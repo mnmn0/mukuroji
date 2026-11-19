@@ -58,13 +58,13 @@ export const AGENT_RUN_TRIAGE_INDEX_NAME = 'AgentRunTriageIndex'
 const triageTeamPartition = 'triage-filing-team'
 
 /** Triage index partition of failed runs not yet filed, oldest finish first. */
-const triageFailedRunPartition = 'triage-failed-run'
+export const triageFailedRunPartition = 'triage-failed-run'
 
 /** Sort key of a Team's stall sweep watermark: the last active run the sweep passed. */
-const stallWatermarkRecordKey = 'agent-run-triage-stall-watermark'
+export const stallWatermarkRecordKey = 'agent-run-triage-stall-watermark'
 
 /** Partition and sort key of the Team where the last bounded stall sweep stopped. */
-const triageSweepResumeKey = { directoryTeamId: 'agent-run-triage-sweep', recordKey: 'resume-team' }
+export const triageSweepResumeKey = { directoryTeamId: 'agent-run-triage-sweep', recordKey: 'resume-team' }
 
 /** Largest page a list query returns. */
 const maximumPageSize = 100
@@ -326,6 +326,8 @@ export interface AgentRunStore {
    * @param since - When given, only runs that finished at or after this ISO time.
    * @param cursor - Continuation from a previous page of the same query.
    * @param limit - Page size from 1 to 100.
+   * @param until - When given, only runs that finished at or before this ISO time; the query skips
+   *   later runs instead of reading them.
    * @returns One page of finished runs.
    */
   listFinishedRunsByTime(
@@ -335,6 +337,7 @@ export interface AgentRunStore {
     since: string | undefined,
     cursor: string | undefined,
     limit: number,
+    until?: string,
   ): Promise<AgentRunFinishedPage>
   /**
    * Builds the writes that create a run, claim its Work Item, clear an earlier revocation of the
@@ -478,7 +481,7 @@ export function createAgentRunPartition(directoryId: string, teamId: string): st
  * @param runId - Run ID.
  * @returns Sort key.
  */
-function runRecordKey(runId: string): string {
+export function runRecordKey(runId: string): string {
   return `agent-run#${runId}`
 }
 
@@ -488,7 +491,7 @@ function runRecordKey(runId: string): string {
  * @param workItemId - Work Item ID.
  * @returns Sort key.
  */
-function claimRecordKey(workItemId: string): string {
+export function claimRecordKey(workItemId: string): string {
   return `agent-run-claim#${workItemId}`
 }
 
@@ -498,7 +501,7 @@ function claimRecordKey(workItemId: string): string {
  * @param workItemId - Work Item ID.
  * @returns Sort key.
  */
-function latestRunRecordKey(workItemId: string): string {
+export function latestRunRecordKey(workItemId: string): string {
   return `agent-run-latest#${workItemId}`
 }
 
@@ -507,7 +510,7 @@ function latestRunRecordKey(workItemId: string): string {
  * @param run - Run to place.
  * @returns The sort key.
  */
-function workItemRunSortKey(run: Pick<StoredAgentRun, 'startedAt' | 'runId'>): string {
+export function workItemRunSortKey(run: Pick<StoredAgentRun, 'startedAt' | 'runId'>): string {
   return `${run.startedAt}#${run.runId}`
 }
 
@@ -518,7 +521,7 @@ function workItemRunSortKey(run: Pick<StoredAgentRun, 'startedAt' | 'runId'>): s
  * @param revocation - Work Item, member, and instance hash.
  * @returns Sort key.
  */
-function revocationRecordKey(revocation: AgentRunRevocation): string {
+export function revocationRecordKey(revocation: AgentRunRevocation): string {
   const subject = createHash('sha256').update(`${revocation.assigneeUserId}\u0000${revocation.instanceIdHash}`).digest('hex')
   return `agent-run-revoked#${revocation.workItemId}#${subject}`
 }
@@ -606,7 +609,7 @@ function storedTimestamp(item: Record<string, unknown>, name: string): string {
  * @param expected - Partition and Team the row must belong to.
  * @returns The run.
  */
-function parseRun(
+export function parseRun(
   item: Record<string, unknown>,
   expected: {
     /** Expected Workspace ID. */
@@ -826,7 +829,7 @@ function finishedRunPartition(partition: string, group: AgentRunFinishedGroup): 
  * @param run.finishedAt - Finish time.
  * @returns Index partition and sort key.
  */
-function finishedRunIndexKeys(run: {
+export function finishedRunIndexKeys(run: {
   /** Workspace ID. */
   directoryId: string
   /** Team ID. */
@@ -875,7 +878,7 @@ function parseFinishedEntry(item: Record<string, unknown>, partition: string, gr
  * @param run - Run to store.
  * @returns DynamoDB item.
  */
-function serializeRun(run: StoredAgentRun): Record<string, unknown> {
+export function serializeRun(run: StoredAgentRun): Record<string, unknown> {
   const partition = createAgentRunPartition(run.directoryId, run.teamId)
   const { directoryId, ...fields } = run
   return {
@@ -1561,20 +1564,33 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
     since: string | undefined,
     cursor: string | undefined,
     limit: number,
+    until?: string,
   ): Promise<AgentRunFinishedPage> {
     if (since !== undefined && !Number.isFinite(Date.parse(since))) {
       throw new AgentRunError('validation_failed', 'since must be an ISO time.', { pointer: '/since' })
     }
+    if (until !== undefined && !Number.isFinite(Date.parse(until))) {
+      throw new AgentRunError('validation_failed', 'until must be an ISO time.', { pointer: '/until' })
+    }
     const partition = finishedRunPartition(createAgentRunPartition(directoryId, teamId), group)
+    // Sort keys are `finishedAt#runId`, and run IDs sort below `~`, so this bound keeps every run that finished at `until`.
+    const upper = until === undefined ? undefined : `${until}#~`
+    const rangeCondition = since !== undefined && upper !== undefined
+      ? ' AND #finishedRunSortKey BETWEEN :since AND :until'
+      : since !== undefined ? ' AND #finishedRunSortKey >= :since' : upper !== undefined ? ' AND #finishedRunSortKey <= :until' : ''
     const response = await this.#client.send(new QueryCommand({
       TableName: this.#tableName,
       IndexName: AGENT_RUN_FINISHED_INDEX_NAME,
-      KeyConditionExpression: '#finishedRunPartition = :partition' + (since === undefined ? '' : ' AND #finishedRunSortKey >= :since'),
+      KeyConditionExpression: '#finishedRunPartition = :partition' + rangeCondition,
       ExpressionAttributeNames: {
         '#finishedRunPartition': 'finishedRunPartition',
-        ...(since === undefined ? {} : { '#finishedRunSortKey': 'finishedRunSortKey' }),
+        ...(rangeCondition === '' ? {} : { '#finishedRunSortKey': 'finishedRunSortKey' }),
       },
-      ExpressionAttributeValues: { ':partition': partition, ...(since === undefined ? {} : { ':since': since }) },
+      ExpressionAttributeValues: {
+        ':partition': partition,
+        ...(since === undefined ? {} : { ':since': since }),
+        ...(upper === undefined ? {} : { ':until': upper }),
+      },
       ScanIndexForward: false,
       Limit: readLimit(limit),
       ExclusiveStartKey: decodeCursor(cursor, 'finishedRunPartition', partition),

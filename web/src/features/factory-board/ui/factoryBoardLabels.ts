@@ -1,4 +1,4 @@
-import type { FactoryBoardLane } from '@mukuroji/contracts'
+import type { AgentRunRuntime, FactoryAnalyticsStage, FactoryBoardLane } from '@mukuroji/contracts'
 import type { FactoryLineStation } from '../model/factoryLine'
 import { createTranslator, type Locale } from '../../../shared/i18n/i18n'
 import { createWorkItemAgentRunsLabels, type WorkItemAgentRunsLabels } from '../../../work-items/ui/agentRunLabels'
@@ -219,5 +219,116 @@ export function createFactoryBoardLabels(locale: Locale): FactoryBoardLabels {
     noRunDetail: t('factoryBoard.detail.noRun'),
     runs: createWorkItemAgentRunsLabels(locale),
     reportChips: createAgentRunReportChipsLabels(locale),
+  }
+}
+
+/** Locale-aware text of the Factory analytics summary. */
+export type FactoryAnalyticsLabels = {
+  /** Heading of the summary. */
+  title: string
+  /** Explanation under the heading. */
+  description: string
+  /** Label of the period select. */
+  period: string
+  /** Period choice with a `{days}` placeholder. */
+  periodDays: string
+  /** Initial loading text. */
+  loading: string
+  /** Loading failure text. */
+  loadError: string
+  /** Retry action. */
+  retry: string
+  /** Text shown when no run finished in the period. */
+  empty: string
+  /** Notice shown when the server reached a read bound. */
+  incomplete: string
+  /** Success rate heading. */
+  successRate: string
+  /** Success rate detail with `{completed}` and `{total}` placeholders. */
+  successRateDetail: string
+  /** Rework rate heading. */
+  reworkRate: string
+  /** Rework rate detail with a `{count}` placeholder. */
+  reworkRateDetail: string
+  /** Intervention heading. */
+  interventions: string
+  /** Intervention detail with `{released}` and `{superseded}` placeholders. */
+  interventionsDetail: string
+  /** Finished run heading. */
+  finishedRuns: string
+  /** Finished run detail with `{failed}` and `{paused}` placeholders. */
+  finishedRunsDetail: string
+  /** Text of a value that cannot be calculated. */
+  notAvailable: string
+  /** Percentage with a `{value}` placeholder. */
+  percent: string
+  /** Heading of the station dwell times. */
+  stageHeading: string
+  /** Hours with an `{hours}` placeholder. */
+  stageHours: string
+  /** Sample count with a `{count}` placeholder. */
+  stageSamples: string
+  /** Station names. */
+  stages: Record<FactoryAnalyticsStage, string>
+  /** Heading of the runtime table. */
+  runtimeHeading: string
+  /** Runtime column. */
+  runtimeColumn: string
+  /** Finished run column. */
+  runsColumn: string
+  /** Success rate column. */
+  successColumn: string
+  /** Rework rate column. */
+  reworkColumn: string
+  /** Intervention column. */
+  interventionsColumn: string
+  /** Display names of runtimes. */
+  runtimes: Record<AgentRunRuntime, string>
+}
+
+/**
+ * Creates the Factory analytics summary text for a locale.
+ *
+ * @param locale - Display locale.
+ * @returns Summary text.
+ */
+export function createFactoryAnalyticsLabels(locale: Locale): FactoryAnalyticsLabels {
+  const t = createTranslator(locale)
+  return {
+    title: t('factoryBoard.analytics.title'),
+    description: t('factoryBoard.analytics.description'),
+    period: t('factoryBoard.analytics.period'),
+    periodDays: t('factoryBoard.analytics.periodDays'),
+    loading: t('factoryBoard.analytics.loading'),
+    loadError: t('factoryBoard.analytics.loadError'),
+    retry: t('factoryBoard.retry'),
+    empty: t('factoryBoard.analytics.empty'),
+    incomplete: t('factoryBoard.analytics.incomplete'),
+    successRate: t('factoryBoard.analytics.successRate'),
+    successRateDetail: t('factoryBoard.analytics.successRateDetail'),
+    reworkRate: t('factoryBoard.analytics.reworkRate'),
+    reworkRateDetail: t('factoryBoard.analytics.reworkRateDetail'),
+    interventions: t('factoryBoard.analytics.interventions'),
+    interventionsDetail: t('factoryBoard.analytics.interventionsDetail'),
+    finishedRuns: t('factoryBoard.analytics.finishedRuns'),
+    finishedRunsDetail: t('factoryBoard.analytics.finishedRunsDetail'),
+    notAvailable: t('factoryBoard.analytics.notAvailable'),
+    percent: t('factoryBoard.analytics.percent'),
+    stageHeading: t('factoryBoard.analytics.stageHeading'),
+    stageHours: t('factoryBoard.analytics.stageHours'),
+    stageSamples: t('factoryBoard.analytics.stageSamples'),
+    stages: {
+      build: t('factoryBoard.line.station.build'),
+      verify: t('factoryBoard.line.station.verify'),
+      artifact: t('factoryBoard.line.station.artifact'),
+      decision: t('factoryBoard.line.station.decision'),
+    },
+    runtimeHeading: t('factoryBoard.analytics.runtimeHeading'),
+    runtimeColumn: t('factoryBoard.analytics.runtimeColumn'),
+    runsColumn: t('factoryBoard.analytics.runsColumn'),
+    successColumn: t('factoryBoard.analytics.successColumn'),
+    reworkColumn: t('factoryBoard.analytics.reworkColumn'),
+    interventionsColumn: t('factoryBoard.analytics.interventionsColumn'),
+    runtimes: createWorkItemAgentRunsLabels(locale).runtimes,
   }
 }

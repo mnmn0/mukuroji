@@ -29,6 +29,9 @@
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `ApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
+| `WebDomainName` | no | Web app と `/api` を配信する独自 domain（例: `wbs.example.com`、小文字）。既定値は空で、空のあいだは CloudFront の domain で配信します。指定すると通知 Email の link などに使う正規 URL（`WebUrl`）がこの domain になります。[独自 domain で配信する](#独自-domain-で配信する) を参照してください。 |
+| `WebCertificateArn` | `WebDomainName` 指定時 | `WebDomainName` を含む、**us-east-1** の発行済み ACM 証明書 ARN。CloudFront は us-east-1 の証明書しか読めません。 |
+| `WebHostedZoneId` | no | `WebDomainName` の A / AAAA alias record を stack に作らせる Route 53 public hosted zone ID。空なら DNS は stack の外で設定します。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
@@ -184,7 +187,8 @@ templateとdeployed configurationの両方で照合します。
 
 ## Outputs
 
-- `WebUrl`: Web app と `/api` を配信する CloudFront の URL
+- `WebUrl`: アプリの正規 URL。`WebDomainName` を指定した場合はその domain、空なら CloudFront の domain
+- `WebDistributionDomainName`: CloudFront distribution の domain（`dxxxx.cloudfront.net`）。独自 domain の DNS を stack の外で設定するときの向き先
 - `WebBucketName` / `WebDistributionId`: `bun run web:deploy` が使う Web bucket と distribution
 - `ApiGatewayUrl`: API Gateway HTTP API URL（外部 webhook と、local の Web から直接呼ぶ場合）
 - `UserPoolId` / `UserPoolClientId`: API が使う Cognito user pool と password client（stack が作ったものか、parameter で渡したもの）
@@ -230,6 +234,27 @@ Lambda が同じ deploy で切り替わりますが、切り替え中の数分�
 書き換えるため、client-side route を直接開いても SPA が表示されます。この書き換えは `/api/*` には
 かからないので、API の 404 はそのまま返ります。HTTP API は `<base>/teams/projects` と
 `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
+
+### 独自 domain で配信する
+
+`WebDomainName` と `WebCertificateArn` を一緒に指定すると、同じ distribution が独自 domain でも Web app と
+`/api/*` を配信します。証明書は TLSv1.2_2021 の viewer policy と SNI で使います。CloudFront の domain
+（`WebDistributionDomainName`）も引き続き使えますが、`WebUrl` と通知 Email の link は独自 domain になります。
+3つとも空なら distribution・DNS・link は従来どおりで、既存環境には resource の変更がありません。
+`WebDomainName` だけ、または `WebHostedZoneId` だけを指定すると、CloudFormation の rule が deploy 前に止めます。
+
+1. **us-east-1** の ACM で `WebDomainName` の証明書を発行し、DNS 検証を済ませます（ACM の公開証明書は無料）。
+2. `WebDomainName`、`WebCertificateArn` を指定して deploy します。domain の hosted zone が同じ account の
+   Route 53 にあれば `WebHostedZoneId` も指定し、stack に A / AAAA alias を作らせます。
+   それ以外の DNS では、`WebDomainName` の CNAME を output の `WebDistributionDomainName` に向けます。
+3. 画面と `/api` は同じ origin なので、`ApiAllowedOrigins`（API の CORS）は変えなくて構いません。
+   file bucket の CORS には独自 domain と CloudFront domain の両方を stack が自動で入れます。
+4. Enterprise SSO を使う場合は、Cognito の SSO app client の callback URL を
+   `https://<WebDomainName>/auth/sso/callback` に変え、同じ値を `CognitoSsoRedirectUri` に指定して deploy します。
+   callback は1件だけ許可するため、切り替え後は CloudFront の domain からの SSO login は使えません。
+5. `bun run web:deploy` で配信し直す必要はありません。PWA の `manifest.webmanifest` は `start_url` と `scope` を
+   相対 path で持つため、独自 domain でそのまま install できます。ただし PWA と Web Push の購読は origin ごとなので、
+   CloudFront の domain で install・購読した利用者には、独自 domain で開き直して入れ直してもらいます。
 
 Lambda Function URL は作りません。外部 sender に渡す signed inbound webhook URL は Lambda の version
 に依存しない安定した HTTP API endpoint を使い、CloudFront の origin も同じ HTTP API にそろえます。

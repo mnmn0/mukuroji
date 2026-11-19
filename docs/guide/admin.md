@@ -16,7 +16,7 @@ mukuroji の権限は Workspace と Project の2段階です。Team には独立
 | owner | すべて。admin の任命・変更は owner だけ |
 | admin | メンバーの招待、member / guest のロール変更と利用停止、Team の作成、Workspace 既定の設定 |
 | member | 業務データの作成・更新。管理系の設定は閲覧のみ |
-| guest | 閲覧中心。業務データの編集、agent 用 token の発行、agent 設定の変更はできない |
+| guest | 閲覧中心。業務データの編集、agent 用 token の発行、agent 設定の変更はできない。自動化の rule・template・定期 Work・実行履歴は見られない |
 
 ### Project のロール
 
@@ -201,6 +201,9 @@ IP allowlist は CIDR を1行に1つ書きます。空にすると制限なし�
 - 「データ governance」: 監査ログの保持日数（30日以上）と legal hold。
 - 「Export と閉鎖」: テナント全体の export（成果物は30日で失効）と、テナントの閉鎖
   （`CLOSE` と入力して開始。中断・再開・検証ができます）。
+  export には監査ログが含まれるため、開始とダウンロードには監査ログの export 権限（`audit.export`）が要ります。
+  組み込みロールでは owner だけが持ち、admin は export できません。ダウンロード URL の発行は監査ログに記録されます。
+  export・閉鎖・ダウンロードと操作の中断・再開・検証は、セキュリティポリシーの「重要操作の再認証」の対象です。
 
 監査ログには現在 Web の画面がありません。API（`/api/audit/events`、`/api/audit/exports`）から取得します。
 仕様は [`docs/event-audit.md`](../event-audit.md) を参照してください。
