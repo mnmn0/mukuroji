@@ -39,14 +39,17 @@ instructions を書き換えないよう、Skill はリポジトリの外（pers
 
 ```sh
 git fetch origin main
-# 導入・更新（既存の copy は置き換え、失敗時は元に戻す）
-git show origin/main:scripts/sync-review-skill.sh | bash -s -- install claude   # Claude Code
-git show origin/main:scripts/sync-review-skill.sh | bash -s -- install kiro     # Kiro
-git show origin/main:scripts/sync-review-skill.sh | bash -s -- install codex    # Codex
+sync_script="$(mktemp)"
+
+# 導入・更新（既存の copy は置き換え、失敗時は元に戻す）。Kiro は kiro、Codex は codex
+git show origin/main:scripts/sync-review-skill.sh >"$sync_script" && bash "$sync_script" install claude
 
 # push 前レビューの直前に照合（標準出力に照合した commit OID を出す）
-git show origin/main:scripts/sync-review-skill.sh | bash -s -- check claude
+git show origin/main:scripts/sync-review-skill.sh >"$sync_script" && bash "$sync_script" check claude
 ```
+
+`git show ... | bash` のように pipe で渡すと、main に script がない場合でも空の入力を
+実行して成功扱いになるため使いません。
 
 `check` が失敗した場合（未導入・差分あり）は、`AGENTS.md` のとおりレビューを失敗扱いにして
 push しません。`install` で trusted source から更新してからやり直します。照合で出た commit

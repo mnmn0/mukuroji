@@ -43,8 +43,27 @@ case "$mode" in
   *) usage ;;
 esac
 
-repo_root="$(git rev-parse --show-toplevel)"
+# Resolve a path through symlinks, including parents that already exist, so
+# the repository containment check below compares physical locations.
+canonical_path() {
+  local existing="$1" rest=""
+  while [ ! -d "$existing" ]; do
+    rest="/$(basename "$existing")$rest"
+    existing="$(dirname "$existing")"
+  done
+  printf '%s%s\n' "$(cd "$existing" && pwd -P)" "$rest"
+}
+
+case "/$dest/" in
+  */./* | */../*)
+    log "DEST_DIR must not contain '.' or '..' components: $dest"
+    exit 2
+    ;;
+esac
+
+repo_root="$(cd "$(git rev-parse --show-toplevel)" && pwd -P)"
 cd "$repo_root"
+dest="$(canonical_path "$dest")"
 
 case "$dest" in
   "$repo_root" | "$repo_root"/*)
