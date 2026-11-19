@@ -110,3 +110,26 @@ test('does not send anything when the callback values are missing', async ({ pag
   await expect(page.getByRole('alert')).toContainText('接続を完了できませんでした。')
   expect(completions).toBe(0)
 })
+
+test('drops the callback values when the member is signed out', async ({ page }) => {
+  let completions = 0
+  await page.route('**/api/developer/connector-oauth/complete', async (route) => {
+    completions += 1
+    await route.fulfill({ json: {} })
+  })
+  await page.goto('/support')
+  await page.evaluate(() => {
+    window.localStorage.setItem('mukuroji.locale', 'ja')
+    window.localStorage.removeItem('mukuroji.auth')
+    window.sessionStorage.removeItem('mukuroji.auth')
+  })
+
+  await page.goto('/settings/connectors/oauth-callback#state=v1.signed-state&code=provider-code')
+
+  await expect(page).toHaveURL(
+    `/?returnTo=${encodeURIComponent('/settings?developerSection=connectors')}`,
+  )
+  expect(page.url()).not.toContain('provider-code')
+  expect(page.url()).not.toContain('signed-state')
+  expect(completions).toBe(0)
+})

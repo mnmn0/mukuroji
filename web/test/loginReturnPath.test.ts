@@ -82,3 +82,26 @@ describe('buildLoginRedirectPath', () => {
     expect(buildLoginRedirectPath('/')).toBe('/')
   })
 })
+
+describe('connector OAuth callback secrets', () => {
+  const callbackPath =
+    '/settings/connectors/oauth-callback#state=v1.signed-state&code=provider-code'
+
+  test('never carry the callback fragment into a login return path', () => {
+    for (const path of [
+      callbackPath,
+      '/settings/connectors/oauth-callback/?x=1#state=v1.signed-state&cancelled=true',
+      '/settings/connectors/oauth-callback',
+    ]) {
+      expect(resolveSafeLoginReturnPath(path)).toBe('/settings?developerSection=connectors')
+    }
+  })
+
+  test('send a signed-out member to connector settings without the authorization code', () => {
+    const redirect = buildLoginRedirectPath(callbackPath)
+
+    expect(redirect).toBe(`/?returnTo=${encodeURIComponent('/settings?developerSection=connectors')}`)
+    expect(redirect).not.toContain('provider-code')
+    expect(redirect).not.toContain('signed-state')
+  })
+})

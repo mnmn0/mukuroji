@@ -1,6 +1,6 @@
 import type { CompleteConnectorOAuthOutput } from '@mukuroji/contracts'
 import { useEffect, useState } from 'react'
-import { Link, useNavigate } from 'react-router'
+import { Link, useLocation, useNavigate } from 'react-router'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
 import { completeDeveloperConnectorOAuth } from '../api/connectors'
@@ -63,16 +63,16 @@ export function ConnectorOAuthCallbackContainer({
   const [callback] = useState(() => readConnectorOAuthCallbackFragment(window.location.hash))
   const [failed, setFailed] = useState(callback === undefined)
 
+  const location = useLocation()
+  const hasFragment = location.hash !== ''
+
   useEffect(() => {
-    // Keep the authorization code out of browser history once it has been read.
-    if (window.location.hash) {
-      window.history.replaceState(
-        window.history.state,
-        '',
-        `${window.location.pathname}${window.location.search}`,
-      )
+    // Keep the authorization code out of browser history and router state once it has been read,
+    // so later redirects that copy the current location cannot carry it along.
+    if (hasFragment) {
+      void navigate({ pathname: location.pathname, search: location.search }, { replace: true })
     }
-  }, [])
+  }, [hasFragment, location.pathname, location.search, navigate])
 
   useEffect(() => {
     if (!callback || !accessToken) return undefined
