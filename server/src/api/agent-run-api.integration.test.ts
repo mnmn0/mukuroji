@@ -1995,6 +1995,35 @@ describe('Factory board route', () => {
   })
 })
 
+describe('Public Work Item actual dates', () => {
+  test('returns the actual dates from their own endpoint and keeps them off the closed Work Item response', async () => {
+    const { projectOptions } = configureUnstartedAssignedWorkItem()
+    projectOptions.detailWorkflowStatusId = 'done'
+    projectOptions.detailStatusCategory = 'completed'
+    projectOptions.detailActualStartDate = '2026-06-10'
+    projectOptions.detailActualEndDate = '2026-06-12'
+    const workItems = createCanonicalPublicWorkItemService()
+
+    expect(await runWithTestAppDependencies(() => workItems.getActualDates(credential, 'core-team', 'task-1')))
+      .toEqual({
+        schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: expect.any(Number),
+        actualStartDate: '2026-06-10', actualEndDate: '2026-06-12',
+      })
+    // Adding a property to the closed public Work Item schema would break existing clients.
+    const workItem = await runWithTestAppDependencies(() => workItems.get(credential, 'core-team', 'task-1'))
+    expect(workItem).not.toHaveProperty('actualStartDate')
+    expect(workItem).not.toHaveProperty('actualEndDate')
+
+    // A Work Item that has not started has neither date.
+    projectOptions.detailWorkflowStatusId = 'todo'
+    projectOptions.detailStatusCategory = 'unstarted'
+    delete projectOptions.detailActualStartDate
+    delete projectOptions.detailActualEndDate
+    expect(await runWithTestAppDependencies(() => workItems.getActualDates(credential, 'core-team', 'task-1')))
+      .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: expect.any(Number) })
+  })
+})
+
 describe('Public Work Item key', () => {
   test('returns the key from its own endpoint and keeps it off the closed Work Item response', async () => {
     const { projectOptions } = configureUnstartedAssignedWorkItem()
