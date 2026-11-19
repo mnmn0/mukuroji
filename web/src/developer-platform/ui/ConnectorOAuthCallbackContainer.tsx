@@ -1,6 +1,6 @@
 import type { CompleteConnectorOAuthOutput } from '@mukuroji/contracts'
 import { useEffect, useState } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router'
+import { useLocation, useNavigate } from 'react-router'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
 import { completeDeveloperConnectorOAuth } from '../api/connectors'
@@ -8,6 +8,7 @@ import {
   readConnectorOAuthCallbackFragment,
   type ConnectorOAuthCallbackFragment,
 } from '../mutations/connectorAuthorization'
+import { ConnectorOAuthCallbackView } from './ConnectorOAuthCallbackView'
 
 /** Inputs for the connector OAuth callback container. */
 export type ConnectorOAuthCallbackContainerProps = {
@@ -90,27 +91,11 @@ export function ConnectorOAuthCallbackContainer({
     }
   }, [accessToken, callback, navigate])
 
-  if (failed) {
-    return (
-      <div className="grid max-w-xl gap-3" role="alert">
-        <p className="text-base font-semibold text-[var(--workbench-text)]">
-          {t('connectors.oauthCallback.failed')}
-        </p>
-        <p className="text-sm text-fg-slate-600">{t('connectors.oauthCallback.failedDetail')}</p>
-        <Link
-          className="justify-self-start text-sm font-semibold text-[var(--workbench-primary-text)] underline"
-          replace
-          to={connectorSettingsPath}
-        >
-          {t('connectors.oauthCallback.backToSettings')}
-        </Link>
-      </div>
-    )
-  }
-
   return (
-    <p aria-live="polite" className="text-sm text-fg-slate-600" role="status">
-      {t('connectors.oauthCallback.completing')}
-    </p>
+    <ConnectorOAuthCallbackView
+      settingsPath={connectorSettingsPath}
+      status={failed ? 'failed' : 'completing'}
+      t={t}
+    />
   )
 }
