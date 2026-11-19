@@ -96,6 +96,8 @@ import {
 import { MyTasksWorkspaceView, type MyTasksViewMode } from '../../workspace/ui/MyTasksWorkspaceView'
 import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
 import { listTaskGanttRowTasks } from '../../tasks/model/taskGanttRows'
+import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
+import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import { createMyTasksGanttGrouping } from '../../workspace/model/myTaskGrouping'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { useCollapsedWorkItemOutlineKeys } from '../../shared/lib/preferences/useCollapsedWorkItemOutlineKeys'
@@ -144,6 +146,7 @@ export function MyTasksPage() {
     createTaskViewSelectionState,
   )
   const [taskActionErrorMessage, setTaskActionErrorMessage] = useState<string>()
+  const [myTasksCalendarMonth, setMyTasksCalendarMonth] = useState(() => getCurrentTaskMonth())
   const [taskActionContextMenuState, setTaskActionContextMenuState] = useState<
     MyTaskActionContextMenuState
   >()
@@ -225,7 +228,7 @@ export function MyTasksPage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
-      layoutModes: ['board', 'gantt'],
+      layoutModes: ['board', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
@@ -259,8 +262,9 @@ export function MyTasksPage() {
     ),
     [myTasks, taskViewController.effectiveDefinition],
   )
+  const myTasksLayoutMode = taskViewController.effectiveDefinition.layout.mode
   const myTasksViewMode: MyTasksViewMode =
-    taskViewController.effectiveDefinition.layout.mode === 'gantt' ? 'gantt' : 'board'
+    myTasksLayoutMode === 'gantt' || myTasksLayoutMode === 'calendar' ? myTasksLayoutMode : 'board'
   const isMyTasksOutlineShown = myTasksViewMode === 'gantt' &&
     (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false)
   const myTasksOutlineTeamIds = useMemo(
@@ -292,10 +296,12 @@ export function MyTasksPage() {
     [collapsedMyTasksOutlineKeys, isMyTasksOutlineShown, myTasksHierarchies, toggleMyTasksOutlineKey],
   )
   // In the Gantt chart, keyboard moves and selection follow its rows: its groups and outline
-  // order, without the rows under a collapsed parent.
+  // order, without the rows under a collapsed parent. The calendar keeps only the cards of the
+  // shown month and the unscheduled bucket.
   const myTasksGanttGroupBy = taskViewController.effectiveDefinition.layout.group?.field
   const myTasksGanttGroupDirection = taskViewController.effectiveDefinition.layout.group?.direction
   const navigableMyTasks = useMemo(() => {
+    if (myTasksViewMode === 'calendar') return listTaskCalendarMonthTasks(visibleMyTasks, myTasksCalendarMonth)
     if (myTasksViewMode !== 'gantt') return visibleMyTasks
     const group = createMyTasksGanttGrouping(
       myTasksGanttGroupBy,
@@ -309,6 +315,7 @@ export function MyTasksPage() {
       ...(group ? { group } : {}),
     })
   }, [
+    myTasksCalendarMonth,
     myTasksGanttGroupBy,
     myTasksGanttGroupDirection,
     myTasksGanttOutline,
@@ -497,8 +504,9 @@ export function MyTasksPage() {
   }), [executeMyTaskMoveAction, executeMyTaskOpenAction])
   const myTaskActionPermissions = useMemo<TaskSurfaceActionPermissions>(() => ({
     move: (context) => {
-      // The Gantt chart is read-only and has no status control to move a Work Item with.
-      if (myTasksViewMode === 'gantt') return denyTaskAction(myTaskActionDisabledReasons.unavailable)
+      // The Gantt chart and the calendar are read-only and have no status control to move a
+      // Work Item with.
+      if (myTasksViewMode !== 'board') return denyTaskAction(myTaskActionDisabledReasons.unavailable)
       const targets = resolveTaskSurfaceActionTargets(context)
       if (targets.length === 0) return allowTaskAction()
       if (targets.length !== 1) {
@@ -964,6 +972,8 @@ export function MyTasksPage() {
             })
           }}
           ganttOutline={myTasksGanttOutline}
+          calendarMonth={myTasksCalendarMonth}
+          onCalendarMonthChange={setMyTasksCalendarMonth}
           outlineNotice={isMyTasksOutlineShown ? (
             <WorkItemOutlineNotice
               failedTeamCount={myTasksHierarchies?.errorsByTeam.size ?? (myTasksHierarchiesError ? 1 : 0)}
