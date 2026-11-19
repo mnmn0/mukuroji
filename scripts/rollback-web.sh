@@ -38,13 +38,16 @@ stack_output() {
 WEB_BUCKET_NAME="$(stack_output WebBucketName)"
 
 if [[ -z "$TARGET_COMMIT_SHA" ]]; then
+  # The CLI applies --query to each listing page, so sort the rows of all pages here.
   echo "Kept Web releases, newest first (upload time of index.html, commit SHA):"
   aws s3api list-objects-v2 \
     --region "$AWS_REGION" \
     --bucket "$WEB_BUCKET_NAME" \
     --prefix 'releases/' \
-    --query "reverse(sort_by(Contents[?ends_with(Key, '/index.html')], &LastModified))[].[LastModified, Key]" \
+    --query "Contents[?ends_with(Key, '/index.html')].[LastModified, Key]" \
     --output text \
+    | { grep -E $'\treleases/[0-9a-f]{40}/index\\.html$' || true; } \
+    | sort -r \
     | sed -E 's#releases/([0-9a-f]{40})/index\.html#\1#'
   echo "Run again with a commit SHA to restore that release."
   exit 0
