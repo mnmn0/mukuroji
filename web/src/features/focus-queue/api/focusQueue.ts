@@ -21,6 +21,7 @@ import {
   type FocusSignalResolution,
   type FocusSignalSource,
   type FocusSignalType,
+  type FocusUpdateDeadline,
   type UpdateFocusPolicyInput,
   type UpdateFocusPolicyResponse,
   type UpdateFocusSnoozeInput,
@@ -96,6 +97,8 @@ const focusResolutionConditions: ReadonlySet<string> = new Set([
   'cycle-changed',
   'source-removed',
 ])
+
+const focusSlaAnchors: ReadonlySet<string> = new Set(['created', 'planned-start', 'started'])
 
 const focusActionabilityReasons: ReadonlySet<string> = new Set([
   'blocked',
@@ -248,6 +251,10 @@ function isFocusQueueResponse(value: unknown): value is FocusQueueResponse {
     value.viewerMemberKey.length === 0 ||
     !isRecord(value.metrics) ||
     !isNonnegativeSafeInteger(value.metrics.blocked) ||
+    (
+      value.updateDeadlines !== undefined &&
+      (!Array.isArray(value.updateDeadlines) || !value.updateDeadlines.every(isFocusUpdateDeadline))
+    ) ||
     !Array.isArray(value.effectivePolicies) ||
     !value.effectivePolicies.every(isFocusEffectivePolicy) ||
     !Array.isArray(value.teamPolicies) ||
@@ -269,6 +276,22 @@ function isFocusQueueResponse(value: unknown): value is FocusQueueResponse {
     value.sections,
     value.effectivePolicies,
   )
+}
+
+/** Returns whether an unknown value is one health update deadline owned by the viewer. */
+function isFocusUpdateDeadline(value: unknown): value is FocusUpdateDeadline {
+  if (!isRecord(value) || !isRecord(value.target)) return false
+  const target = value.target
+  const validTarget = target.type === 'project'
+    ? isNonemptyTrimmedString(target.teamId) && isNonemptyTrimmedString(target.projectId)
+    : target.type === 'initiative' && isNonemptyTrimmedString(target.entityId)
+  return validTarget &&
+    isNonemptyTrimmedString(value.id) &&
+    (value.title === undefined || typeof value.title === 'string') &&
+    (value.state === 'due-soon' || value.state === 'overdue') &&
+    isCanonicalUtcTimestamp(value.dueAt) &&
+    typeof value.deepLink === 'string' &&
+    isSafeApplicationPath(value.deepLink)
 }
 
 /** Returns whether an unknown value is one complete Focus section group. */
@@ -520,7 +543,18 @@ function isFocusPolicySettings(value: unknown): value is FocusPolicySettings {
     isBoundedSafeInteger(value.dueSoonDays, 0, 365) &&
     isBoundedSafeInteger(value.cycleDueSoonDays, 0, 365) &&
     isBoundedSafeInteger(value.slaHours, 1, 8_760) &&
+    typeof value.slaEnabled === 'boolean' &&
+    focusSlaAnchors.has(String(value.slaAnchor)) &&
+    isFocusSlaWorkItemTypeIds(value.slaWorkItemTypeIds) &&
     isBoundedFiniteNumber(value.nowScoreThreshold, 0, 100_000)
+}
+
+/** Returns whether an unknown value is a valid list of SLA-targeted Work Item Type IDs. */
+function isFocusSlaWorkItemTypeIds(value: unknown): value is string[] {
+  return Array.isArray(value) &&
+    value.length <= 50 &&
+    value.every(isNonemptyTrimmedString) &&
+    new Set(value).size === value.length
 }
 
 /** Returns whether an unknown value contains every supported signal weight. */
@@ -563,6 +597,9 @@ function isFocusPolicyOverrides(value: unknown): value is FocusPolicyOverrides {
   return isOptionalBoundedSafeInteger(value.dueSoonDays, 0, 365) &&
     isOptionalBoundedSafeInteger(value.cycleDueSoonDays, 0, 365) &&
     isOptionalBoundedSafeInteger(value.slaHours, 1, 8_760) &&
+    (value.slaEnabled === undefined || typeof value.slaEnabled === 'boolean') &&
+    (value.slaAnchor === undefined || focusSlaAnchors.has(String(value.slaAnchor))) &&
+    (value.slaWorkItemTypeIds === undefined || isFocusSlaWorkItemTypeIds(value.slaWorkItemTypeIds)) &&
     isOptionalBoundedFiniteNumber(value.nowScoreThreshold, 0, 100_000)
 }
 

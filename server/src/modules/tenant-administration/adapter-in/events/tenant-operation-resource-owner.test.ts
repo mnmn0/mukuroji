@@ -51,6 +51,14 @@ describe('tenant operation resource-owner SQS adapter', () => {
           position: 'x'.repeat(8_193),
         },
       },
+      {
+        ...createJob(),
+        cursor: {
+          targetIndex: 0,
+          processedCount: 0,
+          snapshotRunId: '../another-run',
+        },
+      },
     ]) {
       expect(() => readTenantOperationExecutionJob(JSON.stringify(value)))
         .toThrow(/job is invalid/u)
@@ -78,6 +86,20 @@ describe('tenant operation resource-owner SQS adapter', () => {
         phase: 'snapshot',
       },
     })
+  })
+
+  test('keeps the export snapshot run on a continuation cursor', () => {
+    const cursor = {
+      targetIndex: 3,
+      processedCount: 60,
+      phase: 'snapshot' as const,
+      snapshotRunId: 'f'.repeat(32),
+    }
+    expect(readTenantOperationExecutionJob(JSON.stringify({
+      ...createJob(),
+      step: 'export',
+      cursor,
+    }))).toEqual({ ...createJob(), step: 'export', cursor })
   })
 
   test('returns only failed message identifiers for bounded SQS retry', async () => {

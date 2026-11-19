@@ -1,3 +1,4 @@
+import { createDecipheriv, createHmac } from 'node:crypto'
 import { expect, spyOn, test } from 'bun:test'
 import {
   CreateTableCommand,
@@ -68,6 +69,100 @@ test('keeps the unprocessed DynamoDB page behind the opaque search cursor', asyn
     ...input,
     cursor: first.nextCursor,
     filters: { keyword: 'different query' },
+  })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
+})
+
+test('encrypts search cursors and rejects plaintext, tampered or foreign ones', async () => {
+  const documents = ['alpha', 'beta', 'gamma'].map((id) => createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: `team/core/issue/${id}`,
+    title: `${id} title`,
+    url: `/teams/core/issues?issueId=${id}`,
+    teamId: 'core',
+    projectId: 'project-1',
+  })).sort((left, right) => left.recordKey < right.recordKey ? -1 : left.recordKey > right.recordKey ? 1 : 0)
+  const documentClient = createMemoryDocumentClient(documents)
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'workspace-search-cursor-secret-for-tests-0001',
+  )
+  const otherSecretClient = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'workspace-search-cursor-secret-for-tests-0002',
+  )
+  const input = {
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-1']),
+      teamIds: new Set(['core']),
+    },
+    limit: 1,
+  }
+
+  const first = await client.search(input)
+  const cursor = first.nextCursor!
+  const decodedParts = cursor.split('.').map((part) => Buffer.from(part, 'base64url').toString('latin1'))
+  expect(cursor.startsWith('c1.')).toBe(true)
+  // The DynamoDB record key names the entity type and ID of the row the page stopped at.
+  for (const text of [cursor, ...decodedParts]) {
+    expect(text).not.toContain('DOCUMENT#')
+    expect(text).not.toContain('team/core/issue')
+  }
+  const second = await client.search({ ...input, cursor })
+  expect(second.results.map((result) => result.id)).toEqual([documents[1]?.entityId])
+
+  const [version, iv, ciphertext, tag] = cursor.split('.')
+  // Decrypt the issued cursor to get a payload whose scope fields all match this query, so the
+  // legacy plaintext form of it is refused only because it is not an encrypted envelope.
+  const decipher = createDecipheriv(
+    'aes-256-gcm',
+    createHmac('sha256', 'workspace-search-cursor-secret-for-tests-0001')
+      .update('mukuroji/workspace-search-cursor/v1')
+      .digest(),
+    Buffer.from(iv!, 'base64url'),
+  )
+  decipher.setAAD(Buffer.from('c1', 'utf8'))
+  decipher.setAuthTag(Buffer.from(tag!, 'base64url'))
+  const payload = Buffer.concat([
+    decipher.update(Buffer.from(ciphertext!, 'base64url')),
+    decipher.final(),
+  ])
+  expect(JSON.parse(payload.toString('utf8'))).toMatchObject({
+    version: 1,
+    kind: 'search',
+    workspaceId: 'workspace-1',
+    viewerUserId: 'viewer@example.com',
+    recordKey: documents[0]!.recordKey,
+  })
+  const forged = payload.toString('base64url')
+  const flipped = Buffer.from(ciphertext!, 'base64url')
+  flipped[0] = flipped[0]! ^ 1
+  const rejected = [
+    forged,
+    `${version}.${iv}.${flipped.toString('base64url')}.${tag}`,
+    `${version}.${iv}.${ciphertext}`,
+    `c2.${iv}.${ciphertext}.${tag}`,
+    `${cursor}${'A'.repeat(4_096)}`,
+  ]
+  for (const value of rejected) {
+    await expect(client.search({ ...input, cursor: value }))
+      .rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
+  }
+  await expect(otherSecretClient.search({ ...input, cursor }))
+    .rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
+  await expect(client.search({
+    ...input,
+    access: { ...input.access, viewerUserId: 'other@example.com' },
+    cursor,
   })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
 })
 
@@ -1271,6 +1366,16 @@ test('keeps unread saved views from advancing the cursor past unprocessed rows',
   expect(first.views.map((view) => view.id)).toEqual(['01-shared', '02-shared'])
   expect(first.nextCursor).toBeString()
   expect(second.views.map((view) => view.id)).toEqual(['03-shared'])
+  // A cursor the client builds itself, here one that starts before the private view, is refused.
+  const forged = Buffer.from(JSON.stringify({
+    version: 1,
+    kind: 'saved-views',
+    workspaceId: 'workspace-1',
+    viewerUserId: 'viewer@example.com',
+    recordKey: 'VIEW#',
+  }), 'utf8').toString('base64url')
+  await expect(client.listSavedViews({ ...input, cursor: forged }))
+    .rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
 })
 
 test('keeps personal saved views private and detects stale revisions', async () => {
@@ -1759,6 +1864,13 @@ test('filters task views by surface and scope and binds cursors to that context'
     access,
     cursor: firstPage.nextCursor,
   })).rejects.toMatchObject({ code: 'InvalidTaskViewCursor', status: 400 })
+  await expect(client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'project',
+    scope: { kind: 'project', projectId: 'project-1', teamId: 'core' },
+    access,
+    cursor: Buffer.from(JSON.stringify({ version: 1, kind: 'task-views' }), 'utf8').toString('base64url'),
+  })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
 })
 
 test('reports mutation capabilities only for the exact task view list scope', async () => {

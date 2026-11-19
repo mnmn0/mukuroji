@@ -62,6 +62,7 @@ import {
 import { TaskGanttPeriodNavigation } from './TaskScheduleWindowToolbar'
 import {
   createTaskGanttWindow,
+  getCurrentTaskDate,
   listTaskScheduleWindowDates,
   type TaskScheduleWindow,
 } from '../model/taskScheduleWindow'
@@ -1259,7 +1260,7 @@ function createGanttTimelineColumns(
   schedules: readonly WorkItemSchedule[],
   actualDates: readonly string[] = [],
 ): GanttTimelineColumn[] {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = getCurrentTaskDate()
   // Without planned dates the range starts from the first actual date instead of today.
   const range = extendGanttTimelineDateRange(
     createTaskTimelineDateRange(schedules, actualDates[0] ?? today),

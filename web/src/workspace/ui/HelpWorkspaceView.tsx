@@ -1,4 +1,5 @@
 import { Link } from 'react-router'
+import { readWebBuildInfo, type WebBuildInfo } from '../../shared/release/webBuild'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { CodingAgentGuide } from './CodingAgentGuide'
 
@@ -81,15 +82,17 @@ const roleGuides: readonly RoleGuide[] = [
 export type HelpWorkspaceViewProps = {
   /** Translator used for help destination labels. */
   t: (key: MessageKey) => string
+  /** Identity of the running Web build. Defaults to the values embedded at build time. */
+  webBuild?: WebBuildInfo
 }
 
 /**
  * Renders coding-agent setup, role-specific user guides, and Workspace support destinations.
  *
- * @param props - Translator used to label each destination.
+ * @param props - Translator used to label each destination and the running build identity.
  * @returns The Workspace help navigation view.
  */
-export function HelpWorkspaceView({ t }: HelpWorkspaceViewProps) {
+export function HelpWorkspaceView({ t, webBuild = readWebBuildInfo() }: HelpWorkspaceViewProps) {
   return (
     <div className="grid min-w-0 gap-6">
       <CodingAgentGuide t={t} />
@@ -150,6 +153,30 @@ export function HelpWorkspaceView({ t }: HelpWorkspaceViewProps) {
           </Link>
         ))}
       </nav>
+      <section
+        aria-labelledby="web-build-title"
+        className="workbench-panel grid gap-2 p-5"
+        data-testid="web-build"
+        id="web-build"
+      >
+        <h2 className="text-base font-semibold text-[var(--workbench-text)]" id="web-build-title">
+          {t('workspace.help.buildTitle')}
+        </h2>
+        <p className="text-sm leading-6 text-[var(--workbench-muted)]">
+          {t('workspace.help.buildDescription')}
+        </p>
+        {webBuild.commitSha === undefined ? (
+          <p className="text-sm font-medium text-[var(--workbench-text)]">
+            {t('workspace.help.buildUnknown')}
+          </p>
+        ) : (
+          <code
+            className="w-fit max-w-full select-all break-all rounded border border-[var(--workbench-border-strong)] px-2 py-1 font-mono text-sm text-[var(--workbench-text)]"
+          >
+            {webBuild.commitSha}
+          </code>
+        )}
+      </section>
     </div>
   )
 }

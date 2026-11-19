@@ -28,6 +28,30 @@ describe('Focus queue API', () => {
     ])
   })
 
+  test('accepts health update deadlines and rejects an unsafe deadline link', async () => {
+    const deadline = {
+      id: 'update-due:project:core-team:refero:2026-08-10T09%3A00%3A00.000Z',
+      target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+      state: 'due-soon',
+      dueAt: '2026-08-10T09:00:00.000Z',
+      deepLink: '/planning/portfolio?targetType=project&teamId=core-team&projectId=refero',
+    }
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({ ...focusQueueResponseFixture, updateDeadlines: [deadline] }),
+      { status: 200 },
+    )
+    expect((await getFocusQueue('focus-token')).updateDeadlines).toEqual([deadline])
+
+    globalThis.fetch = async () => new Response(
+      JSON.stringify({
+        ...focusQueueResponseFixture,
+        updateDeadlines: [{ ...deadline, deepLink: '//evil.example/planning' }],
+      }),
+      { status: 200 },
+    )
+    await expect(getFocusQueue('focus-token')).rejects.toBeInstanceOf(FocusQueueApiError)
+  })
+
   test('accepts a missing involvement from an older server and rejects an unknown one', async () => {
     const firstSection = focusQueueResponseFixture.sections[0]
     const firstItem = firstSection?.items[0]
