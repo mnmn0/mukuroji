@@ -4,7 +4,7 @@ import { AdminListGroupsForUserCommand, CognitoIdentityProviderClient } from '@a
 import { DocumentError, type GetDocumentRequest } from '../../../documents'
 import type { ApprovalNotificationSource } from '../../../files'
 import { DEFAULT_NOTIFICATION_PREFERENCES } from '../../../notifications/notifications'
-import { createAnalyticsDeliveryAuditEvent } from '../../../analytics/adapter-out/dynamodb/analytics-delivery-notifier'
+import { createAnalyticsDeliveryAuditNotifier } from '../../../analytics'
 import { S3Client } from '@aws-sdk/client-s3'
 import {
   WORK_ITEM_SCHEMA_VERSION,
@@ -559,21 +559,37 @@ describe('collaboration projection pure helpers', () => {
     const previous = keys.map((key) => process.env[key])
     keys.forEach((key) => { process.env[key] = key })
     const memberKey = 'member@example.com'
-    const delivery = (visibility: 'shared' | 'team') => parseAuditProjectionEvent({ ...createAnalyticsDeliveryAuditEvent({
-      report: {
-        schemaVersion: 1, id: 'weekly-report', workspaceId: 'workspace-1', name: 'Weekly portfolio', visibility,
-        ...(visibility === 'team' ? { teamId: 'core' } : {}), ownerMemberKey: 'owner@example.com', timeZone: 'UTC',
-        revision: 1, filter: { period: { from: '2026-07-01T00:00:00.000Z', to: '2026-07-31T23:59:59.999Z' } },
-        widgets: [], createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
-      },
-      snapshotId: 'snapshot-1',
-      receipt: { workspaceId: 'workspace-1', reportId: 'weekly-report', occurrenceKey: 'occurrence', reportRevision: 1,
-        format: 'csv', snapshotId: 'snapshot-1', recipientMemberKeys: [memberKey], createdAt: '2026-07-12T12:00:00.000Z' },
-      recipientMemberKey: memberKey,
-      deliveredAt: '2026-07-12T12:00:00.000Z',
-    }, 30) })
-    const shared = delivery('shared')
-    const team = delivery('team')
+    /** Writes one delivery through the public notifier and parses the captured outbox row. */
+    const delivery = async (visibility: 'shared' | 'team') => {
+      const items: Record<string, unknown>[] = []
+      const notify = createAnalyticsDeliveryAuditNotifier({
+        auditEventsTableName: 'audit-events',
+        auditRetentionDays: 30,
+        documentClient: {
+          async send(command) {
+            if (command.input.Item) items.push(command.input.Item)
+            return {}
+          },
+        },
+      })
+      await notify({
+        report: {
+          schemaVersion: 1, id: 'weekly-report', workspaceId: 'workspace-1', name: 'Weekly portfolio', visibility,
+          ...(visibility === 'team' ? { teamId: 'core' } : {}), ownerMemberKey: 'owner@example.com', timeZone: 'UTC',
+          revision: 1, filter: { period: { from: '2026-07-01T00:00:00.000Z', to: '2026-07-31T23:59:59.999Z' } },
+          widgets: [], createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
+        },
+        snapshotId: 'snapshot-1',
+        receipt: { workspaceId: 'workspace-1', reportId: 'weekly-report', occurrenceKey: 'occurrence', reportRevision: 1,
+          format: 'csv', snapshotId: 'snapshot-1', recipientMemberKeys: [memberKey], createdAt: '2026-07-12T12:00:00.000Z' },
+        recipientMemberKey: memberKey,
+        deliveredAt: '2026-07-12T12:00:00.000Z',
+      })
+      const [item] = items
+      return item ? parseAuditProjectionEvent(item) : undefined
+    }
+    const shared = await delivery('shared')
+    const team = await delivery('team')
     if (!shared || !team) throw new Error('Analytics delivery events must parse.')
     // The system actor never removes the recipient, and the row keeps the report link and title.
     const [candidate] = groupNotificationCandidates(shared)
@@ -607,6 +623,14 @@ describe('collaboration projection pure helpers', () => {
         { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
       ]))
       expect(await authorizeNotificationDelivery(team, memberKey, identity, cache)).toBe(true)
+      // One readable Project is enough, as for the report itself; the generic Team rule needs all.
+      cache.directories.set('workspace-1', Promise.resolve([
+        { entryType: 'team', teamId: 'core' }, { entryType: 'project', teamId: 'core', projectId: 'platform' },
+        { entryType: 'project', teamId: 'core', projectId: 'private' },
+        { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
+      ]))
+      expect(await authorizeNotificationDelivery(team, memberKey, identity, cache)).toBe(true)
+      expect(await authorizeNotificationDelivery({ ...team, eventType: 'work-item.updated' }, memberKey, identity, cache)).toBe(false)
       role = 'guest'
       expect(await authorizeNotificationDelivery(shared, memberKey, identity, cache)).toBe(false)
     } finally {

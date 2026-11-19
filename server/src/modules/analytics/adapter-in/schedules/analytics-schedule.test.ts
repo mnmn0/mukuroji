@@ -1212,17 +1212,79 @@ test('retries a partial recipient failure across an ACL change without poisoning
   expect(snapshots).toHaveLength(2)
   expect(snapshots[0]?.createdByMemberKey).toBe(report.ownerMemberKey)
   expect(renderedArtifacts).toHaveLength(2)
-  // The completed first recipient is not notified again; each notification names its own snapshot.
+  // The retry re-sends the completed first recipient's idempotent notification for its
+  // committed snapshot, and every notification links the snapshot of a committed receipt.
   expect(notifications.map((notification) => notification.recipientMemberKey))
-    .toEqual(['first@example.com', 'second@example.com'])
-  expect(notifications.map((notification) => notification.snapshotId))
-    .toEqual(createdReceipts.map((receipt) => receipt.snapshotId))
-  expect(notifications.map((notification) => notification.receipt.occurrenceKey))
-    .toEqual(createdReceipts.map((receipt) => receipt.occurrenceKey))
+    .toEqual(['first@example.com', 'first@example.com', 'second@example.com'])
+  expect(notifications.map((notification) => notification.snapshotId)).toEqual([
+    createdReceipts[0]?.snapshotId,
+    createdReceipts[0]?.snapshotId,
+    createdReceipts[1]?.snapshotId,
+  ])
+  expect(notifications.map((notification) => notification.receipt.occurrenceKey)).toEqual([
+    createdReceipts[0]?.occurrenceKey,
+    createdReceipts[0]?.occurrenceKey,
+    createdReceipts[1]?.occurrenceKey,
+  ])
   const advanced = await repository.getReport(report.workspaceId, report.id)
   expect(advanced?.revision).toBe(2)
   expect(advanced?.schedule?.nextRunAt).toBe('2026-07-19T08:00:00.000Z')
 }, 15_000)
+
+test('retries a failed notification for the committed snapshot without re-rendering', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const committedReceipts: AnalyticsDeliveryReceipt[] = []
+  const originalPutReceipt = repository.putDeliveryReceipt.bind(repository)
+  repository.putDeliveryReceipt = async (receipt) => {
+    const result = await originalPutReceipt(receipt)
+    if (result.created) committedReceipts.push(result.receipt)
+    return result
+  }
+  const notifications: AnalyticsDeliveryNotification[] = []
+  let renders = 0
+  let failNotification = true
+  const dependencies = {
+    repository,
+    async render(input: {
+      report: AnalyticsReport
+      recipientMemberKey: string
+      scheduledFor: string
+      historyReadAt: string
+    }) {
+      renders += 1
+      // A later render would see a different permission scope and produce another snapshot.
+      return createRenderedSnapshot(
+        input.report,
+        input.recipientMemberKey,
+        SCHEDULED_FOR,
+        new Set([`project-render-${renders}`]),
+      )
+    },
+    entitlement: enabledAnalyticsEntitlement,
+    renderArtifact: async () => {},
+    async notifyDelivery(notification: AnalyticsDeliveryNotification) {
+      if (failNotification) throw new Error('Audit outbox is throttled.')
+      notifications.push(notification)
+    },
+  }
+
+  await expect(processDueAnalyticsReport(report, NOW, dependencies)).rejects
+    .toThrow('Audit outbox is throttled.')
+  const [receipt] = committedReceipts
+  expect(committedReceipts).toHaveLength(1)
+  expect((await repository.getReport(report.workspaceId, report.id))?.schedule?.nextRunAt)
+    .toBe(SCHEDULED_FOR)
+
+  failNotification = false
+  await processDueAnalyticsReport(report, NOW, dependencies)
+
+  expect(renders).toBe(1)
+  expect(notifications).toHaveLength(1)
+  expect(notifications[0]?.snapshotId).toBe(receipt?.snapshotId)
+  expect((await repository.getReport(report.workspaceId, report.id))?.schedule?.nextRunAt)
+    .not.toBe(SCHEDULED_FOR)
+})
 
 test('restarts a partially delivered occurrence under a new semantic report definition', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)

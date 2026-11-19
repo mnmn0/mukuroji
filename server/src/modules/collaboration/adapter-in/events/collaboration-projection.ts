@@ -411,6 +411,11 @@ const planningUpdateActivityEventTypes = new Set([
   ...planningUpdatePublishEventTypes,
   'planning-update.commented',
 ])
+/**
+ * Scheduled Analytics report delivery to one recipient. Kept as a literal so this Lambda does not
+ * bundle the Analytics module; it must match the event type the Analytics notifier writes.
+ */
+const analyticsReportDeliveredEventType = 'analytics.report.delivered'
 /** Scheduled Work Item events that are revalidated against the current Work Item row. */
 const scheduledWorkItemNotificationReasons = new Map([
   ['work-item.due', 'due'],
@@ -2479,6 +2484,23 @@ export async function authorizeNotificationDelivery(
       true, readApproval,
     )
   ) return false
+  if (refreshed.eventType === analyticsReportDeliveredEventType && refreshed.teamId && !refreshed.projectId) {
+    // A Team report is readable through any readable Project of its Team, as in the Analytics
+    // schedule and Inbox checks, while the generic Team rule requires every Project of the Team.
+    const teamProjectIds = directory.flatMap((item) =>
+      item.entryType === 'project' && item.teamId === refreshed.teamId && item.projectId && !item.archivedAt
+        ? [item.projectId]
+        : []
+    )
+    for (const projectId of teamProjectIds) {
+      if (await isEligibleRecipient(
+        { ...refreshed, projectId }, memberKey, directory,
+        new Map<string, Promise<boolean>>(), enterpriseIdentity, cache.enterpriseSnapshots,
+        true, readApproval,
+      )) return true
+    }
+    return false
+  }
   return isEligibleRecipient(
     refreshed, memberKey, directory,
     new Map<string, Promise<boolean>>(), enterpriseIdentity, cache.enterpriseSnapshots,

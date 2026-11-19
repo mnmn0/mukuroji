@@ -17,12 +17,14 @@ stream を読む collaboration projection が持っている。ADR 0008 で Audi
 
 ## 決定
 
-- Analytics schedule は snapshot を保存した後、receipt を保存する前に、recipient ごとに 1 件の
-  `analytics.report.delivered` audit event を AuditEvents へ条件付き put する。Event ID は receipt の
-  occurrence key から決め、retry では `ConditionalCheckFailedException` を配信済みとして扱う。
+- Analytics schedule は receipt を保存した後に、recipient ごとに 1 件の `analytics.report.delivered`
+  audit event を AuditEvents へ条件付き put する。通知は保存済み receipt の snapshot を指す。通知に
+  失敗したら schedule cursor を進めず、retry では完了済み receipt から同じ通知を書き直す。Event ID は
+  receipt の occurrence key から決め、`ConditionalCheckFailedException` を配信済みとして扱う。
 - Event は `metadata.notificationCandidates` にその recipient だけを持ち、report 名を title、
   `/reports?v=1&report=<id>&snapshot=<id>` を deep link にする。Team visibility の report は Team ID を
-  載せ、projection と外部送信の直前の認可で Team access を再確認させる。
+  載せ、projection と外部送信の直前の認可で Team access を再確認させる。Report と同じく、Team の
+  Project のどれかを読めれば Team access ありとする（外部送信の汎用ルールは Team の全 Project を要求）。
 - Inbox の表示時は report を読み直し、現在の visibility（personal / team / shared）を満たさない
   通知を隠す。Link 先の snapshot は従来どおり現在の permission scope で絞る。
 - scheduled-jobs Lambda には AuditEvents table への `dynamodb:PutItem` と `AUDIT_RETENTION_DAYS` を

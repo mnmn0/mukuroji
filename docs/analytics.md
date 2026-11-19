@@ -214,13 +214,15 @@ artifact renderer はその前に実行する副作用のない検証処理で�
 行いません。Renderer に失敗した場合は snapshot/receipt を保存せず、recipientの途中で失敗した
 場合も schedule cursor を進めません。Lambda retryでは既存 snapshot/receiptを冪等に再利用します。
 
-受信者への通知は、snapshot の保存後、receipt の保存前に recipient ごとに1件の audit outbox event
-（`analytics.report.delivered`）を AuditEvents へ条件付き put して行います。Event ID は receipt の
-occurrence key から決まるため、receipt 保存前に失敗して retry しても通知は重複しません。既存の
+受信者への通知は、receipt の保存後に recipient ごとに1件の audit outbox event
+（`analytics.report.delivered`）を AuditEvents へ条件付き put して行います。通知は常に保存済み receipt
+の snapshot を指します。通知に失敗すると schedule cursor は進まず、retry では完了済み receipt から同じ
+通知を書き直します。Event ID は receipt の occurrence key から決まるため重複しません。既存の
 collaboration projection がこの event を受信者の Inbox 行に変え、受信者が通知設定で Slack / Email を
 有効にしていれば同じ channel delivery queue に載せます。Event は report ID を entity、snapshot ID を
 target に持ち、`/reports?v=1&report=<id>&snapshot=<id>` を deep link にします。Team visibility の
 report は event に Team ID を載せ、projection と外部送信の直前に recipient の Team access を再確認します。
+Report と同じく、Team の Project のどれかを読めれば Team access ありとします。
 
 Inbox は表示のたびに report を読み直し、report が削除されたか recipient が現在の visibility
 （personal は owner、team は Team の参照権限、shared は Workspace member）を満たさない場合は通知を
