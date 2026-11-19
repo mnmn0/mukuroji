@@ -7,7 +7,11 @@ import type {
   PlanningWorkItemSummary,
 } from '@mukuroji/contracts'
 import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
-import { createCycleScheduleHandler } from './adapter-in/schedules/cycle-schedule'
+import {
+  createCycleScheduleHandler,
+  CycleScheduleIncompleteError,
+} from './adapter-in/schedules/cycle-schedule'
+import { createDynamoDbCycleScheduleSource } from './adapter-out/dynamodb/cycle-schedule-source'
 import {
   DynamoDbPlanningClient,
   InMemoryPlanningClient,
@@ -324,27 +328,26 @@ describe('Cycle automation due index', () => {
 })
 
 describe('Cycle schedule handler', () => {
-  test('advances every due Cycle and counts failures without stopping', async () => {
-    const queried: string[] = []
-    const documentClient = {
-      async send(command: { input: Record<string, any> }) {
-        const shard = command.input.ExpressionAttributeValues[':scheduleShard'] as string
-        queried.push(shard)
-        if (shard !== 'planning-cycle-00') return { Items: [] }
-        return {
-          Items: [
-            { workspaceId: WORKSPACE, recordKey: 'ENTITY#cycle-ok' },
-            { workspaceId: WORKSPACE, recordKey: 'ENTITY#cycle-broken' },
-            { workspaceId: WORKSPACE, recordKey: 'UPDATE_TARGET#ignored' },
-          ],
-        }
-      },
-    } as unknown as DynamoDBDocumentClient
+  test('advances every due Cycle, then rejects the run when a Cycle failed', async () => {
+    const queried: number[] = []
     const steps = new Map<string, number>()
     const handler = createCycleScheduleHandler({
-      documentClient,
-      planningTableName: 'PlanningTable',
-      workItemsTableName: 'WorkItems',
+      source: {
+        shardCount: 16,
+        async listDueCycles(shard) {
+          queried.push(shard)
+          if (shard !== 0) return { cycles: [] }
+          return {
+            cycles: [
+              { workspaceId: WORKSPACE, cycleId: 'cycle-ok' },
+              { workspaceId: WORKSPACE, cycleId: 'cycle-broken' },
+            ],
+          }
+        },
+        async readLinkedWorkItems() {
+          return { workItems: [] }
+        },
+      },
       planning: {
         async runCycleAutomationStep(_workspaceId, cycleId) {
           const count = (steps.get(cycleId) ?? 0) + 1
@@ -362,15 +365,93 @@ describe('Cycle schedule handler', () => {
     const originalError = console.error
     console.error = () => {}
     try {
-      expect(await handler({ time: '2026-08-17T00:00:00.000Z' })).toEqual({
+      const failure = await handler({ time: '2026-08-17T00:00:00.000Z' }).catch((error: unknown) => error)
+      expect(failure).toBeInstanceOf(CycleScheduleIncompleteError)
+      expect((failure as CycleScheduleIncompleteError).result).toEqual({
         examined: 2,
         created: 1,
         rolledOver: 1,
         failed: 1,
+        truncatedShards: 0,
       })
     } finally {
       console.error = originalError
     }
     expect(queried).toHaveLength(16)
+    expect(steps.get('cycle-ok')).toBe(3)
+  })
+
+  test('follows page cursors and rejects a run that hits the page limit', async () => {
+    const cursors: unknown[] = []
+    const handler = createCycleScheduleHandler({
+      maxPagesPerShard: 2,
+      source: {
+        shardCount: 1,
+        async listDueCycles(_shard, _asOf, cursor) {
+          cursors.push(cursor)
+          return { cycles: [], cursor: { page: cursors.length } }
+        },
+        async readLinkedWorkItems() {
+          return { workItems: [] }
+        },
+      },
+      planning: { runCycleAutomationStep: async () => ({ action: 'idle' }) },
+    })
+
+    const failure = await handler({}).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(CycleScheduleIncompleteError)
+    expect((failure as CycleScheduleIncompleteError).result.truncatedShards).toBe(1)
+    expect(cursors).toEqual([undefined, { page: 1 }])
+  })
+})
+
+describe('DynamoDB Cycle schedule source', () => {
+  test('passes the page cursor and rejects rows that are not Planning entities', async () => {
+    const inputs: Array<Record<string, any>> = []
+    let items: Record<string, unknown>[] = [{ workspaceId: WORKSPACE, recordKey: 'ENTITY#cycle%201' }]
+    const source = createDynamoDbCycleScheduleSource({
+      documentClient: {
+        async send(command: { input: Record<string, any> }) {
+          inputs.push(command.input)
+          return { Items: items, LastEvaluatedKey: { recordKey: 'next' } }
+        },
+      } as unknown as DynamoDBDocumentClient,
+      planningTableName: 'PlanningTable',
+      workItemsTableName: 'WorkItems',
+    })
+
+    const page = await source.listDueCycles(3, new Date('2026-08-17T00:00:00.000Z'), { recordKey: 'prev' })
+    expect(page).toEqual({
+      cycles: [{ workspaceId: WORKSPACE, cycleId: 'cycle 1' }],
+      cursor: { recordKey: 'next' },
+    })
+    expect(inputs[0]).toMatchObject({
+      IndexName: 'UpdateScheduleDueIndex',
+      ExclusiveStartKey: { recordKey: 'prev' },
+      ExpressionAttributeValues: {
+        ':scheduleShard': 'planning-cycle-03',
+        ':upperBound': '2026-08-17T00:00:00.000Z$',
+      },
+    })
+    items = [{ workspaceId: WORKSPACE, recordKey: 'UPDATE_TARGET#x' }]
+    await expect(source.listDueCycles(0, new Date())).rejects.toThrow(TypeError)
+  })
+
+  test('rejects a linked row that is not a canonical Work Item', async () => {
+    const source = createDynamoDbCycleScheduleSource({
+      documentClient: {
+        async send() {
+          return { Responses: { WorkItems: [{ directoryTeamId: 'x', issueId: 'y' }] } }
+        },
+      } as unknown as DynamoDBDocumentClient,
+      planningTableName: 'PlanningTable',
+      workItemsTableName: 'WorkItems',
+    })
+    await expect(source.readLinkedWorkItems(WORKSPACE, [{
+      teamId: 'team-1',
+      workItemId: 'y',
+      goalIds: [],
+      createdAt: '2026-08-01T00:00:00.000Z',
+    }])).rejects.toThrow(TypeError)
   })
 })

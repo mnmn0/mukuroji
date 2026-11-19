@@ -248,6 +248,8 @@ function CycleDetail({
           items={cycleItems.map(({ link, workItem }) => ({
             workItem,
             carriedOver: link.carriedOverFromCycleId !== undefined,
+            // A read-only Work Item cannot be selected, so it cannot fail a whole removal.
+            locked: !(canUpdateWorkItemLink?.(workItem) ?? true),
           }))}
           labels={labels}
           testId="cycle-planning-items"
@@ -326,14 +328,15 @@ function WorkItemSelection({
   actionLabel: (count: number) => string
   disabled: boolean
   emptyLabel: string
-  items: Array<{ workItem: PlanningWorkItemSummary; carriedOver?: boolean }>
+  items: Array<{ workItem: PlanningWorkItemSummary; carriedOver?: boolean; locked?: boolean }>
   labels: CyclePlanningLabels
   onSubmit: (workItems: PlanningWorkItemSummary[]) => void | Promise<void>
   testId: string
   title: string
 }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set())
-  const available = new Set(items.map(({ workItem }) => workItemKey(workItem)))
+  const selectable = items.filter(({ locked }) => !locked)
+  const available = new Set(selectable.map(({ workItem }) => workItemKey(workItem)))
   const selectedKeys = [...selected].filter((key) => available.has(key))
   const limitReached = selectedKeys.length >= CYCLE_WORK_ITEMS_BATCH_LIMIT
   const toggle = (key: string, checked: boolean) => {
@@ -361,16 +364,16 @@ function WorkItemSelection({
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{title}</h3>
-        {!disabled && items.length > 0 ? (
+        {!disabled && selectable.length > 0 ? (
           <div className="flex flex-wrap gap-2">
             <button
               className="workbench-button-secondary min-h-8 px-3 text-xs"
               type="button"
               onClick={() => setSelected(new Set(
-                items.slice(0, CYCLE_WORK_ITEMS_BATCH_LIMIT).map(({ workItem }) => workItemKey(workItem)),
+                selectable.slice(0, CYCLE_WORK_ITEMS_BATCH_LIMIT).map(({ workItem }) => workItemKey(workItem)),
               ))}
             >
-              {labels.selectFirst(Math.min(items.length, CYCLE_WORK_ITEMS_BATCH_LIMIT))}
+              {labels.selectFirst(Math.min(selectable.length, CYCLE_WORK_ITEMS_BATCH_LIMIT))}
             </button>
             {selectedKeys.length > 0 ? (
               <button
@@ -388,7 +391,7 @@ function WorkItemSelection({
         <p className="text-sm font-medium text-[var(--workbench-muted)]">{emptyLabel}</p>
       ) : (
         <ul className="grid max-h-72 gap-1 overflow-y-auto rounded-lg border border-[var(--workbench-border)] p-2">
-          {items.map(({ workItem, carriedOver }) => {
+          {items.map(({ workItem, carriedOver, locked }) => {
             const key = workItemKey(workItem)
             const checked = selected.has(key)
             return (
@@ -396,7 +399,7 @@ function WorkItemSelection({
                 <label className="flex min-w-0 items-center gap-2 rounded px-2 py-1 text-sm text-[var(--workbench-text)]">
                   <input
                     checked={checked}
-                    disabled={disabled || (!checked && limitReached)}
+                    disabled={disabled || locked || (!checked && limitReached)}
                     type="checkbox"
                     onChange={(event) => toggle(key, event.target.checked)}
                   />

@@ -4,6 +4,7 @@ import {
 } from '../../infrastructure/aws/dynamodb-client'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { createCycleScheduleHandler } from '../../modules/planning/adapter-in/schedules/cycle-schedule'
+import { createDynamoDbCycleScheduleSource } from '../../modules/planning/adapter-out/dynamodb/cycle-schedule-source'
 import { createPlanningClient } from './api-dependencies'
 
 /**
@@ -18,12 +19,14 @@ export function createProductionCycleScheduleHandler() {
   if (!planningTableName) throw new Error('PLANNING_TABLE_NAME is required.')
   if (!workItemsTableName) throw new Error('WORK_ITEMS_TABLE_NAME is required.')
   return createCycleScheduleHandler({
-    documentClient: createDynamoDbDocumentClient(createDynamoDbClient()),
+    source: createDynamoDbCycleScheduleSource({
+      documentClient: createDynamoDbDocumentClient(createDynamoDbClient()),
+      planningTableName,
+      workItemsTableName,
+      ...(environment.PLANNING_UPDATE_SCHEDULE_INDEX_NAME?.trim()
+        ? { indexName: environment.PLANNING_UPDATE_SCHEDULE_INDEX_NAME.trim() }
+        : {}),
+    }),
     planning: createPlanningClient(),
-    planningTableName,
-    workItemsTableName,
-    ...(environment.PLANNING_UPDATE_SCHEDULE_INDEX_NAME?.trim()
-      ? { indexName: environment.PLANNING_UPDATE_SCHEDULE_INDEX_NAME.trim() }
-      : {}),
   })
 }

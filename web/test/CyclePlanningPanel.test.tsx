@@ -102,4 +102,18 @@ describe('CyclePlanningPanel', () => {
     expect(html).not.toContain('Save automation')
     expect(html).not.toContain('Add 0 selected')
   })
+
+  test('does not let read-only Work Items be selected for removal', () => {
+    const html = renderToStaticMarkup(
+      <CyclePlanningPanel
+        canUpdateWorkItemLink={(workItem) => workItem.id !== 'journey-copy'}
+        labels={labels}
+        snapshot={planningSnapshotFixture}
+        onSetCycleWorkItems={() => undefined}
+      />,
+    )
+    const items = html.slice(html.indexOf('data-testid="cycle-planning-items"'))
+    expect(items).toContain('Select first 1')
+    expect(items.match(/disabled=""[^>]*type="checkbox"|type="checkbox"[^>]*disabled=""/gu)).toHaveLength(1)
+  })
 })
