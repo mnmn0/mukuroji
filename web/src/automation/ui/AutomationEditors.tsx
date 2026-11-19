@@ -1117,7 +1117,8 @@ function withProjectTemplateWorkItems(
   payload: AutomationProjectTemplatePayload,
   outline: Extract<ProjectTemplateWorkItemOutlineResult, { workItems: unknown }>,
 ): AutomationProjectTemplatePayload {
-  const { workItems: _previousWorkItems, ...fields } = payload
+  const fields = { ...payload }
+  delete fields.workItems
   return outline.workItems.length > 0 ? { ...fields, workItems: outline.workItems } : fields
 }
 
