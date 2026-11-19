@@ -110,7 +110,7 @@ key は必ず server が認証済みの主体から組み立て、client が送�
 | `tenant-administration` | テナント profile、保持・legal hold、export と閉鎖 | TenantAdministrationTable、TenantExportBucket |
 | `audit` | 監査 event の書き込みと読み出し、非同期 export | AuditEventsTable、AuditExportBucket |
 | `realtime` | WebSocket の ticket、接続、presence | RealtimeSessionsTable |
-| `authentication` | Cognito の sign-in、MFA、パスワード変更 | Cognito User Pool |
+| `authentication` | Cognito の sign-in、MFA、パスワード変更 | Cognito User Pool、試行制限の counter は DeveloperPlatformTable（[ADR 0002](adr/0002-shared-authentication-attempt-limits.md)） |
 | `restore-drill` | PITR の復元訓練（任意 module） | RestoreDrillStateTable |
 | `data-integrity` | 横断的な整合性検査（読み取り専用） | 各 table を読むだけ |
 | `data-migration` | 保存済み row の schema version 移行（CLI） | 対象 table と checkpoint table（AWS 上は未定義） |
