@@ -153,4 +153,5 @@ export const timeTrackingMessages = {
   'timeTracking.budget.create': 'Set budget',
   'timeTracking.budget.projectHint': 'Unless you manage {project}, its budget is not shown and cannot be saved.',
   'timeTracking.budget.otherCurrencies': 'Actual costs in other currencies ({amounts}) are not converted, so the remaining amount and usage are not shown.',
+  'timeTracking.budget.teamPartial': 'Team actual costs include only the Projects you manage (time without a Project is not included), so the remaining amount and usage are not shown. They are shown for Project budgets.',
 } as const

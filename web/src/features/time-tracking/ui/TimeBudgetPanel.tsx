@@ -206,6 +206,11 @@ export function TimeBudgetPanel({
                 ) : null}
               </dd>
             </div>
+            {comparison.isPartialScope ? (
+              <p className="col-span-2 text-sm font-semibold text-fg-amber-800 sm:col-span-4" role="note">
+                {t('timeTracking.budget.teamPartial')}
+              </p>
+            ) : null}
             {Object.keys(comparison.otherCurrencyCosts).length > 0 ? (
               <p className="col-span-2 text-sm font-semibold text-fg-amber-800 sm:col-span-4" role="note">
                 {interpolate(t('timeTracking.budget.otherCurrencies'), { amounts: formatCostsByCurrency(comparison.otherCurrencyCosts, locale) })}

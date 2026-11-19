@@ -153,4 +153,5 @@ export const timeTrackingMessages = {
   'timeTracking.budget.create': '予算を設定',
   'timeTracking.budget.projectHint': '{project} のマネージャーでない場合、予算は表示されず保存もできません。',
   'timeTracking.budget.otherCurrencies': '予算と異なる通貨の実績 {amounts} は換算できないため、残りと消化率は表示していません。',
+  'timeTracking.budget.teamPartial': 'Team 全体の実績コストは、あなたが管理する Project の分だけを集計しています（Project なしの工数は含みません）。そのため残りと消化率は表示していません。Project ごとの予算では表示されます。',
 } as const

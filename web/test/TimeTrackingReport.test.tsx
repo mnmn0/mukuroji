@@ -63,6 +63,20 @@ function respondWith(body: unknown, status = 200): RecordedRequest[] {
   return requests
 }
 
+/**
+ * Creates the budget report of the Atlas Project from the Team budget fixture.
+ *
+ * @returns Project-grouped report carrying a 30,000 JPY Atlas budget.
+ */
+function createProjectBudgetSummary() {
+  const teamBudget = timeReportFixtureBudgetSummary.budget
+  if (!teamBudget) throw new Error('The budget fixture has no budget.')
+  return {
+    ...timeReportFixtureBudgetSummary,
+    budget: { ...teamBudget, scopeType: 'project' as const, scopeId: 'atlas', amountMinor: 30_000 },
+  }
+}
+
 afterEach(() => {
   globalThis.fetch = originalFetch
 })
@@ -92,28 +106,36 @@ describe('time report model', () => {
     expect(formatCostsByCurrency({ USD: 1_250, JPY: 300 }, 'en')).toBe('¥300 / $12.50')
   })
 
-  test('compares the Team or a Project budget with the actual cost of the period', () => {
-    expect(compareTimeBudget(timeReportFixtureBudgetSummary)).toMatchObject({
-      actualMinor: 110_000,
-      remainingMinor: 390_000,
-      usedPercent: 22,
-      actualMinutes: 1_170,
+  test('compares a Project budget with the actual cost of the period', () => {
+    const projectBudget = createProjectBudgetSummary()
+    expect(compareTimeBudget(projectBudget, 'atlas')).toMatchObject({
+      actualMinor: 35_000,
+      remainingMinor: -5_000,
+      usedPercent: 117,
+      actualMinutes: 420,
+      isPartialScope: false,
     })
-    const teamBudget = timeReportFixtureBudgetSummary.budget
-    if (!teamBudget) throw new Error('The budget fixture has no budget.')
-    const projectBudget = {
-      ...timeReportFixtureBudgetSummary,
-      budget: { ...teamBudget, scopeType: 'project' as const, scopeId: 'atlas', amountMinor: 30_000 },
-    }
-    expect(compareTimeBudget(projectBudget, 'atlas')).toMatchObject({ actualMinor: 35_000, remainingMinor: -5_000, usedPercent: 117, actualMinutes: 420 })
     expect(compareTimeBudget(projectBudget, 'unknown')).toMatchObject({ actualMinor: 0, actualMinutes: 0 })
     expect(compareTimeBudget(timeReportFixtureManagerSummary)).toBeUndefined()
   })
 
+  test('treats the Team comparison as partial, since Team costs cover only managed Projects', () => {
+    const comparison = compareTimeBudget(timeReportFixtureBudgetSummary)
+    expect(comparison).toMatchObject({ actualMinor: 110_000, actualMinutes: 1_170, isPartialScope: true })
+    expect(comparison?.remainingMinor).toBeUndefined()
+    expect(comparison?.usedPercent).toBeUndefined()
+  })
+
   test('withholds the remaining amount when costs in another currency are not converted', () => {
-    const mixed = { ...timeReportFixtureBudgetSummary, totalActualCostByCurrency: { JPY: 110_000, USD: 2_500 } }
-    const comparison = compareTimeBudget(mixed)
-    expect(comparison).toMatchObject({ actualMinor: 110_000, otherCurrencyCosts: { USD: 2_500 } })
+    const projectBudget = createProjectBudgetSummary()
+    const mixed = {
+      ...projectBudget,
+      groups: projectBudget.groups.map((group) => group.key === 'atlas'
+        ? { ...group, actualCostByCurrency: { JPY: 35_000, USD: 2_500 } }
+        : group),
+    }
+    const comparison = compareTimeBudget(mixed, 'atlas')
+    expect(comparison).toMatchObject({ actualMinor: 35_000, otherCurrencyCosts: { USD: 2_500 } })
     expect(comparison?.remainingMinor).toBeUndefined()
     expect(comparison?.usedPercent).toBeUndefined()
     const markup = renderToStaticMarkup(
@@ -125,7 +147,7 @@ describe('time report model', () => {
         onSave={async () => undefined}
         onUseBudgetPeriod={noop}
         projects={timeReportFixtureProjects}
-        scope={{ scopeType: 'team' }}
+        scope={{ scopeType: 'project', projectId: 'atlas' }}
         summary={mixed}
         t={t}
       />,
@@ -259,7 +281,27 @@ describe('time report views', () => {
     expect(markup).not.toContain('time-report-table')
   })
 
-  test('shows the budget next to the actual cost of the period', () => {
+  test('shows the remaining amount and usage of a Project budget', () => {
+    const markup = renderToStaticMarkup(
+      <TimeBudgetPanel
+        defaultCurrency="USD"
+        locale="en"
+        onChangeScope={noop}
+        onRetry={noop}
+        onSave={async () => undefined}
+        onUseBudgetPeriod={noop}
+        projects={timeReportFixtureProjects}
+        scope={{ scopeType: 'project', projectId: 'atlas' }}
+        summary={createProjectBudgetSummary()}
+        t={t}
+      />,
+    )
+    expect(markup).toContain('-¥5,000')
+    expect(markup).toContain('117%')
+    expect(markup).not.toContain('Team actual costs include only the Projects you manage')
+  })
+
+  test('shows the Team budget next to the actual cost of the period', () => {
     const markup = renderToStaticMarkup(
       <TimeBudgetPanel
         defaultCurrency="USD"
@@ -276,8 +318,8 @@ describe('time report views', () => {
     )
     expect(markup).toContain('¥500,000')
     expect(markup).toContain('¥110,000')
-    expect(markup).toContain('¥390,000')
-    expect(markup).toContain('22%')
+    expect(markup).not.toContain('¥390,000')
+    expect(markup).toContain('Team actual costs include only the Projects you manage')
     expect(markup).toContain('2026-11-01 – 2026-11-30')
     expect(markup).toContain('Report this period')
     expect(markup).toContain('Edit budget')

@@ -28,6 +28,11 @@ export type TimeBudgetComparison = {
   usedPercent?: number
   /** Actual costs in currencies other than the budget's, which are not converted. */
   otherCurrencyCosts: Readonly<Record<string, number>>
+  /**
+   * Whether the actual cost may leave out part of the scope. Team totals include only the Projects
+   * the member manages, and never time without a Project, so a Team comparison is always partial.
+   */
+  isPartialScope: boolean
   /** Minutes recorded against the scope in the report period. */
   actualMinutes: number
 }
@@ -163,12 +168,14 @@ export function compareTimeBudget(summary: TimeTrackingSummary, projectId?: stri
   const actualMinor = costs?.[budget.currency] ?? 0
   const otherCurrencyCosts = Object.fromEntries(Object.entries(costs ?? {})
     .filter(([currency, amount]) => currency !== budget.currency && amount !== 0))
-  // Costs in another currency are not converted, so the remaining amount would overstate what is left.
-  const isComplete = Object.keys(otherCurrencyCosts).length === 0
+  const isPartialScope = projectId === undefined
+  // Unconverted currencies or costs outside the member's Projects would overstate what is left.
+  const isComplete = !isPartialScope && Object.keys(otherCurrencyCosts).length === 0
   return {
     budget,
     actualMinor,
     otherCurrencyCosts,
+    isPartialScope,
     ...(isComplete ? { remainingMinor: budget.amountMinor - actualMinor } : {}),
     ...(isComplete && budget.amountMinor > 0 ? { usedPercent: Math.round((actualMinor / budget.amountMinor) * 100) } : {}),
     actualMinutes: projectId === undefined ? summary.totalMinutes : group?.minutes ?? 0,

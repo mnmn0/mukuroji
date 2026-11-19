@@ -134,7 +134,7 @@ test.describe('time tracking report', () => {
     const comparison = budget.getByTestId('time-budget-comparison')
     await expect(comparison).toContainText('¥300,000')
     await expect(comparison).toContainText('¥75,000')
-    await expect(comparison).toContainText('25%')
+    await expect(budget.getByText('Team actual costs include only the Projects you manage', { exact: false })).toBeVisible()
 
     await budget.getByRole('button', { name: 'Report this period' }).click()
     await expect(page).toHaveURL(/from=2026-11-01&to=2026-11-30&groupBy=user/u)
