@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { createPlanningUpdateProjectTargetRecordKey } from '../../../planning'
 import { DynamoDbProjectDirectoryClient } from './project-directory-client'
 
 const directoryId = 'user#demo@example.com'
@@ -66,13 +67,22 @@ function createProjectRow(
  *
  * @param rows - Rows every directory query returns.
  * @param failTransactions - Whether transactions fail on a lost condition.
+ * @param planningItems - Planning rows served by key reads, keyed by `workspaceId|recordKey`.
  * @returns The client and the commands it sent.
  */
-function createClient(rows: Array<Record<string, unknown>>, failTransactions = false) {
+function createClient(
+  rows: Array<Record<string, unknown>>,
+  failTransactions = false,
+  planningItems: Record<string, Record<string, unknown>> = {},
+) {
   const sent: SentCommand[] = []
   const send = async (command: SentCommand) => {
     sent.push(command)
     if ('KeyConditionExpression' in command.input) return { Items: rows }
+    const key = command.input.Key
+    if (command.input.TableName === 'PlanningTable' && isPlanningKey(key)) {
+      return { Item: planningItems[`${key.workspaceId}|${key.recordKey}`] }
+    }
     if ('TransactItems' in command.input && failTransactions) {
       throw Object.assign(new Error('Transaction was canceled.'), {
         name: 'TransactionCanceledException',
@@ -90,11 +100,48 @@ function createClient(rows: Array<Record<string, unknown>>, failTransactions = f
     false,
     undefined,
     'WorkspaceAccessTable',
+    'PlanningTable',
   )
   const transactions = () => sent
     .filter((command) => 'TransactItems' in command.input)
     .map((command) => command.input.TransactItems)
   return { client, transactions }
+}
+
+/**
+ * Checks whether a command key addresses a Planning row.
+ *
+ * @param key - Untrusted command key.
+ * @returns Whether the key has string partition and sort values.
+ */
+function isPlanningKey(key: unknown): key is { workspaceId: string; recordKey: string } {
+  return typeof key === 'object' && key !== null &&
+    typeof Reflect.get(key, 'workspaceId') === 'string' &&
+    typeof Reflect.get(key, 'recordKey') === 'string'
+}
+
+/**
+ * Creates a stored Planning update target row of a Project.
+ *
+ * @param teamId - Owning Team identifier.
+ * @param projectId - Project identifier.
+ * @param extra - Additional stored attributes.
+ * @returns The stored row.
+ */
+function createPlanningTargetRow(
+  teamId: string,
+  projectId: string,
+  extra: Record<string, unknown> = {},
+) {
+  return {
+    workspaceId: directoryId,
+    recordKey: createPlanningUpdateProjectTargetRecordKey(teamId, projectId),
+    entryType: 'planning-update-target',
+    target: { type: 'project', teamId, projectId },
+    latestVersion: 0,
+    updatedAt: '2026-06-01T00:00:00.000Z',
+    ...extra,
+  }
 }
 
 test('orders the sidebar by display order and falls back to the creation position', async () => {
@@ -274,6 +321,53 @@ test('restores an archived Project only while its Team is active', async () => {
       }),
     },
   ]])
+})
+
+test('makes the archived Planning update targets of restored Projects usable again', async () => {
+  const archivedAt = '2026-06-06T00:00:00.000Z'
+  const planningItems: Record<string, Record<string, unknown>> = Object.fromEntries([
+    createPlanningTargetRow('alpha', 'gone', { archivedAt, cadence: { unit: 'week' } }),
+    createPlanningTargetRow('beta', 'shown', { archivedAt }),
+    createPlanningTargetRow('beta', 'separately-archived', { archivedAt }),
+    createPlanningTargetRow('beta', 'unarchived'),
+  ].map((row) => [`${row.workspaceId}|${row.recordKey}`, row]))
+  planningItems[`FENCE#${directoryId}|META`] = { revision: 7 }
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10),
+    createProjectRow('alpha', 10, 'gone', 10, { archivedAt }),
+    createTeamRow('beta', 20, { archivedAt }),
+    createProjectRow('beta', 20, 'shown', 10),
+    createProjectRow('beta', 20, 'separately-archived', 20, { archivedAt }),
+    createProjectRow('beta', 20, 'unarchived', 30),
+  ], false, planningItems)
+
+  await client.restoreProject(directoryId, 'alpha', 'gone')
+  await client.restoreTeam(directoryId, 'beta')
+
+  const restoreTarget = (teamId: string, projectId: string) => ({
+    Update: expect.objectContaining({
+      TableName: 'PlanningTable',
+      Key: {
+        workspaceId: directoryId,
+        recordKey: createPlanningUpdateProjectTargetRecordKey(teamId, projectId),
+      },
+      UpdateExpression:
+        'SET updatedAt = :restoredAt REMOVE archivedAt, cadence, cadenceAnchorDay, ' +
+        'updateScheduleShard, nextNotificationAtRecordKey',
+      ConditionExpression: expect.stringContaining('attribute_exists(archivedAt)'),
+    }),
+  })
+  const revisionBump = {
+    Put: expect.objectContaining({
+      TableName: 'PlanningTable',
+      Item: expect.objectContaining({ workspaceId: `FENCE#${directoryId}`, revision: 8 }),
+      ConditionExpression: '#revision = :expectedPlanningRevision',
+    }),
+  }
+  const [projectRestore, teamRestore] = transactions()
+  expect(Array.isArray(projectRestore) ? projectRestore.slice(2) : undefined).toEqual([revisionBump, restoreTarget('alpha', 'gone')])
+  // Only the Project that was active when the Team was archived gets its target back.
+  expect(Array.isArray(teamRestore) ? teamRestore.slice(1) : undefined).toEqual([revisionBump, restoreTarget('beta', 'shown')])
 })
 
 test('reorders Teams by reusing their positions and writes only the rows that move', async () => {

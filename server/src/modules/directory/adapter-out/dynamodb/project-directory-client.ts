@@ -2651,6 +2651,19 @@ export class DynamoDbProjectDirectoryClient {
       throw new ProjectDataError(409, 'TeamNotArchived', `Team "${teamId}" is not archived.`)
     }
 
+    // Projects that were active when the Team was archived become visible again, so their
+    // Planning update targets, archived together with the Team, become usable again too.
+    const planningItems = await this.readPlanningProjectRestoreItems(
+      directoryId,
+      teamId,
+      items
+        .filter((item): item is ProjectDirectoryProjectItem =>
+          item.entryType === 'project' && item.teamId === teamId && isActiveDirectoryItem(item)
+        )
+        .map((project) => project.projectId),
+      new Date().toISOString(),
+    )
+
     await this.sendDirectoryAdministrationTransaction([
       {
         Update: {
@@ -2676,6 +2689,7 @@ export class DynamoDbProjectDirectoryClient {
         changes: createAuditFieldChanges(team, { ...team, archivedAt: undefined }, ['archivedAt']),
         metadata: { kind: 'team', teamId },
       }),
+      ...planningItems,
     ])
 
     return { teamId }
@@ -2729,6 +2743,13 @@ export class DynamoDbProjectDirectoryClient {
       )
     }
 
+    const planningItems = await this.readPlanningProjectRestoreItems(
+      directoryId,
+      teamId,
+      [projectId],
+      new Date().toISOString(),
+    )
+
     await this.sendDirectoryAdministrationTransaction([
       {
         Update: {
@@ -2765,6 +2786,7 @@ export class DynamoDbProjectDirectoryClient {
         ),
         metadata: { kind: 'project', projectId, teamId },
       }),
+      ...planningItems,
     ])
 
     return { teamId, projectId }
@@ -3311,6 +3333,97 @@ export class DynamoDbProjectDirectoryClient {
         },
       },
     }
+  }
+
+  /**
+   * Reads the Planning writes that make archived Project update targets usable again after a
+   * restore. The targets lose their cadence, because archiving removed their schedule; an
+   * administrator sets it again. The Planning revision is bumped so a Planning mutation that read
+   * the archived targets fails and reloads.
+   *
+   * @param directoryId - Planning Workspace partition.
+   * @param teamId - Owning Team identifier.
+   * @param projectIds - Projects being restored or becoming visible again.
+   * @param restoredAt - Restore timestamp.
+   * @returns Conditional Planning writes, empty when no target was archived.
+   */
+  private async readPlanningProjectRestoreItems(
+    directoryId: string,
+    teamId: string,
+    projectIds: readonly string[],
+    restoredAt: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+    const targetUpdates = await Promise.all(projectIds.map(async (projectId) => {
+      const recordKey = createPlanningUpdateProjectTargetRecordKey(teamId, projectId)
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.planningTableName,
+        Key: { workspaceId: directoryId, recordKey },
+        ConsistentRead: true,
+      }))
+      const item = response.Item
+      if (
+        !item ||
+        item.entryType !== 'planning-update-target' ||
+        !isRecord(item.target) ||
+        item.target.type !== 'project' ||
+        item.target.teamId !== teamId ||
+        item.target.projectId !== projectId ||
+        item.archivedAt === undefined
+      ) {
+        return []
+      }
+      return [{
+        Update: {
+          TableName: this.planningTableName,
+          Key: { workspaceId: directoryId, recordKey },
+          UpdateExpression:
+            'SET updatedAt = :restoredAt REMOVE archivedAt, cadence, cadenceAnchorDay, ' +
+            'updateScheduleShard, nextNotificationAtRecordKey',
+          ConditionExpression:
+            'attribute_exists(archivedAt) AND #entryType = :entryType AND ' +
+            '#target.#type = :targetType AND #target.#teamId = :teamId AND ' +
+            '#target.#projectId = :projectId',
+          ExpressionAttributeNames: {
+            '#entryType': 'entryType',
+            '#target': 'target',
+            '#type': 'type',
+            '#teamId': 'teamId',
+            '#projectId': 'projectId',
+          },
+          ExpressionAttributeValues: {
+            ':restoredAt': restoredAt,
+            ':entryType': 'planning-update-target',
+            ':targetType': 'project',
+            ':teamId': teamId,
+            ':projectId': projectId,
+          },
+        },
+      }]
+    }))
+    const updates = targetUpdates.flat()
+
+    if (updates.length === 0) {
+      return []
+    }
+
+    const meta = await this.documentClient.send(new GetCommand({
+      TableName: this.planningTableName,
+      Key: { workspaceId: `FENCE#${directoryId}`, recordKey: 'META' },
+      ConsistentRead: true,
+    }))
+    const revision = meta.Item?.revision
+    if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) {
+      throw new ProjectDataError(
+        503,
+        'PlanningUnavailable',
+        'Planning data is unavailable. Try again later.',
+      )
+    }
+
+    return [
+      createPlanningRevisionBump(this.planningTableName, directoryId, revision, restoredAt),
+      ...updates,
+    ]
   }
 
   /**

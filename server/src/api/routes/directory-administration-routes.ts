@@ -244,7 +244,8 @@ async function projectProjectSearchDocument(
       teamId,
       projectId,
     )
-    await projectCharterSearchDocumentBestEffort(workspaceId, state)
+    // The rename or restore was just committed, so eventually consistent reads could miss it.
+    await projectCharterSearchDocumentBestEffort(workspaceId, state, true)
   } catch (error) {
     console.error('Workspace search projection failed after project rename or restore.', error)
   }

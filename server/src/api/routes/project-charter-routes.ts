@@ -306,13 +306,19 @@ async function resolveCharterPerson(
  *
  * @param workspaceId - Workspace that owns the Project.
  * @param state - Committed charter state.
+ * @param consistentRead - Whether to read the directory strongly consistently, so names or archive
+ * state committed just before are seen.
  */
-export async function projectCharterSearchDocumentBestEffort(workspaceId: string, state: ProjectCharterState) {
+export async function projectCharterSearchDocumentBestEffort(
+  workspaceId: string,
+  state: ProjectCharterState,
+  consistentRead = false,
+) {
   let names: { name: string; englishName?: string; project: ProjectDirectoryProjectResponse } | undefined
   try {
     const [japanese, english] = await Promise.all([
-      workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja'),
-      workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'en'),
+      workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja', consistentRead),
+      workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'en', consistentRead),
     ])
     const findProject = (teams: readonly ProjectDirectoryTeamResponse[]) => teams
       .find((team) => team.id === state.teamId)
