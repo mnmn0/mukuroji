@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
+import { PersonalWeeklyReportContainer } from '../../features/time-tracking/ui/PersonalWeeklyReportContainer'
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
 import { TimeReportContainer } from '../../features/time-tracking/ui/TimeReportContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
@@ -19,8 +20,8 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 const emptyTeamProjects: ProjectDirectoryProject[] = []
 
 /**
- * Renders a Team's time tracking: the member's weekly timesheet, the manager's approval queue, and
- * the Team report with its CSV export and budgets.
+ * Renders a Team's time tracking: the member's weekly timesheet and weekly report, the manager's
+ * approval queue, and the Team report with its CSV export and budgets.
  *
  * The view, week, and report period live in the URL so a reload or shared link opens the same view.
  *
@@ -33,7 +34,9 @@ export function TeamTimeTrackingPage() {
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const viewParam = searchParams.get('view')
-  const view: TimeTrackingView = viewParam === 'approvals' || viewParam === 'report' ? viewParam : 'timesheet'
+  const view: TimeTrackingView = viewParam === 'approvals' || viewParam === 'report' || viewParam === 'weekly-report'
+    ? viewParam
+    : 'timesheet'
   const weekStart = resolveWeekStart(searchParams.get('week'))
   const reportFrom = searchParams.get('from')
   const reportTo = searchParams.get('to')
@@ -45,6 +48,9 @@ export function TeamTimeTrackingPage() {
   // Filtered on the server, so other Teams' Work Items cannot push the read past its size limit.
   const teamWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '' }), [teamId])
   const workItems = useWorkspaceWorkItems(accessToken, enabled, false, teamWorkItemFilter)
+  // The weekly report lists only the member's own Work Items, filtered by the server.
+  const myWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '', involvement: 'mine' as const }), [teamId])
+  const myWorkItems = useWorkspaceWorkItems(accessToken, enabled && view === 'weekly-report', false, myWorkItemFilter)
   const projectMembers = useWorkspaceProjectMembers(
     accessToken,
     activeTeam?.id,
@@ -105,7 +111,7 @@ export function TeamTimeTrackingPage() {
   if (!teamId) return null
 
   return (
-    <WorkspaceRouteContent sessionErrors={[workItems.error, writeAccess.error, projectMembers.error]}>
+    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error]}>
       <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <TimeTrackingViewTabs
           getHref={(candidate) => candidate === 'report'
@@ -142,6 +148,20 @@ export function TeamTimeTrackingPage() {
             projects={teamProjects}
             range={reportRange}
             teamId={teamId}
+          />
+        ) : view === 'weekly-report' ? (
+          <PersonalWeeklyReportContainer
+            accessToken={accessToken}
+            hasWorkItemError={Boolean(myWorkItems.error)}
+            key={`${teamId}:weekly-report:${weekStart}`}
+            locale={workspace.locale}
+            memberKey={workspace.userKey}
+            onMoveWeek={moveWeek}
+            onRetryWorkItems={() => { void myWorkItems.mutate().catch(() => undefined) }}
+            teamId={teamId}
+            weekStart={weekStart}
+            workItems={myWorkItems.data}
+            workItemTitles={workItemTitles}
           />
         ) : view === 'approvals' ? (
           <TimeApprovalQueueContainer
