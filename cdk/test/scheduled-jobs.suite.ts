@@ -15,6 +15,7 @@ const scheduledJobIds = [
   'EmailNotification',
   'AnalyticsSchedule',
   'NotificationSchedule',
+  'CycleSchedule',
 ];
 
 test('runs every periodic job from one Lambda on one every-minute rule', () => {

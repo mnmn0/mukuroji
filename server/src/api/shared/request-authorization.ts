@@ -310,6 +310,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/planning/work-item-dependencies*',
     permission: 'planning.manage',
   },
+  {
+    // Bulk Cycle membership is a link change; the route still checks each Cycle and Work Item.
+    method: 'POST',
+    pathPattern: '/api/planning/cycles/:cycleId/work-items',
+    permission: 'planning.write',
+  },
   { method: '*', pathPattern: '/api/planning/cycles*', permission: 'planning.manage' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/read-state', permission: 'planning.read' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/saved', permission: 'planning.read' },

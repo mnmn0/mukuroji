@@ -36,6 +36,7 @@ import { buildRequestEmailWorker } from '../subsystems/workers/request-email';
 import { buildScheduledJobsWorker } from '../subsystems/workers/scheduled-jobs';
 import {
   defineAnalyticsScheduleJob,
+  defineCycleScheduleJob,
   defineNotificationScheduleJob,
 } from '../subsystems/workers/schedules';
 import { defineSlackNotificationJob } from '../subsystems/workers/slack-notifications';
@@ -266,6 +267,7 @@ export class MukurojiStack extends cdk.Stack {
         defineEmailNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
         defineAnalyticsScheduleJob({ dataStores, parameters }),
         defineNotificationScheduleJob({ dataStores, parameters }),
+        defineCycleScheduleJob({ dataStores, parameters }),
       ],
     });
     const tenantOperationWorker = buildTenantOperationWorker(this, {

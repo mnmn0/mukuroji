@@ -14,6 +14,9 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  CYCLE_AUTO_CREATE_LEAD_DAYS,
+  CYCLE_ROLLOVER_BATCH_SIZE,
+  CYCLE_WORK_ITEMS_BATCH_LIMIT,
   PLANNING_SCHEMA_VERSION,
   PLANNING_UPDATE_CONTENT_VERSION,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
@@ -25,7 +28,10 @@ import {
   type CreatePlanningDependencyInput,
   type CreatePlanningEntityInput,
   type CreateWorkItemScheduleDependencyInput,
+  type CreateNextCycleInput,
+  type CycleAutomation,
   type CycleRolloverInput,
+  type CycleWorkItemsInput,
   type DuplicatePlanningEntityInput,
   type MovePlanningEntityInput,
   type ListPlanningUpdatesInput,
@@ -77,6 +83,10 @@ import {
   type WorkItemScheduleDependency,
   type WorkItemScheduleDependencyConflict,
 } from '@mukuroji/contracts'
+import {
+  createPlanningCycleScheduleRecordKey,
+  createPlanningCycleScheduleShard,
+} from './cycle-schedule-index'
 import {
   createPlanningUpdateNextNotificationAtRecordKey,
   createPlanningUpdateScheduleShard,
@@ -174,7 +184,7 @@ const DEFAULT_UPDATE_HISTORY_PAGE_SIZE = 25
 const UPDATE_VERSION_WIDTH = 16
 const MAX_REMINDER_HOURS = 24 * 365
 const MAX_UPDATE_CADENCE_COUNT = 1_000
-const MAX_ROLLOVER_LINK_MUTATIONS = 49
+const MAX_ROLLOVER_LINK_MUTATIONS = CYCLE_ROLLOVER_BATCH_SIZE
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const planningTimeZoneFormatters = new Map<string, Intl.DateTimeFormat>()
 
@@ -627,7 +637,58 @@ export type PlanningClient = {
     input: CycleRolloverInput,
     workItemState: PlanningWorkItemState,
   ): Promise<PlanningMutationResponse>
+  /** Cadence に従って次の Cycle を作ります。 */
+  createNextCycle(
+    workspaceId: string,
+    sourceCycleId: string,
+    input: CreateNextCycleInput,
+    workItemState: PlanningWorkItemState,
+  ): Promise<PlanningMutationResponse & { cycleId: string }>
+  /** 複数の Work Item を Cycle に入れる、または Cycle から外します。 */
+  setCycleWorkItems(
+    workspaceId: string,
+    cycleId: string,
+    input: CycleWorkItemsInput,
+    workItemState: PlanningWorkItemState,
+  ): Promise<PlanningMutationResponse>
+  /** Cycle の自動化を1段階だけ進めます。 */
+  runCycleAutomationStep(
+    workspaceId: string,
+    cycleId: string,
+    loadWorkItems: CycleAutomationWorkItemLoader,
+  ): Promise<CycleAutomationStepResult>
 }
+
+/**
+ * Reads the canonical Work Items linked to a Cycle for an automation step.
+ *
+ * @param links - Live links of the Cycle being rolled over.
+ * @returns Work Item projection that covers those links.
+ */
+export type CycleAutomationWorkItemLoader = (
+  links: readonly PlanningWorkItemLink[],
+) => Promise<PlanningWorkItemState>
+
+/** Result of one Cycle automation step. */
+export type CycleAutomationStepResult =
+  | {
+      /** Nothing is due for this Cycle now. */
+      action: 'idle'
+    }
+  | {
+      /** The next Cycle was created. */
+      action: 'created-next'
+      /** Created Cycle ID. */
+      cycleId: string
+    }
+  | {
+      /** One rollover batch was committed. */
+      action: 'rolled-over'
+      /** Moved Work Item count in this batch. */
+      movedCount: number
+      /** Incomplete Work Items still waiting in the source Cycle. */
+      remainingWorkItemCount: number
+    }
 
 /** 永続化する entity から read-time 派生値を除いた shape です。 */
 type StoredPlanningEntity = Omit<PlanningEntity, 'linkedWorkItemCount' | 'progress' | 'rollupHealth'>
@@ -686,6 +747,8 @@ type PlanningMutationResult = {
   movedWorkItemIds?: string[]
   /** Rollover で元 Cycle に残した未完了 Work Item IDs です。 */
   retainedWorkItemIds?: string[]
+  /** Rollover でまだ移動していない未完了 Work Item の件数です。 */
+  remainingWorkItemCount?: number
   /** Planning commit と同じ transaction で検証する Work Item revisions です。 */
   workItemConditions?: PlanningWorkItemCondition[]
   /** Minimal Work Item dependency value used to prepare a durable completion receipt. */
@@ -1046,6 +1109,13 @@ abstract class BasePlanningClient implements PlanningClient {
           : { goalFramework: readGoalFramework(patch.goalFramework) }),
         updatedAt: now,
       }
+      if (patch.automation !== undefined) {
+        const automation = patch.automation === null
+          ? undefined
+          : readCycleAutomation(patch.automation)
+        if (automation === undefined) delete updated.automation
+        else updated.automation = automation
+      }
       if (patch.description !== undefined) {
         const description = readOptionalDescription(patch.description)
         if (description === undefined) delete updated.description
@@ -1057,6 +1127,7 @@ abstract class BasePlanningClient implements PlanningClient {
       }
       const next = replaceEntity(state, updated)
       validatePlanningState(next)
+      requireCycleChainCompatible(next, updated)
       return { state: next }
     })
   }
@@ -1508,6 +1579,9 @@ abstract class BasePlanningClient implements PlanningClient {
         updatedAt: now,
       }
       delete copy.archivedAt
+      delete copy.nextCycleId
+      // Automation runs without the caller's permissions, so only a manager turns it on.
+      delete copy.automation
       if (copy.parentId) requireActiveEntity(state, copy.parentId)
       const next = { ...state, entities: [...state.entities, copy] }
       validatePlanningState(next)
@@ -1547,6 +1621,9 @@ abstract class BasePlanningClient implements PlanningClient {
         }),
       }
       validatePlanningState(next)
+      for (const entity of next.entities) {
+        if (entity.id === current.id || descendantIds.has(entity.id)) requireCycleChainCompatible(next, entity)
+      }
       return { state: next }
     })
   }
@@ -2156,6 +2233,10 @@ abstract class BasePlanningClient implements PlanningClient {
           ? {}
           : { milestoneId: readIdentifier(input.milestoneId, 'Milestone ID') }),
         goalIds: readUniqueIdentifiers(input.goalIds, 'Goal ID'),
+        // The carry-over history describes how the Work Item reached its current Cycle.
+        ...(current?.cycleId !== undefined && current.cycleId === input.cycleId
+          ? readCarryOverHistory(current)
+          : {}),
         createdAt: current?.createdAt ?? now,
       }
       if ((link.projectId ?? summary.projectId) !== summary.projectId) {
@@ -2211,13 +2292,22 @@ abstract class BasePlanningClient implements PlanningClient {
     })
   }
 
-  /** Cycle を完了し、policy に従って未完了 Work Item を rollover します。 */
+  /**
+   * Cycle を完了し、policy に従って未完了 Work Item を rollover します。
+   *
+   * 1回で移動する link は {@link MAX_ROLLOVER_LINK_MUTATIONS} 件までです。残りがある間は元の Cycle を
+   * 完了せず、残数を返します。同じ呼び出しを繰り返すと続きを移動し、最後の呼び出しで完了します。
+   */
   async rolloverCycle(
     workspaceId: string,
     sourceCycleId: string,
     input: CycleRolloverInput,
     workItemState: PlanningWorkItemState,
   ) {
+    // Where every canonical Work Item write advances META, the caller's expectedRevision CAS already
+    // fails if a linked Work Item changed after the caller's snapshot. Elsewhere each Work Item the
+    // step depends on is guarded itself.
+    const guardEachWorkItem = !this.workItemWritesAdvanceRevision()
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const source = requireActiveEntity(state, sourceCycleId)
       const target = requireActiveEntity(state, input.targetCycleId)
@@ -2258,19 +2348,12 @@ abstract class BasePlanningClient implements PlanningClient {
         )
       }
       const summaries = createWorkItemMap(workItemState)
-      const movedWorkItemIds: string[] = []
-      const retainedWorkItemIds: string[] = []
-      const sourceLinks = state.workItemLinks.filter((link) => link.cycleId === source.id)
-      if (sourceLinks.length > MAX_ROLLOVER_LINK_MUTATIONS) {
-        throw new PlanningError(
-          413,
-          'PlanningCycleRolloverLimitExceeded',
-          `Cycle rollover cannot validate more than ${MAX_ROLLOVER_LINK_MUTATIONS} Work Items at once.`,
-        )
-      }
-      const workItemConditions: PlanningWorkItemCondition[] = []
-      const links = state.workItemLinks.map((link) => {
-        if (link.cycleId !== source.id) return link
+      const sourceLinks = state.workItemLinks
+        .filter((link) => link.cycleId === source.id)
+        .sort(comparePlanningWorkItemLinks)
+      const incompleteLinks: PlanningWorkItemLink[] = []
+      const conditionByKey = new Map<string, PlanningWorkItemCondition>()
+      for (const link of sourceLinks) {
         const summary = summaries.get(createWorkItemKey(link.teamId, link.workItemId))
         if (!summary) {
           throw new PlanningError(503, 'PlanningWorkItemMissing', 'A linked Work Item is missing.')
@@ -2281,35 +2364,224 @@ abstract class BasePlanningClient implements PlanningClient {
             'A linked Work Item changed Project. Re-link it before rollover.',
           )
         }
-        workItemConditions.push({
+        conditionByKey.set(createWorkItemKey(link.teamId, link.workItemId), {
           teamId: link.teamId,
           workItemId: link.workItemId,
           revision: readRevision(summary.revision),
         })
-        if (summary.statusCategory === 'completed' || summary.statusCategory === 'canceled') {
-          return link
+        if (summary.statusCategory !== 'completed' && summary.statusCategory !== 'canceled') {
+          incompleteLinks.push(link)
         }
-        if (source.carryOverPolicy === 'move-incomplete') {
-          movedWorkItemIds.push(link.workItemId)
-          return { ...link, cycleId: target.id }
-        }
-        retainedWorkItemIds.push(link.workItemId)
-        return link
-      })
-      const completedSource: StoredPlanningEntity = {
-        ...source,
-        status: 'completed',
-        updatedAt: now,
       }
-      const next = { ...replaceEntity(state, completedSource), workItemLinks: links }
+      const moving = source.carryOverPolicy === 'move-incomplete'
+        ? incompleteLinks.slice(0, MAX_ROLLOVER_LINK_MUTATIONS)
+        : []
+      const remainingWorkItemCount = source.carryOverPolicy === 'move-incomplete'
+        ? incompleteLinks.length - moving.length
+        : 0
+      const completesSource = remainingWorkItemCount === 0
+      // The completing step relies on every source link's status, so it guards all of them; an
+      // intermediate step only relies on the incomplete links it moves.
+      const guardedLinks = completesSource ? sourceLinks : moving
+      if (guardEachWorkItem && guardedLinks.length > MAX_ROLLOVER_LINK_MUTATIONS) {
+        throw new PlanningError(
+          413,
+          'PlanningCycleRolloverLimitExceeded',
+          `Cycle rollover cannot validate more than ${MAX_ROLLOVER_LINK_MUTATIONS} Work Items at once.`,
+        )
+      }
+      const workItemConditions = guardEachWorkItem
+        ? guardedLinks.map((link) => conditionByKey.get(createWorkItemKey(link.teamId, link.workItemId))!)
+        : []
+      const movingKeys = new Set(moving.map((link) => createWorkItemKey(link.teamId, link.workItemId)))
+      const links = state.workItemLinks.map((link) =>
+        movingKeys.has(createWorkItemKey(link.teamId, link.workItemId))
+          ? { ...link, cycleId: target.id, carriedOverFromCycleId: source.id, carriedOverAt: now }
+          : link
+      )
+      const retainedWorkItemIds = source.carryOverPolicy === 'move-incomplete'
+        ? []
+        : incompleteLinks.map((link) => link.workItemId)
+      const nextSource: StoredPlanningEntity = completesSource
+        ? { ...source, status: 'completed', updatedAt: now }
+        : source
+      const next = { ...replaceEntity(state, nextSource), workItemLinks: links }
       validateCycleCapacities(next)
       return {
         state: next,
-        movedWorkItemIds: movedWorkItemIds.sort(),
+        movedWorkItemIds: moving.map((link) => link.workItemId).sort(),
         retainedWorkItemIds: retainedWorkItemIds.sort(),
+        remainingWorkItemCount,
         workItemConditions,
       }
     })
+  }
+
+  /** Cadence に従って次の Cycle を作り、元の Cycle に `nextCycleId` を記録します。 */
+  async createNextCycle(
+    workspaceId: string,
+    sourceCycleId: string,
+    input: CreateNextCycleInput,
+    workItemState: PlanningWorkItemState,
+  ) {
+    const normalizedSourceId = readIdentifier(sourceCycleId, 'Cycle ID')
+    const nextCycleId = createNextCycleId(normalizedSourceId)
+    await this.requireIdNotArchived(workspaceId, nextCycleId)
+    const response = await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
+      const source = requireActiveEntity(state, normalizedSourceId)
+      if (source.type !== 'cycle' || !source.cadence) {
+        throw invalid('PlanningCycleRequired', 'The next Cycle can be created only from a Cycle.')
+      }
+      if (source.status === 'canceled') {
+        throw conflict('PlanningCycleCanceled', 'A canceled Cycle has no next Cycle.')
+      }
+      if (source.nextCycleId !== undefined) {
+        throw conflict('PlanningCycleNextExists', 'The next Cycle has already been created.')
+      }
+      if (findEntity(state, nextCycleId)) {
+        throw conflict('PlanningEntityExists', `Planning entity "${nextCycleId}" already exists.`)
+      }
+      const range = createNextCycleRange(source, source.cadence)
+      const created: StoredPlanningEntity = {
+        id: nextCycleId,
+        type: 'cycle',
+        title: createNextCycleTitle(source.title),
+        ...(source.teamId === undefined ? {} : { teamId: source.teamId }),
+        ...(source.projectId === undefined ? {} : { projectId: source.projectId }),
+        ownerMemberKey: source.ownerMemberKey,
+        status: 'planned',
+        health: 'unknown',
+        risk: 'none',
+        progressMode: 'automatic',
+        baseline: { ...range },
+        forecast: { ...range },
+        cadence: { ...source.cadence },
+        ...(source.capacity === undefined ? {} : { capacity: source.capacity }),
+        ...(source.carryOverPolicy === undefined ? {} : { carryOverPolicy: source.carryOverPolicy }),
+        ...(source.automation === undefined ? {} : { automation: { ...source.automation } }),
+        createdAt: now,
+        updatedAt: now,
+      }
+      validateEntityFields(created)
+      const next = {
+        ...replaceEntity(state, { ...source, nextCycleId, updatedAt: now }),
+      }
+      next.entities = [...next.entities, created]
+      validatePlanningState(next)
+      return { state: next }
+    })
+    return { ...response, cycleId: nextCycleId }
+  }
+
+  /** 複数の Work Item を1回で Cycle に入れる、または Cycle から外します。 */
+  async setCycleWorkItems(
+    workspaceId: string,
+    cycleId: string,
+    input: CycleWorkItemsInput,
+    workItemState: PlanningWorkItemState,
+  ) {
+    const items = readCycleWorkItemReferences(input.workItems)
+    if (input.action !== 'add' && input.action !== 'remove') {
+      throw invalid('PlanningCycleWorkItemsActionInvalid', 'Cycle Work Item action must be add or remove.')
+    }
+    return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
+      const cycle = requireActiveEntity(state, cycleId)
+      if (cycle.type !== 'cycle') {
+        throw invalid('PlanningCycleRequired', 'Work Items can be added only to a Cycle.')
+      }
+      if (input.action === 'add' && (cycle.status === 'completed' || cycle.status === 'canceled')) {
+        throw conflict('PlanningEntityClosed', 'Completed or canceled Planning entities cannot receive links.')
+      }
+      const linksByKey = new Map(state.workItemLinks.map((link) =>
+        [createWorkItemKey(link.teamId, link.workItemId), link] as const
+      ))
+      const workItemConditions: PlanningWorkItemCondition[] = []
+      for (const item of items) {
+        const summary = requireWorkItem(workItemState, item.teamId, item.workItemId)
+        const key = createWorkItemKey(item.teamId, item.workItemId)
+        const current = linksByKey.get(key)
+        if (input.action === 'add') {
+          if (current?.cycleId === cycle.id) continue
+          if (current !== undefined && current.projectId !== summary.projectId) {
+            throw conflict(
+              'PlanningWorkItemProjectMismatch',
+              'A linked Work Item changed Project. Re-link it before changing its Cycle.',
+            )
+          }
+          const link: PlanningWorkItemLink = current === undefined
+            ? {
+                teamId: item.teamId,
+                workItemId: item.workItemId,
+                ...(summary.projectId === undefined ? {} : { projectId: summary.projectId }),
+                cycleId: cycle.id,
+                goalIds: [],
+                createdAt: now,
+              }
+            : withoutCarryOverHistory({ ...current, cycleId: cycle.id })
+          validateWorkItemLink(state, link)
+          linksByKey.set(key, link)
+        } else {
+          if (current?.cycleId !== cycle.id) continue
+          const link = withoutCarryOverHistory({ ...current })
+          delete link.cycleId
+          if (link.milestoneId === undefined && link.goalIds.length === 0) linksByKey.delete(key)
+          else linksByKey.set(key, link)
+        }
+        workItemConditions.push({
+          teamId: item.teamId,
+          workItemId: item.workItemId,
+          revision: readRevision(summary.revision),
+        })
+      }
+      const next = { ...state, workItemLinks: [...linksByKey.values()] }
+      validateCycleCapacities(next)
+      return { state: next, workItemConditions }
+    })
+  }
+
+  /**
+   * Cycle の自動化を1段階だけ進めます。
+   *
+   * 期日を過ぎていれば次の Cycle を作り、終了日を過ぎていれば rollover を1 batch だけ実行します。
+   * 呼び出し元は `idle` が返るまで繰り返します。
+   *
+   * @param workspaceId - Owning Workspace.
+   * @param cycleId - Cycle found through the schedule index.
+   * @param loadWorkItems - Reads the canonical Work Items linked to the Cycle.
+   * @returns What this step did.
+   */
+  async runCycleAutomationStep(
+    workspaceId: string,
+    cycleId: string,
+    loadWorkItems: CycleAutomationWorkItemLoader,
+  ): Promise<CycleAutomationStepResult> {
+    const state = await this.readState(readIdentifier(workspaceId, 'Workspace ID'))
+    const cycle = findEntity(state, cycleId)
+    if (!cycle) return { action: 'idle' }
+    const action = resolveDueCycleAutomation(cycle, state, this.now())
+    if (action === undefined) return { action: 'idle' }
+    if (action === 'create-next') {
+      const response = await this.createNextCycle(
+        workspaceId,
+        cycle.id,
+        { expectedRevision: state.revision },
+        { workItems: [] },
+      )
+      return { action: 'created-next', cycleId: response.cycleId }
+    }
+    const links = state.workItemLinks.filter((link) => link.cycleId === cycle.id)
+    const workItemState = await loadWorkItems(links)
+    const response = await this.rolloverCycle(
+      workspaceId,
+      cycle.id,
+      { targetCycleId: cycle.nextCycleId!, expectedRevision: state.revision },
+      workItemState,
+    )
+    return {
+      action: 'rolled-over',
+      movedCount: response.movedWorkItemIds.length,
+      remainingWorkItemCount: response.remainingWorkItemCount ?? 0,
+    }
   }
 
   /**
@@ -2414,6 +2686,9 @@ abstract class BasePlanningClient implements PlanningClient {
       planning,
       movedWorkItemIds: result.movedWorkItemIds ?? [],
       retainedWorkItemIds: result.retainedWorkItemIds ?? [],
+      ...(result.remainingWorkItemCount === undefined
+        ? {}
+        : { remainingWorkItemCount: result.remainingWorkItemCount }),
       ...(result.publishedUpdate === undefined
         ? {}
         : { publishedUpdate: structuredClone(result.publishedUpdate) }),
@@ -4380,6 +4655,7 @@ function createStoredEntity(input: CreatePlanningEntityInput, now: string): Stor
     ...(input.carryOverPolicy === undefined
       ? {}
       : { carryOverPolicy: readCarryOverPolicy(input.carryOverPolicy) }),
+    ...optionalCycleAutomation(input.automation),
     ...(input.goalFramework === undefined
       ? {}
       : { goalFramework: readGoalFramework(input.goalFramework) }),
@@ -4477,7 +4753,20 @@ function validateEntityFields(entity: StoredPlanningEntity) {
     readCadence(entity.cadence)
     readCapacity(entity.capacity)
     readCarryOverPolicy(entity.carryOverPolicy)
-  } else if (entity.cadence || entity.capacity !== undefined || entity.carryOverPolicy) {
+    if (entity.automation !== undefined) readCycleAutomation(entity.automation)
+    if (entity.nextCycleId !== undefined) {
+      readIdentifier(entity.nextCycleId, 'Next Cycle ID')
+      if (entity.nextCycleId === entity.id) {
+        throw invalid('PlanningCycleNextInvalid', 'A Cycle cannot be its own next Cycle.')
+      }
+    }
+  } else if (
+    entity.cadence ||
+    entity.capacity !== undefined ||
+    entity.carryOverPolicy ||
+    entity.automation !== undefined ||
+    entity.nextCycleId !== undefined
+  ) {
     throw invalid('PlanningCycleFieldsInvalid', 'Only Cycle entities can define cycle fields.')
   }
   if (entity.goalFramework !== undefined && entity.type !== 'goal') {
@@ -6001,7 +6290,24 @@ function createPlanningRowMap(workspaceId: string, state: PlanningWorkspaceState
   })
   for (const entity of state.entities) {
     const recordKey = createEntityRecordKey(entity.id)
-    rows.set(recordKey, { workspaceId, recordKey, entryType: 'planning-entity', ...entity })
+    const cycleDueAt = resolveCycleAutomationDueAt(entity, state)
+    rows.set(recordKey, {
+      workspaceId,
+      recordKey,
+      entryType: 'planning-entity',
+      ...entity,
+      // Sparse due-index attributes let the Cycle schedule find due Cycles without a scan.
+      ...(cycleDueAt === undefined
+        ? {}
+        : {
+            updateScheduleShard: createPlanningCycleScheduleShard(workspaceId, recordKey),
+            nextNotificationAtRecordKey: createPlanningCycleScheduleRecordKey(
+              workspaceId,
+              recordKey,
+              cycleDueAt,
+            ),
+          }),
+    })
   }
   for (const dependency of state.dependencies) {
     const recordKey = createDependencyRecordKey(dependency.id)
@@ -6166,6 +6472,10 @@ function readStoredPlanningEntity(row: Record<string, unknown>): StoredPlanningE
     ...(row.carryOverPolicy === undefined
       ? {}
       : { carryOverPolicy: readCarryOverPolicy(row.carryOverPolicy) }),
+    ...optionalCycleAutomation(row.automation),
+    ...(row.nextCycleId === undefined
+      ? {}
+      : { nextCycleId: readIdentifier(row.nextCycleId, 'Next Cycle ID') }),
     ...(row.goalFramework === undefined
       ? {}
       : { goalFramework: readGoalFramework(row.goalFramework) }),
@@ -6800,6 +7110,7 @@ function readStoredPlanningWorkItemLink(row: Record<string, unknown>): PlanningW
       ? {}
       : { milestoneId: readIdentifier(row.milestoneId, 'Milestone ID') }),
     goalIds: readUniqueIdentifiers(row.goalIds, 'Goal ID'),
+    ...readCarryOverHistory(row),
     createdAt: readTimestamp(row.createdAt, 'Work Item link timestamp'),
   }
 }
@@ -8689,6 +9000,248 @@ function readGoalFramework(value: unknown): NonNullable<PlanningEntity['goalFram
 function readCarryOverPolicy(value: unknown): NonNullable<PlanningEntity['carryOverPolicy']> {
   if (value === 'move-incomplete' || value === 'keep-incomplete') return value
   throw invalid('PlanningCarryOverPolicyInvalid', 'Cycle carry-over policy is invalid.')
+}
+
+/** Prefix of the server-derived ID of a next Cycle. */
+const NEXT_CYCLE_ID_PREFIX = 'cycle-next-'
+
+/**
+ * Derives the ID of the Cycle created after a source Cycle, so a retried creation cannot add two.
+ *
+ * @param sourceCycleId - Source Cycle ID.
+ * @returns Stable next Cycle ID.
+ */
+function createNextCycleId(sourceCycleId: string) {
+  return `${NEXT_CYCLE_ID_PREFIX}${createHash('sha256').update(sourceCycleId).digest('hex').slice(0, 32)}`
+}
+
+/** Last day covered by a Cycle, counting a forecast that runs past the baseline. */
+function cycleEndDate(cycle: StoredPlanningEntity) {
+  return cycle.forecast.endDate > cycle.baseline.endDate
+    ? cycle.forecast.endDate
+    : cycle.baseline.endDate
+}
+
+/**
+ * Computes the date range of the Cycle that follows a source Cycle.
+ *
+ * @param source - Source Cycle.
+ * @param cadence - Source Cycle cadence.
+ * @returns Range starting the day after the source ends and spanning one cadence.
+ */
+function createNextCycleRange(source: StoredPlanningEntity, cadence: PlanningCadence) {
+  const startDate = shiftIsoDate(cycleEndDate(source), 1)
+  const endDate = startDate === undefined
+    ? undefined
+    : cadence.unit === 'week'
+      ? shiftIsoDate(startDate, cadence.count * 7 - 1)
+      : shiftIsoDate(addIsoDateMonths(startDate, cadence.count), -1)
+  if (startDate === undefined || endDate === undefined) {
+    throw invalid('PlanningCycleNextDateInvalid', 'The next Cycle dates are out of range.')
+  }
+  return { startDate, endDate }
+}
+
+/** Adds calendar months to a date, clamping the day to the end of the target month. */
+function addIsoDateMonths(value: string, months: number) {
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(5, 7))
+  const day = Number(value.slice(8, 10))
+  const monthIndex = year * 12 + month - 1 + months
+  const targetYear = Math.floor(monthIndex / 12)
+  const targetMonth = monthIndex % 12
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate()
+  return new Date(Date.UTC(targetYear, targetMonth, Math.min(day, lastDay))).toISOString().slice(0, 10)
+}
+
+/**
+ * Names the next Cycle by advancing the last number in the source title.
+ *
+ * @param title - Source Cycle title.
+ * @returns `Sprint 13` after `Sprint 12`, or the title followed by ` 2` when it has no number.
+ */
+function createNextCycleTitle(title: string) {
+  const match = /^(.*?)(\d+)(\D*)$/u.exec(title)
+  if (!match) return readTitle(`${title} 2`)
+  const [, prefix = '', digits = '', suffix = ''] = match
+  const next = String(BigInt(digits) + 1n).padStart(digits.length, '0')
+  return readTitle(`${prefix}${next}${suffix}`)
+}
+
+/**
+ * Returns when the next automation step of a Cycle becomes due.
+ *
+ * Cycle dates have no time zone, so a date passes at 00:00 UTC of the following day.
+ *
+ * @param entity - Planning entity.
+ * @param state - Live graph used to check the next Cycle.
+ * @returns ISO timestamp, or undefined when nothing is pending.
+ */
+function resolveCycleAutomationDueAt(
+  entity: StoredPlanningEntity,
+  state: PlanningWorkspaceState,
+) {
+  if (
+    entity.type !== 'cycle' ||
+    entity.archivedAt !== undefined ||
+    entity.automation === undefined ||
+    entity.status === 'completed' ||
+    entity.status === 'canceled'
+  ) {
+    return undefined
+  }
+  const endDate = cycleEndDate(entity)
+  const rolloverDate = shiftIsoDate(endDate, 1)
+  if (entity.nextCycleId === undefined) {
+    const createDate = entity.automation.createNext
+      ? shiftIsoDate(endDate, -CYCLE_AUTO_CREATE_LEAD_DAYS)
+      : rolloverDate
+    return createDate === undefined ? undefined : `${createDate}T00:00:00.000Z`
+  }
+  if (!entity.automation.rolloverAtEnd || rolloverDate === undefined) return undefined
+  const next = findEntity(state, entity.nextCycleId)
+  if (
+    next === undefined ||
+    next.archivedAt !== undefined ||
+    next.status === 'completed' ||
+    next.status === 'canceled'
+  ) {
+    return undefined
+  }
+  return `${rolloverDate}T00:00:00.000Z`
+}
+
+/**
+ * Rejects an edit that would make a Cycle's automated rollover into its next Cycle impossible.
+ *
+ * Automation creates the next Cycle once and records it, so an accepted edit that breaks the
+ * scope, cadence, or date order would leave the automated rollover failing on every run.
+ *
+ * @param state - Graph after the edit.
+ * @param entity - Edited entity.
+ */
+function requireCycleChainCompatible(state: PlanningWorkspaceState, entity: StoredPlanningEntity) {
+  if (entity.type !== 'cycle') return
+  const isPending = (cycle: StoredPlanningEntity) =>
+    cycle.archivedAt === undefined && cycle.status !== 'completed' && cycle.status !== 'canceled'
+  const pairs: Array<[StoredPlanningEntity, StoredPlanningEntity]> = []
+  const next = entity.nextCycleId === undefined ? undefined : findEntity(state, entity.nextCycleId)
+  if (next) pairs.push([entity, next])
+  for (const candidate of state.entities) {
+    if (candidate.id !== entity.id && candidate.nextCycleId === entity.id) pairs.push([candidate, entity])
+  }
+  for (const [source, target] of pairs) {
+    if (source.automation?.rolloverAtEnd !== true || !isPending(source) || !isPending(target)) continue
+    if (
+      target.baseline.startDate <= source.baseline.endDate ||
+      target.forecast.startDate <= source.forecast.endDate ||
+      source.teamId !== target.teamId ||
+      source.projectId !== target.projectId ||
+      source.cadence?.unit !== target.cadence?.unit ||
+      source.cadence?.count !== target.cadence?.count
+    ) {
+      throw conflict(
+        'PlanningCycleNextIncompatible',
+        `Cycle "${target.id}" must keep the scope and cadence of Cycle "${source.id}" and start after it ends. ` +
+          'Change both Cycles together, or roll over by hand first.',
+      )
+    }
+  }
+}
+
+/**
+ * Decides which automation step of a Cycle is due now.
+ *
+ * @param cycle - Cycle entity.
+ * @param state - Live graph.
+ * @param now - Current time.
+ * @returns The due step, or undefined.
+ */
+function resolveDueCycleAutomation(
+  cycle: StoredPlanningEntity,
+  state: PlanningWorkspaceState,
+  now: Date,
+): 'create-next' | 'rollover' | undefined {
+  const dueAt = resolveCycleAutomationDueAt(cycle, state)
+  if (dueAt === undefined || Date.parse(dueAt) > now.getTime()) return undefined
+  if (cycle.nextCycleId === undefined) return 'create-next'
+  // A predecessor still rolling into this Cycle goes first. Completing this Cycle earlier would
+  // stop the predecessor's rollover and strand its unfinished Work Items.
+  const predecessorPending = state.entities.some((candidate) =>
+    candidate.id !== cycle.id &&
+    candidate.nextCycleId === cycle.id &&
+    resolveCycleAutomationDueAt(candidate, state) !== undefined
+  )
+  return predecessorPending ? undefined : 'rollover'
+}
+
+/** Validates the Work Item references of a Cycle bulk change. */
+function readCycleWorkItemReferences(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > CYCLE_WORK_ITEMS_BATCH_LIMIT) {
+    throw invalid(
+      'PlanningCycleWorkItemsInvalid',
+      `Choose 1 to ${CYCLE_WORK_ITEMS_BATCH_LIMIT} Work Items.`,
+    )
+  }
+  const keys = new Set<string>()
+  return value.map((item: unknown) => {
+    if (!isRecord(item)) {
+      throw invalid('PlanningCycleWorkItemsInvalid', 'Cycle Work Item reference is invalid.')
+    }
+    const teamId = readIdentifier(item.teamId, 'Team ID')
+    const workItemId = readIdentifier(item.workItemId, 'Work Item ID')
+    const key = createWorkItemKey(teamId, workItemId)
+    if (keys.has(key)) {
+      throw invalid('PlanningCycleWorkItemsInvalid', 'Cycle Work Items must be unique.')
+    }
+    keys.add(key)
+    return { teamId, workItemId }
+  })
+}
+
+/** Drops the carry-over history of a link whose Cycle is changed by hand. */
+function withoutCarryOverHistory(link: PlanningWorkItemLink): PlanningWorkItemLink {
+  const result = { ...link }
+  delete result.carriedOverFromCycleId
+  delete result.carriedOverAt
+  return result
+}
+
+/**
+ * Validates a Cycle automation setting.
+ *
+ * @param value - Untrusted automation candidate.
+ * @returns Canonical automation, or undefined when every switch is off.
+ */
+function readCycleAutomation(value: unknown): CycleAutomation | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.createNext !== 'boolean' ||
+    typeof value.rolloverAtEnd !== 'boolean' ||
+    Object.keys(value).some((key) => key !== 'createNext' && key !== 'rolloverAtEnd')
+  ) {
+    throw invalid('PlanningCycleAutomationInvalid', 'Cycle automation is invalid.')
+  }
+  if (!value.createNext && !value.rolloverAtEnd) return undefined
+  return { createNext: value.createNext, rolloverAtEnd: value.rolloverAtEnd }
+}
+
+/** Returns the stored automation field, omitted when absent or fully disabled. */
+function optionalCycleAutomation(value: unknown): { automation?: CycleAutomation } {
+  if (value === undefined) return {}
+  const automation = readCycleAutomation(value)
+  return automation === undefined ? {} : { automation }
+}
+
+/** Reads the optional carry-over history of a Work Item link. */
+function readCarryOverHistory(
+  source: Record<string, unknown>,
+): Pick<PlanningWorkItemLink, 'carriedOverFromCycleId' | 'carriedOverAt'> {
+  if (source.carriedOverFromCycleId === undefined && source.carriedOverAt === undefined) return {}
+  return {
+    carriedOverFromCycleId: readIdentifier(source.carriedOverFromCycleId, 'Carried-over Cycle ID'),
+    carriedOverAt: readTimestamp(source.carriedOverAt, 'Carried-over timestamp'),
+  }
 }
 
 function readTimestamp(value: unknown, label: string) {

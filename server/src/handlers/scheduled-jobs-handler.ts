@@ -5,6 +5,7 @@ import {
 import { handler as agentRunTriageHandler } from './agent-run-triage-handler'
 import { handler as analyticsScheduleHandler } from './analytics-schedule-handler'
 import { handler as automationScheduleHandler } from './automation-schedule-handler'
+import { handler as cycleScheduleHandler } from './cycle-schedule-handler'
 import { handler as emailNotificationHandler } from './email-notifications-handler'
 import { handler as notificationScheduleHandler } from './notification-schedule-handler'
 import { handler as slackNotificationHandler } from './slack-notifications-handler'
@@ -24,6 +25,7 @@ export const scheduledJobs: readonly ScheduledJob[] = Object.freeze([
   { name: 'email-notifications', everyMinutes: 1, attempts: 1, run: () => emailNotificationHandler() },
   { name: 'analytics-schedule', everyMinutes: 5, attempts: 3, run: analyticsScheduleHandler },
   { name: 'notification-schedule', everyMinutes: 60, attempts: 3, run: notificationScheduleHandler },
+  { name: 'cycle-schedule', everyMinutes: 60, attempts: 3, run: cycleScheduleHandler },
 ])
 
 /** Runs the jobs due at the scheduled minute of an EventBridge event. */

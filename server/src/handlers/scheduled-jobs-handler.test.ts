@@ -11,6 +11,7 @@ test('keeps the cadence and retry policy each scheduled worker had as its own La
       { name: 'email-notifications', everyMinutes: 1, attempts: 1 },
       { name: 'analytics-schedule', everyMinutes: 5, attempts: 3 },
       { name: 'notification-schedule', everyMinutes: 60, attempts: 3 },
+      { name: 'cycle-schedule', everyMinutes: 60, attempts: 3 },
     ])
 })
 
@@ -22,6 +23,7 @@ test('runs each job through its runtime-control guarded entrypoint', async () =>
     'agent-run-triage-handler',
     'analytics-schedule-handler',
     'automation-schedule-handler',
+    'cycle-schedule-handler',
     'email-notifications-handler',
     'notification-schedule-handler',
     'slack-notifications-handler',
