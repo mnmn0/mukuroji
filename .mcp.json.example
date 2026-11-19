@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "mukuroji-tasks": {
+      "command": "bun",
+      "args": ["run", "mcp:start"],
+      "env": {
+        "MUKUROJI_MCP_URL": "${MUKUROJI_MCP_URL}",
+        "MUKUROJI_MCP_TOKEN": "${MUKUROJI_MCP_TOKEN}",
+        "MUKUROJI_MCP_TEAM_ID": "${MUKUROJI_MCP_TEAM_ID}",
+        "MUKUROJI_MCP_ASSIGNEE_ID": "${MUKUROJI_MCP_ASSIGNEE_ID}",
+        "MUKUROJI_MCP_AGENT_NAME": "claude-code",
+        "MUKUROJI_MCP_RUNTIME": "claude-code"
+      }
+    }
+  }
+}
