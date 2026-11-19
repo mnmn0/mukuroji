@@ -101,9 +101,9 @@ export class DynamoDbProjectScheduleBaselineStore implements ProjectScheduleBase
       throw new ProjectDataError(503, 'ScheduleBaselineAuthorizationUnavailable', 'Caller authorization is unavailable.')
     }
     const key = recordKey(input.teamId, input.projectId)
-    const previous = await this.get(input.workspaceId, input.teamId, input.projectId)
+    const expectedRevision = input.expectedRevision
     const baseline: ProjectScheduleBaseline = {
-      revision: (previous?.revision ?? 0) + 1,
+      revision: expectedRevision + 1,
       capturedAt: input.capturedAt,
       entries: input.entries.map((entry) => ({ ...entry })),
     }
@@ -122,13 +122,13 @@ export class DynamoDbProjectScheduleBaselineStore implements ProjectScheduleBase
                 projectId: input.projectId,
                 ...baseline,
               },
-              ConditionExpression: previous
+              ConditionExpression: expectedRevision > 0
                 ? '#revision = :revision AND #type = :type'
                 : 'attribute_not_exists(recordKey)',
-              ...(previous
+              ...(expectedRevision > 0
                 ? {
                     ExpressionAttributeNames: { '#revision': 'revision', '#type': 'entryType' },
-                    ExpressionAttributeValues: { ':revision': previous.revision, ':type': ENTRY_TYPE },
+                    ExpressionAttributeValues: { ':revision': expectedRevision, ':type': ENTRY_TYPE },
                   }
                 : {}),
             },
@@ -169,8 +169,11 @@ export class InMemoryProjectScheduleBaselineStore implements ProjectScheduleBase
   async capture(input: CaptureProjectScheduleBaselineInput): Promise<ProjectScheduleBaseline> {
     assertEntryLimit(input.entries)
     const key = JSON.stringify([input.workspaceId, input.teamId, input.projectId])
+    if ((this.baselines.get(key)?.revision ?? 0) !== input.expectedRevision) {
+      throw new ProjectDataError(409, 'ScheduleBaselineConflict', 'The schedule baseline changed. Reload and try again.')
+    }
     const baseline: ProjectScheduleBaseline = {
-      revision: (this.baselines.get(key)?.revision ?? 0) + 1,
+      revision: input.expectedRevision + 1,
       capturedAt: input.capturedAt,
       entries: input.entries.map((entry) => ({ ...entry })),
     }

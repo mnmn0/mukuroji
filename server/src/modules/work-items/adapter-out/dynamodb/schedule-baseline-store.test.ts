@@ -32,6 +32,7 @@ async function captureWith(writeError: unknown) {
     projectId: 'p',
     entries: [],
     capturedAt: '2026-11-19T00:00:00.000Z',
+    expectedRevision: 0,
     callerAuthorization: [{ ConditionCheck: { TableName: 'access', Key: { k: 'v' }, ConditionExpression: 'attribute_exists(k)' } }],
   }).then(() => undefined, (error: unknown) => error)
 }

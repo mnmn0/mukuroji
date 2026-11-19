@@ -16,8 +16,7 @@ import {
   requireWorkspaceBusinessWrite,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import { filterAccessibleTeamIssues } from '../shared/work-item-access'
-import type { TeamPermissionContext } from '../shared/workspace-access'
+import { projectAccessAllows, type TeamPermissionContext } from '../shared/workspace-access'
 
 /**
  * Registers the Project schedule baseline endpoints.
@@ -38,11 +37,11 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessRead(principal)
       const context = await requireTeamPermission(principal, teamId, 'viewer')
-      requireProjectAccess(principal, context, projectId, 'viewer')
+      requireProjectAccess(principal, context, teamId, projectId, 'viewer')
       return c.json(await readProjectScheduleBaselineUseCase(
         createBaselineDependencies(principal.directoryId, teamId),
         { workspaceId: principal.directoryId, teamId, projectId },
-        (issue) => filterAccessibleTeamIssues([issue], principal, context).length > 0,
+        (issue) => canAccessTeamProject(principal, context, teamId, issue.assignedProjectId, 'viewer'),
       ))
     } catch (error) {
       return toWorkItemConfigurationErrorResponse(c, error)
@@ -58,7 +57,7 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       const context = await requireTeamPermission(principal, teamId, 'viewer')
-      requireProjectAccess(principal, context, projectId, 'manager')
+      requireProjectAccess(principal, context, teamId, projectId, 'manager')
       const response = await captureProjectScheduleBaselineUseCase(
         createBaselineDependencies(principal.directoryId, teamId),
         { workspaceId: principal.directoryId, teamId, projectId },
@@ -95,27 +94,55 @@ function readBaselineRoute(c: Context) {
 }
 
 /**
- * Requires the Project to belong to the Team and the principal to hold a role on it.
+ * Reports whether the principal holds a role on a Project of this exact Team.
+ *
+ * Project IDs may repeat across Teams, so a grant counts only when its owner Team is the
+ * requested Team, not merely when its Project ID matches.
+ *
+ * @param principal - Authenticated principal.
+ * @param context - Team permission context.
+ * @param teamId - Requested Team.
+ * @param projectId - Project ID, or undefined for a Work Item outside any Project.
+ * @param minimumRole - Role the action needs.
+ * @returns Whether the principal may act on the Project.
+ */
+function canAccessTeamProject(
+  principal: Parameters<typeof canAccessAssignedProject>[0],
+  context: TeamPermissionContext,
+  teamId: string,
+  projectId: string | undefined,
+  minimumRole: 'viewer' | 'manager',
+) {
+  if (principal.isSystemAdmin) return true
+  if (projectId === undefined) return canAccessAssignedProject(principal, context, undefined, minimumRole)
+  return (context.projectAccesses ?? []).some((access) =>
+    access.teamId === teamId && access.projectId === projectId && projectAccessAllows(access, minimumRole))
+}
+
+/**
+ * Requires the Project to belong to the Team and the principal to hold a role on it there.
  *
  * A Project outside the Team and a Project the principal may not use both answer 404, so the
  * response does not reveal which Projects exist.
  *
  * @param principal - Authenticated principal.
  * @param context - Team permission context.
+ * @param teamId - Requested Team.
  * @param projectId - Project ID.
  * @param minimumRole - Role the action needs.
  */
 function requireProjectAccess(
   principal: Parameters<typeof canAccessAssignedProject>[0],
   context: TeamPermissionContext,
+  teamId: string,
   projectId: string,
   minimumRole: 'viewer' | 'manager',
 ) {
-  const inTeam = context.team.projects.some((project) => project.id === projectId)
-  if (!inTeam || !canAccessAssignedProject(principal, context, projectId, 'viewer')) {
+  const inTeam = context.team.id === teamId && context.team.projects.some((project) => project.id === projectId)
+  if (!inTeam || !canAccessTeamProject(principal, context, teamId, projectId, 'viewer')) {
     throw new ProjectDataError(404, 'ProjectNotFound', `Project "${projectId}" was not found.`)
   }
-  if (minimumRole === 'manager' && !canAccessAssignedProject(principal, context, projectId, 'manager')) {
+  if (minimumRole === 'manager' && !canAccessTeamProject(principal, context, teamId, projectId, 'manager')) {
     throw new ProjectDataError(403, 'ScheduleBaselineForbidden', 'Only a Project manager can capture a schedule baseline.')
   }
 }

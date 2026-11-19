@@ -20,6 +20,11 @@ export type CaptureProjectScheduleBaselineInput<TCallerCheck> = {
   entries: readonly ProjectScheduleBaselineEntry[]
   /** Capture time as an ISO timestamp. */
   capturedAt: string
+  /**
+   * Baseline revision read before the Work Item dates were collected, or 0 when none existed.
+   * The write fails when another capture committed in between.
+   */
+  expectedRevision: number
   /** Server-built conditions that fail the write when the caller lost access. */
   callerAuthorization: readonly TCallerCheck[]
 }
@@ -85,10 +90,13 @@ export async function captureProjectScheduleBaselineUseCase<TCallerCheck, TWorkI
   scope: ProjectScheduleBaselineScope,
   capture: { capturedAt: string; callerAuthorization: readonly TCallerCheck[] },
 ): Promise<ProjectScheduleBaselineResponse> {
+  // Pin the revision before reading the plan, so an older snapshot cannot replace a newer capture.
+  const previous = await dependencies.store.get(scope.workspaceId, scope.teamId, scope.projectId)
   const workItems = (await readBoundedTeamWorkItems(dependencies))
     .filter((workItem) => workItem.assignedProjectId === scope.projectId)
   const baseline = await dependencies.store.capture({
     ...scope,
+    expectedRevision: previous?.revision ?? 0,
     entries: workItems.map((workItem) => createProjectScheduleBaselineEntry(workItem.id, workItem.schedule)),
     capturedAt: capture.capturedAt,
     callerAuthorization: capture.callerAuthorization,
