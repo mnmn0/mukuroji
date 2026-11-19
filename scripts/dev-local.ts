@@ -74,11 +74,11 @@ function signalGroup(child: ChildProcess, signal: NodeJS.Signals | 0): boolean {
  * so waiting for the group leaders alone would leave those children running.
  *
  * @param running - The started processes whose groups to wait for.
- * @param deadline - Time in epoch milliseconds after which remaining groups are killed.
+ * @param deadline - Returns the time in epoch milliseconds after which remaining groups are killed.
  */
-async function waitForGroups(running: readonly RunningDevProcess[], deadline: number): Promise<void> {
+async function waitForGroups(running: readonly RunningDevProcess[], deadline: () => number): Promise<void> {
   while (running.some((entry) => signalGroup(entry.child, 0))) {
-    if (Date.now() >= deadline) {
+    if (Date.now() >= deadline()) {
       for (const entry of running) signalGroup(entry.child, 'SIGKILL')
       return
     }
@@ -148,6 +148,10 @@ async function main(): Promise<number> {
   let stopping = false
   let exitCode = 0
   let deadline = Number.POSITIVE_INFINITY
+  let requestStop = (): void => {}
+  const stopRequested = new Promise<void>((resolveStop) => {
+    requestStop = resolveStop
+  })
   /**
    * Asks every process group to stop; groups that outlive the grace period are killed.
    * A second request, such as pressing Ctrl+C again, kills the remaining groups at once.
@@ -160,6 +164,7 @@ async function main(): Promise<number> {
     }
     stopping = true
     deadline = Date.now() + shutdownGraceMilliseconds
+    requestStop()
     for (const entry of running) signalGroup(entry.child, 'SIGTERM')
   }
   process.on('SIGINT', stopAll)
@@ -174,8 +179,10 @@ async function main(): Promise<number> {
     })
   }
 
+  // Enforce the deadline from the moment shutdown starts, even if a group leader never exits on SIGTERM.
+  await stopRequested
+  await waitForGroups(running, () => deadline)
   await Promise.all(running.map((entry) => entry.exited))
-  await waitForGroups(running, deadline)
   return exitCode
 }
 
