@@ -13,6 +13,13 @@ const storageKey = 'mukuroji.auth.sessionDrafts'
 /** Preserved drafts older than this are dropped instead of restored. */
 const maxDraftAgeMilliseconds = 24 * 60 * 60 * 1000
 
+/**
+ * How long an input's last value outlives its unmount. A session error can make a route render
+ * a loading state in place of the page in the same commit whose effect then clears the session,
+ * so the input unregisters just before the session is cleared.
+ */
+const unmountRetentionMilliseconds = 1_000
+
 /** Reads the current unsaved value of one input, or `undefined` when it has nothing to keep. */
 type SessionDraftReader = () => unknown
 
@@ -43,6 +50,9 @@ type StoredSessionDraft = {
 /** Inputs of the mounted pages that currently have something to keep. */
 const registrations = new Set<SessionDraftRegistration>()
 
+/** Last values of inputs that unmounted moments ago, kept for {@link unmountRetentionMilliseconds}. */
+const retainedRegistrations = new Set<SessionDraftRegistration>()
+
 /**
  * Registers an input whose unsaved value is preserved when the session ends.
  *
@@ -55,6 +65,18 @@ export function registerSessionDraft(key: string, read: SessionDraftReader): () 
   registrations.add(registration)
   return () => {
     registrations.delete(registration)
+    let value: unknown
+    try {
+      value = read()
+    } catch {
+      return
+    }
+    if (value === undefined) return
+    const retained: SessionDraftRegistration = { key, read: () => value }
+    retainedRegistrations.add(retained)
+    setTimeout(() => {
+      retainedRegistrations.delete(retained)
+    }, unmountRetentionMilliseconds)
   }
 }
 
@@ -68,12 +90,15 @@ export function registerSessionDraft(key: string, read: SessionDraftReader): () 
  * could not be withheld from another account later.
  */
 export function preserveSessionDrafts(owner: string | undefined) {
-  if (!owner || registrations.size === 0) return
+  // Inputs that unmounted moments ago come first, so a mounted input of the same key wins.
+  const sources = [...retainedRegistrations, ...registrations]
+  retainedRegistrations.clear()
+  if (!owner || sources.length === 0) return
   const now = Date.now()
   const stored = readStoredDrafts()
   const drafts: Record<string, StoredSessionDraft> = stored?.owner === owner ? { ...stored.drafts } : {}
   let preserved = false
-  for (const registration of registrations) {
+  for (const registration of sources) {
     let value: unknown
     try {
       value = registration.read()
@@ -132,6 +157,7 @@ export function keepSessionDraftsOnlyFor(owner: string | undefined) {
  * Removes every preserved draft of this tab, such as on an explicit sign-out.
  */
 export function discardSessionDrafts() {
+  retainedRegistrations.clear()
   try {
     window.sessionStorage.removeItem(storageKey)
   } catch {

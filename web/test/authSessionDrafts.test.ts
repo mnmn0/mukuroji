@@ -92,6 +92,8 @@ beforeEach(() => {
 afterEach(() => {
   for (const remove of unregister) remove()
   unregister = []
+  // Unregistering keeps the last values for a moment; drop them so the next test starts clean.
+  discardSessionDrafts()
   Reflect.set(globalThis, 'window', previousWindow)
 })
 
@@ -128,6 +130,25 @@ test('signing in as another account removes the previous account’s input at on
   signIn(token('member-b', 'access-2'))
 
   expect(window.sessionStorage.getItem('mukuroji.auth.sessionDrafts')).toBeNull()
+})
+
+test('keeps input whose page unmounted just before the session was cleared', async () => {
+  signIn(token('member-a', 'access-1'))
+  // A route can swap the page for a loading state in the same commit that clears the session.
+  registerSessionDraft(commentKey, () => ({ bodyMarkdown: 'Unmounted moments ago', mentionMemberKeys: [] }))()
+  clearAuthSession()
+  expect(takeSessionDraft(commentKey, 'member-a')).toEqual({
+    bodyMarkdown: 'Unmounted moments ago',
+    mentionMemberKeys: [],
+  })
+
+  resetAuthSessionTabAccount()
+  Reflect.set(globalThis, 'window', { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage() })
+  signIn(token('member-a', 'access-2'))
+  registerSessionDraft(commentKey, () => ({ bodyMarkdown: 'Left long ago', mentionMemberKeys: [] }))()
+  await Bun.sleep(1_100)
+  clearAuthSession()
+  expect(takeSessionDraft(commentKey, 'member-a')).toBeUndefined()
 })
 
 test('keeps input after a rejected refresh has already removed the stored session', () => {
