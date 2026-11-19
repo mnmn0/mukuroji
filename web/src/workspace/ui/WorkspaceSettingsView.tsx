@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import {
   fontSizePreferenceOptions,
@@ -35,10 +35,14 @@ export type WorkspaceSettingsViewProps = {
   onLocaleChange?: (locale: Locale) => void
   /** Callback that persists color theme changes. */
   onThemePreferenceChange: (preference: ThemePreference) => void
+  /** Callback that saves a time zone; undefined follows the browser. */
+  onTimeZoneChange?: (timeZone: string | undefined) => void
   /** Localized message resolver. */
   t: (key: MessageKey) => string
   /** Currently selected color theme. */
   themePreference: ThemePreference
+  /** Saved IANA time zone, or undefined to follow the browser. */
+  timeZone?: string
   /** Current user's display label. */
   userLabel: string
 }
@@ -47,6 +51,19 @@ const fontSizePreferenceLabelKeys: Record<FontSizePreference, MessageKey> = {
   compact: 'workspace.settings.fontSize.compact',
   standard: 'workspace.settings.fontSize.standard',
   comfortable: 'workspace.settings.fontSize.comfortable',
+}
+
+/**
+ * Lists the time zones the browser knows, keeping a saved one even if the list lacks it.
+ *
+ * @param saved - Time zone saved for the member.
+ * @returns Sorted IANA time zone names.
+ */
+function listTimeZones(saved: string | undefined): string[] {
+  const known = typeof Intl.supportedValuesOf === 'function'
+    ? Intl.supportedValuesOf('timeZone')
+    : []
+  return saved && !known.includes(saved) ? [...known, saved].sort() : known
 }
 
 const themePreferenceLabelKeys: Record<ThemePreference, MessageKey> = {
@@ -70,10 +87,14 @@ export function WorkspaceSettingsView({
   onFontSizePreferenceChange,
   onLocaleChange,
   onThemePreferenceChange,
+  onTimeZoneChange,
   t,
   themePreference,
+  timeZone,
   userLabel,
 }: WorkspaceSettingsViewProps) {
+  const timeZones = useMemo(() => listTimeZones(timeZone), [timeZone])
+
   return (
     <div className="grid gap-5">
       <section className="workbench-panel overflow-hidden">
@@ -170,6 +191,31 @@ export function WorkspaceSettingsView({
               {localeOptions.map((option) => (
                 <option key={option.locale} value={option.locale}>
                   {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex min-w-0 flex-wrap items-center justify-between gap-4 px-5 py-5">
+            <span className="min-w-0">
+              <strong className="block text-sm font-semibold text-[var(--workbench-text)]">
+                {t('workspace.settings.timeZoneTitle')}
+              </strong>
+              <span className="mt-1 block text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+                {t('workspace.settings.timeZoneDescription')}
+              </span>
+            </span>
+            <select
+              className="workbench-input min-h-10 min-w-[168px] max-w-full px-3 disabled:cursor-not-allowed disabled:bg-[var(--workbench-surface-muted)]"
+              data-testid="time-zone-preference-control"
+              disabled={!onTimeZoneChange}
+              value={timeZone ?? ''}
+              onChange={(event) => onTimeZoneChange?.(event.target.value || undefined)}
+            >
+              <option value="">{t('workspace.settings.timeZoneBrowser')}</option>
+              {timeZones.map((zone) => (
+                <option key={zone} value={zone}>
+                  {zone}
                 </option>
               ))}
             </select>

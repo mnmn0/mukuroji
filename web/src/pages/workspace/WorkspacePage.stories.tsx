@@ -181,6 +181,7 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   onFontSizePreferenceChange: () => undefined,
   onThemePreferenceChange: () => undefined,
   onLocaleChange: () => undefined,
+  onTimeZoneChange: () => undefined,
   onLogout: () => undefined,
   onOpenNotification: () => undefined,
   onOpenTask: () => undefined,
