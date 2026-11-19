@@ -97,20 +97,47 @@ export async function requireEnterpriseSsoSessionAttestation(
 }
 
 /**
+ * Longest access token validity Cognito allows (one day), in seconds. Every access token of a
+ * sign-in was issued before its refresh token was revoked, so none outlives this bound.
+ */
+const maximumCognitoAccessTokenLifetimeSeconds = 24 * 60 * 60
+
+/**
+ * Reads the user behind the enterprise SSO access token presented at sign-out.
+ *
+ * The token may already be expired: another tab can hold a newer access token of the same
+ * sign-in, so the sign-in must still be named. The signature, issuer and app client are verified.
+ *
+ * @param accessToken - Bearer access token of the session being signed out.
+ * @returns The user and verified token claims, or undefined for a token of another app client.
+ */
+export async function readEnterpriseSsoSignOutUser(accessToken: string) {
+  const ssoClientId = resolveEnterpriseSsoAccessTokenClientId(accessToken)
+  if (!ssoClientId) return undefined
+  const cognito = authenticationDependencies.cognito
+  if (!cognito.getUserFromVerifiedAccessToken) {
+    throw new CognitoServiceError(
+      503,
+      'CognitoAccessTokenVerificationUnavailable',
+      'Enterprise SSO access tokens cannot be verified by the configured Cognito client.',
+    )
+  }
+  return await cognito.getUserFromVerifiedAccessToken(accessToken, ssoClientId, {
+    allowExpired: true,
+  })
+}
+
+/**
  * Remembers that the sign-in of an enterprise SSO access token was signed out.
  *
  * Cognito `RevokeToken` does not reach tokens the API verifies locally, so every access token of
- * the sign-in is refused through this record until the presented token expires.
+ * the sign-in is refused through this record. It is kept for the longest access token validity
+ * Cognito allows, which covers tokens refreshed after the presented one.
  *
- * @param accessToken - Bearer access token of the session being signed out.
+ * @param accessToken - Access token of the session being signed out, already verified.
  * @param workspaceId - Workspace of the token's user.
- * @param expiresAt - Expiry of the presented access token in epoch seconds.
  */
-export async function revokeEnterpriseSsoSignIn(
-  accessToken: string,
-  workspaceId: string,
-  expiresAt: number,
-) {
+export async function revokeEnterpriseSsoSignIn(accessToken: string, workspaceId: string) {
   const sessionActivity = workspaceDependencies.enterpriseSessionActivity
   if (!sessionActivity.revokeSignIn) {
     throw new CognitoServiceError(
@@ -122,7 +149,7 @@ export async function revokeEnterpriseSsoSignIn(
   await sessionActivity.revokeSignIn.call(sessionActivity, {
     workspaceId,
     signInId: readSignInId(accessToken),
-    expiresAt,
+    expiresAt: Math.floor(Date.now() / 1_000) + maximumCognitoAccessTokenLifetimeSeconds,
   })
 }
 

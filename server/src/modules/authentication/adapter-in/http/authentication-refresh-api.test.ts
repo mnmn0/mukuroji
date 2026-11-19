@@ -392,3 +392,31 @@ test('refuses every access token of a signed-out SSO sign-in', async () => {
     }
   })
 })
+
+test('revokes an SSO sign-in from a tab whose access token already expired', async () => {
+  await withTestEnvironment({ COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client' }, async () => {
+    configureFakeProjectClients(true)
+    const activity = new InMemoryEnterpriseSessionActivityClient()
+    setTestAppDependencies({ enterpriseSessionActivity: activity })
+    configureRefreshingCognito('unused')
+    const expiredAccessToken = createAccessToken([], {
+      ...signInClaims,
+      client_id: 'mukuroji-sso-client',
+      origin_jti: 'origin-expired-tab',
+      exp: Math.floor(Date.now() / 1_000) - 600,
+    })
+
+    const signOut = await app.request('/api/auth/logout', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${expiredAccessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ refreshToken: 'sso-refresh' }),
+    })
+
+    expect(signOut.status).toBe(204)
+    // Another tab may still hold a newer, unexpired token of the same sign-in.
+    expect(await activity.isSignInRevoked('user#demo@example.com', 'origin-expired-tab')).toBe(true)
+  })
+})

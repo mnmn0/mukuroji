@@ -36,10 +36,15 @@ function createDynamoSessionActivityClient(
       if (typeof key !== 'string') throw new TypeError('The row is missing a connection ID.')
       const existing = rows.get(key)
       const currentTime: unknown = command.input.ExpressionAttributeValues?.[':currentTime']
+      const expiresAt: unknown = command.input.ExpressionAttributeValues?.[':expiresAt']
       const conditionFailed = command.input.ConditionExpression === 'attribute_not_exists(connectionId)'
         ? existing !== undefined
-        : typeof currentTime === 'number' && typeof existing?.lastSeenAt === 'number' &&
-          existing.lastSeenAt > currentTime
+        : command.input.ConditionExpression ===
+            'attribute_not_exists(connectionId) OR expiresAt < :expiresAt'
+          ? existing !== undefined && typeof expiresAt === 'number' &&
+            typeof existing.expiresAt === 'number' && existing.expiresAt >= expiresAt
+          : typeof currentTime === 'number' && typeof existing?.lastSeenAt === 'number' &&
+            existing.lastSeenAt > currentTime
       if (conditionFailed) {
         throw Object.assign(new Error('The conditional request failed'), {
           name: 'ConditionalCheckFailedException',
@@ -294,6 +299,8 @@ test('remembers a signed-out sign-in per Workspace until its tokens expire', asy
     await expect(client.revokeSignIn({ workspaceId: 'workspace-a', signInId: ' ', expiresAt: 1_800 }))
       .rejects.toMatchObject({ code: 'EnterpriseSessionDenied' })
   }
+  // A later sign-out with an earlier bound keeps the longer revocation.
+  await dynamo.revokeSignIn({ workspaceId: 'workspace-a', signInId: 'origin-1', expiresAt: 900 })
   // The record carries the table TTL attribute, so DynamoDB removes it after the tokens expire.
   expect([...rows.values()]).toEqual([{
     connectionId: 'HTTP_SIGN_IN_REVOKED#workspace-a#origin-1',

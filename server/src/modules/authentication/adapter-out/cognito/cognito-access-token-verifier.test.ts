@@ -219,3 +219,66 @@ test('keeps using a cached key when the hourly JWKS refresh fails', async () => 
 
   await expect(verifier.verify(later, expected)).resolves.toMatchObject({ sub: 'sub-1' })
 })
+
+test('backs off a failed hourly JWKS refresh instead of waiting on it for every request', async () => {
+  const key = createSigningKey('kid-1')
+  let available = true
+  let fetches = 0
+  let clock = now
+  const verifier = new CognitoAccessTokenVerifier(
+    'https://jwks.example.test',
+    async () => {
+      fetches += 1
+      if (!available) throw new Error('network down')
+      return { keys: [key.jwk] }
+    },
+    () => clock,
+  )
+  const tokenAt = (time: number) => signToken(
+    key.privateKey,
+    { alg: 'RS256', kid: 'kid-1' },
+    accessClaims({ iat: Math.floor(time / 1_000) - 60, exp: Math.floor(time / 1_000) + 3_000 }),
+  )
+  await verifier.verify(tokenAt(clock), expected)
+  available = false
+  clock += 2 * 60 * 60 * 1_000
+
+  for (let request = 0; request < 3; request += 1) {
+    await expect(verifier.verify(tokenAt(clock), expected)).resolves.toMatchObject({ sub: 'sub-1' })
+  }
+  expect(fetches).toBe(2)
+
+  // An unknown key during the outage is reported as unavailable, not as a bad token.
+  const otherKey = createSigningKey('kid-2')
+  await expect(verifier.verify(
+    signToken(otherKey.privateKey, { alg: 'RS256', kid: 'kid-2' }, accessClaims({
+      iat: Math.floor(clock / 1_000) - 60,
+      exp: Math.floor(clock / 1_000) + 3_000,
+    })),
+    expected,
+  )).rejects.toMatchObject({ status: 503 })
+  expect(fetches).toBe(2)
+
+  available = true
+  clock += 61_000
+  await verifier.verify(tokenAt(clock), expected)
+  expect(fetches).toBe(3)
+})
+
+test('accepts an expired token only when sign-out asks for it', async () => {
+  const key = createSigningKey('kid-1')
+  const verifier = new CognitoAccessTokenVerifier(
+    'https://jwks.example.test',
+    async () => ({ keys: [key.jwk] }),
+    () => now,
+  )
+  const expired = signToken(
+    key.privateKey,
+    { alg: 'RS256', kid: 'kid-1' },
+    accessClaims({ exp: Math.floor(now / 1_000) - 600 }),
+  )
+
+  await expect(verifier.verify(expired, expected)).rejects.toMatchObject({ status: 401 })
+  await expect(verifier.verify(expired, { ...expected, allowExpired: true }))
+    .resolves.toMatchObject({ originJti: 'origin-1' })
+})

@@ -64,7 +64,7 @@ export type EnterpriseSignInRevocationInput = {
   workspaceId: string
   /** Cognito `origin_jti`, shared by every access token refreshed from one sign-in. */
   signInId: string
-  /** Epoch seconds after which no access token of the sign-in is valid anymore. */
+  /** Epoch seconds after which no access token of the sign-in is valid anymore; never shortened. */
   expiresAt: number
 }
 
@@ -309,8 +309,12 @@ implements EnterpriseSessionActivityClient {
           workspaceId: input.workspaceId,
           expiresAt: input.expiresAt,
         },
+        // A later sign-out must never shorten how long the sign-in stays revoked.
+        ConditionExpression: 'attribute_not_exists(connectionId) OR expiresAt < :expiresAt',
+        ExpressionAttributeValues: { ':expiresAt': input.expiresAt },
       }))
     } catch (error) {
+      if (isConditionalWriteError(error)) return
       throw new EnterpriseSessionActivityError(
         503,
         'EnterpriseSessionActivityUnavailable',

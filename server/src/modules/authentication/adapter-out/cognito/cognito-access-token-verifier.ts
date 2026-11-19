@@ -54,6 +54,11 @@ export type CognitoAccessTokenExpectation = {
   issuer: string
   /** App client the token must have been issued to. */
   clientId: string
+  /**
+   * Accepts a token past its `exp`. Only for sign-out, which must name the sign-in of an
+   * expired token; never for authorizing a request.
+   */
+  allowExpired?: boolean
 }
 
 /**
@@ -95,6 +100,8 @@ export class CognitoAccessTokenVerifier {
   private keysFetchedAt = 0
   /** Epoch milliseconds of the last JWKS read attempt. */
   private lastFetchAttemptAt = 0
+  /** Whether the last JWKS read attempt failed. */
+  private lastFetchFailed = false
   /** In-flight JWKS read shared by concurrent verifications. */
   private pendingFetch: Promise<void> | undefined
 
@@ -154,7 +161,7 @@ export class CognitoAccessTokenVerifier {
       !isNonEmptyText(payload.sub) ||
       !isNonEmptyText(payload.username) ||
       !isEpochSeconds(payload.exp) ||
-      payload.exp + clockToleranceSeconds <= nowSeconds ||
+      (!expected.allowExpired && payload.exp + clockToleranceSeconds <= nowSeconds) ||
       (payload.iat !== undefined &&
         (!isEpochSeconds(payload.iat) || payload.iat - clockToleranceSeconds > nowSeconds))
     ) {
@@ -179,9 +186,10 @@ export class CognitoAccessTokenVerifier {
   private async getSigningKey(keyId: string) {
     const now = this.now()
     const stale = now - this.keysFetchedAt >= jwksCacheMilliseconds
-    const unknownKeyMayRefetch = !this.keys.has(keyId) &&
-      now - this.lastFetchAttemptAt >= jwksRefetchIntervalMilliseconds
-    if (stale || unknownKeyMayRefetch) {
+    // Every read, including the hourly refresh, waits out the interval after the last attempt, so
+    // an unreachable JWKS endpoint or unknown key IDs cannot make each request wait on the network.
+    const mayFetch = now - this.lastFetchAttemptAt >= jwksRefetchIntervalMilliseconds
+    if (mayFetch && (stale || !this.keys.has(keyId))) {
       try {
         await this.refreshKeys()
       } catch (error) {
@@ -190,7 +198,16 @@ export class CognitoAccessTokenVerifier {
       }
     }
     const key = this.keys.get(keyId)
-    if (!key) throw invalidAccessToken()
+    if (!key) {
+      if (this.lastFetchFailed) {
+        throw new CognitoAccessTokenVerificationError(
+          503,
+          'CognitoUnavailable',
+          'Cognito signing keys could not be read.',
+        )
+      }
+      throw invalidAccessToken()
+    }
     return key
   }
 
@@ -209,6 +226,7 @@ export class CognitoAccessTokenVerifier {
    */
   private async loadKeys() {
     this.lastFetchAttemptAt = this.now()
+    this.lastFetchFailed = true
     let document: unknown
     try {
       document = await this.fetchJwks(this.jwksUrl)
@@ -230,6 +248,7 @@ export class CognitoAccessTokenVerifier {
     }
     this.keys = keys
     this.keysFetchedAt = this.now()
+    this.lastFetchFailed = false
   }
 }
 

@@ -2028,9 +2028,9 @@ function configureFakeProjectClients(
           ],
         }
       },
-      async getUserFromVerifiedAccessToken(accessToken, clientId) {
+      async getUserFromVerifiedAccessToken(accessToken, clientId, verificationOptions) {
         calls.verifiedAccessTokenReads.push(clientId)
-        const token = verifyFakeAccessToken(accessToken, clientId)
+        const token = verifyFakeAccessToken(accessToken, clientId, verificationOptions?.allowExpired)
         return { ...await this.getUser(accessToken), token }
       },
       async listUsers(input) {
@@ -3617,9 +3617,10 @@ function createWorkspaceBootstrapItems() {
  *
  * @param accessToken - Fake access token.
  * @param clientId - App client the token must have been issued to.
+ * @param allowExpired - Accepts an expired token, as sign-out does.
  * @returns The claims a real verification would return.
  */
-function verifyFakeAccessToken(accessToken: string, clientId: string) {
+function verifyFakeAccessToken(accessToken: string, clientId: string, allowExpired = false) {
   const [, encodedPayload = '', signature] = accessToken.split('.')
   let claims: Record<string, unknown> = {}
   try {
@@ -3635,7 +3636,7 @@ function verifyFakeAccessToken(accessToken: string, clientId: string) {
     signature === 'invalid-signature' ||
     claims.client_id !== clientId ||
     claims.token_use !== 'access' ||
-    expiresAt <= Math.floor(Date.now() / 1_000)
+    (!allowExpired && expiresAt <= Math.floor(Date.now() / 1_000))
   ) {
     throw new CognitoServiceError(401, 'NotAuthorizedException', 'Access token is invalid.')
   }

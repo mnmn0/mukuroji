@@ -173,6 +173,14 @@ export type GetUserResponse = {
 }
 
 /**
+ * Options of reading the user behind a locally verified access token.
+ */
+export type VerifiedAccessTokenOptions = {
+  /** Accepts a token past its expiry. Only for sign-out, never for authorizing a request. */
+  allowExpired?: boolean
+}
+
+/**
  * Cognito user read for an access token verified with the user pool signing keys.
  */
 export type VerifiedAccessTokenUser = GetUserResponse & {
@@ -547,12 +555,14 @@ export type CognitoClient = {
    *
    * @param accessToken - Access token to verify.
    * @param clientId - App client the token must have been issued to.
+   * @param options - `allowExpired` accepts a token past its expiry, for sign-out only.
    * @returns The user, verified token claims included; throws a 401 error for an invalid token or
    *   a disabled user.
    */
   getUserFromVerifiedAccessToken?(
     accessToken: string,
     clientId: string,
+    options?: VerifiedAccessTokenOptions,
   ): Promise<VerifiedAccessTokenUser>
   /**
    * refresh token で access token と ID token を更新します（REFRESH_TOKEN_AUTH）。
@@ -1175,14 +1185,20 @@ export class AwsCognitoClient implements CognitoClient {
    *
    * @param accessToken - Access token to verify.
    * @param clientId - App client the token must have been issued to.
+   * @param options - `allowExpired` accepts a token past its expiry, for sign-out only.
    * @returns The user and the verified token claims.
    */
-  async getUserFromVerifiedAccessToken(accessToken: string, clientId: string) {
+  async getUserFromVerifiedAccessToken(
+    accessToken: string,
+    clientId: string,
+    options: VerifiedAccessTokenOptions = {},
+  ) {
     const { userPoolId } = this.readRequiredConfiguration()
     const token = await verifyCognitoAccessToken(
       accessToken,
       getEnv('COGNITO_ISSUER')?.trim() || createAwsCognitoIssuer(userPoolId),
       clientId,
+      options,
     )
 
     try {
@@ -2038,14 +2054,20 @@ export class FlociCognitoClient implements CognitoClient {
    *
    * @param accessToken - Access token to verify.
    * @param clientId - App client the token must have been issued to.
+   * @param options - `allowExpired` accepts a token past its expiry, for sign-out only.
    * @returns The user and the verified token claims.
    */
-  async getUserFromVerifiedAccessToken(accessToken: string, clientId: string) {
+  async getUserFromVerifiedAccessToken(
+    accessToken: string,
+    clientId: string,
+    options: VerifiedAccessTokenOptions = {},
+  ) {
     const userPoolId = await this.resolveUserPoolId()
     const token = await verifyCognitoAccessToken(
       accessToken,
       getEnv('COGNITO_ISSUER')?.trim() || `${this.endpoint}/${userPoolId}`,
       clientId,
+      options,
     )
 
     try {
@@ -2764,11 +2786,21 @@ export class CognitoServiceError extends Error {
  * @param accessToken - Access token to verify.
  * @param issuer - Issuer URL of the trusted user pool.
  * @param clientId - App client the token must have been issued to.
+ * @param options - `allowExpired` accepts a token past its expiry, for sign-out only.
  * @returns The verified claims.
  */
-async function verifyCognitoAccessToken(accessToken: string, issuer: string, clientId: string) {
+async function verifyCognitoAccessToken(
+  accessToken: string,
+  issuer: string,
+  clientId: string,
+  options: VerifiedAccessTokenOptions,
+) {
   try {
-    return await getCognitoAccessTokenVerifier(issuer).verify(accessToken, { issuer, clientId })
+    return await getCognitoAccessTokenVerifier(issuer).verify(accessToken, {
+      issuer,
+      clientId,
+      allowExpired: options.allowExpired === true,
+    })
   } catch (error) {
     if (error instanceof CognitoAccessTokenVerificationError) {
       throw new CognitoServiceError(error.status, error.code, error.message)

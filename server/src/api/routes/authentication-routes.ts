@@ -8,7 +8,6 @@ import {
   decidePolicyMfaSetup,
   readCognitoMfaChallengeName,
   type AuthTokenSet,
-  type GetUserResponse,
   type InitiateAuthResponse,
   type VerifiedAccessTokenUser,
 } from '../../modules/authentication'
@@ -29,6 +28,7 @@ import { authenticationDependencies, workspaceDependencies } from '../shared/app
 import { createAuthenticationResponse, toProjectPrincipal } from '../shared/authentication-session'
 import {
   readCognitoAccessTokenUser,
+  readEnterpriseSsoSignOutUser,
   resolveEnterpriseSsoAccessTokenClientId,
   revokeEnterpriseSsoSignIn,
 } from '../shared/cognito-access-token-user'
@@ -138,25 +138,22 @@ function resolveSessionClientId(accessToken: string | undefined) {
  * Signs an enterprise SSO sign-in out of the API after Cognito revoked its refresh token.
  *
  * The API verifies SSO access tokens locally, so Cognito's revocation does not reach them; the
- * sign-out is recorded for every access token of the sign-in instead. A token that no longer
- * verifies (expired, or its user is gone) is already refused, so nothing is recorded for it.
+ * sign-out is recorded for every access token of the sign-in instead. The presented token may be
+ * expired while a newer token of the sign-in is still valid, so expiry does not skip the record.
+ * A token whose signature fails or whose user is disabled or gone is refused anyway.
  *
  * @param accessToken - Bearer access token of the session being signed out.
  */
 async function signOutEnterpriseSsoSession(accessToken: string) {
-  let user: GetUserResponse | VerifiedAccessTokenUser
+  let user: VerifiedAccessTokenUser | undefined
   try {
-    user = await readCognitoAccessTokenUser(accessToken)
+    user = await readEnterpriseSsoSignOutUser(accessToken)
   } catch (error) {
     if (error instanceof CognitoServiceError && error.status === 401) return
     throw error
   }
-  if (!('token' in user)) return
-  await revokeEnterpriseSsoSignIn(
-    accessToken,
-    toProjectPrincipal(user, accessToken).directoryId,
-    user.token.expiresAt,
-  )
+  if (!user) return
+  await revokeEnterpriseSsoSignIn(accessToken, toProjectPrincipal(user, accessToken).directoryId)
 }
 
 /**

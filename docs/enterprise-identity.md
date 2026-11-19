@@ -310,7 +310,9 @@ client の設定）で、「ログイン状態を保持」を選ぶと localStor
   同じ refresh token から発行された access token も失効するので、sign-out 後は再開できません。
   SSO session では API が token を署名で検証するため Cognito の失効が届きません。そこで sign-out 時に
   その sign-in の `origin_jti` を server-side に失効として記録し、更新前後のすべての access token を
-  期限まで拒否します。Directory deprovisioning は Cognito user を無効化するので、`AdminGetUser` の
+  拒否します。記録は Cognito の access token 有効期間の上限（1日）だけ保持し、後の sign-out で
+  短くなることはありません。提示された access token が期限切れでも（別 tab が新しい token を持つ
+  場合に備えて）署名・issuer・client を確かめたうえで記録します。Directory deprovisioning は Cognito user を無効化するので、`AdminGetUser` の
   時点で拒否されます。
 - Break-glass activation は access token ごとに結び付くので、更新後の token には引き継ぎません。
 
