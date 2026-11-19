@@ -329,28 +329,51 @@ describe('public API router', () => {
 
   test('keys rate limits and idempotency on the OAuth app instead of each access token', async () => {
     let creates = 0
-    const { platform, router } = createTestRouter({ workItems: createDefaultWorkItemService({
+    const { router } = createTestRouter({ workItems: createDefaultWorkItemService({
       async addComment(credential, _teamId, _id, body) {
         creates += 1
         return { id: `comment-${creates}`, actorUserId: credential.subjectUserId, body, createdAt: NOW.toISOString() }
       },
     }) })
-    const app = await platform.createOAuthApp({
-      workspaceId: 'workspace-1',
-      createdByUserId: 'user-1',
-      input: {
-        name: 'Retrying integration',
-        grantTypes: ['client_credentials'],
-        scopes: ['work-items:read', 'work-items:write'],
-      },
-    })
-    const issueToken = () => platform.issueOAuthToken({
-      clientId: app.oauthApp.clientId,
-      clientSecret: app.clientSecret,
-    })
-    const first = await issueToken()
-    const second = await issueToken()
-    expect(second.accessToken).not.toBe(first.accessToken)
+    // Register OAuth apps and issue tokens through the HTTP endpoints integrations use.
+    const registerClient = async (name: string) => {
+      const response = await router.request('http://localhost/developer/oauth-apps', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer session-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `register-${name}`,
+        },
+        body: JSON.stringify({
+          name,
+          grantTypes: ['client_credentials'],
+          scopes: ['work-items:read', 'work-items:write'],
+        }),
+      })
+      expect(response.status).toBe(201)
+      const registered = await response.json() as {
+        oauthApp: { clientId: string }
+        clientSecret: string
+      }
+      return new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: registered.oauthApp.clientId,
+        client_secret: registered.clientSecret,
+      }).toString()
+    }
+    const requestToken = async (grant: string) => {
+      const response = await router.request('http://localhost/v1/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: grant,
+      })
+      expect(response.status).toBe(200)
+      return (await response.json() as { access_token: string }).access_token
+    }
+    const grant = await registerClient('Retrying integration')
+    const first = await requestToken(grant)
+    const second = await requestToken(grant)
+    expect(second).not.toBe(first)
     const path = '/v1/work-items/work-item-1/comments?teamId=team-1&assignedProjectId=project-1&assigneeUserId=user-1'
     const send = (accessToken: string) => router.request(path, {
       method: 'POST',
@@ -362,11 +385,11 @@ describe('public API router', () => {
       body: JSON.stringify({ body: 'Tests pass.' }),
     })
 
-    const created = await send(first.accessToken)
+    const created = await send(first)
     expect(created.status).toBe(201)
     expect(created.headers.get('RateLimit-Remaining')).toBe('119')
     // A retry with a newly issued token replays instead of creating a second comment.
-    const retried = await send(second.accessToken)
+    const retried = await send(second)
     expect(retried.status).toBe(201)
     expect(retried.headers.get('Idempotency-Replayed')).toBe('true')
     expect(creates).toBe(1)
@@ -374,20 +397,7 @@ describe('public API router', () => {
     expect(retried.headers.get('RateLimit-Remaining')).toBe('118')
 
     // Another OAuth app keeps its own bucket and idempotency scope.
-    const otherApp = await platform.createOAuthApp({
-      workspaceId: 'workspace-1',
-      createdByUserId: 'user-1',
-      input: {
-        name: 'Other integration',
-        grantTypes: ['client_credentials'],
-        scopes: ['work-items:read', 'work-items:write'],
-      },
-    })
-    const otherToken = await platform.issueOAuthToken({
-      clientId: otherApp.oauthApp.clientId,
-      clientSecret: otherApp.clientSecret,
-    })
-    const other = await send(otherToken.accessToken)
+    const other = await send(await requestToken(await registerClient('Other integration')))
     expect(other.status).toBe(201)
     expect(other.headers.get('Idempotency-Replayed')).toBeNull()
     expect(other.headers.get('RateLimit-Remaining')).toBe('119')

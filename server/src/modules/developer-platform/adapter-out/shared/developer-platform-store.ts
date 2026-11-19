@@ -202,8 +202,15 @@ function withExpectedLastUsedAtCondition(
       }
 }
 
-/** Returns whether a credential use at `now` should update the stored last-used time. */
-function shouldRecordCredentialUse(lastUsedAt: string | undefined, now: Date) {
+/**
+ * Returns whether a credential use at `now` should update the stored last-used time.
+ *
+ * @param lastUsedAt - The stored last-used time, if any.
+ * @param now - The time of the current use.
+ * @returns `true` when the stored value is missing, unreadable, in the future, or older than
+ *   the write interval.
+ */
+export function shouldRecordCredentialUse(lastUsedAt: string | undefined, now: Date) {
   if (!lastUsedAt) return true
   const previous = Date.parse(lastUsedAt)
   return !Number.isFinite(previous) ||

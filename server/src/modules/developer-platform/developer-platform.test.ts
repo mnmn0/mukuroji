@@ -17,6 +17,7 @@ import {
   WEBHOOK_DELIVERY_RETENTION_SECONDS,
   WEBHOOK_SUBSCRIPTION_LIMIT,
   createDefaultSecretProtector,
+  shouldRecordCredentialUse,
 } from './adapter-out/shared/developer-platform-store'
 import { createWebhookSignature } from './domain/webhook-signature'
 import { DeveloperPlatformError } from './errors'
@@ -585,6 +586,13 @@ describe('developer credential lifecycle', () => {
     const apiKeyRow = readStoredRows(client).find((row) => row.entryType === 'api-key')
     expect(apiKeyRow?.secretDigest).toMatch(/^[a-f0-9]{64}$/)
     expect(JSON.stringify(apiKeyRow)).not.toContain(created.secret)
+    const versionBeforeUse = apiKeyRow?.version
+    const readApiKeyRow = () => {
+      const row = readStoredRows(client)
+        .find((candidate) => candidate.recordKey === apiKeyRow?.recordKey)
+      if (!row) throw new Error('API key row was not stored.')
+      return row
+    }
 
     const authenticated = await client.authenticateApiKey({
       credential: created.secret,
@@ -598,6 +606,22 @@ describe('developer credential lifecycle', () => {
       scopes: ['work-items:read', 'work-items:write'],
     })
     expect((await client.listApiKeys('workspace-1'))[0]?.lastUsedAt).toBe(START.toISOString())
+    // Recording a use must not move the row version that revoke / rotate compare against.
+    expect(readApiKeyRow().version).toBe(versionBeforeUse)
+
+    // A concurrent use that observed the row before this write does not write again.
+    const touch = (
+      client as unknown as {
+        touchCredentialLastUsedAt(
+          record: Record<string, unknown>,
+          lastUsedAt: string,
+          observedLastUsedAt: string | undefined,
+        ): Promise<boolean>
+      }
+    ).touchCredentialLastUsedAt.bind(client)
+    expect(await touch(readApiKeyRow(), '2000-01-01T00:00:00.000Z', undefined)).toBe(false)
+    expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
+      .toBe(START.toISOString())
 
     const rotated = await client.rotateApiKey({
       workspaceId: 'workspace-1',
@@ -643,58 +667,18 @@ describe('developer credential lifecycle', () => {
     expect(expiredRow).not.toHaveProperty('secretDigest')
   })
 
-  test('records API key use without moving the row version that revocation relies on', async () => {
-    const { client, clock } = createClient()
-    const created = await client.createApiKey({
-      workspaceId: 'workspace-1',
-      createdByUserId: 'user-1',
-      input: { name: 'Busy integration', scopes: ['work-items:read'] },
-    })
-    const readApiKeyRow = () => {
-      const row = readStoredRows(client)
-        .find((candidate) => candidate.recordKey === `APIKEY#${created.apiKey.id}`)
-      if (!row) throw new Error('API key row was not stored.')
-      return row
-    }
-    const versionBeforeUse = readApiKeyRow().version
-
-    await client.authenticateApiKey({ credential: created.secret })
-    expect(readApiKeyRow().version).toBe(versionBeforeUse)
-    expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
-      .toBe(START.toISOString())
-
-    // A concurrent use that observed the row before this write does not write again.
-    const touch = (
-      client as unknown as {
-        touchCredentialLastUsedAt(
-          record: Record<string, unknown>,
-          lastUsedAt: string,
-          observedLastUsedAt: string | undefined,
-        ): Promise<boolean>
-      }
-    ).touchCredentialLastUsedAt.bind(client)
-    expect(await touch(readApiKeyRow(), '2000-01-01T00:00:00.000Z', undefined)).toBe(false)
-    expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
-      .toBe(START.toISOString())
-
-    // Uses inside the write interval do not write the row again.
-    clock.advanceSeconds(30)
-    await client.authenticateApiKey({ credential: created.secret })
-    expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
-      .toBe(START.toISOString())
-    clock.advanceSeconds(31)
-    await client.authenticateApiKey({ credential: created.secret })
-    expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
-      .toBe(new Date(START.getTime() + 61_000).toISOString())
-    expect(readApiKeyRow().version).toBe(versionBeforeUse)
-
-    const revoked = await client.revokeApiKey({
-      workspaceId: 'workspace-1',
-      apiKeyId: created.apiKey.id,
-    })
-    expect(revoked.status).toBe('revoked')
-    await expect(client.authenticateApiKey({ credential: created.secret }))
-      .rejects.toMatchObject({ status: 401 })
+  test('records credential use at most once per write interval', () => {
+    expect(shouldRecordCredentialUse(undefined, START)).toBe(true)
+    expect(shouldRecordCredentialUse(START.toISOString(), new Date(START.getTime() + 30_000)))
+      .toBe(false)
+    expect(shouldRecordCredentialUse(START.toISOString(), new Date(START.getTime() + 59_999)))
+      .toBe(false)
+    expect(shouldRecordCredentialUse(START.toISOString(), new Date(START.getTime() + 60_000)))
+      .toBe(true)
+    // A clock that moved backwards or an unreadable timestamp is replaced.
+    expect(shouldRecordCredentialUse(START.toISOString(), new Date(START.getTime() - 1_000)))
+      .toBe(true)
+    expect(shouldRecordCredentialUse('not-a-date', START)).toBe(true)
   })
 
   test('retries API key revocation after a concurrent credential write', async () => {
@@ -714,8 +698,12 @@ describe('developer credential lifecycle', () => {
       workspaceId: 'workspace-1',
       apiKeyId: created.apiKey.id,
     })).resolves.toMatchObject({ status: 'revoked' })
-    await expect(client.authenticateApiKey({ credential: created.secret }))
-      .rejects.toMatchObject({ status: 401 })
+    const revokedRow = (client as unknown as {
+      records: Map<string, Record<string, unknown>>
+    }).records.get(`workspace-1\0APIKEY#${created.apiKey.id}`)
+    expect(revokedRow?.value).toMatchObject({ status: 'revoked' })
+    expect(revokedRow).not.toHaveProperty('lookupKey')
+    expect(revokedRow).not.toHaveProperty('secretDigest')
 
     const other = await client.createApiKey({
       workspaceId: 'workspace-1',
