@@ -216,6 +216,48 @@ describe('Workspace search backfill mapping', () => {
     }
   })
 
+  test('fences directory documents by the rename count the live projections use', () => {
+    const team = mapProjectDirectoryItem({
+      directoryId: 'workspace#mukuroji',
+      entryKey: '000010#000000#TEAM#core-team',
+      entryType: 'team',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      nameJa: 'コアチーム',
+      nameEn: 'Core team',
+      nameRevision: 2,
+      creatorUserId: 'owner@example.com',
+    })
+    expect(team).toMatchObject({
+      action: 'put',
+      sourceRevision: 2,
+      preserveCreator: true,
+      document: { sourceRevision: 2, creatorUserId: 'owner@example.com' },
+    })
+
+    const project = mapProjectDirectoryItem({
+      directoryId: 'workspace#mukuroji',
+      entryKey: '000010#000010#PROJECT#refero',
+      entryType: 'project',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      projectId: 'refero',
+      projectSortOrder: 10,
+      nameJa: 'Refero',
+      nameEn: 'Refero',
+      tone: 'blue',
+      charterRevision: 3,
+      nameRevision: 2,
+      creatorUserId: 'owner@example.com',
+    })
+    // Charter revision plus rename count, as the request-time Project projection computes it.
+    expect(project).toMatchObject({
+      action: 'put',
+      sourceRevision: 5,
+      document: { sourceRevision: 5, creatorUserId: 'owner@example.com' },
+    })
+  })
+
   test('uses different document keys for the same Work Item ID in different Teams', () => {
     const first = mapWorkItem({
       schemaVersion: WORK_ITEM_SCHEMA_VERSION,

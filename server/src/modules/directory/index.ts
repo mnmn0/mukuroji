@@ -22,6 +22,7 @@ export {
   type ProjectMembersResponse,
   type ProjectRole,
   type ProjectSearchSource,
+  type TeamSearchSource,
   type RemoveProjectMemberResponse,
   type UpdateProjectMemberRequestBody,
   type UpdateProjectMemberResponse,

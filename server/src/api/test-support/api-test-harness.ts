@@ -1641,6 +1641,8 @@ function configureFakeProjectClients(
     ? { items: [], revision: 0 }
     : cloneProjectQuickAccessPreferences(options.projectQuickAccessPreference)
   const projectCharterStates = new Map<string, ProjectCharterState>()
+  /** Teams (`teamId`) and Projects (`teamId/projectId`) the fake directory has archived. */
+  const archivedDirectoryKeys = new Set<string>()
   /** Reads the fake charter state of one Team-owned Project. */
   const readProjectCharterState = (teamId: string, projectId: string): ProjectCharterState =>
     projectCharterStates.get(`${teamId}/${projectId}`) ?? {
@@ -2487,6 +2489,7 @@ function configureFakeProjectClients(
       },
       async restoreTeam(directoryId, teamId) {
         calls.directoryAdministration.push({ method: 'restoreTeam', directoryId, teamId })
+        archivedDirectoryKeys.delete(teamId)
 
         return { response: { teamId }, nameJa: 'リネーム', nameEn: 'Renamed', nameRevision: 0 }
       },
@@ -2497,6 +2500,7 @@ function configureFakeProjectClients(
           teamId,
           projectId,
         })
+        archivedDirectoryKeys.delete(`${teamId}/${projectId}`)
 
         return { teamId, projectId }
       },
@@ -2516,6 +2520,7 @@ function configureFakeProjectClients(
       },
       async archiveTeam(directoryId, teamId, _auditContext, expectedPlanningRevision) {
         calls.teamArchives.push({ directoryId, expectedPlanningRevision, teamId })
+        archivedDirectoryKeys.add(teamId)
 
         return {
           teamId,
@@ -2531,6 +2536,7 @@ function configureFakeProjectClients(
         workItemRevisionGuards,
       ) {
         const detachedGuards = workItemRevisionGuards.map((guard) => ({ ...guard }))
+        archivedDirectoryKeys.add(`${teamId}/${projectId}`)
         calls.projectArchives.push({
           directoryId,
           expectedPlanningRevision,
@@ -2551,6 +2557,16 @@ function configureFakeProjectClients(
           archivedAt: '2026-06-06T00:00:00.000Z',
         }
       },
+      /** Reads the fake Team unless it was archived. */
+      async getTeamSearchSource(directoryId, teamId) {
+        calls.directoryReads.push({ directoryId, locale: 'ja', consistentRead: true })
+        if (archivedDirectoryKeys.has(teamId)) return undefined
+        if (teamId === 'core-team') {
+          return { nameJa: 'コアチーム', nameEn: 'Core Team', nameRevision: 0 }
+        }
+        const team = (options.additionalTeams ?? []).find((candidate) => candidate.id === teamId)
+        return team ? { nameJa: team.name, nameEn: team.name, nameRevision: 0 } : undefined
+      },
       /** Returns a copy of the stored charter state, so callers cannot mutate the fake's state. */
       async getProjectCharter(_directoryId, teamId, projectId) {
         return structuredClone(readProjectCharterState(teamId, projectId))
@@ -2562,6 +2578,9 @@ function configureFakeProjectClients(
           : (options.additionalTeams ?? []).find((team) => team.id === teamId)?.projects ?? []
         const project = projects.find((candidate) => candidate.id === projectId)
         if (!project) return undefined
+        if (archivedDirectoryKeys.has(teamId) || archivedDirectoryKeys.has(`${teamId}/${projectId}`)) {
+          return undefined
+        }
         const state = structuredClone(readProjectCharterState(teamId, projectId))
         return {
           state,

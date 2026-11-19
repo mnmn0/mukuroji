@@ -36,6 +36,10 @@ key を変えると、key を前提にした transaction の条件、data integr
 - Project row にも名称変更・色変更の回数 `nameRevision` を持たせ、Project の検索 document の
   `sourceRevision` は charter の revision と `nameRevision` の和にする。どちらも増えるだけなので、
   同じ row を 1 回読んだ値どうしなら、新しい方が必ず大きい。
+- 新しい Team / Project の row には作成者 `creatorUserId` を記録し、名称変更・復元で検索 document を
+  作り直すときも作成者を保つ。記録のない既存の row は、保存済みの document の作成者を残す。
+- アーカイブ後の検索 document の削除は、削除のあと strongly consistent read で row を読み直し、
+  その間に復元されていれば document を作り直す。復元の投影が削除より先に届いても消えたままにならない。
 - 変更はすべて `project.renamed` / `project.restored` / `project.reordered` として audit に記録する。
 
 ## 検討した選択肢

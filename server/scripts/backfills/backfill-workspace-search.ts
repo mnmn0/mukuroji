@@ -774,6 +774,9 @@ function mapTeamDirectoryItem(
     return undefined
   }
 
+  // Renames project behind the rename count, so the backfill is fenced by the same count.
+  const nameRevision = readPositiveInteger(item.nameRevision)
+  const creatorUserId = readOptionalString(item.creatorUserId)
   return {
     action: 'put',
     document: createTeamWorkspaceSearchDocument({
@@ -781,9 +784,14 @@ function mapTeamDirectoryItem(
       title,
       subtitle,
       teamId,
+      ...(creatorUserId ? { creatorUserId } : {}),
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
+      ...(nameRevision === undefined ? {} : { sourceRevision: nameRevision }),
     }),
+    sourceRevision: nameRevision ?? 0,
+    // Teams created before the row recorded its creator keep the stored creator.
+    preserveCreator: true,
   }
 }
 
@@ -828,6 +836,9 @@ function mapProjectDirectoryItemRow(
       `Workspace search backfill encountered an invalid charter revision on Project "${teamId}/${projectId}".`,
     )
   }
+  // Live projections add the rename count to the charter revision; both only grow.
+  const sourceRevision = (charterRevision ?? 0) + (readPositiveInteger(item.nameRevision) ?? 0)
+  const creatorUserId = readOptionalString(item.creatorUserId)
   return {
     action: 'put',
     document: createProjectWorkspaceSearchDocument({
@@ -836,13 +847,14 @@ function mapProjectDirectoryItemRow(
       subtitle,
       teamId,
       projectId,
+      ...(creatorUserId ? { creatorUserId } : {}),
       ...(item.charter === undefined ? {} : { charter: item.charter }),
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
-      ...(charterRevision === undefined ? {} : { sourceRevision: charterRevision }),
+      ...(sourceRevision > 0 ? { sourceRevision } : {}),
     }),
-    sourceRevision: charterRevision ?? 0,
-    // The directory row does not record the creator; the live projection of the creation does.
+    sourceRevision,
+    // Projects created before the row recorded its creator keep the stored creator.
     preserveCreator: true,
   }
 }

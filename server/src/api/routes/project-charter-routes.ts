@@ -355,13 +355,13 @@ export async function projectProjectSearchDocumentBestEffort(
       workspaceId,
       teamId,
       resolved.project,
-      undefined,
+      resolved.creatorUserId,
       englishName,
       resolved.state.charter,
       sourceRevision,
     ),
     operation,
-    // The Project row does not record its creator, so the creator projected at creation is kept.
+    // Projects created before the row recorded its creator keep the creator projected at creation.
     // Without a revision, a document already projected from a revisioned source is left alone.
     sourceRevision === undefined
       ? { preserveCreator: true, unrevisioned: true }

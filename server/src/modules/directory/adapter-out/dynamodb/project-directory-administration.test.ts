@@ -595,6 +595,27 @@ test('counts Project renames and adds them to the charter revision of the search
   await expect(client.getProjectSearchSource(directoryId, 'alpha', 'gone')).resolves.toBeUndefined()
 })
 
+test('reads the search source of an active Team with its rename count and creator', async () => {
+  const { client } = createClient([
+    createTeamRow('alpha', 10, { nameRevision: 3, creatorUserId: 'owner@example.com' }),
+    createTeamRow('beta', 20),
+    createTeamRow('gone', 30, { archivedAt: '2026-06-06T00:00:00.000Z' }),
+  ])
+
+  await expect(client.getTeamSearchSource(directoryId, 'alpha')).resolves.toEqual({
+    nameJa: 'alpha 日本語',
+    nameEn: 'alpha English',
+    nameRevision: 3,
+    creatorUserId: 'owner@example.com',
+  })
+  await expect(client.getTeamSearchSource(directoryId, 'beta')).resolves.toEqual({
+    nameJa: 'beta 日本語',
+    nameEn: 'beta English',
+    nameRevision: 0,
+  })
+  await expect(client.getTeamSearchSource(directoryId, 'gone')).resolves.toBeUndefined()
+})
+
 test('refuses a restore while the archive Webhook grant cleanup is still running', async () => {
   const archivedAt = '2026-06-06T00:00:00.000Z'
   const { client, transactions } = createClient([

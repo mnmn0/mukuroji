@@ -20,6 +20,13 @@ import type {
   DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
+import type {
+  WorkspaceSearchClient,
+  WorkspaceSearchDocument,
+} from '../../../workspace-search/workspace-search'
+import {
+  createWorkspaceSearchDocument,
+} from '../../../workspace-search/workspace-search'
 import {
   afterEach,
   expect,
@@ -483,6 +490,100 @@ test('archives a team in the authenticated user scoped directory', async () => {
   })
   expect(calls.teamArchives).toEqual([
     { directoryId: 'user#demo@example.com', expectedPlanningRevision: 0, teamId: 'core-team' },
+  ])
+})
+
+/**
+ * Installs a search projection fake that records its writes and, on the first delete, runs a
+ * restore as if it had committed while the archive was finishing.
+ *
+ * @param restorePath - Restore route that the concurrent restore calls.
+ * @returns The ordered search writes.
+ */
+function installSearchWithConcurrentRestore(restorePath: string) {
+  const writes: string[] = []
+  let restored = false
+  setTestAppDependencies({
+    workspaceSearch: {
+      async upsertDocument(document: Parameters<WorkspaceSearchClient['upsertDocument']>[0]) {
+        writes.push(`upsert:${document.entityId}`)
+        return createWorkspaceSearchDocument(document)
+      },
+      async deleteDocument(_workspaceId: string, entityType: string, entityId: string) {
+        if (!restored) {
+          restored = true
+          const restore = await app.request(restorePath, {
+            method: 'PATCH',
+            headers: { Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}` },
+          })
+          expect(restore.status).toBe(200)
+        }
+        writes.push(`delete:${entityType}:${entityId}`)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+  return writes
+}
+
+test('projects a Team again when a restore commits while its archive deletes the document', async () => {
+  configureFakeProjectClients(true)
+  const writes = installSearchWithConcurrentRestore('/api/teams/core-team/restore')
+
+  const response = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}` },
+  })
+
+  expect(response.status).toBe(200)
+  expect(writes).toEqual([
+    'upsert:team/core-team',
+    'delete:team:team/core-team',
+    'upsert:team/core-team',
+  ])
+})
+
+test('leaves an archived Team out of search when no restore follows', async () => {
+  configureFakeProjectClients(true)
+  const writes: string[] = []
+  setTestAppDependencies({
+    workspaceSearch: {
+      async upsertDocument(document: Parameters<WorkspaceSearchClient['upsertDocument']>[0]) {
+        writes.push(`upsert:${document.entityId}`)
+        return createWorkspaceSearchDocument(document)
+      },
+      async deleteDocument(
+        _workspaceId: string,
+        entityType: WorkspaceSearchDocument['entityType'],
+        entityId: string,
+      ) {
+        writes.push(`delete:${entityType}:${entityId}`)
+      },
+    } as unknown as WorkspaceSearchClient,
+  })
+
+  const response = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}` },
+  })
+
+  expect(response.status).toBe(200)
+  expect(writes).toEqual(['delete:team:team/core-team'])
+})
+
+test('projects a Project again when a restore commits while its archive deletes the document', async () => {
+  configureFakeProjectClients(true)
+  const writes = installSearchWithConcurrentRestore('/api/teams/core-team/projects/refero/restore')
+
+  const response = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(writes).toEqual([
+    'upsert:team/core-team/project/refero',
+    'delete:project:team/core-team/project/refero',
+    'upsert:team/core-team/project/refero',
   ])
 })
 

@@ -307,6 +307,10 @@ import {
 } from '../shared/work-item-contributors'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
+import {
+  deleteArchivedProjectSearchDocument,
+  deleteArchivedTeamSearchDocument,
+} from './directory-administration-routes'
 
 /** Maximum serialized UTF-8 bytes allowed for the comments in one collaboration response. */
 const COLLABORATION_COMMENT_RESPONSE_MAX_BYTES = 4_000_000
@@ -3458,6 +3462,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         principal.directoryId,
         body ?? {},
         createApiMutationContext(c, principal, body ?? {}),
+        principal.userKey,
       )
       await projectWorkspaceSearchDocumentBestEffort(
         () => {
@@ -3566,12 +3571,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         createApiMutationContext(c, principal, { teamId }),
         expectedPlanningRevision,
       )
-      await deleteWorkspaceSearchDocumentBestEffort(
-        principal.directoryId,
-        'team',
-        `team/${teamId}`,
-        'team archive',
-      )
+      await deleteArchivedTeamSearchDocument(principal.directoryId, teamId)
       return c.json(response)
     } catch (error) {
       if (error instanceof CognitoServiceError) {
@@ -3619,12 +3619,7 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         archiveGuard.expectedPlanningRevision,
         archiveGuard.workItemRevisionGuards,
       )
-      await deleteWorkspaceSearchDocumentBestEffort(
-        principal.directoryId,
-        'project',
-        `team/${teamId}/project/${projectId}`,
-        'project archive',
-      )
+      await deleteArchivedProjectSearchDocument(principal.directoryId, teamId, projectId)
       return c.json(response)
     } catch (error) {
       if (error instanceof CognitoServiceError) {
