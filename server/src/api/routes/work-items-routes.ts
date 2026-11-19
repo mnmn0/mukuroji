@@ -47,11 +47,9 @@ import {
   createProjectQuickAccessIdentity,
   isProjectQuickAccessItems,
   ProjectDataError,
-  readLocalizedNames,
   type CreateProjectRequestBody,
   type CreateTeamRequestBody,
   type ProjectAccessEntry,
-  type ProjectDirectoryTeamResponse,
   type ProjectArchiveWorkItemRevisionGuard,
   type ProjectMemberResponseItem,
   type ProjectMembersResponse,
@@ -119,7 +117,6 @@ import {
 import {
   createCuratedContextItemWorkspaceSearchDocument,
   createDocumentWorkspaceSearchBody,
-  createTeamWorkspaceSearchDocument,
 } from '../../modules/workspace-search/workspace-search'
 import {
   createFormTriageEntryId,
@@ -180,7 +177,6 @@ import {
 } from '../shared/constants'
 import { hasCustomerManagementAccess, hasCustomerReadAccess } from '../shared/customer-access'
 import {
-  createProjectSearchDocument,
   createWorkItemSearchDocument,
   projectWorkItemSearchDocumentBestEffort,
 } from '../shared/document-access'
@@ -2342,21 +2338,6 @@ async function hydrateWorkItemsResponse(response: WorkItemsResponse, directoryId
   } satisfies WorkItemsResponse
 }
 
-function createTeamSearchDocument(
-  workspaceId: string,
-  team: ProjectDirectoryTeamResponse,
-  creatorUserId?: string,
-  subtitle?: string,
-) {
-  return createTeamWorkspaceSearchDocument({
-    workspaceId,
-    teamId: team.id,
-    title: team.name,
-    ...(subtitle ? { subtitle } : {}),
-    ...(creatorUserId ? { creatorUserId } : {}),
-  })
-}
-
 /** Mutation 後の Work Item と relation graph を強整合 read して search へ反映します。 */
 async function refreshWorkItemSearchDocumentBestEffort(
   workspaceId: string,
@@ -3462,18 +3443,9 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         createApiMutationContext(c, principal, body ?? {}),
         principal.userKey,
       )
-      await projectWorkspaceSearchDocumentBestEffort(
-        () => {
-          const names = readLocalizedNames(body ?? {})
-          return createTeamSearchDocument(
-            principal.directoryId,
-            response.team,
-            principal.userKey,
-            names.nameEn === response.team.name ? undefined : names.nameEn,
-          )
-        },
-        'team creation',
-      )
+      // Projects from the stored row, fenced like renames, so a delayed creation projection
+      // cannot undo a rename or recreate the document of an archived Team.
+      await projectTeamSearchDocumentBestEffort(principal.directoryId, response.team.id, 'team creation')
       return c.json(response, 201)
     } catch (error) {
       if (error instanceof CognitoServiceError) {
@@ -3515,20 +3487,13 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         },
         createApiMutationContext(c, principal, { teamId, ...body }),
       )
-      await projectWorkspaceSearchDocumentBestEffort(
-        () => {
-          const names = readLocalizedNames(body)
-          return createProjectSearchDocument(
-            principal.directoryId,
-            teamId,
-            response.project,
-            principal.userKey,
-            names.nameEn === response.project.name ? undefined : names.nameEn,
-          )
-        },
+      // Projects from the stored row, fenced like renames and charter edits, so a delayed creation
+      // projection cannot undo them or recreate the document of an archived Project.
+      await projectProjectSearchDocumentBestEffort(
+        principal.directoryId,
+        teamId,
+        response.project.id,
         'project creation',
-        // A charter saved before this projection lands carries a revision; keep it.
-        { unrevisioned: true },
       )
       return c.json(response, 201)
     } catch (error) {

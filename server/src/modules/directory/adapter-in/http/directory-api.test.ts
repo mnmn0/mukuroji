@@ -556,6 +556,25 @@ async function patchAsAdministrator(path: string) {
   return response.status
 }
 
+test('does not let a delayed Team creation projection undo a renamed search document', async () => {
+  configureFakeProjectClients(true)
+  const documents = installRevisionedSearch()
+  // A rename committed and projected revision 1 before the creation's projection landed.
+  documents.set('team/new-team', 1)
+
+  const response = await app.request('/api/teams', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${createAccessToken(['mukuroji-system-admins'])}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ name: '新規チーム' }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(documents.get('team/new-team')).toBe(1)
+})
+
 test('removes an archived Team from search', async () => {
   configureFakeProjectClients(true)
   const documents = installRevisionedSearch()

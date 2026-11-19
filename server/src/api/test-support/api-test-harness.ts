@@ -1645,6 +1645,8 @@ function configureFakeProjectClients(
   const archivedDirectoryKeys = new Set<string>()
   /** Archive and restore count of each fake Team and Project, keyed like the archived set. */
   const lifecycleRevisions = new Map<string, number>()
+  /** Names and creators of the Teams the fake directory created, by Team ID. */
+  const createdTeams = new Map<string, { name: string; creatorUserId?: string }>()
   /**
    * Archives or restores one fake Team or Project and advances its lifecycle count.
    *
@@ -2416,8 +2418,12 @@ function configureFakeProjectClients(
           memberId: memberKey,
         }
       },
-      async createTeam(directoryId, input) {
+      async createTeam(directoryId, input, _auditContext, creatorUserId) {
         calls.teamCreates.push({ directoryId, name: String(input.name) })
+        createdTeams.set('new-team', {
+          name: String(input.name),
+          ...(creatorUserId ? { creatorUserId } : {}),
+        })
 
         return {
           team: {
@@ -2579,6 +2585,15 @@ function configureFakeProjectClients(
         }
         if (teamId === 'core-team') {
           return { ...lifecycle, nameJa: 'コアチーム', nameEn: 'Core Team' }
+        }
+        const created = createdTeams.get(teamId)
+        if (created) {
+          return {
+            ...lifecycle,
+            nameJa: created.name,
+            nameEn: created.name,
+            ...(created.creatorUserId ? { creatorUserId: created.creatorUserId } : {}),
+          }
         }
         const team = (options.additionalTeams ?? []).find((candidate) => candidate.id === teamId)
         return team ? { ...lifecycle, nameJa: team.name, nameEn: team.name } : undefined
