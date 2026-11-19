@@ -623,8 +623,10 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   成果物 link、変更ファイル数を chip で表示する（blocker と handoff は判断待ちとして強調）。chip は一覧
   API が返す新しい report（既定 100 件、約 1 MB まで）に限り、それより古い comment は本文だけを表示する。
   `docs/coding-agent-mcp.md` に Claude Code / Codex / Kiro の設定例を置き、`mcp.mjs` は Node.js でも
-  起動できる単一ファイルとして、同梱ライセンス一覧と一緒に build する。GitHub Release への自動添付は、
-  workflow の追加に別の権限が要るため次の変更で入れる。
+  起動できる単一ファイルとして、同梱ライセンス一覧と checksum と一緒に build する。MCP は version と
+  MCP API revision を持ち、server の `GET /api/health` が返す範囲と照合して非互換を警告する。変更は
+  `CHANGELOG.md` に記録する。tag から GitHub Release を作る workflow は `docs/coding-agent-mcp.md` の付録にあり、
+  workflow の追加に別の権限が要るため maintainer が追加する。
 
 ### Slice 3 の実装状況
 
