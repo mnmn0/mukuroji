@@ -515,6 +515,7 @@ function StationPanel({ detailId, entries, formatDateTime, labels, now, onSelect
                   <span aria-hidden="true">·</span>
                   <span className="font-semibold text-[var(--workbench-text)]">{item.run ? item.run.agentName : labels.line.noAgent}</span>
                   {item.run && item.run.agentName !== labels.runs.runtimes[item.run.runtime] ? <span className="workbench-badge">{labels.runs.runtimes[item.run.runtime]}</span> : null}
+                  {item.run?.resumedFromRunId ? <ResumedBadge labels={labels} /> : null}
                   {stalled ? <span className="workbench-badge-warning">{labels.line.stalled}</span> : null}
                 </span>
                 {item.run ? <ReportSummary item={item} labels={labels} /> : null}
@@ -636,6 +637,7 @@ function TileGrid({ detailId, formatDateTime, items, labels, lane, now, onSelect
               <p className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-[var(--workbench-muted)]">
                 <span className="truncate font-semibold text-[var(--workbench-text)]">{item.run.agentName}</span>
                 {item.run.agentName !== labels.runs.runtimes[item.run.runtime] ? <span className="workbench-badge">{labels.runs.runtimes[item.run.runtime]}</span> : null}
+                {item.run.resumedFromRunId ? <ResumedBadge labels={labels} /> : null}
               </p>
             ) : null}
             {item.run ? <ReportSummary item={item} labels={labels} /> : null}
@@ -650,6 +652,19 @@ function TileGrid({ detailId, formatDateTime, items, labels, lane, now, onSelect
       })}
     </div>
   )
+}
+
+/**
+ * Marks a run that resumed an earlier run of its Work Item.
+ *
+ * @param props - Board text.
+ * @returns Badge.
+ */
+function ResumedBadge({ labels }: {
+  /** Board text. */
+  labels: FactoryBoardLabels
+}) {
+  return <span className="workbench-badge" data-factory-board-resumed title={labels.runs.resumedHint}>{labels.runs.resumed}</span>
 }
 
 /**
@@ -802,6 +817,7 @@ function FactoryBoardDetail({ formatDateTime, item, labels, lane, now, onNavigat
             <span className={runStateBadgeClasses[displayState]}>{labels.runs.states[displayState]}</span>
             <span className="truncate text-sm font-semibold text-[var(--workbench-text)]">{run.agentName}</span>
             {run.agentName !== labels.runs.runtimes[run.runtime] ? <span className="workbench-badge">{labels.runs.runtimes[run.runtime]}</span> : null}
+            {run.resumedFromRunId ? <ResumedBadge labels={labels} /> : null}
           </p>
           <dl className="grid grid-cols-2 gap-2 text-xs">
             <DetailField label={labels.startRevision} value={String(run.startRevision)} />
