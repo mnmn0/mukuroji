@@ -114,6 +114,22 @@ describe('Cycle burndown panel', () => {
     baseline: { startDate: '2026-01-01', endDate: '2026-01-05' },
   }
 
+  test('draws a single-bucket cumulative flow as bands with width', () => {
+    const markup = renderToStaticMarkup(
+      <AnalyticsFlowChart
+        label="Flow"
+        locale="en"
+        series={flowSeries.slice(0, 1)}
+        t={createTranslator('en')}
+        timeZone="UTC"
+        visualization="area"
+      />,
+    )
+    const d = /d="([^"]+)"/.exec(markup.slice(markup.lastIndexOf('<path', markup.indexOf('analytics-flow-area-started'))))?.[1] ?? ''
+    const xs = new Set([...d.matchAll(/([ML]) ([\d.]+) /g)].map((match) => match[2]))
+    expect(xs.size).toBe(2)
+  })
+
   test('draws a single first-day observation as a point', () => {
     const html = renderToStaticMarkup(
       <CycleBurndownPanel

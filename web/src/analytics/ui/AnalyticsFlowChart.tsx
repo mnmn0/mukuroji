@@ -124,7 +124,7 @@ export function AnalyticsFlowChart({
           {model.layers.map((layer) => layer.kind === 'area'
             ? (
               <path
-                d={createAreaPath(layer, xAt, yAt)}
+                d={createAreaPath(layer, xAt, yAt, Math.min(24, chartWidth / Math.max(slotCount, 1) / 2))}
                 data-testid={`analytics-flow-area-${layer.key}`}
                 key={layer.key}
                 stroke="var(--workbench-chart-point-fill)"
@@ -314,18 +314,31 @@ function createLinePath(
 /**
  * Builds a closed SVG path for one stacked area over its drawable slots.
  *
+ * A single drawable slot is drawn as a band of `bandHalfWidth` on each side, so the
+ * breakdown of a one-bucket chart stays visible.
+ *
  * @param layer - Area layer with base values.
  * @param xAt - Slot index to x coordinate.
  * @param yAt - Value to y coordinate.
+ * @param bandHalfWidth - Half width of a single-slot band.
  * @returns SVG path data.
  */
 function createAreaPath(
   layer: AnalyticsFlowChartLayer,
   xAt: (index: number) => number,
   yAt: (value: number) => number,
+  bandHalfWidth: number,
 ) {
   const indexes = layer.values.flatMap((value, index) => value === null ? [] : [index])
   if (indexes.length === 0) return ''
+  if (indexes.length === 1) {
+    const index = indexes[0] ?? 0
+    const left = (xAt(index) - bandHalfWidth).toFixed(2)
+    const right = (xAt(index) + bandHalfWidth).toFixed(2)
+    const top = yAt(layer.values[index] ?? 0).toFixed(2)
+    const bottom = yAt(layer.baseValues?.[index] ?? 0).toFixed(2)
+    return `M ${left} ${top} L ${right} ${top} L ${right} ${bottom} L ${left} ${bottom} Z`
+  }
   const top = indexes.map((index) => `${xAt(index).toFixed(2)} ${yAt(layer.values[index] ?? 0).toFixed(2)}`)
   const bottom = [...indexes].reverse().map((index) =>
     `${xAt(index).toFixed(2)} ${yAt(layer.baseValues?.[index] ?? 0).toFixed(2)}`
