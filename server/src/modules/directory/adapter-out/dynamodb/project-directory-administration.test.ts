@@ -278,7 +278,10 @@ test('reorders Teams by reusing their positions and writes only the rows that mo
     {
       Update: expect.objectContaining({
         Key: { directoryId, entryKey: '000030#000000#TEAM#gamma' },
-        UpdateExpression: 'SET displayOrder = :displayOrder',
+        UpdateExpression: 'SET #displayOrder = :displayOrder',
+        ConditionExpression:
+          '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt) ' +
+          'AND attribute_not_exists(#displayOrder)',
         ExpressionAttributeValues: expect.objectContaining({ ':displayOrder': 10 }),
       }),
     },
@@ -295,6 +298,55 @@ test('reorders Teams by reusing their positions and writes only the rows that mo
       }),
     },
   ])
+})
+
+test('guards rows that keep their place with the position read, so concurrent reorders conflict', async () => {
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10, { displayOrder: 10 }),
+    createTeamRow('beta', 20, { displayOrder: 20 }),
+    createTeamRow('gamma', 30, { displayOrder: 30 }),
+  ])
+
+  await client.reorderTeams(directoryId, { teamIds: ['alpha', 'gamma', 'beta'] })
+
+  expect(transactions()).toEqual([[
+    {
+      ConditionCheck: expect.objectContaining({
+        Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
+        ConditionExpression: expect.stringContaining('#displayOrder = :readDisplayOrder'),
+        ExpressionAttributeValues: expect.objectContaining({ ':readDisplayOrder': 10 }),
+      }),
+    },
+    {
+      Update: expect.objectContaining({
+        Key: { directoryId, entryKey: '000030#000000#TEAM#gamma' },
+        ExpressionAttributeValues: expect.objectContaining({
+          ':readDisplayOrder': 30,
+          ':displayOrder': 20,
+        }),
+      }),
+    },
+    {
+      Update: expect.objectContaining({
+        Key: { directoryId, entryKey: '000020#000000#TEAM#beta' },
+        ExpressionAttributeValues: expect.objectContaining({
+          ':readDisplayOrder': 20,
+          ':displayOrder': 30,
+        }),
+      }),
+    },
+  ]])
+})
+
+test('skips the write when the requested Team order is already stored', async () => {
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10, { displayOrder: 10 }),
+    createTeamRow('beta', 20, { displayOrder: 20 }),
+  ])
+
+  await expect(client.reorderTeams(directoryId, { teamIds: ['alpha', 'beta'] }))
+    .resolves.toEqual({ teamIds: ['alpha', 'beta'] })
+  expect(transactions()).toEqual([])
 })
 
 test('rejects a Team order that does not list every active Team exactly once', async () => {

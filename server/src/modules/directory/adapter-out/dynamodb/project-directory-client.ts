@@ -2791,27 +2791,17 @@ export class DynamoDbProjectDirectoryClient {
     const currentIds = teams.map((team) => team.teamId)
     const nextTeams = orderDirectoryItems(teams, currentIds, teamIds)
     const positions = createReorderedDisplayPositions(teams.map(resolveDirectoryDisplayOrder))
-    const updates = nextTeams.flatMap((team, index) => {
-      const position = positions[index]
-      if (position === undefined || team.displayOrder === position) return []
-      const condition = createActiveTeamRowCondition(team.teamId)
-      return [{
-        Update: {
-          TableName: this.tableName,
-          Key: { directoryId, entryKey: team.entryKey },
-          UpdateExpression: 'SET displayOrder = :displayOrder',
-          ...condition,
-          ExpressionAttributeValues: {
-            ...condition.ExpressionAttributeValues,
-            ':displayOrder': position,
-          },
-        },
-      }]
-    })
+    const writes = createDisplayOrderTransactItems(
+      this.tableName,
+      directoryId,
+      nextTeams,
+      positions,
+      (team) => createActiveTeamRowCondition(team.teamId),
+    )
 
-    if (updates.length > 0) {
+    if (writes.changed) {
       await this.sendDirectoryAdministrationTransaction([
-        ...updates,
+        ...writes.items,
         ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
           directoryId,
           eventType: 'project.reordered',
@@ -2859,27 +2849,17 @@ export class DynamoDbProjectDirectoryClient {
     const currentIds = projects.map((project) => project.projectId)
     const nextProjects = orderDirectoryItems(projects, currentIds, projectIds)
     const positions = createReorderedDisplayPositions(projects.map(resolveDirectoryDisplayOrder))
-    const updates = nextProjects.flatMap((project, index) => {
-      const position = positions[index]
-      if (position === undefined || project.displayOrder === position) return []
-      const condition = createActiveProjectRowCondition(teamId, project.projectId)
-      return [{
-        Update: {
-          TableName: this.tableName,
-          Key: { directoryId, entryKey: project.entryKey },
-          UpdateExpression: 'SET displayOrder = :displayOrder',
-          ...condition,
-          ExpressionAttributeValues: {
-            ...condition.ExpressionAttributeValues,
-            ':displayOrder': position,
-          },
-        },
-      }]
-    })
+    const writes = createDisplayOrderTransactItems(
+      this.tableName,
+      directoryId,
+      nextProjects,
+      positions,
+      (project) => createActiveProjectRowCondition(teamId, project.projectId),
+    )
 
-    if (updates.length > 0) {
+    if (writes.changed) {
       await this.sendDirectoryAdministrationTransaction([
-        ...updates,
+        ...writes.items,
         { ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey, teamId) },
         ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
           directoryId,
@@ -4886,6 +4866,71 @@ function createReorderedDisplayPositions(currentPositions: readonly number[]) {
     previous = next
     return next
   })
+}
+
+/** Row condition built by `createActiveTeamRowCondition` or `createActiveProjectRowCondition`. */
+type DirectoryRowCondition = {
+  /** Condition that the row is still the named active row. */
+  ConditionExpression: string
+  /** Attribute names used by the condition. */
+  ExpressionAttributeNames: Record<string, string>
+  /** Attribute values used by the condition. */
+  ExpressionAttributeValues: Record<string, unknown>
+}
+
+/**
+ * Builds the writes of a reorder. Every row is guarded by the position read with it, so two
+ * concurrent reorders cannot interleave into a mixed order: the later one fails as a conflict.
+ *
+ * @param tableName - Directory table name.
+ * @param directoryId - Workspace directory identifier.
+ * @param rows - Rows in the requested order.
+ * @param positions - Positions to assign, in the same order.
+ * @param conditionFor - Builds the active-row condition of one row.
+ * @returns Transaction items, and whether any row moves.
+ */
+function createDisplayOrderTransactItems<
+  T extends ProjectDirectoryTeamItem | ProjectDirectoryProjectItem,
+>(
+  tableName: string,
+  directoryId: string,
+  rows: readonly T[],
+  positions: readonly number[],
+  conditionFor: (row: T) => DirectoryRowCondition,
+) {
+  let changed = false
+  const items = rows.map((row, index) => {
+    const position = positions[index] ?? resolveDirectoryDisplayOrder(row)
+    const condition = conditionFor(row)
+    const guarded = {
+      TableName: tableName,
+      Key: { directoryId, entryKey: row.entryKey },
+      ConditionExpression: `${condition.ConditionExpression} AND ${
+        row.displayOrder === undefined
+          ? 'attribute_not_exists(#displayOrder)'
+          : '#displayOrder = :readDisplayOrder'
+      }`,
+      ExpressionAttributeNames: { ...condition.ExpressionAttributeNames, '#displayOrder': 'displayOrder' },
+    }
+    const readValues = row.displayOrder === undefined
+      ? condition.ExpressionAttributeValues
+      : { ...condition.ExpressionAttributeValues, ':readDisplayOrder': row.displayOrder }
+
+    if (row.displayOrder === position) {
+      return { ConditionCheck: { ...guarded, ExpressionAttributeValues: readValues } }
+    }
+
+    changed = true
+    return {
+      Update: {
+        ...guarded,
+        UpdateExpression: 'SET #displayOrder = :displayOrder',
+        ExpressionAttributeValues: { ...readValues, ':displayOrder': position },
+      },
+    }
+  })
+
+  return { changed, items }
 }
 
 /**

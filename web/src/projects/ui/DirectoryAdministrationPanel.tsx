@@ -1,5 +1,5 @@
 import { useMemo, useState, type FormEvent } from 'react'
-import useSWR, { useSWRConfig } from 'swr'
+import { useSWRConfig } from 'swr'
 import {
   DIRECTORY_PROJECT_TONES,
   isDirectoryProjectTone,
@@ -10,7 +10,6 @@ import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
 import {
-  getDirectoryAdministration,
   renameDirectoryProject,
   renameDirectoryTeam,
   reorderDirectoryProjects,
@@ -25,6 +24,7 @@ import {
   moveDirectoryId,
   type DirectoryMoveDirection,
 } from '../model/directoryAdministration'
+import { useDirectoryAdministration } from '../queries/useDirectoryAdministration'
 import { isProjectDirectoryKey } from '../queries/useProjectDirectory'
 
 /** Props of the directory administration container. */
@@ -47,11 +47,7 @@ export function DirectoryAdministrationPanelContainer({
 }: DirectoryAdministrationPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const { mutate: mutateGlobal } = useSWRConfig()
-  const query = useSWR(
-    ['directory-administration', accessToken] as const,
-    ([, token]) => getDirectoryAdministration(token),
-    { shouldRetryOnError: false },
-  )
+  const query = useDirectoryAdministration(accessToken)
   const [pendingKey, setPendingKey] = useState<string>()
   const [errorMessage, setErrorMessage] = useState<string>()
 
