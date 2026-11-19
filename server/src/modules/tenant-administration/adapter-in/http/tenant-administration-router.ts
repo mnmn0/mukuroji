@@ -262,18 +262,10 @@ async function readWorkspaceCalendar<
   principal: Principal,
   dependencies: TenantAdministrationRouterDependencies<Principal>,
 ): Promise<WorkspaceCalendarSettings> {
-  try {
-    const snapshot = await dependencies.client.getSnapshot(principal.directoryId)
-    return snapshot.profile.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
-  } catch (error) {
-    if (
-      error instanceof TenantAdministrationError &&
-      error.code === 'TenantAdministrationNotInitialized'
-    ) {
-      return DEFAULT_WORKSPACE_CALENDAR_SETTINGS
-    }
-    throw error
-  }
+  // Only a missing profile means "not configured"; any other read failure propagates, so a
+  // stored week start is never silently replaced by the defaults.
+  const profile = await dependencies.client.getProfile(principal.directoryId)
+  return profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
 }
 
 /**
