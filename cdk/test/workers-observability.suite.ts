@@ -2031,7 +2031,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 26);
+  }, 27);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',

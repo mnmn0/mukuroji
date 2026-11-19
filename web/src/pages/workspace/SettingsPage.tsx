@@ -7,6 +7,7 @@ import { AccountSecurityPanelContainer } from '../../features/account-security/u
 import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/AgentSettingsPanelContainer'
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
+import { DirectoryAdministrationPanelContainer } from '../../projects/ui/DirectoryAdministrationPanel'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { useAppBadgePermission } from '../../shared/lib/pwa/badgePermission'
 import { useAppInstallPrompt } from '../../shared/lib/pwa/installPrompt'
@@ -96,6 +97,12 @@ export function SettingsPage() {
               />
               {workspace.canManageWorkspaceConfiguration ? (
                 <TenantAdministrationPanelContainer
+                  accessToken={workspace.accessToken}
+                  locale={workspace.locale}
+                />
+              ) : null}
+              {workspace.canManageWorkspaceConfiguration ? (
+                <DirectoryAdministrationPanelContainer
                   accessToken={workspace.accessToken}
                   locale={workspace.locale}
                 />

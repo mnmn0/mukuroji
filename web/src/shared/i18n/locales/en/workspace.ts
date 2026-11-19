@@ -774,9 +774,9 @@ export const workspaceMessages = {
   'sidebar.archive.error': 'Could not archive',
   'sidebar.archive.confirmTitle': 'Confirm archive',
   'sidebar.archive.confirmTeamDescription':
-    'Archiving {name} hides the team and its projects from the sidebar. They cannot currently be restored from this screen.',
+    'Archiving {name} hides the team and its projects from the sidebar. You can restore them under Settings, Teams and projects.',
   'sidebar.archive.confirmProjectDescription':
-    'Archiving {name} hides it from the sidebar. It cannot currently be restored from this screen.',
+    'Archiving {name} hides it from the sidebar. You can restore it under Settings, Teams and projects.',
   'sidebar.archive.cancel': 'Cancel',
   'sidebar.archive.confirm': 'Archive',
   'sidebar.teamOverview': 'Team overview',

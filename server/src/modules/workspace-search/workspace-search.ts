@@ -1117,6 +1117,8 @@ export function createTeamWorkspaceSearchDocument(input: {
   createdAt?: string
   /** Team row の最終更新日時です。 */
   updatedAt?: string
+  /** Rename count of the Team row, which fences a delayed projection of an older name. */
+  sourceRevision?: number
 }) {
   return createWorkspaceSearchDocument({
     workspaceId: input.workspaceId,
@@ -1129,6 +1131,7 @@ export function createTeamWorkspaceSearchDocument(input: {
     ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+    ...(input.sourceRevision === undefined ? {} : { sourceRevision: input.sourceRevision }),
   })
 }
 

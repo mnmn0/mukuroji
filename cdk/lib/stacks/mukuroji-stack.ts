@@ -316,6 +316,7 @@ export class MukurojiStack extends cdk.Stack {
       dataStores,
       parameters,
       demoDataEnabled,
+      lambdaBuildPaths,
     });
     const { connectorChannels } = workerChannels;
     const { connectorRuntimeSecret } = dataStores;

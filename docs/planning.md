@@ -103,7 +103,7 @@ Response は再計算済み snapshot と `movedWorkItemIds` / `retainedWorkItemI
 
 ## Cycle の自動作成・自動持ち越し・一括追加
 
-設計の判断は [ADR 0009](adr/0009-cycle-schedule-due-index.md) にあります。
+設計の判断は [ADR 0010](adr/0010-cycle-schedule-due-index.md) にあります。
 
 Cycle は `automation: { createNext, rolloverAtEnd }` を持てます（Cycle 以外は持てません。両方 false または `null` の patch で解除します）。日付は date-only なので、期日の判定は UTC の日付で行います。
 

@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(484)
-  expect(new Set(inventory).size).toBe(480)
+  expect(inventory).toHaveLength(491)
+  expect(new Set(inventory).size).toBe(487)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).not.toContain('GET /api/dashboard/summary')
@@ -87,10 +87,18 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/me/preferences')
   expect(inventory).toContain('GET /api/developer/credential-policy')
   expect(inventory).toContain('PUT /api/developer/credential-policy')
+  // Team and Project IDs never change, so renaming is a PATCH on the stable resource.
+  expect(inventory).toContain('GET /api/teams/directory')
+  expect(inventory).toContain('PUT /api/teams/order')
+  expect(inventory).toContain('PATCH /api/teams/:teamId')
+  expect(inventory).toContain('PATCH /api/teams/:teamId/restore')
+  expect(inventory).toContain('PUT /api/teams/:teamId/project-order')
+  expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId')
+  expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId/restore')
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '58ffc48a4f7bac6984ad6f5b1d8d6e65ff1e202fa33d6ae9d3203b6608f62e88',
+    '2dc8ac1ecd4c56f1dbcd37e256aaa6d70f750a5b439fa8419977f92fadc35ca6',
   )
 })

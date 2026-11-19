@@ -1,4 +1,4 @@
-# 0009. Cycle の自動作成・自動繰り越しを既存の due index と scheduled-jobs で動かす
+# 0010. Cycle の自動作成・自動繰り越しを既存の due index と scheduled-jobs で動かす
 
 - 状態: 提案
 - 日付: 2026-11-20
