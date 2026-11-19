@@ -3108,3 +3108,44 @@ test('requires Cycle manager permission to change Cycle automation', async () =>
   })
   expect(allowedPatch.status).toBe(200)
 })
+
+test('accepts a Planning edit whose revision only Work Item writes advanced since', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  setTestAppDependencies({ planning: planningClient })
+  const created = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-busy', 0),
+  )
+  expect(created.status).toBe(201)
+  // Two canonical Work Item writes advance the shared revision after the PM read revision 1.
+  planningClient.recordWorkItemRevision('user#demo@example.com')
+  planningClient.recordWorkItemRevision('user#demo@example.com')
+
+  const renamed = await planningApiRequest('/api/planning/entities/cycle-busy', 'PATCH', {
+    expectedRevision: 1,
+    patch: { title: 'Renamed while Work Items change' },
+  })
+  expect(renamed.status).toBe(200)
+  expect(await renamed.json()).toMatchObject({ revision: 4 })
+
+  const staleAfterPlanningChange = await planningApiRequest(
+    '/api/planning/entities/cycle-busy',
+    'PATCH',
+    { expectedRevision: 1, patch: { title: 'Lost update' } },
+  )
+  expect(staleAfterPlanningChange.status).toBe(409)
+  expect(await staleAfterPlanningChange.json()).toMatchObject({
+    code: 'PlanningRevisionConflict',
+  })
+
+  planningClient.recordWorkItemRevision('user#demo@example.com')
+  const archived = await planningApiRequest(
+    '/api/planning/entities/cycle-busy/archive',
+    'POST',
+    { expectedRevision: 4 },
+  )
+  expect(archived.status).toBe(409)
+  expect(await archived.json()).toMatchObject({ code: 'PlanningRevisionConflict' })
+})

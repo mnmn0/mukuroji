@@ -6,7 +6,7 @@ Issue #27 の Planning domain は、短期の Cycle と中長期の Portfolio / 
 
 `PlanningTable` は `workspaceId` / `recordKey` を primary key とし、次の row を保存します。
 
-- `META`（`workspaceId = FENCE#<workspaceId>`）: planning storage schema version と Workspace graph revision
+- `META`（`workspaceId = FENCE#<workspaceId>`）: planning storage schema version、Workspace graph revision、Work Item による revision 前進を数える counter（`sourceRevisionCount`、`structureRevision`、`structureSourceRevisionCount`）
 - `ENTITY#<id>`: planning entity
 - `DEPENDENCY#<id>`: directed scheduling dependency
 - `WORK_ITEM_DEPENDENCY#<id>`: Team-qualified Work Item 間の canonical schedule dependency
@@ -27,6 +27,10 @@ Planning API snapshot は `schemaVersion: 2` を返し、Web は現在の schema
 Planning client は FENCE `META` だけを強整合 read し、row がなければ revision 0 として扱います。FENCE `META` の作成・更新は常に DynamoDB transaction 内の revision CAS（初回は `attribute_not_exists`、以降は `revision = expectedRevision`）で行います。Runtime の DynamoDB document client は、transaction 外の Put / Update / Delete による FENCE `META` への直接書き込みと、PartiQL / BatchWrite による書き込みを `PLANNING_REVISION_FENCE_BARRIER_REQUIRED` で fail-closed に拒否します。Canonical Work Item を書く worker には、`FENCE#*` partition の revision 属性を `TransactWriteItems` 内でだけ更新できる IAM 権限を付与します。
 
 すべての mutation は snapshot の `expectedRevision` を必須とし、認可に使った snapshot と mutation の revision を一致させたうえで、`META` の revision CAS と対象 row を同じ DynamoDB transaction で更新します。Stale write は `409 PlanningRevisionConflict` で拒否し、階層、dependency、link の部分更新を残しません。Canonical Work Item projection は強整合 read で取得します。Workspace member の role / status 更新と Planning scope が参照する Team / Project の archive は、事前検査した `META` revision を directory mutation と同じ transaction で一つ進めます。並行する Planning create / move とは一方だけが成功し、競合側は最新 snapshot で再検査します。
+
+Canonical Work Item の書き込みも同じ `META` の revision を進めます（roll-up の入力を1つの条件で守るため）。そのままでは Work Item が更新されるたびに Planning の操作が `409` になるため、Work Item の transaction は `revision` と一緒に `sourceRevisionCount` を1つ進め、Planning の commit は自分の revision を `structureRevision`、そのときの counter を `structureSourceRevisionCount` に書きます。`revision - structureRevision` と `sourceRevisionCount - structureSourceRevisionCount` が等しければ、最後の Planning commit 以降は Work Item だけが revision を進めています。counter を書かない writer（Workspace member や Team / Project の変更など）が進めた revision はこの差が合わないので、Planning の変更として扱います。
+
+Work Item の状態に依存しない次の操作は、呼び出し元の `expectedRevision` が最後の Planning commit 以降で、そこから Work Item だけが revision を進めている場合も受け付けます: entity の作成・更新・複製・移動、entity 間の dependency の作成・削除、Work Item link の作成・置換・削除、Cycle への Work Item の一括追加・削除。route は現在の snapshot で認可し、client は commit 直前に同じ条件を再検査します。読み取りから commit までの間に Work Item の書き込みが入って CAS が失敗した場合は、最大3回まで読み直して再試行します。Work Item link と Cycle への一括追加は対象 Work Item の revision を同じ transaction で検査します。Archive・restore・rollover・次の Cycle の作成・Work Item dependency・update の publish / cadence は Work Item の状態を読むか、`META` の revision を Work Item ごとの条件の代わりにしているため、従来どおり revision の完全一致を要求します。Graph の読み取りも、前後の `META` read の間に revision が進んだ場合は最大3回まで読み直します。
 
 1 row は安全余裕を含む 300 KB、1 transaction は 100 item / 3 MB、API snapshot は4 MBを上限とします。Versioned update、comment、reaction は graph snapshot に展開せず、target-prefix の cursor API で取得します。Graph read は META の強整合 read を前後 barrier にし、mutable graph の5 prefixだけを強整合 Queryするため、増え続ける update history / annotation rowを物理的に走査しません。Entity description は UTF-8 で 20 KB までです。Project / Initiative report は entity に埋め込まず、versioned update を正本にします。上限超過は commit 前に `413` で拒否し、response だけ失敗して revision が進む状態を作りません。
 
