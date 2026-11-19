@@ -1162,6 +1162,11 @@ textarea {
   }
 
   .document-print-root pre,
+  .document-print-root pre * {
+    color: #111 !important;
+  }
+
+  .document-print-root pre,
   .document-print-root table,
   .document-print-root blockquote {
     break-inside: avoid;
