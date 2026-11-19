@@ -365,7 +365,19 @@ describe('agent task lifecycle', () => {
     expect((await service.configuration()).agentSettings.resumableStatusIds).toEqual(['coding'])
     // A rate limited search for resumes does not keep ready work from being selected.
     api.latestRun = async () => { throw new AgentTaskError('rate_limited', 'Slow down', true, 60) }
-    expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'fresh' } })
+    expect(await service.next({})).toMatchObject({
+      action: 'start', task: { id: 'fresh' }, skipped: [{ taskId: 'failed', reason: 'resume_unchecked' }],
+    })
+    // So does one that is rate limited while it reads the blockers of a paused task.
+    api.latestRun = latestRun
+    const blocker = api.get.bind(api)
+    api.get = async (id) => {
+      if (id === 'missing') throw new AgentTaskError('rate_limited', 'Slow down', true, 60)
+      return blocker(id)
+    }
+    expect(await service.next({})).toMatchObject({
+      action: 'start', task: { id: 'fresh' }, skipped: [{ taskId: 'waiting', reason: 'resume_unchecked' }],
+    })
   })
 
   test('stops looking for resumes after its read budget and still selects ready work', async () => {
@@ -384,7 +396,10 @@ describe('agent task lifecycle', () => {
     let latestReads = 0
     const latestRun = api.latestRun.bind(api)
     api.latestRun = async (id) => { latestReads += 1; return latestRun(id) }
-    expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'fresh' } })
+    // The first task the search did not check is reported, so the agent can look at it itself.
+    expect(await service.next({})).toMatchObject({
+      action: 'start', task: { id: 'fresh' }, skipped: [{ taskId: 'stuck-20', reason: 'resume_unchecked' }],
+    })
     expect(latestReads).toBe(20)
   })
 
