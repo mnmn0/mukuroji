@@ -2,6 +2,7 @@ import { useState } from 'react'
 import {
   deriveWorkItemScheduleSlip,
   type CanonicalWorkItem,
+  type ProjectScheduleBaseline,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { useCaptureProjectScheduleBaseline } from '../../work-items/mutations/useCaptureProjectScheduleBaseline'
@@ -63,8 +64,72 @@ export function TaskScheduleBaselinePanel({
     }
   }
 
-  const isLoading = query.data === undefined && query.error === undefined
-  const baseline = query.data?.baseline ?? null
+  return (
+    <TaskScheduleBaselineView
+      canCapture={canCapture}
+      captureFailed={failedScope === scope}
+      disabled={disabled || isCapturing}
+      onCapture={() => {
+        void capture()
+      }}
+      state={
+        query.data
+          ? { status: 'ready', baseline: query.data.baseline }
+          : query.error !== undefined
+            ? { status: 'error' }
+            : { status: 'loading' }
+      }
+      t={t}
+      task={task}
+    />
+  )
+}
+
+/** Load state of a Project baseline as the view shows it. */
+export type TaskScheduleBaselineState =
+  | { status: 'loading' }
+  | { status: 'error' }
+  | {
+    /** The baseline was read. */
+    status: 'ready'
+    /** Latest baseline, or `null` when none was saved. */
+    baseline: ProjectScheduleBaseline | null
+  }
+
+/** Props for the presentational baseline section. */
+export type TaskScheduleBaselineViewProps = {
+  /** Work Item whose current plan is compared with the baseline. */
+  task: CanonicalWorkItem
+  /** Load state of the Project baseline. */
+  state: TaskScheduleBaselineState
+  /** Whether to offer saving a new Project baseline. */
+  canCapture: boolean
+  /** Whether the last save for this Project failed. */
+  captureFailed: boolean
+  /** Disables the save button. */
+  disabled: boolean
+  /** Saves a new Project baseline. */
+  onCapture: () => void
+  /** Translator for labels. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders the baseline dates, the slips, and the save button without reading any data.
+ *
+ * @param props - Work Item, baseline state, and the save callback.
+ * @returns The baseline section.
+ */
+export function TaskScheduleBaselineView({
+  task,
+  state,
+  canCapture,
+  captureFailed,
+  disabled,
+  onCapture,
+  t,
+}: TaskScheduleBaselineViewProps) {
+  const baseline = state.status === 'ready' ? state.baseline : null
   const entry = baseline?.entries.find((candidate) => candidate.workItemId === task.id)
   const slip = entry ? deriveWorkItemScheduleSlip(entry, task.schedule) : undefined
   const baselineDates = entry
@@ -80,10 +145,10 @@ export function TaskScheduleBaselinePanel({
       data-testid="task-detail-schedule-baseline"
     >
       <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{t('tasks.detail.scheduleBaseline')}</h3>
-      {query.error !== undefined && query.data === undefined ? (
+      {state.status === 'error' ? (
         <p className="text-sm text-[var(--workbench-muted)]">{t('tasks.detail.baselineLoadError')}</p>
       ) : null}
-      {query.data && !baseline ? (
+      {state.status === 'ready' && !baseline ? (
         <p className="text-sm text-[var(--workbench-muted)]">{t('tasks.detail.baselineNone')}</p>
       ) : null}
       {baseline && !entry ? (
@@ -114,15 +179,13 @@ export function TaskScheduleBaselinePanel({
           <p className="text-xs text-[var(--workbench-muted)]">{t('tasks.detail.baselineCaptureHint')}</p>
           <button
             className="workbench-button-secondary min-h-[44px] px-3 disabled:border-slate-300 disabled:bg-slate-300"
-            disabled={disabled || isCapturing || isLoading}
-            onClick={() => {
-              void capture()
-            }}
+            disabled={disabled || state.status === 'loading'}
+            onClick={onCapture}
             type="button"
           >
             {t('tasks.detail.baselineCapture')}
           </button>
-          {failedScope === scope ? (
+          {captureFailed ? (
             <p className="text-sm text-fg-red-700" role="alert">{t('tasks.detail.baselineCaptureError')}</p>
           ) : null}
         </div>
