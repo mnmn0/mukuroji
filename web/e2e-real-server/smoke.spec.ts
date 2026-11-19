@@ -1,10 +1,10 @@
 import { expect, test, type APIRequestContext } from '@playwright/test'
 
 /**
- * Floci と実 server に対する最小の smoke suite です（#417）。
+ * Minimal smoke suite against the real server running on Floci (#417).
  *
- * API を mock せず、Web の dev server の `/api` proxy を通して server を呼びます。
- * Team と Project の ID は名前から決まるので、実行ごとに一意な名前を使います。
+ * Calls the server through the Web dev server's `/api` proxy without mocking the API.
+ * Team and Project IDs derive from their names, so each run uses unique names.
  */
 
 const demoEmail = process.env.SMOKE_USER_EMAIL ?? 'demo@example.com'
@@ -20,32 +20,32 @@ const calendarPolicy = {
 }
 
 /**
- * 順に流す test の間で受け渡す値です。前の test が失敗すると未設定のまま残ります。
+ * Values passed between the serial tests. They stay unset when an earlier test fails.
  */
 type SmokeState = {
-  /** API login で受け取った access token です。最初の test で設定します。 */
+  /** Access token from the API login; set by the first test. */
   accessToken: string
-  /** 作成した Team の ID です。Team / Project 作成の test で設定します。 */
+  /** ID of the created Team; set by the Team and Project test. */
   teamId: string
-  /** 作成した Project の ID です。Team / Project 作成の test で設定します。 */
+  /** ID of the created Project; set by the Team and Project test. */
   projectId: string
-  /** 作成した Work Item の ID です。Work Item 作成の test で設定します。 */
+  /** ID of the created Work Item; set by the Work Item test. */
   workItemId: string
-  /** 作成直後の Work Item の revision です。Work Item 作成の test で設定します。 */
+  /** Revision of the Work Item right after creation; set by the Work Item test. */
   workItemRevision: number
 }
 
-/** test 間で共有する smoke の状態です。 */
+/** Smoke state shared between tests. */
 const state: Partial<SmokeState> = {}
 
 test.describe.configure({ mode: 'serial' })
 
 /**
- * 前の test が設定した値を読みます。
+ * Reads a value that an earlier test stored.
  *
- * @param key - 読む値の名前です。
- * @returns 設定済みの値です。
- * @throws 前の test が失敗して値が未設定のときに投げます。
+ * @param key - Name of the value to read.
+ * @returns The stored value.
+ * @throws When an earlier test failed and left the value unset.
  */
 function requireState<K extends keyof SmokeState>(key: K): SmokeState[K] {
   const value = state[key]
@@ -56,9 +56,9 @@ function requireState<K extends keyof SmokeState>(key: K): SmokeState[K] {
 }
 
 /**
- * 更新系 API に付ける認証と冪等性の header を作ります。
+ * Builds the auth and idempotency headers for mutating API calls.
  *
- * @returns Authorization・Idempotency-Key・X-Correlation-Id の header です。
+ * @returns Authorization, Idempotency-Key and X-Correlation-Id headers.
  */
 function mutationHeaders() {
   return {
@@ -69,11 +69,11 @@ function mutationHeaders() {
 }
 
 /**
- * response の status を確かめ、JSON body を返します。
+ * Asserts the response status and returns the parsed JSON body.
  *
- * @param response - API の response です。
- * @param expectedStatus - 期待する HTTP status です。
- * @returns 解析した JSON body です。
+ * @param response - API response.
+ * @param expectedStatus - Expected HTTP status.
+ * @returns Parsed JSON body.
  */
 async function readJson(response: Awaited<ReturnType<APIRequestContext['get']>>, expectedStatus: number) {
   const body: unknown = await response.json().catch(() => undefined)

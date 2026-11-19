@@ -13,15 +13,15 @@ const webBaseUrl = `http://127.0.0.1:${webPort}`
 const apiBaseUrl = `http://127.0.0.1:${apiPort}`
 
 /**
- * Floci と実 server に対して動かす smoke suite の設定です（#417）。
+ * Config for the smoke suite that runs against Floci and the real server (#417).
  *
- * `web/e2e` の mock ベースの suite とは分け、API を差し替えずに Web と server の契約を確かめます。
- * 先に `bun run floci:up` で Floci を起動し、`.floci/generated/cognito.env` を作っておきます。
- * server は `server:dev`、Web は `/api` を server へ proxy する `web:dev` で起動します。
+ * Kept apart from the mock-based `web/e2e` suite; it checks the Web and server contract without stubbing the API.
+ * Run `bun run floci:up` first so `.floci/generated/cognito.env` exists.
+ * Starts the server with `server:dev` and the Web with `web:dev`, which proxies `/api` to the server.
  */
 const config = defineConfig({
   testDir: './web/e2e-real-server',
-  // 各 test は前の test が作った Team と Work Item を使うので、1 worker で順に流します。
+  // Tests reuse the Team and Work Item created by earlier tests, so run them serially on one worker.
   fullyParallel: false,
   workers: 1,
   forbidOnly: !!process.env.CI,
