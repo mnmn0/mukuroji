@@ -92,7 +92,16 @@ Work Item Relation Graph の `blocks` / `blockedBy` は意味上の blocker で�
 
 ### Schedule baseline と slip
 
-Project ごとに最新の schedule baseline を 1 つ保存できる（#336 の最初の範囲）。`POST /api/teams/{teamId}/projects/{projectId}/schedule-baseline` は Project manager（Team を通した manager と system admin を含む）だけが呼べ、その Project に割り当てられた archive されていない全 Work Item の予定開始日・予定終了日（期限）を固定して Planning table の 1 行に保存する。保存し直すと revision が 1 つ進み、前の baseline は残らない。1 Team 1,000 件を超えると 413。
+Project ごとに最新の schedule baseline を 1 つ保存できる（#336 の最初の範囲）。`POST /api/teams/{teamId}/projects/{projectId}/schedule-baseline` は Project manager（Team を通した manager と system admin を含む）だけが呼べ、その Project に割り当てられた archive されていない全 Work Item の予定開始日・予定終了日（期限）を固定して Planning table の 1 行に保存する。保存し直すと revision が 1 つ進み、前の baseline は残らない。保存は idempotency key を持たないため、応答が失われた後に押し直すと、その時点の予定で新しい revision になる（Web は自動再送しない）。
+
+| Status | `code` | 意味 |
+| --- | --- | --- |
+| `403` | `ScheduleBaselineForbidden` | Project を読めるが manager ではない（保存時）。Team 自体に権限が無い場合は Team の判定で 403 になり、`code` は無い。 |
+| `404` | `ProjectNotFound` | Team 外の Project、または読めない Project。存在を明かさない。 |
+| `409` | `ScheduleBaselineConflict` | 保存中に別の保存が revision を進めた、または保存の途中で権限が変わった。読み直して再実行する。 |
+| `413` | `WorkItemListLimitExceeded` | Team 全体（Project 単位ではない）の archive されていない Work Item が 1,000 件を超える。 |
+| `502` | `ScheduleBaselineCorruptState` / `ScheduleBaselineStorageFailure` | 保存済みの行が壊れている、または保存先が失敗した。 |
+| `503` | `ScheduleBaselineRetryable` / `ScheduleBaselineUnavailable` / `ScheduleBaselineAuthorizationUnavailable` | 一時的に保存・読み込みできない。 |
 
 `GET` は Project の viewer が読め、今読める Work Item の entry だけを返す。baseline が無い Project では `baseline: null`。現在の予定との差（`startSlipDays` / `endSlipDays`、正が後ろ倒し）は `deriveWorkItemScheduleSlip` で read 時に導出し、Web の詳細ペインの「ベースラインとのずれ」に出す。baseline のない Work Item の表示と既存 API は変わらない。
 

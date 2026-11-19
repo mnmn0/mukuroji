@@ -91,8 +91,14 @@ export function TaskScheduleBaselinePanel({
 
 /** Load state of a Project baseline as the view shows it. */
 export type TaskScheduleBaselineState =
-  | { status: 'loading' }
-  | { status: 'error' }
+  | {
+    /** The baseline is being read for the first time. */
+    status: 'loading'
+  }
+  | {
+    /** The baseline could not be read. */
+    status: 'error'
+  }
   | {
     /** The baseline was read. */
     status: 'ready'
