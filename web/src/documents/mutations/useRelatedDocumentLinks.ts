@@ -14,6 +14,10 @@ import {
   getDocument,
 } from '../api'
 import { createDocumentOperationId } from '../model/document'
+import {
+  createDocumentRelationTargetKey,
+  hasDocumentLevelRelationTo,
+} from '../model/linkTargets'
 
 /**
  * Why creating a linked Document failed.
@@ -43,6 +47,8 @@ type PendingLink = {
  * Request identity kept for one logical page creation until it is linked.
  */
 type PendingCreate = {
+  /** Target the page is created for. */
+  targetKey: string
   /** Normalized title the page is created with. */
   title: string
   /** Idempotency context shared by every create attempt. */
@@ -81,7 +87,7 @@ export function useRelatedDocumentLinks({
   const pendingCreateRef = useRef<PendingCreate | undefined>(undefined)
   const targetKey = target === undefined
     ? undefined
-    : JSON.stringify(target)
+    : createDocumentRelationTargetKey(target)
 
   /**
    * Returns the request identity for linking one Document, reusing the one
@@ -123,20 +129,24 @@ export function useRelatedDocumentLinks({
     if (!accessToken || !target) return
     const pending = readPendingLink(documentId, target)
     const document = await getDocument(accessToken, documentId)
-    await applyDocumentOperations(
-      accessToken,
-      documentId,
-      {
-        baseRevision: document.revision,
-        clientId: pending.clientId,
-        operations: [{
-          operationId: pending.operationId,
-          relation: pending.relation,
-          type: 'upsert-relation',
-        }],
-      },
-      pending.context,
-    )
+    // The panel lists backlinks a page at a time, so a Document that already
+    // links here can still be offered; adding it again would duplicate it.
+    if (!hasDocumentLevelRelationTo(document.relations, target)) {
+      await applyDocumentOperations(
+        accessToken,
+        documentId,
+        {
+          baseRevision: document.revision,
+          clientId: pending.clientId,
+          operations: [{
+            operationId: pending.operationId,
+            relation: pending.relation,
+            type: 'upsert-relation',
+          }],
+        },
+        pending.context,
+      )
+    }
     pendingLinksRef.current.delete(`${targetKey}\0${documentId}`)
     await onChanged()
   }
@@ -149,16 +159,28 @@ export function useRelatedDocumentLinks({
    */
   const createLinkedDocument = async (title: string) => {
     const normalizedTitle = title.trim()
-    if (!accessToken || !target || !normalizedTitle || isCreating) {
+    if (
+      !accessToken ||
+      !target ||
+      targetKey === undefined ||
+      !normalizedTitle ||
+      isCreating
+    ) {
       return false
     }
     setIsCreating(true)
     setCreateError(undefined)
     const previous = pendingCreateRef.current
+    // A retry reuses the earlier attempt only for the same target and title,
+    // so a page created for one target is never linked to another.
     const pending: PendingCreate =
-      previous?.title === normalizedTitle
+      previous?.targetKey === targetKey && previous.title === normalizedTitle
         ? previous
-        : { context: createMutationRequestContext(), title: normalizedTitle }
+        : {
+            context: createMutationRequestContext(),
+            targetKey,
+            title: normalizedTitle,
+          }
     pendingCreateRef.current = pending
     let createdDocumentId = pending.documentId
     try {

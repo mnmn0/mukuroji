@@ -1,14 +1,15 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { WorkspaceSearchResult } from '@mukuroji/contracts'
-import { getProjectDocumentsPage } from '../src/documents/api'
 import { documentSummaryFixtures } from '../src/documents/fixtures'
 import {
   createDocumentRelationTargetKey,
+  hasDocumentLevelRelationTo,
   parseDocumentLinkTargetQuery,
   toDocumentLinkTargetOptions,
 } from '../src/documents/model/linkTargets'
 import { DocumentRelationTargetPicker } from '../src/documents/ui/DocumentLinkPicker'
+import { getProjectDocumentsPage } from '../src/documents/queries/projectDocumentsLoader'
 import { RelatedDocuments } from '../src/documents/ui/RelatedDocuments'
 import { WhiteboardCanvas } from '../src/documents/ui/WhiteboardCanvas'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -91,6 +92,28 @@ describe('Document link targets', () => {
     expect(
       createDocumentRelationTargetKey({ kind: 'project', projectId: 'p-1' }),
     ).toBe('project:p-1')
+  })
+})
+
+describe('Existing Document links', () => {
+  test('counts only a page-level link to the same target as already linked', () => {
+    const target = { kind: 'project', projectId: 'project-1' } as const
+    const relation = {
+      createdAt: '2026-11-19T00:00:00.000Z',
+      createdByUserId: 'user-1',
+      id: 'relation-1',
+      target,
+    }
+
+    expect(hasDocumentLevelRelationTo([
+      { ...relation, source: { kind: 'document' } },
+    ], target)).toBe(true)
+    expect(hasDocumentLevelRelationTo([
+      { ...relation, source: { blockId: 'block-1', kind: 'block' } },
+    ], target)).toBe(false)
+    expect(hasDocumentLevelRelationTo([
+      { ...relation, source: { kind: 'document' } },
+    ], { kind: 'project', projectId: 'project-2' })).toBe(false)
   })
 })
 

@@ -1,4 +1,5 @@
 import type {
+  DocumentRelation,
   DocumentRelationTarget,
   WorkspaceSearchResult,
 } from '@mukuroji/contracts'
@@ -41,6 +42,28 @@ export function createDocumentRelationTargetKey(
   target: DocumentRelationTarget,
 ): string {
   return `${target.kind}:${readDocumentRelationTargetValue(target)}`
+}
+
+/**
+ * Tells whether a Document already links to a target as a whole page.
+ *
+ * Relations sourced from a block or Whiteboard object do not count, because
+ * removing that element removes the link with it.
+ *
+ * @param relations - Relations stored on the Document.
+ * @param target - Target the Document should link to.
+ * @returns Whether a Document-level relation to the target exists.
+ */
+export function hasDocumentLevelRelationTo(
+  relations: readonly DocumentRelation[],
+  target: DocumentRelationTarget,
+): boolean {
+  const key = createDocumentRelationTargetKey(target)
+  return relations.some(
+    (relation) =>
+      relation.source.kind === 'document' &&
+      createDocumentRelationTargetKey(relation.target) === key,
+  )
 }
 
 /**

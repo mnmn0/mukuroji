@@ -2,7 +2,7 @@ import useSWRInfinite from 'swr/infinite'
 import {
   getProjectDocumentsPage,
   type ProjectDocumentsPage,
-} from '../api'
+} from './projectDocumentsLoader'
 
 /**
  * Loads the active Documents in one Project scope, page by page.
