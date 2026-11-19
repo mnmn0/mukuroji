@@ -228,6 +228,44 @@ test('rejects assignments to oneself, to a guest beyond guest roles, and from a 
   })
 })
 
+test('lets only an owner grant administrative roles or promote a member who has assignments', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, { workspaceRole: 'admin' })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    setTestAppDependencies({ enterpriseIdentity: identity })
+
+    const administrative = await sendAssignmentRequest(
+      '/api/enterprise/security/role-assignments',
+      'POST',
+      { memberKey: 'sato@example.com', roleId: 'workspace:admin' },
+    )
+    expect(administrative.status).toBe(403)
+    expect(await administrative.json()).toMatchObject({ code: 'EnterpriseRoleAssignmentAdminProtected' })
+    const viewer = await sendAssignmentRequest(
+      '/api/enterprise/security/role-assignments',
+      'POST',
+      { memberKey: 'sato@example.com', roleId: 'workspace:portfolio-viewer' },
+    )
+    expect(viewer.status).toBe(201)
+
+    configureFakeProjectClients(true, { workspaceRole: 'owner' })
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    const ownerGrant = await sendAssignmentRequest(
+      '/api/enterprise/security/role-assignments',
+      'POST',
+      { memberKey: 'sato@example.com', roleId: 'workspace:admin' },
+    )
+    expect(ownerGrant.status).toBe(201)
+    const promotion = await sendAssignmentRequest(
+      '/api/workspace/members/sato@example.com',
+      'PATCH',
+      { role: 'admin', expectedVersion: 1 },
+    )
+    expect(promotion.status).toBe(409)
+    expect(await promotion.json()).toMatchObject({ code: 'WorkspaceMemberRoleAssignmentsPresent' })
+  })
+})
+
 test('lets an All Projects viewer read a Project it is not a member of, without editing', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     configureFakeProjectClients(false, { workspaceRole: 'member' })

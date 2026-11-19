@@ -446,8 +446,16 @@ export function evaluateEnterpriseAccess(
       principalMatches &&
       scopeMatches(assignment.scope, input.resource, input.projectScopeOwnerTeamId)
     ) {
-      roleIds.add(assignment.roleId)
       matchingScopedGrant = true
+      // A member who became a guest after a direct assignment keeps only guest-assignable roles.
+      if (
+        input.principal.workspaceRole === 'guest' &&
+        assignment.principalKind === 'member' &&
+        !isEnterpriseRoleGuestAssignable(input.customRoles, assignment.roleId)
+      ) {
+        continue
+      }
+      roleIds.add(assignment.roleId)
     }
   }
   for (const mapping of input.groupMappings) {

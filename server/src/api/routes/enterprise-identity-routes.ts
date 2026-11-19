@@ -1026,13 +1026,6 @@ async function requireEnterpriseRoleAssignmentTarget(
   principal: EnterpriseSecurityPrincipal,
   memberKey: string,
 ) {
-  if (memberKey === principal.userKey) {
-    throw new EnterpriseIdentityError(
-      409,
-      'EnterpriseRoleAssignmentSelfDenied',
-      'You cannot change your own role assignments.',
-    )
-  }
   const target = await workspaceDependencies.workspaceAccess.getActiveMember(
     principal.directoryId,
     memberKey,
@@ -1044,6 +1037,14 @@ async function requireEnterpriseRoleAssignmentTarget(
       'The member was not found or is not active.',
     )
   }
+  // Compare the stored key, so a differently written key for the caller cannot pass.
+  if (target.memberKey === principal.userKey) {
+    throw new EnterpriseIdentityError(
+      409,
+      'EnterpriseRoleAssignmentSelfDenied',
+      'You cannot change your own role assignments.',
+    )
+  }
   if (target.role === 'owner') {
     throw new EnterpriseIdentityError(
       409,
@@ -1051,12 +1052,7 @@ async function requireEnterpriseRoleAssignmentTarget(
       'Owners keep full access and cannot receive role assignments.',
     )
   }
-  if (
-    target.role === 'admin' &&
-    principal.workspaceRole !== 'owner' &&
-    principal.isSystemAdmin !== true &&
-    principal.principalKind !== 'break-glass'
-  ) {
+  if (target.role === 'admin' && !isEnterpriseOwnerLevelCaller(principal)) {
     throw new EnterpriseIdentityError(
       403,
       'EnterpriseRoleAssignmentAdminProtected',
@@ -1064,6 +1060,56 @@ async function requireEnterpriseRoleAssignmentTarget(
     )
   }
   return target
+}
+
+/**
+ * Permissions that make a role administrative; only an owner may grant or remove such a role,
+ * as only an owner may appoint or change an admin.
+ */
+const enterpriseAdministrativePermissionIds: ReadonlySet<EnterprisePermissionId> = new Set<
+  EnterprisePermissionId
+>([
+  'workspace.manage',
+  'members.manage',
+  'identity.manage',
+  'security.manage',
+  'service-accounts.manage',
+  'audit.export',
+])
+
+/**
+ * Returns whether the caller may change administrators, like a Workspace owner.
+ *
+ * @param principal - Caller of the assignment route.
+ * @returns Whether the caller is an owner, a system administrator, or a break-glass principal.
+ */
+function isEnterpriseOwnerLevelCaller(principal: EnterpriseSecurityPrincipal): boolean {
+  return principal.workspaceRole === 'owner' ||
+    principal.isSystemAdmin === true ||
+    principal.principalKind === 'break-glass'
+}
+
+/**
+ * Rejects granting or removing an administrative role unless the caller is owner-level.
+ *
+ * @param principal - Caller of the assignment route.
+ * @param snapshot - Enterprise identity snapshot with the custom roles.
+ * @param roleId - Role being granted or removed.
+ */
+function requireEnterpriseAdministrativeRoleCaller(
+  principal: EnterpriseSecurityPrincipal,
+  snapshot: EnterpriseIdentitySnapshot,
+  roleId: EnterpriseRoleId,
+) {
+  const administrative = resolveEnterpriseRolePermissions(snapshot.customRoles, roleId)
+    .some((permission) => enterpriseAdministrativePermissionIds.has(permission))
+  if (administrative && !isEnterpriseOwnerLevelCaller(principal)) {
+    throw new EnterpriseIdentityError(
+      403,
+      'EnterpriseRoleAssignmentAdminProtected',
+      'Only an owner can assign or remove a role with administrative permissions.',
+    )
+  }
 }
 
 /**
@@ -2551,7 +2597,13 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         new URL(`/api/scim/v2/${encodeURIComponent(principal.directoryId)}`, c.req.url).toString(),
         principal.enterprisePermissions,
       )
-      const members = view.capabilities.canViewAccess
+      // Member emails are shown only to callers who may read or manage members anyway.
+      const canListMembers = principal.enterprisePermissions.some((permission) =>
+        permission === 'members.read' ||
+        permission === 'members.manage' ||
+        permission === 'security.manage'
+      )
+      const members = view.capabilities.canViewAccess && canListMembers
         ? (await workspaceDependencies.workspaceAccess.listActiveMembers(principal.directoryId))
           .map((member) => ({
             memberKey: member.memberKey,
@@ -3639,6 +3691,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         roleId,
         scopeType,
       )
+      requireEnterpriseAdministrativeRoleCaller(principal, snapshot, roleId)
       if (target.role === 'guest' && !isEnterpriseRoleGuestAssignable(snapshot.customRoles, roleId)) {
         throw new EnterpriseIdentityError(
           409,
@@ -3697,6 +3750,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         assignment.principalId,
       )
       if (target) await requireEnterpriseRoleAssignmentTarget(principal, target.memberKey)
+      requireEnterpriseAdministrativeRoleCaller(principal, snapshot, assignment.roleId)
       await workspaceDependencies.enterpriseIdentity.authorization.deleteMemberRoleAssignment(
         assignment,
         createWorkspaceMutationContext(c, principal, body),
