@@ -1169,6 +1169,13 @@ textarea {
 
   .document-print-root pre {
     border: 1px solid #ccc;
+    overflow: visible !important;
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
+  }
+
+  .document-print-root pre code {
+    white-space: inherit !important;
   }
 
   .document-print-root pre,
