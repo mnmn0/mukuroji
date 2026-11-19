@@ -1,14 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import {
   deriveWorkItemScheduleSlip,
   type CanonicalWorkItem,
-  type ProjectScheduleBaseline,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import {
-  captureProjectScheduleBaseline,
-  getProjectScheduleBaseline,
-} from '../../work-items/api/scheduleBaseline'
+import { useCaptureProjectScheduleBaseline } from '../../work-items/mutations/useCaptureProjectScheduleBaseline'
+import { useProjectScheduleBaseline } from '../../work-items/queries/useProjectScheduleBaseline'
 import {
   formatTaskScheduleVariance,
   resolveTaskScheduleVarianceTone,
@@ -31,12 +28,6 @@ export type TaskScheduleBaselinePanelProps = {
   t: (key: MessageKey) => string
 }
 
-/** Load state of the Project baseline. */
-type BaselineState =
-  | { status: 'loading' }
-  | { status: 'error' }
-  | { status: 'ready'; baseline: ProjectScheduleBaseline | null }
-
 /**
  * Shows the Work Item's frozen baseline dates and how far its current plan slipped from them.
  *
@@ -51,42 +42,29 @@ export function TaskScheduleBaselinePanel({
   disabled,
   t,
 }: TaskScheduleBaselinePanelProps) {
-  const [state, setState] = useState<BaselineState>({ status: 'loading' })
-  const [isCapturing, setIsCapturing] = useState(false)
-  const [captureFailed, setCaptureFailed] = useState(false)
   const { teamId } = task
+  const query = useProjectScheduleBaseline(accessToken, teamId, projectId)
+  const captureBaseline = useCaptureProjectScheduleBaseline()
+  const [pendingScope, setPendingScope] = useState<string | undefined>()
+  const [failedScope, setFailedScope] = useState<string | undefined>()
+  const scope = `${teamId}/${projectId}`
+  const isCapturing = pendingScope === scope
 
-  useEffect(() => {
-    let active = true
-    setState({ status: 'loading' })
-    getProjectScheduleBaseline(teamId, projectId, accessToken).then(
-      (response) => {
-        if (active) setState({ status: 'ready', baseline: response.baseline })
-      },
-      () => {
-        if (active) setState({ status: 'error' })
-      },
-    )
-    return () => {
-      active = false
-    }
-  }, [teamId, projectId, accessToken])
-
-  /** Saves a new Project baseline and shows it. */
+  /** Saves a new Project baseline; the response lands in that Project's cache entry only. */
   const capture = async () => {
-    setIsCapturing(true)
-    setCaptureFailed(false)
+    setPendingScope(scope)
+    setFailedScope(undefined)
     try {
-      const response = await captureProjectScheduleBaseline(teamId, projectId, accessToken)
-      setState({ status: 'ready', baseline: response.baseline })
+      await captureBaseline(accessToken, teamId, projectId)
     } catch {
-      setCaptureFailed(true)
+      setFailedScope(scope)
     } finally {
-      setIsCapturing(false)
+      setPendingScope((current) => current === scope ? undefined : current)
     }
   }
 
-  const baseline = state.status === 'ready' ? state.baseline : null
+  const isLoading = query.data === undefined && query.error === undefined
+  const baseline = query.data?.baseline ?? null
   const entry = baseline?.entries.find((candidate) => candidate.workItemId === task.id)
   const slip = entry ? deriveWorkItemScheduleSlip(entry, task.schedule) : undefined
   const baselineDates = entry
@@ -102,10 +80,10 @@ export function TaskScheduleBaselinePanel({
       data-testid="task-detail-schedule-baseline"
     >
       <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{t('tasks.detail.scheduleBaseline')}</h3>
-      {state.status === 'error' ? (
+      {query.error !== undefined && query.data === undefined ? (
         <p className="text-sm text-[var(--workbench-muted)]">{t('tasks.detail.baselineLoadError')}</p>
       ) : null}
-      {state.status === 'ready' && !baseline ? (
+      {query.data && !baseline ? (
         <p className="text-sm text-[var(--workbench-muted)]">{t('tasks.detail.baselineNone')}</p>
       ) : null}
       {baseline && !entry ? (
@@ -136,7 +114,7 @@ export function TaskScheduleBaselinePanel({
           <p className="text-xs text-[var(--workbench-muted)]">{t('tasks.detail.baselineCaptureHint')}</p>
           <button
             className="workbench-button-secondary min-h-[44px] px-3 disabled:border-slate-300 disabled:bg-slate-300"
-            disabled={disabled || isCapturing || state.status === 'loading'}
+            disabled={disabled || isCapturing || isLoading}
             onClick={() => {
               void capture()
             }}
@@ -144,7 +122,7 @@ export function TaskScheduleBaselinePanel({
           >
             {t('tasks.detail.baselineCapture')}
           </button>
-          {captureFailed ? (
+          {failedScope === scope ? (
             <p className="text-sm text-fg-red-700" role="alert">{t('tasks.detail.baselineCaptureError')}</p>
           ) : null}
         </div>

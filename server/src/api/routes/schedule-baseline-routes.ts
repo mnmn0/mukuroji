@@ -1,11 +1,10 @@
 import type { Context, Hono } from 'hono'
-import {
-  createProjectScheduleBaselineEntry,
-  PROJECT_SCHEDULE_BASELINE_MAX_ENTRIES,
-  type ProjectScheduleBaselineResponse,
-} from '@mukuroji/contracts'
 import { ProjectDataError } from '../../modules/directory'
-import type { TeamIssueResponseItem } from '../../modules/work-items'
+import {
+  captureProjectScheduleBaselineUseCase,
+  readProjectScheduleBaselineUseCase,
+  type TeamIssueResponseItem,
+} from '../../modules/work-items'
 import { workItemDependencies } from '../shared/app-dependencies'
 import { toWorkItemConfigurationErrorResponse } from '../shared/collaboration-access'
 import { readBearerAccessToken } from '../shared/http'
@@ -40,22 +39,11 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessRead(principal)
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       requireProjectAccess(principal, context, projectId, 'viewer')
-      const baseline = await workItemDependencies.scheduleBaselines.get(principal.directoryId, teamId, projectId)
-      if (!baseline) {
-        return c.json({ teamId, projectId, baseline: null } satisfies ProjectScheduleBaselineResponse)
-      }
-      const readableIds = new Set(
-        filterAccessibleTeamIssues(await readTeamWorkItems(principal.directoryId, teamId), principal, context)
-          .map((issue) => issue.id),
-      )
-      return c.json({
-        teamId,
-        projectId,
-        baseline: {
-          ...baseline,
-          entries: baseline.entries.filter((entry) => readableIds.has(entry.workItemId)),
-        },
-      } satisfies ProjectScheduleBaselineResponse)
+      return c.json(await readProjectScheduleBaselineUseCase(
+        createBaselineDependencies(principal.directoryId, teamId),
+        { workspaceId: principal.directoryId, teamId, projectId },
+        (issue) => filterAccessibleTeamIssues([issue], principal, context).length > 0,
+      ))
     } catch (error) {
       return toWorkItemConfigurationErrorResponse(c, error)
     }
@@ -71,21 +59,19 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessWrite(principal)
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       requireProjectAccess(principal, context, projectId, 'manager')
-      const workItems = (await readTeamWorkItems(principal.directoryId, teamId))
-        .filter((issue) => issue.assignedProjectId === projectId)
-      const baseline = await workItemDependencies.scheduleBaselines.capture({
-        workspaceId: principal.directoryId,
-        teamId,
-        projectId,
-        entries: workItems.map((issue) => createProjectScheduleBaselineEntry(issue.id, issue.schedule)),
-        capturedAt: new Date().toISOString(),
-        callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
-          principal,
-          [],
-          principal.principalKind !== 'service-account',
-        ),
-      })
-      return c.json({ teamId, projectId, baseline } satisfies ProjectScheduleBaselineResponse, 201)
+      const response = await captureProjectScheduleBaselineUseCase(
+        createBaselineDependencies(principal.directoryId, teamId),
+        { workspaceId: principal.directoryId, teamId, projectId },
+        {
+          capturedAt: new Date().toISOString(),
+          callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
+            principal,
+            [],
+            principal.principalKind !== 'service-account',
+          ),
+        },
+      )
+      return c.json(response, 201)
     } catch (error) {
       return toWorkItemConfigurationErrorResponse(c, error)
     }
@@ -135,24 +121,28 @@ function requireProjectAccess(
 }
 
 /**
- * Reads every non-archived Work Item of a Team, refusing a Team too large for one baseline.
+ * Binds the baseline use case dependencies to one Team.
  *
  * @param directoryId - Workspace directory ID.
  * @param teamId - Team ID.
- * @returns The Team's Work Items.
+ * @returns The store and the Team Work Item reader.
  */
-async function readTeamWorkItems(directoryId: string, teamId: string): Promise<TeamIssueResponseItem[]> {
-  const { teamIssues } = workItemDependencies
-  if (!teamIssues.getTeamHierarchyEntries) {
-    throw new ProjectDataError(503, 'ScheduleBaselineUnavailable', 'Work Items cannot be read for the schedule baseline.')
+function createBaselineDependencies(directoryId: string, teamId: string) {
+  return {
+    store: workItemDependencies.scheduleBaselines,
+    /**
+     * Reads the Team's non-archived Work Items.
+     *
+     * @param limit - Most Work Items the use case can use; one more is read.
+     * @returns Up to `limit + 1` Work Items.
+     */
+    async readTeamWorkItems(limit: number): Promise<TeamIssueResponseItem[]> {
+      const { teamIssues } = workItemDependencies
+      if (!teamIssues.getTeamHierarchyEntries) {
+        throw new ProjectDataError(503, 'ScheduleBaselineUnavailable', 'Work Items cannot be read for the schedule baseline.')
+      }
+      const entries = await teamIssues.getTeamHierarchyEntries(directoryId, teamId, limit)
+      return entries.map((entry) => entry.issue)
+    },
   }
-  const entries = await teamIssues.getTeamHierarchyEntries(directoryId, teamId, PROJECT_SCHEDULE_BASELINE_MAX_ENTRIES)
-  if (entries.length > PROJECT_SCHEDULE_BASELINE_MAX_ENTRIES) {
-    throw new ProjectDataError(
-      413,
-      'WorkItemListLimitExceeded',
-      `This Team has more than ${PROJECT_SCHEDULE_BASELINE_MAX_ENTRIES} Work Items, so its schedule baseline cannot be read at once.`,
-    )
-  }
-  return entries.map((entry) => entry.issue)
 }

@@ -11,45 +11,19 @@ import {
   type ProjectScheduleBaselineEntry,
 } from '@mukuroji/contracts'
 import { ProjectDataError } from '../../../directory'
+import type {
+  CaptureProjectScheduleBaselineInput as CaptureInput,
+  ProjectScheduleBaselineStore as BaselineStore,
+} from '../../application/use-cases/project-schedule-baseline'
 
 /** DynamoDB condition checks that pin the caller's authorization in the same transaction. */
 export type ScheduleBaselineCallerAuthorizationCheck = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 
-/** Input of one Project schedule baseline capture. */
-export type CaptureProjectScheduleBaselineInput = {
-  /** Workspace directory ID. */
-  workspaceId: string
-  /** Team that owns the Project. */
-  teamId: string
-  /** Project whose baseline is captured. */
-  projectId: string
-  /** Frozen planned dates of every Work Item in the Project. */
-  entries: readonly ProjectScheduleBaselineEntry[]
-  /** Capture time as an ISO timestamp. */
-  capturedAt: string
-  /** Server-built conditions that fail the write when the caller lost access. */
-  callerAuthorization: readonly ScheduleBaselineCallerAuthorizationCheck[]
-}
+/** Capture input with DynamoDB authorization fences. */
+export type CaptureProjectScheduleBaselineInput = CaptureInput<ScheduleBaselineCallerAuthorizationCheck>
 
-/** Persistence port for the latest schedule baseline of each Project. */
-export type ProjectScheduleBaselineStore = {
-  /**
-   * Reads the latest baseline of a Project.
-   *
-   * @param workspaceId - Workspace directory ID.
-   * @param teamId - Team that owns the Project.
-   * @param projectId - Project whose baseline is read.
-   * @returns The baseline with every entry, or `null` when none was captured.
-   */
-  get(workspaceId: string, teamId: string, projectId: string): Promise<ProjectScheduleBaseline | null>
-  /**
-   * Replaces the latest baseline of a Project.
-   *
-   * @param input - Capture input.
-   * @returns The stored baseline.
-   */
-  capture(input: CaptureProjectScheduleBaselineInput): Promise<ProjectScheduleBaseline>
-}
+/** Baseline persistence bound to DynamoDB authorization fences. */
+export type ProjectScheduleBaselineStore = BaselineStore<ScheduleBaselineCallerAuthorizationCheck>
 
 /** Planning-table record type of a Project schedule baseline. */
 const ENTRY_TYPE = 'project-schedule-baseline'
@@ -163,7 +137,7 @@ export class DynamoDbProjectScheduleBaselineStore implements ProjectScheduleBase
         ],
       }))
     } catch (error) {
-      return storageFailure(error)
+      return storageFailure(error, input.callerAuthorization.length + 1)
     }
     return baseline
   }
@@ -247,26 +221,60 @@ function corruptBaseline() {
   return new ProjectDataError(502, 'ScheduleBaselineCorruptState', 'The stored schedule baseline is invalid.')
 }
 
+/** DynamoDB cancellation codes that mean the request may succeed if retried. */
+const TRANSIENT_CANCELLATION_CODES = ['TransactionConflict', 'ProvisionedThroughputExceeded', 'ThrottlingError']
+
 /**
  * Maps a DynamoDB failure to a Project data error.
  *
+ * A transaction cancelled only by failed conditions is a conflict. One cancelled by throttling
+ * or a competing transaction is retryable, and any other cancellation is a storage failure.
+ *
  * @param error - Thrown SDK error.
+ * @param transactionSize - Number of items in the cancelled transaction, or 0 for a plain read.
  * @returns Never; always throws.
  */
-function storageFailure(error: unknown): never {
+function storageFailure(error: unknown, transactionSize = 0): never {
   const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : undefined
-  if (name === 'TransactionCanceledException' || name === 'ConditionalCheckFailedException') {
-    throw new ProjectDataError(
-      409,
-      'ScheduleBaselineConflict',
-      'The schedule baseline or your permissions changed. Reload and try again.',
-    )
+  if (
+    name === 'TransactionCanceledException' &&
+    typeof error === 'object' &&
+    error !== null &&
+    'CancellationReasons' in error &&
+    Array.isArray(error.CancellationReasons)
+  ) {
+    const codes = error.CancellationReasons.map((reason: unknown) =>
+      typeof reason === 'object' && reason !== null && 'Code' in reason ? String(reason.Code) : undefined)
+    if (transactionSize > 0 && codes.length === transactionSize) {
+      if (codes.includes('ConditionalCheckFailed') && codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')) {
+        throw new ProjectDataError(
+          409,
+          'ScheduleBaselineConflict',
+          'The schedule baseline or your permissions changed. Reload and try again.',
+        )
+      }
+      if (
+        codes.some((code) => code !== undefined && TRANSIENT_CANCELLATION_CODES.includes(code)) &&
+        codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed' || (code !== undefined && TRANSIENT_CANCELLATION_CODES.includes(code)))
+      ) {
+        throw retryableFailure()
+      }
+    }
   }
   if (
     typeof name === 'string' &&
-    ['ProvisionedThroughputExceededException', 'ThrottlingException', 'RequestLimitExceeded', 'InternalServerError', 'TimeoutError'].includes(name)
+    ['ProvisionedThroughputExceededException', 'ThrottlingException', 'RequestLimitExceeded', 'InternalServerError', 'TransactionInProgressException', 'TimeoutError'].includes(name)
   ) {
-    throw new ProjectDataError(503, 'ScheduleBaselineRetryable', 'Schedule baseline storage is temporarily unavailable.')
+    throw retryableFailure()
   }
   throw new ProjectDataError(502, 'ScheduleBaselineStorageFailure', 'Schedule baseline storage request failed.')
+}
+
+/**
+ * Creates the error for a storage failure that may succeed when retried.
+ *
+ * @returns The error.
+ */
+function retryableFailure() {
+  return new ProjectDataError(503, 'ScheduleBaselineRetryable', 'Schedule baseline storage is temporarily unavailable.')
 }
