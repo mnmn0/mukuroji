@@ -1174,7 +1174,8 @@ describe('AI assistance API composition', () => {
     expect(promptContexts).toHaveLength(1)
     expect(promptContexts[0]).toContain('Planning ai-refero-initiative')
     expect(promptContexts[0]).not.toContain('ai-private-initiative')
-    expect(hidden.status).not.toBe(201)
+    expect(hidden.status).toBe(403)
+    expect(await hidden.json()).toMatchObject({ code: 'ProjectAccessDenied' })
   })
 
   test('builds Search context with non-linkable member aliases without executing Search', async () => {
