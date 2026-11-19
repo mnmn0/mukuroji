@@ -1,10 +1,15 @@
 import { useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { applyReleasedRunToBoard } from '../../features/factory-board/model/factoryBoard'
+import {
+  DEFAULT_FACTORY_ANALYTICS_PERIOD_DAYS,
+  type FactoryAnalyticsPeriodDays,
+} from '../../features/factory-board/model/factoryAnalytics'
 import { useReleaseFactoryBoardRun } from '../../features/factory-board/mutations/useReleaseFactoryBoardRun'
-import { useFactoryBoardReports, useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
+import { useFactoryAnalytics, useFactoryBoardReports, useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
+import { FactoryAnalyticsSummary } from '../../features/factory-board/ui/FactoryAnalyticsSummary'
 import { FactoryBoard, type FactoryBoardView } from '../../features/factory-board/ui/FactoryBoard'
-import { createFactoryBoardLabels } from '../../features/factory-board/ui/factoryBoardLabels'
+import { createFactoryAnalyticsLabels, createFactoryBoardLabels } from '../../features/factory-board/ui/factoryBoardLabels'
 import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
@@ -48,12 +53,19 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   const accessToken = enabled ? workspace.accessToken : undefined
   const board = useTeamAgentRunBoard(accessToken, teamId)
   const reports = useFactoryBoardReports(accessToken, teamId, selectedWorkItemId)
+  const [analyticsDays, setAnalyticsDays] = useState<FactoryAnalyticsPeriodDays>(DEFAULT_FACTORY_ANALYTICS_PERIOD_DAYS)
+  const analytics = useFactoryAnalytics(accessToken, teamId, analyticsDays)
   const onRelease = useReleaseFactoryBoardRun(accessToken, teamId, async (released) => {
     // Show the committed release from the response, so a failed refresh cannot bring back the active run.
     await board.mutate((current) => applyReleasedRunToBoard(current, released), { revalidate: false })
     void Promise.all([board.mutate(), reports.mutate()]).catch(() => undefined)
   })
   const labels = useMemo(() => createFactoryBoardLabels(workspace.locale), [workspace.locale])
+  const analyticsLabels = useMemo(() => createFactoryAnalyticsLabels(workspace.locale), [workspace.locale])
+  const formatNumber = useMemo(() => {
+    const formatter = new Intl.NumberFormat(workspace.locale === 'ja' ? 'ja-JP' : 'en-US', { maximumFractionDigits: 1 })
+    return (value: number) => formatter.format(value)
+  }, [workspace.locale])
   const formatDateTime = useMemo(() => {
     const formatter = new Intl.DateTimeFormat(workspace.locale === 'ja' ? 'ja-JP' : 'en-US', { dateStyle: 'medium', timeStyle: 'short' })
     return (value: string) => formatter.format(new Date(value))
@@ -64,8 +76,18 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   )
 
   return (
-    <WorkspaceRouteContent isLoading={board.isLoading} sessionErrors={[board.error, reports.error]}>
+    <WorkspaceRouteContent isLoading={board.isLoading} sessionErrors={[board.error, reports.error, analytics.error]}>
       <div className="px-[clamp(16px,3vw,34px)] py-5">
+        <FactoryAnalyticsSummary
+          analytics={analytics.data}
+          errorMessage={analytics.error ? analyticsLabels.loadError : undefined}
+          formatNumber={formatNumber}
+          isLoading={analytics.isLoading}
+          labels={analyticsLabels}
+          onPeriodDaysChange={setAnalyticsDays}
+          onRetry={() => { void analytics.mutate() }}
+          periodDays={analyticsDays}
+        />
         <FactoryBoard
           board={board.data}
           errorMessage={board.error ? labels.loadError : undefined}

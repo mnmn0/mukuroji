@@ -355,6 +355,32 @@ Factory board には、同じ data を工場のラインとして見せる「ラ
 - `prefers-reduced-motion` ではコンベア、作業者、カメラの動きと自動再生を止める。工程と item は
   SVG の外の工程バーと panel から keyboard で操作でき、SVG には工程ごとの件数を含む説明を付ける。
 
+### 期間サマリー（analytics）
+
+Factory board の上部に、期間内に終わった Run の集計を出す。data は session 認証の内部 API
+`GET /api/teams/{teamId}/agent-runs/analytics?from=...&to=...`（`TeamFactoryAnalyticsResponse`）から取得し、
+保存済みの Run と構造化 report だけから read 時に計算する。新しい保存 field や audit の読み取りは足さない。
+
+- 対象は `finishedAt` が期間（両端を含む UTC instant、最長 92 日）に入る Run のうち、閲覧者が見られる
+  Work Item の Run。削除された Work Item は除き、アーカイブ済みは数える。権限は board と同じく Team の
+  viewer 以上で、Work Item ごとに割り当て Project の viewer 権限を確認する。
+- 成功率は `completed` ÷（終了した Run − `paused`）。`paused` は人へ意図して渡した停止なので成否に数えない。
+- 手戻りは、同じ Work Item の直前の Run が `failed` または `completed` で終わった後に始まった Run。
+  `paused` 後の再開、解放や take over の後の Run は手戻りに数えない。手戻り率は手戻り Run ÷ 終了した Run。
+- 人の介入は `released` と `superseded`（take over された Run）の数。override は記録がないため数えない。
+- 工程別の滞在時間は、Run の開始から `実装`、各 report の時点からその kind の工程（`progress` は実装、
+  `verification` は検証、`artifact` は成果物、`blocker` / `handoff` は判断）に入り、終了までを工程ごとに
+  足し、工程に入った Run の中央値を返す。`paused` で終わった Run は、同じ Work Item の次の Run が始まるまでを
+  判断に足す。次の Run がまだない待ちは数えない。受付（Run なしの `started`）は Work Item の履歴が要るため
+  まだ測らない。
+- 全体と runtime ごとに同じ率を返す。
+- 読み取りは上限付きで、上限で止まったときは flag で知らせる: 終了 Run の index は failed とそれ以外を
+  それぞれ新しい順に最大 1,000 件（`finishedRunsHasMore`）、履歴を読む Work Item は最大 200 件
+  （`workItemsHasMore`）、Work Item ごとの Run は最大 100 件、report は最大 300 件。直前の Run や report が
+  読めなかった Run は件数と成功率には入れ、手戻りと滞在時間からは外す（`historyHasMore`）。
+- token / 費用の報告（`finish_run` / `report_progress` の `usage`）、Analytics engine の metric・widget・snapshot
+  への統合、Work Item / Project 別の集計は後続とする。
+
 ## Triage への自動起票
 
 `failed` で終わった Run と停滞した Run を、Team の Triage に `agent-run` source の entry として
@@ -791,7 +817,8 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
   external link と突き合わせて CI、レビュー、merge 状態を取り込む。
 - Work Item に Gate（CI、bot review、人の承認）を持たせ、`complete` 遷移の server 検証に
   組み込む。既存の approval action を再利用する。
-- stage 別 lead time、Run の成功 / 手戻り率、token 費用を analytics に追加する。
+- token 費用を analytics に追加し、stage 別 lead time と Run の成功 / 手戻り率（「期間サマリー」）を
+  Analytics engine の metric と snapshot に統合する。
 - hooks による heartbeat、planner / implementer / reviewer の多段 Run を Work Item relation と
   Run の親子で表現する。
 
