@@ -156,6 +156,8 @@ export const projectsMessages = {
   'projects.raidLog.error.invalid': 'Check the values: {reason}',
   'projects.raidLog.error.forbidden': 'You cannot change this log.',
   'projects.raidLog.error.full': 'The log is full.',
+  'projects.raidLog.conflict.newer': 'Someone else updated this entry. Your edits are kept; saving now applies them to the newest version.',
+  'projects.raidLog.conflict.useLatest': 'Switch to the newest version',
 } as const satisfies Record<
   Extract<
     MessageKey,

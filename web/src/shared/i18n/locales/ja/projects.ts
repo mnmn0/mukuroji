@@ -154,4 +154,6 @@ export const projectsMessages = {
   'projects.raidLog.error.invalid': '入力を確認してください: {reason}',
   'projects.raidLog.error.forbidden': 'この登録簿を変更する権限がありません。',
   'projects.raidLog.error.full': '登録簿が上限に達しました。',
+  'projects.raidLog.conflict.newer': '他のユーザーがこの登録を更新しました。入力中の内容は残しています。このまま保存すると最新の版を入力中の内容で更新します。',
+  'projects.raidLog.conflict.useLatest': '最新の内容に切り替える',
 } as const

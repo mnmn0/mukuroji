@@ -182,6 +182,15 @@ export function ProjectRaidLogPanel({
   const [showClosed, setShowClosed] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [saveError, setSaveError] = useState<string>()
+  // After a revision conflict the form keeps the draft and saves it onto the newest revision,
+  // which the reloaded list provides; the person can also switch the form to that revision.
+  const [conflictEntryId, setConflictEntryId] = useState<string>()
+  const latestEditedEntry = editor.mode === 'edit' && conflictEntryId === editor.entry.id
+    ? entries?.find((candidate) => candidate.id === editor.entry.id)
+    : undefined
+  const hasNewerRevision = editor.mode === 'edit' &&
+    latestEditedEntry !== undefined &&
+    latestEditedEntry.revision !== editor.entry.revision
   const summary = summarizeProjectRaidLog(entries ?? [], today)
   const visibleEntries = (entries ?? []).filter((entry) => showClosed || entry.status === 'open')
 
@@ -205,10 +214,16 @@ export function ProjectRaidLogPanel({
     if (editor.mode === 'closed' || isSaving) return
     setIsSaving(true)
     setSaveError(undefined)
+    const baseEntry = editor.mode === 'edit' ? (latestEditedEntry ?? editor.entry) : undefined
     try {
-      await onSave(editor.mode === 'edit' ? editor.entry : undefined, toEntryInput(editor.values))
+      await onSave(baseEntry, toEntryInput(editor.values))
       setEditor({ mode: 'closed' })
+      setConflictEntryId(undefined)
     } catch (error) {
+      if (baseEntry && error instanceof ProjectDirectoryApiError && error.status === 409) {
+        setEditor({ mode: 'edit', entry: baseEntry, values: editor.values })
+        setConflictEntryId(baseEntry.id)
+      }
       setSaveError(describeSaveError(error, t))
     } finally {
       setIsSaving(false)
@@ -233,6 +248,7 @@ export function ProjectRaidLogPanel({
             type="button"
             onClick={() => {
               setSaveError(undefined)
+              setConflictEntryId(undefined)
               setEditor({ mode: 'create', values: toFormValues() })
             }}
           >
@@ -371,7 +387,25 @@ export function ProjectRaidLogPanel({
               onChange={(event) => updateValue('response', event.target.value)}
             />
           </label>
-          {saveError ? (
+          {hasNewerRevision && latestEditedEntry ? (
+            <div
+              className="col-span-full flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2"
+              role="status"
+            >
+              <p className="text-sm font-semibold text-fg-amber-800">{t('projects.raidLog.conflict.newer')}</p>
+              <button
+                className="workbench-button-secondary min-h-10 px-4"
+                type="button"
+                onClick={() => {
+                  setEditor({ mode: 'edit', entry: latestEditedEntry, values: toFormValues(latestEditedEntry) })
+                  setConflictEntryId(undefined)
+                  setSaveError(undefined)
+                }}
+              >
+                {t('projects.raidLog.conflict.useLatest')}
+              </button>
+            </div>
+          ) : saveError ? (
             <p className="col-span-full text-sm font-semibold text-fg-red-700" role="alert">{saveError}</p>
           ) : null}
           <div className="col-span-full flex flex-wrap gap-2">
@@ -387,7 +421,10 @@ export function ProjectRaidLogPanel({
               className="workbench-button-secondary min-h-10 px-4"
               disabled={isSaving}
               type="button"
-              onClick={() => setEditor({ mode: 'closed' })}
+              onClick={() => {
+                setEditor({ mode: 'closed' })
+                setConflictEntryId(undefined)
+              }}
             >
               {t('projects.raidLog.cancel')}
             </button>
@@ -428,6 +465,7 @@ export function ProjectRaidLogPanel({
                         type="button"
                         onClick={() => {
                           setSaveError(undefined)
+                          setConflictEntryId(undefined)
                           setEditor({ mode: 'edit', entry, values: toFormValues(entry) })
                         }}
                       >
