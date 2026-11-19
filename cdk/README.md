@@ -592,6 +592,26 @@ Shared API Lambda は `REQUEST_INTAKE_TABLE_NAME`、`REQUEST_QUEUE_INDEX_NAME`�
 
 DLQ の envelope は署名 timestamp が5分で失効するため、そのまま redrive しません。Operator は失敗原因を解消した後、保存済み envelope の内容と `Message-ID` を変更せず、新しい timestamp で adapter 側から再署名して `RequestEmailIngestionFunction` を invokeし、成功を確認してから元 message を削除します。同じ `Message-ID` は request table の receipt で冪等化されます。
 
+## Lambda log retention and table deletion protection
+
+`configureStatefulResourceGuards`（`lib/aspects/stateful-resource-guards.ts`）が stack 全体に次を適用します。
+
+- `cdk.json` の `@aws-cdk/aws-lambda:useCdkManagedLogGroup` で CDK が作る `/aws/lambda/<function name>` は、既定の2年保持を90日に変え、`Retain` にします。
+- Subsystem が `logGroup` を明示した Lambda（restore drill の365日など）はそのまま使います。どちらもない Lambda は synth error にします。L2 でない CDK 内部の bucket notification handler は `file-storage.ts` が log group を割り当てます。
+- `Retain` の DynamoDB table すべてに `DeletionProtectionEnabled: true` を付け、console や CLI からの `DeleteTable` も拒否します。
+
+`stateful-resource-guards.suite.ts` は、`cdk.json` の feature flag あり・なしの両方の template で、保持期間が1年以内の retained log group を持たない Lambda、1年を超えて保持する log group、削除保護のない retained table があると失敗します。
+
+この変更より前に deploy した環境では、Lambda が自動で作った無期限の `/aws/lambda/<function name>` が残ります。新しい log group へ切り替わった後、次で古い log group に保持期間を付けてください（削除する場合は調査に必要な期間が過ぎてから行います）。
+
+```bash
+aws logs describe-log-groups --log-group-name-prefix /aws/lambda/<StackName>- \
+  --query 'logGroups[?retentionInDays==`null`].logGroupName' --output text \
+  | xargs -n1 -I{} aws logs put-retention-policy --log-group-name {} --retention-in-days 90
+```
+
+Table を意図して削除する場合は、先に `aws dynamodb update-table --table-name <name> --no-deletion-protection-enabled` で保護を外します。
+
 ## Fresh deployment
 
 ### 1. Cognito と値を準備する
