@@ -15,7 +15,9 @@ const {
   createApprovalRequestFixture,
   createFakeWorkItemConfigurationClient,
   createFileProofingStub,
+  createTeamIssuesFake,
   createTestWorkItemConfiguration,
+  getTestAppDependencies,
   resetTestApp,
   runWithTestAppDependencies,
   setTestAppDependencies,
@@ -76,6 +78,28 @@ function configureGate(
     }),
   })
   return approvalReads
+}
+
+/**
+ * Records the configuration condition checks each Work Item update commits with.
+ *
+ * @returns Condition checks received by the persistence fake.
+ */
+function captureConfigurationConditionChecks() {
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  const checks: unknown[] = []
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamIssueDetail(...args) {
+        return teamIssues.getTeamIssueDetail(...args)
+      },
+      async updateTeamIssue(directoryId, teamId, issueId, input, ...rest) {
+        checks.push(...(input.configurationConditionChecks ?? []))
+        return teamIssues.updateTeamIssue(directoryId, teamId, issueId, input, ...rest)
+      },
+    }),
+  })
+  return checks
 }
 
 /**
@@ -177,14 +201,30 @@ test('rejects completion while an approval is pending or no approval has been ap
   expect(approvalReads).toEqual(['onboarding-friction'])
 })
 
-test('allows completion once an approval is approved and none is pending', async () => {
+test('allows completion once an approval is approved and none is pending, fencing the counts it judged', async () => {
   configureFakeProjectClients(true)
   configureGate(
     { noPendingApprovals: 'required', humanApproval: 'required' },
     async () => approvals({ approvedCount: 1, rejectedCount: 1 }),
   )
+  const fenceChecks = captureConfigurationConditionChecks()
 
   expect((await patchWorkItem({ workflowStatusId: 'done' })).status).toBe(200)
+  expect(fenceChecks).toContainEqual({
+    ConditionCheck: expect.objectContaining({ Key: expect.objectContaining({ recordKey: 'APPROVAL_SUMMARY' }) }),
+  })
+})
+
+test('does not fence approval counts that only a warn condition read', async () => {
+  configureFakeProjectClients(true)
+  const approvalReads = configureGate({ humanApproval: 'warn' })
+  const fenceChecks = captureConfigurationConditionChecks()
+
+  expect((await patchWorkItem({ workflowStatusId: 'done' })).status).toBe(200)
+  expect(approvalReads).toEqual(['onboarding-friction'])
+  expect(fenceChecks).not.toContainEqual({
+    ConditionCheck: expect.objectContaining({ Key: expect.objectContaining({ recordKey: 'APPROVAL_SUMMARY' }) }),
+  })
 })
 
 test('fails closed when approvals cannot be read', async () => {
@@ -276,7 +316,11 @@ test('applies the Gate when an approval decision completes the Work Item', async
   const response = await approve()
 
   expect(response.status).toBe(409)
-  expect(await response.json()).toMatchObject({ code: 'WorkItemCompletionGateNotSatisfied' })
+  // The decision reports the Gate like a Work Item update, unmet conditions included.
+  expect(await response.json()).toMatchObject({
+    code: 'WorkItemCompletionGateNotSatisfied',
+    unmetConditions: [{ condition: 'acceptance-criteria', requirement: 'required', reason: 'unmet' }],
+  })
 })
 
 test('counts the approval being decided as approved', async () => {
@@ -292,7 +336,11 @@ test('counts the approval being decided as approved', async () => {
   const response = await approve()
 
   expect(response.status).toBe(200)
-  expect(resolved).toEqual([expect.objectContaining({ statusCategory: 'completed' })])
+  // The decision's summary update commits only while the counts the Gate judged are unchanged.
+  expect(resolved).toEqual([expect.objectContaining({
+    statusCategory: 'completed',
+    expectedApprovalSummary: { pendingCount: 1, approvedCount: 0, changesRequestedCount: 0 },
+  })])
 })
 
 const credential: AuthenticatedDeveloperCredential = {

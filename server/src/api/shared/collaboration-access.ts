@@ -1,5 +1,4 @@
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
-import type { WorkItemCompletionGateErrorResponse } from '@mukuroji/contracts'
 import type { Context } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/directory'
@@ -69,11 +68,7 @@ export function toWorkItemConfigurationErrorResponse(c: Context, error: unknown)
     return c.json({ message: 'Work Item configuration is unavailable.' }, 502)
   }
   if (error instanceof WorkItemCompletionGateError) {
-    return c.json({
-      code: 'WorkItemCompletionGateNotSatisfied',
-      message: error.message,
-      unmetConditions: error.unmetConditions.map((condition) => ({ ...condition })),
-    } satisfies WorkItemCompletionGateErrorResponse, 409)
+    return c.json(error.toResponseBody(), 409)
   }
   if (error.status >= 500) {
     console.error(error)

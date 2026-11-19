@@ -1,6 +1,7 @@
 import {
   DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
   evaluateWorkItemCompletionGate,
+  getWorkItemCompletionGateRequirement,
   hasWorkItemCompletionGateConditions,
   isWorkItemHierarchyClosedCategory,
   needsWorkItemCompletionGateApprovals,
@@ -29,6 +30,7 @@ import {
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
   FileProofingError,
+  type ApprovalSummaryFence,
   type PendingWorkItemApprovalCompletionTransition,
   type ListReviewerApprovalsOptions,
   type ReviewerApprovalPage,
@@ -254,6 +256,10 @@ export function toFileProofingErrorResponse(c: Context, error: unknown) {
   if (error instanceof ProjectDataError) {
     return toProjectDataErrorResponse(c, error)
   }
+  if (error instanceof WorkItemCompletionGateError) {
+    // An approval decision that would complete the Work Item reports the Gate like a Work Item update.
+    return c.json(error.toResponseBody(), 409)
+  }
   if (!(error instanceof FileProofingError)) {
     console.error(error)
     return c.json({ message: 'File proofing data is unavailable.' }, 502)
@@ -379,9 +385,11 @@ async function resolveCompletionTransition(
       nextStatus.workflowStatusId,
       workItem.workItemTypeId,
     )
-    if (applyParentCompletionPolicy) {
-      // The approval being decided is still stored as pending, so it is counted as approved here.
-      await assertWorkItemCompletionGate(
+    // The approval being decided is still stored as pending, so it is counted as approved here.
+    // Its decision updates the approval counts, so the counts the Gate judged are required by that
+    // update rather than by a separate condition check on the same row.
+    const gateFence = applyParentCompletionPolicy
+      ? await assertWorkItemCompletionGate(
         directoryId,
         teamId,
         workItem,
@@ -397,7 +405,7 @@ async function resolveCompletionTransition(
           }),
         },
       )
-    }
+      : {}
     const guardConditionChecks = createWorkItemConfigurationGuardConditionChecks(
       getWorkItemConfigurationTableName(),
       directoryId,
@@ -432,8 +440,11 @@ async function resolveCompletionTransition(
         workItemScheduleInstantToLocalDate(new Date(), workItem.schedule.calendarPolicy),
       ),
       configurationConditionChecks: guardConditionChecks.concat(childCompletionConditionChecks),
+      ...(gateFence.observedApprovals ? { expectedApprovalSummary: gateFence.observedApprovals } : {}),
     }
   } catch (error) {
+    // The Gate's unmet conditions are part of its response, so the error keeps its own type.
+    if (error instanceof WorkItemCompletionGateError) throw error
     if (error instanceof WorkItemConfigurationError) {
       throw new FileProofingError(error.status, error.code, error.message, { cause: error })
     }
@@ -608,13 +619,7 @@ export async function prepareConfiguredUpdateWorkItem(
         resolved.configuration,
       )
     : []
-  const otherConditionChecks = createWorkItemConfigurationGuardConditionChecks(
-    getWorkItemConfigurationTableName(),
-    directoryId,
-    teamId,
-    resolved,
-  ).concat(relationTransactionItems, approvalTransitionConditionChecks)
-  await assertWorkItemCompletionGate(
+  const gateFence = await assertWorkItemCompletionGate(
     directoryId,
     teamId,
     current,
@@ -625,6 +630,16 @@ export async function prepareConfiguredUpdateWorkItem(
       ? workItemDependencies
       : { fileProofing: options.relationDependencies.fileProofing },
     { expectedRevision: input.expectedRevision },
+  )
+  const otherConditionChecks = createWorkItemConfigurationGuardConditionChecks(
+    getWorkItemConfigurationTableName(),
+    directoryId,
+    teamId,
+    resolved,
+  ).concat(
+    relationTransactionItems,
+    approvalTransitionConditionChecks,
+    gateFence.approvalConditionCheck ? [gateFence.approvalConditionCheck] : [],
   )
   const childCompletionConditionChecks = await prepareParentCompletionConditionChecks(
     directoryId,
@@ -648,11 +663,21 @@ export async function prepareConfiguredUpdateWorkItem(
   }
 }
 
+/** What a passed completion Gate read and must keep unchanged until the change commits. */
+type WorkItemCompletionGateFence = {
+  /** Condition check on the approval counts the Gate judged; absent when none was judged. */
+  approvalConditionCheck?: WorkItemConfigurationTransactionItems[number]
+  /** Approval counts as stored when the Gate judged them; absent when none was judged. */
+  observedApprovals?: WorkItemCompletionGateApprovalCounts
+}
+
 /**
  * Applies the Team's completion Gate to a status change.
  *
  * Only a move into the `completed` category is checked, and nothing is read when the Team sets no
  * Gate. Approval counts that cannot be read leave approval conditions unmet, so the Gate fails closed.
+ * When a `required` approval condition passed, the counts it judged are returned so the change can
+ * commit only while they are unchanged.
  *
  * @param directoryId - Workspace directory ID.
  * @param teamId - Team that owns the Work Item.
@@ -665,6 +690,7 @@ export async function prepareConfiguredUpdateWorkItem(
  *   counts for a decision not yet saved.
  * @param options.expectedRevision - Revision the update is conditioned on, when it carries one.
  * @param options.adjustApprovals - Adjusts the stored approval counts for a decision not yet saved.
+ * @returns The approval fence to commit with the change.
  * @throws ProjectDataError `409 WorkItemRevisionConflict` when the Gate would judge another revision
  *   than the update writes.
  * @throws WorkItemCompletionGateError `409` when a `required` condition is unmet.
@@ -681,41 +707,56 @@ async function assertWorkItemCompletionGate(
     expectedRevision?: unknown
     adjustApprovals?: (summary: ApprovalSummary) => WorkItemCompletionGateApprovalCounts
   } = {},
-): Promise<void> {
+): Promise<WorkItemCompletionGateFence> {
   const policy = configuration.completionGate
   if (
     current.statusCategory === 'completed' ||
     nextStatusCategory !== 'completed' ||
     !hasWorkItemCompletionGateConditions(policy)
   ) {
-    return
+    return {}
   }
   if (typeof options.expectedRevision === 'number' && options.expectedRevision !== current.revision) {
     // The update is fenced by its expected revision, so the Gate must judge that same revision.
     throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
   }
-  let approvalSummary: WorkItemCompletionGateApprovalCounts | undefined
+  let fence: ApprovalSummaryFence | undefined
   if (needsWorkItemCompletionGateApprovals(policy)) {
     try {
-      const summary = await dependencies.fileProofing.getApprovalSummary({
+      fence = await dependencies.fileProofing.readApprovalSummaryFence({
         workspaceId: directoryId,
         teamId,
         kind: 'work-item',
         issueId: current.id,
       })
-      approvalSummary = options.adjustApprovals ? options.adjustApprovals(summary) : summary
     } catch (error) {
       console.error('Work Item approvals could not be read for the completion Gate.', error)
-      approvalSummary = undefined
+      fence = undefined
     }
   }
   const unmet = evaluateWorkItemCompletionGate(policy, {
     acceptanceCriteria: typeof acceptanceCriteria === 'function' ? acceptanceCriteria() : acceptanceCriteria,
-    approvalSummary,
+    approvalSummary: fence && options.adjustApprovals ? options.adjustApprovals(fence.summary) : fence?.summary,
   }).filter((condition) => condition.requirement === 'required')
   if (unmet.length > 0) {
     throw new WorkItemCompletionGateError(unmet)
   }
+  // An approval created or decided meanwhile changes the counts, so a required approval condition
+  // that passed is fenced. A `warn` condition never blocks, so it needs no fence.
+  const fencesApprovals = fence !== undefined && (
+    getWorkItemCompletionGateRequirement(policy, 'no-pending-approvals') === 'required' ||
+    getWorkItemCompletionGateRequirement(policy, 'human-approval') === 'required'
+  )
+  return fence && fencesApprovals
+    ? {
+        approvalConditionCheck: fence.conditionCheck,
+        observedApprovals: {
+          pendingCount: fence.summary.pendingCount,
+          approvedCount: fence.summary.approvedCount,
+          changesRequestedCount: fence.summary.changesRequestedCount,
+        },
+      }
+    : {}
 }
 
 /**

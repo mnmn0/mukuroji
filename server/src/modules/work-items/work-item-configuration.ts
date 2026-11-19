@@ -38,6 +38,7 @@ import {
   type WorkflowStatusCategory,
   type WorkItemConfiguration,
   type WorkItemConfigurationScopeType,
+  type WorkItemCompletionGateErrorResponse,
   type WorkItemCompletionGatePolicy,
   type WorkItemCompletionGateUnmetCondition,
   type WorkItemJobRoleDefinition,
@@ -120,6 +121,19 @@ export class WorkItemCompletionGateError extends WorkItemConfigurationError {
       `The Team's completion Gate is not satisfied: ${unmetConditions.map((condition) => condition.condition).join(', ')}.`,
     )
     this.unmetConditions = unmetConditions
+  }
+
+  /**
+   * Builds the Team API response body.
+   *
+   * @returns The stable error body with the unmet conditions.
+   */
+  toResponseBody(): WorkItemCompletionGateErrorResponse {
+    return {
+      code: 'WorkItemCompletionGateNotSatisfied',
+      message: this.message,
+      unmetConditions: this.unmetConditions.map((condition) => ({ ...condition })),
+    }
   }
 }
 
