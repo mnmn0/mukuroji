@@ -132,7 +132,10 @@ export function PlanningEntityEditor({
           return
         }
         setIsSaving(true)
-        void Promise.resolve(onSave(entity, result.patch)).finally(() => setIsSaving(false))
+        // Start inside a promise so a synchronous throw cannot leave the form locked.
+        void Promise.resolve()
+          .then(() => onSave(entity, result.patch))
+          .finally(() => setIsSaving(false))
       }}
     >
       <div className="grid gap-1">
