@@ -82,13 +82,14 @@ function configureGate(
  * Sends a Team Work Item update for the first fake Work Item.
  *
  * @param body - JSON update body without the revision.
+ * @param expectedRevision - Revision the client read.
  * @returns The HTTP response.
  */
-function patchWorkItem(body: Record<string, unknown>) {
+function patchWorkItem(body: Record<string, unknown>, expectedRevision = 1) {
   return app.request('/api/teams/core-team/issues/onboarding-friction', {
     method: 'PATCH',
     headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...body, expectedRevision: 1 }),
+    body: JSON.stringify({ ...body, expectedRevision }),
   })
 }
 
@@ -133,6 +134,16 @@ test('evaluates the criteria the same update marks satisfied', async () => {
   })
 
   expect(response.status).toBe(200)
+})
+
+test('judges the Gate at the revision the update is conditioned on', async () => {
+  configureFakeProjectClients(true, { detailAcceptanceCriteria: [metCriterion] })
+  configureGate({ acceptanceCriteria: 'required' })
+
+  const response = await patchWorkItem({ workflowStatusId: 'done' }, 2)
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'WorkItemRevisionConflict' })
 })
 
 test('only checks moves into the completed category, and a warn condition does not block', async () => {

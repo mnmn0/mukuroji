@@ -389,11 +389,13 @@ async function resolveCompletionTransition(
         resolved.configuration,
         workItem.acceptanceCriteria ?? [],
         dependencies,
-        (summary) => ({
-          pendingCount: Math.max(0, summary.pendingCount - 1),
-          approvedCount: summary.approvedCount + 1,
-          changesRequestedCount: summary.changesRequestedCount,
-        }),
+        {
+          adjustApprovals: (summary) => ({
+            pendingCount: Math.max(0, summary.pendingCount - 1),
+            approvedCount: summary.approvedCount + 1,
+            changesRequestedCount: summary.changesRequestedCount,
+          }),
+        },
       )
     }
     const guardConditionChecks = createWorkItemConfigurationGuardConditionChecks(
@@ -622,6 +624,7 @@ export async function prepareConfiguredUpdateWorkItem(
     options.relationDependencies?.fileProofing === undefined
       ? workItemDependencies
       : { fileProofing: options.relationDependencies.fileProofing },
+    { expectedRevision: input.expectedRevision },
   )
   const childCompletionConditionChecks = await prepareParentCompletionConditionChecks(
     directoryId,
@@ -658,18 +661,26 @@ export async function prepareConfiguredUpdateWorkItem(
  * @param configuration - Team Work Item configuration.
  * @param acceptanceCriteria - Criteria after the change, or a function that reads them only when needed.
  * @param dependencies - Approval persistence.
- * @param adjustApprovals - Adjusts the stored approval counts for a decision not yet saved.
+ * @param options - Revision the caller expects to write, and an adjustment of the stored approval
+ *   counts for a decision not yet saved.
+ * @param options.expectedRevision - Revision the update is conditioned on, when it carries one.
+ * @param options.adjustApprovals - Adjusts the stored approval counts for a decision not yet saved.
+ * @throws ProjectDataError `409 WorkItemRevisionConflict` when the Gate would judge another revision
+ *   than the update writes.
  * @throws WorkItemCompletionGateError `409` when a `required` condition is unmet.
  */
 async function assertWorkItemCompletionGate(
   directoryId: string,
   teamId: string,
-  current: Pick<TeamIssueResponseItem, 'id' | 'statusCategory'>,
+  current: Pick<TeamIssueResponseItem, 'id' | 'revision' | 'statusCategory'>,
   nextStatusCategory: WorkflowStatusCategory,
   configuration: WorkItemConfiguration,
   acceptanceCriteria: readonly WorkItemAcceptanceCriterion[] | (() => readonly WorkItemAcceptanceCriterion[]),
   dependencies: Pick<WorkItemDependencies, 'fileProofing'>,
-  adjustApprovals?: (summary: ApprovalSummary) => WorkItemCompletionGateApprovalCounts,
+  options: {
+    expectedRevision?: unknown
+    adjustApprovals?: (summary: ApprovalSummary) => WorkItemCompletionGateApprovalCounts
+  } = {},
 ): Promise<void> {
   const policy = configuration.completionGate
   if (
@@ -678,6 +689,10 @@ async function assertWorkItemCompletionGate(
     !hasWorkItemCompletionGateConditions(policy)
   ) {
     return
+  }
+  if (typeof options.expectedRevision === 'number' && options.expectedRevision !== current.revision) {
+    // The update is fenced by its expected revision, so the Gate must judge that same revision.
+    throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item revision does not match the expected revision.')
   }
   let approvalSummary: WorkItemCompletionGateApprovalCounts | undefined
   if (needsWorkItemCompletionGateApprovals(policy)) {
@@ -688,7 +703,7 @@ async function assertWorkItemCompletionGate(
         kind: 'work-item',
         issueId: current.id,
       })
-      approvalSummary = adjustApprovals ? adjustApprovals(summary) : summary
+      approvalSummary = options.adjustApprovals ? options.adjustApprovals(summary) : summary
     } catch (error) {
       console.error('Work Item approvals could not be read for the completion Gate.', error)
       approvalSummary = undefined
