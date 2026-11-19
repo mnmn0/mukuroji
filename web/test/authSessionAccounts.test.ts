@@ -136,14 +136,26 @@ describe('sessions of different accounts in different tabs', () => {
     expect(getAuthSession()).toEqual(refreshed)
   })
 
-  test('follows a refresh of a non-JWT emulator token in the store the tab signed in with', () => {
-    storeFromAnotherTab(localStorage, session('emulator-token-1', true))
+  test('follows a refresh of a non-JWT emulator token by its refresh token', () => {
+    storeFromAnotherTab(localStorage, session('emulator-token-1', true, { refreshToken: 'emulator-refresh' }))
     getAuthSession()
 
-    const refreshed = session('emulator-token-2', true)
+    const refreshed = session('emulator-token-2', true, { refreshToken: 'emulator-refresh' })
     storeFromAnotherTab(localStorage, refreshed)
 
     expect(getAuthSession()).toEqual(refreshed)
+  })
+
+  test('does not adopt another non-JWT emulator account remembered in the same store', () => {
+    storeFromAnotherTab(localStorage, session('emulator-token-a', true, { refreshToken: 'emulator-refresh-a' }))
+    getAuthSession()
+
+    const other = session('emulator-token-b', true, { refreshToken: 'emulator-refresh-b' })
+    storeFromAnotherTab(localStorage, other)
+
+    expect(getAuthSession()).toBeNull()
+    clearAuthSession()
+    expect(stored(localStorage)).toEqual(other)
   })
 
   test("an expired remembered session of another account leaves this tab's session alone", () => {

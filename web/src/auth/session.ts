@@ -57,7 +57,7 @@ export function getAuthSession() {
     return null
   }
 
-  tabAccount = { accessToken: entry.session.accessToken, remember: entry.session.remember }
+  tabAccount = { accessToken: entry.session.accessToken, refreshToken: entry.session.refreshToken }
   return entry.session
 }
 
@@ -215,7 +215,7 @@ export function saveAuthSession(session: AuthSession) {
   const targetStorage = session.remember ? window.localStorage : window.sessionStorage
   targetStorage.setItem(storageKey, JSON.stringify(session))
   window.sessionStorage.removeItem(signedOutStorageKey)
-  tabAccount = { accessToken: session.accessToken, remember: session.remember }
+  tabAccount = { accessToken: session.accessToken, refreshToken: session.refreshToken }
 }
 
 /**
@@ -251,7 +251,7 @@ export function clearAuthSession() {
  * switches to, or removes, another account's session. The signed-out state is also kept in this
  * tab's sessionStorage, so a reload of the login page does not adopt another account either.
  */
-let tabAccount: { accessToken: string, remember: boolean } | 'signed-out' | null = null
+let tabAccount: Pick<AuthSession, 'accessToken' | 'refreshToken'> | 'signed-out' | null = null
 
 /** sessionStorage key that marks this tab as signed out until its next sign-in. */
 const signedOutStorageKey = 'mukuroji.auth.signedOut'
@@ -300,8 +300,9 @@ function findTabSessionEntry(): { session: AuthSession, storage: Storage } | nul
 /**
  * Checks whether a stored session belongs to this tab's account.
  *
- * Tokens without a subject (the local Cognito emulator) cannot be told apart after another tab
- * refreshes them, so for those the session in the store the tab signed in with still counts.
+ * Tokens without a subject (the local Cognito emulator) carry no account, so after another tab
+ * refreshes one, the session is matched by its refresh token: a refresh keeps it, while a
+ * sign-in of any account gets a new one.
  *
  * @param entry - Stored session and its store.
  * @param account - This tab's account.
@@ -309,11 +310,11 @@ function findTabSessionEntry(): { session: AuthSession, storage: Storage } | nul
  */
 function isTabAccountSession(
   entry: { session: AuthSession, storage: Storage },
-  account: { accessToken: string, remember: boolean },
+  account: Pick<AuthSession, 'accessToken' | 'refreshToken'>,
 ) {
   if (isSameAuthSessionToken(entry.session.accessToken, account.accessToken)) return true
-  const accountStorage = account.remember ? window.localStorage : window.sessionStorage
-  return entry.storage === accountStorage &&
+  return account.refreshToken !== undefined &&
+    entry.session.refreshToken === account.refreshToken &&
     readAccessTokenSubject(account.accessToken) === undefined &&
     readAccessTokenSubject(entry.session.accessToken) === undefined
 }
