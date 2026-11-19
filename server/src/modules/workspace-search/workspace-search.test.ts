@@ -1,3 +1,4 @@
+import { createDecipheriv, createHmac } from 'node:crypto'
 import { expect, spyOn, test } from 'bun:test'
 import {
   CreateTableCommand,
@@ -119,15 +120,30 @@ test('encrypts search cursors and rejects plaintext, tampered or foreign ones', 
   const second = await client.search({ ...input, cursor })
   expect(second.results.map((result) => result.id)).toEqual([documents[1]?.entityId])
 
-  const forged = Buffer.from(JSON.stringify({
+  const [version, iv, ciphertext, tag] = cursor.split('.')
+  // Decrypt the issued cursor to get a payload whose scope fields all match this query, so the
+  // legacy plaintext form of it is refused only because it is not an encrypted envelope.
+  const decipher = createDecipheriv(
+    'aes-256-gcm',
+    createHmac('sha256', 'workspace-search-cursor-secret-for-tests-0001')
+      .update('mukuroji/workspace-search-cursor/v1')
+      .digest(),
+    Buffer.from(iv!, 'base64url'),
+  )
+  decipher.setAAD(Buffer.from('c1', 'utf8'))
+  decipher.setAuthTag(Buffer.from(tag!, 'base64url'))
+  const payload = Buffer.concat([
+    decipher.update(Buffer.from(ciphertext!, 'base64url')),
+    decipher.final(),
+  ])
+  expect(JSON.parse(payload.toString('utf8'))).toMatchObject({
     version: 1,
     kind: 'search',
     workspaceId: 'workspace-1',
     viewerUserId: 'viewer@example.com',
-    queryFingerprint: cursor,
-    recordKey: documents[1]!.recordKey,
-  }), 'utf8').toString('base64url')
-  const [version, iv, ciphertext, tag] = cursor.split('.')
+    recordKey: documents[0]!.recordKey,
+  })
+  const forged = payload.toString('base64url')
   const flipped = Buffer.from(ciphertext!, 'base64url')
   flipped[0] = flipped[0]! ^ 1
   const rejected = [
