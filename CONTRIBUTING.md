@@ -8,6 +8,9 @@ mukuroji への変更（コード・文書・インフラ）を提案する人�
 全体の構成は [アーキテクチャ概要](docs/architecture.md)、用語は [用語集](docs/glossary.md)、
 画面の使い方は [利用者ガイド](docs/guide/README.md) を参照してください。
 
+このリポジトリは [Apache License 2.0](LICENSE) で公開しています。PR として提出した変更は、
+同ライセンスの第5条に従い Apache License 2.0 の下で提供されたものとして扱います。
+
 ## 1. Issue を確認・作成する
 
 - 作業は Issue から始めます。既存の Issue を検索し、なければテンプレート
