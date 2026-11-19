@@ -87,9 +87,11 @@ export function createMemberCredentialResetPorts(
       if (!adminDisableSoftwareTokenMfa) throw createCredentialResetUnavailableError()
       await adminDisableSoftwareTokenMfa.call(cognito, memberKey)
     },
-    async signOutEverywhere(memberKey) {
+    async signOutEverywhere(workspaceId, memberKey) {
       const { globallySignOutWorkspaceUser } = cognito
       if (!globallySignOutWorkspaceUser) throw createCredentialResetUnavailableError()
+      // Cognito global sign-out does not reach SSO tokens the API verifies itself.
+      await workspaceAccess.revokeMemberSignIns?.(workspaceId, memberKey)
       await globallySignOutWorkspaceUser.call(cognito, memberKey)
     },
     reportFailure(message, error, correlationId) {

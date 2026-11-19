@@ -574,6 +574,14 @@ export interface WorkspaceAccessClient {
     input: ReconcileDirectoryWorkspaceMemberInput,
     auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMember>
+  /**
+   * Records that the member was signed out everywhere, so locally verified access tokens of
+   * earlier sign-ins (enterprise SSO) are refused like Cognito global sign-out refuses the rest.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member that was signed out.
+   */
+  revokeMemberSignIns?(workspaceId: string, memberKey: string): Promise<void>
   /** Directory authority から owner 以外の member を冪等に停止します。 */
   deprovisionDirectoryMember?(
     workspaceId: string,
@@ -751,6 +759,32 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   async getActiveMember(workspaceId: string, memberKey: string) {
     const member = await this.getMember(workspaceId, memberKey)
     return member?.status === 'active' ? member : undefined
+  }
+
+  /**
+   * Records that the member was signed out everywhere.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member that was signed out.
+   */
+  async revokeMemberSignIns(workspaceId: string, memberKey: string) {
+    await this.ensureLocalTable()
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizeRequired(workspaceId, 'Workspace ID'),
+          recordKey: createMemberRecordKey(normalizeMemberKey(memberKey)),
+        },
+        UpdateExpression: 'SET signInsRevokedAt = :now',
+        ConditionExpression: 'attribute_exists(recordKey)',
+        ExpressionAttributeValues: { ':now': this.clock().toISOString() },
+      }))
+    } catch (error) {
+      // A member without a record has no Workspace session to refuse.
+      if (isAwsError(error, 'ConditionalCheckFailedException')) return
+      throw toWorkspaceAccessError(error)
+    }
   }
 
   /** Builds a commit-time guard for one currently active Workspace member.

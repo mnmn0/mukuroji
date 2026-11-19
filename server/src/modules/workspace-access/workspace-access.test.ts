@@ -3181,3 +3181,37 @@ test('tracks a credential reset by its idempotency key so that a retry resumes, 
   )).rejects.toMatchObject({ code: 'WorkspaceIdempotencyConflict', status: 409 })
   expect(progressRecords.size).toBe(1)
 })
+
+test('records a sign-out of every session on the member and ignores a missing member', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  let missing = false
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      if (missing) {
+        throw Object.assign(new Error('The conditional request failed'), {
+          name: 'ConditionalCheckFailedException',
+        })
+      }
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+
+  await client.revokeMemberSignIns(workspaceId, 'Sato@Example.com')
+  missing = true
+  await expect(client.revokeMemberSignIns(workspaceId, 'gone@example.com')).resolves.toBeUndefined()
+
+  expect(inputs[0]).toEqual({
+    TableName: 'WorkspaceAccessTable',
+    Key: { workspaceId, recordKey: 'MEMBER#sato@example.com' },
+    UpdateExpression: 'SET signInsRevokedAt = :now',
+    ConditionExpression: 'attribute_exists(recordKey)',
+    ExpressionAttributeValues: { ':now': now.toISOString() },
+  })
+})

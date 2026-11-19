@@ -697,6 +697,7 @@ function createWorkspaceAccessFake(
     markMemberCredentialActionApplying: async () => undefined,
     readMemberCredentialActionProgress: async () => 'none',
     completeMemberCredentialAction: async () => undefined,
+    revokeMemberSignIns: async () => undefined,
     reconcileDirectoryMember: unsupported,
     deprovisionDirectoryMember: unsupported,
     ...overrides,
