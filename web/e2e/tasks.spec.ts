@@ -5627,7 +5627,11 @@ test.describe('authenticated task page', () => {
     })
     await page.goto('/projects/refero/issues')
     const taskViewResponse = page.waitForResponse((response) => {
-      const scopeText = new URL(response.url()).searchParams.get('scope')
+      const url = new URL(response.url())
+      // Other endpoints on this page, such as the Document tree, use a plain
+      // `scope` value, so only task-view responses carry the JSON scope.
+      if (!url.pathname.endsWith('/api/task-views')) return false
+      const scopeText = url.searchParams.get('scope')
       const scope: unknown = scopeText ? JSON.parse(scopeText) : undefined
       const isCoreScope = typeof scope === 'object' && scope !== null &&
         'teamId' in scope && scope.teamId === 'core-team'

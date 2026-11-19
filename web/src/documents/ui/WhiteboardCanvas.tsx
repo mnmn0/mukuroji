@@ -7,6 +7,7 @@ import {
   type RefObject,
 } from 'react'
 import type {
+  DocumentRelationTarget,
   PublicWhiteboardContent,
   WhiteboardFrame,
 } from '@mukuroji/contracts'
@@ -27,11 +28,50 @@ import {
   parseCanonicalWorkItemId,
 } from '../model/relations'
 import { moveWhiteboardObjectWithinCanvas } from '../model/whiteboardGeometry'
+import { useLinkedWorkItem } from '../queries/useLinkedWorkItem'
+import { DocumentRelationTargetPicker } from './DocumentLinkPicker'
+
+/** The Whiteboard Work Item picker only offers Work Items. */
+const workItemLinkTargetKinds = ['work-item'] as const
+
+/**
+ * Chooses the text shown on a Whiteboard Work Item card.
+ *
+ * @param workItemId - Canonical Work Item ID stored on the card.
+ * @param linked - Work Item read with the viewer's token, when one was read.
+ * @param t - Translates UI text.
+ * @returns Key, title, and status when readable; a failure notice with the
+ *   stored ID when a retryable read failed; otherwise the stored ID or an
+ *   unavailable notice for a Work Item the viewer cannot read.
+ */
+function describeWorkItemCard(
+  workItemId: string,
+  linked: ReturnType<typeof useLinkedWorkItem>,
+  t: (key: MessageKey) => string,
+): string {
+  if (linked.isUnavailable && workItemId) {
+    return t('documents.links.unavailable')
+  }
+  if (linked.issue) {
+    const title = linked.issue.key
+      ? `${linked.issue.key} ${linked.issue.title}`
+      : linked.issue.title
+    return `${title} · ${t(`workItems.statusCategory.${linked.issue.statusCategory}`)}`
+  }
+  if (linked.hasError) {
+    return `${t('documents.links.loadError')} · ${workItemId}`
+  }
+  return workItemId || t('documents.whiteboard.work-item')
+}
 
 /**
  * Interactive Whiteboard canvas の props です。
  */
 export type WhiteboardCanvasProps = {
+  /**
+   * Work Item card の検索と title 表示に使う Workspace API token です。
+   */
+  accessToken?: string
   /**
    * API から取得した Whiteboard content です。
    */
@@ -153,6 +193,7 @@ const whiteboardTools = [
  * Miro/Excalidraw 型 floating toolbar と SVG object/connector editor です。
  */
 export function WhiteboardCanvas({
+  accessToken,
   content,
   editable,
   onActiveAnchorChange,
@@ -175,8 +216,6 @@ export function WhiteboardCanvas({
   const [isMultiSelectEnabled, setIsMultiSelectEnabled] = useState(false)
   const [isWorkItemComposerOpen, setIsWorkItemComposerOpen] =
     useState(false)
-  const [workItemTeamId, setWorkItemTeamId] = useState('')
-  const [workItemIssueId, setWorkItemIssueId] = useState('')
   const objects = dragPreviewObjects ?? content.objects
   const frames = content.frames
   const objectsRef = useRef(objects)
@@ -251,8 +290,6 @@ export function WhiteboardCanvas({
 
   const addElement = (type: WhiteboardTool) => {
     if (type === 'work-item') {
-      setWorkItemTeamId('')
-      setWorkItemIssueId('')
       setIsWorkItemComposerOpen(true)
       return
     }
@@ -285,12 +322,16 @@ export function WhiteboardCanvas({
     onUpsertObject(object)
   }
 
-  const createWorkItemObject = () => {
-    const workItemId = createCanonicalWorkItemId(
-      workItemTeamId,
-      workItemIssueId,
-    )
-    if (!workItemId) return
+  /**
+   * Places a card for the Work Item chosen in the picker.
+   *
+   * @param target - Work Item relation target chosen by the editor.
+   */
+  const createWorkItemObject = async (
+    target: DocumentRelationTarget,
+  ) => {
+    if (target.kind !== 'work-item') return
+    const workItemId = target.workItemId
     const object = {
       ...createWhiteboardObject('work-item', objects.length),
       workItemId,
@@ -436,42 +477,21 @@ export function WhiteboardCanvas({
         </div>
       ) : null}
       {editable && isWorkItemComposerOpen ? (
-        <form
+        <div
           className="absolute left-1/2 top-20 z-30 grid w-[min(360px,calc(100%-32px))] -translate-x-1/2 gap-3 rounded-xl border border-[var(--workbench-border)] bg-surface p-4 shadow-[0_16px_44px_rgba(23,32,29,0.18)]"
-          onSubmit={(event) => {
-            event.preventDefault()
-            createWorkItemObject()
-          }}
+          role="dialog"
+          aria-label={t('documents.whiteboard.addWorkItem')}
         >
           <strong className="text-sm text-[var(--workbench-text)]">
             {t('documents.whiteboard.addWorkItem')}
           </strong>
-          <p className="m-0 text-xs font-medium leading-5 text-[var(--workbench-muted)]">
-            {t('documents.whiteboard.workItemHint')}
-          </p>
-          <div className="grid grid-cols-2 gap-2">
-            <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
-              {t('documents.whiteboard.teamId')}
-              <input
-                autoFocus
-                className="workbench-input h-10 px-3 text-sm"
-                onChange={(event) =>
-                  setWorkItemTeamId(event.target.value)
-                }
-                value={workItemTeamId}
-              />
-            </label>
-            <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
-              {t('documents.whiteboard.issueId')}
-              <input
-                className="workbench-input h-10 px-3 text-sm"
-                onChange={(event) =>
-                  setWorkItemIssueId(event.target.value)
-                }
-                value={workItemIssueId}
-              />
-            </label>
-          </div>
+          <DocumentRelationTargetPicker
+            accessToken={accessToken}
+            autoFocus
+            kinds={workItemLinkTargetKinds}
+            onSelect={createWorkItemObject}
+            t={t}
+          />
           <div className="flex justify-end gap-2">
             <button
               className="workbench-button min-h-9 px-3"
@@ -480,23 +500,12 @@ export function WhiteboardCanvas({
             >
               {t('documents.whiteboard.cancelWorkItem')}
             </button>
-            <button
-              className="workbench-button-primary min-h-9 px-3 disabled:opacity-50"
-              disabled={
-                createCanonicalWorkItemId(
-                  workItemTeamId,
-                  workItemIssueId,
-                ) === undefined
-              }
-              type="submit"
-            >
-              {t('documents.whiteboard.saveWorkItem')}
-            </button>
           </div>
-        </form>
+        </div>
       ) : null}
 
       <WhiteboardSvg
+        accessToken={accessToken}
         connectors={content.connectors}
         frames={frames}
         objects={objects}
@@ -625,6 +634,7 @@ export function WhiteboardReadOnly({
 }
 
 function WhiteboardSvg({
+  accessToken,
   connectors,
   frames,
   objects,
@@ -640,6 +650,7 @@ function WhiteboardSvg({
   svgRef,
   t,
 }: {
+  accessToken?: string
   connectors: WhiteboardConnector[]
   frames: WhiteboardFrame[]
   objects: WhiteboardObject[]
@@ -820,6 +831,7 @@ function WhiteboardSvg({
         .sort((left, right) => left.zIndex - right.zIndex)
         .map((object) => (
           <WhiteboardObjectNode
+            accessToken={accessToken}
             key={object.id}
             object={object}
             selected={selectedObjectIds.includes(object.id)}
@@ -835,6 +847,7 @@ function WhiteboardSvg({
 }
 
 function WhiteboardObjectNode({
+  accessToken,
   object,
   onNavigate,
   onMove,
@@ -843,6 +856,7 @@ function WhiteboardObjectNode({
   selected,
   t,
 }: {
+  accessToken?: string
   object: WhiteboardObject
   onNavigate?: (path: string) => void
   onMove?: (
@@ -859,9 +873,15 @@ function WhiteboardObjectNode({
   t: (key: MessageKey) => string
 }) {
   const fill = object.style?.fill ?? '#ffffff'
+  const linkedWorkItem = useLinkedWorkItem(
+    object.type === 'work-item' ? accessToken : undefined,
+    object.type === 'work-item' && accessToken
+      ? object.workItemId
+      : undefined,
+  )
   const text =
     object.type === 'work-item'
-      ? object.workItemId || t('documents.whiteboard.work-item')
+      ? describeWorkItemCard(object.workItemId, linkedWorkItem, t)
       : object.text
   const workItemPath =
     object.type === 'work-item' && object.workItemId
@@ -869,105 +889,184 @@ function WhiteboardObjectNode({
       : undefined
 
   return (
-    <g
-      aria-label={
-        text || t(`documents.whiteboard.${object.type}`)
-      }
-      className={onPointerDown ? 'cursor-grab active:cursor-grabbing' : ''}
-      onDoubleClick={() => workItemPath && onNavigate?.(workItemPath)}
-      onKeyDown={(event) => {
-        const movement =
-          event.key === 'ArrowUp'
-            ? [0, -1]
-            : event.key === 'ArrowDown'
-              ? [0, 1]
-              : event.key === 'ArrowLeft'
-                ? [-1, 0]
-                : event.key === 'ArrowRight'
-                  ? [1, 0]
-                  : undefined
-        if (onMove && movement) {
-          event.preventDefault()
-          const distance = event.shiftKey ? 20 : 5
-          onMove(
-            object.id,
-            movement[0] * distance,
-            movement[1] * distance,
-          )
-        } else if (
-          onSelect &&
-          (event.key === 'Enter' || event.key === ' ')
-        ) {
-          event.preventDefault()
-          onSelect(
-            object.id,
-            event.shiftKey || event.metaKey || event.ctrlKey,
-          )
-        } else if (
-          event.key === 'Enter' &&
-          workItemPath
-        ) {
-          onNavigate?.(workItemPath)
+    <>
+      <g
+        aria-label={
+          text || t(`documents.whiteboard.${object.type}`)
         }
-      }}
-      onPointerDown={(event) => onPointerDown?.(event, object)}
-      role={
-        onSelect
-          ? 'button'
-          : object.type === 'work-item'
-            ? 'link'
-            : undefined
-      }
-      tabIndex={onSelect || object.type === 'work-item' ? 0 : undefined}
-      transform={`translate(${object.bounds.x} ${object.bounds.y})`}
-    >
-      {object.type === 'shape' && object.shape === 'ellipse' ? (
-        <ellipse
-          cx={object.bounds.width / 2}
-          cy={object.bounds.height / 2}
-          fill={fill}
-          rx={object.bounds.width / 2}
-          ry={object.bounds.height / 2}
-          stroke={selected ? '#0f766e' : object.style?.stroke ?? '#dde4e1'}
-          strokeWidth={selected ? 4 : 2}
-        />
-      ) : (
-        <rect
-          fill={fill}
-          height={object.bounds.height}
-          rx="10"
-          stroke={
-            selected
-              ? '#0f766e'
-              : object.type === 'work-item'
-                ? '#99d7cf'
-                : object.style?.stroke ?? '#dde4e1'
+        className={onPointerDown ? 'cursor-grab active:cursor-grabbing' : ''}
+        onDoubleClick={() => workItemPath && onNavigate?.(workItemPath)}
+        onKeyDown={(event) => {
+          const movement =
+            event.key === 'ArrowUp'
+              ? [0, -1]
+              : event.key === 'ArrowDown'
+                ? [0, 1]
+                : event.key === 'ArrowLeft'
+                  ? [-1, 0]
+                  : event.key === 'ArrowRight'
+                    ? [1, 0]
+                    : undefined
+          if (onMove && movement) {
+            event.preventDefault()
+            const distance = event.shiftKey ? 20 : 5
+            onMove(
+              object.id,
+              movement[0] * distance,
+              movement[1] * distance,
+            )
+          } else if (
+            onSelect &&
+            (event.key === 'Enter' || event.key === ' ')
+          ) {
+            event.preventDefault()
+            onSelect(
+              object.id,
+              event.shiftKey || event.metaKey || event.ctrlKey,
+            )
+          } else if (
+            event.key === 'Enter' &&
+            workItemPath
+          ) {
+            onNavigate?.(workItemPath)
           }
-          strokeWidth={selected ? 4 : 2}
-          width={object.bounds.width}
-        />
-      )}
-      <foreignObject
-        height={object.bounds.height}
-        pointerEvents="none"
-        width={object.bounds.width}
+        }}
+        onPointerDown={(event) => onPointerDown?.(event, object)}
+        role={
+          onSelect
+            ? 'button'
+            : object.type === 'work-item'
+              ? 'link'
+              : undefined
+        }
+        tabIndex={onSelect || object.type === 'work-item' ? 0 : undefined}
+        transform={`translate(${object.bounds.x} ${object.bounds.y})`}
       >
-        <div className="flex h-full w-full flex-col justify-center overflow-hidden p-4 font-sans">
-          {object.type === 'work-item' && workItemPath ? (
-            <span className="mb-2 text-[11px] font-bold uppercase tracking-[0.08em] text-paper-accent">
-              {t('documents.whiteboard.work-item')}
+        {object.type === 'shape' && object.shape === 'ellipse' ? (
+          <ellipse
+            cx={object.bounds.width / 2}
+            cy={object.bounds.height / 2}
+            fill={fill}
+            rx={object.bounds.width / 2}
+            ry={object.bounds.height / 2}
+            stroke={selected ? '#0f766e' : object.style?.stroke ?? '#dde4e1'}
+            strokeWidth={selected ? 4 : 2}
+          />
+        ) : (
+          <rect
+            fill={fill}
+            height={object.bounds.height}
+            rx="10"
+            stroke={
+              selected
+                ? '#0f766e'
+                : object.type === 'work-item'
+                  ? '#99d7cf'
+                  : object.style?.stroke ?? '#dde4e1'
+            }
+            strokeWidth={selected ? 4 : 2}
+            width={object.bounds.width}
+          />
+        )}
+        <foreignObject
+          height={object.bounds.height}
+          pointerEvents="none"
+          width={object.bounds.width}
+        >
+          <div className="flex h-full w-full flex-col justify-center overflow-hidden p-4 font-sans">
+            {object.type === 'work-item' && workItemPath ? (
+              <span className="mb-2 text-[11px] font-bold uppercase tracking-[0.08em] text-paper-accent">
+                {t('documents.whiteboard.work-item')}
+              </span>
+            ) : null}
+            <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-paper-ink">
+              {text}
             </span>
-          ) : null}
-          <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-paper-ink">
-            {text}
-          </span>
-          {object.type === 'work-item' ? (
-            <span className="mt-2 text-xs font-semibold text-paper-muted">
-              {t('documents.whiteboard.openWorkItem')}
-            </span>
-          ) : null}
-        </div>
-      </foreignObject>
+            {object.type === 'work-item' ? (
+              <span className="mt-2 text-xs font-semibold text-paper-muted">
+                {t('documents.whiteboard.openWorkItem')}
+              </span>
+            ) : null}
+          </div>
+        </foreignObject>
+      </g>
+      {linkedWorkItem.hasError ? (
+        <WorkItemCardRetry
+          bounds={object.bounds}
+          onRetry={linkedWorkItem.retry}
+          t={t}
+        />
+      ) : null}
+    </>
+  )
+}
+
+/** Size of the retry button drawn on a Work Item card whose read failed. */
+const WORK_ITEM_CARD_RETRY_SIZE = { height: 24, width: 72 }
+
+/**
+ * Draws a retry button over the corner of a Work Item card whose read failed.
+ *
+ * It is a sibling of the card rather than a child, so the card's own button or
+ * link role does not contain another control, and its pointer events do not
+ * start a drag of the card.
+ *
+ * @param props - Card bounds, the retry action, and the translator.
+ * @returns The SVG retry button.
+ */
+function WorkItemCardRetry({
+  bounds,
+  onRetry,
+  t,
+}: {
+  /** Bounds of the card the button belongs to. */
+  bounds: WhiteboardObject['bounds']
+  /** Reads the Work Item again. */
+  onRetry: () => unknown
+  /** Translates UI text. */
+  t: (key: MessageKey) => string
+}) {
+  const { height, width } = WORK_ITEM_CARD_RETRY_SIZE
+  const x = bounds.x + bounds.width - width - 8
+  const y = bounds.y + bounds.height - height - 8
+  return (
+    <g
+      aria-label={t('documents.related.retry')}
+      className="cursor-pointer"
+      onClick={(event) => {
+        event.stopPropagation()
+        void onRetry()
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        event.stopPropagation()
+        void onRetry()
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      role="button"
+      tabIndex={0}
+      transform={`translate(${x} ${y})`}
+    >
+      <rect
+        fill="#ffffff"
+        height={height}
+        rx="6"
+        stroke="#0f766e"
+        strokeWidth={1.5}
+        width={width}
+      />
+      <text
+        dominantBaseline="central"
+        fill="#0f766e"
+        fontSize="12"
+        fontWeight="600"
+        textAnchor="middle"
+        x={width / 2}
+        y={height / 2}
+      >
+        {t('documents.related.retry')}
+      </text>
     </g>
   )
 }

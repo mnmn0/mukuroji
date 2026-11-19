@@ -368,6 +368,8 @@ export type DocumentScreenActions = {
  * Storybook 兼用 DocumentScreen の props です。
  */
 export type DocumentScreenProps = {
+  /** Workspace API token used to search link targets and show their titles. */
+  accessToken?: string
   /** Active Workspace member token used only for explicit AI Brief requests. */
   aiAssistanceAccessToken?: string
   /** Whether the dependent AI API deployment has enabled the route-level controls. */
@@ -1336,6 +1338,7 @@ export function DocumentPage() {
 
   return (
     <DocumentScreen
+      accessToken={accessToken}
       aiAssistanceAccessToken={(
         workspace.isAiAssistanceTaskEnabled?.('summary') ?? aiAssistanceUiEnabled
       ) ? accessToken : undefined}
@@ -1430,6 +1433,7 @@ export function DocumentPage() {
  * Global sidebar、secondary tree、editor、context drawer を描画する screen です。
  */
 export function DocumentScreen({
+  accessToken,
   actions,
   aiAssistanceAccessToken,
   aiAssistanceEnabled = true,
@@ -1868,6 +1872,7 @@ export function DocumentScreen({
               </div>
             ) : selectedDocument ? (
               <DocumentWorkspace
+                accessToken={accessToken}
                 key={selectedDocument.id}
                 isAiOperationPending={isAiOperationPending}
                 selectedDocument={selectedDocument}
@@ -1931,6 +1936,7 @@ export function DocumentScreen({
                 className={`fixed inset-y-0 right-0 z-50 max-w-[calc(100vw-24px)] shadow-2xl min-[1280px]:static min-[1280px]:z-auto min-[1280px]:shadow-none ${contextTab ? '' : 'hidden'}`}
               >
                 <DocumentContextPanel
+                  linkAccessToken={accessToken}
                   activeTab={contextTab ?? 'brief'}
                   aiAssistanceAccessToken={resolvedAiAssistanceAccessToken}
                   aiAssistantSessionKey={mountedAiSessionKey}
@@ -2109,6 +2115,10 @@ export function DocumentScreen({
  */
 type DocumentWorkspaceProps = {
   /**
+   * Whiteboard の Work Item 検索と title 表示に使う Workspace API token です。
+   */
+  accessToken?: string
+  /**
    * API から取得した選択中 Document です。
    */
   selectedDocument: DocumentRecord
@@ -2183,6 +2193,7 @@ type DocumentWorkspaceProps = {
  * @returns The editable document workspace.
  */
 function DocumentWorkspace({
+  accessToken,
   isAiOperationPending = false,
   onActiveAnchorChange,
   onApplyOperations,
@@ -2665,6 +2676,7 @@ function DocumentWorkspace({
       {localDocument.kind === 'whiteboard' ? (
         <div className="min-h-0 flex-1">
           <WhiteboardCanvas
+            accessToken={accessToken}
             content={localDocument.whiteboard}
             editable={editable}
             t={t}
