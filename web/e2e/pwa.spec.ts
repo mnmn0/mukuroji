@@ -298,15 +298,20 @@ test('共有された内容はURLに載せずworkerが端末内に保持し、�
   expect(stored).toMatchObject({ title: 'Secret bug', text: 'confidential details', url: 'https://example.com/x' })
 })
 
-test('共有したURLは確認画面で日本語名のチームを選んで送るとそのチームのTriageに届く', async ({ page }) => {
-  const handoffs = await signInWithTriageApis(page)
+test('共有したURLはsign-in後の確認画面で日本語名のチームを選んで送るとそのチームのTriageに届く', async ({ page }) => {
   await page.goto('/support')
   await waitForServiceWorkerControl(page)
 
+  // Share while signed out; the worker keeps the content and sign-in returns to the same share.
+  // API routes are installed only afterwards, so request interception never races the worker.
   await postShareTarget(page, { title: 'ログイン画面が崩れる', text: 'iPhone で再現します', url: 'https://example.com/issues/42' })
+  await page.waitForURL((url) => url.pathname === '/' && (url.searchParams.get('returnTo') ?? '').startsWith('/share?shared='))
+  const returnTo = new URL(page.url()).searchParams.get('returnTo') ?? ''
+  expect(returnTo).toMatch(/^\/share\?shared=[0-9a-f-]{36}$/)
 
-  await page.waitForURL((url) => url.pathname === '/share' && url.searchParams.has('shared'))
-  expect(page.url()).not.toContain('example.com')
+  const handoffs = await signInWithTriageApis(page)
+  await page.goto(returnTo)
+
   const form = page.getByTestId('share-capture')
   await expect(form.getByLabel('タイトル')).toHaveValue('ログイン画面が崩れる')
   await expect(form.getByLabel('内容')).toHaveValue('iPhone で再現します\n\nhttps://example.com/issues/42')
