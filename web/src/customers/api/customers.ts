@@ -1,5 +1,8 @@
 import type {
+  CreateCustomerContactInput,
+  CreateCustomerInput,
   Customer,
+  CustomerContact,
   CustomerDetail,
   CustomerImpactSignal,
   CustomerImpactRequestSummary,
@@ -12,6 +15,10 @@ import type {
   CustomerSavedView,
   CreateCustomerRequestFromTriageInput,
   CreateCustomerSavedViewInput,
+  CustomerRequestImportance,
+  UpdateCustomerContactInput,
+  UpdateCustomerInput,
+  UpdateCustomerRequestInput,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { isRecord } from '../../shared/api/jsonValidation'
@@ -180,7 +187,271 @@ export async function createCustomerRequestFromTriage(
   return data
 }
 
-/** Sends one authenticated Customer GET request and decodes its JSON body. */
+/** Body of a manual Customer Request create. The idempotency key travels in the `Idempotency-Key` header. */
+export type CreateCustomerRequestBody = {
+  /** Customer organization making the request. */
+  customerId: string
+  /** Contact making the request, when known. */
+  contactId?: string
+  /** Channel the request came from. */
+  source: {
+    /** Source channel. */
+    kind: CustomerRequestSourceKind
+    /** Whether the source can be notified when the Request completes. */
+    canNotify: boolean
+  }
+  /** Original request message. */
+  originalMessage: string
+  /** Received instant in ISO 8601. */
+  receivedAt: string
+  /** Request importance. */
+  importance: CustomerRequestImportance
+}
+
+/** Work Item a Customer Request links to or unlinks from. */
+export type CustomerRequestWorkItemTarget = {
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Canonical Work Item identifier. */
+  workItemId: string
+}
+
+/** Creates one Customer.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param input Customer attributes.
+ * @param context Mutation identity used for safe retries.
+ * @returns The created or idempotently replayed Customer.
+ */
+export async function createCustomer(
+  accessToken: string,
+  input: CreateCustomerInput,
+  context: MutationRequestContext,
+): Promise<Customer> {
+  const data = await requestJson(`${customersApiBaseUrl}/customers`, accessToken, jsonInit('POST', input, context))
+  if (!isCustomer(data)) throw new CustomerApiError(502, 'Customer response is invalid.')
+  return data
+}
+
+/** Updates one Customer with a revision check.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param customerId Customer to update.
+ * @param input Expected revision and the changed fields.
+ * @returns The updated Customer.
+ */
+export async function updateCustomer(
+  accessToken: string,
+  customerId: string,
+  input: UpdateCustomerInput,
+): Promise<Customer> {
+  const data = await requestJson(
+    `${customersApiBaseUrl}/customers/${encodeURIComponent(customerId)}`,
+    accessToken,
+    jsonInit('PATCH', input),
+  )
+  if (!isCustomer(data)) throw new CustomerApiError(502, 'Customer response is invalid.')
+  return data
+}
+
+/** Adds one contact to a Customer.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param customerId Customer that owns the contact.
+ * @param input Contact attributes.
+ * @param context Mutation identity used for safe retries.
+ * @returns The created or idempotently replayed contact.
+ */
+export async function createCustomerContact(
+  accessToken: string,
+  customerId: string,
+  input: CreateCustomerContactInput,
+  context: MutationRequestContext,
+): Promise<CustomerContact> {
+  const data = await requestJson(
+    `${customersApiBaseUrl}/customers/${encodeURIComponent(customerId)}/contacts`,
+    accessToken,
+    jsonInit('POST', input, context),
+  )
+  if (!isCustomerContact(data)) throw new CustomerApiError(502, 'Customer contact response is invalid.')
+  return data
+}
+
+/** Updates one Customer contact with a revision check.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param customerId Customer that owns the contact.
+ * @param contactId Contact to update.
+ * @param input Expected revision and the changed fields.
+ * @returns The updated contact.
+ */
+export async function updateCustomerContact(
+  accessToken: string,
+  customerId: string,
+  contactId: string,
+  input: UpdateCustomerContactInput,
+): Promise<CustomerContact> {
+  const data = await requestJson(
+    `${customersApiBaseUrl}/customers/${encodeURIComponent(customerId)}/contacts/${encodeURIComponent(contactId)}`,
+    accessToken,
+    jsonInit('PATCH', input),
+  )
+  if (!isCustomerContact(data)) throw new CustomerApiError(502, 'Customer contact response is invalid.')
+  return data
+}
+
+/** Deletes one Customer contact with a revision check.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param customerId Customer that owns the contact.
+ * @param contactId Contact to delete.
+ * @param expectedRevision Contact revision observed before the delete.
+ */
+export async function deleteCustomerContact(
+  accessToken: string,
+  customerId: string,
+  contactId: string,
+  expectedRevision: number,
+): Promise<void> {
+  await requestJson(
+    `${customersApiBaseUrl}/customers/${encodeURIComponent(customerId)}/contacts/${encodeURIComponent(contactId)}?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
+    accessToken,
+    { method: 'DELETE' },
+  )
+}
+
+/** Records one Customer Request by hand.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param input Customer, source, message, and importance.
+ * @param context Mutation identity whose key the server requires for safe retries.
+ * @returns The created or idempotently replayed Customer Request.
+ */
+export async function createCustomerRequest(
+  accessToken: string,
+  input: CreateCustomerRequestBody,
+  context: MutationRequestContext,
+): Promise<CustomerRequest> {
+  const data = await requestJson(`${customersApiBaseUrl}/customer-requests`, accessToken, jsonInit('POST', input, context))
+  if (!isCustomerRequest(data)) throw new CustomerApiError(502, 'Customer Request response is invalid.')
+  return data
+}
+
+/** Updates one Customer Request with a revision check.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param requestId Customer Request to update.
+ * @param input Expected revision and the changed fields.
+ * @returns The updated Customer Request.
+ */
+export async function updateCustomerRequest(
+  accessToken: string,
+  requestId: string,
+  input: UpdateCustomerRequestInput,
+): Promise<CustomerRequest> {
+  const data = await requestJson(
+    `${customersApiBaseUrl}/customer-requests/${encodeURIComponent(requestId)}`,
+    accessToken,
+    jsonInit('PATCH', input),
+  )
+  if (!isCustomerRequest(data)) throw new CustomerApiError(502, 'Customer Request response is invalid.')
+  return data
+}
+
+/** Links one Customer Request to a Work Item.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param requestId Customer Request to link.
+ * @param target Work Item to link.
+ * @returns The updated Customer Request.
+ */
+export async function linkCustomerRequestWorkItem(
+  accessToken: string,
+  requestId: string,
+  target: CustomerRequestWorkItemTarget,
+): Promise<CustomerRequest> {
+  return await sendRequestLink(requestId, 'work-items', accessToken, 'POST', target)
+}
+
+/** Removes one Customer Request-to-Work-Item link with a revision check.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param requestId Customer Request to unlink.
+ * @param target Linked Work Item.
+ * @param expectedRevision Customer Request revision observed before the unlink.
+ * @returns The updated Customer Request.
+ */
+export async function unlinkCustomerRequestWorkItem(
+  accessToken: string,
+  requestId: string,
+  target: CustomerRequestWorkItemTarget,
+  expectedRevision: number,
+): Promise<CustomerRequest> {
+  return await sendRequestLink(requestId, 'work-items', accessToken, 'DELETE', { ...target, expectedRevision })
+}
+
+/** Links one Customer Request directly to a Project.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param requestId Customer Request to link.
+ * @param projectId Project to link.
+ * @returns The updated Customer Request.
+ */
+export async function linkCustomerRequestProject(
+  accessToken: string,
+  requestId: string,
+  projectId: string,
+): Promise<CustomerRequest> {
+  return await sendRequestLink(requestId, 'projects', accessToken, 'POST', { projectId })
+}
+
+/** Removes one direct Customer Request-to-Project link with a revision check.
+ *
+ * @param accessToken Bearer token for the authenticated Workspace.
+ * @param requestId Customer Request to unlink.
+ * @param projectId Linked Project.
+ * @param expectedRevision Customer Request revision observed before the unlink.
+ * @returns The updated Customer Request.
+ */
+export async function unlinkCustomerRequestProject(
+  accessToken: string,
+  requestId: string,
+  projectId: string,
+  expectedRevision: number,
+): Promise<CustomerRequest> {
+  return await sendRequestLink(requestId, 'projects', accessToken, 'DELETE', { projectId, expectedRevision })
+}
+
+/** Sends one Customer Request link change and validates the returned Request. */
+async function sendRequestLink(
+  requestId: string,
+  relation: 'work-items' | 'projects',
+  accessToken: string,
+  method: 'POST' | 'DELETE',
+  body: Record<string, unknown>,
+): Promise<CustomerRequest> {
+  const data = await requestJson(
+    `${customersApiBaseUrl}/customer-requests/${encodeURIComponent(requestId)}/${relation}`,
+    accessToken,
+    jsonInit(method, body),
+  )
+  if (!isCustomerRequest(data)) throw new CustomerApiError(502, 'Customer Request response is invalid.')
+  return data
+}
+
+/** Builds a JSON mutation request, adding retry headers when the endpoint is idempotent. */
+function jsonInit(method: string, body: unknown, context?: MutationRequestContext): RequestInit {
+  return {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(context ? createMutationHeaders(context) : {}),
+    },
+    body: JSON.stringify(body),
+  }
+}
+
+/** Sends one authenticated Customer request and decodes its JSON body. */
 async function requestJson(url: string, accessToken: string, init: RequestInit = {}): Promise<unknown> {
   const headers = new Headers(init.headers)
   headers.set('Authorization', `Bearer ${accessToken}`)
@@ -298,7 +569,7 @@ function isCustomer(value: unknown): value is Customer {
 }
 
 /** Validates one Customer Contact response. */
-function isCustomerContact(value: unknown): boolean {
+function isCustomerContact(value: unknown): value is CustomerContact {
   return isRecord(value) && isString(value.id) && isString(value.workspaceId) &&
     isString(value.customerId) && isString(value.name) && isOptionalString(value.email) &&
     isOptionalString(value.role) && isOptionalString(value.phone) &&
