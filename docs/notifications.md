@@ -179,7 +179,7 @@ Work Itemの担当者だけに向けた通知は、担当変更・状態変更�
 
 ## Due / overdue scan
 
-EventBridge の定期 rule が canonical Work Item を bounded pagination で走査します。date-only の期限は各 item の `schedule.calendarPolicy.timeZone` における local calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。
+EventBridge の定期 rule が、Work Items table の期限 index（`WorkItemNotificationDueIndex`）から通知の対象になりうる Work Item だけを読みます。index に載るのは archive されていない未完了の Work Item のうち、期限があるものと着手中（`started`）のものだけで、完了・archive・期限の削除で外れます。schedule は 16 の shard を期限の古い順に、今日（UTC）+ 366 日（期限前通知の日数の上限 365 日 + timezone の余裕 1 日）まで読みます。着手中の Work Item は未更新の督促のため期限に関係なく毎回読みます。読み取り量は Work Item の総数ではなく、期限が近い・超過した・着手中の Work Item の数に比例し、page 数の上限はありません。index は結果整合なので、段階が出る item だけ base table を強整合で読み直してから評価します。index の属性（`notificationScheduleShard` と `notificationDueKey`）は Work Item の作成・更新・日程の連鎖更新・承認による状態遷移で同じ書き込みの中で更新します。属性のない既存の row は次に更新されたときに index に載ります。既存 row への一括付与は #365 の migration で行います。Customer 完了通知の marker は別の sparse index（`WorkItemCustomerCompletionPreparationIndex`）から読みます。date-only の期限は各 item の `schedule.calendarPolicy.timeZone` における local calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。
 
 同じ scan は次の段階も作ります。日数は [リマインドの日数](#リマインドの日数) の順で決まり、括弧内は既定値です。
 
@@ -213,9 +213,8 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 `timesheet.submission-reminder` は、工数 entry が終わってから n 日（`timesheetReminderDays`、7）たっても `draft` または `rejected` のままの人に、Team ごとに 1 通届きます。未提出の entry が残る間は n 日ごとに届きます。
 
 - schedule は 1 時間ごとに動きますが、工数の督促を作るのは 1 日 1 回、UTC の `NOTIFICATION_TIMESHEET_REMINDER_HOUR_UTC` 時（既定 0 時、日本時間 9 時）の実行だけです。その回が失敗した日は送らず、翌日の実行で送ります
-- 対象は Work Item の scan で見つかった Team です。工数は必ず Team の Work Item に付くため、工数のある Team は漏れません。Team ごとに `TimeEntryTeamDateIndex` を直近 92 日分だけ読みます。それより前に始まった未提出の entry は督促しません
+- 対象は Project directory にある全 Team です（その回だけ directory を読みます。読む量は Work Item の数ではなく Team・Project・member の数に比例します）。Team ごとに `TimeEntryTeamDateIndex` を直近 92 日分だけ読みます。それより前に始まった未提出の entry は督促しません
 - 重複排除 key は Workspace・Team・member・n・「Unix epoch から数えて何番目の n 日か」です。同じ期間の再実行や retry は同じ event になります
-- 対象の Team は、その実行で Work Item を走査した Team です。Work Item が 1 件も残っていない Team の工数は督促しません。
 - 通知は Inbox の「工数の提出」として届き、最も古い未提出 entry の週の工数画面（`/teams/{teamId}/timesheet?week=<entry の開始時刻>`。ブラウザが閲覧者の timezone でその時刻を含む月曜始まりの週に直します）を開きます。title は持たず、概要は件数と最も古い日付です
 - 対象は Project に紐づく entry だけです。Project のない entry は一般の member の工数画面に出ず、そこから提出できないため督促しません
 - event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` の entry が 1 件も残っていなければ捨てます。残っていれば、その entry の revision を条件にした ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で読み直して捨てます。読み直す手段がない projection では督促を届けません

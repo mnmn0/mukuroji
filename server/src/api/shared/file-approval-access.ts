@@ -14,6 +14,7 @@ import { ProjectDataError } from '../../modules/directory'
 import {
   applyWorkItemStatusTransitionToActualDates,
   createWorkItemRelationGraphRevisionConditionCheck,
+  createWorkItemNotificationScheduleUpdate,
   createWorkItemRevisionConditionCheck,
   isTeamIssueNotFoundError,
   readAssignedProjectId,
@@ -406,6 +407,11 @@ async function resolveCompletionTransition(
         workItemScheduleInstantToLocalDate(new Date(), workItem.schedule.calendarPolicy),
       ),
       configurationConditionChecks: guardConditionChecks.concat(childCompletionConditionChecks),
+      notificationSchedule: createWorkItemNotificationScheduleUpdate(directoryId, teamId, workItem.id, {
+        archivedAt: workItem.archivedAt,
+        statusCategory: nextStatus.statusCategory,
+        dueDate: workItem.dueDate,
+      }),
     }
   } catch (error) {
     if (error instanceof WorkItemConfigurationError) {

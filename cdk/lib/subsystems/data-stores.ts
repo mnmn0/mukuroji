@@ -130,6 +130,23 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.ALL,
   });
 
+  // Sparse: only open Work Items the notification schedule must evaluate carry the sort key, so
+  // the hourly schedule reads due-soon, overdue, and started Work Items instead of the whole table.
+  workItemsTable.addGlobalSecondaryIndex({
+    indexName: 'WorkItemNotificationDueIndex',
+    partitionKey: { name: 'notificationScheduleShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'notificationDueKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+
+  // Sparse: only Work Items waiting for Customer completion preparation carry the sort key.
+  workItemsTable.addGlobalSecondaryIndex({
+    indexName: 'WorkItemCustomerCompletionPreparationIndex',
+    partitionKey: { name: 'notificationScheduleShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'customerCompletionPreparationAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
   const workItemConfigurationTable = new dynamodb.Table(stack, 'WorkItemConfigurationTable', {
     partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },

@@ -18,6 +18,14 @@ import {
   createPlanningUpdateScheduleShard,
 } from '../../../planning'
 import { createDynamoDbProjectManagerReader } from '../../adapter-out/dynamodb/project-manager-reader'
+import {
+  WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_INDEX_NAME,
+  WORK_ITEM_NOTIFICATION_ALWAYS_DUE_KEY,
+  WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME,
+  createWorkItemNotificationScheduleAttributes,
+  createWorkItemNotificationScheduleShard,
+  isWorkItemKeyRegistryRecord,
+} from '../../../work-items'
 
 /** Creates a canonical Project update target row for schedule tests. */
 function createPlanningProjectUpdateTarget(
@@ -165,8 +173,93 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Returns the notification index attributes the write path stores on a Work Item test row.
+ * Rows the write path could not index (malformed rows) land in the first shard as always due, so
+ * the schedule still meets them and fails closed.
+ */
+function readTestWorkItemIndexAttributes(row: Record<string, unknown>) {
+  if (typeof row.notificationScheduleShard === 'string') {
+    return {
+      shard: row.notificationScheduleShard,
+      dueKey: typeof row.notificationDueKey === 'string' ? row.notificationDueKey : undefined,
+    }
+  }
+  if (
+    typeof row.directoryId !== 'string' ||
+    typeof row.teamId !== 'string' ||
+    typeof row.issueId !== 'string' ||
+    row.directoryId === '' ||
+    row.teamId === '' ||
+    row.issueId === ''
+  ) {
+    return { shard: 'work-item-schedule-00', dueKey: WORK_ITEM_NOTIFICATION_ALWAYS_DUE_KEY }
+  }
+  const attributes = createWorkItemNotificationScheduleAttributes(
+    row.directoryId,
+    row.teamId,
+    row.issueId,
+    {
+      archivedAt: row.archivedAt,
+      statusCategory: row.statusCategory,
+      dueDate: row.dueDate,
+    },
+  )
+  const canonical = row.schemaVersion === WORK_ITEM_SCHEMA_VERSION &&
+    typeof row.title === 'string' &&
+    typeof row.assigneeUserId === 'string'
+  return {
+    shard: attributes.notificationScheduleShard,
+    dueKey: attributes.notificationDueKey ??
+      (canonical ? undefined : WORK_ITEM_NOTIFICATION_ALWAYS_DUE_KEY),
+  }
+}
+
+/**
+ * Emulates the Work Items table indexes and strong reads over the rows a test returns for a
+ * `ScanCommand`, so each test can describe the table as a list of rows.
+ */
+async function resolveWorkItemTableRead(
+  name: string,
+  input: Record<string, unknown>,
+  resolve: (name: string, input: Record<string, unknown>) => unknown | Promise<unknown>,
+): Promise<{ handled: true, response: unknown } | { handled: false }> {
+  const isDueQuery = name === 'QueryCommand' && input.IndexName === WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME
+  const isMarkerQuery = name === 'QueryCommand' &&
+    input.IndexName === WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_INDEX_NAME
+  const isGet = name === 'GetCommand' && input.TableName === 'WorkItemsTable'
+  if (!isDueQuery && !isMarkerQuery && !isGet) return { handled: false }
+  const table = await resolve('ScanCommand', { TableName: input.TableName })
+  const rows = isPlainRecord(table) && Array.isArray(table.Items)
+    ? table.Items.filter(isPlainRecord)
+    : []
+  if (isGet) {
+    const key = isPlainRecord(input.Key) ? input.Key : {}
+    return {
+      handled: true,
+      response: {
+        Item: rows.find((row) =>
+          row.directoryTeamId === key.directoryTeamId && row.issueId === key.issueId
+        ),
+      },
+    }
+  }
+  const values = isPlainRecord(input.ExpressionAttributeValues) ? input.ExpressionAttributeValues : {}
+  const items = rows.filter((row) => {
+    if (isWorkItemKeyRegistryRecord(row)) return false
+    const attributes = readTestWorkItemIndexAttributes(row)
+    if (attributes.shard !== values[':shard']) return false
+    if (isMarkerQuery) return typeof row.customerCompletionPreparationAt === 'string'
+    return attributes.dueKey !== undefined &&
+      typeof values[':upperBound'] === 'string' &&
+      attributes.dueKey <= values[':upperBound']
+  })
+  return { handled: true, response: { Items: items, ScannedCount: items.length } }
+}
+
 function createRecordingDocumentClient(
   resolve: (name: string, input: Record<string, unknown>) => unknown | Promise<unknown>,
+  { emulateWorkItemTable = true }: { emulateWorkItemTable?: boolean } = {},
 ) {
   const commands: Array<{ name: string; input: Record<string, unknown> }> = []
   const client = {
@@ -176,11 +269,24 @@ function createRecordingDocumentClient(
         input: command.input,
       }
       commands.push(recorded)
+      if (emulateWorkItemTable) {
+        const workItemRead = await resolveWorkItemTableRead(recorded.name, recorded.input, resolve)
+        if (workItemRead.handled) return workItemRead.response
+      }
       return await resolve(recorded.name, recorded.input)
     },
   } as unknown as NotificationScheduleDocumentClient
 
   return { client, commands }
+}
+
+/** Returns the commands that read the Work Item notification indexes. */
+function readWorkItemIndexQueries(commands: Array<{ name: string; input: Record<string, unknown> }>) {
+  return commands.filter(({ name, input }) =>
+    name === 'QueryCommand' &&
+    (input.IndexName === WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME ||
+      input.IndexName === WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_INDEX_NAME)
+  )
 }
 
 function createWorkItem(overrides: Record<string, unknown> = {}) {
@@ -273,12 +379,13 @@ describe('notification schedule handler', () => {
     const dueEvent = readPutItem(puts[0]?.input)
     const overdueEvent = readPutItem(puts[1]?.input)
 
+    // The completed Work Item is not in the due index, so only three rows are read.
     expect(result).toEqual({
-      scannedItems: 4,
+      scannedItems: 3,
       emittedEvents: 2,
       duplicateEvents: 0,
-      skippedItems: 2,
-      scannedPages: 1,
+      skippedItems: 1,
+      scannedPages: 32,
     })
     expect(puts).toHaveLength(2)
     expect(dueEvent).toMatchObject({
@@ -342,7 +449,8 @@ describe('notification schedule handler', () => {
       },
     }))
 
-    expect(result).toMatchObject({ scannedItems: 1, skippedItems: 1 })
+    // Read once from the marker index; the completed Work Item is not in the due index.
+    expect(result).toMatchObject({ scannedItems: 1, skippedItems: 0 })
     expect(preparations).toEqual([{
       workspaceId: 'workspace-1',
       teamId: 'core-team',
@@ -592,7 +700,10 @@ describe('notification schedule handler', () => {
       .map(({ input }) => readPutItem(input))
     const escalations = events.filter((event) => event.eventType === 'work-item.overdue-escalation')
 
-    expect(recording.commands.filter(({ name }) => name === 'QueryCommand')).toHaveLength(1)
+    // Project managers are read once per Workspace, not once per escalated Work Item.
+    expect(recording.commands.filter(({ name, input }) =>
+      name === 'QueryCommand' && input.TableName === 'ProjectDirectoryTable'
+    )).toHaveLength(1)
     // One event per manager, so each recipient is deduplicated on its own key.
     expect(escalations).toHaveLength(2)
     expect(escalations[0]).toMatchObject({
@@ -691,7 +802,8 @@ describe('notification schedule handler', () => {
 
     const result = await runNotificationSchedule(createRunOptions(recording.client))
 
-    expect(result).toMatchObject({ emittedEvents: 0, skippedItems: 3 })
+    // Archived Work Items are not in the due index, so the schedule never reads them.
+    expect(result).toMatchObject({ emittedEvents: 0, scannedItems: 0, skippedItems: 0 })
     expect(recording.commands.filter(({ name }) => name === 'PutCommand')).toHaveLength(0)
   })
 
@@ -798,7 +910,8 @@ describe('notification schedule handler', () => {
 
     const result = await runNotificationSchedule(createRunOptions(recording.client))
 
-    expect(result).toMatchObject({ scannedItems: 3, emittedEvents: 1 })
+    // Registry rows never carry the index attributes, so only the Work Item is read.
+    expect(result).toMatchObject({ scannedItems: 1, emittedEvents: 1 })
   })
 
   test('still fails closed for a malformed row that claims to be a key registry row', async () => {
@@ -823,67 +936,100 @@ describe('notification schedule handler', () => {
     )
   })
 
-  test('paginates a bounded strongly consistent Work Item scan', async () => {
-    let scanCount = 0
-    const recording = createRecordingDocumentClient((name) => {
-      if (name !== 'ScanCommand') {
+  test('reads every page of each due-index shard up to a year ahead and re-reads due rows strongly', async () => {
+    const dueToday = createWorkItem()
+    const overdue = createWorkItem({ issueId: 'overdue', dueDate: '2026-07-11' })
+    const shard = createWorkItemNotificationScheduleShard('workspace-1', 'core-team', 'release-checklist')
+    const overdueShard = createWorkItemNotificationScheduleShard('workspace-1', 'core-team', 'overdue')
+    const pages = new Map<string, number>()
+    const recording = createRecordingDocumentClient((name, input) => {
+      if (name === 'GetCommand') {
+        const key = isPlainRecord(input.Key) ? input.Key : {}
+        return { Item: [dueToday, overdue].find((item) => item.issueId === key.issueId) }
+      }
+      if (name !== 'QueryCommand' || input.IndexName !== WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME) {
         return {}
       }
-
-      scanCount += 1
-      return scanCount === 1
-        ? {
-            ScannedCount: 1,
-            Items: [createWorkItem()],
-            LastEvaluatedKey: {
-              directoryTeamId: 'workspace-1#team#core-team',
-              issueId: 'release-checklist',
-            },
-          }
-        : {
-            ScannedCount: 1,
-            Items: [createWorkItem({ issueId: 'overdue', dueDate: '2026-07-11' })],
-          }
-    })
+      const values = isPlainRecord(input.ExpressionAttributeValues) ? input.ExpressionAttributeValues : {}
+      const shardName = String(values[':shard'])
+      const page = (pages.get(shardName) ?? 0) + 1
+      pages.set(shardName, page)
+      const items = [
+        ...(shardName === shard ? [dueToday] : []),
+        ...(shardName === overdueShard ? [overdue] : []),
+      ]
+      // Three pages per populated shard: more than the Planning page budget below.
+      if (items.length === 0) return { Items: [] }
+      return page < 3
+        ? { ScannedCount: 0, Items: [], LastEvaluatedKey: { page } }
+        : { ScannedCount: items.length, Items: items }
+    }, { emulateWorkItemTable: false })
 
     const result = await runNotificationSchedule(createRunOptions(recording.client, {
       scanPageSize: 1,
+      maxScanPages: 1,
     }))
-    const scans = recording.commands.filter((command) => command.name === 'ScanCommand')
+    const dueQueries = recording.commands.filter(({ name, input }) =>
+      name === 'QueryCommand' && input.IndexName === WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME
+    )
 
-    expect(result).toMatchObject({
-      scannedItems: 2,
-      emittedEvents: 2,
-      scannedPages: 2,
-    })
-    expect(scans).toHaveLength(2)
-    expect(scans[0]?.input).toMatchObject({
+    expect(result).toMatchObject({ scannedItems: 2, emittedEvents: 2 })
+    expect(recording.commands.some(({ name }) => name === 'ScanCommand')).toBeFalse()
+    expect(dueQueries[0]?.input).toEqual({
       TableName: 'WorkItemsTable',
-      ConsistentRead: true,
+      IndexName: 'WorkItemNotificationDueIndex',
+      KeyConditionExpression: '#shard = :shard AND #sortKey <= :upperBound',
+      ExpressionAttributeNames: { '#shard': 'notificationScheduleShard', '#sortKey': 'notificationDueKey' },
+      // 365 due-soon days plus one day of time zone slack after 2026-07-12.
+      ExpressionAttributeValues: { ':shard': 'work-item-schedule-00', ':upperBound': '2027-07-13' },
       Limit: 1,
+      ScanIndexForward: true,
     })
-    expect(scans[0]?.input.ProjectionExpression).toBeUndefined()
-    expect(scans[0]?.input.FilterExpression).toBeUndefined()
-    expect(scans[1]?.input.ExclusiveStartKey).toEqual({
-      directoryTeamId: 'workspace-1#team#core-team',
-      issueId: 'release-checklist',
-    })
+    expect(dueQueries.filter(({ input }) => input.ExclusiveStartKey !== undefined).length)
+      .toBe(shard === overdueShard ? 2 : 4)
+    expect(recording.commands.filter(({ name }) => name === 'GetCommand').map(({ input }) => input))
+      .toEqual(expect.arrayContaining([{
+        TableName: 'WorkItemsTable',
+        Key: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'release-checklist' },
+        ConsistentRead: true,
+      }]))
+  })
+
+  test('drops a stage the index copy shows when the strong read no longer qualifies', async () => {
+    const indexed = createWorkItem()
+    const recording = createRecordingDocumentClient((name, input) => {
+      if (name === 'GetCommand') {
+        return { Item: { ...indexed, statusCategory: 'completed', workflowStatusId: 'done' } }
+      }
+      if (name === 'QueryCommand' && input.IndexName === WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME) {
+        const values = isPlainRecord(input.ExpressionAttributeValues) ? input.ExpressionAttributeValues : {}
+        return values[':shard'] === createWorkItemNotificationScheduleShard(
+          'workspace-1',
+          'core-team',
+          'release-checklist',
+        )
+          ? { Items: [indexed], ScannedCount: 1 }
+          : { Items: [] }
+      }
+      return {}
+    }, { emulateWorkItemTable: false })
+
+    await expect(runNotificationSchedule(createRunOptions(recording.client)))
+      .resolves.toMatchObject({ emittedEvents: 0, skippedItems: 1 })
+    expect(recording.commands.some(({ name }) => name === 'PutCommand')).toBeFalse()
   })
 
   test('uses the same event ID across schedule retries and treats the condition as dedupe', async () => {
-    let scanCount = 0
+    let assigneeUserId = 'Member@Example.com'
     let putCount = 0
     const eventIds: string[] = []
     const recording = createRecordingDocumentClient((name, input) => {
       if (name === 'ScanCommand') {
-        scanCount += 1
         return {
-          Items: [createWorkItem({
-            assigneeUserId: scanCount === 3 ? 'new-owner@example.com' : 'Member@Example.com',
-            dueDate: '2026-07-12',
-          })],
+          Items: [createWorkItem({ assigneeUserId, dueDate: '2026-07-12' })],
         }
       }
+      if (name !== 'PutCommand') return {}
 
       putCount += 1
       eventIds.push(String(readPutItem(input).eventId))
@@ -902,6 +1048,7 @@ describe('notification schedule handler', () => {
     const retry = await runNotificationSchedule(createRunOptions(recording.client, {
       now: new Date('2026-07-12T23:59:00.000Z'),
     }))
+    assigneeUserId = 'new-owner@example.com'
     const reassigned = await runNotificationSchedule(createRunOptions(recording.client, {
       now: new Date('2026-07-12T23:59:30.000Z'),
     }))
@@ -944,35 +1091,18 @@ describe('notification schedule handler', () => {
     expect(putCount).toBe(2)
   })
 
-  test('fails visibly instead of silently dropping pages beyond the configured bound', async () => {
-    const recording = createRecordingDocumentClient((name) =>
-      name === 'ScanCommand'
-        ? {
-            Items: [],
-            LastEvaluatedKey: { directoryTeamId: 'next', issueId: 'next' },
-          }
-        : {},
-    )
-
-    await expect(
-      runNotificationSchedule(createRunOptions(recording.client, { maxScanPages: 1 })),
-    ).rejects.toThrow('exceeded the configured 1 scan page limit')
-  })
-
-  test('gives Work Item scans and Planning queries independent page budgets', async () => {
-    const recording = createRecordingDocumentClient((name) => {
-      if (name === 'ScanCommand') return { Items: [] }
-      return { Items: [] }
-    })
+  test('keeps the page budget for Planning queries only', async () => {
+    const recording = createRecordingDocumentClient(() => ({ Items: [] }))
 
     await expect(
       runNotificationSchedule(createRunOptions(recording.client, {
         maxScanPages: 16,
         planningTableName: 'PlanningTable',
       })),
-    ).resolves.toMatchObject({ scannedPages: 17 })
-    expect(recording.commands.filter((command) => command.name === 'ScanCommand')).toHaveLength(1)
-    expect(recording.commands.filter((command) => command.name === 'QueryCommand')).toHaveLength(16)
+    ).resolves.toMatchObject({ scannedPages: 48 })
+    expect(recording.commands.filter((command) => command.name === 'ScanCommand')).toHaveLength(0)
+    expect(readWorkItemIndexQueries(recording.commands)).toHaveLength(32)
+    expect(recording.commands.filter((command) => command.name === 'QueryCommand')).toHaveLength(48)
   })
 
   test('decodes Planning update targets and derives reminder, overdue, and escalation stages', () => {
@@ -1170,7 +1300,7 @@ describe('notification schedule handler', () => {
       duplicateEvents: 0,
       emittedEvents: 1,
       scannedItems: 1,
-      scannedPages: 17,
+      scannedPages: 48,
     })
     await expect(runNotificationSchedule(options)).resolves.toMatchObject({
       duplicateEvents: 1,
@@ -1526,10 +1656,12 @@ describe('configurable reminder days and timesheet reminders', () => {
       ),
     }))
 
-    expect(readEvents(recording.commands).map((event) => [event.entityId, event.eventType])).toEqual([
-      ['team/core-team/issue/owner-five-days', 'work-item.due-soon'],
-      ['team/core-team/issue/other-two-days', 'work-item.due-soon'],
-    ])
+    // Shards are read one after another, so compare without the cross-shard order.
+    expect(readEvents(recording.commands).map((event) => [event.entityId, event.eventType]).sort())
+      .toEqual([
+        ['team/core-team/issue/other-two-days', 'work-item.due-soon'],
+        ['team/core-team/issue/owner-five-days', 'work-item.due-soon'],
+      ])
   })
 
   test('takes escalation days from the Team and keys a non-default overdue interval separately', async () => {
@@ -1596,11 +1728,22 @@ describe('configurable reminder days and timesheet reminders', () => {
       },
     }
     const run = async (now: string, timesheetReminderHourUtc = 0) => {
-      const recording = createRecordingDocumentClient((name) => name === 'ScanCommand'
-        ? { Items: [createWorkItem({ statusCategory: 'completed', workflowStatusId: 'done' })] }
-        : {})
+      const recording = createRecordingDocumentClient((name, input) => {
+        if (name !== 'ScanCommand') return {}
+        // Teams come from the Project directory, not from Work Items, so a Team whose Work
+        // Items are all completed is still reminded.
+        return input.TableName === 'ProjectDirectoryTable'
+          ? {
+              Items: [
+                { directoryId: 'workspace-1', entryType: 'team', teamId: 'core-team' },
+                { directoryId: 'workspace-1', entryType: 'project', teamId: 'core-team', projectId: 'platform' },
+              ],
+            }
+          : { Items: [createWorkItem({ statusCategory: 'completed', workflowStatusId: 'done' })] }
+      })
       await runNotificationSchedule(createRunOptions(recording.client, {
         now: new Date(now),
+        projectDirectoryTableName: 'ProjectDirectoryTable',
         timesheetReader,
         timesheetReminderHourUtc,
       }))

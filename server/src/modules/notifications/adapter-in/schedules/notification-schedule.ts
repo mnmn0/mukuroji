@@ -22,7 +22,18 @@ import {
   PLANNING_UPDATE_SCHEDULE_SHARD_COUNT,
 } from '../../../planning'
 import { createPlanningUpdatePublicTargetKey } from '../../../collaboration'
-import { isCanonicalWorkItemRecord, isWorkItemKeyRegistryRecord } from '../../../work-items'
+import {
+  WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_INDEX_NAME,
+  WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_KEY_ATTRIBUTE,
+  WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME,
+  WORK_ITEM_NOTIFICATION_DUE_KEY_ATTRIBUTE,
+  WORK_ITEM_NOTIFICATION_SCHEDULE_SHARD_ATTRIBUTE,
+  WORK_ITEM_NOTIFICATION_SCHEDULE_SHARD_COUNT,
+  createWorkItemNotificationScheduleShardName,
+  isCanonicalWorkItemRecord,
+  isWorkItemKeyRegistryRecord,
+} from '../../../work-items'
+import { NOTIFICATION_REMINDER_DAYS_MAXIMUM } from '@mukuroji/contracts'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 import type { ScheduledProjectManagerReader } from '../../application/ports/project-manager-reader'
 import type { ScheduledReminderSettingsReader } from '../../application/ports/reminder-settings-reader'
@@ -94,9 +105,14 @@ export type NotificationScheduleRunOptions = {
   auditEventsTableName: string
   /** Schedule timezone ごとの日付判定基準となる event 発生時刻です。 */
   now: Date
-  /** 一度の DynamoDB Scan で評価する最大 item 数です。 */
+  /** Sparse Work Item due GSI; defaults to {@link WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME}. */
+  workItemNotificationDueIndexName?: string
+  /** 一度の DynamoDB Query / Scan page で評価する最大 item 数です。 */
   scanPageSize?: number
-  /** 一度の invocation で読み取る最大 page 数です。 */
+  /**
+   * Planning と Project directory の読み取りで一度の invocation に読む最大 page 数です。
+   * Work Item の期限 index は index 自体が対象を絞るため、この上限を適用しません。
+   */
   maxScanPages?: number
   /** Audit event を保持する日数です。 */
   auditRetentionDays?: number
@@ -383,7 +399,6 @@ export async function runNotificationSchedule(
   const timesheetReminderHourUtc = readHourUtc(
     options.timesheetReminderHourUtc ?? defaultTimesheetReminderHourUtc,
   )
-  const scannedTeams = new Map<string, { workspaceId: string, teamId: string }>()
   const projectManagersByWorkspace = new Map<
     string,
     Promise<ReadonlyMap<string, readonly string[]>>
@@ -395,69 +410,21 @@ export async function runNotificationSchedule(
     skippedItems: 0,
     scannedPages: 0,
   }
-  let workItemScannedPages = 0
-  let exclusiveStartKey: Record<string, unknown> | undefined
+  const documentClient = options.documentClient
 
-  do {
-    if (workItemScannedPages >= maxScanPages) {
-      throw new Error(
-        `Notification schedule exceeded the configured ${maxScanPages} scan page limit.`,
-      )
-    }
-
-    const response = await options.documentClient.send(new ScanCommand({
-      TableName: workItemsTableName,
-      ConsistentRead: true,
-      Limit: scanPageSize,
-      ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-    }))
-
-    workItemScannedPages += 1
-    result.scannedPages += 1
-    result.scannedItems += response.ScannedCount ?? response.Items?.length ?? 0
-
-    for (const item of response.Items ?? []) {
-      // The Work Item key registry shares the table; its rows are not Work Items.
-      if (isWorkItemKeyRegistryRecord(item)) continue
-      const completionPreparation = readCustomerCompletionPreparation(item)
-      if (completionPreparation) {
-        const prepare = options.prepareCustomerCompletionNotifications
-        if (!prepare) {
-          throw new Error(
-            'Customer completion preparation is required for a durable Work Item marker.',
-          )
-        }
-        await prepare(completionPreparation)
-        try {
-          await options.documentClient.send(new UpdateCommand({
-            TableName: workItemsTableName,
-            Key: {
-              directoryTeamId: completionPreparation.directoryTeamId,
-              issueId: completionPreparation.issueId,
-            },
-            UpdateExpression: 'REMOVE #preparationAt, #preparationRevision',
-            ConditionExpression: '#preparationRevision = :revision',
-            ExpressionAttributeNames: {
-              '#preparationAt': 'customerCompletionPreparationAt',
-              '#preparationRevision': 'customerCompletionPreparationRevision',
-            },
-            ExpressionAttributeValues: {
-              ':revision': completionPreparation.revision,
-            },
-          }))
-        } catch (error) {
-          if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
-          // A newer completion marker won the race; leave it for the next scan.
-        }
-      }
+  /**
+   * Evaluates one open Work Item from the due index and emits its scheduled notifications.
+   *
+   * The index copy is eventually consistent, so a row that yields any stage is read again with
+   * a strongly consistent get and evaluated from that copy instead.
+   *
+   * @param indexedItem - Work Item row projected by the due index.
+   */
+  const emitWorkItemNotifications = async (indexedItem: Record<string, unknown>) => {
+    if (isWorkItemKeyRegistryRecord(indexedItem)) return
+    const evaluate = async (item: Record<string, unknown>) => {
       const itemScope = readWorkItemReminderScope(item)
-      if (itemScope) {
-        scannedTeams.set(`${itemScope.workspaceId}\0${itemScope.teamId}`, {
-          workspaceId: itemScope.workspaceId,
-          teamId: itemScope.teamId,
-        })
-      }
-      const evaluation = evaluateScheduledWorkItemNotifications(
+      return evaluateScheduledWorkItemNotifications(
         item,
         now,
         itemScope?.assigneeMemberKey
@@ -468,50 +435,103 @@ export async function runNotificationSchedule(
             )
           : reminderPolicy,
       )
-      const candidates = [...evaluation.candidates]
-      const managerReader = options.projectManagerReader
-      if (evaluation.escalation?.projectId && managerReader) {
-        const escalation = evaluation.escalation
-        let managers = projectManagersByWorkspace.get(escalation.workspaceId)
-        if (!managers) {
-          managers = managerReader.readActiveProjectManagers(escalation.workspaceId)
-          projectManagersByWorkspace.set(escalation.workspaceId, managers)
-        }
-        const recipients = ((await managers).get(escalation.projectId ?? '') ?? [])
-          .filter((memberKey) => memberKey !== escalation.assigneeMemberKey)
-        // One event per manager keeps each recipient's dedupe independent, so a manager who
-        // joins after the first escalation still receives one.
-        for (const memberKey of recipients) {
-          candidates.push({ ...escalation, escalationMemberKey: memberKey })
-        }
+    }
+    const indexed = await evaluate(indexedItem)
+    if (indexed.candidates.length === 0 && !indexed.escalation) {
+      result.skippedItems += 1
+      return
+    }
+    const current = await readCurrentWorkItem(documentClient, workItemsTableName, indexedItem)
+    if (!current) {
+      result.skippedItems += 1
+      return
+    }
+    const evaluation = await evaluate(current)
+    const candidates = [...evaluation.candidates]
+    const managerReader = options.projectManagerReader
+    if (evaluation.escalation?.projectId && managerReader) {
+      const escalation = evaluation.escalation
+      let managers = projectManagersByWorkspace.get(escalation.workspaceId)
+      if (!managers) {
+        managers = managerReader.readActiveProjectManagers(escalation.workspaceId)
+        projectManagersByWorkspace.set(escalation.workspaceId, managers)
       }
-
-      if (candidates.length === 0) {
-        result.skippedItems += 1
-        continue
-      }
-
-      for (const candidate of candidates) {
-        await putScheduledAuditEvent(
-          options.documentClient,
-          auditEventsTableName,
-          createScheduledNotificationAuditEvent(
-            candidate,
-            now,
-            auditRetentionDays,
-            options.requestId,
-          ),
-          result,
-        )
+      const recipients = ((await managers).get(escalation.projectId ?? '') ?? [])
+        .filter((memberKey) => memberKey !== escalation.assigneeMemberKey)
+      // One event per manager keeps each recipient's dedupe independent, so a manager who
+      // joins after the first escalation still receives one.
+      for (const memberKey of recipients) {
+        candidates.push({ ...escalation, escalationMemberKey: memberKey })
       }
     }
 
-    exclusiveStartKey = response.LastEvaluatedKey
-  } while (exclusiveStartKey)
+    if (candidates.length === 0) {
+      result.skippedItems += 1
+      return
+    }
+
+    for (const candidate of candidates) {
+      await putScheduledAuditEvent(
+        documentClient,
+        auditEventsTableName,
+        createScheduledNotificationAuditEvent(
+          candidate,
+          now,
+          auditRetentionDays,
+          options.requestId,
+        ),
+        result,
+      )
+    }
+  }
+
+  await queryWorkItemNotificationIndex({
+    documentClient,
+    workItemsTableName,
+    indexName: WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_INDEX_NAME,
+    sortKeyAttribute: WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_KEY_ATTRIBUTE,
+    pageSize: scanPageSize,
+    result,
+    visit: async (indexedKey) => {
+      const current = await readCurrentWorkItem(documentClient, workItemsTableName, indexedKey)
+      const completionPreparation = current && readCustomerCompletionPreparation(current)
+      if (!completionPreparation) return
+      await prepareCustomerCompletion(
+        documentClient,
+        workItemsTableName,
+        completionPreparation,
+        options.prepareCustomerCompletionNotifications,
+      )
+    },
+  })
+
+  // Every open Work Item that can be due soon for any recipient is at or below this key; a
+  // calendar day of slack covers Work Item time zones ahead of UTC.
+  const dueKeyUpperBound = addUtcDays(now, NOTIFICATION_REMINDER_DAYS_MAXIMUM + 1)
+  await queryWorkItemNotificationIndex({
+    documentClient,
+    workItemsTableName,
+    indexName: options.workItemNotificationDueIndexName ?? WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME,
+    sortKeyAttribute: WORK_ITEM_NOTIFICATION_DUE_KEY_ATTRIBUTE,
+    upperBound: dueKeyUpperBound,
+    pageSize: scanPageSize,
+    result,
+    visit: emitWorkItemNotifications,
+  })
 
   if (options.timesheetReader && now.getUTCHours() === timesheetReminderHourUtc) {
     const from = new Date(now.getTime() - TIMESHEET_REMINDER_LOOKBACK_DAYS * 86_400_000)
-    for (const { workspaceId, teamId } of scannedTeams.values()) {
+    const teams = await listScheduledTeams(
+      documentClient,
+      requireText(
+        options.projectDirectoryTableName,
+        'Project directory table name for timesheet reminders',
+      ),
+      scanPageSize,
+      maxScanPages,
+      result,
+    )
+    for (const { workspaceId, teamId } of teams) {
       const entries = await options.timesheetReader.listUnsubmittedEntries(
         workspaceId,
         teamId,
@@ -570,6 +590,205 @@ function readWorkItemReminderScope(item: Record<string, unknown>) {
     teamId: item.teamId,
     assigneeMemberKey: item.assigneeUserId.toLowerCase(),
   }
+}
+
+/** Input of one pass over a Work Item notification schedule index. */
+type WorkItemNotificationIndexQueryInput = {
+  /** DocumentClient used for the queries. */
+  documentClient: NotificationScheduleDocumentClient
+  /** Canonical Work Items table name. */
+  workItemsTableName: string
+  /** Sparse GSI to read. */
+  indexName: string
+  /** Sort key attribute of the GSI. */
+  sortKeyAttribute: string
+  /** Inclusive sort key upper bound; omitted to read every entry of each shard. */
+  upperBound?: string
+  /** Items per query page. */
+  pageSize: number
+  /** Result accumulator shared with the caller. */
+  result: NotificationScheduleResult
+  /** Handles one projected row, in ascending sort key order within its shard. */
+  visit: (item: Record<string, unknown>) => Promise<void>
+}
+
+/**
+ * Reads every shard of a sparse Work Item notification index to the end.
+ *
+ * The amount read is bounded by the index itself (open, due-soon or overdue Work Items, or pending
+ * completion markers), not by the size of the Work Items table, so there is no page cap.
+ *
+ * @param input - Index, bound, and visitor.
+ */
+async function queryWorkItemNotificationIndex(
+  input: WorkItemNotificationIndexQueryInput,
+): Promise<void> {
+  for (let shardIndex = 0; shardIndex < WORK_ITEM_NOTIFICATION_SCHEDULE_SHARD_COUNT; shardIndex += 1) {
+    const shard = createWorkItemNotificationScheduleShardName(shardIndex)
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await input.documentClient.send(new QueryCommand({
+        TableName: input.workItemsTableName,
+        IndexName: input.indexName,
+        KeyConditionExpression: input.upperBound === undefined
+          ? '#shard = :shard'
+          : '#shard = :shard AND #sortKey <= :upperBound',
+        ExpressionAttributeNames: {
+          '#shard': WORK_ITEM_NOTIFICATION_SCHEDULE_SHARD_ATTRIBUTE,
+          ...(input.upperBound === undefined ? {} : { '#sortKey': input.sortKeyAttribute }),
+        },
+        ExpressionAttributeValues: {
+          ':shard': shard,
+          ...(input.upperBound === undefined ? {} : { ':upperBound': input.upperBound }),
+        },
+        Limit: input.pageSize,
+        ScanIndexForward: true,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      }))
+      input.result.scannedPages += 1
+      input.result.scannedItems += response.ScannedCount ?? response.Items?.length ?? 0
+      for (const item of response.Items ?? []) {
+        await input.visit(item)
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+  }
+}
+
+/**
+ * Reads the current copy of a Work Item row named by an index entry.
+ *
+ * @param documentClient - DocumentClient used for the read.
+ * @param workItemsTableName - Canonical Work Items table name.
+ * @param indexedItem - Index entry carrying the table keys.
+ * @returns The strongly consistent row, or undefined when it no longer exists.
+ */
+async function readCurrentWorkItem(
+  documentClient: NotificationScheduleDocumentClient,
+  workItemsTableName: string,
+  indexedItem: Record<string, unknown>,
+): Promise<Record<string, unknown> | undefined> {
+  const response = await documentClient.send(new GetCommand({
+    TableName: workItemsTableName,
+    Key: {
+      directoryTeamId: requireText(indexedItem.directoryTeamId, 'Indexed Work Item partition key'),
+      issueId: requireText(indexedItem.issueId, 'Indexed Work Item sort key'),
+    },
+    ConsistentRead: true,
+  }))
+  return response.Item
+}
+
+/**
+ * Prepares Customer completion notifications for one marker and clears the marker.
+ *
+ * @param documentClient - DocumentClient used to clear the marker.
+ * @param workItemsTableName - Canonical Work Items table name.
+ * @param completionPreparation - Validated marker.
+ * @param prepare - Customer preparation handler.
+ * @throws Error when no handler is configured for a durable marker.
+ */
+async function prepareCustomerCompletion(
+  documentClient: NotificationScheduleDocumentClient,
+  workItemsTableName: string,
+  completionPreparation: CustomerCompletionPreparation,
+  prepare: CustomerCompletionPreparationHandler | undefined,
+): Promise<void> {
+  if (!prepare) {
+    throw new Error(
+      'Customer completion preparation is required for a durable Work Item marker.',
+    )
+  }
+  await prepare(completionPreparation)
+  try {
+    await documentClient.send(new UpdateCommand({
+      TableName: workItemsTableName,
+      Key: {
+        directoryTeamId: completionPreparation.directoryTeamId,
+        issueId: completionPreparation.issueId,
+      },
+      UpdateExpression: 'REMOVE #preparationAt, #preparationRevision',
+      ConditionExpression: '#preparationRevision = :revision',
+      ExpressionAttributeNames: {
+        '#preparationAt': 'customerCompletionPreparationAt',
+        '#preparationRevision': 'customerCompletionPreparationRevision',
+      },
+      ExpressionAttributeValues: {
+        ':revision': completionPreparation.revision,
+      },
+    }))
+  } catch (error) {
+    if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) throw error
+    // A newer completion marker won the race; leave it for the next run.
+  }
+}
+
+/**
+ * Lists every Team in the Project directory for the daily timesheet reminder pass.
+ *
+ * The directory holds Teams, Projects, and memberships, so this read grows with the organization
+ * rather than with the number of Work Items.
+ *
+ * @param documentClient - DocumentClient used for the scan.
+ * @param projectDirectoryTableName - Project directory table name.
+ * @param pageSize - Items per scan page.
+ * @param maxPages - Safety bound on scan pages.
+ * @param result - Result accumulator shared with the caller.
+ * @returns Distinct Workspace and Team pairs.
+ * @throws Error when the directory needs more than `maxPages` pages.
+ */
+async function listScheduledTeams(
+  documentClient: NotificationScheduleDocumentClient,
+  projectDirectoryTableName: string,
+  pageSize: number,
+  maxPages: number,
+  result: NotificationScheduleResult,
+): Promise<Array<{ workspaceId: string, teamId: string }>> {
+  const teams = new Map<string, { workspaceId: string, teamId: string }>()
+  let pages = 0
+  let exclusiveStartKey: Record<string, unknown> | undefined
+  do {
+    if (pages >= maxPages) {
+      throw new Error(
+        `Timesheet reminder Team lookup exceeded the configured ${maxPages} page limit.`,
+      )
+    }
+    const response = await documentClient.send(new ScanCommand({
+      TableName: projectDirectoryTableName,
+      FilterExpression: '#entryType = :team',
+      ProjectionExpression: '#directoryId, #entryType, #teamId',
+      ExpressionAttributeNames: {
+        '#directoryId': 'directoryId',
+        '#entryType': 'entryType',
+        '#teamId': 'teamId',
+      },
+      ExpressionAttributeValues: { ':team': 'team' },
+      Limit: pageSize,
+      ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+    }))
+    pages += 1
+    result.scannedPages += 1
+    result.scannedItems += response.ScannedCount ?? response.Items?.length ?? 0
+    for (const item of response.Items ?? []) {
+      const workspaceId = readText(item.directoryId)
+      const teamId = readText(item.teamId)
+      if (item.entryType !== 'team' || !workspaceId || !teamId) continue
+      teams.set(`${workspaceId}\0${teamId}`, { workspaceId, teamId })
+    }
+    exclusiveStartKey = response.LastEvaluatedKey
+  } while (exclusiveStartKey)
+  return [...teams.values()]
+}
+
+/**
+ * Returns the UTC calendar date a number of days after an instant.
+ *
+ * @param instant - Starting instant.
+ * @param days - Days to add.
+ * @returns `YYYY-MM-DD` date.
+ */
+function addUtcDays(instant: Date, days: number): string {
+  return new Date(instant.getTime() + days * 86_400_000).toISOString().slice(0, 10)
 }
 
 /**
