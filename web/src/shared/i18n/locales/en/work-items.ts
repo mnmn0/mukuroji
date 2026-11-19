@@ -362,7 +362,7 @@ export const workItemsMessages = {
   'tasks.detail.baselineNone': 'No baseline has been saved for this Project yet.',
   'tasks.detail.baselineNotIncluded': 'This Work Item is not in the saved baseline.',
   'tasks.detail.baselineLoadError': 'The baseline could not be loaded.',
-  'tasks.detail.baselineRetry': 'Reload baseline',
+  'tasks.detail.baselineRetry': 'Fetch baseline again',
   'tasks.detail.baselineCapture': 'Save Project baseline',
   'tasks.detail.baselineCaptureHint': 'Saves the current planned dates of every Work Item in the Project. Only a Project manager can save it.',
   'tasks.detail.baselineCaptureError': 'The baseline could not be saved.',

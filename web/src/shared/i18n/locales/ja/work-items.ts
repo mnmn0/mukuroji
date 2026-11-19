@@ -362,7 +362,7 @@ export const workItemsMessages = {
   'tasks.detail.baselineNone': 'この Project のベースラインはまだ保存されていません。',
   'tasks.detail.baselineNotIncluded': 'この Work Item は保存済みのベースラインに含まれていません。',
   'tasks.detail.baselineLoadError': 'ベースラインを読み込めませんでした。',
-  'tasks.detail.baselineRetry': 'ベースラインを再読み込み',
+  'tasks.detail.baselineRetry': 'ベースラインを取得し直す',
   'tasks.detail.baselineCapture': 'Project のベースラインを保存',
   'tasks.detail.baselineCaptureHint': 'Project の全 Work Item の現在の予定日を保存します。保存できるのは Project manager だけです。',
   'tasks.detail.baselineCaptureError': 'ベースラインを保存できませんでした。',
