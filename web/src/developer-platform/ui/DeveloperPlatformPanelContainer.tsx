@@ -26,7 +26,6 @@ import { resolveDeveloperSyncConflict } from '../api/syncConflicts'
 import {
   createDeveloperImport,
   dryRunDeveloperImport,
-  exportDeveloperWorkItems,
 } from '../api/transfers'
 import {
   createDeveloperWebhook,
@@ -45,6 +44,7 @@ import {
 import type { DeveloperExportFormat } from '../model/transfers'
 import { buildConnectorAuthorizationReturnUrl } from '../mutations/connectorAuthorization'
 import { runDeveloperPlatformMutation } from '../mutations/runDeveloperPlatformMutation'
+import { exportDeveloperWorkItems } from '../queries/developerExport'
 import {
   useDeveloperPlatformResources,
   useDeveloperSyncConflicts,

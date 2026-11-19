@@ -182,6 +182,7 @@ export const workspaceMessages = {
   'workspace.focus.policy.fieldError': 'Enter a value within the allowed range.',
   'workspace.myTasks.eyebrow': 'Owned work',
   'workspace.myTasks.title': 'My tasks',
+  'workspace.myTasks.layout': 'My Tasks layout',
   'workspace.myTasks.description':
     'Handle next actions, review work, and completed tasks in one flow.',
   'workspace.myTasks.involvement.contributor': 'Contributor',

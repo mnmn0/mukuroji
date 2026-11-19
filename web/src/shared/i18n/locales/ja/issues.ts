@@ -11,6 +11,7 @@ export const issuesMessages = {
   'issues.action.new': '新規 Issue',
   'issues.view.table': 'テーブル',
   'issues.view.board': 'ボード',
+  'issues.view.gantt': 'ガント',
   'issues.filter.status': 'Issue ステータス',
   'issues.column.title': 'Issue',
   'issues.column.project': '遂行プロジェクト',
