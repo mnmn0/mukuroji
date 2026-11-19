@@ -131,6 +131,7 @@ export function SettingsPage() {
           ) : undefined}
           fontSizePreference={workspace.fontSizePreference}
           themePreference={workspace.themePreference}
+          timeZone={workspace.timeZone}
           locale={workspace.locale}
           notificationSettingsSection={workspace.accessToken ? (
             <NotificationSettingsPanelContainer
@@ -143,6 +144,9 @@ export function SettingsPage() {
           onFontSizePreferenceChange={workspace.onFontSizePreferenceChange}
           onThemePreferenceChange={workspace.onThemePreferenceChange}
           onLocaleChange={workspace.onLocaleChange}
+          onTimeZoneChange={workspace.onTimeZoneChange}
+          isPreferencesSaveFailed={workspace.isMemberPreferencesSaveFailed}
+          onRetryPreferencesSave={workspace.onRetryMemberPreferencesSave}
           t={t}
           userLabel={workspace.userLabel}
         />
