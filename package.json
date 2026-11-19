@@ -32,6 +32,7 @@
     "skill:validate": "bun scripts/validate-mukuroji-review-skill.ts",
     "skill:validate:test": "bun test scripts/validate-mukuroji-review-skill.test.ts",
     "cdk:nag": "bun --filter cdk nag",
+    "demo-data:remove": "bun cdk/scripts/remove-demo-data.ts",
     "web:dev": "bun --filter web dev",
     "web:lint": "bun --filter web lint",
     "web:lint:ci": "bun --filter web lint:ci",

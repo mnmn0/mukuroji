@@ -78,6 +78,7 @@ export type SidebarNavId =
   | 'focus'
   | 'updates'
   | 'my-tasks'
+  | 'work-items'
   | 'inbox'
   | 'requests'
   | 'customers'
@@ -548,6 +549,7 @@ const primaryNavItems: MainNavItem[] = [
   { id: 'focus', icon: FocusIcon },
   { id: 'updates', icon: UpdateFeedSidebarIcon },
   { id: 'my-tasks', icon: CheckCircleIcon },
+  { id: 'work-items', icon: ListIcon },
   { id: 'inbox', icon: BellIcon },
 ]
 
@@ -645,6 +647,7 @@ const defaultLabels: SidebarLabels = {
     focus: 'フォーカス',
     updates: 'アップデート',
     'my-tasks': 'マイタスク',
+    'work-items': 'Work Item 一覧',
     inbox: '受信箱',
     requests: 'リクエスト',
     customers: '顧客',
@@ -2495,6 +2498,20 @@ function CheckCircleIcon({ className }: SidebarIconProps) {
       <circle cx="12" cy="12" r="9" />
       <path d="m8.5 12.5 2.4 2.4 4.8-5.2" />
       <path d="M18 6.5h.01" />
+    </SvgBase>
+  )
+}
+
+/** Draws the Workspace-wide Work Item list entry as a bulleted list. */
+function ListIcon({ className }: SidebarIconProps) {
+  return (
+    <SvgBase className={className}>
+      <path d="M9 6h11" />
+      <path d="M9 12h11" />
+      <path d="M9 18h11" />
+      <path d="M4.5 6h.01" />
+      <path d="M4.5 12h.01" />
+      <path d="M4.5 18h.01" />
     </SvgBase>
   )
 }
