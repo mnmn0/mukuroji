@@ -53,6 +53,7 @@ export const planningMessages = {
   'planning.action.rollover': 'Carry incomplete work forward',
   'planning.rollover.closedSource': 'Completed or canceled cycles cannot be rolled over.',
   'planning.rollover.noTarget': 'No later cycle has the same scope and cadence.',
+  'planning.rollover.incomplete': 'Some work items have not been carried over yet. Run carry-over again to move the rest.',
   'planning.action.publishStatusUpdate': 'Publish update',
   'planning.action.saveCadence': 'Save schedule',
   'planning.action.clearCadence': 'Clear schedule',

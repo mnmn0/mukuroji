@@ -53,6 +53,7 @@ export const planningMessages = {
   'planning.action.rollover': '未完了を繰り越す',
   'planning.rollover.closedSource': '完了または中止した Cycle は繰り越しできません。',
   'planning.rollover.noTarget': '同じスコープ・ケイデンスで後続する Cycle がありません。',
+  'planning.rollover.incomplete': 'まだ繰り越していない Work Item があります。もう一度「未完了を繰り越す」を実行して残りを移してください。',
   'planning.action.publishStatusUpdate': '更新を公開',
   'planning.action.saveCadence': 'スケジュールを保存',
   'planning.action.clearCadence': 'スケジュールを解除',

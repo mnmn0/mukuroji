@@ -825,6 +825,8 @@ export function PlanningPage() {
                   if (!next || next.remaining === 0) return
                   revision = next.revision
                 }
+                // The safety cap ran out before the source Cycle completed; tell the user to run it again.
+                setMutationErrorMessage(t('planning.rollover.incomplete'))
               }
             : undefined}
           onCreateNextCycle={canManagePlanning && snapshot && accessToken
