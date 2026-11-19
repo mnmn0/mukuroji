@@ -56,12 +56,33 @@ function formatLabel(definition: DevProcessDefinition): string {
  * @param child - The process group leader.
  * @param signal - The signal to send.
  */
-function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return
+function signalGroup(child: ChildProcess, signal: NodeJS.Signals | 0): boolean {
+  if (child.pid === undefined) return false
   try {
     process.kill(-child.pid, signal)
+    return true
   } catch {
-    // The group has already exited.
+    // The whole group has already exited.
+    return false
+  }
+}
+
+/**
+ * Waits until no process remains in any of the groups, killing them once the deadline passes.
+ *
+ * The `bun run` wrapper can exit before its children, such as a worker finishing its current batch,
+ * so waiting for the group leaders alone would leave those children running.
+ *
+ * @param running - The started processes whose groups to wait for.
+ * @param deadline - Time in epoch milliseconds after which remaining groups are killed.
+ */
+async function waitForGroups(running: readonly RunningDevProcess[], deadline: number): Promise<void> {
+  while (running.some((entry) => signalGroup(entry.child, 0))) {
+    if (Date.now() >= deadline) {
+      for (const entry of running) signalGroup(entry.child, 'SIGKILL')
+      return
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200))
   }
 }
 
@@ -121,20 +142,20 @@ async function main(): Promise<number> {
 
   let stopping = false
   let exitCode = 0
+  let deadline = Number.POSITIVE_INFINITY
   /**
-   * Stops every process group, then kills groups that outlive the grace period.
+   * Asks every process group to stop; groups that outlive the grace period are killed.
    * A second request, such as pressing Ctrl+C again, kills the remaining groups at once.
    */
   const stopAll = (): void => {
     if (stopping) {
+      deadline = 0
       for (const entry of running) signalGroup(entry.child, 'SIGKILL')
       return
     }
     stopping = true
+    deadline = Date.now() + shutdownGraceMilliseconds
     for (const entry of running) signalGroup(entry.child, 'SIGTERM')
-    setTimeout(() => {
-      for (const entry of running) signalGroup(entry.child, 'SIGKILL')
-    }, shutdownGraceMilliseconds).unref()
   }
   process.on('SIGINT', stopAll)
   process.on('SIGTERM', stopAll)
@@ -149,6 +170,7 @@ async function main(): Promise<number> {
   }
 
   await Promise.all(running.map((entry) => entry.exited))
+  await waitForGroups(running, deadline)
   return exitCode
 }
 
