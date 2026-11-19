@@ -107,3 +107,45 @@ describe('time zone setting', () => {
     expect(html).toMatch(/<option value="Asia\/Tokyo" selected="">Asia\/Tokyo<\/option>/)
   })
 })
+
+describe('display preference save failure', () => {
+  test('shows an alert with a retry action when saving failed', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <WorkspaceSettingsView
+          fontSizePreference="standard"
+          isPreferencesSaveFailed
+          locale="en"
+          onFontSizePreferenceChange={() => undefined}
+          onRetryPreferencesSave={() => undefined}
+          onThemePreferenceChange={() => undefined}
+          t={createTranslator('en')}
+          themePreference="light"
+          userLabel="demo@example.com"
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('data-testid="preferences-save-failed"')
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('Try again')
+  })
+
+  test('shows no alert while saves succeed', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <WorkspaceSettingsView
+          fontSizePreference="standard"
+          locale="en"
+          onFontSizePreferenceChange={() => undefined}
+          onThemePreferenceChange={() => undefined}
+          t={createTranslator('en')}
+          themePreference="light"
+          userLabel="demo@example.com"
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).not.toContain('preferences-save-failed')
+  })
+})

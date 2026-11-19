@@ -493,6 +493,9 @@ export const workspaceMessages = {
     '現在のセッションで使用しているアカウントです。',
   'workspace.settings.languageDescription':
     '画面で使用する表示言語を選択します。変更はアカウントに保存され、どの端末でも使われます。',
+  'workspace.settings.preferencesSaveFailed':
+    '表示設定をアカウントに保存できませんでした。保存できるまでは、この端末だけに反映されます。',
+  'workspace.settings.preferencesSaveRetry': '再試行',
   'workspace.settings.timeZoneTitle': 'タイムゾーン',
   'workspace.settings.timeZoneDescription':
     'アカウントに保存するタイムゾーンを選択します。「ブラウザの設定」のままにすると、この端末の設定に従います。',

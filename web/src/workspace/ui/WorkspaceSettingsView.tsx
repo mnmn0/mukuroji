@@ -25,6 +25,8 @@ export type WorkspaceSettingsViewProps = {
   configurationSections?: ReactNode
   /** Currently selected font-size preference. */
   fontSizePreference: FontSizePreference
+  /** Whether display preferences failed to save to the account. */
+  isPreferencesSaveFailed?: boolean
   /** Currently selected Workspace locale. */
   locale: Locale
   /** Composed notification settings rendered after display preferences. */
@@ -33,6 +35,8 @@ export type WorkspaceSettingsViewProps = {
   onFontSizePreferenceChange: (preference: FontSizePreference) => void
   /** Callback that persists locale changes. */
   onLocaleChange?: (locale: Locale) => void
+  /** Callback that saves display preferences again after a failed save. */
+  onRetryPreferencesSave?: () => void
   /** Callback that persists color theme changes. */
   onThemePreferenceChange: (preference: ThemePreference) => void
   /** Callback that saves a time zone; undefined follows the browser. */
@@ -82,10 +86,12 @@ export function WorkspaceSettingsView({
   appInstallSection,
   configurationSections,
   fontSizePreference,
+  isPreferencesSaveFailed = false,
   locale,
   notificationSettingsSection,
   onFontSizePreferenceChange,
   onLocaleChange,
+  onRetryPreferencesSave,
   onThemePreferenceChange,
   onTimeZoneChange,
   t,
@@ -103,6 +109,24 @@ export function WorkspaceSettingsView({
           meta={t('workspace.settings.displayDescription')}
         />
         <div className="divide-y divide-[var(--workbench-border)] border-t border-[var(--workbench-border)]">
+          {isPreferencesSaveFailed ? (
+            <div
+              className="flex min-w-0 flex-wrap items-center justify-between gap-3 bg-[var(--workbench-danger-surface)] px-5 py-4 text-sm font-semibold text-[var(--workbench-danger)]"
+              data-testid="preferences-save-failed"
+              role="alert"
+            >
+              <span className="min-w-0">{t('workspace.settings.preferencesSaveFailed')}</span>
+              {onRetryPreferencesSave ? (
+                <button
+                  className="workbench-button-secondary min-h-10 w-fit px-4"
+                  onClick={onRetryPreferencesSave}
+                  type="button"
+                >
+                  {t('workspace.settings.preferencesSaveRetry')}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-4 px-5 py-5">
             <div className="min-w-0 max-w-[640px]">
               <h3 className="text-sm font-semibold text-[var(--workbench-text)]">

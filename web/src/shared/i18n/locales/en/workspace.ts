@@ -493,6 +493,9 @@ export const workspaceMessages = {
     'The account used by the current session.',
   'workspace.settings.languageDescription':
     'Choose the display language. Your choice is saved to your account and used on every device.',
+  'workspace.settings.preferencesSaveFailed':
+    'Your display settings could not be saved to your account. They apply on this device only until saved.',
+  'workspace.settings.preferencesSaveRetry': 'Try again',
   'workspace.settings.timeZoneTitle': 'Time zone',
   'workspace.settings.timeZoneDescription':
     'Choose the time zone saved to your account. Leave it on the browser setting to follow this device.',

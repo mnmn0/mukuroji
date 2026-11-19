@@ -182,6 +182,8 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   onThemePreferenceChange: () => undefined,
   onLocaleChange: () => undefined,
   onTimeZoneChange: () => undefined,
+  onRetryMemberPreferencesSave: () => undefined,
+  isMemberPreferencesSaveFailed: false,
   onLogout: () => undefined,
   onOpenNotification: () => undefined,
   onOpenTask: () => undefined,

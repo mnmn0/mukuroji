@@ -122,6 +122,8 @@ export type WorkspaceRouteContextValue = {
   themePreference: ThemePreference
   /** IANA time zone the member saved, or undefined to follow the browser. */
   timeZone?: string
+  /** Whether display preferences failed to save to the account and wait for a retry. */
+  isMemberPreferencesSaveFailed: boolean
   /** The best available display label for the current user. */
   userLabel: string
   /** Stable identifiers that route models may use to recognize the current user. */
@@ -190,6 +192,8 @@ export type WorkspaceRouteContextValue = {
   onLocaleChange: (locale: Locale) => void
   /** Saves a new time zone; undefined follows the browser. */
   onTimeZoneChange: (timeZone: string | undefined) => void
+  /** Saves display preferences again after a failed save. */
+  onRetryMemberPreferencesSave: () => void
   /** Clears the authentication session and returns to the public entry route. */
   onLogout: () => void
   /** Navigates to a fixed workspace sidebar destination. */
@@ -292,7 +296,11 @@ export function WorkspaceRouteProvider() {
     }
     setTimeZone(values.timeZone)
   }, [])
-  const saveMemberPreferences = useMemberPreferencesSync({
+  const {
+    retry: handleRetryMemberPreferencesSave,
+    save: saveMemberPreferences,
+    saveFailed: isMemberPreferencesSaveFailed,
+  } = useMemberPreferencesSync({
     accessToken,
     apply: applyMemberPreferences,
     enabled: Boolean(user && !currentUserError),
@@ -850,6 +858,7 @@ export function WorkspaceRouteProvider() {
     fontSizePreference,
     themePreference,
     timeZone,
+    isMemberPreferencesSaveFailed,
     guardEnterpriseSession,
     inboxCount,
     hasQuickAccessLoadError,
@@ -875,6 +884,7 @@ export function WorkspaceRouteProvider() {
     onThemePreferenceChange: handleThemePreferenceChange,
     onLocaleChange: handleLocaleChange,
     onTimeZoneChange: handleTimeZoneChange,
+    onRetryMemberPreferencesSave: handleRetryMemberPreferencesSave,
     onLogout: handleLogout,
     onOpenNotification: handleOpenNotification,
     onOpenTask: handleOpenTask,
@@ -914,6 +924,7 @@ export function WorkspaceRouteProvider() {
     fontSizePreference,
     themePreference,
     timeZone,
+    isMemberPreferencesSaveFailed,
     guardEnterpriseSession,
     handleArchiveProject,
     handleArchiveTeam,
@@ -925,6 +936,7 @@ export function WorkspaceRouteProvider() {
     handleIsProjectQuickAccess,
     handleLocaleChange,
     handleTimeZoneChange,
+    handleRetryMemberPreferencesSave,
     handleLogout,
     handleOpenNotification,
     handleOpenTask,

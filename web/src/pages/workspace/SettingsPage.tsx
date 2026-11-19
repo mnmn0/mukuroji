@@ -145,6 +145,8 @@ export function SettingsPage() {
           onThemePreferenceChange={workspace.onThemePreferenceChange}
           onLocaleChange={workspace.onLocaleChange}
           onTimeZoneChange={workspace.onTimeZoneChange}
+          isPreferencesSaveFailed={workspace.isMemberPreferencesSaveFailed}
+          onRetryPreferencesSave={workspace.onRetryMemberPreferencesSave}
           t={t}
           userLabel={workspace.userLabel}
         />
