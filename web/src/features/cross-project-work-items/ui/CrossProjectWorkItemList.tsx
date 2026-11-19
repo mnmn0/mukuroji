@@ -36,6 +36,8 @@ export type CrossProjectWorkItemListProps = {
   memberLabels: ReadonlyMap<string, string>
   /** Whether the Work Items are still loading. */
   isLoading: boolean
+  /** Whether the Work Items could not be loaded; the page shows the error notice instead of a count. */
+  loadFailed: boolean
   /** Translation function for the current locale. */
   t: CrossProjectWorkItemTranslator
   /** Replaces the list state, which the page writes to the URL. */
@@ -65,6 +67,7 @@ export function CrossProjectWorkItemList({
   configurationsByTeam,
   memberLabels,
   isLoading,
+  loadFailed,
   t,
   onChangeState,
   onOpenWorkItem,
@@ -196,12 +199,14 @@ export function CrossProjectWorkItemList({
           </button>
         </div>
       </section>
-      <p className="text-sm text-[var(--workbench-muted)]" data-testid="cross-project-work-items-count">
-        {isLoading
-          ? t('workItems.crossProject.loading')
-          : t('workItems.crossProject.count').replace('{count}', String(totalCount))}
-      </p>
-      {!isLoading && groups.length === 0 ? (
+      {loadFailed ? null : (
+        <p className="text-sm text-[var(--workbench-muted)]" data-testid="cross-project-work-items-count">
+          {isLoading
+            ? t('workItems.crossProject.loading')
+            : t('workItems.crossProject.count').replace('{count}', String(totalCount))}
+        </p>
+      )}
+      {!isLoading && !loadFailed && groups.length === 0 ? (
         <p className="workbench-panel px-4 py-6 text-sm text-[var(--workbench-muted)]">
           {t('workItems.crossProject.empty')}
         </p>

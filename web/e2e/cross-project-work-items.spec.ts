@@ -121,3 +121,16 @@ test('Issue #381: lists Work Items across Projects, filters by contributor, and 
   expect(listQueries.at(-1)?.get('involvement')).toBe('mine')
   await expect(page).toHaveURL(/group=assignee/)
 })
+
+test('Issue #381: a failed Work Item read shows the load notice instead of an empty list', async ({ page }) => {
+  await mockWorkspace(page)
+  await page.route((url) => url.pathname === '/api/work-items', (route) =>
+    route.fulfill({ status: 500, json: { message: 'Unavailable' } }))
+
+  await page.goto('/work-items')
+
+  await expect(page.getByTestId('cross-project-work-items')).toBeVisible()
+  await expect(page.getByTestId('workspace-task-partial-error')).toBeVisible()
+  await expect(page.getByTestId('cross-project-work-items-count')).toHaveCount(0)
+  await expect(page.getByText('No Work Items match these filters.')).toHaveCount(0)
+})

@@ -100,6 +100,7 @@ export function WorkItemsPage() {
           configurationsByTeam={workItems.configurationsByTeam}
           groups={groups}
           isLoading={workItems.isWorkItemsLoading}
+          loadFailed={Boolean(workItems.workItemsError)}
           jobRoleOptions={jobRoleOptions}
           memberLabels={memberLabels}
           memberOptions={memberOptions}
