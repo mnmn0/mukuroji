@@ -5,6 +5,7 @@ import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/Time
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
 import { selectTimeEntryWorkItemChoices } from '../../features/time-tracking/model/timeEntryWorkItemOptions'
 import { resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
+import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import type { ProjectDirectoryProject } from '../../projects/api'
 import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
@@ -30,10 +31,11 @@ export function TeamTimeTrackingPage() {
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const view: TimeTrackingView = searchParams.get('view') === 'approvals' ? 'approvals' : 'timesheet'
-  const weekStart = resolveWeekStart(searchParams.get('week'))
   const activeTeam = workspace.teams.find((team) => team.id === teamId)
   const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
   const accessToken = enabled ? workspace.accessToken : undefined
+  const { weekStartDay } = useWorkspaceCalendarSettings(accessToken, enabled).settings
+  const weekStart = resolveWeekStart(searchParams.get('week'), undefined, weekStartDay)
   // Filtered on the server, so other Teams' Work Items cannot push the read past its size limit.
   const teamWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '' }), [teamId])
   const workItems = useWorkspaceWorkItems(accessToken, enabled, false, teamWorkItemFilter)
@@ -73,7 +75,7 @@ export function TeamTimeTrackingPage() {
    * Opens a view and week through the URL.
    *
    * @param nextView - View to show.
-   * @param nextWeekStart - Monday of the week to show.
+   * @param nextWeekStart - First day of the week to show.
    */
   const open = (nextView: TimeTrackingView, nextWeekStart: string) => {
     void navigate(createTeamTimeTrackingPath(teamId ?? '', nextView, nextWeekStart), { replace: true })
@@ -85,7 +87,7 @@ export function TeamTimeTrackingPage() {
    * @param weeks - Weeks to move.
    */
   const moveWeek = (weeks: number) => {
-    open(view, weeks === 0 ? resolveWeekStart(null) : shiftWeek(weekStart, weeks))
+    open(view, weeks === 0 ? resolveWeekStart(null, undefined, weekStartDay) : shiftWeek(weekStart, weeks, weekStartDay))
   }
 
   if (!teamId) return null
@@ -120,6 +122,7 @@ export function TeamTimeTrackingPage() {
             onMoveWeek={moveWeek}
             teamId={teamId}
             weekStart={weekStart}
+            weekStartDay={weekStartDay}
             workItemTitles={workItemTitles}
           />
         ) : (
@@ -131,6 +134,7 @@ export function TeamTimeTrackingPage() {
             onMoveWeek={moveWeek}
             teamId={teamId}
             weekStart={weekStart}
+            weekStartDay={weekStartDay}
             isLoadingWorkItemOptions={isLoadingWorkItemOptions}
             workItemOptions={workItemOptions}
             workItemTitles={workItemTitles}

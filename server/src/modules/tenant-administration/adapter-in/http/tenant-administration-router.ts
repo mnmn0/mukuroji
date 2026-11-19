@@ -6,6 +6,11 @@ import type {
   TenantDefaultPolicy,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
+  WorkspaceCalendarSettings,
+} from '@mukuroji/contracts'
+import {
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  readWorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
 import {
   TenantAdministrationError,
@@ -99,6 +104,16 @@ export function createTenantAdministrationRouter<
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
       return context.json(await ensureTenantInitialized(principal, dependencies))
+    } catch (error) {
+      return dependencies.mapError(context, error)
+    }
+  })
+
+  // Every active member reads these settings to lay out weeks, so only authentication is required.
+  router.get('/api/workspace/calendar-settings', async (context) => {
+    try {
+      const principal = await requirePrincipal(context, dependencies)
+      return context.json(await readWorkspaceCalendar(principal, dependencies))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -235,6 +250,33 @@ export function createTenantAdministrationRouter<
 }
 
 /**
+ * Reads the Workspace calendar settings without initializing tenant state.
+ *
+ * @param principal - Authenticated Workspace member.
+ * @param dependencies - Tenant administration route dependencies.
+ * @returns The stored settings, or the defaults when none are stored yet.
+ */
+async function readWorkspaceCalendar<
+  Principal extends TenantAdministrationPrincipal,
+>(
+  principal: Principal,
+  dependencies: TenantAdministrationRouterDependencies<Principal>,
+): Promise<WorkspaceCalendarSettings> {
+  try {
+    const snapshot = await dependencies.client.getSnapshot(principal.directoryId)
+    return snapshot.profile.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
+  } catch (error) {
+    if (
+      error instanceof TenantAdministrationError &&
+      error.code === 'TenantAdministrationNotInitialized'
+    ) {
+      return DEFAULT_WORKSPACE_CALENDAR_SETTINGS
+    }
+    throw error
+  }
+}
+
+/**
  * Initializes legacy tenant state from authoritative active Workspace membership.
  *
  * @param principal - Authenticated tenant administration principal.
@@ -283,8 +325,28 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     region: validateTenantRegion(body.region),
     locale: validateTenantLocale(body.locale),
     defaultPolicy: readTenantDefaultPolicy(body.defaultPolicy),
+    ...(body.calendar === undefined ? {} : { calendar: readTenantCalendarInput(body.calendar) }),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
+}
+
+/**
+ * Validates the fiscal year and week settings of a profile update.
+ *
+ * @param value - Untrusted `calendar` field of the request body.
+ * @returns The validated calendar settings.
+ * @throws TenantAdministrationError When the month or the week start day is invalid.
+ */
+function readTenantCalendarInput(value: unknown): WorkspaceCalendarSettings {
+  const calendar = readWorkspaceCalendarSettings(value)
+  if (!calendar) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidTenantCalendarSettings',
+      'Fiscal year start month or week start day is invalid.',
+    )
+  }
+  return calendar
 }
 
 function readTenantGovernanceInput(value: unknown): UpdateTenantGovernanceInput {

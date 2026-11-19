@@ -10,7 +10,9 @@ import type {
   TenantRetentionReconciliation,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
+  WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
+import { readWorkspaceCalendarSettings } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkspaceAccessApiError } from './errors'
 import { isRecord } from '../../shared/api/jsonValidation'
@@ -34,6 +36,29 @@ export async function getTenantAdministration(
     accessToken,
     { signal },
   ))
+}
+
+/**
+ * Retrieves the fiscal year and week settings every Workspace member lays out periods with.
+ *
+ * @param accessToken - Bearer token used for the read.
+ * @param signal - Optional cancellation signal for the request.
+ * @returns The validated Workspace calendar settings.
+ * @throws WorkspaceAccessApiError When the request fails or the response is malformed.
+ */
+export async function getWorkspaceCalendarSettings(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceCalendarSettings> {
+  const settings = readWorkspaceCalendarSettings(await sendTenantRequest(
+    '/workspace/calendar-settings',
+    accessToken,
+    { signal },
+  ))
+  if (!settings) {
+    throw new WorkspaceAccessApiError(502, 'tenant.administration.invalidResponse')
+  }
+  return settings
 }
 
 /**
@@ -301,6 +326,7 @@ function isTenantProfile(value: unknown): value is TenantProfile {
     typeof value.region === 'string' &&
     (value.locale === 'ja' || value.locale === 'en') &&
     isTenantDefaultPolicy(value.defaultPolicy) &&
+    (value.calendar === undefined || readWorkspaceCalendarSettings(value.calendar) !== undefined) &&
     (value.status === 'active' || value.status === 'closing' || value.status === 'closed') &&
     (value.closedAt === undefined || typeof value.closedAt === 'string') &&
     (value.closedByOperationId === undefined || typeof value.closedByOperationId === 'string') &&

@@ -383,3 +383,141 @@ test('refuses lifecycle requests when the export and closure workers are not dep
   const operation = await router.request('/api/tenant/operations/operation-1', { headers })
   expect(operation.status).toBe(200)
 })
+
+/**
+ * Creates a router for a member or an administrator that records profile updates.
+ *
+ * @param client - Tenant application port used by the router.
+ * @param updates - Receives each profile update the router forwards.
+ * @param administrator - Whether the caller passes the administration check.
+ * @returns The tenant administration router under test.
+ */
+function createCalendarRouter(
+  client: TenantAdministrationClient,
+  updates: unknown[] = [],
+  administrator = false,
+) {
+  client.updateProfile = async (_workspaceId, _actor, input) => {
+    updates.push(input)
+    return (await client.getSnapshot('workspace-1')).profile
+  }
+  return createTenantAdministrationRouter({
+    async authenticate() {
+      return { directoryId: 'workspace-1', userKey: 'member-1' }
+    },
+    requireAdministration() {
+      if (!administrator) {
+        throw new TenantAdministrationError(403, 'Forbidden', 'Administrator access is required.')
+      }
+    },
+    client,
+    tenantExportDownload: {
+      async createDownload() {
+        return { expiresAt: '2026-08-02T00:05:00.000Z', files: [] }
+      },
+    },
+    async resolveInitialization() {
+      return { ownerMemberKey: 'owner-1' }
+    },
+    async readJson(request) {
+      return await request.json()
+    },
+    mapError(_context, error) {
+      const status = error instanceof TenantAdministrationError ? error.status : 500
+      const code = error instanceof TenantAdministrationError ? error.code : 'UnknownError'
+      return Response.json({ code }, { status })
+    },
+  })
+}
+
+test('lets any member read the Workspace calendar settings, with defaults before setup', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  client.getSnapshot = async () => {
+    throw new TenantAdministrationError(
+      404,
+      'TenantAdministrationNotInitialized',
+      'Tenant administration state is not initialized.',
+    )
+  }
+  const ensureCalls: Array<[string, string]> = []
+  client.ensureSnapshot = async (workspaceId, ownerMemberKey) => {
+    ensureCalls.push([workspaceId, ownerMemberKey])
+    return snapshot
+  }
+
+  const defaults = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+  expect(defaults.status).toBe(200)
+  expect(await defaults.json()).toEqual({ fiscalYearStartMonth: 1, weekStartDay: 1 })
+  // Reading must not initialize tenant state on a member's behalf.
+  expect(ensureCalls).toEqual([])
+
+  client.getSnapshot = async () => ({
+    ...snapshot,
+    profile: { ...snapshot.profile, calendar: { fiscalYearStartMonth: 4, weekStartDay: 0 } },
+  })
+  const stored = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+  expect(await stored.json()).toEqual({ fiscalYearStartMonth: 4, weekStartDay: 0 })
+
+  const unauthenticated = await createCalendarRouter(client).request('/api/workspace/calendar-settings')
+  expect(unauthenticated.status).toBe(401)
+})
+
+test('keeps calendar settings changes behind administration and validates them', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const body = {
+    region: snapshot.profile.region,
+    locale: 'ja',
+    defaultPolicy: { defaultMemberRole: 'member' },
+    expectedRevision: 1,
+  }
+  const memberUpdates: unknown[] = []
+  const member = await createCalendarRouter(createClient(snapshot, []), memberUpdates).request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, calendar: { fiscalYearStartMonth: 4, weekStartDay: 1 } }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(member.status).toBe(403)
+  expect(memberUpdates).toEqual([])
+
+  const updates: unknown[] = []
+  const admin = createCalendarRouter(createClient(snapshot, []), updates, true)
+
+  for (const calendar of [
+    { fiscalYearStartMonth: 0, weekStartDay: 1 },
+    { fiscalYearStartMonth: 13, weekStartDay: 1 },
+    { fiscalYearStartMonth: 4.5, weekStartDay: 1 },
+    { fiscalYearStartMonth: 4, weekStartDay: 7 },
+    { fiscalYearStartMonth: '4', weekStartDay: 1 },
+    null,
+  ]) {
+    const rejected = await admin.request('/api/tenant/profile', {
+      body: JSON.stringify({ ...body, calendar }),
+      headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+      method: 'PATCH',
+    })
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ code: 'InvalidTenantCalendarSettings' })
+  }
+  expect(updates).toEqual([])
+
+  const accepted = await admin.request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, calendar: { fiscalYearStartMonth: 4, weekStartDay: 0, extra: true } }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(accepted.status).toBe(200)
+  expect(updates).toEqual([{ ...body, locale: 'ja', calendar: { fiscalYearStartMonth: 4, weekStartDay: 0 } }])
+})
