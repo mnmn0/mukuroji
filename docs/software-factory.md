@@ -732,7 +732,7 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
 - `POST /v1/work-items/{workItemId}/agent-runs/resume` は、credential の member が Work Item の
   assignee、Work Item が `started`、`resumableStatusIds` が空かその status を含み、`expectedRevision` が
   現在の revision と一致し、claim row がない場合だけ新しい `active` Run を作る。Run と claim の put、
-  Work Item revision と設定 revision の ConditionCheck、start と同じ認可 snapshot（Project member の権限変更でも上がる member の status と version、Team と Project のアーカイブで上がる planning revision）の ConditionCheck、新しい Run の `agent-run.resumed` audit event
+  Work Item revision と設定 revision の ConditionCheck、start と同じ認可 snapshot（Project member の権限変更でも上がる member の status と version、Team と Project のアーカイブで上がる planning revision、Enterprise 管理の Workspace では Enterprise の control revision）の ConditionCheck、新しい Run の `agent-run.resumed` audit event
   （`metadata.resumedFromRunId` に直前の Run）、idempotency receipt を 1 つの transaction で確定する。Work Item の status は変えないため、
   レビュー待ちなどから作業中へ戻す場合は agent が続けて `move_task` を呼ぶ。
 - 直前の Run は `agent-run-latest#<workItemId>` row を強整合で読んで決め、その `runId` を新しい Run の
@@ -756,8 +756,9 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
   未解決の `blockedBy` がある Work Item を再開候補にせず、`skipped` に `blocked` として残す。
 - 競合: 読み取り後に別 instance が claim を取った場合は claim を読み直して `agent_run_conflict`、
   ConditionCheck で取り消された場合は Work Item と設定を読み直し、担当者の変更は `403`、`started`
-  以外への移動は `invalid_transition`、`resumableStatusIds` の変更は `not_resumable`、revision や設定の
-  それ以外の変更は `409` を返す。
+  以外への移動は `invalid_transition`、現在の status が `resumableStatusIds` から外れた場合は `not_resumable`、
+  revision や設定のそれ以外の変更（現在の status を許したままの `resumableStatusIds` の変更を含む）は `409`、
+  呼び出し元の認可 snapshot の変更は `409 WorkItemAuthorizationChanged` を返す。
 - Public の `AgentRun` schema は閉じているため `resumedFromRunId` は載せず、応答の `resumedFromRun` で
   直前の Run を返す。設定値 `resumableStatusIds` は開いた `AgentContext` で返す。Web の内部 API の
   Run には `resumedFromRunId` を含める。

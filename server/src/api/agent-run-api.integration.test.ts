@@ -801,21 +801,31 @@ describe('public Agent Run service', () => {
       startedAt: new Date(Date.now() + 60_000).toISOString(), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString(),
     }
     store.seed(stalled)
-    const receipts: unknown[] = []
+    // Receipts prepared for a transaction and receipts of transactions that committed are kept apart,
+    // so a cancelled take over is shown to leave no receipt behind.
+    const preparedReceipts: unknown[] = []
+    const committedReceipts: unknown[] = []
     setTestAppDependencies({
       transactions: {
         /**
-         * Records the receipt request and returns a receipt write for the transaction.
+         * Records the receipt request and returns a receipt write that carries the response.
          *
          * @param input - Receipt to write.
          * @returns The receipt write.
          */
         async prepareIdempotencyCompletionTransactWrite(input) {
-          receipts.push(input.response)
-          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+          preparedReceipts.push(input.response)
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true, response: input.response } } } }
         },
       },
     })
+    const commitAndRecordReceipts = store.commit.bind(store)
+    store.commit = async (items, fenceItemCount) => {
+      await commitAndRecordReceipts(items, fenceItemCount)
+      for (const item of items) {
+        if (item.Put?.TableName === 'DeveloperPlatformTable') committedReceipts.push(item.Put.Item?.['response'])
+      }
+    }
     const service = createCanonicalPublicAgentRunService()
     /**
      * Takes over the stalled run as an instance.
@@ -847,8 +857,9 @@ describe('public Agent Run service', () => {
     }
     await expect(takeOver('laptop-2', 'take-over-renewed')).rejects.toMatchObject({ category: 'conflict' })
     store.state.runs.set(`${workspaceId}|core-team|${stalled.runId}`, structuredClone(stalled))
-    // The cancelled transaction wrote no receipt.
-    receipts.length = 0
+    // The cancelled transaction prepared a receipt but committed none.
+    expect(preparedReceipts).toHaveLength(1)
+    expect(committedReceipts).toEqual([])
 
     const taken = await takeOver('laptop-2', 'take-over-2')
     expect(taken.supersededRun).toMatchObject({ runId: stalled.runId, state: 'finished', outcome: 'superseded', finishedBy: 'demo@example.com' })
@@ -856,7 +867,8 @@ describe('public Agent Run service', () => {
     // The successor is listed after the stalled run, while its heartbeat keeps this server's clock.
     expect(Date.parse(taken.run.startedAt)).toBeGreaterThan(Date.parse(stalled.startedAt))
     expect(Date.parse(taken.run.lastHeartbeatAt)).toBeLessThanOrEqual(Date.now())
-    expect(receipts).toEqual([{ status: 201, body: taken }])
+    expect(preparedReceipts).toHaveLength(2)
+    expect(committedReceipts).toEqual([{ status: 201, body: taken }])
     expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toMatchObject({
       runId: taken.run.runId, instanceIdHash: hashAgentInstanceId('laptop-2'),
     })

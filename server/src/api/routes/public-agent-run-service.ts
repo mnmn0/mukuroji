@@ -865,7 +865,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
       requireResumable(principal, detail.issue, input.expectedRevision, settings.resumableStatusIds)
       // A run that finished just after its claim was read has released the claim, so that is not a conflict.
       const holder = await readClaimedRun(principal, teamId, workItemId)
-      if (holder) throw createAgentRunConflictError(describeHoldingRun(holder, new Date()))
+      if (holder) throw createAgentRunConflictError(describeHoldingRun(holder, new Date()), '/instanceId')
       // The newest run is read strongly, and the resume commits only while it is still the newest, so the
       // link names the run that really came last. A Work Item whose runs all predate that record falls back
       // to the history index, which is settled for runs that old.
@@ -874,7 +874,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         ? (await store.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, 1)).runs[0]
         : await store.getRun(principal.directoryId, teamId, latestRunId)
       if (latestRunId !== undefined && previous?.workItemId !== workItemId) throw createAgentRunIntegrityError()
-      if (previous?.state === 'active') throw createAgentRunConflictError(describeHoldingRun(previous, new Date()))
+      if (previous?.state === 'active') throw createAgentRunConflictError(describeHoldingRun(previous, new Date()), '/instanceId')
       if (input.expectedPreviousRunId !== undefined && previous?.runId !== input.expectedPreviousRunId) {
         // The agent chose to resume after a particular run, such as a paused one it was offered; a run that
         // came after it may have ended in a way that needs a person, so the agent must look again.
@@ -942,7 +942,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           // The claim put failed: another start, resume, or take over claimed the Work Item first.
           // A holder that finished meanwhile leaves no claim; that is reported as a change to reload.
           const holder = await readClaimedRun(principal, teamId, workItemId)
-          if (holder) throw createAgentRunConflictError(describeHoldingRun(holder, new Date()))
+          if (holder) throw createAgentRunConflictError(describeHoldingRun(holder, new Date()), '/instanceId')
           throw new AgentRunError('conflict', 'The Agent Run claim changed during the request. Reload the task and retry.')
         }
         if (error.category !== 'temporarily_unavailable') throw error
@@ -961,6 +961,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         }
         if (
           current.workspaceMember.version !== principal.workspaceMember.version ||
+          current.enterpriseIdentityControlRevision !== authorizationSnapshot.enterpriseControlRevision ||
           await workItemDependencies.planning.getAuthorizationRevision(principal.directoryId) !== authorizationSnapshot.planningRevision
         ) {
           throw createWorkItemAuthorizationChangedError()

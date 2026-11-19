@@ -10138,7 +10138,7 @@
     },
     "/api/v1/work-items/{workItemId}/agent-runs/resume": {
       "post": {
-        "description": "Starts a new run on a `started` Work Item whose assignee is the credential's member and that no active run claims, for example after the agent finished its run as `paused` or a reviewer sent the Work Item back. The new run is linked to the Work Item's newest earlier run, which the response returns as `resumedFromRun`, and the Work Item status does not change. A Work Item that is not `started` is rejected with `409 conflict` and `errors[].code` `invalid_transition`, a claim by another run with `agent_run_conflict`, and a status outside the Agent context's non-empty `resumableStatusIds` with `not_resumable`.",
+        "description": "Starts a new run on a `started` Work Item whose assignee is the credential's member and that no active run claims, for example after the agent finished its run as `paused` or a reviewer sent the Work Item back. The new run is linked to the Work Item's newest earlier run, which the response returns as `resumedFromRun`; a `started` Work Item with no earlier run can be resumed too, and then the response has `run` but no `resumedFromRun`. The Work Item status does not change. A Work Item that is not `started` is rejected with `409 conflict` and `errors[].code` `invalid_transition`, a claim by another run with `agent_run_conflict`, and a status outside the Agent context's non-empty `resumableStatusIds` with `not_resumable`.",
         "operationId": "resumePublicAgentRun",
         "parameters": [
           {
@@ -10186,7 +10186,7 @@
                 }
               }
             },
-            "description": "New run of the caller and the earlier run it resumes",
+            "description": "New run of the caller and, when the Work Item had an earlier run, the run it resumes",
             "headers": {
               "Idempotency-Replayed": {
                 "$ref": "#/components/headers/IdempotencyReplayed"
