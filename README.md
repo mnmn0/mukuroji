@@ -8,6 +8,10 @@ mukuroji は、人間とコーディングエージェントが同じタスク�
 
 このリポジトリは Bun workspaces で構成されています。依存関係と lockfile はルートで管理します。
 
+使い方は [利用者ガイド](docs/guide/README.md)（PM・メンバー・管理者・coding agent 利用者向け）、
+全体の構成は [アーキテクチャ概要](docs/architecture.md) と [用語集](docs/glossary.md) を参照してください。
+変更の提案方法は [CONTRIBUTING.md](CONTRIBUTING.md)、脆弱性の報告は [SECURITY.md](SECURITY.md) にあります。
+
 ## 構成
 
 - `web/`: React + TypeScript + Vite のフロントエンド

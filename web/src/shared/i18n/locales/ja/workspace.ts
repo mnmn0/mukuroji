@@ -404,6 +404,21 @@ export const workspaceMessages = {
   'workspace.help.statusTitle': 'トラブルシューティング',
   'workspace.help.statusDescription':
     'Issue・タスクの表示や同期に問題があるときの確認事項を参照します。',
+  'workspace.help.roleGuidesTitle': '役割別の利用者ガイド',
+  'workspace.help.roleGuidesDescription':
+    '画面の使い方を役割ごとにまとめたガイドです。GitHub のリポジトリで新しいタブに開きます。',
+  'workspace.help.pmGuideTitle': 'PM ガイド',
+  'workspace.help.pmGuideDescription':
+    'Project の立ち上げ、WBS と日程、更新スケジュール、週次の近況公開、レポート、終結までの流れ。',
+  'workspace.help.memberGuideTitle': 'メンバーガイド',
+  'workspace.help.memberGuideDescription':
+    'マイタスク、フォーカス、受信箱、タスク詳細、工数の記録とタイムシートの提出。',
+  'workspace.help.adminGuideTitle': '管理者ガイド',
+  'workspace.help.adminGuideDescription':
+    '招待とロール、ワークフローとフィールド、オートメーション、エージェント設定、ID・セキュリティ。',
+  'workspace.help.agentGuideTitle': 'coding agent 利用者ガイド',
+  'workspace.help.agentGuideDescription':
+    'token の発行、クライアントへの登録、agent の作業の流れ、Factory board での確認。',
   'workspace.settings.eyebrow': '管理',
   'workspace.settings.title': '設定',
   'workspace.settings.description':

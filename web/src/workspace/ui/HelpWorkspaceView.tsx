@@ -38,6 +38,44 @@ const helpDestinations: readonly HelpDestination[] = [
 ]
 
 /**
+ * A role-specific user guide published in the repository's `docs/guide/` directory.
+ */
+type RoleGuide = {
+  /** Translation key for the guide summary. */
+  descriptionKey: MessageKey
+  /** File name of the guide inside `docs/guide/`. */
+  fileName: string
+  /** Translation key for the guide title. */
+  titleKey: MessageKey
+}
+
+/** Base URL of the user guides on the repository's default branch. */
+const roleGuideBaseUrl = 'https://github.com/mnmn0/mukuroji/blob/main/docs/guide/'
+
+const roleGuides: readonly RoleGuide[] = [
+  {
+    descriptionKey: 'workspace.help.pmGuideDescription',
+    fileName: 'pm.md',
+    titleKey: 'workspace.help.pmGuideTitle',
+  },
+  {
+    descriptionKey: 'workspace.help.memberGuideDescription',
+    fileName: 'member.md',
+    titleKey: 'workspace.help.memberGuideTitle',
+  },
+  {
+    descriptionKey: 'workspace.help.adminGuideDescription',
+    fileName: 'admin.md',
+    titleKey: 'workspace.help.adminGuideTitle',
+  },
+  {
+    descriptionKey: 'workspace.help.agentGuideDescription',
+    fileName: 'coding-agent.md',
+    titleKey: 'workspace.help.agentGuideTitle',
+  },
+]
+
+/**
  * Props for the Workspace help view.
  */
 export type HelpWorkspaceViewProps = {
@@ -46,7 +84,7 @@ export type HelpWorkspaceViewProps = {
 }
 
 /**
- * Renders coding-agent setup followed by Workspace guidance and support destinations.
+ * Renders coding-agent setup, role-specific user guides, and Workspace support destinations.
  *
  * @param props - Translator used to label each destination.
  * @returns The Workspace help navigation view.
@@ -55,6 +93,36 @@ export function HelpWorkspaceView({ t }: HelpWorkspaceViewProps) {
   return (
     <div className="grid min-w-0 gap-6">
       <CodingAgentGuide t={t} />
+      <section aria-labelledby="role-guides-title" className="grid min-w-0 gap-4" id="role-guides">
+        <header>
+          <h2 className="text-xl font-semibold tracking-tight text-[var(--workbench-text)]" id="role-guides-title">
+            {t('workspace.help.roleGuidesTitle')}
+          </h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--workbench-muted)]">
+            {t('workspace.help.roleGuidesDescription')}
+          </p>
+        </header>
+        <ul className="grid list-none grid-cols-2 gap-4 p-0 max-[820px]:grid-cols-1">
+          {roleGuides.map((guide) => (
+            <li className="min-w-0" key={guide.fileName}>
+              <a
+                className="workbench-panel grid h-full gap-2 p-5 no-underline transition-[border-color,background-color] duration-150 hover:border-tone-99d7cf hover:bg-[var(--workbench-surface-muted)]"
+                href={`${roleGuideBaseUrl}${guide.fileName}`}
+                rel="noopener noreferrer"
+                target="_blank"
+              >
+                <strong className="text-base font-semibold text-[var(--workbench-text)]">
+                  {t(guide.titleKey)}
+                  <span aria-hidden="true"> ↗</span>
+                </strong>
+                <span className="text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+                  {t(guide.descriptionKey)}
+                </span>
+              </a>
+            </li>
+          ))}
+        </ul>
+      </section>
       <nav
         aria-label={t('workspace.help.title')}
         className="grid grid-cols-2 gap-4 max-[820px]:grid-cols-1"

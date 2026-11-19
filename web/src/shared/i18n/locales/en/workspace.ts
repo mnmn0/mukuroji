@@ -404,6 +404,21 @@ export const workspaceMessages = {
   'workspace.help.statusTitle': 'Troubleshoot work updates',
   'workspace.help.statusDescription':
     'Review checks for issue and task visibility or synchronization problems.',
+  'workspace.help.roleGuidesTitle': 'User guides by role',
+  'workspace.help.roleGuidesDescription':
+    'Step-by-step guides for each role, written in Japanese. They open in a new tab on the GitHub repository.',
+  'workspace.help.pmGuideTitle': 'Project manager guide',
+  'workspace.help.pmGuideDescription':
+    'Start a project, build the WBS and schedule, set the update cadence, publish weekly updates, report, and close.',
+  'workspace.help.memberGuideTitle': 'Member guide',
+  'workspace.help.memberGuideDescription':
+    'My tasks, Focus, Inbox, task details, logging time, and submitting timesheets.',
+  'workspace.help.adminGuideTitle': 'Administrator guide',
+  'workspace.help.adminGuideDescription':
+    'Invitations and roles, workflows and fields, automation, agent settings, and identity and security.',
+  'workspace.help.agentGuideTitle': 'Coding agent guide',
+  'workspace.help.agentGuideDescription':
+    'Issue a token, register your client, follow the agent workflow, and monitor the Factory board.',
   'workspace.settings.eyebrow': 'Admin',
   'workspace.settings.title': 'Settings',
   'workspace.settings.description':
