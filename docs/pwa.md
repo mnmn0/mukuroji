@@ -46,10 +46,7 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   「ブロックされているため端末の設定から変更できる」案内を表示します（尋ねず、live region やフォーカス移動も伴いません）。Windows / macOS / ChromeOS の Chrome・Edge など、通知の許可なしに badge を表示する
   platform では、不要な通知の許可を求めないよう button を表示しません。
   同じ通知の許可は、通知設定の「このデバイスのプッシュ通知」をオンにしたときの push 購読にも使い、push 通知はそのデバイスを登録した場合だけ届くことを文言でも案内します。
-- share target: `POST /share`（`multipart/form-data`）で `title` / `text` / `url` を受け取ります。
-  **段階的に公開します**: 既存の install では更新された worker が利用者の承認まで待機するため、manifest が先に更新されると
-  旧 worker が `POST /share` を素通しして共有内容が失われます。この release では worker の受け口だけを入れ、manifest には
-  `share_target` を載せません。この worker が配布・有効化された後の release で、manifest に次を追加します。
+- share target: manifest の `share_target` で OS の共有先に表示し、`POST /share`（`multipart/form-data`）で `title` / `text` / `url` を受け取ります。
 
   ```json
   "share_target": {
@@ -59,6 +56,13 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
     "params": { "title": "title", "text": "text", "url": "url" }
   }
   ```
+
+  受け口の worker と manifest は段階的に公開しました。既存の install では更新された worker が利用者の承認まで待機するため、
+  受け口を持たない旧 worker のまま manifest だけが更新されると、旧 worker が `POST /share` を素通しして共有内容が失われます。
+  そのため先の release では worker の受け口だけを入れ、manifest への追加（#442）はその後にしました。AWS へ初めて配備する時点で
+  両方がそろっているため、install 済みのどの端末にも受け口のない worker はありません。`share_target` の値は worker が読む
+  path と field に合わせ、`web/test/ServiceWorkerRequestStrategy.test.ts` で一致を検証します。今後 worker の受け口を変える場合も、
+  manifest より先に worker を配布し、旧 worker が受け取れない形を manifest に載せないでください。
 
   service worker が request を受け取り（`requestStrategy.ts` の `share-target`、同一 origin・query なしの navigation だけ）、
   text field だけを読んで端末内の専用 cache（`mukuroji-share-inbox-v1`）に保存し、`303` で `/share?shared=<UUID>` へ移動します。
@@ -75,7 +79,7 @@ offline read cache、encrypted mutation queue は Issue #38 の後続範囲で�
   cache を読めなかった場合は空のフォームにせず、読み込み失敗と再読み込みを表示します。共有 ID の内容が見つからない
   （期限切れ・送信済み・破棄済み）場合も空のフォームにせず、元のアプリからもう一度共有するよう案内します。
   worker の activate 時の期限切れ削除は best-effort で、失敗しても activate を止めません。worker が cache に保存できなかった場合は
-  browser の network error にせず、`/share?status=not-saved` へ移動して、元のアプリからもう一度共有するよう案内します。ファイルは受け取らず、install 前（worker が制御していない状態）は share target 自体が使えません。
+  browser の network error にせず、`/share?status=not-saved` へ移動して、元のアプリからもう一度共有するよう案内します。ファイルは受け取らず、manifest にも `files` を載せません。share target は install 済みの PWA にだけ表示されます。worker が制御していない状態（worker の登録に失敗した端末など）で共有すると `POST /share` が CloudFront に届き、Web の default behavior は GET / HEAD だけを許可するため `403` になります（共有内容は保存されません）。
   `/share` は認証済み Workspace の route で、未 sign-in の場合は sign-in 後に同じ URL へ戻ります（`/share` は login の `returnTo` 許可対象）。
   確認フォーム（`web/src/features/share-capture/`）は共有内容をすべて plain text として扱い、tab / 改行以外の制御文字を除いて
   API の上限（タイトル 500 文字、本文 8,000 文字）に切り詰めます。タイトルは共有されたタイトル、なければ本文の最初の行、
@@ -166,12 +170,16 @@ self.addEventListener('activate', (event) => {
 })
 ```
 
+登録を解除すると、install 済みの PWA から共有した `POST /share` は worker を通らず CloudFront の `403` になり、共有内容が失われます。
+worker を止める release では、同時に manifest から `share_target` を外してください。OS の共有先の一覧は manifest の更新が端末に
+反映されるまで残るため、その間の共有は失われる場合があります。
+
 ## 検証
 
 ```sh
 bun run web:test      # request 振り分け、cache 削除、更新 controller、通知 UI
 bun run web:e2e       # 通常の E2E の後に PWA の E2E も実行
-bun run web:e2e:pwa   # production preview で manifest、offline fallback、cache 内容を検証
+bun run web:e2e:pwa   # production preview で manifest、offline fallback、cache 内容、共有から Triage への送信を検証
 ```
 
 `web:e2e:pwa` は `playwright.pwa.config.ts` の `mobile-pwa` project で、Pixel 7 相当の viewport / touch で

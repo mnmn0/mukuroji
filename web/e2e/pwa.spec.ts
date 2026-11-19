@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
+import type { AuthSession } from '../src/auth/session'
+import { triageEntryFixtures } from '../src/triage/fixtures'
 
 /**
  * Installability fields read from the web app manifest.
@@ -47,6 +49,106 @@ function readManifest(value: unknown): { startUrl: unknown, scope: unknown, disp
 }
 
 /**
+ * Submits the same multipart form the OS share sheet posts to the manifest share target.
+ *
+ * @param page - Page controlled by the service worker.
+ * @param fields - Shared title, text, and link.
+ */
+async function postShareTarget(page: Page, fields: { title: string, text: string, url: string }): Promise<void> {
+  await page.evaluate((values) => {
+    const form = document.createElement('form')
+    form.method = 'POST'
+    form.action = '/share'
+    form.enctype = 'multipart/form-data'
+    for (const [name, value] of Object.entries(values)) {
+      const input = document.createElement('input')
+      input.type = 'hidden'
+      input.name = name
+      input.value = value
+      form.append(input)
+    }
+    document.body.append(form)
+    form.submit()
+  }, fields)
+}
+
+/** Team whose display name is Japanese, so its ID is the generated ASCII fallback (#386). */
+const japaneseTeam = { id: 'team-3f9a1c2b4d5e', name: '開発部' }
+
+/**
+ * Signs the browser in and answers the Workspace and Triage APIs the share flow reads.
+ *
+ * The worker does not intercept `/api/*`, so page routes see every API request.
+ *
+ * @param page - Page of the scenario.
+ * @returns Manual handoff request bodies received, in order.
+ */
+async function signInWithTriageApis(page: Page): Promise<unknown[]> {
+  const handoffs: unknown[] = []
+  const session = {
+    accessToken: 'pwa-share-e2e-access-token',
+    expiresAt: Date.now() + 60 * 60 * 1_000,
+    remember: true,
+    tokenType: 'Bearer',
+  } satisfies AuthSession
+
+  await page.addInitScript((value) => {
+    window.localStorage.setItem('mukuroji.auth', JSON.stringify(value))
+  }, session)
+  // Anything the scenario does not model answers 404 instead of the SPA fallback HTML.
+  await page.route('**/api/**', async (route) => {
+    await route.fulfill({ status: 404, json: { code: 'NotFound', message: 'Not modeled by this scenario.' } })
+  })
+  await page.route('**/api/auth/me', async (route) => {
+    await route.fulfill({
+      json: {
+        attributes: { 'custom:workspace_id': 'workspace-demo', email: 'demo@example.com', name: 'Demo User' },
+        groups: [],
+        isSystemAdmin: false,
+        username: 'demo@example.com',
+        workspaceMemberStatus: 'active',
+        workspaceRole: 'member',
+      },
+    })
+  })
+  await page.route('**/api/teams/projects**', async (route) => {
+    await route.fulfill({ json: { teams: [{ ...japaneseTeam, expanded: true, projects: [] }] } })
+  })
+  await page.route('**/api/workspace/access', async (route) => {
+    await route.fulfill({
+      json: {
+        capabilities: { canInvite: false, canManageAdmins: false, canManageMembers: false },
+        currentMember: {
+          createdAt: '2026-07-01T00:00:00.000Z',
+          email: 'demo@example.com',
+          id: 'workspace-member-demo',
+          memberKey: 'demo@example.com',
+          name: 'Demo User',
+          role: 'member',
+          status: 'active',
+          updatedAt: '2026-07-11T00:00:00.000Z',
+          version: 1,
+        },
+        invitations: [],
+        members: [],
+      },
+    })
+  })
+  await page.route(`**/api/teams/${japaneseTeam.id}/triage-entries/manual-handoffs`, async (route) => {
+    const request = route.request()
+    expect(request.method()).toBe('POST')
+    expect(request.headers().authorization).toBe(`Bearer ${session.accessToken}`)
+    handoffs.push(request.postDataJSON())
+    await route.fulfill({
+      status: 201,
+      json: { entry: { ...structuredClone(triageEntryFixtures[0]), id: 'triage-share-1', teamId: japaneseTeam.id }, replayed: false },
+    })
+  })
+
+  return handoffs
+}
+
+/**
  * Waits until the service worker controls the current page.
  *
  * @param page - Page that loaded a production build.
@@ -85,9 +187,13 @@ test('manifestはinstallに必要な項目とアイコンを公開する', async
   expect(manifest?.startUrl).toBe('/home')
   expect(manifest?.scope).toBe('/')
   expect(manifest?.display).toBe('standalone')
-  // The share target is advertised only after a release whose worker handles `POST /share`
-  // has activated everywhere; see "share target" in docs/pwa.md.
-  expect(manifest?.shareTarget).toBeUndefined()
+  // The OS share sheet posts to the worker's receiver; see "share target" in docs/pwa.md.
+  expect(manifest?.shareTarget).toEqual({
+    action: '/share',
+    method: 'POST',
+    enctype: 'multipart/form-data',
+    params: { title: 'title', text: 'text', url: 'url' },
+  })
   expect(manifest?.icons.map((icon) => icon.sizes)).toEqual(expect.arrayContaining(['192x192', '512x512']))
   expect(manifest?.icons.some((icon) => icon.purpose === 'maskable')).toBe(true)
 
@@ -175,22 +281,7 @@ test('共有された内容はURLに載せずworkerが端末内に保持し、�
   await page.goto('/support')
   await waitForServiceWorkerControl(page)
 
-  // Submit the same multipart form the share sheet posts to the manifest share target.
-  await page.evaluate(() => {
-    const form = document.createElement('form')
-    form.method = 'POST'
-    form.action = '/share'
-    form.enctype = 'multipart/form-data'
-    for (const [name, value] of [['title', 'Secret bug'], ['text', 'confidential details'], ['url', 'https://example.com/x']]) {
-      const input = document.createElement('input')
-      input.type = 'hidden'
-      input.name = name
-      input.value = value
-      form.append(input)
-    }
-    document.body.append(form)
-    form.submit()
-  })
+  await postShareTarget(page, { title: 'Secret bug', text: 'confidential details', url: 'https://example.com/x' })
 
   // Signed out, the form sends the person to sign-in and keeps only the opaque ID for the return.
   await page.waitForURL((url) => url.pathname === '/' && (url.searchParams.get('returnTo') ?? '').startsWith('/share?shared='))
@@ -205,4 +296,32 @@ test('共有された内容はURLに載せずworkerが端末内に保持し、�
     return response ? await response.json() : null
   }, new URLSearchParams(returnTo.split('?')[1]).get('shared'))
   expect(stored).toMatchObject({ title: 'Secret bug', text: 'confidential details', url: 'https://example.com/x' })
+})
+
+test('共有したURLは確認画面で日本語名のチームを選んで送るとそのチームのTriageに届く', async ({ page }) => {
+  const handoffs = await signInWithTriageApis(page)
+  await page.goto('/support')
+  await waitForServiceWorkerControl(page)
+
+  await postShareTarget(page, { title: 'ログイン画面が崩れる', text: 'iPhone で再現します', url: 'https://example.com/issues/42' })
+
+  await page.waitForURL((url) => url.pathname === '/share' && url.searchParams.has('shared'))
+  expect(page.url()).not.toContain('example.com')
+  const form = page.getByTestId('share-capture')
+  await expect(form.getByLabel('タイトル')).toHaveValue('ログイン画面が崩れる')
+  await expect(form.getByLabel('内容')).toHaveValue('iPhone で再現します\n\nhttps://example.com/issues/42')
+
+  await form.getByLabel('送り先のチーム').selectOption({ label: japaneseTeam.name })
+  await form.getByRole('button', { name: 'Triage へ送る' }).click()
+
+  await page.waitForURL(`/teams/${japaneseTeam.id}/triage?entryId=triage-share-1`)
+  expect(handoffs).toHaveLength(1)
+  expect(handoffs[0]).toMatchObject({
+    title: 'ログイン画面が崩れる',
+    body: 'iPhone で再現します\n\nhttps://example.com/issues/42',
+    sourceId: expect.stringMatching(/^share:[0-9a-f-]{36}$/),
+  })
+  // The form deletes the share once it is sent, so nothing is left on the device.
+  const remaining = await page.evaluate(async () => (await (await caches.open('mukuroji-share-inbox-v1')).keys()).length)
+  expect(remaining).toBe(0)
 })
