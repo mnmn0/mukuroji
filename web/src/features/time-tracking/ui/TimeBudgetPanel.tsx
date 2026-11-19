@@ -90,6 +90,12 @@ export function TimeBudgetPanel({
     event.preventDefault()
     if (isSaving) return
     const data = new FormData(event.currentTarget)
+    /**
+     * Reads one trimmed text field of the form.
+     *
+     * @param name - Field name.
+     * @returns Trimmed value, or an empty string when absent.
+     */
     const read = (name: string) => {
       const value = data.get(name)
       return typeof value === 'string' ? value.trim() : ''
