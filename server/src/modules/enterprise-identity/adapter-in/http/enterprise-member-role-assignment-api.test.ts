@@ -247,6 +247,14 @@ test('lets only an owner grant administrative roles or promote a member who has 
       { memberKey: 'sato@example.com', roleId: 'workspace:portfolio-viewer' },
     )
     expect(viewer.status).toBe(201)
+    const adminSnapshot = await app.request('/api/enterprise/security', {
+      headers: { Authorization: createAuthorization() },
+    })
+    const adminAssignable = (await adminSnapshot.json() as {
+      assignableRoleIds: { members: { workspace: string[] } }
+    }).assignableRoleIds.members.workspace
+    expect(adminAssignable).toContain('workspace:portfolio-viewer')
+    expect(adminAssignable).not.toContain('workspace:admin')
 
     configureFakeProjectClients(true, { workspaceRole: 'owner' })
     setTestAppDependencies({ enterpriseIdentity: identity })

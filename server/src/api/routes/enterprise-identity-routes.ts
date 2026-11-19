@@ -2612,8 +2612,24 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
             role: member.role,
           }))
         : []
+      // Only owner-level callers may grant administrative roles to a member.
+      const memberAssignableRoleIds = (roleIds: readonly EnterpriseRoleId[]) =>
+        isEnterpriseOwnerLevelCaller(principal)
+          ? [...roleIds]
+          : roleIds.filter((roleId) =>
+              !resolveEnterpriseRolePermissions(snapshot.customRoles, roleId)
+                .some((permission) => enterpriseAdministrativePermissionIds.has(permission))
+            )
       return c.json({
         ...view,
+        assignableRoleIds: {
+          ...view.assignableRoleIds,
+          members: {
+            workspace: memberAssignableRoleIds(view.assignableRoleIds.members.workspace),
+            team: memberAssignableRoleIds(view.assignableRoleIds.members.team),
+            project: memberAssignableRoleIds(view.assignableRoleIds.members.project),
+          },
+        },
         members,
         ...(activeBreakGlassActivation
           ? {
