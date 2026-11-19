@@ -6,6 +6,7 @@ import { HelpWorkspaceView } from './HelpWorkspaceView'
 const meta = {
   args: {
     t: createTranslator('ja'),
+    webBuild: { commitSha: '0123456789abcdef0123456789abcdef01234567' },
   },
   component: HelpWorkspaceView,
   decorators: [
@@ -31,12 +32,19 @@ export default meta
 /** Story type for the Workspace help navigation view. */
 type Story = StoryObj<typeof meta>
 
-/** Japanese MCP connection guide followed by Workspace help destinations. */
+/** Japanese MCP connection guide, Workspace help destinations, and the recorded build SHA. */
 export const Default: Story = {}
 
 /** English MCP connection guide followed by Workspace help destinations. */
 export const English: Story = {
   args: {
     t: createTranslator('en'),
+  },
+}
+
+/** Local or test build made without a recorded commit SHA. */
+export const UnrecordedBuild: Story = {
+  args: {
+    webBuild: { commitSha: undefined },
   },
 }
