@@ -467,7 +467,7 @@ describe('capacity planning mutations', () => {
       expectedRevision: 1,
       expectedTeamRevision: 3,
       actorMemberId: 'member-1',
-    })).rejects.toMatchObject({ code: 'ResourceRequestRevisionConflict', status: 409 })
+    }, { canViewConfidential: true })).rejects.toMatchObject({ code: 'ResourceRequestRevisionConflict', status: 409 })
 
     const updated = await service.updateRequest({
       workspaceId: 'workspace-1',
@@ -481,7 +481,7 @@ describe('capacity planning mutations', () => {
       expectedRevision: 2,
       expectedTeamRevision: 3,
       actorMemberId: 'member-1',
-    })
+    }, { canViewConfidential: true })
 
     expect(updated).toMatchObject({
       title: 'Release hardening',
@@ -501,7 +501,7 @@ describe('capacity planning mutations', () => {
       expectedRevision: 4,
       expectedTeamRevision: 4,
       actorMemberId: 'member-1',
-    })).rejects.toMatchObject({ status: 400 })
+    }, { canViewConfidential: true })).rejects.toMatchObject({ status: 400 })
   })
 
   test('cancels a resource request only after its assignments are canceled and keeps it canceled', async () => {
@@ -559,7 +559,7 @@ describe('capacity planning mutations', () => {
       expectedRevision: 2,
       expectedTeamRevision: 3,
       actorMemberId: 'member-1',
-    })).rejects.toMatchObject({ code: 'ResourceRequestHasActiveAssignments', status: 409 })
+    }, { canViewConfidential: true })).rejects.toMatchObject({ code: 'ResourceRequestHasActiveAssignments', status: 409 })
 
     await service.updateAssignment({
       workspaceId: 'workspace-1',
@@ -578,7 +578,7 @@ describe('capacity planning mutations', () => {
       expectedRevision: 3,
       expectedTeamRevision: 4,
       actorMemberId: 'member-1',
-    })
+    }, { canViewConfidential: true })
     expect(canceled).toMatchObject({ status: 'canceled', revision: 4 })
 
     await expect(service.updateAssignment({
@@ -613,7 +613,7 @@ describe('capacity planning mutations', () => {
       expectedRevision: 4,
       expectedTeamRevision: 5,
       actorMemberId: 'member-1',
-    })).rejects.toMatchObject({ code: 'ResourceRequestCanceled', status: 409 })
+    }, { canViewConfidential: true })).rejects.toMatchObject({ code: 'ResourceRequestCanceled', status: 409 })
 
     const snapshot = await service.getSnapshot({
       workspaceId: 'workspace-1',
@@ -625,6 +625,28 @@ describe('capacity planning mutations', () => {
     })
     expect(snapshot.requests[0]?.status).toBe('canceled')
     expect(snapshot.members[0]?.allocatedMinutes).toBe(0)
+
+    const confidential = await service.createRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      title: 'Confidential review',
+      skillIds: [],
+      fromDate: '2026-08-03',
+      toDate: '2026-08-03',
+      requestedMinutes: 480,
+      confidential: true,
+      expectedTeamRevision: 5,
+      actorMemberId: 'member-1',
+    })
+    await expect(service.updateRequest({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      requestId: confidential.id,
+      status: 'canceled',
+      expectedRevision: 1,
+      expectedTeamRevision: 6,
+      actorMemberId: 'member-1',
+    }, { canViewConfidential: false })).rejects.toMatchObject({ code: 'ResourceRequestNotFound', status: 404 })
   })
 
   test('rejects a state payload that would exceed the DynamoDB item safety budget', async () => {

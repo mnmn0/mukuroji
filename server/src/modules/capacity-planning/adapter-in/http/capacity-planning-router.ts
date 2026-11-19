@@ -185,6 +185,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         throw new CapacityPlanningError(404, 'ResourceRequestNotFound', 'The resource request was not found.')
       }
       const body = asRecord(await dependencies.readJson(context.req))
+      const access = { canViewConfidential: visibility.canViewConfidential }
       const result = await dependencies.getCapacityPlanning().updateRequest({
         workspaceId: principal.directoryId,
         teamId,
@@ -200,7 +201,7 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
         expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected request revision'),
         expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
         actorMemberId: principal.userKey,
-      })
+      }, access)
       return context.json({ request: result })
     })
   })

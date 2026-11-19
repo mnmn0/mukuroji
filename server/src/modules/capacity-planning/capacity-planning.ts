@@ -452,14 +452,24 @@ export class CapacityPlanningService {
    * canceled request never keeps reserving capacity. Canceled requests are read-only.
    *
    * @param input - Changed request fields, an optional cancel status, and expected revisions.
+   * @param access - Whether the actor may see confidential requests; hidden requests are reported as missing.
    * @returns The saved request.
    */
-  async updateRequest(input: UpdateResourceRequestInput): Promise<ResourceRequest> {
+  async updateRequest(
+    input: UpdateResourceRequestInput,
+    access: {
+      /** Whether the actor may read and change confidential requests. */
+      canViewConfidential: boolean
+    },
+  ): Promise<ResourceRequest> {
     validateIdentifier(input.workspaceId, 'Workspace ID')
     validateIdentifier(input.teamId, 'Team ID')
     validateIdentifier(input.requestId, 'Request ID')
     return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
       const current = requireRequest(state, input.requestId)
+      if (current.confidential && !access.canViewConfidential) {
+        throw new CapacityPlanningError(404, 'ResourceRequestNotFound', 'The resource request was not found.')
+      }
       if (current.revision !== input.expectedRevision) {
         throw new CapacityPlanningError(409, 'ResourceRequestRevisionConflict', 'The resource request was changed by another request.')
       }

@@ -91,7 +91,7 @@ export function WorkloadRequestList({ isSaving, onUpdate, projects, redactedCoun
                   <p className="text-xs font-semibold leading-5 text-fg-9f3f3f">{t('workload.controls.requests.cancelConfirm')}</p>
                   <div className="flex flex-wrap gap-2">
                     <button className={buttonClass} disabled={isSaving} type="button" onClick={() => { void update(request, { status: 'canceled' }) }}>{t('workload.controls.requests.cancelConfirmAction')}</button>
-                    <button className={secondaryButtonClass} disabled={isSaving} type="button" onClick={() => setConfirmingId(undefined)}>{t('workload.controls.requests.keep')}</button>
+                    <button autoFocus className={secondaryButtonClass} disabled={isSaving} type="button" onClick={() => setConfirmingId(undefined)}>{t('workload.controls.requests.keep')}</button>
                   </div>
                 </div>
               ) : null}
@@ -152,7 +152,7 @@ function RequestEditForm({ isSaving, onDiscard, onSave, request, t }: RequestEdi
 
   return (
     <div className="grid gap-3">
-      <RequestField label={t('workload.controls.request.name')} value={title} onChange={setTitle} />
+      <RequestField autoFocus label={t('workload.controls.request.name')} value={title} onChange={setTitle} />
       <div className="grid grid-cols-2 gap-3">
         <RequestField label={t('workload.controls.from')} value={fromDate} onChange={setFromDate} type="date" />
         <RequestField label={t('workload.controls.to')} value={toDate} onChange={setToDate} type="date" />
@@ -170,8 +170,8 @@ function RequestEditForm({ isSaving, onDiscard, onSave, request, t }: RequestEdi
 }
 
 /** Renders a labeled input with shared Workbench styling. */
-function RequestField({ label, min, onChange, placeholder, type = 'text', value }: { label: string; min?: string; onChange: (value: string) => void; placeholder?: string; type?: string; value: string }) {
-  return <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">{label}<input className="workbench-input min-h-10 w-full px-3" min={min} placeholder={placeholder} type={type} value={value} onChange={(event) => onChange(event.target.value)} /></label>
+function RequestField({ autoFocus, label, min, onChange, placeholder, type = 'text', value }: { autoFocus?: boolean; label: string; min?: string; onChange: (value: string) => void; placeholder?: string; type?: string; value: string }) {
+  return <label className="grid min-w-0 gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">{label}<input autoFocus={autoFocus} className="workbench-input min-h-10 w-full px-3" min={min} placeholder={placeholder} type={type} value={value} onChange={(event) => onChange(event.target.value)} /></label>
 }
 
 /** Formats minutes as hours for the request summary. */
