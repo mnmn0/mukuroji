@@ -158,4 +158,5 @@ export const projectsMessages = {
   'projects.overview.error.workItemsLimit': 'Work Item が読み取り上限を超えたため、件数は表示していません。一覧画面で絞り込んで確認してください。',
   'projects.overview.error.planning': '計画データを読み込めませんでした。健全性とマイルストーンは表示していません。',
   'projects.overview.error.members': 'メンバーを読み込めませんでした。',
+  'projects.overview.error.membersDenied': 'このプロジェクトでのロールではメンバー一覧を表示できません。必要な場合はプロジェクトマネージャーに依頼してください。',
 } as const

@@ -160,6 +160,7 @@ export const projectsMessages = {
   'projects.overview.error.workItemsLimit': 'The project has more work items than the read limit, so their counts are not shown. Narrow them down in the list.',
   'projects.overview.error.planning': 'Planning data could not be loaded, so health and milestones are not shown.',
   'projects.overview.error.members': 'Members could not be loaded.',
+  'projects.overview.error.membersDenied': 'Your Project role cannot view the member list. Ask a Project manager if you need it.',
 } as const satisfies Record<
   Extract<
     MessageKey,

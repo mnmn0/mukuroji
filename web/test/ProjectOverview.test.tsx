@@ -76,7 +76,6 @@ function renderOverview(props: Partial<ProjectOverviewViewProps> = {}) {
   return renderToStaticMarkup(
     <MemoryRouter>
       <ProjectOverviewView
-        isMembersError={false}
         isMembersLoading={false}
         isPlanningError={false}
         isPlanningLoading={false}
@@ -189,7 +188,7 @@ describe('ProjectOverviewView', () => {
 
   test('marks each failed read in its own widget without hiding the others', () => {
     const html = renderOverview({
-      isMembersError: true,
+      membersError: 'load',
       isPlanningError: true,
       members: undefined,
       schedule: undefined,
@@ -212,7 +211,7 @@ describe('ProjectOverviewView', () => {
     const countRetries = (html: string) => html.split('>Reload</button>').length - 1
     const failed = renderOverview({
       ...retryProps,
-      isMembersError: true,
+      membersError: 'load',
       isPlanningError: true,
       members: undefined,
       schedule: undefined,
@@ -223,6 +222,18 @@ describe('ProjectOverviewView', () => {
 
     expect(countRetries(failed)).toBe(4)
     expect(countRetries(overLimit)).toBe(0)
+  })
+
+  test('explains a members read denied by the Project role without offering a retry', () => {
+    const html = renderOverview({
+      members: undefined,
+      membersError: 'denied',
+      onRetryMembers: () => undefined,
+    })
+
+    expect(html).toContain('Your Project role cannot view the member list.')
+    expect(html).not.toContain('Members could not be loaded.')
+    expect(html).not.toContain('>Reload</button>')
   })
 
   test('asks for the owning Team when the route does not name a readable one', () => {

@@ -19,7 +19,6 @@ const meta = {
   title: 'Application/Projects/Project Overview',
   component: ProjectOverviewView,
   args: {
-    isMembersError: false,
     isMembersLoading: false,
     isPlanningError: false,
     isPlanningLoading: false,
@@ -80,7 +79,7 @@ export const Phone: Story = {
 /** Each failed read is shown in its own widget. */
 export const PartialFailure: Story = {
   args: {
-    isMembersError: true,
+    membersError: 'load',
     isPlanningError: true,
     members: undefined,
     schedule: undefined,

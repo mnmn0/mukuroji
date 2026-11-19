@@ -26,6 +26,9 @@ import {
 /** Why the Project's Work Item counts are not shown. */
 export type ProjectOverviewWorkItemsError = 'load' | 'limit'
 
+/** Why the Project members could not be shown: a failed read, or a role that may not read them. */
+export type ProjectOverviewMembersError = 'load' | 'denied'
+
 /** Props for the pure Project overview view. */
 export type ProjectOverviewViewProps = {
   /** Locale used to format dates. */
@@ -52,8 +55,8 @@ export type ProjectOverviewViewProps = {
   isPlanningLoading: boolean
   /** Project members grouped by role, absent while loading or after a failure. */
   members?: ProjectOverviewMembers
-  /** Whether the Project members failed to load. */
-  isMembersError: boolean
+  /** Why the Project members could not be shown, absent when they loaded or are loading. */
+  membersError?: ProjectOverviewMembersError
   /** Whether the Project members are still loading. */
   isMembersLoading: boolean
   /** Reads the Project Work Items again after a failure. */
@@ -91,13 +94,13 @@ const linkClassName =
  * @returns The pure Project overview.
  */
 export function ProjectOverviewView({
-  isMembersError,
   isMembersLoading,
   isPlanningError,
   isPlanningLoading,
   isWorkItemsLoading,
   locale,
   members,
+  membersError,
   onRetryMembers,
   onRetryPlanning,
   onRetryWorkItems,
@@ -209,7 +212,7 @@ export function ProjectOverviewView({
           title={t('projects.overview.members.title')}
         >
           <MembersContent
-            isError={isMembersError}
+            error={membersError}
             isLoading={isMembersLoading}
             members={members}
             onRetry={onRetryMembers}
@@ -552,8 +555,8 @@ function ScheduleContent({ isError, isLoading, onRetry, schedule, t }: ScheduleC
 
 /** Props for the members widget content. */
 type MembersContentProps = {
-  /** Whether the members failed to load. */
-  isError: boolean
+  /** Why the members could not be shown. */
+  error?: ProjectOverviewMembersError
   /** Whether the members are loading. */
   isLoading: boolean
   /** Members grouped by role. */
@@ -570,8 +573,9 @@ type MembersContentProps = {
  * @param props - Member summary and load state.
  * @returns Members widget content.
  */
-function MembersContent({ isError, isLoading, members, onRetry, t }: MembersContentProps) {
-  if (isError) {
+function MembersContent({ error, isLoading, members, onRetry, t }: MembersContentProps) {
+  if (error === 'denied') return <StatusText>{t('projects.overview.error.membersDenied')}</StatusText>
+  if (error) {
     return <StatusText isError onRetry={onRetry} t={t}>{t('projects.overview.error.members')}</StatusText>
   }
   if (isLoading || !members) return <StatusText>{t('projects.overview.loading')}</StatusText>

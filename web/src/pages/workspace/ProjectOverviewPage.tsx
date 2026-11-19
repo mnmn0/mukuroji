@@ -3,7 +3,7 @@ import { useParams, useSearchParams } from 'react-router'
 import { TeamIssuesApiError } from '../../issues/api'
 import { useProjectIssues } from '../../issues/queries/useWorkItems'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
-import { isActiveProjectAssignmentCandidate } from '../../projects/api'
+import { isActiveProjectAssignmentCandidate, ProjectDirectoryApiError } from '../../projects/api'
 import {
   findProjectOverviewUpdateTarget,
   selectProjectOverviewSchedule,
@@ -13,6 +13,7 @@ import {
 import { useProjectMembers } from '../../projects/queries/useProjectMembers'
 import {
   ProjectOverviewView,
+  type ProjectOverviewMembersError,
   type ProjectOverviewWorkItemsError,
 } from '../../projects/ui/ProjectOverviewView'
 import { createTranslator } from '../../shared/i18n/i18n'
@@ -52,6 +53,11 @@ export function ProjectOverviewPage() {
       ? 'limit'
       : 'load'
     : undefined
+  const membersError: ProjectOverviewMembersError | undefined = members.error
+    ? members.error instanceof ProjectDirectoryApiError && members.error.status === 403
+      ? 'denied'
+      : 'load'
+    : undefined
   const updateTarget = team && projectId && planning.data
     ? findProjectOverviewUpdateTarget(planning.data.updateTargets, team.id, projectId)
     : undefined
@@ -75,13 +81,13 @@ export function ProjectOverviewPage() {
     >
       <div className="px-[clamp(16px,3vw,34px)] py-5">
         <ProjectOverviewView
-          isMembersError={Boolean(members.error)}
           isMembersLoading={Boolean(members.key) && members.data === undefined && !members.error}
           isPlanningError={Boolean(planning.error)}
           isPlanningLoading={Boolean(planning.key) && planning.data === undefined && !planning.error}
           isWorkItemsLoading={workItems.isLoading}
           locale={workspace.locale}
           members={memberSummary}
+          membersError={membersError}
           onRetryMembers={() => void members.mutate()}
           onRetryPlanning={() => void planning.mutate()}
           onRetryWorkItems={() => void workItems.mutate()}
