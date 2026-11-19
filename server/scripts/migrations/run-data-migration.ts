@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts'
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
@@ -117,6 +118,12 @@ export type DataMigrationCliDependencies = {
   /** Time source and delay. */
   readonly clock: DataMigrationClock
   /**
+   * Resolves the authenticated principal recorded with an applying run.
+   *
+   * @returns The principal, such as an IAM role ARN.
+   */
+  readonly resolveOperator: () => Promise<string>
+  /**
    * Creates a run identifier.
    *
    * @returns A unique identifier.
@@ -172,6 +179,19 @@ const defaultDependencies: DataMigrationCliDependencies = {
       rowStore: createDynamoDbDataMigrationRowStore({ documentClient, tableName, totalSegments: segments }),
       checkpointStore: createDynamoDbDataMigrationCheckpointStore({ documentClient, tableName: checkpointTableName }),
     }
+  },
+  resolveOperator: async () => {
+    const config = loadServerConfig()
+    if (shouldBootstrapLocalDynamoDb(config)) return 'local-emulator'
+    let arn: string | undefined
+    try {
+      const identity = await new STSClient({ region: config.awsRegion }).send(new GetCallerIdentityCommand({}))
+      arn = identity.Arn
+    } catch (error: unknown) {
+      throw new DataMigrationFailure('RUN_LOG_FAILED', error)
+    }
+    if (arn === undefined || arn.length === 0) throw new DataMigrationFailure('RUN_LOG_FAILED')
+    return arn
   },
   clock: {
     now: () => Date.now(),
@@ -343,6 +363,7 @@ export async function runDataMigrationCli(
       ...stores,
       clock: dependencies.clock,
       runId: dependencies.createRunId(),
+      operator: command.apply ? await dependencies.resolveOperator() : 'dry-run',
       mode: command.apply ? 'apply' : 'dry-run',
       pageSize: command.pageSize,
       maxPages: command.maxPages,

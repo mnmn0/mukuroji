@@ -12,6 +12,7 @@ import {
   type DataMigrationDefinition,
   type DataMigrationFailureCode,
   type DataMigrationRow,
+  type DataMigrationRunRecord,
 } from '../../domain/data-migration'
 import type {
   DataMigrationCheckpointStore,
@@ -19,7 +20,7 @@ import type {
   DataMigrationRowStore,
 } from '../ports/data-migration-ports'
 
-/** Default lease length; a page must finish well within it. */
+/** Default lease length. */
 const DEFAULT_LEASE_MILLISECONDS = 5 * 60 * 1000
 
 /** Attempts to replace one row before reporting a write conflict. */
@@ -31,12 +32,14 @@ export type RunDataMigrationInput = {
   readonly definition: DataMigrationDefinition
   /** Target table rows. */
   readonly rowStore: DataMigrationRowStore
-  /** Durable checkpoints; unused in `dry-run`. */
+  /** Durable checkpoints and run records; unused in `dry-run`. */
   readonly checkpointStore: DataMigrationCheckpointStore
   /** Time source and delay. */
   readonly clock: DataMigrationClock
   /** Unique identifier of this run; used as the lease owner. */
   readonly runId: string
+  /** Authenticated principal running the migration; recorded with every applying run. */
+  readonly operator: string
   /** `apply` writes rows and checkpoints; `dry-run` reads from the start and writes nothing. */
   readonly mode: 'apply' | 'dry-run'
   /** Rows per page, 1 to {@link DATA_MIGRATION_MAX_PAGE_SIZE}. */
@@ -55,7 +58,7 @@ export type DataMigrationPartitionReport = {
   readonly partitionId: string
   /** Partition state after the run. */
   readonly status: 'completed' | 'in-progress' | 'not-started'
-  /** Counts from this run only. */
+  /** Counts from this run only, including rows written in a page that later failed. */
   readonly counters: DataMigrationCounters
 }
 
@@ -101,6 +104,14 @@ type RunState = {
   partitions: DataMigrationPartitionReport[]
 }
 
+/** Lease-holding state of the partition being applied. */
+type PartitionLease = {
+  /** Checkpoint as last saved by this run. */
+  current: DataMigrationCheckpoint
+  /** Lease length in milliseconds. */
+  readonly leaseMilliseconds: number
+}
+
 /**
  * Runs one bounded slice of a migration. Re-running with the same definition
  * resumes from the stored checkpoints; a partially applied page is safe to
@@ -115,12 +126,30 @@ export async function runDataMigration(input: RunDataMigrationInput): Promise<Da
   let status: DataMigrationRunReport['status'] = 'completed'
   let failureCode: DataMigrationFailureCode | undefined
   let failureDetail: string | undefined
+  let runRecord: DataMigrationRunRecord | undefined
   try {
     assertRunInput(input)
     const partitionIds = input.rowStore.listPartitions()
     const checkpoints = input.mode === 'apply'
       ? await loadCheckpoints(input, partitionIds)
       : new Map<string, DataMigrationCheckpoint>()
+    if (input.mode === 'apply') {
+      const started: DataMigrationRunRecord = {
+        migrationId: input.definition.id,
+        runId: input.runId,
+        operator: input.operator,
+        targetTable: input.rowStore.targetTable,
+        fromSchemaVersion: input.definition.fromSchemaVersion,
+        toSchemaVersion: input.definition.toSchemaVersion,
+        partitionCount: partitionIds.length,
+        status: 'started',
+        pagesRead: 0,
+        counters: createEmptyDataMigrationCounters(),
+        startedAt,
+      }
+      await saveRunRecord(input, started)
+      runRecord = started
+    }
     for (const partitionId of partitionIds) {
       if (state.pagesRead >= input.maxPages) {
         status = 'paused'
@@ -141,6 +170,23 @@ export async function runDataMigration(input: RunDataMigrationInput): Promise<Da
     (total, partition) => addDataMigrationCounters(total, partition.counters),
     createEmptyDataMigrationCounters(),
   )
+  const finishedAt = new Date(input.clock.now()).toISOString()
+  if (runRecord !== undefined) {
+    try {
+      await saveRunRecord(input, {
+        ...runRecord,
+        status,
+        ...(failureCode === undefined ? {} : { failureCode }),
+        pagesRead: state.pagesRead,
+        counters,
+        finishedAt,
+      })
+    } catch (error: unknown) {
+      status = 'failed'
+      failureCode ??= 'RUN_LOG_FAILED'
+      failureDetail ??= error instanceof DataMigrationFailure ? error.detail : undefined
+    }
+  }
   return {
     migrationId: input.definition.id,
     table: input.definition.table,
@@ -155,7 +201,7 @@ export async function runDataMigration(input: RunDataMigrationInput): Promise<Da
     counters,
     partitions: state.partitions,
     startedAt,
-    finishedAt: new Date(input.clock.now()).toISOString(),
+    finishedAt,
   }
 }
 
@@ -168,6 +214,8 @@ function assertRunInput(input: RunDataMigrationInput): void {
   assertValidDataMigrationDefinition(input.definition)
   const lease = input.leaseMilliseconds ?? DEFAULT_LEASE_MILLISECONDS
   const valid = input.runId.length > 0 &&
+    input.operator.trim().length > 0 &&
+    input.rowStore.targetTable.length > 0 &&
     Number.isSafeInteger(input.pageSize) &&
     input.pageSize >= 1 &&
     input.pageSize <= DATA_MIGRATION_MAX_PAGE_SIZE &&
@@ -181,7 +229,22 @@ function assertRunInput(input: RunDataMigrationInput): void {
 }
 
 /**
- * Loads checkpoints and checks that they belong to the same plan and versions.
+ * Writes a run record, classifying any failure as `RUN_LOG_FAILED` so that
+ * no row is written without a durable record of who ran the migration.
+ *
+ * @param input - Run input.
+ * @param record - Run record.
+ */
+async function saveRunRecord(input: RunDataMigrationInput, record: DataMigrationRunRecord): Promise<void> {
+  try {
+    await input.checkpointStore.saveRun(record)
+  } catch (error: unknown) {
+    throw new DataMigrationFailure('RUN_LOG_FAILED', error instanceof DataMigrationFailure ? { name: error.detail } : error)
+  }
+}
+
+/**
+ * Loads checkpoints and checks that they belong to the same table, plan and versions.
  *
  * @param input - Run input.
  * @param partitionIds - Current partition plan.
@@ -194,24 +257,27 @@ async function loadCheckpoints(
   const stored = await input.checkpointStore.list(input.definition.id)
   const checkpoints = new Map<string, DataMigrationCheckpoint>()
   for (const checkpoint of stored) {
-    assertCheckpointMatches(input.definition, partitionIds, checkpoint)
+    assertCheckpointMatches(input.definition, input.rowStore.targetTable, partitionIds, checkpoint)
     checkpoints.set(checkpoint.partitionId, checkpoint)
   }
   return checkpoints
 }
 
 /**
- * Checks that a stored checkpoint was written for the same definition and plan.
+ * Checks that a stored checkpoint was written for the same table, definition and plan.
  *
  * @param definition - Migration definition.
+ * @param targetTable - Identity of the physical target table.
  * @param partitionIds - Current partition plan.
  * @param checkpoint - Stored checkpoint.
  */
 export function assertCheckpointMatches(
   definition: DataMigrationDefinition,
+  targetTable: string,
   partitionIds: readonly string[],
   checkpoint: DataMigrationCheckpoint,
 ): void {
+  if (checkpoint.targetTable !== targetTable) throw new DataMigrationFailure('TARGET_MISMATCH')
   if (
     checkpoint.migrationId !== definition.id ||
     checkpoint.fromSchemaVersion !== definition.fromSchemaVersion ||
@@ -274,61 +340,100 @@ async function applyPartition(
   ) {
     throw new DataMigrationFailure('LEASE_HELD')
   }
-  let current = await saveCheckpoint(input, stored, {
-    migrationId: input.definition.id,
-    partitionId,
-    partitionCount,
-    fromSchemaVersion: input.definition.fromSchemaVersion,
-    toSchemaVersion: input.definition.toSchemaVersion,
-    status: 'in-progress',
-    ...(stored?.cursor === undefined ? {} : { cursor: stored.cursor }),
-    counters: stored?.counters ?? createEmptyDataMigrationCounters(),
-    leaseOwner: input.runId,
-    leaseExpiresAt: new Date(now + leaseMilliseconds).toISOString(),
-  })
+  const lease: PartitionLease = {
+    leaseMilliseconds,
+    current: await saveCheckpoint(input, stored, {
+      migrationId: input.definition.id,
+      partitionId,
+      targetTable: input.rowStore.targetTable,
+      partitionCount,
+      fromSchemaVersion: input.definition.fromSchemaVersion,
+      toSchemaVersion: input.definition.toSchemaVersion,
+      status: 'in-progress',
+      ...(stored?.cursor === undefined ? {} : { cursor: stored.cursor }),
+      counters: stored?.counters ?? createEmptyDataMigrationCounters(),
+      leaseOwner: input.runId,
+      leaseExpiresAt: new Date(now + leaseMilliseconds).toISOString(),
+    }),
+  }
   let runCounters = createEmptyDataMigrationCounters()
   const report = (): DataMigrationPartitionReport => ({
     partitionId,
-    status: current.status,
+    status: lease.current.status,
     counters: runCounters,
   })
   try {
     while (state.pagesRead < input.maxPages) {
+      const cursor = lease.current.cursor
       const page = await input.rowStore.readPage({
         partitionId,
-        ...(current.cursor === undefined ? {} : { cursor: current.cursor }),
+        ...(cursor === undefined ? {} : { cursor }),
         limit: input.pageSize,
       })
       state.pagesRead += 1
-      if (page.nextCursor !== undefined && page.nextCursor === current.cursor) {
+      if (page.nextCursor !== undefined && page.nextCursor === cursor) {
         throw new DataMigrationFailure('CURSOR_REPEATED')
       }
-      const pageCounters = await applyRows(input, state, page.rows)
-      runCounters = addDataMigrationCounters(runCounters, pageCounters)
+      const pageCounters = createEmptyDataMigrationCounters()
+      try {
+        await applyRows(input, state, lease, page.rows, pageCounters)
+      } finally {
+        runCounters = addDataMigrationCounters(runCounters, pageCounters)
+      }
       const completed = page.nextCursor === undefined
-      current = await saveCheckpoint(input, current, {
-        ...withoutLeaseAndCursor(current),
+      lease.current = await saveCheckpoint(input, lease.current, {
+        ...withoutLeaseAndCursor(lease.current),
         status: completed ? 'completed' : 'in-progress',
         ...(page.nextCursor === undefined ? {} : { cursor: page.nextCursor }),
-        counters: addDataMigrationCounters(current.counters, pageCounters),
-        ...(completed
-          ? {}
-          : {
-              leaseOwner: input.runId,
-              leaseExpiresAt: new Date(input.clock.now() + leaseMilliseconds).toISOString(),
-            }),
+        counters: addDataMigrationCounters(lease.current.counters, pageCounters),
+        ...(completed ? {} : newLease(input, leaseMilliseconds)),
       })
       if (completed) break
     }
   } catch (error: unknown) {
     state.partitions.push(report())
-    await releaseLease(input, current)
+    await releaseLease(input, lease.current)
     throw error
   }
   state.partitions.push(report())
-  if (current.status === 'completed') return 'completed'
-  await releaseLease(input, current)
+  if (lease.current.status === 'completed') return 'completed'
+  await releaseLease(input, lease.current)
   return 'in-progress'
+}
+
+/**
+ * Builds lease fields owned by this run from now.
+ *
+ * @param input - Run input.
+ * @param leaseMilliseconds - Lease length.
+ * @returns Lease owner and expiry.
+ */
+function newLease(
+  input: RunDataMigrationInput,
+  leaseMilliseconds: number,
+): Pick<DataMigrationCheckpoint, 'leaseOwner' | 'leaseExpiresAt'> {
+  return {
+    leaseOwner: input.runId,
+    leaseExpiresAt: new Date(input.clock.now() + leaseMilliseconds).toISOString(),
+  }
+}
+
+/**
+ * Renews the lease before a write when less than half of it remains. A lost
+ * compare-and-set stops the run before the write, so a run that lost its
+ * partition never keeps writing.
+ *
+ * @param input - Run input.
+ * @param lease - Lease-holding state of the partition.
+ */
+async function renewLeaseIfNeeded(input: RunDataMigrationInput, lease: PartitionLease): Promise<void> {
+  const expiresAt = Date.parse(lease.current.leaseExpiresAt ?? '')
+  if (Number.isFinite(expiresAt) && expiresAt - input.clock.now() > lease.leaseMilliseconds / 2) return
+  lease.current = await saveCheckpoint(input, lease.current, {
+    ...withoutLeaseAndCursor(lease.current),
+    ...(lease.current.cursor === undefined ? {} : { cursor: lease.current.cursor }),
+    ...newLease(input, lease.leaseMilliseconds),
+  })
 }
 
 /**
@@ -362,6 +467,7 @@ function withoutLeaseAndCursor(
   return {
     migrationId: checkpoint.migrationId,
     partitionId: checkpoint.partitionId,
+    targetTable: checkpoint.targetTable,
     partitionCount: checkpoint.partitionCount,
     fromSchemaVersion: checkpoint.fromSchemaVersion,
     toSchemaVersion: checkpoint.toSchemaVersion,
@@ -394,30 +500,32 @@ async function saveCheckpoint(
 }
 
 /**
- * Classifies a page and replaces its pending rows. The whole page is
- * classified before any write so an unknown row stops the run without a
- * partial page.
+ * Classifies a page and replaces its pending rows, adding to `counters` as it
+ * goes so that rows written before a failure are still reported. The whole
+ * page is classified before any write so an unknown row stops the run
+ * without a partial page.
  *
  * @param input - Run input.
  * @param state - Shared run state.
+ * @param lease - Lease-holding state of the partition.
  * @param rows - Page rows.
- * @returns Counts for the page.
+ * @param counters - Page counters, updated in place.
  */
 async function applyRows(
   input: RunDataMigrationInput,
   state: RunState,
+  lease: PartitionLease,
   rows: readonly DataMigrationRow[],
-): Promise<DataMigrationCounters> {
+  counters: DataMigrationCounters,
+): Promise<void> {
   const classes = classifyPage(input.definition, rows)
-  const counters = createEmptyDataMigrationCounters()
-  counters.scanned = rows.length
+  counters.scanned += rows.length
   for (const [index, row] of rows.entries()) {
     const rowClass = classes[index]
     if (rowClass === 'unrelated') counters.unrelated += 1
     else if (rowClass === 'migrated') counters.alreadyMigrated += 1
-    else counters[await replacePendingRow(input, state, row)] += 1
+    else counters[await replacePendingRow(input, state, lease, row)] += 1
   }
-  return counters
 }
 
 /**
@@ -444,12 +552,14 @@ function classifyPage(
  *
  * @param input - Run input.
  * @param state - Shared run state.
+ * @param lease - Lease-holding state of the partition.
  * @param pending - Row classified as `pending`.
  * @returns The counter the row adds to.
  */
 async function replacePendingRow(
   input: RunDataMigrationInput,
   state: RunState,
+  lease: PartitionLease,
   pending: DataMigrationRow,
 ): Promise<'migrated' | 'alreadyMigrated' | 'vanished'> {
   const { definition } = input
@@ -458,6 +568,7 @@ async function replacePendingRow(
   for (let attempt = 0; attempt < MAX_REPLACE_ATTEMPTS; attempt += 1) {
     const next = transformDataMigrationRow(definition, row)
     await acquireWrite(input, state)
+    await renewLeaseIfNeeded(input, lease)
     const outcome = await input.rowStore.replaceRow({
       definition,
       row: next,

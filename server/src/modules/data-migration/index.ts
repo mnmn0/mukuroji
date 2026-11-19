@@ -9,6 +9,7 @@ export {
   type DataMigrationFailureCode,
   type DataMigrationRow,
   type DataMigrationRowClass,
+  type DataMigrationRunRecord,
   type DataMigrationWriterPolicy,
 } from './domain/data-migration'
 /** Ports the runner and verifier depend on. */

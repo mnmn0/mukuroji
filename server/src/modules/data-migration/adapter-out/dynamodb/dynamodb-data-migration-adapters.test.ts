@@ -143,6 +143,7 @@ describe('DynamoDB checkpoint store', () => {
   const checkpoint: DataMigrationCheckpoint = {
     migrationId: '0001-task-estimate-points',
     partitionId: 'segment-0-of-1',
+    targetTable: 'work-items',
     partitionCount: 1,
     fromSchemaVersion: 1,
     toSchemaVersion: 2,
@@ -165,7 +166,7 @@ describe('DynamoDB checkpoint store', () => {
       }
       page += 1
       return page === 1
-        ? { Items: [{ ...checkpoint, schemaVersion: 1 }], LastEvaluatedKey: { migrationId: 'm', partitionId: 'p' } }
+        ? { Items: [{ ...checkpoint, schemaVersion: 2 }], LastEvaluatedKey: { migrationId: 'm', partitionId: 'p' } }
         : { Items: [] }
     })
     const store = createDynamoDbDataMigrationCheckpointStore({ documentClient, tableName: 'migrations' })
@@ -184,6 +185,29 @@ describe('DynamoDB checkpoint store', () => {
     expect(calls.filter((call) => call.commandName === 'QueryCommand')).toHaveLength(2)
   })
 
+  test('keeps run records in their own partition so checkpoint listing never reads them', async () => {
+    const { documentClient, calls } = createInterceptedClient(() => ({}))
+    const store = createDynamoDbDataMigrationCheckpointStore({ documentClient, tableName: 'migrations' })
+    await store.saveRun({
+      migrationId: checkpoint.migrationId,
+      runId: 'run-1',
+      operator: 'arn:aws:sts::123456789012:assumed-role/operator/session',
+      targetTable: 'work-items',
+      fromSchemaVersion: 1,
+      toSchemaVersion: 2,
+      partitionCount: 1,
+      status: 'started',
+      pagesRead: 0,
+      counters: checkpoint.counters,
+      startedAt: '2026-11-20T00:00:00.000Z',
+    })
+    expect(calls[0]?.input.Item).toMatchObject({
+      migrationId: { S: 'RUN#0001-task-estimate-points' },
+      partitionId: { S: '2026-11-20T00:00:00.000Z#run-1' },
+      operator: { S: 'arn:aws:sts::123456789012:assumed-role/operator/session' },
+    })
+  })
+
   test.each([
     ['another migration', { migrationId: 'other' }],
     ['an unknown status', { status: 'paused' }],
@@ -191,9 +215,10 @@ describe('DynamoDB checkpoint store', () => {
     ['a lease owner without expiry', { leaseExpiresAt: undefined }],
     ['a non-canonical time', { updatedAt: '2026-11-20' }],
     ['a missing counter', { counters: { scanned: 1 } }],
-    ['an unknown row version', { schemaVersion: 2 }],
+    ['an unknown row version', { schemaVersion: 1 }],
+    ['no target table', { targetTable: '' }],
   ])('rejects a stored checkpoint with %s', (_label, overrides) => {
-    expect(() => parseDataMigrationCheckpoint({ ...checkpoint, schemaVersion: 1, ...overrides }, checkpoint.migrationId))
+    expect(() => parseDataMigrationCheckpoint({ ...checkpoint, schemaVersion: 2, ...overrides }, checkpoint.migrationId))
       .toThrow('CHECKPOINT_INVALID')
   })
 })

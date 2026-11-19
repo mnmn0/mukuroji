@@ -24,7 +24,13 @@ const PARTITION_KEY = 'migrationId'
 const SORT_KEY = 'partitionId'
 
 /** Stored checkpoint row format version. */
-const CHECKPOINT_SCHEMA_VERSION = 1
+const CHECKPOINT_SCHEMA_VERSION = 2
+
+/** Stored run record format version. */
+const RUN_RECORD_SCHEMA_VERSION = 1
+
+/** Prefix of the partition key that holds the run records of a migration, apart from its checkpoints. */
+const RUN_RECORD_PARTITION_PREFIX = 'RUN#'
 
 /** Counter names in stored order. */
 const COUNTER_NAMES = ['scanned', 'migrated', 'alreadyMigrated', 'unrelated', 'vanished'] as const
@@ -97,6 +103,21 @@ export function createDynamoDbDataMigrationCheckpointStore(options: {
         throw new DataMigrationFailure('UPSTREAM_FAILURE', error)
       }
     },
+    saveRun: async (record) => {
+      try {
+        await documentClient.send(new PutCommand({
+          TableName: tableName,
+          Item: {
+            ...record,
+            [PARTITION_KEY]: `${RUN_RECORD_PARTITION_PREFIX}${record.migrationId}`,
+            [SORT_KEY]: `${record.startedAt}#${record.runId}`,
+            schemaVersion: RUN_RECORD_SCHEMA_VERSION,
+          },
+        }))
+      } catch (error: unknown) {
+        throw new DataMigrationFailure('UPSTREAM_FAILURE', error)
+      }
+    },
   }
 }
 
@@ -115,6 +136,7 @@ export function parseDataMigrationCheckpoint(
   const counters = parseCounters(item.counters)
   const {
     partitionId,
+    targetTable,
     partitionCount,
     fromSchemaVersion,
     toSchemaVersion,
@@ -129,6 +151,8 @@ export function parseDataMigrationCheckpoint(
     item.schemaVersion !== CHECKPOINT_SCHEMA_VERSION ||
     item.migrationId !== migrationId ||
     typeof partitionId !== 'string' ||
+    typeof targetTable !== 'string' ||
+    targetTable.length === 0 ||
     !isPositiveInteger(partitionCount) ||
     !isPositiveInteger(fromSchemaVersion) ||
     !isPositiveInteger(toSchemaVersion) ||
@@ -146,6 +170,7 @@ export function parseDataMigrationCheckpoint(
   return {
     migrationId,
     partitionId,
+    targetTable,
     partitionCount,
     fromSchemaVersion,
     toSchemaVersion,

@@ -59,9 +59,15 @@ runner は `transform` の結果を書き込む前に、次をすべて確かめ
   checkpoint は前の page のままで、再実行するとその page を読み直します。書き込み済みの row は
   `migrated` に分類されるので二重には書きません（`alreadyMigrated` として数えます）。
 - segment ごとに lease（5 分）を取り、別の実行が有効な lease を持つ segment には `LEASE_HELD` で
-  止まります。期限が切れた lease は引き継ぎます。
-- checkpoint は作成時の segment 数と version を持ちます。segment 数や version を変えて同じ `id` を
-  実行すると `PARTITION_PLAN_MISMATCH` / `DEFINITION_MISMATCH` で止まります。
+  止まります。期限が切れた lease は引き継ぎます。page の処理中も、残りが半分を切ると書き込みの前に
+  lease を compare-and-set で延長し、負けたら（別の実行に取られたら）その時点で書き込みをやめて
+  `CHECKPOINT_CONFLICT` で止まります。
+- checkpoint は作成時の物理 table、segment 数、version を持ちます。別の table（restore した copy など）、
+  別の segment 数、別の version で同じ `id` を再開しようとすると、それぞれ `TARGET_MISMATCH`、
+  `PARTITION_PLAN_MISMATCH`、`DEFINITION_MISMATCH` で止まります。別の table を移行するときは、別の
+  checkpoint table を使います。
+- page の途中で止まった場合も、その page で書き込んだ行数は実行の report と run record に含めます。
+  checkpoint の累計には含めず、再開時に `alreadyMigrated` として数えます。
 
 ### Row の置き換え
 
@@ -108,12 +114,30 @@ check が成功」は、この `verify` の `pass` と integrity check の成功
 
 ## Rollback
 
+この runner は version を 1 つ上げる向きにしか動かず、row を旧 version に戻すことはできません。
+そのため rollback は「旧 version も読める code を保つ」ことで行います。
+
 - 実行中に止める: process を止めるだけでよい。checkpoint は最後に書き終えた page を指す。
-- `verify` が `pass` になる前に戻す: dual-read の code は旧 version も読めるため、application の rollback は
-  不要。migration の再開か、原因を直した新しい migration（新しい `id`）で進める。
-- 旧 version しか読めない code へ戻す必要がある場合は、移行済み row を戻す逆向きの migration を別の
-  `id` で用意する。PITR restore は最後の手段で、[operational-readiness.md](operational-readiness.md) の
-  rollback 手順に従う。
+- 移行を始めた後に戻す: dual-read の code は旧・新どちらの row も読めるため、application はこの code
+  （またはこれ以降の code）のまま止めておけば読み取りは壊れない。原因を直して再開するか、直した
+  transform を新しい `id`（同じ version の組）で用意して残りを進める。
+- 1 行でも移行した後に、旧 version しか読めない code へ戻してはいけない。旧 version の reader は新しい
+  version の row を fail-closed で拒否する。どうしても旧 code に戻す必要がある場合の手段は PITR restore だけで、
+  [operational-readiness.md](operational-readiness.md) の rollback 手順に従い、restore 時点以降の書き込みを
+  失うことを判断したうえで行う。
+
+## 実行者の記録（run record）
+
+`--apply` の実行は、最初の row を書く前に run record を checkpoint table に保存し、実行の終わりに同じ
+record を結果で更新します。保存できなければ row を 1 行も書かずに `RUN_LOG_FAILED` で止まります。
+
+- key: `migrationId = RUN#<migration id>`、`partitionId = <開始時刻>#<run ID>`（checkpoint の partition とは分ける）
+- 内容: 実行者（STS `GetCallerIdentity` の ARN。local emulator では `local-emulator`）、物理 table 名、
+  version、segment 数、状態（`started` → `completed` / `paused` / `failed`）、failure code、page 数、行数、開始・終了時刻
+
+Migration は Workspace をまたいで table 全体を書き換えるため、Workspace 単位の監査 event
+（[event-audit.md](event-audit.md)）ではなく、この run record と CloudTrail の IAM 記録を実行者の記録にします。
+dry run と `verify` は書き込まないので記録しません。
 
 ## Evidence
 
@@ -143,10 +167,14 @@ bun run data:migrate verify --migration <id> --table-name <table> --checkpoint-t
 
 ### Checkpoint table
 
-key は `migrationId`（partition key、S）と `partitionId`（sort key、S）です。row は `schemaVersion: 1` を持ち、
-読み込み時に厳密に検証し、形の崩れた row は `CHECKPOINT_INVALID` で止まります。
+key は `migrationId`（partition key、S）と `partitionId`（sort key、S）です。checkpoint row は `schemaVersion: 2`
+（物理 table 名を含む）を持ち、読み込み時に厳密に検証し、形の崩れた row は `CHECKPOINT_INVALID` で止まります。
+run record は `RUN#` で始まる別の partition key に置きます。
 
-local の emulator（Floci）では CLI が初回に table を作ります。AWS 上の table は CDK にまだ定義していません
+local の emulator（Floci）では CLI が初回に table を作ります。Floci の parallel scan は `Limit` 付きで page を
+またぐと segment の割り当てがずれ、行を読み飛ばすことがあります（2026-11 時点の `1.5.33` で確認。実 DynamoDB では
+起きません）。local では `--segments 1` で実行してください。読み飛ばした場合も `verify` は `pending` を数えて
+`fail` になります。AWS 上の table は CDK にまだ定義していません
 （下記「未実装」）。
 
 ## Failure code
@@ -159,6 +187,8 @@ local の emulator（Floci）では CLI が初回に table を作ります。AWS
 | `LEASE_HELD` | 別の実行が有効な lease を持つ |
 | `CHECKPOINT_CONFLICT` | checkpoint の compare-and-set に負けた |
 | `CHECKPOINT_INVALID` | checkpoint row または cursor の形が崩れている |
+| `TARGET_MISMATCH` | checkpoint が別の物理 table のものである |
+| `RUN_LOG_FAILED` | 実行者を特定できない、または run record を保存できない |
 | `UNKNOWN_ROW` | 分類できない row がある |
 | `TRANSFORM_INVALID` | transform の結果が契約に合わない |
 | `WRITE_CONFLICT` | 同じ row の置き換えが 3 回続けて条件に負けた |
@@ -179,6 +209,5 @@ local の emulator（Floci）では CLI が初回に table を作ります。AWS
 - Floci で旧 schema の seed → migration → verify を 1 command で再現する rehearsal と、CI の smoke
 - Lambda からの実行と、AWS 上の checkpoint table（CDK）
 - Team / Workspace の partition を Query で読む row store（今は scan segment のみ）
-- 実行者と対象を audit event に記録すること
 - #335・#340・#337 の migration 定義
 - `cdk/README.md` の個別手順の置き換えと、review Skill / `AGENTS.md` の push 前チェックへの組み込み

@@ -21,6 +21,7 @@ function createInput(overrides: Partial<RunDataMigrationInput> & Pick<RunDataMig
     checkpointStore: createMemoryCheckpointStore(),
     clock: createManualClock(),
     runId: 'run-1',
+    operator: 'arn:aws:sts::123456789012:assumed-role/migration-operator/session',
     mode: 'apply',
     pageSize: 2,
     maxPages: 100,
@@ -104,10 +105,92 @@ describe('runDataMigration', () => {
     expect(failed).toMatchObject({ status: 'failed', failureCode: 'WRITE_CONFLICT' })
     expect(checkpointStore.checkpoints.get('0001-task-estimate-points|segment-0-of-1')?.leaseOwner).toBeUndefined()
 
+    expect(failed.counters).toMatchObject({ scanned: 2, migrated: 1 })
+    expect(failed.partitions[0]?.counters.migrated).toBe(1)
+    expect(checkpointStore.checkpoints.get('0001-task-estimate-points|segment-0-of-1')?.cursor).toBeUndefined()
+
     failSecond = false
     const resumed = await runDataMigration(createInput({ rowStore, checkpointStore, runId: 'run-2' }))
     expect(resumed.status).toBe('completed')
     expect(resumed.counters).toMatchObject({ migrated: 1, alreadyMigrated: 1 })
+  })
+
+  test('records who ran an applying run against which table before writing and when it ends', async () => {
+    const rowStore = createMemoryRowStore({ 'segment-0-of-1': [1, 2].map(createPendingTaskRow) })
+    const checkpointStore = createMemoryCheckpointStore()
+    let writesBeforeStartRecord = -1
+    checkpointStore.beforeSaveRun = () => {
+      if (writesBeforeStartRecord < 0) writesBeforeStartRecord = rowStore.replaceCalls
+    }
+    await runDataMigration(createInput({ rowStore, checkpointStore }))
+
+    expect(writesBeforeStartRecord).toBe(0)
+    expect(checkpointStore.runHistory.map((record) => record.status)).toEqual(['started', 'completed'])
+    expect(checkpointStore.runs.get('run-1')).toMatchObject({
+      operator: 'arn:aws:sts::123456789012:assumed-role/migration-operator/session',
+      targetTable: 'work-items-table',
+      partitionCount: 1,
+      pagesRead: 1,
+      counters: { migrated: 2 },
+    })
+
+    const dryRunStore = createMemoryCheckpointStore()
+    await runDataMigration(createInput({ rowStore, checkpointStore: dryRunStore, mode: 'dry-run' }))
+    expect(dryRunStore.runHistory).toHaveLength(0)
+  })
+
+  test('writes no row when the run record cannot be saved', async () => {
+    const rowStore = createMemoryRowStore({ 'segment-0-of-1': [createPendingTaskRow(1)] })
+    const checkpointStore = createMemoryCheckpointStore()
+    checkpointStore.beforeSaveRun = () => {
+      throw new Error('denied')
+    }
+    expect(await runDataMigration(createInput({ rowStore, checkpointStore })))
+      .toMatchObject({ status: 'failed', failureCode: 'RUN_LOG_FAILED' })
+    expect(rowStore.replaceCalls).toBe(0)
+    expect(checkpointStore.checkpoints.size).toBe(0)
+  })
+
+  test('refuses checkpoints written for another physical table', async () => {
+    const checkpointStore = createMemoryCheckpointStore()
+    await runDataMigration(createInput({
+      rowStore: createMemoryRowStore({ 'segment-0-of-1': [createPendingTaskRow(1)] }),
+      checkpointStore,
+    }))
+    const restoredCopy = createMemoryRowStore({ 'segment-0-of-1': [createPendingTaskRow(1)] }, 'restored-copy')
+    expect(await runDataMigration(createInput({ rowStore: restoredCopy, checkpointStore })))
+      .toMatchObject({ status: 'failed', failureCode: 'TARGET_MISMATCH' })
+    expect(restoredCopy.replaceCalls).toBe(0)
+    expect(await verifyDataMigration({
+      definition: createTaskEstimateMigration(), rowStore: restoredCopy, checkpointStore, pageSize: 10, maxPages: 10,
+    })).toMatchObject({ status: 'fail', failureCode: 'TARGET_MISMATCH' })
+  })
+
+  test('renews the lease during a slow page and stops writing once it is lost', async () => {
+    const clock = createManualClock()
+    const rowStore = createMemoryRowStore({ 'segment-0-of-1': [1, 2, 3, 4].map(createPendingTaskRow) })
+    const checkpointStore = createMemoryCheckpointStore()
+    const renewed = await runDataMigration(createInput({
+      rowStore, checkpointStore, clock, pageSize: 10, maxWritesPerSecond: 1, leaseMilliseconds: 2_500,
+    }))
+    expect(renewed.status).toBe('completed')
+    expect(checkpointStore.checkpoints.get('0001-task-estimate-points|segment-0-of-1')?.revision).toBeGreaterThan(2)
+
+    const stolenRows = createMemoryRowStore({ 'segment-0-of-1': [1, 2, 3, 4].map(createPendingTaskRow) })
+    const stolenStore = createMemoryCheckpointStore()
+    stolenRows.beforeReplace = (row) => {
+      if (row.sk === 'TASK#002') {
+        const key = '0001-task-estimate-points|segment-0-of-1'
+        const stored = stolenStore.checkpoints.get(key)
+        if (stored !== undefined) stolenStore.checkpoints.set(key, { ...stored, revision: stored.revision + 1, leaseOwner: 'other-run' })
+      }
+      return true
+    }
+    const lost = await runDataMigration(createInput({
+      rowStore: stolenRows, checkpointStore: stolenStore, clock, pageSize: 10, maxWritesPerSecond: 1, leaseMilliseconds: 2_500,
+    }))
+    expect(lost).toMatchObject({ status: 'failed', failureCode: 'CHECKPOINT_CONFLICT' })
+    expect(stolenRows.replaceCalls).toBeLessThan(4)
   })
 
   test('dry run validates transforms and writes neither rows nor checkpoints', async () => {

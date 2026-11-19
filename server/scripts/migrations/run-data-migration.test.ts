@@ -33,6 +33,7 @@ function createDependencies(registry: readonly DataMigrationDefinition[] = [crea
       return { rowStore, checkpointStore }
     },
     clock: createManualClock(),
+    resolveOperator: async () => 'arn:aws:sts::123456789012:assumed-role/operator/session',
     createRunId: () => 'run-1',
     writeOutput: (line) => output.push(line),
     writeError: (line) => errors.push(line),

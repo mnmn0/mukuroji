@@ -83,6 +83,8 @@ export type DataMigrationFailureCode =
   | 'LEASE_HELD'
   | 'CHECKPOINT_CONFLICT'
   | 'CHECKPOINT_INVALID'
+  | 'TARGET_MISMATCH'
+  | 'RUN_LOG_FAILED'
   | 'UNKNOWN_ROW'
   | 'TRANSFORM_INVALID'
   | 'WRITE_CONFLICT'
@@ -134,6 +136,8 @@ export type DataMigrationCheckpoint = {
   readonly migrationId: string
   /** Partition identifier inside the migration. */
   readonly partitionId: string
+  /** Identity of the physical table the checkpoint belongs to; a resume against another table is refused. */
+  readonly targetTable: string
   /** Number of partitions in the plan the checkpoint was created with. */
   readonly partitionCount: number
   /** Schema version the migration reads. */
@@ -154,6 +158,40 @@ export type DataMigrationCheckpoint = {
   readonly leaseExpiresAt?: string
   /** ISO time of the last save. */
   readonly updatedAt: string
+}
+
+/**
+ * Durable record of one applying run: who ran it, against which table, and
+ * what it did. It is written before the first row write and again when the
+ * run ends.
+ */
+export type DataMigrationRunRecord = {
+  /** Migration identifier. */
+  readonly migrationId: string
+  /** Run identifier. */
+  readonly runId: string
+  /** Authenticated principal that ran the migration, such as an IAM role ARN. */
+  readonly operator: string
+  /** Identity of the physical target table. */
+  readonly targetTable: string
+  /** Schema version read. */
+  readonly fromSchemaVersion: number
+  /** Schema version written. */
+  readonly toSchemaVersion: number
+  /** Number of partitions in the plan. */
+  readonly partitionCount: number
+  /** `started` until the run ends. */
+  readonly status: 'started' | 'completed' | 'paused' | 'failed'
+  /** Stable failure code when `status` is `failed`. */
+  readonly failureCode?: DataMigrationFailureCode
+  /** Pages read by the run. */
+  readonly pagesRead: number
+  /** Counts from the run. */
+  readonly counters: DataMigrationCounters
+  /** ISO start time. */
+  readonly startedAt: string
+  /** ISO finish time, once the run ended. */
+  readonly finishedAt?: string
 }
 
 /**

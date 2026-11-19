@@ -26,7 +26,13 @@
 - table は parallel scan の segment に分け、segment を checkpoint の単位にする。
 - checkpoint は専用の DynamoDB table（partition key `migrationId`、sort key `partitionId`、on-demand）に置き、
   revision の compare-and-set と 5 分の lease で同時実行を防ぐ。
+- checkpoint は物理 table 名を持ち、別の table で再開しようとすると拒否する。
+- 書き込む実行は、最初の書き込みの前に実行者（STS の caller ARN）と対象 table を run record として同じ table の
+  別 partition（`RUN#<id>`）に保存する。Workspace 単位の監査 event には載せない（table 全体の操作で、
+  特定の Workspace の操作ではないため）。
 - 最初の実行経路は operator 向けの CLI（`bun run data:migrate`）とし、`--apply` を付けない限り dry run にする。
+- runner は version を上げる向きにしか動かさない。rollback は dual-read の code を保つことで行い、旧 version しか
+  読めない code に戻す手段は PITR restore だけとする。
 - 読み取り API は dual-read の deploy（旧 version と新 version の両方を読む）で migration 中も止めない。
   dual-read の期間は `verify` が `pass` になった後の deploy で終える。
 
@@ -52,5 +58,5 @@
 - 途中で止めても、同じ command で最後に保存した page の続きから再開できる。
 - scan segment は対象 table 全体を読むため、費用は table の総行数に比例する。対象 entity が table の
   一部だけの場合も全 row を読む。
-- AWS 上の checkpoint table、Lambda からの実行、rehearsal と CI smoke、audit への記録は後続の変更で足す。
+- AWS 上の checkpoint table、Lambda からの実行、rehearsal と CI smoke は後続の変更で足す。
 - 更新した文書: `docs/data-migration.md`、`docs/operational-readiness.md`、`docs/architecture.md`。

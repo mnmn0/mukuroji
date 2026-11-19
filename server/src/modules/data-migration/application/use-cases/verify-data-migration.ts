@@ -93,7 +93,7 @@ export async function verifyDataMigration(
     const partitionIds = input.rowStore.listPartitions()
     partitions = partitionIds.length
     for (const checkpoint of await input.checkpointStore.list(input.definition.id)) {
-      assertCheckpointMatches(input.definition, partitionIds, checkpoint)
+      assertCheckpointMatches(input.definition, input.rowStore.targetTable, partitionIds, checkpoint)
       if (checkpoint.status === 'completed') completedPartitions += 1
     }
     for (const partitionId of partitionIds) {

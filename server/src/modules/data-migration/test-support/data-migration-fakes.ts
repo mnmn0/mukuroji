@@ -2,6 +2,7 @@ import type {
   DataMigrationCheckpoint,
   DataMigrationDefinition,
   DataMigrationRow,
+  DataMigrationRunRecord,
 } from '../domain/data-migration'
 import type {
   DataMigrationCheckpointStore,
@@ -69,9 +70,13 @@ export type MemoryRowStore = DataMigrationRowStore & {
  * a cursor is the index of the next row.
  *
  * @param partitions - Rows per partition.
+ * @param targetTable - Identity of the simulated table.
  * @returns The store.
  */
-export function createMemoryRowStore(partitions: Record<string, Record<string, unknown>[]>): MemoryRowStore {
+export function createMemoryRowStore(
+  partitions: Record<string, Record<string, unknown>[]>,
+  targetTable = 'work-items-table',
+): MemoryRowStore {
   const rows = new Map<string, Record<string, unknown>>()
   const keysByPartition = new Map<string, string[]>()
   for (const [partitionId, partitionRows] of Object.entries(partitions)) {
@@ -84,6 +89,7 @@ export function createMemoryRowStore(partitions: Record<string, Record<string, u
   const store: MemoryRowStore = {
     rows,
     replaceCalls: 0,
+    targetTable,
     listPartitions: () => [...keysByPartition.keys()],
     readPage: async ({ partitionId, cursor, limit }) => {
       const keys = keysByPartition.get(partitionId) ?? []
@@ -123,6 +129,12 @@ export function createMemoryRowStore(partitions: Record<string, Record<string, u
 export type MemoryCheckpointStore = DataMigrationCheckpointStore & {
   /** Checkpoints by `migrationId|partitionId`. */
   readonly checkpoints: Map<string, DataMigrationCheckpoint>
+  /** Run records by `runId`, latest version only. */
+  readonly runs: Map<string, DataMigrationRunRecord>
+  /** Every saved run record version, in order. */
+  readonly runHistory: DataMigrationRunRecord[]
+  /** Hook run before a run record is saved; throwing fails the save. */
+  beforeSaveRun?: (record: DataMigrationRunRecord) => void
 }
 
 /**
@@ -132,8 +144,15 @@ export type MemoryCheckpointStore = DataMigrationCheckpointStore & {
  */
 export function createMemoryCheckpointStore(): MemoryCheckpointStore {
   const checkpoints = new Map<string, DataMigrationCheckpoint>()
-  return {
+  const store: MemoryCheckpointStore = {
     checkpoints,
+    runs: new Map(),
+    runHistory: [],
+    saveRun: async (record) => {
+      store.beforeSaveRun?.(record)
+      store.runs.set(record.runId, record)
+      store.runHistory.push(record)
+    },
     list: async (migrationId) =>
       [...checkpoints.values()].filter((checkpoint) => checkpoint.migrationId === migrationId),
     save: async (checkpoint, expectedRevision) => {
@@ -144,6 +163,7 @@ export function createMemoryCheckpointStore(): MemoryCheckpointStore {
       return true
     },
   }
+  return store
 }
 
 /** Manual clock that records sleeps and advances on them. */

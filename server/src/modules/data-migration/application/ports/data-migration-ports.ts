@@ -2,6 +2,7 @@ import type {
   DataMigrationCheckpoint,
   DataMigrationDefinition,
   DataMigrationRow,
+  DataMigrationRunRecord,
 } from '../../domain/data-migration'
 
 /** One bounded page of rows from one partition. */
@@ -22,6 +23,8 @@ export type DataMigrationReplaceOutcome = 'replaced' | 'condition-failed'
  * and never expose raw keys or rows in error messages.
  */
 export type DataMigrationRowStore = {
+  /** Identity of the physical table, stored with every checkpoint and run record. */
+  readonly targetTable: string
   /**
    * Partition identifiers of the read plan, in a stable order.
    *
@@ -86,6 +89,13 @@ export type DataMigrationCheckpointStore = {
     checkpoint: DataMigrationCheckpoint,
     expectedRevision: number | undefined,
   ) => Promise<boolean>
+  /**
+   * Writes the durable record of an applying run, replacing the earlier
+   * version of the same run.
+   *
+   * @param record - Run record.
+   */
+  readonly saveRun: (record: DataMigrationRunRecord) => Promise<void>
 }
 
 /** Time source and delay used for leases and the write rate budget. */

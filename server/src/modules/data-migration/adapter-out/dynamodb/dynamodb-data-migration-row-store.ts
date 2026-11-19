@@ -54,6 +54,7 @@ export function createDynamoDbDataMigrationRowStore(
     (_, segment) => `segment-${segment}-of-${totalSegments}`,
   )
   return {
+    targetTable: tableName,
     listPartitions: () => partitionIds,
     readPage: async ({ partitionId, cursor, limit }) => {
       const segment = parseSegment(partitionId, totalSegments)
