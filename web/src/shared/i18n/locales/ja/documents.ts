@@ -329,6 +329,8 @@ export const documentsMessages = {
   'documents.share.error':
     '共有設定を保存できませんでした。権限と最新の状態を確認してください。',
   'documents.export.action': '書き出す',
+  'documents.export.print': '印刷 / PDF',
+  'documents.export.subtreeMarkdown': '配下ページをまとめて Markdown',
   'documents.public.title': '共有ドキュメント',
   'documents.public.readOnly': '閲覧専用',
   'documents.public.updated': '更新日',

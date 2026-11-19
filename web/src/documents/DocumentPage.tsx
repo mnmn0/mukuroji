@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { createPortal, flushSync } from 'react-dom'
 import type {
   DocumentExportFormat,
   DocumentKind,
@@ -102,8 +103,12 @@ import {
   DocumentContextPanel,
   type DocumentContextTab,
 } from './ui/DocumentContextPanel'
-import { DocumentEditor } from './ui/DocumentEditor'
+import {
+  DocumentEditor,
+  DocumentReadOnlyContent,
+} from './ui/DocumentEditor'
 import { DocumentHome } from './ui/DocumentHome'
+import { exportDocumentSubtreeMarkdown } from './queries/documentSubtreeExport'
 import {
   DocumentShareDialog,
   type CreateDocumentShareDraftInput,
@@ -350,6 +355,10 @@ export type DocumentScreenActions = {
     documentId: string,
     format: DocumentExportFormat,
   ) => Promise<void>
+  /**
+   * Exports a document and its visible descendants as one Markdown file.
+   */
+  exportDocumentSubtree?: (document: DocumentRecord) => Promise<void>
   /**
    * Focus 中 block/object を presence へ反映する action です。
    */
@@ -1336,6 +1345,25 @@ export function DocumentPage() {
     if (objectUrl) URL.revokeObjectURL(objectUrl)
   }
 
+  /**
+   * Downloads the selected document and its visible descendants as Markdown.
+   *
+   * @param root - Document the export starts from.
+   */
+  const handleExportSubtree = async (root: DocumentRecord) => {
+    if (!accessToken) return
+    const result = await exportDocumentSubtreeMarkdown(accessToken, root)
+    const link = globalThis.document.createElement('a')
+    link.download = result.fileName
+    const objectUrl = URL.createObjectURL(
+      new Blob([result.content], { type: 'text/markdown; charset=utf-8' }),
+    )
+    link.href = objectUrl
+    link.rel = 'noopener noreferrer'
+    link.click()
+    URL.revokeObjectURL(objectUrl)
+  }
+
   return (
     <DocumentScreen
       accessToken={accessToken}
@@ -1355,6 +1383,7 @@ export function DocumentPage() {
         createShare: handleCreateShare,
         deleteShare: handleDeleteShare,
         exportDocument: handleExport,
+        exportDocumentSubtree: handleExportSubtree,
         instantiateTemplate: handleInstantiateTemplate,
         loadMoreBacklinks: handleLoadMoreBacklinks,
         loadMoreComments: handleLoadMoreComments,
@@ -1474,7 +1503,25 @@ export function DocumentScreen({
   const [defaultCommentAnchorId, setDefaultCommentAnchorId] =
     useState<string>()
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false)
+  const [isPrinting, setIsPrinting] = useState(false)
   const selectedDocument = data.selectedDocument
+  const printableDocument =
+    selectedDocument?.kind === 'page' || selectedDocument?.kind === 'template'
+      ? selectedDocument
+      : undefined
+
+  /**
+   * Mounts the print-only document copy, opens the browser print dialog and
+   * unmounts the copy once the dialog closes.
+   */
+  const printSelectedDocument = () => {
+    flushSync(() => setIsPrinting(true))
+    try {
+      globalThis.print()
+    } finally {
+      setIsPrinting(false)
+    }
+  }
   const documentAiSessionKey = selectedDocument
     ? `${selectedDocument.id}:${selectedDocument.revision}`
     : ''
@@ -1660,6 +1707,14 @@ export function DocumentScreen({
 
   return (
     <>
+      {isPrinting && printableDocument
+        ? createPortal(
+            <div className="document-print-root">
+              <DocumentReadOnlyContent document={printableDocument} t={t} />
+            </div>,
+            globalThis.document.body,
+          )
+        : null}
       <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <DocumentHeader
           contextTab={contextTab}
@@ -1694,6 +1749,25 @@ export function DocumentScreen({
               : undefined
           }
           onExportMenuOpenChange={setIsExportMenuOpen}
+          onExportSubtree={
+            selectedDocument &&
+            selectedDocument.kind !== 'whiteboard' &&
+            !selectedDocument.archivedAt &&
+            actions.exportDocumentSubtree
+              ? async () => {
+                  await runGuardedAction(() =>
+                    actions.exportDocumentSubtree!(selectedDocument),
+                  )
+                }
+              : undefined
+          }
+          onPrint={
+            printableDocument
+              ? async () => {
+                  await runGuardedAction(printSelectedDocument)
+                }
+              : undefined
+          }
           onFavoriteChange={
             selectedDocument && actions.setFavorite
               ? async (favorite) => {
@@ -2770,9 +2844,11 @@ function DocumentHeader({
   onContextOpen,
   onExport,
   onExportMenuOpenChange,
+  onExportSubtree,
   onFavoriteChange,
   onLogout,
   onMobileSidebarOpen,
+  onPrint,
   onRestore,
   onShareOpen,
   onTreeOpen,
@@ -2788,9 +2864,11 @@ function DocumentHeader({
   onContextOpen: (tab: DocumentContextTab) => void
   onExport?: (format: DocumentExportFormat) => Promise<void>
   onExportMenuOpenChange: (open: boolean) => void
+  onExportSubtree?: () => Promise<void>
   onFavoriteChange?: (favorite: boolean) => Promise<void>
   onLogout?: () => void
   onMobileSidebarOpen: () => void
+  onPrint?: () => Promise<void>
   onRestore?: () => Promise<void>
   onShareOpen?: () => void
   onTreeOpen: () => void
@@ -2813,9 +2891,24 @@ function DocumentHeader({
           selectedDocument?.kind === 'template'
         ? ['markdown', 'json']
         : ['json']
+  const hasExportActions = Boolean(onExport || onPrint || onExportSubtree)
   const hasOverflowActions = Boolean(
-    onShareOpen || onExport || onArchive || onRestore || onLogout,
+    onShareOpen || hasExportActions || onArchive || onRestore || onLogout,
   )
+  const extraExportActions = [
+    ...(onPrint
+      ? [{ key: 'print', label: t('documents.export.print'), run: onPrint }]
+      : []),
+    ...(onExportSubtree
+      ? [
+          {
+            key: 'subtree',
+            label: t('documents.export.subtreeMarkdown'),
+            run: onExportSubtree,
+          },
+        ]
+      : []),
+  ]
 
   return (
     <header className="workbench-header relative z-20 flex min-h-[64px] flex-none items-center gap-3 px-[clamp(14px,2vw,26px)] py-2.5">
@@ -2907,7 +3000,7 @@ function DocumentHeader({
               {t('documents.share.action')}
             </button>
           ) : null}
-          {onExport ? (
+          {hasExportActions ? (
             <div className="relative hidden md:block">
               <button
                 aria-expanded={isExportMenuOpen}
@@ -2922,21 +3015,37 @@ function DocumentHeader({
               </button>
               {isExportMenuOpen ? (
                 <div
-                  className="absolute right-0 top-11 z-30 w-40 rounded-lg border border-[var(--workbench-border)] bg-surface p-1.5 shadow-xl"
+                  className="absolute right-0 top-11 z-30 w-56 rounded-lg border border-[var(--workbench-border)] bg-surface p-1.5 shadow-xl"
                   role="menu"
                 >
-                  {exportFormats.map((format) => (
+                  {onExport
+                    ? exportFormats.map((format) => (
+                        <button
+                          className="w-full rounded-md px-3 py-2 text-left text-sm font-semibold text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]"
+                          key={format}
+                          onClick={() => {
+                            onExportMenuOpenChange(false)
+                            void onExport(format)
+                          }}
+                          role="menuitem"
+                          type="button"
+                        >
+                          {format.toUpperCase()}
+                        </button>
+                      ))
+                    : null}
+                  {extraExportActions.map((action) => (
                     <button
                       className="w-full rounded-md px-3 py-2 text-left text-sm font-semibold text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]"
-                      key={format}
+                      key={action.key}
                       onClick={() => {
                         onExportMenuOpenChange(false)
-                        void onExport(format)
+                        void action.run()
                       }}
                       role="menuitem"
                       type="button"
                     >
-                      {format.toUpperCase()}
+                      {action.label}
                     </button>
                   ))}
                 </div>
@@ -3020,6 +3129,20 @@ function DocumentHeader({
                     </button>
                   ))
                 : null}
+              {extraExportActions.map((action) => (
+                <button
+                  className="w-full rounded-md px-3 py-2 text-left text-sm font-semibold hover:bg-[var(--workbench-surface-muted)]"
+                  key={action.key}
+                  onClick={() => {
+                    setIsActionMenuOpen(false)
+                    void action.run()
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  {action.label}
+                </button>
+              ))}
               {onRestore ? (
                 <button
                   className="w-full rounded-md px-3 py-2 text-left text-sm font-semibold hover:bg-[var(--workbench-surface-muted)]"
