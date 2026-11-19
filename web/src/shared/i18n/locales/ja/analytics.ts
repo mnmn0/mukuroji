@@ -244,6 +244,7 @@ export const analyticsMessages = {
   'analytics.error.conflict': '別の変更が先に保存されました。最新版を読み込みました。',
   'analytics.error.forbidden': 'このレポートを変更する権限がありません。',
   'analytics.error.session': 'セッションの有効期限が切れました。再ログインしてください。',
+  'analytics.error.scopeTooLarge': '集計対象が上限を超えました。期間を短くするか、Team や Project で絞り込んでください。',
   'analytics.error.evidence': '数値の根拠を読み込めませんでした。',
   'analytics.error.export': 'ファイルを出力できませんでした。',
   'analytics.error.share': '共有リンクを作成できませんでした。',
