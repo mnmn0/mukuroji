@@ -3015,6 +3015,42 @@ test('creates the next Cycle and adds Work Items to a Cycle in bulk', async () =
   expect((await removed.json() as PlanningSnapshot).workItemLinks).toEqual([])
 })
 
+test('lets an Enterprise planning.write role change Cycle Work Items in bulk but not create the next Cycle', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient()
+  await planning.create(workspaceId, createCyclePlanningInput('cycle-source', 0), { workItems: [] })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:planning-writer', name: 'Planning writer',
+    permissions: ['planning.read', 'planning.write', 'work-items.read', 'work-items.write', 'projects.read'],
+    guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: [{
+      workspaceId, assignmentId: 'workspace-planning-writer',
+      principalKind: 'member', principalId: 'demo@example.com', roleId: customRole.roleId,
+      scope: { workspaceId, kind: 'workspace' }, source: 'direct',
+    }],
+    customRoles: [customRole],
+  })
+  setTestAppDependencies({ planning, enterpriseIdentity: identity })
+
+  const added = await planningApiRequest('/api/planning/cycles/cycle-source/work-items', 'POST', {
+    action: 'add',
+    workItems: [{ teamId: 'core-team', workItemId: 'onboarding-friction' }],
+    expectedRevision: 1,
+  })
+  expect(added.status).toBe(200)
+  const next = await planningApiRequest('/api/planning/cycles/cycle-source/next', 'POST', {
+    expectedRevision: 2,
+  })
+  expect(next.status).toBe(403)
+})
+
 test('requires Cycle manager permission to create the next Cycle', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   const planning = new InMemoryPlanningClient()
