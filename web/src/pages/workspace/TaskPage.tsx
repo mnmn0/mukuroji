@@ -394,9 +394,9 @@ export function TaskPage() {
     key: planningKey,
     mutate: mutatePlanning,
   } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
-  // New Work Items count working days with the Workspace calendar; a failed read keeps the default.
+  // New Work Items and the Gantt chart use the Workspace calendar; a failed read keeps the default.
   const workspaceCalendar = useWorkspaceCalendarSettings(accessToken, Boolean(user && !currentUserError))
-  const createTaskCalendarPolicy = useMemo(
+  const workspaceCalendarPolicy = useMemo(
     () => createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings),
     [workspaceCalendar.settings],
   )
@@ -2050,7 +2050,7 @@ export function TaskPage() {
       workspaceId={workspaceId}
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}
-      createTaskCalendarPolicy={createTaskCalendarPolicy}
+      workspaceCalendarPolicy={workspaceCalendarPolicy}
       onAuthenticatedApiError={(error) => {
         redirectEnterpriseSessionError(error)
       }}

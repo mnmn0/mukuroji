@@ -467,8 +467,11 @@ export type TaskScreenProps = {
   initialTab?: TaskTab
   /** Whether the inline create form should open on initial render. */
   defaultCreateTaskOpen?: boolean
-  /** Workspace working calendar that new Work Items count working days with. */
-  createTaskCalendarPolicy?: WorkItemScheduleCalendarPolicy
+  /**
+   * Workspace working calendar: new Work Items count working days with it, and the Gantt chart
+   * shades its non-working days.
+   */
+  workspaceCalendarPolicy?: WorkItemScheduleCalendarPolicy
   /** Work Item ID selected by the route when the screen first renders. */
   initialSelectedTaskId?: string
   /** Work Item ID explicitly selected by the current route, including unresolved selections. */
@@ -637,7 +640,7 @@ export function TaskScreen({
   configurationErrorMessage,
   currentWorkspaceMemberKey,
   defaultCreateTaskOpen = false,
-  createTaskCalendarPolicy,
+  workspaceCalendarPolicy,
   detailErrorMessage,
   focusedCommentId,
   focusedRootCommentId,
@@ -3607,7 +3610,7 @@ export function TaskScreen({
                 key={createTaskContextKey(createTaskContext, createTaskEditorGeneration)}
                 assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
-                calendarPolicy={createTaskCalendarPolicy}
+                calendarPolicy={workspaceCalendarPolicy}
                 configuration={createConfiguration}
                 context={createTaskContext}
                 currentUserProjectKey={currentUserProjectKey}
@@ -3716,6 +3719,7 @@ export function TaskScreen({
             >
               <TaskWorkspace
                 activeTab={activeTab}
+                workingCalendar={workspaceCalendarPolicy}
                 scheduleWindowNavigation={scheduleWindowNavigation}
                 allTasks={tasks}
                 assigneeOptions={assigneeOptions}
