@@ -90,6 +90,10 @@ export type AgentRunIntegrityFinding = {
 export type AgentRunIntegrityCounts = {
   /** Team partitions read to the end. */
   partitions: number
+  /** Partitions read a second time because the first read showed a violation. */
+  recheckedPartitions: number
+  /** Violations only one of the two reads showed, which a concurrent write explains; not failures. */
+  unconfirmedFindings: number
   /** Rows read from those partitions. */
   rows: number
   /** Run rows. */
@@ -117,7 +121,7 @@ export type AgentRunIntegrityCounts = {
 /** Result of checking one fully read Team partition. */
 export type AgentRunPartitionCheck = {
   /** Row counts of the partition. */
-  counts: Omit<AgentRunIntegrityCounts, 'partitions'>
+  counts: Omit<AgentRunIntegrityCounts, 'partitions' | 'recheckedPartitions' | 'unconfirmedFindings'>
   /** Violations in the partition. */
   findings: AgentRunIntegrityFinding[]
 }
@@ -691,7 +695,13 @@ class ReadBudget {
         this.stopped = 'page-limit'
         return undefined
       }
-      const page = await read(startKey, this.bounds.pageSize)
+      // Never request more items than the budget has left, so the ceiling bounds what is read.
+      const remaining = this.bounds.maxItems - this.items
+      if (remaining <= 0) {
+        this.stopped = 'item-limit'
+        return undefined
+      }
+      const page = await read(startKey, Math.min(this.bounds.pageSize, remaining))
       this.pages += 1
       const pageItems = page.Items ?? []
       this.items += pageItems.length
@@ -772,6 +782,32 @@ function compareSamples(left: AgentRunIntegritySample, right: AgentRunIntegrityS
 }
 
 /**
+ * Keeps the findings that two reads of the same partition both show, counting duplicates.
+ *
+ * @param first - Findings of the first read.
+ * @param second - Findings of the second read.
+ * @returns Findings of the second read that the first read also showed.
+ */
+function intersectFindings(first: readonly AgentRunIntegrityFinding[], second: readonly AgentRunIntegrityFinding[]): AgentRunIntegrityFinding[] {
+  const key = (finding: AgentRunIntegrityFinding) => JSON.stringify([
+    finding.code,
+    finding.sample.directoryId ?? '',
+    finding.sample.teamId ?? '',
+    finding.sample.workItemId ?? '',
+    finding.sample.runId ?? '',
+    finding.sample.recordKind ?? '',
+  ])
+  const remaining = new Map<string, number>()
+  for (const finding of first) remaining.set(key(finding), (remaining.get(key(finding)) ?? 0) + 1)
+  return second.filter((finding) => {
+    const count = remaining.get(key(finding)) ?? 0
+    if (count === 0) return false
+    remaining.set(key(finding), count - 1)
+    return true
+  })
+}
+
+/**
  * Aggregates findings by code with a bounded, sorted sample list.
  *
  * @param findings - Every finding.
@@ -788,8 +824,9 @@ export function summarizeAgentRunIntegrityFindings(findings: readonly AgentRunIn
 
 /**
  * Checks the Agent Run invariants of every requested or discovered Team partition. Each partition
- * is read with a strongly consistent Query; reaching a ceiling stops the check, and a partition cut
- * short is not judged. The check never writes.
+ * is read with a strongly consistent Query, and a partition that shows a violation is read once more;
+ * only violations both reads show are reported. Reaching a ceiling stops the check, and a partition
+ * cut short is not judged. The check never writes.
  *
  * @param input - Client, table, Teams, ceilings, correlation ID, and start time.
  * @returns Evidence without member IDs or instance hashes.
@@ -801,6 +838,8 @@ export async function runAgentRunsIntegrityCheck(input: AgentRunsIntegrityCheckI
   const findings: AgentRunIntegrityFinding[] = []
   const counts: AgentRunIntegrityCounts = {
     partitions: 0,
+    recheckedPartitions: 0,
+    unconfirmedFindings: 0,
     rows: 0,
     runs: 0,
     activeRuns: 0,
@@ -818,7 +857,7 @@ export async function runAgentRunsIntegrityCheck(input: AgentRunsIntegrityCheckI
     : [...input.teams]
   for (const team of teams ?? []) {
     const partition = createAgentRunPartition(team.directoryId, team.teamId)
-    const rows = await budget.readAll((startKey, limit) => input.client.send(new QueryCommand({
+    const readPartition = () => budget.readAll((startKey, limit) => input.client.send(new QueryCommand({
       TableName: input.tableName,
       KeyConditionExpression: '#directoryTeamId = :partition',
       ExpressionAttributeNames: { '#directoryTeamId': 'directoryTeamId' },
@@ -827,8 +866,21 @@ export async function runAgentRunsIntegrityCheck(input: AgentRunsIntegrityCheckI
       Limit: limit,
       ExclusiveStartKey: startKey,
     })))
-    if (rows === undefined) break
-    const result = checkAgentRunPartition(team, rows)
+    const first = await readPartition()
+    if (first === undefined) break
+    let result = checkAgentRunPartition(team, first)
+    if (result.findings.length > 0) {
+      // Each row is read strongly, but pages and rows are not one snapshot: a run that finishes
+      // between two pages can look unclaimed. Read the partition again and keep only the findings
+      // both reads show, so a concurrent change is not reported as corruption.
+      const second = await readPartition()
+      if (second === undefined) break
+      const recheck = checkAgentRunPartition(team, second)
+      const confirmed = intersectFindings(result.findings, recheck.findings)
+      counts.unconfirmedFindings += result.findings.length + recheck.findings.length - 2 * confirmed.length
+      counts.recheckedPartitions += 1
+      result = { counts: recheck.counts, findings: confirmed }
+    }
     counts.partitions += 1
     for (const name of partitionCountNames) counts[name] += result.counts[name]
     findings.push(...result.findings)

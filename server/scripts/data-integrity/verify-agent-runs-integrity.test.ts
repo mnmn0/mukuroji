@@ -86,9 +86,9 @@ describe('runAgentRunsIntegrityCli', () => {
   })
 
   test('exits 1 when an invariant is broken', async () => {
-    const { dependencies, out } = createDependencies([{
-      Items: [{ directoryTeamId: 'workspace-1#team#core', recordKey: 'unexpected' }],
-    }])
+    const page = { Items: [{ directoryTeamId: 'workspace-1#team#core', recordKey: 'unexpected' }] }
+    // The partition is read again to confirm the violation.
+    const { dependencies, out } = createDependencies([page, page])
     expect(await runAgentRunsIntegrityCli([...baseArguments, '--team', 'workspace-1/core'], dependencies)).toBe(1)
     expect(JSON.parse(out[0] ?? '')).toMatchObject({ status: 'fail', failures: [{ code: 'AGENT_RUN_ROW_UNRECOGNIZED', count: 1 }] })
   })

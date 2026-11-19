@@ -330,9 +330,9 @@ describe('checkAgentRunPartition', () => {
  */
 function createFakeClient(partitions: Record<string, Record<string, unknown>[]>, pageSize = 2) {
   const commands: Array<QueryCommand | ScanCommand> = []
-  const page = (items: Record<string, unknown>[], startKey: Record<string, unknown> | undefined) => {
+  const page = (items: Record<string, unknown>[], startKey: Record<string, unknown> | undefined, limit: number | undefined) => {
     const offset = typeof startKey?.offset === 'number' ? startKey.offset : 0
-    const next = offset + pageSize
+    const next = offset + Math.min(pageSize, limit ?? pageSize)
     return { Items: items.slice(offset, next), ...(next < items.length ? { LastEvaluatedKey: { offset: next } } : {}) }
   }
   const client: AgentRunIntegrityClient = {
@@ -340,10 +340,10 @@ function createFakeClient(partitions: Record<string, Record<string, unknown>[]>,
       commands.push(command)
       if (command instanceof ScanCommand) {
         const all = Object.entries(partitions).flatMap(([key, rows]) => rows.map(() => ({ directoryTeamId: key })))
-        return page(all, command.input.ExclusiveStartKey)
+        return page(all, command.input.ExclusiveStartKey, command.input.Limit)
       }
       const key = command.input.ExpressionAttributeValues?.[':partition']
-      return page(typeof key === 'string' ? partitions[key] ?? [] : [], command.input.ExclusiveStartKey)
+      return page(typeof key === 'string' ? partitions[key] ?? [] : [], command.input.ExclusiveStartKey, command.input.Limit)
     },
   }
   return { client, commands }
@@ -405,6 +405,58 @@ describe('runAgentRunsIntegrityCheck', () => {
     expect(evidence.incompleteReason).toBe('page-limit')
     expect(evidence.counts.partitions).toBe(0)
     expect(evidence.failures).toEqual([])
+  })
+
+  test('reports a violation only when a second read of the partition shows it too', async () => {
+    const healthy = healthyRows()
+    const unclaimed = healthy.filter((row) => row.recordKey !== 'agent-run-claim#task-1')
+    let reads = 0
+    const client: AgentRunIntegrityClient = {
+      // The first read sees a claim missing, as a concurrent finish between pages can make it look.
+      send: async () => ({ Items: reads++ === 0 ? unclaimed : healthy }),
+    }
+    const evidence = await runAgentRunsIntegrityCheck({
+      client,
+      tableName: 'agent-runs',
+      teams: [team],
+      bounds: { pageSize: 100, maxPages: 10, maxItems: 1000 },
+      correlationId: 'corr-7',
+      now,
+    })
+    expect(evidence.status).toBe('pass')
+    expect(evidence.failures).toEqual([])
+    expect(evidence.counts).toMatchObject({ partitions: 1, recheckedPartitions: 1, unconfirmedFindings: 1, claims: 1 })
+  })
+
+  test('confirms a persistent violation with a second read', async () => {
+    const rows = healthyRows().filter((row) => row.recordKey !== 'agent-run-claim#task-1')
+    const { client, commands } = createFakeClient({ [partition]: rows }, 100)
+    const evidence = await runAgentRunsIntegrityCheck({
+      client,
+      tableName: 'agent-runs',
+      teams: [team],
+      bounds: { pageSize: 100, maxPages: 10, maxItems: 1000 },
+      correlationId: 'corr-8',
+      now,
+    })
+    expect(evidence.status).toBe('fail')
+    expect(evidence.counts).toMatchObject({ recheckedPartitions: 1, unconfirmedFindings: 0 })
+    expect(commands).toHaveLength(2)
+  })
+
+  test('never requests more items than the item budget has left', async () => {
+    const { client, commands } = createFakeClient({ [partition]: healthyRows() }, 1000)
+    const evidence = await runAgentRunsIntegrityCheck({
+      client,
+      tableName: 'agent-runs',
+      teams: [team],
+      bounds: { pageSize: 1000, maxPages: 1, maxItems: 1 },
+      correlationId: 'corr-9',
+      now,
+    })
+    expect(evidence.status).toBe('incomplete')
+    expect(evidence.reads.items).toBe(1)
+    expect(commands.map((command) => command.input.Limit)).toEqual([1])
   })
 
   test('stops when a page repeats its continuation key', async () => {

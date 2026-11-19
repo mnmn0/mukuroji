@@ -790,6 +790,10 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
 
 `bun run --silent agent-runs:integrity -- check` は `AgentRunsTable` を読むだけの検査で、修復はしない。
 Team partition ごとに強整合の Query を上限付きで読み、partition を最後まで読めた Team だけを判定する。
+各 page の Limit は残りの item 上限を超えない。強整合でも複数 page・複数 row は 1 つの snapshot ではなく、
+page の間に Run が終わると claim のない Run に見えることがある。そのため違反が見つかった partition は
+もう一度読み、2 回とも同じ違反が出たものだけを failure にする。片方だけの違反は並行書き込みとして
+`unconfirmedFindings` に数え、失敗にしない。
 `--team <workspaceId>/<teamId>` を省くと、key だけを射影した強整合の Scan で Team partition を列挙する。
 列挙の読み取りも同じ上限に数える。
 
