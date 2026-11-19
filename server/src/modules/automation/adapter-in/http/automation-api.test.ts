@@ -2637,6 +2637,7 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
   const placementInputs: Array<Record<string, unknown>> = []
   let placementAttempts = 0
   let movedByUser = false
+  const placementAuditKeys: string[] = []
   const currentRanks = new Map([
     ['application_project_wbs_wbs_0', 'm'],
     ['application_project_wbs_wbs_1', 'q'],
@@ -2693,7 +2694,10 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
           graphRevision: 0,
         }
       },
-      async replaceParent(_workspaceId, _teamId, input) {
+      async replaceParent(workspaceId, _teamId, input, _conditionChecks, audit) {
+        expect(audit?.actorMemberKey).toBe('demo@example.com')
+        expect(audit?.context.workspaceId).toBe(workspaceId)
+        placementAuditKeys.push(String(audit?.context.idempotencyKeyHash))
         placementAttempts += 1
         if (placementAttempts === 1) {
           throw new WorkItemConfigurationError(409, 'WorkItemRelationGraphConflict', 'Work Item relations changed.')
@@ -2799,6 +2803,8 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
     },
   ])
   expect(createdInputs).toHaveLength(4)
+  // Audit event IDs come from the idempotency key, so every placement needs its own.
+  expect(new Set(placementAuditKeys).size).toBe(placementAuditKeys.length)
   const topLevelStart = 'k'
   expect(placementInputs).toEqual([
     {

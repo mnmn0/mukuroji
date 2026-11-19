@@ -241,7 +241,9 @@ export async function createProjectTemplateWorkItems(
     const storedParentId = storedParentIds.get(childId)
     if (storedParentId !== undefined && storedParentId !== parentId) continue
     graphRevision = await placeTemplateWorkItem(
-      directoryId,
+      c,
+      principal,
+      application,
       teamId,
       childId,
       parentId,
@@ -333,7 +335,9 @@ async function createTemplateWorkItemRanks(
  * change is not retried here; it is reported as retryable so the application returns to pending
  * and the client's retry with the same Idempotency-Key resumes.
  *
- * @param directoryId - Workspace directory identifier.
+ * @param c - Hono request context used for audit metadata.
+ * @param principal - Workspace administrator applying the template; recorded as the actor.
+ * @param application - Running template application, recorded in the audit context.
  * @param teamId - Team that owns both Work Items.
  * @param childId - Work Item to place.
  * @param parentId - Parent Work Item ID, or undefined for a top-level item.
@@ -343,7 +347,9 @@ async function createTemplateWorkItemRanks(
  * @returns The graph revision after the change.
  */
 async function placeTemplateWorkItem(
-  directoryId: string,
+  c: Context,
+  principal: WorkspacePrincipal,
+  application: AutomationTemplateApplication,
   teamId: string,
   childId: string,
   parentId: string | undefined,
@@ -351,6 +357,7 @@ async function placeTemplateWorkItem(
   graphRevision: number,
   configuration: Awaited<ReturnType<typeof workItemDependencies.workItemConfigurations.getTeamConfiguration>>,
 ): Promise<number> {
+  const directoryId = principal.directoryId
   const [child, parent] = await Promise.all([
     readTemplateWorkItem(directoryId, teamId, childId),
     parentId ? readTemplateWorkItem(directoryId, teamId, parentId) : undefined,
@@ -387,6 +394,19 @@ async function placeTemplateWorkItem(
         teamId,
         configuration,
       ),
+      {
+        context: createApiMutationContext(c, principal, {
+          teamId,
+          applicationId: application.id,
+          issueId: childId,
+          parentWorkItemId: parentId ?? null,
+          ...(hierarchyRank === undefined ? {} : { hierarchyRank }),
+        },
+        // Audit event IDs come from the idempotency key, so each placement needs its own. The
+        // revisions change with every committed placement, so a later write never reuses a key.
+        `${childId}_place_${graphRevision}_${child.revision}`),
+        actorMemberKey: principal.userKey,
+      },
     )
     return response.graphRevision
   } catch (error) {
