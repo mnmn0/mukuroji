@@ -31,6 +31,7 @@ import type { WorkspaceMember } from '../../workspace/api'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
+import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
 import {
   resolveRecordedRemainingEffortMinutes,
@@ -1211,6 +1212,7 @@ function IssueDetailContent({
             <IssuePriorityBadge priority={issue.priority} t={t} />
           </div>
         </div>
+        <TaskHandoffPanel configuration={configuration} includeDescription={hasDescriptionSection} t={t} task={issue} />
         <div className="grid min-w-0 gap-4">
           {!hasOverviewSection ? renderWorkItemTypeControl() : null}
           {renderedDetailSectionOrder.map((section) => (
