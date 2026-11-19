@@ -27,7 +27,9 @@ assignment の和集合と `workspace.read` だけで評価する（`includeWork
 - 優先関係は既存の規則に合わせる。個人 assignment を持つ member は legacy role ではなく assignment だけで
   評価する。和集合にはしない。
 - この規則で起きる降格・昇格を防ぐため、自分自身、owner、owner 以外が操作する admin、guest への
-  guest 不可 role を API が拒否する。解除にも同じ制限をかける。
+  guest 不可 role、owner 以外による管理系 permission を含む role の付与を API が拒否する。解除にも
+  同じ制限をかける。Direct assignment を持つ member を owner / admin に変える操作も拒否し、guest に
+  なった member の direct assignment は guest 可の role だけを評価する。
 - Built-in role に `workspace:portfolio-viewer`（全 Team・Project の読み取り）と
   `workspace:auditor`（`audit.read`）を加える。Guest には割り当てられず、assignment 後に guest へ
   変わった member では評価時に無視する。

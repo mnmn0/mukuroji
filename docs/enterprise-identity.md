@@ -258,7 +258,7 @@ Built-in role には Workspace scope の読み取り専用 role として、全 
 読める `workspace:portfolio-viewer`（`workspace.read`、`members.read`、`teams.read`、`projects.read`、
 `work-items.read`、`documents.read`、`files.read`、`requests.read`、`planning.read`）と、監査 log を
 読める `workspace:auditor`（`workspace.read`、`members.read`、`audit.read`）があります。どちらも
-guest には割り当てられず、guest に変わった member の assignment は評価時に無視します。
+guest には割り当てられず、guest に変わった member では directory mapping 由来でも評価時に無視します。
 
 Member 個人への direct assignment は `POST /api/enterprise/security/role-assignments`
 （`memberKey`、`roleId`、`scopeType`、`scopeId`、複数 Team に属する Project では `scopeParentId`）で作り、
@@ -275,8 +275,15 @@ Project membership を使わず、assignment の和集合（と `workspace.read`
 - caller が owner、system administrator、break-glass のいずれでもない場合の admin
   （legacy では admin の変更は owner だけが行える）
 - guest への guest 不可 role
+- caller が owner、system administrator、break-glass のいずれでもない場合の、`workspace.manage`、
+  `members.manage`、`identity.manage`、`security.manage`、`service-accounts.manage`、`audit.export`
+  のいずれかを含む role（admin の任命と同じく owner だけが行える）
 
 解除しても同じ制限を適用します（最後の assignment を外すと legacy role に戻るため）。
+Direct assignment を持つ member を owner / admin に変える `PATCH /api/workspace/members/:memberKey` は
+`409 WorkspaceMemberRoleAssignmentsPresent` で拒否します。Guest になった member の direct assignment は、
+評価時に guest 可の role（`workspace:guest`、`project:viewer`、`guestAssignable` の custom role）だけを
+使います。
 
 Group mapping CRUD は `/api/enterprise/security/group-mappings`、custom role CRUD は
 `/api/enterprise/security/roles` 以下で提供します。Role 更新・削除前には assignment impact を
