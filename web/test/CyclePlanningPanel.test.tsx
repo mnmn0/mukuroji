@@ -126,7 +126,7 @@ describe('submitCycleWorkItemBatch', () => {
   /** Creates a request that stays pending until the test settles it. */
   function createDeferredRequest() {
     let resolve = (): void => undefined
-    let reject = (_error: unknown): void => undefined
+    let reject: (error: unknown) => void = () => undefined
     const promise = new Promise<void>((onResolve, onReject) => {
       resolve = () => onResolve()
       reject = onReject
