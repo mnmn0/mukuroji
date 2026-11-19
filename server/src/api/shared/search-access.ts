@@ -593,10 +593,13 @@ export async function syncDirectorySearchDocumentBestEffort<Source extends Direc
     }
     const current = source.archived ? source : await readSource()
     if (!current?.archived) return
-    // An archive always advances the revision, so the fence is a positive integer.
-    await search.deleteDocument(workspaceId, entityType, entityId, {
-      sourceRevision: current.sourceRevision,
-    })
+    // An archive advances the revision; a row archived before revisions were counted has none.
+    await search.deleteDocument(
+      workspaceId,
+      entityType,
+      entityId,
+      current.sourceRevision > 0 ? { sourceRevision: current.sourceRevision } : undefined,
+    )
   } catch (error) {
     console.error(`Workspace search projection failed after ${operation}.`, error)
   }
