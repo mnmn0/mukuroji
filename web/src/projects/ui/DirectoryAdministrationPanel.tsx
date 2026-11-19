@@ -433,7 +433,7 @@ export function DirectoryAdministrationPanel({
                   >
                     <div className="min-w-0">
                       <p className="truncate text-sm">{name}</p>
-                      <p className="truncate text-xs text-[var(--workbench-muted)]">
+                      <p className="text-xs text-[var(--workbench-muted)]">
                         {entry.kind === 'team'
                           ? t('projects.administration.archivedTeam')
                           : t('projects.administration.archivedProject').replace(
