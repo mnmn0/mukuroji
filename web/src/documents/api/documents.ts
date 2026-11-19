@@ -179,17 +179,56 @@ export async function getNextDocumentCollectionPage(
   }
 }
 
+/** Maximum tree pages read when listing one Project's Documents. */
+const PROJECT_DOCUMENT_PAGE_LIMIT = 5
+
+/**
+ * Lists the active Documents in one Project scope that the viewer can read.
+ *
+ * The tree API filters by scope after reading each page, so a page can be
+ * empty while later pages still match; this reads a bounded number of pages.
+ *
+ * @param accessToken - Workspace API token.
+ * @param projectId - Project whose Documents are listed.
+ * @param signal - Optional abort signal.
+ * @returns Permission-filtered Documents in the Project scope.
+ */
+export async function getProjectDocuments(
+  accessToken: string,
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<DocumentSummary[]> {
+  const documents: DocumentSummary[] = []
+  let cursor: string | undefined
+  for (let page = 0; page < PROJECT_DOCUMENT_PAGE_LIMIT; page += 1) {
+    const response = await getDocumentTreePage(accessToken, {
+      cursor,
+      projectId,
+      signal,
+    })
+    documents.push(...response.nodes)
+    if (!response.nextCursor) break
+    cursor = response.nextCursor
+  }
+  return deduplicateDocuments(documents)
+}
+
 async function getDocumentTreePage(
   accessToken: string,
   options: {
     archived?: boolean
     cursor?: string
+    projectId?: string
     signal?: AbortSignal
   },
 ): Promise<DocumentTreeResponse> {
   const query = new URLSearchParams()
   if (options.archived) query.set('archived', 'true')
   if (options.cursor) query.set('cursor', options.cursor)
+  if (options.projectId) {
+    query.set('scope', 'project')
+    query.set('projectId', options.projectId)
+  }
   const suffix = query.size > 0 ? `?${query.toString()}` : ''
   const value = await requestJson(
     `${documentsApiBaseUrl}/documents${suffix}`,
