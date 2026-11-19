@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import type { Page, Route } from '@playwright/test'
+import type { BrowserContext, Page, Route } from '@playwright/test'
 import type { AuthSession } from '../src/auth/session'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 
@@ -67,7 +67,7 @@ async function openProtectedRoute(
  * @param options - Failure injection options for current-user and Work Item APIs.
  */
 async function mockWorkspaceSessionApis(
-  page: Page,
+  page: Page | BrowserContext,
   options: WorkspaceSessionMockOptions = {},
 ) {
   await page.route('**/api/auth/me', async (route) => {
@@ -344,4 +344,62 @@ test('guarded Workspace mutation MFA failure clears the session and replaces his
     session: null,
   })
   await expectProtectedHistoryEntryReplaced(page)
+})
+
+test('a session-only sign-in keeps its account when another tab remembers a different account', async ({
+  context,
+  page,
+}) => {
+  const tabAccountSession = {
+    ...activeAuthSession,
+    accessToken: 'tab-only-account-access-token',
+    remember: false,
+  } satisfies AuthSession
+  const rememberedAccountSession = {
+    ...activeAuthSession,
+    accessToken: 'remembered-account-access-token',
+  } satisfies AuthSession
+  await mockWorkspaceSessionApis(context)
+  // The remembered account's session has ended on the server.
+  await context.route('**/api/auth/me', async (route) => {
+    if (route.request().headers().authorization === `Bearer ${rememberedAccountSession.accessToken}`) {
+      await fulfillWorkspaceApiFailure(route, { status: 401 })
+      return
+    }
+    await route.fallback()
+  })
+  const tabAuthorizations: string[] = []
+  page.on('request', (request) => {
+    const authorization = request.headers().authorization
+    if (authorization && new URL(request.url()).pathname.startsWith('/api/')) {
+      tabAuthorizations.push(authorization)
+    }
+  })
+
+  await page.goto('/support')
+  await page.evaluate((storedSession) => {
+    window.localStorage.setItem('mukuroji.locale', 'ja')
+    window.sessionStorage.setItem('mukuroji.auth', JSON.stringify(storedSession))
+  }, tabAccountSession)
+  const otherTab = await context.newPage()
+  await otherTab.goto('/support')
+  await otherTab.evaluate((storedSession) => {
+    window.localStorage.setItem('mukuroji.auth', JSON.stringify(storedSession))
+  }, rememberedAccountSession)
+
+  await page.goto('/dashboard')
+  await expect(page.getByRole('heading', { level: 1, name: 'ダッシュボード' })).toBeVisible()
+  expect(tabAuthorizations.length).toBeGreaterThan(0)
+  expect(new Set(tabAuthorizations)).toEqual(new Set([`Bearer ${tabAccountSession.accessToken}`]))
+
+  // The other tab's 401 signs out only the remembered account.
+  await otherTab.goto('/help')
+  await expect(otherTab).toHaveURL('/login?returnTo=%2Fhelp')
+  await expect(readStoredAuthSession(page)).resolves.toEqual({
+    local: null,
+    session: JSON.stringify(tabAccountSession),
+  })
+  await page.reload()
+  await expect(page).toHaveURL('/dashboard')
+  await expect(page.getByRole('heading', { level: 1, name: 'ダッシュボード' })).toBeVisible()
 })
