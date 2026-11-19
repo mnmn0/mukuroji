@@ -29,7 +29,7 @@ const tenProjectEntities: PlanningEntity[] = planningSnapshotFixture.entities.fl
 })
 
 const meta = {
-  title: 'Planning/CrossProjectTimelineChart',
+  title: 'Application/Planning/CrossProjectTimelineChart',
   component: CrossProjectTimelineChart,
   args: {
     criticalEntityIds: new Set(planningSnapshotFixture.criticalPath.entityIds),
@@ -53,6 +53,7 @@ const meta = {
 
 export default meta
 
+/** Story object bound to the cross-Project timeline chart metadata. */
 type Story = StoryObj<typeof meta>
 
 /** Fixture snapshot with one Project, dependencies, and baseline drift. */
