@@ -26,5 +26,6 @@ Closes #
 ## レビュー
 
 - [ ] Codex（`chatgpt-codex-connector[bot]`）の 👍 を最新 head で確認した
-- [ ] 認証・権限・token・入力検証に関わる変更なので CodeRabbit のレビューを依頼する
+- [ ] `@coderabbitai review` で CodeRabbit を開始し、最新 head で actionable comment なしの `Review finished` と `CodeRabbit` check の成功を確認した
+- [ ] 適用対象の CI workflow がすべて成功した
 - [ ] `AGENTS.md`・`.github/workflows/`・review Skill を変える（maintainer の承認が必要）
