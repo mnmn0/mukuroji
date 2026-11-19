@@ -72,7 +72,7 @@ function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
  * @returns The running process.
  */
 function startDevProcess(definition: DevProcessDefinition): RunningDevProcess {
-  const child = spawn('bun', ['run', definition.script], {
+  const child = spawn(process.execPath, ['run', definition.script], {
     cwd: repositoryRoot,
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -122,10 +122,14 @@ async function main(): Promise<number> {
   let stopping = false
   let exitCode = 0
   /**
-   * Stops every process group once, then kills groups that outlive the grace period.
+   * Stops every process group, then kills groups that outlive the grace period.
+   * A second request, such as pressing Ctrl+C again, kills the remaining groups at once.
    */
   const stopAll = (): void => {
-    if (stopping) return
+    if (stopping) {
+      for (const entry of running) signalGroup(entry.child, 'SIGKILL')
+      return
+    }
     stopping = true
     for (const entry of running) signalGroup(entry.child, 'SIGTERM')
     setTimeout(() => {

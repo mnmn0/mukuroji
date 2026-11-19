@@ -128,8 +128,8 @@ export function planLocalEnvironment(
 /**
  * Creates or completes the root `.env` and the `.floci/generated` directory for local development.
  *
- * The `.env` file is written owner-only (0600). The generated directory is created writable for the
- * Floci container user, matching the CI setup; it holds no secrets.
+ * The `.env` file is written owner-only (0600). A missing generated directory is created writable for the
+ * Floci container user with the sticky bit set; it holds no secrets. An existing directory is left as is.
  *
  * @param repositoryRoot - The repository root directory.
  * @returns The generated secret names.
@@ -139,13 +139,17 @@ export function setupLocalEnvironment(repositoryRoot: string): readonly string[]
   const template = readFileSync(join(repositoryRoot, '.env.example'), 'utf8')
   const existing = existsSync(envPath) ? readFileSync(envPath, 'utf8') : undefined
   const plan = planLocalEnvironment(existing, template)
+  // Restrict an existing file before writing so generated secrets are never readable by others.
+  if (existing !== undefined) chmodSync(envPath, 0o600)
   if (plan.content !== undefined) writeFileSync(envPath, plan.content, { mode: 0o600 })
   chmodSync(envPath, 0o600)
 
   const generatedDirectory = join(repositoryRoot, '.floci', 'generated')
   if (!existsSync(generatedDirectory)) {
     mkdirSync(generatedDirectory, { recursive: true })
-    chmodSync(generatedDirectory, 0o777)
+    // The Floci container runs as uid 1001, so on native Linux the bind mount must be writable by others.
+    // The sticky bit stops other host users from replacing files that Floci wrote.
+    chmodSync(generatedDirectory, 0o1777)
   }
   return plan.generated
 }

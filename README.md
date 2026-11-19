@@ -48,7 +48,8 @@ bun run dev
 `bun run dev` は次を順に行います。
 
 1. `.env.example` を元に git 管理外の `.env` を作り、空の secret を生成して `chmod 600` にする
-   （`bun run local:setup` と同じ。既存の値は上書きしません）
+   （`bun run local:setup` と同じ。既存の値は上書きしません）。`.floci/generated` がなければ、
+   Floci コンテナ（uid 1001）が native Linux でも書き込めるよう sticky bit 付きの `1777` で作ります
 2. `bun run floci:up` と同じ手順で Floci を起動し、ready hook の完了を待つ
 3. `server:dev`・`workers:dev`・`web:dev` をまとめて起動し、出力に `[server]` などの名前を付ける
 
