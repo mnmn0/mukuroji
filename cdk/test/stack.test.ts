@@ -14,3 +14,4 @@ import './web-distribution.suite';
 import './user-identity.suite';
 import './optional-modules.suite';
 import './stateful-resource-guards.suite';
+import './cost-controls.suite';
