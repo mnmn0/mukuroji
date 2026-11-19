@@ -2,6 +2,7 @@ import type {
   CreatePlanningEntityInput,
   PlanningDependency,
   PlanningEntity,
+  PlanningEntityPatch,
   PlanningEntityStatus,
   PlanningEntityType,
   PlanningGoalFramework,
@@ -63,6 +64,11 @@ import {
   type PlanningArchiveController,
   type PlanningArchiveLabels,
 } from './PlanningArchivePanel'
+import {
+  PlanningEntityEditor,
+  type PlanningEntityEditorLabels,
+} from './PlanningEntityEditor'
+import { collectPlanningOwnerCandidates } from '../model/entityEditor'
 import {
   PlanningLatestUpdateSummary,
   PlanningUpdateDetailPane,
@@ -197,6 +203,8 @@ export type PlanningLabels = PlanningUpdateLabels & {
   capacityFull: string
   /** Archive 済みの計画の一覧と復元の文言です。 */
   archivedPlans: PlanningArchiveLabels
+  /** 選択中の entity を編集する form の文言です。 */
+  entityEditor: PlanningEntityEditorLabels
   /** Portfolio section の見出しです。 */
   portfolioTitle: string
   /** Portfolio section の説明です。 */
@@ -380,6 +388,11 @@ export type PlanningScreenProps = {
     entity: PlanningEntity,
     target: PlanningMoveSelection,
   ) => void | Promise<void>
+  /** 選択中の entity の title・owner・status・health・risk・progress・日付を保存する callback です。 */
+  onUpdateEntity?: (
+    entity: PlanningEntity,
+    patch: PlanningEntityPatch,
+  ) => void | Promise<void>
   /** Project または Initiative の recurring update schedule を保存する callback です。 */
   onSaveUpdateCadence?: (
     target: PlanningUpdateTargetView,
@@ -460,6 +473,7 @@ export function PlanningScreen({
   onDeleteWorkItemLink,
   onDuplicateEntity,
   onMoveEntity,
+  onUpdateEntity,
   onLoadMoreUpdateHistory,
   onOpenMilestone,
   onOpenProject,
@@ -735,6 +749,18 @@ export function PlanningScreen({
                   onSelectEntity={handleSelectEntity}
                   snapshot={snapshot}
                   updateTargetDetails={updateTargetDetails}
+                />
+              ) : null}
+              {selectedEntity && selectedEntity.type !== 'cycle' ? (
+                <PlanningEntityEditor
+                  disabled={isAiOperationPending}
+                  entity={selectedEntity}
+                  key={`planning-entity-editor:${selectedEntity.id}:${selectedEntity.updatedAt}`}
+                  labels={labels.entityEditor}
+                  ownerCandidates={collectPlanningOwnerCandidates(activeEntities)}
+                  onSave={onUpdateEntity && (canManageEntity?.(selectedEntity) ?? true)
+                    ? onUpdateEntity
+                    : undefined}
                 />
               ) : null}
               <CreateEntityPanel
