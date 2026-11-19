@@ -111,17 +111,14 @@ import {
   DocumentEditor,
   DocumentReadOnlyContent,
 } from './ui/DocumentEditor'
-import {
-  DocumentHome,
-  type BuiltInTemplateCreateOptions,
-} from './ui/DocumentHome'
+import { DocumentHome } from './ui/DocumentHome'
 import { ChecklistWorkItemDialog } from './ui/ChecklistWorkItemDialog'
 import { useChecklistWorkItemCreation } from './mutations/useChecklistWorkItemCreation'
-import {
-  buildBuiltInDocumentTemplate,
-  formatLocalCalendarDate,
-  type BuiltInDocumentTemplateKey,
+import type {
+  BuiltInDocumentTemplateKey,
+  BuiltInTemplateCreateOptions,
 } from './model/builtInTemplates'
+import { useBuiltInTemplateDocumentCreation } from './mutations/useBuiltInTemplateDocumentCreation'
 import {
   createChecklistItemWorkItemRelation,
   type ChecklistItemSource,
@@ -144,7 +141,6 @@ import {
   changesDocumentBacklinks,
   createDocumentMutationQueue,
   createDefaultDocumentTitle,
-  createDocumentClientId,
   createDocumentOperationId,
   deduplicateDocumentRelationTargets,
   DocumentOperationChunkSaveError,
@@ -490,12 +486,6 @@ export function DocumentPage() {
   const [activeAnchorId, setActiveAnchorId] = useState<string>()
   const activeAnchorRef = useRef(activeAnchorId)
   const [mutationRunner] = useState(createMutationRequestRunner)
-  const builtInTemplateContentRef = useRef<{
-    /** Template choice and substituted values the content was built from. */
-    fingerprint: string
-    /** Title and blocks sent with the create request. */
-    content: ReturnType<typeof buildBuiltInDocumentTemplate>
-  } | undefined>(undefined)
   const pendingPublicShareCreateRef = useRef<
     PendingPublicShareCreateRequest | undefined
   >(undefined)
@@ -577,6 +567,11 @@ export function DocumentPage() {
     accessToken,
     Boolean(user && !currentUserError),
   )
+  const builtInTemplateCreation = useBuiltInTemplateDocumentCreation({
+    accessToken,
+    locale,
+    onCreated: () => mutateDocuments(),
+  })
   const {
     data: selectedDocument,
     error: detailError,
@@ -925,8 +920,7 @@ export function DocumentPage() {
   }
 
   /**
-   * Creates a page from a bundled template with today's date, the chosen
-   * Project, and the participants substituted.
+   * Creates a page from a bundled template and opens it.
    *
    * @param key - Bundled template to use.
    * @param options - Project and participants chosen on the home.
@@ -935,49 +929,11 @@ export function DocumentPage() {
     key: BuiltInDocumentTemplateKey,
     options: BuiltInTemplateCreateOptions,
   ) => {
-    if (!accessToken) return
-    const date = formatLocalCalendarDate(new Date())
-    const fingerprint = JSON.stringify([
+    const createdId = await builtInTemplateCreation.createFromTemplate(
       key,
-      locale,
-      date,
-      options.projectId ?? '',
-      options.projectName ?? '',
-      options.participants,
-    ])
-    const retained = builtInTemplateContentRef.current
-    // A retry after a lost response must resend the same blocks, because the
-    // server fingerprints the create body and the block IDs are random.
-    const content =
-      retained?.fingerprint === fingerprint
-        ? retained.content
-        : buildBuiltInDocumentTemplate(
-            key,
-            locale,
-            {
-              date,
-              participants: options.participants,
-              projectName: options.projectName,
-            },
-            createDocumentClientId,
-          )
-    builtInTemplateContentRef.current = { content, fingerprint }
-    const input: CreateDocumentInput = {
-      blocks: content.blocks,
-      kind: 'page',
-      scope: options.projectId
-        ? { projectId: options.projectId, type: 'project' }
-        : { type: 'workspace' },
-      title: content.title,
-    }
-    const created = await mutationRunner.run(
-      `document:create:built-in:${key}`,
-      fingerprint,
-      (context) => createDocument(accessToken, input, context),
+      options,
     )
-    builtInTemplateContentRef.current = undefined
-    await mutateDocuments()
-    navigate(createDocumentPath(created.id))
+    if (createdId) navigate(createDocumentPath(createdId))
   }
 
   const handleUpdateDocument = async (

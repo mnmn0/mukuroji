@@ -7,19 +7,8 @@ import {
   builtInDocumentTemplateKeys,
   parseTemplateParticipants,
   type BuiltInDocumentTemplateKey,
+  type BuiltInTemplateCreateOptions,
 } from '../model/builtInTemplates'
-
-/**
- * Options chosen on the Documents home for a page created from a bundled template.
- */
-export type BuiltInTemplateCreateOptions = {
-  /** Project that owns the new page; omission creates it in the Workspace. */
-  projectId?: string
-  /** Display name of the chosen Project, substituted into the template. */
-  projectName?: string
-  /** Participant names substituted into the template. */
-  participants: string[]
-}
 
 /**
  * Documents home の props です。

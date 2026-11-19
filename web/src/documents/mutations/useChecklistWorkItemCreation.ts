@@ -60,13 +60,16 @@ export function useChecklistWorkItemCreation({
     input: ChecklistWorkItemInput,
   ): Promise<string> => {
     if (!accessToken) throw new Error(errorMessage)
+    // A configuration failure stops the create, so a transient error cannot
+    // turn a supported backlog capture into a required-field rejection.
+    // Submitting again reads the configuration again.
     const configuration = await getWorkItemConfiguration(accessToken, {
       kind: 'team',
       teamId: input.teamId,
-    }).catch(() => undefined)
-    const workItemTypeId = configuration
-      ? resolveCreatableWorkItemTypeId(resolveWorkItemTypes(configuration))
-      : undefined
+    })
+    const workItemTypeId = resolveCreatableWorkItemTypeId(
+      resolveWorkItemTypes(configuration),
+    )
     const backlogStatus = resolveCreateWorkflowStatuses(
       configuration,
       workItemTypeId,
@@ -79,7 +82,7 @@ export function useChecklistWorkItemCreation({
         ? createDefaultDueDateWorkItemSchedule(input.dueDate)
         : createDefaultUnscheduledWorkItemSchedule(),
       title: input.title,
-      ...(workItemTypeId ? { workItemTypeId } : {}),
+      workItemTypeId,
       ...(backlogStatus
         ? { quickCapture: true, workflowStatusId: backlogStatus.id }
         : {}),
