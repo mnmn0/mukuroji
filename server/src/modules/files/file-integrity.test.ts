@@ -165,13 +165,29 @@ describe('file metadata integrity references', () => {
     expect(JSON.stringify(result)).not.toContain('other-issue-private')
   })
 
-  test('rejects an object key that does not bind workspace, file, version, and name', () => {
+  test('rejects an object key that does not bind workspace, file, and version', () => {
     const result = checkFileMetadataIntegrity({
       item: createFileItem({}, { objectKey: 'workspaces/other/private-object' }),
       objects: [],
     })
 
     expect(result.failureCodes).toEqual(['FILE_METADATA_REFERENCE_MISSING'])
+  })
+
+  test('accepts the name-free object key used for new versions', () => {
+    const objectKey = 'workspaces/workspace-private/files/file-private/version-private'
+    const result = checkFileMetadataIntegrity({
+      item: createFileItem({}, { objectKey }),
+      objects: [createObjectObservation({ objectKey })],
+    })
+
+    expect(result.failureCodes).toEqual([])
+  })
+
+  test('rejects a legacy object key whose name segment differs from the version name', () => {
+    expect(() => parseFileIntegrityReferences(createFileItem({}, {
+      objectKey: 'workspaces/workspace-private/files/file-private/version-private/other.pdf',
+    }))).toThrow(FileIntegrityFailure)
   })
 
   test('accepts an unverified pending upload without requiring an object observation', () => {
