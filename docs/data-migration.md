@@ -2,7 +2,7 @@
 
 保存済み row の schema version を上げる変更（例: 見積の統一、Project profile、calendar policy の参照化）が、
 本番 data を消さずに移行するための契約です。設計判断は
-[ADR 0011](adr/0011-data-migration-runner.md) にあります。
+[ADR 0012](adr/0012-data-migration-runner.md) にあります。
 
 この文書が定めるのは「1 つの table の、1 つの entity の row を、schema version `N` から `N + 1` へ
 移す」migration です。table の新設・key 設計の変更・別 table への copy は対象外で、それぞれ ADR を伴う

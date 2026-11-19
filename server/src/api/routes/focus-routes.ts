@@ -46,6 +46,7 @@ import {
   createFocusPolicyRevisionConditionCheck,
   createFocusQueue,
   createFocusWorkItemStateKey as createFocusWorkItemKey,
+  focusQueueUsesApprovalSummary,
   isFocusSlaAnchor,
   normalizeFocusSlaWorkItemTypeIds,
   resolveFocusEffectivePolicies,
@@ -1700,6 +1701,9 @@ function canReadFocusScopedSource(
 /**
  * Attaches approval aggregates only to Work Items whose Files source is readable.
  *
+ * Summaries are read only for Work Items whose aggregate the queue can project (active Work
+ * Items owned by the viewer), so one Focus read does not BatchGet every visible Work Item.
+ *
  * @param principal - Current authenticated Workspace principal.
  * @param workItems - Current ACL-filtered canonical Work Items.
  * @returns Detached Work Items with permission-safe approval summaries.
@@ -1717,6 +1721,7 @@ async function hydrateFocusApprovalSummaries(
     return sanitizedWorkItems
   }
   const scopes: FileProofingScope[] = sanitizedWorkItems
+    .filter((workItem) => focusQueueUsesApprovalSummary(workItem, principal.userKey))
     .filter((workItem) => canReadFocusScopedSource(
       principal,
       'files.read',
