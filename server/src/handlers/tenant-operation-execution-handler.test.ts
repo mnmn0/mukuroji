@@ -26,7 +26,6 @@ test('starts durable tenant operations only from DynamoDB stream records', async
         inputs.push(input)
       },
       async reconcileAuditRetention() {},
-      async reconcileAuditEventRetention() {},
     }),
     enabledRuntimeControl,
   )
@@ -68,7 +67,6 @@ test('rejects direct commands before constructing the stream processor', async (
       return {
         async execute() {},
         async reconcileAuditRetention() {},
-        async reconcileAuditEventRetention() {},
       }
     },
     enabledRuntimeControl,

@@ -10,6 +10,14 @@ import { createLazySingleton } from '../app/composition/lazy-singleton'
 import {
   createRuntimeControlGuardedHandler,
 } from '../app/composition/runtime-control'
+import {
+  createWorkerSecretEnvironmentHydrator,
+} from '../app/composition/worker-secret-environment'
+
+const hydrateSecrets = createWorkerSecretEnvironmentHydrator([
+  'REQUEST_EMAIL_WEBHOOK_SECRET',
+  'REQUEST_TOKEN_HASH_SECRET',
+])
 
 const getProductionHandler = createLazySingleton(() =>
   createRequestEmailHandler(createDefaultRequestIntakeClient(
@@ -23,6 +31,7 @@ const getProductionHandler = createLazySingleton(() =>
  * @returns The requester reply receipt.
  */
 async function processRequestEmail(event: SignedRequestEmailEvent) {
+  await hydrateSecrets()
   return await getProductionHandler()(event)
 }
 
