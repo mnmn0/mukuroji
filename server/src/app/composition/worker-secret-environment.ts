@@ -38,7 +38,9 @@ export async function hydrateWorkerSecretEnvironment(
   environment: Record<string, string | undefined> = process.env,
   loadSecret: WorkerSecretLoader = loadWorkerSecret,
 ): Promise<void> {
-  const pending: Array<Promise<readonly [string, string]>> = []
+  // Validate every name before any read starts, so a later invalid entry can
+  // never leave an earlier read running without an awaiting caller.
+  const secretArns: Array<readonly [string, string]> = []
   for (const name of names) {
     if (!WORKER_SECRET_NAME_PATTERN.test(name)) {
       throw createInvalidWorkerSecretEnvironmentError(name)
@@ -54,9 +56,10 @@ export async function hydrateWorkerSecretEnvironment(
     if (plainValue !== undefined || !FULL_SECRETS_MANAGER_ARN_PATTERN.test(secretArn)) {
       throw createInvalidWorkerSecretEnvironmentError(name)
     }
-    pending.push(loadSecret(secretArn).then((value) => [name, value] as const))
+    secretArns.push([name, secretArn])
   }
-  const loaded = await Promise.all(pending)
+  const loaded = await Promise.all(secretArns.map(async ([name, secretArn]) =>
+    [name, await loadSecret(secretArn)] as const))
   for (const [name, value] of loaded) {
     if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
       throw createInvalidWorkerSecretEnvironmentError(name)

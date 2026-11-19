@@ -70,6 +70,18 @@ test('rejects both a plain value and an ARN, a partial ARN, and an empty secret'
   expect(environment.TOKEN_HASH_SECRET).toBeUndefined()
 })
 
+test('validates every entry before starting any read', async () => {
+  let reads = 0
+  await expect(hydrateWorkerSecretEnvironment(['FIRST_SECRET', 'SECOND_SECRET'], {
+    FIRST_SECRET_SECRET_ARN: secretArn,
+    SECOND_SECRET_SECRET_ARN: 'not-an-arn',
+  }, async () => {
+    reads += 1
+    return 'value'
+  })).rejects.toThrow('Worker secret environment SECOND_SECRET is invalid.')
+  expect(reads).toBe(0)
+})
+
 test('applies no value when any secret of the set fails to load', async () => {
   const environment: Record<string, string | undefined> = {
     FIRST_SECRET_SECRET_ARN: secretArn,

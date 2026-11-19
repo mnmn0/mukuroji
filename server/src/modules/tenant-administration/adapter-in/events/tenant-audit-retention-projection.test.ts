@@ -15,6 +15,7 @@ function auditRecord(
     dynamodb: {
       SequenceNumber: sequenceNumber,
       NewImage: {
+        schemaVersion: { N: '1' },
         directoryId: { S: 'workspace-1' },
         workspaceId: { S: 'workspace-1' },
         eventId: { S: eventId },
@@ -83,6 +84,26 @@ test('stops at the first failure and returns its stream checkpoint', async () =>
     batchItemFailures: [{ itemIdentifier: 'audit-sequence-2' }],
   })
   expect(reconciled).toEqual(['event-1'])
+})
+
+test('fails closed on a missing or unknown audit schema version', async () => {
+  const unknown = auditRecord('audit-sequence-1', 'event-1')
+  unknown.dynamodb.NewImage.schemaVersion = { N: '2' }
+  const missing = auditRecord('audit-sequence-2', 'event-2')
+  const { schemaVersion: _omitted, ...withoutVersion } = missing.dynamodb.NewImage
+  const reconciled: string[] = []
+  const reconciler = {
+    async reconcileAuditEventRetention(_workspaceId: string, eventId: string) {
+      reconciled.push(eventId)
+    },
+  }
+
+  expect(await processTenantAuditRetentionProjectionBatch({ Records: [unknown] }, reconciler))
+    .toEqual({ batchItemFailures: [{ itemIdentifier: 'audit-sequence-1' }] })
+  expect(await processTenantAuditRetentionProjectionBatch({
+    Records: [{ ...missing, dynamodb: { ...missing.dynamodb, NewImage: withoutVersion } }],
+  }, reconciler)).toEqual({ batchItemFailures: [{ itemIdentifier: 'audit-sequence-2' }] })
+  expect(reconciled).toEqual([])
 })
 
 test('fails closed on a malformed audit event', async () => {

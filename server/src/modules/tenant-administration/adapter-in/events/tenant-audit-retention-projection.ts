@@ -84,7 +84,9 @@ export function readTenantAuditRetentionEvent(
     eventId !== undefined ||
     occurredAt !== undefined
   if (!hasAuditField) return undefined
+  // Readers accept only current schema v1 audit events (docs/event-audit.md).
   if (
+    image?.schemaVersion?.N !== '1' ||
     !directoryId?.trim() ||
     !eventId?.trim() ||
     !occurredAt?.trim() ||
