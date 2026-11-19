@@ -179,6 +179,8 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 
 Server は actor、HTTP method、canonical path、idempotency key と request fingerprint を関連付ける。同じ key と同じ fingerprint なら保存済み status/body を返し、`Idempotency-Replayed: true` を付ける。同じ key を異なる query/body へ再利用した場合は `409 idempotency_conflict` を返す。平文 key は監査 log へ保存せず digest 化する。
 
+Actor は API key では key ごと、OAuth access token では発行元の OAuth app ごとに決まる。同じ OAuth app から発行し直した token で同じ `Idempotency-Key` を再送しても replay され、二重に作成されない。
+
 Connector の authorization / reauthorization は内部 operation ID から OAuth state と PKCE verifier を導出し、未失効の同一 flow を再利用する。Response receipt 保存前に process が停止しても、同じ idempotency key の再送で provider authorization flow を増殖させない。
 
 ## Error と rate limit
@@ -191,6 +193,8 @@ Error は `application/problem+json` の `ApiProblem` に統一する。`code` �
 - `RateLimit-Remaining`: window 内の残数
 - `RateLimit-Reset`: quota 回復までの秒数
 - `Retry-After`: `429` または一時的な `503` で待つ秒数
+
+Credential の quota は API key では key ごと、OAuth access token では発行元の OAuth app ごとに数える。同じ app の token はすべて 1 つの quota を共有し、token を発行し直しても残数は戻らない。
 
 Client は `Retry-After` を優先し、値が無い retryable error では full jitter 付き exponential backoff を使う。`401`、`403`、validation error、idempotency conflict は自動 retry しない。
 
