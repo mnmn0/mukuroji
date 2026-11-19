@@ -29,6 +29,8 @@ import {
   createWorkspaceTaskTestToken,
 } from '../../work-items/ui/WorkspaceWorkItemPrimitives'
 import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
+import { TaskCalendarView } from '../../tasks/ui/TaskCalendarView'
+import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import {
   createMyTasksGanttGrouping,
   resolveMyTaskGroupValue,
@@ -36,7 +38,7 @@ import {
 } from '../model/myTaskGrouping'
 
 /** Layouts of the My Tasks view. */
-export type MyTasksViewMode = 'board' | 'gantt'
+export type MyTasksViewMode = 'board' | 'gantt' | 'calendar'
 
 /**
  * Props for the Workspace personal task board.
@@ -88,6 +90,10 @@ export type MyTasksWorkspaceViewProps = {
   onViewModeChange?: (mode: MyTasksViewMode) => void
   /** Hierarchy shown as an outline by the Gantt chart. */
   ganttOutline?: TaskGanttOutline
+  /** Month the calendar shows, in `YYYY-MM` form; the view keeps its own month when omitted. */
+  calendarMonth?: string
+  /** Moves the calendar to another month, together with `calendarMonth`. */
+  onCalendarMonthChange?: (month: string) => void
   /** Notice about the outline, such as loading or Teams shown without it. */
   outlineNotice?: ReactNode
   /** Work Items the current user owns or contributes to. */
@@ -97,7 +103,8 @@ export type MyTasksWorkspaceViewProps = {
 }
 
 /**
- * Renders the current user's Team-scoped kanban board with drag-and-drop status changes.
+ * Renders the current user's Team-scoped kanban board with drag-and-drop status changes, or
+ * the same Work Items as a Gantt chart or a monthly calendar.
  *
  * @param props - Owned and contributed Work Items, Team configurations, and board actions.
  * @returns The personal Workspace task board.
@@ -126,6 +133,8 @@ export function MyTasksWorkspaceView({
   viewMode = 'board',
   onViewModeChange,
   ganttOutline,
+  calendarMonth: controlledCalendarMonth,
+  onCalendarMonthChange,
   outlineNotice,
 }: MyTasksWorkspaceViewProps) {
   const ganttGroupBy = presentation?.groupBy
@@ -135,6 +144,13 @@ export function MyTasksWorkspaceView({
     [configurationsByTeam, ganttGroupBy, ganttGroupDirection, t, teams],
   )
   const ganttTasks = useMemo(() => [...tasks], [tasks])
+  const [localCalendarMonth, setLocalCalendarMonth] = useState(() => getCurrentTaskMonth())
+  const calendarMonth = controlledCalendarMonth ?? localCalendarMonth
+  /** Moves the calendar, reporting the month to the owner when it controls the month. */
+  const changeCalendarMonth = (month: string) => {
+    setLocalCalendarMonth(month)
+    onCalendarMonthChange?.(month)
+  }
   const [draggedTaskKey, setDraggedTaskKey] = useState<string | undefined>()
   const [dropTargetColumnKey, setDropTargetColumnKey] = useState<string | undefined>()
   const [movingTaskKeys, setMovingTaskKeys] = useState<ReadonlySet<string>>(() => new Set())
@@ -303,7 +319,7 @@ export function MyTasksWorkspaceView({
       className="inline-flex h-9 w-fit overflow-hidden rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface"
       role="group"
     >
-      {(['board', 'gantt'] as const).map((mode) => (
+      {(['board', 'gantt', 'calendar'] as const).map((mode) => (
         <button
           aria-pressed={viewMode === mode}
           className={`px-3.5 text-sm font-semibold transition ${
@@ -319,6 +335,23 @@ export function MyTasksWorkspaceView({
       ))}
     </div>
   ) : null
+
+  if (viewMode === 'calendar') {
+    return (
+      <div className="grid gap-4">
+        {taskViewToolbar}
+        {viewModeSwitch}
+        <TaskCalendarView
+          configurationsByTeam={configurationsByTeam}
+          month={calendarMonth}
+          onMonthChange={changeCalendarMonth}
+          onSelectTask={onOpenTask}
+          t={t}
+          tasks={ganttTasks}
+        />
+      </div>
+    )
+  }
 
   if (viewMode === 'gantt') {
     return (
