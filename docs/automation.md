@@ -85,13 +85,27 @@ Delivery receipt は endpoint と `Idempotency-Key` に束縛し、endpoint guar
 
 ## Template と複製
 
-Template は Work Item、Project、Workflow の 3 種類を持つ。論理 template ID と immutable version を分離し、作成後の kind 変更は許可しない。複製は current version の payload を新しい論理 template として保存する。Server は kind ごとの top-level field と payload field を allowlist で厳格に検証する。Work Item は `title` と通常の create field、Project は localized name と tone、Workflow は status、transition、initial status の完全な definition を受け付ける。Template を無効化しても既存の recurring definition、固定済み application、実行履歴は削除しない。
+Template は Work Item、Project、Workflow の 3 種類を持つ。論理 template ID と immutable version を分離し、作成後の kind 変更は許可しない。複製は current version の payload を新しい論理 template として保存する。Server は kind ごとの top-level field と payload field を allowlist で厳格に検証する。Work Item は `title` と通常の create field、Project は localized name、tone、任意の WBS（`workItems`）、Workflow は status、transition、initial status の完全な definition を受け付ける。Template を無効化しても既存の recurring definition、固定済み application、実行履歴は削除しない。
 
 Rule/recurring execution は current template ではなく保存済み `templateId` / `templateVersion` から immutable payload を読む。後から template を編集・停止しても、既に固定済みの実行や retry の payload は変わらない。
 
 Project/Workflow template の適用は必須 `Idempotency-Key` と actor、template ID、target を束縛した durable application receipt を最初に予約し、その時点の immutable template version を固定する。同じ key の再送は current template が編集・停止・削除済みでも先に receipt を返す。Pending または期限切れ running receipt だけが runner lease を条件付き取得できるため、並行再送で複数 worker が mutation を開始しない。
 
 Project 適用は application ID を Project ID として使い、Team、localized name、tone が同じ既存 Project だけを強整合 read で成功 replay と認める。Project row、作成者 manager row、Workspace member guard、audit event、application 成功 receipt は同じ DynamoDB transaction で確定する。Workflow 適用は target configuration の expected revision を要求し、既存 `customFields` を保持したまま workflow definition だけを置換する。参照整合性と既存 Work Item usage guard、configuration row、write lock 解放、application 成功 receipt を同じ transaction で確定する。これにより mutation commit 後の応答消失でも、同一 key の retry は別 resource や別 revision を作らず成功 receipt を返す。一時的な 5xx/通信失敗は receipt を再開可能な pending に戻し、検証・権限・revision など確定的な 4xx だけを failed として保存する。
+
+### Project template の WBS
+
+Project template の `workItems` は Project 内に作る Work Item の木（最大 50 件、4 階層）で、各 item は `title`、Project 開始日からの `startOffsetWorkingDays`（0 は開始日以降の最初の稼働日）、`durationWorkingDays`（1 以上）、`children` を持つ。稼働日は Work Item の既定 calendar（月〜金、祝日なし）で数える。WBS を持つ template の適用は target に `startDate`（`YYYY-MM-DD`）を必須とし、無い場合は何も作らずに `AutomationProjectTemplateStartDateRequired` で失敗する。
+
+適用は次の順に進む。
+
+1. 全 item を Team の現在の Work Item configuration で検証する（既定 Type、必須 custom field など）。ここで失敗すれば Project も作らない。
+2. Project を作る。このときは application 成功 receipt を Project transaction に含めない。
+3. 親から順に Work Item を作る。担当者は適用した管理者、優先度は中で、ID は `<application ID>_wbs_<展開順>` に固定する。
+4. 子を親へ `parent` relation でつなぐ。既に親を持つ子はつなぎ直さない。
+5. 最後に application receipt を成功（`result.workItemCount` 付き）で保存する。
+
+途中の一時的な失敗は receipt を pending に戻し、同じ `Idempotency-Key` の再送が Project の replay、固定 ID の Work Item の replay、既存 relation の skip で残りだけを進める。確定的な 4xx で失敗した場合は、それまでに作った Project と Work Item が残る（全体を 1 transaction にはしていない）。
 
 ## Recurring work
 

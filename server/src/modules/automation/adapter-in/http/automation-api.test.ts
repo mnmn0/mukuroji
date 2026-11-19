@@ -10,6 +10,7 @@ const {
   createFakeWorkItemConfigurationClient,
   createFileProofingStub,
   createInboundWebhookEndpointRecord,
+  createTeamIssuesFake,
   createInboundWebhookProvisioning,
   createTestWorkItemConfiguration,
   originalBulkRecoveryTitle,
@@ -2582,6 +2583,266 @@ test('recovers a Project template application from atomic receipt success withou
   expect(replay.status).toBe(200)
   expect(await replay.json()).toMatchObject({ status: 'succeeded', id: application.id })
   expect({ createCalls, templateVersionReads }).toEqual({ createCalls: 1, templateVersionReads: 1 })
+})
+
+test('applies a Project template WBS as Work Items with parent links and completes the receipt last', async () => {
+  const now = '2026-07-16T00:00:00.000Z'
+  const template: AutomationTemplate = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'template-project-wbs',
+    workspaceId: 'user#demo@example.com',
+    kind: 'project',
+    name: 'Standard Project',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    payload: {
+      nameJa: '標準プロジェクト',
+      tone: 'green',
+      workItems: [
+        {
+          title: '要件定義',
+          startOffsetWorkingDays: 0,
+          durationWorkingDays: 5,
+          children: [{ title: 'ヒアリング', startOffsetWorkingDays: 1, durationWorkingDays: 2 }],
+        },
+        { title: '設計', startOffsetWorkingDays: 5, durationWorkingDays: 3 },
+      ],
+    },
+    createdAt: now,
+    updatedAt: now,
+  }
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_project_wbs',
+    workspaceId: template.workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: template.version,
+    kind: 'project',
+    target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-05' },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const projectInputs: Array<Record<string, unknown>> = []
+  const completionMutationCounts: number[] = []
+  const createdIssues = new Map<string, ReturnType<typeof createBulkRecoveryIssue>>()
+  const createdInputs: Array<Record<string, unknown>> = []
+  const relationInputs: Array<Record<string, unknown>> = []
+  configureFakeProjectClients(true, {
+    teamProjects: [{ id: application.id, name: '標準プロジェクト', tone: 'green' }],
+    async projectCreateHook(input, completionTransactItems) {
+      projectInputs.push(input)
+      completionMutationCounts.push(completionTransactItems.length)
+    },
+  })
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async createTeamIssue(_directoryId, teamId, input) {
+        expect(createdIssues.size).toBe(createdInputs.length)
+        createdInputs.push({ ...input })
+        const id = String(input.idempotencyResourceId)
+        const issue = {
+          ...createBulkRecoveryIssue(),
+          id,
+          teamId,
+          title: String(input.title),
+          assignedProjectId: String(input.assignedProjectId),
+        }
+        createdIssues.set(id, issue)
+        return { issue }
+      },
+      async getTeamIssueDetail(_directoryId, _teamId, issueId) {
+        const issue = createdIssues.get(issueId)
+        if (!issue) throw new Error(`Unexpected Work Item ${issueId}`)
+        return { issue, activity: [], comments: [] }
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async createRelation(_workspaceId, _teamId, input) {
+        relationInputs.push({ ...input })
+        return {
+          relation: { ...input, createdAt: now },
+          reciprocalRelation: {
+            sourceWorkItemId: input.targetWorkItemId,
+            targetWorkItemId: input.sourceWorkItemId,
+            type: 'child',
+            createdAt: now,
+          },
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+      },
+    }),
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        application = {
+          ...candidate,
+          status: 'running',
+          revision: candidate.revision + 1,
+          runnerLeaseExpiresAt: leaseExpiresAt,
+        }
+        return structuredClone(application)
+      },
+      createTemplateApplicationCompletionMutation() {
+        throw new Error('A WBS application must not complete inside the Project transaction.')
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        return structuredClone(template)
+      },
+      async saveTemplateApplication(candidate, expectedRevision) {
+        expect(expectedRevision).toBe(application.revision)
+        expect(createdIssues.size).toBe(3)
+        expect(relationInputs).toHaveLength(1)
+        application = structuredClone(candidate)
+      },
+    }),
+  })
+
+  const response = await app.request(
+    `/api/automation/templates/${template.id}/applications`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'apply-project-wbs',
+      },
+      body: JSON.stringify({ target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-05' } }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    status: 'succeeded',
+    result: { kind: 'project', projectId: application.id, workItemCount: 3 },
+  })
+  expect(projectInputs).toHaveLength(1)
+  expect(projectInputs[0]).not.toHaveProperty('workItems')
+  expect(completionMutationCounts).toEqual([0])
+  expect(createdInputs.map((input) => ({
+    id: input.idempotencyResourceId,
+    title: input.title,
+    assignedProjectId: input.assignedProjectId,
+    assigneeUserId: input.assigneeUserId,
+    schedule: input.schedule,
+  }))).toMatchObject([
+    {
+      id: 'application_project_wbs_wbs_0',
+      title: '要件定義',
+      assignedProjectId: application.id,
+      assigneeUserId: 'demo@example.com',
+      schedule: { mode: 'date-range', startDate: '2026-12-07', endDate: '2026-12-11', durationDays: 5 },
+    },
+    {
+      id: 'application_project_wbs_wbs_1',
+      title: 'ヒアリング',
+      schedule: { startDate: '2026-12-08', endDate: '2026-12-09', durationDays: 2 },
+    },
+    {
+      id: 'application_project_wbs_wbs_2',
+      title: '設計',
+      schedule: { startDate: '2026-12-14', endDate: '2026-12-16', durationDays: 3 },
+    },
+  ])
+  expect(relationInputs).toEqual([
+    expect.objectContaining({
+      sourceWorkItemId: 'application_project_wbs_wbs_1',
+      targetWorkItemId: 'application_project_wbs_wbs_0',
+      type: 'parent',
+      expectedGraphRevision: 0,
+    }),
+  ])
+})
+
+test('rejects a Project template WBS application without a start date before creating anything', async () => {
+  const now = '2026-07-16T00:00:00.000Z'
+  const template: AutomationTemplate = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'template-project-wbs-no-date',
+    workspaceId: 'user#demo@example.com',
+    kind: 'project',
+    name: 'Standard Project',
+    enabled: true,
+    version: 1,
+    revision: 1,
+    payload: {
+      nameJa: '標準プロジェクト',
+      workItems: [{ title: '要件定義', startOffsetWorkingDays: 0, durationWorkingDays: 5 }],
+    },
+    createdAt: now,
+    updatedAt: now,
+  }
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_project_wbs_no_date',
+    workspaceId: template.workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: template.version,
+    kind: 'project',
+    target: { kind: 'project', teamId: 'core-team' },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  let projectCreates = 0
+  configureFakeProjectClients(true, {
+    async projectCreateHook() {
+      projectCreates += 1
+    },
+  })
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        application = {
+          ...candidate,
+          status: 'running',
+          revision: candidate.revision + 1,
+          runnerLeaseExpiresAt: leaseExpiresAt,
+        }
+        return structuredClone(application)
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        return structuredClone(template)
+      },
+      async saveTemplateApplication(candidate) {
+        application = structuredClone(candidate)
+      },
+    }),
+  })
+
+  const response = await app.request(
+    `/api/automation/templates/${template.id}/applications`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'apply-project-wbs-no-date',
+      },
+      body: JSON.stringify({ target: { kind: 'project', teamId: 'core-team' } }),
+    },
+  )
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'AutomationProjectTemplateStartDateRequired' })
+  expect(projectCreates).toBe(0)
+  expect(application.status).toBe('failed')
 })
 
 test('keeps non-retryable client-category template failures terminal', async () => {
