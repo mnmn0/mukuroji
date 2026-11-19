@@ -592,10 +592,11 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     let slackEnabledAt: string | undefined
     let emailEnabledAt: string | undefined
     if (preferences.channels.slack || preferences.channels.email) {
+      // Slack keeps its strict read; an Email-only save over a corrupt row starts a new Email period.
       const current = preferences.version > 0
         ? parseStoredNotificationPreferences((await this.documentClient.send(new GetCommand({
             TableName: this.tableName, Key: { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }, ConsistentRead: true,
-          }))).Item, true)
+          }))).Item, preferences.channels.slack === true)
         : undefined
       if (preferences.channels.slack) {
         slackEnabledAt = current?.channels.slack ? current.slackEnabledAt : now.toISOString()
