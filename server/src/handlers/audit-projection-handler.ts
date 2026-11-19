@@ -45,6 +45,7 @@ async function createProductionAuditProjectionHandler(
     collaborationProjection,
     connectorProjection,
     webhook,
+    tenantAuditRetention,
   ] = await Promise.all([
     import('../modules/audit/adapter-in/events/audit-projection'),
     import('./collaboration-projection-handler'),
@@ -52,15 +53,19 @@ async function createProductionAuditProjectionHandler(
       ? import('./connector-handler')
       : Promise.resolve(undefined),
     import('../app/composition/webhook'),
+    import('../app/composition/tenant-audit-retention-projection'),
   ])
   const webhookProjectionHandler =
     webhook.createProductionWebhookProjectionHandler()
+  const tenantAuditRetentionHandler =
+    tenantAuditRetention.createProductionTenantAuditRetentionProjectionHandler()
 
   return async (event) => await auditProjection.processAuditProjectionBatch(
     event,
     [
       collaborationProjection.handler,
       webhookProjectionHandler,
+      tenantAuditRetentionHandler,
       ...(connectorProjection ? [connectorProjection.auditProjectionHandler] : []),
     ],
   )
@@ -118,7 +123,7 @@ export function createAuditProjectionEntrypoint(
 /**
  * Runtime-control guarded outer AuditEvents projection entrypoint.
  *
- * The inner collaboration, webhook, and connector projections intentionally
+ * The inner collaboration, webhook, tenant retention, and connector projections intentionally
  * remain unguarded because this boundary must take one decision before any
  * fan-out dependency is constructed.
  *

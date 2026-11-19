@@ -208,21 +208,8 @@ export function buildTenantOperationWorker(
     }),
   );
   tenantAdministrationTable.grantStreamRead(tenantOperationFunction);
-  tenantOperationFunction.addEventSource(
-    new lambdaEventSources.DynamoEventSource(auditEventsTable, {
-      startingPosition: lambda.StartingPosition.TRIM_HORIZON,
-      batchSize: 10,
-      bisectBatchOnError: true,
-      parallelizationFactor: 1,
-      retryAttempts: 10,
-      reportBatchItemFailures: true,
-      filters: [lambda.FilterCriteria.filter({
-        eventName: lambda.FilterRule.isEqual('INSERT'),
-      })],
-      onFailure: new lambdaEventSources.SqsDlq(tenantOperationDlq),
-    }),
-  );
-  auditEventsTable.grantStreamRead(tenantOperationFunction);
+  // Per-event audit retention runs in the audit projection fan-out instead:
+  // DynamoDB Streams supports only two readers per AuditEvents shard.
   new cloudwatch.Alarm(scope, 'TenantOperationDlqAlarm', {
     alarmDescription:
       'Detects tenant lifecycle or audit-retention records that exhausted bounded retries.',
