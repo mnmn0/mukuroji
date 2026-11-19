@@ -107,6 +107,12 @@ export {
 export type {
   EnterpriseScimGroupJobReference,
 } from './domain/scim-group-job-reference'
+export {
+  deactivateEnterpriseScimUserDesiredState,
+  resolveEnterpriseScimMemberKey,
+  saveEnterpriseScimUserDesiredState,
+  type EnterpriseScimUserDesiredStateDependencies,
+} from './application/use-cases/scim-user-desired-state'
 export type {
   EnterpriseGenerationCommitter,
 } from './application/ports/enterprise-generation-committer'
