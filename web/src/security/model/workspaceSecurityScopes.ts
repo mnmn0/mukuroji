@@ -59,7 +59,8 @@ export function createWorkspaceSecurityScopeOptions(
     })),
     ...Array.from(projects.values(), (project): WorkspaceSecurityScopeOption => ({
       id: project.id,
-      name: `${project.name} · ${project.teamName}`,
+      // A Project shared by several Teams is named alone; the form asks for its owning Team.
+      name: project.teamIds.length > 1 ? project.name : `${project.name} · ${project.teamName}`,
       type: 'project',
       parentIds: project.teamIds,
     })),

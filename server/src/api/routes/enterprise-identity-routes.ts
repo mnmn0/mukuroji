@@ -1200,6 +1200,7 @@ function toEnterpriseMemberRoleAssignmentView(assignment: EnterpriseRoleAssignme
     roleId: assignment.roleId,
     scopeType: assignment.scope.kind,
     scopeId: assignment.scope.targetId ?? assignment.scope.workspaceId,
+    ...(assignment.scope.parentTeamId ? { scopeParentId: assignment.scope.parentTeamId } : {}),
   }
 }
 

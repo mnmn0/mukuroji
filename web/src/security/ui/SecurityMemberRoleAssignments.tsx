@@ -131,7 +131,7 @@ export function SecurityMemberRoleAssignments({
    * Formats the scope of an assignment with the directory names the screen loaded.
    *
    * @param assignment - Assignment to label.
-   * @returns The localized scope type and name.
+   * @returns The localized scope type and name, with the owning Team of a shared Project.
    */
   const formatScope = (assignment: EnterpriseMemberRoleAssignment) => {
     const scope = scopeOptions.find((candidate) =>
@@ -140,7 +140,13 @@ export function SecurityMemberRoleAssignments({
         : candidate.type === assignment.scopeType &&
           candidate.id === assignment.scopeId,
     )
-    return `${t(`security.scope.${assignment.scopeType}`)} · ${scope?.name ?? assignment.scopeId}`
+    const label = `${t(`security.scope.${assignment.scopeType}`)} · ${scope?.name ?? assignment.scopeId}`
+    // A shared Project's option names only its first Team, so name the Team that holds the role.
+    if (!assignment.scopeParentId || (scope?.parentIds?.length ?? 0) < 2) return label
+    const owningTeam = scopeOptions.find(
+      (candidate) => candidate.type === 'team' && candidate.id === assignment.scopeParentId,
+    )
+    return `${label} (${t('security.access.owningTeam')}: ${owningTeam?.name ?? assignment.scopeParentId})`
   }
 
   return (

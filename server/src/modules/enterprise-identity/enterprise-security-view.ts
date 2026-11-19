@@ -285,6 +285,12 @@ export function toEnterpriseSecuritySnapshotView(
     permission === 'members.read' ||
     permission === 'members.manage'
   )
+  // Direct member assignments name members, so they follow the member roster's visibility.
+  const canReadMemberAssignments = effectivePermissions.some((permission) =>
+    permission === 'members.read' ||
+    permission === 'members.manage' ||
+    permission === 'security.manage'
+  )
   const canReadPrivileged = canReadSecurity || effectivePermissions.includes(
     'service-accounts.manage',
   )
@@ -431,7 +437,7 @@ export function toEnterpriseSecuritySnapshotView(
       roleId: mapping.roleId,
       version: mapping.revision,
     })),
-    memberRoleAssignments: (canReadMappings ? snapshot.roleAssignments : [])
+    memberRoleAssignments: (canReadMemberAssignments ? snapshot.roleAssignments : [])
       .filter((assignment) =>
         assignment.principalKind === 'member' && assignment.source === 'direct'
       )
@@ -441,6 +447,9 @@ export function toEnterpriseSecuritySnapshotView(
         roleId: assignment.roleId,
         scopeType: assignment.scope.kind,
         scopeId: assignment.scope.targetId ?? assignment.scope.workspaceId,
+        ...(assignment.scope.parentTeamId
+          ? { scopeParentId: assignment.scope.parentTeamId }
+          : {}),
       })),
     roles: canReadRoleCatalog ? [
       ...builtInRoles.map((role) => ({

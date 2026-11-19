@@ -265,6 +265,9 @@ Member 個人への direct assignment は `POST /api/enterprise/security/role-as
 `DELETE /api/enterprise/security/role-assignments/:assignmentId` で外します。Group mapping と同じく
 `security.manage` または `members.manage` を要求し、caller が持たない permission を含む role は
 割り当てられません。Project scope は所有 Team で qualify して保存します。
+`GET /api/enterprise/security` の `memberRoleAssignments`（Project scope では所有 Team の `scopeParentId` 付き）と
+`members` は、`members.read`、`members.manage`、`security.manage` のいずれかを持つ caller にだけ返します。
+`security.read` だけでは member を特定できる情報を返しません。
 
 個人 assignment を持つ member は、directory 管理の member と同じく legacy Workspace role と
 Project membership を使わず、assignment の和集合（と `workspace.read`）だけで評価します。

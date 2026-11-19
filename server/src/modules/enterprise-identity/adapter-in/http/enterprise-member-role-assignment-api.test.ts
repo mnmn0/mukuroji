@@ -134,6 +134,9 @@ test('lets an owner assign and remove a role on one member, and lists it with th
       'assign-sato-project',
     )
     expect(projectScoped.status).toBe(201)
+    expect(await projectScoped.json()).toMatchObject({
+      assignment: { scopeType: 'project', scopeId: 'refero', scopeParentId: 'core-team' },
+    })
     const stored = (await identity.getSnapshot(workspaceId)).roleAssignments
     expect(stored.find((assignment) => assignment.roleId === 'project:manager')?.scope)
       .toEqual({ workspaceId, kind: 'project', targetId: 'refero', parentTeamId: 'core-team' })
@@ -397,5 +400,32 @@ test('refuses to remove a member\'s last assignment for a caller below their Wor
     expect((await identity.getSnapshot(workspaceId)).roleAssignments
       .filter((assignment) => assignment.principalId === 'sato@example.com')
       .map((assignment) => assignment.roleId)).toEqual(['workspace:auditor'])
+  })
+})
+
+test('hides member assignments from a caller who may read security settings but not members', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, { workspaceRole: 'member' })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:security-reader',
+      name: 'Security reader',
+      permissions: ['workspace.read', 'security.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: '2026-11-19T00:00:00.000Z',
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    })
+    await assignToFixtureMember(identity, 'custom:security-reader')
+
+    const snapshot = await app.request('/api/enterprise/security', {
+      headers: { Authorization: createAuthorization() },
+    })
+    expect(snapshot.status).toBe(200)
+    const body = await snapshot.json() as { memberRoleAssignments: unknown[]; members: unknown[] }
+    expect(body.memberRoleAssignments).toEqual([])
+    expect(body.members).toEqual([])
   })
 })

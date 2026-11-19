@@ -484,11 +484,22 @@ describe('EnterpriseSecurityPanel', () => {
           ...sharedScopeOptions.filter((scope) => scope.type === 'project'),
           ...sharedScopeOptions.filter((scope) => scope.type !== 'project'),
         ]}
-        snapshot={enterpriseSecuritySnapshotFixture}
+        snapshot={{
+          ...enterpriseSecuritySnapshotFixture,
+          memberRoleAssignments: [{
+            id: 'assignment-design',
+            memberKey: 'pmo@example.com',
+            roleId: 'project:viewer',
+            scopeType: 'project',
+            scopeId: 'shared',
+            scopeParentId: 'design-team',
+          }],
+        }}
         onCreateMemberRoleAssignment={async () => undefined}
         onDeleteMemberRoleAssignment={async () => undefined}
       />,
     )
+    expect(html).toContain('Project · Shared (Owning Team: Design team)')
     expect(html).toContain('Owning Team')
     expect(html).toContain('<option value="core-team">Core team</option>')
     expect(html).toContain('<option value="design-team">Design team</option>')

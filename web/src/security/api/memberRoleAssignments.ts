@@ -22,6 +22,8 @@ export type EnterpriseMemberRoleAssignment = {
   scopeType: EnterpriseMemberRoleAssignmentScope
   /** Workspace, Team, or Project ID of the assignment. */
   scopeId: string
+  /** Team that owns the Project of a Project-scoped assignment. */
+  scopeParentId?: string
 }
 
 /**
@@ -128,7 +130,8 @@ export function isEnterpriseMemberRoleAssignment(
     (value.scopeType === 'workspace' ||
       value.scopeType === 'team' ||
       value.scopeType === 'project') &&
-    typeof value.scopeId === 'string'
+    typeof value.scopeId === 'string' &&
+    (value.scopeParentId === undefined || typeof value.scopeParentId === 'string')
   )
 }
 
