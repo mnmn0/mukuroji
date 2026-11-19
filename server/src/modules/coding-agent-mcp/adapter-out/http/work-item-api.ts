@@ -48,6 +48,10 @@ const effortSchema = z.object({
   plannedEffortMinutes: effortMinutes.optional(), remainingEffortMinutes: effortMinutes.optional(),
   progressPercent: z.number().int().min(0).max(100).optional(),
 })
+const actualDatesSchema = z.object({
+  schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, revision: z.number().int().positive(),
+  actualStartDate: z.iso.date().optional(), actualEndDate: z.iso.date().optional(),
+})
 const acceptanceCriteriaSchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, workItemId: identifier, revision: z.number().int().positive(),
   items: z.array(z.object({
@@ -404,6 +408,24 @@ export function createAgentWorkItemApi(
         ...(effort.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: effort.plannedEffortMinutes }),
         ...(effort.remainingEffortMinutes === undefined ? {} : { remainingEffortMinutes: effort.remainingEffortMinutes }),
         ...(effort.progressPercent === undefined ? {} : { progressPercent: effort.progressPercent }),
+      }
+    },
+    /** Reads a task's actual start and end dates; a server older than the endpoint has none. */
+    async actualDates(id) {
+      let found: z.infer<typeof actualDatesSchema>
+      try {
+        found = await request(`work-items/${encodeURIComponent(id)}/actual-dates`, actualDatesSchema)
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+      if (found.teamId !== config.teamId || found.workItemId !== id) {
+        throw new AgentTaskError('invalid_response', 'The API returned the actual dates of another task.')
+      }
+      return {
+        revision: found.revision,
+        ...(found.actualStartDate === undefined ? {} : { actualStartDate: found.actualStartDate }),
+        ...(found.actualEndDate === undefined ? {} : { actualEndDate: found.actualEndDate }),
       }
     },
     /** Reads a task's parent, children, and WBS number; a server older than the endpoint has none. */
