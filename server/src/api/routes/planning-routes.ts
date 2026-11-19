@@ -36,7 +36,6 @@ import {
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
 import { type Locale, ProjectDataError, type ProjectAccessEntry, type ProjectRole } from '../../modules/directory'
-import { type TeamIssueResponseItem } from '../../modules/work-items'
 import {
   WorkspaceAccessError,
   type WorkspaceMember,
@@ -92,7 +91,7 @@ import {
   workItemDependencies,
   workspaceDependencies,
 } from '../shared/app-dependencies'
-import { WORK_ITEMS_PARTITION_SCAN_LIMIT, WORK_ITEMS_TEAM_READ_LIMIT } from '../shared/constants'
+import { WORK_ITEMS_AGGREGATE_TEAM_LIMIT } from '../shared/constants'
 import { resolveDeveloperManagementPrincipal } from '../shared/developer-platform-access'
 import {
   hasUnqualifiedEnterpriseProjectScope,
@@ -140,8 +139,8 @@ import { isRecord, stableDigestStringify } from '../shared/value-guards'
 import {
   createWorkItemListLimitExceededError,
   loadAuthorizedTeamIssue,
-  readCanonicalTeamIssuesForAggregate,
 } from '../shared/work-item-access'
+import { readAllAccessibleWorkItems } from '../shared/work-item-aggregate-read'
 import {
   createWorkItemScheduleIdempotencyUserId,
   createWorkItemScheduleIdempotencyWorkspaceId,
@@ -157,10 +156,6 @@ const MAX_PLANNING_UPDATE_EXPORT_COUNT = 10_000
 
 /** Maximum UTF-8 payload size accepted for one Planning export. */
 const MAX_PLANNING_UPDATE_EXPORT_BYTES = 16_000_000
-
-/** Planning publish が一度に評価する canonical Work Item の最大数です。 */
-const PLANNING_CANONICAL_WORK_ITEM_LIMIT =
-  WORK_ITEMS_TEAM_READ_LIMIT * WORK_ITEMS_PARTITION_SCAN_LIMIT
 
 async function readPlanningJson<T>(request: { json: () => Promise<unknown> }) {
   const body = await readJson<unknown>(request)
@@ -1280,33 +1275,21 @@ async function readCanonicalPlanningWorkItemState(
   const selectedTeams = scope?.teamId === undefined
     ? directory.teams
     : directory.teams.filter((team) => team.id === scope.teamId)
-  if (scope?.teamId === undefined && selectedTeams.length > WORK_ITEMS_TEAM_READ_LIMIT) {
+  if (selectedTeams.length > WORK_ITEMS_AGGREGATE_TEAM_LIMIT) {
     throw createWorkItemListLimitExceededError(
-      `Workspace has more than ${WORK_ITEMS_TEAM_READ_LIMIT} Teams for a Planning publish.`,
+      `Workspace has more than ${WORK_ITEMS_AGGREGATE_TEAM_LIMIT} Teams for a Planning publish.`,
     )
   }
   const servicePrincipal = { ...principal, isSystemAdmin: true }
-  const workItemsByKey = new Map<string, TeamIssueResponseItem>()
-  for (const team of selectedTeams) {
-    const response = await readCanonicalTeamIssuesForAggregate(
-      principal.directoryId,
-      { team, directory } satisfies TeamPermissionContext,
-      servicePrincipal,
-    )
-    for (const workItem of response.issues) {
-      if (scope?.projectId !== undefined && workItem.assignedProjectId !== scope.projectId) {
-        continue
-      }
-      workItemsByKey.set(`${workItem.teamId}\0${workItem.id}`, workItem)
-      if (workItemsByKey.size > PLANNING_CANONICAL_WORK_ITEM_LIMIT) {
-        throw createWorkItemListLimitExceededError(
-          `Planning publish spans more than ${PLANNING_CANONICAL_WORK_ITEM_LIMIT} Work Items.`,
-        )
-      }
-    }
-  }
+  const contexts = selectedTeams
+    .map((team) => ({ team, directory }) satisfies TeamPermissionContext)
+    .sort((left, right) => left.team.id < right.team.id ? -1 : left.team.id > right.team.id ? 1 : 0)
+  const workItems = await readAllAccessibleWorkItems(servicePrincipal, contexts, {
+    includeArchived: false,
+    ...(scope?.projectId === undefined ? {} : { filter: { projectId: scope.projectId } }),
+  })
   return {
-    workItems: [...workItemsByKey.values()].map((workItem) => ({
+    workItems: workItems.map((workItem) => ({
       id: workItem.id,
       revision: workItem.revision,
       teamId: workItem.teamId,

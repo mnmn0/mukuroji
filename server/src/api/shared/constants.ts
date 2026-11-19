@@ -15,17 +15,17 @@ export const TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS: WorkspaceActiveMemberCon
  */
 export const WORK_ITEMS_RESPONSE_LIMIT = 200
 
-/** Planning publish と Task view の relation 解決が一度に読む Team partition の最大数です。 */
+/** Focus の個人 policy 更新が一度に扱う Team の最大数です。 */
 export const WORK_ITEMS_TEAM_READ_LIMIT = 20
 
-/** Automation と Planning publish が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
+/** Automation が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
 export const WORK_ITEMS_PARTITION_SCAN_LIMIT = 1_000
 
-/** Workspace 横断の Work Item 集約読み取りが対象にできる Team partition の最大数です。 */
+/** Workspace 横断の Work Item 集約読み取り（Planning publish、Task view の relation 解決を含む）が対象にできる Team partition の最大数です。 */
 export const WORK_ITEMS_AGGREGATE_TEAM_LIMIT = 100
 
 /**
- * 全件をメモリに載せる集約読み取り（Focus、Planning snapshot、AI assistance）が保持する
+ * 全件をメモリに載せる集約読み取り（Focus、Planning snapshot・publish、AI assistance）が保持する
  * Work Item の最大件数です。超過時は 413 で fail-closed にします。
  */
 export const WORK_ITEMS_AGGREGATE_ITEM_LIMIT = 10_000
