@@ -2335,7 +2335,10 @@ async function isEligibleRecipient(
       (!enforceContentAuthorization || event.teamId || event.projectId || member.role !== 'guest' || selectedWorkspaceRecipient)
     const teamProjects = directoryItems.filter((item) => item.entryType === 'project' &&
       item.teamId === event.teamId && item.projectId && !item.archivedAt)
+    // A timesheet reminder only describes the recipient's own entries, which the timesheet lists
+    // for any one accessible Project, so it does not need access to every Team Project.
     if (legacyAllowed && (!enforceContentAuthorization || event.projectId || !event.teamId ||
+      isOwnTimesheetReminder(event, memberKey) ||
       teamProjects.length > 0 && teamProjects.every((project) => hasEligibleProjectAccess(project, memberKey, directoryItems)))) return true
   }
 
@@ -2348,6 +2351,20 @@ async function isEligibleRecipient(
   }
 
   return currentSystemAdmin
+}
+
+/**
+ * Reports whether the event is a timesheet reminder addressed to this member about their own entries.
+ *
+ * @param event - Parsed audit event.
+ * @param memberKey - Canonical recipient member key.
+ * @returns Whether the member is the reminder's only recipient.
+ */
+function isOwnTimesheetReminder(event: AuditProjectionEvent, memberKey: string) {
+  return event.eventType === TIMESHEET_REMINDER_EVENT_TYPE &&
+    event.notificationCandidates.length === 1 &&
+    event.notificationCandidates[0]?.reason === 'timesheet' &&
+    normalizeMemberKey(event.notificationCandidates[0].memberKey) === memberKey
 }
 
 /**

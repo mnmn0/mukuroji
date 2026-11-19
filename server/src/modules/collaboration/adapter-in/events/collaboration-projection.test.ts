@@ -4,6 +4,7 @@ import { AdminListGroupsForUserCommand, CognitoIdentityProviderClient } from '@a
 import { DocumentError, type GetDocumentRequest } from '../../../documents'
 import type { ApprovalNotificationSource } from '../../../files'
 import { DEFAULT_NOTIFICATION_PREFERENCES } from '../../../notifications/notifications'
+import { TIMESHEET_REMINDER_EVENT_TYPE } from '../../../notifications'
 import { S3Client } from '@aws-sdk/client-s3'
 import {
   WORK_ITEM_SCHEMA_VERSION,
@@ -747,6 +748,42 @@ describe('collaboration projection pure helpers', () => {
       expect(await authorizeNotificationDelivery(dueSoon, memberKey, identity, cache)).toBe(false)
     } finally {
       setSystemTime()
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+  test('delivers a timesheet reminder to its owner with access to only some Team Projects', async () => {
+    const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    const cache = createNotificationDeliveryAuthorizationCache()
+    cache.expiresAt = Date.now() + 60_000
+    cache.directories.set('workspace-1', Promise.resolve([
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      { entryType: 'project', teamId: 'core', projectId: 'secret' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'member' },
+    ]))
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (!(command instanceof GetCommand)) throw new Error('Unexpected command')
+      return { Item: { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {} }
+    })
+    const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+    const reminder = createProjectionEvent({
+      eventType: TIMESHEET_REMINDER_EVENT_TYPE, teamId: 'core', scopeKey: 'workspace-1#team#core', entityId: 'team/core',
+      timeEntryIds: ['entry-1'], notificationCandidates: [{ memberKey, reason: 'timesheet' }],
+    })
+    try {
+      expect(await authorizeNotificationDelivery(reminder, memberKey, identity, cache)).toBe(true)
+      // Another member's reminder and other Team-wide notifications still need every Team Project.
+      expect(await authorizeNotificationDelivery({ ...reminder,
+        notificationCandidates: [{ memberKey: 'other@example.com', reason: 'timesheet' }] }, memberKey, identity, cache)).toBe(false)
+      expect(await authorizeNotificationDelivery({ ...reminder, eventType: 'comment.created',
+        notificationCandidates: [{ memberKey, reason: 'mention' }] }, memberKey, identity, cache)).toBe(false)
+    } finally {
       send.mockRestore()
       groups.mockRestore()
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
