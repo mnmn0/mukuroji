@@ -245,6 +245,10 @@ function readProjectTemplateWorkItemLevel(
         `Project template Work Item title must be ${WORK_ITEM_TITLE_MAX_LENGTH} characters or fewer.`,
       )
     }
+    // The template editor shows the WBS one Work Item per line, so a line break would split it.
+    if (/[\r\n\u2028\u2029]/u.test(title)) {
+      throw invalidInput('Project template Work Item title must not contain line breaks.')
+    }
     const startOffsetWorkingDays = requireInteger(
       item.startOffsetWorkingDays,
       'Project template Work Item start offset',
