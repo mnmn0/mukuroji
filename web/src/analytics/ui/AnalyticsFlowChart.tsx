@@ -83,8 +83,17 @@ export function AnalyticsFlowChart({
   const chartWidth = WIDTH - PADDING * 2
   const chartHeight = height - PADDING * 2
   const slotCount = model.dates.length
-  const xAt = (index: number) => PADDING + (slotCount <= 1 ? chartWidth / 2 : index * chartWidth / (slotCount - 1))
+  const span = model.dayOffsets.at(-1) ?? 0
+  const xAt = (index: number) =>
+    PADDING + (span <= 0 ? chartWidth / 2 : (model.dayOffsets[index] ?? index) * chartWidth / span)
   const yAt = (value: number) => PADDING + chartHeight - value / model.maximum * chartHeight
+  // Each slot's hover area reaches halfway to its neighbors, since slots sit at calendar positions.
+  const hoverLeft = (index: number) =>
+    index === 0 ? xAt(0) - chartWidth / Math.max(slotCount, 1) / 2 : (xAt(index - 1) + xAt(index)) / 2
+  const hoverRight = (index: number) =>
+    index === slotCount - 1
+      ? xAt(index) + chartWidth / Math.max(slotCount, 1) / 2
+      : (xAt(index) + xAt(index + 1)) / 2
   const legendLayers = [...model.layers].reverse()
   const layerLabel = (layer: AnalyticsFlowChartLayer) => t(LAYER_LABEL_KEYS[layer.key] ?? 'analytics.chart.value')
 
@@ -172,8 +181,8 @@ export function AnalyticsFlowChart({
               fill="transparent"
               height={chartHeight}
               key={date}
-              width={Math.max(4, chartWidth / Math.max(slotCount, 1))}
-              x={xAt(index) - chartWidth / Math.max(slotCount, 1) / 2}
+              width={Math.max(4, hoverRight(index) - hoverLeft(index))}
+              x={hoverLeft(index)}
               y={PADDING}
             >
               <title>

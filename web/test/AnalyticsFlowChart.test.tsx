@@ -68,6 +68,14 @@ describe('Analytics flow chart', () => {
     })
     expect(inCurrentWeek.dates).toEqual(['2026-01-11', '2026-01-14', '2026-01-16'])
     expect(inCurrentWeek.layers.find((layer) => layer.key === 'ideal')?.values.at(-1)).toBe(0)
+    // 17 items over Jan 11–28 (17 days): the ideal falls by one per calendar day.
+    const byCalendar = createAnalyticsFlowChartModel(
+      weekly.map((point, index) => ({ ...point, value: index === 0 ? 17 : 13 })),
+      'burndown',
+      { granularity: 'week', plannedEndDate: '2026-01-28', timeZone: 'UTC' },
+    )
+    expect(byCalendar.dayOffsets).toEqual([0, 3, 7, 14, 17])
+    expect(byCalendar.layers.find((layer) => layer.key === 'ideal')?.values).toEqual([17, 14, 10, 3, 0])
 
     const monthly: AnalyticsSeriesPoint[] = [
       { from: '2026-01-15T00:00:00.000Z', to: '2026-01-31T23:59:59.999Z', value: 6, sampleSize: 6 },

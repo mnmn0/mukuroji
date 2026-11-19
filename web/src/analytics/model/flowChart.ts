@@ -34,6 +34,8 @@ export type AnalyticsFlowChartLayer = {
 export type AnalyticsFlowChartModel = {
   /** Local calendar date (`YYYY-MM-DD`) of each slot. */
   dates: string[]
+  /** Calendar days from the first slot to each slot, for positioning slots on a time axis. */
+  dayOffsets: number[]
   /** Layers drawn from the back to the front. */
   layers: AnalyticsFlowChartLayer[]
   /** Largest value of every layer, at least 1. */
@@ -84,7 +86,14 @@ export function createAnalyticsFlowChartModel(
     options.plannedEndDate,
     options.granularity ?? 'day',
   )
-  const slotCount = dates.length + padding.length
+  const allDates = [...dates, ...padding]
+  const firstDay = allDates[0] === undefined ? undefined : parseCalendarDate(allDates[0])
+  const dayOffsets = allDates.map((date, index) => {
+    const day = parseCalendarDate(date)
+    return firstDay === undefined || day === undefined
+      ? index
+      : Math.round((day.getTime() - firstDay.getTime()) / 86_400_000)
+  })
   const pad = (values: Array<number | null>) => [
     ...values,
     ...padding.map((): number | null => null),
@@ -101,12 +110,12 @@ export function createAnalyticsFlowChartModel(
           const values = pad(series.map((point) => readSegment(point, key)))
           return { key, kind: 'line', values, ownValues: values }
         })
-      : createBurndownLayers(series, slotCount, pad)
+      : createBurndownLayers(series, dayOffsets, pad)
   const maximum = Math.max(
     1,
     ...layers.flatMap((layer) => layer.values.filter(isFiniteNumber)),
   )
-  return { dates: [...dates, ...padding], layers, maximum }
+  return { dates: allDates, dayOffsets, layers, maximum }
 }
 
 /**
@@ -124,22 +133,26 @@ export function isAnalyticsFlowVisualization(
 /**
  * Builds the remaining line and the ideal line of a burndown.
  *
+ * The ideal line falls linearly by calendar days, so partial week or month buckets do not
+ * distort it.
+ *
  * @param series - Remaining scope series.
- * @param slotCount - Number of slots including padding.
+ * @param dayOffsets - Calendar days from the first slot to each slot, including padding.
  * @param pad - Pads series values with empty slots.
  * @returns Ideal and remaining layers.
  */
 function createBurndownLayers(
   series: readonly AnalyticsSeriesPoint[],
-  slotCount: number,
+  dayOffsets: readonly number[],
   pad: (values: Array<number | null>) => Array<number | null>,
 ): AnalyticsFlowChartLayer[] {
   const remaining = pad(series.map((point) => isFiniteNumber(point.value) ? point.value : null))
   const start = remaining.find(isFiniteNumber)
-  const ideal = Array.from({ length: slotCount }, (_, index): number | null => {
+  const span = dayOffsets.at(-1) ?? 0
+  const ideal = dayOffsets.map((offset): number | null => {
     if (start === undefined) return null
-    if (slotCount === 1) return start
-    return Math.max(0, start - start * index / (slotCount - 1))
+    if (span <= 0) return start
+    return Math.max(0, start - start * offset / span)
   })
   return [
     { key: 'ideal', kind: 'ideal', values: ideal, ownValues: ideal },
