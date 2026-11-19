@@ -52,7 +52,7 @@ export function getAuthSession() {
   // authenticated fetch refreshes it before the next API request.
   if (entry.session.expiresAt <= Date.now() && !entry.session.refreshToken) {
     entry.storage.removeItem(storageKey)
-    tabAccount = null
+    tabAccount = 'signed-out'
     void clearAppBadgeAndNotifyTabs()
     return null
   }
@@ -218,7 +218,8 @@ export function saveAuthSession(session: AuthSession) {
  * この tab の account の認証セッションを削除します。
  *
  * 別の tab が別の account でログインしている session は残します。この tab がまだ session を
- * 読んでいないときは、この tab から見える session を削除します。
+ * 読んでいないときは、この tab から見える session を削除します。削除後の tab は、次のログインまで
+ * ほかの account の session を読みも消しもしないので、2 回目の削除が別の account を消すことはありません。
  */
 export function clearAuthSession() {
   try {
@@ -233,7 +234,7 @@ export function clearAuthSession() {
   } catch {
     // Nothing more can be removed when storage access fails.
   }
-  tabAccount = null
+  tabAccount = 'signed-out'
   // Every sign-out path destroys the session here, so the app-wide unread badge is cleared with it;
   // other tabs that are still signed in republish their own count.
   void clearAppBadgeAndNotifyTabs()
@@ -241,9 +242,11 @@ export function clearAuthSession() {
 
 /**
  * Account this tab has read or signed in to, kept for the life of the page so that pages that
- * mount later read the same account as the workspace shell.
+ * mount later read the same account as the workspace shell. `'signed-out'` means this tab's
+ * account was signed out or expired: until the next sign-in the tab has no session, so it never
+ * switches to, or removes, another account's session.
  */
-let tabAccount: { accessToken: string, remember: boolean } | null = null
+let tabAccount: { accessToken: string, remember: boolean } | 'signed-out' | null = null
 
 /**
  * Forgets the account this tab has read. Tests use it to start from a fresh page.
@@ -256,7 +259,8 @@ export function resetAuthSessionTabAccount() {
  * Finds this tab's stored session and the store that holds it.
  *
  * Without an account yet, this tab's own sessionStorage wins over a remembered session that
- * every tab shares. Once the tab has an account, only a session of that account is returned.
+ * every tab shares. Once the tab has an account, only a session of that account is returned,
+ * and after this tab signs out, none is.
  *
  * @returns The session and its store, or `null` when this tab has no stored session.
  */
@@ -264,6 +268,7 @@ function findTabSessionEntry(): { session: AuthSession, storage: Storage } | nul
   const entries = [window.sessionStorage, window.localStorage]
     .map((storage) => ({ session: readSession(storage), storage }))
     .filter((entry): entry is { session: AuthSession, storage: Storage } => entry.session !== null)
+  if (tabAccount === 'signed-out') return null
   if (!tabAccount) return entries[0] ?? null
   const account = tabAccount
   return entries.find((entry) => isTabAccountSession(entry, account)) ?? null

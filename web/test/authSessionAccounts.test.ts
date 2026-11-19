@@ -178,8 +178,44 @@ describe('sessions of different accounts in different tabs', () => {
 
     expect(stored(sessionStorage)).toBeNull()
     expect(stored(localStorage)).toEqual(remembered)
-    // The cleared tab now reads nothing of its own and falls back to the remembered account.
-    expect(getAuthSession()).toEqual(remembered)
+    // The signed-out tab does not switch to the remembered account until it signs in again.
+    expect(getAuthSession()).toBeNull()
+    expect(readStoredAuthSession()).toBeNull()
+  })
+
+  test('signing out twice leaves another account remembered on the device', () => {
+    const remembered = session(token('account-a'), true)
+    storeFromAnotherTab(localStorage, remembered)
+    storeFromAnotherTab(sessionStorage, session(token('account-b'), false))
+    getAuthSession()
+
+    // A double-clicked sign-out runs the cleanup twice.
+    clearAuthSession()
+    clearAuthSession()
+
+    expect(stored(localStorage)).toEqual(remembered)
+  })
+
+  test('an expired session does not switch the tab to another account', () => {
+    const remembered = session(token('account-a'), true)
+    storeFromAnotherTab(localStorage, remembered)
+    storeFromAnotherTab(sessionStorage, session(token('account-b'), false, { expiresAt: Date.now() - 1, refreshToken: undefined }))
+
+    expect(getAuthSession()).toBeNull()
+    expect(getAuthSession()).toBeNull()
+    clearAuthSession()
+    expect(stored(localStorage)).toEqual(remembered)
+  })
+
+  test('a sign-in after signing out makes the tab use the new session', () => {
+    storeFromAnotherTab(sessionStorage, session(token('account-b'), false))
+    getAuthSession()
+    clearAuthSession()
+
+    const next = session(token('account-c'), false)
+    saveAuthSession(next)
+
+    expect(getAuthSession()).toEqual(next)
   })
 
   test('signing out removes both stores when they hold the same account', () => {

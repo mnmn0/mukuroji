@@ -14,7 +14,7 @@ import {
   trackPushRegistration,
   type PushDeviceApi,
 } from '../src/notifications/queries/usePushDeviceStatus'
-import { readAccessTokenSubject } from '../src/auth/session'
+import { readAccessTokenSubject, resetAuthSessionTabAccount } from '../src/auth/session'
 import { NotificationsApiError } from '../src/notifications/api/errors'
 import { getPushConfiguration } from '../src/notifications/api/push'
 import { PushDeviceSettings } from '../src/notifications/ui/PushDeviceSettings'
@@ -422,6 +422,8 @@ describe('sign-out with push cleanup', () => {
     const sessionStorage = { getItem: () => null, removeItem: () => undefined }
     const previousWindow = Reflect.get(globalThis, 'window')
     Reflect.set(globalThis, 'window', { localStorage, sessionStorage })
+    // Each run starts as a freshly loaded tab.
+    resetAuthSessionTabAccount()
     try {
       await signOutWithPushCleanup('t', async () => {
         await cleanup()
