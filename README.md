@@ -124,6 +124,9 @@ bun run web:dev
 
 - DynamoDB Admin: http://localhost:8001 （`DYNAMODB_ADMIN_PORT` で変更可）。
   テーブルの閲覧・編集ができるため、host の loopback だけに公開します。
+- Floci: http://localhost:4566 （`FLOCI_PORT` で変更可）。認証のない AWS emulator のため
+  host の loopback だけに公開し、image は digest で固定します。Docker socket は
+  Lambda を実行する `floci:up:lambda` のときだけ渡します。
 - S3: versioning と local Web origin 向け CORS を設定した `mukuroji-files-local` と
   `mukuroji-work-item-import-local`。ready hook の再実行で既存objectを削除しません。
 - SQS: import、Webhook配送、connector同期の3 queue。それぞれ専用DLQ、
@@ -217,9 +220,15 @@ command を安全に再実行できます。その後の作成・更新は通常
 Floci 上の Lambda + API Gateway に backend をデプロイする場合:
 
 ```sh
-bun run floci:up
+bun run floci:up:lambda
 bun run floci:deploy-backend
 ```
+
+Floci は Lambda を host の Docker daemon 上の container として実行するため、
+`floci:up:lambda` は `docker-compose.lambda.yml` を重ねて Docker socket を Floci に渡します。
+socket を持つ container は host の root 相当の操作ができるので、Lambda を使わないときは
+`floci:up` で起動し直してください。`floci:deploy-backend` は socket のない Floci を検出すると、
+deploy の前に停止します。
 
 `floci:deploy-backend` は `server:build:lambda` で `server/src/handlers/api.handler.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は ready hook が生成した `ANALYTICS_TABLE_NAME` と `ANALYTICS_SCHEDULE_INDEX_NAME` を Lambda に渡します。また、確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡し、Secrets Manager の内部 HTTP endpoint と明示的な `MUKUROJI_LOCAL_AWS_RUNTIME=floci` marker を組にして渡します。管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
 
