@@ -300,7 +300,7 @@ export const securityMessages = {
     'このロールは直接割り当て{assignments}件・Group mapping {mappings}件・Service account {serviceAccounts}件から参照されています。参照を解除してから削除してください。',
   'security.access.memberAssignmentsTitle': 'メンバーへのロール割り当て',
   'security.access.memberAssignmentsDescription':
-    'メンバー個人にロールを付けます。割り当てを1件でも持つメンバーは、Workspaceロールと Project メンバーとしての権限ではなく、割り当てたロールだけで権限が決まります。owner と自分自身には割り当てられず、admin への割り当ては owner だけが変更できます。',
+    'メンバー個人にロールを付けます。割り当てを1件でも持つメンバーは、Workspaceロールと Project メンバーとしての権限ではなく、割り当てたロールだけで権限が決まります。owner と自分自身には割り当てられず、admin への割り当てと管理系の権限を含むロールは owner だけが変更できます。',
   'security.access.member': 'メンバー',
   'security.access.selectMember': 'メンバーを選択',
   'security.access.addMemberAssignment': '割り当てを追加',

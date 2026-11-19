@@ -303,7 +303,7 @@ export const securityMessages = {
     'This role is referenced by {assignments} direct assignments, {mappings} group mappings, and {serviceAccounts} service accounts. Remove those references before deleting it.',
   'security.access.memberAssignmentsTitle': 'Member role assignments',
   'security.access.memberAssignmentsDescription':
-    'Give a role to one member. A member with at least one assignment gets only the assigned roles, instead of their Workspace role and Project memberships. Owners and yourself cannot receive assignments, and only an owner can change an admin\'s assignments.',
+    'Give a role to one member. A member with at least one assignment gets only the assigned roles, instead of their Workspace role and Project memberships. Owners and yourself cannot receive assignments, and only an owner can change an admin\'s assignments or roles with administrative permissions.',
   'security.access.member': 'Member',
   'security.access.selectMember': 'Select a member',
   'security.access.addMemberAssignment': 'Add assignment',

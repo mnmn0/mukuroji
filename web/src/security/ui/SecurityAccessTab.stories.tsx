@@ -28,8 +28,10 @@ const meta = {
     snapshot: enterpriseSecuritySnapshotFixture,
     t: createTranslator('en'),
     onCreateMapping: fn(async () => undefined),
+    onCreateMemberRoleAssignment: fn(async () => undefined),
     onCreateRole: fn(async () => undefined),
     onDeleteMapping: fn(async () => undefined),
+    onDeleteMemberRoleAssignment: fn(async () => undefined),
     onPreviewRoleImpact: fn(async () => ({
       assignmentCount: 0,
       blocking: false,
@@ -77,5 +79,30 @@ export const CreateMappingInteraction: Story = {
         roleId: 'workspace:member',
       }),
     )
+  },
+}
+
+/** Assigns the All Projects viewer role to one member from the member assignment form. */
+export const AssignMemberRole: Story = {
+  args: {
+    t: createTranslator('ja'),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const form = within(canvas.getByTestId('security-member-assignment-form'))
+
+    await userEvent.selectOptions(form.getByLabelText('メンバー'), 'auditor@example.com')
+    await userEvent.selectOptions(form.getByLabelText('ロール'), 'workspace:auditor')
+    await userEvent.click(form.getByRole('button', { name: '割り当てを追加' }))
+
+    await expect(args.onCreateMemberRoleAssignment).toHaveBeenCalledWith({
+      memberKey: 'auditor@example.com',
+      roleId: 'workspace:auditor',
+      scopeId: 'workspace-demo',
+      scopeType: 'workspace',
+    })
+    await expect(
+      within(canvas.getByTestId('security-member-assignment-table')).getByText('全Project閲覧'),
+    ).toBeVisible()
   },
 }
