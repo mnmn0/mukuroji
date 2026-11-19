@@ -1,0 +1,7 @@
+# Floci 上で Lambda を実行するときだけ重ねる override です（`bun run floci:up:lambda`）。
+# Floci は Lambda container を host の Docker daemon で起動するため socket が必要ですが、
+# socket を持つ container は host の root 相当の権限を持つので、通常の `floci:up` では渡しません。
+services:
+  floci:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

@@ -220,7 +220,7 @@ function readSummaryGroup(value: unknown): TimeSummaryGroup | undefined {
  * @param value - Unknown JSON value.
  * @returns The rows, or undefined when any row is invalid.
  */
-function readSummaryGroups(value: unknown): TimeSummaryGroup[] | undefined {
+export function readSummaryGroups(value: unknown): TimeSummaryGroup[] | undefined {
   if (!Array.isArray(value)) return undefined
   const groups = value.map(readSummaryGroup)
   return groups.every((group) => group !== undefined) ? groups.filter((group) => group !== undefined) : undefined

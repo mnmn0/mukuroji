@@ -57,7 +57,13 @@ import {
 import { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../planning'
 import { isMissingFileObjectVersionError } from './file-object-errors'
-import { isAllowedFileContentType, normalizeFileContentType } from './file-content-type'
+import {
+  isAllowedFileContentType,
+  isInlineImageFileContentType,
+  isInlineSafeFileContentType,
+  isInlineVideoFileContentType,
+  normalizeFileContentType,
+} from './file-content-type'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 /** Re-exports the production File upload ceiling for existing Files consumers. */
@@ -583,6 +589,8 @@ export interface FileObjectClient {
     objectVersionId?: string
     /** Download 時の file 名です。 */
     fileName: string
+    /** 検証済み version の canonical media type です。 */
+    contentType: string
     /** Inline または attachment です。 */
     disposition: 'inline' | 'attachment'
   }): Promise<FileVersionAccess>
@@ -847,17 +855,21 @@ export class S3FileObjectClient implements FileObjectClient {
     objectVersionId?: string
     /** Download 時の file 名です。 */
     fileName: string
+    /** 検証済み version の canonical media type です。 */
+    contentType: string
     /** Inline または attachment です。 */
     disposition: 'inline' | 'attachment'
   }): Promise<FileVersionAccess> {
     const status = await this.getScanStatus(input.objectKey, input.objectVersionId)
     requireAvailableScanStatus(status)
-    const disposition = `${input.disposition}; filename*=UTF-8''${encodeURIComponent(input.fileName)}`
+    const dispositionType = resolveAccessDisposition(input.contentType, input.disposition)
+    const disposition = `${dispositionType}; filename*=UTF-8''${encodeURIComponent(input.fileName)}`
     const command = new GetObjectCommand({
       Bucket: this.bucketName,
       Key: input.objectKey,
       ...(input.objectVersionId ? { VersionId: input.objectVersionId } : {}),
       ResponseContentDisposition: disposition,
+      ResponseContentType: input.contentType,
     })
 
     return {
@@ -1059,7 +1071,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     const fileId = createMutationResourceId('file', auditContext, scopeKey)
     const versionId = createMutationResourceId('version', auditContext, scopeKey)
     const target = resolveAttachmentTarget(scope)
-    const objectKey = createFileObjectKey(scope.workspaceId, fileId, versionId, normalized.fileName)
+    const objectKey = createFileObjectKey(scope.workspaceId, fileId, versionId)
     const version = createStoredVersion(
       versionId,
       1,
@@ -1158,7 +1170,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       normalized,
       actor.memberKey,
       now,
-      createFileObjectKey(scope.workspaceId, current.fileId, versionId, normalized.fileName),
+      createFileObjectKey(scope.workspaceId, current.fileId, versionId),
       auditContext?.requestFingerprint,
     )
     const next: StoredFileItem = {
@@ -1200,7 +1212,8 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     if (version.objectVersionId && version.verifiedAt) {
       return { file: toFileAttachment(current, actor), version: toFileVersion(version) }
     }
-    const promotesReplacement = current.currentVersionId !== versionId
+    const promotesReplacement = current.currentVersionId !== versionId &&
+      version.number > requireStoredVersion(current, current.currentVersionId).number
     if (promotesReplacement && current.pendingApprovalCount !== 0) {
       throw new FileProofingError(
         409,
@@ -1229,9 +1242,10 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         : verified.scanStatus,
       verifiedAt: auditContext?.occurredAt ?? new Date().toISOString(),
     }
+    // 先に採番された version の upload が後から完了しても、新しい番号の current は戻しません。
     const staged = {
       ...replaceStoredVersion(current, stagedVersion),
-      currentVersionId: versionId,
+      ...(promotesReplacement ? { currentVersionId: versionId } : {}),
     }
     await this.putFileWithAudit(staged, current.revision, auditContext, {
       eventType: 'file.upload-completed',
@@ -1258,7 +1272,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     actor: FileProofingActor,
     fileId: string,
     versionId: string,
-    disposition: 'inline' | 'attachment',
+    requestedDisposition: 'inline' | 'attachment',
     auditContext?: MutationAuditContext,
   ): Promise<FileVersionAccess> {
     await this.ensureReady()
@@ -1274,6 +1288,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       objectVersionId,
     )
     requireAvailableScanStatus(scanStatus)
+    const disposition = resolveAccessDisposition(version.contentType, requestedDisposition)
     const now = auditContext?.occurredAt ?? new Date().toISOString()
     const historyId = createMutationResourceId(
       'download',
@@ -1337,6 +1352,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       objectKey: version.objectKey,
       objectVersionId,
       fileName: version.fileName,
+      contentType: version.contentType,
       disposition,
     })
   }
@@ -2871,16 +2887,30 @@ function normalizeContentType(value: unknown) {
 
 /** MIME type を browser preview 種別へ変換します。 */
 function resolvePreviewKind(contentType: string): FilePreviewKind {
-  if (contentType.startsWith('image/')) {
+  if (isInlineImageFileContentType(contentType)) {
     return 'image'
   }
   if (contentType === 'application/pdf') {
     return 'pdf'
   }
-  if (contentType.startsWith('video/')) {
+  if (isInlineVideoFileContentType(contentType)) {
     return 'video'
   }
   return 'none'
+}
+
+/**
+ * Downgrades an inline access request to an attachment unless the media type is inline-safe.
+ *
+ * @param contentType - Canonical media type stored on the File version.
+ * @param requested - Disposition requested by the caller.
+ * @returns Disposition the signed access URL carries.
+ */
+function resolveAccessDisposition(
+  contentType: string,
+  requested: 'inline' | 'attachment',
+): 'inline' | 'attachment' {
+  return requested === 'inline' && isInlineSafeFileContentType(contentType) ? 'inline' : 'attachment'
 }
 
 /** Stored version を作成します。 */
@@ -2908,12 +2938,16 @@ function createStoredVersion(
   }
 }
 
-/** File body の非推測 object key を作成します。 */
+/**
+ * File body の非推測 object key を作成します。
+ *
+ * 表示名は DynamoDB と download 時の Content-Disposition が持つため key には含めません。
+ * 日本語などの長い名前で S3 の key 上限 (1,024 byte) を超えないようにするためです。
+ */
 function createFileObjectKey(
   workspaceId: string,
   fileId: string,
   versionId: string,
-  fileName: string,
 ) {
   return [
     'workspaces',
@@ -2921,7 +2955,6 @@ function createFileObjectKey(
     'files',
     encodeURIComponent(fileId),
     encodeURIComponent(versionId),
-    encodeURIComponent(fileName),
   ].join('/')
 }
 

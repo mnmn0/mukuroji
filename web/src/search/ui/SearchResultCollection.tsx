@@ -12,6 +12,7 @@ import { useMemo, type ReactNode } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { resolveSearchResultPath } from '../api'
 import { getSearchColumns, getSearchGroup, getSearchLayoutMode } from '../model/queryState'
+import { resolveSearchResultWbsNumber } from '../model/searchWbsNumbers'
 import {
   resolveWorkspaceSearchResultFieldValue,
   sortWorkspaceSearchResults,
@@ -33,6 +34,8 @@ export type SearchResultCollectionProps = {
   statusLabels?: Readonly<Record<string, string>>
   /** Configuration-derived display names for Work Item Type IDs. */
   workItemTypeLabels?: Readonly<Record<string, string>>
+  /** WBS numbers of Work Item results, by `createWorkItemOutlineKey` key. */
+  wbsNumbers?: ReadonlyMap<string, string>
 }
 
 const entityLabelKeys: Record<SearchEntityType, MessageKey> = {
@@ -88,8 +91,11 @@ export function SearchResultCollection({
   results,
   statusLabels = {},
   workItemTypeLabels = {},
+  wbsNumbers,
 }: SearchResultCollectionProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const resolveWbsNumber = (result: WorkspaceSearchResult) =>
+    resolveSearchResultWbsNumber(result, wbsNumbers)
   const formatStatus: SearchStatusFormatter = (status, result) =>
     formatSearchStatus(status, statusLabels, t, result)
   const formatWorkItemType = (result: WorkspaceSearchResult) =>
@@ -104,18 +110,18 @@ export function SearchResultCollection({
   )
 
   if (mode === 'board') {
-    return <SearchBoard formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} formatWorkItemTypeId={formatWorkItemTypeId} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchBoard formatStatus={formatStatus} resolveWbsNumber={resolveWbsNumber} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} formatWorkItemTypeId={formatWorkItemTypeId} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'calendar') {
-    return <SearchCalendar formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchCalendar formatStatus={formatStatus} resolveWbsNumber={resolveWbsNumber} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'timeline') {
-    return <SearchTimeline formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchTimeline formatStatus={formatStatus} resolveWbsNumber={resolveWbsNumber} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
-  return <SearchTable formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+  return <SearchTable formatStatus={formatStatus} resolveWbsNumber={resolveWbsNumber} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
 }
 
 /**
@@ -126,6 +132,7 @@ export function SearchResultCollection({
  */
 function SearchTable({
   formatStatus,
+  resolveWbsNumber,
   formatSubtitle,
   formatWorkItemType,
   isAiOperationPending,
@@ -136,6 +143,8 @@ function SearchTable({
   t,
 }: {
   formatStatus: SearchStatusFormatter
+  /** Looks up the WBS number of a Work Item result. */
+  resolveWbsNumber: (result: WorkspaceSearchResult) => string | undefined
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
@@ -175,7 +184,7 @@ function SearchTable({
                       type="button"
                     >
                       <span className="block text-sm font-semibold text-[var(--workbench-text)]">
-                        <HighlightedField field="title" result={result} fallback={result.title} />
+                        <SearchWbsNumber wbsNumber={resolveWbsNumber(result)} t={t} /><HighlightedField field="title" result={result} fallback={result.title} />
                       </span>
                       {result.subtitle || result.body ? (
                         <span className="mt-1 line-clamp-2 block text-xs font-medium leading-5 text-[var(--workbench-muted)]">
@@ -207,6 +216,7 @@ function SearchTable({
  */
 function SearchBoard({
   formatStatus,
+  resolveWbsNumber,
   formatSubtitle,
   formatWorkItemType,
   formatWorkItemTypeId,
@@ -218,6 +228,8 @@ function SearchBoard({
   t,
 }: {
   formatStatus: SearchStatusFormatter
+  /** Looks up the WBS number of a Work Item result. */
+  resolveWbsNumber: (result: WorkspaceSearchResult) => string | undefined
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemTypeId: (typeId: string) => string
@@ -253,7 +265,7 @@ function SearchBoard({
           </header>
           <div className="grid gap-2 p-3">
             {group.results.map((result) => (
-              <SearchResultCard formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard formatStatus={formatStatus} resolveWbsNumber={resolveWbsNumber} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -270,6 +282,7 @@ function SearchBoard({
  */
 function SearchCalendar({
   formatStatus,
+  resolveWbsNumber,
   formatSubtitle,
   formatWorkItemType,
   isAiOperationPending,
@@ -279,6 +292,8 @@ function SearchCalendar({
   t,
 }: {
   formatStatus: SearchStatusFormatter
+  /** Looks up the WBS number of a Work Item result. */
+  resolveWbsNumber: (result: WorkspaceSearchResult) => string | undefined
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
@@ -302,7 +317,7 @@ function SearchCalendar({
           </h2>
           <div className="mt-3 grid gap-2">
             {group.results.map((result) => (
-              <SearchResultCard compact formatStatus={formatStatus} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard compact formatStatus={formatStatus} resolveWbsNumber={resolveWbsNumber} formatSubtitle={formatSubtitle} formatWorkItemType={formatWorkItemType} isAiOperationPending={isAiOperationPending} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -319,6 +334,7 @@ function SearchCalendar({
  */
 function SearchTimeline({
   formatStatus,
+  resolveWbsNumber,
   formatSubtitle,
   formatWorkItemType,
   isAiOperationPending,
@@ -328,6 +344,8 @@ function SearchTimeline({
   t,
 }: {
   formatStatus: SearchStatusFormatter
+  /** Looks up the WBS number of a Work Item result. */
+  resolveWbsNumber: (result: WorkspaceSearchResult) => string | undefined
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
@@ -357,7 +375,7 @@ function SearchTimeline({
               <span className="h-3 w-3 rounded-full border-2 border-surface bg-[var(--workbench-primary)] ring-2 ring-tone-99d7cf" />
               <span className="min-w-0">
                 <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">
-                  <HighlightedField field="title" result={result} fallback={result.title} />
+                  <SearchWbsNumber wbsNumber={resolveWbsNumber(result)} t={t} /><HighlightedField field="title" result={result} fallback={result.title} />
                 </span>
                 <span className="mt-1 block truncate text-xs font-medium text-[var(--workbench-muted)]">
                   {t(entityLabelKeys[result.entityType])} {formatSubtitle(result) ? `· ${formatSubtitle(result)}` : ''}
@@ -393,6 +411,7 @@ function SearchTimeline({
 function SearchResultCard({
   compact = false,
   formatStatus,
+  resolveWbsNumber,
   formatSubtitle,
   formatWorkItemType,
   isAiOperationPending,
@@ -403,6 +422,8 @@ function SearchResultCard({
 }: {
   compact?: boolean
   formatStatus: SearchStatusFormatter
+  /** Looks up the WBS number of a Work Item result. */
+  resolveWbsNumber: (result: WorkspaceSearchResult) => string | undefined
   formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   formatWorkItemType: (result: WorkspaceSearchResult) => string | undefined
   /** Whether result navigation is fenced while an AI operation is pending. */
@@ -422,7 +443,7 @@ function SearchResultCard({
       type="button"
     >
       <span className="block text-sm font-semibold leading-5 text-[var(--workbench-text)]">
-        <HighlightedField field="title" result={result} fallback={result.title} />
+        <SearchWbsNumber wbsNumber={resolveWbsNumber(result)} t={t} /><HighlightedField field="title" result={result} fallback={result.title} />
       </span>
       <span className="mt-2 block text-xs font-medium text-[var(--workbench-muted)]">
         {t(entityLabelKeys[result.entityType])}{formatSubtitle(result) ? ` · ${formatSubtitle(result)}` : ''}
@@ -628,4 +649,28 @@ function formatSearchStatus(
   const statusId = readSearchWorkItemStatusKey(status)?.statusId ?? status
   const key = statusLabelKeys[statusId]
   return key ? t(key) : statusId
+}
+
+/**
+ * Shows a Work Item result's WBS number before its title.
+ *
+ * @param props - WBS number and translator.
+ * @returns The number, or nothing for a result without one.
+ */
+function SearchWbsNumber({
+  t,
+  wbsNumber,
+}: {
+  /** Translator for the screen reader label. */
+  t: (key: MessageKey) => string
+  /** WBS number such as `1.2.3`. */
+  wbsNumber: string | undefined
+}) {
+  if (!wbsNumber) return null
+  return (
+    <span className="mr-2 font-mono text-xs font-semibold tabular-nums text-[var(--workbench-muted)]" data-testid="search-result-wbs">
+      <span className="sr-only">{`${t('issues.outline.wbs')} `}</span>
+      {wbsNumber}
+    </span>
+  )
 }

@@ -1,8 +1,38 @@
 import { describe, expect, test } from 'bun:test'
 import {
   InMemoryTimeTrackingRepository,
+  TimeTrackingError,
   TimeTrackingService,
+  type TimeTrackingIdempotencyPort,
 } from './time-tracking'
+
+/**
+ * Creates an in-memory idempotency receipt store that replays a completed key
+ * with the same fingerprint and rejects the key with any other fingerprint.
+ */
+function createIdempotencyStore(): TimeTrackingIdempotencyPort {
+  const receipts = new Map<string, { fingerprint: string; response?: unknown }>()
+  return {
+    async reserveIdempotency(request) {
+      const key = `${request.credentialId}\0${request.idempotencyKey}`
+      const receipt = receipts.get(key)
+      if (!receipt) {
+        receipts.set(key, { fingerprint: request.requestFingerprint })
+        return { status: 'reserved', reservationId: key }
+      }
+      if (receipt.fingerprint !== request.requestFingerprint) {
+        throw new TimeTrackingError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
+      }
+      return receipt.response === undefined ? { status: 'in-progress' } : { status: 'replay', response: receipt.response }
+    },
+    async completeIdempotency(request) {
+      receipts.set(request.reservationId, { fingerprint: request.requestFingerprint, response: request.response })
+    },
+    async releaseIdempotency(request) {
+      receipts.delete(request.reservationId)
+    },
+  }
+}
 
 /** Creates an isolated service fixture with deterministic IDs and clock values. */
 function createFixture() {
@@ -377,5 +407,152 @@ describe('TimeTrackingService', () => {
       userId: 'member-1',
     })
     expect(await service.getActiveTimer('workspace-1', 'member-1')).toBeUndefined()
+  })
+
+  test('replays an entry update whose derived authorization changed between retries', async () => {
+    const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
+      now: () => new Date('2026-08-02T12:00:00.000Z'),
+      createId: (() => {
+        let id = 0
+        return () => `id-${++id}`
+      })(),
+      idempotency: createIdempotencyStore(),
+    })
+    const entry = await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      projectId: 'project-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-02T09:00:00.000Z',
+      endAt: '2026-08-02T10:00:00.000Z',
+      billable: true,
+      currency: 'USD',
+      source: 'manual',
+    }, false)
+    const update = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: entry.id,
+      actorUserId: 'member-1',
+      expectedRevision: entry.revision,
+      workItemId: 'work-item-2',
+      projectId: 'project-2',
+      idempotencyKey: 'move-1',
+    }
+    const first = await service.updateEntry({ ...update, canManageRates: false, authorizedRevision: entry.revision })
+    const retry = await service.updateEntry({ ...update, canManageRates: true, authorizedRevision: first.revision })
+    expect(retry).toEqual(first)
+  })
+
+  test('records a categorized date-and-minutes entry and reports it by category', async () => {
+    const { service } = createFixture()
+    const meeting = await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      projectId: 'project-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      duration: { date: '2026-08-03', minutes: 120, timeZone: 'Asia/Tokyo' },
+      category: 'meeting',
+      billable: false,
+      currency: 'JPY',
+      source: 'manual',
+    }, false)
+    expect(meeting).toMatchObject({
+      startAt: '2026-08-02T15:00:00.000Z',
+      endAt: '2026-08-02T17:00:00.000Z',
+      durationMinutes: 120,
+      durationOnly: true,
+      category: 'meeting',
+    })
+    await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      projectId: 'project-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-03T01:00:00.000Z',
+      endAt: '2026-08-03T01:30:00.000Z',
+      billable: false,
+      currency: 'JPY',
+      source: 'manual',
+    }, false)
+
+    const summary = await service.createSummary({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-03',
+      to: '2026-08-09',
+      timeZone: 'Asia/Tokyo',
+      groupBy: 'category',
+      includeCosts: false,
+    })
+    expect(summary.groups.map(({ key, label, minutes }) => ({ key, label, minutes }))).toEqual([
+      { key: 'meeting', label: 'meeting', minutes: 120 },
+      { key: 'uncategorized', label: 'Uncategorized', minutes: 30 },
+    ])
+    expect(summary.totalMinutes).toBe(150)
+    const csv = await service.createCsv({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-03',
+      to: '2026-08-09',
+      timeZone: 'Asia/Tokyo',
+      groupBy: 'category',
+      includeCosts: false,
+    })
+    expect(csv.split('\n')[1]).toStartWith('meeting,120,')
+
+    const edited = await service.updateEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: meeting.id,
+      actorUserId: 'member-1',
+      canManageRates: false,
+      expectedRevision: 1,
+      category: null,
+    })
+    expect(edited.category).toBeUndefined()
+    expect(edited.durationOnly).toBe(true)
+    const timed = await service.updateEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: meeting.id,
+      actorUserId: 'member-1',
+      canManageRates: false,
+      expectedRevision: 2,
+      startAt: '2026-08-03T00:00:00.000Z',
+      endAt: '2026-08-03T01:00:00.000Z',
+      category: 'review',
+    })
+    expect(timed.durationOnly).toBeUndefined()
+    expect(timed.category).toBe('review')
+  })
+
+  test('rejects invalid date-and-minutes entries', async () => {
+    const { service } = createFixture()
+    const base = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      billable: false,
+      currency: 'JPY',
+      source: 'manual' as const,
+    }
+    const cases: Array<[Parameters<TimeTrackingService['createEntry']>[0], string]> = [
+      [{ ...base, duration: { date: '2026-02-30', minutes: 60, timeZone: 'UTC' } }, 'InvalidDate'],
+      [{ ...base, duration: { date: '2026-08-03', minutes: 0, timeZone: 'UTC' } }, 'InvalidInteger'],
+      [{ ...base, duration: { date: '2026-08-03', minutes: 1.5, timeZone: 'UTC' } }, 'InvalidInteger'],
+      [{ ...base, duration: { date: '2026-08-03', minutes: 60, timeZone: 'Mars/Base' } }, 'InvalidTimeZone'],
+      // 2026-03-08 is 23 hours long in New York.
+      [{ ...base, duration: { date: '2026-03-08', minutes: 24 * 60, timeZone: 'America/New_York' } }, 'TimeEntryExceedsDay'],
+      [{ ...base, startAt: '2026-08-03T00:00:00.000Z', duration: { date: '2026-08-03', minutes: 60, timeZone: 'UTC' } }, 'InvalidRequest'],
+      [{ ...base, startAt: '2026-08-03T00:00:00.000Z' }, 'InvalidRequest'],
+    ]
+    for (const [input, code] of cases) {
+      await expect(service.createEntry(input, false)).rejects.toMatchObject({ code })
+    }
   })
 })

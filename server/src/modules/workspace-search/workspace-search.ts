@@ -1,4 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto'
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+} from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -1507,6 +1514,10 @@ export class DynamoDbWorkspaceSearchClient {
   private readonly bootstrapLocalTable: boolean
   /** Local table 初期化を client instance 内で共有する promise です。 */
   private localTableInitialization?: Promise<void>
+  /** Cursor 暗号化に使う secret です。未指定なら server config の cursor secret を使います。 */
+  private readonly cursorSecret?: string
+  /** Cursor secret から導出した AES-256-GCM key です。初回の cursor 利用時に作ります。 */
+  private cursorKey?: Buffer
 
   constructor(
     tableName = readEnvironment('WORKSPACE_SEARCH_TABLE_NAME') ??
@@ -1514,12 +1525,29 @@ export class DynamoDbWorkspaceSearchClient {
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createDynamoDbClient(),
     bootstrapLocalTable = documentClient === undefined && shouldBootstrapLocalTable(),
+    cursorSecret?: string,
   ) {
     this.tableName = requireText(tableName, 'Workspace search table name')
     this.dynamoDbClient = dynamoDbClient
     this.documentClient = documentClient ??
       createDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
+    if (cursorSecret !== undefined) {
+      this.cursorSecret = requireText(cursorSecret, 'Workspace search cursor secret')
+    }
+  }
+
+  /**
+   * Returns the key that encrypts and authenticates search, saved view and task view cursors.
+   *
+   * The secret is resolved lazily so that projection workers, which never page, do not need it.
+   * Production refuses to start without a 32-byte secret (see `publicApiCursorSecret`).
+   */
+  private getCursorKey(): Buffer {
+    this.cursorKey ??= deriveWorkspaceSearchCursorKey(
+      this.cursorSecret ?? loadServerConfig().publicApiCursorSecret,
+    )
+    return this.cursorKey
   }
 
   /** Search document を idempotent に作成または置換します。 */
@@ -1738,6 +1766,7 @@ export class DynamoDbWorkspaceSearchClient {
     const limit = normalizeLimit(input.limit, WORKSPACE_SEARCH_DEFAULT_LIMIT, WORKSPACE_SEARCH_MAX_LIMIT)
     const queryFingerprint = createSearchQueryFingerprint(filters)
     const cursor = decodeSearchCursor(
+      this.getCursorKey(),
       input.cursor,
       workspaceId,
       viewerUserId,
@@ -1855,7 +1884,7 @@ export class DynamoDbWorkspaceSearchClient {
       results,
       ...(nextRecordKey
         ? {
-            nextCursor: encodeCursor({
+            nextCursor: encodeCursor(this.getCursorKey(), {
               version: 1,
               kind: 'search',
               workspaceId,
@@ -1876,7 +1905,7 @@ export class DynamoDbWorkspaceSearchClient {
     const workspaceId = requireText(input.workspaceId, 'Saved view Workspace ID')
     const viewerUserId = requireText(input.access.viewerUserId, 'Saved view viewer ID')
     const limit = normalizeLimit(input.limit, SAVED_VIEW_DEFAULT_LIMIT, SAVED_VIEW_MAX_LIMIT)
-    const cursor = decodeSavedViewCursor(input.cursor, workspaceId, viewerUserId)
+    const cursor = decodeSavedViewCursor(this.getCursorKey(), input.cursor, workspaceId, viewerUserId)
     const views: StoredSavedWorkspaceView[] = []
     let exclusiveStartKey = cursor
       ? { workspaceId, recordKey: cursor.recordKey }
@@ -1932,7 +1961,7 @@ export class DynamoDbWorkspaceSearchClient {
       )),
       ...(nextRecordKey
         ? {
-            nextCursor: encodeCursor({
+            nextCursor: encodeCursor(this.getCursorKey(), {
               version: 1,
               kind: 'saved-views',
               workspaceId,
@@ -2262,6 +2291,7 @@ export class DynamoDbWorkspaceSearchClient {
     const limit = normalizeLimit(input.limit, TASK_VIEW_DEFAULT_LIMIT, TASK_VIEW_MAX_LIMIT)
     const queryFingerprint = createTaskViewListFingerprint(surface, scope)
     const cursor = decodeTaskViewCursor(
+      this.getCursorKey(),
       input.cursor,
       workspaceId,
       viewerUserId,
@@ -2348,7 +2378,7 @@ export class DynamoDbWorkspaceSearchClient {
       views: responseViews,
       ...(nextRecordKey
         ? {
-            nextCursor: encodeCursor({
+            nextCursor: encodeCursor(this.getCursorKey(), {
               version: 1,
               kind: 'task-views',
               workspaceId,
@@ -5674,13 +5704,14 @@ function createTaskViewListFingerprint(
 }
 
 function decodeSearchCursor(
+  key: Buffer,
   value: string | undefined,
   workspaceId: string,
   viewerUserId: string,
   queryFingerprint: string,
 ) {
   if (!value) return undefined
-  const cursor = decodeCursor(value)
+  const cursor = decodeCursor(key, value)
   if (
     cursor.kind !== 'search' ||
     cursor.workspaceId !== workspaceId ||
@@ -5694,9 +5725,14 @@ function decodeSearchCursor(
   return cursor as SearchCursor
 }
 
-function decodeSavedViewCursor(value: string | undefined, workspaceId: string, viewerUserId: string) {
+function decodeSavedViewCursor(
+  key: Buffer,
+  value: string | undefined,
+  workspaceId: string,
+  viewerUserId: string,
+) {
   if (!value) return undefined
-  const cursor = decodeCursor(value)
+  const cursor = decodeCursor(key, value)
   if (
     cursor.kind !== 'saved-views' ||
     cursor.workspaceId !== workspaceId ||
@@ -5711,13 +5747,14 @@ function decodeSavedViewCursor(value: string | undefined, workspaceId: string, v
 
 /** Decodes and verifies a task view cursor against its viewer and list filter. */
 function decodeTaskViewCursor(
+  key: Buffer,
   value: string | undefined,
   workspaceId: string,
   viewerUserId: string,
   queryFingerprint: string,
 ) {
   if (!value) return undefined
-  const cursor = decodeCursor(value)
+  const cursor = decodeCursor(key, value)
   if (
     cursor.kind !== 'task-views' ||
     cursor.workspaceId !== workspaceId ||
@@ -5738,13 +5775,86 @@ function decodeTaskViewCursor(
   } satisfies TaskViewCursor
 }
 
-function encodeCursor(value: SearchCursor | SavedViewCursor | TaskViewCursor) {
-  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+/** Purpose label that separates the cursor key from other uses of the same server secret. */
+const WORKSPACE_SEARCH_CURSOR_KEY_LABEL = 'mukuroji/workspace-search-cursor/v1'
+/** Envelope version of an encrypted Workspace search cursor. */
+const WORKSPACE_SEARCH_CURSOR_ENVELOPE_VERSION = 'c1'
+/** Longest cursor accepted before decryption; real cursors are well under 1 KiB. */
+const WORKSPACE_SEARCH_CURSOR_MAX_LENGTH = 4_096
+const WORKSPACE_SEARCH_CURSOR_IV_BYTES = 12
+const WORKSPACE_SEARCH_CURSOR_TAG_BYTES = 16
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u
+
+/**
+ * Derives the AES-256-GCM cursor key from a server secret.
+ *
+ * @param secret - Server cursor secret.
+ * @returns A 32-byte key used only for Workspace search cursors.
+ */
+function deriveWorkspaceSearchCursorKey(secret: string): Buffer {
+  return createHmac('sha256', requireText(secret, 'Workspace search cursor secret'))
+    .update(WORKSPACE_SEARCH_CURSOR_KEY_LABEL)
+    .digest()
 }
 
-function decodeCursor(value: string) {
+/**
+ * Encrypts a cursor so that the client can neither read the DynamoDB key it carries nor forge one.
+ *
+ * The page can stop on a row the caller cannot read, so the key must stay opaque: its record key
+ * names the entity type and ID of that row.
+ *
+ * @param key - Key from `deriveWorkspaceSearchCursorKey`.
+ * @param value - Cursor payload.
+ * @returns `c1.<iv>.<ciphertext>.<tag>`, each part base64url.
+ */
+function encodeCursor(key: Buffer, value: SearchCursor | SavedViewCursor | TaskViewCursor) {
+  const iv = randomBytes(WORKSPACE_SEARCH_CURSOR_IV_BYTES)
+  const cipher = createCipheriv('aes-256-gcm', key, iv)
+  cipher.setAAD(Buffer.from(WORKSPACE_SEARCH_CURSOR_ENVELOPE_VERSION, 'utf8'))
+  const ciphertext = Buffer.concat([
+    cipher.update(Buffer.from(JSON.stringify(value), 'utf8')),
+    cipher.final(),
+  ])
+  return [
+    WORKSPACE_SEARCH_CURSOR_ENVELOPE_VERSION,
+    iv.toString('base64url'),
+    ciphertext.toString('base64url'),
+    cipher.getAuthTag().toString('base64url'),
+  ].join('.')
+}
+
+/**
+ * Decrypts and authenticates a cursor made by `encodeCursor`.
+ *
+ * @param key - Key from `deriveWorkspaceSearchCursorKey`.
+ * @param value - Cursor from the client.
+ * @returns The cursor payload; the caller still checks its kind and scope.
+ * @throws WorkspaceSearchError `InvalidSearchCursor` for a malformed, tampered or foreign cursor.
+ */
+function decodeCursor(key: Buffer, value: string) {
   try {
-    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (value.length > WORKSPACE_SEARCH_CURSOR_MAX_LENGTH) throw new TypeError('Cursor is too long.')
+    const parts = value.split('.')
+    if (
+      parts.length !== 4 ||
+      parts[0] !== WORKSPACE_SEARCH_CURSOR_ENVELOPE_VERSION ||
+      !parts.slice(1).every((part) => BASE64URL_PATTERN.test(part))
+    ) {
+      throw new TypeError('Unsupported cursor envelope.')
+    }
+    const iv = Buffer.from(parts[1]!, 'base64url')
+    const ciphertext = Buffer.from(parts[2]!, 'base64url')
+    const tag = Buffer.from(parts[3]!, 'base64url')
+    if (iv.length !== WORKSPACE_SEARCH_CURSOR_IV_BYTES || tag.length !== WORKSPACE_SEARCH_CURSOR_TAG_BYTES) {
+      throw new TypeError('Cursor envelope is malformed.')
+    }
+    const decipher = createDecipheriv('aes-256-gcm', key, iv, {
+      authTagLength: WORKSPACE_SEARCH_CURSOR_TAG_BYTES,
+    })
+    decipher.setAAD(Buffer.from(WORKSPACE_SEARCH_CURSOR_ENVELOPE_VERSION, 'utf8'))
+    decipher.setAuthTag(tag)
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()])
+    const parsed: unknown = JSON.parse(plaintext.toString('utf8'))
     if (!isRecordValue(parsed) || parsed.version !== 1) throw new TypeError('Unsupported cursor version.')
     return parsed
   } catch (error) {

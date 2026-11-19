@@ -142,6 +142,19 @@ export const automationMessages = {
   'automation.template.project.tone.purple': 'パープル',
   'automation.template.project.tone.green': 'グリーン',
   'automation.template.project.tone.yellow': 'イエロー',
+  'automation.template.project.workItems': 'WBS',
+  'automation.template.project.workItemsPlaceholder': '要件定義 | 0 | 5\n  ヒアリング | 0 | 2\n設計 | 5 | 10',
+  'automation.template.project.workItemsHint':
+    '1 行に 1 つの Work Item を「タイトル | 開始（Project 開始からの稼働日） | 日数（稼働日）」で書きます。子は親より半角スペース 2 つ深く字下げします。最大 50 件、4 階層です。',
+  'automation.template.project.workItemsError.format': '{line} 行目: 「タイトル | 開始 | 日数」の形で書いてください。',
+  'automation.template.project.workItemsError.indent':
+    '{line} 行目: 字下げは半角スペース 2 つ単位で、上の行より 1 段までしか深くできません。',
+  'automation.template.project.workItemsError.title': '{line} 行目: タイトルを 256 文字以内で入力してください。',
+  'automation.template.project.workItemsError.days':
+    '{line} 行目: 開始は 0 以上、日数は 1 以上で、どちらも 3650 稼働日までです。',
+  'automation.template.project.workItemsError.limit':
+    '{line} 行目: テンプレートに書ける Work Item は 50 件までです。',
+  'automation.template.project.workItemsError.depth': '{line} 行目: WBS は 4 階層までです。',
   'automation.template.apply': '適用',
   'automation.template.application.title': 'テンプレートを適用',
   'automation.template.application.projectDescription':
@@ -149,6 +162,10 @@ export const automationMessages = {
   'automation.template.application.workflowDescription':
     '選択した scope の Workflow だけを置き換えます。既存のカスタムフィールドは保持されます。',
   'automation.template.application.target': '適用先',
+  'automation.template.application.startDate': 'Project 開始日',
+  'automation.template.application.workItemsNotice':
+    'WBS の Work Item {count} 件も作成します。担当者はあなたで、日付は開始日からの稼働日で決まります。',
+  'automation.template.application.workItemsResult': 'WBS の Work Item を {count} 件作成しました。',
   'automation.template.application.workspace': 'Workspace 既定',
   'automation.template.application.team': 'Team: {team}',
   'automation.template.application.revision': 'revision {revision}',

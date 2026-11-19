@@ -15,10 +15,8 @@ import {
   createAnalyticsRouter,
   type AnalyticsExportFile,
 } from '../../modules/analytics/adapter-in/http/analytics-router'
-import { createDashboardRouter } from '../../modules/analytics/adapter-in/http/dashboard-router'
-import type { DashboardSummaryResponse } from '../../modules/analytics'
 import { CognitoServiceError } from '../../modules/authentication'
-import { ProjectDataError, type ProjectAccessEntry } from '../../modules/directory'
+import { ProjectDataError } from '../../modules/directory'
 import { type AuditEventV1 } from '../../modules/audit/audit'
 import {
   createTeamIssueAuditEntityId,
@@ -29,6 +27,7 @@ import {
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
   AnalyticsError,
+  analyticsFilterIncludesWorkItem,
   createAnalyticsCsv,
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
@@ -41,7 +40,7 @@ import {
 } from '../../modules/analytics/analytics'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
-import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
+import { readBearerAccessToken, readJson } from '../shared/http'
 import {
   getEffectiveProjectAccessList,
   hasEnterpriseWorkspacePermission,
@@ -771,6 +770,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
     teamIds: normalized.filter.teamIds ?? null,
     projectIds: normalized.filter.projectIds ?? null,
     includeArchived: normalized.filter.includeArchived === true,
+    workItems: normalized.filter.workItems ?? null,
   })
   let accessible = cache.get(cacheKey)
   if (!accessible) {
@@ -1151,8 +1151,12 @@ async function readAccessibleAnalyticsWorkItems(
     includeArchived: true,
   }
 
+  const listedTeamIds = filter.workItems === undefined
+    ? undefined
+    : new Set(filter.workItems.map((reference) => reference.teamId))
   const selectedTeams = directory.teams.filter((team) => {
     if (filteredTeamIds !== undefined && !filteredTeamIds.has(team.id)) return false
+    if (listedTeamIds !== undefined && !listedTeamIds.has(team.id)) return false
     if (
       filteredProjectIds === undefined &&
       (principal.isSystemAdmin || authorizedTeamIds.has(team.id))
@@ -1175,6 +1179,7 @@ async function readAccessibleAnalyticsWorkItems(
     for (const workItem of response.issues) {
       if (
         workItem.teamId === team.id &&
+        analyticsFilterIncludesWorkItem(filter, workItem.teamId, workItem.id) &&
         (
           workItem.assignedProjectId === undefined ||
           readableProjectIds.has(workItem.assignedProjectId)
@@ -1221,27 +1226,6 @@ function assertAnalyticsPartitionSize(
  * @param routeApp - Hono application that receives the routes.
  */
 export function registerAnalyticsRoutes(routeApp: Hono): void {
-  /**
-   * DynamoDB に保存されたダッシュボード集計値を返す endpoint です。
-   *
-   * @remarks
-   * `Authorization: Bearer <accessToken>` header を要求し、Cognito で token を検証してから
-   * DynamoDB の集計 item を読みます。React から Lambda/API Gateway 経由で呼ぶ想定の読み取り API です。
-   */
-  routeApp.route('/', createDashboardRouter<
-    WorkspacePrincipal,
-    ProjectAccessEntry,
-    DashboardSummaryResponse
-  >({
-    authenticate: async (accessToken, context) =>
-      await authenticateWorkspacePrincipal(accessToken, undefined, context),
-    getProjectAccesses: getEffectiveProjectAccessList,
-    getSummary: (workspaceId, access) => workspaceDependencies.dashboardSummary.getSummary(workspaceId, access),
-    isAuthenticationError: (error) => error instanceof CognitoServiceError,
-    mapAuthenticationError: toAuthErrorResponse,
-    mapProjectDataError: toProjectDataErrorResponse,
-  }))
-
   routeApp.route('/', createAnalyticsRouter({
     readBearerAccessToken,
     authenticate: async (accessToken, context) =>

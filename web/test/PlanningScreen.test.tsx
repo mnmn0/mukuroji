@@ -371,6 +371,33 @@ describe('PlanningScreen', () => {
     expect(html).toContain(`>${labels.move}</button>`)
   })
 
+  test('renders the Cycle burndown slot only for a selected Cycle in Timeline', () => {
+    const renderCycleBurndown = (cycle: PlanningEntity) => (
+      <div data-testid="cycle-burndown-slot">{cycle.id}</div>
+    )
+    const cycleHtml = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        initialSelectedEntityId="cycle-14"
+        labels={labels}
+        renderCycleBurndown={renderCycleBurndown}
+        snapshot={planningSnapshotFixture}
+      />,
+    )
+    const goalHtml = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        initialSelectedEntityId="goal-activation"
+        labels={labels}
+        renderCycleBurndown={renderCycleBurndown}
+        snapshot={planningSnapshotFixture}
+      />,
+    )
+
+    expect(cycleHtml).toContain('<div data-testid="cycle-burndown-slot">cycle-14</div>')
+    expect(goalHtml).not.toContain('cycle-burndown-slot')
+  })
+
   test('hides rollover execution and explains when the selected source Cycle is closed', () => {
     const snapshot = {
       ...planningSnapshotFixture,
@@ -1112,5 +1139,32 @@ describe('PlanningScreen', () => {
       createFormHtml.lastIndexOf('<button', createButtonIndex),
       createButtonIndex,
     )).toContain(' disabled=""')
+  })
+})
+
+describe('PlanningScreen cross-Project timeline', () => {
+  test('draws visible Planning entities on one time axis grouped by Project', () => {
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        directoryTeams={[{
+          id: 'core-team',
+          name: 'Core',
+          projects: [{ id: 'refero', name: 'Refero app' }],
+        }]}
+        labels={labels}
+        onOpenProject={() => undefined}
+        snapshot={planningSnapshotFixture}
+      />,
+    )
+
+    expect(html).toContain('data-testid="planning-cross-project-timeline"')
+    expect(html).toContain('Refero app')
+    expect(html).toContain('data-testid="cross-project-timeline-open-project-refero"')
+    expect(html).toContain('data-testid="cross-project-timeline-bar-phase-build"')
+    expect(html).toContain('data-testid="cross-project-timeline-bar-milestone-beta"')
+    expect(html).toContain('data-testid="cross-project-timeline-link-dependency-build-beta"')
+    expect(html).toContain('7d later than baseline')
+    expect(html).not.toContain('data-testid="cross-project-timeline-bar-goal-activation"')
   })
 })

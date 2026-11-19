@@ -1,11 +1,63 @@
 /**
+ * RFC 9110 `type/subtype` token pattern without parameters, applied after lowercasing.
+ */
+const MEDIA_TYPE_PATTERN = /^[a-z0-9!#$%&'*+.^_`|~-]+\/[a-z0-9!#$%&'*+.^_`|~-]+$/
+
+/**
+ * Raster image media types that browsers render without executing active content.
+ * SVG and other script-capable image formats are intentionally excluded.
+ */
+const INLINE_IMAGE_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'image/avif',
+])
+
+/**
+ * Video media types the File preview plays through a `<video>` element.
+ */
+const INLINE_VIDEO_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  'video/mp4',
+  'video/webm',
+  'video/quicktime',
+])
+
+/**
+ * Media types that may be served with an `inline` Content-Disposition from the File bucket.
+ */
+const INLINE_SAFE_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  ...INLINE_IMAGE_CONTENT_TYPES,
+  ...INLINE_VIDEO_CONTENT_TYPES,
+  'application/pdf',
+])
+
+/**
+ * Every media type the File writer accepts. Types outside {@link INLINE_SAFE_CONTENT_TYPES}
+ * are always served as attachments.
+ */
+const ALLOWED_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  ...INLINE_SAFE_CONTENT_TYPES,
+  'text/plain',
+  'text/csv',
+  'application/json',
+  'application/zip',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+])
+
+/**
  * Normalizes a caller-supplied File media type to the canonical stored representation.
  *
  * @param value - Non-empty media type text validated by the caller's input boundary.
- * @returns Lowercase media type without parameters or surrounding whitespace.
+ * @returns Lowercase `type/subtype` without parameters or surrounding whitespace, or an empty
+ *   string when the essence is not a single well-formed media type token pair.
  */
 export function normalizeFileContentType(value: string): string {
-  return value.split(';')[0]?.trim().toLowerCase() ?? ''
+  const essence = value.split(';')[0]?.trim().toLowerCase() ?? ''
+  return MEDIA_TYPE_PATTERN.test(essence) ? essence : ''
 }
 
 /**
@@ -15,16 +67,35 @@ export function normalizeFileContentType(value: string): string {
  * @returns Whether the File writer permits the media type.
  */
 export function isAllowedFileContentType(contentType: string): boolean {
-  return contentType.startsWith('image/') ||
-    contentType === 'application/pdf' ||
-    contentType === 'video/mp4' ||
-    contentType === 'video/webm' ||
-    contentType === 'video/quicktime' ||
-    contentType === 'text/plain' ||
-    contentType === 'text/csv' ||
-    contentType === 'application/json' ||
-    contentType === 'application/zip' ||
-    contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
-    contentType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-    contentType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  return ALLOWED_CONTENT_TYPES.has(contentType)
+}
+
+/**
+ * Determines whether a canonical media type may be opened inline from the File bucket origin.
+ *
+ * @param contentType - Canonical media type without parameters.
+ * @returns Whether an `inline` Content-Disposition is safe for the media type.
+ */
+export function isInlineSafeFileContentType(contentType: string): boolean {
+  return INLINE_SAFE_CONTENT_TYPES.has(contentType)
+}
+
+/**
+ * Determines whether a canonical media type is an inline-safe raster image.
+ *
+ * @param contentType - Canonical media type without parameters.
+ * @returns Whether the File preview may render the media type as an image.
+ */
+export function isInlineImageFileContentType(contentType: string): boolean {
+  return INLINE_IMAGE_CONTENT_TYPES.has(contentType)
+}
+
+/**
+ * Determines whether a canonical media type is a video the File preview can play.
+ *
+ * @param contentType - Canonical media type without parameters.
+ * @returns Whether the File preview may render the media type as a video.
+ */
+export function isInlineVideoFileContentType(contentType: string): boolean {
+  return INLINE_VIDEO_CONTENT_TYPES.has(contentType)
 }
