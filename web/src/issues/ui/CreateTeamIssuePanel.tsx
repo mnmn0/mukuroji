@@ -1,4 +1,8 @@
-import type { WorkItemConfiguration } from '@mukuroji/contracts'
+import type {
+  CustomFieldDefinition,
+  CustomFieldValue,
+  WorkItemConfiguration,
+} from '@mukuroji/contracts'
 import { useState } from 'react'
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { type CreateTeamIssueInput } from '../api'
@@ -30,6 +34,7 @@ import {
   issuePriorities,
   resolveIssuePriority,
 } from '../model/teamIssueDisplay'
+import type { WorkItemDuplicateDraft } from '../model/workItemDuplicate'
 
 /**
  * Renders the panel that creates a Work Item in the active Team.
@@ -41,6 +46,7 @@ export function CreateIssuePanel({
   assigneeOptions,
   canCreateUnassignedIssue,
   configuration,
+  duplicateDraft,
   errorMessage,
   locale,
   onCancel,
@@ -55,6 +61,8 @@ export function CreateIssuePanel({
   /** Whether an unassigned Team-owned Work Item is an authorized create destination. */
   canCreateUnassignedIssue: boolean
   configuration?: WorkItemConfiguration
+  /** Values copied from an existing Work Item; the member can edit them before saving. */
+  duplicateDraft?: WorkItemDuplicateDraft
   errorMessage?: string
   locale: Locale
   onCancel: () => void
@@ -68,18 +76,21 @@ export function CreateIssuePanel({
 }) {
   const today = formatLocalDateInputValue()
   const [selectedProjectId, setSelectedProjectId] = useState(
-    canCreateUnassignedIssue ? '' : projects[0]?.id ?? '',
+    resolveInitialProjectId(projects, canCreateUnassignedIssue, duplicateDraft?.assignedProjectId),
   )
+  const [carriesContributors, setCarriesContributors] = useState(true)
+  const duplicatedContributors = duplicateDraft?.contributorAssignments ?? []
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workItemTypes = resolveWorkItemTypes(configuration)
   const creatableWorkItemTypes = workItemTypes.filter((type) => type.status === 'active')
   const hasLoadedWorkItemConfiguration = configuration !== undefined
   const hasCreatableWorkItemType = hasLoadedWorkItemConfiguration &&
     creatableWorkItemTypes.length > 0
-  const contextualWorkItemTypeId = workItemTypeId && creatableWorkItemTypes.some((type) =>
-    type.id === workItemTypeId,
+  const requestedWorkItemTypeId = workItemTypeId ?? duplicateDraft?.workItemTypeId
+  const contextualWorkItemTypeId = requestedWorkItemTypeId && creatableWorkItemTypes.some((type) =>
+    type.id === requestedWorkItemTypeId,
   )
-    ? workItemTypeId
+    ? requestedWorkItemTypeId
     : undefined
   const [selectedWorkItemTypeId, setSelectedWorkItemTypeId] = useState(
     contextualWorkItemTypeId ?? creatableWorkItemTypes[0]?.id ?? 'default',
@@ -103,8 +114,17 @@ export function CreateIssuePanel({
     workflowStatuses[0]?.id ?? ''
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
-    ? createDefaultCustomFieldValues(customFieldDefinitions, selectedProjectId || undefined)
+    ? {
+        ...createDefaultCustomFieldValues(customFieldDefinitions, selectedProjectId || undefined),
+        ...(duplicateDraft && duplicateDraft.workItemTypeId === effectiveWorkItemTypeId
+          ? pickDuplicatedCustomFieldValues(duplicateDraft, customFieldDefinitions)
+          : {}),
+      }
     : {}
+  const initialAssigneeUserId = duplicateDraft &&
+    assigneeOptions.some((member) => member.id === duplicateDraft.assigneeUserId)
+    ? duplicateDraft.assigneeUserId
+    : ''
   const hasCustomFields = customFieldDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, selectedProjectId || undefined),
   ) ?? false
@@ -158,14 +178,23 @@ export function CreateIssuePanel({
             schedule,
             workItemTypeId: effectiveWorkItemTypeId,
             workflowStatusId,
+            ...(carriesContributors && duplicatedContributors.length > 0
+              ? { contributorAssignments: duplicatedContributors }
+              : {}),
           })
         }}
       >
+        {duplicateDraft ? (
+          <p className="text-sm font-medium text-[var(--workbench-muted)]" data-testid="create-issue-duplicate-note">
+            {t('issues.duplicate.note')}
+          </p>
+        ) : null}
         <div className="grid grid-cols-1 gap-3 min-[1180px]:grid-cols-2">
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.create.title')}
             <input
               className="workbench-input h-10 w-full min-w-0 px-3"
+              defaultValue={duplicateDraft?.title}
               name="title"
               placeholder={t('issues.create.titlePlaceholder')}
               required
@@ -220,7 +249,12 @@ export function CreateIssuePanel({
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.create.assignee')}
-            <select className="workbench-input h-10 w-full min-w-0 px-3" name="assigneeUserId" required>
+            <select
+              className="workbench-input h-10 w-full min-w-0 px-3"
+              defaultValue={initialAssigneeUserId}
+              name="assigneeUserId"
+              required
+            >
               <option disabled hidden value="">
                 {t('tasks.create.assigneeSelectPlaceholder')}
               </option>
@@ -233,7 +267,7 @@ export function CreateIssuePanel({
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.dueDate')}
-            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={today} name="dueDate" type="date" />
+            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={duplicateDraft ? duplicateDraft.dueDate : today} name="dueDate" type="date" />
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.status')}
@@ -252,7 +286,7 @@ export function CreateIssuePanel({
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.priority')}
-            <select className="workbench-input h-10 w-full min-w-0 px-3" defaultValue="medium" name="priority">
+            <select className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={duplicateDraft?.priority ?? 'medium'} name="priority">
               {issuePriorities.map((priority) => (
                 <option key={priority} value={priority}>
                   {t(`tasks.priority.${priority}`)}
@@ -265,6 +299,7 @@ export function CreateIssuePanel({
           {t('issues.create.description')}
           <textarea
             className="workbench-input min-h-20 w-full min-w-0 px-3 py-2"
+            defaultValue={duplicateDraft?.description}
             name="description"
             placeholder={t('issues.create.descriptionPlaceholder')}
           />
@@ -281,6 +316,20 @@ export function CreateIssuePanel({
             />
           </div>
         ) : null}
+        {duplicatedContributors.length > 0 ? (
+          <label className="flex min-w-0 items-center gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+            <input
+              checked={carriesContributors}
+              data-testid="create-issue-duplicate-contributors"
+              onChange={(event) => setCarriesContributors(event.target.checked)}
+              type="checkbox"
+            />
+            {t('issues.duplicate.contributors').replace(
+              '{count}',
+              String(duplicatedContributors.length),
+            )}
+          </label>
+        ) : null}
         <div className="flex flex-wrap items-center gap-2">
           <button className="workbench-button-primary h-10 px-4 disabled:cursor-not-allowed disabled:border-slate-300 disabled:bg-slate-300" disabled={!hasCreatableWorkItemType} type="submit">
             {t('issues.create.submit')}
@@ -293,4 +342,44 @@ export function CreateIssuePanel({
       </form>
     </section>
   )
+}
+
+/**
+ * Chooses the Project the create panel starts with.
+ *
+ * @param projects - Projects the member may create into.
+ * @param canCreateUnassignedIssue - Whether a Team-owned Work Item is allowed.
+ * @param duplicatedProjectId - Project of the duplicated Work Item, when there is one.
+ * @returns The initial Project ID, or an empty string for a Team-owned Work Item.
+ */
+function resolveInitialProjectId(
+  projects: ProjectDirectoryTeam['projects'],
+  canCreateUnassignedIssue: boolean,
+  duplicatedProjectId: string | undefined,
+) {
+  if (duplicatedProjectId && projects.some((project) => project.id === duplicatedProjectId)) {
+    return duplicatedProjectId
+  }
+  return canCreateUnassignedIssue ? '' : projects[0]?.id ?? ''
+}
+
+/**
+ * Keeps the duplicated custom field values that the selected Work Item Type still defines.
+ *
+ * Formula fields are computed by the server, so they are not copied.
+ *
+ * @param draft - Duplicate draft.
+ * @param definitions - Fields of the selected Work Item Type.
+ * @returns Values keyed by field ID.
+ */
+function pickDuplicatedCustomFieldValues(
+  draft: WorkItemDuplicateDraft,
+  definitions: readonly CustomFieldDefinition[],
+) {
+  const values: Record<string, CustomFieldValue> = {}
+  for (const definition of definitions) {
+    const value = draft.customFieldValues[definition.id]
+    if (value !== undefined && definition.type !== 'formula') values[definition.id] = value
+  }
+  return values
 }

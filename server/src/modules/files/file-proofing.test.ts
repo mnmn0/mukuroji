@@ -164,6 +164,15 @@ class MemoryDocumentClient {
           if (Number(values[':pendingDelta']) < 0 && Number(existing?.pendingCount ?? 0) < 1) {
             throw createTransactionCancelledError()
           }
+          // A completion Gate's expected counts ride on the summary update.
+          if (
+            values[':expectedPending'] !== undefined &&
+            (Number(existing?.pendingCount ?? 0) !== Number(values[':expectedPending']) ||
+              Number(existing?.approvedCount ?? 0) !== Number(values[':expectedApproved']) ||
+              Number(existing?.changesRequestedCount ?? 0) !== Number(values[':expectedChanges']))
+          ) {
+            throw createTransactionCancelledError()
+          }
           continue
         }
         if (values[':increment'] !== undefined && values[':entryType'] === 'planning-meta') {
@@ -481,17 +490,25 @@ function createAuditContext(
   })
 }
 
-async function createAvailableFile() {
+/**
+ * Creates a File whose first version is uploaded, scanned clean, and completed.
+ *
+ * @param upload - Media type and file name of the first version.
+ * @returns The test client state with the completed upload session.
+ */
+async function createAvailableFile(
+  upload: { contentType: string; fileName: string } = { contentType: 'image/png', fileName: 'review.png' },
+) {
   const state = createClient()
   const session = await state.client.createUpload(
     scope,
     manager,
-    { contentType: 'image/png', fileName: 'review.png', sizeBytes: 1024 },
+    { ...upload, sizeBytes: 1024 },
     createAuditContext('create-file'),
   )
   const objectKey = state.objectClient.lastObjectKey!
   state.objectClient.objects.set(objectKey, {
-    contentType: 'image/png',
+    contentType: upload.contentType,
     objectVersionId: 'immutable-object-version-1',
     sizeBytes: 1024,
     scanStatus: 'available',
@@ -581,6 +598,7 @@ describe('file proofing domain', () => {
       objectKey,
       objectVersionId: verified.objectVersionId,
       fileName: 'proof.png',
+      contentType: 'image/png',
       disposition: 'inline',
     })
 
@@ -895,6 +913,69 @@ describe('file proofing domain', () => {
     ])
   })
 
+  test('signs attachment disposition and the stored media type for non-inline-safe files', async () => {
+    const s3Client = new S3Client({
+      credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+      region: 'us-east-1',
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+    })
+    ;(s3Client as unknown as { send(command: unknown): Promise<Record<string, unknown>> }).send =
+      async (command) => {
+        if (command instanceof GetObjectTaggingCommand) {
+          return { TagSet: [{ Key: 'GuardDutyMalwareScanStatus', Value: 'NO_THREATS_FOUND' }] }
+        }
+        throw new Error('Unexpected S3 command.')
+      }
+    const client = new S3FileObjectClient(s3Client, 'mukuroji-files-test')
+
+    const textAccess = new URL((await client.createAccess({
+      objectKey: 'workspaces/workspace-1/files/file-1/version-1/notes.txt',
+      objectVersionId: 'immutable-s3-version-1',
+      fileName: 'notes.txt',
+      contentType: 'text/plain',
+      disposition: 'inline',
+    })).url)
+    const imageAccess = new URL((await client.createAccess({
+      objectKey: 'workspaces/workspace-1/files/file-1/version-1/proof.png',
+      objectVersionId: 'immutable-s3-version-1',
+      fileName: 'proof.png',
+      contentType: 'image/png',
+      disposition: 'inline',
+    })).url)
+
+    expect(textAccess.searchParams.get('response-content-disposition')).toStartWith('attachment;')
+    expect(textAccess.searchParams.get('response-content-type')).toBe('text/plain')
+    expect(imageAccess.searchParams.get('response-content-disposition')).toStartWith('inline;')
+    expect(imageAccess.searchParams.get('response-content-type')).toBe('image/png')
+  })
+
+  test('rejects script-capable or malformed media types before signing', async () => {
+    const { client } = createClient()
+    for (const contentType of ['image/svg+xml', 'image/png, text/html', 'text/html', 'image/']) {
+      await expect(client.createUpload(
+        scope,
+        manager,
+        { contentType, fileName: 'payload.svg', sizeBytes: 100 },
+      )).rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415 })
+    }
+  })
+
+  test('downgrades inline access to attachment for files without an inline-safe media type', async () => {
+    const { client, session } = await createAvailableFile({ contentType: 'text/plain', fileName: 'notes.txt' })
+
+    const access = await client.createAccess(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      'inline',
+      createAuditContext('preview-text-file'),
+    )
+
+    expect(access.url).toContain('disposition=attachment')
+    expect(session.version.previewKind).toBe('none')
+  })
+
   test('rejects unsupported or oversized upload metadata before signing', async () => {
     const { client } = createClient()
     await expect(client.createUpload(
@@ -960,6 +1041,80 @@ describe('file proofing domain', () => {
       replacement.version.id,
       'attachment',
     )).rejects.toMatchObject({ code: 'FileThreatDetected', status: 423 })
+  })
+
+  test('keeps long Japanese file names out of the S3 object key', async () => {
+    const { client, objectClient } = createClient()
+    const fileName = `${'設計レビュー資料'.repeat(30)}.pdf`
+    const session = await client.createUpload(
+      scope,
+      manager,
+      { contentType: 'application/pdf', fileName, sizeBytes: 1024 },
+      createAuditContext('long-japanese-name'),
+    )
+    const objectKey = objectClient.lastObjectKey!
+
+    expect(session.file.name).toBe(fileName)
+    expect(session.version.fileName).toBe(fileName)
+    expect(objectKey).toBe(
+      `workspaces/${scope.workspaceId}/files/${session.file.id}/${session.version.id}`,
+    )
+    expect(new TextEncoder().encode(objectKey).byteLength).toBeLessThanOrEqual(1024)
+  })
+
+  test('keeps the highest-numbered version current when uploads complete out of order', async () => {
+    const { client, objectClient, session } = await createAvailableFile()
+    const older = await client.createVersionUpload(
+      scope,
+      manager,
+      session.file.id,
+      { contentType: 'image/png', fileName: 'review-v2.png', sizeBytes: 2048 },
+      createAuditContext('slow-v2'),
+    )
+    const olderObjectKey = objectClient.lastObjectKey!
+    const newer = await client.createVersionUpload(
+      scope,
+      manager,
+      session.file.id,
+      { contentType: 'image/png', fileName: 'review-v3.png', sizeBytes: 3072 },
+      createAuditContext('fast-v3'),
+    )
+    const newerObjectKey = objectClient.lastObjectKey!
+    expect(older.version.number).toBe(2)
+    expect(newer.version.number).toBe(3)
+    objectClient.objects.set(newerObjectKey, {
+      contentType: 'image/png',
+      objectVersionId: 'immutable-object-version-3',
+      sizeBytes: 3072,
+      scanStatus: 'available',
+    })
+    objectClient.objects.set(olderObjectKey, {
+      contentType: 'image/png',
+      objectVersionId: 'immutable-object-version-2',
+      sizeBytes: 2048,
+      scanStatus: 'available',
+    })
+
+    const newerCompleted = await client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      newer.version.id,
+      createAuditContext('complete-v3'),
+    )
+    expect(newerCompleted.file.currentVersion.id).toBe(newer.version.id)
+
+    const olderCompleted = await client.completeUpload(
+      scope,
+      manager,
+      session.file.id,
+      older.version.id,
+      createAuditContext('complete-v2'),
+    )
+    expect(olderCompleted.version.id).toBe(older.version.id)
+    expect(olderCompleted.version.scanStatus).toBe('available')
+    expect(olderCompleted.file.currentVersion.id).toBe(newer.version.id)
+    expect(olderCompleted.file.versions.map((version) => version.number)).toEqual([3, 2, 1])
   })
 
   test('does not promote a replacement session while the current version has an approval', async () => {
@@ -2032,6 +2187,91 @@ describe('file proofing domain', () => {
         workflowStatusId: 'qa-approved',
       },
     })
+  })
+
+  test('commits a completing decision only while the approval counts the Gate judged are unchanged', async () => {
+    /**
+     * Requests one approval with a completion transition and approves it.
+     *
+     * @param expectedApprovalSummary - Counts the resolver reports the Gate judged.
+     * @returns The decision promise.
+     */
+    const decide = async (expectedApprovalSummary: { pendingCount: number, approvedCount: number, changesRequestedCount: number }) => {
+      const state = createClient('work-items')
+      const workItemKey = { directoryTeamId: 'workspace-1#team#core', issueId: 'work-item-1' }
+      state.documentClient.items.set(createMemoryKey(workItemKey), {
+        ...workItemKey,
+        workflowSchemaVersion: 1,
+        workflowStatusId: 'review-ready',
+        statusCategory: 'started',
+        revision: 4,
+        updatedAt: '2026-07-12T00:00:00.000Z',
+      })
+      const session = await state.client.createUpload(
+        scope,
+        manager,
+        { contentType: 'application/pdf', fileName: 'gate.pdf', sizeBytes: 20 },
+        createAuditContext('gate-file'),
+      )
+      state.objectClient.objects.set(state.objectClient.lastObjectKey!, {
+        contentType: 'application/pdf',
+        objectVersionId: 'immutable-gate-version-1',
+        sizeBytes: 20,
+        scanStatus: 'available',
+      })
+      await state.client.completeUpload(scope, manager, session.file.id, session.version.id, createAuditContext('gate-complete'))
+      const approval = await state.client.createApproval(
+        scope,
+        manager,
+        {
+          fileId: session.file.id,
+          versionId: session.version.id,
+          reviewerMemberKeys: ['reviewer@example.com'],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          completionTransition: 'qa-approved',
+        },
+        createAuditContext('gate-approval'),
+      )
+      const fence = await state.client.readApprovalSummaryFence(scope)
+      expect(fence.summary).toMatchObject({ pendingCount: 1, approvedCount: 0, changesRequestedCount: 0 })
+      expect(fence.conditionCheck.ConditionCheck).toMatchObject({
+        Key: { recordKey: 'APPROVAL_SUMMARY' },
+        ConditionExpression: '#pending = :pending AND #approved = :approved AND #changes = :changes',
+        ExpressionAttributeValues: { ':pending': 1, ':approved': 0, ':changes': 0 },
+      })
+      return state.client.decideApproval(
+        scope,
+        { memberKey: 'reviewer@example.com', guest: false, canWrite: false, canManage: false },
+        approval.id,
+        { decision: 'approve', expectedRevision: 1 },
+        createAuditContext('gate-decision'),
+        async (completionTransition) => ({
+          workflowStatusId: completionTransition,
+          statusCategory: 'completed',
+          workflowSchemaVersion: 1,
+          expectedRevision: 4,
+          configurationConditionChecks: [],
+          expectedApprovalSummary,
+        }),
+      )
+    }
+
+    expect((await decide({ pendingCount: 1, approvedCount: 0, changesRequestedCount: 0 })).status).toBe('approved')
+    // Another approval was requested after the Gate read the counts.
+    await expect(decide({ pendingCount: 0, approvedCount: 0, changesRequestedCount: 0 })).rejects.toMatchObject({
+      status: 409,
+      code: 'ApprovalCompletionTransitionConflict',
+    })
+  })
+
+  test('accepts a missing approval summary row as zero counts when fencing them', async () => {
+    const state = createClient()
+    const fence = await state.client.readApprovalSummaryFence(scope)
+
+    expect(fence.summary).toMatchObject({ pendingCount: 0, approvedCount: 0, changesRequestedCount: 0 })
+    expect(fence.conditionCheck.ConditionCheck?.ConditionExpression).toBe(
+      'attribute_not_exists(scopeKey) OR (#pending = :pending AND #approved = :approved AND #changes = :changes)',
+    )
   })
 
   test('fails closed when an approval transition resolver is unavailable or cannot resolve the ID', async () => {

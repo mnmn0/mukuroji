@@ -73,7 +73,7 @@ export function buildAuditProjectionWorker(
     workspaceSearchTable,
   } = input.dataStores;
   const { fileBucket, fileProofingTable } = input.fileStorage;
-  const { cognitoUserPoolArn, cognitoUserPoolId, systemAdminGroups } = input.parameters;
+  const { cognitoUserPoolArn, cognitoUserPoolId, notificationEmailSender, systemAdminGroups } = input.parameters;
   const { connectorChannels, webhookDeliveryQueue } = input.workerChannels;
   const connectorSyncQueue = connectorChannels?.connectorSyncQueue;
   const { realtimeWebSocketStage } = input;
@@ -118,6 +118,8 @@ export function buildAuditProjectionWorker(
         FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
         NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
         NOTIFICATION_RETENTION_SECONDS: String(365 * 24 * 60 * 60),
+        // Email is queued only while a sender is configured, so enabling it later sends no backlog.
+        NOTIFICATION_EMAIL_SENDER: notificationEmailSender.valueAsString,
         PLANNING_TABLE_NAME: planningTable.tableName,
         PROCESSED_AUDIT_EVENTS_TABLE_NAME: processedAuditEventsTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,

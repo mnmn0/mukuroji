@@ -1,0 +1,39 @@
+name: タスク
+description: 運用・CI・文書・リファクタリングなど、機能追加でも不具合でもない作業
+title: "[P2] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        タイトルは `[P0]`〜`[P3]` の優先度で始めてください。親 Issue（Tracker）の下で分割する作業にも使います。
+  - type: input
+    id: parent
+    attributes:
+      label: Parent
+      placeholder: "#333"
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: 現状（根拠）
+  - type: textarea
+    id: tasks
+    attributes:
+      label: やること
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: 完了条件
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: 依存・関連

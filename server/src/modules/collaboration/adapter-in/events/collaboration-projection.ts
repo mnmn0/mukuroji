@@ -40,6 +40,8 @@ import {
   parsePlanningUpdateTargetScheduleProjection,
   parseStoredNotificationPreferences,
   slackDeliveryShard,
+  emailDeliveryShard,
+  isEmailNotificationEligible,
   isDocumentDeliveryVisible,
   resolveDocumentDeliveryAccess,
   resolveNotificationRecipientBoundary,
@@ -285,6 +287,8 @@ export type NotificationProjectionDeliveryState = {
   deliveryAfter: string
   /** Delivery plan の frequency です。 */
   deliveryFrequency: NotificationPreferences['frequency']
+  /** Whether the Email transport queue receives this notification; set only when it does. */
+  emailQueued?: true
 }
 
 /** Projection 時点で強整合 read した Work Item scope です。 */
@@ -1430,7 +1434,17 @@ export function createNotificationProjectionDeliveryState(
     deliveryChannels: deliveryPlan.channels.filter((channel) => channel !== 'slack' || isSlackNotificationEligible(preferences, occurredAt)),
     deliveryAfter: deliveryPlan.deliveryAfter,
     deliveryFrequency: deliveryPlan.frequency,
+    ...(isEmailTransportEnabled() && isEmailNotificationEligible(preferences, occurredAt) ? { emailQueued: true } : {}),
   }
+}
+
+/**
+ * Reports whether this deployment configured the Email transport sender.
+ * Without it, Email stays a stored preference and nothing is queued for a later backlog.
+ * @returns Whether a sender address is configured.
+ */
+function isEmailTransportEnabled(): boolean {
+  return Boolean(loadServerConfig().environment.NOTIFICATION_EMAIL_SENDER?.trim())
 }
 
 /** Audit event と recipient 候補から durable notification row を作成します。 */
@@ -1491,6 +1505,12 @@ export function createNotificationProjectionItem(
       slackNextAttemptAt: deliveryState.deliveryAfter,
       slackDeliveryStatus: 'pending',
       slackAttempts: 0,
+    } : {}),
+    ...(deliveryState.emailQueued && deliveryState.deliveryChannels.includes('email') ? {
+      emailQueueShard: emailDeliveryShard(recipientKey),
+      emailNextAttemptAt: deliveryState.deliveryAfter,
+      emailDeliveryStatus: 'pending',
+      emailAttempts: 0,
     } : {}),
     ...(deliveryState.archivedAt ? { archivedAt: deliveryState.archivedAt } : {}),
     occurredAt: event.occurredAt,

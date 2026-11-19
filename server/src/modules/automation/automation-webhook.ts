@@ -2,7 +2,7 @@ import { createHash, createHmac } from 'node:crypto'
 import { lookup as lookupHostname } from 'node:dns/promises'
 import type { ClientRequest } from 'node:http'
 import { request as httpsRequest } from 'node:https'
-import { isIP } from 'node:net'
+import { isIP, type LookupFunction } from 'node:net'
 import {
   GetSecretValueCommand,
   SecretsManagerClient,
@@ -238,9 +238,7 @@ export async function sendAutomationWebhookRequest(
             ...request.headers,
             'Content-Length': String(Buffer.byteLength(request.body)),
           },
-          lookup: (_hostname, _options, callback) => {
-            callback(null, resolvedAddress.address, resolvedAddress.family)
-          },
+          lookup: createPinnedAutomationWebhookLookup(resolvedAddress),
           method: 'POST',
         }, (response) => {
           const status = response.statusCode ?? 0
@@ -275,6 +273,29 @@ export async function sendAutomationWebhookRequest(
           ))
     })
   })
+}
+
+/**
+ * Creates a `net` lookup that only ever answers with the DNS-validated address.
+ *
+ * Since Node.js 20, `autoSelectFamily` is enabled by default, so `net` calls the
+ * lookup with `{ all: true }` and expects an array of addresses. Answering only in
+ * the single-address form fails with `ERR_INVALID_IP_ADDRESS` before connecting,
+ * so this lookup answers in both forms.
+ *
+ * @param resolvedAddress - Destination already validated by the SSRF policy.
+ * @returns A lookup that pins every connection to the validated address.
+ */
+export function createPinnedAutomationWebhookLookup(
+  resolvedAddress: AutomationWebhookResolvedAddress,
+): LookupFunction {
+  return (_hostname, options, callback) => {
+    if (options?.all) {
+      callback(null, [{ address: resolvedAddress.address, family: resolvedAddress.family }])
+      return
+    }
+    callback(null, resolvedAddress.address, resolvedAddress.family)
+  }
 }
 
 async function resolveAutomationWebhookSecret(workspaceId: string, secretAlias: string) {

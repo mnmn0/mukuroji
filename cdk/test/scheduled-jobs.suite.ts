@@ -12,6 +12,7 @@ const scheduledJobIds = [
   'TriageSchedule',
   'AgentRunTriage',
   'SlackNotification',
+  'EmailNotification',
   'AnalyticsSchedule',
   'NotificationSchedule',
   'CycleSchedule',

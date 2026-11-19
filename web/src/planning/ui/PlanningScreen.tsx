@@ -2,6 +2,7 @@ import type {
   CreatePlanningEntityInput,
   PlanningDependency,
   PlanningEntity,
+  PlanningEntityPatch,
   PlanningEntityStatus,
   PlanningEntityType,
   PlanningGoalFramework,
@@ -18,7 +19,7 @@ import type {
   PlanningWorkItemSummary,
   WorkItemAffectedProject,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
@@ -53,12 +54,22 @@ import {
   resolvePlanningCycleRolloverTargets,
 } from '../model/selectors'
 import { createPlanningUpdateTargetKey } from '../model/targetKey'
+import type { CrossProjectTimelineDirectoryTeam } from '../model/crossProjectTimeline'
+import {
+  CrossProjectTimelineChart,
+  type CrossProjectTimelineLabels,
+} from './CrossProjectTimelineChart'
 import {
   PlanningArchivePanel,
   type PlanningArchiveController,
   type PlanningArchiveLabels,
 } from './PlanningArchivePanel'
 import { CyclePlanningPanel, type CyclePlanningLabels, type CyclePlanningPanelProps } from './CyclePlanningPanel'
+import {
+  PlanningEntityEditor,
+  type PlanningEntityEditorLabels,
+} from './PlanningEntityEditor'
+import { collectPlanningOwnerCandidates } from '../model/entityEditor'
 import {
   PlanningLatestUpdateSummary,
   PlanningUpdateDetailPane,
@@ -97,6 +108,8 @@ export type PlanningLabels = PlanningUpdateLabels & {
   emptyTitle: string
   /** Empty state の説明です。 */
   emptyDescription: string
+  /** Project 横断 timeline chart の文言です。 */
+  crossProjectTimeline: CrossProjectTimelineLabels
   /** Timeline section の見出しです。 */
   timelineTitle: string
   /** Timeline section の説明です。 */
@@ -193,6 +206,8 @@ export type PlanningLabels = PlanningUpdateLabels & {
   capacityFull: string
   /** Archive 済みの計画の一覧と復元の文言です。 */
   archivedPlans: PlanningArchiveLabels
+  /** 選択中の entity を編集する form の文言です。 */
+  entityEditor: PlanningEntityEditorLabels
   /** Portfolio section の見出しです。 */
   portfolioTitle: string
   /** Portfolio section の説明です。 */
@@ -305,6 +320,8 @@ export type PlanningScreenProps = {
   canCreateInScope?: (scope: PlanningScope) => boolean
   /** Entity 作成 form に表示する管理可能な Team / Project scope です。 */
   createScopeTeams?: readonly ProjectDirectoryTeam[]
+  /** Readable Project directory used to name groups on the cross-Project timeline. */
+  directoryTeams?: readonly CrossProjectTimelineDirectoryTeam[]
   /** Current user が target の update schedule を管理できるか判定する callback です。 */
   canManageUpdateCadence?: (target: PlanningUpdateTargetView) => boolean
   /** Current user が target に manual update を公開できるか判定する callback です。 */
@@ -367,6 +384,8 @@ export type PlanningScreenProps = {
   onUpdateCycleAutomation?: CyclePlanningPanelProps['onUpdateCycleAutomation']
   /** 複数の Work Item を Cycle に入れる、または外す callback です。 */
   onSetCycleWorkItems?: CyclePlanningPanelProps['onSetCycleWorkItems']
+  /** Timeline で Cycle を選んだときに表示する burndown を描きます。省略すると表示しません。 */
+  renderCycleBurndown?: (cycle: PlanningEntity) => ReactNode
   /** Entity archive callback です。 */
   onArchiveEntity?: (entity: PlanningEntity) => void | Promise<void>
   /** Archive 済みの計画の一覧と復元です。省略すると一覧を表示しません。 */
@@ -377,6 +396,11 @@ export type PlanningScreenProps = {
   onMoveEntity?: (
     entity: PlanningEntity,
     target: PlanningMoveSelection,
+  ) => void | Promise<void>
+  /** 選択中の entity の title・owner・status・health・risk・progress・日付を保存する callback です。 */
+  onUpdateEntity?: (
+    entity: PlanningEntity,
+    patch: PlanningEntityPatch,
   ) => void | Promise<void>
   /** Project または Initiative の recurring update schedule を保存する callback です。 */
   onSaveUpdateCadence?: (
@@ -439,6 +463,7 @@ export function PlanningScreen({
   canPublishUpdate,
   canUpdateWorkItemLink,
   createScopeTeams = [],
+  directoryTeams,
   errorMessage,
   hasMoreUpdateHistory = false,
   initialSelectedEntityId,
@@ -457,6 +482,7 @@ export function PlanningScreen({
   onDeleteWorkItemLink,
   onDuplicateEntity,
   onMoveEntity,
+  onUpdateEntity,
   onLoadMoreUpdateHistory,
   onOpenMilestone,
   onOpenProject,
@@ -474,6 +500,7 @@ export function PlanningScreen({
   onSetCycleWorkItems,
   onViewChange,
   onUpdateWorkItemDependency,
+  renderCycleBurndown,
   snapshot,
   updateCollaboration,
   updateHistoryErrorMessage,
@@ -685,6 +712,7 @@ export function PlanningScreen({
               {activeEntities.length > 0 && activeView === 'timeline' ? (
                 <TimelineView
                   canManageEntity={canManageEntity}
+                  directoryTeams={directoryTeams}
                   canManageWorkItemDependencyEndpoint={canManageWorkItemDependencyEndpoint}
                   labels={labels}
                   isAiOperationPending={isAiOperationPending}
@@ -705,6 +733,7 @@ export function PlanningScreen({
                   onRolloverCycle={onRolloverCycle}
                   onSelectEntity={handleSelectEntity}
                   onUpdateWorkItemDependency={onUpdateWorkItemDependency}
+                  renderCycleBurndown={renderCycleBurndown}
                 />
               ) : null}
               {activeEntities.length > 0 && activeView === 'timeline' ? (
@@ -744,6 +773,18 @@ export function PlanningScreen({
                   onSelectEntity={handleSelectEntity}
                   snapshot={snapshot}
                   updateTargetDetails={updateTargetDetails}
+                />
+              ) : null}
+              {selectedEntity && selectedEntity.type !== 'cycle' ? (
+                <PlanningEntityEditor
+                  disabled={isAiOperationPending}
+                  entity={selectedEntity}
+                  key={`planning-entity-editor:${selectedEntity.id}`}
+                  labels={labels.entityEditor}
+                  ownerCandidates={collectPlanningOwnerCandidates(activeEntities)}
+                  onSave={onUpdateEntity && (canManageEntity?.(selectedEntity) ?? true)
+                    ? onUpdateEntity
+                    : undefined}
                 />
               ) : null}
               <CreateEntityPanel
@@ -796,6 +837,7 @@ export function PlanningScreen({
 function TimelineView({
   canManageEntity,
   canManageWorkItemDependencyEndpoint,
+  directoryTeams,
   isAiOperationPending = false,
   labels,
   onArchiveEntity,
@@ -812,12 +854,15 @@ function TimelineView({
   onRolloverCycle,
   onUpdateWorkItemDependency,
   onSelectEntity,
+  renderCycleBurndown,
   selectedEntity,
   snapshot,
   updateTargetDetails,
 }: {
   canManageEntity?: PlanningScreenProps['canManageEntity']
   canManageWorkItemDependencyEndpoint?: PlanningScreenProps['canManageWorkItemDependencyEndpoint']
+  /** Readable Project directory used to name cross-Project timeline groups. */
+  directoryTeams?: PlanningScreenProps['directoryTeams']
   /** Whether AI review is pending and target selection must remain stable. */
   isAiOperationPending?: boolean
   labels: PlanningLabels
@@ -835,6 +880,7 @@ function TimelineView({
   onRolloverCycle?: PlanningScreenProps['onRolloverCycle']
   onUpdateWorkItemDependency?: PlanningScreenProps['onUpdateWorkItemDependency']
   onSelectEntity: (entityId: string) => void
+  renderCycleBurndown?: PlanningScreenProps['renderCycleBurndown']
   selectedEntity?: PlanningEntity
   snapshot: PlanningSnapshot
   updateTargetDetails: readonly PlanningUpdateTargetDetailView[]
@@ -855,6 +901,17 @@ function TimelineView({
 
   return (
     <div className="grid gap-5" data-testid="planning-timeline">
+      <CrossProjectTimelineChart
+        criticalEntityIds={criticalEntityIds}
+        dependencies={snapshot.dependencies}
+        directory={directoryTeams}
+        disabled={isAiOperationPending}
+        entities={snapshot.entities}
+        entityTypes={labels.entityTypes}
+        labels={labels.crossProjectTimeline}
+        onOpenProject={onOpenProject}
+        onSelectEntity={onSelectEntity}
+      />
       <section className="workbench-panel overflow-hidden">
         <PlanningSectionHeader
           description={labels.timelineDescription}
@@ -937,6 +994,10 @@ function TimelineView({
           {labels.criticalPathDays(snapshot.criticalPath.totalDurationDays)}
         </p>
       </section>
+
+      {detailEntity?.type === 'cycle' && renderCycleBurndown
+        ? renderCycleBurndown(detailEntity)
+        : null}
 
       <div className="grid grid-cols-3 gap-5 max-[1100px]:grid-cols-1">
         <MilestoneEditor

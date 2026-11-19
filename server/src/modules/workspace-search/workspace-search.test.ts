@@ -1,3 +1,4 @@
+import { createDecipheriv, createHmac } from 'node:crypto'
 import { expect, spyOn, test } from 'bun:test'
 import {
   CreateTableCommand,
@@ -12,7 +13,7 @@ import {
   createSearchWorkItemStatusKey,
   createSearchWorkItemTypeKey,
 } from '@mukuroji/contracts'
-import type { TaskViewDefinition } from '@mukuroji/contracts'
+import type { TaskViewDefinition, WorkspaceSearchFilters } from '@mukuroji/contracts'
 import {
   type CreateTaskViewRequest,
   type TaskViewAccessScope,
@@ -68,6 +69,100 @@ test('keeps the unprocessed DynamoDB page behind the opaque search cursor', asyn
     ...input,
     cursor: first.nextCursor,
     filters: { keyword: 'different query' },
+  })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
+})
+
+test('encrypts search cursors and rejects plaintext, tampered or foreign ones', async () => {
+  const documents = ['alpha', 'beta', 'gamma'].map((id) => createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: `team/core/issue/${id}`,
+    title: `${id} title`,
+    url: `/teams/core/issues?issueId=${id}`,
+    teamId: 'core',
+    projectId: 'project-1',
+  })).sort((left, right) => left.recordKey < right.recordKey ? -1 : left.recordKey > right.recordKey ? 1 : 0)
+  const documentClient = createMemoryDocumentClient(documents)
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'workspace-search-cursor-secret-for-tests-0001',
+  )
+  const otherSecretClient = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+    'workspace-search-cursor-secret-for-tests-0002',
+  )
+  const input = {
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-1']),
+      teamIds: new Set(['core']),
+    },
+    limit: 1,
+  }
+
+  const first = await client.search(input)
+  const cursor = first.nextCursor!
+  const decodedParts = cursor.split('.').map((part) => Buffer.from(part, 'base64url').toString('latin1'))
+  expect(cursor.startsWith('c1.')).toBe(true)
+  // The DynamoDB record key names the entity type and ID of the row the page stopped at.
+  for (const text of [cursor, ...decodedParts]) {
+    expect(text).not.toContain('DOCUMENT#')
+    expect(text).not.toContain('team/core/issue')
+  }
+  const second = await client.search({ ...input, cursor })
+  expect(second.results.map((result) => result.id)).toEqual([documents[1]?.entityId])
+
+  const [version, iv, ciphertext, tag] = cursor.split('.')
+  // Decrypt the issued cursor to get a payload whose scope fields all match this query, so the
+  // legacy plaintext form of it is refused only because it is not an encrypted envelope.
+  const decipher = createDecipheriv(
+    'aes-256-gcm',
+    createHmac('sha256', 'workspace-search-cursor-secret-for-tests-0001')
+      .update('mukuroji/workspace-search-cursor/v1')
+      .digest(),
+    Buffer.from(iv!, 'base64url'),
+  )
+  decipher.setAAD(Buffer.from('c1', 'utf8'))
+  decipher.setAuthTag(Buffer.from(tag!, 'base64url'))
+  const payload = Buffer.concat([
+    decipher.update(Buffer.from(ciphertext!, 'base64url')),
+    decipher.final(),
+  ])
+  expect(JSON.parse(payload.toString('utf8'))).toMatchObject({
+    version: 1,
+    kind: 'search',
+    workspaceId: 'workspace-1',
+    viewerUserId: 'viewer@example.com',
+    recordKey: documents[0]!.recordKey,
+  })
+  const forged = payload.toString('base64url')
+  const flipped = Buffer.from(ciphertext!, 'base64url')
+  flipped[0] = flipped[0]! ^ 1
+  const rejected = [
+    forged,
+    `${version}.${iv}.${flipped.toString('base64url')}.${tag}`,
+    `${version}.${iv}.${ciphertext}`,
+    `c2.${iv}.${ciphertext}.${tag}`,
+    `${cursor}${'A'.repeat(4_096)}`,
+  ]
+  for (const value of rejected) {
+    await expect(client.search({ ...input, cursor: value }))
+      .rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
+  }
+  await expect(otherSecretClient.search({ ...input, cursor }))
+    .rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
+  await expect(client.search({
+    ...input,
+    access: { ...input.access, viewerUserId: 'other@example.com' },
+    cursor,
   })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
 })
 
@@ -1239,6 +1334,193 @@ test('stops source-of-truth resolution after a small result page is full', async
   expect(response.nextCursor).toBeString()
 })
 
+test('returns a Work Item title match on the first page behind thousands of comments', async () => {
+  const comments = Array.from({ length: 1_200 }, (_, index) => createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'comment',
+    entityId: `team/core/issue/issue-1/comment/comment-${String(index).padStart(4, '0')}`,
+    parentId: 'team/core/issue/issue-1',
+    title: `Rollout comment ${index}`,
+    url: `/teams/core/issues?issueId=issue-1&commentId=comment-${index}`,
+    teamId: 'core',
+  }))
+  const workItem = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: 'team/core/issue/zz-last',
+    title: 'Rollout checklist',
+    url: '/teams/core/issues?issueId=zz-last',
+    teamId: 'core',
+  })
+  const queriedPrefixes: string[] = []
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([...comments, workItem], {
+      observeQuery: (prefix) => queriedPrefixes.push(prefix),
+    }),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    limit: 1,
+    filters: { keyword: 'rollout' },
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['core']),
+    },
+  })
+
+  expect(response.results.map(({ id }) => id)).toEqual([workItem.entityId])
+  expect(queriedPrefixes).toEqual(['DOCUMENT#work-item#'])
+})
+
+test('reads only the requested entity type prefixes, Work Items before Projects', async () => {
+  const project = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'project',
+    entityId: 'project-1',
+    title: 'Launch project',
+    url: '/projects/project-1',
+    projectId: 'project-1',
+  })
+  const workItem = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: 'team/core/issue/launch',
+    title: 'Launch checklist',
+    url: '/teams/core/issues?issueId=launch',
+    teamId: 'core',
+    projectId: 'project-1',
+  })
+  const document = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'document',
+    entityId: 'document-1',
+    title: 'Launch notes',
+    url: '/documents/document-1',
+    projectId: 'project-1',
+  })
+  const queriedPrefixes: string[] = []
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([document, project, workItem], {
+      observeQuery: (prefix) => queriedPrefixes.push(prefix),
+    }),
+    {} as DynamoDBClient,
+    false,
+  )
+  const filters: WorkspaceSearchFilters = { entityTypes: ['project', 'work-item'] }
+  const input = {
+    workspaceId: 'workspace-1',
+    limit: 1,
+    filters,
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-1']),
+      teamIds: new Set(['core']),
+    },
+  }
+
+  const first = await client.search(input)
+  const second = await client.search({ ...input, cursor: first.nextCursor })
+
+  expect(first.results.map(({ id }) => id)).toEqual([workItem.entityId])
+  expect(second.results.map(({ id }) => id)).toEqual([project.entityId])
+  expect(second.nextCursor).toBeUndefined()
+  expect(queriedPrefixes).toEqual([
+    'DOCUMENT#work-item#',
+    'DOCUMENT#work-item#',
+    'DOCUMENT#project#',
+  ])
+})
+
+test('resumes in the next entity type after the evaluation budget ends a prefix', async () => {
+  const workItems = Array.from({ length: 1_000 }, (_, index) => createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: `team/core/issue/issue-${String(index).padStart(4, '0')}`,
+    title: `Issue ${index}`,
+    url: `/teams/core/issues?issueId=issue-${index}`,
+    teamId: 'core',
+  }))
+  const project = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'project',
+    entityId: 'project-1',
+    title: 'Budget project',
+    url: '/projects/project-1',
+    projectId: 'project-1',
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([...workItems, project]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    workspaceId: 'workspace-1',
+    filters: { keyword: 'budget' },
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-1']),
+      teamIds: new Set(['core']),
+    },
+  }
+
+  const first = await client.search(input)
+  const second = await client.search({ ...input, cursor: first.nextCursor })
+
+  expect(first.results).toEqual([])
+  expect(first.nextCursor).toBeString()
+  expect(second.results.map(({ id }) => id)).toEqual([project.entityId])
+  expect(second.nextCursor).toBeUndefined()
+})
+
+test('ranks title matches above body-only matches within a page', async () => {
+  const bodyMatch = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: 'team/core/issue/aa-body',
+    title: 'Prepare release',
+    body: 'Coordinate the Ｍｉｇｒａｔｉｏｎ window',
+    url: '/teams/core/issues?issueId=aa-body',
+    teamId: 'core',
+  })
+  const titleMatch = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'project',
+    entityId: 'project-1',
+    title: 'Data migration',
+    url: '/projects/project-1',
+    projectId: 'project-1',
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([bodyMatch, titleMatch]),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    filters: { keyword: 'migration' },
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-1']),
+      teamIds: new Set(['core']),
+    },
+  })
+
+  expect(response.results.map(({ id }) => id)).toEqual([titleMatch.entityId, bodyMatch.entityId])
+})
+
 test('keeps unread saved views from advancing the cursor past unprocessed rows', async () => {
   const rows = [
     createStoredSavedViewRow('00-private', 'personal', 'other@example.com'),
@@ -1271,6 +1553,16 @@ test('keeps unread saved views from advancing the cursor past unprocessed rows',
   expect(first.views.map((view) => view.id)).toEqual(['01-shared', '02-shared'])
   expect(first.nextCursor).toBeString()
   expect(second.views.map((view) => view.id)).toEqual(['03-shared'])
+  // A cursor the client builds itself, here one that starts before the private view, is refused.
+  const forged = Buffer.from(JSON.stringify({
+    version: 1,
+    kind: 'saved-views',
+    workspaceId: 'workspace-1',
+    viewerUserId: 'viewer@example.com',
+    recordKey: 'VIEW#',
+  }), 'utf8').toString('base64url')
+  await expect(client.listSavedViews({ ...input, cursor: forged }))
+    .rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
 })
 
 test('keeps personal saved views private and detects stale revisions', async () => {
@@ -1759,6 +2051,13 @@ test('filters task views by surface and scope and binds cursors to that context'
     access,
     cursor: firstPage.nextCursor,
   })).rejects.toMatchObject({ code: 'InvalidTaskViewCursor', status: 400 })
+  await expect(client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'project',
+    scope: { kind: 'project', projectId: 'project-1', teamId: 'core' },
+    access,
+    cursor: Buffer.from(JSON.stringify({ version: 1, kind: 'task-views' }), 'utf8').toString('base64url'),
+  })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
 })
 
 test('reports mutation capabilities only for the exact task view list scope', async () => {

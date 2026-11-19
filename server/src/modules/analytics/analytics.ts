@@ -29,12 +29,15 @@ import {
   type AnalyticsReport,
   type AnalyticsSchedule,
   type AnalyticsSeriesPoint,
+  type AnalyticsSeriesSegment,
   type AnalyticsSnapshot,
   type AnalyticsSnapshotRecord,
   type AnalyticsTableRow,
+  type AnalyticsVisualization,
   type AnalyticsWeighting,
   type AnalyticsWidget,
   type AnalyticsWidgetResult,
+  type AnalyticsWorkItemReference,
   type CanonicalWorkItem,
   type CreateAnalyticsReportInput,
   type UpdateAnalyticsReportInput,
@@ -108,6 +111,7 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       total: 'Total',
       group: 'Group',
       series: 'Series',
+      seriesSegment: 'Series segment',
       tableRow: 'Table row',
     }),
     metricLabels: Object.freeze({
@@ -119,6 +123,8 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'scope-change': 'Scope change',
       velocity: 'Velocity',
       sla: 'SLA attainment',
+      'remaining-scope': 'Remaining scope',
+      'cumulative-flow': 'Cumulative flow',
     }),
     unitLabels: Object.freeze({
       count: 'items',
@@ -161,6 +167,7 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       total: '合計',
       group: 'グループ',
       series: '時系列',
+      seriesSegment: '時系列の内訳',
       tableRow: 'テーブル行',
     }),
     metricLabels: Object.freeze({
@@ -172,6 +179,10 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'scope-change': 'スコープ変更',
       velocity: 'ベロシティ',
       sla: 'SLA達成率',
+      // The embedded Japanese PDF font subset has no glyphs for 残 / 累 / 積 / フ, so these
+      // labels stay in Latin script to keep Japanese PDF exports renderable.
+      'remaining-scope': 'Remaining scope',
+      'cumulative-flow': 'Cumulative flow',
     }),
     unitLabels: Object.freeze({
       count: '件',
@@ -469,7 +480,35 @@ export const ANALYTICS_METRIC_DEFINITIONS: Readonly<Record<
     description:
       'Calculates the percentage of effectively completed Work Items whose lead time is within the configured target.',
   }),
+  'remaining-scope': Object.freeze({
+    key: 'remaining-scope',
+    version: 1,
+    label: 'Remaining scope',
+    unit: 'count',
+    description:
+      'Counts non-archived Work Items that are not completed or canceled at the evaluated instant. Chart points also report the total non-canceled scope and the completed part for burnup; with effort weighting both use the estimate.',
+  }),
+  'cumulative-flow': Object.freeze({
+    key: 'cumulative-flow',
+    version: 1,
+    label: 'Cumulative flow',
+    unit: 'count',
+    description:
+      'Counts non-archived Work Items at the evaluated instant. Chart points split the count by status category.',
+  }),
 })
+
+/** Status category order of cumulative flow segments, from the bottom of the stack. */
+const CUMULATIVE_FLOW_STATUS_CATEGORIES = Object.freeze([
+  'completed',
+  'started',
+  'unstarted',
+  'backlog',
+  'canceled',
+])
+
+/** Maximum number of Work Items one Analytics filter can list. */
+const MAX_ANALYTICS_FILTER_WORK_ITEMS = 500
 
 /** Analytics engine が Work Item ごとに再構成する state です。 */
 type AnalyticsWorkItemState = {
@@ -1075,6 +1114,25 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
         '',
         '',
       ])
+      for (const segment of point.segments ?? []) {
+        rows.push([
+          widget.widgetId,
+          widget.metric,
+          metricLabel,
+          segment.value,
+          '',
+          messages.recordTypes.seriesSegment,
+          segment.key,
+          point.from,
+          point.to,
+          '',
+          '',
+          '',
+          '',
+          '',
+          '',
+        ])
+      }
     }
     for (const row of widget.rows) {
       rows.push([
@@ -1319,8 +1377,99 @@ function normalizeFilter(filter: unknown): AnalyticsFilter {
     ...(filter.includeArchived === undefined
       ? {}
       : { includeArchived: readBoolean(filter.includeArchived, 'Analytics includeArchived') }),
+    ...normalizeAnalyticsFilterWorkItems(filter.workItems),
   }
 }
+
+/**
+ * Normalizes the Work Item allowlist of an Analytics filter into a sorted, de-duplicated list.
+ *
+ * @param value - Untrusted `workItems` filter value.
+ * @returns The normalized property, or an empty object when omitted.
+ */
+function normalizeAnalyticsFilterWorkItems(
+  value: unknown,
+): Partial<Pick<AnalyticsFilter, 'workItems'>> {
+  if (value === undefined) return {}
+  if (!Array.isArray(value)) {
+    throw invalid('AnalyticsFilterInvalid', 'Analytics Work Items must be an array.')
+  }
+  if (value.length > MAX_ANALYTICS_FILTER_WORK_ITEMS) {
+    throw invalid(
+      'AnalyticsFilterInvalid',
+      `Analytics Work Items cannot list more than ${MAX_ANALYTICS_FILTER_WORK_ITEMS} entries.`,
+    )
+  }
+  const unique = new Map<string, AnalyticsWorkItemReference>()
+  for (const candidate of value) {
+    if (!isRecord(candidate)) {
+      throw invalid('AnalyticsFilterInvalid', 'Analytics Work Item reference must be an object.')
+    }
+    const reference = {
+      teamId: readIdentifier(candidate.teamId, 'Analytics Work Item Team ID'),
+      workItemId: readIdentifier(candidate.workItemId, 'Analytics Work Item ID'),
+    }
+    unique.set(workItemKey(reference.teamId, reference.workItemId), reference)
+  }
+  return {
+    workItems: [...unique.values()].sort((left, right) =>
+      left.teamId.localeCompare(right.teamId) || left.workItemId.localeCompare(right.workItemId)
+    ),
+  }
+}
+
+/**
+ * Returns whether a Work Item passes the optional Work Item allowlist of a filter.
+ *
+ * @param filter - Analytics filter.
+ * @param teamId - Owning Team ID.
+ * @param workItemId - Work Item ID.
+ * @returns Whether the filter has no allowlist or lists the Work Item.
+ */
+export function analyticsFilterIncludesWorkItem(
+  filter: Pick<AnalyticsFilter, 'workItems'>,
+  teamId: string,
+  workItemId: string,
+) {
+  if (filter.workItems === undefined) return true
+  let keys = analyticsFilterWorkItemKeyCache.get(filter.workItems)
+  if (!keys) {
+    keys = new Set(filter.workItems.map((reference) =>
+      workItemKey(reference.teamId, reference.workItemId)
+    ))
+    analyticsFilterWorkItemKeyCache.set(filter.workItems, keys)
+  }
+  return keys.has(workItemKey(teamId, workItemId))
+}
+
+/**
+ * Selects the Work Items whose audit history can change an Analytics result for a period.
+ *
+ * Every canonical Work Item mutation writes its audit event in the same transaction and sets
+ * `updatedAt` to the event time. A Work Item last updated before the period start therefore has
+ * no completion, `started` transition, or Project scope change inside the period, and its state at
+ * every evaluation point from the period start through `asOf` equals its current canonical row.
+ * The engine gives the same metric values for it with or without its history, so callers only
+ * need to read the entity timelines of the returned Work Items.
+ *
+ * @param workItems - Canonical Work Items that passed the current ACL.
+ * @param periodFrom - Normalized ISO start of the query period.
+ * @returns The Work Items updated at or after the period start, or all of them when either
+ * instant cannot be parsed.
+ */
+export function selectAnalyticsWorkItemsRequiringHistory<
+  T extends Pick<CanonicalWorkItem, 'updatedAt'>,
+>(workItems: readonly T[], periodFrom: string): T[] {
+  const historyFrom = Date.parse(periodFrom)
+  if (!Number.isFinite(historyFrom)) return [...workItems]
+  return workItems.filter((workItem) => {
+    const updatedAt = Date.parse(workItem.updatedAt)
+    return !Number.isFinite(updatedAt) || updatedAt >= historyFrom
+  })
+}
+
+/** Work Item key sets of filter allowlists, so per-bucket filtering stays a set lookup. */
+const analyticsFilterWorkItemKeyCache = new WeakMap<readonly AnalyticsWorkItemReference[], Set<string>>()
 
 /** Normalizes Team-qualified Work Item Type keys used by Analytics filters. */
 function normalizeAnalyticsWorkItemTypeIds(
@@ -1439,7 +1588,7 @@ function normalizeWidgets(value: unknown): AnalyticsWidget[] {
     }
     const metric = readMetricKey(candidate.metric)
     const visualization = candidate.visualization
-    if (visualization !== undefined && visualization !== 'line' && visualization !== 'bar') {
+    if (visualization !== undefined && !isAnalyticsVisualization(visualization)) {
       throw invalid('AnalyticsWidgetInvalid', 'Analytics widget visualization is invalid.')
     }
     const size = candidate.size
@@ -1465,6 +1614,33 @@ function normalizeWidgets(value: unknown): AnalyticsWidget[] {
       ...(weighting === undefined ? {} : { weighting }),
     }
   })
+}
+
+/**
+ * Returns whether a value is a supported chart visualization.
+ *
+ * @param value - Untrusted visualization.
+ * @returns Whether the value is a supported visualization.
+ */
+function isAnalyticsVisualization(value: unknown): value is AnalyticsVisualization {
+  return value === 'line' ||
+    value === 'bar' ||
+    value === 'area' ||
+    value === 'burndown' ||
+    value === 'burnup'
+}
+
+/**
+ * Returns whether a metric is evaluated from the state at each bucket end.
+ *
+ * @param metric - Metric key.
+ * @returns Whether chart buckets rebuild facts at their own evaluation instant.
+ */
+function isAnalyticsStateMetric(metric: AnalyticsMetricKey) {
+  return metric === 'wip' ||
+    metric === 'overdue' ||
+    metric === 'remaining-scope' ||
+    metric === 'cumulative-flow'
 }
 
 function normalizeGroupBy(value: unknown): AnalyticsGroupBy {
@@ -1853,6 +2029,7 @@ function matchesAnalyticsFilter(
     if (!Number.isFinite(archivedAt) || archivedAt <= asOf) return false
   }
   if (filter.teamIds && !filter.teamIds.includes(state.teamId)) return false
+  if (!analyticsFilterIncludesWorkItem(filter, state.teamId, state.id)) return false
   if (
     filter.projectIds &&
     (state.assignedProjectId === undefined || !filter.projectIds.includes(state.assignedProjectId))
@@ -2004,7 +2181,7 @@ function createMetricSeries(
       periodTo: normalized.periodTo,
       asOf: evaluationAt,
     }
-    const bucketFacts = widget.metric === 'wip' || widget.metric === 'overdue'
+    const bucketFacts = isAnalyticsStateMetric(widget.metric)
       ? createFilteredFacts(
           workItems,
           eventsByWorkItem,
@@ -2027,13 +2204,51 @@ function createMetricSeries(
       widget.slaTargetHours,
       widget.weighting,
     )
+    const segments = createSeriesSegments(widget, bucketFacts, evaluationAt)
     return {
       from: new Date(bucket.from).toISOString(),
       to: new Date(bucket.to).toISOString(),
       value: computation.value,
       sampleSize: computation.sampleSize,
+      ...(segments === undefined ? {} : { segments }),
     }
   })
+}
+
+/**
+ * Builds the per-bucket breakdown of flow metrics.
+ *
+ * @param widget - Widget being charted.
+ * @param facts - Facts rebuilt at the bucket evaluation instant.
+ * @param evaluationAt - Bucket evaluation instant.
+ * @returns Segments for `remaining-scope` and `cumulative-flow`, otherwise `undefined`.
+ */
+function createSeriesSegments(
+  widget: AnalyticsWidget,
+  facts: readonly AnalyticsWorkItemFact[],
+  evaluationAt: number,
+): AnalyticsSeriesSegment[] | undefined {
+  const present = facts.filter((fact) => fact.createdAt <= evaluationAt)
+  if (widget.metric === 'cumulative-flow') {
+    return CUMULATIVE_FLOW_STATUS_CATEGORIES.map((category) => ({
+      key: category,
+      value: present.filter((fact) => fact.state.statusCategory === category).length,
+    }))
+  }
+  if (widget.metric === 'remaining-scope') {
+    const inScope = present.filter((fact) => fact.state.statusCategory !== 'canceled')
+    const completed = inScope.filter((fact) => fact.state.statusCategory === 'completed')
+    // Effort burnup measures scope and completion by the estimate, so burning remaining effort
+    // down never reads as scope removal.
+    const measure = (facts: readonly AnalyticsWorkItemFact[]) => widget.weighting === 'effort'
+      ? facts.reduce((sum, fact) => sum + effortHours(fact.state.plannedEffortMinutes), 0)
+      : facts.length
+    return [
+      { key: 'scope', value: roundMetric(measure(inScope)) },
+      { key: 'completed', value: roundMetric(measure(completed)) },
+    ]
+  }
+  return undefined
 }
 
 function createMetricGroups(
@@ -2066,7 +2281,7 @@ function createMetricGroups(
         periodTo: normalized.periodTo,
         asOf: evaluationAt,
       }
-      const metricFacts = widget.metric === 'wip' || widget.metric === 'overdue'
+      const metricFacts = isAnalyticsStateMetric(widget.metric)
         ? createFilteredFacts(
             workItems,
             eventsByWorkItem,
@@ -2202,6 +2417,15 @@ export function resolveAnalyticsMetricDefinition(
       description: 'Normalizes the estimates, in hours, of effective completions in the period to a seven-calendar-day rate.',
     }
   }
+  if (metric === 'remaining-scope') {
+    return {
+      ...definition,
+      label: 'Remaining scope (effort)',
+      unit: 'hours',
+      description:
+        'Sums the remaining effort, in hours, of non-archived Work Items that are not completed or canceled at the evaluated instant. Remaining effort uses the recorded value, otherwise the estimate; Work Items without either count as zero.',
+    }
+  }
   return definition
 }
 
@@ -2217,8 +2441,16 @@ function readWidgetWeighting(value: unknown, metric: AnalyticsMetricKey): Analyt
   if (value !== 'count' && value !== 'effort') {
     throw invalid('AnalyticsWidgetInvalid', 'Analytics widget weighting must be count or effort.')
   }
-  if (value === 'effort' && metric !== 'throughput' && metric !== 'velocity') {
-    throw invalid('AnalyticsWidgetInvalid', 'Only throughput and velocity widgets can be weighted by effort.')
+  if (
+    value === 'effort' &&
+    metric !== 'throughput' &&
+    metric !== 'velocity' &&
+    metric !== 'remaining-scope'
+  ) {
+    throw invalid(
+      'AnalyticsWidgetInvalid',
+      'Only throughput, velocity, and remaining scope widgets can be weighted by effort.',
+    )
   }
   return value
 }
@@ -2355,6 +2587,42 @@ function calculateMetric(
       warnings: invalidDueDateCount === 0
         ? []
         : [`${invalidDueDateCount} Work Item due date value(s) were invalid and excluded.`],
+    }
+  }
+  if (metric === 'remaining-scope') {
+    const samples = facts.filter((fact) =>
+      fact.createdAt <= evaluationAt &&
+      fact.state.statusCategory !== 'completed' &&
+      fact.state.statusCategory !== 'canceled'
+    )
+    if (weighting === 'effort') {
+      const remainingMinutes = samples.map((fact) => deriveAnalyticsRemainingEffortMinutes(fact.state))
+      const unestimated = remainingMinutes.filter((minutes) => minutes === undefined).length
+      return {
+        value: roundMetric(remainingMinutes.reduce<number>((sum, minutes) => sum + effortHours(minutes), 0)),
+        sampleSize: samples.length,
+        evidence: samples.map((fact, index) =>
+          createFactEvidence(fact, metric, evaluationAt, effortHours(remainingMinutes[index]))
+        ),
+        warnings: unestimated === 0
+          ? []
+          : [`${unestimated} remaining Work Item(s) had no estimate and counted as zero effort.`],
+      }
+    }
+    return {
+      value: samples.length,
+      sampleSize: samples.length,
+      evidence: samples.map((fact) => createFactEvidence(fact, metric, evaluationAt)),
+      warnings: [],
+    }
+  }
+  if (metric === 'cumulative-flow') {
+    const samples = facts.filter((fact) => fact.createdAt <= evaluationAt)
+    return {
+      value: samples.length,
+      sampleSize: samples.length,
+      evidence: samples.map((fact) => createFactEvidence(fact, metric, evaluationAt)),
+      warnings: [],
     }
   }
   if (metric === 'scope-change') {
@@ -4683,7 +4951,9 @@ function readMetricKey(value: unknown): AnalyticsMetricKey {
     value === 'overdue' ||
     value === 'scope-change' ||
     value === 'velocity' ||
-    value === 'sla'
+    value === 'sla' ||
+    value === 'remaining-scope' ||
+    value === 'cumulative-flow'
   ) return value
   throw invalid('AnalyticsMetricInvalid', 'Analytics metric key is invalid.')
 }

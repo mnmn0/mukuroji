@@ -660,7 +660,7 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 
-  if (error.code === 'InvalidProjectQuickAccessInput') {
+  if (error.code === 'InvalidProjectQuickAccessInput' || error.code === 'InvalidMemberPreferencesInput') {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 
@@ -785,7 +785,7 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 503)
   }
 
-  if (error.code === 'ProjectQuickAccessConflict') {
+  if (error.code === 'ProjectQuickAccessConflict' || error.code === 'MemberPreferencesConflict') {
     return c.json({ code: error.code, message: error.message }, 409)
   }
 
@@ -835,6 +835,7 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
   if (
     error.code === 'InvalidProjectDirectory' ||
     error.code === 'InvalidProjectQuickAccess' ||
+    error.code === 'InvalidMemberPreferences' ||
     error.code === 'InvalidTeamIssue'
   ) {
     console.error(error)

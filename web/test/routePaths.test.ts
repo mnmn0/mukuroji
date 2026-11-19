@@ -20,6 +20,7 @@ import { TeamTriagePage } from '../src/pages/workspace/TeamTriagePage'
 import { TeamFactoryBoardPage } from '../src/pages/workspace/TeamFactoryBoardPage'
 import { TeamIssuePage } from '../src/pages/workspace/TeamIssuePage'
 import { TeamOverviewPage } from '../src/pages/workspace/TeamOverviewPage'
+import { ProjectOverviewPage } from '../src/pages/workspace/ProjectOverviewPage'
 import { DocumentPage } from '../src/documents/DocumentPage'
 import { RequestIntakePage } from '../src/requests/RequestIntakePage'
 import { SearchPage } from '../src/search/SearchPage'
@@ -33,6 +34,7 @@ import {
   createQuickAccessProjectsPath,
   createPublicRequestPath,
   createProjectIssuesPath,
+  createProjectOverviewPath,
   createRequestsPath,
   createTeamIssuesPath,
   createTeamTriagePath,
@@ -116,6 +118,12 @@ describe('Work Item detail paths', () => {
   test('keeps assigned Work Items scoped by project, team, and issue', () => {
     expect(createProjectIssuesPath('shared launch', 'design/team', 'issue/1')).toBe(
       '/projects/shared%20launch/issues?teamId=design%2Fteam&issueId=issue%2F1',
+    )
+  })
+
+  test('keeps a Project overview qualified by its owning Team', () => {
+    expect(createProjectOverviewPath('shared launch', 'design/team')).toBe(
+      '/projects/shared%20launch/overview?teamId=design%2Fteam',
     )
   })
 
@@ -298,6 +306,7 @@ describe('Workspace route pages', () => {
         component: TaskPage,
         path: '/projects/refero/issues?teamId=core-team',
       },
+      { component: ProjectOverviewPage, path: '/projects/refero/overview?teamId=core-team' },
     ])
   })
 })

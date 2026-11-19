@@ -20,6 +20,7 @@ import {
   isWorkItemProgressMode,
   isWorkItemHierarchyRank,
   isWorkItemParentCompletionPolicy,
+  isWorkItemCompletionGateRequirement,
   DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_JOB_ROLE_LIMIT,
@@ -37,6 +38,9 @@ import {
   type WorkflowStatusCategory,
   type WorkItemConfiguration,
   type WorkItemConfigurationScopeType,
+  type WorkItemCompletionGateErrorResponse,
+  type WorkItemCompletionGatePolicy,
+  type WorkItemCompletionGateUnmetCondition,
   type WorkItemJobRoleDefinition,
   type WorkItemRelation,
   type WorkItemParentMutationResponse,
@@ -97,12 +101,142 @@ export class WorkItemConfigurationError extends Error {
   }
 }
 
+/**
+ * Rejects moving a Work Item into the `completed` category while a required completion Gate
+ * condition is unmet; the API returns `409 WorkItemCompletionGateNotSatisfied` with the list.
+ */
+export class WorkItemCompletionGateError extends WorkItemConfigurationError {
+  /** Required conditions that blocked the completion, in display order. */
+  readonly unmetConditions: readonly WorkItemCompletionGateUnmetCondition[]
+
+  /**
+   * Creates the error for the blocking conditions.
+   *
+   * @param unmetConditions - Required conditions that are not met.
+   */
+  constructor(unmetConditions: readonly WorkItemCompletionGateUnmetCondition[]) {
+    super(
+      409,
+      'WorkItemCompletionGateNotSatisfied',
+      `The Team's completion Gate is not satisfied: ${unmetConditions.map((condition) => condition.condition).join(', ')}.`,
+    )
+    this.unmetConditions = unmetConditions
+  }
+
+  /**
+   * Builds the Team API response body.
+   *
+   * @returns The stable error body with the unmet conditions.
+   */
+  toResponseBody(): WorkItemCompletionGateErrorResponse {
+    return {
+      code: 'WorkItemCompletionGateNotSatisfied',
+      message: this.message,
+      unmetConditions: this.unmetConditions.map((condition) => ({ ...condition })),
+    }
+  }
+}
+
 /** Work Item transaction が definition の同時変更を検出する guard です。 */
 export type WorkItemConfigurationGuard = {
   /** Configuration table の partition key です。 */
   scopeKey: string
   /** 0 は CONFIG row が存在しないことを表します。 */
   revision: number
+}
+
+/** One endpoint's side of a relation change, recorded as one audit event. */
+type RelationAuditChange = {
+  /** Endpoint Work Item whose activity records the change. */
+  workItemId: string
+  /** Event type naming the change from the endpoint's point of view. */
+  eventType: WorkItemRelationAuditEventType
+  /** Relation type from the endpoint's point of view. */
+  relationType: WorkItemRelationType
+  /** Other endpoint of an added or removed link; omitted for a parent change. */
+  relatedWorkItemId?: string
+  /** Parent before a parent change; omitted when the child had no parent. */
+  previousParentWorkItemId?: string
+  /** Parent after a parent change; omitted when the parent was removed. */
+  parentWorkItemId?: string
+}
+
+/** Activity fallback summaries for the relation audit event types. */
+const RELATION_AUDIT_SUMMARIES: Record<WorkItemRelationAuditEventType, string> = {
+  'work-item.parent-changed': 'The parent was changed.',
+  'work-item.child-added': 'A child was added.',
+  'work-item.child-removed': 'A child was removed.',
+  'work-item.blocker-added': 'A blocker was added.',
+  'work-item.blocker-removed': 'A blocker was removed.',
+  'work-item.blocking-added': 'This Work Item now blocks another Work Item.',
+  'work-item.blocking-removed': 'This Work Item no longer blocks another Work Item.',
+  'work-item.relation-added': 'A related Work Item was linked.',
+  'work-item.relation-removed': 'A related Work Item was unlinked.',
+}
+
+/**
+ * Builds the canonical audit entity ID of a Team-owned Work Item.
+ *
+ * Matches the `team/<teamId>/issue/<issueId>` ID the Work Item activity query reads.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Team-local Work Item ID.
+ * @returns The audit entity ID.
+ */
+function createRelationAuditEntityId(teamId: string, workItemId: string) {
+  return `team/${teamId}/issue/${workItemId}`
+}
+
+/**
+ * Describes one stored relation row being added or removed as an audit change on its source.
+ *
+ * @param relation - Directed relation row; its source is the endpoint that records the event.
+ * @param change - Whether the row is added or removed.
+ * @returns The endpoint change to record.
+ */
+function describeRelationAuditChange(
+  relation: Pick<WorkItemRelation, 'sourceWorkItemId' | 'targetWorkItemId' | 'type'>,
+  change: 'added' | 'removed',
+): RelationAuditChange {
+  const related = relation.targetWorkItemId
+  if (relation.type === 'parent') {
+    return {
+      workItemId: relation.sourceWorkItemId,
+      eventType: 'work-item.parent-changed',
+      relationType: 'parent',
+      ...(change === 'added' ? { parentWorkItemId: related } : { previousParentWorkItemId: related }),
+    }
+  }
+  return {
+    workItemId: relation.sourceWorkItemId,
+    eventType: relationAuditEventType(relation.type, change),
+    relationType: relation.type,
+    relatedWorkItemId: related,
+  }
+}
+
+/**
+ * Names a non-parent relation change from its source endpoint's point of view.
+ *
+ * @param type - Relation type stored with the endpoint as its source.
+ * @param change - Whether the link was added or removed.
+ * @returns The audit event type.
+ */
+function relationAuditEventType(
+  type: Exclude<WorkItemRelationType, 'parent'>,
+  change: 'added' | 'removed',
+): WorkItemRelationAuditEventType {
+  switch (type) {
+    case 'child':
+      return change === 'added' ? 'work-item.child-added' : 'work-item.child-removed'
+    case 'blockedBy':
+      return change === 'added' ? 'work-item.blocker-added' : 'work-item.blocker-removed'
+    case 'blocks':
+      return change === 'added' ? 'work-item.blocking-added' : 'work-item.blocking-removed'
+    case 'related':
+    case 'duplicate':
+      return change === 'added' ? 'work-item.relation-added' : 'work-item.relation-removed'
+  }
 }
 
 /**
@@ -315,6 +449,30 @@ export type MutateWorkItemRelationInput = {
   targetAssignedProjectId?: string
 }
 
+/** Audit input recorded in the same transaction as a relation mutation. */
+export type WorkItemRelationAuditInput = {
+  /** Request audit context shared by every endpoint event of the mutation. */
+  context: MutationAuditContext
+  /** Workspace member key that the Work Item activity shows as the actor. */
+  actorMemberKey: string
+}
+
+/** Audit event types recorded on each endpoint when a Work Item relation changes. */
+const WORK_ITEM_RELATION_AUDIT_EVENT_TYPES = [
+  'work-item.parent-changed',
+  'work-item.child-added',
+  'work-item.child-removed',
+  'work-item.blocker-added',
+  'work-item.blocker-removed',
+  'work-item.blocking-added',
+  'work-item.blocking-removed',
+  'work-item.relation-added',
+  'work-item.relation-removed',
+] as const
+
+/** One audit event type recorded when a Work Item relation changes. */
+type WorkItemRelationAuditEventType = typeof WORK_ITEM_RELATION_AUDIT_EVENT_TYPES[number]
+
 /** Relation types projected into a Work Item's `relationIds`; `child` is excluded. */
 export const WORK_ITEM_PROJECTED_RELATION_TYPES: readonly WorkItemRelationType[] = [
   'blockedBy',
@@ -394,8 +552,10 @@ type RelationTransactionInput = {
   endpoints: readonly RelationTransactionEndpoint[]
   /** Relation row puts and deletes. */
   edgeMutations: NonNullable<TransactWriteCommandInput['TransactItems']>
-  /** Configuration guards appended after every other item. */
+  /** Configuration guards appended after the relation rows. */
   configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
+  /** Endpoint audit events appended after every other item. */
+  auditPuts: NonNullable<TransactWriteCommandInput['TransactItems']>
   /** Classifies a canceled transaction after re-reading its fences. */
   classifyCancellation: () => Promise<Error>
 }
@@ -473,18 +633,37 @@ export type WorkItemConfigurationClient = {
    * @returns Current positive revision, or zero before graph metadata exists.
    */
   getRelationGraphRevision?(workspaceId: string, teamId: string): Promise<number>
-  /** Reciprocal relation を単一 transaction で作成します。 */
+  /**
+   * Reciprocal relation を単一 transaction で作成します。
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns both endpoints.
+   * @param input - Relation mutation input.
+   * @param configurationConditionChecks - Configuration guards committed with the relation.
+   * @param audit - Request audit input for the endpoint events committed with the relation.
+   * @returns The created relation pair and the next graph revision.
+   */
   createRelation(
     workspaceId: string,
     teamId: string,
     input: MutateWorkItemRelationInput,
     configurationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    audit?: WorkItemRelationAuditInput,
   ): Promise<WorkItemRelationMutationResponse>
-  /** Reciprocal relation を単一 transaction で削除します。 */
+  /**
+   * Reciprocal relation を単一 transaction で削除します。
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns both endpoints.
+   * @param input - Relation mutation input.
+   * @param audit - Request audit input for the endpoint events committed with the deletion.
+   * @returns The deleted relation pair and the next graph revision.
+   */
   deleteRelation(
     workspaceId: string,
     teamId: string,
     input: MutateWorkItemRelationInput,
+    audit?: WorkItemRelationAuditInput,
   ): Promise<WorkItemRelationMutationResponse>
   /**
    * Sets, replaces, or removes a Work Item's single parent as one atomic transaction.
@@ -493,6 +672,7 @@ export type WorkItemConfigurationClient = {
    * @param teamId - Team that owns every endpoint.
    * @param input - Child, observed current parent, and requested next parent snapshots.
    * @param configurationConditionChecks - Configuration guards committed with the new parent link.
+   * @param audit - Request audit input for the endpoint events committed with a parent change.
    * @returns The previous and next parent IDs with the resulting graph revision.
    */
   replaceParent(
@@ -500,6 +680,7 @@ export type WorkItemConfigurationClient = {
     teamId: string,
     input: ReplaceWorkItemParentInput,
     configurationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    audit?: WorkItemRelationAuditInput,
   ): Promise<WorkItemParentMutationResponse>
 }
 
@@ -632,6 +813,9 @@ export function validateWorkItemConfiguration(
     throw invalidConfiguration('Parent completion policy must be warn or reject.')
   }
   const parentCompletionPolicy = value.parentCompletionPolicy
+  const completionGate = value.completionGate === undefined
+    ? undefined
+    : readWorkItemCompletionGatePolicy(value.completionGate)
 
   return {
     scopeType,
@@ -645,10 +829,35 @@ export function validateWorkItemConfiguration(
     ...(jobRoles === undefined ? {} : { jobRoles }),
     ...(progressMode === undefined ? {} : { progressMode }),
     ...(parentCompletionPolicy === undefined ? {} : { parentCompletionPolicy }),
+    ...(completionGate === undefined ? {} : { completionGate }),
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
   }
+}
+
+/**
+ * Validates a Team completion Gate policy.
+ *
+ * @param value - Untrusted `completionGate` value.
+ * @returns The policy with only the conditions it sets.
+ * @throws WorkItemConfigurationError when the value is not an object of known conditions and requirements.
+ */
+function readWorkItemCompletionGatePolicy(value: unknown): WorkItemCompletionGatePolicy {
+  if (!isRecord(value)) {
+    throw invalidConfiguration('Completion Gate must be an object.')
+  }
+  const policy: WorkItemCompletionGatePolicy = {}
+  for (const [key, requirement] of Object.entries(value)) {
+    if (key !== 'acceptanceCriteria' && key !== 'noPendingApprovals' && key !== 'humanApproval') {
+      throw invalidConfiguration(`Completion Gate condition "${key}" is not supported.`)
+    }
+    if (!isWorkItemCompletionGateRequirement(requirement)) {
+      throw invalidConfiguration(`Completion Gate condition "${key}" must be off, warn, or required.`)
+    }
+    policy[key] = requirement
+  }
+  return policy
 }
 
 /**
@@ -1357,6 +1566,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param teamId - Team that owns both endpoints.
    * @param input - Normalizable relation mutation input.
    * @param configurationConditionChecks - Configuration guards committed with the relation.
+   * @param audit - Request audit input for the endpoint events committed with the relation.
    * @returns The created relation pair and the next graph revision.
    */
   async createRelation(
@@ -1364,8 +1574,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     teamId: string,
     input: MutateWorkItemRelationInput,
     configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+    audit?: WorkItemRelationAuditInput,
   ) {
     await this.ensureTable()
+    this.assertRelationAuditInput(workspaceId, audit)
     const normalized = normalizeRelationInput(input)
     if (normalized.sourceWorkItemId === normalized.targetWorkItemId) {
       throw new WorkItemConfigurationError(400, 'WorkItemRelationSelf', 'A Work Item cannot relate to itself.')
@@ -1441,6 +1653,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         createRelationPut(this.tableName, workspaceId, teamId, reciprocalRelation),
       ],
       configurationConditionChecks,
+      auditPuts: this.createRelationAuditPuts(workspaceId, teamId, audit, createdAt, graph.revision + 1, [
+        describeRelationAuditChange(relation, 'added'),
+        describeRelationAuditChange(reciprocalRelation, 'added'),
+      ]),
       classifyCancellation: () => this.classifyRelationTransactionCancellation(
         workspaceId,
         teamId,
@@ -1459,10 +1675,17 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param workspaceId - Workspace that owns the relation graph.
    * @param teamId - Team that owns both endpoints.
    * @param input - Normalizable relation mutation input; reciprocal types are accepted.
+   * @param audit - Request audit input for the endpoint events committed with the deletion.
    * @returns The deleted relation pair and the next graph revision.
    */
-  async deleteRelation(workspaceId: string, teamId: string, input: MutateWorkItemRelationInput) {
+  async deleteRelation(
+    workspaceId: string,
+    teamId: string,
+    input: MutateWorkItemRelationInput,
+    audit?: WorkItemRelationAuditInput,
+  ) {
     await this.ensureTable()
+    this.assertRelationAuditInput(workspaceId, audit)
     const normalized = normalizeRelationInput(input, true)
     const graph = await this.readRelationGraphState(workspaceId, teamId)
     assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
@@ -1520,6 +1743,17 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         createRelationDelete(this.tableName, workspaceId, teamId, reciprocalRelation),
       ],
       configurationConditionChecks: [],
+      auditPuts: this.createRelationAuditPuts(
+        workspaceId,
+        teamId,
+        audit,
+        new Date().toISOString(),
+        graph.revision + 1,
+        [
+          describeRelationAuditChange(relation, 'removed'),
+          describeRelationAuditChange(reciprocalRelation, 'removed'),
+        ],
+      ),
       classifyCancellation: () => this.classifyRelationTransactionCancellation(
         workspaceId,
         teamId,
@@ -1539,6 +1773,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param teamId - Team that owns every endpoint.
    * @param input - Child, observed current parent, and requested next parent snapshots.
    * @param configurationConditionChecks - Configuration guards committed with the new parent link.
+   * @param audit - Request audit input for the endpoint events committed with a parent change.
    * @returns The previous and next parent IDs with the resulting graph revision.
    */
   async replaceParent(
@@ -1546,8 +1781,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     teamId: string,
     input: ReplaceWorkItemParentInput,
     configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+    audit?: WorkItemRelationAuditInput,
   ): Promise<WorkItemParentMutationResponse> {
     await this.ensureTable()
+    this.assertRelationAuditInput(workspaceId, audit)
     const normalized = normalizeReplaceParentInput(input)
     const child = normalized.child
     if (normalized.nextParent?.workItemId === child.workItemId) {
@@ -1682,6 +1919,21 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         ...added.map((relation) => createRelationPut(this.tableName, workspaceId, teamId, relation)),
       ],
       configurationConditionChecks: normalized.nextParent ? configurationConditionChecks : [],
+      auditPuts: this.createRelationAuditPuts(workspaceId, teamId, audit, createdAt, graph.revision + 1, [
+        {
+          workItemId: child.workItemId,
+          eventType: 'work-item.parent-changed',
+          relationType: 'parent',
+          ...(previousParentWorkItemId ? { previousParentWorkItemId } : {}),
+          ...(parentWorkItemId ? { parentWorkItemId } : {}),
+        },
+        ...removed
+          .filter((relation) => relation.type === 'child')
+          .map((relation) => describeRelationAuditChange(relation, 'removed')),
+        ...added
+          .filter((relation) => relation.type === 'child')
+          .map((relation) => describeRelationAuditChange(relation, 'added')),
+      ]),
       classifyCancellation: () => this.classifyParentReplacementCancellation(
         workspaceId,
         teamId,
@@ -2355,6 +2607,82 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   }
 
   /**
+   * Rejects a relation mutation whose audit input is missing or belongs to another Workspace.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param audit - Request audit input supplied by the caller.
+   */
+  private assertRelationAuditInput(workspaceId: string, audit: WorkItemRelationAuditInput | undefined) {
+    if (this.auditTableName && audit === undefined) {
+      throw new WorkItemConfigurationError(
+        500,
+        'WorkItemRelationAuditContextMissing',
+        'Work Item relation mutation audit context is required.',
+      )
+    }
+    if (audit && audit.context.workspaceId !== workspaceId) {
+      throw new WorkItemConfigurationError(
+        500,
+        'WorkItemRelationAuditContextMismatch',
+        'Work Item relation mutation audit context does not match the target Workspace.',
+      )
+    }
+  }
+
+  /**
+   * Creates one audit event Put per endpoint change for the relation transaction.
+   *
+   * Each endpoint gets its own event under its Work Item entity so both activity timelines show
+   * the change. The Work Item `revision` stays unchanged; the events carry the graph revision.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns every endpoint.
+   * @param audit - Request audit input; omitted only when auditing is not configured.
+   * @param occurredAt - Commit timestamp shared by every event of the mutation.
+   * @param graphRevision - Relation graph revision written by the mutation.
+   * @param changes - Endpoint changes in a deterministic order.
+   * @returns Audit event Puts, or none when auditing is not configured.
+   */
+  private createRelationAuditPuts(
+    workspaceId: string,
+    teamId: string,
+    audit: WorkItemRelationAuditInput | undefined,
+    occurredAt: string,
+    graphRevision: number,
+    changes: readonly RelationAuditChange[],
+  ): NonNullable<TransactWriteCommandInput['TransactItems']> {
+    return changes.flatMap((change, sequence) => {
+      const put = createMutationAuditEventPut(this.auditTableName, audit?.context, {
+        directoryId: workspaceId,
+        eventType: change.eventType,
+        entityType: 'work-item',
+        entityId: createRelationAuditEntityId(teamId, change.workItemId),
+        action: change.eventType.slice('work-item.'.length),
+        occurredAt,
+        // The other endpoint may sit in a Project this endpoint's viewers cannot read, so its ID
+        // stays out of the public `changes` and lives only in metadata, which views never expose.
+        changes: [],
+        summary: RELATION_AUDIT_SUMMARIES[change.eventType],
+        metadata: {
+          adapter: 'work-item-relation',
+          ...(audit ? { actorMemberKey: audit.actorMemberKey } : {}),
+          teamId,
+          issueId: change.workItemId,
+          relationType: change.relationType,
+          ...(change.relatedWorkItemId ? { relatedWorkItemId: change.relatedWorkItemId } : {}),
+          ...(change.previousParentWorkItemId
+            ? { previousParentWorkItemId: change.previousParentWorkItemId }
+            : {}),
+          ...(change.parentWorkItemId ? { parentWorkItemId: change.parentWorkItemId } : {}),
+          graphRevision,
+        },
+        sequence,
+      })
+      return put ? [put] : []
+    })
+  }
+
+  /**
    * Commits relation row changes, endpoint guards, and the graph metadata in one transaction.
    *
    * @param workspaceId - Workspace that owns the relation graph.
@@ -2376,19 +2704,26 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       input.expectedRevision,
       input.nextEdgeCount,
     )
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      ...input.endpoints.map((endpoint) => createRelationEndpointTransactionItem(
+        this.workItemsTableName,
+        workItemPartitionKey,
+        endpoint,
+      )),
+      graphMutation,
+      ...input.edgeMutations,
+      ...input.configurationConditionChecks,
+      ...input.auditPuts,
+    ]
+    if (transactItems.length > DYNAMODB_TRANSACTION_ITEM_LIMIT) {
+      throw new WorkItemConfigurationError(
+        413,
+        'WorkItemRelationTransactionTooLarge',
+        'The relation change exceeds the transaction limit.',
+      )
+    }
     try {
-      await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [
-          ...input.endpoints.map((endpoint) => createRelationEndpointTransactionItem(
-            this.workItemsTableName,
-            workItemPartitionKey,
-            endpoint,
-          )),
-          graphMutation,
-          ...input.edgeMutations,
-          ...input.configurationConditionChecks,
-        ],
-      }))
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
     } catch (error) {
       if (input.configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
@@ -2636,6 +2971,8 @@ function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfigu
     // Whether open children block completing a parent is a Team policy, so its value is audited.
     parentCompletionPolicy:
       configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
+    // Which conditions block completion is a Team policy, so its value is audited.
+    completionGate: configuration.completionGate ?? {},
     workflowIds: getWorkItemConfigurationWorkflows(configuration)
       .map((workflow) => workflow.id)
       .sort(),

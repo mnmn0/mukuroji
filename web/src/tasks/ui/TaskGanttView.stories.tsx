@@ -1,6 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
-import { expect, within } from 'storybook/test'
+import { expect, userEvent, within } from 'storybook/test'
+import type { TeamWorkItemHierarchyNode } from '@mukuroji/contracts'
+import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { TaskGanttView } from './TaskGanttView'
@@ -116,5 +118,79 @@ export const ActualAfterPlannedHorizon: Story = {
     const canvas = within(canvasElement)
     await expect(canvas.getByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[0].id}`))
       .toHaveAccessibleName(t('tasks.gantt.actualBar').replace('{start}', '2026-08-10').replace('{end}', '2026-08-12'))
+  },
+}
+
+/** Hierarchy of the story tasks: the wireframe phase holds the brand and SEO work. */
+const outlineStoryNodes: TeamWorkItemHierarchyNode[] = [
+  {
+    workItemId: 'wireframe',
+    parentWorkItemId: null,
+    depth: 0,
+    wbsNumber: '1',
+    hierarchyRank: 'i',
+    childWorkItemIds: ['brand-guideline', 'seo-research'],
+    rollup: {
+      childCount: 2,
+      descendantCount: 2,
+      statusCategoryCounts: { backlog: 0, unstarted: 1, started: 1, completed: 0, canceled: 0 },
+      openDescendantCount: 2,
+      plannedEffortMinutes: 0,
+      estimatedDescendantCount: 0,
+      remainingEffortMinutes: 0,
+      startDate: '2026-06-05',
+      endDate: '2026-06-09',
+    },
+  },
+  { workItemId: 'brand-guideline', parentWorkItemId: 'wireframe', depth: 1, wbsNumber: '1.1', hierarchyRank: 'i', childWorkItemIds: [] },
+  { workItemId: 'seo-research', parentWorkItemId: 'wireframe', depth: 1, wbsNumber: '1.2', hierarchyRank: 'r', childWorkItemIds: [] },
+  { workItemId: 'competitor-report', parentWorkItemId: null, depth: 0, wbsNumber: '2', hierarchyRank: 'r', childWorkItemIds: [] },
+]
+
+/** Outline with WBS numbers, a summary bar over the children, and a collapse toggle. */
+export const Outline: Story = {
+  render: function OutlineStory(args) {
+    const [collapsedKeys, setCollapsedKeys] = useState<ReadonlySet<string>>(() => new Set())
+    return (
+      <TaskGanttView
+        {...args}
+        outline={{
+          hierarchies: new Map([['core-team', outlineStoryNodes]]),
+          collapsedKeys,
+          onToggleCollapsed: (task) => {
+            const key = createWorkItemOutlineKey(task.teamId, task.id)
+            const next = new Set(collapsedKeys)
+            if (!next.delete(key)) next.add(key)
+            setCollapsedKeys(next)
+          },
+        }}
+      />
+    )
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByTestId('task-gantt-summary-wireframe')).toBeInTheDocument()
+    await expect(canvas.getByTestId('task-gantt-wbs-seo-research')).toHaveTextContent('1.2')
+    await userEvent.click(canvas.getByTestId('task-gantt-outline-toggle-wireframe'))
+    await expect(canvas.queryByTestId('task-gantt-wbs-seo-research')).not.toBeInTheDocument()
+  },
+}
+
+/** Work Items of several Projects under one heading per Project. */
+export const GroupedByProject: Story = {
+  args: {
+    group: {
+      direction: 'asc',
+      resolve: (task) => ({
+        key: task.assignedProjectId ?? '',
+        label: task.assignedProjectId === 'refero' ? 'Refero リニューアル' : '—',
+      }),
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByTestId('task-gantt-group-refero')).toHaveTextContent('Refero リニューアル')
   },
 }

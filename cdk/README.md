@@ -31,6 +31,7 @@
 | `ApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
+| `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
 | `RequestEmailWebhookSecret` | `mukuroji:requestEmail` 有効時 | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
@@ -592,6 +593,26 @@ Shared API Lambda は `REQUEST_INTAKE_TABLE_NAME`、`REQUEST_QUEUE_INDEX_NAME`�
 
 DLQ の envelope は署名 timestamp が5分で失効するため、そのまま redrive しません。Operator は失敗原因を解消した後、保存済み envelope の内容と `Message-ID` を変更せず、新しい timestamp で adapter 側から再署名して `RequestEmailIngestionFunction` を invokeし、成功を確認してから元 message を削除します。同じ `Message-ID` は request table の receipt で冪等化されます。
 
+## Lambda log retention and table deletion protection
+
+`configureStatefulResourceGuards`（`lib/aspects/stateful-resource-guards.ts`）が stack 全体に次を適用します。
+
+- `cdk.json` の `@aws-cdk/aws-lambda:useCdkManagedLogGroup` で CDK が作る `/aws/lambda/<function name>` は、既定の2年保持を90日に変え、`Retain` にします。
+- Subsystem が `logGroup` を明示した Lambda（restore drill の365日など）はそのまま使います。どちらもない Lambda は synth error にします。L2 でない CDK 内部の bucket notification handler は `file-storage.ts` が log group を割り当てます。
+- `Retain` の DynamoDB table すべてに `DeletionProtectionEnabled: true` を付け、console や CLI からの `DeleteTable` も拒否します。
+
+`stateful-resource-guards.suite.ts` は、`cdk.json` の feature flag あり・なしの両方の template で、保持期間が1年以内の retained log group を持たない Lambda、1年を超えて保持する log group、削除保護のない retained table があると失敗します。
+
+この変更より前に deploy した環境では、Lambda が自動で作った無期限の `/aws/lambda/<function name>` が残ります。新しい log group へ切り替わった後、次で古い log group に保持期間を付けてください（削除する場合は調査に必要な期間が過ぎてから行います）。
+
+```bash
+aws logs describe-log-groups --log-group-name-prefix /aws/lambda/<StackName>- \
+  --query 'logGroups[?retentionInDays==`null`].logGroupName' --output text \
+  | xargs -n1 -I{} aws logs put-retention-policy --log-group-name {} --retention-in-days 90
+```
+
+Table を意図して削除する場合は、先に `aws dynamodb update-table --table-name <name> --no-deletion-protection-enabled` で保護を外します。
+
 ## Fresh deployment
 
 ### 1. Cognito と値を準備する
@@ -817,6 +838,44 @@ demo data が必要な環境では無効にせずに使い続けるか、demo da
 
 local の Floci 環境はこの設定と関係なく、`floci/` の初期化で従来どおり demo data を使います。
 
+#### 既存環境から demo data を取り除く
+
+demo data を投入した環境を、owner だけの空の Workspace に戻すには `demo-data:remove` を使います。
+上の一覧の row（demo member・Team・Project・Work Item と、owner の demo Project manager row）だけを
+key で特定して削除し、Workspace metadata・owner・email alias は残します。stack の demo data 設定は
+先に無効（既定）にしておきます。有効のままだと、`SeedWorkspaceDemoMembers` が更新される deploy で
+demo member が作り直されます。
+
+```sh
+export WORKSPACE_ACCESS_TABLE_NAME=...   # WorkspaceAccessTableName output
+export PROJECT_DIRECTORY_TABLE_NAME=...  # ProjectDirectoryTableName output
+export WORK_ITEMS_TABLE_NAME=...         # WorkItemsTableName output
+export MUKUROJI_WORKSPACE_DIRECTORY_ID=... # WorkspaceDirectoryId parameter
+export INITIAL_OWNER_EMAIL=...           # InitialOwnerEmail parameter
+export AWS_REGION=...                    # stack の region（既定値なし）
+
+bun run demo-data:remove          # 削除する row を表示するだけ
+bun run demo-data:remove --apply  # 1 つの transaction ですべて削除する
+```
+
+実 data を壊さないよう、次のどれかがあると何も削除せずに終了し（exit code 1）、該当 row を表示します。
+
+- demo Team・Project に、demo seed 以外の row がある（人が作った Work Item、追加した Project や Project member、
+  demo Project に割り当てた他 Team の Work Item など）
+- demo Work Item が編集されている（`revision` が 1 でない）
+- demo member の role が `owner` になっている
+- demo row の key に別の種類の row がある
+
+その場合は、画面から demo Team・Project を archive するか、表示された row を先に整理してから再実行します。
+削除は条件付きの 1 つの transaction なので、確認した demo row が確認後に変わると全体が失敗し、何も削除されません。
+ただし確認後に demo Team・Project へ新しく追加された row は検出できないので、利用者の操作がない時間に実行します。
+再実行しても、取り除き済みの row は「already gone」として数えるだけです。
+
+この script が見るのは上の 3 table だけです。demo の Work Item に付いたコメント・添付・時間記録や、
+検索 index に backfill 済みの demo の文書は削除しません。demo Team 以外の Work Item の担当者が demo member でも
+検出しません。demo data を使い込んだ環境では archive を使います。
+local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566` と `AWS_REGION` を付けて同じように実行できます。
+
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
 ### 3. Bootstrap と API を検証する
@@ -876,6 +935,28 @@ Web を build して upload し、CloudFront を invalidate します。content 
 ```sh
 VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 ```
+
+`web:deploy` は commit していない変更があると止まります。build には `git rev-parse HEAD` の commit SHA を
+埋め込み、Help 画面の「稼働中の Web build」に表示します。利用者から問題の報告を受けたら、この SHA で
+どの release かを確認します。
+
+#### Web の release を戻す
+
+各 deploy は `assets/` 以外の file（`index.html`、`sw.js`、manifest など）を bucket の
+`releases/<commit SHA>/` にも残します。`assets/` は消さないため、残した release を bucket の直下へ
+copy し直せば、再 build せずに前の release へ戻せます。
+
+```sh
+# 残っている release を新しい順に表示する
+AWS_REGION=ap-northeast-1 bun run web:rollback
+# 指定した commit の release に戻す（Help 画面に出る 40 文字の SHA）
+AWS_REGION=ap-northeast-1 bun run web:rollback -- <commit SHA>
+```
+
+`scripts/rollback-web.sh` は `releases/<commit SHA>/` を bucket の直下へ copy し、直下にだけある file を
+削除してから CloudFront を invalidate します。戻した後に `WebUrl` の Help 画面で SHA が切り替わったことを
+確認します。この仕組みより前に deploy した release は残っていないため戻せません。`releases/` と
+`assets/` は今は自動で削除しないので、古い release の整理は別途行います。
 
 ## Workspace partition migration
 

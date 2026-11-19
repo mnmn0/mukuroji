@@ -62,8 +62,6 @@ export type WorkspacePortfolioProject = {
   teamName: string
   /** Percentage of completed Work Items. */
   progress: number
-  /** Project attention level. */
-  risk: 'clear' | 'low' | 'watch'
 }
 
 /**
@@ -567,30 +565,6 @@ export function calculateWorkspaceProgress(tasks: readonly CanonicalWorkItem[]) 
 }
 
 /**
- * Resolves portfolio risk from a Project's summary counts.
- *
- * @param bucket - Summary bucket of the Project, when it has Work Items.
- * @returns The risk level representing high-priority open work, full completion, or neither.
- */
-export function resolveWorkspacePortfolioRisk(
-  bucket: WorkItemSummaryBucket | undefined,
-): WorkspacePortfolioProject['risk'] {
-  if (!bucket) {
-    return 'clear'
-  }
-
-  if (bucket.highPriorityOpen > 0) {
-    return 'watch'
-  }
-
-  if (bucket.total > 0 && bucket.completed === bucket.total) {
-    return 'low'
-  }
-
-  return 'clear'
-}
-
-/**
  * Creates portfolio rows from the Workspace directory and the server-side Work Item summary.
  *
  * @param teams - Workspace directory.
@@ -614,7 +588,6 @@ export function createWorkspacePortfolioProjects(
         projectId: project.id,
         name: project.name,
         teamName: team.name,
-        risk: resolveWorkspacePortfolioRisk(bucket),
       }
     }),
   )

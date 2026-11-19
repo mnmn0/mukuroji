@@ -35,7 +35,8 @@ embed、diagram を canonical block として保存します。Whiteboard は ob
 
 Client は `baseRevision`、`clientId`、一意な `operationId` を付けて operation batch を送ります。
 Server は block / object / connector / frame / relation ごとの最終更新 revision を比較します。
-Batch は DynamoDB transaction と backlink 更新を常に atomic に収めるため最大 14 operation です。
+Batch は DynamoDB transaction と backlink 更新を常に atomic に収めるため最大 4 operation です
+（`DOCUMENT_OPERATION_BATCH_LIMIT`）。
 
 - 別 element の更新は stale な `baseRevision` からでも現在 snapshot へ merge します。
 - 同じ element が更新済みの場合は batch 全体を `409 DocumentOperationConflict` で拒否します。
@@ -45,6 +46,27 @@ Batch は DynamoDB transaction と backlink 更新を常に atomic に収める�
 - Restore は過去 snapshot を上書きせず、新しい revision として保存します。
 - Restore が再導入する relation / Whiteboard Work Item target は current source of truth で
   再認可し、権限を失った target を過去 snapshot から復活させません。
+
+### Link の上限
+
+1 つの Document は relation と Whiteboard の Work Item object を合わせて最大 500 件の link を
+持てます（`DOCUMENT_MAX_BACKLINK_COUNT`）。Backlink row と Work Item 削除 fence は、link を
+追加・削除した Document の更新と同じ DynamoDB transaction で書くため、Document と backlink が
+食い違ったまま残ることはなく、Work Item 側の関連 Document にも即時に表示されます。
+
+Transaction は 100 action までなので、1 回の更新で追加・削除できる link は最大 28 件です
+（`DOCUMENT_MAX_BACKLINK_CHANGE_COUNT`）。通常の編集は 1 batch 4 operation なので常に収まります。
+block や Whiteboard object を削除するとその要素が持つ link も消えるため、1 つの要素が持てる
+link は 7 件までです（`DOCUMENT_MAX_ELEMENT_LINK_COUNT`、Work Item card 自身の link を含む）。
+4 要素を一度に削除しても 28 件に収まります。この上限より前に保存された要素は 8 件以上の link を
+持っていても編集でき、link を減らすこともできます。拒否されるのは上限を超えた要素に link を
+増やす変更だけです。超えるのは、28 件を超える Work Item object を含む
+Whiteboard の作成と、28 件を超える link の差分を持つ version への restore で、どちらも何も書かずに
+`413 DocumentBacklinkChangeLimitExceeded` を返します。その場合は少ない link で作成してから
+追加するか、新しい version から段階的に戻します。
+
+`POST /api/document-backlinks/batch` は最大 500 target を受け付け、1 request で読む backlink は
+14 件までです。読み切れなかった target は `pending` に入れて返し、client が続きを要求します。
 
 Presence は user / Document ごとに一つの置換可能な短い lease として保存します。画面は
 heartbeat と polling を行い、期限切れ collaborator を表示しません。一覧は評価件数と返却件数を
@@ -133,3 +155,20 @@ Team ID と Issue ID から `team/<teamId>/issue/<issueId>` を生成するた�
 同じ canonical ID を使います。Whiteboard は canvas を広く保つため toolbar を floating control
 にし、public share 画面では編集 control を表示しません。Mention 通知の deep link は対象 thread
 を cursor 越しに取得し、対象 comment を drawer 内で強調・focus します。
+
+### 同梱テンプレートと宿題の Work Item 化
+
+Documents home の「同梱テンプレート」から、議事録・設計書・振り返り（KPT）のページを作れます。
+テンプレートは Web に同梱しており、Workspace ごとの保存や初期化は不要です。作成時に今日の日付、
+選んだ Project の名前、入力した参加者をタイトルと本文に差し込み、Project を選んだ場合はその
+Project scope にページを作ります。
+
+編集中の checklist 項目には「Work Item にする」が出ます。Project・担当者・期限（任意）を選ぶと
+Work Item を作り、その checklist block を起点にした Work Item relation を
+`checklist-item:<blockId>:<itemId>` の ID で保存します。作成済みの項目には「Work Item を開く」が
+出て、Work Item 側の関連ドキュメントからは元のページへ戻れます。Work Item の作成後にリンクだけが
+失敗した場合は、同じ画面で再実行するとリンクだけをやり直します。Team に backlog 区分の status があれば、
+Work Item はクイック作成と同じく backlog に仮保存するので、必須カスタムフィールドは後から入力できます。
+リンク済みの項目は編集権限のない閲覧者にも「Work Item を開く」として表示します。
+ダイアログを開いている間に別の編集で同じ項目がリンクされた場合は、そのリンクを置き換えずに作成を止めます。
+

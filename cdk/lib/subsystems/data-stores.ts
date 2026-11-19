@@ -515,6 +515,16 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.ALL,
   });
 
+  // Finished runs by Team and finish time, failed runs in their own partition. Only the finish
+  // writes the keys, and the projection keeps what the Factory board needs to find Work Items.
+  agentRunsTable.addGlobalSecondaryIndex({
+    indexName: 'FinishedRunIndex',
+    partitionKey: { name: 'finishedRunPartition', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'finishedRunSortKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.INCLUDE,
+    nonKeyAttributes: ['runId', 'workItemId', 'outcome', 'finishedAt'],
+  });
+
   // Teams that file runs to Triage and failed runs waiting to be filed; both partitions stay small.
   agentRunsTable.addGlobalSecondaryIndex({
     indexName: 'AgentRunTriageIndex',
@@ -535,6 +545,14 @@ export function buildDataStores(
     indexName: 'SlackDeliveryIndex',
     partitionKey: { name: 'slackQueueShard', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'slackNextAttemptAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
+  // Sparse: only notifications queued while an Email sender is configured carry these keys.
+  notificationsTable.addGlobalSecondaryIndex({
+    indexName: 'EmailDeliveryIndex',
+    partitionKey: { name: 'emailQueueShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'emailNextAttemptAt', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
   });
 
