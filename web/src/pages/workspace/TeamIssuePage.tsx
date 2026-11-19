@@ -711,18 +711,23 @@ export function TeamIssuePage() {
         'TeamTaskActionAccessDenied',
       )
     }
-    await guardEnterpriseSession(applyWorkItemArchive({
-      accessToken,
-      archived,
-      fallbackErrorMessage: t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'),
-      runner: mutationRequestRunner,
-      target: issue,
-      workspaceId: archiveWorkspaceId,
-    }))
-    await Promise.all([mutateIssues(), mutateIssueDetail()])
-    // Archived Work Items leave the outline, so the roll-ups change too.
-    await refreshTeamHierarchy()
-    await refreshArchivedWorkItems()
+    try {
+      await guardEnterpriseSession(applyWorkItemArchive({
+        accessToken,
+        archived,
+        fallbackErrorMessage: t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'),
+        runner: mutationRequestRunner,
+        target: issue,
+        workspaceId: archiveWorkspaceId,
+      }))
+    } finally {
+      // A failed preview is often a stale revision, so a retry needs the current one.
+      // A refresh failure must not hide the archive outcome, which the server already decided.
+      await Promise.all([mutateIssues(), mutateIssueDetail(), refreshArchivedWorkItems()])
+        // Archived Work Items leave the outline, so the roll-ups change too.
+        .then(() => refreshTeamHierarchy())
+        .catch(() => undefined)
+    }
   }
 
   const handleAddRelation = async (

@@ -1661,6 +1661,8 @@ export function TaskPage() {
     await Promise.all([
       mutateProjectTasks(),
       mutateSelectedIssueDetail(),
+      // A bulk archive, retry, or Undo changes which Work Items the archived list shows.
+      refreshArchivedWorkItems(),
     ])
   }
 
@@ -1710,16 +1712,20 @@ export function TaskPage() {
       throw new Error(t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'))
     }
     requireProjectTaskWriteScope(task)
-    await guardEnterpriseSession(applyWorkItemArchive({
-      accessToken,
-      archived,
-      fallbackErrorMessage: t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'),
-      runner: mutationRequestRunner,
-      target: task,
-      workspaceId,
-    }))
-    await revalidateAfterBulkOperation()
-    await refreshArchivedWorkItems()
+    try {
+      await guardEnterpriseSession(applyWorkItemArchive({
+        accessToken,
+        archived,
+        fallbackErrorMessage: t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'),
+        runner: mutationRequestRunner,
+        target: task,
+        workspaceId,
+      }))
+    } finally {
+      // A failed preview is often a stale revision, so a retry needs the current one. A refresh
+      // failure must not hide the archive outcome, which the server already decided.
+      await revalidateAfterBulkOperation().catch(() => undefined)
+    }
   }
 
   const handleBulkRetry = async (operationId: string, operation?: BulkOperation) => {
