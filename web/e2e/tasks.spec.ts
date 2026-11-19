@@ -11737,6 +11737,25 @@ test.describe('authenticated task page', () => {
     )).toEqual(analyticsReportFixtures[0].widgets.map((widget) => widget.id))
   })
 
+  test('Analyticsの集計上限を超えたときは対象の絞り込み方を表示する', async ({ page }) => {
+    await mockAnalyticsReportsPage(page)
+    await page.route('**/api/analytics/query', async (route) => {
+      await route.fulfill({
+        status: 413,
+        json: {
+          code: 'AnalyticsHistoryLimitExceeded',
+          message: 'Analytics history requires more than 500 entity timeline queries. Narrow the report scope.',
+        },
+      })
+    })
+
+    await page.goto('/reports')
+
+    await expect(page.getByRole('alert')).toContainText(
+      '集計対象が上限を超えました。期間を短くするか、Team や Project で絞り込んでください。',
+    )
+  })
+
   test('Analyticsの非canonical queryは現行URLへ戻して表示を継続する', async ({ page }) => {
     await mockAnalyticsReportsPage(page)
 

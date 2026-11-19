@@ -37,6 +37,7 @@ import {
   normalizeAnalyticsExportLocale,
   normalizeAnalyticsQueryInput,
   queryAnalyticsEvidence,
+  selectAnalyticsWorkItemsRequiringHistory,
 } from '../../modules/analytics/analytics'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
@@ -490,7 +491,10 @@ async function readAuthorizedAnalyticsData(
   ) {
     const events = await readAuthorizedAnalyticsAuditEvents(
       principal.directoryId,
-      accessible.workItems,
+      selectAnalyticsWorkItemsRequiringHistory(
+        accessible.workItems,
+        filter.period.from,
+      ),
       historyReadAt,
     )
     const verified = await readAccessibleAnalyticsWorkItems(
@@ -502,7 +506,13 @@ async function readAuthorizedAnalyticsData(
     if (
       createAnalyticsAccessibleDataFingerprint(accessible) ===
         createAnalyticsAccessibleDataFingerprint(verified) &&
-      hasAnalyticsLatestAuditCoverage(verified.workItems, events)
+      hasAnalyticsLatestAuditCoverage(
+        selectAnalyticsWorkItemsRequiringHistory(
+          verified.workItems,
+          filter.period.from,
+        ),
+        events,
+      )
     ) {
       return {
         workItems: verified.workItems,
