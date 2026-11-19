@@ -8,6 +8,7 @@ import {
   createActiveAgentRun,
   createAgentRunCommitConflictError,
   createAgentRunIntegrityError,
+  createAgentRunNotActiveError,
   createDefaultAgentSettings,
   finishAgentRun,
   hashAgentInstanceId,
@@ -835,6 +836,19 @@ describe('public Agent Run service', () => {
       updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
     })
     await expect(takeOver('laptop-1', 'take-over-1')).rejects.toMatchObject({ reason: 'agent_run_conflict' })
+    // A heartbeat that renews the lease before the commit wins, even though the successor would start
+    // after the stalled run's start time: the lease is compared with the real time of the take over.
+    const commit = store.commit.bind(store)
+    store.commit = async (items, fenceItemCount) => {
+      store.commit = commit
+      const current = store.state.runs.get(`${workspaceId}|core-team|${stalled.runId}`)
+      if (current) store.state.runs.set(`${workspaceId}|core-team|${stalled.runId}`, { ...current, leaseExpiresAt: new Date(Date.now() + 30_000).toISOString() })
+      return commit(items, fenceItemCount)
+    }
+    await expect(takeOver('laptop-2', 'take-over-renewed')).rejects.toMatchObject({ category: 'conflict' })
+    store.state.runs.set(`${workspaceId}|core-team|${stalled.runId}`, structuredClone(stalled))
+    // The cancelled transaction wrote no receipt.
+    receipts.length = 0
 
     const taken = await takeOver('laptop-2', 'take-over-2')
     expect(taken.supersededRun).toMatchObject({ runId: stalled.runId, state: 'finished', outcome: 'superseded', finishedBy: 'demo@example.com' })
@@ -1201,12 +1215,36 @@ describe('public Agent Run service', () => {
     // An offer of the paused run does not resume after the failed run that came later.
     await expect(resume('offered', offered.runId)).rejects.toMatchObject({ category: 'conflict', message: expect.stringContaining('Another run came after') })
     expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()
-    const committed: unknown[][] = []
+    /**
+     * Makes the next claim read return a claim that still names the finished later run, as a read
+     * just before that run's finish removed its claim would.
+     */
+    const readStaleClaimOnce = () => {
+      const getClaim = store.getClaim.bind(store)
+      store.getClaim = async () => {
+        store.getClaim = getClaim
+        return { workItemId: 'task-1', runId: later.runId, instanceIdHash: later.instanceIdHash, assigneeUserId: later.assigneeUserId }
+      }
+    }
+    // A claim put that fails because another request claimed the Work Item, whose run then finished,
+    // asks the caller to reload instead of reporting inconsistent data.
     const commit = store.commit.bind(store)
+    store.commit = async () => {
+      store.commit = commit
+      readStaleClaimOnce()
+      throw createAgentRunNotActiveError()
+    }
+    await expect(resume('claim-lost', later.runId)).rejects.toMatchObject({
+      category: 'conflict', message: expect.stringContaining('claim changed during the request'),
+    })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()
+    const committed: unknown[][] = []
     store.commit = async (items, fenceItemCount) => {
       committed.push([...items])
       return commit(items, fenceItemCount)
     }
+    // A claim read just before the holding run finished does not stop the resume.
+    readStaleClaimOnce()
     const resumed = await resume('expected', later.runId)
     // The commit fails if the caller's membership or Team and Project access changed since authorization.
     expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({

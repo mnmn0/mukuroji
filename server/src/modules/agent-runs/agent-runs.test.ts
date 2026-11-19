@@ -320,7 +320,9 @@ describe('DynamoDB Agent Run store', () => {
     const superseded = finishAgentRun(createRun(), 'superseded', 'member-1', later)
     const successor = createRun({
       runId: 'run_00000000-0000-4000-8000-000000000002', instanceIdHash: hashAgentInstanceId('laptop-2'),
-      startedAt: later.toISOString(), lastHeartbeatAt: later.toISOString(),
+      // The start time sits after a stalled run whose clock was ahead; the lease is still compared with
+      // the real time of the take over.
+      startedAt: new Date(later.getTime() + 60_000).toISOString(), lastHeartbeatAt: later.toISOString(),
     })
     const [update, claim, revoke, put, unrevoke] = store.createTakeOverItems(superseded, successor)
     expect(update?.Update).toMatchObject({
