@@ -23,6 +23,8 @@ import {
   DynamoDbAgentRunStore,
   isSameSettingsSave,
   type AgentRunFenceInput,
+  type AgentRunFinishedGroup,
+  type AgentRunFinishedPage,
   type AgentRunPage,
   type AgentRunReportPage,
   type AgentRunStore,
@@ -322,6 +324,32 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
       .filter((run) => run.directoryId === directoryId && run.teamId === teamId && run.state === 'finished')
       .sort((left, right) => left.runId.localeCompare(right.runId))
     return this.#page(runs, cursor, limit)
+  }
+
+  /** @inheritdoc */
+  async listFinishedRunsByTime(
+    directoryId: string,
+    teamId: string,
+    group: AgentRunFinishedGroup,
+    since: string | undefined,
+    cursor: string | undefined,
+    limit: number,
+  ): Promise<AgentRunFinishedPage> {
+    const entries = [...this.state.runs.values()].flatMap((run) => {
+      if (run.directoryId !== directoryId || run.teamId !== teamId || run.state !== 'finished') return []
+      if (run.outcome === undefined || run.finishedAt === undefined) return []
+      if ((run.outcome === 'failed') !== (group === 'failed')) return []
+      if (since !== undefined && `${run.finishedAt}#${run.runId}` < since) return []
+      return [{ runId: run.runId, workItemId: run.workItemId, outcome: run.outcome, finishedAt: run.finishedAt }]
+    }).sort((left, right) => `${right.finishedAt}#${right.runId}`.localeCompare(`${left.finishedAt}#${left.runId}`))
+    const offset = cursor === undefined ? 0 : Number(cursor)
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new AgentRunError('validation_failed', 'The cursor is invalid.', { pointer: '/cursor' })
+    }
+    return {
+      runs: entries.slice(offset, offset + limit),
+      ...(offset + limit < entries.length ? { nextCursor: String(offset + limit) } : {}),
+    }
   }
 
   /** @inheritdoc */

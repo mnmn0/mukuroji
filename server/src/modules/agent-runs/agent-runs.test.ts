@@ -248,6 +248,61 @@ describe('DynamoDB Agent Run store', () => {
     })
   })
 
+  test('indexes a closed run by finish time, with failed runs in their own partition', async () => {
+    const store = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const runId = 'run_00000000-0000-4000-8000-000000000001'
+    const [released] = store.createCloseItems(finishAgentRun(createRun(), 'released', 'member-2', now))
+    expect(released?.Update?.UpdateExpression).toContain('#finishedRunPartition = :finishedRunPartition, #finishedRunSortKey = :finishedRunSortKey')
+    expect(released?.Update?.ExpressionAttributeValues).toMatchObject({
+      ':finishedRunPartition': 'workspace-1#team#core#finished-run',
+      ':finishedRunSortKey': `${now.toISOString()}#${runId}`,
+    })
+    const [failed] = store.createCloseItems(finishAgentRun(createRun(), 'failed', 'agent', now))
+    expect(failed?.Update?.ExpressionAttributeValues).toMatchObject({ ':finishedRunPartition': 'workspace-1#team#core#failed-run' })
+
+    const entry = {
+      directoryTeamId: 'workspace-1#team#core', recordKey: `agent-run#${runId}`, runId, workItemId: 'task-1', outcome: 'completed',
+      finishedAt: now.toISOString(), finishedRunPartition: 'workspace-1#team#core#finished-run', finishedRunSortKey: `${now.toISOString()}#${runId}`,
+    }
+    const listed = createClient([{ Items: [entry], LastEvaluatedKey: { finishedRunPartition: entry.finishedRunPartition, finishedRunSortKey: entry.finishedRunSortKey, directoryTeamId: entry.directoryTeamId, recordKey: entry.recordKey } }])
+    const page = await new DynamoDbAgentRunStore(listed.client, 'AgentRuns')
+      .listFinishedRunsByTime('workspace-1', 'core', 'other', '2026-10-21T00:00:00.000Z', undefined, 100)
+    expect(page.runs).toEqual([{ runId, workItemId: 'task-1', outcome: 'completed', finishedAt: now.toISOString() }])
+    expect(listed.commands[0]?.input).toMatchObject({
+      IndexName: 'FinishedRunIndex',
+      KeyConditionExpression: '#finishedRunPartition = :partition AND #finishedRunSortKey >= :since',
+      ExpressionAttributeValues: { ':partition': 'workspace-1#team#core#finished-run', ':since': '2026-10-21T00:00:00.000Z' },
+      ScanIndexForward: false,
+    })
+    // The cursor continues only the same Team and group.
+    const next = createClient()
+    await new DynamoDbAgentRunStore(next.client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, page.nextCursor, 100)
+    expect(next.commands[0]?.input).toMatchObject({ KeyConditionExpression: '#finishedRunPartition = :partition', ExclusiveStartKey: { recordKey: entry.recordKey } })
+    await expect(new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'failed', undefined, page.nextCursor, 100))
+      .rejects.toMatchObject({ category: 'validation_failed' })
+    // A failed run in the other partition, or a key that disagrees with the run, fails closed.
+    const misplaced = createClient([{ Items: [{ ...entry, outcome: 'failed' }] }])
+    await expect(new DynamoDbAgentRunStore(misplaced.client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, undefined, 100))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    const forged = createClient([{ Items: [{ ...entry, finishedRunSortKey: `${now.toISOString()}#run_other` }] }])
+    await expect(new DynamoDbAgentRunStore(forged.client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, undefined, 100))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+  })
+
+  test('lists finished runs by time in memory the same way, newest first and failed runs apart', async () => {
+    const store = new InMemoryAgentRunStore()
+    const later = new Date(now.getTime() + 60_000)
+    store.seed(finishAgentRun(createRun({ runId: 'run_00000000-0000-4000-8000-000000000001', workItemId: 'task-1' }), 'completed', 'agent', now))
+    store.seed(finishAgentRun(createRun({ runId: 'run_00000000-0000-4000-8000-000000000002', workItemId: 'task-2' }), 'released', 'member-2', later))
+    store.seed(finishAgentRun(createRun({ runId: 'run_00000000-0000-4000-8000-000000000003', workItemId: 'task-3' }), 'failed', 'agent', now))
+    const other = await store.listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, undefined, 100)
+    expect(other.runs.map((run) => run.workItemId)).toEqual(['task-2', 'task-1'])
+    const recent = await store.listFinishedRunsByTime('workspace-1', 'core', 'other', later.toISOString(), undefined, 100)
+    expect(recent.runs.map((run) => run.workItemId)).toEqual(['task-2'])
+    const failed = await store.listFinishedRunsByTime('workspace-1', 'core', 'failed', undefined, undefined, 100)
+    expect(failed.runs).toEqual([{ runId: 'run_00000000-0000-4000-8000-000000000003', workItemId: 'task-3', outcome: 'failed', finishedAt: now.toISOString() }])
+  })
+
   test('clears the Triage outbox without ever creating a row for a run deleted since it was listed', async () => {
     const missing = createClient([() => {
       throw Object.assign(new Error('missing'), { name: 'ConditionalCheckFailedException' })
