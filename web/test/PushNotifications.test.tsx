@@ -411,9 +411,17 @@ describe('sign-out with push cleanup', () => {
    */
   async function signOut(cleanup: () => Promise<void>, waitMilliseconds: number): Promise<string[]> {
     const order: string[] = []
-    const storage = { removeItem: () => { order.push('session cleared') } }
+    let stored: string | null = JSON.stringify({ accessToken: 't', expiresAt: Date.now() + 60_000, tokenType: 'Bearer', remember: true })
+    const localStorage = {
+      getItem: () => stored,
+      removeItem: () => {
+        stored = null
+        order.push('session cleared')
+      },
+    }
+    const sessionStorage = { getItem: () => null, removeItem: () => undefined }
     const previousWindow = Reflect.get(globalThis, 'window')
-    Reflect.set(globalThis, 'window', { localStorage: storage, sessionStorage: storage })
+    Reflect.set(globalThis, 'window', { localStorage, sessionStorage })
     try {
       await signOutWithPushCleanup('t', async () => {
         await cleanup()
@@ -426,11 +434,11 @@ describe('sign-out with push cleanup', () => {
   }
 
   test('clears the session only after the push cleanup, so the page cannot go away first', async () => {
-    expect(await signOut(async () => undefined, 1_000)).toEqual(['push cleaned', 'session cleared', 'session cleared'])
+    expect(await signOut(async () => undefined, 1_000)).toEqual(['push cleaned', 'session cleared'])
   })
 
   test('stops waiting for a hung cleanup and still signs out', async () => {
-    expect(await signOut(() => new Promise<void>(() => undefined), 10)).toEqual(['session cleared', 'session cleared'])
+    expect(await signOut(() => new Promise<void>(() => undefined), 10)).toEqual(['session cleared'])
   })
 })
 

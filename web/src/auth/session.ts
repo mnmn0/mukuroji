@@ -33,37 +33,43 @@ export type AuthSession = {
 const storageKey = 'mukuroji.auth'
 
 /**
- * localStorage または sessionStorage から有効期限内の認証セッションを取得します。
+ * Returns this tab's usable authentication session.
+ *
+ * Several tabs can be signed in to different accounts: a session-only sign-in lives in this
+ * tab's sessionStorage while another account may be remembered in localStorage. The tab keeps
+ * the account it first read or signed in to, so a page that mounts later never picks up another
+ * account's token, and an unusable session is removed only from the store that holds it.
+ *
+ * @returns This tab's session, or `null` when it has none that can be used.
  */
 export function getAuthSession() {
-  const session = readSession(window.localStorage) ?? readSession(window.sessionStorage)
+  removeMalformedSessions()
 
-  if (!session) {
-    // A stored value that no longer parses still belongs to a previous sign-in, so destroy it
-    // the same way as an expired one and clear that account's badge.
-    if (hasStoredSessionValue()) clearAuthSession()
-    return null
-  }
+  const entry = findTabSessionEntry()
+  if (!entry) return null
 
   // An expired access token is still a live session while a refresh token can renew it; the
   // authenticated fetch refreshes it before the next API request.
-  if (session.expiresAt <= Date.now() && !session.refreshToken) {
-    clearAuthSession()
+  if (entry.session.expiresAt <= Date.now() && !entry.session.refreshToken) {
+    entry.storage.removeItem(storageKey)
+    tabAccount = null
+    void clearAppBadgeAndNotifyTabs()
     return null
   }
 
-  return session
+  tabAccount = { accessToken: entry.session.accessToken, remember: entry.session.remember }
+  return entry.session
 }
 
 /**
  * Reads the stored authentication session as it is, without expiry checks or side effects.
  *
- * @returns The stored session, or `null` when nothing valid is stored.
+ * @returns This tab's stored session, or `null` when nothing valid is stored.
  */
 export function readStoredAuthSession(): AuthSession | null {
   if (typeof window === 'undefined') return null
   try {
-    return readSession(window.localStorage) ?? readSession(window.sessionStorage)
+    return findTabSessionEntry()?.session ?? null
   } catch {
     return null
   }
@@ -188,34 +194,115 @@ export function hasStoredAuthSession(accessToken: string): boolean {
 }
 
 /**
- * ユーザーの保持設定に合わせて認証セッションを保存します。
+ * ユーザーの保持設定に合わせて認証セッションを保存し、この tab の account にします。
+ *
+ * 反対側の storage は、同じ account の古い session か読めない値のときだけ消します。別の tab が
+ * 別の account で使っている session は残します。
  */
 export function saveAuthSession(session: AuthSession) {
   const targetStorage = session.remember ? window.localStorage : window.sessionStorage
   const staleStorage = session.remember ? window.sessionStorage : window.localStorage
 
-  staleStorage.removeItem(storageKey)
+  const stale = staleStorage.getItem(storageKey)
+  if (stale !== null) {
+    const staleSession = readSession(staleStorage)
+    if (!staleSession || isSameAuthSessionToken(staleSession.accessToken, session.accessToken)) {
+      staleStorage.removeItem(storageKey)
+    }
+  }
   targetStorage.setItem(storageKey, JSON.stringify(session))
+  tabAccount = { accessToken: session.accessToken, remember: session.remember }
 }
 
 /**
- * 保存済みの認証セッションをすべて削除します。
+ * この tab の account の認証セッションを削除します。
+ *
+ * 別の tab が別の account でログインしている session は残します。この tab がまだ session を
+ * 読んでいないときは、この tab から見える session を削除します。
  */
 export function clearAuthSession() {
-  window.localStorage.removeItem(storageKey)
-  window.sessionStorage.removeItem(storageKey)
+  try {
+    const entry = findTabSessionEntry()
+    entry?.storage.removeItem(storageKey)
+    // The same account may also sit in the other store from an earlier sign-in.
+    const otherStorage = entry?.storage === window.localStorage ? window.sessionStorage : window.localStorage
+    const other = entry ? readSession(otherStorage) : null
+    if (entry && other && isSameAuthSessionToken(other.accessToken, entry.session.accessToken)) {
+      otherStorage.removeItem(storageKey)
+    }
+  } catch {
+    // Nothing more can be removed when storage access fails.
+  }
+  tabAccount = null
   // Every sign-out path destroys the session here, so the app-wide unread badge is cleared with it;
   // other tabs that are still signed in republish their own count.
   void clearAppBadgeAndNotifyTabs()
 }
 
 /**
- * Checks whether either storage holds a session value, valid or not.
- *
- * @returns Whether a stored session value exists.
+ * Account this tab has read or signed in to, kept for the life of the page so that pages that
+ * mount later read the same account as the workspace shell.
  */
-function hasStoredSessionValue(): boolean {
-  return [window.localStorage, window.sessionStorage].some((storage) => storage.getItem(storageKey) !== null)
+let tabAccount: { accessToken: string, remember: boolean } | null = null
+
+/**
+ * Forgets the account this tab has read. Tests use it to start from a fresh page.
+ */
+export function resetAuthSessionTabAccount() {
+  tabAccount = null
+}
+
+/**
+ * Finds this tab's stored session and the store that holds it.
+ *
+ * Without an account yet, this tab's own sessionStorage wins over a remembered session that
+ * every tab shares. Once the tab has an account, only a session of that account is returned.
+ *
+ * @returns The session and its store, or `null` when this tab has no stored session.
+ */
+function findTabSessionEntry(): { session: AuthSession, storage: Storage } | null {
+  const entries = [window.sessionStorage, window.localStorage]
+    .map((storage) => ({ session: readSession(storage), storage }))
+    .filter((entry): entry is { session: AuthSession, storage: Storage } => entry.session !== null)
+  if (!tabAccount) return entries[0] ?? null
+  const account = tabAccount
+  return entries.find((entry) => isTabAccountSession(entry, account)) ?? null
+}
+
+/**
+ * Checks whether a stored session belongs to this tab's account.
+ *
+ * Tokens without a subject (the local Cognito emulator) cannot be told apart after another tab
+ * refreshes them, so for those the session in the store the tab signed in with still counts.
+ *
+ * @param entry - Stored session and its store.
+ * @param account - This tab's account.
+ * @returns Whether the session belongs to the account.
+ */
+function isTabAccountSession(
+  entry: { session: AuthSession, storage: Storage },
+  account: { accessToken: string, remember: boolean },
+) {
+  if (isSameAuthSessionToken(entry.session.accessToken, account.accessToken)) return true
+  const accountStorage = account.remember ? window.localStorage : window.sessionStorage
+  return entry.storage === accountStorage &&
+    readAccessTokenSubject(account.accessToken) === undefined &&
+    readAccessTokenSubject(entry.session.accessToken) === undefined
+}
+
+/**
+ * Removes stored session values that no longer parse. They still belong to a previous sign-in,
+ * so they are destroyed the same way as an expired session, including that account's badge.
+ */
+function removeMalformedSessions() {
+  let removed = false
+  for (const storage of [window.sessionStorage, window.localStorage]) {
+    if (storage.getItem(storageKey) !== null && !readSession(storage)) {
+      storage.removeItem(storageKey)
+      removed = true
+    }
+  }
+  if (removed) void clearAppBadgeAndNotifyTabs()
 }
 
 function readSession(storage: Storage) {
