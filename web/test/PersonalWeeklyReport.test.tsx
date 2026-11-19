@@ -19,8 +19,41 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 import { createTeamTimeTrackingPath } from '../src/shared/routing/paths'
 
 const week = createWeekPeriod(timeTrackingFixtureWeekStart)
+
+/**
+ * Returns an ISO instant at a whole local hour of a date.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param hour - Local hour.
+ * @returns ISO instant.
+ */
+function readLocalHourIso(date: string, hour: number): string {
+  const [year, month, day] = date.split('-').map(Number)
+  return new Date(year ?? 1970, (month ?? 1) - 1, day ?? 1, hour).toISOString()
+}
 const en = createTranslator('en')
 const ja = createTranslator('ja')
+
+/**
+ * Creates a timed entry that starts at a whole local hour.
+ *
+ * @param id - Entry identifier.
+ * @param workItemId - Work Item the time was recorded against.
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param hour - Local start hour.
+ * @param minutes - Duration in minutes.
+ * @returns Time entry.
+ */
+function createLocalEntry(id: string, workItemId: string, date: string, hour: number, minutes: number) {
+  const startAt = readLocalHourIso(date, hour)
+  return createTimeEntryFixture({
+    id,
+    workItemId,
+    startAt,
+    endAt: new Date(Date.parse(startAt) + minutes * 60_000).toISOString(),
+    durationMinutes: minutes,
+  })
+}
 
 describe('buildPersonalWeeklyReport', () => {
   test('sorts the member Work Items into completed, started, overdue, and upcoming', () => {
@@ -45,9 +78,9 @@ describe('buildPersonalWeeklyReport', () => {
       today: '2026-11-13',
       workItems: weeklyReportFixtureWorkItems,
       entries: [
-        createTimeEntryFixture({ id: 'a', workItemId: 'onboarding', durationMinutes: 90 }),
-        createTimeEntryFixture({ id: 'b', workItemId: 'onboarding', durationMinutes: 30 }),
-        createTimeEntryFixture({ id: 'c', workItemId: 'other-team-item', durationMinutes: 45 }),
+        createLocalEntry('a', 'onboarding', '2026-11-10', 9, 90),
+        createLocalEntry('b', 'onboarding', '2026-11-11', 9, 30),
+        createLocalEntry('c', 'other-team-item', '2026-11-12', 9, 45),
       ],
       workItemTitles: { 'other-team-item': 'Review a teammate task' },
     })
@@ -58,6 +91,26 @@ describe('buildPersonalWeeklyReport', () => {
       { workItemId: 'onboarding', title: 'Reduce onboarding friction', minutes: 120 },
       { workItemId: 'other-team-item', title: 'Review a teammate task', minutes: 45 },
     ])
+  })
+
+  test('counts only the minutes inside the week, like the timesheet', () => {
+    const report = buildPersonalWeeklyReport({
+      weekDays: week.days,
+      today: '2026-11-13',
+      workItems: [],
+      entries: [
+        // Starts on the previous Sunday and runs into Monday, so only Monday's part is counted.
+        createTimeEntryFixture({
+          id: 'overnight',
+          startAt: readLocalHourIso('2026-11-08', 23),
+          endAt: readLocalHourIso('2026-11-09', 1),
+          durationMinutes: 120,
+        }),
+      ],
+    })
+
+    expect(report.totalMinutes).toBe(60)
+    expect(report.time).toEqual([{ workItemId: 'onboarding', title: 'onboarding', minutes: 60 }])
   })
 
   test('counts a due date as overdue only once it is before today in the current week', () => {
@@ -102,7 +155,7 @@ describe('formatPersonalWeeklyReportMarkdown', () => {
       weekDays: week.days,
       today: '2026-11-13',
       workItems: weeklyReportFixtureWorkItems,
-      entries: [createTimeEntryFixture({ id: 'a', workItemId: 'onboarding', durationMinutes: 90 })],
+      entries: [createLocalEntry('a', 'onboarding', '2026-11-10', 9, 90)],
     })
     const markdown = formatPersonalWeeklyReportMarkdown(report, { issues: '請求の丸めは仕様確認待ち', reflection: '順調' }, ja)
 

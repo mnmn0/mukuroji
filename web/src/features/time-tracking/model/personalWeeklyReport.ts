@@ -5,6 +5,7 @@ import {
   type TimeEntry,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../../shared/i18n/i18n'
+import { splitTimeEntryMinutesByDay } from './timeEntryLifecycle'
 import { formatMinutes, shiftLocalDate } from './timePeriod'
 
 /** One Work Item fact listed in a personal weekly report. */
@@ -59,7 +60,7 @@ export type PersonalWeeklyReportInput = {
   today: string
   /** Work Items the member owns or contributes to, as returned by the server for the member. */
   workItems: readonly CanonicalWorkItem[]
-  /** The member's own time entries that start in the week. */
+  /** The member's own time entries that overlap the week; only minutes inside the week count. */
   entries: readonly TimeEntry[]
   /** Titles of Team Work Items, used for time recorded against items outside `workItems`. */
   workItemTitles?: Readonly<Record<string, string>>
@@ -120,8 +121,12 @@ export function buildPersonalWeeklyReport(input: PersonalWeeklyReportInput): Per
   const minutesByWorkItem = new Map<string, number>()
   let totalMinutes = 0
   for (const entry of input.entries) {
-    minutesByWorkItem.set(entry.workItemId, (minutesByWorkItem.get(entry.workItemId) ?? 0) + entry.durationMinutes)
-    totalMinutes += entry.durationMinutes
+    // Split by day like the timesheet, so the totals match it for entries crossing the week edge.
+    let minutes = 0
+    for (const dayMinutes of splitTimeEntryMinutesByDay(entry, input.weekDays).values()) minutes += dayMinutes
+    if (minutes === 0) continue
+    minutesByWorkItem.set(entry.workItemId, (minutesByWorkItem.get(entry.workItemId) ?? 0) + minutes)
+    totalMinutes += minutes
   }
 
   const completed: PersonalWeeklyReportItem[] = []
