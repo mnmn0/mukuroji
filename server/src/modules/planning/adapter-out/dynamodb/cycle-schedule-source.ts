@@ -84,8 +84,9 @@ function readIndexedCycle(item: Record<string, unknown>): CycleScheduleDueCycle 
 /**
  * Reads the canonical Work Items behind Cycle links with strongly consistent batch reads.
  *
- * Archived or missing Work Items are left out, so the rollover fails closed on them like the
- * manual rollover does. A row that is not a canonical Work Item of the Workspace is rejected.
+ * Missing Work Items and archived open ones are left out, so the rollover fails closed on them like
+ * the manual rollover does. Archived completed or canceled Work Items are kept as finished work of
+ * the source Cycle. A row that is not a canonical Work Item of the Workspace is rejected.
  */
 async function readLinkedWorkItems(
   documentClient: Pick<DynamoDBDocumentClient, 'send'>,

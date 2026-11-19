@@ -12,7 +12,7 @@ Cycle に「終了日の 3 日前に次の Cycle を作る」「終了日の翌�
 制約は次のとおり。
 
 - 常時の固定費を増やさない（新しい table、常駐の worker、時間課金のサービスを足さない）。
-- 1 回の実行の読み取り量を Cycle の総数ではなく、期日の来た Cycle の数に比例させる。
+- 期日の来た Cycle を探す読み取り量を、Cycle の総数ではなく期日の来た Cycle の数に比例させる。
 - 失敗を握りつぶさず、既存の再試行・failure destination・DLQ alarm に乗せる。
 
 ## 決定
@@ -38,7 +38,7 @@ Cycle に「終了日の 3 日前に次の Cycle を作る」「終了日の翌�
 ## 検討した選択肢
 
 - 選択肢 A（採用）: 既存の sparse GSI を shard 名で分けて共用し、既存の scheduled-jobs に job を足す。
-  利点: 新しい GSI・table・Lambda がなく固定費が増えない。読み取りは期日の来た Cycle の数に比例する。
+  利点: 新しい GSI・table・Lambda がなく固定費が増えない。候補検索の読み取りは期日の来た Cycle の数に比例する（各 Cycle の処理での graph 読み取りは「結果」を参照）。
   欠点: 通知と Cycle が同じ GSI の容量を分け合う（on-demand なので費用は使った分だけ）。GSI の
   partition key の query は shard 名の完全一致なので、互いの row は読まれない。
 - 選択肢 B: Cycle 専用の GSI を足す。利点: 分離がはっきりする。欠点: GSI の追加は deploy 時の

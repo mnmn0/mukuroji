@@ -31,7 +31,8 @@ export type CycleScheduleSource = {
    */
   listDueCycles(shard: number, asOf: Date, cursor?: unknown): Promise<CycleScheduleDuePage>
   /**
-   * Reads the canonical Work Items behind Cycle links; archived Work Items are left out.
+   * Reads the canonical Work Items behind Cycle links; archived open Work Items are left out, while
+   * archived completed or canceled ones are kept.
    *
    * @param workspaceId - Owning Workspace.
    * @param links - Cycle links.
