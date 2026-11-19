@@ -92,6 +92,43 @@ test('Slack notifications use the sparse due queue with bounded execution and re
   });
 });
 
+test('Email notifications drain their own sparse queue and send only as the configured SES sender', () => {
+  const template = synthesizedTemplate;
+  const { statements } = findScheduledJobPolicy(template, 'EmailNotification');
+  const serialized = JSON.stringify(statements);
+  expect(serialized).toContain('/index/EmailDeliveryIndex');
+  expect(serialized).not.toContain('/index/SlackDeliveryIndex');
+  expect(serialized).not.toContain('secretsmanager:');
+  expect(serialized).not.toContain('dynamodb:Scan');
+  expect(statements).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      Effect: 'Allow', Action: 'ses:SendEmail',
+      Condition: { StringEquals: { 'ses:FromAddress': { Ref: 'NotificationEmailSender' } } },
+    }),
+    expect.objectContaining({
+      Effect: 'Allow', Action: ['cognito-idp:AdminGetUser', 'cognito-idp:AdminListGroupsForUser'],
+    }),
+  ]));
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
+    Environment: { Variables: Match.objectLike({
+      NOTIFICATION_EMAIL_SENDER: { Ref: 'NotificationEmailSender' },
+      NOTIFICATION_EMAIL_APP_ORIGIN: Match.anyValue(),
+    }) },
+  });
+  // The projection queues Email only while a sender is configured.
+  template.hasResourceProperties('AWS::Lambda::Function', {
+    Description: Match.stringLikeRegexp('^Projects audit outbox events'),
+    Environment: { Variables: Match.objectLike({ NOTIFICATION_EMAIL_SENDER: { Ref: 'NotificationEmailSender' } }) },
+  });
+  template.hasParameter('NotificationEmailSender', { Type: 'String', Default: '' });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    Namespace: 'Mukuroji/Notifications', MetricName: 'OldestDueAgeSeconds',
+    Dimensions: [{ Name: 'Channel', Value: 'Email' }],
+    Threshold: 900, EvaluationPeriods: 3, DatapointsToAlarm: 3,
+  });
+});
+
 test('enterprise identity CONTROL stream runs bounded asynchronous maintenance', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
