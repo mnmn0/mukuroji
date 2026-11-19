@@ -14,6 +14,9 @@ import {
 /** Version of the durable tenant resource-owner queue protocol. */
 export const TENANT_OPERATION_EXECUTION_JOB_VERSION = 1
 
+/** Shape of one export snapshot run identifier (128 random bits, lowercase hex). */
+export const TENANT_EXPORT_SNAPSHOT_RUN_ID_PATTERN = /^[a-f0-9]{32}$/u
+
 /** Capability-isolated owner responsible for one tenant lifecycle resource set. */
 export type TenantOperationResourceOwnerKind =
   | 'export'
@@ -33,6 +36,13 @@ export type TenantOperationExecutionCursor = {
   phase?: 'snapshot' | 'prepare' | 'verify'
   /** Number of records or objects successfully handled so far. */
   processedCount: number
+  /**
+   * Export snapshot run that owns every data page written by this lineage.
+   *
+   * A snapshot restarted by pause/resume or a fresh stream dispatch gets a new run, and only the
+   * run recorded by the completion marker reaches the manifest and the download.
+   */
+  snapshotRunId?: string
 }
 
 /** ID-only durable job sent from the tenant stream dispatcher to one owner queue. */

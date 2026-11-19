@@ -83,6 +83,22 @@ mutation ごとに許可する field を allowlist 化し、request body 全体�
 
 event type は resource と operation を組み合わせる。例: `work-item.created`、`work-item.updated`、`comment.created`、`member.role-changed`、`member.removed`、`invitation.created`、`invitation.revoked`、`project.archived`、`workflow.updated`、`file.attached`、`approval.decided`。team は現行 directory model との互換のため `entityType=project`、`entityId=team/<teamId>`、`metadata.kind=team` として扱う。Canonical Work Item ID は既存 activity / collaboration key と互換の `team/<teamId>/issue/<issueId>` とし、comment target は `<workItemId>/comment/<commentId>` とする。Workspace member / invitation の公開 ID は固定 HMAC key と domain separation から `workspace/wsp_v2_<digest>/member/mbr_v2_<digest>`、`workspace/wsp_v2_<digest>/invitation/inv_v2_<digest>` を導出し、raw Workspace ID、member key、email を含めない。同じ private resource は live mutation と backfill で同じ ID になり、別 Workspace と混同しない。migration が current snapshot だけを復元した event は `*.backfilled` とし、実際の作成時刻や actor を捏造しない。
 
+### Work Item relation の event
+
+Work Item relation の追加・削除と親の付け替えは、relation row と graph revision を書く transaction に audit event の Put を加え、同じ transaction で記録する。1 つの relation 変更につき、両端の Work Item それぞれに `entityType=work-item`、`entityId=team/<teamId>/issue/<issueId>` の event を 1 件ずつ書くので、両方の activity に実行者と時刻が残る。event ID は同じ request の audit context から sequence 0, 1, 2 で決まる。
+
+| event type | 記録する Work Item | 相手の Work Item（`metadata`） |
+| --- | --- | --- |
+| `work-item.parent-changed` | 親が設定・付け替え・解除された子 | `previousParentWorkItemId` / `parentWorkItemId` |
+| `work-item.child-added` / `work-item.child-removed` | 子が増えた / 減った親 | `relatedWorkItemId`（子） |
+| `work-item.blocker-added` / `work-item.blocker-removed` | ブロックされる側 | `relatedWorkItemId`（ブロックする側） |
+| `work-item.blocking-added` / `work-item.blocking-removed` | ブロックする側 | `relatedWorkItemId`（ブロックされる側） |
+| `work-item.relation-added` / `work-item.relation-removed` | `related` / `duplicate` の両端 | `relatedWorkItemId` |
+
+`metadata` はほかに `adapter=work-item-relation`、`actorMemberKey`、`teamId`、`issueId`、`relationType`（記録する側から見た type）、`graphRevision` を持つ。相手の Work Item は閲覧者が見られない Project に属することがあるので、相手の ID は公開 view に出る `changes` には入れず（`changes` は空）、公開 view が出さない `metadata` にだけ保存する。activity は「誰がいつ何の種類の relation を変えたか」だけを表示し、相手の Work Item を閲覧者の権限で絞って表示するのは後続変更とする。relation 変更は Work Item の `revision` と `updatedAt` を変えないので、event も `work-item.updated` とは別の type にし、Analytics の scope change（`work-item.updated` の field 変更）と区別する。Audit table が構成されている環境で audit context のない relation mutation は `500` で拒否する。
+
+通知、Automation trigger、webhook の event type はこれらをまだ扱わない（#377 の残り）。
+
 ## DynamoDB key
 
 `AuditEventsTable` の primary key と GSI は次のとおりとする。

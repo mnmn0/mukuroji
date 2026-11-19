@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type {
   CanonicalWorkItem,
   FocusQueueResponse,
@@ -19,9 +20,19 @@ import {
   calculateWorkItemSummaryProgress,
   createWorkspacePortfolioProjects,
   resolveWorkspaceTaskConfiguration,
-  type WorkspacePortfolioProject,
   type WorkspaceSummary,
 } from '../../work-items/model/workspaceWorkItems'
+import {
+  arrangeDashboardPortfolioRows,
+  createDashboardPortfolioRows,
+  DASHBOARD_PORTFOLIO_HEALTH_FILTERS,
+  DASHBOARD_PORTFOLIO_SORTS,
+  type DashboardPortfolioHealthFilter,
+  type DashboardPortfolioSort,
+  isDashboardPortfolioHealthFilter,
+  isDashboardPortfolioSort,
+  needsDashboardReportingAttention,
+} from '../model/dashboardPortfolio'
 import { TaskListRow } from '../../work-items/ui/WorkspaceWorkItemPrimitives'
 import { formatPlanningUpdateDate } from '../../planning/model/date'
 
@@ -87,36 +98,20 @@ const updateHealthMessageKeys: Record<PlanningHealth, MessageKey> = {
   'off-track': 'workspace.planningUpdate.health.offTrack',
 }
 
-/** Finds a Team-qualified Project update projection without cross-Team ID collisions. */
-function findProjectUpdateTarget(
-  targets: readonly PlanningUpdateTargetSummary[],
-  teamId: string,
-  projectId: string,
-) {
-  return targets.find((candidate) =>
-    candidate.target.type === 'project' &&
-    candidate.target.teamId === teamId &&
-    candidate.target.projectId === projectId
-  )
+/** Translation keys for the dashboard Project sort options. */
+const sortMessageKeys: Record<DashboardPortfolioSort, MessageKey> = {
+  directory: 'workspace.dashboard.sort.directory',
+  health: 'workspace.dashboard.sort.health',
+  'update-oldest': 'workspace.dashboard.sort.updateOldest',
+  'update-newest': 'workspace.dashboard.sort.updateNewest',
+  'progress-ascending': 'workspace.dashboard.sort.progressAscending',
+  'progress-descending': 'workspace.dashboard.sort.progressDescending',
 }
 
-/** Returns the compact ISO calendar date used by the dense portfolio ledger. */
-/**
- * Maps a portfolio risk value to its translated Workspace message key.
- *
- * @param risk - Portfolio risk returned by the Workspace Work Item model.
- * @returns Translation key for the risk label.
- */
-function resolvePortfolioRiskMessageKey(
-  risk: WorkspacePortfolioProject['risk'],
-): MessageKey {
-  const riskMessageKeys: Record<WorkspacePortfolioProject['risk'], MessageKey> = {
-    clear: 'workspace.risk.clear',
-    low: 'workspace.risk.low',
-    watch: 'workspace.risk.watch',
-  }
-
-  return riskMessageKeys[risk]
+/** Translation keys for the dashboard reported-health filter options. */
+const healthFilterMessageKeys: Record<DashboardPortfolioHealthFilter, MessageKey> = {
+  all: 'workspace.dashboard.healthFilter.all',
+  ...updateHealthMessageKeys,
 }
 
 /**
@@ -142,19 +137,20 @@ export function DashboardWorkspaceView({
     ...getFocusQueueItems(focusQueue, 'now'),
     ...getFocusQueueItems(focusQueue, 'next'),
   ].slice(0, 5)
-  const projects = createWorkspacePortfolioProjects(teams, workItemSummary)
+  const [sort, setSort] = useState<DashboardPortfolioSort>('health')
+  const [healthFilter, setHealthFilter] = useState<DashboardPortfolioHealthFilter>('all')
   const planningUpdatesUnavailable = Boolean(planningUpdatesErrorMessage)
+  const portfolioRows = createDashboardPortfolioRows(
+    createWorkspacePortfolioProjects(teams, workItemSummary),
+    planningUpdateTargets,
+    planningUpdatesUnavailable,
+  )
+  // Reported health is unknown while Planning projections are unavailable, so a stale filter must not hide rows.
+  const effectiveHealthFilter = planningUpdatesUnavailable ? 'all' : healthFilter
+  const visibleRows = arrangeDashboardPortfolioRows(portfolioRows, sort, effectiveHealthFilter)
   const reportingAttentionCount = planningUpdatesUnavailable
     ? undefined
-    : projects.filter((project) => {
-        const update = findProjectUpdateTarget(
-          planningUpdateTargets,
-          project.teamId,
-          project.projectId,
-        )
-        return !update || update.updateState === 'not-configured' || update.updateState === 'missing' ||
-          update.updateState === 'stale' || update.updateState === 'overdue'
-      }).length
+    : portfolioRows.filter(needsDashboardReportingAttention).length
 
   return (
     <div className="grid gap-6">
@@ -192,7 +188,49 @@ export function DashboardWorkspaceView({
       ) : null}
 
       <section className="workbench-table overflow-hidden">
-        <SectionHeader title={t('workspace.dashboard.portfolioTitle')} meta={t('workspace.dashboard.portfolioMeta')} />
+        <SectionHeader
+          title={t('workspace.dashboard.portfolioTitle')}
+          meta={t('workspace.dashboard.portfolioMeta')
+            .replace('{shown}', String(visibleRows.length))
+            .replace('{total}', String(portfolioRows.length))}
+        />
+        <div className="flex flex-wrap items-end gap-3 px-5 pb-4">
+          <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('workspace.dashboard.sort.label')}
+            <select
+              className="workbench-input min-h-10 min-w-[200px] px-3 text-sm"
+              data-testid="dashboard-portfolio-sort"
+              value={sort}
+              onChange={(event) => {
+                if (isDashboardPortfolioSort(event.target.value)) {
+                  setSort(event.target.value)
+                }
+              }}
+            >
+              {DASHBOARD_PORTFOLIO_SORTS.map((option) => (
+                <option key={option} value={option}>{t(sortMessageKeys[option])}</option>
+              ))}
+            </select>
+          </label>
+          <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('workspace.dashboard.healthFilter.label')}
+            <select
+              className="workbench-input min-h-10 min-w-[180px] px-3 text-sm disabled:cursor-not-allowed disabled:bg-[var(--workbench-surface-muted)]"
+              data-testid="dashboard-portfolio-health-filter"
+              disabled={planningUpdatesUnavailable}
+              value={effectiveHealthFilter}
+              onChange={(event) => {
+                if (isDashboardPortfolioHealthFilter(event.target.value)) {
+                  setHealthFilter(event.target.value)
+                }
+              }}
+            >
+              {DASHBOARD_PORTFOLIO_HEALTH_FILTERS.map((option) => (
+                <option key={option} value={option}>{t(healthFilterMessageKeys[option])}</option>
+              ))}
+            </select>
+          </label>
+        </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-full border-collapse text-left min-[761px]:min-w-[1180px]">
             <thead>
@@ -200,7 +238,6 @@ export function DashboardWorkspaceView({
                 <th className="px-5 py-3" scope="col">{t('workspace.column.project')}</th>
                 <th className="px-5 py-3 max-[760px]:hidden" scope="col">{t('workspace.column.team')}</th>
                 <th className="px-5 py-3 max-[760px]:hidden" scope="col">{t('workspace.column.progress')}</th>
-                <th className="px-5 py-3 max-[760px]:hidden" scope="col">{t('workspace.column.risk')}</th>
                 <th className="px-5 py-3 max-[760px]:hidden" scope="col">{t('workspace.planningUpdate.column.health')}</th>
                 <th className="px-5 py-3 max-[760px]:hidden" scope="col">{t('workspace.planningUpdate.column.freshness')}</th>
                 <th className="px-5 py-3 max-[760px]:hidden" scope="col">{t('workspace.planningUpdate.column.latest')}</th>
@@ -208,14 +245,7 @@ export function DashboardWorkspaceView({
               </tr>
             </thead>
             <tbody>
-              {projects.slice(0, 6).map((project) => {
-                const updateTarget = findProjectUpdateTarget(
-                  planningUpdateTargets,
-                  project.teamId,
-                  project.projectId,
-                )
-                const updateState = updateTarget?.updateState ?? 'not-configured'
-                const health = updateTarget?.latestUpdate?.health ?? 'unknown'
+              {visibleRows.map(({ health, project, updateState, updateTarget }) => {
                 const latestUpdate = planningUpdatesUnavailable
                   ? undefined
                   : updateTarget?.latestUpdate
@@ -296,7 +326,6 @@ export function DashboardWorkspaceView({
                         value={project.progress}
                       />
                     </td>
-                    <td className="px-5 py-4 max-[760px]:hidden">{t(resolvePortfolioRiskMessageKey(project.risk))}</td>
                     <td className="px-5 py-4 max-[760px]:hidden">
                       {planningUpdatesUnavailable ? (
                         <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-fg-amber-800">
@@ -347,6 +376,17 @@ export function DashboardWorkspaceView({
                   </tr>
                 )
               })}
+              {visibleRows.length === 0 ? (
+                <tr>
+                  <td
+                    className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]"
+                    colSpan={7}
+                    data-testid="dashboard-portfolio-empty"
+                  >
+                    {t('workspace.dashboard.portfolioEmpty')}
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </div>

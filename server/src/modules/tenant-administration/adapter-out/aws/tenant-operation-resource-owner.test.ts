@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { Readable } from 'node:stream'
 import { describe, expect, test } from 'bun:test'
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
@@ -849,6 +850,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         targetIndex: 18,
         phase: 'snapshot',
         processedCount: 0,
+        snapshotRunId: 'a'.repeat(32),
       },
     }
 
@@ -868,7 +870,7 @@ describe('AwsTenantOperationResourceOwner', () => {
           ':tenant0': { S: 'WORKSPACE#workspace-1#' },
         },
       })
-      expect(exportPaths[0]).toContain('/snapshot/data/focus/')
+      expect(exportPaths[0]).toContain(`/snapshot-runs/${'a'.repeat(32)}/data/focus/`)
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -1098,6 +1100,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         targetIndex: 22,
         phase: 'snapshot',
         processedCount: 0,
+        snapshotRunId: 'b'.repeat(32),
       },
     }
 
@@ -1137,6 +1140,253 @@ describe('AwsTenantOperationResourceOwner', () => {
         '/snapshot/work-item-import-sources/job-1/source.source',
       )
       expect(importSources.nextJob.cursor?.targetIndex).toBe(25)
+      expect(importSources.nextJob.cursor?.snapshotRunId).toBe('b'.repeat(32))
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('keeps restarted and redelivered export snapshots from duplicating data pages', async () => {
+    const dynamoRequests: unknown[] = []
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const body = readJsonRequestBody(request)
+          dynamoRequests.push(body)
+          const hasStartKey = isRecord(body) && body.ExclusiveStartKey !== undefined
+          return {
+            response: {
+              body: new TextEncoder().encode(JSON.stringify(hasStartKey
+                ? { Items: [{ issueId: { S: 'issue-2' } }] }
+                : {
+                    Items: [{ issueId: { S: 'issue-1' } }],
+                    LastEvaluatedKey: {
+                      issueId: { S: 'issue-1' },
+                      directoryTeamId: { S: 'workspace-1#team-1' },
+                    },
+                  })),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const exportPaths: string[] = []
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          if (isRecord(request)) {
+            const path = Reflect.get(request, 'path')
+            if (typeof path === 'string') exportPaths.push(path)
+          }
+          return {
+            response: { body: new Uint8Array(), headers: {}, statusCode: 200 },
+          }
+        },
+      },
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation('workspace-1'),
+      kind: 'export',
+      currentStep: 'snapshot',
+      completedSteps: [],
+      exportFormat: 'jsonl',
+      revision: 1,
+    }
+    const freshJob: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId: 'workspace-1',
+      operationId: 'operation-1',
+      step: 'snapshot',
+    }
+
+    try {
+      const firstRun = await owner.execute(freshJob, operation)
+      const resumedRun = await owner.execute(freshJob, operation)
+      if (firstRun.status !== 'continuing' || resumedRun.status !== 'continuing') {
+        throw new Error('Expected snapshot continuations.')
+      }
+      const firstRunId = firstRun.nextJob.cursor?.snapshotRunId
+      const resumedRunId = resumedRun.nextJob.cursor?.snapshotRunId
+      expect(firstRunId).toMatch(/^[a-f0-9]{32}$/u)
+      expect(resumedRunId).toMatch(/^[a-f0-9]{32}$/u)
+      expect(resumedRunId).not.toBe(firstRunId)
+      expect(exportPaths[0]).toContain(`/snapshot-runs/${firstRunId}/data/work-items/`)
+      expect(exportPaths[1]).toContain(`/snapshot-runs/${resumedRunId}/data/work-items/`)
+
+      // A redelivered page message sends a second continuation with a fresh ciphertext. Both
+      // branches must write the next page to the same object instead of a second copy.
+      const pageJob: TenantOperationExecutionJob = {
+        ...freshJob,
+        cursor: {
+          targetIndex: 0,
+          phase: 'snapshot',
+          processedCount: 0,
+          snapshotRunId: 'c'.repeat(32),
+        },
+      }
+      const original = await owner.execute(pageJob, operation)
+      const redelivered = await owner.execute(pageJob, operation)
+      if (original.status !== 'continuing' || redelivered.status !== 'continuing') {
+        throw new Error('Expected snapshot continuations.')
+      }
+      expect(exportPaths[2]).toBe(exportPaths[3])
+      expect(redelivered.nextJob.cursor?.position)
+        .not.toBe(original.nextJob.cursor?.position)
+      await owner.execute(original.nextJob, operation)
+      await owner.execute(redelivered.nextJob, operation)
+      expect(exportPaths[4]).toContain(`/snapshot-runs/${'c'.repeat(32)}/data/work-items/`)
+      expect(exportPaths[5]).toBe(exportPaths[4])
+      expect(exportPaths[4]).not.toBe(exportPaths[2])
+
+      // A continuation queued before snapshot runs existed restarts from the first target.
+      const legacy = await owner.execute({
+        ...freshJob,
+        cursor: { targetIndex: 5, phase: 'snapshot', processedCount: 40 },
+      }, operation)
+      if (legacy.status !== 'continuing') throw new Error('Expected a restarted run.')
+      expect(dynamoRequests.at(-1)).toMatchObject({ TableName: 'work-items' })
+      expect(dynamoRequests.at(-1)).not.toHaveProperty('ExclusiveStartKey')
+      expect(legacy.nextJob.cursor).toMatchObject({ targetIndex: 0, processedCount: 1 })
+      expect(legacy.nextJob.cursor?.snapshotRunId).toMatch(/^[a-f0-9]{32}$/u)
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('records the completed snapshot run in the marker and the manifest', async () => {
+    const objects = new Map<string, string>()
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          if (!isRecord(request)) throw new Error('Expected an S3 request.')
+          const path = Reflect.get(request, 'path')
+          const method = Reflect.get(request, 'method')
+          if (typeof path !== 'string') throw new Error('Expected an S3 path.')
+          if (method === 'PUT') {
+            objects.set(path, readTextRequestBody(request))
+            return {
+              response: { body: new Uint8Array(), headers: { etag: '"etag-1"' }, statusCode: 200 },
+            }
+          }
+          const stored = objects.get(path)
+          if (method === 'GET' && stored !== undefined) {
+            return {
+              response: {
+                body: Readable.from([Buffer.from(stored)]),
+                headers: { etag: '"marker-etag"' },
+                statusCode: 200,
+              },
+            }
+          }
+          throw new Error(`Unexpected S3 request ${String(method)} ${path}`)
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation('workspace-1'),
+      currentStep: 'export',
+      completedSteps: [],
+      revision: 1,
+    }
+    const runId = 'd'.repeat(32)
+
+    try {
+      const snapshotDone = await owner.execute({
+        version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+        workspaceId: 'workspace-1',
+        operationId: 'operation-1',
+        step: 'export',
+        cursor: {
+          // 22 tables, 4 file namespaces, and 2 trailing tables precede the completion index.
+          targetIndex: 28,
+          phase: 'snapshot',
+          processedCount: 12,
+          snapshotRunId: runId,
+        },
+      }, operation)
+      if (snapshotDone.status !== 'continuing') {
+        throw new Error('Expected the prepare continuation.')
+      }
+      expect(snapshotDone.nextJob.cursor).toEqual({
+        targetIndex: 0,
+        phase: 'prepare',
+        processedCount: 12,
+      })
+      const markerEntry = [...objects].find(([path]) => path.endsWith('/snapshot-complete.json'))
+      expect(JSON.parse(markerEntry?.[1] ?? '{}')).toMatchObject({
+        snapshotRunId: runId,
+        processedCount: 12,
+      })
+
+      await owner.execute(snapshotDone.nextJob, operation)
+      const manifestEntry = [...objects].find(([path]) => path.endsWith('/manifest.json'))
+      const manifest: unknown = JSON.parse(manifestEntry?.[1] ?? '{}')
+      expect(manifest).toMatchObject({
+        schemaVersion: 2,
+        snapshotRunId: runId,
+        snapshotMarkerEtag: 'marker-etag',
+      })
+      expect(isRecord(manifest) && String(manifest.snapshotDataPrefix))
+        .toEndWith(`/snapshot-runs/${runId}/data/`)
+
+      // A marker written before snapshot runs existed still prepares, in the legacy layout.
+      if (!markerEntry) throw new Error('Expected the snapshot marker.')
+      objects.set(markerEntry[0], JSON.stringify({ schemaVersion: 1, processedCount: 12 }))
+      const legacyPrepared = await owner.execute(snapshotDone.nextJob, operation)
+      expect(legacyPrepared.status).toBe('continuing')
+      const legacyManifest: unknown = JSON.parse(
+        [...objects].find(([path]) => path.endsWith('/manifest.json'))?.[1] ?? '{}',
+      )
+      expect(legacyManifest).toMatchObject({ schemaVersion: 2 })
+      expect(legacyManifest).not.toHaveProperty('snapshotRunId')
+
+      objects.set(markerEntry[0], JSON.stringify({ schemaVersion: 2, snapshotRunId: '../x' }))
+      await expect(owner.execute(snapshotDone.nextJob, operation)).rejects.toMatchObject({
+        code: 'TenantExportSnapshotMarkerInvalid',
+      })
     } finally {
       documentClient.destroy()
       s3Client.destroy()

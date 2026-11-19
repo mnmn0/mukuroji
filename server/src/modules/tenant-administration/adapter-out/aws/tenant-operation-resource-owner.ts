@@ -12,6 +12,7 @@ import {
 import {
   CopyObjectCommand,
   DeleteObjectsCommand,
+  GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   ListObjectVersionsCommand,
@@ -38,6 +39,7 @@ import {
   createTenantDeletedMemberAlias,
   createTenantOperationEvidenceDigest,
   createTenantOperationEvidenceRecordKey,
+  TENANT_EXPORT_SNAPSHOT_RUN_ID_PATTERN,
   validateTenantPseudonymKey,
   type TenantOperationExecutionCursor,
   type TenantOperationExecutionJob,
@@ -552,36 +554,49 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         }
       }
       const result = await this.processExportSnapshotPage(job, operation)
-      if (typeof result !== 'number') return result
-      await this.writeExportSnapshotMarker(operation, result)
+      if (!('processedCount' in result)) return result
+      await this.writeExportSnapshotMarker(
+        operation,
+        result.processedCount,
+        result.snapshotRunId,
+      )
       if (job.step === 'export') {
         return {
           status: 'continuing',
           nextJob: createContinuation(job, {
             targetIndex: 0,
             phase: 'prepare',
-            processedCount: result,
+            processedCount: result.processedCount,
           }),
         }
       }
       return await this.completeWithEvidence(job, {
         artifactPrefix: createExportPrefix(operation),
         phase: 'snapshot',
-        processedCount: result,
+        processedCount: result.processedCount,
+        snapshotRunId: result.snapshotRunId,
       }, operation.revision)
     }
     if (phase === 'prepare') {
-      const marker = await this.requireExportObject(
-        `${createExportPrefix(operation)}/snapshot-complete.json`,
-      )
+      const marker = await this.readExportSnapshotMarker(operation)
       const manifest = JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         operationId: operation.operationId,
         workspaceDigest: digestIdentifier(operation.workspaceId),
         format: operation.exportFormat ?? 'jsonl',
         requestedAt: operation.requestedAt,
         snapshotPrefix: `${createExportPrefix(operation)}/snapshot/`,
-        snapshotMarkerEtag: normalizeEtag(marker.ETag),
+        // A marker written before snapshot runs existed keeps its pages under snapshot/data/.
+        ...(marker.snapshotRunId === undefined
+          ? {}
+          : {
+              snapshotRunId: marker.snapshotRunId,
+              snapshotDataPrefix: createExportSnapshotDataPrefix(
+                operation,
+                marker.snapshotRunId,
+              ),
+            }),
+        snapshotMarkerEtag: marker.etag,
       })
       await this.s3Client.send(new PutObjectCommand({
         Bucket: this.config.tenantExportBucketName,
@@ -666,18 +681,36 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     return Math.min(900, Math.max(1, Math.ceil(remainingMilliseconds / 1_000)))
   }
 
-  /** Processes one DynamoDB or file-object page of an export snapshot. */
+  /**
+   * Processes one DynamoDB or file-object page of an export snapshot.
+   *
+   * Every lineage writes its data pages under its own snapshot run. A job without a run starts a
+   * new run from the first target, so a resumed or re-dispatched snapshot never mixes its pages
+   * with pages a stopped lineage left behind. Inside one run the page key depends only on the
+   * decrypted DynamoDB start key, so a redelivered message overwrites the same object.
+   */
   private async processExportSnapshotPage(
     job: TenantOperationExecutionJob,
     operation: TenantOperation,
-  ): Promise<TenantOperationResourceOwnerResult | number> {
+  ): Promise<
+    | TenantOperationResourceOwnerResult
+    | { processedCount: number, snapshotRunId: string }
+  > {
     const targets = this.exportTargets()
     const fileNamespaces = this.fileNamespaces(operation.workspaceId)
     const trailing = this.trailingTargets()
-    const cursor = job.cursor ?? {
-      targetIndex: 0,
-      phase: 'snapshot',
-      processedCount: 0,
+    const cursor: TenantOperationExecutionCursor =
+      job.cursor?.snapshotRunId !== undefined
+        ? job.cursor
+        : {
+            targetIndex: 0,
+            phase: 'snapshot',
+            processedCount: 0,
+            snapshotRunId: createExportSnapshotRunId(),
+          }
+    const snapshotRunId = cursor.snapshotRunId
+    if (snapshotRunId === undefined) {
+      return { status: 'failed', failureCode: 'EXPORT_SNAPSHOT_RUN_INVALID' }
     }
     const trailingTarget = trailing[cursor.targetIndex - targets.length - fileNamespaces.length]
     if (cursor.targetIndex < targets.length || trailingTarget) {
@@ -689,10 +722,11 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           'Tenant export target is unavailable.',
         )
       }
+      const startKey = this.decodeDynamoPosition(job, cursor.position)
       const page = await this.readDynamoPage(
         target,
         operation.workspaceId,
-        this.decodeDynamoPosition(job, cursor.position),
+        startKey,
         false,
         target.scanPageSize,
       )
@@ -705,11 +739,11 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       )
       if (page.items.length > 0) {
         const pageId = digestIdentifier(
-          `${target.id}:${cursor.position ?? 'start'}`,
+          `${target.id}:${startKey === undefined ? 'start' : canonicalJson(startKey)}`,
         )
         await this.s3Client.send(new PutObjectCommand({
           Bucket: this.config.tenantExportBucketName,
-          Key: `${createExportPrefix(operation)}/snapshot/data/${target.id}/${pageId}.${operation.exportFormat ?? 'jsonl'}`,
+          Key: `${createExportSnapshotDataPrefix(operation, snapshotRunId)}${target.id}/${pageId}.${operation.exportFormat ?? 'jsonl'}`,
           Body: body,
           ContentType: operation.exportFormat === 'csv'
             ? 'text/csv; charset=utf-8'
@@ -728,6 +762,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
             : {}),
           phase: 'snapshot',
           processedCount: cursor.processedCount + page.items.length,
+          snapshotRunId,
         }),
       }
     }
@@ -735,7 +770,9 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     if (namespaceIndex > fileNamespaces.length + trailing.length) {
       return { status: 'failed', failureCode: 'EXPORT_FILE_CURSOR_INVALID' }
     }
-    if (namespaceIndex === fileNamespaces.length + trailing.length) return cursor.processedCount
+    if (namespaceIndex === fileNamespaces.length + trailing.length) {
+      return { processedCount: cursor.processedCount, snapshotRunId }
+    }
     const namespace = fileNamespaces[namespaceIndex]
     if (!namespace) {
       return { status: 'failed', failureCode: 'EXPORT_FILE_NAMESPACE_INVALID' }
@@ -777,6 +814,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
           }),
           phase: 'snapshot',
           processedCount: cursor.processedCount + copied,
+          snapshotRunId,
         }),
       }
     }
@@ -786,6 +824,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         targetIndex: cursor.targetIndex + 1,
         phase: 'snapshot',
         processedCount: cursor.processedCount + copied,
+        snapshotRunId,
       }),
     }
   }
@@ -794,12 +833,15 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   private async writeExportSnapshotMarker(
     operation: TenantOperation,
     processedCount: number,
+    snapshotRunId: string,
   ): Promise<void> {
     const body = JSON.stringify({
-      schemaVersion: 1,
+      schemaVersion: 2,
       operationId: operation.operationId,
       workspaceDigest: digestIdentifier(operation.workspaceId),
       snapshotPrefix: `${createExportPrefix(operation)}/snapshot/`,
+      snapshotRunId,
+      snapshotDataPrefix: createExportSnapshotDataPrefix(operation, snapshotRunId),
       processedCount,
     })
     await this.s3Client.send(new PutObjectCommand({
@@ -809,6 +851,60 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       ContentType: 'application/json',
       ChecksumSHA256: checksumBase64(body),
     }))
+  }
+
+  /**
+   * Reads the completed snapshot run recorded by the snapshot marker.
+   *
+   * @param operation - Export or closure operation owning the marker.
+   * @returns The marker ETag and the run whose data pages belong to the artifact. The run is
+   * undefined for a schema-version-1 marker written before snapshot runs existed, whose single
+   * lineage wrote its pages under snapshot/data/.
+   */
+  private async readExportSnapshotMarker(
+    operation: TenantOperation,
+  ): Promise<{ etag: string, snapshotRunId?: string }> {
+    let response
+    try {
+      response = await this.s3Client.send(new GetObjectCommand({
+        Bucket: this.config.tenantExportBucketName,
+        Key: `${createExportPrefix(operation)}/snapshot-complete.json`,
+      }))
+    } catch (error) {
+      if (isAwsNamedError(error, 'NotFound') || isAwsNamedError(error, 'NoSuchKey')) {
+        throw new TenantAdministrationError(
+          503,
+          'TenantExportArtifactMissing',
+          'Tenant export artifact is missing.',
+        )
+      }
+      throw error
+    }
+    let marker: unknown
+    try {
+      marker = JSON.parse(await response.Body?.transformToString('utf-8') ?? '')
+    } catch {
+      marker = undefined
+    }
+    const isLegacyMarker = isRecord(marker) &&
+      marker.schemaVersion === 1 &&
+      marker.snapshotRunId === undefined
+    if (isLegacyMarker) return { etag: normalizeEtag(response.ETag) }
+    if (
+      !isRecord(marker) ||
+      typeof marker.snapshotRunId !== 'string' ||
+      !TENANT_EXPORT_SNAPSHOT_RUN_ID_PATTERN.test(marker.snapshotRunId)
+    ) {
+      throw new TenantAdministrationError(
+        503,
+        'TenantExportSnapshotMarkerInvalid',
+        'Tenant export snapshot marker does not identify a completed snapshot run.',
+      )
+    }
+    return {
+      etag: normalizeEtag(response.ETag),
+      snapshotRunId: marker.snapshotRunId,
+    }
   }
 
   /** Requires one private export object to exist before lifecycle advancement. */
@@ -1933,6 +2029,41 @@ function resolveExportPhase(
   if (job.step === 'prepare-artifact') return 'prepare'
   if (job.step === 'verify-artifact') return 'verify'
   return job.cursor?.phase ?? 'snapshot'
+}
+
+/** Creates the private object prefix holding one snapshot run's data pages. */
+function createExportSnapshotDataPrefix(
+  operation: TenantOperation,
+  snapshotRunId: string,
+): string {
+  return `${createExportPrefix(operation)}/snapshot-runs/${snapshotRunId}/data/`
+}
+
+/** Creates one random export snapshot run identifier. */
+function createExportSnapshotRunId(): string {
+  return randomBytes(16).toString('hex')
+}
+
+/**
+ * Serializes a DynamoDB key with sorted object fields, so equal keys give equal page IDs.
+ *
+ * @param value - Decrypted DynamoDB exclusive start key or one of its values.
+ * @returns Deterministic JSON text.
+ */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value instanceof Uint8Array) {
+    return JSON.stringify({ binary: Buffer.from(value).toString('base64') })
+  }
+  if (value instanceof Set) {
+    return `{"set":${canonicalJson([...value].map(canonicalJson).sort())}}`
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${canonicalJson(value[key])}`
+    ).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
 }
 
 /** Creates a continuation that cannot change the current job scope. */

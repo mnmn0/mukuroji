@@ -11,10 +11,19 @@ import { TimeTrackingError } from '../../modules/time-tracking'
 import { requireAppDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
-import { requireTeamPermission, toProjectDataErrorResponse } from '../shared/project-access'
+import {
+  requireTeamPermission,
+  requireWorkspaceBusinessWrite,
+  toProjectDataErrorResponse,
+  type WorkspacePrincipal,
+} from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { loadAuthorizedTeamIssue } from '../shared/work-item-access'
-import { projectAccessAllows, toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
+import {
+  projectAccessAllows,
+  toWorkspaceAccessErrorResponse,
+  type TeamPermissionContext,
+} from '../shared/workspace-access'
 
 const timeTrackingDependencies = {
   get timeTrackingService() {
@@ -48,6 +57,28 @@ function toTimeTrackingErrorResponse(c: Context, error: unknown) {
 }
 
 /**
+ * Reads the Team permission context at the manager level.
+ *
+ * A direct Team grant lists every Team Project as managed; otherwise only the
+ * Projects with a manager role are listed in `projectAccesses`.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team to check.
+ * @returns The manager-level context, or `undefined` when the principal manages no Project of the Team.
+ */
+async function readTeamManagerContext(
+  principal: WorkspacePrincipal,
+  teamId: string,
+): Promise<TeamPermissionContext | undefined> {
+  try {
+    return await requireTeamPermission(principal, teamId, 'manager')
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.status === 403) return undefined
+    throw error
+  }
+}
+
+/**
  * Registers the time tracking HTTP routes on the shared route application.
  *
  * @param routeApp - Hono application that receives the routes.
@@ -57,18 +88,13 @@ export function registerTimeTrackingRoutes(routeApp: Hono): void {
     readBearerAccessToken,
     authenticate: async (accessToken, context) =>
       await authenticateWorkspacePrincipal(accessToken, undefined, context),
+    requireWrite: (principal) => {
+      requireWorkspaceBusinessWrite(principal)
+    },
     requireTeamPermission: async (principal, teamId, minimum) => {
       await requireTeamPermission(principal, teamId, minimum)
     },
-    canManageRates: async (principal, teamId) => {
-      try {
-        await requireTeamPermission(principal, teamId, 'manager')
-        return true
-      } catch (error) {
-        if (error instanceof ProjectDataError && error.status === 403) return false
-        throw error
-      }
-    },
+    canManageRates: async (principal, teamId) => await readTeamManagerContext(principal, teamId) !== undefined,
     getAccessibleProjectIds: async (principal, teamId) => {
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       if (principal.isSystemAdmin) return undefined
@@ -79,10 +105,10 @@ export function registerTimeTrackingRoutes(routeApp: Hono): void {
       )
     },
     getManagedProjectIds: async (principal, teamId) => {
-      const context = await requireTeamPermission(principal, teamId, 'viewer')
       if (principal.isSystemAdmin) return undefined
+      const context = await readTeamManagerContext(principal, teamId)
       return new Set(
-        (context.projectAccesses ?? [])
+        (context?.projectAccesses ?? [])
           .filter((access) => projectAccessAllows(access, 'manager'))
           .map((access) => access.projectId),
       )

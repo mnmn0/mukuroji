@@ -26,6 +26,25 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     retry: t('planning.action.retry'),
     emptyTitle: t('planning.empty.title'),
     emptyDescription: t('planning.empty.description'),
+    crossProjectTimeline: {
+      title: t('planning.crossProject.title'),
+      description: t('planning.crossProject.description'),
+      groupBy: t('planning.crossProject.groupBy'),
+      groupByProject: t('planning.crossProject.groupByProject'),
+      groupByPortfolio: t('planning.crossProject.groupByPortfolio'),
+      workspaceGroup: t('planning.crossProject.workspaceGroup'),
+      noPortfolioGroup: t('planning.crossProject.noPortfolioGroup'),
+      today: t('planning.crossProject.today'),
+      forecastLegend: t('planning.crossProject.forecast'),
+      baselineLegend: t('planning.crossProject.baseline'),
+      dependencyLegend: t('planning.crossProject.dependency'),
+      openProject: t('planning.crossProject.openProject'),
+      variance: (days) => (days > 0
+        ? t('planning.crossProject.late')
+        : t('planning.crossProject.early')).replace('{days}', Math.abs(days).toLocaleString(locale)),
+      projectCount: (count) => t('planning.crossProject.projectCount').replace('{count}', count.toLocaleString(locale)),
+      empty: t('planning.crossProject.empty'),
+    },
     timelineTitle: t('planning.view.timeline'),
     timelineDescription: t('planning.description'),
     baseline: t('planning.field.baselineStart'),
@@ -186,6 +205,11 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     historyDescription: t('planning.section.updateHistory.description'),
     noStatusUpdatesDescription: t('planning.statusUpdates.emptyDescription'),
     immutable: t('planning.updateHistory.immutable'),
+    acknowledged: (reviewerMemberKey, acknowledgedAt) => t('planning.updateHistory.acknowledged')
+      .replace('{reviewer}', reviewerMemberKey)
+      .replace('{date}', formatPlanningUpdateDate(acknowledgedAt, undefined, locale)),
+    acknowledgementPending: (reviewerMemberKey) => t('planning.updateHistory.acknowledgementPending')
+      .replace('{reviewer}', reviewerMemberKey),
     historyLoading: t('planning.updateHistory.loading'),
     historyError: t('planning.updateHistory.error'),
     retryHistory: t('planning.action.retry'),

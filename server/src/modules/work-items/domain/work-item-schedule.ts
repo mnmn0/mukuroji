@@ -568,6 +568,55 @@ export function workItemScheduleInstantToLocalDate(
 }
 
 /**
+ * Maps the first instant of a local calendar date under a schedule policy timezone.
+ *
+ * When a DST transition skips local midnight, the result is the first instant after the gap.
+ *
+ * @param date - Local date in `YYYY-MM-DD` form.
+ * @param policy - Calendar policy whose IANA timezone interprets the date.
+ * @returns The absolute instant at which the local date begins.
+ */
+export function workItemScheduleLocalDateToStartInstant(
+  date: string,
+  policy: WorkItemScheduleCalendarPolicy,
+): Date {
+  const normalizedPolicy = normalizeCalendarPolicy(policy)
+  const parsed = parseIsoDate(date)
+  const utcMidnight = new Date(0)
+  utcMidnight.setUTCFullYear(parsed.year, parsed.month - 1, parsed.day)
+  const formatter = new Intl.DateTimeFormat('en-US-u-ca-iso8601-nu-latn', {
+    timeZone: normalizedPolicy.timeZone,
+    hourCycle: 'h23',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+  /** Returns how far the policy timezone is ahead of UTC at one epoch instant. */
+  const offsetAt = (epochMilliseconds: number): number => {
+    const parts = formatter.formatToParts(new Date(epochMilliseconds))
+    /** Reads one numeric local date-time field. */
+    const read = (type: Intl.DateTimeFormatPartTypes): number => {
+      const part = parts.find((candidate) => candidate.type === type)
+      if (!part) return invalidInstant('Schedule date could not be mapped to an instant.')
+      return Number(part.value)
+    }
+    const local = new Date(0)
+    local.setUTCFullYear(read('year'), read('month') - 1, read('day'))
+    local.setUTCHours(read('hour'), read('minute'), read('second'), 0)
+    return local.getTime() - Math.floor(epochMilliseconds / 1_000) * 1_000
+  }
+  const target = utcMidnight.getTime()
+  const firstGuess = target - offsetAt(target)
+  const secondGuess = target - offsetAt(firstGuess)
+  const candidates = [...new Set([firstGuess, secondGuess])].sort((left, right) => left - right)
+  const exact = candidates.find((candidate) => candidate + offsetAt(candidate) === target)
+  return new Date(exact ?? Math.max(...candidates))
+}
+
+/**
  * Adds whole Gregorian calendar days without applying timezone or DST offsets.
  *
  * @param date - Local date in `YYYY-MM-DD` form.

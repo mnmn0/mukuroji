@@ -1,7 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT,
+  AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT,
   createDefaultUnscheduledWorkItemSchedule,
   WORK_ITEM_TITLE_MAX_LENGTH,
+  type AutomationProjectTemplateWorkItem,
 } from '@mukuroji/contracts'
 import {
   validateApplyAutomationTemplateInput,
@@ -119,5 +122,83 @@ describe('Automation management validation domain', () => {
       enabled: true,
       payload: { title: 'Review', dueDate: '2026-07-31' },
     })).toThrow('unsupported fields')
+  })
+
+  test('normalizes a Project template WBS and the application start date', () => {
+    expect(validateCreateAutomationTemplateInput({
+      kind: 'project',
+      name: 'Standard project',
+      enabled: true,
+      payload: {
+        nameJa: '標準プロジェクト',
+        workItems: [
+          {
+            title: ' 要件定義 ',
+            startOffsetWorkingDays: 0,
+            durationWorkingDays: 5,
+            children: [{ title: 'ヒアリング', startOffsetWorkingDays: 0, durationWorkingDays: 2, children: [] }],
+          },
+          { title: '設計', startOffsetWorkingDays: 5, durationWorkingDays: 10 },
+        ],
+      },
+    }).payload).toEqual({
+      nameJa: '標準プロジェクト',
+      tone: 'blue',
+      workItems: [
+        {
+          title: '要件定義',
+          startOffsetWorkingDays: 0,
+          durationWorkingDays: 5,
+          children: [{ title: 'ヒアリング', startOffsetWorkingDays: 0, durationWorkingDays: 2 }],
+        },
+        { title: '設計', startOffsetWorkingDays: 5, durationWorkingDays: 10 },
+      ],
+    })
+    expect(validateCreateAutomationTemplateInput({
+      kind: 'project',
+      name: 'Empty WBS',
+      enabled: true,
+      payload: { name: 'Empty', workItems: [] },
+    }).payload).toEqual({ name: 'Empty', tone: 'blue' })
+    expect(validateApplyAutomationTemplateInput({
+      target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-01' },
+    })).toEqual({ target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-01' } })
+  })
+
+  test('rejects an invalid Project template WBS or start date', () => {
+    const project = (workItems: unknown) => validateCreateAutomationTemplateInput({
+      kind: 'project',
+      name: 'Project',
+      enabled: true,
+      payload: { name: 'Project', workItems },
+    })
+    expect(() => project({})).toThrow('must be an array')
+    expect(() => project([{ title: '', startOffsetWorkingDays: 0, durationWorkingDays: 1 }]))
+      .toThrow('title is required')
+    expect(() => project([{ title: 'A | 0 | 1\nB', startOffsetWorkingDays: 0, durationWorkingDays: 1 }]))
+      .toThrow('must not contain line breaks')
+    expect(() => project([{ title: 'A\u2028B', startOffsetWorkingDays: 0, durationWorkingDays: 1 }]))
+      .toThrow('must not contain line breaks')
+    expect(() => project([{ title: 'A', startOffsetWorkingDays: -1, durationWorkingDays: 1 }]))
+      .toThrow('start offset')
+    expect(() => project([{ title: 'A', startOffsetWorkingDays: 0, durationWorkingDays: 0 }]))
+      .toThrow('duration')
+    expect(() => project([{ title: 'A', startOffsetWorkingDays: 0, durationWorkingDays: 1, assigneeUserId: 'x' }]))
+      .toThrow('unsupported fields')
+    expect(() => project(Array.from({ length: AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT + 1 }, (_, index) => ({
+      title: `Item ${index}`,
+      startOffsetWorkingDays: 0,
+      durationWorkingDays: 1,
+    })))).toThrow(`at most ${AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT} Work Items`)
+    let nested: AutomationProjectTemplateWorkItem = { title: 'Leaf', startOffsetWorkingDays: 0, durationWorkingDays: 1 }
+    for (let level = 0; level < AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT; level += 1) {
+      nested = { title: `Level ${level}`, startOffsetWorkingDays: 0, durationWorkingDays: 1, children: [nested] }
+    }
+    expect(() => project([nested])).toThrow('levels deep')
+    for (const startDate of ['2026-02-30', '2026/12/01', 20261201, '1969-12-31', '3000-01-01']) {
+      expect(() => validateApplyAutomationTemplateInput({
+        target: { kind: 'project', teamId: 'core-team', startDate },
+      })).toThrow('start date')
+    }
   })
 })

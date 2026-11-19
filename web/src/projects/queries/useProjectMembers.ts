@@ -21,20 +21,24 @@ const projectMemberQueryConfig = {
  * @param accessToken - Project API の access token です。
  * @param projectId - 取得対象の Project ID です。
  * @param enabled - Query を実行するかどうかです。
+ * @param teamId - Optional Team that qualifies a Project ID shared by several Teams.
  * @returns Project member の SWR state です。
  */
 export function useProjectMembers(
   accessToken: string | undefined,
   projectId: string | undefined,
   enabled = true,
+  teamId?: string,
 ) {
   const key = accessToken && projectId && enabled
-    ? ['project-members', accessToken, projectId] as const
+    ? ['project-members', accessToken, projectId, teamId ?? ''] as const
     : null
 
   const queryResult = useSWR(
     key,
-    ([, token, currentProjectId]) => getProjectMembers(token, currentProjectId),
+    ([, token, currentProjectId, currentTeamId]) => currentTeamId
+      ? getProjectMembers(token, currentProjectId, currentTeamId)
+      : getProjectMembers(token, currentProjectId),
     projectMemberQueryConfig,
   )
 

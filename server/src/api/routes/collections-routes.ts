@@ -451,7 +451,7 @@ const EXACT_CANDIDATE_CURSOR_PREFIX = 'exact:'
  * readable Teams. Paging stays stable and bounded:
  *
  * - Exact matches come first, in readable-Team order. While they remain, the page carries an
- *   `exact:<offset>.<context>` cursor (never a valid index cursor, which is base64url) that
+ *   `exact:<offset>.<context>` cursor (never a valid index cursor, which has no `:`) that
  *   continues them. The context binds it to the Workspace, caller and keyword that produced it,
  *   so it cannot skip matches of another search.
  * - The page that exhausts the exact matches fills its remaining slots with the first index

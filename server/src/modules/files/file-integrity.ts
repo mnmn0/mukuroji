@@ -223,13 +223,9 @@ export function parseFileIntegrityReferences(item: unknown): FileIntegrityRefere
     throw new FileIntegrityFailure('FILE_SCOPE_INVALID')
   }
   return parsed.versions.map((version) => {
-    const expectedObjectKey = createCanonicalObjectKey(
-      parsed.workspaceId,
-      parsed.fileId,
-      version.id,
-      version.fileName,
-    )
-    if (version.objectKey !== expectedObjectKey) {
+    const expectedObjectKey = createCanonicalObjectKey(parsed.workspaceId, parsed.fileId, version.id)
+    const legacyObjectKey = `${expectedObjectKey}/${encodeURIComponent(version.fileName)}`
+    if (version.objectKey !== expectedObjectKey && version.objectKey !== legacyObjectKey) {
       throw new FileIntegrityFailure('FILE_OBJECT_KEY_MISMATCH')
     }
     validateObjectVersionState(version)
@@ -711,18 +707,17 @@ function mapEvidenceFailureCode(
 
 /**
  * Builds the canonical File object key from validated row fields.
+ * Versions uploaded before #487 also carry the encoded display name as a trailing segment.
  *
  * @param workspaceId - Workspace identifier.
  * @param fileId - File identifier.
  * @param versionId - File version identifier.
- * @param fileName - Canonical display file name.
  * @returns Canonical object key.
  */
 function createCanonicalObjectKey(
   workspaceId: string,
   fileId: string,
   versionId: string,
-  fileName: string,
 ): string {
   return [
     'workspaces',
@@ -730,7 +725,6 @@ function createCanonicalObjectKey(
     'files',
     encodeURIComponent(fileId),
     encodeURIComponent(versionId),
-    encodeURIComponent(fileName),
   ].join('/')
 }
 

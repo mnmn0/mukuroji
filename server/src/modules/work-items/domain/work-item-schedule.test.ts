@@ -20,6 +20,7 @@ import {
   normalizeWorkItemScheduleOperation,
   previewWorkItemScheduleChange,
   workItemScheduleInstantToLocalDate,
+  workItemScheduleLocalDateToStartInstant,
 } from './work-item-schedule'
 
 const calendarPolicy: WorkItemScheduleCalendarPolicy = {
@@ -334,6 +335,22 @@ test('moves deadlines and milestones without inferring another schedule mode', (
     }),
     'InvalidWorkItemScheduleOperation',
   )
+})
+
+test('maps local dates to the instant they begin, including DST days and skipped midnights', () => {
+  const policyIn = (timeZone: string): WorkItemScheduleCalendarPolicy => ({ ...calendarPolicy, timeZone })
+
+  expect(workItemScheduleLocalDateToStartInstant('2026-08-05', policyIn('UTC')).toISOString())
+    .toBe('2026-08-05T00:00:00.000Z')
+  expect(workItemScheduleLocalDateToStartInstant('2026-08-05', policyIn('Asia/Tokyo')).toISOString())
+    .toBe('2026-08-04T15:00:00.000Z')
+  expect(workItemScheduleLocalDateToStartInstant('2026-03-08', policyIn('America/New_York')).toISOString())
+    .toBe('2026-03-08T05:00:00.000Z')
+  expect(workItemScheduleLocalDateToStartInstant('2026-03-09', policyIn('America/New_York')).toISOString())
+    .toBe('2026-03-09T04:00:00.000Z')
+  // Santiago skips local midnight when DST starts; the day begins at 01:00 local time.
+  expect(workItemScheduleLocalDateToStartInstant('2026-09-06', policyIn('America/Santiago')).toISOString())
+    .toBe('2026-09-06T04:00:00.000Z')
 })
 
 test('maps instants to local dates across DST without elapsed-day arithmetic', () => {
