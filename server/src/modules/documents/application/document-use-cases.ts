@@ -12,6 +12,7 @@ import type {
   ResolvedDocumentPublicShare,
 } from '../document-types'
 import {
+  assertElementLinkCountsWithinLimit,
   reduceDocumentOperations,
   renderPublicDocumentExport,
   validateDocumentPayload,
@@ -20,6 +21,7 @@ import { DocumentError } from '../errors'
 export {
   DOCUMENT_BACKLINK_MAX_PAGE_LIMIT,
   DOCUMENT_COMMENT_MAX_PAGE_LIMIT,
+  DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_MAX_BACKLINK_COUNT,
   DOCUMENT_MAX_ITEM_BYTES,
   DOCUMENT_MAX_OPERATION_COUNT,
@@ -109,6 +111,7 @@ export function validateCreateDocumentPayload(
       }
   }
   validateDocumentPayload(document)
+  assertElementLinkCountsWithinLimit(undefined, document)
 }
 
 /**

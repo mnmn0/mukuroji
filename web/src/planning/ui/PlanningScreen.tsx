@@ -53,6 +53,11 @@ import {
   resolvePlanningCycleRolloverTargets,
 } from '../model/selectors'
 import { createPlanningUpdateTargetKey } from '../model/targetKey'
+import type { CrossProjectTimelineDirectoryTeam } from '../model/crossProjectTimeline'
+import {
+  CrossProjectTimelineChart,
+  type CrossProjectTimelineLabels,
+} from './CrossProjectTimelineChart'
 import {
   PlanningArchivePanel,
   type PlanningArchiveController,
@@ -94,6 +99,8 @@ export type PlanningLabels = PlanningUpdateLabels & {
   emptyTitle: string
   /** Empty state の説明です。 */
   emptyDescription: string
+  /** Project 横断 timeline chart の文言です。 */
+  crossProjectTimeline: CrossProjectTimelineLabels
   /** Timeline section の見出しです。 */
   timelineTitle: string
   /** Timeline section の説明です。 */
@@ -302,6 +309,8 @@ export type PlanningScreenProps = {
   canCreateInScope?: (scope: PlanningScope) => boolean
   /** Entity 作成 form に表示する管理可能な Team / Project scope です。 */
   createScopeTeams?: readonly ProjectDirectoryTeam[]
+  /** Readable Project directory used to name groups on the cross-Project timeline. */
+  directoryTeams?: readonly CrossProjectTimelineDirectoryTeam[]
   /** Current user が target の update schedule を管理できるか判定する callback です。 */
   canManageUpdateCadence?: (target: PlanningUpdateTargetView) => boolean
   /** Current user が target に manual update を公開できるか判定する callback です。 */
@@ -432,6 +441,7 @@ export function PlanningScreen({
   canPublishUpdate,
   canUpdateWorkItemLink,
   createScopeTeams = [],
+  directoryTeams,
   errorMessage,
   hasMoreUpdateHistory = false,
   initialSelectedEntityId,
@@ -676,6 +686,7 @@ export function PlanningScreen({
               {activeEntities.length > 0 && activeView === 'timeline' ? (
                 <TimelineView
                   canManageEntity={canManageEntity}
+                  directoryTeams={directoryTeams}
                   canManageWorkItemDependencyEndpoint={canManageWorkItemDependencyEndpoint}
                   labels={labels}
                   isAiOperationPending={isAiOperationPending}
@@ -776,6 +787,7 @@ export function PlanningScreen({
 function TimelineView({
   canManageEntity,
   canManageWorkItemDependencyEndpoint,
+  directoryTeams,
   isAiOperationPending = false,
   labels,
   onArchiveEntity,
@@ -799,6 +811,8 @@ function TimelineView({
 }: {
   canManageEntity?: PlanningScreenProps['canManageEntity']
   canManageWorkItemDependencyEndpoint?: PlanningScreenProps['canManageWorkItemDependencyEndpoint']
+  /** Readable Project directory used to name cross-Project timeline groups. */
+  directoryTeams?: PlanningScreenProps['directoryTeams']
   /** Whether AI review is pending and target selection must remain stable. */
   isAiOperationPending?: boolean
   labels: PlanningLabels
@@ -837,6 +851,17 @@ function TimelineView({
 
   return (
     <div className="grid gap-5" data-testid="planning-timeline">
+      <CrossProjectTimelineChart
+        criticalEntityIds={criticalEntityIds}
+        dependencies={snapshot.dependencies}
+        directory={directoryTeams}
+        disabled={isAiOperationPending}
+        entities={snapshot.entities}
+        entityTypes={labels.entityTypes}
+        labels={labels.crossProjectTimeline}
+        onOpenProject={onOpenProject}
+        onSelectEntity={onSelectEntity}
+      />
       <section className="workbench-panel overflow-hidden">
         <PlanningSectionHeader
           description={labels.timelineDescription}

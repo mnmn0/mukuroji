@@ -31,7 +31,6 @@ AWS_ACCOUNT_ID="${AWS_ACCOUNT_ID:-000000000000}"
 FUNCTION_NAME="${MUKUROJI_BACKEND_FUNCTION_NAME:-mukuroji-backend-local}"
 API_NAME="${MUKUROJI_BACKEND_API_NAME:-mukuroji-backend-local}"
 STAGE_NAME="${MUKUROJI_BACKEND_STAGE_NAME:-dev}"
-DASHBOARD_TABLE="${MUKUROJI_DASHBOARD_TABLE:-mukuroji-dashboard-local}"
 PROJECT_DIRECTORY_TABLE="${PROJECT_DIRECTORY_TABLE_NAME:-mukuroji-project-directory-local}"
 TEAM_ISSUES_TABLE="${WORK_ITEMS_TABLE_NAME:-mukuroji-team-issues-local}"
 TEAM_ISSUE_EVENTS_TABLE="${TEAM_ISSUE_EVENTS_TABLE_NAME:-mukuroji-team-issue-events-local}"
@@ -116,6 +115,17 @@ if is_missing "$CLIENT_ID"; then
   exit 2
 fi
 
+# 通常の floci:up は Docker socket を渡さないため、compose の Floci では Lambda を実行できません。
+FLOCI_CONTAINER=''
+if command -v docker >/dev/null 2>&1; then
+  FLOCI_CONTAINER="$(docker compose -f "$ROOT_DIR/docker-compose.yml" ps -q floci 2>/dev/null || true)"
+fi
+if [ -n "$FLOCI_CONTAINER" ] &&
+  ! docker exec "$FLOCI_CONTAINER" test -S /var/run/docker.sock; then
+  echo 'Floci was started without the Docker socket, so it cannot run Lambda. Run "bun run floci:up:lambda" first.' >&2
+  exit 2
+fi
+
 if [ -n "$SSO_CLIENT_ID$COGNITO_HOSTED_UI_DOMAIN$COGNITO_SSO_REDIRECT_URI$COGNITO_ENTERPRISE_IDP_NAME$ENTERPRISE_SSO_STATE_SECRET" ]; then
   if is_missing "$SSO_CLIENT_ID" ||
     is_missing "$COGNITO_HOSTED_UI_DOMAIN" ||
@@ -166,7 +176,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-MUKUROJI_DASHBOARD_TABLE="$DASHBOARD_TABLE" \
 PROJECT_DIRECTORY_TABLE_NAME="$PROJECT_DIRECTORY_TABLE" \
 WORK_ITEMS_TABLE_NAME="$TEAM_ISSUES_TABLE" \
 TEAM_ISSUE_EVENTS_TABLE_NAME="$TEAM_ISSUE_EVENTS_TABLE" \
@@ -208,7 +217,6 @@ DYNAMODB_ENDPOINT="$LAMBDA_FLOCI_ENDPOINT" \
 AWS_REGION="$AWS_REGION" \
 bun -e '
 const names = `
-  MUKUROJI_DASHBOARD_TABLE
   PROJECT_DIRECTORY_TABLE_NAME
   WORK_ITEMS_TABLE_NAME
   TEAM_ISSUE_EVENTS_TABLE_NAME

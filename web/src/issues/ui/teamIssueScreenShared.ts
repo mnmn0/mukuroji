@@ -30,7 +30,7 @@ export const emptyWorkspaceMembers: WorkspaceMember[] = []
 /**
  * TeamIssueScreen で切り替える Issue 表示モードです。
  */
-export type IssueViewMode = 'table' | 'board'
+export type IssueViewMode = 'table' | 'board' | 'gantt'
 
 /** DOM ID of the panel that hosts the Team Work Item table or board. */
 export const issueViewPanelId = 'team-issue-view-panel'

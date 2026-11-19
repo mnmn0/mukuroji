@@ -1141,3 +1141,30 @@ describe('PlanningScreen', () => {
     )).toContain(' disabled=""')
   })
 })
+
+describe('PlanningScreen cross-Project timeline', () => {
+  test('draws visible Planning entities on one time axis grouped by Project', () => {
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        directoryTeams={[{
+          id: 'core-team',
+          name: 'Core',
+          projects: [{ id: 'refero', name: 'Refero app' }],
+        }]}
+        labels={labels}
+        onOpenProject={() => undefined}
+        snapshot={planningSnapshotFixture}
+      />,
+    )
+
+    expect(html).toContain('data-testid="planning-cross-project-timeline"')
+    expect(html).toContain('Refero app')
+    expect(html).toContain('data-testid="cross-project-timeline-open-project-refero"')
+    expect(html).toContain('data-testid="cross-project-timeline-bar-phase-build"')
+    expect(html).toContain('data-testid="cross-project-timeline-bar-milestone-beta"')
+    expect(html).toContain('data-testid="cross-project-timeline-link-dependency-build-beta"')
+    expect(html).toContain('7d later than baseline')
+    expect(html).not.toContain('data-testid="cross-project-timeline-bar-goal-activation"')
+  })
+})
