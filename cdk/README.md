@@ -32,6 +32,8 @@
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
+| `MonthlyCostBudgetUsd` | no | 月次の AWS 予算（USD）。既定値は 20。実績が 80%・100%、予測が 100% を超えると email で知らせます。[費用の目安と予算 alert](#費用の目安と予算-alert) を参照してください。 |
+| `CostBudgetAlertEmail` | no | 予算 alert の送信先 email。既定値は空で、空なら `InitialOwnerEmail` へ送ります。 |
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
 | `RequestEmailWebhookSecret` | `mukuroji:requestEmail` 有効時 | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
@@ -118,6 +120,83 @@ SSO と AI は独立したオプションです。新規 stack では、それ�
 既存stackの更新ではCloudFormationが前回のparameter値を保持するため、省略だけでは無効化されません。無効にするサービスの上記全parameterへ明示的に空文字を渡し、`ApiRuntimeConfigurationRevision` を更新してください。たとえばAIなら `--parameters AiBedrockModelId=` に加え、ARN、単価2項目、destination ARNも空にします。SSOなら5項目をすべて空にします。API version/aliasの切り替えで新しい設定が適用されます。既に開始した呼び出しの即時取り消しは行いません。
 
 Workspace、複数Project/Team、権限、監査、backup、export/closureは引き続き利用できます。商用plan、seat quota、月次課金集計はありません。
+
+## 費用の目安と予算 alert
+
+新しい環境を作る前に、この節で月額の目安を確認してください。金額は 2026 年 11 月時点の東京リージョン（`ap-northeast-1`）の公開価格をもとにした概算で、税は含みません。実際の額は Cost Explorer で確認します。
+
+### 予算 alert
+
+Stack は AWS Budgets の月次コスト予算（`MonthlyCostBudget`）を 1 つ作り、次のときに email を送ります。予算そのものは無料です。
+
+- その月の実績が予算の 80% を超えたとき
+- その月の実績が予算の 100% を超えたとき
+- その月の予測が予算の 100% を超えたとき
+
+| Parameter | 既定値 | 説明 |
+| --- | --- | --- |
+| `MonthlyCostBudgetUsd` | `20` | 月の予算（USD、1〜100000）。既定値は利用者 50 人程度までの目安です。下の試算を見て環境ごとに決めます。 |
+| `CostBudgetAlertEmail` | 空 | alert の送信先 email。空なら `InitialOwnerEmail` へ送ります。 |
+
+- 予算は AWS アカウント全体の費用を対象にします。cost allocation tag で絞らないのは、tag は Billing console で有効にするまで Budgets に届かず、data transfer や税のように tag の付かない費用もあるためです。Mukuroji 専用のアカウントに deploy してください。他のシステムと同じアカウントでは、他のシステムの費用も合算されます。
+- Budgets は請求データを 1 日に数回まとめて評価するため、通知は費用の発生から最大 1 日ほど遅れます。急な増加をすぐ止める仕組みではありません。
+- email は AWS Budgets（`budgets@costalerts.amazonaws.com`）から届きます。購読の確認は不要です。迷惑メールに入らないよう、受信側で許可してください。
+
+### Cost allocation tag
+
+Stack は tag を付けられる resource すべてに `mukuroji:application=mukuroji` を付けます（AppConfig の deployment と deployment strategy は、tag を変えると作り直しになるため除きます。どちらも課金されません）。Cost Explorer で Mukuroji の費用を分けて見るには、deploy 後に management account で tag を cost allocation tag として有効にします。
+
+```sh
+# tag は resource ができてから最大 24 時間で一覧に出ます
+aws ce update-cost-allocation-tags-status \
+  --cost-allocation-tags-status TagKey=mukuroji:application,Status=Active
+```
+
+有効にした日以降の費用だけが tag で集計されます。過去の分はさかのぼりません。
+
+### 既定構成の固定費
+
+任意 module をすべて無効にした既定構成で、利用がなくてもかかる費用です。合計はおよそ **月 $6〜8** です。
+
+| 構成要素 | 数 | 月額の目安 | 備考 |
+| --- | --- | --- | --- |
+| CloudWatch metric alarm | 33 個（35 metric） | 約 $2.50 | $0.10 / alarm metric。アカウントの無料枠 10 metric を差し引いた額です。 |
+| CloudWatch composite alarm | 1 個 | $0.50 | |
+| Secrets Manager secret | 4 個 | $1.60 | $0.40 / secret。inbound automation Webhook を 1 つ作るごとに secret が 1 つ増えます。 |
+| KMS customer-managed key | 1 個（`DeveloperPlatformKey`） | $1.00 | request 料金は少量です。 |
+| DynamoDB table（on-demand、PITR 有効） | 25 個 | $0.1〜0.5 | 保存量 25 GB までは無料枠。PITR は保存量 1 GB あたり約 $0.23 です。 |
+| EventBridge の毎分 rule と `ScheduledJobsFunction` | 1 個 | ほぼ $0 | 月 43,200 回の起動は Lambda の無料枠（100 万 request、40 万 GB 秒）に収まります。job が読む DynamoDB の料金は数十セントです。 |
+| SQS の待機中の polling | 3 queue | $0〜1 | Lambda の event source が空の queue を long polling し続けます。無料枠は月 100 万 request、超えた分は $0.40 / 100 万です。 |
+| X-Ray active tracing | 全 Lambda | ほぼ $0 | 月 10 万 trace まで無料。毎分の job で約 4.3 万 trace を使います。 |
+| CloudWatch Logs | 21 log group（90 日保持） | ほぼ $0 | 月 5 GB まで無料。超えた分は取り込み $0.76 / GB です。 |
+| GuardDuty Malware Protection for S3 | 1 plan | ほぼ $0 | 無料枠は月 1,000 object・1 GB。超えた分は scan した容量（米国東部で $0.09 / GB）と評価した object 数で課金されます。 |
+| Cognito user pool（Essentials） | 1 個 | $0 | 月 10,000 MAU まで無料。SAML / OIDC 連携の利用者は無料枠が小さく、超えると MAU 単位で課金されます。 |
+| CloudFront、S3、AppConfig、AWS Budgets | — | ほぼ $0 | CloudFront は月 1 TB・1,000 万 request まで無料です。 |
+
+固定費の大半は alarm、secret、KMS key です。alarm を減らすときは、通知の契約（[Alarm destination contract](#alarm-destination-contract)）と [`docs/operational-readiness.md`](../docs/operational-readiness.md) の alarm 一覧を確認してから、別の変更で行います。
+
+### 任意 module を有効にしたときの増分
+
+| Context key / 設定 | 増える固定費の目安 | 主な内訳 |
+| --- | --- | --- |
+| `mukuroji:restoreDrill` | +$3.5 / 月と復元ごとの料金 | KMS key 2 個（$2）、alarm 14 個（$1.40）、Step Functions。drill ごとに PITR の復元料金（復元量 1 GB あたり約 $0.17）と一時 table の料金がかかります。 |
+| `mukuroji:connectors` | +$1 前後 / 月 | secret 1 個、alarm 3 個、5 分ごとの poll（月 8,640 回）、queue の polling。 |
+| `mukuroji:requestEmail` | +$1 / 月 | secret 2 個、alarm 2 個。 |
+| `mukuroji:tenantLifecycle` | +$0〜2 / 月 | Lambda 6 個と queue 6 個。待機中の queue polling が SQS の無料枠を超えた分です。 |
+| AI（Bedrock の parameter 設定） | 利用量に比例 | token 料金。上限は Workspace の AI 設定で決めます。 |
+| `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
+
+### 利用規模ごとの試算
+
+1 人が 1 営業日に API を約 2,000 回呼ぶと仮定した試算です（Document を 1 時間開くと 3.5 秒ごとの再取得だけで約 1,000 回になります）。月 20 営業日、既定構成、AI なしで計算しています。
+
+| 利用者 | API request / 月 | 従量費の目安 | 合計の目安 |
+| --- | --- | --- | --- |
+| 10 人 | 約 40 万 | 約 $1 | 約 $7〜9 |
+| 50 人 | 約 200 万 | 約 $4〜6 | 約 $11〜14 |
+| 200 人 | 約 800 万 | 約 $25〜30 | 約 $32〜38 |
+
+従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、Lambda（無料枠を超えた request と実行時間）、DynamoDB の読み書き、CloudWatch Logs の取り込み、WebSocket の接続時間です。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
 
 ## API observability
 
