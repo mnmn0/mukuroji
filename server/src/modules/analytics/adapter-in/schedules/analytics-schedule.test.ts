@@ -763,6 +763,69 @@ test('rejects an oversized canonical entity-query fan-out before reading audit h
   expect(auditReads).toBe(0)
 })
 
+test('reads scheduled history only for Work Items updated since the period start', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const workItems = Array.from({ length: 3_000 }, (_, index) => {
+    const workItem = createWorkItem(`project-item-${index}`, 'open-project')
+    return index < 10
+      ? workItem
+      : { ...workItem, createdAt: '2026-05-01T00:00:00.000Z', updatedAt: '2026-06-01T00:00:00.000Z' }
+  })
+  const auditEntityIds: string[] = []
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [{
+            id: 'team-1',
+            projects: [{ id: 'open-project' }],
+          }],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        return { teamId, issues: workItems }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query(input) {
+        auditEntityIds.push(input.entityId ?? '')
+        return { events: [] }
+      },
+    },
+  })
+
+  const rendered = await renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })
+
+  expect(rendered?.snapshot.widgets[0]).toMatchObject({ value: 3_000, sampleSize: 3_000 })
+  expect(new Set(auditEntityIds)).toEqual(new Set(
+    workItems.slice(0, 10).map((workItem) => `team/team-1/issue/${workItem.id}`),
+  ))
+})
+
 test('applies the Work Item allowlist before the scheduled history fan-out', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
   const created = await createScheduledReport(repository, ['recipient@example.com'])
