@@ -1134,7 +1134,7 @@ describe('public Agent Run service', () => {
        */
       override async getSnapshot(workspaceId: string) {
         const snapshot = await super.getSnapshot(workspaceId)
-        return { ...snapshot, controlRevision: snapshot.controlRevision + this.controlRevisionShift }
+        return { ...snapshot, controlRevision: (snapshot.controlRevision ?? 0) + this.controlRevisionShift }
       }
     }
     const enterpriseIdentity = new MovingControlEnterpriseIdentity()
