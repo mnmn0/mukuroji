@@ -752,6 +752,8 @@ export const workItemsMessages = {
   'workItems.agentRuns.releaseConfirm': 'Release this run? The agent can no longer update this task.',
   'workItems.agentRuns.releaseError': 'The run could not be released. Check your permissions and the latest state.',
   'workItems.agentRuns.stalledHint': 'No activity within the lease. Check on the agent and release the run if needed.',
+  'workItems.agentRuns.resumed': 'Resumed',
+  'workItems.agentRuns.resumedHint': 'The assignee’s agent resumed the Work Item after the previous run.',
   'workItems.agentRuns.state.running': 'Running',
   'workItems.agentRuns.state.stalled': 'Stalled',
   'workItems.agentRuns.state.completed': 'Completed',

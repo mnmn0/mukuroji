@@ -1,4 +1,4 @@
-# 0003. Connector の OAuth callback を、flow を開始した本人の認証済み session で完了する
+# 0005. Connector の OAuth callback を、flow を開始した本人の認証済み session で完了する
 
 - 状態: 提案
 - 日付: 2026-11-19

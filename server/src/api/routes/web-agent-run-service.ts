@@ -139,7 +139,11 @@ function mayRelease(run: StoredAgentRun, principal: WorkspacePrincipal, manager:
  * @returns Run view.
  */
 function toAgentRunView(run: StoredAgentRun, canRelease: boolean, now: Date): AgentRunView {
-  return { ...toAgentRun(run, now), canRelease: run.state === 'active' && canRelease }
+  return {
+    ...toAgentRun(run, now),
+    canRelease: run.state === 'active' && canRelease,
+    ...(run.resumedFromRunId === undefined ? {} : { resumedFromRunId: run.resumedFromRunId }),
+  }
 }
 
 /**
@@ -648,6 +652,7 @@ export async function updateWebAgentSettings(
         after: update.allowTakeoverAfterLeaseExpiry,
       },
       { field: 'readyStatusIds', before: before.readyStatusIds.join(','), after: update.readyStatusIds.join(',') },
+      { field: 'resumableStatusIds', before: before.resumableStatusIds.join(','), after: update.resumableStatusIds.join(',') },
       { field: 'requireAcceptanceCriteria', before: before.requireAcceptanceCriteria, after: update.requireAcceptanceCriteria },
       { field: 'acceptanceCriteriaFieldId', before: before.acceptanceCriteriaFieldId ?? '', after: update.acceptanceCriteriaFieldId ?? '' },
       { field: 'fileFailedRunsToTriage', before: before.fileFailedRunsToTriage, after: update.fileFailedRunsToTriage },

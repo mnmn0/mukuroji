@@ -364,6 +364,17 @@
             "description": "Whether only Work Items with at least one acceptance criterion are ready for agents; a start without one is rejected with `not_ready`.",
             "type": "boolean"
           },
+          "resumableStatusIds": {
+            "description": "Started workflow status IDs from which the assignee's agent may resume a Work Item that no run claims. Empty means any started status; resuming from another status is rejected with `not_resumable`.",
+            "items": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "type": "array",
+            "uniqueItems": true
+          },
           "revision": {
             "description": "Agent settings revision these values were read from; `0` means the defaults.",
             "minimum": 0,
@@ -2799,6 +2810,65 @@
             "type": "object"
           }
         ]
+      },
+      "ResumeAgentRunRequest": {
+        "additionalProperties": false,
+        "description": "Resumes a started Work Item without an active run. The Work Item status does not change.",
+        "properties": {
+          "agentName": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "expectedPreviousRunId": {
+            "description": "Run the agent expects to resume from, such as the resumedFromRun that next-task selection offered. The resume is refused with 409 when the Work Item's newest run is another run.",
+            "pattern": "^run_[0-9a-f-]{36}$",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "description": "Work Item revision the agent read before deciding to resume.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "instanceId": {
+            "description": "Opaque, stable identifier of the agent instance. Mukuroji stores and compares only its hash.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "runtime": {
+            "enum": [
+              "claude-code",
+              "codex",
+              "kiro",
+              "other"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "expectedRevision",
+          "runtime",
+          "agentName",
+          "instanceId"
+        ],
+        "type": "object"
+      },
+      "ResumeAgentRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "resumedFromRun": {
+            "$ref": "#/components/schemas/AgentRun",
+            "description": "Newest earlier run of the Work Item, which the new run resumes. Absent when the Work Item never had a run."
+          },
+          "run": {
+            "$ref": "#/components/schemas/AgentRun"
+          }
+        },
+        "required": [
+          "run"
+        ],
+        "type": "object"
       },
       "RotateApiKeyInput": {
         "additionalProperties": false,
@@ -10223,6 +10293,119 @@
           }
         ],
         "summary": "Claim an assigned Work Item and move it to a started status in one transaction",
+        "tags": [
+          "Agent Runs"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/agent-runs/resume": {
+      "post": {
+        "description": "Starts a new run on a `started` Work Item whose assignee is the credential's member and that no active run claims, for example after the agent finished its run as `paused` or a reviewer sent the Work Item back. The new run is linked to the Work Item's newest earlier run, which the response returns as `resumedFromRun`; a `started` Work Item with no earlier run can be resumed too, and then the response has `run` but no `resumedFromRun`. The Work Item status does not change. A Work Item that is not `started` is rejected with `409 conflict` and `errors[].code` `invalid_transition`, a claim by another run with `agent_run_conflict`, and a status outside the Agent context's non-empty `resumableStatusIds` with `not_resumable`.",
+        "operationId": "resumePublicAgentRun",
+        "parameters": [
+          {
+            "description": "Started Work Item to resume.",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Team that owns the Work Item and its runs.",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumeAgentRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResumeAgentRunResponse"
+                }
+              }
+            },
+            "description": "New run of the caller and, when the Work Item had an earlier run, the run it resumes",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:write"
+            ]
+          }
+        ],
+        "summary": "Resume a started Work Item that no run claims by starting a new run of its assignee",
         "tags": [
           "Agent Runs"
         ]
