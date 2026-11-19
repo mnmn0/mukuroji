@@ -8,6 +8,7 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   focus: '/focus',
   updates: '/updates',
   'my-tasks': '/my-tasks',
+  'work-items': '/work-items',
   inbox: '/inbox',
   requests: '/requests',
   customers: '/customers',
