@@ -213,6 +213,7 @@ import { readAuditEventQuery, readLocale, readRequiredRouteId } from '../shared/
 import {
   createPlanningFencedWorkItemAuthorizationSnapshot,
   filterPlanningSnapshotForPrincipal,
+  withPlanningLegacyReadScope,
   readPlanningIdentifier,
   readPlanningWorkItemState,
   requirePlanningUpdateProjectPermission,
@@ -2565,6 +2566,7 @@ async function recomputeWorkItemScheduleDependencyPreview(
 async function readStableWorkItemSchedulePlanningSnapshot(
   principal: WorkspacePrincipal,
 ) {
+  const planningReader = await withPlanningLegacyReadScope(principal)
   for (
     let attempt = 0;
     attempt < WORK_ITEM_SCHEDULE_SNAPSHOT_RETRY_LIMIT;
@@ -2575,7 +2577,7 @@ async function readStableWorkItemSchedulePlanningSnapshot(
     )
     const workItemState = await readPlanningWorkItemState(principal)
     const snapshot = filterPlanningSnapshotForPrincipal(
-      principal,
+      planningReader,
       await workItemDependencies.planning.get(principal.directoryId, workItemState),
     )
     const finalRevision = await workItemDependencies.planning.getAuthorizationRevision(

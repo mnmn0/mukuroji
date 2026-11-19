@@ -1199,6 +1199,87 @@ test('rejects non-object Work Item update bodies before reading schedule fields'
   expect(calls.issueUpdates).toEqual([])
 })
 
+test('keeps a readable Planning milestone in a legacy member schedule preview', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'member' }],
+  })
+  const workspaceId = 'user#demo@example.com'
+  const workItemState: PlanningWorkItemState = {
+    workItems: [{
+      id: 'onboarding-friction',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Onboarding friction',
+      projectId: 'refero',
+      statusCategory: 'started',
+      dueDate: '2026-06-18',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
+    }],
+  }
+  const planning = new InMemoryPlanningClient()
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('legacy-portfolio', 0),
+    type: 'portfolio',
+    title: 'Legacy portfolio',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, workItemState)
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('legacy-refero-roadmap', 1),
+    type: 'roadmap',
+    title: 'Refero roadmap',
+    parentId: 'legacy-portfolio',
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, workItemState)
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('legacy-refero-milestone', 2),
+    type: 'milestone',
+    title: 'Refero milestone',
+    parentId: 'legacy-refero-roadmap',
+    baseline: { startDate: '2026-06-30', endDate: '2026-06-30' },
+    forecast: { startDate: '2026-06-30', endDate: '2026-06-30' },
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, workItemState)
+  await planning.putWorkItemLink(workspaceId, {
+    teamId: 'core-team',
+    workItemId: 'onboarding-friction',
+    projectId: 'refero',
+    milestoneId: 'legacy-refero-milestone',
+    goalIds: [],
+    expectedRevision: 3,
+  }, workItemState)
+  setTestAppDependencies({ planning })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/schedule/preview',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedRevision: 1,
+        operation: { type: 'move', targetDate: '2026-06-24' },
+      }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    planningRevision: 4,
+    affectedMilestoneIds: ['legacy-refero-milestone'],
+  })
+})
+
 test('previews moving a due-date Work Item without mutating it', async () => {
   const calls = configureFakeProjectClients(true)
 

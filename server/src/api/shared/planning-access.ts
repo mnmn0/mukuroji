@@ -37,6 +37,7 @@ import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import {
   type ProjectPrincipal,
+  readLegacyProjectScopeAccesses,
   requireProjectPermission,
   requireTeamPermission,
   requireWorkspaceAdministration,
@@ -693,6 +694,33 @@ function stripPlanningLatestUpdateCapturedScope(
   const filtered = structuredClone(updateTarget)
   if (filtered.latestUpdate) delete filtered.latestUpdate.capturedScope
   return filtered
+}
+
+/**
+ * Loads legacy Planning read scopes for an ACL-delegated principal outside `/api/planning`.
+ *
+ * Request authentication loads these scopes only for Planning routes. Shared readers such as
+ * AI assistance and Work Item scheduling call this before filtering so an unloaded scope is
+ * never treated as an empty ACL.
+ *
+ * @param principal - Authenticated Workspace principal about to read a filtered Planning snapshot.
+ * @returns The same principal, or a copy carrying its current legacy Planning read scopes.
+ */
+export async function withPlanningLegacyReadScope<Principal extends WorkspacePrincipal>(
+  principal: Principal,
+): Promise<Principal> {
+  if (
+    principal.isSystemAdmin ||
+    principal.enterprisePermissions !== undefined ||
+    principal.legacyProjectScopeAccesses !== undefined
+  ) {
+    return principal
+  }
+  return {
+    ...principal,
+    legacyProjectScopeAccesses: await readLegacyProjectScopeAccesses(principal),
+    legacyWorkspaceScopeReadable: principal.workspaceRole !== 'guest',
+  }
 }
 
 /**
