@@ -124,6 +124,9 @@ bun run web:dev
 
 - DynamoDB Admin: http://localhost:8001 （`DYNAMODB_ADMIN_PORT` で変更可）。
   テーブルの閲覧・編集ができるため、host の loopback だけに公開します。
+- Floci: http://localhost:4566 （`FLOCI_PORT` で変更可）。認証のない AWS emulator のため
+  host の loopback だけに公開し、image は digest で固定します。Docker socket は
+  Lambda を実行する `floci:up:lambda` のときだけ渡します。
 - S3: versioning と local Web origin 向け CORS を設定した `mukuroji-files-local` と
   `mukuroji-work-item-import-local`。ready hook の再実行で既存objectを削除しません。
 - SQS: import、Webhook配送、connector同期の3 queue。それぞれ専用DLQ、
@@ -182,11 +185,11 @@ secret は owner-only の root `.env` だけに保持します。Workspace audit
 へ渡し、Enterprise credential/state secret は関連する root package scripts が
 `--env-file=.env` を指定して host process へ明示的に渡します。
 
-同じ ready hook で DynamoDB table `mukuroji-dashboard-local`,
+同じ ready hook で DynamoDB table
 `mukuroji-team-issues-local`, `mukuroji-project-directory-local`,
 `mukuroji-workspace-access-local`, `mukuroji-enterprise-identity-local`,
 `mukuroji-workspace-search-local`, `mukuroji-analytics-local` も作成し、
-ダッシュボード集計、canonical Work Item、
+canonical Work Item、
 サイドバー用チーム/プロジェクト階層、Workspace metadata/member を投入します。
 Analytics table は保存済みレポート、immutable snapshot、定期配信 receipt を保持し、
 `ScheduleDueIndex` で配信対象を取得できる本番同等の key schema を使います。
@@ -217,9 +220,15 @@ command を安全に再実行できます。その後の作成・更新は通常
 Floci 上の Lambda + API Gateway に backend をデプロイする場合:
 
 ```sh
-bun run floci:up
+bun run floci:up:lambda
 bun run floci:deploy-backend
 ```
+
+Floci は Lambda を host の Docker daemon 上の container として実行するため、
+`floci:up:lambda` は `docker-compose.lambda.yml` を重ねて Docker socket を Floci に渡します。
+socket を持つ container は host の root 相当の操作ができるので、Lambda を使わないときは
+`floci:up` で起動し直してください。`floci:deploy-backend` は socket のない Floci を検出すると、
+deploy の前に停止します。
 
 `floci:deploy-backend` は `server:build:lambda` で `server/src/handlers/api.handler.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は ready hook が生成した `ANALYTICS_TABLE_NAME` と `ANALYTICS_SCHEDULE_INDEX_NAME` を Lambda に渡します。また、確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡し、Secrets Manager の内部 HTTP endpoint と明示的な `MUKUROJI_LOCAL_AWS_RUNTIME=floci` marker を組にして渡します。管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
 
@@ -282,7 +291,6 @@ Web で各 API がどの環境変数をどの順で参照するかは `web/src/s
 - `COGNITO_SSO_USER_POOL_CLIENT_NAME`: Floci が作る SSO client 名。未指定時は `mukuroji-sso-local`
 - `ENTERPRISE_SSO_STATE_SECRET`: SSO state 署名専用の 32–256 文字 secret
 - `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL_DYNAMODB` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
-- `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
 - `PROJECT_DIRECTORY_TABLE_NAME`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
 - `WORKSPACE_ACCESS_TABLE_NAME`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
 - `WORK_ITEMS_TABLE_NAME`: Work Item を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
@@ -321,7 +329,7 @@ Web で各 API がどの環境変数をどの順で参照するかは `web/src/s
 - `MUKUROJI_REQUEST_TOKEN_HASH_SECRET`: request/reply capability の hash に使う別の 32–256 文字の secret
 - `MUKUROJI_EDGE_ORIGIN_SECRET`: CloudFront が API request に付ける 32–128 文字の secret。一致した request だけ CloudFront が観測した viewer address を rate limit と Enterprise IP policy に使います。環境作成時に生成して secret store に保存し、毎回の deploy で同じ値を渡します。
 
-API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
+API サーバーは `/api/workspace/access`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
 `/api/search`, `/api/saved-views`, `/api/audit/events`,
 `/api/notifications`, `/api/documents`, `/api/automation/rules`, `/api/automation/templates`,

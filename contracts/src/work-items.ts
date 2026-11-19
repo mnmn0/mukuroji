@@ -12,6 +12,7 @@ import type {
   WorkItemContributorAssignmentCreateInput,
   WorkItemContributorAssignmentInput,
 } from './work-item-contributors'
+import { DEFAULT_WORKSPACE_TIME_ZONE } from './workspace-calendar'
 import type { WorkItemAcceptanceCriterion, WorkItemAcceptanceCriterionInput } from './work-item-acceptance-criteria'
 import type {
   TriageEntryEvent,
@@ -113,9 +114,13 @@ export type WorkItemScheduleCalendarPolicy = {
   holidays: string[]
 }
 
-/** Default calendar policy used when a caller creates a new Work Item schedule. */
+/**
+ * Default calendar policy used when a caller creates a new Work Item schedule.
+ *
+ * Its time zone is the Workspace time zone, so "today" and overdue checks follow Japan time.
+ */
 export const DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY: WorkItemScheduleCalendarPolicy = {
-  timeZone: 'UTC',
+  timeZone: DEFAULT_WORKSPACE_TIME_ZONE,
   workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
   holidays: [],
 }
@@ -225,7 +230,7 @@ export function createDefaultUnscheduledWorkItemSchedule(
  * Creates a deadline-only schedule under the default calendar policy.
  *
  * @param dueDate - Real calendar date in `YYYY-MM-DD` form.
- * @returns A due-date schedule using the default UTC Monday-to-Friday policy.
+ * @returns A due-date schedule using the default Workspace-time-zone Monday-to-Friday policy.
  */
 export function createDefaultDueDateWorkItemSchedule(
   dueDate: string,

@@ -8,6 +8,7 @@ import {
   FOCUS_SCHEMA_VERSION,
   matchesScopedWorkItemScheduleFilter,
   PLANNING_SCHEMA_VERSION,
+  toWorkspaceLocalDate,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type AnalyticsExportInput,
@@ -5627,7 +5628,11 @@ test.describe('authenticated task page', () => {
     })
     await page.goto('/projects/refero/issues')
     const taskViewResponse = page.waitForResponse((response) => {
-      const scopeText = new URL(response.url()).searchParams.get('scope')
+      const url = new URL(response.url())
+      // Other endpoints on this page, such as the Document tree, use a plain
+      // `scope` value, so only task-view responses carry the JSON scope.
+      if (!url.pathname.endsWith('/api/task-views')) return false
+      const scopeText = url.searchParams.get('scope')
       const scope: unknown = scopeText ? JSON.parse(scopeText) : undefined
       const isCoreScope = typeof scope === 'object' && scope !== null &&
         'teamId' in scope && scope.teamId === 'core-team'
@@ -14210,7 +14215,7 @@ test('未認証の場合はログイン画面へ戻す', async ({ page }) => {
  * @returns Summary totals and one bucket per Team and Project.
  */
 function createMockWorkItemSummary(workItems: readonly CanonicalWorkItem[]) {
-  const today = new Date().toISOString().slice(0, 10)
+  const now = new Date()
   const buckets = new Map<string, {
     teamId: string
     projectId?: string
@@ -14241,7 +14246,8 @@ function createMockWorkItemSummary(workItems: readonly CanonicalWorkItem[]) {
     buckets.set(key, bucket)
     const open = workItem.statusCategory !== 'completed' && workItem.statusCategory !== 'canceled'
     const highPriority = open && workItem.priority === 'high'
-    const overdue = open && workItem.dueDate < today
+    // Like the server, "today" is the local date of each item's calendar time zone.
+    const overdue = open && workItem.dueDate < toWorkspaceLocalDate(now, workItem.schedule.calendarPolicy.timeZone)
     bucket.total += 1
     if (workItem.statusCategory === 'completed') bucket.completed += 1
     if (workItem.workflowStatusId === 'review') bucket.inReview += 1

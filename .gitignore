@@ -29,6 +29,7 @@ bun-debug.log*
 .floci/generated/
 playwright-report/
 playwright-report-pwa/
+playwright-report-real-server/
 test-results/
 
 # Generated screenshots

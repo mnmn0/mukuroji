@@ -12,9 +12,10 @@ services:
     depends_on:
       - floci
   floci:
-    image: "${FLOCI_IMAGE:-floci/floci:1.5.33-compat}"
+    image: "${FLOCI_IMAGE:-floci/floci:1.5.33-compat@sha256:2303afd62d098444ac037486dd2f4fabcf794153dc11b0355224416d06dbe751}"
     ports:
-      - "${FLOCI_PORT:-4566}:4566"
+      # 認証のない emulator なので host の loopback だけに公開します。
+      - "127.0.0.1:${FLOCI_PORT:-4566}:4566"
     environment:
       FLOCI_BASE_URL: "http://localhost:${FLOCI_PORT:-4566}"
       FLOCI_HOSTNAME: floci
@@ -27,8 +28,8 @@ services:
       COGNITO_SSO_REDIRECT_URI: "${COGNITO_SSO_REDIRECT_URI:-http://localhost:5173/auth/sso/callback}"
       MUKUROJI_PUBLIC_FLOCI_ENDPOINT: "http://localhost:${FLOCI_PORT:-4566}"
       MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: "${MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:?Set a stable 64-character lowercase hexadecimal key in the host environment or .env}"
+    # Docker socket は Lambda を実行するときだけ docker-compose.lambda.yml で渡します。
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       - floci-data:/app/data
       - ./floci/init/ready.d:/etc/floci/init/ready.d:ro
       - ./.floci/generated:/app/generated

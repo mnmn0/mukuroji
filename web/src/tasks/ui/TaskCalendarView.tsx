@@ -41,6 +41,7 @@ import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { TaskCalendarMonthNavigation } from './TaskScheduleWindowToolbar'
 import {
   createTaskCalendarMonthWindow,
+  getCurrentTaskDate,
   listTaskScheduleWindowDates,
 } from '../model/taskScheduleWindow'
 
@@ -783,7 +784,7 @@ function createCanonicalCalendarModel(
  * @returns Sorted dates three days either side of each primary date, or of today.
  */
 function createTaskAnchoredCalendarDates(scheduledEntries: readonly CalendarTaskEntry[]): string[] {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = getCurrentTaskDate()
   const primaryDates = scheduledEntries.flatMap((entry) => {
     const primaryDate = resolveTaskSchedulePrimaryDate(entry.schedule)
     return primaryDate ? [primaryDate] : []

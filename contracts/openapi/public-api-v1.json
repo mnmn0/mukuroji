@@ -3537,6 +3537,43 @@
         ],
         "type": "object"
       },
+      "WorkItemActualDates": {
+        "description": "Actual start and end dates of one Work Item. Properties may be added later, so clients must ignore those they do not know.",
+        "properties": {
+          "actualEndDate": {
+            "description": "Local date, in the schedule calendar timezone, of the latest effective completion. Present only while the Work Item is in the completed category.",
+            "format": "date",
+            "type": "string"
+          },
+          "actualStartDate": {
+            "description": "Local date, in the schedule calendar timezone, when the Work Item first entered the started or completed category. Absent until work starts.",
+            "format": "date",
+            "type": "string"
+          },
+          "revision": {
+            "description": "Work Item revision the dates were read at.",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "workItemId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "teamId",
+          "workItemId",
+          "revision"
+        ],
+        "type": "object"
+      },
       "WorkItemEffort": {
         "description": "Estimate, remaining effort, and recorded progress of one Work Item. Properties may be added later, so clients must ignore those they do not know.",
         "properties": {
@@ -9778,6 +9815,99 @@
           }
         ],
         "summary": "Read the acceptance criteria of a Work Item",
+        "tags": [
+          "Work Items"
+        ]
+      }
+    },
+    "/api/v1/work-items/{workItemId}/actual-dates": {
+      "get": {
+        "operationId": "getPublicWorkItemActualDates",
+        "parameters": [
+          {
+            "description": "Work Item ID です。",
+            "in": "path",
+            "name": "workItemId",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Work Item を所有する Team ID です。",
+            "in": "query",
+            "name": "teamId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkItemActualDates"
+                }
+              }
+            },
+            "description": "Actual dates",
+            "headers": {
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "OAuth2": [
+              "work-items:read"
+            ]
+          }
+        ],
+        "summary": "Read the actual start and end dates of a Work Item",
         "tags": [
           "Work Items"
         ]

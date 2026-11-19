@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { createServer, request as httpRequest } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import {
   AUTOMATION_SCHEMA_VERSION,
   type AutomationExecution,
@@ -11,6 +13,7 @@ import {
   AUTOMATION_WEBHOOK_SECRET_PREFIX,
   createAutomationWebhookSecretId,
   createAutomationWebhookSignature,
+  createPinnedAutomationWebhookLookup,
   deliverAutomationWebhook,
   resolveAutomationWebhookAddress,
   sendAutomationWebhookRequest,
@@ -161,6 +164,51 @@ describe('automation webhook security', () => {
       code: 'AutomationWebhookDnsUnavailable',
       retryable: true,
     })
+  })
+
+  test('answers the pinned lookup in both the single-address and all-addresses forms', () => {
+    const lookup = createPinnedAutomationWebhookLookup({ address: '93.184.216.34', family: 4 })
+    const single: unknown[] = []
+    lookup('example.com', {}, (...args: unknown[]) => single.push(...args))
+    expect(single).toEqual([null, '93.184.216.34', 4])
+    const all: unknown[] = []
+    lookup('example.com', { all: true }, (...args: unknown[]) => all.push(...args))
+    expect(all).toEqual([null, [{ address: '93.184.216.34', family: 4 }]])
+  })
+
+  test('reaches the pinned address for a hostname with autoSelectFamily enabled', async () => {
+    const received: Array<{ host: string | undefined, body: string }> = []
+    const server = createServer((incoming, response) => {
+      let body = ''
+      incoming.setEncoding('utf8')
+      incoming.on('data', (chunk: string) => { body += chunk })
+      incoming.on('end', () => {
+        received.push({ host: incoming.headers.host, body })
+        response.statusCode = 204
+        response.end()
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    try {
+      const { port } = server.address() as AddressInfo
+      const status = await new Promise<number>((resolve, reject) => {
+        const clientRequest = httpRequest(`http://hooks.example.test:${port}/hooks/one`, {
+          // Node.js 20+ の既定 autoSelectFamily で `{ all: true }` 付き lookup を通す。
+          agent: false,
+          lookup: createPinnedAutomationWebhookLookup({ address: '127.0.0.1', family: 4 }),
+          method: 'POST',
+        }, (response) => {
+          response.resume()
+          resolve(response.statusCode ?? 0)
+        })
+        clientRequest.once('error', reject)
+        clientRequest.end('{"ok":true}')
+      })
+      expect(status).toBe(204)
+      expect(received).toEqual([{ host: `hooks.example.test:${port}`, body: '{"ok":true}' }])
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   })
 
   test('stops the production transport before request creation for private DNS', async () => {
