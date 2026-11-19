@@ -119,12 +119,33 @@ export function createPlanningEntityEditorDraft(entity: PlanningEntity): Plannin
 }
 
 /**
+ * Normalizes each draft field the way a save (and the server) would, so a saved value that
+ * was trimmed or lower-cased is not mistaken for an unsaved edit.
+ */
+const draftNormalizers: {
+  [K in keyof PlanningEntityEditorDraft]: (value: PlanningEntityEditorDraft[K]) => string
+} = {
+  title: (value) => value.trim(),
+  description: (value) => value.trim(),
+  ownerMemberKey: (value) => value.trim().toLowerCase(),
+  status: (value) => value,
+  health: (value) => value,
+  risk: (value) => value,
+  progressMode: (value) => value,
+  manualProgress: (value) => (value.trim() ? String(Number(value)) : ''),
+  baselineStart: (value) => value,
+  baselineEnd: (value) => value,
+  forecastStart: (value) => value,
+  forecastEnd: (value) => value,
+}
+
+/**
  * Carries the user's unsaved edits over to a newer stored version of the same entity.
  *
- * Fields the user changed keep the user's value; every other field takes the newer stored
- * value, so a refresh after a conflict neither discards the draft nor reverts someone else's
- * change. After a successful save the changed fields already match, and the result equals
- * a fresh draft of `next`.
+ * Fields the user changed and has not saved keep the user's value; every other field takes the
+ * newer stored value, so a refresh after a conflict neither discards the draft nor reverts
+ * someone else's change. After a successful save the saved fields match `next` once normalized
+ * (trimmed, lower-cased owner), so they take the stored value and stop counting as edits.
  *
  * @param previous - Stored entity the draft was last based on.
  * @param next - Newer stored version of the entity.
@@ -138,23 +159,30 @@ export function rebasePlanningEntityEditorDraft(
 ): PlanningEntityEditorDraft {
   const before = createPlanningEntityEditorDraft(previous)
   const after = createPlanningEntityEditorDraft(next)
+  /**
+   * Keeps the user's value only while it is still an unsaved edit: it differs from both the
+   * old and the new stored value once normalized the way the save normalizes it.
+   */
+  const pick = <K extends keyof PlanningEntityEditorDraft>(key: K): PlanningEntityEditorDraft[K] => {
+    const normalize = draftNormalizers[key]
+    const value = normalize(draft[key])
+    return value === normalize(before[key]) || value === normalize(after[key])
+      ? after[key]
+      : draft[key]
+  }
   return {
-    title: draft.title === before.title ? after.title : draft.title,
-    description: draft.description === before.description ? after.description : draft.description,
-    ownerMemberKey: draft.ownerMemberKey === before.ownerMemberKey
-      ? after.ownerMemberKey
-      : draft.ownerMemberKey,
-    status: draft.status === before.status ? after.status : draft.status,
-    health: draft.health === before.health ? after.health : draft.health,
-    risk: draft.risk === before.risk ? after.risk : draft.risk,
-    progressMode: draft.progressMode === before.progressMode ? after.progressMode : draft.progressMode,
-    manualProgress: draft.manualProgress === before.manualProgress
-      ? after.manualProgress
-      : draft.manualProgress,
-    baselineStart: draft.baselineStart === before.baselineStart ? after.baselineStart : draft.baselineStart,
-    baselineEnd: draft.baselineEnd === before.baselineEnd ? after.baselineEnd : draft.baselineEnd,
-    forecastStart: draft.forecastStart === before.forecastStart ? after.forecastStart : draft.forecastStart,
-    forecastEnd: draft.forecastEnd === before.forecastEnd ? after.forecastEnd : draft.forecastEnd,
+    title: pick('title'),
+    description: pick('description'),
+    ownerMemberKey: pick('ownerMemberKey'),
+    status: pick('status'),
+    health: pick('health'),
+    risk: pick('risk'),
+    progressMode: pick('progressMode'),
+    manualProgress: pick('manualProgress'),
+    baselineStart: pick('baselineStart'),
+    baselineEnd: pick('baselineEnd'),
+    forecastStart: pick('forecastStart'),
+    forecastEnd: pick('forecastEnd'),
   }
 }
 

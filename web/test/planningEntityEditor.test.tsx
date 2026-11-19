@@ -154,6 +154,29 @@ describe('planning entity edit patch', () => {
     )
   })
 
+  test('treats saved values that the save normalized as no longer edited', () => {
+    const phase = fixtureEntity('phase-build')
+    const draft: PlanningEntityEditorDraft = {
+      ...createPlanningEntityEditorDraft(phase),
+      title: ' New title ',
+      ownerMemberKey: ' New-Owner@Example.com',
+      manualProgress: '40.0',
+    }
+    const saved: PlanningEntity = {
+      ...phase,
+      title: 'New title',
+      ownerMemberKey: 'new-owner@example.com',
+      manualProgress: 40,
+      updatedAt: '2099-01-01T00:00:00.000Z',
+    }
+    const rebased = rebasePlanningEntityEditorDraft(phase, saved, draft)
+    expect(rebased).toEqual(createPlanningEntityEditorDraft(saved))
+
+    // A later change by someone else now replaces the saved title instead of being reverted.
+    const later: PlanningEntity = { ...saved, title: 'Their title', updatedAt: '2099-01-02T00:00:00.000Z' }
+    expect(rebasePlanningEntityEditorDraft(saved, later, rebased).title).toBe('Their title')
+  })
+
   test('suggests each owner once and narrows select values to known options', () => {
     expect(collectPlanningOwnerCandidates(planningSnapshotFixture.entities)).toEqual([
       'builder@example.com',
