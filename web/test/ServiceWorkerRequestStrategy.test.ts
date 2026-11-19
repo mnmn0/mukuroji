@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, test } from 'bun:test'
 import {
   createSerialRunner,
@@ -12,6 +13,7 @@ import {
   selectExpiredSharedContent,
   selectRequestStrategy,
   selectStaleCaches,
+  shareTargetPath,
   sharedContentCacheName,
   sharedContentKeyPrefix,
   sharedContentMaxAgeMilliseconds,
@@ -147,6 +149,26 @@ describe('share target', () => {
     expect(fields.title).toBe('Bug')
     expect(fields.text.length).toBe(16_000)
     expect(fields.url).toBe('')
+  })
+
+  test('matches the share target the manifest advertises', () => {
+    const manifest: unknown = JSON.parse(readFileSync(new URL('../public/manifest.webmanifest', import.meta.url), 'utf8'))
+    expect(manifest).toMatchObject({
+      share_target: {
+        action: shareTargetPath,
+        method: 'POST',
+        enctype: 'multipart/form-data',
+        params: { title: 'title', text: 'text', url: 'url' },
+      },
+    })
+    // The worker reads no files, so the manifest must not offer the app as a file share target.
+    expect(JSON.stringify(manifest)).not.toContain('"files"')
+    // The OS posts the share as a top-level navigation without a query, which the worker intercepts.
+    expect(selectRequestStrategy(request({ method: 'POST', url: `${origin}${shareTargetPath}`, mode: 'navigate' }), origin))
+      .toBe('share-target')
+    const values = new Map([['title', 'T'], ['text', 'body'], ['url', 'https://example.com/']])
+    expect(readSharedFormFields((name) => values.get(name) ?? null))
+      .toEqual({ title: 'T', text: 'body', url: 'https://example.com/' })
   })
 
   test('passes only the opaque ID to the confirmation form', () => {
