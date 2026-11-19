@@ -9,6 +9,8 @@
 - 手作業の編集は `apply_patch` を使う。
 - 検索はまず `rg` / `rg --files` を使う。
 - 変更は目的に対して小さく保ち、無関係な整形やリファクタリングを混ぜない。
+- 設計判断を伴う変更（workspace・module の境界や依存方向、DynamoDB の table・key 設計、queue・stream・worker の構成、認証・認可・tenancy の仕組み、外部サービスの採用・廃止、既存の判断の変更）では、`docs/adr/README.md` に従って `docs/adr/NNNN-*.md` の ADR を同じ PR に追加する。採用済みの ADR は書き換えず、新しい ADR を作って古い方を置き換え済みにする。
+- 利用者から見える挙動を変えた場合は、`docs/guide/` の該当ページも更新する。
 - TypeScript の exported 宣言には TSDoc を付ける。export 有無にかかわらず type / interface は宣言本体と各プロパティ、class は宣言本体とメンバー変数に TSDoc を付ける。
 - Add English TSDoc to functions and methods by default, including non-exported helpers introduced by a change. Exported declarations must describe their purpose and document parameters and return values when applicable; keep type, interface, and class member documentation complete.
 - Avoid TypeScript `as` assertions by default because they can hide invalid data at type boundaries; prefer runtime validation, type guards, or explicit construction of typed values.
@@ -36,7 +38,7 @@
 - `server/`: Hono + Bun のサーバー。Server 固有のルールは `server/AGENTS.md` に置く。
 - `contracts/`: Web / Server / CDK で共有する TypeScript の契約。公開面は `contracts/src/index.ts` に集約する。
 - `cdk/`: AWS CDK TypeScript プロジェクト。
-- `docs/`: ドキュメント置き場。
+- `docs/`: ドキュメント置き場。利用者ガイドは `docs/guide/`、全体構成は `docs/architecture.md` と `docs/glossary.md`、設計判断の記録は `docs/adr/` に置く。
 
 このリポジトリは Bun workspaces です。依存管理はルートで行い、lockfile はルートの `bun.lock` に集約します。各パッケージ配下に `bun.lock` を追加しないでください。
 
