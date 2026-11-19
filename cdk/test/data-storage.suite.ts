@@ -957,6 +957,14 @@ test('collaboration notifications and realtime sessions use production-safe Dyna
         ],
         Projection: { ProjectionType: 'KEYS_ONLY' },
       }),
+      Match.objectLike({
+        IndexName: 'EmailDeliveryIndex',
+        KeySchema: [
+          { AttributeName: 'emailQueueShard', KeyType: 'HASH' },
+          { AttributeName: 'emailNextAttemptAt', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      }),
     ]),
     TimeToLiveSpecification: {
       AttributeName: 'expiresAt',
