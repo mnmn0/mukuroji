@@ -3,13 +3,23 @@ import type { Context } from 'hono'
 import {
   createTenantAdministrationRouter,
 } from '../../modules/tenant-administration/adapter-in/http/tenant-administration-router'
+import type { TenantExportDownload, TenantOperation } from '@mukuroji/contracts'
 import { TenantAdministrationError } from '../../modules/tenant-administration'
+import {
+  calculateAuditExpiresAt,
+  createAuditEvent,
+  getConfiguredAuditRetentionDays,
+} from '../../modules/audit/audit'
 import { CognitoServiceError } from '../../modules/authentication'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import { workspaceDependencies } from '../shared/app-dependencies'
 import { readJson, toAuthErrorResponse } from '../shared/http'
 import { getEnv } from '../shared/runtime-config'
-import { requireWorkspaceAdministration } from '../shared/project-access'
+import {
+  createApiMutationContext,
+  requireWorkspaceAdministration,
+  type WorkspacePrincipal,
+} from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
 
@@ -35,6 +45,71 @@ function toTenantAdministrationErrorResponse(c: Context, error: unknown) {
 }
 
 /**
+ * Requires the audit export authority that a tenant export also carries.
+ *
+ * A tenant export contains the Workspace audit log and earlier audit export artifacts, so it is
+ * held to the same `audit.export` permission as `/api/audit/exports`. The built-in
+ * `workspace:admin` role deliberately lacks that permission.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @throws WorkspaceAccessError with status 403 when the principal may not export audit events.
+ */
+function requireTenantAuditDataExport(principal: WorkspacePrincipal): void {
+  if (principal.isSystemAdmin || principal.enterprisePermissions?.includes('audit.export')) return
+  throw new WorkspaceAccessError(
+    403,
+    'TenantExportAuditPermissionRequired',
+    'Exporting the tenant requires permission to export audit events.',
+  )
+}
+
+/**
+ * Records one issuance of tenant export download links in the immutable audit log.
+ *
+ * Every response signs new URLs, so each issuance gets its own audit identity even when a client
+ * retries the request.
+ *
+ * @param c - Hono request context.
+ * @param principal - Authenticated Workspace principal.
+ * @param operation - Completed export operation whose artifacts were signed.
+ * @param download - Signed artifact locations being returned.
+ * @throws TenantAdministrationError with status 503 when no audit writer is configured.
+ */
+async function recordTenantExportDownload(
+  c: Context,
+  principal: WorkspacePrincipal,
+  operation: TenantOperation,
+  download: TenantExportDownload,
+): Promise<void> {
+  const auditEvents = workspaceDependencies.auditEvents
+  if (!auditEvents.putEvent) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantAuditUnavailable',
+      'Tenant export download links cannot be issued without an immutable audit writer.',
+    )
+  }
+  const metadata = {
+    exportId: operation.operationId,
+    partCount: download.files.length,
+  }
+  const context = createApiMutationContext(
+    c,
+    principal,
+    { tenantExport: 'downloaded', ...metadata },
+    `tenant-export-download:${crypto.randomUUID()}`,
+  )
+  await auditEvents.putEvent(createAuditEvent({
+    context,
+    eventType: 'tenant.export.downloaded',
+    entity: { type: 'tenant', id: principal.directoryId },
+    summary: 'Tenant export download links were issued.',
+    metadata,
+    expiresAt: calculateAuditExpiresAt(context.occurredAt, getConfiguredAuditRetentionDays()),
+  }))
+}
+
+/**
  * Environment variable that CDK sets to `disabled` when the stack omits the tenant export and
  * closure workers. Any other value, including unset for local runs, keeps the routes open.
  */
@@ -50,6 +125,8 @@ export function registerTenantAdministrationRoutes(routeApp: Hono): void {
     authenticate: async (accessToken, context) =>
       await authenticateWorkspacePrincipal(accessToken, undefined, context),
     requireAdministration: requireWorkspaceAdministration,
+    requireAuditDataExport: requireTenantAuditDataExport,
+    recordExportDownload: recordTenantExportDownload,
     get client() {
       return workspaceDependencies.tenantAdministration
     },

@@ -1718,6 +1718,9 @@ export function overrideAppDependencies(
       ...(overrides.tenantAdministration
         ? { tenantAdministration: overrides.tenantAdministration }
         : {}),
+      ...(overrides.tenantExportDownload
+        ? { tenantExportDownload: overrides.tenantExportDownload }
+        : {}),
       ...(overrides.tenantLifecycleEnforcement
         ? {
             tenantLifecycleEnforcement:
