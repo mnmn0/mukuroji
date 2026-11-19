@@ -39,6 +39,13 @@ export {
   type ValidatedAgentSettingsUpdate,
 } from './domain/agent-run'
 export {
+  calculateFactoryAnalytics,
+  type FactoryAnalyticsInput,
+  type FactoryAnalyticsReportFacts,
+  type FactoryAnalyticsResult,
+  type FactoryAnalyticsWorkItemHistory,
+} from './domain/agent-run-analytics'
+export {
   createAgentRunReportCommentBody,
   readAgentRunArtifactUrl,
   readReportAgentRunRequest,
