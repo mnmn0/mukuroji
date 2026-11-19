@@ -181,6 +181,7 @@ export function CrossProjectTimelineChart({
                   >
                     <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">{row.entity.title}</span>
                     <span className="block truncate text-[11px] font-semibold text-[var(--workbench-muted)]">
+                      {row.scopeLabel ? `${row.scopeLabel} · ` : ''}
                       {entityTypes[row.entity.type]}
                       {row.endVarianceDays !== 0 ? ` · ${labels.variance(row.endVarianceDays)}` : ''}
                     </span>

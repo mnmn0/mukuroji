@@ -59,6 +59,8 @@ export type CrossProjectTimelineEntityRow = {
   baseline: CrossProjectTimelineSpan
   /** Forecast end minus baseline end in calendar days; positive values are late. */
   endVarianceDays: number
+  /** Project or Team name shown on the row when the group does not already name it. */
+  scopeLabel?: string
 }
 
 /** One group header row that names the Project or Portfolio below it. */
@@ -201,7 +203,9 @@ export function createCrossProjectTimelineChart(
     entities: PlanningEntity[]
   }>()
   for (const entity of drawable) {
-    const group = resolveGroup(entity, input, entitiesById)
+    const group = input.grouping === 'portfolio'
+      ? resolvePortfolioGroup(entity, input, entitiesById)
+      : resolveScopeGroup(entity, input)
     const existing = groups.get(group.key)
     if (existing) existing.entities.push(entity)
     else groups.set(group.key, { ...group, entities: [entity] })
@@ -244,6 +248,9 @@ export function createCrossProjectTimelineChart(
         forecast: isMilestone ? toPoint(forecast.end) : toSpan(forecast.start, forecast.end),
         baseline: isMilestone ? toPoint(baseline.end) : toSpan(baseline.start, baseline.end),
         endVarianceDays: forecast.end - baseline.end,
+        ...(input.grouping === 'portfolio'
+          ? { scopeLabel: resolveScopeGroup(entity, input).label }
+          : {}),
       })
       entityRowCenters.set(entity.id, top + CROSS_PROJECT_TIMELINE_ENTITY_ROW_HEIGHT / 2)
       entityDays.set(entity.id, forecast)
@@ -302,32 +309,51 @@ export function createCrossProjectTimelineChart(
 }
 
 /**
- * Resolves the group an entity belongs to for the selected grouping.
+ * Resolves the Portfolio group of an entity.
  *
  * @param entity - Entity to group.
- * @param input - Chart input with the directory and fallback labels.
+ * @param input - Chart input with the fallback label.
  * @param entitiesById - Visible entities by ID, used to walk Portfolio ancestors.
- * @returns The group key, label, and optional Project scope.
+ * @returns The group key and label.
  */
-function resolveGroup(
+function resolvePortfolioGroup(
   entity: PlanningEntity,
   input: CrossProjectTimelineInput,
   entitiesById: ReadonlyMap<string, PlanningEntity>,
+): Pick<CrossProjectTimelineGroupRow, 'key' | 'label'> {
+  const portfolio = findPortfolioAncestor(entity, entitiesById)
+  return portfolio
+    ? { key: `portfolio:${portfolio.id}`, label: portfolio.title }
+    : { key: 'portfolio:none', label: input.noPortfolioLabel }
+}
+
+/**
+ * Resolves the Project, Team, or Workspace group of an entity.
+ *
+ * A Project name shared by several Teams is suffixed with the Team name so the
+ * groups stay distinguishable.
+ *
+ * @param entity - Entity to group.
+ * @param input - Chart input with the directory and fallback label.
+ * @returns The group key, label, and optional Project scope.
+ */
+function resolveScopeGroup(
+  entity: PlanningEntity,
+  input: CrossProjectTimelineInput,
 ): Pick<CrossProjectTimelineGroupRow, 'key' | 'label' | 'project'> {
-  if (input.grouping === 'portfolio') {
-    const portfolio = findPortfolioAncestor(entity, entitiesById)
-    return portfolio
-      ? { key: `portfolio:${portfolio.id}`, label: portfolio.title }
-      : { key: 'portfolio:none', label: input.noPortfolioLabel }
-  }
   const team = entity.teamId === undefined
     ? undefined
     : input.directory?.find((candidate) => candidate.id === entity.teamId)
   if (entity.teamId !== undefined && entity.projectId !== undefined) {
     const projectName = team?.projects.find((project) => project.id === entity.projectId)?.name
+    const label = projectName ?? entity.projectId
+    const nameIsShared = (input.directory ?? []).some((candidate) =>
+      candidate.id !== entity.teamId &&
+      candidate.projects.some((project) => (project.name === label || project.id === entity.projectId))
+    )
     return {
-      key: `project:${entity.teamId}\0${entity.projectId}`,
-      label: projectName ?? entity.projectId,
+      key: `project:${entity.teamId}/${entity.projectId}`,
+      label: nameIsShared && team ? `${label} · ${team.name}` : label,
       project: { teamId: entity.teamId, projectId: entity.projectId },
     }
   }

@@ -182,3 +182,33 @@ describe('formatLocalCalendarDate', () => {
     expect(formatLocalCalendarDate(new Date(2026, 0, 5, 23, 30))).toBe('2026-01-05')
   })
 })
+
+describe('createCrossProjectTimelineChart scope labels', () => {
+  test('adds the Team name when two Teams share a Project and names the Project in Portfolio rows', () => {
+    const directory = [
+      { id: 'core-team', name: 'Core', projects: [{ id: 'launch', name: 'Launch' }] },
+      { id: 'design-team', name: 'Design', projects: [{ id: 'launch', name: 'Launch' }] },
+    ]
+    const entities = [
+      scopedEntity('core-launch', 'phase', 'launch', { startDate: '2026-07-01', endDate: '2026-07-31' }),
+      { ...scopedEntity('design-launch', 'phase', 'launch', { startDate: '2026-08-01', endDate: '2026-08-31' }), teamId: 'design-team' },
+    ]
+    const byProject = createCrossProjectTimelineChart({ ...baseInput, directory, dependencies: [], entities })
+    expect(byProject?.rows.flatMap((row) => row.kind === 'group' ? [row.label] : [])).toEqual([
+      'Launch · Core',
+      'Launch · Design',
+    ])
+
+    const byPortfolio = createCrossProjectTimelineChart({
+      ...baseInput,
+      directory,
+      dependencies: [],
+      entities,
+      grouping: 'portfolio',
+    })
+    expect(byPortfolio?.rows.flatMap((row) => row.kind === 'entity' ? [row.scopeLabel] : [])).toEqual([
+      'Launch · Core',
+      'Launch · Design',
+    ])
+  })
+})
