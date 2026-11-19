@@ -3169,8 +3169,9 @@ test('grants directory mappings only from applied state on a ready provider', ()
     'member@example.com',
     [],
   )
+  // Desired state that never reached the member does not manage it yet.
   expect(pendingResolution).toMatchObject({
-    directoryManaged: true,
+    directoryManaged: false,
     deprovisioned: false,
     compatibleGroupMappings: [],
   })
@@ -3205,6 +3206,20 @@ test('grants directory mappings only from applied state on a ready provider', ()
       deprovisioned: true,
       compatibleGroupMappings: [],
     })
+  snapshot.scimUsers.push({
+    ...snapshot.scimUsers[0]!,
+    userId: 'directory-user-unapplied',
+    externalId: 'external-user-unapplied',
+    active: true,
+    version: 1,
+    appliedVersion: 0,
+  })
+  expect(resolveEnterpriseDirectoryPrincipal(snapshot, 'member@example.com', []))
+    .toMatchObject({
+      directoryManaged: true,
+      deprovisioned: true,
+    })
+  snapshot.scimUsers.pop()
   snapshot.scimUsers.push({
     ...snapshot.scimUsers[0]!,
     userId: 'directory-user-2',
