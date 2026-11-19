@@ -55,7 +55,7 @@ export function TeamTimeTrackingPage() {
     accessToken,
     activeTeam?.id,
     activeTeam?.projects ?? emptyTeamProjects,
-    enabled && view !== 'timesheet',
+    enabled && (view === 'approvals' || view === 'report'),
   )
   const teamScope = useMemo(() => ({ kind: 'team' as const, teamId: teamId ?? '' }), [teamId])
   // The Team task-view list carries the server's effective write scopes, enterprise grants included.
