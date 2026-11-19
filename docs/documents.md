@@ -58,7 +58,9 @@ Transaction は 100 action までなので、1 回の更新で追加・削除で
 （`DOCUMENT_MAX_BACKLINK_CHANGE_COUNT`）。通常の編集は 1 batch 4 operation なので常に収まります。
 block や Whiteboard object を削除するとその要素が持つ link も消えるため、1 つの要素が持てる
 link は 7 件までです（`DOCUMENT_MAX_ELEMENT_LINK_COUNT`、Work Item card 自身の link を含む）。
-4 要素を一度に削除しても 28 件に収まります。超えるのは、28 件を超える Work Item object を含む
+4 要素を一度に削除しても 28 件に収まります。この上限より前に保存された要素は 8 件以上の link を
+持っていても編集でき、link を減らすこともできます。拒否されるのは上限を超えた要素に link を
+増やす変更だけです。超えるのは、28 件を超える Work Item object を含む
 Whiteboard の作成と、28 件を超える link の差分を持つ version への restore で、どちらも何も書かずに
 `413 DocumentBacklinkChangeLimitExceeded` を返します。その場合は少ない link で作成してから
 追加するか、新しい version から段階的に戻します。

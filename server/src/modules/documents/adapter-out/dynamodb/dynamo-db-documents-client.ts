@@ -90,6 +90,7 @@ import type {
   DocumentApplicationClient,
 } from '../../application/ports/document-ports'
 import {
+  assertElementLinkCountsWithinLimit,
   collectDocumentRelationTargets,
   normalizeDocumentPermissionForActor,
   reduceDocumentOperations,
@@ -1422,6 +1423,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         }
     }
     validateDocumentPayload(document)
+    assertElementLinkCountsWithinLimit(undefined, document)
     const requestFingerprint =
       input.idempotencyFingerprint ??
       fingerprint({

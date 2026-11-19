@@ -3191,6 +3191,84 @@ test('deletes a full batch of linked Whiteboard objects in one transaction and c
   ).toMatchObject({ activeBacklinkCount: 0 })
 })
 
+test('keeps elements saved with more than the per-element link limit editable', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  seedOwnerAuthorization(memory)
+  const page = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Legacy minutes',
+    blocks: [{ id: 'block-1', type: 'paragraph', text: 'Before' }],
+  })
+  const legacyLinkCount = DOCUMENT_MAX_ELEMENT_LINK_COUNT + 3
+  mutateStoredDocument(memory, page.id, (document) => {
+    document.relations = Array.from(
+      { length: legacyLinkCount },
+      (_value, index) => ({
+        ...createGoalRelation(`legacy-${index}`),
+        source: { kind: 'block' as const, blockId: 'block-1' },
+      }),
+    )
+  })
+  let revision = page.revision + 1
+
+  const edited = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'edit-text',
+        blockId: 'block-1',
+        block: { id: 'block-1', type: 'paragraph', text: 'After' },
+      }],
+    },
+  })
+  revision = edited.revision
+  const unlinked = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'delete-relation',
+        operationId: 'unlink-one',
+        relationId: 'relation-legacy-0',
+      }],
+    },
+  })
+  revision = unlinked.revision
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-more',
+        relation: {
+          ...createGoalRelation('new-goal'),
+          source: { kind: 'block', blockId: 'block-1' },
+        },
+      }],
+    },
+  })).rejects.toMatchObject({
+    status: 413,
+    code: 'DocumentElementLinkLimitExceeded',
+  })
+})
+
 test('hashes public tokens at rest, carries allowExport, and checks expiry synchronously', async () => {
   const memory = createMemoryDocumentClient()
   seedOwnerAuthorization(memory)

@@ -12,6 +12,7 @@ import type {
   ResolvedDocumentPublicShare,
 } from '../document-types'
 import {
+  assertElementLinkCountsWithinLimit,
   reduceDocumentOperations,
   renderPublicDocumentExport,
   validateDocumentPayload,
@@ -110,6 +111,7 @@ export function validateCreateDocumentPayload(
       }
   }
   validateDocumentPayload(document)
+  assertElementLinkCountsWithinLimit(undefined, document)
 }
 
 /**

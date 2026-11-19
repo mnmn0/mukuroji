@@ -164,6 +164,7 @@ export function reduceDocumentOperations(
   }
   document.revision = input.nextRevision
   validateDocumentPayload(document)
+  assertElementLinkCountsWithinLimit(input.document, document)
 
   return {
     document,
@@ -244,22 +245,33 @@ export function validateDocumentPayload(document: DocumentDetail): void {
       `A document can index at most ${DOCUMENT_MAX_BACKLINK_COUNT} backlinks.`,
     )
   }
-  assertElementLinkCounts(document)
 }
 
 /**
- * Rejects a block or Whiteboard object that owns more links than one batch of
- * deletions can remove in a single transaction.
+ * Rejects a block or Whiteboard object that gains links beyond the number one
+ * batch of deletions can remove in a single transaction.
  *
- * @param document - Validated Document payload.
- * @throws DocumentError when one element owns too many links.
+ * Elements saved before this limit existed may already own more links. They
+ * stay editable, and only a change that adds links to an element over the
+ * limit is rejected, so their links can still be removed one by one.
+ *
+ * @param previous - Document before the change, or undefined for a new one.
+ * @param next - Document after the change.
+ * @throws DocumentError when the change adds links to an element over the limit.
  */
-function assertElementLinkCounts(document: DocumentDetail): void {
-  const counts = new Map<string, number>()
-  const add = (key: string) => {
-    const count = (counts.get(key) ?? 0) + 1
-    counts.set(key, count)
-    if (count <= DOCUMENT_MAX_ELEMENT_LINK_COUNT) return
+export function assertElementLinkCountsWithinLimit(
+  previous: DocumentDetail | undefined,
+  next: DocumentDetail,
+): void {
+  const previousCounts =
+    previous === undefined ? new Map<string, number>() : countElementLinks(previous)
+  for (const [key, count] of countElementLinks(next)) {
+    if (
+      count <= DOCUMENT_MAX_ELEMENT_LINK_COUNT ||
+      count <= (previousCounts.get(key) ?? 0)
+    ) {
+      continue
+    }
     throw new DocumentError(
       413,
       'DocumentElementLinkLimitExceeded',
@@ -267,6 +279,18 @@ function assertElementLinkCounts(document: DocumentDetail): void {
       { maxElementLinkCount: DOCUMENT_MAX_ELEMENT_LINK_COUNT },
     )
   }
+}
+
+/**
+ * Counts the links each block or Whiteboard object owns, including a Work Item
+ * card's own link.
+ *
+ * @param document - Document to count.
+ * @returns Link count keyed by element kind and ID.
+ */
+function countElementLinks(document: DocumentDetail): Map<string, number> {
+  const counts = new Map<string, number>()
+  const add = (key: string) => counts.set(key, (counts.get(key) ?? 0) + 1)
   if (document.kind === 'whiteboard') {
     for (const object of document.whiteboard.objects) {
       if (object.type === 'work-item') add(`object:${object.id}`)
@@ -276,6 +300,7 @@ function assertElementLinkCounts(document: DocumentDetail): void {
     if (source.kind === 'block') add(`block:${source.blockId}`)
     else if (source.kind === 'whiteboard-object') add(`object:${source.objectId}`)
   }
+  return counts
 }
 
 /**
