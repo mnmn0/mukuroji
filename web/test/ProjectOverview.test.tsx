@@ -191,6 +191,28 @@ describe('ProjectOverviewView', () => {
     expect(html).toContain('data-testid="project-overview-links"')
   })
 
+  test('offers a retry for failed reads but not for a list over the read limit', () => {
+    const retryProps = {
+      onRetryMembers: () => undefined,
+      onRetryPlanning: () => undefined,
+      onRetryWorkItems: () => undefined,
+    }
+    const countRetries = (html: string) => html.split('>Reload</button>').length - 1
+    const failed = renderOverview({
+      ...retryProps,
+      isMembersError: true,
+      isPlanningError: true,
+      members: undefined,
+      schedule: undefined,
+      workItemSummary: undefined,
+      workItemsError: 'load',
+    })
+    const overLimit = renderOverview({ ...retryProps, workItemSummary: undefined, workItemsError: 'limit' })
+
+    expect(countRetries(failed)).toBe(4)
+    expect(countRetries(overLimit)).toBe(0)
+  })
+
   test('asks for the owning Team when the route does not name a readable one', () => {
     const html = renderOverview({ team: undefined, project: undefined })
 

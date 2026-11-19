@@ -56,6 +56,12 @@ export type ProjectOverviewViewProps = {
   isMembersError: boolean
   /** Whether the Project members are still loading. */
   isMembersLoading: boolean
+  /** Reads the Project Work Items again after a failure. */
+  onRetryWorkItems?: () => void
+  /** Reads the Planning snapshot again after a failure. */
+  onRetryPlanning?: () => void
+  /** Reads the Project members again after a failure. */
+  onRetryMembers?: () => void
 }
 
 /** Badge tokens for reported Project health. */
@@ -92,6 +98,9 @@ export function ProjectOverviewView({
   isWorkItemsLoading,
   locale,
   members,
+  onRetryMembers,
+  onRetryPlanning,
+  onRetryWorkItems,
   project,
   schedule,
   t,
@@ -150,6 +159,7 @@ export function ProjectOverviewView({
             isError={isPlanningError}
             isLoading={isPlanningLoading}
             locale={locale}
+            onRetry={onRetryPlanning}
             t={t}
             updateTarget={updateTarget}
           />
@@ -162,6 +172,7 @@ export function ProjectOverviewView({
           <ProgressContent
             error={workItemsError}
             isLoading={isWorkItemsLoading}
+            onRetry={onRetryWorkItems}
             projectName={project.name}
             summary={workItemSummary}
             t={t}
@@ -181,6 +192,7 @@ export function ProjectOverviewView({
           <ScheduleContent
             isError={isPlanningError}
             isLoading={isPlanningLoading}
+            onRetry={onRetryPlanning}
             schedule={schedule}
             t={t}
           />
@@ -200,6 +212,7 @@ export function ProjectOverviewView({
             isError={isMembersError}
             isLoading={isMembersLoading}
             members={members}
+            onRetry={onRetryMembers}
             t={t}
           />
         </OverviewSection>
@@ -288,6 +301,10 @@ type StatusTextProps = {
   children: ReactNode
   /** Whether the message reports a failure. */
   isError?: boolean
+  /** Reads the failed data again, when the failure is retryable. */
+  onRetry?: () => void
+  /** Resolves localized labels, required with `onRetry`. */
+  t?: (key: MessageKey) => string
 }
 
 /**
@@ -296,16 +313,25 @@ type StatusTextProps = {
  * @param props - Message and whether it is a failure.
  * @returns A status paragraph.
  */
-function StatusText({ children, isError = false }: StatusTextProps) {
+function StatusText({ children, isError = false, onRetry, t }: StatusTextProps) {
   return (
-    <p
+    <div
       className={isError
-        ? 'rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-fg-amber-800'
+        ? 'flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-fg-amber-800'
         : 'text-sm font-medium text-[var(--workbench-muted)]'}
       role={isError ? 'alert' : undefined}
     >
-      {children}
-    </p>
+      <p>{children}</p>
+      {isError && onRetry && t ? (
+        <button
+          className="workbench-button-secondary inline-flex h-9 items-center px-3 text-sm"
+          onClick={onRetry}
+          type="button"
+        >
+          {t('workspace.error.retry')}
+        </button>
+      ) : null}
+    </div>
   )
 }
 
@@ -317,6 +343,8 @@ type HealthContentProps = {
   isLoading: boolean
   /** Locale used to format dates. */
   locale: Locale
+  /** Reads the Planning snapshot again after a failure. */
+  onRetry?: () => void
   /** Resolves localized labels. */
   t: (key: MessageKey) => string
   /** The Project's update target. */
@@ -329,8 +357,10 @@ type HealthContentProps = {
  * @param props - Update target and load state.
  * @returns Health widget content.
  */
-function HealthContent({ isError, isLoading, locale, t, updateTarget }: HealthContentProps) {
-  if (isError) return <StatusText isError>{t('projects.overview.error.planning')}</StatusText>
+function HealthContent({ isError, isLoading, locale, onRetry, t, updateTarget }: HealthContentProps) {
+  if (isError) {
+    return <StatusText isError onRetry={onRetry} t={t}>{t('projects.overview.error.planning')}</StatusText>
+  }
   if (isLoading) return <StatusText>{t('projects.overview.loading')}</StatusText>
 
   const latest = updateTarget?.latestUpdate
@@ -378,6 +408,8 @@ type ProgressContentProps = {
   error?: ProjectOverviewWorkItemsError
   /** Whether the counts are loading. */
   isLoading: boolean
+  /** Reads the Work Items again after a retryable failure. */
+  onRetry?: () => void
   /** Project name used in the progress bar label. */
   projectName: string
   /** Work Item counts. */
@@ -392,10 +424,11 @@ type ProgressContentProps = {
  * @param props - Counts and load state.
  * @returns Progress widget content.
  */
-function ProgressContent({ error, isLoading, projectName, summary, t }: ProgressContentProps) {
+function ProgressContent({ error, isLoading, onRetry, projectName, summary, t }: ProgressContentProps) {
   if (error) {
+    // Reading again cannot fix a list over the read limit, so only a load failure offers it.
     return (
-      <StatusText isError>
+      <StatusText isError onRetry={error === 'load' ? onRetry : undefined} t={t}>
         {t(error === 'limit' ? 'projects.overview.error.workItemsLimit' : 'projects.overview.error.workItems')}
       </StatusText>
     )
@@ -449,6 +482,8 @@ type ScheduleContentProps = {
   isError: boolean
   /** Whether the Planning snapshot is loading. */
   isLoading: boolean
+  /** Reads the Planning snapshot again after a failure. */
+  onRetry?: () => void
   /** The Project's bounded schedule. */
   schedule?: ProjectOverviewSchedule
   /** Resolves localized labels. */
@@ -461,8 +496,10 @@ type ScheduleContentProps = {
  * @param props - Bounded schedule and load state.
  * @returns Schedule widget content.
  */
-function ScheduleContent({ isError, isLoading, schedule, t }: ScheduleContentProps) {
-  if (isError) return <StatusText isError>{t('projects.overview.error.planning')}</StatusText>
+function ScheduleContent({ isError, isLoading, onRetry, schedule, t }: ScheduleContentProps) {
+  if (isError) {
+    return <StatusText isError onRetry={onRetry} t={t}>{t('projects.overview.error.planning')}</StatusText>
+  }
   if (isLoading || !schedule) return <StatusText>{t('projects.overview.loading')}</StatusText>
   if (schedule.items.length === 0) return <StatusText>{t('projects.overview.schedule.empty')}</StatusText>
 
@@ -521,6 +558,8 @@ type MembersContentProps = {
   isLoading: boolean
   /** Members grouped by role. */
   members?: ProjectOverviewMembers
+  /** Reads the members again after a failure. */
+  onRetry?: () => void
   /** Resolves localized labels. */
   t: (key: MessageKey) => string
 }
@@ -531,8 +570,10 @@ type MembersContentProps = {
  * @param props - Member summary and load state.
  * @returns Members widget content.
  */
-function MembersContent({ isError, isLoading, members, t }: MembersContentProps) {
-  if (isError) return <StatusText isError>{t('projects.overview.error.members')}</StatusText>
+function MembersContent({ isError, isLoading, members, onRetry, t }: MembersContentProps) {
+  if (isError) {
+    return <StatusText isError onRetry={onRetry} t={t}>{t('projects.overview.error.members')}</StatusText>
+  }
   if (isLoading || !members) return <StatusText>{t('projects.overview.loading')}</StatusText>
   if (members.totalCount === 0) return <StatusText>{t('projects.overview.members.empty')}</StatusText>
 

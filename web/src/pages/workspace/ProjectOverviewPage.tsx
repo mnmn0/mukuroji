@@ -80,6 +80,9 @@ export function ProjectOverviewPage() {
           isWorkItemsLoading={workItems.isLoading}
           locale={workspace.locale}
           members={memberSummary}
+          onRetryMembers={() => void members.mutate()}
+          onRetryPlanning={() => void planning.mutate()}
+          onRetryWorkItems={() => void workItems.mutate()}
           project={project}
           schedule={schedule}
           t={t}
