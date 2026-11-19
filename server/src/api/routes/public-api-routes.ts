@@ -60,6 +60,7 @@ import type {
   AuthenticatedDeveloperCredential,
   IdempotencyMutationToken,
 } from '../../modules/developer-platform/application/ports'
+import { readCredentialPrincipalKey } from '../../modules/developer-platform/credential-principal'
 import {
   createAgentRunDeletionFences,
   createAgentRunMutationFenceExtension,
@@ -1544,7 +1545,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         '/api/v1/work-items',
         createPublicApiWorkItemCreateIdentity(
           credential.workspaceId,
-          credential.credentialId,
+          readCredentialPrincipalKey(credential),
           context,
           teamId,
           workItemInput,

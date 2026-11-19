@@ -129,6 +129,9 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
 - **認証情報**: **API key を作成**、**OAuth app を登録**（client_credentials のみ）。secret は一度だけ表示されます。
   必要最小限の scope（work-items / webhooks / integrations / imports の read / write など）を選び、
   不要になったら **失効** します。ここで「メンバーによる agent 用キーの発行」を許可・停止できます。
+  OAuth app の access token は、app ごとに 1 つの rate limit を共有します。token を発行し直しても残数は戻りません。
+  timeout 後に新しい token で再送するときも、同じ `Idempotency-Key` を使えば二重に作成されません。
+  「最終利用」は 1 分ごとにまとめて記録するため、最大 1 分遅れて表示されます。
 - **Webhook**: 外部への通知。**Webhook を追加** で送信先と「配信を許可する Team」を決めます。配信 log から再送できます。
 - **Connector**: GitHub、Slack、Gmail、Google Calendar、Google Drive との連携。
 - **Import / Export**: Work Item の CSV / JSON export と、検証（dry-run）してから確定する import。

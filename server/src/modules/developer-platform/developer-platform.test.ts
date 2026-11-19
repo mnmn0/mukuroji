@@ -17,6 +17,7 @@ import {
   WEBHOOK_DELIVERY_RETENTION_SECONDS,
   WEBHOOK_SUBSCRIPTION_LIMIT,
   createDefaultSecretProtector,
+  shouldRecordCredentialUse,
 } from './adapter-out/shared/developer-platform-store'
 import { createWebhookSignature } from './domain/webhook-signature'
 import { DeveloperPlatformError } from './errors'
@@ -47,6 +48,36 @@ class LaggingLookupDeveloperPlatformClient extends InMemoryDeveloperPlatformStor
   /** GSI propagation lag を再現し、authoritative rows だけを保持します。 */
   protected override async queryLookupIndex() {
     return { locators: [] }
+  }
+}
+
+/** Memory client whose credential writes fail as if another writer won the CAS. */
+class ConflictingCredentialWriteClient extends InMemoryDeveloperPlatformStorage {
+  /** Number of credential writes that still fail before writes go through. */
+  remainingConflicts = 0
+  /** Runs once just before the next credential write, like a concurrent request. */
+  beforeNextWrite?: () => Promise<void>
+
+  /** Exposes the last-used write so a test can interleave it with a revocation. */
+  touchLastUsedAt(
+    record: Parameters<InMemoryDeveloperPlatformStorage['touchCredentialLastUsedAt']>[0],
+    lastUsedAt: string,
+    observedLastUsedAt: string | undefined,
+  ) {
+    return this.touchCredentialLastUsedAt(record, lastUsedAt, observedLastUsedAt)
+  }
+
+  protected override async putCredentialRecord(
+    ...args: Parameters<InMemoryDeveloperPlatformStorage['putCredentialRecord']>
+  ) {
+    const beforeWrite = this.beforeNextWrite
+    this.beforeNextWrite = undefined
+    await beforeWrite?.()
+    if (this.remainingConflicts > 0) {
+      this.remainingConflicts -= 1
+      return false
+    }
+    return super.putCredentialRecord(...args)
   }
 }
 
@@ -193,6 +224,34 @@ function createMemoryDocumentClient(conditionalPutFailures = 0) {
               }
             : {}),
         }
+      }
+      if (
+        commandName === 'UpdateCommand' &&
+        input.UpdateExpression === 'SET #value.#lastUsedAt = :lastUsedAt'
+      ) {
+        const key = input.Key as { workspaceId: string; recordKey: string }
+        const mapKey = `${key.workspaceId}\0${key.recordKey}`
+        const current = items.get(mapKey)
+        const values = input.ExpressionAttributeValues as Record<string, unknown>
+        if (
+          !current ||
+          current.entryType !== values[':entryType'] ||
+          current.secretDigest !== values[':secretDigest'] ||
+          (current.value as { lastUsedAt?: unknown }).lastUsedAt !==
+            values[':observedLastUsedAt']
+        ) {
+          const error = new Error('condition failed')
+          error.name = 'ConditionalCheckFailedException'
+          throw error
+        }
+        items.set(mapKey, {
+          ...current,
+          value: {
+            ...(current.value as Record<string, unknown>),
+            lastUsedAt: values[':lastUsedAt'],
+          },
+        })
+        return {}
       }
       if (commandName === 'DeleteCommand') {
         const key = input.Key as { workspaceId: string; recordKey: string }
@@ -527,6 +586,13 @@ describe('developer credential lifecycle', () => {
     const apiKeyRow = readStoredRows(client).find((row) => row.entryType === 'api-key')
     expect(apiKeyRow?.secretDigest).toMatch(/^[a-f0-9]{64}$/)
     expect(JSON.stringify(apiKeyRow)).not.toContain(created.secret)
+    const versionBeforeUse = apiKeyRow?.version
+    const readApiKeyRow = () => {
+      const row = readStoredRows(client)
+        .find((candidate) => candidate.recordKey === apiKeyRow?.recordKey)
+      if (!row) throw new Error('API key row was not stored.')
+      return row
+    }
 
     const authenticated = await client.authenticateApiKey({
       credential: created.secret,
@@ -540,6 +606,22 @@ describe('developer credential lifecycle', () => {
       scopes: ['work-items:read', 'work-items:write'],
     })
     expect((await client.listApiKeys('workspace-1'))[0]?.lastUsedAt).toBe(START.toISOString())
+    // Recording a use must not move the row version that revoke / rotate compare against.
+    expect(readApiKeyRow().version).toBe(versionBeforeUse)
+
+    // A concurrent use that observed the row before this write does not write again.
+    const touch = (
+      client as unknown as {
+        touchCredentialLastUsedAt(
+          record: Record<string, unknown>,
+          lastUsedAt: string,
+          observedLastUsedAt: string | undefined,
+        ): Promise<boolean>
+      }
+    ).touchCredentialLastUsedAt.bind(client)
+    expect(await touch(readApiKeyRow(), '2000-01-01T00:00:00.000Z', undefined)).toBe(false)
+    expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
+      .toBe(START.toISOString())
 
     const rotated = await client.rotateApiKey({
       workspaceId: 'workspace-1',
@@ -583,6 +665,87 @@ describe('developer credential lifecycle', () => {
       .find((row) => row.recordKey === `APIKEY#${expiring.apiKey.id}`)
     expect(expiredRow).not.toHaveProperty('lookupKey')
     expect(expiredRow).not.toHaveProperty('secretDigest')
+  })
+
+  test('records credential use at most once per write interval', () => {
+    expect(shouldRecordCredentialUse(undefined, START)).toBe(true)
+    expect(shouldRecordCredentialUse(START.toISOString(), new Date(START.getTime() + 30_000)))
+      .toBe(false)
+    expect(shouldRecordCredentialUse(START.toISOString(), new Date(START.getTime() + 59_999)))
+      .toBe(false)
+    expect(shouldRecordCredentialUse(START.toISOString(), new Date(START.getTime() + 60_000)))
+      .toBe(true)
+    // A clock that moved backwards or an unreadable timestamp is replaced.
+    expect(shouldRecordCredentialUse(START.toISOString(), new Date(START.getTime() - 1_000)))
+      .toBe(true)
+    expect(shouldRecordCredentialUse('not-a-date', START)).toBe(true)
+  })
+
+  test('retries API key revocation after a concurrent credential write', async () => {
+    const clock = createClock()
+    const client = new ConflictingCredentialWriteClient(
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),
+      clock.now,
+    )
+    const created = await client.createApiKey({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: { name: 'Leaked key', scopes: ['work-items:read'] },
+    })
+
+    client.remainingConflicts = 2
+    await expect(client.revokeApiKey({
+      workspaceId: 'workspace-1',
+      apiKeyId: created.apiKey.id,
+    })).resolves.toMatchObject({ status: 'revoked' })
+    const revokedRow = (client as unknown as {
+      records: Map<string, Record<string, unknown>>
+    }).records.get(`workspace-1\0APIKEY#${created.apiKey.id}`)
+    expect(revokedRow?.value).toMatchObject({ status: 'revoked' })
+    expect(revokedRow).not.toHaveProperty('lookupKey')
+    expect(revokedRow).not.toHaveProperty('secretDigest')
+
+    const other = await client.createApiKey({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: { name: 'Contended key', scopes: ['work-items:read'] },
+    })
+    client.remainingConflicts = 3
+    await expect(client.revokeApiKey({
+      workspaceId: 'workspace-1',
+      apiKeyId: other.apiKey.id,
+    })).rejects.toMatchObject({ status: 409 })
+  })
+
+  test('keeps a use recorded between the revocation read and write', async () => {
+    const clock = createClock()
+    const client = new ConflictingCredentialWriteClient(
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),
+      clock.now,
+    )
+    const created = await client.createApiKey({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: { name: 'Racing key', scopes: ['work-items:read'] },
+    })
+    const readRow = () => {
+      const row = (client as unknown as {
+        records: Map<string, Parameters<typeof client.touchLastUsedAt>[0]>
+      }).records.get(`workspace-1\0APIKEY#${created.apiKey.id}`)
+      if (!row) throw new Error('API key row was not stored.')
+      return row
+    }
+    const usedAt = new Date(START.getTime() + 5_000).toISOString()
+    client.beforeNextWrite = async () => {
+      expect(await client.touchLastUsedAt(readRow(), usedAt, undefined)).toBe(true)
+    }
+
+    const revoked = await client.revokeApiKey({
+      workspaceId: 'workspace-1',
+      apiKeyId: created.apiKey.id,
+    })
+    expect(revoked).toMatchObject({ status: 'revoked', lastUsedAt: usedAt })
+    expect(readRow().value).toMatchObject({ status: 'revoked', lastUsedAt: usedAt })
   })
 
   test('issues digest-only OAuth client_credentials tokens with scoped auth and app revoke', async () => {
