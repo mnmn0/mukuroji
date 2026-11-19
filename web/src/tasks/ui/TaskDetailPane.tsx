@@ -97,7 +97,7 @@ import {
   resolveTaskScheduleStartDate,
 } from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
-import { TaskHandoffPanel } from './TaskHandoffPanel'
+import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
 import { TaskActualDatesPanel } from './TaskActualDatesPanel'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */

@@ -380,6 +380,61 @@ export const CreateOpen: Story = {
 }
 
 /**
+ * Duplicates the selected Work Item into an editable create draft, drops the copied contributor
+ * plan, and saves the edited copy.
+ */
+export const DuplicateIntoDraft: Story = {
+  args: {
+    issues: configuredIssues.map((issue) => issue.id === 'onboarding-friction'
+      ? {
+          ...issue,
+          // The create form applies the field pattern `\S+` to the whole value, so use one word.
+          customFieldValues: { ...issue.customFieldValues, 'customer-impact': 'Enterprise-setup-without-support' },
+          contributorAssignments: [
+            {
+              assignmentId: 'onboarding-friction-review',
+              memberUserId: 'suzuki@example.com',
+              plannedEffortMinutes: 60,
+              status: 'in-progress',
+            },
+          ],
+        }
+      : issue),
+    onCreateIssue: fn(async () => undefined),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByTestId('team-issue-duplicate'))
+
+    const form = await canvas.findByTestId('create-issue-form')
+    await expect(within(form).getByTestId('create-issue-duplicate-note')).toBeVisible()
+    const title = within(form).getByRole('textbox', { name: 'Issue 名' })
+    await expect(title).toHaveValue('初回オンボーディングの離脱要因を減らす')
+    await expect(args.onCreateIssue).not.toHaveBeenCalled()
+
+    await userEvent.clear(title)
+    await userEvent.type(title, 'オンボーディングの離脱要因を減らす（第2期）')
+    await userEvent.click(within(form).getByTestId('create-issue-duplicate-contributors'))
+    await userEvent.click(within(form).getByRole('button', { name: 'Issue を作成' }))
+
+    await waitFor(() => expect(args.onCreateIssue).toHaveBeenCalledTimes(1))
+    await expect(args.onCreateIssue).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'オンボーディングの離脱要因を減らす（第2期）',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      priority: 'high',
+      customFieldValues: expect.objectContaining({
+        'customer-impact': 'Enterprise-setup-without-support',
+        'story-points': 8,
+      }),
+    }))
+    await expect(args.onCreateIssue).not.toHaveBeenCalledWith(expect.objectContaining({
+      contributorAssignments: expect.anything(),
+    }))
+  },
+}
+
+/**
  * Issue 詳細取得失敗時の表示です。
  */
 export const DetailError: Story = {
