@@ -247,7 +247,7 @@ Lambda が同じ deploy で切り替わりますが、切り替え中の数分�
 2. `WebDomainName`、`WebCertificateArn` を指定して deploy します。domain の hosted zone が同じ account の
    Route 53 にあれば `WebHostedZoneId` も指定し、stack に A / AAAA alias を作らせます。
    それ以外の DNS では、`WebDomainName` の CNAME を output の `WebDistributionDomainName` に向けます。
-3. `ApiAllowedOrigins` に `https://<WebDomainName>` を加えます。同一 origin の画面は CORS を使いませんが、
+3. 画面と `/api` は同じ origin なので、`ApiAllowedOrigins`（API の CORS）は変えなくて構いません。
    file bucket の CORS には独自 domain と CloudFront domain の両方を stack が自動で入れます。
 4. Enterprise SSO を使う場合は、Cognito の SSO app client の callback URL を
    `https://<WebDomainName>/auth/sso/callback` に変え、同じ値を `CognitoSsoRedirectUri` に指定して deploy します。
