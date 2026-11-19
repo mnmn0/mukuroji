@@ -371,6 +371,33 @@ describe('PlanningScreen', () => {
     expect(html).toContain(`>${labels.move}</button>`)
   })
 
+  test('renders the Cycle burndown slot only for a selected Cycle in Timeline', () => {
+    const renderCycleBurndown = (cycle: PlanningEntity) => (
+      <div data-testid="cycle-burndown-slot">{cycle.id}</div>
+    )
+    const cycleHtml = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        initialSelectedEntityId="cycle-14"
+        labels={labels}
+        renderCycleBurndown={renderCycleBurndown}
+        snapshot={planningSnapshotFixture}
+      />,
+    )
+    const goalHtml = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        initialSelectedEntityId="goal-activation"
+        labels={labels}
+        renderCycleBurndown={renderCycleBurndown}
+        snapshot={planningSnapshotFixture}
+      />,
+    )
+
+    expect(cycleHtml).toContain('<div data-testid="cycle-burndown-slot">cycle-14</div>')
+    expect(goalHtml).not.toContain('cycle-burndown-slot')
+  })
+
   test('hides rollover execution and explains when the selected source Cycle is closed', () => {
     const snapshot = {
       ...planningSnapshotFixture,

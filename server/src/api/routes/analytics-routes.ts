@@ -29,6 +29,7 @@ import {
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
   AnalyticsError,
+  analyticsFilterIncludesWorkItem,
   createAnalyticsCsv,
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
@@ -771,6 +772,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
     teamIds: normalized.filter.teamIds ?? null,
     projectIds: normalized.filter.projectIds ?? null,
     includeArchived: normalized.filter.includeArchived === true,
+    workItems: normalized.filter.workItems ?? null,
   })
   let accessible = cache.get(cacheKey)
   if (!accessible) {
@@ -1151,8 +1153,12 @@ async function readAccessibleAnalyticsWorkItems(
     includeArchived: true,
   }
 
+  const listedTeamIds = filter.workItems === undefined
+    ? undefined
+    : new Set(filter.workItems.map((reference) => reference.teamId))
   const selectedTeams = directory.teams.filter((team) => {
     if (filteredTeamIds !== undefined && !filteredTeamIds.has(team.id)) return false
+    if (listedTeamIds !== undefined && !listedTeamIds.has(team.id)) return false
     if (
       filteredProjectIds === undefined &&
       (principal.isSystemAdmin || authorizedTeamIds.has(team.id))
@@ -1175,6 +1181,7 @@ async function readAccessibleAnalyticsWorkItems(
     for (const workItem of response.issues) {
       if (
         workItem.teamId === team.id &&
+        analyticsFilterIncludesWorkItem(filter, workItem.teamId, workItem.id) &&
         (
           workItem.assignedProjectId === undefined ||
           readableProjectIds.has(workItem.assignedProjectId)

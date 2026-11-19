@@ -13,6 +13,7 @@ import {
   type CurrentUser,
 } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
+import { CycleBurndownPanel } from '../../analytics/ui/CycleBurndownPanel'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/session'
 import {
@@ -148,6 +149,10 @@ export function PlanningPage() {
     mutate: mutatePlanning,
     key: planningKey,
   } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
+  const browserTimeZone = useMemo(
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    [],
+  )
   const projectScopes = useMemo(
     () => teams.flatMap((team) => team.projects.map((project) => ({
       teamId: team.id,
@@ -599,6 +604,19 @@ export function PlanningPage() {
           isUpdateHistoryLoading={Boolean(updateHistory.key && updateHistory.isLoading)}
           key={`${selectedEntityId ?? ''}:${selectedUpdateTarget ? createPlanningUpdateTargetKey(selectedUpdateTarget) : ''}`}
           labels={labels}
+          renderCycleBurndown={accessToken && snapshot
+            ? (cycle) => (
+                <CycleBurndownPanel
+                  accessToken={accessToken}
+                  cycle={cycle}
+                  key={cycle.id}
+                  links={snapshot.workItemLinks}
+                  locale={locale}
+                  t={t}
+                  timeZone={browserTimeZone}
+                />
+              )
+            : undefined}
           snapshot={snapshot}
           updateHistoryErrorMessage={updateHistoryErrorMessage}
           updateCollaboration={updateCollaboration}
