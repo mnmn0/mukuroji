@@ -434,6 +434,10 @@ export const workspaceMessages = {
   'workspace.help.statusTitle': 'トラブルシューティング',
   'workspace.help.statusDescription':
     'Issue・タスクの表示や同期に問題があるときの確認事項を参照します。',
+  'workspace.help.buildTitle': '稼働中の Web build',
+  'workspace.help.buildDescription':
+    '問題を報告するときはこの commit を伝えてください。運用者はこれを手がかりに Web を前の release へ戻します。',
+  'workspace.help.buildUnknown': '開発用 build（commit 未記録）',
   'workspace.settings.eyebrow': '管理',
   'workspace.settings.title': '設定',
   'workspace.settings.description':

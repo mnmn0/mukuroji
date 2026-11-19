@@ -434,6 +434,10 @@ export const workspaceMessages = {
   'workspace.help.statusTitle': 'Troubleshoot work updates',
   'workspace.help.statusDescription':
     'Review checks for issue and task visibility or synchronization problems.',
+  'workspace.help.buildTitle': 'Running Web build',
+  'workspace.help.buildDescription':
+    'Share this commit when reporting a problem. Operators use it to roll the Web app back to an earlier release.',
+  'workspace.help.buildUnknown': 'Development build (no commit recorded)',
   'workspace.settings.eyebrow': 'Admin',
   'workspace.settings.title': 'Settings',
   'workspace.settings.description':
