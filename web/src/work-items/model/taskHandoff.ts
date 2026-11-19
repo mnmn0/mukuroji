@@ -1,7 +1,7 @@
 import type { CanonicalWorkItem, WorkItemConfiguration } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createTeamIssuesPath } from '../../shared/routing/paths'
-import { resolveWorkItemWorkflowStatusLabel } from '../../work-items/model/workItemDisplay'
+import { resolveWorkItemWorkflowStatusLabel } from './workItemDisplay'
 
 /** Inputs for a brief containing only the currently visible saved Work Item. */
 export type TaskHandoffInput = {
@@ -16,7 +16,7 @@ export type TaskHandoffInput = {
 }
 
 /** Reason an agent should not start the Work Item yet, as shown in the handoff brief. */
-export type TaskHandoffBlockReason = 'noAcceptanceCriteria' | 'closed' | 'started' | 'blockedBy'
+type TaskHandoffBlockReason = 'noAcceptanceCriteria' | 'closed' | 'started' | 'blockedBy'
 
 /**
  * Lists why an agent should not start the saved Work Item from this handoff alone.
@@ -24,7 +24,7 @@ export type TaskHandoffBlockReason = 'noAcceptanceCriteria' | 'closed' | 'starte
  * @param task - Saved canonical snapshot.
  * @returns Reasons in display order; empty when the snapshot allows a start.
  */
-export function resolveTaskHandoffBlockReasons(task: CanonicalWorkItem): TaskHandoffBlockReason[] {
+function resolveTaskHandoffBlockReasons(task: CanonicalWorkItem): TaskHandoffBlockReason[] {
   const reasons: TaskHandoffBlockReason[] = []
   if ((task.acceptanceCriteria?.length ?? 0) === 0) reasons.push('noAcceptanceCriteria')
   if (task.statusCategory === 'completed' || task.statusCategory === 'canceled') reasons.push('closed')

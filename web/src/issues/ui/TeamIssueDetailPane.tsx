@@ -31,7 +31,7 @@ import type { WorkspaceMember } from '../../workspace/api'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
-import { TaskHandoffPanel } from '../../tasks/ui/TaskHandoffPanel'
+import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
 import {
   resolveRecordedRemainingEffortMinutes,
