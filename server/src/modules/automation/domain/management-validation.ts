@@ -1,6 +1,10 @@
 import {
+  AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT,
+  AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT,
+  AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_MAX_DAYS,
   type ApplyAutomationTemplateInput,
   type AutomationInboundWebhookLifecycleInput,
+  type AutomationProjectTemplateWorkItem,
   type AutomationValue,
   type CreateAutomationInboundWebhookEndpointInput,
   type CreateAutomationTemplateInput,
@@ -121,7 +125,11 @@ export function validateCreateAutomationTemplateInput(
       }
     }
     case 'project': {
-      assertOnlyKeys(payload, ['name', 'nameEn', 'nameJa', 'tone'], 'Project template payload')
+      assertOnlyKeys(
+        payload,
+        ['name', 'nameEn', 'nameJa', 'tone', 'workItems'],
+        'Project template payload',
+      )
       const rawName = typeof payload.name === 'string' ? payload.name.trim() : ''
       const rawNameJa = typeof payload.nameJa === 'string' ? payload.nameJa.trim() : ''
       const rawNameEn = typeof payload.nameEn === 'string' ? payload.nameEn.trim() : ''
@@ -138,6 +146,9 @@ export function validateCreateAutomationTemplateInput(
       if (tone !== 'blue' && tone !== 'purple' && tone !== 'green' && tone !== 'yellow') {
         throw invalidInput('Project template tone is invalid.')
       }
+      const workItems = payload.workItems === undefined
+        ? undefined
+        : validateProjectTemplateWorkItems(payload.workItems)
       return {
         kind: input.kind,
         name,
@@ -147,6 +158,7 @@ export function validateCreateAutomationTemplateInput(
           ...(rawNameJa ? { nameJa: rawNameJa } : {}),
           ...(rawNameEn ? { nameEn: rawNameEn } : {}),
           tone,
+          ...(workItems && workItems.length > 0 ? { workItems } : {}),
         },
       }
     }
@@ -184,6 +196,83 @@ export function validateCreateAutomationTemplateInput(
   }
 }
 
+/**
+ * Validates a Project template WBS and returns a normalized copy.
+ *
+ * @param value - Untrusted top-level Work Item list.
+ * @returns Work Items with trimmed titles and only supported fields.
+ */
+function validateProjectTemplateWorkItems(value: unknown): AutomationProjectTemplateWorkItem[] {
+  const counter = { count: 0 }
+  return readProjectTemplateWorkItemLevel(value, 1, counter)
+}
+
+/**
+ * Validates one sibling list of a Project template WBS.
+ *
+ * @param value - Untrusted sibling list.
+ * @param depth - One-based WBS level of the siblings.
+ * @param counter - Running Work Item count across the whole template.
+ * @returns Normalized siblings in input order.
+ */
+function readProjectTemplateWorkItemLevel(
+  value: unknown,
+  depth: number,
+  counter: { count: number },
+): AutomationProjectTemplateWorkItem[] {
+  if (!Array.isArray(value)) throw invalidInput('Project template Work Items must be an array.')
+  if (depth > AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT) {
+    throw invalidInput(
+      `Project template Work Items can be nested at most ${AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT} levels deep.`,
+    )
+  }
+  return value.map((candidate) => {
+    counter.count += 1
+    if (counter.count > AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT) {
+      throw invalidInput(
+        `Project template can hold at most ${AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT} Work Items.`,
+      )
+    }
+    const item = requireRecord(candidate, 'Project template Work Item')
+    assertOnlyKeys(
+      item,
+      ['children', 'durationWorkingDays', 'startOffsetWorkingDays', 'title'],
+      'Project template Work Item',
+    )
+    const title = requireBoundedText(item.title, 'Project template Work Item title', WORK_ITEM_TITLE_MAX_LENGTH * 2)
+    if ([...title].length > WORK_ITEM_TITLE_MAX_LENGTH) {
+      throw invalidInput(
+        `Project template Work Item title must be ${WORK_ITEM_TITLE_MAX_LENGTH} characters or fewer.`,
+      )
+    }
+    // The template editor shows the WBS one Work Item per line, so a line break would split it.
+    if (/[\r\n\u2028\u2029]/u.test(title)) {
+      throw invalidInput('Project template Work Item title must not contain line breaks.')
+    }
+    const startOffsetWorkingDays = requireInteger(
+      item.startOffsetWorkingDays,
+      'Project template Work Item start offset',
+      0,
+      AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_MAX_DAYS,
+    )
+    const durationWorkingDays = requireInteger(
+      item.durationWorkingDays,
+      'Project template Work Item duration',
+      1,
+      AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_MAX_DAYS,
+    )
+    const children = item.children === undefined
+      ? []
+      : readProjectTemplateWorkItemLevel(item.children, depth + 1, counter)
+    return {
+      title,
+      startOffsetWorkingDays,
+      durationWorkingDays,
+      ...(children.length > 0 ? { children } : {}),
+    }
+  })
+}
+
 /** Maps pure workflow validation failures to the stable Automation error contract. */
 function validateAutomationWorkflowTemplate(value: unknown) {
   try {
@@ -213,11 +302,15 @@ export function validateApplyAutomationTemplateInput(
   assertOnlyKeys(input, ['target'], 'Template application')
   const target = requireRecord(input.target, 'Template application target')
   if (target.kind === 'project') {
-    assertOnlyKeys(target, ['kind', 'teamId'], 'Project template application target')
+    assertOnlyKeys(target, ['kind', 'startDate', 'teamId'], 'Project template application target')
+    const startDate = target.startDate === undefined
+      ? undefined
+      : requireCalendarDate(target.startDate, 'Project template start date')
     return {
       target: {
         kind: 'project',
         teamId: requireBoundedText(target.teamId, 'Project template Team ID', 256),
+        ...(startDate === undefined ? {} : { startDate }),
       },
     }
   }
@@ -371,6 +464,30 @@ function requireBoundedText(value: unknown, label: string, maximum: number) {
 function readOptionalTemplateString(value: unknown, label: string) {
   if (value === undefined) return undefined
   if (typeof value !== 'string') throw invalidInput(`${label} must be a string.`)
+  return value
+}
+
+/**
+ * Reads a real calendar date in `YYYY-MM-DD` form between 1970 and 2999, which leaves room for
+ * the longest template WBS to stay within the supported schedule range.
+ *
+ * @param value - Untrusted date value.
+ * @param label - Field name used in the error message.
+ * @returns The validated date string.
+ */
+function requireCalendarDate(value: unknown, label: string) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+    throw invalidInput(`${label} must be a YYYY-MM-DD date.`)
+  }
+  const date = new Date(`${value}T00:00:00.000Z`)
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.toISOString().slice(0, 10) !== value ||
+    value < '1970-01-01' ||
+    value > '2999-12-31'
+  ) {
+    throw invalidInput(`${label} must be a real calendar date between 1970 and 2999.`)
+  }
   return value
 }
 
