@@ -138,6 +138,9 @@ describe('createCrossProjectTimelineChart', () => {
     ])
     const link = chart?.links[0]
     expect(link?.toY).toBeGreaterThan(link?.fromY ?? Number.POSITIVE_INFINITY)
+    const milestoneRow = chart?.rows.find((row) => row.kind === 'entity' && row.entity.id === 'beta-ms')
+    if (milestoneRow?.kind !== 'entity') throw new Error('Milestone row is missing.')
+    expect(link?.toPercent).toBeCloseTo(milestoneRow.forecast.leftPercent)
   })
 
   test('groups by the nearest Portfolio ancestor', () => {

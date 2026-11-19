@@ -94,7 +94,16 @@ export function CrossProjectTimelineChart({
   onSelectEntity,
   today,
 }: CrossProjectTimelineChartProps) {
-  const [grouping, setGrouping] = useState<CrossProjectTimelineGrouping>('project')
+  const [grouping, setGrouping] = useState<CrossProjectTimelineGrouping>(readStoredGrouping)
+  /** Changes the grouping and keeps it for this tab, because selecting a row can remount the screen. */
+  const changeGrouping = (next: CrossProjectTimelineGrouping) => {
+    setGrouping(next)
+    try {
+      window.sessionStorage.setItem(groupingStorageKey, next)
+    } catch {
+      // Storage can be unavailable in private windows; the in-memory choice still applies.
+    }
+  }
   const resolvedToday = today ?? formatLocalCalendarDate(new Date())
   const chart = useMemo(() => createCrossProjectTimelineChart({
     dependencies,
@@ -124,7 +133,7 @@ export function CrossProjectTimelineChart({
             className="workbench-input h-9 px-3"
             data-testid="cross-project-timeline-grouping"
             value={grouping}
-            onChange={(event) => setGrouping(event.target.value === 'portfolio' ? 'portfolio' : 'project')}
+            onChange={(event) => changeGrouping(event.target.value === 'portfolio' ? 'portfolio' : 'project')}
           >
             <option value="project">{labels.groupByProject}</option>
             <option value="portfolio">{labels.groupByPortfolio}</option>
@@ -272,6 +281,24 @@ export function CrossProjectTimelineChart({
       )}
     </section>
   )
+}
+
+const groupingStorageKey = 'mukuroji.planning.crossProjectTimeline.grouping'
+
+/**
+ * Reads the grouping chosen earlier in this tab.
+ *
+ * @returns The stored grouping, or Project grouping when none is stored or storage is unavailable.
+ */
+function readStoredGrouping(): CrossProjectTimelineGrouping {
+  try {
+    return typeof window !== 'undefined' &&
+      window.sessionStorage.getItem(groupingStorageKey) === 'portfolio'
+      ? 'portfolio'
+      : 'project'
+  } catch {
+    return 'project'
+  }
 }
 
 /**

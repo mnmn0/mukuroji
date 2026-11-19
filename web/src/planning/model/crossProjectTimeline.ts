@@ -194,7 +194,7 @@ export function createCrossProjectTimelineChart(
   })
   /** Converts one milestone day to a zero-width point at the middle of that day. */
   const toPoint = (day: number): CrossProjectTimelineSpan => ({
-    leftPercent: ((day - startDay + 0.5) / spanDays) * 100,
+    leftPercent: dayMiddlePercent(day, startDay, spanDays),
     widthPercent: 0,
   })
 
@@ -224,7 +224,7 @@ export function createCrossProjectTimelineChart(
 
   const rows: CrossProjectTimelineRow[] = []
   const entityRowCenters = new Map<string, number>()
-  const entityDays = new Map<string, { start: number, end: number }>()
+  const entityDays = new Map<string, { start: number, end: number, milestone: boolean }>()
   let top = 0
   for (const group of orderedGroups) {
     rows.push({
@@ -253,7 +253,7 @@ export function createCrossProjectTimelineChart(
           : {}),
       })
       entityRowCenters.set(entity.id, top + CROSS_PROJECT_TIMELINE_ENTITY_ROW_HEIGHT / 2)
-      entityDays.set(entity.id, forecast)
+      entityDays.set(entity.id, { ...forecast, milestone: isMilestone })
       top += CROSS_PROJECT_TIMELINE_ENTITY_ROW_HEIGHT
     }
   }
@@ -268,9 +268,14 @@ export function createCrossProjectTimelineChart(
     const anchors = resolveDependencyAnchors(dependency.type, predecessor, successor)
     links.push({
       id: dependency.id,
-      fromPercent: dayEdgePercent(anchors.from, anchors.fromEdge, startDay, spanDays),
+      // Milestones are drawn as a point in the middle of their day, so lines meet that point.
+      fromPercent: predecessor.milestone
+        ? dayMiddlePercent(anchors.from, startDay, spanDays)
+        : dayEdgePercent(anchors.from, anchors.fromEdge, startDay, spanDays),
       fromY,
-      toPercent: dayEdgePercent(anchors.to, anchors.toEdge, startDay, spanDays),
+      toPercent: successor.milestone
+        ? dayMiddlePercent(anchors.to, startDay, spanDays)
+        : dayEdgePercent(anchors.to, anchors.toEdge, startDay, spanDays),
       toY,
       violated: anchors.required + dependency.lagDays > anchors.actual,
     })
@@ -454,6 +459,18 @@ function resolveDependencyAnchors(
  */
 function dayEdgePercent(day: number, edge: 'start' | 'end', startDay: number, spanDays: number): number {
   return ((day - startDay + (edge === 'end' ? 1 : 0)) / spanDays) * 100
+}
+
+/**
+ * Converts the middle of one day to a chart percentage, where milestone points are drawn.
+ *
+ * @param day - Day number since the Unix epoch.
+ * @param startDay - First chart day.
+ * @param spanDays - Number of chart days.
+ * @returns Horizontal position in percent.
+ */
+function dayMiddlePercent(day: number, startDay: number, spanDays: number): number {
+  return ((day - startDay + 0.5) / spanDays) * 100
 }
 
 /**
