@@ -794,7 +794,11 @@ describe('public Agent Run service', () => {
 
   test('takes over a stalled run of another instance only when the Team allows it', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
-    const stalled = { ...createHeldRun('task-1', 'laptop-1'), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
+    // The stalled run started on a server whose clock is ahead of this one.
+    const stalled = {
+      ...createHeldRun('task-1', 'laptop-1'),
+      startedAt: new Date(Date.now() + 60_000).toISOString(), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+    }
     store.seed(stalled)
     const receipts: unknown[] = []
     setTestAppDependencies({
@@ -835,6 +839,9 @@ describe('public Agent Run service', () => {
     const taken = await takeOver('laptop-2', 'take-over-2')
     expect(taken.supersededRun).toMatchObject({ runId: stalled.runId, state: 'finished', outcome: 'superseded', finishedBy: 'demo@example.com' })
     expect(taken.run).toMatchObject({ workItemId: 'task-1', state: 'active', runtime: 'codex', stalled: false })
+    // The successor is listed after the stalled run, while its heartbeat keeps this server's clock.
+    expect(Date.parse(taken.run.startedAt)).toBeGreaterThan(Date.parse(stalled.startedAt))
+    expect(Date.parse(taken.run.lastHeartbeatAt)).toBeLessThanOrEqual(Date.now())
     expect(receipts).toEqual([{ status: 201, body: taken }])
     expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toMatchObject({
       runId: taken.run.runId, instanceIdHash: hashAgentInstanceId('laptop-2'),
@@ -1184,6 +1191,13 @@ describe('public Agent Run service', () => {
       { requestId: 'resume', idempotencyKey: key },
       { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
     ))
+    // A run that finished just after its claim was read does not make the resume fail.
+    const getClaim = store.getClaim.bind(store)
+    store.getClaim = async () => {
+      store.getClaim = getClaim
+      return { workItemId: 'task-1', runId: later.runId, instanceIdHash: later.instanceIdHash, assigneeUserId: later.assigneeUserId }
+    }
+    await expect(resume('released', offered.runId)).rejects.toMatchObject({ category: 'conflict', message: expect.stringContaining('Another run came after') })
     // An offer of the paused run does not resume after the failed run that came later.
     await expect(resume('offered', offered.runId)).rejects.toMatchObject({ category: 'conflict', message: expect.stringContaining('Another run came after') })
     expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()

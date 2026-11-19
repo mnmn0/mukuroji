@@ -745,7 +745,7 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
   `paused` の Run を見て再開候補を示した後に、別の Run が始まって `failed` などで終わった場合に、
   人の判断が要る Run から自動で再開しないためである。指定しない resume（ユーザーが明示的に頼んだもの）は
   従来どおり直前の Run が何で終わっていても再開できる。
-- 新しい Run の `startedAt` は直前の Run の `startedAt` より必ず後にする（時計がずれていても 1 ms 後）。動かすのは `startedAt` だけで、
+- 再開と take over で始まる Run の `startedAt` は直前の Run の `startedAt` より必ず後にする（時計がずれていても 1 ms 後）。動かすのは `startedAt` だけで、
   `lastHeartbeatAt` と lease はこのサーバーの現在時刻から数えるため、再開直後の heartbeat と report は拒まれない。Run 履歴
   index は `startedAt#runId` の降順なので、`agent-run-latest` row が指す Run と履歴の先頭が一致する。履歴の
   1 ページ目で index にまだない最新 Run を補うときも、同じ順序の位置に入れて cursor と矛盾させない。
@@ -763,11 +763,13 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
   Run には `resumedFromRunId` を含める。
 - MCP の `get_next_task` は、自 instance の Run を `in_progress` として返した後、Team が
   `resumableStatusIds` を選んでいる場合だけ、その status にある claim のない `started` タスクを優先順に見て
-  最新 Run を 1 件ずつ読み（依存関係の読み取りと合わせて 100 回まで）、最新 Run が
+  最新 Run を 1 件ずつ読み、最新 Run が
   `paused` または `completed` で終了していれば `action=resume` と `resumedFromRun` を返す。最新 Run が
   `failed` / `released` のもの、Run がないものは人の判断を待つため候補にしない。`resumableStatusIds` の外の
-  status にあるタスクは読み取らず、`skipped` にも出さない（レビュー待ちのタスクが多くても読み取りの上限に
-  達しない）。候補がなければ従来どおり
+  status にあるタスクは読み取らず、`skipped` にも出さない。再開候補の探索は新規タスクの選定とは別に
+  最新 Run と依存関係の読み取りを合わせて 20 回までとし、それを超えたときや API が `429` を返したときは
+  残りのタスクを候補にせず探索をやめる（示せないタスクが多くても、選定が止まったり rate limit を使い切ったりしない）。
+  候補がなければ従来どおり
   Ready の新規タスクを選ぶ。`resumableStatusIds` が空の Team で再開候補を示さないのは、レビュー待ちで
   `paused` にした Work Item をすぐ再開してしまうためである。その場合 agent はユーザーの指示でだけ
   `resume_task` を呼ぶ。

@@ -59,6 +59,12 @@ export type SkippedTaskReason = 'blocked' | 'active_run' | 'not_ready'
  */
 const resumableOutcomes: ReadonlySet<string> = new Set(['paused', 'completed'])
 
+/**
+ * Maximum number of reads (newest runs and blockers) spent looking for a resume candidate. Past it, or
+ * when the API rate limits those reads, selection stops offering resumes and goes on to ready work.
+ */
+const maximumResumeReads = 20
+
 /** Maximum number of skipped candidates reported by task selection. */
 const maximumSkippedReports = 5
 
@@ -491,22 +497,31 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       }
       let blockedCount = 0
       let dependencyReads = 0
+      let resumeReads = 0
       // Paused or sent-back work comes before new work, so started tasks are offered for resume first.
       // Only a Team that chose its resumable statuses gets offers: with none chosen, a task paused while
       // it waits for review would be offered straight back, so resume then happens only when asked.
+      // The search has its own small read budget and never fails the selection: past the budget, or when
+      // the API rate limits it, the remaining started tasks are not offered and ready work is selected.
       for (const task of resumableStatusIds.size > 0 ? tasks : []) {
         if (task.statusCategory !== 'started' || claimed.has(task.id)) continue
         // The server rejects a resume from any other status, so such tasks cost no read and are never
         // offered; tasks waiting for people in an excluded status cannot use up the read budget.
         if (!resumableStatusIds.has(task.workflowStatusId)) continue
-        dependencyReads += 1
-        if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)
+        resumeReads += 1
+        if (resumeReads > maximumResumeReads) break
+        let latest: Awaited<ReturnType<typeof api.latestRun>>
+        try {
+          latest = await api.latestRun(task.id)
+        } catch (error) {
+          if (error instanceof AgentTaskError && error.code === 'rate_limited') break
+          throw error
+        }
         // A started task without a run, or whose newest run failed or was released, waits for a person.
-        const latest = await api.latestRun(task.id)
         if (latest === undefined || latest.state !== 'finished' || !resumableOutcomes.has(latest.outcome ?? '')) continue
         // A task paused on an unfinished dependency waits for it like new work does.
-        dependencyReads += task.relationIds.filter((relation) => relation.startsWith('blockedBy:')).length
-        if (dependencyReads > 100) throw new AgentTaskError('dependency_limit', selectionLimitMessage)
+        resumeReads += task.relationIds.filter((relation) => relation.startsWith('blockedBy:')).length
+        if (resumeReads > maximumResumeReads) break
         if ((await blockers(task)).unresolvedCount > 0) { blockedCount += 1; skip(task.id, 'blocked'); continue }
         return { action: 'resume', task, resumedFromRun: latest, blockedCount, skipped, ...runSummary }
       }

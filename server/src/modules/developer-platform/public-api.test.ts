@@ -2985,11 +2985,14 @@ describe('public Agent Run routes', () => {
   test('resumes a started Work Item idempotently and reports a status the Team does not allow', async () => {
     const calls: unknown[] = []
     let notResumable = false
+    let lostAccess = false
     const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
       /**
-       * Accepts every resume authorization in this test.
+       * Accepts resume authorizations until the test removes the caller's access.
        */
-      async authorizeResume() {},
+      async authorizeResume() {
+        if (lostAccess) throw new AgentRunError('forbidden', 'No access.', { reason: 'agent_run_forbidden' })
+      },
       /**
        * Returns a resume response, or the not resumable error the test configures.
        *
@@ -3025,6 +3028,12 @@ describe('public Agent Run routes', () => {
     expect(resumed.status).toBe(201)
     expect(await resumed.json()).toMatchObject({ resumedFromRun: { outcome: 'paused' } })
     expect((await send('resume-1')).headers.get('Idempotency-Replayed')).toBe('true')
+    // A caller who lost access gets no saved response on a retry.
+    lostAccess = true
+    const lost = await send('resume-1')
+    expect(lost.status).toBe(403)
+    expect(lost.headers.get('Idempotency-Replayed')).toBeNull()
+    lostAccess = false
     expect(calls).toEqual([{
       teamId: 'team-1', workItemId: 'work-item-1',
       request: { expectedRevision: 3, runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },

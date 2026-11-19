@@ -45,7 +45,7 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
   const runs = new Map<string, AgentRunRecord & { instanceId: string }>()
   let runSequence = 0
   /** Resume responses by idempotency key, like the API receipts. */
-  const resumeReceipts = new Map<string, Awaited<ReturnType<AgentWorkItemApi['resumeRun']>>>()
+  const resumeReceipts = new Map<string, { fingerprint: string; response: Awaited<ReturnType<AgentWorkItemApi['resumeRun']>> }>()
   const startReceipts = new Map<string, { fingerprint: string; response: { run: AgentRunRecord; task: AgentTask } }>()
   /** Projects a stored run without the raw instance ID, as the server does. */
   const publicRun = ({ instanceId: _instanceId, ...run }: AgentRunRecord & { instanceId: string }): AgentRunRecord => structuredClone(run)
@@ -199,9 +199,12 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
      * @returns The new run and the run it resumes.
      */
     async resumeRun(id, input, key) {
-      // Like the API, a committed resume replays its receipt for the same key.
+      // Like the API, a committed resume replays its receipt for the same key and input only.
       const receipt = resumeReceipts.get(key)
-      if (receipt) return receipt
+      if (receipt) {
+        if (receipt.fingerprint !== JSON.stringify({ id, input })) throw new AgentTaskError('conflict', 'Different input')
+        return structuredClone(receipt.response)
+      }
       const current = records.get(id)
       if (!current || current.revision !== input.expectedRevision) throw new AgentTaskError('conflict', 'Changed')
       if (current.statusCategory !== 'started') throw new AgentTaskError('invalid_transition', 'Not started')
@@ -220,8 +223,8 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       }
       runs.set(run.runId, run)
       const response = { run: publicRun(run), ...(previous === undefined ? {} : { resumedFromRun: publicRun(previous) }) }
-      resumeReceipts.set(key, response)
-      return response
+      resumeReceipts.set(key, { fingerprint: JSON.stringify({ id, input }), response })
+      return structuredClone(response)
     },
     /**
      * Returns the newest run of a task.
@@ -360,6 +363,29 @@ describe('agent task lifecycle', () => {
     // A task in a status the Team does not resume from costs no read of its runs.
     expect(latestReads).toEqual(['failed', 'waiting'])
     expect((await service.configuration()).agentSettings.resumableStatusIds).toEqual(['coding'])
+    // A rate limited search for resumes does not keep ready work from being selected.
+    api.latestRun = async () => { throw new AgentTaskError('rate_limited', 'Slow down', true, 60) }
+    expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'fresh' } })
+  })
+
+  test('stops looking for resumes after its read budget and still selects ready work', async () => {
+    const stuck = Array.from({ length: 30 }, (_, index) => task(`stuck-${String(index).padStart(2, '0')}`, {
+      priority: 'high', statusCategory: 'started', workflowStatusId: 'coding',
+    }))
+    const { service, api } = fixture([...stuck, task('fresh', { priority: 'low' })], {
+      async agentSettings() {
+        return {
+          schemaVersion: 1, teamId: 'team', revision: 1, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
+          readyStatusIds: [], resumableStatusIds: ['coding'], requireAcceptanceCriteria: false, projectBriefs: {},
+        }
+      },
+    })
+    // None of the started tasks has a run, so none of them can be offered for resume.
+    let latestReads = 0
+    const latestRun = api.latestRun.bind(api)
+    api.latestRun = async (id) => { latestReads += 1; return latestRun(id) }
+    expect(await service.next({})).toMatchObject({ action: 'start', task: { id: 'fresh' } })
+    expect(latestReads).toBe(20)
   })
 
   test('refuses to resume a task another instance holds or that is not started', async () => {
