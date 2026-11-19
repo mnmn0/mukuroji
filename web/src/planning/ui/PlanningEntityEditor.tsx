@@ -14,6 +14,7 @@ import {
   planningProgressModeOptions,
   planningRiskOptions,
   readPlanningOption,
+  rebasePlanningEntityEditorDraft,
   resolvePlanningEntityEdit,
   type PlanningEntityEditorDraft,
   type PlanningEntityEditorProblem,
@@ -75,7 +76,10 @@ export type PlanningEntityEditorLabels = {
 
 /** Props for {@link PlanningEntityEditor}. */
 export type PlanningEntityEditorProps = {
-  /** Entity being edited. Remount the editor (via `key`) when the stored entity changes. */
+  /**
+   * Entity being edited. Remount the editor (via `key`) only when another entity is selected:
+   * a newer version of the same entity keeps the user's unsaved edits.
+   */
   entity: PlanningEntity
   /** Localized text. */
   labels: PlanningEntityEditorLabels
@@ -102,6 +106,12 @@ export function PlanningEntityEditor({
   ownerCandidates,
 }: PlanningEntityEditorProps) {
   const [draft, setDraft] = useState(() => createPlanningEntityEditorDraft(entity))
+  const [baseEntity, setBaseEntity] = useState(entity)
+  if (baseEntity !== entity) {
+    // A refresh (after a save, a conflict or revalidation) keeps edits the user has not saved.
+    setBaseEntity(entity)
+    setDraft(rebasePlanningEntityEditorDraft(baseEntity, entity, draft))
+  }
   const [message, setMessage] = useState<string>()
   const [isSaving, setIsSaving] = useState(false)
   const ownerListId = useId()
@@ -219,7 +229,7 @@ export function PlanningEntityEditor({
                 min={0}
                 name="manualProgress"
                 required
-                step={1}
+                step="any"
                 type="number"
                 value={draft.manualProgress}
                 onChange={(event) => update({ manualProgress: event.target.value })}

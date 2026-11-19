@@ -233,5 +233,5 @@ export const planningMessages = {
   'planning.editor.problem.ownerRequired': 'Enter an owner.',
   'planning.editor.problem.dateRequired': 'Enter the baseline and forecast dates.',
   'planning.editor.problem.dateRange': 'End dates must be on or after start dates.',
-  'planning.editor.problem.manualProgress': 'Enter progress as a whole number from 0 to 100.',
+  'planning.editor.problem.manualProgress': 'Enter progress as a number from 0 to 100.',
 } as const

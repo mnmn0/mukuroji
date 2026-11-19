@@ -6,8 +6,10 @@ import {
   collectPlanningOwnerCandidates,
   createPlanningEntityEditorDraft,
   readPlanningOption,
+  rebasePlanningEntityEditorDraft,
   resolvePlanningEntityEdit,
   planningRiskOptions,
+  type PlanningEntityEditorDraft,
 } from '../src/planning/model/entityEditor'
 import { createPlanningLabels } from '../src/planning/ui/labels'
 import { PlanningScreen } from '../src/planning/ui/PlanningScreen'
@@ -111,7 +113,45 @@ describe('planning entity edit patch', () => {
     expect(problem({ forecastStart: '2099-02-02', forecastEnd: '2099-02-01' })).toBe('date-range')
     expect(problem({ progressMode: 'manual', manualProgress: '' })).toBe('manual-progress')
     expect(problem({ progressMode: 'manual', manualProgress: '101' })).toBe('manual-progress')
-    expect(problem({ progressMode: 'manual', manualProgress: '12.5' })).toBe('manual-progress')
+    expect(problem({ progressMode: 'manual', manualProgress: '-1' })).toBe('manual-progress')
+    expect(problem({ progressMode: 'manual', manualProgress: 'abc' })).toBe('manual-progress')
+  })
+
+  test('accepts stored fractional manual progress so unrelated edits can be saved', () => {
+    const phase = { ...fixtureEntity('phase-build'), manualProgress: 12.5 }
+    expect(resolvePlanningEntityEdit(phase, {
+      ...createPlanningEntityEditorDraft(phase),
+      title: 'Renamed',
+    })).toEqual({ kind: 'patch', patch: { title: 'Renamed' } })
+    expect(resolvePlanningEntityEdit(phase, {
+      ...createPlanningEntityEditorDraft(phase),
+      manualProgress: '33.3',
+    })).toEqual({ kind: 'patch', patch: { manualProgress: 33.3 } })
+  })
+
+  test('keeps unsaved edits and takes other fields from a newer stored version', () => {
+    const phase = fixtureEntity('phase-build')
+    const draft: PlanningEntityEditorDraft = { ...createPlanningEntityEditorDraft(phase), title: 'My title', risk: 'critical' }
+    const newer: PlanningEntity = { ...phase, health: 'off-track', title: 'Their title', updatedAt: '2099-01-01T00:00:00.000Z' }
+    const rebased = rebasePlanningEntityEditorDraft(phase, newer, draft)
+    expect(rebased).toEqual({
+      ...createPlanningEntityEditorDraft(newer),
+      title: 'My title',
+      risk: 'critical',
+    })
+    expect(resolvePlanningEntityEdit(newer, rebased)).toEqual({
+      kind: 'patch',
+      patch: { title: 'My title', risk: 'critical' },
+    })
+  })
+
+  test('resets to the stored values after a successful save', () => {
+    const phase = fixtureEntity('phase-build')
+    const draft: PlanningEntityEditorDraft = { ...createPlanningEntityEditorDraft(phase), status: 'completed' }
+    const saved: PlanningEntity = { ...phase, status: 'completed', updatedAt: '2099-01-01T00:00:00.000Z' }
+    expect(rebasePlanningEntityEditorDraft(phase, saved, draft)).toEqual(
+      createPlanningEntityEditorDraft(saved),
+    )
   })
 
   test('suggests each owner once and narrows select values to known options', () => {

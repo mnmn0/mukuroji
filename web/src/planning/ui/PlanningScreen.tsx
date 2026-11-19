@@ -755,7 +755,7 @@ export function PlanningScreen({
                 <PlanningEntityEditor
                   disabled={isAiOperationPending}
                   entity={selectedEntity}
-                  key={`planning-entity-editor:${selectedEntity.id}:${selectedEntity.updatedAt}`}
+                  key={`planning-entity-editor:${selectedEntity.id}`}
                   labels={labels.entityEditor}
                   ownerCandidates={collectPlanningOwnerCandidates(activeEntities)}
                   onSave={onUpdateEntity && (canManageEntity?.(selectedEntity) ?? true)

@@ -119,6 +119,46 @@ export function createPlanningEntityEditorDraft(entity: PlanningEntity): Plannin
 }
 
 /**
+ * Carries the user's unsaved edits over to a newer stored version of the same entity.
+ *
+ * Fields the user changed keep the user's value; every other field takes the newer stored
+ * value, so a refresh after a conflict neither discards the draft nor reverts someone else's
+ * change. After a successful save the changed fields already match, and the result equals
+ * a fresh draft of `next`.
+ *
+ * @param previous - Stored entity the draft was last based on.
+ * @param next - Newer stored version of the entity.
+ * @param draft - Current form values.
+ * @returns Form values based on `next` with the user's edits applied.
+ */
+export function rebasePlanningEntityEditorDraft(
+  previous: PlanningEntity,
+  next: PlanningEntity,
+  draft: PlanningEntityEditorDraft,
+): PlanningEntityEditorDraft {
+  const before = createPlanningEntityEditorDraft(previous)
+  const after = createPlanningEntityEditorDraft(next)
+  return {
+    title: draft.title === before.title ? after.title : draft.title,
+    description: draft.description === before.description ? after.description : draft.description,
+    ownerMemberKey: draft.ownerMemberKey === before.ownerMemberKey
+      ? after.ownerMemberKey
+      : draft.ownerMemberKey,
+    status: draft.status === before.status ? after.status : draft.status,
+    health: draft.health === before.health ? after.health : draft.health,
+    risk: draft.risk === before.risk ? after.risk : draft.risk,
+    progressMode: draft.progressMode === before.progressMode ? after.progressMode : draft.progressMode,
+    manualProgress: draft.manualProgress === before.manualProgress
+      ? after.manualProgress
+      : draft.manualProgress,
+    baselineStart: draft.baselineStart === before.baselineStart ? after.baselineStart : draft.baselineStart,
+    baselineEnd: draft.baselineEnd === before.baselineEnd ? after.baselineEnd : draft.baselineEnd,
+    forecastStart: draft.forecastStart === before.forecastStart ? after.forecastStart : draft.forecastStart,
+    forecastEnd: draft.forecastEnd === before.forecastEnd ? after.forecastEnd : draft.forecastEnd,
+  }
+}
+
+/**
  * Validates a draft and returns a patch holding only the fields that changed.
  *
  * Milestones are single-day entities, so their start dates follow their end dates.
@@ -204,12 +244,14 @@ export function readPlanningOption<T extends string>(
 /**
  * Parses a manual progress percentage.
  *
+ * Fractions are allowed because the server accepts any finite number from 0 to 100.
+ *
  * @param value - Percentage as typed.
- * @returns An integer from 0 to 100, or undefined for empty or invalid input.
+ * @returns A number from 0 to 100, or undefined for empty or invalid input.
  */
 function readManualProgress(value: string): number | undefined {
   const parsed = value.trim() ? Number(value) : Number.NaN
-  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 100 ? parsed : undefined
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : undefined
 }
 
 /**

@@ -233,5 +233,5 @@ export const planningMessages = {
   'planning.editor.problem.ownerRequired': 'オーナーを入力してください。',
   'planning.editor.problem.dateRequired': 'ベースラインと予測の日付を入力してください。',
   'planning.editor.problem.dateRange': '終了日は開始日と同じか、それより後にしてください。',
-  'planning.editor.problem.manualProgress': '進捗は 0 から 100 の整数で入力してください。',
+  'planning.editor.problem.manualProgress': '進捗は 0 から 100 の数で入力してください。',
 } as const
