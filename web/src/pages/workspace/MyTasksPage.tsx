@@ -225,7 +225,7 @@ export function MyTasksPage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
-      layoutModes: ['board', 'gantt'],
+      layoutModes: ['board', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
@@ -259,8 +259,9 @@ export function MyTasksPage() {
     ),
     [myTasks, taskViewController.effectiveDefinition],
   )
+  const myTasksLayoutMode = taskViewController.effectiveDefinition.layout.mode
   const myTasksViewMode: MyTasksViewMode =
-    taskViewController.effectiveDefinition.layout.mode === 'gantt' ? 'gantt' : 'board'
+    myTasksLayoutMode === 'gantt' || myTasksLayoutMode === 'calendar' ? myTasksLayoutMode : 'board'
   const isMyTasksOutlineShown = myTasksViewMode === 'gantt' &&
     (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false)
   const myTasksOutlineTeamIds = useMemo(

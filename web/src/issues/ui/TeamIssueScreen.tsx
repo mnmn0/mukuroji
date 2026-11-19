@@ -123,6 +123,8 @@ import {
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { IssueToolbar } from './TeamIssueToolbar'
 import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
+import { TaskCalendarView } from '../../tasks/ui/TaskCalendarView'
+import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import { listTaskGanttRowTasks, type TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
 import { resolveTeamIssueGroupValue } from '../model/teamIssueDisplay'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
@@ -219,6 +221,7 @@ export function TeamIssueScreen({
   const t = useMemo(() => createTranslator(locale), [locale])
   const { openMobileSidebar } = useWorkspaceSidebarController()
   const [localViewMode, setLocalViewMode] = useState<IssueViewMode>(initialViewMode)
+  const [calendarMonth, setCalendarMonth] = useState(() => getCurrentTaskMonth())
   const [localSearchQuery, setLocalSearchQuery] = useState('')
   const [localStatusFilter, setLocalStatusFilter] = useState<string>('all')
   const [localWorkItemTypeFilter, setLocalWorkItemTypeFilter] = useState<string>('all')
@@ -1656,6 +1659,16 @@ export function TeamIssueScreen({
                       selectedIssueId={selectedIssueId}
                       t={t}
                       workspaceMembers={workspaceMembers}
+                    />
+                  ) : viewMode === 'calendar' ? (
+                    <TaskCalendarView
+                      configuration={configuration}
+                      configurationsByTeam={ganttConfigurationsByTeam}
+                      month={calendarMonth}
+                      onMonthChange={setCalendarMonth}
+                      onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
+                      t={t}
+                      tasks={visibleIssues}
                     />
                   ) : viewMode === 'gantt' ? (
                     <TaskGanttView
