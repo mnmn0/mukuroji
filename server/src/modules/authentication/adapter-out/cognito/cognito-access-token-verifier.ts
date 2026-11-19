@@ -184,6 +184,10 @@ export class CognitoAccessTokenVerifier {
    * @returns The RSA public key.
    */
   private async getSigningKey(keyId: string) {
+    if (this.pendingFetch && !this.keys.has(keyId)) {
+      // A read already in flight may bring the key; the cooldown only limits starting another.
+      await this.pendingFetch.catch(() => undefined)
+    }
     const now = this.now()
     const stale = now - this.keysFetchedAt >= jwksCacheMilliseconds
     // Every read, including the hourly refresh, waits out the interval after the last attempt, so

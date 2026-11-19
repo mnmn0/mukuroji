@@ -121,6 +121,13 @@ export type WorkspaceMember = {
   updatedAt: string
   /** 利用停止日時の ISO 8601 timestamp です。 */
   deactivatedAt?: string
+  /**
+   * When directory deprovisioning signed the member out everywhere (ISO 8601).
+   *
+   * Kept after reactivation: access tokens the API verifies locally (enterprise SSO) are refused
+   * when their sign-in started before this time, as Cognito global sign-out would refuse them.
+   */
+  signInsRevokedAt?: string
 }
 
 /**
@@ -2804,6 +2811,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       version: existing.version + 1,
       updatedAt: nowIso,
       deactivatedAt: nowIso,
+      signInsRevokedAt: nowIso,
     } satisfies WorkspaceMember
     const membershipConditions = await this.prepareMembershipMutation(
       normalizedWorkspaceId,
@@ -2835,7 +2843,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           recordKey: createMemberRecordKey(memberKey),
         },
         UpdateExpression:
-          'SET #status = :deactivated, provisioningSource = :directory, externalIdentityId = :externalIdentityId, updatedAt = :now, deactivatedAt = :now, version = version + :one',
+          'SET #status = :deactivated, provisioningSource = :directory, externalIdentityId = :externalIdentityId, updatedAt = :now, deactivatedAt = :now, signInsRevokedAt = :now, version = version + :one',
         ConditionExpression:
           'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId',
         ExpressionAttributeNames: { '#role': 'role', '#status': 'status' },
@@ -3657,6 +3665,9 @@ function toWorkspaceMember(value: unknown): WorkspaceMember {
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     deactivatedAt: typeof value.deactivatedAt === 'string' ? value.deactivatedAt : undefined,
+    ...(typeof value.signInsRevokedAt === 'string'
+      ? { signInsRevokedAt: value.signInsRevokedAt }
+      : {}),
   }
 }
 
@@ -3781,6 +3792,7 @@ function toMemberItem(
     createdAt: member.createdAt,
     updatedAt: member.updatedAt,
     ...(member.deactivatedAt ? { deactivatedAt: member.deactivatedAt } : {}),
+    ...(member.signInsRevokedAt ? { signInsRevokedAt: member.signInsRevokedAt } : {}),
     ...(identityOwnership ? { identityOwnership } : {}),
   }
 }

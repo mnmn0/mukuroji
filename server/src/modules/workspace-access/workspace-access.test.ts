@@ -2704,6 +2704,7 @@ test('deprovisions a directory member atomically with the Planning revision and 
     externalIdentityId: 'scim-user-123',
     version: 5,
     deactivatedAt: now.toISOString(),
+    signInsRevokedAt: now.toISOString(),
   })
   expect(inputs.at(-1)).toMatchObject({
     TransactItems: [

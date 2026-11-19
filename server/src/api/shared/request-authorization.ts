@@ -653,6 +653,30 @@ const enterpriseRoutePermissionRules = [
 ] as const satisfies readonly EnterpriseRoutePermissionRule[]
 
 /**
+ * Refuses a locally verified access token whose sign-in began before the member was signed out.
+ *
+ * Directory deprovisioning signs the member out everywhere in Cognito, which only reaches tokens
+ * Cognito itself checks. Enterprise SSO tokens are verified by the API, so a sign-in started
+ * before that sign-out stays refused here, also after the member is reactivated.
+ *
+ * @param accessToken - Access token whose signature was already verified.
+ * @param signInsRevokedAt - When the member was signed out everywhere (ISO 8601), if ever.
+ */
+function requireSignInAfterMemberSignOut(accessToken: string, signInsRevokedAt: string | undefined) {
+  if (!signInsRevokedAt) return
+  const revokedAt = Date.parse(signInsRevokedAt)
+  const claims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
+  const signedInAt = readNumericClaim(claims?.auth_time) ?? readNumericClaim(claims?.iat)
+  if (Number.isNaN(revokedAt) || signedInAt === undefined || signedInAt * 1_000 <= revokedAt) {
+    throw new WorkspaceAccessError(
+      401,
+      'EnterpriseSsoSessionRequired',
+      'Single sign-on is required for this Workspace account.',
+    )
+  }
+}
+
+/**
  * Authenticates an access token and resolves the Workspace principal with its enterprise authorization.
  *
  * @param accessToken - Bearer access token from the request.
@@ -690,6 +714,9 @@ export async function authenticateWorkspacePrincipal(
 
   if (!workspaceMember) {
     throw new WorkspaceAccessError(403, 'WorkspaceAccessDenied', 'Workspace access is denied.')
+  }
+  if (ssoSessionAuthenticationMethods) {
+    requireSignInAfterMemberSignOut(accessToken, workspaceMember.signInsRevokedAt)
   }
 
   const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)

@@ -282,3 +282,28 @@ test('accepts an expired token only when sign-out asks for it', async () => {
   await expect(verifier.verify(expired, { ...expected, allowExpired: true }))
     .resolves.toMatchObject({ originJti: 'origin-1' })
 })
+
+test('lets concurrent requests share the first JWKS read instead of failing during it', async () => {
+  const key = createSigningKey('kid-1')
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let fetches = 0
+  const verifier = new CognitoAccessTokenVerifier(
+    'https://jwks.example.test',
+    async () => {
+      fetches += 1
+      await gate
+      return { keys: [key.jwk] }
+    },
+    () => now,
+  )
+  const token = signToken(key.privateKey, { alg: 'RS256', kid: 'kid-1' }, accessClaims())
+
+  const verifications = [verifier.verify(token, expected), verifier.verify(token, expected)]
+  release()
+
+  await expect(Promise.all(verifications)).resolves.toHaveLength(2)
+  expect(fetches).toBe(1)
+})

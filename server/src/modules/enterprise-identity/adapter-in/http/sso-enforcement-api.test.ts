@@ -5,6 +5,7 @@ const {
   app,
   configureFakeProjectClients,
   createAccessToken,
+  getTestAppDependencies,
   resetTestApp,
   setTestAppDependencies,
   withTestEnvironment,
@@ -272,6 +273,35 @@ test('accepts an SSO token only for an attested sign-in of its SSO domain, even 
     expect(forgedSignature.status).toBe(401)
     expect(calls.verifiedAccessTokenReads.length).toBeGreaterThan(0)
     expect(new Set(calls.verifiedAccessTokenReads)).toEqual(new Set(['mukuroji-sso-client']))
+
+    // Directory deprovisioning signed the member out; reactivation must not revive older sign-ins.
+    const signInsRevokedAt = new Date(Date.now() - 60_000).toISOString()
+    const workspaceAccess = getTestAppDependencies().workspace.workspaceAccess
+    setTestAppDependencies({
+      workspaceAccess: {
+        ...workspaceAccess,
+        async getActiveMember(workspaceIdToRead, memberKey) {
+          const member = await workspaceAccess.getActiveMember(workspaceIdToRead, memberKey)
+          return member ? { ...member, signInsRevokedAt } : undefined
+        },
+      },
+    })
+    const signedInBeforeSignOut = createAccessToken([], {
+      client_id: 'mukuroji-sso-client',
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+      auth_time: Math.floor(Date.now() / 1_000) - 600,
+    })
+    const signedInAfterReactivation = createAccessToken([], {
+      client_id: 'mukuroji-sso-client',
+      iss: 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_mukuroji',
+      token_use: 'access',
+      auth_time: Math.floor(Date.now() / 1_000) - 5,
+    })
+    const revivedSession = await requestCurrentUser(signedInBeforeSignOut)
+    expect(revivedSession.status).toBe(401)
+    expect(await revivedSession.json()).toMatchObject({ code: 'EnterpriseSsoSessionRequired' })
+    expect((await requestCurrentUser(signedInAfterReactivation)).status).toBe(200)
   })
 })
 
