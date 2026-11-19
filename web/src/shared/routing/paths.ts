@@ -374,14 +374,28 @@ export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
  * Creates the URL of a Team's time tracking view for one week.
  *
  * @param teamId - Team identifier.
- * @param view - `timesheet` for the member's week or `approvals` for the manager queue.
- * @param weekStart - Monday of the week as `YYYY-MM-DD`; omitted for the current week.
+ * @param view - `timesheet` for the member's week, `approvals` for the manager queue, or `report` for totals.
+ * @param weekStart - Monday of the week as `YYYY-MM-DD`; omitted for the current week. Not used by `report`.
+ * @param report - Period and grouping of the `report` view; omitted for the current week by day.
  * @returns Same-origin path.
  */
-export function createTeamTimeTrackingPath(teamId: string, view: 'timesheet' | 'approvals' = 'timesheet', weekStart?: string) {
+export function createTeamTimeTrackingPath(
+  teamId: string,
+  view: 'timesheet' | 'approvals' | 'report' = 'timesheet',
+  weekStart?: string,
+  report?: { from: string; to: string; groupBy: string },
+) {
   const query = new URLSearchParams()
-  if (view === 'approvals') query.set('view', 'approvals')
-  if (weekStart) query.set('week', weekStart)
+  if (view !== 'timesheet') query.set('view', view)
+  if (view === 'report') {
+    if (report) {
+      query.set('from', report.from)
+      query.set('to', report.to)
+      query.set('groupBy', report.groupBy)
+    }
+  } else if (weekStart) {
+    query.set('week', weekStart)
+  }
   const encoded = query.toString()
   return `/teams/${encodeURIComponent(teamId)}/timesheet${encoded ? `?${encoded}` : ''}`
 }
