@@ -140,6 +140,7 @@ Stack は AWS Budgets の月次コスト予算（`MonthlyCostBudget`）を 1 つ
 
 - 予算は AWS アカウント全体の費用を対象にします。cost allocation tag で絞らないのは、tag は Billing console で有効にするまで Budgets に届かず、data transfer や税のように tag の付かない費用もあるためです。Mukuroji 専用のアカウントに deploy してください。他のシステムと同じアカウントでは、他のシステムの費用も合算されます。
 - Budgets は請求データを 1 日に数回まとめて評価するため、通知は費用の発生から最大 1 日ほど遅れます。急な増加をすぐ止める仕組みではありません。
+- 通知が来たら、Cost Explorer の service 別の内訳で増えた service を確かめ、下の固定費・試算と比べます。任意 module、AI、SES の利用、Lambda の実行時間が主な増加要因です。
 - email は AWS Budgets（`budgets@costalerts.amazonaws.com`）から届きます。購読の確認は不要です。迷惑メールに入らないよう、受信側で許可してください。
 
 ### Cost allocation tag
@@ -165,7 +166,7 @@ aws ce update-cost-allocation-tags-status \
 | Secrets Manager secret | 4 個 | $1.60 | $0.40 / secret。inbound automation Webhook を 1 つ作るごとに secret が 1 つ増えます。 |
 | KMS customer-managed key | 1 個（`DeveloperPlatformKey`） | $1.00 | request 料金は少量です。 |
 | DynamoDB table（on-demand、PITR 有効） | 25 個 | $0.1〜0.5 | 保存量 25 GB までは無料枠。PITR は保存量 1 GB あたり約 $0.23 です。 |
-| EventBridge の毎分 rule と `ScheduledJobsFunction` | 1 個 | ほぼ $0 | 月 43,200 回の起動は Lambda の無料枠（100 万 request、40 万 GB 秒）に収まります。job が読む DynamoDB の料金は数十セントです。 |
+| EventBridge の毎分 rule と `ScheduledJobsFunction` | 1 個 | ほぼ $0 | 月 43,200 回の起動（1,024 MB）は、1 回が平均数秒で終われば Lambda の無料枠（100 万 request、40 万 GB 秒）に収まります。無料枠はほかの Lambda と共有です。job が読む DynamoDB の料金は数十セントです。 |
 | SQS の待機中の polling | 3 queue | $0〜1 | Lambda の event source が空の queue を long polling し続けます。無料枠は月 100 万 request、超えた分は $0.40 / 100 万です。 |
 | X-Ray active tracing | 全 Lambda | ほぼ $0 | 月 10 万 trace まで無料。毎分の job で約 4.3 万 trace を使います。 |
 | CloudWatch Logs | 21 log group（90 日保持） | ほぼ $0 | 月 5 GB まで無料。超えた分は取り込み $0.76 / GB です。 |
