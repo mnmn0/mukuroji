@@ -1640,7 +1640,6 @@ function createGanttProgressLinePoints(input: GanttProgressLineInput): GanttProg
   rows.forEach((row, index) => {
     if (row.kind !== 'task') return
     const top = topOffset + (rowTops[index] ?? 0)
-    const bar = createGanttBar(row.schedule, axis)
     const progressPercent = resolveWorkItemEffortColumnValue(
       row.task,
       'progress',
@@ -1649,9 +1648,9 @@ function createGanttProgressLinePoints(input: GanttProgressLineInput): GanttProg
     const startDate = resolveTaskScheduleStartDate(row.schedule) ?? resolveTaskScheduleEndDate(row.schedule)
     const endDate = resolveTaskScheduleEndDate(row.schedule) ?? startDate
     const x = resolveTaskGanttProgressPointX({
+      axis,
       today,
       todayX,
-      ...(bar ? { barLeft: bar.left, barWidth: bar.width } : {}),
       ...(startDate ? { startDate } : {}),
       ...(endDate ? { endDate } : {}),
       ...(progressPercent === undefined ? {} : { progressPercent }),

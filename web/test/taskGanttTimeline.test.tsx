@@ -66,15 +66,26 @@ describe('task Gantt timeline scales', () => {
   })
 
   test('places progress points behind, ahead, or on today', () => {
-    const base = { barLeft: 100, barWidth: 200, endDate: '2026-11-30', startDate: '2026-11-10', today: '2026-11-20', todayX: 200 }
+    const axis = {
+      columnWidth: 42,
+      columns: createTaskGanttScaledColumns({ endDate: '2026-11-30', startDate: '2026-11-01' }, 'day').columns,
+    }
+    // 2026-11-11 through 2026-11-30 is 20 days; today 2026-11-20 is centered at 19.5 days.
+    const base = { axis, endDate: '2026-11-30', startDate: '2026-11-11', today: '2026-11-20', todayX: 19.5 * 42 }
 
-    expect(resolveTaskGanttProgressPointX({ ...base, progressPercent: 25 })).toBe(150)
-    expect(resolveTaskGanttProgressPointX({ ...base, progressPercent: 75 })).toBe(250)
-    expect(resolveTaskGanttProgressPointX({ ...base })).toBe(200)
-    expect(resolveTaskGanttProgressPointX({ today: base.today, todayX: base.todayX, progressPercent: 40 })).toBe(200)
-    expect(resolveTaskGanttProgressPointX({ ...base, endDate: '2026-11-15', progressPercent: 100 })).toBe(200)
-    expect(resolveTaskGanttProgressPointX({ ...base, progressPercent: 0, startDate: '2026-11-25' })).toBe(200)
-    expect(resolveTaskGanttProgressPointX({ ...base, progressPercent: 0 })).toBe(100)
+    expect(resolveTaskGanttProgressPointX({ ...base, progressPercent: 25 })).toBe(15 * 42)
+    expect(resolveTaskGanttProgressPointX({ ...base, progressPercent: 75 })).toBe(25 * 42)
+    expect(resolveTaskGanttProgressPointX({ ...base })).toBe(base.todayX)
+    expect(resolveTaskGanttProgressPointX({ axis, today: base.today, todayX: base.todayX, progressPercent: 40 }))
+      .toBe(base.todayX)
+    expect(resolveTaskGanttProgressPointX({ ...base, endDate: '2026-11-15', progressPercent: 100 })).toBe(base.todayX)
+    expect(resolveTaskGanttProgressPointX({ ...base, progressPercent: 0, startDate: '2026-11-25' })).toBe(base.todayX)
+    expect(resolveTaskGanttProgressPointX({ ...base, progressPercent: 0 })).toBe(10 * 42)
+    // A range clipped by the timeline keeps its progress position, and points outside stay at the edge.
+    expect(resolveTaskGanttProgressPointX({ ...base, endDate: '2026-11-20', progressPercent: 50, startDate: '2026-10-22' }))
+      .toBe(5 * 42)
+    expect(resolveTaskGanttProgressPointX({ ...base, endDate: '2026-11-20', progressPercent: 10, startDate: '2026-10-22' }))
+      .toBe(0)
   })
 
   test('renders the display controls, today line, and today column', () => {

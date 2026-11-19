@@ -51,10 +51,8 @@ export type TaskGanttDateSpan = {
 
 /** Inputs of one point of the progress line. */
 export type TaskGanttProgressPointInput = {
-  /** Planned bar left edge, when the row has a visible planned bar. */
-  barLeft?: number
-  /** Planned bar width, when the row has a visible planned bar. */
-  barWidth?: number
+  /** Timeline columns and their width. */
+  axis: TaskGanttTimelineAxis
   /** Planned first date of the row. */
   startDate?: string
   /** Planned last date of the row. */
@@ -151,21 +149,30 @@ export function resolveTaskGanttDateSpan(
 /**
  * Places one row on the progress line (イナズマ線).
  *
- * The point sits at the progress position inside the planned bar. A row is on schedule, and so
- * sits on today's line, when it has no bar or progress rate, when it finished before today, or
- * when it has not started and is not due to start yet. A point left of today means the row is
- * behind, and a point right of today means it is ahead.
+ * The point sits at the progress position inside the planned range, measured on the whole
+ * range even when the timeline clips it. A row is on schedule, and so sits on today's line,
+ * when it has no planned dates or progress rate, when it finished before today, or when it has
+ * not started and is not due to start yet. A point left of today means the row is behind, and
+ * a point right of today means it is ahead.
  *
- * @param input - Planned bar, planned dates, progress rate, and today.
- * @returns Horizontal position of the point.
+ * @param input - Timeline, planned dates, progress rate, and today.
+ * @returns Horizontal position of the point, kept inside the timeline.
  */
 export function resolveTaskGanttProgressPointX(input: TaskGanttProgressPointInput): number {
-  const { barLeft, barWidth, endDate, progressPercent, startDate, today, todayX } = input
-  if (barLeft === undefined || barWidth === undefined || progressPercent === undefined) return todayX
+  const { axis, endDate, progressPercent, startDate, today, todayX } = input
+  if (startDate === undefined || endDate === undefined || progressPercent === undefined || endDate < startDate) {
+    return todayX
+  }
   const progress = Math.min(Math.max(progressPercent, 0), 100)
-  if (progress >= 100 && endDate !== undefined && endDate < today) return todayX
-  if (progress <= 0 && startDate !== undefined && today < startDate) return todayX
-  return barLeft + (barWidth * progress) / 100
+  if (progress >= 100 && endDate < today) return todayX
+  if (progress <= 0 && today < startDate) return todayX
+  const progressDays = ((differenceTaskGanttDays(startDate, endDate) + 1) * progress) / 100
+  const wholeDays = Math.floor(progressDays)
+  const progressDate = addTaskGanttDays(startDate, wholeDays)
+  const span = resolveTaskGanttDateSpan(axis, progressDate)
+  if (span) return span.left + (span.right - span.left) * (progressDays - wholeDays)
+  const firstDate = axis.columns[0]?.startDate
+  return firstDate !== undefined && progressDate < firstDate ? 0 : axis.columns.length * axis.columnWidth
 }
 
 /**
