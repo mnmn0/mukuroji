@@ -15,11 +15,17 @@ Rejected entries return to `rejected` and can be edited and submitted again. Eve
 - `POST /api/teams/:teamId/timesheet/{submit,approve,reject,lock}` applies a lifecycle operation to all eligible entries in a period. The operation is resumable: every eligible entry is attempted, and `failedEntryIds` plus `partialFailure` identify entries that need a later retry.
 - `POST /api/teams/:teamId/timers` starts the caller's timer; `GET /api/time-tracking/timers/active` supports offline recovery; `POST /api/time-tracking/timers/:timerId/stop` creates a draft from the timer; `DELETE /api/time-tracking/timers/:timerId` discards an overlong or unwanted timer.
 - `GET /api/teams/:teamId/timesheet` returns daily and Monday-based weekly rows using the requested IANA timezone.
-- `GET /api/teams/:teamId/time-tracking/summary` groups actual minutes by day, week, user, Project, or Work Item.
+- `GET /api/teams/:teamId/time-tracking/summary` groups actual minutes by day, week, user, Project, Work Item, or work category (`groupBy=category`).
 - `GET /api/teams/:teamId/time-tracking/export` exports the same ACL-filtered summary as CSV.
 - `PUT /api/teams/:teamId/time-budget` and `PUT /api/teams/:teamId/projects/:projectId/time-budget` store optimistic-concurrency-protected budgets.
 
 All period endpoints require `from`, `to`, and accept `timeZone` plus `groupBy`. Date-only ranges are interpreted as local dates and converted to UTC before querying. Intervals crossing midnight are split at timezone-aware local boundaries, including daylight-saving transitions.
+
+## Work categories and date-and-minutes entries
+
+An entry may carry a `category`: `design`, `implementation`, `review`, `meeting`, `management`, `training`, or `leave`. Create and `PATCH` accept it, and `PATCH` with `category: null` removes it. Entries without one, including every entry saved before categories existed, are reported in the `uncategorized` group (label `Uncategorized`) of a `groupBy=category` summary or CSV export. The list is fixed for now; Workspace-defined categories are still open in #397.
+
+Instead of `startAt` and `endAt`, a create request may send `date` (`YYYY-MM-DD`), `minutes` (a whole number from 1 to 1440), and optionally `timeZone` (IANA, default `UTC`). The server stores the entry from local midnight of that date for that many minutes and marks it `durationOnly: true`, so clients know its times of day carry no meaning. The minutes must end within the local date, so a 23-hour daylight-saving day accepts at most 1380. Sending both forms is rejected. Editing `startAt` or `endAt` later turns the entry back into a timed entry. Timers still record times of day.
 
 Mutation endpoints accept an optional `Idempotency-Key`; when supplied, the shared durable receipt store binds it to the actor, operation, and request fingerprint, then replays the stored result for an equivalent retry. An in-progress duplicate receives a stable conflict response.
 
