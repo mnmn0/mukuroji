@@ -464,7 +464,8 @@ function readOptionalTemplateString(value: unknown, label: string) {
 }
 
 /**
- * Reads a real calendar date in `YYYY-MM-DD` form.
+ * Reads a real calendar date in `YYYY-MM-DD` form between 1970 and 2999, which leaves room for
+ * the longest template WBS to stay within the supported schedule range.
  *
  * @param value - Untrusted date value.
  * @param label - Field name used in the error message.
@@ -475,8 +476,13 @@ function requireCalendarDate(value: unknown, label: string) {
     throw invalidInput(`${label} must be a YYYY-MM-DD date.`)
   }
   const date = new Date(`${value}T00:00:00.000Z`)
-  if (Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value || value < '1970-01-01') {
-    throw invalidInput(`${label} must be a real calendar date.`)
+  if (
+    Number.isNaN(date.getTime()) ||
+    date.toISOString().slice(0, 10) !== value ||
+    value < '1970-01-01' ||
+    value > '2999-12-31'
+  ) {
+    throw invalidInput(`${label} must be a real calendar date between 1970 and 2999.`)
   }
   return value
 }

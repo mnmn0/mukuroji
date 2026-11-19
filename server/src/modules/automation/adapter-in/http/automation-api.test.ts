@@ -39,6 +39,7 @@ import type {
 } from '../../../collaboration/collaboration'
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
+  WorkItemConfigurationError,
 } from '../../../work-items/work-item-configuration'
 import {
   createWorkItemAuthorizationChangedError,
@@ -2585,7 +2586,7 @@ test('recovers a Project template application from atomic receipt success withou
   expect({ createCalls, templateVersionReads }).toEqual({ createCalls: 1, templateVersionReads: 1 })
 })
 
-test('applies a Project template WBS as Work Items with parent links and completes the receipt last', async () => {
+test('applies a Project template WBS as Work Items with parent links, resumes after a link conflict, and completes the receipt last', async () => {
   const now = '2026-07-16T00:00:00.000Z'
   const template: AutomationTemplate = {
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -2631,6 +2632,7 @@ test('applies a Project template WBS as Work Items with parent links and complet
   const createdIssues = new Map<string, ReturnType<typeof createBulkRecoveryIssue>>()
   const createdInputs: Array<Record<string, unknown>> = []
   const relationInputs: Array<Record<string, unknown>> = []
+  let relationAttempts = 0
   configureFakeProjectClients(true, {
     teamProjects: [{ id: application.id, name: '標準プロジェクト', tone: 'green' }],
     async projectCreateHook(input, completionTransactItems) {
@@ -2641,9 +2643,10 @@ test('applies a Project template WBS as Work Items with parent links and complet
   setTestAppDependencies({
     teamIssues: createTeamIssuesFake({
       async createTeamIssue(_directoryId, teamId, input) {
-        expect(createdIssues.size).toBe(createdInputs.length)
         createdInputs.push({ ...input })
         const id = String(input.idempotencyResourceId)
+        const existing = createdIssues.get(id)
+        if (existing) return { issue: existing }
         const issue = {
           ...createBulkRecoveryIssue(),
           id,
@@ -2662,6 +2665,10 @@ test('applies a Project template WBS as Work Items with parent links and complet
     }),
     workItemConfigurations: createFakeWorkItemConfigurationClient({
       async createRelation(_workspaceId, _teamId, input) {
+        relationAttempts += 1
+        if (relationAttempts === 1) {
+          throw new WorkItemConfigurationError(409, 'WorkItemRelationGraphConflict', 'Work Item relations changed.')
+        }
         relationInputs.push({ ...input })
         return {
           relation: { ...input, createdAt: now },
@@ -2680,6 +2687,7 @@ test('applies a Project template WBS as Work Items with parent links and complet
         return structuredClone(application)
       },
       async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        if (candidate.status !== 'pending' || candidate.revision !== application.revision) return undefined
         application = {
           ...candidate,
           status: 'running',
@@ -2699,14 +2707,16 @@ test('applies a Project template WBS as Work Items with parent links and complet
       },
       async saveTemplateApplication(candidate, expectedRevision) {
         expect(expectedRevision).toBe(application.revision)
-        expect(createdIssues.size).toBe(3)
-        expect(relationInputs).toHaveLength(1)
+        if (candidate.status === 'succeeded') {
+          expect(createdIssues.size).toBe(3)
+          expect(relationInputs).toHaveLength(1)
+        }
         application = structuredClone(candidate)
       },
     }),
   })
 
-  const response = await app.request(
+  const request = () => app.request(
     `/api/automation/templates/${template.id}/applications`,
     {
       method: 'POST',
@@ -2719,15 +2729,23 @@ test('applies a Project template WBS as Work Items with parent links and complet
     },
   )
 
+  const conflicted = await request()
+  expect(conflicted.status).toBe(409)
+  expect(await conflicted.json()).toMatchObject({ code: 'AutomationTemplateWorkItemLinkConflict' })
+  expect(application.status).toBe('pending')
+  expect(createdIssues.size).toBe(3)
+
+  const response = await request()
   expect(response.status).toBe(200)
   expect(await response.json()).toMatchObject({
     status: 'succeeded',
     result: { kind: 'project', projectId: application.id, workItemCount: 3 },
   })
-  expect(projectInputs).toHaveLength(1)
+  expect(projectInputs).toHaveLength(2)
   expect(projectInputs[0]).not.toHaveProperty('workItems')
-  expect(completionMutationCounts).toEqual([0])
-  expect(createdInputs.map((input) => ({
+  expect(completionMutationCounts).toEqual([0, 0])
+  expect(createdIssues.size).toBe(3)
+  expect(createdInputs.slice(0, 3).map((input) => ({
     id: input.idempotencyResourceId,
     title: input.title,
     assignedProjectId: input.assignedProjectId,

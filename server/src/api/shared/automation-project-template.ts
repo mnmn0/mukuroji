@@ -13,6 +13,7 @@ import {
 import {
   assertWorkItemChildTypeAllowed,
   createWorkItemConfigurationGuardConditionChecks,
+  WorkItemConfigurationError,
 } from '../../modules/work-items/work-item-configuration'
 import { AutomationError } from '../../modules/automation'
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
@@ -144,9 +145,9 @@ export async function preflightProjectTemplateWorkItems(
 /**
  * Creates a template's Work Items in the new Project and links each child to its parent.
  *
- * Each Work Item uses an ID derived from the application and its expansion index, and existing
- * parent links are kept, so a retried application finishes the remaining work instead of creating
- * duplicates.
+ * Each Work Item uses an ID derived from the application and its expansion index, and a child
+ * that already has a parent is not linked again, so a retried application finishes the remaining
+ * work instead of creating duplicates.
  *
  * @param c - Hono request context used for audit metadata.
  * @param principal - Workspace administrator applying the template.
@@ -205,27 +206,71 @@ export async function createProjectTemplateWorkItems(
   }
 
   const graph = await workItemDependencies.workItemConfigurations.listRelationGraph(directoryId, teamId)
-  let graphRevision = graph.graphRevision
   const linkedChildIds = new Set(graph.relations
     .filter((relation: WorkItemRelation) => relation.type === 'parent')
     .map((relation) => relation.sourceWorkItemId))
+  let graphRevision = graph.graphRevision
   for (const workItem of workItems) {
     if (workItem.parentIndex === undefined) continue
     const childId = createdIds[workItem.index]
     const parentId = createdIds[workItem.parentIndex]
     if (!childId || !parentId || linkedChildIds.has(childId)) continue
-    const [child, parent] = await Promise.all([childId, parentId].map((workItemId) =>
-      workItemDependencies.teamIssues.getTeamIssueDetail(directoryId, teamId, workItemId, {
-        consistentIssueRead: true,
-        includeEvents: false,
-      })
-    ))
-    if (!child || !parent) continue
-    assertWorkItemChildTypeAllowed(
-      configuration.configuration,
-      parent.issue.workItemTypeId,
-      child.issue.workItemTypeId,
+    graphRevision = await linkTemplateWorkItemToParent(
+      directoryId,
+      teamId,
+      childId,
+      parentId,
+      graphRevision,
+      configuration,
     )
+    linkedChildIds.add(childId)
+  }
+  return createdIds
+}
+
+/**
+ * Links a template child Work Item to its parent.
+ *
+ * The Team's relation graph revision moves with every relation change in the Team. A concurrent
+ * change is not retried here; it is reported as retryable so the application returns to pending
+ * and the client's retry with the same Idempotency-Key resumes from the remaining links.
+ *
+ * @param directoryId - Workspace directory identifier.
+ * @param teamId - Team that owns both Work Items.
+ * @param childId - Child Work Item ID.
+ * @param parentId - Parent Work Item ID.
+ * @param graphRevision - Team relation graph revision observed by this application.
+ * @param configuration - Team configuration that the child type is checked against.
+ * @returns The graph revision after the link.
+ */
+async function linkTemplateWorkItemToParent(
+  directoryId: string,
+  teamId: string,
+  childId: string,
+  parentId: string,
+  graphRevision: number,
+  configuration: Awaited<ReturnType<typeof workItemDependencies.workItemConfigurations.getTeamConfiguration>>,
+): Promise<number> {
+  const [child, parent] = await Promise.all([childId, parentId].map((workItemId) =>
+    workItemDependencies.teamIssues.getTeamIssueDetail(directoryId, teamId, workItemId, {
+      consistentIssueRead: true,
+      includeEvents: false,
+    })
+  ))
+  if (!child || !parent) {
+    throw new AutomationError(
+      'unavailable',
+      'AutomationTemplateWorkItemUnavailable',
+      'A Work Item created from the template could not be read. Retry with the same Idempotency-Key.',
+      true,
+    )
+  }
+  assertWorkItemChildTypeAllowed(
+    configuration.configuration,
+    parent.issue.workItemTypeId,
+    child.issue.workItemTypeId,
+  )
+  try {
     const response = await workItemDependencies.workItemConfigurations.createRelation(
       directoryId,
       teamId,
@@ -246,10 +291,18 @@ export async function createProjectTemplateWorkItems(
         configuration,
       ),
     )
-    graphRevision = response.graphRevision
-    linkedChildIds.add(childId)
+    return response.graphRevision
+  } catch (error) {
+    if (error instanceof WorkItemConfigurationError && error.code === 'WorkItemRelationGraphConflict') {
+      throw new AutomationError(
+        'conflict',
+        'AutomationTemplateWorkItemLinkConflict',
+        'Work Item relations in the Team changed while the template was applied. Retry with the same Idempotency-Key.',
+        true,
+      )
+    }
+    throw error
   }
-  return createdIds
 }
 
 /**

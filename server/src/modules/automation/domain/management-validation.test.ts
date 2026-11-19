@@ -191,7 +191,7 @@ describe('Automation management validation domain', () => {
       nested = { title: `Level ${level}`, startOffsetWorkingDays: 0, durationWorkingDays: 1, children: [nested] }
     }
     expect(() => project([nested])).toThrow('levels deep')
-    for (const startDate of ['2026-02-30', '2026/12/01', 20261201]) {
+    for (const startDate of ['2026-02-30', '2026/12/01', 20261201, '1969-12-31', '3000-01-01']) {
       expect(() => validateApplyAutomationTemplateInput({
         target: { kind: 'project', teamId: 'core-team', startDate },
       })).toThrow('start date')

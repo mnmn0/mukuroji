@@ -105,7 +105,7 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 4. 子を親へ `parent` relation でつなぐ。既に親を持つ子はつなぎ直さない。
 5. 最後に application receipt を成功（`result.workItemCount` 付き）で保存する。
 
-途中の一時的な失敗は receipt を pending に戻し、同じ `Idempotency-Key` の再送が Project の replay、固定 ID の Work Item の replay、既存 relation の skip で残りだけを進める。確定的な 4xx で失敗した場合は、それまでに作った Project と Work Item が残る（全体を 1 transaction にはしていない）。
+途中の一時的な失敗と、子をつなぐ間に Team の relation graph が別の変更で進んだ場合（`AutomationTemplateWorkItemLinkConflict`、409。server 内では自動 retry しない）は receipt を pending に戻し、同じ `Idempotency-Key` の再送が Project の replay、固定 ID の Work Item の replay、既存 relation の skip で残りだけを進める。確定的な 4xx で失敗した場合は、それまでに作った Project と Work Item が残る（全体を 1 transaction にはしていない）。
 
 ## Recurring work
 
