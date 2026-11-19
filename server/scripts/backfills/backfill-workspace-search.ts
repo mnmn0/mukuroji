@@ -141,6 +141,11 @@ export type SearchProjectionOperation =
        * Dry-run log に表示する canonical entity ID です。
        */
       entityId: string
+      /**
+       * Revision the archived source row was scanned at, for sources whose restores advance it.
+       * The delete then never removes a document projected from a newer revision.
+       */
+      sourceRevision?: number
     }
 
 /**
@@ -500,7 +505,7 @@ export async function runBackfill(
 
         if (!await applyProjectionOperation(client, workspaceSearchTableName, operation)) {
           // A live projection of a newer revision won; the scanned row is already stale.
-          counters[definition.name].projected -= 1
+          counters[definition.name][operation.action === 'put' ? 'projected' : 'deleted'] -= 1
           counters[definition.name].skipped += 1
         }
       }
@@ -576,19 +581,28 @@ async function applyProjectionOperation(
     return true
   }
 
-  await client.send(
-    new TransactWriteCommand({
-      TransactItems: [{
-        Delete: {
-          TableName: tableName,
-          Key: {
-            workspaceId: operation.workspaceId,
-            recordKey: operation.recordKey,
+  const deleteRevision = operation.sourceRevision !== undefined && operation.sourceRevision > 0
+    ? operation.sourceRevision
+    : undefined
+  try {
+    await client.send(
+      new TransactWriteCommand({
+        TransactItems: [{
+          Delete: {
+            TableName: tableName,
+            Key: {
+              workspaceId: operation.workspaceId,
+              recordKey: operation.recordKey,
+            },
+            ...createSourceRevisionCondition(deleteRevision),
           },
-        },
-      }],
-    }),
-  )
+        }],
+      }),
+    )
+  } catch (error) {
+    if (deleteRevision !== undefined && isConditionalCheckFailure(error)) return false
+    throw error
+  }
   return true
 }
 
@@ -763,9 +777,13 @@ function mapTeamDirectoryItem(
   }
 
   const entityId = createTeamEntityId(teamId)
+  // Live projections are fenced by the rename count plus the archive and restore count.
+  const sourceRevision =
+    (readPositiveInteger(item.nameRevision) ?? 0) + (readPositiveInteger(item.lifecycleRevision) ?? 0)
 
   if (readOptionalString(item.archivedAt)) {
-    return createDeleteOperation(workspaceId, 'team', entityId)
+    // A restore after the scan projects a newer revision, which this delete leaves alone.
+    return createDeleteOperation(workspaceId, 'team', entityId, sourceRevision)
   }
 
   const { title, subtitle } = readLocalizedTitle(item)
@@ -774,9 +792,6 @@ function mapTeamDirectoryItem(
     return undefined
   }
 
-  // Live projections are fenced by the rename count plus the archive and restore count.
-  const sourceRevision =
-    (readPositiveInteger(item.nameRevision) ?? 0) + (readPositiveInteger(item.lifecycleRevision) ?? 0)
   const creatorUserId = readOptionalString(item.creatorUserId)
   return {
     action: 'put',
@@ -810,7 +825,15 @@ function mapProjectDirectoryItemRow(
   const entityId = createProjectEntityId(teamId, projectId)
 
   if (readOptionalString(item.archivedAt)) {
-    return createDeleteOperation(workspaceId, 'project', entityId)
+    // A restore after the scan projects a newer revision, which this delete leaves alone.
+    return createDeleteOperation(
+      workspaceId,
+      'project',
+      entityId,
+      (readPositiveInteger(item.charterRevision) ?? 0) +
+        (readPositiveInteger(item.nameRevision) ?? 0) +
+        (readPositiveInteger(item.lifecycleRevision) ?? 0),
+    )
   }
 
   const { title, subtitle } = readLocalizedTitle(item)
@@ -1039,10 +1062,20 @@ export function mapDocumentItem(
   }
 }
 
+/**
+ * Builds the operation that removes the search document of a deleted or archived source.
+ *
+ * @param workspaceId - Workspace partition of the document.
+ * @param entityType - Search entity type.
+ * @param entityId - Canonical entity ID.
+ * @param sourceRevision - Revision the source row was scanned at, when its restores advance it.
+ * @returns The delete operation.
+ */
 function createDeleteOperation(
   workspaceId: string,
   entityType: SearchEntityType,
   entityId: string,
+  sourceRevision?: number,
 ): SearchProjectionOperation {
   return {
     action: 'delete',
@@ -1050,6 +1083,7 @@ function createDeleteOperation(
     recordKey: createWorkspaceSearchDocumentRecordKey(entityType, entityId),
     entityType,
     entityId,
+    ...(sourceRevision === undefined ? {} : { sourceRevision }),
   }
 }
 

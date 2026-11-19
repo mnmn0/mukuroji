@@ -879,6 +879,53 @@ describe('Workspace search backfill runner', () => {
     expect(counters['project-directory']).toEqual({ scanned: 1, projected: 0, deleted: 0, skipped: 1 })
   })
 
+  test('fences an archived directory row delete by its revision and keeps a restored document', async () => {
+    const transactionInputs: TransactWriteCommandInput[] = []
+    const documentClient = {
+      async send(command: unknown) {
+        if (command instanceof ScanCommand) {
+          return {
+            Items: [{
+              directoryId: 'workspace#mukuroji',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core team',
+              archivedAt: '2026-07-18T02:00:00.000Z',
+              nameRevision: 1,
+              lifecycleRevision: 1,
+            }],
+            ScannedCount: 1,
+          }
+        }
+        if (command instanceof TransactWriteCommand) {
+          transactionInputs.push(command.input)
+          // A restore after the scan projected a newer revision.
+          throw Object.assign(new Error('Transaction cancelled'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+          })
+        }
+        throw new Error('Unexpected DynamoDB command.')
+      },
+    } as unknown as DynamoDBDocumentClient
+
+    const counters = await runBackfill(
+      documentClient,
+      [{ name: 'project-directory', tableName: 'SourceTable', mapItem: mapProjectDirectoryItem }],
+      'WorkspaceSearchTable',
+      { dryRun: false, help: false },
+    )
+
+    expect(transactionInputs[0]?.TransactItems?.[0]?.Delete).toMatchObject({
+      ConditionExpression: 'attribute_not_exists(#sourceRevision) OR #sourceRevision <= :sourceRevision',
+      ExpressionAttributeValues: { ':sourceRevision': 2 },
+    })
+    expect(counters['project-directory']).toEqual({ scanned: 1, projected: 0, deleted: 0, skipped: 1 })
+  })
+
   test('write run applies both put and delete projection operations', async () => {
     const transactionInputs: TransactWriteCommandInput[] = []
     const documentClient = {

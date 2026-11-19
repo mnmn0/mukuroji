@@ -44,6 +44,7 @@ key を変えると、key を前提にした transaction の条件、data integr
   read で読み直して合わせる。有効な row は投影したあとにもう一度読み、アーカイブされていたら削除する。
   削除はその時点の `sourceRevision` 以下の document だけを消すので、遅れて届いた古い投影がアーカイブ後に
   document を作り直すことも、遅れた削除が後の復元で作り直した document を消すこともない。
+  検索の backfill も同じ revision で put と削除を fence する。
 - 変更はすべて `project.renamed` / `project.restored` / `project.reordered` として audit に記録する。
 
 ## 検討した選択肢

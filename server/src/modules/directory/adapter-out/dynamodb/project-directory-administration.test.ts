@@ -593,6 +593,22 @@ test('adds Project renames, archives, and restores to the charter revision of th
   })
 })
 
+test('keeps the search source of an archived Project under an archived Team', async () => {
+  const archivedAt = '2026-06-06T00:00:00.000Z'
+  const { client } = createClient([
+    createTeamRow('alpha', 10, { archivedAt, lifecycleRevision: 1 }),
+    createProjectRow('alpha', 10, 'gone', 10, { archivedAt, lifecycleRevision: 1 }),
+    createProjectRow('alpha', 10, 'kept', 20),
+  ])
+
+  // The archived Project's document must still be removed after its Team was archived too.
+  await expect(client.getProjectSearchSource(directoryId, 'alpha', 'gone')).resolves.toMatchObject({
+    archived: true,
+    sourceRevision: 1,
+  })
+  await expect(client.getProjectSearchSource(directoryId, 'alpha', 'kept')).resolves.toBeUndefined()
+})
+
 test('reads the search source of a Team with its revision, archive state, and creator', async () => {
   const { client } = createClient([
     createTeamRow('alpha', 10, {

@@ -1045,7 +1045,8 @@ export type ProjectDirectoryClient = {
    * @param directoryId - Owning Workspace directory identifier.
    * @param teamId - Team that owns the Project.
    * @param projectId - Project identifier.
-   * @returns The source, or undefined when the Project is missing or its Team is archived.
+   * @returns The source, or undefined when the Project is missing or is active under an archived
+   *   Team.
    */
   getProjectSearchSource(
     directoryId: string,
@@ -3259,7 +3260,8 @@ export class DynamoDbProjectDirectoryClient {
    * @param directoryId - Owning Workspace directory identifier.
    * @param teamId - Team that owns the Project.
    * @param projectId - Project identifier.
-   * @returns The source, or undefined when the Project is missing or its Team is archived.
+   * @returns The source, or undefined when the Project is missing or is active under an archived
+   *   Team.
    */
   async getProjectSearchSource(
     directoryId: string,
@@ -3272,7 +3274,11 @@ export class DynamoDbProjectDirectoryClient {
       item.entryType === 'project' && item.teamId === teamId && item.projectId === projectId
     )
 
-    if (!team || !isActiveDirectoryItem(team) || !project) return undefined
+    // An archived Project keeps its source under an archived Team, so its document is still
+    // removed; an active Project under an archived Team is left to the Team's archive.
+    if (!team || !project || (isActiveDirectoryItem(project) && !isActiveDirectoryItem(team))) {
+      return undefined
+    }
 
     const state = toProjectCharterState(project)
     return {
