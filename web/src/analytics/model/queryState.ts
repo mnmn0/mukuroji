@@ -4,6 +4,7 @@ import type {
   AnalyticsFilter,
   AnalyticsQueryInput,
   AnalyticsWidget,
+  AnalyticsWorkItemReference,
 } from '@mukuroji/contracts'
 import {
   analyticsCalendarDateBoundaryToInstant,
@@ -75,6 +76,7 @@ export function parseAnalyticsRouteState(
     statusCategories: readOptionalRepeated(searchParams, 'status'),
     workItemTypeIds: readOptionalRepeated(searchParams, 'workItemType'),
     customFields: readCustomFields(searchParams),
+    workItems: readWorkItems(searchParams),
     includeArchived: searchParams.has('archived')
       ? searchParams.get('archived') === '1'
       : false,
@@ -155,6 +157,7 @@ export function serializeAnalyticsRouteState(state: AnalyticsRouteState) {
   for (const customField of readUnknownArray(filter.customFields)) {
     searchParams.append('customField', stableStringify(customField))
   }
+  appendWorkItems(searchParams, filter.workItems)
 
   if (filter.includeArchived === true) {
     searchParams.set('archived', '1')
@@ -248,6 +251,52 @@ function readCustomFields(searchParams: URLSearchParams) {
     }
   })
   return values.length > 0 ? values : undefined
+}
+
+/**
+ * Reads the Work Item allowlist. A lone empty `workItem` value keeps an explicitly empty list.
+ *
+ * @param searchParams - URL query parameters to inspect.
+ * @returns Work Item references when the key is present, otherwise undefined.
+ */
+function readWorkItems(searchParams: URLSearchParams): AnalyticsWorkItemReference[] | undefined {
+  if (!searchParams.has('workItem')) return undefined
+  const seen = new Set<string>()
+  return searchParams.getAll('workItem').flatMap((value) => {
+    if (value === '' || seen.has(value)) return []
+    try {
+      const parsed: unknown = JSON.parse(value)
+      if (!isRecord(parsed)) return []
+      const { teamId, workItemId } = parsed
+      if (typeof teamId !== 'string' || !teamId || typeof workItemId !== 'string' || !workItemId) return []
+      seen.add(value)
+      return [{ teamId, workItemId }]
+    } catch {
+      return []
+    }
+  })
+}
+
+/**
+ * Appends the Work Item allowlist in a stable order, writing one empty value for an empty list.
+ *
+ * @param searchParams - URL query parameters to write.
+ * @param value - `filter.workItems` value.
+ */
+function appendWorkItems(searchParams: URLSearchParams, value: unknown) {
+  if (!Array.isArray(value)) return
+  const encoded = [...new Set(value.flatMap((item) => {
+    if (!isRecord(item)) return []
+    const { teamId, workItemId } = item
+    return typeof teamId === 'string' && teamId && typeof workItemId === 'string' && workItemId
+      ? [stableStringify({ teamId, workItemId })]
+      : []
+  }))].sort()
+  if (encoded.length === 0) {
+    searchParams.append('workItem', '')
+    return
+  }
+  for (const item of encoded) searchParams.append('workItem', item)
 }
 
 function appendValues(searchParams: URLSearchParams, key: string, values: string[]) {

@@ -18,7 +18,7 @@ import type {
   PlanningWorkItemSummary,
   WorkItemAffectedProject,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
@@ -367,6 +367,8 @@ export type PlanningScreenProps = {
     sourceCycle: PlanningEntity,
     targetCycleId: string,
   ) => void | Promise<void>
+  /** Timeline で Cycle を選んだときに表示する burndown を描きます。省略すると表示しません。 */
+  renderCycleBurndown?: (cycle: PlanningEntity) => ReactNode
   /** Entity archive callback です。 */
   onArchiveEntity?: (entity: PlanningEntity) => void | Promise<void>
   /** Archive 済みの計画の一覧と復元です。省略すると一覧を表示しません。 */
@@ -472,6 +474,7 @@ export function PlanningScreen({
   onRolloverCycle,
   onViewChange,
   onUpdateWorkItemDependency,
+  renderCycleBurndown,
   snapshot,
   updateCollaboration,
   updateHistoryErrorMessage,
@@ -704,6 +707,7 @@ export function PlanningScreen({
                   onRolloverCycle={onRolloverCycle}
                   onSelectEntity={handleSelectEntity}
                   onUpdateWorkItemDependency={onUpdateWorkItemDependency}
+                  renderCycleBurndown={renderCycleBurndown}
                 />
               ) : null}
               {activeEntities.length > 0 && activeView === 'roadmap' ? (
@@ -800,6 +804,7 @@ function TimelineView({
   onRolloverCycle,
   onUpdateWorkItemDependency,
   onSelectEntity,
+  renderCycleBurndown,
   selectedEntity,
   snapshot,
   updateTargetDetails,
@@ -825,6 +830,7 @@ function TimelineView({
   onRolloverCycle?: PlanningScreenProps['onRolloverCycle']
   onUpdateWorkItemDependency?: PlanningScreenProps['onUpdateWorkItemDependency']
   onSelectEntity: (entityId: string) => void
+  renderCycleBurndown?: PlanningScreenProps['renderCycleBurndown']
   selectedEntity?: PlanningEntity
   snapshot: PlanningSnapshot
   updateTargetDetails: readonly PlanningUpdateTargetDetailView[]
@@ -938,6 +944,10 @@ function TimelineView({
           {labels.criticalPathDays(snapshot.criticalPath.totalDurationDays)}
         </p>
       </section>
+
+      {detailEntity?.type === 'cycle' && renderCycleBurndown
+        ? renderCycleBurndown(detailEntity)
+        : null}
 
       <div className="grid grid-cols-3 gap-5 max-[1100px]:grid-cols-1">
         <MilestoneEditor
