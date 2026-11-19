@@ -196,7 +196,7 @@ Client は `Retry-After` を優先し、値が無い retryable error では full
 
 Token endpoint（`POST /v1/oauth/token`）は 2 種類の 1 分 window で制限する。
 
-- IP 単位（60 回）: client secret の確認前に、すべての request を数える。IP は CloudFront 経由なら origin secret で検証した viewer address（`x-mukuroji-viewer-address`）、HTTP API を直接呼んだ場合は Lambda event の `requestContext.http.sourceIp` を使う。Internet client が指定できる `Forwarded`、`X-Forwarded-For`、`X-Real-IP` は rate-limit identity に使わない。
+- IP 単位（60 回）: client secret の確認前に、すべての request を数える。IP は CloudFront 経由なら origin secret で検証した viewer address（`x-mukuroji-viewer-address`）、HTTP API を直接呼んだ場合は Lambda event の `requestContext.http.sourceIp` を使う。信頼できる address がない request（Bun server など）は 1 つの bucket を共有する。Internet client が指定できる `Forwarded`、`X-Forwarded-For`、`X-Real-IP` は rate-limit identity に使わない。
 - Client 単位（30 回）: client secret と OAuth app の状態を確認できた request だけを数える。公開値の `client_id` を知っているだけの第三者が、誤った secret でその client の token 取得を止めることはできない。誤った secret の試行は IP 単位の制限で抑える。
 
 ## Signed webhook

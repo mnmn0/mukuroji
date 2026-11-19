@@ -2613,33 +2613,61 @@ describe('public API router', () => {
         scopes: ['work-items:read'],
       },
     })
-    const request = (clientSecret: string) => router.request('http://localhost/v1/oauth/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'client_credentials',
-        client_id: oauthApp.oauthApp.clientId,
-        client_secret: clientSecret,
-      }).toString(),
-    })
+    const request = (clientSecret: string, sourceIp: string) => router.request(
+      'http://localhost/v1/oauth/token',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: oauthApp.oauthApp.clientId,
+          client_secret: clientSecret,
+        }).toString(),
+      },
+      { requestContext: { http: { sourceIp } } },
+    )
 
     // Someone who only knows the public client_id cannot lock the client out.
     for (let attempt = 0; attempt < 40; attempt += 1) {
-      const response = await request('invalid-secret')
+      const response = await request('invalid-secret', '198.51.100.1')
       expect(response.status).toBe(401)
       expect(response.headers.get('Cache-Control')).toBe('no-store')
       expect(response.headers.get('Pragma')).toBe('no-cache')
     }
     for (let attempt = 0; attempt < 30; attempt += 1) {
-      const response = await request(oauthApp.clientSecret)
+      const response = await request(oauthApp.clientSecret, '198.51.100.2')
       expect(response.status).toBe(200)
       expect(response.headers.get('Cache-Control')).toBe('no-store')
     }
-    const limited = await request(oauthApp.clientSecret)
+    const limited = await request(oauthApp.clientSecret, '198.51.100.3')
     expect(limited.status).toBe(429)
     expect(limited.headers.get('RateLimit-Limit')).toBe('30')
     expect(limited.headers.get('Retry-After')).toBe('60')
     expect(limited.headers.get('Cache-Control')).toBe('no-store')
+  })
+
+  test('still limits wrong OAuth secrets when no trusted client address is available', async () => {
+    const { router } = createTestRouter()
+    // No Lambda request context, as under the Bun server.
+    const request = (attempt: number) => router.request('http://localhost/v1/oauth/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Forwarded-For': `198.51.100.${attempt + 1}`,
+      },
+      body: new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: 'unknown-client',
+        client_secret: 'invalid-secret',
+      }).toString(),
+    })
+
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      expect((await request(attempt)).status).toBe(401)
+    }
+    const limited = await request(60)
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('RateLimit-Limit')).toBe('60')
   })
 
   test('limits OAuth token requests by the CloudFront viewer address, not the edge address', async () => {

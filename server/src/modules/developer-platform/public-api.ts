@@ -100,7 +100,7 @@ import {
 } from './domain/personal-credential-policy'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
 import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-projection'
-import { resolveTrustedClientAddress } from '../../infrastructure/http/trusted-request-source'
+import { resolveTrustedRequestSource } from '../../infrastructure/http/trusted-request-source'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
 
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
@@ -940,15 +940,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.post('/v1/oauth/token', async (c) => {
     setSecretResponseHeaders(c)
-    const clientIp = resolveTrustedClientAddress(c)
-    if (clientIp) {
-      await enforceOAuthTokenRateLimit(
-        c,
-        dependencies,
-        `ip:${digestRateLimitSubject(clientIp)}`,
-        OAUTH_TOKEN_IP_RATE_LIMIT,
-      )
-    }
+    // Without a trusted address (for example under the Bun server, which has no Lambda request
+    // context) every such request shares one bucket, so wrong secrets stay bounded there too.
+    await enforceOAuthTokenRateLimit(
+      c,
+      dependencies,
+      `ip:${digestRateLimitSubject(resolveTrustedRequestSource(c))}`,
+      OAUTH_TOKEN_IP_RATE_LIMIT,
+    )
     const input = await readOAuthTokenInput(c)
     if (input.grantType !== 'client_credentials') {
       throw new PublicApiServiceError(400, 'invalid_request', 'grant_type must be client_credentials.')
