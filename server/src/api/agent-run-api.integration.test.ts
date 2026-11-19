@@ -58,6 +58,16 @@ const credential: AuthenticatedDeveloperCredential = {
 }
 
 /**
+ * Checks that a value is a plain record, so a transaction item can be read without assertions.
+ *
+ * @param value - Value to check.
+ * @returns True for a non-array object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
  * Creates an active run held by another instance of the same member.
  *
  * @param workItemId - Claimed Work Item.
@@ -1085,6 +1095,35 @@ describe('public Agent Run service', () => {
       throw createAgentRunCommitConflictError()
     }
     await expect(takeOver('control-changed')).rejects.toMatchObject({ code: 'WorkItemAuthorizationChanged' })
+    controlRevisionShift = 0
+    // A member deactivated during the request fails the membership guard even if its version stays the same,
+    // and the caller gets the same answer as a new request; the stalled run keeps its claim and no successor is saved.
+    const workspaceAccess = getTestAppDependencies().workspace.workspaceAccess
+    const member = await workspaceAccess.getActiveMember(workspaceId, 'demo@example.com')
+    let deactivated = false
+    setTestAppDependencies({
+      workspaceAccess: {
+        ...workspaceAccess,
+        /**
+         * Reads the caller's membership, which the test deactivates during the commit.
+         *
+         * @param id - Workspace ID.
+         * @param memberKey - Member key.
+         * @returns The active member, or undefined once deactivated.
+         */
+        async getActiveMember(id, memberKey) {
+          return deactivated ? undefined : await workspaceAccess.getActiveMember(id, memberKey)
+        },
+      },
+    })
+    store.commit = async () => {
+      deactivated = true
+      throw createAgentRunCommitConflictError()
+    }
+    await expect(takeOver('member-deactivated')).rejects.toMatchObject({ status: 403 })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)?.runId).toBe(stalled.runId)
+    expect([...store.state.runs.values()].map((run) => run.runId)).toEqual([stalled.runId])
+    deactivated = false
 
     const committed: unknown[][] = []
     store.commit = async (items, fenceItemCount) => {
@@ -1095,8 +1134,16 @@ describe('public Agent Run service', () => {
     // The commit fails if the caller's membership or Team and Project access changed since authorization.
     expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({
       Key: { workspaceId, recordKey: 'MEMBER#demo@example.com' },
-      ConditionExpression: expect.any(String),
+      // The guard requires the member to stay active at the version observed during authorization.
+      ConditionExpression: expect.stringContaining('#authorization'),
     }) })
+    const memberCheck = (committed[0] ?? []).find((item) => isRecord(item) && isRecord(item.ConditionCheck) &&
+      isRecord(item.ConditionCheck.Key) && item.ConditionCheck.Key.recordKey === 'MEMBER#demo@example.com')
+    const memberCondition = isRecord(memberCheck) && isRecord(memberCheck.ConditionCheck) ? memberCheck.ConditionCheck : {}
+    expect(Object.values(isRecord(memberCondition.ExpressionAttributeNames) ? memberCondition.ExpressionAttributeNames : {}))
+      .toEqual(expect.arrayContaining(['status', 'version']))
+    expect(Object.values(isRecord(memberCondition.ExpressionAttributeValues) ? memberCondition.ExpressionAttributeValues : {}))
+      .toEqual(expect.arrayContaining(['active', member?.version]))
     expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({
       Key: { workspaceId: `FENCE#${workspaceId}`, recordKey: 'META' },
     }) })

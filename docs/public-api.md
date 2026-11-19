@@ -151,10 +151,12 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   Agent settings で `allowTakeoverAfterLeaseExpiry` が `true` の場合だけ成功し、許可されていない
   場合は `403` と `agent_run_takeover_disabled`、lease が切れていない場合は `agent_run_conflict`
   を返します。start・resume と同じく、認可の後に呼び出し元の member や Team・Project の権限が
-  変わった場合は確定せず、`409 conflict` を返します。
+  変わった場合は確定しません。このとき server は認可をやり直し、権限を失った呼び出し元には新しい
+  request と同じ `403` を、権限を保ったまま member・Team・Project・Enterprise
+  の設定が変わった場合は `409 conflict` を返します。
 - Agent Run の request の `agentName` は文字（任意の言語）、数字、半角スペース、`.`、`_`、`-` だけで、
   前後にスペースを置けません（例: `Codex/CLI` は不可）。`instanceId` と `agentInstanceId` は前後の空白と
-  制御文字（U+0000〜U+001F、U+007F）を含められません（例: ` laptop` は不可）。違反は
+  制御文字（U+0000〜U+001F、U+007F）を含められません（例: 先頭に空白のある `" laptop"` は不可）。違反は
   `400 validation_failed` です。OpenAPI ではこの規則を `description` に書き、`pattern` は付けていません。
   既存 schema への `pattern` 追加は互換性検査で破壊的変更と判定されるうえ、`\p{L}` を解釈できない
   生成ツールでは有効な名前まで拒否されるためです。
