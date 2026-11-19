@@ -17,6 +17,9 @@ import {
   type ApiProblemViolation,
   type ApiScope,
   type CanonicalWorkItem,
+  type CompleteConnectorOAuthInput,
+  type CompleteConnectorOAuthOutput,
+  CONNECTOR_OAUTH_CALLBACK_APP_PATH,
   type ConnectorAuthorizationOutput,
   type ConnectorDefinition,
   type ConnectorInstallation,
@@ -641,23 +644,32 @@ export interface ConnectorAuthorizationService {
     input: CreateConnectorInstallationInput,
     operationId?: string,
   ): Promise<ConnectorAuthorizationOutput>
-  /** Signed single-use state と authorization code を検証して OAuth callback を完了します。 */
-  completeCallback(input: {
-    /** Provider が発行した authorization code です。 */
-    code: string
-    /** Authorization 開始時に作成した signed state です。 */
-    state: string
-  }): Promise<{
+  /**
+   * Signed single-use state と authorization code を検証し、flow を開始した user として
+   * OAuth callback を完了します。
+   */
+  completeCallback(
+    input: {
+      /** Provider が発行した authorization code です。 */
+      code: string
+      /** Authorization 開始時に作成した signed state です。 */
+      state: string
+    },
+    actor: DeveloperManagementPrincipal,
+  ): Promise<{
     /** 作成または復旧した secret-free installation です。 */
     installation: ConnectorInstallation
     /** 検証済み application-relative return URL です。 */
     returnUrl: string
   }>
-  /** Provider denial 時も signed state を consume し、検証済み return URL を返します。 */
-  abortCallback(input: {
-    /** Authorization 開始時に作成した signed state です。 */
-    state: string
-  }): Promise<{
+  /** Provider denial 時も flow 開始者の signed state を consume し、検証済み return URL を返します。 */
+  abortCallback(
+    input: {
+      /** Authorization 開始時に作成した signed state です。 */
+      state: string
+    },
+    actor: DeveloperManagementPrincipal,
+  ): Promise<{
     /** 検証済み application-relative return URL です。 */
     returnUrl: string
   }>
@@ -1973,13 +1985,59 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       throw unavailableManagementMutation('Connector OAuth callback')
     }
     const state = readOAuthCallbackValue(c.req.query('state'), 'OAuth state', 2_048)
+    const fragment = new URLSearchParams({ state })
     if (c.req.query('error') !== undefined) {
-      const result = await dependencies.connectorAuthorization.abortCallback({ state })
-      return c.redirect(appendConnectorCallbackOutcome(result.returnUrl, 'cancelled'), 303)
+      fragment.set('cancelled', 'true')
+    } else {
+      fragment.set(
+        'code',
+        readOAuthCallbackValue(c.req.query('code'), 'OAuth authorization code', 8_192),
+      )
     }
-    const code = readOAuthCallbackValue(c.req.query('code'), 'OAuth authorization code', 8_192)
-    const result = await dependencies.connectorAuthorization.completeCallback({ code, state })
-    return c.redirect(appendConnectorCallbackOutcome(result.returnUrl, 'connected'), 303)
+    // The provider redirect carries no Mukuroji credential, so completing here would let anyone
+    // holding the authorization URL install their provider account. Hand the values to the Web app
+    // in the fragment, which is not sent to servers or in Referer, and let the signed-in user who
+    // started the flow complete it.
+    return c.redirect(`${CONNECTOR_OAUTH_CALLBACK_APP_PATH}#${fragment.toString()}`, 303)
+  })
+
+  router.post('/developer/connector-oauth/complete', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    c.header('Pragma', 'no-cache')
+    const principal = await requireManagementCapability(c, dependencies, 'canManageIntegrations')
+    const input = readCompleteConnectorOAuthInput(await readJson(c))
+    if (!dependencies.connectorAuthorization) {
+      readIdempotencyKey(c.req.header('Idempotency-Key'))
+      throw unavailableManagementMutation('Connector OAuth completion')
+    }
+    return executeManagementIdempotentJson(
+      c,
+      dependencies,
+      principal,
+      input,
+      async () => {
+        if (input.code === undefined) {
+          const result = await dependencies.connectorAuthorization!.abortCallback(
+            { state: input.state },
+            principal,
+          )
+          const body: CompleteConnectorOAuthOutput = {
+            outcome: 'cancelled',
+            returnUrl: appendConnectorCallbackOutcome(result.returnUrl, 'cancelled'),
+          }
+          return { status: 200, body }
+        }
+        const result = await dependencies.connectorAuthorization!.completeCallback(
+          { code: input.code, state: input.state },
+          principal,
+        )
+        const body: CompleteConnectorOAuthOutput = {
+          outcome: 'connected',
+          returnUrl: appendConnectorCallbackOutcome(result.returnUrl, 'connected'),
+        }
+        return { status: 200, body }
+      },
+    )
   })
 
   router.get('/developer/connector-installations', async (c) => {
@@ -3740,6 +3798,51 @@ function readConnectorProvider(value: unknown): ConnectorProvider {
     throw new PublicApiServiceError(400, 'validation_failed', 'Connector provider is invalid.')
   }
   return provider as ConnectorProvider
+}
+
+/**
+ * Validates the Web app's request to complete a connector OAuth flow.
+ *
+ * @param value - Parsed JSON request body.
+ * @returns The signed state with exactly one of an authorization code or a cancellation marker.
+ */
+function readCompleteConnectorOAuthInput(value: unknown): CompleteConnectorOAuthInput {
+  const body = requireRecord(value, 'Connector OAuth completion input is required.')
+  assertAllowedFields(
+    body,
+    ['state', 'code', 'cancelled'],
+    'Connector OAuth completion input',
+  )
+  const state = readOAuthCompletionValue(body.state, 'OAuth state', 2_048)
+  if (body.cancelled !== undefined) {
+    if (body.cancelled !== true || body.code !== undefined) {
+      throw new PublicApiServiceError(
+        400,
+        'validation_failed',
+        'Specify either an OAuth authorization code or cancelled: true.',
+      )
+    }
+    return { state, cancelled: true }
+  }
+  return {
+    state,
+    code: readOAuthCompletionValue(body.code, 'OAuth authorization code', 8_192),
+  }
+}
+
+/**
+ * Reads one OAuth callback value forwarded by the Web app.
+ *
+ * @param value - Untrusted JSON value.
+ * @param label - Field label used in the validation error.
+ * @param maximumLength - Largest accepted length.
+ * @returns The validated value.
+ */
+function readOAuthCompletionValue(value: unknown, label: string, maximumLength: number) {
+  if (typeof value !== 'string') {
+    throw new PublicApiServiceError(400, 'validation_failed', `${label} is invalid.`)
+  }
+  return readOAuthCallbackValue(value, label, maximumLength)
 }
 
 function readConnectorAuthorizationInput(value: unknown): CreateConnectorInstallationInput {

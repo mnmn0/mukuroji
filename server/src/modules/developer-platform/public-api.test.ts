@@ -2620,6 +2620,59 @@ describe('public API router', () => {
     expect(limited.headers.get('RateLimit-Limit')).toBe('60')
   })
 
+  test('requires a signed-in integration manager to complete a connector OAuth flow', async () => {
+    let calls = 0
+    const connectorAuthorization: ConnectorAuthorizationService = {
+      async begin() { throw new Error('not used') },
+      async completeCallback() {
+        calls += 1
+        throw new Error('not reached')
+      },
+      async abortCallback() {
+        calls += 1
+        throw new Error('not reached')
+      },
+      async reauthorize() { throw new Error('not used') },
+      async disconnect() { throw new Error('not used') },
+      async listConflicts() { throw new Error('not used') },
+      async resolveConflict() { throw new Error('not used') },
+    }
+    const request = {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer session-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'complete-without-admin',
+      },
+      body: JSON.stringify({ state: 'signed-state', code: 'provider-code' }),
+    }
+    const member = createTestRouter({
+      connectorAuthorization,
+      managementPrincipal: {
+        ...managementPrincipal,
+        capabilities: { ...managementPrincipal.capabilities, canManageIntegrations: false },
+      },
+    })
+    const forbidden = await member.router.request(
+      'http://localhost/developer/connector-oauth/complete',
+      request,
+    )
+    expect(forbidden.status).toBe(403)
+
+    const anonymous = createTestRouter({
+      connectorAuthorization,
+      authenticateManagement: async () => {
+        throw new PublicApiServiceError(401, 'invalid_credentials', 'Sign in again.')
+      },
+    })
+    const unauthenticated = await anonymous.router.request(
+      'http://localhost/developer/connector-oauth/complete',
+      request,
+    )
+    expect(unauthenticated.status).toBe(401)
+    expect(calls).toBe(0)
+  })
+
   test('uses the configured connector authorization and conflict recovery seam', async () => {
     const conflict: WorkItemSyncConflict = {
       id: 'conflict-1',
@@ -2635,6 +2688,7 @@ describe('public API router', () => {
     let allowConflictWrite = false
     let conflictWriteChecks = 0
     let resolveCalls = 0
+    let completeCalls = 0
     const connectorAuthorization: ConnectorAuthorizationService = {
       async begin(_principal, _input, operationId) {
         beginOperationIds.push(operationId ?? '')
@@ -2644,8 +2698,10 @@ describe('public API router', () => {
           expiresAt: '2026-07-18T00:10:00.000Z',
         }
       },
-      async completeCallback(input) {
+      async completeCallback(input, actor) {
         expect(input).toEqual({ code: 'provider-code', state: 'signed-state' })
+        expect(actor).toMatchObject({ workspaceId: 'workspace-1', userId: 'user-1' })
+        completeCalls += 1
         return {
           installation: {
             id: 'connector-1',
@@ -2661,8 +2717,9 @@ describe('public API router', () => {
           returnUrl: '/settings/developer',
         }
       },
-      async abortCallback(input) {
+      async abortCallback(input, actor) {
         expect(input).toEqual({ state: 'cancelled-state' })
+        expect(actor).toMatchObject({ workspaceId: 'workspace-1', userId: 'user-1' })
         return { returnUrl: '/settings/developer?tab=connectors' }
       },
       async reauthorize() {
@@ -2752,8 +2809,10 @@ describe('public API router', () => {
     )
     expect(callback.status).toBe(303)
     expect(callback.headers.get('Location'))
-      .toBe('/settings/developer?connectorOAuth=connected')
+      .toBe('/settings/connectors/oauth-callback#state=signed-state&code=provider-code')
     expect(callback.headers.get('Cache-Control')).toBe('no-store')
+    expect(callback.headers.get('Referrer-Policy')).toBe('no-referrer')
+    expect(completeCalls).toBe(0)
 
     const cancelled = await router.request(
       'http://localhost/developer/connector-oauth/callback' +
@@ -2761,7 +2820,59 @@ describe('public API router', () => {
     )
     expect(cancelled.status).toBe(303)
     expect(cancelled.headers.get('Location'))
-      .toBe('/settings/developer?tab=connectors&connectorOAuth=cancelled')
+      .toBe('/settings/connectors/oauth-callback#state=cancelled-state&cancelled=true')
+
+    const completeRequest = (body: unknown, idempotencyKey: string) => router.request(
+      'http://localhost/developer/connector-oauth/complete',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer session-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
+      },
+    )
+    const completed = await completeRequest(
+      { state: 'signed-state', code: 'provider-code' },
+      'complete-connector',
+    )
+    expect(completed.status).toBe(200)
+    expect(completed.headers.get('Cache-Control')).toBe('no-store')
+    expect(await completed.json()).toEqual({
+      outcome: 'connected',
+      returnUrl: '/settings/developer?connectorOAuth=connected',
+    })
+    const completedReplay = await completeRequest(
+      { state: 'signed-state', code: 'provider-code' },
+      'complete-connector',
+    )
+    expect(completedReplay.status).toBe(200)
+    expect(completedReplay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(completeCalls).toBe(1)
+
+    const aborted = await completeRequest(
+      { state: 'cancelled-state', cancelled: true },
+      'abort-connector',
+    )
+    expect(aborted.status).toBe(200)
+    expect(await aborted.json()).toEqual({
+      outcome: 'cancelled',
+      returnUrl: '/settings/developer?tab=connectors&connectorOAuth=cancelled',
+    })
+
+    for (const invalid of [
+      { state: 'signed-state' },
+      { state: 'signed-state', code: 'provider-code', cancelled: true },
+      { state: 'signed-state', cancelled: false },
+      { state: 'signed-state', code: 'provider-code', extra: 'field' },
+      { code: 'provider-code' },
+    ]) {
+      const response = await completeRequest(invalid, `invalid-${JSON.stringify(invalid)}`)
+      expect(response.status).toBe(400)
+    }
+    expect(completeCalls).toBe(1)
 
     const conflictInstallation = await platform.installConnector({
       workspaceId: 'workspace-1',

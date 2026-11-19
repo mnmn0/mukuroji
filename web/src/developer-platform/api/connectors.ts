@@ -1,4 +1,6 @@
 import type {
+  CompleteConnectorOAuthInput,
+  CompleteConnectorOAuthOutput,
   ConnectorAuthorizationOutput,
   ConnectorInstallation,
   ConnectorProvider,
@@ -63,6 +65,28 @@ export function reauthorizeDeveloperConnector(
     `/developer/connector-installations/${encodeURIComponent(installationId)}/reauthorize`,
     accessToken,
     createJsonMutation('POST', undefined, mutationContext),
+  )
+}
+
+/**
+ * Provider callback の値で connector OAuth flow を完了します。
+ *
+ * Server は flow を開始した user の access token でだけ完了させます。
+ *
+ * @param accessToken - Authorization header に使う access token です。
+ * @param input - Provider が返した signed state と authorization code、または取り消しです。
+ * @param mutationContext - Retry でも共有する mutation header context です。
+ * @returns 結果と、結果を付けた application-relative の戻り先です。
+ */
+export function completeDeveloperConnectorOAuth(
+  accessToken: string,
+  input: CompleteConnectorOAuthInput,
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<CompleteConnectorOAuthOutput>(
+    '/developer/connector-oauth/complete',
+    accessToken,
+    createJsonMutation('POST', input, mutationContext),
   )
 }
 

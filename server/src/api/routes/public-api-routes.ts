@@ -2484,11 +2484,11 @@ const lazyConnectorAuthorization: ConnectorAuthorizationService = {
     return (await requireConfiguredConnectorAuthorization())
       .begin(principal, input, operationId)
   },
-  async completeCallback(input) {
-    return (await requireConfiguredConnectorAuthorization()).completeCallback(input)
+  async completeCallback(input, actor) {
+    return (await requireConfiguredConnectorAuthorization()).completeCallback(input, actor)
   },
-  async abortCallback(input) {
-    return (await requireConfiguredConnectorAuthorization()).abortCallback(input)
+  async abortCallback(input, actor) {
+    return (await requireConfiguredConnectorAuthorization()).abortCallback(input, actor)
   },
   async reauthorize(principal, installationId, operationId) {
     return (await requireConfiguredConnectorAuthorization())
