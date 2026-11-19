@@ -17,6 +17,7 @@ import {
   type StoredAgentRun,
 } from '../modules/agent-runs'
 import { createAgentRunFenceConflictError } from '../modules/work-items/adapter-out/dynamodb/work-item-client'
+import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import { CognitoServiceError } from '../modules/authentication'
 import { createAuditEventId, createMutationAuditContext } from '../modules/audit/audit'
 import {
@@ -1114,6 +1115,54 @@ describe('public Agent Run service', () => {
     const resumed = await resume('no-history')
     expect(resumed.resumedFromRun).toBeUndefined()
     expect(store.state.runs.get(`${workspaceId}|core-team|${resumed.run.runId}`)).not.toHaveProperty('resumedFromRunId')
+  })
+
+  test('reports a resume cancelled by an Enterprise control change as an authorization change', async () => {
+    const service = createCanonicalPublicAgentRunService()
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    store.seed(finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'paused', 'agent', new Date()))
+    /** Enterprise identity whose control revision moves when the test says so, keeping the caller's access. */
+    class MovingControlEnterpriseIdentity extends InMemoryEnterpriseIdentityClient {
+      /** Added to the stored control revision. */
+      controlRevisionShift = 0
+
+      /**
+       * Returns the stored snapshot with the shifted control revision.
+       *
+       * @param workspaceId - Workspace to read.
+       * @returns The snapshot.
+       */
+      override async getSnapshot(workspaceId: string) {
+        const snapshot = await super.getSnapshot(workspaceId)
+        return { ...snapshot, controlRevision: snapshot.controlRevision + this.controlRevisionShift }
+      }
+    }
+    const enterpriseIdentity = new MovingControlEnterpriseIdentity()
+    setTestAppDependencies({
+      enterpriseIdentity,
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    // The control revision changes after authorization, and the commit's Enterprise control check fails.
+    store.commit = async () => {
+      enterpriseIdentity.controlRevisionShift = 1
+      throw createAgentRunCommitConflictError()
+    }
+    await expect(runWithTestAppDependencies(() => service.resume(
+      credential, 'core-team', 'task-1',
+      { expectedRevision: 1, runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+      { requestId: 'resume', idempotencyKey: 'enterprise-control' },
+      { credentialId: 'agent-key', idempotencyKey: 'enterprise-control', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ status: 409, code: 'WorkItemAuthorizationChanged' })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()
   })
 
   test('links a resume to the newest run read strongly, not to a lagging history index', async () => {
