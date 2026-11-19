@@ -6,6 +6,7 @@ import {
   type FocusQueueResponse,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { MemoryRouter } from 'react-router'
 import {
   focusConfigurationFixture,
   focusQueueResponseFixture,
@@ -193,6 +194,70 @@ describe('Focus queue', () => {
       invalidFieldNames: ['dueSoonDays'],
       overrides: { weights: { urgent: 42 } },
     })
+  })
+
+  test('reads SLA scope overrides from the policy form and inherits blank SLA fields', () => {
+    const formData = new FormData()
+    formData.set('slaEnabled', '')
+    formData.set('slaAnchor', '')
+    formData.set('slaWorkItemTypeIds', ' ')
+    expect(readFocusPolicyOverrides(formData)).toEqual({ invalidFieldNames: [], overrides: {} })
+
+    formData.set('slaEnabled', 'false')
+    formData.set('slaAnchor', 'started')
+    formData.set('slaWorkItemTypeIds', 'request, incident,request')
+    expect(readFocusPolicyOverrides(formData)).toEqual({
+      invalidFieldNames: [],
+      overrides: {
+        slaEnabled: false,
+        slaAnchor: 'started',
+        slaWorkItemTypeIds: ['incident', 'request'],
+      },
+    })
+
+    formData.set('slaAnchor', 'due-date')
+    expect(readFocusPolicyOverrides(formData).invalidFieldNames).toEqual(['slaAnchor'])
+  })
+
+  test('lists health update deadlines owned by the viewer above the queue', () => {
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      updateDeadlines: [
+        {
+          id: 'update-due:initiative:launch:2026-08-09T09%3A00%3A00.000Z',
+          target: { type: 'initiative', entityId: 'launch' },
+          title: 'Launch initiative',
+          state: 'overdue',
+          dueAt: '2026-08-09T09:00:00.000Z',
+          deepLink: '/planning/portfolio?targetType=initiative&entityId=launch',
+        },
+        {
+          id: 'update-due:project:core-team:refero:2026-08-10T09%3A00%3A00.000Z',
+          target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+          state: 'due-soon',
+          dueAt: '2026-08-10T09:00:00.000Z',
+          deepLink: '/planning/portfolio?targetType=project&teamId=core-team&projectId=refero',
+        },
+      ],
+    }
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <FocusQueue
+          locale="en"
+          onOpenItem={() => undefined}
+          onSectionChange={() => undefined}
+          response={response}
+          section="now"
+          t={createTranslator('en')}
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('Health updates due')
+    expect(html).toContain('Launch initiative')
+    expect(html).toContain('Project health update')
+    expect(html).toContain('href="/planning/portfolio?targetType=initiative&amp;entityId=launch"')
+    expect(html.indexOf('Overdue')).toBeLessThan(html.indexOf('Due soon'))
   })
 
   test('falls back from an inaccessible requested signal to another authorized source', () => {

@@ -46,6 +46,8 @@ import {
   createFocusPolicyRevisionConditionCheck,
   createFocusQueue,
   createFocusWorkItemStateKey as createFocusWorkItemKey,
+  isFocusSlaAnchor,
+  normalizeFocusSlaWorkItemTypeIds,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
   type FocusRelationGraphSource,
@@ -225,6 +227,9 @@ function readFocusPolicyOverrides(value: unknown): FocusPolicyOverrides {
     'dueSoonDays',
     'cycleDueSoonDays',
     'slaHours',
+    'slaEnabled',
+    'slaAnchor',
+    'slaWorkItemTypeIds',
     'nowScoreThreshold',
   ])
   const weights = overrides.weights === undefined
@@ -251,6 +256,13 @@ function readFocusPolicyOverrides(value: unknown): FocusPolicyOverrides {
     24 * 365,
     true,
   )
+  if (overrides.slaEnabled !== undefined && typeof overrides.slaEnabled !== 'boolean') {
+    throw invalidFocusInput('slaEnabled must be a boolean.')
+  }
+  if (overrides.slaAnchor !== undefined && !isFocusSlaAnchor(overrides.slaAnchor)) {
+    throw invalidFocusInput('slaAnchor must be created, planned-start, or started.')
+  }
+  const slaWorkItemTypeIds = readOptionalFocusSlaWorkItemTypeIds(overrides.slaWorkItemTypeIds)
   const nowScoreThreshold = readOptionalFocusPolicyNumber(
     overrides.nowScoreThreshold,
     'nowScoreThreshold',
@@ -263,7 +275,25 @@ function readFocusPolicyOverrides(value: unknown): FocusPolicyOverrides {
     ...(dueSoonDays === undefined ? {} : { dueSoonDays }),
     ...(cycleDueSoonDays === undefined ? {} : { cycleDueSoonDays }),
     ...(slaHours === undefined ? {} : { slaHours }),
+    ...(overrides.slaEnabled === undefined ? {} : { slaEnabled: overrides.slaEnabled }),
+    ...(overrides.slaAnchor === undefined ? {} : { slaAnchor: overrides.slaAnchor }),
+    ...(slaWorkItemTypeIds === undefined ? {} : { slaWorkItemTypeIds }),
     ...(nowScoreThreshold === undefined ? {} : { nowScoreThreshold }),
+  }
+}
+
+/**
+ * Parses the optional list of Work Item Types that receive the SLA signal.
+ *
+ * @param value - Unknown Type ID list.
+ * @returns Sorted, deduplicated Type IDs, or undefined when omitted.
+ */
+function readOptionalFocusSlaWorkItemTypeIds(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined
+  try {
+    return normalizeFocusSlaWorkItemTypeIds(value)
+  } catch (error) {
+    throw invalidFocusInput(error instanceof Error ? error.message : 'slaWorkItemTypeIds is invalid.')
   }
 }
 
@@ -1471,6 +1501,7 @@ async function readFocusQueue(
     accessibleWorkItems,
   )
   const accessibleTeamIdsPromise = readFocusAccessibleTeamIds(principal)
+  const projectTitlesPromise = readFocusProjectTitlesByKey(principal)
   const planningWorkItems = createFocusPlanningWorkItemState(accessibleWorkItems)
   const planningPromise = workItemDependencies.planning
     .get(principal.directoryId, planningWorkItems)
@@ -1508,6 +1539,7 @@ async function readFocusQueue(
     workItemPermissions,
     editableTeamPolicyIds,
     state,
+    projectTitlesByKey,
   ] =
     await Promise.all([
       workItemsPromise,
@@ -1518,12 +1550,14 @@ async function readFocusQueue(
       workItemPermissionsPromise,
       editableTeamPolicyIdsPromise,
       statePromise,
+      projectTitlesPromise,
     ])
   const baseInput: CreateFocusQueueInput = {
     now,
     viewerMemberKey: principal.userKey,
     workItems,
     planning,
+    projectTitlesByKey,
     relationGraphs,
     reviewerApprovals,
     notifications,
@@ -1793,9 +1827,15 @@ function filterFocusPlanningSnapshotForPrincipal(
   const criticalEntityIds = snapshot.criticalPath.entityIds.filter((entityId) =>
     entityIds.has(entityId)
   )
+  const updateTargets = snapshot.updateTargets.filter((summary) =>
+    summary.target.type === 'project'
+      ? canReadPlanningResource(summary.target.teamId, summary.target.projectId)
+      : entityIds.has(summary.target.entityId)
+  )
   return {
     ...snapshot,
     entities: scopedEntities,
+    updateTargets,
     dependencies,
     workItemDependencies,
     workItemLinks,
@@ -1816,6 +1856,30 @@ function filterFocusPlanningSnapshotForPrincipal(
       workItemLinks,
     ),
   }
+}
+
+/**
+ * Reads Project titles used to label health update deadlines.
+ *
+ * Titles are only attached to update targets that already passed the Planning read filter, so the
+ * map itself may contain Projects the principal cannot read.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Project titles keyed by Team-qualified Project identity.
+ */
+async function readFocusProjectTitlesByKey(
+  principal: WorkspacePrincipal,
+): Promise<Map<string, string>> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+  )
+  return new Map(directory.teams.flatMap((team) =>
+    team.projects.map((project): [string, string] => [
+      createFocusWorkItemKey(team.id, project.id),
+      project.name,
+    ])
+  ))
 }
 
 /**

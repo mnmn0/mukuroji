@@ -19,16 +19,23 @@ import type {
   FocusSignalType,
   FocusSignalWeightOverrides,
   FocusSignalWeights,
+  FocusSlaAnchor,
+  FocusUpdateDeadline,
   PlanningSnapshot,
   WorkItemRelation,
 } from '@mukuroji/contracts'
-import { FOCUS_SCHEMA_VERSION } from '@mukuroji/contracts'
+import { DEFAULT_WORK_ITEM_TYPE_ID, FOCUS_SCHEMA_VERSION } from '@mukuroji/contracts'
 import { createHash } from 'node:crypto'
 import type { NotificationItem } from '../notifications'
 import {
   addWorkItemScheduleCalendarDays,
   workItemScheduleInstantToLocalDate,
+  workItemScheduleLocalDateToStartInstant,
 } from '../work-items'
+import {
+  isFocusSlaAnchor,
+  normalizeFocusSlaWorkItemTypeIds,
+} from './focus-sla-policy'
 import type { FocusSnoozeRecord } from './focus-state'
 
 /** Stable separator used by caller-provided Work Item state maps. */
@@ -65,6 +72,9 @@ export const DEFAULT_FOCUS_POLICY_SETTINGS: FocusPolicySettings = {
   dueSoonDays: 3,
   cycleDueSoonDays: 2,
   slaHours: 72,
+  slaEnabled: true,
+  slaAnchor: 'planned-start',
+  slaWorkItemTypeIds: [],
   nowScoreThreshold: 75,
 }
 
@@ -98,8 +108,16 @@ export type CreateFocusQueueInput = {
   viewerMemberKey: string
   /** Canonical Work Items already filtered by current read permission. */
   workItems: readonly CanonicalWorkItem[]
-  /** Planning snapshot already filtered so hidden dependency endpoints are absent. */
+  /**
+   * Planning snapshot already filtered so hidden dependency endpoints and unreadable update
+   * targets are absent.
+   */
   planning: PlanningSnapshot
+  /**
+   * Readable Project titles keyed by `teamId`, a NUL separator, and Project ID. Used only to label
+   * health update deadlines; a missing title leaves the label to the client.
+   */
+  projectTitlesByKey?: ReadonlyMap<string, string>
   /**
    * Optional authoritative semantic relation graphs with source occurrence evidence.
    * Relation-only blockers are omitted when this evidence is unavailable.
@@ -358,6 +376,12 @@ export function createFocusQueue(input: CreateFocusQueueInput): FocusQueueRespon
     generatedAt: evaluatedAt,
     viewerMemberKey,
     metrics: { blocked: blockedCount },
+    updateDeadlines: createFocusUpdateDeadlines(
+      input.planning,
+      viewerMemberKey,
+      now,
+      input.projectTitlesByKey,
+    ),
     effectivePolicies,
     teamPolicies,
     ...(userPolicy === undefined ? {} : { userPolicy: cloneFocusPolicy(userPolicy) }),
@@ -532,6 +556,9 @@ function applyPolicyOverrides(
     dueSoonDays: overrides?.dueSoonDays ?? base.dueSoonDays,
     cycleDueSoonDays: overrides?.cycleDueSoonDays ?? base.cycleDueSoonDays,
     slaHours: overrides?.slaHours ?? base.slaHours,
+    slaEnabled: overrides?.slaEnabled ?? base.slaEnabled,
+    slaAnchor: overrides?.slaAnchor ?? base.slaAnchor,
+    slaWorkItemTypeIds: overrides?.slaWorkItemTypeIds ?? base.slaWorkItemTypeIds,
     nowScoreThreshold: overrides?.nowScoreThreshold ?? base.nowScoreThreshold,
   })
 }
@@ -574,6 +601,13 @@ function normalizePolicySettings(settings: FocusPolicySettings): FocusPolicySett
   requireBoundedInteger(settings.dueSoonDays, 0, 365, 'Focus due-soon days')
   requireBoundedInteger(settings.cycleDueSoonDays, 0, 365, 'Focus cycle due-soon days')
   requireBoundedInteger(settings.slaHours, 1, 8_760, 'Focus SLA hours')
+  if (typeof settings.slaEnabled !== 'boolean') {
+    throw new TypeError('Focus SLA enabled flag must be a boolean.')
+  }
+  if (!isFocusSlaAnchor(settings.slaAnchor)) {
+    throw new RangeError('Focus SLA anchor is not supported.')
+  }
+  const slaWorkItemTypeIds = normalizeFocusSlaWorkItemTypeIds(settings.slaWorkItemTypeIds)
   requireBoundedFiniteNumber(
     settings.nowScoreThreshold,
     0,
@@ -585,6 +619,9 @@ function normalizePolicySettings(settings: FocusPolicySettings): FocusPolicySett
     dueSoonDays: settings.dueSoonDays,
     cycleDueSoonDays: settings.cycleDueSoonDays,
     slaHours: settings.slaHours,
+    slaEnabled: settings.slaEnabled,
+    slaAnchor: settings.slaAnchor,
+    slaWorkItemTypeIds,
     nowScoreThreshold: settings.nowScoreThreshold,
   }
 }
@@ -1498,7 +1535,10 @@ function createMentionSignals(
 }
 
 /**
- * Projects an SLA breach from Work Item age and the effective policy window.
+ * Projects an SLA breach from the effective policy anchor and window.
+ *
+ * The signal is omitted when the policy disables it, when the Work Item Type is not targeted, or
+ * when the anchor has not occurred yet (for example a planned start that is still in the future).
  *
  * @param context - Projection context.
  * @param workItem - Owned unfinished Work Item.
@@ -1510,10 +1550,16 @@ function createSlaSignal(
   workItem: CanonicalWorkItem,
   policy: FocusEffectivePolicy,
 ): ProjectedSignal[] {
-  const createdAt = new Date(workItem.createdAt)
-  if (Number.isNaN(createdAt.getTime())) return []
+  const settings = policy.settings
+  if (!settings.slaEnabled) return []
+  if (
+    settings.slaWorkItemTypeIds.length > 0 &&
+    !settings.slaWorkItemTypeIds.includes(workItem.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID)
+  ) return []
+  const anchor = resolveSlaAnchorInstant(workItem, settings.slaAnchor)
+  if (anchor === undefined || Number.isNaN(anchor.getTime())) return []
   const dueAt = new Date(
-    createdAt.getTime() + policy.settings.slaHours * 60 * 60 * 1_000,
+    anchor.getTime() + settings.slaHours * 60 * 60 * 1_000,
   )
   if (dueAt.getTime() > context.now.getTime()) return []
   return [createProjectedSignal({
@@ -1526,6 +1572,110 @@ function createSlaSignal(
     resolutionCondition: 'sla-restored',
     deadline: dueAt.toISOString(),
   })]
+}
+
+/**
+ * Resolves the instant from which a Work Item's SLA window is measured.
+ *
+ * @param workItem - Owned unfinished Work Item.
+ * @param anchor - Effective SLA anchor.
+ * @returns The anchor instant, or undefined when the anchor has no value yet.
+ */
+function resolveSlaAnchorInstant(
+  workItem: CanonicalWorkItem,
+  anchor: FocusSlaAnchor,
+): Date | undefined {
+  switch (anchor) {
+    case 'created':
+      return new Date(workItem.createdAt)
+    case 'planned-start': {
+      const schedule = workItem.schedule
+      if (schedule.mode === 'date-range' || schedule.mode === 'milestone') {
+        return readLocalDateStart(schedule.startDate, workItem)
+      }
+      return resolveSlaAnchorInstant(workItem, 'started')
+    }
+    case 'started':
+      return workItem.actualStartDate === undefined
+        ? undefined
+        : readLocalDateStart(workItem.actualStartDate, workItem)
+  }
+}
+
+/**
+ * Maps a local date to its first instant in the Work Item calendar, failing soft on bad data.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param workItem - Work Item whose schedule calendar interprets the date.
+ * @returns The start instant, or undefined when the stored date cannot be interpreted.
+ */
+function readLocalDateStart(date: string, workItem: CanonicalWorkItem): Date | undefined {
+  try {
+    return workItemScheduleLocalDateToStartInstant(date, workItem.schedule.calendarPolicy)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Projects health update deadlines that are near or past for their update owner.
+ *
+ * @param planning - Planning snapshot already filtered to readable update targets.
+ * @param viewerMemberKey - Normalized current viewer member key.
+ * @param now - Evaluation instant.
+ * @param projectTitlesByKey - Readable Project titles keyed by Team-qualified Project identity.
+ * @returns Overdue deadlines first, then the remaining deadlines in due order.
+ */
+function createFocusUpdateDeadlines(
+  planning: PlanningSnapshot,
+  viewerMemberKey: string,
+  now: Date,
+  projectTitlesByKey: ReadonlyMap<string, string> | undefined,
+): FocusUpdateDeadline[] {
+  const entityTitles = new Map(planning.entities.map((entity) => [entity.id, entity.title]))
+  return planning.updateTargets.flatMap((summary): FocusUpdateDeadline[] => {
+    const cadence = summary.cadence
+    if (cadence === undefined || summary.archivedAt !== undefined) return []
+    if (cadence.updateOwnerMemberKey.trim().toLowerCase() !== viewerMemberKey) return []
+    const dueAt = Date.parse(cadence.nextDueAt)
+    if (Number.isNaN(dueAt)) return []
+    const reminderAt = dueAt - cadence.reminderHoursBefore * 60 * 60 * 1_000
+    const state = now.getTime() >= dueAt
+      ? 'overdue'
+      : now.getTime() >= reminderAt
+        ? 'due-soon'
+        : undefined
+    if (state === undefined) return []
+    const target = summary.target
+    const search = target.type === 'project'
+      ? new URLSearchParams({
+          targetType: 'project',
+          teamId: target.teamId,
+          projectId: target.projectId,
+        })
+      : new URLSearchParams({ targetType: 'initiative', entityId: target.entityId })
+    const title = target.type === 'project'
+      ? projectTitlesByKey?.get(createWorkItemKey(target.teamId, target.projectId))
+      : entityTitles.get(target.entityId)
+    const targetIdentity = target.type === 'project'
+      ? `project:${encodeURIComponent(target.teamId)}:${encodeURIComponent(target.projectId)}`
+      : `initiative:${encodeURIComponent(target.entityId)}`
+    const dueAtText = new Date(dueAt).toISOString()
+    return [{
+      id: `update-due:${targetIdentity}:${encodeURIComponent(dueAtText)}`,
+      target: target.type === 'project'
+        ? { type: 'project', teamId: target.teamId, projectId: target.projectId }
+        : { type: 'initiative', entityId: target.entityId },
+      ...(title === undefined ? {} : { title }),
+      state,
+      dueAt: dueAtText,
+      deepLink: `/planning/portfolio?${search.toString()}`,
+    }]
+  }).sort((left, right) =>
+    (left.state === right.state ? 0 : left.state === 'overdue' ? -1 : 1) ||
+    compareStrings(left.dueAt, right.dueAt) ||
+    compareStrings(left.id, right.id)
+  )
 }
 
 /**

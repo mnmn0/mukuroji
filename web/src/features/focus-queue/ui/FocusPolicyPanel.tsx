@@ -5,13 +5,14 @@ import type {
   FocusPolicyTarget,
   FocusSignalType,
   FocusSignalWeights,
+  FocusSlaAnchor,
 } from '@mukuroji/contracts'
 import { useState, type FormEvent } from 'react'
 import type { MessageKey } from '../../../shared/i18n/i18n'
 import {
   getFocusSignalMessageKey,
 } from '../model/focusQueue'
-import { readFocusPolicyOverrides } from '../model/focusPolicyForm'
+import { focusSlaAnchorOptions, readFocusPolicyOverrides } from '../model/focusPolicyForm'
 
 /** One editable signal-weight field in stable display order. */
 type FocusPolicyWeightField = {
@@ -242,6 +243,70 @@ export function FocusPolicyPanel({
               name="slaHours"
               value={storedPolicy?.overrides.slaHours}
             />
+            <label className="grid gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
+              <span>{t('workspace.focus.policy.slaEnabled')}</span>
+              <select
+                className="workbench-input min-h-[44px] w-full px-3"
+                defaultValue={storedPolicy?.overrides.slaEnabled === undefined
+                  ? ''
+                  : String(storedPolicy.overrides.slaEnabled)}
+                name="slaEnabled"
+              >
+                <option value="">
+                  {t('workspace.focus.policy.inherit').replace(
+                    '{value}',
+                    t(inheritedSettings.slaEnabled
+                      ? 'workspace.focus.policy.slaEnabled.on'
+                      : 'workspace.focus.policy.slaEnabled.off'),
+                  )}
+                </option>
+                <option value="true">{t('workspace.focus.policy.slaEnabled.on')}</option>
+                <option value="false">{t('workspace.focus.policy.slaEnabled.off')}</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
+              <span>{t('workspace.focus.policy.slaAnchor')}</span>
+              <select
+                className="workbench-input min-h-[44px] w-full px-3"
+                defaultValue={storedPolicy?.overrides.slaAnchor ?? ''}
+                name="slaAnchor"
+              >
+                <option value="">
+                  {t('workspace.focus.policy.inherit').replace(
+                    '{value}',
+                    t(getSlaAnchorMessageKey(inheritedSettings.slaAnchor)),
+                  )}
+                </option>
+                {focusSlaAnchorOptions.map((anchor) => (
+                  <option key={anchor} value={anchor}>{t(getSlaAnchorMessageKey(anchor))}</option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
+              <span>{t('workspace.focus.policy.slaWorkItemTypeIds')}</span>
+              <input
+                aria-describedby={invalidFieldNames.includes('slaWorkItemTypeIds')
+                  ? 'focus-policy-slaWorkItemTypeIds-error'
+                  : undefined}
+                aria-invalid={invalidFieldNames.includes('slaWorkItemTypeIds') || undefined}
+                className="workbench-input min-h-[44px] w-full px-3"
+                defaultValue={storedPolicy?.overrides.slaWorkItemTypeIds?.join(', ') ?? ''}
+                name="slaWorkItemTypeIds"
+                placeholder={inheritedSettings.slaWorkItemTypeIds.length === 0
+                  ? t('workspace.focus.policy.slaWorkItemTypeIds.all')
+                  : inheritedSettings.slaWorkItemTypeIds.join(', ')}
+                type="text"
+              />
+              {invalidFieldNames.includes('slaWorkItemTypeIds') ? (
+                <span
+                  className="text-[var(--workbench-danger)]"
+                  id="focus-policy-slaWorkItemTypeIds-error"
+                  role="alert"
+                >
+                  {t('workspace.focus.policy.fieldError')}
+                </span>
+              ) : null}
+            </label>
             <PolicyNumberField
               effectiveValue={inheritedSettings.nowScoreThreshold}
               errorMessage={t('workspace.focus.policy.fieldError')}
@@ -272,6 +337,20 @@ export function FocusPolicyPanel({
       </form>
     </details>
   )
+}
+
+/**
+ * Returns the localized label key of one SLA anchor.
+ *
+ * @param anchor - SLA anchor.
+ * @returns Message key describing where the SLA window starts.
+ */
+function getSlaAnchorMessageKey(anchor: FocusSlaAnchor): MessageKey {
+  switch (anchor) {
+    case 'created': return 'workspace.focus.policy.slaAnchor.created'
+    case 'planned-start': return 'workspace.focus.policy.slaAnchor.plannedStart'
+    case 'started': return 'workspace.focus.policy.slaAnchor.started'
+  }
 }
 
 /** Props for one policy numeric setting. */

@@ -22,6 +22,7 @@ import {
   createDefaultDueDateWorkItemSchedule,
   type ApprovalRequest,
   type EnterprisePermissionId,
+  type PlanningUpdateTarget,
 } from '@mukuroji/contracts'
 
 const {
@@ -786,6 +787,48 @@ test('bounds watcher point reads to the accessible Focus item window', async () 
   expect(watcherReads).toBe(200)
 })
 
+test('lists only readable health update deadlines owned by the viewer', async () => {
+  configureFocusSources()
+  configureFakeAuthenticatedUser({
+    email: 'sato@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  const planning = new InMemoryPlanningClient()
+  const emptyWorkItems: PlanningWorkItemState = { workItems: [] }
+  const targets: PlanningUpdateTarget[] = [
+    { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    { type: 'project', teamId: 'hidden-team', projectId: 'hidden-project' },
+  ]
+  for (const [index, target] of targets.entries()) {
+    await planning.configureUpdateCadence('user#demo@example.com', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'sato@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2020-01-06T09:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: index,
+    }, emptyWorkItems)
+  }
+  setTestAppDependencies({ planning })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  if (!isRecord(body)) throw new Error('Expected a Focus response.')
+  expect(body.updateDeadlines).toEqual([{
+    id: 'update-due:project:core-team:refero:2020-01-06T09%3A00%3A00.000Z',
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    title: expect.any(String),
+    state: 'overdue',
+    dueAt: '2020-01-06T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=project&teamId=core-team&projectId=refero',
+  }])
+})
+
 test('drops Focus mention notifications whose collaboration source was removed', async () => {
   configureFocusSources()
   const notification = {
@@ -1334,6 +1377,49 @@ test('validates and version-checks user policy replacements', async () => {
   })
   expect(invalid.status).toBe(400)
   expect(await invalid.json()).toMatchObject({ code: 'InvalidFocusInput' })
+})
+
+test('stores SLA scope overrides and rejects invalid SLA scope values', async () => {
+  configureFocusSources('manager')
+  const response = await focusRequest('/api/focus/policies', 'PUT', {
+    target: { type: 'user' },
+    expectedVersion: 0,
+    overrides: {
+      slaEnabled: true,
+      slaAnchor: 'started',
+      slaWorkItemTypeIds: ['request', 'incident', 'request'],
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    policy: {
+      overrides: {
+        slaEnabled: true,
+        slaAnchor: 'started',
+        slaWorkItemTypeIds: ['incident', 'request'],
+      },
+    },
+    effectivePolicies: [{
+      baseSettings: { slaEnabled: true, slaAnchor: 'planned-start', slaWorkItemTypeIds: [] },
+      settings: { slaAnchor: 'started', slaWorkItemTypeIds: ['incident', 'request'] },
+    }],
+  })
+
+  for (const overrides of [
+    { slaAnchor: 'due-date' },
+    { slaEnabled: 'false' },
+    { slaWorkItemTypeIds: [' request'] },
+    { slaWorkItemTypeIds: 'request' },
+  ]) {
+    const invalid = await focusRequest('/api/focus/policies', 'PUT', {
+      target: { type: 'user' },
+      expectedVersion: 1,
+      overrides,
+    })
+    expect(invalid.status).toBe(400)
+    expect(await invalid.json()).toMatchObject({ code: 'InvalidFocusInput' })
+  }
 })
 
 test('returns the committed policy when a contributing layer changes after the write', async () => {

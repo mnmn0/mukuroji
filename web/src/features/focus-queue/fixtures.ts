@@ -111,6 +111,9 @@ export const focusQueueResponseFixture = {
       dueSoonDays: 3,
       nowScoreThreshold: 12,
       slaHours: 24,
+      slaEnabled: true,
+      slaAnchor: 'planned-start',
+      slaWorkItemTypeIds: [],
       weights: {
         approval: focusSignalWeightByType.approval,
         blocker: focusSignalWeightByType.blocker,
@@ -140,6 +143,9 @@ export const focusQueueResponseFixture = {
       dueSoonDays: 2,
       nowScoreThreshold: 12,
       slaHours: 24,
+      slaEnabled: true,
+      slaAnchor: 'planned-start',
+      slaWorkItemTypeIds: [],
       weights: {
         approval: focusSignalWeightByType.approval,
         blocker: focusSignalWeightByType.blocker,
@@ -157,6 +163,9 @@ export const focusQueueResponseFixture = {
       dueSoonDays: 2,
       nowScoreThreshold: 12,
       slaHours: 24,
+      slaEnabled: true,
+      slaAnchor: 'planned-start',
+      slaWorkItemTypeIds: [],
       weights: {
         approval: focusSignalWeightByType.approval,
         blocker: focusSignalWeightByType.blocker,
