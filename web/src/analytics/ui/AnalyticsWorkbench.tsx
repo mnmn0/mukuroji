@@ -42,7 +42,7 @@ import {
   formatAnalyticsCalendarDate,
 } from '../model/timeZone'
 import { readRecord } from '../../shared/api/jsonValidation'
-import { isAnalyticsFlowVisualization } from '../model/flowChart'
+import { isAnalyticsFlowVisualization, type AnalyticsFlowVisualization } from '../model/flowChart'
 import { AnalyticsFlowChart } from './AnalyticsFlowChart'
 
 /**
@@ -689,6 +689,7 @@ export function AnalyticsWorkbench({
                       <AnalyticsResultWidget
                         key={result.widgetId}
                         locale={locale}
+                        periodEnd={filter.period.to}
                         result={result}
                         snapshot={snapshot}
                         t={t}
@@ -1834,6 +1835,7 @@ function AnalyticsMetricCard({
 function AnalyticsResultWidget({
   locale,
   onOpenEvidence,
+  periodEnd,
   result,
   snapshot,
   t,
@@ -1842,6 +1844,8 @@ function AnalyticsResultWidget({
 }: {
   locale: Locale
   onOpenEvidence?: (input: AnalyticsEvidenceInput) => void
+  /** Requested period end (before the API clips it to `asOf`), where a burndown ideal reaches zero. */
+  periodEnd?: string
   result: AnalyticsWidgetResult
   snapshot: AnalyticsSnapshot
   t: ReturnType<typeof createTranslator>
@@ -1900,10 +1904,13 @@ function AnalyticsResultWidget({
             }
           />
         ) : isAnalyticsFlowVisualization(widget?.visualization) && result.series.length > 0 &&
-          (widget.visualization === 'burndown' || result.series.some((point) => point.segments !== undefined)) ? (
+          isFlowVisualizationCompatible(widget.visualization, result.metric) ? (
           <AnalyticsFlowChart
             label={widget?.title ?? result.definition.label}
             locale={locale}
+            {...(periodEnd === undefined
+              ? {}
+              : { plannedEndDate: formatAnalyticsCalendarDate(periodEnd, snapshot.timeZone) })}
             series={result.series}
             t={t}
             timeZone={snapshot.timeZone}
@@ -2098,6 +2105,25 @@ function AccessibleChart({
       </details>
     </div>
   )
+}
+
+/**
+ * Returns whether a flow visualization can draw a metric's series.
+ *
+ * Cumulative flow needs status-category segments and burnup needs scope / completed segments, so
+ * other metrics fall back to the line chart.
+ *
+ * @param visualization - Flow visualization of the widget.
+ * @param metric - Metric of the widget result.
+ * @returns Whether the flow chart can draw the result.
+ */
+function isFlowVisualizationCompatible(
+  visualization: AnalyticsFlowVisualization,
+  metric: AnalyticsMetricKey,
+) {
+  if (visualization === 'area') return metric === 'cumulative-flow'
+  if (visualization === 'burnup') return metric === 'remaining-scope'
+  return true
 }
 
 function isDrawableChartValue(value: number | null): value is number {
