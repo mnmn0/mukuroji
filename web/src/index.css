@@ -1178,6 +1178,28 @@ textarea {
     white-space: inherit !important;
   }
 
+  /* Scroll containers cannot be scrolled on paper: let everything fit the page. */
+  .document-print-root * {
+    max-width: 100% !important;
+    overflow: visible !important;
+  }
+
+  .document-print-root table {
+    width: 100% !important;
+    table-layout: fixed;
+  }
+
+  .document-print-root th,
+  .document-print-root td {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .document-print-root img,
+  .document-print-root svg {
+    height: auto;
+  }
+
   .document-print-root pre,
   .document-print-root table,
   .document-print-root blockquote {
