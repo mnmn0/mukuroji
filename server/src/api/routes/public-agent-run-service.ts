@@ -40,6 +40,7 @@ import {
   createAuthorizationSnapshotConditionChecks,
   createWorkItemAuthorizationChangedError,
   createWorkItemRevisionConditionCheck,
+  type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
 import { resolveWorkItemTypeWorkflow } from '../../modules/work-items/work-item-configuration'
 import {
@@ -72,6 +73,20 @@ import {
 } from '../shared/work-item-access'
 import { createMutationAuditContext } from '../../modules/audit/audit'
 import { projectPublicWorkItem, resolveStableWorkItemAuthorization, updateCanonicalPublicWorkItem } from './public-api-routes'
+
+/**
+ * Checks whether the caller's access changed after an Agent Run mutation was authorized, so that a
+ * transaction cancelled by an access guard is reported as a conflict rather than as retryable.
+ *
+ * @param current - Caller resolved again after the transaction was cancelled.
+ * @param snapshot - Access observed when the mutation was authorized.
+ * @returns True when the membership, Planning, or Enterprise Identity revision differs.
+ */
+async function hasAuthorizationChanged(current: WorkspacePrincipal, snapshot: WorkItemAuthorizationSnapshot): Promise<boolean> {
+  return current.workspaceMember.version !== snapshot.workspaceMemberVersion ||
+    current.enterpriseIdentityControlRevision !== snapshot.enterpriseControlRevision ||
+    await workItemDependencies.planning.getAuthorizationRevision(snapshot.workspaceId) !== snapshot.planningRevision
+}
 
 /**
  * Resolves the credential owner for an Agent Run read.
@@ -758,8 +773,15 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
 
     /** Supersedes a stalled run of another instance and claims the Work Item for the caller in one transaction. */
     async takeOver(credential, teamId, workItemId, runId, input, context, idempotency) {
-      const principal = await resolveWriter(credential, teamId)
-      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      // Like a start or a resume, the take over commits only while the member, Team, and Project access
+      // it was authorized with is unchanged.
+      const authorization = await resolveStableWorkItemAuthorization(
+        credential.workspaceId,
+        async () => await resolveWriter(credential, teamId),
+        async (principal) => (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')).detail,
+      )
+      const { principal, authorizationSnapshot } = authorization
+      const detail = authorization.value
       if (detail.issue.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
       const store = workItemDependencies.agentRuns
       const settings = await store.getSettings(principal.directoryId, teamId)
@@ -820,6 +842,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           // The take over was authorized against this assignment and these settings.
           createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, workItemId, detail.issue.revision),
           store.createSettingsRevisionCheck(principal.directoryId, teamId, settings.revision),
+          // The caller's membership and Team and Project access must not have changed since authorization.
+          ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
           ...(supersededAudit ? [supersededAudit] : []),
           ...(startedAudit ? [startedAudit] : []),
           ...(receipt ? [receipt.transactWriteItem] : []),
@@ -828,8 +852,10 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         if (!(error instanceof AgentRunError)) throw error
         if (error.reason === 'agent_run_not_active') throw await explainTakeOverMiss(principal, teamId, runId)
         if (error.category !== 'temporarily_unavailable') throw error
-        // The Work Item or settings guard failed: report what changed instead of a retryable failure.
-        const latest = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+        // A guard failed: report what changed instead of a retryable failure. Access is resolved again
+        // first, so a caller who lost access meanwhile gets the same answer as on a new request.
+        const current = await resolveWriter(credential, teamId)
+        const latest = await loadAuthorizedTeamIssue(current, teamId, workItemId, 'member')
         if (latest.detail.issue.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
         if (latest.detail.issue.statusCategory !== 'started') {
           throw new AgentRunError('conflict', 'Only a run on a started Work Item can be taken over. Ask a person to release it.', {
@@ -844,6 +870,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         if (latestSettings.revision !== settings.revision) {
           throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the take over.')
         }
+        if (await hasAuthorizationChanged(current, authorizationSnapshot)) throw createWorkItemAuthorizationChangedError()
         throw error
       }
       return response
@@ -968,13 +995,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         if (await store.getLatestRunId(principal.directoryId, teamId, workItemId) !== latestRunId) {
           throw new AgentRunError('conflict', 'Another run started on the Work Item during the request. Reload the task and retry.')
         }
-        if (
-          current.workspaceMember.version !== principal.workspaceMember.version ||
-          current.enterpriseIdentityControlRevision !== authorizationSnapshot.enterpriseControlRevision ||
-          await workItemDependencies.planning.getAuthorizationRevision(principal.directoryId) !== authorizationSnapshot.planningRevision
-        ) {
-          throw createWorkItemAuthorizationChangedError()
-        }
+        if (await hasAuthorizationChanged(current, authorizationSnapshot)) throw createWorkItemAuthorizationChangedError()
         throw error
       }
       return response

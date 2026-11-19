@@ -76,6 +76,9 @@ function installTenantPorts() {
     async getSnapshot() {
       return snapshot
     },
+    async getProfile() {
+      return snapshot.profile
+    },
     async updateProfile() {
       return snapshot.profile
     },

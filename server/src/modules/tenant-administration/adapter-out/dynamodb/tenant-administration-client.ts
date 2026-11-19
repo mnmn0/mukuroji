@@ -23,7 +23,9 @@ import type {
   TenantRetentionReconciliation,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
+  WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
+import { readWorkspaceCalendarSettings } from '@mukuroji/contracts'
 import { calculateAuditExpiresAt } from '../../../audit'
 import {
   TENANT_CLOSURE_STEPS,
@@ -215,6 +217,16 @@ export class DynamoDbTenantAdministrationClient implements
   }
 
   /** Reads the tenant aggregate with strongly consistent record reads. */
+  /**
+   * Reads the tenant profile record alone.
+   *
+   * @param workspaceId - Canonical Workspace identifier.
+   * @returns The stored profile, or undefined when the tenant has no profile yet.
+   */
+  async getProfile(workspaceId: string): Promise<TenantProfile | undefined> {
+    return await this.readOptionalRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile)
+  }
+
   async getSnapshot(workspaceId: string): Promise<TenantAdministrationSnapshot> {
     const [profile, governance] = await Promise.all([
       this.readRecord(workspaceId, PROFILE_RECORD_KEY, readTenantProfile),
@@ -263,6 +275,7 @@ export class DynamoDbTenantAdministrationClient implements
       region: validateTenantRegion(input.region),
       locale: validateTenantLocale(input.locale),
       defaultPolicy: readTenantDefaultPolicy(input.defaultPolicy),
+      ...(input.calendar ? { calendar: readStoredWorkspaceCalendar(input.calendar) } : {}),
       revision: current.revision + 1,
       updatedAt: this.now(),
     }
@@ -1972,6 +1985,7 @@ function readTenantProfile(value: unknown): TenantProfile {
     region: validateTenantRegion(value.region),
     locale: validateTenantLocale(value.locale),
     defaultPolicy: policy,
+    ...(value.calendar === undefined ? {} : { calendar: readStoredWorkspaceCalendar(value.calendar) }),
     status,
     ...(closedAt ? { closedAt } : {}),
     ...(closedByOperationId ? { closedByOperationId } : {}),
@@ -1979,6 +1993,19 @@ function readTenantProfile(value: unknown): TenantProfile {
     createdAt,
     updatedAt,
   }
+}
+
+/**
+ * Reads stored or already-validated Workspace calendar settings.
+ *
+ * @param value - Calendar settings candidate.
+ * @returns The validated settings.
+ * @throws Error When the settings are invalid.
+ */
+function readStoredWorkspaceCalendar(value: unknown): WorkspaceCalendarSettings {
+  const calendar = readWorkspaceCalendarSettings(value)
+  if (!calendar) throw new Error('invalid calendar settings')
+  return calendar
 }
 
 function readTenantDefaultPolicy(value: unknown): TenantDefaultPolicy {

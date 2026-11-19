@@ -216,6 +216,51 @@ describe('Workspace search backfill mapping', () => {
     }
   })
 
+  test('fences directory documents by the revision the live projections use', () => {
+    const team = mapProjectDirectoryItem({
+      directoryId: 'workspace#mukuroji',
+      entryKey: '000010#000000#TEAM#core-team',
+      entryType: 'team',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      nameJa: 'コアチーム',
+      nameEn: 'Core team',
+      nameRevision: 2,
+      lifecycleRevision: 2,
+      creatorUserId: 'owner@example.com',
+    })
+    expect(team).toMatchObject({
+      action: 'put',
+      sourceRevision: 4,
+      preserveCreator: true,
+      document: { sourceRevision: 4, creatorUserId: 'owner@example.com' },
+    })
+
+    const project = mapProjectDirectoryItem({
+      directoryId: 'workspace#mukuroji',
+      entryKey: '000010#000010#PROJECT#refero',
+      entryType: 'project',
+      teamId: 'core-team',
+      teamSortOrder: 10,
+      projectId: 'refero',
+      projectSortOrder: 10,
+      nameJa: 'Refero',
+      nameEn: 'Refero',
+      tone: 'blue',
+      charterRevision: 3,
+      nameRevision: 2,
+      lifecycleRevision: 2,
+      creatorUserId: 'owner@example.com',
+    })
+    // Charter revision plus rename count plus archive and restore count, as the request-time
+    // Project projection computes it.
+    expect(project).toMatchObject({
+      action: 'put',
+      sourceRevision: 7,
+      document: { sourceRevision: 7, creatorUserId: 'owner@example.com' },
+    })
+  })
+
   test('uses different document keys for the same Work Item ID in different Teams', () => {
     const first = mapWorkItem({
       schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -831,6 +876,53 @@ describe('Workspace search backfill runner', () => {
     )
 
     expect(transactionInputs).toHaveLength(0)
+    expect(counters['project-directory']).toEqual({ scanned: 1, projected: 0, deleted: 0, skipped: 1 })
+  })
+
+  test('fences an archived directory row delete by its revision and keeps a restored document', async () => {
+    const transactionInputs: TransactWriteCommandInput[] = []
+    const documentClient = {
+      async send(command: unknown) {
+        if (command instanceof ScanCommand) {
+          return {
+            Items: [{
+              directoryId: 'workspace#mukuroji',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core team',
+              archivedAt: '2026-07-18T02:00:00.000Z',
+              nameRevision: 1,
+              lifecycleRevision: 1,
+            }],
+            ScannedCount: 1,
+          }
+        }
+        if (command instanceof TransactWriteCommand) {
+          transactionInputs.push(command.input)
+          // A restore after the scan projected a newer revision.
+          throw Object.assign(new Error('Transaction cancelled'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+          })
+        }
+        throw new Error('Unexpected DynamoDB command.')
+      },
+    } as unknown as DynamoDBDocumentClient
+
+    const counters = await runBackfill(
+      documentClient,
+      [{ name: 'project-directory', tableName: 'SourceTable', mapItem: mapProjectDirectoryItem }],
+      'WorkspaceSearchTable',
+      { dryRun: false, help: false },
+    )
+
+    expect(transactionInputs[0]?.TransactItems?.[0]?.Delete).toMatchObject({
+      ConditionExpression: 'attribute_not_exists(#sourceRevision) OR #sourceRevision <= :sourceRevision',
+      ExpressionAttributeValues: { ':sourceRevision': 2 },
+    })
     expect(counters['project-directory']).toEqual({ scanned: 1, projected: 0, deleted: 0, skipped: 1 })
   })
 

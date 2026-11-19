@@ -13,7 +13,7 @@ import {
   createSearchWorkItemStatusKey,
   createSearchWorkItemTypeKey,
 } from '@mukuroji/contracts'
-import type { TaskViewDefinition } from '@mukuroji/contracts'
+import type { TaskViewDefinition, WorkspaceSearchFilters } from '@mukuroji/contracts'
 import {
   type CreateTaskViewRequest,
   type TaskViewAccessScope,
@@ -1332,6 +1332,193 @@ test('stops source-of-truth resolution after a small result page is full', async
   expect(response.results).toHaveLength(1)
   expect(resolverCalls).toBeLessThanOrEqual(10)
   expect(response.nextCursor).toBeString()
+})
+
+test('returns a Work Item title match on the first page behind thousands of comments', async () => {
+  const comments = Array.from({ length: 1_200 }, (_, index) => createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'comment',
+    entityId: `team/core/issue/issue-1/comment/comment-${String(index).padStart(4, '0')}`,
+    parentId: 'team/core/issue/issue-1',
+    title: `Rollout comment ${index}`,
+    url: `/teams/core/issues?issueId=issue-1&commentId=comment-${index}`,
+    teamId: 'core',
+  }))
+  const workItem = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: 'team/core/issue/zz-last',
+    title: 'Rollout checklist',
+    url: '/teams/core/issues?issueId=zz-last',
+    teamId: 'core',
+  })
+  const queriedPrefixes: string[] = []
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([...comments, workItem], {
+      observeQuery: (prefix) => queriedPrefixes.push(prefix),
+    }),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    limit: 1,
+    filters: { keyword: 'rollout' },
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['core']),
+    },
+  })
+
+  expect(response.results.map(({ id }) => id)).toEqual([workItem.entityId])
+  expect(queriedPrefixes).toEqual(['DOCUMENT#work-item#'])
+})
+
+test('reads only the requested entity type prefixes, Work Items before Projects', async () => {
+  const project = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'project',
+    entityId: 'project-1',
+    title: 'Launch project',
+    url: '/projects/project-1',
+    projectId: 'project-1',
+  })
+  const workItem = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: 'team/core/issue/launch',
+    title: 'Launch checklist',
+    url: '/teams/core/issues?issueId=launch',
+    teamId: 'core',
+    projectId: 'project-1',
+  })
+  const document = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'document',
+    entityId: 'document-1',
+    title: 'Launch notes',
+    url: '/documents/document-1',
+    projectId: 'project-1',
+  })
+  const queriedPrefixes: string[] = []
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([document, project, workItem], {
+      observeQuery: (prefix) => queriedPrefixes.push(prefix),
+    }),
+    {} as DynamoDBClient,
+    false,
+  )
+  const filters: WorkspaceSearchFilters = { entityTypes: ['project', 'work-item'] }
+  const input = {
+    workspaceId: 'workspace-1',
+    limit: 1,
+    filters,
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-1']),
+      teamIds: new Set(['core']),
+    },
+  }
+
+  const first = await client.search(input)
+  const second = await client.search({ ...input, cursor: first.nextCursor })
+
+  expect(first.results.map(({ id }) => id)).toEqual([workItem.entityId])
+  expect(second.results.map(({ id }) => id)).toEqual([project.entityId])
+  expect(second.nextCursor).toBeUndefined()
+  expect(queriedPrefixes).toEqual([
+    'DOCUMENT#work-item#',
+    'DOCUMENT#work-item#',
+    'DOCUMENT#project#',
+  ])
+})
+
+test('resumes in the next entity type after the evaluation budget ends a prefix', async () => {
+  const workItems = Array.from({ length: 1_000 }, (_, index) => createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: `team/core/issue/issue-${String(index).padStart(4, '0')}`,
+    title: `Issue ${index}`,
+    url: `/teams/core/issues?issueId=issue-${index}`,
+    teamId: 'core',
+  }))
+  const project = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'project',
+    entityId: 'project-1',
+    title: 'Budget project',
+    url: '/projects/project-1',
+    projectId: 'project-1',
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([...workItems, project]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const input = {
+    workspaceId: 'workspace-1',
+    filters: { keyword: 'budget' },
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-1']),
+      teamIds: new Set(['core']),
+    },
+  }
+
+  const first = await client.search(input)
+  const second = await client.search({ ...input, cursor: first.nextCursor })
+
+  expect(first.results).toEqual([])
+  expect(first.nextCursor).toBeString()
+  expect(second.results.map(({ id }) => id)).toEqual([project.entityId])
+  expect(second.nextCursor).toBeUndefined()
+})
+
+test('ranks title matches above body-only matches within a page', async () => {
+  const bodyMatch = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: 'team/core/issue/aa-body',
+    title: 'Prepare release',
+    body: 'Coordinate the Ｍｉｇｒａｔｉｏｎ window',
+    url: '/teams/core/issues?issueId=aa-body',
+    teamId: 'core',
+  })
+  const titleMatch = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'project',
+    entityId: 'project-1',
+    title: 'Data migration',
+    url: '/projects/project-1',
+    projectId: 'project-1',
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([bodyMatch, titleMatch]),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    filters: { keyword: 'migration' },
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-1']),
+      teamIds: new Set(['core']),
+    },
+  })
+
+  expect(response.results.map(({ id }) => id)).toEqual([titleMatch.entityId, bodyMatch.entityId])
 })
 
 test('keeps unread saved views from advancing the cursor past unprocessed rows', async () => {

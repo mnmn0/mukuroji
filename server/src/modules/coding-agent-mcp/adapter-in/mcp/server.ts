@@ -9,6 +9,7 @@ import {
   isAgentRunArtifactUrl,
 } from '@mukuroji/contracts'
 import { createAgentTasks, type AgentTaskScope } from '../../application/agent-tasks'
+import { CODING_AGENT_MCP_VERSION, describeCodingAgentMcpBuild, type ServerCompatibility } from '../../application/compatibility'
 import { AgentTaskError, type AgentWorkItemApi } from '../../application/work-item-api'
 
 const id = z.string().trim().min(1).max(256).refine((value) => value !== '.' && value !== '..' &&
@@ -23,7 +24,7 @@ const readAnnotations = { readOnlyHint: true, destructiveHint: false, idempotent
 const writeAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true }
 const customValues = z.record(id, z.union([z.string().max(4096), z.number().finite(), z.boolean(), z.array(z.string().max(256)).max(100)]))
 
-const guide = `Use get_configuration to learn the configured Team, assignee, runtime, Agent settings (lease length), workflow IDs, and required custom fields.
+const guide = `Use get_configuration to learn the configured Team, assignee, runtime, Agent settings (lease length), workflow IDs, and required custom fields. Its mcp field shows this MCP build's version and whether the server supports it; when mcp.serverCompatibility.status is not compatible, tell the user its message before relying on tools that fail.
 Use get_next_task to find work. action=in_progress means this agent instance already holds an active Agent Run for that started task: resume it. Close any other entry in ownRuns whose task is no longer started with finish_run. otherRuns lists tasks held by other instances of the same member; never continue or take them over without an explicit user handoff. When the user hands one over, its run is stalled, and get_configuration shows agentSettings.allowTakeoverAfterLeaseExpiry=true, call take_over_task with its runId; otherwise ask a person to release the run. action=resume means no agent holds that started task and its newest run (resumedFromRun) was paused, or completed before a person sent the task back: read get_task and list_progress, then call resume_task with the task's revision and previousRunId=resumedFromRun.runId to start a new run on it before continuing. skipped lists candidates that were not selected because they are blocked, already claimed, or not in a ready status; resume_unchecked marks the first started task the search for resumes stopped at (it reads at most 20 tasks per call, and stops on a rate limit), so check that task yourself or call get_next_task again later.
 get_next_task is advisory and does not claim work. Use start_task with the task's revision, an explicit started status ID, and a new UUID idempotencyKey. It claims the task with an Agent Run and moves it to the started status in one transaction. Only begin implementation after it succeeds. agent_run_conflict means another instance holds the task; conflict means another writer changed it. Inspect the task before deciding what to do.
 Task mutations and report_progress renew the run lease. During long work without tool calls, call heartbeat with your runId before the lease expires (at most once every 10 seconds). A run whose lease expired is shown to people as stalled; it stays yours until a person releases it or, when the Team allows it, another instance of the same member takes it over.
@@ -57,11 +58,17 @@ async function result(run: () => Promise<unknown>): Promise<CallToolResult> {
  * @param api - Public API port; credentials stay behind this boundary.
  * @param scope - Operator-selected assignment, Project, and display label.
  * @param readOnly - When true, exposes only read tools.
+ * @param serverCompatibility - Reads this build's compatibility with the server; omitted in tests without a server.
  * @returns An unconnected MCP server ready for stdio or a test transport.
  */
-export function createCodingAgentMcpServer(api: AgentWorkItemApi, scope: AgentTaskScope, readOnly = false): McpServer {
+export function createCodingAgentMcpServer(
+  api: AgentWorkItemApi,
+  scope: AgentTaskScope,
+  readOnly = false,
+  serverCompatibility?: () => Promise<ServerCompatibility>,
+): McpServer {
   const tasks = createAgentTasks(api, scope)
-  const server = new McpServer({ name: 'mukuroji-tasks', version: '1.0.0' }, { instructions: guide })
+  const server = new McpServer({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION }, { instructions: guide })
   server.registerResource('workflow-guide', 'mukuroji://agent/workflow', { mimeType: 'text/plain', description: 'Task selection, lifecycle, progress, and recovery guide.' }, async (uri) => ({
     contents: [{ uri: uri.href, mimeType: 'text/plain', text: guide }],
   }))
@@ -87,7 +94,10 @@ export function createCodingAgentMcpServer(api: AgentWorkItemApi, scope: AgentTa
   server.registerPrompt('work-on-next-task', { description: 'Find assigned work and carry it through recorded progress and completion.', argsSchema: z.object({}) }, () => ({
     messages: [{ role: 'user', content: { type: 'text', text: guide } }],
   }))
-  server.registerTool('get_configuration', { description: 'Get Team, assignee, Agent settings (lease, take over, ready and resumable statuses), the agent brief, custom workflow status IDs, and required custom fields. No secrets are returned.', inputSchema: z.object({}), annotations: readAnnotations }, () => result(() => tasks.configuration()))
+  server.registerTool('get_configuration', { description: 'Get this MCP build version and its server compatibility, Team, assignee, Agent settings (lease, take over, ready and resumable statuses), the agent brief, custom workflow status IDs, and required custom fields. No secrets are returned.', inputSchema: z.object({}), annotations: readAnnotations }, () => result(async () => {
+    const [configuration, compatibility] = await Promise.all([tasks.configuration(), serverCompatibility?.()])
+    return { ...configuration, mcp: { ...describeCodingAgentMcpBuild(), ...(compatibility === undefined ? {} : { serverCompatibility: compatibility }) } }
+  }))
   server.registerTool('list_tasks', {
     description: 'List visible tasks with canonical statuses and revisions. Follow nextCursor even when items is empty. Use assigneeUserId to restrict ownership.',
     inputSchema: z.object({ ...selectionFields, ...pageFields, assigneeUserId: id.optional(), workflowStatusId: id.optional() }), annotations: readAnnotations,

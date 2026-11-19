@@ -136,9 +136,9 @@ export type StartAgentRunRequest = {
   workflowStatusId: string
   /** Client runtime that drives the agent. */
   runtime: AgentRunRuntime
-  /** Display name of the agent. */
+  /** Display name of the agent. Letters and digits in any script, spaces, `.`, `_`, or `-`, without surrounding spaces. */
   agentName: string
-  /** Opaque, stable identifier of the agent instance; the server stores only its hash. */
+  /** Opaque, stable identifier of the agent instance; the server stores only its hash. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -160,9 +160,9 @@ export type ResumeAgentRunRequest = {
   expectedRevision: number
   /** Client runtime that drives the agent. */
   runtime: AgentRunRuntime
-  /** Display name of the agent. */
+  /** Display name of the agent. Letters and digits in any script, spaces, `.`, `_`, or `-`, without surrounding spaces. */
   agentName: string
-  /** Opaque, stable identifier of the agent instance; the server stores only its hash. */
+  /** Opaque, stable identifier of the agent instance; the server stores only its hash. It has no surrounding whitespace or control characters. */
   instanceId: string
   /**
    * Run the agent expects to resume from, such as the `resumedFromRun` that next-task selection offered.
@@ -183,9 +183,9 @@ export type ResumeAgentRunResponse = {
 export type TakeOverAgentRunRequest = {
   /** Client runtime that drives the agent taking over. */
   runtime: AgentRunRuntime
-  /** Display name of the agent taking over. */
+  /** Display name of the agent taking over. Letters and digits in any script, spaces, `.`, `_`, or `-`, without surrounding spaces. */
   agentName: string
-  /** Opaque, stable identifier of the instance taking over; the server stores only its hash. */
+  /** Opaque, stable identifier of the instance taking over; the server stores only its hash. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -199,7 +199,7 @@ export type TakeOverAgentRunResponse = {
 
 /** Request body that extends the lease of an agent's own run. */
 export type HeartbeatAgentRunRequest = {
-  /** Instance identifier sent when the run started; other instances cannot extend the lease. */
+  /** Instance identifier sent when the run started; other instances cannot extend the lease. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -207,7 +207,7 @@ export type HeartbeatAgentRunRequest = {
 export type FinishAgentRunRequest = {
   /** Reason the agent is closing the run. */
   outcome: AgentRunFinishOutcome
-  /** Instance identifier sent when the run started; other instances cannot close the run. */
+  /** Instance identifier sent when the run started; other instances cannot close the run. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -215,7 +215,7 @@ export type FinishAgentRunRequest = {
 export type AgentRunMutationFence = {
   /** Active run of the caller for the mutated Work Item. */
   agentRunId?: string
-  /** Opaque instance identifier of the caller; the server compares only its hash. */
+  /** Opaque instance identifier of the caller; the server compares only its hash. It has no surrounding whitespace or control characters. */
   agentInstanceId?: string
 }
 
@@ -348,7 +348,7 @@ export type AgentRunReport = {
 
 /** Request body that saves a structured report and its comment for an agent's own run. */
 export type ReportAgentRunRequest = {
-  /** Instance identifier sent when the run started; other instances cannot report on the run. */
+  /** Instance identifier sent when the run started; other instances cannot report on the run. It has no surrounding whitespace or control characters. */
   instanceId: string
   /** Kind of report; `progress` when omitted. */
   kind?: AgentRunReportKind
@@ -507,9 +507,10 @@ export const FACTORY_BOARD_COMPLETED_WINDOW_HOURS = 24
 export const FACTORY_BOARD_MAX_ACTIVE_RUNS = 100
 
 /**
- * Largest number of finished runs one Factory board response evaluates while it looks for runs that
- * finished within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS}. Finished runs are stored in run ID
- * order, so the response says when the evaluation stopped before reading every finished run.
+ * Largest number of finished runs one Factory board response reads from each of two groups, newest
+ * finish first: runs that finished within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS} other than
+ * failures, and failed runs of any age. Older finished runs are never read, so the bound depends only
+ * on recent and failed runs, and the response says when either group was left partly unread.
  */
 export const FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS = 500
 

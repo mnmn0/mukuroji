@@ -1,4 +1,13 @@
-import type { RunningTimer, TimeEntry, TimeSheet } from '@mukuroji/contracts'
+import {
+  createDefaultDueDateWorkItemSchedule,
+  createDefaultUnscheduledWorkItemSchedule,
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+  type CanonicalWorkItem,
+  type RunningTimer,
+  type TimeEntry,
+  type TimeSheet,
+} from '@mukuroji/contracts'
 
 /** Monday of the fixture week. */
 export const timeTrackingFixtureWeekStart = '2026-11-09'
@@ -138,3 +147,73 @@ export const timeTrackingFixtureTeamTimesheet: TimeSheet = {
   weeks: [{ key: '2026-11-09', label: '2026-11-09', minutes: 555, billableMinutes: 120, entryCount: 6 }],
   costsRedacted: false,
 }
+
+/**
+ * Creates a fixture Work Item owned by the fixture member.
+ *
+ * @param overrides - Fields that differ from the default open, unscheduled item.
+ * @returns Canonical Work Item.
+ */
+export function createWorkItemFixture(
+  overrides: Partial<CanonicalWorkItem> & Pick<CanonicalWorkItem, 'id' | 'title'>,
+): CanonicalWorkItem {
+  return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    assigneeUserId: 'aoi@example.com',
+    creatorMemberKey: 'aoi@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '',
+    schedule: createDefaultUnscheduledWorkItemSchedule(),
+    priority: 'medium',
+    createdAt: '2026-11-01T00:00:00.000Z',
+    updatedAt: '2026-11-01T00:00:00.000Z',
+    source: 'dynamodb',
+    ...overrides,
+  }
+}
+
+/** The fixture member's Work Items in the fixture week, one for each weekly report section. */
+export const weeklyReportFixtureWorkItems: CanonicalWorkItem[] = [
+  createWorkItemFixture({
+    id: 'onboarding',
+    key: 'CORE-12',
+    title: 'Reduce onboarding friction',
+    workflowStatusId: 'done',
+    statusCategory: 'completed',
+    dueDate: '2026-11-12',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-11-12'),
+    actualStartDate: '2026-11-04',
+    actualEndDate: '2026-11-11',
+  }),
+  createWorkItemFixture({
+    id: 'pricing',
+    key: 'CORE-15',
+    title: 'Update the pricing page',
+    workflowStatusId: 'active',
+    statusCategory: 'started',
+    dueDate: '2026-11-20',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-11-20'),
+    actualStartDate: '2026-11-10',
+  }),
+  createWorkItemFixture({
+    id: 'invoice',
+    key: 'CORE-9',
+    title: 'Fix invoice rounding',
+    dueDate: '2026-11-06',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-11-06'),
+  }),
+  createWorkItemFixture({
+    id: 'survey',
+    key: 'CORE-21',
+    title: 'Send the customer survey',
+    dueDate: '2026-11-18',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-11-18'),
+  }),
+]

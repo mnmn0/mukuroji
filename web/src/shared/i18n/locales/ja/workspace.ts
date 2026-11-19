@@ -475,7 +475,7 @@ export const workspaceMessages = {
   'workspace.settings.install.badge.unsupported': 'この端末では通知の許可を確認できなかったため、アプリのアイコンに未読数が表示されない場合があります。',
   'workspace.settings.displayTitle': '表示設定',
   'workspace.settings.displayDescription':
-    'このブラウザで使う文字サイズ、配色、表示言語を調整します。',
+    '文字サイズ、配色、表示言語、タイムゾーンを調整します。設定はアカウントに保存され、別の端末でも引き継がれます。',
   'workspace.settings.fontSizeTitle': 'フォントサイズ',
   'workspace.settings.fontSizeDescription':
     'タスク一覧、サイドバー、設定画面などアプリ全体の文字サイズに反映されます。',
@@ -492,7 +492,14 @@ export const workspaceMessages = {
   'workspace.settings.profileDescription':
     '現在のセッションで使用しているアカウントです。',
   'workspace.settings.languageDescription':
-    '画面で使用する表示言語を選択します。変更はこのブラウザに保存されます。',
+    '画面で使用する表示言語を選択します。変更はアカウントに保存され、どの端末でも使われます。',
+  'workspace.settings.preferencesSaveFailed':
+    '表示設定をアカウントに保存できませんでした。保存できるまでは、この端末だけに反映されます。',
+  'workspace.settings.preferencesSaveRetry': '再試行',
+  'workspace.settings.timeZoneTitle': 'タイムゾーン',
+  'workspace.settings.timeZoneDescription':
+    'アカウントに保存するタイムゾーンを選択します。「ブラウザの設定」のままにすると、この端末の設定に従います。',
+  'workspace.settings.timeZoneBrowser': 'ブラウザの設定',
   'workspace.settings.notificationTitle': '通知設定',
   'workspace.settings.notificationDescription':
     '受信箱とSlackへの通知、配信頻度、通知しない時間帯を設定します。',
@@ -766,9 +773,9 @@ export const workspaceMessages = {
   'sidebar.archive.error': 'アーカイブできませんでした',
   'sidebar.archive.confirmTitle': 'アーカイブの確認',
   'sidebar.archive.confirmTeamDescription':
-    '{name} と配下のプロジェクトをアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。',
+    '{name} と配下のプロジェクトをアーカイブし、サイドバーから非表示にします。設定の「チームとプロジェクトの管理」から復元できます。',
   'sidebar.archive.confirmProjectDescription':
-    '{name} をアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。',
+    '{name} をアーカイブし、サイドバーから非表示にします。設定の「チームとプロジェクトの管理」から復元できます。',
   'sidebar.archive.cancel': 'キャンセル',
   'sidebar.archive.confirm': 'アーカイブ',
   'sidebar.teamOverview': 'チーム概要',
@@ -782,6 +789,7 @@ export const workspaceMessages = {
   'sidebar.unreadCount': '{count}件の未読',
   'sidebar.nav.home': 'ホーム',
   'sidebar.nav.myTasks': 'マイタスク',
+  'sidebar.nav.workItems': 'Work Item 一覧',
   'sidebar.nav.inbox': '受信箱',
   'sidebar.nav.requests': 'リクエスト',
   'sidebar.nav.customers': '顧客',
@@ -811,6 +819,16 @@ export const workspaceMessages = {
   'workspace.tenantAdministration.region': '管理リージョン',
   'workspace.tenantAdministration.locale': 'テナント locale',
   'workspace.tenantAdministration.defaultRole': '既定 member role',
+  'workspace.tenantAdministration.fiscalYearStartMonth': '会計年度の開始月',
+  'workspace.tenantAdministration.monthOption': '{month}月',
+  'workspace.tenantAdministration.weekStartDay': '週の開始曜日',
+  'workspace.tenantAdministration.weekday.sunday': '日曜日',
+  'workspace.tenantAdministration.weekday.monday': '月曜日',
+  'workspace.tenantAdministration.weekday.tuesday': '火曜日',
+  'workspace.tenantAdministration.weekday.wednesday': '水曜日',
+  'workspace.tenantAdministration.weekday.thursday': '木曜日',
+  'workspace.tenantAdministration.weekday.friday': '金曜日',
+  'workspace.tenantAdministration.weekday.saturday': '土曜日',
   'workspace.tenantAdministration.memberRole': 'member',
   'workspace.tenantAdministration.guestRole': 'guest',
   'workspace.tenantAdministration.saveProfile': 'profile を保存',

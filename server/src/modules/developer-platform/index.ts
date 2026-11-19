@@ -9,6 +9,7 @@ export { createWebhookSignature } from './domain/webhook-signature'
 export {
   createWebhookGrantCleanupDirectoryId,
   createWebhookGrantCleanupEntryKey,
+  createWebhookGrantCleanupEntryKeyPrefix,
   createWebhookGrantCleanupItem,
   createWebhookMemberAuthorizationKey,
   createWebhookProjectAuthorizationSortKey,

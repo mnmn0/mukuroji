@@ -1,11 +1,13 @@
 /**
- * Builds the distributable coding agent MCP: a single-file Node bundle, `mcp.mjs`, and
- * `mcp.mjs.LICENSES.txt` with the license of every third-party package the bundle inlines.
+ * Builds the distributable coding agent MCP: a single-file Node bundle, `mcp.mjs`,
+ * `mcp.mjs.LICENSES.txt` with the license of every third-party package the bundle inlines, and
+ * `mcp.mjs.sha256` with checksums of both in `sha256sum -c` format.
  *
  * Usage: `bun scripts/build-coding-agent-mcp.ts [--outdir <dir>]` (default `server/dist`).
  */
+import { createHash } from 'node:crypto'
 import { readdir, readFile, writeFile } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 
 /** Repository root, resolved from this script's location. */
 const repositoryRoot = resolve(import.meta.dir, '..')
@@ -74,7 +76,19 @@ async function readBundledPackage(directory: string): Promise<BundledPackage> {
 }
 
 /**
- * Builds the bundle and its license notices.
+ * Writes SHA-256 checksums of the given files next to them, in `sha256sum -c` format.
+ *
+ * @param paths - Files to checksum, all in the same directory.
+ * @param checksumPath - Path of the checksum file to write.
+ */
+async function writeChecksums(paths: readonly string[], checksumPath: string): Promise<void> {
+  const lines = await Promise.all(paths.map(async (path) =>
+    `${createHash('sha256').update(await readFile(path)).digest('hex')}  ${basename(path)}`))
+  await writeFile(checksumPath, `${lines.join('\n')}\n`)
+}
+
+/**
+ * Builds the bundle, its license notices, and their checksums.
  *
  * @param outdir - Output directory.
  * @returns Paths of the written files.
@@ -103,7 +117,10 @@ async function buildCodingAgentMcp(outdir: string): Promise<string[]> {
   ].join('\n')
   const licensesPath = join(outdir, 'mcp.mjs.LICENSES.txt')
   await writeFile(licensesPath, notices)
-  return [join(outdir, 'mcp.mjs'), licensesPath]
+  const bundlePath = join(outdir, 'mcp.mjs')
+  const checksumPath = join(outdir, 'mcp.mjs.sha256')
+  await writeChecksums([bundlePath, licensesPath], checksumPath)
+  return [bundlePath, licensesPath, checksumPath]
 }
 
 for (const path of await buildCodingAgentMcp(readOutdir(process.argv.slice(2)))) console.log(path)
