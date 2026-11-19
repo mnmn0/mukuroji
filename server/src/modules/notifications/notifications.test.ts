@@ -844,6 +844,34 @@ describe('notification store', () => {
       },
     })).rejects.toBeInstanceOf(NotificationError)
   })
+  test('keeps the Email opt-in boundary, using the last save of preferences stored before Email transport', async () => {
+    let stored: Record<string, unknown> | undefined = {
+      recipientKey: 'workspace-1#member@example.com', notificationKey: NOTIFICATION_PREFERENCES_KEY, itemType: 'preferences',
+      ...DEFAULT_NOTIFICATION_PREFERENCES, version: 1, channels: { inApp: true, email: true, push: false },
+      updatedAt: '2026-09-26T09:00:00.000Z',
+    }
+    const recording = createClient(({ constructor, input }) => {
+      if (constructor.name === 'GetCommand') return { Item: stored }
+      if (constructor.name === 'PutCommand') {
+        if (typeof input.Item !== 'object' || input.Item === null || Array.isArray(input.Item)) throw new Error('Missing preference row')
+        stored = { ...input.Item }
+      }
+      return {}
+    })
+    const recipient = { workspaceId: 'workspace-1', memberKey: 'member@example.com' }
+    const legacy = await recording.client.getPreferences(recipient)
+    expect(legacy.emailEnabledAt).toBeUndefined()
+    const changed = await recording.client.savePreferences({ ...recipient,
+      preferences: { ...legacy, frequency: 'daily' }, now: new Date('2026-09-26T10:00:00Z') })
+    expect(changed.emailEnabledAt).toBe('2026-09-26T09:00:00.000Z')
+    const disabled = await recording.client.savePreferences({ ...recipient,
+      preferences: { ...changed, channels: { ...changed.channels, email: false } }, now: new Date('2026-09-26T11:00:00Z') })
+    expect(stored?.emailEnabledAt).toBeUndefined()
+    const enabled = await recording.client.savePreferences({ ...recipient,
+      preferences: { ...disabled, channels: { ...disabled.channels, email: true } }, now: new Date('2026-09-26T12:00:00Z') })
+    expect(enabled.emailEnabledAt).toBe('2026-09-26T12:00:00.000Z')
+    expect(await recording.client.getPreferences(recipient)).toEqual(enabled)
+  })
   test('owns the Slack activation boundary across updates, disable, re-enable and response-loss retry', async () => {
     let stored: Record<string, unknown> | undefined
     const recording = createClient(({ constructor, input }) => {

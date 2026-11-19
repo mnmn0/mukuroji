@@ -31,7 +31,8 @@ scan して対象を探していた。読み取り費用は完了・archive 済�
   ない既存 row は次の更新で index に載る。既存 row への一括付与は #365 の migration 契約で行う。
 - 属性は Work Item の作成・更新・日程の連鎖更新・承認による状態遷移の各書き込みで、本体と同じ
   UpdateItem / Put の中で計算して書く。計算は `work-items` module の
-  `work-item-notification-schedule-index.ts` に 1 か所だけ置く。
+  `work-item-notification-schedule-index.ts` に 1 か所だけ置く。CDK の demo seed（`cdk/lib/bootstrap-data.ts`）は
+  server を import できないため同じ計算を写し、両方のテストで同じ shard の値を固定して食い違いを検出する。
 - schedule は shard ごとに `notificationDueKey <= 今日（UTC）+ 366 日` を昇順に読み、page 上限なしで最後まで
   読む。366 日は期限前通知の日数の上限（365 日）と timezone の余裕 1 日。index の item で段階が出るときだけ
   base table を強整合で読み直して評価する。

@@ -250,10 +250,10 @@ describe('timesheet reminder evaluation', () => {
       'workspace-1',
       'core',
       [
-        { entryId: 'b-old', memberKey: 'b@example.com', startAt: '2026-07-10T09:00:00.000Z', endAt: '2026-07-10T10:00:00.000Z' },
-        { entryId: 'a-new', memberKey: 'a@example.com', startAt: '2026-07-18T09:00:00.000Z', endAt: '2026-07-18T10:00:00.000Z' },
-        { entryId: 'a-old', memberKey: 'a@example.com', startAt: '2026-07-06T09:00:00.000Z', endAt: '2026-07-06T10:00:00.000Z' },
-        { entryId: 'a-mid', memberKey: 'a@example.com', startAt: '2026-07-12T09:00:00.000Z', endAt: '2026-07-12T10:00:00.000Z' },
+        { entryId: 'b-old', memberKey: 'b@example.com', projectId: 'platform', startAt: '2026-07-10T09:00:00.000Z', endAt: '2026-07-10T10:00:00.000Z' },
+        { entryId: 'a-new', memberKey: 'a@example.com', projectId: 'platform', startAt: '2026-07-18T09:00:00.000Z', endAt: '2026-07-18T10:00:00.000Z' },
+        { entryId: 'a-old', memberKey: 'a@example.com', projectId: 'platform', startAt: '2026-07-06T09:00:00.000Z', endAt: '2026-07-06T10:00:00.000Z' },
+        { entryId: 'a-mid', memberKey: 'a@example.com', projectId: 'platform', startAt: '2026-07-12T09:00:00.000Z', endAt: '2026-07-12T10:00:00.000Z' },
       ],
       now,
       async (memberKey) => memberKey === 'b@example.com' ? 14 : 7,
@@ -265,6 +265,8 @@ describe('timesheet reminder evaluation', () => {
       entryIds: ['a-old', 'a-mid'],
       unsubmittedCount: 2,
       oldestStartAt: '2026-07-06T09:00:00.000Z',
+      projectId: 'platform',
+      dueBefore: '2026-07-13T00:00:00.000Z',
       reminderDays: 7,
       cycle: Math.floor(now.getTime() / (7 * 86_400_000)),
     }])

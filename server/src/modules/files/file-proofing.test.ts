@@ -165,6 +165,15 @@ class MemoryDocumentClient {
           if (Number(values[':pendingDelta']) < 0 && Number(existing?.pendingCount ?? 0) < 1) {
             throw createTransactionCancelledError()
           }
+          // A completion Gate's expected counts ride on the summary update.
+          if (
+            values[':expectedPending'] !== undefined &&
+            (Number(existing?.pendingCount ?? 0) !== Number(values[':expectedPending']) ||
+              Number(existing?.approvedCount ?? 0) !== Number(values[':expectedApproved']) ||
+              Number(existing?.changesRequestedCount ?? 0) !== Number(values[':expectedChanges']))
+          ) {
+            throw createTransactionCancelledError()
+          }
           continue
         }
         if (values[':increment'] !== undefined && values[':entryType'] === 'planning-meta') {
@@ -2187,6 +2196,91 @@ describe('file proofing domain', () => {
         workflowStatusId: 'qa-approved',
       },
     })
+  })
+
+  test('commits a completing decision only while the approval counts the Gate judged are unchanged', async () => {
+    /**
+     * Requests one approval with a completion transition and approves it.
+     *
+     * @param expectedApprovalSummary - Counts the resolver reports the Gate judged.
+     * @returns The decision promise.
+     */
+    const decide = async (expectedApprovalSummary: { pendingCount: number, approvedCount: number, changesRequestedCount: number }) => {
+      const state = createClient('work-items')
+      const workItemKey = { directoryTeamId: 'workspace-1#team#core', issueId: 'work-item-1' }
+      state.documentClient.items.set(createMemoryKey(workItemKey), {
+        ...workItemKey,
+        workflowSchemaVersion: 1,
+        workflowStatusId: 'review-ready',
+        statusCategory: 'started',
+        revision: 4,
+        updatedAt: '2026-07-12T00:00:00.000Z',
+      })
+      const session = await state.client.createUpload(
+        scope,
+        manager,
+        { contentType: 'application/pdf', fileName: 'gate.pdf', sizeBytes: 20 },
+        createAuditContext('gate-file'),
+      )
+      state.objectClient.objects.set(state.objectClient.lastObjectKey!, {
+        contentType: 'application/pdf',
+        objectVersionId: 'immutable-gate-version-1',
+        sizeBytes: 20,
+        scanStatus: 'available',
+      })
+      await state.client.completeUpload(scope, manager, session.file.id, session.version.id, createAuditContext('gate-complete'))
+      const approval = await state.client.createApproval(
+        scope,
+        manager,
+        {
+          fileId: session.file.id,
+          versionId: session.version.id,
+          reviewerMemberKeys: ['reviewer@example.com'],
+          dueAt: '2099-07-20T00:00:00.000Z',
+          completionTransition: 'qa-approved',
+        },
+        createAuditContext('gate-approval'),
+      )
+      const fence = await state.client.readApprovalSummaryFence(scope)
+      expect(fence.summary).toMatchObject({ pendingCount: 1, approvedCount: 0, changesRequestedCount: 0 })
+      expect(fence.conditionCheck.ConditionCheck).toMatchObject({
+        Key: { recordKey: 'APPROVAL_SUMMARY' },
+        ConditionExpression: '#pending = :pending AND #approved = :approved AND #changes = :changes',
+        ExpressionAttributeValues: { ':pending': 1, ':approved': 0, ':changes': 0 },
+      })
+      return state.client.decideApproval(
+        scope,
+        { memberKey: 'reviewer@example.com', guest: false, canWrite: false, canManage: false },
+        approval.id,
+        { decision: 'approve', expectedRevision: 1 },
+        createAuditContext('gate-decision'),
+        async (completionTransition) => ({
+          workflowStatusId: completionTransition,
+          statusCategory: 'completed',
+          workflowSchemaVersion: 1,
+          expectedRevision: 4,
+          configurationConditionChecks: [],
+          expectedApprovalSummary,
+        }),
+      )
+    }
+
+    expect((await decide({ pendingCount: 1, approvedCount: 0, changesRequestedCount: 0 })).status).toBe('approved')
+    // Another approval was requested after the Gate read the counts.
+    await expect(decide({ pendingCount: 0, approvedCount: 0, changesRequestedCount: 0 })).rejects.toMatchObject({
+      status: 409,
+      code: 'ApprovalCompletionTransitionConflict',
+    })
+  })
+
+  test('accepts a missing approval summary row as zero counts when fencing them', async () => {
+    const state = createClient()
+    const fence = await state.client.readApprovalSummaryFence(scope)
+
+    expect(fence.summary).toMatchObject({ pendingCount: 0, approvedCount: 0, changesRequestedCount: 0 })
+    expect(fence.conditionCheck.ConditionCheck?.ConditionExpression).toBe(
+      'attribute_not_exists(scopeKey) OR (#pending = :pending AND #approved = :approved AND #changes = :changes)',
+    )
   })
 
   test('fails closed when an approval transition resolver is unavailable or cannot resolve the ID', async () => {

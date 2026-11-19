@@ -7,17 +7,20 @@ import {
   type QueryCommandInput,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
-import type {
-  RunningTimer,
-  TimeBudget,
-  TimeEntry,
-  TimeEntryHistory,
-  TimeEntrySource,
-  TimeEntryStatus,
-  TimeSheet,
-  TimeSummaryGroup,
-  TimeTrackingGroupBy,
-  TimeTrackingSummary,
+import {
+  TIME_ENTRY_CATEGORIES,
+  UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
+  type RunningTimer,
+  type TimeBudget,
+  type TimeEntry,
+  type TimeEntryCategory,
+  type TimeEntryHistory,
+  type TimeEntrySource,
+  type TimeEntryStatus,
+  type TimeSheet,
+  type TimeSummaryGroup,
+  type TimeTrackingGroupBy,
+  type TimeTrackingSummary,
 } from '@mukuroji/contracts'
 import {
   calculateAuditExpiresAt,
@@ -86,6 +89,7 @@ const CURRENCY_PATTERN = /^[A-Z]{3}$/u
 const MAX_DESCRIPTION_LENGTH = 4_000
 const MAX_ENTRY_DURATION_MINUTES = 24 * 60 * 7
 const MAX_ENTRY_DURATION_MILLISECONDS = MAX_ENTRY_DURATION_MINUTES * 60_000
+const MAX_DURATION_ONLY_MINUTES = 24 * 60
 const MAX_LIST_LIMIT = 500
 const TIME_ENTRY_DATE_INDEX_NAME = 'TimeEntryTeamDateIndex'
 const TIME_ENTRY_AUDIT_FIELDS = [
@@ -94,6 +98,8 @@ const TIME_ENTRY_AUDIT_FIELDS = [
   'startAt',
   'endAt',
   'durationMinutes',
+  'durationOnly',
+  'category',
   'description',
   'billable',
   'currency',
@@ -115,10 +121,14 @@ export type CreateTimeEntryInput = {
   workItemId: string
   /** Member recording the work. */
   userId: string
-  /** Interval start. */
-  startAt: string
-  /** Interval end. */
-  endAt: string
+  /** Interval start; required unless `duration` is set. */
+  startAt?: string
+  /** Interval end; required unless `duration` is set. */
+  endAt?: string
+  /** Date and minutes recorded without times of day; replaces `startAt` and `endAt`. */
+  duration?: TimeEntryDurationInput
+  /** Optional work category. */
+  category?: TimeEntryCategory
   /** Optional explanation. */
   description?: string
   /** Chargeable flag. */
@@ -131,6 +141,26 @@ export type CreateTimeEntryInput = {
   source: TimeEntrySource
   /** Optional client key used to make audit writes idempotent across retries. */
   idempotencyKey?: string
+}
+
+/** Worked minutes on a local date, entered without start and end times. */
+export type TimeEntryDurationInput = {
+  /** Local work date as `YYYY-MM-DD`. */
+  date: string
+  /** Worked minutes; at most the length of the local date. */
+  minutes: number
+  /** IANA timezone that defines the local date. */
+  timeZone: string
+}
+
+/** A create request after validation, with the interval resolved. */
+type NormalizedCreateTimeEntryInput = Omit<CreateTimeEntryInput, 'startAt' | 'endAt' | 'duration' | 'idempotencyKey'> & {
+  /** Resolved interval start. */
+  startAt: string
+  /** Resolved interval end. */
+  endAt: string
+  /** Whether the interval came from a date and minutes rather than times of day. */
+  durationOnly: boolean
 }
 
 /** A time entry update request. */
@@ -161,6 +191,8 @@ export type UpdateTimeEntryInput = {
   workItemId?: string
   /** Optional new Project. */
   projectId?: string | null
+  /** Optional new work category; `null` makes the entry uncategorized. */
+  category?: TimeEntryCategory | null
   /** Optional new description. */
   description?: string | null
   /** Optional new chargeable flag. */
@@ -510,6 +542,8 @@ export class TimeTrackingService {
       startAt: normalized.startAt,
       endAt: normalized.endAt,
       durationMinutes: calculateDurationMinutes(normalized.startAt, normalized.endAt),
+      ...(normalized.durationOnly ? { durationOnly: true } : {}),
+      ...(normalized.category ? { category: normalized.category } : {}),
       ...(normalized.description ? { description: normalized.description } : {}),
       billable: normalized.billable,
       currency: normalized.currency,
@@ -589,6 +623,8 @@ export class TimeTrackingService {
       startAt,
       endAt,
       durationMinutes: calculateDurationMinutes(startAt, endAt),
+      ...(input.startAt === undefined && input.endAt === undefined ? {} : { durationOnly: undefined }),
+      ...(input.category === null ? { category: undefined } : input.category === undefined ? {} : { category: readCategory(input.category) }),
       ...(input.description === null ? { description: undefined } : input.description === undefined ? {} : { description: normalizeDescription(input.description) }),
       billable: input.billable ?? current.billable,
       currency,
@@ -1723,13 +1759,12 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
 }
 
 /** Normalizes and validates a manual entry request. */
-function normalizeCreateInput(input: CreateTimeEntryInput, canManageRates: boolean): CreateTimeEntryInput {
+function normalizeCreateInput(input: CreateTimeEntryInput, canManageRates: boolean): NormalizedCreateTimeEntryInput {
   const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
   const teamId = readIdentifier(input.teamId, 'Team ID')
   const workItemId = readIdentifier(input.workItemId, 'Work Item ID')
   const userId = readIdentifier(input.userId, 'User ID')
-  const startAt = validateInstant(input.startAt, 'Entry start')
-  const endAt = validateInstant(input.endAt, 'Entry end')
+  const { startAt, endAt } = resolveCreateInterval(input)
   validateInterval(startAt, endAt)
   const currency = validateCurrency(input.currency)
   const hourlyRateMinor = input.hourlyRateMinor === undefined ? undefined : requireMoney(input.hourlyRateMinor, 'Hourly rate')
@@ -1744,12 +1779,60 @@ function normalizeCreateInput(input: CreateTimeEntryInput, canManageRates: boole
     userId,
     startAt,
     endAt,
+    durationOnly: input.duration !== undefined,
+    ...(input.category === undefined ? {} : { category: readCategory(input.category) }),
     ...(input.description ? { description: normalizeDescription(input.description) } : {}),
     billable: input.billable,
     currency,
     ...(hourlyRateMinor === undefined ? {} : { hourlyRateMinor }),
     source: input.source,
   }
+}
+
+/**
+ * Resolves the interval of a create request from either its times or its date and minutes.
+ *
+ * A date-and-minutes entry starts at local midnight of the date and must end within that date.
+ *
+ * @param input - Create request carrying either `startAt` and `endAt`, or `duration`.
+ * @returns Normalized interval start and end instants.
+ */
+function resolveCreateInterval(input: CreateTimeEntryInput): { startAt: string; endAt: string } {
+  if (input.duration === undefined) {
+    if (input.startAt === undefined || input.endAt === undefined) {
+      throw new TimeTrackingError(400, 'InvalidRequest', 'Start and end times, or a date and minutes, are required.')
+    }
+    return { startAt: validateInstant(input.startAt, 'Entry start'), endAt: validateInstant(input.endAt, 'Entry end') }
+  }
+  if (input.startAt !== undefined || input.endAt !== undefined) {
+    throw new TimeTrackingError(400, 'InvalidRequest', 'Send either start and end times, or a date and minutes, not both.')
+  }
+  const { date, minutes, timeZone } = input.duration
+  if (!ISO_DATE_PATTERN.test(date) || !isValidCalendarDate(date)) {
+    throw new TimeTrackingError(400, 'InvalidDate', 'Work date must be an ISO date.')
+  }
+  validateTimeZone(timeZone)
+  requireInteger(minutes, 'Minutes', 1, MAX_DURATION_ONLY_MINUTES)
+  const start = resolveLocalDateStart(date, timeZone)
+  const end = start + minutes * 60_000
+  if (end > resolveLocalDateStart(addCalendarDays(date, 1), timeZone)) {
+    throw new TimeTrackingError(400, 'TimeEntryExceedsDay', 'Minutes may not exceed the length of the work date.')
+  }
+  return { startAt: new Date(start).toISOString(), endAt: new Date(end).toISOString() }
+}
+
+/**
+ * Validates a work category.
+ *
+ * @param value - Category value from a request or a stored entry.
+ * @returns The category when it is one of the supported values.
+ */
+function readCategory(value: unknown): TimeEntryCategory {
+  const category = TIME_ENTRY_CATEGORIES.find((candidate) => candidate === value)
+  if (category === undefined) {
+    throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', `Category must be one of ${TIME_ENTRY_CATEGORIES.join(', ')}.`)
+  }
+  return category
 }
 
 /** Validates a lifecycle transition. */
@@ -1806,8 +1889,10 @@ function aggregateEntries(
       ? entry.userId
       : groupBy === 'work-item'
         ? entry.workItemId
-        : entry.projectId ?? 'unassigned'
-    const group = grouped.get(key) ?? createMutableSummaryGroup(key)
+        : groupBy === 'category'
+          ? entry.category ?? UNCATEGORIZED_TIME_ENTRY_GROUP_KEY
+          : entry.projectId ?? 'unassigned'
+    const group = grouped.get(key) ?? createMutableSummaryGroup(key, groupBy === 'category' && key === UNCATEGORIZED_TIME_ENTRY_GROUP_KEY ? 'Uncategorized' : undefined)
     group.minutes += minutes
     group.billableMinutes += entry.billable ? minutes : 0
     group.entryIds.add(entry.id)
@@ -1914,6 +1999,8 @@ function splitEntryByLocalDate(entry: TimeEntry, timeZone: string, from: string,
 type MutableSummaryGroup = {
   /** Group identifier exposed to summary consumers. */
   key: string
+  /** Label that replaces the default key-based label, when set. */
+  label?: string
   /** Total recorded minutes in the group. */
   minutes: number
   /** Total billable minutes in the group. */
@@ -1928,10 +2015,11 @@ type MutableSummaryGroup = {
   actualCostByCurrency: Map<string, number>
 }
 
-/** Creates an empty aggregation row. */
-function createMutableSummaryGroup(key: string): MutableSummaryGroup {
+/** Creates an empty aggregation row, optionally with a label other than the key. */
+function createMutableSummaryGroup(key: string, label?: string): MutableSummaryGroup {
   return {
     key,
+    ...(label === undefined ? {} : { label }),
     minutes: 0,
     billableMinutes: 0,
     entryIds: new Set<string>(),
@@ -1945,7 +2033,7 @@ function createMutableSummaryGroup(key: string): MutableSummaryGroup {
 function toSummaryGroup(group: MutableSummaryGroup, includeCosts: boolean): TimeSummaryGroup {
   return {
     key: group.key,
-    label: group.key === 'unassigned' ? 'Unassigned' : group.key,
+    label: group.label ?? (group.key === 'unassigned' ? 'Unassigned' : group.key),
     minutes: group.minutes,
     billableMinutes: group.billableMinutes,
     entryCount: group.entryIds.size,
@@ -2021,6 +2109,8 @@ function toAuditEntrySnapshot(entry: TimeEntry): Record<string, unknown> {
     startAt: entry.startAt,
     endAt: entry.endAt,
     durationMinutes: entry.durationMinutes,
+    ...(entry.durationOnly ? { durationOnly: true } : {}),
+    ...(entry.category ? { category: entry.category } : {}),
     ...(entry.description ? { description: entry.description } : {}),
     billable: entry.billable,
     currency: entry.currency,
@@ -2336,6 +2426,8 @@ function readStoredEntry(value: unknown): TimeEntry {
     startAt: readString(record.startAt, 'Stored time entry start'),
     endAt: readString(record.endAt, 'Stored time entry end'),
     durationMinutes: readNumber(record.durationMinutes, 'Stored duration'),
+    ...(record.durationOnly === undefined ? {} : { durationOnly: readDurationOnlyFlag(record.durationOnly) }),
+    ...(record.category === undefined ? {} : { category: readStoredCategory(record.category) }),
     ...(readOptionalString(record.description) ? { description: readOptionalString(record.description) } : {}),
     billable: readBoolean(record.billable, 'Stored billable flag'),
     currency: readString(record.currency, 'Stored currency'),
@@ -2351,6 +2443,29 @@ function readStoredEntry(value: unknown): TimeEntry {
     ...(readOptionalString(record.rejectedAt) ? { rejectedAt: readOptionalString(record.rejectedAt) } : {}),
     ...(readOptionalString(record.lockedAt) ? { lockedAt: readOptionalString(record.lockedAt) } : {}),
   }
+}
+
+/**
+ * Reads the stored duration-only marker, which is only ever written as `true`.
+ *
+ * @param value - Stored `durationOnly` attribute.
+ * @returns `true` when the stored marker is valid.
+ */
+function readDurationOnlyFlag(value: unknown): true {
+  if (value !== true) throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored duration-only flag is invalid.')
+  return true
+}
+
+/**
+ * Reads a stored work category, failing closed on values this version does not know.
+ *
+ * @param value - Stored `category` attribute.
+ * @returns The stored category.
+ */
+function readStoredCategory(value: unknown): TimeEntryCategory {
+  const category = TIME_ENTRY_CATEGORIES.find((candidate) => candidate === value)
+  if (category === undefined) throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored time entry category is invalid.')
+  return category
 }
 
 /** Reads a stored timer. */

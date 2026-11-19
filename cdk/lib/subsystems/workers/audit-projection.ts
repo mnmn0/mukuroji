@@ -74,7 +74,7 @@ export function buildAuditProjectionWorker(
     workspaceSearchTable,
   } = input.dataStores;
   const { fileBucket, fileProofingTable } = input.fileStorage;
-  const { cognitoUserPoolArn, cognitoUserPoolId, systemAdminGroups } = input.parameters;
+  const { cognitoUserPoolArn, cognitoUserPoolId, notificationEmailSender, systemAdminGroups } = input.parameters;
   const { connectorChannels, webhookDeliveryQueue } = input.workerChannels;
   const connectorSyncQueue = connectorChannels?.connectorSyncQueue;
   const { realtimeWebSocketStage } = input;
@@ -99,7 +99,7 @@ export function buildAuditProjectionWorker(
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
       description:
-        'Projects audit outbox events into collaboration, Webhook, and connector deliveries.',
+        'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.',
       bundling: {
         bundleAwsSDK: true,
         minify: true,
@@ -108,6 +108,8 @@ export function buildAuditProjectionWorker(
       },
       environment: {
         ANALYTICS_TABLE_NAME: analyticsTable.tableName,
+        // Tenant retention runs in this fan-out, so it writes audit event expiry.
+        AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         // The connector projection runs only when the connectors module owns a queue.
         CONNECTOR_SYNC_ENABLED: connectorSyncQueue ? 'true' : 'false',
@@ -120,6 +122,8 @@ export function buildAuditProjectionWorker(
         FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
         NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
         NOTIFICATION_RETENTION_SECONDS: String(365 * 24 * 60 * 60),
+        // Email is queued only while a sender is configured, so enabling it later sends no backlog.
+        NOTIFICATION_EMAIL_SENDER: notificationEmailSender.valueAsString,
         PLANNING_TABLE_NAME: planningTable.tableName,
         PROCESSED_AUDIT_EVENTS_TABLE_NAME: processedAuditEventsTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
@@ -165,7 +169,7 @@ export function buildAuditProjectionWorker(
   );
   new cloudwatch.Alarm(scope, 'CollaborationProjectionDlqAlarm', {
     alarmDescription:
-      'Detects audit projection records that exhausted collaboration, Webhook, or connector stream retries.',
+      'Detects audit projection records that exhausted collaboration, Webhook, connector, or tenant retention stream retries.',
     comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
     datapointsToAlarm: 1,
     evaluationPeriods: 1,
@@ -174,6 +178,22 @@ export function buildAuditProjectionWorker(
       statistic: 'Maximum',
     }),
     threshold: 1,
+    treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+  });
+  // DynamoDB Streams supports two readers per shard. This function and the
+  // automation worker are the only AuditEvents stream consumers, so every
+  // other audit reaction, such as tenant retention, joins this fan-out.
+  new cloudwatch.Alarm(scope, 'CollaborationProjectionIteratorAgeAlarm', {
+    alarmDescription:
+      'Detects audit projection stream lag of fifteen minutes or more.',
+    comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+    datapointsToAlarm: 1,
+    evaluationPeriods: 1,
+    metric: collaborationProjectionFunction.metric('IteratorAge', {
+      period: cdk.Duration.minutes(5),
+      statistic: 'Maximum',
+    }),
+    threshold: cdk.Duration.minutes(15).toMilliseconds(),
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
   auditEventsTable.grantStreamRead(collaborationProjectionFunction);
@@ -219,6 +239,33 @@ export function buildAuditProjectionWorker(
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem'],
       resources: [tenantAdministrationTable.tableArn],
+    }),
+  );
+  // Tenant retention: a governance revision check and the audit event expiry,
+  // both only inside one TransactWriteItems call.
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:ConditionCheckItem'],
+      resources: [tenantAdministrationTable.tableArn],
+      conditions: {
+        'ForAnyValue:StringEquals': {
+          'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+        },
+      },
+    }),
+  );
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:UpdateItem'],
+      resources: [auditEventsTable.tableArn],
+      conditions: {
+        'ForAllValues:StringEquals': {
+          'dynamodb:Attributes': ['directoryId', 'eventId', 'expiresAt', 'occurredAt'],
+        },
+        'ForAnyValue:StringEquals': {
+          'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+        },
+      },
     }),
   );
   collaborationProjectionFunction.addToRolePolicy(

@@ -444,4 +444,115 @@ describe('TimeTrackingService', () => {
     const retry = await service.updateEntry({ ...update, canManageRates: true, authorizedRevision: first.revision })
     expect(retry).toEqual(first)
   })
+
+  test('records a categorized date-and-minutes entry and reports it by category', async () => {
+    const { service } = createFixture()
+    const meeting = await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      projectId: 'project-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      duration: { date: '2026-08-03', minutes: 120, timeZone: 'Asia/Tokyo' },
+      category: 'meeting',
+      billable: false,
+      currency: 'JPY',
+      source: 'manual',
+    }, false)
+    expect(meeting).toMatchObject({
+      startAt: '2026-08-02T15:00:00.000Z',
+      endAt: '2026-08-02T17:00:00.000Z',
+      durationMinutes: 120,
+      durationOnly: true,
+      category: 'meeting',
+    })
+    await service.createEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      projectId: 'project-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      startAt: '2026-08-03T01:00:00.000Z',
+      endAt: '2026-08-03T01:30:00.000Z',
+      billable: false,
+      currency: 'JPY',
+      source: 'manual',
+    }, false)
+
+    const summary = await service.createSummary({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-03',
+      to: '2026-08-09',
+      timeZone: 'Asia/Tokyo',
+      groupBy: 'category',
+      includeCosts: false,
+    })
+    expect(summary.groups.map(({ key, label, minutes }) => ({ key, label, minutes }))).toEqual([
+      { key: 'meeting', label: 'meeting', minutes: 120 },
+      { key: 'uncategorized', label: 'Uncategorized', minutes: 30 },
+    ])
+    expect(summary.totalMinutes).toBe(150)
+    const csv = await service.createCsv({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      from: '2026-08-03',
+      to: '2026-08-09',
+      timeZone: 'Asia/Tokyo',
+      groupBy: 'category',
+      includeCosts: false,
+    })
+    expect(csv.split('\n')[1]).toStartWith('meeting,120,')
+
+    const edited = await service.updateEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: meeting.id,
+      actorUserId: 'member-1',
+      canManageRates: false,
+      expectedRevision: 1,
+      category: null,
+    })
+    expect(edited.category).toBeUndefined()
+    expect(edited.durationOnly).toBe(true)
+    const timed = await service.updateEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: meeting.id,
+      actorUserId: 'member-1',
+      canManageRates: false,
+      expectedRevision: 2,
+      startAt: '2026-08-03T00:00:00.000Z',
+      endAt: '2026-08-03T01:00:00.000Z',
+      category: 'review',
+    })
+    expect(timed.durationOnly).toBeUndefined()
+    expect(timed.category).toBe('review')
+  })
+
+  test('rejects invalid date-and-minutes entries', async () => {
+    const { service } = createFixture()
+    const base = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      userId: 'member-1',
+      billable: false,
+      currency: 'JPY',
+      source: 'manual' as const,
+    }
+    const cases: Array<[Parameters<TimeTrackingService['createEntry']>[0], string]> = [
+      [{ ...base, duration: { date: '2026-02-30', minutes: 60, timeZone: 'UTC' } }, 'InvalidDate'],
+      [{ ...base, duration: { date: '2026-08-03', minutes: 0, timeZone: 'UTC' } }, 'InvalidInteger'],
+      [{ ...base, duration: { date: '2026-08-03', minutes: 1.5, timeZone: 'UTC' } }, 'InvalidInteger'],
+      [{ ...base, duration: { date: '2026-08-03', minutes: 60, timeZone: 'Mars/Base' } }, 'InvalidTimeZone'],
+      // 2026-03-08 is 23 hours long in New York.
+      [{ ...base, duration: { date: '2026-03-08', minutes: 24 * 60, timeZone: 'America/New_York' } }, 'TimeEntryExceedsDay'],
+      [{ ...base, startAt: '2026-08-03T00:00:00.000Z', duration: { date: '2026-08-03', minutes: 60, timeZone: 'UTC' } }, 'InvalidRequest'],
+      [{ ...base, startAt: '2026-08-03T00:00:00.000Z' }, 'InvalidRequest'],
+    ]
+    for (const [input, code] of cases) {
+      await expect(service.createEntry(input, false)).rejects.toMatchObject({ code })
+    }
+  })
 })

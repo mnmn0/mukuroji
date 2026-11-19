@@ -179,3 +179,43 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
     },
   };
 }
+
+/**
+ * Defines the hourly job that creates next Cycles and carries over unfinished Work Items.
+ *
+ * @param input Shared data stores and parameters.
+ * @returns Environment and grants the job adds to the scheduled-jobs Lambda.
+ */
+export function defineCycleScheduleJob(input: ScheduleWorkerInput): ScheduledJobGrant {
+  const { planningTable, workItemsTable } = input.dataStores;
+
+  return {
+    id: 'CycleSchedule',
+    runtimeScope: 'automation-schedule',
+    environment: {
+      PLANNING_TABLE_NAME: planningTable.tableName,
+      PLANNING_UPDATE_SCHEDULE_INDEX_NAME: 'UpdateScheduleDueIndex',
+      WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
+    },
+    grant: (grantee) => {
+      // The Planning graph is read and committed with the same META revision CAS as the API.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: [
+          'dynamodb:GetItem',
+          'dynamodb:Query',
+          'dynamodb:PutItem',
+          'dynamodb:DeleteItem',
+        ],
+        resources: [planningTable.tableArn],
+      }));
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [`${planningTable.tableArn}/index/UpdateScheduleDueIndex`],
+      }));
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem'],
+        resources: [workItemsTable.tableArn],
+      }));
+    },
+  };
+}

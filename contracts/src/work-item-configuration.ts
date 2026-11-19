@@ -173,6 +173,11 @@ export type WorkItemConfiguration = {
    * What happens when a parent is completed while a child is still open; absent means `warn`.
    */
   parentCompletionPolicy?: WorkItemParentCompletionPolicy
+  /**
+   * Conditions a Work Item must meet before it moves into the `completed` category; absent leaves
+   * completion unchanged.
+   */
+  completionGate?: import('./work-item-completion-gate').WorkItemCompletionGatePolicy
   /** 最終更新日時の ISO 8601 timestamp です。 */
   updatedAt?: string
 }

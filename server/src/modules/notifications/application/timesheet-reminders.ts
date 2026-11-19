@@ -16,6 +16,8 @@ export type UnsubmittedTimeEntry = {
   entryId: string
   /** Lower-case Workspace member key of the entry owner. */
   memberKey: string
+  /** Project the entry was recorded against. */
+  projectId: string
   /** Absolute start of the recorded interval. */
   startAt: string
   /** Absolute end of the recorded interval. */
@@ -36,6 +38,10 @@ export type TimesheetReminderCandidate = {
   unsubmittedCount: number
   /** Start of the oldest unsubmitted entry. */
   oldestStartAt: string
+  /** Project of the oldest unsubmitted entry; delivery is authorized against it. */
+  projectId: string
+  /** Entries that ended at or before this instant were due; delivery revalidates against it. */
+  dueBefore: string
   /** Reminder threshold in days that applied to this member. */
   reminderDays: number
   /** Index of the `reminderDays`-long period since the Unix epoch; one reminder per period. */
@@ -87,6 +93,8 @@ export async function evaluateTimesheetReminders(
       entryIds: due.slice(0, TIMESHEET_REMINDER_MAX_ENTRY_IDS).map((entry) => entry.entryId),
       unsubmittedCount: due.length,
       oldestStartAt: oldest.startAt,
+      projectId: oldest.projectId,
+      dueBefore: new Date(now.getTime() - thresholdMilliseconds).toISOString(),
       reminderDays,
       cycle: Math.floor(now.getTime() / thresholdMilliseconds),
     })

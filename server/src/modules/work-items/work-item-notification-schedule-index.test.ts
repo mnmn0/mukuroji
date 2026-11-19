@@ -43,6 +43,11 @@ test('assigns a stable shard from the Work Item keys', () => {
   ))
   expect(shards.size).toBe(WORK_ITEM_NOTIFICATION_SCHEDULE_SHARD_COUNT)
   expect(() => createWorkItemNotificationScheduleShard('workspace-1', ' ', 'issue-1')).toThrow(TypeError)
+  // The CDK demo seed copies this hash; cdk/test/bootstrap.suite.ts pins the same values.
+  expect(createWorkItemNotificationScheduleShard('directory-1', 'core-team', 'wireframe'))
+    .toBe('work-item-schedule-01')
+  expect(createWorkItemNotificationScheduleShard('directory-1', 'core-team', 'seo-research'))
+    .toBe('work-item-schedule-06')
   expect(createWorkItemNotificationScheduleShardName(15)).toBe('work-item-schedule-15')
   expect(() => createWorkItemNotificationScheduleShardName(16)).toThrow(TypeError)
 })

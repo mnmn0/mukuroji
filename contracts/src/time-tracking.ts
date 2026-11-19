@@ -7,8 +7,29 @@ export type TimeEntryStatus = 'draft' | 'submitted' | 'approved' | 'rejected' | 
 /** Origin of a time entry. */
 export type TimeEntrySource = 'manual' | 'timer'
 
+/**
+ * Work categories a time entry can be classified under, in display order.
+ *
+ * Entries saved before categories existed have no category and are reported as uncategorized.
+ */
+export const TIME_ENTRY_CATEGORIES = [
+  'design',
+  'implementation',
+  'review',
+  'meeting',
+  'management',
+  'training',
+  'leave',
+] as const
+
+/** Work category of a time entry, such as implementation or a meeting. */
+export type TimeEntryCategory = typeof TIME_ENTRY_CATEGORIES[number]
+
+/** Report group key used for entries that have no work category. */
+export const UNCATEGORIZED_TIME_ENTRY_GROUP_KEY = 'uncategorized' as const
+
 /** Grouping dimension supported by a time tracking report. */
-export type TimeTrackingGroupBy = 'day' | 'week' | 'user' | 'project' | 'work-item'
+export type TimeTrackingGroupBy = 'day' | 'week' | 'user' | 'project' | 'work-item' | 'category'
 
 /** A recorded interval of work. */
 export type TimeEntry = {
@@ -32,6 +53,13 @@ export type TimeEntry = {
   endAt: string
   /** Rounded duration in minutes used for reporting. */
   durationMinutes: number
+  /**
+   * `true` when the member entered only a date and a number of minutes. `startAt` is then the
+   * start of that local date and the times of day carry no meaning; absent for timed entries.
+   */
+  durationOnly?: true
+  /** Optional work category; absent for uncategorized entries, including all entries saved before categories. */
+  category?: TimeEntryCategory
   /** Optional explanation supplied by the member. */
   description?: string
   /** Whether the interval is chargeable. */

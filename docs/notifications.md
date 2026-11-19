@@ -89,7 +89,7 @@ Comment notification は `commentId` と `rootCommentId` を追加します。We
 - quiet hours: enabled、start、end、IANA time zone
 - reminder days（`reminderDays`）: 自分あての期限前通知・超過の再通知・未更新の督促・工数の督促の日数（下の [リマインドの日数](#リマインドの日数)）。PUT で `reminderDays` を省略すると保存済みの値を残し、空 object を送ると消します。項目を知らない古い client が保存しても消えないようにするためです
 
-in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録し、対応 channel の transport が有効な環境で同じ予定を使用できます。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
+in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録します。Email は送信元を設定した環境で [Email 配信](#email-配信) がこの予定を使います。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
 
 ## Web Push の購読
 
@@ -177,6 +177,42 @@ Workspace全体のAutomation notifyで明示的に選ばれたactiveなguest受�
 
 Work Itemの担当者だけに向けた通知は、担当変更・状態変更・日程変更も含め、現在の担当者との一致をInboxと共通の条件で確認します。Cognitoから削除済みの受信者は再試行せず配信を抑止し、一時的なCognito障害のみ再試行します。通知設定は認可処理の後にも読み直し、その間のSlack無効化・quiet hours変更を反映します。
 
+## Email 配信
+
+通知設定の **Email** を有効にすると、担当・メンション・返信・期限・承認などの既存通知を、受信者の Cognito profile にある確認済みのメールアドレスへ 1 通ずつ送ります。送信には Amazon SES（API v2）を使います（[ADR 0005](adr/0005-notification-email-ses-transport.md)）。
+
+### 有効にする
+
+送信は deploy 時の opt-in です。CloudFormation parameter `NotificationEmailSender`（既定は空）に SES で検証した送信元アドレスを 1 つ指定すると有効になります。空のあいだは projection が Email の配信予定を書かず、scheduled job も queue を読まないため、後から有効にしても過去の通知はまとめて送られません。メンバーが Email を選んでも、設定が保存されるだけです（設定画面の「無効」表示は後続で入れます）。
+
+運用者は有効にする前に次を行います。
+
+- SES でこのアドレスか、そのドメインを verified identity にする。本番では sandbox を解除する。
+- 送信元ドメインの SPF・DKIM（Easy DKIM）・DMARC を DNS に設定する。
+- SES の account-level suppression list を bounce と complaint について有効にしておく。suppression 中の宛先へは SES が送らないため、bounce した宛先へ送り続けることはありません。運用者は SES console の suppression list（`ListSuppressedDestinations`）で確認・削除できます。
+
+Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信元と一致する場合だけ許可します。本文の deep link は Web の CloudFront origin（`NOTIFICATION_EMAIL_APP_ORIGIN`）で絶対 URL にします。
+
+### 宛先と抑止
+
+宛先は送るたびに、現在の Workspace membership の Cognito username（`username`、なければ email、なければ member key）で `AdminGetUser` を読み、`email_verified` が `true` の `email` だけを使います。membership がない・無効、Cognito user の削除・無効化、未確認アドレスでは配信を抑止し（`emailDeliveryStatus: suppressed`、`emailLastCode` に `EmailRecipientMissing` / `EmailRecipientUnverified`）、alarm は出しません。Cognito の一時障害は再試行します。
+
+有効化時刻は Slack と同じく server が `emailEnabledAt` として保存し、それより前に発生したイベントは送りません。Email transport の導入前から Email を有効にしていた設定は、最後に保存した時刻を境界にします。
+
+### 配信の規則
+
+配信 queue は [Slack 配信](#slack-配信) と同じ実装を使い、属性と index だけが分かれています。通知と同じ transaction で `emailQueueShard`（`email#<番号>`）・`emailNextAttemptAt`・`emailDeliveryStatus`・`emailAttempts` を保存し、16 shard の sparse GSI `EmailDeliveryIndex` から毎分最大32件を処理します。Slack と Email を両方有効にした通知は、それぞれ独立に送ります。どちらの channel の更新も通知 row の `version` を進めるため、一方が期限内の lease を持っている間は他方は claim せず、次の実行で取り直します（互いの送信直前の version 確認を取り消し合わないため）。
+
+再認可・quiet hours と snooze の再確認・lease・version 条件・最大5試行の再試行は Slack と同じです。宛先の読み取りから SES への送信までは合計30秒の期限で打ち切り、送信直前に延長した60秒の lease が切れた後に送ることはありません。frequency は既存の delivery plan の遅延として扱い、通知ごとに 1 通送ります（複数通知を 1 通にまとめる digest ではありません）。SES の throttling（`TooManyRequestsException` など）と一時障害は再試行し、`MessageRejected`・未検証の送信元などは再試行せず失敗にします。応答を失った送信を再試行するため、まれに同じ通知が2通届くことがあります。
+
+本文は ja / en 併記のプレーンテキストです。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
+
+### 失敗の調査
+
+永続的失敗は notification row の `emailDeliveryStatus: failed` と秘密情報を含まない `emailLastCode` に残り、row を `EmailDeliveryIndex` の `email-failed#<番号>` partition へ移して `emailFailureReference` を記録します。CloudWatch の `EmailNotificationFailed` ログの `shard`・`dueAt`・`reference` で Slack と同じ手順で対象を特定できます。ログにはメールアドレスと本文を含めません。`Mukuroji/Notifications` の `OldestDueAgeSeconds`（`Channel: Email`）が15分以上の状態で3回続くと `EmailNotificationBacklogAlarm` を出します。`notification-schedule` runtime control で停止できます。
+
+ローカルでは `floci:up` が index を追加し、`workers:dev` が同じ job を毎分実行します。`NOTIFICATION_EMAIL_SENDER` と `NOTIFICATION_EMAIL_APP_ORIGIN`（loopback 以外は HTTPS）を設定した場合だけ送ります。
+
 ## Due / overdue scan
 
 EventBridge の定期 rule が、Work Items table の期限 index（`WorkItemNotificationDueIndex`）から通知の対象になりうる Work Item だけを読みます。index に載るのは archive されていない未完了の Work Item のうち、期限があるものと着手中（`started`）のものだけで、完了・archive・期限の削除で外れます。schedule は 16 の shard を期限の古い順に、今日（UTC）+ 366 日（期限前通知の日数の上限 365 日 + timezone の余裕 1 日）まで読みます。着手中の Work Item は未更新の督促のため期限に関係なく毎回読みます。読み取り量は Work Item の総数ではなく、期限が近い・超過した・着手中の Work Item の数に比例し、page 数の上限はありません。index は結果整合なので、段階が出る item だけ base table を強整合で読み直してから評価します。index の属性（`notificationScheduleShard` と `notificationDueKey`）は Work Item の作成・更新・日程の連鎖更新・承認による状態遷移で同じ書き込みの中で更新します。属性のない既存の row は次に更新されたときに index に載ります。既存 row への一括付与は #365 の migration で行います。Customer 完了通知の marker は別の sparse index（`WorkItemCustomerCompletionPreparationIndex`）から読みます。date-only の期限は各 item の `schedule.calendarPolicy.timeZone` における local calendar day として評価し、未完了かつ担当者がある item に対し、期限当日は `work-item.due`、期限超過後は `work-item.overdue` を作ります。event ID は Workspace、Work Item、due date、reason から決定的に作るため、Lambda retry や翌日の再走査でも同じ due 状態を重複通知しません。
@@ -215,10 +251,10 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 - schedule は 1 時間ごとに動きますが、工数の督促を作るのは 1 日 1 回、UTC の `NOTIFICATION_TIMESHEET_REMINDER_HOUR_UTC` 時（既定 0 時、日本時間 9 時）の実行だけです。その回が失敗した日は送らず、翌日の実行で送ります
 - 対象は Project directory にある全 Team です（その回だけ directory を読みます。読む量は Work Item の数ではなく Team・Project・member の数に比例します）。Team ごとに `TimeEntryTeamDateIndex` を直近 92 日分だけ読みます。それより前に始まった未提出の entry は督促しません
 - 重複排除 key は Workspace・Team・member・n・「Unix epoch から数えて何番目の n 日か」です。同じ期間の再実行や retry は同じ event になります
-- 通知は Inbox の「工数の提出」として届き、最も古い未提出 entry の週の工数画面（`/teams/{teamId}/timesheet?week=<entry の開始時刻>`。ブラウザが閲覧者の timezone でその時刻を含む月曜始まりの週に直します）を開きます。title は持たず、概要は件数と最も古い日付です
+- 通知は Inbox の「工数の提出」として届き、最も古い未提出 entry の週の工数画面（`/teams/{teamId}/timesheet?week=<entry の開始時刻>`。ブラウザが閲覧者の timezone でその時刻を含む週（Workspace の週の始まりの曜日に合わせる）に直します）を開きます。title は持たず、概要は件数と最も古い日付です
 - 対象は Project に紐づく entry だけです。Project のない entry は一般の member の工数画面に出ず、そこから提出できないため督促しません
-- event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` の entry が 1 件も残っていなければ捨てます。残っていれば、その entry の revision を条件にした ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で読み直して捨てます。読み直す手段がない projection では督促を届けません
-- 宛先の権限は Team scope の通知として確認します（Team の Project のどれかを読めること）
+- event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` で、scan 時の期限（その時点から n 日前）までに終わっている entry が 1 件も残っていなければ捨てます。日付を直して期限より後に終わる entry になった場合も数えません。残っていれば、その entry の revision を条件にした ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で読み直して捨てます。読み直す手段がない projection では督促を届けません
+- 宛先の権限は、最も古い未提出 entry の Project の通知として確認します（その Project を読めること）。Inbox・Slack・Email のどれでも同じで、Team の全 Project を読める必要はありません
 - Slack への配信は送信時に宛先の権限を確認しますが、提出状況は読み直しません。quiet hours や digest で Slack 送信が遅れる間に提出した場合は、Slack に古い督促が届くことがあります
 
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

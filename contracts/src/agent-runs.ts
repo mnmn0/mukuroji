@@ -37,6 +37,9 @@ export const AGENT_RUN_MAX_LEASE_MINUTES = 240
 /** Maximum number of workflow statuses a Team may mark as ready for agents. */
 export const AGENT_SETTINGS_MAX_READY_STATUSES = 50
 
+/** Maximum number of started workflow statuses a Team may mark as resumable by agents. */
+export const AGENT_SETTINGS_MAX_RESUMABLE_STATUSES = 50
+
 /** Maximum UTF-8 size in bytes of one agent brief. */
 export const AGENT_SETTINGS_BRIEF_MAX_BYTES = 16 * 1024
 
@@ -68,6 +71,7 @@ export const AGENT_RUN_PROBLEM_REASONS = [
   'agent_run_takeover_disabled',
   'invalid_artifact_url',
   'not_ready',
+  'not_resumable',
 ] as const
 
 /** Stable Agent Run fence reason carried in a problem violation code. */
@@ -117,6 +121,11 @@ export type AgentRun = {
 export type AgentRunView = AgentRun & {
   /** True when the viewer may release this active run. */
   canRelease: boolean
+  /**
+   * Run of the same Work Item that this run resumed, when it was started by a resume. The Public API
+   * `AgentRun` schema is closed, so only the Web view and the resume response carry the link.
+   */
+  resumedFromRunId?: string
 }
 
 /** Request body that claims a Work Item and moves it to a started status. */
@@ -127,9 +136,9 @@ export type StartAgentRunRequest = {
   workflowStatusId: string
   /** Client runtime that drives the agent. */
   runtime: AgentRunRuntime
-  /** Display name of the agent. */
+  /** Display name of the agent. Letters and digits in any script, spaces, `.`, `_`, or `-`, without surrounding spaces. */
   agentName: string
-  /** Opaque, stable identifier of the agent instance; the server stores only its hash. */
+  /** Opaque, stable identifier of the agent instance; the server stores only its hash. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -141,13 +150,42 @@ export type StartAgentRunResponse = {
   workItem: PublicWorkItem
 }
 
+/**
+ * Request body that resumes a `started` Work Item without an active run: the caller, who must be its
+ * assignee, starts a new run on it. The Work Item status does not change; move it afterwards with
+ * the new run's fence when needed.
+ */
+export type ResumeAgentRunRequest = {
+  /** Work Item revision the agent read before deciding to resume. */
+  expectedRevision: number
+  /** Client runtime that drives the agent. */
+  runtime: AgentRunRuntime
+  /** Display name of the agent. Letters and digits in any script, spaces, `.`, `_`, or `-`, without surrounding spaces. */
+  agentName: string
+  /** Opaque, stable identifier of the agent instance; the server stores only its hash. It has no surrounding whitespace or control characters. */
+  instanceId: string
+  /**
+   * Run the agent expects to resume from, such as the `resumedFromRun` that next-task selection offered.
+   * The resume is refused with a conflict when the Work Item's newest run is another run.
+   */
+  expectedPreviousRunId?: string
+}
+
+/** Response of a successful resume. */
+export type ResumeAgentRunResponse = {
+  /** Newly started run. */
+  run: AgentRun
+  /** Newest earlier run of the Work Item, which the new run resumes; absent when it never had one. */
+  resumedFromRun?: AgentRun
+}
+
 /** Request body that takes over a stalled run of another instance of the same assignee. */
 export type TakeOverAgentRunRequest = {
   /** Client runtime that drives the agent taking over. */
   runtime: AgentRunRuntime
-  /** Display name of the agent taking over. */
+  /** Display name of the agent taking over. Letters and digits in any script, spaces, `.`, `_`, or `-`, without surrounding spaces. */
   agentName: string
-  /** Opaque, stable identifier of the instance taking over; the server stores only its hash. */
+  /** Opaque, stable identifier of the instance taking over; the server stores only its hash. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -161,7 +199,7 @@ export type TakeOverAgentRunResponse = {
 
 /** Request body that extends the lease of an agent's own run. */
 export type HeartbeatAgentRunRequest = {
-  /** Instance identifier sent when the run started; other instances cannot extend the lease. */
+  /** Instance identifier sent when the run started; other instances cannot extend the lease. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -169,7 +207,7 @@ export type HeartbeatAgentRunRequest = {
 export type FinishAgentRunRequest = {
   /** Reason the agent is closing the run. */
   outcome: AgentRunFinishOutcome
-  /** Instance identifier sent when the run started; other instances cannot close the run. */
+  /** Instance identifier sent when the run started; other instances cannot close the run. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -177,7 +215,7 @@ export type FinishAgentRunRequest = {
 export type AgentRunMutationFence = {
   /** Active run of the caller for the mutated Work Item. */
   agentRunId?: string
-  /** Opaque instance identifier of the caller; the server compares only its hash. */
+  /** Opaque instance identifier of the caller; the server compares only its hash. It has no surrounding whitespace or control characters. */
   agentInstanceId?: string
 }
 
@@ -310,7 +348,7 @@ export type AgentRunReport = {
 
 /** Request body that saves a structured report and its comment for an agent's own run. */
 export type ReportAgentRunRequest = {
-  /** Instance identifier sent when the run started; other instances cannot report on the run. */
+  /** Instance identifier sent when the run started; other instances cannot report on the run. It has no surrounding whitespace or control characters. */
   instanceId: string
   /** Kind of report; `progress` when omitted. */
   kind?: AgentRunReportKind
@@ -371,6 +409,11 @@ export type AgentSettings = {
    * unstarted status is ready.
    */
   readyStatusIds: string[]
+  /**
+   * Started workflow status IDs from which the assignee's agent may resume a Work Item without an
+   * active run. Empty means any started status is resumable.
+   */
+  resumableStatusIds: string[]
   /** Whether only Work Items with at least one acceptance criterion are ready for agents. */
   requireAcceptanceCriteria: boolean
   /**
@@ -411,6 +454,8 @@ export type AgentContext = {
   revision: number
   /** Backlog or unstarted workflow status IDs an agent may start from; empty means any. */
   readyStatusIds: string[]
+  /** Started workflow status IDs an agent may resume from; empty means any started status. */
+  resumableStatusIds: string[]
   /** Whether only Work Items with acceptance criteria are ready for agents. */
   requireAcceptanceCriteria: boolean
   /** Custom field whose non-empty value also counts as acceptance criteria. */
@@ -431,6 +476,8 @@ export type UpdateAgentSettingsRequest = {
   allowTakeoverAfterLeaseExpiry: boolean
   /** Backlog or unstarted workflow status IDs an agent may start from; omitted or empty means any. */
   readyStatusIds?: string[]
+  /** Started workflow status IDs an agent may resume from; omitted or empty means any. */
+  resumableStatusIds?: string[]
   /** Whether only Work Items with acceptance criteria are ready; omitted means false. */
   requireAcceptanceCriteria?: boolean
   /** Custom field that holds acceptance criteria; omitted means none. */
@@ -460,9 +507,10 @@ export const FACTORY_BOARD_COMPLETED_WINDOW_HOURS = 24
 export const FACTORY_BOARD_MAX_ACTIVE_RUNS = 100
 
 /**
- * Largest number of finished runs one Factory board response evaluates while it looks for runs that
- * finished within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS}. Finished runs are stored in run ID
- * order, so the response says when the evaluation stopped before reading every finished run.
+ * Largest number of finished runs one Factory board response reads from each of two groups, newest
+ * finish first: runs that finished within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS} other than
+ * failures, and failed runs of any age. Older finished runs are never read, so the bound depends only
+ * on recent and failed runs, and the response says when either group was left partly unread.
  */
 export const FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS = 500
 

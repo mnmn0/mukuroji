@@ -199,7 +199,7 @@ export function buildScheduledJobsWorker(
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     }),
     description:
-      'Runs the periodic Automation, Triage, Agent Run, Slack, analytics, and notification jobs.',
+      'Runs the periodic Automation, Triage, Agent Run, Slack, analytics, notification, and Cycle jobs.',
     onFailure: new lambdaDestinations.SqsDestination(scheduledJobsDlq),
     retryAttempts: 0,
     bundling: {

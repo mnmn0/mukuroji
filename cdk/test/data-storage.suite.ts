@@ -69,6 +69,20 @@ test('stateful resources keep pinned logical IDs and enable retain with PITR', (
     ]),
   }));
 
+  // The Factory board reads finished runs by Team and finish time without scanning older runs.
+  expect(resources.AgentRunsTableB0DA56A7.Properties).toEqual(expect.objectContaining({
+    GlobalSecondaryIndexes: expect.arrayContaining([
+      expect.objectContaining({
+        IndexName: 'FinishedRunIndex',
+        KeySchema: [
+          { AttributeName: 'finishedRunPartition', KeyType: 'HASH' },
+          { AttributeName: 'finishedRunSortKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'INCLUDE', NonKeyAttributes: ['runId', 'workItemId', 'outcome', 'finishedAt'] },
+      }),
+    ]),
+  }));
+
   expect(resources.CapacityPlanningTable0EECD517.Properties)
     .toEqual(expect.objectContaining({
       SSESpecification: {
@@ -959,6 +973,14 @@ test('collaboration notifications and realtime sessions use production-safe Dyna
         KeySchema: [
           { AttributeName: 'slackQueueShard', KeyType: 'HASH' },
           { AttributeName: 'slackNextAttemptAt', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      }),
+      Match.objectLike({
+        IndexName: 'EmailDeliveryIndex',
+        KeySchema: [
+          { AttributeName: 'emailQueueShard', KeyType: 'HASH' },
+          { AttributeName: 'emailNextAttemptAt', KeyType: 'RANGE' },
         ],
         Projection: { ProjectionType: 'KEYS_ONLY' },
       }),

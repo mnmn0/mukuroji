@@ -18,12 +18,6 @@ export interface TenantOperationExecutionProcessor {
   dispatchOperationExecution?(job: TenantOperationExecutionJob): Promise<unknown>
   /** Applies one bounded page of tenant audit-retention reconciliation. */
   reconcileAuditRetention(workspaceId: string): Promise<unknown>
-  /** Applies current tenant retention policy to one newly inserted audit event. */
-  reconcileAuditEventRetention(
-    workspaceId: string,
-    eventId: string,
-    occurredAt: string,
-  ): Promise<unknown>
 }
 
 /**
@@ -59,15 +53,6 @@ export async function processTenantOperationExecutionBatch(
       const retentionWorkspaceId = readTenantRetentionWorkspace(record)
       if (retentionWorkspaceId) {
         await processor.reconcileAuditRetention(retentionWorkspaceId)
-        continue
-      }
-      const auditEvent = readTenantAuditRetentionEvent(record)
-      if (auditEvent) {
-        await processor.reconcileAuditEventRetention(
-          auditEvent.workspaceId,
-          auditEvent.eventId,
-          auditEvent.occurredAt,
-        )
       }
     } catch (error) {
       console.error('Tenant operation execution failed.', {
@@ -199,53 +184,6 @@ export function readRunnableTenantOperation(
     workspaceId,
     operationId: value.operationId,
     step: value.currentStep,
-  }
-}
-
-/** Newly inserted audit event fields needed to enforce tenant retention. */
-export type TenantAuditRetentionEvent = {
-  /** Canonical Workspace identifier. */
-  workspaceId: string
-  /** Immutable audit event identifier. */
-  eventId: string
-  /** Event occurrence time used to calculate DynamoDB TTL. */
-  occurredAt: string
-}
-
-/**
- * Reads a newly inserted audit event without confusing tenant-state records.
- *
- * @param record - Candidate DynamoDB stream record.
- * @returns Validated audit retention input, or undefined for another table shape.
- */
-export function readTenantAuditRetentionEvent(
-  record: DynamoStreamRecord,
-): TenantAuditRetentionEvent | undefined {
-  if (record.eventName !== 'INSERT') return undefined
-  const image = record.dynamodb?.NewImage
-  const directoryId = image?.directoryId?.S
-  const eventId = image?.eventId?.S
-  const occurredAt = image?.occurredAt?.S
-  const hasAuditField = directoryId !== undefined ||
-    eventId !== undefined ||
-    occurredAt !== undefined
-  if (!hasAuditField) return undefined
-  if (
-    !directoryId?.trim() ||
-    !eventId?.trim() ||
-    !occurredAt?.trim() ||
-    (image?.workspaceId?.S !== undefined && image.workspaceId.S !== directoryId)
-  ) {
-    throw new TenantAdministrationError(
-      503,
-      'TenantAuditStreamRecordMalformed',
-      'Tenant audit stream state is malformed.',
-    )
-  }
-  return {
-    workspaceId: directoryId,
-    eventId,
-    occurredAt,
   }
 }
 
