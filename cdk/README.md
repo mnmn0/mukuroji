@@ -851,6 +851,7 @@ export PROJECT_DIRECTORY_TABLE_NAME=...  # ProjectDirectoryTableName output
 export WORK_ITEMS_TABLE_NAME=...         # WorkItemsTableName output
 export MUKUROJI_WORKSPACE_DIRECTORY_ID=... # WorkspaceDirectoryId parameter
 export INITIAL_OWNER_EMAIL=...           # InitialOwnerEmail parameter
+export AWS_REGION=...                    # stack の region（既定値なし）
 
 bun run demo-data:remove          # 削除する row を表示するだけ
 bun run demo-data:remove --apply  # 1 つの transaction ですべて削除する
@@ -872,7 +873,7 @@ bun run demo-data:remove --apply  # 1 つの transaction ですべて削除す�
 この script が見るのは上の 3 table だけです。demo の Work Item に付いたコメント・添付・時間記録や、
 検索 index に backfill 済みの demo の文書は削除しません。demo Team 以外の Work Item の担当者が demo member でも
 検出しません。demo data を使い込んだ環境では archive を使います。
-local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566` を付けて同じように実行できます。
+local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566` と `AWS_REGION` を付けて同じように実行できます。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 

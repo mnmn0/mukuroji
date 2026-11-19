@@ -31,7 +31,8 @@ Environment:
   WORK_ITEMS_TABLE_NAME           WorkItemsTableName stack output
   MUKUROJI_WORKSPACE_DIRECTORY_ID WorkspaceDirectoryId stack parameter
   INITIAL_OWNER_EMAIL             InitialOwnerEmail stack parameter
-  AWS_REGION, AWS_ENDPOINT_URL    optional; AWS_ENDPOINT_URL points at an emulator`;
+  AWS_REGION                      region of the stack; there is no default
+  AWS_ENDPOINT_URL                optional; points at an emulator such as Floci`;
 
 /**
  * Reads a required environment variable.
@@ -142,10 +143,11 @@ async function main(): Promise<number> {
   };
   const workspaceId = requireEnv('MUKUROJI_WORKSPACE_DIRECTORY_ID');
   const initialOwnerEmail = requireEnv('INITIAL_OWNER_EMAIL').toLowerCase();
-  const client = new DynamoDBClient({
-    region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? 'us-east-1',
-    endpoint: process.env.AWS_ENDPOINT_URL || undefined,
-  });
+  // A destructive run must name its target region; a fallback could read another region's tables.
+  const region = requireEnv('AWS_REGION');
+  const endpoint = process.env.AWS_ENDPOINT_URL?.trim() || undefined;
+  const client = new DynamoDBClient({ region, endpoint });
+  console.log(`Target: region ${region}${endpoint ? `, endpoint ${endpoint}` : ''}`);
 
   const demoRows = listDemoDataRows({ workspaceId, initialOwnerEmail });
   const observed: ObservedDemoDataRow[] = [];
