@@ -110,6 +110,7 @@ import { toTriageErrorResponse } from '../shared/request-intake-access'
 import {
   createProjectTemplateWorkItems,
   expandProjectTemplateWorkItems,
+  findProjectTemplateProject,
   preflightProjectTemplateWorkItems,
   requireProjectTemplateStartDate,
 } from '../shared/automation-project-template'
@@ -466,7 +467,11 @@ async function executeAutomationTemplateApplication(
         name: names.nameJa,
         ...(expandedWorkItems.length > 0 ? { workItemCount: expandedWorkItems.length } : {}),
       }
-      const response = await workspaceDependencies.projectDirectory.createProject(
+      // A retry of a WBS application resumes with the Project that an earlier attempt created.
+      const existingProject = expandedWorkItems.length > 0
+        ? await findProjectTemplateProject(principal.directoryId, target.teamId, application.id)
+        : undefined
+      const response = existingProject ? { project: existingProject } : await workspaceDependencies.projectDirectory.createProject(
         principal.directoryId,
         target.teamId,
         {
@@ -493,20 +498,23 @@ async function executeAutomationTemplateApplication(
           ? []
           : [automationDependencies.ruleTemplates.createTemplateApplicationCompletionMutation(application, result)],
       )
-      await projectWorkspaceSearchDocumentBestEffort(
-        () => {
-          return createProjectSearchDocument(
-            principal.directoryId,
-            target.teamId,
-            response.project,
-            principal.userKey,
-            names.nameEn === response.project.name ? undefined : names.nameEn,
-          )
-        },
-        'automation template Project creation',
-        // A charter saved before this projection lands carries a revision; keep it.
-        { unrevisioned: true },
-      )
+      // The attempt that created the Project already projected it; a reused one may have been edited.
+      if (!existingProject) {
+        await projectWorkspaceSearchDocumentBestEffort(
+          () => {
+            return createProjectSearchDocument(
+              principal.directoryId,
+              target.teamId,
+              response.project,
+              principal.userKey,
+              names.nameEn === response.project.name ? undefined : names.nameEn,
+            )
+          },
+          'automation template Project creation',
+          // A charter saved before this projection lands carries a revision; keep it.
+          { unrevisioned: true },
+        )
+      }
       if (expandedWorkItems.length > 0) {
         await createProjectTemplateWorkItems(
           c,

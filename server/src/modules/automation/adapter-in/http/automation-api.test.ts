@@ -2588,7 +2588,7 @@ test('recovers a Project template application from atomic receipt success withou
   expect({ createCalls, templateVersionReads }).toEqual({ createCalls: 1, templateVersionReads: 1 })
 })
 
-test('applies a Project template WBS as Work Items with parent links, resumes after a link conflict without undoing edits, and completes the receipt last', async () => {
+test('applies a Project template WBS as Work Items with parent links, resumes after a link conflict without undoing Project or Work Item edits, and completes the receipt last', async () => {
   const now = '2026-07-16T00:00:00.000Z'
   const template: AutomationTemplate = {
     schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -2644,11 +2644,13 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
     ['application_project_wbs_wbs_2', 'k'],
     ['application_project_wbs_wbs_3', 'n'],
   ])
+  const teamProjects: Array<{ id: string; name: string; tone: 'green' }> = []
   configureFakeProjectClients(true, {
-    teamProjects: [{ id: application.id, name: '標準プロジェクト', tone: 'green' }],
+    teamProjects,
     async projectCreateHook(input, completionTransactItems) {
       projectInputs.push(input)
       completionMutationCounts.push(completionTransactItems.length)
+      teamProjects.push({ id: application.id, name: '標準プロジェクト', tone: 'green' })
     },
   })
   setTestAppDependencies({
@@ -2766,6 +2768,9 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
   if (!edited) throw new Error('The first attempt must create the top-level Work Item.')
   createdIssues.set(edited.id, { ...edited, title: '要件定義（編集済み）', revision: edited.revision + 1 })
   movedByUser = true
+  const createdProject = teamProjects[0]
+  if (!createdProject) throw new Error('The first attempt must create the Project.')
+  createdProject.name = '標準プロジェクト（改名済み）'
 
   const response = await request()
   expect(response.status).toBe(200)
@@ -2773,9 +2778,10 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
     status: 'succeeded',
     result: { kind: 'project', projectId: application.id, workItemCount: 4 },
   })
-  expect(projectInputs).toHaveLength(2)
+  // The retry resumes with the renamed Project instead of replaying its creation.
+  expect(projectInputs).toHaveLength(1)
   expect(projectInputs[0]).not.toHaveProperty('workItems')
-  expect(completionMutationCounts).toEqual([0, 0])
+  expect(completionMutationCounts).toEqual([0])
   expect(createdIssues.size).toBe(4)
   expect(createdInputs.slice(0, 3).map((input) => ({
     id: input.idempotencyResourceId,

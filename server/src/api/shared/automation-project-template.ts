@@ -442,6 +442,23 @@ function createTemplateWorkItemBody(
 }
 
 /**
+ * Finds the Project that an earlier attempt of a WBS application already created.
+ *
+ * The Project ID is the application ID, which only template application can assign, so an
+ * existing Project with that ID is this application's, even if someone renamed or recolored it
+ * before the retry. Comparing its mutable display fields would block the remaining WBS.
+ *
+ * @param directoryId - Workspace directory identifier.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID derived from the application.
+ * @returns The Project, or undefined when the application has not created it yet.
+ */
+export async function findProjectTemplateProject(directoryId: string, teamId: string, projectId: string) {
+  const team = await readTemplateTargetTeam(directoryId, teamId)
+  return team.projects.find((project) => project.id === projectId)
+}
+
+/**
  * Reads the active Team a Project template is applied to.
  *
  * @param directoryId - Workspace directory identifier.
