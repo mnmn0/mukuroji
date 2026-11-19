@@ -4846,6 +4846,17 @@ test.describe('authenticated task page', () => {
     await expect(progressLine).toHaveAttribute('aria-pressed', 'true')
     await expect(page.getByTestId('task-gantt-progress-line')).toBeVisible()
 
+    // A three-day bar on the month scale is widened to stay visible, but its resize handle stays
+    // at the real end date instead of the widened edge.
+    await display.getByLabel('表示倍率').selectOption('month')
+    const barBox = await page.getByTestId('task-gantt-bar-wireframe').boundingBox()
+    const handleBox = await page.getByTestId('task-gantt-resize-wireframe').boundingBox()
+    expect(barBox).not.toBeNull()
+    expect(handleBox).not.toBeNull()
+    if (barBox && handleBox) {
+      expect(handleBox.x + handleBox.width / 2).toBeLessThan(barBox.x + barBox.width / 2)
+    }
+
     await page.evaluate(() => {
       window.print = () => {
         const root = document.querySelector<HTMLElement>('[data-print-root="task-gantt"]')

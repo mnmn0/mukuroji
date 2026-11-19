@@ -1235,7 +1235,7 @@ export function TaskGanttView({
                             '{task}',
                             resolveWorkItemTitle(row.task),
                           )}
-                          className="absolute -right-1 top-0 h-full w-3 cursor-ew-resize rounded bg-tone-087c70 focus:outline-none focus:ring-2 focus:ring-white"
+                          className="absolute top-0 h-full w-3 cursor-ew-resize rounded bg-tone-087c70 focus:outline-none focus:ring-2 focus:ring-white"
                           data-testid={`task-gantt-resize-${row.task.id}`}
                           disabled={!canEditSchedule || isBusy}
                           draggable={canEditSchedule && !isBusy}
@@ -1251,6 +1251,8 @@ export function TaskGanttView({
                           onKeyDown={(event) => handleResizeKey(event, row.schedule, (date) => {
                             void previewScheduleChange(row.task, createResizeTaskScheduleOperation(date))
                           })}
+                          // The handle sits at the real end date, even inside a bar widened to stay visible.
+                          style={{ left: `${bar.rangeWidth - 8}px` }}
                           type="button"
                         />
                       ) : null}
@@ -2034,8 +2036,13 @@ function clampGanttConnectorX(value: number, chartWidth: number): number {
 type GanttBar = {
   /** Horizontal offset from the first timeline date. */
   left: number
-  /** Inclusive schedule width. */
+  /** Inclusive schedule width, at least the narrowest visible bar. */
   width: number
+  /**
+   * Width the range really covers on the axis. It is narrower than `width` when a short range
+   * on a coarse scale is widened, and anchors the resize handle at the real end date.
+   */
+  rangeWidth: number
 }
 
 /**
@@ -2129,6 +2136,7 @@ function createGanttDateRangeBar(
   const inset = Math.min(4, spanWidth / 4)
   return {
     left: startSpan.left + inset,
+    rangeWidth: spanWidth - inset * 2,
     width: Math.max(GANTT_MIN_BAR_WIDTH, spanWidth - inset * 2),
   }
 }
