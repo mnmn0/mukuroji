@@ -423,6 +423,7 @@ export function ProjectRaidLogPanel({
                     </span>
                     {canEdit && editor.mode === 'closed' ? (
                       <button
+                        aria-label={`${t('projects.raidLog.edit')}: ${entry.title}`}
                         className="workbench-button-secondary min-h-8 px-3"
                         type="button"
                         onClick={() => {
@@ -436,9 +437,8 @@ export function ProjectRaidLogPanel({
                   </div>
                   {entry.reviewDueDate ? (
                     <p className={`text-xs font-medium ${overdue ? 'text-fg-red-700' : 'text-fg-505967'}`}>
-                      {overdue
-                        ? t('projects.raidLog.overdue')
-                        : t('projects.raidLog.reviewDue').replace('{date}', entry.reviewDueDate)}
+                      {t('projects.raidLog.reviewDue').replace('{date}', entry.reviewDueDate)}
+                      {overdue ? ` ${t('projects.raidLog.overdue')}` : null}
                     </p>
                   ) : null}
                   {entry.response ? <p className="whitespace-pre-wrap text-sm text-fg-505967">{entry.response}</p> : null}

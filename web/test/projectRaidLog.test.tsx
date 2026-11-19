@@ -61,7 +61,7 @@ describe('ProjectRaidLogPanel', () => {
     expect(markup).toContain('未決の変更要求 0件')
     expect(markup).toContain('最高重大度: 高')
     expect(markup).toContain('見直し期限切れ 1件')
-    expect(markup).toContain('見直し期限切れ: 内容を見直して期限を更新するか、クローズしてください。')
+    expect(markup).toContain('期限切れです。内容を見直して期限を更新するか、クローズしてください。')
     expect(markup).toContain('ベンダー納期遅延')
     expect(markup).not.toContain('範囲追加')
   })

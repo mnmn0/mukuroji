@@ -123,6 +123,17 @@ test('answers 404 for a Project outside the Team', async () => {
   expect(response.status).toBe(404)
 })
 
+test('lets a Project viewer read the log but not change it', async () => {
+  configureFakeProjectClients(true, { projectAccesses: [{ projectId: 'refero', role: 'viewer' }] })
+  const path = '/api/teams/core-team/projects/refero/raid-log'
+  expect((await request(path)).status).toBe(200)
+  const response = await request(`${path}/entries`, 'POST', {
+    entry: { kind: 'issue', title: 'A', impact: 3, status: 'open' },
+  })
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'ProjectRaidLogForbidden' })
+})
+
 test('refuses a change by a member without Project access', async () => {
   configureFakeProjectClients(false)
   const projectId = await readProjectId()

@@ -2,6 +2,7 @@ import type { ProjectRaidEntry, ProjectRaidEntryInput } from '@mukuroji/contract
 import { useCallback } from 'react'
 import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
+import { ProjectDirectoryApiError } from '../api/errors'
 import { createProjectRaidEntry, updateProjectRaidEntry } from '../api/raidLog'
 import { useProjectRaidLog } from '../queries/useProjectRaidLog'
 import { ProjectRaidLogPanel } from './ProjectRaidLogPanel'
@@ -46,10 +47,16 @@ export function ProjectRaidLogSection({ accessToken, teamId, projectId, enabled,
   const save = useCallback(async (entry: ProjectRaidEntry | undefined, input: ProjectRaidEntryInput) => {
     if (!accessToken || !teamId) return
     const context = createMutationRequestContext()
-    if (entry) {
-      await updateProjectRaidEntry(accessToken, teamId, projectId, entry.id, entry.revision, input, context)
-    } else {
-      await createProjectRaidEntry(accessToken, teamId, projectId, input, context)
+    try {
+      if (entry) {
+        await updateProjectRaidEntry(accessToken, teamId, projectId, entry.id, entry.revision, input, context)
+      } else {
+        await createProjectRaidEntry(accessToken, teamId, projectId, input, context)
+      }
+    } catch (error) {
+      // A conflict means the list is stale, so the latest entries are loaded for the next try.
+      if (error instanceof ProjectDirectoryApiError && error.status === 409) void mutate()
+      throw error
     }
     await mutate()
   }, [accessToken, mutate, projectId, teamId])

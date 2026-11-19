@@ -148,7 +148,7 @@ export const projectsMessages = {
   'projects.raidLog.field.description': 'Details',
   'projects.raidLog.field.response': 'Mitigation, resolution, or decision',
   'projects.raidLog.field.status': 'Status',
-  'projects.raidLog.overdue': 'Review overdue: review the entry and set a new date, or close it.',
+  'projects.raidLog.overdue': 'Overdue. Review the entry and set a new date, or close it.',
   'projects.raidLog.reviewDue': 'Review by {date}',
   'projects.raidLog.error.loading': 'The log could not be loaded.',
   'projects.raidLog.error.save': 'The entry could not be saved.',

@@ -146,7 +146,7 @@ export const projectsMessages = {
   'projects.raidLog.field.description': '内容',
   'projects.raidLog.field.response': '対策・対応・判断',
   'projects.raidLog.field.status': '状態',
-  'projects.raidLog.overdue': '見直し期限切れ: 内容を見直して期限を更新するか、クローズしてください。',
+  'projects.raidLog.overdue': '期限切れです。内容を見直して期限を更新するか、クローズしてください。',
   'projects.raidLog.reviewDue': '見直し {date}',
   'projects.raidLog.error.loading': '登録簿を読み込めませんでした。',
   'projects.raidLog.error.save': '保存できませんでした。',
