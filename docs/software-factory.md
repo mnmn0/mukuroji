@@ -152,6 +152,7 @@ finished(paused|completed など) + Work Item が started --resume(同じ assign
 | table | `directoryTeamId` | `agent-settings-mutation#<key hash>` | Agent settings の保存ごとの receipt。同じ key の再送を判定する |
 | `WorkItemRunIndex` | `directoryTeamId#<workItemId>` | `<startedAt>#<runId>` | Work Item 詳細の Run 履歴 |
 | `ActiveRunIndex`（sparse） | `directoryTeamId` | `<leaseExpiresAt>#<runId>` | board の処理中・停滞一覧。`finished` で key を外す |
+| `FinishedRunIndex`（sparse） | `directoryTeamId#failed-run` または `directoryTeamId#finished-run` | `<finishedAt>#<runId>` | board の完了・失敗 lane。Run を閉じる transaction で key を書く。`failed` は別 partition。projection は `runId`・`workItemId`・`outcome`・`finishedAt` |
 
 claim row は `runId` と `instanceId` hash を持ち、start の transaction で「存在しない」条件付き
 put、finish / release / take over の transaction で同じ `runId` 条件付き delete または置換を行う。
@@ -674,10 +675,12 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
   - `ActiveRunIndex` の lease の早い順に最大 100 件。index は結果整合のため、各 Run を強整合で
     読み直し、`active` のものだけを使う。1 つの Work Item に `active` Run が 2 件あれば claim の
     不変条件が壊れているため、`503` で fail-closed にする。
-  - 終了済み Run を最大 500 件評価し、直近 24 時間に終了した Run と、時期を問わず `failed` で終了した Run の
-    Work Item を拾う。終了済み Run は
-    run ID 順に保存され終了時刻の index がないため、Team の終了済み Run が 500 件を超えると完了 lane が
-    欠けうる。その場合は `finishedRunsHasMore: true` を返す。
+  - `FinishedRunIndex` から、直近 24 時間に `failed` 以外で終了した Run と、時期を問わず `failed` で終了した
+    Run を、それぞれ終了の新しい順に最大 500 件読み、その Work Item を拾う。24 時間より前に `failed` 以外で
+    終了した Run は読まないため、Team の終了済み Run の総数には依存しない。どちらかが 500 件で止まった場合は
+    `finishedRunsHasMore: true` を返す。失敗の partition は解決済みの失敗も残るため、失敗の総数が 500 件を
+    超える Team では古い失敗が欠けうる（[ADR 0006](adr/0006-finished-run-index.md)）。index の key がない
+    既存の終了済み Run への付与は #365 の migration で行う。
   - Work Item を更新の新しい順に最大 300 件評価し、閲覧できる `started` のものを拾う。status category の
     index はない。
 - 候補の Work Item はそれぞれ強整合で読み直し、archive・削除済みと、閲覧できない Project のものを除く
