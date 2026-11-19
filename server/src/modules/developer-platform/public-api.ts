@@ -9,6 +9,7 @@ import {
   type AgentContext,
   type PublicAgentSettings,
   type PublicWorkItemAcceptanceCriteria,
+  type PublicWorkItemActualDates,
   type PublicWorkItemEffort,
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
@@ -272,6 +273,18 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<PublicWorkItemEffort>
+  /**
+   * Reads the actual start and end dates of a Work Item after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The dates that are recorded, with the Work Item revision they were read at.
+   */
+  getActualDates(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemActualDates>
   /**
    * Reads the short immutable key of a Work Item after current RBAC checks.
    * @param credential - Authenticated developer credential used for current RBAC checks.
@@ -1008,6 +1021,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/v1/work-items/:workItemId/effort', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     return c.json(await dependencies.workItems.getEffort(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.get('/v1/work-items/:workItemId/actual-dates', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.getActualDates(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),

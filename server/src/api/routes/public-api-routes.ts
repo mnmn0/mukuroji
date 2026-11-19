@@ -1273,6 +1273,32 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
     },
 
     /**
+     * Reads the actual start and end dates of a Work Item the credential can view.
+     *
+     * @param credential - Authenticated developer credential used for current RBAC checks.
+     * @param teamId - Team that owns the Work Item.
+     * @param workItemId - Work Item ID.
+     * @returns The schema version, Team ID, Work Item ID, the Work Item revision the dates were read
+     * at, and each date that is recorded.
+     */
+    async getActualDates(credential, teamId, workItemId) {
+      const principal = await resolveDeveloperCredentialPrincipal(credential, {
+        permission: 'work-items.read',
+        teamId,
+        evaluateProjectScopes: true,
+      })
+      const { issue } = (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')).detail
+      return {
+        schemaVersion: 1,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+        revision: issue.revision,
+        ...(issue.actualStartDate === undefined ? {} : { actualStartDate: issue.actualStartDate }),
+        ...(issue.actualEndDate === undefined ? {} : { actualEndDate: issue.actualEndDate }),
+      }
+    },
+
+    /**
      * Reads the key of a Work Item the credential can view.
      *
      * @param credential - Authenticated developer credential used for current RBAC checks.

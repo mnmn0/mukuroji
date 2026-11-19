@@ -112,6 +112,13 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   idempotency key の再試行は途中で日付が動いても同じ request として replay されます。最新の revision が必要で、
   `schedule` とは同時に送れません。見積だけの変更は dependency の確認を必要としません。不正な値は
   `400 validation_failed` です。詳細は [Work Items](work-items.md#estimate-remaining-effort-and-progress) を参照してください。
+- 実績開始日と実績終了日は `GET /api/v1/work-items/{workItemId}/actual-dates?teamId={teamId}` で読みます。応答は
+  `{ schemaVersion, teamId, workItemId, revision, actualStartDate?, actualEndDate? }` で、日付は schedule の calendar
+  timezone での `YYYY-MM-DD` です。`actualStartDate` は初めて `started` か `completed` に入った日で、着手前は省きます。
+  `actualEndDate` は直近の完了日で、`completed` の間だけ返します。権限は `GET /api/v1/work-items/{workItemId}` と同じで、
+  `work-items:read` scope が要ります。`WorkItem` の response schema は閉じた object のため、実績日は含めません。
+  `GET /api/developer/exports` も同じ `WorkItem` schema の page を返すため実績日を含めません。export した Work Item の
+  実績日が要る client は、この endpoint で 1 件ずつ読みます。
 - `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
   `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
 - `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。
