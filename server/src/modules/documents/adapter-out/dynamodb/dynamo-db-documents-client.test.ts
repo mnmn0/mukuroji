@@ -12,7 +12,9 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from '../../../audit/audit'
 import {
+  DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_MAX_BACKLINK_COUNT,
+  DOCUMENT_MAX_ELEMENT_LINK_COUNT,
   DOCUMENT_MAX_ITEM_BYTES,
   createDocumentSearchAccessReadContext,
   DynamoDbDocumentsClient,
@@ -2824,7 +2826,7 @@ test('serializes the first backlink fence against a stale deletion fence and rep
   })
 })
 
-test('keeps deepest-tree full backlink replacement within 100 actions and rejects the next relation before writing', async () => {
+test('keeps the deepest-tree largest backlink change within 100 actions and rejects the next change before writing', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
   seedOwnerAuthorization(memory)
@@ -2856,10 +2858,11 @@ test('keeps deepest-tree full backlink replacement within 100 actions and reject
     })
     parentId = folder.id
   }
+  const replacedRelationCount =
+    DOCUMENT_MAX_BACKLINK_CHANGE_COUNT / 2
   const initialRelations = Array.from(
     {
-      length:
-        DOCUMENT_MAX_BACKLINK_COUNT,
+      length: replacedRelationCount,
     },
     (_value, index) =>
       createWorkItemRelation(
@@ -2880,8 +2883,7 @@ test('keeps deepest-tree full backlink replacement within 100 actions and reject
   let revision = document.revision
   for (
     let offset = 0;
-    offset <
-      DOCUMENT_MAX_BACKLINK_COUNT;
+    offset < replacedRelationCount;
     offset += 4
   ) {
     const operations =
@@ -2966,7 +2968,7 @@ test('keeps deepest-tree full backlink replacement within 100 actions and reject
     relations: Array.from(
       {
         length:
-          DOCUMENT_MAX_BACKLINK_COUNT +
+          DOCUMENT_MAX_BACKLINK_CHANGE_COUNT +
           1,
       },
       (_value, index) =>
@@ -2978,13 +2980,293 @@ test('keeps deepest-tree full backlink replacement within 100 actions and reject
   })).rejects.toMatchObject({
     status: 413,
     code:
-      'DocumentBacklinkLimitExceeded',
+      'DocumentBacklinkChangeLimitExceeded',
   })
   expect(
     memory
       .transactionActionCounts()
       .length,
   ).toBe(transactionCount)
+})
+
+test('links one Document to hundreds of Work Items through bounded atomic changes', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  seedOwnerAuthorization(memory)
+  const linkCount = 200
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Weekly minutes',
+    blocks: [],
+    relations: [],
+  })
+  let revision = document.revision
+  for (
+    let offset = 0;
+    offset < linkCount;
+    offset += 4
+  ) {
+    const response = await client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      input: {
+        baseRevision: revision,
+        clientId: 'editor-1',
+        operations: Array.from(
+          { length: 4 },
+          (_value, relationOffset) => ({
+            type: 'upsert-relation' as const,
+            operationId: `link-${offset + relationOffset}`,
+            relation: createWorkItemRelation(
+              `relation-${offset + relationOffset}`,
+              `team/team-a/issue/linked-${offset + relationOffset}`,
+            ),
+          }),
+        ),
+      },
+    })
+    revision = response.revision
+  }
+
+  const stored = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })
+  expect(stored.relations).toHaveLength(linkCount)
+  for (const index of [0, 99, linkCount - 1]) {
+    const workItemId = `team/team-a/issue/linked-${index}`
+    expect(
+      findWorkItemBacklinkTargetFence(memory, workItemId),
+    ).toMatchObject({ activeBacklinkCount: 1 })
+    await expect(client.listBacklinks({
+      workspaceId: 'workspace-1',
+      access: ownerAccess,
+      targetKind: 'work-item',
+      targetId: workItemId,
+    })).resolves.toMatchObject({
+      backlinks: [{
+        documentId: document.id,
+        relation: { id: `relation-${index}` },
+      }],
+    })
+  }
+
+  const unlinked = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'delete-relation',
+        operationId: 'unlink-0',
+        relationId: 'relation-0',
+      }],
+    },
+  })
+  expect(unlinked.revision).toBe(revision + 1)
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      'team/team-a/issue/linked-0',
+    ),
+  ).toMatchObject({ activeBacklinkCount: 0 })
+  await expect(client.listBacklinks({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    targetKind: 'work-item',
+    targetId: 'team/team-a/issue/linked-0',
+  })).resolves.toMatchObject({ backlinks: [] })
+  expect(DOCUMENT_MAX_BACKLINK_COUNT).toBeGreaterThanOrEqual(linkCount)
+})
+
+test('deletes a full batch of linked Whiteboard objects in one transaction and caps links per object', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  seedOwnerAuthorization(memory)
+  const objectIds = ['card-0', 'card-1', 'card-2', 'card-3']
+  const whiteboard = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Planning board',
+    whiteboard: {
+      objects: objectIds.map((id, index) => ({
+        id,
+        type: 'work-item' as const,
+        workItemId: `team/team-a/issue/card-${index}`,
+        bounds: { x: index * 120, y: 0, width: 100, height: 60 },
+        zIndex: index,
+      })),
+      connectors: [],
+      frames: [],
+    },
+  })
+  const objectRelations = objectIds.flatMap((objectId) =>
+    Array.from(
+      { length: DOCUMENT_MAX_ELEMENT_LINK_COUNT - 1 },
+      (_value, index) => ({
+        ...createWorkItemRelation(
+          `${objectId}-relation-${index}`,
+          `team/team-a/issue/${objectId}-linked-${index}`,
+        ),
+        source: { kind: 'whiteboard-object' as const, objectId },
+      }),
+    )
+  )
+  let revision = whiteboard.revision
+  for (let offset = 0; offset < objectRelations.length; offset += 4) {
+    const response = await client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: whiteboard.id,
+      access: ownerAccess,
+      input: {
+        baseRevision: revision,
+        clientId: 'editor-1',
+        operations: objectRelations
+          .slice(offset, offset + 4)
+          .map((relation) => ({
+            type: 'upsert-relation' as const,
+            operationId: `link-${relation.id}`,
+            relation,
+          })),
+      },
+    })
+    revision = response.revision
+  }
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: whiteboard.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'one-too-many',
+        relation: {
+          ...createWorkItemRelation(
+            'card-0-relation-extra',
+            'team/team-a/issue/card-0-extra',
+          ),
+          source: { kind: 'whiteboard-object', objectId: 'card-0' },
+        },
+      }],
+    },
+  })).rejects.toMatchObject({
+    status: 413,
+    code: 'DocumentElementLinkLimitExceeded',
+  })
+
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: whiteboard.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: revision,
+      clientId: 'editor-1',
+      operations: objectIds.map((objectId) => ({
+        type: 'delete-object' as const,
+        operationId: `delete-${objectId}`,
+        objectId,
+      })),
+    },
+  })
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      'team/team-a/issue/card-3-linked-5',
+    ),
+  ).toMatchObject({ activeBacklinkCount: 0 })
+  expect(
+    findWorkItemBacklinkTargetFence(memory, 'team/team-a/issue/card-0'),
+  ).toMatchObject({ activeBacklinkCount: 0 })
+})
+
+test('keeps elements saved with more than the per-element link limit editable', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  seedOwnerAuthorization(memory)
+  const page = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Legacy minutes',
+    blocks: [{ id: 'block-1', type: 'paragraph', text: 'Before' }],
+  })
+  const legacyLinkCount = DOCUMENT_MAX_ELEMENT_LINK_COUNT + 3
+  mutateStoredDocument(memory, page.id, (document) => {
+    document.relations = Array.from(
+      { length: legacyLinkCount },
+      (_value, index) => ({
+        ...createGoalRelation(`legacy-${index}`),
+        source: { kind: 'block' as const, blockId: 'block-1' },
+      }),
+    )
+  })
+  let revision = page.revision + 1
+
+  const edited = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'edit-text',
+        blockId: 'block-1',
+        block: { id: 'block-1', type: 'paragraph', text: 'After' },
+      }],
+    },
+  })
+  revision = edited.revision
+  const unlinked = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'delete-relation',
+        operationId: 'unlink-one',
+        relationId: 'relation-legacy-0',
+      }],
+    },
+  })
+  revision = unlinked.revision
+
+  await expect(client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-more',
+        relation: {
+          ...createGoalRelation('new-goal'),
+          source: { kind: 'block', blockId: 'block-1' },
+        },
+      }],
+    },
+  })).rejects.toMatchObject({
+    status: 413,
+    code: 'DocumentElementLinkLimitExceeded',
+  })
 })
 
 test('hashes public tokens at rest, carries allowExport, and checks expiry synchronously', async () => {

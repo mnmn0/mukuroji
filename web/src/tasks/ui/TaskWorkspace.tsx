@@ -78,7 +78,8 @@ import {
 } from './TaskScheduleWindowToolbar'
 import { TaskCalendarView } from './TaskCalendarView'
 import { TaskFileView } from './TaskFileView'
-import { TaskGanttView } from './TaskGanttView'
+import { TaskGanttView, type TaskGanttOutline } from './TaskGanttView'
+import { createMultiTeamWorkItemOutlineRows } from '../../work-items/model/workItemHierarchy'
 import { TaskPermissionsView } from './TaskPermissionsView'
 import { TaskTableView } from './TaskTableView'
 import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
@@ -271,6 +272,11 @@ export type TaskWorkspaceProps = {
   taskViewToolbar?: ReactNode
   /** Columns, grouping, density, and text wrapping applied by task layouts. */
   taskViewPresentation?: TaskViewPresentationSettings
+  /**
+   * Hierarchy shown as an outline by the table and the Gantt chart; absent when the view does
+   * not show the outline.
+   */
+  outline?: TaskGanttOutline
   /** Filtered and sorted tasks rendered by the active view. */
   tasks: CanonicalWorkItem[]
   /** Bulk operation snapshots for currently visible tasks. */
@@ -371,6 +377,7 @@ export function TaskWorkspace({
   taskErrorMessage,
   taskViewToolbar,
   taskViewPresentation,
+  outline,
   tasks,
   visibleBulkItems,
   currentWorkspaceMemberKey,
@@ -408,6 +415,12 @@ export function TaskWorkspace({
     () => createWorkItemDependencySummaries(planningSnapshot),
     [planningSnapshot],
   )
+  const tableOutline = useMemo(() => outline
+    ? {
+        rows: createMultiTeamWorkItemOutlineRows(tasks, outline.hierarchies, outline.collapsedKeys),
+        onToggleCollapsed: outline.onToggleCollapsed,
+      }
+    : undefined, [outline, tasks])
   const boardGroups = taskViewPresentation?.groupBy && taskViewPresentation.groupBy !== 'status'
     ? groupTaskViewItems(
         tasks,
@@ -759,6 +772,7 @@ export function TaskWorkspace({
           taskErrorMessage={taskErrorMessage}
           tasks={tasks}
           presentation={taskViewPresentation}
+          outline={tableOutline}
           visibleBulkItems={visibleBulkItems}
         />
       ) : null}
@@ -790,6 +804,7 @@ export function TaskWorkspace({
           onRequestScheduleChange={onRequestScheduleChange}
           onSelectTask={onSelectTask}
           onUpdateScheduleDependency={onUpdateScheduleDependency}
+          outline={outline}
           projectId={projectId}
           t={t}
           tasks={tasks}

@@ -10,7 +10,7 @@ repository に固定せず、各実行の evidence record に残します。
 | 領域 | 現在の状態 | Production gate |
 | --- | --- | --- |
 | Request correlation | `/api/*` で client header を信頼せず server が correlation/request ID を生成し、内部 route、response、CORS exposed header へ渡す | 信頼済み service 間で parent correlation を継承する認証済み protocol は未実装 |
-| API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Log retention、dashboard、30日 SLO 集計を environment owner が有効化すること |
+| API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Lambda log group は CDK が90日保持で作る（`cdk/README.md` の Lambda log retention）。Dashboard と30日 SLO 集計は environment owner が有効化すること |
 | Health | `/api/health` の liveness と、current-enabled runtime controlを先に確認してからDynamoDBを検証する `/api/ready` を分離し、readiness responseを`no-store`にする | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
 | Trace | CDK が管理する全29個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する。API Lambda は sampled trace ごとに `mukuroji-api-request` subsegment を送り、`correlation_id`、`request_id`、`route_group` を annotation として登録する | API 以外の worker Lambda の annotation、unsampled trace の検索は未実装 |
 | Alarm | API、queue、DLQ（audit export の `AuditExportDlqAlarm` と `AuditExportQueueAgeAlarm` を含む）、async destination、runtime control、restore drill（任意 module を有効にした場合）の56 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な55件のtest evidenceを確認するまで unattended production とみなさないこと |

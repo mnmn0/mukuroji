@@ -9,6 +9,33 @@ import type {
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ResponsiveDisclosure } from '../../shared/ui/ResponsiveDisclosure'
+import {
+  customerGroupOptions,
+  customerHealthLabels,
+  customerHealthOptions,
+  customerSafeGroupOptions,
+  customerSafeSortOptions,
+  customerSizeLabels,
+  customerSizeOptions,
+  customerSortDirectionOptions,
+  customerSortOptions,
+  customerStatusLabels,
+  customerStatusOptions,
+  customerTierLabels,
+  customerTierOptions,
+  requestImportanceLabels,
+  requestStatusLabels,
+  workItemLifecycleLabels,
+  type CustomerFilterOption,
+} from '../model/customerOptions'
+import {
+  ConfirmDeleteButton,
+  CustomerContactForm,
+  CustomerForm,
+  CustomerRequestForm,
+  CustomerRequestLinksEditor,
+  type CustomerEditingProps,
+} from './CustomerEditors'
 
 /** Props for the Customer directory and selected Customer detail view. */
 export type CustomerDirectoryViewProps = {
@@ -64,6 +91,8 @@ export type CustomerDirectoryViewProps = {
   onOpenWorkItem: (workItem: CustomerWorkItemSummary) => void
   /** Opens one related Project in searchable Project context. */
   onOpenProject: (project: CustomerProjectSummary) => void
+  /** Customer editing operations. Leave out for members who may not change Customers, so no edit controls appear. */
+  editing?: CustomerEditingProps
 }
 
 /** Renders Customer discovery, account attributes, and source-to-work traceability.
@@ -98,7 +127,9 @@ export function CustomerDirectoryView({
   onLoadMoreCustomers,
   onOpenWorkItem,
   onOpenProject,
+  editing,
 }: CustomerDirectoryViewProps) {
+  const [isCreatingCustomer, setIsCreatingCustomer] = useState(false)
   const effectiveGroupBy = !canViewSensitiveData && groupBy === 'owner' ? undefined : groupBy
   return (
     <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
@@ -256,10 +287,20 @@ export function CustomerDirectoryView({
       ) : (
         <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.95fr)]">
           <section aria-labelledby="customer-directory-list-title" className="workbench-panel overflow-hidden">
-            <div className="border-b border-[var(--workbench-border)] px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-5 py-4">
               <h2 className="text-base font-bold text-[var(--workbench-text)]" id="customer-directory-list-title">
                 {t('customers.title')}
               </h2>
+              {editing ? (
+                <button
+                  className="workbench-button-primary min-h-9 px-3 text-xs"
+                  disabled={isCreatingCustomer}
+                  onClick={() => setIsCreatingCustomer(true)}
+                  type="button"
+                >
+                  {t('customers.edit.newCustomer')}
+                </button>
+              ) : null}
             </div>
             {customers.length === 0 ? (
               <p className="p-8 text-sm font-semibold text-[var(--workbench-muted)]">
@@ -274,7 +315,10 @@ export function CustomerDirectoryView({
                       <button
                         className={`grid w-full gap-3 px-5 py-4 text-left transition hover:bg-teal-50/60 ${detail?.customer.id === customer.id ? 'bg-teal-50' : ''}`}
                         key={customer.id}
-                        onClick={() => onSelectCustomer(customer.id)}
+                        onClick={() => {
+                          setIsCreatingCustomer(false)
+                          onSelectCustomer(customer.id)
+                        }}
                         type="button"
                       >
                         <span className="flex items-start justify-between gap-3">
@@ -311,13 +355,24 @@ export function CustomerDirectoryView({
             ) : null}
           </section>
 
-          <CustomerDetailPanel
+          {editing && isCreatingCustomer ? (
+            <aside className="grid content-start gap-3">
+              {editing.errorMessage ? <EditingError message={editing.errorMessage} /> : null}
+              <CustomerForm
+                isSaving={editing.isSaving}
+                onCancel={() => setIsCreatingCustomer(false)}
+                onCreate={editing.onCreateCustomer}
+                t={t}
+              />
+            </aside>
+          ) : <CustomerDetailPanel
             detail={detail}
+            editing={editing}
             locale={locale}
             onOpenProject={onOpenProject}
             onOpenWorkItem={onOpenWorkItem}
             t={t}
-          />
+          />}
         </div>
       )}
     </div>
@@ -327,6 +382,7 @@ export function CustomerDirectoryView({
 /** Renders the selected Customer graph without coupling it to HTTP state. */
 function CustomerDetailPanel({
   detail,
+  editing,
   locale,
   onOpenProject,
   onOpenWorkItem,
@@ -334,6 +390,8 @@ function CustomerDetailPanel({
 }: {
   /** Selected Customer graph. */
   detail?: CustomerDetail
+  /** Customer editing operations, when the member may change Customers. */
+  editing?: CustomerEditingProps
   /** Locale used to format dates. */
   locale: string
   /** Opens a related Project. */
@@ -347,17 +405,92 @@ function CustomerDetailPanel({
     return <aside className="workbench-panel p-8 text-sm font-semibold text-[var(--workbench-muted)]">{t('customers.select')}</aside>
   }
 
+  return (
+    <CustomerDetailContent
+      // Remount on Customer change so open editors never carry over to another Customer.
+      key={detail.customer.id}
+      detail={detail}
+      editing={editing}
+      locale={locale}
+      onOpenProject={onOpenProject}
+      onOpenWorkItem={onOpenWorkItem}
+      t={t}
+    />
+  )
+}
+
+/** Which editor is open in the Customer detail panel. */
+type CustomerDetailEditor =
+  | { /** Editor kind. */ kind: 'customer' }
+  | { /** Editor kind. */ kind: 'contact'; /** Contact being edited, or undefined for a new one. */ contactId?: string }
+  | { /** Editor kind. */ kind: 'request'; /** Request being edited, or undefined for a new one. */ requestId?: string }
+
+/** Renders one loaded Customer graph and the editors the member may open on it. */
+function CustomerDetailContent({
+  detail,
+  editing,
+  locale,
+  onOpenProject,
+  onOpenWorkItem,
+  t,
+}: {
+  /** Selected Customer graph. */
+  detail: CustomerDetail
+  /** Customer editing operations, when the member may change Customers. */
+  editing?: CustomerEditingProps
+  /** Locale used to format dates. */
+  locale: string
+  /** Opens a related Project. */
+  onOpenProject: (project: CustomerProjectSummary) => void
+  /** Opens a related Work Item. */
+  onOpenWorkItem: (workItem: CustomerWorkItemSummary) => void
+  /** Translator for Customer copy. */
+  t: (key: MessageKey) => string
+}) {
+  const [openEditor, setOpenEditor] = useState<CustomerDetailEditor>()
+  /** Closes the given editor only if it is still the open one, so a late save never closes another editor. */
+  const closeEditor = (editor: CustomerDetailEditor) => () => setOpenEditor((current) => (
+    current?.kind === editor.kind &&
+    (current.kind !== 'contact' || editor.kind !== 'contact' || current.contactId === editor.contactId) &&
+    (current.kind !== 'request' || editor.kind !== 'request' || current.requestId === editor.requestId)
+      ? undefined
+      : current
+  ))
   const { customer, contacts, requests, workItems } = detail
   return (
     <aside className="grid content-start gap-5">
+      {editing?.errorMessage ? <EditingError message={editing.errorMessage} /> : null}
       <section className="workbench-panel p-5">
+        {editing && openEditor?.kind === 'customer' ? (
+          <CustomerForm
+            customer={customer}
+            isSaving={editing.isSaving}
+            // A refreshed revision starts a fresh draft instead of pairing old input with new data.
+            key={customer.revision}
+            onCancel={closeEditor({ kind: 'customer' })}
+            onUpdate={editing.onUpdateCustomer}
+            t={t}
+          />
+        ) : <>
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">{t('customers.eyebrow')}</p>
             <h2 className="mt-2 text-xl font-bold text-[var(--workbench-text)]">{customer.name}</h2>
             <p className="mt-1 text-sm text-[var(--workbench-muted)]">{customer.domain ?? t('customers.noDomain')}</p>
           </div>
-          <CustomerBadge t={t} value={customer.health} />
+          <div className="flex items-center gap-2">
+            <CustomerBadge t={t} value={customer.health} />
+            {editing ? (
+              <button
+                aria-label={t('customers.edit.editNamed').replace('{name}', customer.name)}
+                className="workbench-button-secondary min-h-8 px-3 text-xs"
+                onClick={() => setOpenEditor({ kind: 'customer' })}
+                type="button"
+              >
+                {t('customers.edit.edit')}
+              </button>
+            ) : null}
+          </div>
         </div>
         <dl className="mt-5 grid grid-cols-2 gap-3 text-sm">
           <Metric label={t('customers.tier')} value={t(customerTierLabels[customer.tier])} />
@@ -367,19 +500,60 @@ function CustomerDetailPanel({
           <Metric label={t('customers.contacts')} value={String(customer.contactCount)} />
           <Metric label={t('customers.openRequests')} value={String(customer.openRequestCount)} />
         </dl>
+        </>}
       </section>
 
       <section className="workbench-panel p-5">
-        <h3 className="text-sm font-bold text-[var(--workbench-text)]">{t('customers.detail.contacts')}</h3>
+        <SectionHeading
+          actionLabel={editing && openEditor?.kind !== 'contact' ? t('customers.edit.addContact') : undefined}
+          onAction={() => setOpenEditor({ kind: 'contact' })}
+          title={t('customers.detail.contacts')}
+        />
+        {editing && openEditor?.kind === 'contact' && openEditor.contactId === undefined ? (
+          <div className="mt-3">
+            <CustomerContactForm customerId={customer.id} editing={editing} onClose={closeEditor({ kind: 'contact' })} t={t} />
+          </div>
+        ) : null}
         {contacts.length === 0 ? (
           <p className="mt-3 text-sm text-[var(--workbench-muted)]">{t('customers.detail.noContacts')}</p>
         ) : (
           <ul className="mt-3 grid gap-2">
-            {contacts.map((contact) => (
-              <li className="rounded-lg border border-[var(--workbench-border)] px-3 py-2 text-sm" key={contact.id}>
-                <span className="font-semibold text-[var(--workbench-text)]">{contact.name}</span>
-                {contact.primary ? <span className="ml-2 text-xs font-semibold text-[var(--workbench-primary-text)]">{t('customers.detail.contactPrimary')}</span> : null}
-                {contact.email ? <span className="mt-1 block text-xs text-[var(--workbench-muted)]">{contact.email}</span> : null}
+            {contacts.map((contact) => editing && openEditor?.kind === 'contact' && openEditor.contactId === contact.id ? (
+              <li key={contact.id}>
+                <CustomerContactForm
+                  contact={contact}
+                  customerId={customer.id}
+                  editing={editing}
+                  key={contact.revision}
+                  onClose={closeEditor({ kind: 'contact', contactId: contact.id })}
+                  t={t}
+                />
+              </li>
+            ) : (
+              <li className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-[var(--workbench-border)] px-3 py-2 text-sm" key={contact.id}>
+                <span className="min-w-0">
+                  <span className="font-semibold text-[var(--workbench-text)]">{contact.name}</span>
+                  {contact.primary ? <span className="ml-2 text-xs font-semibold text-[var(--workbench-primary-text)]">{t('customers.detail.contactPrimary')}</span> : null}
+                  {contact.email ? <span className="mt-1 block text-xs text-[var(--workbench-muted)]">{contact.email}</span> : null}
+                </span>
+                {editing ? (
+                  <span className="flex flex-wrap gap-2">
+                    <button
+                      aria-label={t('customers.edit.editNamed').replace('{name}', contact.name)}
+                      className="workbench-button-secondary min-h-8 px-3 text-xs"
+                      onClick={() => setOpenEditor({ kind: 'contact', contactId: contact.id })}
+                      type="button"
+                    >
+                      {t('customers.edit.edit')}
+                    </button>
+                    <ConfirmDeleteButton
+                      disabled={editing.isSaving}
+                      label={t('customers.edit.deleteNamed').replace('{name}', contact.name)}
+                      onDelete={() => void editing.onDeleteContact(contact)}
+                      t={t}
+                    />
+                  </span>
+                ) : null}
               </li>
             ))}
           </ul>
@@ -387,12 +561,33 @@ function CustomerDetailPanel({
       </section>
 
       <section className="workbench-panel p-5">
-        <h3 className="text-sm font-bold text-[var(--workbench-text)]">{t('customers.detail.requests')}</h3>
+        <SectionHeading
+          actionLabel={editing && openEditor?.kind !== 'request' ? t('customers.edit.addRequest') : undefined}
+          onAction={() => setOpenEditor({ kind: 'request' })}
+          title={t('customers.detail.requests')}
+        />
+        {editing && openEditor?.kind === 'request' && openEditor.requestId === undefined ? (
+          <div className="mt-3">
+            <CustomerRequestForm contacts={contacts} customerId={customer.id} editing={editing} onClose={closeEditor({ kind: 'request' })} t={t} />
+          </div>
+        ) : null}
         {requests.length === 0 ? (
           <p className="mt-3 text-sm text-[var(--workbench-muted)]">{t('customers.detail.noRequests')}</p>
         ) : (
           <ul className="mt-3 grid gap-3">
-            {requests.map((request) => (
+            {requests.map((request) => editing && openEditor?.kind === 'request' && openEditor.requestId === request.id ? (
+              <li key={request.id}>
+                <CustomerRequestForm
+                  contacts={contacts}
+                  customerId={customer.id}
+                  editing={editing}
+                  key={request.revision}
+                  onClose={closeEditor({ kind: 'request', requestId: request.id })}
+                  request={request}
+                  t={t}
+                />
+              </li>
+            ) : (
               <li className="rounded-lg border border-[var(--workbench-border)] p-3" key={request.id}>
                 <div className="flex flex-wrap justify-between gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
                   <span>{t('customers.detail.requestReceived').replace('{date}', formatDate(request.receivedAt, locale))}</span>
@@ -401,9 +596,22 @@ function CustomerDetailPanel({
                 <p className="mt-2 line-clamp-3 text-sm text-[var(--workbench-text)]">
                   {request.originalMessage || t('customers.detail.messageUnavailable')}
                 </p>
-                <p className="mt-2 text-xs font-semibold text-[var(--workbench-muted)]">
-                  {t('customers.detail.importance').replace('{importance}', t(requestImportanceLabels[request.importance]))}
-                </p>
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs font-semibold text-[var(--workbench-muted)]">
+                    {t('customers.detail.importance').replace('{importance}', t(requestImportanceLabels[request.importance]))}
+                  </p>
+                  {editing && request.status !== 'merged' ? (
+                    <button
+                      aria-label={t('customers.edit.editRequestNamed').replace('{date}', formatDate(request.receivedAt, locale))}
+                      className="workbench-button-secondary min-h-8 px-3 text-xs"
+                      onClick={() => setOpenEditor({ kind: 'request', requestId: request.id })}
+                      type="button"
+                    >
+                      {t('customers.edit.edit')}
+                    </button>
+                  ) : null}
+                </div>
+                {editing && request.status !== 'merged' ? <CustomerRequestLinksEditor editing={editing} request={request} t={t} /> : null}
               </li>
             ))}
           </ul>
@@ -455,6 +663,40 @@ function CustomerDetailPanel({
   )
 }
 
+/** Renders a detail section heading with an optional add action. */
+function SectionHeading({
+  actionLabel,
+  onAction,
+  title,
+}: {
+  /** Label of the add action. Leave out to hide it. */
+  actionLabel?: string
+  /** Opens the add form. */
+  onAction: () => void
+  /** Section title. */
+  title: string
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h3 className="text-sm font-bold text-[var(--workbench-text)]">{title}</h3>
+      {actionLabel ? (
+        <button className="workbench-button-secondary min-h-8 px-3 text-xs" onClick={onAction} type="button">
+          {actionLabel}
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+/** Renders the latest failed Customer change. */
+function EditingError({ message }: { /** Failure message. */ message: string }) {
+  return (
+    <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
+      {message}
+    </p>
+  )
+}
+
 /** Renders a compact Customer health badge. */
 function CustomerBadge({ t, value }: { /** Translator for Customer labels. */ t: (key: MessageKey) => string; /** Customer health value. */ value: Customer['health'] }) {
   const className = value === 'critical' || value === 'at-risk'
@@ -474,141 +716,6 @@ function Metric({ label, value }: { /** Metric label. */ label: string; /** Metr
 function formatDate(value: string, locale: string): string {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(locale)
-}
-
-/** Option rendered by a Customer filter select. */
-type CustomerFilterOption<Value extends string> = {
-  /** URL or view value represented by the option. */
-  value: Value
-  /** Message key for the option label. */
-  labelKey: MessageKey
-}
-
-/** Customer tier options supported by the directory filter. */
-const customerTierOptions = [
-  { value: 'strategic', labelKey: 'customers.values.tier.strategic' },
-  { value: 'enterprise', labelKey: 'customers.values.tier.enterprise' },
-  { value: 'growth', labelKey: 'customers.values.tier.growth' },
-  { value: 'standard', labelKey: 'customers.values.tier.standard' },
-  { value: 'trial', labelKey: 'customers.values.tier.trial' },
-] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['tier']>>[]
-
-/** Customer size options supported by the directory filter. */
-const customerSizeOptions = [
-  { value: 'startup', labelKey: 'customers.values.size.startup' },
-  { value: 'small', labelKey: 'customers.values.size.small' },
-  { value: 'mid-market', labelKey: 'customers.values.size.midMarket' },
-  { value: 'enterprise', labelKey: 'customers.values.size.enterprise' },
-] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['size']>>[]
-
-/** Customer lifecycle options supported by the directory filter. */
-const customerStatusOptions = [
-  { value: 'prospect', labelKey: 'customers.values.status.prospect' },
-  { value: 'active', labelKey: 'customers.values.status.active' },
-  { value: 'inactive', labelKey: 'customers.values.status.inactive' },
-  { value: 'churned', labelKey: 'customers.values.status.churned' },
-] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['status']>>[]
-
-/** Customer health options supported by the directory filter. */
-const customerHealthOptions = [
-  { value: 'healthy', labelKey: 'customers.values.health.healthy' },
-  { value: 'watch', labelKey: 'customers.values.health.watch' },
-  { value: 'at-risk', labelKey: 'customers.values.health.atRisk' },
-  { value: 'critical', labelKey: 'customers.values.health.critical' },
-  { value: 'unknown', labelKey: 'customers.values.health.unknown' },
-] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['health']>>[]
-
-/** Customer sort options supported by the directory filter. */
-const customerSortOptions = [
-  { value: 'updatedAt', labelKey: 'customers.filters.sort.updatedAt' },
-  { value: 'name', labelKey: 'customers.filters.sort.name' },
-  { value: 'tier', labelKey: 'customers.filters.sort.tier' },
-  { value: 'size', labelKey: 'customers.filters.sort.size' },
-  { value: 'status', labelKey: 'customers.filters.sort.status' },
-  { value: 'health', labelKey: 'customers.filters.sort.health' },
-  { value: 'businessValue', labelKey: 'customers.filters.sort.businessValue' },
-  { value: 'requestCount', labelKey: 'customers.filters.sort.requestCount' },
-  { value: 'openRequestCount', labelKey: 'customers.filters.sort.openRequestCount' },
-] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['sortBy']>>[]
-
-/** Customer sort options that do not require sensitive business-value access. */
-const customerSafeSortOptions = customerSortOptions.filter((option) => option.value !== 'businessValue')
-
-/** Customer sort-direction options supported by the directory filter. */
-const customerSortDirectionOptions = [
-  { value: 'descending', labelKey: 'customers.filters.direction.descending' },
-  { value: 'ascending', labelKey: 'customers.filters.direction.ascending' },
-] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerListInput['sortDirection']>>[]
-
-/** Customer grouping options supported by saved directory views. */
-const customerGroupOptions = [
-  { value: 'tier', labelKey: 'customers.filters.group.tier' },
-  { value: 'size', labelKey: 'customers.filters.group.size' },
-  { value: 'status', labelKey: 'customers.filters.group.status' },
-  { value: 'health', labelKey: 'customers.filters.group.health' },
-  { value: 'owner', labelKey: 'customers.filters.group.owner' },
-] as const satisfies readonly CustomerFilterOption<NonNullable<CustomerSavedView['groupBy']>>[]
-
-/** Customer grouping options that do not expose redacted owner identifiers. */
-const customerSafeGroupOptions = customerGroupOptions.filter((option) => option.value !== 'owner')
-
-/** Localized labels for Customer commercial tiers. */
-const customerTierLabels: Record<Customer['tier'], MessageKey> = {
-  strategic: 'customers.values.tier.strategic',
-  enterprise: 'customers.values.tier.enterprise',
-  growth: 'customers.values.tier.growth',
-  standard: 'customers.values.tier.standard',
-  trial: 'customers.values.tier.trial',
-}
-
-/** Localized labels for Customer organization sizes. */
-const customerSizeLabels: Record<Customer['size'], MessageKey> = {
-  startup: 'customers.values.size.startup',
-  small: 'customers.values.size.small',
-  'mid-market': 'customers.values.size.midMarket',
-  enterprise: 'customers.values.size.enterprise',
-}
-
-/** Localized labels for Customer lifecycle statuses. */
-const customerStatusLabels: Record<Customer['status'], MessageKey> = {
-  prospect: 'customers.values.status.prospect',
-  active: 'customers.values.status.active',
-  inactive: 'customers.values.status.inactive',
-  churned: 'customers.values.status.churned',
-}
-
-/** Localized labels for Customer health values. */
-const customerHealthLabels: Record<Customer['health'], MessageKey> = {
-  healthy: 'customers.values.health.healthy',
-  watch: 'customers.values.health.watch',
-  'at-risk': 'customers.values.health.atRisk',
-  critical: 'customers.values.health.critical',
-  unknown: 'customers.values.health.unknown',
-}
-
-/** Localized labels for Customer Request lifecycle values. */
-const requestStatusLabels: Record<CustomerDetail['requests'][number]['status'], MessageKey> = {
-  requested: 'customers.values.requestStatus.requested',
-  'in-progress': 'customers.values.requestStatus.inProgress',
-  completed: 'customers.values.requestStatus.completed',
-  closed: 'customers.values.requestStatus.closed',
-  merged: 'customers.values.requestStatus.merged',
-}
-
-/** Localized labels for Customer Request importance values. */
-const requestImportanceLabels: Record<CustomerDetail['requests'][number]['importance'], MessageKey> = {
-  low: 'customers.values.importance.low',
-  normal: 'customers.values.importance.normal',
-  high: 'customers.values.importance.high',
-  urgent: 'customers.values.importance.urgent',
-}
-
-/** Localized labels for Customer Work Item lifecycle projections. */
-const workItemLifecycleLabels: Record<CustomerWorkItemSummary['lifecycle'], MessageKey> = {
-  requested: 'customers.values.lifecycle.requested',
-  'in-progress': 'customers.values.lifecycle.inProgress',
-  completed: 'customers.values.lifecycle.completed',
-  unknown: 'customers.values.lifecycle.unknown',
 }
 
 /** Renders one typed Customer select with an optional all-values option. */

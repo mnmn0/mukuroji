@@ -40,8 +40,6 @@ export type {
   WorkspaceDependencies,
 } from '../app/composition/app-dependencies'
 
-export { DynamoDbDashboardSummaryClient } from '../modules/analytics'
-
 export {
   AwsCognitoClient,
   CognitoServiceError,

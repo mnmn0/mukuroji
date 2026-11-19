@@ -92,6 +92,32 @@ export function createFileBucketBrowserCorsRule(
   };
 }
 
+/** Construct ID CDK uses for the stack-wide S3 bucket-notifications handler Lambda. */
+const BUCKET_NOTIFICATIONS_HANDLER_ID =
+  'BucketNotificationsHandler050a0587b7544547bf325f094a3db834';
+
+/**
+ * Gives the CDK-internal bucket-notifications handler a retained 90-day log group.
+ *
+ * `eventBridgeEnabled` makes CDK add this inline Lambda without any log group setting, and
+ * it is not an L2 function, so `useCdkManagedLogGroup` does not cover it.
+ *
+ * @param scope Stack that owns the singleton handler.
+ */
+function bindBucketNotificationsHandlerLogGroup(scope: cdk.Stack): void {
+  const handlerResource = scope.node
+    .tryFindChild(BUCKET_NOTIFICATIONS_HANDLER_ID)
+    ?.node.defaultChild;
+  if (!(handlerResource instanceof cdk.CfnResource)) {
+    return;
+  }
+  const logGroup = new logs.LogGroup(scope, 'BucketNotificationsHandlerLogGroup', {
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    retention: logs.RetentionDays.THREE_MONTHS,
+  });
+  handlerResource.addPropertyOverride('LoggingConfig.LogGroup', logGroup.logGroupName);
+}
+
 /**
  * Builds durable file storage, import storage, and malware scanning resources.
  *
@@ -137,6 +163,7 @@ export function buildFileStorage(
     removalPolicy: cdk.RemovalPolicy.RETAIN,
     versioned: true,
   });
+  bindBucketNotificationsHandlerLogGroup(scope);
 
   const markerLogGroup = new logs.LogGroup(
     scope,

@@ -432,7 +432,7 @@ export function createCanonicalWorkItemTransactItems(tableName: string, director
               dueDate: { S: dueDate },
               calendarPolicy: {
                 M: {
-                  timeZone: { S: 'UTC' },
+                  timeZone: { S: 'Asia/Tokyo' },
                   workingWeekdays: {
                     L: [
                       { S: 'monday' },

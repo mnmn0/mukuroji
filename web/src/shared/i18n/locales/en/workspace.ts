@@ -182,6 +182,7 @@ export const workspaceMessages = {
   'workspace.focus.policy.fieldError': 'Enter a value within the allowed range.',
   'workspace.myTasks.eyebrow': 'Owned work',
   'workspace.myTasks.title': 'My tasks',
+  'workspace.myTasks.layout': 'My Tasks layout',
   'workspace.myTasks.description':
     'Handle next actions, review work, and completed tasks in one flow.',
   'workspace.myTasks.involvement.contributor': 'Contributor',
@@ -292,7 +293,17 @@ export const workspaceMessages = {
   'workspace.dashboard.description':
     'Compare cross-project progress, open tasks, and risks to support the next decision.',
   'workspace.dashboard.portfolioTitle': 'Portfolio health',
-  'workspace.dashboard.portfolioMeta': 'Active project status',
+  'workspace.dashboard.portfolioMeta': 'Showing {shown} of {total} projects',
+  'workspace.dashboard.portfolioEmpty': 'No projects match the selected health.',
+  'workspace.dashboard.sort.label': 'Sort projects',
+  'workspace.dashboard.sort.directory': 'Team order',
+  'workspace.dashboard.sort.health': 'Health, off track first',
+  'workspace.dashboard.sort.updateOldest': 'Oldest update first',
+  'workspace.dashboard.sort.updateNewest': 'Newest update first',
+  'workspace.dashboard.sort.progressAscending': 'Lowest progress first',
+  'workspace.dashboard.sort.progressDescending': 'Highest progress first',
+  'workspace.dashboard.healthFilter.label': 'Filter by reported health',
+  'workspace.dashboard.healthFilter.all': 'All health',
   'workspace.planningUpdate.metric.attention': 'Updates needing attention',
   'workspace.planningUpdate.column.health': 'Reported health',
   'workspace.planningUpdate.column.freshness': 'Update status',
@@ -424,6 +435,25 @@ export const workspaceMessages = {
   'workspace.help.statusTitle': 'Troubleshoot work updates',
   'workspace.help.statusDescription':
     'Review checks for issue and task visibility or synchronization problems.',
+  'workspace.help.roleGuidesTitle': 'User guides by role',
+  'workspace.help.roleGuidesDescription':
+    'Step-by-step guides for each role, written in Japanese. They open in a new tab on the GitHub repository.',
+  'workspace.help.pmGuideTitle': 'Project manager guide',
+  'workspace.help.pmGuideDescription':
+    'Start a project, build the WBS and schedule, set the update cadence, publish weekly updates, report, and close.',
+  'workspace.help.memberGuideTitle': 'Member guide',
+  'workspace.help.memberGuideDescription':
+    'My tasks, Focus, Inbox, task details, logging time, and submitting timesheets.',
+  'workspace.help.adminGuideTitle': 'Administrator guide',
+  'workspace.help.adminGuideDescription':
+    'Invitations and roles, workflows and fields, automation, agent settings, and identity and security.',
+  'workspace.help.agentGuideTitle': 'Coding agent guide',
+  'workspace.help.agentGuideDescription':
+    'Issue a token, register your client, follow the agent workflow, and monitor the Factory board.',
+  'workspace.help.buildTitle': 'Running Web build',
+  'workspace.help.buildDescription':
+    'Share this commit when reporting a problem. Operators use it to roll the Web app back to an earlier release.',
+  'workspace.help.buildUnknown': 'Development build (no commit recorded)',
   'workspace.settings.eyebrow': 'Admin',
   'workspace.settings.title': 'Settings',
   'workspace.settings.description':
@@ -693,10 +723,6 @@ export const workspaceMessages = {
   'workspace.column.project': 'Project',
   'workspace.column.team': 'Team',
   'workspace.column.progress': 'Progress',
-  'workspace.column.risk': 'Risk',
-  'workspace.risk.low': 'Low risk',
-  'workspace.risk.watch': 'Watch',
-  'workspace.risk.clear': 'Healthy',
   'workspace.empty.tasks': 'No tasks have been registered yet.',
   'workspace.activity.handoff': 'Organized 2 review handoffs',
   'workspace.activity.handoffMeta':

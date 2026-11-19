@@ -1,4 +1,5 @@
 import {
+  TENANT_EXPORT_SNAPSHOT_RUN_ID_PATTERN,
   TENANT_OPERATION_EXECUTION_JOB_VERSION,
   type TenantOperationExecutionJob,
 } from '../../application/tenant-operation-resource-owner'
@@ -116,7 +117,10 @@ function readCursor(value: unknown): TenantOperationExecutionJob['cursor'] {
     (value.phase !== undefined &&
       value.phase !== 'snapshot' &&
       value.phase !== 'prepare' &&
-      value.phase !== 'verify')
+      value.phase !== 'verify') ||
+    (value.snapshotRunId !== undefined &&
+      (typeof value.snapshotRunId !== 'string' ||
+        !TENANT_EXPORT_SNAPSHOT_RUN_ID_PATTERN.test(value.snapshotRunId)))
   ) {
     throw invalidJob()
   }
@@ -126,6 +130,9 @@ function readCursor(value: unknown): TenantOperationExecutionJob['cursor'] {
     ...(typeof value.position === 'string' ? { position: value.position } : {}),
     ...(value.phase === 'snapshot' || value.phase === 'prepare' || value.phase === 'verify'
       ? { phase: value.phase }
+      : {}),
+    ...(typeof value.snapshotRunId === 'string'
+      ? { snapshotRunId: value.snapshotRunId }
       : {}),
   }
 }

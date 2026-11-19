@@ -95,6 +95,10 @@ import {
 } from '../model/teamIssueDisplay'
 import { isCancelledTeamIssueUpdate } from '../model/teamIssueUpdateOutcome'
 import { CreateIssuePanel } from './CreateTeamIssuePanel'
+import {
+  createWorkItemDuplicateDraft,
+  type WorkItemDuplicateDraft,
+} from '../model/workItemDuplicate'
 import { IssueBoard } from './TeamIssueBoard'
 import { IssueDetailPane } from './TeamIssueDetailPane'
 import {
@@ -118,6 +122,10 @@ import {
 } from '../../shared/lib/preferences/workItemOutlineCollapse'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { IssueToolbar } from './TeamIssueToolbar'
+import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
+import { listTaskGanttRowTasks, type TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
+import { resolveTeamIssueGroupValue } from '../model/teamIssueDisplay'
+import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 
 /** Message shown when a hierarchy move cannot be made. */
 const outlineMoveBlockMessageKeys = {
@@ -145,6 +153,8 @@ type TeamIssueCreateContext = {
   workflowStatusId?: string
   /** Optional Work Item Type inherited from a Board column. */
   workItemTypeId?: string
+  /** Values copied from an existing Work Item when the member duplicates it. */
+  duplicateDraft?: WorkItemDuplicateDraft
 }
 
 /**
@@ -219,6 +229,7 @@ export function TeamIssueScreen({
   const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
   const [createWorkflowStatusId, setCreateWorkflowStatusId] = useState<string>()
   const [createWorkItemTypeId, setCreateWorkItemTypeId] = useState<string>()
+  const [createDuplicateDraft, setCreateDuplicateDraft] = useState<WorkItemDuplicateDraft>()
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
   const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
   const [taskViewSelection, setTaskViewSelection] = useState<TaskViewSelectionState>(
@@ -382,6 +393,7 @@ export function TeamIssueScreen({
     setCreateErrorMessage(undefined)
     setCreateWorkflowStatusId(undefined)
     setCreateWorkItemTypeId(undefined)
+    setCreateDuplicateDraft(undefined)
     setIsCreateOpen(false)
   }, [])
 
@@ -390,6 +402,7 @@ export function TeamIssueScreen({
     setCreateErrorMessage(undefined)
     setCreateWorkflowStatusId(context?.workflowStatusId)
     setCreateWorkItemTypeId(context?.workItemTypeId)
+    setCreateDuplicateDraft(context?.duplicateDraft)
     setIsCreateOpen(true)
   }, [])
 
@@ -495,15 +508,16 @@ export function TeamIssueScreen({
   // Set when the person retries the hierarchy from the retry button, which disappears once the
   // read succeeds; focus then moves to the loaded view instead of falling back to the page.
   const outlineRetryFocusPendingRef = useRef(false)
-  const isOutlineRequested = viewMode === 'table' &&
-    (taskViewPresentation?.display.showOutline ?? false) &&
-    !taskViewPresentation?.groupBy
+  // The table nests rows only without grouping; the Gantt chart nests them within each group.
+  const isOutlineRequested = (taskViewPresentation?.display.showOutline ?? false) && (
+    viewMode === 'gantt' || (viewMode === 'table' && !taskViewPresentation?.groupBy)
+  )
   const outlineNodes = isOutlineRequested ? issueOutline?.nodes : undefined
   const outlineRows = useMemo(
-    () => outlineNodes
+    () => outlineNodes && viewMode === 'table'
       ? createWorkItemOutlineRows(visibleIssues, outlineNodes, collapsedOutlineIds)
       : undefined,
-    [collapsedOutlineIds, outlineNodes, visibleIssues],
+    [collapsedOutlineIds, outlineNodes, viewMode, visibleIssues],
   )
   const hasOutlineError = Boolean(isOutlineRequested && issueOutline?.errorMessage)
   // Whether the outline is on screen, and how many times it has been hidden. A move that
@@ -531,19 +545,6 @@ export function TeamIssueScreen({
       issueViewPanelRef.current?.focus()
     }
   }, [hasOutlineError, outlineRows])
-  // Rows hidden under a collapsed parent are left out of keyboard navigation and selection.
-  const navigableIssues = useMemo(
-    () => outlineRows ? outlineRows.map((row) => row.item) : visibleIssues,
-    [outlineRows, visibleIssues],
-  )
-  const visibleIssueActionTargets = useMemo(
-    () => navigableIssues.map((issue) => ({
-      expectedRevision: issue.revision,
-      teamId: issue.teamId,
-      workItemId: issue.id,
-    })),
-    [navigableIssues],
-  )
 
   /** Shows or hides the rows nested under one outline row and remembers the choice. */
   const toggleOutlineCollapsed = useCallback((issueId: string) => {
@@ -553,6 +554,44 @@ export function TeamIssueScreen({
     setCollapsedOutlineState({ teamId, ids: next })
   }, [collapsedOutlineIds, teamId])
 
+  const ganttOutline = useMemo<TaskGanttOutline | undefined>(() => outlineNodes && viewMode === 'gantt'
+    ? {
+        hierarchies: new Map([[teamId, outlineNodes]]),
+        collapsedKeys: new Set([...collapsedOutlineIds].map((id) => createWorkItemOutlineKey(teamId, id))),
+        onToggleCollapsed: (issue) => toggleOutlineCollapsed(issue.id),
+      }
+    : undefined, [collapsedOutlineIds, outlineNodes, teamId, toggleOutlineCollapsed, viewMode])
+  const ganttGroupBy = viewMode === 'gantt' ? taskViewPresentation?.groupBy : undefined
+  const ganttGroupDirection = taskViewPresentation?.groupDirection ?? 'asc'
+  const ganttGroup = useMemo<TaskGanttGrouping | undefined>(() => ganttGroupBy
+    ? {
+        direction: ganttGroupDirection,
+        resolve: (issue) => resolveTeamIssueGroupValue(issue, ganttGroupBy, configuration, activeTeam, t),
+      }
+    : undefined, [activeTeam, configuration, ganttGroupBy, ganttGroupDirection, t])
+  // Keyboard navigation and selection follow the rows shown: the outline order without the rows
+  // under a collapsed parent, and in the Gantt chart its groups and schedule order as well.
+  const navigableIssues = useMemo(
+    () => viewMode === 'gantt'
+      ? listTaskGanttRowTasks(visibleIssues, {
+          ...(ganttOutline ? { outline: ganttOutline } : {}),
+          ...(ganttGroup ? { group: ganttGroup } : {}),
+        })
+      : outlineRows ? outlineRows.map((row) => row.item) : visibleIssues,
+    [ganttGroup, ganttOutline, outlineRows, viewMode, visibleIssues],
+  )
+  const visibleIssueActionTargets = useMemo(
+    () => navigableIssues.map((issue) => ({
+      expectedRevision: issue.revision,
+      teamId: issue.teamId,
+      workItemId: issue.id,
+    })),
+    [navigableIssues],
+  )
+  const ganttConfigurationsByTeam = useMemo(
+    () => resolvedConfiguration ? { [teamId]: resolvedConfiguration } : {},
+    [resolvedConfiguration, teamId],
+  )
   const saveOutlineMove = issueOutline?.onMove
   /** Plans and saves one indent, outdent, or sibling move, then reports the outcome. */
   const moveIssueInOutline = useCallback((issue: TeamIssue, direction: WorkItemHierarchyMoveDirection) => {
@@ -1025,6 +1064,22 @@ export function TeamIssueScreen({
   }, [teamActions])
 
   /**
+   * Opens the create form with a draft copied from an existing Work Item.
+   *
+   * @param issue - Work Item to duplicate.
+   */
+  const handleDuplicateIssue = useCallback((issue: TeamIssue) => {
+    if (isAiSummaryOperationPendingRef.current) return
+    pendingCreateContextRef.current = { duplicateDraft: createWorkItemDuplicateDraft(issue) }
+    void teamActions.execute(
+      'create',
+      'click',
+      undefined,
+      { mode: 'none', targets: [] },
+    )
+  }, [teamActions])
+
+  /**
    * Returns a detail-form mutation outcome to a pending Edit, Move, or Assign action.
    *
    * @param issueId - Team Issue persisted by the existing detail form.
@@ -1387,10 +1442,11 @@ export function TeamIssueScreen({
                 ) : null}
                 {isCreateOpen && onCreateIssue ? (
                   <CreateIssuePanel
-                    key={`create-issue-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}`}
+                    key={`create-issue-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}-${createDuplicateDraft?.sourceWorkItemId ?? ''}`}
                     assigneeOptions={assigneeOptions}
                     canCreateUnassignedIssue={canCreateUnassignedIssue}
                     configuration={configuration}
+                    duplicateDraft={createDuplicateDraft}
                     errorMessage={createErrorMessage}
                     workItemTypeId={createWorkItemTypeId}
                     workflowStatusId={createWorkflowStatusId}
@@ -1601,6 +1657,17 @@ export function TeamIssueScreen({
                       t={t}
                       workspaceMembers={workspaceMembers}
                     />
+                  ) : viewMode === 'gantt' ? (
+                    <TaskGanttView
+                      configuration={configuration}
+                      configurationsByTeam={ganttConfigurationsByTeam}
+                      group={ganttGroup}
+                      onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
+                      outline={ganttOutline}
+                      planningSnapshot={planningSnapshot}
+                      t={t}
+                      tasks={visibleIssues}
+                    />
                   ) : (
                     <IssueBoard
                       activeTeam={activeTeam}
@@ -1649,6 +1716,7 @@ export function TeamIssueScreen({
                 onAuthenticatedApiError={onAuthenticatedApiError}
                 onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
                 onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
+                onDuplicateIssue={onCreateIssue ? handleDuplicateIssue : undefined}
                 onAddRelation={canMutateSelectedIssue && onAddRelation
                   ? (issueId, input) => handleTeamIssueActionRelation(
                       issueId,
