@@ -1,0 +1,54 @@
+name: 機能追加・改善
+description: 新しい機能や既存機能の改善を提案する
+title: "[P2] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        タイトルは `[P0]`〜`[P3]` の優先度で始め、何をするかを一文で書いてください（例: `[P2] Project の週次レポートを PDF で出力する`）。
+        優先度の目安: P0 = 全体の前提・阻害要因、P1 = 主要業務に必要、P2 = 通常の改善、P3 = あるとよい。
+        脆弱性はこのフォームではなく [SECURITY.md](https://github.com/mnmn0/mukuroji/blob/main/SECURITY.md) の非公開窓口から報告してください。
+  - type: input
+    id: parent
+    attributes:
+      label: Parent
+      description: 親 Issue があれば番号を書いてください（例: #333）
+      placeholder: "#333"
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景
+      description: 誰のどんな業務で、なぜ必要か
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: 現状（根拠）
+      description: 今どうなっているか。関連するファイル・画面・docs を挙げてください
+      placeholder: |
+        - `web/src/pages/workspace/ReportsPage.tsx` は ... だけを表示する
+        - `docs/planning.md` には ... の記載がない
+  - type: textarea
+    id: tasks
+    attributes:
+      label: やること
+      description: 実装・文書・運用で必要な作業を箇条書きで
+      placeholder: |
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: 完了条件
+      description: 利用者や運用者の視点で、何ができれば完了か
+      placeholder: |
+        - ...
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: 依存・関連
+      description: 先に終わっている必要がある Issue、関連する Issue / PR

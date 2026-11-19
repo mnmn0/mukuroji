@@ -33,4 +33,17 @@ describe('Coding agent connection guide', () => {
     expect(html).not.toContain('<input')
     expect(html).not.toContain('type="password"')
   })
+
+  test.each(['en', 'ja'] as const)('links every role guide that exists in docs/guide in %s', (locale) => {
+    const t = createTranslator(locale)
+    const html = renderToStaticMarkup(
+      <MemoryRouter><HelpWorkspaceView t={t} /></MemoryRouter>,
+    )
+    expect(html).toContain('id="role-guides"')
+    for (const fileName of ['pm.md', 'member.md', 'admin.md', 'coding-agent.md']) {
+      expect(html).toContain(`href="https://github.com/mnmn0/mukuroji/blob/main/docs/guide/${fileName}"`)
+      expect(readFileSync(new URL(`../../docs/guide/${fileName}`, import.meta.url), 'utf8')).toStartWith('# ')
+    }
+    expect(html).toContain('rel="noopener noreferrer"')
+  })
 })

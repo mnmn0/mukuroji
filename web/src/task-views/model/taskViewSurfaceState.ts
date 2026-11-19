@@ -82,7 +82,7 @@ export type TeamIssueViewState = {
   /** Team/Type-qualified workflow status key or the all-status sentinel. */
   statusFilter: string
   /** Active Team Issue layout. */
-  viewMode: 'table' | 'board'
+  viewMode: 'table' | 'board' | 'gantt'
 }
 
 /**
@@ -324,7 +324,9 @@ export function taskViewDefinitionToTeamState(
     searchQuery: definition.filters.keyword ?? '',
     statusFilter: workflowStatus ? createWorkflowStatusFilterValue(workflowStatus) : 'all',
     workItemTypeFilter: definition.filters.workItemTypeIds?.[0] ?? 'all',
-    viewMode: definition.layout.mode === 'board' ? 'board' : 'table',
+    viewMode: definition.layout.mode === 'board' || definition.layout.mode === 'gantt'
+      ? definition.layout.mode
+      : 'table',
   }
 }
 
