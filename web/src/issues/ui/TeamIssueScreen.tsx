@@ -95,6 +95,10 @@ import {
 } from '../model/teamIssueDisplay'
 import { isCancelledTeamIssueUpdate } from '../model/teamIssueUpdateOutcome'
 import { CreateIssuePanel } from './CreateTeamIssuePanel'
+import {
+  createWorkItemDuplicateDraft,
+  type WorkItemDuplicateDraft,
+} from '../model/workItemDuplicate'
 import { IssueBoard } from './TeamIssueBoard'
 import { IssueDetailPane } from './TeamIssueDetailPane'
 import {
@@ -145,6 +149,8 @@ type TeamIssueCreateContext = {
   workflowStatusId?: string
   /** Optional Work Item Type inherited from a Board column. */
   workItemTypeId?: string
+  /** Values copied from an existing Work Item when the member duplicates it. */
+  duplicateDraft?: WorkItemDuplicateDraft
 }
 
 /**
@@ -219,6 +225,7 @@ export function TeamIssueScreen({
   const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
   const [createWorkflowStatusId, setCreateWorkflowStatusId] = useState<string>()
   const [createWorkItemTypeId, setCreateWorkItemTypeId] = useState<string>()
+  const [createDuplicateDraft, setCreateDuplicateDraft] = useState<WorkItemDuplicateDraft>()
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
   const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
   const [taskViewSelection, setTaskViewSelection] = useState<TaskViewSelectionState>(
@@ -382,6 +389,7 @@ export function TeamIssueScreen({
     setCreateErrorMessage(undefined)
     setCreateWorkflowStatusId(undefined)
     setCreateWorkItemTypeId(undefined)
+    setCreateDuplicateDraft(undefined)
     setIsCreateOpen(false)
   }, [])
 
@@ -390,6 +398,7 @@ export function TeamIssueScreen({
     setCreateErrorMessage(undefined)
     setCreateWorkflowStatusId(context?.workflowStatusId)
     setCreateWorkItemTypeId(context?.workItemTypeId)
+    setCreateDuplicateDraft(context?.duplicateDraft)
     setIsCreateOpen(true)
   }, [])
 
@@ -1025,6 +1034,22 @@ export function TeamIssueScreen({
   }, [teamActions])
 
   /**
+   * Opens the create form with a draft copied from an existing Work Item.
+   *
+   * @param issue - Work Item to duplicate.
+   */
+  const handleDuplicateIssue = useCallback((issue: TeamIssue) => {
+    if (isAiSummaryOperationPendingRef.current) return
+    pendingCreateContextRef.current = { duplicateDraft: createWorkItemDuplicateDraft(issue) }
+    void teamActions.execute(
+      'create',
+      'click',
+      undefined,
+      { mode: 'none', targets: [] },
+    )
+  }, [teamActions])
+
+  /**
    * Returns a detail-form mutation outcome to a pending Edit, Move, or Assign action.
    *
    * @param issueId - Team Issue persisted by the existing detail form.
@@ -1387,10 +1412,11 @@ export function TeamIssueScreen({
                 ) : null}
                 {isCreateOpen && onCreateIssue ? (
                   <CreateIssuePanel
-                    key={`create-issue-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}`}
+                    key={`create-issue-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}-${createDuplicateDraft?.sourceWorkItemId ?? ''}`}
                     assigneeOptions={assigneeOptions}
                     canCreateUnassignedIssue={canCreateUnassignedIssue}
                     configuration={configuration}
+                    duplicateDraft={createDuplicateDraft}
                     errorMessage={createErrorMessage}
                     workItemTypeId={createWorkItemTypeId}
                     workflowStatusId={createWorkflowStatusId}
@@ -1649,6 +1675,7 @@ export function TeamIssueScreen({
                 onAuthenticatedApiError={onAuthenticatedApiError}
                 onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
                 onCommentDraftDirtyChange={handleCommentDraftDirtyChange}
+                onDuplicateIssue={onCreateIssue ? handleDuplicateIssue : undefined}
                 onAddRelation={canMutateSelectedIssue && onAddRelation
                   ? (issueId, input) => handleTeamIssueActionRelation(
                       issueId,
