@@ -830,6 +830,8 @@ export function PlanningPage() {
                   `planning:cycle:${cycle.id}:work-items`,
                   input,
                   (context) => setPlanningCycleWorkItems(accessToken, cycle.id, input, context),
+                  undefined,
+                  { rethrowOnFailure: true },
                 )
               }
             : undefined}

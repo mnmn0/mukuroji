@@ -78,7 +78,7 @@ export type CyclePlanningPanelProps = {
     cycle: PlanningEntity,
     automation: CycleAutomation | null,
   ) => void | Promise<void>
-  /** Adds Work Items to, or removes them from, a Cycle. */
+  /** Adds Work Items to, or removes them from, a Cycle. Rejects when nothing changed. */
   onSetCycleWorkItems?: (
     cycle: PlanningEntity,
     action: 'add' | 'remove',
@@ -206,6 +206,8 @@ function CycleDetail({
 
       <div className="grid grid-cols-2 gap-5 max-[1100px]:grid-cols-1">
         <CycleAutomationForm
+          // Remount when the saved settings change so the unchecked inputs never show stale values.
+          key={`${cycle.automation?.createNext ?? false}:${cycle.automation?.rolloverAtEnd ?? false}`}
           canManage={canManage && open && Boolean(onUpdateCycleAutomation)}
           cycle={cycle}
           labels={labels}
@@ -358,7 +360,12 @@ function WorkItemSelection({
           .map(({ workItem }) => workItem)
           .filter((workItem) => keys.has(workItemKey(workItem)))
         if (workItems.length === 0) return
-        await onSubmit(workItems)
+        try {
+          await onSubmit(workItems)
+        } catch {
+          // The page already shows the failure; keep the selection so the batch can be retried.
+          return
+        }
         setSelected(new Set())
       }}
     >

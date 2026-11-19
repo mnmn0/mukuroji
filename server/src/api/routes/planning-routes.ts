@@ -3797,7 +3797,12 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
       requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
-      await requirePlanningScopePermission(principal, input, 'member')
+      // Cycle automation later runs /next and /rollover without the caller, so it needs a manager.
+      await requirePlanningScopePermission(
+        principal,
+        input,
+        isRecord(input) && input.automation !== undefined ? 'manager' : 'member',
+      )
       if (input.parentId) {
         await requirePlanningEntityPermission(
           principal,
@@ -3829,7 +3834,13 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
       requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
-      await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'member')
+      // Cycle automation later runs /next and /rollover without the caller, so it needs a manager.
+      await requirePlanningEntityPermission(
+        principal,
+        snapshot.entities,
+        entityId,
+        isRecord(input.patch) && input.patch.automation !== undefined ? 'manager' : 'member',
+      )
       if (isRecord(input.patch) && input.patch.ownerMemberKey !== undefined) {
         await requirePlanningActiveOwner(principal, input.patch.ownerMemberKey)
       }

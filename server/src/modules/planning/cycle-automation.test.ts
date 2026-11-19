@@ -240,6 +240,60 @@ describe('Cycle automation', () => {
     expect(snapshot.workItemLinks.find((link) => link.workItemId === 'done')?.cycleId).toBe('cycle-1')
   })
 
+  test('rolls an overdue predecessor into its next Cycle before completing that Cycle', async () => {
+    let now = new Date('2026-08-13T00:00:00.000Z')
+    const workItemState: PlanningWorkItemState = {
+      workItems: [createWorkItem('open', 'started')],
+    }
+    const client = new InMemoryPlanningClient(() => now)
+    await client.create(WORKSPACE, createCycle('cycle-1', 0, {
+      automation: { createNext: true, rolloverAtEnd: true },
+    }), workItemState)
+    await client.setCycleWorkItems(WORKSPACE, 'cycle-1', {
+      action: 'add',
+      workItems: [{ teamId: 'team-1', workItemId: 'open' }],
+      expectedRevision: 1,
+    }, workItemState)
+    const loadWorkItems = async () => workItemState
+    const created = await client.runCycleAutomationStep(WORKSPACE, 'cycle-1', loadWorkItems)
+    const secondId = created.action === 'created-next' ? created.cycleId : ''
+
+    // Both Cycles are overdue, and the successor is reached first.
+    now = new Date('2026-09-01T00:00:00.000Z')
+    const third = await client.runCycleAutomationStep(WORKSPACE, secondId, loadWorkItems)
+    expect(third.action).toBe('created-next')
+    expect(await client.runCycleAutomationStep(WORKSPACE, secondId, loadWorkItems))
+      .toEqual({ action: 'idle' })
+    expect(await client.runCycleAutomationStep(WORKSPACE, 'cycle-1', loadWorkItems)).toEqual({
+      action: 'rolled-over',
+      movedCount: 1,
+      remainingWorkItemCount: 0,
+    })
+    expect(await client.runCycleAutomationStep(WORKSPACE, secondId, loadWorkItems)).toEqual({
+      action: 'rolled-over',
+      movedCount: 1,
+      remainingWorkItemCount: 0,
+    })
+    const snapshot = await client.get(WORKSPACE, workItemState)
+    expect(getEntity(snapshot.entities, secondId).status).toBe('completed')
+    expect(snapshot.workItemLinks.find((link) => link.workItemId === 'open')).toMatchObject({
+      cycleId: third.action === 'created-next' ? third.cycleId : '',
+      carriedOverFromCycleId: secondId,
+    })
+  })
+
+  test('does not copy automation when a Cycle is duplicated', async () => {
+    const client = new InMemoryPlanningClient(() => new Date('2026-08-05T00:00:00.000Z'))
+    await client.create(WORKSPACE, createCycle('cycle-1', 0, {
+      automation: { createNext: true, rolloverAtEnd: true },
+    }), { workItems: [] })
+    const response = await client.duplicate(WORKSPACE, 'cycle-1', {
+      targetId: 'cycle-copy',
+      expectedRevision: 1,
+    }, { workItems: [] })
+    expect(getEntity(response.planning.entities, 'cycle-copy').automation).toBeUndefined()
+  })
+
   test('drops the carry-over history when the Cycle is changed by hand', async () => {
     const now = new Date('2026-08-17T00:00:00.000Z')
     const workItemState: PlanningWorkItemState = { workItems: [createWorkItem('open', 'started')] }

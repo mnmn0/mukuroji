@@ -1579,6 +1579,8 @@ abstract class BasePlanningClient implements PlanningClient {
       }
       delete copy.archivedAt
       delete copy.nextCycleId
+      // Automation runs without the caller's permissions, so only a manager turns it on.
+      delete copy.automation
       if (copy.parentId) requireActiveEntity(state, copy.parentId)
       const next = { ...state, entities: [...state.entities, copy] }
       validatePlanningState(next)
@@ -9118,7 +9120,15 @@ function resolveDueCycleAutomation(
 ): 'create-next' | 'rollover' | undefined {
   const dueAt = resolveCycleAutomationDueAt(cycle, state)
   if (dueAt === undefined || Date.parse(dueAt) > now.getTime()) return undefined
-  return cycle.nextCycleId === undefined ? 'create-next' : 'rollover'
+  if (cycle.nextCycleId === undefined) return 'create-next'
+  // A predecessor still rolling into this Cycle goes first. Completing this Cycle earlier would
+  // stop the predecessor's rollover and strand its unfinished Work Items.
+  const predecessorPending = state.entities.some((candidate) =>
+    candidate.id !== cycle.id &&
+    candidate.nextCycleId === cycle.id &&
+    resolveCycleAutomationDueAt(candidate, state) !== undefined
+  )
+  return predecessorPending ? undefined : 'rollover'
 }
 
 /** Validates the Work Item references of a Cycle bulk change. */

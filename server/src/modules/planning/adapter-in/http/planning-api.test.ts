@@ -3032,3 +3032,32 @@ test('requires Cycle manager permission to create the next Cycle', async () => {
   })
   expect(denied.status).toBe(403)
 })
+
+test('requires Cycle manager permission to change Cycle automation', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const planning = new InMemoryPlanningClient()
+  setTestAppDependencies({ planning })
+  const source = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-source', 0),
+  )
+  expect(source.status).toBe(201)
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  const deniedPatch = await planningApiRequest('/api/planning/entities/cycle-source', 'PATCH', {
+    expectedRevision: 1,
+    patch: { automation: { createNext: true, rolloverAtEnd: true } },
+  })
+  expect(deniedPatch.status).toBe(403)
+  const deniedCreate = await planningApiRequest('/api/planning/entities', 'POST', {
+    ...createCyclePlanningInput('cycle-member', 1),
+    automation: { createNext: true, rolloverAtEnd: false },
+  })
+  expect(deniedCreate.status).toBe(403)
+  const allowedPatch = await planningApiRequest('/api/planning/entities/cycle-source', 'PATCH', {
+    expectedRevision: 1,
+    patch: { title: 'Sprint renamed' },
+  })
+  expect(allowedPatch.status).toBe(200)
+})
