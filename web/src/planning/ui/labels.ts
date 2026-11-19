@@ -205,6 +205,11 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     historyDescription: t('planning.section.updateHistory.description'),
     noStatusUpdatesDescription: t('planning.statusUpdates.emptyDescription'),
     immutable: t('planning.updateHistory.immutable'),
+    acknowledged: (reviewerMemberKey, acknowledgedAt) => t('planning.updateHistory.acknowledged')
+      .replace('{reviewer}', reviewerMemberKey)
+      .replace('{date}', formatPlanningUpdateDate(acknowledgedAt, undefined, locale)),
+    acknowledgementPending: (reviewerMemberKey) => t('planning.updateHistory.acknowledgementPending')
+      .replace('{reviewer}', reviewerMemberKey),
     historyLoading: t('planning.updateHistory.loading'),
     historyError: t('planning.updateHistory.error'),
     retryHistory: t('planning.action.retry'),
