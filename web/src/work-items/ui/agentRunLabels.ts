@@ -36,6 +36,10 @@ export type WorkItemAgentRunsLabels = {
   releaseError: string
   /** Guidance shown for a stalled run. */
   stalledHint: string
+  /** Badge of a run that resumed an earlier run. */
+  resumed: string
+  /** Explanation of the resumed badge. */
+  resumedHint: string
   /** Display names of runtimes. */
   runtimes: Record<AgentRunRuntime, string>
   /** Display names of states. */
@@ -67,6 +71,8 @@ export function createWorkItemAgentRunsLabels(locale: Locale): WorkItemAgentRuns
     releaseConfirm: t('workItems.agentRuns.releaseConfirm'),
     releaseError: t('workItems.agentRuns.releaseError'),
     stalledHint: t('workItems.agentRuns.stalledHint'),
+    resumed: t('workItems.agentRuns.resumed'),
+    resumedHint: t('workItems.agentRuns.resumedHint'),
     // Product names stay untranslated.
     runtimes: { 'claude-code': 'Claude Code', codex: 'Codex', kiro: 'Kiro', other: t('workItems.agentRuns.runtime.other') },
     states: {

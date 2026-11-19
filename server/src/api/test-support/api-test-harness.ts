@@ -8,8 +8,10 @@ import {
   type BulkOperation,
   type ApprovalRequest,
   type CustomFieldValue,
+  type MemberPreferences,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
+  type UpdateMemberPreferencesInput,
   type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
   type WorkItemAcceptanceCriterion,
@@ -584,7 +586,7 @@ function createFileProofingStub(
   const unsupported = async () => {
     throw new Error('Unexpected file proofing client call.')
   }
-  return {
+  const stub = {
     list: unsupported,
     findFileById: unsupported,
     createUpload: unsupported,
@@ -613,9 +615,29 @@ function createFileProofingStub(
     async getApprovalSummaries() {
       return new Map()
     },
+    /**
+     * Reads approval counts through the stub's summary, so a test that overrides the summary also
+     * drives the fence.
+     *
+     * @param scope - Work Item scope.
+     * @returns The counts and a placeholder condition check on the summary row.
+     */
+    async readApprovalSummaryFence(scope) {
+      return {
+        summary: await stub.getApprovalSummary(scope),
+        conditionCheck: {
+          ConditionCheck: {
+            TableName: 'FileProofingTable',
+            Key: { scopeKey: `approval-summary#${scope.issueId ?? ''}`, recordKey: 'APPROVAL_SUMMARY' },
+            ConditionExpression: 'attribute_not_exists(scopeKey)',
+          },
+        },
+      }
+    },
     listReviewerApprovals: unsupported,
     ...overrides,
   } as FileProofingClient
+  return stub
 }
 
 function createCollaborationStub(
@@ -1614,6 +1636,7 @@ function configureFakeProjectClients(
   const workspaceRole = options.workspaceRole ?? 'owner'
   const workspaceStatus = options.workspaceStatus ?? 'active'
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
+  let memberPreferences: MemberPreferences = { revision: 0 }
   let projectQuickAccessPreference = options.projectQuickAccessPreference === undefined
     ? { items: [], revision: 0 }
     : cloneProjectQuickAccessPreferences(options.projectQuickAccessPreference)
@@ -1697,11 +1720,6 @@ function configureFakeProjectClients(
       teamId: string
     }>,
     roleChecks: [] as Array<{ directoryId: string; memberKey: string; projectId: string }>,
-    summaryReads: [] as Array<{
-      directoryId: string
-      isSystemAdmin: boolean
-      userKey: string
-    }>,
     teamArchives: [] as Array<{
       directoryId: string
       expectedPlanningRevision: number
@@ -1771,6 +1789,11 @@ function configureFakeProjectClients(
     projectQuickAccessReplacements: [] as Array<{
       directoryId: string
       input: UpdateProjectQuickAccessPreferencesInput
+      memberKey: string
+    }>,
+    memberPreferencesReplacements: [] as Array<{
+      directoryId: string
+      input: UpdateMemberPreferencesInput
       memberKey: string
     }>,
     userLists: [] as Array<{
@@ -2147,23 +2170,6 @@ function configureFakeProjectClients(
         return 'completed'
       },
     },
-    dashboardSummary: {
-      async getSummary(directoryId, accessContext) {
-        calls.summaryReads.push({
-          directoryId,
-          isSystemAdmin: accessContext.isSystemAdmin,
-          userKey: accessContext.userKey,
-        })
-
-        return {
-          projects: 1,
-          tasks: 1,
-          blocked: 0,
-          updatedAt: '2026-06-03T00:00:00.000Z',
-          source: 'dynamodb',
-        }
-      },
-    },
     workItemConfigurations: createFakeWorkItemConfigurationClient({
       ...(options.jobRoles || options.configurationCustomFields
         ? {
@@ -2275,6 +2281,21 @@ function configureFakeProjectClients(
           revision: detachedInput.revision + 1,
         }
         return cloneProjectQuickAccessPreferences(projectQuickAccessPreference)
+      },
+      async getMemberPreferences() {
+        return { ...memberPreferences }
+      },
+      async replaceMemberPreferences(directoryId, memberKey, input) {
+        calls.memberPreferencesReplacements.push({ directoryId, input: { ...input }, memberKey })
+        if (input.revision !== memberPreferences.revision) {
+          throw new ProjectDataError(
+            409,
+            'MemberPreferencesConflict',
+            'Member preferences changed before this update was saved.',
+          )
+        }
+        memberPreferences = { ...input, revision: input.revision + 1 }
+        return { ...memberPreferences }
       },
       async getProjectAccess(directoryId, projectId, memberKey = 'demo@example.com') {
         calls.accessChecks.push({ directoryId, projectId })

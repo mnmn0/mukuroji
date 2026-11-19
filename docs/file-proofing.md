@@ -8,7 +8,7 @@
 
 - upload/download URL は認証済み API だけが発行し、既定で upload 600 秒、download 300 秒で失効する。
 - bucket は public access を全面拒否し、TLS、SSE-S3、versioning を必須にする。
-- object key は `workspaces/<workspaceId>/files/<fileId>/<versionId>/<fileName>` とし、request から S3 key を受け取らない。
+- object key は `workspaces/<workspaceId>/files/<fileId>/<versionId>` とし、request から S3 key を受け取らない。file 名は key に含めず DynamoDB と download 時の `Content-Disposition` だけに持たせ、長い日本語名でも S3 の key 上限 (1,024 byte) を超えないようにする。以前の version は末尾に encode 済み file 名を持つ key のまま読み書きする。
 - upload session は MIME type、byte 数、file 名を検証し、最大 2 GiB に制限する。`Content-Type`、`Content-Length`、`If-None-Match: *`、upload tag を署名対象にし、同じ論理 version の上書きを拒否する。object size は完了 API でも再検証する。
 - GuardDuty Malware Protection が `GuardDutyMalwareScanStatus=NO_THREATS_FOUND` を付与するまで、API は access URL を発行せず、bucket policy も browser など API/GuardDuty 以外の principal による object read を拒否する。API execution role の例外は upload metadata と scan tag の検証に使い、access URL は clean と判定した immutable S3 VersionId にだけ固定する。`THREATS_FOUND` は `blocked`、scan failure/unsupported は `failed` として扱う。
 - Upload object は最初に `mukuroji-upload=pending` を持ち、clean scan を確認した API だけが `completed` へ更新する。未使用 URL や delete 後に再利用された旧 PUT URL が作った孤立 current object は 1 日後に lifecycle で失効する。
@@ -47,7 +47,7 @@ GET  /api/teams/{teamId}/issues/{issueId}/files
 GET  /api/teams/{teamId}/issues/{issueId}/files/{fileId}/versions/{versionId}/access
 ```
 
-Version 差し替えは `POST .../files/{fileId}/versions`、annotation は `GET|POST .../versions/{versionId}/annotations` を使う。Image は正規化 x/y、PDF は x/y + 1 始まり page、video は x/y + millisecond timecode を保存する。
+Version 差し替えは `POST .../files/{fileId}/versions` で開始時に version 番号を採番する。upload 完了時は、完了した version の番号が現在 version より大きいときだけ現在 version を切り替える。先に採番した version が後から完了しても検証済みとして記録するだけで、現在 version は戻さない。annotation は `GET|POST .../versions/{versionId}/annotations` を使う。Image は正規化 x/y、PDF は x/y + 1 始まり page、video は x/y + millisecond timecode を保存する。
 
 Approval は次の endpoint を使う。
 

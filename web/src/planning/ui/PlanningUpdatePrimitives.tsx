@@ -17,6 +17,7 @@ import { isSafeApplicationPath } from '../../shared/routing/applicationPath'
 import { routeAiPlanningDraftAdoption } from '../model/aiDraftAdoption'
 import { isValidPlanningDateTime, readNonNegativeNumber } from '../model/cadenceForm'
 import {
+  PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION,
   readPlanningUpdateEvidence,
   readPlanningUpdateEvidenceType,
   submitPlanningUpdateCommentAndReset,
@@ -142,6 +143,10 @@ export type PlanningUpdateLabels = {
   noStatusUpdatesDescription: string
   /** Immutable status badge label. */
   immutable: string
+  /** Badge text shown after the configured reviewer confirmed an update. */
+  acknowledged: (reviewerMemberKey: string, acknowledgedAt: string) => string
+  /** Badge text shown while the configured reviewer has not confirmed an update. */
+  acknowledgementPending: (reviewerMemberKey: string) => string
   /** History loading-state label. */
   historyLoading: string
   /** History error-state label. */
@@ -1323,6 +1328,7 @@ export function PlanningStatusUpdateLedger({
             const comments = collaboration?.commentsByUpdateId[update.id] ?? []
             const reactions = collaboration?.reactionsByUpdateId[update.id] ?? update.reactions
             const commentCount = comments.length || update.commentCount
+            const acknowledgement = collaboration?.acknowledgementsByUpdateId?.[update.id]
             return (
             <article
               className="relative px-5 py-5"
@@ -1341,6 +1347,20 @@ export function PlanningStatusUpdateLedger({
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <PlanningHealthBadge health={update.health} labels={labels} />
+                  {acknowledgement ? (
+                    <span
+                      className="workbench-badge"
+                      data-acknowledged={acknowledgement.acknowledgedAt ? 'true' : 'false'}
+                      data-testid="planning-update-acknowledgement"
+                    >
+                      {acknowledgement.acknowledgedAt
+                        ? labels.acknowledged(
+                            acknowledgement.reviewerMemberKey,
+                            acknowledgement.acknowledgedAt,
+                          )
+                        : labels.acknowledgementPending(acknowledgement.reviewerMemberKey)}
+                    </span>
+                  ) : null}
                   <span className="workbench-badge">{labels.immutable}</span>
                 </div>
               </div>
@@ -1594,7 +1614,14 @@ const planningRiskValues: readonly PlanningRisk[] = [
   'critical',
 ]
 
-const planningUpdateReactionChoices: readonly string[] = ['👍', '❤️', '🎉', '👀', '✅']
+/** Reaction choices; the last one doubles as the reviewer confirmation token. */
+const planningUpdateReactionChoices: readonly string[] = [
+  '👍',
+  '❤️',
+  '🎉',
+  '👀',
+  PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION,
+]
 
 /**
  * Reads one supported cadence unit from FormData.

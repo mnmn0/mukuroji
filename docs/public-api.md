@@ -112,6 +112,13 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   idempotency key の再試行は途中で日付が動いても同じ request として replay されます。最新の revision が必要で、
   `schedule` とは同時に送れません。見積だけの変更は dependency の確認を必要としません。不正な値は
   `400 validation_failed` です。詳細は [Work Items](work-items.md#estimate-remaining-effort-and-progress) を参照してください。
+- 実績開始日と実績終了日は `GET /api/v1/work-items/{workItemId}/actual-dates?teamId={teamId}` で読みます。応答は
+  `{ schemaVersion, teamId, workItemId, revision, actualStartDate?, actualEndDate? }` で、日付は schedule の calendar
+  timezone での `YYYY-MM-DD` です。`actualStartDate` は初めて `started` か `completed` に入った日で、着手前は省きます。
+  `actualEndDate` は直近の完了日で、`completed` の間だけ返します。権限は `GET /api/v1/work-items/{workItemId}` と同じで、
+  `work-items:read` scope が要ります。`WorkItem` の response schema は閉じた object のため、実績日は含めません。
+  `GET /api/developer/exports` も同じ `WorkItem` schema の page を返すため実績日を含めません。export した Work Item の
+  実績日が要る client は、この endpoint で 1 件ずつ読みます。
 - `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
   `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
 - `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。
@@ -172,6 +179,8 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 
 Server は actor、HTTP method、canonical path、idempotency key と request fingerprint を関連付ける。同じ key と同じ fingerprint なら保存済み status/body を返し、`Idempotency-Replayed: true` を付ける。同じ key を異なる query/body へ再利用した場合は `409 idempotency_conflict` を返す。平文 key は監査 log へ保存せず digest 化する。
 
+Actor は API key では key ごと、OAuth access token では発行元の OAuth app ごとに決まる。同じ OAuth app から発行し直した token で同じ `Idempotency-Key` を再送しても replay され、二重に作成されない。
+
 Connector の authorization / reauthorization は内部 operation ID から OAuth state と PKCE verifier を導出し、未失効の同一 flow を再利用する。Response receipt 保存前に process が停止しても、同じ idempotency key の再送で provider authorization flow を増殖させない。
 
 ## Error と rate limit
@@ -184,6 +193,8 @@ Error は `application/problem+json` の `ApiProblem` に統一する。`code` �
 - `RateLimit-Remaining`: window 内の残数
 - `RateLimit-Reset`: quota 回復までの秒数
 - `Retry-After`: `429` または一時的な `503` で待つ秒数
+
+Credential の quota は API key では key ごと、OAuth access token では発行元の OAuth app ごとに数える。同じ app の token はすべて 1 つの quota を共有し、token を発行し直しても残数は戻らない。
 
 Client は `Retry-After` を優先し、値が無い retryable error では full jitter 付き exponential backoff を使う。`401`、`403`、validation error、idempotency conflict は自動 retry しない。
 
@@ -254,4 +265,4 @@ Worker retry を使い切った job は `failed` として source を削除し�
 
 Worker が retry 上限に達した message は原因調査用 DLQ に保持する。DLQ の redrive で terminal job を再開せず、原因を修正した後に新しい idempotency key と source で import を作成し直す。
 
-Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。
+Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。Web の export file は、各 Work Item の Team の階層（`GET /api/teams/{teamId}/work-item-hierarchy`）から `wbsNumber` を足す（CSV では `teamId` の次の列、JSON では値があるときだけ）。階層を読めない Team と archive 済みの Work Item では空になる。API の export page 自体は `wbsNumber` を持たない。

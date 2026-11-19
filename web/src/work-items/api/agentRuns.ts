@@ -270,11 +270,13 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
   const leaseExpiresAt = time('leaseExpiresAt')
   const finishedAt = value.finishedAt === undefined ? undefined : time('finishedAt')
   const finishedBy = value.finishedBy === undefined ? undefined : text('finishedBy')
+  const resumedFromRunId = value.resumedFromRunId === undefined ? undefined : text('resumedFromRunId')
   if (
     value.schemaVersion !== 1 || !runId || !teamId || !workItemId || !assigneeUserId || !agentName ||
     !runtime || !runtimes.has(runtime) || !state || (outcome !== undefined && !outcomes.has(outcome)) ||
     (value.outcome !== undefined && outcome === undefined) || !startedAt || !lastHeartbeatAt || !leaseExpiresAt ||
     (value.finishedAt !== undefined && !finishedAt) || (value.finishedBy !== undefined && !finishedBy) ||
+    (value.resumedFromRunId !== undefined && !resumedFromRunId) ||
     !isPositiveSafeInteger(value.startRevision) || !isPositiveSafeInteger(value.leaseMinutes) ||
     !isNonnegativeSafeInteger(value.reportCount) || typeof value.stalled !== 'boolean' || typeof value.canRelease !== 'boolean'
   ) {
@@ -300,6 +302,7 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
     ...(finishedBy === undefined ? {} : { finishedBy }),
     reportCount: value.reportCount,
     canRelease: value.canRelease,
+    ...(resumedFromRunId === undefined ? {} : { resumedFromRunId }),
   }
 }
 

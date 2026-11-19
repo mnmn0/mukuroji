@@ -6,6 +6,9 @@ import { createRestoreDrillCleanupWorkflowName } from './subsystems/restore-dril
 const secretPaths = [
   'ConnectorRuntimeSecret/Resource',
   'DocumentPublicShareTokenSecret/Resource',
+  'EnterpriseIdentityTokenHashKeySecret/Resource',
+  'RequestEmailWebhookKeySecret/Resource',
+  'RequestTokenHashKeySecret/Resource',
 ] as const;
 const deadLetterQueuePaths = [
   'AiAssistanceObservabilityDlq/Resource',
@@ -210,6 +213,12 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
     ['SlackNotificationJobPolicy/Resource'],
+  ],
+  // SES authorizes the sending identity (the address or its domain). The statement's
+  // ses:FromAddress condition pins every message to the configured NotificationEmailSender.
+  [
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ses:<AWS::Region>:<AWS::AccountId>:identity/*]',
+    ['EmailNotificationJobPolicy/Resource'],
   ],
   [
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
@@ -461,6 +470,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-inbound-webhooks/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ses:<AWS::Region>:<AWS::AccountId>:identity/*]',
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<FileProofingTable81DA272F.Arn>/index/*]',
@@ -494,7 +504,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:states:<AWS::Region>:<AWS::AccountId>:execution:<RestoreDrillCleanupWorkflowBC990746.Name>:*]',
   ].map((id) => ({
     id,
-    reason: 'The wildcard is constrained to a reviewed S3 prefix, DynamoDB index/export or reserved restore-table namespace, Step Functions execution namespace, Secrets Manager namespace, API Gateway connection, GuardDuty rule, CDK provider resource, KMS grant action family, or CloudWatch DescribeAlarms action.',
+    reason: 'The wildcard is constrained to a reviewed S3 prefix, DynamoDB index/export or reserved restore-table namespace, Step Functions execution namespace, Secrets Manager namespace, SES sending identity pinned by ses:FromAddress, API Gateway connection, GuardDuty rule, CDK provider resource, KMS grant action family, or CloudWatch DescribeAlarms action.',
     scopePaths: iam5FindingScopePaths.get(id),
   })),
 ] as const;

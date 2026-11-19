@@ -15,7 +15,6 @@ TEST_PASSWORD="${COGNITO_TEST_PASSWORD:-Password123!}"
 INITIAL_OWNER_USERNAME="${MUKUROJI_INITIAL_OWNER_USERNAME:-$TEST_USERNAME}"
 INITIAL_OWNER_EMAIL="${MUKUROJI_INITIAL_OWNER_EMAIL:-$TEST_USERNAME}"
 SYSTEM_ADMIN_GROUP="${MUKUROJI_SYSTEM_ADMIN_GROUP:-mukuroji-system-admins}"
-DASHBOARD_TABLE="${MUKUROJI_DASHBOARD_TABLE:-mukuroji-dashboard-local}"
 PROJECT_DIRECTORY_TABLE="${PROJECT_DIRECTORY_TABLE_NAME:-mukuroji-project-directory-local}"
 WORK_ITEMS_TABLE="${WORK_ITEMS_TABLE_NAME:-mukuroji-team-issues-local}"
 TEAM_ISSUES_TABLE="$WORK_ITEMS_TABLE"
@@ -35,7 +34,6 @@ ENTERPRISE_IDENTITY_TABLE="${ENTERPRISE_IDENTITY_TABLE_NAME:-mukuroji-enterprise
 WORKSPACE_DIRECTORY_ID="${MUKUROJI_WORKSPACE_DIRECTORY_ID:-workspace#mukuroji-local}"
 PROJECT_DIRECTORY_ID="$WORKSPACE_DIRECTORY_ID"
 PROJECT_MEMBER_KEY="$(printf '%s' "$INITIAL_OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')"
-DASHBOARD_UPDATED_AT="${MUKUROJI_DASHBOARD_UPDATED_AT:-$(date -u +%Y-%m-%dT%H:%M:%S.000Z)}"
 GENERATED_DIR="${MUKUROJI_GENERATED_DIR:-/app/generated}"
 COGNITO_ENV_FILE="$GENERATED_DIR/cognito.env"
 
@@ -449,26 +447,6 @@ aws_local cognito-idp admin-add-user-to-group \
   --user-pool-id "$POOL_ID" \
   --username "$INITIAL_OWNER_USERNAME" \
   --group-name "$SYSTEM_ADMIN_GROUP" \
-  >/dev/null
-
-if ! aws_local dynamodb describe-table --table-name "$DASHBOARD_TABLE" >/dev/null 2>&1; then
-  aws_local dynamodb create-table \
-    --table-name "$DASHBOARD_TABLE" \
-    --attribute-definitions AttributeName=id,AttributeType=S \
-    --key-schema AttributeName=id,KeyType=HASH \
-    --billing-mode PAY_PER_REQUEST \
-    >/dev/null
-fi
-
-aws_local dynamodb put-item \
-  --table-name "$DASHBOARD_TABLE" \
-  --item "{
-    \"id\": {\"S\": \"summary\"},
-    \"projects\": {\"N\": \"3\"},
-    \"tasks\": {\"N\": \"18\"},
-    \"blocked\": {\"N\": \"2\"},
-    \"updatedAt\": {\"S\": \"$DASHBOARD_UPDATED_AT\"}
-  }" \
   >/dev/null
 
 if ! aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" >/dev/null 2>&1; then
@@ -1239,7 +1217,6 @@ COGNITO_TEST_USERNAME=$INITIAL_OWNER_USERNAME
 MUKUROJI_INITIAL_OWNER_USERNAME=$INITIAL_OWNER_USERNAME
 MUKUROJI_INITIAL_OWNER_EMAIL=$PROJECT_MEMBER_KEY
 SYSTEM_ADMIN_GROUPS=$SYSTEM_ADMIN_GROUP
-MUKUROJI_DASHBOARD_TABLE=$DASHBOARD_TABLE
 PROJECT_DIRECTORY_TABLE_NAME=$PROJECT_DIRECTORY_TABLE
 WORK_ITEMS_TABLE_NAME=$WORK_ITEMS_TABLE
 TEAM_ISSUE_EVENTS_TABLE_NAME=$TEAM_ISSUE_EVENTS_TABLE
@@ -1263,7 +1240,6 @@ chmod 644 "$COGNITO_ENV_TEMP_FILE"
 mv -f "$COGNITO_ENV_TEMP_FILE" "$COGNITO_ENV_FILE"
 
 echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID ssoClientId=$SSO_CLIENT_ID username=$INITIAL_OWNER_USERNAME adminGroup=$SYSTEM_ADMIN_GROUP"
-echo "mukuroji DynamoDB ready: table=$DASHBOARD_TABLE item=summary"
 echo "mukuroji DynamoDB ready: workItems=$WORK_ITEMS_TABLE projectDirectory=$PROJECT_DIRECTORY_TABLE"
 echo "mukuroji DynamoDB ready: table=$WORK_ITEMS_TABLE canonicalSeed=ready"
 echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory=$WORKSPACE_DIRECTORY_ID"

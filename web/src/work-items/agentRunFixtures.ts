@@ -20,9 +20,9 @@ const baseRun: AgentRunView = {
   canRelease: true,
 }
 
-/** Active run followed by finished runs, newest first. */
+/** Active run that resumed the paused run, followed by finished runs, newest first. */
 export const agentRunFixtures: AgentRunView[] = [
-  baseRun,
+  { ...baseRun, resumedFromRunId: 'run_00000000-0000-4000-8000-000000000002' },
   {
     ...baseRun,
     runId: 'run_00000000-0000-4000-8000-000000000002',

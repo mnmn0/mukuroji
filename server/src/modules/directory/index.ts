@@ -42,6 +42,11 @@ export {
   isProjectQuickAccessIdentifier,
   isProjectQuickAccessItems,
 } from './domain/project-quick-access'
+export {
+  isMemberPreferencesRevision,
+  readMemberPreferenceValues,
+  readUpdateMemberPreferencesInput,
+} from './domain/member-preferences'
 export { ProjectDataError } from './project-data-error'
 export {
   transitionProjectLifecycleUseCase,

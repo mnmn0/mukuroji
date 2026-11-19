@@ -74,6 +74,8 @@ import {
 } from '../../projects/model/projectQuickAccess'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
 import { useProjectQuickAccess } from '../../projects/queries/useProjectQuickAccess'
+import type { MemberPreferenceValues } from '@mukuroji/contracts'
+import { useMemberPreferencesSync } from '../mutations/useMemberPreferencesSync'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import {
   createTranslator,
@@ -118,6 +120,10 @@ export type WorkspaceRouteContextValue = {
   fontSizePreference: FontSizePreference
   /** The selected application color theme. */
   themePreference: ThemePreference
+  /** IANA time zone the member saved, or undefined to follow the browser. */
+  timeZone?: string
+  /** Whether display preferences failed to save to the account and wait for a retry. */
+  isMemberPreferencesSaveFailed: boolean
   /** The best available display label for the current user. */
   userLabel: string
   /** Stable identifiers that route models may use to recognize the current user. */
@@ -184,6 +190,10 @@ export type WorkspaceRouteContextValue = {
   onThemePreferenceChange: (preference: ThemePreference) => void
   /** Persists and applies a new workspace locale. */
   onLocaleChange: (locale: Locale) => void
+  /** Saves a new time zone; undefined follows the browser. */
+  onTimeZoneChange: (timeZone: string | undefined) => void
+  /** Saves display preferences again after a failed save. */
+  onRetryMemberPreferencesSave: () => void
   /** Clears the authentication session and returns to the public entry route. */
   onLogout: () => void
   /** Navigates to a fixed workspace sidebar destination. */
@@ -253,6 +263,7 @@ export function WorkspaceRouteProvider() {
     useState<FontSizePreference>(() => getInitialFontSizePreference())
   const [themePreference, setThemePreferenceState] =
     useState<ThemePreference>(() => getInitialThemePreference())
+  const [timeZone, setTimeZone] = useState<string | undefined>()
   const [authenticatedApiErrorReports, setAuthenticatedApiErrorReports] =
     useState<AuthenticatedApiErrorReports>({
       guardedSessionErrors: [],
@@ -269,6 +280,31 @@ export function WorkspaceRouteProvider() {
     isLoading: isCurrentUserLoading,
     mutate: mutateCurrentUser,
   } = useCurrentUser(accessToken)
+  /** Applies preferences saved on the server so that this device matches the member's choices. */
+  const applyMemberPreferences = useCallback((values: MemberPreferenceValues) => {
+    if (values.locale) {
+      setLocale(values.locale)
+      setLocalePreference(values.locale)
+    }
+    if (values.theme) {
+      setThemePreferenceState(values.theme)
+      setThemePreference(values.theme)
+    }
+    if (values.fontSize) {
+      setFontSizePreferenceState(values.fontSize)
+      setFontSizePreference(values.fontSize)
+    }
+    setTimeZone(values.timeZone)
+  }, [])
+  const {
+    retry: handleRetryMemberPreferencesSave,
+    save: saveMemberPreferences,
+    saveFailed: isMemberPreferencesSaveFailed,
+  } = useMemberPreferencesSync({
+    accessToken,
+    apply: applyMemberPreferences,
+    enabled: Boolean(user && !currentUserError),
+  })
   const {
     data: teams = emptyProjectDirectory,
     error: projectDirectoryError,
@@ -506,19 +542,28 @@ export function WorkspaceRouteProvider() {
   const handleFontSizePreferenceChange = useCallback((preference: FontSizePreference) => {
     setFontSizePreferenceState(preference)
     setFontSizePreference(preference)
-  }, [])
+    saveMemberPreferences({ fontSize: preference })
+  }, [saveMemberPreferences])
 
   /** Saves a color theme and updates provider state for the active route. */
   const handleThemePreferenceChange = useCallback((preference: ThemePreference) => {
     setThemePreferenceState(preference)
     setThemePreference(preference)
-  }, [])
+    saveMemberPreferences({ theme: preference })
+  }, [saveMemberPreferences])
 
   /** Saves a locale preference and updates provider state for the active route. */
   const handleLocaleChange = useCallback((nextLocale: Locale) => {
     setLocale(nextLocale)
     setLocalePreference(nextLocale)
-  }, [])
+    saveMemberPreferences({ locale: nextLocale })
+  }, [saveMemberPreferences])
+
+  /** Saves a time zone and updates provider state for the active route. */
+  const handleTimeZoneChange = useCallback((nextTimeZone: string | undefined) => {
+    setTimeZone(nextTimeZone)
+    saveMemberPreferences({ timeZone: nextTimeZone })
+  }, [saveMemberPreferences])
 
   /** Replaces the complete quick-access order with optimistic rollback semantics. */
   const persistProjectQuickAccess = useCallback(async (
@@ -812,6 +857,8 @@ export function WorkspaceRouteProvider() {
     commonErrorKey,
     fontSizePreference,
     themePreference,
+    timeZone,
+    isMemberPreferencesSaveFailed,
     guardEnterpriseSession,
     inboxCount,
     hasQuickAccessLoadError,
@@ -836,6 +883,8 @@ export function WorkspaceRouteProvider() {
     onFontSizePreferenceChange: handleFontSizePreferenceChange,
     onThemePreferenceChange: handleThemePreferenceChange,
     onLocaleChange: handleLocaleChange,
+    onTimeZoneChange: handleTimeZoneChange,
+    onRetryMemberPreferencesSave: handleRetryMemberPreferencesSave,
     onLogout: handleLogout,
     onOpenNotification: handleOpenNotification,
     onOpenTask: handleOpenTask,
@@ -874,6 +923,8 @@ export function WorkspaceRouteProvider() {
     commonErrorKey,
     fontSizePreference,
     themePreference,
+    timeZone,
+    isMemberPreferencesSaveFailed,
     guardEnterpriseSession,
     handleArchiveProject,
     handleArchiveTeam,
@@ -884,6 +935,8 @@ export function WorkspaceRouteProvider() {
     handleThemePreferenceChange,
     handleIsProjectQuickAccess,
     handleLocaleChange,
+    handleTimeZoneChange,
+    handleRetryMemberPreferencesSave,
     handleLogout,
     handleOpenNotification,
     handleOpenTask,

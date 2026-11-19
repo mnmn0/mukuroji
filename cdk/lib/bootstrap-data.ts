@@ -250,6 +250,19 @@ const projectDirectoryItems = [
 ] as const;
 
 /**
+ * Team and Project IDs that the demo seed creates.
+ */
+export const DEMO_DIRECTORY_SCOPE: {
+  /** Demo Team IDs. */
+  readonly teamIds: readonly string[];
+  /** Demo Project IDs. */
+  readonly projectIds: readonly string[];
+} = {
+  teamIds: [...new Set(projectDirectoryItems.map((entry) => entry.teamId))],
+  projectIds: ownerProjectIds,
+};
+
+/**
  * Demo members other than the owner seeded into the Refero Project.
  */
 const projectMemberItems = [
@@ -432,7 +445,7 @@ export function createCanonicalWorkItemTransactItems(tableName: string, director
               dueDate: { S: dueDate },
               calendarPolicy: {
                 M: {
-                  timeZone: { S: 'UTC' },
+                  timeZone: { S: 'Asia/Tokyo' },
                   workingWeekdays: {
                     L: [
                       { S: 'monday' },

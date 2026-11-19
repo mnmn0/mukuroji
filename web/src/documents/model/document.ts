@@ -1016,7 +1016,13 @@ function clampIndex(value: number, length: number) {
   return Math.max(0, Math.min(length, Math.trunc(value)))
 }
 
-function createDocumentClientId(prefix: string) {
+/**
+ * Creates a client-side ID for a new block, item, or operation.
+ *
+ * @param prefix - Prefix that names what the ID identifies.
+ * @returns Prefixed random ID.
+ */
+export function createDocumentClientId(prefix: string) {
   const randomValue =
     globalThis.crypto?.randomUUID?.() ??
     `${Date.now()}-${Math.random().toString(16).slice(2)}`
