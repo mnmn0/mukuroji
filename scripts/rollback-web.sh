@@ -8,7 +8,7 @@
 # Each deploy keeps its entry files (`index.html`, `sw.js`, the manifest and other
 # non-hashed files) under `releases/<commit SHA>/`. Hashed files under `assets/` are
 # never deleted, so copying a kept release back to the bucket root and invalidating
-# CloudFront is enough to serve it again. Copies keep the stored `no-cache` header.
+# CloudFront is enough to serve it again.
 set -euo pipefail
 
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
@@ -66,16 +66,30 @@ fi
 
 WEB_DISTRIBUTION_ID="$(stack_output WebDistributionId)"
 
-# `sync` skips same-sized objects whose source is older, which is always true for an
-# earlier release, so copy every file first and let `sync` only remove leftovers.
-aws s3 cp "s3://$WEB_BUCKET_NAME/$RELEASE_PREFIX" "s3://$WEB_BUCKET_NAME" \
+# Stage the release locally and upload it the same way as deploy-web.sh. An S3-to-S3
+# `sync` inside one bucket applies the `releases/*` exclude to the source keys too, so
+# it would copy nothing and delete the live files. `cp` always overwrites, which `sync`
+# would skip for same-sized files that are older than the live ones.
+RELEASE_DIRECTORY="$(mktemp -d)"
+trap 'rm -rf "$RELEASE_DIRECTORY"' EXIT
+aws s3 cp "s3://$WEB_BUCKET_NAME/$RELEASE_PREFIX" "$RELEASE_DIRECTORY" \
   --region "$AWS_REGION" \
-  --recursive
-aws s3 sync "s3://$WEB_BUCKET_NAME/$RELEASE_PREFIX" "s3://$WEB_BUCKET_NAME" \
+  --recursive \
+  --only-show-errors
+if [[ ! -f "$RELEASE_DIRECTORY/index.html" ]]; then
+  echo "Downloading release $TARGET_COMMIT_SHA did not produce index.html." >&2
+  exit 1
+fi
+aws s3 cp "$RELEASE_DIRECTORY" "s3://$WEB_BUCKET_NAME" \
+  --region "$AWS_REGION" \
+  --recursive \
+  --cache-control 'no-cache'
+aws s3 sync "$RELEASE_DIRECTORY" "s3://$WEB_BUCKET_NAME" \
   --region "$AWS_REGION" \
   --exclude 'assets/*' \
   --exclude 'releases/*' \
-  --delete
+  --delete \
+  --cache-control 'no-cache'
 aws cloudfront create-invalidation \
   --distribution-id "$WEB_DISTRIBUTION_ID" \
   --paths '/*' \
