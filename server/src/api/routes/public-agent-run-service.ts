@@ -40,6 +40,7 @@ import {
   createAuthorizationSnapshotConditionChecks,
   createWorkItemAuthorizationChangedError,
   createWorkItemRevisionConditionCheck,
+  type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
 import { resolveWorkItemTypeWorkflow } from '../../modules/work-items/work-item-configuration'
 import {
@@ -72,6 +73,20 @@ import {
 } from '../shared/work-item-access'
 import { createMutationAuditContext } from '../../modules/audit/audit'
 import { projectPublicWorkItem, resolveStableWorkItemAuthorization, updateCanonicalPublicWorkItem } from './public-api-routes'
+
+/**
+ * Checks whether the caller's access changed after an Agent Run mutation was authorized, so that a
+ * transaction cancelled by an access guard is reported as a conflict rather than as retryable.
+ *
+ * @param current - Caller resolved again after the transaction was cancelled.
+ * @param snapshot - Access observed when the mutation was authorized.
+ * @returns True when the membership, Planning, or Enterprise Identity revision differs.
+ */
+async function hasAuthorizationChanged(current: WorkspacePrincipal, snapshot: WorkItemAuthorizationSnapshot): Promise<boolean> {
+  return current.workspaceMember.version !== snapshot.workspaceMemberVersion ||
+    current.enterpriseIdentityControlRevision !== snapshot.enterpriseControlRevision ||
+    await workItemDependencies.planning.getAuthorizationRevision(snapshot.workspaceId) !== snapshot.planningRevision
+}
 
 /**
  * Resolves the credential owner for an Agent Run read.
@@ -843,12 +858,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         if (latestSettings.revision !== settings.revision) {
           throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the take over.')
         }
-        if (
-          current.workspaceMember.version !== principal.workspaceMember.version ||
-          await workItemDependencies.planning.getAuthorizationRevision(principal.directoryId) !== authorizationSnapshot.planningRevision
-        ) {
-          throw createWorkItemAuthorizationChangedError()
-        }
+        if (await hasAuthorizationChanged(current, authorizationSnapshot)) throw createWorkItemAuthorizationChangedError()
         throw error
       }
       return response
@@ -971,12 +981,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         if (await store.getLatestRunId(principal.directoryId, teamId, workItemId) !== latestRunId) {
           throw new AgentRunError('conflict', 'Another run started on the Work Item during the request. Reload the task and retry.')
         }
-        if (
-          current.workspaceMember.version !== principal.workspaceMember.version ||
-          await workItemDependencies.planning.getAuthorizationRevision(principal.directoryId) !== authorizationSnapshot.planningRevision
-        ) {
-          throw createWorkItemAuthorizationChangedError()
-        }
+        if (await hasAuthorizationChanged(current, authorizationSnapshot)) throw createWorkItemAuthorizationChangedError()
         throw error
       }
       return response

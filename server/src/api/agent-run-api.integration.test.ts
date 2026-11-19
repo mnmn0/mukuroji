@@ -17,6 +17,7 @@ import {
 } from '../modules/agent-runs'
 import { createAgentRunFenceConflictError } from '../modules/work-items/adapter-out/dynamodb/work-item-client'
 import { CognitoServiceError } from '../modules/authentication'
+import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import { createAuditEventId, createMutationAuditContext } from '../modules/audit/audit'
 import {
   AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
@@ -1005,6 +1006,20 @@ describe('public Agent Run service', () => {
     }
     await expect(takeOver('access-changed')).rejects.toMatchObject({ code: 'WorkItemAuthorizationChanged' })
     expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)?.runId).toBe(stalled.runId)
+    // An Enterprise Identity control change cancels the commit the same way and is reported the same way.
+    const enterpriseIdentity = new InMemoryEnterpriseIdentityClient()
+    const getSnapshot = enterpriseIdentity.getSnapshot.bind(enterpriseIdentity)
+    let controlRevisionShift = 0
+    enterpriseIdentity.getSnapshot = async (id) => {
+      const snapshot = await getSnapshot(id)
+      return { ...snapshot, controlRevision: (snapshot.controlRevision ?? 0) + controlRevisionShift }
+    }
+    setTestAppDependencies({ enterpriseIdentity })
+    store.commit = async () => {
+      controlRevisionShift += 1
+      throw createAgentRunCommitConflictError()
+    }
+    await expect(takeOver('control-changed')).rejects.toMatchObject({ code: 'WorkItemAuthorizationChanged' })
 
     const committed: unknown[][] = []
     store.commit = async (items, fenceItemCount) => {
