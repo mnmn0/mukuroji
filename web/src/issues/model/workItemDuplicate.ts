@@ -1,4 +1,5 @@
 import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
   deriveWorkItemScheduleDueDate,
   type CustomFieldValue,
   type WorkItemContributorAssignmentCreateInput,
@@ -18,8 +19,8 @@ export type WorkItemDuplicateDraft = {
   title: string
   /** Description copied from the source. */
   description: string
-  /** Work Item Type copied from the source, when the source records one. */
-  workItemTypeId?: string
+  /** Work Item Type copied from the source; legacy rows without one use the built-in type. */
+  workItemTypeId: string
   /** Project the source is assigned to; absent for a Team-owned Work Item. */
   assignedProjectId?: string
   /** Accountable owner copied from the source. */
@@ -48,7 +49,7 @@ export function createWorkItemDuplicateDraft(issue: TeamIssue): WorkItemDuplicat
     sourceWorkItemId: issue.id,
     title: issue.title,
     description: issue.description ?? '',
-    ...(issue.workItemTypeId ? { workItemTypeId: issue.workItemTypeId } : {}),
+    workItemTypeId: issue.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
     ...(issue.assignedProjectId ? { assignedProjectId: issue.assignedProjectId } : {}),
     assigneeUserId: issue.assigneeUserId,
     priority: issue.priority,

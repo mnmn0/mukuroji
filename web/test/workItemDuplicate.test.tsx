@@ -55,6 +55,7 @@ describe('Work Item duplicate draft', () => {
       sourceWorkItemId: source.id,
       title: source.title,
       description: '元の説明',
+      workItemTypeId: 'default',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
       priority: 'low',
