@@ -1429,11 +1429,19 @@ export function analyticsFilterIncludesWorkItem(
   teamId: string,
   workItemId: string,
 ) {
-  return filter.workItems === undefined ||
-    filter.workItems.some((reference) =>
-      reference.teamId === teamId && reference.workItemId === workItemId
-    )
+  if (filter.workItems === undefined) return true
+  let keys = analyticsFilterWorkItemKeyCache.get(filter.workItems)
+  if (!keys) {
+    keys = new Set(filter.workItems.map((reference) =>
+      workItemKey(reference.teamId, reference.workItemId)
+    ))
+    analyticsFilterWorkItemKeyCache.set(filter.workItems, keys)
+  }
+  return keys.has(workItemKey(teamId, workItemId))
 }
+
+/** Work Item key sets of filter allowlists, so per-bucket filtering stays a set lookup. */
+const analyticsFilterWorkItemKeyCache = new WeakMap<readonly AnalyticsWorkItemReference[], Set<string>>()
 
 /** Normalizes Team-qualified Work Item Type keys used by Analytics filters. */
 function normalizeAnalyticsWorkItemTypeIds(

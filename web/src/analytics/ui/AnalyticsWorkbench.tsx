@@ -1899,7 +1899,8 @@ function AnalyticsResultWidget({
                 : undefined
             }
           />
-        ) : isAnalyticsFlowVisualization(widget?.visualization) && result.series.length > 0 ? (
+        ) : isAnalyticsFlowVisualization(widget?.visualization) && result.series.length > 0 &&
+          (widget.visualization === 'burndown' || result.series.some((point) => point.segments !== undefined)) ? (
           <AnalyticsFlowChart
             label={widget?.title ?? result.definition.label}
             locale={locale}
