@@ -4,85 +4,63 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import type { IConstruct } from 'constructs';
 
-/** CloudFormation type of every Lambda function, including CDK-internal singleton handlers. */
-const LAMBDA_FUNCTION_RESOURCE_TYPE = 'AWS::Lambda::Function';
-
-/** Construct ID of the log group added next to a Lambda function that has none. */
-const DEFAULT_LAMBDA_LOG_GROUP_ID = 'DefaultLogGroup';
-
 /** Construct ID of the log group CDK creates under `useCdkManagedLogGroup`. */
 const CDK_MANAGED_LAMBDA_LOG_GROUP_ID = 'LogGroup';
 
-/** Retention applied to Lambda log groups that no subsystem declared explicitly. */
+/** Retention applied to CDK-managed Lambda log groups. */
 const DEFAULT_LAMBDA_LOG_RETENTION = logs.RetentionDays.THREE_MONTHS;
 
 /**
- * Returns whether a Lambda function resource already writes to an explicit log group.
+ * Returns whether a Lambda function already writes to an explicit log group.
  *
  * @param resource - Synthesized Lambda function resource.
  * @returns Whether `LoggingConfig.LogGroup` is set.
  */
-function hasExplicitLogGroup(resource: cdk.CfnResource): boolean {
-  if (resource instanceof lambda.CfnFunction) {
-    const loggingConfig = resource.loggingConfig;
-    if (loggingConfig === undefined) {
-      return false;
-    }
-    if (cdk.Token.isUnresolved(loggingConfig)) {
-      return true;
-    }
-
-    return (loggingConfig as lambda.CfnFunction.LoggingConfigProperty).logGroup
-      !== undefined;
+function hasExplicitLogGroup(resource: lambda.CfnFunction): boolean {
+  const loggingConfig = resource.loggingConfig;
+  if (loggingConfig === undefined) {
+    return false;
   }
 
-  return false;
+  return cdk.Token.isUnresolved(loggingConfig)
+    || (loggingConfig as lambda.CfnFunction.LoggingConfigProperty).logGroup !== undefined;
 }
 
 /**
- * Gives every Lambda function a retained log group with a finite retention period.
+ * Enforces a bounded retention on every Lambda function's log group.
  *
  * Without an explicit log group, Lambda creates `/aws/lambda/<name>` on first invocation
- * with no retention, so logs accumulate storage cost forever.
+ * with no retention. `@aws-cdk/aws-lambda:useCdkManagedLogGroup` (set in `cdk.json`) makes
+ * CDK create that group, but with the two-year default; this aspect bounds it to 90 days.
+ * A function with neither kind of log group is reported as a synth error; each
+ * subsystem owns creating the log group for its functions.
  */
 class LambdaLogRetentionAspect implements cdk.IAspect {
   /**
-   * Adds a log group to a Lambda function that has none.
+   * Bounds the CDK-managed log group retention, or reports a function without a log group.
    *
    * @param node - Construct visited by the aspect.
    */
   public visit(node: IConstruct): void {
-    if (
-      !(node instanceof cdk.CfnResource)
-      || node.cfnResourceType !== LAMBDA_FUNCTION_RESOURCE_TYPE
-    ) {
+    if (!(node instanceof lambda.CfnFunction)) {
       return;
     }
-    const scope = node.node.scope;
-    if (scope === undefined) {
-      return;
-    }
-    const cdkManagedLogGroup = scope.node.tryFindChild(CDK_MANAGED_LAMBDA_LOG_GROUP_ID);
+    const cdkManagedLogGroup = node.node.scope?.node.tryFindChild(
+      CDK_MANAGED_LAMBDA_LOG_GROUP_ID,
+    );
     if (cdkManagedLogGroup instanceof logs.LogGroup) {
-      // `@aws-cdk/aws-lambda:useCdkManagedLogGroup` already created `/aws/lambda/<name>`
-      // with the two-year default, so only its retention needs to be bounded.
       const cfnLogGroup = cdkManagedLogGroup.node.defaultChild as logs.CfnLogGroup;
       cfnLogGroup.retentionInDays = DEFAULT_LAMBDA_LOG_RETENTION;
       cfnLogGroup.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
 
       return;
     }
-    if (hasExplicitLogGroup(node)) {
-      return;
+    if (!hasExplicitLogGroup(node)) {
+      cdk.Annotations.of(node).addError(
+        'Lambda function has no log group with bounded retention. Pass `logGroup`, or '
+          + 'enable `@aws-cdk/aws-lambda:useCdkManagedLogGroup`.',
+      );
     }
-    if (scope.node.tryFindChild(DEFAULT_LAMBDA_LOG_GROUP_ID) !== undefined) {
-      return;
-    }
-    const logGroup = new logs.LogGroup(scope, DEFAULT_LAMBDA_LOG_GROUP_ID, {
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      retention: DEFAULT_LAMBDA_LOG_RETENTION,
-    });
-    node.addPropertyOverride('LoggingConfig.LogGroup', logGroup.logGroupName);
   }
 }
 

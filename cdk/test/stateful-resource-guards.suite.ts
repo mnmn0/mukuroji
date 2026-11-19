@@ -117,19 +117,15 @@ test('no log group keeps logs longer than a year', () => {
   }
 });
 
-test('functions without an explicit log group keep their logs for 90 days', () => {
+test('functions without an explicit log group keep their CDK-managed logs for 90 days', () => {
   const template = synthesizedTemplate;
-  const functions = template.findResources('AWS::Lambda::Function') as Record<
+  const logGroups = template.findResources('AWS::Logs::LogGroup') as Record<
     string,
     SynthesizedResource
   >;
-  const loggingConfig = functions.ApiFunctionCE271BD4?.Properties?.LoggingConfig as
-    | { LogGroup?: { Ref?: string } }
-    | undefined;
-  const logGroupId = loggingConfig?.LogGroup?.Ref ?? '';
+  const logGroupId = findDefaultNamedLogGroupId(logGroups, 'ApiFunctionCE271BD4') ?? '';
 
-  expect(logGroupId).toMatch(/^ApiFunctionDefaultLogGroup/);
-  expect(template.findResources('AWS::Logs::LogGroup')[logGroupId]).toMatchObject({
+  expect(logGroups[logGroupId]).toMatchObject({
     DeletionPolicy: 'Retain',
     Properties: { RetentionInDays: 90 },
   });
