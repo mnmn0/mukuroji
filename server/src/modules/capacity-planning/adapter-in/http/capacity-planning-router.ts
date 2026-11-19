@@ -175,6 +175,37 @@ export function createCapacityPlanningRouter<Principal extends CapacityPlanningP
     })
   })
 
+  router.patch('/api/teams/:teamId/workload/requests/:requestId', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, permission) => {
+      const requestId = readRequiredString(context.req.param('requestId'), 'Request ID')
+      const current = await dependencies.getCapacityPlanning().getRequest(principal.directoryId, teamId, requestId)
+      if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, 'manager')
+      const visibility = await dependencies.getWorkloadVisibility(principal, teamId, permission)
+      if (current.confidential && !visibility.canViewConfidential) {
+        throw new CapacityPlanningError(404, 'ResourceRequestNotFound', 'The resource request was not found.')
+      }
+      const body = asRecord(await dependencies.readJson(context.req))
+      const access = { canViewConfidential: visibility.canViewConfidential }
+      const result = await dependencies.getCapacityPlanning().updateRequest({
+        workspaceId: principal.directoryId,
+        teamId,
+        requestId,
+        ...(body.title === undefined ? {} : { title: readRequiredString(body.title, 'Request title') }),
+        ...(body.role === undefined ? {} : { role: readClearableString(body.role, 'Request role') }),
+        ...(body.skillIds === undefined ? {} : { skillIds: readStringArray(body.skillIds, 'Request skills') }),
+        ...(body.fromDate === undefined ? {} : { fromDate: readRequiredString(body.fromDate, 'Start date') }),
+        ...(body.toDate === undefined ? {} : { toDate: readRequiredString(body.toDate, 'End date') }),
+        ...(body.requestedMinutes === undefined ? {} : { requestedMinutes: readRequiredInteger(body.requestedMinutes, 'Requested minutes') }),
+        ...(body.confidential === undefined ? {} : { confidential: readRequiredBoolean(body.confidential, 'Confidential') }),
+        ...(body.status === undefined ? {} : { status: readRequestCancelStatus(body.status) }),
+        expectedRevision: readRequiredInteger(body.expectedRevision, 'Expected request revision'),
+        expectedTeamRevision: readRequiredInteger(body.expectedTeamRevision, 'Expected Team revision'),
+        actorMemberId: principal.userKey,
+      }, access)
+      return context.json({ request: result })
+    })
+  })
+
   router.post('/api/teams/:teamId/workload/assignments', async (context) => {
     return await withTeam(context, dependencies, 'manager', async (principal, teamId, permission) => {
       const body = asRecord(await dependencies.readJson(context.req))
@@ -327,6 +358,12 @@ function readOptionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
 }
 
+/** Reads a string that may be empty to clear an optional value. */
+function readClearableString(value: unknown, label: string): string {
+  if (typeof value !== 'string') throw new CapacityPlanningError(400, 'InvalidRequest', `${label} must be a string.`)
+  return value.trim()
+}
+
 /** Reads a required query value. */
 function readRequiredQuery(context: Context, name: string): string {
   return readRequiredString(context.req.query(name), name)
@@ -398,4 +435,10 @@ function readAssignmentStatus(value: unknown): ResourceAssignmentStatus {
 function readTimeOffStatus(value: unknown): WorkloadTimeOff['status'] {
   if (value === 'planned' || value === 'approved' || value === 'canceled') return value
   throw new CapacityPlanningError(400, 'InvalidRequest', 'time-off status is invalid.')
+}
+
+/** Reads the only request status a client may set; fill states are derived from assignments. */
+function readRequestCancelStatus(value: unknown): 'canceled' {
+  if (value === 'canceled') return value
+  throw new CapacityPlanningError(400, 'InvalidRequest', 'request status may only be set to canceled.')
 }

@@ -30,6 +30,7 @@ Coding agent ── stdio ── MCP server（mcp.mjs）── HTTPS ──▶ P
   stack は `cdk/lib/subsystems/*` の builder から組み立て、restore drill・connector・request email・tenant lifecycle
   などは CDK context（`-c mukuroji:<module>=true`）で有効にする任意 module です。
 - Web は stack とは別に `bun run web:deploy` で WebBucket へ配置します。Web と API は CloudFront の同一 origin です。
+  `WebDomainName` を指定すると同じ distribution が独自 domain でも配信し、その URL が通知の link に使う正規 URL になります。
 - ローカルでは Floci（AWS エミュレーター）と `server:dev`・`workers:dev`・`web:dev` で同じ構成を再現します（README）。
 
 ## Workspace（パッケージ）の構成
