@@ -44,7 +44,7 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
         (issue) => canAccessTeamProject(principal, context, teamId, issue.assignedProjectId, 'viewer'),
       ))
     } catch (error) {
-      return toWorkItemConfigurationErrorResponse(c, error)
+      return toScheduleBaselineErrorResponse(c, error)
     }
   })
 
@@ -72,9 +72,48 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
       )
       return c.json(response, 201)
     } catch (error) {
-      return toWorkItemConfigurationErrorResponse(c, error)
+      return toScheduleBaselineErrorResponse(c, error)
     }
   })
+}
+
+/** HTTP status of each baseline-specific error code. */
+const scheduleBaselineErrorStatuses = {
+  InvalidScheduleBaselineRequest: 400,
+  ScheduleBaselineForbidden: 403,
+  ProjectNotFound: 404,
+  ScheduleBaselineConflict: 409,
+  ScheduleBaselineTooLarge: 413,
+  WorkItemListLimitExceeded: 413,
+  ScheduleBaselineCorruptState: 502,
+  ScheduleBaselineStorageFailure: 502,
+  ScheduleBaselineAuthorizationUnavailable: 503,
+  ScheduleBaselineRetryable: 503,
+  ScheduleBaselineUnavailable: 503,
+} as const satisfies Record<string, 400 | 403 | 404 | 409 | 413 | 502 | 503>
+
+/**
+ * Reports whether an error code is one of the baseline-specific codes.
+ *
+ * @param code - Error code.
+ * @returns Whether the code has a baseline status.
+ */
+function isScheduleBaselineErrorCode(code: string): code is keyof typeof scheduleBaselineErrorStatuses {
+  return Object.hasOwn(scheduleBaselineErrorStatuses, code)
+}
+
+/**
+ * Maps baseline failures to their HTTP status and stable code, and delegates everything else.
+ *
+ * @param c - Hono request context.
+ * @param error - Thrown error.
+ * @returns The error response.
+ */
+function toScheduleBaselineErrorResponse(c: Context, error: unknown) {
+  if (error instanceof ProjectDataError && isScheduleBaselineErrorCode(error.code)) {
+    return c.json({ code: error.code, message: error.message }, scheduleBaselineErrorStatuses[error.code])
+  }
+  return toWorkItemConfigurationErrorResponse(c, error)
 }
 
 /**

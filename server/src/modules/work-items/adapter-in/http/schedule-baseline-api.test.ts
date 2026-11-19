@@ -14,6 +14,7 @@ import {
   type ProjectScheduleBaselineResponse,
 } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
+import { ProjectDataError } from '../../../directory'
 import type { TeamIssueResponseItem, TeamWorkItemHierarchyEntry } from '../../index'
 
 afterEach(() => {
@@ -107,6 +108,31 @@ test('answers 404 for a Project outside the Team', async () => {
   configureFakeProjectClients(true)
   const response = await request('/api/teams/core-team/projects/not-in-team/schedule-baseline', 'POST')
   expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({ code: 'ProjectNotFound' })
+})
+
+test('answers 409 with its code when a capture conflicts', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  const projectId = base.assignedProjectId ?? 'missing'
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamHierarchyEntries() {
+        return [entry(base, 'task-1')]
+      },
+    }),
+    scheduleBaselines: {
+      async get() {
+        return null
+      },
+      async capture() {
+        throw new ProjectDataError(409, 'ScheduleBaselineConflict', 'The schedule baseline changed.')
+      },
+    },
+  })
+  const response = await request(`/api/teams/core-team/projects/${projectId}/schedule-baseline`, 'POST')
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'ScheduleBaselineConflict' })
 })
 
 test('refuses a capture by a reader without Project access', async () => {
