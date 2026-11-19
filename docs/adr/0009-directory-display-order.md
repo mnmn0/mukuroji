@@ -45,6 +45,9 @@ key を変えると、key を前提にした transaction の条件、data integr
   削除はその時点の `sourceRevision` 以下の document だけを消すので、遅れて届いた古い投影がアーカイブ後に
   document を作り直すことも、遅れた削除が後の復元で作り直した document を消すこともない。
   検索の backfill も同じ revision で put と削除を fence する。
+- 復元は、復元した row に `restoreReceipt`（`Idempotency-Key` の hash と request fingerprint）を
+  記録する。応答が失われたあとの同じ key の再試行はこの receipt で成功として答え、同じ key で別の
+  request が来たら 409 で断る。
 - 変更はすべて `project.renamed` / `project.restored` / `project.reordered` として audit に記録する。
 
 ## 検討した選択肢

@@ -195,6 +195,7 @@ const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 403 | 4
   TeamNotArchived: 409,
   ProjectNotArchived: 409,
   TeamArchived: 409,
+  IdempotencyKeyConflict: 409,
   DirectoryArchiveCleanupPending: 409,
   DirectoryOrderLimitExceeded: 413,
   PlanningUnavailable: 503,

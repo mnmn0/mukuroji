@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { createMutationAuditContext } from '../../../audit/audit'
 import { createPlanningUpdateProjectTargetRecordKey } from '../../../planning'
 import { DynamoDbProjectDirectoryClient } from './project-directory-client'
 
@@ -593,7 +594,84 @@ test('adds Project renames, archives, and restores to the charter revision of th
   })
 })
 
-test('keeps the search source of an archived Project under an archived Team', async () => {
+/**
+ * Creates the audit context of one restore request.
+ *
+ * @param idempotencyKey - `Idempotency-Key` of the request.
+ * @param path - Request path, part of the request fingerprint.
+ * @returns The audit context.
+ */
+function createRestoreContext(idempotencyKey: string, path: string) {
+  return createMutationAuditContext({
+    workspaceId: directoryId,
+    actor: { id: 'sub-demo', kind: 'user', displayName: 'demo@example.com' },
+    idempotencyKey,
+    request: { method: 'PATCH', path, body: undefined },
+    source: { kind: 'api', requestId: `request-${idempotencyKey}` },
+  })
+}
+
+test('answers a retried restore with its recorded success and refuses a reused key', async () => {
+  const archivedAt = '2026-06-06T00:00:00.000Z'
+  const teamPath = '/api/teams/alpha/restore'
+  const projectPath = '/api/teams/alpha/projects/gone/restore'
+  const first = createClient([
+    createTeamRow('alpha', 10, { archivedAt }),
+    createProjectRow('alpha', 10, 'gone', 10, { archivedAt }),
+  ])
+
+  await first.client.restoreTeam(directoryId, 'alpha', createRestoreContext('restore-1', teamPath))
+  const teamTransaction = first.transactions()[0]
+  const teamUpdate: unknown = Array.isArray(teamTransaction) ? teamTransaction[0] : undefined
+  expect(teamUpdate).toMatchObject({
+    Update: {
+      UpdateExpression: 'SET restoreReceipt = :restoreReceipt REMOVE archivedAt ADD lifecycleRevision :one',
+    },
+  })
+  const receipt = Reflect.get(
+    Reflect.get(Reflect.get(teamUpdate ?? {}, 'Update') ?? {}, 'ExpressionAttributeValues') ?? {},
+    ':restoreReceipt',
+  )
+
+  // The response was lost; the stored rows now carry the receipt of the committed restores.
+  const retried = createClient([
+    createTeamRow('alpha', 10, { restoreReceipt: receipt }),
+    createProjectRow('alpha', 10, 'gone', 10, {
+      restoreReceipt: {
+        ...receipt,
+        requestFingerprint: createRestoreContext('restore-2', projectPath).requestFingerprint,
+        idempotencyKeyHash: createRestoreContext('restore-2', projectPath).idempotencyKeyHash,
+      },
+    }),
+  ])
+  await expect(retried.client.restoreTeam(
+    directoryId,
+    'alpha',
+    createRestoreContext('restore-1', teamPath),
+  )).resolves.toEqual({ teamId: 'alpha' })
+  await expect(retried.client.restoreProject(
+    directoryId,
+    'alpha',
+    'gone',
+    createRestoreContext('restore-2', projectPath),
+  )).resolves.toEqual({ teamId: 'alpha', projectId: 'gone' })
+  expect(retried.transactions()).toEqual([])
+
+  // A new key is a new request, and the Team is no longer archived.
+  await expect(retried.client.restoreTeam(
+    directoryId,
+    'alpha',
+    createRestoreContext('restore-3', teamPath),
+  )).rejects.toMatchObject({ status: 409, code: 'TeamNotArchived' })
+  // The same key with another request is refused.
+  await expect(retried.client.restoreTeam(
+    directoryId,
+    'alpha',
+    createRestoreContext('restore-1', '/api/teams/alpha/restore?other'),
+  )).rejects.toMatchObject({ status: 409, code: 'IdempotencyKeyConflict' })
+})
+
+test('keeps the search sources of Projects under an archived Team', async () => {
   const archivedAt = '2026-06-06T00:00:00.000Z'
   const { client } = createClient([
     createTeamRow('alpha', 10, { archivedAt, lifecycleRevision: 1 }),
@@ -606,7 +684,10 @@ test('keeps the search source of an archived Project under an archived Team', as
     archived: true,
     sourceRevision: 1,
   })
-  await expect(client.getProjectSearchSource(directoryId, 'alpha', 'kept')).resolves.toBeUndefined()
+  // A rename committed before the Team archive is still projected.
+  await expect(client.getProjectSearchSource(directoryId, 'alpha', 'kept')).resolves.toMatchObject({
+    archived: false,
+  })
 })
 
 test('reads the search source of a Team with its revision, archive state, and creator', async () => {

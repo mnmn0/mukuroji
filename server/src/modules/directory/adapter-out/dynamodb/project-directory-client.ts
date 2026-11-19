@@ -159,6 +159,14 @@ type ProjectTone = 'blue' | 'purple' | 'green' | 'yellow'
 /**
  * DynamoDB に保存する team directory item です。
  */
+/** Durable receipt of a successful restore, stored on the restored row. */
+type DirectoryRestoreReceipt = {
+  /** Hash of the Workspace, actor, and `Idempotency-Key` of the restore request. */
+  idempotencyKeyHash: string
+  /** Fingerprint of the restore request, so a reused key with another request is refused. */
+  requestFingerprint: string
+}
+
 type ProjectDirectoryTeamItem = {
   /**
    * ユーザーごとの directory partition key です。
@@ -220,6 +228,8 @@ type ProjectDirectoryTeamItem = {
    * never archived.
    */
   lifecycleRevision?: number
+  /** Receipt of the last restore, so a retry of it after a lost response is recognized. */
+  restoreReceipt?: DirectoryRestoreReceipt
   /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
@@ -299,6 +309,8 @@ type ProjectDirectoryProjectItem = {
    * never archived.
    */
   lifecycleRevision?: number
+  /** Receipt of the last restore, so a retry of it after a lost response is recognized. */
+  restoreReceipt?: DirectoryRestoreReceipt
   /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
@@ -1045,8 +1057,7 @@ export type ProjectDirectoryClient = {
    * @param directoryId - Owning Workspace directory identifier.
    * @param teamId - Team that owns the Project.
    * @param projectId - Project identifier.
-   * @returns The source, or undefined when the Project is missing or is active under an archived
-   *   Team.
+   * @returns The source, or undefined when the Project or its Team is missing.
    */
   getProjectSearchSource(
     directoryId: string,
@@ -2974,9 +2985,12 @@ export class DynamoDbProjectDirectoryClient {
       throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
     }
 
+    if (isRestoreReplay(team, auditContext)) return { teamId }
+
     if (team.archivedAt === undefined) {
       throw new ProjectDataError(409, 'TeamNotArchived', `Team "${teamId}" is not archived.`)
     }
+    const receipt = createRestoreReceiptUpdate(auditContext)
 
     await this.requireFinishedWebhookGrantCleanup(directoryId, teamId)
 
@@ -2998,7 +3012,7 @@ export class DynamoDbProjectDirectoryClient {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: team.entryKey },
-          UpdateExpression: 'REMOVE archivedAt ADD lifecycleRevision :one',
+          UpdateExpression: `${receipt.set}REMOVE archivedAt ADD lifecycleRevision :one`,
           // Bound to the archive read, so a delayed restore cannot undo a newer archive.
           ConditionExpression:
             '#entryType = :entryType AND #teamId = :teamId AND #archivedAt = :readArchivedAt',
@@ -3012,6 +3026,7 @@ export class DynamoDbProjectDirectoryClient {
             ':teamId': teamId,
             ':readArchivedAt': team.archivedAt,
             ':one': 1,
+            ...receipt.values,
           },
         },
       },
@@ -3051,6 +3066,10 @@ export class DynamoDbProjectDirectoryClient {
     await this.ensureLocalAuditTable()
     const items = await this.readValidDirectoryItems(directoryId, true)
     const team = this.requireDirectoryTeam(items, teamId)
+    const restored = items.find((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' && item.teamId === teamId && item.projectId === projectId,
+    )
+    if (restored && isRestoreReplay(restored, auditContext)) return { teamId, projectId }
 
     if (!isActiveDirectoryItem(team)) {
       throw new ProjectDataError(
@@ -3060,9 +3079,7 @@ export class DynamoDbProjectDirectoryClient {
       )
     }
 
-    const project = items.find((item): item is ProjectDirectoryProjectItem =>
-      item.entryType === 'project' && item.teamId === teamId && item.projectId === projectId,
-    )
+    const project = restored
 
     if (!project) {
       throw new ProjectDataError(
@@ -3079,6 +3096,7 @@ export class DynamoDbProjectDirectoryClient {
         `Project "${projectId}" is not archived.`,
       )
     }
+    const receipt = createRestoreReceiptUpdate(auditContext)
 
     await this.requireFinishedWebhookGrantCleanup(directoryId, teamId, projectId)
 
@@ -3094,7 +3112,7 @@ export class DynamoDbProjectDirectoryClient {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: project.entryKey },
-          UpdateExpression: 'REMOVE archivedAt ADD lifecycleRevision :one',
+          UpdateExpression: `${receipt.set}REMOVE archivedAt ADD lifecycleRevision :one`,
           // Bound to the archive read, so a delayed restore cannot undo a newer archive.
           ConditionExpression:
             '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND ' +
@@ -3111,6 +3129,7 @@ export class DynamoDbProjectDirectoryClient {
             ':teamId': teamId,
             ':readArchivedAt': project.archivedAt,
             ':one': 1,
+            ...receipt.values,
           },
         },
       },
@@ -3260,8 +3279,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param directoryId - Owning Workspace directory identifier.
    * @param teamId - Team that owns the Project.
    * @param projectId - Project identifier.
-   * @returns The source, or undefined when the Project is missing or is active under an archived
-   *   Team.
+   * @returns The source, or undefined when the Project or its Team is missing.
    */
   async getProjectSearchSource(
     directoryId: string,
@@ -3274,11 +3292,9 @@ export class DynamoDbProjectDirectoryClient {
       item.entryType === 'project' && item.teamId === teamId && item.projectId === projectId
     )
 
-    // An archived Project keeps its source under an archived Team, so its document is still
-    // removed; an active Project under an archived Team is left to the Team's archive.
-    if (!team || !project || (isActiveDirectoryItem(project) && !isActiveDirectoryItem(team))) {
-      return undefined
-    }
+    // A Team archive leaves its Projects' rows and documents as they are, so a Project under an
+    // archived Team is still synced: a rename committed before the Team archive is projected.
+    if (!team || !project) return undefined
 
     const state = toProjectCharterState(project)
     return {
@@ -5326,7 +5342,8 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
       !(Number.isSafeInteger(value.nameRevision) && Number(value.nameRevision) >= 0)) ||
     (value.creatorUserId !== undefined && typeof value.creatorUserId !== 'string') ||
     (value.lifecycleRevision !== undefined &&
-      !(Number.isSafeInteger(value.lifecycleRevision) && Number(value.lifecycleRevision) >= 0))
+      !(Number.isSafeInteger(value.lifecycleRevision) && Number(value.lifecycleRevision) >= 0)) ||
+    (value.restoreReceipt !== undefined && !isDirectoryRestoreReceipt(value.restoreReceipt))
   ) {
     return false
   }
@@ -5782,6 +5799,61 @@ function createProjectMemberEntryKey(projectId: string, memberKey: string) {
 
 function padSortOrder(value: number) {
   return String(value).padStart(6, '0')
+}
+
+/**
+ * Tells whether a stored value is a restore receipt.
+ *
+ * @param value - Stored attribute value.
+ * @returns Whether it holds the key hash and request fingerprint.
+ */
+function isDirectoryRestoreReceipt(value: unknown): value is DirectoryRestoreReceipt {
+  return isRecord(value) &&
+    typeof value.idempotencyKeyHash === 'string' &&
+    typeof value.requestFingerprint === 'string'
+}
+
+/**
+ * Tells whether a restore request repeats the restore recorded on a row.
+ *
+ * A retry after a lost response carries the same `Idempotency-Key`, so it finds the receipt the
+ * committed restore stored and is answered as that success instead of a conflict.
+ *
+ * @param row - Team or Project row the request restores.
+ * @param auditContext - Audit context of the request, which carries the key hash.
+ * @returns Whether the request is a replay of the recorded restore.
+ * @throws ProjectDataError 409 when the key was used for a different request.
+ */
+function isRestoreReplay(
+  row: { restoreReceipt?: DirectoryRestoreReceipt },
+  auditContext: MutationAuditContext | undefined,
+) {
+  if (!auditContext || row.restoreReceipt?.idempotencyKeyHash !== auditContext.idempotencyKeyHash) {
+    return false
+  }
+  if (row.restoreReceipt.requestFingerprint !== auditContext.requestFingerprint) {
+    throw new ProjectDataError(
+      409,
+      'IdempotencyKeyConflict',
+      'The Idempotency-Key was already used for a different request.',
+    )
+  }
+  return true
+}
+
+/**
+ * Builds the update parts that record the receipt of a restore on its row.
+ *
+ * @param auditContext - Audit context of the restore request.
+ * @returns The SET clause and its values, or nothing without an audit context.
+ */
+function createRestoreReceiptUpdate(auditContext: MutationAuditContext | undefined) {
+  if (!auditContext) return { set: '', values: {} }
+  const receipt: DirectoryRestoreReceipt = {
+    idempotencyKeyHash: auditContext.idempotencyKeyHash,
+    requestFingerprint: auditContext.requestFingerprint,
+  }
+  return { set: 'SET restoreReceipt = :restoreReceipt ', values: { ':restoreReceipt': receipt } }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
