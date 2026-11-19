@@ -19,6 +19,7 @@ import type {
 import {
   createWebhookGrantCleanupDirectoryId,
   createWebhookGrantCleanupEntryKey,
+  createWebhookGrantCleanupEntryKeyPrefix,
   createWebhookGrantCleanupItem,
   createWebhookMemberAuthorizationKey,
   createWebhookProjectAuthorizationSortKey,
@@ -61,9 +62,11 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  DIRECTORY_REORDER_MAX_ITEMS,
   isProjectLifecycleState,
   PROJECT_LIFECYCLE_STATES_REJECTING_NEW_WORK_ITEMS,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
+  type DirectoryAdministrationResponse,
   type MemberPreferences,
   type MemberPreferenceValues,
   type ProjectCharter,
@@ -72,6 +75,12 @@ import {
   type ProjectLifecycleState,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
+  type RenameDirectoryProjectResponse,
+  type RenameDirectoryTeamResponse,
+  type ReorderDirectoryProjectsInput,
+  type ReorderDirectoryTeamsInput,
+  type RestoreDirectoryProjectResponse,
+  type RestoreDirectoryTeamResponse,
   type UpdateMemberPreferencesInput,
   type UpdateProjectQuickAccessPreferencesInput,
 } from '@mukuroji/contracts'
@@ -150,6 +159,14 @@ type ProjectTone = 'blue' | 'purple' | 'green' | 'yellow'
 /**
  * DynamoDB に保存する team directory item です。
  */
+/** Durable receipt of a successful restore, stored on the restored row. */
+type DirectoryRestoreReceipt = {
+  /** Hash of the Workspace, actor, and `Idempotency-Key` of the restore request. */
+  idempotencyKeyHash: string
+  /** Fingerprint of the restore request, so a reused key with another request is refused. */
+  requestFingerprint: string
+}
+
 type ProjectDirectoryTeamItem = {
   /**
    * ユーザーごとの directory partition key です。
@@ -191,6 +208,28 @@ type ProjectDirectoryTeamItem = {
    * チーム配下を初期展開するかどうかです。
    */
   expanded?: boolean
+  /**
+   * Display position set by a reorder. Rows without it are placed by `teamSortOrder`.
+   */
+  displayOrder?: number
+  /**
+   * Counts renames, so a delayed search projection of an older name cannot replace a newer one.
+   * Rows without it were never renamed.
+   */
+  nameRevision?: number
+  /**
+   * User who created the Team, kept so a search document recreated after a restore keeps its
+   * creator. Rows created before it was recorded lack it.
+   */
+  creatorUserId?: string
+  /**
+   * Counts archives and restores. Added to the other revisions, it fences search projections so
+   * a delayed projection cannot recreate the document of an archived row. Rows without it were
+   * never archived.
+   */
+  lifecycleRevision?: number
+  /** Receipt of the last restore, so a retry of it after a lost response is recognized. */
+  restoreReceipt?: DirectoryRestoreReceipt
   /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
@@ -249,6 +288,29 @@ type ProjectDirectoryProjectItem = {
    * サイドバー上のプロジェクト表示色です。
    */
   tone?: ProjectTone
+  /**
+   * Display position within the Team set by a reorder. Rows without it are placed by
+   * `projectSortOrder`.
+   */
+  displayOrder?: number
+  /**
+   * Counts renames and color changes. Added to the charter revision, it fences the Project's
+   * search projection. Rows without it were never renamed.
+   */
+  nameRevision?: number
+  /**
+   * User who created the Project, kept so a search document recreated after a restore keeps its
+   * creator. Rows created before it was recorded lack it.
+   */
+  creatorUserId?: string
+  /**
+   * Counts archives and restores. Added to the other revisions, it fences search projections so
+   * a delayed projection cannot recreate the document of an archived row. Rows without it were
+   * never archived.
+   */
+  lifecycleRevision?: number
+  /** Receipt of the last restore, so a retry of it after a lost response is recognized. */
+  restoreReceipt?: DirectoryRestoreReceipt
   /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
@@ -458,6 +520,53 @@ export type CreateTeamResponse = {
    * 作成したチーム行です。
    */
   team: ProjectDirectoryTeamResponse
+}
+
+/**
+ * Most authorization condition checks a directory change carries: the caller's membership and the
+ * Enterprise control row.
+ */
+const DIRECTORY_RESTORE_AUTHORIZATION_RESERVE = 2
+
+/** Condition checks proving the caller is still authorized when a directory change commits. */
+export type DirectoryAuthorizationConditionChecks = NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>
+
+/** What the search document of a Project is built from, read in one snapshot. */
+export type ProjectSearchSource = {
+  /** Whether the Project row is archived, so its search document must be absent. */
+  archived: boolean
+  /** Charter state of the Project. */
+  state: ProjectCharterState
+  /** Project directory row with the Japanese name. */
+  project: ProjectDirectoryProjectResponse
+  /** English display name. */
+  englishName: string
+  /** User who created the Project, when the row records it. */
+  creatorUserId?: string
+  /**
+   * Charter revision plus rename count plus archive and restore count. All only grow, so a later
+   * snapshot has a larger value whenever any of them changed.
+   */
+  sourceRevision: number
+}
+
+/** What the search document of a Team is built from, read in one snapshot. */
+export type TeamSearchSource = {
+  /** Whether the Team row is archived, so its search document must be absent. */
+  archived: boolean
+  /** Japanese display name. */
+  nameJa: string
+  /** English display name. */
+  nameEn: string
+  /** User who created the Team, when the row records it. */
+  creatorUserId?: string
+  /**
+   * Rename count plus archive and restore count. Both only grow, so a later snapshot has a larger
+   * value whenever either changed.
+   */
+  sourceRevision: number
 }
 
 /**
@@ -802,6 +911,7 @@ export type ProjectDirectoryClient = {
     directoryId: string,
     input: CreateTeamRequestBody,
     auditContext?: MutationAuditContext,
+    creatorUserId?: string,
   ): Promise<CreateTeamResponse>
   /**
    * DynamoDB に指定チーム配下のプロジェクトを作成します。
@@ -834,6 +944,134 @@ export type ProjectDirectoryClient = {
     expectedPlanningRevision: number,
     workItemRevisionGuards: readonly ProjectArchiveWorkItemRevisionGuard[],
   ): Promise<ArchiveProjectResponse>
+  /**
+   * Reads every Team and Project, archived ones included, in display order.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @returns Team and Project rows with both localized names.
+   */
+  getDirectoryAdministration(directoryId: string): Promise<DirectoryAdministrationResponse>
+  /**
+   * Renames an active Team without changing its ID.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team to rename.
+   * @param input - Untrusted request body with the new names.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Team identifier and its stored names.
+   */
+  renameTeam(
+    directoryId: string,
+    teamId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<RenameDirectoryTeamResponse>
+  /**
+   * Renames an active Project or changes its color without changing its ID.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project to rename.
+   * @param input - Untrusted request body with the new names and optional color.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Project identifiers, its stored names, and its color.
+   */
+  renameProject(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<RenameDirectoryProjectResponse>
+  /**
+   * Restores an archived Team.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Archived Team to restore.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Team identifier.
+   */
+  restoreTeam(
+    directoryId: string,
+    teamId: string,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<RestoreDirectoryTeamResponse>
+  /**
+   * Restores an archived Project of an active Team.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Active Team that owns the Project.
+   * @param projectId - Archived Project to restore.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The restored Project identifiers.
+   */
+  restoreProject(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<RestoreDirectoryProjectResponse>
+  /**
+   * Sets the display order of every active Team.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param input - Untrusted request body listing every active Team ID in the new order.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Team identifiers in their stored order.
+   */
+  reorderTeams(
+    directoryId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<ReorderDirectoryTeamsInput>
+  /**
+   * Sets the display order of every active Project of one active Team.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Active Team whose Projects are reordered.
+   * @param input - Untrusted request body listing every active Project ID in the new order.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Project identifiers in their stored order.
+   */
+  reorderProjects(
+    directoryId: string,
+    teamId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<ReorderDirectoryProjectsInput>
+  /**
+   * Reads, in one strongly consistent read, what the search document of a Project is built from.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @returns The source, or undefined when the Project or its Team is missing.
+   */
+  getProjectSearchSource(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+  ): Promise<ProjectSearchSource | undefined>
+  /**
+   * Reads, in one strongly consistent read, what the search document of a Team is built from.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team identifier.
+   * @returns The source, or undefined when the Team is missing.
+   */
+  getTeamSearchSource(directoryId: string, teamId: string): Promise<TeamSearchSource | undefined>
   /**
    * Reads the charter and lifecycle of one Team-owned Project, including an archived one.
    *
@@ -1908,6 +2146,7 @@ export class DynamoDbProjectDirectoryClient {
     directoryId: string,
     input: CreateTeamRequestBody,
     auditContext?: MutationAuditContext,
+    creatorUserId?: string,
   ) {
     await this.ensureLocalAuditTable()
     const names = readLocalizedNames(input)
@@ -1935,6 +2174,7 @@ export class DynamoDbProjectDirectoryClient {
         nameJa: names.nameJa,
         nameEn: names.nameEn,
         expanded: typeof input.expanded === 'boolean' ? input.expanded : true,
+        ...(creatorUserId ? { creatorUserId } : {}),
       }
 
       const statePut = {
@@ -2121,6 +2361,7 @@ export class DynamoDbProjectDirectoryClient {
         projectSortOrder,
         tone,
         ...(lifecycleState === 'active' ? {} : { lifecycleState }),
+        creatorUserId: creator.userKey,
       }
       const updatedAt = new Date().toISOString()
       const creatorMemberItem: ProjectMemberItem = {
@@ -2274,10 +2515,10 @@ export class DynamoDbProjectDirectoryClient {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: team.entryKey },
-          UpdateExpression: 'SET archivedAt = :archivedAt',
+          UpdateExpression: 'SET archivedAt = :archivedAt ADD lifecycleRevision :one',
           ConditionExpression:
             'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-          ExpressionAttributeValues: { ':archivedAt': archivedAt },
+          ExpressionAttributeValues: { ':archivedAt': archivedAt, ':one': 1 },
         },
       }
       const auditItems = createOptionalAuditTransactItems(this.auditTableName, auditContext, {
@@ -2312,8 +2553,10 @@ export class DynamoDbProjectDirectoryClient {
         update === undefined ? [] : [update]
       )
       planningRevisionItemIndex = 1 + auditItems.length
+      // The limit leaves room for a later restore, which writes the Team, its audit event, the
+      // Planning revision, and the same targets, plus the caller's authorization checks.
       if (
-        1 + auditItems.length + 1 + planningTargetMutations.length >
+        3 + planningTargetMutations.length + DIRECTORY_RESTORE_AUTHORIZATION_RESERVE >
         DYNAMODB_TRANSACTION_MAX_ACTIONS
       ) {
         throw new ProjectDataError(
@@ -2411,10 +2654,10 @@ export class DynamoDbProjectDirectoryClient {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: project.entryKey },
-          UpdateExpression: 'SET archivedAt = :archivedAt',
+          UpdateExpression: 'SET archivedAt = :archivedAt ADD lifecycleRevision :one',
           ConditionExpression:
             'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-          ExpressionAttributeValues: { ':archivedAt': archivedAt },
+          ExpressionAttributeValues: { ':archivedAt': archivedAt, ':one': 1 },
         },
       }
       const auditItems = createOptionalAuditTransactItems(this.auditTableName, auditContext, {
@@ -2526,6 +2769,568 @@ export class DynamoDbProjectDirectoryClient {
       }
 
       throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads every Team and Project, archived ones included, in display order.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @returns Team and Project rows with both localized names.
+   */
+  async getDirectoryAdministration(directoryId: string): Promise<DirectoryAdministrationResponse> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const teamItems = sortDirectoryItemsForDisplay(
+      items.filter((item): item is ProjectDirectoryTeamItem => item.entryType === 'team'),
+    )
+    const projectItems = sortDirectoryItemsForDisplay(
+      items.filter((item): item is ProjectDirectoryProjectItem => item.entryType === 'project'),
+    )
+
+    return {
+      teams: teamItems.map((team) => ({
+        id: team.teamId,
+        nameJa: team.nameJa,
+        nameEn: team.nameEn,
+        ...(team.archivedAt === undefined ? {} : { archivedAt: team.archivedAt }),
+        projects: projectItems
+          .filter((project) => project.teamId === team.teamId)
+          .map((project) => ({
+            id: project.projectId,
+            nameJa: project.nameJa,
+            nameEn: project.nameEn,
+            tone: project.tone ?? 'blue',
+            ...(project.archivedAt === undefined ? {} : { archivedAt: project.archivedAt }),
+          })),
+      })),
+    }
+  }
+
+  /**
+   * Renames an active Team. Its ID, and so every URL and link, stays the same.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team to rename.
+   * @param input - Untrusted request body with the new names.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Team identifier and its stored names.
+   */
+  async renameTeam(
+    directoryId: string,
+    teamId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<RenameDirectoryTeamResponse> {
+    await this.ensureLocalAuditTable()
+    const names = readDirectoryDisplayNames(input)
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = items.find((item): item is ProjectDirectoryTeamItem =>
+      item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
+    )
+
+    if (!team) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    const readNameRevision = team.nameRevision ?? 0
+    if (team.nameJa === names.nameJa && team.nameEn === names.nameEn) {
+      return { teamId, nameJa: names.nameJa, nameEn: names.nameEn }
+    }
+
+    // The names and rename count read above must still be stored, so a stale rename cannot
+    // overwrite a newer one.
+    const nameRevision = readNameRevision + 1
+    const condition = withReadNamesCondition(createActiveTeamRowCondition(teamId), team)
+    await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
+      {
+        Update: {
+          TableName: this.tableName,
+          Key: { directoryId, entryKey: team.entryKey },
+          UpdateExpression: 'SET nameJa = :nameJa, nameEn = :nameEn, #nameRevision = :nameRevision',
+          ...condition,
+          ExpressionAttributeValues: {
+            ...condition.ExpressionAttributeValues,
+            ':nameJa': names.nameJa,
+            ':nameEn': names.nameEn,
+            ':nameRevision': nameRevision,
+          },
+        },
+      },
+      ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'project.renamed',
+        entityType: 'project',
+        entityId: `team/${teamId}`,
+        action: 'renamed',
+        changes: createAuditFieldChanges(team, { ...team, ...names }, ['nameJa', 'nameEn']),
+        metadata: { kind: 'team', teamId },
+      }),
+    ])
+
+    return { teamId, nameJa: names.nameJa, nameEn: names.nameEn }
+  }
+
+  /**
+   * Renames an active Project or changes its color. Its ID, and so every URL and link, stays
+   * the same.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project to rename.
+   * @param input - Untrusted request body with the new names and optional color.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Project identifiers, its stored names, and its color.
+   */
+  async renameProject(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<RenameDirectoryProjectResponse> {
+    await this.ensureLocalAuditTable()
+    const names = readDirectoryDisplayNames(input)
+    const requestedTone = isRecord(input) && input.tone !== undefined
+      ? readProjectTone(input.tone)
+      : undefined
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const project = this.requireActiveTeamProject(items, teamId, projectId)
+    const tone = requestedTone ?? project.tone ?? 'blue'
+    const response = { teamId, projectId, nameJa: names.nameJa, nameEn: names.nameEn, tone }
+
+    if (
+      project.nameJa === names.nameJa &&
+      project.nameEn === names.nameEn &&
+      (project.tone ?? 'blue') === tone
+    ) {
+      return response
+    }
+
+    // The names and color read above must still be stored, so a stale rename cannot overwrite a
+    // concurrent change, such as restoring an old color the request did not mention.
+    const condition = withReadNamesCondition(
+      createActiveProjectRowCondition(teamId, projectId),
+      project,
+    )
+    await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
+      {
+        Update: {
+          TableName: this.tableName,
+          Key: { directoryId, entryKey: project.entryKey },
+          UpdateExpression:
+            'SET nameJa = :nameJa, nameEn = :nameEn, tone = :tone, #nameRevision = :nameRevision',
+          ...condition,
+          ExpressionAttributeValues: {
+            ...condition.ExpressionAttributeValues,
+            ':nameJa': names.nameJa,
+            ':nameEn': names.nameEn,
+            ':tone': tone,
+            ':nameRevision': (project.nameRevision ?? 0) + 1,
+          },
+        },
+      },
+      // The Team must still be active when the rename commits, not only when it was read.
+      {
+        ConditionCheck: this.createActiveTeamConditionCheck(
+          directoryId,
+          this.requireDirectoryTeam(items, teamId).entryKey,
+          teamId,
+        ),
+      },
+      ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'project.renamed',
+        entityType: 'project',
+        entityId: projectId,
+        action: 'renamed',
+        changes: createAuditFieldChanges(
+          project,
+          { ...project, ...names, tone },
+          ['nameJa', 'nameEn', 'tone'],
+        ),
+        metadata: { kind: 'project', projectId, teamId },
+      }),
+    ])
+
+    return response
+  }
+
+  /**
+   * Restores an archived Team. Its Projects, Work Items, and Project roles were kept while it
+   * was archived, so they become visible again unchanged.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Archived Team to restore.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The restored Team identifier.
+   */
+  async restoreTeam(
+    directoryId: string,
+    teamId: string,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<RestoreDirectoryTeamResponse> {
+    await this.ensureLocalAuditTable()
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = items.find((item): item is ProjectDirectoryTeamItem =>
+      item.entryType === 'team' && item.teamId === teamId,
+    )
+
+    if (!team) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    if (isRestoreReplay(team, auditContext)) return { teamId }
+
+    if (team.archivedAt === undefined) {
+      throw new ProjectDataError(409, 'TeamNotArchived', `Team "${teamId}" is not archived.`)
+    }
+    const receipt = createRestoreReceiptUpdate(auditContext)
+
+    await this.requireFinishedWebhookGrantCleanup(directoryId, teamId)
+
+    // Projects that were active when the Team was archived become visible again, so their
+    // Planning update targets, archived together with the Team, become usable again too.
+    const planningItems = await this.readPlanningProjectRestoreItems(
+      directoryId,
+      teamId,
+      items
+        .filter((item): item is ProjectDirectoryProjectItem =>
+          item.entryType === 'project' && item.teamId === teamId && isActiveDirectoryItem(item)
+        )
+        .map((project) => project.projectId),
+      new Date().toISOString(),
+    )
+
+    await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
+      {
+        Update: {
+          TableName: this.tableName,
+          Key: { directoryId, entryKey: team.entryKey },
+          UpdateExpression: `${receipt.set}REMOVE archivedAt ADD lifecycleRevision :one`,
+          // Bound to the archive read, so a delayed restore cannot undo a newer archive.
+          ConditionExpression:
+            '#entryType = :entryType AND #teamId = :teamId AND #archivedAt = :readArchivedAt',
+          ExpressionAttributeNames: {
+            '#archivedAt': 'archivedAt',
+            '#entryType': 'entryType',
+            '#teamId': 'teamId',
+          },
+          ExpressionAttributeValues: {
+            ':entryType': 'team',
+            ':teamId': teamId,
+            ':readArchivedAt': team.archivedAt,
+            ':one': 1,
+            ...receipt.values,
+          },
+        },
+      },
+      ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'project.restored',
+        entityType: 'project',
+        entityId: `team/${teamId}`,
+        action: 'restored',
+        changes: createAuditFieldChanges(team, { ...team, archivedAt: undefined }, ['archivedAt']),
+        metadata: { kind: 'team', teamId },
+      }),
+      ...planningItems,
+    ])
+
+    return { teamId }
+  }
+
+  /**
+   * Restores an archived Project of an active Team. Its Work Items and Project roles were kept
+   * while it was archived, so they become effective again unchanged.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Active Team that owns the Project.
+   * @param projectId - Archived Project to restore.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The restored Project identifiers.
+   */
+  async restoreProject(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<RestoreDirectoryProjectResponse> {
+    await this.ensureLocalAuditTable()
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = this.requireDirectoryTeam(items, teamId)
+    const restored = items.find((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' && item.teamId === teamId && item.projectId === projectId,
+    )
+    if (restored && isRestoreReplay(restored, auditContext)) return { teamId, projectId }
+
+    if (!isActiveDirectoryItem(team)) {
+      throw new ProjectDataError(
+        409,
+        'TeamArchived',
+        `Team "${teamId}" is archived. Restore the Team first.`,
+      )
+    }
+
+    const project = restored
+
+    if (!project) {
+      throw new ProjectDataError(
+        404,
+        'ProjectNotFound',
+        `Project "${projectId}" was not found in team "${teamId}".`,
+      )
+    }
+
+    if (project.archivedAt === undefined) {
+      throw new ProjectDataError(
+        409,
+        'ProjectNotArchived',
+        `Project "${projectId}" is not archived.`,
+      )
+    }
+    const receipt = createRestoreReceiptUpdate(auditContext)
+
+    await this.requireFinishedWebhookGrantCleanup(directoryId, teamId, projectId)
+
+    const planningItems = await this.readPlanningProjectRestoreItems(
+      directoryId,
+      teamId,
+      [projectId],
+      new Date().toISOString(),
+    )
+
+    await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
+      {
+        Update: {
+          TableName: this.tableName,
+          Key: { directoryId, entryKey: project.entryKey },
+          UpdateExpression: `${receipt.set}REMOVE archivedAt ADD lifecycleRevision :one`,
+          // Bound to the archive read, so a delayed restore cannot undo a newer archive.
+          ConditionExpression:
+            '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND ' +
+            '#archivedAt = :readArchivedAt',
+          ExpressionAttributeNames: {
+            '#archivedAt': 'archivedAt',
+            '#entryType': 'entryType',
+            '#projectId': 'projectId',
+            '#teamId': 'teamId',
+          },
+          ExpressionAttributeValues: {
+            ':entryType': 'project',
+            ':projectId': projectId,
+            ':teamId': teamId,
+            ':readArchivedAt': project.archivedAt,
+            ':one': 1,
+            ...receipt.values,
+          },
+        },
+      },
+      { ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey, teamId) },
+      ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'project.restored',
+        entityType: 'project',
+        entityId: projectId,
+        action: 'restored',
+        changes: createAuditFieldChanges(
+          project,
+          { ...project, archivedAt: undefined },
+          ['archivedAt'],
+        ),
+        metadata: { kind: 'project', projectId, teamId },
+      }),
+      ...planningItems,
+    ])
+
+    return { teamId, projectId }
+  }
+
+  /**
+   * Sets the display order of every active Team.
+   *
+   * The new order reuses the positions the Teams already hold, so a Team created later still
+   * sorts last and an archived Team returns near its old place when restored.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param input - Untrusted request body listing every active Team ID in the new order.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Team identifiers in their stored order.
+   */
+  async reorderTeams(
+    directoryId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<ReorderDirectoryTeamsInput> {
+    await this.ensureLocalAuditTable()
+    const teamIds = readDirectoryOrderIds(input, 'teamIds')
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const teams = sortDirectoryItemsForDisplay(
+      items.filter((item): item is ProjectDirectoryTeamItem =>
+        item.entryType === 'team' && isActiveDirectoryItem(item)
+      ),
+    )
+    const currentIds = teams.map((team) => team.teamId)
+    const nextTeams = orderDirectoryItems(teams, currentIds, teamIds)
+    const positions = createReorderedDisplayPositions(teams.map(resolveDirectoryDisplayOrder))
+    const writes = createDisplayOrderTransactItems(
+      this.tableName,
+      directoryId,
+      nextTeams,
+      positions,
+      (team) => createActiveTeamRowCondition(team.teamId),
+    )
+
+    if (writes.changed) {
+      await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
+        ...writes.items,
+        ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+          directoryId,
+          eventType: 'project.reordered',
+          entityType: 'project',
+          entityId: 'team-order',
+          action: 'reordered',
+          changes: createAuditFieldChanges({ order: currentIds }, { order: teamIds }, ['order']),
+          metadata: { kind: 'team-order' },
+        }),
+      ])
+    }
+
+    return { teamIds }
+  }
+
+  /**
+   * Sets the display order of every active Project of one active Team.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Active Team whose Projects are reordered.
+   * @param input - Untrusted request body listing every active Project ID in the new order.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Project identifiers in their stored order.
+   */
+  async reorderProjects(
+    directoryId: string,
+    teamId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<ReorderDirectoryProjectsInput> {
+    await this.ensureLocalAuditTable()
+    const projectIds = readDirectoryOrderIds(input, 'projectIds')
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = this.requireDirectoryTeam(items, teamId)
+
+    if (!isActiveDirectoryItem(team)) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    const projects = sortDirectoryItemsForDisplay(
+      items.filter((item): item is ProjectDirectoryProjectItem =>
+        item.entryType === 'project' && item.teamId === teamId && isActiveDirectoryItem(item)
+      ),
+    )
+    const currentIds = projects.map((project) => project.projectId)
+    const nextProjects = orderDirectoryItems(projects, currentIds, projectIds)
+    const positions = createReorderedDisplayPositions(projects.map(resolveDirectoryDisplayOrder))
+    const writes = createDisplayOrderTransactItems(
+      this.tableName,
+      directoryId,
+      nextProjects,
+      positions,
+      (project) => createActiveProjectRowCondition(teamId, project.projectId),
+    )
+
+    if (writes.changed) {
+      await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
+        ...writes.items,
+        { ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey, teamId) },
+        ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+          directoryId,
+          eventType: 'project.reordered',
+          entityType: 'project',
+          entityId: `team/${teamId}/project-order`,
+          action: 'reordered',
+          changes: createAuditFieldChanges(
+            { order: currentIds },
+            { order: projectIds },
+            ['order'],
+          ),
+          metadata: { kind: 'project-order', teamId },
+        }),
+      ])
+    }
+
+    return { projectIds }
+  }
+
+  /**
+   * Reads, in one strongly consistent read, what the search document of a Project is built from.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @returns The source, or undefined when the Project or its Team is missing.
+   */
+  async getProjectSearchSource(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+  ): Promise<ProjectSearchSource | undefined> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = items.find((item) => item.entryType === 'team' && item.teamId === teamId)
+    const project = items.find((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' && item.teamId === teamId && item.projectId === projectId
+    )
+
+    // A Team archive leaves its Projects' rows and documents as they are, so a Project under an
+    // archived Team is still synced: a rename committed before the Team archive is projected.
+    if (!team || !project) return undefined
+
+    const state = toProjectCharterState(project)
+    return {
+      archived: !isActiveDirectoryItem(project),
+      state,
+      project: toProjectDirectoryProjectResponse(project, 'ja'),
+      englishName: localizedName(project, 'en'),
+      ...(project.creatorUserId === undefined ? {} : { creatorUserId: project.creatorUserId }),
+      sourceRevision:
+        state.revision + (project.nameRevision ?? 0) + (project.lifecycleRevision ?? 0),
+    }
+  }
+
+  /**
+   * Reads, in one strongly consistent read, what the search document of a Team is built from.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team identifier.
+   * @returns The source, or undefined when the Team is missing.
+   */
+  async getTeamSearchSource(
+    directoryId: string,
+    teamId: string,
+  ): Promise<TeamSearchSource | undefined> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = items.find((item): item is ProjectDirectoryTeamItem =>
+      item.entryType === 'team' && item.teamId === teamId
+    )
+    if (!team) return undefined
+
+    return {
+      archived: !isActiveDirectoryItem(team),
+      nameJa: team.nameJa,
+      nameEn: team.nameEn,
+      ...(team.creatorUserId === undefined ? {} : { creatorUserId: team.creatorUserId }),
+      sourceRevision: (team.nameRevision ?? 0) + (team.lifecycleRevision ?? 0),
     }
   }
 
@@ -2953,6 +3758,234 @@ export class DynamoDbProjectDirectoryClient {
           ':projectId': projectId,
         },
       },
+    }
+  }
+
+  /**
+   * Reads the Planning writes that make archived Project update targets usable again after a
+   * restore. The targets lose their cadence, because archiving removed their schedule; an
+   * administrator sets it again. The Planning revision is bumped so a Planning mutation that read
+   * the archived targets fails and reloads.
+   *
+   * @param directoryId - Planning Workspace partition.
+   * @param teamId - Owning Team identifier.
+   * @param projectIds - Projects being restored or becoming visible again.
+   * @param restoredAt - Restore timestamp.
+   * @returns Conditional Planning writes, empty when no target was archived.
+   */
+  private async readPlanningProjectRestoreItems(
+    directoryId: string,
+    teamId: string,
+    projectIds: readonly string[],
+    restoredAt: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+    const targetUpdates = await Promise.all(projectIds.map(async (projectId) => {
+      const recordKey = createPlanningUpdateProjectTargetRecordKey(teamId, projectId)
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.planningTableName,
+        Key: { workspaceId: directoryId, recordKey },
+        ConsistentRead: true,
+      }))
+      const item = response.Item
+      if (
+        !item ||
+        item.entryType !== 'planning-update-target' ||
+        !isRecord(item.target) ||
+        item.target.type !== 'project' ||
+        item.target.teamId !== teamId ||
+        item.target.projectId !== projectId ||
+        item.archivedAt === undefined
+      ) {
+        return []
+      }
+      return [{
+        Update: {
+          TableName: this.planningTableName,
+          Key: { workspaceId: directoryId, recordKey },
+          UpdateExpression:
+            'SET updatedAt = :restoredAt REMOVE archivedAt, cadence, cadenceAnchorDay, ' +
+            'updateScheduleShard, nextNotificationAtRecordKey',
+          ConditionExpression:
+            'attribute_exists(archivedAt) AND #entryType = :entryType AND ' +
+            '#target.#type = :targetType AND #target.#teamId = :teamId AND ' +
+            '#target.#projectId = :projectId',
+          ExpressionAttributeNames: {
+            '#entryType': 'entryType',
+            '#target': 'target',
+            '#type': 'type',
+            '#teamId': 'teamId',
+            '#projectId': 'projectId',
+          },
+          ExpressionAttributeValues: {
+            ':restoredAt': restoredAt,
+            ':entryType': 'planning-update-target',
+            ':targetType': 'project',
+            ':teamId': teamId,
+            ':projectId': projectId,
+          },
+        },
+      }]
+    }))
+    const updates = targetUpdates.flat()
+
+    if (updates.length === 0) {
+      return []
+    }
+
+    const meta = await this.documentClient.send(new GetCommand({
+      TableName: this.planningTableName,
+      Key: { workspaceId: `FENCE#${directoryId}`, recordKey: 'META' },
+      ConsistentRead: true,
+    }))
+    const revision = meta.Item?.revision
+    if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) {
+      throw new ProjectDataError(
+        503,
+        'PlanningUnavailable',
+        'Planning data is unavailable. Try again later.',
+      )
+    }
+
+    return [
+      createPlanningRevisionBump(this.planningTableName, directoryId, revision, restoredAt),
+      ...updates,
+    ]
+  }
+
+  /**
+   * Rejects a restore while the archive's Webhook grant cleanup is still running.
+   *
+   * An archived Team or Project gets no new Webhook grants, so any cleanup locator left in its
+   * scope belongs to the archive's cleanup. Restoring before it finishes would reactivate those
+   * grants, and the cleanup could later delete grants rebuilt after the restore.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Archived Team, or the Team of the archived Project.
+   * @param projectId - Archived Project, when restoring a Project.
+   */
+  private async requireFinishedWebhookGrantCleanup(
+    directoryId: string,
+    teamId: string,
+    projectId?: string,
+  ) {
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression: projectId === undefined
+        ? 'directoryId = :directoryId'
+        : 'directoryId = :directoryId AND begins_with(entryKey, :entryKeyPrefix)',
+      ExpressionAttributeValues: {
+        ':directoryId': createWebhookGrantCleanupDirectoryId(directoryId, teamId),
+        ...(projectId === undefined
+          ? {}
+          : { ':entryKeyPrefix': createWebhookGrantCleanupEntryKeyPrefix(projectId) }),
+      },
+      ConsistentRead: true,
+      Limit: 1,
+    }))
+
+    if ((response.Items ?? []).length > 0) {
+      throw new ProjectDataError(
+        409,
+        'DirectoryArchiveCleanupPending',
+        'The archive is still being cleaned up. Try again in a few minutes.',
+      )
+    }
+  }
+
+  /**
+   * Finds a Team row, archived or not.
+   *
+   * @param items - Validated directory rows.
+   * @param teamId - Team identifier.
+   * @returns The Team row.
+   */
+  private requireDirectoryTeam(items: ProjectDirectoryItem[], teamId: string) {
+    const team = items.find((item): item is ProjectDirectoryTeamItem =>
+      item.entryType === 'team' && item.teamId === teamId,
+    )
+
+    if (!team) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    return team
+  }
+
+  /**
+   * Finds an active Project of an active Team.
+   *
+   * @param items - Validated directory rows.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @returns The Project row.
+   */
+  private requireActiveTeamProject(
+    items: ProjectDirectoryItem[],
+    teamId: string,
+    projectId: string,
+  ) {
+    const team = this.requireDirectoryTeam(items, teamId)
+
+    if (!isActiveDirectoryItem(team)) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    const project = items.find((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' &&
+      item.teamId === teamId &&
+      item.projectId === projectId &&
+      isActiveDirectoryItem(item),
+    )
+
+    if (!project) {
+      throw new ProjectDataError(
+        404,
+        'ProjectNotFound',
+        `Project "${projectId}" was not found in team "${teamId}".`,
+      )
+    }
+
+    return project
+  }
+
+  /**
+   * Commits a rename, restore, or reorder and maps a lost condition to a conflict.
+   *
+   * @param authorizationConditionChecks - Guards that the caller is still authorized.
+   * @param stateItems - State updates, guards, and audit events to commit together.
+   */
+  private async sendDirectoryAdministrationTransaction(
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks,
+    stateItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+  ) {
+    const transactItems = [...stateItems, ...authorizationConditionChecks]
+    if (transactItems.length > DYNAMODB_TRANSACTION_MAX_ACTIONS) {
+      throw new ProjectDataError(
+        413,
+        'DirectoryOrderLimitExceeded',
+        'Too many rows to change atomically.',
+      )
+    }
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+    } catch (error) {
+      const failedAuthorization = authorizationConditionChecks.some((_, index) =>
+        isTransactionConditionalFailureAt(error, stateItems.length + index)
+      )
+      if (failedAuthorization) {
+        throw new ProjectDataError(
+          403,
+          'DirectoryAuthorizationChanged',
+          'Your permission changed. Reload and try again.',
+        )
+      }
+
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+
+      throw toProjectDataError(error)
     }
   }
 
@@ -3947,6 +4980,7 @@ function toProjectDirectoryResponse(
 ): ProjectDirectoryTeamResponse[] {
   const teams: ProjectDirectoryTeamResponse[] = []
   const teamById = new Map<string, ProjectDirectoryTeamResponse>()
+  const teamItems: ProjectDirectoryTeamItem[] = []
   const projectItems: ProjectDirectoryProjectItem[] = []
 
   for (const value of readProjectDirectoryItems(values, directoryId)) {
@@ -3959,22 +4993,26 @@ function toProjectDirectoryResponse(
     }
 
     if (value.entryType === 'team') {
-      const team = {
-        id: value.teamId,
-        name: localizedName(value, locale),
-        expanded: value.expanded ?? false,
-        projects: [],
-      }
-
-      teamById.set(team.id, team)
-      teams.push(team)
+      teamItems.push(value)
       continue
     }
 
     projectItems.push(value)
   }
 
-  for (const item of projectItems) {
+  for (const value of sortDirectoryItemsForDisplay(teamItems)) {
+    const team = {
+      id: value.teamId,
+      name: localizedName(value, locale),
+      expanded: value.expanded ?? false,
+      projects: [],
+    }
+
+    teamById.set(team.id, team)
+    teams.push(team)
+  }
+
+  for (const item of sortDirectoryItemsForDisplay(projectItems)) {
     const team = teamById.get(item.teamId)
 
     if (!team || !item.projectId) {
@@ -4298,7 +5336,14 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
     typeof value.teamSortOrder !== 'number' ||
     typeof value.nameJa !== 'string' ||
     typeof value.nameEn !== 'string' ||
-    (value.archivedAt !== undefined && typeof value.archivedAt !== 'string')
+    (value.archivedAt !== undefined && typeof value.archivedAt !== 'string') ||
+    (value.displayOrder !== undefined && !Number.isSafeInteger(value.displayOrder)) ||
+    (value.nameRevision !== undefined &&
+      !(Number.isSafeInteger(value.nameRevision) && Number(value.nameRevision) >= 0)) ||
+    (value.creatorUserId !== undefined && typeof value.creatorUserId !== 'string') ||
+    (value.lifecycleRevision !== undefined &&
+      !(Number.isSafeInteger(value.lifecycleRevision) && Number(value.lifecycleRevision) >= 0)) ||
+    (value.restoreReceipt !== undefined && !isDirectoryRestoreReceipt(value.restoreReceipt))
   ) {
     return false
   }
@@ -4439,6 +5484,303 @@ function readIdempotencyResourceId(value: unknown): string | undefined {
   return value
 }
 
+/** Longest Team or Project display name a rename stores. */
+const DIRECTORY_DISPLAY_NAME_MAX_LENGTH = 500
+
+/** Longest Team or Project identifier a reorder request may name. */
+const DIRECTORY_ORDER_ID_MAX_LENGTH = 256
+
+/**
+ * Resolves the display position of a Team or Project row.
+ *
+ * @param item - Team or Project row.
+ * @returns The reorder position, or the creation position when the row was never reordered.
+ */
+function resolveDirectoryDisplayOrder(item: ProjectDirectoryTeamItem | ProjectDirectoryProjectItem) {
+  if (item.displayOrder !== undefined) return item.displayOrder
+  return item.entryType === 'team' ? item.teamSortOrder : item.projectSortOrder
+}
+
+/**
+ * Sorts Team or Project rows by display position, keeping storage order between equal positions.
+ *
+ * @param items - Rows in storage order.
+ * @returns A sorted copy.
+ */
+function sortDirectoryItemsForDisplay<
+  T extends ProjectDirectoryTeamItem | ProjectDirectoryProjectItem,
+>(items: readonly T[]): T[] {
+  return [...items].sort((first, second) =>
+    resolveDirectoryDisplayOrder(first) - resolveDirectoryDisplayOrder(second)
+  )
+}
+
+/**
+ * Turns the positions rows hold now into strictly increasing positions for a new order.
+ *
+ * @param currentPositions - Display positions of the rows being reordered.
+ * @returns The same positions in ascending order, raised where two would be equal.
+ */
+function createReorderedDisplayPositions(currentPositions: readonly number[]) {
+  const positions = [...currentPositions].sort((first, second) => first - second)
+  let previous: number | undefined
+
+  return positions.map((position) => {
+    const next = previous === undefined || position > previous ? position : previous + 1
+    previous = next
+    return next
+  })
+}
+
+/** Row condition built by `createActiveTeamRowCondition` or `createActiveProjectRowCondition`. */
+type DirectoryRowCondition = {
+  /** Condition that the row is still the named active row. */
+  ConditionExpression: string
+  /** Attribute names used by the condition. */
+  ExpressionAttributeNames: Record<string, string>
+  /** Attribute values used by the condition. */
+  ExpressionAttributeValues: Record<string, unknown>
+}
+
+/**
+ * Extends a row condition so the names, the rename count, and a Project's color still hold the
+ * values read.
+ *
+ * @param condition - Active-row condition.
+ * @param row - Row as read before the rename.
+ * @returns The condition with compare-and-swap clauses added.
+ */
+function withReadNamesCondition(
+  condition: DirectoryRowCondition,
+  row: ProjectDirectoryTeamItem | ProjectDirectoryProjectItem,
+): DirectoryRowCondition {
+  const clauses = [
+    '#nameJa = :readNameJa',
+    '#nameEn = :readNameEn',
+    row.nameRevision === undefined
+      ? 'attribute_not_exists(#nameRevision)'
+      : '#nameRevision = :readNameRevision',
+  ]
+  const names: Record<string, string> = {
+    '#nameJa': 'nameJa',
+    '#nameEn': 'nameEn',
+    '#nameRevision': 'nameRevision',
+  }
+  const values: Record<string, unknown> = {
+    ':readNameJa': row.nameJa,
+    ':readNameEn': row.nameEn,
+    ...(row.nameRevision === undefined ? {} : { ':readNameRevision': row.nameRevision }),
+  }
+
+  if (row.entryType === 'project') {
+    names['#tone'] = 'tone'
+    if (row.tone === undefined) {
+      clauses.push('attribute_not_exists(#tone)')
+    } else {
+      clauses.push('#tone = :readTone')
+      values[':readTone'] = row.tone
+    }
+  }
+
+  return {
+    ConditionExpression: [condition.ConditionExpression, ...clauses].join(' AND '),
+    ExpressionAttributeNames: { ...condition.ExpressionAttributeNames, ...names },
+    ExpressionAttributeValues: { ...condition.ExpressionAttributeValues, ...values },
+  }
+}
+
+/**
+ * Builds the writes of a reorder. Every row is guarded by the position read with it, so two
+ * concurrent reorders cannot interleave into a mixed order: the later one fails as a conflict.
+ *
+ * @param tableName - Directory table name.
+ * @param directoryId - Workspace directory identifier.
+ * @param rows - Rows in the requested order.
+ * @param positions - Positions to assign, in the same order.
+ * @param conditionFor - Builds the active-row condition of one row.
+ * @returns Transaction items, and whether any row moves.
+ */
+function createDisplayOrderTransactItems<
+  T extends ProjectDirectoryTeamItem | ProjectDirectoryProjectItem,
+>(
+  tableName: string,
+  directoryId: string,
+  rows: readonly T[],
+  positions: readonly number[],
+  conditionFor: (row: T) => DirectoryRowCondition,
+) {
+  let changed = false
+  const items = rows.map((row, index) => {
+    const position = positions[index] ?? resolveDirectoryDisplayOrder(row)
+    const condition = conditionFor(row)
+    const guarded = {
+      TableName: tableName,
+      Key: { directoryId, entryKey: row.entryKey },
+      ConditionExpression: `${condition.ConditionExpression} AND ${
+        row.displayOrder === undefined
+          ? 'attribute_not_exists(#displayOrder)'
+          : '#displayOrder = :readDisplayOrder'
+      }`,
+      ExpressionAttributeNames: { ...condition.ExpressionAttributeNames, '#displayOrder': 'displayOrder' },
+    }
+    const readValues = row.displayOrder === undefined
+      ? condition.ExpressionAttributeValues
+      : { ...condition.ExpressionAttributeValues, ':readDisplayOrder': row.displayOrder }
+
+    if (row.displayOrder === position) {
+      return { ConditionCheck: { ...guarded, ExpressionAttributeValues: readValues } }
+    }
+
+    changed = true
+    return {
+      Update: {
+        ...guarded,
+        UpdateExpression: 'SET #displayOrder = :displayOrder',
+        ExpressionAttributeValues: { ...readValues, ':displayOrder': position },
+      },
+    }
+  })
+
+  return { changed, items }
+}
+
+/**
+ * Reorders rows to match a requested ID list that must name every row exactly once.
+ *
+ * @param items - Rows in their current display order.
+ * @param currentIds - Identifier of each row, in the same order.
+ * @param requestedIds - Validated identifiers in the requested order.
+ * @returns The rows in the requested order.
+ */
+function orderDirectoryItems<T>(
+  items: readonly T[],
+  currentIds: readonly string[],
+  requestedIds: readonly string[],
+): T[] {
+  const itemById = new Map(currentIds.map((id, index) => [id, items[index]]))
+  const ordered = requestedIds.flatMap((id) => {
+    const item = itemById.get(id)
+    return item === undefined ? [] : [item]
+  })
+
+  if (requestedIds.length !== currentIds.length || ordered.length !== currentIds.length) {
+    throw new ProjectDataError(
+      409,
+      'DirectoryOrderConflict',
+      'The list changed. Reload and try again.',
+    )
+  }
+
+  return ordered
+}
+
+/**
+ * Reads the complete ID list of a reorder request.
+ *
+ * @param input - Untrusted request body.
+ * @param field - Field that holds the list.
+ * @returns Distinct identifiers in the requested order.
+ */
+function readDirectoryOrderIds(input: unknown, field: 'teamIds' | 'projectIds') {
+  const value = isRecord(input) ? input[field] : undefined
+
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > DIRECTORY_REORDER_MAX_ITEMS
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidDirectoryOrder',
+      `${field} must list between 1 and ${DIRECTORY_REORDER_MAX_ITEMS} identifiers.`,
+    )
+  }
+
+  const ids = value.filter((id): id is string =>
+    typeof id === 'string' && id.length > 0 && id.length <= DIRECTORY_ORDER_ID_MAX_LENGTH
+  )
+
+  if (ids.length !== value.length || new Set(ids).size !== ids.length) {
+    throw new ProjectDataError(
+      400,
+      'InvalidDirectoryOrder',
+      `${field} must list distinct identifiers.`,
+    )
+  }
+
+  return ids
+}
+
+/**
+ * Reads the Japanese and English names of a rename request.
+ *
+ * @param input - Untrusted request body.
+ * @returns Trimmed names; an empty English name reuses the Japanese one.
+ */
+function readDirectoryDisplayNames(input: unknown) {
+  const names = readLocalizedNames(isRecord(input) ? input : {})
+
+  if (
+    names.nameJa.length > DIRECTORY_DISPLAY_NAME_MAX_LENGTH ||
+    names.nameEn.length > DIRECTORY_DISPLAY_NAME_MAX_LENGTH
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      `Name must be at most ${DIRECTORY_DISPLAY_NAME_MAX_LENGTH} characters.`,
+    )
+  }
+
+  return names
+}
+
+/**
+ * Builds the condition that a row is still the named active Team.
+ *
+ * @param teamId - Team identifier.
+ * @returns Condition expression parts for an Update.
+ */
+function createActiveTeamRowCondition(teamId: string) {
+  const values: Record<string, unknown> = { ':entryType': 'team', ':teamId': teamId }
+  return {
+    ConditionExpression:
+      '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt)',
+    ExpressionAttributeNames: {
+      '#archivedAt': 'archivedAt',
+      '#entryType': 'entryType',
+      '#teamId': 'teamId',
+    },
+    ExpressionAttributeValues: values,
+  }
+}
+
+/**
+ * Builds the condition that a row is still the named active Project of the Team.
+ *
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project identifier.
+ * @returns Condition expression parts for an Update.
+ */
+function createActiveProjectRowCondition(teamId: string, projectId: string) {
+  const values: Record<string, unknown> = {
+    ':entryType': 'project',
+    ':projectId': projectId,
+    ':teamId': teamId,
+  }
+  return {
+    ConditionExpression:
+      '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND ' +
+      'attribute_not_exists(#archivedAt)',
+    ExpressionAttributeNames: {
+      '#archivedAt': 'archivedAt',
+      '#entryType': 'entryType',
+      '#projectId': 'projectId',
+      '#teamId': 'teamId',
+    },
+    ExpressionAttributeValues: values,
+  }
+}
+
 function createTeamEntryKey(teamSortOrder: number, teamId: string) {
   return `${padSortOrder(teamSortOrder)}#000000#TEAM#${teamId}`
 }
@@ -4457,6 +5799,61 @@ function createProjectMemberEntryKey(projectId: string, memberKey: string) {
 
 function padSortOrder(value: number) {
   return String(value).padStart(6, '0')
+}
+
+/**
+ * Tells whether a stored value is a restore receipt.
+ *
+ * @param value - Stored attribute value.
+ * @returns Whether it holds the key hash and request fingerprint.
+ */
+function isDirectoryRestoreReceipt(value: unknown): value is DirectoryRestoreReceipt {
+  return isRecord(value) &&
+    typeof value.idempotencyKeyHash === 'string' &&
+    typeof value.requestFingerprint === 'string'
+}
+
+/**
+ * Tells whether a restore request repeats the restore recorded on a row.
+ *
+ * A retry after a lost response carries the same `Idempotency-Key`, so it finds the receipt the
+ * committed restore stored and is answered as that success instead of a conflict.
+ *
+ * @param row - Team or Project row the request restores.
+ * @param auditContext - Audit context of the request, which carries the key hash.
+ * @returns Whether the request is a replay of the recorded restore.
+ * @throws ProjectDataError 409 when the key was used for a different request.
+ */
+function isRestoreReplay(
+  row: { restoreReceipt?: DirectoryRestoreReceipt },
+  auditContext: MutationAuditContext | undefined,
+) {
+  if (!auditContext || row.restoreReceipt?.idempotencyKeyHash !== auditContext.idempotencyKeyHash) {
+    return false
+  }
+  if (row.restoreReceipt.requestFingerprint !== auditContext.requestFingerprint) {
+    throw new ProjectDataError(
+      409,
+      'IdempotencyKeyConflict',
+      'The Idempotency-Key was already used for a different request.',
+    )
+  }
+  return true
+}
+
+/**
+ * Builds the update parts that record the receipt of a restore on its row.
+ *
+ * @param auditContext - Audit context of the restore request.
+ * @returns The SET clause and its values, or nothing without an audit context.
+ */
+function createRestoreReceiptUpdate(auditContext: MutationAuditContext | undefined) {
+  if (!auditContext) return { set: '', values: {} }
+  const receipt: DirectoryRestoreReceipt = {
+    idempotencyKeyHash: auditContext.idempotencyKeyHash,
+    requestFingerprint: auditContext.requestFingerprint,
+  }
+  return { set: 'SET restoreReceipt = :restoreReceipt ', values: { ':restoreReceipt': receipt } }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

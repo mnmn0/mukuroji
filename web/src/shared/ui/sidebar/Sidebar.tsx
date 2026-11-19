@@ -627,9 +627,9 @@ const defaultLabels: SidebarLabels = {
     error: 'アーカイブできませんでした',
     confirmTitle: 'アーカイブの確認',
     confirmTeamDescription: (name) =>
-      `${name} と配下のプロジェクトをアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。`,
+      `${name} と配下のプロジェクトをアーカイブし、サイドバーから非表示にします。設定の「チームとプロジェクトの管理」から復元できます。`,
     confirmProjectDescription: (name) =>
-      `${name} をアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。`,
+      `${name} をアーカイブし、サイドバーから非表示にします。設定の「チームとプロジェクトの管理」から復元できます。`,
     cancel: 'キャンセル',
     confirm: 'アーカイブ',
   },

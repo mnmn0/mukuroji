@@ -549,6 +549,17 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/projects/:projectId/archive',
     permission: 'projects.manage',
   },
+  // Restoring or renaming a Project is gated like archiving it.
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/restore',
+    permission: 'projects.manage',
+  },
+  {
+    method: 'PATCH',
+    pathPattern: '/api/teams/:teamId/projects/:projectId',
+    permission: 'projects.manage',
+  },
   {
     method: 'GET',
     pathPattern: '/api/teams/:teamId/projects/:projectId/charter',
@@ -572,6 +583,32 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'PATCH',
     pathPattern: '/api/teams/:teamId/archive',
+    permission: 'teams.manage',
+  },
+  // Listing archived Teams, reordering, restoring, and renaming are gated like archiving.
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/directory',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/order',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PATCH',
+    pathPattern: '/api/teams/:teamId/restore',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/project-order',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PATCH',
+    pathPattern: '/api/teams/:teamId',
     permission: 'teams.manage',
   },
   {
@@ -1490,6 +1527,18 @@ function requiresEnterpriseDirectGrant(path: string): boolean {
   return /^\/api\/collections(?:\/|$)/u.test(path)
 }
 
+/**
+ * Returns whether a path under `/api/teams/` addresses every Team rather than one Team.
+ *
+ * @param path - Request path.
+ * @returns Whether the path is a Workspace-wide Team collection route.
+ */
+function isWorkspaceTeamCollectionPath(path: string | undefined): boolean {
+  return path === '/api/teams/projects' ||
+    path === '/api/teams/directory' ||
+    path === '/api/teams/order'
+}
+
 /** Returns whether the notification list needs Enterprise content scopes for visibility checks. */
 function shouldEvaluateEnterpriseNotificationScopes(context?: Context): boolean {
   return context?.req.method === 'GET' && (
@@ -1690,7 +1739,7 @@ async function resolveEnterpriseAuthorizationResource(
       parentTeamId,
     }
   }
-  if (path === '/api/teams/projects') {
+  if (isWorkspaceTeamCollectionPath(path)) {
     return { workspaceId, kind: 'workspace' as const }
   }
   const pathTeamId = path?.match(/\/teams\/([^/]+)/u)?.[1]
