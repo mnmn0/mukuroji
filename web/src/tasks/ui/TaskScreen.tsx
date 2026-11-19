@@ -404,6 +404,8 @@ export type TaskScreenProps = {
   teams: ProjectDirectoryTeam[]
   /** Display name of the current Project. */
   projectName?: string
+  /** Opens the Project overview, when the Project's Team is known. */
+  onOpenProjectOverview?: () => void
   /** Display name of the current Project's selected Team. */
   teamName?: string
   /** Team through which the current Project was selected. */
@@ -612,6 +614,7 @@ export function TaskScreen({
   userInitial,
   currentUserProjectKey,
   teams,
+  onOpenProjectOverview,
   projectName,
   teamName,
   activeProjectTeamId,
@@ -3468,6 +3471,7 @@ export function TaskScreen({
             }
           } : undefined}
           onMobileSidebarOpen={openMobileSidebar}
+          onOpenProjectOverview={onOpenProjectOverview}
           onProjectQuickAccessToggle={onProjectQuickAccessToggle}
           onTabChange={(nextActiveTab) => {
             if (isAiOperationPendingRef.current) return false

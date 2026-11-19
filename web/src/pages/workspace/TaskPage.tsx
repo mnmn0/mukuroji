@@ -100,6 +100,7 @@ import {
 import { readIssueSourceKind } from '../../issues/model/contextSources'
 import {
   createProjectIssuesPath,
+  createProjectOverviewPath,
 } from '../../shared/routing/paths'
 import { useReportWorkspaceSidebarRouteState } from '../../shared/ui/sidebar'
 import {
@@ -2121,6 +2122,9 @@ export function TaskPage() {
       projectFiles={projectFiles}
       projectMembers={projectMembers}
       projectMembersErrorMessage={projectPermissionsErrorMessage}
+      onOpenProjectOverview={interactionTeamId
+        ? () => navigate(createProjectOverviewPath(projectId, interactionTeamId))
+        : undefined}
       projectName={projectName}
       projectUserQuery={projectUserQuery}
       projectUsers={projectUsers}
