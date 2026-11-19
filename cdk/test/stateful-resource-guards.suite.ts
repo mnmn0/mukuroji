@@ -20,7 +20,9 @@ const MAX_LAMBDA_LOG_RETENTION_DAYS = 365;
 
 /** CloudFormation resource shape used by the guard assertions. */
 interface SynthesizedResource {
+  /** CloudFormation deletion policy, such as `Retain`. */
   readonly DeletionPolicy?: string;
+  /** Resource properties as synthesized. */
   readonly Properties?: Record<string, unknown>;
 }
 
