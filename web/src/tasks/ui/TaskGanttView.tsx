@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
+import { flushSync } from 'react-dom'
 import type {
   PlanningSnapshot,
   ResolvedWorkItemConfiguration,
@@ -436,10 +437,14 @@ export function TaskGanttView({
   const todayX = todaySpan ? (todaySpan.left + todaySpan.right) / 2 : undefined
   // Thousands of rows are rendered in steps; connectors are laid out for rendered rows only.
   const {
-    renderedItems: renderedRows,
-    hiddenCount: hiddenRowCount,
+    renderedItems: incrementalRows,
+    hiddenCount: incrementalHiddenRowCount,
     showMore: showMoreRows,
   } = useIncrementalRender(displayRows, TASK_TABLE_RENDER_STEP)
+  // Printing renders every row, because rows left out of the DOM cannot reach the paper.
+  const [printsAllRows, setPrintsAllRows] = useState(false)
+  const renderedRows = printsAllRows ? displayRows : incrementalRows
+  const hiddenRowCount = printsAllRows ? 0 : incrementalHiddenRowCount
   const renderedRowTops = useMemo(
     () => createGanttRowTops(renderedRows, rowLayout.rowHeight),
     [renderedRows, rowLayout.rowHeight],
@@ -505,13 +510,14 @@ export function TaskGanttView({
   }, [todayX])
 
   /**
-   * Prints only the Gantt chart on landscape paper, scaled down to the paper width.
+   * Prints only the Gantt chart, with every row, on landscape paper scaled down to the paper width.
    *
    * @param paper - Paper size to print on.
    */
   const printChart = (paper: GanttPrintPaper) => {
     const root = printRootRef.current
     if (!root) return
+    flushSync(() => setPrintsAllRows(true))
     const contentWidth = Math.max(
       root.scrollWidth,
       scrollContainerRef.current?.scrollWidth ?? 0,
@@ -523,6 +529,7 @@ export function TaskGanttView({
       delete documentElement.dataset.printTarget
       delete root.dataset.printPaper
       root.style.removeProperty('zoom')
+      setPrintsAllRows(false)
     }
     documentElement.dataset.printTarget = 'task-gantt'
     root.dataset.printPaper = paper

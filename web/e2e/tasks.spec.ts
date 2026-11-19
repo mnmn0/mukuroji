@@ -4870,6 +4870,39 @@ test.describe('authenticated task page', () => {
     await page.emulateMedia({ media: 'screen' })
   })
 
+  test('Issue #379: Gantt の印刷は段階表示で隠れている行も含める', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    const fixture = referoTaskFixtures[0]!
+    const tasks = Array.from({ length: 210 }, (_, index) => ({
+      ...fixture,
+      id: `print-${index}`,
+      title: `Print task ${index}`,
+    }))
+    await mockAuthenticatedTaskPage(page, tasks)
+    await page.goto('/projects/refero/issues')
+    await expect(page.getByTestId('task-row-print-0')).toBeVisible()
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    await expect(page.getByRole('tab', { name: '期限順', exact: true })).toHaveAttribute('aria-selected', 'true')
+
+    const chartRows = page.getByTestId('task-gantt-scroll').locator('article[role="row"]')
+    await expect(page.getByTestId('task-gantt-show-more')).toBeVisible()
+    await expect(chartRows).toHaveCount(200)
+
+    await page.evaluate(() => {
+      window.print = () => {
+        document.body.dataset.e2ePrintedRows = String(
+          document.querySelectorAll('[data-testid="task-gantt-scroll"] article[role="row"]').length,
+        )
+      }
+    })
+    await page.getByTestId('task-gantt-display').getByRole('button', { name: 'A4 横で印刷', exact: true }).click()
+    await expect(page.locator('body')).toHaveAttribute('data-e2e-printed-rows', '210')
+
+    await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
+    await expect(chartRows).toHaveCount(200)
+    await expect(page.getByTestId('task-gantt-show-more')).toBeVisible()
+  })
+
   test('Issue #463: 別 Project へ移ると、その Project の saved views が決まるまで一覧を読まない', async ({ page }) => {
     let releaseRoadmapViews: (() => void) | undefined
     const roadmapViewsGate = new Promise<void>((resolve) => {
