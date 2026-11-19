@@ -1,13 +1,15 @@
 import {
+  createWorkItemHierarchyRankBetween,
   DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+  WORK_ITEM_HIERARCHY_MAX_ITEMS,
   type AutomationProjectTemplateWorkItem,
   type AutomationTemplateApplication,
   type DateRangeWorkItemSchedule,
-  type WorkItemRelation,
 } from '@mukuroji/contracts'
 import type { Context } from 'hono'
 import {
   calculateWorkItemScheduleEndDate,
+  isTeamIssueNotFoundError,
   type CreateTeamIssueRequestBody,
 } from '../../modules/work-items'
 import {
@@ -153,11 +155,13 @@ export async function preflightProjectTemplateWorkItems(
 }
 
 /**
- * Creates a template's Work Items in the new Project and links each child to its parent.
+ * Creates a template's Work Items in the new Project, links each child to its parent, and stores
+ * sibling ranks in outline order.
  *
- * Each Work Item uses an ID derived from the application and its expansion index, and a child
- * that already has a parent is not linked again, so a retried application finishes the remaining
- * work instead of creating duplicates.
+ * Each Work Item uses an ID derived from the application and its expansion index. A Work Item
+ * that already exists under that ID is reused as is, even if someone edited it in the meantime,
+ * and parent links and ranks are set declaratively, so a retried application finishes the
+ * remaining work instead of creating duplicates or failing on an edited item.
  *
  * @param c - Hono request context used for audit metadata.
  * @param principal - Workspace administrator applying the template.
@@ -184,6 +188,11 @@ export async function createProjectTemplateWorkItems(
   const createdIds: string[] = []
   for (const workItem of workItems) {
     const idempotencyResourceId = `${application.id}_wbs_${workItem.index}`
+    const existing = await readTemplateWorkItem(directoryId, teamId, idempotencyResourceId)
+    if (existing) {
+      createdIds.push(existing.id)
+      continue
+    }
     const body = normalizeTeamIssueInput(
       {
         ...createTemplateWorkItemBody(principal, workItem),
@@ -215,59 +224,138 @@ export async function createProjectTemplateWorkItems(
     )
   }
 
+  const ranks = await createTemplateWorkItemRanks(directoryId, teamId, workItems, createdIds)
   const graph = await workItemDependencies.workItemConfigurations.listRelationGraph(directoryId, teamId)
-  const linkedChildIds = new Set(graph.relations
-    .filter((relation: WorkItemRelation) => relation.type === 'parent')
-    .map((relation) => relation.sourceWorkItemId))
+  const storedParentIds = new Map(graph.relations
+    .filter((relation) => relation.type === 'parent')
+    .map((relation) => [relation.sourceWorkItemId, relation.targetWorkItemId]))
   let graphRevision = graph.graphRevision
   for (const workItem of workItems) {
-    if (workItem.parentIndex === undefined) continue
     const childId = createdIds[workItem.index]
-    const parentId = createdIds[workItem.parentIndex]
-    if (!childId || !parentId || linkedChildIds.has(childId)) continue
-    graphRevision = await linkTemplateWorkItemToParent(
+    const parentId = workItem.parentIndex === undefined ? undefined : createdIds[workItem.parentIndex]
+    const hierarchyRank = ranks[workItem.index]
+    if (!childId || (workItem.parentIndex !== undefined && !parentId)) continue
+    // A top-level item without a rank keeps its creation order; there is nothing to link.
+    if (!parentId && hierarchyRank === undefined) continue
+    // Someone moved this item under another parent after an earlier attempt; keep their change.
+    const storedParentId = storedParentIds.get(childId)
+    if (storedParentId !== undefined && storedParentId !== parentId) continue
+    graphRevision = await placeTemplateWorkItem(
       directoryId,
       teamId,
       childId,
       parentId,
+      hierarchyRank,
       graphRevision,
       configuration,
     )
-    linkedChildIds.add(childId)
   }
   return createdIds
 }
 
 /**
- * Links a template child Work Item to its parent.
- *
- * The Team's relation graph revision moves with every relation change in the Team. A concurrent
- * change is not retried here; it is reported as retryable so the application returns to pending
- * and the client's retry with the same Idempotency-Key resumes from the remaining links.
+ * Reads a Work Item created by an earlier attempt of the same application.
  *
  * @param directoryId - Workspace directory identifier.
- * @param teamId - Team that owns both Work Items.
- * @param childId - Child Work Item ID.
- * @param parentId - Parent Work Item ID.
- * @param graphRevision - Team relation graph revision observed by this application.
- * @param configuration - Team configuration that the child type is checked against.
- * @returns The graph revision after the link.
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Deterministic template Work Item ID.
+ * @returns The Work Item, or undefined when it does not exist yet.
  */
-async function linkTemplateWorkItemToParent(
-  directoryId: string,
-  teamId: string,
-  childId: string,
-  parentId: string,
-  graphRevision: number,
-  configuration: Awaited<ReturnType<typeof workItemDependencies.workItemConfigurations.getTeamConfiguration>>,
-): Promise<number> {
-  const [child, parent] = await Promise.all([childId, parentId].map((workItemId) =>
-    workItemDependencies.teamIssues.getTeamIssueDetail(directoryId, teamId, workItemId, {
+async function readTemplateWorkItem(directoryId: string, teamId: string, workItemId: string) {
+  try {
+    const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(directoryId, teamId, workItemId, {
       consistentIssueRead: true,
       includeEvents: false,
     })
-  ))
-  if (!child || !parent) {
+    return detail.issue
+  } catch (error) {
+    if (isTeamIssueNotFoundError(error)) return undefined
+    throw error
+  }
+}
+
+/**
+ * Chooses sibling ranks that keep the template's outline order.
+ *
+ * Children only have template siblings, so their ranks start fresh under each parent. Top-level
+ * items share the Team's top level, so they start at the lowest current rank among them and keep
+ * their place relative to other Work Items. Creation order alone cannot be trusted because
+ * consecutive creates can share a sort order.
+ *
+ * @param directoryId - Workspace directory identifier.
+ * @param teamId - Team that owns the Work Items.
+ * @param workItems - Expanded template Work Items.
+ * @param createdIds - Work Item IDs in expansion order.
+ * @returns Rank per expansion index; top-level ranks are undefined when their current ranks cannot
+ *   all be read, for example in a Team larger than the hierarchy read limit.
+ */
+async function createTemplateWorkItemRanks(
+  directoryId: string,
+  teamId: string,
+  workItems: readonly ExpandedProjectTemplateWorkItem[],
+  createdIds: readonly string[],
+): Promise<Array<string | undefined>> {
+  const readHierarchyEntries = workItemDependencies.teamIssues.getTeamHierarchyEntries
+  const entries = readHierarchyEntries
+    ? await readHierarchyEntries.call(
+        workItemDependencies.teamIssues,
+        directoryId,
+        teamId,
+        WORK_ITEM_HIERARCHY_MAX_ITEMS,
+      )
+    : []
+  const currentRanks = new Map(entries.map((entry) => [entry.issue.id, entry.hierarchyRank]))
+  const topLevelRanks = workItems
+    .filter((workItem) => workItem.parentIndex === undefined)
+    .map((workItem) => currentRanks.get(createdIds[workItem.index] ?? ''))
+  const topLevelStart = topLevelRanks.every((rank) => rank !== undefined)
+    ? [...topLevelRanks].sort()[0]
+    : undefined
+  const previousRankByParent = new Map<number, string>()
+  return workItems.map((workItem) => {
+    const parentKey = workItem.parentIndex ?? -1
+    const previous = previousRankByParent.get(parentKey)
+    const rank = previous !== undefined
+      ? createWorkItemHierarchyRankBetween(previous)
+      : workItem.parentIndex === undefined
+        ? topLevelStart
+        : createWorkItemHierarchyRankBetween()
+    if (rank !== undefined) previousRankByParent.set(parentKey, rank)
+    return rank
+  })
+}
+
+/**
+ * Sets a template Work Item's parent and sibling rank.
+ *
+ * Setting the parent is declarative, so a link made by an earlier attempt succeeds again. The
+ * Team's relation graph revision moves with every relation change in the Team. A concurrent
+ * change is not retried here; it is reported as retryable so the application returns to pending
+ * and the client's retry with the same Idempotency-Key resumes.
+ *
+ * @param directoryId - Workspace directory identifier.
+ * @param teamId - Team that owns both Work Items.
+ * @param childId - Work Item to place.
+ * @param parentId - Parent Work Item ID, or undefined for a top-level item.
+ * @param hierarchyRank - Sibling rank to store, or undefined to keep creation order.
+ * @param graphRevision - Team relation graph revision observed by this application.
+ * @param configuration - Team configuration that the child type is checked against.
+ * @returns The graph revision after the change.
+ */
+async function placeTemplateWorkItem(
+  directoryId: string,
+  teamId: string,
+  childId: string,
+  parentId: string | undefined,
+  hierarchyRank: string | undefined,
+  graphRevision: number,
+  configuration: Awaited<ReturnType<typeof workItemDependencies.workItemConfigurations.getTeamConfiguration>>,
+): Promise<number> {
+  const [child, parent] = await Promise.all([
+    readTemplateWorkItem(directoryId, teamId, childId),
+    parentId ? readTemplateWorkItem(directoryId, teamId, parentId) : undefined,
+  ])
+  if (!child || (parentId && !parent)) {
     throw new AutomationError(
       'unavailable',
       'AutomationTemplateWorkItemUnavailable',
@@ -275,24 +363,23 @@ async function linkTemplateWorkItemToParent(
       true,
     )
   }
-  assertWorkItemChildTypeAllowed(
-    configuration.configuration,
-    parent.issue.workItemTypeId,
-    child.issue.workItemTypeId,
-  )
+  if (parent) {
+    assertWorkItemChildTypeAllowed(configuration.configuration, parent.workItemTypeId, child.workItemTypeId)
+  }
+  const toEndpoint = (issue: typeof child) => ({
+    workItemId: issue.id,
+    expectedRevision: issue.revision,
+    ...(issue.assignedProjectId ? { assignedProjectId: issue.assignedProjectId } : {}),
+  })
   try {
-    const response = await workItemDependencies.workItemConfigurations.createRelation(
+    const response = await workItemDependencies.workItemConfigurations.replaceParent(
       directoryId,
       teamId,
       {
-        sourceWorkItemId: childId,
-        targetWorkItemId: parentId,
-        type: 'parent',
+        child: toEndpoint(child),
+        ...(parent ? { nextParent: toEndpoint(parent) } : {}),
         expectedGraphRevision: graphRevision,
-        sourceExpectedRevision: child.issue.revision,
-        targetExpectedRevision: parent.issue.revision,
-        sourceAssignedProjectId: child.issue.assignedProjectId,
-        targetAssignedProjectId: parent.issue.assignedProjectId,
+        ...(hierarchyRank === undefined ? {} : { hierarchyRank }),
       },
       createWorkItemConfigurationGuardConditionChecks(
         getWorkItemConfigurationTableName(),

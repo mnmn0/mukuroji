@@ -101,11 +101,11 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 
 1. 全 item を Team の現在の Work Item configuration で検証する（既定 Type、必須 custom field など）。ここで失敗すれば Project も作らない。
 2. Project を作る。このときは application 成功 receipt を Project transaction に含めない。
-3. 親から順に Work Item を作る。担当者は適用した管理者、優先度は中で、ID は `<application ID>_wbs_<展開順>` に固定する。
-4. 子を親へ `parent` relation でつなぐ。既に親を持つ子はつなぎ直さない。
+3. 親から順に Work Item を作る。担当者は適用した管理者、優先度は中で、ID は `<application ID>_wbs_<展開順>` に固定する。その ID の Work Item が既にあれば、前回の試行の後で編集されていてもそのまま使う。
+4. 展開順に、子を親へ `parent` relation でつなぎ、兄弟の並び（hierarchy rank）を outline の順に保存する。連続して作った Work Item は sort order が同じになりうるため、作成順には頼らない。最上位の item は、それらの現在の rank のうち最小の位置から並べる。前回の試行の後で別の親へ移された item は動かさない。
 5. 最後に application receipt を成功（`result.workItemCount` 付き）で保存する。
 
-途中の一時的な失敗と、子をつなぐ間に Team の relation graph が別の変更で進んだ場合（`AutomationTemplateWorkItemLinkConflict`、409。server 内では自動 retry しない）は receipt を pending に戻し、同じ `Idempotency-Key` の再送が Project の replay、固定 ID の Work Item の replay、既存 relation の skip で残りだけを進める。確定的な 4xx で失敗した場合は、それまでに作った Project と Work Item が残る（全体を 1 transaction にはしていない）。
+途中の一時的な失敗と、子をつなぐ間に Team の relation graph が別の変更で進んだ場合（`AutomationTemplateWorkItemLinkConflict`、409。server 内では自動 retry しない）は receipt を pending に戻し、同じ `Idempotency-Key` の再送が Project の replay、既存 Work Item の再利用、宣言的な親と rank の設定で残りだけを進める。確定的な 4xx で失敗した場合は、それまでに作った Project と Work Item が残る（全体を 1 transaction にはしていない）。
 
 ## Recurring work
 

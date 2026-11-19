@@ -72,6 +72,7 @@ import type {
 import {
   AUTOMATION_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
+  createWorkItemHierarchyRankBetween,
   DEFAULT_WORK_ITEM_TYPE,
 } from '@mukuroji/contracts'
 import {
@@ -2632,8 +2633,13 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
   const completionMutationCounts: number[] = []
   const createdIssues = new Map<string, ReturnType<typeof createBulkRecoveryIssue>>()
   const createdInputs: Array<Record<string, unknown>> = []
-  const relationInputs: Array<Record<string, unknown>> = []
-  let relationAttempts = 0
+  const placementInputs: Array<Record<string, unknown>> = []
+  let placementAttempts = 0
+  const currentRanks = new Map([
+    ['application_project_wbs_wbs_0', 'm'],
+    ['application_project_wbs_wbs_1', 'q'],
+    ['application_project_wbs_wbs_2', 'k'],
+  ])
   configureFakeProjectClients(true, {
     teamProjects: [{ id: application.id, name: '標準プロジェクト', tone: 'green' }],
     async projectCreateHook(input, completionTransactItems) {
@@ -2647,7 +2653,7 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
         createdInputs.push({ ...input })
         const id = String(input.idempotencyResourceId)
         const existing = createdIssues.get(id)
-        if (existing) return { issue: existing }
+        if (existing) throw new Error(`A retry must reuse ${id} instead of creating it again.`)
         const issue = {
           ...createBulkRecoveryIssue(),
           id,
@@ -2660,25 +2666,26 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
       },
       async getTeamIssueDetail(_directoryId, _teamId, issueId) {
         const issue = createdIssues.get(issueId)
-        if (!issue) throw new Error(`Unexpected Work Item ${issueId}`)
+        if (!issue) throw Object.assign(new Error('Work Item not found.'), { status: 404, code: 'TeamIssueNotFound' })
         return { issue, activity: [], comments: [] }
+      },
+      async getTeamHierarchyEntries() {
+        return [...createdIssues.values()].map((issue) => ({
+          issue,
+          hierarchyRank: currentRanks.get(issue.id) ?? 'z',
+        }))
       },
     }),
     workItemConfigurations: createFakeWorkItemConfigurationClient({
-      async createRelation(_workspaceId, _teamId, input) {
-        relationAttempts += 1
-        if (relationAttempts === 1) {
+      async replaceParent(_workspaceId, _teamId, input) {
+        placementAttempts += 1
+        if (placementAttempts === 1) {
           throw new WorkItemConfigurationError(409, 'WorkItemRelationGraphConflict', 'Work Item relations changed.')
         }
-        relationInputs.push({ ...input })
+        placementInputs.push(structuredClone(input))
         return {
-          relation: { ...input, createdAt: now },
-          reciprocalRelation: {
-            sourceWorkItemId: input.targetWorkItemId,
-            targetWorkItemId: input.sourceWorkItemId,
-            type: 'child',
-            createdAt: now,
-          },
+          previousParentWorkItemId: null,
+          parentWorkItemId: input.nextParent?.workItemId ?? null,
           graphRevision: input.expectedGraphRevision + 1,
         }
       },
@@ -2710,7 +2717,7 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
         expect(expectedRevision).toBe(application.revision)
         if (candidate.status === 'succeeded') {
           expect(createdIssues.size).toBe(3)
-          expect(relationInputs).toHaveLength(1)
+          expect(placementInputs).toHaveLength(3)
         }
         application = structuredClone(candidate)
       },
@@ -2735,6 +2742,9 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
   expect(await conflicted.json()).toMatchObject({ code: 'AutomationTemplateWorkItemLinkConflict' })
   expect(application.status).toBe('pending')
   expect(createdIssues.size).toBe(3)
+  const edited = createdIssues.get('application_project_wbs_wbs_0')
+  if (!edited) throw new Error('The first attempt must create the top-level Work Item.')
+  createdIssues.set(edited.id, { ...edited, title: '要件定義（編集済み）', revision: edited.revision + 1 })
 
   const response = await request()
   expect(response.status).toBe(200)
@@ -2771,13 +2781,28 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
       schedule: { startDate: '2026-12-14', endDate: '2026-12-16', durationDays: 3 },
     },
   ])
-  expect(relationInputs).toEqual([
-    expect.objectContaining({
-      sourceWorkItemId: 'application_project_wbs_wbs_1',
-      targetWorkItemId: 'application_project_wbs_wbs_0',
-      type: 'parent',
+  expect(createdInputs).toHaveLength(3)
+  const topLevelStart = 'k'
+  expect(placementInputs).toEqual([
+    {
+      child: expect.objectContaining({
+        workItemId: 'application_project_wbs_wbs_0',
+        expectedRevision: edited.revision + 1,
+      }),
       expectedGraphRevision: 0,
-    }),
+      hierarchyRank: topLevelStart,
+    },
+    {
+      child: expect.objectContaining({ workItemId: 'application_project_wbs_wbs_1' }),
+      nextParent: expect.objectContaining({ workItemId: 'application_project_wbs_wbs_0' }),
+      expectedGraphRevision: 1,
+      hierarchyRank: createWorkItemHierarchyRankBetween(),
+    },
+    {
+      child: expect.objectContaining({ workItemId: 'application_project_wbs_wbs_2' }),
+      expectedGraphRevision: 2,
+      hierarchyRank: createWorkItemHierarchyRankBetween(topLevelStart),
+    },
   ])
 })
 
