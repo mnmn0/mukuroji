@@ -865,11 +865,13 @@ bun run demo-data:remove --apply  # 1 つの transaction ですべて削除す�
 - demo row の key に別の種類の row がある
 
 その場合は、画面から demo Team・Project を archive するか、表示された row を先に整理してから再実行します。
-削除は条件付きの 1 つの transaction なので、確認後に row が変わると全体が失敗し、何も削除されません。
+削除は条件付きの 1 つの transaction なので、確認した demo row が確認後に変わると全体が失敗し、何も削除されません。
+ただし確認後に demo Team・Project へ新しく追加された row は検出できないので、利用者の操作がない時間に実行します。
 再実行しても、取り除き済みの row は「already gone」として数えるだけです。
 
 この script が見るのは上の 3 table だけです。demo の Work Item に付いたコメント・添付・時間記録や、
-検索 index に backfill 済みの demo の文書は削除しません。demo data を使い込んだ環境では archive を使います。
+検索 index に backfill 済みの demo の文書は削除しません。demo Team 以外の Work Item の担当者が demo member でも
+検出しません。demo data を使い込んだ環境では archive を使います。
 local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566` を付けて同じように実行できます。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
