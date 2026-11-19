@@ -215,6 +215,12 @@ type ProjectDirectoryTeamItem = {
    */
   creatorUserId?: string
   /**
+   * Counts archives and restores. Added to the other revisions, it fences search projections so
+   * a delayed projection cannot recreate the document of an archived row. Rows without it were
+   * never archived.
+   */
+  lifecycleRevision?: number
+  /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
   archivedAt?: string
@@ -287,6 +293,12 @@ type ProjectDirectoryProjectItem = {
    * creator. Rows created before it was recorded lack it.
    */
   creatorUserId?: string
+  /**
+   * Counts archives and restores. Added to the other revisions, it fences search projections so
+   * a delayed projection cannot recreate the document of an archived row. Rows without it were
+   * never archived.
+   */
+  lifecycleRevision?: number
   /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
@@ -498,30 +510,6 @@ export type CreateTeamResponse = {
   team: ProjectDirectoryTeamResponse
 }
 
-/** Result of a Team rename. */
-export type RenamedDirectoryTeam = {
-  /** Response body returned to the caller. */
-  response: RenameDirectoryTeamResponse
-  /** Stored rename count, used to fence the Team's search projection. */
-  nameRevision: number
-  /** User who created the Team, when the row records it. */
-  creatorUserId?: string
-}
-
-/** Result of a Team restore. */
-export type RestoredDirectoryTeam = {
-  /** Response body returned to the caller. */
-  response: RestoreDirectoryTeamResponse
-  /** Stored Japanese display name. */
-  nameJa: string
-  /** Stored English display name. */
-  nameEn: string
-  /** Stored rename count, used to fence the Team's search projection. */
-  nameRevision: number
-  /** User who created the Team, when the row records it. */
-  creatorUserId?: string
-}
-
 /**
  * Most authorization condition checks a directory change carries: the caller's membership and the
  * Enterprise control row.
@@ -533,8 +521,10 @@ export type DirectoryAuthorizationConditionChecks = NonNullable<
   TransactWriteCommandInput['TransactItems']
 >
 
-/** What the search document of an active Project is built from, read in one snapshot. */
+/** What the search document of a Project is built from, read in one snapshot. */
 export type ProjectSearchSource = {
+  /** Whether the Project row is archived, so its search document must be absent. */
+  archived: boolean
   /** Charter state of the Project. */
   state: ProjectCharterState
   /** Project directory row with the Japanese name. */
@@ -544,22 +534,27 @@ export type ProjectSearchSource = {
   /** User who created the Project, when the row records it. */
   creatorUserId?: string
   /**
-   * Charter revision plus rename count. Both only grow, so a later snapshot has a larger value
-   * whenever either changed.
+   * Charter revision plus rename count plus archive and restore count. All only grow, so a later
+   * snapshot has a larger value whenever any of them changed.
    */
   sourceRevision: number
 }
 
-/** What the search document of an active Team is built from, read in one snapshot. */
+/** What the search document of a Team is built from, read in one snapshot. */
 export type TeamSearchSource = {
+  /** Whether the Team row is archived, so its search document must be absent. */
+  archived: boolean
   /** Japanese display name. */
   nameJa: string
   /** English display name. */
   nameEn: string
-  /** Rename count of the Team; it only grows. */
-  nameRevision: number
   /** User who created the Team, when the row records it. */
   creatorUserId?: string
+  /**
+   * Rename count plus archive and restore count. Both only grow, so a later snapshot has a larger
+   * value whenever either changed.
+   */
+  sourceRevision: number
 }
 
 /**
@@ -952,7 +947,7 @@ export type ProjectDirectoryClient = {
    * @param input - Untrusted request body with the new names.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
-   * @returns The response body and the Team's rename count.
+   * @returns The Team identifier and its stored names.
    */
   renameTeam(
     directoryId: string,
@@ -960,7 +955,7 @@ export type ProjectDirectoryClient = {
     input: unknown,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
-  ): Promise<RenamedDirectoryTeam>
+  ): Promise<RenameDirectoryTeamResponse>
   /**
    * Renames an active Project or changes its color without changing its ID.
    *
@@ -987,14 +982,14 @@ export type ProjectDirectoryClient = {
    * @param teamId - Archived Team to restore.
    * @param auditContext - Audit context of the mutation.
    * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
-   * @returns The response body and the Team's names and rename count.
+   * @returns The Team identifier.
    */
   restoreTeam(
     directoryId: string,
     teamId: string,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
-  ): Promise<RestoredDirectoryTeam>
+  ): Promise<RestoreDirectoryTeamResponse>
   /**
    * Restores an archived Project of an active Team.
    *
@@ -1045,13 +1040,12 @@ export type ProjectDirectoryClient = {
     authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
   ): Promise<ReorderDirectoryProjectsInput>
   /**
-   * Reads, in one strongly consistent read, what the search document of an active Project is
-   * built from.
+   * Reads, in one strongly consistent read, what the search document of a Project is built from.
    *
    * @param directoryId - Owning Workspace directory identifier.
    * @param teamId - Team that owns the Project.
    * @param projectId - Project identifier.
-   * @returns The source, or undefined when the Project or its Team is archived or missing.
+   * @returns The source, or undefined when the Project is missing or its Team is archived.
    */
   getProjectSearchSource(
     directoryId: string,
@@ -1059,12 +1053,11 @@ export type ProjectDirectoryClient = {
     projectId: string,
   ): Promise<ProjectSearchSource | undefined>
   /**
-   * Reads, in one strongly consistent read, what the search document of an active Team is
-   * built from.
+   * Reads, in one strongly consistent read, what the search document of a Team is built from.
    *
    * @param directoryId - Owning Workspace directory identifier.
    * @param teamId - Team identifier.
-   * @returns The source, or undefined when the Team is archived or missing.
+   * @returns The source, or undefined when the Team is missing.
    */
   getTeamSearchSource(directoryId: string, teamId: string): Promise<TeamSearchSource | undefined>
   /**
@@ -2510,10 +2503,10 @@ export class DynamoDbProjectDirectoryClient {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: team.entryKey },
-          UpdateExpression: 'SET archivedAt = :archivedAt',
+          UpdateExpression: 'SET archivedAt = :archivedAt ADD lifecycleRevision :one',
           ConditionExpression:
             'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-          ExpressionAttributeValues: { ':archivedAt': archivedAt },
+          ExpressionAttributeValues: { ':archivedAt': archivedAt, ':one': 1 },
         },
       }
       const auditItems = createOptionalAuditTransactItems(this.auditTableName, auditContext, {
@@ -2649,10 +2642,10 @@ export class DynamoDbProjectDirectoryClient {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: project.entryKey },
-          UpdateExpression: 'SET archivedAt = :archivedAt',
+          UpdateExpression: 'SET archivedAt = :archivedAt ADD lifecycleRevision :one',
           ConditionExpression:
             'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
-          ExpressionAttributeValues: { ':archivedAt': archivedAt },
+          ExpressionAttributeValues: { ':archivedAt': archivedAt, ':one': 1 },
         },
       }
       const auditItems = createOptionalAuditTransactItems(this.auditTableName, auditContext, {
@@ -2817,7 +2810,7 @@ export class DynamoDbProjectDirectoryClient {
     input: unknown,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
-  ): Promise<RenamedDirectoryTeam> {
+  ): Promise<RenameDirectoryTeamResponse> {
     await this.ensureLocalAuditTable()
     const names = readDirectoryDisplayNames(input)
     const items = await this.readValidDirectoryItems(directoryId, true)
@@ -2831,11 +2824,7 @@ export class DynamoDbProjectDirectoryClient {
 
     const readNameRevision = team.nameRevision ?? 0
     if (team.nameJa === names.nameJa && team.nameEn === names.nameEn) {
-      return {
-        response: { teamId, nameJa: names.nameJa, nameEn: names.nameEn },
-        nameRevision: readNameRevision,
-        ...(team.creatorUserId === undefined ? {} : { creatorUserId: team.creatorUserId }),
-      }
+      return { teamId, nameJa: names.nameJa, nameEn: names.nameEn }
     }
 
     // The names and rename count read above must still be stored, so a stale rename cannot
@@ -2868,11 +2857,7 @@ export class DynamoDbProjectDirectoryClient {
       }),
     ])
 
-    return {
-      response: { teamId, nameJa: names.nameJa, nameEn: names.nameEn },
-      nameRevision,
-      ...(team.creatorUserId === undefined ? {} : { creatorUserId: team.creatorUserId }),
-    }
+    return { teamId, nameJa: names.nameJa, nameEn: names.nameEn }
   }
 
   /**
@@ -2977,7 +2962,7 @@ export class DynamoDbProjectDirectoryClient {
     teamId: string,
     auditContext?: MutationAuditContext,
     authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
-  ): Promise<RestoredDirectoryTeam> {
+  ): Promise<RestoreDirectoryTeamResponse> {
     await this.ensureLocalAuditTable()
     const items = await this.readValidDirectoryItems(directoryId, true)
     const team = items.find((item): item is ProjectDirectoryTeamItem =>
@@ -3012,7 +2997,7 @@ export class DynamoDbProjectDirectoryClient {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: team.entryKey },
-          UpdateExpression: 'REMOVE archivedAt',
+          UpdateExpression: 'REMOVE archivedAt ADD lifecycleRevision :one',
           // Bound to the archive read, so a delayed restore cannot undo a newer archive.
           ConditionExpression:
             '#entryType = :entryType AND #teamId = :teamId AND #archivedAt = :readArchivedAt',
@@ -3025,6 +3010,7 @@ export class DynamoDbProjectDirectoryClient {
             ':entryType': 'team',
             ':teamId': teamId,
             ':readArchivedAt': team.archivedAt,
+            ':one': 1,
           },
         },
       },
@@ -3040,13 +3026,7 @@ export class DynamoDbProjectDirectoryClient {
       ...planningItems,
     ])
 
-    return {
-      response: { teamId },
-      nameJa: team.nameJa,
-      nameEn: team.nameEn,
-      nameRevision: team.nameRevision ?? 0,
-      ...(team.creatorUserId === undefined ? {} : { creatorUserId: team.creatorUserId }),
-    }
+    return { teamId }
   }
 
   /**
@@ -3113,7 +3093,7 @@ export class DynamoDbProjectDirectoryClient {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: project.entryKey },
-          UpdateExpression: 'REMOVE archivedAt',
+          UpdateExpression: 'REMOVE archivedAt ADD lifecycleRevision :one',
           // Bound to the archive read, so a delayed restore cannot undo a newer archive.
           ConditionExpression:
             '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND ' +
@@ -3129,6 +3109,7 @@ export class DynamoDbProjectDirectoryClient {
             ':projectId': projectId,
             ':teamId': teamId,
             ':readArchivedAt': project.archivedAt,
+            ':one': 1,
           },
         },
       },
@@ -3273,13 +3254,12 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
-   * Reads, in one strongly consistent read, what the search document of an active Project is
-   * built from.
+   * Reads, in one strongly consistent read, what the search document of a Project is built from.
    *
    * @param directoryId - Owning Workspace directory identifier.
    * @param teamId - Team that owns the Project.
    * @param projectId - Project identifier.
-   * @returns The source, or undefined when the Project or its Team is archived or missing.
+   * @returns The source, or undefined when the Project is missing or its Team is archived.
    */
   async getProjectSearchSource(
     directoryId: string,
@@ -3292,27 +3272,26 @@ export class DynamoDbProjectDirectoryClient {
       item.entryType === 'project' && item.teamId === teamId && item.projectId === projectId
     )
 
-    if (!team || !isActiveDirectoryItem(team) || !project || !isActiveDirectoryItem(project)) {
-      return undefined
-    }
+    if (!team || !isActiveDirectoryItem(team) || !project) return undefined
 
     const state = toProjectCharterState(project)
     return {
+      archived: !isActiveDirectoryItem(project),
       state,
       project: toProjectDirectoryProjectResponse(project, 'ja'),
       englishName: localizedName(project, 'en'),
       ...(project.creatorUserId === undefined ? {} : { creatorUserId: project.creatorUserId }),
-      sourceRevision: state.revision + (project.nameRevision ?? 0),
+      sourceRevision:
+        state.revision + (project.nameRevision ?? 0) + (project.lifecycleRevision ?? 0),
     }
   }
 
   /**
-   * Reads, in one strongly consistent read, what the search document of an active Team is
-   * built from.
+   * Reads, in one strongly consistent read, what the search document of a Team is built from.
    *
    * @param directoryId - Owning Workspace directory identifier.
    * @param teamId - Team identifier.
-   * @returns The source, or undefined when the Team is archived or missing.
+   * @returns The source, or undefined when the Team is missing.
    */
   async getTeamSearchSource(
     directoryId: string,
@@ -3322,13 +3301,14 @@ export class DynamoDbProjectDirectoryClient {
     const team = items.find((item): item is ProjectDirectoryTeamItem =>
       item.entryType === 'team' && item.teamId === teamId
     )
-    if (!team || !isActiveDirectoryItem(team)) return undefined
+    if (!team) return undefined
 
     return {
+      archived: !isActiveDirectoryItem(team),
       nameJa: team.nameJa,
       nameEn: team.nameEn,
-      nameRevision: team.nameRevision ?? 0,
       ...(team.creatorUserId === undefined ? {} : { creatorUserId: team.creatorUserId }),
+      sourceRevision: (team.nameRevision ?? 0) + (team.lifecycleRevision ?? 0),
     }
   }
 
@@ -5338,7 +5318,9 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
     (value.displayOrder !== undefined && !Number.isSafeInteger(value.displayOrder)) ||
     (value.nameRevision !== undefined &&
       !(Number.isSafeInteger(value.nameRevision) && Number(value.nameRevision) >= 0)) ||
-    (value.creatorUserId !== undefined && typeof value.creatorUserId !== 'string')
+    (value.creatorUserId !== undefined && typeof value.creatorUserId !== 'string') ||
+    (value.lifecycleRevision !== undefined &&
+      !(Number.isSafeInteger(value.lifecycleRevision) && Number(value.lifecycleRevision) >= 0))
   ) {
     return false
   }

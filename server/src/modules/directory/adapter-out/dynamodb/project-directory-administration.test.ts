@@ -224,12 +224,8 @@ test('renames a Team in place without changing its key or ID', async () => {
   await expect(client.renameTeam(directoryId, 'alpha', {
     nameJa: ' 新しい名前 ',
     nameEn: 'New name',
-  })).resolves.toEqual({
-    response: { teamId: 'alpha', nameJa: '新しい名前', nameEn: 'New name' },
-    nameRevision: 1,
-  })
-  await expect(client.renameTeam(directoryId, 'beta', { nameJa: '次' }))
-    .resolves.toMatchObject({ nameRevision: 4 })
+  })).resolves.toEqual({ teamId: 'alpha', nameJa: '新しい名前', nameEn: 'New name' })
+  await client.renameTeam(directoryId, 'beta', { nameJa: '次' })
   expect(transactions()).toEqual([
     [{
       Update: expect.objectContaining({
@@ -328,12 +324,7 @@ test('restores an archived Team and reports a Team that is not archived', async 
     createTeamRow('beta', 20),
   ])
 
-  await expect(client.restoreTeam(directoryId, 'alpha')).resolves.toEqual({
-    response: { teamId: 'alpha' },
-    nameJa: 'alpha 日本語',
-    nameEn: 'alpha English',
-    nameRevision: 0,
-  })
+  await expect(client.restoreTeam(directoryId, 'alpha')).resolves.toEqual({ teamId: 'alpha' })
   await expect(client.restoreTeam(directoryId, 'beta'))
     .rejects.toMatchObject({ status: 409, code: 'TeamNotArchived' })
   await expect(client.restoreTeam(directoryId, 'missing'))
@@ -341,7 +332,7 @@ test('restores an archived Team and reports a Team that is not archived', async 
   expect(transactions()).toEqual([[{
     Update: expect.objectContaining({
       Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
-      UpdateExpression: 'REMOVE archivedAt',
+      UpdateExpression: 'REMOVE archivedAt ADD lifecycleRevision :one',
       ConditionExpression:
         '#entryType = :entryType AND #teamId = :teamId AND #archivedAt = :readArchivedAt',
     }),
@@ -364,7 +355,7 @@ test('restores an archived Project only while its Team is active', async () => {
     {
       Update: expect.objectContaining({
         Key: { directoryId, entryKey: '000010#000010#PROJECT#gone' },
-        UpdateExpression: 'REMOVE archivedAt',
+        UpdateExpression: 'REMOVE archivedAt ADD lifecycleRevision :one',
       }),
     },
     {
@@ -568,10 +559,14 @@ test('maps a lost rename condition to a conflict', async () => {
     .rejects.toMatchObject({ status: 409 })
 })
 
-test('counts Project renames and adds them to the charter revision of the search source', async () => {
+test('adds Project renames, archives, and restores to the charter revision of the search source', async () => {
   const { client, transactions } = createClient([
     createTeamRow('alpha', 10),
-    createProjectRow('alpha', 10, 'live', 10, { nameRevision: 2, charterRevision: 5 }),
+    createProjectRow('alpha', 10, 'live', 10, {
+      nameRevision: 2,
+      charterRevision: 5,
+      lifecycleRevision: 2,
+    }),
     createProjectRow('alpha', 10, 'gone', 20, { archivedAt: '2026-06-06T00:00:00.000Z' }),
   ])
 
@@ -590,30 +585,43 @@ test('counts Project renames and adds them to the charter revision of the search
   await expect(client.getProjectSearchSource(directoryId, 'alpha', 'live')).resolves.toMatchObject({
     project: { id: 'live', name: 'live 日本語' },
     englishName: 'live English',
-    sourceRevision: 7,
+    archived: false,
+    sourceRevision: 9,
   })
-  await expect(client.getProjectSearchSource(directoryId, 'alpha', 'gone')).resolves.toBeUndefined()
+  await expect(client.getProjectSearchSource(directoryId, 'alpha', 'gone')).resolves.toMatchObject({
+    archived: true,
+  })
 })
 
-test('reads the search source of an active Team with its rename count and creator', async () => {
+test('reads the search source of a Team with its revision, archive state, and creator', async () => {
   const { client } = createClient([
-    createTeamRow('alpha', 10, { nameRevision: 3, creatorUserId: 'owner@example.com' }),
+    createTeamRow('alpha', 10, {
+      nameRevision: 3,
+      lifecycleRevision: 2,
+      creatorUserId: 'owner@example.com',
+    }),
     createTeamRow('beta', 20),
-    createTeamRow('gone', 30, { archivedAt: '2026-06-06T00:00:00.000Z' }),
+    createTeamRow('gone', 30, { archivedAt: '2026-06-06T00:00:00.000Z', lifecycleRevision: 1 }),
   ])
 
   await expect(client.getTeamSearchSource(directoryId, 'alpha')).resolves.toEqual({
+    archived: false,
     nameJa: 'alpha 日本語',
     nameEn: 'alpha English',
-    nameRevision: 3,
     creatorUserId: 'owner@example.com',
+    sourceRevision: 5,
   })
   await expect(client.getTeamSearchSource(directoryId, 'beta')).resolves.toEqual({
+    archived: false,
     nameJa: 'beta 日本語',
     nameEn: 'beta English',
-    nameRevision: 0,
+    sourceRevision: 0,
   })
-  await expect(client.getTeamSearchSource(directoryId, 'gone')).resolves.toBeUndefined()
+  await expect(client.getTeamSearchSource(directoryId, 'gone')).resolves.toMatchObject({
+    archived: true,
+    sourceRevision: 1,
+  })
+  await expect(client.getTeamSearchSource(directoryId, 'missing')).resolves.toBeUndefined()
 })
 
 test('refuses a restore while the archive Webhook grant cleanup is still running', async () => {

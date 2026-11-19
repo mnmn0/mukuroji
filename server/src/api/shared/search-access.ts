@@ -543,6 +543,65 @@ export async function projectWorkspaceSearchDocumentBestEffort(
   }
 }
 
+/** Snapshot of a Team or Project row that its search document is built from. */
+export type DirectorySearchSource = {
+  /** Whether the row is archived, so its search document must be absent. */
+  archived: boolean
+  /** Revision of everything the document reflects, including archives and restores. */
+  sourceRevision: number
+}
+
+/**
+ * Brings the search document of a Team or Project in line with its row, and logs instead of
+ * failing the request on errors.
+ *
+ * Every write is fenced by the row's revision, which archives and restores also advance. An
+ * active row is projected and then read again: a projection delayed past an archive would
+ * otherwise recreate the document after the archive removed it. An archived row has its
+ * document removed unless a newer revision, written after a later restore, replaced it.
+ *
+ * @param workspaceId - Workspace that scopes the operation.
+ * @param entityType - Search entity type of the row.
+ * @param entityId - Search entity ID of the row.
+ * @param readSource - Strongly consistent read of the row; undefined when there is nothing to
+ *   project.
+ * @param createDocument - Builds the search document of an active row.
+ * @param operation - Operation name used in logs.
+ */
+export async function syncDirectorySearchDocumentBestEffort<Source extends DirectorySearchSource>(
+  workspaceId: string,
+  entityType: 'team' | 'project',
+  entityId: string,
+  readSource: () => Promise<Source | undefined>,
+  createDocument: (source: Source) => WorkspaceSearchDocument,
+  operation: string,
+) {
+  if (!isWorkspaceSearchProjectionEnabled()) return
+  const search = workItemDependencies.workspaceSearch
+  try {
+    const source = await readSource()
+    if (!source) return
+    if (!source.archived) {
+      // Rows never renamed, edited, or archived have no revision, so they leave revisioned
+      // documents alone.
+      await search.upsertDocument(
+        createDocument(source),
+        source.sourceRevision > 0
+          ? { preserveCreator: true, sourceRevision: source.sourceRevision }
+          : { preserveCreator: true, unrevisioned: true },
+      )
+    }
+    const current = source.archived ? source : await readSource()
+    if (!current?.archived) return
+    // An archive always advances the revision, so the fence is a positive integer.
+    await search.deleteDocument(workspaceId, entityType, entityId, {
+      sourceRevision: current.sourceRevision,
+    })
+  } catch (error) {
+    console.error(`Workspace search projection failed after ${operation}.`, error)
+  }
+}
+
 /**
  * Deletes a Workspace search document and logs instead of failing the request on errors.
  *

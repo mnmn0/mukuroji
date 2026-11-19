@@ -216,7 +216,7 @@ describe('Workspace search backfill mapping', () => {
     }
   })
 
-  test('fences directory documents by the rename count the live projections use', () => {
+  test('fences directory documents by the revision the live projections use', () => {
     const team = mapProjectDirectoryItem({
       directoryId: 'workspace#mukuroji',
       entryKey: '000010#000000#TEAM#core-team',
@@ -226,13 +226,14 @@ describe('Workspace search backfill mapping', () => {
       nameJa: 'コアチーム',
       nameEn: 'Core team',
       nameRevision: 2,
+      lifecycleRevision: 2,
       creatorUserId: 'owner@example.com',
     })
     expect(team).toMatchObject({
       action: 'put',
-      sourceRevision: 2,
+      sourceRevision: 4,
       preserveCreator: true,
-      document: { sourceRevision: 2, creatorUserId: 'owner@example.com' },
+      document: { sourceRevision: 4, creatorUserId: 'owner@example.com' },
     })
 
     const project = mapProjectDirectoryItem({
@@ -248,13 +249,15 @@ describe('Workspace search backfill mapping', () => {
       tone: 'blue',
       charterRevision: 3,
       nameRevision: 2,
+      lifecycleRevision: 2,
       creatorUserId: 'owner@example.com',
     })
-    // Charter revision plus rename count, as the request-time Project projection computes it.
+    // Charter revision plus rename count plus archive and restore count, as the request-time
+    // Project projection computes it.
     expect(project).toMatchObject({
       action: 'put',
-      sourceRevision: 5,
-      document: { sourceRevision: 5, creatorUserId: 'owner@example.com' },
+      sourceRevision: 7,
+      document: { sourceRevision: 7, creatorUserId: 'owner@example.com' },
     })
   })
 

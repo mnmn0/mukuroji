@@ -1,6 +1,6 @@
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
-import { ProjectDataError } from '../../modules/directory'
+import { ProjectDataError, type TeamSearchSource } from '../../modules/directory'
 import { createTeamWorkspaceSearchDocument } from '../../modules/workspace-search/workspace-search'
 import { workspaceDependencies } from '../shared/app-dependencies'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
@@ -11,11 +11,7 @@ import {
 } from '../shared/project-access'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import {
-  deleteWorkspaceSearchDocumentBestEffort,
-  isWorkspaceSearchProjectionEnabled,
-  projectWorkspaceSearchDocumentBestEffort,
-} from '../shared/search-access'
+import { syncDirectorySearchDocumentBestEffort } from '../shared/search-access'
 import { projectProjectSearchDocumentBestEffort } from './project-charter-routes'
 
 /**
@@ -62,16 +58,8 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
       
         createDirectoryAuthorizationChecks(principal),
       )
-      await projectTeamSearchDocument(
-        principal.directoryId,
-        teamId,
-        renamed.response.nameJa,
-        renamed.response.nameEn,
-        renamed.nameRevision,
-        'team rename',
-        renamed.creatorUserId,
-      )
-      return renamed.response
+      await projectTeamSearchDocumentBestEffort(principal.directoryId, teamId, 'team rename')
+      return renamed
     })
   })
 
@@ -86,16 +74,8 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
       
         createDirectoryAuthorizationChecks(principal),
       )
-      await projectTeamSearchDocument(
-        principal.directoryId,
-        teamId,
-        restored.nameJa,
-        restored.nameEn,
-        restored.nameRevision,
-        'team restore',
-        restored.creatorUserId,
-      )
-      return restored.response
+      await projectTeamSearchDocumentBestEffort(principal.directoryId, teamId, 'team restore')
+      return restored
     })
   })
 
@@ -254,102 +234,35 @@ function readRouteIdentifier(c: Context, name: 'teamId' | 'projectId') {
 }
 
 /**
- * Re-projects a Team search document after its names became visible or changed.
+ * Brings the Team search document in line with one strongly consistent read of the Team.
  *
- * The rename count fences the write, so a delayed projection of an older name cannot replace the
- * document of a newer rename. A never-renamed Team leaves a renamed document alone.
+ * The source revision is the rename count plus the archive and restore count, so a delayed
+ * projection of an older name or lifecycle cannot replace the document of a newer one, and an
+ * archived Team's document is removed. Teams created before the row recorded its creator keep
+ * the creator projected at creation.
  *
  * @param workspaceId - Workspace that owns the Team.
  * @param teamId - Team identifier.
- * @param nameJa - Japanese display name.
- * @param nameEn - English display name.
- * @param nameRevision - Rename count stored with these names.
  * @param operation - Operation label used when logging a projection failure.
- * @param creatorUserId - Creator recorded on the Team row; without it the stored creator is kept.
  */
-export async function projectTeamSearchDocument(
+export async function projectTeamSearchDocumentBestEffort(
   workspaceId: string,
   teamId: string,
-  nameJa: string,
-  nameEn: string,
-  nameRevision: number,
   operation: string,
-  creatorUserId?: string,
 ) {
-  const sourceRevision = nameRevision > 0 ? nameRevision : undefined
-  await projectWorkspaceSearchDocumentBestEffort(
-    () => createTeamWorkspaceSearchDocument({
+  await syncDirectorySearchDocumentBestEffort(
+    workspaceId,
+    'team',
+    `team/${teamId}`,
+    () => workspaceDependencies.projectDirectory.getTeamSearchSource(workspaceId, teamId),
+    (source: TeamSearchSource) => createTeamWorkspaceSearchDocument({
       workspaceId,
       teamId,
-      title: nameJa,
-      ...(nameEn === nameJa ? {} : { subtitle: nameEn }),
-      ...(sourceRevision === undefined ? {} : { sourceRevision }),
-      ...(creatorUserId ? { creatorUserId } : {}),
+      title: source.nameJa,
+      ...(source.nameEn === source.nameJa ? {} : { subtitle: source.nameEn }),
+      ...(source.sourceRevision > 0 ? { sourceRevision: source.sourceRevision } : {}),
+      ...(source.creatorUserId ? { creatorUserId: source.creatorUserId } : {}),
     }),
     operation,
-    // Teams created before the row recorded its creator keep the creator projected at creation.
-    sourceRevision === undefined
-      ? { preserveCreator: true, unrevisioned: true }
-      : { preserveCreator: true, sourceRevision },
-  )
-}
-
-/**
- * Deletes the search document of an archived Team, then projects it again if a restore committed
- * meanwhile.
- *
- * A restore that commits after the archive can project its document before this delete runs; the
- * strongly consistent re-read after the delete sees that restore, and any later restore projects
- * after the re-read on its own.
- *
- * @param workspaceId - Owning Workspace identifier.
- * @param teamId - Archived Team identifier.
- */
-export async function deleteArchivedTeamSearchDocument(workspaceId: string, teamId: string) {
-  if (!isWorkspaceSearchProjectionEnabled()) return
-  await deleteWorkspaceSearchDocumentBestEffort(workspaceId, 'team', `team/${teamId}`, 'team archive')
-  try {
-    const source = await workspaceDependencies.projectDirectory.getTeamSearchSource(workspaceId, teamId)
-    if (!source) return
-    await projectTeamSearchDocument(
-      workspaceId,
-      teamId,
-      source.nameJa,
-      source.nameEn,
-      source.nameRevision,
-      'team restore during archive',
-      source.creatorUserId,
-    )
-  } catch (error) {
-    console.error('Workspace search projection failed after team archive.', error)
-  }
-}
-
-/**
- * Deletes the search document of an archived Project, then projects it again if a restore
- * committed meanwhile.
- *
- * @param workspaceId - Owning Workspace identifier.
- * @param teamId - Team that owns the Project.
- * @param projectId - Archived Project identifier.
- */
-export async function deleteArchivedProjectSearchDocument(
-  workspaceId: string,
-  teamId: string,
-  projectId: string,
-) {
-  if (!isWorkspaceSearchProjectionEnabled()) return
-  await deleteWorkspaceSearchDocumentBestEffort(
-    workspaceId,
-    'project',
-    `team/${teamId}/project/${projectId}`,
-    'project archive',
-  )
-  // Reads the Project consistently and projects it only when it is active again.
-  await projectProjectSearchDocumentBestEffort(
-    workspaceId,
-    teamId,
-    projectId,
-    'project restore during archive',
   )
 }

@@ -774,8 +774,9 @@ function mapTeamDirectoryItem(
     return undefined
   }
 
-  // Renames project behind the rename count, so the backfill is fenced by the same count.
-  const nameRevision = readPositiveInteger(item.nameRevision)
+  // Live projections are fenced by the rename count plus the archive and restore count.
+  const sourceRevision =
+    (readPositiveInteger(item.nameRevision) ?? 0) + (readPositiveInteger(item.lifecycleRevision) ?? 0)
   const creatorUserId = readOptionalString(item.creatorUserId)
   return {
     action: 'put',
@@ -787,9 +788,9 @@ function mapTeamDirectoryItem(
       ...(creatorUserId ? { creatorUserId } : {}),
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt),
-      ...(nameRevision === undefined ? {} : { sourceRevision: nameRevision }),
+      ...(sourceRevision > 0 ? { sourceRevision } : {}),
     }),
-    sourceRevision: nameRevision ?? 0,
+    sourceRevision,
     // Teams created before the row recorded its creator keep the stored creator.
     preserveCreator: true,
   }
@@ -836,8 +837,11 @@ function mapProjectDirectoryItemRow(
       `Workspace search backfill encountered an invalid charter revision on Project "${teamId}/${projectId}".`,
     )
   }
-  // Live projections add the rename count to the charter revision; both only grow.
-  const sourceRevision = (charterRevision ?? 0) + (readPositiveInteger(item.nameRevision) ?? 0)
+  // Live projections add the rename count and the archive and restore count to the charter
+  // revision; all only grow.
+  const sourceRevision = (charterRevision ?? 0) +
+    (readPositiveInteger(item.nameRevision) ?? 0) +
+    (readPositiveInteger(item.lifecycleRevision) ?? 0)
   const creatorUserId = readOptionalString(item.creatorUserId)
   return {
     action: 'put',

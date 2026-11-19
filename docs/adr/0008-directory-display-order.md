@@ -38,8 +38,12 @@ key を変えると、key を前提にした transaction の条件、data integr
   同じ row を 1 回読んだ値どうしなら、新しい方が必ず大きい。
 - 新しい Team / Project の row には作成者 `creatorUserId` を記録し、名称変更・復元で検索 document を
   作り直すときも作成者を保つ。記録のない既存の row は、保存済みの document の作成者を残す。
-- アーカイブ後の検索 document の削除は、削除のあと strongly consistent read で row を読み直し、
-  その間に復元されていれば document を作り直す。復元の投影が削除より先に届いても消えたままにならない。
+- Team / Project row にアーカイブと復元の回数 `lifecycleRevision` を持たせ、検索 document の
+  `sourceRevision` に足す（Team は `nameRevision` との和、Project は charter の revision・`nameRevision`
+  との和）。検索 document は名称変更・charter 更新・アーカイブ・復元のたびに row を strongly consistent
+  read で読み直して合わせる。有効な row は投影したあとにもう一度読み、アーカイブされていたら削除する。
+  削除はその時点の `sourceRevision` 以下の document だけを消すので、遅れて届いた古い投影がアーカイブ後に
+  document を作り直すことも、遅れた削除が後の復元で作り直した document を消すこともない。
 - 変更はすべて `project.renamed` / `project.restored` / `project.reordered` として audit に記録する。
 
 ## 検討した選択肢

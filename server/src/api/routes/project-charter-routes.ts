@@ -35,7 +35,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import { projectWorkspaceSearchDocumentBestEffort } from '../shared/search-access'
+import { syncDirectorySearchDocumentBestEffort } from '../shared/search-access'
 
 /**
  * Registers the Project charter and lifecycle endpoints.
@@ -316,11 +316,12 @@ export async function projectCharterSearchDocumentBestEffort(workspaceId: string
 }
 
 /**
- * Re-projects the Project search document from one strongly consistent read of the Project.
+ * Brings the Project search document in line with one strongly consistent read of the Project.
  *
  * The charter, the names, and the source revision come from the same snapshot. The source
- * revision is the charter revision plus the rename count, so a slower projection of an older
- * charter or name cannot overwrite the document of a newer one.
+ * revision is the charter revision plus the rename count plus the archive and restore count, so
+ * a slower projection of an older state cannot overwrite the document of a newer one, and an
+ * archived Project's document is removed.
  *
  * @param workspaceId - Workspace that owns the Project.
  * @param teamId - Team that owns the Project.
@@ -333,39 +334,21 @@ export async function projectProjectSearchDocumentBestEffort(
   projectId: string,
   operation: string,
 ) {
-  let source: ProjectSearchSource | undefined
-  try {
-    source = await workspaceDependencies.projectDirectory.getProjectSearchSource(
+  await syncDirectorySearchDocumentBestEffort(
+    workspaceId,
+    'project',
+    `team/${teamId}/project/${projectId}`,
+    () => workspaceDependencies.projectDirectory.getProjectSearchSource(workspaceId, teamId, projectId),
+    (source: ProjectSearchSource) => createProjectSearchDocument(
       workspaceId,
       teamId,
-      projectId,
-    )
-  } catch (error) {
-    console.error(`Workspace search projection failed after ${operation}.`, error)
-    return
-  }
-  if (!source) return
-  const resolved = source
-  const englishName = resolved.englishName !== resolved.project.name
-    ? resolved.englishName
-    : undefined
-  const sourceRevision = resolved.sourceRevision > 0 ? resolved.sourceRevision : undefined
-  await projectWorkspaceSearchDocumentBestEffort(
-    () => createProjectSearchDocument(
-      workspaceId,
-      teamId,
-      resolved.project,
-      resolved.creatorUserId,
-      englishName,
-      resolved.state.charter,
-      sourceRevision,
+      source.project,
+      source.creatorUserId,
+      source.englishName !== source.project.name ? source.englishName : undefined,
+      source.state.charter,
+      source.sourceRevision > 0 ? source.sourceRevision : undefined,
     ),
     operation,
-    // Projects created before the row recorded its creator keep the creator projected at creation.
-    // Without a revision, a document already projected from a revisioned source is left alone.
-    sourceRevision === undefined
-      ? { preserveCreator: true, unrevisioned: true }
-      : { sourceRevision, preserveCreator: true },
   )
 }
 

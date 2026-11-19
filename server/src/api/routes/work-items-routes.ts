@@ -307,10 +307,8 @@ import {
 } from '../shared/work-item-contributors'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
-import {
-  deleteArchivedProjectSearchDocument,
-  deleteArchivedTeamSearchDocument,
-} from './directory-administration-routes'
+import { projectTeamSearchDocumentBestEffort } from './directory-administration-routes'
+import { projectProjectSearchDocumentBestEffort } from './project-charter-routes'
 
 /** Maximum serialized UTF-8 bytes allowed for the comments in one collaboration response. */
 const COLLABORATION_COMMENT_RESPONSE_MAX_BYTES = 4_000_000
@@ -3571,7 +3569,8 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         createApiMutationContext(c, principal, { teamId }),
         expectedPlanningRevision,
       )
-      await deleteArchivedTeamSearchDocument(principal.directoryId, teamId)
+      // Removes the search document unless a restore already projected a newer one.
+      await projectTeamSearchDocumentBestEffort(principal.directoryId, teamId, 'team archive')
       return c.json(response)
     } catch (error) {
       if (error instanceof CognitoServiceError) {
@@ -3619,7 +3618,13 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         archiveGuard.expectedPlanningRevision,
         archiveGuard.workItemRevisionGuards,
       )
-      await deleteArchivedProjectSearchDocument(principal.directoryId, teamId, projectId)
+      // Removes the search document unless a restore already projected a newer one.
+      await projectProjectSearchDocumentBestEffort(
+        principal.directoryId,
+        teamId,
+        projectId,
+        'project archive',
+      )
       return c.json(response)
     } catch (error) {
       if (error instanceof CognitoServiceError) {
