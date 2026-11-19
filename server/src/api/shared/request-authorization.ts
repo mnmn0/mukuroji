@@ -177,6 +177,12 @@ const enterpriseRoutePermissionRules = [
   },
   {
     method: '*',
+    pathPattern: '/api/enterprise/security/role-assignments*',
+    permission: 'security.manage',
+    alternativePermissions: ['members.manage'],
+  },
+  {
+    method: '*',
     pathPattern: '/api/enterprise/security/service-accounts*',
     permission: 'service-accounts.manage',
     alternativePermissions: ['security.manage'],

@@ -13,11 +13,13 @@ import {
 import type {
   CreateEnterpriseDomainClaimInput,
   CreateEnterpriseGroupRoleMappingInput,
+  CreateEnterpriseMemberRoleAssignmentInput,
   CreateEnterpriseRoleInput,
   CreateEnterpriseServiceAccountInput,
   EnterpriseBreakGlassAdministrator,
   EnterpriseDomainVerificationChallenge,
   EnterpriseGroupRoleMapping,
+  EnterpriseMemberRoleAssignment,
   EnterpriseProvisioningImpact,
   EnterpriseProvisioningLog,
   EnterpriseRoleDefinition,
@@ -133,6 +135,14 @@ export type EnterpriseSecurityPanelProps = {
   /** Deletes a directory-group role mapping. */
   onDeleteMapping?: (
     mapping: EnterpriseGroupRoleMapping,
+  ) => Promise<unknown>
+  /** Assigns a role to one member. */
+  onCreateMemberRoleAssignment?: (
+    input: CreateEnterpriseMemberRoleAssignmentInput,
+  ) => Promise<unknown>
+  /** Removes a role assigned to one member. */
+  onDeleteMemberRoleAssignment?: (
+    assignment: EnterpriseMemberRoleAssignment,
   ) => Promise<unknown>
   /** Updates a directory-group mapping's scope or role. */
   onUpdateMapping?: (
@@ -257,10 +267,12 @@ function EnterpriseSecurityPanelContent({
   onApplyProvisioning,
   onCreateDomain,
   onCreateMapping,
+  onCreateMemberRoleAssignment,
   onCreateRole,
   onCreateServiceAccount,
   onDeactivateBreakGlass,
   onDeleteMapping,
+  onDeleteMemberRoleAssignment,
   onDeleteRole,
   onPreviewProvisioning,
   onPreviewRoleImpact,
@@ -777,7 +789,9 @@ function EnterpriseSecurityPanelContent({
               snapshot={snapshot}
               t={t}
               onCreateMapping={onCreateMapping}
+              onCreateMemberRoleAssignment={onCreateMemberRoleAssignment}
               onCreateRole={onCreateRole}
+              onDeleteMemberRoleAssignment={onDeleteMemberRoleAssignment}
               onDeleteMapping={
                 onDeleteMapping
                   ? async (mapping) =>

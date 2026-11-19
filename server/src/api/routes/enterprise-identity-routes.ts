@@ -11,7 +11,9 @@ import {
   type EnterprisePermissionId,
   type EnterpriseProvisioningPreview,
   type EnterpriseProvisioningRun,
+  type EnterpriseRoleAssignment,
   type EnterpriseRoleId,
+  type EnterpriseRoleScope,
   type EnterpriseScimGroup,
   type EnterpriseScimGroupInput,
   type EnterpriseScimUser,
@@ -52,6 +54,7 @@ import {
   canAssignEnterpriseRole,
   deactivateEnterpriseScimUserDesiredState,
   ipMatchesCidr,
+  isEnterpriseRoleGuestAssignable,
   resolveEnterpriseRolePermissions,
   resolveEnterpriseScimMemberKey,
   saveEnterpriseScimUserDesiredState,
@@ -894,6 +897,8 @@ function readEnterpriseRoleId(value: unknown) {
     roleId !== 'workspace:admin' &&
     roleId !== 'workspace:member' &&
     roleId !== 'workspace:guest' &&
+    roleId !== 'workspace:portfolio-viewer' &&
+    roleId !== 'workspace:auditor' &&
     roleId !== 'team:manager' &&
     roleId !== 'team:member' &&
     roleId !== 'project:manager' &&
@@ -1003,6 +1008,124 @@ async function requireEnterpriseResourceScope(
       'EnterpriseResourceScopeNotFound',
       'The selected Team or Project does not belong to this Workspace.',
     )
+  }
+}
+
+/**
+ * Validates the Workspace member that a direct role assignment targets.
+ *
+ * @remarks
+ * A member who holds a direct assignment is evaluated by its assignments instead of the
+ * Workspace role. Callers therefore cannot target themselves, an owner, or (unless they are an
+ * owner or system administrator) an admin, which would demote or restore that administrator.
+ * @param principal - Caller of the assignment route.
+ * @param memberKey - Member key from the request.
+ * @returns The active target member.
+ */
+async function requireEnterpriseRoleAssignmentTarget(
+  principal: EnterpriseSecurityPrincipal,
+  memberKey: string,
+) {
+  if (memberKey === principal.userKey) {
+    throw new EnterpriseIdentityError(
+      409,
+      'EnterpriseRoleAssignmentSelfDenied',
+      'You cannot change your own role assignments.',
+    )
+  }
+  const target = await workspaceDependencies.workspaceAccess.getActiveMember(
+    principal.directoryId,
+    memberKey,
+  )
+  if (!target) {
+    throw new EnterpriseIdentityError(
+      404,
+      'EnterpriseRoleAssignmentMemberNotFound',
+      'The member was not found or is not active.',
+    )
+  }
+  if (target.role === 'owner') {
+    throw new EnterpriseIdentityError(
+      409,
+      'EnterpriseRoleAssignmentOwnerProtected',
+      'Owners keep full access and cannot receive role assignments.',
+    )
+  }
+  if (
+    target.role === 'admin' &&
+    principal.workspaceRole !== 'owner' &&
+    principal.isSystemAdmin !== true &&
+    principal.principalKind !== 'break-glass'
+  ) {
+    throw new EnterpriseIdentityError(
+      403,
+      'EnterpriseRoleAssignmentAdminProtected',
+      'Only an owner can change role assignments of an admin.',
+    )
+  }
+  return target
+}
+
+/**
+ * Resolves the scope of a direct member assignment, qualifying a Project with its Team.
+ *
+ * @param workspaceId - Workspace of the assignment.
+ * @param scopeKind - Requested scope kind.
+ * @param scopeTargetId - Team or Project ID for a narrower scope.
+ * @param scopeParentId - Owning Team ID, required when a Project belongs to several Teams.
+ * @returns A scope that the authorization evaluator matches without a legacy fallback.
+ */
+async function resolveEnterpriseRoleAssignmentScope(
+  workspaceId: string,
+  scopeKind: 'workspace' | 'team' | 'project',
+  scopeTargetId: string | undefined,
+  scopeParentId: string | undefined,
+): Promise<EnterpriseRoleScope> {
+  if (scopeKind === 'workspace') return { workspaceId, kind: 'workspace' }
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja')
+  if (scopeKind === 'team') {
+    if (!directory.teams.some((team) => team.id === scopeTargetId)) {
+      throw new EnterpriseIdentityError(
+        409,
+        'EnterpriseResourceScopeNotFound',
+        'The selected Team or Project does not belong to this Workspace.',
+      )
+    }
+    return { workspaceId, kind: 'team', targetId: scopeTargetId }
+  }
+  const owningTeamIds = directory.teams
+    .filter((team) => team.projects.some((project) => project.id === scopeTargetId))
+    .map((team) => team.id)
+  const parentTeamId = scopeParentId
+    ? owningTeamIds.find((teamId) => teamId === scopeParentId)
+    : owningTeamIds.length === 1 ? owningTeamIds[0] : undefined
+  if (!parentTeamId) {
+    throw new EnterpriseIdentityError(
+      409,
+      owningTeamIds.length > 1 && !scopeParentId
+        ? 'EnterpriseResourceScopeAmbiguous'
+        : 'EnterpriseResourceScopeNotFound',
+      owningTeamIds.length > 1 && !scopeParentId
+        ? 'Select the Team that owns this Project.'
+        : 'The selected Team or Project does not belong to this Workspace.',
+    )
+  }
+  return { workspaceId, kind: 'project', targetId: scopeTargetId, parentTeamId }
+}
+
+/**
+ * Converts a direct member assignment to the management API response.
+ *
+ * @param assignment - Stored direct member assignment.
+ * @returns The assignment as the security screen shows it.
+ */
+function toEnterpriseMemberRoleAssignmentView(assignment: EnterpriseRoleAssignment) {
+  return {
+    id: assignment.assignmentId,
+    memberKey: assignment.principalId,
+    roleId: assignment.roleId,
+    scopeType: assignment.scope.kind,
+    scopeId: assignment.scope.targetId ?? assignment.scope.workspaceId,
   }
 }
 
@@ -2423,12 +2546,23 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           principal.enterpriseAuthenticationSessionId,
         )
         : undefined
-      return c.json({
-        ...toEnterpriseSecuritySnapshotView(
+      const view = toEnterpriseSecuritySnapshotView(
         snapshot,
         new URL(`/api/scim/v2/${encodeURIComponent(principal.directoryId)}`, c.req.url).toString(),
         principal.enterprisePermissions,
-        ),
+      )
+      const members = view.capabilities.canViewAccess
+        ? (await workspaceDependencies.workspaceAccess.listActiveMembers(principal.directoryId))
+          .map((member) => ({
+            memberKey: member.memberKey,
+            email: member.email,
+            ...(member.name ? { name: member.name } : {}),
+            role: member.role,
+          }))
+        : []
+      return c.json({
+        ...view,
+        members,
         ...(activeBreakGlassActivation
           ? {
               activeBreakGlassActivation: {
@@ -3477,6 +3611,94 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         principal.directoryId,
         c.req.param('mappingId'),
         readEnterpriseInteger(body?.expectedVersion, 'Expected version', 1),
+        createWorkspaceMutationContext(c, principal, body),
+      )
+      return c.body(null, 204)
+    } catch (error) {
+      return toEnterpriseIdentityBoundaryErrorResponse(c, error)
+    }
+  })
+
+  /** Workspace member 個人に role を割り当てます。 */
+  routeApp.post('/api/enterprise/security/role-assignments', async (c) => {
+    try {
+      const principal = await requireEnterpriseSecurityPrincipal(c)
+      const body = await readJson<Record<string, unknown>>(c.req)
+      const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
+      const requestIdempotencyKey =
+        c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
+      const memberKey = readEnterpriseText(body?.memberKey, 'Member key')
+      const scopeType = body?.scopeType === 'team' || body?.scopeType === 'project'
+        ? body.scopeType
+        : 'workspace'
+      const roleId = readEnterpriseRoleId(body?.roleId)
+      const target = await requireEnterpriseRoleAssignmentTarget(principal, memberKey)
+      requireEnterpriseAssignableRole(
+        snapshot,
+        principal.enterprisePermissions,
+        roleId,
+        scopeType,
+      )
+      if (target.role === 'guest' && !isEnterpriseRoleGuestAssignable(snapshot.customRoles, roleId)) {
+        throw new EnterpriseIdentityError(
+          409,
+          'EnterpriseRoleNotGuestAssignable',
+          'The selected role cannot be assigned to a guest.',
+        )
+      }
+      const scope = await resolveEnterpriseRoleAssignmentScope(
+        principal.directoryId,
+        scopeType,
+        scopeType === 'workspace' ? undefined : readEnterpriseText(body?.scopeId, 'Scope ID'),
+        typeof body?.scopeParentId === 'string' ? body.scopeParentId.trim() : undefined,
+      )
+      const assignment = await workspaceDependencies.enterpriseIdentity.authorization
+        .putMemberRoleAssignment({
+          workspaceId: principal.directoryId,
+          assignmentId: createEnterpriseIdempotentResourceId(
+            'role-assignment',
+            principal.directoryId,
+            requestIdempotencyKey,
+          ),
+          principalKind: 'member',
+          principalId: target.memberKey,
+          roleId,
+          scope,
+          source: 'direct',
+        }, createWorkspaceMutationContext(c, principal, body, requestIdempotencyKey))
+      return c.json({ assignment: toEnterpriseMemberRoleAssignmentView(assignment) }, 201)
+    } catch (error) {
+      return toEnterpriseIdentityBoundaryErrorResponse(c, error)
+    }
+  })
+
+  /** Workspace member 個人への role 割り当てを解除します。 */
+  routeApp.delete('/api/enterprise/security/role-assignments/:assignmentId', async (c) => {
+    try {
+      const principal = await requireEnterpriseSecurityPrincipal(c)
+      const body = await readJson<Record<string, unknown>>(c.req)
+      const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
+      const assignment = snapshot.roleAssignments.find((candidate) =>
+        candidate.assignmentId === c.req.param('assignmentId') &&
+        candidate.principalKind === 'member' &&
+        candidate.source === 'direct'
+      )
+      if (!assignment) {
+        throw new EnterpriseIdentityError(
+          404,
+          'EnterpriseRoleAssignmentNotFound',
+          'Role assignment was not found.',
+        )
+      }
+      // Removing the last assignment gives the member their Workspace role back, so the same
+      // protections as granting apply. A deactivated member's leftover assignment can always go.
+      const target = await workspaceDependencies.workspaceAccess.getActiveMember(
+        principal.directoryId,
+        assignment.principalId,
+      )
+      if (target) await requireEnterpriseRoleAssignmentTarget(principal, target.memberKey)
+      await workspaceDependencies.enterpriseIdentity.authorization.deleteMemberRoleAssignment(
+        assignment,
         createWorkspaceMutationContext(c, principal, body),
       )
       return c.body(null, 204)

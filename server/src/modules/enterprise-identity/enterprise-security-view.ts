@@ -8,6 +8,7 @@ import {
 } from '@mukuroji/contracts'
 import {
   canAssignEnterpriseRole,
+  isEnterpriseRoleGuestAssignable,
   resolveEnterpriseRolePermissions,
 } from './domain/enterprise-authorization'
 
@@ -88,6 +89,18 @@ const builtInRoles = [
     name: 'Guest',
     description: 'Read-only access capped by the external access policy.',
     permissions: builtInPermissions['workspace:guest'],
+  },
+  {
+    id: 'workspace:portfolio-viewer',
+    name: 'All Projects viewer',
+    description: 'Read every Team and Project without membership or edit access, for PMO and executives.',
+    permissions: builtInPermissions['workspace:portfolio-viewer'],
+  },
+  {
+    id: 'workspace:auditor',
+    name: 'Auditor',
+    description: 'Read the audit log without export or administration access.',
+    permissions: builtInPermissions['workspace:auditor'],
   },
   {
     id: 'team:manager',
@@ -322,6 +335,11 @@ export function toEnterpriseSecuritySnapshotView(
         project: assignableRoleIdsForScope('project'),
       },
       serviceAccounts: assignableRoleIdsForScope('workspace'),
+      members: {
+        workspace: assignableRoleIdsForScope('workspace'),
+        team: assignableRoleIdsForScope('team'),
+        project: assignableRoleIdsForScope('project'),
+      },
     },
     assignablePermissionIds: canReadSecurity
       ? ENTERPRISE_PERMISSION_IDS.filter((permission) =>
@@ -413,6 +431,17 @@ export function toEnterpriseSecuritySnapshotView(
       roleId: mapping.roleId,
       version: mapping.revision,
     })),
+    memberRoleAssignments: (canReadMappings ? snapshot.roleAssignments : [])
+      .filter((assignment) =>
+        assignment.principalKind === 'member' && assignment.source === 'direct'
+      )
+      .map((assignment) => ({
+        id: assignment.assignmentId,
+        memberKey: assignment.principalId,
+        roleId: assignment.roleId,
+        scopeType: assignment.scope.kind,
+        scopeId: assignment.scope.targetId ?? assignment.scope.workspaceId,
+      })),
     roles: canReadRoleCatalog ? [
       ...builtInRoles.map((role) => ({
         id: role.id,
@@ -420,7 +449,7 @@ export function toEnterpriseSecuritySnapshotView(
         description: role.description,
         kind: 'built-in',
         permissionIds: canReadSecurity ? role.permissions : [],
-        guestAssignable: role.id === 'workspace:guest' || role.id === 'project:viewer',
+        guestAssignable: isEnterpriseRoleGuestAssignable([], role.id),
         assignmentCount: assignmentCountByRole.get(role.id) ?? 0,
         version: 1,
       })),

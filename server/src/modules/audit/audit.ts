@@ -1595,7 +1595,9 @@ const publicAuditMetadataFields = new Set([
   'memberKey',
   'partCount',
   'projectId',
+  'roleId',
   'rootCommentId',
+  'scopeKind',
   'teamId',
 ])
 

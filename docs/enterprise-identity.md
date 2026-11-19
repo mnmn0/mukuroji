@@ -254,6 +254,30 @@ Effective permission は該当 scope の assignment の和集合を計算した�
 3. Sensitive permission は recent re-authentication を満たさない限り拒否する。
 4. Unknown/removed permission と scope 外 permission は付与しない。
 
+Built-in role には Workspace scope の読み取り専用 role として、全 Team・Project の業務データを
+読める `workspace:portfolio-viewer`（`workspace.read`、`members.read`、`teams.read`、`projects.read`、
+`work-items.read`、`documents.read`、`files.read`、`requests.read`、`planning.read`）と、監査 log を
+読める `workspace:auditor`（`workspace.read`、`members.read`、`audit.read`）があります。どちらも
+guest には割り当てられず、guest に変わった member の assignment は評価時に無視します。
+
+Member 個人への direct assignment は `POST /api/enterprise/security/role-assignments`
+（`memberKey`、`roleId`、`scopeType`、`scopeId`、複数 Team に属する Project では `scopeParentId`）で作り、
+`DELETE /api/enterprise/security/role-assignments/:assignmentId` で外します。Group mapping と同じく
+`security.manage` または `members.manage` を要求し、caller が持たない permission を含む role は
+割り当てられません。Project scope は所有 Team で qualify して保存します。
+
+個人 assignment を持つ member は、directory 管理の member と同じく legacy Workspace role と
+Project membership を使わず、assignment の和集合（と `workspace.read`）だけで評価します。
+そのため次の対象には API が assignment を作りません。
+
+- 自分自身（自分の権限の付け替えと締め出しを防ぐ）
+- owner（owner の全権を失わせない）
+- caller が owner、system administrator、break-glass のいずれでもない場合の admin
+  （legacy では admin の変更は owner だけが行える）
+- guest への guest 不可 role
+
+解除しても同じ制限を適用します（最後の assignment を外すと legacy role に戻るため）。
+
 Group mapping CRUD は `/api/enterprise/security/group-mappings`、custom role CRUD は
 `/api/enterprise/security/roles` 以下で提供します。Role 更新・削除前には assignment impact を
 preview して confirmation token を要求し、assignment、group mapping、active service account から
@@ -403,6 +427,8 @@ audit event を作ります。現行 event type は次の値です。
 - `identity-provider.updated`, `identity-domain.updated`,
   `identity-domain.enforcement-updated`, `security-policy.updated`
 - `custom-role.updated|deleted`, `directory-group-mapping.updated|deleted`
+- `role-assignment.created|deleted`（public metadata に `memberKey`、`roleId`、`scopeKind`、
+  Team / Project scope では `teamId`、`projectId`）
 - `scim-credential.issued|rotated|revoked`,
   `scim-user.reconciled|deactivated|applied`, `scim-group.reconciled|deactivated|applied`
 - `provisioning.previewed|reconciled|succeeded|failed|retried`

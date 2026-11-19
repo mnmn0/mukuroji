@@ -419,6 +419,50 @@ describe('EnterpriseSecurityPanel', () => {
     expect(html).toContain('data-testid="security-overview"')
   })
 
+  test('lists member role assignments and offers non-owner members to assign', () => {
+    const snapshot = {
+      ...enterpriseSecuritySnapshotFixture,
+      members: [
+        ...enterpriseSecuritySnapshotFixture.members,
+        { email: 'owner@example.com', memberKey: 'owner@example.com', role: 'owner' as const },
+      ],
+    }
+    const html = renderToStaticMarkup(
+      <EnterpriseSecurityPanel
+        initialTab="access"
+        locale="en"
+        scopeOptions={scopeOptions}
+        snapshot={snapshot}
+        onCreateMemberRoleAssignment={async () => undefined}
+        onDeleteMemberRoleAssignment={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('data-testid="security-member-assignment-form"')
+    expect(html).toContain('PMO Lead (pmo@example.com)')
+    expect(html).toContain('All Projects viewer')
+    expect(html).toContain('Auditor')
+    expect(html).toContain('<option value="auditor@example.com">')
+    expect(html).not.toContain('<option value="owner@example.com">')
+
+    const readOnly = renderToStaticMarkup(
+      <EnterpriseSecurityPanel
+        initialTab="access"
+        locale="en"
+        scopeOptions={scopeOptions}
+        snapshot={{
+          ...enterpriseSecuritySnapshotFixture,
+          capabilities: {
+            ...enterpriseSecuritySnapshotFixture.capabilities,
+            canManageMappings: false,
+          },
+        }}
+      />,
+    )
+    expect(readOnly).toContain('data-testid="security-member-assignment-table"')
+    expect(readOnly).not.toContain('data-testid="security-member-assignment-form"')
+  })
+
   test('gates mapping and custom-role editors with separate capabilities', () => {
     const snapshot = {
       ...enterpriseSecuritySnapshotFixture,

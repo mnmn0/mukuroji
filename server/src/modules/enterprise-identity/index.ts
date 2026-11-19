@@ -14,6 +14,7 @@ export {
   evaluateEnterpriseAccess,
   ipMatchesCidr,
   isEnterpriseRoleCompatibleWithScope,
+  isEnterpriseRoleGuestAssignable,
   resolveEnterpriseDirectoryPrincipal,
   resolveEnterpriseRolePermissions,
   resolveRoutePermission,

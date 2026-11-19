@@ -10,6 +10,7 @@ import type {
   EnterpriseProvisioningInput,
   EnterpriseProvisioningPreview,
   EnterpriseProvisioningRun,
+  EnterpriseRoleAssignment,
   EnterpriseScimCredential,
   EnterpriseScimGroup,
   EnterpriseScimGroupInput,
@@ -177,6 +178,28 @@ export interface EnterpriseAuthorizationAdministrationCapability {
     workspaceId: string,
     mappingId: string,
     expectedRevision: number,
+    auditContext?: MutationAuditContext,
+  ): Promise<void>
+  /**
+   * Assigns a role directly to one Workspace member.
+   *
+   * @param assignment - Validated direct member assignment.
+   * @param auditContext - Optional immutable audit context.
+   * @returns The persisted assignment.
+   */
+  putMemberRoleAssignment(
+    assignment: EnterpriseRoleAssignment,
+    auditContext?: MutationAuditContext,
+  ): Promise<EnterpriseRoleAssignment>
+  /**
+   * Removes a direct member role assignment.
+   *
+   * @param assignment - Direct member assignment read by the caller.
+   * @param auditContext - Optional immutable audit context.
+   * @returns A promise that resolves after removal.
+   */
+  deleteMemberRoleAssignment(
+    assignment: EnterpriseRoleAssignment,
     auditContext?: MutationAuditContext,
   ): Promise<void>
 }
@@ -701,6 +724,8 @@ export function createEnterpriseIdentityCapabilities(
       deleteCustomRole: client.deleteCustomRole.bind(client),
       putGroupMapping: client.putGroupMapping.bind(client),
       deleteGroupMapping: client.deleteGroupMapping.bind(client),
+      putMemberRoleAssignment: client.putMemberRoleAssignment.bind(client),
+      deleteMemberRoleAssignment: client.deleteMemberRoleAssignment.bind(client),
     }),
     scimDirectory: Object.freeze({
       listScimUsers: client.listScimUsers.bind(client),

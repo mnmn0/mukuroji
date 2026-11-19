@@ -36,9 +36,10 @@ Workspace の有効なメンバーだけなので、先に Workspace へ招待�
 エージェント設定は Team の管理者が変更します。
 
 Enterprise の組み込みロール（Workspaceオーナー / Workspace管理者 / Workspaceメンバー / ゲスト /
-Team管理者 / Teamメンバー / Project管理者 / Projectメンバー / Project閲覧者）と Custom role は
-[ID・セキュリティ](#idセキュリティ) で扱います。Team・Project 単位の Enterprise ロールは
-Directory group mapping からだけ割り当てられ、個人へ直接は割り当てられません。
+全Project閲覧 / 監査担当 / Team管理者 / Teamメンバー / Project管理者 / Projectメンバー /
+Project閲覧者）と Custom role は [ID・セキュリティ](#idセキュリティ) で扱います。
+Enterprise ロールは Directory group mapping のほか、メンバー個人にも直接割り当てられます
+（[メンバーへのロール割り当て](#メンバーへのロール割り当て)）。
 
 ## メンバーを招待する・外す
 
@@ -177,7 +178,7 @@ coding agent に任せる作業の範囲を Team ごとに決めます。**設�
 | 概要 | SSO を強制する前の準備状況（IdP の接続テスト、ドメイン確認、緊急管理者） |
 | ID | SAML / OIDC の「ID プロバイダー」（**保存して接続テスト**）、「管理対象ドメイン」（DNS TXT で所有権を確認）、「SSO 強制」 |
 | プロビジョニング | 「SCIM 接続」の token 発行・ローテーション、「Directory reconciliation」（**Dry-runを実行** → **この差分を適用**）、実行ログ |
-| マッピング・ロール | 「Directory group mapping」（Workspace / Team / Project 単位でロールを割り当て）、「ロールと権限」（Custom role の作成） |
+| マッピング・ロール | 「Directory group mapping」（Workspace / Team / Project 単位でロールを割り当て）、「メンバーへのロール割り当て」、「ロールと権限」（Custom role の作成） |
 | セッション | 「MFAを必須にする」、セッション有効期間、アイドルタイムアウト、再認証間隔、「IP allowlist」、Guest・外部協力者の許可 |
 | 特権アクセス | 「Service account」、「緊急管理者」の事前登録と復旧経路のテスト |
 
@@ -187,6 +188,27 @@ SSO を強制する前に、MFA を設定した緊急管理者を登録し、30�
 
 IP allowlist は CIDR を1行に1つ書きます。空にすると制限なしです。自分の接続元を含め忘れると
 締め出されるので、保存前に確認してください。
+
+### メンバーへのロール割り当て
+
+「マッピング・ロール」タブの「メンバーへのロール割り当て」で、メンバー・適用範囲（Workspace / Team /
+Project）・ロールを選んで **割り当てを追加** します。SCIM や IdP の group がなくても使えます。
+割り当てと解除は監査ログに `role-assignment.created` / `role-assignment.deleted` として残ります。
+
+- **全Project閲覧**: 全 Team・全 Project を、Project のメンバーでなくても閲覧できます。編集はできません。
+  PMO や経営層向けです。
+- **監査担当**: 監査ログ（`/api/audit/events`）を閲覧できます。export はできません。
+
+割り当てを1件でも持つメンバーは、Workspace のロールと Project メンバーとしての権限ではなく、
+割り当てたロールの和集合だけで権限が決まります。たとえば Project の manager に「全Project閲覧」を
+付けると、その Project も閲覧だけになるので、編集が要る Project には Project管理者などを同じ画面で
+追加で割り当ててください。割り当てをすべて解除すると、元の Workspace のロールに戻ります。
+
+- owner と自分自身には割り当てられません。admin への割り当ての追加・解除は owner だけができます。
+- ゲストには、ゲストに割り当て可能なロール（ゲスト、Project閲覧者、ゲスト可の Custom role）だけを
+  割り当てられます。割り当て後にゲストへ変更した場合も、全Project閲覧と監査担当は効きません。
+- 割り当てを変更できるのは、Enterprise の `security.manage` または `members.manage` を持つ人です。
+  自分が持っていない権限を含むロールは割り当てられません。
 
 ## テナント管理
 

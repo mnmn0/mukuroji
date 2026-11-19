@@ -1,0 +1,52 @@
+# 0011. メンバー個人への role 割り当てを、Workspace role の代わりに評価する
+
+- 状態: 提案
+- 日付: 2026-11-19
+- 関連: Issue #429
+
+## 背景
+
+PMO や経営層には「全 Project を読めるが編集しない」権限が、監査担当には「監査 log だけ読める」権限が
+要る。Enterprise の role assignment は `member` principal を型として持ち、評価器も member の
+assignment を解決できたが、作る API がなく、role を付けられるのは SCIM の directory group だけだった。
+Password ログインだけの小さな運用では人に role を付けられない。
+
+評価器には既に次の規則がある。member に一致する assignment か directory mapping が1件でもあると、
+legacy の Workspace role（owner / admin / member / guest）と Project membership を使わず、
+assignment の和集合と `workspace.read` だけで評価する（`includeWorkspaceRolePermissions: false`、
+`enterpriseLegacyProjectAccessSuppressed`）。Legacy の member role は Workspace scope で
+`projects.write` を持つので、assignment と和集合にすると全 Project を編集できてしまう。
+
+## 決定
+
+- `POST /api/enterprise/security/role-assignments` と `DELETE .../:assignmentId` で、member 個人に
+  Workspace / Team / Project scope の role を直接割り当てる。group mapping と同じ
+  `security.manage` または `members.manage` を要求し、caller の permission を超える role は拒否する。
+  作成・解除は `role-assignment.created|deleted` として enterprise identity の state と同じ
+  transaction で監査に書く。
+- 優先関係は既存の規則に合わせる。個人 assignment を持つ member は legacy role ではなく assignment だけで
+  評価する。和集合にはしない。
+- この規則で起きる降格・昇格を防ぐため、自分自身、owner、owner 以外が操作する admin、guest への
+  guest 不可 role を API が拒否する。解除にも同じ制限をかける。
+- Built-in role に `workspace:portfolio-viewer`（全 Team・Project の読み取り）と
+  `workspace:auditor`（`audit.read`）を加える。Guest には割り当てられず、assignment 後に guest へ
+  変わった member では評価時に無視する。
+
+## 検討した選択肢
+
+- 個人 assignment を legacy role と和集合にする: Project manager が PMO role を付けても自分の Project を
+  編集し続けられる。ただし legacy の member / admin role は Workspace scope で書き込み権限を持つので、
+  和集合にすると全 Project を編集できる。Legacy の Project 単位の判定を enterprise の評価と
+  合成し直す必要があり、範囲が大きい。
+- 既定 role を custom role の雛形として作る: Workspace ごとに作成が要り、名前や permission が
+  変えられて「既定」として扱えない。Built-in にして固定した。
+- System administrator（Cognito group）を owner / role assignment に置き換える: Cognito group は
+  CDK と運用手順（`cdk/README.md`）に結び付いており、別の判断として扱う。この ADR では変えない。
+
+## 結果
+
+- AWS の操作や SCIM なしで、PMO と監査担当に権限を付けられ、付与と解除が監査 log に残る。
+- PMO role を付けた Project manager は、その Project も読み取りだけになる。編集が要る Project には
+  Project scope の role を追加で割り当てる。利用者ガイドに明記した。
+- System administrator の画面からの付与・解除は未対応のまま残る（Issue #429 に記録）。
+- 更新した文書: `docs/enterprise-identity.md`、`docs/guide/admin.md`。

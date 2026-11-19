@@ -927,6 +927,110 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
     })
   }
 
+  /**
+   * Assigns a role directly to one Workspace member and records `role-assignment.created`.
+   *
+   * @remarks
+   * The caller validates the member, the caller's permission ceiling, and the scope. Assigning
+   * the same role at the same scope twice is rejected so a retry cannot hide a duplicate.
+   * @param assignment - Direct member assignment to store.
+   * @param auditContext - Audit context of the request.
+   * @returns The stored assignment.
+   */
+  async putMemberRoleAssignment(
+    assignment: EnterpriseRoleAssignment,
+    auditContext?: MutationAuditContext,
+  ) {
+    if (assignment.principalKind !== 'member' || assignment.source !== 'direct') {
+      throw new EnterpriseIdentityError(
+        400,
+        'EnterpriseRoleAssignmentInvalid',
+        'Only direct member role assignments can be created here.',
+      )
+    }
+    return this.mutate(assignment.workspaceId, {
+      context: auditContext,
+      eventType: 'role-assignment.created',
+      action: 'created',
+      entityId: assignment.assignmentId,
+      metadata: toRoleAssignmentAuditMetadata(assignment),
+    }, (state) => {
+      if (!roleExists(state, assignment.roleId)) {
+        throw new EnterpriseIdentityError(
+          400,
+          'EnterpriseRoleNotFound',
+          'Role assignment references an unknown role.',
+        )
+      }
+      const existing = state.roleAssignments.find((candidate) =>
+        candidate.assignmentId === assignment.assignmentId
+      )
+      if (existing) {
+        if (!isSameRoleAssignment(existing, assignment)) {
+          throw new EnterpriseIdentityError(
+            409,
+            'EnterpriseIdempotencyConflict',
+            'Role assignment idempotency key was already used with a different payload.',
+          )
+        }
+        return existing
+      }
+      if (state.roleAssignments.some((candidate) =>
+        candidate.principalKind === 'member' &&
+        candidate.principalId === assignment.principalId &&
+        candidate.roleId === assignment.roleId &&
+        candidate.scope.kind === assignment.scope.kind &&
+        candidate.scope.targetId === assignment.scope.targetId
+      )) {
+        throw new EnterpriseIdentityError(
+          409,
+          'EnterpriseRoleAssignmentDuplicate',
+          'The member already has this role at the selected scope.',
+        )
+      }
+      state.roleAssignments.push(assignment)
+      return assignment
+    })
+  }
+
+  /**
+   * Removes a direct member role assignment and records `role-assignment.deleted`.
+   *
+   * @remarks
+   * The caller passes the assignment it read so the audit event names the member, role, and
+   * scope. The assignment is removed only while the stored copy still matches it.
+   * @param assignment - Direct member assignment the caller read.
+   * @param auditContext - Audit context of the request.
+   */
+  async deleteMemberRoleAssignment(
+    assignment: EnterpriseRoleAssignment,
+    auditContext?: MutationAuditContext,
+  ) {
+    await this.mutate(assignment.workspaceId, {
+      context: auditContext,
+      eventType: 'role-assignment.deleted',
+      action: 'deleted',
+      entityId: assignment.assignmentId,
+      metadata: toRoleAssignmentAuditMetadata(assignment),
+    }, (state) => {
+      const stored = state.roleAssignments.find((candidate) =>
+        candidate.assignmentId === assignment.assignmentId &&
+        candidate.principalKind === 'member' &&
+        candidate.source === 'direct'
+      )
+      if (!stored || !isSameRoleAssignment(stored, assignment)) {
+        throw new EnterpriseIdentityError(
+          404,
+          'EnterpriseRoleAssignmentNotFound',
+          'Role assignment was not found.',
+        )
+      }
+      state.roleAssignments = state.roleAssignments.filter((candidate) =>
+        candidate.assignmentId !== assignment.assignmentId
+      )
+    })
+  }
+
   /** SCIM bearer credential を一度だけ発行します。 */
   async issueScimToken(
     workspaceId: string,
@@ -6032,6 +6136,50 @@ function requireReadyIdentityProvider(
   )
   assertEnterpriseIdentityProviderReady(provider)
   return provider
+}
+
+/**
+ * Compares two role assignments by principal, role, scope, and source.
+ *
+ * @param left - First assignment.
+ * @param right - Second assignment.
+ * @returns Whether both describe the same grant.
+ */
+function isSameRoleAssignment(
+  left: EnterpriseRoleAssignment,
+  right: EnterpriseRoleAssignment,
+) {
+  return left.assignmentId === right.assignmentId &&
+    left.principalKind === right.principalKind &&
+    left.principalId === right.principalId &&
+    left.roleId === right.roleId &&
+    left.source === right.source &&
+    left.scope.kind === right.scope.kind &&
+    left.scope.targetId === right.scope.targetId &&
+    left.scope.parentTeamId === right.scope.parentTeamId
+}
+
+/**
+ * Builds the public audit metadata that names who received which role where.
+ *
+ * @param assignment - Direct member assignment.
+ * @returns Audit metadata with the member, role, and scope.
+ */
+function toRoleAssignmentAuditMetadata(assignment: EnterpriseRoleAssignment) {
+  return {
+    memberKey: assignment.principalId,
+    roleId: assignment.roleId,
+    scopeKind: assignment.scope.kind,
+    ...(assignment.scope.kind === 'team' && assignment.scope.targetId
+      ? { teamId: assignment.scope.targetId }
+      : {}),
+    ...(assignment.scope.kind === 'project'
+      ? {
+          ...(assignment.scope.targetId ? { projectId: assignment.scope.targetId } : {}),
+          ...(assignment.scope.parentTeamId ? { teamId: assignment.scope.parentTeamId } : {}),
+        }
+      : {}),
+  }
 }
 
 function roleExists(state: EnterpriseIdentityState, roleId: string) {

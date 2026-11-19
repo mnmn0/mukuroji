@@ -155,6 +155,11 @@ const builtInRolePermissions: Record<
     permission !== 'identity.read' &&
     permission !== 'security.read'
   ),
+  // PMO and executives read every Team and Project without becoming a member or editing.
+  'workspace:portfolio-viewer': ['workspace.read', 'members.read', 'teams.read', 'projects.read',
+    'work-items.read', 'documents.read', 'files.read', 'requests.read', 'planning.read'],
+  // Auditors read the audit log only; exporting it stays with `audit.export` holders.
+  'workspace:auditor': ['workspace.read', 'members.read', 'audit.read'],
   'team:manager': ['teams.read', 'teams.write', 'teams.manage', 'projects.read', 'projects.write',
     'projects.manage', 'work-items.read', 'work-items.write', 'documents.read', 'documents.write',
     'documents.manage', 'files.read', 'files.write', 'files.approve', 'planning.read',
@@ -170,6 +175,38 @@ const builtInRolePermissions: Record<
     'documents.read', 'documents.write', 'files.read', 'files.write', 'planning.read'],
   'project:viewer': ['projects.read', 'work-items.read', 'documents.read', 'files.read',
     'planning.read'],
+}
+
+/**
+ * Workspace-wide read roles that never apply to a guest, even when assigned before the member
+ * became a guest, so a guest cannot read every Project or the audit log.
+ */
+const guestExcludedBuiltInRoleIds: ReadonlySet<EnterpriseRoleId> = new Set<EnterpriseRoleId>([
+  'workspace:portfolio-viewer',
+  'workspace:auditor',
+])
+
+/**
+ * Built-in roles that a guest member may receive.
+ */
+const guestAssignableBuiltInRoleIds: ReadonlySet<EnterpriseRoleId> = new Set<EnterpriseRoleId>([
+  'workspace:guest',
+  'project:viewer',
+])
+
+/**
+ * Determines whether a role may be assigned to a guest member.
+ *
+ * @param customRoles - Custom roles configured for the workspace.
+ * @param roleId - Role ID to check.
+ * @returns Whether a guest may hold the role.
+ */
+export function isEnterpriseRoleGuestAssignable(
+  customRoles: readonly EnterpriseCustomRole[],
+  roleId: EnterpriseRoleId,
+): boolean {
+  if (guestAssignableBuiltInRoleIds.has(roleId)) return true
+  return customRoles.some((role) => role.roleId === roleId && role.guestAssignable)
 }
 
 /**
@@ -431,9 +468,10 @@ export function evaluateEnterpriseAccess(
   for (const roleId of roleIds) {
     const customRole = input.customRoles.find((role) => role.roleId === roleId)
     if (
-      customRole &&
       input.principal.workspaceRole === 'guest' &&
-      !customRole.guestAssignable
+      (
+        customRole ? !customRole.guestAssignable : guestExcludedBuiltInRoleIds.has(roleId)
+      )
     ) {
       continue
     }
