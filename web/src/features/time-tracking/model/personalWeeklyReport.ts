@@ -227,12 +227,16 @@ function formatItemLines(items: readonly PersonalWeeklyReportItem[], t: (key: Me
  * @param report - Generated facts.
  * @param notes - The member's free text.
  * @param t - Translator.
+ * @param options - Export options.
+ * @param options.timeIsPartial - Whether only part of the time entries could be read; the
+ *   recorded-time section then says so, so a short total is not shared as complete.
  * @returns Markdown text ready to paste into a report, chat, or Document.
  */
 export function formatPersonalWeeklyReportMarkdown(
   report: PersonalWeeklyReport,
   notes: PersonalWeeklyReportNotes,
   t: (key: MessageKey) => string,
+  options: { timeIsPartial?: boolean } = {},
 ): string {
   const lines: string[] = [
     `# ${t('timeTracking.weeklyReport.title')} ${report.weekStart} – ${report.weekEnd}`,
@@ -257,6 +261,7 @@ export function formatPersonalWeeklyReportMarkdown(
   lines.push(
     '',
     `## ${t('timeTracking.weeklyReport.time')}`,
+    ...(options.timeIsPartial === true ? [`> ${t('timeTracking.weeklyReport.partial')}`, ''] : []),
     `- ${t('timeTracking.weeklyReport.total')} ${formatMinutes(report.totalMinutes)}`,
     ...report.time.map((row) => `- ${toSingleLine(row.title)} ${formatMinutes(row.minutes)}`),
   )

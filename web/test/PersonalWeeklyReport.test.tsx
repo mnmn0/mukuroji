@@ -191,6 +191,15 @@ describe('formatPersonalWeeklyReportMarkdown', () => {
     ].join('\n'))
   })
 
+  test('says in the export that the recorded time is partial', () => {
+    const report = buildPersonalWeeklyReport({ weekDays: week.days, today: '2026-11-13', workItems: [], entries: [] })
+
+    expect(formatPersonalWeeklyReportMarkdown(report, { issues: '', reflection: '' }, en, { timeIsPartial: true }))
+      .toContain(`## Recorded time\n> ${en('timeTracking.weeklyReport.partial')}\n\n- Total 0:00`)
+    expect(formatPersonalWeeklyReportMarkdown(report, { issues: '', reflection: '' }, en))
+      .not.toContain(en('timeTracking.weeklyReport.partial'))
+  })
+
   test('keeps each title on one line and marks empty sections', () => {
     const report = buildPersonalWeeklyReport({
       weekDays: week.days,

@@ -97,7 +97,10 @@ export function PersonalWeeklyReport({
   const id = useId()
   const [notes, setNotes] = useState<PersonalWeeklyReportNotes>({ issues: '', reflection: '' })
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
-  const markdown = useMemo(() => formatPersonalWeeklyReportMarkdown(report, notes, t), [notes, report, t])
+  const markdown = useMemo(
+    () => formatPersonalWeeklyReportMarkdown(report, notes, t, { timeIsPartial: isPartial }),
+    [isPartial, notes, report, t],
+  )
 
   /** Copies the Markdown and reports the outcome. */
   const copy = async () => {
