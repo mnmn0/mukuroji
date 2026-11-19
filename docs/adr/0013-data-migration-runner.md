@@ -1,4 +1,4 @@
-# 0012. 保存済み row の schema 移行を、checkpoint 付きの共通 runner と専用の checkpoint table で行う
+# 0013. 保存済み row の schema 移行を、checkpoint 付きの共通 runner と専用の checkpoint table で行う
 
 - 状態: 提案
 - 日付: 2026-11-20
