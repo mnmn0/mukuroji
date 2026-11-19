@@ -51,8 +51,26 @@ export const DOCUMENT_VERSION_RETENTION_DAYS = 180
 /** Retention period for operation idempotency receipts. */
 export const DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS = 30
 
-/** Maximum number of transactionally indexed backlinks per document. */
-export const DOCUMENT_MAX_BACKLINK_COUNT = 14
+/**
+ * Maximum number of relations and Whiteboard Work Item objects per document.
+ *
+ * Backlink rows are written in the same DynamoDB transaction as the Document
+ * change that adds or removes them, so this total is bounded by item size and
+ * relation-target validation cost rather than by the transaction size.
+ */
+export const DOCUMENT_MAX_BACKLINK_COUNT = 500
+
+/**
+ * Maximum number of backlink additions and removals in one Document mutation.
+ *
+ * Each changed Work Item link writes a backlink row and a target fence row in
+ * the Document transaction, so this keeps every mutation within DynamoDB's
+ * 100-action transaction limit together with the Document, search, version,
+ * receipt, and authorization-guard actions. 28 changes use at most 56
+ * backlink actions, the same headroom as replacing every link under the
+ * former 14-link document limit.
+ */
+export const DOCUMENT_MAX_BACKLINK_CHANGE_COUNT = 28
 
 /** Maximum text length accepted by document content validators. */
 export const DOCUMENT_MAX_TEXT_LENGTH = 50_000

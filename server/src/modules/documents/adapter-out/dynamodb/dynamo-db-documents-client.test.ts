@@ -12,6 +12,7 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from '../../../audit/audit'
 import {
+  DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_MAX_BACKLINK_COUNT,
   DOCUMENT_MAX_ITEM_BYTES,
   createDocumentSearchAccessReadContext,
@@ -2824,7 +2825,7 @@ test('serializes the first backlink fence against a stale deletion fence and rep
   })
 })
 
-test('keeps deepest-tree full backlink replacement within 100 actions and rejects the next relation before writing', async () => {
+test('keeps the deepest-tree largest backlink change within 100 actions and rejects the next change before writing', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
   seedOwnerAuthorization(memory)
@@ -2856,10 +2857,11 @@ test('keeps deepest-tree full backlink replacement within 100 actions and reject
     })
     parentId = folder.id
   }
+  const replacedRelationCount =
+    DOCUMENT_MAX_BACKLINK_CHANGE_COUNT / 2
   const initialRelations = Array.from(
     {
-      length:
-        DOCUMENT_MAX_BACKLINK_COUNT,
+      length: replacedRelationCount,
     },
     (_value, index) =>
       createWorkItemRelation(
@@ -2880,8 +2882,7 @@ test('keeps deepest-tree full backlink replacement within 100 actions and reject
   let revision = document.revision
   for (
     let offset = 0;
-    offset <
-      DOCUMENT_MAX_BACKLINK_COUNT;
+    offset < replacedRelationCount;
     offset += 4
   ) {
     const operations =
@@ -2966,7 +2967,7 @@ test('keeps deepest-tree full backlink replacement within 100 actions and reject
     relations: Array.from(
       {
         length:
-          DOCUMENT_MAX_BACKLINK_COUNT +
+          DOCUMENT_MAX_BACKLINK_CHANGE_COUNT +
           1,
       },
       (_value, index) =>
@@ -2978,13 +2979,110 @@ test('keeps deepest-tree full backlink replacement within 100 actions and reject
   })).rejects.toMatchObject({
     status: 413,
     code:
-      'DocumentBacklinkLimitExceeded',
+      'DocumentBacklinkChangeLimitExceeded',
   })
   expect(
     memory
       .transactionActionCounts()
       .length,
   ).toBe(transactionCount)
+})
+
+test('links one Document to hundreds of Work Items through bounded atomic changes', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  seedOwnerAuthorization(memory)
+  const linkCount = 200
+  const document = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Weekly minutes',
+    blocks: [],
+    relations: [],
+  })
+  let revision = document.revision
+  for (
+    let offset = 0;
+    offset < linkCount;
+    offset += 4
+  ) {
+    const response = await client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: document.id,
+      access: ownerAccess,
+      input: {
+        baseRevision: revision,
+        clientId: 'editor-1',
+        operations: Array.from(
+          { length: 4 },
+          (_value, relationOffset) => ({
+            type: 'upsert-relation' as const,
+            operationId: `link-${offset + relationOffset}`,
+            relation: createWorkItemRelation(
+              `relation-${offset + relationOffset}`,
+              `team/team-a/issue/linked-${offset + relationOffset}`,
+            ),
+          }),
+        ),
+      },
+    })
+    revision = response.revision
+  }
+
+  const stored = await client.get({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+  })
+  expect(stored.relations).toHaveLength(linkCount)
+  for (const index of [0, 99, linkCount - 1]) {
+    const workItemId = `team/team-a/issue/linked-${index}`
+    expect(
+      findWorkItemBacklinkTargetFence(memory, workItemId),
+    ).toMatchObject({ activeBacklinkCount: 1 })
+    await expect(client.listBacklinks({
+      workspaceId: 'workspace-1',
+      access: ownerAccess,
+      targetKind: 'work-item',
+      targetId: workItemId,
+    })).resolves.toMatchObject({
+      backlinks: [{
+        documentId: document.id,
+        relation: { id: `relation-${index}` },
+      }],
+    })
+  }
+
+  const unlinked = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: document.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'delete-relation',
+        operationId: 'unlink-0',
+        relationId: 'relation-0',
+      }],
+    },
+  })
+  expect(unlinked.revision).toBe(revision + 1)
+  expect(
+    findWorkItemBacklinkTargetFence(
+      memory,
+      'team/team-a/issue/linked-0',
+    ),
+  ).toMatchObject({ activeBacklinkCount: 0 })
+  await expect(client.listBacklinks({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    targetKind: 'work-item',
+    targetId: 'team/team-a/issue/linked-0',
+  })).resolves.toMatchObject({ backlinks: [] })
+  expect(DOCUMENT_MAX_BACKLINK_COUNT).toBeGreaterThanOrEqual(linkCount)
 })
 
 test('hashes public tokens at rest, carries allowExport, and checks expiry synchronously', async () => {
