@@ -14,10 +14,10 @@ function toHttpStatus(status: number): 400 | 403 | 404 | 409 | 500 {
 /**
  * Creates a router whose caller is `manager-1`, with a configurable management scope.
  *
- * @param scope - Whether the caller manages time at all, and the Projects it is limited to.
+ * @param scope - Whether the caller manages time at all, and whether it manages the whole Team.
  * @returns The router and its service.
  */
-function createFixture(scope: { canManage: boolean; managedProjectIds?: ReadonlySet<string> }) {
+function createFixture(scope: { canManage: boolean; wholeTeam: boolean }) {
   const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
     now: () => new Date('2026-08-02T12:00:00.000Z'),
     createId: (() => {
@@ -32,7 +32,8 @@ function createFixture(scope: { canManage: boolean; managedProjectIds?: Readonly
     requireTeamPermission: async () => {},
     canManageRates: async () => scope.canManage,
     getAccessibleProjectIds: async () => undefined,
-    getManagedProjectIds: async () => scope.managedProjectIds,
+    canManageWholeTeam: async () => scope.wholeTeam,
+    getManagedProjectIds: async () => undefined,
     verifyProject: async () => {},
     verifyWorkItem: async () => undefined,
     getTimeTracking: () => service,
@@ -51,7 +52,7 @@ const headers = { Authorization: 'Bearer token', 'Content-Type': 'application/js
 
 describe('time period close routes', () => {
   test('a Team manager closes, lists, and reopens a month with a reason', async () => {
-    const { router } = createFixture({ canManage: true })
+    const { router } = createFixture({ canManage: true, wholeTeam: true })
     const closed = await router.request('/api/teams/team-1/time-periods/2026-07/close', {
       method: 'POST',
       headers,
@@ -90,7 +91,7 @@ describe('time period close routes', () => {
   })
 
   test('only a manager of the whole Team may close or reopen a month', async () => {
-    for (const scope of [{ canManage: false }, { canManage: true, managedProjectIds: new Set(['project-1']) }]) {
+    for (const scope of [{ canManage: false, wholeTeam: false }, { canManage: true, wholeTeam: false }]) {
       const { router } = createFixture(scope)
       for (const action of ['close', 'reopen']) {
         const response = await router.request(`/api/teams/team-1/time-periods/2026-07/${action}`, {
@@ -105,7 +106,7 @@ describe('time period close routes', () => {
   })
 
   test('a manager returns an approved entry with a reason', async () => {
-    const { router, service } = createFixture({ canManage: true })
+    const { router, service } = createFixture({ canManage: true, wholeTeam: true })
     const entry = await service.createEntry({
       workspaceId: 'workspace-1',
       teamId: 'team-1',

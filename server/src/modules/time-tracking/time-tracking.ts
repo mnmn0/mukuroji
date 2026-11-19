@@ -86,6 +86,8 @@ const TIMER_PREFIX = 'TIME_TIMER#'
 const BUDGET_PREFIX = 'TIME_BUDGET#'
 const PERIOD_CLOSE_PREFIX = 'TIME_CLOSE#'
 const MONTH_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])$/u
+const MIN_CLOSE_YEAR = 1970
+const MAX_CLOSE_YEAR = 9998
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
 const ISO_INSTANT_PATTERN = /T.*(?:Z|[+-]\d{2}:\d{2})$/u
 const CURRENCY_PATTERN = /^[A-Z]{3}$/u
@@ -1139,6 +1141,8 @@ export class TimeTrackingService {
       closedBy: readIdentifier(input.actorUserId, 'Actor user ID'),
       closedAt: readNow(this.now).toISOString(),
     }
+    // Resolve the boundaries now so a stored close can never break later overlap checks.
+    monthBounds(close.month, close.timeZone)
     const auditPut = this.createPeriodAuditPut(close, 'closed', close.closedBy, input.idempotencyKey ?? this.createId(), close.closedAt)
     const idempotencyPut = completion ? await completion(close) : undefined
     await this.repository.createPeriodClose(close, auditPut, idempotencyPut)
@@ -2168,6 +2172,11 @@ function historyActionFor(action: TransitionTimeEntryInput['action']): TimeEntry
 function readMonth(value: string): string {
   if (typeof value !== 'string' || !MONTH_PATTERN.test(value)) {
     throw new TimeTrackingError(400, 'InvalidMonth', 'Month must be YYYY-MM.')
+  }
+  // The month after must still be a four-digit year so its first instant can be resolved.
+  const year = Number(value.slice(0, 4))
+  if (year < MIN_CLOSE_YEAR || year > MAX_CLOSE_YEAR) {
+    throw new TimeTrackingError(400, 'InvalidMonth', `Month must be between ${MIN_CLOSE_YEAR}-01 and ${MAX_CLOSE_YEAR}-12.`)
   }
   return value
 }

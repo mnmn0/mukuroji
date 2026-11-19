@@ -35,6 +35,11 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
   canManageRates(principal: Principal, teamId: string): Promise<boolean>
   /** Returns the Project allowlist visible inside the selected Team. */
   getAccessibleProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
+  /**
+   * Returns whether the principal manages every Project of a Team: a system administrator or a
+   * direct Team grant with manage permission, not a manager of only some Projects.
+   */
+  canManageWholeTeam(principal: Principal, teamId: string): Promise<boolean>
   /** Returns the Project IDs for which the principal may view confidential costs. */
   getManagedProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
   /** Verifies Project-level access for a Team operation. */
@@ -511,7 +516,7 @@ async function withTeam<Principal extends TimeTrackingPrincipal>(
 /**
  * Requires a manager of every Project in the Team, because a month close applies to all of its time.
  *
- * @param dependencies - Router dependencies used to read the managed Projects.
+ * @param dependencies - Router dependencies used to read the Team management scope.
  * @param principal - Authenticated caller.
  * @param teamId - Team whose month is closed or reopened.
  * @param canManage - Whether the caller manages time in the Team at all.
@@ -523,8 +528,7 @@ async function requireWholeTeamManager<Principal extends TimeTrackingPrincipal>(
   teamId: string,
   canManage: boolean,
 ): Promise<void> {
-  const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
-  if (!canManage || managedProjectIds !== undefined) {
+  if (!canManage || !await dependencies.canManageWholeTeam(principal, teamId)) {
     throw new TimeTrackingError(403, 'TimePeriodCloseDenied', 'Only a manager of the whole Team may close or reopen a month.')
   }
 }

@@ -95,6 +95,8 @@ export function registerTimeTrackingRoutes(routeApp: Hono): void {
       await requireTeamPermission(principal, teamId, minimum)
     },
     canManageRates: async (principal, teamId) => await readTeamManagerContext(principal, teamId) !== undefined,
+    canManageWholeTeam: async (principal, teamId) =>
+      principal.isSystemAdmin || (await readTeamManagerContext(principal, teamId))?.directTeamGrant === true,
     getAccessibleProjectIds: async (principal, teamId) => {
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       if (principal.isSystemAdmin) return undefined

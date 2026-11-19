@@ -157,6 +157,9 @@ describe('TimeTrackingService month close', () => {
     await service.closePeriod(input)
     expect(await errorCode(() => service.closePeriod(input))).toBe('TimePeriodAlreadyClosed')
     expect(await errorCode(() => service.closePeriod({ ...input, month: '2026-13' }))).toBe('InvalidMonth')
+    // The month after 9999-12 has no four-digit year, so it would break every later overlap check.
+    expect(await errorCode(() => service.closePeriod({ ...input, month: '9999-12' }))).toBe('InvalidMonth')
+    expect(await service.listClosedPeriods('workspace-1', 'team-1')).toHaveLength(1)
     expect(await errorCode(() => service.closePeriod({ ...input, month: '2026-08', timeZone: 'Not/AZone' }))).toBe('InvalidTimeZone')
     expect(await errorCode(() => service.reopenPeriod({ ...input, month: '2026-06', reason: 'typo' }))).toBe('TimePeriodNotClosed')
   })
