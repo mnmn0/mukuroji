@@ -632,9 +632,16 @@ Cognito の既定 email が初期 owner に仮パスワードを送り、owner �
 招待が多い場合は SES の設定を user pool に追加してください。SSO を使う場合は、stack が作った
 user pool に IdP と SSO 専用 client を追加し、その client ID を SSO parameter に渡します。
 
-既存の user pool を使う場合は、以下の条件をそろえてから両 parameter を渡します。app client の
-`WriteAttributes` には `email`、`custom:directory_id`、`custom:workspace_id` を含めないでください。
+既存の user pool を使う場合は、以下の条件をそろえてから両 parameter を渡します。password client の
+`WriteAttributes` は明示設定し、`email`、`email_verified`、`custom:directory_id`、`custom:workspace_id`
+を含めないでください（例: `name` だけ）。未設定の場合の Cognito default は `email` を書けます。
 含めると、user が自分の access token でこれらを書き換え、別の user として認可される可能性があります。
+user pool は `AdminCreateUserConfig.AllowAdminCreateUserOnly=true`（self sign-up なし）にします。
+この2点は準備 script、bootstrap validator、deploy 時の `ValidateCognitoClientContract` custom
+resource が検証し、満たさなければ失敗します。stack が作る user pool は最初から満たしています。
+多層防御として、API は `email_verified=false` かつ email が username と異なる user（自分で email を
+変えた user）を拒否します。email でサインインする pool（username が Cognito の生成値 = `sub`）は
+Cognito が email の重複を拒否するため、この判定の対象外です。
 
 初期 owner は既に Cognito に存在し、enabled / `CONFIRMED` である必要があります。
 Password/API client は client secret なしで `ALLOW_USER_PASSWORD_AUTH` を許可します。SSO client は
