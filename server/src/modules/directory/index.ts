@@ -21,6 +21,7 @@ export {
   type ProjectMemberResponseItem,
   type ProjectMembersResponse,
   type ProjectRole,
+  type ProjectSearchSource,
   type RemoveProjectMemberResponse,
   type UpdateProjectMemberRequestBody,
   type UpdateProjectMemberResponse,

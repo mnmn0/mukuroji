@@ -184,6 +184,7 @@ export const projectsMessages = {
   'projects.administration.restoring': 'Restoring',
   'projects.administration.error.action': 'The change could not be saved. Try again later.',
   'projects.administration.error.conflict': 'Another change got there first. The list was reloaded; try again.',
+  'projects.administration.error.cleanupPending': 'The archive is still being cleaned up. Try restoring again in a few minutes.',
 } as const satisfies Record<
   Extract<
     MessageKey,

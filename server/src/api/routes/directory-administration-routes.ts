@@ -11,7 +11,7 @@ import {
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { projectWorkspaceSearchDocumentBestEffort } from '../shared/search-access'
-import { projectCharterSearchDocumentBestEffort } from './project-charter-routes'
+import { projectProjectSearchDocumentBestEffort } from './project-charter-routes'
 
 /**
  * Registers the endpoints that rename, restore, and reorder Teams and Projects.
@@ -113,7 +113,12 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         body,
         createApiMutationContext(c, principal, { teamId, projectId, body }),
       )
-      await projectProjectSearchDocument(principal.directoryId, teamId, projectId)
+      await projectProjectSearchDocumentBestEffort(
+        principal.directoryId,
+        teamId,
+        projectId,
+        'project rename or restore',
+      )
       return response
     })
   })
@@ -129,7 +134,12 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         projectId,
         createApiMutationContext(c, principal, { teamId, projectId }),
       )
-      await projectProjectSearchDocument(principal.directoryId, teamId, projectId)
+      await projectProjectSearchDocumentBestEffort(
+        principal.directoryId,
+        teamId,
+        projectId,
+        'project rename or restore',
+      )
       return response
     })
   })
@@ -164,8 +174,30 @@ async function handleDirectoryAdministration(
       return toAuthErrorResponse(c, error)
     }
 
+    if (error instanceof ProjectDataError) {
+      const status = directoryAdministrationErrorStatuses[error.code]
+      if (status !== undefined) {
+        return c.json({ code: error.code, message: error.message }, status)
+      }
+    }
+
     return toProjectDataErrorResponse(c, error)
   }
+}
+
+/**
+ * Expected directory administration failures, answered with their status and stable code so the
+ * client can tell a stale list or a concurrent change from an infrastructure failure.
+ */
+const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 409 | 413 | 503>> = {
+  InvalidDirectoryOrder: 400,
+  DirectoryOrderConflict: 409,
+  TeamNotArchived: 409,
+  ProjectNotArchived: 409,
+  TeamArchived: 409,
+  DirectoryArchiveCleanupPending: 409,
+  DirectoryOrderLimitExceeded: 413,
+  PlanningUnavailable: 503,
 }
 
 /**
@@ -221,29 +253,4 @@ async function projectTeamSearchDocument(
       ? { preserveCreator: true, unrevisioned: true }
       : { preserveCreator: true, sourceRevision },
   )
-}
-
-/**
- * Re-projects a Project search document with its current names and charter.
- *
- * @param workspaceId - Workspace that owns the Project.
- * @param teamId - Team that owns the Project.
- * @param projectId - Project identifier.
- */
-async function projectProjectSearchDocument(
-  workspaceId: string,
-  teamId: string,
-  projectId: string,
-) {
-  try {
-    const state = await workspaceDependencies.projectDirectory.getProjectCharter(
-      workspaceId,
-      teamId,
-      projectId,
-    )
-    // The rename or restore was just committed, so eventually consistent reads could miss it.
-    await projectCharterSearchDocumentBestEffort(workspaceId, state, true)
-  } catch (error) {
-    console.error('Workspace search projection failed after project rename or restore.', error)
-  }
 }

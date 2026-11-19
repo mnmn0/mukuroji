@@ -31,6 +31,11 @@ key を変えると、key を前提にした transaction の条件、data integr
   参照は残っているので、復元すると元に戻る。Project の復元は Team が有効なことを条件にする。
   アーカイブで一緒にアーカイブされた Planning の更新対象も、同じ transaction で使える状態に戻し
   （Planning の revision を上げる）、cadence は消す。
+  アーカイブで始まった Webhook grant の後始末（cleanup locator）が残っている間は、復元を 409 で断る。
+  後始末より先に復元すると古い grant が有効に戻り、復元後に作り直した grant を後始末が消してしまうため。
+- Project row にも名称変更・色変更の回数 `nameRevision` を持たせ、Project の検索 document の
+  `sourceRevision` は charter の revision と `nameRevision` の和にする。どちらも増えるだけなので、
+  同じ row を 1 回読んだ値どうしなら、新しい方が必ず大きい。
 - 変更はすべて `project.renamed` / `project.restored` / `project.reordered` として audit に記録する。
 
 ## 検討した選択肢

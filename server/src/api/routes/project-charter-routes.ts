@@ -7,8 +7,7 @@ import {
   transitionProjectLifecycleUseCase,
   updateProjectCharterUseCase,
   type ProjectCharterCallerAuthorization,
-  type ProjectDirectoryProjectResponse,
-  type ProjectDirectoryTeamResponse,
+  type ProjectSearchSource,
   type ResolvedProjectCharterPerson,
 } from '../../modules/directory'
 import {
@@ -305,53 +304,63 @@ async function resolveCharterPerson(
  * Re-projects the Project search document so its charter text becomes searchable.
  *
  * @param workspaceId - Workspace that owns the Project.
- * @param state - Committed charter state.
- * @param consistentRead - Whether to read the directory strongly consistently, so names or archive
- * state committed just before are seen.
+ * @param state - Committed charter state; only its Team and Project identify the document.
  */
-export async function projectCharterSearchDocumentBestEffort(
+export async function projectCharterSearchDocumentBestEffort(workspaceId: string, state: ProjectCharterState) {
+  await projectProjectSearchDocumentBestEffort(
+    workspaceId,
+    state.teamId,
+    state.projectId,
+    'project charter update',
+  )
+}
+
+/**
+ * Re-projects the Project search document from one strongly consistent read of the Project.
+ *
+ * The charter, the names, and the source revision come from the same snapshot. The source
+ * revision is the charter revision plus the rename count, so a slower projection of an older
+ * charter or name cannot overwrite the document of a newer one.
+ *
+ * @param workspaceId - Workspace that owns the Project.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project identifier.
+ * @param operation - Operation label used when logging a projection failure.
+ */
+export async function projectProjectSearchDocumentBestEffort(
   workspaceId: string,
-  state: ProjectCharterState,
-  consistentRead = false,
+  teamId: string,
+  projectId: string,
+  operation: string,
 ) {
-  let names: { name: string; englishName?: string; project: ProjectDirectoryProjectResponse } | undefined
+  let source: ProjectSearchSource | undefined
   try {
-    const [japanese, english] = await Promise.all([
-      workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja', consistentRead),
-      workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'en', consistentRead),
-    ])
-    const findProject = (teams: readonly ProjectDirectoryTeamResponse[]) => teams
-      .find((team) => team.id === state.teamId)
-      ?.projects.find((project) => project.id === state.projectId)
-    const project = findProject(japanese.teams)
-    if (project) {
-      const englishName = findProject(english.teams)?.name
-      names = {
-        name: project.name,
-        project,
-        ...(englishName && englishName !== project.name ? { englishName } : {}),
-      }
-    }
+    source = await workspaceDependencies.projectDirectory.getProjectSearchSource(
+      workspaceId,
+      teamId,
+      projectId,
+    )
   } catch (error) {
-    console.error('Workspace search projection failed after project charter update.', error)
+    console.error(`Workspace search projection failed after ${operation}.`, error)
     return
   }
-  if (!names) return
-  const resolved = names
-  // The charter revision fences the write, so a slower projection of an older charter cannot
-  // overwrite the document of a newer one.
-  const sourceRevision = state.revision > 0 ? state.revision : undefined
+  if (!source) return
+  const resolved = source
+  const englishName = resolved.englishName !== resolved.project.name
+    ? resolved.englishName
+    : undefined
+  const sourceRevision = resolved.sourceRevision > 0 ? resolved.sourceRevision : undefined
   await projectWorkspaceSearchDocumentBestEffort(
     () => createProjectSearchDocument(
       workspaceId,
-      state.teamId,
+      teamId,
       resolved.project,
       undefined,
-      resolved.englishName,
-      state.charter,
+      englishName,
+      resolved.state.charter,
       sourceRevision,
     ),
-    'project charter update',
+    operation,
     // The Project row does not record its creator, so the creator projected at creation is kept.
     { sourceRevision, preserveCreator: true },
   )

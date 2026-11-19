@@ -19,6 +19,7 @@ import type {
 import {
   createWebhookGrantCleanupDirectoryId,
   createWebhookGrantCleanupEntryKey,
+  createWebhookGrantCleanupEntryKeyPrefix,
   createWebhookGrantCleanupItem,
   createWebhookMemberAuthorizationKey,
   createWebhookProjectAuthorizationSortKey,
@@ -272,6 +273,11 @@ type ProjectDirectoryProjectItem = {
    */
   displayOrder?: number
   /**
+   * Counts renames and color changes. Added to the charter revision, it fences the Project's
+   * search projection. Rows without it were never renamed.
+   */
+  nameRevision?: number
+  /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
   archivedAt?: string
@@ -500,6 +506,21 @@ export type RestoredDirectoryTeam = {
   nameEn: string
   /** Stored rename count, used to fence the Team's search projection. */
   nameRevision: number
+}
+
+/** What the search document of an active Project is built from, read in one snapshot. */
+export type ProjectSearchSource = {
+  /** Charter state of the Project. */
+  state: ProjectCharterState
+  /** Project directory row with the Japanese name. */
+  project: ProjectDirectoryProjectResponse
+  /** English display name. */
+  englishName: string
+  /**
+   * Charter revision plus rename count. Both only grow, so a later snapshot has a larger value
+   * whenever either changed.
+   */
+  sourceRevision: number
 }
 
 /**
@@ -971,6 +992,20 @@ export type ProjectDirectoryClient = {
     input: unknown,
     auditContext?: MutationAuditContext,
   ): Promise<ReorderDirectoryProjectsInput>
+  /**
+   * Reads, in one strongly consistent read, what the search document of an active Project is
+   * built from.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @returns The source, or undefined when the Project or its Team is archived or missing.
+   */
+  getProjectSearchSource(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+  ): Promise<ProjectSearchSource | undefined>
   /**
    * Reads the charter and lifecycle of one Team-owned Project, including an archived one.
    *
@@ -2737,22 +2772,7 @@ export class DynamoDbProjectDirectoryClient {
     // The names and rename count read above must still be stored, so a stale rename cannot
     // overwrite a newer one.
     const nameRevision = readNameRevision + 1
-    const readCondition = withReadNamesCondition(createActiveTeamRowCondition(teamId), team)
-    const condition: DirectoryRowCondition = {
-      ConditionExpression: `${readCondition.ConditionExpression} AND ${
-        team.nameRevision === undefined
-          ? 'attribute_not_exists(#nameRevision)'
-          : '#nameRevision = :readNameRevision'
-      }`,
-      ExpressionAttributeNames: {
-        ...readCondition.ExpressionAttributeNames,
-        '#nameRevision': 'nameRevision',
-      },
-      ExpressionAttributeValues: {
-        ...readCondition.ExpressionAttributeValues,
-        ...(team.nameRevision === undefined ? {} : { ':readNameRevision': team.nameRevision }),
-      },
-    }
+    const condition = withReadNamesCondition(createActiveTeamRowCondition(teamId), team)
     await this.sendDirectoryAdministrationTransaction([
       {
         Update: {
@@ -2829,13 +2849,15 @@ export class DynamoDbProjectDirectoryClient {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: project.entryKey },
-          UpdateExpression: 'SET nameJa = :nameJa, nameEn = :nameEn, tone = :tone',
+          UpdateExpression:
+            'SET nameJa = :nameJa, nameEn = :nameEn, tone = :tone, #nameRevision = :nameRevision',
           ...condition,
           ExpressionAttributeValues: {
             ...condition.ExpressionAttributeValues,
             ':nameJa': names.nameJa,
             ':nameEn': names.nameEn,
             ':tone': tone,
+            ':nameRevision': (project.nameRevision ?? 0) + 1,
           },
         },
       },
@@ -2892,6 +2914,8 @@ export class DynamoDbProjectDirectoryClient {
     if (team.archivedAt === undefined) {
       throw new ProjectDataError(409, 'TeamNotArchived', `Team "${teamId}" is not archived.`)
     }
+
+    await this.requireFinishedWebhookGrantCleanup(directoryId, teamId)
 
     // Projects that were active when the Team was archived become visible again, so their
     // Planning update targets, archived together with the Team, become usable again too.
@@ -2989,6 +3013,8 @@ export class DynamoDbProjectDirectoryClient {
         `Project "${projectId}" is not archived.`,
       )
     }
+
+    await this.requireFinishedWebhookGrantCleanup(directoryId, teamId, projectId)
 
     const planningItems = await this.readPlanningProjectRestoreItems(
       directoryId,
@@ -3156,6 +3182,39 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /** Reads the charter and lifecycle of one Team-owned Project, including an archived one. */
+  /**
+   * Reads, in one strongly consistent read, what the search document of an active Project is
+   * built from.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project identifier.
+   * @returns The source, or undefined when the Project or its Team is archived or missing.
+   */
+  async getProjectSearchSource(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+  ): Promise<ProjectSearchSource | undefined> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = items.find((item) => item.entryType === 'team' && item.teamId === teamId)
+    const project = items.find((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' && item.teamId === teamId && item.projectId === projectId
+    )
+
+    if (!team || !isActiveDirectoryItem(team) || !project || !isActiveDirectoryItem(project)) {
+      return undefined
+    }
+
+    const state = toProjectCharterState(project)
+    return {
+      state,
+      project: toProjectDirectoryProjectResponse(project, 'ja'),
+      englishName: localizedName(project, 'en'),
+      sourceRevision: state.revision + (project.nameRevision ?? 0),
+    }
+  }
+
   async getProjectCharter(directoryId: string, teamId: string, projectId: string) {
     try {
       return toProjectCharterState((await this.readTeamProjectItem(directoryId, teamId, projectId)).project)
@@ -3671,6 +3730,46 @@ export class DynamoDbProjectDirectoryClient {
       createPlanningRevisionBump(this.planningTableName, directoryId, revision, restoredAt),
       ...updates,
     ]
+  }
+
+  /**
+   * Rejects a restore while the archive's Webhook grant cleanup is still running.
+   *
+   * An archived Team or Project gets no new Webhook grants, so any cleanup locator left in its
+   * scope belongs to the archive's cleanup. Restoring before it finishes would reactivate those
+   * grants, and the cleanup could later delete grants rebuilt after the restore.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Archived Team, or the Team of the archived Project.
+   * @param projectId - Archived Project, when restoring a Project.
+   */
+  private async requireFinishedWebhookGrantCleanup(
+    directoryId: string,
+    teamId: string,
+    projectId?: string,
+  ) {
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression: projectId === undefined
+        ? 'directoryId = :directoryId'
+        : 'directoryId = :directoryId AND begins_with(entryKey, :entryKeyPrefix)',
+      ExpressionAttributeValues: {
+        ':directoryId': createWebhookGrantCleanupDirectoryId(directoryId, teamId),
+        ...(projectId === undefined
+          ? {}
+          : { ':entryKeyPrefix': createWebhookGrantCleanupEntryKeyPrefix(projectId) }),
+      },
+      ConsistentRead: true,
+      Limit: 1,
+    }))
+
+    if ((response.Items ?? []).length > 0) {
+      throw new ProjectDataError(
+        409,
+        'DirectoryArchiveCleanupPending',
+        'The archive is still being cleaned up. Try again in a few minutes.',
+      )
+    }
   }
 
   /**
@@ -5104,17 +5203,15 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
     typeof value.nameJa !== 'string' ||
     typeof value.nameEn !== 'string' ||
     (value.archivedAt !== undefined && typeof value.archivedAt !== 'string') ||
-    (value.displayOrder !== undefined && !Number.isSafeInteger(value.displayOrder))
+    (value.displayOrder !== undefined && !Number.isSafeInteger(value.displayOrder)) ||
+    (value.nameRevision !== undefined &&
+      !(Number.isSafeInteger(value.nameRevision) && Number(value.nameRevision) >= 0))
   ) {
     return false
   }
 
   if (value.entryType === 'team') {
-    return (
-      (value.expanded === undefined || typeof value.expanded === 'boolean') &&
-      (value.nameRevision === undefined ||
-        (Number.isSafeInteger(value.nameRevision) && Number(value.nameRevision) >= 0))
-    )
+    return value.expanded === undefined || typeof value.expanded === 'boolean'
   }
 
   return (
@@ -5308,7 +5405,8 @@ type DirectoryRowCondition = {
 }
 
 /**
- * Extends a row condition so the names, and a Project's color, still hold the values read.
+ * Extends a row condition so the names, the rename count, and a Project's color still hold the
+ * values read.
  *
  * @param condition - Active-row condition.
  * @param row - Row as read before the rename.
@@ -5318,9 +5416,23 @@ function withReadNamesCondition(
   condition: DirectoryRowCondition,
   row: ProjectDirectoryTeamItem | ProjectDirectoryProjectItem,
 ): DirectoryRowCondition {
-  const clauses = ['#nameJa = :readNameJa', '#nameEn = :readNameEn']
-  const names: Record<string, string> = { '#nameJa': 'nameJa', '#nameEn': 'nameEn' }
-  const values: Record<string, unknown> = { ':readNameJa': row.nameJa, ':readNameEn': row.nameEn }
+  const clauses = [
+    '#nameJa = :readNameJa',
+    '#nameEn = :readNameEn',
+    row.nameRevision === undefined
+      ? 'attribute_not_exists(#nameRevision)'
+      : '#nameRevision = :readNameRevision',
+  ]
+  const names: Record<string, string> = {
+    '#nameJa': 'nameJa',
+    '#nameEn': 'nameEn',
+    '#nameRevision': 'nameRevision',
+  }
+  const values: Record<string, unknown> = {
+    ':readNameJa': row.nameJa,
+    ':readNameEn': row.nameEn,
+    ...(row.nameRevision === undefined ? {} : { ':readNameRevision': row.nameRevision }),
+  }
 
   if (row.entryType === 'project') {
     names['#tone'] = 'tone'

@@ -182,4 +182,5 @@ export const projectsMessages = {
   'projects.administration.restoring': '復元中',
   'projects.administration.error.action': '変更できませんでした。時間をおいてもう一度お試しください。',
   'projects.administration.error.conflict': 'ほかの変更と重なりました。最新の一覧を読み込んだので、もう一度お試しください。',
+  'projects.administration.error.cleanupPending': 'アーカイブの後始末がまだ終わっていません。数分後にもう一度復元してください。',
 } as const

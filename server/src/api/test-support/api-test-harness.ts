@@ -2503,6 +2503,10 @@ function configureFakeProjectClients(
       async reorderTeams(directoryId, input) {
         calls.directoryAdministration.push({ method: 'reorderTeams', directoryId, input })
 
+        if (JSON.stringify(input).includes('stale-team')) {
+          throw new ProjectDataError(409, 'DirectoryOrderConflict', 'The Team list changed.')
+        }
+
         return { teamIds: ['core-team'] }
       },
       async reorderProjects(directoryId, teamId, input) {
@@ -2550,6 +2554,21 @@ function configureFakeProjectClients(
       /** Returns a copy of the stored charter state, so callers cannot mutate the fake's state. */
       async getProjectCharter(_directoryId, teamId, projectId) {
         return structuredClone(readProjectCharterState(teamId, projectId))
+      },
+      async getProjectSearchSource(directoryId, teamId, projectId) {
+        calls.directoryReads.push({ directoryId, locale: 'ja', consistentRead: true })
+        const projects = teamId === 'core-team'
+          ? options.teamProjects ?? [{ id: 'refero', name: 'Refero', tone: 'blue' }]
+          : (options.additionalTeams ?? []).find((team) => team.id === teamId)?.projects ?? []
+        const project = projects.find((candidate) => candidate.id === projectId)
+        if (!project) return undefined
+        const state = structuredClone(readProjectCharterState(teamId, projectId))
+        return {
+          state,
+          project: { ...project, lifecycleState: state.lifecycleState },
+          englishName: project.name,
+          sourceRevision: state.revision,
+        }
       },
       /**
        * Replaces the charter when the revision matches and advances the revision.

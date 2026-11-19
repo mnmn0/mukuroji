@@ -36,6 +36,22 @@ test('lists Teams and Projects, archived ones included, for a Workspace administ
   ])
 })
 
+test('answers an expected directory failure with its status and code', async () => {
+  configureFakeProjectClients(true)
+
+  const response = await app.request('/api/teams/order', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ teamIds: ['stale-team'] }),
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'DirectoryOrderConflict',
+    message: 'The Team list changed.',
+  })
+})
+
 test('renames, restores, and reorders Teams and Projects through the directory client', async () => {
   const calls = configureFakeProjectClients(true)
   const send = (path: string, method: string, body?: unknown) => app.request(path, {

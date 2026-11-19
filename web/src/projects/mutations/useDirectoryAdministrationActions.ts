@@ -75,11 +75,7 @@ export function useDirectoryAdministrationActions(
       await Promise.all([query.mutate(), mutateGlobal(isProjectDirectoryKey)])
       return true
     } catch (error) {
-      setErrorMessageKey(
-        error instanceof ProjectDirectoryApiError && error.status === 409
-          ? 'projects.administration.error.conflict'
-          : 'projects.administration.error.action',
-      )
+      setErrorMessageKey(readDirectoryAdministrationErrorKey(error))
       await query.mutate()
       return false
     } finally {
@@ -122,4 +118,19 @@ export function useDirectoryAdministrationActions(
       () => restoreDirectoryProject(accessToken, teamId, projectId, createMutationRequestContext()),
     ),
   }
+}
+
+/**
+ * Chooses the message of a failed directory change.
+ *
+ * @param error - Failure raised by the API call.
+ * @returns The message key shown in the panel.
+ */
+function readDirectoryAdministrationErrorKey(error: unknown): MessageKey {
+  if (!(error instanceof ProjectDirectoryApiError) || error.status !== 409) {
+    return 'projects.administration.error.action'
+  }
+  return error.code === 'DirectoryArchiveCleanupPending'
+    ? 'projects.administration.error.cleanupPending'
+    : 'projects.administration.error.conflict'
 }

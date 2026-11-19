@@ -68,17 +68,28 @@ function createProjectRow(
  * @param rows - Rows every directory query returns.
  * @param failTransactions - Whether transactions fail on a lost condition.
  * @param planningItems - Planning rows served by key reads, keyed by `workspaceId|recordKey`.
+ * @param cleanupLocators - Webhook grant cleanup locators still waiting for an archive cleanup.
  * @returns The client and the commands it sent.
  */
 function createClient(
   rows: Array<Record<string, unknown>>,
   failTransactions = false,
   planningItems: Record<string, Record<string, unknown>> = {},
+  cleanupLocators: Array<Record<string, unknown>> = [],
 ) {
   const sent: SentCommand[] = []
   const send = async (command: SentCommand) => {
     sent.push(command)
-    if ('KeyConditionExpression' in command.input) return { Items: rows }
+    if ('KeyConditionExpression' in command.input) {
+      const values = command.input.ExpressionAttributeValues
+      const partition = typeof values === 'object' && values !== null
+        ? Reflect.get(values, ':directoryId')
+        : undefined
+      if (typeof partition === 'string' && partition.startsWith('WEBHOOK_GRANT_CLEANUP#')) {
+        return { Items: cleanupLocators.filter((locator) => locator.directoryId === partition) }
+      }
+      return { Items: rows }
+    }
     const key = command.input.Key
     if (command.input.TableName === 'PlanningTable' && isPlanningKey(key)) {
       return { Item: planningItems[`${key.workspaceId}|${key.recordKey}`] }
@@ -549,4 +560,49 @@ test('maps a lost rename condition to a conflict', async () => {
 
   await expect(client.renameTeam(directoryId, 'alpha', { nameJa: '改名' }))
     .rejects.toMatchObject({ status: 409 })
+})
+
+test('counts Project renames and adds them to the charter revision of the search source', async () => {
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10),
+    createProjectRow('alpha', 10, 'live', 10, { nameRevision: 2, charterRevision: 5 }),
+    createProjectRow('alpha', 10, 'gone', 20, { archivedAt: '2026-06-06T00:00:00.000Z' }),
+  ])
+
+  await client.renameProject(directoryId, 'alpha', 'live', { nameJa: '改名' })
+  expect(transactions()[0]).toEqual(expect.arrayContaining([{
+    Update: expect.objectContaining({
+      UpdateExpression:
+        'SET nameJa = :nameJa, nameEn = :nameEn, tone = :tone, #nameRevision = :nameRevision',
+      ConditionExpression: expect.stringContaining('#nameRevision = :readNameRevision'),
+      ExpressionAttributeValues: expect.objectContaining({
+        ':readNameRevision': 2,
+        ':nameRevision': 3,
+      }),
+    }),
+  }]))
+  await expect(client.getProjectSearchSource(directoryId, 'alpha', 'live')).resolves.toMatchObject({
+    project: { id: 'live', name: 'live 日本語' },
+    englishName: 'live English',
+    sourceRevision: 7,
+  })
+  await expect(client.getProjectSearchSource(directoryId, 'alpha', 'gone')).resolves.toBeUndefined()
+})
+
+test('refuses a restore while the archive Webhook grant cleanup is still running', async () => {
+  const archivedAt = '2026-06-06T00:00:00.000Z'
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10, { archivedAt }),
+    createTeamRow('beta', 20),
+    createProjectRow('beta', 20, 'gone', 10, { archivedAt }),
+  ], false, {}, [
+    { directoryId: `WEBHOOK_GRANT_CLEANUP#${directoryId}#alpha`, entryKey: 'PROJECT#x#MEMBER#m' },
+    { directoryId: `WEBHOOK_GRANT_CLEANUP#${directoryId}#beta`, entryKey: 'PROJECT#gone#MEMBER#m' },
+  ])
+
+  await expect(client.restoreTeam(directoryId, 'alpha'))
+    .rejects.toMatchObject({ status: 409, code: 'DirectoryArchiveCleanupPending' })
+  await expect(client.restoreProject(directoryId, 'beta', 'gone'))
+    .rejects.toMatchObject({ status: 409, code: 'DirectoryArchiveCleanupPending' })
+  expect(transactions()).toEqual([])
 })
