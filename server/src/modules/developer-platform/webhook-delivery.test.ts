@@ -148,6 +148,46 @@ describe('webhook delivery policy', () => {
     }
   })
 
+  test('名前解決の一時失敗は retryable、禁止 address への解決は終端にする', async () => {
+    let transportCalls = 0
+    const transport: WebhookRequestTransport = async () => {
+      transportCalls += 1
+      return { status: 204, retryAfter: null }
+    }
+    const input = {
+      deliveryId: 'd3',
+      eventId: 'e3',
+      url: 'https://hooks.example.com/path',
+      signingSecret: 's',
+      payload: '{}',
+    }
+
+    const unresolved = await deliverWebhookRequest(input, {
+      resolveAddresses: async () => {
+        throw Object.assign(new Error('queryA ESERVFAIL hooks.example.com'), { code: 'ESERVFAIL' })
+      },
+      transport,
+    })
+    expect(unresolved).toEqual({
+      succeeded: false,
+      retryable: true,
+      error: 'Webhook hostname could not be resolved.',
+    })
+
+    await expect(deliverWebhookRequest(input, {
+      resolveAddresses: async () => [{ address: '10.0.0.4', family: 4 }],
+      transport,
+    })).rejects.toBeInstanceOf(UnsafeWebhookUrlError)
+    expect(transportCalls).toBe(0)
+  })
+
+  test('登録時の検証では名前解決の失敗を引き続き unsafe として拒否する', async () => {
+    await expect(assertSafeWebhookUrl(
+      'https://hooks.example.com/path',
+      async () => { throw new Error('getaddrinfo ENOTFOUND hooks.example.com') },
+    )).rejects.toBeInstanceOf(UnsafeWebhookUrlError)
+  })
+
   test('full-jitter backoff と Retry-After cap を適用する', () => {
     expect(createWebhookRetryDelaySeconds(3, undefined, () => 0.5)).toBe(30)
     expect(createWebhookRetryDelaySeconds(1, 99_999)).toBe(43_200)

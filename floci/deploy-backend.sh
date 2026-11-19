@@ -116,6 +116,17 @@ if is_missing "$CLIENT_ID"; then
   exit 2
 fi
 
+# 通常の floci:up は Docker socket を渡さないため、compose の Floci では Lambda を実行できません。
+FLOCI_CONTAINER=''
+if command -v docker >/dev/null 2>&1; then
+  FLOCI_CONTAINER="$(docker compose -f "$ROOT_DIR/docker-compose.yml" ps -q floci 2>/dev/null || true)"
+fi
+if [ -n "$FLOCI_CONTAINER" ] &&
+  ! docker exec "$FLOCI_CONTAINER" test -S /var/run/docker.sock; then
+  echo 'Floci was started without the Docker socket, so it cannot run Lambda. Run "bun run floci:up:lambda" first.' >&2
+  exit 2
+fi
+
 if [ -n "$SSO_CLIENT_ID$COGNITO_HOSTED_UI_DOMAIN$COGNITO_SSO_REDIRECT_URI$COGNITO_ENTERPRISE_IDP_NAME$ENTERPRISE_SSO_STATE_SECRET" ]; then
   if is_missing "$SSO_CLIENT_ID" ||
     is_missing "$COGNITO_HOSTED_UI_DOMAIN" ||
