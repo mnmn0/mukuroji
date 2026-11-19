@@ -33,9 +33,6 @@ export const workspaceDependencies: WorkspaceDependencies = {
   get customers() {
     return requireAppDependencies().workspace.customers
   },
-  get dashboardSummary() {
-    return requireAppDependencies().workspace.dashboardSummary
-  },
   get projectDirectory() {
     return requireAppDependencies().workspace.projectDirectory
   },

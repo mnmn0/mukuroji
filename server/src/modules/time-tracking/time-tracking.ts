@@ -147,6 +147,12 @@ export type UpdateTimeEntryInput = {
   canManageRates: boolean
   /** Expected entry revision. */
   expectedRevision: number
+  /**
+   * Revision that the caller's authorization checks read. When set, a request whose
+   * expected revision differs is rejected as a conflict, so a concurrent change cannot
+   * reuse an authorization decided on an older revision. Excluded from idempotency fingerprints.
+   */
+  authorizedRevision?: number
   /** Optional new start. */
   startAt?: string
   /** Optional new end. */
@@ -181,6 +187,12 @@ export type TransitionTimeEntryInput = {
   canApprove: boolean
   /** Expected entry revision. */
   expectedRevision: number
+  /**
+   * Revision that the caller's authorization checks read. When set, a request whose
+   * expected revision differs is rejected as a conflict, so a concurrent change cannot
+   * reuse an authorization decided on an older revision. Excluded from idempotency fingerprints.
+   */
+  authorizedRevision?: number
   /** Requested transition. */
   action: 'submit' | 'approve' | 'reject' | 'lock'
   /** Optional rejection reason. */
@@ -549,7 +561,7 @@ export class TimeTrackingService {
     if (current.status !== 'draft' && current.status !== 'rejected') {
       throw new TimeTrackingError(409, 'TimeEntryNotEditable', 'Submitted, approved, and locked entries cannot be edited.')
     }
-    if (current.revision !== input.expectedRevision) {
+    if (current.revision !== input.expectedRevision || (input.authorizedRevision !== undefined && input.authorizedRevision !== input.expectedRevision)) {
       throw new TimeTrackingError(409, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
     }
     const startAt = input.startAt === undefined
@@ -619,7 +631,7 @@ export class TimeTrackingService {
     completion?: TimeTrackingIdempotencyCompletion,
   ): Promise<TimeEntry> {
     const current = await this.requireEntry(input.workspaceId, input.entryId, input.teamId)
-    if (current.revision !== input.expectedRevision) {
+    if (current.revision !== input.expectedRevision || (input.authorizedRevision !== undefined && input.authorizedRevision !== input.expectedRevision)) {
       throw new TimeTrackingError(409, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
     }
     const isOwner = current.userId === input.actorUserId
@@ -1013,9 +1025,16 @@ export class TimeTrackingService {
     })
     const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
     const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
-    const budget = input.budgetScope === 'project' && input.budgetScopeId
-      ? await this.repository.getBudget(input.workspaceId, 'project', input.budgetScopeId)
-      : await this.repository.getBudget(input.workspaceId, 'team', input.teamId)
+    const includeBudget = input.includeCosts && (
+      input.budgetScope !== 'project' ||
+      input.managedProjectIds === undefined ||
+      (input.budgetScopeId !== undefined && input.managedProjectIds.has(input.budgetScopeId))
+    )
+    const budget = !includeBudget
+      ? undefined
+      : input.budgetScope === 'project' && input.budgetScopeId
+        ? await this.repository.getBudget(input.workspaceId, 'project', input.budgetScopeId)
+        : await this.repository.getBudget(input.workspaceId, 'team', input.teamId)
     const totalEstimateMinutes = [...new Set(entries.map((entry) => entry.workItemId))]
       .reduce((sum, workItemId) => sum + (estimateByWorkItem.get(workItemId) ?? 0), 0)
     const totalActualCostByCurrency = input.includeCosts
@@ -1034,7 +1053,7 @@ export class TimeTrackingService {
       ...(totalActualCostByCurrency !== undefined && Object.keys(totalActualCostByCurrency).length === 1
         ? { totalActualCostMinor: Object.values(totalActualCostByCurrency)[0] }
         : {}),
-      ...(input.includeCosts && budget ? { budget } : {}),
+      ...(budget ? { budget } : {}),
       costsRedacted: !input.includeCosts,
     }
   }
@@ -2532,11 +2551,24 @@ function csvCell(value: string | number): string {
   return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text
 }
 
+/**
+ * Input keys left out of request fingerprints: the key itself, and authorization
+ * context the route derives from current state. A retry after a successful
+ * mutation can derive different values (for example, after an entry moved into a
+ * Project the caller manages) and must still replay the stored result.
+ */
+const IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
+  'idempotencyKey',
+  'canManageRates',
+  'canApprove',
+  'authorizedRevision',
+])
+
 /** Creates a stable request fingerprint while excluding the idempotency key itself. */
 function createTimeTrackingRequestFingerprint(operation: string, input: object): string {
   const body = Object.fromEntries(
     Object.entries(input)
-      .filter(([key]) => key !== 'idempotencyKey')
+      .filter(([key]) => !IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS.has(key))
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([key, value]) => [key, sortRequestValue(value)]),
   )

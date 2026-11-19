@@ -11,6 +11,11 @@ export {
 } from './focus-queue'
 
 export {
+  isFocusSlaAnchor,
+  normalizeFocusSlaWorkItemTypeIds,
+} from './focus-sla-policy'
+
+export {
   DynamoDbFocusStateClient,
   FocusStateError,
   InMemoryFocusStateClient,

@@ -66,9 +66,6 @@ import {
   InMemoryCustomerClient,
 } from '../../modules/customers'
 import {
-  DynamoDbDashboardSummaryClient,
-} from '../../modules/analytics'
-import {
   DynamoDbAnalyticsRepository,
   InMemoryAnalyticsRepository,
 } from '../../modules/analytics/analytics'
@@ -536,7 +533,6 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   })
   return {
     customers: new DynamoDbCustomerClient(),
-    dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
     auditEvents,
     ...(auditExports ? { auditExports } : {}),
@@ -1695,9 +1691,6 @@ export function overrideAppDependencies(
     workspace: {
       ...dependencies.workspace,
       ...(overrides.customers ? { customers: overrides.customers } : {}),
-      ...(overrides.dashboardSummary
-        ? { dashboardSummary: overrides.dashboardSummary }
-        : {}),
       ...(overrides.projectDirectory
         ? { projectDirectory: overrides.projectDirectory }
         : {}),

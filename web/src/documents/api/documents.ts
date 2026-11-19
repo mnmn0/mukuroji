@@ -179,17 +179,29 @@ export async function getNextDocumentCollectionPage(
   }
 }
 
-async function getDocumentTreePage(
+/**
+ * Reads one page of the permission-filtered Document tree.
+ *
+ * @param accessToken - Workspace API token.
+ * @param options - Archive filter, Project scope filter, cursor, and abort signal.
+ * @returns Nodes on this page and the cursor to continue from, if any.
+ */
+export async function getDocumentTreePage(
   accessToken: string,
   options: {
     archived?: boolean
     cursor?: string
+    projectId?: string
     signal?: AbortSignal
   },
 ): Promise<DocumentTreeResponse> {
   const query = new URLSearchParams()
   if (options.archived) query.set('archived', 'true')
   if (options.cursor) query.set('cursor', options.cursor)
+  if (options.projectId) {
+    query.set('scope', 'project')
+    query.set('projectId', options.projectId)
+  }
   const suffix = query.size > 0 ? `?${query.toString()}` : ''
   const value = await requestJson(
     `${documentsApiBaseUrl}/documents${suffix}`,

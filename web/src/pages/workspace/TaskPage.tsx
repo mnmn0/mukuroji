@@ -16,6 +16,12 @@ import { useBlocker, useLocation, useNavigate, useParams, useSearchParams } from
 import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
+import { withHierarchyRevalidation } from '../../work-items/mutations/hierarchyRevalidation'
+import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
+import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
+import { useCollapsedWorkItemOutlineKeys } from '../../shared/lib/preferences/useCollapsedWorkItemOutlineKeys'
+import { WorkItemOutlineNotice } from '../../work-items/ui/WorkItemOutlineNotice'
+import type { TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
 import { clearAuthSession, getAuthSession, isSameAuthSessionToken } from '../../auth/session'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import {
@@ -351,8 +357,8 @@ export function TaskPage() {
     data: projectListIssues = emptyTeamIssues,
     error: taskError,
     isLoading: isProjectListLoading,
-    mutate: mutateProjectTasks,
-    publishIssues: publishProjectTasks,
+    mutate: mutateProjectTaskList,
+    publishIssues: publishProjectTaskList,
     canReadCustomerImpact,
   } = useProjectIssues(
     accessToken,
@@ -662,6 +668,50 @@ export function TaskPage() {
     searchParams,
     surface: 'project',
   })
+  const projectOutlineLayout = taskViewController.effectiveDefinition.layout
+  // The table nests rows only without grouping, as on the Team page; the Gantt chart always can.
+  const isProjectOutlineShown = (projectOutlineLayout.displayOptions.showOutline ?? false) && (
+    projectOutlineLayout.mode === 'gantt' ||
+    (projectOutlineLayout.mode === 'table' && !projectOutlineLayout.group)
+  )
+  const projectOutlineTeamIds = useMemo(
+    () => isProjectOutlineShown ? tasks.map((task) => task.teamId) : [],
+    [isProjectOutlineShown, tasks],
+  )
+  const {
+    data: projectHierarchies,
+    error: projectHierarchiesError,
+    isLoading: isProjectHierarchiesLoading,
+    isValidating: isProjectHierarchiesValidating,
+    mutate: mutateProjectHierarchies,
+  } = useTeamWorkItemHierarchies(
+    accessToken,
+    projectOutlineTeamIds,
+    Boolean(user && !currentUserError) && isProjectOutlineShown,
+  )
+  // Roll-ups and WBS numbers follow the Project's Work Items, so every refresh of the list, after
+  // an edit, a schedule change, a bulk operation, or a create, also re-reads the hierarchies.
+  const mutateProjectTasks = withHierarchyRevalidation(mutateProjectTaskList, mutateProjectHierarchies)
+  /** Publishes a refreshed Project list and re-reads the hierarchies that total it. */
+  const publishProjectTasks = (...args: Parameters<typeof publishProjectTaskList>) => {
+    void mutateProjectHierarchies().catch(() => undefined)
+    return publishProjectTaskList(...args)
+  }
+  const [collapsedProjectOutlineKeys, toggleProjectOutlineKey] = useCollapsedWorkItemOutlineKeys(
+    `project.${projectId}`,
+  )
+  const projectOutline = useMemo<TaskGanttOutline | undefined>(() => isProjectOutlineShown && projectHierarchies
+    ? {
+        hierarchies: projectHierarchies.nodesByTeam,
+        collapsedKeys: collapsedProjectOutlineKeys,
+        onToggleCollapsed: (task) => toggleProjectOutlineKey(createWorkItemOutlineKey(task.teamId, task.id)),
+      }
+    : undefined, [
+    collapsedProjectOutlineKeys,
+    isProjectOutlineShown,
+    projectHierarchies,
+    toggleProjectOutlineKey,
+  ])
   const taskViewFieldOptions = useMemo(
     () => [
       { id: 'title', label: t('tasks.create.title') },
@@ -841,6 +891,8 @@ export function TaskPage() {
       ...(projectFiles.sessionErrors ?? []),
       ...(collaboration.sessionErrors ?? []),
       ...(projectCustomerImpactError ? [projectCustomerImpactError] : []),
+      projectHierarchiesError,
+      ...(projectHierarchies ? [...projectHierarchies.errorsByTeam.values()] : []),
     ],
     currentPath,
   )
@@ -1727,7 +1779,8 @@ export function TaskPage() {
           ),
         )
       }
-      await mutateSelectedIssueDetail()
+      // A parent link moves the Work Item in the hierarchy, so its WBS number and roll-ups change.
+      await Promise.all([mutateSelectedIssueDetail(), mutateProjectHierarchies()])
     } catch (error) {
       redirectEnterpriseSessionError(error)
       await refreshRelationDetailAfterConflict(error, mutateSelectedIssueDetail)
@@ -1769,7 +1822,8 @@ export function TaskPage() {
           context,
         ),
       )
-      await mutateSelectedIssueDetail()
+      // A parent link moves the Work Item in the hierarchy, so its WBS number and roll-ups change.
+      await Promise.all([mutateSelectedIssueDetail(), mutateProjectHierarchies()])
     } catch (error) {
       redirectEnterpriseSessionError(error)
       await refreshRelationDetailAfterConflict(error, mutateSelectedIssueDetail)
@@ -1869,6 +1923,7 @@ export function TaskPage() {
     ? createTaskViewOption(taskViewController.activeSavedView)
     : undefined
   const taskViewToolbar = (
+    <>
     <TaskViewToolbar
       builtInName={t('tasks.tab.table')}
       canManageShared={taskViewController.canManageShared}
@@ -1909,11 +1964,24 @@ export function TaskPage() {
       supportsEmptyGroups={projectTaskViewState.activeTab === 'board'}
       supportsLayoutPresentation={projectTaskViewState.activeTab === 'table' ||
         projectTaskViewState.activeTab === 'board'}
+      supportsOutline={projectTaskViewState.activeTab === 'table' ||
+        projectTaskViewState.activeTab === 'gantt'}
       supportsKeyboardSelection
       teams={taskViewTeams}
       t={t}
       views={taskViewOptions}
     />
+    {isProjectOutlineShown ? (
+      <WorkItemOutlineNotice
+        failedTeamCount={projectHierarchies?.errorsByTeam.size ?? (projectHierarchiesError ? 1 : 0)}
+        isLoading={isProjectHierarchiesLoading}
+        isRetrying={isProjectHierarchiesValidating}
+        onRetry={() => void mutateProjectHierarchies()}
+        t={t}
+        testId="project-task-outline"
+      />
+    ) : null}
+    </>
   )
 
   const aiSummaryAssistanceEnabled = isAiAssistanceTaskEnabled?.('summary') ?? false
@@ -2074,6 +2142,7 @@ export function TaskPage() {
       taskViewPresentation={taskViewDefinitionToPresentationSettings(
         taskViewController.effectiveDefinition,
       )}
+      outline={projectOutline}
       tasks={tasks}
       teamName={interactionTeam?.name}
       teams={teams}

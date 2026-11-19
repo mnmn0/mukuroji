@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, type FormEvent } from 'react'
+import type { DocumentRelationTarget } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createDocumentPath } from '../../shared/routing/paths'
 import {
@@ -7,7 +8,16 @@ import {
   type DocumentBacklink,
   type DocumentRecord,
 } from '../api'
+import { useRelatedDocumentLinks } from '../mutations/useRelatedDocumentLinks'
 import { useDocumentBacklinks } from '../queries/useDocumentQueries'
+import { useProjectDocuments } from '../queries/useProjectDocuments'
+import {
+  LinkableDocumentPicker,
+  type LinkableDocumentOption,
+} from './DocumentLinkPicker'
+
+/** Which inline composer is open on the related-Documents panel. */
+type RelatedDocumentsComposer = 'link' | 'create'
 
 /**
  * 実行対象から逆引きする Document 一覧の props です。
@@ -62,10 +72,57 @@ export function RelatedDocuments({
     useState<string>()
   const [promotionErrorDocumentId, setPromotionErrorDocumentId] =
     useState<string>()
+  const [composer, setComposer] =
+    useState<RelatedDocumentsComposer>()
+  const [newTitle, setNewTitle] = useState('')
+  const projectDocuments = useProjectDocuments(
+    accessToken,
+    targetKind === 'project' ? targetId : undefined,
+  )
+  const target = targetId
+    ? createRelationTarget(targetKind, targetId)
+    : undefined
+  const links = useRelatedDocumentLinks({
+    accessToken,
+    onChanged: () =>
+      Promise.all([mutate(), projectDocuments.refresh()]),
+    target,
+  })
 
   if (!key) return null
 
   const backlinks = data?.backlinks ?? []
+  const linkedDocumentIds = new Set(
+    backlinks.map(({ documentId }) => documentId),
+  )
+  const unlinkedProjectDocuments = projectDocuments.documents.filter(
+    (document) =>
+      document.kind !== 'folder' &&
+      !linkedDocumentIds.has(document.id),
+  )
+
+  /**
+   * Links the Document chosen in the existing-Document picker.
+   *
+   * @param option - Document chosen by the member.
+   */
+  const handleLinkExisting = async (option: LinkableDocumentOption) => {
+    await links.linkDocument(option.documentId)
+  }
+
+  /**
+   * Creates an empty page linked to this panel's target.
+   *
+   * @param event - Submit event of the create form.
+   */
+  const handleCreate = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (await links.createLinkedDocument(newTitle)) {
+      setNewTitle('')
+      setComposer(undefined)
+    }
+  }
+
   const handleLoadMore = async () => {
     if (
       !accessToken ||
@@ -144,6 +201,66 @@ export function RelatedDocuments({
           {t('documents.related.title')}
         </h3>
       </div>
+      {accessToken && target ? (
+        <div className="flex flex-wrap gap-2">
+          {(['link', 'create'] as const).map((option) => (
+            <button
+              aria-expanded={composer === option}
+              className="workbench-button-secondary min-h-9 px-3 text-xs"
+              key={option}
+              onClick={() =>
+                setComposer((current) =>
+                  current === option ? undefined : option,
+                )
+              }
+              type="button"
+            >
+              {composer === option
+                ? t('documents.related.closeComposer')
+                : option === 'link'
+                  ? t('documents.related.linkExisting')
+                  : t('documents.related.createNew')}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {accessToken && target && composer === 'link' ? (
+        <LinkableDocumentPicker
+          accessToken={accessToken}
+          linkedDocumentIds={linkedDocumentIds}
+          onSelect={handleLinkExisting}
+          t={t}
+        />
+      ) : null}
+      {accessToken && target && composer === 'create' ? (
+        <form className="flex flex-wrap gap-2" onSubmit={handleCreate}>
+          <input
+            aria-label={t('documents.related.newTitleLabel')}
+            autoFocus
+            className="workbench-input h-10 min-w-0 flex-1 px-3 text-sm"
+            maxLength={500}
+            onChange={(event) => setNewTitle(event.target.value)}
+            placeholder={t('documents.related.newTitlePlaceholder')}
+            value={newTitle}
+          />
+          <button
+            className="workbench-button-primary min-h-10 px-3 text-xs disabled:opacity-50"
+            disabled={links.isCreating || !newTitle.trim()}
+            type="submit"
+          >
+            {links.isCreating
+              ? t('documents.related.creating')
+              : t('documents.related.create')}
+          </button>
+          {links.createError ? (
+            <p className="m-0 w-full text-xs font-semibold text-fg-red-700" role="alert">
+              {links.createError === 'create'
+                ? t('documents.related.createError')
+                : t('documents.related.createdButNotLinked')}
+            </p>
+          ) : null}
+        </form>
+      ) : null}
       {isLoading ? (
         <p className="text-sm font-medium text-[var(--workbench-muted)]">
           {t('documents.context.loading')}
@@ -157,7 +274,13 @@ export function RelatedDocuments({
           {t('documents.related.error')}
         </p>
       ) : null}
-      {!isLoading && !error && backlinks.length === 0 ? (
+      {!isLoading &&
+      !error &&
+      !projectDocuments.isLoading &&
+      !projectDocuments.error &&
+      !projectDocuments.hasMore &&
+      backlinks.length === 0 &&
+      unlinkedProjectDocuments.length === 0 ? (
         <p className="text-sm font-medium leading-6 text-[var(--workbench-muted)]">
           {t('documents.related.empty')}
         </p>
@@ -220,6 +343,61 @@ export function RelatedDocuments({
           ))}
         </div>
       ) : null}
+      {unlinkedProjectDocuments.length > 0 ? (
+        <div className="grid gap-2">
+          <p className="m-0 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('documents.related.projectDocuments')}
+          </p>
+          {unlinkedProjectDocuments.map((document) => (
+            <a
+              className="flex min-h-[44px] min-w-0 items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-surface px-3 py-2.5 hover:bg-tone-f2fbf9"
+              href={createDocumentPath(document.id)}
+              key={document.id}
+            >
+              <span
+                aria-hidden="true"
+                className="grid h-8 w-8 flex-none place-items-center rounded-md bg-tone-e5f7f4 text-sm font-bold text-[var(--workbench-primary-text)]"
+              >
+                D
+              </span>
+              <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--workbench-text)]">
+                {document.title}
+              </span>
+            </a>
+          ))}
+        </div>
+      ) : null}
+      {projectDocuments.isLoading ? (
+        <p className="text-sm font-medium text-[var(--workbench-muted)]">
+          {t('documents.context.loading')}
+        </p>
+      ) : null}
+      {projectDocuments.error ? (
+        <div className="flex flex-wrap items-center gap-2" role="alert">
+          <p className="m-0 text-sm font-semibold text-fg-red-700">
+            {t('documents.related.projectDocumentsError')}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-9 px-3 text-xs"
+            onClick={() => void projectDocuments.refresh()}
+            type="button"
+          >
+            {t('documents.related.retry')}
+          </button>
+        </div>
+      ) : null}
+      {projectDocuments.hasMore && !projectDocuments.error ? (
+        <button
+          className="workbench-button-secondary min-h-9 px-3 text-xs"
+          disabled={projectDocuments.isLoadingMore}
+          onClick={() => void projectDocuments.loadMore()}
+          type="button"
+        >
+          {projectDocuments.isLoadingMore
+            ? t('documents.context.loading')
+            : t('documents.related.loadMoreProjectDocuments')}
+        </button>
+      ) : null}
       {promotionErrorDocumentId ? (
         <p className="text-sm font-semibold text-fg-red-700" role="alert">
           {t('documents.related.promoteToContextError')}
@@ -267,4 +445,25 @@ function mergeBacklinks(
       ]),
     ).values(),
   ]
+}
+
+/**
+ * Builds the relation target for this panel's target kind and ID.
+ *
+ * @param kind - Relation target kind.
+ * @param id - Canonical target ID.
+ * @returns Relation target saved on the linking Document.
+ */
+function createRelationTarget(
+  kind: RelatedDocumentsProps['targetKind'],
+  id: string,
+): DocumentRelationTarget {
+  switch (kind) {
+    case 'work-item':
+      return { kind: 'work-item', workItemId: id }
+    case 'project':
+      return { kind: 'project', projectId: id }
+    case 'goal':
+      return { goalId: id, kind: 'goal' }
+  }
 }

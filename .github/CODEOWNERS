@@ -1,0 +1,15 @@
+# Code owners for mnmn0/mukuroji.
+#
+# Only the review trust roots and repository policy files are listed here. They match the
+# trust roots checked by `.github/workflows/review-skill.yml` and the push-before-review rules
+# in `AGENTS.md`; changes to them need an independent maintainer review. Ordinary product
+# code is intentionally not listed, so this file does not add a review requirement to it.
+
+/AGENTS.md                                          @mnmn0
+**/AGENTS.md                                        @mnmn0
+/.codex/skills/mukuroji-review/                     @mnmn0
+/.github/workflows/                                 @mnmn0
+/.github/CODEOWNERS                                 @mnmn0
+/scripts/validate-mukuroji-review-skill.ts          @mnmn0
+/scripts/validate-mukuroji-review-skill.test.ts     @mnmn0
+/SECURITY.md                                        @mnmn0

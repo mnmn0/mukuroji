@@ -1,6 +1,5 @@
 import type { EnterpriseIdentityProvider, TriageEntry } from '@mukuroji/contracts'
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
-import type { DashboardSummaryClient } from '../../modules/analytics'
 import type { AnalyticsRepository } from '../../modules/analytics/analytics'
 import type {
   AuditEventPage,
@@ -124,8 +123,6 @@ export interface AuthenticationDependencies {
 export interface WorkspaceDependencies {
   /** Provides Customer, Contact, and Customer Request persistence. */
   customers: CustomerClient
-  /** Provides the Dashboard read model. */
-  dashboardSummary: DashboardSummaryClient
   /** Provides Team, Project, and member directory persistence. */
   projectDirectory: ProjectDirectoryClient
   /** Provides append-only audit persistence. */
