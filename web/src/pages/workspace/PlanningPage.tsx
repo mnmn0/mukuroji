@@ -848,6 +848,19 @@ export function PlanningPage() {
                 )
               }
             : undefined}
+          onUpdateEntity={canManagePlanning && snapshot && accessToken
+            ? (entity, patch) => {
+                if (!canManagePlanningScope(user, entity, planningAccess)) return
+                return runMutation(
+                  `planning:entity:${entity.id}:edit`,
+                  [snapshot.revision, patch],
+                  (context) => updatePlanningEntity(accessToken, entity.id, {
+                    expectedRevision: snapshot.revision,
+                    patch,
+                  }, context),
+                )
+              }
+            : undefined}
           onSaveUpdateCadence={canMutatePlanningContent && snapshot && accessToken
             ? (target, cadence) => {
                 const input = {
