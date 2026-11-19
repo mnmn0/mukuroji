@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react'
+import { useSWRConfig } from 'swr'
 import type {
   TenantGovernancePolicy,
   TenantOperation,
@@ -18,6 +19,7 @@ import {
   createMutationRequestRunner,
   type MutationRequestContext,
 } from '../../shared/api/mutationHeaders'
+import { isWorkspaceCalendarSettingsKey } from '../queries/useWorkspaceCalendarSettings'
 
 /** Stable error view returned by tenant administration mutations. */
 export type TenantAdministrationMutationError = {
@@ -49,6 +51,7 @@ export function useTenantAdministrationMutations({
   refresh,
 }: TenantAdministrationMutationInput) {
   const mutationRunner = useRef(createMutationRequestRunner()).current
+  const { mutate: mutateGlobal } = useSWRConfig()
   const [isSaving, setIsSaving] = useState(false)
   const [actionError, setActionError] =
     useState<TenantAdministrationMutationError>()
@@ -78,7 +81,7 @@ export function useTenantAdministrationMutations({
 
   /** Saves the current tenant profile draft. */
   async function saveProfile(profile: TenantProfile): Promise<boolean> {
-    return await runMutation(
+    const saved = await runMutation(
       'tenant-profile',
       JSON.stringify(profile),
       (context) => updateTenantProfile(accessToken, {
@@ -89,6 +92,9 @@ export function useTenantAdministrationMutations({
         expectedRevision: profile.revision,
       }, context),
     )
+    // Timesheets read the week start through their own query, so they must see the saved value.
+    if (saved) await mutateGlobal(isWorkspaceCalendarSettingsKey).catch(() => undefined)
+    return saved
   }
 
   /** Saves the current tenant governance draft. */

@@ -34,7 +34,8 @@ export function TeamTimeTrackingPage() {
   const activeTeam = workspace.teams.find((team) => team.id === teamId)
   const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
   const accessToken = enabled ? workspace.accessToken : undefined
-  const { weekStartDay } = useWorkspaceCalendarSettings(accessToken, enabled).settings
+  const calendarSettings = useWorkspaceCalendarSettings(accessToken, enabled)
+  const weekStartDay = calendarSettings.settings?.weekStartDay
   const weekStart = resolveWeekStart(searchParams.get('week'), undefined, weekStartDay)
   // Filtered on the server, so other Teams' Work Items cannot push the read past its size limit.
   const teamWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '' }), [teamId])
@@ -113,7 +114,25 @@ export function TeamTimeTrackingPage() {
             </button>
           </div>
         ) : null}
-        {view === 'approvals' ? (
+        {!calendarSettings.settings ? (
+          calendarSettings.error ? (
+            <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
+              <span>{t('timeTracking.page.calendarSettingsError')}</span>
+              <button
+                className="workbench-button-secondary min-h-8 px-3"
+                onClick={calendarSettings.retry}
+                type="button"
+              >
+                {t('timeTracking.page.calendarSettingsRetry')}
+              </button>
+            </div>
+          ) : (
+            // Weeks are laid out only once the Workspace week start is known.
+            <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">
+              {t('timeTracking.page.calendarSettingsLoading')}
+            </p>
+          )
+        ) : view === 'approvals' ? (
           <TimeApprovalQueueContainer
             accessToken={accessToken}
             key={`${teamId}:approvals`}
@@ -122,7 +141,7 @@ export function TeamTimeTrackingPage() {
             onMoveWeek={moveWeek}
             teamId={teamId}
             weekStart={weekStart}
-            weekStartDay={weekStartDay}
+            weekStartDay={calendarSettings.settings.weekStartDay}
             workItemTitles={workItemTitles}
           />
         ) : (
@@ -134,7 +153,7 @@ export function TeamTimeTrackingPage() {
             onMoveWeek={moveWeek}
             teamId={teamId}
             weekStart={weekStart}
-            weekStartDay={weekStartDay}
+            weekStartDay={calendarSettings.settings.weekStartDay}
             isLoadingWorkItemOptions={isLoadingWorkItemOptions}
             workItemOptions={workItemOptions}
             workItemTitles={workItemTitles}
