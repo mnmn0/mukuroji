@@ -47,7 +47,10 @@ export type EnterpriseDirectoryGroupMembership = {
 
 /** HTTP/realtime evaluator が共有する authoritative directory principal 解決結果です。 */
 export type EnterpriseDirectoryPrincipalResolution = {
-  /** Principal が provider readiness に関係なく SCIM directory 管理下かどうかです。 */
+  /**
+   * Principal が provider readiness に関係なく SCIM directory 管理下かどうかです。
+   * 一度も Workspace member へ適用されていない SCIM user は数えません。
+   */
   directoryManaged: boolean
   /** 現在の Cognito token から取得した group ID 一覧です。 */
   directoryGroupIds: string[]
@@ -57,7 +60,7 @@ export type EnterpriseDirectoryPrincipalResolution = {
   compatibleGroupMappings: EnterpriseDirectoryGroupMapping[]
   /** Provider binding を満たす assignment 一覧です。 */
   compatibleRoleAssignments: EnterpriseRoleAssignment[]
-  /** Principal に紐づく inactive SCIM user が存在するかどうかです。 */
+  /** Principal を管理する SCIM user がすべて inactive として適用済みかどうかです。 */
   deprovisioned: boolean
 }
 
@@ -301,6 +304,12 @@ export function resolveEnterpriseDirectoryPrincipal(
   const linkedScimUsers = snapshot.scimUsers.filter((candidate) =>
     candidate.linkedMemberKey?.trim().toLowerCase() === normalizedPrincipalId
   )
+  // Desired state that never reached the Workspace member does not manage it. Otherwise a SCIM
+  // credential could store a user for any member's email and, even though applying it fails,
+  // take away that member's Workspace role.
+  const managingScimUsers = linkedScimUsers.filter((candidate) =>
+    candidate.appliedVersion > 0
+  )
   const activeScimUsers = linkedScimUsers.filter((candidate) =>
     eligibleProviderIds.has(candidate.identityProviderId) &&
     candidate.active && candidate.appliedVersion >= candidate.version
@@ -336,7 +345,7 @@ export function resolveEnterpriseDirectoryPrincipal(
   )
 
   return {
-    directoryManaged: linkedScimUsers.length > 0,
+    directoryManaged: managingScimUsers.length > 0,
     directoryGroupIds: [...new Set(
       cognitoGroupIds.map((groupId) => groupId.trim()).filter(Boolean),
     )],
@@ -347,8 +356,8 @@ export function resolveEnterpriseDirectoryPrincipal(
       assignment.source !== 'directory-mapping' ||
       assignment.mappingId !== undefined && compatibleMappingIds.has(assignment.mappingId)
     ),
-    deprovisioned: linkedScimUsers.length > 0 &&
-      linkedScimUsers.every((candidate) =>
+    deprovisioned: managingScimUsers.length > 0 &&
+      managingScimUsers.every((candidate) =>
         !candidate.active &&
         candidate.appliedVersion >= candidate.version
       ),
