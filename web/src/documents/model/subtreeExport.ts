@@ -105,7 +105,7 @@ export function buildSubtreeMarkdown(
       return demoteMarkdownHeadings(section.markdown.trim(), section.depth)
     }
     const level = Math.min(section.depth + 1, 6)
-    return `${'#'.repeat(level)} ${section.node.title.trim() || 'Untitled'}`
+    return `${'#'.repeat(level)} ${escapeMarkdownText(section.node.title.trim() || 'Untitled')}`
   })
   return `${parts.join('\n\n')}\n`
 }
@@ -160,6 +160,17 @@ export function subtreeExportFileName(title: string): string {
     .trim()
     .slice(0, 120)
   return `${base || 'documents'}.md`
+}
+
+/**
+ * Escapes Markdown and inline HTML punctuation so a title stays plain text,
+ * matching the server's per-page Markdown export.
+ *
+ * @param value - Text to escape.
+ * @returns Escaped text.
+ */
+function escapeMarkdownText(value: string): string {
+  return value.replace(/([\\`*_[\]<>])/gu, '\\$1')
 }
 
 /**

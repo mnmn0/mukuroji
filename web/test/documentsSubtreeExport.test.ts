@@ -106,6 +106,16 @@ describe('buildSubtreeMarkdown', () => {
   })
 })
 
+describe('buildSubtreeMarkdown title escaping', () => {
+  test('escapes Markdown and HTML punctuation in heading-only titles', () => {
+    expect(
+      buildSubtreeMarkdown([
+        { depth: 0, node: node({ id: 'f', kind: 'folder', title: 'API <T> *v1*' }) },
+      ]),
+    ).toBe('# API \\<T\\> \\*v1\\*\n')
+  })
+})
+
 describe('subtreeExportFileName', () => {
   test('replaces unsafe characters', () => {
     expect(subtreeExportFileName('設計/書: v1')).toBe('設計_書_ v1.md')

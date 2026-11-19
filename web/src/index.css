@@ -1164,6 +1164,11 @@ textarea {
   .document-print-root pre,
   .document-print-root pre * {
     color: #111 !important;
+    background: #f4f4f4 !important;
+  }
+
+  .document-print-root pre {
+    border: 1px solid #ccc;
   }
 
   .document-print-root pre,
