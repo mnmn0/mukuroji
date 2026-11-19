@@ -362,7 +362,10 @@ export async function projectProjectSearchDocumentBestEffort(
     ),
     operation,
     // The Project row does not record its creator, so the creator projected at creation is kept.
-    { sourceRevision, preserveCreator: true },
+    // Without a revision, a document already projected from a revisioned source is left alone.
+    sourceRevision === undefined
+      ? { preserveCreator: true, unrevisioned: true }
+      : { sourceRevision, preserveCreator: true },
   )
 }
 

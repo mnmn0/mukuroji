@@ -14,6 +14,7 @@ import {
 import { ProjectDirectoryApiError } from '../api/errors'
 import { useDirectoryAdministration } from '../queries/useDirectoryAdministration'
 import { isProjectDirectoryKey } from '../queries/useProjectDirectory'
+import { isProjectQuickAccessKey } from '../queries/useProjectQuickAccess'
 
 /** Directory administration query plus the rename, restore, and reorder actions. */
 export type DirectoryAdministrationActions = {
@@ -72,7 +73,12 @@ export function useDirectoryAdministrationActions(
     setErrorMessageKey(undefined)
     try {
       await action()
-      await Promise.all([query.mutate(), mutateGlobal(isProjectDirectoryKey)])
+      // Quick access hides archived Projects, so a restore can bring shortcuts back.
+      await Promise.all([
+        query.mutate(),
+        mutateGlobal(isProjectDirectoryKey),
+        mutateGlobal(isProjectQuickAccessKey),
+      ])
       return true
     } catch (error) {
       setErrorMessageKey(readDirectoryAdministrationErrorKey(error))

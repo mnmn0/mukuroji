@@ -53,6 +53,9 @@ key を変えると、key を前提にした transaction の条件、data integr
 - 新しい Team / Project は作成時の位置（既存の最大値 + 10）を使い、並び替えはその範囲内の位置を
   割り当て直すだけなので、あとから作った row は末尾に並ぶ。
 - 位置を割り当て直す前提として、1 回の並び替えで扱える row は transaction の上限から 90 件までとする。
+- 復元は Team・audit・Planning revision・更新対象に加えて呼び出し元の権限確認（最大 2 件）も同じ
+  transaction に入れる。アーカイブできた Team を必ず復元できるよう、Team のアーカイブで一緒に
+  アーカイブできる Project の更新対象は 95 件までにした（以前は 97 件）。
 - アーカイブ時に止めた Planning の更新スケジュール（cadence）と Webhook の Team / Project grant は、
   復元しても自動では戻らない。更新対象は使える状態に戻るので、cadence は設定し直せる。
 - 利用者ガイドは `docs/guide/admin.md` を更新した。

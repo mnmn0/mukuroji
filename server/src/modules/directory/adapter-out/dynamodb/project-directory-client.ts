@@ -508,6 +508,12 @@ export type RestoredDirectoryTeam = {
   nameRevision: number
 }
 
+/**
+ * Most authorization condition checks a directory change carries: the caller's membership and the
+ * Enterprise control row.
+ */
+const DIRECTORY_RESTORE_AUTHORIZATION_RESERVE = 2
+
 /** Condition checks proving the caller is still authorized when a directory change commits. */
 export type DirectoryAuthorizationConditionChecks = NonNullable<
   TransactWriteCommandInput['TransactItems']
@@ -2501,8 +2507,10 @@ export class DynamoDbProjectDirectoryClient {
         update === undefined ? [] : [update]
       )
       planningRevisionItemIndex = 1 + auditItems.length
+      // The limit leaves room for a later restore, which writes the Team, its audit event, the
+      // Planning revision, and the same targets, plus the caller's authorization checks.
       if (
-        1 + auditItems.length + 1 + planningTargetMutations.length >
+        3 + planningTargetMutations.length + DIRECTORY_RESTORE_AUTHORIZATION_RESERVE >
         DYNAMODB_TRANSACTION_MAX_ACTIONS
       ) {
         throw new ProjectDataError(
