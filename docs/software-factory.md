@@ -157,7 +157,7 @@ finished(paused|completed など) + Work Item が started --resume(同じ assign
 claim row は `runId` と `instanceId` hash を持ち、start の transaction で「存在しない」条件付き
 put、finish / release / take over の transaction で同じ `runId` 条件付き delete または置換を行う。
 claim row が残り Run row が `finished` になった不整合は strict reader が fail-closed で `503` とし、
-[data-integrity](data-integrity.md) の verify script に検査を追加する。
+[Agent Run の整合性検査](#agent-run-の整合性検査と手動修復) で定期的に検出する。
 
 revocation row は Run を `released` または `superseded` で閉じる transaction で書き、同じ member と
 instance がその Work Item で Run を開始する transaction でだけ削除する。別 instance の Run が開始・
@@ -636,8 +636,9 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   変更は `403`、`started` 以外への移動は `invalid_transition`、take over の無効化は
   `agent_run_takeover_disabled`、それ以外の変更は `409` として返す。
   Work Item の status は変えない。
-- 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、data-integrity の verify script
-  による claim / Run 不整合の検査。不整合は読み取り時に fail-closed で検出する。
+- 後へ回した点: Agent settings の Web 編集画面（API は提供済み）。不整合は読み取り時に fail-closed で
+  検出する。claim / Run 不整合の検査は後に
+  [Agent Run の整合性検査](#agent-run-の整合性検査と手動修復) として追加した。
 
 ### Slice 2 の実装状況
 
@@ -811,6 +812,67 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
   Work Item の Run パネルと Factory board（tile、ライン表示、detail）は、再開で始まった Run に
   「再開」の印を付ける。lane は既存どおり `classifyFactoryBoardItem` で決まり、再開した `active` Run は
   処理中または停滞に入る。
+
+## Agent Run の整合性検査と手動修復
+
+`bun run --silent agent-runs:integrity -- check` は `AgentRunsTable` を読むだけの検査で、修復はしない。
+Team partition ごとに強整合の Query を上限付きで読み、partition を最後まで読めた Team だけを判定する。
+各 page の Limit は残りの item 上限を超えない。強整合でも複数 page・複数 row は 1 つの snapshot ではなく、
+page の間に Run が終わると claim のない Run に見えることがある。そのため違反が見つかった partition は
+もう一度読み、2 回とも同じ違反が出たものだけを failure にする。片方だけの違反は並行書き込みとして
+`unconfirmedFindings` に数え、失敗にしない。
+`--team <workspaceId>/<teamId>` を省くと、key だけを射影した強整合の Scan で Team partition を列挙する。
+列挙の読み取りも同じ上限に数える。
+
+```sh
+bun run --silent agent-runs:integrity -- check \
+  --region ap-northeast-1 \
+  --table mukuroji-agent-runs \
+  --profile reviewed-operator \
+  --page-size 100 --max-pages 1000 --max-items 100000 \
+  --correlation-id <運用記録の ID>
+```
+
+出力は 1 行の JSON evidence で、`correlationId`、`checkedAt`、上限、読んだ page と item の数、row の種類別件数、
+failure code ごとの件数と最大 5 件のサンプル（Workspace ID、Team ID、Work Item ID、Run ID）を含む。
+member ID、instance hash、revocation row の sort key（両者の hash を含む）は出力しない。
+AWS の error 本文も出力せず、error 名と `correlationId` だけを返す。exit code は `pass` が 0、
+`fail` と上限で止まった `incomplete` が 1、引数や読み取りの失敗が 2 で、`incomplete` は合格にしない。
+`AWS_ENDPOINT_URL` など SDK 標準の設定はそのまま効くため、ローカルでは Floci の table に対して実行できる。
+
+検査する不変条件:
+
+| failure code | 不変条件 |
+| --- | --- |
+| `AGENT_RUN_MULTIPLE_ACTIVE_RUNS` | 1 Work Item に `active` Run は 1 件まで |
+| `AGENT_RUN_CLAIM_RUN_MISSING` / `AGENT_RUN_CLAIM_RUN_NOT_ACTIVE` / `AGENT_RUN_CLAIM_HOLDER_MISMATCH` | claim row の `runId` は同じ Work Item・member・instance の `active` Run を指す。`finished` Run に claim は残らない |
+| `AGENT_RUN_ACTIVE_RUN_UNCLAIMED` | `active` Run はその Work Item の claim row が指す |
+| `AGENT_RUN_INDEX_KEYS_MISMATCH` | Run row の `WorkItemRunIndex` / `ActiveRunIndex` / `FinishedRunIndex` の key 属性が Run の値と一致し、`active` だけが `ActiveRunIndex`、`finished` だけが `FinishedRunIndex` の key を持つ。`FinishedRunIndex` 導入前に閉じた Run は key がなくても失敗にせず、`legacyFinishedRunsWithoutIndexKeys` に数える |
+| `AGENT_RUN_OUTBOX_KEY_INVALID` | Triage outbox key（`triage-failed-run`）は `failed` で終わった Run にだけあり、sort key が `<時刻>#<partition>#<runId>` |
+| `AGENT_RUN_REVOCATION_ORPHANED` | revocation row は同じ Work Item・member・instance の `released` / `superseded` Run を指す。Run row は Work Item の削除後も残るため、削除済み Work Item の revocation も同じ条件で判定する |
+| `AGENT_RUN_REVOCATION_BLOCKS_ACTIVE_RUN` | 同じ member と instance の `active` Run がある Work Item に revocation row は残らない |
+| `AGENT_RUN_LATEST_RUN_INVALID` | `agent-run-latest` row は同じ Work Item の Run を指し、`active` Run があればそれを指す |
+| `AGENT_RUN_WATERMARK_INVALID` | 停滞走査の watermark / resume は `<leaseExpiresAt>#<runId>` で、partition の Run を指し、その Run の lease より後ろにない |
+| `AGENT_RUN_ROW_MALFORMED` / `AGENT_RUN_ROW_UNRECOGNIZED` / `AGENT_RUN_PARTITION_UNRESOLVED` | row が strict reader と同じ形で読め、既知の種類で、partition key が `<workspaceId>#team#<teamId>` |
+
+report row と Agent settings の row は件数だけを数え、内容は検査しない。
+
+手動修復は検査の自動処理にせず、運用者が change record に `correlationId` を残して行う。どの修復も、
+対象の row をサンプルの ID で強整合に読み直し、evidence と同じ状態であることを確かめてから、読んだ値を
+条件にした conditional write で行う。書いた後に同じ Team を `--team` で再検査し、`pass` を確かめる。
+修復は audit event を書かないため、change record が監査の記録になる。
+
+| failure code | 手順 |
+| --- | --- |
+| `AGENT_RUN_CLAIM_RUN_MISSING` / `AGENT_RUN_CLAIM_RUN_NOT_ACTIVE` | Run row がない、または `finished` であることを読み直してから、claim row を `runId = <サンプルの runId>` 条件で削除する。claim の削除だけで Work Item は新しい start を受け付ける |
+| `AGENT_RUN_ACTIVE_RUN_UNCLAIMED` / `AGENT_RUN_MULTIPLE_ACTIVE_RUNS` / `AGENT_RUN_CLAIM_HOLDER_MISMATCH` | claim が指していない `active` Run を解放する。1 つの transaction で、Run row を `state = active` 条件で `state=finished`、`outcome=released`、`finishedAt`、`finishedBy` に更新して `FinishedRunIndex` の key を書き、`activeRunPartition`・`activeRunSortKey`・`lastHeartbeatRequestAt` を外す。同じ transaction で Run row の member と instance hash から revocation row を put する。claim が指す Run は残す。claim が指す Run の member や instance が claim と違う場合は、その Run も同じ手順で解放し、claim を `runId` 条件で削除する |
+| `AGENT_RUN_INDEX_KEYS_MISMATCH` | Run row の値から key 属性を書き直す。`active` は `activeRunSortKey = <leaseExpiresAt>#<runId>`、`finished` は `FinishedRunIndex` の key を書き、反対側の key を外す |
+| `AGENT_RUN_OUTBOX_KEY_INVALID` | `failed` 以外の Run から `triageIndexPartition` と `triageIndexSortKey` を `outcome <> failed` 条件で外す。`failed` の Run で sort key が壊れている場合は `<finishedAt>#<partition>#<runId>` に書き直す |
+| `AGENT_RUN_REVOCATION_BLOCKS_ACTIVE_RUN` | `active` Run が同じ member と instance のものであることを読み直してから revocation row を削除する |
+| `AGENT_RUN_REVOCATION_ORPHANED` | 削除しない。revocation row は解放済み instance を止める tombstone なので、原因を調べてから判断する |
+| `AGENT_RUN_LATEST_RUN_INVALID` | `active` Run があればその Run、なければ `WorkItemRunIndex` で最も新しい Run を指すよう、`runId = <読んだ値>` 条件で書き直す |
+| `AGENT_RUN_WATERMARK_INVALID` | watermark row を削除する。次の停滞走査は先頭から読み直し、起票済みの Run は Triage の source claim で重複しない |
+| `AGENT_RUN_ROW_MALFORMED` / `AGENT_RUN_ROW_UNRECOGNIZED` / `AGENT_RUN_PARTITION_UNRESOLVED` | 自動の手順はない。書き込んだ経路を特定し、PITR の時点と比べてから個別に直す |
 
 ## 後続 Phase
 

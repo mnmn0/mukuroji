@@ -58,13 +58,13 @@ export const AGENT_RUN_TRIAGE_INDEX_NAME = 'AgentRunTriageIndex'
 const triageTeamPartition = 'triage-filing-team'
 
 /** Triage index partition of failed runs not yet filed, oldest finish first. */
-const triageFailedRunPartition = 'triage-failed-run'
+export const triageFailedRunPartition = 'triage-failed-run'
 
 /** Sort key of a Team's stall sweep watermark: the last active run the sweep passed. */
-const stallWatermarkRecordKey = 'agent-run-triage-stall-watermark'
+export const stallWatermarkRecordKey = 'agent-run-triage-stall-watermark'
 
 /** Partition and sort key of the Team where the last bounded stall sweep stopped. */
-const triageSweepResumeKey = { directoryTeamId: 'agent-run-triage-sweep', recordKey: 'resume-team' }
+export const triageSweepResumeKey = { directoryTeamId: 'agent-run-triage-sweep', recordKey: 'resume-team' }
 
 /** Largest page a list query returns. */
 const maximumPageSize = 100
@@ -481,7 +481,7 @@ export function createAgentRunPartition(directoryId: string, teamId: string): st
  * @param runId - Run ID.
  * @returns Sort key.
  */
-function runRecordKey(runId: string): string {
+export function runRecordKey(runId: string): string {
   return `agent-run#${runId}`
 }
 
@@ -491,7 +491,7 @@ function runRecordKey(runId: string): string {
  * @param workItemId - Work Item ID.
  * @returns Sort key.
  */
-function claimRecordKey(workItemId: string): string {
+export function claimRecordKey(workItemId: string): string {
   return `agent-run-claim#${workItemId}`
 }
 
@@ -501,7 +501,7 @@ function claimRecordKey(workItemId: string): string {
  * @param workItemId - Work Item ID.
  * @returns Sort key.
  */
-function latestRunRecordKey(workItemId: string): string {
+export function latestRunRecordKey(workItemId: string): string {
   return `agent-run-latest#${workItemId}`
 }
 
@@ -510,7 +510,7 @@ function latestRunRecordKey(workItemId: string): string {
  * @param run - Run to place.
  * @returns The sort key.
  */
-function workItemRunSortKey(run: Pick<StoredAgentRun, 'startedAt' | 'runId'>): string {
+export function workItemRunSortKey(run: Pick<StoredAgentRun, 'startedAt' | 'runId'>): string {
   return `${run.startedAt}#${run.runId}`
 }
 
@@ -521,7 +521,7 @@ function workItemRunSortKey(run: Pick<StoredAgentRun, 'startedAt' | 'runId'>): s
  * @param revocation - Work Item, member, and instance hash.
  * @returns Sort key.
  */
-function revocationRecordKey(revocation: AgentRunRevocation): string {
+export function revocationRecordKey(revocation: AgentRunRevocation): string {
   const subject = createHash('sha256').update(`${revocation.assigneeUserId}\u0000${revocation.instanceIdHash}`).digest('hex')
   return `agent-run-revoked#${revocation.workItemId}#${subject}`
 }
@@ -609,7 +609,7 @@ function storedTimestamp(item: Record<string, unknown>, name: string): string {
  * @param expected - Partition and Team the row must belong to.
  * @returns The run.
  */
-function parseRun(
+export function parseRun(
   item: Record<string, unknown>,
   expected: {
     /** Expected Workspace ID. */
@@ -829,7 +829,7 @@ function finishedRunPartition(partition: string, group: AgentRunFinishedGroup): 
  * @param run.finishedAt - Finish time.
  * @returns Index partition and sort key.
  */
-function finishedRunIndexKeys(run: {
+export function finishedRunIndexKeys(run: {
   /** Workspace ID. */
   directoryId: string
   /** Team ID. */
@@ -878,7 +878,7 @@ function parseFinishedEntry(item: Record<string, unknown>, partition: string, gr
  * @param run - Run to store.
  * @returns DynamoDB item.
  */
-function serializeRun(run: StoredAgentRun): Record<string, unknown> {
+export function serializeRun(run: StoredAgentRun): Record<string, unknown> {
   const partition = createAgentRunPartition(run.directoryId, run.teamId)
   const { directoryId, ...fields } = run
   return {
