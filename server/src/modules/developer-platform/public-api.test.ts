@@ -231,6 +231,8 @@ function createTestRouter(input: {
   /** Agent Run service used by Agent Run route tests. */
   agentRuns?: PublicAgentRunService
   connectorAuthorization?: ConnectorAuthorizationService
+  /** Web app origin that the connector OAuth callback hands off to. */
+  connectorOAuthWebOrigin?: string
   managementPrincipal?: DeveloperManagementPrincipal
   /** Management authentication の request context を検証する override です。 */
   authenticateManagement?: PublicApiDependencies['authenticateManagement']
@@ -263,6 +265,9 @@ function createTestRouter(input: {
       : {}),
     ...(input.connectorAuthorization
       ? { connectorAuthorization: input.connectorAuthorization }
+      : {}),
+    ...(input.connectorOAuthWebOrigin
+      ? { connectorOAuthWebOrigin: input.connectorOAuthWebOrigin }
       : {}),
   })
   return { platform, router }
@@ -2620,7 +2625,7 @@ describe('public API router', () => {
     expect(limited.headers.get('RateLimit-Limit')).toBe('60')
   })
 
-  test('requires a signed-in integration manager to complete a connector OAuth flow', async () => {
+  test('hands the callback to the Web origin and requires a signed-in integration manager to complete it', async () => {
     let calls = 0
     const connectorAuthorization: ConnectorAuthorizationService = {
       async begin() { throw new Error('not used') },
@@ -2646,6 +2651,20 @@ describe('public API router', () => {
       },
       body: JSON.stringify({ state: 'signed-state', code: 'provider-code' }),
     }
+    const splitOrigin = createTestRouter({
+      connectorAuthorization,
+      connectorOAuthWebOrigin: 'https://app.example.com',
+    })
+    const handedOff = await splitOrigin.router.request(
+      'http://localhost/developer/connector-oauth/callback?code=provider-code&state=signed-state',
+    )
+    expect(handedOff.status).toBe(303)
+    expect(handedOff.headers.get('Location')).toBe(
+      'https://app.example.com/settings/connectors/oauth-callback' +
+        '#state=signed-state&code=provider-code',
+    )
+    expect(calls).toBe(0)
+
     const member = createTestRouter({
       connectorAuthorization,
       managementPrincipal: {

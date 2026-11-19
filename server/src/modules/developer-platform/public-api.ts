@@ -750,6 +750,11 @@ export type PublicApiDependencies = {
   queueWebhookDelivery?(workspaceId: string, deliveryId: string): Promise<void>
   /** Connector OAuth と sync-conflict recovery の optional provider adapter です。 */
   connectorAuthorization?: ConnectorAuthorizationService
+  /**
+   * Provider redirect URI が Web app と別の API origin を指す場合に、OAuth callback を引き渡す
+   * Web app の origin です。省略時は callback と同じ origin の Web app へ引き渡します。
+   */
+  connectorOAuthWebOrigin?: string
   /** Existing domain error を stable public error へ変換します。 */
   mapError?(error: unknown): PublicApiServiceError | undefined
   /** Test で request ID を固定する generator です。 */
@@ -1998,7 +2003,11 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     // holding the authorization URL install their provider account. Hand the values to the Web app
     // in the fragment, which is not sent to servers or in Referer, and let the signed-in user who
     // started the flow complete it.
-    return c.redirect(`${CONNECTOR_OAUTH_CALLBACK_APP_PATH}#${fragment.toString()}`, 303)
+    return c.redirect(
+      `${dependencies.connectorOAuthWebOrigin ?? ''}${CONNECTOR_OAUTH_CALLBACK_APP_PATH}` +
+        `#${fragment.toString()}`,
+      303,
+    )
   })
 
   router.post('/developer/connector-oauth/complete', async (c) => {

@@ -3129,7 +3129,9 @@ function getPublicApiCursorSecret() {
  * @param routeApp - Hono application that receives the routes.
  */
 export function registerPublicApiRoutes(routeApp: Hono): void {
-  if (!loadServerConfig().runtimeRole) {
+  const serverConfig = loadServerConfig()
+  if (!serverConfig.runtimeRole) {
+    const { connectorOAuthWebOrigin } = serverConfig
     const publicApiDependencies: PublicApiDependencies = {
       apiKeys: createForwardingClient(() => developerPlatformDependencies.apiKeys),
       oauthCredentials: createForwardingClient(
@@ -3162,6 +3164,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       },
       queueWebhookDelivery,
       connectorAuthorization: lazyConnectorAuthorization,
+      ...(connectorOAuthWebOrigin ? { connectorOAuthWebOrigin } : {}),
       mapError: mapPublicApiAdapterError,
     }
     routeApp.route('/api', createPublicApiRouter(publicApiDependencies))
