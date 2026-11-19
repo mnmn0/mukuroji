@@ -136,6 +136,49 @@ test('fails before audit reads when canonical entity fan-out exceeds the API cap
   expect(auditReads).toBe(0)
 })
 
+test('narrows Analytics reads to the listed Work Items before the history fan-out cap', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 501 })
+  const auditEntityIds: unknown[] = []
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        auditEntityIds.push(input.entityId)
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: {
+      ...query.filter,
+      workItems: [
+        { teamId: 'core-team', workItemId: 'work-item-7' },
+        { teamId: 'core-team', workItemId: 'work-item-9' },
+        { teamId: 'core-team', workItemId: 'missing-item' },
+      ],
+    },
+    widgets: [{
+      id: 'burndown',
+      title: 'Burndown',
+      type: 'chart',
+      metric: 'remaining-scope',
+      visualization: 'burndown',
+    }],
+  })
+
+  expect(response.status).toBe(200)
+  expect(new Set(auditEntityIds)).toEqual(new Set([
+    'team/core-team/issue/work-item-7',
+    'team/core-team/issue/work-item-9',
+  ]))
+})
+
 test('bounds shared Analytics page reads for paginated canonical events', async () => {
   configureFakeProjectClients(true, { teamIssueCount: 6 })
   let auditReads = 0
