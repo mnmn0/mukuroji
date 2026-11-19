@@ -2,12 +2,14 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   createDefaultDueDateWorkItemSchedule,
+  createDefaultUnscheduledWorkItemSchedule,
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
 import { teamIssueFixtures } from '../src/issues/fixtures'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { TeamIssueScreen } from '../src/issues/ui/TeamIssueScreen'
 import { createTranslator } from '../src/shared/i18n/i18n'
+import { listTaskCalendarMonthTasks } from '../src/tasks/model/taskCalendarMonth'
 import { getCurrentTaskDate } from '../src/tasks/model/taskScheduleWindow'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 import { MyTasksWorkspaceView } from '../src/workspace/ui/MyTasksWorkspaceView'
@@ -84,5 +86,22 @@ describe('My Tasks calendar', () => {
     expect(html).not.toContain('data-testid="my-tasks-kanban"')
     expect(html).toContain('data-testid="task-calendar-month-navigation"')
     expect(html).toContain('data-testid="task-calendar-item-due-today"')
+  })
+})
+
+describe('calendar keyboard targets', () => {
+  test('keeps only the shown month by date, then the unscheduled Work Items', () => {
+    const lateMarch = createItem('late-march', '2026-03-20')
+    const earlyMarch = createItem('early-march', '2026-03-02')
+    const february = createItem('february', '2026-02-28')
+    const april = createItem('april', '2026-04-01')
+    const unscheduled = {
+      ...createItem('unscheduled', '2026-03-05'),
+      dueDate: undefined,
+      schedule: createDefaultUnscheduledWorkItemSchedule(),
+    }
+
+    expect(listTaskCalendarMonthTasks([unscheduled, lateMarch, february, earlyMarch, april], '2026-03')
+      .map((task) => task.id)).toEqual(['early-march', 'late-march', 'unscheduled'])
   })
 })

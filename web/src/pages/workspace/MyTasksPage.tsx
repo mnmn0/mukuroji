@@ -96,6 +96,8 @@ import {
 import { MyTasksWorkspaceView, type MyTasksViewMode } from '../../workspace/ui/MyTasksWorkspaceView'
 import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
 import { listTaskGanttRowTasks } from '../../tasks/model/taskGanttRows'
+import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
+import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import { createMyTasksGanttGrouping } from '../../workspace/model/myTaskGrouping'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { useCollapsedWorkItemOutlineKeys } from '../../shared/lib/preferences/useCollapsedWorkItemOutlineKeys'
@@ -144,6 +146,7 @@ export function MyTasksPage() {
     createTaskViewSelectionState,
   )
   const [taskActionErrorMessage, setTaskActionErrorMessage] = useState<string>()
+  const [myTasksCalendarMonth, setMyTasksCalendarMonth] = useState(() => getCurrentTaskMonth())
   const [taskActionContextMenuState, setTaskActionContextMenuState] = useState<
     MyTaskActionContextMenuState
   >()
@@ -293,10 +296,12 @@ export function MyTasksPage() {
     [collapsedMyTasksOutlineKeys, isMyTasksOutlineShown, myTasksHierarchies, toggleMyTasksOutlineKey],
   )
   // In the Gantt chart, keyboard moves and selection follow its rows: its groups and outline
-  // order, without the rows under a collapsed parent.
+  // order, without the rows under a collapsed parent. The calendar keeps only the cards of the
+  // shown month and the unscheduled bucket.
   const myTasksGanttGroupBy = taskViewController.effectiveDefinition.layout.group?.field
   const myTasksGanttGroupDirection = taskViewController.effectiveDefinition.layout.group?.direction
   const navigableMyTasks = useMemo(() => {
+    if (myTasksViewMode === 'calendar') return listTaskCalendarMonthTasks(visibleMyTasks, myTasksCalendarMonth)
     if (myTasksViewMode !== 'gantt') return visibleMyTasks
     const group = createMyTasksGanttGrouping(
       myTasksGanttGroupBy,
@@ -310,6 +315,7 @@ export function MyTasksPage() {
       ...(group ? { group } : {}),
     })
   }, [
+    myTasksCalendarMonth,
     myTasksGanttGroupBy,
     myTasksGanttGroupDirection,
     myTasksGanttOutline,
@@ -965,6 +971,8 @@ export function MyTasksPage() {
             })
           }}
           ganttOutline={myTasksGanttOutline}
+          calendarMonth={myTasksCalendarMonth}
+          onCalendarMonthChange={setMyTasksCalendarMonth}
           outlineNotice={isMyTasksOutlineShown ? (
             <WorkItemOutlineNotice
               failedTeamCount={myTasksHierarchies?.errorsByTeam.size ?? (myTasksHierarchiesError ? 1 : 0)}

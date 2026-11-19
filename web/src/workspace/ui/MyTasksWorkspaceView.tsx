@@ -90,6 +90,10 @@ export type MyTasksWorkspaceViewProps = {
   onViewModeChange?: (mode: MyTasksViewMode) => void
   /** Hierarchy shown as an outline by the Gantt chart. */
   ganttOutline?: TaskGanttOutline
+  /** Month the calendar shows, in `YYYY-MM` form; the view keeps its own month when omitted. */
+  calendarMonth?: string
+  /** Moves the calendar to another month, together with `calendarMonth`. */
+  onCalendarMonthChange?: (month: string) => void
   /** Notice about the outline, such as loading or Teams shown without it. */
   outlineNotice?: ReactNode
   /** Work Items the current user owns or contributes to. */
@@ -129,6 +133,8 @@ export function MyTasksWorkspaceView({
   viewMode = 'board',
   onViewModeChange,
   ganttOutline,
+  calendarMonth: controlledCalendarMonth,
+  onCalendarMonthChange,
   outlineNotice,
 }: MyTasksWorkspaceViewProps) {
   const ganttGroupBy = presentation?.groupBy
@@ -138,7 +144,13 @@ export function MyTasksWorkspaceView({
     [configurationsByTeam, ganttGroupBy, ganttGroupDirection, t, teams],
   )
   const ganttTasks = useMemo(() => [...tasks], [tasks])
-  const [calendarMonth, setCalendarMonth] = useState(() => getCurrentTaskMonth())
+  const [localCalendarMonth, setLocalCalendarMonth] = useState(() => getCurrentTaskMonth())
+  const calendarMonth = controlledCalendarMonth ?? localCalendarMonth
+  /** Moves the calendar, reporting the month to the owner when it controls the month. */
+  const changeCalendarMonth = (month: string) => {
+    setLocalCalendarMonth(month)
+    onCalendarMonthChange?.(month)
+  }
   const [draggedTaskKey, setDraggedTaskKey] = useState<string | undefined>()
   const [dropTargetColumnKey, setDropTargetColumnKey] = useState<string | undefined>()
   const [movingTaskKeys, setMovingTaskKeys] = useState<ReadonlySet<string>>(() => new Set())
@@ -332,7 +344,7 @@ export function MyTasksWorkspaceView({
         <TaskCalendarView
           configurationsByTeam={configurationsByTeam}
           month={calendarMonth}
-          onMonthChange={setCalendarMonth}
+          onMonthChange={changeCalendarMonth}
           onSelectTask={onOpenTask}
           t={t}
           tasks={ganttTasks}
