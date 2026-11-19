@@ -45,6 +45,10 @@ export type DocumentHomeProps = {
     key: BuiltInDocumentTemplateKey,
     options: BuiltInTemplateCreateOptions,
   ) => void
+  /**
+   * Whether a page is being created from a bundled template.
+   */
+  isCreatingFromBuiltInTemplate?: boolean
 }
 
 /**
@@ -52,6 +56,7 @@ export type DocumentHomeProps = {
  */
 export function DocumentHome({
   documents,
+  isCreatingFromBuiltInTemplate = false,
   onCreateDocument,
   onCreateFromBuiltInTemplate,
   onInstantiateTemplate,
@@ -133,6 +138,7 @@ export function DocumentHome({
 
       {onCreateFromBuiltInTemplate ? (
         <BuiltInTemplateSection
+          isCreating={isCreatingFromBuiltInTemplate}
           projects={projectSpaces}
           t={t}
           onCreate={onCreateFromBuiltInTemplate}
@@ -301,10 +307,13 @@ function DocumentCardSection({
  * @returns The bundled template section.
  */
 function BuiltInTemplateSection({
+  isCreating,
   onCreate,
   projects,
   t,
 }: {
+  /** Whether a page is being created, which disables the template buttons. */
+  isCreating: boolean
   /** Creates a page from the chosen bundled template. */
   onCreate: (
     key: BuiltInDocumentTemplateKey,
@@ -362,7 +371,8 @@ function BuiltInTemplateSection({
       <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,220px),1fr))] gap-3">
         {builtInDocumentTemplateKeys.map((key) => (
           <button
-            className="workbench-panel group min-h-[110px] p-5 text-left transition hover:border-tone-99d7cf hover:shadow-[0_8px_24px_rgba(23,32,29,0.08)]"
+            className="workbench-panel group min-h-[110px] p-5 text-left transition hover:border-tone-99d7cf hover:shadow-[0_8px_24px_rgba(23,32,29,0.08)] disabled:cursor-wait disabled:opacity-60"
+            disabled={isCreating}
             key={key}
             onClick={() =>
               onCreate(key, {

@@ -184,6 +184,10 @@ export type DocumentScreenData = {
    */
   currentUserKey?: string
   /**
+   * Whether a page is being created from a bundled template.
+   */
+  isCreatingFromBuiltInTemplate?: boolean
+  /**
    * Sidebar と Project scope に表示する directory です。
    */
   teams: ProjectDirectoryTeam[]
@@ -570,7 +574,10 @@ export function DocumentPage() {
   const builtInTemplateCreation = useBuiltInTemplateDocumentCreation({
     accessToken,
     locale,
-    onCreated: () => mutateDocuments(),
+    onCreated: async (documentId) => {
+      await mutateDocuments()
+      navigate(createDocumentPath(documentId))
+    },
   })
   const {
     data: selectedDocument,
@@ -917,23 +924,6 @@ export function DocumentPage() {
     )
     await mutateDocuments()
     navigate(createDocumentPath(created.id))
-  }
-
-  /**
-   * Creates a page from a bundled template and opens it.
-   *
-   * @param key - Bundled template to use.
-   * @param options - Project and participants chosen on the home.
-   */
-  const handleCreateFromBuiltInTemplate = async (
-    key: BuiltInDocumentTemplateKey,
-    options: BuiltInTemplateCreateOptions,
-  ) => {
-    const createdId = await builtInTemplateCreation.createFromTemplate(
-      key,
-      options,
-    )
-    if (createdId) navigate(createDocumentPath(createdId))
   }
 
   const handleUpdateDocument = async (
@@ -1440,7 +1430,8 @@ export function DocumentPage() {
         archiveDocument: handleArchiveDocument,
         createComment: handleCreateComment,
         createDocument: handleCreateDocument,
-        createDocumentFromBuiltInTemplate: handleCreateFromBuiltInTemplate,
+        createDocumentFromBuiltInTemplate:
+          builtInTemplateCreation.createFromTemplate,
         createWorkItem: canCreateDocuments
           ? checklistWorkItemCreation.createWorkItem
           : undefined,
@@ -1474,6 +1465,7 @@ export function DocumentPage() {
         canCreateDocuments,
         comments,
         currentUserKey: workspace.userKey,
+        isCreatingFromBuiltInTemplate: builtInTemplateCreation.isCreating,
         documents,
         focusedCommentId,
         hasMoreActiveDocuments:
@@ -2118,6 +2110,9 @@ export function DocumentScreen({
                   documents={data.documents}
                   t={t}
                   teams={data.teams}
+                  isCreatingFromBuiltInTemplate={
+                    data.isCreatingFromBuiltInTemplate
+                  }
                   onCreateDocument={createDocumentAction}
                   onCreateFromBuiltInTemplate={
                     data.canCreateDocuments &&

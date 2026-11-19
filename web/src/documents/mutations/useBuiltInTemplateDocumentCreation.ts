@@ -19,8 +19,11 @@ export type UseBuiltInTemplateDocumentCreationOptions = {
   accessToken?: string
   /** Language of the template text. */
   locale: Locale
-  /** Refreshes every cache that lists Documents after a page is created. */
-  onCreated: () => Promise<unknown>
+  /**
+   * Refreshes the Document caches and opens the created page. Creation stays
+   * pending until it settles, so a second click cannot create a duplicate.
+   */
+  onCreated: (documentId: string) => Promise<unknown> | void
 }
 
 /**
@@ -40,7 +43,7 @@ type RetainedTemplateContent = {
  * the server fingerprints the create body and block IDs are random.
  *
  * @param options - API token, template language, and the cache refresh.
- * @returns The create action, which resolves to the new page ID.
+ * @returns The create action and whether a create is pending.
  */
 export function useBuiltInTemplateDocumentCreation({
   accessToken,
@@ -49,6 +52,8 @@ export function useBuiltInTemplateDocumentCreation({
 }: UseBuiltInTemplateDocumentCreationOptions) {
   const [mutationRunner] = useState(createMutationRequestRunner)
   const retainedRef = useRef<RetainedTemplateContent | undefined>(undefined)
+  const pendingRef = useRef(false)
+  const [isCreating, setIsCreating] = useState(false)
 
   /**
    * Creates a page with today's date, the chosen Project, and the
@@ -56,13 +61,34 @@ export function useBuiltInTemplateDocumentCreation({
    *
    * @param key - Bundled template to use.
    * @param options - Project and participants chosen on the home.
-   * @returns ID of the created page, or undefined without a token.
    */
   const createFromTemplate = async (
     key: BuiltInDocumentTemplateKey,
     options: BuiltInTemplateCreateOptions,
-  ): Promise<string | undefined> => {
-    if (!accessToken) return undefined
+  ): Promise<void> => {
+    if (!accessToken || pendingRef.current) return
+    pendingRef.current = true
+    setIsCreating(true)
+    try {
+      await createAndOpen(accessToken, key, options)
+    } finally {
+      pendingRef.current = false
+      setIsCreating(false)
+    }
+  }
+
+  /**
+   * Sends the create request with retained content and opens the new page.
+   *
+   * @param token - Workspace API token.
+   * @param key - Bundled template to use.
+   * @param options - Project and participants chosen on the home.
+   */
+  const createAndOpen = async (
+    token: string,
+    key: BuiltInDocumentTemplateKey,
+    options: BuiltInTemplateCreateOptions,
+  ) => {
     const date = formatLocalCalendarDate(new Date())
     const fingerprint = JSON.stringify([
       key,
@@ -98,12 +124,11 @@ export function useBuiltInTemplateDocumentCreation({
     const created = await mutationRunner.run(
       `document:create:built-in:${key}`,
       fingerprint,
-      (context) => createDocument(accessToken, input, context),
+      (context) => createDocument(token, input, context),
     )
     retainedRef.current = undefined
-    await onCreated()
-    return created.id
+    await onCreated(created.id)
   }
 
-  return { createFromTemplate }
+  return { createFromTemplate, isCreating }
 }
