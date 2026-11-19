@@ -609,4 +609,157 @@ describe('triage schedule adapter', () => {
       harness.restore()
     }
   })
+
+  describe('snoozed entries past their SLA (#484)', () => {
+    /** Creates a snoozed entry whose SLA and escalation fall due before the snooze ends. */
+    function createSnoozedPastSlaEntry(): TriageEntry {
+      const entry = createEntry()
+      entry.snoozedUntil = '2026-08-10T00:00:00.000Z'
+      entry.sla = {
+        policyId: 'support-sla',
+        dueAt: '2026-08-09T00:05:00.000Z',
+        escalationDueAt: '2026-08-09T00:07:00.000Z',
+      }
+      return entry
+    }
+
+    /** Builds the stored root row for an entry. */
+    function createStoredItem(entry: TriageEntry): Record<string, unknown> {
+      const storedItem = createTriageEntryTransactionItems({
+        tableName: 'RequestIntakeTable',
+        entry,
+        inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+      })[0]?.Put?.Item
+      if (!storedItem) throw new TypeError('Expected a stored triage entry fixture.')
+      return storedItem
+    }
+
+    /** Returns the stored row only from the wake shard it is indexed in. */
+    function queryShardOf(storedItem: Record<string, unknown>, input: Record<string, unknown>) {
+      const values = isRecord(input.ExpressionAttributeValues) ? input.ExpressionAttributeValues : {}
+      return values[':wakeShard'] === storedItem.triageWakeShard
+        ? { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] }
+        : { Items: [] }
+    }
+
+    /** Runs one schedule invocation after the SLA but before the snooze deadline. */
+    async function runAfterSla(harness: ReturnType<typeof createHarness>) {
+      return await runTriageSchedule({
+        documentClient: harness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 100,
+        now: '2026-08-09T00:10:00.000Z',
+      })
+    }
+
+    test('indexes a snoozed entry at its snooze deadline instead of its suspended SLA', () => {
+      const entry = createSnoozedPastSlaEntry()
+      expect(createStoredItem(entry).triageNextWakeAt)
+        .toBe('2026-08-10T00:00:00.000Z#triage-1')
+
+      const pending: TriageEntry = { ...entry, state: 'pending' }
+      delete pending.snoozedUntil
+      pending.capabilities = createTriageCapabilities(pending)
+      expect(createStoredItem(pending).triageNextWakeAt)
+        .toBe('2026-08-09T00:05:00.000Z#triage-1')
+    })
+
+    test('moves a legacy row indexed at its suspended SLA to the snooze deadline', async () => {
+      const entry = createSnoozedPastSlaEntry()
+      const storedItem: Record<string, unknown> = {
+        ...createStoredItem(entry),
+        triageNextWakeAt: '2026-08-09T00:05:00.000Z#triage-1',
+      }
+      const harness = createHarness((commandName, input) => {
+        if (commandName === 'QueryCommand') return queryShardOf(storedItem, input)
+        if (commandName === 'GetCommand') return { Item: storedItem }
+        return {}
+      })
+
+      try {
+        const result = await runAfterSla(harness)
+
+        expect(result).toMatchObject({
+          evaluatedCandidates: 1,
+          breachedEntries: 0,
+          escalatedEntries: 0,
+          repairedWakeIndexEntries: 1,
+          conflicts: 0,
+        })
+        const queries = harness.inputs.filter((input) => 'IndexName' in input)
+        expect(queries).toHaveLength(8)
+        expect(harness.calls).not.toContain('UpdateCommand')
+        const writes = harness.inputs.filter((input) => 'TransactItems' in input)
+        expect(writes).toEqual([{
+          TransactItems: [{
+            Update: {
+              TableName: 'RequestIntakeTable',
+              Key: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' },
+              UpdateExpression:
+                'SET triageWakeShard = :wakeShard, triageNextWakeAt = :nextWakeAt',
+              ConditionExpression: '#revision = :expectedRevision',
+              ExpressionAttributeNames: { '#revision': 'revision' },
+              ExpressionAttributeValues: {
+                ':expectedRevision': 1,
+                ':wakeShard': storedItem.triageWakeShard,
+                ':nextWakeAt': '2026-08-10T00:00:00.000Z#triage-1',
+              },
+            },
+          }],
+        }])
+      } finally {
+        harness.restore()
+      }
+    })
+
+    test('does not write when an unchanged entry is already indexed correctly', async () => {
+      const storedItem = createStoredItem(createSnoozedPastSlaEntry())
+      const harness = createHarness((commandName, input) => {
+        if (commandName === 'QueryCommand') return queryShardOf(storedItem, input)
+        if (commandName === 'GetCommand') return { Item: storedItem }
+        return {}
+      })
+
+      try {
+        await expect(runAfterSla(harness)).resolves.toMatchObject({
+          evaluatedCandidates: 1,
+          repairedWakeIndexEntries: 0,
+        })
+        expect(harness.calls).toEqual(expect.not.arrayContaining([
+          'TransactWriteCommand',
+          'UpdateCommand',
+        ]))
+      } finally {
+        harness.restore()
+      }
+    })
+
+    test('counts a concurrent change during the index repair as a conflict', async () => {
+      const storedItem: Record<string, unknown> = {
+        ...createStoredItem(createSnoozedPastSlaEntry()),
+        triageNextWakeAt: '2026-08-09T00:05:00.000Z#triage-1',
+      }
+      const conflict = new Error('Transaction cancelled.')
+      conflict.name = 'TransactionCanceledException'
+      Object.assign(conflict, { CancellationReasons: [{ Code: 'ConditionalCheckFailed' }] })
+      const harness = createHarness((commandName, input) => {
+        if (commandName === 'QueryCommand') return queryShardOf(storedItem, input)
+        if (commandName === 'GetCommand') return { Item: storedItem }
+        throw conflict
+      })
+
+      try {
+        await expect(runAfterSla(harness)).resolves.toMatchObject({
+          repairedWakeIndexEntries: 0,
+          conflicts: 1,
+        })
+      } finally {
+        harness.restore()
+      }
+    })
+  })
 })

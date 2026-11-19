@@ -50,8 +50,12 @@ import {
   assertEnterpriseCognitoProviderBinding,
   assertEnterpriseIdentityProviderReady,
   canAssignEnterpriseRole,
+  deactivateEnterpriseScimUserDesiredState,
   ipMatchesCidr,
   resolveEnterpriseRolePermissions,
+  resolveEnterpriseScimMemberKey,
+  saveEnterpriseScimUserDesiredState,
+  type EnterpriseScimUserDesiredStateDependencies,
 } from '../../modules/enterprise-identity'
 import {
   createDefaultEnterpriseSecurityPolicy,
@@ -1378,9 +1382,7 @@ async function applyEnterpriseScimUserState(
   auditContext: MutationAuditContext,
   desiredGroupOverlays: readonly EnterpriseScimGroup[] = [],
 ) {
-  const memberKey = user.linkedMemberKey ??
-    user.emails[0]?.trim().toLowerCase() ??
-    user.userName.trim().toLowerCase()
+  const memberKey = resolveEnterpriseScimMemberKey(user)
   const existing = await workspaceDependencies.workspaceAccess.getMember(user.workspaceId, memberKey)
   if (user.active) {
     const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(user.workspaceId)
@@ -1457,6 +1459,18 @@ async function applyEnterpriseScimUserState(
     user.version,
     auditContext,
   )
+}
+
+/**
+ * Builds the ports for storing SCIM user desired state from the request dependencies.
+ *
+ * @returns Directory store and Workspace member reader for SCIM user desired state.
+ */
+function createEnterpriseScimUserDesiredStateDependencies(): EnterpriseScimUserDesiredStateDependencies {
+  return {
+    scimDirectory: workspaceDependencies.enterpriseIdentity.scimDirectory,
+    workspaceAccess: workspaceDependencies.workspaceAccess,
+  }
 }
 
 async function requireEnterpriseScimDeprovisionAllowed(
@@ -3977,7 +3991,9 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           snapshot,
         )
       }
-      const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.upsertScimUser(
+      const user = await saveEnterpriseScimUserDesiredState(
+        createEnterpriseScimUserDesiredStateDependencies(),
+        snapshot,
         input,
         createEnterpriseScimMutationContext(
           c,
@@ -4055,7 +4071,9 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           snapshot,
         )
       }
-      const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.upsertScimUser(
+      const user = await saveEnterpriseScimUserDesiredState(
+        createEnterpriseScimUserDesiredStateDependencies(),
+        snapshot,
         input,
         createEnterpriseScimMutationContext(
           c,
@@ -4097,10 +4115,10 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           snapshot,
         )
       }
-      const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.deactivateScimUser(
-        workspaceId,
-        credential.identityProviderId,
-        userId,
+      const user = await deactivateEnterpriseScimUserDesiredState(
+        createEnterpriseScimUserDesiredStateDependencies(),
+        snapshot,
+        existing,
         readScimIdempotencyKey(c, `delete-user:${userId}`),
         createEnterpriseScimMutationContext(
           c,
