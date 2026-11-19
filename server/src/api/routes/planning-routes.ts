@@ -640,6 +640,28 @@ function readPlanningWorkItemDependencyEndpoint(
   }
 }
 
+/**
+ * Requires the caller to manage Planning at a Cycle's scope before it changes the Cycle's automation.
+ *
+ * Automation later runs `/next` and rollover without the caller, so it needs the same
+ * `planning.manage` (or legacy manager role) as those routes, evaluated at the Cycle's own scope.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param scope - Team / Project scope of the Cycle.
+ */
+async function requirePlanningAutomationManagement(
+  principal: WorkspacePrincipal,
+  scope: Pick<PlanningEntity, 'teamId' | 'projectId'>,
+) {
+  if (!await canManagePlanningEntityScope(principal, scope)) {
+    throw new PlanningError(
+      403,
+      'ProjectAccessDenied',
+      'Planning manage permission is required to change Cycle automation.',
+    )
+  }
+}
+
 async function requirePlanningScopePermission(
   principal: WorkspacePrincipal,
   scope: Pick<PlanningEntity, 'teamId' | 'projectId'>,
@@ -3797,12 +3819,10 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
       requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
-      // Cycle automation later runs /next and /rollover without the caller, so it needs a manager.
-      await requirePlanningScopePermission(
-        principal,
-        input,
-        isRecord(input) && input.automation !== undefined ? 'manager' : 'member',
-      )
+      await requirePlanningScopePermission(principal, input, 'member')
+      if (isRecord(input) && input.automation !== undefined) {
+        await requirePlanningAutomationManagement(principal, input)
+      }
       if (input.parentId) {
         await requirePlanningEntityPermission(
           principal,
@@ -3834,13 +3854,10 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
       requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
-      // Cycle automation later runs /next and /rollover without the caller, so it needs a manager.
-      await requirePlanningEntityPermission(
-        principal,
-        snapshot.entities,
-        entityId,
-        isRecord(input.patch) && input.patch.automation !== undefined ? 'manager' : 'member',
-      )
+      const entity = await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'member')
+      if (isRecord(input.patch) && input.patch.automation !== undefined) {
+        await requirePlanningAutomationManagement(principal, entity)
+      }
       if (isRecord(input.patch) && input.patch.ownerMemberKey !== undefined) {
         await requirePlanningActiveOwner(principal, input.patch.ownerMemberKey)
       }

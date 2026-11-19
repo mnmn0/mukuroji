@@ -282,6 +282,32 @@ describe('Cycle automation', () => {
     })
   })
 
+  test('rejects edits that would stop the automated rollover into the next Cycle', async () => {
+    const client = new InMemoryPlanningClient(() => new Date('2026-08-13T00:00:00.000Z'))
+    await client.create(WORKSPACE, createCycle('cycle-1', 0, {
+      automation: { createNext: true, rolloverAtEnd: true },
+    }), { workItems: [] })
+    const created = await client.runCycleAutomationStep(WORKSPACE, 'cycle-1', async () => ({ workItems: [] }))
+    const nextId = created.action === 'created-next' ? created.cycleId : ''
+    const update = (entityId: string, patch: Record<string, unknown>) => client.update(WORKSPACE, entityId, {
+      expectedRevision: 2,
+      patch,
+    }, { workItems: [] })
+
+    await expect(update('cycle-1', {
+      forecast: { startDate: '2026-08-03', endDate: '2026-08-17' },
+    })).rejects.toMatchObject({ status: 409, code: 'PlanningCycleNextIncompatible' })
+    await expect(update(nextId, { cadence: { unit: 'week', count: 1 } }))
+      .rejects.toMatchObject({ status: 409, code: 'PlanningCycleNextIncompatible' })
+    // Without the automated rollover the dates are free to change.
+    const manual = await update('cycle-1', { automation: { createNext: true, rolloverAtEnd: false } })
+    expect(manual.planning.revision).toBe(3)
+    await client.update(WORKSPACE, 'cycle-1', {
+      expectedRevision: 3,
+      patch: { forecast: { startDate: '2026-08-03', endDate: '2026-08-17' } },
+    }, { workItems: [] })
+  })
+
   test('does not copy automation when a Cycle is duplicated', async () => {
     const client = new InMemoryPlanningClient(() => new Date('2026-08-05T00:00:00.000Z'))
     await client.create(WORKSPACE, createCycle('cycle-1', 0, {

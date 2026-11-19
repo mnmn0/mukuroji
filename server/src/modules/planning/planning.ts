@@ -1127,6 +1127,7 @@ abstract class BasePlanningClient implements PlanningClient {
       }
       const next = replaceEntity(state, updated)
       validatePlanningState(next)
+      requireCycleChainCompatible(next, updated)
       return { state: next }
     })
   }
@@ -1620,6 +1621,9 @@ abstract class BasePlanningClient implements PlanningClient {
         }),
       }
       validatePlanningState(next)
+      for (const entity of next.entities) {
+        if (entity.id === current.id || descendantIds.has(entity.id)) requireCycleChainCompatible(next, entity)
+      }
       return { state: next }
     })
   }
@@ -9103,6 +9107,44 @@ function resolveCycleAutomationDueAt(
     return undefined
   }
   return `${rolloverDate}T00:00:00.000Z`
+}
+
+/**
+ * Rejects an edit that would make a Cycle's automated rollover into its next Cycle impossible.
+ *
+ * Automation creates the next Cycle once and records it, so an accepted edit that breaks the
+ * scope, cadence, or date order would leave the automated rollover failing on every run.
+ *
+ * @param state - Graph after the edit.
+ * @param entity - Edited entity.
+ */
+function requireCycleChainCompatible(state: PlanningWorkspaceState, entity: StoredPlanningEntity) {
+  if (entity.type !== 'cycle') return
+  const isPending = (cycle: StoredPlanningEntity) =>
+    cycle.archivedAt === undefined && cycle.status !== 'completed' && cycle.status !== 'canceled'
+  const pairs: Array<[StoredPlanningEntity, StoredPlanningEntity]> = []
+  const next = entity.nextCycleId === undefined ? undefined : findEntity(state, entity.nextCycleId)
+  if (next) pairs.push([entity, next])
+  for (const candidate of state.entities) {
+    if (candidate.id !== entity.id && candidate.nextCycleId === entity.id) pairs.push([candidate, entity])
+  }
+  for (const [source, target] of pairs) {
+    if (source.automation?.rolloverAtEnd !== true || !isPending(source) || !isPending(target)) continue
+    if (
+      target.baseline.startDate <= source.baseline.endDate ||
+      target.forecast.startDate <= source.forecast.endDate ||
+      source.teamId !== target.teamId ||
+      source.projectId !== target.projectId ||
+      source.cadence?.unit !== target.cadence?.unit ||
+      source.cadence?.count !== target.cadence?.count
+    ) {
+      throw conflict(
+        'PlanningCycleNextIncompatible',
+        `Cycle "${target.id}" must keep the scope and cadence of Cycle "${source.id}" and start after it ends. ` +
+          'Change both Cycles together, or roll over by hand first.',
+      )
+    }
+  }
 }
 
 /**

@@ -108,7 +108,7 @@ Cycle は `automation: { createNext, rolloverAtEnd }` を持てます（Cycle �
 - `createNext`: 終了日（baseline と forecast の遅いほう）の3日前の 00:00 UTC から、次の Cycle を作ります
 - `rolloverAtEnd`: 終了日の翌日 00:00 UTC から、次の Cycle へ rollover します。次の Cycle がまだなければ先に作ります
 
-Automation は呼び出し元の権限なしで `/next` と rollover を実行するので、設定・変更・作成時の指定には Cycle の manager 権限が必要です（`PATCH /api/planning/entities/:entityId` と `POST /api/planning/entities` で `automation` を含むとき）。複製した Cycle は automation を引き継ぎません。
+Automation は呼び出し元の権限なしで `/next` と rollover を実行するので、設定・変更・作成時の指定には Cycle の scope での manager 権限（Enterprise では `planning.manage`）が必要です（`PATCH /api/planning/entities/:entityId` と `POST /api/planning/entities` で `automation` を含むとき）。複製した Cycle は automation を引き継ぎません。`rolloverAtEnd` が有効で次の Cycle がある間は、どちらかの Cycle の日付・cadence・scope を、次の Cycle が前の Cycle の終了後に始まり同じ cadence と scope を持つ状態から外す変更を `409 PlanningCycleNextIncompatible` で拒否します（先に `rolloverAtEnd` を外すか、手で rollover します）。
 
 次の Cycle は `POST /api/planning/cycles/:cycleId/next`（source の manager 権限）でも作れます。元の Cycle の終了日の翌日から cadence の1回分（週なら `count × 7` 日、月なら `count` か月）の baseline / forecast を持ち、Team / Project scope、owner、cadence、capacity、carry-over policy、automation を引き継ぎます。Title は末尾の数字を1つ進めます（`Sprint 12` → `Sprint 13`、数字がなければ ` 2` を付けます）。ID は元の Cycle ID から決まり、元の Cycle に `nextCycleId` を記録するので、同じ Cycle から次を2回作ることはできません（`409 PlanningCycleNextExists`）。
 

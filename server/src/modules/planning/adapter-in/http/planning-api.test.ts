@@ -3015,7 +3015,7 @@ test('creates the next Cycle and adds Work Items to a Cycle in bulk', async () =
   expect((await removed.json() as PlanningSnapshot).workItemLinks).toEqual([])
 })
 
-test('lets an Enterprise planning.write role change Cycle Work Items in bulk but not create the next Cycle', async () => {
+test('lets an Enterprise planning.write role change Cycle Work Items in bulk but not create the next Cycle or set automation', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
   const workspaceId = 'user#demo@example.com'
   const planning = new InMemoryPlanningClient()
@@ -3049,6 +3049,17 @@ test('lets an Enterprise planning.write role change Cycle Work Items in bulk but
     expectedRevision: 2,
   })
   expect(next.status).toBe(403)
+  // Automation runs /next and rollover later, so turning it on needs planning.manage too.
+  const automation = await planningApiRequest('/api/planning/entities/cycle-source', 'PATCH', {
+    expectedRevision: 2,
+    patch: { automation: { createNext: true, rolloverAtEnd: true } },
+  })
+  expect(automation.status).toBe(403)
+  const created = await planningApiRequest('/api/planning/entities', 'POST', {
+    ...createCyclePlanningInput('cycle-writer', 2),
+    automation: { createNext: true, rolloverAtEnd: false },
+  })
+  expect(created.status).toBe(403)
 })
 
 test('requires Cycle manager permission to create the next Cycle', async () => {
