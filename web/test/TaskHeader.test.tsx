@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createTranslator } from '../src/shared/i18n/i18n'
-import { TaskHeader } from '../src/tasks/ui/TaskHeader'
+import { TaskHeader, type TaskHeaderProps } from '../src/tasks/ui/TaskHeader'
 
 const t = createTranslator('en')
 
@@ -64,5 +64,32 @@ describe('TaskHeader Project quick access', () => {
     expect(savingHtml).toContain('aria-busy="true"')
     expect(savingHtml).toContain('disabled=""')
     expect(missingTeamHtml).toContain('disabled=""')
+  })
+})
+
+describe('TaskHeader Project overview', () => {
+  test('offers the Project overview outside the task view tabs only when its Team is known', () => {
+    const props: TaskHeaderProps = {
+      activeTab: 'table',
+      isCreateTaskOpen: false,
+      isProjectQuickAccess: false,
+      onMobileSidebarOpen: () => undefined,
+      onTabChange: () => undefined,
+      projectName: 'Refero',
+      t,
+      tasks: [],
+      teamName: 'Core team',
+      userInitial: 'D',
+    }
+    const withOverview = renderToStaticMarkup(
+      <TaskHeader {...props} onOpenProjectOverview={() => undefined} />,
+    )
+    const withoutOverview = renderToStaticMarkup(<TaskHeader {...props} />)
+
+    expect(withOverview).toContain('data-testid="task-header-project-overview"')
+    expect(withOverview).toContain('>Overview</button>')
+    expect(withOverview.indexOf('task-header-project-overview'))
+      .toBeLessThan(withOverview.indexOf('role="tablist"'))
+    expect(withoutOverview).not.toContain('task-header-project-overview')
   })
 })

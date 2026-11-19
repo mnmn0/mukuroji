@@ -307,6 +307,29 @@ export type FileApprovalCompletionTransition = {
   }
   /** Definition の同時変更を検出する DynamoDB ConditionCheck 一覧です。 */
   configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
+  /**
+   * Approval counts a completion Gate judged before the decision; the decision's summary update
+   * commits only while the stored counts still match. Absent when no Gate read approvals.
+   */
+  expectedApprovalSummary?: ApprovalSummaryCounts
+}
+
+/** Approval counts of one Work Item that a completion Gate judges and fences. */
+export type ApprovalSummaryCounts = {
+  /** Approvals waiting for a decision. */
+  pendingCount: number
+  /** Approvals that have been approved. */
+  approvedCount: number
+  /** Approvals whose reviewers requested changes. */
+  changesRequestedCount: number
+}
+
+/** Approval counts read together with a condition that keeps them unchanged until a commit. */
+export type ApprovalSummaryFence = {
+  /** Approval counts as read. */
+  summary: ApprovalSummary
+  /** Condition check that fails when the stored counts change before the transaction commits. */
+  conditionCheck: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 }
 
 /** Pending Work Item approval transition reference used by type-change fences. */
@@ -707,6 +730,14 @@ export interface FileProofingClient {
   ): Promise<ApprovalRequest>
   /** Work Item の approval summary を返します。 */
   getApprovalSummary(scope: FileProofingScope): Promise<ApprovalSummary>
+  /**
+   * Reads a Work Item's approval counts with a condition check that keeps them unchanged until a
+   * transaction commits, so a completion Gate fences the counts it judged.
+   *
+   * @param scope - Work Item scope.
+   * @returns The counts and their commit-time condition check.
+   */
+  readApprovalSummaryFence(scope: FileProofingScope): Promise<ApprovalSummaryFence>
   /** 複数 Work Item の approval summary projection を batch read します。 */
   getApprovalSummaries(
     scopes: readonly FileProofingScope[],
@@ -1883,6 +1914,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           ...(status === 'rejected' ? { rejected: 1 } : {}),
           ...(status === 'changes-requested' ? { changesRequested: 1 } : {}),
         },
+        completionTransition?.expectedApprovalSummary,
       ))
     } else {
       transactionItems.push(createApprovalSummaryTouch(
@@ -2142,6 +2174,24 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       throw createApprovalSummaryUnavailableError()
     }
     return toApprovalSummary(summary)
+  }
+
+  /**
+   * Reads a Work Item's approval counts with a condition check that keeps them unchanged.
+   *
+   * @param scope - Work Item scope.
+   * @returns The counts and their commit-time condition check.
+   */
+  async readApprovalSummaryFence(scope: FileProofingScope): Promise<ApprovalSummaryFence> {
+    const summary = await this.getApprovalSummary(scope)
+    return {
+      summary,
+      conditionCheck: createApprovalSummaryConditionCheck(
+        this.tableName,
+        createFileProofingScopeKey(scope),
+        summary,
+      ),
+    }
   }
 
   /** 複数 Work Item の approval summary projection を bounded batch read します。 */
@@ -3376,13 +3426,29 @@ function createFilePendingApprovalUpdate(
   }
 }
 
-/** Approval mutation と同じ transaction で aggregate projection を増減します。 */
+/**
+ * Approval mutation と同じ transaction で aggregate projection を増減します。
+ *
+ * @param tableName - File proofing table that owns the aggregate.
+ * @param scopeKey - Work Item approval partition key.
+ * @param updatedAt - Mutation timestamp.
+ * @param delta - Count changes.
+ * @param expected - Counts the update requires before it applies, when a completion Gate judged them.
+ * @returns The conditional aggregate update.
+ */
 function createApprovalSummaryUpdate(
   tableName: string,
   scopeKey: string,
   updatedAt: string,
   delta: ApprovalSummaryDelta,
+  expected?: ApprovalSummaryCounts,
 ): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const conditions = [
+    ...(delta.pending < 0 ? ['attribute_exists(scopeKey) AND #pending >= :one'] : []),
+    ...(expected
+      ? ['#pending = :expectedPending AND #approved = :expectedApproved AND #changes = :expectedChanges']
+      : []),
+  ]
   return {
     Update: {
       TableName: tableName,
@@ -3397,9 +3463,7 @@ function createApprovalSummaryUpdate(
         (delta.pending > 0
           ? 'ADD #pendingDueAt :dueAtSet'
           : 'DELETE #pendingDueAt :dueAtSet'),
-      ...(delta.pending < 0
-        ? { ConditionExpression: 'attribute_exists(scopeKey) AND #pending >= :one' }
-        : {}),
+      ...(conditions.length > 0 ? { ConditionExpression: conditions.join(' AND ') } : {}),
       ExpressionAttributeNames: {
         '#approved': 'approvedCount',
         '#changes': 'changesRequestedCount',
@@ -3419,6 +3483,51 @@ function createApprovalSummaryUpdate(
         ':updatedAt': updatedAt,
         ':zero': 0,
         ...(delta.pending < 0 ? { ':one': 1 } : {}),
+        ...(expected
+          ? {
+              ':expectedPending': expected.pendingCount,
+              ':expectedApproved': expected.approvedCount,
+              ':expectedChanges': expected.changesRequestedCount,
+            }
+          : {}),
+      },
+    },
+  }
+}
+
+/**
+ * Builds a condition check that keeps a Work Item's approval counts as they were read.
+ *
+ * A missing summary row reads as zero counts, so zero counts also accept a missing row.
+ *
+ * @param tableName - File proofing table that owns the aggregate.
+ * @param scopeKey - Work Item approval partition key.
+ * @param observed - Counts that were read.
+ * @returns The condition check.
+ */
+function createApprovalSummaryConditionCheck(
+  tableName: string,
+  scopeKey: string,
+  observed: ApprovalSummaryCounts,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const counts = '#pending = :pending AND #approved = :approved AND #changes = :changes'
+  const empty = observed.pendingCount === 0 &&
+    observed.approvedCount === 0 &&
+    observed.changesRequestedCount === 0
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { scopeKey, recordKey: 'APPROVAL_SUMMARY' },
+      ConditionExpression: empty ? `attribute_not_exists(scopeKey) OR (${counts})` : counts,
+      ExpressionAttributeNames: {
+        '#approved': 'approvedCount',
+        '#changes': 'changesRequestedCount',
+        '#pending': 'pendingCount',
+      },
+      ExpressionAttributeValues: {
+        ':approved': observed.approvedCount,
+        ':changes': observed.changesRequestedCount,
+        ':pending': observed.pendingCount,
       },
     },
   }

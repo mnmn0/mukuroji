@@ -5,10 +5,12 @@ import {
   AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES,
   AGENT_SETTINGS_MAX_PROJECT_BRIEFS,
   AGENT_SETTINGS_MAX_READY_STATUSES,
+  AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
   type AgentSettings,
   type CustomFieldType,
   type UpdateAgentSettingsRequest,
   type WorkflowDefinition,
+  type WorkflowStatusCategory,
   type WorkItemConfiguration,
 } from '@mukuroji/contracts'
 
@@ -27,6 +29,8 @@ export type AgentSettingsDraft = {
   allowTakeoverAfterLeaseExpiry: boolean
   /** Workflow status IDs agents may start from; empty means any backlog or unstarted status. */
   readyStatusIds: string[]
+  /** Started workflow status IDs agents may resume from; empty means any started status. */
+  resumableStatusIds: string[]
   /** Whether only Work Items with acceptance criteria are ready for agents. */
   requireAcceptanceCriteria: boolean
   /** Custom field that holds acceptance criteria; empty means none. */
@@ -61,11 +65,13 @@ export type AgentSettingsDraftValidation = {
   totalOverLimit: boolean
   /** Whether more ready statuses are selected than allowed. */
   tooManyReadyStatuses: boolean
+  /** Whether more resumable statuses are selected than allowed. */
+  tooManyResumableStatuses: boolean
   /** Whether the draft may be saved. */
   valid: boolean
 }
 
-/** One workflow status an operator may mark as ready for agents. */
+/** One workflow status an operator may mark as ready for agents, or as resumable by them. */
 export type AgentReadyStatusOption = {
   /** Workflow status ID. */
   id: string
@@ -73,7 +79,7 @@ export type AgentReadyStatusOption = {
   name: string
   /** Name of the workflow that owns the status, when the Team uses several workflows. */
   workflowName?: string
-  /** Whether the saved ID is no longer a backlog or unstarted status of the Team. */
+  /** Whether the saved ID is no longer a status of the listed categories in the Team. */
   missing: boolean
 }
 
@@ -114,6 +120,7 @@ export function createAgentSettingsDraft(settings: AgentSettings): AgentSettings
     leaseMinutes: String(settings.leaseMinutes),
     allowTakeoverAfterLeaseExpiry: settings.allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...settings.readyStatusIds],
+    resumableStatusIds: [...settings.resumableStatusIds],
     requireAcceptanceCriteria: settings.requireAcceptanceCriteria,
     acceptanceCriteriaFieldId: settings.acceptanceCriteriaFieldId ?? '',
     brief: settings.brief ?? '',
@@ -155,6 +162,7 @@ export function validateAgentSettingsDraft(draft: AgentSettingsDraft): AgentSett
   const tooManyProjectBriefs = savedProjectBriefs.length > AGENT_SETTINGS_MAX_PROJECT_BRIEFS
   const totalOverLimit = totalBytes > AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES
   const tooManyReadyStatuses = draft.readyStatusIds.length > AGENT_SETTINGS_MAX_READY_STATUSES
+  const tooManyResumableStatuses = draft.resumableStatusIds.length > AGENT_SETTINGS_MAX_RESUMABLE_STATUSES
   const leaseMinutesValid = leaseMinutes !== undefined
   return {
     leaseMinutesValid,
@@ -166,8 +174,9 @@ export function validateAgentSettingsDraft(draft: AgentSettingsDraft): AgentSett
     totalBytes,
     totalOverLimit,
     tooManyReadyStatuses,
+    tooManyResumableStatuses,
     valid: leaseMinutesValid && !briefOverLimit && overLimitProjectIds.length === 0 &&
-      !tooManyProjectBriefs && !totalOverLimit && !tooManyReadyStatuses,
+      !tooManyProjectBriefs && !totalOverLimit && !tooManyReadyStatuses && !tooManyResumableStatuses,
   }
 }
 
@@ -193,6 +202,7 @@ export function createUpdateAgentSettingsRequest(
     leaseMinutes,
     allowTakeoverAfterLeaseExpiry: draft.allowTakeoverAfterLeaseExpiry,
     readyStatusIds: [...new Set(draft.readyStatusIds)],
+    resumableStatusIds: [...new Set(draft.resumableStatusIds)],
     requireAcceptanceCriteria: draft.requireAcceptanceCriteria,
     ...(draft.acceptanceCriteriaFieldId === '' ? {} : { acceptanceCriteriaFieldId: draft.acceptanceCriteriaFieldId }),
     ...(isBlank(draft.brief) ? {} : { brief: draft.brief }),
@@ -242,11 +252,43 @@ export function listAgentReadyStatusOptions(
   configuration: WorkItemConfiguration | undefined,
   selectedIds: readonly string[],
 ): AgentReadyStatusOption[] {
+  return listAgentStatusOptions(configuration, selectedIds, ['backlog', 'unstarted'])
+}
+
+/**
+ * Lists the started statuses of every workflow of a Team, followed by saved IDs that are no longer a
+ * started status, so a save never drops them silently.
+ *
+ * @param configuration - Team's resolved Work Item configuration, if loaded.
+ * @param selectedIds - Saved or selected status IDs.
+ * @returns Status options in workflow order.
+ */
+export function listAgentResumableStatusOptions(
+  configuration: WorkItemConfiguration | undefined,
+  selectedIds: readonly string[],
+): AgentReadyStatusOption[] {
+  return listAgentStatusOptions(configuration, selectedIds, ['started'])
+}
+
+/**
+ * Lists the statuses of the given categories in every workflow of a Team, followed by saved IDs that
+ * are no longer such a status.
+ *
+ * @param configuration - Team's resolved Work Item configuration, if loaded.
+ * @param selectedIds - Saved or selected status IDs.
+ * @param categories - Status categories to list.
+ * @returns Status options in workflow order.
+ */
+function listAgentStatusOptions(
+  configuration: WorkItemConfiguration | undefined,
+  selectedIds: readonly string[],
+  categories: readonly WorkflowStatusCategory[],
+): AgentReadyStatusOption[] {
   const workflows = configuration ? listWorkflows(configuration) : []
   const options = new Map<string, AgentReadyStatusOption>()
   for (const workflow of workflows) {
     const statuses = [...workflow.statuses]
-      .filter((status) => status.category === 'backlog' || status.category === 'unstarted')
+      .filter((status) => categories.includes(status.category))
       .sort((left, right) => left.sortOrder - right.sortOrder)
     for (const status of statuses) {
       if (options.has(status.id)) continue
@@ -360,6 +402,7 @@ function createDraftComparisonKey(draft: AgentSettingsDraft): string {
     draft.leaseMinutes.trim(),
     draft.allowTakeoverAfterLeaseExpiry,
     [...new Set(draft.readyStatusIds)].sort(),
+    [...new Set(draft.resumableStatusIds)].sort(),
     draft.requireAcceptanceCriteria,
     draft.fileFailedRunsToTriage,
     draft.fileStalledRunsToTriage,

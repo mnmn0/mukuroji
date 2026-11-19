@@ -121,6 +121,42 @@ validate_client_read_attributes() {
   done
 }
 
+validate_password_client_write_contract() {
+  local write_attributes
+  local admin_create_only
+  local protected_attribute
+
+  write_attributes="$(aws_call cognito-idp describe-user-pool-client \
+    --user-pool-id "$COGNITO_USER_POOL_ID" \
+    --client-id "$COGNITO_USER_POOL_CLIENT_ID" \
+    --query UserPoolClient.WriteAttributes \
+    --output text)"
+  admin_create_only="$(aws_call cognito-idp describe-user-pool \
+    --user-pool-id "$COGNITO_USER_POOL_ID" \
+    --query UserPool.AdminCreateUserConfig.AllowAdminCreateUserOnly \
+    --output text)"
+
+  # The API authorizes by email and the Workspace attributes it reads from GetUser, so a user's
+  # own access token must not be able to rewrite them. Cognito's default WriteAttributes includes
+  # email, so the client must set the list explicitly.
+  if [[ -z "$write_attributes" || "$write_attributes" == "None" ]]; then
+    echo "Bootstrap validation failed: Cognito password app client must set WriteAttributes explicitly; the Cognito default lets users write email." >&2
+    exit 1
+  fi
+
+  for protected_attribute in email email_verified custom:directory_id custom:workspace_id; do
+    if text_list_contains "$write_attributes" "$protected_attribute"; then
+      echo "Bootstrap validation failed: Cognito password app client WriteAttributes must not include $protected_attribute." >&2
+      exit 1
+    fi
+  done
+
+  if [[ "$admin_create_only" != "True" ]]; then
+    echo "Bootstrap validation failed: Cognito user pool must set AdminCreateUserConfig.AllowAdminCreateUserOnly to true." >&2
+    exit 1
+  fi
+}
+
 assert_equal() {
   local actual="$1"
   local expected="$2"
@@ -193,6 +229,7 @@ if [[ "$client_flows" != *"ALLOW_USER_PASSWORD_AUTH"* ]]; then
 fi
 
 validate_client_read_attributes "$client_read_attributes"
+validate_password_client_write_contract
 validate_owner_email_login
 
 owner_enabled="$(aws_call cognito-idp admin-get-user \

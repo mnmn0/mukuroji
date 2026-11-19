@@ -2,6 +2,7 @@ import { z } from 'zod'
 import {
   isCanonicalWorkItemKey,
   AGENT_RUN_PROBLEM_REASONS, AGENT_SETTINGS_BRIEF_MAX_BYTES, AGENT_SETTINGS_MAX_PROJECT_BRIEFS, AGENT_SETTINGS_MAX_READY_STATUSES,
+  AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import type {
@@ -123,6 +124,8 @@ const settingsSchema = z.object({
 const contextSchema = z.object({
   schemaVersion: z.literal(1), teamId: identifier, revision: z.number().int().nonnegative(),
   readyStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_READY_STATUSES),
+  // Servers older than resuming omit this; nothing is offered for resume then, and resume_task fails there.
+  resumableStatusIds: z.array(identifier).max(AGENT_SETTINGS_MAX_RESUMABLE_STATUSES).default([]),
   // Servers older than acceptance criteria omit these.
   requireAcceptanceCriteria: z.boolean().default(false),
   acceptanceCriteriaFieldId: identifier.optional(),
@@ -141,6 +144,7 @@ const reasonMessages: Record<(typeof AGENT_RUN_PROBLEM_REASONS)[number], string>
   invalid_transition: 'The task is not in a state that permits this operation. Reload its current status.',
   agent_run_takeover_disabled: 'This Team does not allow taking over stalled runs. Ask the user to release the run instead.',
   invalid_artifact_url: 'An artifact url is not an https URL without credentials. Nothing was saved; fix the link and report again with a new idempotencyKey.',
+  not_resumable: 'This task is not in a status the Team allows agents to resume from (agentSettings.resumableStatusIds in get_configuration). Do not continue it; ask the user.',
   not_ready: 'This task is not ready for agents: it is not in a Ready status, or the Team requires acceptance criteria and the task has none (check get_task and the agentSettings acceptance criteria field in get_configuration). Do not start it; pick another task with get_next_task or ask the user.',
 }
 
@@ -325,6 +329,26 @@ export function createAgentWorkItemApi(
       }
       return { run, supersededRun }
     },
+    /** Resumes a started task with the original idempotency key. */
+    async resumeRun(id, input, key) {
+      const resumed = await request(
+        `work-items/${encodeURIComponent(id)}/agent-runs/resume`,
+        z.object({ run: runSchema, resumedFromRun: runSchema.optional() }), 'POST', input, key,
+      )
+      const run = scopedRun(resumed.run)
+      const resumedFromRun = resumed.resumedFromRun === undefined ? undefined : scopedRun(resumed.resumedFromRun)
+      if (run.workItemId !== id || (resumedFromRun !== undefined && resumedFromRun.workItemId !== id)) {
+        throw new AgentTaskError('invalid_response', 'The API returned runs for another task.')
+      }
+      return { run, ...(resumedFromRun === undefined ? {} : { resumedFromRun }) }
+    },
+    /** Reads the newest run of a task from its run history. */
+    async latestRun(id) {
+      const page = await request(`work-items/${encodeURIComponent(id)}/agent-runs`, pageSchema(runSchema), 'GET', undefined, undefined, { limit: 1 })
+      const [run] = page.items.map((item) => scopedRun(item))
+      if (run && run.workItemId !== id) throw new AgentTaskError('invalid_response', 'The API returned a run for another task.')
+      return run
+    },
     /** Lists one page of active runs. */
     async listActiveRuns(filters, cursor) {
       const page = await request('agent-runs', pageSchema(runSchema), 'GET', undefined, undefined, { state: 'active', ...filters, cursor, limit: 100 })
@@ -371,6 +395,7 @@ export function createAgentWorkItemApi(
       return {
         ...settings,
         readyStatusIds: context?.readyStatusIds ?? [],
+        resumableStatusIds: context?.resumableStatusIds ?? [],
         requireAcceptanceCriteria: context?.requireAcceptanceCriteria ?? false,
         ...(context?.acceptanceCriteriaFieldId === undefined ? {} : { acceptanceCriteriaFieldId: context.acceptanceCriteriaFieldId }),
         ...(context?.brief === undefined ? {} : { brief: context.brief }),

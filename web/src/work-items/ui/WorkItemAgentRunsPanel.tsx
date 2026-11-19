@@ -167,6 +167,7 @@ export function WorkItemAgentRunsPanel({
           <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <AgentRunStateBadge labels={labels} run={active} />
+              <AgentRunResumedBadge labels={labels} run={active} />
               <span className="truncate text-sm font-semibold text-[var(--workbench-text)]">{active.agentName}</span>
               {active.agentName !== labels.runtimes[active.runtime] ? (
                 <span className="workbench-badge">{labels.runtimes[active.runtime]}</span>
@@ -201,6 +202,7 @@ export function WorkItemAgentRunsPanel({
             {history.map((run) => (
               <li className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]" key={run.runId}>
                 <AgentRunStateBadge labels={labels} run={run} />
+                <AgentRunResumedBadge labels={labels} run={run} />
                 <span className="truncate font-semibold text-[var(--workbench-text)]">{run.agentName}</span>
                 {run.agentName !== labels.runtimes[run.runtime] ? <span>{labels.runtimes[run.runtime]}</span> : null}
                 <span className="whitespace-nowrap">
@@ -234,6 +236,22 @@ function AgentRunStateBadge({ labels, run }: {
 }) {
   const state = readAgentRunDisplayState(run)
   return <span className={stateBadgeClasses[state]}>{labels.states[state]}</span>
+}
+
+/**
+ * Marks a run that resumed an earlier run of the same Work Item.
+ *
+ * @param props - Run and text.
+ * @returns Badge, or nothing for a run that was not resumed.
+ */
+function AgentRunResumedBadge({ labels, run }: {
+  /** Panel text. */
+  labels: WorkItemAgentRunsLabels
+  /** Run to describe. */
+  run: AgentRunView
+}) {
+  if (run.resumedFromRunId === undefined) return null
+  return <span className="workbench-badge" data-testid="agent-run-resumed" title={labels.resumedHint}>{labels.resumed}</span>
 }
 
 /**

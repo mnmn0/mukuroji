@@ -620,6 +620,62 @@ describe('AutomationManagementPanel', () => {
     expect(html).toContain('Created project “ローンチ準備” (application-project-launch).')
   })
 
+  test('edits a Project template WBS as an outline and asks for a start date when applying it', () => {
+    const wbsTemplate = {
+      ...projectAutomationTemplateFixture,
+      payload: {
+        ...projectAutomationTemplateFixture.payload,
+        workItems: [
+          {
+            title: 'Requirements',
+            startOffsetWorkingDays: 0,
+            durationWorkingDays: 5,
+            children: [{ title: 'Interviews', startOffsetWorkingDays: 0, durationWorkingDays: 2 }],
+          },
+        ],
+      },
+    }
+    const editorHtml = renderToStaticMarkup(
+      <AutomationTemplateUpdateEditor
+        locale="en"
+        template={wbsTemplate}
+        onCancel={() => undefined}
+        onUpdate={async () => undefined}
+      />,
+    )
+    const applicationHtml = renderToStaticMarkup(
+      <AutomationTemplateApplicationEditor
+        initialApplication={{
+          ...projectTemplateApplicationFixture,
+          result: projectTemplateApplicationFixture.result?.kind === 'project'
+            ? { ...projectTemplateApplicationFixture.result, workItemCount: 2 }
+            : undefined,
+        }}
+        locale="en"
+        teams={teams}
+        template={wbsTemplate}
+        workflowTargets={[]}
+        onApply={async () => projectTemplateApplicationFixture}
+      />,
+    )
+    const plainApplicationHtml = renderToStaticMarkup(
+      <AutomationTemplateApplicationEditor
+        locale="en"
+        teams={teams}
+        template={projectAutomationTemplateFixture}
+        workflowTargets={[]}
+        onApply={async () => projectTemplateApplicationFixture}
+      />,
+    )
+
+    expect(editorHtml).toContain('data-testid="automation-template-project-work-items"')
+    expect(editorHtml).toContain('Requirements | 0 | 5\n  Interviews | 0 | 2')
+    expect(applicationHtml).toContain('data-testid="automation-template-application-start-date"')
+    expect(applicationHtml).toContain('2 Work Items from the WBS are also created')
+    expect(applicationHtml).toContain('Created 2 Work Items from the WBS.')
+    expect(plainApplicationHtml).not.toContain('automation-template-application-start-date')
+  })
+
   test('renders Workflow workspace/team targets with expected revisions and result state', () => {
     const html = renderToStaticMarkup(
       <AutomationTemplateApplicationEditor

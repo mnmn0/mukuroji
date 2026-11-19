@@ -8,6 +8,7 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   focus: '/focus',
   updates: '/updates',
   'my-tasks': '/my-tasks',
+  'work-items': '/work-items',
   inbox: '/inbox',
   requests: '/requests',
   customers: '/customers',
@@ -312,6 +313,18 @@ export function createProjectIssuesPath(
 }
 
 /**
+ * Creates the URL of one Team-qualified Project overview.
+ *
+ * @param projectId - Project identifier.
+ * @param teamId - Team that owns the Project.
+ * @returns Same-origin Project overview path.
+ */
+export function createProjectOverviewPath(projectId: string, teamId: string) {
+  const searchParams = new URLSearchParams({ teamId })
+  return `/projects/${encodeURIComponent(projectId)}/overview?${searchParams.toString()}`
+}
+
+/**
  * チーム所有 Issue 画面 URL を生成します。
  *
  * @param teamId - Issue を所有する Team ID です。
@@ -374,14 +387,29 @@ export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
  * Creates the URL of a Team's time tracking view for one week.
  *
  * @param teamId - Team identifier.
- * @param view - `timesheet` for the member's week or `approvals` for the manager queue.
- * @param weekStart - Monday of the week as `YYYY-MM-DD`; omitted for the current week.
+ * @param view - `timesheet` for the member's week, `weekly-report` for the member's weekly report,
+ *   `approvals` for the manager queue, or `report` for totals.
+ * @param weekStart - Monday of the week as `YYYY-MM-DD`; omitted for the current week. Not used by `report`.
+ * @param report - Period and grouping of the `report` view; omitted for the current week by day.
  * @returns Same-origin path.
  */
-export function createTeamTimeTrackingPath(teamId: string, view: 'timesheet' | 'approvals' = 'timesheet', weekStart?: string) {
+export function createTeamTimeTrackingPath(
+  teamId: string,
+  view: 'timesheet' | 'weekly-report' | 'approvals' | 'report' = 'timesheet',
+  weekStart?: string,
+  report?: { from: string; to: string; groupBy: string },
+) {
   const query = new URLSearchParams()
-  if (view === 'approvals') query.set('view', 'approvals')
-  if (weekStart) query.set('week', weekStart)
+  if (view !== 'timesheet') query.set('view', view)
+  if (view === 'report') {
+    if (report) {
+      query.set('from', report.from)
+      query.set('to', report.to)
+      query.set('groupBy', report.groupBy)
+    }
+  } else if (weekStart) {
+    query.set('week', weekStart)
+  }
   const encoded = query.toString()
   return `/teams/${encodeURIComponent(teamId)}/timesheet${encoded ? `?${encoded}` : ''}`
 }
