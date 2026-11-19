@@ -227,6 +227,8 @@ job と worker の動作は次のとおり。
 
 activity、audit、export は保存 row をそのまま返さず、`eventId`、`eventType`、`occurredAt`、nested actor/entity/target、action、redact 済み changes、`correlationId`、source kind、`summary`、allowlist 済み metadata だけを DTO へ projection する。`schemaVersion`、`workspaceId` / `directoryId`、`actorUserId`、flat な entity/target field、`workspaceKey` / `*EventKey` / `actorKey` / `entityKey` / `targetKey` 等の DynamoDB key、backfill の source key、`requestFingerprint`、`idempotencyKeyHash`、`sourceDetails` の IP/User-Agent、`outboxStatus` は public response と export に含めない。
 
+tenant export（`POST /api/tenant/exports`）も audit log を含むため、`workspace.manage` に加えて audit export と同じ `audit.export`（または system administrator）を要求し、download link の発行（`GET /api/tenant/operations/:operationId/download`）にも同じ権限を求める。built-in の `workspace:admin` は `audit.export` を持たないため tenant export を使えない。tenant export に含める `audit-events` の row は上と同じ public DTO に projection し、DTO にできない壊れた row があれば skip せず `TenantExportAuditEventInvalid` で export を失敗させる。download link の発行は発行ごとに `tenant.export.downloaded` event として記録し（`exportId` と `partCount` を public metadata に含める）、記録できない場合は link を返さない。tenant の export・closure・download・operation の pause / resume / verify は `workspace.manage` でも privileged session として扱い、MFA と sensitive action の再認証 policy を適用する。
+
 ### Cursor
 
 cursor v1 は version、index、filter fingerprint、DynamoDB `LastEvaluatedKey` を JSON 化して base64url encoding した opaque token である。server は decode 後に filter fingerprint、選択した index、base/index partition key、Workspace/entity/actor/target key を検証し、一致しなければ `400` を返す。client は cursor の中身へ依存せず、異なる filter へ再利用しない。現在の fingerprint は誤用・単純改変の検出用であり、暗号学的な改ざん耐性が必要になった場合は HMAC を追加して v1 decoder と並行移行する。
