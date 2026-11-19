@@ -7,6 +7,10 @@ import type {
   WorkItemRelationMutationResponse,
   WorkItemRelationType,
 } from '@mukuroji/contracts'
+import {
+  DynamoDbProjectRaidLogStore,
+  InMemoryProjectRaidLogStore,
+} from '../../modules/project-raid-log'
 import { AI_ASSISTANCE_SCHEMA_VERSION } from '@mukuroji/contracts'
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
 import {
@@ -590,6 +594,11 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
+    ),
+    projectRaidLogs: new DynamoDbProjectRaidLogStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
     ),
     collections: new DynamoDbCollectionsStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
@@ -1629,6 +1638,7 @@ export function createTestAppDependencies(): AppDependencies {
       planning: new InMemoryPlanningClient(),
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
+      projectRaidLogs: new InMemoryProjectRaidLogStore(),
       collections: new InMemoryCollectionsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
       inboxDigestSettings: new InMemoryUpdateFeedDigestStore(),
@@ -1748,6 +1758,7 @@ export function overrideAppDependencies(
       ...(overrides.planning ? { planning: overrides.planning } : {}),
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
+      ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
       ...(overrides.collections ? { collections: overrides.collections } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),
       ...(overrides.inboxDigestSettings ? { inboxDigestSettings: overrides.inboxDigestSettings } : {}),

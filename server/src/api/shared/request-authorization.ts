@@ -565,6 +565,16 @@ const enterpriseRoutePermissionRules = [
     permission: 'projects.manage',
   },
   {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
+    permission: 'projects.write',
+  },
+  {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/projects',
     permission: 'projects.write',

@@ -28,3 +28,4 @@
 | 番号 | タイトル | 状態 |
 | --- | --- | --- |
 | [0001](0001-record-architecture-decisions.md) | 設計判断を ADR として記録する | 採用 |
+| [0002](0002-project-raid-log-storage.md) | Project のリスク・課題・変更要求を Planning table の1登録1行で持つ | 提案 |

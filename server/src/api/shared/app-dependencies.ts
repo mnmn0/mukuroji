@@ -112,6 +112,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get savedUpdateFeeds() {
     return requireAppDependencies().workItems.savedUpdateFeeds
   },
+  get projectRaidLogs() {
+    return requireAppDependencies().workItems.projectRaidLogs
+  },
   get collections() {
     return requireAppDependencies().workItems.collections
   },
