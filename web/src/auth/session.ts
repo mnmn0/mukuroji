@@ -57,7 +57,7 @@ export function getAuthSession() {
     return null
   }
 
-  tabAccount = { accessToken: entry.session.accessToken, refreshToken: entry.session.refreshToken }
+  setTabAccount(entry.session)
   return entry.session
 }
 
@@ -214,8 +214,7 @@ export function saveAuthSession(session: AuthSession) {
   }
   const targetStorage = session.remember ? window.localStorage : window.sessionStorage
   targetStorage.setItem(storageKey, JSON.stringify(session))
-  window.sessionStorage.removeItem(signedOutStorageKey)
-  tabAccount = { accessToken: session.accessToken, refreshToken: session.refreshToken }
+  setTabAccount(session)
 }
 
 /**
@@ -248,13 +247,38 @@ export function clearAuthSession() {
  * Account this tab has read or signed in to, kept for the life of the page so that pages that
  * mount later read the same account as the workspace shell. `'signed-out'` means this tab's
  * account was signed out or expired: until the next sign-in the tab has no session, so it never
- * switches to, or removes, another account's session. The signed-out state is also kept in this
- * tab's sessionStorage, so a reload of the login page does not adopt another account either.
+ * switches to, or removes, another account's session. Both the account and the signed-out state
+ * are also kept in this tab's sessionStorage, so a reload never adopts another account either.
  */
-let tabAccount: Pick<AuthSession, 'accessToken' | 'refreshToken'> | 'signed-out' | null = null
+let tabAccount: TabAccount | 'signed-out' | null = null
+
+/** Tokens that identify this tab's account: its subject, or for emulator tokens its refresh token. */
+type TabAccount = Pick<AuthSession, 'accessToken' | 'refreshToken'>
 
 /** sessionStorage key that marks this tab as signed out until its next sign-in. */
 const signedOutStorageKey = 'mukuroji.auth.signedOut'
+
+/** sessionStorage key that keeps this tab's account across reloads. */
+const tabAccountStorageKey = 'mukuroji.auth.tabAccount'
+
+/**
+ * Makes a session's account this tab's account, in memory and in its sessionStorage.
+ *
+ * @param session - Session of the account.
+ */
+function setTabAccount(session: AuthSession) {
+  const account: TabAccount = { accessToken: session.accessToken, refreshToken: session.refreshToken }
+  const unchanged = tabAccount !== null && tabAccount !== 'signed-out' &&
+    tabAccount.accessToken === account.accessToken && tabAccount.refreshToken === account.refreshToken
+  tabAccount = account
+  if (unchanged) return
+  try {
+    window.sessionStorage.removeItem(signedOutStorageKey)
+    window.sessionStorage.setItem(tabAccountStorageKey, JSON.stringify(account))
+  } catch {
+    // The in-memory account still serves this page when storage refuses the write.
+  }
+}
 
 /**
  * Marks this tab as signed out, in memory and in its sessionStorage.
@@ -262,9 +286,31 @@ const signedOutStorageKey = 'mukuroji.auth.signedOut'
 function markTabSignedOut() {
   tabAccount = 'signed-out'
   try {
+    window.sessionStorage.removeItem(tabAccountStorageKey)
     window.sessionStorage.setItem(signedOutStorageKey, '1')
   } catch {
     // The in-memory state still keeps this page signed out when storage refuses the write.
+  }
+}
+
+/**
+ * Restores this tab's account or signed-out state after a reload.
+ *
+ * @returns The account, `'signed-out'`, or `null` when the tab has neither yet.
+ */
+function readPersistedTabAccount(): TabAccount | 'signed-out' | null {
+  if (window.sessionStorage.getItem(signedOutStorageKey) !== null) return 'signed-out'
+  const value = window.sessionStorage.getItem(tabAccountStorageKey)
+  if (!value) return null
+  try {
+    const parsed: unknown = JSON.parse(value)
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const accessToken: unknown = Reflect.get(parsed, 'accessToken')
+    const refreshToken: unknown = Reflect.get(parsed, 'refreshToken')
+    if (typeof accessToken !== 'string') return null
+    return { accessToken, refreshToken: typeof refreshToken === 'string' ? refreshToken : undefined }
+  } catch {
+    return null
   }
 }
 
@@ -288,9 +334,7 @@ function findTabSessionEntry(): { session: AuthSession, storage: Storage } | nul
   const entries = [window.sessionStorage, window.localStorage]
     .map((storage) => ({ session: readSession(storage), storage }))
     .filter((entry): entry is { session: AuthSession, storage: Storage } => entry.session !== null)
-  if (tabAccount === null && window.sessionStorage.getItem(signedOutStorageKey) !== null) {
-    tabAccount = 'signed-out'
-  }
+  if (tabAccount === null) tabAccount = readPersistedTabAccount()
   if (tabAccount === 'signed-out') return null
   if (!tabAccount) return entries[0] ?? null
   const account = tabAccount
@@ -310,7 +354,7 @@ function findTabSessionEntry(): { session: AuthSession, storage: Storage } | nul
  */
 function isTabAccountSession(
   entry: { session: AuthSession, storage: Storage },
-  account: Pick<AuthSession, 'accessToken' | 'refreshToken'>,
+  account: TabAccount,
 ) {
   if (isSameAuthSessionToken(entry.session.accessToken, account.accessToken)) return true
   return account.refreshToken !== undefined &&

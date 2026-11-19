@@ -126,6 +126,32 @@ describe('sessions of different accounts in different tabs', () => {
     expect(stored(localStorage)).toEqual(other)
   })
 
+  test('keeps the account the tab started with across a reload', () => {
+    const first = session(token('account-a'), true)
+    storeFromAnotherTab(localStorage, first)
+    expect(getAuthSession()).toEqual(first)
+
+    const other = session(token('account-c'), true)
+    storeFromAnotherTab(localStorage, other)
+    // A reload starts the page again with this tab's sessionStorage.
+    resetAuthSessionTabAccount()
+
+    expect(getAuthSession()).toBeNull()
+    clearAuthSession()
+    expect(stored(localStorage)).toEqual(other)
+  })
+
+  test("follows a refresh of the tab's account made in another tab across a reload", () => {
+    storeFromAnotherTab(localStorage, session(token('account-a', '1'), true))
+    getAuthSession()
+
+    const refreshed = session(token('account-a', '2'), true)
+    storeFromAnotherTab(localStorage, refreshed)
+    resetAuthSessionTabAccount()
+
+    expect(getAuthSession()).toEqual(refreshed)
+  })
+
   test("follows a refresh of the tab's account made in another tab", () => {
     storeFromAnotherTab(localStorage, session(token('account-a', '1'), true))
     getAuthSession()
