@@ -127,7 +127,7 @@ test('reads Ready statuses and briefs from agent-context alongside the run setti
   })
   expect(await api.agentSettings()).toEqual({
     schemaVersion: 1, teamId: 'team', revision: 4, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true,
-    readyStatusIds: ['ready'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'criteria',
+    readyStatusIds: ['ready'], resumableStatusIds: [], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'criteria',
     brief: 'Run tests.', projectBriefs: { web: 'Use Storybook.' },
   })
   const mismatched = createAgentWorkItemApi(config, async (url) => Response.json(url.pathname === '/api/v1/agent-settings'
@@ -247,6 +247,31 @@ test('starts, lists, heartbeats, and finishes runs on the versioned Agent Run en
     .toEqual(new URLSearchParams('?teamId=team&state=active&workItemId=task&assigneeUserId=agent&instanceId=laptop&limit=1'))
   await expect(api.claimedRun('task', { assigneeUserId: 'someone-else', instanceId: 'laptop' })).rejects.toMatchObject({ code: 'invalid_response' })
   await expect(api.claimedRun('other-task')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('resumes a task and reads its newest run on the versioned Agent Run endpoints', async () => {
+  const seen: { method: string; path: string; query: string; body: unknown; key: string | null }[] = []
+  const paused = { ...validRun, runId: 'run_00000000-0000-4000-8000-000000000002', state: 'finished', outcome: 'paused', finishedAt: validRun.startedAt, finishedBy: 'agent' }
+  let resumedFromRun: unknown = paused
+  const api = createAgentWorkItemApi(config, async (url, init) => {
+    const body: unknown = typeof init.body === 'string' ? JSON.parse(init.body) : undefined
+    seen.push({ method: init.method ?? 'GET', path: url.pathname, query: url.search, body, key: new Headers(init.headers).get('Idempotency-Key') })
+    if (url.pathname.endsWith('/agent-runs/resume')) return Response.json({ run: validRun, resumedFromRun }, { status: 201 })
+    if (url.pathname.endsWith('/agent-runs')) return Response.json({ items: [paused], hasMore: false })
+    return Response.json({ status: 500, code: 'internal_error', retryable: false }, { status: 500 })
+  })
+  expect(await api.resumeRun('task', { expectedRevision: 2, runtime: 'codex', agentName: 'Codex', instanceId: 'laptop' }, 'resume-key'))
+    .toMatchObject({ run: { runId: validRun.runId }, resumedFromRun: { runId: paused.runId, outcome: 'paused' } })
+  expect(seen[0]).toMatchObject({
+    method: 'POST', path: '/api/v1/work-items/task/agent-runs/resume', key: 'resume-key',
+    body: { expectedRevision: 2, runtime: 'codex', agentName: 'Codex', instanceId: 'laptop' },
+  })
+  expect(await api.latestRun('task')).toMatchObject({ runId: paused.runId })
+  expect(new URLSearchParams(seen[1]?.query)).toEqual(new URLSearchParams('?teamId=team&limit=1'))
+  await expect(api.latestRun('other-task')).rejects.toMatchObject({ code: 'invalid_response' })
+  resumedFromRun = { ...paused, workItemId: 'other-task' }
+  await expect(api.resumeRun('task', { expectedRevision: 2, runtime: 'codex', agentName: 'Codex', instanceId: 'laptop' }, 'resume-key'))
+    .rejects.toMatchObject({ code: 'invalid_response' })
 })
 
 test('saves a structured report on the run endpoint and checks its scope', async () => {

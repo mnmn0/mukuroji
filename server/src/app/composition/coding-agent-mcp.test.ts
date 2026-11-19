@@ -211,7 +211,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     clients.push(readOnly)
     const readTools = (await readOnly.listTools()).tools.map((tool) => tool.name)
     expect(readTools).toContain('get_next_task')
-    for (const name of ['start_task', 'report_progress', 'heartbeat', 'finish_run', 'take_over_task']) expect(readTools).not.toContain(name)
+    for (const name of ['start_task', 'report_progress', 'heartbeat', 'finish_run', 'take_over_task', 'resume_task']) expect(readTools).not.toContain(name)
     expect((await readOnly.readResource({ uri: 'mukuroji://agent/workflow' })).contents).toHaveLength(1)
     expect((await readOnly.readResource({ uri: 'mukuroji://project/web/brief' })).contents)
       .toMatchObject([{ mimeType: 'text/markdown', text: 'Run bun test.\n\nAdd a story.' }])
@@ -221,7 +221,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
 
     const client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
     clients.push(client)
-    expect((await client.listTools()).tools).toHaveLength(17)
+    expect((await client.listTools()).tools).toHaveLength(18)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
     } })
@@ -314,7 +314,7 @@ test('the distributable Node bundle serves the same tools over stdio', async () 
     const node = Bun.which('node')
     if (!node) throw new Error('Node.js is required to test the distributable MCP bundle.')
     client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'), node)
-    expect((await client.listTools()).tools).toHaveLength(17)
+    expect((await client.listTools()).tools).toHaveLength(18)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: { runtime: 'codex' } })
   } finally {
     await client?.close()

@@ -28,3 +28,4 @@
 | 番号 | タイトル | 状態 |
 | --- | --- | --- |
 | [0001](0001-record-architecture-decisions.md) | 設計判断を ADR として記録する | 採用 |
+| [0003](0003-agent-run-latest-record.md) | Work Item ごとの最新 Run を `agent-run-latest` row で強整合に持つ | 採用 |
