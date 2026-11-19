@@ -1,11 +1,6 @@
-import { useEffect, useState } from 'react'
-import type {
-  DocumentRelationTarget,
-  SearchEntityType,
-  WorkspaceSearchResult,
-} from '@mukuroji/contracts'
+import { useState } from 'react'
+import type { DocumentRelationTarget } from '@mukuroji/contracts'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
-import { searchWorkspaceAcrossCursors } from '../../search/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import {
   createDocumentRelationTargetKey,
@@ -14,88 +9,8 @@ import {
   type DocumentLinkTargetKind,
   type DocumentLinkTargetOption,
 } from '../model/linkTargets'
+import { useDocumentLinkSearch } from '../queries/useDocumentLinkSearch'
 import { useLinkedWorkItem } from '../queries/useLinkedWorkItem'
-
-/** Delay before a typed query is sent to Workspace search. */
-const LINK_SEARCH_DEBOUNCE_MS = 200
-
-/** Maximum number of candidates shown for one query. */
-const LINK_SEARCH_RESULT_LIMIT = 8
-
-/**
- * Debounced, permission-filtered Workspace search state for one entity type.
- */
-type LinkSearchState = {
-  /** Results for the latest settled query. */
-  results: WorkspaceSearchResult[]
-  /** Whether a request for the current query is running. */
-  isLoading: boolean
-  /** Whether the latest request failed. */
-  hasError: boolean
-}
-
-/**
- * Searches one Workspace entity type while the user types.
- *
- * @param accessToken - Workspace API token; omission disables search.
- * @param entityType - Entity type to search, or undefined to disable search.
- * @param query - Raw keyword typed by the user.
- * @returns Results, loading, and error state for the latest query.
- */
-function useLinkSearch(
-  accessToken: string | undefined,
-  entityType: SearchEntityType | undefined,
-  query: string,
-): LinkSearchState {
-  const keyword = query.trim()
-  const [state, setState] = useState<LinkSearchState & { key: string }>({
-    key: '',
-    results: [],
-    isLoading: false,
-    hasError: false,
-  })
-  const key = accessToken && entityType && keyword
-    ? `${entityType}\0${keyword}`
-    : ''
-
-  useEffect(() => {
-    if (!accessToken || !entityType || !keyword) return undefined
-    const abortController = new AbortController()
-    const timeoutId = window.setTimeout(() => {
-      setState({ key, results: [], isLoading: true, hasError: false })
-      searchWorkspaceAcrossCursors(
-        accessToken,
-        { keyword, entityTypes: [entityType] },
-        {
-          pageLimit: 3,
-          resultLimit: LINK_SEARCH_RESULT_LIMIT,
-          signal: abortController.signal,
-        },
-      )
-        .then((response) => {
-          setState({
-            key,
-            results: response.results,
-            isLoading: false,
-            hasError: false,
-          })
-        })
-        .catch(() => {
-          if (abortController.signal.aborted) return
-          setState({ key, results: [], isLoading: false, hasError: true })
-        })
-    }, LINK_SEARCH_DEBOUNCE_MS)
-    return () => {
-      window.clearTimeout(timeoutId)
-      abortController.abort()
-    }
-  }, [accessToken, entityType, key, keyword])
-
-  if (!key || state.key !== key) {
-    return { results: [], isLoading: Boolean(key), hasError: false }
-  }
-  return state
-}
 
 /**
  * Props for the relation target picker shown on a Document.
@@ -143,7 +58,7 @@ export function DocumentRelationTargetPicker({
   const [query, setQuery] = useState('')
   const [savingKey, setSavingKey] = useState<string>()
   const [hasSaveError, setHasSaveError] = useState(false)
-  const search = useLinkSearch(
+  const search = useDocumentLinkSearch(
     accessToken,
     kind === 'goal' ? undefined : kind,
     query,
@@ -281,9 +196,18 @@ export function DocumentRelationTargetPicker({
         </p>
       ) : null}
       {search.hasError ? (
-        <p className="m-0 text-[11px] font-semibold text-fg-red-700" role="alert">
-          {t('documents.links.searchError')}
-        </p>
+        <div className="flex flex-wrap items-center gap-2" role="alert">
+          <p className="m-0 text-[11px] font-semibold text-fg-red-700">
+            {t('documents.links.searchError')}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-8 px-2 text-xs"
+            onClick={search.retry}
+            type="button"
+          >
+            {t('documents.related.retry')}
+          </button>
+        </div>
       ) : null}
       {options.length > 0 || showIdOption ? (
         <ul aria-label={t('documents.links.results')} className="m-0 grid list-none gap-1 p-0">
@@ -526,7 +450,7 @@ export function LinkableDocumentPicker({
   const [query, setQuery] = useState('')
   const [savingId, setSavingId] = useState<string>()
   const [hasSaveError, setHasSaveError] = useState(false)
-  const search = useLinkSearch(accessToken, 'document', query)
+  const search = useDocumentLinkSearch(accessToken, 'document', query)
   const options = search.results
     .filter((result) => result.entityType === 'document')
     .map((result): LinkableDocumentOption => ({
@@ -571,9 +495,18 @@ export function LinkableDocumentPicker({
         </p>
       ) : null}
       {search.hasError ? (
-        <p className="m-0 text-xs font-semibold text-fg-red-700" role="alert">
-          {t('documents.links.searchError')}
-        </p>
+        <div className="flex flex-wrap items-center gap-2" role="alert">
+          <p className="m-0 text-xs font-semibold text-fg-red-700">
+            {t('documents.links.searchError')}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-8 px-2 text-xs"
+            onClick={search.retry}
+            type="button"
+          >
+            {t('documents.related.retry')}
+          </button>
+        </div>
       ) : null}
       {options.length > 0 ? (
         <ul aria-label={t('documents.links.results')} className="m-0 grid list-none gap-1 p-0">

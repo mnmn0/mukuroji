@@ -1,5 +1,4 @@
 import { useState, type FormEvent } from 'react'
-import useSWR from 'swr'
 import type {
   DocumentRelation,
   DocumentRelationTarget,
@@ -12,12 +11,12 @@ import {
   createDocument,
   getDocument,
   getDocumentBacklinks,
-  getProjectDocuments,
   type DocumentBacklink,
   type DocumentRecord,
 } from '../api'
 import { createDocumentOperationId } from '../model/document'
 import { useDocumentBacklinks } from '../queries/useDocumentQueries'
+import { useProjectDocuments } from '../queries/useProjectDocuments'
 import {
   LinkableDocumentPicker,
   type LinkableDocumentOption,
@@ -86,12 +85,9 @@ export function RelatedDocuments({
   const [createError, setCreateError] = useState<
     'create' | 'link'
   >()
-  const projectDocuments = useSWR(
-    accessToken && targetKind === 'project' && targetId
-      ? ['project-documents', accessToken, targetId] as const
-      : null,
-    ([, token, projectId]) => getProjectDocuments(token, projectId),
-    { revalidateOnFocus: false },
+  const projectDocuments = useProjectDocuments(
+    accessToken,
+    targetKind === 'project' ? targetId : undefined,
   )
 
   if (!key) return null
@@ -100,7 +96,7 @@ export function RelatedDocuments({
   const linkedDocumentIds = new Set(
     backlinks.map(({ documentId }) => documentId),
   )
-  const unlinkedProjectDocuments = (projectDocuments.data ?? []).filter(
+  const unlinkedProjectDocuments = projectDocuments.documents.filter(
     (document) =>
       document.kind !== 'folder' &&
       !linkedDocumentIds.has(document.id),
@@ -187,7 +183,7 @@ export function RelatedDocuments({
       )
     } finally {
       if (createdDocumentId !== undefined) {
-        await projectDocuments.mutate()
+        await projectDocuments.refresh()
       }
       setIsCreating(false)
     }
@@ -346,6 +342,9 @@ export function RelatedDocuments({
       ) : null}
       {!isLoading &&
       !error &&
+      !projectDocuments.isLoading &&
+      !projectDocuments.error &&
+      !projectDocuments.hasMore &&
       backlinks.length === 0 &&
       unlinkedProjectDocuments.length === 0 ? (
         <p className="text-sm font-medium leading-6 text-[var(--workbench-muted)]">
@@ -433,6 +432,37 @@ export function RelatedDocuments({
             </a>
           ))}
         </div>
+      ) : null}
+      {projectDocuments.isLoading ? (
+        <p className="text-sm font-medium text-[var(--workbench-muted)]">
+          {t('documents.context.loading')}
+        </p>
+      ) : null}
+      {projectDocuments.error ? (
+        <div className="flex flex-wrap items-center gap-2" role="alert">
+          <p className="m-0 text-sm font-semibold text-fg-red-700">
+            {t('documents.related.projectDocumentsError')}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-9 px-3 text-xs"
+            onClick={() => void projectDocuments.refresh()}
+            type="button"
+          >
+            {t('documents.related.retry')}
+          </button>
+        </div>
+      ) : null}
+      {projectDocuments.hasMore && !projectDocuments.error ? (
+        <button
+          className="workbench-button-secondary min-h-9 px-3 text-xs"
+          disabled={projectDocuments.isLoadingMore}
+          onClick={() => void projectDocuments.loadMore()}
+          type="button"
+        >
+          {projectDocuments.isLoadingMore
+            ? t('documents.context.loading')
+            : t('documents.related.loadMoreProjectDocuments')}
+        </button>
       ) : null}
       {promotionErrorDocumentId ? (
         <p className="text-sm font-semibold text-fg-red-700" role="alert">

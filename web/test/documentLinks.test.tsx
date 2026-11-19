@@ -1,6 +1,8 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { WorkspaceSearchResult } from '@mukuroji/contracts'
+import { getProjectDocumentsPage } from '../src/documents/api'
+import { documentSummaryFixtures } from '../src/documents/fixtures'
 import {
   createDocumentRelationTargetKey,
   parseDocumentLinkTargetQuery,
@@ -159,5 +161,44 @@ describe('Document link UI', () => {
     )
 
     expect(html).toContain('team/core/issue/issue-1')
+  })
+})
+
+const originalFetch = globalThis.fetch
+
+afterEach(() => {
+  globalThis.fetch = originalFetch
+})
+
+describe('Project Documents page', () => {
+  test('keeps the continuation cursor when every tree page is still filtered out', async () => {
+    const urls: URL[] = []
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(
+        input instanceof Request ? input.url : String(input),
+        'https://app.example.test',
+      )
+      urls.push(url)
+      return Response.json({
+        nodes: [],
+        nextCursor: `cursor-${urls.length}`,
+      })
+    }) as typeof fetch
+
+    const page = await getProjectDocumentsPage('token', 'project-1')
+
+    expect(page).toEqual({ documents: [], nextCursor: 'cursor-5' })
+    expect(urls).toHaveLength(5)
+    expect(urls[0]?.searchParams.get('scope')).toBe('project')
+    expect(urls[0]?.searchParams.get('projectId')).toBe('project-1')
+    expect(urls[1]?.searchParams.get('cursor')).toBe('cursor-1')
+
+    urls.length = 0
+    globalThis.fetch = (async () =>
+      Response.json({ nodes: documentSummaryFixtures.slice(0, 1) })
+    ) as typeof fetch
+    await expect(
+      getProjectDocumentsPage('token', 'project-1', 'cursor-5'),
+    ).resolves.toEqual({ documents: documentSummaryFixtures.slice(0, 1) })
   })
 })
