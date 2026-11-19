@@ -493,7 +493,11 @@ export function TaskGanttView({
 
   /** Moves to today, first switching a windowed chart to the period containing today. */
   const moveToToday = () => {
-    if (todayX !== undefined) {
+    // A coarse scale can show today in a column outside the loaded period, whose Work Items
+    // are not loaded, so the period moves unless it already contains today.
+    const periodContainsToday = !timelineWindow ||
+      (timelineWindow.from <= today && today <= timelineWindow.to)
+    if (todayX !== undefined && (periodContainsToday || !onWindowStartMonthChange)) {
       scrollGanttToX(scrollContainerRef.current, todayX)
       return
     }
@@ -507,7 +511,7 @@ export function TaskGanttView({
     if (!todayScrollPendingRef.current || todayX === undefined) return
     todayScrollPendingRef.current = false
     scrollGanttToX(scrollContainerRef.current, todayX)
-  }, [todayX])
+  }, [timelineColumns, todayX])
 
   /**
    * Prints only the Gantt chart, with every row, on landscape paper scaled down to the paper width.
