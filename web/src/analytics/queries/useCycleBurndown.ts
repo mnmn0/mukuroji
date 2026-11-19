@@ -3,13 +3,16 @@ import type {
   PlanningEntity,
   PlanningWorkItemLink,
 } from '@mukuroji/contracts'
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import useSWR from 'swr'
 import { queryAnalytics } from '../api/queries'
 import {
   CYCLE_BURNDOWN_WIDGET_ID,
   createCycleBurndownQuery,
 } from '../model/cycleBurndown'
+
+/** How often a not-yet-started Cycle is checked again for its start. */
+const START_CHECK_INTERVAL_MS = 60_000
 
 /** Screen state of a Cycle burndown. */
 export type CycleBurndownState =
@@ -47,10 +50,18 @@ export function useCycleBurndown(
   links: readonly PlanningWorkItemLink[],
   timeZone: string,
 ): CycleBurndownQuery {
+  // Refreshed while the Cycle has not started, so an open panel starts loading once it does.
+  const [checkedAt, setCheckedAt] = useState(() => new Date())
   const plan = useMemo(
-    () => createCycleBurndownQuery(cycle, links, timeZone, new Date()),
-    [cycle, links, timeZone],
+    () => createCycleBurndownQuery(cycle, links, timeZone, checkedAt),
+    [checkedAt, cycle, links, timeZone],
   )
+  const notStarted = plan.kind === 'not-started'
+  useEffect(() => {
+    if (!notStarted) return undefined
+    const timer = setInterval(() => setCheckedAt(new Date()), START_CHECK_INTERVAL_MS)
+    return () => clearInterval(timer)
+  }, [notStarted])
   const workItemSignature = plan.kind === 'query'
     ? JSON.stringify(plan.query.filter)
     : null
