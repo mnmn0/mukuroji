@@ -237,6 +237,28 @@ describe('PersonalWeeklyReport', () => {
     expect(html).toContain(en('timeTracking.weeklyReport.partial'))
   })
 
+  test('hides the facts and the copy action when a read failed', () => {
+    const report = buildPersonalWeeklyReport({ weekDays: week.days, today: '2026-11-13', workItems: [], entries: [] })
+    const html = renderToStaticMarkup(
+      <PersonalWeeklyReport
+        formatters={createTimeTrackingFormatters('en')}
+        hasLoadError
+        isLoading={false}
+        isPartial={false}
+        onCopy={async () => undefined}
+        onMoveWeek={() => undefined}
+        onRetry={() => undefined}
+        report={report}
+        t={en}
+        week={week}
+      />,
+    )
+
+    expect(html).toContain(en('timeTracking.weeklyReport.loadError'))
+    expect(html).not.toContain('Copy Markdown')
+    expect(html).not.toContain('weekly-report-markdown')
+  })
+
   test('has its own time tracking URL', () => {
     expect(createTeamTimeTrackingPath('core-team', 'weekly-report', '2026-11-09'))
       .toBe('/teams/core-team/timesheet?view=weekly-report&week=2026-11-09')

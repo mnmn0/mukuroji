@@ -21,7 +21,7 @@ export type PersonalWeeklyReportProps = {
   report: PersonalWeeklyReportFacts
   /** Whether the facts are still loading. */
   isLoading: boolean
-  /** Whether a read failed. */
+  /** Whether a read failed; the facts and copy action are then hidden so a gap is never exported as "none". */
   hasLoadError: boolean
   /** Whether the time entries were cut at the server's read limit. */
   isPartial: boolean
@@ -129,7 +129,7 @@ export function PersonalWeeklyReport({
 
       {isLoading ? (
         <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('timeTracking.weeklyReport.loading')}</p>
-      ) : (
+      ) : hasLoadError ? null : (
         <div className="grid min-w-0 gap-4 lg:grid-cols-2">
           <div className="grid min-w-0 content-start gap-4">
             <section className="grid min-w-0 gap-2">

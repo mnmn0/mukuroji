@@ -81,7 +81,8 @@ export function PersonalWeeklyReportContainer({
   return (
     <PersonalWeeklyReport
       formatters={formatters}
-      hasLoadError={Boolean(entries.error) || hasWorkItemError}
+      // Without the member key the entries cannot be read, so the report is unavailable, not empty.
+      hasLoadError={Boolean(entries.error) || hasWorkItemError || memberKey === undefined}
       isLoading={entries.isLoading || (workItems === undefined && !hasWorkItemError)}
       isPartial={entries.data?.complete === false}
       onCopy={writeClipboardText}
