@@ -25,7 +25,7 @@ import {
   resolveWorkflowStatus,
   validateWorkItemConfiguration,
 } from './work-item-configuration'
-import { createMutationAuditContext } from '../audit'
+import { createMutationAuditContext, toAuditEventView } from '../audit'
 
 test('validates the built-in workflow and resolves configured statuses', () => {
   const configuration = validateWorkItemConfiguration(DEFAULT_WORK_ITEM_CONFIGURATION)
@@ -1948,7 +1948,7 @@ test('records a blocker change on both endpoints in the relation transaction', a
       eventId: expect.any(String),
       eventType: 'work-item.blocking-added',
       entityId: 'team/core-team/issue/design',
-      changes: [{ field: 'blocks', after: 'build' }],
+      changes: [],
       metadata: {
         adapter: 'work-item-relation',
         actorMemberKey: 'member-1',
@@ -1958,15 +1958,20 @@ test('records a blocker change on both endpoints in the relation transaction', a
         relatedWorkItemId: 'build',
         graphRevision: 1,
       },
+      publicView: expect.any(String),
     },
     {
       eventId: expect.any(String),
       eventType: 'work-item.blocker-added',
       entityId: 'team/core-team/issue/build',
-      changes: [{ field: 'blockedBy', after: 'design' }],
+      changes: [],
       metadata: expect.objectContaining({ issueId: 'build', relatedWorkItemId: 'design' }),
+      publicView: expect.any(String),
     },
   ])
+  // The other endpoint may be in a Project the reader cannot view, so activity never shows its ID.
+  expect(created[0]?.publicView).not.toContain('build')
+  expect(created[1]?.publicView).not.toContain('design')
 
   await client.deleteRelation('workspace-1', 'core-team', {
     sourceWorkItemId: 'build',
@@ -1980,10 +1985,18 @@ test('records a blocker change on both endpoints in the relation transaction', a
   expect(readRelationAuditEvents(store.transactions[1]).map((event) => [
     event.eventType,
     event.entityId,
-    event.changes,
+    event.metadata,
   ])).toEqual([
-    ['work-item.blocker-removed', 'team/core-team/issue/build', [{ field: 'blockedBy', before: 'design' }]],
-    ['work-item.blocking-removed', 'team/core-team/issue/design', [{ field: 'blocks', before: 'build' }]],
+    [
+      'work-item.blocker-removed',
+      'team/core-team/issue/build',
+      expect.objectContaining({ relationType: 'blockedBy', relatedWorkItemId: 'design' }),
+    ],
+    [
+      'work-item.blocking-removed',
+      'team/core-team/issue/design',
+      expect.objectContaining({ relationType: 'blocks', relatedWorkItemId: 'build' }),
+    ],
   ])
 })
 
@@ -2001,15 +2014,24 @@ test('records one parent change on the child and child changes on both parents',
   }, [], createRelationAudit('parent-replace-1'))
 
   const events = readRelationAuditEvents(store.transactions[0])
-  expect(events.map((event) => [event.eventType, event.entityId, event.changes])).toEqual([
+  expect(events.map((event) => [event.eventType, event.entityId, event.metadata])).toEqual([
     [
       'work-item.parent-changed',
       'team/core-team/issue/task',
-      [{ field: 'parentWorkItemId', before: 'phase-a', after: 'phase-b' }],
+      expect.objectContaining({ previousParentWorkItemId: 'phase-a', parentWorkItemId: 'phase-b' }),
     ],
-    ['work-item.child-removed', 'team/core-team/issue/phase-a', [{ field: 'child', before: 'task' }]],
-    ['work-item.child-added', 'team/core-team/issue/phase-b', [{ field: 'child', after: 'task' }]],
+    [
+      'work-item.child-removed',
+      'team/core-team/issue/phase-a',
+      expect.objectContaining({ relationType: 'child', relatedWorkItemId: 'task' }),
+    ],
+    [
+      'work-item.child-added',
+      'team/core-team/issue/phase-b',
+      expect.objectContaining({ relationType: 'child', relatedWorkItemId: 'task' }),
+    ],
   ])
+  expect(events[0]?.publicView).not.toContain('phase-')
   expect(new Set(events.map((event) => event.eventId)).size).toBe(3)
 
   // A retried request that finds the parent already set writes neither the relation nor an event.
@@ -2676,7 +2698,7 @@ function createRelationAudit(idempotencyKey: string) {
  * Reads the audit events a relation transaction puts, in transaction order.
  *
  * @param transaction - TransactWrite input.
- * @returns Event ID, type, entity, changes, and metadata of each audit Put.
+ * @returns Event ID, type, entity, changes, metadata, and serialized public view of each audit Put.
  */
 function readRelationAuditEvents(transaction: Record<string, unknown> | undefined) {
   return ((transaction?.TransactItems ?? []) as Array<Record<string, Record<string, unknown>>>)
@@ -2689,6 +2711,7 @@ function readRelationAuditEvents(transaction: Record<string, unknown> | undefine
         entityId: event.entityId,
         changes: event.changes,
         metadata: event.metadata,
+        publicView: JSON.stringify(toAuditEventView(event)),
       }
     })
 }

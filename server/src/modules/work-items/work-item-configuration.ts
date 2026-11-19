@@ -111,16 +111,14 @@ type RelationAuditChange = {
   workItemId: string
   /** Event type naming the change from the endpoint's point of view. */
   eventType: WorkItemRelationAuditEventType
-  /** Changed field: `parentWorkItemId` for a parent change, otherwise the relation type. */
-  field: string
-  /** Related Work Item before the change; omitted when the link was added. */
-  before?: string
-  /** Related Work Item after the change; omitted when the link was removed. */
-  after?: string
   /** Relation type from the endpoint's point of view. */
   relationType: WorkItemRelationType
   /** Other endpoint of an added or removed link; omitted for a parent change. */
   relatedWorkItemId?: string
+  /** Parent before a parent change; omitted when the child had no parent. */
+  previousParentWorkItemId?: string
+  /** Parent after a parent change; omitted when the parent was removed. */
+  parentWorkItemId?: string
 }
 
 /** Activity fallback summaries for the relation audit event types. */
@@ -165,16 +163,13 @@ function describeRelationAuditChange(
     return {
       workItemId: relation.sourceWorkItemId,
       eventType: 'work-item.parent-changed',
-      field: 'parentWorkItemId',
-      ...(change === 'added' ? { after: related } : { before: related }),
       relationType: 'parent',
+      ...(change === 'added' ? { parentWorkItemId: related } : { previousParentWorkItemId: related }),
     }
   }
   return {
     workItemId: relation.sourceWorkItemId,
     eventType: relationAuditEventType(relation.type, change),
-    field: relation.type,
-    ...(change === 'added' ? { after: related } : { before: related }),
     relationType: relation.type,
     relatedWorkItemId: related,
   }
@@ -1860,10 +1855,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         {
           workItemId: child.workItemId,
           eventType: 'work-item.parent-changed',
-          field: 'parentWorkItemId',
-          ...(previousParentWorkItemId ? { before: previousParentWorkItemId } : {}),
-          ...(parentWorkItemId ? { after: parentWorkItemId } : {}),
           relationType: 'parent',
+          ...(previousParentWorkItemId ? { previousParentWorkItemId } : {}),
+          ...(parentWorkItemId ? { parentWorkItemId } : {}),
         },
         ...removed
           .filter((relation) => relation.type === 'child')
@@ -2597,11 +2591,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         entityId: createRelationAuditEntityId(teamId, change.workItemId),
         action: change.eventType.slice('work-item.'.length),
         occurredAt,
-        changes: [{
-          field: change.field,
-          ...(change.before === undefined ? {} : { before: change.before }),
-          ...(change.after === undefined ? {} : { after: change.after }),
-        }],
+        // The other endpoint may sit in a Project this endpoint's viewers cannot read, so its ID
+        // stays out of the public `changes` and lives only in metadata, which views never expose.
+        changes: [],
         summary: RELATION_AUDIT_SUMMARIES[change.eventType],
         metadata: {
           adapter: 'work-item-relation',
@@ -2610,6 +2602,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           issueId: change.workItemId,
           relationType: change.relationType,
           ...(change.relatedWorkItemId ? { relatedWorkItemId: change.relatedWorkItemId } : {}),
+          ...(change.previousParentWorkItemId
+            ? { previousParentWorkItemId: change.previousParentWorkItemId }
+            : {}),
+          ...(change.parentWorkItemId ? { parentWorkItemId: change.parentWorkItemId } : {}),
           graphRevision,
         },
         sequence,
