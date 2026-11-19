@@ -1,20 +1,14 @@
 import { useState, type FormEvent } from 'react'
-import type {
-  DocumentRelation,
-  DocumentRelationTarget,
-} from '@mukuroji/contracts'
-import { createMutationRequestContext } from '../../shared/api/mutationHeaders'
+import type { DocumentRelationTarget } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createDocumentPath } from '../../shared/routing/paths'
 import {
-  applyDocumentOperations,
-  createDocument,
   getDocument,
   getDocumentBacklinks,
   type DocumentBacklink,
   type DocumentRecord,
 } from '../api'
-import { createDocumentOperationId } from '../model/document'
+import { useRelatedDocumentLinks } from '../mutations/useRelatedDocumentLinks'
 import { useDocumentBacklinks } from '../queries/useDocumentQueries'
 import { useProjectDocuments } from '../queries/useProjectDocuments'
 import {
@@ -81,14 +75,19 @@ export function RelatedDocuments({
   const [composer, setComposer] =
     useState<RelatedDocumentsComposer>()
   const [newTitle, setNewTitle] = useState('')
-  const [isCreating, setIsCreating] = useState(false)
-  const [createError, setCreateError] = useState<
-    'create' | 'link'
-  >()
   const projectDocuments = useProjectDocuments(
     accessToken,
     targetKind === 'project' ? targetId : undefined,
   )
+  const target = targetId
+    ? createRelationTarget(targetKind, targetId)
+    : undefined
+  const links = useRelatedDocumentLinks({
+    accessToken,
+    onChanged: () =>
+      Promise.all([mutate(), projectDocuments.refresh()]),
+    target,
+  })
 
   if (!key) return null
 
@@ -101,41 +100,6 @@ export function RelatedDocuments({
       document.kind !== 'folder' &&
       !linkedDocumentIds.has(document.id),
   )
-  const target = targetId
-    ? createRelationTarget(targetKind, targetId)
-    : undefined
-
-  /**
-   * Adds a Document-level relation from one Document to this panel's target.
-   *
-   * @param documentId - Document that should link to the target.
-   */
-  const linkDocumentToTarget = async (documentId: string) => {
-    if (!accessToken || !target) return
-    const document = await getDocument(accessToken, documentId)
-    const relation: DocumentRelation = {
-      createdAt: new Date().toISOString(),
-      createdByUserId: 'current-user',
-      id: createDocumentOperationId(),
-      source: { kind: 'document' },
-      target,
-    }
-    await applyDocumentOperations(
-      accessToken,
-      documentId,
-      {
-        baseRevision: document.revision,
-        clientId: createDocumentOperationId(),
-        operations: [{
-          operationId: createDocumentOperationId(),
-          relation,
-          type: 'upsert-relation',
-        }],
-      },
-      createMutationRequestContext(),
-    )
-    await mutate()
-  }
 
   /**
    * Links the Document chosen in the existing-Document picker.
@@ -143,49 +107,19 @@ export function RelatedDocuments({
    * @param option - Document chosen by the member.
    */
   const handleLinkExisting = async (option: LinkableDocumentOption) => {
-    await linkDocumentToTarget(option.documentId)
+    await links.linkDocument(option.documentId)
   }
 
   /**
-   * Creates an empty page and links it to this panel's target.
+   * Creates an empty page linked to this panel's target.
    *
    * @param event - Submit event of the create form.
    */
   const handleCreate = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    const title = newTitle.trim()
-    if (!accessToken || !target || !title || isCreating) return
-    setIsCreating(true)
-    setCreateError(undefined)
-    let createdDocumentId: string | undefined
-    try {
-      const document = await createDocument(
-        accessToken,
-        {
-          blocks: [],
-          kind: 'page',
-          scope:
-            target.kind === 'project'
-              ? { type: 'project', projectId: target.projectId }
-              : { type: 'workspace' },
-          title,
-        },
-        createMutationRequestContext(),
-      )
-      createdDocumentId = document.id
-      await linkDocumentToTarget(document.id)
+    if (await links.createLinkedDocument(newTitle)) {
       setNewTitle('')
       setComposer(undefined)
-    } catch {
-      // A page that was created but not linked stays visible from Documents.
-      setCreateError(
-        createdDocumentId === undefined ? 'create' : 'link',
-      )
-    } finally {
-      if (createdDocumentId !== undefined) {
-        await projectDocuments.refresh()
-      }
-      setIsCreating(false)
     }
   }
 
@@ -311,16 +245,16 @@ export function RelatedDocuments({
           />
           <button
             className="workbench-button-primary min-h-10 px-3 text-xs disabled:opacity-50"
-            disabled={isCreating || !newTitle.trim()}
+            disabled={links.isCreating || !newTitle.trim()}
             type="submit"
           >
-            {isCreating
+            {links.isCreating
               ? t('documents.related.creating')
               : t('documents.related.create')}
           </button>
-          {createError ? (
+          {links.createError ? (
             <p className="m-0 w-full text-xs font-semibold text-fg-red-700" role="alert">
-              {createError === 'create'
+              {links.createError === 'create'
                 ? t('documents.related.createError')
                 : t('documents.related.createdButNotLinked')}
             </p>

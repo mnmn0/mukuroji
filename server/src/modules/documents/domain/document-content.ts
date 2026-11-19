@@ -23,6 +23,7 @@ import { DocumentError } from '../errors'
 import {
   DOCUMENT_MAX_BACKLINK_COUNT,
   DOCUMENT_MAX_BLOCK_COUNT,
+  DOCUMENT_MAX_ELEMENT_LINK_COUNT,
   DOCUMENT_MAX_ITEM_BYTES,
   DOCUMENT_MAX_OPERATION_COUNT,
   DOCUMENT_MAX_TABLE_COLUMNS,
@@ -242,6 +243,38 @@ export function validateDocumentPayload(document: DocumentDetail): void {
       'DocumentBacklinkLimitExceeded',
       `A document can index at most ${DOCUMENT_MAX_BACKLINK_COUNT} backlinks.`,
     )
+  }
+  assertElementLinkCounts(document)
+}
+
+/**
+ * Rejects a block or Whiteboard object that owns more links than one batch of
+ * deletions can remove in a single transaction.
+ *
+ * @param document - Validated Document payload.
+ * @throws DocumentError when one element owns too many links.
+ */
+function assertElementLinkCounts(document: DocumentDetail): void {
+  const counts = new Map<string, number>()
+  const add = (key: string) => {
+    const count = (counts.get(key) ?? 0) + 1
+    counts.set(key, count)
+    if (count <= DOCUMENT_MAX_ELEMENT_LINK_COUNT) return
+    throw new DocumentError(
+      413,
+      'DocumentElementLinkLimitExceeded',
+      `A block or Whiteboard object can own at most ${DOCUMENT_MAX_ELEMENT_LINK_COUNT} links.`,
+      { maxElementLinkCount: DOCUMENT_MAX_ELEMENT_LINK_COUNT },
+    )
+  }
+  if (document.kind === 'whiteboard') {
+    for (const object of document.whiteboard.objects) {
+      if (object.type === 'work-item') add(`object:${object.id}`)
+    }
+  }
+  for (const { source } of document.relations) {
+    if (source.kind === 'block') add(`block:${source.blockId}`)
+    else if (source.kind === 'whiteboard-object') add(`object:${source.objectId}`)
   }
 }
 

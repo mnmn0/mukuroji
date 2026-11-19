@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import useSWR from 'swr'
 import type {
   SearchEntityType,
   WorkspaceSearchResult,
@@ -14,21 +15,33 @@ const LINK_SEARCH_RESULT_LIMIT = 8
 /**
  * Debounced, permission-filtered Workspace search state for one entity type.
  */
-export type LinkSearchState = {
-  /** Results for the latest settled query. */
+export type DocumentLinkSearch = {
+  /** Results for the settled query. */
   results: WorkspaceSearchResult[]
-  /** Whether a request for the current query is running. */
+  /** Whether the typed query is waiting for the debounce or a response. */
   isLoading: boolean
-  /** Whether the latest request failed. */
+  /** Whether the search for the settled query failed. */
   hasError: boolean
+  /** Sends the settled query again. */
+  retry: () => void
 }
 
 /**
- * Search state plus a way to repeat a failed search.
+ * Returns the value once it has stopped changing for the debounce delay.
+ *
+ * @param value - Value that changes while the user types.
+ * @returns The last value that stayed unchanged for the delay.
  */
-export type DocumentLinkSearch = LinkSearchState & {
-  /** Sends the current query again. */
-  retry: () => void
+function useDebouncedValue(value: string): string {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const timeoutId = window.setTimeout(
+      () => setDebounced(value),
+      LINK_SEARCH_DEBOUNCE_MS,
+    )
+    return () => window.clearTimeout(timeoutId)
+  }, [value])
+  return debounced
 }
 
 /**
@@ -37,7 +50,7 @@ export type DocumentLinkSearch = LinkSearchState & {
  * @param accessToken - Workspace API token; omission disables search.
  * @param entityType - Entity type to search, or undefined to disable search.
  * @param query - Raw keyword typed by the user.
- * @returns Results, loading, and error state for the latest query, and a retry.
+ * @returns Results, loading, and error state for the settled query, and a retry.
  */
 export function useDocumentLinkSearch(
   accessToken: string | undefined,
@@ -45,53 +58,32 @@ export function useDocumentLinkSearch(
   query: string,
 ): DocumentLinkSearch {
   const keyword = query.trim()
-  const [attempt, setAttempt] = useState(0)
-  const retry = () => setAttempt((current) => current + 1)
-  const [state, setState] = useState<LinkSearchState & { key: string }>({
-    key: '',
-    results: [],
-    isLoading: false,
-    hasError: false,
-  })
-  const key = accessToken && entityType && keyword
-    ? `${entityType}\0${keyword}`
-    : ''
-
-  useEffect(() => {
-    if (!accessToken || !entityType || !keyword) return undefined
-    const abortController = new AbortController()
-    const timeoutId = window.setTimeout(() => {
-      setState({ key, results: [], isLoading: true, hasError: false })
+  const settledKeyword = useDebouncedValue(keyword)
+  const isEnabled = Boolean(accessToken && entityType && keyword)
+  const key = accessToken && entityType && keyword && settledKeyword
+    ? ['document-link-search', accessToken, entityType, settledKeyword] as const
+    : null
+  const { data, error, isLoading, mutate } = useSWR(
+    key,
+    ([, token, type, currentKeyword]) =>
       searchWorkspaceAcrossCursors(
-        accessToken,
-        { keyword, entityTypes: [entityType] },
-        {
-          pageLimit: 3,
-          resultLimit: LINK_SEARCH_RESULT_LIMIT,
-          signal: abortController.signal,
-        },
-      )
-        .then((response) => {
-          setState({
-            key,
-            results: response.results,
-            isLoading: false,
-            hasError: false,
-          })
-        })
-        .catch(() => {
-          if (abortController.signal.aborted) return
-          setState({ key, results: [], isLoading: false, hasError: true })
-        })
-    }, LINK_SEARCH_DEBOUNCE_MS)
-    return () => {
-      window.clearTimeout(timeoutId)
-      abortController.abort()
-    }
-  }, [accessToken, attempt, entityType, key, keyword])
+        token,
+        { keyword: currentKeyword, entityTypes: [type] },
+        { pageLimit: 3, resultLimit: LINK_SEARCH_RESULT_LIMIT },
+      ),
+    {
+      dedupingInterval: 10_000,
+      keepPreviousData: false,
+      revalidateOnFocus: false,
+      shouldRetryOnError: false,
+    },
+  )
+  const isSettled = settledKeyword === keyword
 
-  if (!key || state.key !== key) {
-    return { results: [], isLoading: Boolean(key), hasError: false, retry }
+  return {
+    hasError: isEnabled && isSettled && error !== undefined,
+    isLoading: isEnabled && (!isSettled || isLoading),
+    results: isEnabled && isSettled ? data?.results ?? [] : [],
+    retry: () => void mutate(),
   }
-  return { ...state, retry }
 }

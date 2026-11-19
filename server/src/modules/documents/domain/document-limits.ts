@@ -83,3 +83,17 @@ export const DOCUMENT_MAX_TABLE_COLUMNS = 50
 
 /** Maximum number of table rows. */
 export const DOCUMENT_MAX_TABLE_ROWS = 200
+
+/**
+ * Maximum number of links owned by one block or Whiteboard object.
+ *
+ * Deleting a block or object also removes the links it owns, and one operation
+ * batch can delete up to {@link DOCUMENT_MAX_OPERATION_COUNT} elements. A Work
+ * Item card's own card link counts toward its object's total. Keeping each
+ * element at this many links keeps a full batch of deletions within
+ * {@link DOCUMENT_MAX_BACKLINK_CHANGE_COUNT}, so an ordinary delete never fails
+ * for having too many links to remove.
+ */
+export const DOCUMENT_MAX_ELEMENT_LINK_COUNT = Math.floor(
+  DOCUMENT_MAX_BACKLINK_CHANGE_COUNT / DOCUMENT_MAX_OPERATION_COUNT,
+)
