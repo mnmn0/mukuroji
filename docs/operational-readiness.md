@@ -693,6 +693,7 @@ production では先に別 environment で同一 artifact を検証し、変更 
 4. Response の request/correlation ID と JSON completion log が一致し、EMF metric が到着する。
 5. API alarm、DLQ、queue age、destination failure が `OK` で、telemetry に no-data がない。
 6. Migration marker/checkpoint/integrity check が成功し、新旧 client の contract test が通る。
+   Data migration の checkpoint と `verify` の契約は [Data migration](./data-migration.md) を参照する。
 7. AI assistanceを含むdeployでは同じfull SHAのmanual `production-like-live-eval`が成功し、namespace
    `Mukuroji/AIAssistance`、exact
    `Service=mukuroji-ai-assistance, ApplicationCommitSha=<evaluated full SHA>` dimension setの
@@ -708,8 +709,8 @@ failure destination error、security regression のいずれかは自動継続�
 
 1. Incident を宣言し、新しい deploy/migration/write を停止する。
 2. 直前 commit、stack event、alarm、request/event locator、data evidence を固定する。
-3. Data migration がある場合は、その migration contract に従って writer を止めたまま
-   rollback する。
+3. Data migration がある場合は、その migration contract（[Data migration](./data-migration.md#rollback)）に従って
+   writer を止めたまま rollback する。
 4. Schema-compatible な code/infrastructure は直前の成功code/configurationを、新しい
    `ApiRuntimeConfigurationRevision`とその他の同じ必須parameterでforward deployする。
    Retained secretの物理名を再作成するために旧revisionを再利用せず、retained resourceを
