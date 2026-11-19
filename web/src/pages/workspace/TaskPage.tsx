@@ -76,6 +76,14 @@ import { describeScopedWorkItemListError } from '../../issues/model/workItemList
 import { useProjectCustomerImpact } from '../../customers/queries/useCustomers'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
+  confirmParentCompletion,
+  confirmParentCompletionInBrowser,
+} from '../../issues/mutations/confirmParentCompletion'
+import {
+  CANCELLED_TEAM_ISSUE_UPDATE,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
+import {
   applyIssueCollaborationTabToSearchParams,
   applyIssueCollaborationSourceToSearchParams,
   issueCollaborationTargetSearchParams,
@@ -134,6 +142,7 @@ import {
 import {
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
+  resolveWorkflowStatusDefinition,
   resolveWorkItemTypeWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
@@ -1440,11 +1449,11 @@ export function TaskPage() {
     )
   }
 
-  /** Updates a visible Work Item with optimistic cache projection and conflict rollback. */
+  /** Updates a visible Work Item with optimistic cache projection and conflict rollback; resolves cancelled when the person declines completing a parent. */
   const handleUpdateTask = async (
     task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
-  ): Promise<CanonicalWorkItem> => {
+  ): Promise<CanonicalWorkItem | CancelledTeamIssueUpdate> => {
     if (!accessToken) {
       throw new Error(t('tasks.action.updateError'))
     }
@@ -1483,6 +1492,19 @@ export function TaskPage() {
 
     const configuration = workItemConfigurationLoadResult.configurationsByTeam[currentTask.teamId]?.configuration ??
       selectedIssueDetail?.resolvedConfiguration?.configuration
+    if (input.workflowStatusId !== undefined && !await confirmParentCompletion({
+      workItem: latestKnownTask,
+      nextStatusCategory: resolveWorkflowStatusDefinition({
+        ...latestKnownTask,
+        workflowStatusId: input.workflowStatusId,
+        workItemTypeId: input.workItemTypeId ?? latestKnownTask.workItemTypeId,
+      }, configuration)?.category,
+      configuration,
+      accessToken,
+      confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+    })) {
+      return CANCELLED_TEAM_ISSUE_UPDATE
+    }
     const optimisticTask = applyTaskPatchOptimistically(currentTask, input, configuration)
     /** Returns whether a candidate is the same Team-local Work Item. */
     const matchesTask = (candidate: CanonicalWorkItem) =>
@@ -1569,6 +1591,8 @@ export function TaskPage() {
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
         setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.conflict')])
         await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
+      } else if (error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren') {
+        setIssueUpdateError([currentIssueUpdateErrorKey, t('issues.error.openChildren')])
       } else {
         setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.action.updateError')])
       }

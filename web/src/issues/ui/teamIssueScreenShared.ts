@@ -1,6 +1,7 @@
 import type {
   PlanningSnapshot,
   ResolvedWorkItemConfiguration,
+  TeamWorkItemHierarchyNode,
   TaskViewDefinition,
   WorkItemRelation,
   WorkItemDependencyEndpoint,
@@ -14,6 +15,7 @@ import { type Locale } from '../../shared/i18n/i18n'
 import { type CreateTeamIssueInput, type TeamIssue, type UpdateTeamIssueInput } from '../api'
 import { type IssueCollaborationController } from '../mutations/useIssueCollaboration'
 import { type IssueCollaborationRoute } from '../model/collaborationTabs'
+import { type CancelledTeamIssueUpdate } from '../model/teamIssueUpdateOutcome'
 import { type ProjectDirectoryTeam, type ProjectMember } from '../../projects/api'
 import type { WorkspaceMember } from '../../workspace/api'
 import { type WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
@@ -81,6 +83,43 @@ export type TeamIssueTypeChangeState = {
   targetWorkItemTypeId: string
 }
 
+/** Where a hierarchy move places a Work Item. */
+export type TeamIssueHierarchyPlacement = {
+  /** Parent after the move; `null` makes the Work Item top-level. */
+  parentWorkItemId: string | null
+  /** Sibling order rank after the move. */
+  hierarchyRank: string
+}
+
+/** Team Work Item hierarchy the table shows as an outline. */
+export type TeamIssueOutlineSource = {
+  /**
+   * Hierarchy nodes in outline order; absent until the first read succeeds.
+   *
+   * A failed re-read keeps the nodes read before it, so they can come with `errorMessage`.
+   */
+  nodes?: readonly TeamWorkItemHierarchyNode[]
+  /**
+   * Message shown above the table when the hierarchy could not be read.
+   *
+   * With `nodes` the outline stays and the message explains it may be out of date; without them
+   * the table is shown flat.
+   */
+  errorMessage?: string
+  /** Whether the first read is in flight with no hierarchy yet; the table is shown flat meanwhile. */
+  isLoading?: boolean
+  /** Reads the hierarchy again after a failed read. */
+  onRetry?: () => void
+  /** Whether a retried read is in flight; the retry button ignores clicks meanwhile. */
+  isRetrying?: boolean
+  /**
+   * Saves a planned hierarchy move and refreshes the hierarchy.
+   *
+   * Absent when the viewer cannot change the hierarchy.
+   */
+  onMove?: (issueId: string, placement: TeamIssueHierarchyPlacement) => Promise<void>
+}
+
 /**
  * チーム所有 Issue 画面を描画する props です。
  */
@@ -95,6 +134,8 @@ export type TeamIssueScreenProps = {
   taskViewDefinition?: TaskViewDefinition
   /** Presentation settings rendered by Team table and board layouts. */
   taskViewPresentation?: TaskViewPresentationSettings
+  /** Hierarchy shown as an outline when the table view turns the outline on. */
+  issueOutline?: TeamIssueOutlineSource
   /** Optional route-controlled Team Issue view state. */
   viewState?: TeamIssueViewState
   /** Persists one complete next route-controlled Team Issue view state. */
@@ -245,12 +286,12 @@ export type TeamIssueScreenProps = {
    */
   onCreateIssue?: (input: CreateTeamIssueInput) => Promise<CreatedTeamIssueMutation | void>
   /**
-   * Issue 更新時の callback です。
+   * Updates a Work Item; resolves with the cancelled outcome when the person declines.
    */
   onUpdateIssue?: (
     issueId: string,
     input: UpdateTeamIssueInput,
-  ) => Promise<TeamIssue | void>
+  ) => Promise<TeamIssue | CancelledTeamIssueUpdate | void>
   /**
    * 選択中 Work Item へ relation を追加する callback です。
    */
