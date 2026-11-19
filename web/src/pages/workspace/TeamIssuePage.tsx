@@ -27,6 +27,9 @@ import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessi
 import { clearAuthSession, getAuthSession } from '../../auth/session'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
+import { applyWorkItemArchive } from '../../bulk-operations/mutations/workItemArchive'
+import { ArchivedWorkItemsPanelContainer } from '../../issues/ui/ArchivedWorkItemsPanelContainer'
+import { useArchivedWorkItemsRefresh } from '../../issues/queries/useArchivedWorkItems'
 import { type FileArtifactScope, useFileArtifacts } from '../../files/mutations/useFileArtifacts'
 import { createTranslator, getInitialLocale, type Locale } from '../../shared/i18n/i18n'
 import {
@@ -155,6 +158,7 @@ export function TeamIssuePage() {
   const params = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
+  const refreshArchivedWorkItems = useArchivedWorkItemsRefresh()
   const teamId = params.teamId ?? 'core-team'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -256,6 +260,7 @@ export function TeamIssuePage() {
   const commentDraftPrincipalKey = user?.username ?? user?.attributes.email ?? ''
   const commentDraftWorkspaceKey = user?.attributes['custom:workspace_id'] ??
     user?.attributes['custom:directory_id'] ?? ''
+  const archiveWorkspaceId = commentDraftWorkspaceKey.trim()
   const commentDraftScopeKey = JSON.stringify([
     teamId,
     resolvedSelectedIssueId ?? '',
@@ -436,7 +441,7 @@ export function TeamIssuePage() {
       fields: taskViewFields,
       // Effort values sort but do not group, because they have no shared buckets.
       sortFields: taskViewSortFields,
-      layoutModes: ['table', 'board'],
+      layoutModes: ['table', 'board', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
@@ -470,9 +475,12 @@ export function TeamIssuePage() {
   ])
   const canCreateTeamIssue = canCreateUnassignedIssue || createIssueProjects.length > 0
   const taskViewState = taskViewDefinitionToTeamState(taskViewController.effectiveDefinition)
-  const isOutlineShown = taskViewState.viewMode === 'table' &&
-    (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false) &&
-    !taskViewController.effectiveDefinition.layout.group
+  // The table nests rows only without grouping; the Gantt chart nests them within each group.
+  const isOutlineShown =
+    (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false) && (
+      taskViewState.viewMode === 'gantt' ||
+      (taskViewState.viewMode === 'table' && !taskViewController.effectiveDefinition.layout.group)
+    )
   const {
     data: hierarchy,
     error: hierarchyError,
@@ -689,6 +697,39 @@ export function TeamIssuePage() {
     }
   }
 
+  /**
+   * Archives or restores one Work Item through a one-item bulk archive operation.
+   *
+   * @param issue - Work Item at the revision the viewer saw.
+   * @param archived - True to archive, false to restore.
+   */
+  const handleArchiveIssue = async (issue: TeamIssue, archived: boolean) => {
+    if (!accessToken || !archiveWorkspaceId || !canMutateTeamIssue(issue)) {
+      throw new TeamIssuesApiError(
+        403,
+        t('taskViews.action.unavailable'),
+        'TeamTaskActionAccessDenied',
+      )
+    }
+    try {
+      await guardEnterpriseSession(applyWorkItemArchive({
+        accessToken,
+        archived,
+        fallbackErrorMessage: t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'),
+        runner: mutationRequestRunner,
+        target: issue,
+        workspaceId: archiveWorkspaceId,
+      }))
+    } finally {
+      // A failed preview is often a stale revision, so a retry needs the current one.
+      // A refresh failure must not hide the archive outcome, which the server already decided.
+      await Promise.all([mutateIssues(), mutateIssueDetail(), refreshArchivedWorkItems()])
+        // Archived Work Items leave the outline, so the roll-ups change too.
+        .then(() => refreshTeamHierarchy())
+        .catch(() => undefined)
+    }
+  }
+
   const handleAddRelation = async (
     issueId: string,
     input: WorkItemRelationEditorInput,
@@ -843,6 +884,7 @@ export function TeamIssuePage() {
     ? createTaskViewOption(taskViewController.activeSavedView)
     : undefined
   const taskViewToolbar = (
+    <>
     <TaskViewToolbar
       builtInName={t('issues.title')}
       canManageShared={taskViewController.canManageShared}
@@ -879,11 +921,23 @@ export function TeamIssuePage() {
       )}
       supportsColumnLayoutMetadata={taskViewState.viewMode === 'table'}
       supportsEmptyGroups={taskViewState.viewMode === 'board'}
-      supportsOutline={taskViewState.viewMode === 'table'}
+      supportsOutline={taskViewState.viewMode === 'table' || taskViewState.viewMode === 'gantt'}
       t={t}
       teams={taskViewTeams}
       views={taskViewOptions}
     />
+    <ArchivedWorkItemsPanelContainer
+      accessToken={accessToken}
+      canRestore={canMutateTeamIssue}
+      key={teamId}
+      locale={locale}
+      onRestore={hasWritableWorkItemScope && archiveWorkspaceId
+        ? (issue) => handleArchiveIssue(issue, false)
+        : undefined}
+      scope={{ kind: 'team', id: teamId }}
+      t={t}
+    />
+    </>
   )
 
   return (
@@ -940,6 +994,9 @@ export function TeamIssuePage() {
       key={JSON.stringify([teamId, commentDraftPrincipalKey, commentDraftWorkspaceKey])}
       locale={locale}
       onAddRelation={hasWritableWorkItemScope ? handleAddRelation : undefined}
+      onArchiveIssue={hasWritableWorkItemScope && archiveWorkspaceId
+        ? handleArchiveIssue
+        : undefined}
       createIssueProjects={createIssueProjects}
       onCreateIssue={canCreateTeamIssue && !workItemConfigurationError
         ? handleCreateIssue

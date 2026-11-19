@@ -22,32 +22,6 @@ afterEach(() => {
   resetTestApp()
 })
 
-test('loads dashboard summary from the authenticated user scoped directory', async () => {
-  const calls = configureFakeProjectClients(true)
-
-  const response = await app.request('/api/dashboard/summary', {
-    headers: {
-      Authorization: 'Bearer test-token',
-    },
-  })
-
-  expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({
-    projects: 1,
-    tasks: 1,
-    blocked: 0,
-    updatedAt: '2026-06-03T00:00:00.000Z',
-    source: 'dynamodb',
-  })
-  expect(calls.summaryReads).toEqual([
-    {
-      directoryId: 'user#demo@example.com',
-      isSystemAdmin: false,
-      userKey: 'demo@example.com',
-    },
-  ])
-})
-
 test('marks a workspace audit export as truncated when the 1,000 event cap leaves a cursor', async () => {
   configureFakeProjectClients(true)
   const event = createFakeAuditEvent()

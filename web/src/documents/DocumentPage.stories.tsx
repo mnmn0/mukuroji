@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, within } from 'storybook/test'
+import { expect, userEvent, within } from 'storybook/test'
 import { projectDirectoryFixtures } from '../projects/fixtures'
 import {
   documentBacklinkFixtures,
@@ -52,6 +52,7 @@ const screenActions: DocumentScreenActions = {
   createShare: async () => undefined,
   deleteShare: async () => undefined,
   exportDocument: async () => undefined,
+  exportDocumentSubtree: async () => undefined,
   instantiateTemplate: async () => undefined,
   moveDocument: async () => undefined,
   restoreDocument: async () => undefined,
@@ -104,6 +105,22 @@ export const MobileEditor: Story = {
     const editor = canvas.getByTestId('document-editor')
     await expect(editor.scrollWidth).toBeLessThanOrEqual(editor.clientWidth)
     await expect(canvasElement.ownerDocument.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth)
+  },
+}
+
+/**
+ * Export menu with Markdown/JSON, print / PDF, and subtree Markdown actions.
+ */
+export const ExportMenu: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: /書き出す/ }))
+    await expect(
+      canvas.getByRole('menuitem', { name: '印刷 / PDF' }),
+    ).toBeVisible()
+    await expect(
+      canvas.getByRole('menuitem', { name: '配下ページをまとめて Markdown' }),
+    ).toBeVisible()
   },
 }
 

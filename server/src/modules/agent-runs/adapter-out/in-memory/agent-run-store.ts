@@ -502,7 +502,7 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
         check: (state) => {
           const current = state.runs.get(supersededKey)
           return current?.state === 'active' && current.instanceIdHash === superseded.instanceIdHash &&
-            current.leaseExpiresAt < successor.startedAt
+            current.leaseExpiresAt < successor.lastHeartbeatAt
         },
         apply: (state) => {
           const current = state.runs.get(supersededKey)

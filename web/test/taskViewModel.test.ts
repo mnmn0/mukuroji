@@ -239,7 +239,8 @@ describe('contextual task mutations', () => {
 })
 
 describe('task due-date model', () => {
-  const referenceDay = new Date(2026, 6, 23, 15, 30)
+  // 10:30 UTC is 19:30 in the Workspace time zone (Asia/Tokyo), still 2026-07-23 there.
+  const referenceDay = new Date('2026-07-23T10:30:00.000Z')
 
   test('parses canonical ISO dates at local midnight without mutating the reference day', () => {
     const parsed = parseTaskDueDate('2026-07-23')

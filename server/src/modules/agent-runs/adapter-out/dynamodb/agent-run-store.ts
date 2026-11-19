@@ -1745,10 +1745,12 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
       {
         Update: {
           ...closeUpdate.Update,
-          // A heartbeat that renews the lease first wins; only a stalled run can be taken over.
+          // A heartbeat that renews the lease first wins; only a stalled run can be taken over. The lease is
+          // compared with the time of the take over, which the successor's first heartbeat records; its start
+          // time may be moved later to keep the history in order.
           ConditionExpression: `${closeUpdate.Update.ConditionExpression} AND #leaseExpiresAt < :takenOverAt`,
           ExpressionAttributeNames: { ...closeUpdate.Update.ExpressionAttributeNames, '#leaseExpiresAt': 'leaseExpiresAt' },
-          ExpressionAttributeValues: { ...closeUpdate.Update.ExpressionAttributeValues, ':takenOverAt': successor.startedAt },
+          ExpressionAttributeValues: { ...closeUpdate.Update.ExpressionAttributeValues, ':takenOverAt': successor.lastHeartbeatAt },
         },
       },
       {

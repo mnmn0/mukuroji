@@ -8,6 +8,7 @@ import {
   createActiveAgentRun,
   createAgentRunCommitConflictError,
   createAgentRunIntegrityError,
+  createAgentRunNotActiveError,
   createDefaultAgentSettings,
   finishAgentRun,
   hashAgentInstanceId,
@@ -129,6 +130,38 @@ function configureUnstartedAssignedWorkItem(overrides: {
 }
 
 describe('public Agent Run service', () => {
+  test('starts a run after a finished run that started on a clock ahead of this one', async () => {
+    const { store } = configureUnstartedAssignedWorkItem()
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const ahead = new Date(Date.now() + 60_000).toISOString()
+    const earlier = finishAgentRun({ ...createHeldRun('task-1', 'laptop-1'), startedAt: ahead }, 'paused', 'agent', new Date())
+    store.seed(earlier)
+    const service = createCanonicalPublicAgentRunService()
+    const started = await runWithTestAppDependencies(() => service.start(
+      credential, 'core-team', 'task-1',
+      readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2' }),
+      { requestId: 'start-after-ahead', idempotencyKey: 'start-after-ahead' },
+      { credentialId: 'agent-key', idempotencyKey: 'start-after-ahead', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    // The new run sorts first in the history, which agrees with the latest-run record.
+    expect(Date.parse(started.run.startedAt)).toBeGreaterThan(Date.parse(ahead))
+    expect(Date.parse(started.run.lastHeartbeatAt)).toBeLessThanOrEqual(Date.now())
+    const history = await store.listWorkItemRuns(workspaceId, 'core-team', 'task-1', undefined, 1)
+    expect(history.runs.map((run) => run.runId)).toEqual([started.run.runId])
+    expect(await store.getLatestRunId(workspaceId, 'core-team', 'task-1')).toBe(started.run.runId)
+  })
+
   test('starts a run atomically with the started transition and fences other instances', async () => {
     const { store, observed } = configureUnstartedAssignedWorkItem()
     const receipts: unknown[] = []
@@ -795,23 +828,37 @@ describe('public Agent Run service', () => {
 
   test('takes over a stalled run of another instance only when the Team allows it', async () => {
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
-    const stalled = { ...createHeldRun('task-1', 'laptop-1'), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
+    // The stalled run started on a server whose clock is ahead of this one.
+    const stalled = {
+      ...createHeldRun('task-1', 'laptop-1'),
+      startedAt: new Date(Date.now() + 60_000).toISOString(), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+    }
     store.seed(stalled)
-    const receipts: unknown[] = []
+    // Receipts prepared for a transaction and receipts of transactions that committed are kept apart,
+    // so a cancelled take over is shown to leave no receipt behind.
+    const preparedReceipts: unknown[] = []
+    const committedReceipts: unknown[] = []
     setTestAppDependencies({
       transactions: {
         /**
-         * Records the receipt request and returns a receipt write for the transaction.
+         * Records the receipt request and returns a receipt write that carries the response.
          *
          * @param input - Receipt to write.
          * @returns The receipt write.
          */
         async prepareIdempotencyCompletionTransactWrite(input) {
-          receipts.push(input.response)
-          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+          preparedReceipts.push(input.response)
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true, response: input.response } } } }
         },
       },
     })
+    const commitAndRecordReceipts = store.commit.bind(store)
+    store.commit = async (items, fenceItemCount) => {
+      await commitAndRecordReceipts(items, fenceItemCount)
+      for (const item of items) {
+        if (item.Put?.TableName === 'DeveloperPlatformTable') committedReceipts.push(item.Put.Item?.['response'])
+      }
+    }
     const service = createCanonicalPublicAgentRunService()
     /**
      * Takes over the stalled run as an instance.
@@ -832,11 +879,29 @@ describe('public Agent Run service', () => {
       updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
     })
     await expect(takeOver('laptop-1', 'take-over-1')).rejects.toMatchObject({ reason: 'agent_run_conflict' })
+    // A heartbeat that renews the lease before the commit wins, even though the successor would start
+    // after the stalled run's start time: the lease is compared with the real time of the take over.
+    const commit = store.commit.bind(store)
+    store.commit = async (items, fenceItemCount) => {
+      store.commit = commit
+      const current = store.state.runs.get(`${workspaceId}|core-team|${stalled.runId}`)
+      if (current) store.state.runs.set(`${workspaceId}|core-team|${stalled.runId}`, { ...current, leaseExpiresAt: new Date(Date.now() + 30_000).toISOString() })
+      return commit(items, fenceItemCount)
+    }
+    await expect(takeOver('laptop-2', 'take-over-renewed')).rejects.toMatchObject({ category: 'conflict' })
+    store.state.runs.set(`${workspaceId}|core-team|${stalled.runId}`, structuredClone(stalled))
+    // The cancelled transaction prepared a receipt but committed none.
+    expect(preparedReceipts).toHaveLength(1)
+    expect(committedReceipts).toEqual([])
 
     const taken = await takeOver('laptop-2', 'take-over-2')
     expect(taken.supersededRun).toMatchObject({ runId: stalled.runId, state: 'finished', outcome: 'superseded', finishedBy: 'demo@example.com' })
     expect(taken.run).toMatchObject({ workItemId: 'task-1', state: 'active', runtime: 'codex', stalled: false })
-    expect(receipts).toEqual([{ status: 201, body: taken }])
+    // The successor is listed after the stalled run, while its heartbeat keeps this server's clock.
+    expect(Date.parse(taken.run.startedAt)).toBeGreaterThan(Date.parse(stalled.startedAt))
+    expect(Date.parse(taken.run.lastHeartbeatAt)).toBeLessThanOrEqual(Date.now())
+    expect(preparedReceipts).toHaveLength(2)
+    expect(committedReceipts).toEqual([{ status: 201, body: taken }])
     expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toMatchObject({
       runId: taken.run.runId, instanceIdHash: hashAgentInstanceId('laptop-2'),
     })
@@ -1161,6 +1226,54 @@ describe('public Agent Run service', () => {
     expect(store.state.runs.get(`${workspaceId}|core-team|${resumed.run.runId}`)).not.toHaveProperty('resumedFromRunId')
   })
 
+  test('reports a resume cancelled by an Enterprise control change as an authorization change', async () => {
+    const service = createCanonicalPublicAgentRunService()
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    store.seed(finishAgentRun(createHeldRun('task-1', 'laptop-1'), 'paused', 'agent', new Date()))
+    /** Enterprise identity whose control revision moves when the test says so, keeping the caller's access. */
+    class MovingControlEnterpriseIdentity extends InMemoryEnterpriseIdentityClient {
+      /** Added to the stored control revision. */
+      controlRevisionShift = 0
+
+      /**
+       * Returns the stored snapshot with the shifted control revision.
+       *
+       * @param workspaceId - Workspace to read.
+       * @returns The snapshot.
+       */
+      override async getSnapshot(workspaceId: string) {
+        const snapshot = await super.getSnapshot(workspaceId)
+        return { ...snapshot, controlRevision: (snapshot.controlRevision ?? 0) + this.controlRevisionShift }
+      }
+    }
+    const enterpriseIdentity = new MovingControlEnterpriseIdentity()
+    setTestAppDependencies({
+      enterpriseIdentity,
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    // The control revision changes after authorization, and the commit's Enterprise control check fails.
+    store.commit = async () => {
+      enterpriseIdentity.controlRevisionShift = 1
+      throw createAgentRunCommitConflictError()
+    }
+    await expect(runWithTestAppDependencies(() => service.resume(
+      credential, 'core-team', 'task-1',
+      { expectedRevision: 1, runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+      { requestId: 'resume', idempotencyKey: 'enterprise-control' },
+      { credentialId: 'agent-key', idempotencyKey: 'enterprise-control', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))).rejects.toMatchObject({ status: 409, code: 'WorkItemAuthorizationChanged' })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()
+  })
+
   test('links a resume to the newest run read strongly, not to a lagging history index', async () => {
     const service = createCanonicalPublicAgentRunService()
     const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
@@ -1262,15 +1375,46 @@ describe('public Agent Run service', () => {
       { requestId: 'resume', idempotencyKey: key },
       { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
     ))
+    // A run that finished just after its claim was read does not make the resume fail.
+    const getClaim = store.getClaim.bind(store)
+    store.getClaim = async () => {
+      store.getClaim = getClaim
+      return { workItemId: 'task-1', runId: later.runId, instanceIdHash: later.instanceIdHash, assigneeUserId: later.assigneeUserId }
+    }
+    await expect(resume('released', offered.runId)).rejects.toMatchObject({ category: 'conflict', message: expect.stringContaining('Another run came after') })
     // An offer of the paused run does not resume after the failed run that came later.
     await expect(resume('offered', offered.runId)).rejects.toMatchObject({ category: 'conflict', message: expect.stringContaining('Another run came after') })
     expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()
-    const committed: unknown[][] = []
+    /**
+     * Makes the next claim read return a claim that still names the finished later run, as a read
+     * just before that run's finish removed its claim would.
+     */
+    const readStaleClaimOnce = () => {
+      const getClaim = store.getClaim.bind(store)
+      store.getClaim = async () => {
+        store.getClaim = getClaim
+        return { workItemId: 'task-1', runId: later.runId, instanceIdHash: later.instanceIdHash, assigneeUserId: later.assigneeUserId }
+      }
+    }
+    // A claim put that fails because another request claimed the Work Item, whose run then finished,
+    // asks the caller to reload instead of reporting inconsistent data.
     const commit = store.commit.bind(store)
+    store.commit = async () => {
+      store.commit = commit
+      readStaleClaimOnce()
+      throw createAgentRunNotActiveError()
+    }
+    await expect(resume('claim-lost', later.runId)).rejects.toMatchObject({
+      category: 'conflict', message: expect.stringContaining('claim changed during the request'),
+    })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)).toBeUndefined()
+    const committed: unknown[][] = []
     store.commit = async (items, fenceItemCount) => {
       committed.push([...items])
       return commit(items, fenceItemCount)
     }
+    // A claim read just before the holding run finished does not stop the resume.
+    readStaleClaimOnce()
     const resumed = await resume('expected', later.runId)
     // The commit fails if the caller's membership or Team and Project access changed since authorization.
     expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({
@@ -2364,6 +2508,35 @@ describe('Factory board route', () => {
     const corrupt = await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })
     expect(corrupt.status).toBe(503)
     expect(await corrupt.json()).not.toHaveProperty('items')
+  })
+})
+
+describe('Public Work Item actual dates', () => {
+  test('returns the actual dates from their own endpoint and keeps them off the closed Work Item response', async () => {
+    const { projectOptions } = configureUnstartedAssignedWorkItem()
+    projectOptions.detailWorkflowStatusId = 'done'
+    projectOptions.detailStatusCategory = 'completed'
+    projectOptions.detailActualStartDate = '2026-06-10'
+    projectOptions.detailActualEndDate = '2026-06-12'
+    const workItems = createCanonicalPublicWorkItemService()
+
+    expect(await runWithTestAppDependencies(() => workItems.getActualDates(credential, 'core-team', 'task-1')))
+      .toEqual({
+        schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: expect.any(Number),
+        actualStartDate: '2026-06-10', actualEndDate: '2026-06-12',
+      })
+    // Adding a property to the closed public Work Item schema would break existing clients.
+    const workItem = await runWithTestAppDependencies(() => workItems.get(credential, 'core-team', 'task-1'))
+    expect(workItem).not.toHaveProperty('actualStartDate')
+    expect(workItem).not.toHaveProperty('actualEndDate')
+
+    // A Work Item that has not started has neither date.
+    projectOptions.detailWorkflowStatusId = 'todo'
+    projectOptions.detailStatusCategory = 'unstarted'
+    delete projectOptions.detailActualStartDate
+    delete projectOptions.detailActualEndDate
+    expect(await runWithTestAppDependencies(() => workItems.getActualDates(credential, 'core-team', 'task-1')))
+      .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-1', revision: expect.any(Number) })
   })
 })
 

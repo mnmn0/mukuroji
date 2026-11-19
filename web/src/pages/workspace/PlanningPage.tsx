@@ -13,6 +13,7 @@ import {
   type CurrentUser,
 } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
+import { CycleBurndown } from '../../analytics/ui/CycleBurndownPanel'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/session'
 import {
@@ -54,8 +55,10 @@ import {
 import {
   createMissingPlanningTargetUpdateView,
   createPlanningTargetUpdateView,
+  derivePlanningUpdateAcknowledgement,
   extractPlanningUpdateCommentMentions,
   planningUpdateTargetsAreEqual,
+  type PlanningUpdateAcknowledgementView,
   type PlanningUpdateTargetDetailView,
   type PlanningUpdateTargetSummaryView,
   type PlanningUpdateCollaborationController,
@@ -148,6 +151,10 @@ export function PlanningPage() {
     mutate: mutatePlanning,
     key: planningKey,
   } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
+  const browserTimeZone = useMemo(
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    [],
+  )
   const projectScopes = useMemo(
     () => teams.flatMap((team) => team.projects.map((project) => ({
       teamId: team.id,
@@ -206,18 +213,26 @@ export function PlanningPage() {
     updateHistory.data?.updates,
     Boolean(user && !currentUserError),
   )
+  // Derive reviewer confirmation only from loaded reactions so loading never reads as unconfirmed.
+  const selectedUpdateReviewerMemberKey = selectedUpdateTarget && updateAnnotations.data
+    ? snapshot?.updateTargets.find((summary) =>
+        planningUpdateTargetsAreEqual(summary.target, selectedUpdateTarget)
+      )?.cadence?.escalationMemberKey
+    : undefined
   const updateAnnotationViews = useMemo(
     () => createPlanningUpdateAnnotationViews(
       updateHistory.data?.updates,
       updateAnnotations.data?.comments,
       updateAnnotations.data?.reactions,
       currentUserProjectKey,
+      selectedUpdateReviewerMemberKey,
     ),
     [
       updateAnnotations.data?.comments,
       updateAnnotations.data?.reactions,
       updateHistory.data?.updates,
       currentUserProjectKey,
+      selectedUpdateReviewerMemberKey,
     ],
   )
   const updateTargetDetails = useMemo(
@@ -556,6 +571,7 @@ export function PlanningPage() {
             ? togglePlanningUpdateWatch
             : undefined,
           reactionsByUpdateId: updateAnnotationViews.reactionsByUpdateId,
+          acknowledgementsByUpdateId: updateAnnotationViews.acknowledgementsByUpdateId,
           watch: updateWatch.data
             ? {
                 subscribed: updateWatch.data.subscribed,
@@ -599,6 +615,19 @@ export function PlanningPage() {
           isUpdateHistoryLoading={Boolean(updateHistory.key && updateHistory.isLoading)}
           key={`${selectedEntityId ?? ''}:${selectedUpdateTarget ? createPlanningUpdateTargetKey(selectedUpdateTarget) : ''}`}
           labels={labels}
+          renderCycleBurndown={accessToken && snapshot
+            ? (cycle) => (
+                <CycleBurndown
+                  accessToken={accessToken}
+                  cycle={cycle}
+                  key={cycle.id}
+                  links={snapshot.workItemLinks}
+                  locale={locale}
+                  t={t}
+                  timeZone={browserTimeZone}
+                />
+              )
+            : undefined}
           snapshot={snapshot}
           updateHistoryErrorMessage={updateHistoryErrorMessage}
           updateCollaboration={updateCollaboration}
@@ -633,6 +662,7 @@ export function PlanningPage() {
           canUpdateWorkItemLink={(workItem) =>
             canUpdatePlanningWorkItemLink(user, workItem, planningAccess)}
           createScopeTeams={manageableCreateScopeTeams}
+          directoryTeams={teams}
           onRetry={loadErrorMessage && !mutationErrorMessage
             ? () => void mutatePlanning()
             : undefined}
@@ -1003,16 +1033,19 @@ function createPlanningUpdateTargetDetails(
  * @param comments - Loaded append-only comments across the visible versions.
  * @param reactions - Loaded member reactions across the visible versions.
  * @param currentMemberKey - Normalized Workspace member key for viewer-state projection.
- * @returns Comment and reaction maps keyed by immutable update ID.
+ * @param reviewerMemberKey - Cadence escalation member whose confirmation reaction marks an update reviewed.
+ * @returns Comment, reaction, and reviewer confirmation maps keyed by immutable update ID.
  */
 function createPlanningUpdateAnnotationViews(
   updates: readonly PlanningUpdate[] = [],
   comments: readonly PlanningUpdateComment[] = [],
   reactions: readonly PlanningUpdateReaction[] = [],
   currentMemberKey = '',
+  reviewerMemberKey?: string,
 ) {
   const commentsByUpdateId: Record<string, PlanningUpdateCommentView[]> = {}
   const reactionsByUpdateId: Record<string, PlanningUpdateReactionView[]> = {}
+  const acknowledgementsByUpdateId: Record<string, PlanningUpdateAcknowledgementView> = {}
 
   for (const update of updates) {
     commentsByUpdateId[update.id] = comments
@@ -1041,9 +1074,15 @@ function createPlanningUpdateAnnotationViews(
       reaction,
       reactedByViewer: aggregate.reactedByViewer,
     }))
+    const acknowledgement = derivePlanningUpdateAcknowledgement(
+      reactions,
+      update.version,
+      reviewerMemberKey,
+    )
+    if (acknowledgement) acknowledgementsByUpdateId[update.id] = acknowledgement
   }
 
-  return { commentsByUpdateId, reactionsByUpdateId }
+  return { acknowledgementsByUpdateId, commentsByUpdateId, reactionsByUpdateId }
 }
 
 /**

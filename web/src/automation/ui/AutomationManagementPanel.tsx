@@ -29,6 +29,10 @@ import {
   type AutomationManagementTab,
 } from '../model/tabs'
 import { refreshAutomationTemplateApplication } from '../model/templateApplicationRefresh'
+import {
+  countProjectTemplateWorkItems,
+  formatLocalCalendarDate,
+} from '../model/projectTemplateWorkItems'
 
 const tabLabelKeys: Record<AutomationManagementTab, MessageKey> = {
   rules: 'automation.tab.rules',
@@ -655,14 +659,24 @@ export function AutomationTemplateApplicationEditor({
   const [application, setApplication] = useState(initialApplication)
   const [refreshErrorMessage, setRefreshErrorMessage] = useState<string>()
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [startDate, setStartDate] = useState(() => formatLocalCalendarDate(new Date()))
+  const workItemCount = template.kind === 'project'
+    ? countProjectTemplateWorkItems(template.payload.workItems)
+    : 0
   const targetsAvailable = template.kind === 'project'
     ? projectTargetValues.length > 0
     : workflowTargetValues.length > 0
+  const startDateIsValid = workItemCount === 0 || /^\d{4}-\d{2}-\d{2}$/u.test(startDate)
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!targetsAvailable) return
-    const input = createTemplateApplicationInput(template, targetValue, workflowTargets)
+    if (!targetsAvailable || !startDateIsValid) return
+    const input = createTemplateApplicationInput(
+      template,
+      targetValue,
+      workflowTargets,
+      workItemCount > 0 ? startDate : undefined,
+    )
     if (!input) return
     try {
       setApplication(await onApply(input))
@@ -717,6 +731,25 @@ export function AutomationTemplateApplicationEditor({
               ))}
         </select>
       </label>
+      {workItemCount > 0 ? (
+        <>
+          <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('automation.template.application.startDate')}
+            <input
+              className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+              data-testid="automation-template-application-start-date"
+              disabled={isApplying}
+              required
+              type="date"
+              value={startDate}
+              onChange={(event) => setStartDate(event.target.value)}
+            />
+          </label>
+          <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+            {t('automation.template.application.workItemsNotice').replace('{count}', String(workItemCount))}
+          </p>
+        </>
+      ) : null}
       {!targetsAvailable ? (
         <p className="text-xs font-semibold text-fg-red-700" role="alert">
           {t('automation.template.application.noTargets')}
@@ -726,7 +759,7 @@ export function AutomationTemplateApplicationEditor({
         <button
           className="workbench-button-primary min-h-10 px-5 disabled:cursor-not-allowed disabled:opacity-55"
           data-testid="automation-template-application-submit"
-          disabled={!targetsAvailable || isApplying}
+          disabled={!targetsAvailable || !startDateIsValid || isApplying}
           type="submit"
         >
           {t(isApplying ? 'automation.template.application.applying' : 'automation.template.apply')}
@@ -803,6 +836,9 @@ function TemplateApplicationResult({
           {t('automation.template.application.projectResult')
             .replace('{name}', result.name)
             .replace('{id}', result.projectId)}
+          {result.workItemCount
+            ? ` ${t('automation.template.application.workItemsResult').replace('{count}', String(result.workItemCount))}`
+            : null}
         </p>
       ) : result?.kind === 'workflow' ? (
         <p className="mt-3 text-sm font-semibold text-[var(--workbench-text)]">
@@ -820,13 +856,25 @@ function TemplateApplicationResult({
   )
 }
 
+/**
+ * Builds the application request for the selected target.
+ *
+ * @param template - Project or Workflow template being applied.
+ * @param targetValue - Selected Team ID or encoded Workflow scope.
+ * @param workflowTargets - Workflow scopes the viewer can choose from.
+ * @param startDate - Project start date, sent only for a template with a WBS.
+ * @returns The request body, or undefined when no target is selected.
+ */
 function createTemplateApplicationInput(
   template: Extract<AutomationTemplate, { kind: 'project' | 'workflow' }>,
   targetValue: string,
   workflowTargets: AutomationWorkflowTargetOption[],
+  startDate?: string,
 ): ApplyAutomationTemplateInput | undefined {
   if (template.kind === 'project') {
-    return targetValue ? { target: { kind: 'project', teamId: targetValue } } : undefined
+    return targetValue
+      ? { target: { kind: 'project', teamId: targetValue, ...(startDate ? { startDate } : {}) } }
+      : undefined
   }
   const target = workflowTargets.find((candidate) =>
     createWorkflowTargetValue(candidate) === targetValue
