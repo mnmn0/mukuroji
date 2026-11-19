@@ -31,6 +31,7 @@
 | `ApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
+| `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
 | `RequestEmailWebhookSecret` | `mukuroji:requestEmail` 有効時 | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |

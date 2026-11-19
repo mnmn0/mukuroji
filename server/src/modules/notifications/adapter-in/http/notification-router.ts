@@ -205,7 +205,7 @@ export function createNotificationRouter<
 
 /** Removes internal delivery eligibility metadata from the existing HTTP preference contract. */
 function toPublicPreferences(preferences: NotificationPreferences) {
-  const { slackEnabledAt: _internalActivation, ...publicPreferences } = preferences
+  const { slackEnabledAt: _internalActivation, emailEnabledAt: _internalEmailActivation, ...publicPreferences } = preferences
   return publicPreferences
 }
 

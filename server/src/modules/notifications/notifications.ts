@@ -71,6 +71,8 @@ export type NotificationPreferences = {
   updatedAt?: string
   /** Server-owned start of the current Slack opt-in period; omitted from HTTP preferences. */
   slackEnabledAt?: string
+  /** Server-owned start of the current Email opt-in period; omitted from HTTP preferences. */
+  emailEnabledAt?: string
 }
 
 /** Notification preference を置き換える入力です。 */
@@ -588,19 +590,30 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     const preferences = normalizeNotificationPreferencesInput(input.preferences)
     const now = normalizeDate(input.now ?? new Date(), 'Notification preference update time')
     let slackEnabledAt: string | undefined
-    if (preferences.channels.slack) {
+    let emailEnabledAt: string | undefined
+    if (preferences.channels.slack || preferences.channels.email) {
+      // Slack keeps its strict read; an Email-only save over a corrupt row starts a new Email period.
       const current = preferences.version > 0
         ? parseStoredNotificationPreferences((await this.documentClient.send(new GetCommand({
             TableName: this.tableName, Key: { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }, ConsistentRead: true,
-          }))).Item, true)
+          }))).Item, preferences.channels.slack === true)
         : undefined
-      slackEnabledAt = current?.channels.slack ? current.slackEnabledAt : now.toISOString()
+      if (preferences.channels.slack) {
+        slackEnabledAt = current?.channels.slack ? current.slackEnabledAt : now.toISOString()
+      }
+      if (preferences.channels.email) {
+        // Rows saved before Email transport existed keep their last save time as the opt-in boundary.
+        emailEnabledAt = current?.channels.email
+          ? current.emailEnabledAt ?? current.updatedAt ?? now.toISOString()
+          : now.toISOString()
+      }
     }
     const next: NotificationPreferences = {
       ...preferences,
       version: preferences.version + 1,
       updatedAt: now.toISOString(),
       ...(slackEnabledAt ? { slackEnabledAt } : {}),
+      ...(emailEnabledAt ? { emailEnabledAt } : {}),
     }
 
     try {
@@ -760,6 +773,8 @@ export class DynamoDbNotificationsClient implements NotificationClient {
           { AttributeName: 'recipientStatusKey', AttributeType: 'S' },
           { AttributeName: 'slackQueueShard', AttributeType: 'S' },
           { AttributeName: 'slackNextAttemptAt', AttributeType: 'S' },
+          { AttributeName: 'emailQueueShard', AttributeType: 'S' },
+          { AttributeName: 'emailNextAttemptAt', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'recipientKey', KeyType: 'HASH' },
@@ -777,6 +792,13 @@ export class DynamoDbNotificationsClient implements NotificationClient {
           KeySchema: [
             { AttributeName: 'slackQueueShard', KeyType: 'HASH' },
             { AttributeName: 'slackNextAttemptAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
+        }, {
+          IndexName: 'EmailDeliveryIndex',
+          KeySchema: [
+            { AttributeName: 'emailQueueShard', KeyType: 'HASH' },
+            { AttributeName: 'emailNextAttemptAt', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'KEYS_ONLY' },
         }],
@@ -851,9 +873,13 @@ export function parseStoredNotificationPreferences(
       ? readTimestamp(value.slackEnabledAt)
       : undefined
     if (normalized.channels.slack && !slackEnabledAt) throw new Error('Missing Slack activation time.')
+    if (value.emailEnabledAt !== undefined && !readTimestamp(value.emailEnabledAt)) throw new Error('Invalid Email activation time.')
+    // Email existed as a preference before its transport, so older rows may lack an activation time.
+    const emailEnabledAt = normalized.channels.email ? readTimestamp(value.emailEnabledAt) : undefined
     return {
       ...normalized,
       ...(slackEnabledAt ? { slackEnabledAt } : {}),
+      ...(emailEnabledAt ? { emailEnabledAt } : {}),
       ...(readTimestamp(value.updatedAt) ? { updatedAt: readTimestamp(value.updatedAt) } : {}),
     }
   } catch {
@@ -871,6 +897,19 @@ export function parseStoredNotificationPreferences(
 export function isSlackNotificationEligible(preferences: NotificationPreferences, occurredAt: string): boolean {
   const enabledAt = Date.parse(preferences.slackEnabledAt ?? '')
   return preferences.channels.slack === true && Number.isFinite(enabledAt) && Date.parse(occurredAt) >= enabledAt
+}
+
+/**
+ * Binds Email delivery to the server-recorded opt-in period, including delayed audit projection.
+ * Preferences saved before Email transport existed have no activation time, so their last save
+ * time is the boundary: the member chose Email then, and older events are never sent.
+ * @param preferences - Current stored preferences and activation boundary.
+ * @param occurredAt - Original notification event time, not its projection or retry time.
+ * @returns Whether the event occurred during the current Email opt-in period.
+ */
+export function isEmailNotificationEligible(preferences: NotificationPreferences, occurredAt: string): boolean {
+  const enabledAt = Date.parse(preferences.emailEnabledAt ?? preferences.updatedAt ?? '')
+  return preferences.channels.email && Number.isFinite(enabledAt) && Date.parse(occurredAt) >= enabledAt
 }
 
 /** Frequency と quiet hours から channel delivery plan を作成します。 */
