@@ -20,6 +20,7 @@ import {
   isWorkItemProgressMode,
   isWorkItemHierarchyRank,
   isWorkItemParentCompletionPolicy,
+  isWorkItemCompletionGateRequirement,
   DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_JOB_ROLE_LIMIT,
@@ -37,6 +38,8 @@ import {
   type WorkflowStatusCategory,
   type WorkItemConfiguration,
   type WorkItemConfigurationScopeType,
+  type WorkItemCompletionGatePolicy,
+  type WorkItemCompletionGateUnmetCondition,
   type WorkItemJobRoleDefinition,
   type WorkItemRelation,
   type WorkItemParentMutationResponse,
@@ -94,6 +97,29 @@ export class WorkItemConfigurationError extends Error {
     super(message)
     this.status = status
     this.code = code
+  }
+}
+
+/**
+ * Rejects moving a Work Item into the `completed` category while a required completion Gate
+ * condition is unmet; the API returns `409 WorkItemCompletionGateNotSatisfied` with the list.
+ */
+export class WorkItemCompletionGateError extends WorkItemConfigurationError {
+  /** Required conditions that blocked the completion, in display order. */
+  readonly unmetConditions: readonly WorkItemCompletionGateUnmetCondition[]
+
+  /**
+   * Creates the error for the blocking conditions.
+   *
+   * @param unmetConditions - Required conditions that are not met.
+   */
+  constructor(unmetConditions: readonly WorkItemCompletionGateUnmetCondition[]) {
+    super(
+      409,
+      'WorkItemCompletionGateNotSatisfied',
+      `The Team's completion Gate is not satisfied: ${unmetConditions.map((condition) => condition.condition).join(', ')}.`,
+    )
+    this.unmetConditions = unmetConditions
   }
 }
 
@@ -773,6 +799,9 @@ export function validateWorkItemConfiguration(
     throw invalidConfiguration('Parent completion policy must be warn or reject.')
   }
   const parentCompletionPolicy = value.parentCompletionPolicy
+  const completionGate = value.completionGate === undefined
+    ? undefined
+    : readWorkItemCompletionGatePolicy(value.completionGate)
 
   return {
     scopeType,
@@ -786,10 +815,35 @@ export function validateWorkItemConfiguration(
     ...(jobRoles === undefined ? {} : { jobRoles }),
     ...(progressMode === undefined ? {} : { progressMode }),
     ...(parentCompletionPolicy === undefined ? {} : { parentCompletionPolicy }),
+    ...(completionGate === undefined ? {} : { completionGate }),
     ...(value.updatedAt === undefined
       ? {}
       : { updatedAt: readIsoTimestamp(value.updatedAt, 'Configuration updatedAt') }),
   }
+}
+
+/**
+ * Validates a Team completion Gate policy.
+ *
+ * @param value - Untrusted `completionGate` value.
+ * @returns The policy with only the conditions it sets.
+ * @throws WorkItemConfigurationError when the value is not an object of known conditions and requirements.
+ */
+function readWorkItemCompletionGatePolicy(value: unknown): WorkItemCompletionGatePolicy {
+  if (!isRecord(value)) {
+    throw invalidConfiguration('Completion Gate must be an object.')
+  }
+  const policy: WorkItemCompletionGatePolicy = {}
+  for (const [key, requirement] of Object.entries(value)) {
+    if (key !== 'acceptanceCriteria' && key !== 'noPendingApprovals' && key !== 'humanApproval') {
+      throw invalidConfiguration(`Completion Gate condition "${key}" is not supported.`)
+    }
+    if (!isWorkItemCompletionGateRequirement(requirement)) {
+      throw invalidConfiguration(`Completion Gate condition "${key}" must be off, warn, or required.`)
+    }
+    policy[key] = requirement
+  }
+  return policy
 }
 
 /**
@@ -2903,6 +2957,8 @@ function createWorkItemConfigurationAuditSnapshot(configuration: WorkItemConfigu
     // Whether open children block completing a parent is a Team policy, so its value is audited.
     parentCompletionPolicy:
       configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
+    // Which conditions block completion is a Team policy, so its value is audited.
+    completionGate: configuration.completionGate ?? {},
     workflowIds: getWorkItemConfigurationWorkflows(configuration)
       .map((workflow) => workflow.id)
       .sort(),

@@ -1,9 +1,14 @@
 import {
   DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
+  evaluateWorkItemCompletionGate,
+  hasWorkItemCompletionGateConditions,
   isWorkItemHierarchyClosedCategory,
+  needsWorkItemCompletionGateApprovals,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   type ApprovalSummary,
   type ResolvedWorkItemConfiguration,
+  type WorkItemAcceptanceCriterion,
+  type WorkItemCompletionGateApprovalCounts,
   type WorkItemConfiguration,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
@@ -29,6 +34,7 @@ import {
   type ReviewerApprovalPage,
 } from '../../modules/files/file-proofing'
 import {
+  WorkItemCompletionGateError,
   WorkItemConfigurationError,
   assertWorkItemTypeChangeResolution,
   assertWorkflowTransitionAllowed,
@@ -49,6 +55,7 @@ import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import { readJson } from './http'
 import { toProjectDataErrorResponse, type WorkspacePrincipal } from './project-access'
 import { isRecord } from './value-guards'
+import { readAcceptanceCriteriaChange } from './work-item-acceptance-criteria'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from './work-item-access'
 import {
   createWorkItemTypeRelationConfigurationTransactionItems,
@@ -372,6 +379,23 @@ async function resolveCompletionTransition(
       nextStatus.workflowStatusId,
       workItem.workItemTypeId,
     )
+    if (applyParentCompletionPolicy) {
+      // The approval being decided is still stored as pending, so it is counted as approved here.
+      await assertWorkItemCompletionGate(
+        directoryId,
+        teamId,
+        workItem,
+        nextStatus.statusCategory,
+        resolved.configuration,
+        workItem.acceptanceCriteria ?? [],
+        dependencies,
+        (summary) => ({
+          pendingCount: Math.max(0, summary.pendingCount - 1),
+          approvedCount: summary.approvedCount + 1,
+          changesRequestedCount: summary.changesRequestedCount,
+        }),
+      )
+    }
     const guardConditionChecks = createWorkItemConfigurationGuardConditionChecks(
       getWorkItemConfigurationTableName(),
       directoryId,
@@ -434,8 +458,11 @@ export function hasApprovalSummaryContent(summary: ApprovalSummary) {
  * @param current - Current Work Item.
  * @param input - Request input.
  * @param resolved - Resolved Work Item configuration.
- * @param options - Optional dependency overrides for relation validation.
+ * @param options - Optional dependency overrides for relation validation and the approval read,
+ *   and acceptance criterion marks a caller sends outside `input`.
  * @returns The validated update and its configuration transaction items.
+ * @throws WorkItemCompletionGateError when the change completes the Work Item while a required
+ *   completion Gate condition is unmet.
  */
 export async function prepareConfiguredUpdateWorkItem(
   directoryId: string,
@@ -444,7 +471,9 @@ export async function prepareConfiguredUpdateWorkItem(
   input: UpdateTeamIssueRequestBody,
   resolved: ResolvedWorkItemConfiguration,
   options: {
-    relationDependencies?: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'>
+    relationDependencies?: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'> &
+      Partial<Pick<WorkItemDependencies, 'fileProofing'>>
+    acceptanceCriteriaMarks?: unknown
   } = {},
 ): Promise<UpdateTeamIssueRequestBody> {
   const currentWorkItemType = resolveWorkItemType(
@@ -583,6 +612,17 @@ export async function prepareConfiguredUpdateWorkItem(
     teamId,
     resolved,
   ).concat(relationTransactionItems, approvalTransitionConditionChecks)
+  await assertWorkItemCompletionGate(
+    directoryId,
+    teamId,
+    current,
+    nextWorkflowStatus.statusCategory,
+    resolved.configuration,
+    () => readCompletionGateAcceptanceCriteria(current, input, options.acceptanceCriteriaMarks),
+    options.relationDependencies?.fileProofing === undefined
+      ? workItemDependencies
+      : { fileProofing: options.relationDependencies.fileProofing },
+  )
   const childCompletionConditionChecks = await prepareParentCompletionConditionChecks(
     directoryId,
     teamId,
@@ -603,6 +643,84 @@ export async function prepareConfiguredUpdateWorkItem(
     customFieldValues,
     configurationConditionChecks: otherConditionChecks.concat(childCompletionConditionChecks),
   }
+}
+
+/**
+ * Applies the Team's completion Gate to a status change.
+ *
+ * Only a move into the `completed` category is checked, and nothing is read when the Team sets no
+ * Gate. Approval counts that cannot be read leave approval conditions unmet, so the Gate fails closed.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the Work Item.
+ * @param current - Work Item before the change.
+ * @param nextStatusCategory - Status category after the change.
+ * @param configuration - Team Work Item configuration.
+ * @param acceptanceCriteria - Criteria after the change, or a function that reads them only when needed.
+ * @param dependencies - Approval persistence.
+ * @param adjustApprovals - Adjusts the stored approval counts for a decision not yet saved.
+ * @throws WorkItemCompletionGateError `409` when a `required` condition is unmet.
+ */
+async function assertWorkItemCompletionGate(
+  directoryId: string,
+  teamId: string,
+  current: Pick<TeamIssueResponseItem, 'id' | 'statusCategory'>,
+  nextStatusCategory: WorkflowStatusCategory,
+  configuration: WorkItemConfiguration,
+  acceptanceCriteria: readonly WorkItemAcceptanceCriterion[] | (() => readonly WorkItemAcceptanceCriterion[]),
+  dependencies: Pick<WorkItemDependencies, 'fileProofing'>,
+  adjustApprovals?: (summary: ApprovalSummary) => WorkItemCompletionGateApprovalCounts,
+): Promise<void> {
+  const policy = configuration.completionGate
+  if (
+    current.statusCategory === 'completed' ||
+    nextStatusCategory !== 'completed' ||
+    !hasWorkItemCompletionGateConditions(policy)
+  ) {
+    return
+  }
+  let approvalSummary: WorkItemCompletionGateApprovalCounts | undefined
+  if (needsWorkItemCompletionGateApprovals(policy)) {
+    try {
+      const summary = await dependencies.fileProofing.getApprovalSummary({
+        workspaceId: directoryId,
+        teamId,
+        kind: 'work-item',
+        issueId: current.id,
+      })
+      approvalSummary = adjustApprovals ? adjustApprovals(summary) : summary
+    } catch (error) {
+      console.error('Work Item approvals could not be read for the completion Gate.', error)
+      approvalSummary = undefined
+    }
+  }
+  const unmet = evaluateWorkItemCompletionGate(policy, {
+    acceptanceCriteria: typeof acceptanceCriteria === 'function' ? acceptanceCriteria() : acceptanceCriteria,
+    approvalSummary,
+  }).filter((condition) => condition.requirement === 'required')
+  if (unmet.length > 0) {
+    throw new WorkItemCompletionGateError(unmet)
+  }
+}
+
+/**
+ * Reads the acceptance criteria a Work Item will hold after an update.
+ *
+ * @param current - Work Item before the update.
+ * @param input - Update body, which may replace the criteria or mark some of them.
+ * @param acceptanceCriteriaMarks - Marks a caller sends outside `input`, if any.
+ * @returns The criteria after the update.
+ */
+function readCompletionGateAcceptanceCriteria(
+  current: Pick<TeamIssueResponseItem, 'acceptanceCriteria'>,
+  input: UpdateTeamIssueRequestBody & { acceptanceCriteriaMarks?: unknown },
+  acceptanceCriteriaMarks: unknown,
+): readonly WorkItemAcceptanceCriterion[] {
+  const existing = current.acceptanceCriteria ?? []
+  const change = acceptanceCriteriaMarks === undefined
+    ? input
+    : { acceptanceCriteriaMarks }
+  return readAcceptanceCriteriaChange(change, existing, false) ?? existing
 }
 
 /**
