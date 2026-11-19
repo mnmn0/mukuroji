@@ -5144,6 +5144,28 @@ test.describe('authenticated task page', () => {
     })
   })
 
+  test('Issue #337: 稼働カレンダーを取得できないときは既定で扱うことを示し再読み込みできる', async ({ page }) => {
+    let calendarReads = 0
+    await page.route('**/api/workspace/calendar-settings', async (route) => {
+      calendarReads += 1
+      if (calendarReads === 1) {
+        await route.fulfill({ status: 500, json: { message: 'unavailable' } })
+        return
+      }
+      await route.fulfill({
+        json: { fiscalYearStartMonth: 1, weekStartDay: 1, workingWeekdays: ['monday'], holidays: [] },
+      })
+    })
+    await setScheduleFixtureClock(page)
+    await page.goto('/projects/refero/issues')
+
+    const calendarError = page.getByTestId('project-workspace-calendar-error')
+    await expect(calendarError).toContainText('Workspace の稼働カレンダーを取得できませんでした。')
+    await calendarError.getByRole('button', { name: 'もう一度読み込む' }).click()
+    await expect(calendarError).toHaveCount(0)
+    expect(calendarReads).toBe(2)
+  })
+
   test('Issue #188: schedule preview の permission error は理由を表示し更新しない', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {

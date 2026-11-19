@@ -365,6 +365,8 @@ export const workItemsMessages = {
   'tasks.column.progress': 'Progress',
   'tasks.addTask': 'Add task',
   'tasks.create.title': 'Task name',
+  'tasks.workspaceCalendar.error': "Couldn't load the Workspace working calendar. New Work Items and the Gantt chart use Monday to Friday with no holidays for now.",
+  'tasks.workspaceCalendar.retry': 'Load again',
   'tasks.create.titlePlaceholder': 'Ex: Pre-release checklist',
   'tasks.create.assignee': 'Assignee',
   'tasks.create.assigneeRequired': 'Select an assignee before creating the task.',

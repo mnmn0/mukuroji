@@ -461,6 +461,13 @@ export type TaskScreenProps = {
   planningErrorMessage?: string
   /** Retries the canonical Planning dependency and permission queries. */
   onRetryPlanning?: () => void
+  /**
+   * Shown when the Workspace working calendar failed to load, so new Work Items and the Gantt
+   * chart fall back to Monday-to-Friday without holidays.
+   */
+  workspaceCalendarErrorMessage?: string
+  /** Reads the Workspace working calendar again. */
+  onRetryWorkspaceCalendar?: () => void
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Task view selected when the screen first mounts. */
@@ -680,6 +687,8 @@ export function TaskScreen({
   outline,
   planningErrorMessage,
   planningSnapshot,
+  workspaceCalendarErrorMessage,
+  onRetryWorkspaceCalendar,
   onLoadMoreProjectUsers,
   onAddRelation,
   onDeleteRelation,
@@ -3549,6 +3558,26 @@ export function TaskScreen({
             ) : null}
             {projectCustomerImpact && projectCustomerImpact.requestCount > 0 ? (
               <CustomerImpactPanel signal={projectCustomerImpact} t={t} />
+            ) : null}
+            {workspaceCalendarErrorMessage ? (
+              <div
+                className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[var(--workbench-warning-border)] bg-[var(--workbench-warning-surface)] px-5 py-4"
+                data-testid="project-workspace-calendar-error"
+                role="alert"
+              >
+                <span className="text-sm font-semibold text-[var(--workbench-warning)]">
+                  {workspaceCalendarErrorMessage}
+                </span>
+                {onRetryWorkspaceCalendar ? (
+                  <button
+                    className="workbench-button-secondary min-h-9 px-3"
+                    onClick={onRetryWorkspaceCalendar}
+                    type="button"
+                  >
+                    {t('tasks.workspaceCalendar.retry')}
+                  </button>
+                ) : null}
+              </div>
             ) : null}
             {planningErrorMessage ? (
               <div
