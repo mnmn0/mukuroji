@@ -45,6 +45,8 @@ import {
   putPlanningWorkItemLink,
   resolvePlanningErrorMessageKey,
   rolloverPlanningCycle,
+  createNextPlanningCycle,
+  setPlanningCycleWorkItems,
   removePlanningUpdateReaction,
   updatePlanningEntity,
   updateWorkItemScheduleDependency,
@@ -771,14 +773,65 @@ export function PlanningPage() {
               }
             : undefined}
           onRolloverCycle={canManagePlanning && snapshot && accessToken
-            ? (sourceCycle, targetCycleId) => runMutation(
-                `planning:cycle:${sourceCycle.id}:rollover`,
-                [snapshot.revision, targetCycleId],
-                (context) => rolloverPlanningCycle(accessToken, sourceCycle.id, {
+            ? async (sourceCycle, targetCycleId) => {
+                // One call moves at most one batch; repeat until the source Cycle completes.
+                let revision = snapshot.revision
+                for (let batch = 0; batch < 100; batch += 1) {
+                  let next: { remaining: number; revision: number } | undefined
+                  await runMutation(
+                    `planning:cycle:${sourceCycle.id}:rollover`,
+                    [revision, targetCycleId],
+                    (context) => rolloverPlanningCycle(accessToken, sourceCycle.id, {
+                      expectedRevision: revision,
+                      targetCycleId,
+                    }, context).then((result) => {
+                      next = {
+                        remaining: result.remainingWorkItemCount ?? 0,
+                        revision: result.planning.revision,
+                      }
+                      return result.planning
+                    }),
+                  )
+                  if (!next || next.remaining === 0) return
+                  revision = next.revision
+                }
+              }
+            : undefined}
+          onCreateNextCycle={canManagePlanning && snapshot && accessToken
+            ? (cycle) => runMutation(
+                `planning:cycle:${cycle.id}:next`,
+                snapshot.revision,
+                (context) => createNextPlanningCycle(accessToken, cycle.id, {
                   expectedRevision: snapshot.revision,
-                  targetCycleId,
                 }, context).then((result) => result.planning),
               )
+            : undefined}
+          onUpdateCycleAutomation={canManagePlanning && snapshot && accessToken
+            ? (cycle, automation) => runMutation(
+                `planning:entity:${cycle.id}:automation`,
+                [snapshot.revision, automation],
+                (context) => updatePlanningEntity(accessToken, cycle.id, {
+                  expectedRevision: snapshot.revision,
+                  patch: { automation },
+                }, context),
+              )
+            : undefined}
+          onSetCycleWorkItems={canMutatePlanningContent && snapshot && accessToken
+            ? (cycle, action, workItems) => {
+                const input = {
+                  action,
+                  workItems: workItems.map((workItem) => ({
+                    teamId: workItem.teamId,
+                    workItemId: workItem.id,
+                  })),
+                  expectedRevision: snapshot.revision,
+                }
+                return runMutation(
+                  `planning:cycle:${cycle.id}:work-items`,
+                  input,
+                  (context) => setPlanningCycleWorkItems(accessToken, cycle.id, input, context),
+                )
+              }
             : undefined}
           onArchiveEntity={canManagePlanning && snapshot && accessToken
             ? async (entity) => {

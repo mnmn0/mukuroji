@@ -1,4 +1,11 @@
-import type { CycleRolloverInput, PlanningMutationResponse } from '@mukuroji/contracts'
+import type {
+  CreateNextCycleInput,
+  CreateNextCycleResponse,
+  CycleRolloverInput,
+  CycleWorkItemsInput,
+  PlanningMutationResponse,
+  PlanningSnapshot,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { PlanningApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -24,6 +31,54 @@ export function rolloverPlanningCycle(
 ) {
   return requestMutation<PlanningMutationResponse>(
     `${planningApiBaseUrl}/planning/cycles/${encodeURIComponent(cycleId)}/rollover`,
+    accessToken,
+    'POST',
+    input,
+    mutationContext,
+  )
+}
+
+/**
+ * Cadence に従って次の Cycle を作ります。
+ *
+ * @param accessToken - Authorization header に使う access token です。
+ * @param cycleId - 元の Cycle ID です。
+ * @param input - 読み込み時点の revision です。
+ * @param mutationContext - retry 間で共有する mutation request context です。
+ * @returns 作成した Cycle の ID と snapshot です。
+ */
+export function createNextPlanningCycle(
+  accessToken: string,
+  cycleId: string,
+  input: CreateNextCycleInput,
+  mutationContext: MutationRequestContext,
+) {
+  return requestMutation<CreateNextCycleResponse>(
+    `${planningApiBaseUrl}/planning/cycles/${encodeURIComponent(cycleId)}/next`,
+    accessToken,
+    'POST',
+    input,
+    mutationContext,
+  )
+}
+
+/**
+ * 複数の Work Item を1回で Cycle に入れる、または Cycle から外します。
+ *
+ * @param accessToken - Authorization header に使う access token です。
+ * @param cycleId - 対象の Cycle ID です。
+ * @param input - 操作、Work Item、revision です。
+ * @param mutationContext - retry 間で共有する mutation request context です。
+ * @returns 更新後の snapshot です。
+ */
+export function setPlanningCycleWorkItems(
+  accessToken: string,
+  cycleId: string,
+  input: CycleWorkItemsInput,
+  mutationContext: MutationRequestContext,
+) {
+  return requestMutation<PlanningSnapshot>(
+    `${planningApiBaseUrl}/planning/cycles/${encodeURIComponent(cycleId)}/work-items`,
     accessToken,
     'POST',
     input,
