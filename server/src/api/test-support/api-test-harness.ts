@@ -1697,11 +1697,6 @@ function configureFakeProjectClients(
       teamId: string
     }>,
     roleChecks: [] as Array<{ directoryId: string; memberKey: string; projectId: string }>,
-    summaryReads: [] as Array<{
-      directoryId: string
-      isSystemAdmin: boolean
-      userKey: string
-    }>,
     teamArchives: [] as Array<{
       directoryId: string
       expectedPlanningRevision: number
@@ -2145,23 +2140,6 @@ function configureFakeProjectClients(
       },
       async unlinkWorkspaceUser() {
         return 'completed'
-      },
-    },
-    dashboardSummary: {
-      async getSummary(directoryId, accessContext) {
-        calls.summaryReads.push({
-          directoryId,
-          isSystemAdmin: accessContext.isSystemAdmin,
-          userKey: accessContext.userKey,
-        })
-
-        return {
-          projects: 1,
-          tasks: 1,
-          blocked: 0,
-          updatedAt: '2026-06-03T00:00:00.000Z',
-          source: 'dynamodb',
-        }
       },
     },
     workItemConfigurations: createFakeWorkItemConfigurationClient({
