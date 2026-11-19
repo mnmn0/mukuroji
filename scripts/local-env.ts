@@ -71,15 +71,16 @@ function findAssignment(lines: readonly string[], name: string): { index: number
 }
 
 /**
- * Removes surrounding whitespace and one pair of matching quotes from a dotenv value.
+ * Reads a dotenv value: removes surrounding whitespace, an inline `#` comment, and one pair of matching quotes.
  *
  * @param raw - The text after `=`.
  * @returns The bare value.
  */
 function unquote(raw: string): string {
   const trimmed = raw.trim()
-  const quoted = /^(["'])(.*)\1$/.exec(trimmed)
-  return quoted ? (quoted[2] ?? '') : trimmed
+  const quoted = /^(["'])(.*?)\1\s*(?:#.*)?$/.exec(trimmed)
+  if (quoted) return quoted[2] ?? ''
+  return trimmed.replace(/(?:^|\s+)#.*$/, '')
 }
 
 /**
@@ -126,15 +127,41 @@ export function planLocalEnvironment(
 }
 
 /**
+ * Outcome of preparing the local environment.
+ */
+export interface LocalEnvironmentSetup {
+  /** Names of the secrets that were generated. */
+  readonly generated: readonly string[]
+  /** The value of each required secret as written in `.env`. */
+  readonly secrets: Readonly<Record<string, string>>
+}
+
+/**
+ * Reads the required secrets from dotenv text.
+ *
+ * @param content - The `.env` content.
+ * @returns Each required secret that has a value, keyed by name.
+ */
+export function readLocalSecrets(content: string): Record<string, string> {
+  const lines = content.split('\n')
+  const secrets: Record<string, string> = {}
+  for (const name of requiredLocalSecretNames) {
+    const value = findAssignment(lines, name)?.value
+    if (value) secrets[name] = value
+  }
+  return secrets
+}
+
+/**
  * Creates or completes the root `.env` and the `.floci/generated` directory for local development.
  *
  * The `.env` file is written owner-only (0600). A missing generated directory is created writable for the
  * Floci container user with the sticky bit set; it holds no secrets. An existing directory is left as is.
  *
  * @param repositoryRoot - The repository root directory.
- * @returns The generated secret names.
+ * @returns The generated secret names and the secret values now in `.env`.
  */
-export function setupLocalEnvironment(repositoryRoot: string): readonly string[] {
+export function setupLocalEnvironment(repositoryRoot: string): LocalEnvironmentSetup {
   const envPath = join(repositoryRoot, '.env')
   const template = readFileSync(join(repositoryRoot, '.env.example'), 'utf8')
   const existing = existsSync(envPath) ? readFileSync(envPath, 'utf8') : undefined
@@ -151,12 +178,12 @@ export function setupLocalEnvironment(repositoryRoot: string): readonly string[]
     // The sticky bit stops other host users from replacing files that Floci wrote.
     chmodSync(generatedDirectory, 0o1777)
   }
-  return plan.generated
+  return { generated: plan.generated, secrets: readLocalSecrets(plan.content ?? existing ?? '') }
 }
 
 if (import.meta.main) {
   try {
-    const generated = setupLocalEnvironment(resolve(import.meta.dir, '..'))
+    const { generated } = setupLocalEnvironment(resolve(import.meta.dir, '..'))
     console.log(
       generated.length > 0
         ? `.env: generated ${generated.join(', ')}.`

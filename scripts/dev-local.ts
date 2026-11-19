@@ -132,8 +132,13 @@ function startFloci(): boolean {
  * @returns The exit code: the first process's non-zero code, or 0 after a normal stop.
  */
 async function main(): Promise<number> {
-  const generated = setupLocalEnvironment(repositoryRoot)
+  const { generated, secrets } = setupLocalEnvironment(repositoryRoot)
   if (generated.length > 0) console.log(`.env: generated ${generated.join(', ')}.`)
+  // Bun loaded `.env` into this process before setup ran, so an empty secret it inherited would
+  // override the generated value in Docker Compose and the child processes. Pass the file values instead.
+  for (const [name, value] of Object.entries(secrets)) {
+    if (!process.env[name]) process.env[name] = value
+  }
   if (!startFloci()) return 1
 
   const running = devProcesses.map(startDevProcess)
