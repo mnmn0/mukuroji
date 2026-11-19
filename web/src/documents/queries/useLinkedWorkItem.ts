@@ -49,7 +49,9 @@ export function useLinkedWorkItem(
     (parsed === undefined || isUnavailableWorkItemError(error))
   return {
     hasError: error !== undefined && !isUnavailable,
-    issue: data?.issue,
+    // SWR keeps earlier data after a failed revalidation; a target that is now
+    // forbidden or deleted must not keep showing its cached title.
+    issue: isUnavailable ? undefined : data?.issue,
     isUnavailable,
     retry: () => mutate(),
   }

@@ -49,6 +49,9 @@ function describeWorkItemCard(
   linked: ReturnType<typeof useLinkedWorkItem>,
   t: (key: MessageKey) => string,
 ): string {
+  if (linked.isUnavailable && workItemId) {
+    return t('documents.links.unavailable')
+  }
   if (linked.issue) {
     const title = linked.issue.key
       ? `${linked.issue.key} ${linked.issue.title}`
@@ -57,9 +60,6 @@ function describeWorkItemCard(
   }
   if (linked.hasError) {
     return `${t('documents.links.loadError')} · ${workItemId}`
-  }
-  if (linked.isUnavailable && workItemId) {
-    return t('documents.links.unavailable')
   }
   return workItemId || t('documents.whiteboard.work-item')
 }
