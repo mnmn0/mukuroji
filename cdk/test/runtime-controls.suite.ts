@@ -66,6 +66,10 @@ const fileStorageInfrastructureFunctionIds = new Set([
   'FileBucketIncarnationMarkerFunctionBCDA95D8',
 ]);
 
+const bootstrapInfrastructureFunctionIds = new Set([
+  'CognitoClientContractFunction2E0ABB34',
+]);
+
 const observabilityInfrastructureFunctionIds = new Set([
   'AiAssistanceObservabilityFunction304A2391',
 ]);
@@ -608,6 +612,7 @@ test('binds exact runtime-control settings through API config and nineteen direc
       return runtimeControlPlaneFunctionIds.has(logicalId) ||
         restoreDrillFunctionIds.has(logicalId) ||
         fileStorageInfrastructureFunctionIds.has(logicalId) ||
+        bootstrapInfrastructureFunctionIds.has(logicalId) ||
         observabilityInfrastructureFunctionIds.has(logicalId) ||
         logicalId.startsWith('AWS679f53fac002430cb0da5b7982bd2287') ||
         (
