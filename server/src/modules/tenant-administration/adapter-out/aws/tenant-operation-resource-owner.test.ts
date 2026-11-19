@@ -976,6 +976,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         targetIndex: 11,
         phase: 'snapshot',
         processedCount: 0,
+        snapshotRunId: 'a'.repeat(32),
       },
     }
 
