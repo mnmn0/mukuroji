@@ -28,3 +28,4 @@
 | 番号 | タイトル | 状態 |
 | --- | --- | --- |
 | [0001](0001-record-architecture-decisions.md) | 設計判断を ADR として記録する | 採用 |
+| [0003](0003-bind-connector-oauth-callback-to-initiator.md) | Connector の OAuth callback を、flow を開始した本人の認証済み session で完了する | 提案 |
