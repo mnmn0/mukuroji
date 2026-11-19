@@ -13,8 +13,8 @@ export type EmailRecipientLookup =
     kind: 'missing' | 'unverified'
   }
 
-/** Reads the recipient's current verified Email address; transient failures throw. */
-export type EmailRecipientReader = (delivery: ChannelDelivery) => Promise<EmailRecipientLookup>
+/** Reads the recipient's current verified Email address within the deadline; transient failures throw. */
+export type EmailRecipientReader = (delivery: ChannelDelivery, signal: AbortSignal) => Promise<EmailRecipientLookup>
 
 /** One plain-text message handed to the Email provider. */
 export type EmailMessage = {
@@ -28,8 +28,8 @@ export type EmailMessage = {
   text: string
 }
 
-/** Provider boundary; rejects with the provider's named error on failure. */
-export type EmailTransport = (message: EmailMessage) => Promise<void>
+/** Provider boundary bound to the deadline; rejects with the provider's named error on failure. */
+export type EmailTransport = (message: EmailMessage, signal: AbortSignal) => Promise<void>
 
 /** Deploy-time configuration and ports for the Email sender. */
 export type EmailNotificationSenderOptions = {
@@ -41,7 +41,16 @@ export type EmailNotificationSenderOptions = {
   readRecipient: EmailRecipientReader
   /** Provider send operation. */
   sendEmail: EmailTransport
+  /**
+   * Deadline for the whole lookup and send, in milliseconds. It stays well inside the 60-second
+   * lease renewed just before sending, so a slow lookup can never send after another worker
+   * reclaims the notification.
+   */
+  deadlineMs?: number
 }
+
+/** Default deadline for lookup and send, half of the renewed delivery lease. */
+const EMAIL_SEND_DEADLINE_MS = 30_000
 
 /** Provider errors that a later attempt can fix without operator action. */
 const RETRYABLE_PROVIDER_ERRORS = new Set([
@@ -62,12 +71,15 @@ const PERMANENT_PROVIDER_ERRORS = new Set([
  */
 export function createEmailNotificationSender(options: EmailNotificationSenderOptions) {
   return async (delivery: ChannelDelivery): Promise<ChannelSendResult> => {
+    const signal = AbortSignal.timeout(options.deadlineMs ?? EMAIL_SEND_DEADLINE_MS)
     let recipient: EmailRecipientLookup
     try {
-      recipient = await options.readRecipient(delivery)
+      recipient = await options.readRecipient(delivery, signal)
     } catch {
       return { succeeded: false, retryable: true, code: 'EmailRecipientUnavailable' }
     }
+    // A lookup that outlived the deadline never sends; the lease may already belong to a newer claim.
+    if (signal.aborted) return { succeeded: false, retryable: true, code: 'EmailRecipientUnavailable' }
     if (recipient.kind === 'missing') return { succeeded: false, retryable: false, suppressed: true, code: 'EmailRecipientMissing' }
     const address = recipient.kind === 'verified' ? recipient.address.trim() : ''
     if (!isDeliverableAddress(address)) {
@@ -77,7 +89,7 @@ export function createEmailNotificationSender(options: EmailNotificationSenderOp
       await options.sendEmail({
         from: options.sender, to: address,
         ...renderEmailNotification(delivery, options.appOrigin),
-      })
+      }, signal)
       return { succeeded: true, retryable: false }
     } catch (error) {
       const name = error instanceof Error ? error.name : ''

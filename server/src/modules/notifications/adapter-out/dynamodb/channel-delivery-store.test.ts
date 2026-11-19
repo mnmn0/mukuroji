@@ -50,6 +50,15 @@ describe('Email DynamoDB delivery queue', () => {
     })
     for (const update of updates) expect(String(update.input.UpdateExpression)).not.toContain('slack')
   })
+  test('waits while Slack holds an unexpired lease so neither channel cancels the other', async () => {
+    const f = fixture()
+    const delivery = (await f.store.listDue(shard, now, 2)).deliveries[0]!
+    await f.store.claim(delivery, 'lease-1', new Date(now.getTime() + 60_000), now)
+    const claim = f.commands.find((command) => command instanceof UpdateCommand)
+    expect(claim?.input.ConditionExpression).toContain('(attribute_not_exists(slackLeaseToken) OR slackNextAttemptAt <= :now)')
+    expect(claim?.input.ConditionExpression).not.toContain('emailLeaseToken) OR')
+    expect(claim?.input.ExpressionAttributeValues?.[':now']).toBe(now.toISOString())
+  })
   test('rejects Email queue rows that no longer plan Email delivery', async () => {
     const f = fixture({ ...row, deliveryChannels: ['inApp'] })
     await expect(Promise.resolve(f.store.listDue(shard, now, 2))).resolves.toEqual({ deliveries: [], invalidCount: 1 })

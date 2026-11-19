@@ -51,6 +51,19 @@ describe('Email notification sender', () => {
     expect(await sender({ kind: 'verified', address: 'a@b.test, c@d.test' }).send(delivery)).toMatchObject({ suppressed: true })
     expect(await sender(new Error('Cognito down')).send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'EmailRecipientUnavailable' })
   })
+  test('never sends after a recipient lookup outlives the deadline', async () => {
+    const messages: EmailMessage[] = []
+    const send = createEmailNotificationSender({
+      sender: 'notify@example.test', appOrigin: 'https://app.example.test', deadlineMs: 5,
+      readRecipient: async () => {
+        await Bun.sleep(30)
+        return { kind: 'verified', address: 'member@example.test' }
+      },
+      sendEmail: async (message, signal) => { signal.throwIfAborted(); messages.push(message) },
+    })
+    expect(await send(delivery)).toEqual({ succeeded: false, retryable: true, code: 'EmailRecipientUnavailable' })
+    expect(messages).toEqual([])
+  })
   test('classifies provider errors without exposing their messages', async () => {
     const verified: EmailRecipientLookup = { kind: 'verified', address: 'member@example.test' }
     expect(await sender(verified, named('MessageRejected')).send(delivery)).toEqual({ succeeded: false, retryable: false, code: 'EmailDeliveryRejected' })

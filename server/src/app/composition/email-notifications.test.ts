@@ -21,8 +21,9 @@ function reader(member: Record<string, unknown> | undefined, user: Record<string
     { send: async () => ({ Item: member, $metadata: {} }) },
     'workspace-access', 'pool-1',
     {
-      send: async (command: unknown) => {
+      send: async (command: unknown, options?: unknown) => {
         if (!(command instanceof AdminGetUserCommand)) throw new Error('Unexpected command')
+        if (typeof options !== 'object' || options === null || !('abortSignal' in options)) throw new Error('Cognito lookup must carry the delivery deadline')
         usernames.push(command.input.Username)
         if (user instanceof Error) throw user
         return { ...user, $metadata: {} }
@@ -51,12 +52,12 @@ describe('Email notification composition', () => {
   test('reads the verified Cognito address of the active member by their Cognito username', async () => {
     const attributes = [{ Name: 'email', Value: 'member@example.test' }, { Name: 'email_verified', Value: 'true' }]
     const f = reader({ status: 'active', username: 'cognito-user' }, { Enabled: true, UserAttributes: attributes })
-    expect(await f.read(delivery)).toEqual({ kind: 'verified', address: 'member@example.test' })
+    expect(await f.read(delivery, AbortSignal.timeout(5_000))).toEqual({ kind: 'verified', address: 'member@example.test' })
     expect(f.usernames).toEqual(['cognito-user'])
-    expect(await reader({ status: 'active' }, { UserAttributes: [attributes[0]] }).read(delivery)).toEqual({ kind: 'unverified' })
-    expect(await reader({ status: 'active' }, { Enabled: false, UserAttributes: attributes }).read(delivery)).toEqual({ kind: 'missing' })
-    expect(await reader({ status: 'removed' }, { UserAttributes: attributes }).read(delivery)).toEqual({ kind: 'missing' })
-    expect(await reader({ status: 'active' }, Object.assign(new Error('gone'), { name: 'UserNotFoundException' })).read(delivery)).toEqual({ kind: 'missing' })
-    await expect(reader({ status: 'active' }, new Error('Cognito down')).read(delivery)).rejects.toThrow('Cognito down')
+    expect(await reader({ status: 'active' }, { UserAttributes: [attributes[0]] }).read(delivery, AbortSignal.timeout(5_000))).toEqual({ kind: 'unverified' })
+    expect(await reader({ status: 'active' }, { Enabled: false, UserAttributes: attributes }).read(delivery, AbortSignal.timeout(5_000))).toEqual({ kind: 'missing' })
+    expect(await reader({ status: 'removed' }, { UserAttributes: attributes }).read(delivery, AbortSignal.timeout(5_000))).toEqual({ kind: 'missing' })
+    expect(await reader({ status: 'active' }, Object.assign(new Error('gone'), { name: 'UserNotFoundException' })).read(delivery, AbortSignal.timeout(5_000))).toEqual({ kind: 'missing' })
+    await expect(reader({ status: 'active' }, new Error('Cognito down')).read(delivery, AbortSignal.timeout(5_000))).rejects.toThrow('Cognito down')
   })
 })

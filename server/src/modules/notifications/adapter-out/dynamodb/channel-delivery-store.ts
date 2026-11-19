@@ -1,6 +1,6 @@
 import { GetCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb'
 import type { ChannelDelivery, ChannelDeliveryBatch, ChannelDeliveryStore } from '../../application/channel-delivery'
-import { channelDeliveryShard, channelFailedDeliveryShard, type ExternalDeliveryChannel } from '../../domain/channel-delivery'
+import { EXTERNAL_DELIVERY_CHANNELS, channelDeliveryShard, channelFailedDeliveryShard, type ExternalDeliveryChannel } from '../../domain/channel-delivery'
 import { NOTIFICATION_PREFERENCES_KEY, parseStoredNotificationPreferences, toNotificationItem } from '../../notifications'
 
 /** Minimal DynamoDB command boundary used by the delivery queue. */
@@ -138,18 +138,24 @@ export class DynamoDbChannelDeliveryStore implements ChannelDeliveryStore {
     }
   }
 
-  /** Claims only the revision and due time that were read. */
-  async claim(delivery: ChannelDelivery, token: string, leaseUntil: Date): Promise<boolean> {
+  /**
+   * Claims only the revision and due time that were read, and only while no other channel holds an
+   * unexpired lease on the row, so two channels never cancel each other's final version fence.
+   */
+  async claim(delivery: ChannelDelivery, token: string, leaseUntil: Date, now: Date = new Date()): Promise<boolean> {
     const names = this.#names
+    const otherLeases = EXTERNAL_DELIVERY_CHANNELS.filter((channel) => channel !== names.channel).map(channelAttributes)
+      .map((other) => ` AND (attribute_not_exists(${other.lease}) OR ${other.next} <= :now)`).join('')
     try {
       await this.#client.send(new UpdateCommand({
         TableName: this.#tableName, Key: key(delivery),
-        ConditionExpression: `#version = :version AND ${names.next} = :due AND attribute_exists(${names.shard})`,
+        ConditionExpression: `#version = :version AND ${names.next} = :due AND attribute_exists(${names.shard})${otherLeases}`,
         UpdateExpression: `SET ${names.lease} = :token, ${names.next} = :lease, ${names.status} = :sending ADD #version :one, ${names.attempts} :one`,
         ExpressionAttributeNames: { '#version': 'version' },
         ExpressionAttributeValues: {
           ':version': delivery.version, ':due': delivery.nextAttemptAt, ':token': token,
           ':lease': leaseUntil.toISOString(), ':sending': 'sending', ':one': 1,
+          ...(otherLeases ? { ':now': now.toISOString() } : {}),
         },
       }))
       return true

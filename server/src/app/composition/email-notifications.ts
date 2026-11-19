@@ -40,26 +40,26 @@ export function parseEmailAppOrigin(value: string | undefined): string {
  * @param workspaceAccessTableName - Workspace membership table.
  * @param userPoolId - Cognito user pool.
  * @param cognito - Cognito client.
- * @returns Recipient reader; transient failures propagate for retry.
+ * @returns Recipient reader bound to the caller's deadline; transient failures propagate for retry.
  */
 export function createCognitoEmailRecipientReader(
   documentClient: Pick<DynamoDBDocumentClient, 'send'>,
   workspaceAccessTableName: string,
   userPoolId: string,
   cognito: Pick<CognitoIdentityProviderClient, 'send'>,
-): (delivery: ChannelDelivery) => Promise<EmailRecipientLookup> {
-  return async (delivery) => {
+): (delivery: ChannelDelivery, signal: AbortSignal) => Promise<EmailRecipientLookup> {
+  return async (delivery, signal) => {
     const member = (await documentClient.send(new GetCommand({
       TableName: workspaceAccessTableName, ConsistentRead: true,
       Key: { workspaceId: delivery.workspaceId, recordKey: `MEMBER#${delivery.memberKey}` },
-    }))).Item
+    }), { abortSignal: signal })).Item
     if (!member || member.status !== 'active') return { kind: 'missing' }
     const username = [member.username, member.email, delivery.memberKey]
       .find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim()
     if (!username) return { kind: 'missing' }
     let attributes: Array<{ Name?: string, Value?: string }>
     try {
-      const user = await cognito.send(new AdminGetUserCommand({ UserPoolId: userPoolId, Username: username }))
+      const user = await cognito.send(new AdminGetUserCommand({ UserPoolId: userPoolId, Username: username }), { abortSignal: signal })
       if (user.Enabled === false) return { kind: 'missing' }
       attributes = user.UserAttributes ?? []
     } catch (error) {
@@ -98,7 +98,7 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
   const send = createEmailNotificationSender({
     sender, appOrigin,
     readRecipient: createCognitoEmailRecipientReader(documentClient, workspaceAccessTableName, userPoolId, new CognitoIdentityProviderClient({ region })),
-    async sendEmail(message) {
+    async sendEmail(message, signal) {
       await ses.send(new SendEmailCommand({
         FromEmailAddress: message.from,
         Destination: { ToAddresses: [message.to] },
@@ -106,7 +106,7 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
           Subject: { Data: message.subject, Charset: 'UTF-8' },
           Body: { Text: { Data: message.text, Charset: 'UTF-8' } },
         } },
-      }), { abortSignal: AbortSignal.timeout(10_000) })
+      }), { abortSignal: signal })
     },
   })
   return () => deliverDueEmailNotifications({

@@ -84,8 +84,12 @@ export type ChannelDeliveryTelemetry = {
 export interface ChannelDeliveryStore {
   /** Reads a bounded page of due candidates and rechecks canonical rows. */
   listDue(shard: string, now: Date, limit: number): Promise<ChannelDeliveryBatch>
-  /** Claims an unchanged row until the supplied lease expiry. */
-  claim(delivery: ChannelDelivery, token: string, leaseUntil: Date): Promise<boolean>
+  /**
+   * Claims an unchanged row until the supplied lease expiry. The claim also waits while another
+   * channel holds an unexpired lease on the same row, because every delivery update advances the
+   * shared row version that each channel's final fence checks.
+   */
+  claim(delivery: ChannelDelivery, token: string, leaseUntil: Date, now?: Date): Promise<boolean>
   /** Renews an unexpired claim immediately before the external side effect. */
   renew(delivery: ChannelDelivery, token: string, now: Date): Promise<boolean>
   /** Releases an owned, unsent claim without consuming an attempt. */
@@ -154,7 +158,7 @@ export async function deliverDueChannelNotifications(policy: ChannelDeliveryPoli
       if (dependencies.now().getTime() >= deadline) break
       const token = dependencies.createToken()
       try {
-        if (!await dependencies.store.claim(delivery, token, new Date(dependencies.now().getTime() + 60_000))) continue
+        if (!await dependencies.store.claim(delivery, token, new Date(dependencies.now().getTime() + 60_000), dependencies.now())) continue
       } catch {
         // A lost claim response may already own a lease; leave it for expiry and continue other recipients.
         failed = true

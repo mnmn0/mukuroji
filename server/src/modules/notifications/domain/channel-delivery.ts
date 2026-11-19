@@ -1,6 +1,9 @@
 /** External channels that drain a durable per-notification delivery queue. */
 export type ExternalDeliveryChannel = 'slack' | 'email'
 
+/** Every external channel whose queue state can live on the same notification row. */
+export const EXTERNAL_DELIVERY_CHANNELS: readonly ExternalDeliveryChannel[] = Object.freeze(['slack', 'email'])
+
 /** Number of independent partitions in each channel's delivery due index. */
 export const CHANNEL_DELIVERY_SHARDS = 16
 
