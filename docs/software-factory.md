@@ -377,7 +377,8 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
 - 読み取りは上限付きで、上限で止まったときは flag で知らせる: 終了 Run の index は failed とそれ以外を
   それぞれ新しい順に最大 1,000 件（`finishedRunsHasMore`）、履歴を読む Work Item は最大 200 件
   （`workItemsHasMore`）、Work Item ごとの Run は最大 100 件、report は最大 300 件。直前の Run や report が
-  読めなかった Run は件数と成功率には入れ、手戻りと滞在時間からは外す（`historyHasMore`）。
+  読めなかった Run は件数と成功率には入れ、手戻りと滞在時間からは外す。Run が 100 件を超える
+  Work Item で読めなかった古い Run が期間内に終わっている可能性があるときも知らせる（`historyHasMore`）。
 - token / 費用の報告（`finish_run` / `report_progress` の `usage`）、Analytics engine の metric・widget・snapshot
   への統合、Work Item / Project 別の集計は後続とする。
 

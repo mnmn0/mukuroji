@@ -752,8 +752,9 @@ export type TeamFactoryAnalyticsResponse = FactoryAnalyticsRunSummary & {
   /** Whether Work Items beyond {@link FACTORY_ANALYTICS_MAX_WORK_ITEMS} were left unread. */
   workItemsHasMore: boolean
   /**
-   * Whether some Work Item had more runs or reports than one response reads. Rework and dwell time
-   * leave out the runs whose history was cut.
+   * Whether some Work Item had more runs or reports than one response reads. Older runs of that Work
+   * Item may be missing from the counts, and rework and dwell time leave out the runs whose history
+   * was cut.
    */
   historyHasMore: boolean
 }

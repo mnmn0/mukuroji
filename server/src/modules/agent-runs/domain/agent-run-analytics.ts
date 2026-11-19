@@ -50,7 +50,7 @@ export type FactoryAnalyticsResult = FactoryAnalyticsRunSummary & {
   stageLeadTimes: FactoryAnalyticsStageLeadTime[]
   /** Outcome rates per runtime with at least one finished run, in runtime order. */
   runtimes: FactoryAnalyticsRuntimeSummary[]
-  /** Whether a run's rework or dwell time was left out because its history was cut. */
+  /** Whether runs, or a run's rework or dwell time, were left out because a history was cut. */
   historyHasMore: boolean
 }
 
@@ -194,7 +194,8 @@ function measureRunDwell(
  * rework rates, interventions, and the median hours runs spent in each station, overall and per
  * runtime. Rework compares a run with the previous run of its Work Item; dwell time needs every report
  * of the run. A run whose previous run or reports were not read is still counted, but is left out of
- * rework or dwell time, and the result says so.
+ * rework or dwell time, and the result says so. It also says so when a cut run history may hold older
+ * runs that finished in the period.
  *
  * @param input - Period and histories.
  * @returns Factory analytics of the period.
@@ -206,6 +207,9 @@ export function calculateFactoryAnalytics(input: FactoryAnalyticsInput): Factory
 
   for (const history of input.histories) {
     const runs = [...history.runs].sort(compareRunStart)
+    const oldest = runs[0]
+    // Runs older than the oldest one read may still have finished in the period and are not counted.
+    if (!history.runsComplete && oldest !== undefined && Date.parse(oldest.startedAt) >= input.from) historyHasMore = true
     const reportsByRun = new Map<string, AgentRunReport[]>()
     for (const report of history.reports) {
       const reports = reportsByRun.get(report.runId) ?? []

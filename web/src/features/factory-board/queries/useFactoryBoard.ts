@@ -76,7 +76,7 @@ export function useFactoryAnalytics(accessToken: string | undefined, teamId: str
       getTeamFactoryAnalytics(token, currentTeamId, createFactoryAnalyticsPeriod(currentDays, new Date())),
     {
       dedupingInterval: 60_000,
-      keepPreviousData: true,
+      // Another period's numbers are never shown under the newly selected period.
       revalidateOnFocus: false,
       shouldRetryOnError: false,
     },

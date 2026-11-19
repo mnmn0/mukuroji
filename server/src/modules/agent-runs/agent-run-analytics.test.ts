@@ -115,6 +115,17 @@ describe('calculateFactoryAnalytics', () => {
     expect(result.stageLeadTimes[0]).toEqual({ stage: 'build', medianHours: 1, sampleSize: 2 })
   })
 
+  test('says when a cut run history may hold older runs that finished in the period', () => {
+    const recent = finishedRun('task-1', 3, 2, 'completed')
+    const older = finishedRun('task-1', 6, 5, 'completed')
+    const result = calculateFactoryAnalytics({ ...period, histories: [{ runs: [recent, older], runsComplete: false, reports: [] }] })
+    // The previous run of `recent` was read, but runs before `older` were not.
+    expect(result).toMatchObject({ finishedRuns: 2, reworkRuns: 1, historyHasMore: true })
+    const beforePeriod = finishedRun('task-1', 30, 29, 'completed')
+    const complete = calculateFactoryAnalytics({ ...period, histories: [{ runs: [recent, beforePeriod], runsComplete: false, reports: [] }] })
+    expect(complete).toMatchObject({ finishedRuns: 1, reworkRuns: 1, historyHasMore: false })
+  })
+
   test('counts only runs that finished inside the period', () => {
     const before = finishedRun('task-1', 30, 25, 'completed')
     const after = finishedRun('task-2', 1, -1, 'completed')
