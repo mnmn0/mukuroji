@@ -34,6 +34,12 @@ import {
 } from '../auth/api'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { createTeamIssue } from '../issues/api/workItems'
+import { getWorkItemConfiguration } from '../work-items/api/configuration'
+import {
+  resolveCreatableWorkItemTypeId,
+  resolveCreateWorkflowStatuses,
+  resolveWorkItemTypes,
+} from '../work-items/model/workItemDisplay'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { signOutWithPushCleanup } from '../notifications/mutations/usePushDevice'
 import {
@@ -491,6 +497,12 @@ export function DocumentPage() {
   const [activeAnchorId, setActiveAnchorId] = useState<string>()
   const activeAnchorRef = useRef(activeAnchorId)
   const [mutationRunner] = useState(createMutationRequestRunner)
+  const builtInTemplateContentRef = useRef<{
+    /** Template choice and substituted values the content was built from. */
+    fingerprint: string
+    /** Title and blocks sent with the create request. */
+    content: ReturnType<typeof buildBuiltInDocumentTemplate>
+  } | undefined>(undefined)
   const pendingPublicShareCreateRef = useRef<
     PendingPublicShareCreateRequest | undefined
   >(undefined)
@@ -927,16 +939,32 @@ export function DocumentPage() {
     options: BuiltInTemplateCreateOptions,
   ) => {
     if (!accessToken) return
-    const content = buildBuiltInDocumentTemplate(
+    const date = formatLocalCalendarDate(new Date())
+    const fingerprint = JSON.stringify([
       key,
       locale,
-      {
-        date: formatLocalCalendarDate(new Date()),
-        participants: options.participants,
-        projectName: options.projectName,
-      },
-      createDocumentClientId,
-    )
+      date,
+      options.projectId ?? '',
+      options.projectName ?? '',
+      options.participants,
+    ])
+    const retained = builtInTemplateContentRef.current
+    // A retry after a lost response must resend the same blocks, because the
+    // server fingerprints the create body and the block IDs are random.
+    const content =
+      retained?.fingerprint === fingerprint
+        ? retained.content
+        : buildBuiltInDocumentTemplate(
+            key,
+            locale,
+            {
+              date,
+              participants: options.participants,
+              projectName: options.projectName,
+            },
+            createDocumentClientId,
+          )
+    builtInTemplateContentRef.current = { content, fingerprint }
     const input: CreateDocumentInput = {
       blocks: content.blocks,
       kind: 'page',
@@ -947,14 +975,10 @@ export function DocumentPage() {
     }
     const created = await mutationRunner.run(
       `document:create:built-in:${key}`,
-      JSON.stringify([
-        key,
-        options.projectId ?? '',
-        content.title,
-        options.participants,
-      ]),
+      fingerprint,
       (context) => createDocument(accessToken, input, context),
     )
+    builtInTemplateContentRef.current = undefined
     await mutateDocuments()
     navigate(createDocumentPath(created.id))
   }
@@ -969,6 +993,19 @@ export function DocumentPage() {
     if (!accessToken) {
       throw new Error(t('documents.checklistWorkItem.error'))
     }
+    // Like the quick create form, capture into a backlog status when the
+    // Team has one, so required custom fields can be filled in later.
+    const configuration = await getWorkItemConfiguration(accessToken, {
+      kind: 'team',
+      teamId: input.teamId,
+    }).catch(() => undefined)
+    const workItemTypeId = configuration
+      ? resolveCreatableWorkItemTypeId(resolveWorkItemTypes(configuration))
+      : undefined
+    const backlogStatus = resolveCreateWorkflowStatuses(
+      configuration,
+      workItemTypeId,
+    ).find((status) => status.category === 'backlog')
     const request = {
       assignedProjectId: input.projectId,
       assigneeUserId: input.assigneeUserId,
@@ -977,6 +1014,10 @@ export function DocumentPage() {
         ? createDefaultDueDateWorkItemSchedule(input.dueDate)
         : createDefaultUnscheduledWorkItemSchedule(),
       title: input.title,
+      ...(workItemTypeId ? { workItemTypeId } : {}),
+      ...(backlogStatus
+        ? { quickCapture: true, workflowStatusId: backlogStatus.id }
+        : {}),
     }
     const issue = await mutationRunner.run(
       `issue:create:document-checklist:${input.teamId}`,

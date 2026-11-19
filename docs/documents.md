@@ -167,5 +167,7 @@ Project scope にページを作ります。
 Work Item を作り、その checklist block を起点にした Work Item relation を
 `checklist-item:<blockId>:<itemId>` の ID で保存します。作成済みの項目には「Work Item を開く」が
 出て、Work Item 側の関連ドキュメントからは元のページへ戻れます。Work Item の作成後にリンクだけが
-失敗した場合は、同じ画面で再実行するとリンクだけをやり直します。
+失敗した場合は、同じ画面で再実行するとリンクだけをやり直します。Team に backlog 区分の status があれば、
+Work Item はクイック作成と同じく backlog に仮保存するので、必須カスタムフィールドは後から入力できます。
+リンク済みの項目は編集権限のない閲覧者にも「Work Item を開く」として表示します。
 

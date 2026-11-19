@@ -408,7 +408,17 @@ function BlockBody({
   t: (key: MessageKey) => string
 }) {
   if (!editable) {
-    return <ReadOnlyBlock block={block} t={t} />
+    return (
+      <ReadOnlyBlock
+        block={block}
+        checklistWorkItems={
+          checklistWorkItems
+            ? { onOpen: checklistWorkItems.onOpen, relations: checklistWorkItems.relations }
+            : undefined
+        }
+        t={t}
+      />
+    )
   }
 
   if (block.type === 'heading') {
@@ -909,9 +919,12 @@ function DiagramBlockEditor({
 
 function ReadOnlyBlock({
   block,
+  checklistWorkItems,
   t,
 }: {
   block: DocumentBlock
+  /** Open actions for checklist items with a Work Item; creation is never offered here. */
+  checklistWorkItems?: ChecklistWorkItemControls
   t: (key: MessageKey) => string
 }) {
   if (block.type === 'heading') {
@@ -977,6 +990,16 @@ function ReadOnlyBlock({
             <span className={item.checked ? 'text-[var(--workbench-muted)] line-through' : ''}>
               {item.text}
             </span>
+            <ChecklistItemWorkItemAction
+              blockId={block.id}
+              controls={
+                checklistWorkItems
+                  ? { onOpen: checklistWorkItems.onOpen, relations: checklistWorkItems.relations }
+                  : undefined
+              }
+              item={item}
+              t={t}
+            />
           </li>
         ))}
       </ul>

@@ -149,4 +149,29 @@ describe('checklist items as Work Items', () => {
     expect(html.match(/Make Work Item/g)?.length).toBe(1)
     expect(html.match(/Open Work Item/g)?.length).toBe(1)
   })
+
+  test('shows linked Work Items to read-only viewers without offering creation', () => {
+    if (documentRecordFixture.kind !== 'page') {
+      throw new Error('Expected a page fixture.')
+    }
+    const html = renderToStaticMarkup(
+      <DocumentEditor
+        checklistWorkItems={{
+          onCreate: () => undefined,
+          onOpen: () => undefined,
+          relations: [relation],
+        }}
+        document={{ ...documentRecordFixture, blocks: [block], relations: [relation] }}
+        editable={false}
+        saveStatus="idle"
+        t={createTranslator('en')}
+        onDeleteBlock={() => undefined}
+        onMoveBlock={() => undefined}
+        onUpsertBlock={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('Open Work Item')
+    expect(html).not.toContain('Make Work Item')
+  })
 })
