@@ -90,11 +90,20 @@ export function ChecklistWorkItemDialog({
   const dialogRef = useRef<HTMLElement>(null)
   const fieldId = useId()
   const selectedOption = projectOptions[optionIndex]
-  const { data: memberResult } = useActiveProjectMembers(
+  const {
+    data: memberResult,
+    error: memberError,
+    isLoading: isMembersLoading,
+    mutate: reloadMembers,
+  } = useActiveProjectMembers(
     accessToken,
     selectedOption ? [selectedOption.projectId] : [],
   )
   const members = memberResult?.members ?? []
+  // The aggregate query resolves with per-Project errors instead of
+  // rejecting, so both shapes mean the assignee list could not be read.
+  const hasMemberLoadError =
+    memberError !== undefined || (memberResult?.errors.length ?? 0) > 0
   const assigneeUserId =
     selectedAssignee !== undefined &&
     members.some((member) => member.id === selectedAssignee)
@@ -212,7 +221,11 @@ export function ChecklistWorkItemDialog({
                 required
                 value={assigneeUserId}
               >
-                <option value="">{t('documents.checklistWorkItem.chooseAssignee')}</option>
+                <option value="">
+                  {isMembersLoading
+                    ? t('documents.checklistWorkItem.loadingAssignees')
+                    : t('documents.checklistWorkItem.chooseAssignee')}
+                </option>
                 {members.map((member) => (
                   <option key={member.id} value={member.id}>
                     {member.name ?? member.email}
@@ -220,6 +233,21 @@ export function ChecklistWorkItemDialog({
                 ))}
               </select>
             </label>
+            {hasMemberLoadError ? (
+              <div
+                className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-800"
+                role="alert"
+              >
+                <span>{t('documents.checklistWorkItem.assigneesError')}</span>
+                <button
+                  className="workbench-button-secondary min-h-9 px-3 text-xs"
+                  onClick={() => void reloadMembers()}
+                  type="button"
+                >
+                  {t('documents.checklistWorkItem.retryAssignees')}
+                </button>
+              </div>
+            ) : null}
             <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
               {t('documents.checklistWorkItem.dueDate')}
               <input
