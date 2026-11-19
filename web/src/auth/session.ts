@@ -52,7 +52,7 @@ export function getAuthSession() {
   // authenticated fetch refreshes it before the next API request.
   if (entry.session.expiresAt <= Date.now() && !entry.session.refreshToken) {
     entry.storage.removeItem(storageKey)
-    tabAccount = 'signed-out'
+    markTabSignedOut()
     void clearAppBadgeAndNotifyTabs()
     return null
   }
@@ -211,6 +211,7 @@ export function saveAuthSession(session: AuthSession) {
     }
   }
   targetStorage.setItem(storageKey, JSON.stringify(session))
+  window.sessionStorage.removeItem(signedOutStorageKey)
   tabAccount = { accessToken: session.accessToken, remember: session.remember }
 }
 
@@ -234,7 +235,7 @@ export function clearAuthSession() {
   } catch {
     // Nothing more can be removed when storage access fails.
   }
-  tabAccount = 'signed-out'
+  markTabSignedOut()
   // Every sign-out path destroys the session here, so the app-wide unread badge is cleared with it;
   // other tabs that are still signed in republish their own count.
   void clearAppBadgeAndNotifyTabs()
@@ -244,9 +245,25 @@ export function clearAuthSession() {
  * Account this tab has read or signed in to, kept for the life of the page so that pages that
  * mount later read the same account as the workspace shell. `'signed-out'` means this tab's
  * account was signed out or expired: until the next sign-in the tab has no session, so it never
- * switches to, or removes, another account's session.
+ * switches to, or removes, another account's session. The signed-out state is also kept in this
+ * tab's sessionStorage, so a reload of the login page does not adopt another account either.
  */
 let tabAccount: { accessToken: string, remember: boolean } | 'signed-out' | null = null
+
+/** sessionStorage key that marks this tab as signed out until its next sign-in. */
+const signedOutStorageKey = 'mukuroji.auth.signedOut'
+
+/**
+ * Marks this tab as signed out, in memory and in its sessionStorage.
+ */
+function markTabSignedOut() {
+  tabAccount = 'signed-out'
+  try {
+    window.sessionStorage.setItem(signedOutStorageKey, '1')
+  } catch {
+    // The in-memory state still keeps this page signed out when storage refuses the write.
+  }
+}
 
 /**
  * Forgets the account this tab has read. Tests use it to start from a fresh page.
@@ -268,6 +285,9 @@ function findTabSessionEntry(): { session: AuthSession, storage: Storage } | nul
   const entries = [window.sessionStorage, window.localStorage]
     .map((storage) => ({ session: readSession(storage), storage }))
     .filter((entry): entry is { session: AuthSession, storage: Storage } => entry.session !== null)
+  if (tabAccount === null && window.sessionStorage.getItem(signedOutStorageKey) !== null) {
+    tabAccount = 'signed-out'
+  }
   if (tabAccount === 'signed-out') return null
   if (!tabAccount) return entries[0] ?? null
   const account = tabAccount

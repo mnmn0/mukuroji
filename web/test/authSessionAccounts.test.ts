@@ -207,6 +207,34 @@ describe('sessions of different accounts in different tabs', () => {
     expect(stored(localStorage)).toEqual(remembered)
   })
 
+  test('a reload after signing out does not adopt another account remembered on the device', () => {
+    const remembered = session(token('account-a'), true)
+    storeFromAnotherTab(localStorage, remembered)
+    storeFromAnotherTab(sessionStorage, session(token('account-b'), false))
+    getAuthSession()
+    clearAuthSession()
+
+    // A reload starts the page again with this tab's sessionStorage.
+    resetAuthSessionTabAccount()
+
+    expect(getAuthSession()).toBeNull()
+    clearAuthSession()
+    expect(stored(localStorage)).toEqual(remembered)
+  })
+
+  test('a sign-in after signing out and reloading makes the tab use the new session', () => {
+    storeFromAnotherTab(sessionStorage, session(token('account-b'), false))
+    getAuthSession()
+    clearAuthSession()
+    resetAuthSessionTabAccount()
+
+    const remembered = session(token('account-c'), true)
+    saveAuthSession(remembered)
+    resetAuthSessionTabAccount()
+
+    expect(getAuthSession()).toEqual(remembered)
+  })
+
   test('a sign-in after signing out makes the tab use the new session', () => {
     storeFromAnotherTab(sessionStorage, session(token('account-b'), false))
     getAuthSession()
