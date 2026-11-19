@@ -185,11 +185,11 @@ secret は owner-only の root `.env` だけに保持します。Workspace audit
 へ渡し、Enterprise credential/state secret は関連する root package scripts が
 `--env-file=.env` を指定して host process へ明示的に渡します。
 
-同じ ready hook で DynamoDB table `mukuroji-dashboard-local`,
+同じ ready hook で DynamoDB table
 `mukuroji-team-issues-local`, `mukuroji-project-directory-local`,
 `mukuroji-workspace-access-local`, `mukuroji-enterprise-identity-local`,
 `mukuroji-workspace-search-local`, `mukuroji-analytics-local` も作成し、
-ダッシュボード集計、canonical Work Item、
+canonical Work Item、
 サイドバー用チーム/プロジェクト階層、Workspace metadata/member を投入します。
 Analytics table は保存済みレポート、immutable snapshot、定期配信 receipt を保持し、
 `ScheduleDueIndex` で配信対象を取得できる本番同等の key schema を使います。
@@ -291,7 +291,6 @@ Web で各 API がどの環境変数をどの順で参照するかは `web/src/s
 - `COGNITO_SSO_USER_POOL_CLIENT_NAME`: Floci が作る SSO client 名。未指定時は `mukuroji-sso-local`
 - `ENTERPRISE_SSO_STATE_SECRET`: SSO state 署名専用の 32–256 文字 secret
 - `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL_DYNAMODB` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
-- `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
 - `PROJECT_DIRECTORY_TABLE_NAME`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
 - `WORKSPACE_ACCESS_TABLE_NAME`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
 - `WORK_ITEMS_TABLE_NAME`: Work Item を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
@@ -330,7 +329,7 @@ Web で各 API がどの環境変数をどの順で参照するかは `web/src/s
 - `MUKUROJI_REQUEST_TOKEN_HASH_SECRET`: request/reply capability の hash に使う別の 32–256 文字の secret
 - `MUKUROJI_EDGE_ORIGIN_SECRET`: CloudFront が API request に付ける 32–128 文字の secret。一致した request だけ CloudFront が観測した viewer address を rate limit と Enterprise IP policy に使います。環境作成時に生成して secret store に保存し、毎回の deploy で同じ値を渡します。
 
-API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
+API サーバーは `/api/workspace/access`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
 `/api/search`, `/api/saved-views`, `/api/audit/events`,
 `/api/notifications`, `/api/documents`, `/api/automation/rules`, `/api/automation/templates`,
