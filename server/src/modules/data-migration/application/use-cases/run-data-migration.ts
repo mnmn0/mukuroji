@@ -77,6 +77,8 @@ export type DataMigrationRunReport = {
   readonly status: 'completed' | 'paused' | 'failed'
   /** Stable failure code when `status` is `failed`. */
   readonly failureCode?: DataMigrationFailureCode
+  /** Upstream error class name for `UPSTREAM_FAILURE`, when known. */
+  readonly failureDetail?: string
   /** Pages read by this run. */
   readonly pagesRead: number
   /** Counts from this run across partitions; in `dry-run`, `migrated` counts rows that would be replaced. */
@@ -112,6 +114,7 @@ export async function runDataMigration(input: RunDataMigrationInput): Promise<Da
   const state: RunState = { pagesRead: 0, nextWriteAt: 0, partitions: [] }
   let status: DataMigrationRunReport['status'] = 'completed'
   let failureCode: DataMigrationFailureCode | undefined
+  let failureDetail: string | undefined
   try {
     assertRunInput(input)
     const partitionIds = input.rowStore.listPartitions()
@@ -132,6 +135,7 @@ export async function runDataMigration(input: RunDataMigrationInput): Promise<Da
   } catch (error: unknown) {
     status = 'failed'
     failureCode = error instanceof DataMigrationFailure ? error.code : 'UPSTREAM_FAILURE'
+    failureDetail = error instanceof DataMigrationFailure ? error.detail : undefined
   }
   const counters = state.partitions.reduce(
     (total, partition) => addDataMigrationCounters(total, partition.counters),
@@ -146,6 +150,7 @@ export async function runDataMigration(input: RunDataMigrationInput): Promise<Da
     runId: input.runId,
     status,
     ...(failureCode === undefined ? {} : { failureCode }),
+    ...(failureDetail === undefined ? {} : { failureDetail }),
     pagesRead: state.pagesRead,
     counters,
     partitions: state.partitions,

@@ -355,6 +355,7 @@ export async function runDataMigrationCli(
       operation: command.command,
       status: 'error',
       code: error instanceof DataMigrationFailure ? error.code : 'UPSTREAM_FAILURE',
+      ...(error instanceof DataMigrationFailure && error.detail !== undefined ? { detail: error.detail } : {}),
     }))
     return 1
   }

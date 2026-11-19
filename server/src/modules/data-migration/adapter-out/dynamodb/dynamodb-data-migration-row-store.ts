@@ -110,7 +110,7 @@ export function createDynamoDbDataMigrationRowStore(
         return 'replaced'
       } catch (error: unknown) {
         if (isConditionalCheckFailure(error)) return 'condition-failed'
-        throw new DataMigrationFailure('UPSTREAM_FAILURE')
+        throw new DataMigrationFailure('UPSTREAM_FAILURE', error)
       }
     },
   }
@@ -190,8 +190,8 @@ function parseSegment(partitionId: string, totalSegments: number): number {
 async function sendClassified<T>(send: () => Promise<T>): Promise<T> {
   try {
     return await send()
-  } catch {
-    throw new DataMigrationFailure('UPSTREAM_FAILURE')
+  } catch (error: unknown) {
+    throw new DataMigrationFailure('UPSTREAM_FAILURE', error)
   }
 }
 

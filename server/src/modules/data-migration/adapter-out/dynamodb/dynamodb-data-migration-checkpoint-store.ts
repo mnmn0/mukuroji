@@ -60,8 +60,8 @@ export function createDynamoDbDataMigrationCheckpointStore(options: {
             ConsistentRead: true,
             ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
           }))
-        } catch {
-          throw new DataMigrationFailure('UPSTREAM_FAILURE')
+        } catch (error: unknown) {
+          throw new DataMigrationFailure('UPSTREAM_FAILURE', error)
         }
         for (const item of output.Items ?? []) {
           checkpoints.push(parseDataMigrationCheckpoint(item, migrationId))
@@ -94,7 +94,7 @@ export function createDynamoDbDataMigrationCheckpointStore(options: {
         return true
       } catch (error: unknown) {
         if (isConditionalCheckFailure(error)) return false
-        throw new DataMigrationFailure('UPSTREAM_FAILURE')
+        throw new DataMigrationFailure('UPSTREAM_FAILURE', error)
       }
     },
   }
@@ -236,7 +236,7 @@ export async function ensureLocalDataMigrationCheckpointTable(
     return
   } catch (error: unknown) {
     if (error instanceof DataMigrationFailure) throw error
-    if (!isNamedError(error, 'ResourceNotFoundException')) throw new DataMigrationFailure('UPSTREAM_FAILURE')
+    if (!isNamedError(error, 'ResourceNotFoundException')) throw new DataMigrationFailure('UPSTREAM_FAILURE', error)
   }
   try {
     await dynamoDbClient.send(new CreateTableCommand({
@@ -252,7 +252,7 @@ export async function ensureLocalDataMigrationCheckpointTable(
       BillingMode: 'PAY_PER_REQUEST',
     }))
   } catch (error: unknown) {
-    if (!isNamedError(error, 'ResourceInUseException')) throw new DataMigrationFailure('UPSTREAM_FAILURE')
+    if (!isNamedError(error, 'ResourceInUseException')) throw new DataMigrationFailure('UPSTREAM_FAILURE', error)
   }
 }
 

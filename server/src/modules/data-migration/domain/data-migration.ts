@@ -89,20 +89,28 @@ export type DataMigrationFailureCode =
   | 'CURSOR_REPEATED'
   | 'UPSTREAM_FAILURE'
 
+/** Pattern of an SDK error name that may be reported as failure detail. */
+const ERROR_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9]{0,79}$/u
+
 /** Error carrying a stable migration failure code and no row data. */
 export class DataMigrationFailure extends Error {
   /** Stable failure code. */
   readonly code: DataMigrationFailureCode
+  /** Name of the upstream error class, such as `AccessDeniedException`; never its message. */
+  readonly detail?: string
 
   /**
    * Creates a failure with a stable code.
    *
    * @param code - Stable failure code.
+   * @param cause - Upstream error whose class name is kept as detail when it is a plain identifier.
    */
-  constructor(code: DataMigrationFailureCode) {
+  constructor(code: DataMigrationFailureCode, cause?: unknown) {
     super(code)
     this.name = 'DataMigrationFailure'
     this.code = code
+    const causeName = typeof cause === 'object' && cause !== null && 'name' in cause ? cause.name : undefined
+    if (typeof causeName === 'string' && ERROR_NAME_PATTERN.test(causeName)) this.detail = causeName
   }
 }
 

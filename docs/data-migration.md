@@ -163,7 +163,7 @@ local の emulator（Floci）では CLI が初回に table を作ります。AWS
 | `TRANSFORM_INVALID` | transform の結果が契約に合わない |
 | `WRITE_CONFLICT` | 同じ row の置き換えが 3 回続けて条件に負けた |
 | `CURSOR_REPEATED` | page の cursor が進まない |
-| `UPSTREAM_FAILURE` | DynamoDB などの呼び出しに失敗した |
+| `UPSTREAM_FAILURE` | DynamoDB などの呼び出しに失敗した。SDK error の class 名（`AccessDeniedException` など）が分かるときは `failureDetail`（CLI の error 出力では `detail`）に載せる。message は載せない |
 
 ## 新しい schema 変更の PR の確認項目
 

@@ -41,6 +41,8 @@ export type DataMigrationVerificationReport = {
   readonly status: 'pass' | 'fail' | 'incomplete'
   /** Stable failure code when the check could not run. */
   readonly failureCode?: DataMigrationFailureCode
+  /** Upstream error class name for `UPSTREAM_FAILURE`, when known. */
+  readonly failureDetail?: string
   /** Partitions in the plan. */
   readonly partitions: number
   /** Partitions whose checkpoint is completed. */
@@ -127,6 +129,7 @@ export async function verifyDataMigration(
       ...base,
       status: 'fail',
       failureCode: error instanceof DataMigrationFailure ? error.code : 'UPSTREAM_FAILURE',
+      ...(error instanceof DataMigrationFailure && error.detail !== undefined ? { failureDetail: error.detail } : {}),
       partitions,
       completedPartitions,
       ...counts,
