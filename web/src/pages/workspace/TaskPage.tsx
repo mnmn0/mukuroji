@@ -39,6 +39,9 @@ import {
   retryBulkOperation,
   undoBulkOperation,
 } from '../../bulk-operations/api'
+import { applyWorkItemArchive } from '../../bulk-operations/mutations/workItemArchive'
+import { ArchivedWorkItemsPanelContainer } from '../../issues/ui/ArchivedWorkItemsPanelContainer'
+import { useArchivedWorkItemsRefresh } from '../../issues/queries/useArchivedWorkItems'
 import {
   getProjectUsers,
   isActiveProjectAssignmentCandidate,
@@ -279,6 +282,7 @@ export function TaskPage() {
     onToggleProjectQuickAccess,
   } = useWorkspaceRouteContext()
   const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
+  const refreshArchivedWorkItems = useArchivedWorkItemsRefresh()
   const [searchParams, setSearchParams] = useSearchParams()
   const projectId = params.projectId ?? 'refero'
   const selectedTeamId = searchParams.get('teamId') ?? undefined
@@ -1695,6 +1699,29 @@ export function TaskPage() {
     return operation
   }
 
+  /**
+   * Archives or restores one Work Item through a one-item bulk archive operation.
+   *
+   * @param task - Work Item at the revision the viewer saw.
+   * @param archived - True to archive, false to restore.
+   */
+  const handleArchiveTask = async (task: CanonicalWorkItem, archived: boolean) => {
+    if (!accessToken || !workspaceId) {
+      throw new Error(t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'))
+    }
+    requireProjectTaskWriteScope(task)
+    await guardEnterpriseSession(applyWorkItemArchive({
+      accessToken,
+      archived,
+      fallbackErrorMessage: t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'),
+      runner: mutationRequestRunner,
+      target: task,
+      workspaceId,
+    }))
+    await revalidateAfterBulkOperation()
+    await refreshArchivedWorkItems()
+  }
+
   const handleBulkRetry = async (operationId: string, operation?: BulkOperation) => {
     if (!accessToken) {
       throw new Error(t('bulk.error'))
@@ -1981,6 +2008,17 @@ export function TaskPage() {
         testId="project-task-outline"
       />
     ) : null}
+    <ArchivedWorkItemsPanelContainer
+      accessToken={accessToken}
+      canRestore={canMutateProjectTaskTarget}
+      key={projectId}
+      locale={locale}
+      onRestore={canMutateProjectTasks && workspaceId
+        ? (task) => handleArchiveTask(task, false)
+        : undefined}
+      scope={projectId ? { kind: 'project', id: projectId } : undefined}
+      t={t}
+    />
     </>
   )
 
@@ -2113,6 +2151,7 @@ export function TaskPage() {
       planningErrorMessage={planningErrorMessage}
       planningSnapshot={planningSnapshot}
       onUpdateProjectMember={canManageProjectMembers ? handleUpdateProjectMember : undefined}
+      onArchiveTask={canMutateProjectTasks && workspaceId ? handleArchiveTask : undefined}
       onBulkApply={canMutateProjectTasks && workspaceId ? handleBulkApply : undefined}
       onBulkPreview={canMutateProjectTasks && workspaceId ? handleBulkPreview : undefined}
       onBulkRetry={canMutateProjectTasks && workspaceId ? handleBulkRetry : undefined}

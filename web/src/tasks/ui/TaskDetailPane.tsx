@@ -99,6 +99,7 @@ import {
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
 import { TaskActualDatesPanel } from './TaskActualDatesPanel'
+import { WorkItemArchiveButton } from '../../issues/ui/WorkItemArchiveButton'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
 export type TaskDetailAiAssistanceRenderContext = {
@@ -209,6 +210,8 @@ export type TaskDetailPaneProps = {
   onCreateScheduleDependency?: (input: WorkItemDependencyCreateDraft) => void | Promise<void>
   /** Deletes a canonical schedule dependency. */
   onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
+  /** Archives (true) or restores (false) the selected Work Item; hidden when undefined. */
+  onArchiveIssue?: (task: CanonicalWorkItem, archived: boolean) => Promise<void>
   /** Closes the detail pane while keeping the list selection and scroll position. */
   onClose?: () => void
   /** Reports combined Work Item AI operation state to the owning task screen. */
@@ -315,6 +318,7 @@ export function TaskDetailPane({
   onCreateScheduleDependency,
   onAiOperationPendingChange,
   onCommentDraftDirtyChange,
+  onArchiveIssue,
   onClose,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -1576,6 +1580,15 @@ export function TaskDetailPane({
             />
               {resolveWorkItemTypeLabel(issue ?? task, resolvedConfiguration)}
             </span>
+            {onArchiveIssue && issue && !isRetainedDetail ? (
+              <WorkItemArchiveButton
+                archived={issue.archivedAt !== undefined}
+                disabled={isWorkItemMutationPending || isBulkOperationPending}
+                key={`${issue.teamId}:${issue.id}:${issue.revision}`}
+                onArchiveChange={(archived) => onArchiveIssue(issue, archived)}
+                t={t}
+              />
+            ) : null}
             <TaskPriorityBadge priority={issue?.priority ?? task.priority} t={t} />
             {onClose ? (
               <button

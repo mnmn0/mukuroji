@@ -300,4 +300,8 @@ export type TeamIssueScreenProps = {
    * 選択中 Work Item の relation を解除する callback です。
    */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
+  /**
+   * Archives (true) or restores (false) one Work Item from the detail pane.
+   */
+  onArchiveIssue?: (issue: TeamIssue, archived: boolean) => Promise<void>
 }

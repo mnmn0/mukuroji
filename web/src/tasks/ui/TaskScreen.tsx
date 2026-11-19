@@ -514,6 +514,8 @@ export type TaskScreenProps = {
   detailErrorMessage?: string
   /** Changes the Work Item selected by the detail pane. */
   onSelectedIssueChange?: (task: CanonicalWorkItem) => void
+  /** Archives (true) or restores (false) one Work Item from the detail pane. */
+  onArchiveTask?: (task: CanonicalWorkItem, archived: boolean) => Promise<void>
   /** Adds or removes the displayed Project from quick access. */
   onProjectQuickAccessToggle?: () => void
   /** Updates editable fields on the selected Work Item; resolves cancelled when the person declines. */
@@ -673,6 +675,7 @@ export function TaskScreen({
   onDeleteRelation,
   onProjectUserQueryChange,
   onRemoveProjectMember,
+  onArchiveTask,
   onSelectedIssueChange,
   onProjectQuickAccessToggle,
   onCreateTask,
@@ -3883,6 +3886,7 @@ export function TaskScreen({
                         () => onAddRelation(issueId, input),
                       )
                     : undefined}
+                  onArchiveIssue={canMutateDetailTask && !isRetainedDetail ? onArchiveTask : undefined}
                   onClose={handleCloseDetail}
                   onAiOperationPendingChange={reportAiOperationPending}
                   onCommentDraftDirtyChange={(isDirty) => {

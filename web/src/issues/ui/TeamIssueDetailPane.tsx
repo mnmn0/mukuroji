@@ -42,6 +42,7 @@ import {
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath, createWorkItemKeyPath } from '../../shared/routing/paths'
 import { findWorkItemKeys } from '../../work-items/model/workItemKeys'
+import { WorkItemArchiveButton } from './WorkItemArchiveButton'
 import { WorkItemKeyActions } from './WorkItemKeyActions'
 import {
   isCustomFieldApplicable,
@@ -125,6 +126,7 @@ export function IssueDetailPane({
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
+  onArchiveIssue,
   onDuplicateIssue,
   onUpdateIssue,
   onUpdateScheduleDependency,
@@ -170,6 +172,8 @@ export function IssueDetailPane({
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
   /** Deletes a canonical schedule dependency. */
   onDeleteScheduleDependency?: TeamIssueScreenProps['onDeleteScheduleDependency']
+  /** Archives (true) or restores (false) this Work Item; hidden when undefined. */
+  onArchiveIssue?: (issue: TeamIssue, archived: boolean) => Promise<void>
   /** Opens the create form with a draft copied from this Work Item. */
   onDuplicateIssue?: (issue: TeamIssue) => void
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
@@ -220,6 +224,7 @@ export function IssueDetailPane({
       onCreateScheduleDependency={onCreateScheduleDependency}
       onDeleteRelation={onDeleteRelation}
       onDeleteScheduleDependency={onDeleteScheduleDependency}
+      onArchiveIssue={onArchiveIssue}
       onDuplicateIssue={onDuplicateIssue}
       onUpdateIssue={onUpdateIssue}
       onUpdateScheduleDependency={onUpdateScheduleDependency}
@@ -260,6 +265,7 @@ function IssueDetailContent({
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
+  onArchiveIssue,
   onDuplicateIssue,
   onUpdateIssue,
   onUpdateScheduleDependency,
@@ -322,6 +328,8 @@ function IssueDetailContent({
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
   /** Deletes a canonical schedule dependency. */
   onDeleteScheduleDependency?: TeamIssueScreenProps['onDeleteScheduleDependency']
+  /** Archives (true) or restores (false) this Work Item; hidden when undefined. */
+  onArchiveIssue?: (issue: TeamIssue, archived: boolean) => Promise<void>
   /** Opens the create form with a draft copied from this Work Item. */
   onDuplicateIssue?: (issue: TeamIssue) => void
   /** Issue 更新 callback です。 */
@@ -1208,6 +1216,15 @@ function IssueDetailContent({
               >
                 {t('issues.duplicate.action')}
               </button>
+            ) : null}
+            {onArchiveIssue ? (
+              <WorkItemArchiveButton
+                archived={issue.archivedAt !== undefined}
+                disabled={isAiSummaryOperationPending || isIssueUpdatePending}
+                key={`${issue.teamId}:${issue.id}:${issue.revision}`}
+                onArchiveChange={(archived) => onArchiveIssue(issue, archived)}
+                t={t}
+              />
             ) : null}
             <IssuePriorityBadge priority={issue.priority} t={t} />
           </div>
