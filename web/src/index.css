@@ -1111,3 +1111,59 @@ textarea {
     min-height: 44px;
   }
 }
+
+/*
+ * Document print / PDF layout (#423). While a document print root is mounted,
+ * only that root is printed on A4 so the browser's "Save as PDF" output keeps
+ * the page text without the workbench chrome.
+ */
+.document-print-root {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 16mm 14mm;
+  }
+
+  body:has(> .document-print-root) > :not(.document-print-root) {
+    display: none !important;
+  }
+
+  body:has(> .document-print-root) {
+    background: #fff;
+    color: #000;
+  }
+
+  .document-print-root {
+    --workbench-text: #111;
+    --workbench-muted: #444;
+    --workbench-border: #ccc;
+    --workbench-surface-muted: #f4f4f4;
+    display: block;
+    color: #111;
+    background: #fff;
+    font-family:
+      -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans',
+      'Yu Gothic UI', 'Yu Gothic', Meiryo, 'Noto Sans JP', 'Noto Sans CJK JP',
+      sans-serif;
+  }
+
+  .document-print-root article {
+    max-width: none;
+    padding: 0;
+  }
+
+  .document-print-root h1,
+  .document-print-root h2,
+  .document-print-root h3 {
+    break-after: avoid;
+  }
+
+  .document-print-root pre,
+  .document-print-root table,
+  .document-print-root blockquote {
+    break-inside: avoid;
+  }
+}

@@ -329,6 +329,8 @@ export const documentsMessages = {
   'documents.share.error':
     'Sharing settings could not be saved. Check your access and the latest document state.',
   'documents.export.action': 'Export',
+  'documents.export.print': 'Print / PDF',
+  'documents.export.subtreeMarkdown': 'Markdown with subpages',
   'documents.public.title': 'Shared document',
   'documents.public.readOnly': 'Read only',
   'documents.public.updated': 'Updated',
