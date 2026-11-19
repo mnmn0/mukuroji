@@ -119,6 +119,17 @@ test('never hands one account’s input to another account and removes it', () =
   expect(takeSessionDraft(commentKey, 'member-a')).toBeUndefined()
 })
 
+test('signing in as another account removes the previous account’s input at once', () => {
+  signIn(token('member-a', 'access-1'))
+  register(commentKey, () => ({ bodyMarkdown: 'Private note', mentionMemberKeys: [] }))
+  clearAuthSession()
+  expect(window.sessionStorage.getItem('mukuroji.auth.sessionDrafts')).not.toBeNull()
+
+  signIn(token('member-b', 'access-2'))
+
+  expect(window.sessionStorage.getItem('mukuroji.auth.sessionDrafts')).toBeNull()
+})
+
 test('keeps input after a rejected refresh has already removed the stored session', () => {
   const session = signIn(token('member-a', 'access-1'))
   register(commentKey, () => ({ bodyMarkdown: 'Still here', mentionMemberKeys: [] }))

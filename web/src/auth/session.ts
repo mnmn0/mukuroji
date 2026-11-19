@@ -1,5 +1,5 @@
 import { clearAppBadgeAndNotifyTabs } from '../shared/lib/pwa/appBadge'
-import { preserveSessionDrafts } from './sessionDrafts'
+import { keepSessionDraftsOnlyFor, preserveSessionDrafts } from './sessionDrafts'
 
 /**
  * ブラウザに保存する Cognito 認証セッションです。
@@ -216,6 +216,8 @@ export function saveAuthSession(session: AuthSession) {
   const targetStorage = session.remember ? window.localStorage : window.sessionStorage
   targetStorage.setItem(storageKey, JSON.stringify(session))
   setTabAccount(session)
+  // Input kept from an ended session is offered only to the account that typed it.
+  keepSessionDraftsOnlyFor(readAccessTokenSubject(session.accessToken))
 }
 
 /**

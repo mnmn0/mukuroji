@@ -119,6 +119,16 @@ export function takeSessionDraft(key: string, owner: string | undefined): unknow
 }
 
 /**
+ * Removes this tab's preserved drafts unless they belong to the account that just signed in.
+ *
+ * @param owner - Account now signed in to this tab, or `undefined` when it cannot be told apart.
+ */
+export function keepSessionDraftsOnlyFor(owner: string | undefined) {
+  const stored = readStoredDrafts()
+  if (stored && stored.owner !== owner) discardSessionDrafts()
+}
+
+/**
  * Removes every preserved draft of this tab, such as on an explicit sign-out.
  */
 export function discardSessionDrafts() {
