@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import { listTimeEntries, transitionTimeEntry, transitionTimesheet, updateTimeEntry } from '../src/features/time-tracking/api/timeEntries'
 import { TimeTrackingApiError } from '../src/features/time-tracking/api/timeTrackingRequest'
+import { readTimeEntryHistory } from '../src/features/time-tracking/api/timeTrackingValidation'
 import { getActiveTimer, stopTimer } from '../src/features/time-tracking/api/timers'
 import { getTeamTimesheet } from '../src/features/time-tracking/api/teamTimesheet'
 import {
@@ -630,5 +631,29 @@ describe('time tracking views', () => {
   test('the default Work Item type includes the time section before activity', () => {
     const sections = DEFAULT_WORK_ITEM_TYPE.detailSections
     expect(sections.indexOf('time')).toBe(sections.indexOf('activity') - 1)
+  })
+})
+
+describe('time entry history from a manager return', () => {
+  test('keeps the returned action and its reason', () => {
+    expect(readTimeEntryHistory({
+      id: 'history-9',
+      entryId: 'entry-approved',
+      action: 'returned',
+      fromStatus: 'approved',
+      toStatus: 'rejected',
+      actorUserId: 'manager-1',
+      reason: 'Wrong Work Item',
+      occurredAt: '2026-08-02T12:00:00.000Z',
+    })).toEqual({
+      id: 'history-9',
+      entryId: 'entry-approved',
+      action: 'returned',
+      fromStatus: 'approved',
+      toStatus: 'rejected',
+      actorUserId: 'manager-1',
+      reason: 'Wrong Work Item',
+      occurredAt: '2026-08-02T12:00:00.000Z',
+    })
   })
 })

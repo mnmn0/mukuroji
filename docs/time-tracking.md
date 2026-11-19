@@ -4,7 +4,7 @@ Time tracking is scoped by Workspace and Team. A time entry references a canonic
 
 `draft → submitted → approved → locked`
 
-Rejected entries return to `rejected` and can be edited and submitted again. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record and a shared audit event in the same transaction. Budget changes also append a shared audit event in the same transaction. Estimates are not stored here: the canonical estimate is the Work Item's `schedule.plannedEffortMinutes` (see [Work Items](work-items.md#estimate-remaining-effort-and-progress)), and summaries and timesheets read it from the Work Items, including archived ones, so archiving finished work keeps its estimate next to its recorded time. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry, its history, and its audit event.
+Rejected entries return to `rejected` and can be edited and submitted again. A manager can also send an approved or locked entry back to `rejected` with a required reason (`return`); its history records the `returned` action with the reason, and `approvedAt` / `lockedAt` are cleared. Every create, edit, submit, approve, reject, and lock operation writes an immutable history record and a shared audit event in the same transaction. Budget changes also append a shared audit event in the same transaction. Estimates are not stored here: the canonical estimate is the Work Item's `schedule.plannedEffortMinutes` (see [Work Items](work-items.md#estimate-remaining-effort-and-progress)), and summaries and timesheets read it from the Work Items, including archived ones, so archiving finished work keeps its estimate next to its recorded time. Entry revisions are checked with optimistic concurrency, and timer stop atomically removes the running timer while creating the entry, its history, and its audit event.
 
 ## HTTP surface
 
@@ -12,6 +12,8 @@ Rejected entries return to `rejected` and can be edited and submitted again. Eve
 - `GET /api/teams/:teamId/time-entries` lists entries in the caller's Project allowlist.
 - `PATCH /api/teams/:teamId/time-entries/:entryId` edits a draft or rejected entry.
 - `POST /api/teams/:teamId/time-entries/:entryId/{submit,approve,reject,lock}` changes one lifecycle state.
+- `POST /api/teams/:teamId/time-entries/:entryId/return` sends an approved or locked entry back to `rejected`; `reason` is required.
+- `GET /api/teams/:teamId/time-periods` lists the Team's closed months; `POST /api/teams/:teamId/time-periods/:month/close` closes a `YYYY-MM` month in the body's `timeZone` (default `UTC`); `POST /api/teams/:teamId/time-periods/:month/reopen` reopens it with a required `reason`. See [Month close](#month-close).
 - `POST /api/teams/:teamId/timesheet/{submit,approve,reject,lock}` applies a lifecycle operation to all eligible entries in a period. The operation is resumable: every eligible entry is attempted, and `failedEntryIds` plus `partialFailure` identify entries that need a later retry.
 - `POST /api/teams/:teamId/timers` starts the caller's timer; `GET /api/time-tracking/timers/active` supports offline recovery; `POST /api/time-tracking/timers/:timerId/stop` creates a draft from the timer; `DELETE /api/time-tracking/timers/:timerId` discards an overlong or unwanted timer.
 - `GET /api/teams/:teamId/timesheet` returns daily and Monday-based weekly rows using the requested IANA timezone.
@@ -28,6 +30,16 @@ An entry may carry a `category`: `design`, `implementation`, `review`, `meeting`
 Instead of `startAt` and `endAt`, a create request may send `date` (`YYYY-MM-DD`), `minutes` (a whole number from 1 to 1440), and optionally `timeZone` (IANA, default `UTC`). The server stores the entry from local midnight of that date for that many minutes and marks it `durationOnly: true`, so clients know its times of day carry no meaning. The minutes must end within the local date, so a 23-hour daylight-saving day accepts at most 1380. Sending both forms is rejected. Editing `startAt` or `endAt` later turns the entry back into a timed entry. Timers still record times of day.
 
 Mutation endpoints accept an optional `Idempotency-Key`; when supplied, the shared durable receipt store binds it to the actor, operation, and request fingerprint, then replays the stored result for an equivalent retry. An in-progress duplicate receives a stable conflict response.
+
+## Month close
+
+A Team manager closes a calendar month so its time stops changing. The close stores the month and the IANA timezone that defines its first and last instant. While it exists, any create, edit, timer stop, or lifecycle transition whose entry interval overlaps the month fails with `409 TimePeriodClosed`; an edit is checked against both the stored and the new interval, so time cannot be moved into or out of a closed month. Locking an approved entry is still allowed, because that is how a closed month is finalized. Closing a month twice fails with `TimePeriodAlreadyClosed`.
+
+Reopening requires a non-empty `reason` and removes the close. Both operations write a shared audit event (`time-period.closed` / `time-period.reopened`, entity `time-period`, `teamId:month`) in the same DynamoDB transaction, and the reopen reason is kept in the event metadata. Closes are stored in the time tracking table under the `TIME_CLOSE#<teamId>#<YYYY-MM>` sort key.
+
+Only a caller who manages every Project of the Team (a system administrator or a direct enterprise Team grant with `teams.manage`) may close or reopen; a manager of only some Projects receives `TimePeriodCloseDenied`. Every member of the Team can list the closed months.
+
+The closed-month check reads the closes before the entry write and is not part of the same transaction, so a write racing with a close can still land in the month. Member and role rate cards, the Workspace default currency, and per-period budgets from #398 are not implemented yet.
 
 ## Write access and manager scope
 

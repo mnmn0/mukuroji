@@ -92,6 +92,16 @@ Project に属さないタスクも含む Team の **Issues**（`/teams/:teamId/
 メンバーの実績工数は Team の **工数**（`/teams/:teamId/timesheet`）の **承認** 表示で確認・承認します
 （[メンバーガイド](member.md#工数を記録する)）。
 
+月次の締めと、承認後の差し戻しは今のところ API だけで行います（画面は未対応です）。
+
+- **月を締める**: `POST /api/teams/:teamId/time-periods/:month/close`（`month` は `YYYY-MM`、本文の `timeZone` で月の境界を決めます。既定は UTC）。
+  締めた月にかかる記録は、追加・修正・提出・承認・差し戻しができなくなります。承認済みの記録のロックだけはできます。
+- **締めを解除する**: `POST /api/teams/:teamId/time-periods/:month/reopen` に `reason`（必須）を付けます。理由は監査ログに残ります。
+- **承認後に差し戻す**: 承認済み・ロック済みの記録を `POST /api/teams/:teamId/time-entries/:entryId/return` に `reason`（必須）を付けて差し戻すと、
+  記録は「差し戻し」に戻り、メンバーが修正して再提出できます。
+
+月の締めと解除は Team のすべての Project を管理できる人（システム管理者、または Team の管理権限を持つ人）だけが行えます。
+
 同じ画面の **集計** 表示では、期間（開始日・終了日）と集計の単位（日・週・メンバー・Project・タスク・作業区分）を選んで
 実績・請求可能時間・見積を確認し、**CSV をダウンロード** で同じ条件の CSV を保存できます。
 コストの列と **予算と実績** は、コストを見られる Team の管理者にだけ表示されます。予算は Team 全体か Project ごとに
