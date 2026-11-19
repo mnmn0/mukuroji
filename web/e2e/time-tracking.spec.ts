@@ -241,6 +241,10 @@ test.describe('Time tracking', () => {
     const alert = page.getByRole('alert').filter({ hasText: 'The Workspace week start could not be loaded.' })
     await expect(alert).toBeVisible()
     await expect(page.getByRole('button', { name: 'Add manually' })).toHaveCount(0)
+    // Switching views before the week start is known keeps the URL free of a guessed week.
+    await page.getByRole('link', { name: 'Approvals' }).click()
+    await expect(page).toHaveURL(/\/timesheet\?view=approvals$/u)
+    await page.getByRole('link', { name: 'My timesheet' }).click()
     await alert.getByRole('button', { name: 'Reload settings' }).click()
     await expect(alert).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Add manually' })).toBeVisible()

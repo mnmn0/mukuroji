@@ -36,7 +36,11 @@ export function TeamTimeTrackingPage() {
   const accessToken = enabled ? workspace.accessToken : undefined
   const calendarSettings = useWorkspaceCalendarSettings(accessToken, enabled)
   const weekStartDay = calendarSettings.settings?.weekStartDay
-  const weekStart = resolveWeekStart(searchParams.get('week'), undefined, weekStartDay)
+  const requestedWeek = searchParams.get('week') ?? undefined
+  const weekStart = resolveWeekStart(requestedWeek, undefined, weekStartDay)
+  // Until the week start is known, view tabs keep the requested week as is, so a provisional
+  // Monday-based date never replaces it in the URL.
+  const linkWeek = calendarSettings.settings ? weekStart : requestedWeek
   // Filtered on the server, so other Teams' Work Items cannot push the read past its size limit.
   const teamWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '' }), [teamId])
   const workItems = useWorkspaceWorkItems(accessToken, enabled, false, teamWorkItemFilter)
@@ -76,9 +80,9 @@ export function TeamTimeTrackingPage() {
    * Opens a view and week through the URL.
    *
    * @param nextView - View to show.
-   * @param nextWeekStart - First day of the week to show.
+   * @param nextWeekStart - First day of the week to show; undefined shows the current week.
    */
-  const open = (nextView: TimeTrackingView, nextWeekStart: string) => {
+  const open = (nextView: TimeTrackingView, nextWeekStart: string | undefined) => {
     void navigate(createTeamTimeTrackingPath(teamId ?? '', nextView, nextWeekStart), { replace: true })
   }
 
@@ -97,8 +101,8 @@ export function TeamTimeTrackingPage() {
     <WorkspaceRouteContent sessionErrors={[workItems.error, writeAccess.error, projectMembers.error]}>
       <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <TimeTrackingViewTabs
-          getHref={(candidate) => createTeamTimeTrackingPath(teamId, candidate, weekStart)}
-          onSelect={(candidate) => open(candidate, weekStart)}
+          getHref={(candidate) => createTeamTimeTrackingPath(teamId, candidate, linkWeek)}
+          onSelect={(candidate) => open(candidate, linkWeek)}
           t={t}
           view={view}
         />
