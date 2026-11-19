@@ -40,7 +40,8 @@ const workItemLinkTargetKinds = ['work-item'] as const
  * @param workItemId - Canonical Work Item ID stored on the card.
  * @param linked - Work Item read with the viewer's token, when one was read.
  * @param t - Translates UI text.
- * @returns Key, title, and status when readable; otherwise the stored ID or an
+ * @returns Key, title, and status when readable; a failure notice with the
+ *   stored ID when a retryable read failed; otherwise the stored ID or an
  *   unavailable notice for a Work Item the viewer cannot read.
  */
 function describeWorkItemCard(
@@ -53,6 +54,9 @@ function describeWorkItemCard(
       ? `${linked.issue.key} ${linked.issue.title}`
       : linked.issue.title
     return `${title} · ${t(`workItems.statusCategory.${linked.issue.statusCategory}`)}`
+  }
+  if (linked.hasError) {
+    return `${t('documents.links.loadError')} · ${workItemId}`
   }
   if (linked.isUnavailable && workItemId) {
     return t('documents.links.unavailable')
@@ -885,105 +889,184 @@ function WhiteboardObjectNode({
       : undefined
 
   return (
-    <g
-      aria-label={
-        text || t(`documents.whiteboard.${object.type}`)
-      }
-      className={onPointerDown ? 'cursor-grab active:cursor-grabbing' : ''}
-      onDoubleClick={() => workItemPath && onNavigate?.(workItemPath)}
-      onKeyDown={(event) => {
-        const movement =
-          event.key === 'ArrowUp'
-            ? [0, -1]
-            : event.key === 'ArrowDown'
-              ? [0, 1]
-              : event.key === 'ArrowLeft'
-                ? [-1, 0]
-                : event.key === 'ArrowRight'
-                  ? [1, 0]
-                  : undefined
-        if (onMove && movement) {
-          event.preventDefault()
-          const distance = event.shiftKey ? 20 : 5
-          onMove(
-            object.id,
-            movement[0] * distance,
-            movement[1] * distance,
-          )
-        } else if (
-          onSelect &&
-          (event.key === 'Enter' || event.key === ' ')
-        ) {
-          event.preventDefault()
-          onSelect(
-            object.id,
-            event.shiftKey || event.metaKey || event.ctrlKey,
-          )
-        } else if (
-          event.key === 'Enter' &&
-          workItemPath
-        ) {
-          onNavigate?.(workItemPath)
+    <>
+      <g
+        aria-label={
+          text || t(`documents.whiteboard.${object.type}`)
         }
-      }}
-      onPointerDown={(event) => onPointerDown?.(event, object)}
-      role={
-        onSelect
-          ? 'button'
-          : object.type === 'work-item'
-            ? 'link'
-            : undefined
-      }
-      tabIndex={onSelect || object.type === 'work-item' ? 0 : undefined}
-      transform={`translate(${object.bounds.x} ${object.bounds.y})`}
-    >
-      {object.type === 'shape' && object.shape === 'ellipse' ? (
-        <ellipse
-          cx={object.bounds.width / 2}
-          cy={object.bounds.height / 2}
-          fill={fill}
-          rx={object.bounds.width / 2}
-          ry={object.bounds.height / 2}
-          stroke={selected ? '#0f766e' : object.style?.stroke ?? '#dde4e1'}
-          strokeWidth={selected ? 4 : 2}
-        />
-      ) : (
-        <rect
-          fill={fill}
-          height={object.bounds.height}
-          rx="10"
-          stroke={
-            selected
-              ? '#0f766e'
-              : object.type === 'work-item'
-                ? '#99d7cf'
-                : object.style?.stroke ?? '#dde4e1'
+        className={onPointerDown ? 'cursor-grab active:cursor-grabbing' : ''}
+        onDoubleClick={() => workItemPath && onNavigate?.(workItemPath)}
+        onKeyDown={(event) => {
+          const movement =
+            event.key === 'ArrowUp'
+              ? [0, -1]
+              : event.key === 'ArrowDown'
+                ? [0, 1]
+                : event.key === 'ArrowLeft'
+                  ? [-1, 0]
+                  : event.key === 'ArrowRight'
+                    ? [1, 0]
+                    : undefined
+          if (onMove && movement) {
+            event.preventDefault()
+            const distance = event.shiftKey ? 20 : 5
+            onMove(
+              object.id,
+              movement[0] * distance,
+              movement[1] * distance,
+            )
+          } else if (
+            onSelect &&
+            (event.key === 'Enter' || event.key === ' ')
+          ) {
+            event.preventDefault()
+            onSelect(
+              object.id,
+              event.shiftKey || event.metaKey || event.ctrlKey,
+            )
+          } else if (
+            event.key === 'Enter' &&
+            workItemPath
+          ) {
+            onNavigate?.(workItemPath)
           }
-          strokeWidth={selected ? 4 : 2}
-          width={object.bounds.width}
-        />
-      )}
-      <foreignObject
-        height={object.bounds.height}
-        pointerEvents="none"
-        width={object.bounds.width}
+        }}
+        onPointerDown={(event) => onPointerDown?.(event, object)}
+        role={
+          onSelect
+            ? 'button'
+            : object.type === 'work-item'
+              ? 'link'
+              : undefined
+        }
+        tabIndex={onSelect || object.type === 'work-item' ? 0 : undefined}
+        transform={`translate(${object.bounds.x} ${object.bounds.y})`}
       >
-        <div className="flex h-full w-full flex-col justify-center overflow-hidden p-4 font-sans">
-          {object.type === 'work-item' && workItemPath ? (
-            <span className="mb-2 text-[11px] font-bold uppercase tracking-[0.08em] text-paper-accent">
-              {t('documents.whiteboard.work-item')}
+        {object.type === 'shape' && object.shape === 'ellipse' ? (
+          <ellipse
+            cx={object.bounds.width / 2}
+            cy={object.bounds.height / 2}
+            fill={fill}
+            rx={object.bounds.width / 2}
+            ry={object.bounds.height / 2}
+            stroke={selected ? '#0f766e' : object.style?.stroke ?? '#dde4e1'}
+            strokeWidth={selected ? 4 : 2}
+          />
+        ) : (
+          <rect
+            fill={fill}
+            height={object.bounds.height}
+            rx="10"
+            stroke={
+              selected
+                ? '#0f766e'
+                : object.type === 'work-item'
+                  ? '#99d7cf'
+                  : object.style?.stroke ?? '#dde4e1'
+            }
+            strokeWidth={selected ? 4 : 2}
+            width={object.bounds.width}
+          />
+        )}
+        <foreignObject
+          height={object.bounds.height}
+          pointerEvents="none"
+          width={object.bounds.width}
+        >
+          <div className="flex h-full w-full flex-col justify-center overflow-hidden p-4 font-sans">
+            {object.type === 'work-item' && workItemPath ? (
+              <span className="mb-2 text-[11px] font-bold uppercase tracking-[0.08em] text-paper-accent">
+                {t('documents.whiteboard.work-item')}
+              </span>
+            ) : null}
+            <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-paper-ink">
+              {text}
             </span>
-          ) : null}
-          <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-paper-ink">
-            {text}
-          </span>
-          {object.type === 'work-item' ? (
-            <span className="mt-2 text-xs font-semibold text-paper-muted">
-              {t('documents.whiteboard.openWorkItem')}
-            </span>
-          ) : null}
-        </div>
-      </foreignObject>
+            {object.type === 'work-item' ? (
+              <span className="mt-2 text-xs font-semibold text-paper-muted">
+                {t('documents.whiteboard.openWorkItem')}
+              </span>
+            ) : null}
+          </div>
+        </foreignObject>
+      </g>
+      {linkedWorkItem.hasError ? (
+        <WorkItemCardRetry
+          bounds={object.bounds}
+          onRetry={linkedWorkItem.retry}
+          t={t}
+        />
+      ) : null}
+    </>
+  )
+}
+
+/** Size of the retry button drawn on a Work Item card whose read failed. */
+const WORK_ITEM_CARD_RETRY_SIZE = { height: 24, width: 72 }
+
+/**
+ * Draws a retry button over the corner of a Work Item card whose read failed.
+ *
+ * It is a sibling of the card rather than a child, so the card's own button or
+ * link role does not contain another control, and its pointer events do not
+ * start a drag of the card.
+ *
+ * @param props - Card bounds, the retry action, and the translator.
+ * @returns The SVG retry button.
+ */
+function WorkItemCardRetry({
+  bounds,
+  onRetry,
+  t,
+}: {
+  /** Bounds of the card the button belongs to. */
+  bounds: WhiteboardObject['bounds']
+  /** Reads the Work Item again. */
+  onRetry: () => unknown
+  /** Translates UI text. */
+  t: (key: MessageKey) => string
+}) {
+  const { height, width } = WORK_ITEM_CARD_RETRY_SIZE
+  const x = bounds.x + bounds.width - width - 8
+  const y = bounds.y + bounds.height - height - 8
+  return (
+    <g
+      aria-label={t('documents.related.retry')}
+      className="cursor-pointer"
+      onClick={(event) => {
+        event.stopPropagation()
+        void onRetry()
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        event.stopPropagation()
+        void onRetry()
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      role="button"
+      tabIndex={0}
+      transform={`translate(${x} ${y})`}
+    >
+      <rect
+        fill="#ffffff"
+        height={height}
+        rx="6"
+        stroke="#0f766e"
+        strokeWidth={1.5}
+        width={width}
+      />
+      <text
+        dominantBaseline="central"
+        fill="#0f766e"
+        fontSize="12"
+        fontWeight="600"
+        textAnchor="middle"
+        x={width / 2}
+        y={height / 2}
+      >
+        {t('documents.related.retry')}
+      </text>
     </g>
   )
 }

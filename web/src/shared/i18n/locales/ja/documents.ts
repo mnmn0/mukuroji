@@ -187,6 +187,7 @@ export const documentsMessages = {
   'documents.links.byId': 'この ID でリンク',
   'documents.links.noResults': '一致する対象はありません。',
   'documents.links.saveError': 'リンクを保存できませんでした。',
+  'documents.links.loadError': '読み込めませんでした',
   'documents.links.unavailable': '表示できない対象',
   'documents.links.showMore': 'さらに表示',
   'documents.links.documentSearchLabel': 'リンクするドキュメントを検索',

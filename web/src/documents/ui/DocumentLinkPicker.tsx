@@ -311,10 +311,19 @@ function WorkItemTargetLabel({
   /** Canonical `team/<teamId>/issue/<issueId>` ID. */
   workItemId: string
 }) {
-  const { issue, isUnavailable } = useLinkedWorkItem(
+  const { hasError, issue, isUnavailable, retry } = useLinkedWorkItem(
     accessToken,
     workItemId,
   )
+  if (hasError) {
+    return (
+      <TargetLabelRetry
+        onRetry={retry}
+        subtitle={t('documents.backlinks.work-item')}
+        t={t}
+      />
+    )
+  }
   if (isUnavailable) {
     return (
       <TargetLabelText
@@ -364,11 +373,20 @@ function ProjectTargetLabel({
   /** Translates UI text. */
   t: (key: MessageKey) => string
 }) {
-  const { data, error } = useProjectDirectory({
+  const { data, error, mutate } = useProjectDirectory({
     accessToken,
     enabled: Boolean(accessToken),
     locale,
   })
+  if (error && !data) {
+    return (
+      <TargetLabelRetry
+        onRetry={() => mutate()}
+        subtitle={t('documents.backlinks.project')}
+        t={t}
+      />
+    )
+  }
   const project = data
     ?.flatMap((team) => team.projects)
     .find((candidate) => candidate.id === projectId)
@@ -377,11 +395,43 @@ function ProjectTargetLabel({
       subtitle={t('documents.backlinks.project')}
       title={
         project?.name ??
-        (data || error
+        (data
           ? t('documents.links.unavailable')
           : t('documents.context.loading'))
       }
     />
+  )
+}
+
+/**
+ * Renders a link label whose read failed, with a retry button.
+ *
+ * @param props - Target kind line, retry action, and translator.
+ * @returns The failure notice and its retry button.
+ */
+function TargetLabelRetry({
+  onRetry,
+  subtitle,
+  t,
+}: {
+  /** Reads the target again. */
+  onRetry: () => unknown
+  /** Secondary line naming the target kind. */
+  subtitle: string
+  /** Translates UI text. */
+  t: (key: MessageKey) => string
+}) {
+  return (
+    <span className="flex min-w-0 flex-1 items-center gap-2">
+      <TargetLabelText subtitle={subtitle} title={t('documents.links.loadError')} />
+      <button
+        className="text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
+        onClick={() => void onRetry()}
+        type="button"
+      >
+        {t('documents.related.retry')}
+      </button>
+    </span>
   )
 }
 

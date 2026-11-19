@@ -187,6 +187,7 @@ export const documentsMessages = {
   'documents.links.byId': 'Link by this ID',
   'documents.links.noResults': 'No matching items.',
   'documents.links.saveError': 'The link could not be saved.',
+  'documents.links.loadError': 'Could not load',
   'documents.links.unavailable': 'Unavailable item',
   'documents.links.showMore': 'Show more',
   'documents.links.documentSearchLabel': 'Search documents to link',
