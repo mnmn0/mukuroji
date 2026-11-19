@@ -18,6 +18,7 @@ import {
   createPlanningUpdateScheduleShard,
 } from '../../../planning'
 import { createDynamoDbProjectManagerReader } from '../../adapter-out/dynamodb/project-manager-reader'
+import { createDynamoDbScheduledWorkItemSource } from '../../adapter-out/dynamodb/scheduled-work-item-source'
 import {
   WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_INDEX_NAME,
   WORK_ITEM_NOTIFICATION_ALWAYS_DUE_KEY,
@@ -341,7 +342,11 @@ function createRunOptions(
 ): NotificationScheduleRunOptions {
   return {
     documentClient,
-    workItemsTableName: 'WorkItemsTable',
+    workItemSource: createDynamoDbScheduledWorkItemSource({
+      documentClient,
+      workItemsTableName: 'WorkItemsTable',
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    }),
     auditEventsTableName: 'AuditEventsTable',
     now: new Date('2026-07-12T09:00:00.000Z'),
     scanPageSize: 25,
@@ -1611,7 +1616,10 @@ test('notification schedule handler treats blank numeric environment values as u
 
   try {
     await expect(
-      createNotificationScheduleHandler(client)({ id: 'schedule-event-1', time: '2026-07-12T09:00:00.000Z' }),
+      createNotificationScheduleHandler(
+        client,
+        createDynamoDbScheduledWorkItemSource({ documentClient: client, workItemsTableName: 'WorkItemsTable' }),
+      )({ id: 'schedule-event-1', time: '2026-07-12T09:00:00.000Z' }),
     ).resolves.toMatchObject({ emittedEvents: 0 })
   } finally {
     for (const [name, value] of previous) {

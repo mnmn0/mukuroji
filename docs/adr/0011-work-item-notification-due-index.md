@@ -39,6 +39,12 @@ scan して対象を探していた。読み取り費用は完了・archive 済�
   した sparse GSI `WorkItemCustomerCompletionPreparationIndex`（KEYS_ONLY）で読む。marker の付与・削除は
   既存の書き込みのままで index に反映される。
 - 工数の督促の Team 一覧は、督促を送る 1 日 1 回の実行だけ Project directory table を読んで作る。
+- index と directory の読み取りは notifications の port `ScheduledWorkItemSource` の背後の DynamoDB adapter
+  （`adapter-out/dynamodb/scheduled-work-item-source.ts`）で行い、schedule の adapter-in は DynamoDB の index key を扱わない。
+- この変更の時点で AWS 環境は 1 つもなく、最初の deploy は stack 全体の新規作成になる。table の作成時には GSI を
+  何本でも同時に作れ、すべての row は作成時から index 属性を持つため、段階的な GSI 追加と既存 row の backfill は
+  この PR では用意しない。既存の Work Items table を持つ環境ができた後にこの種の変更をするときは、GSI を 1 本ずつ
+  deploy し、#365 の migration で属性を付与し終えてから読み手を切り替える。
 
 ## 検討した選択肢
 

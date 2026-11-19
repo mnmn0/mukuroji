@@ -1,6 +1,7 @@
 import {
   DynamoDbReminderSettingsStore,
   createDynamoDbProjectManagerReader,
+  createDynamoDbScheduledWorkItemSource,
   createNotificationScheduleHandler,
 } from '../../modules/notifications'
 import { DynamoDbTimeTrackingRepository } from '../../modules/time-tracking'
@@ -60,8 +61,15 @@ export function createProductionNotificationScheduleHandler() {
   if (!notificationsTableName) throw new Error('NOTIFICATIONS_TABLE_NAME is required.')
   const analyticsTableName = environment.ANALYTICS_TABLE_NAME?.trim()
   if (!analyticsTableName) throw new Error('ANALYTICS_TABLE_NAME is required.')
+  const workItemsTableName = environment.WORK_ITEMS_TABLE_NAME?.trim()
+  if (!workItemsTableName) throw new Error('WORK_ITEMS_TABLE_NAME is required.')
   const notificationHandler = createNotificationScheduleHandler(
     documentClient,
+    createDynamoDbScheduledWorkItemSource({
+      documentClient,
+      workItemsTableName,
+      projectDirectoryTableName,
+    }),
     async ({ workspaceId, teamId, workItemId }) => {
       await customerClient.prepareCompletionNotifications(
         workspaceId,
