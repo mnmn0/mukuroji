@@ -1,8 +1,11 @@
 import {
+  DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY,
+  isWorkItemHierarchyClosedCategory,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   type ApprovalSummary,
   type ResolvedWorkItemConfiguration,
   type WorkItemConfiguration,
+  type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import type { Context } from 'hono'
 import { type WorkItemDependencies } from '../../app/composition/app-dependencies'
@@ -10,6 +13,9 @@ import { CognitoServiceError } from '../../modules/authentication'
 import { ProjectDataError } from '../../modules/directory'
 import {
   applyWorkItemStatusTransitionToActualDates,
+  createWorkItemRelationGraphRevisionConditionCheck,
+  createWorkItemRevisionConditionCheck,
+  isTeamIssueNotFoundError,
   readAssignedProjectId,
   workItemScheduleInstantToLocalDate,
   type TeamIssueResponseItem,
@@ -43,7 +49,7 @@ import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import { readJson } from './http'
 import { toProjectDataErrorResponse, type WorkspacePrincipal } from './project-access'
 import { isRecord } from './value-guards'
-import { loadAuthorizedTeamIssue } from './work-item-access'
+import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from './work-item-access'
 import {
   createWorkItemTypeRelationConfigurationTransactionItems,
   getWorkItemConfigurationTableName,
@@ -279,7 +285,10 @@ export function requireCanonicalFileProofingWorkItem(
 }
 
 /**
- * Resolves an approval completion transition against current workflow state.
+ * Resolves an approval completion transition against current workflow state, when an approval
+ * decision is about to apply it.
+ *
+ * The Team's parent completion policy applies here, because this is when the status changes.
  *
  * @param directoryId - Owning Workspace directory identifier.
  * @param teamId - Owning Team identifier.
@@ -288,13 +297,59 @@ export function requireCanonicalFileProofingWorkItem(
  * @param dependencies - Ports used to read workflow configuration.
  * @returns A transaction-ready completion transition snapshot.
  */
-export async function resolveFileApprovalCompletionTransition(
+export function resolveFileApprovalCompletionTransition(
   directoryId: string,
   teamId: string,
   workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
   completionTransition: string,
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
+) {
+  return resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, true)
+}
+
+/**
+ * Checks that an approval request may name a completion transition.
+ *
+ * Requesting an approval does not change the status, so open children do not block it; the
+ * parent completion policy is checked when the decision applies the transition.
+ *
+ * @param directoryId - Owning Workspace directory identifier.
+ * @param teamId - Owning Team identifier.
+ * @param workItem - Canonical Work Item being approved.
+ * @param completionTransition - Requested target workflow status.
+ * @param dependencies - Ports used to read workflow configuration.
+ * @throws FileProofingError when the status is unknown or the transition is not allowed.
+ */
+export async function validateFileApprovalCompletionTransition(
+  directoryId: string,
+  teamId: string,
+  workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
+  completionTransition: string,
+  dependencies: AutomationActionExecutorDependencies =
+    ambientAutomationActionExecutorDependencies,
+): Promise<void> {
+  await resolveCompletionTransition(directoryId, teamId, workItem, completionTransition, dependencies, false)
+}
+
+/**
+ * Resolves an approval completion transition against current workflow state.
+ *
+ * @param directoryId - Owning Workspace directory identifier.
+ * @param teamId - Owning Team identifier.
+ * @param workItem - Canonical Work Item being approved.
+ * @param completionTransition - Requested target workflow status.
+ * @param dependencies - Ports used to read workflow configuration.
+ * @param applyParentCompletionPolicy - Whether to check and fence the Work Item's open children.
+ * @returns A transaction-ready completion transition snapshot.
+ */
+async function resolveCompletionTransition(
+  directoryId: string,
+  teamId: string,
+  workItem: ReturnType<typeof requireCanonicalFileProofingWorkItem>,
+  completionTransition: string,
+  dependencies: AutomationActionExecutorDependencies,
+  applyParentCompletionPolicy: boolean,
 ) {
   try {
     const resolved = await dependencies.workItemConfigurations.getTeamConfiguration(
@@ -317,6 +372,25 @@ export async function resolveFileApprovalCompletionTransition(
       nextStatus.workflowStatusId,
       workItem.workItemTypeId,
     )
+    const guardConditionChecks = createWorkItemConfigurationGuardConditionChecks(
+      getWorkItemConfigurationTableName(),
+      directoryId,
+      teamId,
+      resolved,
+    )
+    // An approval that completes a parent follows the Team's completion policy like any update.
+    const childCompletionConditionChecks = applyParentCompletionPolicy
+      ? await prepareParentCompletionConditionChecks(
+          directoryId,
+          teamId,
+          workItem,
+          nextStatus.statusCategory,
+          resolved.configuration,
+          dependencies,
+          true,
+          guardConditionChecks.length,
+        )
+      : []
     return {
       workflowStatusId: nextStatus.workflowStatusId,
       statusCategory: nextStatus.statusCategory,
@@ -331,12 +405,7 @@ export async function resolveFileApprovalCompletionTransition(
         nextStatus.statusCategory,
         workItemScheduleInstantToLocalDate(new Date(), workItem.schedule.calendarPolicy),
       ),
-      configurationConditionChecks: createWorkItemConfigurationGuardConditionChecks(
-        getWorkItemConfigurationTableName(),
-        directoryId,
-        teamId,
-        resolved,
-      ),
+      configurationConditionChecks: guardConditionChecks.concat(childCompletionConditionChecks),
     }
   } catch (error) {
     if (error instanceof WorkItemConfigurationError) {
@@ -508,6 +577,23 @@ export async function prepareConfiguredUpdateWorkItem(
         resolved.configuration,
       )
     : []
+  const otherConditionChecks = createWorkItemConfigurationGuardConditionChecks(
+    getWorkItemConfigurationTableName(),
+    directoryId,
+    teamId,
+    resolved,
+  ).concat(relationTransactionItems, approvalTransitionConditionChecks)
+  const childCompletionConditionChecks = await prepareParentCompletionConditionChecks(
+    directoryId,
+    teamId,
+    current,
+    nextWorkflowStatus.statusCategory,
+    resolved.configuration,
+    options.relationDependencies ?? workItemDependencies,
+    // A Type change already fences the graph revision it read before this one.
+    relationTransactionItems.length === 0,
+    otherConditionChecks.length,
+  )
   return {
     ...inputWithoutTypeChangeResolution,
     workItemTypeId: targetWorkItemType.id,
@@ -515,13 +601,151 @@ export async function prepareConfiguredUpdateWorkItem(
     workflowStatusId: nextWorkflowStatus.workflowStatusId,
     statusCategory: nextWorkflowStatus.statusCategory,
     customFieldValues,
-    configurationConditionChecks: createWorkItemConfigurationGuardConditionChecks(
-      getWorkItemConfigurationTableName(),
-      directoryId,
-      teamId,
-      resolved,
-    ).concat(relationTransactionItems, approvalTransitionConditionChecks),
+    configurationConditionChecks: otherConditionChecks.concat(childCompletionConditionChecks),
   }
+}
+
+/**
+ * Applies the Team's parent completion policy to a status change.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the Work Item.
+ * @param current - Work Item before the change.
+ * @param nextStatusCategory - Status category after the change.
+ * @param configuration - Team Work Item configuration.
+ * @param dependencies - Relation and Work Item persistence.
+ * @param fenceGraph - Whether to fence the graph revision; false when the change already does.
+ * @param otherConditionCheckCount - Configuration condition checks the change already sends.
+ * @returns Condition checks to commit with the change; none unless a `reject` Team completes it.
+ * @throws WorkItemConfigurationError `409 WorkItemOpenChildren` when a child is still open.
+ */
+async function prepareParentCompletionConditionChecks(
+  directoryId: string,
+  teamId: string,
+  current: TeamIssueResponseItem,
+  nextStatusCategory: WorkflowStatusCategory,
+  configuration: WorkItemConfiguration,
+  dependencies: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'>,
+  fenceGraph: boolean,
+  otherConditionCheckCount: number,
+): Promise<WorkItemConfigurationTransactionItems> {
+  const policy = configuration.parentCompletionPolicy ?? DEFAULT_WORK_ITEM_PARENT_COMPLETION_POLICY
+  if (current.statusCategory === 'completed' || nextStatusCategory !== 'completed' || policy !== 'reject') {
+    return []
+  }
+  return assertWorkItemChildrenClosed(
+    directoryId,
+    teamId,
+    current.id,
+    dependencies,
+    fenceGraph,
+    otherConditionCheckCount,
+  )
+}
+
+/** Child Work Items read at once while checking that a parent can be completed. */
+const CHILD_COMPLETION_READ_CONCURRENCY = 16
+
+/**
+ * Most configuration condition checks one Work Item update sends.
+ *
+ * DynamoDB allows 100 items per transaction. The rest are left for the update itself, its event,
+ * audit, authorization, and other fences the persistence adapter adds.
+ */
+const WORK_ITEM_UPDATE_CONFIGURATION_CHECK_BUDGET = 70
+
+/**
+ * Rejects completing a parent while one of its non-archived children is still open, and fences
+ * what it read into the parent's update transaction.
+ *
+ * The relation graph revision fences a child attached meanwhile, and each child's revision fences
+ * a child reopened meanwhile. When the children's checks would push the update past
+ * {@link WORK_ITEM_UPDATE_CONFIGURATION_CHECK_BUDGET} together with its other checks, only the
+ * graph is fenced, so a child reopened while the parent's update commits is not detected.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team that owns the parent.
+ * @param parentWorkItemId - Parent about to be completed.
+ * @param dependencies - Relation and Work Item persistence.
+ * @param fenceGraph - Whether to fence the graph revision; false when the update already does.
+ * @param otherConditionCheckCount - Configuration condition checks the update already sends.
+ * @returns Condition checks to commit with the parent's update.
+ * @throws WorkItemConfigurationError `409 WorkItemOpenChildren` when a child is neither completed nor canceled.
+ */
+async function assertWorkItemChildrenClosed(
+  directoryId: string,
+  teamId: string,
+  parentWorkItemId: string,
+  dependencies: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'>,
+  fenceGraph: boolean,
+  otherConditionCheckCount: number,
+): Promise<WorkItemConfigurationTransactionItems> {
+  const children = await dependencies.workItemConfigurations.listRelations(
+    directoryId,
+    teamId,
+    parentWorkItemId,
+    { types: ['child'] },
+  )
+  const childIds = children.relations.map((relation) => relation.targetWorkItemId)
+  const childRevisions: { workItemId: string, revision: number }[] = []
+  let openChildCount = 0
+  for (let index = 0; index < childIds.length; index += CHILD_COMPLETION_READ_CONCURRENCY) {
+    const details = await Promise.all(childIds
+      .slice(index, index + CHILD_COMPLETION_READ_CONCURRENCY)
+      .map(async (childId) => {
+        try {
+          return await dependencies.teamIssues.getTeamIssueDetail(
+            directoryId,
+            teamId,
+            childId,
+            { consistentIssueRead: true, includeEvents: false },
+          )
+        } catch (error) {
+          // A deleted child can leave its relation behind. It can never be reopened, so it is
+          // not open, and the graph revision fence still catches a child added meanwhile.
+          if (isTeamIssueNotFoundError(error)) return undefined
+          throw error
+        }
+      }))
+    for (const detail of details) {
+      if (!detail) continue
+      const { issue } = detail
+      childRevisions.push({ workItemId: issue.id, revision: issue.revision })
+      if (issue.archivedAt === undefined && !isWorkItemHierarchyClosedCategory(issue.statusCategory)) {
+        openChildCount += 1
+      }
+    }
+  }
+  if (openChildCount > 0) {
+    throw new WorkItemConfigurationError(
+      409,
+      'WorkItemOpenChildren',
+      // The count can include children the caller cannot read, so the message leaves it out.
+      'A child Work Item is still open. Complete or cancel the children before completing the parent.',
+    )
+  }
+  const graphConditionChecks = fenceGraph
+    ? [createWorkItemRelationGraphRevisionConditionCheck(
+        getWorkItemConfigurationTableName(),
+        directoryId,
+        teamId,
+        children.graphRevision,
+      )]
+    : []
+  const childFencesFit = otherConditionCheckCount + graphConditionChecks.length + childRevisions.length <=
+    WORK_ITEM_UPDATE_CONFIGURATION_CHECK_BUDGET
+  return [
+    ...graphConditionChecks,
+    ...(childFencesFit
+      ? childRevisions.map((child) => createWorkItemRevisionConditionCheck(
+          getTeamIssuesTableName(),
+          directoryId,
+          teamId,
+          child.workItemId,
+          child.revision,
+        ))
+      : []),
+  ]
 }
 
 /**

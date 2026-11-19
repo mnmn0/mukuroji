@@ -914,6 +914,7 @@ const taskViewDisplayOptionKeys = [
   'showEmptyGroups',
   'wrapText',
   'showAssigneeAvatars',
+  'showOutline',
 ] as const
 
 /**
