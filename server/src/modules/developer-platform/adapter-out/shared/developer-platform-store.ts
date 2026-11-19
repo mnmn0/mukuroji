@@ -159,6 +159,49 @@ const API_KEY_REVOKE_MAX_ATTEMPTS = 3
 /** Minimum gap between two last-used writes of the same credential. */
 const CREDENTIAL_LAST_USED_WRITE_INTERVAL_MS = 60 * 1_000
 
+/** Reads the stored `value.lastUsedAt` of a credential row, if any. */
+function readStoredLastUsedAt(record: { value: unknown } | undefined) {
+  const value = record?.value
+  if (typeof value !== 'object' || value === null) return undefined
+  const lastUsedAt = (value as { lastUsedAt?: unknown }).lastUsedAt
+  return typeof lastUsedAt === 'string' ? lastUsedAt : undefined
+}
+
+/** Adds the optional `value.lastUsedAt` guard to a version-conditioned DynamoDB Put. */
+function withExpectedLastUsedAtCondition(
+  condition: {
+    ConditionExpression: string
+    ExpressionAttributeNames: Record<string, string>
+    ExpressionAttributeValues: Record<string, unknown>
+  },
+  expected: PutRecordCondition['expectedLastUsedAt'],
+) {
+  if (!expected) return condition
+  const names = {
+    ...condition.ExpressionAttributeNames,
+    '#recordValue': 'value',
+    '#recordLastUsedAt': 'lastUsedAt',
+  }
+  return expected.value === undefined
+    ? {
+        ConditionExpression:
+          `${condition.ConditionExpression} AND ` +
+          'attribute_not_exists(#recordValue.#recordLastUsedAt)',
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: condition.ExpressionAttributeValues,
+      }
+    : {
+        ConditionExpression:
+          `${condition.ConditionExpression} AND ` +
+          '#recordValue.#recordLastUsedAt = :expectedRecordLastUsedAt',
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: {
+          ...condition.ExpressionAttributeValues,
+          ':expectedRecordLastUsedAt': expected.value,
+        },
+      }
+}
+
 /** Returns whether a credential use at `now` should update the stored last-used time. */
 function shouldRecordCredentialUse(lastUsedAt: string | undefined, now: Date) {
   if (!lastUsedAt) return true
@@ -716,6 +759,13 @@ type PutRecordCondition = {
   ifAbsent?: boolean
   /** 現在の version が一致する場合だけ置換します。 */
   expectedVersion?: number
+  /**
+   * Replaces the row only while `value.lastUsedAt` still equals this value (`undefined`
+   * means absent). Last-used writes do not move the version, so a full-row credential
+   * write uses this to avoid erasing a use recorded after its read. Only
+   * `putCredentialRecord` honors it.
+   */
+  expectedLastUsedAt?: { value: string | undefined }
 }
 
 /** 書き込みと同じ transaction で、書き換えずに状態だけを確かめる別 row です。 */
@@ -1739,7 +1789,11 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       ...record,
       value: apiKey,
       version: record.version + 1,
-    }, true), { expectedVersion: record.version }, undefined,
+    }, true), {
+      expectedVersion: record.version,
+      // A use recorded after this read must survive the revocation write.
+      expectedLastUsedAt: { value: readStoredLastUsedAt(record) },
+    }, undefined,
     authRecord ? createCredentialAuthDelete(authRecord) : undefined,
     undefined,
     this.createApiKeyAuditPut(apiKey, record, {
@@ -5169,6 +5223,10 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
       condition.expectedVersion !== undefined &&
       currentRecord?.version !== condition.expectedVersion
     ) return false
+    if (
+      condition.expectedLastUsedAt &&
+      readStoredLastUsedAt(currentRecord) !== condition.expectedLastUsedAt.value
+    ) return false
     if (conditionCheck) {
       const checkedRecord = this.records.get(
         createMemoryKey(conditionCheck.workspaceId, conditionCheck.recordKey),
@@ -6283,13 +6341,13 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
         }
       : condition.expectedVersion === undefined
         ? {}
-        : {
+        : withExpectedLastUsedAtCondition({
             ConditionExpression: '#recordVersion = :expectedRecordVersion',
             ExpressionAttributeNames: { '#recordVersion': 'version' },
             ExpressionAttributeValues: {
               ':expectedRecordVersion': condition.expectedVersion,
             },
-          }
+          }, condition.expectedLastUsedAt)
     const authCondition = authWrite?.condition.ifAbsent
       ? {
           ConditionExpression:

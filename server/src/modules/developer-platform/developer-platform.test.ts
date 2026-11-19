@@ -54,10 +54,24 @@ class LaggingLookupDeveloperPlatformClient extends InMemoryDeveloperPlatformStor
 class ConflictingCredentialWriteClient extends InMemoryDeveloperPlatformStorage {
   /** Number of credential writes that still fail before writes go through. */
   remainingConflicts = 0
+  /** Runs once just before the next credential write, like a concurrent request. */
+  beforeNextWrite?: () => Promise<void>
+
+  /** Exposes the last-used write so a test can interleave it with a revocation. */
+  touchLastUsedAt(
+    record: Parameters<InMemoryDeveloperPlatformStorage['touchCredentialLastUsedAt']>[0],
+    lastUsedAt: string,
+    observedLastUsedAt: string | undefined,
+  ) {
+    return this.touchCredentialLastUsedAt(record, lastUsedAt, observedLastUsedAt)
+  }
 
   protected override async putCredentialRecord(
     ...args: Parameters<InMemoryDeveloperPlatformStorage['putCredentialRecord']>
   ) {
+    const beforeWrite = this.beforeNextWrite
+    this.beforeNextWrite = undefined
+    await beforeWrite?.()
     if (this.remainingConflicts > 0) {
       this.remainingConflicts -= 1
       return false
@@ -713,6 +727,37 @@ describe('developer credential lifecycle', () => {
       workspaceId: 'workspace-1',
       apiKeyId: other.apiKey.id,
     })).rejects.toMatchObject({ status: 409 })
+  })
+
+  test('keeps a use recorded between the revocation read and write', async () => {
+    const clock = createClock()
+    const client = new ConflictingCredentialWriteClient(
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),
+      clock.now,
+    )
+    const created = await client.createApiKey({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: { name: 'Racing key', scopes: ['work-items:read'] },
+    })
+    const readRow = () => {
+      const row = (client as unknown as {
+        records: Map<string, Parameters<typeof client.touchLastUsedAt>[0]>
+      }).records.get(`workspace-1\0APIKEY#${created.apiKey.id}`)
+      if (!row) throw new Error('API key row was not stored.')
+      return row
+    }
+    const usedAt = new Date(START.getTime() + 5_000).toISOString()
+    client.beforeNextWrite = async () => {
+      expect(await client.touchLastUsedAt(readRow(), usedAt, undefined)).toBe(true)
+    }
+
+    const revoked = await client.revokeApiKey({
+      workspaceId: 'workspace-1',
+      apiKeyId: created.apiKey.id,
+    })
+    expect(revoked).toMatchObject({ status: 'revoked', lastUsedAt: usedAt })
+    expect(readRow().value).toMatchObject({ status: 'revoked', lastUsedAt: usedAt })
   })
 
   test('issues digest-only OAuth client_credentials tokens with scoped auth and app revoke', async () => {
