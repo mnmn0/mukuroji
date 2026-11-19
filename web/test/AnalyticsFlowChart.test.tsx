@@ -47,6 +47,31 @@ describe('Analytics flow chart', () => {
     expect(model.layers.find((layer) => layer.key === 'ideal')?.values).toEqual([4, 3, 2, 1, 0])
   })
 
+  test('labels weekly and monthly observations by bucket end and pads by bucket', () => {
+    // 2026-01-05 is a Monday. The current week is clipped at asOf (Wednesday).
+    const weekly: AnalyticsSeriesPoint[] = [
+      { from: '2026-01-05T00:00:00.000Z', to: '2026-01-11T23:59:59.999Z', value: 6, sampleSize: 6 },
+      { from: '2026-01-12T00:00:00.000Z', to: '2026-01-14T12:00:00.000Z', value: 4, sampleSize: 4 },
+    ]
+    const week = createAnalyticsFlowChartModel(weekly, 'burndown', {
+      granularity: 'week',
+      plannedEndDate: '2026-01-28',
+      timeZone: 'UTC',
+    })
+    expect(week.dates).toEqual(['2026-01-11', '2026-01-14', '2026-01-25', '2026-01-28'])
+    expect(week.layers.find((layer) => layer.key === 'remaining')?.values).toEqual([6, 4, null, null])
+
+    const monthly: AnalyticsSeriesPoint[] = [
+      { from: '2026-01-15T00:00:00.000Z', to: '2026-01-31T23:59:59.999Z', value: 6, sampleSize: 6 },
+    ]
+    const month = createAnalyticsFlowChartModel(monthly, 'burndown', {
+      granularity: 'month',
+      plannedEndDate: '2026-03-10',
+      timeZone: 'UTC',
+    })
+    expect(month.dates).toEqual(['2026-01-31', '2026-02-28', '2026-03-10'])
+  })
+
   test('draws burnup scope and completed lines and stacks cumulative flow', () => {
     const burnup = createAnalyticsFlowChartModel(series, 'burnup', { timeZone: 'UTC' })
     expect(burnup.layers.map((layer) => [layer.key, layer.values])).toEqual([

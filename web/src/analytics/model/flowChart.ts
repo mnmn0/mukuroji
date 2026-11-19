@@ -45,11 +45,16 @@ export type AnalyticsFlowChartOptions = {
   /** IANA timezone that the series buckets were built in. */
   timeZone: string
   /**
-   * Last local calendar date (`YYYY-MM-DD`) of the chart. Days after the last series point up
+   * Last local calendar date (`YYYY-MM-DD`) of the chart. Buckets after the last series point up
    * to this date are drawn empty, and the burndown ideal line reaches zero on it.
    */
   plannedEndDate?: string
+  /** Calendar bucket size of the series. Defaults to `day`. */
+  granularity?: AnalyticsFlowGranularity
 }
+
+/** Calendar bucket size of a flow chart series. */
+export type AnalyticsFlowGranularity = 'day' | 'week' | 'month'
 
 const MAX_PADDING_DAYS = 366
 
@@ -66,8 +71,19 @@ export function createAnalyticsFlowChartModel(
   visualization: AnalyticsFlowVisualization,
   options: AnalyticsFlowChartOptions,
 ): AnalyticsFlowChartModel {
-  const dates = series.map((point) => formatAnalyticsCalendarDate(point.from, options.timeZone))
-  const padding = createPaddingDates(dates.at(-1), options.plannedEndDate)
+  // State metrics are observed at the end of each bucket, so each slot is labeled with the
+  // bucket's last local date (or the clipped `asOf` date of the current bucket).
+  const dates = series.map((point) => formatAnalyticsCalendarDate(point.to, options.timeZone))
+  const lastPoint = series.at(-1)
+  const lastBucketStart = lastPoint === undefined
+    ? undefined
+    : formatAnalyticsCalendarDate(lastPoint.from, options.timeZone)
+  const padding = createPaddingDates(
+    lastBucketStart,
+    dates.at(-1),
+    options.plannedEndDate,
+    options.granularity ?? 'day',
+  )
   const slotCount = dates.length + padding.length
   const pad = (values: Array<number | null>) => [
     ...values,
@@ -164,26 +180,63 @@ function readSegment(point: AnalyticsSeriesPoint, key: string): number | null {
 }
 
 /**
- * Lists the local dates after the last series date up to the planned end date.
+ * Lists the end dates of the empty buckets after the last series bucket up to the planned end
+ * date. The last padded bucket is cut at the planned end date.
  *
- * @param lastDate - Local date of the last series point.
+ * @param lastBucketStart - Local first date of the last series bucket.
+ * @param lastDate - Local date of the last series observation.
  * @param plannedEndDate - Planned last date of the chart.
+ * @param granularity - Calendar bucket size.
  * @returns Padding dates in order.
  */
-function createPaddingDates(lastDate: string | undefined, plannedEndDate: string | undefined) {
-  if (lastDate === undefined || plannedEndDate === undefined) return []
-  const last = Date.parse(`${lastDate}T00:00:00Z`)
-  const end = Date.parse(`${plannedEndDate}T00:00:00Z`)
-  if (!Number.isFinite(last) || !Number.isFinite(end)) return []
+function createPaddingDates(
+  lastBucketStart: string | undefined,
+  lastDate: string | undefined,
+  plannedEndDate: string | undefined,
+  granularity: AnalyticsFlowGranularity,
+) {
+  if (lastBucketStart === undefined || lastDate === undefined || plannedEndDate === undefined) return []
+  const start = parseCalendarDate(lastBucketStart)
+  const last = parseCalendarDate(lastDate)
+  const end = parseCalendarDate(plannedEndDate)
+  if (start === undefined || last === undefined || end === undefined) return []
+  const cursor = new Date(start)
+  if (granularity === 'week') cursor.setUTCDate(cursor.getUTCDate() - (cursor.getUTCDay() + 6) % 7)
+  if (granularity === 'month') cursor.setUTCDate(1)
   const dates: string[] = []
-  for (
-    let day = last + 86_400_000;
-    day <= end && dates.length < MAX_PADDING_DAYS;
-    day += 86_400_000
-  ) {
-    dates.push(new Date(day).toISOString().slice(0, 10))
+  while (dates.length < MAX_PADDING_DAYS) {
+    advanceBucket(cursor, granularity)
+    if (cursor.getTime() > end.getTime()) break
+    const bucketEnd = new Date(cursor)
+    advanceBucket(bucketEnd, granularity)
+    bucketEnd.setUTCDate(bucketEnd.getUTCDate() - 1)
+    const slotEnd = Math.min(bucketEnd.getTime(), end.getTime())
+    if (slotEnd > last.getTime()) dates.push(new Date(slotEnd).toISOString().slice(0, 10))
   }
   return dates
+}
+
+/**
+ * Moves a UTC-midnight calendar date to the first date of the next bucket.
+ *
+ * @param date - Date to move in place.
+ * @param granularity - Calendar bucket size.
+ */
+function advanceBucket(date: Date, granularity: AnalyticsFlowGranularity) {
+  if (granularity === 'day') date.setUTCDate(date.getUTCDate() + 1)
+  if (granularity === 'week') date.setUTCDate(date.getUTCDate() + 7)
+  if (granularity === 'month') date.setUTCMonth(date.getUTCMonth() + 1, 1)
+}
+
+/**
+ * Parses a `YYYY-MM-DD` calendar date as UTC midnight.
+ *
+ * @param value - Calendar date.
+ * @returns The date, or `undefined` when it is invalid.
+ */
+function parseCalendarDate(value: string) {
+  const time = Date.parse(`${value}T00:00:00Z`)
+  return Number.isFinite(time) ? new Date(time) : undefined
 }
 
 /**

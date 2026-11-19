@@ -1906,6 +1906,7 @@ function AnalyticsResultWidget({
         ) : isAnalyticsFlowVisualization(widget?.visualization) && result.series.length > 0 &&
           isFlowVisualizationCompatible(widget.visualization, result.metric) ? (
           <AnalyticsFlowChart
+            granularity={readFlowGranularity(widget)}
             label={widget?.title ?? result.definition.label}
             locale={locale}
             {...(periodEnd === undefined
@@ -2105,6 +2106,17 @@ function AccessibleChart({
       </details>
     </div>
   )
+}
+
+/**
+ * Returns the calendar bucket size of a flow chart widget.
+ *
+ * @param widget - Widget definition.
+ * @returns `week` or `month` when the widget is grouped so, otherwise `day`.
+ */
+function readFlowGranularity(widget: AnalyticsWidget) {
+  const dimension = widget.groupBy?.dimension
+  return dimension === 'week' || dimension === 'month' ? dimension : 'day'
 }
 
 /**

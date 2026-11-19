@@ -4,6 +4,7 @@ import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import {
   createAnalyticsFlowChartModel,
   type AnalyticsFlowChartLayer,
+  type AnalyticsFlowGranularity,
   type AnalyticsFlowVisualization,
 } from '../model/flowChart'
 
@@ -25,6 +26,8 @@ export type AnalyticsFlowChartProps = {
   plannedEndDate?: string
   /** Chart height in SVG units; smaller values suit embedded charts. */
   height?: number
+  /** Calendar bucket size of the series; defaults to `day`. */
+  granularity?: AnalyticsFlowGranularity
 }
 
 const WIDTH = 640
@@ -58,6 +61,7 @@ const LAYER_LABEL_KEYS: Readonly<Record<string, MessageKey>> = {
  * @returns The chart.
  */
 export function AnalyticsFlowChart({
+  granularity = 'day',
   height = 220,
   label,
   locale,
@@ -69,10 +73,11 @@ export function AnalyticsFlowChart({
 }: AnalyticsFlowChartProps) {
   const model = useMemo(
     () => createAnalyticsFlowChartModel(series, visualization, {
+      granularity,
       timeZone,
       ...(plannedEndDate === undefined ? {} : { plannedEndDate }),
     }),
-    [plannedEndDate, series, timeZone, visualization],
+    [granularity, plannedEndDate, series, timeZone, visualization],
   )
   const formatter = useMemo(() => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }), [locale])
   const chartWidth = WIDTH - PADDING * 2
