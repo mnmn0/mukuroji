@@ -52,4 +52,8 @@ Cycle に「終了日の 3 日前に次の Cycle を作る」「終了日の翌�
 - 中断していた job が再開すると、遅れた分の手順を前の Cycle から順に追いつく。
 - 永続化された続きの位置（checkpoint）は持たない。1 shard に 10,000 件を超える期日の Cycle が溜まると
   実行が失敗になり alarm で分かる。そこまで溜まる実績が出てから checkpoint を検討する。
+- 候補の Cycle は index で絞り込むが、各 Cycle の手順は Workspace の Planning graph を読んで
+  revision 付きで更新する（cache が無ければ graph 全体の読み取り）。1 回の実行の費用は
+  「期日の来た Cycle の数 × その Workspace の graph の大きさ」に比例する。期日の来た Cycle は
+  通常ごく少数なので許容し、多くなったら Workspace 単位でまとめて読む形を検討する。
 - 更新した文書: `docs/planning.md`、`docs/guide/pm.md`。

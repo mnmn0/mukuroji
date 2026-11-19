@@ -9044,7 +9044,9 @@ function createNextCycleRange(source: StoredPlanningEntity, cadence: PlanningCad
 
 /** Adds calendar months to a date, clamping the day to the end of the target month. */
 function addIsoDateMonths(value: string, months: number) {
-  const [year, month, day] = value.split('-').map(Number) as [number, number, number]
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(5, 7))
+  const day = Number(value.slice(8, 10))
   const monthIndex = year * 12 + month - 1 + months
   const targetYear = Math.floor(monthIndex / 12)
   const targetMonth = monthIndex % 12
@@ -9061,7 +9063,7 @@ function addIsoDateMonths(value: string, months: number) {
 function createNextCycleTitle(title: string) {
   const match = /^(.*?)(\d+)(\D*)$/u.exec(title)
   if (!match) return readTitle(`${title} 2`)
-  const [, prefix, digits, suffix] = match as unknown as [string, string, string, string]
+  const [, prefix = '', digits = '', suffix = ''] = match
   const next = String(BigInt(digits) + 1n).padStart(digits.length, '0')
   return readTitle(`${prefix}${next}${suffix}`)
 }
@@ -9233,9 +9235,8 @@ function optionalCycleAutomation(value: unknown): { automation?: CycleAutomation
 
 /** Reads the optional carry-over history of a Work Item link. */
 function readCarryOverHistory(
-  row: Record<string, unknown> | PlanningWorkItemLink,
+  source: Record<string, unknown>,
 ): Pick<PlanningWorkItemLink, 'carriedOverFromCycleId' | 'carriedOverAt'> {
-  const source = row as Record<string, unknown>
   if (source.carriedOverFromCycleId === undefined && source.carriedOverAt === undefined) return {}
   return {
     carriedOverFromCycleId: readIdentifier(source.carriedOverFromCycleId, 'Carried-over Cycle ID'),

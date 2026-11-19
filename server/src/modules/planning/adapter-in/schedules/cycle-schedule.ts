@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import type { PlanningWorkItemLink } from '@mukuroji/contracts'
 import type {
   CycleScheduleDueCycle,
@@ -77,6 +78,8 @@ export function createCycleScheduleHandler(options: CycleScheduleOptions) {
 
   return async (event: CycleScheduleEvent = {}): Promise<CycleScheduleResult> => {
     const asOf = readScheduleTime(event.time) ?? (options.now ?? (() => new Date()))()
+    // Correlates the failure logs of one run; Workspace IDs can contain member emails, so they are not logged.
+    const runId = randomUUID()
     const result: CycleScheduleResult = {
       examined: 0,
       created: 0,
@@ -99,7 +102,9 @@ export function createCycleScheduleHandler(options: CycleScheduleOptions) {
           } catch (error) {
             result.failed += 1
             console.error('Cycle automation step failed.', {
+              runId,
               shard,
+              cycleId: cycle.cycleId,
               error: error instanceof PlanningError
                 ? error.code
                 : error instanceof Error ? error.name : 'unknown',

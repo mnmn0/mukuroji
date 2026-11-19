@@ -337,6 +337,8 @@ function WorkItemSelection({
   title: string
 }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set())
+  // While a batch is being saved the selection is frozen, so a success clears only what was sent.
+  const [submitting, setSubmitting] = useState(false)
   const selectable = items.filter(({ locked }) => !locked)
   const available = new Set(selectable.map(({ workItem }) => workItemKey(workItem)))
   const selectedKeys = [...selected].filter((key) => available.has(key))
@@ -359,14 +361,16 @@ function WorkItemSelection({
         const workItems = items
           .map(({ workItem }) => workItem)
           .filter((workItem) => keys.has(workItemKey(workItem)))
-        if (workItems.length === 0) return
+        if (submitting || workItems.length === 0) return
+        setSubmitting(true)
         try {
           await onSubmit(workItems)
+          setSelected(new Set())
         } catch {
           // The page already shows the failure; keep the selection so the batch can be retried.
-          return
+        } finally {
+          setSubmitting(false)
         }
-        setSelected(new Set())
       }}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -375,6 +379,7 @@ function WorkItemSelection({
           <div className="flex flex-wrap gap-2">
             <button
               className="workbench-button-secondary min-h-8 px-3 text-xs"
+              disabled={submitting}
               type="button"
               onClick={() => setSelected(new Set(
                 selectable.slice(0, CYCLE_WORK_ITEMS_BATCH_LIMIT).map(({ workItem }) => workItemKey(workItem)),
@@ -385,6 +390,7 @@ function WorkItemSelection({
             {selectedKeys.length > 0 ? (
               <button
                 className="workbench-button-secondary min-h-8 px-3 text-xs"
+                disabled={submitting}
                 type="button"
                 onClick={() => setSelected(new Set())}
               >
@@ -406,7 +412,7 @@ function WorkItemSelection({
                 <label className="flex min-w-0 items-center gap-2 rounded px-2 py-1 text-sm text-[var(--workbench-text)]">
                   <input
                     checked={checked}
-                    disabled={disabled || locked || (!checked && limitReached)}
+                    disabled={disabled || submitting || locked || (!checked && limitReached)}
                     type="checkbox"
                     onChange={(event) => toggle(key, event.target.checked)}
                   />
@@ -428,7 +434,7 @@ function WorkItemSelection({
       {!disabled ? (
         <button
           className="workbench-button-primary min-h-10 justify-self-start px-4 disabled:opacity-50"
-          disabled={selectedKeys.length === 0}
+          disabled={submitting || selectedKeys.length === 0}
           type="submit"
         >
           {actionLabel(selectedKeys.length)}

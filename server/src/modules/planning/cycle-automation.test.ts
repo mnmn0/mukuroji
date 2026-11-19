@@ -549,6 +549,63 @@ describe('DynamoDB Cycle schedule source', () => {
     await expect(source.listDueCycles(0, new Date())).rejects.toThrow(TypeError)
   })
 
+  test('keeps archived finished Work Items and leaves out archived open ones', async () => {
+    /** Builds a canonical Work Item row of the test Workspace. */
+    const row = (issueId: string, statusCategory: string, archivedAt?: string): Record<string, unknown> => ({
+      schemaVersion: 2,
+      revision: 1,
+      workflowSchemaVersion: 1,
+      directoryId: WORKSPACE,
+      directoryTeamId: `${WORKSPACE}#team#team-1`,
+      teamId: 'team-1',
+      issueId,
+      sortOrder: 1,
+      title: issueId,
+      assigneeUserId: 'member-1',
+      creatorMemberKey: 'member-1',
+      workflowStatusId: statusCategory,
+      statusCategory,
+      customFieldValues: {},
+      relationIds: [],
+      dueDate: '2026-08-31',
+      schedule: {
+        mode: 'due-date',
+        dueDate: '2026-08-31',
+        calendarPolicy: { timeZone: 'UTC', workingWeekdays: ['monday'], holidays: [] },
+      },
+      priority: 'medium',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-11T00:00:00.000Z',
+      ...(archivedAt ? { archivedAt, archivedBy: 'member-1' } : {}),
+    })
+    const source = createDynamoDbCycleScheduleSource({
+      documentClient: {
+        async send() {
+          return {
+            Responses: {
+              WorkItems: [
+                row('done', 'completed', '2026-08-10T00:00:00.000Z'),
+                row('dropped', 'canceled', '2026-08-10T00:00:00.000Z'),
+                row('open', 'started', '2026-08-10T00:00:00.000Z'),
+                row('active', 'started'),
+              ],
+            },
+          }
+        },
+      } as unknown as DynamoDBDocumentClient,
+      planningTableName: 'PlanningTable',
+      workItemsTableName: 'WorkItems',
+    })
+    const link = (workItemId: string) => ({
+      teamId: 'team-1',
+      workItemId,
+      goalIds: [],
+      createdAt: '2026-08-01T00:00:00.000Z',
+    })
+    const state = await source.readLinkedWorkItems(WORKSPACE, ['done', 'dropped', 'open', 'active'].map(link))
+    expect(state.workItems.map((workItem) => workItem.id)).toEqual(['done', 'dropped', 'active'])
+  })
+
   test('rejects a linked row that is not a canonical Work Item', async () => {
     const source = createDynamoDbCycleScheduleSource({
       documentClient: {

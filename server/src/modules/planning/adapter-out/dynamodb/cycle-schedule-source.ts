@@ -110,7 +110,9 @@ async function readLinkedWorkItems(
         if (!isCanonicalWorkItemRecord(row) || row.directoryId !== workspaceId) {
           throw new TypeError('Cycle schedule read an invalid canonical Work Item row.')
         }
-        if (row.archivedAt) continue
+        // An archived open Work Item stays out, so rollover fails closed as it does by hand. An archived
+        // completed or canceled one is finished work that stays with the source Cycle.
+        if (row.archivedAt && row.statusCategory !== 'completed' && row.statusCategory !== 'canceled') continue
         workItems.push({
           id: row.issueId,
           revision: row.revision,
