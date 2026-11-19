@@ -39,6 +39,7 @@ import {
   IssueCollaborationPanel,
   type IssueSummaryAiAssistance,
 } from '../../issues/ui/IssueCollaborationPanel'
+import { createIssueCommentSessionDraftKey } from '../../issues/model/commentSessionDraft'
 import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
@@ -1422,6 +1423,7 @@ export function TaskDetailPane({
               artifacts={artifacts}
               contextDraft={documentContextPromotion.documentContextDraft}
               key={`${task.teamId ?? ''}:${task.id}`}
+              {...(task.teamId ? { commentSessionDraftKey: createIssueCommentSessionDraftKey(task.teamId, task.id) } : {})}
               controller={collaboration}
               currentMemberKey={currentWorkspaceMemberKey}
               focusedCommentId={focusedCommentId}

@@ -1,4 +1,5 @@
 import { clearAppBadgeAndNotifyTabs } from '../shared/lib/pwa/appBadge'
+import { preserveSessionDrafts } from './sessionDrafts'
 
 /**
  * ブラウザに保存する Cognito 認証セッションです。
@@ -223,10 +224,16 @@ export function saveAuthSession(session: AuthSession) {
  * 別の tab が別の account でログインしている session は残します。この tab がまだ session を
  * 読んでいないときは、この tab から見える session を削除します。削除後の tab は、次のログインまで
  * ほかの account の session を読みも消しもしないので、2 回目の削除が別の account を消すことはありません。
+ * 削除の前に、表示中の画面に残っている未保存の入力をこの account の下書きとして tab に残し、
+ * 同じ account で再ログインしたときに戻せるようにします。
  */
 export function clearAuthSession() {
   try {
     const entry = findTabSessionEntry()
+    // A rejected refresh has already removed the stored session, so the tab's account names
+    // the owner of the input that is still on screen.
+    const account = entry?.session ?? (tabAccount === 'signed-out' ? null : tabAccount)
+    preserveSessionDrafts(account ? readAccessTokenSubject(account.accessToken) : undefined)
     entry?.storage.removeItem(storageKey)
     // The same account may also sit in the other store from an earlier sign-in.
     const otherStorage = entry?.storage === window.localStorage ? window.sessionStorage : window.localStorage
