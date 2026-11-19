@@ -17,6 +17,7 @@ import type { FocusSnoozeRecord } from './focus-state'
 import {
   createFocusCauseFingerprint,
   createFocusQueue,
+  focusQueueUsesApprovalSummary,
   resolveFocusEffectivePolicies,
   type FocusRelationGraphSource,
 } from './focus-queue'
@@ -1227,6 +1228,28 @@ describe('Focus queue projection', () => {
 
     expect(firstOrder).toEqual(['a-item', 'z-item'])
     expect(secondOrder).toEqual(firstOrder)
+  })
+
+  test('reads approval summaries only for active Work Items the viewer owns', () => {
+    expect(focusQueueUsesApprovalSummary(createWorkItem('owned', ' Viewer '), 'viewer')).toBeTrue()
+    expect(focusQueueUsesApprovalSummary(createWorkItem('other', 'someone-else'), 'viewer'))
+      .toBeFalse()
+    expect(focusQueueUsesApprovalSummary(
+      withContributors(createWorkItem('contributed', 'someone-else'), [{
+        assignmentId: 'b'.repeat(32),
+        memberUserId: 'viewer',
+        status: 'in-progress',
+      }]),
+      'viewer',
+    )).toBeFalse()
+    expect(focusQueueUsesApprovalSummary(
+      createWorkItem('done', 'viewer', 'medium', 'completed'),
+      'viewer',
+    )).toBeFalse()
+    expect(focusQueueUsesApprovalSummary(
+      { ...createWorkItem('archived', 'viewer'), archivedAt: '2026-08-09T10:00:00.000Z' },
+      'viewer',
+    )).toBeFalse()
   })
 })
 

@@ -65,6 +65,14 @@ export {
   type AgentRunTransactItem,
 } from './adapter-out/dynamodb/agent-run-store'
 export {
+  assertAgentRunIntegrityBounds,
+  runAgentRunsIntegrityCheck,
+  type AgentRunIntegrityBounds,
+  type AgentRunIntegrityClient,
+  type AgentRunIntegrityEvidence,
+  type AgentRunIntegrityTeam,
+} from './adapter-out/dynamodb/agent-run-integrity'
+export {
   InMemoryAgentRunStore,
   InMemoryTransactionCanceledError,
 } from './adapter-out/in-memory/agent-run-store'
