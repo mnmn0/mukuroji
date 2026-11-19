@@ -5,7 +5,11 @@ import {
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
-import { resolveCycleBacklog, summarizeCycleCommitment } from '../src/planning/model/cycles'
+import {
+  resolveCycleBacklog,
+  submitCycleWorkItemBatch,
+  summarizeCycleCommitment,
+} from '../src/planning/model/cycles'
 import { CyclePlanningPanel } from '../src/planning/ui/CyclePlanningPanel'
 import { createPlanningLabels } from '../src/planning/ui/labels'
 
@@ -115,5 +119,62 @@ describe('CyclePlanningPanel', () => {
     const items = html.slice(html.indexOf('data-testid="cycle-planning-items"'))
     expect(items).toContain('Select first 1')
     expect(items.match(/disabled=""[^>]*type="checkbox"|type="checkbox"[^>]*disabled=""/gu)).toHaveLength(1)
+  })
+})
+
+describe('submitCycleWorkItemBatch', () => {
+  /** Creates a request that stays pending until the test settles it. */
+  function createDeferredRequest() {
+    let resolve = (): void => undefined
+    let reject = (_error: unknown): void => undefined
+    const promise = new Promise<void>((onResolve, onReject) => {
+      resolve = () => onResolve()
+      reject = onReject
+    })
+    return { promise, resolve, reject }
+  }
+
+  test('locks the selection while saving and clears it only after success', async () => {
+    const events: string[] = []
+    const hooks = {
+      onStart: () => events.push('start'),
+      onSuccess: () => events.push('clear'),
+      onSettled: () => events.push('unlock'),
+    }
+    const inFlight = { current: false }
+    const request = createDeferredRequest()
+    const sent: string[][] = []
+    const first = submitCycleWorkItemBatch(inFlight, ['a'], (items) => {
+      sent.push(items)
+      return request.promise
+    }, hooks)
+
+    expect(inFlight.current).toBe(true)
+    expect(events).toEqual(['start'])
+    expect(await submitCycleWorkItemBatch(inFlight, ['b'], (items) => {
+      sent.push(items)
+    }, hooks)).toBe(false)
+    expect(sent).toEqual([['a']])
+
+    request.resolve()
+    expect(await first).toBe(true)
+    expect(events).toEqual(['start', 'clear', 'unlock'])
+    expect(inFlight.current).toBe(false)
+  })
+
+  test('keeps the selection and unlocks it when saving fails', async () => {
+    const events: string[] = []
+    const inFlight = { current: false }
+    const request = createDeferredRequest()
+    const pending = submitCycleWorkItemBatch(inFlight, ['a'], () => request.promise, {
+      onStart: () => events.push('start'),
+      onSuccess: () => events.push('clear'),
+      onSettled: () => events.push('unlock'),
+    })
+    request.reject(new Error('conflict'))
+
+    expect(await pending).toBe(false)
+    expect(events).toEqual(['start', 'unlock'])
+    expect(inFlight.current).toBe(false)
   })
 })

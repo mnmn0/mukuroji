@@ -6,8 +6,12 @@ import type {
   PlanningWorkItemSummary,
 } from '@mukuroji/contracts'
 import { CYCLE_WORK_ITEMS_BATCH_LIMIT } from '@mukuroji/contracts'
-import { useState } from 'react'
-import { resolveCycleBacklog, summarizeCycleCommitment } from '../model/cycles'
+import { useRef, useState } from 'react'
+import {
+  resolveCycleBacklog,
+  submitCycleWorkItemBatch,
+  summarizeCycleCommitment,
+} from '../model/cycles'
 
 /** Localized labels of the Cycle planning panel. */
 export type CyclePlanningLabels = {
@@ -339,6 +343,7 @@ function WorkItemSelection({
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set())
   // While a batch is being saved the selection is frozen, so a success clears only what was sent.
   const [submitting, setSubmitting] = useState(false)
+  const inFlight = useRef(false)
   const selectable = items.filter(({ locked }) => !locked)
   const available = new Set(selectable.map(({ workItem }) => workItemKey(workItem)))
   const selectedKeys = [...selected].filter((key) => available.has(key))
@@ -361,16 +366,12 @@ function WorkItemSelection({
         const workItems = items
           .map(({ workItem }) => workItem)
           .filter((workItem) => keys.has(workItemKey(workItem)))
-        if (submitting || workItems.length === 0) return
-        setSubmitting(true)
-        try {
-          await onSubmit(workItems)
-          setSelected(new Set())
-        } catch {
-          // The page already shows the failure; keep the selection so the batch can be retried.
-        } finally {
-          setSubmitting(false)
-        }
+        // The page already shows a failure; the selection then stays so the batch can be retried.
+        await submitCycleWorkItemBatch(inFlight, workItems, onSubmit, {
+          onStart: () => setSubmitting(true),
+          onSuccess: () => setSelected(new Set()),
+          onSettled: () => setSubmitting(false),
+        })
       }}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
