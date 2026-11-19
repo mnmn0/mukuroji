@@ -77,6 +77,12 @@ export type AgentRunStartInput = {
   instanceId: string
 }
 
+/** Input that resumes a started task without an active run for this agent instance. */
+export type AgentRunResumeInput = Omit<AgentRunStartInput, 'workflowStatusId'> & {
+  /** Run the agent expects to resume from; the API refuses the resume when a later run exists. */
+  expectedPreviousRunId?: string
+}
+
 /** Structured report fields sent for this instance's run; the instance ID is added by the adapter. */
 export type AgentRunReportInput = Omit<ReportAgentRunRequest, 'instanceId'>
 
@@ -197,6 +203,26 @@ export interface AgentWorkItemApi {
     /** Stalled run, now superseded. */
     supersededRun: AgentRunRecord
   }>
+  /**
+   * Starts a new run on a started task that no run claims, linked to the task's newest earlier run.
+   * The task status does not change.
+   * @param id - Task identifier within the configured Team.
+   * @param input - Revision read before deciding to resume, and the identity of this process.
+   * @param key - Idempotency key reused for uncertain retries.
+   * @returns This instance's new run and the earlier run it resumes, if any.
+   */
+  resumeRun(id: string, input: AgentRunResumeInput, key: string): Promise<{
+    /** New run of this instance. */
+    run: AgentRunRecord
+    /** Newest earlier run of the task, which the new run resumes. */
+    resumedFromRun?: AgentRunRecord
+  }>
+  /**
+   * Reads the newest run of a task, active or finished.
+   * @param id - Task identifier within the configured Team.
+   * @returns The newest run, or undefined when the task never had one.
+   */
+  latestRun(id: string): Promise<AgentRunRecord | undefined>
   /**
    * Saves a structured report and its comment for this instance's run.
    * @param runId - Run identifier.

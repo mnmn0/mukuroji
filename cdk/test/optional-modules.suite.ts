@@ -34,6 +34,7 @@ function synthesizeDefaultStack(
       // The feature flags cdk.json sets for every synthesis.
       '@aws-cdk/aws-iam:minimizePolicies': true,
       '@aws-cdk/aws-lambda:createNewPoliciesWithAddToRolePolicy': false,
+      '@aws-cdk/aws-lambda:useCdkManagedLogGroup': true,
       '@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy': true,
       ...context,
     },
@@ -162,10 +163,11 @@ describe('default deployment without optional modules', () => {
     const filters = JSON.stringify(tenantStreamMappings[0].Properties?.FilterCriteria);
     expect(filters).toContain('RETENTION_JOB');
     expect(filters).not.toContain('OPERATION#');
+    // Per-event audit retention runs in the audit projection fan-out (#491).
     expect(Object.values(resources).filter((resource) =>
       resource.Type === 'AWS::Lambda::EventSourceMapping' &&
       JSON.stringify(resource.Properties).includes(String(worker?.[0])) &&
-      JSON.stringify(resource.Properties).includes('AuditEventsTable'))).toHaveLength(1);
+      JSON.stringify(resource.Properties).includes('AuditEventsTable'))).toHaveLength(0);
   });
 
   test('keeps deleted file versions unreadable for everyone without the restore drill', () => {

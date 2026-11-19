@@ -31,6 +31,7 @@ import type { WorkspaceMember } from '../../workspace/api'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
+import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
 import {
   resolveRecordedRemainingEffortMinutes,
@@ -41,6 +42,7 @@ import {
 import { WorkItemEffortProgressEditor } from '../../work-items/ui/WorkItemEffortProgressEditor'
 import { createTeamTimeTrackingPath, createWorkItemKeyPath } from '../../shared/routing/paths'
 import { findWorkItemKeys } from '../../work-items/model/workItemKeys'
+import { WorkItemArchiveButton } from './WorkItemArchiveButton'
 import { WorkItemKeyActions } from './WorkItemKeyActions'
 import {
   isCustomFieldApplicable,
@@ -124,6 +126,8 @@ export function IssueDetailPane({
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
+  onArchiveIssue,
+  onDuplicateIssue,
   onUpdateIssue,
   onUpdateScheduleDependency,
   planningSnapshot,
@@ -168,6 +172,10 @@ export function IssueDetailPane({
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
   /** Deletes a canonical schedule dependency. */
   onDeleteScheduleDependency?: TeamIssueScreenProps['onDeleteScheduleDependency']
+  /** Archives (true) or restores (false) this Work Item; hidden when undefined. */
+  onArchiveIssue?: (issue: TeamIssue, archived: boolean) => Promise<void>
+  /** Opens the create form with a draft copied from this Work Item. */
+  onDuplicateIssue?: (issue: TeamIssue) => void
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
   /** Updates a canonical schedule dependency. */
   onUpdateScheduleDependency?: TeamIssueScreenProps['onUpdateScheduleDependency']
@@ -216,6 +224,8 @@ export function IssueDetailPane({
       onCreateScheduleDependency={onCreateScheduleDependency}
       onDeleteRelation={onDeleteRelation}
       onDeleteScheduleDependency={onDeleteScheduleDependency}
+      onArchiveIssue={onArchiveIssue}
+      onDuplicateIssue={onDuplicateIssue}
       onUpdateIssue={onUpdateIssue}
       onUpdateScheduleDependency={onUpdateScheduleDependency}
       planningSnapshot={planningSnapshot}
@@ -255,6 +265,8 @@ function IssueDetailContent({
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
+  onArchiveIssue,
+  onDuplicateIssue,
   onUpdateIssue,
   onUpdateScheduleDependency,
   planningSnapshot,
@@ -316,6 +328,10 @@ function IssueDetailContent({
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
   /** Deletes a canonical schedule dependency. */
   onDeleteScheduleDependency?: TeamIssueScreenProps['onDeleteScheduleDependency']
+  /** Archives (true) or restores (false) this Work Item; hidden when undefined. */
+  onArchiveIssue?: (issue: TeamIssue, archived: boolean) => Promise<void>
+  /** Opens the create form with a draft copied from this Work Item. */
+  onDuplicateIssue?: (issue: TeamIssue) => void
   /** Issue 更新 callback です。 */
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
   /** Updates a canonical schedule dependency. */
@@ -1189,8 +1205,31 @@ function IssueDetailContent({
               </div>
             ) : null}
           </div>
-          <IssuePriorityBadge priority={issue.priority} t={t} />
+          <div className="flex shrink-0 items-center gap-2">
+            {onDuplicateIssue ? (
+              <button
+                className="workbench-button-secondary h-8 px-3 text-xs"
+                data-testid="team-issue-duplicate"
+                disabled={isAiSummaryOperationPending}
+                onClick={() => onDuplicateIssue(issue)}
+                type="button"
+              >
+                {t('issues.duplicate.action')}
+              </button>
+            ) : null}
+            {onArchiveIssue ? (
+              <WorkItemArchiveButton
+                archived={issue.archivedAt !== undefined}
+                disabled={isAiSummaryOperationPending || isIssueUpdatePending}
+                key={`${issue.teamId}:${issue.id}`}
+                onArchiveChange={(archived) => onArchiveIssue(issue, archived)}
+                t={t}
+              />
+            ) : null}
+            <IssuePriorityBadge priority={issue.priority} t={t} />
+          </div>
         </div>
+        <TaskHandoffPanel configuration={configuration} includeDescription={hasDescriptionSection} t={t} task={issue} />
         <div className="grid min-w-0 gap-4">
           {!hasOverviewSection ? renderWorkItemTypeControl() : null}
           {renderedDetailSectionOrder.map((section) => (

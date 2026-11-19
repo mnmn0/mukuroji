@@ -1718,10 +1718,66 @@ describe('planning domain', () => {
     })
   })
 
-  test('rejects an oversized atomic Cycle rollover before changing the source', async () => {
+  test('rolls over more than one batch of incomplete Work Items across calls', async () => {
     const workItemState: PlanningWorkItemState = {
       workItems: Array.from({ length: 50 }, (_, index) =>
         createWorkItem(`work-${index}`, 'unstarted')
+      ),
+    }
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create(
+      'workspace-1',
+      createCycleInput('cycle-source', 0, { projectId: 'project-1', capacity: 50 }),
+      workItemState,
+    )
+    await client.create(
+      'workspace-1',
+      createCycleInput('cycle-target', 1, { projectId: 'project-1', capacity: 50 }),
+      workItemState,
+    )
+    await client.update('workspace-1', 'cycle-target', {
+      expectedRevision: 2,
+      patch: { baseline: NEXT_CYCLE_RANGE, forecast: NEXT_CYCLE_RANGE },
+    }, workItemState)
+    for (let index = 0; index < workItemState.workItems.length; index += 1) {
+      await client.putWorkItemLink('workspace-1', {
+        teamId: 'team-1',
+        workItemId: `work-${index}`,
+        cycleId: 'cycle-source',
+        goalIds: [],
+        expectedRevision: index + 3,
+      }, workItemState)
+    }
+
+    const first = await client.rolloverCycle('workspace-1', 'cycle-source', {
+      targetCycleId: 'cycle-target',
+      expectedRevision: 53,
+    }, workItemState)
+    expect(first.movedWorkItemIds).toHaveLength(49)
+    expect(first.remainingWorkItemCount).toBe(1)
+    expect(getEntity(first.planning.entities, 'cycle-source').status).not.toBe('completed')
+
+    const second = await client.rolloverCycle('workspace-1', 'cycle-source', {
+      targetCycleId: 'cycle-target',
+      expectedRevision: 54,
+    }, workItemState)
+    expect(second.movedWorkItemIds).toHaveLength(1)
+    expect(second.remainingWorkItemCount).toBe(0)
+    expect(getEntity(second.planning.entities, 'cycle-source').status).toBe('completed')
+    expect(second.planning.workItemLinks).toHaveLength(50)
+    for (const link of second.planning.workItemLinks) {
+      expect(link).toMatchObject({
+        cycleId: 'cycle-target',
+        carriedOverFromCycleId: 'cycle-source',
+        carriedOverAt: NOW.toISOString(),
+      })
+    }
+  })
+
+  test('rejects a completing rollover that must guard more Work Items than one transaction holds', async () => {
+    const workItemState: PlanningWorkItemState = {
+      workItems: Array.from({ length: 50 }, (_, index) =>
+        createWorkItem(`work-${index}`, 'completed')
       ),
     }
     const client = new InMemoryPlanningClient(() => NOW)

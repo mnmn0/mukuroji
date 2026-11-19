@@ -27,6 +27,7 @@ export const agentSettingsFixture: AgentSettings = {
   leaseMinutes: 45,
   allowTakeoverAfterLeaseExpiry: true,
   readyStatusIds: ['ready'],
+  resumableStatusIds: ['active'],
   requireAcceptanceCriteria: true,
   acceptanceCriteriaFieldId: 'definition-of-done',
   brief: '## Platform\n\n- Run `bun run web:test` before reporting.\n- Keep changes small.',

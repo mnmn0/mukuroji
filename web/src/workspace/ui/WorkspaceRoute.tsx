@@ -95,6 +95,12 @@ const myTasksRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'workspace.myTasks.title',
   descriptionKey: 'workspace.myTasks.description',
 }
+const workItemsRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'work-items',
+  eyebrowKey: 'workItems.crossProject.eyebrow',
+  titleKey: 'workItems.crossProject.title',
+  descriptionKey: 'workItems.crossProject.description',
+}
 const inboxRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'inbox',
   eyebrowKey: 'workspace.inbox.eyebrow',
@@ -242,6 +248,11 @@ const projectIssuesRouteMetadata: WorkspaceRouteMetadata = {
   eyebrowKey: 'workspace.myTasks.eyebrow',
   titleKey: 'workspace.myTasks.title',
   descriptionKey: 'workspace.myTasks.description',
+}
+const projectOverviewRouteMetadata: WorkspaceRouteMetadata = {
+  eyebrowKey: 'projects.overview.eyebrow',
+  titleKey: 'projects.overview.title',
+  descriptionKey: 'projects.overview.description',
 }
 const emptySessionErrors: readonly unknown[] = []
 
@@ -719,6 +730,10 @@ function resolveWorkspaceRouteMetadata(
     return myTasksRouteMetadata
   }
 
+  if (matchPath('/work-items', pathname)) {
+    return workItemsRouteMetadata
+  }
+
   if (matchPath('/inbox', pathname)) {
     return inboxRouteMetadata
   }
@@ -839,6 +854,18 @@ function resolveWorkspaceRouteMetadata(
     return {
       ...projectIssuesRouteMetadata,
       activeProjectId: decodeWorkspaceRouteParameter(projectIssuesMatch.params.projectId),
+      activeProjectTeamId: teamId ?? null,
+    }
+  }
+
+  const projectOverviewMatch = matchPath('/projects/:projectId/overview', pathname)
+
+  if (projectOverviewMatch?.params.projectId) {
+    const teamId = new URLSearchParams(search).get('teamId')
+
+    return {
+      ...projectOverviewRouteMetadata,
+      activeProjectId: decodeWorkspaceRouteParameter(projectOverviewMatch.params.projectId),
       activeProjectTeamId: teamId ?? null,
     }
   }

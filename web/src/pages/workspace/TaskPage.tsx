@@ -16,6 +16,12 @@ import { useBlocker, useLocation, useNavigate, useParams, useSearchParams } from
 import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
+import { withHierarchyRevalidation } from '../../work-items/mutations/hierarchyRevalidation'
+import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
+import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
+import { useCollapsedWorkItemOutlineKeys } from '../../shared/lib/preferences/useCollapsedWorkItemOutlineKeys'
+import { WorkItemOutlineNotice } from '../../work-items/ui/WorkItemOutlineNotice'
+import type { TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
 import { clearAuthSession, getAuthSession, isSameAuthSessionToken } from '../../auth/session'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import {
@@ -33,6 +39,9 @@ import {
   retryBulkOperation,
   undoBulkOperation,
 } from '../../bulk-operations/api'
+import { applyWorkItemArchive } from '../../bulk-operations/mutations/workItemArchive'
+import { ArchivedWorkItemsPanelContainer } from '../../issues/ui/ArchivedWorkItemsPanelContainer'
+import { useArchivedWorkItemsRefresh } from '../../issues/queries/useArchivedWorkItems'
 import {
   getProjectUsers,
   isActiveProjectAssignmentCandidate,
@@ -94,6 +103,7 @@ import {
 import { readIssueSourceKind } from '../../issues/model/contextSources'
 import {
   createProjectIssuesPath,
+  createProjectOverviewPath,
 } from '../../shared/routing/paths'
 import { useReportWorkspaceSidebarRouteState } from '../../shared/ui/sidebar'
 import {
@@ -275,6 +285,7 @@ export function TaskPage() {
     onToggleProjectQuickAccess,
   } = useWorkspaceRouteContext()
   const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
+  const refreshArchivedWorkItems = useArchivedWorkItemsRefresh()
   const [searchParams, setSearchParams] = useSearchParams()
   const projectId = params.projectId ?? 'refero'
   const selectedTeamId = searchParams.get('teamId') ?? undefined
@@ -353,8 +364,8 @@ export function TaskPage() {
     data: projectListIssues = emptyTeamIssues,
     error: taskError,
     isLoading: isProjectListLoading,
-    mutate: mutateProjectTasks,
-    publishIssues: publishProjectTasks,
+    mutate: mutateProjectTaskList,
+    publishIssues: publishProjectTaskList,
     canReadCustomerImpact,
   } = useProjectIssues(
     accessToken,
@@ -670,6 +681,50 @@ export function TaskPage() {
     searchParams,
     surface: 'project',
   })
+  const projectOutlineLayout = taskViewController.effectiveDefinition.layout
+  // The table nests rows only without grouping, as on the Team page; the Gantt chart always can.
+  const isProjectOutlineShown = (projectOutlineLayout.displayOptions.showOutline ?? false) && (
+    projectOutlineLayout.mode === 'gantt' ||
+    (projectOutlineLayout.mode === 'table' && !projectOutlineLayout.group)
+  )
+  const projectOutlineTeamIds = useMemo(
+    () => isProjectOutlineShown ? tasks.map((task) => task.teamId) : [],
+    [isProjectOutlineShown, tasks],
+  )
+  const {
+    data: projectHierarchies,
+    error: projectHierarchiesError,
+    isLoading: isProjectHierarchiesLoading,
+    isValidating: isProjectHierarchiesValidating,
+    mutate: mutateProjectHierarchies,
+  } = useTeamWorkItemHierarchies(
+    accessToken,
+    projectOutlineTeamIds,
+    Boolean(user && !currentUserError) && isProjectOutlineShown,
+  )
+  // Roll-ups and WBS numbers follow the Project's Work Items, so every refresh of the list, after
+  // an edit, a schedule change, a bulk operation, or a create, also re-reads the hierarchies.
+  const mutateProjectTasks = withHierarchyRevalidation(mutateProjectTaskList, mutateProjectHierarchies)
+  /** Publishes a refreshed Project list and re-reads the hierarchies that total it. */
+  const publishProjectTasks = (...args: Parameters<typeof publishProjectTaskList>) => {
+    void mutateProjectHierarchies().catch(() => undefined)
+    return publishProjectTaskList(...args)
+  }
+  const [collapsedProjectOutlineKeys, toggleProjectOutlineKey] = useCollapsedWorkItemOutlineKeys(
+    `project.${projectId}`,
+  )
+  const projectOutline = useMemo<TaskGanttOutline | undefined>(() => isProjectOutlineShown && projectHierarchies
+    ? {
+        hierarchies: projectHierarchies.nodesByTeam,
+        collapsedKeys: collapsedProjectOutlineKeys,
+        onToggleCollapsed: (task) => toggleProjectOutlineKey(createWorkItemOutlineKey(task.teamId, task.id)),
+      }
+    : undefined, [
+    collapsedProjectOutlineKeys,
+    isProjectOutlineShown,
+    projectHierarchies,
+    toggleProjectOutlineKey,
+  ])
   const taskViewFieldOptions = useMemo(
     () => [
       { id: 'title', label: t('tasks.create.title') },
@@ -849,6 +904,8 @@ export function TaskPage() {
       ...(projectFiles.sessionErrors ?? []),
       ...(collaboration.sessionErrors ?? []),
       ...(projectCustomerImpactError ? [projectCustomerImpactError] : []),
+      projectHierarchiesError,
+      ...(projectHierarchies ? [...projectHierarchies.errorsByTeam.values()] : []),
     ],
     currentPath,
   )
@@ -1613,6 +1670,8 @@ export function TaskPage() {
     await Promise.all([
       mutateProjectTasks(),
       mutateSelectedIssueDetail(),
+      // A bulk archive, retry, or Undo changes which Work Items the archived list shows.
+      refreshArchivedWorkItems(),
     ])
   }
 
@@ -1649,6 +1708,33 @@ export function TaskPage() {
     ))
     await revalidateAfterBulkOperation()
     return operation
+  }
+
+  /**
+   * Archives or restores one Work Item through a one-item bulk archive operation.
+   *
+   * @param task - Work Item at the revision the viewer saw.
+   * @param archived - True to archive, false to restore.
+   */
+  const handleArchiveTask = async (task: CanonicalWorkItem, archived: boolean) => {
+    if (!accessToken || !workspaceId) {
+      throw new Error(t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'))
+    }
+    requireProjectTaskWriteScope(task)
+    try {
+      await guardEnterpriseSession(applyWorkItemArchive({
+        accessToken,
+        archived,
+        fallbackErrorMessage: t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'),
+        runner: mutationRequestRunner,
+        target: task,
+        workspaceId,
+      }))
+    } finally {
+      // A failed preview is often a stale revision, so a retry needs the current one. A refresh
+      // failure must not hide the archive outcome, which the server already decided.
+      await revalidateAfterBulkOperation().catch(() => undefined)
+    }
   }
 
   const handleBulkRetry = async (operationId: string, operation?: BulkOperation) => {
@@ -1735,7 +1821,8 @@ export function TaskPage() {
           ),
         )
       }
-      await mutateSelectedIssueDetail()
+      // A parent link moves the Work Item in the hierarchy, so its WBS number and roll-ups change.
+      await Promise.all([mutateSelectedIssueDetail(), mutateProjectHierarchies()])
     } catch (error) {
       redirectEnterpriseSessionError(error)
       await refreshRelationDetailAfterConflict(error, mutateSelectedIssueDetail)
@@ -1777,7 +1864,8 @@ export function TaskPage() {
           context,
         ),
       )
-      await mutateSelectedIssueDetail()
+      // A parent link moves the Work Item in the hierarchy, so its WBS number and roll-ups change.
+      await Promise.all([mutateSelectedIssueDetail(), mutateProjectHierarchies()])
     } catch (error) {
       redirectEnterpriseSessionError(error)
       await refreshRelationDetailAfterConflict(error, mutateSelectedIssueDetail)
@@ -1877,6 +1965,7 @@ export function TaskPage() {
     ? createTaskViewOption(taskViewController.activeSavedView)
     : undefined
   const taskViewToolbar = (
+    <>
     <TaskViewToolbar
       builtInName={t('tasks.tab.table')}
       canManageShared={taskViewController.canManageShared}
@@ -1917,11 +2006,35 @@ export function TaskPage() {
       supportsEmptyGroups={projectTaskViewState.activeTab === 'board'}
       supportsLayoutPresentation={projectTaskViewState.activeTab === 'table' ||
         projectTaskViewState.activeTab === 'board'}
+      supportsOutline={projectTaskViewState.activeTab === 'table' ||
+        projectTaskViewState.activeTab === 'gantt'}
       supportsKeyboardSelection
       teams={taskViewTeams}
       t={t}
       views={taskViewOptions}
     />
+    {isProjectOutlineShown ? (
+      <WorkItemOutlineNotice
+        failedTeamCount={projectHierarchies?.errorsByTeam.size ?? (projectHierarchiesError ? 1 : 0)}
+        isLoading={isProjectHierarchiesLoading}
+        isRetrying={isProjectHierarchiesValidating}
+        onRetry={() => void mutateProjectHierarchies()}
+        t={t}
+        testId="project-task-outline"
+      />
+    ) : null}
+    <ArchivedWorkItemsPanelContainer
+      accessToken={accessToken}
+      canRestore={canMutateProjectTaskTarget}
+      key={projectId}
+      locale={locale}
+      onRestore={canMutateProjectTasks && workspaceId
+        ? (task) => handleArchiveTask(task, false)
+        : undefined}
+      scope={projectId ? { kind: 'project', id: projectId } : undefined}
+      t={t}
+    />
+    </>
   )
 
   const aiSummaryAssistanceEnabled = isAiAssistanceTaskEnabled?.('summary') ?? false
@@ -2054,6 +2167,7 @@ export function TaskPage() {
       planningErrorMessage={planningErrorMessage}
       planningSnapshot={planningSnapshot}
       onUpdateProjectMember={canManageProjectMembers ? handleUpdateProjectMember : undefined}
+      onArchiveTask={canMutateProjectTasks && workspaceId ? handleArchiveTask : undefined}
       onBulkApply={canMutateProjectTasks && workspaceId ? handleBulkApply : undefined}
       onBulkPreview={canMutateProjectTasks && workspaceId ? handleBulkPreview : undefined}
       onBulkRetry={canMutateProjectTasks && workspaceId ? handleBulkRetry : undefined}
@@ -2062,6 +2176,9 @@ export function TaskPage() {
       projectFiles={projectFiles}
       projectMembers={projectMembers}
       projectMembersErrorMessage={projectPermissionsErrorMessage}
+      onOpenProjectOverview={interactionTeamId
+        ? () => navigate(createProjectOverviewPath(projectId, interactionTeamId))
+        : undefined}
       projectName={projectName}
       projectUserQuery={projectUserQuery}
       projectUsers={projectUsers}
@@ -2083,6 +2200,7 @@ export function TaskPage() {
       taskViewPresentation={taskViewDefinitionToPresentationSettings(
         taskViewController.effectiveDefinition,
       )}
+      outline={projectOutline}
       tasks={tasks}
       teamName={interactionTeam?.name}
       teams={teams}

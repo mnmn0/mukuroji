@@ -1,20 +1,30 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { planningSnapshotFixture } from '../src/planning/fixtures'
+import type { PlanningUpdateReaction } from '@mukuroji/contracts'
+import {
+  planningSnapshotFixture,
+  planningUpdateHistoryFixture,
+} from '../src/planning/fixtures'
 import { aiPlanningGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import {
   isValidPlanningDateTime,
   readNonNegativeNumber,
 } from '../src/planning/model/cadenceForm'
 import {
+  createPlanningTargetUpdateView,
   createPlanningUpdateEvidenceCandidates,
+  derivePlanningUpdateAcknowledgement,
   createPlanningUpdateWorkItemEvidenceValue,
   extractPlanningUpdateCommentMentions,
   readPlanningEvidenceHttpsUrl,
   readPlanningUpdateEvidence,
   submitPlanningUpdateCommentAndReset,
+  PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION,
 } from '../src/planning/model/statusUpdateView'
-import { PlanningStatusUpdateComposer } from '../src/planning/ui/PlanningUpdatePrimitives'
+import {
+  PlanningStatusUpdateComposer,
+  PlanningStatusUpdateLedger,
+} from '../src/planning/ui/PlanningUpdatePrimitives'
 import { createPlanningLabels } from '../src/planning/ui/labels'
 
 const labels = createPlanningLabels('en')
@@ -243,5 +253,90 @@ describe('Planning update evidence composer', () => {
     expect(extractPlanningUpdateCommentMentions(
       `@${'a'.repeat(321)}@example.com and @dev@example.com`,
     )).toEqual(['dev@example.com'])
+  })
+})
+
+/**
+ * Builds one reaction row on the onboarding Initiative used by acknowledgement tests.
+ *
+ * @param memberKey - Member that added the reaction.
+ * @param emoji - Reaction token.
+ * @param updateVersion - Immutable update version that owns the reaction.
+ * @returns Contract reaction row.
+ */
+function createReaction(
+  memberKey: string,
+  emoji: string,
+  updateVersion: number,
+): PlanningUpdateReaction {
+  return {
+    target: { type: 'initiative', entityId: 'initiative-onboarding' },
+    updateVersion,
+    emoji,
+    memberKey,
+    createdAt: '2026-07-16T01:00:00.000Z',
+  }
+}
+
+describe('Planning update reviewer acknowledgement', () => {
+  test('is absent when the cadence has no escalation reviewer', () => {
+    expect(derivePlanningUpdateAcknowledgement([], 2, undefined)).toBeUndefined()
+    expect(derivePlanningUpdateAcknowledgement([], 2, '  ')).toBeUndefined()
+  })
+
+  test('counts only the reviewer confirmation reaction on the same version', () => {
+    const reactions = [
+      createReaction('member@example.com', PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION, 2),
+      createReaction('Manager@Example.com', '👍', 2),
+      createReaction('manager@example.com', PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION, 1),
+    ]
+    expect(derivePlanningUpdateAcknowledgement(reactions, 2, 'manager@example.com')).toEqual({
+      reviewerMemberKey: 'manager@example.com',
+    })
+    expect(derivePlanningUpdateAcknowledgement(reactions, 1, ' MANAGER@example.com ')).toEqual({
+      reviewerMemberKey: 'MANAGER@example.com',
+      acknowledgedAt: '2026-07-16T01:00:00.000Z',
+    })
+  })
+
+  test('shows reviewed and awaiting-review badges in the update ledger', () => {
+    const summary = planningSnapshotFixture.updateTargets.find((candidate) =>
+      candidate.target.type === 'initiative' &&
+      candidate.target.entityId === 'initiative-onboarding'
+    )
+    if (!summary) throw new Error('Missing onboarding update target fixture.')
+    const markup = renderToStaticMarkup(
+      <PlanningStatusUpdateLedger
+        collaboration={{
+          acknowledgementsByUpdateId: {
+            'update-initiative-1': {
+              reviewerMemberKey: 'manager@example.com',
+              acknowledgedAt: '2026-07-09T00:00:00.000Z',
+            },
+            'update-initiative-2': { reviewerMemberKey: 'manager@example.com' },
+          },
+          commentsByUpdateId: {},
+          isLoading: false,
+          isPending: false,
+          reactionsByUpdateId: {},
+        }}
+        labels={labels}
+        updateView={createPlanningTargetUpdateView(summary, planningUpdateHistoryFixture)}
+      />,
+    )
+    expect(markup).toContain('Awaiting review · manager@example.com')
+    expect(markup).toContain('Reviewed · manager@example.com · ')
+  })
+
+  test('renders no acknowledgement badge without a configured reviewer', () => {
+    const summary = planningSnapshotFixture.updateTargets[0]
+    if (!summary) throw new Error('Missing update target fixture.')
+    const markup = renderToStaticMarkup(
+      <PlanningStatusUpdateLedger
+        labels={labels}
+        updateView={createPlanningTargetUpdateView(summary, planningUpdateHistoryFixture)}
+      />,
+    )
+    expect(markup).not.toContain('planning-update-acknowledgement')
   })
 })

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import type { CustomerListInput, CustomerSavedView } from '@mukuroji/contracts'
+import { useCustomerEditing } from '../../customers/mutations/useCustomerEditing'
 import { useCustomerSavedViewMutations } from '../../customers/mutations/useCustomerSavedViewMutations'
 import { useCustomer, useCustomerSavedViews, useCustomers } from '../../customers/queries/useCustomers'
 import { CustomerDirectoryView } from '../../customers/ui/CustomerDirectoryView'
+import type { CustomerEditingProps, CustomerProjectOption } from '../../customers/ui/CustomerEditors'
+import type { ProjectDirectoryTeam } from '../../projects/api/directory'
 import { createTranslator } from '../../shared/i18n/i18n'
 import {
   createProjectIssuesPath,
@@ -53,6 +56,42 @@ export function CustomerPage() {
     customerId,
     customerAccessEnabled,
   )
+  // Saved-view management needs Customer management and business write, which also covers every
+  // Customer, contact, and Customer Request change the editors send.
+  const canEditCustomers = customerAccessEnabled && workspace.canManageCustomerViews
+  const { mutate: refreshCustomers } = customers
+  const { mutate: refreshDetail } = detail
+  const customerEditing = useCustomerEditing({
+    accessToken: workspace.accessToken,
+    enabled: canEditCustomers,
+    refresh: useCallback(
+      () => Promise.all([refreshCustomers(), refreshDetail()]),
+      [refreshCustomers, refreshDetail],
+    ),
+  })
+  const projectOptions = useMemo(() => listCustomerProjectOptions(workspace.teams), [workspace.teams])
+  const editing = useMemo((): CustomerEditingProps | undefined => canEditCustomers ? {
+    isSaving: customerEditing.isSaving,
+    errorMessage: customerEditing.errorKey ? t(customerEditing.errorKey) : undefined,
+    projects: projectOptions,
+    onCreateCustomer: async (input) => {
+      const created = await customerEditing.createCustomer(input)
+      if (created) {
+        navigate(`/customers/${encodeURIComponent(created.id)}${searchParams.toString() ? `?${searchParams.toString()}` : ''}`)
+      }
+      return Boolean(created)
+    },
+    onUpdateCustomer: customerEditing.updateCustomer,
+    onCreateContact: customerEditing.createContact,
+    onUpdateContact: customerEditing.updateContact,
+    onDeleteContact: customerEditing.deleteContact,
+    onCreateRequest: customerEditing.createRequest,
+    onUpdateRequest: customerEditing.updateRequest,
+    onLinkWorkItem: customerEditing.linkWorkItem,
+    onUnlinkWorkItem: customerEditing.unlinkWorkItem,
+    onLinkProject: customerEditing.linkProject,
+    onUnlinkProject: customerEditing.unlinkProject,
+  } : undefined, [canEditCustomers, customerEditing, navigate, projectOptions, searchParams, t])
 
   const replaceSearch = useCallback((value: string) => {
     updateDirectorySearchParams(setSearchParams, { ...filters, search: value }, groupBy)
@@ -111,6 +150,7 @@ export function CustomerPage() {
           canViewSensitiveData={workspace.canViewCustomerSensitiveData}
           customers={customers.data?.customers ?? []}
           detail={detail.data}
+          editing={editing}
           errorMessage={errorMessage}
           filters={filters}
           groupBy={groupBy}
@@ -261,4 +301,15 @@ function readSearchInteger(value: string | null): number | undefined {
 /** Reads the optional Customer grouping value from URL state. */
 function readCustomerGroupBy(value: string | null): CustomerSavedView['groupBy'] {
   return readSearchEnum(value, customerGroupings)
+}
+
+/** Lists each readable Project once, by name, for the Customer Request link picker. */
+function listCustomerProjectOptions(teams: readonly ProjectDirectoryTeam[]): CustomerProjectOption[] {
+  const projects = new Map<string, CustomerProjectOption>()
+  for (const team of teams) {
+    for (const project of team.projects) {
+      if (!projects.has(project.id)) projects.set(project.id, { id: project.id, name: project.name })
+    }
+  }
+  return [...projects.values()].sort((left, right) => left.name.localeCompare(right.name))
 }

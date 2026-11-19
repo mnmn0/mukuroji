@@ -485,6 +485,12 @@ describe('task-view surface adapters', () => {
     ])
     expect(next.filters.customFields).toEqual(definition.filters.customFields)
     expect(next.layout.mode).toBe('board')
+    expect(taskViewDefinitionToTeamState({
+      ...definition,
+      layout: { ...definition.layout, mode: 'calendar' },
+    }).viewMode).toBe('calendar')
+    expect(teamStateToTaskViewDefinition(definition, { ...state, viewMode: 'calendar' }).layout.mode)
+      .toBe('calendar')
 
     const foreignStatusDefinition = { ...definition, filters: projectDefinition.filters }
     const rescoped = teamStateToTaskViewDefinition(foreignStatusDefinition, {

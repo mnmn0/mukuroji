@@ -73,6 +73,9 @@ import {
 } from './model/queryState'
 import { applyApprovedAiSearchToRouteStateIfCurrent } from './model/aiSearchApplication'
 import { SearchResultCollection } from './ui/SearchResultCollection'
+import { readSearchWorkItemIdentity } from './model/searchWbsNumbers'
+import { useTeamWorkItemHierarchies } from '../work-items/queries/useTeamWorkItemHierarchies'
+import { createWorkItemWbsNumberIndex } from '../work-items/model/workItemHierarchy'
 import {
   NaturalLanguageSearchComposer,
   type NaturalLanguageSearchComposerProps,
@@ -215,6 +218,20 @@ export function SearchPage() {
   const canManageSharedViews = Boolean(
     user && (user.isSystemAdmin || user.workspaceRole === 'owner' || user.workspaceRole === 'admin'),
   )
+  // WBS numbers come from each result Team's hierarchy; a Team that cannot be read shows none.
+  const searchHierarchyTeamIds = useMemo(
+    () => results.flatMap((result) => readSearchWorkItemIdentity(result)?.teamId ?? []),
+    [results],
+  )
+  const { data: searchHierarchies, error: searchHierarchiesError } = useTeamWorkItemHierarchies(
+    accessToken,
+    searchHierarchyTeamIds,
+    Boolean(user && !currentUserError),
+  )
+  const searchWbsNumbers = useMemo(
+    () => searchHierarchies ? createWorkItemWbsNumberIndex(searchHierarchies.nodesByTeam) : undefined,
+    [searchHierarchies],
+  )
   const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
     currentUserError,
     [
@@ -223,6 +240,8 @@ export function SearchPage() {
       ...(workItemConfigurationLoadResult?.errors ?? []),
       savedViewsError,
       authenticatedApiError,
+      searchHierarchiesError,
+      ...(searchHierarchies ? [...searchHierarchies.errorsByTeam.values()] : []),
     ],
     `${location.pathname}${location.search}${location.hash}`,
   )
@@ -732,6 +751,7 @@ export function SearchPage() {
                     onNavigate={navigateToSearchResult}
                     results={results}
                     statusLabels={statusLabels}
+                    wbsNumbers={searchWbsNumbers}
                     workItemTypeLabels={workItemTypeLabels}
                   />
                 ) : !visibleSearchErrorMessage ? (

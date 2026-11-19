@@ -8,6 +8,7 @@ export {
 } from './adapter-in/schedules/analytics-schedule'
 export {
   AnalyticsError,
+  analyticsFilterIncludesWorkItem,
   calculateAnalyticsNextRunAt,
   compareDynamoDbStringSortKeys,
   createAnalyticsCsv,

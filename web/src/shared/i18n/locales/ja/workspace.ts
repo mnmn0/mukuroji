@@ -182,6 +182,7 @@ export const workspaceMessages = {
   'workspace.focus.policy.fieldError': '許可された範囲の値を入力してください。',
   'workspace.myTasks.eyebrow': '自分の担当',
   'workspace.myTasks.title': 'マイタスク',
+  'workspace.myTasks.layout': 'マイタスクの表示形式',
   'workspace.myTasks.description':
     '自分が次に進めるタスク、レビュー待ち、完了済みの作業をひとつの流れで扱えます。',
   'workspace.myTasks.involvement.contributor': '参加',
@@ -434,6 +435,25 @@ export const workspaceMessages = {
   'workspace.help.statusTitle': 'トラブルシューティング',
   'workspace.help.statusDescription':
     'Issue・タスクの表示や同期に問題があるときの確認事項を参照します。',
+  'workspace.help.roleGuidesTitle': '役割別の利用者ガイド',
+  'workspace.help.roleGuidesDescription':
+    '画面の使い方を役割ごとにまとめたガイドです。GitHub のリポジトリで新しいタブに開きます。',
+  'workspace.help.pmGuideTitle': 'PM ガイド',
+  'workspace.help.pmGuideDescription':
+    'Project の立ち上げ、WBS と日程、更新スケジュール、週次の近況公開、レポート、終結までの流れ。',
+  'workspace.help.memberGuideTitle': 'メンバーガイド',
+  'workspace.help.memberGuideDescription':
+    'マイタスク、フォーカス、受信箱、タスク詳細、工数の記録とタイムシートの提出。',
+  'workspace.help.adminGuideTitle': '管理者ガイド',
+  'workspace.help.adminGuideDescription':
+    '招待とロール、ワークフローとフィールド、オートメーション、エージェント設定、ID・セキュリティ。',
+  'workspace.help.agentGuideTitle': 'coding agent 利用者ガイド',
+  'workspace.help.agentGuideDescription':
+    'token の発行、クライアントへの登録、agent の作業の流れ、Factory board での確認。',
+  'workspace.help.buildTitle': '稼働中の Web build',
+  'workspace.help.buildDescription':
+    '問題を報告するときはこの commit を伝えてください。運用者はこれを手がかりに Web を前の release へ戻します。',
+  'workspace.help.buildUnknown': '開発用 build（commit 未記録）',
   'workspace.settings.eyebrow': '管理',
   'workspace.settings.title': '設定',
   'workspace.settings.description':
@@ -455,7 +475,7 @@ export const workspaceMessages = {
   'workspace.settings.install.badge.unsupported': 'この端末では通知の許可を確認できなかったため、アプリのアイコンに未読数が表示されない場合があります。',
   'workspace.settings.displayTitle': '表示設定',
   'workspace.settings.displayDescription':
-    'このブラウザで使う文字サイズ、配色、表示言語を調整します。',
+    '文字サイズ、配色、表示言語、タイムゾーンを調整します。設定はアカウントに保存され、別の端末でも引き継がれます。',
   'workspace.settings.fontSizeTitle': 'フォントサイズ',
   'workspace.settings.fontSizeDescription':
     'タスク一覧、サイドバー、設定画面などアプリ全体の文字サイズに反映されます。',
@@ -472,7 +492,14 @@ export const workspaceMessages = {
   'workspace.settings.profileDescription':
     '現在のセッションで使用しているアカウントです。',
   'workspace.settings.languageDescription':
-    '画面で使用する表示言語を選択します。変更はこのブラウザに保存されます。',
+    '画面で使用する表示言語を選択します。変更はアカウントに保存され、どの端末でも使われます。',
+  'workspace.settings.preferencesSaveFailed':
+    '表示設定をアカウントに保存できませんでした。保存できるまでは、この端末だけに反映されます。',
+  'workspace.settings.preferencesSaveRetry': '再試行',
+  'workspace.settings.timeZoneTitle': 'タイムゾーン',
+  'workspace.settings.timeZoneDescription':
+    'アカウントに保存するタイムゾーンを選択します。「ブラウザの設定」のままにすると、この端末の設定に従います。',
+  'workspace.settings.timeZoneBrowser': 'ブラウザの設定',
   'workspace.settings.notificationTitle': '通知設定',
   'workspace.settings.notificationDescription':
     '受信箱とSlackへの通知、配信頻度、通知しない時間帯を設定します。',
@@ -746,9 +773,9 @@ export const workspaceMessages = {
   'sidebar.archive.error': 'アーカイブできませんでした',
   'sidebar.archive.confirmTitle': 'アーカイブの確認',
   'sidebar.archive.confirmTeamDescription':
-    '{name} と配下のプロジェクトをアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。',
+    '{name} と配下のプロジェクトをアーカイブし、サイドバーから非表示にします。設定の「チームとプロジェクトの管理」から復元できます。',
   'sidebar.archive.confirmProjectDescription':
-    '{name} をアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。',
+    '{name} をアーカイブし、サイドバーから非表示にします。設定の「チームとプロジェクトの管理」から復元できます。',
   'sidebar.archive.cancel': 'キャンセル',
   'sidebar.archive.confirm': 'アーカイブ',
   'sidebar.teamOverview': 'チーム概要',
@@ -762,6 +789,7 @@ export const workspaceMessages = {
   'sidebar.unreadCount': '{count}件の未読',
   'sidebar.nav.home': 'ホーム',
   'sidebar.nav.myTasks': 'マイタスク',
+  'sidebar.nav.workItems': 'Work Item 一覧',
   'sidebar.nav.inbox': '受信箱',
   'sidebar.nav.requests': 'リクエスト',
   'sidebar.nav.customers': '顧客',
