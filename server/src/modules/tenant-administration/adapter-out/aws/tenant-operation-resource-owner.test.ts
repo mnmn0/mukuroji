@@ -1013,6 +1013,98 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
   })
 
+  test('exports only the NDJSON parts of asynchronous audit export jobs', async () => {
+    const workspaceId = 'workspace/one'
+    const auditPrefix = `audit-exports/${createHash('sha256').update(workspaceId).digest('hex')}/`
+    const exportId = 'c'.repeat(32)
+    const partKey = `${auditPrefix}${exportId}/part-00001-${'d'.repeat(64)}.ndjson`
+    const listedKeys = [
+      `${auditPrefix}${exportId}/job.json`,
+      `${auditPrefix}index/0000000000001-${exportId}`,
+      partKey,
+    ]
+    const listedPrefixes: string[] = []
+    const copiedSources: string[] = []
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const listedPrefix = readHttpQueryValue(request, 'prefix')
+          if (readHttpQueryValue(request, 'list-type') === '2' && listedPrefix) {
+            listedPrefixes.push(listedPrefix)
+            const contents = listedKeys
+              .map((key) => `<Contents><Key>${key}</Key><Size>7</Size></Contents>`)
+              .join('')
+            return createS3XmlResponse(
+              `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+              `<Name>audit-exports</Name><Prefix>${listedPrefix}</Prefix>` +
+              `<KeyCount>${listedKeys.length}</KeyCount><MaxKeys>20</MaxKeys>` +
+              `<IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`,
+            )
+          }
+          const copySource = readHttpHeader(request, 'x-amz-copy-source')
+          if (copySource) {
+            copiedSources.push(decodeURIComponent(copySource))
+            return createS3XmlResponse(
+              '<CopyObjectResult><ETag>"etag-1"</ETag></CopyObjectResult>',
+            )
+          }
+          throw new Error('Unexpected S3 export request.')
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation(workspaceId),
+      kind: 'export',
+      currentStep: 'snapshot',
+      completedSteps: [],
+      exportFormat: 'jsonl',
+      revision: 1,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId,
+      operationId: operation.operationId,
+      step: 'snapshot',
+      cursor: {
+        targetIndex: 25,
+        phase: 'snapshot',
+        processedCount: 0,
+        snapshotRunId: 'b'.repeat(32),
+      },
+    }
+
+    try {
+      const result = await owner.execute(job, operation)
+
+      expect(result).toMatchObject({ status: 'continuing' })
+      expect(listedPrefixes).toEqual([auditPrefix])
+      expect(copiedSources).toEqual([`audit-exports/${partKey}`])
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
   test('exports regular, Request Intake, and Work Item import objects', async () => {
     const workspaceId = 'workspace/one'
     const requestWorkspaceDigest = createHash('sha256')

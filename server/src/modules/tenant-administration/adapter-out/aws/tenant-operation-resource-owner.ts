@@ -237,6 +237,11 @@ type TenantFileNamespace = {
   readonly prefix: string
   /** Relative directory used when copying current objects into an export. */
   readonly exportDirectory: string
+  /**
+   * Selects which objects an export copies, by key relative to the prefix. Omitted means every
+   * object. Closure deletion and verification always cover the whole namespace.
+   */
+  readonly exportsObject?: (relativeKey: string) => boolean
 }
 
 /** Every resource cursor accepted by a lifecycle resource owner. */
@@ -530,6 +535,9 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         bucketName: this.config.auditExportBucketName,
         prefix: createAuditExportWorkspacePrefix(workspaceId),
         exportDirectory: 'audit-exports',
+        // Only the NDJSON parts hold the public audit event view. The job document carries the
+        // request fingerprint and the index markers are bookkeeping, so neither is exported.
+        exportsObject: isAuditExportPartKey,
       },
     ]
   }
@@ -788,6 +796,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     for (const object of response.Contents ?? []) {
       const objectKey = requireTenantFileKey(namespace, object.Key)
       const relativeKey = objectKey.slice(namespace.prefix.length)
+      if (namespace.exportsObject && !namespace.exportsObject(relativeKey)) continue
       await this.s3Client.send(new CopyObjectCommand({
         Bucket: this.config.tenantExportBucketName,
         Key: `${createExportPrefix(operation)}/snapshot/${namespace.exportDirectory}/${relativeKey}`,
@@ -1941,6 +1950,16 @@ function normalizeItems(
   values: Record<string, unknown>[] | undefined,
 ): Record<string, unknown>[] {
   return (values ?? []).filter(isRecord)
+}
+
+/**
+ * Returns whether a key relative to the audit export namespace names an NDJSON export part.
+ *
+ * @param relativeKey - Object key relative to the Workspace audit export prefix.
+ * @returns True for `<exportId>/part-<n>-<sha256>.ndjson` keys.
+ */
+function isAuditExportPartKey(relativeKey: string): boolean {
+  return /^[0-9a-f]{32}\/part-\d{5}-[0-9a-f]{64}\.ndjson$/u.test(relativeKey)
 }
 
 /** Export target ID of the immutable audit event table. */
