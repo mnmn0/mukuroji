@@ -21,6 +21,7 @@ import {
 } from '@mukuroji/contracts'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { SearchKeyJump } from './SearchKeyJump'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
@@ -902,6 +903,7 @@ function SearchToolbar({
             value={getSearchKeyword(routeState.filters)}
           />
         </label>
+        <SearchKeyJump keyword={getSearchKeyword(routeState.filters)} t={t} />
         {onUpdateSelectedView && selectedSavedView ? (
           <button className="workbench-button-primary min-h-10 px-4" onClick={onUpdateSelectedView} type="button">
             {t('search.saved.update')}

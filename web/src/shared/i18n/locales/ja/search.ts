@@ -7,6 +7,7 @@ export const searchMessages = {
   'search.description': '閲覧できる Work Item、プロジェクト、ドキュメント、ホワイトボード、コメントを1か所から探せます。',
   'search.input.label': 'Workspace を検索',
   'search.input.placeholder': 'キーワードを入力、または filter を組み合わせる',
+  'search.keyJump': '{key} を開く',
   'search.loading': '検索結果を読み込んでいます。',
   'search.error': '検索結果を取得できませんでした。',
   'search.emptyTitle': '条件に合う結果はありません',

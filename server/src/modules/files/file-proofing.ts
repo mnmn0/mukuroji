@@ -289,6 +289,16 @@ export type FileApprovalCompletionTransition = {
   workflowSchemaVersion: typeof WORK_ITEM_CONFIGURATION_SCHEMA_VERSION
   /** Work Item 更新の optimistic concurrency に使う revision です。 */
   expectedRevision: number
+  /**
+   * Actual dates the Work Item holds after the transition; absent fields are removed.
+   * Omitted when the caller does not track actual dates.
+   */
+  actualDates?: {
+    /** Local date when the Work Item first entered the started or completed category. */
+    actualStartDate?: string
+    /** Local date of the latest effective completion. */
+    actualEndDate?: string
+  }
   /** Definition の同時変更を検出する DynamoDB ConditionCheck 一覧です。 */
   configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
@@ -1867,6 +1877,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     }
     if (completionTransition && this.workItemsTableName) {
       transactionItems.push(...completionTransition.configurationConditionChecks)
+      const actualDateUpdate = createCompletionActualDateUpdate(completionTransition.actualDates)
       transactionItems.push({
         Update: {
           TableName: this.workItemsTableName,
@@ -1877,13 +1888,14 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           UpdateExpression:
             'SET #workflowStatusId = :workflowStatusId, #statusCategory = :statusCategory, ' +
             '#workflowSchemaVersion = :workflowSchemaVersion, updatedAt = :updatedAt, ' +
-            'revision = revision + :one',
+            'revision = revision + :one' + actualDateUpdate.expression,
           ConditionExpression:
             'attribute_exists(issueId) AND revision = :expectedRevision',
           ExpressionAttributeNames: {
             '#statusCategory': 'statusCategory',
             '#workflowSchemaVersion': 'workflowSchemaVersion',
             '#workflowStatusId': 'workflowStatusId',
+            ...actualDateUpdate.names,
           },
           ExpressionAttributeValues: {
             ':statusCategory': completionTransition.statusCategory,
@@ -1895,6 +1907,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
               completionTransition.expectedRevision,
               'Work Item revision',
             ),
+            ...actualDateUpdate.values,
           },
         },
       })
@@ -3867,4 +3880,33 @@ function isResourceNotFoundError(error: unknown) {
 function isResourceInUseError(error: unknown) {
   return typeof error === 'object' && error !== null &&
     'name' in error && error.name === 'ResourceInUseException'
+}
+
+/**
+ * Builds the update expression suffix that stores the actual dates after an approval transition.
+ *
+ * @param actualDates - Actual dates after the transition, or undefined to leave them unchanged.
+ * @returns The `SET` additions and `REMOVE` clause with their attribute names and values.
+ */
+function createCompletionActualDateUpdate(
+  actualDates: FileApprovalCompletionTransition['actualDates'],
+): { expression: string, names: Record<string, string>, values: Record<string, string> } {
+  if (!actualDates) return { expression: '', names: {}, values: {} }
+  const names: Record<string, string> = {}
+  const values: Record<string, string> = {}
+  const setExpressions: string[] = []
+  const removeExpressions: string[] = []
+  for (const field of ['actualStartDate', 'actualEndDate'] as const) {
+    names[`#${field}`] = field
+    const value = actualDates[field]
+    if (value === undefined) {
+      removeExpressions.push(`#${field}`)
+    } else {
+      values[`:${field}`] = value
+      setExpressions.push(`#${field} = :${field}`)
+    }
+  }
+  const setSuffix = setExpressions.map((expression) => `, ${expression}`).join('')
+  const removeClause = removeExpressions.length > 0 ? ` REMOVE ${removeExpressions.join(', ')}` : ''
+  return { expression: setSuffix + removeClause, names, values }
 }

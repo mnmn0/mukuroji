@@ -35,6 +35,7 @@ import {
 } from '../model/workItemConfigurationEditor'
 import { WorkItemTypeIcon } from './WorkItemTypeIcon'
 import { JobRolesConfigurationSection } from './JobRolesConfigurationSection'
+import { ParentCompletionPolicyConfigurationSection } from './ParentCompletionPolicyConfigurationSection'
 import { ProgressModeConfigurationSection } from './ProgressModeConfigurationSection'
 
 /**
@@ -264,6 +265,11 @@ function WorkItemConfigurationPanelContent({
               savedJobRoleIds={savedJobRoleIds}
             />
             <ProgressModeConfigurationSection
+              configuration={draft}
+              locale={locale}
+              onChange={setDraft}
+            />
+            <ParentCompletionPolicyConfigurationSection
               configuration={draft}
               locale={locale}
               onChange={setDraft}

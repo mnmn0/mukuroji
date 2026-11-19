@@ -40,6 +40,14 @@ import { isStoredContributorAssignmentList } from '../../domain/contributor-assi
 import { isStoredAcceptanceCriterionList } from '../../domain/acceptance-criteria'
 import { createResourceId } from '../../domain/resource-id'
 import {
+  WORK_ITEM_ACTUAL_DATE_FIELDS,
+  WorkItemActualDateError,
+  applyWorkItemStatusTransitionToActualDates,
+  correctWorkItemActualDates,
+  type WorkItemActualDateCorrection,
+  type WorkItemActualDates,
+} from '../../domain/actual-dates'
+import {
   allocateWorkItemKey,
   createWorkItemKeyReservationPut,
   readWorkItemKeyLocation,
@@ -48,6 +56,7 @@ import {
 import {
   deriveWorkItemScheduleDueDate,
   normalizeWorkItemSchedule,
+  workItemScheduleInstantToLocalDate,
   WorkItemScheduleError,
 } from '../../domain/work-item-schedule'
 import {
@@ -73,6 +82,7 @@ import type {
 import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  createDefaultWorkItemHierarchyRank,
   isWorkItemEffortMinutes,
   isWorkItemProgressPercent,
   parseWorkItemKey,
@@ -104,6 +114,12 @@ import type {
 
 /** Physical Planning META key that serializes canonical Work Item projections. */
 const PLANNING_META_RECORD_KEY = 'META'
+
+/**
+ * Rows one hierarchy read may evaluate for each Work Item it may return, so archived rows cannot
+ * make the read unbounded.
+ */
+const TEAM_HIERARCHY_EVALUATED_ROWS_PER_ITEM = 10
 
 /** Keys tried for a new Work Item before giving up on IDs taken by older title-based IDs. */
 const CREATED_WORK_ITEM_ID_ATTEMPT_LIMIT = 5
@@ -521,6 +537,8 @@ type TeamIssueItem = {
    * チーム内の表示順です。
    */
   sortOrder: number
+  /** Sibling order rank under the parent; absent until the Work Item is reordered. */
+  hierarchyRank?: string
   /**
    * Issue タイトルです。
    */
@@ -577,6 +595,10 @@ type TeamIssueItem = {
   priorityUpdatedAt?: string
   /** Derived due date の直近変更時刻です。 */
   dueDateUpdatedAt?: string
+  /** Local date when the Work Item first entered the started or completed category. */
+  actualStartDate?: string
+  /** Local date of the latest effective completion; present only while completed. */
+  actualEndDate?: string
   /** Time the item last returned to open work from completed, canceled, or archived. */
   reopenedAt?: string
   /**
@@ -665,6 +687,14 @@ export type TeamIssueResponseItem = CanonicalWorkItem & {
    * Issue 作成者の Workspace member key です。
    */
   creatorMemberKey: string
+}
+
+/** One Work Item read for the Team hierarchy read model. */
+export type TeamWorkItemHierarchyEntry = {
+  /** Canonical Work Item. */
+  issue: TeamIssueResponseItem
+  /** Stored rank, or the rank derived from the Team creation order when none is stored. */
+  hierarchyRank: string
 }
 
 /** Work Item 一覧 client の読み込み量を制御します。 */
@@ -870,11 +900,9 @@ export type TeamIssueDetailResponse = {
 }
 
 /**
- * チーム Issue 作成 API が受け取る request body です。
+ * Client が Work Item 作成 API に送れる公開 field だけの request body です。
  */
-export type CreateTeamIssueRequestBody = {
-  /** Internal automation create action が再配送間で固定する resource ID です。 */
-  idempotencyResourceId?: unknown
+export type PublicCreateTeamIssueRequestBody = {
   /**
    * Issue タイトルです。
    */
@@ -911,6 +939,14 @@ export type CreateTeamIssueRequestBody = {
   customFieldValues?: unknown
   /** Quick capture では required custom field の入力を後回しにします。 */
   quickCapture?: unknown
+}
+
+/**
+ * 検証済みの設定値と内部 adapter 専用 field を含むチーム Issue 作成入力です。
+ */
+export type CreateTeamIssueRequestBody = PublicCreateTeamIssueRequestBody & {
+  /** Internal automation create action が再配送間で固定する resource ID です。 */
+  idempotencyResourceId?: unknown
   /** API handler が検証後に付与する workflow extension schema version です。 */
   workflowSchemaVersion?: unknown
   /** API handler が検証後に付与する workflow status category です。 */
@@ -1076,6 +1112,10 @@ export type PublicUpdateTeamIssueRequestBody = {
   customFieldValues?: unknown
   /** Explicit acknowledgement for data affected by changing the Work Item Type. */
   typeChangeResolution?: unknown
+  /** Manager correction of the actual start date; the API handler moves it to `actualDateCorrection`. */
+  actualStartDate?: unknown
+  /** Manager correction of the actual end date; the API handler moves it to `actualDateCorrection`. */
+  actualEndDate?: unknown
 }
 
 /**
@@ -1101,6 +1141,13 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   archivedAt?: unknown
   /** Internal bulk operation が記録する archive actor member key です。 */
   archivedBy?: unknown
+  /** Team manager correction of the actual dates, authorized by the API handler. */
+  actualDateCorrection?: WorkItemActualDateCorrection
+  /**
+   * ISO instant that dates the status transition, set by an internal caller that predicted the
+   * resulting actual dates at that instant. Defaults to the update time.
+   */
+  actualDateTransitionAt?: string
   /**
    * Agent Run claim, fence, and lease writes committed in the same transaction as the update.
    * A conditional failure in these items is reported as an Agent Run fence conflict.
@@ -1215,6 +1262,20 @@ export type TeamIssuesClient = {
     teamId: string,
     options?: WorkItemListReadOptions,
   ): Promise<TeamIssuesResponse>
+  /**
+   * Strongly reads a Team's non-archived Work Items with their effective sibling order ranks for
+   * the hierarchy read model.
+   *
+   * @param directoryId - Workspace directory ID.
+   * @param teamId - Team whose Work Items are read.
+   * @param limit - Most Work Items to read; one more is read to detect a larger Team.
+   * @returns Up to `limit + 1` Work Items with their ranks.
+   */
+  getTeamHierarchyEntries?(
+    directoryId: string,
+    teamId: string,
+    limit: number,
+  ): Promise<TeamWorkItemHierarchyEntry[]>
   /**
    * Resolves a Work Item key to the Team and Work Item that hold it, without authorizing them.
    *
@@ -1635,6 +1696,37 @@ export class DynamoDbTeamIssuesClient {
         throw error
       }
 
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Strongly reads a Team's non-archived Work Items with their effective sibling order ranks.
+   *
+   * @param directoryId - Workspace directory ID.
+   * @param teamId - Team whose Work Items are read.
+   * @param limit - Most Work Items to read; one more is read to detect a larger Team.
+   * @returns Up to `limit + 1` Work Items with their ranks.
+   */
+  async getTeamHierarchyEntries(
+    directoryId: string,
+    teamId: string,
+    limit: number,
+  ): Promise<TeamWorkItemHierarchyEntry[]> {
+    await this.ensureLocalTables()
+    try {
+      const items = await this.queryTeamHierarchyItems(directoryId, teamId, limit + 1)
+      return items.map((item) => {
+        const issue = toTeamIssueResponseItem(item)
+        return {
+          issue,
+          hierarchyRank: item.hierarchyRank ?? createDefaultWorkItemHierarchyRank(item.sortOrder, issue.id),
+        }
+      })
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
       throw toProjectDataError(error)
     }
   }
@@ -2164,6 +2256,12 @@ export class DynamoDbTeamIssuesClient {
         item.customerCompletionPreparationAt = now
         item.customerCompletionPreparationRevision = item.revision
       }
+      Object.assign(item, applyWorkItemStatusTransitionToActualDates(
+        {},
+        undefined,
+        statusCategory,
+        workItemScheduleInstantToLocalDate(now, schedule.calendarPolicy),
+      ))
 
       const eventItem = this.createIssueEventItem({
         directoryId,
@@ -2196,6 +2294,8 @@ export class DynamoDbTeamIssuesClient {
           'dueDate',
           'schedule',
           'priority',
+          'actualStartDate',
+          'actualEndDate',
           'sourceRequestId',
           'sourceTriageEntryId',
         ]),
@@ -2946,6 +3046,26 @@ export class DynamoDbTeamIssuesClient {
           '#customerCompletionPreparationRevision',
         )
       }
+      const actualDateUpdate = createWorkItemActualDateUpdate(
+        beforeIssue,
+        nextStatusCategory,
+        workItemScheduleInstantToLocalDate(
+          readActualDateTransitionAt(input.actualDateTransitionAt, updatedAt),
+          schedule.calendarPolicy,
+        ),
+        input.actualDateCorrection,
+      )
+      for (const field of WORK_ITEM_ACTUAL_DATE_FIELDS) {
+        if (actualDateUpdate[field] === beforeIssue[field]) continue
+        expressionAttributeNames[`#${field}`] = field
+        const value = actualDateUpdate[field]
+        if (value === undefined) {
+          removeExpressions.push(`#${field}`)
+        } else {
+          expressionAttributeValues[`:${field}`] = value
+          setExpressions.push(`#${field} = :${field}`)
+        }
+      }
       const updateExpression = [
         `SET ${setExpressions.join(', ')}`,
         removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
@@ -3024,6 +3144,8 @@ export class DynamoDbTeamIssuesClient {
           'remainingEffortMinutes',
           'progressPercent',
           'priority',
+          'actualStartDate',
+          'actualEndDate',
           'archivedAt',
           'archivedBy',
         ]),
@@ -3040,6 +3162,7 @@ export class DynamoDbTeamIssuesClient {
           afterRevision: nextRevision,
           ...(completionTransition ? { completionTransition: true } : {}),
           ...(leavesCompletion ? { completionReopened: true } : {}),
+          ...(input.actualDateCorrection ? { actualDateCorrection: true } : {}),
         },
       })
       const idempotencyCompletion = await idempotency?.prepare({
@@ -3555,6 +3678,59 @@ export class DynamoDbTeamIssuesClient {
     } while (exclusiveStartKey)
 
     return { items }
+  }
+
+  /**
+   * Strongly reads a Team's non-archived rows for the hierarchy, within a budget of evaluated rows.
+   *
+   * Archived rows are read and dropped, so without a budget a Team with many archived Work Items
+   * would make one hierarchy read scan its whole partition.
+   *
+   * @param directoryId - Workspace directory that owns the Team partition.
+   * @param teamId - Team whose Work Items are read.
+   * @param limit - Non-archived rows after which reading stops.
+   * @returns Up to `limit` non-archived rows.
+   * @throws ProjectDataError `413 WorkItemListLimitExceeded` when the budget runs out first.
+   */
+  private async queryTeamHierarchyItems(
+    directoryId: string,
+    teamId: string,
+    limit: number,
+  ): Promise<TeamIssueItem[]> {
+    const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
+    const maxEvaluatedRows = limit * TEAM_HIERARCHY_EVALUATED_ROWS_PER_ITEM
+    const items: TeamIssueItem[] = []
+    let evaluatedCount = 0
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      if (evaluatedCount >= maxEvaluatedRows) {
+        throw new ProjectDataError(
+          413,
+          'WorkItemListLimitExceeded',
+          'This Team has too many archived Work Items to read its hierarchy at once.',
+        )
+      }
+      const response = await this.documentClient.send(
+        new QueryCommand({
+          TableName: this.issueTableName,
+          ConsistentRead: true,
+          KeyConditionExpression: 'directoryTeamId = :directoryTeamId',
+          ExpressionAttributeValues: { ':directoryTeamId': directoryTeamId },
+          ExclusiveStartKey: exclusiveStartKey,
+          Limit: maxEvaluatedRows - evaluatedCount,
+        }),
+      )
+      // Validate row by row, so rows after the limit are never parsed and cannot fail the read.
+      for (const stored of response.Items ?? []) {
+        evaluatedCount += 1
+        const row = toTeamIssueItem(stored)
+        if (row.archivedAt !== undefined) continue
+        items.push(row)
+        if (items.length >= limit) return items
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return items
   }
 
   /**
@@ -4313,7 +4489,66 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     issue.archivedBy = item.archivedBy
   }
 
+  if (item.actualStartDate) {
+    issue.actualStartDate = item.actualStartDate
+  }
+
+  if (item.actualEndDate) {
+    issue.actualEndDate = item.actualEndDate
+  }
+
   return issue
+}
+
+/**
+ * Reads the instant that dates a status transition.
+ *
+ * @param value - Instant chosen by an internal caller, if any.
+ * @param updatedAt - Update time used when no caller chose an instant.
+ * @returns The instant to date the transition by.
+ * @throws ProjectDataError when the caller passed an invalid instant.
+ */
+function readActualDateTransitionAt(value: string | undefined, updatedAt: string): string {
+  if (value === undefined) return updatedAt
+  if (Number.isNaN(Date.parse(value))) {
+    throw new ProjectDataError(400, 'InvalidWorkItemActualDates', 'Actual date transition time is invalid.')
+  }
+  return value
+}
+
+/**
+ * Resolves the actual dates after one Work Item update.
+ *
+ * @param beforeIssue - Stored Work Item before the update.
+ * @param nextStatusCategory - Status category after the update.
+ * @param today - Local date of the update in the schedule calendar timezone.
+ * @param correction - Optional manager correction authorized by the API handler.
+ * @returns The actual dates to store after the update.
+ */
+function createWorkItemActualDateUpdate(
+  beforeIssue: TeamIssueItem,
+  nextStatusCategory: WorkflowStatusCategory,
+  today: string,
+  correction: WorkItemActualDateCorrection | undefined,
+): WorkItemActualDates {
+  const transitioned = applyWorkItemStatusTransitionToActualDates(
+    {
+      ...(beforeIssue.actualStartDate ? { actualStartDate: beforeIssue.actualStartDate } : {}),
+      ...(beforeIssue.actualEndDate ? { actualEndDate: beforeIssue.actualEndDate } : {}),
+    },
+    beforeIssue.statusCategory,
+    nextStatusCategory,
+    today,
+  )
+  if (!correction) return transitioned
+  try {
+    return correctWorkItemActualDates(transitioned, correction, nextStatusCategory, today)
+  } catch (error) {
+    if (error instanceof WorkItemActualDateError) {
+      throw new ProjectDataError(400, error.code, error.message)
+    }
+    throw error
+  }
 }
 
 function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueActivityResponseItem {

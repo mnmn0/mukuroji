@@ -98,6 +98,7 @@ import {
 } from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 import { TaskHandoffPanel } from './TaskHandoffPanel'
+import { TaskActualDatesPanel } from './TaskActualDatesPanel'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
 export type TaskDetailAiAssistanceRenderContext = {
@@ -188,6 +189,8 @@ export type TaskDetailPaneProps = {
   isLoading: boolean
   /** Whether a bulk mutation currently targets this Work Item. */
   isBulkOperationPending?: boolean
+  /** Whether an Undo or Redo of this Work Item is saving; edits wait for it. */
+  isHistoryRestorePending?: boolean
   /** Whether this pane is retained read-only after its live Project scope disappeared. */
   isRetainedDetail?: boolean
   /** Explanation shown when the retained detail can no longer be edited. */
@@ -214,6 +217,8 @@ export type TaskDetailPaneProps = {
   onCommentDraftDirtyChange?: (isDirty: boolean) => void
   /** Cancels an accepted Schedule action when explicit save detects no schedule change. */
   onScheduleNoChange?: (teamId: string, issueId: string) => void
+  /** Whether the viewer manages the Work Item's Project and may correct its actual dates. */
+  canCorrectActualDates?: boolean
   /** Saves editable fields on the selected Work Item. */
   onUpdateIssue?: (
     teamId: string,
@@ -299,6 +304,7 @@ export function TaskDetailPane({
   focusedRootCommentId,
   isLoading,
   isBulkOperationPending = false,
+  isHistoryRestorePending = false,
   isRetainedDetail = false,
   isRelationCandidatesLoading,
   locale,
@@ -313,6 +319,7 @@ export function TaskDetailPane({
   onDeleteRelation,
   onDeleteScheduleDependency,
   onScheduleNoChange,
+  canCorrectActualDates = false,
   onUpdateIssue,
   onUpdateScheduleDependency,
   projects,
@@ -340,6 +347,7 @@ export function TaskDetailPane({
     workItemId: task?.id ?? '',
   })
   const isWorkItemMutationPending = isIssueSaving ||
+    isHistoryRestorePending ||
     isAiPlanningOperationPending ||
     isAiSummaryOperationPending
   const [aiFormSeed, setAiFormSeed] = useState<WorkItemAiFormSeed>({
@@ -751,6 +759,7 @@ export function TaskDetailPane({
       !task.teamId ||
       !onUpdateIssue ||
       isIssueSavingRef.current ||
+      isHistoryRestorePending ||
       isAiPlanningOperationPendingRef.current ||
       isAiSummaryOperationPendingRef.current
     ) return
@@ -1206,6 +1215,7 @@ export function TaskDetailPane({
         )
       case 'schedule':
         return (
+          <>
           <fieldset
             className="contents"
             disabled={isReadOnly || isWorkItemMutationPending}
@@ -1310,6 +1320,17 @@ export function TaskDetailPane({
               />
             </div>
           </fieldset>
+          <TaskActualDatesPanel
+            canCorrect={Boolean(canCorrectActualDates && onUpdateIssue) && !isReadOnly}
+            disabled={isReadOnly || isWorkItemMutationPending}
+            onCorrect={(patch) => {
+              void submitIssueUpdate(patch)
+            }}
+            t={t}
+            // The loaded detail is newer than the list row, so the panel shows its dates.
+            task={issue ?? task}
+          />
+          </>
         )
       case 'relations':
         return (

@@ -13,6 +13,7 @@ import type {
   WorkItemPatch,
   WorkItemRelation,
   WorkItemTriageContextSnapshot,
+  WorkItemKeyLookupResponse,
   WorkItemTypeChangePreview,
   WorkItemSummaryResponse,
   WorkspaceWorkItemListFilter,
@@ -264,6 +265,37 @@ export async function getTeamIssueDetail(
     `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`,
     accessToken,
   )
+}
+
+/**
+ * Resolves a Work Item key, such as `PT-12`, to the Team and Work Item it names.
+ *
+ * @param key - Canonical Work Item key.
+ * @param accessToken - Bearer token for the Work Item API.
+ * @returns Where the Work Item lives. The server answers 404 for unknown, deleted, or hidden keys.
+ */
+export async function getWorkItemByKey(key: string, accessToken?: string) {
+  const location = await requestJson<unknown>(
+    `${issuesApiBaseUrl}/work-items/keys/${encodeURIComponent(key)}`,
+    accessToken,
+  )
+  if (!isWorkItemKeyLookupResponse(location)) {
+    throw new TeamIssuesApiError(502, defaultIssuesApiErrorMessage)
+  }
+  return location
+}
+
+/**
+ * Checks the key lookup response before the client navigates with it.
+ *
+ * @param value - Parsed response body.
+ * @returns Whether every field is a non-empty string.
+ */
+function isWorkItemKeyLookupResponse(value: unknown): value is WorkItemKeyLookupResponse {
+  if (typeof value !== 'object' || value === null) return false
+  const record = value as Record<string, unknown>
+  return ['key', 'teamId', 'workItemId'].every((field) =>
+    typeof record[field] === 'string' && record[field] !== '')
 }
 
 /**

@@ -63,6 +63,7 @@ import {
   formatShowMoreLabel,
   TASK_BOARD_COLUMN_RENDER_STEP,
 } from '../model/taskListRendering'
+import type { CancelledTeamIssueUpdate } from '../../issues/model/teamIssueUpdateOutcome'
 
 /** Resolves a localized task-board message. */
 type TaskBoardTranslator = (key: MessageKey) => string
@@ -106,7 +107,7 @@ export type TaskBoardViewProps = {
   /** Opens the create panel with Board-column context. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates or moves a task through the shared Work Item action. */
-  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
+  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate>
 }
 
 /**
@@ -169,7 +170,7 @@ export function TaskBoardView({
     onUpdateTask && (canMutateTask?.(task) ?? true),
   )
   /** Sends one card edit only when its exact Work Item scope is writable. */
-  const updateTask = async (task: CanonicalWorkItem, input: WorkItemPatch): Promise<CanonicalWorkItem> => {
+  const updateTask = async (task: CanonicalWorkItem, input: WorkItemPatch): Promise<CanonicalWorkItem | CancelledTeamIssueUpdate> => {
     if (!canEditTask(task) || !onUpdateTask) return task
     return onUpdateTask(task, input)
   }

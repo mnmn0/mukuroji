@@ -62,6 +62,7 @@ import {
 } from '../../issues/api'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import {
+  canManagePlanningScope,
   canManagePlanningWorkItemDependencyEndpoint,
   createPlanningAccessSnapshot,
 } from '../../planning/model/permissions'
@@ -74,6 +75,14 @@ import {
 import { describeScopedWorkItemListError } from '../../issues/model/workItemListError'
 import { useProjectCustomerImpact } from '../../customers/queries/useCustomers'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
+import {
+  confirmParentCompletion,
+  confirmParentCompletionInBrowser,
+} from '../../issues/mutations/confirmParentCompletion'
+import {
+  CANCELLED_TEAM_ISSUE_UPDATE,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 import {
   applyIssueCollaborationTabToSearchParams,
   applyIssueCollaborationSourceToSearchParams,
@@ -133,6 +142,7 @@ import {
 import {
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
+  resolveWorkflowStatusDefinition,
   resolveWorkItemTypeWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
@@ -170,6 +180,10 @@ const standardTaskViewFields = [
   'status',
   'assignee',
   'dueDate',
+  'actualStartDate',
+  'actualEndDate',
+  'startDelayDays',
+  'completionDelayDays',
   'priority',
   'workItemType',
   'project',
@@ -619,7 +633,12 @@ export function TaskPage() {
       'project',
       taskViewScope,
       'table',
-      taskViewCustomFields.length > 0 ? ['customFields'] : [],
+      [
+        // The WBS table shows the recorded actual dates next to the plan by default.
+        'actualStartDate',
+        'actualEndDate',
+        ...(taskViewCustomFields.length > 0 ? ['customFields'] : []),
+      ],
     ),
     [taskViewCustomFields.length, taskViewScope],
   )
@@ -649,6 +668,10 @@ export function TaskPage() {
       { id: 'status', label: t('tasks.filter.status') },
       { id: 'assignee', label: t('tasks.filter.assignee') },
       { id: 'dueDate', label: t('tasks.filter.dueDate') },
+      { id: 'actualStartDate', label: t('tasks.column.actualStartDate') },
+      { id: 'actualEndDate', label: t('tasks.column.actualEndDate') },
+      { id: 'startDelayDays', label: t('tasks.column.startDelayDays') },
+      { id: 'completionDelayDays', label: t('tasks.column.completionDelayDays') },
       { id: 'priority', label: t('tasks.filter.priority') },
       { id: 'workItemType', label: t('tasks.column.workItemType') },
       { id: 'project', label: t('workspace.column.project') },
@@ -1195,6 +1218,27 @@ export function TaskPage() {
   }
 
   /** Checks one concrete Work Item against the Team-qualified task-view write scopes. */
+  /**
+   * Mirrors the server rule for correcting actual dates: a manager of the assigned Project may
+   * correct them, and a Team manager may correct an unassigned Work Item. A manager of another
+   * Project in the same Team may not. Direct Team manager grants are not visible here, so those
+   * users correct through the API only.
+   */
+  const canCorrectTaskActualDates = (
+    task: Pick<CanonicalWorkItem, 'assignedProjectId' | 'teamId'>,
+  ) =>
+    canMutateContent && (
+      Boolean(user?.isSystemAdmin) ||
+      (task.assignedProjectId === projectId && canManageProjectMembers) ||
+      canManagePlanningScope(
+        user,
+        task.assignedProjectId
+          ? { teamId: task.teamId, projectId: task.assignedProjectId }
+          : { teamId: task.teamId },
+        planningAccess,
+      )
+    )
+
   const canMutateProjectTaskTarget = (
     target: Pick<CanonicalWorkItem, 'assignedProjectId' | 'teamId'>,
   ) => canWriteTaskViewWorkItem(taskViewWriteCapabilities, target)
@@ -1405,11 +1449,11 @@ export function TaskPage() {
     )
   }
 
-  /** Updates a visible Work Item with optimistic cache projection and conflict rollback. */
+  /** Updates a visible Work Item with optimistic cache projection and conflict rollback; resolves cancelled when the person declines completing a parent. */
   const handleUpdateTask = async (
     task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
-  ): Promise<CanonicalWorkItem> => {
+  ): Promise<CanonicalWorkItem | CancelledTeamIssueUpdate> => {
     if (!accessToken) {
       throw new Error(t('tasks.action.updateError'))
     }
@@ -1448,6 +1492,19 @@ export function TaskPage() {
 
     const configuration = workItemConfigurationLoadResult.configurationsByTeam[currentTask.teamId]?.configuration ??
       selectedIssueDetail?.resolvedConfiguration?.configuration
+    if (input.workflowStatusId !== undefined && !await confirmParentCompletion({
+      workItem: latestKnownTask,
+      nextStatusCategory: resolveWorkflowStatusDefinition({
+        ...latestKnownTask,
+        workflowStatusId: input.workflowStatusId,
+        workItemTypeId: input.workItemTypeId ?? latestKnownTask.workItemTypeId,
+      }, configuration)?.category,
+      configuration,
+      accessToken,
+      confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+    })) {
+      return CANCELLED_TEAM_ISSUE_UPDATE
+    }
     const optimisticTask = applyTaskPatchOptimistically(currentTask, input, configuration)
     /** Returns whether a candidate is the same Team-local Work Item. */
     const matchesTask = (candidate: CanonicalWorkItem) =>
@@ -1534,6 +1591,8 @@ export function TaskPage() {
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
         setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.detail.conflict')])
         await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
+      } else if (error instanceof TeamIssuesApiError && error.code === 'WorkItemOpenChildren') {
+        setIssueUpdateError([currentIssueUpdateErrorKey, t('issues.error.openChildren')])
       } else {
         setIssueUpdateError([currentIssueUpdateErrorKey, t('tasks.action.updateError')])
       }
@@ -1896,6 +1955,7 @@ export function TaskPage() {
           }
         : undefined}
       onCommentDraftDirtyChange={reportCommentDraftDirty}
+      canCorrectActualDates={canCorrectTaskActualDates}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}

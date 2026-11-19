@@ -668,7 +668,15 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 
-  if (['InvalidContributorAssignments', 'InvalidAcceptanceCriteria', 'InvalidWorkItemEffort', 'InvalidWorkItemProgress'].includes(error.code)) {
+  if (
+    [
+      'InvalidContributorAssignments',
+      'InvalidAcceptanceCriteria',
+      'InvalidWorkItemActualDates',
+      'InvalidWorkItemEffort',
+      'InvalidWorkItemProgress',
+    ].includes(error.code)
+  ) {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 

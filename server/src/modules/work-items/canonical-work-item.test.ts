@@ -65,6 +65,20 @@ describe('canonical Work Item validation', () => {
     }
   })
 
+  test('accepts an actual end only on a completed row that started on or before it', () => {
+    const completed = { workflowStatusId: 'done', statusCategory: 'completed' }
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem())).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ actualStartDate: '2026-07-02' }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ ...completed, actualStartDate: '2026-07-02', actualEndDate: '2026-07-02' }))).toBe(true)
+    for (const overrides of [
+      { actualStartDate: '2026-07-02', actualEndDate: '2026-07-03' },
+      { ...completed, actualEndDate: '2026-07-03' },
+      { ...completed, actualStartDate: '2026-07-04', actualEndDate: '2026-07-03' },
+    ]) {
+      expect(isCanonicalWorkItemRecord(createCanonicalWorkItem(overrides))).toBe(false)
+    }
+  })
+
   test('accepts assigned and unassigned strict canonical rows', () => {
     const unassigned = createCanonicalWorkItem()
     delete unassigned.assignedProjectId

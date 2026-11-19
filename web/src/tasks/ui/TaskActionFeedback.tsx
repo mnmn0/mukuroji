@@ -13,6 +13,11 @@ export type TaskActionFeedbackProps = {
   dismissLabel: string
   /** Reverses the last successful optimistic action. */
   onUndo?: () => void
+  /**
+   * Whether the undo action is shown but cannot run yet, such as while another save is in
+   * flight. The button keeps its place and focus and reports `aria-disabled`.
+   */
+  isUndoDisabled?: boolean
   /** Dismisses the current feedback message. */
   onDismiss?: () => void
   /** Optional stable test identifier. */
@@ -39,6 +44,7 @@ export function TaskActionFeedback({
   announcementKey,
   kind,
   dismissLabel,
+  isUndoDisabled = false,
   message,
   onDismiss,
   onUndo,
@@ -62,7 +68,14 @@ export function TaskActionFeedback({
     >
       <span className="min-w-0 flex-1">{message}</span>
       {onUndo && undoLabel ? (
-        <button className="underline underline-offset-2" onClick={onUndo} type="button">
+        <button
+          aria-disabled={isUndoDisabled || undefined}
+          className="underline underline-offset-2 aria-disabled:cursor-not-allowed aria-disabled:opacity-60"
+          onClick={() => {
+            if (!isUndoDisabled) onUndo()
+          }}
+          type="button"
+        >
           {undoLabel}
         </button>
       ) : null}

@@ -59,7 +59,7 @@ const migrationSections = [
 const migrationFallbacks = ['removed', 'reset-to-default', 'ignored', 'unavailable']
 const workflowCategories = ['backlog', 'unstarted', 'started', 'completed', 'canceled']
 const priorities = ['high', 'medium', 'low']
-const dueDatePresets = ['overdue', 'today', 'upcoming', 'no-date']
+const dueDatePresets = ['overdue', 'today', 'upcoming', 'no-date', 'completed-late', 'started-late']
 const searchEntityTypes = ['work-item', 'project', 'team', 'comment', 'file', 'document']
 const searchCustomFieldOperators = [
   'equals',
@@ -547,6 +547,7 @@ function isTaskViewDisplayOptions(value: unknown): value is TaskViewDisplayOptio
     value.showEmptyGroups,
     value.wrapText,
     value.showAssigneeAvatars,
+    value.showOutline,
   ].every((option) => option === undefined || typeof option === 'boolean')
 }
 

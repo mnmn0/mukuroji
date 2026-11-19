@@ -9,6 +9,7 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { TeamIssuesApiError } from '../../issues/api'
+import { isCancelledTeamIssueUpdate } from '../../issues/model/teamIssueUpdateOutcome'
 import { createTranslator } from '../../shared/i18n/i18n'
 import {
   createBuiltInTaskViewDefinition,
@@ -29,6 +30,7 @@ import {
 } from '../../task-views/model/taskViewSelection'
 import {
   allowTaskAction,
+  createCancelledTaskActionResult,
   createFailedTaskActionResult,
   createSucceededTaskActionResult,
   createSucceededTaskActionMutationResult,
@@ -43,7 +45,10 @@ import {
   resolvePendingTaskActionContext,
 } from '../../task-views/model/taskActionCompletion'
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
-import { executeMyTaskDirectStatusMove } from '../../task-views/model/myTaskDirectMove'
+import {
+  executeMyTaskDirectStatusMove,
+  isMyTaskOpenChildrenRefusal,
+} from '../../task-views/model/myTaskDirectMove'
 import { canWriteTaskViewWorkItem } from '../../task-views/model/taskViewWorkItemPermission'
 import {
   clearTaskStatusMoveRequest,
@@ -362,11 +367,17 @@ export function MyTasksPage() {
         requestSlot,
         visibleMyTasks,
         workItems.configurationsByTeam,
-        moveTaskStatus,
+        // The direct move reports a refusal in its action result, so the board does not repeat it.
+        moveTaskStatus
+          ? (task, workflowStatusId) => moveTaskStatus(task, workflowStatusId, {
+              reportOpenChildrenRefusal: false,
+            })
+          : undefined,
         {
           conflict: t('workspace.myTasks.conflict'),
           failed: t('workspace.myTasks.moveError'),
           notFound: t('taskViews.action.notFound'),
+          openChildren: t('issues.error.openChildren'),
           unavailable: myTaskActionDisabledReasons.unavailable,
         },
       ) ?? createFailedTaskActionResult(
@@ -669,9 +680,19 @@ export function MyTasksPage() {
       : undefined
 
     try {
-      const updatedTask = await moveTaskStatus(task, workflowStatusId)
+      // A refusal is reported once: by the action result when one is settled below, otherwise by
+      // the board.
+      const updatedTask = await moveTaskStatus(task, workflowStatusId, {
+        reportOpenChildrenRefusal: !(claimedContext && target),
+      })
       if (claimedContext && target) {
-        if (updatedTask) {
+        if (isCancelledTeamIssueUpdate(updatedTask)) {
+          // The person declined the parent completion warning; nothing failed.
+          taskActionCompletion.settle(
+            claimedContext,
+            createCancelledTaskActionResult(claimedContext.actionId, [target]),
+          )
+        } else if (updatedTask) {
           taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
             claimedContext.actionId,
             target,
@@ -695,14 +716,22 @@ export function MyTasksPage() {
           taskActionCompletion,
           claimedContext,
         )
-        taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
-          claimedContext.actionId,
-          target,
-          isConflict ? 'WorkItemRevisionConflict' : 'MyTasksMoveFailed',
-          isConflict ? 'conflict' : 'unknown',
-          isConflict ? t('workspace.myTasks.conflict') : t('workspace.myTasks.moveError'),
-          isConflict,
-        ))
+        taskActionCompletion.settle(claimedContext, isMyTaskOpenChildrenRefusal(error)
+          ? createFailedTaskActionResult(
+              claimedContext.actionId,
+              target,
+              'WorkItemOpenChildren',
+              'validation',
+              t('issues.error.openChildren'),
+            )
+          : createFailedTaskActionResult(
+              claimedContext.actionId,
+              target,
+              isConflict ? 'WorkItemRevisionConflict' : 'MyTasksMoveFailed',
+              isConflict ? 'conflict' : 'unknown',
+              isConflict ? t('workspace.myTasks.conflict') : t('workspace.myTasks.moveError'),
+              isConflict,
+            ))
         if (canDismissOwner) {
           setRevealedStatusTaskKey((currentKey) =>
             currentKey === taskKey ? undefined : currentKey

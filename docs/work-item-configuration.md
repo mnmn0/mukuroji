@@ -45,6 +45,7 @@ CDK は table を `PAY_PER_REQUEST`、PITR enabled、`Retain` で作成する。
 | `customFields` | yes | Scope に適用する custom field definition の配列。 |
 | `jobRoles` | no | Contributor を計画するジョブロールの配列。最大 100 件。各要素は stable `id`、表示名 `name`、任意の `archived` を持つ。 |
 | `progressMode` | no | Work Item の進捗率の求め方。`status-category`（省略時）、`remaining-effort`、`manual`。詳細は [Work Items](work-items.md#estimate-remaining-effort-and-progress)。 |
+| `parentCompletionPolicy` | no | 未完了の子がある親を完了にするときの扱い。`warn`（省略時）または `reject`。詳細は [親の完了ポリシー](#親の完了ポリシー)。 |
 | `updatedAt` | no | 永続化済み configuration の最終更新を表す UTC ISO 8601 timestamp。built-in default では省略する。 |
 
 未知の `schemaVersion`、不正 revision、scope key と payload の不一致を黙って読み飛ばさない。API は stable error を返し、管理 mutation と Work Item mutation を停止する。
@@ -175,7 +176,7 @@ Relation row の sort key は source Work Item ID から始まるため、`REL#<
 
 ### 親子関係と上限
 
-`parent` は 1 つの Work Item につき最大 1 件とする。親がある Work Item への `parent` 作成は `409 WorkItemParentAlreadyExists` で拒否する。親の付け替えは `PUT /api/teams/{teamId}/issues/{issueId}/parent`（body は `{ parentWorkItemId: string | null, expectedGraphRevision }`）で行い、旧い親子 row の削除と新しい親子 row の作成を 1 つの transaction で確定する。`null` は親を外す。API は現在の親を読み、子・現在の親・新しい親の 3 つの endpoint を認可し、Work Item Type の親子制約と configuration revision を同じ transaction で検証する。現在の親が読んだ後に変わった場合は `409 WorkItemRelationGraphConflict` を返す。付け替えは宣言的な操作で、子の親がすでに指定された親（`null` なら親なし）であれば graph revision に関係なく書き込まずに成功を返す。これで応答が失われた後の再送も成功として扱える。Transaction が取り消され、再読み取りで graph・現在の親・endpoint のどれも変わっていない場合は、競合ではなく再試行可能な `503 WorkItemRelationUnavailable` を返す。
+`parent` は 1 つの Work Item につき最大 1 件とする。親がある Work Item への `parent` 作成は `409 WorkItemParentAlreadyExists` で拒否する。親の付け替えは `PUT /api/teams/{teamId}/issues/{issueId}/parent`（body は `{ parentWorkItemId: string | null, expectedGraphRevision, hierarchyRank? }`）で行い、旧い親子 row の削除と新しい親子 row の作成を 1 つの transaction で確定する。`null` は親を外す。API は現在の親を読み、子・現在の親・新しい親の 3 つの endpoint を認可し、Work Item Type の親子制約と configuration revision を同じ transaction で検証する。現在の親が読んだ後に変わった場合は `409 WorkItemRelationGraphConflict` を返す。付け替えは宣言的な操作で、`hierarchyRank` を付けずに送り、子の親がすでに指定された親（`null` なら親なし）であれば graph revision に関係なく書き込まずに成功を返す。これで応答が失われた後の再送も成功として扱える。`hierarchyRank` を付けた場合は親が同じでも rank を書くので、`expectedGraphRevision` を確かめ、古ければ `409 WorkItemRelationGraphConflict` を返す（[兄弟の順序](#兄弟の順序hierarchyrank)）。ただし子に指定どおりの親と rank がすでに保存されていれば、graph revision に関係なく書き込まずに成功を返す。保存済みの rank を読めないときは `503 WorkItemRelationUnavailable` を返す。応答が失われた移動や並び替えの再送も成功として扱うためである。DynamoDB が item を拒否して transaction が取り消された場合（`ValidationError` / `ItemCollectionSizeLimitExceeded`）は再試行しても同じ結果になるので、読み直さずに `502 WorkItemRelationStoragePermanent` を返す。それ以外の理由で取り消された場合は graph・現在の親・endpoint を読み直し、どれも変わっていなければ競合ではなく再試行可能な `503 WorkItemRelationUnavailable` を返す。
 
 残る上限は次のとおりで、`@mukuroji/contracts` の定数と一致させる。
 
@@ -186,6 +187,25 @@ Relation row の sort key は source Work Item ID から始まるため、`REL#<
 | 1 つの Team の relation link（reciprocal 2 row で 1 link） | 10,000 | `WORK_ITEM_TEAM_RELATION_LINK_LIMIT` |
 
 Team の link 数は `RELATION_GRAPH` row の `edgeCount`（directed row 数）で数え、mutation ごとに同じ transaction で更新する。上限を超える作成・付け替えは `413 WorkItemRelationGraphLimitExceeded` で拒否する。`edgeCount` を持たない旧い graph row は、次の mutation で relation row を COUNT Query で数え直してから保存する。この上限は Focus など Team の graph を一括で読む処理の読み取り量を抑えるためのもので、relation mutation の読み取り量には影響しない。
+
+### 兄弟の順序（`hierarchyRank`）
+
+同じ親の子どうしの並び（最上位の Work Item どうしも含む）は、Work Item row の `hierarchyRank` で決める。値は `0-9a-z` の文字列で、最大 64 文字、末尾は `0` 以外とする（`isWorkItemHierarchyRank`）。辞書順に並べ、同じ値なら Work Item ID の順にする。2 つの rank の間には必ず別の rank を作れる（`createWorkItemHierarchyRankBetween`）。64 文字に収まらない場合だけ作れず、Web は「この位置にはこれ以上並べられません」と伝える。
+
+`hierarchyRank` を持たない Work Item は、作成順の `sortOrder` と Work Item ID の hash から作る既定の rank（`createDefaultWorkItemHierarchyRank`）で並ぶ。hash を足すので、`sortOrder` が同じ兄弟でも rank は重ならず、その間へ移動できる。`sortOrder` は一覧の paging に使う GSI の range key なので、階層の並び替えには使わない。
+
+`PUT .../parent` に `hierarchyRank` を付けると、親の付け替えと同じ transaction で子の rank を書く。親を変えずに rank だけを変える（上下の並び替え）と、子の row を revision と所属 Project を条件に更新し、同じ transaction で graph revision を 1 つ進める。親がある子では、認可に使った親の row（revision と所属 Project）と configuration の guard も同じ transaction の条件に入れる。認可の後に親が別の Project へ移されても、並び替えは確定しない。graph revision は読んだ値を条件にするので、並び替えも親の付け替えと同じく `expectedGraphRevision` が古ければ、またはその間に別の並び替えや親の変更があれば `409 WorkItemRelationGraphConflict` を返す。同じ移動を 2 人が同時に送っても、後の方は競合になる。親を変えて rank を付けない場合は保存済みの rank を消し、既定の順に戻す。relation API で `parent` を作ったとき、`parent` / `child` の関係を消したときも、子の rank を消す。取り消された並び替えは、子・親・graph revision・configuration guard のいずれかの条件が失敗していれば `409 WorkItemRelationGraphConflict` を返す。同時の書き込み（`TransactionConflict`）で取り消された場合は graph revision を読み直し、変わっていれば同じ `409`、変わっていなければ再試行可能な `503 WorkItemRelationUnavailable` を返す。DynamoDB が item を拒否した場合（`ValidationError` / `ItemCollectionSizeLimitExceeded`）は再試行しても同じ結果になるので、競合とも一時障害とも分けて `502 WorkItemRelationStoragePermanent` を返す。不正な rank は `400 InvalidWorkItemHierarchyRank` で拒否する。`relationIds` と同じく、rank の更新は Work Item の `revision` を進めない。
+
+### 親の完了ポリシー
+
+Configuration の `parentCompletionPolicy` は、完了でもキャンセルでもない子が残る親を完了にするときの扱いを決める。省略時は `warn` とする。
+
+| 値 | 動き |
+| --- | --- |
+| `warn` | server は許可する。Web は status を完了にするどの画面（Team の Work Item、Project の task、My Tasks、Focus）でも、`GET /api/teams/{teamId}/issues/{issueId}/children/open-count` で読んだ未完了の子の数を示して確認してから更新する。数は読める・archive されていない直接の子だけを数える。数を読めなかったときも、数を示さずに確認してから更新する。 |
+| `reject` | Work Item が completed category の status に移るとき、server が直接の子を読み、archive されていない未完了の子があれば `409 WorkItemOpenChildren` で拒否する。判定には呼び出し元が読めない子も含めるので、応答に件数は入れない。拒否の条件は Web・Public API・MCP・自動化のどの経路でも同じだが、応答の形は経路で異なる。Team の API は `409` と `code: "WorkItemOpenChildren"` を返し、Public API は共通の error 形式に写すので `409` と `code: "conflict"`、`retryable: false` を返す（message は同じ）。承認で完了する場合は、承認を決定して status を変えるときに確認する。承認の依頼は status を変えないので、子が残っていても依頼できる。 |
+
+子は relation graph の `child` row から読み、各子の詳細を 16 件ずつ読む。数えるのは直接の子だけで、孫は数えない。読んだ graph revision と各子の revision を親の更新 transaction の条件に入れるので、確認の後に子が付いたり子が再開されたりすると更新は `409` で失敗する（子の revision の条件は、同じ更新で送る他の configuration 条件（configuration guard、Type 変更の relation と承認の条件など）と合わせて 70 件に収まるときだけ入れる。収まらないときは graph revision だけを条件にし、子の再開は検出しない）。ポリシーの変更は他の configuration と同じく監査に残る。
 
 ### Reciprocal transaction と graph CAS
 

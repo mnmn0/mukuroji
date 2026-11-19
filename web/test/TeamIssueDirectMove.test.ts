@@ -6,6 +6,7 @@ import {
 } from '@mukuroji/contracts'
 import { TeamIssuesApiError } from '../src/issues/api'
 import { teamIssueFixtures } from '../src/issues/fixtures'
+import { CANCELLED_TEAM_ISSUE_UPDATE } from '../src/issues/model/teamIssueUpdateOutcome'
 import { executeTeamIssueDirectStatusMove } from '../src/task-views/model/teamIssueDirectMove'
 import {
   createTaskStatusMoveRequest,
@@ -17,6 +18,7 @@ const messages = {
   conflict: 'conflict',
   failed: 'failed',
   unavailable: 'unavailable',
+  openChildren: 'open children',
 }
 
 /** Creates a revision-bound Team Move context for direct Board entrance tests. */
@@ -148,6 +150,49 @@ describe('Team Issue direct Move action', () => {
       retryable: true,
     })
     expect(result.items[0]?.failure).toEqual(result.failure)
+  })
+
+  test('explains a completion the Team refuses because of open children', async () => {
+    const issue = teamIssueFixtures[0]
+    if (!issue) throw new Error('Expected one Team Issue fixture.')
+
+    const result = requireResult(await executeTeamIssueDirectStatusMove(
+      createMoveContext(issue.revision),
+      createMoveRequestSlot(issue.revision),
+      [issue],
+      teamWorkItemConfigurationFixture,
+      async () => {
+        throw new Error('Route message', {
+          cause: new TeamIssuesApiError(409, 'API body', 'WorkItemOpenChildren'),
+        })
+      },
+      messages,
+    ))
+
+    expect(result.status).toBe('failed')
+    expect(result.failure).toEqual({
+      category: 'validation',
+      code: 'WorkItemOpenChildren',
+      message: 'open children',
+      retryable: false,
+    })
+  })
+
+  test('reports a Move the person declined as cancelled, not succeeded', async () => {
+    const issue = teamIssueFixtures[0]
+    if (!issue) throw new Error('Expected one Team Issue fixture.')
+
+    const result = requireResult(await executeTeamIssueDirectStatusMove(
+      createMoveContext(issue.revision),
+      createMoveRequestSlot(issue.revision),
+      [issue],
+      teamWorkItemConfigurationFixture,
+      async () => CANCELLED_TEAM_ISSUE_UPDATE,
+      messages,
+    ))
+
+    expect(result.status).toBe('cancelled')
+    expect(result.items.map((item) => item.status)).toEqual(['cancelled'])
   })
 
   test('rejects a stale visible revision before dispatching the direct mutation', async () => {

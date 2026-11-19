@@ -123,6 +123,31 @@ describe('WorkspaceRoute', () => {
     expect(html).not.toContain('data-testid="workspace-common-error"')
   })
 
+  test('gives the Work Item key route the shared header with the mobile sidebar button', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter initialEntries={['/browse/PT-12']}>
+        <Routes>
+          <Route element={<WorkspaceContextOutlet context={{ ...routeContext, commonErrorKey: undefined }} />}>
+            <Route element={<WorkspaceRoute />}>
+              <Route
+                element={(
+                  <WorkspaceRouteContent>
+                    <p>Key status</p>
+                  </WorkspaceRouteContent>
+                )}
+                path="/browse/:workItemKey"
+              />
+            </Route>
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('Open a Work Item by key')
+    expect(html).toContain('aria-label="Open sidebar"')
+    expect(html).toContain('Key status')
+  })
+
   test('keeps route content available while exposing a retryable Quick Access error', () => {
     const context: WorkspaceRouteContextValue = {
       ...routeContext,

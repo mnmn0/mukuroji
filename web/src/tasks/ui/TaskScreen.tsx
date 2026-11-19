@@ -45,6 +45,11 @@ import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import type { IssueCollaborationController } from '../../issues/mutations/useIssueCollaboration'
 import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
+import {
+  CANCELLED_TEAM_ISSUE_UPDATE,
+  isCancelledTeamIssueUpdate,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 import { TeamIssuesApiError, type TeamIssue, type TeamIssueDetail, type UpdateTeamIssueInput } from '../../issues/api'
 import type {
   ProjectDirectoryTeam,
@@ -190,8 +195,10 @@ import {
 } from '../model/taskView'
 import {
   formatTaskScheduleRange,
+  taskScheduleInstantToLocalDate,
   taskScheduleModeLabelKeys,
 } from '../model/taskSchedule'
+import { resolveTaskActualDateUndo } from '../model/taskActualDates'
 import type { TaskScheduleWindowNavigation } from '../model/taskScheduleWindow'
 import { CreateTaskPanel } from './CreateTaskPanel'
 import { TaskActionFeedback } from './TaskActionFeedback'
@@ -253,6 +260,11 @@ type TaskBulkSelectionState = {
 
 /** Last successful inline update retained for a reversible task action. */
 type TaskUndoState = {
+  /**
+   * Task snapshot before an inline update, used to recheck the actual dates when the undo runs.
+   * Schedule-only undo states built from a schedule preview have none.
+   */
+  before?: CanonicalWorkItem
   /** Task snapshot returned by the successful update. */
   task: CanonicalWorkItem
   /** Patch that restores every field touched by the update. */
@@ -419,6 +431,8 @@ export type TaskScreenProps = {
   isSystemAdmin?: boolean
   /** Whether the current user may manage Project member roles. */
   canManageProjectMembers?: boolean
+  /** Checks whether the current user may correct one Work Item's recorded actual dates. */
+  canCorrectActualDates?: (task: CanonicalWorkItem) => boolean
   /** Project charter section rendered on the permissions tab. */
   projectCharterPanel?: ReactNode
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
@@ -497,17 +511,17 @@ export type TaskScreenProps = {
   onSelectedIssueChange?: (task: CanonicalWorkItem) => void
   /** Adds or removes the displayed Project from quick access. */
   onProjectQuickAccessToggle?: () => void
-  /** Updates editable fields on the selected Work Item. */
+  /** Updates editable fields on the selected Work Item; resolves cancelled when the person declines. */
   onUpdateIssue?: (
     teamId: string,
     issueId: string,
     input: UpdateTeamIssueInput,
-  ) => Promise<CanonicalWorkItem | void>
-  /** Updates any visible Work Item through the shared optimistic action. */
+  ) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate | void>
+  /** Updates any visible Work Item through the shared optimistic action; resolves cancelled when the person declines. */
   onUpdateTask?: (
     task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
-  ) => Promise<CanonicalWorkItem>
+  ) => Promise<CanonicalWorkItem | CancelledTeamIssueUpdate>
   /** Previews one schedule operation against the current server revision. */
   onPreviewScheduleChange?: (
     task: CanonicalWorkItem,
@@ -600,6 +614,7 @@ export function TaskScreen({
   assigneeOptions = emptyProjectMembers,
   canAccessTriage = false,
   canManageProjectMembers = false,
+  canCorrectActualDates,
   projectCharterPanel,
   canMutateTask,
   canManageScheduleDependencyEndpoint,
@@ -713,8 +728,54 @@ export function TaskScreen({
   >()
   const [taskActionCompletion] = useState(createTaskActionCompletionBridge)
   const [taskUndo, setTaskUndo] = useState<TaskUndoState>()
+
+  /**
+   * Creates the undo entry for one successful update, or undefined when it cannot be undone.
+   *
+   * @param before - Work Item before the update.
+   * @param input - Forward patch that was saved.
+   * @param after - Work Item returned by the update.
+   * @returns Undo state including any actual dates the reverse status change cannot restore.
+   */
+  const createTaskUndoState = useCallback((
+    before: CanonicalWorkItem,
+    input: UpdateTeamIssueInput,
+    after: CanonicalWorkItem,
+  ): TaskUndoState | undefined => {
+    if (!isReversibleTaskUpdate(input)) return undefined
+    const actualDateUndo = resolveTaskActualDateUndo(
+      before,
+      after,
+      input,
+      canCorrectActualDates?.(before) ?? false,
+      // The undo restores the earlier schedule, so its calendar dates the reverse transition.
+      taskScheduleInstantToLocalDate(new Date(), before.schedule.calendarPolicy),
+    )
+    if (!actualDateUndo.reversible) return undefined
+    return {
+      before,
+      forwardPatch: input,
+      inversePatch: { ...createTaskInversePatch(before, input), ...actualDateUndo.patch },
+      task: after,
+      undoToken: createTaskUpdateUndoToken(after),
+    }
+  }, [canCorrectActualDates])
   const [taskRedo, setTaskRedo] = useState<TaskRedoState>()
-  const [isRestoringTask, setIsRestoringTask] = useState(false)
+  // Work Item whose Undo or Redo is saving, as `teamId:workItemId`. Its detail form and its table
+  // and board controls wait for it: a save meanwhile would leave the restore with a stale revision.
+  const [restoringTaskKey, setRestoringTaskKeyState] = useState<string>()
+  // Same key for callbacks created before the render that shows it.
+  const restoringTaskKeyRef = useRef<string | undefined>(undefined)
+  const isRestoringTask = restoringTaskKey !== undefined
+  /** Marks the Work Item whose Undo or Redo is saving, or clears it. */
+  const setRestoringTaskKey = (key: string | undefined) => {
+    restoringTaskKeyRef.current = key
+    setRestoringTaskKeyState(key)
+  }
+  // Saves still waiting for their outcome. Undo/Redo waits for them: running one meanwhile would
+  // advance the revision the pending save was built on.
+  const [pendingTaskUpdateCount, setPendingTaskUpdateCount] = useState(0)
+  const isTaskUpdatePending = pendingTaskUpdateCount > 0
   const [scheduleUpdateQueue, setScheduleUpdateQueue] = useState<PendingTaskScheduleUpdate[]>([])
   const [isApplyingScheduleUpdate, setIsApplyingScheduleUpdate] = useState(false)
   const scheduleUpdateQueueRef = useRef<PendingTaskScheduleUpdate[]>([])
@@ -1847,35 +1908,35 @@ export function TaskScreen({
     return true
   }, [activeProjectTeamId, projectId, teams])
 
-  /** Persists an already-confirmed task patch and retains an inverse for undo. */
+  /**
+   * Persists an already-confirmed task patch and retains an inverse for undo.
+   *
+   * @param task - Revision-bound Work Item snapshot being changed.
+   * @param input - Patch to save.
+   * @returns Whether the patch was saved, and the saved or unchanged task. A patch the person
+   *   declined is not applied and leaves the saved message and undo history as they were.
+   */
   const persistTaskUpdate = useCallback(async (
     task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
-  ) => {
+  ): Promise<TaskUpdateResult> => {
     if (!onUpdateTask) {
-      return task
+      return { applied: true, task }
     }
 
-    setTaskAction(undefined)
-
+    // The previous message stays until the outcome is known, so a declined patch keeps it and the
+    // Undo/Redo controls it carries; those controls cannot run until then.
+    setPendingTaskUpdateCount((count) => count + 1)
     try {
-      const updatedTask = await onUpdateTask(task, input)
-      if (isReversibleTaskUpdate(input)) {
-        setTaskUndo({
-          forwardPatch: input,
-          inversePatch: createTaskInversePatch(task, input),
-          task: updatedTask,
-          undoToken: createTaskUpdateUndoToken(updatedTask),
-        })
-      } else {
-        setTaskUndo(undefined)
-      }
+      const outcome = await onUpdateTask(task, input)
+      if (isCancelledTeamIssueUpdate(outcome)) return { applied: false, task }
+      setTaskUndo(createTaskUndoState(task, input, outcome))
       setTaskRedo(undefined)
       setTaskAction({
         kind: 'success',
         message: t('tasks.action.saved'),
       })
-      return updatedTask
+      return { applied: true, task: outcome }
     } catch (error) {
       const isRevisionConflict = isTaskRevisionConflict(error)
       if (isRevisionConflict) {
@@ -1887,8 +1948,10 @@ export function TaskScreen({
         message: resolveTaskMutationErrorMessage(error, t),
       })
       throw error
+    } finally {
+      setPendingTaskUpdateCount((count) => count - 1)
     }
-  }, [onUpdateTask, t])
+  }, [createTaskUndoState, onUpdateTask, t])
 
   /**
    * Previews every schedule patch before allowing the shared persistence path to run.
@@ -1909,10 +1972,7 @@ export function TaskScreen({
     directRequest?: ProjectTaskDirectActionRequest,
   ): Promise<TaskUpdateResult> => {
     if (!input.schedule) {
-      return {
-        applied: true,
-        task: await persistTaskUpdate(task, input),
-      }
+      return await persistTaskUpdate(task, input)
     }
     if (Object.keys(input).some((field) => field !== 'schedule')) {
       throw new Error(t('tasks.action.updateError'))
@@ -2065,19 +2125,29 @@ export function TaskScreen({
       !taskUndo ||
       !onUpdateTask ||
       isRestoringTask ||
+      isTaskUpdatePending ||
       !isTaskUpdateUndoTokenForTask(taskUndo.undoToken, taskUndo.task)
     ) {
       return
     }
 
-    setIsRestoringTask(true)
+    // The reverse status change records today's date, so recheck the actual dates on today's date.
+    const currentUndo = taskUndo.before
+      ? createTaskUndoState(taskUndo.before, taskUndo.forwardPatch, taskUndo.task)
+      : taskUndo
+    if (!currentUndo) {
+      setTaskUndo(undefined)
+      setTaskRedo(undefined)
+      setTaskAction({ kind: 'error', message: t('tasks.action.undoActualDatesUnavailable') })
+      return
+    }
+
+    setRestoringTaskKey(`${taskUndo.task.teamId}:${taskUndo.task.id}`)
 
     try {
-      const result = await performTaskUpdate(taskUndo.task, taskUndo.inversePatch)
-      if (!result.applied) {
-        setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
-        return
-      }
+      const result = await performTaskUpdate(taskUndo.task, currentUndo.inversePatch)
+      // Declined: the undo stays available and the earlier message is left as it was.
+      if (!result.applied) return
       setTaskRedo({
         forwardPatch: taskUndo.forwardPatch,
         task: result.task,
@@ -2098,7 +2168,7 @@ export function TaskScreen({
         message: resolveTaskMutationErrorMessage(error, t),
       })
     } finally {
-      setIsRestoringTask(false)
+      setRestoringTaskKey(undefined)
     }
   }
 
@@ -2109,24 +2179,17 @@ export function TaskScreen({
       setTaskRedo(undefined)
       return
     }
-    if (!taskRedo || !onUpdateTask || isRestoringTask) {
+    if (!taskRedo || !onUpdateTask || isRestoringTask || isTaskUpdatePending) {
       return
     }
 
-    setIsRestoringTask(true)
+    setRestoringTaskKey(`${taskRedo.task.teamId}:${taskRedo.task.id}`)
 
     try {
       const result = await performTaskUpdate(taskRedo.task, taskRedo.forwardPatch)
-      if (!result.applied) {
-        setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
-        return
-      }
-      setTaskUndo({
-        forwardPatch: taskRedo.forwardPatch,
-        inversePatch: createTaskInversePatch(taskRedo.task, taskRedo.forwardPatch),
-        task: result.task,
-        undoToken: createTaskUpdateUndoToken(result.task),
-      })
+      // Declined: the redo stays available and the earlier message is left as it was.
+      if (!result.applied) return
+      setTaskUndo(createTaskUndoState(taskRedo.task, taskRedo.forwardPatch, result.task))
       setTaskRedo(undefined)
       setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
     } catch (error) {
@@ -2140,7 +2203,7 @@ export function TaskScreen({
         message: resolveTaskMutationErrorMessage(error, t),
       })
     } finally {
-      setIsRestoringTask(false)
+      setRestoringTaskKey(undefined)
     }
   }
 
@@ -2198,24 +2261,43 @@ export function TaskScreen({
             }
             updatedTask = result.task
           } else if (onUpdateIssue) {
-            const result = await onUpdateIssue(teamId, issueId, input)
+            // Undo and Redo wait for this save too: completing a parent reads its children
+            // first, and an undo meanwhile would leave the completion with a stale revision.
+            setPendingTaskUpdateCount((count) => count + 1)
+            let result: Awaited<ReturnType<typeof onUpdateIssue>>
+            try {
+              result = await onUpdateIssue(teamId, issueId, input)
+            } finally {
+              // Also runs when the callback throws before returning its promise.
+              setPendingTaskUpdateCount((count) => count - 1)
+            }
+            if (isCancelledTeamIssueUpdate(result)) {
+              if (claimedContext && target) {
+                taskActionCompletion.settle(
+                  claimedContext,
+                  createCancelledTaskActionResult(claimedContext.actionId, [target]),
+                )
+              }
+              return
+            }
             if (result) {
               updatedTask = result
-              if (isReversibleTaskUpdate(input)) {
-                setTaskUndo({
-                  forwardPatch: input,
-                  inversePatch: createTaskInversePatch(detailTask, input),
-                  task: result,
-                  undoToken: createTaskUpdateUndoToken(result),
-                })
-              } else {
-                setTaskUndo(undefined)
-              }
+              setTaskUndo(createTaskUndoState(detailTask, input, result))
               setTaskRedo(undefined)
               setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
             }
           } else {
-            updatedTask = (await performTaskUpdate(detailTask, input)).task
+            const result = await performTaskUpdate(detailTask, input)
+            if (!result.applied) {
+              if (claimedContext && target) {
+                taskActionCompletion.settle(
+                  claimedContext,
+                  createCancelledTaskActionResult(claimedContext.actionId, [target]),
+                )
+              }
+              return
+            }
+            updatedTask = result.task
           }
           if (shouldConfirmProjectTransfer &&
               commentDraftDirtyRef.current &&
@@ -3001,12 +3083,17 @@ export function TaskScreen({
    *
    * @param task - Revision-bound Work Item selected by the direct mutation control.
    * @param input - Complete atomic patch emitted by that control.
-   * @returns Persisted task, or the original snapshot after an explicit preview cancellation.
+   * @returns Persisted task, or the cancelled outcome after the person declined a preview or
+   *   confirmation.
    */
   const handleUpdateTask = useCallback(async (
     task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
-  ): Promise<CanonicalWorkItem> => {
+  ): Promise<CanonicalWorkItem | CancelledTeamIssueUpdate> => {
+    // A table or board edit of the Work Item whose Undo or Redo is saving is dropped like a
+    // declined one: it was built on the revision the restore is replacing. Other Work Items, and
+    // the same one once the restore ends, save as usual.
+    if (restoringTaskKeyRef.current === `${task.teamId}:${task.id}`) return CANCELLED_TEAM_ISSUE_UPDATE
     const target = {
       expectedRevision: task.revision,
       teamId: task.teamId,
@@ -3028,7 +3115,7 @@ export function TaskScreen({
       const mutationError = directTaskActionErrorsRef.current.get(request)
       if (mutationError !== undefined) throw mutationError
       if (execution.status === 'executed' && execution.result.status === 'cancelled') {
-        return task
+        return CANCELLED_TEAM_ISSUE_UPDATE
       }
       const message = resolveTaskActionExecutionFailureMessage(
         execution,
@@ -3474,6 +3561,7 @@ export function TaskScreen({
                   setTaskUndo(undefined)
                   setTaskRedo(undefined)
                 }}
+                isUndoDisabled={isTaskUpdatePending}
                 onUndo={!isRestoringTask && (taskUndo || taskRedo)
                   ? () => void (taskUndo ? handleUndoTask() : handleRedoTask())
                   : undefined}
@@ -3724,6 +3812,9 @@ export function TaskScreen({
                   onAuthenticatedApiError={onAuthenticatedApiError}
                   artifacts={isRetainedDetail ? undefined : artifacts}
                   canAccessTriage={isRetainedDetail ? false : canAccessTriage}
+                  canCorrectActualDates={!isRetainedDetail &&
+                    renderedDetailTask !== undefined &&
+                    (canCorrectActualDates?.(renderedDetailTask) ?? false)}
                   canManageScheduleDependencyEndpoint={isRetainedDetail
                     ? undefined
                     : canManageScheduleDependencyEndpoint}
@@ -3748,6 +3839,10 @@ export function TaskScreen({
                     renderedDetailTask && bulkMutationPendingEntries.some((entry) =>
                       entry.targetKeys.includes(`${renderedDetailTask.teamId}:${renderedDetailTask.id}`),
                     ),
+                  )}
+                  isHistoryRestorePending={Boolean(
+                    renderedDetailTask &&
+                      restoringTaskKey === `${renderedDetailTask.teamId}:${renderedDetailTask.id}`,
                   )}
                   isRetainedDetail={isRetainedDetail}
                   isRelationCandidatesLoading={isRelationCandidatesLoading}
@@ -4039,6 +4134,9 @@ function resolveTaskMutationErrorMessage(
     }
     if (error.code === 'WorkItemRevisionConflict') {
       return t('tasks.action.conflict')
+    }
+    if (error.code === 'WorkItemOpenChildren') {
+      return t('issues.error.openChildren')
     }
     if (error.status === 403) {
       return t('tasks.action.permission')

@@ -9,6 +9,11 @@ export {
   type WorkItemScheduleConfirmationReservationRequest,
 } from './application/use-cases/confirm-work-item-schedule-change'
 export {
+  createTeamWorkItemHierarchyResponse,
+  type CreateTeamWorkItemHierarchyInput,
+  type TeamWorkItemHierarchySourceEntry,
+} from './application/use-cases/read-team-work-item-hierarchy'
+export {
   WorkItemContributorAssignmentError,
   listAddedContributorMembers,
   normalizeContributorAssignments,
@@ -21,6 +26,11 @@ export {
   isStoredAcceptanceCriterionList,
   normalizeAcceptanceCriteria,
 } from './domain/acceptance-criteria'
+export {
+  WorkItemActualDateError,
+  applyWorkItemStatusTransitionToActualDates,
+  type WorkItemActualDateCorrection,
+} from './domain/actual-dates'
 export {
   createResourceId,
 } from './domain/resource-id'
@@ -146,6 +156,7 @@ export {
   type CreateTriageDuplicateContextTransactionItemsInput,
   type NamedWorkItemDeletionFence,
   type ProjectIssuesResponse,
+  type PublicCreateTeamIssueRequestBody,
   type PublicUpdateTeamIssueRequestBody,
   type PublicWorkItemPageReadOptions,
   type SortedWorkItemPage,
@@ -156,6 +167,7 @@ export {
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
   type TeamIssuesClient,
+  type TeamWorkItemHierarchyEntry,
   type TeamIssuesResponse,
   type TriageAcceptanceTransactionInput,
   type TriageDuplicateContextTransactionContribution,
