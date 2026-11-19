@@ -77,6 +77,51 @@ describe('createTimeTrackingRouter', () => {
     expect(body.entry.actualCostMinor).toBeUndefined()
   })
 
+  test('records a categorized date-and-minutes entry and groups the summary by category', async () => {
+    const { router } = createFixture()
+    const headers = { Authorization: 'Bearer token', 'Content-Type': 'application/json' }
+    const created = await router.request('/api/teams/team-1/time-entries', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        workItemId: 'work-item-1',
+        date: '2026-08-03',
+        minutes: 120,
+        timeZone: 'Asia/Tokyo',
+        category: 'meeting',
+        billable: false,
+      }),
+    })
+    expect(created.status).toBe(201)
+    const { entry } = await created.json() as { entry: Record<string, unknown> }
+    expect(entry).toMatchObject({ startAt: '2026-08-02T15:00:00.000Z', durationMinutes: 120, durationOnly: true, category: 'meeting' })
+
+    const cleared = await router.request(`/api/teams/team-1/time-entries/${String(entry.id)}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ expectedRevision: 1, category: null }),
+    })
+    expect(cleared.status).toBe(200)
+    expect((await cleared.json() as { entry: Record<string, unknown> }).entry.category).toBeUndefined()
+
+    const summary = await router.request(
+      '/api/teams/team-1/time-tracking/summary?from=2026-08-03&to=2026-08-09&timeZone=Asia/Tokyo&groupBy=category',
+      { headers },
+    )
+    expect(summary.status).toBe(200)
+    expect(await summary.json()).toMatchObject({ groupBy: 'category', groups: [{ key: 'uncategorized', minutes: 120 }] })
+
+    const invalid: unknown[] = [
+      { workItemId: 'work-item-1', date: '2026-08-03', minutes: 60, category: 'lunch', billable: false },
+      { workItemId: 'work-item-1', date: '2026-08-03', billable: false },
+      { workItemId: 'work-item-1', date: '2026-08-03', minutes: 60, startAt: '2026-08-03T00:00:00.000Z', billable: false },
+    ]
+    for (const body of invalid) {
+      const response = await router.request('/api/teams/team-1/time-entries', { method: 'POST', headers, body: JSON.stringify(body) })
+      expect(response.status).toBe(400)
+    }
+  })
+
   test('allows managers to persist and read confidential rate data', async () => {
     const manager = createFixture(true)
     const created = await manager.router.request('/api/teams/team-1/time-entries', {

@@ -11,6 +11,7 @@ import type {
   AnalyticsSchedule,
   AnalyticsSnapshot,
   AnalyticsSnapshotRecord,
+  AnalyticsVisualization,
   AnalyticsWeighting,
   AnalyticsWidget,
   AnalyticsWidgetResult,
@@ -41,6 +42,8 @@ import {
   formatAnalyticsCalendarDate,
 } from '../model/timeZone'
 import { readRecord } from '../../shared/api/jsonValidation'
+import { isAnalyticsFlowVisualization, type AnalyticsFlowVisualization } from '../model/flowChart'
+import { AnalyticsFlowChart } from './AnalyticsFlowChart'
 
 /**
  * Analytics workbench の表示と操作に必要な props です。
@@ -260,6 +263,8 @@ const metricKeys = [
   'scope-change',
   'velocity',
   'sla',
+  'remaining-scope',
+  'cumulative-flow',
 ] as const satisfies readonly AnalyticsMetricKey[]
 
 const statusCategories = [
@@ -291,6 +296,8 @@ const metricLabelKeys: Record<AnalyticsMetricKey, MessageKey> = {
   'scope-change': 'analytics.metric.scopeChange',
   velocity: 'analytics.metric.velocity',
   sla: 'analytics.metric.sla',
+  'remaining-scope': 'analytics.metric.remainingScope',
+  'cumulative-flow': 'analytics.metric.cumulativeFlow',
 }
 
 const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
@@ -302,6 +309,8 @@ const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
   'scope-change': 'analytics.metricDescription.scopeChange',
   velocity: 'analytics.metricDescription.velocity',
   sla: 'analytics.metricDescription.sla',
+  'remaining-scope': 'analytics.metricDescription.remainingScope',
+  'cumulative-flow': 'analytics.metricDescription.cumulativeFlow',
 }
 
 const tableColumnLabelKeys: Readonly<Record<string, MessageKey>> = {
@@ -680,6 +689,7 @@ export function AnalyticsWorkbench({
                       <AnalyticsResultWidget
                         key={result.widgetId}
                         locale={locale}
+                        periodEnd={filter.period.to}
                         result={result}
                         snapshot={snapshot}
                         t={t}
@@ -1458,12 +1468,16 @@ function AnalyticsBuilderPanel({
   visibility: AnalyticsReport['visibility']
   widgets: AnalyticsWidget[]
 }) {
-  const addWidget = (type: AnalyticsWidget['type'], visualization?: 'line' | 'bar') => {
-    const metric = type === 'metric'
+  const addWidget = (type: AnalyticsWidget['type'], visualization?: AnalyticsVisualization) => {
+    const metric: AnalyticsMetricKey = type === 'metric'
       ? metricKeys[Math.min(widgets.filter((widget) => widget.type === 'metric').length, 3)]
       : type === 'table'
         ? 'overdue'
-        : 'throughput'
+        : visualization === 'area'
+          ? 'cumulative-flow'
+          : visualization === 'burndown' || visualization === 'burnup'
+            ? 'remaining-scope'
+            : 'throughput'
     const nextWidget = {
       id: createAnalyticsClientId('widget'),
       metric,
@@ -1471,7 +1485,9 @@ function AnalyticsBuilderPanel({
       title: t(metricLabelKeys[metric]),
       type,
       visualization,
-      ...(type === 'chart' ? { groupBy: { dimension: 'week' as const } } : {}),
+      ...(type === 'chart'
+        ? { groupBy: { dimension: isAnalyticsFlowVisualization(visualization) ? 'day' as const : 'week' as const } }
+        : {}),
     } as AnalyticsWidget
 
     onWidgetsChange?.([...widgets, nextWidget])
@@ -1530,6 +1546,15 @@ function AnalyticsBuilderPanel({
           </button>
           <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('chart', 'bar')}>
             {t('analytics.builder.type.bar')}
+          </button>
+          <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('chart', 'burndown')}>
+            {t('analytics.builder.type.burndown')}
+          </button>
+          <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('chart', 'burnup')}>
+            {t('analytics.builder.type.burnup')}
+          </button>
+          <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('chart', 'area')}>
+            {t('analytics.builder.type.area')}
           </button>
           <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('table')}>
             {t('analytics.builder.type.table')}
@@ -1646,7 +1671,7 @@ function AnalyticsWidgetEditor({
           value={widget.metric}
           onChange={(event) => {
             const metric = event.target.value as AnalyticsMetricKey
-            // Only throughput and velocity accept effort weighting, so other metrics drop it.
+            // Only throughput, velocity, and remaining scope accept effort weighting, so other metrics drop it.
             onChange(isEffortWeightableMetric(metric) ? { ...widget, metric } : { ...withoutWidgetWeighting(widget), metric })
           }}
         >
@@ -1810,6 +1835,7 @@ function AnalyticsMetricCard({
 function AnalyticsResultWidget({
   locale,
   onOpenEvidence,
+  periodEnd,
   result,
   snapshot,
   t,
@@ -1818,6 +1844,8 @@ function AnalyticsResultWidget({
 }: {
   locale: Locale
   onOpenEvidence?: (input: AnalyticsEvidenceInput) => void
+  /** Requested period end (before the API clips it to `asOf`), where a burndown ideal reaches zero. */
+  periodEnd?: string
   result: AnalyticsWidgetResult
   snapshot: AnalyticsSnapshot
   t: ReturnType<typeof createTranslator>
@@ -1874,6 +1902,20 @@ function AnalyticsResultWidget({
                 ? workItemTypeLabels
                 : undefined
             }
+          />
+        ) : isAnalyticsFlowVisualization(widget?.visualization) && result.series.length > 0 &&
+          isFlowVisualizationCompatible(widget.visualization, result.metric) ? (
+          <AnalyticsFlowChart
+            granularity={readFlowGranularity(widget)}
+            label={widget?.title ?? result.definition.label}
+            locale={locale}
+            {...(periodEnd === undefined
+              ? {}
+              : { plannedEndDate: formatAnalyticsCalendarDate(periodEnd, snapshot.timeZone) })}
+            series={result.series}
+            t={t}
+            timeZone={snapshot.timeZone}
+            visualization={widget.visualization}
           />
         ) : points.length > 0 ? (
           <AccessibleChart
@@ -2064,6 +2106,36 @@ function AccessibleChart({
       </details>
     </div>
   )
+}
+
+/**
+ * Returns the calendar bucket size of a flow chart widget.
+ *
+ * @param widget - Widget definition.
+ * @returns `week` or `month` when the widget is grouped so, otherwise `day`.
+ */
+function readFlowGranularity(widget: AnalyticsWidget) {
+  const dimension = widget.groupBy?.dimension
+  return dimension === 'week' || dimension === 'month' ? dimension : 'day'
+}
+
+/**
+ * Returns whether a flow visualization can draw a metric's series.
+ *
+ * Cumulative flow needs status-category segments and burnup needs scope / completed segments, so
+ * other metrics fall back to the line chart.
+ *
+ * @param visualization - Flow visualization of the widget.
+ * @param metric - Metric of the widget result.
+ * @returns Whether the flow chart can draw the result.
+ */
+function isFlowVisualizationCompatible(
+  visualization: AnalyticsFlowVisualization,
+  metric: AnalyticsMetricKey,
+) {
+  if (visualization === 'area') return metric === 'cumulative-flow'
+  if (visualization === 'burnup') return metric === 'remaining-scope'
+  return true
 }
 
 function isDrawableChartValue(value: number | null): value is number {
@@ -2592,10 +2664,10 @@ function withoutWidgetWeighting(widget: AnalyticsWidget): AnalyticsWidget {
  * Returns whether a metric can be weighted by the canonical estimate.
  *
  * @param metric - Widget metric.
- * @returns Whether it is throughput or velocity.
+ * @returns Whether it is throughput, velocity, or remaining scope.
  */
 function isEffortWeightableMetric(metric: AnalyticsMetricKey): boolean {
-  return metric === 'throughput' || metric === 'velocity'
+  return metric === 'throughput' || metric === 'velocity' || metric === 'remaining-scope'
 }
 
 function formatForecastDate(
