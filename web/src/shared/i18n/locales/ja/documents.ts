@@ -199,6 +199,7 @@ export const documentsMessages = {
   'documents.related.create': '作成してリンク',
   'documents.related.creating': '作成中…',
   'documents.related.createError': 'ドキュメントを作成できませんでした。',
+  'documents.related.createdButNotLinked': 'ドキュメントは作成しましたが、リンクできませんでした。ドキュメント一覧から開けます。',
   'documents.related.projectDocuments': 'このプロジェクトのドキュメント',
   'documents.backlinks.openTarget': '開く',
   'documents.context.comments': 'コメント',

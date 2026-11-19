@@ -83,7 +83,9 @@ export function RelatedDocuments({
     useState<RelatedDocumentsComposer>()
   const [newTitle, setNewTitle] = useState('')
   const [isCreating, setIsCreating] = useState(false)
-  const [hasCreateError, setHasCreateError] = useState(false)
+  const [createError, setCreateError] = useState<
+    'create' | 'link'
+  >()
   const projectDocuments = useSWR(
     accessToken && targetKind === 'project' && targetId
       ? ['project-documents', accessToken, targetId] as const
@@ -158,7 +160,8 @@ export function RelatedDocuments({
     const title = newTitle.trim()
     if (!accessToken || !target || !title || isCreating) return
     setIsCreating(true)
-    setHasCreateError(false)
+    setCreateError(undefined)
+    let createdDocumentId: string | undefined
     try {
       const document = await createDocument(
         accessToken,
@@ -173,13 +176,19 @@ export function RelatedDocuments({
         },
         createMutationRequestContext(),
       )
+      createdDocumentId = document.id
       await linkDocumentToTarget(document.id)
-      await projectDocuments.mutate()
       setNewTitle('')
       setComposer(undefined)
     } catch {
-      setHasCreateError(true)
+      // A page that was created but not linked stays visible from Documents.
+      setCreateError(
+        createdDocumentId === undefined ? 'create' : 'link',
+      )
     } finally {
+      if (createdDocumentId !== undefined) {
+        await projectDocuments.mutate()
+      }
       setIsCreating(false)
     }
   }
@@ -313,9 +322,11 @@ export function RelatedDocuments({
               ? t('documents.related.creating')
               : t('documents.related.create')}
           </button>
-          {hasCreateError ? (
+          {createError ? (
             <p className="m-0 w-full text-xs font-semibold text-fg-red-700" role="alert">
-              {t('documents.related.createError')}
+              {createError === 'create'
+                ? t('documents.related.createError')
+                : t('documents.related.createdButNotLinked')}
             </p>
           ) : null}
         </form>

@@ -199,6 +199,7 @@ export const documentsMessages = {
   'documents.related.create': 'Create and link',
   'documents.related.creating': 'Creating…',
   'documents.related.createError': 'The document could not be created.',
+  'documents.related.createdButNotLinked': 'The document was created but could not be linked. Open it from Documents.',
   'documents.related.projectDocuments': 'Documents in this project',
   'documents.backlinks.openTarget': 'Open',
   'documents.context.comments': 'Comments',
