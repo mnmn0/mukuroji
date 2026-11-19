@@ -56,16 +56,17 @@ describe('timesheet reminder adapters', () => {
       new Date('2026-04-01T00:00:00.000Z'),
       new Date('2026-07-12T00:00:00.000Z'),
     )).toEqual([
-      { entryId: 'draft', memberKey: 'member@example.com', startAt: '2026-07-01T00:00:00.000Z', endAt: '2026-07-01T01:00:00.000Z' },
-      { entryId: 'rejected', memberKey: 'member@example.com', startAt: '2026-07-01T00:00:00.000Z', endAt: '2026-07-01T01:00:00.000Z' },
+      { entryId: 'draft', memberKey: 'member@example.com', projectId: 'project-1', startAt: '2026-07-01T00:00:00.000Z', endAt: '2026-07-01T01:00:00.000Z' },
+      { entryId: 'rejected', memberKey: 'member@example.com', projectId: 'project-1', startAt: '2026-07-01T00:00:00.000Z', endAt: '2026-07-01T01:00:00.000Z' },
     ])
   })
 
-  test('drops a reminder once every named entry is submitted, gone, or owned by someone else', async () => {
+  test('drops a reminder once every named entry is submitted, gone, moved, or owned by someone else', async () => {
     const stored = new Map<string, TimeEntry>([
       ['submitted', createEntry({ id: 'submitted', status: 'submitted' })],
       ['other-owner', createEntry({ id: 'other-owner', userId: 'other@example.com' })],
       ['no-project', createEntry({ id: 'no-project', projectId: undefined })],
+      ['moved', createEntry({ id: 'moved', endAt: '2026-07-11T01:00:00.000Z' })],
       ['rejected', createEntry({ id: 'rejected', status: 'rejected', revision: 4 })],
     ])
     const revalidator = createTimesheetReminderRevalidator({
@@ -79,13 +80,16 @@ describe('timesheet reminder adapters', () => {
       outboxStatus: 'pending',
       metadata: {
         teamId: 'core',
-        timeEntryIds: ['submitted', 'missing', 'other-owner', 'no-project', 'rejected'],
+        projectId: 'project-1',
+        timeEntryIds: ['submitted', 'missing', 'other-owner', 'no-project', 'moved', 'rejected'],
+        timesheetDueBefore: '2026-07-05T00:00:00.000Z',
         notificationCandidates: [{ memberKey: 'Member@Example.com', reason: 'timesheet' }],
       },
     })
     if (!event) throw new Error('Expected a parsed event.')
 
-    expect(event.timeEntryIds).toEqual(['submitted', 'missing', 'other-owner', 'no-project', 'rejected'])
+    expect(event.timeEntryIds).toEqual(['submitted', 'missing', 'other-owner', 'no-project', 'moved', 'rejected'])
+    expect(event.timesheetDueBefore).toBe('2026-07-05T00:00:00.000Z')
     // The notification save is fenced on the revision of the entry that is still unsubmitted.
     expect(await readTimesheetReminderFence(event, revalidator)).toEqual({
       current: true,
@@ -101,7 +105,11 @@ describe('timesheet reminder adapters', () => {
     })
     stored.set('rejected', createEntry({ id: 'rejected', status: 'submitted' }))
     expect((await readTimesheetReminderFence(event, revalidator)).current).toBe(false)
+    // An entry whose dates were corrected to end after the due instant no longer qualifies.
+    stored.set('rejected', createEntry({ id: 'rejected', status: 'rejected', endAt: '2026-07-05T00:00:00.001Z' }))
+    expect((await readTimesheetReminderFence(event, revalidator)).current).toBe(false)
     stored.set('rejected', createEntry({ id: 'rejected', status: 'rejected' }))
+    expect((await readTimesheetReminderFence({ ...event, timesheetDueBefore: undefined }, revalidator)).current).toBe(false)
     // Without a revalidator, or without entry IDs, a reminder is never delivered.
     expect((await readTimesheetReminderFence(event, undefined)).current).toBe(false)
     expect((await readTimesheetReminderFence({ ...event, timeEntryIds: [] }, revalidator)).current).toBe(false)

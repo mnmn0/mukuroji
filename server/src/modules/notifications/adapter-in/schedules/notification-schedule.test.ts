@@ -1585,9 +1585,9 @@ describe('configurable reminder days and timesheet reminders', () => {
   test('reminds each member with unsubmitted time once per reminder period at the configured hour', async () => {
     const reads: Array<[string, string, string, string]> = []
     const entries = [
-      { entryId: 'old-1', memberKey: 'member@example.com', startAt: '2026-07-01T00:00:00.000Z', endAt: '2026-07-01T02:00:00.000Z' },
-      { entryId: 'old-2', memberKey: 'member@example.com', startAt: '2026-07-02T00:00:00.000Z', endAt: '2026-07-02T02:00:00.000Z' },
-      { entryId: 'recent', memberKey: 'other@example.com', startAt: '2026-07-11T00:00:00.000Z', endAt: '2026-07-11T02:00:00.000Z' },
+      { entryId: 'old-1', memberKey: 'member@example.com', projectId: 'platform', startAt: '2026-07-01T00:00:00.000Z', endAt: '2026-07-01T02:00:00.000Z' },
+      { entryId: 'old-2', memberKey: 'member@example.com', projectId: 'platform', startAt: '2026-07-02T00:00:00.000Z', endAt: '2026-07-02T02:00:00.000Z' },
+      { entryId: 'recent', memberKey: 'other@example.com', projectId: 'platform', startAt: '2026-07-11T00:00:00.000Z', endAt: '2026-07-11T02:00:00.000Z' },
     ]
     const timesheetReader = {
       async listUnsubmittedEntries(workspaceId: string, teamId: string, from: Date, to: Date) {
@@ -1617,8 +1617,10 @@ describe('configurable reminder days and timesheet reminders', () => {
       summary: '2 time entries since 2026-07-01 have not been submitted.',
       metadata: {
         teamId: 'core-team',
+        projectId: 'platform',
         deepLink: '/teams/core-team/timesheet?week=2026-07-01T00%3A00%3A00.000Z',
         timeEntryIds: ['old-1', 'old-2'],
+        timesheetDueBefore: '2026-07-05T00:00:00.000Z',
         notificationCandidates: [{ memberKey: 'member@example.com', reason: 'timesheet' }],
       },
     })

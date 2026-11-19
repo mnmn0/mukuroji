@@ -1196,8 +1196,11 @@ function createTimesheetReminderAuditEvent(
     metadata: {
       actorMemberKey: scheduleActorMemberKey,
       teamId: candidate.teamId,
+      // Recipients are authorized against the oldest entry's Project, which the timesheet lists.
+      projectId: candidate.projectId,
       deepLink: `/teams/${encodeURIComponent(candidate.teamId)}/timesheet?${search.toString()}`,
       timeEntryIds: candidate.entryIds,
+      timesheetDueBefore: candidate.dueBefore,
       notificationCandidates: [{ memberKey: candidate.memberKey, reason: 'timesheet' }],
     },
     expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),

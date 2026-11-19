@@ -753,7 +753,7 @@ describe('collaboration projection pure helpers', () => {
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
     }
   })
-  test('delivers a timesheet reminder to its owner with access to only some Team Projects', async () => {
+  test('authorizes a timesheet reminder against its entry Project, not every Team Project', async () => {
     const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
     const previous = keys.map((key) => process.env[key])
     keys.forEach((key) => { process.env[key] = key })
@@ -773,16 +773,16 @@ describe('collaboration projection pure helpers', () => {
     })
     const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
     const reminder = createProjectionEvent({
-      eventType: TIMESHEET_REMINDER_EVENT_TYPE, teamId: 'core', scopeKey: 'workspace-1#team#core', entityId: 'team/core',
-      timeEntryIds: ['entry-1'], notificationCandidates: [{ memberKey, reason: 'timesheet' }],
+      eventType: TIMESHEET_REMINDER_EVENT_TYPE, teamId: 'core', projectId: 'platform',
+      scopeKey: 'workspace-1#team#core', entityId: 'team/core/timesheet',
+      timeEntryIds: ['entry-1'], timesheetDueBefore: '2026-07-05T00:00:00.000Z',
+      notificationCandidates: [{ memberKey, reason: 'timesheet' }],
     })
     try {
       expect(await authorizeNotificationDelivery(reminder, memberKey, identity, cache)).toBe(true)
-      // Another member's reminder and other Team-wide notifications still need every Team Project.
-      expect(await authorizeNotificationDelivery({ ...reminder,
-        notificationCandidates: [{ memberKey: 'other@example.com', reason: 'timesheet' }] }, memberKey, identity, cache)).toBe(false)
-      expect(await authorizeNotificationDelivery({ ...reminder, eventType: 'comment.created',
-        notificationCandidates: [{ memberKey, reason: 'mention' }] }, memberKey, identity, cache)).toBe(false)
+      // The member cannot read the other Project, nor the Team as a whole.
+      expect(await authorizeNotificationDelivery({ ...reminder, projectId: 'secret' }, memberKey, identity, cache)).toBe(false)
+      expect(await authorizeNotificationDelivery({ ...reminder, projectId: undefined }, memberKey, identity, cache)).toBe(false)
     } finally {
       send.mockRestore()
       groups.mockRestore()

@@ -149,6 +149,8 @@ export type AuditProjectionEvent = {
   planningNotificationKind?: PlanningScheduledNotificationKind
   /** Unsubmitted time entries a timesheet reminder was scanned for. */
   timeEntryIds?: string[]
+  /** Instant at or before which a timesheet reminder's entries had to end to be due. */
+  timesheetDueBefore?: string
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
 }
@@ -233,6 +235,8 @@ export type TimesheetReminderRevalidator = {
     memberKey: string
     /** Entry IDs the schedule found unsubmitted. */
     entryIds: readonly string[]
+    /** An entry must have ended at or before this instant to still be due. */
+    dueBefore: string
   }): Promise<ProjectionConditionCheck | undefined>
 }
 
@@ -1630,7 +1634,8 @@ export async function readTimesheetReminderFence(
     !event.teamId ||
     !memberKey ||
     event.notificationCandidates.length !== 1 ||
-    !event.timeEntryIds?.length
+    !event.timeEntryIds?.length ||
+    !event.timesheetDueBefore
   ) {
     return { current: false }
   }
@@ -1639,6 +1644,7 @@ export async function readTimesheetReminderFence(
     teamId: event.teamId,
     memberKey,
     entryIds: event.timeEntryIds,
+    dueBefore: event.timesheetDueBefore,
   })
   return condition ? { current: true, condition } : { current: false }
 }
@@ -2335,10 +2341,7 @@ async function isEligibleRecipient(
       (!enforceContentAuthorization || event.teamId || event.projectId || member.role !== 'guest' || selectedWorkspaceRecipient)
     const teamProjects = directoryItems.filter((item) => item.entryType === 'project' &&
       item.teamId === event.teamId && item.projectId && !item.archivedAt)
-    // A timesheet reminder only describes the recipient's own entries, which the timesheet lists
-    // for any one accessible Project, so it does not need access to every Team Project.
     if (legacyAllowed && (!enforceContentAuthorization || event.projectId || !event.teamId ||
-      isOwnTimesheetReminder(event, memberKey) ||
       teamProjects.length > 0 && teamProjects.every((project) => hasEligibleProjectAccess(project, memberKey, directoryItems)))) return true
   }
 
@@ -2351,20 +2354,6 @@ async function isEligibleRecipient(
   }
 
   return currentSystemAdmin
-}
-
-/**
- * Reports whether the event is a timesheet reminder addressed to this member about their own entries.
- *
- * @param event - Parsed audit event.
- * @param memberKey - Canonical recipient member key.
- * @returns Whether the member is the reminder's only recipient.
- */
-function isOwnTimesheetReminder(event: AuditProjectionEvent, memberKey: string) {
-  return event.eventType === TIMESHEET_REMINDER_EVENT_TYPE &&
-    event.notificationCandidates.length === 1 &&
-    event.notificationCandidates[0]?.reason === 'timesheet' &&
-    normalizeMemberKey(event.notificationCandidates[0].memberKey) === memberKey
 }
 
 /**
@@ -2875,6 +2864,7 @@ export function parseAuditProjectionEvent(
     ...(Array.isArray(metadata.timeEntryIds)
       ? { timeEntryIds: metadata.timeEntryIds.flatMap((entryId) => readString(entryId) ?? []) }
       : {}),
+    ...(readString(metadata.timesheetDueBefore) ? { timesheetDueBefore: readString(metadata.timesheetDueBefore) } : {}),
     outboxStatus: value.outboxStatus === 'suppressed' ? 'suppressed' : 'pending',
   }
 }

@@ -26,14 +26,16 @@ export function createTimesheetReader(
       })
       // Entries without a Project are left out: the timesheet a member opens from the reminder
       // lists and submits only Project entries, so they could never clear the reminder there.
-      return entries
-        .filter((entry) => (entry.status === 'draft' || entry.status === 'rejected') && entry.projectId !== undefined)
-        .map((entry) => ({
-          entryId: entry.id,
-          memberKey: entry.userId.toLowerCase(),
-          startAt: entry.startAt,
-          endAt: entry.endAt,
-        }))
+      return entries.flatMap((entry) =>
+        (entry.status === 'draft' || entry.status === 'rejected') && entry.projectId !== undefined
+          ? [{
+              entryId: entry.id,
+              memberKey: entry.userId.toLowerCase(),
+              projectId: entry.projectId,
+              startAt: entry.startAt,
+              endAt: entry.endAt,
+            }]
+          : [])
     },
   }
 }
@@ -57,7 +59,9 @@ export function createTimesheetReminderRevalidator(
           entry &&
           entry.userId.toLowerCase() === input.memberKey &&
           entry.projectId !== undefined &&
-          (entry.status === 'draft' || entry.status === 'rejected')
+          (entry.status === 'draft' || entry.status === 'rejected') &&
+          // An entry whose dates were corrected after the scan must still be past the threshold.
+          Date.parse(entry.endAt) <= Date.parse(input.dueBefore)
         ) {
           return createTimeEntryRevisionCondition(
             tableName,
