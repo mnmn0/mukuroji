@@ -278,6 +278,19 @@ describe('sessions of different accounts in different tabs', () => {
     expect(getAuthSession()).toEqual(remembered)
   })
 
+  test("a remembered sign-in replaces this tab's session-only sign-in of another account", () => {
+    storeFromAnotherTab(sessionStorage, session(token('account-b'), false))
+    getAuthSession()
+
+    const remembered = session(token('account-a'), true)
+    saveAuthSession(remembered)
+    // A reload must keep the account the tab signed in to last.
+    resetAuthSessionTabAccount()
+
+    expect(stored(sessionStorage)).toBeNull()
+    expect(getAuthSession()).toEqual(remembered)
+  })
+
   test('a sign-in makes the new account the tab account', () => {
     storeFromAnotherTab(localStorage, session(token('account-a'), true))
     getAuthSession()

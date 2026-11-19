@@ -196,20 +196,23 @@ export function hasStoredAuthSession(accessToken: string): boolean {
 /**
  * ユーザーの保持設定に合わせて認証セッションを保存し、この tab の account にします。
  *
- * 反対側の storage は、同じ account の古い session か読めない値のときだけ消します。別の tab が
- * 別の account で使っている session は残します。
+ * 保持ありで保存するときは、この tab の sessionStorage の session を必ず消します。残すと reload で
+ * そちらが先に読まれ、別の account に切り替わるためです。保持なしで保存するときは、localStorage の
+ * session が同じ account の古い session か読めない値のときだけ消し、別の tab が使う別の account の
+ * session は残します。
  */
 export function saveAuthSession(session: AuthSession) {
-  const targetStorage = session.remember ? window.localStorage : window.sessionStorage
-  const staleStorage = session.remember ? window.sessionStorage : window.localStorage
-
-  const stale = staleStorage.getItem(storageKey)
-  if (stale !== null) {
-    const staleSession = readSession(staleStorage)
-    if (!staleSession || isSameAuthSessionToken(staleSession.accessToken, session.accessToken)) {
-      staleStorage.removeItem(storageKey)
+  if (session.remember) {
+    window.sessionStorage.removeItem(storageKey)
+  } else {
+    if (window.localStorage.getItem(storageKey) !== null) {
+      const remembered = readSession(window.localStorage)
+      if (!remembered || isSameAuthSessionToken(remembered.accessToken, session.accessToken)) {
+        window.localStorage.removeItem(storageKey)
+      }
     }
   }
+  const targetStorage = session.remember ? window.localStorage : window.sessionStorage
   targetStorage.setItem(storageKey, JSON.stringify(session))
   window.sessionStorage.removeItem(signedOutStorageKey)
   tabAccount = { accessToken: session.accessToken, remember: session.remember }
