@@ -3,7 +3,7 @@ import { assessServerCompatibility, CODING_AGENT_MCP_VERSION, describeCodingAgen
 
 test('describes this build with a semantic version and the shared MCP API revision', () => {
   expect(CODING_AGENT_MCP_VERSION).toMatch(/^\d+\.\d+\.\d+$/u)
-  expect(describeCodingAgentMcpBuild()).toEqual({ version: CODING_AGENT_MCP_VERSION, apiRevision: 1 })
+  expect(describeCodingAgentMcpBuild()).toEqual({ version: CODING_AGENT_MCP_VERSION, apiRevision: 2 })
 })
 
 test('accepts a build whose revision is inside the server range', () => {

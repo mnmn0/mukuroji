@@ -6,7 +6,8 @@ import {
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT, WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
 } from '@mukuroji/contracts'
 import type {
-  AgentCatalog, AgentPage, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentWorkItemApi,
+  AgentCatalog, AgentDocument, AgentPage, AgentRunRecord, AgentRunReportResult, AgentSettingsRecord, AgentTask, AgentTaskDocument,
+  AgentWorkItemApi,
 } from '../../application/work-item-api'
 import { AgentTaskError } from '../../application/work-item-api'
 
@@ -131,6 +132,11 @@ const contextSchema = z.object({
   acceptanceCriteriaFieldId: identifier.optional(),
   brief: briefText.optional(),
   projectBriefs: z.record(identifier, briefText).refine((briefs) => Object.keys(briefs).length <= AGENT_SETTINGS_MAX_PROJECT_BRIEFS),
+})
+const linkedDocumentSchema: z.ZodType<AgentTaskDocument> = z.object({ id: identifier, title: z.string() })
+const documentSchema: z.ZodType<AgentDocument> = z.object({
+  schemaVersion: z.literal(1), id: identifier, kind: z.enum(['page', 'template']), title: z.string(),
+  revision: z.number().int().positive(), updatedAt: z.iso.datetime(), format: z.literal('markdown'), content: z.string(),
 })
 const problemSchema = z.object({
   status: z.number().int(), code: z.string(), retryable: z.boolean(),
@@ -484,6 +490,21 @@ export function createAgentWorkItemApi(
         throw new AgentTaskError('invalid_response', 'The API returned the key of another task.')
       }
       return { createdAt: found.createdAt, ...(found.key === undefined ? {} : { key: found.key }) }
+    },
+    /** Reads one page of a task's visible linked Documents; a server older than the endpoint has none. */
+    async relatedDocuments(id, cursor, limit = 20) {
+      try {
+        return await request(`work-items/${encodeURIComponent(id)}/documents`, pageSchema(linkedDocumentSchema), 'GET', undefined, undefined, { cursor, limit })
+      } catch (error) {
+        if (error instanceof AgentTaskError && error.code === 'not_found') return undefined
+        throw error
+      }
+    },
+    /** Reads one linked Document as Markdown. */
+    async document(id, documentId) {
+      const found = await request(`work-items/${encodeURIComponent(id)}/documents/${encodeURIComponent(documentId)}`, documentSchema)
+      if (found.id !== documentId) throw new AgentTaskError('invalid_response', 'The API returned another Document.')
+      return found
     },
   }
 

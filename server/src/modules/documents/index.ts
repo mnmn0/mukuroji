@@ -7,6 +7,7 @@ export {
   collectDocumentRelationTargets,
   reduceDocumentOperations,
   renderDocumentExport,
+  renderDocumentProjectionExport,
   renderPublicDocumentExport,
   validateDocumentPayload,
 } from './domain/document-content'
