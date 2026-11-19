@@ -481,17 +481,19 @@ function createAuditContext(
   })
 }
 
-async function createAvailableFile() {
+async function createAvailableFile(
+  upload: { contentType: string; fileName: string } = { contentType: 'image/png', fileName: 'review.png' },
+) {
   const state = createClient()
   const session = await state.client.createUpload(
     scope,
     manager,
-    { contentType: 'image/png', fileName: 'review.png', sizeBytes: 1024 },
+    { ...upload, sizeBytes: 1024 },
     createAuditContext('create-file'),
   )
   const objectKey = state.objectClient.lastObjectKey!
   state.objectClient.objects.set(objectKey, {
-    contentType: 'image/png',
+    contentType: upload.contentType,
     objectVersionId: 'immutable-object-version-1',
     sizeBytes: 1024,
     scanStatus: 'available',
@@ -581,6 +583,7 @@ describe('file proofing domain', () => {
       objectKey,
       objectVersionId: verified.objectVersionId,
       fileName: 'proof.png',
+      contentType: 'image/png',
       disposition: 'inline',
     })
 
@@ -893,6 +896,69 @@ describe('file proofing domain', () => {
       'FILE#',
       'FILE#',
     ])
+  })
+
+  test('signs attachment disposition and the stored media type for non-inline-safe files', async () => {
+    const s3Client = new S3Client({
+      credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+      region: 'us-east-1',
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+    })
+    ;(s3Client as unknown as { send(command: unknown): Promise<Record<string, unknown>> }).send =
+      async (command) => {
+        if (command instanceof GetObjectTaggingCommand) {
+          return { TagSet: [{ Key: 'GuardDutyMalwareScanStatus', Value: 'NO_THREATS_FOUND' }] }
+        }
+        throw new Error('Unexpected S3 command.')
+      }
+    const client = new S3FileObjectClient(s3Client, 'mukuroji-files-test')
+
+    const textAccess = new URL((await client.createAccess({
+      objectKey: 'workspaces/workspace-1/files/file-1/version-1/notes.txt',
+      objectVersionId: 'immutable-s3-version-1',
+      fileName: 'notes.txt',
+      contentType: 'text/plain',
+      disposition: 'inline',
+    })).url)
+    const imageAccess = new URL((await client.createAccess({
+      objectKey: 'workspaces/workspace-1/files/file-1/version-1/proof.png',
+      objectVersionId: 'immutable-s3-version-1',
+      fileName: 'proof.png',
+      contentType: 'image/png',
+      disposition: 'inline',
+    })).url)
+
+    expect(textAccess.searchParams.get('response-content-disposition')).toStartWith('attachment;')
+    expect(textAccess.searchParams.get('response-content-type')).toBe('text/plain')
+    expect(imageAccess.searchParams.get('response-content-disposition')).toStartWith('inline;')
+    expect(imageAccess.searchParams.get('response-content-type')).toBe('image/png')
+  })
+
+  test('rejects script-capable or malformed media types before signing', async () => {
+    const { client } = createClient()
+    for (const contentType of ['image/svg+xml', 'image/png, text/html', 'text/html', 'image/']) {
+      await expect(client.createUpload(
+        scope,
+        manager,
+        { contentType, fileName: 'payload.svg', sizeBytes: 100 },
+      )).rejects.toMatchObject({ code: 'FileTypeNotAllowed', status: 415 })
+    }
+  })
+
+  test('downgrades inline access to attachment for files without an inline-safe media type', async () => {
+    const { client, session } = await createAvailableFile({ contentType: 'text/plain', fileName: 'notes.txt' })
+
+    const access = await client.createAccess(
+      scope,
+      manager,
+      session.file.id,
+      session.version.id,
+      'inline',
+      createAuditContext('preview-text-file'),
+    )
+
+    expect(access.url).toContain('disposition=attachment')
+    expect(session.version.previewKind).toBe('none')
   })
 
   test('rejects unsupported or oversized upload metadata before signing', async () => {

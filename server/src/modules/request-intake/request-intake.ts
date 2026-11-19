@@ -2562,6 +2562,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       objectKey,
       objectVersionId,
       fileName: attachment.fileName,
+      contentType: attachment.contentType,
       disposition: 'attachment',
     })
   }
