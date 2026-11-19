@@ -24,6 +24,9 @@ const stageByReportKind: Record<AgentRunReportKind, FactoryAnalyticsStage> = {
   handoff: 'decision',
 }
 
+/** Facts of one structured report that analytics uses. */
+export type FactoryAnalyticsReportFacts = Pick<AgentRunReport, 'runId' | 'sequence' | 'kind' | 'createdAt'>
+
 /** Run and report history of one Work Item, as far as it was read. */
 export type FactoryAnalyticsWorkItemHistory = {
   /** Runs of the Work Item in any order; the newest ones when the history was cut. */
@@ -31,7 +34,7 @@ export type FactoryAnalyticsWorkItemHistory = {
   /** Whether `runs` holds every run of the Work Item. */
   runsComplete: boolean
   /** Structured reports of the Work Item in any order; the newest ones when the history was cut. */
-  reports: readonly AgentRunReport[]
+  reports: readonly FactoryAnalyticsReportFacts[]
 }
 
 /** Period and histories Factory analytics are calculated from. */
@@ -169,7 +172,7 @@ function addDwell(dwell: Map<FactoryAnalyticsStage, number>, stage: FactoryAnaly
  */
 function measureRunDwell(
   run: StoredAgentRun,
-  reports: readonly AgentRunReport[],
+  reports: readonly FactoryAnalyticsReportFacts[],
   next: StoredAgentRun | undefined,
 ): Map<FactoryAnalyticsStage, number> {
   const dwell = new Map<FactoryAnalyticsStage, number>()
@@ -210,7 +213,7 @@ export function calculateFactoryAnalytics(input: FactoryAnalyticsInput): Factory
     const oldest = runs[0]
     // Runs older than the oldest one read may still have finished in the period and are not counted.
     if (!history.runsComplete && oldest !== undefined && Date.parse(oldest.startedAt) >= input.from) historyHasMore = true
-    const reportsByRun = new Map<string, AgentRunReport[]>()
+    const reportsByRun = new Map<string, FactoryAnalyticsReportFacts[]>()
     for (const report of history.reports) {
       const reports = reportsByRun.get(report.runId) ?? []
       reports.push(report)

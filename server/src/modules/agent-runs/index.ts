@@ -41,6 +41,7 @@ export {
 export {
   calculateFactoryAnalytics,
   type FactoryAnalyticsInput,
+  type FactoryAnalyticsReportFacts,
   type FactoryAnalyticsResult,
   type FactoryAnalyticsWorkItemHistory,
 } from './domain/agent-run-analytics'

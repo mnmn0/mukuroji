@@ -4,7 +4,6 @@ import {
   FACTORY_ANALYTICS_MAX_REPORTS_PER_WORK_ITEM,
   FACTORY_ANALYTICS_MAX_RUNS_PER_WORK_ITEM,
   FACTORY_ANALYTICS_MAX_WORK_ITEMS,
-  type AgentRunReport,
   type TeamFactoryAnalyticsResponse,
 } from '@mukuroji/contracts'
 import {
@@ -13,6 +12,7 @@ import {
   createAgentRunIntegrityError,
   toAgentRunReport,
   type AgentRunFinishedGroup,
+  type FactoryAnalyticsReportFacts,
   type FactoryAnalyticsWorkItemHistory,
 } from '../../modules/agent-runs'
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
@@ -79,7 +79,8 @@ export function readFactoryAnalyticsPeriod(from: string | undefined, to: string 
 
 /**
  * Collects the Work Items of one group of runs that finished in the period, newest finish first, up
- * to {@link FACTORY_ANALYTICS_MAX_EVALUATED_FINISHED_RUNS} evaluated index entries.
+ * to {@link FACTORY_ANALYTICS_MAX_EVALUATED_FINISHED_RUNS} evaluated index entries. The index query is
+ * bounded by both ends of the period, so runs outside it never use up the budget.
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
@@ -95,11 +96,12 @@ async function readFinishedRunWorkItemIds(
 ): Promise<{ workItemIds: string[]; hasMore: boolean }> {
   const workItemIds = new Set<string>()
   const since = new Date(period.from).toISOString()
+  const until = new Date(period.to).toISOString()
   let evaluated = 0
   let cursor: string | undefined
   do {
     const limit = Math.min(analyticsPageSize, FACTORY_ANALYTICS_MAX_EVALUATED_FINISHED_RUNS - evaluated)
-    const page = await workItemDependencies.agentRuns.listFinishedRunsByTime(principal.directoryId, teamId, group, since, cursor, limit)
+    const page = await workItemDependencies.agentRuns.listFinishedRunsByTime(principal.directoryId, teamId, group, since, cursor, limit, until)
     evaluated += limit
     for (const run of page.runs) {
       const finishedAt = Date.parse(run.finishedAt)
@@ -157,7 +159,7 @@ async function readWorkItemHistory(
   const store = workItemDependencies.agentRuns
   const runPage = await store.listWorkItemRuns(principal.directoryId, teamId, workItemId, undefined, FACTORY_ANALYTICS_MAX_RUNS_PER_WORK_ITEM)
   if (runPage.runs.some((run) => run.workItemId !== workItemId)) throw createAgentRunIntegrityError()
-  const reports: AgentRunReport[] = []
+  const reports: FactoryAnalyticsReportFacts[] = []
   if (runPage.runs.some((run) => run.reportCount > 0)) {
     let cursor: string | undefined
     do {
@@ -165,7 +167,9 @@ async function readWorkItemHistory(
       const page = await store.listWorkItemReports(principal.directoryId, teamId, workItemId, cursor, limit)
       for (const report of page.reports) {
         if (report.workItemId !== workItemId) throw createAgentRunIntegrityError()
-        reports.push(toAgentRunReport(report))
+        // Only the fields analytics uses are kept, so verification text and artifact URLs never pile up across Work Items.
+        const { runId, sequence, kind, createdAt } = toAgentRunReport(report)
+        reports.push({ runId, sequence, kind, createdAt })
       }
       cursor = page.nextCursor
     } while (cursor !== undefined && reports.length < FACTORY_ANALYTICS_MAX_REPORTS_PER_WORK_ITEM)

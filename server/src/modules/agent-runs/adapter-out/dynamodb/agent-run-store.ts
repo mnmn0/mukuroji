@@ -326,6 +326,8 @@ export interface AgentRunStore {
    * @param since - When given, only runs that finished at or after this ISO time.
    * @param cursor - Continuation from a previous page of the same query.
    * @param limit - Page size from 1 to 100.
+   * @param until - When given, only runs that finished at or before this ISO time; the query skips
+   *   later runs instead of reading them.
    * @returns One page of finished runs.
    */
   listFinishedRunsByTime(
@@ -335,6 +337,7 @@ export interface AgentRunStore {
     since: string | undefined,
     cursor: string | undefined,
     limit: number,
+    until?: string,
   ): Promise<AgentRunFinishedPage>
   /**
    * Builds the writes that create a run, claim its Work Item, clear an earlier revocation of the
@@ -1561,20 +1564,33 @@ export class DynamoDbAgentRunStore implements AgentRunStore, AgentRunTriageStore
     since: string | undefined,
     cursor: string | undefined,
     limit: number,
+    until?: string,
   ): Promise<AgentRunFinishedPage> {
     if (since !== undefined && !Number.isFinite(Date.parse(since))) {
       throw new AgentRunError('validation_failed', 'since must be an ISO time.', { pointer: '/since' })
     }
+    if (until !== undefined && !Number.isFinite(Date.parse(until))) {
+      throw new AgentRunError('validation_failed', 'until must be an ISO time.', { pointer: '/until' })
+    }
     const partition = finishedRunPartition(createAgentRunPartition(directoryId, teamId), group)
+    // Sort keys are `finishedAt#runId`, and run IDs sort below `~`, so this bound keeps every run that finished at `until`.
+    const upper = until === undefined ? undefined : `${until}#~`
+    const rangeCondition = since !== undefined && upper !== undefined
+      ? ' AND #finishedRunSortKey BETWEEN :since AND :until'
+      : since !== undefined ? ' AND #finishedRunSortKey >= :since' : upper !== undefined ? ' AND #finishedRunSortKey <= :until' : ''
     const response = await this.#client.send(new QueryCommand({
       TableName: this.#tableName,
       IndexName: AGENT_RUN_FINISHED_INDEX_NAME,
-      KeyConditionExpression: '#finishedRunPartition = :partition' + (since === undefined ? '' : ' AND #finishedRunSortKey >= :since'),
+      KeyConditionExpression: '#finishedRunPartition = :partition' + rangeCondition,
       ExpressionAttributeNames: {
         '#finishedRunPartition': 'finishedRunPartition',
-        ...(since === undefined ? {} : { '#finishedRunSortKey': 'finishedRunSortKey' }),
+        ...(rangeCondition === '' ? {} : { '#finishedRunSortKey': 'finishedRunSortKey' }),
       },
-      ExpressionAttributeValues: { ':partition': partition, ...(since === undefined ? {} : { ':since': since }) },
+      ExpressionAttributeValues: {
+        ':partition': partition,
+        ...(since === undefined ? {} : { ':since': since }),
+        ...(upper === undefined ? {} : { ':until': upper }),
+      },
       ScanIndexForward: false,
       Limit: readLimit(limit),
       ExclusiveStartKey: decodeCursor(cursor, 'finishedRunPartition', partition),

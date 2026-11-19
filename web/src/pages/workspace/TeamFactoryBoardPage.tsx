@@ -58,7 +58,8 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
   const onRelease = useReleaseFactoryBoardRun(accessToken, teamId, async (released) => {
     // Show the committed release from the response, so a failed refresh cannot bring back the active run.
     await board.mutate((current) => applyReleasedRunToBoard(current, released), { revalidate: false })
-    void Promise.all([board.mutate(), reports.mutate()]).catch(() => undefined)
+    // A release finishes a run and counts as an intervention, so the period summary is read again too.
+    void Promise.all([board.mutate(), reports.mutate(), analytics.mutate()]).catch(() => undefined)
   })
   const labels = useMemo(() => createFactoryBoardLabels(workspace.locale), [workspace.locale])
   const analyticsLabels = useMemo(() => createFactoryAnalyticsLabels(workspace.locale), [workspace.locale])
@@ -99,7 +100,10 @@ function TeamFactoryBoardContent({ teamId }: TeamFactoryBoardContentProps) {
           isRefreshing={board.isValidating}
           labels={labels}
           onNavigate={(href) => { void navigate(href) }}
-          onRefresh={() => { void board.mutate() }}
+          onRefresh={() => {
+            void board.mutate()
+            void analytics.mutate()
+          }}
           onRelease={onRelease}
           onSelect={setSelectedWorkItemId}
           onViewChange={(next) => {

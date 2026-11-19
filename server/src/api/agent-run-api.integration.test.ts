@@ -2664,6 +2664,19 @@ describe('Factory board route', () => {
     expect(JSON.stringify(body)).not.toContain('cursor')
   })
 
+  test('reads a past period without spending its budget on runs that finished after it', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([{ id: 'task-past', statusCategory: 'completed' }])
+    for (let index = 0; index < 1_001; index += 1) {
+      store.seed(finishAgentRun(createRunAt(`later-${index}`, new Date(now - 2 * hourMs)), 'failed', 'agent', new Date(now - hourMs)))
+    }
+    store.seed(finishAgentRun(createRunAt('task-past', new Date(now - 50 * hourMs)), 'failed', 'agent', new Date(now - 49 * hourMs)))
+    const query = new URLSearchParams({ from: new Date(now - 72 * hourMs).toISOString(), to: new Date(now - 48 * hourMs).toISOString() })
+    const response = await app.request(`http://localhost/api/teams/core-team/agent-runs/analytics?${query}`, { headers })
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ finishedRuns: 1, outcomes: { failed: 1 }, finishedRunsHasMore: false })
+  })
+
   test('bounds the Work Items whose history it reads and says so', async () => {
     const now = Date.now()
     const workItems: BoardWorkItem[] = Array.from({ length: 201 }, (_, index) => ({ id: `task-${String(index).padStart(3, '0')}`, statusCategory: 'completed' }))

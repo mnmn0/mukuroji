@@ -374,7 +374,7 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
   判断に足す。次の Run がまだない待ちは数えない。受付（Run なしの `started`）は Work Item の履歴が要るため
   まだ測らない。
 - 全体と runtime ごとに同じ率を返す。
-- 読み取りは上限付きで、上限で止まったときは flag で知らせる: 終了 Run の index は failed とそれ以外を
+- 読み取りは上限付きで、上限で止まったときは flag で知らせる: 終了 Run の index は期間の両端で絞り、failed とそれ以外を
   それぞれ新しい順に最大 1,000 件（`finishedRunsHasMore`）、履歴を読む Work Item は最大 200 件
   （`workItemsHasMore`）、Work Item ごとの Run は最大 100 件、report は最大 300 件。直前の Run や report が
   読めなかった Run は件数と成功率には入れ、手戻りと滞在時間からは外す。Run が 100 件を超える
