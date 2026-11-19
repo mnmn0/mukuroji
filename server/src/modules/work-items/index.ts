@@ -186,4 +186,11 @@ export {
   type WorkItemKeyLocation,
 } from './adapter-out/dynamodb/work-item-key-registry'
 export { deriveWorkItemKeyPrefix } from './domain/work-item-key'
+export {
+  DynamoDbProjectScheduleBaselineStore,
+  InMemoryProjectScheduleBaselineStore,
+  type CaptureProjectScheduleBaselineInput,
+  type ProjectScheduleBaselineStore,
+  type ScheduleBaselineCallerAuthorizationCheck,
+} from './adapter-out/dynamodb/schedule-baseline-store'
 export type { TeamIssueCommentResponseItem } from '@mukuroji/contracts'

@@ -99,6 +99,7 @@ import {
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 import { TaskHandoffPanel } from './TaskHandoffPanel'
 import { TaskActualDatesPanel } from './TaskActualDatesPanel'
+import { TaskScheduleBaselinePanel } from './TaskScheduleBaselinePanel'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
 export type TaskDetailAiAssistanceRenderContext = {
@@ -1330,6 +1331,16 @@ export function TaskDetailPane({
             // The loaded detail is newer than the list row, so the panel shows its dates.
             task={issue ?? task}
           />
+          {accessToken && (issue ?? task).assignedProjectId ? (
+            <TaskScheduleBaselinePanel
+              accessToken={accessToken}
+              canCapture={Boolean(canCorrectActualDates) && !isReadOnly}
+              disabled={isReadOnly}
+              projectId={(issue ?? task).assignedProjectId ?? ''}
+              t={t}
+              task={issue ?? task}
+            />
+          ) : null}
           </>
         )
       case 'relations':

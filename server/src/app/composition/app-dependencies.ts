@@ -54,7 +54,7 @@ import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
 import type { TriageClient } from '../../modules/triage'
-import type { TeamIssuesClient } from '../../modules/work-items'
+import type { ProjectScheduleBaselineStore, TeamIssuesClient } from '../../modules/work-items'
 import type { WorkItemConfigurationClient } from '../../modules/work-items/work-item-configuration'
 import type {
   WorkItemImportExecutionStore,
@@ -192,6 +192,8 @@ export interface WorkItemDependencies {
   updateFeedReadState: UpdateFeedReadStatePersistence
   /** Provides bounded member-owned saved feed definitions. */
   savedUpdateFeeds: SavedUpdateFeedsPersistence
+  /** Provides the latest schedule baseline of each Project. */
+  scheduleBaselines: ProjectScheduleBaselineStore
   /** Provides Workspace Collections that reference canonical Work Items. */
   collections: CollectionsPersistence
   /** Provides manual digest preferences and content-free generation receipts. */
