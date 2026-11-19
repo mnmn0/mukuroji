@@ -584,6 +584,81 @@ export const DashboardRouteMobile: Story = {
   ),
 }
 
+/** Twelve Projects with mixed reported health, more than the former six-row limit. */
+const storyLargePortfolioTeams = [{
+  id: 'core-team',
+  name: 'Core team',
+  projects: Array.from({ length: 12 }, (_, index) => ({
+    id: `portfolio-${String(index + 1).padStart(2, '0')}`,
+    name: `Portfolio project ${String(index + 1).padStart(2, '0')}`,
+  })),
+}]
+
+/** Planning update projections that give the large portfolio one off-track and one at-risk Project. */
+const storyLargePortfolioUpdateTargets: PlanningUpdateTargetSummary[] = (
+  [['portfolio-12', 'off-track'], ['portfolio-07', 'at-risk'], ['portfolio-01', 'on-track']] as const
+).map(([projectId, health], index) => ({
+  target: { type: 'project', teamId: 'core-team', projectId },
+  updateState: 'current',
+  latestVersion: 1,
+  latestUpdate: {
+    id: `story-large-portfolio-${projectId}`,
+    version: 1,
+    health,
+    risk: 'low',
+    summary: `Story update for ${projectId}.`,
+    progressSnapshot: { percent: 40, linkedWorkItemCount: 3 },
+    authorMemberKey: 'demo@example.com',
+    coveredDueAt: '2026-08-07T08:00:00.000Z',
+    createdAt: `2026-08-0${index + 1}T07:30:00.000Z`,
+  },
+  updatedAt: `2026-08-0${index + 1}T07:30:00.000Z`,
+}))
+
+/** The `/dashboard` portfolio lists every Project, puts off-track first, and filters by reported health. */
+export const DashboardRouteLargePortfolio: Story = {
+  render: () => (
+    <DashboardWorkspaceView
+      planningUpdateTargets={storyLargePortfolioUpdateTargets}
+      summary={{ blocked: 0, projects: 12, tasks: 0 }}
+      t={englishTranslator}
+      teams={storyLargePortfolioTeams}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const projectRows = () => canvasElement.querySelectorAll('[data-testid^="dashboard-update-summary-"]')
+
+    await expect(canvas.getByText('Showing 12 of 12 projects')).toBeInTheDocument()
+    await expect(projectRows()).toHaveLength(12)
+    await expect(projectRows()[0]).toHaveAttribute('data-testid', 'dashboard-update-summary-core-team-portfolio-12')
+
+    await userEvent.selectOptions(canvas.getByTestId('dashboard-portfolio-health-filter'), 'at-risk')
+    await expect(canvas.getByText('Showing 1 of 12 projects')).toBeInTheDocument()
+    await expect(projectRows()).toHaveLength(1)
+  },
+}
+
+/** The `/dashboard` portfolio when no Project matches the selected reported health. */
+export const DashboardRoutePortfolioFilterEmpty: Story = {
+  render: () => (
+    <DashboardWorkspaceView
+      planningUpdateTargets={storyLargePortfolioUpdateTargets.slice(0, 1)}
+      summary={{ blocked: 0, projects: 12, tasks: 0 }}
+      t={englishTranslator}
+      teams={storyLargePortfolioTeams}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.selectOptions(canvas.getByTestId('dashboard-portfolio-health-filter'), 'on-track')
+    await expect(canvas.getByTestId('dashboard-portfolio-empty')).toHaveTextContent('No projects match the selected health.')
+  },
+}
+
 /** The `/dashboard` route when Focus metrics and previews cannot be loaded. */
 export const DashboardRouteFocusUnavailable: Story = {
   render: () => (
