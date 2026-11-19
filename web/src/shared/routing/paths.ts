@@ -8,6 +8,7 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   focus: '/focus',
   updates: '/updates',
   'my-tasks': '/my-tasks',
+  'work-items': '/work-items',
   inbox: '/inbox',
   requests: '/requests',
   customers: '/customers',
@@ -386,14 +387,15 @@ export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
  * Creates the URL of a Team's time tracking view for one week.
  *
  * @param teamId - Team identifier.
- * @param view - `timesheet` for the member's week, `approvals` for the manager queue, or `report` for totals.
+ * @param view - `timesheet` for the member's week, `weekly-report` for the member's weekly report,
+ *   `approvals` for the manager queue, or `report` for totals.
  * @param weekStart - Monday of the week as `YYYY-MM-DD`; omitted for the current week. Not used by `report`.
  * @param report - Period and grouping of the `report` view; omitted for the current week by day.
  * @returns Same-origin path.
  */
 export function createTeamTimeTrackingPath(
   teamId: string,
-  view: 'timesheet' | 'approvals' | 'report' = 'timesheet',
+  view: 'timesheet' | 'weekly-report' | 'approvals' | 'report' = 'timesheet',
   weekStart?: string,
   report?: { from: string; to: string; groupBy: string },
 ) {

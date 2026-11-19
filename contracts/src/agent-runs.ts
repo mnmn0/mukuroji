@@ -507,9 +507,10 @@ export const FACTORY_BOARD_COMPLETED_WINDOW_HOURS = 24
 export const FACTORY_BOARD_MAX_ACTIVE_RUNS = 100
 
 /**
- * Largest number of finished runs one Factory board response evaluates while it looks for runs that
- * finished within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS}. Finished runs are stored in run ID
- * order, so the response says when the evaluation stopped before reading every finished run.
+ * Largest number of finished runs one Factory board response reads from each of two groups, newest
+ * finish first: runs that finished within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS} other than
+ * failures, and failed runs of any age. Older finished runs are never read, so the bound depends only
+ * on recent and failed runs, and the response says when either group was left partly unread.
  */
 export const FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS = 500
 

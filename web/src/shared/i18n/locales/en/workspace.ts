@@ -790,6 +790,7 @@ export const workspaceMessages = {
   'sidebar.unreadCount': '{count} unread',
   'sidebar.nav.home': 'Home',
   'sidebar.nav.myTasks': 'My tasks',
+  'sidebar.nav.workItems': 'Work items',
   'sidebar.nav.inbox': 'Inbox',
   'sidebar.nav.requests': 'Requests',
   'sidebar.nav.customers': 'Customers',

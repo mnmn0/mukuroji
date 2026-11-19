@@ -789,6 +789,7 @@ export const workspaceMessages = {
   'sidebar.unreadCount': '{count}件の未読',
   'sidebar.nav.home': 'ホーム',
   'sidebar.nav.myTasks': 'マイタスク',
+  'sidebar.nav.workItems': 'Work Item 一覧',
   'sidebar.nav.inbox': '受信箱',
   'sidebar.nav.requests': 'リクエスト',
   'sidebar.nav.customers': '顧客',

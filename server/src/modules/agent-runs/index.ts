@@ -54,6 +54,7 @@ export {
   createAgentRunPartition,
   type AgentRunDocumentClient,
   type AgentRunFenceInput,
+  type AgentRunFinishedGroup,
   type AgentRunPage,
   type AgentRunReportPage,
   type AgentRunStore,
