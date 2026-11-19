@@ -217,7 +217,8 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 - 重複排除 key は Workspace・Team・member・n・「Unix epoch から数えて何番目の n 日か」です。同じ期間の再実行や retry は同じ event になります
 - 対象の Team は、その実行で Work Item を走査した Team です。Work Item が 1 件も残っていない Team の工数は督促しません。
 - 通知は Inbox の「工数の提出」として届き、最も古い未提出 entry の週の工数画面（`/teams/{teamId}/timesheet?week=<entry の開始時刻>`。ブラウザが閲覧者の timezone でその時刻を含む月曜始まりの週に直します）を開きます。title は持たず、概要は件数と最も古い日付です
-- event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` の entry が 1 件も残っていなければ捨てます。読み直す手段がない projection では督促を届けません
+- 対象は Project に紐づく entry だけです。Project のない entry は一般の member の工数画面に出ず、そこから提出できないため督促しません
+- event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` の entry が 1 件も残っていなければ捨てます。残っていれば、その entry の revision を条件にした ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で読み直して捨てます。読み直す手段がない projection では督促を届けません
 - 宛先の権限は Team scope の通知として確認します（Team の Project のどれかを読めること）
 - Slack への配信は送信時に宛先の権限を確認しますが、提出状況は読み直しません。quiet hours や digest で Slack 送信が遅れる間に提出した場合は、Slack に古い督促が届くことがあります
 

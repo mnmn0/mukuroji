@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { TIME_TRACKING_SCHEMA_VERSION, type TimeEntry } from '@mukuroji/contracts'
 import {
-  isTimesheetReminderCurrent,
+  readTimesheetReminderFence,
   parseAuditProjectionEvent,
 } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
 import { TIMESHEET_REMINDER_EVENT_TYPE } from '../../modules/notifications'
@@ -23,6 +23,7 @@ function createEntry(overrides: Partial<TimeEntry> = {}): TimeEntry {
     workspaceId: 'workspace-1',
     teamId: 'core',
     workItemId: 'task-1',
+    projectId: 'project-1',
     userId: 'Member@Example.com',
     startAt: '2026-07-01T00:00:00.000Z',
     endAt: '2026-07-01T01:00:00.000Z',
@@ -39,13 +40,14 @@ function createEntry(overrides: Partial<TimeEntry> = {}): TimeEntry {
 }
 
 describe('timesheet reminder adapters', () => {
-  test('lists only draft and rejected entries with lower-case owners', async () => {
+  test('lists only draft and rejected Project entries with lower-case owners', async () => {
     const reader = createTimesheetReader({
       listEntries: async () => [
         createEntry({ id: 'draft' }),
         createEntry({ id: 'rejected', status: 'rejected' }),
         createEntry({ id: 'submitted', status: 'submitted' }),
         createEntry({ id: 'approved', status: 'approved' }),
+        createEntry({ id: 'no-project', projectId: undefined }),
       ],
     })
     expect(await reader.listUnsubmittedEntries(
@@ -63,11 +65,12 @@ describe('timesheet reminder adapters', () => {
     const stored = new Map<string, TimeEntry>([
       ['submitted', createEntry({ id: 'submitted', status: 'submitted' })],
       ['other-owner', createEntry({ id: 'other-owner', userId: 'other@example.com' })],
-      ['rejected', createEntry({ id: 'rejected', status: 'rejected' })],
+      ['no-project', createEntry({ id: 'no-project', projectId: undefined })],
+      ['rejected', createEntry({ id: 'rejected', status: 'rejected', revision: 4 })],
     ])
     const revalidator = createTimesheetReminderRevalidator({
       getEntry: async (_workspaceId, _teamId, entryId) => stored.get(entryId),
-    })
+    }, 'AnalyticsTable')
     const event = parseAuditProjectionEvent({
       eventId: 'event-1',
       eventType: TIMESHEET_REMINDER_EVENT_TYPE,
@@ -76,25 +79,37 @@ describe('timesheet reminder adapters', () => {
       outboxStatus: 'pending',
       metadata: {
         teamId: 'core',
-        timeEntryIds: ['submitted', 'missing', 'other-owner', 'rejected'],
+        timeEntryIds: ['submitted', 'missing', 'other-owner', 'no-project', 'rejected'],
         notificationCandidates: [{ memberKey: 'Member@Example.com', reason: 'timesheet' }],
       },
     })
     if (!event) throw new Error('Expected a parsed event.')
 
-    expect(event.timeEntryIds).toEqual(['submitted', 'missing', 'other-owner', 'rejected'])
-    expect(await isTimesheetReminderCurrent(event, revalidator)).toBe(true)
+    expect(event.timeEntryIds).toEqual(['submitted', 'missing', 'other-owner', 'no-project', 'rejected'])
+    // The notification save is fenced on the revision of the entry that is still unsubmitted.
+    expect(await readTimesheetReminderFence(event, revalidator)).toEqual({
+      current: true,
+      condition: {
+        ConditionCheck: {
+          TableName: 'AnalyticsTable',
+          Key: { workspaceId: 'workspace-1', recordKey: 'TIME_ENTRY#core#rejected' },
+          ConditionExpression: '#revision = :revision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: { ':revision': 4 },
+        },
+      },
+    })
     stored.set('rejected', createEntry({ id: 'rejected', status: 'submitted' }))
-    expect(await isTimesheetReminderCurrent(event, revalidator)).toBe(false)
+    expect((await readTimesheetReminderFence(event, revalidator)).current).toBe(false)
     stored.set('rejected', createEntry({ id: 'rejected', status: 'rejected' }))
     // Without a revalidator, or without entry IDs, a reminder is never delivered.
-    expect(await isTimesheetReminderCurrent(event, undefined)).toBe(false)
-    expect(await isTimesheetReminderCurrent({ ...event, timeEntryIds: [] }, revalidator)).toBe(false)
+    expect((await readTimesheetReminderFence(event, undefined)).current).toBe(false)
+    expect((await readTimesheetReminderFence({ ...event, timeEntryIds: [] }, revalidator)).current).toBe(false)
     // A reminder that names someone else as well is not one the schedule produced.
-    expect(await isTimesheetReminderCurrent({
+    expect((await readTimesheetReminderFence({
       ...event,
       notificationCandidates: [...event.notificationCandidates, { memberKey: 'other@example.com', reason: 'watcher' }],
-    }, revalidator)).toBe(false)
-    expect(await isTimesheetReminderCurrent({ ...event, eventType: 'comment.created' }, undefined)).toBe(true)
+    }, revalidator)).current).toBe(false)
+    expect(await readTimesheetReminderFence({ ...event, eventType: 'comment.created' }, undefined)).toEqual({ current: true })
   })
 })

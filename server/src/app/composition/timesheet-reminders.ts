@@ -1,6 +1,10 @@
 import type { TimesheetReminderRevalidator } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
 import type { ScheduledTimesheetReader } from '../../modules/notifications'
-import { DynamoDbTimeTrackingRepository, type TimeTrackingRepository } from '../../modules/time-tracking'
+import {
+  DynamoDbTimeTrackingRepository,
+  createTimeEntryRevisionCondition,
+  type TimeTrackingRepository,
+} from '../../modules/time-tracking'
 import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
 
 /**
@@ -20,8 +24,10 @@ export function createTimesheetReader(
         from: from.toISOString(),
         to: to.toISOString(),
       })
+      // Entries without a Project are left out: the timesheet a member opens from the reminder
+      // lists and submits only Project entries, so they could never clear the reminder there.
       return entries
-        .filter((entry) => entry.status === 'draft' || entry.status === 'rejected')
+        .filter((entry) => (entry.status === 'draft' || entry.status === 'rejected') && entry.projectId !== undefined)
         .map((entry) => ({
           entryId: entry.id,
           memberKey: entry.userId.toLowerCase(),
@@ -36,24 +42,33 @@ export function createTimesheetReader(
  * Adapts the time tracking repository to the projection's timesheet reminder revalidator.
  *
  * @param repository - Time entry repository.
+ * @param tableName - Analytics table that stores the entries, for the transaction condition.
  * @returns Revalidator that reads the named entries until one is still unsubmitted.
  */
 export function createTimesheetReminderRevalidator(
   repository: Pick<TimeTrackingRepository, 'getEntry'>,
+  tableName: string,
 ): TimesheetReminderRevalidator {
   return {
-    async hasUnsubmittedEntry(input) {
+    async findUnsubmittedEntry(input) {
       for (const entryId of input.entryIds) {
         const entry = await repository.getEntry(input.workspaceId, input.teamId, entryId)
         if (
           entry &&
           entry.userId.toLowerCase() === input.memberKey &&
+          entry.projectId !== undefined &&
           (entry.status === 'draft' || entry.status === 'rejected')
         ) {
-          return true
+          return createTimeEntryRevisionCondition(
+            tableName,
+            input.workspaceId,
+            input.teamId,
+            entry.id,
+            entry.revision,
+          )
         }
       }
-      return false
+      return undefined
     },
   }
 }
@@ -68,8 +83,11 @@ export function createConfiguredTimesheetReminderRevalidator(
   analyticsTableName: string | undefined,
 ): TimesheetReminderRevalidator | undefined {
   if (!analyticsTableName) return undefined
-  return createTimesheetReminderRevalidator(new DynamoDbTimeTrackingRepository(
+  return createTimesheetReminderRevalidator(
+    new DynamoDbTimeTrackingRepository(
+      analyticsTableName,
+      createDynamoDbDocumentClient(createDynamoDbClient()),
+    ),
     analyticsTableName,
-    createDynamoDbDocumentClient(createDynamoDbClient()),
-  ))
+  )
 }

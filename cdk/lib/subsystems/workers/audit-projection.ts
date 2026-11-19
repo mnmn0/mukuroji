@@ -185,10 +185,11 @@ export function buildAuditProjectionWorker(
       resources: [planningTable.tableArn],
     }),
   );
-  // Timesheet reminders are dropped once their time entries are submitted.
+  // Timesheet reminders are dropped once their time entries are submitted; the notification save
+  // is conditioned on the revalidated entry so a concurrent submission cancels it.
   collaborationProjectionFunction.addToRolePolicy(
     new iam.PolicyStatement({
-      actions: ['dynamodb:GetItem'],
+      actions: ['dynamodb:GetItem', 'dynamodb:ConditionCheckItem'],
       resources: [analyticsTable.tableArn],
     }),
   );

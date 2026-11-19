@@ -2514,6 +2514,35 @@ function readTransactionCancellationCodes(error: unknown): string[] {
   )
 }
 
+/**
+ * Builds a transaction condition that holds only while a time entry keeps the given revision, so
+ * a write that relied on reading the entry is cancelled when the entry changes.
+ *
+ * @param tableName - Analytics table that stores time entries.
+ * @param workspaceId - Canonical Workspace ID.
+ * @param teamId - Team ID.
+ * @param entryId - Time entry ID.
+ * @param revision - Revision that was read.
+ * @returns A `ConditionCheck` transaction item.
+ */
+export function createTimeEntryRevisionCondition(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  entryId: string,
+  revision: number,
+) {
+  return {
+    ConditionCheck: {
+      TableName: readIdentifier(tableName, 'Time tracking table name'),
+      Key: { workspaceId, recordKey: entryKey(teamId, entryId) },
+      ConditionExpression: '#revision = :revision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':revision': revision },
+    },
+  }
+}
+
 /** Builds an entry key. */
 function entryKey(teamId: string, entryId: string): string {
   return `${ENTRY_PREFIX}${teamId}#${entryId}`

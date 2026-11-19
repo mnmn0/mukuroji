@@ -28,3 +28,4 @@
 | 番号 | タイトル | 状態 |
 | --- | --- | --- |
 | [0001](0001-record-architecture-decisions.md) | 設計判断を ADR として記録する | 採用 |
+| [0002](0002-team-reminder-settings-storage.md) | Team の通知日数設定を NotificationsTable の Workspace 内 partition に保存する | 提案 |
