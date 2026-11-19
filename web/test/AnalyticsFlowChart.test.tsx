@@ -58,8 +58,16 @@ describe('Analytics flow chart', () => {
       plannedEndDate: '2026-01-28',
       timeZone: 'UTC',
     })
-    expect(week.dates).toEqual(['2026-01-11', '2026-01-14', '2026-01-25', '2026-01-28'])
-    expect(week.layers.find((layer) => layer.key === 'remaining')?.values).toEqual([6, 4, null, null])
+    expect(week.dates).toEqual(['2026-01-11', '2026-01-14', '2026-01-18', '2026-01-25', '2026-01-28'])
+    expect(week.layers.find((layer) => layer.key === 'remaining')?.values).toEqual([6, 4, null, null, null])
+
+    const inCurrentWeek = createAnalyticsFlowChartModel(weekly, 'burndown', {
+      granularity: 'week',
+      plannedEndDate: '2026-01-16',
+      timeZone: 'UTC',
+    })
+    expect(inCurrentWeek.dates).toEqual(['2026-01-11', '2026-01-14', '2026-01-16'])
+    expect(inCurrentWeek.layers.find((layer) => layer.key === 'ideal')?.values.at(-1)).toBe(0)
 
     const monthly: AnalyticsSeriesPoint[] = [
       { from: '2026-01-15T00:00:00.000Z', to: '2026-01-31T23:59:59.999Z', value: 6, sampleSize: 6 },

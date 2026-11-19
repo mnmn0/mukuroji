@@ -204,14 +204,15 @@ function createPaddingDates(
   if (granularity === 'week') cursor.setUTCDate(cursor.getUTCDate() - (cursor.getUTCDay() + 6) % 7)
   if (granularity === 'month') cursor.setUTCDate(1)
   const dates: string[] = []
-  while (dates.length < MAX_PADDING_DAYS) {
-    advanceBucket(cursor, granularity)
-    if (cursor.getTime() > end.getTime()) break
+  // Starts at the last observed bucket: when the planned end falls inside it after the last
+  // observation (an unfinished current bucket), its remaining part becomes one padded slot.
+  while (cursor.getTime() <= end.getTime() && dates.length < MAX_PADDING_DAYS) {
     const bucketEnd = new Date(cursor)
     advanceBucket(bucketEnd, granularity)
     bucketEnd.setUTCDate(bucketEnd.getUTCDate() - 1)
     const slotEnd = Math.min(bucketEnd.getTime(), end.getTime())
     if (slotEnd > last.getTime()) dates.push(new Date(slotEnd).toISOString().slice(0, 10))
+    advanceBucket(cursor, granularity)
   }
   return dates
 }
