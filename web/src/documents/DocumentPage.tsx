@@ -6,6 +6,11 @@ import {
   useState,
 } from 'react'
 import { createPortal, flushSync } from 'react-dom'
+import {
+  createDefaultDueDateWorkItemSchedule,
+  createDefaultUnscheduledWorkItemSchedule,
+  type DocumentChecklistItem,
+} from '@mukuroji/contracts'
 import type {
   DocumentExportFormat,
   DocumentKind,
@@ -28,6 +33,7 @@ import {
   canMutateWorkspaceContent,
 } from '../auth/api'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
+import { createTeamIssue } from '../issues/api/workItems'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { signOutWithPushCleanup } from '../notifications/mutations/usePushDevice'
 import {
@@ -42,7 +48,10 @@ import {
 } from '../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
-import { createDocumentPath } from '../shared/routing/paths'
+import {
+  createDocumentPath,
+  createWorkItemSearchPath,
+} from '../shared/routing/paths'
 import { useWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import {
@@ -107,7 +116,21 @@ import {
   DocumentEditor,
   DocumentReadOnlyContent,
 } from './ui/DocumentEditor'
-import { DocumentHome } from './ui/DocumentHome'
+import {
+  DocumentHome,
+  type BuiltInTemplateCreateOptions,
+} from './ui/DocumentHome'
+import {
+  ChecklistWorkItemDialog,
+  type ChecklistWorkItemInput,
+} from './ui/ChecklistWorkItemDialog'
+import {
+  buildBuiltInDocumentTemplate,
+  formatLocalCalendarDate,
+  type BuiltInDocumentTemplateKey,
+} from './model/builtInTemplates'
+import { createChecklistItemWorkItemRelation } from './model/checklistWorkItems'
+import { createCanonicalWorkItemId } from './model/relations'
 import { exportDocumentSubtreeMarkdown } from './queries/documentSubtreeExport'
 import {
   DocumentShareDialog,
@@ -125,6 +148,7 @@ import {
   changesDocumentBacklinks,
   createDocumentMutationQueue,
   createDefaultDocumentTitle,
+  createDocumentClientId,
   createDocumentOperationId,
   deduplicateDocumentRelationTargets,
   DocumentOperationChunkSaveError,
@@ -163,6 +187,10 @@ export type DocumentScreenData = {
    * 現在 user が Workspace/Project scope に Document を作成できるかどうかです。
    */
   canCreateDocuments: boolean
+  /**
+   * Normalized member key of the current user, selected first as a Work Item owner.
+   */
+  currentUserKey?: string
   /**
    * Sidebar と Project scope に表示する directory です。
    */
@@ -245,6 +273,17 @@ export type DocumentScreenActions = {
    * Template を instantiate する action です。
    */
   instantiateTemplate?: (templateId: string) => Promise<void>
+  /**
+   * Creates a page from a template bundled with every Workspace.
+   */
+  createDocumentFromBuiltInTemplate?: (
+    key: BuiltInDocumentTemplateKey,
+    options: BuiltInTemplateCreateOptions,
+  ) => Promise<void>
+  /**
+   * Creates a Work Item and returns its canonical ID.
+   */
+  createWorkItem?: (input: ChecklistWorkItemInput) => Promise<string>
   /**
    * Document metadata/permission を更新する action です。
    */
@@ -876,6 +915,76 @@ export function DocumentPage() {
     navigate(createDocumentPath(created.id))
   }
 
+  /**
+   * Creates a page from a bundled template with today's date, the chosen
+   * Project, and the participants substituted.
+   *
+   * @param key - Bundled template to use.
+   * @param options - Project and participants chosen on the home.
+   */
+  const handleCreateFromBuiltInTemplate = async (
+    key: BuiltInDocumentTemplateKey,
+    options: BuiltInTemplateCreateOptions,
+  ) => {
+    if (!accessToken) return
+    const content = buildBuiltInDocumentTemplate(
+      key,
+      locale,
+      {
+        date: formatLocalCalendarDate(new Date()),
+        participants: options.participants,
+        projectName: options.projectName,
+      },
+      createDocumentClientId,
+    )
+    const input: CreateDocumentInput = {
+      blocks: content.blocks,
+      kind: 'page',
+      scope: options.projectId
+        ? { projectId: options.projectId, type: 'project' }
+        : { type: 'workspace' },
+      title: content.title,
+    }
+    const created = await mutationRunner.run(
+      `document:create:built-in:${key}`,
+      JSON.stringify([key, options.projectId ?? '', content.title]),
+      (context) => createDocument(accessToken, input, context),
+    )
+    await mutateDocuments()
+    navigate(createDocumentPath(created.id))
+  }
+
+  /**
+   * Creates a Work Item assigned to a Project for a Document checklist item.
+   *
+   * @param input - Team, Project, title, owner, and optional deadline.
+   * @returns Canonical ID of the created Work Item.
+   */
+  const handleCreateWorkItem = async (input: ChecklistWorkItemInput) => {
+    if (!accessToken) {
+      throw new Error(t('documents.checklistWorkItem.error'))
+    }
+    const request = {
+      assignedProjectId: input.projectId,
+      assigneeUserId: input.assigneeUserId,
+      priority: 'medium' as const,
+      schedule: input.dueDate
+        ? createDefaultDueDateWorkItemSchedule(input.dueDate)
+        : createDefaultUnscheduledWorkItemSchedule(),
+      title: input.title,
+    }
+    const issue = await mutationRunner.run(
+      `issue:create:document-checklist:${input.teamId}`,
+      JSON.stringify([input.teamId, request]),
+      (context) => createTeamIssue(input.teamId, accessToken, request, context),
+    )
+    const workItemId = createCanonicalWorkItemId(issue.teamId, issue.id)
+    if (!workItemId) {
+      throw new Error(t('documents.checklistWorkItem.error'))
+    }
+    return workItemId
+  }
+
   const handleUpdateDocument = async (
     selectedId: string,
     expectedRevision: number,
@@ -1380,6 +1489,8 @@ export function DocumentPage() {
         archiveDocument: handleArchiveDocument,
         createComment: handleCreateComment,
         createDocument: handleCreateDocument,
+        createDocumentFromBuiltInTemplate: handleCreateFromBuiltInTemplate,
+        createWorkItem: canCreateDocuments ? handleCreateWorkItem : undefined,
         createShare: handleCreateShare,
         deleteShare: handleDeleteShare,
         exportDocument: handleExport,
@@ -1409,6 +1520,7 @@ export function DocumentPage() {
         backlinks,
         canCreateDocuments,
         comments,
+        currentUserKey: workspace.userKey,
         documents,
         focusedCommentId,
         hasMoreActiveDocuments:
@@ -1504,6 +1616,9 @@ export function DocumentScreen({
     useState<string>()
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false)
   const [isPrinting, setIsPrinting] = useState(false)
+  const [checklistWorkItemTarget, setChecklistWorkItemTarget] =
+    useState<ChecklistWorkItemTarget>()
+  const createdChecklistWorkItemsRef = useRef(new Map<string, string>())
   const selectedDocument = data.selectedDocument
   const printableDocument =
     selectedDocument?.kind === 'page' || selectedDocument?.kind === 'template'
@@ -1634,6 +1749,62 @@ export function DocumentScreen({
     }
     return ensureDraftSaved()
   }, [ensureDraftSaved])
+
+  const canCreateChecklistWorkItems = Boolean(
+    selectedDocument?.capabilities.canEdit &&
+      !isAiOperationPending &&
+      actions.applyOperations &&
+      actions.createWorkItem,
+  )
+
+  /**
+   * Creates the Work Item for the checklist item in the open dialog and links
+   * the item to it. A Work Item created by an earlier attempt whose link
+   * failed is reused, so a retry does not create a second one.
+   *
+   * @param input - Values confirmed in the dialog.
+   */
+  const submitChecklistWorkItem = async (input: ChecklistWorkItemInput) => {
+    const target = checklistWorkItemTarget
+    if (
+      !target ||
+      !selectedDocument ||
+      selectedDocument.id !== target.documentId ||
+      !actions.applyOperations ||
+      !actions.createWorkItem
+    ) {
+      throw new Error(t('documents.checklistWorkItem.error'))
+    }
+    const flushedRevision = await requireSavedDraft()
+    const key = `${target.documentId}\0${target.blockId}\0${target.itemId}`
+    const workItemId =
+      createdChecklistWorkItemsRef.current.get(key) ??
+      (await actions.createWorkItem(input))
+    createdChecklistWorkItemsRef.current.set(key, workItemId)
+    try {
+      await actions.applyOperations(
+        selectedDocument.id,
+        resolveDocumentMutationRevision(
+          selectedDocument.revision,
+          flushedRevision,
+        ),
+        [{
+          operationId: createDocumentOperationId(),
+          relation: createChecklistItemWorkItemRelation(
+            target.blockId,
+            target.itemId,
+            workItemId,
+            new Date(),
+          ),
+          type: 'upsert-relation',
+        }],
+      )
+    } catch {
+      throw new Error(t('documents.checklistWorkItem.linkError'))
+    }
+    createdChecklistWorkItemsRef.current.delete(key)
+    setChecklistWorkItemTarget(undefined)
+  }
 
   const createDocumentAction =
     data.canCreateDocuments && actions.createDocument
@@ -1953,6 +2124,17 @@ export function DocumentScreen({
                 t={t}
                 onActiveAnchorChange={actions.setActiveAnchor}
                 onApplyOperations={actions.applyOperations}
+                onCreateChecklistWorkItem={
+                  canCreateChecklistWorkItems
+                    ? (blockId, item) =>
+                        setChecklistWorkItemTarget({
+                          blockId,
+                          documentId: selectedDocument.id,
+                          itemId: item.id,
+                          text: item.text,
+                        })
+                    : undefined
+                }
                 onContextOpen={openContext}
                 onDraftGuardChange={handleDraftGuardChange}
                 onNavigate={
@@ -1974,6 +2156,19 @@ export function DocumentScreen({
                   t={t}
                   teams={data.teams}
                   onCreateDocument={createDocumentAction}
+                  onCreateFromBuiltInTemplate={
+                    data.canCreateDocuments &&
+                    actions.createDocumentFromBuiltInTemplate
+                      ? (key, options) => {
+                          void runGuardedAction(() =>
+                            actions.createDocumentFromBuiltInTemplate?.(
+                              key,
+                              options,
+                            ),
+                          )
+                        }
+                      : undefined
+                  }
                   onInstantiateTemplate={
                     data.canCreateDocuments
                       ? actions.instantiateTemplate
@@ -2149,6 +2344,24 @@ export function DocumentScreen({
         </div>
       </section>
 
+      {checklistWorkItemTarget &&
+      selectedDocument?.id === checklistWorkItemTarget.documentId ? (
+        <ChecklistWorkItemDialog
+          accessToken={accessToken}
+          currentUserKey={data.currentUserKey}
+          defaultProjectId={
+            selectedDocument.scope.type === 'project'
+              ? selectedDocument.scope.projectId
+              : undefined
+          }
+          itemText={checklistWorkItemTarget.text}
+          t={t}
+          teams={data.teams}
+          onClose={() => setChecklistWorkItemTarget(undefined)}
+          onSubmit={submitChecklistWorkItem}
+        />
+      ) : null}
+
       {isShareDialogOpen && selectedDocument ? (
         <DocumentShareDialog
           document={selectedDocument}
@@ -2185,6 +2398,20 @@ export function DocumentScreen({
 }
 
 /**
+ * Checklist item the Work Item dialog is open for.
+ */
+type ChecklistWorkItemTarget = {
+  /** Document that contains the item. */
+  documentId: string
+  /** Checklist block that contains the item. */
+  blockId: string
+  /** Checklist item ID. */
+  itemId: string
+  /** Item text used as the initial Work Item title. */
+  text: string
+}
+
+/**
  * Document detail 内の local operation queue と autosave を管理します。
  */
 type DocumentWorkspaceProps = {
@@ -2218,6 +2445,13 @@ type DocumentWorkspaceProps = {
    * Context drawer open callback です。
    */
   onContextOpen: (tab: DocumentContextTab, anchorId?: string) => void
+  /**
+   * Starts creating a Work Item from a checklist item; omission hides the action.
+   */
+  onCreateChecklistWorkItem?: (
+    blockId: string,
+    item: DocumentChecklistItem,
+  ) => void
   /**
    * Route navigation と破壊的操作へ現在の draft guard を登録します。
    */
@@ -2272,6 +2506,7 @@ function DocumentWorkspace({
   onActiveAnchorChange,
   onApplyOperations,
   onContextOpen,
+  onCreateChecklistWorkItem,
   onDraftGuardChange,
   onNavigate,
   onUnsavedStateChange,
@@ -2786,6 +3021,14 @@ function DocumentWorkspace({
         localDocument.kind === 'template' ? (
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <DocumentEditor
+            checklistWorkItems={{
+              onCreate: editable ? onCreateChecklistWorkItem : undefined,
+              onOpen: onNavigate
+                ? (workItemId) =>
+                    onNavigate(createWorkItemSearchPath(workItemId))
+                : undefined,
+              relations: localDocument.relations,
+            }}
             document={localDocument}
             editable={editable}
             saveStatus={saveStatus}

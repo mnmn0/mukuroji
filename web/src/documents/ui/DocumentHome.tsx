@@ -1,7 +1,25 @@
+import { useId, useState } from 'react'
 import type { DocumentKind, DocumentScope } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { DocumentSummary } from '../api'
+import {
+  builtInDocumentTemplateKeys,
+  parseTemplateParticipants,
+  type BuiltInDocumentTemplateKey,
+} from '../model/builtInTemplates'
+
+/**
+ * Options chosen on the Documents home for a page created from a bundled template.
+ */
+export type BuiltInTemplateCreateOptions = {
+  /** Project that owns the new page; omission creates it in the Workspace. */
+  projectId?: string
+  /** Display name of the chosen Project, substituted into the template. */
+  projectName?: string
+  /** Participant names substituted into the template. */
+  participants: string[]
+}
 
 /**
  * Documents home の props です。
@@ -31,6 +49,13 @@ export type DocumentHomeProps = {
    * Template を instantiate する callback です。
    */
   onInstantiateTemplate?: (templateId: string) => void
+  /**
+   * Creates a page from a template bundled with every Workspace.
+   */
+  onCreateFromBuiltInTemplate?: (
+    key: BuiltInDocumentTemplateKey,
+    options: BuiltInTemplateCreateOptions,
+  ) => void
 }
 
 /**
@@ -39,6 +64,7 @@ export type DocumentHomeProps = {
 export function DocumentHome({
   documents,
   onCreateDocument,
+  onCreateFromBuiltInTemplate,
   onInstantiateTemplate,
   onSelectDocument,
   t,
@@ -115,6 +141,14 @@ export function DocumentHome({
         title={t('documents.home.recent')}
         onSelectDocument={onSelectDocument}
       />
+
+      {onCreateFromBuiltInTemplate ? (
+        <BuiltInTemplateSection
+          projects={projectSpaces}
+          t={t}
+          onCreate={onCreateFromBuiltInTemplate}
+        />
+      ) : null}
 
       <section>
         <div className="mb-4 flex items-center justify-between gap-4">
@@ -267,6 +301,99 @@ function DocumentCardSection({
       ) : (
         <EmptySection message={emptyMessage} />
       )}
+    </section>
+  )
+}
+
+/**
+ * Lists the templates bundled with every Workspace and the values substituted into them.
+ *
+ * @param props - Projects to choose from, translator, and create callback.
+ * @returns The bundled template section.
+ */
+function BuiltInTemplateSection({
+  onCreate,
+  projects,
+  t,
+}: {
+  /** Creates a page from the chosen bundled template. */
+  onCreate: (
+    key: BuiltInDocumentTemplateKey,
+    options: BuiltInTemplateCreateOptions,
+  ) => void
+  /** Projects the new page can belong to. */
+  projects: { id: string; name: string }[]
+  /** Resolves display text. */
+  t: (key: MessageKey) => string
+}) {
+  const [projectId, setProjectId] = useState('')
+  const [participants, setParticipants] = useState('')
+  const fieldId = useId()
+  const project = projects.find((candidate) => candidate.id === projectId)
+
+  return (
+    <section aria-labelledby={`${fieldId}-title`}>
+      <div className="mb-4">
+        <h2
+          className="m-0 text-base font-semibold text-[var(--workbench-text)]"
+          id={`${fieldId}-title`}
+        >
+          {t('documents.home.builtInTemplates')}
+        </h2>
+        <p className="m-0 mt-1 text-xs font-medium text-[var(--workbench-muted)]">
+          {t('documents.home.builtInTemplatesDescription')}
+        </p>
+      </div>
+      <div className="mb-3 grid gap-3 sm:grid-cols-2">
+        <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('documents.home.builtInTemplateProject')}
+          <select
+            className="workbench-input min-h-10 px-3"
+            onChange={(event) => setProjectId(event.target.value)}
+            value={projectId}
+          >
+            <option value="">{t('documents.home.builtInTemplateNoProject')}</option>
+            {projects.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {candidate.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="grid gap-1 text-xs font-semibold text-[var(--workbench-muted)]">
+          {t('documents.home.builtInTemplateParticipants')}
+          <input
+            className="workbench-input min-h-10 px-3"
+            onChange={(event) => setParticipants(event.target.value)}
+            placeholder={t('documents.home.builtInTemplateParticipantsPlaceholder')}
+            value={participants}
+          />
+        </label>
+      </div>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,220px),1fr))] gap-3">
+        {builtInDocumentTemplateKeys.map((key) => (
+          <button
+            className="workbench-panel group min-h-[110px] p-5 text-left transition hover:border-tone-99d7cf hover:shadow-[0_8px_24px_rgba(23,32,29,0.08)]"
+            key={key}
+            onClick={() =>
+              onCreate(key, {
+                participants: parseTemplateParticipants(participants),
+                ...(project
+                  ? { projectId: project.id, projectName: project.name }
+                  : {}),
+              })
+            }
+            type="button"
+          >
+            <strong className="block text-sm text-[var(--workbench-text)] group-hover:text-[var(--workbench-primary-text)]">
+              {t(`documents.builtInTemplate.${key}`)}
+            </strong>
+            <span className="mt-1 block text-xs font-medium text-[var(--workbench-muted)]">
+              {t('documents.home.useTemplate')}
+            </span>
+          </button>
+        ))}
+      </div>
     </section>
   )
 }

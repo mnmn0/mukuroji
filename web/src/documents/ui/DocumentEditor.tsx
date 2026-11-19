@@ -2,15 +2,18 @@ import { useState, type ReactNode } from 'react'
 import type {
   DocumentBlock,
   DocumentChecklistBlock,
+  DocumentChecklistItem,
   DocumentCodeBlock,
   DocumentDiagramBlock,
   DocumentEmbedBlock,
   DocumentHeadingBlock,
   DocumentParagraphBlock,
+  DocumentRelation,
   DocumentTableBlock,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { DocumentRecord } from '../api'
+import { findChecklistItemWorkItemId } from '../model/checklistWorkItems'
 import {
   createDocumentBlock,
   resolveSafeEmbedUrl,
@@ -24,6 +27,18 @@ type RichTextDocument = Extract<
   DocumentRecord,
   { kind: 'page' | 'template' }
 >
+
+/**
+ * Actions that turn checklist items into Work Items and open the linked ones.
+ */
+export type ChecklistWorkItemControls = {
+  /** Relations of the Document, used to find items that already have a Work Item. */
+  relations: readonly DocumentRelation[]
+  /** Starts creating a Work Item from an item; omission hides the action. */
+  onCreate?: (blockId: string, item: DocumentChecklistItem) => void
+  /** Opens the Work Item linked to an item; omission hides the link. */
+  onOpen?: (workItemId: string) => void
+}
 
 /**
  * Typed block editor の props です。
@@ -65,6 +80,10 @@ export type DocumentEditorProps = {
    * Block anchor の comment panel を開く callback です。
    */
   onOpenComments?: (anchorId: string) => void
+  /**
+   * Checklist item から Work Item を作成・表示する操作です。
+   */
+  checklistWorkItems?: ChecklistWorkItemControls
 }
 
 /**
@@ -95,6 +114,7 @@ const insertableBlockTypes = [
  * Craft 型の狭い本文 column と block ごとの操作を持つ Document editor です。
  */
 export function DocumentEditor({
+  checklistWorkItems,
   document,
   editable,
   onActiveAnchorChange,
@@ -133,6 +153,7 @@ export function DocumentEditor({
         {document.blocks.map((block, index) => (
           <EditableBlock
             block={block}
+            checklistWorkItems={checklistWorkItems}
             editable={editable}
             index={index}
             key={block.id}
@@ -236,6 +257,7 @@ export function DocumentReadOnlyContent({
 
 function EditableBlock({
   block,
+  checklistWorkItems,
   editable,
   index,
   lastIndex,
@@ -250,6 +272,10 @@ function EditableBlock({
    * 描画対象 block です。
    */
   block: DocumentBlock
+  /**
+   * Checklist item から Work Item を作成・表示する操作です。
+   */
+  checklistWorkItems?: ChecklistWorkItemControls
   /**
    * Block を編集できるかどうかです。
    */
@@ -344,6 +370,7 @@ function EditableBlock({
       ) : null}
       <BlockBody
         block={block}
+        checklistWorkItems={checklistWorkItems}
         editable={editable}
         t={t}
         onChange={onChange}
@@ -354,6 +381,7 @@ function EditableBlock({
 
 function BlockBody({
   block,
+  checklistWorkItems,
   editable,
   onChange,
   t,
@@ -362,6 +390,10 @@ function BlockBody({
    * 描画対象 block です。
    */
   block: DocumentBlock
+  /**
+   * Checklist item から Work Item を作成・表示する操作です。
+   */
+  checklistWorkItems?: ChecklistWorkItemControls
   /**
    * 編集可否です。
    */
@@ -389,7 +421,14 @@ function BlockBody({
     return <CodeBlockEditor block={block} onChange={onChange} t={t} />
   }
   if (block.type === 'checklist') {
-    return <ChecklistBlockEditor block={block} onChange={onChange} t={t} />
+    return (
+      <ChecklistBlockEditor
+        block={block}
+        checklistWorkItems={checklistWorkItems}
+        onChange={onChange}
+        t={t}
+      />
+    )
   }
   if (block.type === 'embed') {
     return <EmbedBlockEditor block={block} onChange={onChange} t={t} />
@@ -615,10 +654,12 @@ function CodeBlockEditor({
 
 function ChecklistBlockEditor({
   block,
+  checklistWorkItems,
   onChange,
   t,
 }: {
   block: DocumentChecklistBlock
+  checklistWorkItems?: ChecklistWorkItemControls
   onChange: (block: DocumentBlock) => void
   t: (key: MessageKey) => string
 }) {
@@ -664,6 +705,12 @@ function ChecklistBlockEditor({
             placeholder={t('documents.editor.checklistPlaceholder')}
             value={item.text}
           />
+          <ChecklistItemWorkItemAction
+            blockId={block.id}
+            controls={checklistWorkItems}
+            item={item}
+            t={t}
+          />
           <button
             aria-label={t('documents.editor.deleteChecklistItem')}
             className="grid h-7 w-7 place-items-center rounded text-[var(--workbench-muted)] hover:bg-surface hover:text-[var(--workbench-danger)]"
@@ -697,6 +744,70 @@ function ChecklistBlockEditor({
         + {t('documents.editor.addChecklistItem')}
       </button>
     </div>
+  )
+}
+
+/**
+ * Shows the Work Item linked to a checklist item, or the action that creates one.
+ *
+ * @param props - Checklist block ID, item, controls, and translator.
+ * @returns The link, the create button, or nothing.
+ */
+function ChecklistItemWorkItemAction({
+  blockId,
+  controls,
+  item,
+  t,
+}: {
+  /** Checklist block that contains the item. */
+  blockId: string
+  /** Create and open actions; omission renders nothing. */
+  controls?: ChecklistWorkItemControls
+  /** Checklist item the action belongs to. */
+  item: DocumentChecklistItem
+  /** Resolves display text. */
+  t: (key: MessageKey) => string
+}) {
+  if (!controls) return null
+  const workItemId = findChecklistItemWorkItemId(
+    controls.relations,
+    blockId,
+    item.id,
+  )
+  const actionClassName =
+    'flex-none rounded px-2 py-1 text-xs font-semibold text-[var(--workbench-primary-text)] hover:bg-surface'
+  if (workItemId) {
+    const { onOpen } = controls
+    return onOpen ? (
+      <button
+        className={actionClassName}
+        onClick={(event) => {
+          event.preventDefault()
+          onOpen(workItemId)
+        }}
+        type="button"
+      >
+        {t('documents.checklistWorkItem.open')}
+      </button>
+    ) : (
+      <span className="workbench-badge flex-none">
+        {t('documents.checklistWorkItem.linked')}
+      </span>
+    )
+  }
+  const { onCreate } = controls
+  if (!onCreate || item.text.trim().length === 0) return null
+  return (
+    <button
+      className={actionClassName}
+      onClick={(event) => {
+        event.preventDefault()
+        onCreate(blockId, item)
+      }}
+      type="button"
+    >
+      {t('documents.checklistWorkItem.create')}
+    </button>
   )
 }
 
