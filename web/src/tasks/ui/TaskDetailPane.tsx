@@ -1338,8 +1338,10 @@ export function TaskDetailPane({
           {accessToken && (issue ?? task).assignedProjectId ? (
             <TaskScheduleBaselinePanel
               accessToken={accessToken}
-              canCapture={Boolean(canCorrectActualDates) && !isReadOnly}
-              disabled={isReadOnly}
+              // Capturing needs Project management, not Work Item write access, so it does not
+              // depend on onUpdateIssue; it only waits for the current detail.
+              canCapture={Boolean(canCorrectActualDates) && !isRetainedDetail && !needsDetailBeforeEdit}
+              disabled={isRetainedDetail || needsDetailBeforeEdit}
               projectId={(issue ?? task).assignedProjectId ?? ''}
               t={t}
               task={issue ?? task}
