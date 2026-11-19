@@ -3133,6 +3133,10 @@ test('no Lambda environment references a NoEcho parameter (#494)', () => {
         WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
     }],
   ];
+  expectations.push(['RequestEmailIngestionFunction', {
+    REQUEST_EMAIL_WEBHOOK_SECRET_SECRET_ARN: 'RequestEmailWebhookKeySecretCA8DB054',
+    REQUEST_TOKEN_HASH_SECRET_SECRET_ARN: 'RequestTokenHashKeySecretCABB3465',
+  }]);
   for (const [functionPrefix, variables] of expectations) {
     const entry = Object.entries(document.Resources).find(([logicalId, resource]) =>
       resource.Type === 'AWS::Lambda::Function' &&
@@ -3142,10 +3146,23 @@ test('no Lambda environment references a NoEcho parameter (#494)', () => {
     for (const [name, secretLogicalId] of Object.entries(variables)) {
       expect(environment[name]).toEqual({ Ref: secretLogicalId });
     }
+    // A rotated secret keeps its ARN; the operator revision replaces warm
+    // environments that cached the previous value.
+    expect(environment.MUKUROJI_WORKER_SECRET_REVISION)
+      .toEqual({ Ref: 'ApiRuntimeConfigurationRevision' });
   }
-  const tokenHashSecret = document.Resources.EnterpriseIdentityTokenHashKeySecretB442F5F9 as {
-    Properties?: { SecretString?: unknown };
-  };
-  expect(tokenHashSecret.Properties?.SecretString)
-    .toEqual({ Ref: 'EnterpriseIdentityTokenHashSecret' });
+  for (const [logicalId, parameter] of [
+    ['EnterpriseIdentityTokenHashKeySecretB442F5F9', 'EnterpriseIdentityTokenHashSecret'],
+    ['RequestEmailWebhookKeySecretCA8DB054', 'RequestEmailWebhookSecret'],
+    ['RequestTokenHashKeySecretCABB3465', 'RequestTokenHashSecret'],
+  ] as const) {
+    const secret = document.Resources[logicalId] as {
+      DeletionPolicy?: string;
+      Properties?: { SecretString?: unknown };
+      UpdateReplacePolicy?: string;
+    };
+    expect(secret.Properties?.SecretString).toEqual({ Ref: parameter });
+    expect(secret.DeletionPolicy).toBe('Retain');
+    expect(secret.UpdateReplacePolicy).toBe('Retain');
+  }
 });

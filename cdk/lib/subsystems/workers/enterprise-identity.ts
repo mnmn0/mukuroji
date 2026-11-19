@@ -113,6 +113,10 @@ export function buildEnterpriseIdentityWorkers(
         DOCUMENTS_TABLE_NAME: documentsTable.tableName,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         // Secret ARNs only: the worker reads both values at cold start.
+        // A rotated secret keeps its ARN, so the revision changes the function
+        // configuration and replaces warm environments that cached the old value.
+        MUKUROJI_WORKER_SECRET_REVISION:
+          input.parameters.apiRuntimeConfigurationRevision.valueAsString,
         ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET_SECRET_ARN:
           enterpriseIdentityTokenHashKeySecret.secretArn,
         MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY_SECRET_ARN:

@@ -151,6 +151,10 @@ export function buildConnectorWorkers(
         DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: developerPlatformKey.keyArn,
         DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
+        // A rotated secret keeps its ARN, so the revision changes the function
+        // configuration and replaces warm environments that cached the old value.
+        MUKUROJI_WORKER_SECRET_REVISION:
+          input.parameters.apiRuntimeConfigurationRevision.valueAsString,
         ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET_SECRET_ARN:
           enterpriseIdentityTokenHashKeySecret.secretArn,
         MUKUROJI_RUNTIME_ROLE: 'connector-queue-worker',

@@ -19,7 +19,7 @@
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡します。 |
 | `RestoreDrillCleanupApproverRoleArn` | 復元ドリル有効時 | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
-| `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、またはruntime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
+| `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、またはruntime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。worker が Secrets Manager から読む secret（`EnterpriseIdentityTokenHashSecret`、`RequestEmailWebhookSecret`、`RequestTokenHashSecret`）を変えるときも増分します。worker は値を cold start で読んで保持するため、revision が変わらないと warm な実行環境が古い値を使い続けます。 |
 | `ApplicationCommitSha` | yes | deploy対象としてreview済みのfull lowercase Git commit SHA（40桁）。APIのliveness responseに公開され、production-like evaluationが意図したcommitを検証します。 |
 | `AiBedrockModelId` | AI有効時 | AI assistanceでdefault/allowlistの両方に使う、現在サポートしているexact Bedrock model ID。現在はJP Geo profileの `jp.anthropic.claude-sonnet-4-6` のみを許可し、Tokyo/Osaka stackだけが使用できます。 |
 | `AiBedrockInputPricePerMillionTokensUsd` | AI有効時 | deploy時にAWS公式料金表と照合した、選択modelのstandard input 100万token当たりUSD。 |

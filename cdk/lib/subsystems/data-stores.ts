@@ -467,6 +467,7 @@ export function buildDataStores(
     {
       description:
         'Enterprise identity credential HMAC key read by trusted workers at cold start.',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       secretStringValue: cdk.SecretValue.cfnParameter(
         input.enterpriseIdentityTokenHashSecret,
       ),

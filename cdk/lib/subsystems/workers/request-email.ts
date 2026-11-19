@@ -63,6 +63,7 @@ export function buildRequestEmailWorker(
     'RequestEmailWebhookKeySecret',
     {
       description: 'Request email envelope signing key read by the ingestion worker.',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       secretStringValue: cdk.SecretValue.cfnParameter(requestEmailWebhookSecret),
     },
   );
@@ -71,6 +72,7 @@ export function buildRequestEmailWorker(
     'RequestTokenHashKeySecret',
     {
       description: 'Request capability token HMAC key read by the ingestion worker.',
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
       secretStringValue: cdk.SecretValue.cfnParameter(requestTokenHashSecret),
     },
   );
@@ -103,6 +105,10 @@ export function buildRequestEmailWorker(
         target: 'node22',
       },
       environment: {
+        // A rotated secret keeps its ARN, so the revision changes the function
+        // configuration and replaces warm environments that cached the old value.
+        MUKUROJI_WORKER_SECRET_REVISION:
+          input.parameters.apiRuntimeConfigurationRevision.valueAsString,
         REQUEST_EMAIL_WEBHOOK_SECRET_SECRET_ARN:
           requestEmailWebhookKeySecret.secretArn,
         REQUEST_INTAKE_TABLE_NAME: requestIntakeTable.tableName,
