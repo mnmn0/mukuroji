@@ -3,6 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { TenantAdministrationSnapshot } from '@mukuroji/contracts'
 import { getWorkspaceCalendarSettings } from '../src/workspace/api/tenantAdministration'
 import { createWorkspaceTaskScheduleCalendarPolicy } from '../src/tasks/model/taskSchedule'
+import {
+  addWorkspaceHoliday,
+  removeWorkspaceHoliday,
+  setWorkspaceWorkingWeekday,
+} from '../src/workspace/model/workspaceWorkingCalendar'
 import { TenantAdministrationPanel } from '../src/workspace/ui/TenantAdministrationPanel'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -126,6 +131,34 @@ describe('Workspace calendar settings', () => {
     expect(html).not.toMatch(/data-testid="tenant-working-weekday-sunday"[^>]*checked/u)
     expect(html).toContain('<time dateTime="2027-01-01">2027-01-01</time>')
     expect(html).toContain('休日 2027-05-03 を削除')
+  })
+
+  test('edits working weekdays and holidays without leaving the Workspace without working days', () => {
+    const calendar = {
+      fiscalYearStartMonth: 1,
+      weekStartDay: 1 as const,
+      workingWeekdays: ['tuesday' as const],
+      holidays: ['2027-05-03'],
+    }
+    expect(setWorkspaceWorkingWeekday(calendar, 'monday', true)?.workingWeekdays)
+      .toEqual(['monday', 'tuesday'])
+    // Unchecking the only working weekday is refused.
+    expect(setWorkspaceWorkingWeekday(calendar, 'tuesday', false)).toBeUndefined()
+
+    expect(addWorkspaceHoliday(calendar, '2027-01-01')?.holidays).toEqual(['2027-01-01', '2027-05-03'])
+    expect(addWorkspaceHoliday(calendar, '2027-05-03')).toBeUndefined()
+    expect(addWorkspaceHoliday(calendar, '')).toBeUndefined()
+    expect(addWorkspaceHoliday(calendar, '2027-02-30')).toBeUndefined()
+    const full = {
+      ...calendar,
+      holidays: Array.from({ length: 512 }, (_, index) =>
+        new Date(Date.UTC(2027, 0, 1 + index)).toISOString().slice(0, 10)),
+    }
+    expect(addWorkspaceHoliday(full, '2030-01-01')).toBeUndefined()
+
+    expect(removeWorkspaceHoliday(calendar, '2027-05-03').holidays).toEqual([])
+    // The edited copies never change the settings being edited.
+    expect(calendar.holidays).toEqual(['2027-05-03'])
   })
 
   test('maps the Workspace calendar to the policy new Work Items use', () => {

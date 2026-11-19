@@ -95,7 +95,7 @@ export const WORKSPACE_CALENDAR_WEEKDAYS: readonly WorkspaceCalendarWeekday[] = 
 /** Largest number of holidays a Workspace calendar keeps, the same limit as a Work Item schedule. */
 export const WORKSPACE_CALENDAR_MAX_HOLIDAYS = 512
 
-/** Earliest year accepted for a Workspace holiday, matching Work Item schedule dates. */
+/** Earliest year accepted for a Workspace holiday; Work Item schedules accept these dates too. */
 const WORKSPACE_CALENDAR_MIN_HOLIDAY_YEAR = 1970
 
 /** Workspace-wide calendar settings that decide fiscal years, weeks, and working days. */

@@ -1,12 +1,16 @@
 import { useState } from 'react'
 import {
-  WORKSPACE_CALENDAR_MAX_HOLIDAYS,
   WORKSPACE_CALENDAR_WEEKDAYS,
-  isWorkspaceHolidayDate,
   type WorkspaceCalendarSettings,
   type WorkspaceCalendarWeekday,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
+import {
+  addWorkspaceHoliday,
+  canAddWorkspaceHoliday,
+  removeWorkspaceHoliday,
+  setWorkspaceWorkingWeekday,
+} from '../model/workspaceWorkingCalendar'
 
 /** Label keys of each working weekday checkbox. */
 const workingWeekdayLabelKeys: Record<WorkspaceCalendarWeekday, MessageKey> = {
@@ -47,10 +51,7 @@ export function WorkspaceWorkingCalendarFields({
   t,
 }: WorkspaceWorkingCalendarFieldsProps) {
   const [holidayDraft, setHolidayDraft] = useState('')
-  const canAddHoliday = !disabled &&
-    isWorkspaceHolidayDate(holidayDraft) &&
-    !calendar.holidays.includes(holidayDraft) &&
-    calendar.holidays.length < WORKSPACE_CALENDAR_MAX_HOLIDAYS
+  const canAddHoliday = !disabled && canAddWorkspaceHoliday(calendar, holidayDraft)
 
   /**
    * Turns one weekday on or off, keeping at least one working weekday.
@@ -59,16 +60,16 @@ export function WorkspaceWorkingCalendarFields({
    * @param checked - Whether the weekday is now a working day.
    */
   function toggleWorkingWeekday(weekday: WorkspaceCalendarWeekday, checked: boolean) {
-    const workingWeekdays = WORKSPACE_CALENDAR_WEEKDAYS.filter((candidate) =>
-      candidate === weekday ? checked : calendar.workingWeekdays.includes(candidate))
-    if (workingWeekdays.length === 0) return
-    onChange({ ...calendar, workingWeekdays })
+    const next = setWorkspaceWorkingWeekday(calendar, weekday, checked)
+    if (next) onChange(next)
   }
 
   /** Adds the drafted date to the holidays and clears the draft. */
   function addHoliday() {
-    if (!canAddHoliday) return
-    onChange({ ...calendar, holidays: [...calendar.holidays, holidayDraft].sort() })
+    if (disabled) return
+    const next = addWorkspaceHoliday(calendar, holidayDraft)
+    if (!next) return
+    onChange(next)
     setHolidayDraft('')
   }
 
@@ -144,10 +145,7 @@ export function WorkspaceWorkingCalendarFields({
                   aria-label={t('workspace.tenantAdministration.removeHoliday').replace('{date}', holiday)}
                   className="px-1 text-[var(--workbench-muted)] hover:text-[var(--workbench-text)]"
                   disabled={disabled}
-                  onClick={() => onChange({
-                    ...calendar,
-                    holidays: calendar.holidays.filter((candidate) => candidate !== holiday),
-                  })}
+                  onClick={() => onChange(removeWorkspaceHoliday(calendar, holiday))}
                   type="button"
                 >
                   ×
