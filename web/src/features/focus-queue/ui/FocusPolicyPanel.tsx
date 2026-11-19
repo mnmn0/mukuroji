@@ -90,6 +90,7 @@ export function FocusPolicyPanel({
   const storedPolicy = editingTeam ? teamPolicy : personalPolicy
   const inheritedSettings = editingTeam ? policy.baseSettings : policy.teamSettings
   const canEdit = editingTeam ? canEditTeam : canEditPersonal
+  const storedSlaTypeIds = storedPolicy?.overrides.slaWorkItemTypeIds
   const selectableTeamIds = [...new Set([
     ...editableTeamIds,
     ...(policy.teamId === undefined ? [] : [policy.teamId]),
@@ -283,6 +284,27 @@ export function FocusPolicyPanel({
               </select>
             </label>
             <label className="grid gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
+              <span>{t('workspace.focus.policy.slaWorkItemTypeMode')}</span>
+              <select
+                className="workbench-input min-h-[44px] w-full px-3"
+                defaultValue={storedSlaTypeIds === undefined
+                  ? ''
+                  : storedSlaTypeIds.length === 0 ? 'all' : 'listed'}
+                name="slaWorkItemTypeMode"
+              >
+                <option value="">
+                  {t('workspace.focus.policy.inherit').replace(
+                    '{value}',
+                    inheritedSettings.slaWorkItemTypeIds.length === 0
+                      ? t('workspace.focus.policy.slaWorkItemTypeIds.all')
+                      : inheritedSettings.slaWorkItemTypeIds.join(', '),
+                  )}
+                </option>
+                <option value="all">{t('workspace.focus.policy.slaWorkItemTypeIds.all')}</option>
+                <option value="listed">{t('workspace.focus.policy.slaWorkItemTypeIds.listed')}</option>
+              </select>
+            </label>
+            <label className="grid gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
               <span>{t('workspace.focus.policy.slaWorkItemTypeIds')}</span>
               <input
                 aria-describedby={invalidFieldNames.includes('slaWorkItemTypeIds')
@@ -290,11 +312,9 @@ export function FocusPolicyPanel({
                   : undefined}
                 aria-invalid={invalidFieldNames.includes('slaWorkItemTypeIds') || undefined}
                 className="workbench-input min-h-[44px] w-full px-3"
-                defaultValue={storedPolicy?.overrides.slaWorkItemTypeIds?.join(', ') ?? ''}
+                defaultValue={storedSlaTypeIds?.join(', ') ?? ''}
                 name="slaWorkItemTypeIds"
-                placeholder={inheritedSettings.slaWorkItemTypeIds.length === 0
-                  ? t('workspace.focus.policy.slaWorkItemTypeIds.all')
-                  : inheritedSettings.slaWorkItemTypeIds.join(', ')}
+                placeholder={t('workspace.focus.policy.slaWorkItemTypeIds.placeholder')}
                 type="text"
               />
               {invalidFieldNames.includes('slaWorkItemTypeIds') ? (

@@ -62,7 +62,11 @@ export function readFocusPolicyOverrides(
   )
   const slaEnabled = readOptionalPolicyBoolean(formData, 'slaEnabled')
   const slaAnchor = readOptionalSlaAnchor(formData, 'slaAnchor')
-  const slaWorkItemTypeIds = readOptionalTypeIds(formData, 'slaWorkItemTypeIds')
+  const slaWorkItemTypeIds = readOptionalTypeIds(
+    formData,
+    'slaWorkItemTypeMode',
+    'slaWorkItemTypeIds',
+  )
   const values: readonly [string, { valid: boolean }][] = [
     ['weight-blocker', blocker],
     ['weight-urgent', urgent],
@@ -150,22 +154,27 @@ function readOptionalSlaAnchor(
 }
 
 /**
- * Reads an optional comma-separated list of Work Item Type IDs whose blank value inherits.
+ * Reads the SLA Work Item Type scope: inherit, every Type, or only the listed Type IDs.
  *
  * @param formData - Submitted policy form.
- * @param name - Text input name.
- * @returns Sorted, deduplicated Type IDs, or no value when the field inherits.
+ * @param modeName - Select whose value is blank (inherit), `all`, or `listed`.
+ * @param idsName - Comma-separated Type ID input used by the `listed` mode.
+ * @returns No value to inherit, an empty list for every Type, or sorted deduplicated Type IDs.
  */
 function readOptionalTypeIds(
   formData: FormData,
-  name: string,
+  modeName: string,
+  idsName: string,
 ): { valid: boolean, value?: string[] } {
-  const value = formData.get(name)
-  if (value === null) return { valid: true }
+  const mode = formData.get(modeName)
+  if (mode === null || mode === '') return { valid: true }
+  if (mode === 'all') return { valid: true, value: [] }
+  if (mode !== 'listed') return { valid: false }
+  const value = formData.get(idsName)
   if (typeof value !== 'string') return { valid: false }
   const typeIds = [...new Set(value.split(',').map((typeId) => typeId.trim()).filter(Boolean))]
-  if (typeIds.length === 0) return { valid: true }
   if (
+    typeIds.length === 0 ||
     typeIds.length > focusSlaWorkItemTypeLimit ||
     typeIds.some((typeId) => typeId.length > 128)
   ) return { valid: false }

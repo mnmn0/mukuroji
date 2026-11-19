@@ -200,8 +200,16 @@ describe('Focus queue', () => {
     const formData = new FormData()
     formData.set('slaEnabled', '')
     formData.set('slaAnchor', '')
-    formData.set('slaWorkItemTypeIds', ' ')
+    formData.set('slaWorkItemTypeMode', '')
+    formData.set('slaWorkItemTypeIds', 'ignored-while-inheriting')
     expect(readFocusPolicyOverrides(formData)).toEqual({ invalidFieldNames: [], overrides: {} })
+
+    formData.set('slaWorkItemTypeMode', 'all')
+    expect(readFocusPolicyOverrides(formData).overrides).toEqual({ slaWorkItemTypeIds: [] })
+
+    formData.set('slaWorkItemTypeMode', 'listed')
+    formData.set('slaWorkItemTypeIds', ' ')
+    expect(readFocusPolicyOverrides(formData).invalidFieldNames).toEqual(['slaWorkItemTypeIds'])
 
     formData.set('slaEnabled', 'false')
     formData.set('slaAnchor', 'started')

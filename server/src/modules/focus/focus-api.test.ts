@@ -787,8 +787,9 @@ test('bounds watcher point reads to the accessible Focus item window', async () 
   expect(watcherReads).toBe(200)
 })
 
-test('lists only readable health update deadlines owned by the viewer', async () => {
-  configureFocusSources()
+test('lists health update deadlines the viewer owns in Projects readable by ACL', async () => {
+  // No Work Items: the Project ACL alone authorizes the update target.
+  configureFocusSources('member', undefined, 0)
   configureFakeAuthenticatedUser({
     email: 'sato@example.com',
     'custom:directory_id': 'user#demo@example.com',
@@ -818,7 +819,10 @@ test('lists only readable health update deadlines owned by the viewer', async ()
 
   expect(response.status).toBe(200)
   const body: unknown = await response.json()
-  if (!isRecord(body)) throw new Error('Expected a Focus response.')
+  if (!isRecord(body) || !Array.isArray(body.sections)) throw new Error('Expected a Focus response.')
+  expect(body.sections.every((section) =>
+    isRecord(section) && Array.isArray(section.items) && section.items.length === 0
+  )).toBeTrue()
   expect(body.updateDeadlines).toEqual([{
     id: 'update-due:project:core-team:refero:2020-01-06T09%3A00%3A00.000Z',
     target: { type: 'project', teamId: 'core-team', projectId: 'refero' },

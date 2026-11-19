@@ -41,7 +41,7 @@ response の `updateDeadlines` は、Project / Initiative の health update で�
 - `overdue`: 現在時刻が cadence の `nextDueAt` 以降
 - `due-soon`: `nextDueAt` から cadence の `reminderHoursBefore` 時間前以降
 - archive 済みの対象と cadence 未設定の対象は出しません。並びは `overdue` が先、次に期限順です。
-- 対象の Project / Initiative を Focus の Planning 読み取り条件で読めない場合は出しません。
+- 対象を現在読めない場合は出しません。Enterprise の利用者は `planning.read` の scope、それ以外は Planning API と同じく Project ACL（Initiative は entity の Team / Project scope）で判定し、Work Item の有無には依存しません。
 - 解消条件は update の提出です。提出すると cadence が次の期限へ進むため、一覧から消えます。リンクは Inbox の reminder と同じ `/planning/portfolio?...` です。
 
 response の `metrics.blocked` は個人 queue への採否とは分け、現在の利用者が参照できる全 active Work Item の実 relation/dependency から算出します。priority を blocker の代用にはしません。

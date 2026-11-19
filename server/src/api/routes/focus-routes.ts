@@ -95,6 +95,7 @@ import {
 import {
   createApiMutationContext,
   getEffectiveProjectAccessList,
+  readLegacyProjectScopeAccesses,
   requireTeamPermission,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
@@ -1503,13 +1504,16 @@ async function readFocusQueue(
   const accessibleTeamIdsPromise = readFocusAccessibleTeamIds(principal)
   const projectTitlesPromise = readFocusProjectTitlesByKey(principal)
   const planningWorkItems = createFocusPlanningWorkItemState(accessibleWorkItems)
-  const planningPromise = workItemDependencies.planning
-    .get(principal.directoryId, planningWorkItems)
-    .then((planning) => filterFocusPlanningSnapshotForPrincipal(
-      principal,
-      planning,
-      accessibleWorkItems,
-    ))
+  const legacyUpdateTargetScopePromise = readFocusLegacyUpdateTargetScope(principal)
+  const planningPromise = Promise.all([
+    workItemDependencies.planning.get(principal.directoryId, planningWorkItems),
+    legacyUpdateTargetScopePromise,
+  ]).then(([planning, legacyUpdateTargetScope]) => filterFocusPlanningSnapshotForPrincipal(
+    principal,
+    planning,
+    accessibleWorkItems,
+    legacyUpdateTargetScope,
+  ))
   const relationGraphsPromise = readFocusRelationGraphs(
     principal.directoryId,
     accessibleWorkItems,
@@ -1746,12 +1750,14 @@ async function hydrateFocusApprovalSummaries(
  * @param principal - Current authenticated Workspace principal.
  * @param snapshot - Complete Planning snapshot loaded from the canonical store.
  * @param workItems - Current ACL-filtered canonical Work Items.
+ * @param legacyUpdateTargetScope - Project ACL scope for legacy principals, used for update targets.
  * @returns A detached Planning snapshot safe to use as Focus signal input.
  */
 function filterFocusPlanningSnapshotForPrincipal(
   principal: WorkspacePrincipal,
   snapshot: PlanningSnapshot,
   workItems: readonly CanonicalWorkItem[],
+  legacyUpdateTargetScope?: FocusLegacyUpdateTargetScope,
 ): PlanningSnapshot {
   if (principal.isSystemAdmin) return snapshot
   const canonicalWorkItemsByKey = new Map(workItems.map((workItem) => [
@@ -1827,11 +1833,31 @@ function filterFocusPlanningSnapshotForPrincipal(
   const criticalEntityIds = snapshot.criticalPath.entityIds.filter((entityId) =>
     entityIds.has(entityId)
   )
-  const updateTargets = snapshot.updateTargets.filter((summary) =>
-    summary.target.type === 'project'
-      ? canReadPlanningResource(summary.target.teamId, summary.target.projectId)
-      : entityIds.has(summary.target.entityId)
-  )
+  const updateTargets = snapshot.updateTargets.filter((summary) => {
+    const target = summary.target
+    if (principal.enterpriseAuthorizationEvaluation !== undefined) {
+      return target.type === 'project'
+        ? canReadPlanningResource(target.teamId, target.projectId)
+        : entityIds.has(target.entityId)
+    }
+    // Legacy principals: Project ACLs authorize update targets, as in the Planning API, so a
+    // readable Project without active Work Items still shows its deadline.
+    if (legacyUpdateTargetScope === undefined) return false
+    if (target.type === 'project') {
+      return legacyUpdateTargetScope.projectKeys.has(
+        createFocusWorkItemKey(target.teamId, target.projectId),
+      )
+    }
+    const entity = snapshot.entities.find((candidate) => candidate.id === target.entityId)
+    if (entity === undefined) return false
+    if (entity.projectId !== undefined) {
+      return entity.teamId !== undefined && legacyUpdateTargetScope.projectKeys.has(
+        createFocusWorkItemKey(entity.teamId, entity.projectId),
+      )
+    }
+    if (entity.teamId !== undefined) return legacyUpdateTargetScope.teamIds.has(entity.teamId)
+    return legacyUpdateTargetScope.workspaceReadable
+  })
   return {
     ...snapshot,
     entities: scopedEntities,
@@ -1855,6 +1881,48 @@ function filterFocusPlanningSnapshotForPrincipal(
       planningWorkItems,
       workItemLinks,
     ),
+  }
+}
+
+/** Planning read scope of a legacy principal, taken from its Project ACLs. */
+type FocusLegacyUpdateTargetScope = {
+  /** Readable Projects keyed by `teamId`, a NUL separator, and Project ID. */
+  projectKeys: ReadonlySet<string>
+  /** Teams in which the principal can read at least one Project. */
+  teamIds: ReadonlySet<string>
+  /** Whether Workspace-scoped Planning content is readable. */
+  workspaceReadable: boolean
+}
+
+/**
+ * Reads the Project ACL scope that authorizes health update targets for a legacy principal.
+ *
+ * Mirrors the legacy branch of the Planning API snapshot filter. Enterprise principals and system
+ * administrators do not need it and get undefined.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns The legacy scope, or undefined when another authorization path applies.
+ */
+async function readFocusLegacyUpdateTargetScope(
+  principal: WorkspacePrincipal,
+): Promise<FocusLegacyUpdateTargetScope | undefined> {
+  if (principal.isSystemAdmin || principal.enterpriseAuthorizationEvaluation !== undefined) {
+    return undefined
+  }
+  if (principal.enterpriseLegacyProjectAccessSuppressed === true) {
+    return { projectKeys: new Set(), teamIds: new Set(), workspaceReadable: false }
+  }
+  const accesses = (principal.legacyProjectScopeAccesses ??
+    await readLegacyProjectScopeAccesses(principal))
+    .filter((access) => access.teamId !== undefined && projectAccessAllows(access, 'viewer'))
+  return {
+    projectKeys: new Set(accesses.flatMap((access) =>
+      access.teamId === undefined ? [] : [createFocusWorkItemKey(access.teamId, access.projectId)]
+    )),
+    teamIds: new Set(accesses.flatMap((access) =>
+      access.teamId === undefined ? [] : [access.teamId]
+    )),
+    workspaceReadable: principal.workspaceRole !== 'guest',
   }
 }
 
