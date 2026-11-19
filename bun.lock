@@ -25,6 +25,7 @@
         "constructs": "^10.5.0",
       },
       "devDependencies": {
+        "@aws-sdk/client-dynamodb": "3.1057.0",
         "@jest/globals": "^30",
         "@types/jest": "^30",
         "@types/node": "^24.10.1",
