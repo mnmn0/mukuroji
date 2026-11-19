@@ -192,3 +192,30 @@ test('fails closed with 503 when the signing keys cannot be read', async () => {
     code: 'CognitoUnavailable',
   })
 })
+
+test('keeps using a cached key when the hourly JWKS refresh fails', async () => {
+  const key = createSigningKey('kid-1')
+  let available = true
+  let clock = now
+  const verifier = new CognitoAccessTokenVerifier(
+    'https://jwks.example.test',
+    async () => {
+      if (!available) throw new Error('network down')
+      return { keys: [key.jwk] }
+    },
+    () => clock,
+  )
+  await verifier.verify(
+    signToken(key.privateKey, { alg: 'RS256', kid: 'kid-1' }, accessClaims()),
+    expected,
+  )
+  available = false
+  clock += 2 * 60 * 60 * 1_000
+  const later = signToken(
+    key.privateKey,
+    { alg: 'RS256', kid: 'kid-1' },
+    accessClaims({ iat: Math.floor(clock / 1_000) - 60, exp: Math.floor(clock / 1_000) + 3_000 }),
+  )
+
+  await expect(verifier.verify(later, expected)).resolves.toMatchObject({ sub: 'sub-1' })
+})

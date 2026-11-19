@@ -182,7 +182,12 @@ export class CognitoAccessTokenVerifier {
     const unknownKeyMayRefetch = !this.keys.has(keyId) &&
       now - this.lastFetchAttemptAt >= jwksRefetchIntervalMilliseconds
     if (stale || unknownKeyMayRefetch) {
-      await this.refreshKeys()
+      try {
+        await this.refreshKeys()
+      } catch (error) {
+        // Keep verifying with a key read earlier while the JWKS endpoint is briefly unreachable.
+        if (!this.keys.has(keyId)) throw error
+      }
     }
     const key = this.keys.get(keyId)
     if (!key) throw invalidAccessToken()

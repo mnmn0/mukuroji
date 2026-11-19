@@ -2794,14 +2794,14 @@ function createAwsCognitoIssuer(userPoolId: string) {
  *
  * @param user - AdminGetUser response.
  * @param token - Verified claims of the access token.
- * @returns The user; throws a 401 error when the user is disabled or is another identity.
+ * @returns The user; throws a 401 error when the user is disabled or is not the token's `sub`.
  */
 function toVerifiedAccessTokenUser(
   user: CognitoUserRecord,
   token: VerifiedCognitoAccessToken,
 ): VerifiedAccessTokenUser {
   const sub = readCognitoUserAttribute(user, 'sub')?.trim()
-  if (user.Enabled === false || (sub && sub !== token.sub)) {
+  if (user.Enabled === false || sub !== token.sub) {
     throw new CognitoServiceError(401, 'NotAuthorizedException', 'Access token is invalid.')
   }
   return {
