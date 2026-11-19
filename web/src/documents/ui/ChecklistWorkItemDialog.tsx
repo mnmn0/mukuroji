@@ -2,23 +2,8 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import { useActiveProjectMembers } from '../../projects/queries/useProjectMembers'
 import type { MessageKey } from '../../shared/i18n/i18n'
+import type { ChecklistWorkItemInput } from '../model/checklistWorkItems'
 import { focusFirstModalElement, trapModalFocus } from './modalFocus'
-
-/**
- * Values the author confirmed for a Work Item created from a checklist item.
- */
-export type ChecklistWorkItemInput = {
-  /** Team that owns the new Work Item. */
-  teamId: string
-  /** Project the Work Item is assigned to. */
-  projectId: string
-  /** Work Item title. */
-  title: string
-  /** Project member key of the accountable owner. */
-  assigneeUserId: string
-  /** Local `YYYY-MM-DD` deadline, when one was entered. */
-  dueDate?: string
-}
 
 /**
  * Props of the dialog that turns a checklist item into a Work Item.

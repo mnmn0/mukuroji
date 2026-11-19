@@ -3,6 +3,34 @@ import type { DocumentRelation } from '@mukuroji/contracts'
 const checklistItemRelationPrefix = 'checklist-item:'
 
 /**
+ * Document checklist item a Work Item is created from.
+ */
+export type ChecklistItemSource = {
+  /** Document that contains the item. */
+  documentId: string
+  /** Checklist block that contains the item. */
+  blockId: string
+  /** Checklist item ID inside the block. */
+  itemId: string
+}
+
+/**
+ * Values the author confirmed for a Work Item created from a checklist item.
+ */
+export type ChecklistWorkItemInput = {
+  /** Team that owns the new Work Item. */
+  teamId: string
+  /** Project the Work Item is assigned to. */
+  projectId: string
+  /** Work Item title. */
+  title: string
+  /** Project member key of the accountable owner. */
+  assigneeUserId: string
+  /** Local `YYYY-MM-DD` deadline, when one was entered. */
+  dueDate?: string
+}
+
+/**
  * Builds the Document relation ID that links one checklist item to its Work Item.
  *
  * The ID is derived from the block and item so the editor can tell which item

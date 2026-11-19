@@ -6,11 +6,7 @@ import {
   useState,
 } from 'react'
 import { createPortal, flushSync } from 'react-dom'
-import {
-  createDefaultDueDateWorkItemSchedule,
-  createDefaultUnscheduledWorkItemSchedule,
-  type DocumentChecklistItem,
-} from '@mukuroji/contracts'
+import type { DocumentChecklistItem } from '@mukuroji/contracts'
 import type {
   DocumentExportFormat,
   DocumentKind,
@@ -33,13 +29,6 @@ import {
   canMutateWorkspaceContent,
 } from '../auth/api'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
-import { createTeamIssue } from '../issues/api/workItems'
-import { getWorkItemConfiguration } from '../work-items/api/configuration'
-import {
-  resolveCreatableWorkItemTypeId,
-  resolveCreateWorkflowStatuses,
-  resolveWorkItemTypes,
-} from '../work-items/model/workItemDisplay'
 import { clearAuthSession, getAuthSession } from '../auth/session'
 import { signOutWithPushCleanup } from '../notifications/mutations/usePushDevice'
 import {
@@ -126,17 +115,18 @@ import {
   DocumentHome,
   type BuiltInTemplateCreateOptions,
 } from './ui/DocumentHome'
-import {
-  ChecklistWorkItemDialog,
-  type ChecklistWorkItemInput,
-} from './ui/ChecklistWorkItemDialog'
+import { ChecklistWorkItemDialog } from './ui/ChecklistWorkItemDialog'
+import { useChecklistWorkItemCreation } from './mutations/useChecklistWorkItemCreation'
 import {
   buildBuiltInDocumentTemplate,
   formatLocalCalendarDate,
   type BuiltInDocumentTemplateKey,
 } from './model/builtInTemplates'
-import { createChecklistItemWorkItemRelation } from './model/checklistWorkItems'
-import { createCanonicalWorkItemId } from './model/relations'
+import {
+  createChecklistItemWorkItemRelation,
+  type ChecklistItemSource,
+  type ChecklistWorkItemInput,
+} from './model/checklistWorkItems'
 import { exportDocumentSubtreeMarkdown } from './queries/documentSubtreeExport'
 import {
   DocumentShareDialog,
@@ -289,7 +279,10 @@ export type DocumentScreenActions = {
   /**
    * Creates a Work Item and returns its canonical ID.
    */
-  createWorkItem?: (input: ChecklistWorkItemInput) => Promise<string>
+  createWorkItem?: (
+    source: ChecklistItemSource,
+    input: ChecklistWorkItemInput,
+  ) => Promise<string>
   /**
    * Document metadata/permission を更新する action です。
    */
@@ -557,6 +550,10 @@ export function DocumentPage() {
     ])
   }
   const t = useMemo(() => createTranslator(locale), [locale])
+  const checklistWorkItemCreation = useChecklistWorkItemCreation({
+    accessToken,
+    errorMessage: t('documents.checklistWorkItem.error'),
+  })
   const {
     data: user,
     error: currentUserError,
@@ -981,54 +978,6 @@ export function DocumentPage() {
     builtInTemplateContentRef.current = undefined
     await mutateDocuments()
     navigate(createDocumentPath(created.id))
-  }
-
-  /**
-   * Creates a Work Item assigned to a Project for a Document checklist item.
-   *
-   * @param input - Team, Project, title, owner, and optional deadline.
-   * @returns Canonical ID of the created Work Item.
-   */
-  const handleCreateWorkItem = async (input: ChecklistWorkItemInput) => {
-    if (!accessToken) {
-      throw new Error(t('documents.checklistWorkItem.error'))
-    }
-    // Like the quick create form, capture into a backlog status when the
-    // Team has one, so required custom fields can be filled in later.
-    const configuration = await getWorkItemConfiguration(accessToken, {
-      kind: 'team',
-      teamId: input.teamId,
-    }).catch(() => undefined)
-    const workItemTypeId = configuration
-      ? resolveCreatableWorkItemTypeId(resolveWorkItemTypes(configuration))
-      : undefined
-    const backlogStatus = resolveCreateWorkflowStatuses(
-      configuration,
-      workItemTypeId,
-    ).find((status) => status.category === 'backlog')
-    const request = {
-      assignedProjectId: input.projectId,
-      assigneeUserId: input.assigneeUserId,
-      priority: 'medium' as const,
-      schedule: input.dueDate
-        ? createDefaultDueDateWorkItemSchedule(input.dueDate)
-        : createDefaultUnscheduledWorkItemSchedule(),
-      title: input.title,
-      ...(workItemTypeId ? { workItemTypeId } : {}),
-      ...(backlogStatus
-        ? { quickCapture: true, workflowStatusId: backlogStatus.id }
-        : {}),
-    }
-    const issue = await mutationRunner.run(
-      `issue:create:document-checklist:${input.teamId}`,
-      JSON.stringify([input.teamId, request]),
-      (context) => createTeamIssue(input.teamId, accessToken, request, context),
-    )
-    const workItemId = createCanonicalWorkItemId(issue.teamId, issue.id)
-    if (!workItemId) {
-      throw new Error(t('documents.checklistWorkItem.error'))
-    }
-    return workItemId
   }
 
   const handleUpdateDocument = async (
@@ -1536,7 +1485,9 @@ export function DocumentPage() {
         createComment: handleCreateComment,
         createDocument: handleCreateDocument,
         createDocumentFromBuiltInTemplate: handleCreateFromBuiltInTemplate,
-        createWorkItem: canCreateDocuments ? handleCreateWorkItem : undefined,
+        createWorkItem: canCreateDocuments
+          ? checklistWorkItemCreation.createWorkItem
+          : undefined,
         createShare: handleCreateShare,
         deleteShare: handleDeleteShare,
         exportDocument: handleExport,
@@ -1825,7 +1776,7 @@ export function DocumentScreen({
     const key = `${target.documentId}\0${target.blockId}\0${target.itemId}`
     const workItemId =
       createdChecklistWorkItemsRef.current.get(key) ??
-      (await actions.createWorkItem(input))
+      (await actions.createWorkItem(target, input))
     createdChecklistWorkItemsRef.current.set(key, workItemId)
     try {
       await actions.applyOperations(
