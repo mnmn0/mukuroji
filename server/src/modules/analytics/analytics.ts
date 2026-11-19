@@ -179,8 +179,10 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'scope-change': 'スコープ変更',
       velocity: 'ベロシティ',
       sla: 'SLA達成率',
-      'remaining-scope': '残スコープ',
-      'cumulative-flow': '累積フロー',
+      // The embedded Japanese PDF font subset has no glyphs for 残 / 累 / 積 / フ, so these
+      // labels stay in Latin script to keep Japanese PDF exports renderable.
+      'remaining-scope': 'Remaining scope',
+      'cumulative-flow': 'Cumulative flow',
     }),
     unitLabels: Object.freeze({
       count: '件',
@@ -484,7 +486,7 @@ export const ANALYTICS_METRIC_DEFINITIONS: Readonly<Record<
     label: 'Remaining scope',
     unit: 'count',
     description:
-      'Counts non-archived Work Items that are not completed or canceled at the evaluated instant. Chart points also report the total non-canceled scope and the completed part for burnup.',
+      'Counts non-archived Work Items that are not completed or canceled at the evaluated instant. Chart points also report the total non-canceled scope and the completed part for burnup; with effort weighting both use the estimate.',
   }),
   'cumulative-flow': Object.freeze({
     key: 'cumulative-flow',
@@ -2210,19 +2212,14 @@ function createSeriesSegments(
   if (widget.metric === 'remaining-scope') {
     const inScope = present.filter((fact) => fact.state.statusCategory !== 'canceled')
     const completed = inScope.filter((fact) => fact.state.statusCategory === 'completed')
-    const remaining = inScope.filter((fact) => fact.state.statusCategory !== 'completed')
-    const completedValue = widget.weighting === 'effort'
-      ? completed.reduce((sum, fact) => sum + effortHours(fact.state.plannedEffortMinutes), 0)
-      : completed.length
-    const remainingValue = widget.weighting === 'effort'
-      ? remaining.reduce(
-          (sum, fact) => sum + effortHours(deriveAnalyticsRemainingEffortMinutes(fact.state)),
-          0,
-        )
-      : remaining.length
+    // Effort burnup measures scope and completion by the estimate, so burning remaining effort
+    // down never reads as scope removal.
+    const measure = (facts: readonly AnalyticsWorkItemFact[]) => widget.weighting === 'effort'
+      ? facts.reduce((sum, fact) => sum + effortHours(fact.state.plannedEffortMinutes), 0)
+      : facts.length
     return [
-      { key: 'scope', value: roundMetric(completedValue + remainingValue) },
-      { key: 'completed', value: roundMetric(completedValue) },
+      { key: 'scope', value: roundMetric(measure(inScope)) },
+      { key: 'completed', value: roundMetric(measure(completed)) },
     ]
   }
   return undefined

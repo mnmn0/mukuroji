@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { AnalyticsSeriesPoint, PlanningEntity } from '@mukuroji/contracts'
 import { AnalyticsFlowChart } from '../src/analytics/ui/AnalyticsFlowChart'
+import { CycleBurndownPanel } from '../src/analytics/ui/CycleBurndownPanel'
 import { createAnalyticsFlowChartModel } from '../src/analytics/model/flowChart'
 import { createCycleBurndownQuery } from '../src/analytics/model/cycleBurndown'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
@@ -75,6 +76,45 @@ describe('Analytics flow chart', () => {
     expect(html).toContain('data-testid="analytics-flow-area-completed"')
     expect(html).toContain('Backlog')
     expect(html).toContain('<table')
+  })
+})
+
+describe('Cycle burndown panel', () => {
+  const t = createTranslator('en')
+  const cycle: PlanningEntity = {
+    ...planningSnapshotFixture.entities[0]!,
+    id: 'cycle-1',
+    type: 'cycle',
+    title: 'Sprint 1',
+    baseline: { startDate: '2026-01-01', endDate: '2026-01-05' },
+  }
+
+  test('draws a single first-day observation as a point', () => {
+    const html = renderToStaticMarkup(
+      <CycleBurndownPanel
+        cycle={cycle}
+        locale="en"
+        state={{ kind: 'ready', series: series.slice(0, 1) }}
+        t={t}
+        timeZone="UTC"
+      />,
+    )
+    expect(html).toContain('data-testid="analytics-flow-point-remaining-0"')
+  })
+
+  test('offers a retry when loading fails', () => {
+    const html = renderToStaticMarkup(
+      <CycleBurndownPanel
+        cycle={cycle}
+        locale="en"
+        onRetry={() => undefined}
+        state={{ kind: 'error' }}
+        t={t}
+        timeZone="UTC"
+      />,
+    )
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('>Retry</button>')
   })
 })
 

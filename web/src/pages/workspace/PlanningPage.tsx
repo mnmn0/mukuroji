@@ -13,7 +13,7 @@ import {
   type CurrentUser,
 } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
-import { CycleBurndownPanel } from '../../analytics/ui/CycleBurndownPanel'
+import { CycleBurndown } from '../../analytics/ui/CycleBurndownPanel'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/session'
 import {
@@ -606,7 +606,7 @@ export function PlanningPage() {
           labels={labels}
           renderCycleBurndown={accessToken && snapshot
             ? (cycle) => (
-                <CycleBurndownPanel
+                <CycleBurndown
                   accessToken={accessToken}
                   cycle={cycle}
                   key={cycle.id}

@@ -763,6 +763,76 @@ test('rejects an oversized canonical entity-query fan-out before reading audit h
   expect(auditReads).toBe(0)
 })
 
+test('applies the Work Item allowlist before the scheduled history fan-out', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const created = await createScheduledReport(repository, ['recipient@example.com'])
+  const report = {
+    ...created,
+    filter: {
+      ...created.filter,
+      workItems: [
+        { teamId: 'team-1', workItemId: 'identity-3' },
+        { teamId: 'team-1', workItemId: 'identity-8' },
+      ],
+    },
+  }
+  const workItems = Array.from({ length: 501 }, (_, index) =>
+    createWorkItem(`identity-${index}`, 'open-project')
+  )
+  const auditEntityIds: unknown[] = []
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return {
+          teams: [
+            { id: 'team-1', projects: [{ id: 'open-project' }] },
+            { id: 'team-2', projects: [{ id: 'open-project' }] },
+          ],
+        }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues(_workspaceId, teamId) {
+        if (teamId !== 'team-1') throw new Error('Unlisted Teams must not be read.')
+        return { teamId, issues: workItems }
+      },
+      async getProjectIssues() {
+        throw new Error('The renderer must use the owning Team partition.')
+      },
+    },
+    auditEvents: {
+      async query(input) {
+        auditEntityIds.push(input.entityId)
+        return { events: [] }
+      },
+    },
+  })
+
+  await renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })
+  expect(new Set(auditEntityIds)).toEqual(new Set([
+    'team/team-1/issue/identity-3',
+    'team/team-1/issue/identity-8',
+  ]))
+})
+
 test('bounds shared schedule page reads across paginated canonical entities', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
   const report = await createScheduledReport(repository, ['recipient@example.com'])

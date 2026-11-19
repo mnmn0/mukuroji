@@ -143,6 +143,25 @@ export function AnalyticsFlowChart({
                 style={{ stroke: isPrimaryLine(layer) ? 'var(--workbench-chart-series)' : 'var(--workbench-chart-missing)' }}
               />
             ))}
+          {model.layers.flatMap((layer) => layer.kind === 'area'
+            ? []
+            : layer.values.flatMap((value, index) =>
+                value === null || !isIsolatedPoint(layer.values, index)
+                  ? []
+                  : [
+                      <circle
+                        cx={xAt(index)}
+                        cy={yAt(value)}
+                        data-testid={`analytics-flow-point-${layer.key}-${index}`}
+                        key={`${layer.key}-${index}`}
+                        r="4"
+                        strokeWidth="2"
+                        style={{
+                          fill: 'var(--workbench-chart-point-fill)',
+                          stroke: isPrimaryLine(layer) ? 'var(--workbench-chart-series)' : 'var(--workbench-chart-missing)',
+                        }}
+                      />,
+                    ]))}
           {model.dates.map((date, index) => (
             <rect
               fill="transparent"
@@ -246,6 +265,19 @@ function LegendSwatch({ layer }: { layer: AnalyticsFlowChartLayer }) {
  */
 function isPrimaryLine(layer: AnalyticsFlowChartLayer) {
   return layer.key === 'remaining' || layer.key === 'completed'
+}
+
+/**
+ * Returns whether a value has no drawable neighbor, so a line through it would draw nothing.
+ *
+ * @param values - Values per slot.
+ * @param index - Slot index.
+ * @returns Whether both neighbors are empty or missing.
+ */
+function isIsolatedPoint(values: ReadonlyArray<number | null>, index: number) {
+  const previous = index > 0 ? values[index - 1] : null
+  const next = index < values.length - 1 ? values[index + 1] : null
+  return (previous === null || previous === undefined) && (next === null || next === undefined)
 }
 
 /**

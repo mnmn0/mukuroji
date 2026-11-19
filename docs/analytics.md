@@ -101,7 +101,7 @@ Metric contract の version は snapshot に固定します。同じ入力、met
 | Scope change | 期間中の Project assignment の追加、削除、移動に相当する event 数。 |
 | Velocity | 期間の週数で正規化した completed Work Item 数。 |
 | SLA | Widget の `slaTargetHours` 以下で完了した eligible Work Item の割合。 |
-| Remaining scope | 評価時点で archive されておらず、`completed` / `canceled` ではない Work Item 数。Chart の各 point は burnup 用に `scope`（`canceled` を除く total scope）と `completed` を `segments` で返します。`weighting: "effort"` では残工数（記録された残工数、なければ見積）の合計時間です。 |
+| Remaining scope | 評価時点で archive されておらず、`completed` / `canceled` ではない Work Item 数。Chart の各 point は burnup 用に `scope`（`canceled` を除く total scope）と `completed` を `segments` で返します。`weighting: "effort"` では残工数（記録された残工数、なければ見積）の合計時間で、burnup の `scope` と `completed` は見積の合計時間です（残工数の消化が scope の減少に見えないようにするため）。 |
 | Cumulative flow | 評価時点で archive されていない Work Item 数。Chart の各 point は status category（`completed` / `started` / `unstarted` / `backlog` / `canceled`）ごとの件数を `segments` で返します。 |
 
 Remaining scope と cumulative flow は WIP と同じく、chart の bucket ごとに bucket 末（`asOf` を超えない）時点へ

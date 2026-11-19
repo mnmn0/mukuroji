@@ -761,8 +761,20 @@ describe('Analytics metric engine', () => {
           type: 'chart',
           metric: 'wip',
         },
+        {
+          id: 'burnup',
+          title: 'Burnup',
+          type: 'chart',
+          metric: 'remaining-scope',
+          visualization: 'burnup',
+          weighting: 'effort',
+        },
       ]),
     })
+    expect(snapshot.widgets[2]?.series.at(-1)?.segments).toEqual([
+      { key: 'scope', value: 4 },
+      { key: 'completed', value: 0 },
+    ])
     expect(snapshot.widgets[0]?.value).toBe(1.5)
     expect(snapshot.widgets[0]?.definition.unit).toBe('hours')
     expect(snapshot.widgets[0]?.warnings).toEqual([
@@ -1685,6 +1697,8 @@ describe('Analytics export', () => {
         'scope-change',
         'velocity',
         'sla',
+        'remaining-scope',
+        'cumulative-flow',
       ] as const).map((metric) => ({
         id: metric,
         title: metric,
@@ -1736,6 +1750,8 @@ describe('Analytics export', () => {
       'スコープ変更',
       'ベロシティ',
       'SLA達成率',
+      'Remaining scope',
+      'Cumulative flow',
       '件',
       '時間',
       '件/週',
