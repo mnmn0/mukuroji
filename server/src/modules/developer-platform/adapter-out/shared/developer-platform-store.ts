@@ -890,11 +890,13 @@ abstract class DeveloperPlatformStorageKernel {
   /**
    * Records credential use without changing the row version, so frequent use never
    * makes version-conditioned revocation or rotation fail. Only updates the row while
-   * it still holds the same secret digest. Returns false when the row changed.
+   * it still holds the same secret digest and the last-used time the caller observed,
+   * so concurrent uses write at most once. Returns false when the row changed.
    */
   protected abstract touchCredentialLastUsedAt(
     record: DeveloperPlatformRecord,
     lastUsedAt: string,
+    observedLastUsedAt: string | undefined,
   ): Promise<boolean>
 
   /** Credential domain row と対応 auth row を原子的に削除します。 */
@@ -1891,7 +1893,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
     assertRequiredScopes(current.scopes, request.requiredScopes)
     if (shouldRecordCredentialUse(current.lastUsedAt, now)) {
       // Best effort: a lost race only skips one last-used update.
-      await this.touchCredentialLastUsedAt(record, now.toISOString())
+      await this.touchCredentialLastUsedAt(record, now.toISOString(), current.lastUsedAt)
     }
     return {
       kind: 'api-key',
@@ -2247,7 +2249,7 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
     }
     assertRequiredScopes(token.scopes, request.requiredScopes)
     if (shouldRecordCredentialUse(token.lastUsedAt, now)) {
-      await this.touchCredentialLastUsedAt(record, now.toISOString())
+      await this.touchCredentialLastUsedAt(record, now.toISOString(), token.lastUsedAt)
     }
     return {
       kind: 'oauth-token',
@@ -5264,10 +5266,11 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     return true
   }
 
-  /** Credential domain row と auth row を同じ memory commit で削除します。 */
+  /** Records credential use in memory under the same secret and last-used conditions as DynamoDB. */
   protected async touchCredentialLastUsedAt(
     record: DeveloperPlatformRecord,
     lastUsedAt: string,
+    observedLastUsedAt: string | undefined,
   ) {
     const key = createMemoryKey(record.workspaceId, record.recordKey)
     const current = this.records.get(key)
@@ -5277,12 +5280,14 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
       !current.secretDigest ||
       current.secretDigest !== record.secretDigest ||
       typeof current.value !== 'object' ||
-      current.value === null
+      current.value === null ||
+      (current.value as { lastUsedAt?: unknown }).lastUsedAt !== observedLastUsedAt
     ) return false
     this.records.set(key, { ...current, value: { ...current.value, lastUsedAt } })
     return true
   }
 
+  /** Credential domain row と auth row を同じ memory commit で削除します。 */
   protected async deleteCredentialRecord(
     record: DeveloperPlatformRecord,
     authRecord?: DeveloperPlatformRecord,
@@ -6423,10 +6428,11 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
     }
   }
 
-  /** Credential domain/auth rows を一 transaction で削除します。 */
+  /** Records credential use with a field update conditioned on the secret and the observed last-used time. */
   protected async touchCredentialLastUsedAt(
     record: DeveloperPlatformRecord,
     lastUsedAt: string,
+    observedLastUsedAt: string | undefined,
   ) {
     if (!record.secretDigest) return false
     try {
@@ -6439,7 +6445,10 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
         UpdateExpression: 'SET #value.#lastUsedAt = :lastUsedAt',
         ConditionExpression:
           'attribute_exists(recordKey) AND #entryType = :entryType AND ' +
-          '#secretDigest = :secretDigest',
+          '#secretDigest = :secretDigest AND ' +
+          (observedLastUsedAt === undefined
+            ? 'attribute_not_exists(#value.#lastUsedAt)'
+            : '#value.#lastUsedAt = :observedLastUsedAt'),
         ExpressionAttributeNames: {
           '#value': 'value',
           '#lastUsedAt': 'lastUsedAt',
@@ -6450,6 +6459,9 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
           ':lastUsedAt': lastUsedAt,
           ':entryType': record.entryType,
           ':secretDigest': record.secretDigest,
+          ...(observedLastUsedAt === undefined
+            ? {}
+            : { ':observedLastUsedAt': observedLastUsedAt }),
         },
       }))
       return true
@@ -6459,6 +6471,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
     }
   }
 
+  /** Credential domain/auth rows を一 transaction で削除します。 */
   protected async deleteCredentialRecord(
     record: DeveloperPlatformRecord,
     authRecord?: DeveloperPlatformRecord,

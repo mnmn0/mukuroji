@@ -221,7 +221,9 @@ function createMemoryDocumentClient(conditionalPutFailures = 0) {
         if (
           !current ||
           current.entryType !== values[':entryType'] ||
-          current.secretDigest !== values[':secretDigest']
+          current.secretDigest !== values[':secretDigest'] ||
+          (current.value as { lastUsedAt?: unknown }).lastUsedAt !==
+            values[':observedLastUsedAt']
         ) {
           const error = new Error('condition failed')
           error.name = 'ConditionalCheckFailedException'
@@ -644,6 +646,20 @@ describe('developer credential lifecycle', () => {
 
     await client.authenticateApiKey({ credential: created.secret })
     expect(readApiKeyRow().version).toBe(versionBeforeUse)
+    expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
+      .toBe(START.toISOString())
+
+    // A concurrent use that observed the row before this write does not write again.
+    const touch = (
+      client as unknown as {
+        touchCredentialLastUsedAt(
+          record: Record<string, unknown>,
+          lastUsedAt: string,
+          observedLastUsedAt: string | undefined,
+        ): Promise<boolean>
+      }
+    ).touchCredentialLastUsedAt.bind(client)
+    expect(await touch(readApiKeyRow(), '2000-01-01T00:00:00.000Z', undefined)).toBe(false)
     expect((readApiKeyRow().value as { lastUsedAt?: string }).lastUsedAt)
       .toBe(START.toISOString())
 
