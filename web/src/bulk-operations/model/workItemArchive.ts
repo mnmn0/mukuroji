@@ -62,3 +62,14 @@ export function readWorkItemArchiveOperationFailure(
   return item?.errorMessage ?? ''
 }
 
+
+/**
+ * Reports whether a single-item archive operation failed in a way the retry endpoint can repeat.
+ *
+ * @param operation - Operation returned by applying a one-item archive request.
+ * @returns True when its item failed and the server marked it retryable.
+ */
+export function isWorkItemArchiveOperationRetryable(operation: BulkOperation): boolean {
+  const item = operation.items[0]
+  return item?.status === 'failed' && item.retryable
+}

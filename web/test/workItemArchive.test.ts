@@ -92,6 +92,22 @@ describe('single Work Item archive', () => {
 
     await expect(runArchive(true)).rejects.toThrow('fallback')
   })
+
+  test('retries a retryable failed item through the retry endpoint', async () => {
+    const requests = installFetchSequence([
+      { canApply: true, items: [], operationToken: 'preview-token' },
+      { id: 'bulk_1', items: [{ status: 'failed', retryable: true, errorMessage: 'Temporary failure.' }] },
+      { id: 'bulk_1', items: [{ status: 'succeeded', retryable: false }] },
+    ])
+
+    await runArchive(true)
+
+    expect(requests.map((request) => request.url)).toEqual([
+      '/api/bulk-operations/preview',
+      '/api/bulk-operations',
+      '/api/bulk-operations/bulk_1/retry',
+    ])
+  })
 })
 
 describe('archived Work Item list', () => {

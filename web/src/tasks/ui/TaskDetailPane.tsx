@@ -1584,7 +1584,7 @@ export function TaskDetailPane({
               <WorkItemArchiveButton
                 archived={issue.archivedAt !== undefined}
                 disabled={isWorkItemMutationPending || isBulkOperationPending}
-                key={`${issue.teamId}:${issue.id}:${issue.revision}`}
+                key={`${issue.teamId}:${issue.id}`}
                 onArchiveChange={(archived) => onArchiveIssue(issue, archived)}
                 t={t}
               />

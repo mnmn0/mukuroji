@@ -1,7 +1,8 @@
 import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
-import { applyBulkOperation, previewBulkOperation } from '../api/operations'
+import { applyBulkOperation, previewBulkOperation, retryBulkOperation } from '../api/operations'
 import {
   createWorkItemArchiveRequest,
+  isWorkItemArchiveOperationRetryable,
   readWorkItemArchiveOperationFailure,
   readWorkItemArchivePreviewFailure,
   type WorkItemArchiveTarget,
@@ -27,7 +28,8 @@ export type WorkItemArchiveMutationInput = {
  * Archives or restores one Work Item through a one-item bulk archive operation.
  *
  * The operation is previewed first, so a stale revision or a missing permission is reported
- * without changing anything, and then applied with the preview token.
+ * without changing anything, and then applied with the preview token. A retryable item failure is
+ * retried once through the retry endpoint, which also covers a failure kept from an earlier click.
  *
  * @param input - Work Item, direction, and request context.
  * @returns Resolves once the Work Item was archived or restored.
@@ -54,7 +56,16 @@ export async function applyWorkItemArchive(input: WorkItemArchiveMutationInput):
       context,
     ),
   )
-  const operationFailure = readWorkItemArchiveOperationFailure(operation)
+  // The same request maps to the same stored operation, so applying it again after a transient
+  // failure returns that failed operation unchanged. The retry endpoint re-runs its failed item.
+  const settledOperation = isWorkItemArchiveOperationRetryable(operation)
+    ? await input.runner.run(
+        `${operationKey}:retry:${operation.id}`,
+        operation.id,
+        (context) => retryBulkOperation(input.accessToken, operation.id, context),
+      )
+    : operation
+  const operationFailure = readWorkItemArchiveOperationFailure(settledOperation)
   if (operationFailure !== undefined) {
     throw new Error(operationFailure || input.fallbackErrorMessage)
   }
