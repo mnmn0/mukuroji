@@ -613,7 +613,13 @@ function createFileProofingStub(
     async getApprovalSummaries() {
       return new Map()
     },
-    // Reads through the stub's summary, so a test that overrides it also drives the fence.
+    /**
+     * Reads approval counts through the stub's summary, so a test that overrides the summary also
+     * drives the fence.
+     *
+     * @param scope - Work Item scope.
+     * @returns The counts and a placeholder condition check on the summary row.
+     */
     async readApprovalSummaryFence(scope) {
       return {
         summary: await stub.getApprovalSummary(scope),
