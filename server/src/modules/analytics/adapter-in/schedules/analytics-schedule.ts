@@ -22,6 +22,7 @@ import {
   createAnalyticsCsv,
   createAnalyticsPdf,
   createAnalyticsSnapshot,
+  selectAnalyticsWorkItemsRequiringHistory,
 } from '../../analytics'
 import type { WorkspaceMember } from '../../../workspace-access'
 import { isRecord } from '../../../../infrastructure/runtime/value-guards'
@@ -765,7 +766,7 @@ async function readRecipientAuthorizedData(
     const events = await readRecipientAuditEvents(
       report.workspaceId,
       historyReadAt,
-      workItems,
+      selectAnalyticsWorkItemsRequiringHistory(workItems, report.filter.period.from),
       auditClient,
     )
     const verifiedWorkItems = await readRecipientWorkItems(
@@ -781,7 +782,10 @@ async function readRecipientAuthorizedData(
         createAnalyticsScheduleWorkItemsFingerprint(verifiedWorkItems)
     ) {
       assertAnalyticsScheduleAuditCoverage(
-        verifiedWorkItems,
+        selectAnalyticsWorkItemsRequiringHistory(
+          verifiedWorkItems,
+          report.filter.period.from,
+        ),
         events,
       )
       return { workItems: verifiedWorkItems, events }
