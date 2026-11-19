@@ -124,6 +124,7 @@ export function IssueDetailPane({
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
+  onDuplicateIssue,
   onUpdateIssue,
   onUpdateScheduleDependency,
   planningSnapshot,
@@ -168,6 +169,8 @@ export function IssueDetailPane({
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
   /** Deletes a canonical schedule dependency. */
   onDeleteScheduleDependency?: TeamIssueScreenProps['onDeleteScheduleDependency']
+  /** Opens the create form with a draft copied from this Work Item. */
+  onDuplicateIssue?: (issue: TeamIssue) => void
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
   /** Updates a canonical schedule dependency. */
   onUpdateScheduleDependency?: TeamIssueScreenProps['onUpdateScheduleDependency']
@@ -216,6 +219,7 @@ export function IssueDetailPane({
       onCreateScheduleDependency={onCreateScheduleDependency}
       onDeleteRelation={onDeleteRelation}
       onDeleteScheduleDependency={onDeleteScheduleDependency}
+      onDuplicateIssue={onDuplicateIssue}
       onUpdateIssue={onUpdateIssue}
       onUpdateScheduleDependency={onUpdateScheduleDependency}
       planningSnapshot={planningSnapshot}
@@ -255,6 +259,7 @@ function IssueDetailContent({
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
+  onDuplicateIssue,
   onUpdateIssue,
   onUpdateScheduleDependency,
   planningSnapshot,
@@ -316,6 +321,8 @@ function IssueDetailContent({
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
   /** Deletes a canonical schedule dependency. */
   onDeleteScheduleDependency?: TeamIssueScreenProps['onDeleteScheduleDependency']
+  /** Opens the create form with a draft copied from this Work Item. */
+  onDuplicateIssue?: (issue: TeamIssue) => void
   /** Issue 更新 callback です。 */
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
   /** Updates a canonical schedule dependency. */
@@ -1189,7 +1196,20 @@ function IssueDetailContent({
               </div>
             ) : null}
           </div>
-          <IssuePriorityBadge priority={issue.priority} t={t} />
+          <div className="flex shrink-0 items-center gap-2">
+            {onDuplicateIssue ? (
+              <button
+                className="workbench-button-secondary h-8 px-3 text-xs"
+                data-testid="team-issue-duplicate"
+                disabled={isAiSummaryOperationPending}
+                onClick={() => onDuplicateIssue(issue)}
+                type="button"
+              >
+                {t('issues.duplicate.action')}
+              </button>
+            ) : null}
+            <IssuePriorityBadge priority={issue.priority} t={t} />
+          </div>
         </div>
         <div className="grid min-w-0 gap-4">
           {!hasOverviewSection ? renderWorkItemTypeControl() : null}
