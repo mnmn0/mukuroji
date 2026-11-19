@@ -27,6 +27,8 @@ agent に取得・着手・報告・完了させるための手順です。接�
    接続先（`MUKUROJI_MCP_URL`）と自分の member ID（`MUKUROJI_MCP_ASSIGNEE_ID`）を埋めた設定例が表示されるので、
    クライアントの設定に貼り付ける。
 4. **接続を確認**: クライアントを再起動し、agent から `get_configuration` を呼べることを確認する。
+   `mcp.serverCompatibility.status` が `compatible` 以外なら、`message` に従って Mukuroji か `mcp.mjs` を更新する。
+   `node mcp.mjs --version` で手元の `mcp.mjs` の version を確認できます。
 
 token の期限が近づいたら「発行済みの token」から **期限を更新して再発行**、不要になったら **失効** します。
 

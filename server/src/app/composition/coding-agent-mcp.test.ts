@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { Client } from '@modelcontextprotocol/client'
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio'
+import { CODING_AGENT_MCP_VERSION } from '../../modules/coding-agent-mcp/application/compatibility'
 import { composeCodingAgentMcp, deriveAgentInstanceId } from './coding-agent-mcp'
 
 /** Public run fields kept by the fake API, plus the raw instance ID only the fake sees. */
@@ -50,6 +51,11 @@ function startFakeApi() {
     return undefined
   }
   const api = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
+    // Liveness is public, so the MCP must read it without the API credential.
+    if (new URL(request.url).pathname === '/api/health') {
+      if (request.headers.get('Authorization') !== null) return Response.json({}, { status: 400 })
+      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 1, minimumApiRevision: 1 } })
+    }
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     const url = new URL(request.url)
     if (url.searchParams.get('teamId') !== 'team') return Response.json({}, { status: 400 })
@@ -224,7 +230,9 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     expect((await client.listTools()).tools).toHaveLength(18)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
+      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 1, serverCompatibility: { status: 'compatible', server: { apiRevision: 1, minimumApiRevision: 1 } } },
     } })
+    expect(client.getServerVersion()).toMatchObject({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'start', task: { id: 'task' }, ownRuns: [] } })
     const startKey = crypto.randomUUID()
     const started = await call(client, 'start_task', { taskId: 'task', expectedRevision: 1, workflowStatusId: 'coding', idempotencyKey: startKey })
@@ -313,9 +321,20 @@ test('the distributable Node bundle serves the same tools over stdio', async () 
     // The bundle is published for Node, so only a Node run proves it; Bun would hide Node regressions.
     const node = Bun.which('node')
     if (!node) throw new Error('Node.js is required to test the distributable MCP bundle.')
+    // The checksum file verifies both published files in `sha256sum -c` format.
+    const checksums = await Bun.file(join(outdir, 'mcp.mjs.sha256')).text()
+    for (const file of ['mcp.mjs', 'mcp.mjs.LICENSES.txt']) {
+      const digest = new Bun.CryptoHasher('sha256').update(await Bun.file(join(outdir, file)).arrayBuffer()).digest('hex')
+      expect(checksums).toContain(`${digest}  ${file}\n`)
+    }
+    const version = Bun.spawn([node, join(outdir, 'mcp.mjs'), '--version'], { stdout: 'pipe', stderr: 'pipe', env: {} })
+    expect(await version.exited).toBe(0)
+    expect((await new Response(version.stdout).text()).trim()).toBe(CODING_AGENT_MCP_VERSION)
     client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'), node)
     expect((await client.listTools()).tools).toHaveLength(18)
-    expect((await call(client, 'get_configuration')).content).toMatchObject({ data: { runtime: 'codex' } })
+    expect((await call(client, 'get_configuration')).content).toMatchObject({
+      data: { runtime: 'codex', mcp: { version: CODING_AGENT_MCP_VERSION, serverCompatibility: { status: 'compatible' } } },
+    })
   } finally {
     await client?.close()
     await fake.api.stop(true)

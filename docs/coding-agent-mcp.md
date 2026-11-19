@@ -83,12 +83,37 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 
 リポジトリを手元に置かずに使う場合は、GitHub Releaseに添付された `mcp.mjs`、`mcp.mjs.LICENSES.txt`、
 `mcp.mjs.sha256` を同じディレクトリに取得し、`sha256sum -c mcp.mjs.sha256` で照合してから使います。
+GitHub CLIがあれば、`gh attestation verify mcp.mjs --repo mnmn0/mukuroji` でこのリポジトリのrelease
+workflowがbuildしたことも確認できます（provenanceはReleaseにも `mcp.mjs.sigstore.json` として添付します）。
 `mcp.mjs` は依存を同梱した単一ファイルで、Node.js 22以上またはBunで起動できます
 （`node /absolute/path/to/mcp.mjs`）。同梱した第三者パッケージのライセンスは `mcp.mjs.LICENSES.txt` に
-あります。リポジトリから作る場合は `bun run mcp:build` で `server/dist/` に両ファイルを生成します。
-Releaseへ添付するときは、build後に `server/dist` で
-`sha256sum mcp.mjs mcp.mjs.LICENSES.txt > mcp.mjs.sha256` を実行し、3ファイルを添付します。
+あります。リポジトリから作る場合は `bun run mcp:build` で `server/dist/` に3ファイルを生成します。
 設定変更・token更新時はMCPプロセスを再起動してください。
+
+### Versionとserverとの互換性
+
+- `node mcp.mjs --version` はMCPのversionだけを表示して終了します。起動時にはversionとMCP API revisionを
+  stderrに1行出します（stdoutはMCPのprotocolに使います）。MCPの `serverInfo.version` も同じversionです。
+- serverは `GET /api/health` の `codingAgentMcp` で、受け付けるMCP API revisionの範囲
+  （`minimumApiRevision` から `apiRevision` まで）を返します。MCPは起動時に認証なしでこれを読み、
+  自分のrevisionが範囲外なら、serverとMCPのどちらを更新すべきかをstderrに警告します。
+  範囲を返さない古いserverや、読めなかった場合も警告します。起動は止めません。
+- `get_configuration` は `mcp` に `version`、`apiRevision`、`serverCompatibility`
+  （`status` が `compatible` / `server_outdated` / `mcp_outdated` / `unknown`、`message`、serverが返した範囲）を返します。
+  agentは `compatible` 以外のときに `message` を利用者へ伝えます。
+- revisionの値は `contracts/src/coding-agent-mcp.ts` が持ち、MCPとserverのbuildが同じ値を使います。
+  上げ方と変更履歴は [CHANGELOG.md](../CHANGELOG.md) に従います。
+
+### Releaseの作り方
+
+1. MCPのtool、引数、結果、またはMCPが呼ぶPublic APIを変えるPRでは、`CHANGELOG.md` の `## [Unreleased]` に書きます。
+2. Releaseするときは、`server/src/modules/coding-agent-mcp/application/compatibility.ts` の `CODING_AGENT_MCP_VERSION` を上げ、
+   `CHANGELOG.md` の `## [Unreleased]` を `## [<version>] - <YYYY-MM-DD>` に移すPRをmainへマージします。
+3. mainのそのcommitに `mcp-v<version>` のtagを付けてpushします。
+   `.github/workflows/mcp-release.yml`（末尾の付録）がtagを検証し、build、provenanceの署名、
+   Releaseの作成と4ファイルの添付を行います。Release noteは `bun run mcp:release-notes -- --tag mcp-v<version>` と同じ内容です。
+
+workflowのtrust rootと権限は [operational readiness](operational-readiness.md) のMCP releaseの行に記録しています。
 
 ### クライアント別の設定例
 
@@ -235,7 +260,7 @@ Webのタスク一覧・詳細から状態とコメントを確認できます�
 ## 検証
 
 ```sh
-bun test server/src/modules/coding-agent-mcp server/src/app/composition/coding-agent-mcp.test.ts
+bun test server/src/modules/coding-agent-mcp server/src/app/composition/coding-agent-mcp.test.ts server/scripts/coding-agent-mcp
 bun run server:test
 bun run typecheck:server
 bun run typecheck:contracts
@@ -247,3 +272,104 @@ bun run mcp:build
 
 stdioの結合テストはloopback HTTPサーバーと公式MCPクライアントを起動し、旧プロトコル互換・新プロトコル、ツール発見、着手、進捗記録、完了、read-only設定を検証します。実際のAWS・本番APIキーは使いません。
 MCP SDKの利用方法は[公式TypeScript SDK](https://ts.sdk.modelcontextprotocol.io/v2/get-started/first-server)に従います。
+
+## 付録: release workflow
+
+GitHub Appからは `.github/workflows/` を更新できないため、workflowを編集できるmaintainerが次の内容で
+`.github/workflows/mcp-release.yml` を追加します。tag `mcp-v*` のpushだけで動き、workflow全体の権限は
+空にして、jobに必要な3つ（Releaseの作成、Sigstoreの署名、attestationの保存）だけを与えます。
+tagがmainのcommitを指していないとき、tagと `CODING_AGENT_MCP_VERSION` が一致しないとき、
+`CHANGELOG.md` に該当sectionがないときは、何も公開せずに失敗します。
+
+```yaml
+name: MCP release
+
+on:
+  push:
+    tags:
+      - 'mcp-v*'
+
+permissions: {}
+
+concurrency:
+  group: mcp-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: publish-mcp-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: mcp-release
+      deployment: false
+    permissions:
+      # Create the GitHub Release and upload its assets.
+      contents: write
+      # Sign the provenance with a short-lived Sigstore certificate.
+      id-token: write
+      # Store the provenance in the repository's attestations.
+      attestations: write
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require a tagged commit on main
+        env:
+          TAG_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$TAG_SHA" refs/remotes/origin/main; then
+            echo "::error::${GITHUB_REF_NAME} does not point at a commit on main."
+            exit 1
+          fi
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check the tag and build the release notes from CHANGELOG.md
+        run: bun run mcp:release-notes -- --tag "$GITHUB_REF_NAME" > "$RUNNER_TEMP/release-notes.md"
+
+      - name: Build mcp.mjs, its licenses, and checksums
+        run: |
+          set -euo pipefail
+          bun run mcp:build
+          cd server/dist
+          sha256sum -c mcp.mjs.sha256
+
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            server/dist/mcp.mjs
+            server/dist/mcp.mjs.LICENSES.txt
+
+      - name: Publish the GitHub Release
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cp "$BUNDLE_PATH" server/dist/mcp.mjs.sigstore.json
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "mukuroji MCP ${GITHUB_REF_NAME#mcp-v}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            server/dist/mcp.mjs \
+            server/dist/mcp.mjs.LICENSES.txt \
+            server/dist/mcp.mjs.sha256 \
+            server/dist/mcp.mjs.sigstore.json
+```
+
+追加後は、repositoryのrulesetで `mcp-v*` tagの作成をmaintainerに限ると、release workflowを動かせる人も限られます。
+`mcp-release` environmentに承認者を設定すると、Releaseの公開前に承認を挟めます。
