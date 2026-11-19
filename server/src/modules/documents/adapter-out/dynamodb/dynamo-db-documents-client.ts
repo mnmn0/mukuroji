@@ -90,6 +90,7 @@ import type {
   DocumentApplicationClient,
 } from '../../application/ports/document-ports'
 import {
+  assertElementLinkCountsWithinLimit,
   collectDocumentRelationTargets,
   normalizeDocumentPermissionForActor,
   reduceDocumentOperations,
@@ -101,6 +102,7 @@ import {
 } from '../../domain/document-content'
 import {
   DOCUMENT_BACKLINK_MAX_PAGE_LIMIT,
+  DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_COMMENT_MAX_LENGTH,
   DOCUMENT_COMMENT_MAX_PAGE_LIMIT,
   DOCUMENT_MAX_ITEM_BYTES,
@@ -1421,6 +1423,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         }
     }
     validateDocumentPayload(document)
+    assertElementLinkCountsWithinLimit(undefined, document)
     const requestFingerprint =
       input.idempotencyFingerprint ??
       fingerprint({
@@ -5207,6 +5210,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       TransactWriteCommandInput['TransactItems']
     >
   > {
+    assertBacklinkChangeCount(diff)
     const fenceActions =
       await mapWithConcurrency(
         coalesceWorkItemBacklinkTargetDeltas(
@@ -7411,6 +7415,29 @@ function backlinkDiffActions(
       })),
     ...backlinkPutActions(tableName, workspaceId, documentId, diff.added),
   ]
+}
+
+/**
+ * Rejects a relation diff that cannot be indexed in one Document transaction.
+ *
+ * @param diff - Backlink rows added and removed by one Document mutation.
+ * @throws DocumentError when the mutation changes too many links at once.
+ */
+function assertBacklinkChangeCount(
+  diff: DocumentRelationDiff,
+): void {
+  const changeCount =
+    diff.added.length + diff.removed.length
+  if (changeCount <= DOCUMENT_MAX_BACKLINK_CHANGE_COUNT) return
+  throw new DocumentError(
+    413,
+    'DocumentBacklinkChangeLimitExceeded',
+    `A Document change can add or remove at most ${DOCUMENT_MAX_BACKLINK_CHANGE_COUNT} links at once.`,
+    {
+      changeCount,
+      maxChangeCount: DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
+    },
+  )
 }
 
 function assertDynamoItemSize(item: unknown): void {

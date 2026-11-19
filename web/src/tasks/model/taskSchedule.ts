@@ -64,7 +64,7 @@ export const taskScheduleModeLabelKeys = {
 } as const
 
 /**
- * Creates an independent copy of the default UTC Monday-to-Friday policy.
+ * Creates an independent copy of the default Workspace-time-zone Monday-to-Friday policy.
  *
  * @returns A mutable policy copy that cannot mutate the shared contract constant.
  */
@@ -112,7 +112,7 @@ export function createDefaultDueDateTaskSchedule(
 }
 
 /**
- * Creates an inclusive date-range task under the UTC Monday-to-Friday draft policy.
+ * Creates an inclusive date-range task under the default Monday-to-Friday draft policy.
  *
  * The returned duration is only a client draft. Custom timezone and holiday rules remain a
  * server-side preview and validation responsibility.

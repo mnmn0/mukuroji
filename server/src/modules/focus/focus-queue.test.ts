@@ -523,7 +523,11 @@ describe('Focus queue projection', () => {
       goalIds: [],
       createdAt: '2026-08-01T00:00:00.000Z',
     }], [cycle])
-    const queue = projectQueue({ workItems: [workItem], planning })
+    const queue = projectQueue({
+      workItems: [workItem],
+      planning,
+      userPolicy: createPolicy('user-policy', { type: 'user' }, 1, { slaAnchor: 'created' }),
+    })
     const item = findFocusItem(queue, workItem.id)
 
     expect(item.signals.map((signal) => signal.type)).toEqual(['sla', 'cycle'])
@@ -555,7 +559,7 @@ describe('Focus queue projection', () => {
       'user-policy',
       { type: 'user' },
       1,
-      { weights: { mention: 45 } },
+      { weights: { mention: 45 }, slaAnchor: 'created' },
     )
     const initial = findFocusItem(projectQueue({
       workItems: [workItem],
@@ -575,7 +579,7 @@ describe('Focus queue projection', () => {
       'user-policy',
       { type: 'user' },
       2,
-      { weights: { mention: 46 } },
+      { weights: { mention: 46 }, slaAnchor: 'created' },
     )
     const revised = findFocusItem(projectQueue({
       workItems: [workItem],
@@ -587,6 +591,246 @@ describe('Focus queue projection', () => {
     expect(secondSla?.source.id).toBe(firstSla.source.id)
     expect(revised.section).toBe('snoozed')
     expect(revised.snoozedUntil).toBe(snooze.snoozedUntil)
+  })
+
+  test('measures SLA from the planned start date so planned future work carries no SLA', () => {
+    const tokyoPolicy = {
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      holidays: [],
+    } satisfies CanonicalWorkItem['schedule']['calendarPolicy']
+    const longAgo = '2026-07-01T00:00:00.000Z'
+    const future: CanonicalWorkItem = {
+      ...createWorkItem('planned-future', 'viewer', 'medium', 'unstarted', '', 1, longAgo, longAgo),
+      dueDate: '2026-09-30',
+      schedule: {
+        mode: 'date-range',
+        startDate: '2026-09-01',
+        endDate: '2026-09-30',
+        durationDays: 22,
+        calendarPolicy: tokyoPolicy,
+      },
+    }
+    const pastStart: CanonicalWorkItem = {
+      ...future,
+      id: 'planned-past',
+      title: 'planned-past',
+      schedule: { ...future.schedule, mode: 'date-range', startDate: '2026-08-05', endDate: '2026-09-30', durationDays: 41 },
+    }
+    const notStartedDueOnly = createWorkItem(
+      'due-only',
+      'viewer',
+      'medium',
+      'unstarted',
+      '2026-09-30',
+      1,
+      longAgo,
+      longAgo,
+    )
+    const startedDueOnly: CanonicalWorkItem = {
+      ...createWorkItem('started-due-only', 'viewer', 'medium', 'started', '2026-09-30', 1, longAgo, longAgo),
+      actualStartDate: '2026-08-06',
+    }
+    const queue = projectQueue({
+      workItems: [future, pastStart, notStartedDueOnly, startedDueOnly],
+    })
+    const slaOf = (workItemId: string) => findOptionalFocusItem(queue, workItemId)?.signals
+      .find((signal) => signal.type === 'sla')
+
+    expect(slaOf(future.id)).toBeUndefined()
+    expect(slaOf(notStartedDueOnly.id)).toBeUndefined()
+    // 2026-08-05 00:00 in Asia/Tokyo is 2026-08-04T15:00Z; plus the default 72 hours.
+    expect(slaOf(pastStart.id)?.source.occurredAt).toBe('2026-08-07T15:00:00.000Z')
+    // Without a planned start the actual start date is used.
+    expect(slaOf(startedDueOnly.id)?.source.occurredAt).toBe('2026-08-09T00:00:00.000Z')
+
+    const createdAnchorQueue = projectQueue({
+      workItems: [future],
+      userPolicy: createPolicy('user-policy', { type: 'user' }, 1, { slaAnchor: 'created' }),
+    })
+    expect(findFocusItem(createdAnchorQueue, future.id).signals.map((signal) => signal.type))
+      .toEqual(['sla'])
+  })
+
+  test('limits SLA to targeted Work Item Types and lets a Team turn it off', () => {
+    const createdAt = '2026-08-01T00:00:00.000Z'
+    const request: CanonicalWorkItem = {
+      ...createWorkItem('request-item', 'viewer', 'medium', 'started', '', 1, createdAt, createdAt),
+      workItemTypeId: 'request',
+    }
+    const task = createWorkItem('legacy-task', 'viewer', 'medium', 'started', '', 1, createdAt, createdAt)
+    const teamPolicy = createPolicy(
+      'team-policy',
+      { type: 'team', teamId: 'team-a' },
+      1,
+      { slaAnchor: 'created', slaWorkItemTypeIds: ['request'] },
+    )
+    const queue = projectQueue({ workItems: [request, task], teamPolicies: [teamPolicy] })
+
+    expect(findFocusItem(queue, request.id).signals.map((signal) => signal.type)).toEqual(['sla'])
+    expect(findOptionalFocusItem(queue, task.id)).toBeUndefined()
+    expect(queue.effectivePolicies[0]?.settings).toMatchObject({
+      slaEnabled: true,
+      slaAnchor: 'created',
+      slaWorkItemTypeIds: ['request'],
+    })
+
+    const defaultTypeQueue = projectQueue({
+      workItems: [request, task],
+      teamPolicies: [createPolicy(
+        'team-policy',
+        { type: 'team', teamId: 'team-a' },
+        2,
+        { slaAnchor: 'created', slaWorkItemTypeIds: ['default'] },
+      )],
+    })
+    expect(findOptionalFocusItem(defaultTypeQueue, request.id)).toBeUndefined()
+    expect(findFocusItem(defaultTypeQueue, task.id).signals.map((signal) => signal.type))
+      .toEqual(['sla'])
+
+    const disabledQueue = projectQueue({
+      workItems: [request, task],
+      teamPolicies: [createPolicy(
+        'team-policy',
+        { type: 'team', teamId: 'team-a' },
+        3,
+        { slaAnchor: 'created', slaEnabled: false },
+      )],
+    })
+    expect(findOptionalFocusItem(disabledQueue, request.id)).toBeUndefined()
+    expect(findOptionalFocusItem(disabledQueue, task.id)).toBeUndefined()
+  })
+
+  test('shows health update deadlines that are near or past to the update owner only', () => {
+    const initiative: PlanningSnapshot['entities'][number] = {
+      id: 'initiative-1',
+      type: 'initiative',
+      title: 'Launch initiative',
+      ownerMemberKey: 'viewer',
+      status: 'active',
+      health: 'on-track',
+      rollupHealth: 'on-track',
+      risk: 'none',
+      progressMode: 'automatic',
+      progress: 0,
+      linkedWorkItemCount: 0,
+      baseline: { startDate: '2026-08-01', endDate: '2026-09-30' },
+      forecast: { startDate: '2026-08-01', endDate: '2026-09-30' },
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-01T00:00:00.000Z',
+    }
+    const cadence = (
+      nextDueAt: string,
+      updateOwnerMemberKey = 'Viewer',
+    ): NonNullable<PlanningSnapshot['updateTargets'][number]['cadence']> => ({
+      updateOwnerMemberKey,
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt,
+      reminderHoursBefore: 24,
+    })
+    const planning: PlanningSnapshot = {
+      ...createPlanningSnapshot([], [], [], [initiative]),
+      updateTargets: [
+        {
+          target: { type: 'project', teamId: 'team-a', projectId: 'project-due-soon' },
+          cadence: cadence('2026-08-10T09:00:00.000Z'),
+          updateState: 'stale',
+          latestVersion: 1,
+          updatedAt: '2026-08-01T00:00:00.000Z',
+        },
+        {
+          target: { type: 'initiative', entityId: initiative.id },
+          cadence: cadence('2026-08-09T09:00:00.000Z'),
+          updateState: 'overdue',
+          latestVersion: 0,
+          updatedAt: '2026-08-01T00:00:00.000Z',
+        },
+        {
+          target: { type: 'project', teamId: 'team-a', projectId: 'project-current' },
+          cadence: cadence('2026-08-14T09:00:00.000Z'),
+          updateState: 'current',
+          latestVersion: 1,
+          updatedAt: '2026-08-01T00:00:00.000Z',
+        },
+        {
+          target: { type: 'project', teamId: 'team-a', projectId: 'project-other-owner' },
+          cadence: cadence('2026-08-09T09:00:00.000Z', 'someone-else'),
+          updateState: 'overdue',
+          latestVersion: 0,
+          updatedAt: '2026-08-01T00:00:00.000Z',
+        },
+        {
+          target: { type: 'project', teamId: 'team-a', projectId: 'project-archived' },
+          cadence: cadence('2026-08-09T09:00:00.000Z'),
+          updateState: 'overdue',
+          latestVersion: 0,
+          archivedAt: '2026-08-02T00:00:00.000Z',
+          updatedAt: '2026-08-02T00:00:00.000Z',
+        },
+      ],
+    }
+    const queue = createFocusQueue({
+      now: '2026-08-09T12:00:00.000Z',
+      viewerMemberKey: 'viewer',
+      workItems: [],
+      planning,
+      projectTitlesByKey: new Map([['team-a\0project-due-soon', 'Due soon project']]),
+      reviewerApprovals: [],
+      notifications: [],
+      teamPolicies: [],
+      snoozeRecords: [],
+      canApproveByWorkItemKey: {},
+      canWriteByWorkItemKey: {},
+      canWatchByWorkItemKey: {},
+      watchingByWorkItemKey: {},
+    })
+
+    expect(queue.updateDeadlines).toEqual([
+      {
+        id: 'update-due:initiative:initiative-1:2026-08-09T09%3A00%3A00.000Z',
+        target: { type: 'initiative', entityId: 'initiative-1' },
+        title: 'Launch initiative',
+        state: 'overdue',
+        dueAt: '2026-08-09T09:00:00.000Z',
+        deepLink: '/planning/portfolio?targetType=initiative&entityId=initiative-1',
+      },
+      {
+        id: 'update-due:project:team-a:project-due-soon:2026-08-10T09%3A00%3A00.000Z',
+        target: { type: 'project', teamId: 'team-a', projectId: 'project-due-soon' },
+        title: 'Due soon project',
+        state: 'due-soon',
+        dueAt: '2026-08-10T09:00:00.000Z',
+        deepLink: '/planning/portfolio?targetType=project&teamId=team-a&projectId=project-due-soon',
+      },
+    ])
+
+    // Publishing an update moves the cadence to its next deadline, which clears the entry.
+    const published = createFocusQueue({
+      now: '2026-08-09T12:00:00.000Z',
+      viewerMemberKey: 'viewer',
+      workItems: [],
+      planning: {
+        ...planning,
+        updateTargets: planning.updateTargets.map((summary) =>
+          summary.target.type === 'initiative'
+            ? { ...summary, cadence: cadence('2026-08-16T09:00:00.000Z'), latestVersion: 1 }
+            : summary
+        ),
+      },
+      reviewerApprovals: [],
+      notifications: [],
+      teamPolicies: [],
+      snoozeRecords: [],
+      canApproveByWorkItemKey: {},
+      canWriteByWorkItemKey: {},
+      canWatchByWorkItemKey: {},
+      watchingByWorkItemKey: {},
+    })
+    expect(published.updateDeadlines?.map((deadline) => deadline.target)).toEqual([
+      { type: 'project', teamId: 'team-a', projectId: 'project-due-soon' },
+    ])
+    expect(published.updateDeadlines?.[0]?.title).toBeUndefined()
   })
 
   test('applies Team overrides before user overrides and preserves deterministic Team order', () => {

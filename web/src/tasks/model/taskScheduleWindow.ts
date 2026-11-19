@@ -1,4 +1,5 @@
 import {
+  toWorkspaceLocalDate,
   workItemScheduleOverlapsWindow,
   type WorkItemSchedule,
 } from '@mukuroji/contracts'
@@ -18,13 +19,23 @@ export type TaskScheduleWindow = {
 export type TaskScheduleWindowLayout = 'calendar' | 'gantt'
 
 /**
- * Returns the viewer's current local month.
+ * Returns today's date in the Workspace time zone, the "today" of the Gantt and Calendar.
+ *
+ * @param now - Instant to read the date from.
+ * @returns The date in `YYYY-MM-DD` form.
+ */
+export function getCurrentTaskDate(now: Date = new Date()): string {
+  return toWorkspaceLocalDate(now)
+}
+
+/**
+ * Returns the current month in the Workspace time zone.
  *
  * @param now - Instant to read the month from.
  * @returns The month in `YYYY-MM` form.
  */
 export function getCurrentTaskMonth(now: Date = new Date()): string {
-  return formatTaskMonth(now.getFullYear(), now.getMonth() + 1)
+  return getCurrentTaskDate(now).slice(0, 7)
 }
 
 /**

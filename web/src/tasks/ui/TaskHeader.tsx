@@ -27,6 +27,8 @@ export type TaskHeaderProps = {
   onMobileSidebarOpen: () => void
   /** Adds or removes the displayed Project from quick access. */
   onProjectQuickAccessToggle?: () => void
+  /** Opens the Project overview, when the Project's Team is known. */
+  onOpenProjectOverview?: () => void
   /** Selects a task view and returns false when a local guard rejects it. */
   onTabChange: (tab: TaskTab) => boolean | void
   /** Project name shown in the breadcrumb and heading. */
@@ -54,6 +56,7 @@ export function TaskHeader({
   isCreateTaskOpen,
   onCreateTaskOpenChange,
   onMobileSidebarOpen,
+  onOpenProjectOverview,
   onProjectQuickAccessToggle,
   onTabChange,
   projectName,
@@ -179,6 +182,17 @@ export function TaskHeader({
       </div>
 
       <div className="flex items-center justify-between gap-4 overflow-x-auto border-t border-[var(--workbench-border)] px-[clamp(18px,2.5vw,30px)]">
+        <div className="flex min-w-max items-center gap-0">
+        {onOpenProjectOverview ? (
+          <button
+            className="inline-flex h-11 items-center gap-2 border-r border-[var(--workbench-border)] px-3.5 text-app-caption font-semibold text-[var(--workbench-muted)] transition hover:text-[var(--workbench-text)]"
+            data-testid="task-header-project-overview"
+            onClick={onOpenProjectOverview}
+            type="button"
+          >
+            {t('projects.overview.tab')}
+          </button>
+        ) : null}
         <div aria-label={t('tasks.tabs.aria')} className="flex min-w-max items-center gap-0" role="tablist">
           {taskTabs.map((tab) => (
             <button
@@ -207,6 +221,7 @@ export function TaskHeader({
               ) : null}
             </button>
           ))}
+        </div>
         </div>
         <ProjectSummary summary={taskSummary} t={t} />
       </div>

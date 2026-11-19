@@ -10,6 +10,11 @@
 # CloudFront's CSP allows any bucket on the regional S3 endpoint, so the
 # script adds a `<meta>` CSP to `index.html` that names the stack's own file
 # bucket and realtime API; the browser enforces both policies.
+#
+# The build embeds the commit SHA so the Help screen can show which build is
+# running. A copy of every non-asset file is also kept under
+# `releases/<commit SHA>/`, so `scripts/rollback-web.sh` can restore an earlier
+# release without rebuilding it.
 set -euo pipefail
 
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
@@ -20,6 +25,12 @@ fi
 STACK_NAME="${MUKUROJI_STACK_NAME:-Mukuroji}"
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIRECTORY="$REPOSITORY_ROOT/web/dist"
+
+if [[ -n "$(git -C "$REPOSITORY_ROOT" status --porcelain)" ]]; then
+  echo "Commit or stash local changes first: a release must match its commit SHA." >&2
+  exit 1
+fi
+WEB_BUILD_COMMIT_SHA="$(git -C "$REPOSITORY_ROOT" rev-parse HEAD)"
 
 stack_output() {
   local key="$1"
@@ -50,6 +61,7 @@ REALTIME_WEBSOCKET_URL="$(stack_output RealtimeWebSocketUrl)"
     VITE_PROJECTS_API_BASE_URL=/api \
     VITE_WORKSPACE_API_BASE_URL=/api \
     VITE_ENTERPRISE_IDENTITY_API_BASE_URL=/api \
+    VITE_WEB_BUILD_COMMIT_SHA="$WEB_BUILD_COMMIT_SHA" \
     bun run web:build
 )
 
@@ -67,9 +79,16 @@ bun "$REPOSITORY_ROOT/scripts/inject-web-csp-meta.ts" \
 aws s3 sync "$DIST_DIRECTORY/assets" "s3://$WEB_BUCKET_NAME/assets" \
   --region "$AWS_REGION" \
   --cache-control 'public, max-age=31536000, immutable'
+# Keep this release's entry files first, so a release that is live can always be restored.
+aws s3 sync "$DIST_DIRECTORY" "s3://$WEB_BUCKET_NAME/releases/$WEB_BUILD_COMMIT_SHA" \
+  --region "$AWS_REGION" \
+  --exclude 'assets/*' \
+  --delete \
+  --cache-control 'no-cache'
 aws s3 sync "$DIST_DIRECTORY" "s3://$WEB_BUCKET_NAME" \
   --region "$AWS_REGION" \
   --exclude 'assets/*' \
+  --exclude 'releases/*' \
   --delete \
   --cache-control 'no-cache'
 aws cloudfront create-invalidation \
@@ -78,4 +97,4 @@ aws cloudfront create-invalidation \
   --query 'Invalidation.Id' \
   --output text
 
-echo "Web app uploaded. Open $WEB_URL"
+echo "Web app $WEB_BUILD_COMMIT_SHA uploaded. Open $WEB_URL"

@@ -5,6 +5,8 @@ import {
   useRef,
   useState,
 } from 'react'
+import { createPortal, flushSync } from 'react-dom'
+import type { DocumentChecklistItem } from '@mukuroji/contracts'
 import type {
   DocumentExportFormat,
   DocumentKind,
@@ -41,7 +43,10 @@ import {
 } from '../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
-import { createDocumentPath } from '../shared/routing/paths'
+import {
+  createDocumentPath,
+  createWorkItemSearchPath,
+} from '../shared/routing/paths'
 import { useWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import {
@@ -102,8 +107,25 @@ import {
   DocumentContextPanel,
   type DocumentContextTab,
 } from './ui/DocumentContextPanel'
-import { DocumentEditor } from './ui/DocumentEditor'
+import {
+  DocumentEditor,
+  DocumentReadOnlyContent,
+} from './ui/DocumentEditor'
 import { DocumentHome } from './ui/DocumentHome'
+import { ChecklistWorkItemDialog } from './ui/ChecklistWorkItemDialog'
+import { useChecklistWorkItemCreation } from './mutations/useChecklistWorkItemCreation'
+import type {
+  BuiltInDocumentTemplateKey,
+  BuiltInTemplateCreateOptions,
+} from './model/builtInTemplates'
+import { useBuiltInTemplateDocumentCreation } from './mutations/useBuiltInTemplateDocumentCreation'
+import {
+  createChecklistItemWorkItemRelation,
+  findChecklistItemWorkItemId,
+  type ChecklistItemSource,
+  type ChecklistWorkItemInput,
+} from './model/checklistWorkItems'
+import { exportDocumentSubtreeMarkdown } from './queries/documentSubtreeExport'
 import {
   DocumentShareDialog,
   type CreateDocumentShareDraftInput,
@@ -158,6 +180,14 @@ export type DocumentScreenData = {
    * 現在 user が Workspace/Project scope に Document を作成できるかどうかです。
    */
   canCreateDocuments: boolean
+  /**
+   * Normalized member key of the current user, selected first as a Work Item owner.
+   */
+  currentUserKey?: string
+  /**
+   * Whether a page is being created from a bundled template.
+   */
+  isCreatingFromBuiltInTemplate?: boolean
   /**
    * Sidebar と Project scope に表示する directory です。
    */
@@ -240,6 +270,20 @@ export type DocumentScreenActions = {
    * Template を instantiate する action です。
    */
   instantiateTemplate?: (templateId: string) => Promise<void>
+  /**
+   * Creates a page from a template bundled with every Workspace.
+   */
+  createDocumentFromBuiltInTemplate?: (
+    key: BuiltInDocumentTemplateKey,
+    options: BuiltInTemplateCreateOptions,
+  ) => Promise<void>
+  /**
+   * Creates a Work Item and returns its canonical ID.
+   */
+  createWorkItem?: (
+    source: ChecklistItemSource,
+    input: ChecklistWorkItemInput,
+  ) => Promise<string>
   /**
    * Document metadata/permission を更新する action です。
    */
@@ -351,6 +395,10 @@ export type DocumentScreenActions = {
     format: DocumentExportFormat,
   ) => Promise<void>
   /**
+   * Exports a document and its visible descendants as one Markdown file.
+   */
+  exportDocumentSubtree?: (document: DocumentRecord) => Promise<void>
+  /**
    * Focus 中 block/object を presence へ反映する action です。
    */
   setActiveAnchor?: (anchorId?: string) => void
@@ -368,6 +416,8 @@ export type DocumentScreenActions = {
  * Storybook 兼用 DocumentScreen の props です。
  */
 export type DocumentScreenProps = {
+  /** Workspace API token used to search link targets and show their titles. */
+  accessToken?: string
   /** Active Workspace member token used only for explicit AI Brief requests. */
   aiAssistanceAccessToken?: string
   /** Whether the dependent AI API deployment has enabled the route-level controls. */
@@ -495,6 +545,10 @@ export function DocumentPage() {
     ])
   }
   const t = useMemo(() => createTranslator(locale), [locale])
+  const checklistWorkItemCreation = useChecklistWorkItemCreation({
+    accessToken,
+    errorMessage: t('documents.checklistWorkItem.error'),
+  })
   const {
     data: user,
     error: currentUserError,
@@ -518,6 +572,14 @@ export function DocumentPage() {
     accessToken,
     Boolean(user && !currentUserError),
   )
+  const builtInTemplateCreation = useBuiltInTemplateDocumentCreation({
+    accessToken,
+    locale,
+    onCreated: async (documentId) => {
+      await mutateDocuments()
+      navigate(createDocumentPath(documentId))
+    },
+  })
   const {
     data: selectedDocument,
     error: detailError,
@@ -1334,8 +1396,28 @@ export function DocumentPage() {
     if (objectUrl) URL.revokeObjectURL(objectUrl)
   }
 
+  /**
+   * Downloads the selected document and its visible descendants as Markdown.
+   *
+   * @param root - Document the export starts from.
+   */
+  const handleExportSubtree = async (root: DocumentRecord) => {
+    if (!accessToken) return
+    const result = await exportDocumentSubtreeMarkdown(accessToken, root)
+    const link = globalThis.document.createElement('a')
+    link.download = result.fileName
+    const objectUrl = URL.createObjectURL(
+      new Blob([result.content], { type: 'text/markdown; charset=utf-8' }),
+    )
+    link.href = objectUrl
+    link.rel = 'noopener noreferrer'
+    link.click()
+    URL.revokeObjectURL(objectUrl)
+  }
+
   return (
     <DocumentScreen
+      accessToken={accessToken}
       aiAssistanceAccessToken={(
         workspace.isAiAssistanceTaskEnabled?.('summary') ?? aiAssistanceUiEnabled
       ) ? accessToken : undefined}
@@ -1349,9 +1431,15 @@ export function DocumentPage() {
         archiveDocument: handleArchiveDocument,
         createComment: handleCreateComment,
         createDocument: handleCreateDocument,
+        createDocumentFromBuiltInTemplate:
+          builtInTemplateCreation.createFromTemplate,
+        createWorkItem: canCreateDocuments
+          ? checklistWorkItemCreation.createWorkItem
+          : undefined,
         createShare: handleCreateShare,
         deleteShare: handleDeleteShare,
         exportDocument: handleExport,
+        exportDocumentSubtree: handleExportSubtree,
         instantiateTemplate: handleInstantiateTemplate,
         loadMoreBacklinks: handleLoadMoreBacklinks,
         loadMoreComments: handleLoadMoreComments,
@@ -1377,6 +1465,8 @@ export function DocumentPage() {
         backlinks,
         canCreateDocuments,
         comments,
+        currentUserKey: workspace.userKey,
+        isCreatingFromBuiltInTemplate: builtInTemplateCreation.isCreating,
         documents,
         focusedCommentId,
         hasMoreActiveDocuments:
@@ -1430,6 +1520,7 @@ export function DocumentPage() {
  * Global sidebar、secondary tree、editor、context drawer を描画する screen です。
  */
 export function DocumentScreen({
+  accessToken,
   actions,
   aiAssistanceAccessToken,
   aiAssistanceEnabled = true,
@@ -1470,7 +1561,30 @@ export function DocumentScreen({
   const [defaultCommentAnchorId, setDefaultCommentAnchorId] =
     useState<string>()
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false)
+  const [isPrinting, setIsPrinting] = useState(false)
+  const [checklistWorkItemTarget, setChecklistWorkItemTarget] =
+    useState<ChecklistWorkItemTarget>()
+  // Work Items created for an item whose link failed, keyed by source item.
+  const [unlinkedChecklistWorkItems, setUnlinkedChecklistWorkItems] =
+    useState<Readonly<Record<string, string>>>({})
   const selectedDocument = data.selectedDocument
+  const printableDocument =
+    selectedDocument?.kind === 'page' || selectedDocument?.kind === 'template'
+      ? selectedDocument
+      : undefined
+
+  /**
+   * Mounts the print-only document copy, opens the browser print dialog and
+   * unmounts the copy once the dialog closes.
+   */
+  const printSelectedDocument = () => {
+    flushSync(() => setIsPrinting(true))
+    try {
+      globalThis.print()
+    } finally {
+      setIsPrinting(false)
+    }
+  }
   const documentAiSessionKey = selectedDocument
     ? `${selectedDocument.id}:${selectedDocument.revision}`
     : ''
@@ -1584,6 +1698,80 @@ export function DocumentScreen({
     return ensureDraftSaved()
   }, [ensureDraftSaved])
 
+  const canCreateChecklistWorkItems = Boolean(
+    selectedDocument?.capabilities.canEdit &&
+      !isAiOperationPending &&
+      actions.applyOperations &&
+      actions.createWorkItem,
+  )
+
+  /**
+   * Creates the Work Item for the checklist item in the open dialog and links
+   * the item to it. A Work Item created by an earlier attempt whose link
+   * failed is reused, so a retry does not create a second one.
+   *
+   * @param input - Values confirmed in the dialog.
+   */
+  const submitChecklistWorkItem = async (input: ChecklistWorkItemInput) => {
+    const target = checklistWorkItemTarget
+    if (
+      !target ||
+      !selectedDocument ||
+      selectedDocument.id !== target.documentId ||
+      !actions.applyOperations ||
+      !actions.createWorkItem
+    ) {
+      throw new Error(t('documents.checklistWorkItem.error'))
+    }
+    const flushedRevision = await requireSavedDraft()
+    const key = createChecklistWorkItemTargetKey(target)
+    const unlinkedWorkItemId = unlinkedChecklistWorkItems[key]
+    // Another editor may have converted the item while this dialog was open.
+    // Its link is kept rather than replaced by a second Work Item.
+    const linkedWorkItemId = findChecklistItemWorkItemId(
+      selectedDocument.relations,
+      target.blockId,
+      target.itemId,
+    )
+    if (linkedWorkItemId && linkedWorkItemId !== unlinkedWorkItemId) {
+      throw new Error(t('documents.checklistWorkItem.alreadyLinked'))
+    }
+    const workItemId =
+      unlinkedWorkItemId ?? (await actions.createWorkItem(target, input))
+    try {
+      await actions.applyOperations(
+        selectedDocument.id,
+        resolveDocumentMutationRevision(
+          selectedDocument.revision,
+          flushedRevision,
+        ),
+        [{
+          operationId: createDocumentOperationId(),
+          relation: createChecklistItemWorkItemRelation(
+            target.blockId,
+            target.itemId,
+            workItemId,
+            new Date(),
+          ),
+          type: 'upsert-relation',
+        }],
+      )
+    } catch {
+      // Lock the dialog to a link-only retry so changed values are never
+      // silently dropped in favor of the Work Item that already exists.
+      setUnlinkedChecklistWorkItems((current) => ({
+        ...current,
+        [key]: workItemId,
+      }))
+      throw new Error(t('documents.checklistWorkItem.linkError'))
+    }
+    setUnlinkedChecklistWorkItems((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([entryKey]) => entryKey !== key),
+      ))
+    setChecklistWorkItemTarget(undefined)
+  }
+
   const createDocumentAction =
     data.canCreateDocuments && actions.createDocument
       ? async (
@@ -1656,6 +1844,14 @@ export function DocumentScreen({
 
   return (
     <>
+      {isPrinting && printableDocument
+        ? createPortal(
+            <div className="document-print-root">
+              <DocumentReadOnlyContent document={printableDocument} t={t} />
+            </div>,
+            globalThis.document.body,
+          )
+        : null}
       <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <DocumentHeader
           contextTab={contextTab}
@@ -1690,6 +1886,25 @@ export function DocumentScreen({
               : undefined
           }
           onExportMenuOpenChange={setIsExportMenuOpen}
+          onExportSubtree={
+            selectedDocument &&
+            selectedDocument.kind !== 'whiteboard' &&
+            !selectedDocument.archivedAt &&
+            actions.exportDocumentSubtree
+              ? async () => {
+                  await runGuardedAction(() =>
+                    actions.exportDocumentSubtree!(selectedDocument),
+                  )
+                }
+              : undefined
+          }
+          onPrint={
+            printableDocument
+              ? async () => {
+                  await runGuardedAction(printSelectedDocument)
+                }
+              : undefined
+          }
           onFavoriteChange={
             selectedDocument && actions.setFavorite
               ? async (favorite) => {
@@ -1868,12 +2083,24 @@ export function DocumentScreen({
               </div>
             ) : selectedDocument ? (
               <DocumentWorkspace
+                accessToken={accessToken}
                 key={selectedDocument.id}
                 isAiOperationPending={isAiOperationPending}
                 selectedDocument={selectedDocument}
                 t={t}
                 onActiveAnchorChange={actions.setActiveAnchor}
                 onApplyOperations={actions.applyOperations}
+                onCreateChecklistWorkItem={
+                  canCreateChecklistWorkItems
+                    ? (blockId, item) =>
+                        setChecklistWorkItemTarget({
+                          blockId,
+                          documentId: selectedDocument.id,
+                          itemId: item.id,
+                          text: item.text,
+                        })
+                    : undefined
+                }
                 onContextOpen={openContext}
                 onDraftGuardChange={handleDraftGuardChange}
                 onNavigate={
@@ -1894,7 +2121,23 @@ export function DocumentScreen({
                   documents={data.documents}
                   t={t}
                   teams={data.teams}
+                  isCreatingFromBuiltInTemplate={
+                    data.isCreatingFromBuiltInTemplate
+                  }
                   onCreateDocument={createDocumentAction}
+                  onCreateFromBuiltInTemplate={
+                    data.canCreateDocuments &&
+                    actions.createDocumentFromBuiltInTemplate
+                      ? (key, options) => {
+                          void runGuardedAction(() =>
+                            actions.createDocumentFromBuiltInTemplate?.(
+                              key,
+                              options,
+                            ),
+                          )
+                        }
+                      : undefined
+                  }
                   onInstantiateTemplate={
                     data.canCreateDocuments
                       ? actions.instantiateTemplate
@@ -1931,6 +2174,7 @@ export function DocumentScreen({
                 className={`fixed inset-y-0 right-0 z-50 max-w-[calc(100vw-24px)] shadow-2xl min-[1280px]:static min-[1280px]:z-auto min-[1280px]:shadow-none ${contextTab ? '' : 'hidden'}`}
               >
                 <DocumentContextPanel
+                  linkAccessToken={accessToken}
                   activeTab={contextTab ?? 'brief'}
                   aiAssistanceAccessToken={resolvedAiAssistanceAccessToken}
                   aiAssistantSessionKey={mountedAiSessionKey}
@@ -2069,6 +2313,29 @@ export function DocumentScreen({
         </div>
       </section>
 
+      {checklistWorkItemTarget &&
+      selectedDocument?.id === checklistWorkItemTarget.documentId ? (
+        <ChecklistWorkItemDialog
+          accessToken={accessToken}
+          currentUserKey={data.currentUserKey}
+          defaultProjectId={
+            selectedDocument.scope.type === 'project'
+              ? selectedDocument.scope.projectId
+              : undefined
+          }
+          itemText={checklistWorkItemTarget.text}
+          linkOnly={
+            unlinkedChecklistWorkItems[
+              createChecklistWorkItemTargetKey(checklistWorkItemTarget)
+            ] !== undefined
+          }
+          t={t}
+          teams={data.teams}
+          onClose={() => setChecklistWorkItemTarget(undefined)}
+          onSubmit={submitChecklistWorkItem}
+        />
+      ) : null}
+
       {isShareDialogOpen && selectedDocument ? (
         <DocumentShareDialog
           document={selectedDocument}
@@ -2105,9 +2372,37 @@ export function DocumentScreen({
 }
 
 /**
+ * Checklist item the Work Item dialog is open for.
+ */
+type ChecklistWorkItemTarget = {
+  /** Document that contains the item. */
+  documentId: string
+  /** Checklist block that contains the item. */
+  blockId: string
+  /** Checklist item ID. */
+  itemId: string
+  /** Item text used as the initial Work Item title. */
+  text: string
+}
+
+/**
+ * Builds the key that identifies one checklist item across Documents.
+ *
+ * @param target - Checklist item the dialog is open for.
+ * @returns Key unique to the Document, block, and item.
+ */
+function createChecklistWorkItemTargetKey(target: ChecklistWorkItemTarget) {
+  return JSON.stringify([target.documentId, target.blockId, target.itemId])
+}
+
+/**
  * Document detail 内の local operation queue と autosave を管理します。
  */
 type DocumentWorkspaceProps = {
+  /**
+   * Whiteboard の Work Item 検索と title 表示に使う Workspace API token です。
+   */
+  accessToken?: string
   /**
    * API から取得した選択中 Document です。
    */
@@ -2134,6 +2429,13 @@ type DocumentWorkspaceProps = {
    * Context drawer open callback です。
    */
   onContextOpen: (tab: DocumentContextTab, anchorId?: string) => void
+  /**
+   * Starts creating a Work Item from a checklist item; omission hides the action.
+   */
+  onCreateChecklistWorkItem?: (
+    blockId: string,
+    item: DocumentChecklistItem,
+  ) => void
   /**
    * Route navigation と破壊的操作へ現在の draft guard を登録します。
    */
@@ -2183,10 +2485,12 @@ type DocumentWorkspaceProps = {
  * @returns The editable document workspace.
  */
 function DocumentWorkspace({
+  accessToken,
   isAiOperationPending = false,
   onActiveAnchorChange,
   onApplyOperations,
   onContextOpen,
+  onCreateChecklistWorkItem,
   onDraftGuardChange,
   onNavigate,
   onUnsavedStateChange,
@@ -2665,6 +2969,7 @@ function DocumentWorkspace({
       {localDocument.kind === 'whiteboard' ? (
         <div className="min-h-0 flex-1">
           <WhiteboardCanvas
+            accessToken={accessToken}
             content={localDocument.whiteboard}
             editable={editable}
             t={t}
@@ -2700,6 +3005,14 @@ function DocumentWorkspace({
         localDocument.kind === 'template' ? (
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <DocumentEditor
+            checklistWorkItems={{
+              onCreate: editable ? onCreateChecklistWorkItem : undefined,
+              onOpen: onNavigate
+                ? (workItemId) =>
+                    onNavigate(createWorkItemSearchPath(workItemId))
+                : undefined,
+              relations: localDocument.relations,
+            }}
             document={localDocument}
             editable={editable}
             saveStatus={saveStatus}
@@ -2758,9 +3071,11 @@ function DocumentHeader({
   onContextOpen,
   onExport,
   onExportMenuOpenChange,
+  onExportSubtree,
   onFavoriteChange,
   onLogout,
   onMobileSidebarOpen,
+  onPrint,
   onRestore,
   onShareOpen,
   onTreeOpen,
@@ -2776,9 +3091,11 @@ function DocumentHeader({
   onContextOpen: (tab: DocumentContextTab) => void
   onExport?: (format: DocumentExportFormat) => Promise<void>
   onExportMenuOpenChange: (open: boolean) => void
+  onExportSubtree?: () => Promise<void>
   onFavoriteChange?: (favorite: boolean) => Promise<void>
   onLogout?: () => void
   onMobileSidebarOpen: () => void
+  onPrint?: () => Promise<void>
   onRestore?: () => Promise<void>
   onShareOpen?: () => void
   onTreeOpen: () => void
@@ -2801,9 +3118,24 @@ function DocumentHeader({
           selectedDocument?.kind === 'template'
         ? ['markdown', 'json']
         : ['json']
+  const hasExportActions = Boolean(onExport || onPrint || onExportSubtree)
   const hasOverflowActions = Boolean(
-    onShareOpen || onExport || onArchive || onRestore || onLogout,
+    onShareOpen || hasExportActions || onArchive || onRestore || onLogout,
   )
+  const extraExportActions = [
+    ...(onPrint
+      ? [{ key: 'print', label: t('documents.export.print'), run: onPrint }]
+      : []),
+    ...(onExportSubtree
+      ? [
+          {
+            key: 'subtree',
+            label: t('documents.export.subtreeMarkdown'),
+            run: onExportSubtree,
+          },
+        ]
+      : []),
+  ]
 
   return (
     <header className="workbench-header relative z-20 flex min-h-[64px] flex-none items-center gap-3 px-[clamp(14px,2vw,26px)] py-2.5">
@@ -2895,7 +3227,7 @@ function DocumentHeader({
               {t('documents.share.action')}
             </button>
           ) : null}
-          {onExport ? (
+          {hasExportActions ? (
             <div className="relative hidden md:block">
               <button
                 aria-expanded={isExportMenuOpen}
@@ -2910,21 +3242,37 @@ function DocumentHeader({
               </button>
               {isExportMenuOpen ? (
                 <div
-                  className="absolute right-0 top-11 z-30 w-40 rounded-lg border border-[var(--workbench-border)] bg-surface p-1.5 shadow-xl"
+                  className="absolute right-0 top-11 z-30 w-56 rounded-lg border border-[var(--workbench-border)] bg-surface p-1.5 shadow-xl"
                   role="menu"
                 >
-                  {exportFormats.map((format) => (
+                  {onExport
+                    ? exportFormats.map((format) => (
+                        <button
+                          className="w-full rounded-md px-3 py-2 text-left text-sm font-semibold text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]"
+                          key={format}
+                          onClick={() => {
+                            onExportMenuOpenChange(false)
+                            void onExport(format)
+                          }}
+                          role="menuitem"
+                          type="button"
+                        >
+                          {format.toUpperCase()}
+                        </button>
+                      ))
+                    : null}
+                  {extraExportActions.map((action) => (
                     <button
                       className="w-full rounded-md px-3 py-2 text-left text-sm font-semibold text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]"
-                      key={format}
+                      key={action.key}
                       onClick={() => {
                         onExportMenuOpenChange(false)
-                        void onExport(format)
+                        void action.run()
                       }}
                       role="menuitem"
                       type="button"
                     >
-                      {format.toUpperCase()}
+                      {action.label}
                     </button>
                   ))}
                 </div>
@@ -3008,6 +3356,20 @@ function DocumentHeader({
                     </button>
                   ))
                 : null}
+              {extraExportActions.map((action) => (
+                <button
+                  className="w-full rounded-md px-3 py-2 text-left text-sm font-semibold hover:bg-[var(--workbench-surface-muted)]"
+                  key={action.key}
+                  onClick={() => {
+                    setIsActionMenuOpen(false)
+                    void action.run()
+                  }}
+                  role="menuitem"
+                  type="button"
+                >
+                  {action.label}
+                </button>
+              ))}
               {onRestore ? (
                 <button
                   className="w-full rounded-md px-3 py-2 text-left text-sm font-semibold hover:bg-[var(--workbench-surface-muted)]"

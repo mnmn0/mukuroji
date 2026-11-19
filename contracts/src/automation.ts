@@ -367,6 +367,32 @@ export type AutomationWorkItemTemplatePayload = {
   workflowStatusId?: string
 }
 
+/** Most Work Items one Project template can create, counting every level of its WBS. */
+export const AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT = 50
+
+/** Deepest WBS level a Project template can hold; top-level items are level 1. */
+export const AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT = 4
+
+/** Largest working-day offset or duration a Project template Work Item can use. */
+export const AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_MAX_DAYS = 3650
+
+/**
+ * One Work Item in a Project template's WBS.
+ *
+ * Dates are relative to the Project start date given when the template is applied and are counted
+ * in working days (Monday to Friday) of the default Work Item calendar.
+ */
+export type AutomationProjectTemplateWorkItem = {
+  /** Title of the Work Item to create. */
+  title: string
+  /** Working days between the Project start and this Work Item's start; 0 starts on the first working day. */
+  startOffsetWorkingDays: number
+  /** Working days the Work Item occupies, including its start date; at least 1. */
+  durationWorkingDays: number
+  /** Child Work Items created under this one with a parent relation, in display order. */
+  children?: AutomationProjectTemplateWorkItem[]
+}
+
 /** Project template の作成 payload です。 */
 export type AutomationProjectTemplatePayload = {
   /** Locale 非依存の Project 名です。 */
@@ -377,6 +403,8 @@ export type AutomationProjectTemplatePayload = {
   nameEn?: string
   /** Project の表示色です。 */
   tone?: AutomationProjectTemplateTone
+  /** WBS created inside the new Project when the template is applied, in display order. */
+  workItems?: AutomationProjectTemplateWorkItem[]
 }
 
 /** Workflow template の payload です。 */
@@ -461,6 +489,11 @@ export type AutomationTemplateApplicationTarget =
       kind: 'project'
       /** Project を追加する Team ID です。 */
       teamId: string
+      /**
+       * Project start date in `YYYY-MM-DD` form that the template's relative Work Item dates are
+       * counted from. Required when the template has Work Items.
+       */
+      startDate?: string
     }
   | {
       /** Workflow 設定 target です。 */
@@ -484,6 +517,8 @@ export type AutomationTemplateApplicationResult =
       projectId: string
       /** 作成した Project 名です。 */
       name: string
+      /** Number of WBS Work Items created in the Project; absent when the template had none. */
+      workItemCount?: number
     }
   | {
       /** Workflow 保存結果です。 */

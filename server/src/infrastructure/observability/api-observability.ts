@@ -86,7 +86,6 @@ const SAFE_API_ROUTE_AREAS = new Set([
   'auth',
   'automation',
   'bulk-operations',
-  'dashboard',
   'developer',
   'document-backlinks',
   'documents',

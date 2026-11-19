@@ -32,7 +32,7 @@ import {
 } from '../src/tasks/model/taskSchedule'
 
 describe('default task schedule construction', () => {
-  test('keeps every schedule state explicit under independent UTC weekday policies', () => {
+  test('keeps every schedule state explicit under independent Workspace-time-zone weekday policies', () => {
     const unscheduled = createDefaultUnscheduledTaskSchedule()
     const dueDate = createDefaultDueDateTaskSchedule('2026-07-31', 240)
     const dateRange = createDefaultDateRangeTaskSchedule('2026-07-31', '2026-08-04')
@@ -41,7 +41,7 @@ describe('default task schedule construction', () => {
     expect(unscheduled).toEqual({
       calendarPolicy: {
         holidays: [],
-        timeZone: 'UTC',
+        timeZone: 'Asia/Tokyo',
         workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
       },
       mode: 'unscheduled',
@@ -239,7 +239,7 @@ describe('task schedule operations', () => {
       dueDate: '2026-08-10',
       calendarPolicy: {
         workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
-        timeZone: 'UTC',
+        timeZone: 'Asia/Tokyo',
         holidays: [],
       },
     } satisfies WorkItemSchedule

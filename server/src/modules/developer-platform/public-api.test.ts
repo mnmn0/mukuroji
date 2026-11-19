@@ -130,6 +130,9 @@ function createDefaultWorkItemService(
     async getEffort(_credential, teamId, workItemId) {
       return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision }
     },
+    async getActualDates(_credential, teamId, workItemId) {
+      return { schemaVersion: 1, teamId, workItemId, revision: workItem.revision }
+    },
     async getKey(_credential, teamId, workItemId) {
       return { schemaVersion: 1, teamId, workItemId, createdAt: workItem.createdAt, key: 'TEAM-1' }
     },
@@ -522,6 +525,39 @@ describe('public API router', () => {
     expect(reads).toEqual(['team-1/work-item-1'])
   })
 
+  test('returns the actual dates of a Work Item from their own read-scoped endpoint', async () => {
+    const reads: string[] = []
+    const { platform, router } = createTestRouter({
+      workItems: createDefaultWorkItemService({
+        async getActualDates(_credential, teamId, workItemId) {
+          reads.push(`${teamId}/${workItemId}`)
+          return { schemaVersion: 1, teamId, workItemId, revision: 4, actualStartDate: '2026-07-01', actualEndDate: '2026-07-09' }
+        },
+      }),
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const response = await router.request('http://localhost/v1/work-items/work-item-1/actual-dates?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const denied = await router.request('http://localhost/v1/work-items/work-item-1/actual-dates?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+    const missingTeam = await router.request('http://localhost/v1/work-items/work-item-1/actual-dates', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', workItemId: 'work-item-1', revision: 4,
+      actualStartDate: '2026-07-01', actualEndDate: '2026-07-09',
+    })
+    expect(denied.status).toBe(403)
+    expect(missingTeam.status).toBe(400)
+    expect(reads).toEqual(['team-1/work-item-1'])
+  })
+
   test('exposes the authorized Work Item Type creation schema', async () => {
     let requestedTeamId: string | undefined
     let requestedProjectId: string | undefined
@@ -783,6 +819,9 @@ describe('public API router', () => {
     expect(paths['/api/v1/work-items/{workItemId}/acceptance-criteria']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/effort']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/key']).toHaveProperty('get')
+    expect(paths['/api/v1/work-items/{workItemId}/actual-dates']).toHaveProperty('get')
+    expect(components.schemas.WorkItem.properties).not.toHaveProperty('actualStartDate')
+    expect(components.schemas.WorkItem.properties).not.toHaveProperty('actualEndDate')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('acceptanceCriteria')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('remainingEffortMinutes')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('progressPercent')
@@ -2867,6 +2906,8 @@ function createAgentRunService(overrides: Partial<PublicAgentRunService> = {}): 
     report: unexpected,
     authorizeTakeOver: unexpected,
     takeOver: unexpected,
+    authorizeResume: unexpected,
+    resume: unexpected,
     getSettings: unexpected,
     getContext: unexpected,
     ...overrides,
@@ -2978,6 +3019,70 @@ describe('public Agent Run routes', () => {
     expect(refused.status).toBe(403)
     expect(await refused.json()).toMatchObject({ code: 'forbidden', errors: [{ code: 'agent_run_takeover_disabled' }] })
     expect((await send('take-over-3', { runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2', expectedRevision: 1 })).status).toBe(400)
+  })
+
+  test('resumes a started Work Item idempotently and reports a status the Team does not allow', async () => {
+    const calls: unknown[] = []
+    let notResumable = false
+    let lostAccess = false
+    const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
+      /**
+       * Accepts resume authorizations until the test removes the caller's access.
+       */
+      async authorizeResume() {
+        if (lostAccess) throw new AgentRunError('forbidden', 'No access.', { reason: 'agent_run_forbidden' })
+      },
+      /**
+       * Returns a resume response, or the not resumable error the test configures.
+       *
+       * @param _credential - Ignored credential.
+       * @param teamId - Team ID.
+       * @param workItemId - Work Item ID.
+       * @param request - Resume request.
+       * @returns The new run and the run it resumes.
+       */
+      async resume(_credential, teamId, workItemId, request) {
+        calls.push({ teamId, workItemId, request })
+        if (notResumable) throw new AgentRunError('conflict', 'Not resumable.', { reason: 'not_resumable' })
+        return {
+          run: { ...agentRunFixture, runId: 'run_00000000-0000-4000-8000-000000000010' },
+          resumedFromRun: { ...agentRunFixture, state: 'finished', outcome: 'paused', finishedBy: 'agent', finishedAt: NOW.toISOString() },
+        }
+      },
+    }) })
+    const credential = await createApiKey(platform, ['work-items:write'])
+    const headers = { Authorization: `Bearer ${credential.secret}`, 'Content-Type': 'application/json' }
+    /**
+     * Sends a resume request.
+     *
+     * @param key - Idempotency key.
+     * @param body - Request body.
+     * @returns Response.
+     */
+    const send = (key: string, body: unknown = { expectedRevision: 3, runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2' }) => router.request(
+      '/v1/work-items/work-item-1/agent-runs/resume?teamId=team-1',
+      { method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify(body) },
+    )
+    const resumed = await send('resume-1')
+    expect(resumed.status).toBe(201)
+    expect(await resumed.json()).toMatchObject({ resumedFromRun: { outcome: 'paused' } })
+    expect((await send('resume-1')).headers.get('Idempotency-Replayed')).toBe('true')
+    // A caller who lost access gets no saved response on a retry.
+    lostAccess = true
+    const lost = await send('resume-1')
+    expect(lost.status).toBe(403)
+    expect(lost.headers.get('Idempotency-Replayed')).toBeNull()
+    lostAccess = false
+    expect(calls).toEqual([{
+      teamId: 'team-1', workItemId: 'work-item-1',
+      request: { expectedRevision: 3, runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+    }])
+    notResumable = true
+    const refused = await send('resume-2')
+    expect(refused.status).toBe(409)
+    expect(await refused.json()).toMatchObject({ code: 'conflict', errors: [{ code: 'not_resumable' }] })
+    expect((await send('resume-3', { runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2' })).status).toBe(400)
+    expect((await send('resume-4', { expectedRevision: 3, runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2', workflowStatusId: 'doing' })).status).toBe(400)
   })
 
   test('saves a structured report idempotently and rejects an unsafe artifact URL before any write', async () => {

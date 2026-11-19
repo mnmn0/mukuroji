@@ -17,7 +17,6 @@ import {
   disconnectDeveloperConnector,
   deleteDeveloperExternalLink,
   dryRunDeveloperImport,
-  exportDeveloperWorkItems,
   getDeveloperPlatformResources,
   getPersonalCredentialAdministration,
   listDeveloperExternalLinks,
@@ -34,6 +33,7 @@ import {
   shouldRetainDeveloperPlatformMutationContext,
   updateDeveloperExternalLink,
 } from '../src/developer-platform/api'
+import { exportDeveloperWorkItems } from '../src/developer-platform/queries/developerExport'
 import {
   createMutationRequestRunner,
   type MutationRequestContext,
@@ -460,6 +460,22 @@ describe('Developer Platform API', () => {
         init,
       })
 
+      if (url.endsWith('/work-item-hierarchy')) {
+        // Only the first Work Item is in the read tree; the second keeps an empty WBS cell.
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          teamId: 'team-product',
+          graphRevision: 4,
+          nodes: [{
+            workItemId: 'work-item-1',
+            parentWorkItemId: null,
+            depth: 0,
+            wbsNumber: '2.1',
+            hierarchyRank: 'i',
+            childWorkItemIds: [],
+          }],
+        }), { headers: { 'Content-Type': 'application/json' } })
+      }
       const isNextPage = url.includes('cursor=')
       return new Response(JSON.stringify({
         items: [exportedWorkItems[isNextPage ? 1 : 0]],
@@ -486,8 +502,10 @@ describe('Developer Platform API', () => {
       '/api/developer/imports',
       '/api/developer/exports?format=csv&limit=100',
       '/api/developer/exports?format=csv&limit=100&cursor=signed%2Fcursor%2B2',
+      '/api/teams/team-product/work-item-hierarchy',
       '/api/developer/exports?format=json&limit=100',
       '/api/developer/exports?format=json&limit=100&cursor=signed%2Fcursor%2B2',
+      '/api/teams/team-product/work-item-hierarchy',
     ])
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual(
       importInput,
@@ -504,11 +522,12 @@ describe('Developer Platform API', () => {
     expect(new Uint8Array(await csvExport.blob.arrayBuffer()).slice(0, 3))
       .toEqual(new Uint8Array([0xef, 0xbb, 0xbf]))
     expect(await csvExport.blob.text()).toContain(
-      'id,teamId,title,description,assignedProjectId,assigneeUserId,workflowStatusId,statusCategory,dueDate,schedule,priority,revision,createdAt,updatedAt,customFieldValues.labels,customFieldValues.risk\r\n',
+      'id,teamId,wbsNumber,title,description,assignedProjectId,assigneeUserId,workflowStatusId,statusCategory,dueDate,schedule,priority,revision,createdAt,updatedAt,customFieldValues.labels,customFieldValues.risk\r\n',
     )
     expect(await csvExport.blob.text()).toContain(
-      'work-item-1,team-product,"\'=HYPERLINK(""https://example.com"")"',
+      'work-item-1,team-product,2.1,"\'=HYPERLINK(""https://example.com"")"',
     )
+    expect(await csvExport.blob.text()).toContain('work-item-2,team-product,,Ship API,')
     expect(jsonExport.fileName).toMatch(
       /^mukuroji-work-items-\d{4}-\d{2}-\d{2}\.json$/u,
     )
@@ -517,6 +536,7 @@ describe('Developer Platform API', () => {
       workItems: [
         {
           id: 'work-item-1',
+          wbsNumber: '2.1',
           customFieldValues: { risk: 'high' },
           schedule: createDefaultDueDateWorkItemSchedule('2026-08-01'),
         },
@@ -561,9 +581,12 @@ describe('Developer Platform API', () => {
 
     await expect(exportDeveloperWorkItems('access-token', 'json'))
       .resolves.toMatchObject({ fileName: expect.stringMatching(/\.json$/u) })
+    // The hierarchy read gets an export page back, which is not a hierarchy; the export still
+    // succeeds without WBS numbers.
     expect(urls).toEqual([
       '/api/developer/exports?format=json&limit=100',
       '/api/developer/exports?format=json&limit=100',
+      '/api/teams/team-product/work-item-hierarchy',
     ])
   })
 
