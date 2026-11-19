@@ -766,9 +766,9 @@ export const workspaceMessages = {
   'sidebar.archive.error': 'アーカイブできませんでした',
   'sidebar.archive.confirmTitle': 'アーカイブの確認',
   'sidebar.archive.confirmTeamDescription':
-    '{name} と配下のプロジェクトをアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。',
+    '{name} と配下のプロジェクトをアーカイブし、サイドバーから非表示にします。設定の「チームとプロジェクトの管理」から復元できます。',
   'sidebar.archive.confirmProjectDescription':
-    '{name} をアーカイブし、サイドバーから非表示にします。現在この画面からは復元できません。',
+    '{name} をアーカイブし、サイドバーから非表示にします。設定の「チームとプロジェクトの管理」から復元できます。',
   'sidebar.archive.cancel': 'キャンセル',
   'sidebar.archive.confirm': 'アーカイブ',
   'sidebar.teamOverview': 'チーム概要',

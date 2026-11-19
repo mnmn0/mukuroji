@@ -1703,6 +1703,13 @@ function configureFakeProjectClients(
       teamId: string
     }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
+    directoryAdministration: [] as Array<{
+      method: string
+      directoryId: string
+      teamId?: string
+      projectId?: string
+      input?: unknown
+    }>,
     issueCreates: [] as Array<{
       actorUserId: string
       assignedProjectId?: unknown
@@ -2397,6 +2404,68 @@ function configureFakeProjectClients(
               : 'green',
           },
         }
+      },
+      async getDirectoryAdministration(directoryId) {
+        calls.directoryAdministration.push({ method: 'get', directoryId })
+
+        return {
+          teams: [{
+            id: 'core-team',
+            nameJa: 'コアチーム',
+            nameEn: 'Core Team',
+            projects: [
+              { id: 'refero', nameJa: 'Refero', nameEn: 'Refero', tone: 'blue' },
+              {
+                id: 'old-project',
+                nameJa: '旧プロジェクト',
+                nameEn: 'Old Project',
+                tone: 'green',
+                archivedAt: '2026-06-06T00:00:00.000Z',
+              },
+            ],
+          }],
+        }
+      },
+      async renameTeam(directoryId, teamId, input) {
+        calls.directoryAdministration.push({ method: 'renameTeam', directoryId, teamId, input })
+
+        return { teamId, nameJa: 'リネーム', nameEn: 'Renamed' }
+      },
+      async renameProject(directoryId, teamId, projectId, input) {
+        calls.directoryAdministration.push({
+          method: 'renameProject',
+          directoryId,
+          teamId,
+          projectId,
+          input,
+        })
+
+        return { teamId, projectId, nameJa: 'リネーム', nameEn: 'Renamed', tone: 'purple' }
+      },
+      async restoreTeam(directoryId, teamId) {
+        calls.directoryAdministration.push({ method: 'restoreTeam', directoryId, teamId })
+
+        return { teamId }
+      },
+      async restoreProject(directoryId, teamId, projectId) {
+        calls.directoryAdministration.push({
+          method: 'restoreProject',
+          directoryId,
+          teamId,
+          projectId,
+        })
+
+        return { teamId, projectId }
+      },
+      async reorderTeams(directoryId, input) {
+        calls.directoryAdministration.push({ method: 'reorderTeams', directoryId, input })
+
+        return { teamIds: ['core-team'] }
+      },
+      async reorderProjects(directoryId, teamId, input) {
+        calls.directoryAdministration.push({ method: 'reorderProjects', directoryId, teamId, input })
+
+        return { projectIds: ['refero'] }
       },
       async archiveTeam(directoryId, teamId, _auditContext, expectedPlanningRevision) {
         calls.teamArchives.push({ directoryId, expectedPlanningRevision, teamId })

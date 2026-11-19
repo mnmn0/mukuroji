@@ -307,7 +307,7 @@ async function resolveCharterPerson(
  * @param workspaceId - Workspace that owns the Project.
  * @param state - Committed charter state.
  */
-async function projectCharterSearchDocumentBestEffort(workspaceId: string, state: ProjectCharterState) {
+export async function projectCharterSearchDocumentBestEffort(workspaceId: string, state: ProjectCharterState) {
   let names: { name: string; englishName?: string; project: ProjectDirectoryProjectResponse } | undefined
   try {
     const [japanese, english] = await Promise.all([
