@@ -75,7 +75,7 @@ import {
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
 import { useProjectQuickAccess } from '../../projects/queries/useProjectQuickAccess'
 import type { MemberPreferenceValues } from '@mukuroji/contracts'
-import { useMemberPreferencesSync } from '../queries/useMemberPreferencesSync'
+import { useMemberPreferencesSync } from '../mutations/useMemberPreferencesSync'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import {
   createTranslator,
@@ -276,12 +276,6 @@ export function WorkspaceRouteProvider() {
     isLoading: isCurrentUserLoading,
     mutate: mutateCurrentUser,
   } = useCurrentUser(accessToken)
-  const memberPreferenceValues = useMemo<MemberPreferenceValues>(() => ({
-    fontSize: fontSizePreference,
-    locale,
-    theme: themePreference,
-    timeZone,
-  }), [fontSizePreference, locale, themePreference, timeZone])
   /** Applies preferences saved on the server so that this device matches the member's choices. */
   const applyMemberPreferences = useCallback((values: MemberPreferenceValues) => {
     if (values.locale) {
@@ -301,7 +295,6 @@ export function WorkspaceRouteProvider() {
   const saveMemberPreferences = useMemberPreferencesSync({
     accessToken,
     apply: applyMemberPreferences,
-    current: memberPreferenceValues,
     enabled: Boolean(user && !currentUserError),
   })
   const {
