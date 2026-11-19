@@ -1,5 +1,4 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
-import { isIP } from 'node:net'
 import {
   isWorkItemProgressPercent,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
@@ -100,6 +99,7 @@ import {
 } from './domain/personal-credential-policy'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
 import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-projection'
+import { resolveTrustedClientAddress } from '../../infrastructure/http/trusted-request-source'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
 
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
@@ -108,10 +108,10 @@ export const PUBLIC_API_RATE_LIMIT = 120
 /** Maximum accepted public API request body size. */
 const PUBLIC_API_BODY_MAX_BYTES = 10 * 1024 * 1024
 
-/** OAuth token endpoint が一 client ID に許可する1分あたりの request 数です。 */
+/** OAuth token endpoint が secret を確認できた一 client ID に許可する1分あたりの request 数です。 */
 export const OAUTH_TOKEN_CLIENT_RATE_LIMIT = 30
 
-/** OAuth token endpoint が一 source IP に許可する1分あたりの request 数です。 */
+/** OAuth token endpoint が信頼できる一 client IP に許可する1分あたりの request 数です（secret 確認前に数える）。 */
 export const OAUTH_TOKEN_IP_RATE_LIMIT = 60
 
 /** Public Work Item page の既定件数です。 */
@@ -927,7 +927,7 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.post('/v1/oauth/token', async (c) => {
     setSecretResponseHeaders(c)
-    const clientIp = readTrustedClientIp(c)
+    const clientIp = resolveTrustedClientAddress(c)
     if (clientIp) {
       await enforceOAuthTokenRateLimit(
         c,
@@ -937,12 +937,6 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       )
     }
     const input = await readOAuthTokenInput(c)
-    await enforceOAuthTokenRateLimit(
-      c,
-      dependencies,
-      `client:${digestRateLimitSubject(input.clientId)}`,
-      OAUTH_TOKEN_CLIENT_RATE_LIMIT,
-    )
     if (input.grantType !== 'client_credentials') {
       throw new PublicApiServiceError(400, 'invalid_request', 'grant_type must be client_credentials.')
     }
@@ -950,6 +944,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       clientId: input.clientId,
       clientSecret: input.clientSecret,
       ...(input.scopes.length > 0 ? { scopes: input.scopes } : {}),
+      // The client bucket counts only callers that proved the secret, so knowing the public
+      // client_id is not enough to lock the client out. Wrong secrets count against the IP bucket.
+      admitVerifiedClient: () => enforceOAuthTokenRateLimit(
+        c,
+        dependencies,
+        `client:${digestRateLimitSubject(input.clientId)}`,
+        OAUTH_TOKEN_CLIENT_RATE_LIMIT,
+      ),
     })
     return c.json({
       access_token: token.accessToken,
@@ -2752,26 +2754,6 @@ async function enforceOAuthTokenRateLimit(
       true,
     )
   }
-}
-
-function readTrustedClientIp(c: Context) {
-  const environment = isObjectRecord(c.env) ? c.env : undefined
-  const event = environment && isObjectRecord(environment.event)
-    ? environment.event
-    : undefined
-  const requestContext = event && isObjectRecord(event.requestContext)
-    ? event.requestContext
-    : undefined
-  const http = requestContext && isObjectRecord(requestContext.http)
-    ? requestContext.http
-    : undefined
-  if (typeof http?.sourceIp !== 'string') return undefined
-  const normalized = http.sourceIp.trim()
-  return isIP(normalized) !== 0 ? normalized : undefined
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function digestRateLimitSubject(value: string) {

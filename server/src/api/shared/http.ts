@@ -2,6 +2,7 @@ import { type LambdaEvent } from 'hono/aws-lambda'
 import type { Context } from 'hono'
 import { TenantAdministrationError } from '../../modules/tenant-administration'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { resolveTrustedClientAddress } from '../../infrastructure/http/trusted-request-source'
 import { CognitoServiceError } from '../../modules/authentication'
 import { createMutationAuditContext, type AuditActorKind } from '../../modules/audit/audit'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
@@ -78,7 +79,7 @@ export function createRequestMutationContext(
       requestId: c.req.header('X-Request-Id'),
       method: c.req.method,
       route: path,
-      ipAddress: c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+      ipAddress: resolveTrustedClientAddress(c),
       userAgent: c.req.header('User-Agent'),
     },
   })
@@ -166,30 +167,6 @@ export function toAuthErrorResponse(c: Context, error: unknown) {
   }
 
   return c.json({ message: error.message }, 400)
-}
-
-/**
- * Resolves a rate-limit client key from the transport source and trusted proxies.
- *
- * @param transportSource - Network peer observed by the server transport.
- * @param forwardedFor - Untrusted forwarded chain supplied by the request.
- * @param trustedProxyAddresses - Transport peers allowed to supply the forwarded chain.
- * @returns The trusted client source or a stable unavailable marker.
- */
-export function resolveRequestClientKey(
-  transportSource: string | undefined,
-  forwardedFor: string | undefined,
-  trustedProxyAddresses: ReadonlySet<string>,
-) {
-  const normalizedTransportSource = transportSource?.trim()
-  if (normalizedTransportSource && trustedProxyAddresses.has(normalizedTransportSource)) {
-    const forwardedSource = forwardedFor
-      ?.split(',')
-      .map((entry) => entry.trim())
-      .find(Boolean)
-    if (forwardedSource) return forwardedSource
-  }
-  return normalizedTransportSource || 'transport-unavailable'
 }
 
 /**

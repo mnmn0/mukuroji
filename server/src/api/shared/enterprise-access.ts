@@ -45,7 +45,7 @@ import {
   workspaceDependencies,
 } from './app-dependencies'
 import { ENTERPRISE_SERVICE_ACCOUNT_SNAPSHOT_RETRY_LIMIT } from './constants'
-import { resolveTrustedRequestSource } from './request-source'
+import { resolveTrustedRequestSource } from '../../infrastructure/http/trusted-request-source'
 import { getAwsRegion, getEnv, trimTrailingSlash } from './runtime-config'
 import { decodeJwtPayload } from './token-claims'
 

@@ -18,6 +18,7 @@ import {
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
+import { resolveTrustedClientAddress } from '../../infrastructure/http/trusted-request-source'
 import { CognitoServiceError } from '../../modules/authentication'
 import { ProjectDataError, readLocalizedNames } from '../../modules/directory'
 import {
@@ -2274,7 +2275,7 @@ async function deliverTriageWebhook(
         requestId: c.req.header('X-Request-Id'),
         method: 'POST',
         route: path,
-        ipAddress: c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+        ipAddress: resolveTrustedClientAddress(c),
         userAgent: c.req.header('User-Agent'),
       },
     })
@@ -2675,7 +2676,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
           requestId: c.req.header('X-Request-Id'),
           method: 'POST',
           route: path,
-          ipAddress: c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+          ipAddress: resolveTrustedClientAddress(c),
           userAgent: c.req.header('User-Agent'),
         },
       })
