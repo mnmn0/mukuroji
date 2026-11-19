@@ -53,21 +53,20 @@ export function useMemberPreferencesSync({
   const latestRef = useRef<MemberPreferences | undefined>(undefined)
   const appliedRef = useRef(false)
   const saveChainRef = useRef<Promise<void>>(Promise.resolve())
+  const pendingRef = useRef<MemberPreferenceValues | undefined>(undefined)
 
   useEffect(() => {
     currentRef.current = current
     applyRef.current = apply
   })
 
-  useEffect(() => {
-    if (!data || appliedRef.current) return
-    appliedRef.current = true
-    latestRef.current = data
-    if (data.revision > 0) applyRef.current(toValues(data))
-  }, [data])
-
-  return useCallback((changes: MemberPreferenceValues) => {
+  const save = useCallback((changes: MemberPreferenceValues) => {
     if (!accessToken) return
+    if (!latestRef.current) {
+      // Keep changes made before the saved values arrive, and save them once they do.
+      pendingRef.current = { ...pendingRef.current, ...changes }
+      return
+    }
     saveChainRef.current = saveChainRef.current.then(async () => {
       const latest = latestRef.current
       if (!latest) return
@@ -89,6 +88,24 @@ export function useMemberPreferencesSync({
       console.warn('Display preferences could not be saved to the server.', error)
     })
   }, [accessToken, loadMemberPreferences, saveMemberPreferences])
+
+  useEffect(() => {
+    if (!data || appliedRef.current) return
+    appliedRef.current = true
+    latestRef.current = data
+    const pending = pendingRef.current
+    pendingRef.current = undefined
+    if (pending) {
+      // The member changed something before the saved values arrived; that change wins.
+      const merged = { ...toValues(data), ...pending }
+      applyRef.current(merged)
+      save(merged)
+    } else if (data.revision > 0) {
+      applyRef.current(toValues(data))
+    }
+  }, [data, save])
+
+  return save
 }
 
 /**
