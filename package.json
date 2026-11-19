@@ -63,6 +63,7 @@
     "ai-assistance:eval:live": "bun server/scripts/ai-assistance/evaluate-ai-assistance-live.ts",
     "work-items:integrity": "bun server/scripts/data-integrity/verify-work-items-integrity.ts",
     "cross-domain:integrity": "bun server/scripts/data-integrity/verify-cross-domain-integrity.ts",
+    "data:migrate": "bun server/scripts/migrations/run-data-migration.ts",
     "agent-runs:integrity": "bun server/scripts/data-integrity/verify-agent-runs-integrity.ts",
     "restore-drill:approve-cleanup": "bun --filter server restore-drill:approve-cleanup",
     "floci:deploy-backend": "bun --env-file=.env run sh floci/deploy-backend.sh",
