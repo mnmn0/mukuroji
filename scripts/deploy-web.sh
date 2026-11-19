@@ -7,6 +7,9 @@
 # under `assets/` are cached for a year and kept after later uploads, so a
 # browser that still runs the previous `index.html` can load its lazy chunks.
 # Every other file is served with `no-cache` and replaced on each upload.
+# CloudFront's CSP allows any bucket on the regional S3 endpoint, so the
+# script adds a `<meta>` CSP to `index.html` that names the stack's own file
+# bucket and realtime API; the browser enforces both policies.
 set -euo pipefail
 
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
@@ -37,6 +40,8 @@ stack_output() {
 WEB_BUCKET_NAME="$(stack_output WebBucketName)"
 WEB_DISTRIBUTION_ID="$(stack_output WebDistributionId)"
 WEB_URL="$(stack_output WebUrl)"
+FILE_BUCKET_NAME="$(stack_output FileBucketName)"
+REALTIME_WEBSOCKET_URL="$(stack_output RealtimeWebSocketUrl)"
 
 (
   cd "$REPOSITORY_ROOT"
@@ -52,6 +57,12 @@ if [[ ! -f "$DIST_DIRECTORY/index.html" || ! -d "$DIST_DIRECTORY/assets" ]]; the
   echo "The Web build did not produce index.html and assets/." >&2
   exit 1
 fi
+
+bun "$REPOSITORY_ROOT/scripts/inject-web-csp-meta.ts" \
+  "$DIST_DIRECTORY/index.html" \
+  "$FILE_BUCKET_NAME" \
+  "$AWS_REGION" \
+  "$REALTIME_WEBSOCKET_URL"
 
 aws s3 sync "$DIST_DIRECTORY/assets" "s3://$WEB_BUCKET_NAME/assets" \
   --region "$AWS_REGION" \

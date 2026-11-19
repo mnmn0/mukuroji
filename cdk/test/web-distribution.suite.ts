@@ -1,6 +1,10 @@
 /** Registers tests for the CloudFront distribution that serves the Web app and API. */
 import { expect, test } from '@jest/globals';
 import { Match } from 'aws-cdk-lib/assertions';
+import {
+  API_CONTENT_SECURITY_POLICY,
+  buildWebContentSecurityPolicy,
+} from '../lib/subsystems/web-response-headers';
 import { synthesizedTemplate } from './test-support';
 
 /**
@@ -176,4 +180,105 @@ test('accepts presigned browser file uploads from the Web origin', () => {
   synthesizedTemplate.hasOutput('WebUrl', {});
   synthesizedTemplate.hasOutput('WebBucketName', {});
   synthesizedTemplate.hasOutput('WebDistributionId', {});
+});
+
+/** Security headers both CloudFront behaviors send, overriding the origin. */
+const sharedSecurityHeaders = {
+  ContentTypeOptions: { Override: true },
+  FrameOptions: { FrameOption: 'DENY', Override: true },
+  ReferrerPolicy: { ReferrerPolicy: 'no-referrer', Override: true },
+  StrictTransportSecurity: { AccessControlMaxAgeSec: 31_536_000, Override: true },
+  XSSProtection: { Protection: false, Override: true },
+};
+
+/**
+ * Returns the security headers of the response headers policy whose logical ID starts with the prefix.
+ *
+ * @param logicalIdPrefix Construct ID the policy's logical ID starts with.
+ * @returns The policy's `SecurityHeadersConfig` property.
+ */
+function requireSecurityHeadersConfig(
+  logicalIdPrefix: string,
+): Record<string, unknown> {
+  const policies = Object.entries(
+    synthesizedTemplate.findResources('AWS::CloudFront::ResponseHeadersPolicy'),
+  ).filter(([logicalId]) => logicalId.startsWith(logicalIdPrefix));
+  expect(policies).toHaveLength(1);
+  return policies[0][1].Properties.ResponseHeadersPolicyConfig.SecurityHeadersConfig;
+}
+
+test('builds a Web CSP that only loads code from the Web origin', () => {
+  const policy = buildWebContentSecurityPolicy({
+    fileBucketSource: 'https://*.s3.ap-northeast-1.amazonaws.com',
+    realtimeWebSocketOrigin: 'wss://abc123.execute-api.ap-northeast-1.amazonaws.com',
+  });
+
+  expect(policy.split('; ')).toEqual([
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self'",
+    "worker-src 'self'",
+    "connect-src 'self' wss://abc123.execute-api.ap-northeast-1.amazonaws.com https://*.s3.ap-northeast-1.amazonaws.com",
+    "img-src 'self' data: blob: https://*.s3.ap-northeast-1.amazonaws.com",
+    "media-src 'self' blob: https://*.s3.ap-northeast-1.amazonaws.com",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ]);
+  expect(policy).not.toMatch(/unsafe-inline|unsafe-eval/);
+});
+
+test('sends the Web CSP and security headers with the SPA', () => {
+  const config = requireDistributionConfig();
+  expect(config.DefaultCacheBehavior).toEqual(expect.objectContaining({
+    ResponseHeadersPolicyId: {
+      Ref: expect.stringMatching(/^WebResponseHeadersPolicy/),
+    },
+  }));
+
+  const headers = requireSecurityHeadersConfig('WebResponseHeadersPolicy');
+  expect(headers).toEqual(expect.objectContaining(sharedSecurityHeaders));
+  expect(headers.ContentSecurityPolicy).toEqual({
+    ContentSecurityPolicy: {
+      'Fn::Join': ['', [
+        "default-src 'self'; script-src 'self'; style-src 'self'; worker-src 'self'; connect-src 'self' ",
+        { 'Fn::GetAtt': [expect.stringMatching(/^RealtimeWebSocketApi/), 'ApiEndpoint'] },
+        ' https://*.s3.',
+        { Ref: 'AWS::Region' },
+        '.',
+        { Ref: 'AWS::URLSuffix' },
+        "; img-src 'self' data: blob: https://*.s3.",
+        { Ref: 'AWS::Region' },
+        '.',
+        { Ref: 'AWS::URLSuffix' },
+        "; media-src 'self' blob: https://*.s3.",
+        { Ref: 'AWS::Region' },
+        '.',
+        { Ref: 'AWS::URLSuffix' },
+        "; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+      ]],
+    },
+    Override: true,
+  });
+});
+
+test('sends a deny-all CSP and security headers with /api/* responses', () => {
+  const behaviors = requireDistributionConfig().CacheBehaviors as Record<string, unknown>[];
+  expect(behaviors[0]).toEqual(expect.objectContaining({
+    PathPattern: '/api/*',
+    ResponseHeadersPolicyId: {
+      Ref: expect.stringMatching(/^ApiResponseHeadersPolicy/),
+    },
+  }));
+
+  const headers = requireSecurityHeadersConfig('ApiResponseHeadersPolicy');
+  expect(headers).toEqual(expect.objectContaining(sharedSecurityHeaders));
+  expect(headers.ContentSecurityPolicy).toEqual({
+    ContentSecurityPolicy: API_CONTENT_SECURITY_POLICY,
+    Override: true,
+  });
+  expect(API_CONTENT_SECURITY_POLICY).toBe(
+    "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  );
 });
