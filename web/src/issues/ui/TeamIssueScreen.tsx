@@ -123,6 +123,9 @@ import {
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { IssueToolbar } from './TeamIssueToolbar'
 import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
+import { TaskCalendarView } from '../../tasks/ui/TaskCalendarView'
+import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
+import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
 import { listTaskGanttRowTasks, type TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
 import { resolveTeamIssueGroupValue } from '../model/teamIssueDisplay'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
@@ -220,6 +223,7 @@ export function TeamIssueScreen({
   const t = useMemo(() => createTranslator(locale), [locale])
   const { openMobileSidebar } = useWorkspaceSidebarController()
   const [localViewMode, setLocalViewMode] = useState<IssueViewMode>(initialViewMode)
+  const [calendarMonth, setCalendarMonth] = useState(() => getCurrentTaskMonth())
   const [localSearchQuery, setLocalSearchQuery] = useState('')
   const [localStatusFilter, setLocalStatusFilter] = useState<string>('all')
   const [localWorkItemTypeFilter, setLocalWorkItemTypeFilter] = useState<string>('all')
@@ -572,14 +576,17 @@ export function TeamIssueScreen({
     : undefined, [activeTeam, configuration, ganttGroupBy, ganttGroupDirection, t])
   // Keyboard navigation and selection follow the rows shown: the outline order without the rows
   // under a collapsed parent, and in the Gantt chart its groups and schedule order as well.
+  // The calendar keeps only the cards of the shown month and the unscheduled bucket.
   const navigableIssues = useMemo(
     () => viewMode === 'gantt'
       ? listTaskGanttRowTasks(visibleIssues, {
           ...(ganttOutline ? { outline: ganttOutline } : {}),
           ...(ganttGroup ? { group: ganttGroup } : {}),
         })
-      : outlineRows ? outlineRows.map((row) => row.item) : visibleIssues,
-    [ganttGroup, ganttOutline, outlineRows, viewMode, visibleIssues],
+      : viewMode === 'calendar'
+        ? listTaskCalendarMonthTasks(visibleIssues, calendarMonth)
+        : outlineRows ? outlineRows.map((row) => row.item) : visibleIssues,
+    [calendarMonth, ganttGroup, ganttOutline, outlineRows, viewMode, visibleIssues],
   )
   const visibleIssueActionTargets = useMemo(
     () => navigableIssues.map((issue) => ({
@@ -1657,6 +1664,16 @@ export function TeamIssueScreen({
                       selectedIssueId={selectedIssueId}
                       t={t}
                       workspaceMembers={workspaceMembers}
+                    />
+                  ) : viewMode === 'calendar' ? (
+                    <TaskCalendarView
+                      configuration={configuration}
+                      configurationsByTeam={ganttConfigurationsByTeam}
+                      month={calendarMonth}
+                      onMonthChange={setCalendarMonth}
+                      onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
+                      t={t}
+                      tasks={visibleIssues}
                     />
                   ) : viewMode === 'gantt' ? (
                     <TaskGanttView

@@ -441,7 +441,7 @@ export function TeamIssuePage() {
       fields: taskViewFields,
       // Effort values sort but do not group, because they have no shared buckets.
       sortFields: taskViewSortFields,
-      layoutModes: ['table', 'board', 'gantt'],
+      layoutModes: ['table', 'board', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },

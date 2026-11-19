@@ -12,6 +12,7 @@ export const issuesMessages = {
   'issues.view.table': 'テーブル',
   'issues.view.board': 'ボード',
   'issues.view.gantt': 'ガント',
+  'issues.view.calendar': 'カレンダー',
   'issues.filter.status': 'Issue ステータス',
   'issues.column.title': 'Issue',
   'issues.column.project': '遂行プロジェクト',
