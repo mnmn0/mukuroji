@@ -9,6 +9,7 @@ import {
   requireWorkspaceAdministration,
   toProjectDataErrorResponse,
 } from '../shared/project-access'
+import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { projectWorkspaceSearchDocumentBestEffort } from '../shared/search-access'
 import { projectProjectSearchDocumentBestEffort } from './project-charter-routes'
@@ -38,6 +39,8 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         principal.directoryId,
         body,
         createApiMutationContext(c, principal, body ?? {}),
+      
+        createDirectoryAuthorizationChecks(principal),
       )
     })
   })
@@ -52,6 +55,8 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         teamId,
         body,
         createApiMutationContext(c, principal, { teamId, body }),
+      
+        createDirectoryAuthorizationChecks(principal),
       )
       await projectTeamSearchDocument(
         principal.directoryId,
@@ -73,6 +78,8 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         principal.directoryId,
         teamId,
         createApiMutationContext(c, principal, { teamId }),
+      
+        createDirectoryAuthorizationChecks(principal),
       )
       await projectTeamSearchDocument(
         principal.directoryId,
@@ -96,6 +103,8 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         teamId,
         body,
         createApiMutationContext(c, principal, { teamId, body }),
+      
+        createDirectoryAuthorizationChecks(principal),
       )
     })
   })
@@ -112,6 +121,8 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         projectId,
         body,
         createApiMutationContext(c, principal, { teamId, projectId, body }),
+      
+        createDirectoryAuthorizationChecks(principal),
       )
       await projectProjectSearchDocumentBestEffort(
         principal.directoryId,
@@ -133,6 +144,8 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         teamId,
         projectId,
         createApiMutationContext(c, principal, { teamId, projectId }),
+      
+        createDirectoryAuthorizationChecks(principal),
       )
       await projectProjectSearchDocumentBestEffort(
         principal.directoryId,
@@ -189,8 +202,9 @@ async function handleDirectoryAdministration(
  * Expected directory administration failures, answered with their status and stable code so the
  * client can tell a stale list or a concurrent change from an infrastructure failure.
  */
-const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 409 | 413 | 503>> = {
+const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 403 | 409 | 413 | 503>> = {
   InvalidDirectoryOrder: 400,
+  DirectoryAuthorizationChanged: 403,
   DirectoryOrderConflict: 409,
   TeamNotArchived: 409,
   ProjectNotArchived: 409,
@@ -198,6 +212,22 @@ const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 409 | 4
   DirectoryArchiveCleanupPending: 409,
   DirectoryOrderLimitExceeded: 413,
   PlanningUnavailable: 503,
+}
+
+/**
+ * Builds the guards that the administrator is still an active member with the same membership
+ * version and Enterprise control revision when a directory change commits, so privileges revoked
+ * after authentication cannot authorize the write.
+ *
+ * @param principal - Authenticated administrator.
+ * @returns Condition checks added to the directory transaction.
+ */
+function createDirectoryAuthorizationChecks(principal: DirectoryAdministrationPrincipal) {
+  return createPlanningCallerAuthorizationConditionChecks(
+    principal,
+    [],
+    principal.principalKind !== 'service-account',
+  )
 }
 
 /**

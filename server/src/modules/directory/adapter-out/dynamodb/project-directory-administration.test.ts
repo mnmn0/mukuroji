@@ -69,6 +69,7 @@ function createProjectRow(
  * @param failTransactions - Whether transactions fail on a lost condition.
  * @param planningItems - Planning rows served by key reads, keyed by `workspaceId|recordKey`.
  * @param cleanupLocators - Webhook grant cleanup locators still waiting for an archive cleanup.
+ * @param failedIndex - Index of the transaction item that fails its condition, when one does.
  * @returns The client and the commands it sent.
  */
 function createClient(
@@ -76,6 +77,7 @@ function createClient(
   failTransactions = false,
   planningItems: Record<string, Record<string, unknown>> = {},
   cleanupLocators: Array<Record<string, unknown>> = [],
+  failedIndex?: number,
 ) {
   const sent: SentCommand[] = []
   const send = async (command: SentCommand) => {
@@ -94,10 +96,14 @@ function createClient(
     if (command.input.TableName === 'PlanningTable' && isPlanningKey(key)) {
       return { Item: planningItems[`${key.workspaceId}|${key.recordKey}`] }
     }
-    if ('TransactItems' in command.input && failTransactions) {
+    if ('TransactItems' in command.input && (failTransactions || failedIndex !== undefined)) {
+      const items = command.input.TransactItems
+      const length = Array.isArray(items) ? items.length : 1
       throw Object.assign(new Error('Transaction was canceled.'), {
         name: 'TransactionCanceledException',
-        CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+        CancellationReasons: Array.from({ length }, (_, index) => ({
+          Code: failedIndex === undefined || failedIndex === index ? 'ConditionalCheckFailed' : 'None',
+        })),
       })
     }
     return {}
@@ -337,7 +343,7 @@ test('restores an archived Team and reports a Team that is not archived', async 
       Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
       UpdateExpression: 'REMOVE archivedAt',
       ConditionExpression:
-        '#entryType = :entryType AND #teamId = :teamId AND attribute_exists(#archivedAt)',
+        '#entryType = :entryType AND #teamId = :teamId AND #archivedAt = :readArchivedAt',
     }),
   }]])
 })
@@ -605,4 +611,33 @@ test('refuses a restore while the archive Webhook grant cleanup is still running
   await expect(client.restoreProject(directoryId, 'beta', 'gone'))
     .rejects.toMatchObject({ status: 409, code: 'DirectoryArchiveCleanupPending' })
   expect(transactions()).toEqual([])
+})
+
+test('binds a restore to the archive it read and fences every change by the caller authorization', async () => {
+  const archivedAt = '2026-06-06T00:00:00.000Z'
+  const authorization = [{
+    ConditionCheck: {
+      TableName: 'WorkspaceAccessTable',
+      Key: { workspaceId: directoryId, recordKey: 'MEMBER#admin' },
+      ConditionExpression: '#version = :expectedVersion',
+    },
+  }]
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10, { archivedAt }),
+  ])
+
+  await client.restoreTeam(directoryId, 'alpha', undefined, authorization)
+  expect(transactions()).toEqual([[
+    {
+      Update: expect.objectContaining({
+        ConditionExpression: expect.stringContaining('#archivedAt = :readArchivedAt'),
+        ExpressionAttributeValues: expect.objectContaining({ ':readArchivedAt': archivedAt }),
+      }),
+    },
+    ...authorization,
+  ]])
+
+  const revoked = createClient([createTeamRow('alpha', 10)], false, {}, [], 1)
+  await expect(revoked.client.renameTeam(directoryId, 'alpha', { nameJa: '改名' }, undefined, authorization))
+    .rejects.toMatchObject({ status: 403, code: 'DirectoryAuthorizationChanged' })
 })

@@ -508,6 +508,11 @@ export type RestoredDirectoryTeam = {
   nameRevision: number
 }
 
+/** Condition checks proving the caller is still authorized when a directory change commits. */
+export type DirectoryAuthorizationConditionChecks = NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>
+
 /** What the search document of an active Project is built from, read in one snapshot. */
 export type ProjectSearchSource = {
   /** Charter state of the Project. */
@@ -911,6 +916,7 @@ export type ProjectDirectoryClient = {
    * @param teamId - Team to rename.
    * @param input - Untrusted request body with the new names.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The response body and the Team's rename count.
    */
   renameTeam(
@@ -918,6 +924,7 @@ export type ProjectDirectoryClient = {
     teamId: string,
     input: unknown,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
   ): Promise<RenamedDirectoryTeam>
   /**
    * Renames an active Project or changes its color without changing its ID.
@@ -927,6 +934,7 @@ export type ProjectDirectoryClient = {
    * @param projectId - Project to rename.
    * @param input - Untrusted request body with the new names and optional color.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The Project identifiers, its stored names, and its color.
    */
   renameProject(
@@ -935,6 +943,7 @@ export type ProjectDirectoryClient = {
     projectId: string,
     input: unknown,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
   ): Promise<RenameDirectoryProjectResponse>
   /**
    * Restores an archived Team.
@@ -942,12 +951,14 @@ export type ProjectDirectoryClient = {
    * @param directoryId - Workspace directory identifier.
    * @param teamId - Archived Team to restore.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The response body and the Team's names and rename count.
    */
   restoreTeam(
     directoryId: string,
     teamId: string,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
   ): Promise<RestoredDirectoryTeam>
   /**
    * Restores an archived Project of an active Team.
@@ -956,6 +967,7 @@ export type ProjectDirectoryClient = {
    * @param teamId - Active Team that owns the Project.
    * @param projectId - Archived Project to restore.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The restored Project identifiers.
    */
   restoreProject(
@@ -963,6 +975,7 @@ export type ProjectDirectoryClient = {
     teamId: string,
     projectId: string,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
   ): Promise<RestoreDirectoryProjectResponse>
   /**
    * Sets the display order of every active Team.
@@ -970,12 +983,14 @@ export type ProjectDirectoryClient = {
    * @param directoryId - Workspace directory identifier.
    * @param input - Untrusted request body listing every active Team ID in the new order.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The Team identifiers in their stored order.
    */
   reorderTeams(
     directoryId: string,
     input: unknown,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
   ): Promise<ReorderDirectoryTeamsInput>
   /**
    * Sets the display order of every active Project of one active Team.
@@ -984,6 +999,7 @@ export type ProjectDirectoryClient = {
    * @param teamId - Active Team whose Projects are reordered.
    * @param input - Untrusted request body listing every active Project ID in the new order.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The Project identifiers in their stored order.
    */
   reorderProjects(
@@ -991,6 +1007,7 @@ export type ProjectDirectoryClient = {
     teamId: string,
     input: unknown,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
   ): Promise<ReorderDirectoryProjectsInput>
   /**
    * Reads, in one strongly consistent read, what the search document of an active Project is
@@ -2742,6 +2759,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param teamId - Team to rename.
    * @param input - Untrusted request body with the new names.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The Team identifier and its stored names.
    */
   async renameTeam(
@@ -2749,6 +2767,7 @@ export class DynamoDbProjectDirectoryClient {
     teamId: string,
     input: unknown,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
   ): Promise<RenamedDirectoryTeam> {
     await this.ensureLocalAuditTable()
     const names = readDirectoryDisplayNames(input)
@@ -2773,7 +2792,7 @@ export class DynamoDbProjectDirectoryClient {
     // overwrite a newer one.
     const nameRevision = readNameRevision + 1
     const condition = withReadNamesCondition(createActiveTeamRowCondition(teamId), team)
-    await this.sendDirectoryAdministrationTransaction([
+    await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
       {
         Update: {
           TableName: this.tableName,
@@ -2811,6 +2830,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param projectId - Project to rename.
    * @param input - Untrusted request body with the new names and optional color.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The Project identifiers, its stored names, and its color.
    */
   async renameProject(
@@ -2819,6 +2839,7 @@ export class DynamoDbProjectDirectoryClient {
     projectId: string,
     input: unknown,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
   ): Promise<RenameDirectoryProjectResponse> {
     await this.ensureLocalAuditTable()
     const names = readDirectoryDisplayNames(input)
@@ -2844,7 +2865,7 @@ export class DynamoDbProjectDirectoryClient {
       createActiveProjectRowCondition(teamId, projectId),
       project,
     )
-    await this.sendDirectoryAdministrationTransaction([
+    await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
       {
         Update: {
           TableName: this.tableName,
@@ -2894,12 +2915,14 @@ export class DynamoDbProjectDirectoryClient {
    * @param directoryId - Workspace directory identifier.
    * @param teamId - Archived Team to restore.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The restored Team identifier.
    */
   async restoreTeam(
     directoryId: string,
     teamId: string,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
   ): Promise<RestoredDirectoryTeam> {
     await this.ensureLocalAuditTable()
     const items = await this.readValidDirectoryItems(directoryId, true)
@@ -2930,20 +2953,25 @@ export class DynamoDbProjectDirectoryClient {
       new Date().toISOString(),
     )
 
-    await this.sendDirectoryAdministrationTransaction([
+    await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
       {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: team.entryKey },
           UpdateExpression: 'REMOVE archivedAt',
+          // Bound to the archive read, so a delayed restore cannot undo a newer archive.
           ConditionExpression:
-            '#entryType = :entryType AND #teamId = :teamId AND attribute_exists(#archivedAt)',
+            '#entryType = :entryType AND #teamId = :teamId AND #archivedAt = :readArchivedAt',
           ExpressionAttributeNames: {
             '#archivedAt': 'archivedAt',
             '#entryType': 'entryType',
             '#teamId': 'teamId',
           },
-          ExpressionAttributeValues: { ':entryType': 'team', ':teamId': teamId },
+          ExpressionAttributeValues: {
+            ':entryType': 'team',
+            ':teamId': teamId,
+            ':readArchivedAt': team.archivedAt,
+          },
         },
       },
       ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
@@ -2974,6 +3002,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param teamId - Active Team that owns the Project.
    * @param projectId - Archived Project to restore.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The restored Project identifiers.
    */
   async restoreProject(
@@ -2981,6 +3010,7 @@ export class DynamoDbProjectDirectoryClient {
     teamId: string,
     projectId: string,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
   ): Promise<RestoreDirectoryProjectResponse> {
     await this.ensureLocalAuditTable()
     const items = await this.readValidDirectoryItems(directoryId, true)
@@ -3023,15 +3053,16 @@ export class DynamoDbProjectDirectoryClient {
       new Date().toISOString(),
     )
 
-    await this.sendDirectoryAdministrationTransaction([
+    await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
       {
         Update: {
           TableName: this.tableName,
           Key: { directoryId, entryKey: project.entryKey },
           UpdateExpression: 'REMOVE archivedAt',
+          // Bound to the archive read, so a delayed restore cannot undo a newer archive.
           ConditionExpression:
             '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND ' +
-            'attribute_exists(#archivedAt)',
+            '#archivedAt = :readArchivedAt',
           ExpressionAttributeNames: {
             '#archivedAt': 'archivedAt',
             '#entryType': 'entryType',
@@ -3042,6 +3073,7 @@ export class DynamoDbProjectDirectoryClient {
             ':entryType': 'project',
             ':projectId': projectId,
             ':teamId': teamId,
+            ':readArchivedAt': project.archivedAt,
           },
         },
       },
@@ -3074,12 +3106,14 @@ export class DynamoDbProjectDirectoryClient {
    * @param directoryId - Workspace directory identifier.
    * @param input - Untrusted request body listing every active Team ID in the new order.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The Team identifiers in their stored order.
    */
   async reorderTeams(
     directoryId: string,
     input: unknown,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
   ): Promise<ReorderDirectoryTeamsInput> {
     await this.ensureLocalAuditTable()
     const teamIds = readDirectoryOrderIds(input, 'teamIds')
@@ -3101,7 +3135,7 @@ export class DynamoDbProjectDirectoryClient {
     )
 
     if (writes.changed) {
-      await this.sendDirectoryAdministrationTransaction([
+      await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
         ...writes.items,
         ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
           directoryId,
@@ -3125,6 +3159,7 @@ export class DynamoDbProjectDirectoryClient {
    * @param teamId - Active Team whose Projects are reordered.
    * @param input - Untrusted request body listing every active Project ID in the new order.
    * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
    * @returns The Project identifiers in their stored order.
    */
   async reorderProjects(
@@ -3132,6 +3167,7 @@ export class DynamoDbProjectDirectoryClient {
     teamId: string,
     input: unknown,
     auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
   ): Promise<ReorderDirectoryProjectsInput> {
     await this.ensureLocalAuditTable()
     const projectIds = readDirectoryOrderIds(input, 'projectIds')
@@ -3159,7 +3195,7 @@ export class DynamoDbProjectDirectoryClient {
     )
 
     if (writes.changed) {
-      await this.sendDirectoryAdministrationTransaction([
+      await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
         ...writes.items,
         { ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey, teamId) },
         ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
@@ -3831,11 +3867,14 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * Commits a rename, restore, or reorder and maps a lost condition to a conflict.
    *
-   * @param transactItems - State updates, guards, and audit events to commit together.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized.
+   * @param stateItems - State updates, guards, and audit events to commit together.
    */
   private async sendDirectoryAdministrationTransaction(
-    transactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks,
+    stateItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ) {
+    const transactItems = [...stateItems, ...authorizationConditionChecks]
     if (transactItems.length > DYNAMODB_TRANSACTION_MAX_ACTIONS) {
       throw new ProjectDataError(
         413,
@@ -3847,6 +3886,17 @@ export class DynamoDbProjectDirectoryClient {
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
     } catch (error) {
+      const failedAuthorization = authorizationConditionChecks.some((_, index) =>
+        isTransactionConditionalFailureAt(error, stateItems.length + index)
+      )
+      if (failedAuthorization) {
+        throw new ProjectDataError(
+          403,
+          'DirectoryAuthorizationChanged',
+          'Your permission changed. Reload and try again.',
+        )
+      }
+
       if (hasTransactionConditionalFailure(error)) {
         throw createProjectDataConflictError()
       }
