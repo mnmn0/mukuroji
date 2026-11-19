@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { PUBLIC_API_OPENAPI_DOCUMENT } from '@mukuroji/contracts'
 import {
   GetCommand,
   QueryCommand,
@@ -107,6 +108,30 @@ describe('Agent Run domain', () => {
     for (const input of invalid) {
       expect(() => readStartAgentRunRequest(input)).toThrow(AgentRunError)
     }
+  })
+
+  test('documents the agent name and instance ID rules on every request schema that takes them', () => {
+    const documented: string[] = []
+    for (const [name, schema] of Object.entries(PUBLIC_API_OPENAPI_DOCUMENT.components.schemas)) {
+      if (!name.endsWith('Request') || !('properties' in schema)) continue
+      for (const [field, property] of Object.entries(schema.properties)) {
+        if (field !== 'agentName' && field !== 'instanceId' && field !== 'agentInstanceId') continue
+        // Generated clients check only the length, so the description must name what the server also rejects.
+        expect(property).toMatchObject({ description: expect.stringContaining('rejected with validation_failed') })
+        documented.push(`${name}.${field}`)
+      }
+    }
+    expect(documented).toEqual(expect.arrayContaining([
+      'StartAgentRunRequest.agentName',
+      'StartAgentRunRequest.instanceId',
+      'TakeOverAgentRunRequest.agentName',
+      'TakeOverAgentRunRequest.instanceId',
+      'ResumeAgentRunRequest.agentName',
+      'ResumeAgentRunRequest.instanceId',
+      'HeartbeatAgentRunRequest.instanceId',
+      'FinishAgentRunRequest.instanceId',
+      'ReportAgentRunRequest.instanceId',
+    ]))
   })
 
   test('derives stalled from the lease at read time without changing the state', () => {

@@ -960,6 +960,69 @@ describe('public Agent Run service', () => {
     await expect(takeOverDuring(undefined, 'unrelated')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
   })
 
+  test('fences the caller\'s access when it takes over and reports access that changed meanwhile', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, allowTakeoverAfterLeaseExpiry: true,
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    const stalled = { ...createHeldRun('task-1', 'laptop-1'), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
+    store.seed(stalled)
+    let planningRevision = 3
+    const planning = getTestAppDependencies().workItems.planning
+    planning.getAuthorizationRevision = async () => planningRevision
+    setTestAppDependencies({
+      planning,
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Takes over the stalled run as another instance.
+     *
+     * @param key - Idempotency key.
+     * @returns The take over response.
+     */
+    const takeOver = (key: string) => runWithTestAppDependencies(() => service.takeOver(
+      credential, 'core-team', 'task-1', stalled.runId,
+      { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+      { requestId: 'take-over', idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    const commit = store.commit.bind(store)
+    // Team or Project access changes after authorization, so the commit's access guard cancels it.
+    store.commit = async () => {
+      planningRevision += 1
+      throw createAgentRunCommitConflictError()
+    }
+    await expect(takeOver('access-changed')).rejects.toMatchObject({ code: 'WorkItemAuthorizationChanged' })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)?.runId).toBe(stalled.runId)
+
+    const committed: unknown[][] = []
+    store.commit = async (items, fenceItemCount) => {
+      committed.push([...items])
+      return commit(items, fenceItemCount)
+    }
+    const taken = await takeOver('stable')
+    // The commit fails if the caller's membership or Team and Project access changed since authorization.
+    expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({
+      Key: { workspaceId, recordKey: 'MEMBER#demo@example.com' },
+      ConditionExpression: expect.any(String),
+    }) })
+    expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({
+      Key: { workspaceId: `FENCE#${workspaceId}`, recordKey: 'META' },
+    }) })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)?.runId).toBe(taken.run.runId)
+  })
+
   test('resumes a started Work Item after a paused run with a linked run, audit, and history', async () => {
     const previous = process.env.AUDIT_EVENTS_TABLE_NAME
     process.env.AUDIT_EVENTS_TABLE_NAME = 'AuditEvents'

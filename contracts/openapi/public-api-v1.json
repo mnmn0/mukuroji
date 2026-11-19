@@ -1311,7 +1311,7 @@
         "additionalProperties": false,
         "properties": {
           "agentInstanceId": {
-            "description": "Opaque instance identifier of the calling agent. The request fails with an `agent_run_conflict` reason when another instance holds the Work Item.",
+            "description": "Opaque instance identifier of the calling agent. The request fails with an `agent_run_conflict` reason when another instance holds the Work Item. Must not start or end with whitespace and must not contain control characters (U+0000-U+001F, U+007F); such values, such as \" laptop\", are rejected with validation_failed.",
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
@@ -1754,7 +1754,7 @@
         "additionalProperties": false,
         "properties": {
           "instanceId": {
-            "description": "Instance identifier sent when the run started. Another instance of the same user cannot extend or close the run.",
+            "description": "Instance identifier sent when the run started. Another instance of the same user cannot extend or close the run. Must not start or end with whitespace and must not contain control characters (U+0000-U+001F, U+007F); such values, such as \" laptop\", are rejected with validation_failed.",
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
@@ -1778,7 +1778,7 @@
         "additionalProperties": false,
         "properties": {
           "instanceId": {
-            "description": "Instance identifier sent when the run started. Another instance of the same user cannot extend or close the run.",
+            "description": "Instance identifier sent when the run started. Another instance of the same user cannot extend or close the run. Must not start or end with whitespace and must not contain control characters (U+0000-U+001F, U+007F); such values, such as \" laptop\", are rejected with validation_failed.",
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
@@ -2646,7 +2646,7 @@
             "type": "integer"
           },
           "instanceId": {
-            "description": "Instance identifier sent when the run started. Mukuroji stores and compares only its hash.",
+            "description": "Instance identifier sent when the run started. Mukuroji stores and compares only its hash. Must not start or end with whitespace and must not contain control characters (U+0000-U+001F, U+007F); such values, such as \" laptop\", are rejected with validation_failed.",
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
@@ -2748,6 +2748,7 @@
         "description": "Resumes a started Work Item without an active run. The Work Item status does not change.",
         "properties": {
           "agentName": {
+            "description": "Display name of the agent. Letters and digits in any script, spaces, dots (.), underscores (_), and hyphens (-), without leading or trailing spaces. Other characters, such as \"Codex/CLI\", are rejected with validation_failed.",
             "maxLength": 64,
             "minLength": 1,
             "type": "string"
@@ -2763,7 +2764,7 @@
             "type": "integer"
           },
           "instanceId": {
-            "description": "Opaque, stable identifier of the agent instance. Mukuroji stores and compares only its hash.",
+            "description": "Opaque, stable identifier of the agent instance. Mukuroji stores and compares only its hash. Must not start or end with whitespace and must not contain control characters (U+0000-U+001F, U+007F); such values, such as \" laptop\", are rejected with validation_failed.",
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
@@ -2833,6 +2834,7 @@
         "additionalProperties": false,
         "properties": {
           "agentName": {
+            "description": "Display name of the agent. Letters and digits in any script, spaces, dots (.), underscores (_), and hyphens (-), without leading or trailing spaces. Other characters, such as \"Codex/CLI\", are rejected with validation_failed.",
             "maxLength": 64,
             "minLength": 1,
             "type": "string"
@@ -2842,7 +2844,7 @@
             "type": "integer"
           },
           "instanceId": {
-            "description": "Opaque, stable identifier of the agent instance. Mukuroji stores and compares only its hash.",
+            "description": "Opaque, stable identifier of the agent instance. Mukuroji stores and compares only its hash. Must not start or end with whitespace and must not contain control characters (U+0000-U+001F, U+007F); such values, such as \" laptop\", are rejected with validation_failed.",
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
@@ -2890,12 +2892,13 @@
         "additionalProperties": false,
         "properties": {
           "agentName": {
+            "description": "Display name of the agent. Letters and digits in any script, spaces, dots (.), underscores (_), and hyphens (-), without leading or trailing spaces. Other characters, such as \"Codex/CLI\", are rejected with validation_failed.",
             "maxLength": 64,
             "minLength": 1,
             "type": "string"
           },
           "instanceId": {
-            "description": "Opaque, stable identifier of the instance taking over. Mukuroji stores and compares only its hash.",
+            "description": "Opaque, stable identifier of the instance taking over. Mukuroji stores and compares only its hash. Must not start or end with whitespace and must not contain control characters (U+0000-U+001F, U+007F); such values, such as \" laptop\", are rejected with validation_failed.",
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
@@ -2985,7 +2988,7 @@
             "type": "array"
           },
           "agentInstanceId": {
-            "description": "Opaque instance identifier of the calling agent. The request fails with an `agent_run_conflict` reason when another instance holds the Work Item.",
+            "description": "Opaque instance identifier of the calling agent. The request fails with an `agent_run_conflict` reason when another instance holds the Work Item. Must not start or end with whitespace and must not contain control characters (U+0000-U+001F, U+007F); such values, such as \" laptop\", are rejected with validation_failed.",
             "maxLength": 256,
             "minLength": 1,
             "type": "string"
@@ -8327,7 +8330,7 @@
             }
           },
           {
-            "description": "Restricts the list to runs started by this instance. The server compares only its hash.",
+            "description": "Restricts the list to runs started by this instance. The server compares only its hash. Must not start or end with whitespace and must not contain control characters (U+0000-U+001F, U+007F); such values, such as \" laptop\", are rejected with validation_failed.",
             "in": "query",
             "name": "instanceId",
             "schema": {

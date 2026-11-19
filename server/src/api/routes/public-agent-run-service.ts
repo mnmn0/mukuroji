@@ -748,8 +748,15 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
 
     /** Supersedes a stalled run of another instance and claims the Work Item for the caller in one transaction. */
     async takeOver(credential, teamId, workItemId, runId, input, context, idempotency) {
-      const principal = await resolveWriter(credential, teamId)
-      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+      // Like a start or a resume, the take over commits only while the member, Team, and Project access
+      // it was authorized with is unchanged.
+      const authorization = await resolveStableWorkItemAuthorization(
+        credential.workspaceId,
+        async () => await resolveWriter(credential, teamId),
+        async (principal) => (await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')).detail,
+      )
+      const { principal, authorizationSnapshot } = authorization
+      const detail = authorization.value
       if (detail.issue.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
       const store = workItemDependencies.agentRuns
       const settings = await store.getSettings(principal.directoryId, teamId)
@@ -808,6 +815,8 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
           // The take over was authorized against this assignment and these settings.
           createWorkItemRevisionConditionCheck(getTeamIssuesTableName(), principal.directoryId, teamId, workItemId, detail.issue.revision),
           store.createSettingsRevisionCheck(principal.directoryId, teamId, settings.revision),
+          // The caller's membership and Team and Project access must not have changed since authorization.
+          ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
           ...(supersededAudit ? [supersededAudit] : []),
           ...(startedAudit ? [startedAudit] : []),
           ...(receipt ? [receipt.transactWriteItem] : []),
@@ -816,8 +825,10 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         if (!(error instanceof AgentRunError)) throw error
         if (error.reason === 'agent_run_not_active') throw await explainTakeOverMiss(principal, teamId, runId)
         if (error.category !== 'temporarily_unavailable') throw error
-        // The Work Item or settings guard failed: report what changed instead of a retryable failure.
-        const latest = await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+        // A guard failed: report what changed instead of a retryable failure. Access is resolved again
+        // first, so a caller who lost access meanwhile gets the same answer as on a new request.
+        const current = await resolveWriter(credential, teamId)
+        const latest = await loadAuthorizedTeamIssue(current, teamId, workItemId, 'member')
         if (latest.detail.issue.assigneeUserId !== principal.userKey) throw createAgentRunForbiddenError()
         if (latest.detail.issue.statusCategory !== 'started') {
           throw new AgentRunError('conflict', 'Only a run on a started Work Item can be taken over. Ask a person to release it.', {
@@ -831,6 +842,12 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
         if (!latestSettings.allowTakeoverAfterLeaseExpiry) throw createAgentRunTakeoverDisabledError()
         if (latestSettings.revision !== settings.revision) {
           throw new AgentRunError('conflict', 'Agent settings changed during the request. Retry the take over.')
+        }
+        if (
+          current.workspaceMember.version !== principal.workspaceMember.version ||
+          await workItemDependencies.planning.getAuthorizationRevision(principal.directoryId) !== authorizationSnapshot.planningRevision
+        ) {
+          throw createWorkItemAuthorizationChangedError()
         }
         throw error
       }
