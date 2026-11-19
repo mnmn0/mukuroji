@@ -283,6 +283,17 @@ Web の Project 画面（`TaskPage`）は、表示中のレイアウトに合わ
 - Planning publish は 20 Team と partition あたり 1,000 件、Task view の relation 解決は 20 Team の上限のまま。
 - Work Item 作成は Team partition 全件を読まない。ID は key から決め、`sortOrder` は並び順 GSI の最大値を 1 件だけ読んで 10 足す。GSI は結果整合なので、ほぼ同時の作成で同じ `sortOrder` になることがある（一覧は ID で順序を決める）。
 
+## 階層（WBS）と roll-up
+
+`GET /api/teams/{teamId}/work-item-hierarchy` は Team の Work Item を親子の木として返す（`TeamWorkItemHierarchyResponse`）。Enterprise の route 権限は Team の Work Item 一覧と同じ `work-items.read` とする。各 node は `parentWorkItemId`、木の中の `depth`、`1.2.3` 形式の `wbsNumber`、兄弟の順序 `hierarchyRank`、子の ID（兄弟順）を持つ。`rollup` は呼び出し元が読める直接の子を 1 件以上持つ node にだけ付く。子がいても 1 件も読めない node には付かないので、クライアントは `rollup` がない場合を扱う。応答の `graphRevision` は、並び替えや indent / outdent で `PUT .../parent` に渡す `expectedGraphRevision` に使う。
+
+- 親は各 Work Item の `relationIds` にある `parent:<id>` から読む。兄弟は `hierarchyRank` の順に並ぶ（[兄弟の順序](work-item-configuration.md#兄弟の順序hierarchyrank)）。
+- 木と WBS 番号は archive されていない Team の全 Work Item から作るので、誰が読んでも同じ番号になる。応答には読める Work Item だけを入れる。親を読めない Work Item は `parentWorkItemId: null` と `parentHidden: true` を持ち（Web はその階層を変えさせない）、`depth` は読める祖先だけを数える。親が archive 済みか見つからない Work Item と、保存済みの循環を切った Work Item は最上位に置き、同じく `parentHidden: true` を付ける。並べ替えで保存済みの親を黙って外さないためである。
+- `rollup` は読める子孫だけ（読める親を通って届くもの）を数える：子の数、子孫の数、status category ごとの数、未完了の子孫の数、見積（`plannedEffortMinutes`）の合計と見積を持つ子孫の数、残工数の合計、子孫の日付の最小と最大（`startDate` / `endDate`）。親自身の値は含めない。期限だけの Work Item は期限を両端として数える。
+- 1 Team 1,000 件（`WORK_ITEM_HIERARCHY_MAX_ITEMS`）を超えると `413 WorkItemListLimitExceeded` を返す。
+
+Web の Team Work Item テーブルは、表示設定の「階層（WBS）で表示する」をオンにすると（グループ化していないとき）この木を outline として表示する。行は階層の順に並び、WBS 番号・字下げ・折りたたみ（ブラウザごとに Team 単位で記憶）・子の集計を示す。フィルタで親が隠れた行は、表示されている一番近い祖先の下に入る。タイトルにフォーカスがある行（または J/K で選んだ行）で Alt+Shift+→ / ← を押すと 1 つ下 / 上の階層へ、Alt+Shift+↑ / ↓ で兄弟の中で並べ替える。折りたたまれた行は J/K と一括選択の対象から外れる。
+
 ## 運用
 
 開発中の schema は既存 row を自動変換しない。Schema を更新した環境は保持済みの開発データを削除し、現行 application/CDK の seed または API で strict schema v2 row を作り直す。Seed には `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds`、正しい `schedule`、および schedule から導出した `dueDate` が必要である。

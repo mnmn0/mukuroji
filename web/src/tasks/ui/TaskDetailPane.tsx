@@ -189,6 +189,8 @@ export type TaskDetailPaneProps = {
   isLoading: boolean
   /** Whether a bulk mutation currently targets this Work Item. */
   isBulkOperationPending?: boolean
+  /** Whether an Undo or Redo of this Work Item is saving; edits wait for it. */
+  isHistoryRestorePending?: boolean
   /** Whether this pane is retained read-only after its live Project scope disappeared. */
   isRetainedDetail?: boolean
   /** Explanation shown when the retained detail can no longer be edited. */
@@ -302,6 +304,7 @@ export function TaskDetailPane({
   focusedRootCommentId,
   isLoading,
   isBulkOperationPending = false,
+  isHistoryRestorePending = false,
   isRetainedDetail = false,
   isRelationCandidatesLoading,
   locale,
@@ -344,6 +347,7 @@ export function TaskDetailPane({
     workItemId: task?.id ?? '',
   })
   const isWorkItemMutationPending = isIssueSaving ||
+    isHistoryRestorePending ||
     isAiPlanningOperationPending ||
     isAiSummaryOperationPending
   const [aiFormSeed, setAiFormSeed] = useState<WorkItemAiFormSeed>({
@@ -755,6 +759,7 @@ export function TaskDetailPane({
       !task.teamId ||
       !onUpdateIssue ||
       isIssueSavingRef.current ||
+      isHistoryRestorePending ||
       isAiPlanningOperationPendingRef.current ||
       isAiSummaryOperationPendingRef.current
     ) return

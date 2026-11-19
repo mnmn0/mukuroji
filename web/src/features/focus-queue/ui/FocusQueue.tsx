@@ -327,7 +327,9 @@ export function FocusQueue({
           <span>
             {t(mutationError === 'conflict'
               ? 'workspace.focus.actionConflict'
-              : 'workspace.focus.actionError')}
+              : mutationError === 'openChildren'
+                ? 'issues.error.openChildren'
+                : 'workspace.focus.actionError')}
           </span>
           <button
             className="min-h-[44px] px-3 font-semibold"

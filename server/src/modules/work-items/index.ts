@@ -9,6 +9,11 @@ export {
   type WorkItemScheduleConfirmationReservationRequest,
 } from './application/use-cases/confirm-work-item-schedule-change'
 export {
+  createTeamWorkItemHierarchyResponse,
+  type CreateTeamWorkItemHierarchyInput,
+  type TeamWorkItemHierarchySourceEntry,
+} from './application/use-cases/read-team-work-item-hierarchy'
+export {
   WorkItemContributorAssignmentError,
   listAddedContributorMembers,
   normalizeContributorAssignments,
@@ -162,6 +167,7 @@ export {
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
   type TeamIssuesClient,
+  type TeamWorkItemHierarchyEntry,
   type TeamIssuesResponse,
   type TriageAcceptanceTransactionInput,
   type TriageDuplicateContextTransactionContribution,

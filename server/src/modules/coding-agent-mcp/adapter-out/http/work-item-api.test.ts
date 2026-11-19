@@ -272,6 +272,12 @@ test('reads a task key and its creation time from the endpoint and treats an old
   const paths: string[] = []
   const api = createAgentWorkItemApi(config, async (url) => {
     paths.push(`${url.pathname}${url.search}`)
+    /**
+     * Builds a hierarchy response with the given fields.
+     *
+     * @param body - Fields that override the empty hierarchy.
+     * @returns The JSON response.
+     */
     const respond = (body: Record<string, unknown>) =>
       Response.json({ schemaVersion: 1, teamId: 'team', createdAt: '2026-09-01T00:00:00.000Z', ...body })
     switch (url.pathname) {
@@ -288,4 +294,33 @@ test('reads a task key and its creation time from the endpoint and treats an old
   expect(await api.taskKey('legacy-server')).toBeUndefined()
   await expect(api.taskKey('other')).rejects.toMatchObject({ code: 'invalid_response' })
   await expect(api.taskKey('lowercase')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('reads a task hierarchy from the endpoint and treats an older server as having none', async () => {
+  const paths: string[] = []
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    /**
+     * Builds a hierarchy response with the given fields.
+     *
+     * @param body - Fields that override the empty hierarchy.
+     * @returns The JSON response.
+     */
+    const respond = (body: Record<string, unknown>) =>
+      Response.json({ schemaVersion: 1, teamId: 'team', parentWorkItemId: null, childWorkItemIds: [], ...body })
+    switch (url.pathname) {
+      case '/api/v1/work-items/task/hierarchy':
+        return respond({ workItemId: 'task', parentWorkItemId: 'phase', childWorkItemIds: ['sub'], wbsNumber: '1.2' })
+      case '/api/v1/work-items/archived/hierarchy': return respond({ workItemId: 'archived' })
+      case '/api/v1/work-items/other/hierarchy': return respond({ workItemId: 'task', wbsNumber: '1' })
+      case '/api/v1/work-items/bad-number/hierarchy': return respond({ workItemId: 'bad-number', wbsNumber: '1.0' })
+      default: return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+    }
+  })
+  expect(await api.hierarchy('task')).toEqual({ parentWorkItemId: 'phase', childWorkItemIds: ['sub'], wbsNumber: '1.2' })
+  expect(paths[0]).toBe('/api/v1/work-items/task/hierarchy?teamId=team')
+  expect(await api.hierarchy('archived')).toEqual({ parentWorkItemId: null, childWorkItemIds: [] })
+  expect(await api.hierarchy('legacy-server')).toBeUndefined()
+  await expect(api.hierarchy('other')).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.hierarchy('bad-number')).rejects.toMatchObject({ code: 'invalid_response' })
 })
