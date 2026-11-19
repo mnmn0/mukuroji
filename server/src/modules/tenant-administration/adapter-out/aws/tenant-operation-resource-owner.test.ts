@@ -876,7 +876,9 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
   })
 
-  test('exports audit events only through the public audit event view', async () => {
+  for (const includeMalformedRow of [false, true]) test(includeMalformedRow
+    ? 'fails the export page instead of skipping a malformed audit event'
+    : 'exports audit events only through the public audit event view', async () => {
     const auditEvent = createAuditEvent({
       context: createMutationAuditContext({
         workspaceId: 'workspace-1',
@@ -910,10 +912,12 @@ describe('AwsTenantOperationResourceOwner', () => {
           return {
             response: {
               body: new TextEncoder().encode(JSON.stringify({
-                Items: [
-                  toDynamoAttributeMap(storedRow),
-                  toDynamoAttributeMap({ directoryId: 'workspace-1', eventId: 'malformed-1', ipAddress: '203.0.113.9' }),
-                ],
+                Items: includeMalformedRow
+                  ? [
+                      toDynamoAttributeMap(storedRow),
+                      toDynamoAttributeMap({ directoryId: 'workspace-1', eventId: 'malformed-1', ipAddress: '203.0.113.9' }),
+                    ]
+                  : [toDynamoAttributeMap(storedRow)],
               })),
               headers: {},
               statusCode: 200,
@@ -974,6 +978,14 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
 
     try {
+      if (includeMalformedRow) {
+        await expect(owner.execute(job, operation)).rejects.toMatchObject({
+          status: 503,
+          code: 'TenantExportAuditEventInvalid',
+        })
+        expect(exportBodies).toEqual([])
+        return
+      }
       await owner.execute(job, operation)
 
       expect(dynamoRequests[0]).toMatchObject({ TableName: 'audit-events' })
@@ -981,12 +993,10 @@ describe('AwsTenantOperationResourceOwner', () => {
       const records = exportBodies[0]!.trim().split('\n').map((line) => JSON.parse(line))
       expect(records).toEqual([
         { resource: 'audit-events', record: JSON.parse(JSON.stringify(toAuditEventView(auditEvent))) },
-        { resource: 'audit-events', record: { eventId: 'malformed-1', unreadable: true } },
       ])
       for (const hidden of [
         '198.51.100.23',
         'SecretAgent/1.0',
-        '203.0.113.9',
         auditEvent.requestFingerprint,
         'actorKey',
       ]) {

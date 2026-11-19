@@ -108,7 +108,15 @@ function installTenantPorts() {
       return { ...createOperation('verified'), kind: 'closure' }
     },
   }
-  const auditEvents = getTestAppDependencies().workspace.auditEvents
+  // The writer reads its own state through `this`, as the DynamoDB client does, so a caller
+  // that detaches the method from the client fails here.
+  const recordingAuditEvents = {
+    ...getTestAppDependencies().workspace.auditEvents,
+    recorded: events,
+    async putEvent(this: { recorded: AuditEventV1[] }, event: AuditEventV1) {
+      this.recorded.push(event)
+    },
+  }
   setTestAppDependencies({
     tenantAdministration,
     tenantExportDownload: {
@@ -120,12 +128,7 @@ function installTenantPorts() {
         }
       },
     },
-    auditEvents: {
-      ...auditEvents,
-      async putEvent(event: AuditEventV1) {
-        events.push(event)
-      },
-    },
+    auditEvents: recordingAuditEvents,
   })
   return { calls, events }
 }

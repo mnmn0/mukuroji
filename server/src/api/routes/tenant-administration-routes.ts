@@ -81,8 +81,8 @@ async function recordTenantExportDownload(
   operation: TenantOperation,
   download: TenantExportDownload,
 ): Promise<void> {
-  const putEvent = workspaceDependencies.auditEvents.putEvent
-  if (!putEvent) {
+  const auditEvents = workspaceDependencies.auditEvents
+  if (!auditEvents.putEvent) {
     throw new TenantAdministrationError(
       503,
       'TenantAuditUnavailable',
@@ -99,7 +99,7 @@ async function recordTenantExportDownload(
     { tenantExport: 'downloaded', ...metadata },
     `tenant-export-download:${crypto.randomUUID()}`,
   )
-  await putEvent(createAuditEvent({
+  await auditEvents.putEvent(createAuditEvent({
     context,
     eventType: 'tenant.export.downloaded',
     entity: { type: 'tenant', id: principal.directoryId },

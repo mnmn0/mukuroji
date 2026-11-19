@@ -1856,19 +1856,22 @@ const AUDIT_EVENTS_EXPORT_TARGET_ID = 'audit-events'
  * The stored row also holds the caller IP address and User-Agent, the request fingerprint, the
  * idempotency key digest, and index keys, which the audit API and audit export never return. A
  * tenant export must not reveal more of the audit log than those do. A row that is not a valid
- * audit event keeps only its event ID.
+ * audit event fails the export instead of being skipped, so the export never completes with
+ * audit history silently missing.
  *
  * @param item - Stored audit event row.
  * @returns The exported audit event record.
+ * @throws TenantAdministrationError with status 503 when the row is not a valid audit event.
  */
 function toAuditEventExportRecord(item: Record<string, unknown>): Record<string, unknown> {
   try {
     return toAuditEventView(item)
-  } catch {
-    return {
-      ...(typeof item.eventId === 'string' ? { eventId: item.eventId } : {}),
-      unreadable: true,
-    }
+  } catch (error) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantExportAuditEventInvalid',
+      `A stored audit event could not be exported: ${error instanceof Error ? error.message : 'invalid row'}`,
+    )
   }
 }
 
