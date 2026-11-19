@@ -1929,6 +1929,114 @@ test('replaces, removes, and sets a parent atomically', async () => {
   expect(store.transactions).toHaveLength(3)
 })
 
+test('records a blocker change on both endpoints in the relation transaction', async () => {
+  const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
+  const client = store.createClient()
+
+  await client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'design',
+    targetWorkItemId: 'build',
+    type: 'blocks',
+    expectedGraphRevision: 0,
+    sourceExpectedRevision: 1,
+    targetExpectedRevision: 4,
+  }, [], createRelationAudit('relation-create-1'))
+
+  const created = readRelationAuditEvents(store.transactions[0])
+  expect(created).toEqual([
+    {
+      eventId: expect.any(String),
+      eventType: 'work-item.blocking-added',
+      entityId: 'team/core-team/issue/design',
+      changes: [{ field: 'blocks', after: 'build' }],
+      metadata: {
+        adapter: 'work-item-relation',
+        actorMemberKey: 'member-1',
+        teamId: 'core-team',
+        issueId: 'design',
+        relationType: 'blocks',
+        relatedWorkItemId: 'build',
+        graphRevision: 1,
+      },
+    },
+    {
+      eventId: expect.any(String),
+      eventType: 'work-item.blocker-added',
+      entityId: 'team/core-team/issue/build',
+      changes: [{ field: 'blockedBy', after: 'design' }],
+      metadata: expect.objectContaining({ issueId: 'build', relatedWorkItemId: 'design' }),
+    },
+  ])
+
+  await client.deleteRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'build',
+    targetWorkItemId: 'design',
+    type: 'blockedBy',
+    expectedGraphRevision: 1,
+    sourceExpectedRevision: 4,
+    targetExpectedRevision: 1,
+  }, createRelationAudit('relation-delete-1'))
+
+  expect(readRelationAuditEvents(store.transactions[1]).map((event) => [
+    event.eventType,
+    event.entityId,
+    event.changes,
+  ])).toEqual([
+    ['work-item.blocker-removed', 'team/core-team/issue/build', [{ field: 'blockedBy', before: 'design' }]],
+    ['work-item.blocking-removed', 'team/core-team/issue/design', [{ field: 'blocks', before: 'build' }]],
+  ])
+})
+
+test('records one parent change on the child and child changes on both parents', async () => {
+  const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+  const client = store.createClient()
+
+  await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 5,
+  }, [], createRelationAudit('parent-replace-1'))
+
+  const events = readRelationAuditEvents(store.transactions[0])
+  expect(events.map((event) => [event.eventType, event.entityId, event.changes])).toEqual([
+    [
+      'work-item.parent-changed',
+      'team/core-team/issue/task',
+      [{ field: 'parentWorkItemId', before: 'phase-a', after: 'phase-b' }],
+    ],
+    ['work-item.child-removed', 'team/core-team/issue/phase-a', [{ field: 'child', before: 'task' }]],
+    ['work-item.child-added', 'team/core-team/issue/phase-b', [{ field: 'child', after: 'task' }]],
+  ])
+  expect(new Set(events.map((event) => event.eventId)).size).toBe(3)
+
+  // A retried request that finds the parent already set writes neither the relation nor an event.
+  await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    nextParent: { workItemId: 'phase-b', expectedRevision: 2 },
+    expectedGraphRevision: 6,
+  }, [], createRelationAudit('parent-replace-1'))
+  expect(store.transactions).toHaveLength(1)
+})
+
+test('refuses a relation mutation without audit context when auditing is configured', async () => {
+  const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
+  const client = store.createClient()
+
+  await expect(client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'design',
+    targetWorkItemId: 'build',
+    type: 'related',
+    expectedGraphRevision: 0,
+    sourceExpectedRevision: 1,
+    targetExpectedRevision: 1,
+  })).rejects.toMatchObject({ status: 500, code: 'WorkItemRelationAuditContextMissing' })
+  expect(store.transactions).toHaveLength(0)
+})
+
 test('stores the sibling order rank with a parent change and reorders under the same parent', async () => {
   const store = createInMemoryRelationStore()
   store.seedRelation('task', 'phase-a', 'parent')
@@ -2397,6 +2505,8 @@ function createInMemoryRelationStore(
     workItemReadFailure?: string
     /** Records the key of every Work Item row read. */
     onWorkItemRead?: (key: Record<string, string>) => void
+    /** Audit table the client writes relation events to; omitted disables auditing. */
+    auditTableName?: string
   } = {},
 ): InMemoryRelationStore {
   const scopeKey = 'workspace-1#team#core-team#work-item-configuration'
@@ -2534,10 +2644,53 @@ function createInMemoryRelationStore(
         'work-items-table',
         documentClient,
         {} as DynamoDBClient,
+        false,
+        options.auditTableName,
       )
     },
   }
   return store
+}
+
+/**
+ * Creates the audit input a relation route passes for one request.
+ *
+ * @param idempotencyKey - Request idempotency key that seeds the event IDs.
+ * @returns Relation audit input for workspace-1.
+ */
+function createRelationAudit(idempotencyKey: string) {
+  return {
+    context: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'actor-1', kind: 'user' },
+      idempotencyKey,
+      request: { method: 'POST', path: '/api/teams/core-team/issues/a/relations', body: {} },
+      source: { kind: 'api', method: 'POST', route: '/api/teams/core-team/issues/a/relations' },
+      occurredAt: '2026-07-16T00:00:00.000Z',
+    }),
+    actorMemberKey: 'member-1',
+  }
+}
+
+/**
+ * Reads the audit events a relation transaction puts, in transaction order.
+ *
+ * @param transaction - TransactWrite input.
+ * @returns Event ID, type, entity, changes, and metadata of each audit Put.
+ */
+function readRelationAuditEvents(transaction: Record<string, unknown> | undefined) {
+  return ((transaction?.TransactItems ?? []) as Array<Record<string, Record<string, unknown>>>)
+    .filter((item) => item.Put?.TableName === 'audit-table')
+    .map((item) => {
+      const event = item.Put?.Item as Record<string, unknown>
+      return {
+        eventId: event.eventId,
+        eventType: event.eventType,
+        entityId: event.entityId,
+        changes: event.changes,
+        metadata: event.metadata,
+      }
+    })
 }
 
 /**
