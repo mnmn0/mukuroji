@@ -16,7 +16,7 @@ Project ごとにリスク・課題・変更要求（RAID）を登録し、更�
   record key は `PROJECT_RAID#<teamId>#<projectId>#ENTRY#<entryId>`（各 ID は `encodeURIComponent`）、
   `entryType = project-raid-entry`。
 - 同じ Project の件数カウンタを `PROJECT_RAID#<teamId>#<projectId>`（`entryType = project-raid-log`）に置き、
-  追加の transaction で `entryCount < 500` を条件に1増やす。
+  追加の transaction で `entryCount < 300` を条件に1増やす。
 - 一覧は `begins_with(recordKey, PROJECT_RAID#<team>#<project>#ENTRY#)` の Query を全ページ読む。
 - 更新は登録ごとの `revision` を CAS にし、呼び出し元の membership / Enterprise revision の fence と
   audit event を同じ transaction に入れる。
@@ -30,7 +30,7 @@ Project ごとにリスク・課題・変更要求（RAID）を登録し、更�
 
 ## 結果
 
-- 1 Project 500 件まで、自由記述の長さに関係なく保存できる。一覧は Query 1回（1 MB ごとに次ページ）で読める。
+- 1 Project 300 件まで保存できる。上限は、全件を返す一覧の応答が自由記述を最大まで使っても Lambda の 6 MB 応答上限に収まるように決めた。一覧は Query 1回（1 MB ごとに次ページ）で読める。
 - 削除はなく、close / reopen を状態で表す。件数カウンタは close でも減らない（上限は登録の総数）。
 - 変更要求の承認と baseline・日程への反映、Focus・通知、CSV・Public API は未実装（#344 に残す）。
 - 利用者ガイドは `docs/guide/pm.md` を更新した。

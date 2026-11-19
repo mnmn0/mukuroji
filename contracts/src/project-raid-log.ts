@@ -25,7 +25,7 @@ export const PROJECT_RAID_TITLE_MAX_LENGTH = 200
 /** Maximum length of the description and response texts. */
 export const PROJECT_RAID_TEXT_MAX_LENGTH = 2_000
 /** Most entries, open and closed, one Project log may hold. */
-export const PROJECT_RAID_LOG_MAX_ENTRIES = 500
+export const PROJECT_RAID_LOG_MAX_ENTRIES = 300
 
 /** Pattern of a `YYYY-MM-DD` date. */
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u

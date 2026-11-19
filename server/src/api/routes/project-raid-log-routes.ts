@@ -6,7 +6,7 @@ import {
   readProjectRaidLogUseCase,
   updateProjectRaidEntryUseCase,
 } from '../../modules/project-raid-log'
-import { workItemDependencies } from '../shared/app-dependencies'
+import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import {
@@ -67,7 +67,7 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
         body,
         {
           now: new Date().toISOString(),
-          callerAuthorization: createCallerAuthorization(principal),
+          callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
           auditContext,
           entryId: createEntryId(teamId, projectId, auditContext.actor.id, auditContext.idempotencyKeyHash),
           creationFingerprint: auditContext.requestFingerprint,
@@ -99,7 +99,7 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
         body,
         {
           now: new Date().toISOString(),
-          callerAuthorization: createCallerAuthorization(principal),
+          callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
           auditContext: createApiMutationContext(c, principal, body),
         },
       )
@@ -153,17 +153,28 @@ function requireProjectAccess(
 }
 
 /**
- * Builds the commit-time fences that fail a log write when the caller lost access.
+ * Builds the commit-time fences that fail a log write when the caller lost access or the Team
+ * or Project was archived after the request was authorized.
  *
  * @param principal - Authenticated principal.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project whose log is changed.
  * @returns The condition checks.
+ * @throws ProjectDataError 503 when the directory cannot build the active-reference fences.
  */
-function createCallerAuthorization(principal: WorkspacePrincipal) {
-  return createPlanningCallerAuthorizationConditionChecks(
-    principal,
-    [],
-    principal.principalKind !== 'service-account',
-  )
+async function createCallerAuthorization(principal: WorkspacePrincipal, teamId: string, projectId: string) {
+  const { projectDirectory } = workspaceDependencies
+  if (!projectDirectory.createActiveReferenceConditionChecks) {
+    throw new ProjectDataError(503, 'ProjectRaidLogAuthorizationUnavailable', 'Project access cannot be verified.')
+  }
+  return [
+    ...createPlanningCallerAuthorizationConditionChecks(
+      principal,
+      [],
+      principal.principalKind !== 'service-account',
+    ),
+    ...await projectDirectory.createActiveReferenceConditionChecks(principal.directoryId, teamId, projectId),
+  ]
 }
 
 /**
