@@ -33,7 +33,7 @@
     "@modelcontextprotocol/server": "2.3.0",
     "@mukuroji/contracts": "workspace:*",
     "@smithy/node-http-handler": "4.9.5",
-    "hono": "^4.12.21",
+    "hono": "^4.13.16",
     "zod": "4.6.6"
   },
   "devDependencies": {

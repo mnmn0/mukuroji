@@ -1868,6 +1868,7 @@ describe('file proofing domain', () => {
         statusCategory: 'completed',
         workflowSchemaVersion: 1,
         expectedRevision: 4,
+        actualDates: { actualStartDate: '2026-07-01', actualEndDate: '2026-07-12' },
         configurationConditionChecks: [{
           ConditionCheck: {
             TableName: 'work-item-configuration',
@@ -1887,6 +1888,16 @@ describe('file proofing domain', () => {
       workflowStatusId: 'qa-approved',
       statusCategory: 'completed',
     })
+    const completionUpdate = state.documentClient.transactionInputs.at(-1)?.TransactItems
+      ?.find((entry) => entry.Update?.TableName === 'work-items')?.Update
+    expect(completionUpdate).toMatchObject({
+      ExpressionAttributeNames: { '#actualStartDate': 'actualStartDate', '#actualEndDate': 'actualEndDate' },
+      ExpressionAttributeValues: { ':actualStartDate': '2026-07-01', ':actualEndDate': '2026-07-12' },
+    })
+    expect(completionUpdate?.UpdateExpression).toContain(
+      '#actualStartDate = :actualStartDate, #actualEndDate = :actualEndDate',
+    )
+    expect(completionUpdate?.UpdateExpression).not.toContain('REMOVE')
     expect(state.documentClient.items.get(createMemoryKey({
       workspaceId: scope.workspaceId,
       recordKey: 'META',

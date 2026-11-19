@@ -1,6 +1,9 @@
 import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  deriveWorkItemScheduleVariance,
+  isWorkItemCompletedLate,
+  isWorkItemStartedLate,
   type CustomFieldDefinition,
   type ResolvedWorkItemConfiguration,
   type WorkflowStatusDefinition,
@@ -56,18 +59,29 @@ export const taskTabs: readonly ['table', 'board', 'gantt', 'calendar', 'file', 
 export const taskPriorities: readonly ['high', 'medium', 'low'] = ['high', 'medium', 'low']
 
 /** Due-date filters available to the task list. */
-export const taskDueDateFilters: readonly ['all', 'overdue', 'today', 'upcoming', 'no-date'] = [
+export const taskDueDateFilters: readonly [
   'all',
   'overdue',
   'today',
   'upcoming',
   'no-date',
+  'completed-late',
+  'started-late',
+] = [
+  'all',
+  'overdue',
+  'today',
+  'upcoming',
+  'no-date',
+  'completed-late',
+  'started-late',
 ]
 
-/** Due-date sort orders available to the task list. */
-export const taskSortOrders: readonly ['due-date-asc', 'due-date-desc'] = [
+/** Sort orders available to the task list. */
+export const taskSortOrders: readonly ['due-date-asc', 'due-date-desc', 'completion-delay-desc'] = [
   'due-date-asc',
   'due-date-desc',
+  'completion-delay-desc',
 ]
 
 /** Task view selected within the project task workspace. */
@@ -246,6 +260,10 @@ export function applyTaskPatchOptimistically(
           schedule: patch.schedule,
         }),
     ...(patch.priority === undefined ? {} : { priority: patch.priority }),
+    ...(patch.actualStartDate === undefined
+      ? {}
+      : { actualStartDate: patch.actualStartDate ?? undefined }),
+    ...(patch.actualEndDate === undefined ? {} : { actualEndDate: patch.actualEndDate ?? undefined }),
     ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: patch.workflowStatusId }),
     ...(nextStatus ? { statusCategory: nextStatus.category } : {}),
     ...(patch.customFieldValues === undefined ? {} : { customFieldValues: nextCustomFieldValues }),
@@ -284,6 +302,10 @@ export function createTaskInversePatch(
       ? {}
       : { schedule: task.schedule }),
     ...(patch.priority === undefined ? {} : { priority: task.priority }),
+    ...(patch.actualStartDate === undefined
+      ? {}
+      : { actualStartDate: task.actualStartDate ?? null }),
+    ...(patch.actualEndDate === undefined ? {} : { actualEndDate: task.actualEndDate ?? null }),
     ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: task.workflowStatusId }),
     ...(patch.remainingEffortMinutes === undefined
       ? {}
@@ -507,6 +529,14 @@ export function matchesTaskDueDateFilter(
     return !parsedDueDate
   }
 
+  if (filter === 'completed-late') {
+    return resolveWorkflowStatusCategory(task) === 'completed' && isWorkItemCompletedLate(task)
+  }
+
+  if (filter === 'started-late') {
+    return isWorkItemStartedLate(task)
+  }
+
   if (resolveWorkflowStatusCategory(task) === 'completed' || !parsedDueDate) {
     return false
   }
@@ -537,7 +567,10 @@ export function matchesTaskDueDateFilter(
 export function sortTasksByDueDate(
   tasks: readonly CanonicalWorkItem[],
   sortOrder: TaskSortOrder,
-) {
+): CanonicalWorkItem[] {
+  if (sortOrder === 'completion-delay-desc') {
+    return sortTasksByCompletionDelay(tasks)
+  }
   return [...tasks].sort((firstTask, secondTask) => {
     const firstTime = parseTaskDueDate(deriveTaskScheduleDueDate(firstTask.schedule))?.getTime()
     const secondTime = parseTaskDueDate(deriveTaskScheduleDueDate(secondTask.schedule))?.getTime()
@@ -557,6 +590,30 @@ export function sortTasksByDueDate(
 }
 
 /**
+ * Sorts tasks with the longest completion delay first without mutating the source list.
+ *
+ * Tasks without a completion delay follow in due-date order, and equal values use the Work Item
+ * ID as a deterministic tie-breaker.
+ *
+ * @param tasks - Tasks to sort.
+ * @returns A new sorted task array.
+ */
+function sortTasksByCompletionDelay(tasks: readonly CanonicalWorkItem[]): CanonicalWorkItem[] {
+  const byDueDate = sortTasksByDueDate(tasks, 'due-date-asc')
+  const dueDateRank = new Map(byDueDate.map((task, index) => [task, index]))
+  return byDueDate.sort((firstTask, secondTask) => {
+    const firstDelay = deriveWorkItemScheduleVariance(firstTask).completionDelayDays
+    const secondDelay = deriveWorkItemScheduleVariance(secondTask).completionDelayDays
+    if (firstDelay !== secondDelay) {
+      if (firstDelay === undefined) return 1
+      if (secondDelay === undefined) return -1
+      return secondDelay - firstDelay
+    }
+    return (dueDateRank.get(firstTask) ?? 0) - (dueDateRank.get(secondTask) ?? 0)
+  })
+}
+
+/**
  * Resolves the localized message key for a due-date filter option.
  *
  * @param filter - Due-date filter whose menu label is required.
@@ -569,6 +626,8 @@ export function resolveDueDateFilterLabelKey(filter: DueDateFilter): MessageKey 
     today: 'tasks.filter.dueDateToday',
     upcoming: 'tasks.filter.dueDateUpcoming',
     'no-date': 'tasks.filter.dueDateNoDate',
+    'completed-late': 'tasks.filter.completedLate',
+    'started-late': 'tasks.filter.startedLate',
   }
 
   return labelKeys[filter]
@@ -581,9 +640,11 @@ export function resolveDueDateFilterLabelKey(filter: DueDateFilter): MessageKey 
  * @returns Message key for the selected due-date ordering.
  */
 export function resolveTaskSortOrderLabelKey(sortOrder: TaskSortOrder): MessageKey {
-  return sortOrder === 'due-date-desc'
-    ? 'tasks.sort.dueDateDesc'
-    : 'tasks.sort.dueDateAsc'
+  switch (sortOrder) {
+    case 'due-date-desc': return 'tasks.sort.dueDateDesc'
+    case 'completion-delay-desc': return 'tasks.sort.completionDelayDesc'
+    case 'due-date-asc': return 'tasks.sort.dueDateAsc'
+  }
 }
 
 /**
@@ -695,6 +756,14 @@ export function resolveProjectTaskGroupValue(
     case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
     case 'assignee': value = resolveWorkItemAssignee(task); break
     case 'dueDate': value = task.dueDate || '—'; break
+    case 'actualStartDate': value = task.actualStartDate ?? '—'; break
+    case 'actualEndDate': value = task.actualEndDate ?? '—'; break
+    case 'startDelayDays':
+    case 'completionDelayDays': {
+      const delay = deriveWorkItemScheduleVariance(task)[field]
+      value = delay === undefined ? '—' : String(delay)
+      break
+    }
     case 'priority': value = t(`tasks.priority.${task.priority}`); break
     case 'workItemType': {
       const workItemTypeId = task.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID

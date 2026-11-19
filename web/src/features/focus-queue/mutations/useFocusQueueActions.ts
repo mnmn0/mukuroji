@@ -3,6 +3,7 @@ import type {
   FocusPolicyOverrides,
   FocusPolicyTarget,
   FocusQueueResponse,
+  ResolvedWorkItemConfiguration,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
@@ -14,7 +15,15 @@ import {
   previewTeamIssueSchedule,
   updateTeamIssue,
 } from '../../../issues/api/workItems'
+import {
+  confirmParentCompletion,
+  confirmParentCompletionInBrowser,
+} from '../../../issues/mutations/confirmParentCompletion'
+import { refreshMovedHierarchyCache } from '../../../issues/mutations/hierarchyMoveCacheRefresh'
 import { createMutationRequestRunner } from '../../../shared/api/mutationHeaders'
+import type { MessageKey } from '../../../shared/i18n/i18n'
+import { getTeamWorkItemHierarchy } from '../../../work-items/api/hierarchy'
+import { resolveWorkItemTypeWorkflow } from '../../../work-items/model/workItemDisplay'
 import {
   updateFocusPolicy,
   updateFocusSnooze,
@@ -22,7 +31,9 @@ import {
 } from '../api/focusQueue'
 import {
   isFocusAffectedCacheKey,
+  isFocusAffectedHierarchyCacheKey,
   isFocusMutationConflict,
+  isFocusOpenChildrenRefusal,
   revalidateFocusCachesOnConflict,
   type FocusCacheRevalidationScope,
 } from './focusCacheRevalidation'
@@ -54,7 +65,7 @@ export type FocusQueueSnoozeFeedback = {
 }
 
 /** Error category shown after a failed non-policy queue action. */
-export type FocusQueueMutationError = 'conflict' | 'failure'
+export type FocusQueueMutationError = 'conflict' | 'openChildren' | 'failure'
 
 /** Inputs required by the route-scoped Focus mutation controller. */
 export type UseFocusQueueActionsOptions = {
@@ -64,6 +75,10 @@ export type UseFocusQueueActionsOptions = {
   guardAuthenticatedRequest: <Result>(request: Promise<Result>) => Promise<Result>
   /** Revalidates the authoritative Focus queue snapshot. */
   mutateFocusQueue: KeyedMutator<FocusQueueResponse>
+  /** Team configurations, used to warn before completing a parent with open children. */
+  configurationsByTeam?: Readonly<Record<string, ResolvedWorkItemConfiguration>>
+  /** Localized message resolver. */
+  t: (key: MessageKey) => string
 }
 
 /** Actions and transient feedback consumed by the Focus queue view. */
@@ -89,7 +104,7 @@ export type FocusQueueMutationController = {
     item: FocusItem,
     operation: WorkItemScheduleOperation,
   ) => Promise<WorkItemScheduleChangePreview>
-  /** Removes the latest mutation error notice. */
+  /** Removes the latest item action error notice; a policy save failure stays on the policy editor. */
   clearError: () => void
   /** Removes the latest snooze feedback without changing server state. */
   dismissSnoozeFeedback: () => void
@@ -119,8 +134,10 @@ export type FocusQueueMutationController = {
  */
 export function useFocusQueueActions({
   accessToken,
+  configurationsByTeam,
   guardAuthenticatedRequest,
   mutateFocusQueue,
+  t,
 }: UseFocusQueueActionsOptions): FocusQueueMutationController {
   const { mutate: mutateSWR } = useSWRConfig()
   const mutationRunnerRef = useRef<ReturnType<typeof createMutationRequestRunner> | null>(null)
@@ -130,13 +147,35 @@ export function useFocusQueueActions({
   const mutationRunner = mutationRunnerRef.current
   const pendingKeysRef = useRef(new Set<string>())
   const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(new Set())
-  const [failedAction, setFailedAction] = useState<{
-    /** Action that failed. */
-    action: FocusQueueActionId
-    /** User-facing failure category. */
-    kind: FocusQueueMutationError
-  }>()
+  const [itemError, setItemError] = useState<FocusQueueMutationError>()
+  const [policyError, setPolicyError] = useState(false)
   const [snoozeFeedback, setSnoozeFeedback] = useState<FocusQueueSnoozeFeedback>()
+  // Counts the item actions and the policy saves apart, so a failure that finishes after a newer
+  // action of the same kind started does not replace that action's message, and an item action
+  // never hides a policy save failure or the other way around.
+  const actionGenerationRef = useRef({ item: 0, policy: 0 })
+
+  /**
+   * Reads every loaded Team hierarchy the action affected again and writes it to the cache. A
+   * hierarchy that cannot be read is cleared, so the outline shows its retry instead of the
+   * totals from before the action.
+   */
+  const refreshAffectedHierarchies = useCallback(async (scope: FocusCacheRevalidationScope) => {
+    const hierarchyKeys: (readonly [string, string, string])[] = []
+    // Only collects the loaded keys; returning false leaves every entry untouched.
+    await mutateSWR((key) => {
+      if (isFocusAffectedHierarchyCacheKey(key, scope)) hierarchyKeys.push(key)
+      return false
+    })
+    await Promise.all(hierarchyKeys.map((key) => {
+      const [, hierarchyAccessToken, teamId] = key
+      return refreshMovedHierarchyCache(
+        mutateSWR,
+        key,
+        () => getTeamWorkItemHierarchy(teamId, hierarchyAccessToken),
+      )
+    }))
+  }, [mutateSWR])
 
   /** Revalidates Focus and every loaded canonical projection affected by one action. */
   const refreshAffectedCaches = useCallback(async (
@@ -149,8 +188,9 @@ export function useFocusQueueActions({
         undefined,
         { revalidate: true },
       ),
+      refreshAffectedHierarchies(scope),
     ])
-  }, [mutateFocusQueue, mutateSWR])
+  }, [mutateFocusQueue, mutateSWR, refreshAffectedHierarchies])
 
   /** Runs one item action once while publishing pending and failure state. */
   const runItemAction = useCallback(async <Result,>(
@@ -164,7 +204,11 @@ export function useFocusQueueActions({
 
     pendingKeysRef.current.add(pendingKey)
     setPendingKeys(new Set(pendingKeysRef.current))
-    setFailedAction(undefined)
+    const channel = action === 'policy' ? 'policy' : 'item'
+    if (channel === 'policy') setPolicyError(false)
+    else setItemError(undefined)
+    const generation = actionGenerationRef.current[channel] + 1
+    actionGenerationRef.current[channel] = generation
     try {
       return await request()
     } catch (error) {
@@ -172,10 +216,14 @@ export function useFocusQueueActions({
         error,
         () => refreshAffectedCaches(conflictScope),
       )
-      setFailedAction({
-        action,
-        kind: isFocusMutationConflict(error) ? 'conflict' : 'failure',
-      })
+      if (generation === actionGenerationRef.current[channel]) {
+        if (channel === 'policy') setPolicyError(true)
+        else setItemError(
+          isFocusOpenChildrenRefusal(error)
+            ? 'openChildren'
+            : isFocusMutationConflict(error) ? 'conflict' : 'failure',
+        )
+      }
       throw error
     } finally {
       pendingKeysRef.current.delete(pendingKey)
@@ -190,8 +238,32 @@ export function useFocusQueueActions({
     patch: { assigneeUserId?: string; workflowStatusId?: string },
   ): Promise<void> => {
     if (!accessToken) return
+    // Complete and status both change the workflow status, so one waits for the other on the
+    // same item instead of racing it, including while the completion confirm is open.
+    const competingStatusAction = action === 'complete' ? 'status' : action === 'status' ? 'complete' : undefined
+    if (
+      competingStatusAction !== undefined &&
+      pendingKeysRef.current.has(createPendingKey(item.id, competingStatusAction))
+    ) {
+      return
+    }
     const cacheScope = createFocusItemCacheRevalidationScope(item, true)
     await runItemAction(item.id, action, cacheScope, async () => {
+      // Asked inside the action so the item stays pending, and a second click is ignored, while
+      // the open children are counted and the person answers.
+      if (patch.workflowStatusId !== undefined) {
+        const configuration = configurationsByTeam?.[item.workItem.teamId]?.configuration
+        const nextStatus = resolveWorkItemTypeWorkflow(configuration, item.workItem.workItemTypeId)
+          ?.statuses.find((status) => status.id === patch.workflowStatusId)
+        const confirmed = await confirmParentCompletion({
+          workItem: item.workItem,
+          nextStatusCategory: nextStatus?.category,
+          configuration,
+          accessToken,
+          confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+        })
+        if (!confirmed) return
+      }
       await guardAuthenticatedRequest(mutationRunner.run(
         `focus:${action}:${item.workItem.teamId}:${item.workItem.id}`,
         JSON.stringify([item.workItem.revision, patch]),
@@ -207,10 +279,12 @@ export function useFocusQueueActions({
     })
   }, [
     accessToken,
+    configurationsByTeam,
     guardAuthenticatedRequest,
     mutationRunner,
     refreshAffectedCaches,
     runItemAction,
+    t,
   ])
 
   /** Assigns the item to the viewer identifier authorized by the Focus response. */
@@ -432,16 +506,14 @@ export function useFocusQueueActions({
 
   return {
     assignToViewer,
-    clearError: () => setFailedAction(undefined),
+    clearError: () => setItemError(undefined),
     complete,
     confirmSchedule,
     dismissSnoozeFeedback: () => setSnoozeFeedback(undefined),
-    ...(failedAction !== undefined && failedAction.action !== 'policy'
-      ? { error: failedAction.kind }
-      : {}),
+    ...(itemError !== undefined ? { error: itemError } : {}),
     isPending: (itemId, action) => pendingKeys.has(createPendingKey(itemId, action)),
     previewSchedule,
-    policyError: failedAction?.action === 'policy',
+    policyError,
     snoozeFeedback,
     undoSnooze,
     updatePolicy,

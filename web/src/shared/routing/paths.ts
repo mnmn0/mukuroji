@@ -226,6 +226,16 @@ export function createWorkItemSearchPath(workItemId: string) {
 }
 
 /**
+ * Creates the canonical URL of a Work Item key, which keeps working when the Work Item moves.
+ *
+ * @param key - Canonical Work Item key, such as `PT-12`.
+ * @returns A same-origin path that resolves the key to the Work Item.
+ */
+export function createWorkItemKeyPath(key: string) {
+  return `/browse/${encodeURIComponent(key)}`
+}
+
+/**
  * Project ID を permission-aware Workspace search で開く URL を生成します。
  */
 export function createProjectSearchPath(projectId: string) {

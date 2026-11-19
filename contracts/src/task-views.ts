@@ -77,8 +77,17 @@ export type TaskViewWorkflowStatusFilter = {
   statusId: string
 }
 
-/** Relative due-date buckets supported by task surfaces. */
-export type TaskViewDueDatePreset = 'overdue' | 'today' | 'upcoming' | 'no-date'
+/**
+ * Relative due-date buckets supported by task surfaces. `completed-late` and `started-late`
+ * compare the recorded actual dates with the plan.
+ */
+export type TaskViewDueDatePreset =
+  | 'overdue'
+  | 'today'
+  | 'upcoming'
+  | 'no-date'
+  | 'completed-late'
+  | 'started-late'
 
 /**
  * Permission-aware filters shared by Search and every task surface.
@@ -159,6 +168,11 @@ export type TaskViewDisplayOptions = {
   wrapText?: boolean
   /** Whether assignee avatars are rendered alongside assignee names. */
   showAssigneeAvatars?: boolean
+  /**
+   * Whether a table renders Work Items as an indented, collapsible outline in hierarchy (WBS)
+   * order with WBS numbers, instead of the view's sort order.
+   */
+  showOutline?: boolean
 }
 
 /** Reproducible layout shared by every task view surface. */

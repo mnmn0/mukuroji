@@ -371,6 +371,81 @@ describe('task-view surface adapters', () => {
     ])
   })
 
+  test('maps the completion-delay sort and late presets between Project state and the definition', () => {
+    const definition = {
+      ...createProjectDefinition(),
+      layout: {
+        ...createProjectDefinition().layout,
+        sort: [
+          { direction: 'asc', field: 'dueDate' },
+          { direction: 'asc', field: 'priority' },
+        ],
+      },
+    } satisfies TaskViewDefinition
+    const delayed = projectStateToTaskViewDefinition(definition, {
+      ...taskViewDefinitionToProjectState(definition),
+      dueDateFilter: 'completed-late',
+      sortOrder: 'completion-delay-desc',
+    })
+
+    expect(delayed.filters.dueDatePreset).toBe('completed-late')
+    expect(delayed.layout.sort).toEqual([
+      { direction: 'desc', field: 'completionDelayDays' },
+      { direction: 'asc', field: 'dueDate' },
+      { direction: 'asc', field: 'priority' },
+    ])
+    expect(taskViewDefinitionToProjectState(delayed)).toMatchObject({
+      dueDateFilter: 'completed-late',
+      sortOrder: 'completion-delay-desc',
+    })
+
+    const restored = projectStateToTaskViewDefinition(delayed, {
+      ...taskViewDefinitionToProjectState(delayed),
+      sortOrder: 'due-date-desc',
+    })
+    expect(restored.layout.sort).toEqual([
+      { direction: 'desc', field: 'dueDate' },
+      { direction: 'asc', field: 'priority' },
+    ])
+  })
+
+  test('keeps the completion-delay sort within the saved-view rule limit', () => {
+    const fields = ['dueDate', 'priority', 'title', 'status', 'updatedAt', 'createdAt', 'assignee', 'startDate', 'actualStartDate', 'actualEndDate'] as const
+    const base = createProjectDefinition()
+    const definition = {
+      ...base,
+      layout: { ...base.layout, sort: fields.map((field) => ({ direction: 'asc' as const, field })) },
+    } as TaskViewDefinition
+    const delayed = projectStateToTaskViewDefinition(definition, {
+      ...taskViewDefinitionToProjectState(definition),
+      sortOrder: 'completion-delay-desc',
+    })
+
+    expect(delayed.layout.sort).toHaveLength(10)
+    expect(delayed.layout.sort[0]).toEqual({ direction: 'desc', field: 'completionDelayDays' })
+    expect(delayed.layout.sort.at(-1)).toEqual({ direction: 'asc', field: 'actualStartDate' })
+  })
+
+  test('sorts by actual dates and completion delay through persisted sort rules', () => {
+    const late = { ...taskViewStoryTasks[0], actualStartDate: '2026-06-01', actualEndDate: '2026-06-20' }
+    const onTime = { ...taskViewStoryTasks[1], actualStartDate: '2026-06-02', actualEndDate: taskViewStoryTasks[1].dueDate }
+    const open = taskViewStoryTasks[2]
+    const base = createBuiltInTaskViewDefinition('project', { kind: 'project', projectId: 'refero' }, 'table')
+    const byDelay = {
+      ...base,
+      layout: { ...base.layout, sort: [{ direction: 'desc', field: 'completionDelayDays' }] },
+    } satisfies TaskViewDefinition
+    const byActualStart = {
+      ...base,
+      layout: { ...base.layout, sort: [{ direction: 'asc', field: 'actualStartDate' }] },
+    } satisfies TaskViewDefinition
+
+    expect(applyTaskViewDefinitionToTasks([open, onTime, late], byDelay).map((task) => task.id))
+      .toEqual([late.id, onTime.id, open.id])
+    expect(applyTaskViewDefinitionToTasks([open, onTime, late], byActualStart).map((task) => task.id))
+      .toEqual([late.id, onTime.id, open.id])
+  })
+
   test('maps Team state without losing scope qualification or existing custom-field predicates', () => {
     const projectDefinition = createProjectDefinition()
     const definition = {

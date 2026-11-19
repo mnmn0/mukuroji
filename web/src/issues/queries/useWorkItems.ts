@@ -49,6 +49,24 @@ function isTransientIssueDetailError(error: unknown): boolean {
 }
 
 /**
+ * Builds the SWR key of a Team Work Item list, so other queries can read or refresh that cache.
+ *
+ * @param accessToken - Work Item API access token.
+ * @param teamId - Team whose Work Items the list holds.
+ * @param includeArchived - Whether the list includes archived Work Items.
+ * @param scope - SWR key scope that separates uses of the same Team list.
+ * @returns The key that `useTeamIssues` uses for the same arguments.
+ */
+export function createTeamIssuesKey(
+  accessToken: string,
+  teamId: string,
+  includeArchived: boolean,
+  scope = 'team-issues',
+) {
+  return [scope, accessToken, teamId, includeArchived] as const
+}
+
+/**
  * Team の Work Item 一覧を取得します。
  *
  * @param accessToken - Work Item API の access token です。
@@ -66,7 +84,7 @@ export function useTeamIssues(
   scope = 'team-issues',
 ) {
   const key = accessToken && teamId && enabled
-    ? [scope, accessToken, teamId, includeArchived] as const
+    ? createTeamIssuesKey(accessToken, teamId, includeArchived, scope)
     : null
 
   const query = useSWR(
@@ -429,6 +447,24 @@ function createWorkspaceWorkItemFilterKey(filter: WorkspaceWorkItemListFilter) {
 }
 
 /**
+ * Builds the SWR key of one Work Item detail read.
+ *
+ * @param accessToken - Access token for the Work Item API.
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item ID.
+ * @param scope - SWR key scope that separates the screens reading the detail.
+ * @returns The key, shared by the read and by writes that refresh that detail.
+ */
+export function createTeamIssueDetailKey(
+  accessToken: string,
+  teamId: string,
+  issueId: string,
+  scope = 'team-issue-detail',
+) {
+  return [scope, accessToken, teamId, issueId] as const
+}
+
+/**
  * Team Work Item の詳細を取得します。
  *
  * @param accessToken - Work Item API の access token です。
@@ -446,7 +482,7 @@ export function useTeamIssueDetail(
   scope = 'team-issue-detail',
 ) {
   const key = accessToken && teamId && issueId && enabled
-    ? [scope, accessToken, teamId, issueId] as const
+    ? createTeamIssueDetailKey(accessToken, teamId, issueId, scope)
     : null
 
   const query = useSWR(

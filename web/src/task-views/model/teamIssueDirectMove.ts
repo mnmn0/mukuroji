@@ -9,6 +9,10 @@ import {
   type TeamIssue,
   type UpdateTeamIssueInput,
 } from '../../issues/api'
+import {
+  isCancelledTeamIssueUpdate,
+  type CancelledTeamIssueUpdate,
+} from '../../issues/model/teamIssueUpdateOutcome'
 import { resolveEditableWorkflowStatuses } from '../../work-items/model/workItemDisplay'
 import {
   clearTaskStatusMoveRequest,
@@ -16,6 +20,7 @@ import {
   type TaskStatusMoveRequestSlot,
 } from './taskStatusMoveRequest'
 import {
+  createCancelledTaskActionResult,
   createFailedTaskActionResult,
   createSucceededTaskActionMutationResult,
 } from './taskActionRegistry'
@@ -25,12 +30,13 @@ import {
  *
  * @param issueId - Team Issue identifier selected by the canonical Move action.
  * @param input - Revalidated workflow status patch.
- * @returns Persisted Team Issue snapshot when supplied by the route mutation.
+ * @returns Persisted Team Issue snapshot when supplied by the route mutation, or the cancelled
+ *   outcome when the person declined the update.
  */
 export type TeamIssueDirectStatusMoveMutation = (
   issueId: string,
   input: UpdateTeamIssueInput,
-) => Promise<TeamIssue | void>
+) => Promise<TeamIssue | CancelledTeamIssueUpdate | void>
 
 /** Localized failure messages returned by a direct Team Board Move action. */
 export type TeamIssueDirectStatusMoveMessages = {
@@ -40,6 +46,8 @@ export type TeamIssueDirectStatusMoveMessages = {
   failed: string
   /** Message shown when a retained target or destination is no longer valid. */
   unavailable: string
+  /** Message shown when the Team refuses to complete a parent that has open children. */
+  openChildren: string
 }
 
 /**
@@ -134,6 +142,15 @@ export function executeTeamIssueDirectStatusMove(
 
   /** Converts a rejected direct mutation into the same canonical failure returned by detail Move. */
   const createMutationFailure = (error: unknown): WorkItemActionResult => {
+    if (hasTeamIssueErrorCode(error, 'WorkItemOpenChildren')) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'WorkItemOpenChildren',
+        'validation',
+        messages.openChildren,
+      )
+    }
     const conflict = isTeamIssueRevisionConflict(error)
     return createFailedTaskActionResult(
       context.actionId,
@@ -147,11 +164,9 @@ export function executeTeamIssueDirectStatusMove(
 
   try {
     return onUpdateIssue(issue.id, { workflowStatusId: destinationWorkflowStatusId }).then(
-      (updatedIssue) => createSucceededTaskActionMutationResult(
-        context.actionId,
-        target,
-        updatedIssue?.revision,
-      ),
+      (outcome) => isCancelledTeamIssueUpdate(outcome)
+        ? createCancelledTaskActionResult(context.actionId, [target])
+        : createSucceededTaskActionMutationResult(context.actionId, target, outcome?.revision),
       createMutationFailure,
     )
   } catch (error) {
@@ -166,11 +181,22 @@ export function executeTeamIssueDirectStatusMove(
  * @returns Whether the failure has the canonical Work Item revision conflict code.
  */
 export function isTeamIssueRevisionConflict(error: unknown): boolean {
+  return hasTeamIssueErrorCode(error, 'WorkItemRevisionConflict')
+}
+
+/**
+ * Checks a Team Issue API error code preserved either directly or as a route-level error cause.
+ *
+ * @param error - Unknown Team Issue mutation failure.
+ * @param code - API error code to look for.
+ * @returns Whether the failure or its cause carries the code.
+ */
+function hasTeamIssueErrorCode(error: unknown, code: string): boolean {
   if (error instanceof TeamIssuesApiError) {
-    return error.code === 'WorkItemRevisionConflict'
+    return error.code === code
   }
   const cause = error instanceof Error ? error.cause : undefined
-  return cause instanceof TeamIssuesApiError && cause.code === 'WorkItemRevisionConflict'
+  return cause instanceof TeamIssuesApiError && cause.code === code
 }
 
 /**
