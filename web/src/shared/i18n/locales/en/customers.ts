@@ -164,7 +164,7 @@ export const customersMessages = {
   'customers.edit.linkProject': 'Link project',
   'customers.edit.unlink': 'Unlink',
   'customers.edit.unlinkNamed': 'Unlink {name}',
-  'customers.edit.issue.nameRequired': 'Enter a name (up to 200 characters).',
+  'customers.edit.issue.nameRequired': 'Enter a name (up to 300 characters).',
   'customers.edit.issue.domainInvalid': 'Enter a valid domain, such as example.com.',
   'customers.edit.issue.businessValueInvalid': 'Business value must be a number from 0 to 100.',
   'customers.edit.issue.emailInvalid': 'Enter a valid email address.',

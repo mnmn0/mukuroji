@@ -162,6 +162,23 @@ describe('Customer drafts', () => {
     })
   })
 
+  test('keeps a precise received time when the field is left untouched', () => {
+    const precise = { ...request, receivedAt: '2026-08-18T00:00:42.123Z' }
+    const draft = { ...createCustomerRequestDraft(precise), importance: 'urgent' as const }
+    expect(readUpdateCustomerRequestInput(precise, draft)).toEqual({
+      ok: true,
+      input: { expectedRevision: 3, importance: 'urgent' },
+    })
+  })
+
+  test('accepts names up to the server limit of 300 characters', () => {
+    const long = { ...customer, name: 'A'.repeat(250) }
+    expect(readUpdateCustomerInput(long, { ...createCustomerDraft(long), status: 'inactive' }))
+      .toEqual({ ok: true, input: { expectedRevision: 4, status: 'inactive' } })
+    expect(readCreateCustomerInput({ ...createCustomerDraft(), name: 'A'.repeat(301) }))
+      .toEqual({ ok: false, issue: 'nameRequired' })
+  })
+
   test('formats an invalid date as an empty datetime-local value', () => {
     expect(toDateTimeLocalValue(new Date('invalid'))).toBe('')
   })

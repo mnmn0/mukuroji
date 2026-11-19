@@ -289,7 +289,8 @@ export function readUpdateCustomerRequestInput(
     input: {
       expectedRevision: request.revision,
       ...(originalMessage === request.originalMessage ? {} : { originalMessage }),
-      ...(Date.parse(receivedAt) === Date.parse(request.receivedAt) ? {} : { receivedAt }),
+      // The draft holds minutes only, so an untouched field must keep the recorded instant's full precision.
+      ...(draft.receivedAt === toDateTimeLocalValue(new Date(request.receivedAt)) ? {} : { receivedAt }),
       ...(draft.importance === request.importance ? {} : { importance: draft.importance }),
       ...(contactId === request.contactId ? {} : { contactId: contactId ?? null }),
       ...(draft.status === request.status ? {} : { status: draft.status }),
@@ -317,7 +318,7 @@ function readCustomerFields(draft: CustomerDraft): CustomerDraftResult<{
   /** Trimmed notes, when set. */ notes?: string
 }> {
   const name = draft.name.trim()
-  if (!name || name.length > 200) return { ok: false, issue: 'nameRequired' }
+  if (!name || name.length > 300) return { ok: false, issue: 'nameRequired' }
   const domain = draft.domain.trim().toLowerCase() || undefined
   if (domain !== undefined && (domain.length > 253 || !domainPattern.test(domain))) {
     return { ok: false, issue: 'domainInvalid' }
@@ -339,7 +340,7 @@ function readContactFields(draft: CustomerContactDraft): CustomerDraftResult<{
   /** Trimmed phone, when set. */ phone?: string
 }> {
   const name = draft.name.trim()
-  if (!name) return { ok: false, issue: 'nameRequired' }
+  if (!name || name.length > 300) return { ok: false, issue: 'nameRequired' }
   const email = draft.email.trim().toLowerCase() || undefined
   if (email !== undefined && !emailPattern.test(email)) return { ok: false, issue: 'emailInvalid' }
   return {

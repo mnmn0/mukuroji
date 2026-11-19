@@ -448,7 +448,14 @@ function CustomerDetailContent({
   t: (key: MessageKey) => string
 }) {
   const [openEditor, setOpenEditor] = useState<CustomerDetailEditor>()
-  const closeEditor = () => setOpenEditor(undefined)
+  /** Closes the given editor only if it is still the open one, so a late save never closes another editor. */
+  const closeEditor = (editor: CustomerDetailEditor) => () => setOpenEditor((current) => (
+    current?.kind === editor.kind &&
+    (current.kind !== 'contact' || editor.kind !== 'contact' || current.contactId === editor.contactId) &&
+    (current.kind !== 'request' || editor.kind !== 'request' || current.requestId === editor.requestId)
+      ? undefined
+      : current
+  ))
   const { customer, contacts, requests, workItems } = detail
   return (
     <aside className="grid content-start gap-5">
@@ -458,7 +465,9 @@ function CustomerDetailContent({
           <CustomerForm
             customer={customer}
             isSaving={editing.isSaving}
-            onCancel={closeEditor}
+            // A refreshed revision starts a fresh draft instead of pairing old input with new data.
+            key={customer.revision}
+            onCancel={closeEditor({ kind: 'customer' })}
             onUpdate={editing.onUpdateCustomer}
             t={t}
           />
@@ -502,7 +511,7 @@ function CustomerDetailContent({
         />
         {editing && openEditor?.kind === 'contact' && openEditor.contactId === undefined ? (
           <div className="mt-3">
-            <CustomerContactForm customerId={customer.id} editing={editing} onClose={closeEditor} t={t} />
+            <CustomerContactForm customerId={customer.id} editing={editing} onClose={closeEditor({ kind: 'contact' })} t={t} />
           </div>
         ) : null}
         {contacts.length === 0 ? (
@@ -511,7 +520,14 @@ function CustomerDetailContent({
           <ul className="mt-3 grid gap-2">
             {contacts.map((contact) => editing && openEditor?.kind === 'contact' && openEditor.contactId === contact.id ? (
               <li key={contact.id}>
-                <CustomerContactForm contact={contact} customerId={customer.id} editing={editing} onClose={closeEditor} t={t} />
+                <CustomerContactForm
+                  contact={contact}
+                  customerId={customer.id}
+                  editing={editing}
+                  key={contact.revision}
+                  onClose={closeEditor({ kind: 'contact', contactId: contact.id })}
+                  t={t}
+                />
               </li>
             ) : (
               <li className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-[var(--workbench-border)] px-3 py-2 text-sm" key={contact.id}>
@@ -552,7 +568,7 @@ function CustomerDetailContent({
         />
         {editing && openEditor?.kind === 'request' && openEditor.requestId === undefined ? (
           <div className="mt-3">
-            <CustomerRequestForm contacts={contacts} customerId={customer.id} editing={editing} onClose={closeEditor} t={t} />
+            <CustomerRequestForm contacts={contacts} customerId={customer.id} editing={editing} onClose={closeEditor({ kind: 'request' })} t={t} />
           </div>
         ) : null}
         {requests.length === 0 ? (
@@ -565,7 +581,8 @@ function CustomerDetailContent({
                   contacts={contacts}
                   customerId={customer.id}
                   editing={editing}
-                  onClose={closeEditor}
+                  key={request.revision}
+                  onClose={closeEditor({ kind: 'request', requestId: request.id })}
                   request={request}
                   t={t}
                 />

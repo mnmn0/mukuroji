@@ -147,7 +147,10 @@ export function CustomerForm({
   /** Translator for form copy. */
   t: Translate
 }) {
-  const [draft, setDraft] = useState(() => createCustomerDraft(customer))
+  // The draft and the record it was made from stay together, so a later refresh never becomes the
+  // revision baseline for edits made against older data.
+  const [baseline] = useState(customer)
+  const [draft, setDraft] = useState(() => createCustomerDraft(baseline))
   const { issue, submit } = useDraftSubmission()
   const title = t(customer ? 'customers.edit.editTitle' : 'customers.edit.createTitle')
   return (
@@ -156,8 +159,8 @@ export function CustomerForm({
       isSaving={isSaving}
       onCancel={onCancel}
       onSubmit={() => {
-        if (customer && onUpdate) {
-          void submit(readUpdateCustomerInput(customer, draft), (input) => onUpdate(customer.id, input), onCancel)
+        if (baseline && onUpdate) {
+          void submit(readUpdateCustomerInput(baseline, draft), (input) => onUpdate(baseline.id, input), onCancel)
         } else if (onCreate) {
           void submit(readCreateCustomerInput(draft), onCreate, onCancel)
         }
@@ -215,7 +218,8 @@ export function CustomerContactForm({
   /** Translator for form copy. */
   t: Translate
 }) {
-  const [draft, setDraft] = useState(() => createCustomerContactDraft(contact))
+  const [baseline] = useState(contact)
+  const [draft, setDraft] = useState(() => createCustomerContactDraft(baseline))
   const { issue, submit } = useDraftSubmission()
   return (
     <EditorForm
@@ -223,8 +227,8 @@ export function CustomerContactForm({
       isSaving={editing.isSaving}
       onCancel={onClose}
       onSubmit={() => {
-        if (contact) {
-          void submit(readUpdateCustomerContactInput(contact, draft), (input) => editing.onUpdateContact(contact, input), onClose)
+        if (baseline) {
+          void submit(readUpdateCustomerContactInput(baseline, draft), (input) => editing.onUpdateContact(baseline, input), onClose)
         } else {
           void submit(readCreateCustomerContactInput(draft), (input) => editing.onCreateContact(customerId, input), onClose)
         }
@@ -278,7 +282,8 @@ export function CustomerRequestForm({
   /** Translator for form copy. */
   t: Translate
 }) {
-  const [draft, setDraft] = useState(() => createCustomerRequestDraft(request))
+  const [baseline] = useState(request)
+  const [draft, setDraft] = useState(() => createCustomerRequestDraft(baseline))
   const { issue, submit } = useDraftSubmission()
   const contactOptions = contacts.filter((contact) => contact.status === 'active' || contact.id === request?.contactId)
   return (
@@ -287,8 +292,8 @@ export function CustomerRequestForm({
       isSaving={editing.isSaving}
       onCancel={onClose}
       onSubmit={() => {
-        if (request) {
-          void submit(readUpdateCustomerRequestInput(request, draft), (input) => editing.onUpdateRequest(request, input), onClose)
+        if (baseline) {
+          void submit(readUpdateCustomerRequestInput(baseline, draft), (input) => editing.onUpdateRequest(baseline, input), onClose)
         } else {
           void submit(readCreateCustomerRequestInput(customerId, draft), editing.onCreateRequest, onClose)
         }

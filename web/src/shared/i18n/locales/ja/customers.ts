@@ -164,7 +164,7 @@ export const customersMessages = {
   'customers.edit.linkProject': 'Project にリンク',
   'customers.edit.unlink': '解除',
   'customers.edit.unlinkNamed': '{name} とのリンクを解除',
-  'customers.edit.issue.nameRequired': '名前を入力してください（200 文字以内）。',
+  'customers.edit.issue.nameRequired': '名前を入力してください（300 文字以内）。',
   'customers.edit.issue.domainInvalid': 'ドメインの形式が正しくありません（例: example.com）。',
   'customers.edit.issue.businessValueInvalid': 'Business value は 0〜100 の数値で入力してください。',
   'customers.edit.issue.emailInvalid': 'メールアドレスの形式が正しくありません。',
