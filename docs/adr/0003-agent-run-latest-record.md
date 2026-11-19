@@ -24,7 +24,7 @@ resume、start、take over は Run・claim・Work Item revision などを 1 つ�
 - resume は row を強整合で読んで直前の Run を決め、transaction では row がまだその `runId` を指していることを
   条件に新しい Run へ置き換える。読み取り後に別の Run が始まった場合は条件が外れて `409` になる。
 - Run 履歴の先頭ページはこの row も強整合で読み、index にまだない最新 Run を先頭に補う。
-- 再開と take over の新しい Run の `startedAt` は直前の Run より必ず後にし、row が指す Run と
+- start・take over・再開の新しい Run の `startedAt` は直前の Run より必ず後にし、row が指す Run と
   index の先頭を一致させる。
 - row の導入前に最後の Run が始まった Work Item（row がない）は、従来どおり Run 履歴 index で
   直前の Run を決める。row がないことを transaction の条件にするため、同時に始まった Run とは競合として扱う。

@@ -745,7 +745,7 @@ claim がないまま `started` に残る。同じ assignee がこれを続け�
   `paused` の Run を見て再開候補を示した後に、別の Run が始まって `failed` などで終わった場合に、
   人の判断が要る Run から自動で再開しないためである。指定しない resume（ユーザーが明示的に頼んだもの）は
   従来どおり直前の Run が何で終わっていても再開できる。
-- 再開と take over で始まる Run の `startedAt` は直前の Run の `startedAt` より必ず後にする（時計がずれていても 1 ms 後）。動かすのは `startedAt` だけで、
+- 通常の start、再開、take over で始まる Run の `startedAt` は直前の Run の `startedAt` より必ず後にする（時計がずれていても 1 ms 後）。動かすのは `startedAt` だけで、
   `lastHeartbeatAt` と lease はこのサーバーの現在時刻から数えるため、再開直後の heartbeat と report は拒まれない。Run 履歴
   index は `startedAt#runId` の降順なので、`agent-run-latest` row が指す Run と履歴の先頭が一致する。履歴の
   1 ページ目で index にまだない最新 Run を補うときも、同じ順序の位置に入れて cursor と矛盾させない。

@@ -322,8 +322,9 @@ function requireResumable(
 }
 
 /**
- * Chooses the start time of a run that resumes or takes over another: now, but always after that run,
- * so that a clock behind that run's still lists the new run first in the history. Only the start time
+ * Chooses the start time of a run that follows another on the same Work Item (a start, resume, or take
+ * over): now, but always after that run, so that a clock behind that run's still lists the new run first
+ * in the history. Only the start time
  * moves; the heartbeat and lease keep this server's time, so the run's own reports and heartbeats are
  * not refused.
  *
@@ -444,7 +445,14 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
                   { reason: 'not_ready', pointer: '/acceptanceCriteria' },
                 )
               }
-              const run = createActiveAgentRun({
+              // A run that started on a server whose clock was ahead must still sort before this one, so the
+              // history and the latest-run record agree on which run came last. The Work Item revision check
+              // fails this start if another run starts meanwhile.
+              const latestRunId = await store.getLatestRunId(principal.directoryId, teamId, workItemId)
+              const previous = latestRunId === undefined
+                ? undefined
+                : await store.getRun(principal.directoryId, teamId, latestRunId)
+              const created = createActiveAgentRun({
                 directoryId: principal.directoryId,
                 teamId,
                 workItemId,
@@ -455,6 +463,7 @@ export function createCanonicalPublicAgentRunService(): PublicAgentRunService {
                 leaseMinutes: settings.leaseMinutes,
                 now,
               })
+              const run = { ...created, startedAt: resumeStartedAt(previous, now) }
               started = run
               startedAt = now
               const auditPut = createAgentRunAuditPut(

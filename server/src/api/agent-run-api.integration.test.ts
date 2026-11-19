@@ -130,6 +130,38 @@ function configureUnstartedAssignedWorkItem(overrides: {
 }
 
 describe('public Agent Run service', () => {
+  test('starts a run after a finished run that started on a clock ahead of this one', async () => {
+    const { store } = configureUnstartedAssignedWorkItem()
+    setTestAppDependencies({
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const ahead = new Date(Date.now() + 60_000).toISOString()
+    const earlier = finishAgentRun({ ...createHeldRun('task-1', 'laptop-1'), startedAt: ahead }, 'paused', 'agent', new Date())
+    store.seed(earlier)
+    const service = createCanonicalPublicAgentRunService()
+    const started = await runWithTestAppDependencies(() => service.start(
+      credential, 'core-team', 'task-1',
+      readStartAgentRunRequest({ expectedRevision: 1, workflowStatusId: 'in-progress', runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2' }),
+      { requestId: 'start-after-ahead', idempotencyKey: 'start-after-ahead' },
+      { credentialId: 'agent-key', idempotencyKey: 'start-after-ahead', requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    // The new run sorts first in the history, which agrees with the latest-run record.
+    expect(Date.parse(started.run.startedAt)).toBeGreaterThan(Date.parse(ahead))
+    expect(Date.parse(started.run.lastHeartbeatAt)).toBeLessThanOrEqual(Date.now())
+    const history = await store.listWorkItemRuns(workspaceId, 'core-team', 'task-1', undefined, 1)
+    expect(history.runs.map((run) => run.runId)).toEqual([started.run.runId])
+    expect(await store.getLatestRunId(workspaceId, 'core-team', 'task-1')).toBe(started.run.runId)
+  })
+
   test('starts a run atomically with the started transition and fences other instances', async () => {
     const { store, observed } = configureUnstartedAssignedWorkItem()
     const receipts: unknown[] = []
