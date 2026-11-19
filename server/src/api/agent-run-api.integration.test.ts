@@ -17,8 +17,8 @@ import {
   type StoredAgentRun,
 } from '../modules/agent-runs'
 import { createAgentRunFenceConflictError } from '../modules/work-items/adapter-out/dynamodb/work-item-client'
-import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import { CognitoServiceError } from '../modules/authentication'
+import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import { createAuditEventId, createMutationAuditContext } from '../modules/audit/audit'
 import {
   AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
@@ -55,6 +55,16 @@ const credential: AuthenticatedDeveloperCredential = {
   credentialId: 'agent-key',
   subjectUserId: 'demo@example.com',
   scopes: ['work-items:read', 'work-items:write'],
+}
+
+/**
+ * Checks that a value is a plain record, so a transaction item can be read without assertions.
+ *
+ * @param value - Value to check.
+ * @returns True for a non-array object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 /**
@@ -1024,6 +1034,120 @@ describe('public Agent Run service', () => {
       .rejects.toMatchObject({ category: 'conflict' })
     // A cancellation with nothing changed, such as an identical request's receipt, stays retryable.
     await expect(takeOverDuring(undefined, 'unrelated')).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+  })
+
+  test('fences the caller\'s access when it takes over and reports access that changed meanwhile', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    store.state.settings.set(`${workspaceId}|core-team`, {
+      ...createDefaultAgentSettings('core-team'), revision: 1, allowTakeoverAfterLeaseExpiry: true,
+      updatedAt: new Date().toISOString(), updatedBy: 'manager@example.com',
+    })
+    const stalled = { ...createHeldRun('task-1', 'laptop-1'), leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() }
+    store.seed(stalled)
+    let planningRevision = 3
+    const planning = getTestAppDependencies().workItems.planning
+    planning.getAuthorizationRevision = async () => planningRevision
+    setTestAppDependencies({
+      planning,
+      transactions: {
+        /**
+         * Returns a receipt write for the transaction.
+         *
+         * @returns The receipt write.
+         */
+        async prepareIdempotencyCompletionTransactWrite() {
+          return { transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { receipt: true } } } }
+        },
+      },
+    })
+    const service = createCanonicalPublicAgentRunService()
+    /**
+     * Takes over the stalled run as another instance.
+     *
+     * @param key - Idempotency key.
+     * @returns The take over response.
+     */
+    const takeOver = (key: string) => runWithTestAppDependencies(() => service.takeOver(
+      credential, 'core-team', 'task-1', stalled.runId,
+      { runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+      { requestId: 'take-over', idempotencyKey: key },
+      { credentialId: 'agent-key', idempotencyKey: key, requestFingerprint: 'fp', reservationId: 'reservation' },
+    ))
+    const commit = store.commit.bind(store)
+    // Team or Project access changes after authorization, so the commit's access guard cancels it.
+    store.commit = async () => {
+      planningRevision += 1
+      throw createAgentRunCommitConflictError()
+    }
+    await expect(takeOver('access-changed')).rejects.toMatchObject({ code: 'WorkItemAuthorizationChanged' })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)?.runId).toBe(stalled.runId)
+    // An Enterprise Identity control change cancels the commit the same way and is reported the same way.
+    const enterpriseIdentity = new InMemoryEnterpriseIdentityClient()
+    const getSnapshot = enterpriseIdentity.getSnapshot.bind(enterpriseIdentity)
+    let controlRevisionShift = 0
+    enterpriseIdentity.getSnapshot = async (id) => {
+      const snapshot = await getSnapshot(id)
+      return { ...snapshot, controlRevision: (snapshot.controlRevision ?? 0) + controlRevisionShift }
+    }
+    setTestAppDependencies({ enterpriseIdentity })
+    store.commit = async () => {
+      controlRevisionShift += 1
+      throw createAgentRunCommitConflictError()
+    }
+    await expect(takeOver('control-changed')).rejects.toMatchObject({ code: 'WorkItemAuthorizationChanged' })
+    controlRevisionShift = 0
+    // A member deactivated during the request fails the membership guard even if its version stays the same,
+    // and the caller gets the same answer as a new request; the stalled run keeps its claim and no successor is saved.
+    const workspaceAccess = getTestAppDependencies().workspace.workspaceAccess
+    const member = await workspaceAccess.getActiveMember(workspaceId, 'demo@example.com')
+    let deactivated = false
+    setTestAppDependencies({
+      workspaceAccess: {
+        ...workspaceAccess,
+        /**
+         * Reads the caller's membership, which the test deactivates during the commit.
+         *
+         * @param id - Workspace ID.
+         * @param memberKey - Member key.
+         * @returns The active member, or undefined once deactivated.
+         */
+        async getActiveMember(id, memberKey) {
+          return deactivated ? undefined : await workspaceAccess.getActiveMember(id, memberKey)
+        },
+      },
+    })
+    store.commit = async () => {
+      deactivated = true
+      throw createAgentRunCommitConflictError()
+    }
+    await expect(takeOver('member-deactivated')).rejects.toMatchObject({ status: 403 })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)?.runId).toBe(stalled.runId)
+    expect([...store.state.runs.values()].map((run) => run.runId)).toEqual([stalled.runId])
+    deactivated = false
+
+    const committed: unknown[][] = []
+    store.commit = async (items, fenceItemCount) => {
+      committed.push([...items])
+      return commit(items, fenceItemCount)
+    }
+    const taken = await takeOver('stable')
+    // The commit fails if the caller's membership or Team and Project access changed since authorization.
+    expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({
+      Key: { workspaceId, recordKey: 'MEMBER#demo@example.com' },
+      // The guard requires the member to stay active at the version observed during authorization.
+      ConditionExpression: expect.stringContaining('#authorization'),
+    }) })
+    const memberCheck = (committed[0] ?? []).find((item) => isRecord(item) && isRecord(item.ConditionCheck) &&
+      isRecord(item.ConditionCheck.Key) && item.ConditionCheck.Key.recordKey === 'MEMBER#demo@example.com')
+    const memberCondition = isRecord(memberCheck) && isRecord(memberCheck.ConditionCheck) ? memberCheck.ConditionCheck : {}
+    expect(Object.values(isRecord(memberCondition.ExpressionAttributeNames) ? memberCondition.ExpressionAttributeNames : {}))
+      .toEqual(expect.arrayContaining(['status', 'version']))
+    expect(Object.values(isRecord(memberCondition.ExpressionAttributeValues) ? memberCondition.ExpressionAttributeValues : {}))
+      .toEqual(expect.arrayContaining(['active', member?.version]))
+    expect(committed[0]).toContainEqual({ ConditionCheck: expect.objectContaining({
+      Key: { workspaceId: `FENCE#${workspaceId}`, recordKey: 'META' },
+    }) })
+    expect(store.state.claims.get(`${workspaceId}|core-team|task-1`)?.runId).toBe(taken.run.runId)
   })
 
   test('resumes a started Work Item after a paused run with a linked run, audit, and history', async () => {
@@ -2262,19 +2386,50 @@ describe('Factory board route', () => {
     expect(JSON.stringify(body)).not.toContain('task-hidden')
   })
 
+  test('reads recent and failed runs from the finished-run index however many older runs the Team has', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([
+      { id: 'task-done', statusCategory: 'completed' },
+      { id: 'task-old-failure', statusCategory: 'started' },
+    ])
+    for (let index = 0; index < 5_000; index += 1) {
+      store.seed(finishAgentRun(createRunAt(`old-${index}`, new Date(now - 50 * hourMs)), 'completed', 'agent', new Date(now - 49 * hourMs)))
+    }
+    store.seed(finishAgentRun(createRunAt('task-done', new Date(now - 2 * hourMs)), 'completed', 'agent', new Date(now - hourMs)))
+    store.seed(finishAgentRun(createRunAt('task-old-failure', new Date(now - 100 * hourMs)), 'failed', 'agent', new Date(now - 99 * hourMs)))
+    store.listFinishedRuns = async () => {
+      throw new Error('The board must not scan the finished runs.')
+    }
+    const listFinishedRunsByTime = store.listFinishedRunsByTime.bind(store)
+    const reads: { group: string; since: string | undefined }[] = []
+    store.listFinishedRunsByTime = async (directoryId, teamId, group, since, cursor, limit) => {
+      reads.push({ group, since })
+      return listFinishedRunsByTime(directoryId, teamId, group, since, cursor, limit)
+    }
+    const { body, lanes } = await readBoard()
+    expect(lanes).toEqual({ 'task-done': 'completed', 'task-old-failure': 'failed' })
+    expect(body.finishedRunsHasMore).toBe(false)
+    // Only the completed-lane window is read from the other finished runs; failures are read without a time limit.
+    expect(reads).toHaveLength(2)
+    expect(reads.find((read) => read.group === 'failed')?.since).toBeUndefined()
+    const since = reads.find((read) => read.group === 'other')?.since
+    const windowMs = since === undefined ? Number.NaN : now - Date.parse(since)
+    expect(windowMs).toBeGreaterThan(23 * hourMs)
+    expect(windowMs).toBeLessThanOrEqual(24 * hourMs)
+  })
+
   test('bounds the finished runs and Work Items it evaluates and says so', async () => {
     const now = Date.now()
     const workItems: BoardWorkItem[] = Array.from({ length: 400 }, (_, index) => ({ id: `task-${index}`, statusCategory: 'unstarted' }))
     const { store, pageReads } = configureBoard(workItems)
     for (let index = 0; index < 600; index += 1) {
-      store.seed(finishAgentRun(createRunAt(`old-${index}`, new Date(now - 50 * hourMs)), 'completed', 'agent', new Date(now - 49 * hourMs)))
+      store.seed(finishAgentRun(createRunAt(`old-${index}`, new Date(now - 50 * hourMs)), 'failed', 'agent', new Date(now - 49 * hourMs)))
     }
-    const listFinishedRuns = store.listFinishedRuns.bind(store)
+    const listFinishedRunsByTime = store.listFinishedRunsByTime.bind(store)
     const finishedLimits: number[] = []
-    store.listFinishedRuns = async (directoryId, teamId, cursor, limit) => {
-      finishedLimits.push(limit)
-      // The fake page never continues on its own, so the board must stop at its own bound.
-      return listFinishedRuns(directoryId, teamId, cursor, limit)
+    store.listFinishedRunsByTime = async (directoryId, teamId, group, since, cursor, limit) => {
+      if (group === 'failed') finishedLimits.push(limit)
+      return listFinishedRunsByTime(directoryId, teamId, group, since, cursor, limit)
     }
     const { body } = await readBoard()
     expect(body).toMatchObject({ items: [], finishedRunsHasMore: true, startedWorkItemsHasMore: false })
@@ -2425,7 +2580,7 @@ describe('Factory board route', () => {
 
     resetTestApp()
     const second = configureBoard([{ id: 'task-1', statusCategory: 'started' }])
-    second.store.listFinishedRuns = async () => {
+    second.store.listFinishedRunsByTime = async () => {
       throw createAgentRunIntegrityError()
     }
     const corrupt = await app.request('http://localhost/api/teams/core-team/agent-runs', { headers })

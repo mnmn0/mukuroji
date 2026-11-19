@@ -25,6 +25,7 @@ import {
   readUpdateAgentSettingsRequest,
   toAgentRun,
   toAgentRunReport,
+  type AgentRunFinishedGroup,
   type StoredAgentRun,
 } from '../../modules/agent-runs'
 import { CognitoServiceError, isCognitoUserNotFoundError, type CognitoUserProfile } from '../../modules/authentication'
@@ -283,32 +284,51 @@ async function readBoardActiveRuns(
 /**
  * Collects the Work Items of runs that finished within the completed-lane window, and of every failed
  * run, which stays on the board without a time limit. The board then shows each Work Item by its
- * newest run. Finished runs are stored in run ID order, so at most
- * {@link FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS} are evaluated.
+ * newest run. Both come from the finished-run index, newest finish first, so the Team's older
+ * finished runs are never read; each group stops after
+ * {@link FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS} runs.
  *
  * @param principal - Viewer.
  * @param teamId - Team ID.
  * @param now - Board read time.
- * @returns Work Item IDs and whether finished runs were left unread.
+ * @returns Work Item IDs and whether either group was left partly unread.
  */
 async function readRecentlyFinishedWorkItemIds(
   principal: WorkspacePrincipal,
   teamId: string,
   now: Date,
 ): Promise<{ workItemIds: string[]; hasMore: boolean }> {
-  const since = now.getTime() - FACTORY_BOARD_COMPLETED_WINDOW_HOURS * millisecondsPerHour
+  const since = new Date(now.getTime() - FACTORY_BOARD_COMPLETED_WINDOW_HOURS * millisecondsPerHour).toISOString()
+  const [recent, failed] = await Promise.all([
+    readFinishedRunWorkItemIds(principal, teamId, 'other', since),
+    readFinishedRunWorkItemIds(principal, teamId, 'failed', undefined),
+  ])
+  return { workItemIds: [...new Set([...recent.workItemIds, ...failed.workItemIds])], hasMore: recent.hasMore || failed.hasMore }
+}
+
+/**
+ * Reads one group of the finished-run index up to the board bound.
+ *
+ * @param principal - Viewer.
+ * @param teamId - Team ID.
+ * @param group - Failed runs or the other finished runs.
+ * @param since - When given, only runs that finished at or after this ISO time.
+ * @returns Work Item IDs and whether the group was left partly unread.
+ */
+async function readFinishedRunWorkItemIds(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  group: AgentRunFinishedGroup,
+  since: string | undefined,
+): Promise<{ workItemIds: string[]; hasMore: boolean }> {
   const workItemIds = new Set<string>()
   let evaluated = 0
   let cursor: string | undefined
   do {
     const limit = Math.min(boardPageSize, FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS - evaluated)
-    const page = await workItemDependencies.agentRuns.listFinishedRuns(principal.directoryId, teamId, cursor, limit)
+    const page = await workItemDependencies.agentRuns.listFinishedRunsByTime(principal.directoryId, teamId, group, since, cursor, limit)
     evaluated += limit
-    for (const run of page.runs) {
-      // A failure stays on the board without a time limit, so only other outcomes use the window.
-      const recent = run.finishedAt !== undefined && Date.parse(run.finishedAt) >= since
-      if (recent || run.outcome === 'failed') workItemIds.add(run.workItemId)
-    }
+    for (const run of page.runs) workItemIds.add(run.workItemId)
     cursor = page.nextCursor
   } while (cursor !== undefined && evaluated < FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS)
   return { workItemIds: [...workItemIds], hasMore: cursor !== undefined }

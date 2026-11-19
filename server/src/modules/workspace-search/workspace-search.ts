@@ -887,6 +887,22 @@ const taskViewBuiltInLayoutFields = new Set([
   'completionDelayDays',
 ])
 
+/**
+ * Order in which Workspace Search reads each entity type's index prefix.
+ *
+ * Work Items and Projects come first so that a large number of comments or Documents cannot push
+ * them past the per-page evaluation budget.
+ */
+const WORKSPACE_SEARCH_ENTITY_TYPE_RANK: Record<SearchEntityType, number> = {
+  'work-item': 0,
+  project: 1,
+  document: 2,
+  team: 3,
+  'context-item': 4,
+  comment: 5,
+  file: 6,
+}
+
 const searchEntityTypes = new Set<SearchEntityType>([
   'work-item',
   'project',
@@ -1101,6 +1117,8 @@ export function createTeamWorkspaceSearchDocument(input: {
   createdAt?: string
   /** Team row の最終更新日時です。 */
   updatedAt?: string
+  /** Rename count of the Team row, which fences a delayed projection of an older name. */
+  sourceRevision?: number
 }) {
   return createWorkspaceSearchDocument({
     workspaceId: input.workspaceId,
@@ -1113,6 +1131,7 @@ export function createTeamWorkspaceSearchDocument(input: {
     ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+    ...(input.sourceRevision === undefined ? {} : { sourceRevision: input.sourceRevision }),
   })
 }
 
@@ -1772,21 +1791,26 @@ export class DynamoDbWorkspaceSearchClient {
       viewerUserId,
       queryFingerprint,
     )
+    const entityTypes = orderWorkspaceSearchEntityTypes(filters.entityTypes)
     const results: WorkspaceSearchResult[] = []
+    let entityTypeIndex = cursor ? findSearchCursorEntityTypeIndex(entityTypes, cursor.recordKey) : 0
     let exclusiveStartKey = cursor
       ? { workspaceId, recordKey: cursor.recordKey }
       : undefined
+    let positionRecordKey = cursor?.recordKey
     let evaluated = 0
     let nextRecordKey: string | undefined
     let reachedLimit = false
 
-    do {
+    while (entityTypeIndex < entityTypes.length) {
+      const entityType = entityTypes[entityTypeIndex]
+      if (entityType === undefined) break
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.tableName,
         KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
         ExpressionAttributeValues: {
           ':workspaceId': workspaceId,
-          ':prefix': WORKSPACE_SEARCH_DOCUMENT_PREFIX,
+          ':prefix': createWorkspaceSearchEntityTypePrefix(entityType),
         },
         ExclusiveStartKey: exclusiveStartKey,
         ScanIndexForward: true,
@@ -1797,7 +1821,6 @@ export class DynamoDbWorkspaceSearchClient {
         recordKey: typeof item.recordKey === 'string' ? item.recordKey : undefined,
       }))
       let processedDocumentCount = 0
-      let lastProcessedRecordKey: string | undefined
 
       for (
         let offset = 0;
@@ -1847,7 +1870,7 @@ export class DynamoDbWorkspaceSearchClient {
           if (!row) continue
           processedDocumentCount += 1
           evaluated += 1
-          if (row.recordKey) lastProcessedRecordKey = row.recordKey
+          if (row.recordKey) positionRecordKey = row.recordKey
           const document = currentDocuments[index]
           if (!document) continue
           results.push(
@@ -1866,22 +1889,31 @@ export class DynamoDbWorkspaceSearchClient {
       const responseLastRecordKey = typeof response.LastEvaluatedKey?.recordKey === 'string'
         ? response.LastEvaluatedKey.recordKey
         : undefined
+      const hasLaterEntityTypes = entityTypeIndex < entityTypes.length - 1
       if (reachedLimit) {
-        const hasUnprocessedRows = processedDocumentCount < documentRows.length || Boolean(responseLastRecordKey)
-        nextRecordKey = hasUnprocessedRows ? lastProcessedRecordKey : undefined
+        const hasUnprocessedRows = processedDocumentCount < documentRows.length ||
+          Boolean(responseLastRecordKey) ||
+          hasLaterEntityTypes
+        nextRecordKey = hasUnprocessedRows ? positionRecordKey : undefined
         break
       }
-      nextRecordKey = responseLastRecordKey
-      exclusiveStartKey = response.LastEvaluatedKey as typeof exclusiveStartKey
-    } while (
-      results.length < limit &&
-      nextRecordKey &&
-      evaluated < WORKSPACE_SEARCH_EVALUATION_LIMIT
-    )
+      if (responseLastRecordKey) {
+        exclusiveStartKey = { workspaceId, recordKey: responseLastRecordKey }
+        positionRecordKey = responseLastRecordKey
+      } else {
+        // An exhausted prefix resumes from its last key, which the next query skips past.
+        entityTypeIndex += 1
+        exclusiveStartKey = undefined
+      }
+      if (evaluated >= WORKSPACE_SEARCH_EVALUATION_LIMIT) {
+        nextRecordKey = entityTypeIndex < entityTypes.length ? positionRecordKey : undefined
+        break
+      }
+    }
 
     return {
       schemaVersion: SEARCH_SCHEMA_VERSION,
-      results,
+      results: rankWorkspaceSearchResultsByTitleMatch(results, filters.keyword),
       ...(nextRecordKey
         ? {
             nextCursor: encodeCursor(this.getCursorKey(), {
@@ -5723,6 +5755,80 @@ function decodeSearchCursor(
     throw new WorkspaceSearchError(400, 'InvalidSearchCursor', 'Search cursor is invalid for this query.')
   }
   return cursor as SearchCursor
+}
+
+/**
+ * Lists the entity types a search reads, in index read order.
+ *
+ * @param entityTypes - Requested entity types, or undefined for every type.
+ * @returns Entity types sorted so that Work Items and Projects are read first.
+ */
+function orderWorkspaceSearchEntityTypes(
+  entityTypes: readonly SearchEntityType[] | undefined,
+): SearchEntityType[] {
+  const selected = entityTypes?.length ? entityTypes : [...searchEntityTypes]
+  return [...new Set(selected)].sort((left, right) =>
+    WORKSPACE_SEARCH_ENTITY_TYPE_RANK[left] - WORKSPACE_SEARCH_ENTITY_TYPE_RANK[right]
+  )
+}
+
+/**
+ * Creates the record key prefix shared by every search document of one entity type.
+ *
+ * @param entityType - Indexed entity type.
+ * @returns The `DOCUMENT#<entityType>#` record key prefix.
+ */
+function createWorkspaceSearchEntityTypePrefix(entityType: SearchEntityType): string {
+  return `${WORKSPACE_SEARCH_DOCUMENT_PREFIX}${entityType}#`
+}
+
+/**
+ * Finds which entity type prefix a search cursor stopped in.
+ *
+ * @param entityTypes - Entity types the current query reads, in read order.
+ * @param recordKey - Last evaluated record key stored in the cursor.
+ * @returns Index into `entityTypes` to resume from.
+ * @throws WorkspaceSearchError when the cursor points outside the query's entity types.
+ */
+function findSearchCursorEntityTypeIndex(
+  entityTypes: readonly SearchEntityType[],
+  recordKey: string,
+): number {
+  const index = entityTypes.findIndex((entityType) =>
+    recordKey.startsWith(createWorkspaceSearchEntityTypePrefix(entityType))
+  )
+  if (index < 0) {
+    throw new WorkspaceSearchError(400, 'InvalidSearchCursor', 'Search cursor is invalid for this query.')
+  }
+  return index
+}
+
+/**
+ * Moves results whose title contains every keyword term above the other results of the page.
+ *
+ * The sort is stable, so results keep the index read order within each group.
+ *
+ * @param results - One page of results in index read order.
+ * @param keyword - Search keyword, if any.
+ * @returns The page with title matches first.
+ */
+function rankWorkspaceSearchResultsByTitleMatch(
+  results: WorkspaceSearchResult[],
+  keyword: string | undefined,
+): WorkspaceSearchResult[] {
+  const terms = keyword ? splitKeyword(keyword) : []
+  if (terms.length === 0) return results
+  const titleMatches: WorkspaceSearchResult[] = []
+  const otherMatches: WorkspaceSearchResult[] = []
+  for (const result of results) {
+    const title = normalizeSearchText(result.title)
+    if (terms.every((term) => title.includes(term))) {
+      titleMatches.push(result)
+    } else {
+      otherMatches.push(result)
+    }
+  }
+  return [...titleMatches, ...otherMatches]
 }
 
 function decodeSavedViewCursor(

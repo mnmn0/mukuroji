@@ -105,7 +105,7 @@ test.describe('time tracking report', () => {
   test('a manager switches the grouping, downloads the CSV, and sets the Team budget', async ({ page }) => {
     const state = await mockTimeReport(page, true)
     await page.goto('/teams/core-team/timesheet')
-    await page.getByRole('link', { name: 'Report' }).click()
+    await page.getByRole('link', { name: 'Report', exact: true }).click()
     await expect(page).toHaveURL(/view=report&from=2026-11-09&to=2026-11-15&groupBy=day/u)
 
     await page.getByLabel('Group by').selectOption('user')

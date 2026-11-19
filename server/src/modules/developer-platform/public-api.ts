@@ -98,6 +98,7 @@ import type {
   WebhookDeliveryPort,
   WebhookSubscriptionPort,
 } from './application/ports'
+import { readCredentialPrincipalKey } from './credential-principal'
 import { DeveloperPlatformError } from './errors'
 import {
   decidePersonalCredentialIssuance,
@@ -2793,7 +2794,7 @@ async function authenticatePublicRequest(
   }
   const rateLimit = await dependencies.rateLimits.consumeRateLimit({
     workspaceId: credential.workspaceId,
-    credentialId: credential.credentialId,
+    credentialId: readCredentialPrincipalKey(credential),
     limit: PUBLIC_API_RATE_LIMIT,
     windowSeconds: 60,
   })
@@ -3045,7 +3046,7 @@ async function executeIdempotentJson(
 ) {
   return executeIdempotent(c, dependencies, {
     workspaceId: credential.workspaceId,
-    credentialId: credential.credentialId,
+    credentialId: readCredentialPrincipalKey(credential),
   }, body, operation, options)
 }
 

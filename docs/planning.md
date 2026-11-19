@@ -95,9 +95,28 @@ Cycle は date-only の baseline / forecast、cadence、Work Item 件数単位�
 - `move-incomplete`: `completed` / `canceled` 以外の Work Item link を target Cycle へ移動
 - `keep-incomplete`: 未完了 link を source Cycle に保持
 
-Response は再計算済み snapshot と `movedWorkItemIds` / `retainedWorkItemIds` を返すため、同じ入力と revision から結果を再現できます。
+Response は再計算済み snapshot と `movedWorkItemIds` / `retainedWorkItemIds` / `remainingWorkItemCount` を返すため、同じ入力と revision から結果を再現できます。
 
-Rollover は canonical Work Item revision を Planning META と同じ DynamoDB transaction で条件検証します。Transaction の100 item上限に合わせ、一度に検証できる source link は49件までです。削除済み・閲覧不能の Work Item が link された場合は rollover を fail-closed にし、Workspace owner / admin が既存の DELETE API で stale link を清掃してから再実行します。Work Item の Project が変わった link は snapshot / roll-up から除外し、新しい Project scope へ明示的に再 link するまで rollover を拒否します。
+1回の rollover で移動する link は49件までです。未完了が49件を超える場合、その呼び出しは49件だけを移動して source を完了せず、`remainingWorkItemCount` に残りの件数を返します。同じ呼び出しを繰り返すと続きを移動し、残りが0件になる呼び出しで source を `completed` にします。画面の rollover は残りが0件になるまで自動で繰り返します。移動した link には `carriedOverFromCycleId`（元の Cycle）と `carriedOverAt` を記録し、これが持ち越しの履歴になります。Cycle を手で変えるとこの記録は消えます。
+
+`PLANNING_TABLE_NAME` を設定した環境では canonical Work Item の書き込みが Planning META の revision を進めるため、呼び出し元の `expectedRevision` の CAS が Work Item の変化を検出し、Work Item ごとの条件検証は行いません。設定しない local 環境では canonical Work Item revision を Planning META と同じ DynamoDB transaction で条件検証します。Transaction の100 item上限に合わせ、途中の呼び出しは移動する link だけを、source を完了する呼び出しは source に残る全 link を検証し、どちらも49件までです。削除済み・閲覧不能の Work Item が link された場合は rollover を fail-closed にし、Workspace owner / admin が既存の DELETE API で stale link を清掃してから再実行します。Work Item の Project が変わった link は snapshot / roll-up から除外し、新しい Project scope へ明示的に再 link するまで rollover を拒否します。
+
+## Cycle の自動作成・自動持ち越し・一括追加
+
+設計の判断は [ADR 0010](adr/0010-cycle-schedule-due-index.md) にあります。
+
+Cycle は `automation: { createNext, rolloverAtEnd }` を持てます（Cycle 以外は持てません。両方 false または `null` の patch で解除します）。日付は date-only なので、期日の判定は UTC の日付で行います。
+
+- `createNext`: 終了日（baseline と forecast の遅いほう）の3日前の 00:00 UTC から、次の Cycle を作ります
+- `rolloverAtEnd`: 終了日の翌日 00:00 UTC から、次の Cycle へ rollover します。次の Cycle がまだなければ先に作ります
+
+Automation は呼び出し元の権限なしで `/next` と rollover を実行するので、設定・変更・作成時の指定には Cycle の scope での manager 権限（Enterprise では `planning.manage`）が必要です（`PATCH /api/planning/entities/:entityId` と `POST /api/planning/entities` で `automation` を含むとき）。複製した Cycle は automation を引き継ぎません。`rolloverAtEnd` が有効で次の Cycle がある間は、どちらかの Cycle の日付・cadence・scope を、次の Cycle が前の Cycle の終了後に始まり同じ cadence と scope を持つ状態から外す変更を `409 PlanningCycleNextIncompatible` で拒否します（先に `rolloverAtEnd` を外すか、手で rollover します）。
+
+次の Cycle は `POST /api/planning/cycles/:cycleId/next`（source の manager 権限）でも作れます。元の Cycle の終了日の翌日から cadence の1回分（週なら `count × 7` 日、月なら `count` か月）の baseline / forecast を持ち、Team / Project scope、owner、cadence、capacity、carry-over policy、automation を引き継ぎます。Title は末尾の数字を1つ進めます（`Sprint 12` → `Sprint 13`、数字がなければ ` 2` を付けます）。ID は元の Cycle ID から決まり、元の Cycle に `nextCycleId` を記録するので、同じ Cycle から次を2回作ることはできません（`409 PlanningCycleNextExists`）。
+
+自動化は既存の scheduled-jobs Lambda の `cycle-schedule` job が1時間ごとに実行します（runtime control は automation と共有します）。自動化の期日が来ていない、または完了済みの Cycle を除き、Cycle の `ENTITY#` row は `UpdateScheduleDueIndex` に `planning-cycle-00..15` の shard と期日の sort key を持ちます（update target の shard とは名前が違うので、通知の schedule は読みません）。Job は期日を過ぎた row を Query し、Cycle ごとに「次の Cycle を作る」「rollover を1 batch 実行する」を、やることがなくなるまで繰り返します。Rollover に使う Work Item は link 先の canonical Work Item を強整合で読み、archive 済み・削除済みの Work Item があれば手動の rollover と同じく fail-closed にします。前の Cycle の rollover がまだ残っている Cycle は、その rollover が終わるまで自分の rollover（完了）を待つので、job が止まっていて両方の期日を過ぎていても、前の Cycle の未完了 Work Item は取り残されません。失敗した Cycle は期日のまま index に残り、ほかの Cycle の処理は続けますが、失敗、Cycle ごとの手順の上限（1回の実行で20手順）で終わらなかった Cycle、page 上限（shard ごとに100 page）での打ち切りがあれば job 全体を失敗にするので、dispatcher の再試行と DLQ alarm に乗ります。
+
+`POST /api/planning/cycles/:cycleId/work-items` は `{ action: 'add' | 'remove', workItems: [{ teamId, workItemId }], expectedRevision }` で、49件までの Work Item を1回で Cycle に入れる、または外します。Cycle と、移動元の Cycle の member 権限と、各 Work Item の member 権限が必要です（Enterprise permission は他の `/api/planning/cycles*` と違い `planning.manage` ではなく `planning.write` です。`/next` と rollover は `planning.manage` のままです）。入れるときは既存の Milestone / Goal の link を保ち、外したときに他の参照がなければ link を削除します。Capacity を超える場合は全体を拒否します。
 
 Cycle を archive できるのは、残っている link の canonical Work Item がすべて `completed` / `canceled` の場合だけです。未完了なら先に rollover または unlink が必要で、canonical Work Item が削除済み・閲覧不能なら fail-closed に拒否します。`PLANNING_TABLE_NAME` を設定した環境では、archive は Work Item ごとの revision を条件検証しません。Canonical Work Item の作成・更新・削除は同じ transaction で Planning META の revision を進めるので、呼び出し元の `expectedRevision` による META の CAS が、snapshot 以降に link 先の Work Item が変わった場合を検出します。このため link の数にかかわらず archive は 1 transaction に収まり、link の参照はその後の revision で小分けに退避します。`PLANNING_TABLE_NAME` を設定しない local 環境では Work Item の書き込みが META を進めないため、archive の transaction で link 先の Work Item ごとに revision を条件検証します（transaction の上限から、link が約 97 件を超える Cycle は archive できません）。
 

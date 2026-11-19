@@ -1412,17 +1412,40 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
   expect(serializedCompositeAlarms).toContain(' AND ALARM');
 });
 
-test('external Cognito client and initial owner attributes are validated on create and update', () => {
+test('external Cognito client contract and initial owner attributes are validated on create and update', () => {
   const template = synthesizedTemplate;
-  const [, clientValidation] = findCustomResource(template, 'describeUserPoolClient');
   const [, ownerAttributes] = findCustomResource(template, 'adminUpdateUserAttributes');
-  const clientCreate = serializeAwsSdkCall(clientValidation.Properties.Create);
   const ownerCreate = serializeAwsSdkCall(ownerAttributes.Properties.Create);
+  const contractChecks = Object.entries(template.findResources('Custom::CognitoClientContract'));
 
-  expect(clientCreate).toContain('describeUserPoolClient');
-  expect(clientCreate).toContain('CognitoUserPoolId');
-  expect(clientCreate).toContain('CognitoUserPoolClientId');
-  expect(clientValidation.Properties.Update).toEqual(clientValidation.Properties.Create);
+  expect(contractChecks).toHaveLength(1);
+  const [contractLogicalId, contractCheck] = contractChecks[0]!;
+  const contractProperties = serializeAwsSdkCall(contractCheck.Properties);
+  expect(contractProperties).toContain('CognitoUserPoolId');
+  expect(contractProperties).toContain('CognitoUserPoolClientId');
+  expect(contractCheck.Properties.ContractVersion).toBe('v1');
+  // A new commit or configuration revision re-runs the check even when the IDs stay the same.
+  expect(contractCheck.Properties.ApplicationRevision).toEqual({ Ref: 'ApplicationCommitSha' });
+  expect(contractCheck.Properties.ConfigurationRevision).toEqual({ Ref: 'ApiRuntimeConfigurationRevision' });
+  // The owner attributes are written only after the pool passes the contract.
+  expect(ownerAttributes.DependsOn).toEqual(expect.arrayContaining([contractLogicalId]));
+
+  const contractFunctions = template.findResources('AWS::Lambda::Function', {
+    Properties: { Handler: 'index.onEventHandler', Description: Match.stringLikeRegexp('Cognito attributes') },
+  });
+  expect(Object.keys(contractFunctions)).toHaveLength(1);
+  template.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: {
+      Statement: Match.arrayWith([
+        Match.objectLike({
+          Action: ['cognito-idp:DescribeUserPool', 'cognito-idp:DescribeUserPoolClient'],
+          Effect: 'Allow',
+          Resource: Match.anyValue(),
+        }),
+      ]),
+    },
+    Roles: [{ Ref: Match.stringLikeRegexp('^CognitoClientContractFunctionServiceRole') }],
+  });
 
   expect(ownerCreate).toContain('adminUpdateUserAttributes');
   expect(ownerCreate).toContain('InitialOwnerUsername');
@@ -1435,10 +1458,7 @@ test('external Cognito client and initial owner attributes are validated on crea
     PolicyDocument: {
       Statement: Match.arrayWith([
         Match.objectLike({
-          Action: Match.arrayWith([
-            'cognito-idp:AdminUpdateUserAttributes',
-            'cognito-idp:DescribeUserPoolClient',
-          ]),
+          Action: 'cognito-idp:AdminUpdateUserAttributes',
           Effect: 'Allow',
           Resource: Match.anyValue(),
         }),

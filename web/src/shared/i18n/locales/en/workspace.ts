@@ -475,7 +475,7 @@ export const workspaceMessages = {
   'workspace.settings.install.badge.unsupported': 'This device could not ask for notification permission, so the app icon may not show the unread count.',
   'workspace.settings.displayTitle': 'Display',
   'workspace.settings.displayDescription':
-    'Adjust text size, theme, and display language for this browser.',
+    'Adjust text size, theme, display language, and time zone. Your choices follow you to every device.',
   'workspace.settings.fontSizeTitle': 'Font size',
   'workspace.settings.fontSizeDescription':
     'Applies to task lists, the sidebar, settings, and the rest of the app.',
@@ -492,7 +492,14 @@ export const workspaceMessages = {
   'workspace.settings.profileDescription':
     'The account used by the current session.',
   'workspace.settings.languageDescription':
-    'Choose the display language for this browser. Your preference is saved locally.',
+    'Choose the display language. Your choice is saved to your account and used on every device.',
+  'workspace.settings.preferencesSaveFailed':
+    'Your display settings could not be saved to your account. They apply on this device only until saved.',
+  'workspace.settings.preferencesSaveRetry': 'Try again',
+  'workspace.settings.timeZoneTitle': 'Time zone',
+  'workspace.settings.timeZoneDescription':
+    'Choose the time zone saved to your account. Leave it on the browser setting to follow this device.',
+  'workspace.settings.timeZoneBrowser': 'Browser setting',
   'workspace.settings.notificationTitle': 'Notifications',
   'workspace.settings.notificationDescription':
     'Choose Inbox and Slack delivery, notification frequency, and quiet hours.',
@@ -767,9 +774,9 @@ export const workspaceMessages = {
   'sidebar.archive.error': 'Could not archive',
   'sidebar.archive.confirmTitle': 'Confirm archive',
   'sidebar.archive.confirmTeamDescription':
-    'Archiving {name} hides the team and its projects from the sidebar. They cannot currently be restored from this screen.',
+    'Archiving {name} hides the team and its projects from the sidebar. You can restore them under Settings, Teams and projects.',
   'sidebar.archive.confirmProjectDescription':
-    'Archiving {name} hides it from the sidebar. It cannot currently be restored from this screen.',
+    'Archiving {name} hides it from the sidebar. You can restore it under Settings, Teams and projects.',
   'sidebar.archive.cancel': 'Cancel',
   'sidebar.archive.confirm': 'Archive',
   'sidebar.teamOverview': 'Team overview',
@@ -783,6 +790,7 @@ export const workspaceMessages = {
   'sidebar.unreadCount': '{count} unread',
   'sidebar.nav.home': 'Home',
   'sidebar.nav.myTasks': 'My tasks',
+  'sidebar.nav.workItems': 'Work items',
   'sidebar.nav.inbox': 'Inbox',
   'sidebar.nav.requests': 'Requests',
   'sidebar.nav.customers': 'Customers',
@@ -812,6 +820,16 @@ export const workspaceMessages = {
   'workspace.tenantAdministration.region': 'Control-plane region',
   'workspace.tenantAdministration.locale': 'Tenant locale',
   'workspace.tenantAdministration.defaultRole': 'Default member role',
+  'workspace.tenantAdministration.fiscalYearStartMonth': 'Fiscal year starts in',
+  'workspace.tenantAdministration.monthOption': 'Month {month}',
+  'workspace.tenantAdministration.weekStartDay': 'Week starts on',
+  'workspace.tenantAdministration.weekday.sunday': 'Sunday',
+  'workspace.tenantAdministration.weekday.monday': 'Monday',
+  'workspace.tenantAdministration.weekday.tuesday': 'Tuesday',
+  'workspace.tenantAdministration.weekday.wednesday': 'Wednesday',
+  'workspace.tenantAdministration.weekday.thursday': 'Thursday',
+  'workspace.tenantAdministration.weekday.friday': 'Friday',
+  'workspace.tenantAdministration.weekday.saturday': 'Saturday',
   'workspace.tenantAdministration.memberRole': 'Member',
   'workspace.tenantAdministration.guestRole': 'Guest',
   'workspace.tenantAdministration.saveProfile': 'Save profile',
