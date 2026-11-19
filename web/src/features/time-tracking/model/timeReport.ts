@@ -11,7 +11,7 @@ export type TimeReportRange = {
 }
 
 /** Groupings offered by the report, in display order. */
-export const timeReportGroupings: readonly TimeTrackingGroupBy[] = ['day', 'week', 'user', 'project', 'work-item']
+export const timeReportGroupings: readonly TimeTrackingGroupBy[] = ['day', 'week', 'user', 'project', 'work-item', 'category']
 
 /** Budget compared with the actual cost recorded in the report period. */
 export type TimeBudgetComparison = {

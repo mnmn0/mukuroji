@@ -275,6 +275,21 @@ describe('time report views', () => {
     expect(markup).toContain('No Project')
   })
 
+  test('labels work categories and uncategorized time', () => {
+    const summary = {
+      ...timeReportFixtureMemberSummary,
+      groupBy: 'category' as const,
+      groups: [
+        { key: 'meeting', label: 'meeting', minutes: 120, billableMinutes: 0, entryCount: 1 },
+        { key: 'uncategorized', label: 'uncategorized', minutes: 30, billableMinutes: 0, entryCount: 1 },
+      ],
+    }
+    const markup = renderToStaticMarkup(<TimeReport {...reportProps} groupBy="category" summary={summary} />)
+    expect(markup).toContain('Meeting')
+    expect(markup).toContain('Uncategorized')
+    expect(resolveTimeReportGroupBy('category')).toBe('category')
+  })
+
   test('refuses a period that ends before it starts', () => {
     const markup = renderToStaticMarkup(<TimeReport {...reportProps} range={{ from: '2026-11-15', to: '2026-11-09' }} summary={timeReportFixtureManagerSummary} />)
     expect(markup).toContain('The start date must be on or before the end date.')

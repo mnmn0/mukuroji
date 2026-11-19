@@ -154,4 +154,13 @@ export const timeTrackingMessages = {
   'timeTracking.budget.projectHint': '{project} のマネージャーでない場合、予算は表示されず保存もできません。',
   'timeTracking.budget.otherCurrencies': '予算と異なる通貨の実績 {amounts} は換算できないため、残りと消化率は表示していません。',
   'timeTracking.budget.teamPartial': 'Team 全体の実績コストは、あなたが管理する Project の分だけを集計しています（Project なしの工数は含みません）。そのため残りと消化率は表示していません。Project ごとの予算では表示されます。',
+  'timeTracking.report.groupBy.category': '作業区分',
+  'timeTracking.report.category.design': '設計',
+  'timeTracking.report.category.implementation': '実装',
+  'timeTracking.report.category.review': 'レビュー',
+  'timeTracking.report.category.meeting': '会議',
+  'timeTracking.report.category.management': '管理',
+  'timeTracking.report.category.training': '教育',
+  'timeTracking.report.category.leave': '休暇',
+  'timeTracking.report.category.uncategorized': '区分なし',
 } as const

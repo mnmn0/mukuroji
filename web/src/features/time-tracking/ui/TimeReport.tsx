@@ -1,4 +1,10 @@
-import type { TimeSummaryGroup, TimeTrackingGroupBy, TimeTrackingSummary } from '@mukuroji/contracts'
+import {
+  UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
+  type TimeEntryCategory,
+  type TimeSummaryGroup,
+  type TimeTrackingGroupBy,
+  type TimeTrackingSummary,
+} from '@mukuroji/contracts'
 import { useId, useState } from 'react'
 import type { Locale } from '../../../shared/i18n/i18n'
 import { formatCostsByCurrency, isTimeReportRangeOrdered, timeReportGroupings, type TimeReportRange } from '../model/timeReport'
@@ -60,7 +66,29 @@ const groupByKeys = {
   user: 'timeTracking.report.groupBy.user',
   project: 'timeTracking.report.groupBy.project',
   'work-item': 'timeTracking.report.groupBy.workItem',
+  category: 'timeTracking.report.groupBy.category',
 } as const satisfies Record<TimeTrackingGroupBy, string>
+
+/** Message key of each work category. */
+const categoryKeys = {
+  design: 'timeTracking.report.category.design',
+  implementation: 'timeTracking.report.category.implementation',
+  review: 'timeTracking.report.category.review',
+  meeting: 'timeTracking.report.category.meeting',
+  management: 'timeTracking.report.category.management',
+  training: 'timeTracking.report.category.training',
+  leave: 'timeTracking.report.category.leave',
+} as const satisfies Record<TimeEntryCategory, string>
+
+/**
+ * Returns whether a report key names a known work category.
+ *
+ * @param key - Report group key.
+ * @returns Whether the key is a category with a message.
+ */
+function isCategoryKey(key: string): key is TimeEntryCategory {
+  return Object.hasOwn(categoryKeys, key)
+}
 
 /**
  * Team report: totals grouped by day, week, member, Project, or Work Item for a period, with a CSV
@@ -110,6 +138,9 @@ export function TimeReport({
         return group.key === 'unassigned' ? t('timeTracking.report.noProject') : labels.projects[group.key] ?? group.label
       case 'work-item':
         return labels.workItems[group.key] ?? group.label
+      case 'category':
+        if (group.key === UNCATEGORIZED_TIME_ENTRY_GROUP_KEY) return t('timeTracking.report.category.uncategorized')
+        return isCategoryKey(group.key) ? t(categoryKeys[group.key]) : group.label
     }
   }
 

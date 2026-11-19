@@ -154,4 +154,13 @@ export const timeTrackingMessages = {
   'timeTracking.budget.projectHint': 'Unless you manage {project}, its budget is not shown and cannot be saved.',
   'timeTracking.budget.otherCurrencies': 'Actual costs in other currencies ({amounts}) are not converted, so the remaining amount and usage are not shown.',
   'timeTracking.budget.teamPartial': 'Team actual costs include only the Projects you manage (time without a Project is not included), so the remaining amount and usage are not shown. They are shown for Project budgets.',
+  'timeTracking.report.groupBy.category': 'Category',
+  'timeTracking.report.category.design': 'Design',
+  'timeTracking.report.category.implementation': 'Implementation',
+  'timeTracking.report.category.review': 'Review',
+  'timeTracking.report.category.meeting': 'Meeting',
+  'timeTracking.report.category.management': 'Management',
+  'timeTracking.report.category.training': 'Training',
+  'timeTracking.report.category.leave': 'Leave',
+  'timeTracking.report.category.uncategorized': 'Uncategorized',
 } as const

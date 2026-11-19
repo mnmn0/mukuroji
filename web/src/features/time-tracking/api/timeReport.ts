@@ -49,7 +49,7 @@ export type SaveTimeBudgetInput = {
   expectedRevision: number
 }
 
-const groupByValues = new Set<string>(['day', 'week', 'user', 'project', 'work-item'])
+const groupByValues = new Set<string>(['day', 'week', 'user', 'project', 'work-item', 'category'])
 
 /**
  * Builds the query string shared by the summary and the CSV export.
@@ -150,6 +150,7 @@ function readGroupBy(value: string): TimeTrackingGroupBy {
     case 'user':
     case 'project':
     case 'work-item':
+    case 'category':
       return value
     default:
       return 'day'
