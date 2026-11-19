@@ -1424,8 +1424,9 @@ test('external Cognito client contract and initial owner attributes are validate
   expect(contractProperties).toContain('CognitoUserPoolId');
   expect(contractProperties).toContain('CognitoUserPoolClientId');
   expect(contractCheck.Properties.ContractVersion).toBe('v1');
-  // Each deploy carries a new commit, so the check runs again even when the IDs stay the same.
+  // A new commit or configuration revision re-runs the check even when the IDs stay the same.
   expect(contractCheck.Properties.ApplicationRevision).toEqual({ Ref: 'ApplicationCommitSha' });
+  expect(contractCheck.Properties.ConfigurationRevision).toEqual({ Ref: 'ApiRuntimeConfigurationRevision' });
   // The owner attributes are written only after the pool passes the contract.
   expect(ownerAttributes.DependsOn).toEqual(expect.arrayContaining([contractLogicalId]));
 

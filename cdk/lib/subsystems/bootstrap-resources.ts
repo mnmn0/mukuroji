@@ -399,6 +399,7 @@ function buildCognitoClientContractCheck(
   input: BootstrapResourcesInput,
 ): cdk.CustomResource {
   const {
+    apiRuntimeConfigurationRevision,
     applicationCommitSha,
     cognitoUserPoolArn,
     cognitoUserPoolClientId,
@@ -448,9 +449,11 @@ function buildCognitoClientContractCheck(
       ClientId: cognitoUserPoolClientId,
       ContractVersion: 'v1',
       // An existing pool's client can be loosened between deploys without changing its ID.
-      // Every deploy ships a new commit, so this property makes CloudFormation run the check
-      // again on each deploy instead of only when the pool or client ID changes.
+      // CloudFormation re-runs a custom resource only when its properties change, so the check
+      // keys on both deploy revisions: a new commit, or an operator-incremented configuration
+      // revision for a same-commit redeploy. A deploy that changes nothing updates no resource.
       ApplicationRevision: applicationCommitSha.valueAsString,
+      ConfigurationRevision: apiRuntimeConfigurationRevision.valueAsString,
     },
     resourceType: 'Custom::CognitoClientContract',
     serviceToken: provider.serviceToken,
