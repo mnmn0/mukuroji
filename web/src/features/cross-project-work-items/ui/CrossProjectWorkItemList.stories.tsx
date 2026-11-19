@@ -46,6 +46,7 @@ const meta = {
     onChangeState: changeState,
     onCopyLink: async () => true,
     onOpenWorkItem: fn(),
+    onRetry: fn(),
     projectOptions: createCrossProjectWorkItemProjectOptions(projectDirectoryFixtures),
     state: defaultCrossProjectWorkItemListState,
     t: createTranslator('en'),
@@ -107,5 +108,6 @@ export const LoadFailed: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.queryByTestId('cross-project-work-items-count')).toBeNull()
+    await expect(canvas.getByRole('button', { name: 'Reload Work Items' })).toBeVisible()
   },
 }

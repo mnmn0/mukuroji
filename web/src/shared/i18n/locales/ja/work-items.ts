@@ -801,6 +801,7 @@ export const workItemsMessages = {
   'workItems.crossProject.copyLink.copied': 'リンクをコピーしました',
   'workItems.crossProject.copyLink.failed': 'コピーできませんでした。アドレスバーの URL を使ってください',
   'workItems.crossProject.loading': '読み込み中',
+  'workItems.crossProject.retry': 'Work Item を再読み込み',
   'workItems.crossProject.count': '{count} 件',
   'workItems.crossProject.empty': '条件に合う Work Item はありません。',
   'workItems.crossProject.group.noProject': 'Project なし',

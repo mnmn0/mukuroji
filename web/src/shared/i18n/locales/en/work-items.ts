@@ -801,6 +801,7 @@ export const workItemsMessages = {
   'workItems.crossProject.copyLink.copied': 'Link copied',
   'workItems.crossProject.copyLink.failed': 'Could not copy. Use the URL in the address bar.',
   'workItems.crossProject.loading': 'Loading',
+  'workItems.crossProject.retry': 'Reload Work Items',
   'workItems.crossProject.count': '{count} Work Items',
   'workItems.crossProject.empty': 'No Work Items match these filters.',
   'workItems.crossProject.group.noProject': 'No Project',

@@ -124,8 +124,9 @@ test('Issue #381: lists Work Items across Projects, filters by contributor, and 
 
 test('Issue #381: a failed Work Item read shows the load notice instead of an empty list', async ({ page }) => {
   await mockWorkspace(page)
+  let failRead = true
   await page.route((url) => url.pathname === '/api/work-items', (route) =>
-    route.fulfill({ status: 500, json: { message: 'Unavailable' } }))
+    failRead ? route.fulfill({ status: 500, json: { message: 'Unavailable' } }) : route.fallback())
 
   await page.goto('/work-items')
 
@@ -133,6 +134,11 @@ test('Issue #381: a failed Work Item read shows the load notice instead of an em
   await expect(page.getByTestId('workspace-task-partial-error')).toBeVisible()
   await expect(page.getByTestId('cross-project-work-items-count')).toHaveCount(0)
   await expect(page.getByText('No Work Items match these filters.')).toHaveCount(0)
+
+  failRead = false
+  await page.getByTestId('cross-project-work-items-retry').click()
+  await expect(page.getByTestId('cross-project-work-item-group')).toHaveCount(3)
+  await expect(page.getByTestId('workspace-task-partial-error')).toHaveCount(0)
 })
 
 test('Issue #381: a failed Team configuration read shows the configuration notice with retry', async ({ page }) => {

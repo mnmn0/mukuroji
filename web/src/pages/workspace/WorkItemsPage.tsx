@@ -122,6 +122,7 @@ export function WorkItemsPage() {
           onChangeState={changeState}
           onCopyLink={copyLink}
           onOpenWorkItem={workspace.onOpenTask}
+          onRetry={() => void workItems.mutateWorkItems()}
           projectOptions={projectOptions}
           state={state}
           t={t}

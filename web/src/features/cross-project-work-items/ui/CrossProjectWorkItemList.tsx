@@ -46,6 +46,8 @@ export type CrossProjectWorkItemListProps = {
   onChangeState: (state: CrossProjectWorkItemListState) => void
   /** Opens one Work Item in its Team or Project route. */
   onOpenWorkItem: (workItem: CanonicalWorkItem) => void
+  /** Reads the Work Items again after a failed load. */
+  onRetry: () => void
   /** Copies the URL of the current view, resolving whether it succeeded. */
   onCopyLink: () => Promise<boolean>
 }
@@ -73,6 +75,7 @@ export function CrossProjectWorkItemList({
   t,
   onChangeState,
   onOpenWorkItem,
+  onRetry,
   onCopyLink,
 }: CrossProjectWorkItemListProps) {
   const [copyLinkStatus, setCopyLinkStatus] = useState<CopyLinkStatus>('idle')
@@ -208,7 +211,18 @@ export function CrossProjectWorkItemList({
           </button>
         </div>
       </section>
-      {loadFailed ? null : (
+      {loadFailed ? (
+        <div>
+          <button
+            className="workbench-button-secondary min-h-9 px-3 text-sm"
+            data-testid="cross-project-work-items-retry"
+            onClick={onRetry}
+            type="button"
+          >
+            {t('workItems.crossProject.retry')}
+          </button>
+        </div>
+      ) : (
         <p className="text-sm text-[var(--workbench-muted)]" data-testid="cross-project-work-items-count">
           {isLoading
             ? t('workItems.crossProject.loading')
