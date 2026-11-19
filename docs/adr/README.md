@@ -28,3 +28,4 @@
 | 番号 | タイトル | 状態 |
 | --- | --- | --- |
 | [0001](0001-record-architecture-decisions.md) | 設計判断を ADR として記録する | 採用 |
+| [0002](0002-shared-authentication-attempt-limits.md) | 認証の試行制限を DynamoDB の共有 counter で数え、信頼できる送信元を key にする | 提案 |
