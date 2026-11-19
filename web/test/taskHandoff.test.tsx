@@ -6,6 +6,7 @@ import { referoTaskFixtures } from '../src/tasks/fixtures'
 import { createTaskHandoffBrief } from '../src/tasks/model/taskHandoff'
 import { TaskHandoffPanel } from '../src/tasks/ui/TaskHandoffPanel'
 import { TaskDetailPane, type TaskDetailPaneProps } from '../src/tasks/ui/TaskDetailPane'
+import { IssueDetailPane } from '../src/issues/ui/TeamIssueDetailPane'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 
 const t = createTranslator('en')
@@ -107,5 +108,55 @@ describe('task handoff brief', () => {
     const html = renderDetail({ configuration })
     expect(html).toContain('data-testid="task-handoff-panel"')
     expect(html).not.toContain(task.description)
+  })
+
+  test('lists acceptance criteria and says why an agent should not start yet', () => {
+    const brief = createTaskHandoffBrief({ task, includeDescription: true, t })
+    expect(brief).toContain('## Acceptance criteria')
+    expect(brief).toContain('No acceptance criteria are saved.')
+    expect(brief).toContain('No. Do not start until a human resolves the following:')
+    expect(brief).toContain('so completion cannot be judged')
+    expect(brief).toContain('already in progress')
+    expect(brief).toContain('1 blockedBy relation(s) are recorded')
+    expect(brief).not.toContain('restricted-target')
+  })
+
+  test('marks a criteria-backed, unblocked, unstarted task as ready to start', () => {
+    const brief = createTaskHandoffBrief({
+      task: {
+        ...task,
+        statusCategory: 'unstarted',
+        relationIds: ['related:other'],
+        acceptanceCriteria: [
+          { id: 'a'.repeat(32), text: 'Keyboard flow works\non narrow layouts', satisfied: false },
+          { id: 'b'.repeat(32), text: 'Docs updated', satisfied: true },
+        ],
+      },
+      includeDescription: true,
+      t,
+    })
+    expect(brief).toContain('- [ ] Keyboard flow works on narrow layouts')
+    expect(brief).toContain('- [x] Docs updated')
+    expect(brief).toContain('Yes. Re-read the task with get_task')
+    expect(brief).not.toContain('blockedBy relation')
+  })
+
+  test('offers the same handoff for a Team Work Item without a Project', () => {
+    const html = renderToStaticMarkup(<IssueDetailPane
+      assigneeOptions={[]}
+      canAssignUnassigned={false}
+      canManageExternalLinks={false}
+      isAiSummaryOperationPending={false}
+      isRelationsLoading={false}
+      issue={{ ...task, assignedProjectId: undefined }}
+      locale="en"
+      projects={[]}
+      relationCandidates={[]}
+      relations={[]}
+      t={t}
+      workspaceMembers={[]}
+    />)
+    expect(html).toContain('data-testid="task-handoff-panel"')
+    expect(html).toContain('Project ID: Not set')
   })
 })
