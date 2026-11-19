@@ -331,11 +331,12 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
 }
 
 /**
- * Validates the fiscal year and week settings of a profile update.
+ * Validates the fiscal year, week, and working day settings of a profile update.
  *
  * @param value - Untrusted `calendar` field of the request body.
  * @returns The validated calendar settings.
- * @throws TenantAdministrationError When the month or the week start day is invalid.
+ * @throws TenantAdministrationError When the month, the week start day, the working weekdays,
+ *   or the holidays are invalid.
  */
 function readTenantCalendarInput(value: unknown): WorkspaceCalendarSettings {
   const calendar = readWorkspaceCalendarSettings(value)
@@ -343,7 +344,7 @@ function readTenantCalendarInput(value: unknown): WorkspaceCalendarSettings {
     throw new TenantAdministrationError(
       400,
       'InvalidTenantCalendarSettings',
-      'Fiscal year start month or week start day is invalid.',
+      'Fiscal year start month, week start day, working weekdays, or holidays are invalid.',
     )
   }
   return calendar

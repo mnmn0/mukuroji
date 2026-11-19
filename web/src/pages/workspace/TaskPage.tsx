@@ -111,6 +111,7 @@ import {
   getCurrentTaskMonth,
   type TaskScheduleWindowLayout,
 } from '../../tasks/model/taskScheduleWindow'
+import { createWorkspaceTaskScheduleCalendarPolicy } from '../../tasks/model/taskSchedule'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import {
   createBuiltInTaskViewDefinition,
@@ -131,6 +132,7 @@ import {
 import { canWriteTaskViewWorkItem } from '../../task-views/model/taskViewWorkItemPermission'
 import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
+import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import {
   createWorkItemRelation,
   replaceWorkItemParent,
@@ -381,6 +383,12 @@ export function TaskPage() {
     key: planningKey,
     mutate: mutatePlanning,
   } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
+  // New Work Items count working days with the Workspace calendar; a failed read keeps the default.
+  const workspaceCalendar = useWorkspaceCalendarSettings(accessToken, Boolean(user && !currentUserError))
+  const createTaskCalendarPolicy = useMemo(
+    () => createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings),
+    [workspaceCalendar.settings],
+  )
   const {
     data: teams = [],
     error: projectDirectoryError,
@@ -1929,6 +1937,7 @@ export function TaskPage() {
       workspaceId={workspaceId}
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}
+      createTaskCalendarPolicy={createTaskCalendarPolicy}
       onAuthenticatedApiError={(error) => {
         redirectEnterpriseSessionError(error)
       }}

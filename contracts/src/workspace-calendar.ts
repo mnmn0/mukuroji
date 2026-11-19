@@ -71,23 +71,57 @@ function readWorkspaceDatePart(
 /** Day a Workspace week starts on, as `Date#getDay()` numbers it: 0 is Sunday, 1 is Monday. */
 export type WorkspaceWeekStartDay = 0 | 1 | 2 | 3 | 4 | 5 | 6
 
-/** Workspace-wide calendar settings that decide fiscal years and weeks. */
+/** Weekday names of the Workspace working calendar, shared with Work Item calendar policies. */
+export type WorkspaceCalendarWeekday =
+  | 'monday'
+  | 'tuesday'
+  | 'wednesday'
+  | 'thursday'
+  | 'friday'
+  | 'saturday'
+  | 'sunday'
+
+/** Every weekday in the order the Workspace calendar stores and shows them, Monday first. */
+export const WORKSPACE_CALENDAR_WEEKDAYS: readonly WorkspaceCalendarWeekday[] = [
+  'monday',
+  'tuesday',
+  'wednesday',
+  'thursday',
+  'friday',
+  'saturday',
+  'sunday',
+]
+
+/** Largest number of holidays a Workspace calendar keeps, the same limit as a Work Item schedule. */
+export const WORKSPACE_CALENDAR_MAX_HOLIDAYS = 512
+
+/** Earliest year accepted for a Workspace holiday, matching Work Item schedule dates. */
+const WORKSPACE_CALENDAR_MIN_HOLIDAY_YEAR = 1970
+
+/** Workspace-wide calendar settings that decide fiscal years, weeks, and working days. */
 export type WorkspaceCalendarSettings = {
   /** First month of the fiscal year, from 1 (January) to 12 (December). */
   fiscalYearStartMonth: number
   /** Day each Workspace week starts on. */
   weekStartDay: WorkspaceWeekStartDay
+  /** Weekdays the whole Workspace works on, in Monday-first order without duplicates. */
+  workingWeekdays: WorkspaceCalendarWeekday[]
+  /** Company holidays as local `YYYY-MM-DD` dates, sorted ascending without duplicates. */
+  holidays: string[]
 }
 
 /**
  * Calendar settings of a Workspace that has not chosen its own.
  *
- * They keep the behavior from before the settings existed: calendar-year fiscal years and
- * Monday-based weeks, as the timesheet and capacity planning already use.
+ * They keep the behavior from before the settings existed: calendar-year fiscal years,
+ * Monday-based weeks, and Monday-to-Friday working days without holidays, as the timesheet,
+ * capacity planning, and new Work Item schedules already use.
  */
 export const DEFAULT_WORKSPACE_CALENDAR_SETTINGS: WorkspaceCalendarSettings = {
   fiscalYearStartMonth: 1,
   weekStartDay: 1,
+  workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+  holidays: [],
 }
 
 /**
@@ -104,8 +138,12 @@ export function isWorkspaceWeekStartDay(value: unknown): value is WorkspaceWeekS
 /**
  * Reads untrusted Workspace calendar settings.
  *
+ * Settings stored before working days existed carry only the fiscal year and week start, so a
+ * missing `workingWeekdays` reads as Monday to Friday and missing `holidays` as none. Weekdays come
+ * back in Monday-first order and holidays sorted, both without duplicates.
+ *
  * @param value - Untrusted candidate, such as a request body field or a stored record.
- * @returns Settings built from the value, or undefined when any field is missing or invalid.
+ * @returns Settings built from the value, or undefined when any field is invalid.
  */
 export function readWorkspaceCalendarSettings(value: unknown): WorkspaceCalendarSettings | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
@@ -120,5 +158,64 @@ export function readWorkspaceCalendarSettings(value: unknown): WorkspaceCalendar
   ) {
     return undefined
   }
-  return { fiscalYearStartMonth, weekStartDay }
+  const workingWeekdays = readWorkspaceWorkingWeekdays(Reflect.get(value, 'workingWeekdays'))
+  const holidays = readWorkspaceHolidays(Reflect.get(value, 'holidays'))
+  if (!workingWeekdays || !holidays) return undefined
+  return { fiscalYearStartMonth, weekStartDay, workingWeekdays, holidays }
+}
+
+/**
+ * Narrows an untrusted value to a Workspace calendar weekday name.
+ *
+ * @param value - Untrusted candidate.
+ * @returns Whether the value names a weekday.
+ */
+export function isWorkspaceCalendarWeekday(value: unknown): value is WorkspaceCalendarWeekday {
+  return WORKSPACE_CALENDAR_WEEKDAYS.some((weekday) => weekday === value)
+}
+
+/**
+ * Checks whether a value is a real `YYYY-MM-DD` date a Workspace holiday may fall on.
+ *
+ * @param value - Untrusted candidate.
+ * @returns Whether the value is a valid calendar date from 1970 onward.
+ */
+export function isWorkspaceHolidayDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return Number(value.slice(0, 4)) >= WORKSPACE_CALENDAR_MIN_HOLIDAY_YEAR &&
+    !Number.isNaN(date.getTime()) &&
+    date.toISOString().slice(0, 10) === value
+}
+
+/**
+ * Reads the working weekdays of untrusted calendar settings.
+ *
+ * @param value - Untrusted `workingWeekdays` field.
+ * @returns At least one weekday in Monday-first order, the default when the field is missing, or
+ *   undefined when the field is not a list of weekday names.
+ */
+function readWorkspaceWorkingWeekdays(value: unknown): WorkspaceCalendarWeekday[] | undefined {
+  if (value === undefined) return [...DEFAULT_WORKSPACE_CALENDAR_SETTINGS.workingWeekdays]
+  if (!Array.isArray(value) || value.length > WORKSPACE_CALENDAR_WEEKDAYS.length) return undefined
+  const entries: unknown[] = value
+  if (!entries.every(isWorkspaceCalendarWeekday)) return undefined
+  const weekdays = WORKSPACE_CALENDAR_WEEKDAYS.filter((weekday) => entries.includes(weekday))
+  return weekdays.length > 0 ? weekdays : undefined
+}
+
+/**
+ * Reads the holidays of untrusted calendar settings.
+ *
+ * @param value - Untrusted `holidays` field.
+ * @returns Sorted unique dates, none when the field is missing, or undefined when the field is not
+ *   a list of at most {@link WORKSPACE_CALENDAR_MAX_HOLIDAYS} valid dates.
+ */
+function readWorkspaceHolidays(value: unknown): string[] | undefined {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) return undefined
+  const entries: unknown[] = value
+  if (!entries.every(isWorkspaceHolidayDate)) return undefined
+  const holidays = [...new Set(entries.filter(isWorkspaceHolidayDate))].sort()
+  return holidays.length <= WORKSPACE_CALENDAR_MAX_HOLIDAYS ? holidays : undefined
 }

@@ -16,6 +16,7 @@ import {
   type WorkItemDependencyEndpoint,
   type WorkItemRelation,
   type WorkItemSchedule,
+  type WorkItemScheduleCalendarPolicy,
   type WorkItemScheduleChangePreview,
   type WorkItemScheduleOperation,
   type WorkItemScheduleDependency,
@@ -459,6 +460,8 @@ export type TaskScreenProps = {
   initialTab?: TaskTab
   /** Whether the inline create form should open on initial render. */
   defaultCreateTaskOpen?: boolean
+  /** Workspace working calendar that new Work Items count working days with. */
+  createTaskCalendarPolicy?: WorkItemScheduleCalendarPolicy
   /** Work Item ID selected by the route when the screen first renders. */
   initialSelectedTaskId?: string
   /** Work Item ID explicitly selected by the current route, including unresolved selections. */
@@ -624,6 +627,7 @@ export function TaskScreen({
   configurationErrorMessage,
   currentWorkspaceMemberKey,
   defaultCreateTaskOpen = false,
+  createTaskCalendarPolicy,
   detailErrorMessage,
   focusedCommentId,
   focusedRootCommentId,
@@ -3575,6 +3579,7 @@ export function TaskScreen({
                 key={createTaskContextKey(createTaskContext, createTaskEditorGeneration)}
                 assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
+                calendarPolicy={createTaskCalendarPolicy}
                 configuration={createConfiguration}
                 context={createTaskContext}
                 currentUserProjectKey={currentUserProjectKey}

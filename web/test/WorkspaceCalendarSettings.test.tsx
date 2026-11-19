@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { TenantAdministrationSnapshot } from '@mukuroji/contracts'
 import { getWorkspaceCalendarSettings } from '../src/workspace/api/tenantAdministration'
+import { createWorkspaceTaskScheduleCalendarPolicy } from '../src/tasks/model/taskSchedule'
 import { TenantAdministrationPanel } from '../src/workspace/ui/TenantAdministrationPanel'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -38,7 +39,12 @@ const snapshot = {
     region: 'ap-northeast-1',
     locale: 'ja',
     defaultPolicy: { defaultMemberRole: 'member' },
-    calendar: { fiscalYearStartMonth: 4, weekStartDay: 0 },
+    calendar: {
+      fiscalYearStartMonth: 4,
+      weekStartDay: 0,
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
+      holidays: ['2027-01-01', '2027-05-03'],
+    },
     status: 'active',
     revision: 2,
     createdAt: '2026-07-01T00:00:00.000Z',
@@ -63,11 +69,24 @@ const snapshot = {
 
 describe('Workspace calendar settings', () => {
   test('reads the settings every member uses and rejects a malformed response', async () => {
-    const urls = mockFetch({ fiscalYearStartMonth: 4, weekStartDay: 1 })
-    expect(await getWorkspaceCalendarSettings('token-1')).toEqual({ fiscalYearStartMonth: 4, weekStartDay: 1 })
+    const urls = mockFetch({
+      fiscalYearStartMonth: 4,
+      weekStartDay: 1,
+      workingWeekdays: ['tuesday', 'monday'],
+      holidays: ['2027-05-03', '2027-01-01'],
+    })
+    expect(await getWorkspaceCalendarSettings('token-1')).toEqual({
+      fiscalYearStartMonth: 4,
+      weekStartDay: 1,
+      workingWeekdays: ['monday', 'tuesday'],
+      holidays: ['2027-01-01', '2027-05-03'],
+    })
     expect(urls[0]?.endsWith('/workspace/calendar-settings')).toBe(true)
 
     mockFetch({ fiscalYearStartMonth: 13, weekStartDay: 1 })
+    await expect(getWorkspaceCalendarSettings('token-1')).rejects.toThrow()
+
+    mockFetch({ fiscalYearStartMonth: 4, weekStartDay: 1, holidays: ['2027-13-01'] })
     await expect(getWorkspaceCalendarSettings('token-1')).rejects.toThrow()
   })
 
@@ -101,5 +120,25 @@ describe('Workspace calendar settings', () => {
     expect(html).toContain('会計年度の開始月')
     expect(html).toContain('<option value="4" selected="">4月</option>')
     expect(html).toContain('<option value="0" selected="">日曜日</option>')
+    // Working weekdays and company holidays are edited next to the fiscal year settings.
+    expect(html).toContain('稼働曜日')
+    expect(html).toMatch(/data-testid="tenant-working-weekday-saturday"[^>]*checked/u)
+    expect(html).not.toMatch(/data-testid="tenant-working-weekday-sunday"[^>]*checked/u)
+    expect(html).toContain('<time dateTime="2027-01-01">2027-01-01</time>')
+    expect(html).toContain('休日 2027-05-03 を削除')
+  })
+
+  test('maps the Workspace calendar to the policy new Work Items use', () => {
+    expect(createWorkspaceTaskScheduleCalendarPolicy(snapshot.profile.calendar)).toEqual({
+      holidays: ['2027-01-01', '2027-05-03'],
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
+    })
+    // Before the settings load, new Work Items keep the Monday-to-Friday default.
+    expect(createWorkspaceTaskScheduleCalendarPolicy(undefined)).toEqual({
+      holidays: [],
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+    })
   })
 })
