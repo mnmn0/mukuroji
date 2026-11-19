@@ -2086,11 +2086,17 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readIdempotencyKey(c.req.header('Idempotency-Key'))
       throw unavailableManagementMutation('Connector OAuth completion')
     }
+    // The state names one single-use flow, so it identifies the request without keeping a
+    // digest of the provider's authorization code in the idempotency record.
+    const fingerprint = {
+      state: input.state,
+      outcome: input.code === undefined ? 'cancelled' : 'connected',
+    }
     return executeManagementIdempotentJson(
       c,
       dependencies,
       principal,
-      input,
+      fingerprint,
       async () => {
         if (input.code === undefined) {
           const result = await dependencies.connectorAuthorization!.abortCallback(
