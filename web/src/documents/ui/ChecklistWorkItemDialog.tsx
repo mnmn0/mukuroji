@@ -102,7 +102,13 @@ export function ChecklistWorkItemDialog({
       : members.find((member) => member.id === currentUserKey)?.id ?? ''
 
   useEffect(() => {
+    const previousFocus = globalThis.document.activeElement
     focusFirstModalElement(dialogRef.current)
+    return () => {
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) {
+        previousFocus.focus()
+      }
+    }
   }, [])
 
   /**

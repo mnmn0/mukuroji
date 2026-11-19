@@ -947,7 +947,12 @@ export function DocumentPage() {
     }
     const created = await mutationRunner.run(
       `document:create:built-in:${key}`,
-      JSON.stringify([key, options.projectId ?? '', content.title]),
+      JSON.stringify([
+        key,
+        options.projectId ?? '',
+        content.title,
+        options.participants,
+      ]),
       (context) => createDocument(accessToken, input, context),
     )
     await mutateDocuments()
