@@ -595,8 +595,12 @@ async function replacePendingRow(
  */
 async function acquireWrite(input: RunDataMigrationInput, state: RunState): Promise<void> {
   const interval = 1000 / input.maxWritesPerSecond
-  const now = input.clock.now()
-  if (state.nextWriteAt > now) await input.clock.sleep(state.nextWriteAt - now)
+  let now = input.clock.now()
+  if (state.nextWriteAt > now) {
+    await input.clock.sleep(state.nextWriteAt - now)
+    // A late wake-up must push the next deadline back, or the budget bursts.
+    now = input.clock.now()
+  }
   state.nextWriteAt = Math.max(now, state.nextWriteAt) + interval
 }
 

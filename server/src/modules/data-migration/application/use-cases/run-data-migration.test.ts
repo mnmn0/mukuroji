@@ -306,6 +306,21 @@ describe('runDataMigration', () => {
     expect(clock.sleeps).toEqual([100, 100])
   })
 
+  test('measures the next write slot from a late wake-up', async () => {
+    const clock = createManualClock()
+    const oversleepingClock = {
+      ...clock,
+      now: () => clock.now(),
+      sleep: async (milliseconds: number) => {
+        await clock.sleep(milliseconds)
+        clock.current += 250
+      },
+    }
+    const rowStore = createMemoryRowStore({ 'segment-0-of-1': [1, 2, 3].map(createPendingTaskRow) })
+    await runDataMigration(createInput({ rowStore, clock: oversleepingClock, maxWritesPerSecond: 10, pageSize: 10 }))
+    expect(clock.sleeps).toEqual([100, 100])
+  })
+
   test('fails on a repeated cursor and on invalid bounds', async () => {
     const rowStore = createMemoryRowStore({ 'segment-0-of-1': [1, 2, 3].map(createPendingTaskRow) })
     const looping = { ...rowStore, readPage: async () => ({ rows: [], nextCursor: 'same' }) }
