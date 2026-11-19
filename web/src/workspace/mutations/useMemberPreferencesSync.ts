@@ -92,8 +92,11 @@ export function useMemberPreferencesSync({
         })
       }
       pendingRef.current = withoutSaved(pendingRef.current, changes)
-      // Record the result first so the cache update is not applied again over newer local changes.
+      // Record the result first so the cache update is not applied a second time.
       latestRef.current = saved
+      // A conflict retry can bring in fields another device changed; show them here too,
+      // under any local changes made while this save was in flight.
+      applyRef.current({ ...toValues(saved), ...pendingRef.current })
       await mutate(saved, { revalidate: false })
       setSaveFailed(false)
     }).catch((error: unknown) => {
