@@ -535,7 +535,7 @@ export const workspaceMessages = {
   'workspace.inbox.reason.timesheet': '未提出の工数',
   'workspace.settings.notifications.remindersTitle': 'リマインドの日数',
   'workspace.settings.notifications.remindersDescription': '自分あての期限前通知・再通知・督促の日数です。空欄の項目は Team の設定（Team が決めていなければ既定値）を使います。',
-  'workspace.reminders.invalid': '日数は 1〜365 の整数で入力してください。',
+  'workspace.reminders.invalid': '日数は 1〜365（工数の督促は 1〜31）の整数で入力してください。',
   'workspace.reminders.daysUnit': '日',
   'workspace.reminders.teamValue': 'Team の設定',
   'workspace.reminders.defaultValue': '既定 {days} 日',

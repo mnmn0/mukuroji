@@ -535,7 +535,7 @@ export const workspaceMessages = {
   'workspace.inbox.reason.timesheet': 'Unsubmitted time',
   'workspace.settings.notifications.remindersTitle': 'Reminder timing',
   'workspace.settings.notifications.remindersDescription': "How many days your own due-date, overdue, and follow-up reminders wait. A blank field uses your Team's setting, or the default when the Team has none.",
-  'workspace.reminders.invalid': 'Enter whole days from 1 to 365.',
+  'workspace.reminders.invalid': 'Enter whole days from 1 to 365 (1 to 31 for timesheet reminders).',
   'workspace.reminders.daysUnit': 'days',
   'workspace.reminders.teamValue': 'Team setting',
   'workspace.reminders.defaultValue': 'Default {days} days',
