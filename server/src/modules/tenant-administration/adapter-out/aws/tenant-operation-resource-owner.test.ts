@@ -1232,6 +1232,22 @@ describe('AwsTenantOperationResourceOwner', () => {
       })
       expect(isRecord(manifest) && String(manifest.snapshotDataPrefix))
         .toEndWith(`/snapshot-runs/${runId}/data/`)
+
+      // A marker written before snapshot runs existed still prepares, in the legacy layout.
+      if (!markerEntry) throw new Error('Expected the snapshot marker.')
+      objects.set(markerEntry[0], JSON.stringify({ schemaVersion: 1, processedCount: 12 }))
+      const legacyPrepared = await owner.execute(snapshotDone.nextJob, operation)
+      expect(legacyPrepared.status).toBe('continuing')
+      const legacyManifest: unknown = JSON.parse(
+        [...objects].find(([path]) => path.endsWith('/manifest.json'))?.[1] ?? '{}',
+      )
+      expect(legacyManifest).toMatchObject({ schemaVersion: 2 })
+      expect(legacyManifest).not.toHaveProperty('snapshotRunId')
+
+      objects.set(markerEntry[0], JSON.stringify({ schemaVersion: 2, snapshotRunId: '../x' }))
+      await expect(owner.execute(snapshotDone.nextJob, operation)).rejects.toMatchObject({
+        code: 'TenantExportSnapshotMarkerInvalid',
+      })
     } finally {
       documentClient.destroy()
       s3Client.destroy()

@@ -101,6 +101,9 @@ export class S3TenantExportDownloadClient implements TenantExportDownloadPort {
         if (storedName.startsWith(SNAPSHOT_RUNS_DIRECTORY)) {
           if (!runPrefix || !storedName.startsWith(runPrefix)) continue
           name = `snapshot/${storedName.slice(runPrefix.length)}`
+        } else if (runPrefix && storedName.startsWith(LEGACY_SNAPSHOT_DATA_DIRECTORY)) {
+          // Pages a pre-run lineage wrote before the export restarted into the selected run.
+          continue
         }
         const url = await getSignedUrl(
           this.client,
@@ -198,6 +201,12 @@ function isNamedError(error: unknown, name: string): boolean {
 
 /** Directory holding the per-run data pages written by the export worker. */
 const SNAPSHOT_RUNS_DIRECTORY = 'snapshot-runs/'
+
+/**
+ * Directory where data pages lived before snapshot runs existed. File copies use sibling
+ * directories under snapshot/ and stay part of every export.
+ */
+const LEGACY_SNAPSHOT_DATA_DIRECTORY = 'snapshot/data/'
 
 /** Creates the production S3 adapter from runtime configuration. */
 export function createProductionTenantExportDownloadClient(): S3TenantExportDownloadClient {

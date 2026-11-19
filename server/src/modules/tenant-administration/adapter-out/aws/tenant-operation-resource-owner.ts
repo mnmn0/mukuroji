@@ -586,11 +586,16 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         format: operation.exportFormat ?? 'jsonl',
         requestedAt: operation.requestedAt,
         snapshotPrefix: `${createExportPrefix(operation)}/snapshot/`,
-        snapshotRunId: marker.snapshotRunId,
-        snapshotDataPrefix: createExportSnapshotDataPrefix(
-          operation,
-          marker.snapshotRunId,
-        ),
+        // A marker written before snapshot runs existed keeps its pages under snapshot/data/.
+        ...(marker.snapshotRunId === undefined
+          ? {}
+          : {
+              snapshotRunId: marker.snapshotRunId,
+              snapshotDataPrefix: createExportSnapshotDataPrefix(
+                operation,
+                marker.snapshotRunId,
+              ),
+            }),
         snapshotMarkerEtag: marker.etag,
       })
       await this.s3Client.send(new PutObjectCommand({
@@ -850,11 +855,13 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
    * Reads the completed snapshot run recorded by the snapshot marker.
    *
    * @param operation - Export or closure operation owning the marker.
-   * @returns The marker ETag and the run whose data pages belong to the artifact.
+   * @returns The marker ETag and the run whose data pages belong to the artifact. The run is
+   * undefined for a schema-version-1 marker written before snapshot runs existed, whose single
+   * lineage wrote its pages under snapshot/data/.
    */
   private async readExportSnapshotMarker(
     operation: TenantOperation,
-  ): Promise<{ etag: string, snapshotRunId: string }> {
+  ): Promise<{ etag: string, snapshotRunId?: string }> {
     let response
     try {
       response = await this.s3Client.send(new GetObjectCommand({
@@ -877,6 +884,10 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     } catch {
       marker = undefined
     }
+    const isLegacyMarker = isRecord(marker) &&
+      marker.schemaVersion === 1 &&
+      marker.snapshotRunId === undefined
+    if (isLegacyMarker) return { etag: normalizeEtag(response.ETag) }
     if (
       !isRecord(marker) ||
       typeof marker.snapshotRunId !== 'string' ||

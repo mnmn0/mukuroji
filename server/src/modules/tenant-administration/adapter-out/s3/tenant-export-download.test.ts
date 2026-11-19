@@ -152,6 +152,7 @@ test('signs only the data pages of the snapshot run named by the manifest', asyn
           `${prefix}/snapshot-runs/${abandonedRun}/data/work-items/page-2.jsonl`,
           `${prefix}/snapshot-runs/${completedRun}/data/work-items/page-1.jsonl`,
           `${prefix}/snapshot-runs/${completedRun}/data/work-items/page-3.jsonl`,
+          `${prefix}/snapshot/data/work-items/legacy-page.jsonl`,
           `${prefix}/snapshot/files/report.pdf`,
         )
       },
@@ -173,6 +174,7 @@ test('signs only the data pages of the snapshot run named by the manifest', asyn
       `snapshot-runs/${completedRun}/data/work-items/page-1.jsonl`,
     )
     expect(download.files.some((file) => file.url.includes(abandonedRun))).toBe(false)
+    expect(download.files.some((file) => file.url.includes('legacy-page'))).toBe(false)
   } finally {
     client.destroy()
   }
@@ -201,6 +203,43 @@ test('rejects a manifest whose snapshot run is malformed', async () => {
     await expect(downloadClient.createDownload(operation)).rejects.toMatchObject({
       code: 'TenantExportArtifactInvalid',
     } satisfies Partial<TenantAdministrationError>)
+  } finally {
+    client.destroy()
+  }
+})
+
+test('keeps every legacy data page for a manifest written before snapshot runs', async () => {
+  const operation = createCompletedExport()
+  const prefix = createPrefix(operation)
+  const client = new S3Client({
+    credentials: {
+      accessKeyId: 'test-access-key',
+      secretAccessKey: 'test-secret-key',
+    },
+    region: 'ap-northeast-1',
+    requestHandler: {
+      async handle(request: unknown) {
+        if (readListPrefix(request) === undefined) {
+          return createManifestResponse({ schemaVersion: 1 })
+        }
+        return createListResponse(
+          `${prefix}/manifest.json`,
+          `${prefix}/snapshot/data/work-items/page-1.jsonl`,
+          `${prefix}/snapshot/files/report.pdf`,
+        )
+      },
+    },
+  })
+  const downloadClient = new S3TenantExportDownloadClient(client, 'tenant-export')
+
+  try {
+    const download = await downloadClient.createDownload(operation)
+
+    expect(download.files.map((file) => file.name)).toEqual([
+      'manifest.json',
+      'snapshot/data/work-items/page-1.jsonl',
+      'snapshot/files/report.pdf',
+    ])
   } finally {
     client.destroy()
   }
