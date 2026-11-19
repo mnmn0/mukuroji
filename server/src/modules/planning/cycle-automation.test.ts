@@ -452,6 +452,7 @@ describe('Cycle schedule handler', () => {
         created: 1,
         rolledOver: 1,
         failed: 1,
+        unfinished: 0,
         truncatedShards: 0,
       })
     } finally {
@@ -459,6 +460,37 @@ describe('Cycle schedule handler', () => {
     }
     expect(queried).toHaveLength(16)
     expect(steps.get('cycle-ok')).toBe(3)
+  })
+
+  test('rejects a run that leaves a Cycle with due steps at the step limit', async () => {
+    let calls = 0
+    const handler = createCycleScheduleHandler({
+      maxStepsPerCycle: 3,
+      source: {
+        shardCount: 1,
+        async listDueCycles() {
+          return { cycles: [{ workspaceId: WORKSPACE, cycleId: 'cycle-large' }] }
+        },
+        async readLinkedWorkItems() {
+          return { workItems: [] }
+        },
+      },
+      planning: {
+        async runCycleAutomationStep() {
+          calls += 1
+          return { action: 'rolled-over', movedCount: 49, remainingWorkItemCount: 100 }
+        },
+      },
+    })
+
+    const failure = await handler({}).catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(CycleScheduleIncompleteError)
+    expect((failure as CycleScheduleIncompleteError).result).toMatchObject({
+      rolledOver: 3,
+      failed: 0,
+      unfinished: 1,
+    })
+    expect(calls).toBe(3)
   })
 
   test('follows page cursors and rejects a run that hits the page limit', async () => {

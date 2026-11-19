@@ -35,6 +35,8 @@ export type CycleScheduleResult = {
   rolledOver: number
   /** Cycles whose step failed; they stay due and are retried on the next run. */
   failed: number
+  /** Cycles that still had a due step when the step limit of this run ran out. */
+  unfinished: number
   /** Shards whose due rows did not fit in the page limit of this run. */
   truncatedShards: number
 }
@@ -50,7 +52,8 @@ export class CycleScheduleIncompleteError extends Error {
   /** @param result - Counts of the incomplete run. */
   constructor(result: CycleScheduleResult) {
     super(
-      `Cycle schedule left ${result.failed} failed Cycles and ${result.truncatedShards} truncated shards.`,
+      `Cycle schedule left ${result.failed} failed Cycles, ${result.unfinished} unfinished Cycles, ` +
+        `and ${result.truncatedShards} truncated shards.`,
     )
     this.name = 'CycleScheduleIncompleteError'
     this.result = result
@@ -62,7 +65,8 @@ export class CycleScheduleIncompleteError extends Error {
  *
  * Cycle rows carry sparse due-index attributes while an automation step is pending. Each run reads
  * the due rows of every shard and advances each Cycle until nothing is due. A failed Cycle does
- * not stop the others; after the run, failures and page-limit truncation reject the job.
+ * not stop the others; after the run, failures, Cycles left unfinished at the step limit, and
+ * page-limit truncation reject the job.
  *
  * @param options - Storage port, Planning adapter, and limits.
  * @returns Schedule handler.
@@ -78,6 +82,7 @@ export function createCycleScheduleHandler(options: CycleScheduleOptions) {
       created: 0,
       rolledOver: 0,
       failed: 0,
+      unfinished: 0,
       truncatedShards: 0,
     }
     for (let shard = 0; shard < options.source.shardCount; shard += 1) {
@@ -90,7 +95,7 @@ export function createCycleScheduleHandler(options: CycleScheduleOptions) {
         for (const cycle of page.cycles) {
           result.examined += 1
           try {
-            await advanceCycle(options, cycle, maxSteps, result)
+            if (!await advanceCycle(options, cycle, maxSteps, result)) result.unfinished += 1
           } catch (error) {
             result.failed += 1
             console.error('Cycle automation step failed.', {
@@ -104,14 +109,18 @@ export function createCycleScheduleHandler(options: CycleScheduleOptions) {
       } while (cursor !== undefined && pages < maxPages)
       if (cursor !== undefined) result.truncatedShards += 1
     }
-    if (result.failed > 0 || result.truncatedShards > 0) {
+    if (result.failed > 0 || result.unfinished > 0 || result.truncatedShards > 0) {
       throw new CycleScheduleIncompleteError(result)
     }
     return result
   }
 }
 
-/** Runs automation steps for one Cycle until nothing is due. */
+/**
+ * Runs automation steps for one Cycle until nothing is due.
+ *
+ * @returns Whether the Cycle reached an idle step within the step limit.
+ */
 async function advanceCycle(
   options: CycleScheduleOptions,
   cycle: CycleScheduleDueCycle,
@@ -137,10 +146,11 @@ async function advanceCycle(
       }
       throw error
     }
-    if (outcome.action === 'idle') return
+    if (outcome.action === 'idle') return true
     if (outcome.action === 'created-next') result.created += 1
     else result.rolledOver += 1
   }
+  return false
 }
 
 /** Parses the schedule time of an EventBridge event. */
