@@ -193,6 +193,49 @@ describe('IssueCollaborationPanel', () => {
     expect(html).toContain('Demo User が解決策を採用しました。')
   })
 
+  test('localizes Work Item relation activity events', () => {
+    const eventTypes = [
+      'work-item.parent-changed',
+      'work-item.child-added',
+      'work-item.child-removed',
+      'work-item.blocker-added',
+      'work-item.blocker-removed',
+      'work-item.blocking-added',
+      'work-item.blocking-removed',
+      'work-item.relation-added',
+      'work-item.relation-removed',
+    ]
+    const html = renderToStaticMarkup(
+      <IssueActivityTab
+        controller={{
+          ...issueCollaborationControllerFixture,
+          activity: eventTypes.map((eventType, index) => ({
+            actorUserId: 'demo@example.com',
+            eventId: `event-relation-${index}`,
+            eventType,
+            occurredAt: `2026-07-12T04:${String(index).padStart(2, '0')}:00.000Z`,
+          })),
+        }}
+        locale="ja"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    for (const message of [
+      'Demo User が親を変更しました。',
+      'Demo User が子を追加しました。',
+      'Demo User が子を外しました。',
+      'Demo User がこの Work Item をブロックする項目を追加しました。',
+      'Demo User がこの Work Item をブロックする項目を解除しました。',
+      'Demo User がこの Work Item がブロックする項目を追加しました。',
+      'Demo User がこの Work Item がブロックする項目を解除しました。',
+      'Demo User が関連する Work Item を追加しました。',
+      'Demo User が関連する Work Item を解除しました。',
+    ]) {
+      expect(html).toContain(message)
+    }
+  })
+
   test('keeps the latest canonical comment when pages overlap', () => {
     const persisted = issueCollaborationControllerFixture.comments[0]
     const updated = {

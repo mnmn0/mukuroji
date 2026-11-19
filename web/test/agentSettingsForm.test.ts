@@ -17,6 +17,7 @@ import {
   listAgentReadyStatusOptions,
   measureUtf8Bytes,
   toggleAgentReadyStatus,
+  listAgentResumableStatusOptions,
   validateAgentSettingsDraft,
 } from '../src/features/agent-settings/model/agentSettingsForm'
 
@@ -30,6 +31,7 @@ describe('Agent settings draft', () => {
       leaseMinutes: 45,
       allowTakeoverAfterLeaseExpiry: true,
       readyStatusIds: ['ready'],
+      resumableStatusIds: ['active'],
       requireAcceptanceCriteria: true,
       acceptanceCriteriaFieldId: 'definition-of-done',
       brief: agentSettingsFixture.brief,
@@ -51,6 +53,7 @@ describe('Agent settings draft', () => {
       leaseMinutes: 45,
       allowTakeoverAfterLeaseExpiry: true,
       readyStatusIds: ['ready'],
+      resumableStatusIds: ['active'],
       requireAcceptanceCriteria: true,
       projectBriefs: { 'project-console': 'Use the design system.' },
       fileFailedRunsToTriage: true,
@@ -58,6 +61,17 @@ describe('Agent settings draft', () => {
     })
     expect(isAgentSettingsDraftChanged(agentSettingsFixture, cleared)).toBeTrue()
     expect(isAgentSettingsDraftChanged(agentSettingsFixture, { ...draft, fileStalledRunsToTriage: true })).toBeTrue()
+    expect(isAgentSettingsDraftChanged(agentSettingsFixture, { ...draft, resumableStatusIds: [] })).toBeTrue()
+  })
+
+  test('lists started statuses as resumable and keeps a saved status that is no longer started', () => {
+    expect(listAgentResumableStatusOptions(agentSettingsConfigurationFixture, ['ready'])).toEqual([
+      { id: 'active', name: 'In progress', workflowName: 'Delivery', missing: false },
+      { id: 'mitigating', name: 'Mitigating', workflowName: 'Incidents', missing: false },
+      { id: 'ready', name: 'ready', missing: true },
+    ])
+    expect(validateAgentSettingsDraft({ ...draft, resumableStatusIds: Array.from({ length: 51 }, (_, index) => `s${index}`) }))
+      .toMatchObject({ tooManyResumableStatuses: true, valid: false })
   })
 
   test('treats a reordered selection and a blank brief edit as unchanged', () => {

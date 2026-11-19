@@ -231,4 +231,55 @@ test.describe('Time tracking', () => {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
     expect(overflow).toBeLessThanOrEqual(0)
   })
+
+  test('drafts the member weekly report from their tasks and time and copies it as Markdown', async ({ page, context }) => {
+    const state = await mockTimeTracking(page)
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'])
+    const schedule = (dueDate: string) => ({ mode: 'due-date', dueDate })
+    const myWorkItems = [
+      { ...workItems[0], key: 'CORE-12', statusCategory: 'completed', actualStartDate: '2026-11-04', actualEndDate: '2026-11-10', dueDate: '2026-11-12', schedule: schedule('2026-11-12') },
+      { ...workItems[1], key: 'CORE-15', statusCategory: 'started', actualStartDate: '2026-11-10', dueDate: '2026-11-18', schedule: schedule('2026-11-18') },
+    ]
+    const requestedFilters: (string | null)[] = []
+    await page.route((url) => url.pathname === '/api/work-items' && url.searchParams.get('involvement') === 'mine', (route) => {
+      requestedFilters.push(new URL(route.request().url()).searchParams.get('teamId'))
+      return route.fulfill({ json: { workItems: myWorkItems } })
+    })
+    state.entries.push({
+      schemaVersion: 1,
+      id: 'entry-1',
+      workspaceId: 'workspace-demo',
+      teamId: 'core-team',
+      projectId: 'refero',
+      workItemId: 'onboarding',
+      userId: 'demo@example.com',
+      startAt: '2026-11-10T00:00:00.000Z',
+      endAt: '2026-11-10T02:30:00.000Z',
+      durationMinutes: 150,
+      billable: false,
+      currency: 'USD',
+      status: 'draft',
+      source: 'manual',
+      revision: 1,
+      createdAt: '2026-11-10T02:30:00.000Z',
+      updatedAt: '2026-11-10T02:30:00.000Z',
+    })
+
+    await page.goto('/teams/core-team/timesheet')
+    await page.getByRole('link', { name: 'Weekly report' }).click()
+    await expect(page).toHaveURL(/view=weekly-report/u)
+    const report = page.getByTestId('personal-weekly-report')
+    await expect(report).toContainText('Reduce onboarding friction')
+    expect(requestedFilters).toContain('core-team')
+
+    await page.getByLabel('Reflection').fill('Onboarding shipped.')
+    const markdown = page.getByTestId('weekly-report-markdown')
+    await expect(markdown).toContainText('- CORE-12 Reduce onboarding friction (due 2026-11-12, recorded 2:30)')
+    await expect(markdown).toContainText('- CORE-15 Update the pricing page (due 2026-11-18)')
+    await expect(markdown).toContainText('Onboarding shipped.')
+
+    await page.getByRole('button', { name: 'Copy Markdown' }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'Copied.' })).toBeVisible()
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('# Weekly report')
+  })
 })

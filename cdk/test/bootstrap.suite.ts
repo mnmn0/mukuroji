@@ -300,7 +300,7 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(workItemPayload.match(/creatorMemberKey/g)).toHaveLength(10);
   expect(workItemPayload).toContain('"schemaVersion":{"N":"2"}');
   expect(workItemPayload).toContain('"mode":{"S":"due-date"}');
-  expect(workItemPayload).toContain('"timeZone":{"S":"UTC"}');
+  expect(workItemPayload).toContain('"timeZone":{"S":"Asia/Tokyo"}');
   expect(workItemPayload).toContain('"dueDate":{"S":"2026-06-03"}');
   expect(workItemPayload).toContain('"statusCategory":{"S":"unstarted"}');
   expect(workItemPayload).toContain('"statusCategory":{"S":"started"}');

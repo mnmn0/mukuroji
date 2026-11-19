@@ -3950,6 +3950,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
               resolvedConfiguration,
             )
           : undefined,
+        {
+          context: createApiMutationContext(c, principal, { teamId, issueId, ...body }),
+          actorMemberKey: principal.userKey,
+        },
       )
       await Promise.all([
         refreshWorkItemSearchDocumentBestEffort(
@@ -4006,6 +4010,16 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
           targetExpectedRevision: endpoints.target.revision,
           sourceAssignedProjectId: endpoints.source.assignedProjectId,
           targetAssignedProjectId: endpoints.target.assignedProjectId,
+        },
+        {
+          context: createApiMutationContext(c, principal, {
+            teamId,
+            issueId,
+            targetWorkItemId,
+            relationType,
+            ...body,
+          }),
+          actorMemberKey: principal.userKey,
         },
       )
       await Promise.all([
@@ -4119,6 +4133,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
               resolvedConfiguration,
             )
           : undefined,
+        {
+          context: createApiMutationContext(c, principal, { teamId, issueId, ...body }),
+          actorMemberKey: principal.userKey,
+        },
       )
       if (response.previousParentWorkItemId !== response.parentWorkItemId) {
         await refreshWorkItemSearchDocumentBestEffort(

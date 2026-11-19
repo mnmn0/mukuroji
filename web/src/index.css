@@ -1111,3 +1111,169 @@ textarea {
     min-height: 44px;
   }
 }
+
+/*
+ * Document print / PDF layout (#423). While a document print root is mounted,
+ * only that root is printed on A4 so the browser's "Save as PDF" output keeps
+ * the page text without the workbench chrome.
+ */
+.document-print-root {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 16mm 14mm;
+  }
+
+  body:has(> .document-print-root) > :not(.document-print-root) {
+    display: none !important;
+  }
+
+  body:has(> .document-print-root) {
+    background: #fff;
+    color: #000;
+  }
+
+  .document-print-root {
+    --workbench-text: #111;
+    --workbench-muted: #444;
+    --workbench-border: #ccc;
+    --workbench-surface-muted: #f4f4f4;
+    display: block;
+    color: #111;
+    background: #fff;
+    font-family:
+      -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans',
+      'Yu Gothic UI', 'Yu Gothic', Meiryo, 'Noto Sans JP', 'Noto Sans CJK JP',
+      sans-serif;
+  }
+
+  .document-print-root article {
+    max-width: none;
+    padding: 0;
+  }
+
+  .document-print-root h1,
+  .document-print-root h2,
+  .document-print-root h3 {
+    break-after: avoid;
+  }
+
+  .document-print-root pre,
+  .document-print-root pre * {
+    color: #111 !important;
+    background: #f4f4f4 !important;
+  }
+
+  .document-print-root pre {
+    border: 1px solid #ccc;
+    overflow: visible !important;
+    white-space: pre-wrap !important;
+    overflow-wrap: anywhere;
+  }
+
+  .document-print-root pre code {
+    white-space: inherit !important;
+  }
+
+  /* Scroll containers cannot be scrolled on paper: let everything fit the page. */
+  .document-print-root * {
+    max-width: 100% !important;
+    overflow: visible !important;
+  }
+
+  .document-print-root table {
+    width: 100% !important;
+    table-layout: fixed;
+  }
+
+  .document-print-root th,
+  .document-print-root td {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  .document-print-root img,
+  .document-print-root svg {
+    height: auto;
+  }
+
+  .document-print-root pre,
+  .document-print-root table,
+  .document-print-root blockquote {
+    break-inside: avoid;
+  }
+}
+
+/*
+ * Gantt print layout (#379). The Gantt's print buttons set
+ * `html[data-print-target='task-gantt']` and the paper on the chart root, then
+ * open the print dialog. Only the chart is printed, on landscape A3 or A4, and
+ * the chart is zoomed down to the paper width by the print button.
+ */
+@page task-gantt-a3 {
+  size: A3 landscape;
+  margin: 8mm;
+}
+
+@page task-gantt-a4 {
+  size: A4 landscape;
+  margin: 8mm;
+}
+
+@media print {
+  html[data-print-target='task-gantt']:has([data-print-root='task-gantt'][data-print-paper='a3']) body {
+    page: task-gantt-a3;
+  }
+
+  html[data-print-target='task-gantt']:has([data-print-root='task-gantt'][data-print-paper='a4']) body {
+    page: task-gantt-a4;
+  }
+
+  /* Hide everything except the chart and the elements that contain it. */
+  html[data-print-target='task-gantt'] body *:not([data-print-root='task-gantt'], [data-print-root='task-gantt'] *, :has([data-print-root='task-gantt'])) {
+    display: none !important;
+  }
+
+  /* Containers of the chart must not clip or scroll it on paper. */
+  html[data-print-target='task-gantt'],
+  html[data-print-target='task-gantt'] body,
+  html[data-print-target='task-gantt'] body :has([data-print-root='task-gantt']) {
+    position: static !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    border: 0 !important;
+    background: #fff !important;
+    box-shadow: none !important;
+  }
+
+  html[data-print-target='task-gantt'] [data-print-root='task-gantt'] {
+    width: max-content;
+    margin: 0 !important;
+    overflow: visible !important;
+    font-family:
+      -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans',
+      'Yu Gothic UI', 'Yu Gothic', Meiryo, 'Noto Sans JP', 'Noto Sans CJK JP',
+      sans-serif;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  html[data-print-target='task-gantt'] [data-print-root='task-gantt'] [data-print-hidden] {
+    display: none !important;
+  }
+
+  html[data-print-target='task-gantt'] [data-print-root='task-gantt'] [data-print-overflow] {
+    overflow: visible !important;
+  }
+
+  html[data-print-target='task-gantt'] [data-print-root='task-gantt'] [role='row'] {
+    break-inside: avoid;
+  }
+}

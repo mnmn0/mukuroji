@@ -312,7 +312,7 @@ export const AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM = 1
 export function createAgentRunAuditPut(
   auditContext: MutationAuditContext,
   run: StoredAgentRun,
-  action: 'started' | 'reported' | 'finished' | 'released' | 'taken-over',
+  action: 'started' | 'resumed' | 'reported' | 'finished' | 'released' | 'taken-over',
   summary: string,
   sequence?: number,
 ): AgentRunTransactItem | undefined {
@@ -336,6 +336,7 @@ export function createAgentRunAuditPut(
       agentName: run.agentName,
       state: run.state,
       ...(run.outcome ? { outcome: run.outcome } : {}),
+      ...(run.resumedFromRunId ? { resumedFromRunId: run.resumedFromRunId } : {}),
     },
   })
 }

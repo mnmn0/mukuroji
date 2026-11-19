@@ -40,6 +40,7 @@ import {
   normalizeAnalyticsExportLocale,
   normalizeAnalyticsQueryInput,
   queryAnalyticsEvidence,
+  selectAnalyticsWorkItemsRequiringHistory,
   validateAnalyticsSnapshotRecordSize,
 } from './analytics'
 import {
@@ -143,6 +144,87 @@ function createAuditEvent(
     source: 'api',
     outboxStatus: 'pending',
   }
+}
+
+/**
+ * Simulates canonical Work Items and their audit timelines, the way each mutation writes its event
+ * and sets `updatedAt` in the same transaction.
+ *
+ * @param count - Number of Work Items to simulate.
+ * @returns Final canonical Work Items and every audit event written for them.
+ */
+function createSimulatedAnalyticsHistory(count: number) {
+  let seed = 371
+  /** Returns the next deterministic pseudo-random integer below the bound. */
+  const next = (bound: number) => {
+    seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648
+    return seed % bound
+  }
+  const pick = <T,>(values: readonly T[]): T => values[next(values.length)]!
+  const statuses = ['backlog', 'unstarted', 'started', 'completed', 'canceled'] as const
+  const projects = ['project-1', 'project-2', 'project-a', undefined] as const
+  const assignees = ['user-1', 'user-2', 'user-3'] as const
+  const start = Date.parse('2026-01-01T00:00:00.000Z')
+  const hour = 60 * 60 * 1_000
+  const workItems: CanonicalWorkItem[] = []
+  const events: AuditEventV1[] = []
+
+  for (let index = 0; index < count; index += 1) {
+    let at = start + next(24 * 100) * hour
+    const createdAt = new Date(at).toISOString()
+    const initialProject = pick(projects)
+    let item = createWorkItem(`simulated-${String(index).padStart(3, '0')}`, {
+      createdAt,
+      updatedAt: createdAt,
+      statusCategory: pick(statuses),
+      assigneeUserId: pick(assignees),
+      dueDate: `2026-0${1 + next(4)}-1${next(10)}`,
+      ...(initialProject === undefined ? {} : { assignedProjectId: initialProject }),
+      ...(next(3) === 0 ? { remainingEffortMinutes: 60 * (1 + next(8)) } : {}),
+    })
+    item = {
+      ...item,
+      schedule: { ...item.schedule, plannedEffortMinutes: 60 * (1 + next(16)) },
+    }
+    const changeCount = next(7)
+    for (let change = 0; change < changeCount; change += 1) {
+      at += (1 + next(24 * 12)) * hour
+      const occurredAt = new Date(at).toISOString()
+      const kind = next(5)
+      let changes: AuditFieldChange[]
+      let after: CanonicalWorkItem
+      if (kind <= 1) {
+        const statusCategory = pick(statuses)
+        changes = [{ field: 'statusCategory', before: item.statusCategory, after: statusCategory }]
+        after = { ...item, statusCategory }
+      } else if (kind === 2) {
+        const project = pick(projects)
+        changes = [{
+          field: 'assignedProjectId',
+          before: item.assignedProjectId ?? null,
+          after: project ?? null,
+        }]
+        const { assignedProjectId: _previous, ...rest } = item
+        after = project === undefined ? rest : { ...rest, assignedProjectId: project }
+      } else if (kind === 3) {
+        const assigneeUserId = pick(assignees)
+        changes = [{ field: 'assigneeUserId', before: item.assigneeUserId, after: assigneeUserId }]
+        after = { ...item, assigneeUserId }
+      } else if (item.archivedAt === undefined) {
+        changes = [{ field: 'archivedAt', before: null, after: occurredAt }]
+        after = { ...item, archivedAt: occurredAt }
+      } else {
+        changes = [{ field: 'archivedAt', before: item.archivedAt, after: null }]
+        const { archivedAt: _archived, ...rest } = item
+        after = rest
+      }
+      after = { ...after, revision: item.revision + 1, updatedAt: occurredAt }
+      events.push(createAuditEvent(`${item.id}-${change}`, item, occurredAt, changes))
+      item = after
+    }
+    workItems.push(item)
+  }
+  return { workItems, events }
 }
 
 function createQuery(
@@ -462,6 +544,8 @@ describe('Analytics metric engine', () => {
       'scope-change': 1,
       velocity: 1,
       sla: 100,
+      'remaining-scope': 1,
+      'cumulative-flow': 2,
     })
     expect(snapshot.generatedAt).toBe(period.to)
     expect(snapshot.queryHash).toHaveLength(64)
@@ -638,6 +722,163 @@ describe('Analytics metric engine', () => {
     })
     expect(losAngeles.widgets[0]?.value).toBe(0)
     expect(tokyo.widgets[0]?.value).toBe(1)
+  })
+
+  test('charts daily remaining scope, burnup scope, and cumulative flow from rewound state', () => {
+    const done = createWorkItem('done', {
+      createdAt: '2025-12-31T00:00:00.000Z',
+      updatedAt: '2026-01-02T12:00:00.000Z',
+    })
+    const added = createWorkItem('added', {
+      createdAt: '2026-01-02T06:00:00.000Z',
+      updatedAt: '2026-01-02T06:00:00.000Z',
+      statusCategory: 'started',
+      workflowStatusId: 'status-started',
+    })
+    const canceled = createWorkItem('canceled', {
+      createdAt: '2025-12-31T00:00:00.000Z',
+      updatedAt: '2026-01-03T12:00:00.000Z',
+      statusCategory: 'canceled',
+      workflowStatusId: 'status-canceled',
+    })
+    const outside = createWorkItem('outside', {
+      createdAt: '2025-12-31T00:00:00.000Z',
+      statusCategory: 'unstarted',
+      workflowStatusId: 'status-unstarted',
+    })
+    const events = [
+      createAuditEvent('done-complete', done, '2026-01-02T12:00:00.000Z', [
+        { field: 'statusCategory', before: 'unstarted', after: 'completed' },
+      ]),
+      createAuditEvent('cancel', canceled, '2026-01-03T12:00:00.000Z', [
+        { field: 'statusCategory', before: 'backlog', after: 'canceled' },
+      ]),
+    ]
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [done, added, canceled, outside],
+      events,
+      query: createQuery([
+        {
+          id: 'burndown',
+          title: 'Burndown',
+          type: 'chart',
+          metric: 'remaining-scope',
+          visualization: 'burndown',
+          groupBy: { dimension: 'day' },
+        },
+        {
+          id: 'cfd',
+          title: 'CFD',
+          type: 'chart',
+          metric: 'cumulative-flow',
+          visualization: 'area',
+          groupBy: { dimension: 'day' },
+        },
+      ], {
+        filter: {
+          period: {
+            from: '2026-01-01T00:00:00.000Z',
+            to: '2026-01-03T23:59:59.999Z',
+          },
+          workItems: [
+            { teamId: 'core', workItemId: 'canceled' },
+            { teamId: 'core', workItemId: 'added' },
+            { teamId: 'core', workItemId: 'done' },
+            { teamId: 'core', workItemId: 'done' },
+          ],
+        },
+        asOf: '2026-01-03T23:59:59.999Z',
+      }),
+    })
+
+    expect(snapshot.filter.workItems).toEqual([
+      { teamId: 'core', workItemId: 'added' },
+      { teamId: 'core', workItemId: 'canceled' },
+      { teamId: 'core', workItemId: 'done' },
+    ])
+    const burndown = snapshot.widgets[0]
+    expect(burndown?.value).toBe(1)
+    expect(burndown?.series.map((point) => point.value)).toEqual([2, 2, 1])
+    expect(burndown?.series.map((point) => point.segments)).toEqual([
+      [{ key: 'scope', value: 2 }, { key: 'completed', value: 0 }],
+      [{ key: 'scope', value: 3 }, { key: 'completed', value: 1 }],
+      [{ key: 'scope', value: 2 }, { key: 'completed', value: 1 }],
+    ])
+    const cfd = snapshot.widgets[1]
+    expect(cfd?.value).toBe(3)
+    expect(cfd?.series.map((point) =>
+      Object.fromEntries((point.segments ?? []).map((segment) => [segment.key, segment.value]))
+    )).toEqual([
+      { completed: 0, started: 0, unstarted: 1, backlog: 1, canceled: 0 },
+      { completed: 1, started: 1, unstarted: 0, backlog: 1, canceled: 0 },
+      { completed: 1, started: 1, unstarted: 0, backlog: 0, canceled: 1 },
+    ])
+  })
+
+  test('weights remaining scope by remaining effort and keeps existing metric series unchanged', () => {
+    const estimated = createWorkItem('estimated', {
+      statusCategory: 'started',
+      workflowStatusId: 'status-started',
+      schedule: { ...createDefaultDueDateWorkItemSchedule('2026-01-10'), plannedEffortMinutes: 240 },
+      remainingEffortMinutes: 90,
+    })
+    const unestimated = createWorkItem('unestimated', {
+      statusCategory: 'unstarted',
+      workflowStatusId: 'status-unstarted',
+    })
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [estimated, unestimated],
+      events: [],
+      query: createQuery([
+        {
+          id: 'effort',
+          title: 'Effort',
+          type: 'metric',
+          metric: 'remaining-scope',
+          weighting: 'effort',
+        },
+        {
+          id: 'wip',
+          title: 'WIP',
+          type: 'chart',
+          metric: 'wip',
+        },
+        {
+          id: 'burnup',
+          title: 'Burnup',
+          type: 'chart',
+          metric: 'remaining-scope',
+          visualization: 'burnup',
+          weighting: 'effort',
+        },
+      ]),
+    })
+    expect(snapshot.widgets[2]?.series.at(-1)?.segments).toEqual([
+      { key: 'scope', value: 4 },
+      { key: 'completed', value: 0 },
+    ])
+    expect(snapshot.widgets[0]?.value).toBe(1.5)
+    expect(snapshot.widgets[0]?.definition.unit).toBe('hours')
+    expect(snapshot.widgets[0]?.warnings).toEqual([
+      '1 remaining Work Item(s) had no estimate and counted as zero effort.',
+    ])
+    expect(snapshot.widgets[1]?.series.every((point) => point.segments === undefined)).toBe(true)
+    expect(() => normalizeAnalyticsQueryInput(createQuery([{
+      id: 'wip',
+      title: 'WIP',
+      type: 'metric',
+      metric: 'wip',
+      weighting: 'effort',
+    }]))).toThrow(AnalyticsError)
+    expect(() => normalizeAnalyticsQueryInput(createQuery([], {
+      filter: {
+        period,
+        workItems: Array.from({ length: 501 }, (_, index) => ({
+          teamId: 'core',
+          workItemId: `item-${index}`,
+        })),
+      },
+    }))).toThrow(AnalyticsError)
   })
 
   test('produces bounded ordered forecast percentiles without NaN', () => {
@@ -1165,7 +1406,7 @@ describe('Analytics metric engine', () => {
     expect(() => createTestAnalyticsSnapshot({
       ...input,
       query: createQuery([{ id: 'wip', title: 'WIP', type: 'metric', metric: 'wip', weighting: 'effort' }]),
-    })).toThrow('Only throughput and velocity widgets can be weighted by effort.')
+    })).toThrow('Only throughput, velocity, and remaining scope widgets can be weighted by effort.')
   })
 
   test('simulates effort in whole minutes so rounding the reported hours cannot add a day', () => {
@@ -1466,6 +1707,95 @@ describe('Analytics metric engine', () => {
     expect(evidence.items).toHaveLength(workItems.length)
     expect(evidence.nextCursor).toBeUndefined()
   })
+
+  test('gives identical results when Work Items untouched since the period start skip history', () => {
+    const { workItems, events } = createSimulatedAnalyticsHistory(240)
+    const historyPeriod = {
+      from: '2026-03-01T00:00:00.000Z',
+      to: '2026-03-31T23:59:59.999Z',
+    }
+    const asOf = '2026-03-24T09:30:00.000Z'
+    const metrics = Object.keys(ANALYTICS_METRIC_DEFINITIONS) as Array<
+      keyof typeof ANALYTICS_METRIC_DEFINITIONS
+    >
+    const query = createQuery([
+      ...metrics.map((metric) => ({
+        id: `chart-${metric}`,
+        title: metric,
+        type: 'chart' as const,
+        metric,
+        groupBy: { dimension: 'day' as const },
+        ...(metric === 'sla' ? { slaTargetHours: 240 } : {}),
+      })),
+      ...(['project', 'status', 'assignee', 'week'] as const).map((dimension) => ({
+        id: `group-${dimension}`,
+        title: dimension,
+        type: 'table' as const,
+        metric: 'remaining-scope' as const,
+        groupBy: { dimension },
+      })),
+      {
+        id: 'effort-throughput',
+        title: 'Effort throughput',
+        type: 'metric',
+        metric: 'throughput',
+        weighting: 'effort',
+      },
+    ], {
+      filter: { period: historyPeriod, includeArchived: true },
+      asOf,
+      forecastBaseline: { from: historyPeriod.from, to: '2026-04-15T00:00:00.000Z' },
+    })
+    const historyWorkItems = selectAnalyticsWorkItemsRequiringHistory(
+      workItems,
+      historyPeriod.from,
+    )
+    const historyKeys = new Set(historyWorkItems.map((item) =>
+      `team/${item.teamId}/issue/${item.id}`
+    ))
+    const historyEvents = events.filter((event) => historyKeys.has(event.entityId))
+
+    expect(historyWorkItems.length).toBeGreaterThan(0)
+    expect(historyWorkItems.length).toBeLessThan(workItems.length)
+    expect(historyEvents.length).toBeLessThan(events.length)
+
+    for (const includeArchived of [true, false]) {
+      const scopedQuery = {
+        ...query,
+        filter: { ...query.filter, includeArchived },
+      }
+      const full = createTestAnalyticsSnapshot({ workItems, events, query: scopedQuery })
+      const reduced = createTestAnalyticsSnapshot({
+        workItems,
+        events: historyEvents,
+        query: scopedQuery,
+      })
+      expect(reduced).toEqual(full)
+      expect(full.widgets.some((widget) => (widget.value ?? 0) > 0)).toBe(true)
+    }
+    for (const metric of metrics) {
+      const evidence = {
+        metric,
+        filter: query.filter,
+        asOf,
+        timeZone: 'UTC',
+        limit: 200,
+      }
+      expect(queryTestAnalyticsEvidence({ workItems, events: historyEvents, evidence }))
+        .toEqual(queryTestAnalyticsEvidence({ workItems, events, evidence }))
+    }
+  })
+
+  test('requires history for every Work Item when an update instant cannot be compared', () => {
+    const old = createWorkItem('old', { updatedAt: '2025-12-01T00:00:00.000Z' })
+    const recent = createWorkItem('recent', { updatedAt: period.from })
+    const invalid = createWorkItem('invalid', { updatedAt: 'not-a-date' })
+
+    expect(selectAnalyticsWorkItemsRequiringHistory([old, recent, invalid], period.from))
+      .toEqual([recent, invalid])
+    expect(selectAnalyticsWorkItemsRequiringHistory([old, recent], 'not-a-date'))
+      .toEqual([old, recent])
+  })
 })
 
 describe('Analytics export', () => {
@@ -1538,6 +1868,8 @@ describe('Analytics export', () => {
         'scope-change',
         'velocity',
         'sla',
+        'remaining-scope',
+        'cumulative-flow',
       ] as const).map((metric) => ({
         id: metric,
         title: metric,
@@ -1589,6 +1921,8 @@ describe('Analytics export', () => {
       'スコープ変更',
       'ベロシティ',
       'SLA達成率',
+      'Remaining scope',
+      'Cumulative flow',
       '件',
       '時間',
       '件/週',

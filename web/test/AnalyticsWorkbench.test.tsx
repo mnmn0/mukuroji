@@ -52,6 +52,45 @@ describe('AnalyticsWorkbench', () => {
     expect(html).toContain('View evidence')
   })
 
+  test('draws flow charts only for compatible metrics and extends burndowns to the period end', () => {
+    const series = [{
+      from: '2026-06-30T15:00:00.000Z',
+      to: '2026-07-01T14:59:59.999Z',
+      value: 3,
+      sampleSize: 3,
+      segments: [{ key: 'scope', value: 3 }, { key: 'completed', value: 0 }],
+    }]
+    const result = (widgetId: string) => ({
+      ...analyticsSnapshotFixture.widgets[0]!,
+      widgetId,
+      metric: 'remaining-scope' as const,
+      series,
+      groups: [],
+      rows: [],
+      warnings: [],
+    })
+    const widget = (id: string, visualization: 'burndown' | 'area') => ({
+      id,
+      title: id,
+      type: 'chart' as const,
+      metric: 'remaining-scope' as const,
+      visualization,
+      groupBy: { dimension: 'day' as const },
+    })
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        filter={{ period: { from: '2026-06-30T15:00:00.000Z', to: '2026-07-03T14:59:59.999Z' } }}
+        snapshot={{ ...analyticsSnapshotFixture, widgets: [result('bd'), result('cfd')] }}
+        widgets={[widget('bd', 'burndown'), widget('cfd', 'area')]}
+      />,
+    )
+
+    expect(html).toContain('data-testid="analytics-flow-chart-burndown"')
+    expect(html).toContain('<td class="px-3 py-2">2026-07-02</td>')
+    expect(html).not.toContain('data-testid="analytics-flow-chart-area"')
+  })
+
   test('formats series buckets in the snapshot timezone', () => {
     const snapshot = {
       ...analyticsSnapshotFixture,
