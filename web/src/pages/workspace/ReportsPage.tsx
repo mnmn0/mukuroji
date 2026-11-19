@@ -914,6 +914,7 @@ function resolveAnalyticsErrorMessage(
     if (error.status === 409) return t('analytics.error.conflict')
     if (error.status === 403) return t('analytics.error.forbidden')
     if (error.status === 401) return t('analytics.error.session')
+    if (error.status === 413) return t('analytics.error.scopeTooLarge')
   }
   if (scope === 'evidence') return t('analytics.error.evidence')
   if (scope === 'export') return t('analytics.error.export')

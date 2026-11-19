@@ -15,7 +15,10 @@ import {
   type CollaborationComment,
 } from '../../modules/collaboration/collaboration'
 import { type FileProofingActor, type FileProofingScope } from '../../modules/files/file-proofing'
-import { WorkItemConfigurationError } from '../../modules/work-items/work-item-configuration'
+import {
+  WorkItemCompletionGateError,
+  WorkItemConfigurationError,
+} from '../../modules/work-items/work-item-configuration'
 import { authenticationDependencies, workspaceDependencies } from './app-dependencies'
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import { readRequiredRouteId } from './input-parsing'
@@ -63,6 +66,9 @@ export function toWorkItemConfigurationErrorResponse(c: Context, error: unknown)
   if (!(error instanceof WorkItemConfigurationError)) {
     console.error(error)
     return c.json({ message: 'Work Item configuration is unavailable.' }, 502)
+  }
+  if (error instanceof WorkItemCompletionGateError) {
+    return c.json(error.toResponseBody(), 409)
   }
   if (error.status >= 500) {
     console.error(error)

@@ -109,6 +109,13 @@ import {
 } from '../shared/app-dependencies'
 import { toTriageErrorResponse } from '../shared/request-intake-access'
 import {
+  createProjectTemplateWorkItems,
+  expandProjectTemplateWorkItems,
+  findProjectTemplateProject,
+  preflightProjectTemplateWorkItems,
+  requireProjectTemplateStartDate,
+} from '../shared/automation-project-template'
+import {
   createAutomationWorkItemCreateBody,
   mapAutomationErrorStatus,
   readAutomationMetadataText,
@@ -443,18 +450,33 @@ async function executeAutomationTemplateApplication(
       if (template.kind !== 'project' || target.kind !== 'project') {
         throw new AutomationError('unavailable', 'AutomationTemplateApplicationInvalid', 'Project template application is invalid.')
       }
-      const names = readLocalizedNames(template.payload)
+      const { workItems: templateWorkItems, ...projectPayload } = template.payload
+      const names = readLocalizedNames(projectPayload)
+      const expandedWorkItems = templateWorkItems && templateWorkItems.length > 0
+        ? expandProjectTemplateWorkItems(
+            templateWorkItems,
+            requireProjectTemplateStartDate(target.startDate),
+          )
+        : []
+      if (expandedWorkItems.length > 0) {
+        await preflightProjectTemplateWorkItems(principal, target.teamId, expandedWorkItems)
+      }
       const result = {
         kind: 'project' as const,
         teamId: target.teamId,
         projectId: application.id,
         name: names.nameJa,
+        ...(expandedWorkItems.length > 0 ? { workItemCount: expandedWorkItems.length } : {}),
       }
-      const response = await workspaceDependencies.projectDirectory.createProject(
+      // A retry of a WBS application resumes with the Project that an earlier attempt created.
+      const existingProject = expandedWorkItems.length > 0
+        ? await findProjectTemplateProject(principal.directoryId, target.teamId, application.id)
+        : undefined
+      const response = existingProject ? { project: existingProject } : await workspaceDependencies.projectDirectory.createProject(
         principal.directoryId,
         target.teamId,
         {
-          ...template.payload,
+          ...projectPayload,
           idempotencyResourceId: application.id,
         },
         {
@@ -472,22 +494,54 @@ async function executeAutomationTemplateApplication(
           },
           application.id,
         ),
-        [automationDependencies.ruleTemplates.createTemplateApplicationCompletionMutation(application, result)],
+        // With Work Items, the receipt completes only after the last one exists, so a retry resumes.
+        expandedWorkItems.length > 0
+          ? []
+          : [automationDependencies.ruleTemplates.createTemplateApplicationCompletionMutation(application, result)],
       )
-      await projectWorkspaceSearchDocumentBestEffort(
-        () => {
-          return createProjectSearchDocument(
-            principal.directoryId,
-            target.teamId,
-            response.project,
-            principal.userKey,
-            names.nameEn === response.project.name ? undefined : names.nameEn,
-          )
-        },
-        'automation template Project creation',
-        // A charter saved before this projection lands carries a revision; keep it.
-        { unrevisioned: true },
-      )
+      // The attempt that created the Project already projected it; a reused one may have been edited.
+      if (!existingProject) {
+        await projectWorkspaceSearchDocumentBestEffort(
+          () => {
+            return createProjectSearchDocument(
+              principal.directoryId,
+              target.teamId,
+              response.project,
+              principal.userKey,
+              names.nameEn === response.project.name ? undefined : names.nameEn,
+            )
+          },
+          'automation template Project creation',
+          // A charter saved before this projection lands carries a revision; keep it.
+          { unrevisioned: true },
+        )
+      }
+      if (expandedWorkItems.length > 0) {
+        await createProjectTemplateWorkItems(
+          c,
+          principal,
+          application,
+          target.teamId,
+          response.project.id,
+          expandedWorkItems,
+        )
+        const {
+          runnerLeaseExpiresAt: _runnerLeaseExpiresAt,
+          errorCode: _errorCode,
+          errorMessage: _errorMessage,
+          ...base
+        } = application
+        await automationDependencies.ruleTemplates.saveTemplateApplication(
+          {
+            ...base,
+            status: 'succeeded',
+            revision: application.revision + 1,
+            result,
+            updatedAt: new Date().toISOString(),
+          },
+          application.revision,
+        )
+      }
       return await requireCompletedTemplateApplication(application)
     }
 

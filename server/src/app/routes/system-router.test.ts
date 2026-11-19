@@ -16,7 +16,11 @@ test('keeps liveness independent from dependency readiness', async () => {
   const response = await router.request('/api/health')
 
   expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ ok: true, status: 'alive' })
+  expect(await response.json()).toEqual({
+    codingAgentMcp: { apiRevision: 1, minimumApiRevision: 1 },
+    ok: true,
+    status: 'alive',
+  })
 })
 
 test('exposes only validated deployment provenance with liveness', async () => {
@@ -35,6 +39,7 @@ test('exposes only validated deployment provenance with liveness', async () => {
   expect(response.headers.get('Cache-Control')).toBe('no-store')
   expect(await response.json()).toEqual({
     applicationCommitSha: '0123456789abcdef0123456789abcdef01234567',
+    codingAgentMcp: { apiRevision: 1, minimumApiRevision: 1 },
     ok: true,
     status: 'alive',
   })

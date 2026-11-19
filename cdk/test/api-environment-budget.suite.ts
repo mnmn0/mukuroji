@@ -736,7 +736,8 @@ describe('API runtime configuration externalization', () => {
     expect(auditProperties.SecretString).toEqual(ref('WorkspaceAuditPseudonymKey'));
     expect(auditProperties.Name).toBeUndefined();
 
-    // Four secrets in total, none named after the configuration revision.
+    // Four API secrets plus one stable secret per NoEcho value a worker reads
+    // (#494), none named after the configuration revision.
     const secrets = Object.entries(resources)
       .filter(([, resource]) =>
         isRecord(resource) &&
@@ -745,6 +746,9 @@ describe('API runtime configuration externalization', () => {
       API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
       'ConnectorRuntimeSecret7993B96D',
       DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET_LOGICAL_ID,
+      'EnterpriseIdentityTokenHashKeySecretB442F5F9',
+      'RequestEmailWebhookKeySecretCA8DB054',
+      'RequestTokenHashKeySecretCABB3465',
       WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID,
     ].sort());
     for (const [, resource] of secrets) {

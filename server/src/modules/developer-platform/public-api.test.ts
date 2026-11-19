@@ -327,6 +327,83 @@ describe('public API router', () => {
     expect((await router.request(path)).status).toBe(401)
   })
 
+  test('keys rate limits and idempotency on the OAuth app instead of each access token', async () => {
+    let creates = 0
+    const { router } = createTestRouter({ workItems: createDefaultWorkItemService({
+      async addComment(credential, _teamId, _id, body) {
+        creates += 1
+        return { id: `comment-${creates}`, actorUserId: credential.subjectUserId, body, createdAt: NOW.toISOString() }
+      },
+    }) })
+    // Register OAuth apps and issue tokens through the HTTP endpoints integrations use.
+    const registerClient = async (name: string) => {
+      const response = await router.request('http://localhost/developer/oauth-apps', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer session-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `register-${name}`,
+        },
+        body: JSON.stringify({
+          name,
+          grantTypes: ['client_credentials'],
+          scopes: ['work-items:read', 'work-items:write'],
+        }),
+      })
+      expect(response.status).toBe(201)
+      const registered = await response.json() as {
+        oauthApp: { clientId: string }
+        clientSecret: string
+      }
+      return new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: registered.oauthApp.clientId,
+        client_secret: registered.clientSecret,
+      }).toString()
+    }
+    const requestToken = async (grant: string) => {
+      const response = await router.request('http://localhost/v1/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: grant,
+      })
+      expect(response.status).toBe(200)
+      return (await response.json() as { access_token: string }).access_token
+    }
+    const grant = await registerClient('Retrying integration')
+    const first = await requestToken(grant)
+    const second = await requestToken(grant)
+    expect(second).not.toBe(first)
+    const path = '/v1/work-items/work-item-1/comments?teamId=team-1&assignedProjectId=project-1&assigneeUserId=user-1'
+    const send = (accessToken: string) => router.request(path, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'oauth-retry-key',
+      },
+      body: JSON.stringify({ body: 'Tests pass.' }),
+    })
+
+    const created = await send(first)
+    expect(created.status).toBe(201)
+    expect(created.headers.get('RateLimit-Remaining')).toBe('119')
+    // A retry with a newly issued token replays instead of creating a second comment.
+    const retried = await send(second)
+    expect(retried.status).toBe(201)
+    expect(retried.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(creates).toBe(1)
+    // Both tokens draw from one rate-limit bucket.
+    expect(retried.headers.get('RateLimit-Remaining')).toBe('118')
+
+    // Another OAuth app keeps its own bucket and idempotency scope.
+    const other = await send(await requestToken(await registerClient('Other integration')))
+    expect(other.status).toBe(201)
+    expect(other.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(other.headers.get('RateLimit-Remaining')).toBe('119')
+    expect(creates).toBe(2)
+  })
+
   test('preserves empty comment page continuations and binds cursors to Team, Project, task, credential, and limit', async () => {
     const { platform, router } = createTestRouter({ workItems: createDefaultWorkItemService({
       async listComments(_credential, _team, _id, continuation, _limit, project) {
@@ -2991,6 +3068,8 @@ function createAgentRunService(overrides: Partial<PublicAgentRunService> = {}): 
     report: unexpected,
     authorizeTakeOver: unexpected,
     takeOver: unexpected,
+    authorizeResume: unexpected,
+    resume: unexpected,
     getSettings: unexpected,
     getContext: unexpected,
     ...overrides,
@@ -3102,6 +3181,70 @@ describe('public Agent Run routes', () => {
     expect(refused.status).toBe(403)
     expect(await refused.json()).toMatchObject({ code: 'forbidden', errors: [{ code: 'agent_run_takeover_disabled' }] })
     expect((await send('take-over-3', { runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2', expectedRevision: 1 })).status).toBe(400)
+  })
+
+  test('resumes a started Work Item idempotently and reports a status the Team does not allow', async () => {
+    const calls: unknown[] = []
+    let notResumable = false
+    let lostAccess = false
+    const { platform, router } = createTestRouter({ agentRuns: createAgentRunService({
+      /**
+       * Accepts resume authorizations until the test removes the caller's access.
+       */
+      async authorizeResume() {
+        if (lostAccess) throw new AgentRunError('forbidden', 'No access.', { reason: 'agent_run_forbidden' })
+      },
+      /**
+       * Returns a resume response, or the not resumable error the test configures.
+       *
+       * @param _credential - Ignored credential.
+       * @param teamId - Team ID.
+       * @param workItemId - Work Item ID.
+       * @param request - Resume request.
+       * @returns The new run and the run it resumes.
+       */
+      async resume(_credential, teamId, workItemId, request) {
+        calls.push({ teamId, workItemId, request })
+        if (notResumable) throw new AgentRunError('conflict', 'Not resumable.', { reason: 'not_resumable' })
+        return {
+          run: { ...agentRunFixture, runId: 'run_00000000-0000-4000-8000-000000000010' },
+          resumedFromRun: { ...agentRunFixture, state: 'finished', outcome: 'paused', finishedBy: 'agent', finishedAt: NOW.toISOString() },
+        }
+      },
+    }) })
+    const credential = await createApiKey(platform, ['work-items:write'])
+    const headers = { Authorization: `Bearer ${credential.secret}`, 'Content-Type': 'application/json' }
+    /**
+     * Sends a resume request.
+     *
+     * @param key - Idempotency key.
+     * @param body - Request body.
+     * @returns Response.
+     */
+    const send = (key: string, body: unknown = { expectedRevision: 3, runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2' }) => router.request(
+      '/v1/work-items/work-item-1/agent-runs/resume?teamId=team-1',
+      { method: 'POST', headers: { ...headers, 'Idempotency-Key': key }, body: JSON.stringify(body) },
+    )
+    const resumed = await send('resume-1')
+    expect(resumed.status).toBe(201)
+    expect(await resumed.json()).toMatchObject({ resumedFromRun: { outcome: 'paused' } })
+    expect((await send('resume-1')).headers.get('Idempotency-Replayed')).toBe('true')
+    // A caller who lost access gets no saved response on a retry.
+    lostAccess = true
+    const lost = await send('resume-1')
+    expect(lost.status).toBe(403)
+    expect(lost.headers.get('Idempotency-Replayed')).toBeNull()
+    lostAccess = false
+    expect(calls).toEqual([{
+      teamId: 'team-1', workItemId: 'work-item-1',
+      request: { expectedRevision: 3, runtime: 'codex', agentName: 'Codex', instanceIdHash: hashAgentInstanceId('laptop-2') },
+    }])
+    notResumable = true
+    const refused = await send('resume-2')
+    expect(refused.status).toBe(409)
+    expect(await refused.json()).toMatchObject({ code: 'conflict', errors: [{ code: 'not_resumable' }] })
+    expect((await send('resume-3', { runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2' })).status).toBe(400)
+    expect((await send('resume-4', { expectedRevision: 3, runtime: 'codex', agentName: 'Codex', instanceId: 'laptop-2', workflowStatusId: 'doing' })).status).toBe(400)
   })
 
   test('saves a structured report idempotently and rejects an unsafe artifact URL before any write', async () => {

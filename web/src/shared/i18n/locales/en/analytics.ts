@@ -244,6 +244,7 @@ export const analyticsMessages = {
   'analytics.error.conflict': 'Another change was saved first. The latest report has been loaded.',
   'analytics.error.forbidden': 'You do not have permission to change this report.',
   'analytics.error.session': 'Your session expired. Sign in again.',
+  'analytics.error.scopeTooLarge': 'The report covers more data than one query can evaluate. Shorten the period or filter by Team or Project.',
   'analytics.error.evidence': 'The evidence for this value could not be loaded.',
   'analytics.error.export': 'The file could not be exported.',
   'analytics.error.share': 'The share link could not be created.',

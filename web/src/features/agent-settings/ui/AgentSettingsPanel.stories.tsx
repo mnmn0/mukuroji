@@ -16,6 +16,7 @@ import {
   listAgentAcceptanceCriteriaFieldOptions,
   listAgentProjectBriefTargets,
   listAgentReadyStatusOptions,
+  listAgentResumableStatusOptions,
 } from '../model/agentSettingsForm'
 import { AgentSettingsPanel } from './AgentSettingsPanel'
 
@@ -29,6 +30,7 @@ const defaultSettings: AgentSettings = {
   leaseMinutes: 30,
   allowTakeoverAfterLeaseExpiry: false,
   readyStatusIds: [],
+  resumableStatusIds: [],
   requireAcceptanceCriteria: false,
   projectBriefs: {},
   fileFailedRunsToTriage: false,
@@ -74,6 +76,7 @@ const meta = {
     ),
     readOnly: false,
     readyStatusOptions: listAgentReadyStatusOptions(agentSettingsConfigurationFixture, loadedDraft.readyStatusIds),
+    resumableStatusOptions: listAgentResumableStatusOptions(agentSettingsConfigurationFixture, loadedDraft.resumableStatusIds),
     selectedTeamId: agentSettingsFixture.teamId,
     settings: agentSettingsFixture,
     t: createTranslator('en'),
@@ -143,6 +146,7 @@ export const Defaults: Story = {
     draft: createAgentSettingsDraft(defaultSettings),
     projectBriefTargets: [],
     readyStatusOptions: listAgentReadyStatusOptions(agentSettingsConfigurationFixture, []),
+    resumableStatusOptions: listAgentResumableStatusOptions(agentSettingsConfigurationFixture, []),
     selectedTeamId: defaultSettings.teamId,
     settings: defaultSettings,
   },

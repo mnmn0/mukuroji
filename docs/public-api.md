@@ -150,7 +150,16 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   instance の新しい Run を開始します。body は `runtime`、`agentName`、`instanceId` です。Team の
   Agent settings で `allowTakeoverAfterLeaseExpiry` が `true` の場合だけ成功し、許可されていない
   場合は `403` と `agent_run_takeover_disabled`、lease が切れていない場合は `agent_run_conflict`
-  を返します。
+  を返します。start・resume と同じく、認可の後に呼び出し元の member や Team・Project の権限が
+  変わった場合は確定しません。このとき server は認可をやり直し、権限を失った呼び出し元には新しい
+  request と同じ `403` を、権限を保ったまま member・Team・Project・Enterprise
+  の設定が変わった場合は `409 conflict` を返します。
+- Agent Run の request の `agentName` は文字（任意の言語）、数字、半角スペース、`.`、`_`、`-` だけで、
+  前後にスペースを置けません（例: `Codex/CLI` は不可）。`instanceId` と `agentInstanceId` は前後の空白と
+  制御文字（U+0000〜U+001F、U+007F）を含められません（例: 先頭に空白のある `" laptop"` は不可）。違反は
+  `400 validation_failed` です。OpenAPI ではこの規則を `description` に書き、`pattern` は付けていません。
+  既存 schema への `pattern` 追加は互換性検査で破壊的変更と判定されるうえ、`\p{L}` を解釈できない
+  生成ツールでは有効な名前まで拒否されるためです。
 - 同じメンバーの別 instance は、他 instance の Run を heartbeat・report・finish できません。`active` な
   Run には `agent_run_conflict`、終了済みの Run には `agent_run_not_active` を返します。
 - `PATCH /api/v1/work-items/{workItemId}` とコメントの `POST` は任意の `agentRunId` と
@@ -179,6 +188,8 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
 
 Server は actor、HTTP method、canonical path、idempotency key と request fingerprint を関連付ける。同じ key と同じ fingerprint なら保存済み status/body を返し、`Idempotency-Replayed: true` を付ける。同じ key を異なる query/body へ再利用した場合は `409 idempotency_conflict` を返す。平文 key は監査 log へ保存せず digest 化する。
 
+Actor は API key では key ごと、OAuth access token では発行元の OAuth app ごとに決まる。同じ OAuth app から発行し直した token で同じ `Idempotency-Key` を再送しても replay され、二重に作成されない。
+
 Connector の authorization / reauthorization は内部 operation ID から OAuth state と PKCE verifier を導出し、未失効の同一 flow を再利用する。Response receipt 保存前に process が停止しても、同じ idempotency key の再送で provider authorization flow を増殖させない。
 
 ## Error と rate limit
@@ -191,6 +202,8 @@ Error は `application/problem+json` の `ApiProblem` に統一する。`code` �
 - `RateLimit-Remaining`: window 内の残数
 - `RateLimit-Reset`: quota 回復までの秒数
 - `Retry-After`: `429` または一時的な `503` で待つ秒数
+
+Credential の quota は API key では key ごと、OAuth access token では発行元の OAuth app ごとに数える。同じ app の token はすべて 1 つの quota を共有し、token を発行し直しても残数は戻らない。
 
 Client は `Retry-After` を優先し、値が無い retryable error では full jitter 付き exponential backoff を使う。`401`、`403`、validation error、idempotency conflict は自動 retry しない。
 

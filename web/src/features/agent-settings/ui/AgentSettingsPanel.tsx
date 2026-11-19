@@ -5,6 +5,7 @@ import {
   AGENT_SETTINGS_BRIEFS_MAX_TOTAL_BYTES,
   AGENT_SETTINGS_MAX_PROJECT_BRIEFS,
   AGENT_SETTINGS_MAX_READY_STATUSES,
+  AGENT_SETTINGS_MAX_RESUMABLE_STATUSES,
   type AgentSettings,
 } from '@mukuroji/contracts'
 import { useId } from 'react'
@@ -53,6 +54,8 @@ export type AgentSettingsPanelProps = {
   configurationState: AgentSettingsConfigurationState
   /** Statuses that may be marked as ready. */
   readyStatusOptions: readonly AgentReadyStatusOption[]
+  /** Started statuses that may be marked as resumable. */
+  resumableStatusOptions: readonly AgentReadyStatusOption[]
   /** Custom fields that may hold acceptance criteria. */
   acceptanceCriteriaFieldOptions: readonly AgentAcceptanceCriteriaFieldOption[]
   /** Projects that can carry their own brief. */
@@ -107,6 +110,7 @@ export function AgentSettingsPanel({
   projectBriefTargets,
   readOnly,
   readyStatusOptions,
+  resumableStatusOptions,
   selectedTeamId,
   settings,
   t,
@@ -297,6 +301,48 @@ export function AgentSettingsPanel({
                   {validation.tooManyReadyStatuses ? (
                     <p className="text-xs font-semibold text-[var(--workbench-danger)]">
                       {format('agentSettings.ready.tooMany', { max: AGENT_SETTINGS_MAX_READY_STATUSES })}
+                    </p>
+                  ) : null}
+                </fieldset>
+
+                <fieldset className="grid gap-3" disabled={disabled}>
+                  <legend className="text-base font-semibold text-[var(--workbench-text)]">{t('agentSettings.resumable.title')}</legend>
+                  <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">{t('agentSettings.resumable.help')}</p>
+                  {draft.resumableStatusIds.length === 0 ? (
+                    <p className="workbench-badge justify-self-start">{t('agentSettings.resumable.any')}</p>
+                  ) : null}
+                  {resumableStatusOptions.length === 0 ? (
+                    <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('agentSettings.resumable.empty')}</p>
+                  ) : (
+                    <ul className="grid gap-1 sm:grid-cols-2">
+                      {resumableStatusOptions.map((status) => (
+                        <li key={status.id}>
+                          <label className="flex min-h-[44px] items-center gap-3 text-sm font-semibold text-[var(--workbench-text)]">
+                            <input
+                              checked={draft.resumableStatusIds.includes(status.id)}
+                              className="h-5 w-5 shrink-0 accent-[var(--workbench-primary)]"
+                              type="checkbox"
+                              onChange={(event) => onDraftChange({
+                                ...draft,
+                                resumableStatusIds: toggleAgentReadyStatus(draft.resumableStatusIds, status.id, event.target.checked),
+                              })}
+                            />
+                            <span className="grid min-w-0">
+                              <span className="truncate">{status.name}</span>
+                              {status.missing ? (
+                                <span className="text-xs font-medium text-[var(--workbench-danger)]">{t('agentSettings.resumable.missing')}</span>
+                              ) : status.workflowName ? (
+                                <span className="truncate text-xs font-medium text-[var(--workbench-muted)]">{status.workflowName}</span>
+                              ) : null}
+                            </span>
+                          </label>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {validation.tooManyResumableStatuses ? (
+                    <p className="text-xs font-semibold text-[var(--workbench-danger)]">
+                      {format('agentSettings.ready.tooMany', { max: AGENT_SETTINGS_MAX_RESUMABLE_STATUSES })}
                     </p>
                   ) : null}
                 </fieldset>

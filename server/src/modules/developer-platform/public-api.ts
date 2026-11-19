@@ -55,6 +55,7 @@ import {
   type WorkItemTypeChangeResolution,
   type StartAgentRunResponse,
   type ReportAgentRunResponse,
+  type ResumeAgentRunResponse,
   type TakeOverAgentRunResponse,
   type TeamIssueCommentResponseItem,
 } from '@mukuroji/contracts'
@@ -69,12 +70,14 @@ import {
   readHeartbeatAgentRunRequest,
   readReportAgentRunRequest,
   readStartAgentRunRequest,
+  readResumeAgentRunRequest,
   readTakeOverAgentRunRequest,
   splitAgentRunMutationFence,
   type ValidatedAgentRunFence,
   type ValidatedAgentRunFinish,
   type ValidatedAgentRunReport,
   type ValidatedAgentRunStart,
+  type ValidatedAgentRunResume,
   type ValidatedAgentRunTakeOver,
 } from '../agent-runs'
 import type {
@@ -91,6 +94,7 @@ import type {
   WebhookDeliveryPort,
   WebhookSubscriptionPort,
 } from './application/ports'
+import { readCredentialPrincipalKey } from './credential-principal'
 import { DeveloperPlatformError } from './errors'
 import {
   decidePersonalCredentialIssuance,
@@ -620,6 +624,32 @@ export interface PublicAgentRunService {
     context: PublicMutationContext,
     idempotency: IdempotencyMutationToken,
   ): Promise<TakeOverAgentRunResponse>
+  /**
+   * Revalidates resume permissions before replaying a resume receipt.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item being resumed.
+   * @returns A promise that resolves when the caller may still act on the Work Item.
+   */
+  authorizeResume(credential: AuthenticatedDeveloperCredential, teamId: string, workItemId: string): Promise<void>
+  /**
+   * Starts a new run of the assignee on a started Work Item that no run claims, linked to its newest earlier run.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item being resumed.
+   * @param request - Revision read by the caller, and its runtime, agent name, and instance hash.
+   * @param context - Request and idempotency identifiers.
+   * @param idempotency - Idempotency reservation token.
+   * @returns The new run and the earlier run it resumes.
+   */
+  resume(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    request: ValidatedAgentRunResume,
+    context: PublicMutationContext,
+    idempotency: IdempotencyMutationToken,
+  ): Promise<ResumeAgentRunResponse>
   /**
    * Reads the Team Agent settings that govern runs.
    * @param credential - Authenticated developer credential.
@@ -1312,6 +1342,21 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       body: await agentRuns.report(credential, teamId, runId, reportRequest, context, idempotency, assignedProjectId),
     }), {
       authorizeReplay: () => agentRuns.authorizeReport(credential, teamId, runId, reportRequest.instanceIdHash, assignedProjectId),
+    })
+  })
+
+  router.post('/v1/work-items/:workItemId/agent-runs/resume', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const agentRuns = requireAgentRunService(dependencies)
+    const rawBody = await readJson(c)
+    const input = readResumeAgentRunRequest(rawBody)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    return executeIdempotentJson(c, dependencies, credential, rawBody, async (context, idempotency) => ({
+      status: 201,
+      body: await agentRuns.resume(credential, teamId, workItemId, input, context, idempotency),
+    }), {
+      authorizeReplay: () => agentRuns.authorizeResume(credential, teamId, workItemId),
     })
   })
 
@@ -2684,7 +2729,7 @@ async function authenticatePublicRequest(
   }
   const rateLimit = await dependencies.rateLimits.consumeRateLimit({
     workspaceId: credential.workspaceId,
-    credentialId: credential.credentialId,
+    credentialId: readCredentialPrincipalKey(credential),
     limit: PUBLIC_API_RATE_LIMIT,
     windowSeconds: 60,
   })
@@ -2916,7 +2961,7 @@ async function executeIdempotentJson(
 ) {
   return executeIdempotent(c, dependencies, {
     workspaceId: credential.workspaceId,
-    credentialId: credential.credentialId,
+    credentialId: readCredentialPrincipalKey(credential),
   }, body, operation, options)
 }
 
