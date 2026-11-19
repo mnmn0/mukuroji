@@ -481,6 +481,12 @@ function createAuditContext(
   })
 }
 
+/**
+ * Creates a File whose first version is uploaded, scanned clean, and completed.
+ *
+ * @param upload - Media type and file name of the first version.
+ * @returns The test client state with the completed upload session.
+ */
 async function createAvailableFile(
   upload: { contentType: string; fileName: string } = { contentType: 'image/png', fileName: 'review.png' },
 ) {
