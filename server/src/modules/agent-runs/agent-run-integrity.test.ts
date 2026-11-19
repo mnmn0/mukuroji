@@ -302,8 +302,8 @@ describe('checkAgentRunPartition', () => {
   })
 
   test('detects malformed and unrecognized rows', () => {
-    const claimKey = recordKeyWith(healthyRows(), 'agent-run-revoked#')
-    const malformed = replaceRow(healthyRows(), claimKey, (row) => ({ ...row, assigneeUserId: 'someone-else' }))
+    const revocationKey = recordKeyWith(healthyRows(), 'agent-run-revoked#')
+    const malformed = replaceRow(healthyRows(), revocationKey, (row) => ({ ...row, assigneeUserId: 'someone-else' }))
     expect(codes(malformed)).toEqual(['AGENT_RUN_ROW_MALFORMED'])
     expect(codes([...healthyRows(), { directoryTeamId: partition, recordKey: 'something-else' }])).toEqual(['AGENT_RUN_ROW_UNRECOGNIZED'])
   })
@@ -417,7 +417,9 @@ describe('runAgentRunsIntegrityCheck', () => {
   })
 
   test('reports a partition key it cannot resolve', async () => {
-    const { client } = createFakeClient({ 'no-team-separator': [{ directoryTeamId: 'no-team-separator', recordKey: 'x' }] })
+    const { client } = createFakeClient({
+      'no-team-separator': [{ directoryTeamId: 'no-team-separator', recordKey: 'x' }, { directoryTeamId: 'no-team-separator', recordKey: 'y' }],
+    })
     const evidence = await runAgentRunsIntegrityCheck({ client, tableName: 'agent-runs', bounds, correlationId: 'corr-5', now })
     expect(evidence.failures).toEqual([{ code: 'AGENT_RUN_PARTITION_UNRESOLVED', count: 1, samples: [{}] }])
   })

@@ -721,7 +721,7 @@ class ReadBudget {
  * @param input.client - DynamoDB client.
  * @param input.tableName - Table name.
  * @param input.budget - Shared read budget.
- * @param input.findings - Receives a finding for each partition key that cannot be resolved.
+ * @param input.findings - Receives one finding for each partition key that cannot be resolved.
  * @returns Sorted Teams, or undefined when the budget stopped the Scan.
  */
 async function discoverTeams(input: {
@@ -744,15 +744,15 @@ async function discoverTeams(input: {
   })))
   if (items === undefined) return undefined
   const partitions = new Set<string>()
+  const unresolved = new Set<unknown>()
   for (const item of items) {
     const partition = item.directoryTeamId
     if (partition === triageSweepResumeKey.directoryTeamId) continue
-    if (typeof partition !== 'string' || parseAgentRunPartition(partition) === undefined) {
-      input.findings.push({ code: 'AGENT_RUN_PARTITION_UNRESOLVED', sample: {} })
-      continue
-    }
-    partitions.add(partition)
+    if (typeof partition !== 'string' || parseAgentRunPartition(partition) === undefined) unresolved.add(partition)
+    else partitions.add(partition)
   }
+  // One finding per partition key, not per row; the key itself is not reported.
+  for (const _partition of unresolved) input.findings.push({ code: 'AGENT_RUN_PARTITION_UNRESOLVED', sample: {} })
   return [...partitions].sort().flatMap((partition) => parseAgentRunPartition(partition) ?? [])
 }
 
