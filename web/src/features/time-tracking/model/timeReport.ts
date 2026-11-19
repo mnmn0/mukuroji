@@ -19,10 +19,15 @@ export type TimeBudgetComparison = {
   budget: TimeBudget
   /** Actual cost in the budget currency, in minor units. */
   actualMinor: number
-  /** Budget left, in minor units; negative when overspent. */
-  remainingMinor: number
-  /** Share of the budget used, as a whole percentage; undefined for a zero budget. */
+  /** Budget left, in minor units; negative when overspent. Undefined when costs in other currencies exist. */
+  remainingMinor?: number
+  /**
+   * Share of the budget used, as a whole percentage; undefined for a zero budget or when costs in
+   * other currencies exist.
+   */
   usedPercent?: number
+  /** Actual costs in currencies other than the budget's, which are not converted. */
+  otherCurrencyCosts: Readonly<Record<string, number>>
   /** Minutes recorded against the scope in the report period. */
   actualMinutes: number
 }
@@ -156,11 +161,16 @@ export function compareTimeBudget(summary: TimeTrackingSummary, projectId?: stri
   const group = projectId === undefined ? undefined : summary.groups.find((candidate) => candidate.key === projectId)
   const costs = projectId === undefined ? summary.totalActualCostByCurrency : group?.actualCostByCurrency
   const actualMinor = costs?.[budget.currency] ?? 0
+  const otherCurrencyCosts = Object.fromEntries(Object.entries(costs ?? {})
+    .filter(([currency, amount]) => currency !== budget.currency && amount !== 0))
+  // Costs in another currency are not converted, so the remaining amount would overstate what is left.
+  const isComplete = Object.keys(otherCurrencyCosts).length === 0
   return {
     budget,
     actualMinor,
-    remainingMinor: budget.amountMinor - actualMinor,
-    ...(budget.amountMinor > 0 ? { usedPercent: Math.round((actualMinor / budget.amountMinor) * 100) } : {}),
+    otherCurrencyCosts,
+    ...(isComplete ? { remainingMinor: budget.amountMinor - actualMinor } : {}),
+    ...(isComplete && budget.amountMinor > 0 ? { usedPercent: Math.round((actualMinor / budget.amountMinor) * 100) } : {}),
     actualMinutes: projectId === undefined ? summary.totalMinutes : group?.minutes ?? 0,
   }
 }

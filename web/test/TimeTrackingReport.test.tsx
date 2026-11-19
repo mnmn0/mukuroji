@@ -110,6 +110,29 @@ describe('time report model', () => {
     expect(compareTimeBudget(timeReportFixtureManagerSummary)).toBeUndefined()
   })
 
+  test('withholds the remaining amount when costs in another currency are not converted', () => {
+    const mixed = { ...timeReportFixtureBudgetSummary, totalActualCostByCurrency: { JPY: 110_000, USD: 2_500 } }
+    const comparison = compareTimeBudget(mixed)
+    expect(comparison).toMatchObject({ actualMinor: 110_000, otherCurrencyCosts: { USD: 2_500 } })
+    expect(comparison?.remainingMinor).toBeUndefined()
+    expect(comparison?.usedPercent).toBeUndefined()
+    const markup = renderToStaticMarkup(
+      <TimeBudgetPanel
+        defaultCurrency="USD"
+        locale="en"
+        onChangeScope={noop}
+        onRetry={noop}
+        onSave={async () => undefined}
+        onUseBudgetPeriod={noop}
+        projects={timeReportFixtureProjects}
+        scope={{ scopeType: 'team' }}
+        summary={mixed}
+        t={t}
+      />,
+    )
+    expect(markup).toContain('Actual costs in other currencies ($25.00) are not converted')
+  })
+
   test('links the report view with its period and grouping', () => {
     expect(createTeamTimeTrackingPath('core-team', 'report', undefined, { from: '2026-11-01', to: '2026-11-30', groupBy: 'project' }))
       .toBe('/teams/core-team/timesheet?view=report&from=2026-11-01&to=2026-11-30&groupBy=project')

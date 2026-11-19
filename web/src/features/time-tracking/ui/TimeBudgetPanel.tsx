@@ -4,6 +4,7 @@ import type { Locale } from '../../../shared/i18n/i18n'
 import type { SaveTimeBudgetInput, TimeReportBudgetScope } from '../api/timeReport'
 import {
   compareTimeBudget,
+  formatCostsByCurrency,
   formatMinorAmount,
   isTimeReportRangeOrdered,
   parseMajorAmount,
@@ -176,8 +177,8 @@ export function TimeBudgetPanel({
             </div>
             <div className="grid gap-0.5">
               <dt className="text-xs font-semibold text-[var(--workbench-muted)]">{t('timeTracking.budget.remaining')}</dt>
-              <dd className={`font-semibold tabular-nums ${comparison.remainingMinor < 0 ? 'text-fg-red-700' : 'text-[var(--workbench-text)]'}`}>
-                {formatMinorAmount(comparison.remainingMinor, comparison.budget.currency, locale)}
+              <dd className={`font-semibold tabular-nums ${(comparison.remainingMinor ?? 0) < 0 ? 'text-fg-red-700' : 'text-[var(--workbench-text)]'}`}>
+                {comparison.remainingMinor === undefined ? '—' : formatMinorAmount(comparison.remainingMinor, comparison.budget.currency, locale)}
               </dd>
             </div>
             <div className="grid gap-0.5">
@@ -205,6 +206,11 @@ export function TimeBudgetPanel({
                 ) : null}
               </dd>
             </div>
+            {Object.keys(comparison.otherCurrencyCosts).length > 0 ? (
+              <p className="col-span-2 text-sm font-semibold text-fg-amber-800 sm:col-span-4" role="note">
+                {interpolate(t('timeTracking.budget.otherCurrencies'), { amounts: formatCostsByCurrency(comparison.otherCurrencyCosts, locale) })}
+              </p>
+            ) : null}
             <p className="col-span-2 text-xs text-[var(--workbench-muted)] sm:col-span-4">{t('timeTracking.budget.actualNote')}</p>
           </dl>
         ) : (

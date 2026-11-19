@@ -2,10 +2,11 @@ import type { TimeTrackingGroupBy } from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
 import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
-import { downloadTimeTrackingCsv, saveTimeBudget, type TimeReportBudgetScope } from '../api/timeReport'
+import { downloadTimeTrackingCsv, type TimeReportBudgetScope } from '../api/timeReport'
 import { TimeTrackingApiError } from '../api/timeTrackingRequest'
 import { createTimeReportFileName, isTimeReportRangeOrdered, type TimeReportRange } from '../model/timeReport'
 import { resolveBrowserTimeZone } from '../model/timePeriod'
+import { useSaveTimeBudget } from '../mutations/useSaveTimeBudget'
 import { useTimeTrackingSummary } from '../queries/useTimeTrackingSummary'
 import { TimeBudgetPanel, type TimeBudgetProjectOption } from './TimeBudgetPanel'
 import { TimeReport, type TimeReportLabels } from './TimeReport'
@@ -78,6 +79,7 @@ export function TimeReportContainer({
     [budgetScope, range, timeZone],
   )
   const budgetReport = useTimeTrackingSummary(accessToken, teamId, budgetInput, ordered && canSeeCosts)
+  const saveBudget = useSaveTimeBudget(accessToken, teamId)
 
   return (
     <div className="grid min-w-0 gap-6">
@@ -108,15 +110,7 @@ export function TimeReportContainer({
           locale={locale}
           onChangeScope={setBudgetScope}
           onRetry={() => { void budgetReport.mutate().catch(() => undefined) }}
-          onSave={async (input) => {
-            if (!accessToken) throw new TimeTrackingApiError(401, 'Sign in again to save the budget.')
-            try {
-              return await saveTimeBudget(accessToken, teamId, budgetScope, input)
-            } finally {
-              // A conflict means someone else saved first, so the latest budget is read either way.
-              await budgetReport.mutate().catch(() => undefined)
-            }
-          }}
+          onSave={(input) => saveBudget(budgetScope, input)}
           onUseBudgetPeriod={(next) => onChange(next, groupBy)}
           projects={projects}
           scope={budgetScope}
