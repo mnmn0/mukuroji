@@ -1,4 +1,4 @@
-# 0011. Planning の revision を Work Item の更新と Planning の変更で数え分ける
+# 0012. Planning の revision を Work Item の更新と Planning の変更で数え分ける
 
 - 状態: 提案
 - 日付: 2026-11-20

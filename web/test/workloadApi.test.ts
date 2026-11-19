@@ -6,6 +6,7 @@ import {
   saveWorkloadProfile,
   saveWorkloadTimeOff,
   updateWorkloadAssignment,
+  updateWorkloadRequest,
 } from '../src/workload/api'
 
 const originalFetch = globalThis.fetch
@@ -71,6 +72,11 @@ describe('workload API', () => {
       expectedRevision: 1,
       expectedTeamRevision: 8,
     })
+    await updateWorkloadRequest('token', 'team/1', 'request/1', {
+      status: 'canceled',
+      expectedRevision: 2,
+      expectedTeamRevision: 9,
+    })
 
     expect(requests.map((request) => [request.method, request.url])).toEqual([
       ['PUT', '/api/teams/team%2F1/workload/profiles/member%2F1'],
@@ -78,7 +84,13 @@ describe('workload API', () => {
       ['POST', '/api/teams/team%2F1/workload/requests'],
       ['POST', '/api/teams/team%2F1/workload/assignments'],
       ['PATCH', '/api/teams/team%2F1/workload/assignments/assignment%2F1'],
+      ['PATCH', '/api/teams/team%2F1/workload/requests/request%2F1'],
     ])
+    expect(JSON.parse(requests[5]?.body ?? '{}')).toEqual({
+      status: 'canceled',
+      expectedRevision: 2,
+      expectedTeamRevision: 9,
+    })
     expect(JSON.parse(requests[4]?.body ?? '{}')).toMatchObject({
       expectedRevision: 1,
       expectedTeamRevision: 8,
