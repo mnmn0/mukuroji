@@ -10,6 +10,9 @@ const LAMBDA_FUNCTION_RESOURCE_TYPE = 'AWS::Lambda::Function';
 /** Construct ID of the log group added next to a Lambda function that has none. */
 const DEFAULT_LAMBDA_LOG_GROUP_ID = 'DefaultLogGroup';
 
+/** Construct ID of the log group CDK creates under `useCdkManagedLogGroup`. */
+const CDK_MANAGED_LAMBDA_LOG_GROUP_ID = 'LogGroup';
+
 /** Retention applied to Lambda log groups that no subsystem declared explicitly. */
 const DEFAULT_LAMBDA_LOG_RETENTION = logs.RetentionDays.THREE_MONTHS;
 
@@ -52,15 +55,27 @@ class LambdaLogRetentionAspect implements cdk.IAspect {
     if (
       !(node instanceof cdk.CfnResource)
       || node.cfnResourceType !== LAMBDA_FUNCTION_RESOURCE_TYPE
-      || hasExplicitLogGroup(node)
     ) {
       return;
     }
     const scope = node.node.scope;
-    if (
-      scope === undefined
-      || scope.node.tryFindChild(DEFAULT_LAMBDA_LOG_GROUP_ID) !== undefined
-    ) {
+    if (scope === undefined) {
+      return;
+    }
+    const cdkManagedLogGroup = scope.node.tryFindChild(CDK_MANAGED_LAMBDA_LOG_GROUP_ID);
+    if (cdkManagedLogGroup instanceof logs.LogGroup) {
+      // `@aws-cdk/aws-lambda:useCdkManagedLogGroup` already created `/aws/lambda/<name>`
+      // with the two-year default, so only its retention needs to be bounded.
+      const cfnLogGroup = cdkManagedLogGroup.node.defaultChild as logs.CfnLogGroup;
+      cfnLogGroup.retentionInDays = DEFAULT_LAMBDA_LOG_RETENTION;
+      cfnLogGroup.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
+
+      return;
+    }
+    if (hasExplicitLogGroup(node)) {
+      return;
+    }
+    if (scope.node.tryFindChild(DEFAULT_LAMBDA_LOG_GROUP_ID) !== undefined) {
       return;
     }
     const logGroup = new logs.LogGroup(scope, DEFAULT_LAMBDA_LOG_GROUP_ID, {

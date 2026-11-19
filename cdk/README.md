@@ -596,10 +596,11 @@ DLQ の envelope は署名 timestamp が5分で失効するため、そのまま
 
 `configureStatefulResourceGuards`（`lib/aspects/stateful-resource-guards.ts`）が stack 全体に次を適用します。
 
-- `LoggingConfig.LogGroup` を持たない Lambda（CDK 内部の custom resource handler を含む）には、`DefaultLogGroup` という retained log group を作って割り当て、保持期間を90日にします。Subsystem が明示した log group（restore drill の365日など）はそのまま使います。
+- `cdk.json` の `@aws-cdk/aws-lambda:useCdkManagedLogGroup` で CDK が作る `/aws/lambda/<function name>` は、既定の2年保持を90日に変えます。
+- それ以外で `LoggingConfig.LogGroup` を持たない Lambda（CDK 内部の custom resource handler を含む）には、`DefaultLogGroup` という retained log group を作って割り当て、保持期間を90日にします。Subsystem が明示した log group（restore drill の365日など）はそのまま使います。
 - `Retain` の DynamoDB table すべてに `DeletionProtectionEnabled: true` を付け、console や CLI からの `DeleteTable` も拒否します。
 
-`stateful-resource-guards.suite.ts` は、保持期間付きの retained log group を持たない Lambda と、削除保護のない retained table があると失敗します。
+`stateful-resource-guards.suite.ts` は、`cdk.json` の feature flag あり・なしの両方の template で、保持期間が1年以内の retained log group を持たない Lambda、1年を超えて保持する log group、削除保護のない retained table があると失敗します。
 
 この変更より前に deploy した環境では、Lambda が自動で作った無期限の `/aws/lambda/<function name>` が残ります。新しい log group へ切り替わった後、次で古い log group に保持期間を付けてください（削除する場合は調査に必要な期間が過ぎてから行います）。
 
