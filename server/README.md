@@ -231,6 +231,7 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `/api/notifications`, `/api/notifications/unread-count`, `/api/notification-preferences`
 - `GET /api/push/config`, `PUT /api/push-subscriptions`, `DELETE /api/push-subscriptions`
 - `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs`, `POST /api/teams/{teamId}/agent-runs/{runId}/release`
+- `GET /api/teams/{teamId}/agent-runs/analytics`
 - `GET /api/teams/{teamId}/agent-settings`, `PUT /api/teams/{teamId}/agent-settings`
 - `/api/request-forms`, `/api/request-queue`, `/api/request-submissions/{submissionId}`
 - `/api/request-intake/{token}`, `GET /api/request-threads/{threadToken}`, `/api/request-threads/{threadToken}/replies`

@@ -2951,6 +2951,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
             'schemaVersion',
             'revision',
             'updatedAt',
+            'sourceRevisionCount',
           ],
         },
         'ForAllValues:StringLike': {

@@ -1,4 +1,4 @@
-# 0012. AWS アカウント全体の月次 Budget と cost allocation tag で費用を見える化する
+# 0013. AWS アカウント全体の月次 Budget と cost allocation tag で費用を見える化する
 
 - 状態: 提案
 - 日付: 2026-11-20
