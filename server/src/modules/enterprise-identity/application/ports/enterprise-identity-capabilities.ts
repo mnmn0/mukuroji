@@ -10,6 +10,7 @@ import type {
   EnterpriseProvisioningInput,
   EnterpriseProvisioningPreview,
   EnterpriseProvisioningRun,
+  EnterpriseRoleAssignment,
   EnterpriseScimCredential,
   EnterpriseScimGroup,
   EnterpriseScimGroupInput,
@@ -18,6 +19,7 @@ import type {
   EnterpriseSecurityPolicy,
   EnterpriseServiceAccount,
   EnterpriseVerifiedDomain,
+  EnterprisePermissionId,
 } from '@mukuroji/contracts'
 import type { MutationAuditContext } from '../../../audit'
 import type {
@@ -132,11 +134,13 @@ export interface EnterpriseAuthorizationAdministrationCapability {
    *
    * @param role - Validated custom role.
    * @param auditContext - Optional immutable audit context.
+   * @param options - Conditions checked with the update.
    * @returns The persisted role.
    */
   putCustomRole(
     role: EnterpriseCustomRole,
     auditContext?: MutationAuditContext,
+    options?: EnterpriseCustomRoleUpdateOptions,
   ): Promise<EnterpriseCustomRole>
   /**
    * Deletes an unused custom role.
@@ -178,6 +182,32 @@ export interface EnterpriseAuthorizationAdministrationCapability {
     mappingId: string,
     expectedRevision: number,
     auditContext?: MutationAuditContext,
+  ): Promise<void>
+  /**
+   * Assigns a role directly to one Workspace member.
+   *
+   * @param assignment - Validated direct member assignment.
+   * @param auditContext - Optional immutable audit context.
+   * @param options - Conditions checked with the assignment.
+   * @returns The persisted assignment.
+   */
+  putMemberRoleAssignment(
+    assignment: EnterpriseRoleAssignment,
+    auditContext?: MutationAuditContext,
+    options?: EnterpriseMemberRoleAssignmentCreateOptions,
+  ): Promise<EnterpriseRoleAssignment>
+  /**
+   * Removes a direct member role assignment.
+   *
+   * @param assignment - Direct member assignment read by the caller.
+   * @param auditContext - Optional immutable audit context.
+   * @param options - Whether the member must keep another direct assignment afterwards.
+   * @returns A promise that resolves after removal.
+   */
+  deleteMemberRoleAssignment(
+    assignment: EnterpriseRoleAssignment,
+    auditContext?: MutationAuditContext,
+    options?: EnterpriseMemberRoleAssignmentDeleteOptions,
   ): Promise<void>
 }
 
@@ -701,6 +731,8 @@ export function createEnterpriseIdentityCapabilities(
       deleteCustomRole: client.deleteCustomRole.bind(client),
       putGroupMapping: client.putGroupMapping.bind(client),
       deleteGroupMapping: client.deleteGroupMapping.bind(client),
+      putMemberRoleAssignment: client.putMemberRoleAssignment.bind(client),
+      deleteMemberRoleAssignment: client.deleteMemberRoleAssignment.bind(client),
     }),
     scimDirectory: Object.freeze({
       listScimUsers: client.listScimUsers.bind(client),
@@ -749,4 +781,37 @@ export function createEnterpriseIdentityCapabilities(
       deactivateBreakGlass: client.deactivateBreakGlass.bind(client),
     }),
   })
+}
+
+/** Conditions checked atomically when a direct member assignment is removed. */
+export type EnterpriseMemberRoleAssignmentDeleteOptions = {
+  /**
+   * Requires the member to keep another direct assignment, so the removal cannot hand back the
+   * member's Workspace role and Project memberships.
+   */
+  requireRemainingAssignment?: boolean
+  /** Permissions that the removed role must not hold, read from the state being written. */
+  forbiddenPermissions?: readonly EnterprisePermissionId[]
+}
+
+/** Conditions checked atomically when a direct member assignment is created. */
+export type EnterpriseMemberRoleAssignmentCreateOptions = {
+  /**
+   * Effective permissions of the caller. The assigned role, read from the state being written,
+   * must not hold any permission outside them.
+   */
+  callerPermissions?: readonly EnterprisePermissionId[]
+  /** Permissions that the assigned role must not hold, read from the state being written. */
+  forbiddenPermissions?: readonly EnterprisePermissionId[]
+  /** Requires the role, read from the state being written, to be assignable to a guest. */
+  requireGuestAssignable?: boolean
+}
+
+/** Conditions checked atomically when a custom role is saved. */
+export type EnterpriseCustomRoleUpdateOptions = {
+  /**
+   * Permissions that the role must not newly gain while a direct member assignment references it, so
+   * editing a role cannot grant what assigning it directly would be refused.
+   */
+  forbiddenMemberAssignmentPermissions?: readonly EnterprisePermissionId[]
 }

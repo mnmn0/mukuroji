@@ -40,6 +40,11 @@ export const enterpriseSecuritySnapshotFixture = {
       'workspace:member',
       'custom:security-reviewer',
     ],
+    members: {
+      project: ['project:manager', 'project:member', 'project:viewer'],
+      team: ['team:manager', 'team:member'],
+      workspace: ['workspace:portfolio-viewer', 'workspace:auditor'],
+    },
   },
   breakGlassAdministrators: [
     {
@@ -121,6 +126,20 @@ export const enterpriseSecuritySnapshotFixture = {
       scopeType: 'team',
       version: 1,
     },
+  ],
+  memberRoleAssignments: [
+    {
+      id: 'role-assignment-pmo',
+      memberKey: 'pmo@example.com',
+      roleId: 'workspace:portfolio-viewer',
+      scopeId: 'workspace-demo',
+      scopeType: 'workspace',
+    },
+  ],
+  members: [
+    { email: 'pmo@example.com', memberKey: 'pmo@example.com', name: 'PMO Lead', role: 'member' },
+    { email: 'auditor@example.com', memberKey: 'auditor@example.com', role: 'member' },
+    { email: 'guest@partner.example', memberKey: 'guest@partner.example', role: 'guest' },
   ],
   permissions: [
     {
@@ -283,6 +302,26 @@ export const enterpriseSecuritySnapshotFixture = {
       id: 'project:viewer',
       kind: 'built-in',
       name: 'Project viewer',
+      permissionIds: [],
+      version: 1,
+    },
+    {
+      assignmentCount: 1,
+      description: 'Reads every Team and Project without editing.',
+      guestAssignable: false,
+      id: 'workspace:portfolio-viewer',
+      kind: 'built-in',
+      name: 'All Projects viewer',
+      permissionIds: [],
+      version: 1,
+    },
+    {
+      assignmentCount: 0,
+      description: 'Reads the audit log.',
+      guestAssignable: false,
+      id: 'workspace:auditor',
+      kind: 'built-in',
+      name: 'Auditor',
       permissionIds: [],
       version: 1,
     },

@@ -38,6 +38,8 @@ import {
 } from '@mukuroji/contracts'
 import {
   createMutationAuditEventPut,
+  createWorkspaceMemberAuditEntityId,
+  WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV,
   type MutationAuditContext,
 } from '../audit'
 import type {
@@ -56,6 +58,9 @@ import {
 import type {
   EnterpriseIdentityApplicationCapability,
   EnterpriseIdentityReadCapability,
+  EnterpriseCustomRoleUpdateOptions,
+  EnterpriseMemberRoleAssignmentCreateOptions,
+  EnterpriseMemberRoleAssignmentDeleteOptions,
 } from './application/ports/enterprise-identity-capabilities'
 import {
   ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_PROVIDER,
@@ -96,6 +101,7 @@ import {
   evaluateEnterpriseAccess,
   ipMatchesCidr,
   isEnterpriseRoleCompatibleWithScope,
+  isEnterpriseRoleGuestAssignable,
   resolveEnterpriseDirectoryPrincipal,
   resolveEnterpriseRolePermissions,
   resolveRoutePermission,
@@ -487,6 +493,18 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
   ): Promise<void>
   /** Domain claim の global uniqueness pointer を読みます。 */
   protected abstract findDomainWorkspace(domain: string): Promise<string | undefined>
+
+  /**
+   * Creates the Workspace Audit pseudonym that names a member in audit metadata.
+   *
+   * @param workspaceId - Workspace that owns the member.
+   * @param memberId - Private member key.
+   * @returns The pseudonym, or undefined when this client records no audit events.
+   */
+  protected abstract createMemberAuditPseudonym(
+    workspaceId: string,
+    memberId: string,
+  ): string | undefined
   /** Inject された wall clock の現在時刻を返します。 */
   protected currentTime() {
     return this.clock()
@@ -731,8 +749,19 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
     })
   }
 
-  /** Custom role を安全に upsert します。 */
-  async putCustomRole(role: EnterpriseCustomRole, auditContext?: MutationAuditContext) {
+  /**
+   * Custom role を安全に upsert します。
+   *
+   * @param role - Validated custom role.
+   * @param auditContext - Audit context of the request.
+   * @param options - Permissions the role must not gain while a direct member assignment uses it.
+   * @returns The persisted role.
+   */
+  async putCustomRole(
+    role: EnterpriseCustomRole,
+    auditContext?: MutationAuditContext,
+    options: EnterpriseCustomRoleUpdateOptions = {},
+  ) {
     if (!role.roleId.startsWith('custom:') || role.permissions.length === 0) {
       throw new EnterpriseIdentityError(
         400,
@@ -766,6 +795,24 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
           409,
           'EnterpriseCustomRoleNameConflict',
           'Custom role name must be unique in the Workspace.',
+        )
+      }
+      // Only permissions the edit adds are protected, so admins can still maintain the role.
+      if (
+        role.permissions.some((permission) =>
+          options.forbiddenMemberAssignmentPermissions?.includes(permission) &&
+          !existing?.permissions.includes(permission)
+        ) &&
+        state.roleAssignments.some((assignment) =>
+          assignment.roleId === role.roleId &&
+          assignment.principalKind === 'member' &&
+          assignment.source === 'direct'
+        )
+      ) {
+        throw new EnterpriseIdentityError(
+          403,
+          'EnterpriseRoleAssignmentAdminProtected',
+          'Only an owner can add administrative permissions to a role assigned to members.',
         )
       }
       const normalizedRole = {
@@ -923,6 +970,180 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
         state,
         [mapping],
         this.clock().toISOString(),
+      )
+    })
+  }
+
+  /**
+   * Assigns a role directly to one Workspace member and records `role-assignment.created`.
+   *
+   * @remarks
+   * The caller validates the member, the caller's permission ceiling, and the scope. Assigning
+   * the same role at the same scope twice is rejected so a retry cannot hide a duplicate.
+   * @param assignment - Direct member assignment to store.
+   * @param auditContext - Audit context of the request.
+   * @param options - Permissions the assigned role must not hold in the state being written.
+   * @returns The stored assignment.
+   */
+  async putMemberRoleAssignment(
+    assignment: EnterpriseRoleAssignment,
+    auditContext?: MutationAuditContext,
+    options: EnterpriseMemberRoleAssignmentCreateOptions = {},
+  ) {
+    if (assignment.principalKind !== 'member' || assignment.source !== 'direct') {
+      throw new EnterpriseIdentityError(
+        400,
+        'EnterpriseRoleAssignmentInvalid',
+        'Only direct member role assignments can be created here.',
+      )
+    }
+    return this.mutate(assignment.workspaceId, {
+      context: auditContext,
+      eventType: 'role-assignment.created',
+      action: 'created',
+      entityId: assignment.assignmentId,
+      metadata: toRoleAssignmentAuditMetadata(
+        assignment,
+        this.createMemberAuditPseudonym(assignment.workspaceId, assignment.principalId),
+      ),
+    }, (state) => {
+      if (!roleExists(state, assignment.roleId)) {
+        throw new EnterpriseIdentityError(
+          400,
+          'EnterpriseRoleNotFound',
+          'Role assignment references an unknown role.',
+        )
+      }
+      const rolePermissions = resolveEnterpriseRolePermissions(
+        state.customRoles,
+        assignment.roleId,
+      )
+      const callerPermissions = options.callerPermissions
+      if (
+        callerPermissions &&
+        rolePermissions.some((permission) => !callerPermissions.includes(permission))
+      ) {
+        throw new EnterpriseIdentityError(
+          403,
+          'EnterpriseRoleAssignmentDenied',
+          'The selected role exceeds your effective permissions or is invalid for this scope.',
+        )
+      }
+      if (
+        options.requireGuestAssignable &&
+        !isEnterpriseRoleGuestAssignable(state.customRoles, assignment.roleId)
+      ) {
+        throw new EnterpriseIdentityError(
+          409,
+          'EnterpriseRoleNotGuestAssignable',
+          'The selected role cannot be assigned to a guest.',
+        )
+      }
+      if (rolePermissions.some((permission) => options.forbiddenPermissions?.includes(permission))) {
+        throw new EnterpriseIdentityError(
+          403,
+          'EnterpriseRoleAssignmentAdminProtected',
+          'Only an owner can assign or remove a role with administrative permissions.',
+        )
+      }
+      const existing = state.roleAssignments.find((candidate) =>
+        candidate.assignmentId === assignment.assignmentId
+      )
+      if (existing) {
+        if (!isSameRoleAssignment(existing, assignment)) {
+          throw new EnterpriseIdentityError(
+            409,
+            'EnterpriseIdempotencyConflict',
+            'Role assignment idempotency key was already used with a different payload.',
+          )
+        }
+        return existing
+      }
+      if (state.roleAssignments.some((candidate) =>
+        candidate.principalKind === 'member' &&
+        candidate.principalId === assignment.principalId &&
+        candidate.roleId === assignment.roleId &&
+        candidate.scope.kind === assignment.scope.kind &&
+        candidate.scope.targetId === assignment.scope.targetId &&
+        candidate.scope.parentTeamId === assignment.scope.parentTeamId
+      )) {
+        throw new EnterpriseIdentityError(
+          409,
+          'EnterpriseRoleAssignmentDuplicate',
+          'The member already has this role at the selected scope.',
+        )
+      }
+      state.roleAssignments.push(assignment)
+      return assignment
+    })
+  }
+
+  /**
+   * Removes a direct member role assignment and records `role-assignment.deleted`.
+   *
+   * @remarks
+   * The caller passes the assignment it read so the audit event names the member, role, and
+   * scope. The assignment is removed only while the stored copy still matches it. With
+   * `requireRemainingAssignment`, the removal is refused when it would leave the member with no
+   * direct assignment, checked against the same state that the write is conditioned on.
+   * @param assignment - Direct member assignment the caller read.
+   * @param auditContext - Audit context of the request.
+   * @param options - Conditions checked with the removal.
+   */
+  async deleteMemberRoleAssignment(
+    assignment: EnterpriseRoleAssignment,
+    auditContext?: MutationAuditContext,
+    options: EnterpriseMemberRoleAssignmentDeleteOptions = {},
+  ) {
+    await this.mutate(assignment.workspaceId, {
+      context: auditContext,
+      eventType: 'role-assignment.deleted',
+      action: 'deleted',
+      entityId: assignment.assignmentId,
+      metadata: toRoleAssignmentAuditMetadata(
+        assignment,
+        this.createMemberAuditPseudonym(assignment.workspaceId, assignment.principalId),
+      ),
+    }, (state) => {
+      const stored = state.roleAssignments.find((candidate) =>
+        candidate.assignmentId === assignment.assignmentId &&
+        candidate.principalKind === 'member' &&
+        candidate.source === 'direct'
+      )
+      if (!stored || !isSameRoleAssignment(stored, assignment)) {
+        throw new EnterpriseIdentityError(
+          404,
+          'EnterpriseRoleAssignmentNotFound',
+          'Role assignment was not found.',
+        )
+      }
+      if (
+        resolveEnterpriseRolePermissions(state.customRoles, stored.roleId)
+          .some((permission) => options.forbiddenPermissions?.includes(permission))
+      ) {
+        throw new EnterpriseIdentityError(
+          403,
+          'EnterpriseRoleAssignmentAdminProtected',
+          'Only an owner can assign or remove a role with administrative permissions.',
+        )
+      }
+      if (
+        options.requireRemainingAssignment &&
+        !state.roleAssignments.some((candidate) =>
+          candidate.assignmentId !== assignment.assignmentId &&
+          candidate.principalKind === 'member' &&
+          candidate.source === 'direct' &&
+          candidate.principalId === assignment.principalId
+        )
+      ) {
+        throw new EnterpriseIdentityError(
+          403,
+          'EnterpriseRoleAssignmentRestoreDenied',
+          'Removing the last role assignment would give the member permissions that exceed yours.',
+        )
+      }
+      state.roleAssignments = state.roleAssignments.filter((candidate) =>
+        candidate.assignmentId !== assignment.assignmentId
       )
     })
   }
@@ -2935,6 +3156,15 @@ export class InMemoryEnterpriseIdentityClient extends EnterpriseIdentityService 
   protected async findDomainWorkspace(domain: string) {
     return this.domainOwners.get(domain)
   }
+
+  /**
+   * Returns no pseudonym because the memory client records no audit events.
+   *
+   * @returns Always undefined.
+   */
+  protected createMemberAuditPseudonym() {
+    return undefined
+  }
 }
 
 /**
@@ -2945,6 +3175,8 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
   private readonly tableName: string
   /** Immutable audit event table 名です。 */
   private readonly auditTableName?: string
+  /** Workspace Audit pseudonym key, read from the environment when the client is built. */
+  private readonly auditPseudonymKey?: string
   /** DynamoDB document client です。 */
   private readonly documentClient: DynamoDBDocumentClient
   /** Immutable generation staging と atomic checkpoint adapter です。 */
@@ -2978,6 +3210,38 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
     this.documentClient = documentClient
     this.generationCommitter = composedAdapters.generationCommitter
     this.auditTableName = auditTableName?.trim() || undefined
+    this.auditPseudonymKey =
+      loadServerConfig().environment[WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV] || undefined
+  }
+
+  /**
+   * Creates the Workspace Audit member pseudonym, failing closed while audit is on.
+   *
+   * @param workspaceId - Workspace that owns the member.
+   * @param memberId - Private member key.
+   * @returns The pseudonym, or undefined when no audit table is configured.
+   * @throws EnterpriseIdentityError when audit is on and the pseudonym key is missing or invalid.
+   */
+  protected createMemberAuditPseudonym(workspaceId: string, memberId: string) {
+    if (!this.auditTableName) return undefined
+    if (!this.auditPseudonymKey) {
+      throw new EnterpriseIdentityError(
+        500,
+        'EnterpriseAuditPseudonymKeyMissing',
+        'Workspace audit pseudonym key is required.',
+      )
+    }
+    try {
+      return createWorkspaceMemberAuditEntityId(workspaceId, memberId, this.auditPseudonymKey)
+    } catch (error) {
+      throw new EnterpriseIdentityError(
+        500,
+        'EnterpriseAuditPseudonymKeyInvalid',
+        'Workspace audit pseudonym key is invalid.',
+        false,
+        { cause: error },
+      )
+    }
   }
 
   /** CONTROL と bounded generation chain を強整合読みします。 */
@@ -6032,6 +6296,57 @@ function requireReadyIdentityProvider(
   )
   assertEnterpriseIdentityProviderReady(provider)
   return provider
+}
+
+/**
+ * Compares two role assignments by principal, role, scope, and source.
+ *
+ * @param left - First assignment.
+ * @param right - Second assignment.
+ * @returns Whether both describe the same grant.
+ */
+function isSameRoleAssignment(
+  left: EnterpriseRoleAssignment,
+  right: EnterpriseRoleAssignment,
+) {
+  return left.assignmentId === right.assignmentId &&
+    left.principalKind === right.principalKind &&
+    left.principalId === right.principalId &&
+    left.roleId === right.roleId &&
+    left.source === right.source &&
+    left.scope.kind === right.scope.kind &&
+    left.scope.targetId === right.scope.targetId &&
+    left.scope.parentTeamId === right.scope.parentTeamId
+}
+
+/**
+ * Builds the public audit metadata that names who received which role where.
+ *
+ * @remarks
+ * The member appears only as its Workspace Audit pseudonym, the same ID that member lifecycle
+ * events use, so the audit log never stores the member key or email address.
+ * @param assignment - Direct member assignment.
+ * @param memberId - Workspace Audit pseudonym of the member, absent when audit is disabled.
+ * @returns Audit metadata with the member pseudonym, role, and scope.
+ */
+function toRoleAssignmentAuditMetadata(
+  assignment: EnterpriseRoleAssignment,
+  memberId: string | undefined,
+) {
+  return {
+    ...(memberId ? { memberId } : {}),
+    roleId: assignment.roleId,
+    scopeKind: assignment.scope.kind,
+    ...(assignment.scope.kind === 'team' && assignment.scope.targetId
+      ? { teamId: assignment.scope.targetId }
+      : {}),
+    ...(assignment.scope.kind === 'project'
+      ? {
+          ...(assignment.scope.targetId ? { projectId: assignment.scope.targetId } : {}),
+          ...(assignment.scope.parentTeamId ? { teamId: assignment.scope.parentTeamId } : {}),
+        }
+      : {}),
+  }
 }
 
 function roleExists(state: EnterpriseIdentityState, roleId: string) {
