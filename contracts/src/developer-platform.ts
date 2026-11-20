@@ -907,6 +907,46 @@ export type ConnectorAuthorizationOutput = {
 }
 
 /**
+ * Provider callback から Web が受け取った値で connector OAuth flow を完了する入力です。
+ *
+ * Callback は flow を開始した user の認証済み session で完了させるため、Web はこの値を
+ * Bearer token 付きで送ります。`code` と `cancelled` のどちらか一方だけを指定します。
+ */
+export type CompleteConnectorOAuthInput = {
+  /**
+   * Authorization 開始時に発行され、provider がそのまま返した signed state です。
+   */
+  state: string
+  /**
+   * Provider が発行した authorization code です。Provider が認可しなかった場合は省略します。
+   */
+  code?: string
+  /**
+   * Provider が認可を完了しなかった場合に `true` を指定します。
+   */
+  cancelled?: true
+}
+
+/**
+ * Connector OAuth flow 完了の結果です。
+ */
+export type CompleteConnectorOAuthOutput = {
+  /**
+   * Installation が接続されたか、利用者が provider 側で取り消したかです。
+   */
+  outcome: 'connected' | 'cancelled'
+  /**
+   * 結果を `connectorOAuth` query に付けた application-relative URL です。
+   */
+  returnUrl: string
+}
+
+/**
+ * Provider callback の値を fragment に載せて Web が受け取る application-relative path です。
+ */
+export const CONNECTOR_OAUTH_CALLBACK_APP_PATH = '/settings/connectors/oauth-callback'
+
+/**
  * 外部 resource と Work Item の link 対象種別です。
  */
 export type ExternalResourceType = 'issue' | 'merge-request' | 'commit' | 'deploy'

@@ -22,6 +22,7 @@ import { customersMessages } from './customers'
 import { codingAgentMessages } from './coding-agent'
 import { codingAgentGuideMessages } from './coding-agent-guide'
 import { agentConnectionMessages } from './agent-connection'
+import { connectorOAuthMessages } from './connector-oauth'
 import { collectionsMessages } from './collections'
 import { agentSettingsMessages } from './agent-settings'
 import { factoryBoardMessages } from './factory-board'
@@ -68,6 +69,7 @@ export const enMessages = defineMessages({
   ...codingAgentMessages,
   ...codingAgentGuideMessages,
   ...agentConnectionMessages,
+  ...connectorOAuthMessages,
   ...collectionsMessages,
   ...agentSettingsMessages,
   ...factoryBoardMessages,
