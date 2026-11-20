@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { createDynamoDbDocumentClient } from '../../infrastructure/aws/dynamodb-client'
 import {
   createDataMigrationLambdaDependencies,
+  createDataMigrationRehearsalDependencies,
   parseDataMigrationTargetTables,
 } from './data-migration'
 
@@ -29,5 +32,29 @@ describe('data migration Lambda composition', () => {
     })
     expect(dependencies.checkpointTableName).toBe('Mukuroji-DataMigrationCheckpointTable')
     expect(dependencies.targetTables.get('work-items')).toBe('Mukuroji-WorkItemsTable')
+  })
+
+  test('builds rehearsal dependencies only for a local emulator endpoint', async () => {
+    const input = {
+      documentClient: createDynamoDbDocumentClient(new DynamoDBClient({ region: 'ap-northeast-1' })),
+      registry: [],
+      targetTables: new Map([['rehearsal', 'mukuroji-data-migration-rehearsal-1']]),
+      checkpointTableName: 'mukuroji-data-migration-rehearsal-checkpoints-1',
+      operator: 'local-emulator',
+    }
+    const savedEndpoint = process.env.DYNAMODB_ENDPOINT
+    try {
+      process.env.DYNAMODB_ENDPOINT = 'https://dynamodb.ap-northeast-1.amazonaws.com'
+      expect(() => createDataMigrationRehearsalDependencies(input)).toThrow(TypeError)
+      process.env.DYNAMODB_ENDPOINT = 'http://localhost:4566'
+      const dependencies = createDataMigrationRehearsalDependencies(input)
+      expect(await dependencies.verifyOperator({ proof: 'any', binding: 'b', accountId: '000000000000' }))
+        .toBe('local-emulator')
+      expect(dependencies.writeAuditLog('line')).toBeUndefined()
+      expect(dependencies.targetTables.get('rehearsal')).toBe('mukuroji-data-migration-rehearsal-1')
+    } finally {
+      if (savedEndpoint === undefined) delete process.env.DYNAMODB_ENDPOINT
+      else process.env.DYNAMODB_ENDPOINT = savedEndpoint
+    }
   })
 })

@@ -12,12 +12,10 @@ import {
   shouldBootstrapLocalDynamoDb,
 } from '../../src/infrastructure/aws/dynamodb-client'
 import { loadServerConfig } from '../../src/infrastructure/config/server-config'
+import { createDataMigrationRehearsalDependencies } from '../../src/app/composition/data-migration'
 import {
-  createDynamoDbDataMigrationCheckpointStore,
-  createDynamoDbDataMigrationRowStore,
   ensureLocalDataMigrationCheckpointTable,
   handleDataMigrationInvocation,
-  type DataMigrationInvocationDependencies,
   type DataMigrationInvocationResponse,
 } from '../../src/modules/data-migration'
 import { createRehearsalMigration, createRehearsalSeed, REHEARSAL_TABLE } from './rehearsal-migration'
@@ -67,6 +65,8 @@ function parseOptions(arguments_: readonly string[]): RehearsalOptions | undefin
     const value = arguments_[index + 1] ?? ''
     if (flag !== '--rows' || !/^[1-9][0-9]{0,3}$/u.test(value)) return undefined
     pendingRows = Number(value)
+    // The first page of an interrupted apply must leave pending rows behind.
+    if (pendingRows <= PAGE_SIZE) return undefined
     index += 1
   }
   return { pendingRows, keep }
@@ -141,7 +141,7 @@ export async function rehearseDataMigration(arguments_: readonly string[]): Prom
   const options = parseOptions(arguments_)
   if (options === undefined) {
     console.error(JSON.stringify({ status: 'error', code: 'INVALID_USAGE' }))
-    console.error('Usage: bun run data:migrate:rehearsal [--rows <n>] [--keep]')
+    console.error(`Usage: bun run data:migrate:rehearsal [--rows <${PAGE_SIZE + 1}-9999>] [--keep]`)
     return 2
   }
   const config = loadServerConfig()
@@ -167,29 +167,13 @@ export async function rehearseDataMigration(arguments_: readonly string[]): Prom
     for (const row of seed.rows) {
       await documentClient.send(new PutCommand({ TableName: tableName, Item: row }))
     }
-    const dependencies: DataMigrationInvocationDependencies = {
+    const dependencies = createDataMigrationRehearsalDependencies({
+      documentClient,
       registry: [definition],
       targetTables: new Map([[REHEARSAL_TABLE, tableName]]),
       checkpointTableName,
-      createStores: async (request) => ({
-        rowStore: createDynamoDbDataMigrationRowStore({
-          documentClient,
-          tableName: request.tableName,
-          totalSegments: request.segments,
-        }),
-        checkpointStore: createDynamoDbDataMigrationCheckpointStore({
-          documentClient,
-          tableName: request.checkpointTableName,
-        }),
-      }),
-      verifyOperator: async () => REHEARSAL_OPERATOR,
-      clock: {
-        now: () => Date.now(),
-        sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-      },
-      createRunId: () => randomUUID(),
-      writeAuditLog: () => undefined,
-    }
+      operator: REHEARSAL_OPERATOR,
+    })
     const invoke = async (payload: Readonly<Record<string, unknown>>): Promise<DataMigrationInvocationResponse> => {
       invocation += 1
       return await handleDataMigrationInvocation(payload, {

@@ -18,7 +18,7 @@
 | `server/src/modules/data-migration/adapter-in/lambda/` | Lambda の起動 payload の検証と、run / verify の呼び出し |
 | `server/src/modules/data-migration/adapter-out/dynamodb/` | parallel scan segment で読む row store と、checkpoint table の store |
 | `server/src/modules/data-migration/adapter-out/sts/` | operator の proof（presigned STS `GetCallerIdentity`）の検証 |
-| `server/src/app/composition/data-migration.ts` | DynamoDB adapter・実行者の解決・Lambda の依存を組み立てる composition root |
+| `server/src/app/composition/data-migration.ts` | DynamoDB adapter・実行者の解決・Lambda と rehearsal の依存を組み立てる composition root |
 | `server/src/app/composition/data-migration-registry.ts` | CLI と Lambda から実行できる migration の一覧 |
 | `server/src/handlers/data-migration-handler.ts` | Lambda の entrypoint（`DataMigrationFunction`） |
 | `server/scripts/migrations/run-data-migration.ts` | table を直接読み書きする CLI（`bun run data:migrate`。local の Floci 向け） |
@@ -229,7 +229,7 @@ bun run data:migrate:aws verify --function-name <name> --migration <id>
 MUKUROJI_LOCAL_AWS_RUNTIME=floci DYNAMODB_ENDPOINT=http://localhost:4566 bun run data:migrate:rehearsal
 ```
 
-local の DynamoDB endpoint でだけ動きます。使い捨ての table に旧 schema の row（既定 60 行、`--rows`）と
+local の DynamoDB endpoint でだけ動きます。使い捨ての table に旧 schema の row（既定 60 行、`--rows` で 11〜9999。1 page の 10 行より多くないと中断を再現できない）と
 移行済み・別 entity の row を入れ、Lambda と同じ adapter を通して次を順に確かめ、最後に table を消します
 （`--keep` で残す）。
 

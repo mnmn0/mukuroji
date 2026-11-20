@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts'
+import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
@@ -14,6 +15,7 @@ import {
   DataMigrationFailure,
   ensureLocalDataMigrationCheckpointTable,
   type DataMigrationCheckpointStore,
+  type DataMigrationDefinition,
   type DataMigrationInvocationDependencies,
   type DataMigrationRowStore,
 } from '../../modules/data-migration'
@@ -117,11 +119,81 @@ export function createDataMigrationLambdaDependencies(
     throw new TypeError('DATA_MIGRATION_CHECKPOINT_TABLE_NAME is invalid.')
   }
   const targetTables = parseDataMigrationTargetTables(environment.DATA_MIGRATION_TARGET_TABLES)
-  const documentClient = createDynamoDbDocumentClient(new DynamoDBClient({ region }))
-  return {
+  return createDataMigrationInvocationDependencies({
+    documentClient: createDynamoDbDocumentClient(new DynamoDBClient({ region })),
     registry: dataMigrationRegistry,
     targetTables,
     checkpointTableName,
+    verifyOperator: createStsDataMigrationOperatorVerifier({ region }),
+    writeAuditLog: (line) => console.log(line),
+  })
+}
+
+/** Inputs of the local data migration rehearsal. */
+export type DataMigrationRehearsalInput = {
+  /** Document client bound to the local emulator. */
+  readonly documentClient: DynamoDBDocumentClient
+  /** Rehearsal-only migrations. */
+  readonly registry: readonly DataMigrationDefinition[]
+  /** Physical rehearsal table names by logical name. */
+  readonly targetTables: ReadonlyMap<string, string>
+  /** Physical rehearsal checkpoint table name. */
+  readonly checkpointTableName: string
+  /** Operator the stub verifier reports, since STS is not available on the emulator. */
+  readonly operator: string
+}
+
+/**
+ * Builds the dependencies the local rehearsal drives the data migration
+ * Lambda adapter with: the same DynamoDB stores as the Lambda, and a verifier
+ * that accepts any proof as `operator`. It refuses to build them unless the
+ * server configuration names an explicit local emulator endpoint, so the
+ * stub verifier can never face real AWS.
+ *
+ * @param input - Emulator client, rehearsal migrations, tables and operator.
+ * @returns The adapter dependencies.
+ * @throws TypeError when the configuration is not a local emulator.
+ */
+export function createDataMigrationRehearsalDependencies(
+  input: DataMigrationRehearsalInput,
+): DataMigrationInvocationDependencies {
+  if (!shouldBootstrapLocalDynamoDb(loadServerConfig())) {
+    throw new TypeError('The data migration rehearsal requires a local emulator endpoint.')
+  }
+  return createDataMigrationInvocationDependencies({
+    documentClient: input.documentClient,
+    registry: input.registry,
+    targetTables: input.targetTables,
+    checkpointTableName: input.checkpointTableName,
+    verifyOperator: async () => input.operator,
+    writeAuditLog: () => undefined,
+  })
+}
+
+/** Parts that differ between the Lambda and the rehearsal. */
+type DataMigrationInvocationParts = Pick<
+  DataMigrationInvocationDependencies,
+  'registry' | 'targetTables' | 'checkpointTableName' | 'verifyOperator' | 'writeAuditLog'
+> & {
+  /** Document client the DynamoDB stores use. */
+  readonly documentClient: DynamoDBDocumentClient
+}
+
+/**
+ * Wires the DynamoDB stores, the system clock and random run IDs around the
+ * given parts.
+ *
+ * @param parts - Client, registry, tables, verifier and audit sink.
+ * @returns The adapter dependencies.
+ */
+function createDataMigrationInvocationDependencies(
+  parts: DataMigrationInvocationParts,
+): DataMigrationInvocationDependencies {
+  const { documentClient } = parts
+  return {
+    registry: parts.registry,
+    targetTables: parts.targetTables,
+    checkpointTableName: parts.checkpointTableName,
     createStores: async (request) => ({
       rowStore: createDynamoDbDataMigrationRowStore({
         documentClient,
@@ -133,13 +205,13 @@ export function createDataMigrationLambdaDependencies(
         tableName: request.checkpointTableName,
       }),
     }),
-    verifyOperator: createStsDataMigrationOperatorVerifier({ region }),
+    verifyOperator: parts.verifyOperator,
     clock: {
       now: () => Date.now(),
       sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     },
     createRunId: () => randomUUID(),
-    writeAuditLog: (line) => console.log(line),
+    writeAuditLog: parts.writeAuditLog,
   }
 }
 
