@@ -14,6 +14,7 @@ import {
   type WorkItemPriority,
 } from '@mukuroji/contracts'
 import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOperation'
+import type { WorkItemDuplicateDraft } from '../../issues/model/workItemDuplicate'
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api/access'
@@ -143,8 +144,10 @@ export type TaskCreateContext = {
   schedule?: WorkItemSchedule
   /** Assignee inherited from an assignee-oriented surface. */
   assigneeUserId?: string
+  /** Values copied from an existing Work Item when the member duplicates it. */
+  duplicate?: WorkItemDuplicateDraft
   /** Surface that initiated the create action. */
-  source: 'header' | 'table' | 'board' | 'gantt' | 'calendar' | 'assignee'
+  source: 'header' | 'table' | 'board' | 'gantt' | 'calendar' | 'assignee' | 'duplicate'
 }
 
 /** A selectable assignee filter option derived from visible task data. */

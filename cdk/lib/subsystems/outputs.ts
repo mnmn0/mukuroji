@@ -143,7 +143,7 @@ export type StackOutputResources = {
   readonly webBucket: s3.IBucket;
   /** CloudFront distribution serving the Web app and `/api/*`. */
   readonly webDistribution: cloudfront.IDistribution;
-  /** HTTPS origin of the Web distribution. */
+  /** Canonical HTTPS origin of the app: the custom domain when configured, else CloudFront. */
   readonly webOrigin: string;
   /** HTTP API Gateway endpoint for the shared API. */
   readonly httpApi: apigatewayv2.HttpApi;
@@ -366,6 +366,7 @@ export function buildStackOutputs(
     value: resources.tenantOperationDlq.queueUrl,
   });
   new cdk.CfnOutput(scope, 'WebUrl', {
+    description: 'Canonical app URL: the custom WebDomainName when configured, otherwise the CloudFront domain.',
     value: resources.webOrigin,
   });
   new cdk.CfnOutput(scope, 'WebBucketName', {
@@ -373,6 +374,10 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'WebDistributionId', {
     value: resources.webDistribution.distributionId,
+  });
+  new cdk.CfnOutput(scope, 'WebDistributionDomainName', {
+    description: 'CloudFront domain that a custom WebDomainName points to when DNS is managed outside the stack.',
+    value: resources.webDistribution.distributionDomainName,
   });
   new cdk.CfnOutput(scope, 'ApiGatewayUrl', {
     value: resources.httpApi.apiEndpoint,

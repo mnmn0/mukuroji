@@ -296,7 +296,7 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(workItemPayload.match(/statusCategory/g)).toHaveLength(10);
   expect(workItemPayload.match(/customFieldValues/g)).toHaveLength(10);
   expect(workItemPayload.match(/relationIds/g)).toHaveLength(10);
-  expect(workItemPayload.match(/schedule/g)).toHaveLength(10);
+  expect(workItemPayload.match(/"schedule":/g)).toHaveLength(10);
   expect(workItemPayload.match(/creatorMemberKey/g)).toHaveLength(10);
   expect(workItemPayload).toContain('"schemaVersion":{"N":"2"}');
   expect(workItemPayload).toContain('"mode":{"S":"due-date"}');
@@ -422,6 +422,15 @@ test('bootstrap payload builders preserve deterministic keys, conditions, and id
     Put.Item.updatedAt.S === '2026-06-01T00:00:00.000Z',
   )).toBe(true);
   expect(canonicalWorkItems).toEqual(createCanonicalWorkItemTransactItems('WorkItemsTable', 'directory-1'));
+  // Seeds join the notification due index like Work Items the server creates. The shard is pinned to
+  // the value the server's createWorkItemNotificationScheduleShard returns for the same keys.
+  const seededIndexAttributes = Object.fromEntries(canonicalWorkItems.map(({ Put }) => [
+    Put.Item.issueId.S,
+    [Put.Item.notificationScheduleShard.S, Put.Item.notificationDueKey?.S],
+  ]));
+  expect(seededIndexAttributes.wireframe).toEqual(['work-item-schedule-01', '0000-00-00']);
+  expect(seededIndexAttributes['seo-research']).toEqual(['work-item-schedule-06', '2026-06-09']);
+  expect(seededIndexAttributes['competitor-report']?.[1]).toBeUndefined();
 
   expect(directoryItems).toHaveLength(13);
   expect(directoryItems.filter(({ Put }) => 'ConditionExpression' in Put)).toHaveLength(9);

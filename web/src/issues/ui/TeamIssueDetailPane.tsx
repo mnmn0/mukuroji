@@ -1231,7 +1231,7 @@ function IssueDetailContent({
             <IssuePriorityBadge priority={issue.priority} t={t} />
           </div>
         </div>
-        <TaskHandoffPanel configuration={configuration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+        <TaskHandoffPanel accessToken={accessToken} configuration={configuration} includeDescription={hasDescriptionSection} t={t} task={issue} />
         <div className="grid min-w-0 gap-4">
           {!hasOverviewSection ? renderWorkItemTypeControl() : null}
           {renderedDetailSectionOrder.map((section) => (

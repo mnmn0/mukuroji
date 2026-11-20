@@ -45,6 +45,7 @@ import type { EnterpriseSessionActivityClient } from '../../modules/enterprise-i
 import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { FocusStateClient } from '../../modules/focus'
 import type { PushSubscriptionStore } from '../../modules/notifications/application/push-subscriptions'
+import type { TeamReminderSettingsStore } from '../../modules/notifications/application/ports/reminder-settings-reader'
 import type { AgentRunStore } from '../../modules/agent-runs'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
@@ -54,7 +55,7 @@ import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
 import type { TriageClient } from '../../modules/triage'
-import type { TeamIssuesClient } from '../../modules/work-items'
+import type { ProjectScheduleBaselineStore, TeamIssuesClient } from '../../modules/work-items'
 import type { WorkItemConfigurationClient } from '../../modules/work-items/work-item-configuration'
 import type {
   WorkItemImportExecutionStore,
@@ -174,6 +175,8 @@ export interface WorkItemDependencies {
   notifications: NotificationClient
   /** Provides Web Push device subscription persistence. */
   pushSubscriptions: PushSubscriptionStore
+  /** Provides Team notification reminder settings persistence. */
+  teamReminderSettings: TeamReminderSettingsStore
   /** Provides Agent Run, claim, and Team Agent settings persistence. */
   agentRuns: AgentRunStore
   /** Provides Focus policy and recipient snooze persistence. */
@@ -192,6 +195,8 @@ export interface WorkItemDependencies {
   updateFeedReadState: UpdateFeedReadStatePersistence
   /** Provides bounded member-owned saved feed definitions. */
   savedUpdateFeeds: SavedUpdateFeedsPersistence
+  /** Provides the latest schedule baseline of each Project. */
+  scheduleBaselines: ProjectScheduleBaselineStore
   /** Provides Workspace Collections that reference canonical Work Items. */
   collections: CollectionsPersistence
   /** Provides manual digest preferences and content-free generation receipts. */

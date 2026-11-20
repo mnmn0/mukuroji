@@ -34,6 +34,40 @@ describe('AnalyticsWorkbench', () => {
     ).toEqual(['urgent', 'blocked'])
   })
 
+  test('enables the period presets only once the Workspace calendar settings are loaded', () => {
+    const withoutSettings = renderToStaticMarkup(
+      <AnalyticsWorkbench {...baseProps} onFilterChange={() => undefined} />,
+    )
+    const withSettings = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        calendarSettings={{ fiscalYearStartMonth: 4, weekStartDay: 1 }}
+        onFilterChange={() => undefined}
+      />,
+    )
+
+    expect(withoutSettings).toMatch(/<select[^>]*data-testid="analytics-period-preset"[^>]*disabled/u)
+    expect(withSettings).not.toMatch(/<select[^>]*data-testid="analytics-period-preset"[^>]*disabled/u)
+    expect(withSettings).toContain('This fiscal year')
+    expect(withSettings).toContain('Last week')
+    expect(withSettings).toMatch(/<option value="custom" selected/u)
+  })
+
+  test('explains a failed calendar settings read and offers a retry while presets stay disabled', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        calendarSettingsFailed
+        onFilterChange={() => undefined}
+        onRetryCalendarSettings={() => undefined}
+      />,
+    )
+
+    expect(html).toMatch(/<select[^>]*data-testid="analytics-period-preset"[^>]*disabled/u)
+    expect(html).toContain("Couldn&#x27;t load the Workspace fiscal year and week settings.")
+    expect(html).toMatch(/role="alert">Couldn[^<]*<button[^>]*>Retry<\/button>/u)
+  })
+
   test('renders KPI, dependency-free charts, table fallback, forecast, and provenance', () => {
     const html = renderToStaticMarkup(
       <AnalyticsWorkbench

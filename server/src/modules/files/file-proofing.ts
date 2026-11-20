@@ -87,6 +87,8 @@ const FILE_ID_INDEX_NAME = 'FileIdIndex'
 /**
  * Creates the Planning META update for a canonical Work Item transition.
  *
+ * Like every canonical Work Item write, it also counts the advance in `sourceRevisionCount`.
+ *
  * @param planningTableName - Optional Planning table configured for the runtime.
  * @param workspaceId - Workspace whose canonical Work Item projection changes.
  * @param updatedAt - Mutation timestamp written to Planning META.
@@ -105,7 +107,7 @@ function createPlanningRevisionIncrementTransactionItem(
       UpdateExpression:
         'SET #entryType = if_not_exists(#entryType, :entryType), ' +
         '#schemaVersion = if_not_exists(#schemaVersion, :schemaVersion), ' +
-        '#updatedAt = :updatedAt ADD #revision :increment',
+        '#updatedAt = :updatedAt ADD #revision :increment, #sourceRevisionCount :increment',
       ConditionExpression:
         '(attribute_not_exists(#entryType) AND ' +
         'attribute_not_exists(#schemaVersion) AND attribute_not_exists(#revision)) OR (' +
@@ -116,6 +118,7 @@ function createPlanningRevisionIncrementTransactionItem(
         '#schemaVersion': 'schemaVersion',
         '#updatedAt': 'updatedAt',
         '#revision': 'revision',
+        '#sourceRevisionCount': 'sourceRevisionCount',
       },
       ExpressionAttributeValues: {
         ':entryType': 'planning-meta',
@@ -285,6 +288,21 @@ export type CreateFileApprovalDecisionInput = {
   expectedRevision: number
 }
 
+/**
+ * Update clauses that keep a Work Item's notification schedule index attributes current. The
+ * work-items module builds them; this module only appends them to the approval transition.
+ */
+export type FileApprovalWorkItemIndexUpdate = {
+  /** `SET` clauses to append to the Work Item update. */
+  setExpressions: readonly string[]
+  /** `REMOVE` clauses to append to the Work Item update. */
+  removeExpressions: readonly string[]
+  /** Expression attribute names used by the clauses. */
+  expressionAttributeNames: Readonly<Record<string, string>>
+  /** Expression attribute values used by the clauses. */
+  expressionAttributeValues: Readonly<Record<string, string>>
+}
+
 /** Approval 完了時に適用する検証済み workflow transition です。 */
 export type FileApprovalCompletionTransition = {
   /** Configuration workflow 内の遷移先 status ID です。 */
@@ -305,6 +323,11 @@ export type FileApprovalCompletionTransition = {
     /** Local date of the latest effective completion. */
     actualEndDate?: string
   }
+  /**
+   * Clauses that move the Work Item to its notification schedule index position after the
+   * transition. Omitted when the caller does not maintain the index.
+   */
+  notificationSchedule?: FileApprovalWorkItemIndexUpdate
   /** Definition の同時変更を検出する DynamoDB ConditionCheck 一覧です。 */
   configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
   /**
@@ -1925,7 +1948,10 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     }
     if (completionTransition && this.workItemsTableName) {
       transactionItems.push(...completionTransition.configurationConditionChecks)
-      const actualDateUpdate = createCompletionActualDateUpdate(completionTransition.actualDates)
+      const actualDateUpdate = createCompletionActualDateUpdate(
+        completionTransition.actualDates,
+        completionTransition.notificationSchedule,
+      )
       transactionItems.push({
         Update: {
           TableName: this.workItemsTableName,
@@ -4025,22 +4051,24 @@ function isResourceInUseError(error: unknown) {
 }
 
 /**
- * Builds the update expression suffix that stores the actual dates after an approval transition.
+ * Builds the update expression suffix that stores the actual dates and the notification schedule
+ * index position after an approval transition.
  *
  * @param actualDates - Actual dates after the transition, or undefined to leave them unchanged.
+ * @param notificationSchedule - Index clauses, or undefined to leave the index attributes as they are.
  * @returns The `SET` additions and `REMOVE` clause with their attribute names and values.
  */
 function createCompletionActualDateUpdate(
   actualDates: FileApprovalCompletionTransition['actualDates'],
+  notificationSchedule?: FileApprovalCompletionTransition['notificationSchedule'],
 ): { expression: string, names: Record<string, string>, values: Record<string, string> } {
-  if (!actualDates) return { expression: '', names: {}, values: {} }
-  const names: Record<string, string> = {}
-  const values: Record<string, string> = {}
-  const setExpressions: string[] = []
-  const removeExpressions: string[] = []
-  for (const field of ['actualStartDate', 'actualEndDate'] as const) {
+  const names: Record<string, string> = { ...notificationSchedule?.expressionAttributeNames }
+  const values: Record<string, string> = { ...notificationSchedule?.expressionAttributeValues }
+  const setExpressions: string[] = [...notificationSchedule?.setExpressions ?? []]
+  const removeExpressions: string[] = [...notificationSchedule?.removeExpressions ?? []]
+  for (const field of actualDates ? ['actualStartDate', 'actualEndDate'] as const : []) {
     names[`#${field}`] = field
-    const value = actualDates[field]
+    const value = actualDates?.[field]
     if (value === undefined) {
       removeExpressions.push(`#${field}`)
     } else {

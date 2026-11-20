@@ -902,6 +902,29 @@ describe('independent task views', () => {
     expect(emptyHtml).toContain(t('tasks.detail.empty'))
   })
 
+  test('offers baseline capture to a Project manager without Work Item write access', () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailPane
+        accessToken="token"
+        assigneeOptions={taskViewStoryProjectMembers}
+        canCorrectActualDates
+        configuration={teamWorkItemConfigurationFixture}
+        detail={taskViewStorySelectedIssueDetail}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        t={t}
+        task={taskViewStoryTasks[0]}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('data-testid="task-detail-schedule-baseline"')
+    expect(html).toContain(t('tasks.detail.baselineCapture'))
+  })
+
   test('renders configured detail sections in order and omits the overview section when removed', () => {
     const orderedConfiguration = {
       ...teamWorkItemConfigurationFixture,

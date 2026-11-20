@@ -14,9 +14,11 @@ const securityRoleNameKeys: Readonly<Record<string, MessageKey>> = {
   'team:manager': 'security.role.name.teamManager',
   'team:member': 'security.role.name.teamMember',
   'workspace:admin': 'security.role.name.workspaceAdmin',
+  'workspace:auditor': 'security.role.name.workspaceAuditor',
   'workspace:guest': 'security.role.name.workspaceGuest',
   'workspace:member': 'security.role.name.workspaceMember',
   'workspace:owner': 'security.role.name.workspaceOwner',
+  'workspace:portfolio-viewer': 'security.role.name.workspacePortfolioViewer',
   'workspace-member': 'security.role.name.workspaceMember',
   'workspace-owner': 'security.role.name.workspaceOwner',
 }

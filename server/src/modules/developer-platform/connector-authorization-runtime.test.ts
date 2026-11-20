@@ -214,7 +214,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const result = await fixture.runtime.completeCallback({
       code: 'callback-code',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
     expect(result.returnUrl).toBe('/settings/developer?tab=connectors')
     expect(result.installation).toMatchObject({
       category: 'source-control',
@@ -241,7 +241,49 @@ describe('ConnectorAuthorizationRuntime', () => {
     await expect(fixture.runtime.completeCallback({
       code: 'replayed-code',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })).rejects.toMatchObject({ code: 'ConnectorOAuthStateConsumed' })
+    }, principal)).rejects.toMatchObject({ code: 'ConnectorOAuthStateConsumed' })
+  })
+
+  test('rejects a callback completed by anyone other than the user who started the flow', async () => {
+    const fixture = createRuntimeFixture()
+    const begin = () => fixture.runtime.begin(principal, {
+      provider: 'github',
+      name: 'Engineering GitHub',
+      scopes: ['repo'],
+      returnUrl: '/settings',
+    })
+    const otherUserFlow = await begin()
+    const otherWorkspaceFlow = await begin()
+    const cancelledFlow = await begin()
+
+    await expect(fixture.runtime.completeCallback({
+      code: 'forwarded-code',
+      state: readStateFromAuthorizationUrl(otherUserFlow.authorizationUrl),
+    }, { ...principal, userId: 'user-2' })).rejects.toMatchObject({
+      status: 403,
+      code: 'ConnectorOAuthActorMismatch',
+    })
+    await expect(fixture.runtime.completeCallback({
+      code: 'forwarded-code',
+      state: readStateFromAuthorizationUrl(otherWorkspaceFlow.authorizationUrl),
+    }, { ...principal, workspaceId: 'workspace-2' })).rejects.toMatchObject({
+      status: 403,
+      code: 'ConnectorOAuthActorMismatch',
+    })
+    await expect(fixture.runtime.abortCallback({
+      state: readStateFromAuthorizationUrl(cancelledFlow.authorizationUrl),
+    }, { ...principal, userId: 'user-2' })).rejects.toMatchObject({
+      code: 'ConnectorOAuthActorMismatch',
+    })
+    expect(fixture.tokenRequests).toEqual([])
+    expect(fixture.callbackAuthorizations).toEqual([])
+    expect(await fixture.platform.listConnectors('workspace-1')).toEqual([])
+
+    // A rejected attempt burns the flow, so the leaked URL cannot be retried by anyone.
+    await expect(fixture.runtime.completeCallback({
+      code: 'retried-code',
+      state: readStateFromAuthorizationUrl(otherUserFlow.authorizationUrl),
+    }, principal)).rejects.toMatchObject({ code: 'ConnectorOAuthStateConsumed' })
   })
 
   test('reauthorizes only the same provider account and retains the old credential on mismatch', async () => {
@@ -255,7 +297,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'initial-code',
       state: readStateFromAuthorizationUrl(firstAuthorization.authorizationUrl),
-    })
+    }, principal)
 
     const reauthorization = await fixture.runtime.reauthorize(
       principal,
@@ -264,7 +306,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const recovered = await fixture.runtime.completeCallback({
       code: 'reauthorized-code',
       state: readStateFromAuthorizationUrl(reauthorization.authorizationUrl),
-    })
+    }, principal)
     expect(recovered.installation.id).toBe(installed.installation.id)
     expect(deserializeConnectorCredential(
       await fixture.platform.readConnectorCredential({
@@ -281,7 +323,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     await expect(fixture.runtime.completeCallback({
       code: 'wrong-account-code',
       state: readStateFromAuthorizationUrl(mismatchedFlow.authorizationUrl),
-    })).rejects.toMatchObject({ code: 'ConnectorAccountMismatch' })
+    }, principal)).rejects.toMatchObject({ code: 'ConnectorAccountMismatch' })
     expect(deserializeConnectorCredential(
       await fixture.platform.readConnectorCredential({
         workspaceId: 'workspace-1',
@@ -301,7 +343,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'initial-fenced-code',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
     const stale = await fixture.runtime.reauthorize(
       principal,
       installed.installation.id,
@@ -314,7 +356,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     await expect(fixture.runtime.completeCallback({
       code: 'stale-code',
       state: readStateFromAuthorizationUrl(stale.authorizationUrl),
-    })).rejects.toMatchObject({ code: 'ConnectorReauthorizationStateStale' })
+    }, principal)).rejects.toMatchObject({ code: 'ConnectorReauthorizationStateStale' })
     expect(deserializeConnectorCredential(
       await fixture.platform.readConnectorCredential({
         workspaceId: 'workspace-1',
@@ -327,7 +369,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     await expect(fixture.runtime.completeCallback({
       code: 'current-code',
       state: readStateFromAuthorizationUrl(current.authorizationUrl),
-    })).resolves.toMatchObject({
+    }, principal)).resolves.toMatchObject({
       installation: {
         id: installed.installation.id,
         status: 'connected',
@@ -347,7 +389,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'disconnect-fence-code',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
     const reauthorization = await fixture.runtime.reauthorize(
       principal,
       installed.installation.id,
@@ -357,7 +399,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     await expect(fixture.runtime.completeCallback({
       code: 'after-disconnect-code',
       state: readStateFromAuthorizationUrl(reauthorization.authorizationUrl),
-    })).rejects.toMatchObject({ code: 'ConnectorReauthorizationStateStale' })
+    }, principal)).rejects.toMatchObject({ code: 'ConnectorReauthorizationStateStale' })
     expect((await fixture.platform.listConnectors('workspace-1'))[0]).toEqual(
       expect.objectContaining({
         status: 'disconnected',
@@ -386,7 +428,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'bind-disconnect-race',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
     const updateStatus = fixture.platform.updateConnectorStatus.bind(fixture.platform)
     let releaseBinding!: () => void
     const bindingGate = new Promise<void>((resolve) => {
@@ -438,7 +480,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'disconnect-c1',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
     const updateStatus = fixture.platform.updateConnectorStatus.bind(fixture.platform)
     const recover = fixture.platform.recoverConnector.bind(fixture.platform)
     let concurrentReplacements = 0
@@ -492,7 +534,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'disconnect-deadline-c1',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
     const updateStatus = fixture.platform.updateConnectorStatus.bind(fixture.platform)
     const recover = fixture.platform.recoverConnector.bind(fixture.platform)
     let concurrentReplacements = 0
@@ -553,7 +595,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'stale-health-c1',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
     const stale = await fixture.platform.readConnectorLifecycleSnapshot({
       workspaceId: 'workspace-1',
       installationId: installed.installation.id,
@@ -601,7 +643,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'refresh-cas-code',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
     const outcomes = await Promise.allSettled([
       fixture.runtime.refreshCredential(
         'workspace-1',
@@ -638,7 +680,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'disconnect-code',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
 
     await fixture.runtime.disconnect(principal, installed.installation.id)
     expect(fixture.revoked).toEqual([
@@ -671,7 +713,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'partial-revoke-code',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
 
     await expect(fixture.runtime.disconnect(
       principal,
@@ -705,7 +747,7 @@ describe('ConnectorAuthorizationRuntime', () => {
     const installed = await fixture.runtime.completeCallback({
       code: 'health-code',
       state: readStateFromAuthorizationUrl(authorization.authorizationUrl),
-    })
+    }, principal)
 
     await fixture.runtime.degraded(
       'workspace-1',

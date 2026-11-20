@@ -82,6 +82,7 @@ import { DynamoDbAutomationRepository } from '../../modules/automation'
 import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { createDynamoDbDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-adapters'
+import { createInMemoryDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { DeveloperPlatformTransactionPort } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-transaction-port'
 import type { IdempotencyPort } from '../../modules/developer-platform'
 import {
@@ -100,6 +101,8 @@ import {
   createFocusStateClient,
 } from '../../modules/focus'
 import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
+import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
+import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
 import { DynamoDbAgentRunStore, InMemoryAgentRunStore } from '../../modules/agent-runs'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
@@ -128,7 +131,9 @@ import {
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
 import {
+  DynamoDbProjectScheduleBaselineStore,
   DynamoDbTeamIssuesClient,
+  InMemoryProjectScheduleBaselineStore,
   createWorkItemRevisionConditionCheck,
   isTeamIssueNotFoundError,
   type TeamIssuesClient,
@@ -573,6 +578,10 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.PUSH_SUBSCRIPTIONS_TABLE_NAME ?? 'mukuroji-push-subscriptions-local',
     ),
+    teamReminderSettings: new DynamoDbReminderSettingsStore(
+      createDynamoDbDocumentClient(),
+      getConfiguredNotificationsTableName(),
+    ),
     agentRuns: new DynamoDbAgentRunStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
@@ -588,6 +597,10 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       createDynamoDbDocumentClient(),
     ),
     savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+    ),
+    scheduleBaselines: new DynamoDbProjectScheduleBaselineStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
     ),
@@ -1629,6 +1642,7 @@ export function createTestAppDependencies(): AppDependencies {
       planning: new InMemoryPlanningClient(),
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
+      scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
       collections: new InMemoryCollectionsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
       inboxDigestSettings: new InMemoryUpdateFeedDigestStore(),
@@ -1638,6 +1652,11 @@ export function createTestAppDependencies(): AppDependencies {
       requestIntake,
     },
     automation,
+    developerPlatform: {
+      ...production.developerPlatform,
+      // Sign-in attempt limits count in this store, so tests need it without a DynamoDB table.
+      rateLimits: createInMemoryDeveloperPlatformAdapters().rateLimits,
+    },
     timeTracking: { timeTrackingService },
     capacityPlanning: {
       capacityPlanningService: new CapacityPlanningService(
@@ -1712,6 +1731,9 @@ export function overrideAppDependencies(
       ...(overrides.tenantAdministration
         ? { tenantAdministration: overrides.tenantAdministration }
         : {}),
+      ...(overrides.tenantExportDownload
+        ? { tenantExportDownload: overrides.tenantExportDownload }
+        : {}),
       ...(overrides.tenantLifecycleEnforcement
         ? {
             tenantLifecycleEnforcement:
@@ -1748,6 +1770,7 @@ export function overrideAppDependencies(
       ...(overrides.planning ? { planning: overrides.planning } : {}),
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
+      ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),
       ...(overrides.collections ? { collections: overrides.collections } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),
       ...(overrides.inboxDigestSettings ? { inboxDigestSettings: overrides.inboxDigestSettings } : {}),

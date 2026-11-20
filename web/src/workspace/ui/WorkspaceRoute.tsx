@@ -8,6 +8,7 @@ import {
   type RefObject,
 } from 'react'
 import { matchPath, Outlet, useLocation, useNavigate } from 'react-router'
+import { CONNECTOR_OAUTH_CALLBACK_APP_PATH } from '@mukuroji/contracts'
 import { useWorkspaceCommandMenu } from '../../commands/ui/WorkspaceCommandMenuContext'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import {
@@ -135,6 +136,12 @@ const agentConnectionRouteMetadata: WorkspaceRouteMetadata = {
   eyebrowKey: 'agents.connect.eyebrow',
   titleKey: 'agents.connect.title',
   descriptionKey: 'agents.connect.description',
+}
+const connectorOAuthCallbackRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'settings',
+  eyebrowKey: 'connectors.oauthCallback.eyebrow',
+  titleKey: 'connectors.oauthCallback.title',
+  descriptionKey: 'connectors.oauthCallback.description',
 }
 const teamOverviewRouteMetadata: WorkspaceRouteMetadata = {
   activeTeamViewId: 'overview',
@@ -713,6 +720,10 @@ function resolveWorkspaceRouteMetadata(
     return agentConnectionRouteMetadata
   }
 
+  if (matchPath(CONNECTOR_OAUTH_CALLBACK_APP_PATH, pathname)) {
+    return connectorOAuthCallbackRouteMetadata
+  }
+
   if (matchPath('/dashboard', pathname)) {
     return dashboardRouteMetadata
   }
@@ -746,7 +757,12 @@ function resolveWorkspaceRouteMetadata(
     return shareRouteMetadata
   }
 
-  if (matchPath('/settings', pathname)) {
+  if (
+    matchPath('/settings', pathname) ||
+    matchPath('/settings/personal', pathname) ||
+    matchPath('/settings/workspace', pathname) ||
+    matchPath('/settings/team', pathname)
+  ) {
     return settingsRouteMetadata
   }
 

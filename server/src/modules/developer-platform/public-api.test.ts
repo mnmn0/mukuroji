@@ -234,6 +234,10 @@ function createTestRouter(input: {
   /** Agent Run service used by Agent Run route tests. */
   agentRuns?: PublicAgentRunService
   connectorAuthorization?: ConnectorAuthorizationService
+  /** Lists the providers configured in the test runtime. */
+  listConfiguredConnectorProviders?: PublicApiDependencies['listConfiguredConnectorProviders']
+  /** Web app origin that the connector OAuth callback hands off to. */
+  connectorOAuthWebOrigin?: string
   managementPrincipal?: DeveloperManagementPrincipal
   /** Management authentication の request context を検証する override です。 */
   authenticateManagement?: PublicApiDependencies['authenticateManagement']
@@ -267,6 +271,12 @@ function createTestRouter(input: {
     ...(input.connectorAuthorization
       ? { connectorAuthorization: input.connectorAuthorization }
       : {}),
+    ...(input.connectorOAuthWebOrigin
+      ? { connectorOAuthWebOrigin: input.connectorOAuthWebOrigin }
+      : {}),
+    ...(input.listConfiguredConnectorProviders
+      ? { listConfiguredConnectorProviders: input.listConfiguredConnectorProviders }
+      : {}),
   })
   return { platform, router }
 }
@@ -287,6 +297,37 @@ async function createApiKey(
 }
 
 describe('public API router', () => {
+  test('lists only the connector providers configured in the runtime', async () => {
+    /** Reads the provider IDs returned by the connector catalog route. */
+    const readProviders = async (
+      router: ReturnType<typeof createTestRouter>['router'],
+      query = '',
+    ) => {
+      const response = await router.request(
+        `http://localhost/developer/connectors${query}`,
+        { headers: { Authorization: 'Bearer session-token' } },
+      )
+      expect(response.status).toBe(200)
+      const body: unknown = await response.json()
+      if (!Array.isArray(body)) throw new TypeError('Catalog must be an array.')
+      return body.map((entry: unknown) =>
+        typeof entry === 'object' && entry !== null && 'provider' in entry
+          ? entry.provider
+          : undefined
+      )
+    }
+
+    const { router: unconfiguredRouter } = createTestRouter()
+    expect(await readProviders(unconfiguredRouter)).toEqual([])
+
+    const { router } = createTestRouter({
+      listConfiguredConnectorProviders: async () => ['slack', 'github'],
+    })
+    expect(await readProviders(router)).toEqual(['github', 'slack'])
+    expect(await readProviders(router, '?category=chat')).toEqual(['slack'])
+    expect(await readProviders(router, '?category=email')).toEqual([])
+  })
+
   test('adds progress comments with scoped authentication, idempotency, and current replay authorization', async () => {
     let creates = 0
     let allowed = true
@@ -2679,28 +2720,115 @@ describe('public API router', () => {
     expect(queued).toEqual([])
   })
 
-  test('rate-limits invalid OAuth client attempts and never permits caching token responses', async () => {
+  test('keeps invalid OAuth secrets from using up the client limit and never permits caching token responses', async () => {
+    const { platform, router } = createTestRouter()
+    const oauthApp = await platform.createOAuthApp({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        name: 'Rate limited service',
+        grantTypes: ['client_credentials'],
+        scopes: ['work-items:read'],
+      },
+    })
+    const request = (clientSecret: string, sourceIp: string) => router.request(
+      'http://localhost/v1/oauth/token',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: oauthApp.oauthApp.clientId,
+          client_secret: clientSecret,
+        }).toString(),
+      },
+      { requestContext: { http: { sourceIp } } },
+    )
+
+    // Someone who only knows the public client_id cannot lock the client out.
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const response = await request('invalid-secret', '198.51.100.1')
+      expect(response.status).toBe(401)
+      expect(response.headers.get('Cache-Control')).toBe('no-store')
+      expect(response.headers.get('Pragma')).toBe('no-cache')
+    }
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = await request(oauthApp.clientSecret, '198.51.100.2')
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Cache-Control')).toBe('no-store')
+    }
+    const limited = await request(oauthApp.clientSecret, '198.51.100.3')
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('RateLimit-Limit')).toBe('30')
+    expect(limited.headers.get('Retry-After')).toBe('60')
+    expect(limited.headers.get('Cache-Control')).toBe('no-store')
+  })
+
+  test('still limits wrong OAuth secrets when no trusted client address is available', async () => {
     const { router } = createTestRouter()
-    const request = () => router.request('http://localhost/v1/oauth/token', {
+    // No Lambda request context, as under the Bun server.
+    const request = (attempt: number) => router.request('http://localhost/v1/oauth/token', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Forwarded-For': `198.51.100.${attempt + 1}`,
+      },
       body: new URLSearchParams({
         grant_type: 'client_credentials',
         client_id: 'unknown-client',
         client_secret: 'invalid-secret',
       }).toString(),
     })
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      const response = await request()
-      expect(response.status).toBe(401)
-      expect(response.headers.get('Cache-Control')).toBe('no-store')
-      expect(response.headers.get('Pragma')).toBe('no-cache')
+
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      expect((await request(attempt)).status).toBe(401)
     }
-    const limited = await request()
+    const limited = await request(60)
     expect(limited.status).toBe(429)
-    expect(limited.headers.get('RateLimit-Limit')).toBe('30')
-    expect(limited.headers.get('Retry-After')).toBe('60')
-    expect(limited.headers.get('Cache-Control')).toBe('no-store')
+    expect(limited.headers.get('RateLimit-Limit')).toBe('60')
+  })
+
+  test('limits OAuth token requests by the CloudFront viewer address, not the edge address', async () => {
+    const edgeSecret = 'edge-secret-0123456789abcdef0123456789abcdef'
+    const originalEdgeSecret = process.env.MUKUROJI_EDGE_ORIGIN_SECRET
+    process.env.MUKUROJI_EDGE_ORIGIN_SECRET = edgeSecret
+    try {
+      const { router } = createTestRouter()
+      const request = (viewerAddress: string, attempt: number) => router.request(
+        'http://localhost/v1/oauth/token',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'x-mukuroji-edge-secret': edgeSecret,
+            'x-mukuroji-viewer-address': viewerAddress,
+          },
+          body: new URLSearchParams({
+            grant_type: 'client_credentials',
+            client_id: `unknown-client-${attempt}`,
+            client_secret: 'invalid-secret',
+          }).toString(),
+        },
+        // Every request reaches the API from the same CloudFront edge.
+        {
+          event: { requestContext: { http: { sourceIp: '198.51.100.250' } } },
+          requestContext: { http: { sourceIp: '198.51.100.250' } },
+        },
+      )
+
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        expect((await request('203.0.113.9', attempt)).status).toBe(401)
+      }
+      expect((await request('203.0.113.9', 60)).status).toBe(429)
+      // Another viewer behind the same edge keeps its own bucket.
+      expect((await request('203.0.113.10', 61)).status).toBe(401)
+    } finally {
+      if (originalEdgeSecret === undefined) {
+        delete process.env.MUKUROJI_EDGE_ORIGIN_SECRET
+      } else {
+        process.env.MUKUROJI_EDGE_ORIGIN_SECRET = originalEdgeSecret
+      }
+    }
   })
 
   test('uses the trusted Lambda source IP instead of spoofable forwarding headers', async () => {
@@ -2719,12 +2847,10 @@ describe('public API router', () => {
           client_secret: 'invalid-secret',
         }).toString(),
       },
+      // Shaped like the env that hono/aws-lambda passes to the app.
       {
-        event: {
-          requestContext: {
-            http: { sourceIp: '203.0.113.9' },
-          },
-        },
+        event: { requestContext: { http: { sourceIp: '203.0.113.9' } } },
+        requestContext: { http: { sourceIp: '203.0.113.9' } },
       },
     )
 
@@ -2734,6 +2860,73 @@ describe('public API router', () => {
     const limited = await request(60)
     expect(limited.status).toBe(429)
     expect(limited.headers.get('RateLimit-Limit')).toBe('60')
+  })
+
+  test('hands the callback to the Web origin and requires a signed-in integration manager to complete it', async () => {
+    let calls = 0
+    const connectorAuthorization: ConnectorAuthorizationService = {
+      async begin() { throw new Error('not used') },
+      async completeCallback() {
+        calls += 1
+        throw new Error('not reached')
+      },
+      async abortCallback() {
+        calls += 1
+        throw new Error('not reached')
+      },
+      async reauthorize() { throw new Error('not used') },
+      async disconnect() { throw new Error('not used') },
+      async listConflicts() { throw new Error('not used') },
+      async resolveConflict() { throw new Error('not used') },
+    }
+    const request = {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer session-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'complete-without-admin',
+      },
+      body: JSON.stringify({ state: 'signed-state', code: 'provider-code' }),
+    }
+    const splitOrigin = createTestRouter({
+      connectorAuthorization,
+      connectorOAuthWebOrigin: 'https://app.example.com',
+    })
+    const handedOff = await splitOrigin.router.request(
+      'http://localhost/developer/connector-oauth/callback?code=provider-code&state=signed-state',
+    )
+    expect(handedOff.status).toBe(303)
+    expect(handedOff.headers.get('Location')).toBe(
+      'https://app.example.com/settings/connectors/oauth-callback' +
+        '#state=signed-state&code=provider-code',
+    )
+    expect(calls).toBe(0)
+
+    const member = createTestRouter({
+      connectorAuthorization,
+      managementPrincipal: {
+        ...managementPrincipal,
+        capabilities: { ...managementPrincipal.capabilities, canManageIntegrations: false },
+      },
+    })
+    const forbidden = await member.router.request(
+      'http://localhost/developer/connector-oauth/complete',
+      request,
+    )
+    expect(forbidden.status).toBe(403)
+
+    const anonymous = createTestRouter({
+      connectorAuthorization,
+      authenticateManagement: async () => {
+        throw new PublicApiServiceError(401, 'invalid_credentials', 'Sign in again.')
+      },
+    })
+    const unauthenticated = await anonymous.router.request(
+      'http://localhost/developer/connector-oauth/complete',
+      request,
+    )
+    expect(unauthenticated.status).toBe(401)
+    expect(calls).toBe(0)
   })
 
   test('uses the configured connector authorization and conflict recovery seam', async () => {
@@ -2751,6 +2944,7 @@ describe('public API router', () => {
     let allowConflictWrite = false
     let conflictWriteChecks = 0
     let resolveCalls = 0
+    let completeCalls = 0
     const connectorAuthorization: ConnectorAuthorizationService = {
       async begin(_principal, _input, operationId) {
         beginOperationIds.push(operationId ?? '')
@@ -2760,8 +2954,10 @@ describe('public API router', () => {
           expiresAt: '2026-07-18T00:10:00.000Z',
         }
       },
-      async completeCallback(input) {
+      async completeCallback(input, actor) {
         expect(input).toEqual({ code: 'provider-code', state: 'signed-state' })
+        expect(actor).toMatchObject({ workspaceId: 'workspace-1', userId: 'user-1' })
+        completeCalls += 1
         return {
           installation: {
             id: 'connector-1',
@@ -2777,8 +2973,9 @@ describe('public API router', () => {
           returnUrl: '/settings/developer',
         }
       },
-      async abortCallback(input) {
+      async abortCallback(input, actor) {
         expect(input).toEqual({ state: 'cancelled-state' })
+        expect(actor).toMatchObject({ workspaceId: 'workspace-1', userId: 'user-1' })
         return { returnUrl: '/settings/developer?tab=connectors' }
       },
       async reauthorize() {
@@ -2868,8 +3065,10 @@ describe('public API router', () => {
     )
     expect(callback.status).toBe(303)
     expect(callback.headers.get('Location'))
-      .toBe('/settings/developer?connectorOAuth=connected')
+      .toBe('/settings/connectors/oauth-callback#state=signed-state&code=provider-code')
     expect(callback.headers.get('Cache-Control')).toBe('no-store')
+    expect(callback.headers.get('Referrer-Policy')).toBe('no-referrer')
+    expect(completeCalls).toBe(0)
 
     const cancelled = await router.request(
       'http://localhost/developer/connector-oauth/callback' +
@@ -2877,7 +3076,59 @@ describe('public API router', () => {
     )
     expect(cancelled.status).toBe(303)
     expect(cancelled.headers.get('Location'))
-      .toBe('/settings/developer?tab=connectors&connectorOAuth=cancelled')
+      .toBe('/settings/connectors/oauth-callback#state=cancelled-state&cancelled=true')
+
+    const completeRequest = (body: unknown, idempotencyKey: string) => router.request(
+      'http://localhost/developer/connector-oauth/complete',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer session-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
+        },
+        body: JSON.stringify(body),
+      },
+    )
+    const completed = await completeRequest(
+      { state: 'signed-state', code: 'provider-code' },
+      'complete-connector',
+    )
+    expect(completed.status).toBe(200)
+    expect(completed.headers.get('Cache-Control')).toBe('no-store')
+    expect(await completed.json()).toEqual({
+      outcome: 'connected',
+      returnUrl: '/settings/developer?connectorOAuth=connected',
+    })
+    const completedReplay = await completeRequest(
+      { state: 'signed-state', code: 'provider-code' },
+      'complete-connector',
+    )
+    expect(completedReplay.status).toBe(200)
+    expect(completedReplay.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(completeCalls).toBe(1)
+
+    const aborted = await completeRequest(
+      { state: 'cancelled-state', cancelled: true },
+      'abort-connector',
+    )
+    expect(aborted.status).toBe(200)
+    expect(await aborted.json()).toEqual({
+      outcome: 'cancelled',
+      returnUrl: '/settings/developer?tab=connectors&connectorOAuth=cancelled',
+    })
+
+    for (const invalid of [
+      { state: 'signed-state' },
+      { state: 'signed-state', code: 'provider-code', cancelled: true },
+      { state: 'signed-state', cancelled: false },
+      { state: 'signed-state', code: 'provider-code', extra: 'field' },
+      { code: 'provider-code' },
+    ]) {
+      const response = await completeRequest(invalid, `invalid-${JSON.stringify(invalid)}`)
+      expect(response.status).toBe(400)
+    }
+    expect(completeCalls).toBe(1)
 
     const conflictInstallation = await platform.installConnector({
       workspaceId: 'workspace-1',

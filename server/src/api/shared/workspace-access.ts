@@ -222,6 +222,34 @@ export function projectAccessAllows(access: ProjectAccessEntry, minimumRole: Pro
   return access.role !== undefined && projectRoleAllows(access.role, minimumRole)
 }
 
+/**
+ * Checks whether a Project access entry can apply to a Team.
+ *
+ * A Team-qualified entry applies only to its own Team, so a grant on `other-team/refero` never
+ * authorizes `core-team/refero`. An unqualified entry comes from a context its builder already
+ * narrowed to the Team's Projects, and keeps applying.
+ *
+ * @param access - Project access entry.
+ * @param teamId - Team that owns the resource.
+ * @returns `true` unless the entry is qualified for another Team.
+ */
+export function projectAccessAppliesToTeam(access: ProjectAccessEntry, teamId: string) {
+  return access.teamId === undefined || access.teamId === teamId
+}
+
+/**
+ * Finds the principal's access entry for one Project of the context's Team.
+ *
+ * @param context - Team permission context of the principal.
+ * @param projectId - Project owned by the context's Team.
+ * @returns The access entry, ignoring entries qualified for another Team.
+ */
+export function findTeamProjectAccess(context: TeamPermissionContext, projectId: string) {
+  return context.projectAccesses?.find((access) =>
+    access.projectId === projectId && projectAccessAppliesToTeam(access, context.team.id)
+  )
+}
+
 function projectRoleAllows(role: ProjectRole, minimumRole: ProjectRole) {
   return projectRoleWeights[role] >= projectRoleWeights[minimumRole]
 }

@@ -37,6 +37,10 @@ import {
 } from './app-dependencies'
 import { toProjectPrincipal } from './authentication-session'
 import {
+  readCognitoAccessTokenUser,
+  requireEnterpriseSsoSessionAttestation,
+} from './cognito-access-token-user'
+import {
   assertEnterpriseRuntimeCognitoProviders,
   type CognitoAccessTokenClaims,
   createEnterpriseAuthenticationSessionId,
@@ -172,6 +176,12 @@ const enterpriseRoutePermissionRules = [
   {
     method: '*',
     pathPattern: '/api/enterprise/security/group-mappings*',
+    permission: 'security.manage',
+    alternativePermissions: ['members.manage'],
+  },
+  {
+    method: '*',
+    pathPattern: '/api/enterprise/security/role-assignments*',
     permission: 'security.manage',
     alternativePermissions: ['members.manage'],
   },
@@ -370,6 +380,11 @@ const enterpriseRoutePermissionRules = [
     permission: 'teams.manage',
   },
   {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/notification-reminders',
+    permission: 'teams.manage',
+  },
+  {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/triage-entries/:entryId/customer-request',
     permission: 'requests.manage',
@@ -398,6 +413,11 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'GET',
     pathPattern: '/api/teams/:teamId/agent-runs',
+    permission: 'work-items.read',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/agent-runs/analytics',
     permission: 'work-items.read',
   },
   {
@@ -582,6 +602,16 @@ const enterpriseRoutePermissionRules = [
     permission: 'projects.manage',
   },
   {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline',
+    permission: 'projects.manage',
+  },
+  {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/projects',
     permission: 'projects.write',
@@ -698,6 +728,51 @@ const enterpriseRoutePermissionRules = [
 ] as const satisfies readonly EnterpriseRoutePermissionRule[]
 
 /**
+ * Refuses a locally verified access token whose sign-in began before the member was signed out.
+ *
+ * Directory deprovisioning signs the member out everywhere in Cognito, which only reaches tokens
+ * Cognito itself checks. Enterprise SSO tokens are verified by the API, so a sign-in started
+ * before that sign-out stays refused here, also after the member is reactivated.
+ *
+ * @param accessToken - Access token whose signature was already verified.
+ * @param signInsRevokedAt - When the member was signed out everywhere (ISO 8601), if ever.
+ */
+function requireSignInAfterMemberSignOut(accessToken: string, signInsRevokedAt: string | undefined) {
+  if (!signInsRevokedAt) return
+  const revokedAt = Date.parse(signInsRevokedAt)
+  const claims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
+  const signedInAt = readNumericClaim(claims?.auth_time) ?? readNumericClaim(claims?.iat)
+  if (Number.isNaN(revokedAt) || signedInAt === undefined || signedInAt * 1_000 <= revokedAt) {
+    throw new WorkspaceAccessError(
+      401,
+      'EnterpriseSsoSessionRequired',
+      'Single sign-on is required for this Workspace account.',
+    )
+  }
+}
+
+/**
+ * Returns whether a request starts, advances, or downloads a tenant lifecycle operation.
+ *
+ * These routes are guarded by `workspace.manage`, which is not a privileged permission, yet they
+ * export the whole tenant, including its audit log, or irreversibly close it. They therefore get
+ * the same MFA and recent-authentication policy as audit export and member administration.
+ *
+ * @param context - Hono request context.
+ * @returns True when the request is a privileged tenant lifecycle request.
+ */
+function isPrivilegedTenantLifecycleRequest(context: Context): boolean {
+  const method = context.req.method
+  const path = context.req.path
+  if (method === 'GET') {
+    return /^\/api\/tenant\/operations\/[^/]+\/download$/u.test(path)
+  }
+  return path === '/api/tenant/exports' ||
+    path === '/api/tenant/closures' ||
+    /^\/api\/tenant\/operations\/[^/]+\/(?:pause|resume|verify)$/u.test(path)
+}
+
+/**
  * Authenticates an access token and resolves the Workspace principal with its enterprise authorization.
  *
  * @param accessToken - Bearer access token from the request.
@@ -718,7 +793,12 @@ export async function authenticateWorkspacePrincipal(
     return principal
   }
   validateConfiguredCognitoAccessToken(accessToken)
-  const principal = toProjectPrincipal(user ?? await authenticationDependencies.cognito.getUser(accessToken), accessToken)
+  const principal = toProjectPrincipal(user ?? await readCognitoAccessTokenUser(accessToken), accessToken)
+  // An SSO token is only usable after /api/auth/sso/exchange attested it (#514).
+  const ssoSessionAuthenticationMethods = await requireEnterpriseSsoSessionAttestation(
+    accessToken,
+    principal.directoryId,
+  )
   if (typeof authenticationDependencies.cognito.isSystemAdmin === 'function') {
     principal.isSystemAdmin = await authenticationDependencies.cognito.isSystemAdmin(principal.userKey)
   }
@@ -730,6 +810,9 @@ export async function authenticateWorkspacePrincipal(
 
   if (!workspaceMember) {
     throw new WorkspaceAccessError(403, 'WorkspaceAccessDenied', 'Workspace access is denied.')
+  }
+  if (ssoSessionAuthenticationMethods) {
+    requireSignInAfterMemberSignOut(accessToken, workspaceMember.signInsRevokedAt)
   }
 
   const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
@@ -743,12 +826,16 @@ export async function authenticateWorkspacePrincipal(
   )
   const principalKind = breakGlassActivation ? 'break-glass' : 'member'
   let verifiedAuthenticationMethods: string[] | undefined
-  if (!options.breakGlassCandidate && principalKind !== 'break-glass' && isEnterpriseSsoConfigured()) {
+  if (
+    ssoSessionAuthenticationMethods ||
+    (!options.breakGlassCandidate && principalKind !== 'break-glass' && isEnterpriseSsoConfigured())
+  ) {
     try {
       await assertEnterpriseRuntimeCognitoProviders(
         snapshot,
         principal.userKey,
         workspaceMember.email,
+        { includeOptionalSsoDomains: ssoSessionAuthenticationMethods !== undefined },
       )
     } catch (error) {
       const status = error instanceof EnterpriseIdentityError && error.status >= 500
@@ -763,18 +850,28 @@ export async function authenticateWorkspacePrincipal(
     }
 
     const memberDomain = normalizeEnterpriseEmailDomain(workspaceMember.email)
+    // An SSO session is checked against its domain's provider even when SSO is optional there,
+    // so a provider change or a member outside the SSO domains ends the session (#514).
     const enforcedSsoDomains = snapshot.domains.filter((domain) =>
       domain.status === 'verified' &&
-      domain.enforceSso &&
+      (domain.enforceSso || ssoSessionAuthenticationMethods !== undefined) &&
       domain.domain === memberDomain
     )
+    if (ssoSessionAuthenticationMethods && enforcedSsoDomains.length === 0) {
+      throw new WorkspaceAccessError(
+        403,
+        'EnterpriseSsoSessionRequired',
+        'Single sign-on is required for this Workspace account.',
+      )
+    }
     if (enforcedSsoDomains.length > 0) {
       const ssoClient = requireEnterpriseCognitoSsoAppClientConfiguration()
       const accessTokenClaims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
-      verifiedAuthenticationMethods = await getVerifiedEnterpriseAuthenticationMethods(
-        principal.directoryId,
-        authenticationSessionId,
-      )
+      verifiedAuthenticationMethods = ssoSessionAuthenticationMethods ??
+        await getVerifiedEnterpriseAuthenticationMethods(
+          principal.directoryId,
+          authenticationSessionId,
+        )
       if (
         accessTokenClaims?.client_id !== ssoClient.clientId ||
         enforcedSsoDomains.some((domain) => {
@@ -961,7 +1058,7 @@ export async function authenticateWorkspacePrincipal(
       now: nowSeconds,
       authenticationMethods,
       clientIp: resolveEnterpriseClientIp(context),
-      privileged: [
+      privileged: isPrivilegedTenantLifecycleRequest(context) || [
         requestAccess.grantedRoutePermission,
         ...(requiredPermissions ?? []),
       ].some((permission) =>

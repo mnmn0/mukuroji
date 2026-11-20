@@ -100,6 +100,7 @@ import {
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
 import { TaskActualDatesPanel } from './TaskActualDatesPanel'
+import { TaskScheduleBaselinePanel } from './TaskScheduleBaselinePanel'
 import { WorkItemArchiveButton } from '../../issues/ui/WorkItemArchiveButton'
 
 /** Context passed from the Work Item container to the feature-owned AI renderer. */
@@ -215,6 +216,8 @@ export type TaskDetailPaneProps = {
   onArchiveIssue?: (task: CanonicalWorkItem, archived: boolean) => Promise<void>
   /** Closes the detail pane while keeping the list selection and scroll position. */
   onClose?: () => void
+  /** Opens the create panel with a draft copied from this Work Item; hidden when undefined. */
+  onDuplicateIssue?: (task: CanonicalWorkItem) => void
   /** Reports combined Work Item AI operation state to the owning task screen. */
   onAiOperationPendingChange?: (pending: boolean) => void
   /** Reports retained comment composer input to the owning task screen. */
@@ -321,6 +324,7 @@ export function TaskDetailPane({
   onCommentDraftDirtyChange,
   onArchiveIssue,
   onClose,
+  onDuplicateIssue,
   onDeleteRelation,
   onDeleteScheduleDependency,
   onScheduleNoChange,
@@ -1335,6 +1339,18 @@ export function TaskDetailPane({
             // The loaded detail is newer than the list row, so the panel shows its dates.
             task={issue ?? task}
           />
+          {accessToken && (issue ?? task).assignedProjectId ? (
+            <TaskScheduleBaselinePanel
+              accessToken={accessToken}
+              // Capturing needs Project management, not Work Item write access, so it does not
+              // depend on onUpdateIssue; it only waits for the current detail.
+              canCapture={Boolean(canCorrectActualDates) && !isRetainedDetail && !needsDetailBeforeEdit}
+              disabled={isRetainedDetail || needsDetailBeforeEdit}
+              projectId={(issue ?? task).assignedProjectId ?? ''}
+              t={t}
+              task={issue ?? task}
+            />
+          ) : null}
           </>
         )
       case 'relations':
@@ -1591,6 +1607,17 @@ export function TaskDetailPane({
                 t={t}
               />
             ) : null}
+            {onDuplicateIssue && !isRetainedDetail ? (
+              <button
+                className="workbench-button-secondary h-8 px-3 text-xs"
+                data-testid="task-detail-duplicate"
+                disabled={isWorkItemMutationPending}
+                onClick={() => onDuplicateIssue(issue ?? task)}
+                type="button"
+              >
+                {t('issues.duplicate.action')}
+              </button>
+            ) : null}
             <TaskPriorityBadge priority={issue?.priority ?? task.priority} t={t} />
             {onClose ? (
               <button
@@ -1607,7 +1634,7 @@ export function TaskDetailPane({
           </div>
         </div>
         {issue && !isRetainedDetail ? (
-          <TaskHandoffPanel configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+          <TaskHandoffPanel accessToken={accessToken} configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
         ) : null}
         {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
         {!hasOverviewSection ? renderWorkItemTypeControl() : null}

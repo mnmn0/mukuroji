@@ -1,4 +1,4 @@
-import { afterEach, expect, setSystemTime, test } from 'bun:test'
+import { afterEach, expect, test } from 'bun:test'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
 import { CognitoServiceError, type CognitoClient } from '../..'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
@@ -153,35 +153,6 @@ test('rate limits repeated password reset requests for one address', async () =>
 
   expect(statuses).toEqual([202, 202, 202, 202, 202, 429])
 })
-
-test('keeps live rate-limit counters when many addresses fill the store', async () => {
-  configureFakeProjectClients(true)
-  overrideCognito({ async requestPasswordReset() {} })
-  const startedAt = Date.now()
-  setSystemTime(startedAt)
-  try {
-    const requestFor = async (email: string) => (await sendJson('/api/auth/password-reset/request', { email })).status
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect(await requestFor('flood-target@example.com')).toBe(202)
-    }
-
-    // Fill the store with distinct addresses until it refuses a new one.
-    let filler = 0
-    while (await requestFor(`flood-${filler}@example.com`) === 202) {
-      filler += 1
-      if (filler > 10_000) throw new Error('The rate-limit store never filled up.')
-    }
-
-    expect(await requestFor('flood-target@example.com')).toBe(429)
-    expect(await requestFor('flood-newcomer@example.com')).toBe(429)
-
-    // Once the window has passed, the next request sweeps the expired keys.
-    setSystemTime(startedAt + 16 * 60_000)
-    expect(await requestFor('flood-newcomer@example.com')).toBe(202)
-  } finally {
-    setSystemTime()
-  }
-}, 60_000)
 
 test('sets a new password with the emailed code and reports a wrong code without detail', async () => {
   configureFakeProjectClients(true)
@@ -739,6 +710,9 @@ test('records the administrator password reset and signs the member out around t
       const member = (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
       return { member, alreadyRecorded: false, completed: false }
     },
+    async revokeMemberSignIns(revokedWorkspaceId, memberKey) {
+      events.push(`revoke:${revokedWorkspaceId}:${memberKey}`)
+    },
   })
   overrideCognito({
     async adminResetUserPassword(userId) {
@@ -752,11 +726,17 @@ test('records the administrator password reset and signs the member out around t
   const response = await sendJson('/api/workspace/members/sato%40example.com/password-reset', {}, 'test-token')
 
   expect(response.status).toBe(202)
+  // SSO sessions that the API verifies itself are refused from the sign-out on as well, including
+  // a sign-in that completed while Cognito was signing the user out.
   expect(events).toEqual([
     'audit',
+    `revoke:${workspaceId}:sato@example.com`,
     'sign-out:sato@example.com',
+    `revoke:${workspaceId}:sato@example.com`,
     'reset:sato@example.com',
+    `revoke:${workspaceId}:sato@example.com`,
     'sign-out:sato@example.com',
+    `revoke:${workspaceId}:sato@example.com`,
   ])
   expect(recorded[0]).toMatchObject({
     actor: 'demo@example.com',

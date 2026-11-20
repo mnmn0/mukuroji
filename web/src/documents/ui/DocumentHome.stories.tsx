@@ -15,6 +15,7 @@ const meta = {
     documents: documentSummaryFixtures,
     onCreateDocument: fn(),
     onCreateFromBuiltInTemplate: fn(),
+    onImportMarkdown: fn(async () => undefined),
     onInstantiateTemplate: fn(),
     onSelectDocument: fn(),
     t: createTranslator('ja'),
@@ -54,12 +55,30 @@ export const BundledTemplates: Story = {
 }
 
 /**
+ * Pasted Markdown becomes a page in the chosen Project.
+ */
+export const MarkdownImport: Story = {
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.selectOptions(canvas.getByLabelText('取り込み先 Project'), 'refero')
+    await userEvent.type(canvas.getByLabelText('Markdown'), '# 設計書')
+    await userEvent.click(canvas.getByRole('button', { name: 'ページを作成' }))
+    await expect(args.onImportMarkdown).toHaveBeenCalledWith({
+      fallbackTitle: '取り込んだページ',
+      projectId: 'refero',
+      source: '# 設計書',
+    })
+  },
+}
+
+/**
  * Members who cannot create Documents do not see the bundled templates.
  */
 export const ReadOnly: Story = {
   args: {
     onCreateDocument: undefined,
     onCreateFromBuiltInTemplate: undefined,
+    onImportMarkdown: undefined,
     onInstantiateTemplate: undefined,
   },
 }

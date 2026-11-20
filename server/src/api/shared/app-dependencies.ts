@@ -85,6 +85,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get pushSubscriptions() {
     return requireAppDependencies().workItems.pushSubscriptions
   },
+  get teamReminderSettings() {
+    return requireAppDependencies().workItems.teamReminderSettings
+  },
   get agentRuns() {
     return requireAppDependencies().workItems.agentRuns
   },
@@ -111,6 +114,9 @@ export const workItemDependencies: WorkItemDependencies = {
   },
   get savedUpdateFeeds() {
     return requireAppDependencies().workItems.savedUpdateFeeds
+  },
+  get scheduleBaselines() {
+    return requireAppDependencies().workItems.scheduleBaselines
   },
   get collections() {
     return requireAppDependencies().workItems.collections

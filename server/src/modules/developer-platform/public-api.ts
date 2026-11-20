@@ -1,5 +1,4 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
-import { isIP } from 'node:net'
 import {
   isWorkItemProgressPercent,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
@@ -18,6 +17,9 @@ import {
   type ApiProblemViolation,
   type ApiScope,
   type CanonicalWorkItem,
+  type CompleteConnectorOAuthInput,
+  type CompleteConnectorOAuthOutput,
+  CONNECTOR_OAUTH_CALLBACK_APP_PATH,
   type ConnectorAuthorizationOutput,
   type ConnectorDefinition,
   type ConnectorInstallation,
@@ -105,6 +107,7 @@ import {
 } from './domain/personal-credential-policy'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
 import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-projection'
+import { resolveTrustedRequestSource } from '../../infrastructure/http/trusted-request-source'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
 
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
@@ -113,10 +116,10 @@ export const PUBLIC_API_RATE_LIMIT = 120
 /** Maximum accepted public API request body size. */
 const PUBLIC_API_BODY_MAX_BYTES = 10 * 1024 * 1024
 
-/** OAuth token endpoint が一 client ID に許可する1分あたりの request 数です。 */
+/** OAuth token endpoint が secret を確認できた一 client ID に許可する1分あたりの request 数です。 */
 export const OAUTH_TOKEN_CLIENT_RATE_LIMIT = 30
 
-/** OAuth token endpoint が一 source IP に許可する1分あたりの request 数です。 */
+/** OAuth token endpoint が信頼できる一 client IP に許可する1分あたりの request 数です（secret 確認前に数える）。 */
 export const OAUTH_TOKEN_IP_RATE_LIMIT = 60
 
 /** Public Work Item page の既定件数です。 */
@@ -684,23 +687,32 @@ export interface ConnectorAuthorizationService {
     input: CreateConnectorInstallationInput,
     operationId?: string,
   ): Promise<ConnectorAuthorizationOutput>
-  /** Signed single-use state と authorization code を検証して OAuth callback を完了します。 */
-  completeCallback(input: {
-    /** Provider が発行した authorization code です。 */
-    code: string
-    /** Authorization 開始時に作成した signed state です。 */
-    state: string
-  }): Promise<{
+  /**
+   * Signed single-use state と authorization code を検証し、flow を開始した user として
+   * OAuth callback を完了します。
+   */
+  completeCallback(
+    input: {
+      /** Provider が発行した authorization code です。 */
+      code: string
+      /** Authorization 開始時に作成した signed state です。 */
+      state: string
+    },
+    actor: DeveloperManagementPrincipal,
+  ): Promise<{
     /** 作成または復旧した secret-free installation です。 */
     installation: ConnectorInstallation
     /** 検証済み application-relative return URL です。 */
     returnUrl: string
   }>
-  /** Provider denial 時も signed state を consume し、検証済み return URL を返します。 */
-  abortCallback(input: {
-    /** Authorization 開始時に作成した signed state です。 */
-    state: string
-  }): Promise<{
+  /** Provider denial 時も flow 開始者の signed state を consume し、検証済み return URL を返します。 */
+  abortCallback(
+    input: {
+      /** Authorization 開始時に作成した signed state です。 */
+      state: string
+    },
+    actor: DeveloperManagementPrincipal,
+  ): Promise<{
     /** 検証済み application-relative return URL です。 */
     returnUrl: string
   }>
@@ -781,6 +793,16 @@ export type PublicApiDependencies = {
   queueWebhookDelivery?(workspaceId: string, deliveryId: string): Promise<void>
   /** Connector OAuth と sync-conflict recovery の optional provider adapter です。 */
   connectorAuthorization?: ConnectorAuthorizationService
+  /**
+   * Lists the providers configured in this runtime. The connector catalog shows only these
+   * providers, and shows none when this dependency is omitted.
+   */
+  listConfiguredConnectorProviders?(): Promise<readonly ConnectorProvider[]>
+  /**
+   * Provider redirect URI が Web app と別の API origin を指す場合に、OAuth callback を引き渡す
+   * Web app の origin です。省略時は callback と同じ origin の Web app へ引き渡します。
+   */
+  connectorOAuthWebOrigin?: string
   /** Existing domain error を stable public error へ変換します。 */
   mapError?(error: unknown): PublicApiServiceError | undefined
   /** Test で request ID を固定する generator です。 */
@@ -970,22 +992,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.post('/v1/oauth/token', async (c) => {
     setSecretResponseHeaders(c)
-    const clientIp = readTrustedClientIp(c)
-    if (clientIp) {
-      await enforceOAuthTokenRateLimit(
-        c,
-        dependencies,
-        `ip:${digestRateLimitSubject(clientIp)}`,
-        OAUTH_TOKEN_IP_RATE_LIMIT,
-      )
-    }
-    const input = await readOAuthTokenInput(c)
+    // Without a trusted address (for example under the Bun server, which has no Lambda request
+    // context) every such request shares one bucket, so wrong secrets stay bounded there too.
     await enforceOAuthTokenRateLimit(
       c,
       dependencies,
-      `client:${digestRateLimitSubject(input.clientId)}`,
-      OAUTH_TOKEN_CLIENT_RATE_LIMIT,
+      `ip:${digestRateLimitSubject(resolveTrustedRequestSource(c))}`,
+      OAUTH_TOKEN_IP_RATE_LIMIT,
     )
+    const input = await readOAuthTokenInput(c)
     if (input.grantType !== 'client_credentials') {
       throw new PublicApiServiceError(400, 'invalid_request', 'grant_type must be client_credentials.')
     }
@@ -993,6 +1008,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       clientId: input.clientId,
       clientSecret: input.clientSecret,
       ...(input.scopes.length > 0 ? { scopes: input.scopes } : {}),
+      // The client bucket counts only callers that proved the secret, so knowing the public
+      // client_id is not enough to lock the client out. Wrong secrets count against the IP bucket.
+      // It is keyed on the verified app's internal ID, so nothing from the request body is hashed.
+      admitVerifiedClient: (client) => enforceOAuthTokenRateLimit(
+        c,
+        dependencies,
+        `client:${client.oauthAppId}`,
+        OAUTH_TOKEN_CLIENT_RATE_LIMIT,
+      ),
     })
     return c.json({
       access_token: token.accessToken,
@@ -2025,10 +2049,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     ) {
       throw new PublicApiServiceError(400, 'invalid_request', 'Connector category is invalid.')
     }
+    const configuredProviders = new Set(
+      await dependencies.listConfiguredConnectorProviders?.() ?? [],
+    )
     return c.json(
-      category === undefined
-        ? connectorCatalog
-        : connectorCatalog.filter((connector) => connector.category === category),
+      connectorCatalog.filter((connector) =>
+        configuredProviders.has(connector.provider) &&
+        (category === undefined || connector.category === category)
+      ),
     )
   })
 
@@ -2040,13 +2068,69 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       throw unavailableManagementMutation('Connector OAuth callback')
     }
     const state = readOAuthCallbackValue(c.req.query('state'), 'OAuth state', 2_048)
+    const fragment = new URLSearchParams({ state })
     if (c.req.query('error') !== undefined) {
-      const result = await dependencies.connectorAuthorization.abortCallback({ state })
-      return c.redirect(appendConnectorCallbackOutcome(result.returnUrl, 'cancelled'), 303)
+      fragment.set('cancelled', 'true')
+    } else {
+      fragment.set(
+        'code',
+        readOAuthCallbackValue(c.req.query('code'), 'OAuth authorization code', 8_192),
+      )
     }
-    const code = readOAuthCallbackValue(c.req.query('code'), 'OAuth authorization code', 8_192)
-    const result = await dependencies.connectorAuthorization.completeCallback({ code, state })
-    return c.redirect(appendConnectorCallbackOutcome(result.returnUrl, 'connected'), 303)
+    // The provider redirect carries no Mukuroji credential, so completing here would let anyone
+    // holding the authorization URL install their provider account. Hand the values to the Web app
+    // in the fragment, which is not sent to servers or in Referer, and let the signed-in user who
+    // started the flow complete it.
+    return c.redirect(
+      `${dependencies.connectorOAuthWebOrigin ?? ''}${CONNECTOR_OAUTH_CALLBACK_APP_PATH}` +
+        `#${fragment.toString()}`,
+      303,
+    )
+  })
+
+  router.post('/developer/connector-oauth/complete', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    c.header('Pragma', 'no-cache')
+    const principal = await requireManagementCapability(c, dependencies, 'canManageIntegrations')
+    const input = readCompleteConnectorOAuthInput(await readJson(c))
+    if (!dependencies.connectorAuthorization) {
+      readIdempotencyKey(c.req.header('Idempotency-Key'))
+      throw unavailableManagementMutation('Connector OAuth completion')
+    }
+    // The state names one single-use flow, so it identifies the request without keeping a
+    // digest of the provider's authorization code in the idempotency record.
+    const fingerprint = {
+      state: input.state,
+      outcome: input.code === undefined ? 'cancelled' : 'connected',
+    }
+    return executeManagementIdempotentJson(
+      c,
+      dependencies,
+      principal,
+      fingerprint,
+      async () => {
+        if (input.code === undefined) {
+          const result = await dependencies.connectorAuthorization!.abortCallback(
+            { state: input.state },
+            principal,
+          )
+          const body: CompleteConnectorOAuthOutput = {
+            outcome: 'cancelled',
+            returnUrl: appendConnectorCallbackOutcome(result.returnUrl, 'cancelled'),
+          }
+          return { status: 200, body }
+        }
+        const result = await dependencies.connectorAuthorization!.completeCallback(
+          { code: input.code, state: input.state },
+          principal,
+        )
+        const body: CompleteConnectorOAuthOutput = {
+          outcome: 'connected',
+          returnUrl: appendConnectorCallbackOutcome(result.returnUrl, 'connected'),
+        }
+        return { status: 200, body }
+      },
+    )
   })
 
   router.get('/developer/connector-installations', async (c) => {
@@ -2819,26 +2903,6 @@ async function enforceOAuthTokenRateLimit(
       true,
     )
   }
-}
-
-function readTrustedClientIp(c: Context) {
-  const environment = isObjectRecord(c.env) ? c.env : undefined
-  const event = environment && isObjectRecord(environment.event)
-    ? environment.event
-    : undefined
-  const requestContext = event && isObjectRecord(event.requestContext)
-    ? event.requestContext
-    : undefined
-  const http = requestContext && isObjectRecord(requestContext.http)
-    ? requestContext.http
-    : undefined
-  if (typeof http?.sourceIp !== 'string') return undefined
-  const normalized = http.sourceIp.trim()
-  return isIP(normalized) !== 0 ? normalized : undefined
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function digestRateLimitSubject(value: string) {
@@ -3807,6 +3871,51 @@ function readConnectorProvider(value: unknown): ConnectorProvider {
     throw new PublicApiServiceError(400, 'validation_failed', 'Connector provider is invalid.')
   }
   return provider as ConnectorProvider
+}
+
+/**
+ * Validates the Web app's request to complete a connector OAuth flow.
+ *
+ * @param value - Parsed JSON request body.
+ * @returns The signed state with exactly one of an authorization code or a cancellation marker.
+ */
+function readCompleteConnectorOAuthInput(value: unknown): CompleteConnectorOAuthInput {
+  const body = requireRecord(value, 'Connector OAuth completion input is required.')
+  assertAllowedFields(
+    body,
+    ['state', 'code', 'cancelled'],
+    'Connector OAuth completion input',
+  )
+  const state = readOAuthCompletionValue(body.state, 'OAuth state', 2_048)
+  if (body.cancelled !== undefined) {
+    if (body.cancelled !== true || body.code !== undefined) {
+      throw new PublicApiServiceError(
+        400,
+        'validation_failed',
+        'Specify either an OAuth authorization code or cancelled: true.',
+      )
+    }
+    return { state, cancelled: true }
+  }
+  return {
+    state,
+    code: readOAuthCompletionValue(body.code, 'OAuth authorization code', 8_192),
+  }
+}
+
+/**
+ * Reads one OAuth callback value forwarded by the Web app.
+ *
+ * @param value - Untrusted JSON value.
+ * @param label - Field label used in the validation error.
+ * @param maximumLength - Largest accepted length.
+ * @returns The validated value.
+ */
+function readOAuthCompletionValue(value: unknown, label: string, maximumLength: number) {
+  if (typeof value !== 'string') {
+    throw new PublicApiServiceError(400, 'validation_failed', `${label} is invalid.`)
+  }
+  return readOAuthCallbackValue(value, label, maximumLength)
 }
 
 function readConnectorAuthorizationInput(value: unknown): CreateConnectorInstallationInput {

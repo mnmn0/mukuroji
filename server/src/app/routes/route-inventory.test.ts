@@ -9,15 +9,18 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(492)
-  expect(new Set(inventory).size).toBe(488)
+  expect(inventory).toHaveLength(501)
+  expect(new Set(inventory).size).toBe(497)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
+  expect(inventory).toContain('PATCH /api/teams/:teamId/workload/requests/:requestId')
   expect(inventory).not.toContain('GET /api/dashboard/summary')
   expect(inventory).toContain('GET /api/work-items/keys/:key')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/key')
   expect(inventory).toContain('GET /api/teams/:teamId/work-item-hierarchy')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/schedule-baseline')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/schedule-baseline')
   // A Work Item may be named `hierarchy`, so the Team hierarchy must not sit under `/issues/`.
   expect(inventory).not.toContain('GET /api/teams/:teamId/issues/hierarchy')
   expect(inventory).toContain('GET /api/teams/:teamId/issues/:issueId/children/open-count')
@@ -77,6 +80,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-runs')
+  expect(inventory).toContain('GET /api/teams/:teamId/agent-runs/analytics')
   expect(inventory).toContain('POST /api/teams/:teamId/agent-runs/:runId/release')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-settings')
   expect(inventory).toContain('PUT /api/teams/:teamId/agent-settings')
@@ -88,6 +92,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/me/preferences')
   expect(inventory).toContain('GET /api/developer/credential-policy')
   expect(inventory).toContain('PUT /api/developer/credential-policy')
+  expect(inventory).toContain('GET /api/teams/:teamId/notification-reminders')
+  expect(inventory).toContain('PUT /api/teams/:teamId/notification-reminders')
+  expect(inventory).toContain('POST /api/developer/connector-oauth/complete')
   // Team and Project IDs never change, so renaming is a PATCH on the stable resource.
   expect(inventory).toContain('GET /api/teams/directory')
   expect(inventory).toContain('PUT /api/teams/order')
@@ -96,10 +103,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/teams/:teamId/project-order')
   expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId')
   expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId/restore')
+  expect(inventory).toContain('POST /api/enterprise/security/role-assignments')
+  expect(inventory).toContain('DELETE /api/enterprise/security/role-assignments/:assignmentId')
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'b294c8bec3eba952f56e74f7d12bf80dfc63f59868c681091203904743fb7e3c',
+    '85d6f7457d92a836ece8a512f0349474607ca3daa0e3ad1a657862ffd4555508',
   )
 })

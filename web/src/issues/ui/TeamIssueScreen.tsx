@@ -148,6 +148,8 @@ type TeamIssueActionContextMenuState = {
   returnFocusElement: HTMLElement
   /** Revision-bound target selected by this row or card entrance. */
   selection: WorkItemActionSelection
+  /** Work Item the menu was opened on; screen-owned actions such as Duplicate read it. */
+  issue: TeamIssue
 }
 
 /** Context retained while a canonical Team Create action is being accepted. */
@@ -1300,6 +1302,7 @@ export function TeamIssueScreen({
     }))
     setTaskActionContextMenuState({
       anchorPoint,
+      issue,
       returnFocusElement,
       selection: createFocusedTaskViewActionSelection({
         expectedRevision: issue.revision,
@@ -1319,6 +1322,15 @@ export function TeamIssueScreen({
       taskActionContextMenuState.selection,
     )
   }, [taskActionContextMenuState, teamActions])
+
+  const menuIssue = taskActionContextMenuState?.issue
+  const taskActionContextMenuExtraActions = useMemo(() => onCreateIssue && menuIssue
+    ? [{
+        id: 'duplicate',
+        label: t('issues.duplicate.menuAction'),
+        onSelect: () => handleDuplicateIssue(menuIssue),
+      }]
+    : [], [handleDuplicateIssue, menuIssue, onCreateIssue, t])
 
   useEffect(() => {
     /**
@@ -1778,6 +1790,7 @@ export function TeamIssueScreen({
             labels={teamActionLabels}
             menuLabel={t('tasks.action.more')}
             onClose={() => setTaskActionContextMenuState(undefined)}
+            extraActions={taskActionContextMenuExtraActions}
             onExecute={handleTeamIssueActionMenuExecute}
             registry={teamActions.registry}
             returnFocusElement={taskActionContextMenuState.returnFocusElement}

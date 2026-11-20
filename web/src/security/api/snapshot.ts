@@ -3,6 +3,12 @@ import type { EnterpriseDomainClaim } from './domains'
 import { EnterpriseSecurityApiError } from './errors'
 import type { EnterpriseGroupRoleMapping } from './groupRoleMappings'
 import type { EnterpriseIdentityProvider } from './identityProvider'
+import {
+  isEnterpriseAssignableMember,
+  isEnterpriseMemberRoleAssignment,
+  type EnterpriseAssignableMember,
+  type EnterpriseMemberRoleAssignment,
+} from './memberRoleAssignments'
 import type { EnterpriseProvisioningLog, EnterpriseScimConfiguration } from './provisioning'
 import type { EnterpriseAssignableRoleIds, EnterprisePermissionDefinition, EnterpriseRoleDefinition } from './roles'
 import type { EnterpriseServiceAccount } from './serviceAccounts'
@@ -78,6 +84,10 @@ export type EnterpriseSecuritySnapshot = {
   provisioningLogs: EnterpriseProvisioningLog[]
   /** Directory group role mapping 一覧です。 */
   mappings: EnterpriseGroupRoleMapping[]
+  /** Member 個人へ直接割り当てた role 一覧です。 */
+  memberRoleAssignments: EnterpriseMemberRoleAssignment[]
+  /** Role を割り当てられる active member 一覧です。 */
+  members: EnterpriseAssignableMember[]
   /** Built-in/custom role 一覧です。 */
   roles: EnterpriseRoleDefinition[]
   /** Role editor で選べる permission catalog です。 */
@@ -163,6 +173,10 @@ function parseEnterpriseSecuritySnapshot(data: unknown) {
         isRecord(mapping) &&
         typeof mapping.identityProviderId === 'string',
     ) ||
+    !Array.isArray(data.memberRoleAssignments) ||
+    !data.memberRoleAssignments.every(isEnterpriseMemberRoleAssignment) ||
+    !Array.isArray(data.members) ||
+    !data.members.every(isEnterpriseAssignableMember) ||
     !Array.isArray(data.roles) ||
     !data.roles.every(
       (role) =>
@@ -210,6 +224,10 @@ function parseEnterpriseSecuritySnapshot(data: unknown) {
           : '',
     } as EnterpriseIdentityProvider,
     mappings: data.mappings as EnterpriseGroupRoleMapping[],
+    memberRoleAssignments: data.memberRoleAssignments.filter(
+      isEnterpriseMemberRoleAssignment,
+    ),
+    members: data.members.filter(isEnterpriseAssignableMember),
     permissions: data.permissions as EnterprisePermissionDefinition[],
     provisioningLogs: Array.isArray(data.provisioningLogs)
       ? (data.provisioningLogs as EnterpriseProvisioningLog[])
@@ -341,12 +359,17 @@ function isEnterpriseAssignableRoleIds(
   }
 
   const groupMappings = value.groupMappings
+  const members = value.members
 
   return (
     ['workspace', 'team', 'project'].every((scope) =>
       isStringArray(groupMappings[scope]),
     ) &&
-    isStringArray(value.serviceAccounts)
+    isStringArray(value.serviceAccounts) &&
+    isRecord(members) &&
+    ['workspace', 'team', 'project'].every((scope) =>
+      isStringArray(members[scope]),
+    )
   )
 }
 

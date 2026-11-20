@@ -207,7 +207,10 @@ Credential の quota は API key では key ごと、OAuth access token では�
 
 Client は `Retry-After` を優先し、値が無い retryable error では full jitter 付き exponential backoff を使う。`401`、`403`、validation error、idempotency conflict は自動 retry しない。
 
-IP 単位の token endpoint rate limit は Lambda event の `requestContext.http.sourceIp` だけを信頼する。Internet client が指定できる `Forwarded`、`X-Forwarded-For`、`X-Real-IP` は rate-limit identity に使わない。
+Token endpoint（`POST /v1/oauth/token`）は 2 種類の 1 分 window で制限する。
+
+- IP 単位（60 回）: client secret の確認前に、すべての request を数える。IP は CloudFront 経由なら origin secret で検証した viewer address（`x-mukuroji-viewer-address`）、HTTP API を直接呼んだ場合は Lambda event の `requestContext.http.sourceIp` を使う。信頼できる address がない request（Bun server など）は 1 つの bucket を共有する。Internet client が指定できる `Forwarded`、`X-Forwarded-For`、`X-Real-IP` は rate-limit identity に使わない。例外として、`MUKUROJI_REQUEST_TRUSTED_PROXY_ADDRESSES` に登録した proxy から届いた request に限り、`X-Forwarded-For` の先頭の値を使う。この proxy は client が送った転送 header を捨てるか上書きし、自分が見た接続元だけを先頭に置く必要がある。
+- Client 単位（30 回）: client secret と OAuth app の状態を確認できた request だけを数える。公開値の `client_id` を知っているだけの第三者が、誤った secret でその client の token 取得を止めることはできない。誤った secret の試行は IP 単位の制限で抑える。そのため、同じ IP（Bun server では送信元が分からない request 全体）から誤った secret で 60 回試行されると、その window の間は正しい secret を持つ client の request も IP 単位の制限で `429` になる。
 
 ## Signed webhook
 
@@ -229,6 +232,8 @@ Subscription 作成時は `teamIds` を必須とし、作成者がその時点�
 Connector installation は `connected`、`needs-reauth`、`degraded`、`disconnected`、`conflict` の状態を持つ。Access token 失効や consent 変更は `needs-reauth`、一時的な provider error は `degraded`、管理者による切断は `disconnected`、双方向更新の衝突は `conflict` とする。Credential や provider response body は `lastError` に含めず、redact 済み `ApiProblem` だけを保存する。
 
 Provider ごとの OAuth/pull/push/revoke 実装は `ConnectorAdapter` 境界の後ろに登録する。管理 API は provider token を response や log に露出せず、永続化した installation/link/conflict と current RBAC だけを扱う。
+
+Provider の OAuth callback（`GET /api/developer/connector-oauth/callback`）は Mukuroji の認証情報を持たないため flow を完了しない。state と code（provider が拒否した場合は `cancelled=true`）を URL fragment に載せて Web の `/settings/connectors/oauth-callback` へ 303 で引き渡し、Web が利用者の Bearer token で `POST /api/developer/connector-oauth/complete` を呼ぶ。Server は state を consume したあと、flow を開始した Workspace と user が呼び出し元と一致しなければ 403 を返し、state は再利用できなくなる。Provider の redirect URI が Web と別 origin の API を指す場合は、API の `CONNECTOR_OAUTH_WEB_ORIGIN` に Web の origin を設定する。判断の経緯は [ADR 0014](adr/0014-bind-connector-oauth-callback-to-initiator.md)。
 
 復旧手順は次のとおり。
 

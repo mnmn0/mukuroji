@@ -45,7 +45,7 @@ import {
   workspaceDependencies,
 } from './app-dependencies'
 import { ENTERPRISE_SERVICE_ACCOUNT_SNAPSHOT_RETRY_LIMIT } from './constants'
-import { resolveTrustedRequestSource } from './request-source'
+import { resolveTrustedRequestSource } from '../../infrastructure/http/trusted-request-source'
 import { getAwsRegion, getEnv, trimTrailingSlash } from './runtime-config'
 import { decodeJwtPayload } from './token-claims'
 
@@ -739,11 +739,14 @@ export async function assertEnterpriseCognitoSsoAppClient(
  * @param snapshot - Enterprise identity snapshot.
  * @param principalId - Principal ID.
  * @param email - Member email address.
+ * @param options - `includeOptionalSsoDomains` also checks the provider of a verified domain that
+ *   does not enforce SSO, for a session that signed in through SSO.
  */
 export async function assertEnterpriseRuntimeCognitoProviders(
   snapshot: EnterpriseIdentitySnapshot,
   principalId: string,
   email: string,
+  options: { includeOptionalSsoDomains?: boolean } = {},
 ) {
   const normalizedPrincipalId = principalId.trim().toLowerCase()
   const providerIds = new Set(
@@ -757,11 +760,13 @@ export async function assertEnterpriseRuntimeCognitoProviders(
   )
   const emailDomain = normalizeEnterpriseEmailDomain(email)
   for (const domain of snapshot.domains) {
-    if (
-      domain.status !== 'verified' ||
-      !domain.enforceSso ||
-      domain.domain !== emailDomain
-    ) continue
+    if (domain.status !== 'verified' || domain.domain !== emailDomain) continue
+    if (!domain.enforceSso) {
+      if (options.includeOptionalSsoDomains && domain.identityProviderId) {
+        providerIds.add(domain.identityProviderId)
+      }
+      continue
+    }
     if (!domain.identityProviderId) {
       throw new EnterpriseIdentityError(
         503,

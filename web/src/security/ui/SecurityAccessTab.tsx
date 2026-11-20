@@ -2,8 +2,10 @@ import { useState, type FormEvent } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type {
   CreateEnterpriseGroupRoleMappingInput,
+  CreateEnterpriseMemberRoleAssignmentInput,
   CreateEnterpriseRoleInput,
   EnterpriseGroupRoleMapping,
+  EnterpriseMemberRoleAssignment,
   EnterpriseRoleDefinition,
   EnterpriseRoleImpact,
   EnterpriseSecuritySnapshot,
@@ -32,6 +34,7 @@ import {
   EnterpriseSecurityReadOnlyNotice,
   EnterpriseSecuritySectionHeader,
 } from './EnterpriseSecurityFields'
+import { SecurityMemberRoleAssignments } from './SecurityMemberRoleAssignments'
 
 /**
  * Renders directory-group mappings and custom-role permission editors.
@@ -45,8 +48,10 @@ export function SecurityAccessTab({
   snapshot,
   t,
   onCreateMapping,
+  onCreateMemberRoleAssignment,
   onCreateRole,
   onDeleteMapping,
+  onDeleteMemberRoleAssignment,
   onPreviewRoleImpact,
   onRequestDeleteRole,
   onRequestUpdateRole,
@@ -60,9 +65,15 @@ export function SecurityAccessTab({
   onCreateMapping?: (
     input: CreateEnterpriseGroupRoleMappingInput,
   ) => Promise<unknown>
+  onCreateMemberRoleAssignment?: (
+    input: CreateEnterpriseMemberRoleAssignmentInput,
+  ) => Promise<unknown>
   onCreateRole?: (input: CreateEnterpriseRoleInput) => Promise<unknown>
   onDeleteMapping?: (
     mapping: EnterpriseGroupRoleMapping,
+  ) => Promise<unknown>
+  onDeleteMemberRoleAssignment?: (
+    assignment: EnterpriseMemberRoleAssignment,
   ) => Promise<unknown>
   onPreviewRoleImpact?: (
     role: EnterpriseRoleDefinition,
@@ -597,6 +608,15 @@ export function SecurityAccessTab({
           ) : null}
         </div>
       </section>
+
+      <SecurityMemberRoleAssignments
+        busyOperation={busyOperation}
+        scopeOptions={scopeOptions}
+        snapshot={snapshot}
+        t={t}
+        onCreateMemberRoleAssignment={onCreateMemberRoleAssignment}
+        onDeleteMemberRoleAssignment={onDeleteMemberRoleAssignment}
+      />
 
       <section className="overflow-hidden rounded-lg border border-[var(--workbench-border)] bg-surface">
         <EnterpriseSecuritySectionHeader

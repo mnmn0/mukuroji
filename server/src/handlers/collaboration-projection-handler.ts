@@ -22,6 +22,7 @@ import {
   DynamoDbWorkspaceSearchClient,
 } from '../modules/workspace-search/workspace-search'
 import { loadServerConfig } from '../infrastructure/config/server-config'
+import { createConfiguredTimesheetReminderRevalidator } from '../app/composition/timesheet-reminders'
 
 const deletedFileCleanup = createDefaultDeletedFileCleanupDependencies()
 const workspaceSearchTableName = readOptionalEnvironment('WORKSPACE_SEARCH_TABLE_NAME')
@@ -36,6 +37,10 @@ const enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'> 
   enterpriseIdentityTableName
     ? new DynamoDbEnterpriseIdentityReadClient(enterpriseIdentityTableName)
     : undefined
+
+const timesheetReminders = createConfiguredTimesheetReminderRevalidator(
+  readOptionalEnvironment('ANALYTICS_TABLE_NAME'),
+)
 
 const curatedContextSearch = {
   /** Upserts the latest canonical non-superseded context item into Workspace search. */
@@ -148,6 +153,7 @@ export async function handler(event: DynamoStreamEvent) {
     curatedContextSearch,
     enterpriseIdentity,
     realtime,
+    ...(timesheetReminders ? { timesheetReminders } : {}),
   })
 }
 

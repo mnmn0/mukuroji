@@ -1,6 +1,4 @@
-import { createHash } from 'node:crypto'
 import type { Context, Hono } from 'hono'
-import { getConnInfo } from 'hono/aws-lambda'
 import type {
   AccountSecurityStatus,
   SoftwareTokenSetupStart,
@@ -46,7 +44,12 @@ import {
   readMfaRequirement,
 } from '../shared/account-security'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
-import { createAuthenticationResponse } from '../shared/authentication-session'
+import { consumeAuthenticationAttempt } from '../shared/authentication-attempt-limit'
+import { createAuthenticationResponse, toProjectPrincipal } from '../shared/authentication-session'
+import {
+  readCognitoAccessTokenUser,
+  requireEnterpriseSsoSessionAttestation,
+} from '../shared/cognito-access-token-user'
 import {
   isEnterpriseSsoConfigured,
   toEnterpriseIdentityErrorResponse,
@@ -72,49 +75,20 @@ const maxPasswordLength = 256
 /** Longest Cognito challenge session the API accepts. */
 const maxSessionLength = 4_096
 
-/** Requests allowed per client and email address in one rate-limit window. */
+/** Requests allowed per client address and email address in one rate-limit window. */
 const attemptLimits = {
-  'password-reset-request': { attempts: 5, windowMs: 15 * 60_000 },
-  'password-reset-confirm': { attempts: 10, windowMs: 15 * 60_000 },
-  'mfa-setup-verify': { attempts: 10, windowMs: 5 * 60_000 },
+  'password-reset-request': { attempts: 5, windowSeconds: 15 * 60 },
+  'password-reset-confirm': { attempts: 10, windowSeconds: 15 * 60 },
+  'mfa-setup-verify': { attempts: 10, windowSeconds: 5 * 60 },
 } as const
 
-/** Kind of request that the in-process rate limit counts separately. */
+/** Kind of request that the rate limit counts separately. */
 type AttemptScope = keyof typeof attemptLimits
-
-/** Attempts counted per hashed client and email key, oldest first. */
-const attemptCounters = new Map<string, { attempts: number; resetAt: number }>()
-
-/**
- * Most keys the rate limit keeps, so that many distinct addresses cannot grow memory without
- * bound. When it is full, new keys are refused until expired ones are swept.
- */
-const maxAttemptCounters = 10_000
-
-/** Shortest interval between sweeps of expired rate-limit keys. */
-const attemptSweepIntervalMs = 60_000
-
-/** When expired rate-limit keys were last swept. */
-let lastAttemptSweepAt = 0
-
-/**
- * Drops expired rate-limit keys, at most once a minute.
- *
- * @param now - Current time in milliseconds.
- */
-function sweepExpiredAttemptCounters(now: number) {
-  if (Math.abs(now - lastAttemptSweepAt) < attemptSweepIntervalMs) return
-  lastAttemptSweepAt = now
-  for (const [candidate, state] of attemptCounters) {
-    if (state.resetAt <= now) attemptCounters.delete(candidate)
-  }
-}
 
 /**
  * Counts one attempt and reports whether it is still within the limit.
  *
- * The count lives in this process only, like the MFA challenge limit; Cognito applies its own
- * per-user limits behind it.
+ * The count is shared by every API instance; Cognito applies its own per-user limits behind it.
  *
  * @param c - Hono request context.
  * @param scope - Kind of request.
@@ -122,40 +96,7 @@ function sweepExpiredAttemptCounters(now: number) {
  * @returns Whether the attempt is allowed and, if not, when to retry.
  */
 function consumeAttempt(c: Context, scope: AttemptScope, subject: string) {
-  const { attempts, windowMs } = attemptLimits[scope]
-  let transportSource = 'transport-unavailable'
-  try {
-    transportSource = getConnInfo(c).remote.address ?? transportSource
-  } catch {
-    // Unit tests and non-server adapters do not always expose connection metadata.
-  }
-  const key = createHash('sha256')
-    .update(`${scope}\0${transportSource}\0${subject}`)
-    .digest('base64url')
-  const now = Date.now()
-  const stored = attemptCounters.get(key)
-  const current = stored && stored.resetAt > now ? stored : undefined
-  if (current && current.attempts >= attempts) {
-    return {
-      allowed: false as const,
-      retryAfterSeconds: Math.max(1, Math.ceil((current.resetAt - now) / 1_000)),
-    }
-  }
-  if (stored && !current) attemptCounters.delete(key)
-  sweepExpiredAttemptCounters(now)
-  if (!current && attemptCounters.size >= maxAttemptCounters) {
-    // Evicting live counters would let a flood of addresses reset a subject's limit, so new
-    // keys wait until expired ones are swept instead.
-    return {
-      allowed: false as const,
-      retryAfterSeconds: Math.ceil(attemptSweepIntervalMs / 1_000),
-    }
-  }
-  attemptCounters.set(key, {
-    attempts: (current?.attempts ?? 0) + 1,
-    resetAt: current?.resetAt ?? now + windowMs,
-  })
-  return { allowed: true as const, retryAfterSeconds: 0 }
+  return consumeAuthenticationAttempt(c, scope, subject, attemptLimits[scope])
 }
 
 /**
@@ -313,7 +254,11 @@ async function readCognitoCaller(c: Context) {
   const accessToken = readBearerAccessToken(c)
   if (!accessToken) return undefined
   validateConfiguredCognitoAccessToken(accessToken)
-  const user = await authenticationDependencies.cognito.getUser(accessToken)
+  const user = await readCognitoAccessTokenUser(accessToken)
+  await requireEnterpriseSsoSessionAttestation(
+    accessToken,
+    toProjectPrincipal(user, accessToken).directoryId,
+  )
   return { accessToken, user }
 }
 
@@ -352,7 +297,7 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     if (!email) {
       return c.json({ code: 'InvalidPasswordResetRequest' as const, message: 'A valid email address is required.' }, 400)
     }
-    const limit = consumeAttempt(c, 'password-reset-request', email)
+    const limit = await consumeAttempt(c, 'password-reset-request', email)
     if (!limit.allowed) return rateLimitedResponse(c, limit.retryAfterSeconds)
 
     try {
@@ -384,7 +329,7 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
         message: 'Email, the emailed code, and a new password are required.',
       }, 400)
     }
-    const limit = consumeAttempt(c, 'password-reset-confirm', email)
+    const limit = await consumeAttempt(c, 'password-reset-confirm', email)
     if (!limit.allowed) return rateLimitedResponse(c, limit.retryAfterSeconds)
 
     try {
@@ -501,7 +446,7 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
     try {
       const caller = await readCognitoCaller(c)
       if (!caller) return c.json({ message: 'Bearer token is required.' }, 401)
-      const limit = consumeAttempt(c, 'mfa-setup-verify', caller.user.Username ?? caller.accessToken)
+      const limit = await consumeAttempt(c, 'mfa-setup-verify', caller.user.Username ?? caller.accessToken)
       if (!limit.allowed) return rateLimitedResponse(c, limit.retryAfterSeconds)
       await confirmSoftwareTokenEnrollment(
         createSoftwareTokenEnrollmentPorts(authenticationDependencies.cognito),
@@ -527,7 +472,7 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
 
     try {
       validateConfiguredCognitoAccessToken(accessToken)
-      const user = await authenticationDependencies.cognito.getUser(accessToken)
+      const user = await readCognitoAccessTokenUser(accessToken)
       await authenticateWorkspacePrincipal(accessToken, user, c)
       const { policy, mfaRequired } = await readMfaRequirement(user, accessToken)
       await removeSoftwareToken(createSoftwareTokenRemovalPorts(authenticationDependencies.cognito), {
@@ -596,7 +541,7 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
         message: 'Email, challenge session, and the 6-digit code are required.',
       }, 400)
     }
-    const limit = consumeAttempt(c, 'mfa-setup-verify', email)
+    const limit = await consumeAttempt(c, 'mfa-setup-verify', email)
     if (!limit.allowed) return rateLimitedResponse(c, limit.retryAfterSeconds)
 
     try {

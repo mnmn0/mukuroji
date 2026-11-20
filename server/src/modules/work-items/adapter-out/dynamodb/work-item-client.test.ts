@@ -14,6 +14,7 @@ import {
   createMutationAuditContext,
 } from '../../../audit/audit'
 import { ProjectDataError } from '../../../directory'
+import { createWorkItemNotificationScheduleShard } from '../../work-item-notification-schedule-index'
 import {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
@@ -1395,7 +1396,10 @@ test('DynamoDB Work Item creation persists a Customer preparation marker for com
     statusCategory: 'completed',
     customerCompletionPreparationAt: expect.any(String),
     customerCompletionPreparationRevision: 1,
+    notificationScheduleShard: expect.stringMatching(/^work-item-schedule-\d{2}$/),
   })
+  // A completed Work Item is not in the notification due index.
+  expect(item).not.toHaveProperty('notificationDueKey')
 })
 
 test('duplicate Triage context is atomically guarded and de-identified on the Work Item', () => {
@@ -2520,6 +2524,10 @@ test('DynamoDB Work Item clears the Customer completion marker when leaving comp
   // Reopening restarts overdue escalation, which is keyed by this time.
   if (typeof reopenUpdateExpression !== 'string') throw new Error('Expected the update expression')
   expect(reopenUpdateExpression).toContain('#reopenedAt = :reopenedAt')
+  // A started Work Item is read by every schedule run for the stale reminder.
+  expect(reopenUpdateExpression).toContain('#notificationDueKey = :notificationDueKey')
+  expect(reopenValues?.[':notificationDueKey']).toBe('0000-00-00')
+  expect(updated.issue).not.toHaveProperty('notificationDueKey')
   if (typeof reopenedAt !== 'string' || typeof reopenUpdatedAt !== 'string') {
     throw new Error('Expected the reopen and update timestamps')
   }
@@ -2874,7 +2882,13 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
             workspaceId: 'FENCE#workspace-1',
             recordKey: 'META',
           },
-          UpdateExpression: expect.stringContaining('ADD #revision :increment'),
+          // The counter tells this Work Item advance apart from Planning changes.
+          UpdateExpression: expect.stringContaining(
+            'ADD #revision :increment, #sourceRevisionCount :increment',
+          ),
+          ExpressionAttributeNames: expect.objectContaining({
+            '#sourceRevisionCount': 'sourceRevisionCount',
+          }),
         }),
       },
     ])
@@ -3655,6 +3669,19 @@ test('DynamoDB Work Item schedule cascade writes one bounded transaction with un
       expect(transactItems).toHaveLength(auditEnabled ? 13 : 11)
       expect(transactItems.filter((item) => item.Update?.TableName === 'IssuesTable'))
         .toHaveLength(2)
+      // The cascade moves each open Work Item to its new deadline in the notification index.
+      expect(transactItems.find((item) => item.Update?.Key?.issueId === 'root')?.Update)
+        .toMatchObject({
+          UpdateExpression: expect.stringContaining('#notificationDueKey = :notificationDueKey'),
+          ExpressionAttributeValues: expect.objectContaining({
+            ':notificationScheduleShard': createWorkItemNotificationScheduleShard(
+              'workspace-1',
+              'core-team',
+              'root',
+            ),
+            ':notificationDueKey': '2026-07-21',
+          }),
+        })
       expect(transactItems).toContainEqual(expect.objectContaining({
         ConditionCheck: expect.objectContaining({
           TableName: 'IssuesTable',

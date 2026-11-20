@@ -38,6 +38,12 @@ import {
 } from '../../canonical-work-item'
 import { isStoredContributorAssignmentList } from '../../domain/contributor-assignments'
 import { isStoredAcceptanceCriterionList } from '../../domain/acceptance-criteria'
+import {
+  WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_INDEX_NAME,
+  WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME,
+  createWorkItemNotificationScheduleAttributes,
+  createWorkItemNotificationScheduleUpdate,
+} from '../../work-item-notification-schedule-index'
 import { createResourceId } from '../../domain/resource-id'
 import {
   WORK_ITEM_ACTUAL_DATE_FIELDS,
@@ -129,7 +135,9 @@ const CREATED_WORK_ITEM_ID_ATTEMPT_LIMIT = 5
  *
  * The Planning revision is also the bounded source-version fence for roll-ups. Updating it
  * in the same transaction as every canonical Work Item mutation lets a Planning publish use
- * one condition instead of one condition per source Work Item.
+ * one condition instead of one condition per source Work Item. `sourceRevisionCount` counts
+ * these advances so Planning edits that do not depend on Work Items can tell them apart from
+ * Planning changes and are not rejected by them.
  *
  * @param planningTableName - Optional Planning table configured for the runtime.
  * @param workspaceId - Workspace whose canonical Work Item projection changes.
@@ -149,7 +157,7 @@ function createPlanningRevisionIncrementTransactionItem(
       UpdateExpression:
         'SET #entryType = if_not_exists(#entryType, :entryType), ' +
         '#schemaVersion = if_not_exists(#schemaVersion, :schemaVersion), ' +
-        '#updatedAt = :updatedAt ADD #revision :increment',
+        '#updatedAt = :updatedAt ADD #revision :increment, #sourceRevisionCount :increment',
       ConditionExpression:
         '(attribute_not_exists(#entryType) AND ' +
         'attribute_not_exists(#schemaVersion) AND attribute_not_exists(#revision)) OR (' +
@@ -160,6 +168,7 @@ function createPlanningRevisionIncrementTransactionItem(
         '#schemaVersion': 'schemaVersion',
         '#updatedAt': 'updatedAt',
         '#revision': 'revision',
+        '#sourceRevisionCount': 'sourceRevisionCount',
       },
       ExpressionAttributeValues: {
         ':entryType': 'planning-meta',
@@ -617,6 +626,10 @@ type TeamIssueItem = {
   customerCompletionPreparationAt?: string
   /** Work Item revision captured by the Customer completion preparation marker. */
   customerCompletionPreparationRevision?: number
+  /** Stable shard of the notification schedule indexes. */
+  notificationScheduleShard?: string
+  /** Due-index sort key; present only while the notification schedule must evaluate the row. */
+  notificationDueKey?: string
 }
 
 /**
@@ -2256,6 +2269,12 @@ export class DynamoDbTeamIssuesClient {
         item.customerCompletionPreparationAt = now
         item.customerCompletionPreparationRevision = item.revision
       }
+      Object.assign(item, createWorkItemNotificationScheduleAttributes(
+        directoryId,
+        teamId,
+        issueId,
+        { statusCategory, dueDate },
+      ))
       Object.assign(item, applyWorkItemStatusTransitionToActualDates(
         {},
         undefined,
@@ -2567,6 +2586,12 @@ export class DynamoDbTeamIssuesClient {
         ...(dueDateChanged ? { dueDateUpdatedAt: occurredAt } : {}),
         updatedAt: occurredAt,
       }
+      const notificationSchedule = createWorkItemNotificationScheduleUpdate(
+        directoryId,
+        update.teamId,
+        update.workItemId,
+        afterIssue,
+      )
       const eventItem = this.createIssueEventItem({
         directoryId,
         teamId: update.teamId,
@@ -2600,7 +2625,15 @@ export class DynamoDbTeamIssuesClient {
           cascadeSize: updates.length,
         },
       })
-      return { update, expectedRevision, afterIssue, eventItem, auditPut, dueDateChanged }
+      return {
+        update,
+        expectedRevision,
+        afterIssue,
+        eventItem,
+        auditPut,
+        dueDateChanged,
+        notificationSchedule,
+      }
     }))
     const authorizationConditionEntries = createAuthorizationSnapshotConditionEntries(
       authorizationSnapshot,
@@ -2657,7 +2690,11 @@ export class DynamoDbTeamIssuesClient {
           UpdateExpression:
             'SET #schemaVersion = :schemaVersion, #revision = :nextRevision, ' +
             '#schedule = :schedule, #dueDate = :dueDate, #updatedAt = :updatedAt' +
-            (entry.dueDateChanged ? ', #dueDateUpdatedAt = :dueDateUpdatedAt' : ''),
+            (entry.dueDateChanged ? ', #dueDateUpdatedAt = :dueDateUpdatedAt' : '') +
+            `, ${entry.notificationSchedule.setExpressions.join(', ')}` +
+            (entry.notificationSchedule.removeExpressions.length > 0
+              ? ` REMOVE ${entry.notificationSchedule.removeExpressions.join(', ')}`
+              : ''),
           ExpressionAttributeNames: {
             '#schemaVersion': 'schemaVersion',
             '#revision': 'revision',
@@ -2667,6 +2704,7 @@ export class DynamoDbTeamIssuesClient {
             ...(entry.dueDateChanged
               ? { '#dueDateUpdatedAt': 'dueDateUpdatedAt' }
               : {}),
+            ...entry.notificationSchedule.expressionAttributeNames,
           },
           ExpressionAttributeValues: {
             ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
@@ -2676,6 +2714,7 @@ export class DynamoDbTeamIssuesClient {
             ':dueDate': entry.afterIssue.dueDate,
             ':updatedAt': occurredAt,
             ...(entry.dueDateChanged ? { ':dueDateUpdatedAt': occurredAt } : {}),
+            ...entry.notificationSchedule.expressionAttributeValues,
           },
           ConditionExpression:
             'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
@@ -3066,6 +3105,20 @@ export class DynamoDbTeamIssuesClient {
           setExpressions.push(`#${field} = :${field}`)
         }
       }
+      const notificationSchedule = createWorkItemNotificationScheduleUpdate(
+        directoryId,
+        teamId,
+        issueId,
+        {
+          archivedAt: nextArchivedAt,
+          statusCategory: nextStatusCategory,
+          dueDate: expressionAttributeValues[':dueDate'],
+        },
+      )
+      Object.assign(expressionAttributeNames, notificationSchedule.expressionAttributeNames)
+      Object.assign(expressionAttributeValues, notificationSchedule.expressionAttributeValues)
+      setExpressions.push(...notificationSchedule.setExpressions)
+      removeExpressions.push(...notificationSchedule.removeExpressions)
       const updateExpression = [
         `SET ${setExpressions.join(', ')}`,
         removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
@@ -3945,12 +3998,31 @@ async function ensureLocalTeamIssuesTable(
           { AttributeName: 'sortOrder', AttributeType: 'N' },
           { AttributeName: 'directoryProjectId', AttributeType: 'S' },
           { AttributeName: 'updatedAt', AttributeType: 'S' },
+          { AttributeName: 'notificationScheduleShard', AttributeType: 'S' },
+          { AttributeName: 'notificationDueKey', AttributeType: 'S' },
+          { AttributeName: 'customerCompletionPreparationAt', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
           { AttributeName: 'issueId', KeyType: 'RANGE' },
         ],
         GlobalSecondaryIndexes: [
+          {
+            IndexName: WORK_ITEM_NOTIFICATION_DUE_INDEX_NAME,
+            KeySchema: [
+              { AttributeName: 'notificationScheduleShard', KeyType: 'HASH' },
+              { AttributeName: 'notificationDueKey', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'ALL' },
+          },
+          {
+            IndexName: WORK_ITEM_CUSTOMER_COMPLETION_PREPARATION_INDEX_NAME,
+            KeySchema: [
+              { AttributeName: 'notificationScheduleShard', KeyType: 'HASH' },
+              { AttributeName: 'customerCompletionPreparationAt', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'KEYS_ONLY' },
+          },
           {
             IndexName: 'TeamIssueSortOrderIndex',
             KeySchema: [
