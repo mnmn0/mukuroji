@@ -391,6 +391,8 @@ export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
  *   `approvals` for the manager queue, or `report` for totals.
  * @param weekStart - Monday of the week as `YYYY-MM-DD`; omitted for the current week. Not used by `report`.
  * @param report - Period and grouping of the `report` view; omitted for the current week by day.
+ * @param exactWeek - Opens the week starting exactly on `weekStart`, even when the Workspace now
+ *   starts weeks on another day; used to reopen a weekly report saved under an earlier setting.
  * @returns Same-origin path.
  */
 export function createTeamTimeTrackingPath(
@@ -398,6 +400,7 @@ export function createTeamTimeTrackingPath(
   view: 'timesheet' | 'weekly-report' | 'team-weekly-reports' | 'approvals' | 'report' = 'timesheet',
   weekStart?: string,
   report?: { from: string; to: string; groupBy: string },
+  exactWeek = false,
 ) {
   const query = new URLSearchParams()
   if (view !== 'timesheet') query.set('view', view)
@@ -409,6 +412,7 @@ export function createTeamTimeTrackingPath(
     }
   } else if (weekStart) {
     query.set('week', weekStart)
+    if (exactWeek) query.set('exactWeek', '1')
   }
   const encoded = query.toString()
   return `/teams/${encodeURIComponent(teamId)}/timesheet${encoded ? `?${encoded}` : ''}`

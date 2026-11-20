@@ -405,7 +405,11 @@ export async function submitWeeklyReportUseCase<TCallerCheck, TAudit>(
   if (previous?.lastSubmissionKey === mutation.submissionKey) {
     throw new ProjectDataError(409, 'WeeklyReportIdempotencyConflict', 'This Idempotency-Key was already used for another submission.')
   }
-  if (previousCount !== request.expectedSubmissionCount) throw staleWeek()
+  // A stale count means another submission; a stale revision means notes saved elsewhere that
+  // this submission would replace.
+  if (previousCount !== request.expectedSubmissionCount || (previous?.revision ?? 0) !== request.expectedRevision) {
+    throw staleWeek()
+  }
   if (previousCount >= WEEKLY_REPORT_MAX_SUBMISSIONS) {
     throw new ProjectDataError(413, 'WeeklyReportSubmissionLimit', `A week can be submitted at most ${WEEKLY_REPORT_MAX_SUBMISSIONS} times.`)
   }

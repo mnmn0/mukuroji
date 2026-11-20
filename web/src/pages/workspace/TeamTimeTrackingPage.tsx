@@ -1,3 +1,4 @@
+import { isWeeklyReportDate, isWorkspaceWeekStartDay, type WorkspaceWeekStartDay } from '@mukuroji/contracts'
 import { useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
@@ -20,6 +21,18 @@ import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
 const emptyTeamProjects: ProjectDirectoryProject[] = []
+
+/**
+ * Reads the weekday of a `YYYY-MM-DD` date.
+ *
+ * @param date - Date from the URL.
+ * @returns The weekday, 0 (Sunday) to 6, or undefined for a missing or invalid date.
+ */
+function readDateWeekday(date: string | undefined): WorkspaceWeekStartDay | undefined {
+  if (!date || !isWeeklyReportDate(date)) return undefined
+  const weekday = new Date(`${date}T00:00:00.000Z`).getUTCDay()
+  return isWorkspaceWeekStartDay(weekday) ? weekday : undefined
+}
 
 /**
  * Renders a Team's time tracking: the member's weekly timesheet and weekly report, the managers'
@@ -53,6 +66,13 @@ export function TeamTimeTrackingPage() {
   const weekStartDay = calendarSettings.settings?.weekStartDay
   const requestedWeek = searchParams.get('week') ?? undefined
   const weekStart = resolveWeekStart(requestedWeek, undefined, weekStartDay)
+  // A weekly report opened from its history keeps the week it was saved under, even when the
+  // Workspace has since moved its week start to another day.
+  const exactReportWeekDay = view === 'weekly-report' && searchParams.get('exactWeek') === '1'
+    ? readDateWeekday(requestedWeek)
+    : undefined
+  const reportWeekStartDay = exactReportWeekDay ?? weekStartDay
+  const reportWeekStart = exactReportWeekDay === undefined ? weekStart : resolveWeekStart(requestedWeek, undefined, exactReportWeekDay)
   // Until the week start is known, view tabs keep the requested week as is, so a provisional
   // Monday-based date never replaces it in the URL.
   const linkWeek = calendarSettings.settings ? weekStart : requestedWeek
@@ -182,15 +202,17 @@ export function TeamTimeTrackingPage() {
           <PersonalWeeklyReportContainer
             accessToken={accessToken}
             hasWorkItemError={Boolean(myWorkItems.error)}
-            key={`${teamId}:weekly-report:${weekStart}`}
+            key={`${teamId}:weekly-report:${reportWeekStart}`}
             locale={workspace.locale}
             memberKey={workspace.userKey}
             onMoveWeek={moveWeek}
-            onOpenWeek={(nextWeekStart) => open('weekly-report', nextWeekStart)}
+            onOpenWeek={(nextWeekStart) => {
+              void navigate(createTeamTimeTrackingPath(teamId, 'weekly-report', nextWeekStart, undefined, true), { replace: true })
+            }}
             onRetryWorkItems={() => { void myWorkItems.mutate().catch(() => undefined) }}
             teamId={teamId}
-            weekStart={weekStart}
-            weekStartDay={calendarSettings.settings.weekStartDay}
+            weekStart={reportWeekStart}
+            weekStartDay={reportWeekStartDay ?? calendarSettings.settings.weekStartDay}
             workItems={myWorkItems.data}
             workItemTitles={workItemTitles}
           />

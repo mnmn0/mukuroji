@@ -56,6 +56,8 @@ export type SaveWeeklyReportDraftRequest = {
 export type SubmitWeeklyReportRequest = {
   /** Number of versions already submitted for the week, as last read; guards against double submission. */
   expectedSubmissionCount: number
+  /** Saved revision the submitted notes were edited from; 0 when nothing was saved. Guards against replacing notes saved elsewhere. */
+  expectedRevision: number
   /** Work Items listed in each section, in display order. */
   sections: Record<WeeklyReportSectionName, WeeklyReportItemInput[]>
   /** Recorded time per Work Item, largest first. */
@@ -322,6 +324,10 @@ export function parseSubmitWeeklyReportRequest(value: unknown): WeeklyReportPars
   if (typeof expected !== 'number' || !Number.isSafeInteger(expected) || expected < 0) {
     return { ok: false, message: 'expectedSubmissionCount must be a non-negative integer.' }
   }
+  const expectedRevision = value.expectedRevision
+  if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    return { ok: false, message: 'expectedRevision must be a non-negative integer.' }
+  }
   const rawSections = value.sections
   if (!isRecord(rawSections)) return { ok: false, message: 'sections must be an object.' }
   const completed = parseItemInputs(rawSections.completed ?? [], 'sections.completed')
@@ -357,6 +363,7 @@ export function parseSubmitWeeklyReportRequest(value: unknown): WeeklyReportPars
     ok: true,
     value: {
       expectedSubmissionCount: expected,
+      expectedRevision,
       sections,
       time: time.value,
       totalMinutes: value.totalMinutes,

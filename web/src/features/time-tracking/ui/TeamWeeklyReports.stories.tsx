@@ -30,6 +30,7 @@ const meta = {
     onSelectMember: fn(),
     onMoveWeek: fn(),
     onRetry: fn(),
+    onRetrySelectedReport: fn(),
   },
 } satisfies Meta<typeof TeamWeeklyReports>
 

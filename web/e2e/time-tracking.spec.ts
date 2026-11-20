@@ -111,7 +111,7 @@ async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
       state.weeklyReports[weekStart] = { ...stored, revision: stored.revision + 1, notes: input.notes }
       return respond(memberKey, weekStart)
     }
-    if (input.expectedSubmissionCount !== stored.submissions.length) return route.fulfill({ status: 409, json: { code: 'WeeklyReportConflict' } })
+    if (input.expectedSubmissionCount !== stored.submissions.length || input.expectedRevision !== stored.revision) return route.fulfill({ status: 409, json: { code: 'WeeklyReportConflict' } })
     state.weeklyReports[weekStart] = { revision: stored.revision + 1, notes: input.notes, submissions: [...stored.submissions, { notes: input.notes, sections: input.sections }] }
     return respond(memberKey, weekStart, 201)
   })

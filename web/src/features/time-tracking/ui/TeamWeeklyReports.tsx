@@ -37,6 +37,8 @@ export type TeamWeeklyReportsProps = {
   onMoveWeek: (weeks: number) => void
   /** Retries the failed reads. */
   onRetry: () => void
+  /** Reads the selected member's report again after it failed. */
+  onRetrySelectedReport: () => void
 }
 
 /**
@@ -55,6 +57,7 @@ export function TeamWeeklyReports({
   members,
   onMoveWeek,
   onRetry,
+  onRetrySelectedReport,
   onSelectMember,
   selectedMemberKey,
   selectedReport,
@@ -116,7 +119,10 @@ export function TeamWeeklyReports({
               <>
                 <h3 className="text-base font-semibold text-[var(--workbench-text)]">{nameOf(selected)}</h3>
                 {hasSelectedReportError ? (
-                  <p className="text-sm font-semibold text-fg-red-700" role="alert">{t('timeTracking.teamWeeklyReports.reportLoadError')}</p>
+                  <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
+                    <span>{t('timeTracking.teamWeeklyReports.reportLoadError')}</span>
+                    <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetrySelectedReport} type="button">{t('timeTracking.retry')}</button>
+                  </div>
                 ) : !selectedReport ? (
                   <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('timeTracking.weeklyReport.loading')}</p>
                 ) : selectedReport.submission ? (

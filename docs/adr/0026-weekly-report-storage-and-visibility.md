@@ -31,6 +31,7 @@
 
 - 所感の保存は週の行の `revision` を CAS にする。
 - 提出は1つの transaction で、週の行の `submissionCount` を CAS で1増やし（所感も同時に保存）、
+  提出する所感が編集を始めた時点の `revision` も照合して、別の画面で保存された所感を黙って置き換えない。
   提出版の行を追加し、呼び出し元の membership / Enterprise revision の fence と audit event を入れる。
   1週あたりの提出は 10 版まで。同じ Idempotency-Key の再送は、週の行に残した最後の提出の receipt で見分けて保存済みの版を返す。
 - 自分の履歴は `begins_with(…#MEMBER#<memberKey>#W#)` の Query を新しい週から読む（ページ送り付き）。

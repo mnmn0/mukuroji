@@ -48,11 +48,13 @@ function request(path: string, method = 'GET', body?: unknown, idempotencyKey?: 
  *
  * @param expectedSubmissionCount - Versions already submitted.
  * @param reflection - Reflection note.
+ * @param expectedRevision - Saved revision the notes were edited from.
  * @returns The body.
  */
-function submission(expectedSubmissionCount: number, reflection = 'Good week') {
+function submission(expectedSubmissionCount: number, reflection = 'Good week', expectedRevision = expectedSubmissionCount) {
   return {
     expectedSubmissionCount,
+    expectedRevision,
     sections: {
       completed: [{ workItemId: 'item-visible', minutes: 90 }],
       started: [{ workItemId: 'item-other-project', minutes: 30 }],
@@ -88,7 +90,7 @@ test('saves notes, submits versions, and lists the history of the author', async
   const stale = await request(`${OWN_PATH}/draft`, 'PUT', { expectedRevision: 0, notes: { issues: 'Other', reflection: '' } })
   expect(stale.status).toBe(409)
 
-  const submitted = await request(`${OWN_PATH}/submissions`, 'POST', submission(0), 'submit-1')
+  const submitted = await request(`${OWN_PATH}/submissions`, 'POST', submission(0, 'Good week', 1), 'submit-1')
   expect(submitted.status).toBe(201)
   const report = await submitted.json() as WeeklyReportResponse
   expect(report.submissionCount).toBe(1)
@@ -108,18 +110,23 @@ test('saves notes, submits versions, and lists the history of the author', async
     totalMinutes: 120,
   })
 
-  const retried = await request(`${OWN_PATH}/submissions`, 'POST', submission(0), 'submit-1')
+  const retried = await request(`${OWN_PATH}/submissions`, 'POST', submission(0, 'Good week', 1), 'submit-1')
   expect(retried.status).toBe(201)
   expect((await retried.json() as WeeklyReportResponse).submission).toEqual(report.submission)
 
-  const reusedKey = await request(`${OWN_PATH}/submissions`, 'POST', submission(1, 'Changed'), 'submit-1')
+  const reusedKey = await request(`${OWN_PATH}/submissions`, 'POST', submission(1, 'Changed', 2), 'submit-1')
   expect(reusedKey.status).toBe(409)
   expect(await reusedKey.json()).toMatchObject({ code: 'WeeklyReportIdempotencyConflict' })
 
-  const staleCount = await request(`${OWN_PATH}/submissions`, 'POST', submission(0, 'Again'), 'submit-2')
+  const staleCount = await request(`${OWN_PATH}/submissions`, 'POST', submission(0, 'Again', 2), 'submit-2')
   expect(staleCount.status).toBe(409)
 
-  const second = await request(`${OWN_PATH}/submissions`, 'POST', submission(1, 'Fixed a typo'), 'submit-3')
+  // Notes saved elsewhere after this editor read revision 1 are not replaced by a submission.
+  const staleNotes = await request(`${OWN_PATH}/submissions`, 'POST', submission(1, 'Old text', 1), 'submit-stale-notes')
+  expect(staleNotes.status).toBe(409)
+  expect(await staleNotes.json()).toMatchObject({ code: 'WeeklyReportConflict' })
+
+  const second = await request(`${OWN_PATH}/submissions`, 'POST', submission(1, 'Fixed a typo', 2), 'submit-3')
   expect(second.status).toBe(201)
   expect(await second.json()).toMatchObject({ submissionCount: 2, submission: { version: 2, notes: { reflection: 'Fixed a typo' } } })
 
@@ -238,6 +245,19 @@ test('hides a member outside the manager\'s Projects from that manager', async (
   })
   expect((await request(`/api/teams/core-team/weekly-reports/outsider@example.com/${WEEK}`)).status).toBe(404)
   expect((await request('/api/teams/core-team/weekly-reports/outsider@example.com')).status).toBe(404)
+})
+
+test('does not let a legacy membership of a Project ID several Teams share prove Team membership', async () => {
+  configureFakeProjectClients(true, {
+    projectAccesses: [{ projectId: 'refero', role: 'manager', teamId: 'core-team' }],
+    projectAccessesByMember: {
+      'legacy@example.com': [{ projectId: 'refero', role: 'member' }],
+      'qualified@example.com': [{ projectId: 'refero', role: 'member', teamId: 'core-team' }],
+    },
+    additionalTeams: [{ id: 'other-team', name: 'Other Team', projects: [{ id: 'refero', name: 'Other Refero', tone: 'green' }] }],
+  })
+  expect((await request(`/api/teams/core-team/weekly-reports/legacy@example.com/${WEEK}`)).status).toBe(404)
+  expect((await request(`/api/teams/core-team/weekly-reports/qualified@example.com/${WEEK}`)).status).toBe(200)
 })
 
 test('refuses a submission past the most versions of a week', async () => {

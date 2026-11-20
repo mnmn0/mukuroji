@@ -237,6 +237,7 @@ function WeeklyReportComposer({
         : await onSubmit(toSubmitWeeklyReportRequest(report, notes, {
             timeIsPartial: isPartial,
             expectedSubmissionCount: savedReport.submissionCount,
+            expectedRevision: editor.baseRevision,
           }))
       setMessage(result === 'done'
         ? { tone: 'status', text: t(action === 'save' ? 'timeTracking.weeklyReport.saved' : 'timeTracking.weeklyReport.submittedMessage') }

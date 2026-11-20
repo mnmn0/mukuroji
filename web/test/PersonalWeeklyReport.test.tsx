@@ -341,6 +341,8 @@ describe('PersonalWeeklyReport', () => {
   test('has its own time tracking URL', () => {
     expect(createTeamTimeTrackingPath('core-team', 'weekly-report', '2026-11-09'))
       .toBe('/teams/core-team/timesheet?view=weekly-report&week=2026-11-09')
+    expect(createTeamTimeTrackingPath('core-team', 'weekly-report', '2026-11-09', undefined, true))
+      .toBe('/teams/core-team/timesheet?view=weekly-report&week=2026-11-09&exactWeek=1')
   })
 })
 
@@ -400,9 +402,11 @@ describe('toSubmitWeeklyReportRequest', () => {
     const request = toSubmitWeeklyReportRequest(report, { issues: ' Blocked ', reflection: '' }, {
       timeIsPartial: true,
       expectedSubmissionCount: 1,
+      expectedRevision: 3,
     })
 
     expect(request.expectedSubmissionCount).toBe(1)
+    expect(request.expectedRevision).toBe(3)
     expect(request.timeIsPartial).toBe(true)
     expect(request.notes).toEqual({ issues: 'Blocked', reflection: '' })
     expect(request.sections.completed).toEqual(report.completed.map((item) => ({ workItemId: item.id, minutes: item.minutes })))
@@ -436,6 +440,7 @@ describe('TeamWeeklyReports', () => {
       onSelectMember: () => undefined,
       onMoveWeek: () => undefined,
       onRetry: () => undefined,
+      onRetrySelectedReport: () => undefined,
       t: en,
     }
     const listed = renderToStaticMarkup(<TeamWeeklyReports {...props} isForbidden={false} members={teamWeeklyReportFixtureMembers} />)

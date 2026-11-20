@@ -19,6 +19,7 @@ import { createPlanningCallerAuthorizationConditionChecks } from '../shared/plan
 import {
   canAccessAssignedProject,
   createApiMutationContext,
+  readLegacyProjectScopeAccesses,
   requireTeamPermission,
   requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
@@ -26,7 +27,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import { projectAccessAppliesToTeam, type TeamPermissionContext } from '../shared/workspace-access'
+import type { TeamPermissionContext } from '../shared/workspace-access'
 
 /** Most Work Items resolved at once while a report is submitted. */
 const RESOLVE_CONCURRENCY = 8
@@ -279,10 +280,12 @@ async function managesMember(principal: WorkspacePrincipal, teamId: string, memb
   if (!context) return false
   if (managesWholeTeam(principal, context)) return true
   const teamProjectIds = new Set(context.team.projects.map((project) => project.id))
-  const memberAccesses = await workspaceDependencies.projectDirectory.getProjectAccessList(principal.directoryId, memberKey)
+  // Legacy memberships are qualified against the directory; one whose Project ID several Teams
+  // share is dropped, so it never proves membership in this Team.
+  const memberAccesses = await readLegacyProjectScopeAccesses({ directoryId: principal.directoryId, userKey: memberKey })
   return memberAccesses.some((access) =>
     access.role !== undefined &&
-    projectAccessAppliesToTeam(access, teamId) &&
+    access.teamId === teamId &&
     teamProjectIds.has(access.projectId) &&
     canAccessAssignedProject(principal, context, access.projectId, 'manager'))
 }

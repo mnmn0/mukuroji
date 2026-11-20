@@ -60,6 +60,7 @@ export function TeamWeeklyReportsContainer({
       members={status.data?.members}
       onMoveWeek={onMoveWeek}
       onRetry={() => { void status.mutate().catch(() => undefined) }}
+      onRetrySelectedReport={() => { void selectedReport.mutate().catch(() => undefined) }}
       onSelectMember={setSelectedMemberKey}
       selectedMemberKey={selectedMemberKey}
       selectedReport={selectedReport.data}

@@ -281,16 +281,18 @@ export function formatPersonalWeeklyReportMarkdown(
  * @param options - Submission options.
  * @param options.timeIsPartial - Whether only part of the time entries could be read.
  * @param options.expectedSubmissionCount - Versions already submitted for the week, as last read.
+ * @param options.expectedRevision - Saved revision the notes were edited from.
  * @returns The request body.
  */
 export function toSubmitWeeklyReportRequest(
   report: PersonalWeeklyReport,
   notes: PersonalWeeklyReportNotes,
-  options: { timeIsPartial: boolean; expectedSubmissionCount: number },
+  options: { timeIsPartial: boolean; expectedSubmissionCount: number; expectedRevision: number },
 ): SubmitWeeklyReportRequest {
   const rows = (items: readonly PersonalWeeklyReportItem[]) => items.map((item) => ({ workItemId: item.id, minutes: item.minutes }))
   return {
     expectedSubmissionCount: options.expectedSubmissionCount,
+    expectedRevision: options.expectedRevision,
     sections: {
       completed: rows(report.completed),
       started: rows(report.started),
