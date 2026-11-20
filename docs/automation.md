@@ -133,7 +133,7 @@ Operation 状態は `running`、`succeeded`、`partial`、`failed`、`undone` �
 
 Operation ID と downstream mutation key は開始 actor に束縛する。Retry/undo は operation を開始した member だけが実行でき、管理者 override は設けない。各再実行では owner の現在の Team/Project 権限も再検証する。同じ apply の再配送で durable operation が `running` の場合は残った `ready` item から CAS 付きで再開する。Item mutation または undo の commit 後に応答が失われた場合は、保存済み before snapshot、deterministic mutation key、期待 revision のちょうど 1 増加、適用後 state の一致を確認して成功を回収する。
 
-Archive は hard delete ではなく reversible archive metadata を Work Item に保存する。通常 list/search は archived item を除外し、audit/detail/undo は保持する。
+Archive は hard delete ではなく reversible archive metadata を Work Item に保存する。通常 list/search は archived item を除外し、audit/detail/undo は保持する。未 archive の子を持つ親の archive は `WorkItemActiveChildren`、親が archive 済みの Work Item の復元は `WorkItemParentArchived` の conflict として item 単位で失敗する。同じ operation の同じ Team の item は相手として数えないので、親子をまとめた archive・復元は通る（[Work Items](work-items.md#archive復元と階層633)）。
 
 ## API
 
