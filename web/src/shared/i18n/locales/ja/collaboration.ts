@@ -209,6 +209,8 @@ export const collaborationMessages = {
   'collaboration.activity.watchUnsubscribed': '{actor} がウォッチを解除しました。',
   'collaboration.activity.workItemCreated': '{actor} が Work Item を作成しました。',
   'collaboration.activity.workItemUpdated': '{actor} が Work Item を更新しました。',
+  'collaboration.activity.workItemArchived': '{actor} が Work Item をアーカイブしました。',
+  'collaboration.activity.workItemRestored': '{actor} が Work Item を復元しました。',
   'collaboration.activity.parentChanged': '{actor} が親を変更しました。',
   'collaboration.activity.childAdded': '{actor} が子を追加しました。',
   'collaboration.activity.childRemoved': '{actor} が子を外しました。',

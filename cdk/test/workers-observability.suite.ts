@@ -442,7 +442,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   template.hasOutput('EnterpriseScimGroupJobDlqUrl', {});
 });
 
-test('analytics scheduled delivery reauthorizes source data without consuming the audit stream', () => {
+test('analytics scheduled delivery reauthorizes source data and notifies through the audit outbox without consuming it', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
   const analyticsTableLogicalId = template.toJSON().Outputs.AnalyticsTableName?.Value?.Ref;
@@ -479,6 +479,7 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
         ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
         ANALYTICS_TABLE_NAME: { Ref: analyticsTableLogicalId },
         AUDIT_EVENTS_TABLE_NAME: { Ref: auditTableLogicalId },
+        AUDIT_RETENTION_DAYS: { Ref: 'AuditRetentionDays' },
         COGNITO_CLIENT_ID: COGNITO_USER_POOL_CLIENT_ID_VALUE,
         COGNITO_USER_POOL_ID: COGNITO_USER_POOL_ID_VALUE,
         PROJECT_DIRECTORY_TABLE_NAME: { Ref: projectDirectoryTableLogicalId },
@@ -536,8 +537,10 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
     'dynamodb:PutItem',
     'dynamodb:Query',
   ]));
+  // Query reads history through the entity index; PutItem writes the conditional
+  // delivery-notification outbox event for each authorized recipient.
   expect(new Set(actionsForResource(auditTableLogicalId))).toEqual(
-    new Set(['dynamodb:Query']),
+    new Set(['dynamodb:Query', 'dynamodb:PutItem']),
   );
   expect(new Set(actionsForResource(projectDirectoryTableLogicalId))).toEqual(
     new Set(['dynamodb:Query']),

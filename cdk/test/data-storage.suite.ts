@@ -408,6 +408,9 @@ test('analytics state is retained with a due-delivery index and scoped API acces
       (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
     )?.[1];
   expect(JSON.stringify(apiAnalyticsPolicy)).toContain(analyticsTableLogicalId);
+  // Time entry writes recheck month close rows with a ConditionCheck inside their transaction.
+  expect(JSON.stringify(apiAnalyticsPolicy)).toContain('dynamodb:ConditionCheckItem');
+  expect(JSON.stringify(apiAnalyticsPolicy)).toContain('dynamodb:EnclosingOperation');
 
   const apiTransactionConditionCheckPolicy = Object.entries(template.toJSON().Resources)
     .find(([logicalId, resource]) =>

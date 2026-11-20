@@ -1,4 +1,4 @@
-# 0026. Data migration を operator が起動する Lambda で実行し、実行者を presigned STS proof で確かめる
+# 0031. Data migration を operator が起動する Lambda で実行し、実行者を presigned STS proof で確かめる
 
 - 状態: 提案
 - 日付: 2026-11-20

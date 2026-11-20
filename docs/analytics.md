@@ -218,9 +218,22 @@ artifact renderer はその前に実行する副作用のない検証処理で�
 行いません。Renderer に失敗した場合は snapshot/receipt を保存せず、recipientの途中で失敗した
 場合も schedule cursor を進めません。Lambda retryでは既存 snapshot/receiptを冪等に再利用します。
 
-Emailなど外部providerへの送信を追加する場合は、純粋rendererへ副作用を混ぜず、transactional
-outboxまたは明示的なdelivery state machine、recipient認可、retry、bounce、secret管理を別途
-実装してください。Analytics LambdaをAuditEvents streamの3つ目のdirect consumerにはしません。
+受信者への通知は、receipt の保存後に recipient ごとに1件の audit outbox event
+（`analytics.report.delivered`）を AuditEvents へ条件付き put して行います。通知は常に保存済み receipt
+の snapshot を指します。通知に失敗すると schedule cursor は進まず、retry では完了済み receipt から同じ
+通知を書き直します。Event ID は receipt の occurrence key から決まるため重複しません。既存の
+collaboration projection がこの event を受信者の Inbox 行に変え、受信者が通知設定で Slack / Email を
+有効にしていれば同じ channel delivery queue に載せます。Event は report ID を entity、snapshot ID を
+target に持ち、`/reports?v=1&report=<id>&snapshot=<id>` を deep link にします。Team visibility の
+report は event に Team ID を載せ、projection と外部送信の直前に recipient の Team access を再確認します。
+Report と同じく、Team の Project のどれかを読めれば Team access ありとします。Shared / personal report
+の外部送信は、Enterprise の Work Item 閲覧権限が Workspace・Team・Project のどれか1つにあれば送ります。
+
+Inbox は表示のたびに report を読み直し、report が削除されたか recipient が現在の visibility
+（personal は owner、team は Team の参照権限、shared は Workspace member）を満たさない場合は通知を
+隠し、表示名は現在の report 名に置き換えます。Link 先の snapshot 一覧は従来どおり recipient の
+現在の permission scope と一致する snapshot だけを返します。Analytics Lambda は AuditEvents に
+書くだけで、AuditEvents stream の direct consumer にはしません。
 
 Schedule failure は非同期retry後にencrypted SQS DLQへ入り、visible message数の
 CloudWatch alarmで検出します。同じ occurrence を手動再実行してもreceiptにより重複配信しません。

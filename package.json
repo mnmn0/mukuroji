@@ -57,6 +57,7 @@
     "web:visual:docker": "sh scripts/run-visual-regression-in-container.sh",
     "web:budget": "bun scripts/check-web-bundle-budget.ts",
     "web:budget:test": "bun test scripts/check-web-bundle-budget.test.ts",
+    "web:csp-meta:test": "bun test scripts/inject-web-csp-meta.test.ts",
     "web:storybook": "bun --filter web storybook",
     "web:build-storybook": "bun --filter web build-storybook",
     "server:dev": "bun --env-file=.env --env-file=.floci/generated/cognito.env --env-file=.floci/generated/services.env --filter server dev",

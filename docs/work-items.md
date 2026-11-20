@@ -132,6 +132,18 @@ Project ごとに最新の schedule baseline を 1 つ保存できる（#336 の
 
 Relation の正本は `WorkItemConfigurationTable` の Relation Graph row であり、Work Item row の `relationIds` は検索と backfill のための派生 projection である。Relation の作成・削除 transaction は、graph metadata と reciprocal row に加えて source / target 両方の `relationIds` を同時に更新する。この projection 更新では Work Item の `revision` と `updatedAt` を進めない。
 
+### 削除と参照の掃除（#633）
+
+Work Item の削除は Public API の `DELETE /api/v1/work-items/{id}` だけで行う（Web は archive だけを出す）。削除は次を Work Item row の削除と同じ DynamoDB transaction で確定し、どれかが確定できなければ削除しない。
+
+- 子（`child` relation）を持つ Work Item は削除しない（`409`）。archive 済みの子も数える。消すと子が存在しない親を指して残るためである。
+- Relation Graph: 削除する Work Item が source の row と、その reciprocal row をすべて消し、graph の `revision` を 1 つ進めて `edgeCount` を減らす。相手側の `relationIds` は、削除する Work Item への relation を除いた値に書き換える（相手の `revision` は進めず、読んだ値のままであることを条件にする）。親の `relationIds` は子を持たないので書き換えない。relation がない Work Item も graph の `revision` を確認するので、準備の後に relation が付いた場合は削除しない。
+- 子の復元を数える guard row（`CHILD_RESTORE#<id>`、[archive・復元と階層](#archive復元と階層633)）: 削除する Work Item の row を消す。
+- Collection: Workspace の全 Collection row を strongly consistent に読み、削除する Work Item を参照する row を、参照を除いて次の `revision` で書き直す（読んだ `revision` を条件にする）。
+- 準備の後に relation・相手の Work Item・Collection が変わった場合は `409 WorkItemDeletionReferencesChanged` で、読み直してやり直す。掃除の write が 80 件を超えると 1 transaction に収まらないため `409` で拒否する。
+- 相手側の Work Item の activity には relation の削除を記録しない（削除の audit event は削除した Work Item に残る）。
+- 準備の read の後に別の人が同じ Work Item を Collection に追加した場合、その参照は掃除されない。Collection の一覧は削除済みの Work Item を省くので表示には出ない。
+
 ## Configuration と mutation
 
 Work Item configuration は Workspace default、Team override、built-in default の順で解決する。作成時に `workflowStatusId` を省略した場合は、解決済み workflow の `initialStatusId` を使用する。指定した status ID と custom field value は同じ解決済み configuration に対して検証する。
@@ -308,6 +320,17 @@ Web の Project 画面（`TaskPage`）は、表示中のレイアウトに合わ
 - 木と WBS 番号は archive されていない Team の全 Work Item から作るので、誰が読んでも同じ番号になる。応答には読める Work Item だけを入れる。親を読めない Work Item は `parentWorkItemId: null` と `parentHidden: true` を持ち（Web はその階層を変えさせない）、`depth` は読める祖先だけを数える。親が archive 済みか見つからない Work Item と、保存済みの循環を切った Work Item は最上位に置き、同じく `parentHidden: true` を付ける。並べ替えで保存済みの親を黙って外さないためである。
 - `rollup` は読める子孫だけ（読める親を通って届くもの）を数える：子の数、子孫の数、status category ごとの数、未完了の子孫の数、見積（`plannedEffortMinutes`）の合計と見積を持つ子孫の数、残工数の合計、子孫の日付の最小と最大（`startDate` / `endDate`）。親自身の値は含めない。期限だけの Work Item は期限を両端として数える。
 - 1 Team 1,000 件（`WORK_ITEM_HIERARCHY_MAX_ITEMS`）を超えると `413 WorkItemListLimitExceeded` を返す。
+
+### archive・復元と階層（#633）
+
+archive は Work Item を木・WBS 番号・roll-up から外す操作で、削除の代わりに使う（Web は削除を出さない。削除は Public API の `DELETE /api/v1/work-items/{id}` だけ）。木が壊れないように、archive と復元に次の規則を置く。
+
+- 子を持つ Work Item は、archive されていない子が 1 件でも残っていれば archive できない（`409 WorkItemActiveChildren`）。子を先に archive するか、別の親へ移す。子をまとめて archive しない理由は、復元で「一緒に archive した子」だけを戻す記録が要るためで、必要になったら別の Issue で扱う。
+- 親が archive 済みの Work Item は復元できない（`409 WorkItemParentArchived`）。親を先に復元する。復元した子が親の見えない最上位に出て、WBS 番号が変わるのを避けるためである。
+- 同じ一括操作（Bulk archive）で同じ Team の親と子をまとめて archive・復元できる。preview は何も書く前に走るので、操作内の相手を archive・復元済みとみなして確認から外す。適用では相手を外さず、archive は子から親の順（操作内の祖先の数が多い item から）、復元は親から子の順に適用し、各 item は先に確定した item の状態で確認する。request の並び順には依存しない。途中の子が失敗すると、その親は `WorkItemActiveChildren` で失敗するので、archive 済みの親の下に未 archive の子は残らない。Retry も同じ順に、Bulk の Undo はその逆順に適用し、Undo も相手を外さずに確認する。
+- 確認は直接の親子だけを relation graph から読み、子の数によらない固定数の項目を archive・復元の更新と同じ transaction で fence する。archive は relation graph の revision と、親の子復元 generation（`WorkItemConfigurationTable` の `CHILD_RESTORE#<親 ID>` row、子より先に読む）を ConditionCheck する。復元は relation graph の revision と親の revision を ConditionCheck し、親の子復元 generation を 1 進める（同じ操作で親も復元するときも進める）。これで子が何件でも単独で archive でき、確認の後に子が付いた・子が復元された・親が archive された場合は書き込まずに競合として失敗する。削除済みの相手（relation だけが残っている）は確認から外す。
+- 階層の確認で拒否された Bulk item と、確認の後に親子が変わって fence で書き込めなかった Bulk item（`409 WorkItemHierarchyChanged`）は retryable として残す。子を archive するなど Work Item 自体を変えずに階層を直すと request と operation token が変わらないので、Web は同じ操作の再実行で retry endpoint を呼び、最新の親子で確認し直す。validation の競合を自動で繰り返さないように、Web は階層の失敗をその場では retry せず、そのページで失敗を表示した後の次のクリックでだけ retry する（再読み込みの後は 1 回目のクリックで失敗をもう一度表示する）。Bulk Undo で拒否された item も Undo 可能なまま残り、親を復元した後にもう一度 Undo できる。
+- 完了ポリシー（`parentCompletionPolicy`）の `reject` と roll-up は、もともと archive 済みの子を数えない。archive できるのは子がすべて archive 済みの親だけなので、archive 済みの親の下に数えられる子は残らない。
 
 Web の Team Work Item テーブルは、表示設定の「階層（WBS）で表示する」をオンにすると（グループ化していないとき）この木を outline として表示する。行は階層の順に並び、WBS 番号・字下げ・折りたたみ（ブラウザごとに Team 単位で記憶）・子の集計を示す。フィルタで親が隠れた行は、表示されている一番近い祖先の下に入る。タイトルにフォーカスがある行（または J/K で選んだ行）で Alt+Shift+→ / ← を押すと 1 つ下 / 上の階層へ、Alt+Shift+↑ / ↓ で兄弟の中で並べ替える。折りたたまれた行は J/K と一括選択の対象から外れる。
 

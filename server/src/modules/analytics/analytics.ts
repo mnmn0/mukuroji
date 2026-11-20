@@ -346,6 +346,30 @@ export type AnalyticsSnapshotPage = {
   nextCursor?: string
 }
 
+/** One recipient-scoped scheduled delivery that the recipient is told about. */
+export type AnalyticsDeliveryNotification = {
+  /** Current report revision that produced the delivery. */
+  report: AnalyticsReport
+  /** Snapshot that the committed receipt points to. */
+  snapshotId: string
+  /** Committed receipt that completes this recipient's occurrence. */
+  receipt: AnalyticsDeliveryReceipt
+  /** Recipient who passed the current ACL check for this occurrence. */
+  recipientMemberKey: string
+  /** Wall-clock time of the schedule invocation that delivered the snapshot. */
+  deliveredAt: string
+}
+
+/**
+ * Tells one authorized recipient that a scheduled snapshot is ready.
+ *
+ * @remarks Called after the receipt is committed, and again for already completed recipients when
+ * an occurrence is retried. Implementations must be idempotent per receipt occurrence key.
+ */
+export type AnalyticsDeliveryNotifier = (
+  notification: AnalyticsDeliveryNotification,
+) => Promise<void>
+
 /** Delivery receipt の idempotent put result です。 */
 export type AnalyticsDeliveryReceiptResult = {
   /** この呼び出しが新しい receipt を作成したかどうかです。 */

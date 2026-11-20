@@ -77,6 +77,13 @@ export type MukurojiStackProps = cdk.StackProps & Readonly<{
    */
   readonly tenantLifecycleEnabled?: boolean;
   /**
+   * Serves Software factory: Agent Runs, the Factory board, Team agent settings, personal agent
+   * credentials for MCP, and the Agent Run triage job. Without it the API refuses those routes
+   * with `503 SoftwareFactoryNotDeployed` and the scheduled-jobs Lambda skips the triage job.
+   * Off unless the composition root turns it on.
+   */
+  readonly softwareFactoryEnabled?: boolean;
+  /**
    * Seeds demo members (`@example.com`), two Teams, four Projects, and ten Work Items when the
    * stack is created, and makes the initial owner a manager of the demo Projects. For trial and
    * development environments; a company Workspace starts with only its owner. Off unless the
@@ -102,6 +109,7 @@ export class MukurojiStack extends cdk.Stack {
     const connectorsEnabled = props?.connectorsEnabled ?? false;
     const requestEmailEnabled = props?.requestEmailEnabled ?? false;
     const tenantLifecycleEnabled = props?.tenantLifecycleEnabled ?? false;
+    const softwareFactoryEnabled = props?.softwareFactoryEnabled ?? false;
     const demoDataEnabled = props?.demoDataEnabled ?? false;
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
@@ -215,6 +223,7 @@ export class MukurojiStack extends cdk.Stack {
       edgeOriginSecret: parameters.edgeOriginSecret.valueAsString,
       fileBucket: fileStorage.fileBucket,
       httpApi: apiTransports.httpApi,
+      realtimeWebSocketApi: apiTransports.realtimeWebSocketStage.api,
     });
     const auditProjection = buildAuditProjectionWorker(this, {
       dataStores,
@@ -272,7 +281,7 @@ export class MukurojiStack extends cdk.Stack {
       jobs: [
         defineAutomationScheduleJob(this, { dataStores, fileStorage, parameters }),
         defineTriageScheduleJob({ dataStores, parameters }),
-        defineAgentRunTriageJob({ dataStores, parameters }),
+        ...(softwareFactoryEnabled ? [defineAgentRunTriageJob({ dataStores, parameters })] : []),
         defineSlackNotificationJob(this, { dataStores, parameters }),
         defineEmailNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
         defineAnalyticsScheduleJob({ dataStores, parameters }),
@@ -280,6 +289,11 @@ export class MukurojiStack extends cdk.Stack {
         defineCycleScheduleJob({ dataStores, parameters }),
       ],
     });
+    // The API and the scheduled-jobs Lambda read this to refuse Software factory routes and to
+    // skip the Agent Run triage job.
+    const softwareFactorySwitch = softwareFactoryEnabled ? 'enabled' : 'disabled';
+    apiRuntime.apiFunction.addEnvironment('SOFTWARE_FACTORY', softwareFactorySwitch);
+    scheduledJobs.scheduledJobsFunction.addEnvironment('SOFTWARE_FACTORY', softwareFactorySwitch);
     const tenantOperationWorker = buildTenantOperationWorker(this, {
       dataStores,
       fileStorage,

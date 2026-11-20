@@ -46,7 +46,10 @@ export function ProjectOverviewPage() {
   const workItems = useProjectIssues(workspace.accessToken, projectId, canRead)
   const planning = usePlanningSnapshot(workspace.accessToken, canRead)
   const members = useProjectMembers(workspace.accessToken, projectId, canRead, team?.id)
-  const agentRunBoard = useTeamAgentRunBoard(canRead ? workspace.accessToken : undefined, team?.id)
+  const agentRunBoard = useTeamAgentRunBoard(
+    canRead && workspace.softwareFactoryEnabled ? workspace.accessToken : undefined,
+    team?.id,
+  )
   const workItemSummary = useMemo(
     () => workItems.data && team
       ? summarizeProjectOverviewWorkItems(workItems.data, team.id, new Date())
@@ -115,6 +118,7 @@ export function ProjectOverviewPage() {
           onRetryWorkItems={() => void workItems.mutate()}
           project={project}
           schedule={schedule}
+          showAgentRuns={workspace.softwareFactoryEnabled}
           t={t}
           team={team}
           updateTarget={updateTarget}

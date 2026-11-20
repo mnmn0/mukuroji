@@ -79,6 +79,7 @@ import {
 } from '../model/taskGanttRows'
 import { ChevronIcon } from '../../shared/ui/icons'
 import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
+import { printTaskView, type TaskViewPrintPaper } from './taskViewPrint'
 import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
 import { formatShowMoreLabel, TASK_TABLE_RENDER_STEP } from '../model/taskListRendering'
 import { resolveWorkItemEffortColumnValue } from '../../work-items/model/workItemEffort'
@@ -89,6 +90,7 @@ import {
   resolveTaskGanttColumnWidth,
   resolveTaskGanttDateSpan,
   resolveTaskGanttProgressPointX,
+  resolveTaskGanttProgressVarianceDays,
   taskGanttScales,
   type TaskGanttDateRange,
   type TaskGanttScale,
@@ -139,15 +141,6 @@ const GANTT_COMPACT_ROW_LAYOUT: GanttRowLayout = {
   summaryBarTop: 2,
 }
 
-/** Paper sizes offered for printing the Gantt chart, always in landscape. */
-type GanttPrintPaper = 'a3' | 'a4'
-
-/** Printable width in CSS pixels of each landscape paper size, inside 8mm margins. */
-const ganttPrintableWidths: Readonly<Record<GanttPrintPaper, number>> = {
-  // (420mm - 16mm) and (297mm - 16mm) at 96 CSS pixels per inch.
-  a3: 1_526,
-  a4: 1_062,
-}
 const MAX_GANTT_TIMELINE_COLUMNS = 180
 const MILLISECONDS_PER_CALENDAR_DAY = 86_400_000
 /**
@@ -512,6 +505,13 @@ export function TaskGanttView({
       todayX,
     ],
   )
+  // The drawn line is hidden from screen readers, so the same standing is also told in words.
+  const progressSummary = useMemo(
+    () => progressLinePoints
+      ? createGanttProgressSummary(renderedRows, configurationsByTeam, configuration, today)
+      : undefined,
+    [configuration, configurationsByTeam, progressLinePoints, renderedRows, today],
+  )
 
   /** Moves to today, first switching a windowed chart to the period containing today. */
   const moveToToday = () => {
@@ -540,7 +540,7 @@ export function TaskGanttView({
    *
    * @param paper - Paper size to print on.
    */
-  const printChart = (paper: GanttPrintPaper) => {
+  const printChart = (paper: TaskViewPrintPaper) => {
     const root = printRootRef.current
     if (!root) return
     flushSync(() => setPrintsAllRows(true))
@@ -548,20 +548,13 @@ export function TaskGanttView({
       root.scrollWidth,
       scrollContainerRef.current?.scrollWidth ?? 0,
     )
-    const zoom = contentWidth > 0 ? Math.min(1, ganttPrintableWidths[paper] / contentWidth) : 1
-    const documentElement = document.documentElement
-    /** Restores the screen layout after the print dialog closes. */
-    const restore = () => {
-      delete documentElement.dataset.printTarget
-      delete root.dataset.printPaper
-      root.style.removeProperty('zoom')
-      setPrintsAllRows(false)
-    }
-    documentElement.dataset.printTarget = 'task-gantt'
-    root.dataset.printPaper = paper
-    root.style.setProperty('zoom', String(zoom))
-    window.addEventListener('afterprint', restore, { once: true })
-    window.print()
+    printTaskView({
+      contentWidth,
+      onAfterPrint: () => setPrintsAllRows(false),
+      paper,
+      root,
+      target: 'task-gantt',
+    })
   }
   const [dragChange, setDragChange] = useState<GanttDragChange>()
   const dragChangeRef = useRef<GanttDragChange | undefined>(undefined)
@@ -776,6 +769,7 @@ export function TaskGanttView({
         showsProgressLine={showsProgressLine}
         t={t}
       />
+      {progressSummary ? <GanttProgressSummary entries={progressSummary} t={t} /> : null}
       {dependencyRows.length > 0 ? (
         <ul
           aria-label={t('workItems.dependencies.title')}
@@ -1694,25 +1688,152 @@ function createGanttProgressLinePoints(input: GanttProgressLineInput): GanttProg
   rows.forEach((row, index) => {
     if (row.kind !== 'task') return
     const top = topOffset + (rowTops[index] ?? 0)
-    const progressPercent = resolveWorkItemEffortColumnValue(
-      row.task,
-      'progress',
-      resolveProjectTaskConfiguration(row.task, input.configurationsByTeam, input.configuration),
-    )
-    const startDate = resolveTaskScheduleStartDate(row.schedule) ?? resolveTaskScheduleEndDate(row.schedule)
-    const endDate = resolveTaskScheduleEndDate(row.schedule) ?? startDate
     const x = resolveTaskGanttProgressPointX({
       axis,
       today,
       todayX,
-      ...(startDate ? { startDate } : {}),
-      ...(endDate ? { endDate } : {}),
-      ...(progressPercent === undefined ? {} : { progressPercent }),
+      ...resolveGanttRowProgress(row, input.configurationsByTeam, input.configuration),
     })
     points.push({ x: todayX, y: top }, { x, y: top + barCenterOffset }, { x: todayX, y: top + rowHeight })
   })
   points.push({ x: todayX, y: topOffset + (rowTops.at(-1) ?? 0) })
   return points
+}
+
+/** Planned dates and progress rate of one task row, as the progress line reads them. */
+type GanttRowProgress = {
+  /** Planned last date, or the first date when the row has only one. */
+  endDate?: string
+  /** Progress rate from 0 through 100, when the row's configuration defines one. */
+  progressPercent?: number
+  /** Planned first date, or the last date when the row has only one. */
+  startDate?: string
+}
+
+/**
+ * Reads the planned dates and progress rate that place a task row on the progress line.
+ *
+ * @param row - Task row.
+ * @param configurationsByTeam - Team-scoped resolved configurations that define progress.
+ * @param configuration - Fallback configuration used for a single-team project view.
+ * @returns Only the values the row has.
+ */
+function resolveGanttRowProgress(
+  row: TaskGanttTaskRow,
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  configuration: WorkItemConfiguration | undefined,
+): GanttRowProgress {
+  const progressPercent = resolveWorkItemEffortColumnValue(
+    row.task,
+    'progress',
+    resolveProjectTaskConfiguration(row.task, configurationsByTeam, configuration),
+  )
+  const startDate = resolveTaskScheduleStartDate(row.schedule) ?? resolveTaskScheduleEndDate(row.schedule)
+  const endDate = resolveTaskScheduleEndDate(row.schedule) ?? startDate
+  return {
+    ...(startDate ? { startDate } : {}),
+    ...(endDate ? { endDate } : {}),
+    ...(progressPercent === undefined ? {} : { progressPercent }),
+  }
+}
+
+/** How one task row stands on the progress line, told in words. */
+type GanttProgressSummaryEntry = {
+  /** Stable key of the task row. */
+  key: string
+  /** Task title. */
+  title: string
+  /** Days ahead (positive) or behind (negative), or `undefined` without dates or progress. */
+  varianceDays?: number
+}
+
+/**
+ * Lists how each rendered task row stands on the progress line, in display order.
+ *
+ * @param rows - Rendered rows in display order, including group headings.
+ * @param configurationsByTeam - Team-scoped resolved configurations that define progress.
+ * @param configuration - Fallback configuration used for a single-team project view.
+ * @param today - Today's date.
+ * @returns One entry per task row.
+ */
+function createGanttProgressSummary(
+  rows: readonly TaskGanttRow[],
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  configuration: WorkItemConfiguration | undefined,
+  today: string,
+): GanttProgressSummaryEntry[] {
+  return rows.flatMap((row) => {
+    if (row.kind !== 'task') return []
+    const varianceDays = resolveTaskGanttProgressVarianceDays({
+      today,
+      ...resolveGanttRowProgress(row, configurationsByTeam, configuration),
+    })
+    return [{
+      key: createTaskKey(row.task),
+      title: row.task.title,
+      ...(varianceDays === undefined ? {} : { varianceDays }),
+    }]
+  })
+}
+
+/**
+ * Words the standing of one task row on the progress line.
+ *
+ * @param entry - Task row and its distance from today.
+ * @param t - Translator used for labels.
+ * @returns A sentence such as "Design: 2 days behind".
+ */
+function formatGanttProgressSummaryEntry(entry: GanttProgressSummaryEntry, t: TaskGanttTranslator): string {
+  const { varianceDays } = entry
+  const status = varianceDays === undefined
+    ? t('tasks.gantt.progressSummary.noProgress')
+    : varianceDays < 0
+      ? t('tasks.gantt.progressSummary.behind').replace('{days}', String(-varianceDays))
+      : varianceDays > 0
+        ? t('tasks.gantt.progressSummary.ahead').replace('{days}', String(varianceDays))
+        : t('tasks.gantt.progressSummary.onSchedule')
+  return t('tasks.gantt.progressSummary.entry').replace('{title}', entry.title).replace('{status}', status)
+}
+
+/** Props for the screen reader summary of the progress line. */
+type GanttProgressSummaryProps = {
+  /** One entry per rendered task row. */
+  entries: readonly GanttProgressSummaryEntry[]
+  /** Translator used for labels. */
+  t: TaskGanttTranslator
+}
+
+/**
+ * Tells the progress line to screen readers, which skip the drawn line: a count of rows behind,
+ * ahead, and on schedule, then each row's distance from today.
+ *
+ * @param props - Summary entries and the translator.
+ * @returns A visually hidden region next to the chart.
+ */
+function GanttProgressSummary({ entries, t }: GanttProgressSummaryProps) {
+  const behind = entries.filter((entry) => (entry.varianceDays ?? 0) < 0).length
+  const ahead = entries.filter((entry) => (entry.varianceDays ?? 0) > 0).length
+  const onSchedule = entries.filter((entry) => entry.varianceDays === 0).length
+  return (
+    <section
+      aria-label={t('tasks.gantt.progressSummary')}
+      className="sr-only"
+      data-print-hidden=""
+      data-testid="task-gantt-progress-summary"
+    >
+      <p>
+        {t('tasks.gantt.progressSummary.counts')
+          .replace('{behind}', String(behind))
+          .replace('{ahead}', String(ahead))
+          .replace('{onSchedule}', String(onSchedule))}
+      </p>
+      <ul>
+        {entries.map((entry) => (
+          <li key={entry.key}>{formatGanttProgressSummaryEntry(entry, t)}</li>
+        ))}
+      </ul>
+    </section>
+  )
 }
 
 /**
@@ -1739,7 +1860,7 @@ type GanttDisplayToolbarProps = {
   /** Brings today's line into view. */
   onMoveToToday: () => void
   /** Prints the chart on landscape paper. */
-  onPrint: (paper: GanttPrintPaper) => void
+  onPrint: (paper: TaskViewPrintPaper) => void
   /** Shows or hides the progress line. */
   onProgressLineChange: (showsProgressLine: boolean) => void
   /** Changes the timeline scale. */

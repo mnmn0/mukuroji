@@ -73,6 +73,10 @@ const CONFIGURATION_WRITE_LOCK_RECORD_KEY = 'CONFIG_WRITE_LOCK'
 const CONFIGURATION_WRITE_LOCK_LEASE_SECONDS = 15 * 60
 const RELATION_GRAPH_RECORD_KEY = 'RELATION_GRAPH'
 const RELATION_RECORD_PREFIX = 'REL#'
+/** Record key prefix of the row that counts restores of a parent Work Item's children. */
+const CHILD_RESTORE_GUARD_RECORD_PREFIX = 'CHILD_RESTORE#'
+/** Entry type of a child restore guard row. */
+const CHILD_RESTORE_GUARD_ENTRY_TYPE = 'child-restore-guard'
 /** Directed relation rows a Team may store; each logical link is a reciprocal pair. */
 const TEAM_RELATION_EDGE_LIMIT = WORK_ITEM_TEAM_RELATION_LINK_LIMIT * 2
 /** Work Items a single cycle validation may visit before failing closed. */
@@ -397,6 +401,147 @@ export function createWorkItemRelationGraphRevisionIncrementTransactionItem(
   }
 }
 
+/**
+ * Creates the key of the row that counts restores of a parent Work Item's children.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team that owns the parent Work Item.
+ * @param parentWorkItemId - Parent Work Item whose children are restored.
+ * @returns The configuration table key of the parent's child restore guard row.
+ */
+function createChildRestoreGuardKey(workspaceId: string, teamId: string, parentWorkItemId: string) {
+  return {
+    scopeKey: createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+    recordKey: `${CHILD_RESTORE_GUARD_RECORD_PREFIX}${encodeURIComponent(
+      readIdentifier(parentWorkItemId, 'Work Item ID'),
+    )}`,
+  }
+}
+
+/**
+ * Creates the write that records one restore of a child Work Item under its parent.
+ *
+ * The parent's guard generation advances by one from the validated value the caller read, so an
+ * archive of the parent that read its children before this restore fails at commit instead of
+ * hiding the restored child. A row changed since the read, or one the reader would reject, fails
+ * the restore instead of being overwritten.
+ *
+ * @param tableName - Work Item configuration table.
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team that owns the parent Work Item.
+ * @param parentWorkItemId - Parent of the Work Item being restored.
+ * @param expectedGeneration - Generation read with `getChildRestoreGeneration`; `0` means no row yet.
+ * @returns One DynamoDB Put or Update ready for the restore transaction.
+ */
+export function createWorkItemChildRestoreGuardAdvance(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  parentWorkItemId: string,
+  expectedGeneration: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (
+    !Number.isSafeInteger(expectedGeneration) ||
+    expectedGeneration < 0 ||
+    expectedGeneration >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemChildRestoreGeneration',
+      'Work Item child restore generation must be a non-negative safe integer below the maximum.',
+    )
+  }
+  const key = createChildRestoreGuardKey(workspaceId, teamId, parentWorkItemId)
+  if (expectedGeneration === 0) {
+    return {
+      Put: {
+        TableName: tableName,
+        Item: {
+          ...key,
+          entryType: CHILD_RESTORE_GUARD_ENTRY_TYPE,
+          schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+          generation: 1,
+        },
+        ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+      },
+    }
+  }
+  return {
+    Update: {
+      TableName: tableName,
+      Key: key,
+      UpdateExpression: 'SET #generation = :nextGeneration',
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': CHILD_RESTORE_GUARD_ENTRY_TYPE,
+        ':schemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':expectedGeneration': expectedGeneration,
+        ':nextGeneration': expectedGeneration + 1,
+      },
+    },
+  }
+}
+
+/**
+ * Creates the check that no child of a parent Work Item was restored since the caller read.
+ *
+ * @param tableName - Work Item configuration table.
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team that owns the parent Work Item.
+ * @param parentWorkItemId - Parent Work Item about to be archived.
+ * @param expectedGeneration - Generation read before the children; `0` means no row yet.
+ * @returns One DynamoDB ConditionCheck ready for the archive transaction.
+ */
+export function createWorkItemChildRestoreGuardConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  parentWorkItemId: string,
+  expectedGeneration: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemChildRestoreGeneration',
+      'Work Item child restore generation must be a non-negative safe integer.',
+    )
+  }
+  const key = createChildRestoreGuardKey(workspaceId, teamId, parentWorkItemId)
+  if (expectedGeneration === 0) {
+    return {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: key,
+        ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+      },
+    }
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: key,
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': CHILD_RESTORE_GUARD_ENTRY_TYPE,
+        ':schemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':expectedGeneration': expectedGeneration,
+      },
+    },
+  }
+}
+
 /** DynamoDB transaction items contributed by a configuration validation boundary. */
 export type WorkItemConfigurationTransactionItems = NonNullable<
   TransactWriteCommandInput['TransactItems']
@@ -481,6 +626,21 @@ export const WORK_ITEM_PROJECTED_RELATION_TYPES: readonly WorkItemRelationType[]
   'parent',
   'related',
 ]
+
+/** Relation clean-up committed with the deletion of one Work Item. */
+export type WorkItemDeletionRelationCleanup = {
+  /**
+   * Children of the Work Item. A Work Item with children is not deleted, so no clean-up is
+   * prepared and `transactItems` is empty when this is not empty.
+   */
+  childWorkItemIds: string[]
+  /**
+   * Writes that remove every relation row of the Work Item and its reciprocal rows, update the
+   * projected `relationIds` of the other endpoints, and advance the relation graph. Without
+   * relations it only checks the graph revision, so a relation created meanwhile stops the delete.
+   */
+  transactItems: NonNullable<TransactWriteCommandInput['TransactItems']>
+}
 
 /** Options for reading one Work Item's relation neighbourhood. */
 export type ListWorkItemRelationsOptions = {
@@ -633,6 +793,28 @@ export type WorkItemConfigurationClient = {
    * @returns Current positive revision, or zero before graph metadata exists.
    */
   getRelationGraphRevision?(workspaceId: string, teamId: string): Promise<number>
+  /**
+   * Reads how many times a child of the parent Work Item has been restored.
+   *
+   * @param workspaceId - Workspace that owns the parent Work Item.
+   * @param teamId - Team that owns the parent Work Item.
+   * @param parentWorkItemId - Parent Work Item about to be archived, or of a child being restored.
+   * @returns Current generation, or zero before any child was restored.
+   */
+  getChildRestoreGeneration?(workspaceId: string, teamId: string, parentWorkItemId: string): Promise<number>
+  /**
+   * Prepares the relation clean-up that is committed in the same transaction as a Work Item delete.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item about to be deleted.
+   * @returns The Work Item's children and the clean-up writes.
+   */
+  prepareWorkItemDeletionRelationCleanup?(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<WorkItemDeletionRelationCleanup>
   /**
    * Reciprocal relation を単一 transaction で作成します。
    *
@@ -1767,6 +1949,130 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
   }
 
   /**
+   * Prepares the relation clean-up that is committed in the same transaction as a Work Item delete.
+   *
+   * Every relation row of the Work Item and its reciprocal row are deleted, and each other
+   * endpoint whose projection held the Work Item gets its `relationIds` rewritten without it. The
+   * other endpoint's revision is not advanced, the same as for a relation delete, but is required
+   * to be unchanged. The graph revision advances once, so a relation changed meanwhile anywhere in
+   * the Team stops the delete. A Work Item with children gets no clean-up: deleting it would leave
+   * the children under a parent that no longer exists, so the caller refuses the delete. The Work
+   * Item's child restore guard row is deleted with it.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item about to be deleted.
+   * @returns The Work Item's children and the clean-up writes.
+   * @throws WorkItemConfigurationError `503 WorkItemRelationInconsistent` when a reciprocal row, an
+   * endpoint, or the edge count is missing.
+   */
+  async prepareWorkItemDeletionRelationCleanup(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<WorkItemDeletionRelationCleanup> {
+    await this.ensureTable()
+    const graph = await this.readRelationGraphState(workspaceId, teamId)
+    const relations = await this.readWorkItemRelations(workspaceId, teamId, workItemId)
+    const childWorkItemIds = relations
+      .filter((relation) => relation.type === 'child')
+      .map((relation) => relation.targetWorkItemId)
+    if (childWorkItemIds.length > 0) return { childWorkItemIds, transactItems: [] }
+    // The Work Item's child restore guard is only read by an archive of the Work Item itself.
+    const guardDelete = {
+      Delete: {
+        TableName: this.tableName,
+        Key: createChildRestoreGuardKey(workspaceId, teamId, workItemId),
+      },
+    }
+    if (relations.length === 0) {
+      return {
+        childWorkItemIds,
+        transactItems: [
+          createWorkItemRelationGraphRevisionConditionCheck(
+            this.tableName,
+            workspaceId,
+            teamId,
+            graph.revision,
+          ),
+          guardDelete,
+        ],
+      }
+    }
+    const reciprocals = await Promise.all(relations.map(async (relation) => {
+      const reciprocal = await this.readRelationRow(workspaceId, teamId, {
+        sourceWorkItemId: relation.targetWorkItemId,
+        targetWorkItemId: relation.sourceWorkItemId,
+        type: reciprocalRelationType(relation.type),
+      })
+      if (!reciprocal) {
+        throw new WorkItemConfigurationError(503, 'WorkItemRelationInconsistent', 'The reciprocal relation is missing.')
+      }
+      return reciprocal
+    }))
+    if (graph.edgeCount < relations.length * 2) {
+      throw new WorkItemConfigurationError(
+        503,
+        'WorkItemRelationInconsistent',
+        'Stored relation graph metadata is inconsistent.',
+      )
+    }
+    // One endpoint can hold several relations to the Work Item, and a transaction may write each
+    // item only once, so the projection of each other endpoint is computed once.
+    const projectedByEndpoint = new Map<string, WorkItemRelation[]>()
+    for (const reciprocal of reciprocals) {
+      if (!isProjectedRelationType(reciprocal.type)) continue
+      projectedByEndpoint.set(reciprocal.sourceWorkItemId, [
+        ...projectedByEndpoint.get(reciprocal.sourceWorkItemId) ?? [],
+        reciprocal,
+      ])
+    }
+    const workItemPartitionKey = `${workspaceId}#team#${teamId}`
+    const endpointItems = await Promise.all([...projectedByEndpoint].map(async ([endpointId, removed]) => {
+      const [relationIds, response] = await Promise.all([
+        this.readRelationIdsAfter(workspaceId, teamId, endpointId, { remove: removed }),
+        this.documentClient.send(new GetCommand({
+          TableName: this.workItemsTableName,
+          Key: { directoryTeamId: workItemPartitionKey, issueId: endpointId },
+          ConsistentRead: true,
+        })),
+      ])
+      const endpoint = response.Item
+      if (
+        !endpoint ||
+        typeof endpoint.revision !== 'number' ||
+        (endpoint.assignedProjectId !== undefined && typeof endpoint.assignedProjectId !== 'string')
+      ) {
+        throw new WorkItemConfigurationError(503, 'WorkItemRelationInconsistent', 'A relation endpoint is missing.')
+      }
+      return createRelationEndpointTransactionItem(this.workItemsTableName, workItemPartitionKey, {
+        workItemId: endpointId,
+        expectedRevision: endpoint.revision,
+        ...(typeof endpoint.assignedProjectId === 'string'
+          ? { assignedProjectId: endpoint.assignedProjectId }
+          : {}),
+        relationIds,
+      })
+    }))
+    return {
+      childWorkItemIds,
+      transactItems: [
+        createRelationGraphAdvance(
+          this.tableName,
+          createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+          graph.revision,
+          graph.edgeCount - relations.length * 2,
+        ),
+        ...[...relations, ...reciprocals].map((relation) =>
+          createRelationDelete(this.tableName, workspaceId, teamId, relation)
+        ),
+        ...endpointItems,
+        guardDelete,
+      ],
+    }
+  }
+
+  /**
    * Sets, replaces, or removes a Work Item's single parent as one atomic transaction.
    *
    * @param workspaceId - Workspace that owns the relation graph.
@@ -2582,6 +2888,41 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       }
       frontier = [...next]
     }
+  }
+
+  /**
+   * Reads a parent Work Item's child restore generation with a strongly consistent read.
+   *
+   * @param workspaceId - Workspace that owns the parent Work Item.
+   * @param teamId - Team that owns the parent Work Item.
+   * @param parentWorkItemId - Parent Work Item about to be archived.
+   * @returns Current generation, or zero before any child was restored.
+   * @throws WorkItemConfigurationError `503 StoredWorkItemConfigurationInvalid` when the row is malformed
+   * or has an unsupported schema.
+   */
+  async getChildRestoreGeneration(
+    workspaceId: string,
+    teamId: string,
+    parentWorkItemId: string,
+  ): Promise<number> {
+    await this.ensureTable()
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: createChildRestoreGuardKey(workspaceId, teamId, parentWorkItemId),
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+    if (!item) return 0
+    if (
+      item.entryType !== CHILD_RESTORE_GUARD_ENTRY_TYPE ||
+      item.schemaVersion !== WORK_ITEM_CONFIGURATION_SCHEMA_VERSION ||
+      typeof item.generation !== 'number' ||
+      !Number.isSafeInteger(item.generation) ||
+      item.generation < 1
+    ) {
+      throw storedConfigurationInvalid()
+    }
+    return item.generation
   }
 
   /**

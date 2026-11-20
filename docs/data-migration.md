@@ -3,7 +3,7 @@
 保存済み row の schema version を上げる変更（例: 見積の統一、Project profile、calendar policy の参照化）が、
 本番 data を消さずに移行するための契約です。設計判断は
 [ADR 0013](adr/0013-data-migration-runner.md)（runner と checkpoint table）と
-[ADR 0026](adr/0026-data-migration-lambda-and-operator-proof.md)（AWS 上の実行と実行者の検証）にあります。
+[ADR 0031](adr/0031-data-migration-lambda-and-operator-proof.md)（AWS 上の実行と実行者の検証）にあります。
 
 この文書が定めるのは「1 つの table の、1 つの entity の row を、schema version `N` から `N + 1` へ
 移す」migration です。table の新設・key 設計の変更・別 table への copy は対象外で、それぞれ ADR を伴う

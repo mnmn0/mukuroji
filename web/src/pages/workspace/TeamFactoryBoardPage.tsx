@@ -11,6 +11,7 @@ import { FactoryAnalyticsSummary } from '../../features/factory-board/ui/Factory
 import { FactoryBoard, type FactoryBoardView } from '../../features/factory-board/ui/FactoryBoard'
 import { createFactoryAnalyticsLabels, createFactoryBoardLabels } from '../../features/factory-board/ui/factoryBoardLabels'
 import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
+import { SoftwareFactoryGate } from '../../workspace/ui/SoftwareFactoryGate'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -24,7 +25,11 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
  */
 export function TeamFactoryBoardPage() {
   const teamId = useParams().teamId
-  return <TeamFactoryBoardContent key={teamId} teamId={teamId} />
+  return (
+    <SoftwareFactoryGate fallbackPath={teamId ? createTeamIssuesPath(teamId) : '/'}>
+      <TeamFactoryBoardContent key={teamId} teamId={teamId} />
+    </SoftwareFactoryGate>
+  )
 }
 
 /**

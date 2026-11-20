@@ -63,6 +63,7 @@ wiring も stack に含めません。Context は `bin/cdk.ts` だけが読み�
 | `mukuroji:connectors` | Connector sync / poll worker、sync queue と DLQ、`ConnectorRuntimeSecret` と `ConnectorRuntimeConfiguration` parameter。 | API は connector provider を読み込まず、audit projection は connector への fan-out を行いません（`CONNECTOR_SYNC_ENABLED=false`）。Webhook と public API は使えます。 |
 | `mukuroji:requestEmail` | 外部の mail relay が invoke する `RequestEmailIngestionFunction`、DLQ、alarm。`RequestEmailWebhookSecret` parameter が必要になります。 | 公開フォームと手動での依頼登録は使えます。メールからの依頼取り込みだけがありません。 |
 | `mukuroji:tenantLifecycle` | テナントのエクスポートと閉鎖を実行する 6 つの resource owner Lambda（export、access、identity、data、secrets、verification）、それぞれの execution queue、エクスポート成果物を置く `TenantExportBucket`。API にはその bucket の読み取り権限を付けます。 | API はエクスポート・閉鎖の要求と、操作の download・pause・resume・verify を `503 TenantLifecycleNotDeployed` で断ります（`TENANT_LIFECYCLE_OPERATIONS=disabled`）。テナントのプロフィールとガバナンス設定、操作の参照は使えます。`TenantOperationFunction` は残り、監査ログの保持期間の処理だけを行います。 |
+| `mukuroji:softwareFactory` | 追加の resource はありません。API と scheduled-jobs Lambda に `SOFTWARE_FACTORY=enabled` を渡し、scheduled-jobs Lambda に Agent Run triage job（毎分）とその IAM policy を足します。 | API は Agent Run（Web の Factory board・Work Item の Run 履歴と報告・期間サマリー・release、Public API の Agent Run 系と `/v1/agent-settings`・`/v1/agent-context`）、Team の agent 設定、本人用 agent token（`/developer/me/agent-connection` と発行・rotate）を認証前に `503 SoftwareFactoryNotDeployed` で断ります（`SOFTWARE_FACTORY=disabled`）。Agent Run triage job は動きません。Web は `/api/auth/me` の `softwareFactoryEnabled` を見て Factory board、agent 接続、Team の agent 設定、Work Item の「エージェントへ引き継ぐ」と Run 履歴、Project 概要の Agent Run 欄、ヘルプの coding agent ガイドを出しません。Public API の Work Item の読み書きと本人用 token の失効は使えます。 |
 
 有効にするときは、`cdk diff` / `cdk deploy` に context と、そのモジュールの parameter を足します。
 
@@ -187,6 +188,7 @@ aws ce update-cost-allocation-tags-status \
 | `mukuroji:connectors` | +$1 前後 / 月 | secret 1 個、alarm 3 個、5 分ごとの poll（月 8,640 回）、queue の polling。 |
 | `mukuroji:requestEmail` | +$1 / 月 | secret 2 個、alarm 2 個。 |
 | `mukuroji:tenantLifecycle` | +$0〜2 / 月 | Lambda 6 個と queue 6 個。待機中の queue polling が SQS の無料枠を超えた分です。 |
+| `mukuroji:softwareFactory` | ほぼ $0 | 毎分の Agent Run triage job。opt-in した Team がなければ AgentRuns table の index を読むだけです。 |
 | AI（Bedrock の parameter 設定） | 利用量に比例 | token 料金。上限は Workspace の AI 設定で決めます。 |
 | `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
 
@@ -1075,6 +1077,15 @@ Web を build して upload し、CloudFront を invalidate します。content 
 `sw.js` などそれ以外の file は `no-cache` で置き換えます。配信後に `WebUrl` を開き、login と Team/project
 一覧の表示を確認します。local の Web から AWS の API を試す場合だけ、HTTP API を直接指定します。
 
+CloudFront は Web と `/api/*` の両方に security header（HSTS、`X-Content-Type-Options`、`X-Frame-Options: DENY`、
+`Referrer-Policy: no-referrer`、Content-Security-Policy）を付けます。Web の CSP は script・style・worker を同じ
+origin に限り、接続先を同じ origin、realtime WebSocket API、file bucket に限ります。file bucket の CORS が
+distribution の domain を参照するため、CloudFront の CSP は bucket 名を書けず、同じ region の S3 endpoint
+（`https://*.s3.<region>.amazonaws.com`）を許可します。`scripts/deploy-web.sh` は `FileBucketName` と
+`RealtimeWebSocketUrl` output から、接続先をこの stack の bucket と WebSocket API だけに絞る `<meta>` CSP を
+`index.html` に加えます。browser は両方の policy を適用します。`/api/*` の CSP は `default-src 'none'` で、
+API の応答が document として開かれても何も読み込みません。
+
 ```sh
 VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 ```
@@ -1155,7 +1166,7 @@ Deploy 時は `cdk diff` で canonical table の意図しない replacement/dele
 保存済み row の schema version を上げる migration は、stack にある `DataMigrationFunction` を operator が起動して
 実行します。migration の契約、dual-read の deploy 順、rollback、evidence は
 [docs/data-migration.md](../docs/data-migration.md)、設計判断は
-[ADR 0026](../docs/adr/0026-data-migration-lambda-and-operator-proof.md) にあります。
+[ADR 0031](../docs/adr/0031-data-migration-lambda-and-operator-proof.md) にあります。
 
 - `DataMigrationFunction` は schedule も event source も持たず、起動されたときだけ動きます（timeout 15 分、
   非同期起動の retry 0）。待機中の費用はかかりません。

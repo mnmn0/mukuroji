@@ -54,6 +54,7 @@ test('shared server handler is bundled as a Lambda asset with production environ
     'MUKUROJI_API_RUNTIME_CONFIG_REVISION',
     'MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN',
     'MUKUROJI_APPLICATION_COMMIT_SHA',
+    'SOFTWARE_FACTORY',
     'TENANT_EXPORT_BUCKET_NAME',
     'TENANT_LIFECYCLE_OPERATIONS',
   ]);

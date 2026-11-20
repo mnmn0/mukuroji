@@ -1245,7 +1245,12 @@ export type WorkItemIdempotencyTransaction = {
 }
 
 /** Canonical Work Item delete transaction に含める参照整合性 fence の種別です。 */
-type WorkItemDeletionFenceKind = 'external-links' | 'document-backlinks' | 'agent-runs'
+type WorkItemDeletionFenceKind =
+  | 'external-links'
+  | 'document-backlinks'
+  | 'agent-runs'
+  | 'relations'
+  | 'collections'
 
 /** Cancellation reason を安定した domain conflict に分類する名前付き fence です。 */
 export type NamedWorkItemDeletionFence = {
@@ -4329,6 +4334,15 @@ function createWorkItemDeletionFenceConflictError(kind: WorkItemDeletionFenceKin
       )
     case 'agent-runs':
       return createAgentRunFenceConflictError()
+    case 'relations':
+    case 'collections':
+      // The clean-up was prepared from what was read before the delete; a relation or Collection
+      // that changed meanwhile is read again on retry.
+      return new ProjectDataError(
+        409,
+        'WorkItemDeletionReferencesChanged',
+        'The relations or Collections of this Work Item changed. Retry the request.',
+      )
   }
 }
 

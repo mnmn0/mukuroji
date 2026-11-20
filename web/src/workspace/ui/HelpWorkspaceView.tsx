@@ -84,18 +84,24 @@ export type HelpWorkspaceViewProps = {
   t: (key: MessageKey) => string
   /** Identity of the running Web build. Defaults to the values embedded at build time. */
   webBuild?: WebBuildInfo
+  /** Whether to show the coding-agent setup guide, which only Software factory deployments serve. */
+  showCodingAgentGuide?: boolean
 }
 
 /**
  * Renders coding-agent setup, role-specific user guides, and Workspace support destinations.
  *
- * @param props - Translator used to label each destination and the running build identity.
+ * @param props - Translator, running build identity, and whether to show the coding-agent guide.
  * @returns The Workspace help navigation view.
  */
-export function HelpWorkspaceView({ t, webBuild = readWebBuildInfo() }: HelpWorkspaceViewProps) {
+export function HelpWorkspaceView({
+  t,
+  webBuild = readWebBuildInfo(),
+  showCodingAgentGuide = true,
+}: HelpWorkspaceViewProps) {
   return (
     <div className="grid min-w-0 gap-6">
-      <CodingAgentGuide t={t} />
+      {showCodingAgentGuide ? <CodingAgentGuide t={t} /> : null}
       <section aria-labelledby="role-guides-title" className="grid min-w-0 gap-4" id="role-guides">
         <header>
           <h2 className="text-xl font-semibold tracking-tight text-[var(--workbench-text)]" id="role-guides-title">
