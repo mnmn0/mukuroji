@@ -26,6 +26,7 @@ import {
   type AutomationTemplateApplicationResult,
   type AutomationTemplateApplicationTarget,
   type AutomationTrigger,
+  type WorkItemScheduleCalendarPolicy,
   type BulkOperation,
   type CreateAutomationRuleInput,
   type CreateAutomationInboundWebhookEndpointInput,
@@ -641,13 +642,17 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     await this.deleteCurrent(workspaceId, `TEMPLATE#${encodeKey(templateId)}`, expectedRevision)
   }
 
-  /** Current enabled template version を固定した application receipt を予約します。 */
+  /**
+   * Current enabled template version を固定した application receipt を予約します。Project template
+   * の新しい receipt には WBS を数える稼働カレンダーも固定します。既存の receipt はそのまま返します。
+   */
   async reserveTemplateApplication(
     workspaceId: string,
     actorId: string,
     templateId: string,
     target: AutomationTemplateApplicationTarget,
     idempotencyKey: string,
+    calendarPolicy?: WorkItemScheduleCalendarPolicy,
   ) {
     await this.ensureTable()
     const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
@@ -698,6 +703,9 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       templateVersion: template.version,
       kind: template.kind,
       target: structuredClone(target),
+      ...(template.kind === 'project' && calendarPolicy
+        ? { calendarPolicy: structuredClone(calendarPolicy) }
+        : {}),
       status: 'pending',
       revision: 1,
       createdAt: now,
@@ -3715,6 +3723,29 @@ function readBulkOperation(item: Record<string, unknown>) {
   return value
 }
 
+/**
+ * Checks the shape of a calendar policy pinned on a template application.
+ *
+ * @param value - Stored value.
+ * @returns Whether it has a time zone and string arrays of working weekdays and holidays.
+ */
+function isStoredCalendarPolicy(value: unknown): value is WorkItemScheduleCalendarPolicy {
+  return typeof value === 'object' && value !== null &&
+    typeof Reflect.get(value, 'timeZone') === 'string' &&
+    isStringArray(Reflect.get(value, 'workingWeekdays')) &&
+    isStringArray(Reflect.get(value, 'holidays'))
+}
+
+/**
+ * Checks that a value is an array of strings.
+ *
+ * @param value - Candidate value.
+ * @returns Whether every entry is a string.
+ */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
+}
+
 function readTemplateApplication(item: Record<string, unknown>) {
   const value = stripStorage<AutomationTemplateApplication>(item)
   if (
@@ -3725,7 +3756,8 @@ function readTemplateApplication(item: Record<string, unknown>) {
       value.status !== 'succeeded' &&
       value.status !== 'failed') ||
     !Number.isSafeInteger(value.revision) ||
-    value.revision < 1
+    value.revision < 1 ||
+    !(value.calendarPolicy === undefined || isStoredCalendarPolicy(value.calendarPolicy))
   ) {
     throw storedInvalid('template application')
   }

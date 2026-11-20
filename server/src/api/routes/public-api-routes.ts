@@ -1886,6 +1886,8 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         }
       }
       await requirePublicImportPermission(principal, input)
+      // Read before the job exists, so a failed read leaves nothing to fail and the client can retry.
+      const defaultCalendarPolicy = await readWorkspaceWorkItemCalendarPolicy(principal.directoryId)
       const jobId = createWorkItemImportJobId(
         principal.directoryId,
         principal.userKey,
@@ -1925,7 +1927,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           format: input.format,
           sourceContent: input.source.content,
           mapping: input.mapping,
-          defaultCalendarPolicy: await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
+          defaultCalendarPolicy,
           requestFingerprint: createHash('sha256')
             .update(`management-import-v1\n${mutationContext.idempotencyKey}`)
             .digest('hex'),

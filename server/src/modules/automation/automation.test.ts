@@ -11,6 +11,7 @@ import {
   type BulkOperationRequest,
   type RecurringSchedule,
   type RecurringWork,
+  type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import {
   type AutomationErrorCategory,
@@ -627,6 +628,32 @@ describe('automation management create idempotency', () => {
       { kind: 'project', teamId: 'other' },
       'apply-1',
     )).rejects.toMatchObject({ code: 'IdempotencyConflict' })
+  })
+
+  test('pins the calendar of a Project template application and keeps it on a replay', async () => {
+    const { documentClient } = createIdempotencyDocumentClient()
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
+    const template = await client.createTemplate('workspace-1', {
+      kind: 'project',
+      name: 'Launch project',
+      enabled: true,
+      payload: { name: 'Launch', tone: 'purple' },
+    })
+    const target = { kind: 'project' as const, teamId: 'core', startDate: '2026-12-01' }
+    const pinned: WorkItemScheduleCalendarPolicy = {
+      timeZone: 'Asia/Tokyo', workingWeekdays: ['monday'], holidays: ['2026-12-08'],
+    }
+
+    const application = await client.reserveTemplateApplication(
+      'workspace-1', 'owner@example.com', template.id, target, 'apply-calendar', pinned,
+    )
+    const replay = await client.reserveTemplateApplication(
+      'workspace-1', 'owner@example.com', template.id, target, 'apply-calendar', { ...pinned, holidays: [] },
+    )
+
+    expect(application.calendarPolicy).toEqual(pinned)
+    expect(replay.calendarPolicy).toEqual(pinned)
+    expect((await client.getTemplateApplication('workspace-1', application.id))?.calendarPolicy).toEqual(pinned)
   })
 
   test('validates every Work Item template field at the server boundary', () => {

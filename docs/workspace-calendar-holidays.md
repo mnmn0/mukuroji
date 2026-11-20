@@ -20,7 +20,7 @@ Workspace の設定を変えても変わらない。
 | Web の task 画面、Team の Issue 画面 | 読み込んだ Workspace の稼働カレンダー（読み込み前・失敗時は月〜金・休日なし） |
 | Public API `POST /api/v1/work-items` | `schedule` を省いたとき server が Workspace の稼働カレンダーを付ける（`dueDate` があれば期限付き、なければ未スケジュール）。`schedule` を送ったときはその policy のまま |
 | MCP `create_task` | `schedule` を省いて Public API に送るので、Public API と同じ |
-| Project template の WBS 適用 | Workspace の稼働カレンダーで開始日からの稼働日を数え、その policy を各 Work Item に付ける |
+| Project template の WBS 適用 | Workspace の稼働カレンダーで開始日からの稼働日を数え、その policy を各 Work Item に付ける。適用の受付時に稼働カレンダーを固定し、再試行でも同じものを使う |
 | 依頼フォーム・Triage からの作成 | Workspace の稼働カレンダー |
 | CSV / JSON import | 行の `schedule` に `calendarPolicy` がないとき Workspace の稼働カレンダー。日付範囲で `durationDays` もないときは、その policy で数える。commit した job は作成時の稼働カレンダーを保存し、worker の再試行でも同じものを使う |
 
