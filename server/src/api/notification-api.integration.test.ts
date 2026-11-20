@@ -22,6 +22,8 @@ import type {
   NotificationClient,
 } from '../modules/notifications'
 import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
+import { ANALYTICS_REPORT_DELIVERED_EVENT_TYPE } from '../modules/analytics'
+import { InMemoryAnalyticsRepository } from '../modules/analytics/analytics'
 import { createTriageCapabilities } from '../modules/triage'
 import {
   afterEach,
@@ -1524,4 +1526,79 @@ test('shows Planning update activity to an Enterprise member with only Planning 
 
   expect(response.status).toBe(200)
   expect(probe.visibility.get(comment.id)).toBe(true)
+})
+
+test('shows a scheduled report delivery only while its recipient can still read the report', async () => {
+  const repository = new InMemoryAnalyticsRepository()
+  const filter = {
+    period: { from: '2026-07-01T00:00:00.000Z', to: '2026-07-31T23:59:59.999Z' },
+  }
+  const widgets = [{ id: 'wip', type: 'metric' as const, title: 'WIP', metric: 'wip' as const }]
+  for (const report of [
+    { id: 'shared-report', name: 'Weekly portfolio', visibility: 'shared' as const },
+    { id: 'team-report', name: 'Core Team status', visibility: 'team' as const, teamId: 'core-team' },
+    { id: 'personal-report', name: 'Private notes', visibility: 'personal' as const },
+  ]) {
+    await repository.createReport(
+      'user#demo@example.com',
+      report.id === 'personal-report' ? 'someone-else@example.com' : 'demo@example.com',
+      { ...report, timeZone: 'UTC', filter, widgets },
+    )
+  }
+  /**
+   * Builds one stored report delivery notification for the demo recipient.
+   *
+   * @param id - Notification ID.
+   * @param reportId - Delivered report.
+   * @returns The notification row as the projection stores it.
+   */
+  const delivery = (id: string, reportId: string) => createNotificationItem({
+    id,
+    eventType: ANALYTICS_REPORT_DELIVERED_EVENT_TYPE,
+    entityId: reportId,
+    reasons: ['report-recipient'],
+    title: 'Name at delivery time',
+    deepLink: `/reports?v=1&report=${reportId}&snapshot=snapshot-1`,
+    teamId: undefined,
+    projectId: undefined,
+    issueId: undefined,
+  })
+  const shared = delivery('analytics-shared', 'shared-report')
+  const team = { ...delivery('analytics-team', 'team-report'), teamId: 'core-team' }
+  const personal = delivery('analytics-personal', 'personal-report')
+  const deleted = delivery('analytics-deleted', 'deleted-report')
+  const missingReport = { ...delivery('analytics-missing-entity', 'shared-report'), entityId: undefined }
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const readable = createNotificationVisibilityProbe([shared, team, personal, deleted, missingReport])
+  setTestAppDependencies({ analytics: repository, notifications: readable.client })
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(readable.visibility).toEqual(new Map([
+    [shared.id, true],
+    [team.id, true],
+    [personal.id, false],
+    [deleted.id, false],
+    [missingReport.id, false],
+  ]))
+  // The Inbox shows the current report name instead of the name captured at delivery.
+  expect(shared.title).toBe('Weekly portfolio')
+  expect(team.title).toBe('Core Team status')
+
+  // Losing the Team removes the Team report delivery but keeps the shared one.
+  configureFakeProjectClients(false, { workspaceRole: 'member' })
+  const afterTeamLoss = createNotificationVisibilityProbe([shared, team])
+  setTestAppDependencies({ analytics: repository, notifications: afterTeamLoss.client })
+  const afterResponse = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(afterResponse.status).toBe(200)
+  expect(afterTeamLoss.visibility).toEqual(new Map([
+    [shared.id, true],
+    [team.id, false],
+  ]))
 })

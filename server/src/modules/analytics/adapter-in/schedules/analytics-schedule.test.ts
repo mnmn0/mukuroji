@@ -20,6 +20,7 @@ import {
   createAnalyticsScheduleShard,
   createAnalyticsSnapshot,
   InMemoryAnalyticsRepository,
+  type AnalyticsDeliveryNotification,
 } from '../../analytics'
 import {
   createAnalyticsScheduleRenderer,
@@ -1060,6 +1061,9 @@ test('leaves due reports paused when tenant Analytics is disabled', async () => 
     async renderArtifact() {
       throw new Error('Disabled Analytics must not render artifacts.')
     },
+    async notifyDelivery() {
+      throw new Error('Disabled Analytics must not notify recipients.')
+    },
   })
 
   expect(result).toEqual({
@@ -1121,6 +1125,9 @@ test('skips inactive recipients without reading directory, Work Item, or audit d
     render: renderer,
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    async notifyDelivery() {
+      throw new Error('An unauthorized recipient must not be notified.')
+    },
   })
 
   expect(result).toMatchObject({
@@ -1147,6 +1154,7 @@ test('retries a partial recipient failure across an ACL change without poisoning
     return result
   }
   const renderedArtifacts: AnalyticsScheduleArtifactInput[] = []
+  const notifications: AnalyticsDeliveryNotification[] = []
   let failSecondRecipient = true
   let authorizationVersion = 'before-change'
   const dependencies = {
@@ -1175,6 +1183,9 @@ test('retries a partial recipient failure across an ACL change without poisoning
     async renderArtifact(input: AnalyticsScheduleArtifactInput) {
       renderedArtifacts.push(input)
     },
+    async notifyDelivery(notification: AnalyticsDeliveryNotification) {
+      notifications.push(notification)
+    },
   }
 
   await expect(processDueAnalyticsReport(report, NOW, dependencies)).rejects.toMatchObject({
@@ -1182,6 +1193,8 @@ test('retries a partial recipient failure across an ACL change without poisoning
   })
   expect((await repository.getReport(report.workspaceId, report.id))?.revision).toBe(1)
   expect(createdReceipts).toHaveLength(1)
+  expect(notifications.map((notification) => notification.recipientMemberKey))
+    .toEqual(['first@example.com'])
 
   failSecondRecipient = false
   authorizationVersion = 'after-change'
@@ -1199,10 +1212,79 @@ test('retries a partial recipient failure across an ACL change without poisoning
   expect(snapshots).toHaveLength(2)
   expect(snapshots[0]?.createdByMemberKey).toBe(report.ownerMemberKey)
   expect(renderedArtifacts).toHaveLength(2)
+  // The retry re-sends the completed first recipient's idempotent notification for its
+  // committed snapshot, and every notification links the snapshot of a committed receipt.
+  expect(notifications.map((notification) => notification.recipientMemberKey))
+    .toEqual(['first@example.com', 'first@example.com', 'second@example.com'])
+  expect(notifications.map((notification) => notification.snapshotId)).toEqual([
+    createdReceipts[0]?.snapshotId,
+    createdReceipts[0]?.snapshotId,
+    createdReceipts[1]?.snapshotId,
+  ])
+  expect(notifications.map((notification) => notification.receipt.occurrenceKey)).toEqual([
+    createdReceipts[0]?.occurrenceKey,
+    createdReceipts[0]?.occurrenceKey,
+    createdReceipts[1]?.occurrenceKey,
+  ])
   const advanced = await repository.getReport(report.workspaceId, report.id)
   expect(advanced?.revision).toBe(2)
   expect(advanced?.schedule?.nextRunAt).toBe('2026-07-19T08:00:00.000Z')
 }, 15_000)
+
+test('retries a failed notification for the committed snapshot without re-rendering', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  const committedReceipts: AnalyticsDeliveryReceipt[] = []
+  const originalPutReceipt = repository.putDeliveryReceipt.bind(repository)
+  repository.putDeliveryReceipt = async (receipt) => {
+    const result = await originalPutReceipt(receipt)
+    if (result.created) committedReceipts.push(result.receipt)
+    return result
+  }
+  const notifications: AnalyticsDeliveryNotification[] = []
+  let renders = 0
+  let failNotification = true
+  const dependencies = {
+    repository,
+    async render(input: {
+      report: AnalyticsReport
+      recipientMemberKey: string
+      scheduledFor: string
+      historyReadAt: string
+    }) {
+      renders += 1
+      // A later render would see a different permission scope and produce another snapshot.
+      return createRenderedSnapshot(
+        input.report,
+        input.recipientMemberKey,
+        SCHEDULED_FOR,
+        new Set([`project-render-${renders}`]),
+      )
+    },
+    entitlement: enabledAnalyticsEntitlement,
+    renderArtifact: async () => {},
+    async notifyDelivery(notification: AnalyticsDeliveryNotification) {
+      if (failNotification) throw new Error('Audit outbox is throttled.')
+      notifications.push(notification)
+    },
+  }
+
+  await expect(processDueAnalyticsReport(report, NOW, dependencies)).rejects
+    .toThrow('Audit outbox is throttled.')
+  const [receipt] = committedReceipts
+  expect(committedReceipts).toHaveLength(1)
+  expect((await repository.getReport(report.workspaceId, report.id))?.schedule?.nextRunAt)
+    .toBe(SCHEDULED_FOR)
+
+  failNotification = false
+  await processDueAnalyticsReport(report, NOW, dependencies)
+
+  expect(renders).toBe(1)
+  expect(notifications).toHaveLength(1)
+  expect(notifications[0]?.snapshotId).toBe(receipt?.snapshotId)
+  expect((await repository.getReport(report.workspaceId, report.id))?.schedule?.nextRunAt)
+    .not.toBe(SCHEDULED_FOR)
+})
 
 test('restarts a partially delivered occurrence under a new semantic report definition', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
@@ -1239,6 +1321,7 @@ test('restarts a partially delivered occurrence under a new semantic report defi
     },
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    notifyDelivery: async () => {},
   }
 
   await expect(processDueAnalyticsReport(report, NOW, dependencies)).rejects.toMatchObject({
@@ -1299,6 +1382,7 @@ test('resumes after durable recipient checkpoints instead of restarting from the
     },
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    notifyDelivery: async () => {},
   }
 
   await expect(processDueAnalyticsReport(report, NOW, dependencies)).rejects.toMatchObject({
@@ -1356,6 +1440,7 @@ test('advances the delivered occurrence after an unrelated report edit wins the 
     },
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    notifyDelivery: async () => {},
   })
 
   expect(result.processed).toBe(true)
@@ -1404,6 +1489,7 @@ test('reprocesses the occurrence when a semantic report edit wins the first CAS'
     },
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    notifyDelivery: async () => {},
   }
 
   await processDueAnalyticsReport(report, NOW, dependencies)
@@ -1453,6 +1539,7 @@ test('does not overwrite a schedule cursor changed by a concurrent edit', async 
     },
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    notifyDelivery: async () => {},
   })
 
   const current = await repository.getReport(report.workspaceId, report.id)
@@ -1507,6 +1594,7 @@ test('advances past the second DST-fold instant on the same local delivery date'
     },
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    notifyDelivery: async () => {},
   })
 
   expect((await repository.getReport(report.workspaceId, report.id))?.schedule?.nextRunAt)
@@ -1529,6 +1617,9 @@ test('does not advance the schedule when every delivery attempt cannot complete'
         'AnalyticsArtifactUnavailable',
         'Analytics artifact could not be rendered.',
       )
+    },
+    async notifyDelivery() {
+      throw new Error('An undelivered artifact must not notify its recipient.')
     },
   })).rejects.toMatchObject({ code: 'AnalyticsArtifactUnavailable' })
 
@@ -1559,6 +1650,7 @@ test('fails closed when an occurrence receipt has a different immutable payload'
     },
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    notifyDelivery: async () => {},
   })).rejects.toMatchObject({ code: 'AnalyticsDeliveryConflict' })
 
   expect((await repository.getReport(report.workspaceId, report.id))?.revision).toBe(1)
@@ -1586,6 +1678,7 @@ test('fails closed when a receipt checkpoint identity does not match its lookup 
     },
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    notifyDelivery: async () => {},
   })).rejects.toMatchObject({ code: 'AnalyticsDeliveryConflict' })
 
   expect((await repository.getReport(report.workspaceId, report.id))?.revision).toBe(1)
@@ -1639,6 +1732,7 @@ test('processes due reports with a bounded worker pool and preserves every settl
       },
       entitlement: enabledAnalyticsEntitlement,
       renderArtifact: async () => {},
+      notifyDelivery: async () => {},
     })
   } catch (error) {
     caught = error
@@ -1676,6 +1770,7 @@ test('processes every due report when a shard spans multiple mutating pages', as
     },
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    notifyDelivery: async () => {},
   })
 
   expect(result).toMatchObject({
@@ -1711,6 +1806,7 @@ test('bounds empty due pages that keep returning continuation cursors', async ()
     },
     entitlement: enabledAnalyticsEntitlement,
     renderArtifact: async () => {},
+    notifyDelivery: async () => {},
   })).rejects.toMatchObject({
     code: 'AnalyticsScheduleLimitExceeded',
   })
