@@ -17,6 +17,11 @@ export type UserIdentityInput = Readonly<{
   readonly userPoolIdParameter: cdk.CfnParameter;
   /** Existing password app client ID, or blank to let the stack create one. */
   readonly userPoolClientIdParameter: cdk.CfnParameter;
+  /**
+   * Canonical app URL, without a trailing slash, that the invitation and verification email
+   * link to. The stack passes a lazy value because the Web distribution is built later.
+   */
+  readonly webOrigin: string;
 }>;
 
 /** Cognito identifiers the API and workers use, whichever pool the deployment picked. */
@@ -41,8 +46,15 @@ export type UserIdentityResources = Readonly<{
  * Passing both keeps the existing pool, as earlier deployments did. The pool is retained when
  * the stack is deleted because it holds every user's sign-in.
  *
+ * The stack-owned pool sends bilingual invitation and verification email that link to the app.
+ * With `CognitoEmailSender` empty it keeps Cognito's own email sending, which allows only a few
+ * messages a day. With it set the pool sends from that address through SES in the stack's
+ * region, authorized by `CognitoEmailSesIdentity`, or by the address itself when that is empty.
+ * An existing user pool keeps its own email settings, so a rule rejects a sender for it instead
+ * of ignoring the value.
+ *
  * @param scope Stack scope used directly to keep construct paths flat.
- * @param input Parameters that pick an existing pool and client.
+ * @param input Parameters that pick an existing pool and client, and the app URL.
  * @returns Conditions and the resolved Cognito identifiers, also published as stack outputs.
  */
 export function buildUserIdentity(
@@ -68,6 +80,13 @@ export function buildUserIdentity(
       workspace_id: new cognito.StringAttribute({ mutable: true }),
     },
     autoVerify: { email: true },
+    userInvitation: buildInvitationEmail(input.webOrigin),
+    // Cognito sends the verification template for password reset codes, including the one an
+    // administrator's reset sends, and for email address verification.
+    userVerification: {
+      ...buildVerificationEmail(input.webOrigin),
+      emailStyle: cognito.VerificationEmailStyle.CODE,
+    },
     accountRecovery: cognito.AccountRecovery.EMAIL_ONLY,
     passwordPolicy: {
       minLength: 12,
@@ -105,6 +124,11 @@ export function buildUserIdentity(
   for (const resource of [userPool, userPoolClient]) {
     (resource.node.defaultChild as cdk.CfnResource).cfnOptions.condition = userPoolCreated;
   }
+  const cfnUserPool = userPool.node.defaultChild;
+  if (!(cfnUserPool instanceof cognito.CfnUserPool)) {
+    throw new Error('The stack-owned user pool must have a CfnUserPool default child.');
+  }
+  cfnUserPool.emailConfiguration = declareUserPoolEmailSending(scope, userPoolIdBlank);
 
   const userPoolId = cdk.Token.asString(cdk.Fn.conditionIf(
     userPoolCreated.logicalId,
@@ -141,32 +165,21 @@ export function buildUserIdentity(
   };
 }
 
-/** Inputs for the invitation and verification email of a stack-owned user pool. */
-export type UserPoolEmailInput = Readonly<{
-  /** Resources `buildUserIdentity` returned. */
-  readonly userIdentity: UserIdentityResources;
-  /** Existing user pool ID parameter; the SES sender applies only when it is blank. */
-  readonly userPoolIdParameter: cdk.CfnParameter;
-  /** Canonical app URL, without a trailing slash, that the messages link to. */
-  readonly webOrigin: string;
-}>;
-
 /**
- * Sets the stack-owned user pool's invitation and verification email, and sends it through SES
- * when `CognitoEmailSender` is set.
+ * Declares the parameters, rule, and conditions that send the stack-owned pool's email through
+ * SES, and returns the pool's `EmailConfiguration`.
  *
- * The messages name the app URL, which exists only once the Web distribution is built, so the
- * stack calls this after `buildWebDistribution` instead of passing the URL to
- * `buildUserIdentity`. With `CognitoEmailSender` empty the pool keeps Cognito's own email
- * sending, which allows only a few messages a day. With it set the pool sends from that
- * address through SES in the stack's region, authorized by `CognitoEmailSesIdentity`, or by
- * the address itself when that is empty. An existing user pool keeps its own email settings,
- * so a rule rejects a sender for it instead of ignoring the value.
+ * Without `CognitoEmailSender` the value resolves to no property, which keeps Cognito's default
+ * email sending.
  *
  * @param scope Stack that directly owns the parameters, rule, and conditions.
- * @param input The user pool, the parameter that picks an existing pool, and the app URL.
+ * @param userPoolIdBlank Condition that is true when the stack creates the user pool.
+ * @returns The conditional `EmailConfiguration` of the stack-owned user pool.
  */
-export function configureUserPoolEmail(scope: cdk.Stack, input: UserPoolEmailInput): void {
+function declareUserPoolEmailSending(
+  scope: cdk.Stack,
+  userPoolIdBlank: cdk.ICfnConditionExpression,
+): cdk.IResolvable {
   const sender = new cdk.CfnParameter(scope, 'CognitoEmailSender', {
     type: 'String',
     default: '',
@@ -197,10 +210,7 @@ export function configureUserPoolEmail(scope: cdk.Stack, input: UserPoolEmailInp
         assertDescription: 'CognitoEmailSesIdentity needs CognitoEmailSender.',
       },
       {
-        assert: cdk.Fn.conditionOr(
-          senderBlank,
-          cdk.Fn.conditionEquals(input.userPoolIdParameter.valueAsString, ''),
-        ),
+        assert: cdk.Fn.conditionOr(senderBlank, userPoolIdBlank),
         assertDescription:
           'CognitoEmailSender applies only to a user pool the stack creates. Configure SES on an existing user pool in Cognito instead.',
       },
@@ -221,12 +231,7 @@ export function configureUserPoolEmail(scope: cdk.Stack, input: UserPoolEmailInp
       sesIdentity.valueAsString,
     )),
   });
-
-  const userPool = input.userIdentity.userPool.node.defaultChild;
-  if (!(userPool instanceof cognito.CfnUserPool)) {
-    throw new Error('The stack-owned user pool must have a CfnUserPool default child.');
-  }
-  userPool.addPropertyOverride('EmailConfiguration', cdk.Fn.conditionIf(
+  return cdk.Fn.conditionIf(
     sendsThroughSes.logicalId,
     {
       EmailSendingAccount: 'DEVELOPER',
@@ -234,29 +239,15 @@ export function configureUserPoolEmail(scope: cdk.Stack, input: UserPoolEmailInp
       SourceArn: sourceArn,
     },
     cdk.Aws.NO_VALUE,
-  ));
-
-  const invitation = buildInvitationEmail(input.webOrigin);
-  userPool.addPropertyOverride('AdminCreateUserConfig.InviteMessageTemplate', {
-    EmailSubject: invitation.subject,
-    EmailMessage: invitation.body,
-  });
-  // Cognito sends the verification template for password reset codes, including the one an
-  // administrator's reset sends, and for email address verification. The legacy fields carry
-  // the same text because CloudFormation sends both to Cognito.
-  const verification = buildVerificationEmail(input.webOrigin);
-  userPool.addPropertyOverride('VerificationMessageTemplate.EmailSubject', verification.subject);
-  userPool.addPropertyOverride('VerificationMessageTemplate.EmailMessage', verification.body);
-  userPool.addPropertyOverride('EmailVerificationSubject', verification.subject);
-  userPool.addPropertyOverride('EmailVerificationMessage', verification.body);
+  );
 }
 
 /** Subject and HTML body of one Cognito email template. */
 type CognitoEmailTemplate = Readonly<{
   /** Subject line, in Japanese and English. */
-  readonly subject: string;
+  readonly emailSubject: string;
   /** HTML body, in Japanese and then English. */
-  readonly body: string;
+  readonly emailBody: string;
 }>;
 
 /**
@@ -271,8 +262,8 @@ function buildInvitationEmail(webOrigin: string): CognitoEmailTemplate {
   const loginUrl = `${webOrigin}/login`;
   const link = `<a href="${loginUrl}">${loginUrl}</a>`;
   return {
-    subject: 'Mukuroji への招待 / Your Mukuroji invitation',
-    body: [
+    emailSubject: 'Mukuroji への招待 / Your Mukuroji invitation',
+    emailBody: [
       '<p>Mukuroji に招待されました。</p>',
       '<p>ユーザー名: {username}<br>仮パスワード: {####}</p>',
       `<p>${link} でサインインし、新しいパスワードを設定してください。`
@@ -300,8 +291,8 @@ function buildVerificationEmail(webOrigin: string): CognitoEmailTemplate {
   const resetUrl = `${webOrigin}/forgot-password`;
   const link = `<a href="${resetUrl}">${resetUrl}</a>`;
   return {
-    subject: 'Mukuroji の確認コード / Your Mukuroji verification code',
-    body: [
+    emailSubject: 'Mukuroji の確認コード / Your Mukuroji verification code',
+    emailBody: [
       '<p>Mukuroji の確認コード: {####}</p>',
       '<p>パスワードを再設定するときは、再設定画面でこのコードと新しいパスワードを入力してください。'
         + `画面を開いていない場合は ${link} から始めると、新しいコードが届きます。`
