@@ -125,7 +125,7 @@ test('rejects a token from another Cognito pool before calling GetUser', async (
   )
 })
 
-test('uses an explicit Floci public issuer and rejects other issuers before GetUser', async () => {
+test('uses an explicit Floci public issuer, rejects other issuers before GetUser and refuses unattested SSO tokens', async () => {
   await withTestEnvironment(
     {
       COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
@@ -174,7 +174,9 @@ test('uses an explicit Floci public issuer and rejects other issuers before GetU
       })
 
       expect(validResponse.status).toBe(200)
-      expect(ssoResponse.status).toBe(200)
+      // An SSO token that did not come through /api/auth/sso/exchange has no server marker.
+      expect(ssoResponse.status).toBe(401)
+      expect(await ssoResponse.json()).toMatchObject({ code: 'EnterpriseSsoSessionRequired' })
       expect(wrongIssuerResponse.status).toBe(401)
       expect(await wrongIssuerResponse.json()).toEqual({ message: 'Authentication failed.' })
       expect(getUserCalls).toBe(2)

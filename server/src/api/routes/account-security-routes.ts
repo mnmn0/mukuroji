@@ -45,7 +45,11 @@ import {
 } from '../shared/account-security'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { consumeAuthenticationAttempt } from '../shared/authentication-attempt-limit'
-import { createAuthenticationResponse } from '../shared/authentication-session'
+import { createAuthenticationResponse, toProjectPrincipal } from '../shared/authentication-session'
+import {
+  readCognitoAccessTokenUser,
+  requireEnterpriseSsoSessionAttestation,
+} from '../shared/cognito-access-token-user'
 import {
   isEnterpriseSsoConfigured,
   toEnterpriseIdentityErrorResponse,
@@ -250,7 +254,11 @@ async function readCognitoCaller(c: Context) {
   const accessToken = readBearerAccessToken(c)
   if (!accessToken) return undefined
   validateConfiguredCognitoAccessToken(accessToken)
-  const user = await authenticationDependencies.cognito.getUser(accessToken)
+  const user = await readCognitoAccessTokenUser(accessToken)
+  await requireEnterpriseSsoSessionAttestation(
+    accessToken,
+    toProjectPrincipal(user, accessToken).directoryId,
+  )
   return { accessToken, user }
 }
 
@@ -464,7 +472,7 @@ export function registerAccountSecurityRoutes(routeApp: Hono): void {
 
     try {
       validateConfiguredCognitoAccessToken(accessToken)
-      const user = await authenticationDependencies.cognito.getUser(accessToken)
+      const user = await readCognitoAccessTokenUser(accessToken)
       await authenticateWorkspacePrincipal(accessToken, user, c)
       const { policy, mfaRequired } = await readMfaRequirement(user, accessToken)
       await removeSoftwareToken(createSoftwareTokenRemovalPorts(authenticationDependencies.cognito), {
