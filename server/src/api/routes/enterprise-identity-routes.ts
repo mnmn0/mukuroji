@@ -103,6 +103,7 @@ import {
   toAuthErrorResponse,
 } from '../shared/http'
 import { summarizeMfaEnrollment } from '../../modules/workspace-access'
+import { resolveTrustedClientAddress } from '../../infrastructure/http/trusted-request-source'
 import { createRequestMemberSignInSecurityPorts } from '../shared/member-sign-in-security'
 import { requireWorkspaceMemberHasNoOwnedPlanningEntities } from '../shared/planning-access'
 import {
@@ -225,7 +226,7 @@ export async function auditRejectedEnterpriseSecurityMutation(
         requestId,
         method: c.req.method,
         route: c.req.path,
-        ipAddress: resolveEnterpriseClientIp(c),
+        ipAddress: resolveTrustedClientAddress(c),
         userAgent: c.req.header('User-Agent'),
       },
     })

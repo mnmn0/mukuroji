@@ -6,6 +6,10 @@ import {
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
+import {
+  COST_ALLOCATION_TAG_KEY,
+  COST_ALLOCATION_TAG_VALUE,
+} from '../lib/aspects/cost-allocation-tags';
 
 test('stateful resources keep pinned logical IDs and enable retain with PITR', () => {
   const template = synthesizedTemplate;
@@ -493,6 +497,7 @@ test('planning data uses retained storage with a sparse update schedule due inde
       PointInTimeRecoverySpecification: {
         PointInTimeRecoveryEnabled: true,
       },
+      Tags: [{ Key: COST_ALLOCATION_TAG_KEY, Value: COST_ALLOCATION_TAG_VALUE }],
     },
     UpdateReplacePolicy: 'Retain',
     DeletionPolicy: 'Retain',
@@ -536,6 +541,7 @@ test('developer platform uses a retained TTL table with a lookup GSI', () => {
         AttributeName: 'expiresAt',
         Enabled: true,
       },
+      Tags: [{ Key: COST_ALLOCATION_TAG_KEY, Value: COST_ALLOCATION_TAG_VALUE }],
     },
     UpdateReplacePolicy: 'Retain',
     DeletionPolicy: 'Retain',

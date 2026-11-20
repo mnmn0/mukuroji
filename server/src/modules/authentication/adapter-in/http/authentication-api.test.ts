@@ -264,6 +264,50 @@ test('rate limits repeated MFA verification attempts by transport and email', as
   })
 })
 
+test('counts MFA verification attempts per CloudFront viewer address, not per edge', async () => {
+  configureFakeProjectClients(true)
+  const edgeSecret = 'edge-secret-0123456789abcdef0123456789abcdef'
+  await withTestEnvironment({ MUKUROJI_EDGE_ORIGIN_SECRET: edgeSecret }, async () => {
+    const createRequest = (viewerAddress: string) => app.request('/api/auth/challenge/mfa', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-mukuroji-edge-secret': edgeSecret,
+        'x-mukuroji-viewer-address': viewerAddress,
+      },
+      body: JSON.stringify({
+        email: 'edge-rate-limit-mfa@example.com',
+        challenge: 'EMAIL_OTP',
+        code: '123456',
+        session: 'mfa-session',
+      }),
+    })
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      expect((await createRequest('203.0.113.20')).status).toBe(409)
+    }
+    expect((await createRequest('203.0.113.20')).status).toBe(429)
+    // Spoofing a forwarded header without the origin secret does not reset the count.
+    expect((await app.request('/api/auth/challenge/mfa', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-mukuroji-edge-secret': edgeSecret,
+        'x-mukuroji-viewer-address': '203.0.113.20',
+        'X-Forwarded-For': '198.51.100.99',
+      },
+      body: JSON.stringify({
+        email: 'edge-rate-limit-mfa@example.com',
+        challenge: 'EMAIL_OTP',
+        code: '123456',
+        session: 'mfa-session',
+      }),
+    })).status).toBe(429)
+    // Another viewer behind the same CloudFront edge keeps its own count.
+    expect((await createRequest('203.0.113.21')).status).toBe(409)
+  })
+})
+
 test('returns a stable error when a new password violates the Cognito policy', async () => {
   const calls = configureFakeProjectClients(true, {
     newPasswordChallengeError: new CognitoServiceError(
