@@ -63,8 +63,6 @@ export type {
 } from './application/ports/reminder-settings-reader'
 export type { ScheduledTimesheetReader } from './application/ports/timesheet-reminder-reader'
 export type { UnsubmittedTimeEntry } from './application/timesheet-reminders'
-/** Exposes the NotificationsTable store of Team reminder overrides. */
-export { DynamoDbReminderSettingsStore } from './adapter-out/dynamodb/reminder-settings-store'
 /** Exposes reminder override validation shared by HTTP adapters. */
 export { normalizeTeamReminderDays } from './domain/reminder-days'
 export {

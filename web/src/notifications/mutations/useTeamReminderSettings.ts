@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from 'react'
+import { useSWRConfig } from 'swr'
 import type {
   TeamNotificationReminderDays,
   TeamNotificationReminderSettings,
@@ -6,7 +7,10 @@ import type {
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from '../api/errors'
 import { updateTeamReminderSettings } from '../api/teamReminders'
-import { useTeamReminderSettingsQuery } from '../queries/useTeamReminderSettingsQuery'
+import {
+  createTeamReminderSettingsKey,
+  useTeamReminderSettingsQuery,
+} from '../queries/useTeamReminderSettingsQuery'
 
 /** State and actions of the Team reminder settings panel. */
 export type TeamReminderSettingsController = {
@@ -49,15 +53,22 @@ export function useTeamReminderSettings(
   enabled = true,
 ): TeamReminderSettingsController {
   const mutationRunner = useRef(createMutationRequestRunner()).current
+  const { mutate: mutateCache } = useSWRConfig()
   const [isSaving, setIsSaving] = useState(false)
-  const [saveResult, setSaveResult] = useState<TeamReminderSettingsController['saveResult']>()
+  // Tagged with the saved Team, so a result never shows on another Team's page.
+  const [saveOutcome, setSaveOutcome] = useState<{
+    teamId: string
+    result: NonNullable<TeamReminderSettingsController['saveResult']>
+  }>()
   const [saveError, setSaveError] = useState<unknown>()
   const { data, error, isLoading, mutate } = useTeamReminderSettingsQuery(accessToken, teamId, enabled)
-
   const save = useCallback(async (days: TeamNotificationReminderDays) => {
     if (!accessToken || !teamId || !data) return false
+    // Fixed at save start, so a response that arrives after moving to another Team updates the
+    // saved Team's cache entry instead of the one now on screen.
+    const key = createTeamReminderSettingsKey(accessToken, teamId)
     setIsSaving(true)
-    setSaveResult(undefined)
+    setSaveOutcome(undefined)
     setSaveError(undefined)
     const request = { expectedRevision: data.revision, days }
     try {
@@ -66,23 +77,23 @@ export function useTeamReminderSettings(
         JSON.stringify(request),
         (context) => updateTeamReminderSettings(accessToken, teamId, request, context),
       )
-      await mutate(saved, { revalidate: false })
-      setSaveResult('saved')
+      await mutateCache(key, saved, { revalidate: false })
+      setSaveOutcome({ teamId, result: 'saved' })
       return true
     } catch (caught) {
       console.error('Team reminder settings update failed:', caught)
-      setSaveError(caught)
       if (caught instanceof NotificationsApiError && caught.status === 409) {
-        setSaveResult('conflict')
-        await mutate().catch(() => undefined)
+        await mutateCache(key).catch(() => undefined)
+        setSaveOutcome({ teamId, result: 'conflict' })
       } else {
-        setSaveResult('error')
+        setSaveOutcome({ teamId, result: 'error' })
       }
+      setSaveError(caught)
       return false
     } finally {
       setIsSaving(false)
     }
-  }, [accessToken, data, mutate, mutationRunner, teamId])
+  }, [accessToken, data, mutateCache, mutationRunner, teamId])
 
   return {
     ...(data ? { settings: data } : {}),
@@ -90,7 +101,7 @@ export function useTeamReminderSettings(
     hasLoadError: Boolean(error),
     isUnavailable: error instanceof NotificationsApiError && (error.status === 403 || error.status === 404),
     isSaving,
-    ...(saveResult ? { saveResult } : {}),
+    ...(saveOutcome && saveOutcome.teamId === teamId ? { saveResult: saveOutcome.result } : {}),
     sessionErrors: [error, saveError],
     refresh: async () => {
       await mutate()

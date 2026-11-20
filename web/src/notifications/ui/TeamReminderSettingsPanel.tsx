@@ -103,7 +103,8 @@ function TeamReminderSettingsForm({
       </div>
       <div className="px-5 py-5">
         <ReminderDaysFields
-          disabled={!settings.canManage}
+          // Saving remounts the form with the saved revision, so edits made meanwhile would be lost.
+          disabled={!settings.canManage || controller.isSaving}
           draft={draft}
           fields={NOTIFICATION_REMINDER_DAY_FIELDS}
           placeholderFor={(field) =>

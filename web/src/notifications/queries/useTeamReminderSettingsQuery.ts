@@ -2,6 +2,17 @@ import useSWR from 'swr'
 import { getTeamReminderSettings } from '../api/teamReminders'
 
 /**
+ * Builds the SWR key of a Team's reminder settings.
+ *
+ * @param accessToken - API access token.
+ * @param teamId - Team ID.
+ * @returns Cache key shared by the query and the save that updates it.
+ */
+export function createTeamReminderSettingsKey(accessToken: string, teamId: string) {
+  return ['team-notification-reminders', accessToken, teamId] as const
+}
+
+/**
  * Loads a Team's reminder settings.
  *
  * @param accessToken - API access token.
@@ -15,7 +26,7 @@ export function useTeamReminderSettingsQuery(
   enabled = true,
 ) {
   const key = accessToken && teamId && enabled
-    ? ['team-notification-reminders', accessToken, teamId] as const
+    ? createTeamReminderSettingsKey(accessToken, teamId)
     : null
   return useSWR(
     key,

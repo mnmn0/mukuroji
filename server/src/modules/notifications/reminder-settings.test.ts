@@ -17,7 +17,11 @@ import {
 import {
   evaluateTimesheetReminders,
 } from './application/timesheet-reminders'
-import type { TeamReminderSettingsRecord } from './application/ports/reminder-settings-reader'
+import type {
+  SaveTeamReminderSettingsInput,
+  TeamReminderSettingsReceipt,
+  TeamReminderSettingsRecord,
+} from './application/ports/reminder-settings-reader'
 
 /** Command recorded by the fake DocumentClient. */
 type RecordedCommand = { name: string; input: Record<string, unknown> }
@@ -123,84 +127,175 @@ describe('personal reminder days', () => {
 })
 
 describe('Team reminder settings store', () => {
-  test('creates, updates with the revision condition, and reports a lost race as a conflict', async () => {
-    let stored: Record<string, unknown> | undefined
+  /**
+   * Creates a NotificationsTable fake that applies transactions atomically and evaluates each
+   * item's condition: `attribute_not_exists`, the revision match, and ConditionChecks marked as
+   * failing.
+   */
+  function createTransactionalStore() {
+    const rows = new Map<string, Record<string, unknown>>()
+    const keyOf = (key: unknown) => {
+      const recipientKey: unknown = Reflect.get(key ?? {}, 'recipientKey')
+      const notificationKey: unknown = Reflect.get(key ?? {}, 'notificationKey')
+      return `${String(recipientKey)}|${String(notificationKey)}`
+    }
+    const failingChecks = new Set<string>()
+    const transactions: unknown[][] = []
     const recording = createRecordingClient(({ name, input }) => {
-      if (name === 'GetCommand') return { Item: stored }
-      if (name === 'TransactWriteCommand') {
-        const items = input.TransactItems
-        if (!Array.isArray(items)) throw new Error('Missing transaction.')
-        const put: unknown = Reflect.get(items[0] ?? {}, 'Put')
+      if (name === 'GetCommand') return { Item: rows.get(keyOf(input.Key)) }
+      if (name !== 'TransactWriteCommand') return {}
+      const items = input.TransactItems
+      if (!Array.isArray(items)) throw new Error('Missing transaction.')
+      transactions.push(items)
+      const reasons = items.map((item: unknown) => {
+        const check: unknown = Reflect.get(item ?? {}, 'ConditionCheck')
+        if (check) {
+          const table: unknown = Reflect.get(check, 'TableName')
+          return { Code: typeof table === 'string' && failingChecks.has(table) ? 'ConditionalCheckFailed' : 'None' }
+        }
+        const put: unknown = Reflect.get(item ?? {}, 'Put')
+        if (Reflect.get(put ?? {}, 'TableName') !== 'NotificationsTable') return { Code: 'None' }
+        const existing = rows.get(keyOf(Reflect.get(put ?? {}, 'Item')))
         const condition = Reflect.get(put ?? {}, 'ConditionExpression')
         const expected = Reflect.get(Reflect.get(put ?? {}, 'ExpressionAttributeValues') ?? {}, ':revision')
-        if (
-          condition === 'attribute_not_exists(recipientKey)' ? stored !== undefined : stored?.revision !== expected
-        ) {
-          throw Object.assign(new Error('Cancelled'), {
-            name: 'TransactionCanceledException',
-            CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
-          })
+        const holds = condition === 'attribute_not_exists(recipientKey)'
+          ? existing === undefined
+          : existing?.revision === expected
+        return { Code: holds ? 'None' : 'ConditionalCheckFailed' }
+      })
+      if (reasons.some((reason) => reason.Code !== 'None')) {
+        throw Object.assign(new Error('Cancelled'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: reasons,
+        })
+      }
+      for (const item of items) {
+        const put: unknown = Reflect.get(item ?? {}, 'Put')
+        const row: unknown = Reflect.get(put ?? {}, 'Item')
+        if (Reflect.get(put ?? {}, 'TableName') === 'NotificationsTable' && typeof row === 'object' && row !== null) {
+          rows.set(keyOf(row), { ...row })
         }
-        stored = { ...Reflect.get(put ?? {}, 'Item') }
       }
       return {}
     })
     const store = new DynamoDbReminderSettingsStore(recording.documentClient, 'NotificationsTable')
+    return { store, rows, failingChecks, transactions }
+  }
+
+  const save = (expectedRevision: number, overrides: Partial<SaveTeamReminderSettingsInput> = {}) => ({
+    workspaceId: 'workspace-1',
+    teamId: 'core-team',
+    days: {},
+    expectedRevision,
+    now: new Date('2026-07-12T00:00:00.000Z'),
+    ...overrides,
+  })
+
+  test('creates, updates with the revision condition, and reports a lost race as a conflict', async () => {
+    const { store, rows } = createTransactionalStore()
 
     expect(await store.getTeamSettings('workspace-1', 'core-team')).toEqual({ days: {}, revision: 0 })
     expect(await store.readTeamReminderDays('workspace-1', 'core-team')).toBeUndefined()
-    await store.saveTeamSettings({
+    await store.saveTeamSettings(save(0, { days: { dueSoonDays: 2, overdueEscalationDays: 14 } }))
+    expect(rows.get('workspace-1#!team-reminder-settings|TEAM#core-team')).toMatchObject({
+      itemType: 'team-reminder-settings',
       workspaceId: 'workspace-1',
       teamId: 'core-team',
-      days: { dueSoonDays: 2, overdueEscalationDays: 14 },
-      expectedRevision: 0,
-      now: new Date('2026-07-12T00:00:00.000Z'),
-    })
-    expect(stored).toMatchObject({
-      recipientKey: 'workspace-1#!team-reminder-settings',
-      notificationKey: 'TEAM#core-team',
-      itemType: 'team-reminder-settings',
       revision: 1,
     })
     expect(await store.readTeamReminderDays('workspace-1', 'core-team')).toEqual({ dueSoonDays: 2, overdueEscalationDays: 14 })
-    await expect(store.saveTeamSettings({
-      workspaceId: 'workspace-1',
-      teamId: 'core-team',
-      days: {},
-      expectedRevision: 0,
-      now: new Date('2026-07-13T00:00:00.000Z'),
-    })).rejects.toMatchObject({ status: 409, code: 'NotificationReminderSettingsConflict' })
-    await store.saveTeamSettings({
-      workspaceId: 'workspace-1',
-      teamId: 'core-team',
-      days: {},
-      expectedRevision: 1,
-      now: new Date('2026-07-13T00:00:00.000Z'),
-      mutation: { idempotencyKey: 'key-2', requestFingerprint: 'fingerprint-2' },
+    await expect(store.saveTeamSettings(save(0))).rejects.toMatchObject({
+      status: 409,
+      code: 'NotificationReminderSettingsConflict',
     })
+    await store.saveTeamSettings(save(1, { now: new Date('2026-07-13T00:00:00.000Z') }))
     expect(await store.getTeamSettings('workspace-1', 'core-team')).toEqual({
       days: {},
       revision: 2,
       updatedAt: '2026-07-13T00:00:00.000Z',
-      lastMutation: { idempotencyKey: 'key-2', requestFingerprint: 'fingerprint-2' },
     })
   })
 
-  test('fails instead of falling back to defaults for a corrupt row', async () => {
-    const recording = createRecordingClient(() => ({
-      Item: { itemType: 'team-reminder-settings', revision: 1, days: { dueSoonDays: 'soon' } },
+  test('keeps a receipt per idempotency key that later updates do not replace', async () => {
+    const { store } = createTransactionalStore()
+    await store.saveTeamSettings(save(0, {
+      days: { dueSoonDays: 2 },
+      mutation: { idempotencyKey: 'key-1', requestFingerprint: 'fingerprint-1' },
     }))
-    const store = new DynamoDbReminderSettingsStore(recording.documentClient, 'NotificationsTable')
+    await store.saveTeamSettings(save(1, {
+      days: { dueSoonDays: 4 },
+      mutation: { idempotencyKey: 'key-2', requestFingerprint: 'fingerprint-2' },
+    }))
+    expect(await store.getMutationReceipt('workspace-1', 'core-team', 'key-1')).toEqual({
+      requestFingerprint: 'fingerprint-1',
+      record: { days: { dueSoonDays: 2 }, revision: 1, updatedAt: '2026-07-12T00:00:00.000Z' },
+    })
+    expect(await store.getMutationReceipt('workspace-1', 'core-team', 'unused')).toBeUndefined()
+    expect(await store.getMutationReceipt('workspace-1', 'other-team', 'key-1')).toBeUndefined()
+    // A key can only be used once, even with the current revision.
+    await expect(store.saveTeamSettings(save(2, {
+      mutation: { idempotencyKey: 'key-1', requestFingerprint: 'fingerprint-3' },
+    }))).rejects.toMatchObject({ status: 409, code: 'NotificationReminderSettingsConflict' })
+  })
+
+  test('commits the caller authorization checks and reports their failure apart from a conflict', async () => {
+    const { store, failingChecks, transactions } = createTransactionalStore()
+    const authorizationConditionChecks = [{
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#manager@example.com' },
+        ConditionExpression: '#version = :expectedVersion',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':expectedVersion': 3 },
+      },
+    }]
+    await store.saveTeamSettings(save(0, { authorizationConditionChecks }))
+    expect(transactions[0]).toContainEqual(authorizationConditionChecks[0])
+
+    failingChecks.add('WorkspaceAccessTable')
+    await expect(store.saveTeamSettings(save(1, { authorizationConditionChecks }))).rejects.toMatchObject({
+      status: 409,
+      code: 'TeamReminderSettingsAuthorizationChanged',
+    })
+    expect((await store.getTeamSettings('workspace-1', 'core-team')).revision).toBe(1)
+  })
+
+  test('fails instead of falling back to defaults for a corrupt or misplaced row', async () => {
+    const { store, rows } = createTransactionalStore()
+    await store.saveTeamSettings(save(0, { days: { dueSoonDays: 2 } }))
+    expect(await store.readTeamReminderDays('workspace-1', 'core-team')).toEqual({ dueSoonDays: 2 })
+    const key = 'workspace-1#!team-reminder-settings|TEAM#core-team'
+    const valid = { ...rows.get(key) }
+
+    rows.set(key, { ...valid, days: { dueSoonDays: 366 } })
     await expect(store.readTeamReminderDays('workspace-1', 'core-team')).rejects.toThrow('invalid')
+    rows.set(key, { ...valid, teamId: 'other-team' })
+    await expect(store.getTeamSettings('workspace-1', 'core-team')).rejects.toThrow('invalid')
+    rows.set(key, { ...valid, workspaceId: 'workspace-2' })
+    await expect(store.getTeamSettings('workspace-1', 'core-team')).rejects.toThrow('invalid')
   })
 
   test('fails instead of falling back for a corrupt personal row and uses nothing for a missing one', async () => {
-    let item: Record<string, unknown> | undefined
-    const recording = createRecordingClient(() => ({ Item: item }))
-    const store = new DynamoDbReminderSettingsStore(recording.documentClient, 'NotificationsTable')
-    expect(await store.readPersonalReminderDays('workspace-1', 'member@example.com')).toBeUndefined()
-    item = { reminderDays: { dueSoonDays: 'soon' } }
-    await expect(store.readPersonalReminderDays('workspace-1', 'member@example.com')).rejects.toThrow()
+    const preferences = createPreferenceStore()
+    const reader = new DynamoDbReminderSettingsStore(preferences.documentClient, 'NotificationsTable')
+    expect(await reader.readPersonalReminderDays('workspace-1', 'member@example.com')).toBeUndefined()
+    await preferences.client.savePreferences({
+      ...recipient,
+      preferences: { ...DEFAULT_NOTIFICATION_PREFERENCES, reminderDays: { dueSoonDays: 5 } },
+    })
+    expect(await reader.readPersonalReminderDays('workspace-1', 'member@example.com')).toEqual({ dueSoonDays: 5 })
+
+    const [key, row] = [...preferences.rows.entries()][0] ?? []
+    if (!key || !row) throw new Error('Missing saved preferences.')
+    preferences.rows.set(key, { ...row, reminderDays: { dueSoonDays: 366 } })
+    await expect(reader.readPersonalReminderDays('workspace-1', 'member@example.com')).rejects.toThrow()
+    // A non-strict read and an inheriting save fail too instead of writing defaults back.
+    await expect(preferences.client.getPreferences(recipient)).rejects.toThrow()
+    await expect(preferences.client.savePreferences({
+      ...recipient,
+      preferences: { ...DEFAULT_NOTIFICATION_PREFERENCES, version: 1 },
+    })).rejects.toThrow()
+    expect(preferences.rows.get(key)?.reminderDays).toEqual({ dueSoonDays: 366 })
   })
 })
 
@@ -298,6 +393,8 @@ describe('Team reminder settings routes', () => {
     const accessChecks: string[] = []
     const audits: unknown[] = []
     let saves = 0
+    const receipts = new Map<string, TeamReminderSettingsReceipt>()
+    const authorizationChecks: unknown[] = []
     const router = createTeamReminderSettingsRouter({
       authenticate: async () => ({ directoryId: 'workspace-1' }),
       async requireTeamAccess(_principal, teamId, access) {
@@ -307,18 +404,35 @@ describe('Team reminder settings routes', () => {
         }
       },
       canManageTeam: async () => options.manager,
+      createAuthorizationConditionChecks: () => [{
+        ConditionCheck: {
+          TableName: 'WorkspaceAccessTable',
+          Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#manager@example.com' },
+          ConditionExpression: 'attribute_exists(workspaceId)',
+        },
+      }],
       getStore: () => ({
         getTeamSettings: async () => record,
+        getMutationReceipt: async (_workspaceId, _teamId, key) => receipts.get(key),
         async saveTeamSettings(input) {
-          if (input.expectedRevision !== record.revision) {
+          if (
+            input.expectedRevision !== record.revision ||
+            (input.mutation && receipts.has(input.mutation.idempotencyKey))
+          ) {
             throw new NotificationError(409, 'NotificationReminderSettingsConflict', 'Conflict.')
           }
           saves += 1
+          authorizationChecks.push(...(input.authorizationConditionChecks ?? []))
           record = {
             days: input.days,
             revision: input.expectedRevision + 1,
             updatedAt: input.now.toISOString(),
-            ...(input.mutation ? { lastMutation: input.mutation } : {}),
+          }
+          if (input.mutation) {
+            receipts.set(input.mutation.idempotencyKey, {
+              requestFingerprint: input.mutation.requestFingerprint,
+              record,
+            })
           }
           return record
         },
@@ -336,7 +450,7 @@ describe('Team reminder settings routes', () => {
       readJson: async (request) => await request.json().catch(() => undefined),
       now: () => new Date('2026-07-12T00:00:00.000Z'),
     })
-    return { router, accessChecks, audits, saveCount: () => saves }
+    return { router, accessChecks, audits, authorizationChecks, saveCount: () => saves }
   }
 
   const headers = { Authorization: 'Bearer token', 'Content-Type': 'application/json' }
@@ -385,7 +499,7 @@ describe('Team reminder settings routes', () => {
   })
 
   test('saves with the expected revision, audits the change, and rejects a stale revision', async () => {
-    const { router, audits } = createRouter({ manager: true })
+    const { router, audits, authorizationChecks } = createRouter({ manager: true })
     const saved = await router.request('/api/teams/core/notification-reminders', {
       method: 'PUT',
       headers,
@@ -394,6 +508,7 @@ describe('Team reminder settings routes', () => {
     expect(saved.status).toBe(200)
     expect(await saved.json()).toMatchObject({ days: { dueSoonDays: 2 }, revision: 1, canManage: true })
     expect(audits).toMatchObject([{ teamId: 'core', before: {}, after: { dueSoonDays: 2 }, beforeRevision: 0 }])
+    expect(authorizationChecks).toMatchObject([{ ConditionCheck: { TableName: 'WorkspaceAccessTable' } }])
 
     const stale = await router.request('/api/teams/core/notification-reminders', {
       method: 'PUT',
@@ -431,5 +546,29 @@ describe('Team reminder settings routes', () => {
     })
     expect(otherKey.status).toBe(409)
     expect(await otherKey.json()).toEqual({ code: 'NotificationReminderSettingsConflict' })
+
+    // After another key updates the settings, the first key still replays and still rejects a new
+    // body, even one sent with the current revision.
+    const later = await router.request('/api/teams/core/notification-reminders', {
+      method: 'PUT',
+      headers: { ...headers, 'Idempotency-Key': 'save-3' },
+      body: JSON.stringify({ expectedRevision: 1, days: { dueSoonDays: 4 } }),
+    })
+    expect(later.status).toBe(200)
+    const replayedAfterLater = await router.request('/api/teams/core/notification-reminders', {
+      method: 'PUT',
+      headers: retryHeaders,
+      body,
+    })
+    expect(replayedAfterLater.status).toBe(200)
+    expect(await replayedAfterLater.json()).toMatchObject({ days: { dueSoonDays: 2 }, revision: 1 })
+    const reusedAtCurrentRevision = await router.request('/api/teams/core/notification-reminders', {
+      method: 'PUT',
+      headers: retryHeaders,
+      body: JSON.stringify({ expectedRevision: 2, days: { dueSoonDays: 9 } }),
+    })
+    expect(reusedAtCurrentRevision.status).toBe(409)
+    expect(await reusedAtCurrentRevision.json()).toEqual({ code: 'IdempotencyKeyReused' })
+    expect(saveCount()).toBe(2)
   })
 })

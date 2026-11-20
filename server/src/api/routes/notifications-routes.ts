@@ -21,6 +21,7 @@ import {
   createNotificationVisibilityFilter,
   toNotificationErrorResponse,
 } from '../shared/notification-access'
+import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 
 /**
@@ -53,6 +54,14 @@ export function registerNotificationsRoutes(routeApp: Hono): void {
         return false
       }
     },
+    // Fences the caller's membership version and Enterprise control revision, so a manager whose
+    // access changed after the check cannot save.
+    createAuthorizationConditionChecks: (principal) =>
+      createPlanningCallerAuthorizationConditionChecks(
+        principal,
+        [],
+        principal.principalKind !== 'service-account',
+      ),
     getStore: () => workItemDependencies.teamReminderSettings,
     getDefaults: readReminderPolicyDefaultsFromEnvironment,
     createAuditPut(context, principal, input) {

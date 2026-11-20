@@ -2525,6 +2525,7 @@ describe('collaboration projection pure helpers', () => {
     const previous = keys.map((key) => process.env[key])
     keys.forEach((key) => { process.env[key] = key })
     const notifications: Array<Record<string, unknown>> = []
+    const notificationTransactions: unknown[][] = []
     const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
     const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
       if (command instanceof GetCommand) {
@@ -2545,7 +2546,9 @@ describe('collaboration projection pure helpers', () => {
         }
       }
       if (command instanceof TransactWriteCommand) {
-        for (const item of command.input.TransactItems ?? []) {
+        const items = command.input.TransactItems ?? []
+        if (items.some((item) => item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME')) notificationTransactions.push(items)
+        for (const item of items) {
           if (item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME' && item.Put.Item) notifications.push(item.Put.Item)
         }
         return { $metadata: {} }
@@ -2562,15 +2565,16 @@ describe('collaboration projection pure helpers', () => {
         principalId: 'member@example.com', roleId: 'custom:work-item-reader', source: 'direct',
         scope: { workspaceId: 'workspace-1', kind: 'project', targetId: 'platform' } }] : [],
     })
+    const entryRevisionCheck = { ConditionCheck: {
+      TableName: 'AnalyticsTable', Key: { workspaceId: 'workspace-1', recordKey: 'TIME_ENTRY#core#entry-1' },
+      ConditionExpression: '#revision = :revision', ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':revision': 1 },
+    } }
     const dependencies = {
       deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
       curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
       enterpriseIdentity: { getSnapshot: async () => snapshot() },
-      timesheetReminders: { findUnsubmittedEntry: async () => ({ ConditionCheck: {
-        TableName: 'AnalyticsTable', Key: { workspaceId: 'workspace-1', recordKey: 'TIME_ENTRY#core#entry-1' },
-        ConditionExpression: '#revision = :revision', ExpressionAttributeNames: { '#revision': 'revision' },
-        ExpressionAttributeValues: { ':revision': 1 },
-      } }) },
+      timesheetReminders: { findUnsubmittedEntry: async () => entryRevisionCheck },
     }
     const record = (eventId: string) => ({
       eventName: 'INSERT', dynamodb: { SequenceNumber: eventId, NewImage: {
@@ -2590,6 +2594,12 @@ describe('collaboration projection pure helpers', () => {
         .toEqual({ batchItemFailures: [] })
       expect(notifications.map((item) => [item.eventId, item.recipientMemberKey]))
         .toEqual([['enterprise-reader', 'member@example.com']])
+      // The entry revision fence commits first, in the same transaction as the notification.
+      expect(notificationTransactions).toHaveLength(1)
+      expect(notificationTransactions[0]?.[0]).toEqual(entryRevisionCheck)
+      expect(notificationTransactions[0]).toContainEqual(expect.objectContaining({
+        Put: expect.objectContaining({ TableName: 'NOTIFICATIONS_TABLE_NAME' }),
+      }))
 
       // Without the role there is no legacy membership either, so the reminder is not projected.
       assigned = false

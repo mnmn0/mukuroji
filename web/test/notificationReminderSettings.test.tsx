@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import {
   NOTIFICATION_REMINDER_DAY_FIELDS,
   PERSONAL_NOTIFICATION_REMINDER_DAY_FIELDS,
+  type NotificationReminderDayField,
 } from '@mukuroji/contracts'
 import { NotificationSettingsPanel } from '../src/notifications/ui/NotificationSettingsPanel'
 import { TeamReminderSettingsPanel } from '../src/notifications/ui/TeamReminderSettingsPanel'
@@ -11,13 +12,33 @@ import { notificationPreferencesControllerFixture, notificationPreferencesFixtur
 import type { TeamReminderSettingsController } from '../src/notifications/mutations/useTeamReminderSettings'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
-/** Returns the rendered input with a test ID. */
-function findInput(html: string, testId: string) {
-  return html.match(new RegExp(`<input[^>]*data-testid="${testId}"[^>]*>`))?.[0]
+/**
+ * Returns the input whose accessible name is a field label, so a lost label association fails.
+ *
+ * Each field renders its input inside the `<label>` that holds the visible name.
+ *
+ * @param html - Rendered markup.
+ * @param locale - Locale the markup was rendered in.
+ * @param field - Reminder day field.
+ * @returns The input tag, or undefined when no label with that name holds an input.
+ */
+function findInput(html: string, locale: 'ja' | 'en', field: NotificationReminderDayField) {
+  const name = createTranslator(locale)(`workspace.reminders.field.${field}`)
+  for (const [, content = ''] of html.matchAll(/<label[^>]*>(.*?)<\/label>/g)) {
+    const text = content.replace(/<input[^>]*>/g, '').replace(/<[^>]+>/g, '').trim()
+    if (text.startsWith(name)) return content.match(/<input[^>]*>/)?.[0]
+  }
+  return undefined
 }
 
-/** Creates a Team reminder controller around loaded settings. */
-function createTeamController(canManage: boolean): TeamReminderSettingsController {
+/**
+ * Creates a Team reminder controller around loaded settings.
+ *
+ * @param canManage - Whether the caller manages the Team.
+ * @param isSaving - Whether a save is running.
+ * @returns Controller fixture.
+ */
+function createTeamController(canManage: boolean, isSaving = false): TeamReminderSettingsController {
   return {
     settings: {
       teamId: 'core',
@@ -35,7 +56,7 @@ function createTeamController(canManage: boolean): TeamReminderSettingsControlle
     isLoading: false,
     hasLoadError: false,
     isUnavailable: false,
-    isSaving: false,
+    isSaving,
     sessionErrors: [],
     refresh: async () => undefined,
     save: async () => true,
@@ -49,22 +70,27 @@ describe('reminder day settings', () => {
       preferences: { ...notificationPreferencesFixture, reminderDays: { dueSoonDays: 5 } },
     }} />)
     expect(html).toContain('リマインドの日数')
-    expect(findInput(html, 'notification-reminder-dueSoonDays')).toContain('value="5"')
-    expect(findInput(html, 'notification-reminder-staleStartedDays')).toContain('placeholder="Team の設定"')
-    expect(findInput(html, 'notification-reminder-overdueEscalationDays')).toBeUndefined()
+    expect(findInput(html, 'ja', 'dueSoonDays')).toContain('value="5"')
+    expect(findInput(html, 'ja', 'staleStartedDays')).toContain('placeholder="Team の設定"')
+    expect(findInput(html, 'ja', 'overdueEscalationDays')).toBeUndefined()
   })
 
   test('lets a Team manager edit the Team days and shows the defaults as placeholders', () => {
     const t = createTranslator('en')
     const managerHtml = renderToStaticMarkup(<TeamReminderSettingsPanel controller={createTeamController(true)} t={t} />)
-    expect(findInput(managerHtml, 'team-reminder-overdueEscalationDays')).toContain('value="14"')
-    expect(findInput(managerHtml, 'team-reminder-dueSoonDays')).toContain('placeholder="Default 3 days"')
+    expect(findInput(managerHtml, 'en', 'overdueEscalationDays')).toContain('value="14"')
+    expect(findInput(managerHtml, 'en', 'dueSoonDays')).toContain('placeholder="Default 3 days"')
     expect(managerHtml).toContain('team-reminder-settings-save')
 
     const memberHtml = renderToStaticMarkup(<TeamReminderSettingsPanel controller={createTeamController(false)} t={t} />)
     expect(memberHtml).toContain('Only Team managers can change these.')
-    expect(findInput(memberHtml, 'team-reminder-dueSoonDays')).toContain('disabled')
+    expect(findInput(memberHtml, 'en', 'dueSoonDays')).toContain('disabled=""')
     expect(memberHtml).not.toContain('team-reminder-settings-save')
+
+    // Saving remounts the form with the saved revision, so the fields are locked meanwhile.
+    const savingHtml = renderToStaticMarkup(<TeamReminderSettingsPanel controller={createTeamController(true, true)} t={t} />)
+    expect(findInput(savingHtml, 'en', 'dueSoonDays')).toContain('disabled=""')
+    expect(findInput(managerHtml, 'en', 'dueSoonDays')).not.toContain('disabled=""')
   })
 
   test('turns blank fields into unset days and rejects anything but whole days from 1 to 365', () => {

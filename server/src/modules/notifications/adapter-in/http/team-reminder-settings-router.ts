@@ -36,6 +36,13 @@ export type TeamReminderSettingsRouterDependencies<
   requireTeamAccess(principal: Principal, teamId: string, access: 'read' | 'manage'): Promise<void>
   /** Reports whether the principal may manage the Team, without throwing. */
   canManageTeam(principal: Principal, teamId: string): Promise<boolean>
+  /**
+   * Builds read-only checks on the caller's authorization rows, committed with the save.
+   *
+   * @param principal - Team manager the route authorized.
+   * @returns Transaction condition checks; empty when the deployment has none to fence.
+   */
+  createAuthorizationConditionChecks(principal: Principal): readonly AuditTransactWriteItem[]
   /** Returns the store bound to this request. */
   getStore(): TeamReminderSettingsStore
   /** Returns the deployment default thresholds. */
@@ -115,6 +122,7 @@ export function createTeamReminderSettingsRouter<
         days: request.days,
         ...(idempotencyKey ? { idempotencyKey } : {}),
         now: dependencies.now(),
+        authorizationConditionChecks: dependencies.createAuthorizationConditionChecks(principal),
         createAuditPut: (before) => dependencies.createAuditPut(context, principal, {
           teamId,
           before: before.days,
