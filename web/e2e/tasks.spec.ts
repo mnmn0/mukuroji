@@ -748,6 +748,8 @@ async function mockAuthenticatedTaskPage(
         },
         groups: currentUser.isSystemAdmin ? ['mukuroji-system-admins'] : [],
         isSystemAdmin: currentUser.isSystemAdmin,
+        // The default deploy has no Software factory; these tests cover a deployment that serves it.
+        softwareFactoryEnabled: true,
         workspaceMemberStatus: 'active',
         workspaceRole: currentUser.workspaceRole,
       },
@@ -4059,6 +4061,44 @@ test.describe('authenticated task page', () => {
 
     await page.getByTestId('task-header-project-overview').click()
     await expect(page).toHaveURL('/projects/refero/overview?teamId=core-team')
+  })
+
+  test('Issue #632: Software factory のない deploy では Factory board と Agent Run の入口を出さない', async ({ page }) => {
+    const agentRunRequests: string[] = []
+    page.on('request', (request) => {
+      const { pathname } = new URL(request.url())
+      if (pathname.startsWith('/api/') && /\/agent-(runs?|settings|connection)/.test(pathname)) {
+        agentRunRequests.push(request.url())
+      }
+    })
+    await page.unroute('**/api/auth/me')
+    await page.route('**/api/auth/me', async (route) => {
+      await route.fulfill({
+        json: {
+          username: 'demo@example.com',
+          attributes: { 'custom:workspace_id': 'workspace-demo', email: 'demo@example.com', name: 'Demo' },
+          groups: ['mukuroji-system-admins'],
+          isSystemAdmin: true,
+          softwareFactoryEnabled: false,
+          workspaceMemberStatus: 'active',
+          workspaceRole: 'owner',
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+    await expect(page.getByTestId('project-overview-members')).toBeVisible()
+    await expect(page.getByTestId('project-overview-agent-runs')).toHaveCount(0)
+    await expect(page.getByLabel('メインサイドバー').getByRole('button', { name: 'Factory board', exact: true }))
+      .toHaveCount(0)
+
+    await page.goto('/teams/core-team/factory')
+    await expect(page).toHaveURL('/teams/core-team/issues')
+    await page.goto('/settings/agent-connection')
+    await expect(page).toHaveURL('/settings/personal')
+    await expect(page.getByTestId('agent-connection-settings-link')).toHaveCount(0)
+    expect(agentRunRequests).toEqual([])
   })
 
   test('主要タスクビューの読み上げ構造とキーボードタブ操作を維持する', async ({ page }) => {

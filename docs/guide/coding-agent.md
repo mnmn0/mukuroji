@@ -6,6 +6,10 @@ agent に取得・着手・報告・完了させるための手順です。接�
 [`docs/software-factory.md`](../software-factory.md) にあります。アプリの **ヘルプ**（`/help#coding-agent`）
 にも設定のテンプレートがあります。
 
+Software factory は deploy 時に選ぶ任意の機能です（CDK context `mukuroji:softwareFactory`、既定は off）。
+off の環境では **agent を接続**、Factory board、ヘルプの coding agent ガイドが表示されず、agent 用 token も
+発行できません。使いたい場合は環境の管理者に有効化を依頼してください（[`cdk/README.md`](../../cdk/README.md#optional-modules)）。
+
 ## 使う前に
 
 - Workspace の member 以上のロールで、タスクを編集できる権限が必要です。guest は接続できません。

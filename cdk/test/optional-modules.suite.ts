@@ -9,6 +9,7 @@ import {
   DEMO_DATA_CONTEXT_KEY,
   REQUEST_EMAIL_CONTEXT_KEY,
   RESTORE_DRILL_CONTEXT_KEY,
+  SOFTWARE_FACTORY_CONTEXT_KEY,
   TENANT_LIFECYCLE_CONTEXT_KEY,
   readStackModuleProps,
 } from '../bin/stack-modules';
@@ -170,6 +171,27 @@ describe('default deployment without optional modules', () => {
       JSON.stringify(resource.Properties).includes('AuditEventsTable'))).toHaveLength(0);
   });
 
+  test('tells the API and the scheduled jobs that Software factory is off, and skips Agent Run triage', () => {
+    const functions = Object.entries(resources).filter(([, resource]) =>
+      resource.Type === 'AWS::Lambda::Function');
+    const switches = functions
+      .map(([, resource]) => (resource.Properties?.Environment as
+        | { Variables: Record<string, unknown> }
+        | undefined)?.Variables ?? {})
+      .filter((variables) => 'SOFTWARE_FACTORY' in variables);
+    const scheduledJobs = functions.find(([id]) =>
+      id.startsWith('ScheduledJobsFunction') && !id.includes('ServiceRole'));
+    const scheduledJobsVariables = (scheduledJobs?.[1].Properties?.Environment as
+      | { Variables: Record<string, unknown> }
+      | undefined)?.Variables ?? {};
+
+    expect(switches).toHaveLength(2);
+    expect(switches.map((variables) => variables.SOFTWARE_FACTORY)).toEqual(['disabled', 'disabled']);
+    expect(scheduledJobsVariables.SOFTWARE_FACTORY).toBe('disabled');
+    expect(scheduledJobsVariables).not.toHaveProperty('AGENT_RUNS_TABLE_NAME');
+    expect(logicalIds.filter((id) => id.startsWith('AgentRunTriageJobPolicy'))).toEqual([]);
+  });
+
   test('keeps deleted file versions unreadable for everyone without the restore drill', () => {
     const bucketPolicy = Object.values(template.findResources('AWS::S3::BucketPolicy'))
       .map((resource) => resource.Properties.PolicyDocument.Statement as Record<string, unknown>[])
@@ -244,6 +266,30 @@ describe('optional modules selected through CDK context', () => {
     });
   });
 
+  test('turns Software factory on', () => {
+    const { template } = synthesizeDefaultStack({ [SOFTWARE_FACTORY_CONTEXT_KEY]: 'true' });
+    const logicalIds = Object.keys(template.toJSON().Resources);
+
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          AGENT_RUNS_TABLE_NAME: Match.anyValue(),
+          MUKUROJI_RUNTIME_ROLE: 'scheduled-jobs-worker',
+          SOFTWARE_FACTORY: 'enabled',
+        }),
+      },
+    });
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          SOFTWARE_FACTORY: 'enabled',
+          TENANT_LIFECYCLE_OPERATIONS: 'disabled',
+        }),
+      },
+    });
+    expect(logicalIds.some((id) => id.startsWith('AgentRunTriageJobPolicy'))).toBe(true);
+  });
+
   test('turns the demo data on', () => {
     const { template, errors } = synthesizeDefaultStack({ [DEMO_DATA_CONTEXT_KEY]: 'true' });
     const payloads = JSON.stringify(template.findResources('Custom::AWS'));
@@ -263,6 +309,7 @@ describe('optional modules selected through CDK context', () => {
         [CONNECTORS_CONTEXT_KEY]: 'true',
         [REQUEST_EMAIL_CONTEXT_KEY]: 'true',
         [TENANT_LIFECYCLE_CONTEXT_KEY]: 'true',
+        [SOFTWARE_FACTORY_CONTEXT_KEY]: 'true',
         [DEMO_DATA_CONTEXT_KEY]: 'true',
       },
       {},
@@ -274,5 +321,13 @@ describe('optional modules selected through CDK context', () => {
     expect(parameters.RequestEmailWebhookSecret).toBeUndefined();
     expect(template.toJSON().Outputs).not.toHaveProperty('TenantExportCapabilityFunctionName');
     expect(findDemoSeedLogicalIds(template)).toEqual([]);
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          MUKUROJI_RUNTIME_ROLE: 'scheduled-jobs-worker',
+          SOFTWARE_FACTORY: 'disabled',
+        }),
+      },
+    });
   });
 });

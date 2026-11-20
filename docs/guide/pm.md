@@ -258,6 +258,7 @@ Phase・Milestone・Release の予測終了とベースラインからの遅れ�
 Factory board と同じ分類）を 1 画面にまとめ、各欄から近況（Planning）、Work Item 一覧、
 タイムライン、Factory board、ドキュメントへ移動できます。読み込めなかった欄や読み取り上限を
 超えた欄は、その欄にだけ理由を表示します。
+Software factory を有効にしていない環境では、Agent Run の欄と Factory board への移動先は表示されません。
 
 ## 9. Project を終結する
 

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test'
-import { scheduledJobs } from './scheduled-jobs-handler'
+import { scheduledJobs, selectDeployedScheduledJobs } from './scheduled-jobs-handler'
 
 test('keeps the cadence and retry policy each scheduled worker had as its own Lambda', () => {
   expect(scheduledJobs.map(({ name, everyMinutes, attempts }) => ({ name, everyMinutes, attempts })))
@@ -31,4 +31,17 @@ test('runs each job through its runtime-control guarded entrypoint', async () =>
   ]) {
     expect(source).toMatch(new RegExp(`import \\{ handler as \\w+ \\} from './${entrypoint}'`, 'u'))
   }
+})
+
+test('leaves the Agent Run triage job out when Software factory is not deployed', () => {
+  expect(selectDeployedScheduledJobs(scheduledJobs, true)).toBe(scheduledJobs)
+  expect(selectDeployedScheduledJobs(scheduledJobs, false).map(({ name }) => name)).toEqual([
+    'automation-schedule',
+    'triage-schedule',
+    'slack-notifications',
+    'email-notifications',
+    'analytics-schedule',
+    'notification-schedule',
+    'cycle-schedule',
+  ])
 })

@@ -284,6 +284,7 @@ export function TaskPage() {
     isQuickAccessLoading,
     isQuickAccessSaving,
     onToggleProjectQuickAccess,
+    softwareFactoryEnabled,
   } = useWorkspaceRouteContext()
   const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
   const refreshArchivedWorkItems = useArchivedWorkItemsRefresh()
@@ -2046,6 +2047,7 @@ export function TaskPage() {
       key={taskScopeKey}
       scheduleWindowNavigation={scheduleWindowNavigation}
       aiAssistanceEnabled={aiPlanningAssistanceEnabled}
+      softwareFactoryEnabled={softwareFactoryEnabled}
       aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled}
       renderAiAssistance={taskDetailAiAssistanceRenderer}
       workspaceId={workspaceId}
