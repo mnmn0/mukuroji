@@ -6,7 +6,10 @@ import {
   useState,
 } from 'react'
 import { createPortal, flushSync } from 'react-dom'
-import type { DocumentChecklistItem } from '@mukuroji/contracts'
+import type {
+  DocumentChecklistItem,
+  WhiteboardNoteObject,
+} from '@mukuroji/contracts'
 import type {
   DocumentExportFormat,
   DocumentKind,
@@ -125,10 +128,11 @@ import type {
   MarkdownImportErrorCode,
 } from './model/markdownImport'
 import {
-  createChecklistItemWorkItemRelation,
-  findChecklistItemWorkItemId,
-  type ChecklistItemSource,
+  createDocumentWorkItemRelation,
+  createDocumentWorkItemSourceKey,
+  findDocumentWorkItemId,
   type ChecklistWorkItemInput,
+  type DocumentWorkItemSource,
 } from './model/checklistWorkItems'
 import { exportDocumentSubtreeMarkdown } from './queries/documentSubtreeExport'
 import {
@@ -297,7 +301,7 @@ export type DocumentScreenActions = {
    * Creates a Work Item and returns its canonical ID.
    */
   createWorkItem?: (
-    source: ChecklistItemSource,
+    source: DocumentWorkItemSource,
     input: ChecklistWorkItemInput,
   ) => Promise<string>
   /**
@@ -1731,9 +1735,10 @@ export function DocumentScreen({
   )
 
   /**
-   * Creates the Work Item for the checklist item in the open dialog and links
-   * the item to it. A Work Item created by an earlier attempt whose link
-   * failed is reused, so a retry does not create a second one.
+   * Creates the Work Item for the checklist item or Whiteboard note in the
+   * open dialog and links the element to it. A Work Item created by an
+   * earlier attempt whose link failed is reused, so a retry does not create a
+   * second one.
    *
    * @param input - Values confirmed in the dialog.
    */
@@ -1748,18 +1753,18 @@ export function DocumentScreen({
     ) {
       throw new Error(t('documents.checklistWorkItem.error'))
     }
+    const messageKeys = documentWorkItemMessageKeys[target.kind]
     const flushedRevision = await requireSavedDraft()
-    const key = createChecklistWorkItemTargetKey(target)
+    const key = createDocumentWorkItemSourceKey(target)
     const unlinkedWorkItemId = unlinkedChecklistWorkItems[key]
-    // Another editor may have converted the item while this dialog was open.
-    // Its link is kept rather than replaced by a second Work Item.
-    const linkedWorkItemId = findChecklistItemWorkItemId(
+    // Another editor may have converted the element while this dialog was
+    // open. Its link is kept rather than replaced by a second Work Item.
+    const linkedWorkItemId = findDocumentWorkItemId(
       selectedDocument.relations,
-      target.blockId,
-      target.itemId,
+      target,
     )
     if (linkedWorkItemId && linkedWorkItemId !== unlinkedWorkItemId) {
-      throw new Error(t('documents.checklistWorkItem.alreadyLinked'))
+      throw new Error(t(messageKeys.alreadyLinked))
     }
     const workItemId =
       unlinkedWorkItemId ?? (await actions.createWorkItem(target, input))
@@ -1772,9 +1777,8 @@ export function DocumentScreen({
         ),
         [{
           operationId: createDocumentOperationId(),
-          relation: createChecklistItemWorkItemRelation(
-            target.blockId,
-            target.itemId,
+          relation: createDocumentWorkItemRelation(
+            target,
             workItemId,
             new Date(),
           ),
@@ -1788,7 +1792,7 @@ export function DocumentScreen({
         ...current,
         [key]: workItemId,
       }))
-      throw new Error(t('documents.checklistWorkItem.linkError'))
+      throw new Error(t(messageKeys.linkError))
     }
     setUnlinkedChecklistWorkItems((current) =>
       Object.fromEntries(
@@ -2122,7 +2126,19 @@ export function DocumentScreen({
                           blockId,
                           documentId: selectedDocument.id,
                           itemId: item.id,
+                          kind: 'checklist-item',
                           text: item.text,
+                        })
+                    : undefined
+                }
+                onCreateNoteWorkItem={
+                  canCreateChecklistWorkItems
+                    ? (note) =>
+                        setChecklistWorkItemTarget({
+                          documentId: selectedDocument.id,
+                          kind: 'whiteboard-note',
+                          objectId: note.id,
+                          text: note.text,
                         })
                     : undefined
                 }
@@ -2363,9 +2379,10 @@ export function DocumentScreen({
           itemText={checklistWorkItemTarget.text}
           linkOnly={
             unlinkedChecklistWorkItems[
-              createChecklistWorkItemTargetKey(checklistWorkItemTarget)
+              createDocumentWorkItemSourceKey(checklistWorkItemTarget)
             ] !== undefined
           }
+          source={checklistWorkItemTarget.kind}
           t={t}
           teams={data.teams}
           onClose={() => setChecklistWorkItemTarget(undefined)}
@@ -2409,27 +2426,29 @@ export function DocumentScreen({
 }
 
 /**
- * Checklist item the Work Item dialog is open for.
+ * Checklist item or Whiteboard note the Work Item dialog is open for, with
+ * the text used as the initial Work Item title.
  */
-type ChecklistWorkItemTarget = {
-  /** Document that contains the item. */
-  documentId: string
-  /** Checklist block that contains the item. */
-  blockId: string
-  /** Checklist item ID. */
-  itemId: string
-  /** Item text used as the initial Work Item title. */
+type ChecklistWorkItemTarget = DocumentWorkItemSource & {
+  /** Element text used as the initial Work Item title. */
   text: string
 }
 
 /**
- * Builds the key that identifies one checklist item across Documents.
- *
- * @param target - Checklist item the dialog is open for.
- * @returns Key unique to the Document, block, and item.
+ * Failure messages shown for each kind of Document element.
  */
-function createChecklistWorkItemTargetKey(target: ChecklistWorkItemTarget) {
-  return JSON.stringify([target.documentId, target.blockId, target.itemId])
+const documentWorkItemMessageKeys: Readonly<Record<
+  DocumentWorkItemSource['kind'],
+  Readonly<Record<'alreadyLinked' | 'linkError', MessageKey>>
+>> = {
+  'checklist-item': {
+    alreadyLinked: 'documents.checklistWorkItem.alreadyLinked',
+    linkError: 'documents.checklistWorkItem.linkError',
+  },
+  'whiteboard-note': {
+    alreadyLinked: 'documents.noteWorkItem.alreadyLinked',
+    linkError: 'documents.noteWorkItem.linkError',
+  },
 }
 
 /**
@@ -2473,6 +2492,10 @@ type DocumentWorkspaceProps = {
     blockId: string,
     item: DocumentChecklistItem,
   ) => void
+  /**
+   * Starts creating a Work Item from a Whiteboard note; omission hides the action.
+   */
+  onCreateNoteWorkItem?: (note: WhiteboardNoteObject) => void
   /**
    * Route navigation と破壊的操作へ現在の draft guard を登録します。
    */
@@ -2528,6 +2551,7 @@ function DocumentWorkspace({
   onApplyOperations,
   onContextOpen,
   onCreateChecklistWorkItem,
+  onCreateNoteWorkItem,
   onDraftGuardChange,
   onNavigate,
   onUnsavedStateChange,
@@ -3032,6 +3056,14 @@ function DocumentWorkspace({
                 type: 'delete-object',
               })
             }
+            noteWorkItems={{
+              onCreate: editable ? onCreateNoteWorkItem : undefined,
+              onOpen: onNavigate
+                ? (workItemId) =>
+                    onNavigate(createWorkItemSearchPath(workItemId))
+                : undefined,
+              relations: localDocument.relations,
+            }}
             onNavigate={onNavigate}
             onUpsertConnector={upsertWhiteboardConnector}
             onUpsertFrame={upsertWhiteboardFrame}

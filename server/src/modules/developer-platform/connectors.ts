@@ -336,6 +336,15 @@ export class ConnectorRegistry {
     this.adapters.set(adapter.definition.id, adapter)
   }
 
+  /**
+   * Lists the providers that have a registered adapter, in registration order.
+   *
+   * @returns Provider IDs that this runtime can connect.
+   */
+  listProviders(): ConnectorProviderId[] {
+    return [...this.adapters.keys()]
+  }
+
   /** Provider ID に対応する adapter を返します。 */
   get(provider: ConnectorProviderId) {
     const adapter = this.adapters.get(provider)

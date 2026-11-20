@@ -190,3 +190,10 @@ Work Item はクイック作成と同じく backlog に仮保存するので、�
 リンク済みの項目は編集権限のない閲覧者にも「Work Item を開く」として表示します。
 ダイアログを開いている間に別の編集で同じ項目がリンクされた場合は、そのリンクを置き換えずに作成を止めます。
 
+Whiteboard の付箋（note object）も同じダイアログで Work Item にできます。付箋を選ぶと inspector に
+「Work Item にする」が出て、付箋の文字列を初期タイトルにします。Relation は付箋の object を起点にし、
+`whiteboard-note:<objectId>` の ID で保存します（Work Item card の `system:whiteboard-work-item:` とは別の
+namespace）。作成済みの付箋には「Work Item を開く」が出て、Work Item 側の関連ドキュメントから元の
+Whiteboard へ戻れます。付箋を削除すると server が relation も一緒に消します。付箋は配置したまま残し、
+Work Item card への置き換えはしません。
+
