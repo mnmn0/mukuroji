@@ -327,10 +327,21 @@ test('lets an auditor read the audit log but not export it or read Projects', as
     setTestAppDependencies({
       enterpriseIdentity: identity,
       auditEvents: {
+        /** Accepts an audit event without storing it. */
         async putEvent() {},
+        /**
+         * Finds no stored audit event.
+         *
+         * @returns Always undefined.
+         */
         async getEvent() {
           return undefined
         },
+        /**
+         * Lists no audit events.
+         *
+         * @returns An empty page.
+         */
         async query() {
           return { events: [] }
         },

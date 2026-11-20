@@ -3347,6 +3347,13 @@ test('names the member of a role assignment audit event only by its Workspace Au
 
 test('treats the same Project role under two owning Teams as separate assignments', async () => {
   const client = new InMemoryEnterpriseIdentityClient(tokenSecret, () => now)
+  /**
+   * Builds a Project-scoped direct assignment held under one owning Team.
+   *
+   * @param assignmentId - Assignment ID.
+   * @param parentTeamId - Owning Team of the Project.
+   * @returns The assignment.
+   */
   const assignmentIn = (assignmentId: string, parentTeamId: string) => ({
     workspaceId,
     assignmentId,

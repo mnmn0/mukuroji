@@ -48,6 +48,13 @@ test('evaluates role and guest ceilings without AWS or Hono adapters', () => {
 })
 
 test('keeps only guest-assignable direct roles once the member is a guest', () => {
+  /**
+   * Evaluates Project read access for a member that holds one direct Project role.
+   *
+   * @param workspaceRole - Workspace role of the member.
+   * @param roleId - Direct Project role of the member.
+   * @returns The access decision.
+   */
   const evaluate = (workspaceRole: 'member' | 'guest', roleId: 'project:manager' | 'project:viewer') =>
     evaluateEnterpriseAccess({
       permission: 'projects.read',

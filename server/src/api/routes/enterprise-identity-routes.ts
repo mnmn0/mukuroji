@@ -2656,7 +2656,13 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
             role: member.role,
           }))
         : []
-      // Only owner-level callers may grant administrative roles to a member.
+      /**
+       * Narrows assignable roles to those this caller may give a member.
+       *
+       * @remarks Only owner-level callers may grant administrative roles to a member.
+       * @param roleIds - Roles the caller could assign without exceeding its permissions.
+       * @returns The roles the caller may assign to a member.
+       */
       const memberAssignableRoleIds = (roleIds: readonly EnterpriseRoleId[]) =>
         isEnterpriseOwnerLevelCaller(principal)
           ? [...roleIds]
