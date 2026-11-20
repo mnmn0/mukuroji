@@ -34,6 +34,25 @@ describe('AnalyticsWorkbench', () => {
     ).toEqual(['urgent', 'blocked'])
   })
 
+  test('enables the period presets only once the Workspace calendar settings are loaded', () => {
+    const withoutSettings = renderToStaticMarkup(
+      <AnalyticsWorkbench {...baseProps} onFilterChange={() => undefined} />,
+    )
+    const withSettings = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        calendarSettings={{ fiscalYearStartMonth: 4, weekStartDay: 1 }}
+        onFilterChange={() => undefined}
+      />,
+    )
+
+    expect(withoutSettings).toMatch(/<select[^>]*data-testid="analytics-period-preset"[^>]*disabled/u)
+    expect(withSettings).not.toMatch(/<select[^>]*data-testid="analytics-period-preset"[^>]*disabled/u)
+    expect(withSettings).toContain('This fiscal year')
+    expect(withSettings).toContain('Last week')
+    expect(withSettings).toMatch(/<option value="custom" selected/u)
+  })
+
   test('renders KPI, dependency-free charts, table fallback, forecast, and provenance', () => {
     const html = renderToStaticMarkup(
       <AnalyticsWorkbench

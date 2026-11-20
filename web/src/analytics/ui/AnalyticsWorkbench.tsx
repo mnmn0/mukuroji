@@ -18,6 +18,10 @@ import type {
   CreateAnalyticsReportInput,
 } from '@mukuroji/contracts'
 import {
+  WORKSPACE_CALENDAR_PERIOD_PRESETS,
+  type WorkspaceCalendarPeriodPreset,
+} from '@mukuroji/contracts'
+import {
   useCallback,
   useEffect,
   useMemo,
@@ -41,6 +45,12 @@ import {
   analyticsCalendarDateBoundaryToInstant,
   formatAnalyticsCalendarDate,
 } from '../model/timeZone'
+import {
+  createAnalyticsPresetPeriod,
+  findAnalyticsPeriodPreset,
+  isAnalyticsPeriodPreset,
+  type AnalyticsPeriodCalendar,
+} from '../model/periodPresets'
 import { readRecord } from '../../shared/api/jsonValidation'
 import { isAnalyticsFlowVisualization, type AnalyticsFlowVisualization } from '../model/flowChart'
 import { AnalyticsFlowChart } from './AnalyticsFlowChart'
@@ -65,6 +75,11 @@ export type AnalyticsWorkbenchProps = {
    * 実行中 query の filter です。
    */
   filter: AnalyticsFilter
+  /**
+   * Workspace fiscal year start and week start that period presets follow. Presets stay disabled
+   * while it is undefined, so a period is never laid out on a calendar the Workspace did not choose.
+   */
+  calendarSettings?: AnalyticsPeriodCalendar
   /**
    * Forecast risk と比較する target date range です。
    */
@@ -335,6 +350,7 @@ export function AnalyticsWorkbench({
   reports,
   selectedReportId,
   filter,
+  calendarSettings,
   forecastBaseline,
   forecastWeighting,
   timeZone,
@@ -608,6 +624,7 @@ export function AnalyticsWorkbench({
       </header>
 
       <AnalyticsFilterToolbar
+        {...(calendarSettings ? { calendarSettings } : {})}
         filter={filter}
         forecastBaseline={forecastBaseline}
         {...(forecastWeighting ? { forecastWeighting } : {})}
@@ -841,6 +858,7 @@ function SnapshotMetadata({
 }
 
 function AnalyticsFilterToolbar({
+  calendarSettings,
   filter,
   forecastBaseline,
   forecastWeighting,
@@ -853,6 +871,7 @@ function AnalyticsFilterToolbar({
   timeZone,
   workItemTypes,
 }: {
+  calendarSettings?: AnalyticsPeriodCalendar
   filter: AnalyticsFilter
   forecastBaseline?: AnalyticsDateRange
   forecastWeighting?: AnalyticsWeighting
@@ -906,7 +925,14 @@ function AnalyticsFilterToolbar({
         label={t('workspace.filters.title')}
         summary={`${formatAnalyticsCalendarDate(filter.period.from, timeZone)} – ${formatAnalyticsCalendarDate(filter.period.to, timeZone)}`}
       >
-        <div className="grid grid-cols-[repeat(2,minmax(150px,1fr))_repeat(4,minmax(140px,1fr))] items-start gap-3 max-[1280px]:grid-cols-3 max-[760px]:grid-cols-1">
+        <div className="grid grid-cols-[repeat(3,minmax(150px,1fr))_repeat(4,minmax(140px,1fr))] items-start gap-3 max-[1280px]:grid-cols-3 max-[760px]:grid-cols-1">
+          <AnalyticsPeriodPresetPicker
+            {...(calendarSettings ? { calendarSettings } : {})}
+            filter={filter}
+            t={t}
+            timeZone={timeZone}
+            {...(onFilterChange ? { onFilterChange } : {})}
+          />
           <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('analytics.filter.from')}
             <input
@@ -1112,6 +1138,72 @@ function AnalyticsFilterToolbar({
         </details>
       </ResponsiveDisclosure>
     </section>
+  )
+}
+
+/** i18n keys of the period preset labels. */
+const periodPresetLabelKeys: Readonly<Record<WorkspaceCalendarPeriodPreset, MessageKey>> = {
+  'this-week': 'analytics.filter.period.thisWeek',
+  'last-week': 'analytics.filter.period.lastWeek',
+  'this-fiscal-quarter': 'analytics.filter.period.thisFiscalQuarter',
+  'last-fiscal-quarter': 'analytics.filter.period.lastFiscalQuarter',
+  'this-fiscal-year': 'analytics.filter.period.thisFiscalYear',
+  'last-fiscal-year': 'analytics.filter.period.lastFiscalYear',
+}
+
+/**
+ * Renders the period picker that sets the filter dates to a week, fiscal quarter, or fiscal year.
+ *
+ * It shows the preset matching the current dates, or "Custom" when none does, and stays disabled
+ * until the Workspace calendar settings are loaded.
+ *
+ * @param props - Picker props.
+ * @param props.calendarSettings - Workspace fiscal year start and week start, once loaded.
+ * @param props.filter - Current Analytics filter.
+ * @param props.onFilterChange - Receives the filter with the preset period applied.
+ * @param props.t - Translator for labels.
+ * @param props.timeZone - IANA time zone the report reads calendar dates in.
+ * @returns The labelled select element.
+ */
+function AnalyticsPeriodPresetPicker({
+  calendarSettings,
+  filter,
+  onFilterChange,
+  t,
+  timeZone,
+}: {
+  calendarSettings?: AnalyticsPeriodCalendar
+  filter: AnalyticsFilter
+  onFilterChange?: (filter: AnalyticsFilter) => void
+  t: ReturnType<typeof createTranslator>
+  timeZone: string
+}) {
+  const selectedPreset = calendarSettings
+    ? findAnalyticsPeriodPreset(filter.period, new Date(), timeZone, calendarSettings)
+    : undefined
+  return (
+    <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
+      {t('analytics.filter.period')}
+      <select
+        className="workbench-input min-h-10 px-3"
+        data-testid="analytics-period-preset"
+        disabled={!calendarSettings || !onFilterChange}
+        value={selectedPreset ?? 'custom'}
+        onChange={(event) => {
+          const preset = event.target.value
+          if (!calendarSettings || !isAnalyticsPeriodPreset(preset)) return
+          onFilterChange?.({
+            ...filter,
+            period: createAnalyticsPresetPeriod(preset, new Date(), timeZone, calendarSettings),
+          })
+        }}
+      >
+        <option value="custom">{t('analytics.filter.period.custom')}</option>
+        {WORKSPACE_CALENDAR_PERIOD_PRESETS.map((preset) => (
+          <option key={preset} value={preset}>{t(periodPresetLabelKeys[preset])}</option>
+        ))}
+      </select>
+    </label>
   )
 }
 
