@@ -123,7 +123,11 @@ export function ReportsPage() {
     isLoading: isCurrentUserLoading,
     mutate: mutateCurrentUser,
   } = useCurrentUser(accessToken)
-  const { settings: calendarSettings } = useWorkspaceCalendarSettings(
+  const {
+    settings: calendarSettings,
+    error: calendarSettingsError,
+    retry: retryCalendarSettings,
+  } = useWorkspaceCalendarSettings(
     accessToken,
     Boolean(user && !currentUserError),
   )
@@ -773,6 +777,8 @@ export function ReportsPage() {
           key={`${selectedReport?.id ?? 'ad-hoc'}:${selectedReport?.revision ?? 0}`}
           builder={routeState.builder}
           {...(calendarSettings ? { calendarSettings } : {})}
+          calendarSettingsFailed={Boolean(calendarSettingsError)}
+          onRetryCalendarSettings={retryCalendarSettings}
           canManageReports={canMutateWorkspaceContent(user)}
           errorMessage={mutationErrorMessage ?? loadErrorMessage}
           evidence={evidence}
@@ -847,6 +853,7 @@ export function ReportsPage() {
               mutateSnapshots(),
               mutateQuery(),
             ])
+            if (calendarSettingsError) retryCalendarSettings()
           }}
           onSaveReport={saveReport}
           onSaveSchedule={saveSchedule}

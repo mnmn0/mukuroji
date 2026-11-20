@@ -42,6 +42,7 @@ export const analyticsMessages = {
   'analytics.empty.feature.deliveryDescription': '固定スナップショット、CSV、PDF をチームで共有できます。',
   'analytics.filter.period': '期間',
   'analytics.filter.period.custom': 'カスタム',
+  'analytics.filter.period.settingsError': 'Workspace の会計年度と週の設定を読み込めませんでした。',
   'analytics.filter.period.thisWeek': '今週',
   'analytics.filter.period.lastWeek': '先週',
   'analytics.filter.period.thisFiscalQuarter': '今四半期',

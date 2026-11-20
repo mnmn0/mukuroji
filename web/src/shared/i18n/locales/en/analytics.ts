@@ -42,6 +42,7 @@ export const analyticsMessages = {
   'analytics.empty.feature.deliveryDescription': 'Share fixed snapshots, CSV files, and PDFs with your team.',
   'analytics.filter.period': 'Period',
   'analytics.filter.period.custom': 'Custom',
+  'analytics.filter.period.settingsError': "Couldn't load the Workspace fiscal year and week settings.",
   'analytics.filter.period.thisWeek': 'This week',
   'analytics.filter.period.lastWeek': 'Last week',
   'analytics.filter.period.thisFiscalQuarter': 'This fiscal quarter',

@@ -53,6 +53,21 @@ describe('AnalyticsWorkbench', () => {
     expect(withSettings).toMatch(/<option value="custom" selected/u)
   })
 
+  test('explains a failed calendar settings read and offers a retry while presets stay disabled', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        calendarSettingsFailed
+        onFilterChange={() => undefined}
+        onRetryCalendarSettings={() => undefined}
+      />,
+    )
+
+    expect(html).toMatch(/<select[^>]*data-testid="analytics-period-preset"[^>]*disabled/u)
+    expect(html).toContain("Couldn&#x27;t load the Workspace fiscal year and week settings.")
+    expect(html).toMatch(/role="alert">Couldn[^<]*<button[^>]*>Retry<\/button>/u)
+  })
+
   test('renders KPI, dependency-free charts, table fallback, forecast, and provenance', () => {
     const html = renderToStaticMarkup(
       <AnalyticsWorkbench
