@@ -31,6 +31,12 @@ Project の task 画面の **権限** タブ（「権限管理」）で、Projec
 Project のメンバー権限を変えられるのは、その Project の manager だけです。追加できるのは
 Workspace の有効なメンバーだけなので、先に Workspace へ招待しておきます。
 
+Project の権限はその Team の Project にだけ効きます。別の Team に同じ ID の Project があっても、
+そちらの Work Item は見えません。複数の Team が同じ Project ID を使っている場合、Team を持たない
+旧形式の Project メンバー登録ではどの Team の Project か決められないため、その Project の権限は
+どの Team でも効きません。Enterprise では Directory group mapping で Team・Project 単位のロールを
+割り当てると、その Team の Project にだけ効きます。
+
 **Team の管理者** は、Workspace の owner / admin、またはその Team のいずれかの Project の manager です
 （Enterprise の `teams.manage` 権限を持つ人も含みます）。Team 固有の Work Item 設定と
 エージェント設定は Team の管理者が変更します。
@@ -149,6 +155,9 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   「最終利用」は 1 分ごとにまとめて記録するため、最大 1 分遅れて表示されます。
 - **Webhook**: 外部への通知。**Webhook を追加** で送信先と「配信を許可する Team」を決めます。配信 log から再送できます。
 - **Connector**: GitHub、Slack、Gmail、Google Calendar、Google Drive との連携。
+  一覧には、運用者がこの環境で設定した provider だけが出ます（設定は [`cdk/README.md`](../../cdk/README.md) の
+  connector secret）。設定がなければ「利用できる connector はありません」と表示されます。
+  設定から外した provider に接続済みの account は一覧に残り、切断はできますが新しい接続はできません。
   接続は、**接続** を押した本人が provider の画面で許可したあと、同じアカウントでログインしたまま
   Mukuroji に戻ると完了します。許可の URL を別の人に送ったり、ログインが切れた状態で戻ったり、
   期限（約10分）が切れたりした場合は完了できないので、この画面からもう一度接続してください。
