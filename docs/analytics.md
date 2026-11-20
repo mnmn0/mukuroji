@@ -138,6 +138,10 @@ Forecast は query / report の `forecastWeighting: "effort"` で、完了した
 `dailyThroughput` は 1 日あたりの見積時間です。`weighting` と `forecastWeighting` は query hash、snapshot、
 evidence、定期配信の hash に含まれます。
 
+Software factory の Run の成功率・手戻り率・工程別の滞在時間は、まだ Analytics engine の metric ではなく、
+Factory board の期間サマリーとして別 API で計算します。定義は
+[Software factory の「期間サマリー」](software-factory.md#期間サマリーanalytics) を参照してください。
+
 ## Timezone and date boundaries
 
 - `asOf` と audit event は UTC ISO 8601 instant です。

@@ -13,6 +13,7 @@ import {
 } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
+import { WorkspaceWorkingCalendarFields } from './WorkspaceWorkingCalendarFields'
 import { useTenantAdministrationMutations } from '../mutations/useTenantAdministrationMutations'
 import { useTenantAdministration } from '../queries/useTenantAdministration'
 
@@ -402,6 +403,12 @@ export function TenantAdministrationPanel({
               </select>
             </label>
           </div>
+          <WorkspaceWorkingCalendarFields
+            calendar={calendar}
+            disabled={tenantLifecycleLocked}
+            onChange={(next) => onChangeProfile({ ...profile, calendar: next })}
+            t={t}
+          />
           <button className="workbench-button-primary mt-5" disabled={isSaving || tenantLifecycleLocked} onClick={onSaveProfile} type="button">
             {t('workspace.tenantAdministration.saveProfile')}
           </button>

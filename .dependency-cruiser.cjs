@@ -7,6 +7,7 @@ const serverModules = [
   'collaboration',
   'coding-agent-mcp',
   'data-integrity',
+  'data-migration',
   'developer-platform',
   'directory',
   'documents',

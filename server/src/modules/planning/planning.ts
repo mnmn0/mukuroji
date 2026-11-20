@@ -194,7 +194,36 @@ type PlanningMeta = {
   revision: number
   /** Last mutation timestamp, when persisted. */
   updatedAt?: string
+  /** Counters that tell Work Item advances apart from Planning structure commits. */
+  revisionFence?: PlanningRevisionFence
 }
+
+/**
+ * META counters that show which writers advanced the shared revision.
+ *
+ * Canonical Work Item writes add one to both `revision` and `sourceRevisionCount`. Every Planning
+ * commit records its own revision and the source count it saw. When the revisions after that
+ * commit equal the source advances after it, only Work Items changed the revision since then.
+ * A writer that advances `revision` without the counter keeps the two apart, so an unknown
+ * writer always counts as a Planning change.
+ */
+type PlanningRevisionFence = {
+  /** Work Item advances counted on META since the counter was created. */
+  sourceRevisionCount: number
+  /** META revision written by the latest Planning commit, when one wrote the counters. */
+  structureRevision?: number
+  /** `sourceRevisionCount` at that Planning commit. */
+  structureSourceRevisionCount?: number
+}
+
+/** Planning mutation attempts while only Work Item writes keep advancing the revision. */
+const PLANNING_WORK_ITEM_REBASE_ATTEMPT_LIMIT = 3
+
+/** Strong graph reads attempted while Work Item writes advance META during the read. */
+const PLANNING_STABLE_READ_ATTEMPT_LIMIT = 3
+
+/** Mutation options for Planning-only changes that Work Item edits must not block. */
+const REBASE_OVER_WORK_ITEM_CHANGES: PlanningMutateOptions = { rebaseOverWorkItemChanges: true }
 
 /** Schema version of the persisted Planning META fencing row. */
 export const PLANNING_STORAGE_SCHEMA_VERSION = 1 as const
@@ -402,6 +431,19 @@ export type PlanningClient = {
   get(workspaceId: string, workItemState: PlanningWorkItemState): Promise<PlanningSnapshot>
   /** 外部 authorization transaction を束縛する global revision を返します。 */
   getAuthorizationRevision(workspaceId: string): Promise<number>
+  /**
+   * Returns whether only canonical Work Item writes advanced the revision between two reads.
+   *
+   * @param workspaceId - Owning Workspace.
+   * @param expectedRevision - Revision the caller read.
+   * @param observedRevision - Newer revision read for authorization.
+   * @returns True when the Planning graph is the same at both revisions.
+   */
+  isWorkItemOnlyRevisionAdvance(
+    workspaceId: string,
+    expectedRevision: number,
+    observedRevision: number,
+  ): Promise<boolean>
   /** 認可用に read-time filtering 前の Work Item link を返します。 */
   getWorkItemLinkForAuthorization(
     workspaceId: string,
@@ -707,6 +749,8 @@ type StoredPlanningUpdateTarget = Omit<PlanningUpdateTargetSummary, 'updateState
 type PlanningWorkspaceState = {
   /** Global optimistic concurrency revision です。 */
   revision: number
+  /** META counters read with `revision`, when the stored row has them. */
+  revisionFence?: PlanningRevisionFence
   /** Planning entities です。 */
   entities: StoredPlanningEntity[]
   /** Directed dependencies です。 */
@@ -737,6 +781,16 @@ type PlanningWorkItemDependencyTransactionSource = {
   kind: 'upsert' | 'delete'
   /** Complete dependency value created, updated, or deleted by the mutation. */
   dependency: WorkItemScheduleDependency
+}
+
+/** How one Planning mutation treats a revision that moved after the caller's read. */
+type PlanningMutateOptions = {
+  /**
+   * Accepts a caller revision that only canonical Work Item writes have advanced since, and
+   * retries the commit when such a write lands first. Only for mutations whose result does not
+   * depend on Work Item state, or that guard every Work Item they read with its own revision.
+   */
+  rebaseOverWorkItemChanges?: boolean
 }
 
 /** Mutation が返す rollover の追加情報です。 */
@@ -870,6 +924,14 @@ abstract class BasePlanningClient implements PlanningClient {
 
   /** Workspace state を storage から読み込みます。 */
   protected abstract readState(workspaceId: string): Promise<PlanningWorkspaceState>
+
+  /**
+   * Strongly reads only the revision metadata, without the graph.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @returns The current revision and its Work Item counters.
+   */
+  protected abstract readRevisionMeta(workspaceId: string): Promise<PlanningMeta>
 
   /** Storage から target-local immutable history の1 pageを返します。 */
   protected abstract readUpdateHistory(
@@ -1069,7 +1131,7 @@ abstract class BasePlanningClient implements PlanningClient {
       const next = { ...state, entities: [...state.entities, entity] }
       validatePlanningState(next)
       return { state: next }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning entity の editable fields を更新します。 */
@@ -1129,7 +1191,7 @@ abstract class BasePlanningClient implements PlanningClient {
       validatePlanningState(next)
       requireCycleChainCompatible(next, updated)
       return { state: next }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /**
@@ -1586,7 +1648,7 @@ abstract class BasePlanningClient implements PlanningClient {
       const next = { ...state, entities: [...state.entities, copy] }
       validatePlanningState(next)
       return { state: next }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning entity の hierarchy / Team / Project scope を移動します。 */
@@ -1625,7 +1687,7 @@ abstract class BasePlanningClient implements PlanningClient {
         if (entity.id === current.id || descendantIds.has(entity.id)) requireCycleChainCompatible(next, entity)
       }
       return { state: next }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Project / Initiative update cadence を設定または解除します。 */
@@ -2016,7 +2078,7 @@ abstract class BasePlanningClient implements PlanningClient {
       const next = { ...state, dependencies: [...state.dependencies, dependency] }
       validatePlanningState(next)
       return { state: next }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning dependency を削除します。 */
@@ -2037,7 +2099,7 @@ abstract class BasePlanningClient implements PlanningClient {
           dependencies: state.dependencies.filter((dependency) => dependency.id !== id),
         },
       }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /**
@@ -2261,7 +2323,7 @@ abstract class BasePlanningClient implements PlanningClient {
           revision: readRevision(summary.revision),
         }],
       }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Work Item planning link を削除します。 */
@@ -2536,7 +2598,7 @@ abstract class BasePlanningClient implements PlanningClient {
       const next = { ...state, workItemLinks: [...linksByKey.values()] }
       validateCycleCapacities(next)
       return { state: next, workItemConditions }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /**
@@ -2585,6 +2647,32 @@ abstract class BasePlanningClient implements PlanningClient {
   }
 
   /**
+   * Returns whether a caller's revision still describes the current Planning graph.
+   *
+   * The revision may be older than the current one when only canonical Work Item writes advanced
+   * it since then. Mutations that do not depend on Work Item state accept such a revision.
+   *
+   * @param workspaceIdValue - Candidate Workspace identifier.
+   * @param expectedRevisionValue - Planning revision the caller read.
+   * @param observedRevisionValue - Newer revision the caller has just read and authorized against.
+   * @returns True when Planning did not change between the two revisions.
+   */
+  async isWorkItemOnlyRevisionAdvance(
+    workspaceIdValue: string,
+    expectedRevisionValue: number,
+    observedRevisionValue: number,
+  ) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const expectedRevision = readRevision(expectedRevisionValue)
+    const observedRevision = readRevision(observedRevisionValue)
+    if (expectedRevision === observedRevision) return true
+    if (expectedRevision > observedRevision) return false
+    const meta = await this.readRevisionMeta(workspaceId)
+    return observedRevision <= meta.revision &&
+      isWorkItemOnlyRevisionAdvance(meta, expectedRevision)
+  }
+
+  /**
    * Validates the global revision, applies a domain mutation, and commits its guarded state.
    *
    * @param workspaceIdValue - Candidate Workspace identifier.
@@ -2593,6 +2681,7 @@ abstract class BasePlanningClient implements PlanningClient {
    * @param mutation - Pure state transition applied after the revision check.
    * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
    * @param transaction - Optional durable completion receipt prepared before persistence.
+   * @param options - Whether the mutation may rebase over Work Item-only revision advances.
    * @returns The updated Planning snapshot and mutation metadata.
    */
   private async mutate(
@@ -2602,13 +2691,64 @@ abstract class BasePlanningClient implements PlanningClient {
     mutation: (state: PlanningWorkspaceState, now: string) => PlanningMutationResult,
     authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
     transaction?: PlanningMutationTransaction<PlanningMutationTransactionResult>,
+    options: PlanningMutateOptions = {},
   ) {
     const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
     const expectedRevision = readRevision(expectedRevisionValue)
-    const before = await this.readState(workspaceId)
-    if (before.revision !== expectedRevision) {
-      throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+    // A durable receipt is prepared once for one exact revision, so it is never rebased.
+    const rebase = options.rebaseOverWorkItemChanges === true && transaction === undefined
+    for (let attempt = 1; ; attempt += 1) {
+      const before = await this.readState(workspaceId)
+      if (
+        before.revision !== expectedRevision &&
+        !(rebase && isWorkItemOnlyRevisionAdvance(before, expectedRevision))
+      ) {
+        throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+      }
+      try {
+        return await this.commitMutation(
+          workspaceId,
+          before,
+          workItemState,
+          mutation,
+          authorizationConditionChecks,
+          transaction,
+        )
+      } catch (error) {
+        // Another write landed between the read and the commit. Each attempt re-reads the graph
+        // and is accepted again only if Planning itself is still unchanged since the caller's read.
+        if (
+          rebase &&
+          attempt < PLANNING_WORK_ITEM_REBASE_ATTEMPT_LIMIT &&
+          error instanceof PlanningError &&
+          error.code === 'PlanningRevisionConflict'
+        ) {
+          continue
+        }
+        throw error
+      }
     }
+  }
+
+  /**
+   * Applies a domain mutation to one strongly read graph and commits it with a revision CAS.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @param before - Graph read for this attempt; its revision is the commit's CAS value.
+   * @param workItemState - Canonical Work Item projection used by the mutation.
+   * @param mutation - Pure state transition applied to a copy of `before`.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
+   * @param transaction - Optional durable completion receipt prepared before persistence.
+   * @returns The updated Planning snapshot and mutation metadata.
+   */
+  private async commitMutation(
+    workspaceId: string,
+    before: PlanningWorkspaceState,
+    workItemState: PlanningWorkItemState,
+    mutation: (state: PlanningWorkspaceState, now: string) => PlanningMutationResult,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[],
+    transaction: PlanningMutationTransaction<PlanningMutationTransactionResult> | undefined,
+  ) {
     const result = mutation(structuredClone(before), this.now().toISOString())
     validatePlanningState(result.state)
     const afterUsage = measurePlanningLiveGraph(workspaceId, result.state)
@@ -2883,6 +3023,43 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     return deepFreeze(structuredClone(this.states.get(workspaceId) ?? createEmptyPlanningState()))
   }
 
+  /**
+   * Returns the in-memory revision and its Work Item counters.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @returns The current revision metadata.
+   */
+  protected async readRevisionMeta(workspaceId: string): Promise<PlanningMeta> {
+    const state = this.states.get(workspaceId)
+    return {
+      revision: state?.revision ?? 0,
+      ...(state?.revisionFence === undefined ? {} : { revisionFence: { ...state.revisionFence } }),
+    }
+  }
+
+  /**
+   * Advances the revision the way a canonical Work Item write advances the shared DynamoDB META.
+   *
+   * The in-memory Work Item clients do not share this store, so callers that model a Work Item
+   * write against this client call it themselves.
+   *
+   * @param workspaceIdValue - Workspace whose Work Item changed.
+   * @param updatedAt - Timestamp of the Work Item write.
+   */
+  recordWorkItemRevision(workspaceIdValue: string, updatedAt = new Date().toISOString()) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const current = this.states.get(workspaceId) ?? createEmptyPlanningState()
+    this.states.set(workspaceId, {
+      ...structuredClone(current),
+      revision: current.revision + 1,
+      revisionFence: {
+        ...current.revisionFence,
+        sourceRevisionCount: (current.revisionFence?.sourceRevisionCount ?? 0) + 1,
+      },
+      updatedAt,
+    })
+  }
+
   /** In-memory immutable history の1 pageを返します。 */
   protected async readUpdateHistory(
     workspaceId: string,
@@ -3100,7 +3277,14 @@ export class InMemoryPlanningClient extends BasePlanningClient {
       }
       this.archives.set(workspaceId, archive)
     }
-    this.states.set(workspaceId, structuredClone(after))
+    this.states.set(workspaceId, {
+      ...structuredClone(after),
+      revisionFence: createCommittedRevisionFence({
+        ...after,
+        // The CAS above proves no Work Item write landed since `before` was read.
+        revisionFence: current.revisionFence,
+      }),
+    })
   }
 }
 
@@ -3213,6 +3397,30 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
    */
   protected async readState(workspaceId: string) {
     await this.ensureTable()
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.readStableState(workspaceId)
+      } catch (error) {
+        // Canonical Work Item writes advance META at any time; a read retries past them.
+        if (
+          attempt < PLANNING_STABLE_READ_ATTEMPT_LIMIT &&
+          error instanceof PlanningError &&
+          error.code === 'PlanningRevisionConflict'
+        ) {
+          continue
+        }
+        throw error
+      }
+    }
+  }
+
+  /**
+   * Strongly reads META, then the graph rows, then META again.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @returns The live graph state at one stable revision.
+   */
+  private async readStableState(workspaceId: string) {
     const before = await this.readMeta(workspaceId)
     const cached = this.readCachedGraph(workspaceId, before)
     const items = await this.queryLiveGraphRows(
@@ -3827,7 +4035,11 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
   ) {
     await this.ensureTable()
     const beforeRows = createPlanningRowMap(workspaceId, before)
-    const afterRows = createPlanningRowMap(workspaceId, after)
+    // The META CAS below proves no Work Item write advanced the counters since `before` was read.
+    const afterRows = createPlanningRowMap(workspaceId, {
+      ...after,
+      revisionFence: before.revisionFence,
+    })
     const mutations: NonNullable<TransactWriteCommandInput['TransactItems']> = []
     for (const [recordKey, item] of afterRows) {
       if (recordKey === META_RECORD_KEY || recordsEqual(item, beforeRows.get(recordKey))) continue
@@ -4028,6 +4240,17 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       }
       throw toPersistenceError(error)
     }
+  }
+
+  /**
+   * Strongly reads the META row without the graph.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @returns The current revision metadata.
+   */
+  protected async readRevisionMeta(workspaceId: string) {
+    await this.ensureTable()
+    return this.readMeta(workspaceId)
   }
 
   /** Local DynamoDB 利用時だけ table を bootstrap します。 */
@@ -6287,6 +6510,7 @@ function createPlanningRowMap(workspaceId: string, state: PlanningWorkspaceState
     schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
     revision: state.revision,
     updatedAt: state.updatedAt,
+    ...createCommittedRevisionFence(state),
   })
   for (const entity of state.entities) {
     const recordKey = createEntityRecordKey(entity.id)
@@ -6352,11 +6576,12 @@ function createPlanningRowMap(workspaceId: string, state: PlanningWorkspaceState
 
 function readPlanningRows(
   rows: readonly Record<string, unknown>[],
-  meta: { revision: number; updatedAt?: string },
+  meta: PlanningMeta,
   workspaceId: string,
 ): PlanningWorkspaceState {
   const state: PlanningWorkspaceState = {
     revision: meta.revision,
+    ...(meta.revisionFence === undefined ? {} : { revisionFence: { ...meta.revisionFence } }),
     entities: [],
     dependencies: [],
     workItemDependencies: [],
@@ -9376,9 +9601,95 @@ function readPlanningMetaItem(
   ) {
     throw persistenceInvalid('Planning metadata is invalid.')
   }
+  const revisionFence = readPlanningRevisionFence(
+    readOptionalStoredCounter(item.sourceRevisionCount),
+    readOptionalStoredCounter(item.structureRevision),
+    readOptionalStoredCounter(item.structureSourceRevisionCount),
+  )
   return {
     revision: item.revision,
     ...(item.updatedAt === undefined ? {} : { updatedAt: item.updatedAt }),
+    ...(revisionFence === undefined ? {} : { revisionFence }),
+  }
+}
+
+/**
+ * Validates an optional stored META counter.
+ *
+ * @param value - Untrusted attribute value.
+ * @returns The counter, or undefined when it is absent.
+ */
+function readOptionalStoredCounter(value: unknown): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw persistenceInvalid('Planning metadata is invalid.')
+  }
+  return value
+}
+
+/**
+ * Builds the revision fence from validated META counters.
+ *
+ * @param sourceRevisionCount - Work Item advance counter, when stored.
+ * @param structureRevision - Revision of the latest Planning commit that wrote counters.
+ * @param structureSourceRevisionCount - Work Item counter at that Planning commit.
+ * @returns The fence, or undefined before any Work Item write or Planning commit stored counters.
+ */
+function readPlanningRevisionFence(
+  sourceRevisionCount: number | undefined,
+  structureRevision: number | undefined,
+  structureSourceRevisionCount: number | undefined,
+): PlanningRevisionFence | undefined {
+  if (sourceRevisionCount === undefined) return undefined
+  // Both structure attributes are written together; a half-written pair is ignored.
+  return structureRevision === undefined || structureSourceRevisionCount === undefined
+    ? { sourceRevisionCount }
+    : { sourceRevisionCount, structureRevision, structureSourceRevisionCount }
+}
+
+/**
+ * Returns whether only canonical Work Item writes advanced META after a caller's revision.
+ *
+ * Every increment after the latest Planning commit must be a counted Work Item increment, and
+ * the caller must have read that commit. A META row without counters is treated as changed.
+ *
+ * @param meta - Strongly read revision and counters.
+ * @param expectedRevision - Revision the caller read.
+ * @returns True when the Planning graph at `expectedRevision` equals the graph at `meta.revision`.
+ */
+function isWorkItemOnlyRevisionAdvance(
+  meta: Pick<PlanningMeta, 'revision' | 'revisionFence'>,
+  expectedRevision: number,
+) {
+  if (meta.revision === expectedRevision) return true
+  const fence = meta.revisionFence
+  if (
+    fence?.structureRevision === undefined ||
+    fence.structureSourceRevisionCount === undefined ||
+    expectedRevision < fence.structureRevision ||
+    expectedRevision > meta.revision
+  ) {
+    return false
+  }
+  return meta.revision - fence.structureRevision ===
+    fence.sourceRevisionCount - fence.structureSourceRevisionCount
+}
+
+/**
+ * Marks a graph about to be committed as the latest Planning change on META.
+ *
+ * The commit's CAS on `revision` means no Work Item write landed since `state` was read, so its
+ * counter is still current.
+ *
+ * @param state - Graph carrying the revision it commits and the counter it was read with.
+ * @returns META counters to persist with the commit.
+ */
+function createCommittedRevisionFence(state: PlanningWorkspaceState): Required<PlanningRevisionFence> {
+  const sourceRevisionCount = state.revisionFence?.sourceRevisionCount ?? 0
+  return {
+    sourceRevisionCount,
+    structureRevision: state.revision,
+    structureSourceRevisionCount: sourceRevisionCount,
   }
 }
 

@@ -1,4 +1,4 @@
-# 0011. Analytics の定期配信を audit outbox 経由で受信者に通知する
+# 0020. Analytics の定期配信を audit outbox 経由で受信者に通知する
 
 - 状態: 提案
 - 日付: 2026-11-19

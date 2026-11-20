@@ -13,6 +13,10 @@ import {
   findScheduledJobsFunctionLogicalId,
   synthesizedTemplate,
 } from './test-support';
+import {
+  COST_ALLOCATION_TAG_KEY,
+  COST_ALLOCATION_TAG_VALUE,
+} from '../lib/aspects/cost-allocation-tags';
 
 test('Slack notifications use the sparse due queue with bounded execution and recipient-secret access', () => {
   const template = synthesizedTemplate;
@@ -1266,6 +1270,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     Properties: {
       MessageRetentionPeriod: 1209600,
       SqsManagedSseEnabled: true,
+      Tags: [{ Key: COST_ALLOCATION_TAG_KEY, Value: COST_ALLOCATION_TAG_VALUE }],
     },
     UpdateReplacePolicy: 'Retain',
     DeletionPolicy: 'Retain',
@@ -1281,6 +1286,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
         maxReceiveCount: 5,
       },
       SqsManagedSseEnabled: true,
+      Tags: [{ Key: COST_ALLOCATION_TAG_KEY, Value: COST_ALLOCATION_TAG_VALUE }],
       VisibilityTimeout: 180,
     },
     UpdateReplacePolicy: 'Retain',
@@ -2948,6 +2954,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
             'schemaVersion',
             'revision',
             'updatedAt',
+            'sourceRevisionCount',
           ],
         },
         'ForAllValues:StringLike': {

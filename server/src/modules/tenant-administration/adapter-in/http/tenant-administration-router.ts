@@ -4,6 +4,8 @@ import type {
   RequestTenantExportInput,
   TenantAdministrationSnapshot,
   TenantDefaultPolicy,
+  TenantExportDownload,
+  TenantOperation,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
   WorkspaceCalendarSettings,
@@ -46,6 +48,24 @@ export type TenantAdministrationRouterDependencies<
   authenticate(accessToken: string, context: Context): Promise<Principal>
   /** Enforces Workspace owner/admin authorization at the route boundary. */
   requireAdministration(principal: Principal): void
+  /**
+   * Enforces the audit export authority that a tenant export also needs.
+   *
+   * A tenant export carries the Workspace audit log, so requesting or downloading one must not
+   * bypass the separate permission that guards the audit export itself.
+   */
+  requireAuditDataExport(principal: Principal): void
+  /**
+   * Records an immutable audit event for each issuance of tenant export download links.
+   *
+   * It runs before the links are returned, and a failure refuses the download.
+   */
+  recordExportDownload(
+    context: Context,
+    principal: Principal,
+    operation: TenantOperation,
+    download: TenantExportDownload,
+  ): Promise<void>
   /** Provides the tenant administration application port. */
   client: TenantAdministrationClient
   /** Provides authorized access to completed export artifacts. */
@@ -159,6 +179,7 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
+      dependencies.requireAuditDataExport(principal)
       requireLifecycleOperationsDeployed(dependencies)
       await ensureTenantInitialized(principal, dependencies)
       const input = readTenantExportInput(await dependencies.readJson(context.req))
@@ -214,14 +235,15 @@ export function createTenantAdministrationRouter<
     try {
       const principal = await requirePrincipal(context, dependencies)
       dependencies.requireAdministration(principal)
+      dependencies.requireAuditDataExport(principal)
       requireLifecycleOperationsDeployed(dependencies)
       const operation = await dependencies.client.getOperation(
         principal.directoryId,
         readOperationId(context.req.param('operationId')),
       )
-      return context.json({
-        download: await dependencies.tenantExportDownload.createDownload(operation),
-      })
+      const download = await dependencies.tenantExportDownload.createDownload(operation)
+      await dependencies.recordExportDownload(context, principal, operation, download)
+      return context.json({ download })
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -323,11 +345,12 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
 }
 
 /**
- * Validates the fiscal year and week settings of a profile update.
+ * Validates the fiscal year, week, and working day settings of a profile update.
  *
  * @param value - Untrusted `calendar` field of the request body.
  * @returns The validated calendar settings.
- * @throws TenantAdministrationError When the month or the week start day is invalid.
+ * @throws TenantAdministrationError When the month, the week start day, the working weekdays,
+ *   or the holidays are invalid.
  */
 function readTenantCalendarInput(value: unknown): WorkspaceCalendarSettings {
   const calendar = readWorkspaceCalendarSettings(value)
@@ -335,7 +358,7 @@ function readTenantCalendarInput(value: unknown): WorkspaceCalendarSettings {
     throw new TenantAdministrationError(
       400,
       'InvalidTenantCalendarSettings',
-      'Fiscal year start month or week start day is invalid.',
+      'Fiscal year start month, week start day, working weekdays, or holidays are invalid.',
     )
   }
   return calendar

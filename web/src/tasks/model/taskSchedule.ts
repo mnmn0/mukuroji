@@ -11,6 +11,7 @@ import {
   type WorkItemScheduleCalendarPolicy,
   type WorkItemScheduleOperation,
   type WorkItemScheduleWeekday,
+  type WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
 
 const MILLISECONDS_PER_CALENDAR_DAY = 24 * 60 * 60 * 1_000
@@ -73,6 +74,25 @@ export function createDefaultTaskScheduleCalendarPolicy(): WorkItemScheduleCalen
     holidays: [...DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.holidays],
     timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
     workingWeekdays: [...DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.workingWeekdays],
+  }
+}
+
+/**
+ * Creates the calendar policy new Work Items take from the Workspace working calendar.
+ *
+ * @param settings - Workspace calendar settings, or undefined before they load or when the read
+ *   fails.
+ * @returns The Workspace time zone with the Workspace working weekdays and holidays, or the
+ *   default Monday-to-Friday policy without holidays when no settings are available.
+ */
+export function createWorkspaceTaskScheduleCalendarPolicy(
+  settings: WorkspaceCalendarSettings | undefined,
+): WorkItemScheduleCalendarPolicy {
+  if (!settings) return createDefaultTaskScheduleCalendarPolicy()
+  return {
+    holidays: [...settings.holidays],
+    timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
+    workingWeekdays: [...settings.workingWeekdays],
   }
 }
 
