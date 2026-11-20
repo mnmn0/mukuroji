@@ -33,6 +33,11 @@ export type PlanningEntityCreationWithAssignedIdInput<TResult> = {
   /** Mutation that creates the entity. */
   operation: PlanningEntityCreationOperation
   /**
+   * Returns whether an entity with the assigned ID already exists, live or archived. Only an
+   * earlier request with the same caller, operation, and key can have created it.
+   */
+  exists: (entityId: string) => Promise<boolean>
+  /**
    * Authorizes and commits the creation with the assigned ID. It must not return before the
    * entity is committed, and must throw when nothing was committed.
    */
@@ -60,9 +65,8 @@ export type PlanningEntityCreationWithAssignedIdOutcome<TResult> =
  * Creates or duplicates a Planning entity with a server-assigned ID, once per request key.
  *
  * The ID depends only on the caller, the operation, and the request key. The receipt is stored
- * after the commit, so a lost receipt can leave the reservation incomplete; a later retry then
- * targets the same ID and the domain rejects it as an existing entity instead of creating a
- * second one.
+ * after the commit, so a failure after the commit can leave no receipt. A retry with the same key
+ * then finds the entity under the same ID and returns it instead of creating a second one.
  *
  * @param input - Reservation scope, request key, and the creation to run.
  * @returns Replay of an earlier success, or the result of this creation.
@@ -107,6 +111,14 @@ export async function createPlanningEntityWithAssignedId<TResult>(
   }
   let result: TResult
   try {
+    // A failed attempt whose commit went through releases its reservation, so the retry would
+    // otherwise fail its revision check instead of returning the entity it already created.
+    if (await input.exists(entityId)) {
+      await input.idempotency
+        .completeIdempotency({ ...reservation, response: receipt })
+        .catch(() => undefined)
+      return { status: 'replay', entityId }
+    }
     result = await input.create(entityId)
   } catch (error) {
     await input.idempotency.releaseIdempotency(reservation).catch(() => undefined)

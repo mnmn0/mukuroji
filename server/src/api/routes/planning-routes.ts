@@ -1524,6 +1524,19 @@ function createPlanningEntityCreationFingerprint(path: string, body: unknown): s
 }
 
 /**
+ * Returns whether a Planning entity ID is used by a live or archived entity.
+ *
+ * @param workspaceId - Planning Workspace partition.
+ * @param entityId - Candidate entity ID.
+ * @returns True when the ID is already taken.
+ */
+async function planningEntityIdExists(workspaceId: string, entityId: string): Promise<boolean> {
+  const state = await workItemDependencies.planning.getAuthorizationState(workspaceId)
+  if (state.entities.some((entity) => entity.id === entityId)) return true
+  return await workItemDependencies.planning.getArchivedEntity(workspaceId, entityId) !== undefined
+}
+
+/**
  * Sets the response headers of a server-assigned creation and returns its snapshot.
  *
  * @param c - Route context receiving the headers.
@@ -3972,6 +3985,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         ...createPlanningEntityCreationScope(principal),
         idempotency: developerPlatformDependencies.idempotency,
         idempotencyKey: c.req.header('Idempotency-Key'),
+        exists: (assignedId) => planningEntityIdExists(principal.directoryId, assignedId),
         requestFingerprint: createPlanningEntityCreationFingerprint('/api/planning/entities', input),
         operation: 'create',
         create,
@@ -4189,6 +4203,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         ...createPlanningEntityCreationScope(principal),
         idempotency: developerPlatformDependencies.idempotency,
         idempotencyKey: c.req.header('Idempotency-Key'),
+        exists: (assignedId) => planningEntityIdExists(principal.directoryId, assignedId),
         requestFingerprint: createPlanningEntityCreationFingerprint(
           `/api/planning/entities/${entityId}/duplicate`,
           input,

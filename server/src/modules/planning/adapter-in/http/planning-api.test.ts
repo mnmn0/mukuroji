@@ -2151,7 +2151,7 @@ test('assigns the duplicate ID on the server and does not copy twice for the sam
   ].sort())
 })
 
-test('does not create a second entity when the create receipt was lost', async () => {
+test('returns the created entity instead of a second one when the create receipt was lost', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
   const planning = new InMemoryPlanningClient()
   const platform = createInMemoryDeveloperPlatformAdapters()
@@ -2173,16 +2173,18 @@ test('does not create a second entity when the create receipt was lost', async (
   const retried = await planningApiRequest('/api/planning/entities', 'POST', input, 'assign-lost-receipt')
   expect(retried.status).toBe(409)
 
-  // After the reservation is gone, the derived ID still collides with the created entity.
+  // After the reservation is gone, the same request finds the entity under its derived ID and
+  // returns it, even though its revision is now stale.
   setTestAppDependencies({ planning, idempotency: createInMemoryDeveloperPlatformAdapters().idempotency })
   const afterExpiry = await planningApiRequest(
     '/api/planning/entities',
     'POST',
-    { ...input, expectedRevision: 1 },
+    input,
     'assign-lost-receipt',
   )
-  expect(afterExpiry.status).toBe(409)
-  expect(await afterExpiry.json()).toMatchObject({ code: 'PlanningEntityExists' })
+  expect(afterExpiry.status).toBe(201)
+  expect(afterExpiry.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(readCreatedPlanningEntityId(afterExpiry)).toBe(readCreatedPlanningEntityId(created))
 
   const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
   expect(snapshot.entities).toHaveLength(1)

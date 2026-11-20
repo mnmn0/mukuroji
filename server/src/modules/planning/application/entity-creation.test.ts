@@ -37,6 +37,7 @@ const baseInput = {
   idempotencyKey: 'key-1',
   requestFingerprint: 'fingerprint',
   operation: 'create' as const,
+  exists: async () => false,
 }
 
 describe('createPlanningEntityWithAssignedId', () => {
@@ -55,6 +56,23 @@ describe('createPlanningEntityWithAssignedId', () => {
     expect(ids[0]).toMatch(/^pe-[0-9a-f]{32}$/u)
     expect(ids[1]).toBe(ids[0])
     expect(ids[2]).not.toBe(ids[0])
+  })
+
+  test('returns an entity that an earlier attempt with the same key already created', async () => {
+    const { idempotency, calls } = createIdempotencyDouble({ status: 'reserved', reservationId: 'r' })
+    let created = false
+    const outcome = await createPlanningEntityWithAssignedId({
+      ...baseInput,
+      idempotency,
+      exists: async () => true,
+      create: async () => {
+        created = true
+        return 'created'
+      },
+    })
+    expect(outcome.status).toBe('replay')
+    expect(created).toBe(false)
+    expect(calls).toEqual(['reserve', 'complete'])
   })
 
   test('releases the reservation when the creation throws', async () => {
