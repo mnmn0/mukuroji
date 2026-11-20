@@ -31,8 +31,9 @@ import { createTranslator } from '../src/shared/i18n/i18n'
 function findInput(html: string, locale: 'ja' | 'en', field: NotificationReminderDayField) {
   const name = createTranslator(locale)(`workspace.reminders.field.${field}`)
   for (const [, content = ''] of html.matchAll(/<label[^>]*>(.*?)<\/label>/g)) {
-    const text = content.replace(/<input[^>]*>/g, '').replace(/<[^>]+>/g, '').trim()
-    if (text.startsWith(name)) return content.match(/<input[^>]*>/)?.[0]
+    // The label's first child holds the visible name; compare it as text instead of stripping tags.
+    const labelText = content.match(/^<span[^>]*>([^<]*)<\/span>/)?.[1]
+    if (labelText === name) return content.match(/<input[^>]*>/)?.[0]
   }
   return undefined
 }
