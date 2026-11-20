@@ -2714,6 +2714,7 @@ test('deprovisions a directory member atomically with the Planning revision and 
     externalIdentityId: 'scim-user-123',
     version: 5,
     deactivatedAt: now.toISOString(),
+    signInsRevokedAt: now.toISOString(),
   })
   expect(inputs.at(-1)).toMatchObject({
     TransactItems: [
@@ -2721,7 +2722,7 @@ test('deprovisions a directory member atomically with the Planning revision and 
         Update: {
           TableName: 'WorkspaceAccessTable',
           ConditionExpression:
-            'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId',
+            'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId AND (attribute_not_exists(signInsRevokedAt) OR signInsRevokedAt < :signInsRevokedAt)',
         },
       },
       {
@@ -2762,6 +2763,79 @@ test('deprovisions a directory member atomically with the Planning revision and 
         },
       },
     ],
+  })
+})
+
+test('refuses a member whose stored sign-in cutoff is not a UTC timestamp', async () => {
+  for (const signInsRevokedAt of [123, '2026-07-11', 'not-a-time']) {
+    const member = createWorkspaceMember('sato@example.com', 'member')
+    const client = createWorkspaceAccessClientWithDocumentAuthorization(
+      'WorkspaceAccessTable',
+      createDocumentClient(() => ({ Item: { ...toMemberItem(member), signInsRevokedAt } })),
+      undefined,
+      false,
+      () => now,
+      'PlanningTable',
+      'AuditTable',
+    )
+
+    await expect(client.getMember(workspaceId, member.memberKey))
+      .rejects.toMatchObject({ status: 503, code: 'InvalidWorkspaceAccessData' })
+  }
+})
+
+test('deprovisioning keeps a later sign-in cutoff written by a concurrent sign-out', async () => {
+  const laterCutoff = new Date(now.getTime() + 5_000).toISOString()
+  let target = {
+    ...createWorkspaceMember('sato@example.com', 'member', 'active', 4),
+    provisioningSource: 'directory' as const,
+    externalIdentityId: 'scim-user-123',
+  }
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') return { Item: toMemberItem(target) }
+      if (command.constructor.name !== 'TransactWriteCommand') return {}
+      transactions.push(command.input)
+      if (transactions.length === 1) {
+        // A password reset signs the member out between the read and this transaction.
+        target = { ...target, signInsRevokedAt: laterCutoff }
+        throw Object.assign(new Error('Transaction cancelled'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+        })
+      }
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+
+  const member = await client.deprovisionDirectoryMember(
+    workspaceId,
+    target.memberKey,
+    {
+      externalIdentityId: target.externalIdentityId,
+      expectedVersion: target.version,
+      expectedPlanningRevision: 9,
+      expectedDocumentAuthorizationRevision: 3,
+    },
+    createAuditContext('directory-deprovision'),
+  )
+
+  const expectedCutoff = new Date(now.getTime() + 5_001).toISOString()
+  expect(transactions).toHaveLength(2)
+  expect(member).toMatchObject({ status: 'deactivated', signInsRevokedAt: expectedCutoff })
+  expect(transactions[1]).toMatchObject({
+    TransactItems: expect.arrayContaining([{
+      Update: expect.objectContaining({
+        ExpressionAttributeValues: expect.objectContaining({ ':signInsRevokedAt': expectedCutoff }),
+      }),
+    }]),
   })
 })
 
@@ -3189,4 +3263,39 @@ test('tracks a credential reset by its idempotency key so that a retry resumes, 
     auditContext,
   )).rejects.toMatchObject({ code: 'WorkspaceIdempotencyConflict', status: 409 })
   expect(progressRecords.size).toBe(1)
+})
+
+test('records a sign-out of every session on the member, keeping a later cutoff and ignoring a missing member', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  let missing = false
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      if (missing) {
+        throw Object.assign(new Error('The conditional request failed'), {
+          name: 'ConditionalCheckFailedException',
+        })
+      }
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+
+  await client.revokeMemberSignIns(workspaceId, 'Sato@Example.com')
+  missing = true
+  await expect(client.revokeMemberSignIns(workspaceId, 'gone@example.com')).resolves.toBeUndefined()
+
+  expect(inputs[0]).toEqual({
+    TableName: 'WorkspaceAccessTable',
+    Key: { workspaceId, recordKey: 'MEMBER#sato@example.com' },
+    UpdateExpression: 'SET signInsRevokedAt = :now',
+    ConditionExpression:
+      'attribute_exists(recordKey) AND (attribute_not_exists(signInsRevokedAt) OR signInsRevokedAt < :now)',
+    ExpressionAttributeValues: { ':now': now.toISOString() },
+  })
 })

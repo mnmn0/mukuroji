@@ -1,4 +1,4 @@
-# 0017. Work Item に link された Document を `work-items:read` で Work Item 経由だけ読ませる
+# 0019. Work Item に link された Document を `work-items:read` で Work Item 経由だけ読ませる
 
 - 状態: 提案
 - 日付: 2026-11-20
