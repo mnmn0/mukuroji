@@ -167,6 +167,33 @@ describe('Markdown import', () => {
     ])
   })
 
+  test('keeps dash-only cells as rows of an exported table', () => {
+    const blocks = blocksOf([
+      '| a | b |', '', '| --- | --- |', '', '| - | - |', '', '| 1 | 2 |', '',
+    ].join('\n'))
+    expect(blocks).toMatchObject([{
+      columns: ['a', 'b'],
+      rows: [
+        { cells: [{ text: '-' }, { text: '-' }] },
+        { cells: [{ text: '1' }, { text: '2' }] },
+      ],
+      type: 'table',
+    }])
+  })
+
+  test('ends a table where a list or blockquote starts', () => {
+    const blocks = blocksOf('| a |\n| --- |\n| value |\n- first | x\n- second\n> quote')
+    expect(blocks).toEqual([
+      {
+        columns: ['a'],
+        id: 'block-3',
+        rows: [{ cells: [{ id: 'cell-2', text: 'value' }], id: 'row-1' }],
+        type: 'table',
+      },
+      { id: 'block-4', text: '- first | x\n- second\n> quote', type: 'paragraph' },
+    ])
+  })
+
   test('rejects oversized tables before building every cell', () => {
     const wide = Array.from({ length: 40_000 }, () => 'c').join('|')
     const delimiter = Array.from({ length: 40_000 }, () => '-').join('|')

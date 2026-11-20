@@ -109,6 +109,9 @@ const ATX_HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/u
 /** Task-list item line. */
 const TASK_ITEM = /^ {0,3}[-*+][ \t]+\[([ xX])\][ \t]+(.*)$/u
 
+/** First line of a list item or blockquote. */
+const LIST_OR_QUOTE_START = /^ {0,3}(?:[-*+][ \t]|\d{1,9}[.)][ \t]|>)/u
+
 /** Thematic break line. */
 const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/u
 
@@ -379,14 +382,37 @@ function nextTableRowIndex(
       : undefined
   }
   const candidate = lines[index + 1] ?? ''
-  if ((lines[index] ?? '').trim() !== '' || !isPipeRow(candidate)) {
+  if ((lines[index] ?? '').trim() !== '' || !isPipeLine(candidate)) {
     return undefined
   }
   const startsNextTable =
-    isDelimiterRow(lines[index + 2] ?? '') ||
+    isExportedDelimiterRow(lines[index + 2] ?? '') ||
     ((lines[index + 2] ?? '').trim() === '' &&
-      isDelimiterRow(lines[index + 3] ?? ''))
+      isExportedDelimiterRow(lines[index + 3] ?? ''))
   return startsNextTable ? undefined : index + 1
+}
+
+/**
+ * Checks whether a line is the delimiter row the page Markdown export writes,
+ * `| --- | --- |`. A body row whose cells merely look like dashes, such as
+ * `| - | - |`, does not match, so it stays a row of the current table.
+ *
+ * @param line - Candidate line.
+ * @returns Whether the line is an exported delimiter row.
+ */
+function isExportedDelimiterRow(line: string): boolean {
+  return /^\|(?: --- \|)+$/u.test(line.trim())
+}
+
+/**
+ * Checks whether a line starts and ends with a pipe.
+ *
+ * @param line - Candidate line.
+ * @returns Whether the line can be a row of an exported table.
+ */
+function isPipeLine(line: string): boolean {
+  const trimmed = line.trim()
+  return trimmed.length > 1 && trimmed.startsWith('|') && trimmed.endsWith('|')
 }
 
 /**
@@ -406,19 +432,13 @@ function isDelimiterRow(line: string): boolean {
  * @returns Whether the line looks like an exported table row.
  */
 function isPipeRow(line: string): boolean {
-  const trimmed = line.trim()
-  return (
-    trimmed.length > 1 &&
-    trimmed.startsWith('|') &&
-    trimmed.endsWith('|') &&
-    !isDelimiterRow(trimmed)
-  )
+  return isPipeLine(line) && !isDelimiterRow(line)
 }
 
 /**
  * Checks whether a line after a table's delimiter row is another row. As in
  * GitHub Flavored Markdown, rows continue until a blank line or the start of
- * another block.
+ * another block such as a heading, fence, list item, or blockquote.
  *
  * @param line - Line after the previous row.
  * @returns Whether the line is a table row.
@@ -429,6 +449,7 @@ function continuesTable(line: string): boolean {
     !FENCE_OPEN.test(line) &&
     !ATX_HEADING.test(line) &&
     !TASK_ITEM.test(line) &&
+    !LIST_OR_QUOTE_START.test(line) &&
     !THEMATIC_BREAK.test(line)
   )
 }
