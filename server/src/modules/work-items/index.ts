@@ -75,6 +75,8 @@ export {
   assertWorkItemChildTypeAllowed,
   assertWorkflowTransitionAllowed,
   assertWorkItemTypeChangeResolution,
+  createWorkItemChildRestoreGuardAdvance,
+  createWorkItemChildRestoreGuardConditionCheck,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationGraphRevisionConditionCheck,
   createWorkItemRelationGraphRevisionIncrementTransactionItem,

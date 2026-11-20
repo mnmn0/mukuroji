@@ -7,6 +7,9 @@
 # under `assets/` are cached for a year and kept after later uploads, so a
 # browser that still runs the previous `index.html` can load its lazy chunks.
 # Every other file is served with `no-cache` and replaced on each upload.
+# CloudFront's CSP allows any bucket on the regional S3 endpoint, so the
+# script adds a `<meta>` CSP to `index.html` that names the stack's own file
+# bucket and realtime API; the browser enforces both policies.
 #
 # The build embeds the commit SHA so the Help screen can show which build is
 # running. A copy of every non-asset file is also kept under
@@ -136,6 +139,8 @@ prune_unreferenced_assets() {
 WEB_BUCKET_NAME="$(stack_output WebBucketName)"
 WEB_DISTRIBUTION_ID="$(stack_output WebDistributionId)"
 WEB_URL="$(stack_output WebUrl)"
+FILE_BUCKET_NAME="$(stack_output FileBucketName)"
+REALTIME_WEBSOCKET_URL="$(stack_output RealtimeWebSocketUrl)"
 
 (
   cd "$REPOSITORY_ROOT"
@@ -153,6 +158,12 @@ if [[ ! -f "$DIST_DIRECTORY/index.html" || ! -d "$DIST_DIRECTORY/assets" ]]; the
   exit 1
 fi
 (cd "$DIST_DIRECTORY" && find assets -type f | LC_ALL=C sort) >"$DIST_DIRECTORY/$ASSET_MANIFEST_NAME"
+
+bun "$REPOSITORY_ROOT/scripts/inject-web-csp-meta.ts" \
+  "$DIST_DIRECTORY/index.html" \
+  "$FILE_BUCKET_NAME" \
+  "$AWS_REGION" \
+  "$REALTIME_WEBSOCKET_URL"
 
 aws s3 sync "$DIST_DIRECTORY/assets" "s3://$WEB_BUCKET_NAME/assets" \
   --region "$AWS_REGION" \

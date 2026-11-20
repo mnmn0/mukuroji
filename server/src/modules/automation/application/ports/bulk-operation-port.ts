@@ -42,6 +42,16 @@ export interface BulkOperationAdapter {
   ): Promise<BulkItemApplyResult>
   /** Applies a saved undo snapshot with a current-revision guard. */
   undo(operation: BulkOperation, itemIndex: number): Promise<BulkItemApplyResult>
+  /**
+   * Orders the items so that each one is applied after the items it depends on.
+   *
+   * Apply and retry follow this order and undo follows it in reverse. Without it, items run in
+   * request order.
+   *
+   * @param request - Bulk request whose items are ordered.
+   * @returns Every item index exactly once, in apply order.
+   */
+  orderItems?(request: BulkOperationRequest): Promise<readonly number[]>
 }
 
 /** Durable checkpoint capability required by Bulk operation use cases. */

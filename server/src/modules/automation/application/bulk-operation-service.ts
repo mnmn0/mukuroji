@@ -160,7 +160,7 @@ export async function applyBulkOperation(
       true,
     )
   }
-  for (let itemIndex = 0; itemIndex < request.items.length; itemIndex += 1) {
+  for (const itemIndex of await readBulkApplyOrder(request, adapter)) {
     const checkpoint = operation.items[itemIndex]
     if (!checkpoint) {
       throw new AutomationError('unavailable', 'BulkOperationInvalid', 'Bulk checkpoint is invalid.')
@@ -193,14 +193,10 @@ export async function retryBulkOperation(
   adapter: BulkOperationAdapter,
   client?: AutomationBulkOperationPort,
 ): Promise<BulkOperation> {
-  const retryableIndexes: number[] = []
-  for (let itemIndex = 0; itemIndex < operation.items.length; itemIndex += 1) {
-    const item = requireBulkOperationCheckpoint(operation, itemIndex)
-    if (item.status === 'ready' || (item.status === 'failed' && item.retryable)) {
-      retryableIndexes.push(itemIndex)
-    }
-  }
-  if (retryableIndexes.length === 0) {
+  const hasRetryableItem = operation.items.some((item) =>
+    item.status === 'ready' || (item.status === 'failed' && item.retryable)
+  )
+  if (!hasRetryableItem) {
     if (operation.status === 'running') {
       operation.status = summarizeBulkStatus(operation.items)
       operation.updatedAt = new Date().toISOString()
@@ -208,14 +204,13 @@ export async function retryBulkOperation(
     }
     return operation
   }
-  const request: BulkOperationRequest = {
-    workspaceId: operation.workspaceId,
-    action: operation.action,
-    items: operation.items.map(({ teamId, workItemId, expectedRevision }) => ({
-      teamId,
-      workItemId,
-      expectedRevision,
-    })),
+  const request = createBulkRequestFromOperation(operation)
+  const retryableIndexes: number[] = []
+  for (const itemIndex of await readBulkApplyOrder(request, adapter)) {
+    const item = requireBulkOperationCheckpoint(operation, itemIndex)
+    if (item.status === 'ready' || (item.status === 'failed' && item.retryable)) {
+      retryableIndexes.push(itemIndex)
+    }
   }
   operation.status = 'running'
   operation.updatedAt = new Date().toISOString()
@@ -248,10 +243,11 @@ export async function undoBulkOperation(
   for (let index = 0; index < operation.items.length; index += 1) {
     requireBulkOperationCheckpoint(operation, index)
   }
+  const undoOrder = [...await readBulkApplyOrder(createBulkRequestFromOperation(operation), adapter)].reverse()
   operation.status = 'undoing'
   operation.updatedAt = new Date().toISOString()
   await saveBulkOperationCheckpoint(operation, client)
-  for (let index = operation.items.length - 1; index >= 0; index -= 1) {
+  for (const index of undoOrder) {
     const item = requireBulkOperationCheckpoint(operation, index)
     if (item.status !== 'succeeded' || !item.undoable) continue
     try {
@@ -291,6 +287,50 @@ export async function undoBulkOperation(
   operation.updatedAt = new Date().toISOString()
   await saveBulkOperationCheckpoint(operation, client)
   return operation
+}
+
+/**
+ * Rebuilds the Bulk request of a stored operation.
+ *
+ * @param operation - Durable operation.
+ * @returns Request with the operation's scope, action, and targets.
+ */
+function createBulkRequestFromOperation(operation: BulkOperation): BulkOperationRequest {
+  return {
+    workspaceId: operation.workspaceId,
+    action: operation.action,
+    items: operation.items.map(({ teamId, workItemId, expectedRevision }) => ({
+      teamId,
+      workItemId,
+      expectedRevision,
+    })),
+  }
+}
+
+/**
+ * Reads the order in which the items of a Bulk request are applied.
+ *
+ * @param request - Bulk request whose items are applied.
+ * @param adapter - Work Item mutation boundary that may order dependent items.
+ * @returns Every item index exactly once; request order when the adapter does not order items.
+ * @throws AutomationError `unavailable` when the adapter's order is not a permutation of the items.
+ */
+async function readBulkApplyOrder(
+  request: BulkOperationRequest,
+  adapter: BulkOperationAdapter,
+): Promise<readonly number[]> {
+  const requestOrder = request.items.map((_, index) => index)
+  if (!adapter.orderItems) return requestOrder
+  const order = await adapter.orderItems(request)
+  const seen = new Set(order)
+  if (
+    order.length !== requestOrder.length ||
+    seen.size !== order.length ||
+    order.some((index) => !Number.isInteger(index) || index < 0 || index >= requestOrder.length)
+  ) {
+    throw new AutomationError('unavailable', 'BulkOperationInvalid', 'Bulk item order is invalid.')
+  }
+  return order
 }
 
 /**
