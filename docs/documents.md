@@ -156,6 +156,24 @@ Team ID と Issue ID から `team/<teamId>/issue/<issueId>` を生成するた�
 にし、public share 画面では編集 control を表示しません。Mention 通知の deep link は対象 thread
 を cursor 越しに取得し、対象 comment を drawer 内で強調・focus します。
 
+### Markdown の取り込み
+
+Documents home の「Markdown を取り込む」で、貼り付けた Markdown または Markdown ファイル 1 つ
+（300 KB まで）から新しいページを作れます。変換は Web で行い、結果は通常のページ作成 API で
+保存するので、server 側の検証・権限・block 上限（500 block、表は 50 列・200 行、1 block 5 万文字）が
+そのまま適用されます。上限を超える Markdown は作成前に理由を表示します。
+
+- `#` 〜 `######` の見出しは heading block に変換します。先頭にある唯一の `#` 見出しはページの
+  タイトルにし、`##` を level 1 として level 3 までに詰めます（ページの Markdown export と同じ形
+  なので、export したページは見出しの level を保ったまま戻せます）。それ以外は最も浅い見出しを
+  level 1 にし、タイトルはファイル名（なければ「取り込んだページ」）にします。
+- ページの Markdown export は表の各行の間に空行を入れるので、その形の表も table block に戻します。
+- フェンス付きコードは code block（安全な言語名だけ保持）、`mermaid` のフェンスは diagram block、
+  `- [ ]` / `- [x]` の連続行は checklist block、GFM のパイプ表は table block にします。
+- 段落・リスト・引用・リンク・画像・HTML は、Markdown の backslash escape だけを外して paragraph
+  block の text として残します。paragraph は text として表示するので、HTML やリンクは描画しません。
+- folder 単位の一括取り込みと、相対リンクを取り込んだページ同士のリンクに変換する処理はまだありません。
+
 ### 同梱テンプレートと宿題の Work Item 化
 
 Documents home の「同梱テンプレート」から、議事録・設計書・振り返り（KPT）のページを作れます。

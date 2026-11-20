@@ -122,6 +122,11 @@ import type {
   BuiltInTemplateCreateOptions,
 } from './model/builtInTemplates'
 import { useBuiltInTemplateDocumentCreation } from './mutations/useBuiltInTemplateDocumentCreation'
+import { useMarkdownDocumentImport } from './mutations/useMarkdownDocumentImport'
+import type {
+  MarkdownDocumentImportRequest,
+  MarkdownImportErrorCode,
+} from './model/markdownImport'
 import {
   createDocumentWorkItemRelation,
   createDocumentWorkItemSourceKey,
@@ -192,6 +197,10 @@ export type DocumentScreenData = {
    * Whether a page is being created from a bundled template.
    */
   isCreatingFromBuiltInTemplate?: boolean
+  /**
+   * Whether a page is being created from Markdown.
+   */
+  isImportingMarkdown?: boolean
   /**
    * Sidebar と Project scope に表示する directory です。
    */
@@ -281,6 +290,13 @@ export type DocumentScreenActions = {
     key: BuiltInDocumentTemplateKey,
     options: BuiltInTemplateCreateOptions,
   ) => Promise<void>
+  /**
+   * Creates a page from pasted or uploaded Markdown and resolves with why the
+   * Markdown cannot become a page, if it cannot.
+   */
+  importMarkdown?: (
+    request: MarkdownDocumentImportRequest,
+  ) => Promise<MarkdownImportErrorCode | undefined>
   /**
    * Creates a Work Item and returns its canonical ID.
    */
@@ -579,6 +595,13 @@ export function DocumentPage() {
   const builtInTemplateCreation = useBuiltInTemplateDocumentCreation({
     accessToken,
     locale,
+    onCreated: async (documentId) => {
+      await mutateDocuments()
+      navigate(createDocumentPath(documentId))
+    },
+  })
+  const markdownImport = useMarkdownDocumentImport({
+    accessToken,
     onCreated: async (documentId) => {
       await mutateDocuments()
       navigate(createDocumentPath(documentId))
@@ -1440,6 +1463,7 @@ export function DocumentPage() {
         createWorkItem: canCreateDocuments
           ? checklistWorkItemCreation.createWorkItem
           : undefined,
+        importMarkdown: markdownImport.importMarkdown,
         createShare: handleCreateShare,
         deleteShare: handleDeleteShare,
         exportDocument: handleExport,
@@ -1471,6 +1495,7 @@ export function DocumentPage() {
         comments,
         currentUserKey: workspace.userKey,
         isCreatingFromBuiltInTemplate: builtInTemplateCreation.isCreating,
+        isImportingMarkdown: markdownImport.isImporting,
         documents,
         focusedCommentId,
         hasMoreActiveDocuments:
@@ -2139,6 +2164,18 @@ export function DocumentScreen({
                   teams={data.teams}
                   isCreatingFromBuiltInTemplate={
                     data.isCreatingFromBuiltInTemplate
+                  }
+                  isImportingMarkdown={data.isImportingMarkdown}
+                  onImportMarkdown={
+                    data.canCreateDocuments && actions.importMarkdown
+                      ? async (request) => {
+                          let code: MarkdownImportErrorCode | undefined
+                          await runGuardedAction(async () => {
+                            code = await actions.importMarkdown?.(request)
+                          })
+                          return code
+                        }
+                      : undefined
                   }
                   onCreateDocument={createDocumentAction}
                   onCreateFromBuiltInTemplate={
