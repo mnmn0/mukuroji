@@ -111,8 +111,9 @@ test('lists Cognito users for project member assignment when the current user is
     ],
     nextToken: 'following-page-token',
   })
+  // The legacy ACL is read as a list so a Project ID that several Teams share fails closed.
   expect(calls.accessChecks).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+    { directoryId: 'user#demo@example.com', projectId: '*' },
   ])
   expect(calls.userLists).toEqual([{
     directoryId: 'user#demo@example.com',
@@ -716,8 +717,9 @@ test('denies project member reads when the project role is viewer', async () => 
 
   expect(response.status).toBe(403)
   expect(await response.json()).toEqual({ message: 'Project access is denied.' })
+  // The legacy ACL is read as a list so a Project ID that several Teams share fails closed.
   expect(calls.accessChecks).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
+    { directoryId: 'user#demo@example.com', projectId: '*' },
   ])
   expect(calls.memberReads).toEqual([])
 })

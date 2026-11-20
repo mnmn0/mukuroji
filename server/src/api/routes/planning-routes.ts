@@ -759,7 +759,7 @@ async function requirePlanningScopePermission(
     ? await requireTeamPermission(principal, teamId, minimumRole)
     : undefined
   if (projectId) {
-    await requireProjectPermission(principal, projectId, minimumRole)
+    await requireProjectPermission(principal, projectId, minimumRole, teamId)
   }
   if (
     teamContext &&
