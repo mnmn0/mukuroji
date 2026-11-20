@@ -33,7 +33,7 @@ Scope は用途ごとに read/write を分離し、Work Item の削除だけは 
 
 | Scope | 許可する操作 |
 | --- | --- |
-| `work-items:read` | Work Item の取得と一覧 |
+| `work-items:read` | Work Item の取得と一覧、Work Item に link された Document の一覧と本文 |
 | `work-items:write` | Work Item の作成と更新 |
 | `work-items:delete` | Work Item の削除 |
 | `webhooks:read` / `webhooks:write` | Subscription と delivery log の参照 / 管理・replay |
