@@ -205,12 +205,14 @@ export function TimeEntryList({
                     {entry.status === 'rejected' ? t('timeTracking.entry.resubmit') : t('timeTracking.entry.submit')}
                   </button>
                 ) : null}
-                {onDelete && confirmingDeleteId !== entry.id ? (
+                {onDelete ? (
+                  // Stays in place while the confirmation is open, so keyboard focus is not lost.
                   <button
+                    aria-expanded={confirmingDeleteId === entry.id}
                     aria-label={`${t('timeTracking.entry.delete')} ${label}`}
                     className="workbench-button-secondary min-h-8 px-3"
                     disabled={pendingEntryId !== undefined}
-                    onClick={() => setConfirmingDeleteId(entry.id)}
+                    onClick={() => setConfirmingDeleteId(confirmingDeleteId === entry.id ? undefined : entry.id)}
                     type="button"
                   >
                     {t('timeTracking.entry.delete')}

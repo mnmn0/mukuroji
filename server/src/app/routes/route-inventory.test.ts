@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(506)
-  expect(new Set(inventory).size).toBe(502)
+  expect(inventory).toHaveLength(507)
+  expect(new Set(inventory).size).toBe(503)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
@@ -110,10 +110,11 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId/restore')
   expect(inventory).toContain('POST /api/enterprise/security/role-assignments')
   expect(inventory).toContain('DELETE /api/enterprise/security/role-assignments/:assignmentId')
+  expect(inventory).toContain('DELETE /api/teams/:teamId/time-entries/:entryId')
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '81fb7995fc8d048b6db6ebe7ba333818f750b98119e2f524b87a16a8db601932',
+    '155786ac01baa1a827906d7546cec31cd22a25dcae8167ea7a80d546e987c089',
   )
 })

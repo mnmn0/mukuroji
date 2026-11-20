@@ -190,21 +190,25 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
   router.delete('/api/teams/:teamId/time-entries/:entryId', async (context) => {
     return await withTeam(context, dependencies, 'member', async (principal, teamId) => {
       const entryId = readRequiredString(context.req.param('entryId'), 'Time entry ID')
-      const current = await dependencies.getTimeTracking().getEntry(principal.directoryId, teamId, entryId)
-      // Only the owner may delete, and still needs write access to where the time was recorded.
-      if (current.userId !== principal.userKey) {
-        throw new TimeTrackingError(403, 'TimeEntryAccessDenied', 'Only the entry owner may delete this entry.')
+      const expectedRevision = readExpectedRevisionQuery(context.req.query('expectedRevision'))
+      const idempotencyKey = readOptionalIdempotencyKey(context)
+      const current = await readEntryUnlessReplayable(dependencies.getTimeTracking(), principal.directoryId, teamId, entryId, idempotencyKey)
+      if (current) {
+        // Only the owner may delete, and still needs write access to the Project the time is stored on.
+        // The Work Item is not checked, so a draft on a Work Item that was removed can still be deleted.
+        if (current.userId !== principal.userKey) {
+          throw new TimeTrackingError(403, 'TimeEntryAccessDenied', 'Only the entry owner may delete this entry.')
+        }
+        if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, 'member')
       }
-      if (current.workItemId) await dependencies.verifyWorkItem(principal, teamId, current.workItemId, 'member')
-      if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, 'member')
       await dependencies.getTimeTracking().deleteEntry({
         workspaceId: principal.directoryId,
         teamId,
         entryId,
         actorUserId: principal.userKey,
-        expectedRevision: readExpectedRevisionQuery(context.req.query('expectedRevision')),
-        authorizedRevision: current.revision,
-        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+        expectedRevision,
+        ...(current ? { authorizedRevision: current.revision } : {}),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
       })
       return context.body(null, 204)
     })
@@ -721,6 +725,35 @@ function readUpdateInterval(body: Record<string, unknown>): Pick<CreateTimeEntry
     }
   }
   return readCreateInterval(body)
+}
+
+/**
+ * Reads the entry a delete request targets.
+ *
+ * A retried delete whose first attempt committed finds the entry gone. With an idempotency key
+ * the service then replays the stored result for the same actor and request, or reports the entry
+ * missing when no such result exists, so the missing entry is not an error here.
+ *
+ * @param service - Time tracking service.
+ * @param workspaceId - Workspace of the caller.
+ * @param teamId - Team in the route.
+ * @param entryId - Entry in the route.
+ * @param idempotencyKey - Key of the request, if any.
+ * @returns The entry, or `undefined` when it is missing and the request can be replayed.
+ */
+async function readEntryUnlessReplayable(
+  service: TimeTrackingService,
+  workspaceId: string,
+  teamId: string,
+  entryId: string,
+  idempotencyKey: string | undefined,
+): Promise<TimeEntry | undefined> {
+  try {
+    return await service.getEntry(workspaceId, teamId, entryId)
+  } catch (error) {
+    if (idempotencyKey !== undefined && error instanceof TimeTrackingError && error.code === 'TimeEntryNotFound') return undefined
+    throw error
+  }
 }
 
 /**

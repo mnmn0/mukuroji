@@ -4,6 +4,7 @@ import {
   InMemoryTimeTrackingRepository,
   TimeTrackingError,
   TimeTrackingService,
+  type TimeTrackingIdempotencyPort,
 } from '../../time-tracking'
 
 /** Converts a domain status to the HTTP status values accepted by Hono. */
@@ -20,14 +21,45 @@ function toTimeTrackingHttpStatus(status: number): 400 | 403 | 404 | 409 | 500 {
   }
 }
 
+/**
+ * Creates an in-memory idempotency receipt store that replays a completed key with the same
+ * fingerprint.
+ *
+ * @returns Receipt store.
+ */
+function createIdempotencyStore(): TimeTrackingIdempotencyPort {
+  const receipts = new Map<string, { fingerprint: string; response?: unknown }>()
+  return {
+    async reserveIdempotency(request) {
+      const key = `${request.credentialId}\0${request.idempotencyKey}`
+      const receipt = receipts.get(key)
+      if (!receipt) {
+        receipts.set(key, { fingerprint: request.requestFingerprint })
+        return { status: 'reserved', reservationId: key }
+      }
+      if (receipt.fingerprint !== request.requestFingerprint) {
+        throw new TimeTrackingError(409, 'IdempotencyKeyConflict', 'The key was used with another request.')
+      }
+      return receipt.response === undefined ? { status: 'in-progress' } : { status: 'replay', response: receipt.response }
+    },
+    async completeIdempotency(request) {
+      receipts.set(request.reservationId, { fingerprint: request.requestFingerprint, response: request.response })
+    },
+    async releaseIdempotency(request) {
+      receipts.delete(request.reservationId)
+    },
+  }
+}
+
 /** Creates an isolated HTTP router fixture with deterministic authentication and storage. */
-function createFixture(canManageRates = false) {
+function createFixture(canManageRates = false, idempotency?: TimeTrackingIdempotencyPort) {
   const service = new TimeTrackingService(new InMemoryTimeTrackingRepository(), {
     now: () => new Date('2026-08-02T12:00:00.000Z'),
     createId: (() => {
       let id = 0
       return () => `id-${++id}`
     })(),
+    ...(idempotency ? { idempotency } : {}),
   })
   const router = createTimeTrackingRouter({
     readBearerAccessToken: (context) => context.req.header('Authorization')?.replace(/^Bearer\s+/u, ''),
@@ -371,6 +403,26 @@ describe('createTimeTrackingRouter', () => {
       .toMatchObject({ durationOnly: true, durationMinutes: 90, startAt: '2026-08-03T15:00:00.000Z' })
     const timed = await patch({ expectedRevision: 3, startAt: '2026-08-04T01:00:00.000Z', endAt: '2026-08-04T02:00:00.000Z' })
     expect(timed.durationOnly).toBeUndefined()
+  })
+
+  test('replays a retried delete with the same key instead of reporting the entry missing', async () => {
+    const { router } = createFixture(false, createIdempotencyStore())
+    const headers = { Authorization: 'Bearer token', 'Content-Type': 'application/json' }
+    const created = await router.request('/api/teams/team-1/time-entries', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ category: 'meeting', date: '2026-08-03', minutes: 60, billable: false }),
+    })
+    const { entry } = await created.json() as { entry: { id: string } }
+    /** Deletes the entry with an idempotency key. */
+    const remove = (key: string, entryId = entry.id) => router.request(`/api/teams/team-1/time-entries/${entryId}?expectedRevision=1`, {
+      method: 'DELETE',
+      headers: { ...headers, 'Idempotency-Key': key },
+    })
+    expect((await remove('delete-1')).status).toBe(204)
+    expect((await remove('delete-1')).status).toBe(204)
+    expect((await remove('delete-2')).status).toBe(404)
+    expect((await remove('delete-3', 'missing-entry')).status).toBe(404)
   })
 
   test('lets only the owner delete a draft or rejected entry', async () => {
