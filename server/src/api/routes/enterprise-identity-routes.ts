@@ -1027,17 +1027,6 @@ async function requireEnterpriseResourceScope(
 }
 
 /**
- * Validates the Workspace member that a direct role assignment targets.
- *
- * @remarks
- * A member who holds a direct assignment is evaluated by its assignments instead of the
- * Workspace role. Callers therefore cannot target themselves, an owner, or (unless they are an
- * owner or system administrator) an admin, which would demote or restore that administrator.
- * @param principal - Caller of the assignment route.
- * @param memberKey - Member key from the request.
- * @returns The active target member.
- */
-/**
  * Reads the scope type of a member role assignment request.
  *
  * @param value - Untrusted `scopeType` from the request body.
@@ -1054,6 +1043,17 @@ function readEnterpriseRoleAssignmentScopeType(value: unknown): 'workspace' | 't
   )
 }
 
+/**
+ * Validates the Workspace member that a direct role assignment targets.
+ *
+ * @remarks
+ * A member who holds a direct assignment is evaluated by its assignments instead of the
+ * Workspace role. Callers therefore cannot target themselves, an owner, or (unless they are an
+ * owner or system administrator) an admin, which would demote or restore that administrator.
+ * @param principal - Caller of the assignment route.
+ * @param memberKey - Member key from the request.
+ * @returns The active target member.
+ */
 async function requireEnterpriseRoleAssignmentTarget(
   principal: EnterpriseSecurityPrincipal,
   memberKey: string,
