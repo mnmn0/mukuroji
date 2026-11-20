@@ -818,6 +818,7 @@ describe('API runtime configuration externalization', () => {
         ref('ApiRuntimeConfigurationRevision'),
       MUKUROJI_API_RUNTIME_CONFIG_SECRET_ARN:
         ref(API_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
+      SOFTWARE_FACTORY: 'enabled',
       TENANT_EXPORT_BUCKET_NAME: ref(TENANT_EXPORT_BUCKET_LOGICAL_ID),
       TENANT_LIFECYCLE_OPERATIONS: 'enabled',
     });

@@ -27,6 +27,8 @@ export type HomeWorkspaceViewProps = {
   teams: readonly ProjectDirectoryTeam[]
   /** Resolved configuration indexed by Team ID. */
   workItemConfigurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>
+  /** Whether to show the coding-agent handoff banner; hidden when the deployment has no Software factory. */
+  showCodingAgentHandoff?: boolean
 }
 
 /**
@@ -34,10 +36,10 @@ export type HomeWorkspaceViewProps = {
  * @param props - Authorized workspace data and navigation callbacks.
  * @returns The responsive collaboration home.
  */
-export function HomeWorkspaceView({ focusQueue, isFocusUnavailable = false, onOpenTask, summary, t, teams, workItemConfigurationsByTeam }: HomeWorkspaceViewProps) {
+export function HomeWorkspaceView({ focusQueue, isFocusUnavailable = false, onOpenTask, showCodingAgentHandoff = true, summary, t, teams, workItemConfigurationsByTeam }: HomeWorkspaceViewProps) {
   return (
     <div className="mx-auto grid w-full max-w-[1440px] gap-6">
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-4 border-l-2 border-teal-600 py-1 pl-4">
+      {showCodingAgentHandoff ? <div className="flex min-w-0 flex-wrap items-center justify-between gap-4 border-l-2 border-teal-600 py-1 pl-4">
         <div className="min-w-0">
           <p className="text-sm font-semibold text-[var(--workbench-text)]">{t('workspace.collaboration.handoffTitle')}</p>
           <p className="mt-1 text-xs leading-5 text-[var(--workbench-muted)]">{t('workspace.collaboration.handoffDescription')}</p>
@@ -45,7 +47,7 @@ export function HomeWorkspaceView({ focusQueue, isFocusUnavailable = false, onOp
         <Link className="inline-flex min-h-[44px] shrink-0 items-center gap-2 rounded-md border border-[var(--workbench-border)] bg-surface px-3 text-xs font-semibold text-[var(--workbench-primary-text)] no-underline hover:bg-teal-50" to={`${workspaceNavPaths.help}#coding-agent`}>
           {t('workspace.collaboration.connect')}<ChevronIcon className="size-4 -rotate-90 fill-none stroke-current stroke-2" />
         </Link>
-      </div>
+      </div> : null}
       <CollaborationQueue configurations={workItemConfigurationsByTeam} onOpenTask={onOpenTask} response={focusQueue} t={t} teams={teams} unavailable={isFocusUnavailable} />
       <dl className="grid grid-cols-2 border-t border-[var(--workbench-border)] min-[760px]:grid-cols-4">
         {[

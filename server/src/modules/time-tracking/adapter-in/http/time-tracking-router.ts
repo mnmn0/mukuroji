@@ -35,6 +35,11 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
   canManageRates(principal: Principal, teamId: string): Promise<boolean>
   /** Returns the Project allowlist visible inside the selected Team. */
   getAccessibleProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
+  /**
+   * Returns whether the principal manages every Project of a Team: a system administrator or a
+   * direct Team grant with manage permission, not a manager of only some Projects.
+   */
+  canManageWholeTeam(principal: Principal, teamId: string): Promise<boolean>
   /** Returns the Project IDs for which the principal may view confidential costs. */
   getManagedProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
   /** Verifies Project-level access for a Team operation. */
@@ -172,7 +177,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     })
   })
 
-  for (const action of ['submit', 'approve', 'reject', 'lock'] as const) {
+  for (const action of ['submit', 'approve', 'reject', 'lock', 'return'] as const) {
     router.post(`/api/teams/:teamId/time-entries/:entryId/${action}`, async (context) => {
       const minimum = action === 'submit' ? 'member' : 'manager'
       return await withTeam(context, dependencies, minimum, async (principal, teamId, canManage) => {
@@ -256,6 +261,45 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       })
     })
   }
+
+  router.get('/api/teams/:teamId/time-periods', async (context) => {
+    return await withTeam(context, dependencies, 'viewer', async (principal, teamId) => {
+      const closedPeriods = await dependencies.getTimeTracking().listClosedPeriods(principal.directoryId, teamId)
+      return context.json({ closedPeriods })
+    })
+  })
+
+  router.post('/api/teams/:teamId/time-periods/:month/close', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, canManage) => {
+      await requireWholeTeamManager(dependencies, principal, teamId, canManage)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const period = await dependencies.getTimeTracking().closePeriod({
+        workspaceId: principal.directoryId,
+        teamId,
+        month: readRequiredString(context.req.param('month'), 'Month'),
+        timeZone: body.timeZone === undefined ? 'UTC' : readRequiredString(body.timeZone, 'Time zone'),
+        actorUserId: principal.userKey,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+      })
+      return context.json({ period }, 201)
+    })
+  })
+
+  router.post('/api/teams/:teamId/time-periods/:month/reopen', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, canManage) => {
+      await requireWholeTeamManager(dependencies, principal, teamId, canManage)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const period = await dependencies.getTimeTracking().reopenPeriod({
+        workspaceId: principal.directoryId,
+        teamId,
+        month: readRequiredString(context.req.param('month'), 'Month'),
+        actorUserId: principal.userKey,
+        reason: typeof body.reason === 'string' ? body.reason : '',
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+      })
+      return context.json({ period })
+    })
+  })
 
   router.get('/api/teams/:teamId/time-entries/:entryId/history', async (context) => {
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
@@ -467,6 +511,26 @@ async function withTeam<Principal extends TimeTrackingPrincipal>(
     const canManage = await dependencies.canManageRates(principal, teamId)
     return await operation(principal, teamId, canManage)
   })
+}
+
+/**
+ * Requires a manager of every Project in the Team, because a month close applies to all of its time.
+ *
+ * @param dependencies - Router dependencies used to read the Team management scope.
+ * @param principal - Authenticated caller.
+ * @param teamId - Team whose month is closed or reopened.
+ * @param canManage - Whether the caller manages time in the Team at all.
+ * @throws TimeTrackingError when the caller manages only some Projects of the Team.
+ */
+async function requireWholeTeamManager<Principal extends TimeTrackingPrincipal>(
+  dependencies: TimeTrackingRouterDependencies<Principal>,
+  principal: Principal,
+  teamId: string,
+  canManage: boolean,
+): Promise<void> {
+  if (!canManage || !await dependencies.canManageWholeTeam(principal, teamId)) {
+    throw new TimeTrackingError(403, 'TimePeriodCloseDenied', 'Only a manager of the whole Team may close or reopen a month.')
+  }
 }
 
 /** Reads a report query into an application input. */

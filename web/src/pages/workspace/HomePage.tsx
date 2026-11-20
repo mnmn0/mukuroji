@@ -56,6 +56,7 @@ export function HomePage() {
           focusQueue={focus.response}
           isFocusUnavailable={focus.isUnavailable}
           onOpenTask={workspace.onOpenTask}
+          showCodingAgentHandoff={workspace.softwareFactoryEnabled}
           summary={summary}
           t={t}
           teams={workspace.teams}

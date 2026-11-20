@@ -206,6 +206,35 @@ export function resolveTaskGanttProgressPointX(input: TaskGanttProgressPointInpu
 }
 
 /**
+ * Measures how far one row's progress point is from today, in calendar days, so the progress
+ * line can be told in words to people who cannot see it.
+ *
+ * It follows the same rules as {@link resolveTaskGanttProgressPointX}: a finished row and a row
+ * not due to start yet are on schedule. The days of planned work done are compared with the days
+ * of the plan that passed before today, and the difference is rounded to whole days, so a row
+ * that starts today with no progress yet is on schedule.
+ *
+ * @param input - Planned dates, progress rate, and today.
+ * @returns Days ahead (positive) or behind (negative), 0 on schedule, or `undefined` when the
+ * row has no planned dates or no progress rate.
+ */
+export function resolveTaskGanttProgressVarianceDays(
+  input: Omit<TaskGanttProgressPointInput, 'axis' | 'todayX'>,
+): number | undefined {
+  const { endDate, progressPercent, startDate, today } = input
+  if (startDate === undefined || endDate === undefined || progressPercent === undefined || endDate < startDate) {
+    return undefined
+  }
+  const progress = Math.min(Math.max(progressPercent, 0), 100)
+  if (progress >= 100 && endDate < today) return 0
+  if (progress <= 0 && today < startDate) return 0
+  const progressDays = ((differenceTaskGanttDays(startDate, endDate) + 1) * progress) / 100
+  const elapsedDays = differenceTaskGanttDays(startDate, today)
+  // `|| 0` turns a rounded -0 into 0.
+  return Math.round(progressDays - elapsedDays) || 0
+}
+
+/**
  * Builds the columns of one calendar scale without a column limit.
  *
  * @param range - Inclusive range the columns must cover.

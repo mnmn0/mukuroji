@@ -192,8 +192,6 @@ export type PlanningLabels = PlanningUpdateLabels & {
   entityActions: string
   /** Archive ボタンの文言です。 */
   archive: string
-  /** Duplicate target ID field の文言です。 */
-  duplicateId: string
   /** Duplicate ボタンの文言です。 */
   duplicate: string
   /** Move target field の文言です。 */
@@ -220,8 +218,6 @@ export type PlanningLabels = PlanningUpdateLabels & {
   portfolioDescription: string
   /** Entity name の列見出しです。 */
   entity: string
-  /** Entity ID field の文言です。 */
-  entityId: string
   /** Entity type field の文言です。 */
   entityType: string
   /** Team scope field の文言です。 */
@@ -406,7 +402,7 @@ export type PlanningScreenProps = {
   /** Archive 済みの計画の一覧と復元です。省略すると一覧を表示しません。 */
   archive?: PlanningArchiveController
   /** Entity duplicate callback です。 */
-  onDuplicateEntity?: (entity: PlanningEntity, targetId: string) => void | Promise<void>
+  onDuplicateEntity?: (entity: PlanningEntity) => void | Promise<void>
   /** Entity move callback です。 */
   onMoveEntity?: (
     entity: PlanningEntity,
@@ -1548,14 +1544,7 @@ function EntityActions({
       <p className="text-sm font-semibold text-[var(--workbench-muted)]">{entity.title}</p>
       {onArchive ? <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={() => void onArchive(entity)}>{labels.archive}</button> : null}
       {canDuplicate && onDuplicate ? (
-        <form className="grid gap-2" onSubmit={(event) => {
-          event.preventDefault()
-          const targetId = String(new FormData(event.currentTarget).get('targetId') ?? '').trim()
-          if (targetId) void onDuplicate(entity, targetId)
-        }}>
-          <label className="grid gap-2 text-sm font-semibold">{labels.duplicateId}<input className="workbench-input h-10 px-3" name="targetId" required /></label>
-          <button className="workbench-button-secondary min-h-10 px-4" type="submit">{labels.duplicate}</button>
-        </form>
+        <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={() => void onDuplicate(entity)}>{labels.duplicate}</button>
       ) : null}
       {canMove && onMove ? (
         <form className="grid gap-2" onSubmit={(event) => {
@@ -1656,7 +1645,6 @@ function CreateEntityPanel({
         const projectId = parent?.projectId ?? (requestedProjectId || undefined)
         if (canCreateInScope && !canCreateInScope({ teamId, projectId })) return
         const input: Omit<CreatePlanningEntityInput, 'expectedRevision'> = {
-          id: String(data.get('entityId') ?? '').trim(),
           type: entityType,
           title: String(data.get('title') ?? '').trim(),
           ownerMemberKey: String(data.get('ownerMemberKey') ?? '').trim(),
@@ -1681,14 +1669,13 @@ function CreateEntityPanel({
               : 'move-incomplete',
           } : {}),
         }
-        if (input.id && input.title && input.ownerMemberKey && baseline.startDate && baseline.endDate) {
+        if (input.title && input.ownerMemberKey && baseline.startDate && baseline.endDate) {
           void onCreate?.(input)
         }
       }}
     >
       <h2 className="text-base font-semibold text-[var(--workbench-text)]">{labels.createEntity}</h2>
       <div className="grid grid-cols-4 gap-3 max-[1000px]:grid-cols-2 max-[640px]:grid-cols-1">
-        <PlanningInput label={labels.entityId} name="entityId" required />
         <PlanningInput label={labels.entity} name="title" required />
         <label className="grid gap-2 text-sm font-semibold">{labels.entityType}<select className="workbench-input h-10 px-3" name="entityType" value={entityType} onChange={(event) => setEntityType(event.target.value as PlanningEntityType)}>{(Object.keys(labels.entityTypes) as PlanningEntityType[]).map((type) => <option key={type} value={type}>{labels.entityTypes[type]}</option>)}</select></label>
         <div className="grid content-start gap-2">
