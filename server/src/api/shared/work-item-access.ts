@@ -29,7 +29,12 @@ import {
 import { projectLifecycleAcceptsNewWorkItems } from '@mukuroji/contracts'
 import { getEnv } from './runtime-config'
 import { isRecord } from './value-guards'
-import { projectAccessAllows, type TeamPermissionContext } from './workspace-access'
+import {
+  findTeamProjectAccess,
+  projectAccessAllows,
+  projectAccessAppliesToTeam,
+  type TeamPermissionContext,
+} from './workspace-access'
 
 /**
  * Workspace 横断 Work Item API が返す response body です。
@@ -100,11 +105,13 @@ export function canWriteTeamIssue(
   }
 
   if (assignedProjectId) {
-    const access = context.projectAccesses?.find((entry) => entry.projectId === assignedProjectId)
+    const access = findTeamProjectAccess(context, assignedProjectId)
     return access !== undefined && projectAccessAllows(access, 'member')
   }
 
-  return context.projectAccesses?.some((access) => projectAccessAllows(access, 'member')) ?? false
+  return context.projectAccesses?.some((access) =>
+    projectAccessAppliesToTeam(access, context.team.id) && projectAccessAllows(access, 'member')
+  ) ?? false
 }
 
 /**
