@@ -194,6 +194,21 @@ test('never keeps input discarded by a sign-out again when its page unmounts rig
   expect(takeSessionDraft(commentKey, 'member-a')).toBeUndefined()
 })
 
+test('restoring the last draft still keeps another input that unmounts just before the next session end', () => {
+  signIn(token('member-a', 'access-1'))
+  register(commentKey, () => ({ bodyMarkdown: 'Restored', mentionMemberKeys: [] }))
+  clearAuthSession()
+
+  signIn(token('member-a', 'access-2'))
+  const unmountOther = register('other-input', () => 'Typed after restore')
+  expect(takeSessionDraft(commentKey, 'member-a')).toEqual({ bodyMarkdown: 'Restored', mentionMemberKeys: [] })
+  // The other page swaps to a loading state in the same commit that clears the session.
+  unmountOther()
+  clearAuthSession()
+
+  expect(takeSessionDraft('other-input', 'member-a')).toBe('Typed after restore')
+})
+
 test('an input that is empty now wins over its value from moments ago', () => {
   signIn(token('member-a', 'access-1'))
   register(commentKey, () => ({ bodyMarkdown: 'Old text', mentionMemberKeys: [] }))()

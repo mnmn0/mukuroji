@@ -154,7 +154,7 @@ export function takeSessionDraft(key: string, owner: string | undefined): unknow
   if (!stored) return undefined
   if (!owner) return undefined
   if (stored.owner !== owner) {
-    discardSessionDrafts()
+    discardStoredDrafts()
     return undefined
   }
   const draft = stored.drafts[key]
@@ -164,19 +164,24 @@ export function takeSessionDraft(key: string, owner: string | undefined): unknow
   if (Object.keys(remaining).length > 0) {
     writeStoredDrafts({ owner, drafts: remaining })
   } else {
-    discardSessionDrafts()
+    // Only the stored drafts go: other inputs of this account stay ready to be kept.
+    discardStoredDrafts()
   }
   return Date.now() - draft.savedAt <= maxDraftAgeMilliseconds ? draft.value : undefined
 }
 
 /**
- * Removes this tab's preserved drafts unless they belong to the account that just signed in.
+ * Removes this tab's preserved drafts, and the values of inputs that unmounted moments ago,
+ * unless they belong to the account that just signed in.
  *
  * @param owner - Account now signed in to this tab, or `undefined` when it cannot be told apart.
  */
 export function keepSessionDraftsOnlyFor(owner: string | undefined) {
+  for (const registration of retainedRegistrations) {
+    if (registration.owner !== owner) retainedRegistrations.delete(registration)
+  }
   const stored = readStoredDrafts()
-  if (stored && stored.owner !== owner) discardSessionDrafts()
+  if (stored && stored.owner !== owner) discardStoredDrafts()
 }
 
 /**
