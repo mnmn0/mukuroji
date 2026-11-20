@@ -999,6 +999,8 @@ describe('agent task lifecycle', () => {
         return content
       },
     }, { ...baseScope, assignedProjectId: 'project-a' })
+    await expect(movingService.get('one')).rejects.toMatchObject({ code: 'out_of_scope' })
+    moving.records.set('one', task('one', { assignedProjectId: 'project-a' }))
     await expect(movingService.documents('one')).rejects.toMatchObject({ code: 'out_of_scope' })
     moving.records.set('one', task('one', { assignedProjectId: 'project-a' }))
     await expect(movingService.document('one', 'spec')).rejects.toMatchObject({ code: 'out_of_scope' })

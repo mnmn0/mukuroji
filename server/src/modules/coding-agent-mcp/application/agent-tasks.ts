@@ -479,6 +479,10 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         api.hierarchy(id),
         readRelatedDocumentsForTask(id),
       ])
+      // The task may have moved to another Project while its linked Documents were read.
+      if (scope.assignedProjectId !== undefined && relatedDocuments !== null && relatedDocuments.items.length > 0) {
+        inScope(await api.get(id))
+      }
       return {
         task,
         acceptanceCriteria,
