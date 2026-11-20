@@ -12,7 +12,7 @@ import {
 import {
   completeDeveloperConnectorCatalog,
   filterDeveloperConnectorCatalog,
-  type DeveloperConnectorCatalogItem,
+  type DeveloperConnectorCatalogEntry,
 } from '../model/connectors'
 import { formatDeveloperTimestamp } from '../model/displayFormatting'
 import {
@@ -24,15 +24,19 @@ import {
  * Builds a complete connector catalog for a story's installation set.
  *
  * @param connectors - Connector installations rendered by the story.
+ * @param availableProviders - Providers configured in the story environment; defaults to every localized entry.
  * @returns Localized catalog entries including installed-only providers.
  */
 function createConnectorCatalog(
   connectors: ConnectorsSectionProps['connectors'],
-): DeveloperConnectorCatalogItem[] {
+  availableProviders: readonly string[] = developerPlatformLabelsFixture
+    .connectorCatalog.map((item) => item.provider),
+): DeveloperConnectorCatalogEntry[] {
   return completeDeveloperConnectorCatalog(
     developerPlatformLabelsFixture.connectorCatalog,
     connectors,
     developerPlatformLabelsFixture.helpText.installedConnector,
+    availableProviders,
   )
 }
 
@@ -319,5 +323,46 @@ export const InitialError: Story = {
         name: developerPlatformLabelsFixture.retry,
       }),
     ).toBeEnabled()
+  },
+}
+
+/**
+ * Lists only the providers configured in the environment, so unconfigured ones are not offered.
+ */
+export const OnlyConfiguredProviders: Story = {
+  args: {
+    catalog: createConnectorCatalog([], ['github']),
+    connectors: [],
+    syncConflicts: [],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(
+      canvas.getByRole('heading', { name: 'GitHub' }),
+    ).toBeVisible()
+    await expect(
+      canvas.queryByRole('heading', { name: 'Slack' }),
+    ).toBeNull()
+  },
+}
+
+/**
+ * Explains the empty catalog when the environment has no configured provider.
+ */
+export const NoConfiguredProviders: Story = {
+  args: {
+    catalog: createConnectorCatalog([], []),
+    connectors: [],
+    syncConflicts: [],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(
+      canvas.getByText(
+        developerPlatformLabelsFixture.headings.connectorCatalogEmpty,
+      ),
+    ).toBeVisible()
   },
 }

@@ -25,7 +25,11 @@ import {
   WORK_ITEMS_PAGE_SCAN_BUDGET,
   WORK_ITEMS_SUMMARY_SCAN_LIMIT,
 } from './constants'
-import { getEffectiveProjectAccessList, type ProjectPrincipal } from './project-access'
+import {
+  getEffectiveProjectScopeAccessList,
+  selectTeamProjectScopeAccesses,
+  type ProjectPrincipal,
+} from './project-access'
 import {
   createWorkItemListLimitExceededError,
   filterAccessibleTeamIssues,
@@ -73,6 +77,9 @@ type WorkItemPageCursor = {
 /**
  * Resolves the Team partitions the principal may read, in stable Team ID order.
  *
+ * Project grants are matched by Team and Project, so a grant on one Team's Project never opens
+ * another Team that reuses the same Project ID.
+ *
  * @param principal - Authenticated Workspace principal.
  * @param scope - Optional Team/Project envelope.
  * @returns Team permission contexts limited to readable Teams.
@@ -84,7 +91,7 @@ export async function resolveAccessibleWorkItemTeamContexts(
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
     ? undefined
-    : await getEffectiveProjectAccessList(principal)
+    : await getEffectiveProjectScopeAccessList(principal)
   const authorizedTeamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
   const selectedTeams = scope?.teamId === undefined
     ? directory.teams
@@ -94,11 +101,8 @@ export async function resolveAccessibleWorkItemTeamContexts(
       return [{ team, directory } satisfies TeamPermissionContext]
     }
 
-    const teamProjectIds = new Set(team.projects.map((project) => project.id))
-    const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
-      teamProjectIds.has(access.projectId) &&
-      (scope?.projectId === undefined || access.projectId === scope.projectId)
-    )
+    const teamProjectAccesses = selectTeamProjectScopeAccesses(projectAccesses ?? [], team)
+      .filter((access) => scope?.projectId === undefined || access.projectId === scope.projectId)
     if (
       !authorizedTeamIds.has(team.id) &&
       !teamProjectAccesses.some((access) => projectAccessAllows(access, 'viewer'))
