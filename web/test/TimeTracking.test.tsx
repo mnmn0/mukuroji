@@ -332,6 +332,15 @@ describe('time tracking API', () => {
     }, { preconnect: originalFetch.preconnect })
     await expect(getActiveTimer('token')).rejects.toMatchObject({ status: 0, code: 'NetworkUnavailable' })
   })
+
+  test('reports a response cut off while its body is read as offline, since the request may have taken effect', async () => {
+    globalThis.fetch = Object.assign(async () => new Response(new ReadableStream({
+      start(controller) {
+        controller.error(new TypeError('network error'))
+      },
+    }), { status: 201 }), { preconnect: originalFetch.preconnect })
+    await expect(getActiveTimer('token')).rejects.toMatchObject({ status: 0, code: 'NetworkUnavailable' })
+  })
 })
 
 describe('time tracking views', () => {
