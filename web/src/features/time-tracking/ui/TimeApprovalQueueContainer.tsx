@@ -32,8 +32,8 @@ export type TimeApprovalQueueContainerProps = {
 /**
  * Connects the approval queue to the entry and timesheet APIs.
  *
- * The Team timesheet withholds confidential costs from everyone but Team managers, so its
- * `costsRedacted` flag decides whether the queue is shown before any entry list is read.
+ * The Team timesheet's `canManageTeam` flag decides whether the queue is shown before any entry
+ * list is read.
  *
  * @param props - Team, week, and session.
  * @returns Connected queue.
@@ -53,7 +53,7 @@ export function TimeApprovalQueueContainer({
   const week = useMemo(() => createWeekPeriod(weekStart, weekStartDay), [weekStart, weekStartDay])
   const timeZone = resolveBrowserTimeZone()
   const timesheet = useTeamTimesheet(accessToken, teamId, { ...week, timeZone })
-  const canManage = timesheet.data ? !timesheet.data.costsRedacted : undefined
+  const canManage = timesheet.data?.canManageTeam
   const entries = useTimeEntries(accessToken, teamId, week, {}, canManage === true)
   const mutations = useTimeEntryMutations(accessToken)
 

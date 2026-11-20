@@ -390,6 +390,8 @@ export type ListTimeEntriesInput = {
   status?: TimeEntryStatus
   /** Project allowlist applied before returning or aggregating entries. */
   projectIds?: ReadonlySet<string>
+  /** Whether entries without a Project pass the Project allowlist; they are dropped by default. */
+  includeUnassigned?: boolean
   /** Maximum number of entries to return. */
   limit?: number
 }
@@ -414,10 +416,32 @@ export type TimeTrackingReportInput = {
   projectIds?: ReadonlySet<string>
   /** Project IDs for which the caller may view confidential costs. */
   managedProjectIds?: ReadonlySet<string>
+  /** Caller whose time management rights narrow the entries a report reads; omitted for unrestricted reports. */
+  viewer?: TimeReportViewer
   /** Explicit budget scope selected by the caller. */
   budgetScope?: 'team' | 'project'
   /** Project ID used when budgetScope is project. */
   budgetScopeId?: string
+}
+
+/**
+ * Caller of a report, used to decide whose entries the report may total.
+ *
+ * Members read only their own entries. Callers who manage time in the Team also read other
+ * members' entries in the Projects they manage and entries without a Project. Work Item totals
+ * set `includeAllMembers` to read every member's entries in the caller's visible Projects.
+ */
+export type TimeReportViewer = {
+  /** Member key of the caller; their own entries are always readable. */
+  userId: string
+  /** Whether the caller manages time in the Team. */
+  canManage: boolean
+  /**
+   * Whether every member's time in the caller's visible Projects and outside Projects may be
+   * totalled, as for Work Item totals that anyone who can see the Work Item may compare with its
+   * estimate.
+   */
+  includeAllMembers?: boolean
 }
 
 /** Repository used by the time tracking application service. */
@@ -1052,13 +1076,7 @@ export class TimeTrackingService {
   /** Builds an ACL-filtered aggregate report. */
   async createSummary(input: TimeTrackingReportInput): Promise<TimeTrackingSummary> {
     const period = normalizePeriod(input.from, input.to, input.timeZone)
-    const entries = await this.listAllEntries({
-      workspaceId: input.workspaceId,
-      teamId: input.teamId,
-      from: period.from,
-      to: period.to,
-      ...(input.projectIds ? { projectIds: input.projectIds } : {}),
-    })
+    const entries = await this.listReportEntries(input, period)
     const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
     const groups = aggregateEntries(entries, input.groupBy, input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
     const includeBudget = input.includeCosts && (
@@ -1091,19 +1109,14 @@ export class TimeTrackingService {
         : {}),
       ...(budget ? { budget } : {}),
       costsRedacted: !input.includeCosts,
+      canManageTeam: input.viewer?.canManage ?? true,
     }
   }
 
   /** Builds daily and weekly timesheet rows with DST-aware local boundaries. */
   async createTimesheet(input: TimeTrackingReportInput): Promise<TimeSheet> {
     const period = normalizePeriod(input.from, input.to, input.timeZone)
-    const entries = await this.listAllEntries({
-      workspaceId: input.workspaceId,
-      teamId: input.teamId,
-      from: period.from,
-      to: period.to,
-      ...(input.projectIds ? { projectIds: input.projectIds } : {}),
-    })
+    const entries = await this.listReportEntries(input, period)
     const estimateByWorkItem = await this.listPlannedEffort(input.workspaceId, input.teamId)
     const days = aggregateCalendarEntries(entries, 'day', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
     const weeks = aggregateCalendarEntries(entries, 'week', input.timeZone, period.from, period.to, estimateByWorkItem, input.includeCosts, input.managedProjectIds)
@@ -1114,7 +1127,39 @@ export class TimeTrackingService {
       days,
       weeks,
       costsRedacted: !input.includeCosts,
+      canManageTeam: input.viewer?.canManage ?? true,
     }
+  }
+
+  /**
+   * Reads the entries a report may total.
+   *
+   * With a viewer, entries without a Project are read too, and the result keeps the viewer's
+   * own entries plus, for a Team time manager, other members' entries in managed Projects and
+   * without a Project.
+   *
+   * @param input - Report query with the caller's Project allowlist and viewer.
+   * @param period - Normalized report period.
+   * @returns Entries visible to the viewer in the period.
+   */
+  private async listReportEntries(
+    input: TimeTrackingReportInput,
+    period: { from: string; to: string },
+  ): Promise<TimeEntry[]> {
+    const entries = await this.listAllEntries({
+      workspaceId: input.workspaceId,
+      teamId: input.teamId,
+      from: period.from,
+      to: period.to,
+      ...(input.projectIds ? { projectIds: input.projectIds } : {}),
+      ...(input.viewer ? { includeUnassigned: true } : {}),
+    })
+    const viewer = input.viewer
+    if (!viewer || viewer.includeAllMembers) return entries
+    return entries.filter((entry) =>
+      entry.userId === viewer.userId ||
+      (viewer.canManage && canManageEntryProject(entry, input.managedProjectIds))
+    )
   }
 
   /**
@@ -1302,7 +1347,7 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
       .filter((entry) => entry.workspaceId === input.workspaceId && entry.teamId === input.teamId)
       .filter((entry) => input.userId === undefined || entry.userId === input.userId)
       .filter((entry) => input.status === undefined || entry.status === input.status)
-      .filter((entry) => input.projectIds === undefined || (entry.projectId !== undefined && input.projectIds.has(entry.projectId)))
+      .filter((entry) => matchesProjectAllowlist(entry, input))
       .filter((entry) => Date.parse(entry.endAt) > from && Date.parse(entry.startAt) < to)
       .sort((left, right) => left.startAt.localeCompare(right.startAt) || left.id.localeCompare(right.id))
     return (input.limit === undefined ? matching : matching.slice(0, input.limit)).map(clone)
@@ -1487,7 +1532,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
         const entry = readStoredEntry(item)
         if (input.userId !== undefined && entry.userId !== input.userId) continue
         if (input.status !== undefined && entry.status !== input.status) continue
-        if (input.projectIds !== undefined && (entry.projectId === undefined || !input.projectIds.has(entry.projectId))) continue
+        if (!matchesProjectAllowlist(entry, input)) continue
         const from = input.from ? Date.parse(input.from) : Number.NEGATIVE_INFINITY
         const to = input.to ? Date.parse(input.to) : Number.POSITIVE_INFINITY
         if (Date.parse(entry.endAt) <= from || Date.parse(entry.startAt) >= to) continue
@@ -2076,9 +2121,38 @@ function sumCostsByCurrency(
   return costFields(costs).actualCostByCurrency
 }
 
+/**
+ * Returns whether an entry passes a list query's Project allowlist.
+ *
+ * @param entry - Stored time entry.
+ * @param input - Project allowlist and whether entries without a Project pass it.
+ * @returns `true` when the entry's Project is allowed, or it has no Project and those are included.
+ */
+function matchesProjectAllowlist(
+  entry: TimeEntry,
+  input: Pick<ListTimeEntriesInput, 'projectIds' | 'includeUnassigned'>,
+): boolean {
+  if (input.projectIds === undefined) return true
+  if (entry.projectId === undefined) return input.includeUnassigned === true
+  return input.projectIds.has(entry.projectId)
+}
+
+/**
+ * Returns whether a Team time manager manages the Project an entry is recorded on.
+ *
+ * Entries without a Project belong to the Team, so every Team time manager manages them.
+ *
+ * @param entry - Time entry.
+ * @param managedProjectIds - Managed Project IDs, or `undefined` when every Project is managed.
+ * @returns `true` when the entry has no Project or its Project is managed.
+ */
+function canManageEntryProject(entry: TimeEntry, managedProjectIds?: ReadonlySet<string>): boolean {
+  return managedProjectIds === undefined || entry.projectId === undefined || managedProjectIds.has(entry.projectId)
+}
+
 /** Returns whether a caller can see an entry's confidential costs. */
 function canViewCosts(entry: TimeEntry, managedProjectIds?: ReadonlySet<string>): boolean {
-  return managedProjectIds === undefined || (entry.projectId !== undefined && managedProjectIds.has(entry.projectId))
+  return canManageEntryProject(entry, managedProjectIds)
 }
 
 /** Calculates a clipped entry cost when the caller is authorized to see it. */

@@ -242,7 +242,32 @@ export function readTimeSheet(value: unknown): TimeSheet | undefined {
   ) {
     return undefined
   }
-  return { from: value.from, to: value.to, timeZone: value.timeZone, days, weeks, costsRedacted: value.costsRedacted }
+  const canManageTeam = readCanManageTeam(value.canManageTeam, value.costsRedacted)
+  if (canManageTeam === undefined) return undefined
+  return {
+    from: value.from,
+    to: value.to,
+    timeZone: value.timeZone,
+    days,
+    weeks,
+    costsRedacted: value.costsRedacted,
+    canManageTeam,
+  }
+}
+
+/**
+ * Reads whether the caller manages time in the Team from a report response.
+ *
+ * An API deployed before the flag existed omits it; there only Team managers received costs,
+ * so `costsRedacted` stands in for it until both sides are updated.
+ *
+ * @param value - The response's `canManageTeam` value.
+ * @param costsRedacted - The response's `costsRedacted` flag.
+ * @returns The flag, or undefined when the value is present but not a boolean.
+ */
+export function readCanManageTeam(value: unknown, costsRedacted: boolean): boolean | undefined {
+  if (value === undefined) return !costsRedacted
+  return typeof value === 'boolean' ? value : undefined
 }
 
 /**

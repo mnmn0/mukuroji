@@ -117,6 +117,8 @@ export function TimeReport({
   const [downloadError, setDownloadError] = useState<string>()
   const ordered = isTimeReportRangeOrdered(range)
   const showCosts = summary !== undefined && !summary.costsRedacted
+  // Members get only their own time, except Work Item totals that every viewer of the Work Item reads.
+  const showsOwnTimeOnly = summary !== undefined && !summary.canManageTeam && summary.groupBy !== 'work-item'
 
   /**
    * Labels one report row.
@@ -209,6 +211,9 @@ export function TimeReport({
         </div>
       ) : null}
       {isLoading ? <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">{t('timeTracking.loading')}</p> : null}
+      {showsOwnTimeOnly && ordered ? (
+        <p className="text-sm font-medium text-[var(--workbench-muted)]" data-testid="time-report-own-only">{t('timeTracking.report.ownTimeOnly')}</p>
+      ) : null}
 
       {summary && ordered ? (
         summary.groups.length === 0 ? (

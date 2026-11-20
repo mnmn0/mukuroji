@@ -214,6 +214,12 @@ export type TimeTrackingSummary = {
   budget?: TimeBudget
   /** Whether money fields were withheld from this response. */
   costsRedacted: boolean
+  /**
+   * Whether the caller manages time in the Team. When `false`, the report totals only the
+   * caller's own entries; when `true`, it also totals other members' entries in the Projects the
+   * caller manages and entries without a Project.
+   */
+  canManageTeam: boolean
 }
 
 /** Daily and weekly timesheet view. */
@@ -230,4 +236,10 @@ export type TimeSheet = {
   weeks: TimeSummaryGroup[]
   /** Whether money fields were withheld from this response. */
   costsRedacted: boolean
+  /**
+   * Whether the caller manages time in the Team. When `false`, the rows total only the caller's
+   * own entries; when `true`, they also total other members' entries in the Projects the caller
+   * manages and entries without a Project.
+   */
+  canManageTeam: boolean
 }

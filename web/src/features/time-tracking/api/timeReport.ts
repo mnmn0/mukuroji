@@ -6,7 +6,7 @@ import {
   requestTimeTrackingJson,
   TimeTrackingApiError,
 } from './timeTrackingRequest'
-import { readSummaryGroups } from './timeTrackingValidation'
+import { readCanManageTeam, readSummaryGroups } from './timeTrackingValidation'
 
 /** Budget whose figures a report also returns. */
 export type TimeReportBudgetScope =
@@ -107,7 +107,7 @@ export function readTimeTrackingSummary(value: unknown): TimeTrackingSummary | u
   if (!isRecord(value)) return undefined
   const {
     from, to, timeZone, groupBy, totalMinutes, totalBillableMinutes, totalEstimateMinutes,
-    totalActualCostMinor, totalActualCostByCurrency, budget, costsRedacted,
+    totalActualCostMinor, totalActualCostByCurrency, budget, costsRedacted, canManageTeam,
   } = value
   const groups = readSummaryGroups(value.groups)
   const parsedBudget = budget === undefined ? undefined : readTimeBudget(budget)
@@ -122,6 +122,8 @@ export function readTimeTrackingSummary(value: unknown): TimeTrackingSummary | u
   ) {
     return undefined
   }
+  const parsedCanManageTeam = readCanManageTeam(canManageTeam, costsRedacted)
+  if (parsedCanManageTeam === undefined) return undefined
   return {
     from,
     to,
@@ -135,6 +137,7 @@ export function readTimeTrackingSummary(value: unknown): TimeTrackingSummary | u
     ...(totalActualCostByCurrency === undefined ? {} : { totalActualCostByCurrency }),
     ...(parsedBudget ? { budget: parsedBudget } : {}),
     costsRedacted,
+    canManageTeam: parsedCanManageTeam,
   }
 }
 

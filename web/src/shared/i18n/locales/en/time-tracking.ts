@@ -127,6 +127,7 @@ export const timeTrackingMessages = {
   'timeTracking.report.empty': 'No time was recorded in this period.',
   'timeTracking.report.weekOf': 'Week of {date}',
   'timeTracking.report.noProject': 'No Project',
+  'timeTracking.report.ownTimeOnly': 'Only the time you recorded is totalled here. Grouped by task, the report totals everyone\'s time on the tasks you can see.',
   'timeTracking.report.total': 'Total',
   'timeTracking.report.column.minutes': 'Actual',
   'timeTracking.report.column.billable': 'Billable',

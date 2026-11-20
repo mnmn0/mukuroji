@@ -256,9 +256,11 @@ describe('time report views', () => {
     expect(manager).toContain('Aoi Tanaka')
     expect(manager).toContain('ren@example.com')
     expect(manager).toContain('19:30')
+    expect(manager).not.toContain('time-report-own-only')
     const member = renderToStaticMarkup(<TimeReport {...reportProps} summary={timeReportFixtureMemberSummary} />)
     expect(member).not.toContain('Actual cost')
     expect(member).toContain('12:30')
+    expect(member).toContain('Only the time you recorded is totalled here.')
   })
 
   test('labels Project rows and entries without a Project', () => {

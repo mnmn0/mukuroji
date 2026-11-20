@@ -232,7 +232,7 @@ describe('createTimeTrackingRouter', () => {
     expect((await fixture.service.getEntry('workspace-1', 'team-1', entry.id)).billable).toBe(true)
   })
 
-  test('does not let a Project manager approve another member entry without a Project', async () => {
+  test('lets a Team time manager list, approve, and read history of another member entry without a Project', async () => {
     const fixture = createProjectFixture()
     const entry = await createDraft(fixture.router, 'bob', 'work-item-none')
     const submitted = await requestAs(fixture.router, 'bob', 'POST', `/api/teams/team-1/time-entries/${entry.id}/submit`, {
@@ -241,11 +241,106 @@ describe('createTimeTrackingRouter', () => {
     expect(submitted.status).toBe(200)
     const submittedEntry = readEntryRef(await submitted.json())
 
+    const queue = await requestAs(fixture.router, 'alice', 'GET', '/api/teams/team-1/time-entries?status=submitted')
+    expect(readEntryIds(await queue.json())).toEqual([entry.id])
+
     const approved = await requestAs(fixture.router, 'alice', 'POST', `/api/teams/team-1/time-entries/${entry.id}/approve`, {
       expectedRevision: submittedEntry.revision,
     })
-    expect(approved.status).toBe(403)
-    expect(await approved.json()).toMatchObject({ code: 'TimesheetApprovalDenied' })
+    expect(approved.status).toBe(200)
+    expect(await approved.json()).toMatchObject({ entry: { id: entry.id, status: 'approved' } })
+
+    const history = await requestAs(fixture.router, 'alice', 'GET', `/api/teams/team-1/time-entries/${entry.id}/history`)
+    expect(history.status).toBe(200)
+  })
+
+  test('shows a member their own entries without a Project but not other members ones', async () => {
+    const fixture = createProjectFixture()
+    const own = await createDraft(fixture.router, 'bob', 'work-item-none')
+    const other = await createDraft(fixture.router, 'alice', 'work-item-none')
+
+    const listed = await requestAs(fixture.router, 'bob', 'GET', '/api/teams/team-1/time-entries')
+    expect(readEntryIds(await listed.json())).toEqual([own.id])
+    const otherUser = await requestAs(fixture.router, 'bob', 'GET', '/api/teams/team-1/time-entries?userId=alice')
+    expect(readEntryIds(await otherUser.json())).toEqual([own.id])
+
+    const deniedHistory = await requestAs(fixture.router, 'bob', 'GET', `/api/teams/team-1/time-entries/${other.id}/history`)
+    expect(deniedHistory.status).toBe(403)
+
+    const submitted = await requestAs(fixture.router, 'bob', 'POST', '/api/teams/team-1/timesheet/submit', {
+      from: '2026-08-02T00:00:00.000Z',
+      to: '2026-08-03T00:00:00.000Z',
+    })
+    expect(await submitted.json()).toMatchObject({ count: 1, entries: [{ id: own.id, status: 'submitted' }] })
+
+    const approved = await requestAs(fixture.router, 'alice', 'POST', '/api/teams/team-1/timesheet/approve', {
+      from: '2026-08-02T00:00:00.000Z',
+      to: '2026-08-03T00:00:00.000Z',
+    })
+    expect(await approved.json()).toMatchObject({ count: 1, entries: [{ id: own.id, status: 'approved' }] })
+  })
+
+  test('totals only the member own time in timesheets, summaries, and exports', async () => {
+    const fixture = createProjectFixture()
+    await createDraft(fixture.router, 'bob', 'work-item-none')
+    await createDraft(fixture.router, 'alice', 'work-item-p1')
+    await createDraft(fixture.router, 'alice', 'work-item-p2')
+    const period = 'from=2026-08-02T00:00:00.000Z&to=2026-08-03T00:00:00.000Z'
+
+    const timesheet = await requestAs(fixture.router, 'bob', 'GET', `/api/teams/team-1/timesheet?${period}`)
+    expect(timesheet.status).toBe(200)
+    const sheet = await timesheet.json()
+    expect(sheet).toMatchObject({ canManageTeam: false, costsRedacted: true })
+    expect(readTotalMinutes(sheet.days)).toBe(60)
+
+    const summary = await requestAs(fixture.router, 'bob', 'GET', `/api/teams/team-1/time-tracking/summary?${period}&groupBy=user`)
+    expect(await summary.json()).toMatchObject({
+      canManageTeam: false,
+      totalMinutes: 60,
+      groups: [{ key: 'bob', minutes: 60 }],
+    })
+
+    const csv = await requestAs(fixture.router, 'bob', 'GET', `/api/teams/team-1/time-tracking/export?${period}&groupBy=user`)
+    const rows = (await csv.text()).trim().split('\n')
+    expect(rows).toHaveLength(2)
+    expect(rows[1]).toStartWith('bob,60,')
+  })
+
+  test('totals every member time per Work Item for a member who can see the Work Items', async () => {
+    const fixture = createProjectFixture()
+    await createDraft(fixture.router, 'bob', 'work-item-p2')
+    await createDraft(fixture.router, 'alice', 'work-item-p2')
+    await createDraft(fixture.router, 'alice', 'work-item-none')
+    const period = 'from=2026-08-02T00:00:00.000Z&to=2026-08-03T00:00:00.000Z'
+
+    const summary = await requestAs(fixture.router, 'bob', 'GET', `/api/teams/team-1/time-tracking/summary?${period}&groupBy=work-item`)
+    expect(await summary.json()).toMatchObject({
+      canManageTeam: false,
+      costsRedacted: true,
+      totalMinutes: 180,
+      groups: [{ key: 'work-item-none', minutes: 60 }, { key: 'work-item-p2', minutes: 120 }],
+    })
+  })
+
+  test('totals other members time only from managed Projects and outside Projects for a Team time manager', async () => {
+    const fixture = createProjectFixture()
+    await createDraft(fixture.router, 'bob', 'work-item-p1')
+    await createDraft(fixture.router, 'bob', 'work-item-p2')
+    await createDraft(fixture.router, 'bob', 'work-item-none')
+    await createDraft(fixture.router, 'alice', 'work-item-p2')
+    const period = 'from=2026-08-02T00:00:00.000Z&to=2026-08-03T00:00:00.000Z'
+
+    const timesheet = await requestAs(fixture.router, 'alice', 'GET', `/api/teams/team-1/timesheet?${period}`)
+    const sheet = await timesheet.json()
+    expect(sheet).toMatchObject({ canManageTeam: true, costsRedacted: false })
+    expect(readTotalMinutes(sheet.days)).toBe(180)
+
+    const summary = await requestAs(fixture.router, 'alice', 'GET', `/api/teams/team-1/time-tracking/summary?${period}&groupBy=user`)
+    expect(await summary.json()).toMatchObject({
+      canManageTeam: true,
+      totalMinutes: 180,
+      groups: [{ key: 'alice', minutes: 60 }, { key: 'bob', minutes: 120 }],
+    })
   })
 
   test('lists other users entries and history only from the Projects the manager manages', async () => {
@@ -468,4 +563,18 @@ function readEntryIds(body: unknown): string[] {
  */
 function isFixtureRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Sums the minutes of timesheet rows.
+ *
+ * @param rows - Parsed `days` or `weeks` rows of a timesheet response.
+ * @returns Total minutes.
+ */
+function readTotalMinutes(rows: unknown): number {
+  if (!Array.isArray(rows)) throw new Error('The timesheet does not contain rows.')
+  return rows.reduce((sum: number, row: unknown) => {
+    if (!isFixtureRecord(row) || typeof row.minutes !== 'number') throw new Error('The timesheet contains an invalid row.')
+    return sum + row.minutes
+  }, 0)
 }
