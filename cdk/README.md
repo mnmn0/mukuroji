@@ -1082,7 +1082,8 @@ Web bucket は versioning を有効にし、次の期間で古い file を消し
 - `assets/` は日数では消しません。稼働中の release の chunk は deploy しない限り upload し直されないため、
   日数で消すと配信中の画面が壊れるからです。代わりに各 release が使う `assets/` の一覧を
   `release-assets.txt` として残し、`web:deploy` が、残っている release、置き換える直前の release、
-  今回の build のどれも使わない `assets/` を削除します。一覧のない release（この仕組みより前の deploy）が
+  今回の build のどれも使わない `assets/` を削除します。直近 24 時間に upload された file は、同時に走った
+  別の deploy のものかもしれないので残します。一覧のない release（この仕組みより前の deploy）が
   残っている間は削除しません。
 
 ## Workspace partition migration

@@ -69,7 +69,9 @@ list_keys() {
 
 # Deletes `assets/` keys that no kept release, the replaced live release, or this
 # build lists. Pruning is skipped when a kept release has no asset manifest, because
-# its assets cannot be told apart from unused ones.
+# its assets cannot be told apart from unused ones. Files uploaded in the last 24 hours
+# are kept, so a deploy running at the same time does not lose assets it has uploaded
+# before its manifest exists.
 prune_unreferenced_assets() {
   local work_directory="$1"
   local release_directories="$work_directory/release-directories"
@@ -79,6 +81,7 @@ prune_unreferenced_assets() {
   local unreferenced_assets="$work_directory/unreferenced-assets"
   local manifest_key
   local asset_key
+  local cutoff
 
   list_keys 'releases/' >"$work_directory/release-keys"
   sed -n -E 's#^(releases/[0-9a-f]{40})/index\.html$#\1#p' "$work_directory/release-keys" \
@@ -111,14 +114,23 @@ prune_unreferenced_assets() {
   fi
 
   LC_ALL=C sort -u -o "$referenced_assets" "$referenced_assets"
-  list_keys 'assets/' | LC_ALL=C sort -u >"$stored_assets"
+  # ISO 8601 times in UTC compare correctly as strings.
+  cutoff="$(bun -e 'console.log(new Date(Date.now() - 86_400_000).toISOString().slice(0, 19))')"
+  aws s3api list-objects-v2 \
+    --region "$AWS_REGION" \
+    --bucket "$WEB_BUCKET_NAME" \
+    --prefix 'assets/' \
+    --query 'Contents[].[Key, LastModified]' \
+    --output text \
+    | awk -F '\t' -v cutoff="$cutoff" 'NF == 2 && $2 "" < cutoff { print $1 }' \
+    | LC_ALL=C sort -u >"$stored_assets"
   LC_ALL=C comm -23 "$stored_assets" "$referenced_assets" >"$unreferenced_assets"
   while IFS= read -r asset_key; do
     aws s3 rm "s3://$WEB_BUCKET_NAME/$asset_key" \
       --region "$AWS_REGION" \
       --only-show-errors
   done <"$unreferenced_assets"
-  echo "Deleted $(wc -l <"$unreferenced_assets" | tr -d ' ') asset file(s) that no kept release uses."
+  echo "Deleted $(wc -l <"$unreferenced_assets" | tr -d ' ') asset file(s) that no kept release uses and nobody uploaded in the last 24 hours."
 }
 
 WEB_BUCKET_NAME="$(stack_output WebBucketName)"
