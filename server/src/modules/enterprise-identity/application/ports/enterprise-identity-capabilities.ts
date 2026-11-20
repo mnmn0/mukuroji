@@ -790,6 +790,8 @@ export type EnterpriseMemberRoleAssignmentDeleteOptions = {
    * member's Workspace role and Project memberships.
    */
   requireRemainingAssignment?: boolean
+  /** Permissions that the removed role must not hold, read from the state being written. */
+  forbiddenPermissions?: readonly EnterprisePermissionId[]
 }
 
 /** Conditions checked atomically when a direct member assignment is created. */
@@ -801,6 +803,8 @@ export type EnterpriseMemberRoleAssignmentCreateOptions = {
   callerPermissions?: readonly EnterprisePermissionId[]
   /** Permissions that the assigned role must not hold, read from the state being written. */
   forbiddenPermissions?: readonly EnterprisePermissionId[]
+  /** Requires the role, read from the state being written, to be assignable to a guest. */
+  requireGuestAssignable?: boolean
 }
 
 /** Conditions checked atomically when a custom role is saved. */

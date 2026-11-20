@@ -514,7 +514,48 @@ test('checks the full grant ceiling against the role stored when the assignment 
   expect((await identity.getSnapshot(workspaceId)).roleAssignments).toEqual([])
   await expect(identity.putMemberRoleAssignment(assignment, undefined, {
     callerPermissions: ['workspace.read', 'work-items.read', 'work-items.write'],
+    requireGuestAssignable: true,
+  })).rejects.toMatchObject({ status: 409, code: 'EnterpriseRoleNotGuestAssignable' })
+  await expect(identity.putMemberRoleAssignment(assignment, undefined, {
+    callerPermissions: ['workspace.read', 'work-items.read', 'work-items.write'],
   })).resolves.toMatchObject({ roleId: 'custom:reader' })
+})
+
+test('rechecks administrative permissions of the stored role when an assignment is removed', async () => {
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const role = {
+    workspaceId,
+    roleId: 'custom:desk' as const,
+    name: 'Desk',
+    permissions: ['workspace.read' as const, 'members.read' as const],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: '2026-11-19T00:00:00.000Z',
+    updatedAt: '2026-11-19T00:00:00.000Z',
+  }
+  await identity.putCustomRole(role)
+  const assignment = await identity.putMemberRoleAssignment({
+    workspaceId,
+    assignmentId: 'assignment-desk',
+    principalKind: 'member',
+    principalId: 'sato@example.com',
+    roleId: 'custom:desk',
+    scope: { workspaceId, kind: 'workspace' },
+    source: 'direct',
+  })
+  // An owner adds an administrative permission after the caller read the role.
+  await identity.putCustomRole({
+    ...role,
+    permissions: [...role.permissions, 'members.manage'],
+    revision: 2,
+  })
+
+  await expect(identity.deleteMemberRoleAssignment(assignment, undefined, {
+    forbiddenPermissions: ['members.manage'],
+  })).rejects.toMatchObject({ status: 403, code: 'EnterpriseRoleAssignmentAdminProtected' })
+  expect((await identity.getSnapshot(workspaceId)).roleAssignments).toHaveLength(1)
+  await identity.deleteMemberRoleAssignment(assignment)
+  expect((await identity.getSnapshot(workspaceId)).roleAssignments).toEqual([])
 })
 
 test('lets an admin keep maintaining an assigned role that already holds administrative permissions', async () => {

@@ -290,7 +290,8 @@ assignment を外せます。持たない場合は `403 EnterpriseRoleAssignment
 同じ理由で、owner 相当以外の caller は、member に direct assignment されている custom role に管理系
 permission を足せません（`403 EnterpriseRoleAssignmentAdminProtected`）。既に持つ管理系 permission を残した
 ままの編集はできます。割り当て時は、caller が持たない permission（`403 EnterpriseRoleAssignmentDenied`）と
-管理系 permission を含まないことを、書き込む state の role 定義で再確認します。
+管理系 permission を含まないこと（guest には guest 可であること）を、書き込む state の role 定義で再確認します。
+解除時の管理系 role の判定も、削除する state の role 定義で行います。
 Direct assignment を持つ member を owner / admin に変える `PATCH /api/workspace/members/:memberKey` は
 `409 WorkspaceMemberRoleAssignmentsPresent` で拒否します。Guest になった member の direct assignment は、
 評価時に guest 可の role（`workspace:guest`、`project:viewer`、`guestAssignable` の custom role）だけを

@@ -101,6 +101,7 @@ import {
   evaluateEnterpriseAccess,
   ipMatchesCidr,
   isEnterpriseRoleCompatibleWithScope,
+  isEnterpriseRoleGuestAssignable,
   resolveEnterpriseDirectoryPrincipal,
   resolveEnterpriseRolePermissions,
   resolveRoutePermission,
@@ -1028,6 +1029,16 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
           'The selected role exceeds your effective permissions or is invalid for this scope.',
         )
       }
+      if (
+        options.requireGuestAssignable &&
+        !isEnterpriseRoleGuestAssignable(state.customRoles, assignment.roleId)
+      ) {
+        throw new EnterpriseIdentityError(
+          409,
+          'EnterpriseRoleNotGuestAssignable',
+          'The selected role cannot be assigned to a guest.',
+        )
+      }
       if (rolePermissions.some((permission) => options.forbiddenPermissions?.includes(permission))) {
         throw new EnterpriseIdentityError(
           403,
@@ -1104,6 +1115,16 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
           404,
           'EnterpriseRoleAssignmentNotFound',
           'Role assignment was not found.',
+        )
+      }
+      if (
+        resolveEnterpriseRolePermissions(state.customRoles, stored.roleId)
+          .some((permission) => options.forbiddenPermissions?.includes(permission))
+      ) {
+        throw new EnterpriseIdentityError(
+          403,
+          'EnterpriseRoleAssignmentAdminProtected',
+          'Only an owner can assign or remove a role with administrative permissions.',
         )
       }
       if (

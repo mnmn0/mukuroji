@@ -3784,6 +3784,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         }, createWorkspaceMutationContext(c, principal, body, requestIdempotencyKey),
         {
           callerPermissions: principal.enterprisePermissions,
+          requireGuestAssignable: target.role === 'guest',
           ...(isEnterpriseOwnerLevelCaller(principal)
             ? {}
             : { forbiddenPermissions: [...enterpriseAdministrativePermissionIds] }),
@@ -3826,6 +3827,10 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         {
           requireRemainingAssignment: target !== undefined &&
             !canRestoreEnterpriseLegacyAccess(principal, snapshot, target.role),
+          // The role is re-checked in the stored state, so a concurrent role edit cannot slip through.
+          ...(isEnterpriseOwnerLevelCaller(principal)
+            ? {}
+            : { forbiddenPermissions: [...enterpriseAdministrativePermissionIds] }),
         },
       )
       return c.body(null, 204)
