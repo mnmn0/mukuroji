@@ -26,6 +26,11 @@ export {
 } from './planning'
 
 export {
+  createPlanningEntityWithAssignedId,
+  type PlanningEntityCreationWithAssignedIdOutcome,
+} from './application/entity-creation'
+
+export {
   createPlanningUpdateNextNotificationAtRecordKey,
   createPlanningUpdateNotificationAtRecordKey,
   createPlanningUpdateScheduleShard,

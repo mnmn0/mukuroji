@@ -69,7 +69,7 @@ ID を省略する request には `Idempotency-Key` header（1〜256 文字、�
 - ID は Workspace・呼び出し元・操作（作成 / 複製）・key の SHA-256 から決まります。commit 後に受領記録の保存だけが失敗しても、再送は同じ ID を作ろうとして `409 PlanningEntityExists` になるので、entity は 2 つになりません
 - 権限の確認や validation で失敗した request は reservation を解放するので、直した body を同じ key で送り直せます
 
-Web の作成フォームと複製ボタンは ID を送らず、1 回の操作とその再試行で同じ `Idempotency-Key` を使います。
+Web の作成フォームと複製ボタンは ID を送らず、1 回の操作とその再試行で同じ `Idempotency-Key` を使います。通信失敗や 5xx など結果が分からない失敗の後は、snapshot を読み直していても、同じ内容の再送では最初の `expectedRevision` を送り続けます。body が変わると key も変わり、2 つ目の entity ができてしまうためです。`Location` は CORS の `Access-Control-Expose-Headers` で公開しています。
 
 #### Archive と復元
 
