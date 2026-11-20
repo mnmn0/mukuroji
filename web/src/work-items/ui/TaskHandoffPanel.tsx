@@ -62,7 +62,15 @@ export function TaskHandoffPanel({ accessToken, ...props }: TaskHandoffPanelProp
     hasMore: Boolean(data.nextCursor),
   }))
   const brief = createTaskHandoffBrief({ ...props, agentRuns, documents })
-  return <TaskHandoffSnapshot brief={brief} key={brief} revision={task.revision} t={props.t} />
+  // The disclosure stays outside the keyed snapshot so a background run or Document refresh does not close it.
+  return (
+    <details className="min-w-0 border-y border-[var(--workbench-border)]" data-testid="task-handoff-panel">
+      <summary className="min-h-[44px] cursor-pointer py-3 text-sm font-semibold text-[var(--workbench-primary-text)]">
+        {props.t('agents.handoff.title')}
+      </summary>
+      <TaskHandoffSnapshot brief={brief} key={brief} revision={task.revision} t={props.t} />
+    </details>
+  )
 }
 
 /**
@@ -89,7 +97,7 @@ type TaskHandoffSnapshotProps = {
 }
 
 /**
- * Renders a native disclosure; selecting or copying the brief never starts work.
+ * Renders the brief preview and copy controls; selecting or copying the brief never starts work.
  * @param props - Exact saved snapshot and localized labels.
  * @returns An accessible preview, copy action, and selectable fallback.
  */
@@ -124,11 +132,7 @@ function TaskHandoffSnapshot({ brief, revision, t }: TaskHandoffSnapshotProps) {
   }
 
   return (
-    <details className="min-w-0 border-y border-[var(--workbench-border)]" data-testid="task-handoff-panel">
-      <summary className="min-h-[44px] cursor-pointer py-3 text-sm font-semibold text-[var(--workbench-primary-text)]">
-        {t('agents.handoff.title')}
-      </summary>
-      <div className="grid min-w-0 gap-3 pb-4">
+    <div className="grid min-w-0 gap-3 pb-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <label className="text-xs font-semibold text-[var(--workbench-text)]" htmlFor={previewId}>
             {t('agents.handoff.preview')}
@@ -164,7 +168,6 @@ function TaskHandoffSnapshot({ brief, revision, t }: TaskHandoffSnapshotProps) {
         <p className="text-xs leading-5 text-[var(--workbench-muted)]" id={feedbackId}>{t('agents.handoff.note')}</p>
         {copyState === 'copied' ? <p className="text-xs font-medium text-[var(--workbench-primary-text)]" role="status">{t('agents.handoff.copied')}</p> : null}
         {copyState === 'failed' ? <p className="text-xs leading-5 text-fg-red-700" role="alert">{t('agents.handoff.copyFailed')}</p> : null}
-      </div>
-    </details>
+    </div>
   )
 }

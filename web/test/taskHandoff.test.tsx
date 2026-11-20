@@ -175,7 +175,7 @@ describe('task handoff brief', () => {
     expect(brief).toContain('Run ID: run_1')
     expect(brief).toContain('Agent: codex bot (codex)')
     expect(brief).toContain('Agent codex bot holds an active run (run_1).')
-    expect(brief).not.toContain('Agent Run state could not be read')
+    expect(brief).not.toContain('confirmed Agent Run state')
   })
 
   test('tells the agent not to take over a stalled run without a handoff', () => {
@@ -213,7 +213,7 @@ describe('task handoff brief', () => {
 
   test('says when runs and Documents were not read instead of implying there are none', () => {
     const unread = createTaskHandoffBrief({ task, includeDescription: true, t })
-    expect(unread).toContain('The Agent Run state could not be read on this screen.')
+    expect(unread).toContain('This brief does not include a confirmed Agent Run state.')
     expect(unread).toContain('Agent Runs could not be read on this screen.')
     expect(unread).toContain('Related Documents could not be read on this screen.')
     expect(unread).not.toContain('No agent holds an active run')
