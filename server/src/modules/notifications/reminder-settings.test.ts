@@ -24,7 +24,12 @@ import type {
 } from './application/ports/reminder-settings-reader'
 
 /** Command recorded by the fake DocumentClient. */
-type RecordedCommand = { name: string; input: Record<string, unknown> }
+type RecordedCommand = {
+  /** AWS SDK command class name. */
+  name: string
+  /** Command input as sent to the client. */
+  input: Record<string, unknown>
+}
 
 /**
  * Creates a fake DocumentClient that records each command and answers it with `resolve`.

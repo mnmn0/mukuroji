@@ -22,6 +22,26 @@ export type TeamReminderSettingsPrincipal = {
   directoryId: string
 }
 
+/** Team change the audit put records for a settings save. */
+type TeamReminderSettingsAuditInput = {
+  /** Team whose overrides changed. */
+  teamId: string
+  /** Overrides before the save. */
+  before: TeamNotificationReminderDays
+  /** Overrides after the save. */
+  after: TeamNotificationReminderDays
+  /** Settings revision the save replaced. */
+  beforeRevision: number
+  /** Request body as received, for the audit request digest. */
+  body: unknown
+}
+
+/** Request whose body the route reads as JSON. */
+type TeamReminderSettingsJsonRequest = {
+  /** Parses the request body as JSON. */
+  json: () => Promise<unknown>
+}
+
 /** Ports injected into the Team reminder routes. */
 export type TeamReminderSettingsRouterDependencies<
   Principal extends TeamReminderSettingsPrincipal,
@@ -58,18 +78,12 @@ export type TeamReminderSettingsRouterDependencies<
   createAuditPut(
     context: Context,
     principal: Principal,
-    input: {
-      teamId: string
-      before: TeamNotificationReminderDays
-      after: TeamNotificationReminderDays
-      beforeRevision: number
-      body: unknown
-    },
+    input: TeamReminderSettingsAuditInput,
   ): AuditTransactWriteItem | undefined
   /** Maps an application or authorization error to a response. */
   mapError(context: Context, error: unknown): Response
   /** Reads the request JSON, returning undefined when it does not parse. */
-  readJson(request: { json: () => Promise<unknown> }): Promise<unknown>
+  readJson(request: TeamReminderSettingsJsonRequest): Promise<unknown>
   /** Current time. */
   now(): Date
 }
