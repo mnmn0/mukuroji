@@ -299,6 +299,20 @@ describe('DynamoDB Agent Run store', () => {
       ExpressionAttributeValues: { ':partition': 'workspace-1#team#core#finished-run', ':since': '2026-10-21T00:00:00.000Z' },
       ScanIndexForward: false,
     })
+    // An end bound keeps every run that finished at it and skips later runs inside the query.
+    const bounded = createClient()
+    await new DynamoDbAgentRunStore(bounded.client, 'AgentRuns')
+      .listFinishedRunsByTime('workspace-1', 'core', 'other', '2026-10-21T00:00:00.000Z', undefined, 100, '2026-10-22T00:00:00.000Z')
+    expect(bounded.commands[0]?.input).toMatchObject({
+      KeyConditionExpression: '#finishedRunPartition = :partition AND #finishedRunSortKey BETWEEN :since AND :until',
+      ExpressionAttributeValues: { ':since': '2026-10-21T00:00:00.000Z', ':until': '2026-10-22T00:00:00.000Z#~' },
+    })
+    const untilOnly = createClient()
+    await new DynamoDbAgentRunStore(untilOnly.client, 'AgentRuns')
+      .listFinishedRunsByTime('workspace-1', 'core', 'failed', undefined, undefined, 100, '2026-10-22T00:00:00.000Z')
+    expect(untilOnly.commands[0]?.input).toMatchObject({ KeyConditionExpression: '#finishedRunPartition = :partition AND #finishedRunSortKey <= :until' })
+    await expect(new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, undefined, 100, 'yesterday'))
+      .rejects.toMatchObject({ category: 'validation_failed' })
     // The cursor continues only the same Team and group.
     const next = createClient()
     await new DynamoDbAgentRunStore(next.client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, page.nextCursor, 100)
@@ -324,6 +338,8 @@ describe('DynamoDB Agent Run store', () => {
     expect(other.runs.map((run) => run.workItemId)).toEqual(['task-2', 'task-1'])
     const recent = await store.listFinishedRunsByTime('workspace-1', 'core', 'other', later.toISOString(), undefined, 100)
     expect(recent.runs.map((run) => run.workItemId)).toEqual(['task-2'])
+    const earlier = await store.listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, undefined, 100, now.toISOString())
+    expect(earlier.runs.map((run) => run.workItemId)).toEqual(['task-1'])
     const failed = await store.listFinishedRunsByTime('workspace-1', 'core', 'failed', undefined, undefined, 100)
     expect(failed.runs).toEqual([{ runId: 'run_00000000-0000-4000-8000-000000000003', workItemId: 'task-3', outcome: 'failed', finishedAt: now.toISOString() }])
   })

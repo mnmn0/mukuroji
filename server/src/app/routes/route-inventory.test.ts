@@ -9,11 +9,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(494)
-  expect(new Set(inventory).size).toBe(490)
+  expect(inventory).toHaveLength(496)
+  expect(new Set(inventory).size).toBe(492)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
+  expect(inventory).toContain('PATCH /api/teams/:teamId/workload/requests/:requestId')
   expect(inventory).not.toContain('GET /api/dashboard/summary')
   expect(inventory).toContain('GET /api/work-items/keys/:key')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/key')
@@ -77,6 +78,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-runs')
+  expect(inventory).toContain('GET /api/teams/:teamId/agent-runs/analytics')
   expect(inventory).toContain('POST /api/teams/:teamId/agent-runs/:runId/release')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-settings')
   expect(inventory).toContain('PUT /api/teams/:teamId/agent-settings')
@@ -102,6 +104,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '777bb2a2cc65a69c13e8329a75b00e1a404291a5e4bb52f24667b410ad746eaa',
+    '19dfd8cb06032a0bad30f46b1de3d3a56f8b7fa8fc98bdc8063d091842bb88de',
   )
 })

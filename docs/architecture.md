@@ -30,6 +30,7 @@ Coding agent ── stdio ── MCP server（mcp.mjs）── HTTPS ──▶ P
   stack は `cdk/lib/subsystems/*` の builder から組み立て、restore drill・connector・request email・tenant lifecycle
   などは CDK context（`-c mukuroji:<module>=true`）で有効にする任意 module です。
 - Web は stack とは別に `bun run web:deploy` で WebBucket へ配置します。Web と API は CloudFront の同一 origin です。
+  `WebDomainName` を指定すると同じ distribution が独自 domain でも配信し、その URL が通知の link に使う正規 URL になります。
 - ローカルでは Floci（AWS エミュレーター）と `server:dev`・`workers:dev`・`web:dev` で同じ構成を再現します（README）。
 
 ## Workspace（パッケージ）の構成
@@ -109,9 +110,10 @@ key は必ず server が認証済みの主体から組み立て、client が送�
 | `tenant-administration` | テナント profile、保持・legal hold、export と閉鎖 | TenantAdministrationTable、TenantExportBucket |
 | `audit` | 監査 event の書き込みと読み出し、非同期 export | AuditEventsTable、AuditExportBucket |
 | `realtime` | WebSocket の ticket、接続、presence | RealtimeSessionsTable |
-| `authentication` | Cognito の sign-in、MFA、パスワード変更 | Cognito User Pool |
+| `authentication` | Cognito の sign-in、MFA、パスワード変更 | Cognito User Pool、試行制限の counter は DeveloperPlatformTable（[ADR 0002](adr/0002-shared-authentication-attempt-limits.md)） |
 | `restore-drill` | PITR の復元訓練（任意 module） | RestoreDrillStateTable |
 | `data-integrity` | 横断的な整合性検査（読み取り専用） | 各 table を読むだけ |
+| `data-migration` | 保存済み row の schema version 移行（CLI） | 対象 table と checkpoint table（AWS 上は未定義） |
 | `external-chat` | Slack / Teams のスレッド同期の契約（未接続） | なし |
 | `work-item-workflow`、`file-upload-policy` | workflow 定義の検証、アップロード上限（純粋な処理） | なし |
 
@@ -251,5 +253,5 @@ main への merge には `static-analysis`・`strict-typecheck`・`application-u
 | 自動化・外部連携 | [`automation.md`](automation.md)、[`public-api.md`](public-api.md)、[`external-chat-sync.md`](external-chat-sync.md) |
 | Software factory | [`software-factory.md`](software-factory.md)、[`coding-agent-mcp.md`](coding-agent-mcp.md)、[`ai-assistance.md`](ai-assistance.md) |
 | ID・テナント・監査 | [`enterprise-identity.md`](enterprise-identity.md)、[`tenant-administration.md`](tenant-administration.md)、[`event-audit.md`](event-audit.md) |
-| 運用 | [`operational-readiness.md`](operational-readiness.md)、[`restore-drill.md`](restore-drill.md)、[`data-integrity.md`](data-integrity.md) |
+| 運用 | [`operational-readiness.md`](operational-readiness.md)、[`restore-drill.md`](restore-drill.md)、[`data-integrity.md`](data-integrity.md)、[`data-migration.md`](data-migration.md) |
 | Web | [`web-quality-gates.md`](web-quality-gates.md)、[`web-structure-migration.md`](web-structure-migration.md)、[`frontend-data-access.md`](frontend-data-access.md)、[`pwa.md`](pwa.md) |

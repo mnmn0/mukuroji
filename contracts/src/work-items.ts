@@ -12,7 +12,10 @@ import type {
   WorkItemContributorAssignmentCreateInput,
   WorkItemContributorAssignmentInput,
 } from './work-item-contributors'
-import { DEFAULT_WORKSPACE_TIME_ZONE } from './workspace-calendar'
+import {
+  DEFAULT_WORKSPACE_TIME_ZONE,
+  type WorkspaceCalendarWeekday,
+} from './workspace-calendar'
 import type { WorkItemAcceptanceCriterion, WorkItemAcceptanceCriterionInput } from './work-item-acceptance-criteria'
 import type {
   TriageEntryEvent,
@@ -94,15 +97,8 @@ export function isCanonicalWorkItemKey(value: unknown): value is string {
   return typeof value === 'string' && parseWorkItemKey(value)?.key === value
 }
 
-/** Weekday names used by a Work Item schedule calendar policy. */
-export type WorkItemScheduleWeekday =
-  | 'monday'
-  | 'tuesday'
-  | 'wednesday'
-  | 'thursday'
-  | 'friday'
-  | 'saturday'
-  | 'sunday'
+/** Weekday names used by a Work Item schedule calendar policy, the same as the Workspace calendar's. */
+export type WorkItemScheduleWeekday = WorkspaceCalendarWeekday
 
 /** Calendar rules captured with a Work Item schedule for reproducible date arithmetic. */
 export type WorkItemScheduleCalendarPolicy = {

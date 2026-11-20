@@ -1,6 +1,4 @@
-import { createHash } from 'node:crypto'
 import type { Hono } from 'hono'
-import { getConnInfo } from 'hono/aws-lambda'
 import type { Context } from 'hono'
 import type { MfaSetupChallenge } from '@mukuroji/contracts'
 import {
@@ -24,6 +22,7 @@ import {
 import { readCognitoMfaSetupChallenge } from '../shared/account-security'
 import { canManageAiAssistanceWorkspace } from '../shared/ai-assistance-access'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import { consumeAuthenticationAttempt } from '../shared/authentication-attempt-limit'
 import { createAuthenticationResponse } from '../shared/authentication-session'
 import { hasCustomerManagementAccess, hasCustomerReadAccess } from '../shared/customer-access'
 import {
@@ -222,65 +221,8 @@ function toSupportedMfaChallenge(response: InitiateAuthResponse, email: string) 
   }
 }
 
-const authenticationChallengeAttempts = new Map<string, {
-  attempts: number
-  resetAt: number
-}>()
-
-/** Attempt counters kept apart so one challenge kind cannot spend another kind's budget. */
-type AuthenticationChallengeAttemptScope = 'mfa' | 'new-password'
-
-function consumeAuthenticationChallengeAttempt(
-  c: Context,
-  email: string,
-  scope: AuthenticationChallengeAttemptScope = 'mfa',
-) {
-  const key = authenticationChallengeAttemptKey(c, email, scope)
-  const now = Date.now()
-  for (const [candidate, state] of authenticationChallengeAttempts) {
-    if (state.resetAt <= now) authenticationChallengeAttempts.delete(candidate)
-  }
-  const current = authenticationChallengeAttempts.get(key)
-  if (current && current.resetAt > now && current.attempts >= 10) {
-    return {
-      allowed: false as const,
-      retryAfterSeconds: Math.max(1, Math.ceil((current.resetAt - now) / 1_000)),
-    }
-  }
-  authenticationChallengeAttempts.set(key, {
-    attempts: (current?.attempts ?? 0) + 1,
-    resetAt: current?.resetAt && current.resetAt > now
-      ? current.resetAt
-      : now + 5 * 60_000,
-  })
-  return { allowed: true as const, retryAfterSeconds: 0 }
-}
-
-function clearAuthenticationChallengeAttempts(
-  c: Context,
-  email: string,
-  scope: AuthenticationChallengeAttemptScope = 'mfa',
-) {
-  authenticationChallengeAttempts.delete(authenticationChallengeAttemptKey(c, email, scope))
-}
-
-function authenticationChallengeAttemptKey(
-  c: Context,
-  email: string,
-  scope: AuthenticationChallengeAttemptScope,
-) {
-  let transportSource = 'transport-unavailable'
-  try {
-    transportSource = getConnInfo(c).remote.address ?? transportSource
-  } catch {
-    // Unit tests and non-server adapters do not always expose connection metadata.
-  }
-  return createHash('sha256')
-    .update(scope === 'mfa'
-      ? `${transportSource}\0${email}`
-      : `${scope}\0${transportSource}\0${email}`)
-    .digest('base64url')
-}
+/** MFA code and new-password challenge attempts allowed per client address and email in one window. */
+const authenticationChallengeAttemptLimit = { attempts: 10, windowSeconds: 5 * 60 }
 
 async function acquireNewPasswordChallengeInvitationLock(c: Context, email: string) {
   const workspaceUser = await authenticationDependencies.cognito.findWorkspaceUser(email)
@@ -528,7 +470,12 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
           ssoStartPath: '/api/auth/sso/start' as const,
         }, 409)
       }
-      const rateLimit = consumeAuthenticationChallengeAttempt(c, attemptEmail, 'new-password')
+      const rateLimit = await consumeAuthenticationAttempt(
+        c,
+        'new-password-challenge',
+        attemptEmail,
+        authenticationChallengeAttemptLimit,
+      )
       if (!rateLimit.allowed) {
         c.header('Retry-After', String(rateLimit.retryAfterSeconds))
         return c.json({
@@ -552,7 +499,6 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
 
       try {
         const response = await authenticationDependencies.cognito.respondToNewPasswordChallenge(email, newPassword, session)
-        clearAuthenticationChallengeAttempts(c, attemptEmail, 'new-password')
         const tokens = response.AuthenticationResult
 
         if (!tokens?.AccessToken) {
@@ -631,7 +577,12 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
       return toEnterpriseIdentityErrorResponse(c, error)
     }
 
-    const rateLimit = consumeAuthenticationChallengeAttempt(c, email)
+    const rateLimit = await consumeAuthenticationAttempt(
+      c,
+      'mfa-challenge',
+      email,
+      authenticationChallengeAttemptLimit,
+    )
     if (!rateLimit.allowed) {
       c.header('Retry-After', String(rateLimit.retryAfterSeconds))
       return c.json({
@@ -658,7 +609,6 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
             : 'Cognito did not return an access token.',
         }, 409)
       }
-      clearAuthenticationChallengeAttempts(c, email)
       return c.json(await createAuthenticationResponse(
         tokens,
         c,
