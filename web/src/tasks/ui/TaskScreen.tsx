@@ -16,6 +16,7 @@ import {
   type WorkItemDependencyEndpoint,
   type WorkItemRelation,
   type WorkItemSchedule,
+  type WorkItemScheduleCalendarPolicy,
   type WorkItemScheduleChangePreview,
   type WorkItemScheduleOperation,
   type WorkItemScheduleDependency,
@@ -460,12 +461,24 @@ export type TaskScreenProps = {
   planningErrorMessage?: string
   /** Retries the canonical Planning dependency and permission queries. */
   onRetryPlanning?: () => void
+  /**
+   * Shown when the Workspace working calendar failed to load, so new Work Items and the Gantt
+   * chart fall back to Monday-to-Friday without holidays.
+   */
+  workspaceCalendarErrorMessage?: string
+  /** Reads the Workspace working calendar again. */
+  onRetryWorkspaceCalendar?: () => void
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Task view selected when the screen first mounts. */
   initialTab?: TaskTab
   /** Whether the inline create form should open on initial render. */
   defaultCreateTaskOpen?: boolean
+  /**
+   * Workspace working calendar: new Work Items count working days with it, and the Gantt chart
+   * shades its non-working days.
+   */
+  workspaceCalendarPolicy?: WorkItemScheduleCalendarPolicy
   /** Work Item ID selected by the route when the screen first renders. */
   initialSelectedTaskId?: string
   /** Work Item ID explicitly selected by the current route, including unresolved selections. */
@@ -634,6 +647,7 @@ export function TaskScreen({
   configurationErrorMessage,
   currentWorkspaceMemberKey,
   defaultCreateTaskOpen = false,
+  workspaceCalendarPolicy,
   detailErrorMessage,
   focusedCommentId,
   focusedRootCommentId,
@@ -673,6 +687,8 @@ export function TaskScreen({
   outline,
   planningErrorMessage,
   planningSnapshot,
+  workspaceCalendarErrorMessage,
+  onRetryWorkspaceCalendar,
   onLoadMoreProjectUsers,
   onAddRelation,
   onDeleteRelation,
@@ -3543,6 +3559,26 @@ export function TaskScreen({
             {projectCustomerImpact && projectCustomerImpact.requestCount > 0 ? (
               <CustomerImpactPanel signal={projectCustomerImpact} t={t} />
             ) : null}
+            {workspaceCalendarErrorMessage ? (
+              <div
+                className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-[var(--workbench-warning-border)] bg-[var(--workbench-warning-surface)] px-5 py-4"
+                data-testid="project-workspace-calendar-error"
+                role="alert"
+              >
+                <span className="text-sm font-semibold text-[var(--workbench-warning)]">
+                  {workspaceCalendarErrorMessage}
+                </span>
+                {onRetryWorkspaceCalendar ? (
+                  <button
+                    className="workbench-button-secondary min-h-9 px-3"
+                    onClick={onRetryWorkspaceCalendar}
+                    type="button"
+                  >
+                    {t('tasks.workspaceCalendar.retry')}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {planningErrorMessage ? (
               <div
                 className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-5 py-4"
@@ -3603,6 +3639,7 @@ export function TaskScreen({
                 key={createTaskContextKey(createTaskContext, createTaskEditorGeneration)}
                 assigneeErrorMessage={assigneeErrorMessage}
                 assigneeOptions={assigneeOptions}
+                calendarPolicy={workspaceCalendarPolicy}
                 configuration={createConfiguration}
                 context={createTaskContext}
                 currentUserProjectKey={currentUserProjectKey}
@@ -3711,6 +3748,7 @@ export function TaskScreen({
             >
               <TaskWorkspace
                 activeTab={activeTab}
+                workingCalendar={workspaceCalendarPolicy}
                 scheduleWindowNavigation={scheduleWindowNavigation}
                 allTasks={tasks}
                 assigneeOptions={assigneeOptions}
