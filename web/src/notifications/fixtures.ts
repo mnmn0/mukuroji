@@ -51,6 +51,21 @@ export const notificationFixtures: InboxNotification[] = [
 ]
 
 /**
+ * Storybook と UI test で使う、定期配信されたレポートの通知です。
+ */
+export const reportDeliveryNotificationFixture: InboxNotification = {
+  id: 'notification-report-delivered-1',
+  eventId: 'event-analytics-report-delivered-1',
+  eventType: 'analytics.report.delivered',
+  reasons: ['report-recipient'],
+  title: '週次ポートフォリオ',
+  summary: 'A scheduled report snapshot is ready.',
+  deepLink: '/reports?v=1&report=weekly-report&snapshot=snapshot-1',
+  occurredAt: '2026-07-13T08:00:12.000Z',
+  state: 'unread',
+}
+
+/**
  * Storybook で NotificationInbox を操作可能にする controller fixture です。
  */
 export const notificationInboxControllerFixture: NotificationInboxController = {
