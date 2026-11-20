@@ -158,6 +158,8 @@ export type TaskDetailPaneProps = {
   renderAiAssistance?: TaskDetailAiAssistanceRenderer
   /** Whether the dependent AI API deployment has enabled the route-level controls. */
   aiAssistanceEnabled?: boolean
+  /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
+  softwareFactoryEnabled?: boolean
   /** Whether the Summary workflow is enabled for the current Workspace member. */
   aiSummaryAssistanceEnabled?: boolean
   /** Reports authenticated AI failures to the owning task route session guard. */
@@ -296,6 +298,7 @@ type WorkItemTypeChangeEditorState = {
 export function TaskDetailPane({
   accessToken,
   aiAssistanceEnabled = true,
+  softwareFactoryEnabled = true,
   aiSummaryAssistanceEnabled = false,
   assigneeOptions,
   canAccessTriage = false,
@@ -349,7 +352,7 @@ export function TaskDetailPane({
   const commentDraftDirtyRef = useRef(false)
   const [isCommentDraftDirty, setIsCommentDraftDirty] = useState(false)
   const agentRunReports = useAgentRunReportCommentDetails({
-    accessToken,
+    accessToken: softwareFactoryEnabled ? accessToken : undefined,
     commentCount: collaboration?.comments.length ?? 0,
     locale,
     teamId: task?.teamId,
@@ -1633,7 +1636,7 @@ export function TaskDetailPane({
             ) : null}
           </div>
         </div>
-        {issue && !isRetainedDetail ? (
+        {issue && !isRetainedDetail && softwareFactoryEnabled ? (
           <TaskHandoffPanel accessToken={accessToken} configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
         ) : null}
         {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
@@ -1667,7 +1670,7 @@ export function TaskDetailPane({
           </fieldset>
         ) : null}
         {/* Agent claims are operational state, so Work Item types that hide the workflow section still show them. */}
-        {accessToken && issue && !isRetainedDetail ? (
+        {accessToken && issue && !isRetainedDetail && softwareFactoryEnabled ? (
           <WorkItemAgentRunsPanelContainer
             accessToken={accessToken}
             key={`${issue.teamId}:${issue.id}:agent-runs`}

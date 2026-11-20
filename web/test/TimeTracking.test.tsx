@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
 import { listTimeEntries, transitionTimeEntry, transitionTimesheet, updateTimeEntry } from '../src/features/time-tracking/api/timeEntries'
 import { TimeTrackingApiError } from '../src/features/time-tracking/api/timeTrackingRequest'
+import { readTimeEntryHistory } from '../src/features/time-tracking/api/timeTrackingValidation'
 import { getActiveTimer, stopTimer } from '../src/features/time-tracking/api/timers'
 import { getTeamTimesheet } from '../src/features/time-tracking/api/teamTimesheet'
 import {
@@ -223,6 +224,7 @@ describe('time tracking model', () => {
   test('keeps the idempotency key only for failures that may have been applied', () => {
     expect(classifyTimeTrackingFailure(new TimeTrackingApiError(0, 'offline', 'NetworkUnavailable'))).toBe('offline')
     expect(classifyTimeTrackingFailure(new TimeTrackingApiError(409, 'conflict', 'TimeEntryRevisionConflict'))).toBe('conflict')
+    expect(classifyTimeTrackingFailure(new TimeTrackingApiError(409, 'closed', 'TimePeriodClosed'))).toBe('closed')
     expect(classifyTimeTrackingFailure(new TimeTrackingApiError(403, 'denied'))).toBe('forbidden')
     expect(shouldRetainTimeTrackingMutation(new TimeTrackingApiError(0, 'offline'))).toBe(true)
     expect(shouldRetainTimeTrackingMutation(new TimeTrackingApiError(503, 'unavailable'))).toBe(true)
@@ -646,5 +648,29 @@ describe('time tracking views', () => {
   test('the default Work Item type includes the time section before activity', () => {
     const sections = DEFAULT_WORK_ITEM_TYPE.detailSections
     expect(sections.indexOf('time')).toBe(sections.indexOf('activity') - 1)
+  })
+})
+
+describe('time entry history from a manager return', () => {
+  test('keeps the returned action and its reason', () => {
+    expect(readTimeEntryHistory({
+      id: 'history-9',
+      entryId: 'entry-approved',
+      action: 'returned',
+      fromStatus: 'approved',
+      toStatus: 'rejected',
+      actorUserId: 'manager-1',
+      reason: 'Wrong Work Item',
+      occurredAt: '2026-08-02T12:00:00.000Z',
+    })).toEqual({
+      id: 'history-9',
+      entryId: 'entry-approved',
+      action: 'returned',
+      fromStatus: 'approved',
+      toStatus: 'rejected',
+      actorUserId: 'manager-1',
+      reason: 'Wrong Work Item',
+      occurredAt: '2026-08-02T12:00:00.000Z',
+    })
   })
 })

@@ -368,6 +368,8 @@ export type TaskScreenProps = {
   scheduleWindowNavigation?: TaskScheduleWindowNavigation
   /** Whether the dependent AI API deployment has enabled the route-level controls. */
   aiAssistanceEnabled?: boolean
+  /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
+  softwareFactoryEnabled?: boolean
   /** Whether the Summary workflow is enabled for the current Workspace member. */
   aiSummaryAssistanceEnabled?: boolean
   /** Feature-owned AI renderer supplied by the route container. */
@@ -622,6 +624,7 @@ export function TaskScreen({
   workspaceId = '',
   accessToken,
   aiAssistanceEnabled = true,
+  softwareFactoryEnabled = true,
   aiSummaryAssistanceEnabled = false,
   renderAiAssistance,
   onAuthenticatedApiError,
@@ -3912,6 +3915,7 @@ export function TaskScreen({
                 <TaskDetailPane
                   accessToken={isRetainedDetail ? undefined : accessToken}
                   aiAssistanceEnabled={isRetainedDetail ? false : aiAssistanceEnabled}
+                  softwareFactoryEnabled={softwareFactoryEnabled}
                   aiSummaryAssistanceEnabled={isRetainedDetail ? false : aiSummaryAssistanceEnabled}
                   assigneeOptions={assigneeOptions}
                   onAuthenticatedApiError={onAuthenticatedApiError}

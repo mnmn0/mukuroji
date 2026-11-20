@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import type { CreatePlanningEntityInput, PlanningEntityType } from '@mukuroji/contracts'
 import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
-import { InMemoryPlanningClient, type PlanningWorkItemState } from './planning'
+import {
+  InMemoryPlanningClient,
+  type PlanningEntityCreation,
+  type PlanningWorkItemState,
+} from './planning'
 
 const NOW = new Date('2026-07-16T09:00:00.000Z')
 const WORKSPACE_ID = 'workspace-1'
@@ -54,7 +58,7 @@ function createEntityInput(
   type: PlanningEntityType,
   expectedRevision: number,
   overrides: Partial<CreatePlanningEntityInput> = {},
-): CreatePlanningEntityInput {
+): PlanningEntityCreation {
   return {
     id,
     type,

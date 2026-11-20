@@ -57,6 +57,8 @@ export function describeTimeTrackingFailure(t: TimeTrackingTranslator, error: un
       return t('timeTracking.error.offline')
     case 'conflict':
       return t('timeTracking.error.conflict')
+    case 'closed':
+      return t('timeTracking.error.closed')
     case 'forbidden':
       return t('timeTracking.error.forbidden')
     case 'invalid':

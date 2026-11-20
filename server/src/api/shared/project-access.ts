@@ -866,21 +866,29 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
 /**
  * Requires the principal to hold at least the given role on a Project.
  *
+ * Several Teams can use the same Project ID. A Team-qualified grant applies only to its own
+ * Team's Project, and a legacy Project membership, which has no Team, applies only when exactly
+ * one active Team owns the Project ID. A legacy membership of a shared Project ID therefore fails
+ * closed, the same as in {@link selectTeamProjectScopeAccesses}.
+ *
  * @param principal - Authenticated Workspace principal.
  * @param projectId - Project that scopes the operation.
  * @param minimumRole - Minimum role the principal must hold.
+ * @param teamId - Team that owns the Project, when the route names it.
  */
 export async function requireProjectPermission(
   principal: ProjectPrincipal,
   projectId: string,
   minimumRole: ProjectRole,
+  teamId?: string,
 ) {
   if (principal.isSystemAdmin) {
     return
   }
 
   const enterpriseProjectAccess = principal.enterpriseProjectAccesses?.find((access) =>
-    access.projectId === projectId
+    access.projectId === projectId &&
+    (teamId === undefined || access.teamId === undefined || access.teamId === teamId)
   )
   if (
     enterpriseProjectAccess &&
@@ -891,10 +899,9 @@ export async function requireProjectPermission(
 
   const projectAccess = principal.enterpriseLegacyProjectAccessSuppressed
     ? undefined
-    : await workspaceDependencies.projectDirectory.getProjectAccess(
-        principal.directoryId,
-        projectId,
-        principal.userKey,
+    : (await readLegacyProjectScopeAccesses(principal)).find((access) =>
+        access.projectId === projectId &&
+        (teamId === undefined || access.teamId === teamId)
       )
   if (
     !projectAccess ||

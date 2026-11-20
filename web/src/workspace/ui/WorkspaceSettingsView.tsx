@@ -41,6 +41,8 @@ export type WorkspaceSettingsViewProps = {
   onThemePreferenceChange: (preference: ThemePreference) => void
   /** Callback that saves a time zone; undefined follows the browser. */
   onTimeZoneChange?: (timeZone: string | undefined) => void
+  /** Whether to link the agent connection page, which only Software factory deployments serve. */
+  showAgentConnection?: boolean
   /** Localized message resolver. */
   t: (key: MessageKey) => string
   /** Currently selected color theme. */
@@ -95,6 +97,7 @@ export function WorkspaceSettingsView({
   onRetryPreferencesSave,
   onThemePreferenceChange,
   onTimeZoneChange,
+  showAgentConnection = true,
   t,
   themePreference,
   timeZone,
@@ -254,29 +257,31 @@ export function WorkspaceSettingsView({
 
       {accountSections}
 
-      <Link
-        className="workbench-panel group flex min-w-0 items-center justify-between gap-5 p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
-        data-testid="agent-connection-settings-link"
-        to="/settings/agent-connection"
-      >
-        <span className="min-w-0">
-          <span className="workbench-eyebrow">
-            {t('agents.connect.eyebrow')}
-          </span>
-          <strong className="mt-2 block text-lg font-semibold text-[var(--workbench-text)]">
-            {t('agents.connect.open')}
-          </strong>
-          <span className="mt-2 block max-w-[760px] text-sm font-medium leading-6 text-[var(--workbench-muted)]">
-            {t('agents.connect.openDescription')}
-          </span>
-        </span>
-        <span
-          aria-hidden="true"
-          className="grid h-11 w-11 flex-none place-items-center rounded-full border border-[var(--workbench-border)] bg-surface text-lg font-semibold text-[var(--workbench-primary-text)] transition-transform group-hover:translate-x-0.5"
+      {showAgentConnection ? (
+        <Link
+          className="workbench-panel group flex min-w-0 items-center justify-between gap-5 p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
+          data-testid="agent-connection-settings-link"
+          to="/settings/agent-connection"
         >
-          →
-        </span>
-      </Link>
+          <span className="min-w-0">
+            <span className="workbench-eyebrow">
+              {t('agents.connect.eyebrow')}
+            </span>
+            <strong className="mt-2 block text-lg font-semibold text-[var(--workbench-text)]">
+              {t('agents.connect.open')}
+            </strong>
+            <span className="mt-2 block max-w-[760px] text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+              {t('agents.connect.openDescription')}
+            </span>
+          </span>
+          <span
+            aria-hidden="true"
+            className="grid h-11 w-11 flex-none place-items-center rounded-full border border-[var(--workbench-border)] bg-surface text-lg font-semibold text-[var(--workbench-primary-text)] transition-transform group-hover:translate-x-0.5"
+          >
+            →
+          </span>
+        </Link>
+      ) : null}
 
       <section className="workbench-panel p-5" data-testid="settings-profile">
         <p className="workbench-eyebrow">{t('workspace.user.label')}</p>

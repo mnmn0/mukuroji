@@ -244,6 +244,30 @@ test('treats Team teams.manage access as managing every Project for time entry c
   })
 })
 
+test('lets a Team teams.manage grant close and reopen a month of time', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    const authorization = await configureEnterpriseTeamAccess([
+      'teams.read',
+      'teams.write',
+      'teams.manage',
+    ])
+    const headers = { Authorization: authorization, 'Content-Type': 'application/json' }
+
+    const closed = await app.request('/api/teams/core-team/time-periods/2026-07/close', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ timeZone: 'Asia/Tokyo' }),
+    })
+    expect(closed.status).toBe(201)
+    const reopened = await app.request('/api/teams/core-team/time-periods/2026-07/reopen', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason: 'Late client meeting' }),
+    })
+    expect(reopened.status).toBe(200)
+  })
+})
+
 test('uses Team teams.manage access for capacity request creation', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
     const authorization = await configureEnterpriseTeamAccess([

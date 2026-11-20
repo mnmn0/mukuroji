@@ -24,6 +24,7 @@ export const timeTrackingMessages = {
   'timeTracking.status.locked': 'ロック済み',
   'timeTracking.error.offline': 'オフラインのため保存できませんでした。接続が戻ったら同じ操作をもう一度行ってください（二重に登録されることはありません）。',
   'timeTracking.error.conflict': 'ほかの操作で内容が変わったため、最新の状態を読み込みました。確認してからもう一度操作してください。',
+  'timeTracking.error.closed': 'この月は締められているため、工数を変更できません。直す場合は管理者に締めの解除を依頼してください。',
   'timeTracking.error.forbidden': 'この操作を行う権限がありません。',
   'timeTracking.error.invalid': '入力内容を受け付けられませんでした。時刻やタスクを確認してください。',
   'timeTracking.error.failed': '工数を保存できませんでした。時間をおいてもう一度お試しください。',

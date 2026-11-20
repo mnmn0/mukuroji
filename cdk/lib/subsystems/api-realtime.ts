@@ -847,6 +847,16 @@ export function buildApiRuntime(
         actions: ['dynamodb:Query'],
         resources: [`${analyticsTable.tableArn}/index/TimeEntryTeamDateIndex`],
       }),
+      // Time entry writes recheck the Team's month close rows inside their transaction.
+      new iam.PolicyStatement({
+        actions: ['dynamodb:ConditionCheckItem'],
+        resources: [analyticsTable.tableArn],
+        conditions: {
+          'ForAnyValue:StringEquals': {
+            'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+          },
+        },
+      }),
     ],
   });
   const apiAuditTransactionDataPolicy = new iam.Policy(

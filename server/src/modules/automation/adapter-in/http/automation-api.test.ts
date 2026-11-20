@@ -55,6 +55,7 @@ import type {
 } from '../../application/ports'
 import { AutomationError } from '../../domain/automation-error'
 import { TriageError } from '../../../triage'
+import { ProjectDataError } from '../../../directory'
 import { toAutomationInboundWebhookEndpoint } from '../../application/inbound-webhook-view'
 import type {
   AutomationInboundWebhookSecretStore,
@@ -866,6 +867,406 @@ test('releases the active Agent Run of a Work Item in the same write that archiv
   expect(agentRuns.state.revocations.size).toBe(1)
   expect(await agentRuns.getRun('user#demo@example.com', 'core-team', run.runId))
     .toMatchObject({ state: 'finished', outcome: 'released', finishedBy: 'demo@example.com' })
+})
+
+/**
+ * Previews and applies one bulk archive or restore request through the HTTP API.
+ *
+ * @param request - Bulk archive request without its operation token.
+ * @returns The preview body and, when the preview could apply, the applied operation body.
+ */
+async function previewAndApplyBulkArchive(request: {
+  action: { type: 'archive', archived: boolean }
+  items: { teamId: string, workItemId: string, expectedRevision: number }[]
+}): Promise<{ preview: unknown, operation?: unknown }> {
+  const headers = { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  expect(previewResponse.status).toBe(200)
+  const preview: unknown = await previewResponse.json()
+  if (
+    typeof preview !== 'object' || preview === null ||
+    !('canApply' in preview) || preview.canApply !== true ||
+    !('operationToken' in preview)
+  ) {
+    return { preview }
+  }
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+  expect(applyResponse.status).toBe(201)
+  return { preview, operation: await applyResponse.json() }
+}
+
+test('refuses to archive a parent while one of its children is not archived', async () => {
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    workItemRelations: [{
+      sourceWorkItemId: 'onboarding-friction',
+      type: 'child',
+      targetWorkItemId: 'child-work-item',
+    }],
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { preview } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: true },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  })
+
+  expect(preview).toMatchObject({
+    canApply: false,
+    items: [{ status: 'failed', errorCode: 'WorkItemActiveChildren', retryable: true }],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('archives a parent whose children are archived and fences the graph and child restores', async () => {
+  const configurationConditionChecks: unknown[] = []
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailArchivedIssueIds: ['child-work-item'],
+    workItemRelationGraphRevision: 7,
+    workItemRelations: [{
+      sourceWorkItemId: 'onboarding-friction',
+      type: 'child',
+      targetWorkItemId: 'child-work-item',
+    }],
+    issueUpdateHook(input) {
+      configurationConditionChecks.push(...input.configurationConditionChecks ?? [])
+    },
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { operation } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: true },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  })
+
+  expect(operation).toMatchObject({ status: 'succeeded' })
+  expect(calls.issueUpdates.map((update) => update.issueId)).toEqual(['onboarding-friction'])
+  expect(configurationConditionChecks).toEqual([
+    expect.objectContaining({ ConditionCheck: expect.objectContaining({
+      Key: expect.objectContaining({ recordKey: 'RELATION_GRAPH' }),
+      ExpressionAttributeValues: expect.objectContaining({ ':expectedRevision': 7 }),
+    }) }),
+    expect.objectContaining({ ConditionCheck: expect.objectContaining({
+      Key: expect.objectContaining({ recordKey: 'CHILD_RESTORE#onboarding-friction' }),
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    }) }),
+  ])
+})
+
+test('archives a parent with more children than one Bulk request holds using a fixed number of fences', async () => {
+  const childIds = Array.from({ length: 200 }, (_, index) => `child-${index}`)
+  const configurationConditionChecks: unknown[] = []
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailArchivedIssueIds: childIds,
+    childRestoreGeneration: 3,
+    workItemRelations: childIds.map((childId) => ({
+      sourceWorkItemId: 'onboarding-friction',
+      type: 'child' as const,
+      targetWorkItemId: childId,
+    })),
+    issueUpdateHook(input) {
+      configurationConditionChecks.push(...input.configurationConditionChecks ?? [])
+    },
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { operation } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: true },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  })
+
+  expect(operation).toMatchObject({ status: 'succeeded' })
+  expect(calls.issueUpdates.map((update) => update.issueId)).toEqual(['onboarding-friction'])
+  expect(configurationConditionChecks).toHaveLength(2)
+  expect(configurationConditionChecks[1]).toMatchObject({
+    ConditionCheck: {
+      Key: { recordKey: 'CHILD_RESTORE#onboarding-friction' },
+      ConditionExpression: '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
+      ExpressionAttributeValues: { ':expectedGeneration': 3 },
+    },
+  })
+})
+
+test('keeps a hierarchy fence failure retryable so an explicit retry checks the hierarchy again', async () => {
+  let failFence = true
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailArchivedIssueIds: ['child-work-item'],
+    workItemRelations: [{
+      sourceWorkItemId: 'onboarding-friction',
+      type: 'child',
+      targetWorkItemId: 'child-work-item',
+    }],
+    issueUpdateHook() {
+      if (failFence) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemConfigurationRevisionConflict',
+          'Work Item configuration changed during the mutation.',
+        )
+      }
+    },
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { operation } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: true },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  })
+
+  expect(operation).toMatchObject({
+    status: 'failed',
+    items: [{ status: 'failed', errorCode: 'WorkItemHierarchyChanged', retryable: true }],
+  })
+  if (!operation || typeof operation !== 'object' || !('id' in operation) || typeof operation.id !== 'string') {
+    throw new Error('expected a stored Bulk operation')
+  }
+  failFence = false
+  const retried = await app.request(`/api/bulk-operations/${operation.id}/retry`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+  })
+  expect(retried.status).toBe(200)
+  expect(await retried.json()).toMatchObject({ status: 'succeeded', items: [{ status: 'succeeded' }] })
+  expect(calls.issueUpdates.map((update) => update.issueId)).toEqual(['onboarding-friction'])
+})
+
+test('restores a child under an active parent and records the restore on the parent', async () => {
+  const configurationConditionChecks: unknown[] = []
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    childRestoreGeneration: 2,
+    detailArchivedIssueIds: ['onboarding-friction'],
+    workItemRelations: [{
+      sourceWorkItemId: 'onboarding-friction',
+      type: 'parent',
+      targetWorkItemId: 'parent-work-item',
+    }],
+    issueUpdateHook(input) {
+      configurationConditionChecks.push(...input.configurationConditionChecks ?? [])
+    },
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { operation } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: false },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  })
+
+  expect(operation).toMatchObject({ status: 'succeeded' })
+  expect(calls.issueUpdates.map((update) => update.issueId)).toEqual(['onboarding-friction'])
+  expect(configurationConditionChecks).toHaveLength(3)
+  expect(configurationConditionChecks[1]).toMatchObject({
+    ConditionCheck: { Key: { issueId: 'parent-work-item' } },
+  })
+  expect(configurationConditionChecks[2]).toMatchObject({
+    Update: {
+      Key: { recordKey: 'CHILD_RESTORE#parent-work-item' },
+      UpdateExpression: 'SET #generation = :nextGeneration',
+      ExpressionAttributeValues: { ':expectedGeneration': 2, ':nextGeneration': 3 },
+    },
+  })
+})
+
+test('archives a parent together with its active child by archiving the child first', async () => {
+  const archivedIds: string[] = []
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailArchivedIssueIds: archivedIds,
+    workItemRelations: [
+      { sourceWorkItemId: 'onboarding-friction', type: 'child', targetWorkItemId: 'child-work-item' },
+      { sourceWorkItemId: 'child-work-item', type: 'parent', targetWorkItemId: 'onboarding-friction' },
+    ],
+    issueUpdateHook(input) {
+      archivedIds.push(input.issueId)
+    },
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { operation } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: true },
+    items: [
+      { teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 },
+      { teamId: 'core-team', workItemId: 'child-work-item', expectedRevision: 1 },
+    ],
+  })
+
+  expect(operation).toMatchObject({ status: 'succeeded' })
+  expect(calls.issueUpdates.map((update) => update.issueId))
+    .toEqual(['child-work-item', 'onboarding-friction'])
+})
+
+test('keeps the parent active when its child fails in the same archive operation', async () => {
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    workItemRelations: [
+      { sourceWorkItemId: 'onboarding-friction', type: 'child', targetWorkItemId: 'child-work-item' },
+      { sourceWorkItemId: 'child-work-item', type: 'parent', targetWorkItemId: 'onboarding-friction' },
+    ],
+    issueUpdateHook(input) {
+      if (input.issueId === 'child-work-item') {
+        throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item changed after it was selected.')
+      }
+    },
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { operation } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: true },
+    items: [
+      { teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 },
+      { teamId: 'core-team', workItemId: 'child-work-item', expectedRevision: 1 },
+    ],
+  })
+
+  expect(operation).toMatchObject({
+    status: 'failed',
+    items: [
+      { workItemId: 'onboarding-friction', status: 'failed', errorCode: 'WorkItemActiveChildren', retryable: true },
+      { workItemId: 'child-work-item', status: 'failed' },
+    ],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('restores a child together with its archived parent by restoring the parent first', async () => {
+  const archivedIds = ['onboarding-friction', 'parent-work-item']
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailArchivedIssueIds: archivedIds,
+    workItemRelations: [
+      { sourceWorkItemId: 'onboarding-friction', type: 'parent', targetWorkItemId: 'parent-work-item' },
+      { sourceWorkItemId: 'parent-work-item', type: 'child', targetWorkItemId: 'onboarding-friction' },
+    ],
+    issueUpdateHook(input) {
+      archivedIds.splice(archivedIds.indexOf(input.issueId), 1)
+    },
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { operation } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: false },
+    items: [
+      { teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 },
+      { teamId: 'core-team', workItemId: 'parent-work-item', expectedRevision: 1 },
+    ],
+  })
+
+  expect(operation).toMatchObject({ status: 'succeeded' })
+  expect(calls.issueUpdates.map((update) => update.issueId))
+    .toEqual(['parent-work-item', 'onboarding-friction'])
+})
+
+test('refuses to restore a child while its parent is archived', async () => {
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailArchivedIssueIds: ['onboarding-friction', 'parent-work-item'],
+    workItemRelations: [{
+      sourceWorkItemId: 'onboarding-friction',
+      type: 'parent',
+      targetWorkItemId: 'parent-work-item',
+    }],
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { preview } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: false },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  })
+
+  expect(preview).toMatchObject({
+    canApply: false,
+    items: [{ status: 'failed', errorCode: 'WorkItemParentArchived', retryable: true }],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('refuses a bulk undo that would restore a child while its parent stays archived', async () => {
+  const calls = configureFakeProjectClients(true, {
+    detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+    detailArchivedIssueIds: ['onboarding-friction', 'parent-work-item'],
+    teamIssueCount: 2,
+    workItemRelations: [{
+      sourceWorkItemId: 'onboarding-friction',
+      type: 'parent',
+      targetWorkItemId: 'parent-work-item',
+    }],
+  })
+  const operation: BulkOperation = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'bulk-archive-undo-parent',
+    workspaceId: 'user#demo@example.com',
+    actorMemberKey: 'demo@example.com',
+    revision: 1,
+    status: 'succeeded',
+    action: { type: 'archive', archived: true },
+    items: [{
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      expectedRevision: 1,
+      resultingRevision: 2,
+      status: 'succeeded',
+      retryable: false,
+      undoable: true,
+      undoPayload: { archivedAt: null, archivedBy: null },
+    }],
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake(operation).client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+  })
+
+  expect(response.status).toBe(200)
+  // The undo stays available, so it can run again once the parent is restored.
+  expect(await response.json()).toMatchObject({
+    status: 'partial',
+    items: [{ status: 'succeeded', errorCode: 'WorkItemParentArchived', retryable: true, undoable: true }],
+  })
+  expect(calls.issueUpdates).toEqual([])
 })
 
 test('rejects bulk undo that would re-archive a Work Item with a dependency', async () => {

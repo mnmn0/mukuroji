@@ -9,6 +9,7 @@ import {
   resolveTaskGanttColumnWidth,
   resolveTaskGanttDateSpan,
   resolveTaskGanttProgressPointX,
+  resolveTaskGanttProgressVarianceDays,
 } from '../src/tasks/model/taskGanttTimeline'
 import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
 import { taskViewStoryConfigurationsByTeam, taskViewStoryTasks } from '../src/tasks/ui/TaskView.stories.fixtures'
@@ -87,6 +88,22 @@ describe('task Gantt timeline scales', () => {
       .toBe(5 * 42)
     expect(resolveTaskGanttProgressPointX({ ...base, endDate: '2026-11-20', progressPercent: 10, startDate: '2026-10-22' }))
       .toBe(0)
+  })
+
+  test('tells how many days a row is behind or ahead on the progress line', () => {
+    // 2026-11-11 through 2026-11-30 is 20 days, and 9 of them pass before today 2026-11-20.
+    const base = { endDate: '2026-11-30', startDate: '2026-11-11', today: '2026-11-20' }
+
+    expect(resolveTaskGanttProgressVarianceDays({ ...base, progressPercent: 25 })).toBe(-4)
+    expect(resolveTaskGanttProgressVarianceDays({ ...base, progressPercent: 75 })).toBe(6)
+    expect(resolveTaskGanttProgressVarianceDays({ ...base, progressPercent: 45 })).toBe(0)
+    expect(resolveTaskGanttProgressVarianceDays({ ...base })).toBeUndefined()
+    expect(resolveTaskGanttProgressVarianceDays({ today: base.today, progressPercent: 40 })).toBeUndefined()
+    expect(resolveTaskGanttProgressVarianceDays({ ...base, endDate: '2026-11-15', progressPercent: 100 })).toBe(0)
+    expect(resolveTaskGanttProgressVarianceDays({ ...base, progressPercent: 0, startDate: '2026-11-25' })).toBe(0)
+    // A row starting today with no progress yet is on schedule, and one with none after 9 days is behind.
+    expect(resolveTaskGanttProgressVarianceDays({ ...base, progressPercent: 0, startDate: '2026-11-20' })).toBe(0)
+    expect(resolveTaskGanttProgressVarianceDays({ ...base, progressPercent: 0 })).toBe(-9)
   })
 
   test('renders the display controls, today line, and today column', () => {
