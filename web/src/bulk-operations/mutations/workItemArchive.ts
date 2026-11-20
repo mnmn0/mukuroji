@@ -5,6 +5,7 @@ import {
   isWorkItemArchiveOperationRetryable,
   readWorkItemArchiveOperationFailure,
   readWorkItemArchivePreviewFailure,
+  type WorkItemArchiveFailure,
   type WorkItemArchiveTarget,
 } from '../model/workItemArchive'
 
@@ -22,6 +23,22 @@ export type WorkItemArchiveMutationInput = {
   runner: MutationRequestRunner
   /** Message used when the server rejects the change without a message of its own. */
   fallbackErrorMessage: string
+  /** Returns a localized message for a failure code, or undefined to keep the server's message. */
+  localizeFailure?: (code: string | undefined) => string | undefined
+}
+
+/**
+ * Picks the message shown for a failed archive or restore.
+ *
+ * @param input - Mutation input with the fallback message and the localizer.
+ * @param failure - Failure the server reported.
+ * @returns The localized message, the server's message, or the fallback.
+ */
+function describeWorkItemArchiveFailure(
+  input: WorkItemArchiveMutationInput,
+  failure: WorkItemArchiveFailure,
+): string {
+  return input.localizeFailure?.(failure.code) || failure.message || input.fallbackErrorMessage
 }
 
 /**
@@ -45,7 +62,7 @@ export async function applyWorkItemArchive(input: WorkItemArchiveMutationInput):
   )
   const previewFailure = readWorkItemArchivePreviewFailure(preview)
   if (previewFailure !== undefined) {
-    throw new Error(previewFailure || input.fallbackErrorMessage)
+    throw new Error(describeWorkItemArchiveFailure(input, previewFailure))
   }
   const operation = await input.runner.run(
     `${operationKey}:apply`,
@@ -67,6 +84,6 @@ export async function applyWorkItemArchive(input: WorkItemArchiveMutationInput):
     : operation
   const operationFailure = readWorkItemArchiveOperationFailure(settledOperation)
   if (operationFailure !== undefined) {
-    throw new Error(operationFailure || input.fallbackErrorMessage)
+    throw new Error(describeWorkItemArchiveFailure(input, operationFailure))
   }
 }

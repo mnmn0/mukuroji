@@ -35,33 +35,64 @@ export function createWorkItemArchiveRequest(
   }
 }
 
+/** Why a single archive or restore did not change the Work Item. */
+export type WorkItemArchiveFailure = {
+  /** Stable server error code, when the server sent one. */
+  code?: string
+  /** Safe server message; empty when the server sent none. */
+  message: string
+}
+
 /**
  * Reads why a single-item archive preview cannot be applied.
  *
  * @param preview - Preview returned for a one-item archive request.
- * @returns The server's safe error message, or undefined when the preview can be applied.
+ * @returns The server's failure, or undefined when the preview can be applied.
  */
 export function readWorkItemArchivePreviewFailure(
   preview: BulkOperationPreview,
-): string | undefined {
+): WorkItemArchiveFailure | undefined {
   if (preview.canApply) return undefined
-  return preview.items.find((item) => item.errorMessage)?.errorMessage ?? ''
+  const item = preview.items.find((candidate) => candidate.errorCode || candidate.errorMessage)
+  return {
+    ...(item?.errorCode ? { code: item.errorCode } : {}),
+    message: item?.errorMessage ?? '',
+  }
 }
 
 /**
  * Reads why a single-item archive operation did not change the Work Item.
  *
  * @param operation - Operation returned by applying a one-item archive request.
- * @returns The server's safe error message, or undefined when the item succeeded.
+ * @returns The server's failure, or undefined when the item succeeded.
  */
 export function readWorkItemArchiveOperationFailure(
   operation: BulkOperation,
-): string | undefined {
+): WorkItemArchiveFailure | undefined {
   const item = operation.items[0]
   if (item?.status === 'succeeded') return undefined
-  return item?.errorMessage ?? ''
+  return {
+    ...(item?.errorCode ? { code: item.errorCode } : {}),
+    message: item?.errorMessage ?? '',
+  }
 }
 
+/**
+ * Picks the localized message of an archive failure that the hierarchy rules caused.
+ *
+ * The server refuses to archive a parent while a child is not archived, and to restore a child
+ * while its parent is archived. Its own messages are English, so these two are shown localized.
+ *
+ * @param code - Stable server error code of the failure.
+ * @returns The message key, or undefined when the failure keeps the server's message.
+ */
+export function readWorkItemArchiveFailureMessageKey(
+  code: string | undefined,
+): 'issues.archive.activeChildren' | 'issues.archive.parentArchived' | undefined {
+  if (code === 'WorkItemActiveChildren') return 'issues.archive.activeChildren'
+  if (code === 'WorkItemParentArchived') return 'issues.archive.parentArchived'
+  return undefined
+}
 
 /**
  * Reports whether a single-item archive operation failed in a way the retry endpoint can repeat.

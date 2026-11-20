@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { readWorkItemArchiveFailureMessageKey } from '../src/bulk-operations/model/workItemArchive'
 import { applyWorkItemArchive } from '../src/bulk-operations/mutations/workItemArchive'
 import { selectArchivedWorkItems } from '../src/issues/model/archivedWorkItems'
 import { createMutationRequestRunner } from '../src/shared/api/mutationHeaders'
@@ -82,6 +83,42 @@ describe('single Work Item archive', () => {
 
     await expect(runArchive(true)).rejects.toThrow('Work Item changed after it was selected.')
     expect(requests).toHaveLength(1)
+  })
+
+  test('shows the localized message when a child keeps the parent from being archived', async () => {
+    installFetchSequence([
+      {
+        canApply: false,
+        items: [{
+          status: 'failed',
+          errorCode: 'WorkItemActiveChildren',
+          errorMessage: 'A child Work Item is not archived.',
+        }],
+        operationToken: 'preview-token',
+      },
+    ])
+
+    await expect(applyWorkItemArchive({
+      accessToken: 'token',
+      archived: true,
+      fallbackErrorMessage: 'fallback',
+      localizeFailure: (code) => {
+        const key = readWorkItemArchiveFailureMessageKey(code)
+        return key ? `localized:${key}` : undefined
+      },
+      runner: createMutationRequestRunner(),
+      target,
+      workspaceId: 'workspace-1',
+    })).rejects.toThrow('localized:issues.archive.activeChildren')
+  })
+
+  test('maps only the hierarchy failures to localized messages', () => {
+    expect(readWorkItemArchiveFailureMessageKey('WorkItemActiveChildren'))
+      .toBe('issues.archive.activeChildren')
+    expect(readWorkItemArchiveFailureMessageKey('WorkItemParentArchived'))
+      .toBe('issues.archive.parentArchived')
+    expect(readWorkItemArchiveFailureMessageKey('WorkItemRevisionConflict')).toBeUndefined()
+    expect(readWorkItemArchiveFailureMessageKey(undefined)).toBeUndefined()
   })
 
   test('reports a failed apply with the fallback message when the server gives none', async () => {

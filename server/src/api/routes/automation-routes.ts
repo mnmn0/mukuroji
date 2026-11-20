@@ -56,6 +56,7 @@ import { FileProofingError } from '../../modules/files/file-proofing'
 import {
   WorkItemConfigurationError,
   validateWorkItemConfiguration,
+  type WorkItemConfigurationTransactionItems,
 } from '../../modules/work-items/work-item-configuration'
 import {
   AUTOMATION_TEMPLATE_APPLICATION_LEASE_MS,
@@ -139,6 +140,7 @@ import {
   toFileProofingErrorResponse,
 } from '../shared/file-approval-access'
 import { createAgentRunReleaseOnRemovalItems } from '../shared/agent-run-access'
+import { prepareWorkItemArchiveHierarchyConditionChecks } from '../shared/work-item-archive-hierarchy'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
   readWorkItemActualDateCorrection,
@@ -744,6 +746,46 @@ function isTerminalTemplateApplicationError(
 }
 
 /**
+ * Checks that archiving or restoring one Bulk item keeps the Work Item hierarchy whole.
+ *
+ * Other items of the same operation in the same Team are left out of the check, so a parent can
+ * be archived together with its children and a child restored together with its parent.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param target - Work Item being archived or restored.
+ * @param archived - True when the item is archived, false when it is restored.
+ * @param operationItems - Every target of the Bulk operation.
+ * @returns Condition checks to commit with the item's update.
+ * @throws AutomationError `conflict` when a child is still active or the parent is archived.
+ */
+async function prepareBulkArchiveHierarchyConditionChecks(
+  directoryId: string,
+  target: { teamId: string, workItemId: string },
+  archived: boolean,
+  operationItems: readonly { teamId: string, workItemId: string }[],
+): Promise<WorkItemConfigurationTransactionItems> {
+  try {
+    return await prepareWorkItemArchiveHierarchyConditionChecks(
+      {
+        directoryId,
+        teamId: target.teamId,
+        workItemId: target.workItemId,
+        archived,
+        sameOperationWorkItemIds: new Set(operationItems
+          .filter((item) => item.teamId === target.teamId && item.workItemId !== target.workItemId)
+          .map((item) => item.workItemId)),
+      },
+      workItemDependencies,
+    )
+  } catch (error) {
+    if (error instanceof WorkItemConfigurationError && error.status === 409) {
+      throw new AutomationError('conflict', error.code, error.message)
+    }
+    throw error
+  }
+}
+
+/**
  * Converts Planning failures into the stable Automation action error contract.
  *
  * @param error - Planning failure raised while preparing one bulk mutation.
@@ -882,10 +924,17 @@ function createApiBulkOperationAdapter(
           throw error
         }
       }
+      const configurationConditionChecks = await prepareBulkArchiveHierarchyConditionChecks(
+        principal.directoryId,
+        loaded.item,
+        action.archived,
+        request.items,
+      )
       body = {
         archivedAt: action.archived ? new Date().toISOString() : null,
         archivedBy: action.archived ? principal.userKey : null,
         expectedRevision: loaded.item.expectedRevision,
+        configurationConditionChecks,
         ...(authorizationSnapshot ? { authorizationSnapshot } : {}),
       }
     } else {
@@ -1191,8 +1240,21 @@ function createApiBulkOperationAdapter(
             actualDateTransitionAt,
           )
         : undefined
+      // Undoing an archive restores the Work Item and undoing a restore archives it again, so the
+      // undo keeps the hierarchy whole the same way the operation itself did.
+      const archiveHierarchyConditionChecks = operation.action.type === 'archive'
+        ? await prepareBulkArchiveHierarchyConditionChecks(
+            principal.directoryId,
+            item,
+            restoresArchive,
+            operation.items,
+          )
+        : []
       let mutationBody: UpdateTeamIssueRequestBody = {
         ...configuredBody,
+        ...(archiveHierarchyConditionChecks.length > 0
+          ? { configurationConditionChecks: archiveHierarchyConditionChecks }
+          : {}),
         ...(actualDateRequest.correction ? { actualDateTransitionAt } : {}),
         ...(actualDateCorrection ? { actualDateCorrection } : {}),
       }

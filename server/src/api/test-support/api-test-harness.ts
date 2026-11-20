@@ -1511,6 +1511,8 @@ function configureFakeProjectClients(
     /** Detail fake が返す legacy search custom fields です。 */
     /** Detail fake が TeamIssueNotFound を返す Work Item ID です。 */
     detailMissingIssueIds?: string[]
+    /** Work Item IDs the detail fake returns as archived. */
+    detailArchivedIssueIds?: string[]
     /** Work Item detail read の障害を再現する error です。 */
     detailReadError?: Error
     /** Work Item detail read の同時実行を観測または制御する hook です。 */
@@ -3103,6 +3105,9 @@ function configureFakeProjectClients(
             dueDate: deriveWorkItemScheduleDueDate(detailSchedule),
             schedule: detailSchedule,
             priority: 'high',
+            ...(options.detailArchivedIssueIds?.includes(issueId)
+              ? { archivedAt: '2026-06-09T00:00:00.000Z', archivedBy: 'demo@example.com' }
+              : {}),
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: options.detailUpdatedAts?.[detailReadIndex] ??
               '2026-06-08T00:00:00.000Z',
