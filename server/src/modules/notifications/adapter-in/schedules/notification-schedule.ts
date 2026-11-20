@@ -1157,6 +1157,7 @@ function createTimesheetReminderAuditEvent(
     entityId,
     TIMESHEET_REMINDER_EVENT_TYPE,
     candidate.memberKey,
+    candidate.projectId,
     String(candidate.reminderDays),
     String(candidate.cycle),
   ].join('\0')).digest('hex')
@@ -1172,7 +1173,7 @@ function createTimesheetReminderAuditEvent(
     request: {
       method: 'SCHEDULE',
       path: '/internal/notification-schedule',
-      body: { entityId, reason: 'timesheet', cycle: candidate.cycle },
+      body: { entityId, projectId: candidate.projectId, reason: 'timesheet', cycle: candidate.cycle },
     },
     source: {
       kind: 'system',
@@ -1196,7 +1197,7 @@ function createTimesheetReminderAuditEvent(
     metadata: {
       actorMemberKey: scheduleActorMemberKey,
       teamId: candidate.teamId,
-      // Recipients are authorized against the oldest entry's Project, which the timesheet lists.
+      // Recipients are authorized against the entries' Project, which the timesheet lists.
       projectId: candidate.projectId,
       deepLink: `/teams/${encodeURIComponent(candidate.teamId)}/timesheet?${search.toString()}`,
       timeEntryIds: candidate.entryIds,
