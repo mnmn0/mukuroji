@@ -115,8 +115,8 @@ const LIST_OR_QUOTE_START = /^ {0,3}(?:[-*+][ \t]|\d{1,9}[.)][ \t]|>)/u
 /** Thematic break line. */
 const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/u
 
-/** Table delimiter row. */
-const TABLE_DELIMITER = /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/u
+/** One cell of a table delimiter row, such as `---` or `:-:`. */
+const DELIMITER_CELL = /^:?-+:?$/u
 
 /** Code-fence language identifiers the server accepts. */
 const SAFE_LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u
@@ -423,7 +423,13 @@ function isPipeLine(line: string): boolean {
  * @returns Whether the line is a delimiter row with at least one pipe.
  */
 function isDelimiterRow(line: string): boolean {
-  return line.includes('|') && TABLE_DELIMITER.test(line)
+  if (!line.includes('|') || /^ {4}/u.test(line)) return false
+  let trimmed = line.trim()
+  if (trimmed.startsWith('|')) trimmed = trimmed.slice(1)
+  if (trimmed.endsWith('|')) trimmed = trimmed.slice(0, -1)
+  return trimmed
+    .split('|')
+    .every((cell) => DELIMITER_CELL.test(cell.trim()))
 }
 
 /**

@@ -251,6 +251,13 @@ describe('Markdown import', () => {
     expect(performance.now() - started).toBeLessThan(1_000)
   })
 
+  test('rejects a malformed delimiter row quickly', () => {
+    const started = performance.now()
+    const blocks = blocksOf(`| a |\n| ---${' '.repeat(40_000)}x`)
+    expect(blocks[0]?.type).toBe('paragraph')
+    expect(performance.now() - started).toBeLessThan(1_000)
+  })
+
   test('rejects a long inline code span quickly', () => {
     const started = performance.now()
     const blocks = blocksOf(`\`\`\`${'a'.repeat(40_000)}\`\`\``)
