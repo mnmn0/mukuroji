@@ -7372,7 +7372,7 @@ test.describe('authenticated task page', () => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       workspaceWorkItemConfiguration: workspaceWorkItemConfigurationFixture,
     })
-    await page.goto('/settings')
+    await page.goto('/settings/team')
     const requestCounts = getMockRequestCounts(page)
     const configurationPanel = page.getByTestId('work-item-configuration-panel')
 
@@ -11948,6 +11948,40 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('my-tasks-kanban')).toBeVisible()
   })
 
+  test('Issue #431: 設定を個人・Workspace 管理・Team に分け、各区分を URL で直接開ける', async ({ page }) => {
+    await page.goto('/settings')
+
+    const nav = page.getByTestId('settings-section-nav')
+    await expect(nav.getByTestId('settings-section-personal')).toHaveAttribute('aria-current', 'page')
+    await expect(page.getByTestId('font-size-preference-control')).toBeVisible()
+    await expect(page.getByTestId('settings-profile')).toBeVisible()
+    await expect(page.getByTestId('workspace-access-panel')).toHaveCount(0)
+    await expect(page.getByTestId('work-item-configuration-panel')).toHaveCount(0)
+
+    await nav.getByTestId('settings-section-workspace').click()
+    await expect(page).toHaveURL('/settings/workspace')
+    await expect(nav.getByTestId('settings-section-workspace')).toHaveAttribute('aria-current', 'page')
+    await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
+    await expect(page.getByTestId('enterprise-security-settings-link')).toBeVisible()
+    await expect(page.getByTestId('font-size-preference-control')).toHaveCount(0)
+
+    await nav.getByTestId('settings-section-team').click()
+    await expect(page).toHaveURL('/settings/team')
+    await expect(page.getByTestId('work-item-configuration-panel')).toBeVisible()
+    await expect(page.getByTestId('workspace-access-panel')).toHaveCount(0)
+
+    await page.goto('/settings/workspace')
+    await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
+
+    await page.goto('/settings/personal')
+    await expect(page.getByTestId('font-size-preference-control')).toBeVisible()
+
+    // The server returns this URL after connector OAuth, so it must keep opening the Developer Platform.
+    await page.goto('/settings?developerSection=connectors')
+    await expect(nav.getByTestId('settings-section-workspace')).toHaveAttribute('aria-current', 'page')
+    await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
+  })
+
   test('設定画面で通知 channel・frequency・quiet hours を保存できる', async ({ page }) => {
     const requestCounts = getMockRequestCounts(page)
 
@@ -12027,7 +12061,7 @@ test.describe('authenticated task page', () => {
       await route.fulfill({ json: { member: {} } })
     })
 
-    await page.goto('/settings')
+    await page.goto('/settings/workspace')
 
     await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
     await expect(page.getByTestId('workspace-invitation-invitation-failed')).toContainText('配信失敗')
@@ -12076,7 +12110,7 @@ test.describe('authenticated task page', () => {
       await route.fulfill({ status: 202, json: { sent: true } })
     })
 
-    await page.goto('/settings')
+    await page.goto('/settings/workspace')
 
     const member = page.getByTestId('workspace-member-sato-example-com')
     await member.getByRole('button', { name: 'パスワード再設定を送る' }).click()
@@ -12108,7 +12142,7 @@ test.describe('authenticated task page', () => {
       await route.fulfill({ json: { reset: true } })
     })
 
-    await page.goto('/settings')
+    await page.goto('/settings/workspace')
 
     const member = page.getByTestId('workspace-member-sato-example-com')
     await member.getByRole('button', { name: 'MFAをリセット' }).click()
