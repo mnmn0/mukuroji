@@ -1618,7 +1618,7 @@ export function TaskDetailPane({
           </div>
         </div>
         {issue && !isRetainedDetail ? (
-          <TaskHandoffPanel configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+          <TaskHandoffPanel accessToken={accessToken} configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
         ) : null}
         {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
         {!hasOverviewSection ? renderWorkItemTypeControl() : null}

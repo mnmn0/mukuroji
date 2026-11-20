@@ -92,7 +92,7 @@ function RevisionHarness(props: TaskHandoffPanelProps) {
   )
 }
 
-/** Clears a successful clipboard message when a newer saved revision arrives. */
+/** Clears a successful clipboard message when a newer saved revision arrives, keeping the disclosure open. */
 export const RevisionChanged: Story = {
   render: (args) => <RevisionHarness {...args} />,
   play: async ({ canvasElement }) => {
@@ -105,7 +105,8 @@ export const RevisionChanged: Story = {
       await expect(canvas.getByRole('status')).toHaveTextContent('コピーしました')
       await userEvent.click(canvas.getByRole('button', { name: 'Load newer revision' }))
       await expect(canvas.queryByRole('status')).toBeNull()
-      await userEvent.click(canvas.getByText('エージェントへ引き継ぐ'))
+      // The disclosure stays open across a newer snapshot, so the refreshed brief is visible without toggling it.
+      await expect(canvas.getByTestId('task-handoff-panel')).toHaveAttribute('open')
       const preview = canvas.getByRole('textbox', { name: '引き継ぎ内容' })
       if (!(preview instanceof HTMLTextAreaElement)) throw new Error('Expected a handoff preview textarea')
       await expect(preview.value).toContain('取得済み revision: 2')
@@ -133,7 +134,7 @@ export const PendingCopyRevisionChanged: Story = {
       await expect(canvas.getByRole('button', { name: 'コピー中…' })).toBeDisabled()
       await userEvent.click(canvas.getByRole('button', { name: 'Load newer revision' }))
       finishCopy?.()
-      await userEvent.click(canvas.getByText('エージェントへ引き継ぐ'))
+      await expect(canvas.getByTestId('task-handoff-panel')).toHaveAttribute('open')
       await expect(canvas.queryByRole('status')).toBeNull()
       await expect(canvas.getByRole('button', { name: '引き継ぎ内容をコピー' })).toBeEnabled()
       const preview = canvas.getByRole('textbox', { name: '引き継ぎ内容' })
