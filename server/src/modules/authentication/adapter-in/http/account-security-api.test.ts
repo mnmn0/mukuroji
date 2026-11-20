@@ -710,6 +710,9 @@ test('records the administrator password reset and signs the member out around t
       const member = (await getTestAppDependencies().workspace.workspaceAccess.getMember(workspaceId, target))!
       return { member, alreadyRecorded: false, completed: false }
     },
+    async revokeMemberSignIns(revokedWorkspaceId, memberKey) {
+      events.push(`revoke:${revokedWorkspaceId}:${memberKey}`)
+    },
   })
   overrideCognito({
     async adminResetUserPassword(userId) {
@@ -723,11 +726,17 @@ test('records the administrator password reset and signs the member out around t
   const response = await sendJson('/api/workspace/members/sato%40example.com/password-reset', {}, 'test-token')
 
   expect(response.status).toBe(202)
+  // SSO sessions that the API verifies itself are refused from the sign-out on as well, including
+  // a sign-in that completed while Cognito was signing the user out.
   expect(events).toEqual([
     'audit',
+    `revoke:${workspaceId}:sato@example.com`,
     'sign-out:sato@example.com',
+    `revoke:${workspaceId}:sato@example.com`,
     'reset:sato@example.com',
+    `revoke:${workspaceId}:sato@example.com`,
     'sign-out:sato@example.com',
+    `revoke:${workspaceId}:sato@example.com`,
   ])
   expect(recorded[0]).toMatchObject({
     actor: 'demo@example.com',

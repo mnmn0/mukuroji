@@ -65,6 +65,7 @@ export {
   type EnterpriseSessionActivityClient,
   type EnterpriseSessionActivityInput,
   type EnterpriseSessionAssuranceInput,
+  type EnterpriseSignInRevocationInput,
 } from './enterprise-session-activity'
 export {
   EnterpriseSsoError,

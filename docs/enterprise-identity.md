@@ -179,6 +179,19 @@ runtime 認可は current provider revision と一致する server-side record �
 `amr` に同じ予約 prefix を偽装しても採用しません。Provider revision の更新は既存 state だけでなく
 以前の SSO session assurance も無効化します。
 
+SSO client の access token は `aws.cognito.signin.user.admin` scope を持たないため、Cognito
+`GetUser` では読めません（scope 不足で拒否されます）。API は SSO client の token に限り、User Pool の
+JWKS（`<issuer>/.well-known/jwks.json`）で RS256 署名を検証し、issuer、SSO client ID、`token_use`、
+`exp` を確かめてから `AdminGetUser` で user を読みます。無効化・削除された user、`sub` が一致しない
+user は拒否します。SSO client に admin scope を足す方式は、SSO user が自分の属性を
+`UpdateUserAttributes` で書き換えられるようになるため採りません。
+
+この検証は Cognito 側の失効を見ないため、SSO client の token は SSO の強制有無にかかわらず、
+code exchange が記録した server-side SSO marker を常に要求します。Cognito `/oauth2/token` で直接
+引き換えた token（nonce・`email_verified`・state の email 一致を通っていない token）は marker がなく
+`401 EnterpriseSsoSessionRequired` になります。さらに member の email domain が verified で、その
+domain に結び付いた provider の current revision の marker であることも要求します。
+
 Identity provider の設定変更は
 `PUT /api/enterprise/security/identity-provider` で行います。Provider を `active` にする前に
 issuer/audience、redirect URL、署名 metadata を検証します。Cognito 側で必要な設定は以下です。
@@ -338,6 +351,16 @@ client の設定）で、「ログイン状態を保持」を選ぶと localStor
   再ログインを求めます。Deactivate された member は更新時に拒否されます。
 - Sign-out は `POST /api/auth/logout` で refresh token を Cognito の RevokeToken で失効させます。
   同じ refresh token から発行された access token も失効するので、sign-out 後は再開できません。
+  SSO session では API が token を署名で検証するため Cognito の失効が届きません。そこで sign-out 時に
+  その sign-in の `origin_jti` を server-side に失効として記録し、更新前後のすべての access token を
+  拒否します。記録は Cognito の access token 有効期間の上限（1日）だけ保持し、後の sign-out で
+  短くなることはありません。提示された access token が期限切れでも（別 tab が新しい token を持つ
+  場合に備えて）署名・issuer・client を確かめたうえで記録します。
+- Directory deprovisioning は Cognito user を無効化するので、SSO の token も `AdminGetUser` の時点で
+  拒否されます。同時に member に `signInsRevokedAt` を記録し、再有効化された後も、それより前に
+  始まった sign-in（`auth_time`）の SSO token は拒否します（Cognito の global sign-out と同じ扱い）。
+  管理者による password reset の「全 session からの sign-out」も同じ `signInsRevokedAt` を記録します。
+  Cognito の global sign-out の前と後に 1 回ずつ書くので、sign-out の途中で終わった SSO sign-in も拒否されます。
 - Break-glass activation は access token ごとに結び付くので、更新後の token には引き継ぎません。
 
 IP policy の誤設定に備えて、保存前に caller の現在 IP への影響を preview します。ただし

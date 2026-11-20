@@ -52,7 +52,7 @@ function createPorts(
     async disableAuthenticator(memberKey) {
       calls.push(`disable:${memberKey}`)
     },
-    async signOutEverywhere(memberKey) {
+    async signOutEverywhere(_workspaceId, memberKey) {
       calls.push(`sign-out:${memberKey}`)
     },
     reportFailure(message) {
