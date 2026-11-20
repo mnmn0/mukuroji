@@ -18,7 +18,7 @@ import {
 } from '../../../shared/api/jsonValidation'
 
 const entryStatuses = new Set<string>(['draft', 'submitted', 'approved', 'rejected', 'locked'])
-const historyActions = new Set<string>(['created', 'updated', 'submitted', 'approved', 'rejected', 'locked'])
+const historyActions = new Set<string>(['created', 'updated', 'submitted', 'approved', 'rejected', 'locked', 'returned'])
 
 /**
  * Returns whether a value is a time entry lifecycle state.
@@ -194,6 +194,7 @@ function readHistoryAction(value: string): TimeEntryHistory['action'] {
     case 'approved':
     case 'rejected':
     case 'locked':
+    case 'returned':
       return value
     default:
       return 'created'

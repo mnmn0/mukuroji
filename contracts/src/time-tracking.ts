@@ -130,8 +130,11 @@ export type TimeEntryHistory = {
   id: string
   /** Time entry identifier. */
   entryId: string
-  /** Lifecycle operation that created the record. */
-  action: 'created' | 'updated' | 'submitted' | 'approved' | 'rejected' | 'locked'
+  /**
+   * Lifecycle operation that created the record. `returned` is a manager sending an approved or
+   * locked entry back to `rejected` so the member can correct it; it always carries a reason.
+   */
+  action: 'created' | 'updated' | 'submitted' | 'approved' | 'rejected' | 'locked' | 'returned'
   /** Previous lifecycle state when applicable. */
   fromStatus?: TimeEntryStatus
   /** New lifecycle state when applicable. */
@@ -142,6 +145,30 @@ export type TimeEntryHistory = {
   reason?: string
   /** History creation timestamp. */
   occurredAt: string
+}
+
+/**
+ * A closed month of a Team's time entries.
+ *
+ * While a month is closed, entries whose interval overlaps it cannot be created, edited, or moved
+ * through the lifecycle, except for locking approved entries. A manager reopens the month with a
+ * reason.
+ */
+export type TimePeriodClose = {
+  /** Contract schema version. */
+  schemaVersion: typeof TIME_TRACKING_SCHEMA_VERSION
+  /** Owning Workspace identifier. */
+  workspaceId: string
+  /** Team whose entries the close applies to. */
+  teamId: string
+  /** Closed calendar month as `YYYY-MM`. */
+  month: string
+  /** IANA timezone that defines the first and last instant of the month. */
+  timeZone: string
+  /** Manager who closed the month. */
+  closedBy: string
+  /** Close timestamp. */
+  closedAt: string
 }
 
 /** A budget for a Team or Project and optional local-date period. */
