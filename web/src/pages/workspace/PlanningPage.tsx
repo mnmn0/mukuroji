@@ -99,7 +99,11 @@ import {
   type ProjectDirectoryTeam,
   type ProjectMemberRole,
 } from '../../projects/api'
-import { usePlanningProjectRoles } from '../../projects/queries/useProjectMembers'
+import {
+  useActiveDirectoryMembers,
+  usePlanningProjectRoles,
+} from '../../projects/queries/useProjectMembers'
+import { formatProjectMemberOption } from '../../issues/model/teamIssueDisplay'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
 import { createWorkItemDependencyMutationId } from '../../work-items/model/workItemDependencies'
 import {
@@ -247,6 +251,14 @@ export function PlanningPage() {
     [selectedUpdateTarget, snapshot, teams, updateHistory.data?.updates],
   )
   const canManagePlanning = canManageAnyPlanningScope(user, planningAccess)
+  const ownerMembers = useActiveDirectoryMembers(accessToken, teams, canManagePlanning)
+  const ownerOptions = useMemo(
+    () => (ownerMembers.data?.members ?? []).map((member) => ({
+      memberKey: member.id,
+      label: formatProjectMemberOption(member),
+    })),
+    [ownerMembers.data?.members],
+  )
   const archive = usePlanningArchive({
     accessToken,
     canManageEntity: (entity) => canManagePlanningScope(user, entity, planningAccess),
@@ -665,6 +677,7 @@ export function PlanningPage() {
             canUpdatePlanningWorkItemLink(user, workItem, planningAccess)}
           createScopeTeams={manageableCreateScopeTeams}
           directoryTeams={teams}
+          ownerOptions={ownerOptions}
           onRetry={loadErrorMessage && !mutationErrorMessage
             ? () => void mutatePlanning()
             : undefined}
