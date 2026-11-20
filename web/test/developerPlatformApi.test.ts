@@ -20,6 +20,7 @@ import {
   dryRunDeveloperImport,
   getDeveloperPlatformResources,
   getPersonalCredentialAdministration,
+  listAvailableDeveloperConnectorProviders,
   listDeveloperExternalLinks,
   listDeveloperSyncConflicts,
   replayDeveloperWebhookDelivery,
@@ -104,6 +105,23 @@ describe('Developer Platform API', () => {
     expect(requests[0]?.init.headers).toMatchObject({
       Authorization: 'Bearer access-token',
     })
+  })
+
+  test('lists the connector providers configured in the environment', async () => {
+    const requests = installFetchRecorder([
+      { provider: 'github', category: 'source-control', name: 'GitHub', capabilities: [] },
+    ])
+
+    await expect(listAvailableDeveloperConnectorProviders('access-token'))
+      .resolves.toEqual(['github'])
+    expect(requests.map(({ url }) => url)).toEqual(['/api/developer/connectors'])
+  })
+
+  test('rejects a connector catalog response without provider identifiers', async () => {
+    installFetchRecorder([{ name: 'GitHub' }])
+
+    await expect(listAvailableDeveloperConnectorProviders('access-token'))
+      .rejects.toBeInstanceOf(DeveloperPlatformApiError)
   })
 
   test('gets the personal credential policy and member-issued key IDs separately', async () => {

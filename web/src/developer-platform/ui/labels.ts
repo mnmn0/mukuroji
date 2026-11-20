@@ -1,4 +1,4 @@
-import type { Locale } from '../../shared/i18n/i18n'
+import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import type { DeveloperPlatformLabels } from './DeveloperPlatformView'
 
 /**
@@ -11,6 +11,7 @@ export function createDeveloperPlatformLabels(
   locale: Locale,
 ): DeveloperPlatformLabels {
   const ja = locale === 'ja'
+  const t = createTranslator(locale)
 
   return {
     eyebrow: ja ? '開発者プラットフォーム' : 'Developer platform',
@@ -390,6 +391,7 @@ export function createDeveloperPlatformLabels(
         : 'Member-issued agent keys',
       apiKeysEmpty: ja ? 'API key はまだありません' : 'No API keys yet',
       connectors: ja ? 'Connector catalog' : 'Connector catalog',
+      connectorCatalogEmpty: t('connectors.catalog.emptyTitle'),
       connectorSearchEmpty: ja
         ? '一致する resource がありません'
         : 'No matching resources',
@@ -434,7 +436,11 @@ export function createDeveloperPlatformLabels(
       connectorConflict: ja
         ? '同期は一時停止中です。上の同期競合一覧から差分を確認して復旧してください。'
         : 'Synchronization is paused. Review the field differences in the sync conflict list above to recover it.',
+      connectorAvailabilityError: t('connectors.catalog.availabilityError'),
+      connectorAvailabilityLoading: t('connectors.catalog.availabilityLoading'),
+      connectorCatalogEmpty: t('connectors.catalog.emptyDescription'),
       connectorCount: ja ? '{count} account' : '{count} accounts',
+      connectorNotConfigured: t('connectors.catalog.notConfigured'),
       connectors: ja
         ? 'Provider と mapping 対象を検索し、接続または復旧します。'
         : 'Search providers and the resources they map, then connect or recover an installation.',

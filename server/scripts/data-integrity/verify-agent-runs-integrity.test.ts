@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { GetCommand } from '@aws-sdk/lib-dynamodb'
 import {
+  createWorkItemLookup,
   parseAgentRunsIntegrityCliArguments,
   runAgentRunsIntegrityCli,
   type AgentRunsIntegrityCliDependencies,
@@ -69,11 +71,64 @@ describe('parseAgentRunsIntegrityCliArguments', () => {
     [[...baseArguments, '--team', 'no-separator']],
     [[...baseArguments, '--team', 'a/b/c']],
     [[...baseArguments, '--profile', 'a', '--profile', 'b']],
+    [[...baseArguments, '--work-items-table', 'x']],
+    [[...baseArguments, '--work-items-table', 'mukuroji-work-items', '--work-items-table', 'mukuroji-work-items']],
     [['check', '--region', 'nowhere', '--table', 'mukuroji-agent-runs', '--page-size', '1', '--max-pages', '1', '--max-items', '1']],
     [['check', '--region', 'ap-northeast-1', '--table', 'mukuroji-agent-runs', '--page-size', '10', '--max-pages', '1', '--max-items', '11']],
     [['delete']],
   ])('rejects invalid arguments %#', (arguments_) => {
     expect(() => parseAgentRunsIntegrityCliArguments(arguments_)).toThrow()
+  })
+})
+
+describe('parseAgentRunsIntegrityCliArguments --work-items-table', () => {
+  test('parses the Work Items table', () => {
+    expect(parseAgentRunsIntegrityCliArguments([...baseArguments, '--work-items-table', 'mukuroji-work-items'])).toMatchObject({
+      tableName: 'mukuroji-agent-runs',
+      workItemsTableName: 'mukuroji-work-items',
+    })
+  })
+})
+
+describe('createWorkItemLookup', () => {
+  const workItem = { directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1' }
+
+  /**
+   * Reads the Work Item through a lookup whose client returns one fixed Get response.
+   *
+   * @param item - Item the Get returns, or undefined for none.
+   * @returns The state and the sent commands.
+   */
+  async function read(item: Record<string, unknown> | undefined) {
+    const commands: unknown[] = []
+    const lookup = createWorkItemLookup({
+      send: async (command) => {
+        commands.push(command)
+        return item === undefined ? {} : { Item: item }
+      },
+    }, 'mukuroji-work-items')
+    return { state: await lookup.read(workItem), commands }
+  }
+
+  test('reads the key and archive time with a strongly consistent Get', async () => {
+    const { state, commands } = await read({ issueId: 'task-1' })
+    expect(state).toEqual({ kind: 'present', archived: false })
+    const command = commands[0]
+    if (!(command instanceof GetCommand)) throw new Error('Expected a Get.')
+    expect(command.input).toEqual({
+      TableName: 'mukuroji-work-items',
+      Key: { directoryTeamId: 'workspace-1#team#core', issueId: 'task-1' },
+      ConsistentRead: true,
+      ProjectionExpression: '#issueId, #archivedAt',
+      ExpressionAttributeNames: { '#issueId': 'issueId', '#archivedAt': 'archivedAt' },
+    })
+  })
+
+  test('classifies missing, archived, and malformed rows', async () => {
+    expect((await read(undefined)).state).toEqual({ kind: 'missing' })
+    expect((await read({ issueId: 'task-1', archivedAt: '2026-10-02T00:00:00.000Z' })).state).toEqual({ kind: 'present', archived: true })
+    expect((await read({ issueId: 'task-2' })).state).toEqual({ kind: 'malformed' })
+    expect((await read({ issueId: 'task-1', archivedAt: null })).state).toEqual({ kind: 'malformed' })
   })
 })
 
