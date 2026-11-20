@@ -15,6 +15,8 @@ import {
   ANALYTICS_SCHEDULE_SHARD_COUNT,
   AnalyticsError,
   analyticsFilterIncludesWorkItem,
+  type AnalyticsDeliveryNotification,
+  type AnalyticsDeliveryNotifier,
   type AnalyticsDeliveryReceipt,
   type AnalyticsDueReportReference,
   type AnalyticsRepository,
@@ -199,30 +201,6 @@ export type AnalyticsScheduleArtifactInput = {
  */
 export type AnalyticsScheduleArtifactRenderer = (
   input: AnalyticsScheduleArtifactInput,
-) => Promise<void>
-
-/** One recipient-scoped scheduled delivery that the recipient is told about. */
-export type AnalyticsDeliveryNotification = {
-  /** Current report revision that produced the delivery. */
-  report: AnalyticsReport
-  /** Snapshot that the committed receipt points to. */
-  snapshotId: string
-  /** Committed receipt that completes this recipient's occurrence. */
-  receipt: AnalyticsDeliveryReceipt
-  /** Recipient who passed the current ACL check for this occurrence. */
-  recipientMemberKey: string
-  /** Wall-clock time of the schedule invocation that delivered the snapshot. */
-  deliveredAt: string
-}
-
-/**
- * Tells one authorized recipient that a scheduled snapshot is ready.
- *
- * @remarks Called after the receipt is committed, and again for already completed recipients when
- * an occurrence is retried. Implementations must be idempotent per receipt occurrence key.
- */
-export type AnalyticsDeliveryNotifier = (
-  notification: AnalyticsDeliveryNotification,
 ) => Promise<void>
 
 /** Server-side feature gate required by the trusted Analytics schedule worker. */
@@ -1265,7 +1243,18 @@ async function notifyCommittedDelivery(
   })
 }
 
-/** Durable receipt と snapshot が recipient の完了 checkpoint を構成する場合、その receipt を返します。 */
+/**
+ * Reads the receipt that completes one recipient's occurrence.
+ *
+ * A recipient is complete only when the durable receipt and the snapshot it points to both exist.
+ *
+ * @param report - Current report whose occurrence is being delivered.
+ * @param scheduledFor - Scheduled time of the occurrence.
+ * @param recipientMemberKey - Recipient whose checkpoint is read.
+ * @param occurrenceKey - Occurrence key of the schedule time, report definition, and recipient.
+ * @param repository - Repository that stores receipts and snapshots.
+ * @returns The completing receipt, or `undefined` when the recipient still needs a delivery.
+ */
 async function readCompletedAnalyticsScheduleDelivery(
   report: AnalyticsReport,
   scheduledFor: string,

@@ -1545,6 +1545,13 @@ test('shows a scheduled report delivery only while its recipient can still read 
       { ...report, timeZone: 'UTC', filter, widgets },
     )
   }
+  /**
+   * Builds one stored report delivery notification for the demo recipient.
+   *
+   * @param id - Notification ID.
+   * @param reportId - Delivered report.
+   * @returns The notification row as the projection stores it.
+   */
   const delivery = (id: string, reportId: string) => createNotificationItem({
     id,
     eventType: ANALYTICS_REPORT_DELIVERED_EVENT_TYPE,

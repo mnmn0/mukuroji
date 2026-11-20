@@ -9,7 +9,7 @@ import {
 import type {
   AnalyticsDeliveryNotification,
   AnalyticsDeliveryNotifier,
-} from '../../adapter-in/schedules/analytics-schedule'
+} from '../../analytics'
 
 /** Audit event type that the collaboration projection turns into a recipient notification. */
 export const ANALYTICS_REPORT_DELIVERED_EVENT_TYPE = 'analytics.report.delivered'

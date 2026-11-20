@@ -1,8 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { PutCommand } from '@aws-sdk/lib-dynamodb'
 import type { AnalyticsReport } from '@mukuroji/contracts'
-import type { AnalyticsDeliveryReceipt } from '../../analytics'
-import type { AnalyticsDeliveryNotification } from '../../adapter-in/schedules/analytics-schedule'
+import type { AnalyticsDeliveryNotification, AnalyticsDeliveryReceipt } from '../../analytics'
 import {
   ANALYTICS_REPORT_DELIVERED_EVENT_TYPE,
   createAnalyticsDeliveryAuditEvent,

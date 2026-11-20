@@ -2350,6 +2350,8 @@ async function isEligibleRecipient(
       planningUpdateActivityEventTypes.has(event.eventType) ||
       // Timesheet access can come from an Enterprise role alone, so it is evaluated here too.
       event.eventType === TIMESHEET_REMINDER_EVENT_TYPE ||
+      // A Team report can be readable through an Enterprise Project grant without a project-member row.
+      event.eventType === analyticsReportDeliveredEventType ||
       enforceContentAuthorization
     ) &&
     (event.projectId !== undefined || event.teamId !== undefined || enforceContentAuthorization)

@@ -20,6 +20,7 @@ import {
   createAnalyticsScheduleShard,
   createAnalyticsSnapshot,
   InMemoryAnalyticsRepository,
+  type AnalyticsDeliveryNotification,
 } from '../../analytics'
 import {
   createAnalyticsScheduleRenderer,
@@ -27,7 +28,6 @@ import {
   processDueAnalyticsReport,
   resolveAnalyticsScheduleProcessingTime,
   type AnalyticsFeatureEntitlementPort,
-  type AnalyticsDeliveryNotification,
   type AnalyticsScheduleArtifactInput,
 } from './analytics-schedule'
 
