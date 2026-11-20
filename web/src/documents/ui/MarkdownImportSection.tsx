@@ -3,9 +3,9 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   MARKDOWN_IMPORT_MAX_BYTES,
   titleFromMarkdownFileName,
+  type MarkdownDocumentImportRequest,
   type MarkdownImportErrorCode,
 } from '../model/markdownImport'
-import type { MarkdownDocumentImportRequest } from '../mutations/useMarkdownDocumentImport'
 
 /**
  * Props of the Documents home section that creates a page from Markdown.
@@ -58,6 +58,8 @@ export function MarkdownImportSection({
     if (!file) return
     setErrorCode(undefined)
     if (file.size > MARKDOWN_IMPORT_MAX_BYTES) {
+      setSource('')
+      setFileTitle('')
       setErrorCode('too-large')
       return
     }

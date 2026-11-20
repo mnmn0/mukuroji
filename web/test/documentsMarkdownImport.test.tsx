@@ -161,6 +161,15 @@ describe('Markdown import', () => {
     ).join('\n\n'))).toEqual({ code: 'too-many-blocks', ok: false })
     expect(convert('x'.repeat(50_001))).toEqual({ code: 'block-too-long', ok: false })
     expect(convert('a'.repeat(300_001))).toEqual({ code: 'too-large', ok: false })
+    const fullTable = [
+      `|${Array.from({ length: 50 }, () => 'c').join('|')}|`,
+      `|${Array.from({ length: 50 }, () => '-').join('|')}|`,
+      ...Array.from({ length: 200 }, () => `|${Array.from({ length: 50 }, () => 'v').join('|')}|`),
+    ].join('\n')
+    expect(convertMarkdownToDocument(fullTable, {
+      createId: (prefix) => `${prefix}-${crypto.randomUUID()}`,
+      fallbackTitle: 'table',
+    })).toEqual({ code: 'too-large', ok: false })
     const wideHeader = `|${Array.from({ length: 51 }, () => 'c').join('|')}|`
     const wideDelimiter = `|${Array.from({ length: 51 }, () => '-').join('|')}|`
     expect(convert(`${wideHeader}\n${wideDelimiter}\n`)).toEqual({

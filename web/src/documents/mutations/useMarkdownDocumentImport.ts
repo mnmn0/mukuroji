@@ -1,23 +1,15 @@
 import { useRef, useState } from 'react'
-import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
+import {
+  createMutationFingerprint,
+  createMutationRequestRunner,
+} from '../../shared/api/mutationHeaders'
 import { createDocument, type CreateDocumentInput } from '../api'
 import { createDocumentClientId } from '../model/document'
 import {
   convertMarkdownToDocument,
+  type MarkdownDocumentImportRequest,
   type MarkdownImportErrorCode,
 } from '../model/markdownImport'
-
-/**
- * Markdown and destination chosen for one import.
- */
-export type MarkdownDocumentImportRequest = {
-  /** Markdown text pasted or read from a file. */
-  source: string
-  /** Title used when the Markdown has no single leading `#` heading. */
-  fallbackTitle: string
-  /** Project that owns the new page; omission creates it in the Workspace. */
-  projectId?: string
-}
 
 /**
  * Options for creating pages from Markdown.
@@ -71,11 +63,33 @@ export function useMarkdownDocumentImport({
     request: MarkdownDocumentImportRequest,
   ): Promise<MarkdownImportErrorCode | undefined> => {
     if (!accessToken || pendingRef.current) return undefined
-    const fingerprint = JSON.stringify([
+    pendingRef.current = true
+    setIsImporting(true)
+    try {
+      return await convertAndCreate(accessToken, request)
+    } finally {
+      pendingRef.current = false
+      setIsImporting(false)
+    }
+  }
+
+  /**
+   * Converts the Markdown, or reuses the content of a failed attempt with the
+   * same input, and sends the create request.
+   *
+   * @param token - Workspace API token.
+   * @param request - Markdown, fallback title, and destination.
+   * @returns Why the Markdown cannot become a page, or undefined once created.
+   */
+  const convertAndCreate = async (
+    token: string,
+    request: MarkdownDocumentImportRequest,
+  ): Promise<MarkdownImportErrorCode | undefined> => {
+    const fingerprint = await createMutationFingerprint(
       request.source,
       request.fallbackTitle,
       request.projectId ?? '',
-    ])
+    )
     let input = retainedRef.current?.fingerprint === fingerprint
       ? retainedRef.current.input
       : undefined
@@ -96,22 +110,15 @@ export function useMarkdownDocumentImport({
       retainedRef.current = { fingerprint, input }
     }
 
-    pendingRef.current = true
-    setIsImporting(true)
-    try {
-      const body = input
-      const created = await mutationRunner.run(
-        'document:create:markdown-import',
-        fingerprint,
-        (context) => createDocument(accessToken, body, context),
-      )
-      retainedRef.current = undefined
-      await onCreated(created.id)
-      return undefined
-    } finally {
-      pendingRef.current = false
-      setIsImporting(false)
-    }
+    const body = input
+    const created = await mutationRunner.run(
+      'document:create:markdown-import',
+      fingerprint,
+      (context) => createDocument(token, body, context),
+    )
+    retainedRef.current = undefined
+    await onCreated(created.id)
+    return undefined
   }
 
   return { importMarkdown, isImporting }

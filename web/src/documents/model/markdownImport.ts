@@ -11,6 +11,12 @@ import type {
  */
 export const MARKDOWN_IMPORT_MAX_BYTES = 300_000
 
+/**
+ * Largest serialized title and blocks the import sends. The server stores a
+ * page in one item of at most 350 KB, which also holds the page metadata.
+ */
+const MAX_CONTENT_BYTES = 320_000
+
 /** Most blocks one page may hold, matching the server limit. */
 export const MARKDOWN_IMPORT_MAX_BLOCKS = 500
 
@@ -35,6 +41,18 @@ export type MarkdownImportErrorCode =
   | 'too-many-blocks'
   | 'block-too-long'
   | 'table-too-large'
+
+/**
+ * Markdown and destination chosen for one import.
+ */
+export type MarkdownDocumentImportRequest = {
+  /** Markdown text pasted or read from a file. */
+  source: string
+  /** Title used when the Markdown has no single leading `#` heading. */
+  fallbackTitle: string
+  /** Project that owns the new page; omission creates it in the Workspace. */
+  projectId?: string
+}
 
 /**
  * Page title and blocks converted from Markdown, or the reason it failed.
@@ -153,11 +171,14 @@ export function convertMarkdownToDocument(
   if (blocks.some(exceedsTextLimit)) {
     return { ok: false, code: 'block-too-long' }
   }
-  return {
-    ok: true,
-    title: title.slice(0, MAX_TITLE_LENGTH),
-    blocks,
+  const pageTitle = title.slice(0, MAX_TITLE_LENGTH)
+  const contentBytes = new TextEncoder().encode(
+    JSON.stringify({ blocks, title: pageTitle }),
+  ).length
+  if (contentBytes > MAX_CONTENT_BYTES) {
+    return { ok: false, code: 'too-large' }
   }
+  return { ok: true, title: pageTitle, blocks }
 }
 
 /**

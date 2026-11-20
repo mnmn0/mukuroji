@@ -9,8 +9,10 @@ import {
   type BuiltInDocumentTemplateKey,
   type BuiltInTemplateCreateOptions,
 } from '../model/builtInTemplates'
-import type { MarkdownImportErrorCode } from '../model/markdownImport'
-import type { MarkdownDocumentImportRequest } from '../mutations/useMarkdownDocumentImport'
+import type {
+  MarkdownDocumentImportRequest,
+  MarkdownImportErrorCode,
+} from '../model/markdownImport'
 import { MarkdownImportSection } from './MarkdownImportSection'
 
 /**
