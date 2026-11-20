@@ -40,6 +40,7 @@ import {
   WorkspaceRouteContent,
 } from '../../workspace/ui/WorkspaceRoute'
 import type { WorkspaceRouteContextValue } from '../../workspace/ui/WorkspaceRouteProvider'
+import { SettingsSectionNav } from '../../workspace/ui/SettingsSectionNav'
 import { WorkspaceSettingsView } from '../../workspace/ui/WorkspaceSettingsView'
 import { createWorkItemSummaryFromWorkItems } from '../../work-items/model/workItemSummary'
 
@@ -715,7 +716,12 @@ export const HelpRoute: Story = {
   render: () => <HelpWorkspaceView t={t} />,
 }
 
-/** The `/settings` route display preferences without authenticated feature requests. */
+/** The navigation between personal, Workspace admin, and Team settings, on the Team area. */
+export const SettingsSectionNavigation: Story = {
+  render: () => <SettingsSectionNav current="team" t={t} />,
+}
+
+/** The `/settings/personal` route display preferences without authenticated feature requests. */
 export const SettingsRoute: Story = {
   render: () => (
     <WorkspaceSettingsView

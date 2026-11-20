@@ -95,6 +95,18 @@ export const appRoutes: RouteObject[] = [
                     lazy: lazyPage(async () => (await import('../pages/workspace/SettingsPage')).SettingsPage),
                   },
                   {
+                    path: '/settings/personal',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/SettingsPage')).SettingsPage),
+                  },
+                  {
+                    path: '/settings/workspace',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/SettingsPage')).SettingsPage),
+                  },
+                  {
+                    path: '/settings/team',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/SettingsPage')).SettingsPage),
+                  },
+                  {
                     path: '/settings/agent-connection',
                     lazy: lazyPage(async () => (await import('../pages/workspace/AgentConnectionPage')).AgentConnectionPage),
                   },

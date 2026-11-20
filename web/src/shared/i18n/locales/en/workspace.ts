@@ -234,6 +234,17 @@ export const workspaceMessages = {
   'workspace.inbox.type.all': 'All notification types',
   'workspace.inbox.markAllRead': 'Mark all as read',
   'workspace.inbox.markingAllRead': 'Marking as read',
+  'workspace.inbox.bulk.label': 'Selected notification actions',
+  'workspace.inbox.bulk.selectAll': 'Select all shown notifications',
+  'workspace.inbox.bulk.selectOne': 'Select {title}',
+  'workspace.inbox.bulk.selected': '{count} selected',
+  'workspace.inbox.bulk.none': 'Select notifications to act on several at once',
+  'workspace.inbox.bulk.markRead': 'Mark selected as read',
+  'workspace.inbox.bulk.archive': 'Archive selected',
+  'workspace.inbox.bulk.restore': 'Restore selected',
+  'workspace.inbox.bulk.clear': 'Clear selection',
+  'workspace.inbox.bulk.running': 'Updating',
+  'workspace.inbox.bulk.partialFailure': '{count} could not be updated and are still selected.',
   'workspace.inbox.summary': '{count} shown · {unread} unread',
   'workspace.inbox.persistedState': 'States are kept after reload',
   'workspace.inbox.mutationError': 'Could not update the notification. Try again.',
@@ -457,7 +468,17 @@ export const workspaceMessages = {
   'workspace.settings.eyebrow': 'Admin',
   'workspace.settings.title': 'Settings',
   'workspace.settings.description':
-    'Manage this browser’s display language and text size, and review the signed-in account.',
+    'Personal display and notifications, Workspace administration, and per-Team settings, each in its own area.',
+  'workspace.settings.section.aria': 'Settings areas',
+  'workspace.settings.section.personal': 'Personal',
+  'workspace.settings.section.workspace': 'Workspace admin',
+  'workspace.settings.section.team': 'Team',
+  'workspace.settings.section.personalDescription':
+    'Settings that apply only to your account: display, notifications, sign-in, AI access, and agent connection.',
+  'workspace.settings.section.workspaceDescription':
+    'Settings for the whole Workspace: members, identity and security, tenant, directory, API and integrations, and automation.',
+  'workspace.settings.section.teamDescription':
+    'Settings each Team can override: workflow and fields, and agent settings.',
   'workspace.settings.install.title': 'Install as an app',
   'workspace.settings.install.description': 'Install mukuroji to open it in its own window. Where the device supports app badges, its icon also shows the unread Inbox count.',
   'workspace.settings.install.action': 'Install',
@@ -584,12 +605,6 @@ export const workspaceMessages = {
   'workspace.settings.notifications.pushDevice.result.dismissed': 'Notifications were not allowed, so nothing was registered.',
   'workspace.settings.notifications.pushDevice.result.denied': 'Notifications were denied, so nothing was registered.',
   'workspace.settings.notifications.pushDevice.result.failed': 'Could not change this device. Try again.',
-  'workspace.settings.permissionTitle': 'Permission sets',
-  'workspace.settings.permissionDescription':
-    'Manage edit, approval, and view permissions by team.',
-  'workspace.settings.integrationTitle': 'Integrations',
-  'workspace.settings.integrationDescription':
-    'Manage chat, calendar, and analytics connections.',
   'workspace.access.eyebrow': 'Workspace administration',
   'workspace.access.title': 'Access ledger',
   'workspace.access.description':

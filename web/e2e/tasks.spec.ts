@@ -5061,6 +5061,40 @@ test.describe('authenticated task page', () => {
     ).toBeFocused()
   })
 
+  test('Issue #383: 行メニューの複製で写した下書きを直してから作成する', async ({ page }) => {
+    await page.goto('/projects/refero/issues')
+    const requestCounts = getMockRequestCounts(page)
+    const createRequest = page.waitForRequest((request) =>
+      request.method() === 'POST' &&
+      new URL(request.url()).pathname.endsWith('/api/teams/core-team/issues'))
+
+    await page.getByTestId('task-row-wireframe').click({ button: 'right' })
+    await page.getByTestId('project-task-action-context-menu')
+      .getByRole('menuitem', { name: 'Work Item を複製', exact: true }).click()
+
+    const createTaskForm = page.getByTestId('create-task-form')
+    await expect(createTaskForm.getByTestId('create-task-duplicate-note')).toBeVisible()
+    const title = createTaskForm.locator('input[name="title"]')
+    await expect(title).toHaveValue('新しいランディングページのワイヤーフレーム作成')
+    await expect(createTaskForm.locator('select[name="assigneeUserId"]')).toHaveValue('sato@example.com')
+    await expect(createTaskForm.locator('select[name="priority"]')).toHaveValue('high')
+    await expect(createTaskForm.locator('select[name="scheduleMode"]')).toHaveValue('date-range')
+    await expect(createTaskForm.locator('input[name="scheduleStartDate"]')).toHaveValue('2026-06-01')
+    expect(requestCounts.issueCreates).toBe(0)
+
+    await title.fill('新しいランディングページのワイヤーフレーム作成（第2版）')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    const body: unknown = (await createRequest).postDataJSON()
+    expect(body).toMatchObject({
+      assigneeUserId: 'sato@example.com',
+      priority: 'high',
+      schedule: { endDate: '2026-06-03', mode: 'date-range', startDate: '2026-06-01' },
+      title: '新しいランディングページのワイヤーフレーム作成（第2版）',
+    })
+    await expect.poll(() => requestCounts.issueCreates).toBe(1)
+  })
+
   test('Issue #188: Calendar は2日を選んだ期間 task を作成し再読込後も保持する', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')
@@ -7372,7 +7406,7 @@ test.describe('authenticated task page', () => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       workspaceWorkItemConfiguration: workspaceWorkItemConfigurationFixture,
     })
-    await page.goto('/settings')
+    await page.goto('/settings/team')
     const requestCounts = getMockRequestCounts(page)
     const configurationPanel = page.getByTestId('work-item-configuration-panel')
 
@@ -11242,7 +11276,7 @@ test.describe('authenticated task page', () => {
       'notification-row-notification-archived-unread',
     )
     await expect(archivedUnreadNotification).toBeVisible()
-    await expect(archivedUnreadNotification.getByLabel('未読')).toHaveCount(0)
+    await expect(archivedUnreadNotification.getByLabel('未読', { exact: true })).toHaveCount(0)
     await expect(
       archivedUnreadNotification.getByRole('button', { name: '既読にする' }),
     ).toBeVisible()
@@ -11261,8 +11295,73 @@ test.describe('authenticated task page', () => {
       'notification-row-notification-snoozed-unread',
     )
     await expect(snoozedUnreadNotification).toBeVisible()
-    await expect(snoozedUnreadNotification.getByLabel('未読')).toHaveCount(0)
+    await expect(snoozedUnreadNotification.getByLabel('未読', { exact: true })).toHaveCount(0)
     await expect.poll(() => requestCounts.notificationUpdates).toBeGreaterThanOrEqual(4)
+  })
+
+  test('通知 Inbox で複数選択した通知をまとめて既読・archive・戻すにできる', async ({ page }) => {
+    await page.clock.setFixedTime(notificationFixtureNow)
+
+    await page.goto('/inbox')
+    await expect(page.getByTestId('notification-inbox')).toBeVisible()
+    const bulkBar = page.getByTestId('notification-bulk-bar')
+    const wireframeNotification = page.getByTestId('notification-row-notification-wireframe')
+    const brandNotification = page.getByTestId('notification-row-notification-brand-guideline')
+    const selectWireframe = page.getByTestId('notification-select-notification-wireframe')
+    const selectBrand = page.getByTestId('notification-select-notification-brand-guideline')
+
+    await expect(wireframeNotification.getByLabel('未読', { exact: true })).toBeVisible()
+    await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
+    await selectWireframe.check()
+    await page.getByTestId('notification-filter-unread').click()
+    await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
+    await page.getByTestId('notification-filter-all').click()
+    await expect(selectWireframe).not.toBeChecked()
+    await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
+    await selectWireframe.check()
+    await selectBrand.check()
+    await expect(bulkBar).toContainText('2件を選択中')
+    await page.getByTestId('notification-bulk-mark-read').click()
+    await expect(wireframeNotification.getByLabel('未読', { exact: true })).toHaveCount(0)
+    await expect(page.getByTestId('notification-mark-all-read')).toBeDisabled()
+    await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
+
+    let failBrandArchive = true
+    await page.route(/.*\/api\/notifications\/notification-brand-guideline$/, async (route) => {
+      if (route.request().method() === 'PATCH' && failBrandArchive) {
+        failBrandArchive = false
+        await route.fulfill({ status: 500, json: { message: 'Temporary failure.' } })
+        return
+      }
+      await route.fallback()
+    })
+    await selectWireframe.check()
+    await selectBrand.check()
+    await page.getByTestId('notification-bulk-archive').click()
+    await expect(wireframeNotification).toHaveCount(0)
+    await expect(brandNotification).toBeVisible()
+    await expect(selectBrand).toBeChecked()
+    await expect(page.getByRole('alert')).toContainText('1件を更新できませんでした')
+    await expect(bulkBar).toContainText('1件を選択中')
+    await page.getByTestId('notification-bulk-archive').click()
+    await expect(brandNotification).toHaveCount(0)
+    await expect(page.getByRole('alert')).toHaveCount(0)
+
+    await page.getByTestId('notification-filter-archived').click()
+    await expect(wireframeNotification).toBeVisible()
+    await expect(brandNotification).toBeVisible()
+    await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
+    await page.getByTestId('notification-select-all').check()
+    await expect(selectWireframe).toBeChecked()
+    await expect(selectBrand).toBeChecked()
+    await page.getByTestId('notification-bulk-restore').click()
+    await expect(wireframeNotification).toHaveCount(0)
+    await expect(brandNotification).toHaveCount(0)
+
+    // The fixed test clock keeps SWR's cached All page fresh, so check the restored rows in Read.
+    await page.getByTestId('notification-filter-read').click()
+    await expect(wireframeNotification).toBeVisible()
+    await expect(brandNotification).toBeVisible()
   })
 
   test('Issue #192 の共同作業タブで判断のページング、採用解決策、利用不能な情報源を操作できる', async ({ page }) => {
@@ -11948,6 +12047,40 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('my-tasks-kanban')).toBeVisible()
   })
 
+  test('Issue #431: 設定を個人・Workspace 管理・Team に分け、各区分を URL で直接開ける', async ({ page }) => {
+    await page.goto('/settings')
+
+    const nav = page.getByTestId('settings-section-nav')
+    await expect(nav.getByTestId('settings-section-personal')).toHaveAttribute('aria-current', 'page')
+    await expect(page.getByTestId('font-size-preference-control')).toBeVisible()
+    await expect(page.getByTestId('settings-profile')).toBeVisible()
+    await expect(page.getByTestId('workspace-access-panel')).toHaveCount(0)
+    await expect(page.getByTestId('work-item-configuration-panel')).toHaveCount(0)
+
+    await nav.getByTestId('settings-section-workspace').click()
+    await expect(page).toHaveURL('/settings/workspace')
+    await expect(nav.getByTestId('settings-section-workspace')).toHaveAttribute('aria-current', 'page')
+    await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
+    await expect(page.getByTestId('enterprise-security-settings-link')).toBeVisible()
+    await expect(page.getByTestId('font-size-preference-control')).toHaveCount(0)
+
+    await nav.getByTestId('settings-section-team').click()
+    await expect(page).toHaveURL('/settings/team')
+    await expect(page.getByTestId('work-item-configuration-panel')).toBeVisible()
+    await expect(page.getByTestId('workspace-access-panel')).toHaveCount(0)
+
+    await page.goto('/settings/workspace')
+    await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
+
+    await page.goto('/settings/personal')
+    await expect(page.getByTestId('font-size-preference-control')).toBeVisible()
+
+    // The server returns this URL after connector OAuth, so it must keep opening the Developer Platform.
+    await page.goto('/settings?developerSection=connectors')
+    await expect(nav.getByTestId('settings-section-workspace')).toHaveAttribute('aria-current', 'page')
+    await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
+  })
+
   test('設定画面で通知 channel・frequency・quiet hours を保存できる', async ({ page }) => {
     const requestCounts = getMockRequestCounts(page)
 
@@ -12027,7 +12160,7 @@ test.describe('authenticated task page', () => {
       await route.fulfill({ json: { member: {} } })
     })
 
-    await page.goto('/settings')
+    await page.goto('/settings/workspace')
 
     await expect(page.getByTestId('workspace-access-panel')).toBeVisible()
     await expect(page.getByTestId('workspace-invitation-invitation-failed')).toContainText('配信失敗')
@@ -12076,7 +12209,7 @@ test.describe('authenticated task page', () => {
       await route.fulfill({ status: 202, json: { sent: true } })
     })
 
-    await page.goto('/settings')
+    await page.goto('/settings/workspace')
 
     const member = page.getByTestId('workspace-member-sato-example-com')
     await member.getByRole('button', { name: 'パスワード再設定を送る' }).click()
@@ -12108,7 +12241,7 @@ test.describe('authenticated task page', () => {
       await route.fulfill({ json: { reset: true } })
     })
 
-    await page.goto('/settings')
+    await page.goto('/settings/workspace')
 
     const member = page.getByTestId('workspace-member-sato-example-com')
     await member.getByRole('button', { name: 'MFAをリセット' }).click()
