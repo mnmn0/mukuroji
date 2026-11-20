@@ -76,6 +76,25 @@ function createLinkedDocument(
     : { ...base, kind, whiteboard: { objects: [], connectors: [], frames: [] } }
 }
 
+/**
+ * Creates a whiteboard that links a Work Item only through a Work Item card.
+ *
+ * @param id - Document ID.
+ * @param workItemId - Relation target ID of the Work Item on the card.
+ * @returns Whiteboard snapshot without explicit relations.
+ */
+function createCardWhiteboard(id: string, workItemId: string): DocumentDetail {
+  const board = createLinkedDocument(id, [], 'whiteboard')
+  if (board.kind !== 'whiteboard') throw new Error('Expected a whiteboard fixture.')
+  return {
+    ...board,
+    whiteboard: {
+      ...board.whiteboard,
+      objects: [{ id: 'card-1', type: 'work-item', workItemId, bounds: { x: 0, y: 0, width: 200, height: 80 }, zIndex: 0 }],
+    },
+  }
+}
+
 describe('public Document service', () => {
   test('lists linked Documents with the credential owner\'s current Document access', async () => {
     configureFakeProjectClients(true, {
@@ -150,6 +169,8 @@ describe('public Document service', () => {
       ['linked', createLinkedDocument('linked', ['team/core-team/issue/task-1'])],
       ['other-task', createLinkedDocument('other-task', ['team/core-team/issue/task-2'])],
       ['board', createLinkedDocument('board', ['team/core-team/issue/task-1'], 'whiteboard')],
+      ['card-board', createCardWhiteboard('card-board', 'team/core-team/issue/task-1')],
+      ['other-card-board', createCardWhiteboard('other-card-board', 'team/core-team/issue/task-2')],
     ])
     setTestAppDependencies({
       documents: createDocumentFake({
@@ -188,5 +209,8 @@ describe('public Document service', () => {
     await expect(read('other-task')).rejects.toMatchObject({ status: 404, code: 'not_found' })
     await expect(read('hidden')).rejects.toMatchObject({ status: 404, code: 'not_found' })
     await expect(read('board')).rejects.toMatchObject({ status: 422, code: 'validation_failed' })
+    // A whiteboard that links the task only through a Work Item card is still linked, so it is unsupported, not missing.
+    await expect(read('card-board')).rejects.toMatchObject({ status: 422, code: 'validation_failed' })
+    await expect(read('other-card-board')).rejects.toMatchObject({ status: 404, code: 'not_found' })
   })
 })

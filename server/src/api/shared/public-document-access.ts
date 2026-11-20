@@ -77,6 +77,25 @@ async function readVisibleDocument(
 }
 
 /**
+ * Tells whether a Document links a Work Item the same way the Documents backlink index does:
+ * through an explicit relation, or through a Work Item card on a whiteboard.
+ *
+ * @param document - Document the credential owner can view.
+ * @param targetId - Work Item relation target ID.
+ * @returns Whether the Document links the Work Item.
+ */
+function linksWorkItem(document: DocumentDetail, targetId: string): boolean {
+  if (document.relations.some((relation) =>
+    relation.target.kind === 'work-item' && relation.target.workItemId === targetId
+  )) {
+    return true
+  }
+  return document.kind === 'whiteboard' && document.whiteboard.objects.some((object) =>
+    object.type === 'work-item' && object.workItemId === targetId
+  )
+}
+
+/**
  * Returns the relation target ID the Documents store uses for a Work Item.
  *
  * @param teamId - Team that owns the Work Item.
@@ -145,9 +164,7 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
       const { workspaceId, access } = await resolveCredentialDocumentAccess(credential)
       const document = await readVisibleDocument(workspaceId, documentId, access)
       const targetId = toWorkItemRelationTargetId(teamId, workItemId)
-      if (!document.relations.some((relation) =>
-        relation.target.kind === 'work-item' && relation.target.workItemId === targetId
-      )) {
+      if (!linksWorkItem(document, targetId)) {
         throw new PublicApiServiceError(404, 'not_found', 'Document was not found.')
       }
       if (document.kind !== 'page' && document.kind !== 'template') {
