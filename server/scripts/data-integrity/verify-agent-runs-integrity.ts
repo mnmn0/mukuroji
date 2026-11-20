@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { fromIni } from '@aws-sdk/credential-provider-ini'
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb'
 import {
   assertAgentRunIntegrityBounds,
   runAgentRunsIntegrityCheck,
@@ -9,6 +9,8 @@ import {
   type AgentRunIntegrityClient,
   type AgentRunIntegrityEvidence,
   type AgentRunIntegrityTeam,
+  type AgentRunWorkItemLookup,
+  type AgentRunWorkItemState,
 } from '../../src/modules/agent-runs'
 
 /** Flags the `check` command accepts; `--team` may repeat. */
@@ -21,13 +23,14 @@ const checkFlagNames = new Set([
   '--region',
   '--table',
   '--team',
+  '--work-items-table',
 ])
 
 /** Usage printed by `help`. */
 const helpPayload = {
   status: 'help',
   commands: [
-    'bun run --silent agent-runs:integrity -- check --region <region> --table <table> [--profile <profile>] [--team <workspaceId>/<teamId> ...] --page-size <n> --max-pages <n> --max-items <n> [--correlation-id <id>]',
+    'bun run --silent agent-runs:integrity -- check --region <region> --table <table> [--profile <profile>] [--team <workspaceId>/<teamId> ...] [--work-items-table <table>] --page-size <n> --max-pages <n> --max-items <n> [--correlation-id <id>]',
     'bun run --silent agent-runs:integrity -- help',
   ],
 }
@@ -43,6 +46,8 @@ export type AgentRunsIntegrityCheckArguments = {
   region: string
   /** Agent Run table name. */
   tableName: string
+  /** Work Items table name; when present, the Work Item of each active run is read too. */
+  workItemsTableName?: string
   /** Named credential profile; the default chain when absent. */
   profile?: string
   /** Teams to check; every Team is discovered when absent. */
@@ -64,7 +69,7 @@ export type AgentRunsIntegrityCliDependencies = {
   /**
    * Creates the DynamoDB client of a check.
    * @param configuration - Validated `check` arguments.
-   * @returns Client limited to Query and Scan.
+   * @returns Client limited to Query, Scan, and Get.
    */
   createClient(configuration: AgentRunsIntegrityCheckArguments): AgentRunIntegrityClient
   /**
@@ -206,6 +211,10 @@ export function parseAgentRunsIntegrityCliArguments(arguments_: readonly string[
   } catch (error) {
     throw new AgentRunsIntegrityUsageError(error instanceof RangeError ? error.message : 'The bounds are invalid.')
   }
+  const workItemsTableName = optionalSingle(flags, '--work-items-table')
+  if (workItemsTableName !== undefined && !/^[A-Za-z0-9_.-]{3,255}$/u.test(workItemsTableName)) {
+    throw new AgentRunsIntegrityUsageError('--work-items-table is not a DynamoDB table name.')
+  }
   const teamValues = flags.get('--team')
   const teams = teamValues?.map(parseTeamFlag)
   const profile = optionalSingle(flags, '--profile')
@@ -215,6 +224,7 @@ export function parseAgentRunsIntegrityCliArguments(arguments_: readonly string[
     region,
     tableName,
     bounds,
+    ...(workItemsTableName === undefined ? {} : { workItemsTableName }),
     ...(profile === undefined ? {} : { profile }),
     ...(teams === undefined ? {} : { teams }),
     ...(correlationId === undefined ? {} : { correlationId }),
@@ -234,6 +244,44 @@ function createDefaultClient(configuration: AgentRunsIntegrityCheckArguments): A
     ...(configuration.profile === undefined ? {} : { credentials: fromIni({ profile: configuration.profile }) }),
   })
   return DynamoDBDocumentClient.from(client)
+}
+
+/**
+ * Checks that a value is a parseable timestamp string.
+ *
+ * @param value - Untrusted attribute value.
+ * @returns True for a non-empty string that `Date.parse` accepts.
+ */
+function isTimestampAttribute(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value))
+}
+
+/**
+ * Creates the Work Item lookup of a check. It reads only the key, creation time, and archive time
+ * of one Work Items row with a strongly consistent Get, so no title or member reaches the check.
+ *
+ * @param client - Client that sends the Get.
+ * @param tableName - Work Items table name.
+ * @returns Lookup for the check.
+ */
+export function createWorkItemLookup(client: AgentRunIntegrityClient, tableName: string): AgentRunWorkItemLookup {
+  return {
+    async read({ directoryId, teamId, workItemId }): Promise<AgentRunWorkItemState> {
+      const response = await client.send(new GetCommand({
+        TableName: tableName,
+        Key: { directoryTeamId: `${directoryId}#team#${teamId}`, issueId: workItemId },
+        ConsistentRead: true,
+        ProjectionExpression: '#issueId, #createdAt, #archivedAt',
+        ExpressionAttributeNames: { '#issueId': 'issueId', '#createdAt': 'createdAt', '#archivedAt': 'archivedAt' },
+      }))
+      const item = response.Item
+      if (item === undefined) return { kind: 'missing' }
+      if (item.issueId !== workItemId || !isTimestampAttribute(item.createdAt)) return { kind: 'malformed' }
+      // Unarchiving removes the attribute, so any stored value must be a timestamp.
+      if (item.archivedAt !== undefined && !isTimestampAttribute(item.archivedAt)) return { kind: 'malformed' }
+      return { kind: 'present', createdAt: item.createdAt, archived: item.archivedAt !== undefined }
+    },
+  }
 }
 
 /** Production resources of the CLI. */
@@ -280,9 +328,13 @@ export async function runAgentRunsIntegrityCli(
   }
   const correlationId = configuration.correlationId ?? randomUUID()
   try {
+    const client = dependencies.createClient(configuration)
     const evidence = await runAgentRunsIntegrityCheck({
-      client: dependencies.createClient(configuration),
+      client,
       tableName: configuration.tableName,
+      ...(configuration.workItemsTableName === undefined
+        ? {}
+        : { workItems: createWorkItemLookup(client, configuration.workItemsTableName) }),
       ...(configuration.teams === undefined ? {} : { teams: configuration.teams }),
       bounds: configuration.bounds,
       correlationId,

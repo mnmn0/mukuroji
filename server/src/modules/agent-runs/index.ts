@@ -78,6 +78,9 @@ export {
   type AgentRunIntegrityClient,
   type AgentRunIntegrityEvidence,
   type AgentRunIntegrityTeam,
+  type AgentRunWorkItemLookup,
+  type AgentRunWorkItemReference,
+  type AgentRunWorkItemState,
 } from './adapter-out/dynamodb/agent-run-integrity'
 export {
   InMemoryAgentRunStore,
