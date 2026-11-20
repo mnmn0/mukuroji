@@ -68,6 +68,9 @@ Agent Runs are checked by a separate, read-only verifier,
 partition of the Agent Runs table with bounded, strongly consistent Query
 pages and reports counts and sample Workspace, Team, Work Item, and Run IDs
 under a caller-supplied correlation ID, never member IDs or instance hashes.
+With `--work-items-table`, it also reads the Work Item of each active Run with
+a strongly consistent GetItem and reports Runs left active on a deleted or
+archived Work Item.
 Its invariants and the manual repair steps are in
 [Software factory](./software-factory.md#agent-run-の整合性検査と手動修復).
 
