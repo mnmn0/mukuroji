@@ -132,6 +132,18 @@ Project ごとに最新の schedule baseline を 1 つ保存できる（#336 の
 
 Relation の正本は `WorkItemConfigurationTable` の Relation Graph row であり、Work Item row の `relationIds` は検索と backfill のための派生 projection である。Relation の作成・削除 transaction は、graph metadata と reciprocal row に加えて source / target 両方の `relationIds` を同時に更新する。この projection 更新では Work Item の `revision` と `updatedAt` を進めない。
 
+### 削除と参照の掃除（#633）
+
+Work Item の削除は Public API の `DELETE /api/v1/work-items/{id}` だけで行う（Web は archive だけを出す）。削除は次を Work Item row の削除と同じ DynamoDB transaction で確定し、どれかが確定できなければ削除しない。
+
+- 子（`child` relation）を持つ Work Item は削除しない（`409`）。archive 済みの子も数える。消すと子が存在しない親を指して残るためである。
+- Relation Graph: 削除する Work Item が source の row と、その reciprocal row をすべて消し、graph の `revision` を 1 つ進めて `edgeCount` を減らす。相手側の `relationIds` は、削除する Work Item への relation を除いた値に書き換える（相手の `revision` は進めず、読んだ値のままであることを条件にする）。親の `relationIds` は子を持たないので書き換えない。relation がない Work Item も graph の `revision` を確認するので、準備の後に relation が付いた場合は削除しない。
+- 子の復元を数える guard row（`CHILD_RESTORE#<id>`、[archive・復元と階層](#archive復元と階層633)）: 削除する Work Item の row を消す。
+- Collection: Workspace の全 Collection row を strongly consistent に読み、削除する Work Item を参照する row を、参照を除いて次の `revision` で書き直す（読んだ `revision` を条件にする）。
+- 準備の後に relation・相手の Work Item・Collection が変わった場合は `409 WorkItemDeletionReferencesChanged` で、読み直してやり直す。掃除の write が 80 件を超えると 1 transaction に収まらないため `409` で拒否する。
+- 相手側の Work Item の activity には relation の削除を記録しない（削除の audit event は削除した Work Item に残る）。
+- 準備の read の後に別の人が同じ Work Item を Collection に追加した場合、その参照は掃除されない。Collection の一覧は削除済みの Work Item を省くので表示には出ない。
+
 ## Configuration と mutation
 
 Work Item configuration は Workspace default、Team override、built-in default の順で解決する。作成時に `workflowStatusId` を省略した場合は、解決済み workflow の `initialStatusId` を使用する。指定した status ID と custom field value は同じ解決済み configuration に対して検証する。
