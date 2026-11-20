@@ -71,7 +71,6 @@ export const planningMessages = {
   'planning.action.delete': '削除',
   'planning.action.retry': '再試行',
   'planning.field.title': '名前',
-  'planning.field.id': 'ID',
   'planning.field.type': '種別',
   'planning.field.entityType': '計画種別',
   'planning.field.parent': '上位計画',

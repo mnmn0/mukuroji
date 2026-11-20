@@ -340,6 +340,8 @@ describe('PlanningScreen', () => {
     expect(html).toContain('aria-label="1 affected Milestones: milestone-beta"')
     expect(html).toContain('data-testid="cycle-rollover"')
     expect(html).toContain('data-testid="planning-create-entity"')
+    // The server assigns new entity IDs, so the form does not ask for one.
+    expect(html).not.toContain('name="entityId"')
     expect(html).toContain(labels.dependencyLag)
     expect(html).toContain(`name="goalFramework"`)
     expect(html).toContain('value="objective"')
@@ -368,6 +370,7 @@ describe('PlanningScreen', () => {
     expect(html).toContain('value="core-team"')
     expect(html).toContain(`>${labels.archive}</button>`)
     expect(html).toContain(`>${labels.duplicate}</button>`)
+    expect(html).not.toContain('name="targetId"')
     expect(html).toContain(`>${labels.move}</button>`)
   })
 

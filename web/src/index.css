@@ -1208,39 +1208,39 @@ textarea {
 }
 
 /*
- * Gantt print layout (#379). The Gantt's print buttons set
- * `html[data-print-target='task-gantt']` and the paper on the chart root, then
- * open the print dialog. Only the chart is printed, on landscape A3 or A4, and
- * the chart is zoomed down to the paper width by the print button.
+ * Task view print layout (#379), shared by the Gantt chart and the WBS table. A view's print
+ * buttons set `html[data-print-target]` and `data-print-paper` on the view root
+ * (`[data-print-root]`), then open the print dialog. Only that view is printed, on landscape A3
+ * or A4, and the view is zoomed down to the paper width by the print button.
  */
-@page task-gantt-a3 {
+@page task-view-a3 {
   size: A3 landscape;
   margin: 8mm;
 }
 
-@page task-gantt-a4 {
+@page task-view-a4 {
   size: A4 landscape;
   margin: 8mm;
 }
 
 @media print {
-  html[data-print-target='task-gantt']:has([data-print-root='task-gantt'][data-print-paper='a3']) body {
-    page: task-gantt-a3;
+  html[data-print-target]:has([data-print-root][data-print-paper='a3']) body {
+    page: task-view-a3;
   }
 
-  html[data-print-target='task-gantt']:has([data-print-root='task-gantt'][data-print-paper='a4']) body {
-    page: task-gantt-a4;
+  html[data-print-target]:has([data-print-root][data-print-paper='a4']) body {
+    page: task-view-a4;
   }
 
-  /* Hide everything except the chart and the elements that contain it. */
-  html[data-print-target='task-gantt'] body *:not([data-print-root='task-gantt'], [data-print-root='task-gantt'] *, :has([data-print-root='task-gantt'])) {
+  /* Hide everything except the printed view and the elements that contain it. */
+  html[data-print-target] body *:not([data-print-root][data-print-paper], [data-print-root][data-print-paper] *, :has([data-print-root][data-print-paper])) {
     display: none !important;
   }
 
-  /* Containers of the chart must not clip or scroll it on paper. */
-  html[data-print-target='task-gantt'],
-  html[data-print-target='task-gantt'] body,
-  html[data-print-target='task-gantt'] body :has([data-print-root='task-gantt']) {
+  /* Containers of the view must not clip or scroll it on paper. */
+  html[data-print-target],
+  html[data-print-target] body,
+  html[data-print-target] body :has([data-print-root][data-print-paper]) {
     position: static !important;
     height: auto !important;
     min-height: 0 !important;
@@ -1253,7 +1253,7 @@ textarea {
     box-shadow: none !important;
   }
 
-  html[data-print-target='task-gantt'] [data-print-root='task-gantt'] {
+  html[data-print-target] [data-print-root][data-print-paper] {
     width: max-content;
     margin: 0 !important;
     overflow: visible !important;
@@ -1265,15 +1265,41 @@ textarea {
     print-color-adjust: exact;
   }
 
-  html[data-print-target='task-gantt'] [data-print-root='task-gantt'] [data-print-hidden] {
+  /*
+   * The table stretches to its container, so its root takes the paper width instead of its
+   * content width; the print button zooms the columns' total width down to the paper.
+   */
+  html[data-print-target='task-table'] [data-print-root='task-table'][data-print-paper],
+  html[data-print-target='team-issue-table'] [data-print-root='team-issue-table'][data-print-paper] {
+    width: auto;
+  }
+
+  html[data-print-target] [data-print-root][data-print-paper] [data-print-hidden] {
     display: none !important;
   }
 
-  html[data-print-target='task-gantt'] [data-print-root='task-gantt'] [data-print-overflow] {
+  /* A table column without content on paper, such as the row action menu. */
+  html[data-print-target] [data-print-root][data-print-paper] col[data-print-hidden] {
+    display: table-column !important;
+    visibility: collapse;
+  }
+
+  html[data-print-target] [data-print-root][data-print-paper] [data-print-overflow] {
     overflow: visible !important;
   }
 
-  html[data-print-target='task-gantt'] [data-print-root='task-gantt'] [role='row'] {
+  /* Pinned table columns stay in place on paper instead of sticking over other cells. */
+  html[data-print-target] [data-print-root][data-print-paper] [data-column-pin] {
+    position: static !important;
+  }
+
+  html[data-print-target] [data-print-root][data-print-paper] [role='row'],
+  html[data-print-target] [data-print-root][data-print-paper] tr {
     break-inside: avoid;
+  }
+
+  /* Repeat the table heading on each printed page. */
+  html[data-print-target] [data-print-root][data-print-paper] thead {
+    display: table-header-group;
   }
 }

@@ -57,6 +57,10 @@ import {
 import {
   PlanningError,
   type PlanningCallerAuthorizationConditionCheck,
+  createPlanningEntityWithAssignedId,
+  type PlanningEntityCreation,
+  type PlanningEntityCreationWithAssignedIdOutcome,
+  type PlanningEntityDuplication,
   type PlanningUpdateCadenceTransactionResult,
   type PlanningMutationTransaction,
   type PlanningUpdateAnnotationTransactionResult,
@@ -1488,6 +1492,95 @@ async function releasePlanningWorkItemDependencyReservation(
   await developerPlatformDependencies.idempotency
     .releaseIdempotency(request)
     .catch(() => undefined)
+}
+
+/**
+ * Creates the reservation namespace of one caller's Planning entity creations.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Opaque Workspace and caller namespaces for the request-key store.
+ */
+function createPlanningEntityCreationScope(principal: WorkspacePrincipal) {
+  return {
+    workspaceId: createWorkItemScheduleIdempotencyWorkspaceId(principal.directoryId),
+    credentialId: createWorkItemScheduleIdempotencyUserId(
+      principal.directoryId,
+      principal.actorId,
+    ),
+  }
+}
+
+/**
+ * Binds one create or duplicate request key to its exact path and body.
+ *
+ * @param path - Canonical API path, including the source entity ID for a duplicate.
+ * @param body - Parsed JSON request body.
+ * @returns Stable SHA-256 request fingerprint.
+ */
+function createPlanningEntityCreationFingerprint(path: string, body: unknown): string {
+  return createHash('sha256')
+    .update(`POST\n${path}\n${stableDigestStringify(body)}`)
+    .digest('hex')
+}
+
+/**
+ * Returns whether a Planning entity ID is used by a live or archived entity.
+ *
+ * @param workspaceId - Planning Workspace partition.
+ * @param entityId - Candidate entity ID.
+ * @returns True when the ID is already taken.
+ */
+async function planningEntityIdExists(workspaceId: string, entityId: string): Promise<boolean> {
+  const state = await workItemDependencies.planning.getAuthorizationState(workspaceId)
+  if (state.entities.some((entity) => entity.id === entityId)) return true
+  return await workItemDependencies.planning.getArchivedEntity(workspaceId, entityId) !== undefined
+}
+
+/**
+ * Sets the response headers of a server-assigned creation and returns its snapshot.
+ *
+ * @param c - Route context receiving the headers.
+ * @param principal - Current authenticated Workspace principal.
+ * @param outcome - Replay of an earlier success, or the result of this creation.
+ * @returns Planning snapshot visible to the principal.
+ */
+async function respondPlanningEntityCreation(
+  c: Context,
+  principal: WorkspacePrincipal,
+  outcome: PlanningEntityCreationWithAssignedIdOutcome<{ planning: PlanningSnapshot }>,
+): Promise<PlanningSnapshot> {
+  c.header('Location', createPlanningEntityLocation(outcome.entityId))
+  if (outcome.status === 'created') {
+    return filterPlanningSnapshotForPrincipal(principal, outcome.result.planning)
+  }
+  c.header('Idempotency-Replayed', 'true')
+  return readPlanningSnapshotForPrincipal(principal)
+}
+
+/**
+ * Reads the current Planning snapshot visible to the principal for an idempotent replay.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Current Planning snapshot filtered for the principal.
+ */
+async function readPlanningSnapshotForPrincipal(
+  principal: WorkspacePrincipal,
+): Promise<PlanningSnapshot> {
+  const workItemState = await readPlanningWorkItemState(principal)
+  return filterPlanningSnapshotForPrincipal(
+    principal,
+    await workItemDependencies.planning.get(principal.directoryId, workItemState),
+  )
+}
+
+/**
+ * Creates the `Location` header value of one Planning entity.
+ *
+ * @param entityId - Created entity ID.
+ * @returns Canonical entity API path.
+ */
+function createPlanningEntityLocation(entityId: string): string {
+  return `/api/planning/entities/${encodeURIComponent(entityId)}`
 }
 
 /** Stable operation stored in one Planning update annotation mutation receipt. */
@@ -3851,7 +3944,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
     })
   }
 
-  /** Planning hierarchy に entity を作成します。 */
+  /** Planning hierarchy に entity を作成します。ID を省略すると server が採番します。 */
   routeApp.post('/api/planning/entities', async (c) => {
     const accessToken = readBearerAccessToken(c)
     if (!accessToken) {
@@ -3862,24 +3955,42 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       const input = await readPlanningJson<CreatePlanningEntityInput>(c.req)
-      const workItemState = await readPlanningWorkItemState(principal)
-      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
-      await requirePlanningScopePermission(principal, input, 'member')
-      if (isRecord(input) && input.automation !== undefined) {
-        await requirePlanningAutomationManagement(principal, input)
+      /** Authorizes the creation against the current graph and commits it with the given ID. */
+      const create = async (entityId: string) => {
+        const workItemState = await readPlanningWorkItemState(principal)
+        const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+        await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
+        await requirePlanningScopePermission(principal, input, 'member')
+        if (isRecord(input) && input.automation !== undefined) {
+          await requirePlanningAutomationManagement(principal, input)
+        }
+        if (input.parentId) {
+          await requirePlanningEntityPermission(
+            principal,
+            snapshot.entities,
+            input.parentId,
+            'member',
+          )
+        }
+        await requirePlanningActiveOwner(principal, input.ownerMemberKey)
+        const creation: PlanningEntityCreation = { ...input, id: entityId }
+        return workItemDependencies.planning.create(principal.directoryId, creation, workItemState)
       }
-      if (input.parentId) {
-        await requirePlanningEntityPermission(
-          principal,
-          snapshot.entities,
-          input.parentId,
-          'member',
-        )
+      if (input.id !== undefined) {
+        const response = await create(input.id)
+        c.header('Location', createPlanningEntityLocation(input.id))
+        return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning), 201)
       }
-      await requirePlanningActiveOwner(principal, input.ownerMemberKey)
-      const response = await workItemDependencies.planning.create(principal.directoryId, input, workItemState)
-      return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning), 201)
+      const outcome = await createPlanningEntityWithAssignedId({
+        ...createPlanningEntityCreationScope(principal),
+        idempotency: developerPlatformDependencies.idempotency,
+        idempotencyKey: c.req.header('Idempotency-Key'),
+        exists: (assignedId) => planningEntityIdExists(principal.directoryId, assignedId),
+        requestFingerprint: createPlanningEntityCreationFingerprint('/api/planning/entities', input),
+        operation: 'create',
+        create,
+      })
+      return c.json(await respondPlanningEntityCreation(c, principal, outcome), 201)
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }
@@ -4044,7 +4155,10 @@ export function registerPlanningRoutes(routeApp: Hono): void {
     }
   })
 
-  /** Planning entity を link や dependency を持たない新規 entity として複製します。 */
+  /**
+   * Planning entity を link や dependency を持たない新規 entity として複製します。
+   * 複製先 ID を省略すると server が採番します。
+   */
   routeApp.post('/api/planning/entities/:entityId/duplicate', async (c) => {
     const accessToken = readBearerAccessToken(c)
     if (!accessToken) {
@@ -4056,27 +4170,48 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessWrite(principal)
       const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
       const input = await readPlanningJson<DuplicatePlanningEntityInput>(c.req)
-      const workItemState = await readPlanningWorkItemState(principal)
-      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
-      const source = await requirePlanningEntityPermission(
-        principal,
-        snapshot.entities,
-        entityId,
-        'member',
-      )
-      await requirePlanningActiveOwner(principal, source.ownerMemberKey)
-      const effectiveParentId = input.parentId === undefined ? source.parentId : input.parentId
-      if (effectiveParentId) {
-        await requirePlanningEntityPermission(
+      /** Authorizes the copy against the current graph and commits it with the given ID. */
+      const duplicate = async (targetId: string) => {
+        const workItemState = await readPlanningWorkItemState(principal)
+        const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+        await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
+        const source = await requirePlanningEntityPermission(
           principal,
           snapshot.entities,
-          effectiveParentId,
+          entityId,
           'member',
         )
+        await requirePlanningActiveOwner(principal, source.ownerMemberKey)
+        const effectiveParentId = input.parentId === undefined ? source.parentId : input.parentId
+        if (effectiveParentId) {
+          await requirePlanningEntityPermission(
+            principal,
+            snapshot.entities,
+            effectiveParentId,
+            'member',
+          )
+        }
+        const duplication: PlanningEntityDuplication = { ...input, targetId }
+        return workItemDependencies.planning.duplicate(principal.directoryId, entityId, duplication, workItemState)
       }
-      const response = await workItemDependencies.planning.duplicate(principal.directoryId, entityId, input, workItemState)
-      return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning), 201)
+      if (input.targetId !== undefined) {
+        const response = await duplicate(input.targetId)
+        c.header('Location', createPlanningEntityLocation(input.targetId))
+        return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning), 201)
+      }
+      const outcome = await createPlanningEntityWithAssignedId({
+        ...createPlanningEntityCreationScope(principal),
+        idempotency: developerPlatformDependencies.idempotency,
+        idempotencyKey: c.req.header('Idempotency-Key'),
+        exists: (assignedId) => planningEntityIdExists(principal.directoryId, assignedId),
+        requestFingerprint: createPlanningEntityCreationFingerprint(
+          `/api/planning/entities/${entityId}/duplicate`,
+          input,
+        ),
+        operation: 'duplicate',
+        create: duplicate,
+      })
+      return c.json(await respondPlanningEntityCreation(c, principal, outcome), 201)
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }
