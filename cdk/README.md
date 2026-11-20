@@ -720,6 +720,13 @@ aws logs describe-log-groups --log-group-name-prefix /aws/lambda/<StackName>- \
 
 Table を意図して削除する場合は、先に `aws dynamodb update-table --table-name <name> --no-deletion-protection-enabled` で保護を外します。
 
+## IAM policy の大きさ
+
+IAM は1つの role に付く inline policy を合計10,240文字（空白を除く）まで、customer-managed policy を1本6,144文字まで、role あたり10本までに制限します。Floci はこの上限を検査しないため、`cdk/test/iam-policy-quotas.suite.ts` が全 role について、ARN を長めの値に置き換えた見積もりで inline の合計と各 managed policy が上限の80%以下、managed policy が10本以下であることを確かめます。
+
+- API role の DynamoDB と SQS の権限は customer-managed policy（`ApiTableDataPolicy`、`ApiAnalyticsTablePolicy`、`ApiFeatureDataPolicy`、`ApiTransactionConditionPolicy`）に置きます。API Lambda はこれらの policy ができてから作られます。
+- Role の inline が上限に近づいたら、`grants.*` に `ManagedPolicyPrincipal`（`cdk/lib/policies/managed-policy-principal.ts`）を渡して、権限を customer-managed policy へ移します。
+
 ## Fresh deployment
 
 ### 1. Cognito と値を準備する
