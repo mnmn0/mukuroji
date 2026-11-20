@@ -1,4 +1,4 @@
-# 0016. Team の通知日数設定を NotificationsTable の Workspace 内 partition に保存する
+# 0017. Team の通知日数設定を NotificationsTable の Workspace 内 partition に保存する
 
 - 状態: 提案
 - 日付: 2026-11-19
