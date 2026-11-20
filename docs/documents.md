@@ -164,9 +164,10 @@ Documents home の「Markdown を取り込む」で、貼り付けた Markdown �
 そのまま適用されます。上限を超える Markdown は作成前に理由を表示します。
 
 - `#` 〜 `######` の見出しは heading block に変換します。先頭にある唯一の `#` 見出しはページの
-  タイトルにし（ページの Markdown export と同じ形）、残りの見出しは最も浅いものを level 1 として
-  level 3 までに詰めます。`#` 見出しがない場合はファイル名（なければ「取り込んだページ」）を
-  タイトルにします。
+  タイトルにし、`##` を level 1 として level 3 までに詰めます（ページの Markdown export と同じ形
+  なので、export したページは見出しの level を保ったまま戻せます）。それ以外は最も浅い見出しを
+  level 1 にし、タイトルはファイル名（なければ「取り込んだページ」）にします。
+- ページの Markdown export は表の各行の間に空行を入れるので、その形の表も table block に戻します。
 - フェンス付きコードは code block（安全な言語名だけ保持）、`mermaid` のフェンスは diagram block、
   `- [ ]` / `- [x]` の連続行は checklist block、GFM のパイプ表は table block にします。
 - 段落・リスト・引用・リンク・画像・HTML は、Markdown の backslash escape だけを外して paragraph

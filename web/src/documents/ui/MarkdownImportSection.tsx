@@ -1,4 +1,4 @@
-import { useId, useState, type ChangeEvent } from 'react'
+import { useId, useRef, useState, type ChangeEvent } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   MARKDOWN_IMPORT_MAX_BYTES,
@@ -46,7 +46,18 @@ export function MarkdownImportSection({
     MarkdownImportErrorCode | 'unreadable' | undefined
   >(undefined)
   const [fileInputKey, setFileInputKey] = useState(0)
+  const [isReadingFile, setIsReadingFile] = useState(false)
+  const readGenerationRef = useRef(0)
   const fieldId = useId()
+
+  /**
+   * Abandons a file read still in progress so its result cannot replace
+   * newer text.
+   */
+  const cancelFileRead = () => {
+    readGenerationRef.current += 1
+    setIsReadingFile(false)
+  }
 
   /**
    * Reads the chosen file into the text area so it can be checked before import.
@@ -56,18 +67,25 @@ export function MarkdownImportSection({
   const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) return
+    cancelFileRead()
+    const generation = readGenerationRef.current
     setErrorCode(undefined)
+    setSource('')
+    setFileTitle('')
     if (file.size > MARKDOWN_IMPORT_MAX_BYTES) {
-      setSource('')
-      setFileTitle('')
       setErrorCode('too-large')
       return
     }
+    setIsReadingFile(true)
     try {
-      setSource(await file.text())
+      const text = await file.text()
+      if (generation !== readGenerationRef.current) return
+      setSource(text)
       setFileTitle(titleFromMarkdownFileName(file.name))
     } catch {
-      setErrorCode('unreadable')
+      if (generation === readGenerationRef.current) setErrorCode('unreadable')
+    } finally {
+      if (generation === readGenerationRef.current) setIsReadingFile(false)
     }
   }
 
@@ -88,6 +106,7 @@ export function MarkdownImportSection({
    * Clears the pasted text and the chosen file.
    */
   const handleClear = () => {
+    cancelFileRead()
     setSource('')
     setFileTitle('')
     setErrorCode(undefined)
@@ -142,6 +161,7 @@ export function MarkdownImportSection({
           <textarea
             className="workbench-input min-h-40 px-3 py-2 font-mono text-sm"
             onChange={(event) => {
+              cancelFileRead()
               setSource(event.target.value)
               setErrorCode(undefined)
             }}
@@ -157,7 +177,7 @@ export function MarkdownImportSection({
         <div className="flex flex-wrap justify-end gap-2">
           <button
             className="workbench-button-secondary min-h-10 px-4"
-            disabled={isImporting || (!source && !fileTitle)}
+            disabled={isImporting || (!source && !fileTitle && !isReadingFile)}
             onClick={handleClear}
             type="button"
           >
@@ -165,7 +185,7 @@ export function MarkdownImportSection({
           </button>
           <button
             className="workbench-button-primary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={isImporting || source.trim() === ''}
+            disabled={isImporting || isReadingFile || source.trim() === ''}
             onClick={() => {
               void handleImport()
             }}

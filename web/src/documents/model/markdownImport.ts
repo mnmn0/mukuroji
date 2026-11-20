@@ -125,8 +125,9 @@ const SAFE_LANGUAGE = /^[A-Za-z0-9][A-Za-z0-9_+.-]{0,99}$/u
  * their matching blocks; everything else stays as plain paragraph text, since
  * paragraphs store text rather than rendered Markdown. When the source starts
  * with the only `#` heading, as Markdown exported from a page does, that
- * heading becomes the title. Heading levels are shifted so the shallowest
- * remaining heading is level 1, and deeper ones stop at level 3.
+ * heading becomes the title and `##` becomes level 1, so exported pages keep
+ * their heading levels. Otherwise levels are shifted so the shallowest heading
+ * is level 1. Deeper headings stop at level 3.
  *
  * @param source - Markdown text to convert.
  * @param options - Fallback title and ID factory.
@@ -148,6 +149,7 @@ export function convertMarkdownToDocument(
 
   let title = options.fallbackTitle
   let body = scanned.blocks
+  let titleTaken = false
   const first = body[0]
   const topLevelCount = body.filter(
     (block) => block.type === 'raw-heading' && block.rawLevel === 1,
@@ -155,11 +157,14 @@ export function convertMarkdownToDocument(
   if (first?.type === 'raw-heading' && first.rawLevel === 1 && topLevelCount === 1) {
     title = first.text.trim() || options.fallbackTitle
     body = body.slice(1)
+    titleTaken = true
   }
 
-  const shallowest = Math.min(
-    ...body.flatMap((block) => (block.type === 'raw-heading' ? [block.rawLevel] : [])),
-  )
+  const shallowest = titleTaken
+    ? 2
+    : Math.min(
+        ...body.flatMap((block) => (block.type === 'raw-heading' ? [block.rawLevel] : [])),
+      )
   const blocks = body.map((block): DocumentBlock =>
     block.type === 'raw-heading'
       ? createHeading(block, shallowest, options.createId)
@@ -271,30 +276,33 @@ function scanBlocks(
       continue
     }
 
-    const delimiter = lines[index + 1] ?? ''
-    if (line.includes('|') && delimiter.includes('|') && TABLE_DELIMITER.test(delimiter)) {
+    const table = readTableStart(lines, index)
+    if (table) {
+      flushParagraph()
       const columns = splitTableRow(line)
-      if (columns.length === splitTableRow(delimiter).length) {
-        flushParagraph()
-        index += 2
-        const rows: DocumentTableRow[] = []
-        while (index < lines.length && continuesTable(lines[index] ?? '')) {
-          const cells = splitTableRow(lines[index] ?? '')
-          rows.push({
-            id: createId('row'),
-            cells: columns.map((_, column) => ({
-              id: createId('cell'),
-              text: cells[column] ?? '',
-            })),
-          })
-          index += 1
-        }
-        if (columns.length > MAX_TABLE_COLUMNS || rows.length > MAX_TABLE_ROWS) {
+      if (columns.length > MAX_TABLE_COLUMNS) {
+        return { ok: false, code: 'table-too-large' }
+      }
+      const rows: DocumentTableRow[] = []
+      let rowIndex = nextTableRowIndex(lines, table.delimiterIndex + 1, table.spaced)
+      while (rowIndex !== undefined) {
+        if (rows.length === MAX_TABLE_ROWS) {
           return { ok: false, code: 'table-too-large' }
         }
-        blocks.push({ id: createId('block'), type: 'table', columns, rows })
-        continue
+        const cells = splitTableRow(lines[rowIndex] ?? '')
+        rows.push({
+          id: createId('row'),
+          cells: columns.map((_, column) => ({
+            id: createId('cell'),
+            text: cells[column] ?? '',
+          })),
+        })
+        index = rowIndex + 1
+        rowIndex = nextTableRowIndex(lines, index, table.spaced)
       }
+      index = Math.max(index, table.delimiterIndex + 1)
+      blocks.push({ id: createId('block'), type: 'table', columns, rows })
+      continue
     }
 
     if (THEMATIC_BREAK.test(line)) {
@@ -308,6 +316,103 @@ function scanBlocks(
   }
   flushParagraph()
   return { ok: true, blocks }
+}
+
+/**
+ * Detects a pipe table whose header is at the given line.
+ *
+ * Besides GitHub Flavored Markdown tables, this accepts the layout the page
+ * Markdown export writes, which puts a blank line between the header, the
+ * delimiter row, and every body row.
+ *
+ * @param lines - Source lines.
+ * @param index - Line of the candidate header row.
+ * @returns Where the delimiter row is and whether rows are blank-separated,
+ *   or undefined when the line does not start a table.
+ */
+function readTableStart(
+  lines: readonly string[],
+  index: number,
+): { delimiterIndex: number; spaced: boolean } | undefined {
+  const header = lines[index] ?? ''
+  if (!header.includes('|')) return undefined
+  const columnCount = splitTableRow(header).length
+  const matches = (delimiterIndex: number) => {
+    const delimiter = lines[delimiterIndex] ?? ''
+    return (
+      isDelimiterRow(delimiter) &&
+      splitTableRow(delimiter).length === columnCount
+    )
+  }
+  if (matches(index + 1)) return { delimiterIndex: index + 1, spaced: false }
+  if (
+    isPipeRow(header) &&
+    (lines[index + 1] ?? '').trim() === '' &&
+    matches(index + 2)
+  ) {
+    return { delimiterIndex: index + 2, spaced: true }
+  }
+  return undefined
+}
+
+/**
+ * Finds the next body row of a table.
+ *
+ * GitHub Flavored Markdown rows continue until a blank line or the start of
+ * another block. Rows of an exported table are each preceded by one blank line
+ * and start and end with a pipe; a row that is itself followed by a delimiter
+ * row is the header of the next table instead.
+ *
+ * @param lines - Source lines.
+ * @param index - Line after the previous row or the delimiter row.
+ * @param spaced - Whether the table separates rows with blank lines.
+ * @returns Line of the next row, or undefined when the table has ended.
+ */
+function nextTableRowIndex(
+  lines: readonly string[],
+  index: number,
+  spaced: boolean,
+): number | undefined {
+  if (!spaced) {
+    return index < lines.length && continuesTable(lines[index] ?? '')
+      ? index
+      : undefined
+  }
+  const candidate = lines[index + 1] ?? ''
+  if ((lines[index] ?? '').trim() !== '' || !isPipeRow(candidate)) {
+    return undefined
+  }
+  const startsNextTable =
+    isDelimiterRow(lines[index + 2] ?? '') ||
+    ((lines[index + 2] ?? '').trim() === '' &&
+      isDelimiterRow(lines[index + 3] ?? ''))
+  return startsNextTable ? undefined : index + 1
+}
+
+/**
+ * Checks whether a line is a table delimiter row such as `| --- | :-: |`.
+ *
+ * @param line - Candidate line.
+ * @returns Whether the line is a delimiter row with at least one pipe.
+ */
+function isDelimiterRow(line: string): boolean {
+  return line.includes('|') && TABLE_DELIMITER.test(line)
+}
+
+/**
+ * Checks whether a line starts and ends with a pipe and is not a delimiter row.
+ *
+ * @param line - Candidate line.
+ * @returns Whether the line looks like an exported table row.
+ */
+function isPipeRow(line: string): boolean {
+  const trimmed = line.trim()
+  return (
+    trimmed.length > 1 &&
+    trimmed.startsWith('|') &&
+    trimmed.endsWith('|') &&
+    !isDelimiterRow(trimmed)
+  )
 }
 
 /**

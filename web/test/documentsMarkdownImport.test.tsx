@@ -47,6 +47,8 @@ function blocksOf(source: string): DocumentBlock[] {
 
 describe('Markdown import', () => {
   test('reads back a page exported as Markdown', () => {
+    // Same layout as renderMarkdown in the server Document export: every
+    // block, and every table line, is separated by one blank line.
     const exported = [
       '# 設計書 \\[draft\\]',
       '',
@@ -58,8 +60,12 @@ describe('Markdown import', () => {
       '### 詳細',
       '',
       '| 項目 | 値 |',
+      '',
       '| --- | --- |',
+      '',
       '| a\\|b | 1<br>2 |',
+      '',
+      '| c | d |',
       '',
       '```ts',
       'const value = 1',
@@ -91,7 +97,10 @@ describe('Markdown import', () => {
     expect(result.blocks[2]).toMatchObject({ level: 2, text: '詳細' })
     expect(result.blocks[3]).toMatchObject({
       columns: ['項目', '値'],
-      rows: [{ cells: [{ text: 'a|b' }, { text: '1\n2' }] }],
+      rows: [
+        { cells: [{ text: 'a|b' }, { text: '1\n2' }] },
+        { cells: [{ text: 'c' }, { text: 'd' }] },
+      ],
     })
     expect(result.blocks[4]).toMatchObject({ code: 'const value = 1', language: 'ts' })
     expect(result.blocks[5]).toMatchObject({
@@ -117,6 +126,11 @@ describe('Markdown import', () => {
     ])
   })
 
+  test('keeps exported heading levels when the title heading is taken', () => {
+    const blocks = blocksOf('# Title\n\n### Deep only\n')
+    expect(blocks).toMatchObject([{ level: 2, text: 'Deep only', type: 'heading' }])
+  })
+
   test('starts heading levels at the shallowest heading when there is no title', () => {
     const blocks = blocksOf('## Section\n\n### Sub\n')
     expect(blocks).toMatchObject([
@@ -140,6 +154,36 @@ describe('Markdown import', () => {
       { code: '# not a heading\n\\*kept\\*', id: 'block-1', type: 'code' },
       { code: 'unterminated', id: 'block-2', type: 'code' },
     ])
+  })
+
+  test('keeps two blank-separated exported tables apart', () => {
+    const blocks = blocksOf([
+      '| a | b |', '', '| --- | --- |', '', '| 1 | 2 |', '',
+      '| x |', '', '| --- |', '', '| 9 |', '',
+    ].join('\n'))
+    expect(blocks).toMatchObject([
+      { columns: ['a', 'b'], rows: [{ cells: [{ text: '1' }, { text: '2' }] }], type: 'table' },
+      { columns: ['x'], rows: [{ cells: [{ text: '9' }] }], type: 'table' },
+    ])
+  })
+
+  test('rejects oversized tables before building every cell', () => {
+    const wide = Array.from({ length: 40_000 }, () => 'c').join('|')
+    const delimiter = Array.from({ length: 40_000 }, () => '-').join('|')
+    const rows = Array.from({ length: 40_000 }, () => 'v').join('\n')
+    const createId = (prefix: string) => `${prefix}-${++calls}`
+    let calls = 0
+    expect(convertMarkdownToDocument(`${wide}\n${delimiter}\n${rows}`, {
+      createId,
+      fallbackTitle: 'wide',
+    })).toEqual({ code: 'table-too-large', ok: false })
+    expect(calls).toBe(0)
+
+    const longTable = ['| a |', '| --- |', ...Array.from({ length: 5_000 }, () => '| v |')].join('\n')
+    calls = 0
+    expect(convertMarkdownToDocument(longTable, { createId, fallbackTitle: 'long' }))
+      .toEqual({ code: 'table-too-large', ok: false })
+    expect(calls).toBeLessThanOrEqual(201 * 2)
   })
 
   test('pads short table rows and ignores extra cells', () => {
