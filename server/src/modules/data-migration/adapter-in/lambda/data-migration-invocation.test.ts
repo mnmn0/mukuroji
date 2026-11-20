@@ -174,7 +174,7 @@ describe('handleDataMigrationInvocation', () => {
     const response = await handleDataMigrationInvocation(applyPayload, context, dependencies)
     expect(response).toEqual({ operation: 'run', status: 'error', code: 'OPERATOR_UNVERIFIED' })
     expect(storeRequests).toEqual([])
-    expect(JSON.parse(auditLines[0] ?? '{}')).toMatchObject({ code: 'OPERATOR_UNVERIFIED', mode: 'apply' })
+    expect(JSON.parse(auditLines[0] ?? '{}')).toMatchObject({ code: 'OPERATOR_UNVERIFIED', mode: 'apply', reason: 'STS_REJECTED' })
   })
 
   test('refuses an unknown migration and a table outside the allowlist', async () => {
@@ -200,6 +200,17 @@ describe('handleDataMigrationInvocation', () => {
       { command: 'verify', migrationId: '0001-task-estimate-points', segments: 1 }, context, dependencies,
     )
     expect(verified).toMatchObject({ operation: 'verify', status: 'pass', migratedRows: 3 })
+  })
+
+  test('drops a verifier message that is not a reason code from the audit log', async () => {
+    const { dependencies, auditLines } = createDependencies({
+      verifyOperator: async () => {
+        throw new Error('https://sts.example/?X-Amz-Signature=secret')
+      },
+    })
+    await handleDataMigrationInvocation(applyPayload, context, dependencies)
+    expect(auditLines[0]).not.toContain('secret')
+    expect(JSON.parse(auditLines[0] ?? '{}')).not.toHaveProperty('reason')
   })
 
   test('reports a store failure with its code and no raw error', async () => {

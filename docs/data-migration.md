@@ -152,7 +152,7 @@ Migration は Workspace をまたいで table 全体を書き換えるため、W
 Lambda で実行した場合は、これに加えて function の log group（1 年保持）に、起動ごとに 1 行の
 `data-migration.invocation` を残します。中身は Lambda の request ID、command、migration ID、論理 table 名、mode、
 status、counter、`--apply` では確かめた実行者の ARN です。proof を確かめられずに断った `--apply` も
-`OPERATOR_UNVERIFIED` として残ります。
+`OPERATOR_UNVERIFIED` として、理由の code（`STS_REJECTED`、`PROOF_TARGET_INVALID`、`ACCOUNT_MISMATCH` など）付きで残ります。
 
 ### AWS 上の実行者の確認（operator proof）
 

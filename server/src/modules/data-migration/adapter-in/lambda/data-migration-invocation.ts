@@ -20,6 +20,9 @@ import {
 /** Time kept back from the Lambda limit so the last page, checkpoint and run record finish. */
 const DEADLINE_SAFETY_MILLISECONDS = 60_000
 
+/** Shape of a verifier rejection reason that is safe to log; anything else is dropped. */
+const REASON_CODE_PATTERN = /^[A-Z][A-Z_]{0,39}$/u
+
 /** Version tag of the binding digest, changed whenever its inputs change. */
 const BINDING_VERSION = 'mukuroji-data-migration-request/v1'
 
@@ -255,7 +258,8 @@ export async function handleDataMigrationInvocation(
           binding: computeDataMigrationRequestBinding(context.functionName, request),
           accountId: context.accountId,
         })
-      } catch {
+      } catch (error: unknown) {
+        const reason = error instanceof Error && REASON_CODE_PATTERN.test(error.message) ? error.message : undefined
         writeAudit(dependencies, context, {
           operation,
           migrationId: definition.id,
@@ -263,6 +267,7 @@ export async function handleDataMigrationInvocation(
           mode: 'apply',
           status: 'error',
           code: 'OPERATOR_UNVERIFIED',
+          ...(reason === undefined ? {} : { reason }),
         })
         return refuse(operation, 'OPERATOR_UNVERIFIED')
       }
