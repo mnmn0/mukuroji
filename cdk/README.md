@@ -858,7 +858,9 @@ stack が作る user pool は、招待メール（仮パスワード）と確認
 4. 自分宛てに member を招待して招待メールが指定の送信元から届くこと、login 画面の「パスワードを忘れた場合」で
    確認コードが届くことを確かめます。届かない場合は SES の送信統計と suppression list を確認します。
 
-`CognitoEmailSender` を空に戻して deploy すると、Cognito の既定の送信機能に戻ります。文面はどちらでも同じです。
+Cognito の既定の送信機能に戻すときは、`CognitoEmailSender` と `CognitoEmailSesIdentity` の両方を空にして deploy します
+（例: `--parameters CognitoEmailSender= --parameters CognitoEmailSesIdentity=`）。`CognitoEmailSesIdentity` だけが残っていると
+rule が deploy 前に止めます。文面はどちらでも同じです。
 既存の user pool を渡す場合、stack は user pool のメール設定を変えないため、`CognitoEmailSender` を指定すると
 deploy 前に rule が止めます。既存の user pool では Cognito console の「メッセージング」で SES を設定してください。
 
