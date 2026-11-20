@@ -8,6 +8,13 @@ import {
   type PersonalWeeklyReportNotes,
 } from '../model/personalWeeklyReport'
 import { formatMinutes, type TimeWeekPeriod } from '../model/timePeriod'
+import {
+  readWeeklyReportSavedBase,
+  reconcileWeeklyReportEditor,
+  sameWeeklyReportNotes,
+  type WeeklyReportEditorState,
+  type WeeklyReportNotesBase,
+} from '../model/weeklyReportNotesEditor'
 import { SubmittedWeeklyReport } from './SubmittedWeeklyReport'
 import { TimeWeekNavigator } from './TimeWeekNavigator'
 import { formatWeeklyReportSubmittedStatus, type TimeTrackingFormatters, type TimeTrackingTranslator } from './timeTrackingText'
@@ -71,6 +78,28 @@ type WeeklyReportComposerProps = Pick<
 > & {
   /** The member's saved notes and latest submission of the week. */
   savedReport: WeeklyReportResponse
+  /** Notes being edited, kept by the parent so a failed read does not discard them. */
+  editor: WeeklyReportEditor
+}
+
+/** Notes editor shared by the weekly report and its composer. */
+type WeeklyReportEditor = {
+  /** Notes as the member is typing them. */
+  notes: PersonalWeeklyReportNotes
+  /** Revision a save expects: the one the edit started from. */
+  baseRevision: number
+  /** Whether the notes differ from the saved notes the edit started from. */
+  isDirty: boolean
+  /** Notes saved elsewhere after the edit started, while the member has unsaved changes. */
+  externalChange?: WeeklyReportNotesBase
+  /**
+   * Replaces the notes being typed.
+   *
+   * @param update - Builds the next notes from the current ones.
+   */
+  setNotes: (update: (current: PersonalWeeklyReportNotes) => PersonalWeeklyReportNotes) => void
+  /** Drops the unsaved changes and starts again from the notes saved elsewhere. */
+  loadSaved: () => void
 }
 
 /** Props of one fact list. */
@@ -115,19 +144,33 @@ function ReportItemList({ items, t, title }: ReportItemListProps) {
   )
 }
 
-/** Notes of a week nothing was saved for. */
-const emptyNotes: PersonalWeeklyReportNotes = { issues: '', reflection: '' }
-
 /**
- * Tells whether two sets of notes are the same once surrounding whitespace is ignored, as the
- * server stores them trimmed.
+ * Keeps the notes being edited for the whole life of the week's view, reconciled with every read
+ * of the saved report.
  *
- * @param left - First notes.
- * @param right - Second notes.
- * @returns Whether both fields match.
+ * @param savedReport - Latest saved report, or undefined until it is read.
+ * @returns The editor, or undefined until the saved report is first read.
  */
-function sameNotes(left: PersonalWeeklyReportNotes, right: PersonalWeeklyReportNotes) {
-  return left.issues.trim() === right.issues.trim() && left.reflection.trim() === right.reflection.trim()
+function useWeeklyReportEditor(savedReport: WeeklyReportResponse | undefined): WeeklyReportEditor | undefined {
+  const [state, setState] = useState<WeeklyReportEditorState>()
+  let current = state
+  if (savedReport && state?.seen !== savedReport) {
+    current = reconcileWeeklyReportEditor(state, savedReport)
+    setState(current)
+  }
+  if (!current) return undefined
+  const saved = readWeeklyReportSavedBase(current.seen)
+  const isDirty = !sameWeeklyReportNotes(current.notes, current.base.notes)
+  return {
+    notes: current.notes,
+    baseRevision: current.base.revision,
+    isDirty,
+    ...(saved.revision !== current.base.revision ? { externalChange: saved } : {}),
+    setNotes: (update) => setState((previous) => previous ? { ...previous, notes: update(previous.notes) } : previous),
+    loadSaved: () => setState((previous) => previous
+      ? { ...previous, notes: readWeeklyReportSavedBase(previous.seen).notes, base: readWeeklyReportSavedBase(previous.seen) }
+      : previous),
+  }
 }
 
 /**
@@ -150,16 +193,24 @@ function failureMessageKey(result: Exclude<WeeklyReportActionResult, 'done'>, ac
  * @param props - Facts, saved report, and actions.
  * @returns Notes, actions, and preview.
  */
-function WeeklyReportComposer({ formatters, isPartial, onCopy, onSaveDraft, onSubmit, report, savedReport, t }: WeeklyReportComposerProps) {
-  const savedNotes = savedReport.draft?.notes ?? emptyNotes
-  const [notes, setNotes] = useState<PersonalWeeklyReportNotes>(savedNotes)
+function WeeklyReportComposer({
+  editor,
+  formatters,
+  isPartial,
+  onCopy,
+  onSaveDraft,
+  onSubmit,
+  report,
+  savedReport,
+  t,
+}: WeeklyReportComposerProps) {
+  const { externalChange, isDirty, notes, setNotes } = editor
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
   const [busy, setBusy] = useState(false)
   const markdown = useMemo(
     () => formatPersonalWeeklyReportMarkdown(report, notes, t, { timeIsPartial: isPartial }),
     [isPartial, notes, report, t],
   )
-  const isDirty = !sameNotes(notes, savedNotes)
 
   /** Copies the Markdown and reports the outcome. */
   const copy = async () => {
@@ -175,13 +226,14 @@ function WeeklyReportComposer({ formatters, isPartial, onCopy, onSaveDraft, onSu
    * Runs a save or submission and reports the outcome.
    *
    * @param action - Which action runs.
+   * @param expectedRevision - Revision a save expects; the one the edit started from by default.
    */
-  const run = async (action: 'save' | 'submit') => {
+  const run = async (action: 'save' | 'submit', expectedRevision = editor.baseRevision) => {
     setBusy(true)
     setMessage(undefined)
     try {
       const result = action === 'save'
-        ? await onSaveDraft(savedReport.draft?.revision ?? 0, notes)
+        ? await onSaveDraft(expectedRevision, notes)
         : await onSubmit(toSubmitWeeklyReportRequest(report, notes, {
             timeIsPartial: isPartial,
             expectedSubmissionCount: savedReport.submissionCount,
@@ -221,11 +273,27 @@ function WeeklyReportComposer({ formatters, isPartial, onCopy, onSaveDraft, onSu
       </label>
       <p className="text-xs text-[var(--workbench-muted)]">{t('timeTracking.weeklyReport.notesHint')}</p>
       {isDirty ? <p className="text-xs font-semibold text-fg-amber-800">{t('timeTracking.weeklyReport.unsaved')}</p> : null}
+      {externalChange ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-fg-amber-800" role="status">
+          <span>{t('timeTracking.weeklyReport.externalChange')}</span>
+          <button className="workbench-button-secondary min-h-8 px-3" disabled={busy} onClick={editor.loadSaved} type="button">
+            {t('timeTracking.weeklyReport.loadSaved')}
+          </button>
+          <button
+            className="workbench-button-secondary min-h-8 px-3"
+            disabled={busy}
+            onClick={() => { void run('save', externalChange.revision) }}
+            type="button"
+          >
+            {t('timeTracking.weeklyReport.overwriteSaved')}
+          </button>
+        </div>
+      ) : null}
       <div className="flex flex-wrap items-center gap-3">
-        <button className="workbench-button-primary min-h-9 px-3" disabled={busy} onClick={() => { void run('submit') }} type="button">
+        <button className="workbench-button-primary min-h-9 px-3" disabled={busy || externalChange !== undefined} onClick={() => { void run('submit') }} type="button">
           {t(savedReport.submissionCount > 0 ? 'timeTracking.weeklyReport.resubmit' : 'timeTracking.weeklyReport.submit')}
         </button>
-        <button className="workbench-button-secondary min-h-9 px-3" disabled={busy || !isDirty} onClick={() => { void run('save') }} type="button">
+        <button className="workbench-button-secondary min-h-9 px-3" disabled={busy || !isDirty || externalChange !== undefined} onClick={() => { void run('save') }} type="button">
           {t('timeTracking.weeklyReport.saveDraft')}
         </button>
         <button className="workbench-button-secondary min-h-9 px-3" onClick={() => { void copy() }} type="button">
@@ -336,6 +404,8 @@ export function PersonalWeeklyReport({
   week,
 }: PersonalWeeklyReportProps) {
   const id = useId()
+  // Owned here, above the loading and error branches, so a failed read never discards typed notes.
+  const editor = useWeeklyReportEditor(savedReport)
 
   return (
     <section aria-labelledby={`${id}-title`} className="grid min-w-0 gap-4" data-testid="personal-weekly-report">
@@ -355,9 +425,9 @@ export function PersonalWeeklyReport({
         </p>
       ) : null}
 
-      {isLoading || (!hasLoadError && !savedReport) ? (
+      {isLoading || (!hasLoadError && (!savedReport || !editor)) ? (
         <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('timeTracking.weeklyReport.loading')}</p>
-      ) : hasLoadError || !savedReport ? null : (
+      ) : hasLoadError || !savedReport || !editor ? null : (
         <div className="grid min-w-0 gap-4 lg:grid-cols-2">
           <div className="grid min-w-0 content-start gap-4">
             <section className="grid min-w-0 gap-2">
@@ -393,6 +463,7 @@ export function PersonalWeeklyReport({
           </div>
 
           <WeeklyReportComposer
+            editor={editor}
             formatters={formatters}
             isPartial={isPartial}
             onCopy={onCopy}

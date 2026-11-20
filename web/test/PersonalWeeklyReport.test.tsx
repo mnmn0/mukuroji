@@ -17,6 +17,7 @@ import {
   toSubmitWeeklyReportRequest,
 } from '../src/features/time-tracking/model/personalWeeklyReport'
 import { createWeekPeriod } from '../src/features/time-tracking/model/timePeriod'
+import { reconcileWeeklyReportEditor } from '../src/features/time-tracking/model/weeklyReportNotesEditor'
 import { PersonalWeeklyReport } from '../src/features/time-tracking/ui/PersonalWeeklyReport'
 import { SubmittedWeeklyReport } from '../src/features/time-tracking/ui/SubmittedWeeklyReport'
 import { TeamWeeklyReports } from '../src/features/time-tracking/ui/TeamWeeklyReports'
@@ -340,6 +341,51 @@ describe('PersonalWeeklyReport', () => {
   test('has its own time tracking URL', () => {
     expect(createTeamTimeTrackingPath('core-team', 'weekly-report', '2026-11-09'))
       .toBe('/teams/core-team/timesheet?view=weekly-report&week=2026-11-09')
+  })
+})
+
+describe('reconcileWeeklyReportEditor', () => {
+  /**
+   * Builds a saved report with notes at a revision.
+   *
+   * @param revision - Saved revision.
+   * @param reflection - Saved reflection.
+   * @returns Saved report.
+   */
+  const saved = (revision: number, reflection: string) => ({
+    ...savedReport,
+    draft: { revision, updatedAt: '2026-11-13T09:00:00.000Z', notes: { issues: '', reflection } },
+  })
+
+  test('follows notes saved elsewhere while nothing is typed', () => {
+    const first = reconcileWeeklyReportEditor(undefined, saved(1, 'Mine'))
+    const next = reconcileWeeklyReportEditor(first, saved(2, 'From another tab'))
+    expect(next.notes.reflection).toBe('From another tab')
+    expect(next.base.revision).toBe(2)
+  })
+
+  test('keeps typed notes tied to the revision they started from when another tab saves', () => {
+    const first = reconcileWeeklyReportEditor(undefined, saved(1, 'Mine'))
+    const typing = { ...first, notes: { issues: '', reflection: 'Mine, edited' } }
+    const next = reconcileWeeklyReportEditor(typing, saved(2, 'From another tab'))
+    expect(next.notes.reflection).toBe('Mine, edited')
+    expect(next.base.revision).toBe(1)
+  })
+
+  test('moves to the revision its own save produced', () => {
+    const first = reconcileWeeklyReportEditor(undefined, saved(1, 'Mine'))
+    const typing = { ...first, notes: { issues: '', reflection: 'Mine, edited ' } }
+    const next = reconcileWeeklyReportEditor(typing, saved(2, 'Mine, edited'))
+    expect(next.notes.reflection).toBe('Mine, edited ')
+    expect(next.base.revision).toBe(2)
+  })
+
+  test('keeps typed notes across a reread of the same revision', () => {
+    const first = reconcileWeeklyReportEditor(undefined, saved(1, 'Mine'))
+    const typing = { ...first, notes: { issues: 'Blocked', reflection: 'Mine' } }
+    const next = reconcileWeeklyReportEditor(typing, saved(1, 'Mine'))
+    expect(next.notes.issues).toBe('Blocked')
+    expect(next.base.revision).toBe(1)
   })
 })
 
