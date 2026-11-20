@@ -44,6 +44,37 @@ test('validates optional deployment commit provenance', () => {
   }
 })
 
+test('validates the connector OAuth Web origin used for split API and Web hosts', () => {
+  expect(loadServerConfig({}, { localBun: true })).not.toHaveProperty('connectorOAuthWebOrigin')
+  expect(loadServerConfig({ CONNECTOR_OAUTH_WEB_ORIGIN: '  ' }, { localBun: true }))
+    .not.toHaveProperty('connectorOAuthWebOrigin')
+  for (const [configured, expected] of [
+    ['https://app.example.com', 'https://app.example.com'],
+    [' https://app.example.com/ ', 'https://app.example.com'],
+    ['https://app.example.com:8443', 'https://app.example.com:8443'],
+    ['http://localhost:5173', 'http://localhost:5173'],
+    ['http://127.0.0.1:5173', 'http://127.0.0.1:5173'],
+  ]) {
+    expect(loadServerConfig({
+      CONNECTOR_OAUTH_WEB_ORIGIN: configured,
+    }, { localBun: true }).connectorOAuthWebOrigin).toBe(expected)
+  }
+  for (const invalid of [
+    'app.example.com',
+    'http://app.example.com',
+    'https://app.example.com/settings',
+    'https://app.example.com?next=1',
+    'https://user:pass@app.example.com',
+    'javascript:alert(1)',
+  ]) {
+    expect(() => loadServerConfig({
+      CONNECTOR_OAUTH_WEB_ORIGIN: invalid,
+    }, { localBun: true })).toThrow(
+      'CONNECTOR_OAUTH_WEB_ORIGIN must be an https origin, or an http origin on localhost.',
+    )
+  }
+})
+
 test('normalizes explicit endpoints, origins, and production cursor validation', () => {
   const config = loadServerConfig({
     ALLOWED_ORIGINS: ' https://app.example.com,https://admin.example.com ',
