@@ -365,6 +365,8 @@ export const workItemsMessages = {
   'tasks.column.progress': '進捗率',
   'tasks.addTask': 'タスクを追加',
   'tasks.create.title': 'タスク名',
+  'tasks.workspaceCalendar.error': 'Workspace の稼働カレンダーを取得できませんでした。新しい Work Item と Gantt は、月〜金を稼働日・休日なしとして扱っています。',
+  'tasks.workspaceCalendar.retry': 'もう一度読み込む',
   'tasks.create.titlePlaceholder': '例: リリース前チェック',
   'tasks.create.assignee': '担当者',
   'tasks.create.assigneeRequired': '担当者を選択してから登録してください。',
