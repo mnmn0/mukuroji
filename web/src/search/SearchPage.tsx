@@ -864,6 +864,7 @@ function SearchToolbar({
     data: projectMembers,
     error: projectMembersError,
     isLoading: isProjectMembersLoading,
+    mutate: reloadProjectMembers,
   } = useWorkspaceProjectMembers(
     accessToken,
     'search',
@@ -874,11 +875,17 @@ function SearchToolbar({
     () => createSearchMemberFilterOptions(projectMembers?.members ?? []),
     [projectMembers],
   )
+  // Per-Project failures come back in `errors` while SWR still reports success, so check both.
+  const hasProjectMembersError = !isProjectMembersLoading &&
+    Boolean(projectMembersError || (projectMembers?.errors.length ?? 0) > 0)
   const memberStatusMessage = isProjectMembersLoading
     ? t('search.filters.membersLoading')
-    : projectMembersError || (projectMembers?.errors.length ?? 0) > 0
+    : hasProjectMembersError
       ? t('search.filters.membersError')
       : undefined
+  const retryProjectMembers = hasProjectMembersError
+    ? () => { void reloadProjectMembers() }
+    : undefined
   const statuses = getSearchStatuses(routeState.filters)
   const selectedWorkItemTypeIds = getSearchFilterValues(routeState.filters, 'workItemTypeIds')
   const columns = getSearchColumns(routeState.layout)
@@ -1024,6 +1031,7 @@ function SearchToolbar({
               onChange={(assigneeUserIds) => onFiltersChange({ assigneeUserIds })}
               options={memberFilterOptions}
               selectedValues={selectedAssigneeIds}
+              onRetry={retryProjectMembers}
               statusMessage={memberStatusMessage}
               t={t}
               testId="search-assignee-filter"
@@ -1033,6 +1041,7 @@ function SearchToolbar({
               onChange={(creatorUserIds) => onFiltersChange({ creatorUserIds })}
               options={memberFilterOptions}
               selectedValues={selectedCreatorIds}
+              onRetry={retryProjectMembers}
               statusMessage={memberStatusMessage}
               t={t}
               testId="search-creator-filter"

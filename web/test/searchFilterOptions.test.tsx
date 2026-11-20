@@ -111,6 +111,23 @@ describe('SearchFilterPicker', () => {
     expect(html).toContain('Loading members')
     expect(html).toContain('Clear selection')
     expect(html.match(/checked=""/g)).toHaveLength(2)
+    expect(html).not.toContain('Retry loading members')
+  })
+
+  test('shows a retry action only when one is provided', () => {
+    const html = renderToStaticMarkup(
+      <SearchFilterPicker
+        label="Assignee"
+        onChange={() => undefined}
+        onRetry={() => undefined}
+        options={[]}
+        selectedValues={[]}
+        statusMessage="Some members could not be loaded"
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html).toContain('Retry loading members')
   })
 })
 

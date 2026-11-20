@@ -44,6 +44,7 @@ export const searchMessages = {
   'search.filters.pickerClear': '選択を解除',
   'search.filters.membersLoading': 'メンバーを読み込み中',
   'search.filters.membersError': '一部のメンバーを読み込めませんでした',
+  'search.filters.membersRetry': 'メンバーを再取得',
   'search.layout.label': '表示モード',
   'search.layout.table': 'テーブル',
   'search.layout.board': 'ボード',

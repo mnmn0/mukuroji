@@ -44,6 +44,7 @@ export const searchMessages = {
   'search.filters.pickerClear': 'Clear selection',
   'search.filters.membersLoading': 'Loading members',
   'search.filters.membersError': 'Some members could not be loaded',
+  'search.filters.membersRetry': 'Retry loading members',
   'search.layout.label': 'Layout',
   'search.layout.table': 'Table',
   'search.layout.board': 'Board',

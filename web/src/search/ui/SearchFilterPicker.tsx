@@ -21,6 +21,8 @@ export type SearchFilterPickerProps = {
   onChange: (values: string[]) => void
   /** Optional note shown under the list, such as a loading or load-failure message. */
   statusMessage?: string
+  /** Reloads the options after a load failure; the retry action is shown only when set. */
+  onRetry?: () => void
   /** Stable test ID for the picker root. */
   testId?: string
   /** Localized message resolver. */
@@ -39,6 +41,7 @@ export type SearchFilterPickerProps = {
 export function SearchFilterPicker({
   label,
   onChange,
+  onRetry,
   options,
   selectedValues,
   statusMessage,
@@ -73,7 +76,8 @@ export function SearchFilterPicker({
         className="workbench-input min-h-9 px-3 text-sm"
         onChange={(event) => setQuery(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === 'Enter') {
+          // Enter that confirms an IME conversion must not add the composed text as an ID.
+          if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) {
             event.preventDefault()
             if (canAddTypedId) {
               toggle(typedId, true)
@@ -128,6 +132,15 @@ export function SearchFilterPicker({
             : t('search.filters.pickerAll')}
           {statusMessage ? ` · ${statusMessage}` : ''}
         </span>
+        {onRetry ? (
+          <button
+            className="font-semibold text-[var(--workbench-primary-text)] hover:underline"
+            onClick={onRetry}
+            type="button"
+          >
+            {t('search.filters.membersRetry')}
+          </button>
+        ) : null}
         {selected.size > 0 ? (
           <button
             className="font-semibold text-[var(--workbench-primary-text)] hover:underline"
