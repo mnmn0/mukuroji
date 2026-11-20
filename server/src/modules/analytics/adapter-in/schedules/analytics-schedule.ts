@@ -15,7 +15,6 @@ import {
   ANALYTICS_SCHEDULE_SHARD_COUNT,
   AnalyticsError,
   analyticsFilterIncludesWorkItem,
-  type AnalyticsDeliveryNotification,
   type AnalyticsDeliveryNotifier,
   type AnalyticsDeliveryReceipt,
   type AnalyticsDueReportReference,
