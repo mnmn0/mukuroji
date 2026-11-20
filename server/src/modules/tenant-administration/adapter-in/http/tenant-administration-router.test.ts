@@ -588,18 +588,34 @@ test('lets any member read the Workspace calendar settings, with defaults before
     headers: { Authorization: 'Bearer token-1' },
   })
   expect(defaults.status).toBe(200)
-  expect(await defaults.json()).toEqual({ fiscalYearStartMonth: 1, weekStartDay: 1 })
+  expect(await defaults.json()).toEqual({
+    fiscalYearStartMonth: 1,
+    weekStartDay: 1,
+    workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+    holidays: [],
+  })
   // Reading must not initialize tenant state on a member's behalf.
   expect(ensureCalls).toEqual([])
 
   client.getProfile = async () => ({
     ...snapshot.profile,
-    calendar: { fiscalYearStartMonth: 4, weekStartDay: 0 },
+    calendar: {
+      fiscalYearStartMonth: 4,
+      weekStartDay: 0,
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday'],
+      holidays: ['2027-01-01'],
+    },
   })
   const stored = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
     headers: { Authorization: 'Bearer token-1' },
   })
-  expect(await stored.json()).toEqual({ fiscalYearStartMonth: 4, weekStartDay: 0 })
+  // Members read the working days and holidays too, so new Work Items can use them.
+  expect(await stored.json()).toEqual({
+    fiscalYearStartMonth: 4,
+    weekStartDay: 0,
+    workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday'],
+    holidays: ['2027-01-01'],
+  })
 
   const unauthenticated = await createCalendarRouter(client).request('/api/workspace/calendar-settings')
   expect(unauthenticated.status).toBe(401)
@@ -644,6 +660,18 @@ test('keeps calendar settings changes behind administration and validates them',
     { fiscalYearStartMonth: 4.5, weekStartDay: 1 },
     { fiscalYearStartMonth: 4, weekStartDay: 7 },
     { fiscalYearStartMonth: '4', weekStartDay: 1 },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, workingWeekdays: [] },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, workingWeekdays: ['funday'] },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, workingWeekdays: 'monday' },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: ['2027-02-30'] },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: ['1969-12-31'] },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: '2027-01-01' },
+    {
+      fiscalYearStartMonth: 4,
+      weekStartDay: 1,
+      holidays: Array.from({ length: 513 }, (_, index) =>
+        new Date(Date.UTC(2027, 0, 1 + index)).toISOString().slice(0, 10)),
+    },
     null,
   ]) {
     const rejected = await admin.request('/api/tenant/profile', {
@@ -662,5 +690,41 @@ test('keeps calendar settings changes behind administration and validates them',
     method: 'PATCH',
   })
   expect(accepted.status).toBe(200)
-  expect(updates).toEqual([{ ...body, locale: 'ja', calendar: { fiscalYearStartMonth: 4, weekStartDay: 0 } }])
+  // Settings from before working days existed get the Monday-to-Friday default and no holidays.
+  expect(updates).toEqual([{
+    ...body,
+    locale: 'ja',
+    calendar: {
+      fiscalYearStartMonth: 4,
+      weekStartDay: 0,
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      holidays: [],
+    },
+  }])
+
+  const withWorkingDays = await admin.request('/api/tenant/profile', {
+    body: JSON.stringify({
+      ...body,
+      calendar: {
+        fiscalYearStartMonth: 4,
+        weekStartDay: 1,
+        workingWeekdays: ['saturday', 'monday', 'monday', 'tuesday'],
+        holidays: ['2027-05-03', '2027-01-01', '2027-05-03'],
+      },
+    }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(withWorkingDays.status).toBe(200)
+  // Weekdays are stored Monday first and holidays sorted, both without duplicates.
+  expect(updates.at(-1)).toEqual({
+    ...body,
+    locale: 'ja',
+    calendar: {
+      fiscalYearStartMonth: 4,
+      weekStartDay: 1,
+      workingWeekdays: ['monday', 'tuesday', 'saturday'],
+      holidays: ['2027-01-01', '2027-05-03'],
+    },
+  })
 })
