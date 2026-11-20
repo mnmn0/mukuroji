@@ -211,6 +211,8 @@ export const timeTrackingMessages = {
   'timeTracking.weeklyReport.submittedContent': 'Submitted report',
   'timeTracking.weeklyReport.hiddenItem': 'A task you cannot view',
   'timeTracking.weeklyReport.history': 'Past reports',
+  'timeTracking.weeklyReport.historyLoadError': 'Could not load your past reports.',
+  'timeTracking.weeklyReport.retry': 'Reload',
   'timeTracking.weeklyReport.historyEmpty': 'You have not saved or submitted a report yet.',
   'timeTracking.weeklyReport.historyDraft': 'Draft only',
   'timeTracking.weeklyReport.historySubmitted': 'Submitted (version {version})',

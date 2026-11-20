@@ -313,6 +313,34 @@ describe('PersonalWeeklyReport', () => {
     expect(html).toContain('Submitted (version 2)')
   })
 
+  test('explains a failed history read and offers a retry', () => {
+    const report = buildPersonalWeeklyReport({ weekDays: week.days, today: '2026-11-13', workItems: [], entries: [] })
+    const html = renderToStaticMarkup(
+      <PersonalWeeklyReport
+        formatters={createTimeTrackingFormatters('en')}
+        hasHistoryError
+        hasLoadError={false}
+        isLoading={false}
+        isPartial={false}
+        onCopy={async () => undefined}
+        onMoveWeek={() => undefined}
+        onOpenWeek={() => undefined}
+        onRetry={() => undefined}
+        onRetryHistory={() => undefined}
+        onSaveDraft={async () => 'done'}
+        onSubmit={async () => 'done'}
+        report={report}
+        savedReport={savedReport}
+        t={en}
+        week={week}
+      />,
+    )
+
+    expect(html).toContain(en('timeTracking.weeklyReport.historyLoadError'))
+    expect(html).toContain('>Reload<')
+    expect(html).toContain('Save draft')
+  })
+
   test('waits for the saved report before showing the note fields', () => {
     const report = buildPersonalWeeklyReport({ weekDays: week.days, today: '2026-11-13', workItems: [], entries: [] })
     const html = renderToStaticMarkup(

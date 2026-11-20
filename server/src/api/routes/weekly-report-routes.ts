@@ -19,6 +19,7 @@ import { createPlanningCallerAuthorizationConditionChecks } from '../shared/plan
 import {
   canAccessAssignedProject,
   createApiMutationContext,
+  hasEnterprisePermissionAtResource,
   readLegacyProjectScopeAccesses,
   requireTeamPermission,
   requireWorkspaceBusinessRead,
@@ -239,32 +240,47 @@ async function authorizeAuthorWrite(principal: WorkspacePrincipal, c: Context) {
   return { scope, authorContext }
 }
 
+/** A principal's manager-level access to a Team. */
+type ManagerAccess = {
+  /** Team context of the principal. */
+  context: TeamPermissionContext
+  /** Whether the principal manages every Project of the Team. */
+  wholeTeam: boolean
+}
+
 /**
- * Reads the principal's manager-level Team context.
+ * Tells whether the principal is a Workspace owner or admin under legacy (non-Enterprise)
+ * authorization, who reads every member's reports in the Teams they can view, as for Team
+ * configuration.
+ *
+ * @param principal - Authenticated principal.
+ * @returns Whether the principal administers the Workspace.
+ */
+function isLegacyWorkspaceAdministrator(principal: WorkspacePrincipal) {
+  return principal.enterprisePermissions === undefined &&
+    (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin')
+}
+
+/**
+ * Reads the principal's manager-level access to a Team: a system administrator, a legacy
+ * Workspace owner or admin, or a Team-wide Enterprise grant manages the whole Team; a Project
+ * manager manages their Projects.
  *
  * @param principal - Authenticated principal.
  * @param teamId - Team ID.
- * @returns The context, or `undefined` when the principal manages no Project of the Team.
+ * @returns The access, or `undefined` when the principal manages no Project of the Team.
  */
-async function readManagerContext(principal: WorkspacePrincipal, teamId: string): Promise<TeamPermissionContext | undefined> {
+async function readManagerContext(principal: WorkspacePrincipal, teamId: string): Promise<ManagerAccess | undefined> {
   try {
-    return await requireTeamPermission(principal, teamId, 'manager')
+    if (isLegacyWorkspaceAdministrator(principal)) {
+      return { context: await requireTeamPermission(principal, teamId, 'viewer'), wholeTeam: true }
+    }
+    const context = await requireTeamPermission(principal, teamId, 'manager')
+    return { context, wholeTeam: principal.isSystemAdmin || context.directTeamGrant === true }
   } catch (error) {
     if (error instanceof ProjectDataError && error.status === 403) return undefined
     throw error
   }
-}
-
-/**
- * Tells whether the principal manages the whole Team: a Workspace administrator or a Team-wide
- * Enterprise grant.
- *
- * @param principal - Authenticated principal.
- * @param context - Manager-level Team context.
- * @returns Whether every Project of the Team is managed.
- */
-function managesWholeTeam(principal: WorkspacePrincipal, context: TeamPermissionContext) {
-  return principal.isSystemAdmin || context.directTeamGrant === true
 }
 
 /**
@@ -276,9 +292,11 @@ function managesWholeTeam(principal: WorkspacePrincipal, context: TeamPermission
  * @returns Whether the principal may read the member's submitted reports.
  */
 async function managesMember(principal: WorkspacePrincipal, teamId: string, memberKey: string) {
-  const context = await readManagerContext(principal, teamId)
-  if (!context) return false
-  if (managesWholeTeam(principal, context)) return true
+  const access = await readManagerContext(principal, teamId)
+  if (!access) return false
+  const { context } = access
+  // A report exists only if its author could write in the Team, so a Team-wide reader reads any.
+  if (access.wholeTeam) return true
   const teamProjectIds = new Set(context.team.projects.map((project) => project.id))
   // Legacy memberships are qualified against the directory; one whose Project ID several Teams
   // share is dropped, so it never proves membership in this Team.
@@ -300,11 +318,11 @@ async function managesMember(principal: WorkspacePrincipal, teamId: string, memb
  * @throws ProjectDataError 403 when the principal manages no Project of the Team.
  */
 async function readManagedRoster(principal: WorkspacePrincipal, teamId: string) {
-  const context = await readManagerContext(principal, teamId)
-  if (!context) {
+  const access = await readManagerContext(principal, teamId)
+  if (!access) {
     throw new ProjectDataError(403, 'WeeklyReportForbidden', 'Only a Team manager can list the weekly reports of the Team.')
   }
-  const wholeTeam = managesWholeTeam(principal, context)
+  const { context, wholeTeam } = access
   const projects = context.team.projects.filter((project) =>
     wholeTeam || canAccessAssignedProject(principal, context, project.id, 'manager'))
   const responses = await Promise.all(projects.map(async (project) =>
@@ -332,8 +350,20 @@ async function readManagedRoster(principal: WorkspacePrincipal, teamId: string) 
  * @returns The check.
  */
 function createItemReadCheck(principal: WorkspacePrincipal, context: TeamPermissionContext): WeeklyReportItemReadCheck {
+  const teamId = context.team.id
   const teamProjectIds = new Set(context.team.projects.map((project) => project.id))
   return (item) => {
+    // Team access does not imply Work Item access under Enterprise roles: the reader needs
+    // `work-items.read` at the Work Item's Project, or at the Team for a Team-level Work Item.
+    if (
+      principal.enterpriseAuthorizationEvaluation !== undefined &&
+      !principal.isSystemAdmin &&
+      !hasEnterprisePermissionAtResource(principal, 'work-items.read', item.projectId === undefined
+        ? { workspaceId: principal.directoryId, kind: 'team', targetId: teamId }
+        : { workspaceId: principal.directoryId, kind: 'project', targetId: item.projectId, parentTeamId: teamId })
+    ) {
+      return false
+    }
     if (item.projectId === undefined) return true
     return (principal.isSystemAdmin || teamProjectIds.has(item.projectId)) &&
       canAccessAssignedProject(principal, context, item.projectId, 'viewer')

@@ -48,6 +48,10 @@ export type PersonalWeeklyReportProps = {
   savedReport: WeeklyReportResponse | undefined
   /** The member's recent weeks, newest first, when read. */
   history?: readonly WeeklyReportHistoryEntry[]
+  /** Whether reading the recent weeks failed. */
+  hasHistoryError?: boolean
+  /** Reads the recent weeks again after they failed. */
+  onRetryHistory?: () => void
   /**
    * Saves the notes without submitting.
    *
@@ -390,6 +394,7 @@ function WeeklyReportHistoryList({ currentWeekStart, formatters, onOpenWeek, t, 
 export function PersonalWeeklyReport({
   formatters,
   hasLoadError,
+  hasHistoryError = false,
   history,
   isLoading,
   isPartial,
@@ -397,6 +402,7 @@ export function PersonalWeeklyReport({
   onMoveWeek,
   onOpenWeek,
   onRetry,
+  onRetryHistory,
   onSaveDraft,
   onSubmit,
   report,
@@ -458,7 +464,17 @@ export function PersonalWeeklyReport({
                 ))}
               </ul>
             </section>
-            {history ? (
+            {hasHistoryError ? (
+              <section className="grid min-w-0 gap-2">
+                <h3 className="text-base font-semibold text-[var(--workbench-text)]">{t('timeTracking.weeklyReport.history')}</h3>
+                <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
+                  <span>{t('timeTracking.weeklyReport.historyLoadError')}</span>
+                  {onRetryHistory ? (
+                    <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetryHistory} type="button">{t('timeTracking.weeklyReport.retry')}</button>
+                  ) : null}
+                </div>
+              </section>
+            ) : history ? (
               <WeeklyReportHistoryList currentWeekStart={week.days[0] ?? ''} formatters={formatters} onOpenWeek={onOpenWeek} t={t} weeks={history} />
             ) : null}
           </div>

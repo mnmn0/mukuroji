@@ -82,7 +82,7 @@ export function TeamWeeklyReports({
       ) : hasLoadError ? (
         <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
           <span>{t('timeTracking.teamWeeklyReports.loadError')}</span>
-          <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetry} type="button">{t('timeTracking.retry')}</button>
+          <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetry} type="button">{t('timeTracking.weeklyReport.retry')}</button>
         </div>
       ) : !sorted ? (
         <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('timeTracking.teamWeeklyReports.loading')}</p>
@@ -121,7 +121,7 @@ export function TeamWeeklyReports({
                 {hasSelectedReportError ? (
                   <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
                     <span>{t('timeTracking.teamWeeklyReports.reportLoadError')}</span>
-                    <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetrySelectedReport} type="button">{t('timeTracking.retry')}</button>
+                    <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetrySelectedReport} type="button">{t('timeTracking.weeklyReport.retry')}</button>
                   </div>
                 ) : !selectedReport ? (
                   <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('timeTracking.weeklyReport.loading')}</p>

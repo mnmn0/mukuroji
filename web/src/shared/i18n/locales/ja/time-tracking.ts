@@ -211,6 +211,8 @@ export const timeTrackingMessages = {
   'timeTracking.weeklyReport.submittedContent': '提出した内容',
   'timeTracking.weeklyReport.hiddenItem': '閲覧権限のないタスク',
   'timeTracking.weeklyReport.history': 'これまでの週報',
+  'timeTracking.weeklyReport.historyLoadError': 'これまでの週報を読み込めませんでした。',
+  'timeTracking.weeklyReport.retry': '再読み込み',
   'timeTracking.weeklyReport.historyEmpty': 'まだ保存・提出した週報はありません。',
   'timeTracking.weeklyReport.historyDraft': '下書きのみ',
   'timeTracking.weeklyReport.historySubmitted': '提出済み（第{version}版）',

@@ -4,14 +4,17 @@ const {
   configureFakeProjectClients,
   getTestAppDependencies,
   resetTestApp,
+  setTestAppDependencies,
 } = createApiTestHarness()
 import type {
+  EnterpriseCustomRole,
   TeamWeeklyReportStatusResponse,
   WeeklyReportHistoryResponse,
   WeeklyReportResponse,
 } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 import { createMutationAuditContext } from '../../../audit'
+import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 
 afterEach(() => {
   resetTestApp()
@@ -69,6 +72,58 @@ function submission(expectedSubmissionCount: number, reflection = 'Good week', e
     timeIsPartial: false,
     notes: { issues: ' Need review ', reflection },
   }
+}
+
+/**
+ * Stores one submitted version for a member, referencing a Work Item of `refero` and one of
+ * `secret`.
+ *
+ * @param memberKey - Author.
+ */
+async function seedSubmission(memberKey: string) {
+  const store = getTestAppDependencies().workItems.weeklyReports
+  const scope = { workspaceId: 'user#demo@example.com', teamId: 'core-team', memberKey }
+  await store.submit({
+    ...scope,
+    now: '2026-11-20T09:00:00.000Z',
+    callerAuthorization: [{ ConditionCheck: { TableName: 't', Key: {}, ConditionExpression: 'attribute_exists(x)' } }],
+    auditContext: createMutationAuditContext({
+      workspaceId: scope.workspaceId,
+      actor: { id: memberKey, kind: 'user', displayName: 'Author' },
+      idempotencyKey: 'seed',
+      request: { method: 'POST', path: '/seed', body: {} },
+      source: { kind: 'api' },
+    }),
+    previous: null,
+    next: {
+      weekStart: WEEK,
+      revision: 1,
+      updatedAt: '2026-11-20T09:00:00.000Z',
+      notes: { issues: '', reflection: 'Submitted text' },
+      submissionCount: 1,
+      lastSubmittedAt: '2026-11-20T09:00:00.000Z',
+    },
+    submission: {
+      version: 1,
+      submittedAt: '2026-11-20T09:00:00.000Z',
+      weekStart: WEEK,
+      weekEnd: '2026-11-22',
+      sections: {
+        completed: [{ workItemId: 'a', minutes: 60 }, { workItemId: 'b', minutes: 30 }],
+        started: [],
+        overdue: [],
+        upcoming: [],
+      },
+      time: [{ workItemId: 'b', minutes: 30 }],
+      items: [
+        { workItemId: 'a', key: 'REF-1', title: 'Visible title', projectId: 'refero' },
+        { workItemId: 'b', key: 'SEC-1', title: 'Secret title', projectId: 'secret' },
+      ],
+      totalMinutes: 90,
+      timeIsPartial: false,
+      notes: { issues: '', reflection: 'Submitted text' },
+    },
+  })
 }
 
 test('saves notes, submits versions, and lists the history of the author', async () => {
@@ -158,7 +213,7 @@ test('rejects invalid weeks and bodies', async () => {
 })
 
 test('lets only the author write a report', async () => {
-  configureFakeProjectClients(true, { projectAccesses: [{ projectId: 'refero', role: 'manager' }] })
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [{ projectId: 'refero', role: 'manager' }] })
   const path = `/api/teams/core-team/weekly-reports/sato@example.com/${WEEK}`
   const draft = await request(`${path}/draft`, 'PUT', { expectedRevision: 0, notes: { issues: '', reflection: '' } })
   expect(draft.status).toBe(403)
@@ -167,50 +222,8 @@ test('lets only the author write a report', async () => {
 })
 
 test('shows a manager the submitted report of a member without the saved notes or hidden Work Items', async () => {
-  configureFakeProjectClients(true, { projectAccesses: [{ projectId: 'refero', role: 'manager' }] })
-  const store = getTestAppDependencies().workItems.weeklyReports
-  const scope = { workspaceId: 'user#demo@example.com', teamId: 'core-team', memberKey: 'sato@example.com' }
-  await store.submit({
-    ...scope,
-    now: '2026-11-20T09:00:00.000Z',
-    callerAuthorization: [{ ConditionCheck: { TableName: 't', Key: {}, ConditionExpression: 'attribute_exists(x)' } }],
-    auditContext: createMutationAuditContext({
-      workspaceId: scope.workspaceId,
-      actor: { id: 'sato@example.com', kind: 'user', displayName: 'Sato' },
-      idempotencyKey: 'seed',
-      request: { method: 'POST', path: '/seed', body: {} },
-      source: { kind: 'api' },
-    }),
-    previous: null,
-    next: {
-      weekStart: WEEK,
-      revision: 1,
-      updatedAt: '2026-11-20T09:00:00.000Z',
-      notes: { issues: '', reflection: 'Submitted text' },
-      submissionCount: 1,
-      lastSubmittedAt: '2026-11-20T09:00:00.000Z',
-    },
-    submission: {
-      version: 1,
-      submittedAt: '2026-11-20T09:00:00.000Z',
-      weekStart: WEEK,
-      weekEnd: '2026-11-22',
-      sections: {
-        completed: [{ workItemId: 'a', minutes: 60 }, { workItemId: 'b', minutes: 30 }],
-        started: [],
-        overdue: [],
-        upcoming: [],
-      },
-      time: [{ workItemId: 'b', minutes: 30 }],
-      items: [
-        { workItemId: 'a', key: 'REF-1', title: 'Visible title', projectId: 'refero' },
-        { workItemId: 'b', key: 'SEC-1', title: 'Secret title', projectId: 'secret' },
-      ],
-      totalMinutes: 90,
-      timeIsPartial: false,
-      notes: { issues: '', reflection: 'Submitted text' },
-    },
-  })
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [{ projectId: 'refero', role: 'manager' }] })
+  await seedSubmission('sato@example.com')
 
   const read = await request(`/api/teams/core-team/weekly-reports/sato@example.com/${WEEK}`)
   expect(read.status).toBe(200)
@@ -240,6 +253,7 @@ test('shows a manager the submitted report of a member without the saved notes o
 
 test('hides a member outside the manager\'s Projects from that manager', async () => {
   configureFakeProjectClients(true, {
+    workspaceRole: 'member',
     projectAccesses: [{ projectId: 'refero', role: 'manager' }],
     mentionAccessDeniedMemberKeys: ['outsider@example.com'],
   })
@@ -249,6 +263,7 @@ test('hides a member outside the manager\'s Projects from that manager', async (
 
 test('does not let a legacy membership of a Project ID several Teams share prove Team membership', async () => {
   configureFakeProjectClients(true, {
+    workspaceRole: 'member',
     projectAccesses: [{ projectId: 'refero', role: 'manager', teamId: 'core-team' }],
     projectAccessesByMember: {
       'legacy@example.com': [{ projectId: 'refero', role: 'member' }],
@@ -258,6 +273,45 @@ test('does not let a legacy membership of a Project ID several Teams share prove
   })
   expect((await request(`/api/teams/core-team/weekly-reports/legacy@example.com/${WEEK}`)).status).toBe(404)
   expect((await request(`/api/teams/core-team/weekly-reports/qualified@example.com/${WEEK}`)).status).toBe(200)
+})
+
+test('lets a legacy Workspace admin read every member of the Team', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'admin', projectAccesses: [{ projectId: 'refero', role: 'viewer' }] })
+  await seedSubmission('sato@example.com')
+  const read = await request(`/api/teams/core-team/weekly-reports/sato@example.com/${WEEK}`)
+  expect(read.status).toBe(200)
+  expect((await read.json() as WeeklyReportResponse).submission?.version).toBe(1)
+  expect((await request(`/api/teams/core-team/weekly-reports?weekStart=${WEEK}`)).status).toBe(200)
+})
+
+test('hides Work Items from an Enterprise role without work-items.read', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:team-only', name: 'Team only',
+    permissions: ['teams.read', 'teams.write', 'teams.manage', 'projects.read'],
+    guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: [{
+      workspaceId, assignmentId: 'team-only',
+      principalKind: 'member', principalId: 'demo@example.com', roleId: customRole.roleId,
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' }, source: 'direct',
+    }],
+    customRoles: [customRole],
+  })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+  await seedSubmission('sato@example.com')
+
+  const read = await request(`/api/teams/core-team/weekly-reports/sato@example.com/${WEEK}`)
+  expect(read.status).toBe(200)
+  const report = await read.json() as WeeklyReportResponse
+  expect(report.submission?.sections.completed).toEqual([{ hidden: true, minutes: 60 }, { hidden: true, minutes: 30 }])
+  expect(JSON.stringify(report)).not.toContain('Visible title')
 })
 
 test('refuses a submission past the most versions of a week', async () => {
@@ -271,7 +325,7 @@ test('refuses a submission past the most versions of a week', async () => {
 })
 
 test('hides other members\' reports and the Team status from a member who manages nothing', async () => {
-  configureFakeProjectClients(true, { projectAccesses: [{ projectId: 'refero', role: 'member' }] })
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [{ projectId: 'refero', role: 'member' }] })
   expect((await request(`/api/teams/core-team/weekly-reports/sato@example.com/${WEEK}`)).status).toBe(404)
   expect((await request('/api/teams/core-team/weekly-reports/sato@example.com')).status).toBe(404)
   expect((await request(`/api/teams/core-team/weekly-reports?weekStart=${WEEK}`)).status).toBe(403)

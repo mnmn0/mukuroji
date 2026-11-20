@@ -125,6 +125,7 @@ export function PersonalWeeklyReportContainer({
       // Without the member key the entries cannot be read, so the report is unavailable, not empty.
       hasLoadError={Boolean(entries.error) || Boolean(saved.error) || hasWorkItemError || memberKey === undefined}
       {...(history.data ? { history: history.data.weeks } : {})}
+      hasHistoryError={Boolean(history.error)}
       isLoading={entries.isLoading || saved.isLoading || (workItems === undefined && !hasWorkItemError)}
       isPartial={entries.data?.complete === false}
       onCopy={writeClipboardText}
@@ -132,8 +133,9 @@ export function PersonalWeeklyReportContainer({
       onOpenWeek={onOpenWeek}
       onRetry={() => {
         onRetryWorkItems()
-        void Promise.all([entries.mutate(), saved.mutate()]).catch(() => undefined)
+        void Promise.all([entries.mutate(), saved.mutate(), history.mutate()]).catch(() => undefined)
       }}
+      onRetryHistory={() => { void history.mutate().catch(() => undefined) }}
       onSaveDraft={(expectedRevision, notes) => runAction(() => mutations.saveDraft(expectedRevision, notes))}
       onSubmit={(request) => runAction(() => mutations.submit(request))}
       report={report}

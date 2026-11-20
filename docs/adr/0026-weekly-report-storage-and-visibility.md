@@ -50,13 +50,16 @@ Web は下書きの各欄（完了・着手・期限超過・来週・工数）�
 （Project 未割当のタスクは Team を読めない）場合、そのタスクは key・title・ID を消し、工数だけを
 「閲覧権限のないタスク」として返す。作成者本人も同じ規則で読む（後で Project を外れた場合も同じ）。
 課題・所感の自由記述は作成者が書いた文なので絞らない。
+Enterprise の role で読む人は、Team を読めるだけでは足りず、そのタスクの Project（Project 未割当なら Team）で
+`work-items.read` を持つ必要がある。
 
 ### 誰が読めるか
 
 - 作成者本人: 自分の書きかけと全提出版、履歴。書き込みは本人だけ。
-- Team の管理者（Workspace の owner / admin、Enterprise の `teams.manage`、またはその Team の Project の manager）:
+- Team の管理者（システム管理者、Enterprise を使っていない Workspace の owner / admin、Enterprise の `teams.manage`、またはその Team の Project の manager）:
   自分が manager の Project のメンバー（Team 全体の管理者なら Team の全 Project のメンバー）の提出版と履歴、
   その週の提出状況（提出済み・未提出）。書きかけの所感は読めない。
+  Project のメンバーかは旧形式の Project 権限を Team に結び付けて判定し、複数の Team が同じ Project ID を持つ曖昧なものは数えない。
 
 ## 検討した選択肢
 
