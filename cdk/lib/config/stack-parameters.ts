@@ -139,6 +139,10 @@ export interface StackParameters {
   readonly webPushVapidPublicKey: cdk.CfnParameter;
   /** Verified SES sender address for notification Email; empty disables Email delivery. */
   readonly notificationEmailSender: cdk.CfnParameter;
+  /** Monthly USD amount the account's AWS cost budget alerts against. */
+  readonly monthlyCostBudgetUsd: cdk.CfnParameter;
+  /** Recipient of the cost budget alerts; empty sends them to the initial owner. */
+  readonly costBudgetAlertEmail: cdk.CfnParameter;
   /** Secret authenticating request intake email Webhooks, declared only with the request email module. */
   readonly requestEmailWebhookSecret: cdk.CfnParameter | undefined;
   /** Secret used to hash public request and reply tokens. */
@@ -571,6 +575,24 @@ export function buildStackParameters(
     description:
       'SES-verified sender address for notification Email. Empty disables Email delivery; the preference stays stored.',
   });
+  const monthlyCostBudgetUsd = new cdk.CfnParameter(stack, 'MonthlyCostBudgetUsd', {
+    type: 'Number',
+    default: 20,
+    minValue: 1,
+    maxValue: 100_000,
+    description:
+      'Monthly AWS cost in USD for the account budget. Email alerts go out at 80% and 100% of actual cost and when the forecast exceeds 100%.',
+  });
+  const costBudgetAlertEmail = new cdk.CfnParameter(stack, 'CostBudgetAlertEmail', {
+    type: 'String',
+    default: '',
+    minLength: 0,
+    maxLength: 254,
+    allowedPattern: '^(?:|[^\\s@,;<>"]+@[^\\s@,;<>"]+\\.[^\\s@,;<>"]+)$',
+    constraintDescription: 'CostBudgetAlertEmail must be empty or one email address.',
+    description:
+      'Email address that receives the cost budget alerts. Empty sends them to InitialOwnerEmail.',
+  });
   const requestEmailWebhookSecret = options.requestEmailEnabled === true
     ? new cdk.CfnParameter(stack, 'RequestEmailWebhookSecret', {
       type: 'String',
@@ -824,6 +846,8 @@ export function buildStackParameters(
     requestRateLimitPerHour,
     webPushVapidPublicKey,
     notificationEmailSender,
+    monthlyCostBudgetUsd,
+    costBudgetAlertEmail,
     requestEmailWebhookSecret,
     requestTokenHashSecret,
     edgeOriginSecret,

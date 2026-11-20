@@ -319,13 +319,20 @@ function queryPlanningPage(
  * @returns The client, its mutable rows, every Query input, every transaction it wrote, and a
  * control whose `rejectAuthorizationAtWrite` cancels that write (1-based) on its
  * `workspace-access` condition checks, as DynamoDB does when the caller's membership changed.
+ * The control's `advanceWorkItemRevisionOnMetaRead` advances META the way a canonical Work Item
+ * write does right after that strong META read (1-based), and `readMeta` returns the stored row.
  */
 function createFakePlanningTable(
   rows: Record<string, unknown>[],
   pageSize = 1_000_000,
   sharesRevisionWithWorkItems = false,
 ) {
-  const control = { rejectAuthorizationAtWrite: 0 }
+  let metaReads = 0
+  const control = {
+    rejectAuthorizationAtWrite: 0,
+    advanceWorkItemRevisionOnMetaRead: new Set<number>(),
+    readMeta: () => ({ ...meta }),
+  }
   let meta: Record<string, unknown> = {
     workspaceId: 'FENCE#workspace-1',
     recordKey: 'META',
@@ -346,7 +353,18 @@ function createFakePlanningTable(
       if (command.constructor.name === 'GetCommand') {
         const key = command.input.Key
         if (typeof key !== 'object' || key === null || !('recordKey' in key)) return {}
-        if ('workspaceId' in key && key.workspaceId === 'FENCE#workspace-1') return { Item: meta }
+        if ('workspaceId' in key && key.workspaceId === 'FENCE#workspace-1') {
+          const read = { ...meta }
+          metaReads += 1
+          if (control.advanceWorkItemRevisionOnMetaRead.has(metaReads)) {
+            meta = {
+              ...meta,
+              revision: Number(meta.revision) + 1,
+              sourceRevisionCount: Number(meta.sourceRevisionCount ?? 0) + 1,
+            }
+          }
+          return { Item: read }
+        }
         const item = rows.find((row) => row.recordKey === key.recordKey)
         return item ? { Item: { ...item } } : {}
       }
@@ -4538,6 +4556,70 @@ describe('planning persistence', () => {
     for (const write of writes) {
       expect((write.TransactItems as unknown[]).length).toBeLessThanOrEqual(100)
     }
+  })
+
+  test('records Work Item counters on META and rebases Planning edits over them', async () => {
+    const { client, control, writes } = createFakePlanningTable([createStoredCycle('cycle-1')])
+
+    await client.update('workspace-1', 'cycle-1', {
+      expectedRevision: 1,
+      patch: { title: 'Renamed' },
+    }, EMPTY_WORK_ITEMS)
+    expect(control.readMeta()).toMatchObject({
+      revision: 2,
+      sourceRevisionCount: 0,
+      structureRevision: 2,
+      structureSourceRevisionCount: 0,
+    })
+
+    // A Work Item write lands while the edit reads the graph: the read retries at the new
+    // revision, and the edit rebases over it because only a Work Item advanced META.
+    const metaReadsBeforeEdit = 2
+    control.advanceWorkItemRevisionOnMetaRead.add(metaReadsBeforeEdit + 1)
+    const moved = await client.update('workspace-1', 'cycle-1', {
+      expectedRevision: 2,
+      patch: { title: 'Renamed again' },
+    }, EMPTY_WORK_ITEMS)
+
+    expect(moved.planning.revision).toBe(4)
+    expect(control.readMeta()).toMatchObject({
+      revision: 4,
+      sourceRevisionCount: 1,
+      structureRevision: 4,
+      structureSourceRevisionCount: 1,
+    })
+    expect(writes).toHaveLength(2)
+    expect(await client.isWorkItemOnlyRevisionAdvance('workspace-1', 3, 4)).toBe(false)
+  })
+
+  test('rejects META counters that are not non-negative integers', async () => {
+    const commands: string[] = []
+    const documentClient = {
+      async send(command: { constructor: { name: string } }) {
+        commands.push(command.constructor.name)
+        return {
+          Item: {
+            workspaceId: 'FENCE#workspace-1',
+            recordKey: 'META',
+            entryType: 'planning-meta',
+            schemaVersion: 1,
+            revision: 3,
+            sourceRevisionCount: -1,
+          },
+        }
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    await expect(client.isWorkItemOnlyRevisionAdvance('workspace-1', 2, 3))
+      .rejects.toMatchObject({ status: 503, code: 'InvalidPlanningData' })
+    expect(commands).toEqual(['GetCommand'])
   })
 
   test('moves an archived Goal and its links out of the live graph and restores them', async () => {
