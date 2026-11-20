@@ -37,6 +37,7 @@ export const collaborationMessages = {
   'collaboration.composer.discardConfirm': 'Discard the unsaved comment draft?',
   'collaboration.composer.targetUnavailable': 'This comment target is no longer available for writing. Your draft is retained below.',
   'collaboration.composer.discardDraft': 'Discard draft',
+  'collaboration.composer.sessionDraftRestored': 'Restored the comment you were writing when your session ended. Check it and send it again.',
   'collaboration.comment.reply': 'Reply',
   'collaboration.comment.edit': 'Edit',
   'collaboration.comment.delete': 'Delete',

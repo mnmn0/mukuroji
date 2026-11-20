@@ -38,6 +38,7 @@ export const issuesMessages = {
   'issues.archive.archivedAt': 'アーカイブ: {date}',
   'issues.archive.retry': '再読み込み',
   'issues.duplicate.action': '複製',
+  'issues.duplicate.menuAction': 'Work Item を複製',
   'issues.duplicate.note': '選んだ Work Item の内容を下書きに写しました。保存するまで作成されません。履歴・コメント・関連・Run は引き継ぎません。',
   'issues.duplicate.contributors': 'Contributor の計画 {count} 件を引き継ぐ',
   'issues.key.label': 'Key',

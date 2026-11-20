@@ -20,6 +20,7 @@ import type {
   ResolvedAiAssistanceContext,
 } from '../modules/ai-assistance'
 import { AiAssistanceError } from '../modules/ai-assistance'
+import { InMemoryPlanningClient } from '../modules/planning/planning'
 import type { TriageCompositionClient } from '../app/composition/app-dependencies'
 import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import type { RequestIntakeClient } from '../modules/request-intake'
@@ -34,6 +35,7 @@ const {
   createAccessToken,
   createBulkRecoveryIssue,
   createCollaborationStub,
+  createCyclePlanningInput,
   createDocumentFake,
   createFakeWorkItemConfigurationClient,
   createTeamIssuesFake,
@@ -1094,6 +1096,86 @@ describe('AI assistance API composition', () => {
     expect(planningResponse.status).toBe(201)
     expect(searchResponse.status).toBe(201)
     expect(resolvedTasks).toBe(2)
+  })
+
+  test('resolves a legacy member\'s readable Planning Initiative and hides other Projects', async () => {
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'viewer', teamId: 'core-team' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+      teamProjects: [
+        { id: 'refero', name: 'Refero', tone: 'blue' },
+        { id: 'private-project', name: 'Private', tone: 'purple' },
+      ],
+    })
+    const workspaceId = 'user#demo@example.com'
+    const planning = new InMemoryPlanningClient()
+    const entities = [
+      { id: 'ai-portfolio', type: 'portfolio' as const },
+      { id: 'ai-roadmap', type: 'roadmap' as const, parentId: 'ai-portfolio', teamId: 'core-team' },
+      {
+        id: 'ai-refero-initiative',
+        type: 'initiative' as const,
+        parentId: 'ai-roadmap',
+        teamId: 'core-team',
+        projectId: 'refero',
+      },
+      {
+        id: 'ai-private-initiative',
+        type: 'initiative' as const,
+        parentId: 'ai-roadmap',
+        teamId: 'core-team',
+        projectId: 'private-project',
+      },
+    ]
+    for (const [index, entity] of entities.entries()) {
+      await planning.create(workspaceId, {
+        ...createCyclePlanningInput(entity.id, index),
+        title: `Planning ${entity.id}`,
+        cadence: undefined,
+        capacity: undefined,
+        carryOverPolicy: undefined,
+        teamId: undefined,
+        projectId: undefined,
+        ...entity,
+      }, { workItems: [] })
+    }
+    const promptContexts: string[] = []
+    setTestAppDependencies({
+      planning,
+      aiAssistanceService: createAiService({
+        async generate(actor, request, authorization) {
+          const resolved = await authorization.resolveContext({ actor, request })
+          promptContexts.push(resolved.promptContext)
+          return createWithheldGeneration(request.task, 'source-changed')
+        },
+      }),
+    })
+    /** Requests a Planning generation for one Initiative at the seeded revision. */
+    const requestInitiative = (entityId: string) =>
+      app.request('/api/ai-assistance/generations', {
+        method: 'POST',
+        headers: { ...createAiHeaders(), 'Idempotency-Key': `ai-planning-${entityId}` },
+        body: JSON.stringify({
+          task: 'planning',
+          locale: 'en',
+          source: {
+            type: 'planning-target',
+            target: { type: 'initiative', entityId },
+            expectedRevision: entities.length,
+          },
+        }),
+      })
+
+    const readable = await requestInitiative('ai-refero-initiative')
+    const hidden = await requestInitiative('ai-private-initiative')
+
+    expect(readable.status).toBe(201)
+    expect(promptContexts).toHaveLength(1)
+    expect(promptContexts[0]).toContain('Planning ai-refero-initiative')
+    expect(promptContexts[0]).not.toContain('ai-private-initiative')
+    expect(hidden.status).toBe(403)
+    expect(await hidden.json()).toMatchObject({ code: 'ProjectAccessDenied' })
   })
 
   test('builds Search context with non-linkable member aliases without executing Search', async () => {

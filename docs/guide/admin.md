@@ -4,6 +4,16 @@ Workspace の owner・admin、Team の管理者向けに、メンバーと権限
 coding agent の受け入れ、Enterprise のセキュリティ設定をまとめます。管理系の画面は
 サイドバーの **設定**（`/settings`）と **ID・セキュリティ**（`/settings/security`）に集まっています。
 
+**設定** は3つの区分に分かれ、それぞれ URL で直接開けます。
+
+| 区分 | URL | 主な内容 |
+| --- | --- | --- |
+| 個人 | `/settings/personal`（`/settings` も同じ） | 表示設定、通知設定、サインインとセキュリティ、AI の利用、agent の接続 |
+| Workspace 管理 | `/settings/workspace` | アクセス台帳、ID・セキュリティ管理への入口、テナント管理、チームとプロジェクトの管理、API と外部連携、オートメーション |
+| Team | `/settings/team` | ワークフローとフィールド、エージェント設定 |
+
+区分は画面の分け方だけで、操作できる範囲はこれまでどおりロールで決まります。
+
 ## 権限のしくみ
 
 mukuroji の権限は Workspace と Project の2段階です。Team には独立したメンバー登録がなく、
@@ -31,18 +41,25 @@ Project の task 画面の **権限** タブ（「権限管理」）で、Projec
 Project のメンバー権限を変えられるのは、その Project の manager だけです。追加できるのは
 Workspace の有効なメンバーだけなので、先に Workspace へ招待しておきます。
 
+Project の権限はその Team の Project にだけ効きます。別の Team に同じ ID の Project があっても、
+そちらの Work Item は見えません。複数の Team が同じ Project ID を使っている場合、Team を持たない
+旧形式の Project メンバー登録ではどの Team の Project か決められないため、その Project の権限は
+どの Team でも効きません。Enterprise では Directory group mapping で Team・Project 単位のロールを
+割り当てると、その Team の Project にだけ効きます。
+
 **Team の管理者** は、Workspace の owner / admin、またはその Team のいずれかの Project の manager です
 （Enterprise の `teams.manage` 権限を持つ人も含みます）。Team 固有の Work Item 設定と
 エージェント設定は Team の管理者が変更します。
 
 Enterprise の組み込みロール（Workspaceオーナー / Workspace管理者 / Workspaceメンバー / ゲスト /
-Team管理者 / Teamメンバー / Project管理者 / Projectメンバー / Project閲覧者）と Custom role は
-[ID・セキュリティ](#idセキュリティ) で扱います。Team・Project 単位の Enterprise ロールは
-Directory group mapping からだけ割り当てられ、個人へ直接は割り当てられません。
+全Project閲覧 / 監査担当 / Team管理者 / Teamメンバー / Project管理者 / Projectメンバー /
+Project閲覧者）と Custom role は [ID・セキュリティ](#idセキュリティ) で扱います。
+Enterprise ロールは Directory group mapping のほか、メンバー個人にも直接割り当てられます
+（[メンバーへのロール割り当て](#メンバーへのロール割り当て)）。
 
 ## メンバーを招待する・外す
 
-**設定** → **アクセス台帳** で行います（owner / admin のみ。それ以外の人には読み取り専用で表示されます）。
+**設定** → **Workspace 管理**（`/settings/workspace`）→ **アクセス台帳** で行います（owner / admin のみ。それ以外の人には読み取り専用で表示されます）。
 
 1. **メンバーを招待** に「メールアドレス」「表示名（任意）」とロールを入れ、**招待を作成** を押す。
    admin が選べるのは member と guest、owner はすべてのロールを選べます。
@@ -63,7 +80,7 @@ Directory group mapping からだけ割り当てられ、個人へ直接は割�
 - 同じ画面の **プロジェクト** で「登録先チーム」を選ぶと Project を作れます。Project の進め方は
   [PM ガイド](pm.md) を参照してください。
 - アーカイブは「{名前} をアーカイブ」から行います。
-- **設定** → **チームとプロジェクトの管理**（owner / admin のみ）で、次の操作ができます。
+- **設定** → **Workspace 管理** → **チームとプロジェクトの管理**（owner / admin のみ）で、次の操作ができます。
   - **名前を変更**: 日本語名と英語名（Project は色も）を変えます。英語名を空にすると日本語名を使います。
     ID と URL は変わらないので、ブックマーク・Work Item・リンクはそのまま使えます。
   - **↑ / ↓**: チームの並び順と、チーム内のプロジェクトの並び順を変えます。サイドバーと一覧に反映されます。
@@ -76,10 +93,14 @@ Directory group mapping からだけ割り当てられ、個人へ直接は割�
     アーカイブ直後は Webhook の許可の後始末が終わるまで復元できないことがあります。数分おいてから復元してください。
 - `/teams/:teamId/members`（サイドバーの **メンバー**）は Team の顔ぶれと負荷を確認する画面で、
   ここからメンバーの追加・削除はできません。
+- 同じ画面の **Team の通知リマインド** で、Team のメンバーに届く期限前通知・期限超過の再通知・
+  Project manager への escalation・未更新の督促・工数の督促の日数を決めます。変更できるのは Team manager で、
+  ほかのメンバーは閲覧だけです。空欄の項目は既定値を使います。メンバーは escalation 以外を自分の通知設定で
+  上書きできます。
 
 ## Work Item の設定（ワークフローとフィールド）
 
-**設定** → **ワークフローとフィールド** で、業務の種類・状態の流れ・入力項目を決めます。
+**設定** → **Team**（`/settings/team`）→ **ワークフローとフィールド** で、業務の種類・状態の流れ・入力項目を決めます。
 詳しい契約は [`docs/work-item-configuration.md`](../work-item-configuration.md) にあります。
 
 - **設定範囲**: 「Workspace 既定」（owner / admin）と「{Team} 固有」（Team の管理者）。
@@ -100,7 +121,7 @@ Directory group mapping からだけ割り当てられ、個人へ直接は割�
 
 ## オートメーション
 
-**設定** → **オートメーション**（変更は owner / admin のみ）。詳細は [`docs/automation.md`](../automation.md)。
+**設定** → **Workspace 管理** → **オートメーション**（変更は owner / admin のみ）。詳細は [`docs/automation.md`](../automation.md)。
 
 | タブ | 内容 |
 | --- | --- |
@@ -135,7 +156,7 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
 
 ## API と外部連携
 
-**設定** → **API と外部連携** のタブで扱います（owner / admin）。詳細は [`docs/public-api.md`](../public-api.md)。
+**設定** → **Workspace 管理** → **API と外部連携** のタブで扱います（owner / admin）。詳細は [`docs/public-api.md`](../public-api.md)。
 
 - **認証情報**: **API key を作成**、**OAuth app を登録**（client_credentials のみ）。secret は一度だけ表示されます。
   必要最小限の scope（work-items / webhooks / integrations / imports の read / write など）を選び、
@@ -145,6 +166,9 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   「最終利用」は 1 分ごとにまとめて記録するため、最大 1 分遅れて表示されます。
 - **Webhook**: 外部への通知。**Webhook を追加** で送信先と「配信を許可する Team」を決めます。配信 log から再送できます。
 - **Connector**: GitHub、Slack、Gmail、Google Calendar、Google Drive との連携。
+  一覧には、運用者がこの環境で設定した provider だけが出ます（設定は [`cdk/README.md`](../../cdk/README.md) の
+  connector secret）。設定がなければ「利用できる connector はありません」と表示されます。
+  設定から外した provider に接続済みの account は一覧に残り、切断はできますが新しい接続はできません。
   接続は、**接続** を押した本人が provider の画面で許可したあと、同じアカウントでログインしたまま
   Mukuroji に戻ると完了します。許可の URL を別の人に送ったり、ログインが切れた状態で戻ったり、
   期限（約10分）が切れたりした場合は完了できないので、この画面からもう一度接続してください。
@@ -153,7 +177,7 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
 
 ## エージェント設定（Software factory）
 
-coding agent に任せる作業の範囲を Team ごとに決めます。**設定** → **エージェント設定**
+coding agent に任せる作業の範囲を Team ごとに決めます。**設定** → **Team** → **エージェント設定**
 （変更は Team の管理者のみ）。仕組みは [`docs/software-factory.md`](../software-factory.md)。
 
 - 「リース時間（分）」: agent が作業を確保しておける時間（5〜240分、既定30分）。
@@ -173,7 +197,7 @@ coding agent に任せる作業の範囲を Team ごとに決めます。**設�
 
 ## ID・セキュリティ
 
-`/settings/security`（**設定** の「ID・セキュリティ管理」から開く）。Enterprise のセキュリティ権限が
+`/settings/security`（**設定** → **Workspace 管理** の「ID・セキュリティ管理」から開く）。Enterprise のセキュリティ権限が
 ない人には読み取り専用で表示されます。詳細は [`docs/enterprise-identity.md`](../enterprise-identity.md)。
 
 | タブ | 主な設定 |
@@ -181,7 +205,7 @@ coding agent に任せる作業の範囲を Team ごとに決めます。**設�
 | 概要 | SSO を強制する前の準備状況（IdP の接続テスト、ドメイン確認、緊急管理者） |
 | ID | SAML / OIDC の「ID プロバイダー」（**保存して接続テスト**）、「管理対象ドメイン」（DNS TXT で所有権を確認）、「SSO 強制」 |
 | プロビジョニング | 「SCIM 接続」の token 発行・ローテーション、「Directory reconciliation」（**Dry-runを実行** → **この差分を適用**）、実行ログ |
-| マッピング・ロール | 「Directory group mapping」（Workspace / Team / Project 単位でロールを割り当て）、「ロールと権限」（Custom role の作成） |
+| マッピング・ロール | 「Directory group mapping」（Workspace / Team / Project 単位でロールを割り当て）、「メンバーへのロール割り当て」、「ロールと権限」（Custom role の作成） |
 | セッション | 「MFAを必須にする」、セッション有効期間、アイドルタイムアウト、再認証間隔、「IP allowlist」、Guest・外部協力者の許可 |
 | 特権アクセス | 「Service account」、「緊急管理者」の事前登録と復旧経路のテスト |
 
@@ -205,12 +229,41 @@ IP allowlist は CIDR を1行に1つ書きます。空にすると制限なし�
 何度か間違えてからログインし、すぐに再ログインして上限に達した場合は、最大5分待ってください。
 回数はメールアドレスごとに分けて数えるので、他の人の失敗で自分が止められることはありません。
 
+### メンバーへのロール割り当て
+
+「マッピング・ロール」タブの「メンバーへのロール割り当て」で、メンバー・適用範囲（Workspace / Team /
+Project）・ロールを選んで **割り当てを追加** します。SCIM や IdP の group がなくても使えます。
+複数の Team に属する Project を選んだときは、どの Team の Project として割り当てるかも選びます。
+割り当てと解除は監査ログに `role-assignment.created` / `role-assignment.deleted` として残ります。
+監査ログではメンバーをメールアドレスではなく、メンバーごとの仮名の ID で示します。
+
+- **全Project閲覧**: 全 Team・全 Project を、Project のメンバーでなくても閲覧できます。編集はできません。
+  PMO や経営層向けです。
+- **監査担当**: 監査ログ（`/api/audit/events`）を閲覧できます。export はできません。
+
+割り当てを1件でも持つメンバーは、Workspace のロールと Project メンバーとしての権限ではなく、
+割り当てたロールの和集合だけで権限が決まります。たとえば Project の manager に「全Project閲覧」を
+付けると、その Project も閲覧だけになるので、編集が要る Project には Project管理者などを同じ画面で
+追加で割り当ててください。割り当てをすべて解除すると、元の Workspace のロールに戻ります。
+
+- owner と自分自身には割り当てられません。admin への割り当ての追加・解除と、管理系の権限
+  （メンバー管理・セキュリティ管理・監査ログの export など）を含むロールの付与・解除は owner だけができます。
+  メンバーに割り当て済みの Custom role に管理系の権限を足すことも、owner だけができます。
+- 割り当てを持つメンバーを owner / admin に変更するときは、先に割り当てをすべて解除してください。
+- メンバーの最後の割り当てを解除すると元のロールに戻るため、owner 以外は、そのメンバーが戻って得る
+  権限を自分も持っている場合だけ最後の1件を解除できます。無効化したメンバーも、再有効化すると元の
+  ロールに戻るので同じです。
+- ゲストには、ゲストに割り当て可能なロール（ゲスト、Project閲覧者、ゲスト可の Custom role）だけを
+  割り当てられます。割り当て後にゲストへ変更した場合、それ以外のロールは効かなくなります。
+- 割り当てを変更できるのは、Enterprise の `security.manage` または `members.manage` を持つ人です。
+  自分が持っていない権限を含むロールは割り当てられません。
+
 ## テナント管理
 
-**設定** → **テナント管理**（owner / admin のみ）。詳細は [`docs/tenant-administration.md`](../tenant-administration.md)。
+**設定** → **Workspace 管理** → **テナント管理**（owner / admin のみ）。詳細は [`docs/tenant-administration.md`](../tenant-administration.md)。
 
 - 「テナント profile」: owner、region、locale、招待時にロールを省略したときの「既定 member role」。
-  「会計年度の開始月」と「週の開始曜日」もここで決めます。週の開始曜日は工数のタイムシート・承認・週報の週に使われます。決めていなければ 1 月始まり・月曜始まりです。
+  「会計年度の開始月」と「週の開始曜日」もここで決めます。週の開始曜日は工数のタイムシート・承認・週報の週と、レポートの期間（今週・先週）に使われます。会計年度の開始月はレポートの期間（今四半期・今年度など）に使われます。決めていなければ 1 月始まり・月曜始まりです。
   「稼働曜日」と「会社の休日」（日付を選んで **休日を追加**、最大512日）も Workspace 全体で決めます。
   task 画面から新しく作る Work Item はこの稼働曜日と休日で稼働日数を数え、Gantt の日単位の列では稼働日でない日を網掛けします。
   すでにある Work Item の日程は変わりません。決めていなければ月〜金が稼働日で、休日はありません。

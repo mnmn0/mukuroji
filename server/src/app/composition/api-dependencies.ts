@@ -7,6 +7,10 @@ import type {
   WorkItemRelationMutationResponse,
   WorkItemRelationType,
 } from '@mukuroji/contracts'
+import {
+  DynamoDbProjectRaidLogStore,
+  InMemoryProjectRaidLogStore,
+} from '../../modules/project-raid-log'
 import { AI_ASSISTANCE_SCHEMA_VERSION } from '@mukuroji/contracts'
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
 import {
@@ -101,6 +105,8 @@ import {
   createFocusStateClient,
 } from '../../modules/focus'
 import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
+import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
+import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
 import { DynamoDbAgentRunStore, InMemoryAgentRunStore } from '../../modules/agent-runs'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
@@ -576,6 +582,10 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.PUSH_SUBSCRIPTIONS_TABLE_NAME ?? 'mukuroji-push-subscriptions-local',
     ),
+    teamReminderSettings: new DynamoDbReminderSettingsStore(
+      createDynamoDbDocumentClient(),
+      getConfiguredNotificationsTableName(),
+    ),
     agentRuns: new DynamoDbAgentRunStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
@@ -593,6 +603,11 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     savedUpdateFeeds: new DynamoDbSavedUpdateFeedsStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
+    ),
+    projectRaidLogs: new DynamoDbProjectRaidLogStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
     ),
     scheduleBaselines: new DynamoDbProjectScheduleBaselineStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
@@ -1636,6 +1651,7 @@ export function createTestAppDependencies(): AppDependencies {
       planning: new InMemoryPlanningClient(),
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
+      projectRaidLogs: new InMemoryProjectRaidLogStore(),
       scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
       collections: new InMemoryCollectionsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
@@ -1764,6 +1780,7 @@ export function overrideAppDependencies(
       ...(overrides.planning ? { planning: overrides.planning } : {}),
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
+      ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
       ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),
       ...(overrides.collections ? { collections: overrides.collections } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),

@@ -121,6 +121,13 @@ export type WorkspaceMember = {
   updatedAt: string
   /** 利用停止日時の ISO 8601 timestamp です。 */
   deactivatedAt?: string
+  /**
+   * When directory deprovisioning signed the member out everywhere (ISO 8601).
+   *
+   * Kept after reactivation: access tokens the API verifies locally (enterprise SSO) are refused
+   * when their sign-in started before this time, as Cognito global sign-out would refuse them.
+   */
+  signInsRevokedAt?: string
 }
 
 /**
@@ -569,6 +576,14 @@ export interface WorkspaceAccessClient {
     input: ReconcileDirectoryWorkspaceMemberInput,
     auditContext?: MutationAuditContext,
   ): Promise<WorkspaceMember>
+  /**
+   * Records that the member was signed out everywhere, so locally verified access tokens of
+   * earlier sign-ins (enterprise SSO) are refused like Cognito global sign-out refuses the rest.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member that was signed out.
+   */
+  revokeMemberSignIns?(workspaceId: string, memberKey: string): Promise<void>
   /** Directory authority から owner 以外の member を冪等に停止します。 */
   deprovisionDirectoryMember?(
     workspaceId: string,
@@ -746,6 +761,38 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   async getActiveMember(workspaceId: string, memberKey: string) {
     const member = await this.getMember(workspaceId, memberKey)
     return member?.status === 'active' ? member : undefined
+  }
+
+  /**
+   * Records that the member was signed out everywhere.
+   *
+   * The cutoff never moves backwards, so overlapping sign-outs keep the latest one.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param memberKey - Member that was signed out.
+   */
+  async revokeMemberSignIns(workspaceId: string, memberKey: string) {
+    await this.ensureLocalTable()
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: normalizeRequired(workspaceId, 'Workspace ID'),
+          recordKey: createMemberRecordKey(normalizeMemberKey(memberKey)),
+        },
+        UpdateExpression: 'SET signInsRevokedAt = :now',
+        // The cutoff only moves forward: a delayed write of an earlier sign-out must not reopen
+        // the sign-ins a later one refused.
+        ConditionExpression:
+          'attribute_exists(recordKey) AND (attribute_not_exists(signInsRevokedAt) OR signInsRevokedAt < :now)',
+        ExpressionAttributeValues: { ':now': this.clock().toISOString() },
+      }))
+    } catch (error) {
+      // A member without a record has no Workspace session to refuse, and a member whose cutoff
+      // is already later keeps it.
+      if (isAwsError(error, 'ConditionalCheckFailedException')) return
+      throw toWorkspaceAccessError(error)
+    }
   }
 
   /** Builds a commit-time guard for one currently active Workspace member.
@@ -2762,6 +2809,38 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     input: DeprovisionDirectoryWorkspaceMemberInput,
     auditContext?: MutationAuditContext,
   ) {
+    for (let attempt = 0; attempt < maximumSignInCutoffAttempts; attempt += 1) {
+      const result = await this.tryDeprovisionDirectoryMember(
+        workspaceId,
+        targetMemberKey,
+        input,
+        auditContext,
+      )
+      if (result !== signInCutoffMovedForward) return result
+    }
+    throw new WorkspaceAccessError(
+      409,
+      'WorkspaceDirectoryDeprovisionConflict',
+      'Workspace member changed while directory access was being removed.',
+    )
+  }
+
+  /**
+   * Deactivates a directory-managed member in one transaction.
+   *
+   * @param workspaceId - Workspace of the member.
+   * @param targetMemberKey - Member to deactivate.
+   * @param input - Directory identity and the versions the caller read.
+   * @param auditContext - Audit context of the request.
+   * @returns The deactivated member, undefined for an unknown member, or
+   *   {@link signInCutoffMovedForward} when another sign-out wrote a later cutoff meanwhile.
+   */
+  private async tryDeprovisionDirectoryMember(
+    workspaceId: string,
+    targetMemberKey: string,
+    input: DeprovisionDirectoryWorkspaceMemberInput,
+    auditContext?: MutationAuditContext,
+  ): Promise<WorkspaceMember | undefined | typeof signInCutoffMovedForward> {
     const normalizedWorkspaceId = normalizeRequired(workspaceId, 'Workspace ID')
     const memberKey = normalizeMemberKey(targetMemberKey)
     const externalIdentityId = normalizeRequired(
@@ -2802,6 +2881,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
 
     const nowIso = this.clock().toISOString()
+    // The cutoff only moves forward, also past one another sign-out wrote at the same instant.
+    const signInsRevokedAt = laterSignInCutoff(nowIso, existing.signInsRevokedAt)
     const nextMember = {
       ...existing,
       status: 'deactivated',
@@ -2810,6 +2891,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       version: existing.version + 1,
       updatedAt: nowIso,
       deactivatedAt: nowIso,
+      signInsRevokedAt,
     } satisfies WorkspaceMember
     const membershipConditions = await this.prepareMembershipMutation(
       normalizedWorkspaceId,
@@ -2841,15 +2923,17 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           recordKey: createMemberRecordKey(memberKey),
         },
         UpdateExpression:
-          'SET #status = :deactivated, provisioningSource = :directory, externalIdentityId = :externalIdentityId, updatedAt = :now, deactivatedAt = :now, version = version + :one',
+          'SET #status = :deactivated, provisioningSource = :directory, externalIdentityId = :externalIdentityId, updatedAt = :now, deactivatedAt = :now, signInsRevokedAt = :signInsRevokedAt, version = version + :one',
+        // A sign-out does not change the member version, so the cutoff is guarded on its own.
         ConditionExpression:
-          'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId',
+          'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId AND (attribute_not_exists(signInsRevokedAt) OR signInsRevokedAt < :signInsRevokedAt)',
         ExpressionAttributeNames: { '#role': 'role', '#status': 'status' },
         ExpressionAttributeValues: {
           ':deactivated': 'deactivated',
           ':directory': 'directory',
           ':externalIdentityId': externalIdentityId,
           ':now': nowIso,
+          ':signInsRevokedAt': signInsRevokedAt,
           ':one': 1,
           ':owner': 'owner',
           ':expectedVersion': input.expectedVersion,
@@ -2898,6 +2982,16 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
             'Document permissions changed. Reload and try again.',
             { cause: error },
           )
+        }
+        if (isTransactionConditionalFailureAt(error, 0)) {
+          const current = await this.getMember(normalizedWorkspaceId, memberKey)
+          if (
+            current?.version === input.expectedVersion &&
+            current.signInsRevokedAt !== undefined &&
+            current.signInsRevokedAt >= signInsRevokedAt
+          ) {
+            return signInCutoffMovedForward
+          }
         }
         throw new WorkspaceAccessError(
           409,
@@ -3667,7 +3761,23 @@ function toWorkspaceMember(value: unknown): WorkspaceMember {
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     deactivatedAt: typeof value.deactivatedAt === 'string' ? value.deactivatedAt : undefined,
+    ...(value.signInsRevokedAt === undefined
+      ? {}
+      : { signInsRevokedAt: readSignInCutoff(value.signInsRevokedAt) }),
   }
+}
+
+/**
+ * Reads a stored sign-in cutoff, refusing a value that is not a canonical UTC timestamp.
+ *
+ * @param value - Stored `signInsRevokedAt`.
+ * @returns The cutoff.
+ */
+function readSignInCutoff(value: unknown) {
+  if (typeof value !== 'string') throw invalidWorkspaceDataError()
+  const time = Date.parse(value)
+  if (Number.isNaN(time) || new Date(time).toISOString() !== value) throw invalidWorkspaceDataError()
+  return value
 }
 
 function toWorkspaceInvitation(value: unknown, now: Date): WorkspaceInvitation {
@@ -3791,6 +3901,7 @@ function toMemberItem(
     createdAt: member.createdAt,
     updatedAt: member.updatedAt,
     ...(member.deactivatedAt ? { deactivatedAt: member.deactivatedAt } : {}),
+    ...(member.signInsRevokedAt ? { signInsRevokedAt: member.signInsRevokedAt } : {}),
     ...(identityOwnership ? { identityOwnership } : {}),
   }
 }
@@ -3928,6 +4039,25 @@ function requireDocumentAuthorizationRevision(
     )
   }
   return value
+}
+
+/** Attempts of a deprovisioning whose sign-in cutoff another sign-out moved forward meanwhile. */
+const maximumSignInCutoffAttempts = 3
+
+/** Marks a deprovisioning attempt to repeat because the sign-in cutoff moved forward. */
+const signInCutoffMovedForward = Symbol('signInCutoffMovedForward')
+
+/**
+ * Returns a sign-in cutoff that is later than the stored one.
+ *
+ * @param nowIso - Current time (ISO 8601).
+ * @param storedCutoff - Cutoff already on the member, if any.
+ * @returns `nowIso`, or one millisecond after the stored cutoff when that is not earlier.
+ */
+function laterSignInCutoff(nowIso: string, storedCutoff: string | undefined) {
+  if (storedCutoff === undefined || storedCutoff < nowIso) return nowIso
+  const stored = Date.parse(storedCutoff)
+  return Number.isNaN(stored) ? nowIso : new Date(stored + 1).toISOString()
 }
 
 function isTransactionConditionalFailureAt(error: unknown, index: number) {

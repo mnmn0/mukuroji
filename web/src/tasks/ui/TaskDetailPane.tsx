@@ -39,6 +39,7 @@ import {
   IssueCollaborationPanel,
   type IssueSummaryAiAssistance,
 } from '../../issues/ui/IssueCollaborationPanel'
+import { createIssueCommentSessionDraftKey } from '../../issues/model/commentSessionDraft'
 import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
@@ -215,6 +216,8 @@ export type TaskDetailPaneProps = {
   onArchiveIssue?: (task: CanonicalWorkItem, archived: boolean) => Promise<void>
   /** Closes the detail pane while keeping the list selection and scroll position. */
   onClose?: () => void
+  /** Opens the create panel with a draft copied from this Work Item; hidden when undefined. */
+  onDuplicateIssue?: (task: CanonicalWorkItem) => void
   /** Reports combined Work Item AI operation state to the owning task screen. */
   onAiOperationPendingChange?: (pending: boolean) => void
   /** Reports retained comment composer input to the owning task screen. */
@@ -321,6 +324,7 @@ export function TaskDetailPane({
   onCommentDraftDirtyChange,
   onArchiveIssue,
   onClose,
+  onDuplicateIssue,
   onDeleteRelation,
   onDeleteScheduleDependency,
   onScheduleNoChange,
@@ -1435,6 +1439,7 @@ export function TaskDetailPane({
               artifacts={artifacts}
               contextDraft={documentContextPromotion.documentContextDraft}
               key={`${task.teamId ?? ''}:${task.id}`}
+              {...(task.teamId ? { commentSessionDraftKey: createIssueCommentSessionDraftKey(task.teamId, task.id) } : {})}
               controller={collaboration}
               currentMemberKey={currentWorkspaceMemberKey}
               focusedCommentId={focusedCommentId}
@@ -1602,6 +1607,17 @@ export function TaskDetailPane({
                 t={t}
               />
             ) : null}
+            {onDuplicateIssue && !isRetainedDetail ? (
+              <button
+                className="workbench-button-secondary h-8 px-3 text-xs"
+                data-testid="task-detail-duplicate"
+                disabled={isWorkItemMutationPending}
+                onClick={() => onDuplicateIssue(issue ?? task)}
+                type="button"
+              >
+                {t('issues.duplicate.action')}
+              </button>
+            ) : null}
             <TaskPriorityBadge priority={issue?.priority ?? task.priority} t={t} />
             {onClose ? (
               <button
@@ -1618,7 +1634,7 @@ export function TaskDetailPane({
           </div>
         </div>
         {issue && !isRetainedDetail ? (
-          <TaskHandoffPanel configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+          <TaskHandoffPanel accessToken={accessToken} configuration={resolvedConfiguration} includeDescription={hasDescriptionSection} t={t} task={issue} />
         ) : null}
         {aiAssistanceEnabled ? aiAssistanceSlots?.planning ?? null : null}
         {!hasOverviewSection ? renderWorkItemTypeControl() : null}

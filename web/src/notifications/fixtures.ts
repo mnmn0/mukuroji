@@ -3,6 +3,7 @@ import type {
   NotificationInboxController,
   NotificationPreferencesController,
 } from './mutations/useNotifications'
+import type { TeamReminderSettingsController } from './mutations/useTeamReminderSettings'
 
 /**
  * Storybook と UI test で使う notification-backed Inbox の通知です。
@@ -71,11 +72,17 @@ export const reportDeliveryNotificationFixture: InboxNotification = {
 export const notificationInboxControllerFixture: NotificationInboxController = {
   archive: async () => true,
   availableEventTypes: notificationFixtures.map((notification) => notification.eventType),
+  bulkFailedCount: 0,
+  bulkUpdate: async (notifications) => ({
+    failedIds: [],
+    succeededIds: notifications.map((notification) => notification.id),
+  }),
   eventType: undefined,
   filter: 'all',
   hasLoadError: false,
   hasMore: true,
   hasMutationError: false,
+  isBulkPending: false,
   isLoading: false,
   isLoadingMore: false,
   loadMore: async () => undefined,
@@ -122,6 +129,33 @@ export const notificationPreferencesControllerFixture: NotificationPreferencesCo
   isLoading: false,
   isSaving: false,
   preferences: notificationPreferencesFixture,
+  refresh: async () => undefined,
+  save: async () => true,
+}
+
+/**
+ * Team reminder settings controller fixture for a Team manager in Storybook and tests.
+ */
+export const teamReminderSettingsControllerFixture: TeamReminderSettingsController = {
+  settings: {
+    teamId: 'core',
+    days: { dueSoonDays: 2, overdueEscalationDays: 14 },
+    defaults: {
+      dueSoonDays: 3,
+      overdueReminderIntervalDays: 7,
+      overdueEscalationDays: 7,
+      staleStartedDays: 7,
+      timesheetReminderDays: 7,
+    },
+    revision: 3,
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    canManage: true,
+  },
+  isLoading: false,
+  hasLoadError: false,
+  isUnavailable: false,
+  isSaving: false,
+  sessionErrors: [],
   refresh: async () => undefined,
   save: async () => true,
 }

@@ -24,6 +24,7 @@ import {
   canMutateWorkspaceContent,
 } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
+import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import {
   clearAuthSession,
   getAuthSession,
@@ -122,6 +123,14 @@ export function ReportsPage() {
     isLoading: isCurrentUserLoading,
     mutate: mutateCurrentUser,
   } = useCurrentUser(accessToken)
+  const {
+    settings: calendarSettings,
+    error: calendarSettingsError,
+    retry: retryCalendarSettings,
+  } = useWorkspaceCalendarSettings(
+    accessToken,
+    Boolean(user && !currentUserError),
+  )
   const {
     data: teams = emptyTeams,
     error: projectDirectoryError,
@@ -767,6 +776,9 @@ export function ReportsPage() {
         <AnalyticsWorkbench
           key={`${selectedReport?.id ?? 'ad-hoc'}:${selectedReport?.revision ?? 0}`}
           builder={routeState.builder}
+          {...(calendarSettings ? { calendarSettings } : {})}
+          calendarSettingsFailed={Boolean(calendarSettingsError)}
+          onRetryCalendarSettings={retryCalendarSettings}
           canManageReports={canMutateWorkspaceContent(user)}
           errorMessage={mutationErrorMessage ?? loadErrorMessage}
           evidence={evidence}
@@ -841,6 +853,7 @@ export function ReportsPage() {
               mutateSnapshots(),
               mutateQuery(),
             ])
+            if (calendarSettingsError) retryCalendarSettings()
           }}
           onSaveReport={saveReport}
           onSaveSchedule={saveSchedule}

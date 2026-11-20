@@ -757,7 +757,12 @@ function resolveWorkspaceRouteMetadata(
     return shareRouteMetadata
   }
 
-  if (matchPath('/settings', pathname)) {
+  if (
+    matchPath('/settings', pathname) ||
+    matchPath('/settings/personal', pathname) ||
+    matchPath('/settings/workspace', pathname) ||
+    matchPath('/settings/team', pathname)
+  ) {
     return settingsRouteMetadata
   }
 

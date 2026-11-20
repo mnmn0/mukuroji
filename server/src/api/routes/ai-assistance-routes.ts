@@ -82,6 +82,7 @@ import { requireTriageTeamAccess } from '../shared/customer-access'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
   filterPlanningSnapshotForPrincipal,
+  withPlanningLegacyReadScope,
   planningUpdateTargetsEqual,
   readPlanningPublishState,
   readPlanningWorkItemState,
@@ -2237,7 +2238,7 @@ async function resolveAiWorkItemSource(
   requireAiAssistanceSourceRevision(detail.issue.revision, source.expectedRevision)
   const planningState = await readPlanningWorkItemState(principal)
   const planning = filterPlanningSnapshotForPrincipal(
-    principal,
+    await withPlanningLegacyReadScope(principal),
     await workItemDependencies.planning.get(principal.directoryId, planningState),
   )
   const sourceKey = createWorkItemDependencyKey({
@@ -2656,7 +2657,10 @@ async function resolveAiPlanningTargetSource(
     'viewer',
   )
   requireAiAssistanceSourceRevision(snapshot.revision, source.expectedRevision)
-  const visible = filterPlanningSnapshotForPrincipal(principal, snapshot)
+  const visible = filterPlanningSnapshotForPrincipal(
+    await withPlanningLegacyReadScope(principal),
+    snapshot,
+  )
   const target = source.target
   const entity = target.type === 'initiative'
     ? visible.entities.find((candidate) => candidate.id === target.entityId)

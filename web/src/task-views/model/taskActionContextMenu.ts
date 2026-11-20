@@ -50,6 +50,71 @@ export type TaskActionContextMenuItem = {
   destructive: boolean
 }
 
+/**
+ * Screen-owned action shown beside the registry actions, such as Duplicate.
+ *
+ * It is not a canonical Work Item action, so the owning screen runs it directly.
+ */
+export type TaskActionContextMenuExtraAction = {
+  /** Stable identifier used as the row key and `data-action-id`. */
+  id: string
+  /** Localized visible action label. */
+  label: string
+  /** Runs the action after the menu closes. */
+  onSelect: () => void
+  /** Reason that prevents activation, shown under the label. */
+  disabledReason?: string
+}
+
+/** One rendered menu row: a registry action or a screen-owned extra action. */
+export type TaskActionContextMenuRow =
+  | (TaskActionContextMenuItem & {
+      /** Row executed through the shared registry pipeline. */
+      source: 'registry'
+    })
+  | (Omit<TaskActionContextMenuItem, 'id'> & {
+      /** Row run by the owning screen. */
+      source: 'extra'
+      /** Stable identifier of the extra action. */
+      id: string
+      /** Runs the extra action. */
+      onSelect: () => void
+    })
+
+/**
+ * Places screen-owned actions at the end of the first action group (after Open and Edit).
+ *
+ * @param items - Registry rows in canonical order.
+ * @param extraActions - Screen-owned actions to insert.
+ * @returns Ordered rows for rendering and keyboard navigation.
+ */
+export function mergeTaskActionContextMenuRows(
+  items: readonly TaskActionContextMenuItem[],
+  extraActions: readonly TaskActionContextMenuExtraAction[] = [],
+): readonly TaskActionContextMenuRow[] {
+  const registryRows: TaskActionContextMenuRow[] = items.map((item) => ({
+    ...item,
+    source: 'registry',
+  }))
+  if (extraActions.length === 0) return registryRows
+  const extraRows: TaskActionContextMenuRow[] = extraActions.map((action) => ({
+    destructive: false,
+    ...(action.disabledReason !== undefined ? { disabledReason: action.disabledReason } : {}),
+    id: action.id,
+    label: action.label,
+    onSelect: action.onSelect,
+    separatorBefore: false,
+    source: 'extra',
+  }))
+  const groupEnd = registryRows.findIndex((row, index) => index > 0 && row.separatorBefore)
+  const insertAt = groupEnd === -1 ? registryRows.length : groupEnd
+  return [
+    ...registryRows.slice(0, insertAt),
+    ...extraRows,
+    ...registryRows.slice(insertAt),
+  ]
+}
+
 /** Maximum viewport width that uses the touch-oriented bottom sheet. */
 const taskActionContextMenuCompactWidth = 640
 
@@ -160,7 +225,7 @@ export function resolveTaskActionContextMenuLayout(
  * @returns Zero-based focus index, or -1 when no actions are rendered.
  */
 export function resolveInitialTaskActionMenuItemIndex(
-  items: readonly TaskActionContextMenuItem[],
+  items: readonly Pick<TaskActionContextMenuItem, 'disabledReason'>[],
 ): number {
   const firstEnabledIndex = items.findIndex((item) => item.disabledReason === undefined)
   return firstEnabledIndex >= 0 ? firstEnabledIndex : items.length > 0 ? 0 : -1

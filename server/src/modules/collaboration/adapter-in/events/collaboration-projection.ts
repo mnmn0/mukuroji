@@ -39,6 +39,7 @@ import {
   createNotificationDeliveryPlan,
   parsePlanningUpdateTargetScheduleProjection,
   parseStoredNotificationPreferences,
+  TIMESHEET_REMINDER_EVENT_TYPE,
   slackDeliveryShard,
   emailDeliveryShard,
   isEmailNotificationEligible,
@@ -146,6 +147,10 @@ export type AuditProjectionEvent = {
   planningNextDueAt?: string
   /** Scheduled Planning event の reminder / overdue / escalation kind です。 */
   planningNotificationKind?: PlanningScheduledNotificationKind
+  /** Unsubmitted time entries a timesheet reminder was scanned for. */
+  timeEntryIds?: string[]
+  /** Instant at or before which a timesheet reminder's entries had to end to be due. */
+  timesheetDueBefore?: string
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
 }
@@ -192,6 +197,49 @@ export interface CollaborationProjectionDependencies {
   realtime: CollaborationRealtimePublisher
   /** Optional authoritative Enterprise Identity reader for cadence authorization. */
   enterpriseIdentity?: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'>
+  /** Revalidates timesheet reminders; without it every timesheet reminder is dropped. */
+  timesheetReminders?: TimesheetReminderRevalidator
+}
+
+/** A `ConditionCheck` transaction item written together with a projected notification. */
+export type ProjectionConditionCheck = {
+  /** Condition that must still hold when the notification is saved. */
+  ConditionCheck: {
+    /** Table of the checked row. */
+    TableName: string
+    /** Key of the checked row. */
+    Key: Record<string, unknown>
+    /** Condition on the checked row. */
+    ConditionExpression: string
+    /** Attribute name placeholders. */
+    ExpressionAttributeNames?: Record<string, string>
+    /** Attribute value placeholders. */
+    ExpressionAttributeValues?: Record<string, unknown>
+  }
+}
+
+/** Checks that a timesheet reminder still names an unsubmitted entry of its recipient. */
+export type TimesheetReminderRevalidator = {
+  /**
+   * Finds a named entry that is still draft or rejected and owned by the member.
+   *
+   * @param input - Workspace, Team, recipient, and the entries the schedule found.
+   * @returns A condition that holds while that entry is unchanged, or undefined when none qualifies.
+   */
+  findUnsubmittedEntry(input: {
+    /** Canonical Workspace ID. */
+    workspaceId: string
+    /** Team ID. */
+    teamId: string
+    /** Lower-case member key of the recipient. */
+    memberKey: string
+    /** Entry IDs the schedule found unsubmitted. */
+    entryIds: readonly string[]
+    /** An entry must have ended at or before this instant to still be due. */
+    dueBefore: string
+    /** Project the reminder is authorized against; the entry must still belong to it. */
+    projectId: string
+  }): Promise<ProjectionConditionCheck | undefined>
 }
 
 /** Canonical scope passed to the curated context Search projection. */
@@ -682,7 +730,8 @@ async function processRecord(
     currentScope,
     event.projectId,
   )
-  if (!workItemAuthorizationEvent) {
+  const timesheetReminder = await readTimesheetReminderFence(event, dependencies.timesheetReminders)
+  if (!workItemAuthorizationEvent || !timesheetReminder.current) {
     await markProjectionProcessed(event.eventId)
     return
   }
@@ -716,13 +765,15 @@ async function processRecord(
     return
   }
 
-  const parentCondition = currentScope.checked && authorizationEvent.teamId && authorizationEvent.issueId
+  // A timesheet reminder is fenced on the entry it was revalidated against, so a submission that
+  // lands before the save cancels it and the stream retry drops the reminder.
+  const parentCondition = (currentScope.checked && authorizationEvent.teamId && authorizationEvent.issueId
     ? createCuratedContextSearchParentCondition(
         requireEnv('WORK_ITEMS_TABLE_NAME'),
         authorizationEvent,
         currentScope,
       )
-    : undefined
+    : undefined) ?? timesheetReminder.condition
   const watcherCandidates = await readSubscribedWatcherCandidates(authorizationEvent)
   const memberDirectory = notifiesPlanningUpdateProjectMembers(authorizationEvent)
     ? await readProjectDirectory(authorizationEvent.workspaceId)
@@ -1297,7 +1348,7 @@ export function createCuratedContextSearchParentCondition(
 async function projectNotification(
   event: AuditProjectionEvent,
   candidate: GroupedNotificationCandidate,
-  parentCondition?: ReturnType<typeof createCuratedContextSearchParentCondition>,
+  parentCondition?: ProjectionConditionCheck,
 ) {
   const {
     recipientKey,
@@ -1564,6 +1615,47 @@ function isScheduledStageStillCurrent(
     return currentDaysUntilDue <= event.daysUntilDue
   }
   return true
+}
+
+/**
+ * Revalidates a timesheet reminder against the current time entries.
+ *
+ * A reminder whose entries were all submitted, deleted, or moved to another owner between the
+ * scan and the projection is dropped. Without a revalidator the reminder is dropped too, so a
+ * stale reminder is never delivered. A current reminder carries a condition on the entry it was
+ * revalidated against, to be written in the same transaction as the notification.
+ *
+ * @param event - Parsed audit event.
+ * @param revalidator - Current time entry reader.
+ * @returns Whether the event should still be projected, and the condition for a timesheet reminder.
+ */
+export async function readTimesheetReminderFence(
+  event: AuditProjectionEvent,
+  revalidator: TimesheetReminderRevalidator | undefined,
+): Promise<{ current: boolean; condition?: ProjectionConditionCheck }> {
+  if (event.eventType !== TIMESHEET_REMINDER_EVENT_TYPE) return { current: true }
+  const recipient = event.notificationCandidates.find((candidate) => candidate.reason === 'timesheet')
+  const memberKey = normalizeMemberKey(recipient?.memberKey)
+  if (
+    !revalidator ||
+    !event.teamId ||
+    !memberKey ||
+    event.notificationCandidates.length !== 1 ||
+    !event.timeEntryIds?.length ||
+    !event.timesheetDueBefore ||
+    !event.projectId
+  ) {
+    return { current: false }
+  }
+  const condition = await revalidator.findUnsubmittedEntry({
+    workspaceId: event.workspaceId,
+    teamId: event.teamId,
+    memberKey,
+    entryIds: event.timeEntryIds,
+    dueBefore: event.timesheetDueBefore,
+    projectId: event.projectId,
+  })
+  return condition ? { current: true, condition } : { current: false }
 }
 
 /**
@@ -2256,6 +2348,8 @@ async function isEligibleRecipient(
     (
       event.planningNotificationKind !== undefined ||
       planningUpdateActivityEventTypes.has(event.eventType) ||
+      // Timesheet access can come from an Enterprise role alone, so it is evaluated here too.
+      event.eventType === TIMESHEET_REMINDER_EVENT_TYPE ||
       enforceContentAuthorization
     ) &&
     (event.projectId !== undefined || event.teamId !== undefined || enforceContentAuthorization)
@@ -2831,6 +2925,10 @@ export function parseAuditProjectionEvent(
     planningNotificationKind: readPlanningNotificationKind(
       metadata.planningNotificationKind,
     ),
+    ...(Array.isArray(metadata.timeEntryIds)
+      ? { timeEntryIds: metadata.timeEntryIds.flatMap((entryId) => readString(entryId) ?? []) }
+      : {}),
+    ...(readString(metadata.timesheetDueBefore) ? { timesheetDueBefore: readString(metadata.timesheetDueBefore) } : {}),
     outboxStatus: value.outboxStatus === 'suppressed' ? 'suppressed' : 'pending',
   }
 }

@@ -15,10 +15,12 @@ import {
 import {
   createEnterpriseDomainClaim,
   createEnterpriseGroupRoleMapping,
+  createEnterpriseMemberRoleAssignment,
   createEnterpriseRole,
   createEnterpriseServiceAccount,
   deactivateEnterpriseBreakGlassAdministrator,
   deleteEnterpriseGroupRoleMapping,
+  deleteEnterpriseMemberRoleAssignment,
   deleteEnterpriseRole,
   EnterpriseSecurityApiError,
   getEnterpriseSecuritySnapshot as loadEnterpriseSecuritySnapshot,
@@ -415,6 +417,33 @@ export function EnterpriseSecurityPanelContainer({
                   input,
                   context,
                 ),
+              )
+          : undefined
+      }
+      onCreateMemberRoleAssignment={
+        canManageMappings
+          ? (input) =>
+              runMutation('member-assignment:create', input, (context) =>
+                createEnterpriseMemberRoleAssignment(
+                  mutationSession.accessToken,
+                  input,
+                  context,
+                ),
+              )
+          : undefined
+      }
+      onDeleteMemberRoleAssignment={
+        canManageMappings
+          ? (assignment) =>
+              runMutation(
+                `member-assignment:delete:${assignment.id}`,
+                assignment,
+                (context) =>
+                  deleteEnterpriseMemberRoleAssignment(
+                    mutationSession.accessToken,
+                    assignment,
+                    context,
+                  ),
               )
           : undefined
       }

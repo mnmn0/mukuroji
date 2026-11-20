@@ -8,6 +8,7 @@ import {
   readPlanningOption,
   rebasePlanningEntityEditorDraft,
   resolvePlanningEntityEdit,
+  resolvePlanningOwnerOptions,
   planningRiskOptions,
   type PlanningEntityEditorDraft,
 } from '../src/planning/model/entityEditor'
@@ -188,6 +189,23 @@ describe('planning entity edit patch', () => {
   })
 })
 
+describe('planning owner options', () => {
+  test('lists members by label and keeps owners that no member matches', () => {
+    expect(resolvePlanningOwnerOptions(
+      [
+        { memberKey: 'Zed@Example.com', label: 'Zed (zed@example.com)' },
+        { memberKey: 'ann@example.com', label: 'Ann (ann@example.com)' },
+        { memberKey: 'zed@example.com', label: 'Duplicate' },
+      ],
+      ['left@example.com', ' ANN@example.com', ''],
+    )).toEqual([
+      { memberKey: 'ann@example.com', label: 'Ann (ann@example.com)' },
+      { memberKey: 'zed@example.com', label: 'Zed (zed@example.com)' },
+      { memberKey: 'left@example.com', label: 'left@example.com' },
+    ])
+  })
+})
+
 describe('planning entity editor', () => {
   test('shows the selected Milestone with single-day dates and a save button', () => {
     const html = renderToStaticMarkup(
@@ -231,5 +249,57 @@ describe('planning entity editor', () => {
       />,
     )
     expect(cycle).not.toContain('data-testid="planning-entity-editor"')
+  })
+  test('suggests members by name while the owner stays typeable', () => {
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        initialSelectedEntityId="milestone-beta"
+        labels={labels}
+        ownerOptions={[{ memberKey: 'ann@example.com', label: 'Ann (ann@example.com)' }]}
+        snapshot={planningSnapshotFixture}
+        onCreateEntity={() => undefined}
+        onUpdateEntity={() => undefined}
+      />,
+    )
+    const milestone = fixtureEntity('milestone-beta')
+    const editor = html.slice(
+      html.indexOf('data-testid="planning-entity-editor"'),
+      html.indexOf('data-testid="planning-create-entity"'),
+    )
+    expect(editor).toContain(`name="ownerMemberKey" value="${milestone.ownerMemberKey}"`)
+    expect(editor).toContain('<option label="Ann (ann@example.com)" value="ann@example.com">')
+    expect(editor).toContain(labels.entityEditor.ownerPickerHint)
+    expect(editor).not.toContain('<select class="workbench-input h-10 px-3" name="ownerMemberKey"')
+
+    const create = html.slice(html.indexOf('data-testid="planning-create-entity"'))
+    expect(create).toContain(`placeholder="${labels.ownerPlaceholder}"`)
+    expect(create).toContain('<option label="Ann (ann@example.com)" value="ann@example.com">')
+    expect(create).not.toContain(labels.retry)
+  })
+
+  test('keeps the typed owner field and offers a retry when members fail to load', () => {
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        initialSelectedEntityId="milestone-beta"
+        labels={labels}
+        ownerOptionsErrorMessage="Some members could not be loaded."
+        snapshot={planningSnapshotFixture}
+        onCreateEntity={() => undefined}
+        onRetryOwnerOptions={() => undefined}
+        onUpdateEntity={() => undefined}
+      />,
+    )
+    const editor = html.slice(
+      html.indexOf('data-testid="planning-entity-editor"'),
+      html.indexOf('data-testid="planning-create-entity"'),
+    )
+    expect(editor).toContain('<datalist')
+    expect(editor).toContain(labels.entityEditor.ownerHint)
+    expect(editor).toContain('Some members could not be loaded.')
+    expect(editor).toContain(`>${labels.retry}</button>`)
+    const create = html.slice(html.indexOf('data-testid="planning-create-entity"'))
+    expect(create).toContain('Some members could not be loaded.')
   })
 })

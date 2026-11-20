@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react'
 import { clearAuthSession, readAccessTokenSubject } from '../../auth/session'
+import { discardSessionDrafts } from '../../auth/sessionDrafts'
 import { revokeStoredAuthSession } from '../../auth/sessionRefresh'
 import {
   decodeBase64Url,
@@ -373,6 +374,8 @@ export async function signOutWithPushCleanup(
     if (timer !== undefined) clearTimeout(timer)
     void startRevoke()
     clearAuthSession()
+    // An explicit sign-out leaves nothing behind for the next person at this device.
+    discardSessionDrafts()
   }
 }
 

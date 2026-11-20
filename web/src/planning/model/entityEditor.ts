@@ -255,6 +255,42 @@ export function collectPlanningOwnerCandidates(entities: readonly PlanningEntity
   return [...new Set(entities.map((entity) => entity.ownerMemberKey).filter(Boolean))].sort()
 }
 
+/** One Workspace member offered by the Planning owner picker. */
+export type PlanningOwnerOption = {
+  /** Normalized member key sent as `ownerMemberKey`. */
+  memberKey: string
+  /** Text shown for the member, such as `Name (email)`. */
+  label: string
+}
+
+/**
+ * Builds the owner picker list from known members and owner keys that must stay selectable.
+ *
+ * Members come first, sorted by label. A key that no loaded member matches, such as the current
+ * owner of a plan whose owner left every Project, is kept and labeled by the key itself so the
+ * picker never silently changes the stored owner.
+ *
+ * @param members - Members loaded from the Project directory.
+ * @param keepKeys - Owner keys that must appear even without a matching member.
+ * @returns De-duplicated owner options.
+ */
+export function resolvePlanningOwnerOptions(
+  members: readonly PlanningOwnerOption[],
+  keepKeys: readonly string[],
+): PlanningOwnerOption[] {
+  const byKey = new Map<string, PlanningOwnerOption>()
+  for (const member of members) {
+    const memberKey = member.memberKey.trim().toLowerCase()
+    if (memberKey && !byKey.has(memberKey)) byKey.set(memberKey, { memberKey, label: member.label })
+  }
+  const options = [...byKey.values()].sort((left, right) => left.label.localeCompare(right.label))
+  const extras = [...new Set(keepKeys.map((key) => key.trim().toLowerCase()))]
+    .filter((key) => key && !byKey.has(key))
+    .sort()
+    .map((memberKey) => ({ memberKey, label: memberKey }))
+  return [...options, ...extras]
+}
+
 /**
  * Narrows a select value to one of the allowed options.
  *

@@ -1,3 +1,4 @@
+import type { PersonalNotificationReminderDays } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -65,6 +66,11 @@ export type NotificationPreferences = {
    * 通知を抑制する時間帯です。
    */
   quietHours: NotificationQuietHours
+  /**
+   * The member's own reminder day overrides. A missing field uses the Team setting; omitting the
+   * whole object on save keeps the saved overrides, and an empty object clears them.
+   */
+  reminderDays?: PersonalNotificationReminderDays
   /**
    * optimistic concurrency に使う version です。
    */
