@@ -298,8 +298,10 @@ Project membership を使わず、assignment の和集合（と `workspace.read`
 解除しても同じ制限を適用します（最後の assignment を外すと legacy role に戻るため）。さらに、
 caller が owner、system administrator、break-glass のいずれでもない場合は、戻る権限（member の
 Workspace role と Project manager role の permission）をすべて持つときだけ、member の最後の direct
-assignment を外せます。持たない場合は `403 EnterpriseRoleAssignmentRestoreDenied` です。この判定は
-削除と同じ revision 条件付きの書き込みの中で行います。
+assignment を外せます。持たない場合は `403 EnterpriseRoleAssignmentRestoreDenied` です。無効化された
+member も再有効化すると Workspace role に戻るので、同じ判定をします。この判定は削除と同じ revision
+条件付きの書き込みの中で行います。割り当て API の `scopeType` は `workspace`・`team`・`project` か省略
+（Workspace）だけを受け付け、それ以外は `400 EnterpriseRoleAssignmentScopeInvalid` です。
 同じ理由で、owner 相当以外の caller は、member に direct assignment されている custom role に管理系
 permission を足せません（`403 EnterpriseRoleAssignmentAdminProtected`）。既に持つ管理系 permission を残した
 ままの編集はできます。割り当て時は、caller が持たない permission（`403 EnterpriseRoleAssignmentDenied`）と
@@ -491,7 +493,8 @@ IdP secret、bearer credential、HMAC key/digest は event payload に含めま�
 `sourceDetails` には request source IP/User-Agent が入りますが、audit JSON/NDJSON projection からは
 除外します。
 
-`GET /api/audit/events` と `GET /api/audit/events/export` は system administrator を要求し、query/export
+`GET /api/audit/events` は `audit.read`、`GET /api/audit/events/export` は `audit.export` を要求し（system administrator
+はどちらも可）、`workspace:auditor` は閲覧できても export はできません。query/export
 完了後に filter の有無、件数、truncation、format を別の immutable event に記録します。Audit writer が
 無い場合は閲覧を fail closed で拒否します。
 

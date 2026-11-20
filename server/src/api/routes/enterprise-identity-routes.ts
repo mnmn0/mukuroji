@@ -1037,6 +1037,23 @@ async function requireEnterpriseResourceScope(
  * @param memberKey - Member key from the request.
  * @returns The active target member.
  */
+/**
+ * Reads the scope type of a member role assignment request.
+ *
+ * @param value - Untrusted `scopeType` from the request body.
+ * @returns The scope type, defaulting to Workspace only when it is omitted.
+ * @throws EnterpriseIdentityError when the value is not a supported scope type.
+ */
+function readEnterpriseRoleAssignmentScopeType(value: unknown): 'workspace' | 'team' | 'project' {
+  if (value === undefined) return 'workspace'
+  if (value === 'workspace' || value === 'team' || value === 'project') return value
+  throw new EnterpriseIdentityError(
+    400,
+    'EnterpriseRoleAssignmentScopeInvalid',
+    'Scope type must be workspace, team, or project.',
+  )
+}
+
 async function requireEnterpriseRoleAssignmentTarget(
   principal: EnterpriseSecurityPrincipal,
   memberKey: string,
@@ -3749,9 +3766,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
       const requestIdempotencyKey =
         c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()
       const memberKey = readEnterpriseText(body?.memberKey, 'Member key')
-      const scopeType = body?.scopeType === 'team' || body?.scopeType === 'project'
-        ? body.scopeType
-        : 'workspace'
+      const scopeType = readEnterpriseRoleAssignmentScopeType(body?.scopeType)
       const roleId = readEnterpriseRoleId(body?.roleId)
       const target = await requireEnterpriseRoleAssignmentTarget(principal, memberKey)
       requireEnterpriseAssignableRole(
@@ -3821,19 +3836,23 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         )
       }
       // Removing the last assignment gives the member their Workspace role back, so the same
-      // protections as granting apply. A deactivated member's leftover assignment can always go.
-      const target = await workspaceDependencies.workspaceAccess.getActiveMember(
+      // protections as granting apply. A deactivated member gets that role back when reactivated,
+      // so the restore check uses the stored member whatever its status; only an active member's
+      // assignments need the target protections.
+      const member = await workspaceDependencies.workspaceAccess.getMember(
         principal.directoryId,
         assignment.principalId,
       )
-      if (target) await requireEnterpriseRoleAssignmentTarget(principal, target.memberKey)
+      if (member?.status === 'active') {
+        await requireEnterpriseRoleAssignmentTarget(principal, member.memberKey)
+      }
       requireEnterpriseAdministrativeRoleCaller(principal, snapshot, assignment.roleId)
       await workspaceDependencies.enterpriseIdentity.authorization.deleteMemberRoleAssignment(
         assignment,
         createWorkspaceMutationContext(c, principal, body),
         {
-          requireRemainingAssignment: target !== undefined &&
-            !canRestoreEnterpriseLegacyAccess(principal, snapshot, target.role),
+          requireRemainingAssignment: member !== undefined &&
+            !canRestoreEnterpriseLegacyAccess(principal, snapshot, member.role),
           // The role is re-checked in the stored state, so a concurrent role edit cannot slip through.
           ...(isEnterpriseOwnerLevelCaller(principal)
             ? {}

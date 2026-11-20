@@ -30,7 +30,8 @@ assignment の和集合と `workspace.read` だけで評価する（`includeWork
   guest 不可 role、owner 以外による管理系 permission を含む role の付与を API が拒否する。解除にも
   同じ制限をかける。最後の assignment を外すと legacy role と Project membership が戻るので、owner 相当
   以外の caller は、戻る権限（member の Workspace role と Project manager の permission）をすべて持つ
-  場合だけ最後の1件を外せる。この判定は削除と同じ条件付き書き込みの中で行う。Direct assignment を
+  場合だけ最後の1件を外せる。無効化された member も再有効化で legacy role に戻るので同じ判定をする。
+  この判定は削除と同じ条件付き書き込みの中で行う。Direct assignment を
   持つ member を owner / admin に変える操作も拒否し、guest になった member の direct assignment は
   guest 可の role だけを評価する。
 - メンバーに direct assignment されている custom role に管理系 permission を足す編集も owner 相当だけに

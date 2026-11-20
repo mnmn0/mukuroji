@@ -219,6 +219,15 @@ test('rejects assignments to oneself, to a guest beyond guest roles, and from a 
     )
     expect(unknownScope.status).toBe(409)
 
+    // A misspelled scope type must not widen a Project request to the whole Workspace.
+    const misspelledScope = await sendAssignmentRequest(
+      '/api/enterprise/security/role-assignments',
+      'POST',
+      { memberKey: 'sato@example.com', roleId: 'workspace:auditor', scopeType: 'projectt', scopeId: 'refero' },
+    )
+    expect(misspelledScope.status).toBe(400)
+    expect(await misspelledScope.json()).toMatchObject({ code: 'EnterpriseRoleAssignmentScopeInvalid' })
+
     configureFakeProjectClients(true, { workspaceRole: 'member' })
     setTestAppDependencies({ enterpriseIdentity: identity })
     const denied = await sendAssignmentRequest(
@@ -366,7 +375,11 @@ test('lets an auditor read the audit log but not export it or read Projects', as
 
 test('refuses to remove a member\'s last assignment for a caller below their Workspace role', async () => {
   await withTestEnvironment(enterpriseEnvironment, async () => {
-    configureFakeProjectClients(true, { workspaceRole: 'member' })
+    // A deactivated member gets their Workspace role back when reactivated, so the rule holds too.
+    configureFakeProjectClients(true, {
+      workspaceRole: 'member',
+      inactiveWorkspaceMemberKeys: ['former@example.com'],
+    })
     const identity = new InMemoryEnterpriseIdentityClient()
     setTestAppDependencies({ enterpriseIdentity: identity })
     await identity.putCustomRole({
@@ -390,6 +403,18 @@ test('refuses to remove a member\'s last assignment for a caller below their Wor
       source: 'direct' as const,
     }
     await identity.putMemberRoleAssignment(satoAssignment)
+    await identity.putMemberRoleAssignment({
+      ...satoAssignment,
+      assignmentId: 'assignment-former-viewer',
+      principalId: 'former@example.com',
+    })
+
+    const formerRemoval = await sendAssignmentRequest(
+      '/api/enterprise/security/role-assignments/assignment-former-viewer',
+      'DELETE',
+    )
+    expect(formerRemoval.status).toBe(403)
+    expect(await formerRemoval.json()).toMatchObject({ code: 'EnterpriseRoleAssignmentRestoreDenied' })
 
     const lastRemoval = await sendAssignmentRequest(
       '/api/enterprise/security/role-assignments/assignment-sato-viewer',

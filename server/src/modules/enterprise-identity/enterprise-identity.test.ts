@@ -11,7 +11,7 @@ import type {
 import {
   createMutationAuditContext,
   createWorkspaceMemberAuditEntityId,
-} from '../audit/audit'
+} from '../audit'
 import {
   DynamoDbEnterpriseIdentityClient,
   DynamoDbEnterpriseIdentityMaintenanceClient,
