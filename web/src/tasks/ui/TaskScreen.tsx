@@ -51,6 +51,7 @@ import {
   isCancelledTeamIssueUpdate,
   type CancelledTeamIssueUpdate,
 } from '../../issues/model/teamIssueUpdateOutcome'
+import { createWorkItemDuplicateDraft } from '../../issues/model/workItemDuplicate'
 import { TeamIssuesApiError, type TeamIssue, type TeamIssueDetail, type UpdateTeamIssueInput } from '../../issues/api'
 import type {
   ProjectDirectoryTeam,
@@ -303,6 +304,8 @@ type TaskActionContextMenuState = {
   returnFocusElement: HTMLElement
   /** Revision-bound target selected by this specific row or card entrance. */
   selection: WorkItemActionSelection
+  /** Task the menu was opened on; screen-owned actions such as Duplicate read it. */
+  task: CanonicalWorkItem
 }
 
 /** Result of a task update that may require an explicit schedule confirmation. */
@@ -1943,6 +1946,7 @@ export function TaskScreen({
       ...(context?.workItemTypeId
         ? { workItemTypeId: context.workItemTypeId }
         : {}),
+      ...(context?.duplicate ? { duplicate: context.duplicate } : {}),
     }
     setCreateTaskError(undefined)
     setCreateTaskContext(resolvedContext)
@@ -3245,6 +3249,30 @@ export function TaskScreen({
   }, [projectTaskActions])
 
   /**
+   * Opens the create panel with a draft copied from an existing Project task.
+   *
+   * The copy keeps the source Team, Project, Type, schedule, and owner when the owner is still a
+   * Project member. Nothing is saved until the member submits the panel.
+   *
+   * @param task - Project task to duplicate.
+   */
+  const handleDuplicateTask = useCallback((task: CanonicalWorkItem) => {
+    if (isAiOperationPendingRef.current) return
+    const duplicate = createWorkItemDuplicateDraft(task)
+    handleProjectCreateClick({
+      duplicate,
+      projectId: task.assignedProjectId ?? projectId,
+      schedule: task.schedule,
+      source: 'duplicate',
+      teamId: task.teamId,
+      workItemTypeId: duplicate.workItemTypeId,
+      ...(assigneeOptions.some((member) => member.id === task.assigneeUserId)
+        ? { assigneeUserId: task.assigneeUserId }
+        : {}),
+    })
+  }, [assigneeOptions, handleProjectCreateClick, projectId])
+
+  /**
    * Returns an existing relation editor mutation to a pending canonical Relation action.
    *
    * @param issueId - Work Item whose relation graph is being changed.
@@ -3366,6 +3394,7 @@ export function TaskScreen({
           teamId: task.teamId,
           workItemId: task.id,
         }),
+        task,
       })
     },
     [],
@@ -3386,6 +3415,15 @@ export function TaskScreen({
       taskActionContextMenuState.selection,
     )
   }, [projectTaskActions, taskActionContextMenuState])
+
+  const menuTask = taskActionContextMenuState?.task
+  const taskActionContextMenuExtraActions = useMemo(() => canCreateTaskAction && menuTask
+    ? [{
+        id: 'duplicate',
+        label: t('issues.duplicate.menuAction'),
+        onSelect: () => handleDuplicateTask(menuTask),
+      }]
+    : [], [canCreateTaskAction, handleDuplicateTask, menuTask, t])
 
   /** Lets the bulk toolbar request Move, Assign, or Archive through the shared registry. */
   const handleBulkTaskActionRequest = useCallback(async (
@@ -3930,6 +3968,9 @@ export function TaskScreen({
                     : undefined}
                   onArchiveIssue={canMutateDetailTask && !isRetainedDetail ? onArchiveTask : undefined}
                   onClose={handleCloseDetail}
+                  onDuplicateIssue={canCreateTaskAction && !isRetainedDetail
+                    ? handleDuplicateTask
+                    : undefined}
                   onAiOperationPendingChange={reportAiOperationPending}
                   onCommentDraftDirtyChange={(isDirty) => {
                     reportCommentDraftDirty(
@@ -3980,6 +4021,7 @@ export function TaskScreen({
             labels={projectTaskActionLabels}
             menuLabel={t('tasks.action.more')}
             onClose={() => setTaskActionContextMenuState(undefined)}
+            extraActions={taskActionContextMenuExtraActions}
             onExecute={handleTaskActionMenuExecute}
             registry={projectTaskActions.registry}
             returnFocusElement={taskActionContextMenuState.returnFocusElement}

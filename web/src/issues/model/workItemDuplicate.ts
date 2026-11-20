@@ -1,6 +1,7 @@
 import {
   DEFAULT_WORK_ITEM_TYPE_ID,
   deriveWorkItemScheduleDueDate,
+  type CustomFieldDefinition,
   type CustomFieldValue,
   type WorkItemContributorAssignmentCreateInput,
   type WorkItemPriority,
@@ -63,4 +64,25 @@ export function createWorkItemDuplicateDraft(issue: TeamIssue): WorkItemDuplicat
         : {}),
     })),
   }
+}
+
+/**
+ * Keeps the duplicated custom field values that the selected Work Item Type still defines.
+ *
+ * Formula fields are computed by the server, so they are not copied.
+ *
+ * @param draft - Duplicate draft.
+ * @param definitions - Fields of the selected Work Item Type.
+ * @returns Values keyed by field ID.
+ */
+export function pickDuplicatedCustomFieldValues(
+  draft: WorkItemDuplicateDraft,
+  definitions: readonly CustomFieldDefinition[],
+): Record<string, CustomFieldValue> {
+  const values: Record<string, CustomFieldValue> = {}
+  for (const definition of definitions) {
+    const value = draft.customFieldValues[definition.id]
+    if (value !== undefined && definition.type !== 'formula') values[definition.id] = value
+  }
+  return values
 }

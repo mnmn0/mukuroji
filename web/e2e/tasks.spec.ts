@@ -5061,6 +5061,40 @@ test.describe('authenticated task page', () => {
     ).toBeFocused()
   })
 
+  test('Issue #383: 行メニューの複製で写した下書きを直してから作成する', async ({ page }) => {
+    await page.goto('/projects/refero/issues')
+    const requestCounts = getMockRequestCounts(page)
+    const createRequest = page.waitForRequest((request) =>
+      request.method() === 'POST' &&
+      /\/api\/teams\/core-team\/issues$/u.test(new URL(request.url()).pathname))
+
+    await page.getByTestId('task-row-wireframe').click({ button: 'right' })
+    await page.getByTestId('project-task-action-context-menu')
+      .getByRole('menuitem', { name: 'Work Item を複製', exact: true }).click()
+
+    const createTaskForm = page.getByTestId('create-task-form')
+    await expect(createTaskForm.getByTestId('create-task-duplicate-note')).toBeVisible()
+    const title = createTaskForm.locator('input[name="title"]')
+    await expect(title).toHaveValue('新しいランディングページのワイヤーフレーム作成')
+    await expect(createTaskForm.locator('select[name="assigneeUserId"]')).toHaveValue('sato@example.com')
+    await expect(createTaskForm.locator('select[name="priority"]')).toHaveValue('high')
+    await expect(createTaskForm.locator('select[name="scheduleMode"]')).toHaveValue('date-range')
+    await expect(createTaskForm.locator('input[name="scheduleStartDate"]')).toHaveValue('2026-06-01')
+    expect(requestCounts.issueCreates).toBe(0)
+
+    await title.fill('新しいランディングページのワイヤーフレーム作成（第2版）')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    const body: unknown = (await createRequest).postDataJSON()
+    expect(body).toMatchObject({
+      assigneeUserId: 'sato@example.com',
+      priority: 'high',
+      schedule: { endDate: '2026-06-03', mode: 'date-range', startDate: '2026-06-01' },
+      title: '新しいランディングページのワイヤーフレーム作成（第2版）',
+    })
+    await expect.poll(() => requestCounts.issueCreates).toBe(1)
+  })
+
   test('Issue #188: Calendar は2日を選んだ期間 task を作成し再読込後も保持する', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await page.goto('/projects/refero/issues')

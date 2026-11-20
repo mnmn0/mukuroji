@@ -4,6 +4,10 @@ import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import { teamIssueFixtures } from '../src/issues/fixtures'
 import { createWorkItemDuplicateDraft } from '../src/issues/model/workItemDuplicate'
 import { CreateIssuePanel } from '../src/issues/ui/CreateTeamIssuePanel'
+import { CreateTaskPanel } from '../src/tasks/ui/CreateTaskPanel'
+import { taskViewStoryProjectMembers } from '../src/tasks/ui/TaskView.stories.fixtures'
+import { mergeTaskActionContextMenuRows } from '../src/task-views/model/taskActionContextMenu'
+import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 import type { ProjectMember } from '../src/projects/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -102,5 +106,86 @@ describe('Work Item duplicate draft', () => {
     expect(markup).toMatch(/<option value="sato@example.com" selected="">/)
     expect(markup).toMatch(/<option value="low" selected="">/)
     expect(markup).toContain('Contributor の計画 1 件を引き継ぐ')
+  })
+
+  test('starts the Project task panel in detailed mode from the copied values', () => {
+    const t = createTranslator('ja')
+    const draft = createWorkItemDuplicateDraft({
+      ...source,
+      customFieldValues: { 'customer-impact': '元の影響' },
+    })
+    const markup = renderToStaticMarkup(
+      <CreateTaskPanel
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={teamWorkItemConfigurationFixture}
+        context={{
+          assigneeUserId: source.assigneeUserId,
+          duplicate: draft,
+          projectId: 'refero',
+          schedule: source.schedule,
+          source: 'duplicate',
+          teamId: source.teamId,
+          workItemTypeId: draft.workItemTypeId,
+        }}
+        isAssigneeOptionsLoading={false}
+        isSubmitting={false}
+        locale="ja"
+        projectId="refero"
+        t={t}
+        workspaceMembers={[]}
+        onCancel={() => undefined}
+        onSubmit={async () => undefined}
+      />,
+    )
+
+    expect(markup).toContain('data-testid="create-task-duplicate-note"')
+    expect(markup).toContain(`value="${source.title}"`)
+    expect(markup).toContain('元の説明')
+    expect(markup).toContain('元の影響')
+    expect(markup).toContain('value="2026-12-24"')
+    expect(markup).toMatch(/<option value="sato@example.com" selected="">/)
+    expect(markup).toMatch(/<option value="low" selected="">/)
+    expect(markup).toContain('Contributor の計画 1 件を引き継ぐ')
+    expect(markup).not.toContain('作業中の列・日付・担当者を引き継いでいます。')
+  })
+})
+
+describe('Task action menu extra actions', () => {
+  const registryRows = [
+    { destructive: false, id: 'open', label: 'Open', separatorBefore: false },
+    { destructive: false, id: 'edit', label: 'Edit', separatorBefore: false },
+    { destructive: false, id: 'move', label: 'Move', separatorBefore: true },
+    { destructive: true, id: 'archive', label: 'Archive', separatorBefore: true },
+  ] as const
+
+  test('places Duplicate after Open and Edit, before the Move section', () => {
+    const rows = mergeTaskActionContextMenuRows(registryRows, [
+      { id: 'duplicate', label: 'Duplicate', onSelect: () => undefined },
+    ])
+
+    expect(rows.map((row) => `${row.source}:${row.id}`)).toEqual([
+      'registry:open',
+      'registry:edit',
+      'extra:duplicate',
+      'registry:move',
+      'registry:archive',
+    ])
+  })
+
+  test('appends extra actions when the menu has a single group', () => {
+    const rows = mergeTaskActionContextMenuRows(registryRows.slice(0, 2), [
+      { disabledReason: 'No access', id: 'duplicate', label: 'Duplicate', onSelect: () => undefined },
+    ])
+
+    expect(rows.at(-1)).toMatchObject({ disabledReason: 'No access', id: 'duplicate', source: 'extra' })
+  })
+
+  test('keeps registry rows unchanged without extra actions', () => {
+    expect(mergeTaskActionContextMenuRows(registryRows).map((row) => row.id)).toEqual([
+      'open',
+      'edit',
+      'move',
+      'archive',
+    ])
   })
 })
