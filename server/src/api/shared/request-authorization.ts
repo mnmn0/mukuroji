@@ -603,6 +603,16 @@ const enterpriseRoutePermissionRules = [
   },
   {
     method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
+    permission: 'projects.write',
+  },
+  {
+    method: 'GET',
     pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline',
     permission: 'projects.read',
   },
