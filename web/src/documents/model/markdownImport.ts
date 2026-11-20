@@ -100,11 +100,11 @@ type RawHeading = {
  */
 type ScannedBlock = DocumentBlock | RawHeading
 
-/** Opening line of a fenced code block. */
-const FENCE_OPEN = /^ {0,3}(?:(`{3,})[ \t]*([^\s`]*)[^`]*|(~{3,})[ \t]*(\S*).*)$/u
+/** Opening line of a fenced code block, before the info string is checked. */
+const FENCE_OPEN = /^( {0,3})(`{3,}|~{3,})(.*)$/u
 
 /** ATX heading line. */
-const ATX_HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/u
+const ATX_HEADING = /^ {0,3}(#{1,6})(?:[ \t](.*))?$/u
 
 /** Task-list item line. */
 const TASK_ITEM = /^ {0,3}[-*+][ \t]+\[([ xX])\][ \t]+(.*)$/u
@@ -236,19 +236,18 @@ function scanBlocks(
       continue
     }
 
-    const fence = FENCE_OPEN.exec(line)
-    const marker = fence?.[1] ?? fence?.[3]
-    if (fence && marker) {
+    const fence = readFenceOpen(line)
+    if (fence) {
       flushParagraph()
-      const close = new RegExp(`^ {0,3}${marker[0] === '`' ? '`' : '~'}{${marker.length},}[ \\t]*$`, 'u')
+      const close = new RegExp(`^ {0,3}${fence.marker[0] === '`' ? '`' : '~'}{${fence.marker.length},}[ \\t]*$`, 'u')
       const content: string[] = []
       index += 1
       while (index < lines.length && !close.test(lines[index] ?? '')) {
-        content.push(lines[index] ?? '')
+        content.push(removeIndent(lines[index] ?? '', fence.indent))
         index += 1
       }
       index += 1
-      blocks.push(createFencedBlock(fence[2] ?? fence[4] ?? '', content.join('\n'), createId))
+      blocks.push(createFencedBlock(fence.info, content.join('\n'), createId))
       continue
     }
 
@@ -258,7 +257,7 @@ function scanBlocks(
       blocks.push({
         type: 'raw-heading',
         rawLevel: heading[1].length,
-        text: unescapeMarkdown((heading[2] ?? '').trim()),
+        text: unescapeMarkdown(removeClosingHashes(heading[2] ?? '')),
       })
       index += 1
       continue
@@ -351,7 +350,7 @@ function readTableStart(
   }
   if (matches(index + 1)) return { delimiterIndex: index + 1, spaced: false }
   if (
-    isPipeRow(header) &&
+    isPipeLine(header) &&
     (lines[index + 1] ?? '').trim() === '' &&
     matches(index + 2)
   ) {
@@ -428,16 +427,6 @@ function isDelimiterRow(line: string): boolean {
 }
 
 /**
- * Checks whether a line starts and ends with a pipe and is not a delimiter row.
- *
- * @param line - Candidate line.
- * @returns Whether the line looks like an exported table row.
- */
-function isPipeRow(line: string): boolean {
-  return isPipeLine(line) && !isDelimiterRow(line)
-}
-
-/**
  * Checks whether a line after a table's delimiter row is another row. As in
  * GitHub Flavored Markdown, rows continue until a blank line or the start of
  * another block such as a heading, fence, list item, or blockquote.
@@ -448,12 +437,62 @@ function isPipeRow(line: string): boolean {
 function continuesTable(line: string): boolean {
   return (
     line.trim() !== '' &&
-    !FENCE_OPEN.test(line) &&
+    !readFenceOpen(line) &&
     !ATX_HEADING.test(line) &&
     !TASK_ITEM.test(line) &&
     !LIST_OR_QUOTE_START.test(line) &&
     !THEMATIC_BREAK.test(line)
   )
+}
+
+/**
+ * Removes an ATX heading's optional closing `#` sequence and surrounding
+ * spaces without a backtracking regular expression.
+ *
+ * @param text - Heading text after the opening `#` sequence.
+ * @returns The heading text.
+ */
+function removeClosingHashes(text: string): string {
+  const trimmed = text.trim()
+  let end = trimmed.length
+  while (end > 0 && trimmed[end - 1] === '#') end -= 1
+  if (end === trimmed.length) return trimmed
+  if (end === 0) return ''
+  const before = trimmed[end - 1]
+  return before === ' ' || before === '\t' ? trimmed.slice(0, end).trim() : trimmed
+}
+
+/**
+ * Reads the opening line of a fenced code block.
+ *
+ * @param line - Candidate line.
+ * @returns The fence marker, its indentation, and the first word of the info
+ *   string, or undefined when the line does not open a fence. A backtick
+ *   fence whose info string contains a backtick is inline code, not a fence.
+ */
+function readFenceOpen(
+  line: string,
+): { marker: string; indent: number; info: string } | undefined {
+  const match = FENCE_OPEN.exec(line)
+  const indent = match?.[1]
+  const marker = match?.[2]
+  if (indent === undefined || !marker) return undefined
+  const rest = match?.[3] ?? ''
+  if (marker.startsWith('`') && rest.includes('`')) return undefined
+  return { marker, indent: indent.length, info: rest.trim().split(/\s/u)[0] ?? '' }
+}
+
+/**
+ * Removes the opening fence's indentation from a code line, as Markdown does.
+ *
+ * @param line - Line inside the fence.
+ * @param indent - Number of spaces before the opening fence.
+ * @returns The line with up to that many leading spaces removed.
+ */
+function removeIndent(line: string, indent: number): string {
+  let removed = 0
+  while (removed < indent && line[removed] === ' ') removed += 1
+  return line.slice(removed)
 }
 
 /**
@@ -505,24 +544,26 @@ function createHeading(
  * @returns Cell texts in column order.
  */
 function splitTableRow(line: string): string[] {
-  let trimmed = line.trim()
-  if (trimmed.startsWith('|')) trimmed = trimmed.slice(1)
-  if (trimmed.endsWith('|') && !trimmed.endsWith('\\|')) trimmed = trimmed.slice(0, -1)
+  const trimmed = line.trim()
   const cells: string[] = []
   let current = ''
+  let endsWithPipe = false
   for (let position = 0; position < trimmed.length; position += 1) {
-    const character = trimmed[position]
-    if (character === '\\' && trimmed[position + 1] === '|') {
-      current += '\\|'
+    const character = trimmed[position] ?? ''
+    endsWithPipe = false
+    if (character === '\\' && position + 1 < trimmed.length) {
+      current += character + (trimmed[position + 1] ?? '')
       position += 1
     } else if (character === '|') {
       cells.push(current)
       current = ''
+      endsWithPipe = true
     } else {
       current += character
     }
   }
-  cells.push(current)
+  if (!endsWithPipe) cells.push(current)
+  if (trimmed.startsWith('|')) cells.shift()
   return cells.map((cell) =>
     unescapeMarkdown(cell.trim().replace(/<br\s*\/?>/giu, '\n')),
   )

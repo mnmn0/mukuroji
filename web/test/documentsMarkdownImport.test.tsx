@@ -224,6 +224,40 @@ describe('Markdown import', () => {
     expect(convert('#\n'.repeat(149_999))).toEqual({ code: 'too-many-blocks', ok: false })
   })
 
+  test('splits cells at a pipe after an escaped backslash', () => {
+    const blocks = blocksOf('a | b\n--|--\npath\\\\|value\n')
+    expect(blocks[0]).toMatchObject({
+      rows: [{ cells: [{ text: 'path\\' }, { text: 'value' }] }],
+    })
+  })
+
+  test('accepts an exported header whose cells look like dashes', () => {
+    const blocks = blocksOf('| - | - |\n\n| --- | --- |\n\n| 1 | 2 |\n')
+    expect(blocks).toMatchObject([{ columns: ['-', '-'], rows: [{ cells: [{ text: '1' }, { text: '2' }] }], type: 'table' }])
+  })
+
+  test('removes the opening fence indentation from code lines', () => {
+    expect(blocksOf('  ```python\n  print(1)\n    nested\n  ```\n')).toEqual([
+      { code: 'print(1)\n  nested', id: 'block-1', language: 'python', type: 'code' },
+    ])
+  })
+
+  test('reads closing hashes and long space runs in headings quickly', () => {
+    expect(blocksOf('## C# ##\n\n## Tail #\n\n## a#b')).toMatchObject([
+      { text: 'C#' }, { text: 'Tail' }, { text: 'a#b' },
+    ])
+    const started = performance.now()
+    blocksOf(`## a${' '.repeat(40_000)}x`)
+    expect(performance.now() - started).toBeLessThan(1_000)
+  })
+
+  test('rejects a long inline code span quickly', () => {
+    const started = performance.now()
+    const blocks = blocksOf(`\`\`\`${'a'.repeat(40_000)}\`\`\``)
+    expect(blocks[0]?.type).toBe('paragraph')
+    expect(performance.now() - started).toBeLessThan(1_000)
+  })
+
   test('pads short table rows and ignores extra cells', () => {
     const blocks = blocksOf('a | b\n--|--\n1\n1 | 2 | 3\n')
     expect(blocks[0]).toMatchObject({
