@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(507)
-  expect(new Set(inventory).size).toBe(503)
+  expect(inventory).toHaveLength(527)
+  expect(new Set(inventory).size).toBe(523)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
@@ -114,7 +114,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
+  // The Software factory deployment gate runs ahead of the Agent Run, agent setting, and agent
+  // credential routes (#632).
+  expect(inventory).toContain('ALL /api/v1/agent-runs/*')
+  expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
+  expect(inventory).toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '155786ac01baa1a827906d7546cec31cd22a25dcae8167ea7a80d546e987c089',
+    '3419547463c25a73b48bddf21a5dbb41fff829f43dc8e2125747f84e0f999cb8',
   )
 })

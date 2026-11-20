@@ -16,7 +16,7 @@ export function HelpPage() {
   return (
     <WorkspaceRouteContent>
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
-        <HelpWorkspaceView t={t} />
+        <HelpWorkspaceView showCodingAgentGuide={workspace.softwareFactoryEnabled} t={t} />
       </div>
     </WorkspaceRouteContent>
   )

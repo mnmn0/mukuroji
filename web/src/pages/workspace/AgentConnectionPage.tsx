@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { AgentConnectionPanelContainer } from '../../developer-platform/ui/AgentConnectionPanelContainer'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { SoftwareFactoryGate } from '../../workspace/ui/SoftwareFactoryGate'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -18,17 +19,19 @@ export function AgentConnectionPage() {
   )
 
   return (
-    <WorkspaceRouteContent>
-      <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
-        {workspace.accessToken ? (
-          <AgentConnectionPanelContainer
-            accessToken={workspace.accessToken}
-            locale={workspace.locale}
-            t={t}
-            teams={teams}
-          />
-        ) : null}
-      </div>
-    </WorkspaceRouteContent>
+    <SoftwareFactoryGate fallbackPath="/settings/personal">
+      <WorkspaceRouteContent>
+        <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
+          {workspace.accessToken ? (
+            <AgentConnectionPanelContainer
+              accessToken={workspace.accessToken}
+              locale={workspace.locale}
+              t={t}
+              teams={teams}
+            />
+          ) : null}
+        </div>
+      </WorkspaceRouteContent>
+    </SoftwareFactoryGate>
   )
 }

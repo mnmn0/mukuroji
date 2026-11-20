@@ -40,6 +40,11 @@ export type CurrentUser = {
   canManageCustomerRequests?: boolean
   /** Whether the current user may create or update Customer saved views. */
   canManageCustomerViews?: boolean
+  /**
+   * Whether the deployment serves Software factory (Agent Runs, Factory board, Agent settings,
+   * and agent credentials). The Web hides those entries unless this is `true`.
+   */
+  softwareFactoryEnabled?: boolean
 }
 
 /**
