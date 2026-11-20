@@ -258,7 +258,7 @@ export function DeveloperPlatformPanelContainer({
       resources={resources}
       availableConnectorProviders={availableConnectorProviders}
       connectorAvailabilityErrorMessage={
-        availableConnectorProvidersError
+        availableConnectorProvidersError && !availableConnectorProviders
           ? labels.helpText.connectorAvailabilityError
           : undefined
       }

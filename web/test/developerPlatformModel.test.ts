@@ -42,9 +42,22 @@ describe('Developer Platform connector model', () => {
       ['github'],
     )
 
-    expect(catalog.map((item) => [item.provider, item.available])).toEqual([
-      ['github', true],
-      ['slack', false],
+    expect(catalog.map((item) => [item.provider, item.availability])).toEqual([
+      ['github', 'available'],
+      ['slack', 'not-configured'],
+    ])
+  })
+
+  test('keeps availability unknown until the configured providers load', () => {
+    const catalog = completeDeveloperConnectorCatalog(
+      developerPlatformLabelsFixture.connectorCatalog,
+      [{ ...developerPlatformResourcesFixture.connectors[0]!, provider: 'slack' }],
+      developerPlatformLabelsFixture.helpText.installedConnector,
+      undefined,
+    )
+
+    expect(catalog.map((item) => [item.provider, item.availability])).toEqual([
+      ['slack', 'unknown'],
     ])
   })
 

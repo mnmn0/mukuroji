@@ -94,24 +94,64 @@ describe('DeveloperPlatformPanel connector management', () => {
     )
   })
 
-  test('explains an empty catalog and a failed availability check', () => {
+  test('explains an empty catalog only after the configured providers load', () => {
     const html = renderToStaticMarkup(
       <DeveloperPlatformPanel
         initialSection="connectors"
         labels={developerPlatformLabelsFixture}
         resources={{ ...developerPlatformResourcesFixture, connectors: [] }}
-        connectorAvailabilityErrorMessage={
-          developerPlatformLabelsFixture.helpText.connectorAvailabilityError
-        }
-        onRetryConnectorAvailability={() => undefined}
+        availableConnectorProviders={[]}
       />,
     )
 
     expect(html).toContain(
       developerPlatformLabelsFixture.headings.connectorCatalogEmpty,
     )
+  })
+
+  test('shows a failed availability check without claiming the catalog is empty', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="connectors"
+        labels={developerPlatformLabelsFixture}
+        resources={multipleConnectorAccountsDeveloperPlatformResourcesFixture}
+        connectorAvailabilityErrorMessage={
+          developerPlatformLabelsFixture.helpText.connectorAvailabilityError
+        }
+        onConnectConnector={async () => undefined}
+        onRetryConnectorAvailability={() => undefined}
+      />,
+    )
+
     expect(html).toContain(
       developerPlatformLabelsFixture.helpText.connectorAvailabilityError,
+    )
+    expect(html).toContain('mnmn0-archive')
+    expect(html).not.toContain(
+      developerPlatformLabelsFixture.headings.connectorCatalogEmpty,
+    )
+    expect(html).not.toContain(
+      developerPlatformLabelsFixture.helpText.connectorNotConfigured,
+    )
+    expect(html).not.toContain('Add account')
+  })
+
+  test('shows the loading state next to installed providers while availability loads', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="connectors"
+        labels={developerPlatformLabelsFixture}
+        resources={multipleConnectorAccountsDeveloperPlatformResourcesFixture}
+        isConnectorAvailabilityLoading
+        onConnectConnector={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain(
+      developerPlatformLabelsFixture.helpText.connectorAvailabilityLoading,
+    )
+    expect(html).not.toContain(
+      developerPlatformLabelsFixture.helpText.connectorNotConfigured,
     )
   })
 

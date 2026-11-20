@@ -29,6 +29,8 @@ export type ConnectorsSectionProps = {
   availabilityErrorMessage?: string
   /** Whether the configured connector providers are still loading. */
   isAvailabilityLoading?: boolean
+  /** Whether the configured connector providers have loaded, so an empty catalog is really empty. */
+  isAvailabilityKnown?: boolean
   /** Retries loading the configured connector providers. */
   onRetryAvailability?: () => void
   /** Validation messages keyed by synchronization-conflict identifier. */
@@ -98,6 +100,7 @@ export function ConnectorsSection({
   catalog,
   availabilityErrorMessage,
   isAvailabilityLoading,
+  isAvailabilityKnown = true,
   onRetryAvailability,
   conflictMergeErrors,
   conflictMergedValueDrafts,
@@ -414,6 +417,15 @@ export function ConnectorsSection({
           </div>
         ) : null}
 
+        {isAvailabilityLoading && catalog.length ? (
+          <p
+            className="mt-4 text-xs font-medium text-[var(--workbench-muted)]"
+            role="status"
+          >
+            {labels.helpText.connectorAvailabilityLoading}
+          </p>
+        ) : null}
+
         {catalog.length ? (
           <div className="mt-4 grid grid-cols-2 gap-4 max-[1180px]:grid-cols-1">
             {catalog.map((item) => {
@@ -551,11 +563,11 @@ export function ConnectorsSection({
                     </p>
                   )}
 
-                  {canManage && !item.available ? (
+                  {canManage && item.availability === 'not-configured' ? (
                     <p className="mt-4 text-xs font-medium leading-5 text-[var(--workbench-muted)]">
                       {labels.helpText.connectorNotConfigured}
                     </p>
-                  ) : canManage && onConnect ? (
+                  ) : canManage && onConnect && item.availability === 'available' ? (
                     <div className="mt-4 flex flex-wrap gap-2">
                       <button
                         className={
@@ -586,19 +598,17 @@ export function ConnectorsSection({
             <div className="h-36 animate-pulse rounded-lg bg-slate-100" />
             <div className="h-36 animate-pulse rounded-lg bg-slate-100" />
           </div>
-        ) : (
-          query.trim() ? (
-            <EmptyState
-              description={labels.helpText.connectorSearchEmpty}
-              title={labels.headings.connectorSearchEmpty}
-            />
-          ) : (
-            <EmptyState
-              description={labels.helpText.connectorCatalogEmpty}
-              title={labels.headings.connectorCatalogEmpty}
-            />
-          )
-        )}
+        ) : query.trim() ? (
+          <EmptyState
+            description={labels.helpText.connectorSearchEmpty}
+            title={labels.headings.connectorSearchEmpty}
+          />
+        ) : isAvailabilityKnown ? (
+          <EmptyState
+            description={labels.helpText.connectorCatalogEmpty}
+            title={labels.headings.connectorCatalogEmpty}
+          />
+        ) : null}
       </section>
     </div>
   )

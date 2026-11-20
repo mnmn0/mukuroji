@@ -368,7 +368,7 @@ export function DeveloperPlatformPanel({
     labels.connectorCatalog,
     resources.connectors,
     labels.helpText.installedConnector,
-    availableConnectorProviders ?? [],
+    availableConnectorProviders,
   )
   const filteredConnectorCatalog = filterDeveloperConnectorCatalog(
     completeConnectorCatalog,
@@ -803,6 +803,7 @@ export function DeveloperPlatformPanel({
               catalog={filteredConnectorCatalog}
               availabilityErrorMessage={connectorAvailabilityErrorMessage}
               isAvailabilityLoading={isConnectorAvailabilityLoading}
+              isAvailabilityKnown={availableConnectorProviders !== undefined}
               onRetryAvailability={onRetryConnectorAvailability}
               conflictMergeErrors={conflictMergeErrors}
               conflictMergedValueDrafts={conflictMergedValueDrafts}
