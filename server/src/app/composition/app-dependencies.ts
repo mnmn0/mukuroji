@@ -56,6 +56,7 @@ import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-tick
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
 import type { TriageClient } from '../../modules/triage'
 import type { ProjectScheduleBaselineStore, TeamIssuesClient } from '../../modules/work-items'
+import type { ProjectRaidLogStore } from '../../modules/project-raid-log'
 import type { WorkItemConfigurationClient } from '../../modules/work-items/work-item-configuration'
 import type {
   WorkItemImportExecutionStore,
@@ -195,6 +196,8 @@ export interface WorkItemDependencies {
   updateFeedReadState: UpdateFeedReadStatePersistence
   /** Provides bounded member-owned saved feed definitions. */
   savedUpdateFeeds: SavedUpdateFeedsPersistence
+  /** Provides each Project's risk, issue, and change request log. */
+  projectRaidLogs: ProjectRaidLogStore
   /** Provides the latest schedule baseline of each Project. */
   scheduleBaselines: ProjectScheduleBaselineStore
   /** Provides Workspace Collections that reference canonical Work Items. */
