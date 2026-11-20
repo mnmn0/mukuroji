@@ -5,6 +5,8 @@ import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { type TeamIssue } from '../api'
 import { type ProjectDirectoryTeam } from '../../projects/api'
 import { TaskWorkItemTypeBadge } from '../../tasks/ui/TaskViewPrimitives'
+import { TaskViewPrintButtons } from '../../tasks/ui/TaskViewPrintButtons'
+import { useTaskViewTablePrint } from '../../tasks/ui/taskViewPrint'
 import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
 import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
 import {
@@ -161,8 +163,8 @@ export function IssueTable({
       )
     : issues
   const {
-    renderedItems: renderedIssues,
-    hiddenCount: hiddenIssueCount,
+    renderedItems: incrementalIssues,
+    hiddenCount: incrementalHiddenIssueCount,
     showMore: showMoreIssues,
   } = useIncrementalRender(
     displayOrderedIssues,
@@ -174,6 +176,13 @@ export function IssueTable({
         ? index
         : requiredIndex, -1),
   )
+  const {
+    print: printTable,
+    printsAllRows,
+    rootRef: printRootRef,
+  } = useTaskViewTablePrint('team-issue-table', tableMinimumWidth)
+  const renderedIssues = printsAllRows ? displayOrderedIssues : incrementalIssues
+  const hiddenIssueCount = printsAllRows ? 0 : incrementalHiddenIssueCount
   const renderedIssueIds = hiddenIssueCount > 0
     ? new Set(renderedIssues.map((issue) => issue.id))
     : undefined
@@ -408,8 +417,12 @@ export function IssueTable({
   }
 
   return (
-    <section className="workbench-table mt-5 overflow-hidden">
-      <div className="overflow-x-auto">
+    <section
+      className="workbench-table mt-5 overflow-hidden"
+      data-print-root="team-issue-table"
+      ref={printRootRef}
+    >
+      <div className="overflow-x-auto" data-print-overflow="">
         <table
           className="w-full table-fixed border-collapse"
           style={{ minWidth: tableMinimumWidth }}
@@ -481,8 +494,13 @@ export function IssueTable({
           </tbody>
         </table>
       </div>
-      <div className="border-t border-[var(--workbench-border)] px-5 py-3 text-sm font-medium text-[var(--workbench-muted)]" data-testid="team-issues-count">
-        {t('issues.count').replace('{count}', String(issues.length))}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--workbench-border)] px-5 py-3 text-sm font-medium text-[var(--workbench-muted)]">
+        <span data-testid="team-issues-count">
+          {t('issues.count').replace('{count}', String(issues.length))}
+        </span>
+        {issues.length > 0 ? (
+          <TaskViewPrintButtons onPrint={printTable} t={t} testId="team-issue-table-print" />
+        ) : null}
       </div>
     </section>
   )

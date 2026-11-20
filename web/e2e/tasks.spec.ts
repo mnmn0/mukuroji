@@ -4845,6 +4845,10 @@ test.describe('authenticated task page', () => {
     await progressLine.click()
     await expect(progressLine).toHaveAttribute('aria-pressed', 'true')
     await expect(page.getByTestId('task-gantt-progress-line')).toBeVisible()
+    // The drawn line is hidden from screen readers, so its standing is also told in words.
+    const progressSummary = page.getByRole('region', { name: '進捗線の状況', exact: true })
+    await expect(progressSummary).toContainText(/今日時点で遅れ \d+ 件、先行 \d+ 件、予定どおり \d+ 件/u)
+    await expect(progressSummary.getByRole('listitem').first()).toContainText(': ')
 
     // A three-day bar on the month scale is widened to stay visible, but its resize handle stays
     // at the real end date instead of the widened edge.
@@ -4912,6 +4916,46 @@ test.describe('authenticated task page', () => {
     await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
     await expect(chartRows).toHaveCount(200)
     await expect(page.getByTestId('task-gantt-show-more')).toBeVisible()
+  })
+
+  test('Issue #379: WBS の表は段階表示で隠れている行も含めて表だけを印刷する', async ({ page }) => {
+    const fixture = referoTaskFixtures[0]!
+    const tasks = Array.from({ length: 210 }, (_, index) => ({
+      ...fixture,
+      id: `print-${index}`,
+      title: `Print task ${index}`,
+    }))
+    await mockAuthenticatedTaskPage(page, tasks)
+    await page.goto('/projects/refero/issues')
+    const tableRows = page.locator('[data-print-root="task-table"] tbody tr[data-testid^="task-row-"]')
+    await expect(page.getByTestId('task-row-print-0')).toBeVisible()
+    await expect(page.getByTestId('task-table-show-more')).toBeVisible()
+    await expect(tableRows).toHaveCount(200)
+
+    await page.evaluate(() => {
+      window.print = () => {
+        const root = document.querySelector<HTMLElement>('[data-print-root="task-table"]')
+        document.body.dataset.e2ePrinted = [
+          document.documentElement.dataset.printTarget,
+          root?.dataset.printPaper,
+          String(document.querySelectorAll('[data-print-root="task-table"] tbody tr[data-testid^="task-row-"]').length),
+        ].join(',')
+      }
+    })
+    const printButtons = page.getByTestId('task-table-print')
+    await printButtons.getByRole('button', { name: 'A3 横で印刷', exact: true }).click()
+    await expect(page.locator('body')).toHaveAttribute('data-e2e-printed', 'task-table,a3,210')
+
+    await page.emulateMedia({ media: 'print' })
+    await expect(page.getByTestId('task-row-print-209')).toBeVisible()
+    await expect(printButtons).toBeHidden()
+    await expect(page.getByRole('tab', { name: '期限順', exact: true })).toBeHidden()
+
+    await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
+    await expect(page.locator('html')).not.toHaveAttribute('data-print-target', /.*/)
+    await expect(tableRows).toHaveCount(200)
+    await expect(page.getByTestId('task-table-show-more')).toBeVisible()
+    await page.emulateMedia({ media: 'screen' })
   })
 
   test('Issue #463: 別 Project へ移ると、その Project の saved views が決まるまで一覧を読まない', async ({ page }) => {
@@ -7134,6 +7178,36 @@ test.describe('authenticated task page', () => {
     expect(completedRetryResponse.status()).toBe(200)
     expect(applyCount).toBe(2)
     await expect(body).toHaveCount(0)
+  })
+
+  test('Issue #379: Team の Issues の WBS テーブルを表だけ横向きで印刷する', async ({ page }) => {
+    await page.goto('/teams/core-team/issues')
+    await expect(page.getByTestId('issue-row-wireframe')).toBeVisible()
+
+    await page.evaluate(() => {
+      window.print = () => {
+        const root = document.querySelector<HTMLElement>('[data-print-root="team-issue-table"]')
+        document.body.dataset.e2ePrinted = [
+          document.documentElement.dataset.printTarget,
+          root?.dataset.printPaper,
+          root?.style.getPropertyValue('zoom') ? 'zoomed' : 'unzoomed',
+        ].join(',')
+      }
+    })
+    const printButtons = page.getByTestId('team-issue-table-print')
+    await printButtons.getByRole('button', { name: 'A4 横で印刷', exact: true }).click()
+    await expect(page.locator('body')).toHaveAttribute('data-e2e-printed', 'team-issue-table,a4,zoomed')
+
+    await page.emulateMedia({ media: 'print' })
+    await expect(page.getByTestId('issue-row-wireframe')).toBeVisible()
+    await expect(page.getByTestId('team-issues-count')).toBeVisible()
+    await expect(printButtons).toBeHidden()
+    await expect(page.getByRole('searchbox', { name: 'Issue を検索...' })).toBeHidden()
+
+    await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
+    await expect(page.locator('html')).not.toHaveAttribute('data-print-target', /.*/)
+    await expect(page.getByRole('searchbox', { name: 'Issue を検索...' })).toBeVisible()
+    await page.emulateMedia({ media: 'screen' })
   })
 
   test('Issue toolbar で検索、ステータス絞り込み、テーブル/ボード切替が動作する', async ({ page }) => {
