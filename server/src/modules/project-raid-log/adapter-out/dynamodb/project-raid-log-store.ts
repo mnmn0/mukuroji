@@ -173,8 +173,9 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
               TableName: this.tableName,
               Key: { workspaceId: input.workspaceId, recordKey: counterKey(input) },
               UpdateExpression: 'SET #count = if_not_exists(#count, :zero) + :one, #type = if_not_exists(#type, :type), #teamId = if_not_exists(#teamId, :teamId), #projectId = if_not_exists(#projectId, :projectId), #schemaVersion = if_not_exists(#schemaVersion, :schemaVersion)',
-              // An existing counter must be this Project's, in the known schema, and below the limit.
-              ConditionExpression: 'attribute_not_exists(recordKey) OR (#type = :type AND #schemaVersion = :schemaVersion AND #teamId = :teamId AND #projectId = :projectId AND #count < :max)',
+              // An existing counter must be this Project's, in the known schema, not negative, and
+              // below the limit.
+              ConditionExpression: 'attribute_not_exists(recordKey) OR (#type = :type AND #schemaVersion = :schemaVersion AND #teamId = :teamId AND #projectId = :projectId AND #count >= :zero AND #count < :max)',
               ExpressionAttributeNames: {
                 '#count': 'entryCount',
                 '#type': 'entryType',

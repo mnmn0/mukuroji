@@ -141,7 +141,7 @@ test('writes the entry, the counter, the caller fence, and the audit event in on
   // The counter is checked against its Project and schema, and an existing one keeps them.
   expect(Array.isArray(items) ? items[1] : undefined).toMatchObject({
     Update: {
-      ConditionExpression: 'attribute_not_exists(recordKey) OR (#type = :type AND #schemaVersion = :schemaVersion AND #teamId = :teamId AND #projectId = :projectId AND #count < :max)',
+      ConditionExpression: 'attribute_not_exists(recordKey) OR (#type = :type AND #schemaVersion = :schemaVersion AND #teamId = :teamId AND #projectId = :projectId AND #count >= :zero AND #count < :max)',
       ExpressionAttributeValues: { ':teamId': 't', ':projectId': 'p', ':schemaVersion': 1 },
     },
   })
@@ -174,6 +174,33 @@ test('reports a full log only for a valid counter of this Project', async () => 
     .toMatchObject({ status: 502, code: 'ProjectRaidLogCorruptState' })
   expect(await createWith(fakeClient({ counter: { ...counter, entryCount: 12 }, writeError })))
     .toMatchObject({ status: 502, code: 'ProjectRaidLogCorruptState' })
+  expect(await createWith(fakeClient({ counter: { ...counter, entryCount: -1 }, writeError })))
+    .toMatchObject({ status: 502, code: 'ProjectRaidLogCorruptState' })
+  expect(await createWith(fakeClient({ counter: { ...counter, entryCount: 300.5 }, writeError })))
+    .toMatchObject({ status: 502, code: 'ProjectRaidLogCorruptState' })
+})
+
+test('records that the title changed on an update without keeping either text', async () => {
+  const sent: SentCommand[] = []
+  const previous = entry
+  const next: ProjectRaidEntry = { ...entry, title: 'Build fixed', revision: 2, updatedAt: '2026-11-20T00:00:00.000Z' }
+  const store = new DynamoDbProjectRaidLogStore('planning', fakeClient({ row: entryRow(previous), sent }), 'audit')
+  await store.update({
+    ...scope,
+    now: next.updatedAt,
+    callerAuthorization,
+    auditContext,
+    previous,
+    next,
+    updateReceipt: 'r1',
+    updateKey: 'k1',
+  })
+  const write = sent.find((command) => command.constructor.name === 'TransactWriteCommand')
+  const items = write?.input.TransactItems
+  const auditItem = JSON.stringify(Array.isArray(items) ? items.at(-1) : undefined)
+  expect(auditItem).toContain('"title"')
+  expect(auditItem).not.toContain(previous.title)
+  expect(auditItem).not.toContain(next.title)
 })
 
 test('reads every page of a log', async () => {
