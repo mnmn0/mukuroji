@@ -151,6 +151,10 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   「最終利用」は 1 分ごとにまとめて記録するため、最大 1 分遅れて表示されます。
 - **Webhook**: 外部への通知。**Webhook を追加** で送信先と「配信を許可する Team」を決めます。配信 log から再送できます。
 - **Connector**: GitHub、Slack、Gmail、Google Calendar、Google Drive との連携。
+  接続は、**接続** を押した本人が provider の画面で許可したあと、同じアカウントでログインしたまま
+  Mukuroji に戻ると完了します。許可の URL を別の人に送ったり、ログインが切れた状態で戻ったり、
+  期限（約10分）が切れたりした場合は完了できないので、この画面からもう一度接続してください。
+  **再接続** も同じで、押した本人が完了します。
 - **Import / Export**: Work Item の CSV / JSON export と、検証（dry-run）してから確定する import。
 
 ## エージェント設定（Software factory）
