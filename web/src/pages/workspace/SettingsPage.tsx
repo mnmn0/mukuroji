@@ -48,6 +48,7 @@ export function SettingsPage() {
         <SettingsSectionNav current={section} t={t} />
         {section === 'personal' ? (
           <WorkspaceSettingsView
+            showAgentConnection={workspace.softwareFactoryEnabled}
             accountSections={workspace.accessToken ? (
               <>
                 <AccountSecurityPanelContainer
@@ -171,12 +172,14 @@ export function SettingsPage() {
               locale={workspace.locale}
               teams={workspace.teams}
             />
-            <AgentSettingsPanelContainer
-              accessToken={workspace.accessToken}
-              canMutateTeamConfiguration={workspace.canMutateTeamConfiguration}
-              locale={workspace.locale}
-              teams={workspace.teams}
-            />
+            {workspace.softwareFactoryEnabled ? (
+              <AgentSettingsPanelContainer
+                accessToken={workspace.accessToken}
+                canMutateTeamConfiguration={workspace.canMutateTeamConfiguration}
+                locale={workspace.locale}
+                teams={workspace.teams}
+              />
+            ) : null}
           </>
         ) : null}
       </div>
