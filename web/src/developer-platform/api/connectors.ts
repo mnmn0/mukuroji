@@ -49,6 +49,41 @@ export function connectDeveloperConnector(
 }
 
 /**
+ * Lists the connector providers configured in this environment.
+ *
+ * The server returns only providers that can start a new connection, so the connector list does not
+ * offer providers the environment cannot connect.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @returns Provider identifiers of the configured connectors.
+ * @throws {DeveloperPlatformApiError} When the request fails or the response is not a catalog.
+ */
+export async function listAvailableDeveloperConnectorProviders(
+  accessToken: string,
+): Promise<string[]> {
+  const data = await requestJson<unknown>('/developer/connectors', accessToken)
+  if (Array.isArray(data)) {
+    const providers = data.map((entry: unknown) =>
+      typeof entry === 'object' &&
+      entry !== null &&
+      'provider' in entry &&
+      typeof entry.provider === 'string'
+        ? entry.provider
+        : undefined
+    )
+    if (providers.every((provider) => provider !== undefined)) {
+      return providers
+    }
+  }
+  throw new DeveloperPlatformApiError(
+    200,
+    'Developer Platform API returned an invalid connector catalog.',
+    'InvalidDeveloperPlatformResponse',
+    false,
+  )
+}
+
+/**
  * Connector の再認証 flow を開始します。
  *
  * @param accessToken - Authorization header に使う access token です。

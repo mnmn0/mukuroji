@@ -159,4 +159,99 @@ describe('task handoff brief', () => {
     expect(html).toContain('data-testid="task-handoff-panel"')
     expect(html).toContain('Project ID: Not set')
   })
+
+  test('names the active run and blocks a start while another agent holds the task', () => {
+    const brief = createTaskHandoffBrief({
+      task: { ...task, statusCategory: 'started', relationIds: [], acceptanceCriteria: [{ id: 'a'.repeat(32), text: 'Done', satisfied: false }] },
+      includeDescription: true,
+      agentRuns: {
+        status: 'loaded',
+        value: { active: { runId: 'run_1', agentName: 'codex\nbot', runtime: 'codex', startedAt: '2026-11-20T01:00:00.000Z', stalled: false } },
+      },
+      t,
+    })
+    expect(brief).toContain('## Agent Run')
+    expect(brief).toContain('Active run: Running')
+    expect(brief).toContain('Run ID: run_1')
+    expect(brief).toContain('Agent: codex bot (codex)')
+    expect(brief).toContain('Agent codex bot holds an active run (run_1).')
+    expect(brief).not.toContain('confirmed Agent Run state')
+  })
+
+  test('tells the agent not to take over a stalled run without a handoff', () => {
+    const brief = createTaskHandoffBrief({
+      task,
+      includeDescription: true,
+      agentRuns: {
+        status: 'loaded',
+        value: { active: { runId: 'run_2', agentName: 'claude', runtime: 'claude-code', startedAt: '2026-11-20T01:00:00.000Z', stalled: true } },
+      },
+      t,
+    })
+    expect(brief).toContain('Active run: Stalled (lease expired)')
+    expect(brief).toContain('The active run of agent claude (run_2) is stalled.')
+  })
+
+  test('keeps a ready verdict when no run holds the task and lists linked Documents without content', () => {
+    const brief = createTaskHandoffBrief({
+      task: { ...task, statusCategory: 'unstarted', relationIds: [], acceptanceCriteria: [{ id: 'a'.repeat(32), text: 'Done', satisfied: false }] },
+      includeDescription: true,
+      agentRuns: { status: 'loaded', value: {} },
+      documents: {
+        status: 'loaded',
+        value: { items: [{ documentId: 'doc/1', documentTitle: 'Design\nnotes' }], hasMore: true },
+      },
+      t,
+    })
+    expect(brief).toContain('Yes. Re-read the task with get_task')
+    expect(brief).toContain('No agent holds an active run on this task.')
+    expect(brief).toContain('## Related Documents')
+    expect(brief).toContain('- Design notes (Document ID: doc/1, path: /documents/doc%2F1)')
+    expect(brief).toContain('More linked Documents exist.')
+    expect(brief).toContain('Document content is not part of this brief.')
+  })
+
+  test('says when runs and Documents were not read instead of implying there are none', () => {
+    const unread = createTaskHandoffBrief({ task, includeDescription: true, t })
+    expect(unread).toContain('This brief does not include a confirmed Agent Run state.')
+    expect(unread).toContain('Agent Runs could not be read on this screen.')
+    expect(unread).toContain('Related Documents could not be read on this screen.')
+    expect(unread).not.toContain('No agent holds an active run')
+    const loading = createTaskHandoffBrief({
+      task,
+      includeDescription: true,
+      agentRuns: { status: 'loading' },
+      documents: { status: 'loading' },
+      t,
+    })
+    expect(loading).toContain('Agent Runs were still loading')
+    expect(loading).toContain('Related Documents were still loading')
+    const empty = createTaskHandoffBrief({
+      task,
+      includeDescription: true,
+      documents: { status: 'loaded', value: { items: [], hasMore: false } },
+      t,
+    })
+    expect(empty).toContain('No Documents you can view are linked to this task.')
+    const emptyPage = createTaskHandoffBrief({
+      task,
+      includeDescription: true,
+      documents: { status: 'loaded', value: { items: [], hasMore: true } },
+      t,
+    })
+    expect(emptyPage).not.toContain('No Documents you can view are linked to this task.')
+    expect(emptyPage).toContain('More linked Documents exist.')
+  })
+
+  test('uses Japanese labels for the new sections', () => {
+    const brief = createTaskHandoffBrief({
+      task,
+      includeDescription: true,
+      agentRuns: { status: 'loaded', value: {} },
+      documents: { status: 'loaded', value: { items: [], hasMore: false } },
+      t: createTranslator('ja'),
+    })
+    expect(brief).toContain('## Agent Run')
+    expect(brief).toContain('## 関連 Document')
+  })
 })
