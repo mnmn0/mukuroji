@@ -57,11 +57,16 @@ export const notificationFixtures: InboxNotification[] = [
 export const notificationInboxControllerFixture: NotificationInboxController = {
   archive: async () => true,
   availableEventTypes: notificationFixtures.map((notification) => notification.eventType),
+  bulkUpdate: async (notifications) => ({
+    failedIds: [],
+    succeededIds: notifications.map((notification) => notification.id),
+  }),
   eventType: undefined,
   filter: 'all',
   hasLoadError: false,
   hasMore: true,
   hasMutationError: false,
+  isBulkPending: false,
   isLoading: false,
   isLoadingMore: false,
   loadMore: async () => undefined,

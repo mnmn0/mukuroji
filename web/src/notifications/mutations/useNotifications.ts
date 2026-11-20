@@ -17,6 +17,10 @@ import {
 } from '../queries/useNotificationUnreadCount'
 import { useNotificationInboxPages } from '../queries/useNotificationInbox'
 import {
+  notificationBulkActionConcurrency,
+  settleWithConcurrency,
+} from '../model/selection'
+import {
   type NotificationPreferencesSessionErrorReporter,
   useNotificationPreferencesQuery,
 } from '../queries/useNotificationPreferences'
@@ -29,6 +33,17 @@ const notificationInboxMaximumAutomaticPageLoads = 7
  * @param accessToken - API 認証に使う access token です。
  * @returns 全画面で共有する SWR key です。
  */
+/** Actions the Inbox can apply to several selected notifications at once. */
+export type BulkNotificationAction = 'mark-read' | 'archive' | 'restore'
+
+/** Per-notification outcome of a bulk Inbox action. */
+export type BulkNotificationResult = {
+  /** Notifications that now have the requested state, including ones that already had it. */
+  succeededIds: string[]
+  /** Notifications whose update failed and that the user may retry. */
+  failedIds: string[]
+}
+
 /**
  * NotificationInbox が利用する data と action です。
  */
@@ -76,9 +91,11 @@ export type NotificationInboxController = {
   /** Shell が認証 policy error を一元処理するための raw load/mutation errors です。 */
   sessionErrors?: readonly unknown[]
   /**
-   * 実行中 mutation の通知 ID または mark-all 識別子です。
+   * 実行中 mutation の通知 ID、mark-all 識別子、または bulk 識別子です。
    */
   pendingNotificationId?: string
+  /** Whether a bulk action over selected notifications is running. */
+  isBulkPending: boolean
   /**
    * 通知状態 filter を変更します。
    */
@@ -111,6 +128,11 @@ export type NotificationInboxController = {
    * 現在の recipient の通知をすべて既読にします。
    */
   markAllRead: () => Promise<boolean>
+  /** Applies one action to the selected notifications and reports which ones failed. */
+  bulkUpdate: (
+    notifications: readonly InboxNotification[],
+    action: BulkNotificationAction,
+  ) => Promise<BulkNotificationResult>
   /**
    * cursor の次 page を読み込みます。
    */
@@ -204,6 +226,7 @@ export function useNotificationInbox(
   const [eventType, setEventTypeState] = useState<string | undefined>()
   const [pendingNotificationId, setPendingNotificationId] = useState<string | undefined>()
   const [mutationError, setMutationError] = useState<unknown>()
+  const bulkPendingRef = useRef(false)
   const filter = previousInitialFilter === initialFilter ? filterState : initialFilter
   const isConfigured = Boolean(accessToken && enabled)
   const {
@@ -322,6 +345,59 @@ export function useNotificationInbox(
     }
   }, [accessToken, mutateGlobal, mutationRunner, refresh, unreadCount])
 
+  const bulkUpdate = useCallback(async (
+    targets: readonly InboxNotification[],
+    action: BulkNotificationAction,
+  ): Promise<BulkNotificationResult> => {
+    if (!accessToken || bulkPendingRef.current) {
+      return { succeededIds: [], failedIds: targets.map((notification) => notification.id) }
+    }
+
+    // Already-read rows need no request, matching the single-row mark-read shortcut.
+    const requests = action === 'mark-read'
+      ? targets.filter((notification) => !notification.readAt)
+      : [...targets]
+
+    bulkPendingRef.current = true
+    setMutationError(undefined)
+    setPendingNotificationId('bulk')
+
+    try {
+      const results = await settleWithConcurrency(
+        requests,
+        notificationBulkActionConcurrency,
+        (notification) => mutationRunner.run(
+          `notification:${action}:${notification.id}`,
+          JSON.stringify({ action }),
+          (context) => updateNotification(notification.id, accessToken, { action }, context),
+        ),
+      )
+      const failures = results.flatMap((result, index) =>
+        result.status === 'rejected' ? [{ notification: requests[index], reason: result.reason }] : [],
+      )
+
+      if (failures.length > 0) {
+        console.error('Bulk notification action failed:', failures.map((failure) => failure.reason))
+        setMutationError(failures[0]?.reason)
+      }
+      await Promise.allSettled([
+        refresh(),
+        mutateGlobal(['focus-queue', accessToken]),
+      ])
+
+      const failedIds = new Set(failures.map((failure) => failure.notification.id))
+      return {
+        failedIds: targets.flatMap((notification) =>
+          failedIds.has(notification.id) ? [notification.id] : []),
+        succeededIds: targets.flatMap((notification) =>
+          failedIds.has(notification.id) ? [] : [notification.id]),
+      }
+    } finally {
+      bulkPendingRef.current = false
+      setPendingNotificationId(undefined)
+    }
+  }, [accessToken, mutateGlobal, mutationRunner, refresh])
+
   const setFilter = useCallback((nextFilter: NotificationFilter) => {
     setFilterState(nextFilter)
     setMutationError(undefined)
@@ -365,11 +441,13 @@ export function useNotificationInbox(
   return {
     archive: (notification) => runNotificationAction(notification, 'archive'),
     availableEventTypes,
+    bulkUpdate,
     eventType,
     filter,
     hasLoadError: Boolean(error),
     hasMore: Boolean(lastPage?.nextCursor),
     hasMutationError: Boolean(mutationError),
+    isBulkPending: pendingNotificationId === 'bulk',
     isLoading,
     isLoadingMore,
     loadMore,
