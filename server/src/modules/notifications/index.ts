@@ -49,6 +49,8 @@ export { DynamoDbChannelDeliveryStore } from './adapter-out/dynamodb/channel-del
 export type { ScheduledProjectManagerReader } from './application/ports/project-manager-reader'
 /** Exposes the Project Directory adapter that resolves overdue escalation managers. */
 export { createDynamoDbProjectManagerReader } from './adapter-out/dynamodb/project-manager-reader'
+export { createDynamoDbScheduledWorkItemSource } from './adapter-out/dynamodb/scheduled-work-item-source'
+export type { ScheduledWorkItemSource } from './application/ports/scheduled-work-item-source'
 /** Exposes the recipient-scoped Incoming Webhook transport factory. */
 export { createSlackNotificationSender } from './adapter-out/slack/slack-sender'
 /** Exposes safe Slack delivery logs and backlog metrics. */

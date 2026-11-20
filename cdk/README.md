@@ -1180,7 +1180,7 @@ Deploy前後に次を確認します。
 
 ## Notification schedule
 
-期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として handler 内で retry され、最終失敗は `ScheduledJobsDlq` に保存されます。DLQ message の error message に失敗した job 名が入ります。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。`CollaborationProjectionDlqUrl` と `ScheduledJobsDlqUrl` の滞留、Inbox の unread count も監視します。
+期限 schedule は1時間ごとに Work Items table の sparse GSI `WorkItemNotificationDueIndex`（partition `notificationScheduleShard` の16 shard、sort `notificationDueKey`）を query し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。index に載るのは archive されていない未完了の Work Item のうち、期限があるもの（sort key は期限日）と着手中のもの（sort key は `0000-00-00` で毎回読む）だけです。完了・archive・期限の削除で index から外れるため、読み取り量は Work Item の総数ではなく、期限が近い・超過した・着手中の Work Item の数に比例します。query 範囲は今日（UTC）+ 366 日までで、page 上限はありません。Customer 完了通知の marker は `WorkItemCustomerCompletionPreparationIndex`（KEYS_ONLY）から読みます。工数の督促は Project directory の Team 一覧を1日1回だけ読み、`NOTIFICATION_SCHEDULE_MAX_PAGES` は Planning の index と directory の読み取りにだけ使います。index 属性のない既存 row は次に更新されたときに index に入ります。既存 row への一括付与は #365 の migration 契約で行います。上限到達などで失敗した場合も例外として handler 内で retry され、最終失敗は `ScheduledJobsDlq` に保存されます。DLQ message の error message に失敗した job 名が入ります。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査して再実行してください。`CollaborationProjectionDlqUrl` と `ScheduledJobsDlqUrl` の滞留、Inbox の unread count も監視します。
 
 ## Scheduled jobs
 
