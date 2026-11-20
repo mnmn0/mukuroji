@@ -677,10 +677,10 @@ export function TaskTableView({
                     </th>
                   ))}
                   <th className="px-3 py-2.5 text-center text-fg-8f99a8" scope="col">
-                    <span data-print-hidden="">
+                    <div data-print-hidden="">
                       <span className="sr-only">{t('tasks.action.more')}</span>
                       <MoreHorizontalIcon className="mx-auto h-5 w-5" />
-                    </span>
+                    </div>
                   </th>
                 </tr>
               </thead>
