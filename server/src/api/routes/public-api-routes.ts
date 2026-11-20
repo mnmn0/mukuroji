@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   DEFAULT_WORK_ITEM_TYPE,
+  DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ApiProblem,
   type CanonicalWorkItem,
@@ -14,6 +15,7 @@ import {
   type ImportReport,
   type ImportRowError,
   type UpdatePublicWorkItemRequest,
+  type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -1923,6 +1925,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           format: input.format,
           sourceContent: input.source.content,
           mapping: input.mapping,
+          defaultCalendarPolicy: await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
           requestFingerprint: createHash('sha256')
             .update(`management-import-v1\n${mutationContext.idempotencyKey}`)
             .digest('hex'),
@@ -2623,9 +2626,20 @@ async function requirePublicImportPermission(
   return permission
 }
 
+/**
+ * Validates an import source against the current permissions and Team configuration.
+ *
+ * @param principal - Workspace principal running the import.
+ * @param input - Import source, Team, and mapping.
+ * @param calendarPolicy - Calendar policy for rows without one. A queued execution passes the
+ *   policy it pinned, so a retry keeps each row's request digest; otherwise the current Workspace
+ *   working calendar is read.
+ * @returns The dry-run report and the valid row inputs.
+ */
 async function validatePublicImport(
   principal: WorkspacePrincipal,
   input: PublicImportSourceInput,
+  calendarPolicy?: WorkItemScheduleCalendarPolicy,
 ) {
   const permission = await requirePublicImportPermission(principal, input)
   const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
@@ -2636,7 +2650,7 @@ async function validatePublicImport(
     input.format,
     input.source.content,
     input.mapping,
-    await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
+    calendarPolicy ?? await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
   )
   const errorsByRow = new Map<number, ImportRowError[]>(
     preview.rows.map((row) => [row.row, [...row.errors]]),
@@ -2973,6 +2987,8 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
     async validate(execution, sourceContent) {
       try {
         const principal = await resolveWorkItemImportPrincipal(execution)
+        // Rows keep the calendar pinned when the job was staged, so a retry hashes the same input.
+        // An execution staged before the calendar was pinned validated its rows with the default.
         const validation = await validatePublicImport(principal, {
           format: execution.format,
           source: {
@@ -2985,7 +3001,7 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
             ? { assignedProjectId: execution.assignedProjectId }
             : {}),
           mapping: execution.mapping,
-        })
+        }, execution.defaultCalendarPolicy ?? DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY)
         return { report: validation.report, rows: validation.validInputs }
       } catch (error) {
         throw toWorkItemImportWorkerError(error)

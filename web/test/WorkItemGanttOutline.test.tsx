@@ -397,6 +397,28 @@ describe('My Tasks Gantt working calendar', () => {
   })
 })
 
+describe('Team Issue working calendar notice', () => {
+  test('shows a retry when the Workspace working calendar could not be read', () => {
+    const render = (message?: string) => renderToStaticMarkup(
+      <TeamIssueScreen
+        issues={[]}
+        locale="ja"
+        onRetryWorkingCalendar={() => undefined}
+        resolvedConfiguration={{ configuration: teamWorkItemConfigurationFixture }}
+        teamId="core-team"
+        teams={projectDirectoryFixtures}
+        userInitial="J"
+        workingCalendarErrorMessage={message}
+      />,
+    )
+
+    const html = render(t('tasks.workspaceCalendar.error'))
+    expect(html).toContain('data-testid="team-issue-workspace-calendar-error"')
+    expect(html).toContain(t('tasks.workspaceCalendar.retry'))
+    expect(render()).not.toContain('team-issue-workspace-calendar-error')
+  })
+})
+
 describe('Search WBS numbers', () => {
   const result = {
     entityType: 'work-item',

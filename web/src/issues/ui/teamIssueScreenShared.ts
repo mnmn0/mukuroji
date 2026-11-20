@@ -186,6 +186,10 @@ export type TeamIssueScreenProps = {
    * default calendar is used and nothing is shaded when it is omitted.
    */
   workingCalendar?: WorkItemScheduleCalendarPolicy
+  /** Shown when the Workspace working calendar could not be read, so the default is in use. */
+  workingCalendarErrorMessage?: string
+  /** Reads the Workspace working calendar again after a failure. */
+  onRetryWorkingCalendar?: () => void
   /** Whether canonical Planning dependency data is loading. */
   isPlanningLoading?: boolean
   /** Planning dependency load error shown without hiding Team Issues. */

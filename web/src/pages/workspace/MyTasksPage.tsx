@@ -171,13 +171,15 @@ export function MyTasksPage() {
     includeArchivedWorkItems,
     myTasksWorkItemFilter,
   )
-  // The Gantt chart shades the Workspace days off once the calendar loads.
+  // The Gantt chart shades the Workspace days off once the calendar loads; a failed read shows a
+  // notice with a retry.
   const workspaceCalendar = useWorkspaceCalendarSettings(workspace.accessToken, workspace.canLoadWorkspaceData)
   const workspaceCalendarPolicy = useMemo(
-    () => workspaceCalendar.settings
+    // After a failed read the default calendar is used, as the notice says.
+    () => workspaceCalendar.settings || workspaceCalendar.error
       ? createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings)
       : undefined,
-    [workspaceCalendar.settings],
+    [workspaceCalendar.settings, workspaceCalendar.error],
   )
   const { contributorTaskKeys, myTasks } = useMemo(() => {
     const contributorKeys = new Set<string>()
@@ -930,6 +932,18 @@ export function MyTasksPage() {
           onRetry={() => void workItems.mutateConfigurations()}
           t={t}
         />
+        {workspaceCalendar.error ? (
+          <div
+            className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-warning-border)] bg-[var(--workbench-warning-surface)] px-4 py-3"
+            data-testid="my-tasks-workspace-calendar-error"
+            role="alert"
+          >
+            <p className="text-sm font-semibold text-[var(--workbench-warning)]">{t('tasks.workspaceCalendar.error')}</p>
+            <button className="workbench-button-secondary min-h-9 px-3" onClick={workspaceCalendar.retry} type="button">
+              {t('tasks.workspaceCalendar.retry')}
+            </button>
+          </div>
+        ) : null}
         {taskActionErrorMessage ? (
           <p
             className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-fg-red-700"

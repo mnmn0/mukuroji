@@ -200,13 +200,15 @@ export function TeamIssuePage() {
     key: planningKey,
     mutate: mutatePlanning,
   } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
-  // New Work Items and the Gantt chart use the Workspace calendar; a failed read keeps the default.
+  // New Work Items and the Gantt chart use the Workspace calendar; a failed read keeps the default and
+  // shows a notice with a retry.
   const workspaceCalendar = useWorkspaceCalendarSettings(accessToken, Boolean(user && !currentUserError))
   const workspaceCalendarPolicy = useMemo(
-    () => workspaceCalendar.settings
+    // After a failed read the default calendar is used, as the notice says.
+    () => workspaceCalendar.settings || workspaceCalendar.error
       ? createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings)
       : undefined,
-    [workspaceCalendar.settings],
+    [workspaceCalendar.settings, workspaceCalendar.error],
   )
   const {
     data: teams = emptyTeams,
@@ -1035,6 +1037,8 @@ export function TeamIssuePage() {
       planningErrorMessage={planningErrorMessage}
       planningSnapshot={planningSnapshot}
       workingCalendar={workspaceCalendarPolicy}
+      workingCalendarErrorMessage={workspaceCalendar.error ? t('tasks.workspaceCalendar.error') : undefined}
+      onRetryWorkingCalendar={workspaceCalendar.retry}
       selectedIssueId={resolvedSelectedIssueId}
       relations={issueDetail && issueDetail.issue.id === resolvedSelectedIssueId
         ? issueDetail.relations ?? []

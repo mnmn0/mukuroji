@@ -22,7 +22,7 @@ Workspace の設定を変えても変わらない。
 | MCP `create_task` | `schedule` を省いて Public API に送るので、Public API と同じ |
 | Project template の WBS 適用 | Workspace の稼働カレンダーで開始日からの稼働日を数え、その policy を各 Work Item に付ける |
 | 依頼フォーム・Triage からの作成 | Workspace の稼働カレンダー |
-| CSV / JSON import | 行の `schedule` に `calendarPolicy` がないとき Workspace の稼働カレンダー。日付範囲で `durationDays` もないときは、その policy で数える |
+| CSV / JSON import | 行の `schedule` に `calendarPolicy` がないとき Workspace の稼働カレンダー。日付範囲で `durationDays` もないときは、その policy で数える。commit した job は作成時の稼働カレンダーを保存し、worker の再試行でも同じものを使う |
 
 期限・期限超過の判定は policy の time zone で今日の日付を決めて期限日と比べるだけで、休日を使わない。
 Planning の critical path（Planning entity と Work Item の依存関係）は、日付範囲の暦日数と暦日の lag で数える。
