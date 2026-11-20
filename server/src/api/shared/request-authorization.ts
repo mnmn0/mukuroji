@@ -824,6 +824,7 @@ export async function authenticateWorkspacePrincipal(
         snapshot,
         principal.userKey,
         workspaceMember.email,
+        { includeOptionalSsoDomains: ssoSessionAuthenticationMethods !== undefined },
       )
     } catch (error) {
       const status = error instanceof EnterpriseIdentityError && error.status >= 500

@@ -3761,10 +3761,23 @@ function toWorkspaceMember(value: unknown): WorkspaceMember {
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
     deactivatedAt: typeof value.deactivatedAt === 'string' ? value.deactivatedAt : undefined,
-    ...(typeof value.signInsRevokedAt === 'string'
-      ? { signInsRevokedAt: value.signInsRevokedAt }
-      : {}),
+    ...(value.signInsRevokedAt === undefined
+      ? {}
+      : { signInsRevokedAt: readSignInCutoff(value.signInsRevokedAt) }),
   }
+}
+
+/**
+ * Reads a stored sign-in cutoff, refusing a value that is not a canonical UTC timestamp.
+ *
+ * @param value - Stored `signInsRevokedAt`.
+ * @returns The cutoff.
+ */
+function readSignInCutoff(value: unknown) {
+  if (typeof value !== 'string') throw invalidWorkspaceDataError()
+  const time = Date.parse(value)
+  if (Number.isNaN(time) || new Date(time).toISOString() !== value) throw invalidWorkspaceDataError()
+  return value
 }
 
 function toWorkspaceInvitation(value: unknown, now: Date): WorkspaceInvitation {

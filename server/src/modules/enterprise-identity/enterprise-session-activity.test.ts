@@ -310,6 +310,27 @@ test('remembers a signed-out sign-in per Workspace until its tokens expire', asy
   }])
 })
 
+test('fails closed on a sign-out record of another Workspace or shape', async () => {
+  const rows = new Map<string, Record<string, unknown>>([
+    ['HTTP_SIGN_IN_REVOKED#workspace-a#origin-1', {
+      connectionId: 'HTTP_SIGN_IN_REVOKED#workspace-a#origin-1',
+      itemType: 'http-sign-in-revocation',
+      workspaceId: 'workspace-b',
+      expiresAt: 1_800,
+    }],
+    ['HTTP_SIGN_IN_REVOKED#workspace-a#origin-2', {
+      connectionId: 'HTTP_SIGN_IN_REVOKED#workspace-a#origin-2',
+      workspaceId: 'workspace-a',
+    }],
+  ])
+  const client = createDynamoSessionActivityClient(rows)
+
+  for (const signInId of ['origin-1', 'origin-2']) {
+    await expect(client.isSignInRevoked('workspace-a', signInId))
+      .rejects.toMatchObject({ status: 503, code: 'EnterpriseSessionActivityUnavailable' })
+  }
+})
+
 test('reports a DynamoDB failure of the sign-out record as unavailable', async () => {
   const client = createDynamoSessionActivityClient(new Map(), new Error('DynamoDB is down'))
 

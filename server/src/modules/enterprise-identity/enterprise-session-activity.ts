@@ -324,16 +324,17 @@ implements EnterpriseSessionActivityClient {
     }
   }
 
-  /** Checks whether a sign-in was signed out. */
+  /** Checks whether a sign-in was signed out; a row of another shape or scope fails closed. */
   async isSignInRevoked(workspaceId: string, signInId: string) {
     const connectionId = createSignInRevocationKey(workspaceId, signInId)
+    let item: Record<string, unknown> | undefined
     try {
       const response = await this.documentClient.send(new GetCommand({
         TableName: this.tableName,
         Key: { connectionId },
         ConsistentRead: true,
       }))
-      return response.Item?.workspaceId === workspaceId
+      item = response.Item
     } catch (error) {
       throw new EnterpriseSessionActivityError(
         503,
@@ -342,6 +343,15 @@ implements EnterpriseSessionActivityClient {
         { cause: error },
       )
     }
+    if (!item) return false
+    if (item.itemType !== 'http-sign-in-revocation' || item.workspaceId !== workspaceId) {
+      throw new EnterpriseSessionActivityError(
+        503,
+        'EnterpriseSessionActivityUnavailable',
+        'Sign-out state could not be verified.',
+      )
+    }
+    return true
   }
 }
 

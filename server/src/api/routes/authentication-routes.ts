@@ -767,6 +767,13 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
       if (ssoClientId && accessToken) await signOutEnterpriseSsoSession(accessToken)
       return c.body(null, 204)
     } catch (error) {
+      // The refresh token is revoked, but the sign-out of locally verified tokens is not recorded.
+      if (error instanceof EnterpriseSessionActivityError) {
+        return c.json({
+          code: 'EnterpriseSessionActivityUnavailable' as const,
+          message: 'Sign-out could not be recorded. Try signing out again.',
+        }, 503)
+      }
       return toAuthErrorResponse(c, error)
     }
   })

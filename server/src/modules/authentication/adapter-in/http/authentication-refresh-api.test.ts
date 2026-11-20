@@ -3,7 +3,10 @@ import { afterEach, expect, test } from 'bun:test'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
 import { CognitoServiceError } from '../..'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
-import { InMemoryEnterpriseSessionActivityClient } from '../../../enterprise-identity/enterprise-session-activity'
+import {
+  EnterpriseSessionActivityError,
+  InMemoryEnterpriseSessionActivityClient,
+} from '../../../enterprise-identity/enterprise-session-activity'
 
 const {
   app,
@@ -390,6 +393,39 @@ test('refuses every access token of a signed-out SSO sign-in', async () => {
       expect(response.status).toBe(401)
       expect(await response.json()).toMatchObject({ code: 'EnterpriseSsoSessionRequired' })
     }
+  })
+})
+
+test('reports an unrecorded SSO sign-out as unavailable', async () => {
+  await withTestEnvironment({ COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client' }, async () => {
+    configureFakeProjectClients(true)
+    const activity = new InMemoryEnterpriseSessionActivityClient()
+    activity.revokeSignIn = async () => {
+      throw new EnterpriseSessionActivityError(
+        503,
+        'EnterpriseSessionActivityUnavailable',
+        'Sign-out could not be recorded.',
+      )
+    }
+    setTestAppDependencies({ enterpriseSessionActivity: activity })
+    configureRefreshingCognito('unused')
+    const accessToken = createAccessToken([], {
+      ...signInClaims,
+      client_id: 'mukuroji-sso-client',
+      origin_jti: 'origin-unrecorded',
+    })
+
+    const signOut = await app.request('/api/auth/logout', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ refreshToken: 'sso-refresh' }),
+    })
+
+    expect(signOut.status).toBe(503)
+    expect(await signOut.json()).toMatchObject({ code: 'EnterpriseSessionActivityUnavailable' })
   })
 })
 

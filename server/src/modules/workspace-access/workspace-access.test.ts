@@ -2766,6 +2766,24 @@ test('deprovisions a directory member atomically with the Planning revision and 
   })
 })
 
+test('refuses a member whose stored sign-in cutoff is not a UTC timestamp', async () => {
+  for (const signInsRevokedAt of [123, '2026-07-11', 'not-a-time']) {
+    const member = createWorkspaceMember('sato@example.com', 'member')
+    const client = createWorkspaceAccessClientWithDocumentAuthorization(
+      'WorkspaceAccessTable',
+      createDocumentClient(() => ({ Item: { ...toMemberItem(member), signInsRevokedAt } })),
+      undefined,
+      false,
+      () => now,
+      'PlanningTable',
+      'AuditTable',
+    )
+
+    await expect(client.getMember(workspaceId, member.memberKey))
+      .rejects.toMatchObject({ status: 503, code: 'InvalidWorkspaceAccessData' })
+  }
+})
+
 test('deprovisioning keeps a later sign-in cutoff written by a concurrent sign-out', async () => {
   const laterCutoff = new Date(now.getTime() + 5_000).toISOString()
   let target = {
