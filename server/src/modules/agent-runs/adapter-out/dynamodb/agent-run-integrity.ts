@@ -1,4 +1,4 @@
-import { QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb'
+import { GetCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb'
 import { isAgentRunId, type StoredAgentRun } from '../../domain/agent-run'
 import {
   claimRecordKey,
@@ -36,6 +36,9 @@ export const AGENT_RUN_INTEGRITY_FAILURE_CODES = [
   'AGENT_RUN_REVOCATION_BLOCKS_ACTIVE_RUN',
   'AGENT_RUN_LATEST_RUN_INVALID',
   'AGENT_RUN_WATERMARK_INVALID',
+  'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED',
+  'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_ARCHIVED',
+  'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_UNREADABLE',
 ] as const
 
 /** One stable failure code of the Agent Run integrity check. */
@@ -116,14 +119,63 @@ export type AgentRunIntegrityCounts = {
   watermarks: number
   /** Settings and settings receipt rows; counted, not checked. */
   settings: number
+  /** Active runs whose Work Item was read from the Work Items table; 0 when that check is off. */
+  workItemsChecked: number
+}
+
+/** Active run of a partition whose Work Item the check reads. */
+export type AgentRunIntegrityActiveRun = {
+  /** Work Item ID. */
+  workItemId: string
+  /** Run ID. */
+  runId: string
 }
 
 /** Result of checking one fully read Team partition. */
 export type AgentRunPartitionCheck = {
   /** Row counts of the partition. */
-  counts: Omit<AgentRunIntegrityCounts, 'partitions' | 'recheckedPartitions' | 'unconfirmedFindings'>
+  counts: Omit<AgentRunIntegrityCounts, 'partitions' | 'recheckedPartitions' | 'unconfirmedFindings' | 'workItemsChecked'>
   /** Violations in the partition. */
   findings: AgentRunIntegrityFinding[]
+  /** Active runs of the partition, in row order. */
+  activeRuns: AgentRunIntegrityActiveRun[]
+}
+
+/** State of a Work Item as one strongly consistent read of the Work Items table shows it. */
+export type AgentRunWorkItemState =
+  | {
+    /** The Work Item has no row: it was deleted. */
+    kind: 'missing'
+  }
+  | {
+    /** The Work Item row was read. */
+    kind: 'present'
+    /** Whether the Work Item is archived. */
+    archived: boolean
+  }
+  | {
+    /** The row exists but does not have the shape the check needs. */
+    kind: 'malformed'
+  }
+
+/** Work Item of an active run. */
+export type AgentRunWorkItemReference = {
+  /** Workspace ID. */
+  directoryId: string
+  /** Team ID. */
+  teamId: string
+  /** Work Item ID. */
+  workItemId: string
+}
+
+/** Read-only boundary to the Work Items table, so the check does not own that table's schema. */
+export type AgentRunWorkItemLookup = {
+  /**
+   * Reads one Work Item with a strongly consistent read.
+   * @param workItem - Work Item of an active run.
+   * @returns Its state.
+   */
+  read(workItem: AgentRunWorkItemReference): Promise<AgentRunWorkItemState>
 }
 
 /** Read ceilings of one check. Reaching one with data left makes the result incomplete. */
@@ -178,18 +230,20 @@ export type AgentRunIntegrityEvidence = {
   failures: AgentRunIntegrityFailure[]
 }
 
-/** DynamoDB boundary of the check: strongly consistent Query and Scan pages only. */
+/** DynamoDB boundary of the check: strongly consistent Query, Scan, and Get reads only. */
 export type AgentRunIntegrityClient = {
   /**
    * Sends one read.
-   * @param command - Query of one Team partition or Scan that discovers partitions.
-   * @returns One page.
+   * @param command - Query of one Team partition, Scan that discovers partitions, or Get that reads one run again.
+   * @returns One page, or the item of a Get.
    */
-  send(command: QueryCommand | ScanCommand): Promise<{
+  send(command: QueryCommand | ScanCommand | GetCommand): Promise<{
     /** Page items. */
     Items?: Record<string, unknown>[]
     /** Key of the last evaluated item when more items remain. */
     LastEvaluatedKey?: Record<string, unknown>
+    /** Item of a Get, absent when there is none. */
+    Item?: Record<string, unknown>
   }>
 }
 
@@ -207,6 +261,11 @@ export type AgentRunsIntegrityCheckInput = {
   correlationId: string
   /** Check start time. */
   now: Date
+  /**
+   * Reads the Work Item of each active run, to find runs left active on a deleted or archived
+   * Work Item. The check is off when absent.
+   */
+  workItems?: AgentRunWorkItemLookup
 }
 
 /** Row of a partition in its parsed form. */
@@ -606,7 +665,10 @@ export function checkAgentRunPartition(team: AgentRunIntegrityTeam, rows: readon
     }
   }
 
-  return { counts, findings }
+  const activeRuns = [...runs.values()]
+    .filter((run) => run.state === 'active')
+    .map((run) => ({ workItemId: run.workItemId, runId: run.runId }))
+  return { counts, findings, activeRuns }
 }
 
 /**
@@ -722,6 +784,35 @@ class ReadBudget {
     } while (startKey !== undefined)
     return items
   }
+
+  /**
+   * Sends one single-item read, or stops at a ceiling. It counts as one page.
+   *
+   * @param read - Sends the read and says whether it returned an item.
+   * @returns The value in a box, or undefined when the budget stopped the read.
+   */
+  async readOne<T>(read: () => Promise<{
+    /** Read result. */
+    value: T
+    /** Whether the read returned an item. */
+    found: boolean
+  }>): Promise<{
+    /** Read result. */
+    value: T
+  } | undefined> {
+    if (this.pages >= this.bounds.maxPages) {
+      this.stopped = 'page-limit'
+      return undefined
+    }
+    if (this.items >= this.bounds.maxItems) {
+      this.stopped = 'item-limit'
+      return undefined
+    }
+    const result = await read()
+    this.pages += 1
+    if (result.found) this.items += 1
+    return { value: result.value }
+  }
 }
 
 /**
@@ -764,6 +855,96 @@ async function discoverTeams(input: {
   // One finding per partition key, not per row; the key itself is not reported.
   for (const _partition of unresolved) input.findings.push({ code: 'AGENT_RUN_PARTITION_UNRESOLVED', sample: {} })
   return [...partitions].sort().flatMap((partition) => parseAgentRunPartition(partition) ?? [])
+}
+
+/**
+ * Chooses the violation a Work Item state shows for an active run. A Work Item re-created with the
+ * ID of a deleted one is not detected: no durable incarnation marker ties a run to its Work Item, and
+ * creation and start times come from different servers' clocks.
+ *
+ * @param state - Work Item state.
+ * @returns The failure code, or undefined when the Work Item may hold an active run.
+ */
+function classifyWorkItemState(state: AgentRunWorkItemState): AgentRunIntegrityFailureCode | undefined {
+  switch (state.kind) {
+    case 'missing':
+      return 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED'
+    case 'malformed':
+      return 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_UNREADABLE'
+    case 'present':
+      return state.archived ? 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_ARCHIVED' : undefined
+  }
+}
+
+/**
+ * Reads the Work Item of each active run of a partition and reports runs left active on a deleted
+ * or archived Work Item. Deleting or archiving releases the active run in the same transaction, so
+ * a run still active after its Work Item was seen closed was never released. The run is read again
+ * after the Work Item, and only a run still active then is reported; one that closed in between is
+ * counted as unconfirmed.
+ *
+ * @param input - Reads, partition, and the evidence being built.
+ * @param input.client - DynamoDB client of the Agent Run table.
+ * @param input.tableName - Agent Run table name.
+ * @param input.team - Team partition.
+ * @param input.activeRuns - Active runs of the partition.
+ * @param input.workItems - Work Item lookup.
+ * @param input.budget - Shared read budget.
+ * @param input.findings - Receives confirmed violations.
+ * @param input.counts - Totals that receive the read and unconfirmed counts.
+ * @returns False when the budget stopped the reads.
+ */
+async function checkActiveRunWorkItems(input: {
+  /** DynamoDB client of the Agent Run table. */
+  client: AgentRunIntegrityClient
+  /** Agent Run table name. */
+  tableName: string
+  /** Team partition. */
+  team: AgentRunIntegrityTeam
+  /** Active runs of the partition. */
+  activeRuns: readonly AgentRunIntegrityActiveRun[]
+  /** Work Item lookup. */
+  workItems: AgentRunWorkItemLookup
+  /** Shared read budget. */
+  budget: ReadBudget
+  /** Receives confirmed violations. */
+  findings: AgentRunIntegrityFinding[]
+  /** Totals of the check. */
+  counts: AgentRunIntegrityCounts
+}): Promise<boolean> {
+  const { team } = input
+  for (const run of input.activeRuns) {
+    const state = await input.budget.readOne(async () => {
+      const value = await input.workItems.read({ directoryId: team.directoryId, teamId: team.teamId, workItemId: run.workItemId })
+      return { value, found: value.kind !== 'missing' }
+    })
+    if (state === undefined) return false
+    input.counts.workItemsChecked += 1
+    const code = classifyWorkItemState(state.value)
+    if (code === undefined) continue
+    const sample = { directoryId: team.directoryId, teamId: team.teamId, workItemId: run.workItemId, runId: run.runId }
+    if (code === 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_UNREADABLE') {
+      input.findings.push({ code, sample })
+      continue
+    }
+    const current = await input.budget.readOne(async () => {
+      const page = await input.client.send(new GetCommand({
+        TableName: input.tableName,
+        Key: { directoryTeamId: createAgentRunPartition(team.directoryId, team.teamId), recordKey: runRecordKey(run.runId) },
+        ConsistentRead: true,
+      }))
+      return { value: page.Item, found: page.Item !== undefined }
+    })
+    if (current === undefined) return false
+    const reread = current.value === undefined ? undefined : tryParseRun(current.value, team)
+    // A run only moves from active to finished, so still active now means active when the Work Item was read.
+    if (reread?.state === 'active' && reread.runId === run.runId && reread.workItemId === run.workItemId) {
+      input.findings.push({ code, sample })
+    } else {
+      input.counts.unconfirmedFindings += 1
+    }
+  }
+  return true
 }
 
 /**
@@ -826,9 +1007,10 @@ export function summarizeAgentRunIntegrityFindings(findings: readonly AgentRunIn
  * Checks the Agent Run invariants of every requested or discovered Team partition. Each partition
  * is read with a strongly consistent Query, and a partition that shows a violation is read once more;
  * only violations both reads show are reported. Reaching a ceiling stops the check, and a partition
- * cut short is not judged. The check never writes.
+ * cut short is not judged. With a Work Item lookup, the Work Item of every active run is read too,
+ * to find runs left active on a deleted or archived Work Item. The check never writes.
  *
- * @param input - Client, table, Teams, ceilings, correlation ID, and start time.
+ * @param input - Client, table, Teams, ceilings, correlation ID, start time, and optional Work Item lookup.
  * @returns Evidence without member IDs or instance hashes.
  */
 export async function runAgentRunsIntegrityCheck(input: AgentRunsIntegrityCheckInput): Promise<AgentRunIntegrityEvidence> {
@@ -851,6 +1033,7 @@ export async function runAgentRunsIntegrityCheck(input: AgentRunsIntegrityCheckI
     reports: 0,
     watermarks: 0,
     settings: 0,
+    workItemsChecked: 0,
   }
   const teams = input.teams === undefined
     ? await discoverTeams({ client: input.client, tableName: input.tableName, budget, findings })
@@ -879,11 +1062,24 @@ export async function runAgentRunsIntegrityCheck(input: AgentRunsIntegrityCheckI
       const confirmed = intersectFindings(result.findings, recheck.findings)
       counts.unconfirmedFindings += result.findings.length + recheck.findings.length - 2 * confirmed.length
       counts.recheckedPartitions += 1
-      result = { counts: recheck.counts, findings: confirmed }
+      result = { counts: recheck.counts, findings: confirmed, activeRuns: recheck.activeRuns }
     }
     counts.partitions += 1
     for (const name of partitionCountNames) counts[name] += result.counts[name]
     findings.push(...result.findings)
+    if (input.workItems !== undefined) {
+      const finished = await checkActiveRunWorkItems({
+        client: input.client,
+        tableName: input.tableName,
+        team,
+        activeRuns: result.activeRuns,
+        workItems: input.workItems,
+        budget,
+        findings,
+        counts,
+      })
+      if (!finished) break
+    }
   }
   const failures = summarizeAgentRunIntegrityFindings(findings)
   const status = failures.length > 0 ? 'fail' : budget.stopped !== undefined ? 'incomplete' : 'pass'

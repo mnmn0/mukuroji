@@ -2,6 +2,7 @@ import type { CursorPage, WorkItemSyncConflict } from '@mukuroji/contracts'
 import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
 import { getPersonalCredentialAdministration } from '../api/apiKeys'
+import { listAvailableDeveloperConnectorProviders } from '../api/connectors'
 import { getDeveloperPlatformResources } from '../api/overview'
 import { listDeveloperSyncConflicts } from '../api/syncConflicts'
 
@@ -52,6 +53,26 @@ export function usePersonalCredentialAdministration(
       ? ['developer-personal-credentials', accessToken] as const
       : null,
     ([, token]) => getPersonalCredentialAdministration(token),
+    developerPlatformQueryConfig,
+  )
+}
+
+/**
+ * Fetches the connector providers configured in this environment.
+ *
+ * @param accessToken - Access token for the Developer Platform API.
+ * @param enabled - Whether to run the query; it needs the integration management capability.
+ * @returns SWR state holding the configured provider identifiers.
+ */
+export function useAvailableDeveloperConnectorProviders(
+  accessToken: string | undefined,
+  enabled = true,
+) {
+  return useSWR(
+    accessToken && enabled
+      ? ['developer-connector-providers', accessToken] as const
+      : null,
+    ([, token]) => listAvailableDeveloperConnectorProviders(token),
     developerPlatformQueryConfig,
   )
 }
