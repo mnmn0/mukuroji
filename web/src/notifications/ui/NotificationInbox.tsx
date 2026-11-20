@@ -65,6 +65,10 @@ export function NotificationInbox({
   const [selection, setSelection] = useState<{ scope: string, ids: ReadonlySet<string> }>(
     () => ({ scope: selectionScope, ids: new Set() }),
   )
+  if (selection.scope !== selectionScope) {
+    // Drop the stored IDs so returning to the previous filter does not restore its selection.
+    setSelection({ scope: selectionScope, ids: new Set() })
+  }
   const selectedNotifications = resolveSelectedNotifications(
     selection.scope === selectionScope ? selection.ids : new Set(),
     controller.notifications,
@@ -306,7 +310,8 @@ function NotificationBulkBar({
   const selectAllRef = useRef<HTMLInputElement>(null)
   const selectedCount = selectedNotifications.length
   const allSelected = selectedCount > 0 && selectedCount === loadedCount
-  const isBusy = controller.isBulkPending
+  // Any running mutation may touch the selected rows, so bulk actions wait for it.
+  const isBusy = controller.isBulkPending || controller.pendingNotificationId !== undefined
   const canMarkRead = selectedNotifications.some((notification) => !notification.readAt)
   const archiveAction: BulkNotificationAction = controller.filter === 'archived' ? 'restore' : 'archive'
 
@@ -329,7 +334,7 @@ function NotificationBulkBar({
           checked={allSelected}
           className="h-4 w-4 accent-[var(--workbench-primary)]"
           data-testid="notification-select-all"
-          disabled={isBusy}
+          disabled={controller.isBulkPending}
           onChange={(event) => onSelectAll(event.target.checked)}
           ref={selectAllRef}
           type="checkbox"
@@ -365,13 +370,13 @@ function NotificationBulkBar({
           <button
             className="min-h-9 rounded-md px-2.5 text-xs font-semibold text-[var(--workbench-muted)] transition hover:text-[var(--workbench-primary-text)] disabled:opacity-50 max-[760px]:min-h-[44px]"
             data-testid="notification-bulk-clear"
-            disabled={isBusy}
+            disabled={controller.isBulkPending}
             onClick={onClear}
             type="button"
           >
             {t('workspace.inbox.bulk.clear')}
           </button>
-          {isBusy ? (
+          {controller.isBulkPending ? (
             <span className="text-xs font-semibold text-[var(--workbench-muted-soft)]" role="status">
               {t('workspace.inbox.bulk.running')}
             </span>
@@ -406,7 +411,7 @@ function NotificationRow({
   const rowRef = useRef<HTMLElement>(null)
   const isUnread = notification.state === 'unread'
   const isRead = notification.state === 'read' || Boolean(notification.readAt)
-  // A bulk action owns the pending marker, so every row waits until it finishes.
+  // Rows wait while a bulk action runs because it may be updating them.
   const isPending = controller.pendingNotificationId === notification.id || controller.isBulkPending
   const eventLabel = formatNotificationEventType(notification.eventType, t)
   const title = notification.title?.trim() || eventLabel

@@ -80,7 +80,7 @@ export type NotificationInboxController = {
   /** Shell が認証 policy error を一元処理するための raw load/mutation errors です。 */
   sessionErrors?: readonly unknown[]
   /**
-   * 実行中 mutation の通知 ID、mark-all 識別子、または bulk 識別子です。
+   * 実行中 mutation の通知 ID または mark-all 識別子です。
    */
   pendingNotificationId?: string
   /** Whether a bulk action over selected notifications is running. */
@@ -228,7 +228,10 @@ export function useNotificationInbox(
   const [eventType, setEventTypeState] = useState<string | undefined>()
   const [pendingNotificationId, setPendingNotificationId] = useState<string | undefined>()
   const [mutationError, setMutationError] = useState<unknown>()
+  // Refs gate overlapping mutations synchronously; state alone lags one render behind.
   const bulkPendingRef = useRef(false)
+  const singleMutationCountRef = useRef(0)
+  const [isBulkPending, setIsBulkPending] = useState(false)
   const [bulkFailedCount, setBulkFailedCount] = useState(0)
   const filter = previousInitialFilter === initialFilter ? filterState : initialFilter
   const isConfigured = Boolean(accessToken && enabled)
@@ -284,10 +287,11 @@ export function useNotificationInbox(
     action: NotificationAction,
     snoozedUntil?: string,
   ) => {
-    if (!accessToken) {
+    if (!accessToken || bulkPendingRef.current) {
       return false
     }
 
+    singleMutationCountRef.current += 1
     setMutationError(undefined)
     setBulkFailedCount(0)
     setPendingNotificationId(notification.id)
@@ -318,15 +322,17 @@ export function useNotificationInbox(
 
       return false
     } finally {
+      singleMutationCountRef.current -= 1
       setPendingNotificationId(undefined)
     }
   }, [accessToken, mutateGlobal, mutationRunner, refresh])
 
   const markAllRead = useCallback(async () => {
-    if (!accessToken) {
+    if (!accessToken || bulkPendingRef.current) {
       return false
     }
 
+    singleMutationCountRef.current += 1
     setMutationError(undefined)
     setBulkFailedCount(0)
     setPendingNotificationId('mark-all')
@@ -347,6 +353,7 @@ export function useNotificationInbox(
       setMutationError(markAllError)
       return false
     } finally {
+      singleMutationCountRef.current -= 1
       setPendingNotificationId(undefined)
     }
   }, [accessToken, mutateGlobal, mutationRunner, refresh, unreadCount])
@@ -355,7 +362,8 @@ export function useNotificationInbox(
     targets: readonly InboxNotification[],
     action: BulkNotificationAction,
   ): Promise<BulkNotificationResult> => {
-    if (!accessToken || bulkPendingRef.current) {
+    // Another mutation may hold the same rows; refuse rather than race its version check.
+    if (!accessToken || bulkPendingRef.current || singleMutationCountRef.current > 0) {
       return { succeededIds: [], failedIds: targets.map((notification) => notification.id) }
     }
 
@@ -365,9 +373,9 @@ export function useNotificationInbox(
       : [...targets]
 
     bulkPendingRef.current = true
+    setIsBulkPending(true)
     setMutationError(undefined)
     setBulkFailedCount(0)
-    setPendingNotificationId('bulk')
 
     try {
       const results = await settleWithConcurrency(
@@ -402,7 +410,7 @@ export function useNotificationInbox(
       }
     } finally {
       bulkPendingRef.current = false
-      setPendingNotificationId(undefined)
+      setIsBulkPending(false)
     }
   }, [accessToken, mutateGlobal, mutationRunner, refresh])
 
@@ -458,7 +466,7 @@ export function useNotificationInbox(
     hasLoadError: Boolean(error),
     hasMore: Boolean(lastPage?.nextCursor),
     hasMutationError: Boolean(mutationError),
-    isBulkPending: pendingNotificationId === 'bulk',
+    isBulkPending,
     isLoading,
     isLoadingMore,
     loadMore,
