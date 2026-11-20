@@ -316,7 +316,7 @@ archive は Work Item を木・WBS 番号・roll-up から外す操作で、削�
 - 子を持つ Work Item は、archive されていない子が 1 件でも残っていれば archive できない（`409 WorkItemActiveChildren`）。子を先に archive するか、別の親へ移す。子をまとめて archive しない理由は、復元で「一緒に archive した子」だけを戻す記録が要るためで、必要になったら別の Issue で扱う。
 - 親が archive 済みの Work Item は復元できない（`409 WorkItemParentArchived`）。親を先に復元する。復元した子が親の見えない最上位に出て、WBS 番号が変わるのを避けるためである。
 - 同じ一括操作（Bulk archive）で同じ Team の親と子をまとめて archive・復元するときは、操作内の相手を確認から外す。item は request の順に適用するので、親を先に並べても通る。途中の item が失敗すると、archive 済みの親の下に未 archive の子が残ることがある（木では親を失った子として最上位に出る）。Bulk の Undo も同じ規則で確認し、Undo の対象は操作全体の item を相手として外す。
-- 確認は直接の親子だけを relation graph から読み、archive・復元の更新と同じ transaction で relation graph の revision と、読んだ親子の revision（60 件まで。超えると graph の revision だけ）を ConditionCheck する。確認の後に子が付いた・子が復元された・親が archive された場合は書き込まずに競合として失敗し、やり直すと最新の親子で確認し直す。削除済みの相手（relation だけが残っている）は確認から外す。
+- 確認は直接の親子だけを relation graph から読み、archive・復元の更新と同じ transaction で relation graph の revision と、読んだ親子の revision を ConditionCheck する。一括操作の外にある子が 60 件を超える親は、子をすべて fence できないので単独では archive せず `409 WorkItemTooManyChildren` にする（子と一緒に一括 archive する）。確認の後に子が付いた・子が復元された・親が archive された場合は書き込まずに競合として失敗し、やり直すと最新の親子で確認し直す。削除済みの相手（relation だけが残っている）は確認から外す。
 - 完了ポリシー（`parentCompletionPolicy`）の `reject` と roll-up は、もともと archive 済みの子を数えない。archive できるのは子がすべて archive 済みの親だけなので、archive 済みの親の下に数えられる子は残らない。
 
 Web の Team Work Item テーブルは、表示設定の「階層（WBS）で表示する」をオンにすると（グループ化していないとき）この木を outline として表示する。行は階層の順に並び、WBS 番号・字下げ・折りたたみ（ブラウザごとに Team 単位で記憶）・子の集計を示す。フィルタで親が隠れた行は、表示されている一番近い祖先の下に入る。タイトルにフォーカスがある行（または J/K で選んだ行）で Alt+Shift+→ / ← を押すと 1 つ下 / 上の階層へ、Alt+Shift+↑ / ↓ で兄弟の中で並べ替える。折りたたまれた行は J/K と一括選択の対象から外れる。

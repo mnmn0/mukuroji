@@ -115,6 +115,8 @@ describe('single Work Item archive', () => {
   test('maps only the hierarchy failures to localized messages', () => {
     expect(readWorkItemArchiveFailureMessageKey('WorkItemActiveChildren'))
       .toBe('issues.archive.activeChildren')
+    expect(readWorkItemArchiveFailureMessageKey('WorkItemTooManyChildren'))
+      .toBe('issues.archive.tooManyChildren')
     expect(readWorkItemArchiveFailureMessageKey('WorkItemParentArchived'))
       .toBe('issues.archive.parentArchived')
     expect(readWorkItemArchiveFailureMessageKey('WorkItemRevisionConflict')).toBeUndefined()

@@ -959,6 +959,34 @@ test('archives a parent whose children are archived and fences the graph and the
   expect(JSON.stringify(configurationConditionChecks)).toContain('child-work-item')
 })
 
+test('refuses to archive a parent alone when it has more children than one write can fence', async () => {
+  const childIds = Array.from({ length: 61 }, (_, index) => `child-${index}`)
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailArchivedIssueIds: childIds,
+    workItemRelations: childIds.map((childId) => ({
+      sourceWorkItemId: 'onboarding-friction',
+      type: 'child' as const,
+      targetWorkItemId: childId,
+    })),
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { preview } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: true },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  })
+
+  expect(preview).toMatchObject({
+    canApply: false,
+    items: [{ status: 'failed', errorCode: 'WorkItemTooManyChildren', retryable: false }],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
 test('archives a parent together with its active child in one operation', async () => {
   const calls = configureFakeProjectClients(true, {
     teamIssueCount: 2,

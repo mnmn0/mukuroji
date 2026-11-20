@@ -19,13 +19,17 @@ const ARCHIVE_CHILD_READ_CONCURRENCY = 16
  * Most Work Item revision fences one archive or restore commits with its update.
  *
  * DynamoDB allows 100 items per transaction. The rest are left for the update itself, its event,
- * audit, authorization, and Agent Run fences the persistence adapter adds. When more children
- * than this are read, only the relation graph is fenced.
+ * audit, authorization, and Agent Run fences the persistence adapter adds. A parent with more
+ * children than this is not archived on its own, because an unfenced child could be restored
+ * between the check and the archive.
  */
 const ARCHIVE_HIERARCHY_REVISION_FENCE_BUDGET = 60
 
 /** Error code of an archive refused because a child Work Item is not archived. */
 export const WORK_ITEM_ACTIVE_CHILDREN_ERROR_CODE = 'WorkItemActiveChildren'
+
+/** Error code of an archive refused because the parent has too many children to fence. */
+export const WORK_ITEM_TOO_MANY_CHILDREN_ERROR_CODE = 'WorkItemTooManyChildren'
 
 /** Error code of a restore refused because the parent Work Item is archived. */
 export const WORK_ITEM_PARENT_ARCHIVED_ERROR_CODE = 'WorkItemParentArchived'
@@ -62,8 +66,9 @@ export type WorkItemArchiveHierarchyCheckInput = {
  * @param dependencies - Relation and Work Item persistence.
  * @returns Condition checks to commit with the archive or restore.
  * @throws WorkItemConfigurationError `409 WorkItemActiveChildren` when archiving a parent that has
- * a child that is not archived, or `409 WorkItemParentArchived` when restoring a child whose
- * parent is archived.
+ * a child that is not archived, `409 WorkItemTooManyChildren` when archiving a parent with more
+ * children outside the operation than one transaction can fence, or `409 WorkItemParentArchived`
+ * when restoring a child whose parent is archived.
  */
 export async function prepareWorkItemArchiveHierarchyConditionChecks(
   input: WorkItemArchiveHierarchyCheckInput,
@@ -81,6 +86,14 @@ export async function prepareWorkItemArchiveHierarchyConditionChecks(
     .filter((relation) => relation.sourceWorkItemId === workItemId && relation.type === relationType)
     .map((relation) => relation.targetWorkItemId))]
     .filter((relatedId) => !input.sameOperationWorkItemIds?.has(relatedId))
+  if (relatedIds.length > ARCHIVE_HIERARCHY_REVISION_FENCE_BUDGET) {
+    throw new WorkItemConfigurationError(
+      409,
+      WORK_ITEM_TOO_MANY_CHILDREN_ERROR_CODE,
+      `A parent with more than ${ARCHIVE_HIERARCHY_REVISION_FENCE_BUDGET} children cannot be archived on its own. ` +
+        'Archive it together with its children in one operation.',
+    )
+  }
   const issues = await readExistingWorkItems(directoryId, teamId, relatedIds, dependencies)
   if (archived && issues.some((issue) => issue.archivedAt === undefined)) {
     throw new WorkItemConfigurationError(
@@ -103,7 +116,6 @@ export async function prepareWorkItemArchiveHierarchyConditionChecks(
     teamId,
     related.graphRevision,
   )
-  if (issues.length > ARCHIVE_HIERARCHY_REVISION_FENCE_BUDGET) return [graphConditionCheck]
   return [
     graphConditionCheck,
     ...issues.map((issue) => createWorkItemRevisionConditionCheck(
