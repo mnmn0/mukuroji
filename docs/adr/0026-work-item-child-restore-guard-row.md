@@ -40,5 +40,5 @@ archive できなくなった。
 ## 結果
 
 子が何件あっても、子をすべて archive した親を単独で archive できる。復元の transaction は 1 項目増える。
-guard row は親の Work Item を削除しても残る（数 byte で、読むのは同じ親の archive だけ）。
+guard row は Public API で親の Work Item を削除するときに同じ transaction で消す。
 `docs/work-item-configuration.md`（key 一覧と guard row）、`docs/work-items.md`（archive・復元と階層）を更新した。

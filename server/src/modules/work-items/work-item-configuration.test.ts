@@ -2909,3 +2909,49 @@ test('validates the completion Gate', () => {
     })).toThrow(message)
   }
 })
+
+test('prepares the relation clean-up of a deleted Work Item and refuses one with children', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('deleted', 'peer', 'blocks')
+  store.seedRelation('deleted', 'peer', 'related')
+  store.seedRelation('deleted', 'parent', 'parent')
+  store.seedRelation('peer', 'other', 'related')
+  store.seedRelation('child', 'owner', 'parent')
+  store.seedGraph(4, 10)
+  const client = store.createClient()
+
+  const cleanup = await client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'deleted')
+
+  expect(cleanup.childWorkItemIds).toEqual([])
+  const [graphAdvance, ...rest] = cleanup.transactItems
+  // Three relations and their reciprocal rows leave the graph in one advance.
+  expect(graphAdvance?.Put?.Item).toMatchObject({ recordKey: 'RELATION_GRAPH', revision: 5, edgeCount: 4 })
+  expect(graphAdvance?.Put?.ExpressionAttributeValues).toEqual({ ':expectedRevision': 4 })
+  const deletedKeys = rest.flatMap((item) => item.Delete ? [String(item.Delete.Key?.recordKey)] : []).sort()
+  expect(deletedKeys).toEqual([
+    'CHILD_RESTORE#deleted',
+    'REL#deleted#blocks#peer',
+    'REL#deleted#parent#parent',
+    'REL#deleted#related#peer',
+    'REL#parent#child#deleted',
+    'REL#peer#blockedBy#deleted',
+    'REL#peer#related#deleted',
+  ])
+  // Only the peer's projection held the deleted Work Item; a parent does not project its children.
+  const endpointUpdates = rest.flatMap((item) => item.Update ? [item.Update] : [])
+  expect(endpointUpdates).toHaveLength(1)
+  expect(endpointUpdates[0]).toMatchObject({
+    TableName: 'work-items-table',
+    Key: { issueId: 'peer' },
+    ExpressionAttributeValues: { ':revision': 1, ':relationIds': ['related:other'] },
+  })
+
+  await expect(client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'owner'))
+    .resolves.toEqual({ childWorkItemIds: ['child'], transactItems: [] })
+  const unrelated = await client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'lonely')
+  expect(unrelated.childWorkItemIds).toEqual([])
+  expect(unrelated.transactItems).toHaveLength(2)
+  expect(unrelated.transactItems[0]?.ConditionCheck?.Key).toMatchObject({ recordKey: 'RELATION_GRAPH' })
+  expect(unrelated.transactItems[1]?.Delete?.Key).toMatchObject({ recordKey: 'CHILD_RESTORE#lonely' })
+  expect(store.transactions).toEqual([])
+})

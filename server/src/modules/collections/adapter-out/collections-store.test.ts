@@ -580,3 +580,45 @@ test('retries unprocessed deletion-marker keys and reports exhaustion as retryab
   await expect(exhausted.store.listSummaries('w')).rejects.toMatchObject({ status: 503 })
   expect(exhausted.reads.count).toBe(5)
 })
+
+test('prepares a revision-conditioned rewrite of each Collection that references a deleted Work Item', async () => {
+  const row = { ...collection, workspaceId: 'w', recordKey: 'COLLECTION#c1', entryType: 'work-item-collection', schemaVersion: 1 }
+  const otherItem = { teamId: 'core-team', issueId: 'item-2', addedAt: collection.createdAt, addedBy: 'reader' }
+  const queries: unknown[] = []
+  const store = new DynamoDbCollectionsStore('planning', clientFor(async (command) => {
+    if (command instanceof QueryCommand) {
+      queries.push(command.input)
+      expect(command.input.ConsistentRead).toBe(true)
+      // The clean-up needs the inline references, so the rows are read whole.
+      expect(command.input.ProjectionExpression).toBeUndefined()
+      return queries.length === 1
+        ? {
+            Items: [{ ...row, revision: 3, items: [...row.items, otherItem] }],
+            LastEvaluatedKey: { workspaceId: 'w', recordKey: 'COLLECTION#c1' },
+          }
+        : { Items: [{ ...row, collectionId: 'c2', recordKey: 'COLLECTION#c2', items: [otherItem] }] }
+    }
+    throw new Error('Unexpected command')
+  }))
+
+  const writes = await store.prepareWorkItemReferenceCleanup('w', 'core-team', 'item-1')
+
+  expect(queries).toHaveLength(2)
+  expect(writes).toHaveLength(1)
+  expect(writes[0]).toMatchObject({
+    Put: {
+      TableName: 'planning',
+      Item: { collectionId: 'c1', recordKey: 'COLLECTION#c1', revision: 4, items: [otherItem] },
+      ExpressionAttributeValues: { ':revision': 3, ':entryType': 'work-item-collection' },
+    },
+  })
+})
+
+test('fails closed on a corrupt row while preparing the Work Item reference clean-up', async () => {
+  const store = new DynamoDbCollectionsStore('planning', clientFor(async () => ({
+    Items: [{ ...collection, workspaceId: 'other', recordKey: 'COLLECTION#c1', entryType: 'work-item-collection', schemaVersion: 1 }],
+  })))
+
+  await expect(store.prepareWorkItemReferenceCleanup('w', 'core-team', 'item-1'))
+    .rejects.toMatchObject({ status: 502, code: 'CollectionCorruptState' })
+})

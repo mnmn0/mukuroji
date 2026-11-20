@@ -627,6 +627,21 @@ export const WORK_ITEM_PROJECTED_RELATION_TYPES: readonly WorkItemRelationType[]
   'related',
 ]
 
+/** Relation clean-up committed with the deletion of one Work Item. */
+export type WorkItemDeletionRelationCleanup = {
+  /**
+   * Children of the Work Item. A Work Item with children is not deleted, so no clean-up is
+   * prepared and `transactItems` is empty when this is not empty.
+   */
+  childWorkItemIds: string[]
+  /**
+   * Writes that remove every relation row of the Work Item and its reciprocal rows, update the
+   * projected `relationIds` of the other endpoints, and advance the relation graph. Without
+   * relations it only checks the graph revision, so a relation created meanwhile stops the delete.
+   */
+  transactItems: NonNullable<TransactWriteCommandInput['TransactItems']>
+}
+
 /** Options for reading one Work Item's relation neighbourhood. */
 export type ListWorkItemRelationsOptions = {
   /** Relation types to read; omitted reads every type. */
@@ -787,6 +802,19 @@ export type WorkItemConfigurationClient = {
    * @returns Current generation, or zero before any child was restored.
    */
   getChildRestoreGeneration?(workspaceId: string, teamId: string, parentWorkItemId: string): Promise<number>
+  /**
+   * Prepares the relation clean-up that is committed in the same transaction as a Work Item delete.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item about to be deleted.
+   * @returns The Work Item's children and the clean-up writes.
+   */
+  prepareWorkItemDeletionRelationCleanup?(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<WorkItemDeletionRelationCleanup>
   /**
    * Reciprocal relation を単一 transaction で作成します。
    *
@@ -1918,6 +1946,130 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       ),
     })
     return { relation, reciprocalRelation, graphRevision: graph.revision + 1 }
+  }
+
+  /**
+   * Prepares the relation clean-up that is committed in the same transaction as a Work Item delete.
+   *
+   * Every relation row of the Work Item and its reciprocal row are deleted, and each other
+   * endpoint whose projection held the Work Item gets its `relationIds` rewritten without it. The
+   * other endpoint's revision is not advanced, the same as for a relation delete, but is required
+   * to be unchanged. The graph revision advances once, so a relation changed meanwhile anywhere in
+   * the Team stops the delete. A Work Item with children gets no clean-up: deleting it would leave
+   * the children under a parent that no longer exists, so the caller refuses the delete. The Work
+   * Item's child restore guard row is deleted with it.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item about to be deleted.
+   * @returns The Work Item's children and the clean-up writes.
+   * @throws WorkItemConfigurationError `503 WorkItemRelationInconsistent` when a reciprocal row, an
+   * endpoint, or the edge count is missing.
+   */
+  async prepareWorkItemDeletionRelationCleanup(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<WorkItemDeletionRelationCleanup> {
+    await this.ensureTable()
+    const graph = await this.readRelationGraphState(workspaceId, teamId)
+    const relations = await this.readWorkItemRelations(workspaceId, teamId, workItemId)
+    const childWorkItemIds = relations
+      .filter((relation) => relation.type === 'child')
+      .map((relation) => relation.targetWorkItemId)
+    if (childWorkItemIds.length > 0) return { childWorkItemIds, transactItems: [] }
+    // The Work Item's child restore guard is only read by an archive of the Work Item itself.
+    const guardDelete = {
+      Delete: {
+        TableName: this.tableName,
+        Key: createChildRestoreGuardKey(workspaceId, teamId, workItemId),
+      },
+    }
+    if (relations.length === 0) {
+      return {
+        childWorkItemIds,
+        transactItems: [
+          createWorkItemRelationGraphRevisionConditionCheck(
+            this.tableName,
+            workspaceId,
+            teamId,
+            graph.revision,
+          ),
+          guardDelete,
+        ],
+      }
+    }
+    const reciprocals = await Promise.all(relations.map(async (relation) => {
+      const reciprocal = await this.readRelationRow(workspaceId, teamId, {
+        sourceWorkItemId: relation.targetWorkItemId,
+        targetWorkItemId: relation.sourceWorkItemId,
+        type: reciprocalRelationType(relation.type),
+      })
+      if (!reciprocal) {
+        throw new WorkItemConfigurationError(503, 'WorkItemRelationInconsistent', 'The reciprocal relation is missing.')
+      }
+      return reciprocal
+    }))
+    if (graph.edgeCount < relations.length * 2) {
+      throw new WorkItemConfigurationError(
+        503,
+        'WorkItemRelationInconsistent',
+        'Stored relation graph metadata is inconsistent.',
+      )
+    }
+    // One endpoint can hold several relations to the Work Item, and a transaction may write each
+    // item only once, so the projection of each other endpoint is computed once.
+    const projectedByEndpoint = new Map<string, WorkItemRelation[]>()
+    for (const reciprocal of reciprocals) {
+      if (!isProjectedRelationType(reciprocal.type)) continue
+      projectedByEndpoint.set(reciprocal.sourceWorkItemId, [
+        ...projectedByEndpoint.get(reciprocal.sourceWorkItemId) ?? [],
+        reciprocal,
+      ])
+    }
+    const workItemPartitionKey = `${workspaceId}#team#${teamId}`
+    const endpointItems = await Promise.all([...projectedByEndpoint].map(async ([endpointId, removed]) => {
+      const [relationIds, response] = await Promise.all([
+        this.readRelationIdsAfter(workspaceId, teamId, endpointId, { remove: removed }),
+        this.documentClient.send(new GetCommand({
+          TableName: this.workItemsTableName,
+          Key: { directoryTeamId: workItemPartitionKey, issueId: endpointId },
+          ConsistentRead: true,
+        })),
+      ])
+      const endpoint = response.Item
+      if (
+        !endpoint ||
+        typeof endpoint.revision !== 'number' ||
+        (endpoint.assignedProjectId !== undefined && typeof endpoint.assignedProjectId !== 'string')
+      ) {
+        throw new WorkItemConfigurationError(503, 'WorkItemRelationInconsistent', 'A relation endpoint is missing.')
+      }
+      return createRelationEndpointTransactionItem(this.workItemsTableName, workItemPartitionKey, {
+        workItemId: endpointId,
+        expectedRevision: endpoint.revision,
+        ...(typeof endpoint.assignedProjectId === 'string'
+          ? { assignedProjectId: endpoint.assignedProjectId }
+          : {}),
+        relationIds,
+      })
+    }))
+    return {
+      childWorkItemIds,
+      transactItems: [
+        createRelationGraphAdvance(
+          this.tableName,
+          createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+          graph.revision,
+          graph.edgeCount - relations.length * 2,
+        ),
+        ...[...relations, ...reciprocals].map((relation) =>
+          createRelationDelete(this.tableName, workspaceId, teamId, relation)
+        ),
+        ...endpointItems,
+        guardDelete,
+      ],
+    }
   }
 
   /**

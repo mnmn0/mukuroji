@@ -129,6 +129,20 @@ export interface CollectionsPersistence extends CollectionsStore {
     checks: readonly PlanningCallerAuthorizationConditionCheck[],
     projectAccessCheck?: CollectionProjectAccessCheck,
   ): CollectionsStore
+  /**
+   * Prepares the writes that remove a Work Item's references from every Collection, committed in
+   * the same transaction as the Work Item's deletion.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @param teamId - Team that owns the Work Item.
+   * @param issueId - Work Item about to be deleted.
+   * @returns One revision-conditioned write for each Collection that references the Work Item.
+   */
+  prepareWorkItemReferenceCleanup?(
+    workspaceId: string,
+    teamId: string,
+    issueId: string,
+  ): Promise<CollectionTransactItem[]>
 }
 
 /** Collection rows in the existing Planning table (pk `workspaceId`, sk `recordKey`). */
@@ -217,6 +231,68 @@ export class DynamoDbCollectionsStore implements CollectionsPersistence {
       exclusiveStartKey = page.LastEvaluatedKey
     } while (exclusiveStartKey)
     return await this.withoutDeletedSummaries(workspaceId, collections)
+  }
+
+  /**
+   * Prepares the writes that remove a Work Item's references from every Collection.
+   *
+   * Every live Collection row of the Workspace is read whole with a strongly consistent query,
+   * and each one that references the Work Item is rewritten without it at the next revision,
+   * conditioned on the revision that was read. A reference added after this read is not covered:
+   * the Work Item still exists then, so the add commits, and lists keep omitting the reference of
+   * a deleted Work Item as before.
+   *
+   * @param workspaceId - Server-resolved Workspace.
+   * @param teamId - Team that owns the Work Item.
+   * @param issueId - Work Item about to be deleted.
+   * @returns One revision-conditioned write for each Collection that references the Work Item.
+   * @throws CollectionError `CollectionCorruptState` when a row is invalid or the Workspace holds
+   * more Collections than the limit.
+   */
+  async prepareWorkItemReferenceCleanup(
+    workspaceId: string,
+    teamId: string,
+    issueId: string,
+  ): Promise<CollectionTransactItem[]> {
+    const updatedAt = new Date().toISOString()
+    const writes: CollectionTransactItem[] = []
+    let rowCount = 0
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const page = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: '#workspaceId = :workspaceId AND begins_with(#recordKey, :prefix)',
+        ExpressionAttributeNames: { '#workspaceId': 'workspaceId', '#recordKey': 'recordKey' },
+        ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': COLLECTION_RECORD_PREFIX },
+        ConsistentRead: true,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      })).catch((error: unknown) => storageFailure(error))
+      for (const row of page.Items ?? []) {
+        rowCount += 1
+        if (rowCount > COLLECTION_LIMIT) throw corruptState()
+        const collection = readRow(workspaceId, row)
+        const items = collection.items.filter((item) => item.teamId !== teamId || item.issueId !== issueId)
+        if (items.length === collection.items.length) continue
+        writes.push({
+          Put: {
+            TableName: this.tableName,
+            Item: {
+              ...collection,
+              items,
+              revision: collection.revision + 1,
+              updatedAt,
+              workspaceId,
+              recordKey: recordKey(collection.collectionId),
+              entryType: COLLECTION_ENTRY_TYPE,
+              schemaVersion: COLLECTION_SCHEMA_VERSION,
+            },
+            ...revisionCondition(collection.revision),
+          },
+        })
+      }
+      exclusiveStartKey = page.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return writes
   }
 
   /**
