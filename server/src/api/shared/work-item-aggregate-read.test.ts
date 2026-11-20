@@ -104,17 +104,17 @@ test('does not let a Team-qualified grant of another Team open the Team or its W
   })
 })
 
-test('keeps the existing legacy behavior for a Project ID that several Teams share', async () => {
-  configureDuplicateProjectIds([{ projectId: 'refero', role: 'viewer' }])
+test('fails closed for a legacy Project ACL whose Project ID several Teams share', async () => {
+  configureDuplicateProjectIds([{ projectId: 'refero', role: 'manager' }])
   const principal = legacyPrincipal()
 
   await runWithTestAppDependencies(async () => {
     // Legacy Project membership has no Team, so it cannot tell the two `refero` Projects apart.
-    const contexts = await resolveAccessibleWorkItemTeamContexts(principal)
-    expect(contexts.map((context) => context.team.id)).toEqual(['core-team', 'other-team'])
-    await expect(requireTeamPermission(principal, 'core-team', 'viewer')).resolves.toMatchObject({
-      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
-    })
+    expect(await resolveAccessibleWorkItemTeamContexts(principal)).toEqual([])
+    for (const teamId of ['core-team', 'other-team']) {
+      await expect(requireTeamPermission(principal, teamId, 'viewer'))
+        .rejects.toMatchObject({ status: 403, code: 'ProjectAccessDenied' })
+    }
   })
 })
 

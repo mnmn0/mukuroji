@@ -31,6 +31,12 @@ Project の task 画面の **権限** タブ（「権限管理」）で、Projec
 Project のメンバー権限を変えられるのは、その Project の manager だけです。追加できるのは
 Workspace の有効なメンバーだけなので、先に Workspace へ招待しておきます。
 
+Project の権限はその Team の Project にだけ効きます。別の Team に同じ ID の Project があっても、
+そちらの Work Item は見えません。複数の Team が同じ Project ID を使っている場合、Team を持たない
+旧形式の Project メンバー登録ではどの Team の Project か決められないため、その Project の権限は
+どの Team でも効きません。Enterprise では Directory group mapping で Team・Project 単位のロールを
+割り当てると、その Team の Project にだけ効きます。
+
 **Team の管理者** は、Workspace の owner / admin、またはその Team のいずれかの Project の manager です
 （Enterprise の `teams.manage` 権限を持つ人も含みます）。Team 固有の Work Item 設定と
 エージェント設定は Team の管理者が変更します。

@@ -39,7 +39,6 @@ import {
   createWorkspaceMutationContextForActor,
   findTeamProjectAccess,
   projectAccessAllows,
-  projectAccessAppliesToTeam,
   type TeamPermissionContext,
   type TeamPermissionReadContext,
   toWorkspaceAccessErrorResponse,
@@ -1112,12 +1111,12 @@ export async function readLegacyProjectScopeAccesses(
 }
 
 /**
- * Selects the Project access entries that apply to one Team's Projects.
+ * Selects the Team-qualified Project access entries that belong to one Team.
  *
  * Pass entries from {@link getEffectiveProjectScopeAccessList}, which qualifies every entry it
- * can resolve to one Team. A Team-qualified entry applies only to its own Team. An entry left
- * unqualified there is a legacy ACL whose Project ID several Teams share; it keeps applying to
- * each of them, as legacy Project membership has no Team to tell them apart.
+ * can resolve to one Team. An entry left unqualified there is a legacy ACL whose Project ID
+ * several Teams share. Legacy Project membership has no Team to tell those Projects apart, so
+ * the entry fails closed for every one of them instead of opening all of them.
  *
  * @param accesses - Team-qualified effective Project access entries.
  * @param team - Team whose Projects are being authorized.
@@ -1129,7 +1128,7 @@ export function selectTeamProjectScopeAccesses(
 ): ProjectAccessEntry[] {
   const teamProjectIds = new Set(team.projects.map((project) => project.id))
   return accesses.filter((access) =>
-    teamProjectIds.has(access.projectId) && projectAccessAppliesToTeam(access, team.id)
+    access.teamId === team.id && teamProjectIds.has(access.projectId)
   )
 }
 
