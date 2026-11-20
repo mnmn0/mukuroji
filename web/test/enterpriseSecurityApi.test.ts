@@ -3,7 +3,9 @@ import {
   activateEnterpriseBreakGlassAccess,
   EnterpriseSecurityApiError,
   createEnterpriseDomainClaim,
+  createEnterpriseMemberRoleAssignment,
   createEnterpriseServiceAccount,
+  deleteEnterpriseMemberRoleAssignment,
   deleteEnterpriseRole,
   getEnterpriseSecuritySnapshot,
   previewEnterpriseProvisioning,
@@ -49,6 +51,60 @@ describe('enterprise security API', () => {
     expect(requests[0]?.init.headers).toMatchObject({
       Authorization: 'Bearer access-token',
       'Content-Type': 'application/json',
+    })
+  })
+
+  test('parses member role assignments and rejects a snapshot without them', async () => {
+    installFetchRecorder(enterpriseSecuritySnapshotFixture)
+    const snapshot = await getEnterpriseSecuritySnapshot('access-token')
+    expect(snapshot.memberRoleAssignments).toEqual([
+      expect.objectContaining({ memberKey: 'pmo@example.com', roleId: 'workspace:portfolio-viewer' }),
+    ])
+    expect(snapshot.members.map((member) => member.memberKey)).toContain('auditor@example.com')
+
+    installFetchRecorder({ ...enterpriseSecuritySnapshotFixture, memberRoleAssignments: undefined })
+    await expect(getEnterpriseSecuritySnapshot('access-token')).rejects.toMatchObject({
+      code: 'EnterpriseSecurityInvalidResponse',
+    })
+  })
+
+  test('assigns and removes a member role with idempotent mutation headers', async () => {
+    const assignment = {
+      id: 'role-assignment-auditor',
+      memberKey: 'auditor@example.com',
+      roleId: 'workspace:auditor',
+      scopeId: 'workspace-demo',
+      scopeType: 'workspace' as const,
+    }
+    const requests = installFetchRecorder({ assignment })
+
+    const created = await createEnterpriseMemberRoleAssignment(
+      'access-token',
+      {
+        memberKey: 'auditor@example.com',
+        roleId: 'workspace:auditor',
+        scopeId: 'workspace-demo',
+        scopeType: 'workspace',
+      },
+      mutationContext,
+    )
+    await deleteEnterpriseMemberRoleAssignment('access-token', created, mutationContext)
+
+    expect(created).toEqual(assignment)
+    expect(requests[0]).toMatchObject({
+      url: '/api/enterprise/security/role-assignments',
+      init: { method: 'POST' },
+    })
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
+      memberKey: 'auditor@example.com',
+      roleId: 'workspace:auditor',
+      scopeId: 'workspace-demo',
+      scopeType: 'workspace',
+    })
+    expect(requests[0]?.init.headers).toMatchObject({ 'Idempotency-Key': 'idempotency-security-1' })
+    expect(requests[1]).toMatchObject({
+      url: '/api/enterprise/security/role-assignments/role-assignment-auditor',
+      init: { method: 'DELETE' },
     })
   })
 

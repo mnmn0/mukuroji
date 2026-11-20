@@ -25,6 +25,7 @@ describe('DeveloperPlatformPanel connector management', () => {
         initialSection="connectors"
         labels={developerPlatformLabelsFixture}
         resources={multipleConnectorAccountsDeveloperPlatformResourcesFixture}
+        availableConnectorProviders={['github']}
         onConnectConnector={async () => undefined}
       />,
     )
@@ -37,6 +38,121 @@ describe('DeveloperPlatformPanel connector management', () => {
     expect(reauthorizeHtml).not.toContain('Add account')
     expect(addAccountHtml).toContain('Add account')
     expect(addAccountHtml).not.toContain('Connect again')
+  })
+
+  test('offers new connections only for providers configured in the environment', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="connectors"
+        labels={developerPlatformLabelsFixture}
+        resources={{ ...developerPlatformResourcesFixture, connectors: [] }}
+        availableConnectorProviders={['github']}
+        onConnectConnector={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('GitHub')
+    expect(html).toContain('>Connect<')
+    expect(html).not.toContain('Slack')
+    expect(html).not.toContain('Google Drive')
+  })
+
+  test('keeps installed accounts of an unconfigured provider without offering a new connection', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="connectors"
+        labels={developerPlatformLabelsFixture}
+        resources={multipleConnectorAccountsDeveloperPlatformResourcesFixture}
+        availableConnectorProviders={[]}
+        onConnectConnector={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('mnmn0-archive')
+    expect(html).toContain(
+      developerPlatformLabelsFixture.helpText.connectorNotConfigured,
+    )
+    expect(html).not.toContain('Add account')
+    expect(html).not.toContain('Slack')
+  })
+
+  test('shows a loading state instead of an empty catalog while availability loads', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="connectors"
+        labels={developerPlatformLabelsFixture}
+        resources={{ ...developerPlatformResourcesFixture, connectors: [] }}
+        isConnectorAvailabilityLoading
+      />,
+    )
+
+    expect(html).toContain(
+      developerPlatformLabelsFixture.helpText.connectorAvailabilityLoading,
+    )
+    expect(html).not.toContain(
+      developerPlatformLabelsFixture.headings.connectorCatalogEmpty,
+    )
+  })
+
+  test('explains an empty catalog only after the configured providers load', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="connectors"
+        labels={developerPlatformLabelsFixture}
+        resources={{ ...developerPlatformResourcesFixture, connectors: [] }}
+        availableConnectorProviders={[]}
+      />,
+    )
+
+    expect(html).toContain(
+      developerPlatformLabelsFixture.headings.connectorCatalogEmpty,
+    )
+  })
+
+  test('shows a failed availability check without claiming the catalog is empty', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="connectors"
+        labels={developerPlatformLabelsFixture}
+        resources={multipleConnectorAccountsDeveloperPlatformResourcesFixture}
+        connectorAvailabilityErrorMessage={
+          developerPlatformLabelsFixture.helpText.connectorAvailabilityError
+        }
+        onConnectConnector={async () => undefined}
+        onRetryConnectorAvailability={() => undefined}
+      />,
+    )
+
+    expect(html).toContain(
+      developerPlatformLabelsFixture.helpText.connectorAvailabilityError,
+    )
+    expect(html).toContain('mnmn0-archive')
+    expect(html).not.toContain(
+      developerPlatformLabelsFixture.headings.connectorCatalogEmpty,
+    )
+    expect(html).not.toContain(
+      developerPlatformLabelsFixture.helpText.connectorNotConfigured,
+    )
+    expect(html).not.toContain('Add account')
+  })
+
+  test('shows the loading state next to installed providers while availability loads', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="connectors"
+        labels={developerPlatformLabelsFixture}
+        resources={multipleConnectorAccountsDeveloperPlatformResourcesFixture}
+        isConnectorAvailabilityLoading
+        onConnectConnector={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain(
+      developerPlatformLabelsFixture.helpText.connectorAvailabilityLoading,
+    )
+    expect(html).not.toContain(
+      developerPlatformLabelsFixture.helpText.connectorNotConfigured,
+    )
   })
 
   test('requires an explicit conflict choice and preserves loaded pages on pagination error', () => {

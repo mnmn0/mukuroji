@@ -31,6 +31,24 @@ export type DeveloperConnectorCatalogItem = {
 }
 
 /**
+ * Whether this environment can start a new connection for a provider.
+ *
+ * `unknown` means the configured providers have not been loaded successfully yet.
+ */
+export type DeveloperConnectorAvailability =
+  | 'available'
+  | 'not-configured'
+  | 'unknown'
+
+/**
+ * Connector catalog entry with whether this environment can start a new connection for it.
+ */
+export type DeveloperConnectorCatalogEntry = DeveloperConnectorCatalogItem & {
+  /** Whether the provider is configured in this environment and can connect new accounts. */
+  availability: DeveloperConnectorAvailability
+}
+
+/**
  * Input used to start a connector authorization flow.
  */
 export type ConnectDeveloperConnectorInput =
@@ -82,20 +100,41 @@ export function isDeveloperSyncConflictResolution(
 }
 
 /**
- * Adds installed providers that are missing from the localized catalog.
+ * Builds the connector catalog from providers configured in this environment and installed providers.
+ *
+ * Providers that are neither configured nor installed are left out, so an unconfigured provider never
+ * looks connectable. Installed providers stay listed, marked not configured when absent from the
+ * configured providers, so their accounts can still be reviewed and disconnected. While the configured
+ * providers are unknown, only installed providers are listed and their availability stays unknown.
  *
  * @param catalog - Localized connector catalog entries.
  * @param installations - Current connector installations.
  * @param installedConnectorDescription - Description used for synthesized entries.
- * @returns A complete catalog with one entry per installed provider.
+ * @param availableProviders - Providers configured in this environment, or undefined while unknown.
+ * @returns One entry per configured or installed provider.
  */
 export function completeDeveloperConnectorCatalog(
   catalog: DeveloperConnectorCatalogItem[],
   installations: ConnectorInstallation[],
   installedConnectorDescription: string,
-) {
+  availableProviders: readonly string[] | undefined,
+): DeveloperConnectorCatalogEntry[] {
+  const available = new Set(availableProviders ?? [])
+  const installed = new Set(
+    installations.map((installation) => installation.provider),
+  )
+  /** Resolves the availability of one provider from the configured providers. */
+  const availabilityOf = (provider: string): DeveloperConnectorAvailability => {
+    if (!availableProviders) return 'unknown'
+    return available.has(provider) ? 'available' : 'not-configured'
+  }
+
   return [
-    ...catalog,
+    ...catalog
+      .filter(
+        (item) => available.has(item.provider) || installed.has(item.provider),
+      )
+      .map((item) => ({ ...item, availability: availabilityOf(item.provider) })),
     ...installations
       .filter(
         (installation, index, currentInstallations) =>
@@ -113,6 +152,7 @@ export function completeDeveloperConnectorCatalog(
         categoryLabel: formatConnectorProviderName(installation.category),
         scopes: installation.scopes,
         searchTerms: [installation.provider, installation.category],
+        availability: availabilityOf(installation.provider),
       })),
   ]
 }
@@ -120,16 +160,19 @@ export function completeDeveloperConnectorCatalog(
 /**
  * Filters connector catalog entries and their accounts by a search query.
  *
+ * @typeParam TItem - Catalog entry type, kept in the result.
  * @param catalog - Complete connector catalog.
  * @param installations - Current connector installations.
  * @param query - User-entered search query.
  * @returns Catalog entries matching provider or account metadata.
  */
-export function filterDeveloperConnectorCatalog(
-  catalog: DeveloperConnectorCatalogItem[],
+export function filterDeveloperConnectorCatalog<
+  TItem extends DeveloperConnectorCatalogItem,
+>(
+  catalog: TItem[],
   installations: ConnectorInstallation[],
   query: string,
-) {
+): TItem[] {
   const normalizedQuery = query.trim().toLocaleLowerCase()
 
   if (!normalizedQuery) {

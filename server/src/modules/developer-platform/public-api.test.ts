@@ -237,6 +237,8 @@ function createTestRouter(input: {
   /** Document service used by Document route tests. */
   documents?: PublicDocumentService
   connectorAuthorization?: ConnectorAuthorizationService
+  /** Lists the providers configured in the test runtime. */
+  listConfiguredConnectorProviders?: PublicApiDependencies['listConfiguredConnectorProviders']
   /** Web app origin that the connector OAuth callback hands off to. */
   connectorOAuthWebOrigin?: string
   managementPrincipal?: DeveloperManagementPrincipal
@@ -276,6 +278,9 @@ function createTestRouter(input: {
     ...(input.connectorOAuthWebOrigin
       ? { connectorOAuthWebOrigin: input.connectorOAuthWebOrigin }
       : {}),
+    ...(input.listConfiguredConnectorProviders
+      ? { listConfiguredConnectorProviders: input.listConfiguredConnectorProviders }
+      : {}),
   })
   return { platform, router }
 }
@@ -296,6 +301,37 @@ async function createApiKey(
 }
 
 describe('public API router', () => {
+  test('lists only the connector providers configured in the runtime', async () => {
+    /** Reads the provider IDs returned by the connector catalog route. */
+    const readProviders = async (
+      router: ReturnType<typeof createTestRouter>['router'],
+      query = '',
+    ) => {
+      const response = await router.request(
+        `http://localhost/developer/connectors${query}`,
+        { headers: { Authorization: 'Bearer session-token' } },
+      )
+      expect(response.status).toBe(200)
+      const body: unknown = await response.json()
+      if (!Array.isArray(body)) throw new TypeError('Catalog must be an array.')
+      return body.map((entry: unknown) =>
+        typeof entry === 'object' && entry !== null && 'provider' in entry
+          ? entry.provider
+          : undefined
+      )
+    }
+
+    const { router: unconfiguredRouter } = createTestRouter()
+    expect(await readProviders(unconfiguredRouter)).toEqual([])
+
+    const { router } = createTestRouter({
+      listConfiguredConnectorProviders: async () => ['slack', 'github'],
+    })
+    expect(await readProviders(router)).toEqual(['github', 'slack'])
+    expect(await readProviders(router, '?category=chat')).toEqual(['slack'])
+    expect(await readProviders(router, '?category=email')).toEqual([])
+  })
+
   test('adds progress comments with scoped authentication, idempotency, and current replay authorization', async () => {
     let creates = 0
     let allowed = true

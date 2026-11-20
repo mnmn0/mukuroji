@@ -14,11 +14,13 @@ import {
 import { createPortal } from 'react-dom'
 import {
   createTaskActionContextMenuItems,
+  mergeTaskActionContextMenuRows,
   resolveInitialTaskActionMenuItemIndex,
   resolveTaskActionContextMenuLayout,
   taskActionContextMenuActionIds,
   taskActionContextMenuEstimatedHeight,
   type TaskActionContextMenuAnchorPoint,
+  type TaskActionContextMenuExtraAction,
 } from '../model/taskActionContextMenu'
 import type { TaskActionRegistry } from '../model/taskActionRegistry'
 
@@ -30,6 +32,8 @@ export type TaskActionContextMenuProps = {
   actionIds?: readonly WorkItemActionId[]
   /** Surface, scope, view, and target selection used for display-time policy checks. */
   context: Omit<WorkItemActionContext, 'actionId' | 'keyboardShortcut' | 'trigger'>
+  /** Screen-owned actions, such as Duplicate, shown after Open and Edit. */
+  extraActions?: readonly TaskActionContextMenuExtraAction[]
   /** Localized action labels indexed by canonical action ID. */
   labels: Readonly<Record<WorkItemActionId, string>>
   /** Accessible name applied to the menu surface. */
@@ -62,6 +66,7 @@ export function TaskActionContextMenu({
   actionIds = taskActionContextMenuActionIds,
   anchorPoint,
   context,
+  extraActions,
   labels,
   menuLabel,
   onClose,
@@ -77,8 +82,11 @@ export function TaskActionContextMenu({
   const anchorX = anchorPoint.x
   const anchorY = anchorPoint.y
   const items = useMemo(
-    () => createTaskActionContextMenuItems(registry, labels, context, actionIds),
-    [actionIds, context, labels, registry],
+    () => mergeTaskActionContextMenuRows(
+      createTaskActionContextMenuItems(registry, labels, context, actionIds),
+      extraActions,
+    ),
+    [actionIds, context, extraActions, labels, registry],
   )
   const [layout, setLayout] = useState(() =>
     resolveTaskActionContextMenuLayout(
@@ -240,6 +248,10 @@ export function TaskActionContextMenu({
                 onClick={() => {
                   if (disabled) return
                   onClose()
+                  if (item.source === 'extra') {
+                    item.onSelect()
+                    return
+                  }
                   onExecute(item.id)
                 }}
                 onFocus={() => setActiveIndex(index)}

@@ -17,6 +17,8 @@ import {
   type WorkloadPlanningMemberOption,
 } from '../../workload/ui/WorkloadPlanningControls'
 import { TeamWorkloadView } from '../../workload/ui/TeamWorkloadView'
+import { useTeamReminderSettings } from '../../notifications/mutations/useTeamReminderSettings'
+import { TeamReminderSettingsPanel } from '../../notifications/ui/TeamReminderSettingsPanel'
 
 const emptyTeamProjects: ProjectDirectoryProject[] = []
 const emptyWorkspaceTasks: CanonicalWorkItem[] = []
@@ -80,6 +82,11 @@ export function TeamMembersPage() {
     () => projects.map((project) => ({ id: project.id, name: project.name })),
     [projects],
   )
+  const reminderSettings = useTeamReminderSettings(
+    workspace.accessToken,
+    activeTeam?.id,
+    workspace.canLoadWorkspaceData && Boolean(activeTeam),
+  )
   const failedProjectCount = workItems.error
     ? getUniqueWorkspaceProjectIds(workspace.teams).length
     : 0
@@ -92,6 +99,7 @@ export function TeamMembersPage() {
         projectMembers.error,
         ...(projectMembers.data?.errors ?? []),
         workload.error,
+        ...reminderSettings.sessionErrors,
       ]}
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
@@ -133,6 +141,9 @@ export function TeamMembersPage() {
           snapshot={workload.data}
           t={t}
         />
+        {activeTeam && !reminderSettings.isUnavailable
+          ? <TeamReminderSettingsPanel controller={reminderSettings} t={t} />
+          : null}
       </div>
     </WorkspaceRouteContent>
   )

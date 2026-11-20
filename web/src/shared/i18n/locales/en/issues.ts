@@ -38,6 +38,7 @@ export const issuesMessages = {
   'issues.archive.archivedAt': 'Archived {date}',
   'issues.archive.retry': 'Reload',
   'issues.duplicate.action': 'Duplicate',
+  'issues.duplicate.menuAction': 'Duplicate Work Item',
   'issues.duplicate.note': 'This draft copies the selected Work Item. Nothing is created until you save. History, comments, relations, and runs are not copied.',
   'issues.duplicate.contributors': 'Keep the {count} planned contributors',
   'issues.key.label': 'Key',

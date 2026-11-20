@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(499)
-  expect(new Set(inventory).size).toBe(495)
+  expect(inventory).toHaveLength(506)
+  expect(new Set(inventory).size).toBe(502)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
@@ -19,6 +19,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/work-items/keys/:key')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/key')
   expect(inventory).toContain('GET /api/teams/:teamId/work-item-hierarchy')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
+  expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/schedule-baseline')
   // A Work Item may be named `hierarchy`, so the Team hierarchy must not sit under `/issues/`.
@@ -94,6 +97,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/me/preferences')
   expect(inventory).toContain('GET /api/developer/credential-policy')
   expect(inventory).toContain('PUT /api/developer/credential-policy')
+  expect(inventory).toContain('GET /api/teams/:teamId/notification-reminders')
+  expect(inventory).toContain('PUT /api/teams/:teamId/notification-reminders')
   expect(inventory).toContain('POST /api/developer/connector-oauth/complete')
   // Team and Project IDs never change, so renaming is a PATCH on the stable resource.
   expect(inventory).toContain('GET /api/teams/directory')
@@ -103,10 +108,12 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/teams/:teamId/project-order')
   expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId')
   expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId/restore')
+  expect(inventory).toContain('POST /api/enterprise/security/role-assignments')
+  expect(inventory).toContain('DELETE /api/enterprise/security/role-assignments/:assignmentId')
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '95aaf255ef745edc8bc1f7c46ee00e9581f66d2d06b3253338c171445b790e60',
+    '81fb7995fc8d048b6db6ebe7ba333818f750b98119e2f524b87a16a8db601932',
   )
 })

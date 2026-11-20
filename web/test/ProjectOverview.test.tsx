@@ -2,12 +2,14 @@ import { describe, expect, test } from 'bun:test'
 import type { PlanningEntity } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
+import { factoryBoardFixture } from '../src/features/factory-board/fixtures'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
 import type { ProjectMember } from '../src/projects/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import {
   findProjectOverviewUpdateTarget,
   selectProjectOverviewSchedule,
+  summarizeProjectOverviewAgentRuns,
   summarizeProjectOverviewMembers,
   summarizeProjectOverviewWorkItems,
 } from '../src/projects/model/projectOverview'
@@ -76,6 +78,7 @@ function renderOverview(props: Partial<ProjectOverviewViewProps> = {}) {
   return renderToStaticMarkup(
     <MemoryRouter>
       <ProjectOverviewView
+        agentRuns={summarizeProjectOverviewAgentRuns(factoryBoardFixture, 'refero')}
         isMembersLoading={false}
         isPlanningError={false}
         isPlanningLoading={false}
@@ -171,6 +174,44 @@ describe('Project overview model', () => {
   })
 })
 
+describe('Project overview Agent Run lanes', () => {
+  test('counts only the Project Work Items in each Factory board lane at the board read time', () => {
+    const summary = summarizeProjectOverviewAgentRuns(factoryBoardFixture, 'refero')
+
+    // release-notes and stalled-import belong to no Project, so they are left out.
+    expect(summary.laneCounts).toEqual({
+      processing: 1,
+      'no-run': 1,
+      decision: 2,
+      stalled: 0,
+      failed: 1,
+      completed: 1,
+    })
+    expect(summary.totalCount).toBe(6)
+    expect(summary.isIncomplete).toBe(false)
+  })
+
+  test('evaluates lanes at generatedAt so an aged completion leaves the counts', () => {
+    const later = { ...factoryBoardFixture, generatedAt: '2026-10-23T23:00:00.000Z' }
+
+    expect(summarizeProjectOverviewAgentRuns(later, 'refero').laneCounts.completed).toBe(0)
+  })
+
+  test('marks the counts incomplete when the board stopped at any read bound', () => {
+    for (const flag of ['activeRunsHasMore', 'finishedRunsHasMore', 'startedWorkItemsHasMore'] as const) {
+      const bounded = { ...factoryBoardFixture, [flag]: true }
+      expect(summarizeProjectOverviewAgentRuns(bounded, 'refero').isIncomplete).toBe(true)
+    }
+  })
+
+  test('counts nothing for a Project without board items', () => {
+    const summary = summarizeProjectOverviewAgentRuns(factoryBoardFixture, 'brand-refresh')
+
+    expect(summary.totalCount).toBe(0)
+    expect(Object.values(summary.laneCounts).every((count) => count === 0)).toBe(true)
+  })
+})
+
 describe('ProjectOverviewView', () => {
   test('shows every widget with deep links to the existing views', () => {
     const html = renderOverview()
@@ -180,6 +221,8 @@ describe('ProjectOverviewView', () => {
     expect(html).toContain('data-testid="project-overview-progress"')
     expect(html).toContain('data-testid="project-overview-schedule"')
     expect(html).toContain('data-testid="project-overview-members"')
+    expect(html).toContain('data-testid="project-overview-agent-runs"')
+    expect(html).toContain('data-testid="project-overview-agent-lane-decision"')
     expect(html).toContain('href="/projects/refero/issues?teamId=core-team"')
     expect(html).toContain('href="/planning/portfolio?targetType=project&amp;teamId=core-team&amp;projectId=refero"')
     expect(html).toContain('href="/teams/core-team/factory"')
@@ -234,6 +277,20 @@ describe('ProjectOverviewView', () => {
     expect(html).toContain('Your Project role cannot view the member list.')
     expect(html).not.toContain('Members could not be loaded.')
     expect(html).not.toContain('>Reload</button>')
+  })
+
+  test('shows the Agent Run read state in its own widget', () => {
+    const failed = renderOverview({ agentRuns: undefined, agentRunsError: 'load', onRetryAgentRuns: () => undefined })
+    const denied = renderOverview({ agentRuns: undefined, agentRunsError: 'denied', onRetryAgentRuns: () => undefined })
+    const bounded = renderOverview({
+      agentRuns: summarizeProjectOverviewAgentRuns({ ...factoryBoardFixture, activeRunsHasMore: true }, 'refero'),
+    })
+
+    expect(failed).toContain('Agent runs could not be loaded.')
+    expect(failed).toContain('>Reload</button>')
+    expect(denied).toContain('Your Team role cannot view agent runs.')
+    expect(denied).not.toContain('>Reload</button>')
+    expect(bounded).toContain('reached its read limit')
   })
 
   test('asks for the owning Team when the route does not name a readable one', () => {

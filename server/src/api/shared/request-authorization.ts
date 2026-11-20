@@ -181,6 +181,12 @@ const enterpriseRoutePermissionRules = [
   },
   {
     method: '*',
+    pathPattern: '/api/enterprise/security/role-assignments*',
+    permission: 'security.manage',
+    alternativePermissions: ['members.manage'],
+  },
+  {
+    method: '*',
     pathPattern: '/api/enterprise/security/service-accounts*',
     permission: 'service-accounts.manage',
     alternativePermissions: ['security.manage'],
@@ -371,6 +377,11 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'PUT',
     pathPattern: '/api/teams/:teamId/triage-settings',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/notification-reminders',
     permission: 'teams.manage',
   },
   {
@@ -589,6 +600,16 @@ const enterpriseRoutePermissionRules = [
     method: '*',
     pathPattern: '/api/teams/:teamId/projects/:projectId/lifecycle',
     permission: 'projects.manage',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
+    permission: 'projects.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/raid-log*',
+    permission: 'projects.write',
   },
   {
     method: 'GET',

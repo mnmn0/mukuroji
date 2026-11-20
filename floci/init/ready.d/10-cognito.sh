@@ -23,6 +23,7 @@ COLLABORATION_TABLE="${COLLABORATION_TABLE_NAME:-mukuroji-collaboration-local}"
 WORKSPACE_SEARCH_TABLE="${WORKSPACE_SEARCH_TABLE_NAME:-mukuroji-workspace-search-local}"
 ANALYTICS_TABLE="${ANALYTICS_TABLE_NAME:-mukuroji-analytics-local}"
 ANALYTICS_SCHEDULE_INDEX="${ANALYTICS_SCHEDULE_INDEX_NAME:-ScheduleDueIndex}"
+ANALYTICS_TIME_ENTRY_INDEX="TimeEntryTeamDateIndex"
 NOTIFICATIONS_TABLE="${NOTIFICATIONS_TABLE_NAME:-mukuroji-notifications-local}"
 REALTIME_SESSIONS_TABLE="${REALTIME_SESSIONS_TABLE_NAME:-mukuroji-realtime-sessions-local}"
 AUDIT_EVENTS_TABLE="${AUDIT_EVENTS_TABLE_NAME:-mukuroji-audit-events}"
@@ -458,6 +459,9 @@ if ! aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" >/dev/nu
       AttributeName=directoryProjectId,AttributeType=S \
       AttributeName=sortOrder,AttributeType=N \
       AttributeName=updatedAt,AttributeType=S \
+      AttributeName=notificationScheduleShard,AttributeType=S \
+      AttributeName=notificationDueKey,AttributeType=S \
+      AttributeName=customerCompletionPreparationAt,AttributeType=S \
     --key-schema \
       AttributeName=directoryTeamId,KeyType=HASH \
       AttributeName=issueId,KeyType=RANGE \
@@ -485,6 +489,22 @@ if ! aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" >/dev/nu
           {"AttributeName": "updatedAt", "KeyType": "RANGE"}
         ],
         "Projection": {"ProjectionType": "ALL"}
+      },
+      {
+        "IndexName": "WorkItemNotificationDueIndex",
+        "KeySchema": [
+          {"AttributeName": "notificationScheduleShard", "KeyType": "HASH"},
+          {"AttributeName": "notificationDueKey", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "ALL"}
+      },
+      {
+        "IndexName": "WorkItemCustomerCompletionPreparationIndex",
+        "KeySchema": [
+          {"AttributeName": "notificationScheduleShard", "KeyType": "HASH"},
+          {"AttributeName": "customerCompletionPreparationAt", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "KEYS_ONLY"}
       }
     ]' \
     --billing-mode PAY_PER_REQUEST \
@@ -512,6 +532,49 @@ if [ "$TEAM_ISSUE_UPDATED_AT_INDEX_STATUS" != "ACTIVE" ]; then
   exit 1
 fi
 
+# Local tables created before the notification schedule indexes gain them here, one per update.
+ensure_work_item_index() {
+  index_name="$1"
+  sort_key="$2"
+  projection_type="$3"
+  index_count="$(aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" \
+    --query "length(Table.GlobalSecondaryIndexes[?IndexName=='$index_name'] || \`[]\`)" \
+    --output text)"
+  if [ "$index_count" = 0 ]; then
+    aws_local dynamodb update-table --table-name "$WORK_ITEMS_TABLE" \
+      --attribute-definitions \
+        AttributeName=notificationScheduleShard,AttributeType=S \
+        "AttributeName=$sort_key,AttributeType=S" \
+      --global-secondary-index-updates "[{\"Create\":{\"IndexName\":\"$index_name\",\"KeySchema\":[{\"AttributeName\":\"notificationScheduleShard\",\"KeyType\":\"HASH\"},{\"AttributeName\":\"$sort_key\",\"KeyType\":\"RANGE\"}],\"Projection\":{\"ProjectionType\":\"$projection_type\"}}}]" \
+      >/dev/null
+  fi
+  index_status=""
+  index_wait_attempt=0
+  while [ "$index_wait_attempt" -lt 60 ]; do
+    index_status="$(aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" \
+      --query "Table.GlobalSecondaryIndexes[?IndexName=='$index_name'] | [0].IndexStatus" \
+      --output text)"
+    if [ "$index_status" = "ACTIVE" ]; then
+      return 0
+    fi
+    index_wait_attempt=$((index_wait_attempt + 1))
+    sleep 1
+  done
+  echo "DynamoDB index $index_name did not become active for table $WORK_ITEMS_TABLE." >&2
+  return 1
+}
+
+ensure_work_item_index WorkItemNotificationDueIndex notificationDueKey ALL
+ensure_work_item_index WorkItemCustomerCompletionPreparationIndex customerCompletionPreparationAt KEYS_ONLY
+
+# Mirrors createWorkItemNotificationScheduleShard in the server work-items module: the first
+# sha256 byte of "<workspace>\0<team>\0<issue>" modulo 16, which is its second hex digit.
+work_item_notification_schedule_shard() {
+  shard_digest="$(printf '%s\000%s\000%s' "$1" "$2" "$3" | sha256sum)"
+  shard_low_nibble="$(printf '%s' "$shard_digest" | cut -c2)"
+  printf 'work-item-schedule-%02d' "$(printf '%d' "0x$shard_low_nibble")"
+}
+
 WORK_ITEM_SEED_TIMESTAMP="2026-06-01T00:00:00.000Z"
 
 seed_work_item() {
@@ -524,6 +587,13 @@ seed_work_item() {
   due_date="$7"
   priority="$8"
   put_item_error=""
+  notification_schedule_shard="$(work_item_notification_schedule_shard "$PROJECT_DIRECTORY_ID" core-team "$work_item_id")"
+  # Mirrors createWorkItemNotificationDueKey: started is always read, open Work Items by deadline.
+  case "$status_category" in
+    started) notification_due_key_attribute=', "notificationDueKey": {"S": "0000-00-00"}' ;;
+    backlog|unstarted) notification_due_key_attribute=", \"notificationDueKey\": {\"S\": \"$due_date\"}" ;;
+    *) notification_due_key_attribute="" ;;
+  esac
 
   if ! put_item_error="$(aws_local dynamodb put-item \
     --table-name "$WORK_ITEMS_TABLE" \
@@ -563,7 +633,8 @@ seed_work_item() {
       }},
       \"priority\": {\"S\": \"$priority\"},
       \"createdAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
-      \"updatedAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"}
+      \"updatedAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
+      \"notificationScheduleShard\": {\"S\": \"$notification_schedule_shard\"}$notification_due_key_attribute
     }" \
     --condition-expression 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)' \
     2>&1 >/dev/null)"; then
@@ -976,6 +1047,8 @@ if ! aws_local dynamodb describe-table --table-name "$ANALYTICS_TABLE" >/dev/nul
       AttributeName=recordKey,AttributeType=S \
       AttributeName=scheduleShard,AttributeType=S \
       AttributeName=nextDeliveryAtRecordKey,AttributeType=S \
+      AttributeName=teamId,AttributeType=S \
+      AttributeName=startAt,AttributeType=S \
     --key-schema \
       AttributeName=workspaceId,KeyType=HASH \
       AttributeName=recordKey,KeyType=RANGE \
@@ -987,6 +1060,14 @@ if ! aws_local dynamodb describe-table --table-name "$ANALYTICS_TABLE" >/dev/nul
           {\"AttributeName\": \"nextDeliveryAtRecordKey\", \"KeyType\": \"RANGE\"}
         ],
         \"Projection\": {\"ProjectionType\": \"ALL\"}
+      },
+      {
+        \"IndexName\": \"$ANALYTICS_TIME_ENTRY_INDEX\",
+        \"KeySchema\": [
+          {\"AttributeName\": \"teamId\", \"KeyType\": \"HASH\"},
+          {\"AttributeName\": \"startAt\", \"KeyType\": \"RANGE\"}
+        ],
+        \"Projection\": {\"ProjectionType\": \"ALL\"}
       }
     ]" \
     --billing-mode PAY_PER_REQUEST \
@@ -994,6 +1075,33 @@ if ! aws_local dynamodb describe-table --table-name "$ANALYTICS_TABLE" >/dev/nul
 fi
 
 aws_local dynamodb wait table-exists --table-name "$ANALYTICS_TABLE"
+
+# Tables created before the time entry date index existed get it added in place, so the Team
+# timesheet and the timesheet reminder can query entries by Team and start time.
+if [ "$(aws_local dynamodb describe-table \
+  --table-name "$ANALYTICS_TABLE" \
+  --query "length(Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_TIME_ENTRY_INDEX'] || \`[]\`)" \
+  --output text)" = "0" ]; then
+  aws_local dynamodb update-table \
+    --table-name "$ANALYTICS_TABLE" \
+    --attribute-definitions \
+      AttributeName=teamId,AttributeType=S \
+      AttributeName=startAt,AttributeType=S \
+    --global-secondary-index-updates "[
+      {
+        \"Create\": {
+          \"IndexName\": \"$ANALYTICS_TIME_ENTRY_INDEX\",
+          \"KeySchema\": [
+            {\"AttributeName\": \"teamId\", \"KeyType\": \"HASH\"},
+            {\"AttributeName\": \"startAt\", \"KeyType\": \"RANGE\"}
+          ],
+          \"Projection\": {\"ProjectionType\": \"ALL\"}
+        }
+      }
+    ]" \
+    >/dev/null
+  aws_local dynamodb wait table-exists --table-name "$ANALYTICS_TABLE"
+fi
 
 if ! aws_local dynamodb describe-table --table-name "$TENANT_ADMINISTRATION_TABLE" >/dev/null 2>&1; then
   aws_local dynamodb create-table \
@@ -1040,6 +1148,9 @@ ANALYTICS_INDEX_SORT_KEY="$(read_analytics_table_schema "Table.GlobalSecondaryIn
 ANALYTICS_INDEX_PARTITION_KEY_TYPE="$(read_analytics_table_schema "Table.AttributeDefinitions[?AttributeName=='scheduleShard'].AttributeType | [0]")"
 ANALYTICS_INDEX_SORT_KEY_TYPE="$(read_analytics_table_schema "Table.AttributeDefinitions[?AttributeName=='nextDeliveryAtRecordKey'].AttributeType | [0]")"
 ANALYTICS_INDEX_PROJECTION_TYPE="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_SCHEDULE_INDEX'] | [0].Projection.ProjectionType")"
+ANALYTICS_TIME_ENTRY_INDEX_PARTITION_KEY="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_TIME_ENTRY_INDEX'] | [0].KeySchema[?KeyType=='HASH'].AttributeName | [0]")"
+ANALYTICS_TIME_ENTRY_INDEX_SORT_KEY="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_TIME_ENTRY_INDEX'] | [0].KeySchema[?KeyType=='RANGE'].AttributeName | [0]")"
+ANALYTICS_TIME_ENTRY_INDEX_PROJECTION_TYPE="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_TIME_ENTRY_INDEX'] | [0].Projection.ProjectionType")"
 
 if [ "$ANALYTICS_TABLE_BILLING_MODE" != "PAY_PER_REQUEST" ] ||
   [ "$ANALYTICS_TABLE_PARTITION_KEY" != "workspaceId" ] ||
@@ -1050,9 +1161,12 @@ if [ "$ANALYTICS_TABLE_BILLING_MODE" != "PAY_PER_REQUEST" ] ||
   [ "$ANALYTICS_INDEX_SORT_KEY" != "nextDeliveryAtRecordKey" ] ||
   [ "$ANALYTICS_INDEX_PARTITION_KEY_TYPE" != "S" ] ||
   [ "$ANALYTICS_INDEX_SORT_KEY_TYPE" != "S" ] ||
-  [ "$ANALYTICS_INDEX_PROJECTION_TYPE" != "ALL" ]; then
+  [ "$ANALYTICS_INDEX_PROJECTION_TYPE" != "ALL" ] ||
+  [ "$ANALYTICS_TIME_ENTRY_INDEX_PARTITION_KEY" != "teamId" ] ||
+  [ "$ANALYTICS_TIME_ENTRY_INDEX_SORT_KEY" != "startAt" ] ||
+  [ "$ANALYTICS_TIME_ENTRY_INDEX_PROJECTION_TYPE" != "ALL" ]; then
   echo "Existing Analytics table schema does not match the local API contract: table=$ANALYTICS_TABLE index=$ANALYTICS_SCHEDULE_INDEX" >&2
-  echo "Actual: billingMode=$ANALYTICS_TABLE_BILLING_MODE primaryKey=$ANALYTICS_TABLE_PARTITION_KEY($ANALYTICS_TABLE_PARTITION_KEY_TYPE)/$ANALYTICS_TABLE_SORT_KEY($ANALYTICS_TABLE_SORT_KEY_TYPE) indexKey=$ANALYTICS_INDEX_PARTITION_KEY($ANALYTICS_INDEX_PARTITION_KEY_TYPE)/$ANALYTICS_INDEX_SORT_KEY($ANALYTICS_INDEX_SORT_KEY_TYPE) projection=$ANALYTICS_INDEX_PROJECTION_TYPE" >&2
+  echo "Actual: billingMode=$ANALYTICS_TABLE_BILLING_MODE primaryKey=$ANALYTICS_TABLE_PARTITION_KEY($ANALYTICS_TABLE_PARTITION_KEY_TYPE)/$ANALYTICS_TABLE_SORT_KEY($ANALYTICS_TABLE_SORT_KEY_TYPE) indexKey=$ANALYTICS_INDEX_PARTITION_KEY($ANALYTICS_INDEX_PARTITION_KEY_TYPE)/$ANALYTICS_INDEX_SORT_KEY($ANALYTICS_INDEX_SORT_KEY_TYPE) projection=$ANALYTICS_INDEX_PROJECTION_TYPE timeEntryIndexKey=$ANALYTICS_TIME_ENTRY_INDEX_PARTITION_KEY/$ANALYTICS_TIME_ENTRY_INDEX_SORT_KEY timeEntryProjection=$ANALYTICS_TIME_ENTRY_INDEX_PROJECTION_TYPE" >&2
   exit 1
 fi
 

@@ -1,8 +1,4 @@
-import type {
-  CustomFieldDefinition,
-  CustomFieldValue,
-  WorkItemConfiguration,
-} from '@mukuroji/contracts'
+import type { WorkItemConfiguration } from '@mukuroji/contracts'
 import { useState } from 'react'
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { type CreateTeamIssueInput } from '../api'
@@ -34,7 +30,10 @@ import {
   issuePriorities,
   resolveIssuePriority,
 } from '../model/teamIssueDisplay'
-import type { WorkItemDuplicateDraft } from '../model/workItemDuplicate'
+import {
+  pickDuplicatedCustomFieldValues,
+  type WorkItemDuplicateDraft,
+} from '../model/workItemDuplicate'
 
 /**
  * Renders the panel that creates a Work Item in the active Team.
@@ -361,25 +360,4 @@ function resolveInitialProjectId(
     return duplicatedProjectId
   }
   return canCreateUnassignedIssue ? '' : projects[0]?.id ?? ''
-}
-
-/**
- * Keeps the duplicated custom field values that the selected Work Item Type still defines.
- *
- * Formula fields are computed by the server, so they are not copied.
- *
- * @param draft - Duplicate draft.
- * @param definitions - Fields of the selected Work Item Type.
- * @returns Values keyed by field ID.
- */
-function pickDuplicatedCustomFieldValues(
-  draft: WorkItemDuplicateDraft,
-  definitions: readonly CustomFieldDefinition[],
-) {
-  const values: Record<string, CustomFieldValue> = {}
-  for (const definition of definitions) {
-    const value = draft.customFieldValues[definition.id]
-    if (value !== undefined && definition.type !== 'formula') values[definition.id] = value
-  }
-  return values
 }

@@ -371,6 +371,36 @@ describe('PlanningScreen', () => {
     expect(html).toContain(`>${labels.move}</button>`)
   })
 
+  test('picks the root move Team and Project from the directory', () => {
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        canCreateInScope={(scope) => scope.teamId !== 'viewer-team'}
+        canManageEntity={() => true}
+        createScopeTeams={[
+          {
+            id: 'core-team',
+            name: 'Core team',
+            projects: [{ id: 'refero', name: 'Refero' }],
+          },
+          { id: 'next-team', name: 'Next team', projects: [] },
+          { id: 'viewer-team', name: 'Viewer team', projects: [] },
+        ]}
+        initialSelectedEntityId="cycle-14"
+        labels={labels}
+        snapshot={planningSnapshotFixture}
+        onMoveEntity={() => undefined}
+      />,
+    )
+    const scope = html.slice(html.indexOf('data-testid="planning-root-move-scope"'))
+    expect(scope).toContain('<select class="workbench-input h-10 px-3" name="teamId" required="">')
+    expect(scope).toContain('<option value="core-team" selected="">Core team</option>')
+    expect(scope).toContain('<option value="next-team">Next team</option>')
+    expect(scope).not.toContain('Viewer team')
+    expect(scope).toContain('<option value="refero">Refero</option>')
+    expect(scope).not.toContain('name="teamId" value=')
+  })
+
   test('renders the Cycle burndown slot only for a selected Cycle in Timeline', () => {
     const renderCycleBurndown = (cycle: PlanningEntity) => (
       <div data-testid="cycle-burndown-slot">{cycle.id}</div>

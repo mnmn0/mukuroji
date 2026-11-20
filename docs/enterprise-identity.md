@@ -267,6 +267,51 @@ Effective permission は該当 scope の assignment の和集合を計算した�
 3. Sensitive permission は recent re-authentication を満たさない限り拒否する。
 4. Unknown/removed permission と scope 外 permission は付与しない。
 
+Built-in role には Workspace scope の読み取り専用 role として、全 Team・Project の業務データを
+読める `workspace:portfolio-viewer`（`workspace.read`、`members.read`、`teams.read`、`projects.read`、
+`work-items.read`、`documents.read`、`files.read`、`requests.read`、`planning.read`）と、監査 log を
+読める `workspace:auditor`（`workspace.read`、`members.read`、`audit.read`）があります。どちらも
+guest には割り当てられず、guest に変わった member では directory mapping 由来でも評価時に無視します。
+
+Member 個人への direct assignment は `POST /api/enterprise/security/role-assignments`
+（`memberKey`、`roleId`、`scopeType`、`scopeId`、複数 Team に属する Project では `scopeParentId`）で作り、
+`DELETE /api/enterprise/security/role-assignments/:assignmentId` で外します。Group mapping と同じく
+`security.manage` または `members.manage` を要求し、caller が持たない permission を含む role は
+割り当てられません。Project scope は所有 Team で qualify して保存します。
+`GET /api/enterprise/security` の `memberRoleAssignments`（Project scope では所有 Team の `scopeParentId` 付き）と
+`members` は、`members.read`、`members.manage`、`security.manage` のいずれかを持つ caller にだけ返します。
+`security.read` だけでは member を特定できる情報を返しません。
+
+個人 assignment を持つ member は、directory 管理の member と同じく legacy Workspace role と
+Project membership を使わず、assignment の和集合（と `workspace.read`）だけで評価します。
+そのため次の対象には API が assignment を作りません。
+
+- 自分自身（自分の権限の付け替えと締め出しを防ぐ）
+- owner（owner の全権を失わせない）
+- caller が owner、system administrator、break-glass のいずれでもない場合の admin
+  （legacy では admin の変更は owner だけが行える）
+- guest への guest 不可 role
+- caller が owner、system administrator、break-glass のいずれでもない場合の、`workspace.manage`、
+  `members.manage`、`identity.manage`、`security.manage`、`service-accounts.manage`、`audit.export`
+  のいずれかを含む role（admin の任命と同じく owner だけが行える）
+
+解除しても同じ制限を適用します（最後の assignment を外すと legacy role に戻るため）。さらに、
+caller が owner、system administrator、break-glass のいずれでもない場合は、戻る権限（member の
+Workspace role と Project manager role の permission）をすべて持つときだけ、member の最後の direct
+assignment を外せます。持たない場合は `403 EnterpriseRoleAssignmentRestoreDenied` です。無効化された
+member も再有効化すると Workspace role に戻るので、同じ判定をします。この判定は削除と同じ revision
+条件付きの書き込みの中で行います。割り当て API の `scopeType` は `workspace`・`team`・`project` か省略
+（Workspace）だけを受け付け、それ以外は `400 EnterpriseRoleAssignmentScopeInvalid` です。
+同じ理由で、owner 相当以外の caller は、member に direct assignment されている custom role に管理系
+permission を足せません（`403 EnterpriseRoleAssignmentAdminProtected`）。既に持つ管理系 permission を残した
+ままの編集はできます。割り当て時は、caller が持たない permission（`403 EnterpriseRoleAssignmentDenied`）と
+管理系 permission を含まないこと（guest には guest 可であること）を、書き込む state の role 定義で再確認します。
+解除時の管理系 role の判定も、削除する state の role 定義で行います。
+Direct assignment を持つ member を owner / admin に変える `PATCH /api/workspace/members/:memberKey` は
+`409 WorkspaceMemberRoleAssignmentsPresent` で拒否します。Guest になった member の direct assignment は、
+評価時に guest 可の role（`workspace:guest`、`project:viewer`、`guestAssignable` の custom role）だけを
+使います。
+
 Group mapping CRUD は `/api/enterprise/security/group-mappings`、custom role CRUD は
 `/api/enterprise/security/roles` 以下で提供します。Role 更新・削除前には assignment impact を
 preview して confirmation token を要求し、assignment、group mapping、active service account から
@@ -426,6 +471,10 @@ audit event を作ります。現行 event type は次の値です。
 - `identity-provider.updated`, `identity-domain.updated`,
   `identity-domain.enforcement-updated`, `security-policy.updated`
 - `custom-role.updated|deleted`, `directory-group-mapping.updated|deleted`
+- `role-assignment.created|deleted`（public metadata に `memberId`、`roleId`、`scopeKind`、
+  Team / Project scope では `teamId`、`projectId`。`memberId` は member lifecycle event と同じ
+  Workspace Audit の仮名で、member key や email は残さない。audit table があるのに
+  `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` がない場合、割り当ての変更は 500 で失敗する）
 - `scim-credential.issued|rotated|revoked`,
   `scim-user.reconciled|deactivated|applied`, `scim-group.reconciled|deactivated|applied`
 - `provisioning.previewed|reconciled|succeeded|failed|retried`
@@ -444,7 +493,8 @@ IdP secret、bearer credential、HMAC key/digest は event payload に含めま�
 `sourceDetails` には request source IP/User-Agent が入りますが、audit JSON/NDJSON projection からは
 除外します。
 
-`GET /api/audit/events` と `GET /api/audit/events/export` は system administrator を要求し、query/export
+`GET /api/audit/events` は `audit.read`、`GET /api/audit/events/export` は `audit.export` を要求し（system administrator
+はどちらも可）、`workspace:auditor` は閲覧できても export はできません。query/export
 完了後に filter の有無、件数、truncation、format を別の immutable event に記録します。Audit writer が
 無い場合は閲覧を fail closed で拒否します。
 

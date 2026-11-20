@@ -98,6 +98,7 @@ import {
 } from '../../shared/lib/preferences/theme'
 import {
   createProjectIssuesPath,
+  createProjectOverviewPath,
   createTeamIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
@@ -202,7 +203,7 @@ export type WorkspaceRouteContextValue = {
   onSelectNav: (navId: SidebarNavId) => void
   /** Navigates to a fixed view owned by a team. */
   onSelectTeamView: (teamId: string, viewId: SidebarTeamViewId) => void
-  /** Navigates to a project's issue route within its owning team. */
+  /** Navigates to a project's overview, its default view, within its owning team. */
   onSelectProject: (projectId: string, teamId: string) => void
   /** Tests whether one Team-owned Project is currently starred. */
   isProjectQuickAccess: (item: ProjectQuickAccessItem) => boolean
@@ -831,10 +832,18 @@ export function WorkspaceRouteProvider() {
     navigate(createTeamViewPath(teamId, viewId))
   }, [navigate])
 
-  /** Navigates to the selected project's issue route. */
+  const isOnProjectIssues = useMatch('/projects/:projectId/issues') !== null
+
+  /**
+   * Navigates to the selected project's overview, the default view of a Project. Switching
+   * Projects from a Project's Work Item list keeps the list, so moving between Projects does not
+   * leave the view the person is working in.
+   */
   const handleSelectProject = useCallback((projectId: string, teamId: string) => {
-    navigate(createProjectIssuesPath(projectId, teamId))
-  }, [navigate])
+    navigate(isOnProjectIssues
+      ? createProjectIssuesPath(projectId, teamId)
+      : createProjectOverviewPath(projectId, teamId))
+  }, [isOnProjectIssues, navigate])
 
   /** Navigates to the assigned project or owning team route represented by a task. */
   const handleOpenTask = useCallback((task: CanonicalWorkItem) => {
