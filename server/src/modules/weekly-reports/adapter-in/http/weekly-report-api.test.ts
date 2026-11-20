@@ -271,7 +271,19 @@ test('checks a Work Item at the Project it is in now, and a deleted one at the P
     detailAssignedProjectIds: { a: 'secret', b: 'refero' },
   })
   await seedSubmission('sato@example.com')
+  const teamIssues = getTestAppDependencies().workItems.teamIssues
+  const readDetail = teamIssues.getTeamIssueDetail.bind(teamIssues)
+  const reads: unknown[] = []
+  teamIssues.getTeamIssueDetail = async (directoryId, teamId, workItemId, options) => {
+    reads.push(options)
+    return await readDetail(directoryId, teamId, workItemId, options)
+  }
   const moved = await request(`/api/teams/core-team/weekly-reports/sato@example.com/${WEEK}`)
+  // The Project decides visibility, so a move just made is read strongly consistent.
+  expect(reads).toEqual([
+    { consistentIssueRead: true, includeEvents: false },
+    { consistentIssueRead: true, includeEvents: false },
+  ])
   expect((await moved.json() as WeeklyReportResponse).submission?.sections.completed).toEqual([
     { hidden: true, minutes: 60 },
     { hidden: false, workItemId: 'b', key: 'SEC-1', title: 'Secret title', minutes: 30 },

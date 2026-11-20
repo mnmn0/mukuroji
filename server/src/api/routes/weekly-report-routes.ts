@@ -393,8 +393,10 @@ async function readTeamIssues(principal: WorkspacePrincipal, teamId: string, wor
     const batch = unique.slice(offset, offset + RESOLVE_CONCURRENCY)
     const issues = await Promise.all(batch.map(async (workItemId) => {
       try {
+        // Read strongly consistent: the Project decides who may see the Work Item, so a move
+        // just made must not be missed.
         const { issue } = await workItemDependencies.teamIssues.getTeamIssueDetail(principal.directoryId, teamId, workItemId, {
-          consistentIssueRead: false,
+          consistentIssueRead: true,
           includeEvents: false,
         })
         return issue.id === workItemId ? issue : undefined
