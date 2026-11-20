@@ -303,7 +303,12 @@ async function configureCrossTeamScheduleDependency() {
       ['a-team\0onboarding-friction']: 7,
       ['z-team\0onboarding-friction']: 3,
     },
-    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+    // Each Team reuses the `refero` ID, so only Team-qualified grants authorize their Work Items.
+    projectAccesses: ['core-team', 'a-team', 'z-team'].map((teamId) => ({
+      teamId,
+      projectId: 'refero',
+      role: 'manager' as const,
+    })),
   })
   configureScheduleConfirmationIdempotency()
   const planning = new InMemoryPlanningClient()

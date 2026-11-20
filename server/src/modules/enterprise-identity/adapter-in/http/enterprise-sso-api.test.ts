@@ -184,6 +184,8 @@ test('binds SSO exchange assurance to the signed provider revision', async () =>
 
       expect(currentExchange.status).toBe(200)
       expect(tokenExchangeCalls).toBe(1)
+      // The SSO token lacks the GetUser admin scope, so its user is read after JWKS verification.
+      expect(calls.verifiedAccessTokenReads).toEqual(['mukuroji-sso-client'])
       const expectedSsoMethod = `mukuroji:enterprise-sso-provider-sha256:${
         createHash('sha256')
           .update(`${providerId}\0${updatedProviderRevision}`)

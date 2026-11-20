@@ -31,6 +31,12 @@ Project の task 画面の **権限** タブ（「権限管理」）で、Projec
 Project のメンバー権限を変えられるのは、その Project の manager だけです。追加できるのは
 Workspace の有効なメンバーだけなので、先に Workspace へ招待しておきます。
 
+Project の権限はその Team の Project にだけ効きます。別の Team に同じ ID の Project があっても、
+そちらの Work Item は見えません。複数の Team が同じ Project ID を使っている場合、Team を持たない
+旧形式の Project メンバー登録ではどの Team の Project か決められないため、その Project の権限は
+どの Team でも効きません。Enterprise では Directory group mapping で Team・Project 単位のロールを
+割り当てると、その Team の Project にだけ効きます。
+
 **Team の管理者** は、Workspace の owner / admin、またはその Team のいずれかの Project の manager です
 （Enterprise の `teams.manage` 権限を持つ人も含みます）。Team 固有の Work Item 設定と
 エージェント設定は Team の管理者が変更します。
@@ -76,6 +82,10 @@ Directory group mapping からだけ割り当てられ、個人へ直接は割�
     アーカイブ直後は Webhook の許可の後始末が終わるまで復元できないことがあります。数分おいてから復元してください。
 - `/teams/:teamId/members`（サイドバーの **メンバー**）は Team の顔ぶれと負荷を確認する画面で、
   ここからメンバーの追加・削除はできません。
+- 同じ画面の **Team の通知リマインド** で、Team のメンバーに届く期限前通知・期限超過の再通知・
+  Project manager への escalation・未更新の督促・工数の督促の日数を決めます。変更できるのは Team manager で、
+  ほかのメンバーは閲覧だけです。空欄の項目は既定値を使います。メンバーは escalation 以外を自分の通知設定で
+  上書きできます。
 
 ## Work Item の設定（ワークフローとフィールド）
 
@@ -145,6 +155,10 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   「最終利用」は 1 分ごとにまとめて記録するため、最大 1 分遅れて表示されます。
 - **Webhook**: 外部への通知。**Webhook を追加** で送信先と「配信を許可する Team」を決めます。配信 log から再送できます。
 - **Connector**: GitHub、Slack、Gmail、Google Calendar、Google Drive との連携。
+  接続は、**接続** を押した本人が provider の画面で許可したあと、同じアカウントでログインしたまま
+  Mukuroji に戻ると完了します。許可の URL を別の人に送ったり、ログインが切れた状態で戻ったり、
+  期限（約10分）が切れたりした場合は完了できないので、この画面からもう一度接続してください。
+  **再接続** も同じで、押した本人が完了します。
 - **Import / Export**: Work Item の CSV / JSON export と、検証（dry-run）してから確定する import。
 
 ## エージェント設定（Software factory）

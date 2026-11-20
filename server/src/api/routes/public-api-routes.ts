@@ -152,12 +152,13 @@ import {
   prepareConfiguredUpdateWorkItem,
 } from '../shared/file-approval-access'
 import {
-  getEffectiveProjectAccessList,
+  getEffectiveProjectScopeAccessList,
   hasEnterpriseWorkspacePermission,
   type ProjectPrincipal,
   requireAssignedProjectPermission,
   requireTeamPermission,
   requireWorkspaceBusinessWrite,
+  selectTeamProjectScopeAccesses,
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
@@ -273,15 +274,13 @@ async function readAccessibleWorkItemExportPage(
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
     ? undefined
-    : await getEffectiveProjectAccessList(principal)
+    : await getEffectiveProjectScopeAccessList(principal)
   const contexts: TeamPermissionContext[] = directory.teams.flatMap((team) => {
     if (principal.isSystemAdmin) {
       return [{ team, directory } satisfies TeamPermissionContext]
     }
-    const teamProjectIds = new Set(team.projects.map((project) => project.id))
-    const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
-      teamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer')
-    )
+    const teamProjectAccesses = selectTeamProjectScopeAccesses(projectAccesses ?? [], team)
+      .filter((access) => projectAccessAllows(access, 'viewer'))
     return teamProjectAccesses.length > 0
       ? [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
       : []
@@ -2523,11 +2522,11 @@ const lazyConnectorAuthorization: ConnectorAuthorizationService = {
     return (await requireConfiguredConnectorAuthorization())
       .begin(principal, input, operationId)
   },
-  async completeCallback(input) {
-    return (await requireConfiguredConnectorAuthorization()).completeCallback(input)
+  async completeCallback(input, actor) {
+    return (await requireConfiguredConnectorAuthorization()).completeCallback(input, actor)
   },
-  async abortCallback(input) {
-    return (await requireConfiguredConnectorAuthorization()).abortCallback(input)
+  async abortCallback(input, actor) {
+    return (await requireConfiguredConnectorAuthorization()).abortCallback(input, actor)
   },
   async reauthorize(principal, installationId, operationId) {
     return (await requireConfiguredConnectorAuthorization())
@@ -3182,7 +3181,9 @@ function getPublicApiCursorSecret() {
  * @param routeApp - Hono application that receives the routes.
  */
 export function registerPublicApiRoutes(routeApp: Hono): void {
-  if (!loadServerConfig().runtimeRole) {
+  const serverConfig = loadServerConfig()
+  if (!serverConfig.runtimeRole) {
+    const { connectorOAuthWebOrigin } = serverConfig
     const publicApiDependencies: PublicApiDependencies = {
       apiKeys: createForwardingClient(() => developerPlatformDependencies.apiKeys),
       oauthCredentials: createForwardingClient(
@@ -3215,6 +3216,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       },
       queueWebhookDelivery,
       connectorAuthorization: lazyConnectorAuthorization,
+      ...(connectorOAuthWebOrigin ? { connectorOAuthWebOrigin } : {}),
       mapError: mapPublicApiAdapterError,
     }
     routeApp.route('/api', createPublicApiRouter(publicApiDependencies))
