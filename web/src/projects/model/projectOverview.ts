@@ -1,8 +1,11 @@
-import type {
-  CanonicalWorkItem,
-  PlanningEntity,
-  PlanningEntityType,
-  PlanningUpdateTargetSummary,
+import {
+  classifyFactoryBoardItem,
+  type CanonicalWorkItem,
+  type FactoryBoardLane,
+  type PlanningEntity,
+  type PlanningEntityType,
+  type PlanningUpdateTargetSummary,
+  type TeamAgentRunBoardResponse,
 } from '@mukuroji/contracts'
 import type { ProjectMember, ProjectMemberRole } from '../api/members'
 import { resolveWorkflowStatusCategory } from '../../work-items/model/workItemDisplay'
@@ -223,6 +226,55 @@ export function summarizeProjectOverviewMembers(
     roleCounts,
     shown: sorted.slice(0, boundedLimit),
     totalCount: members.length,
+  }
+}
+
+/** Agent Run lane counts of one Project, taken from its Team's Factory board. */
+export type ProjectOverviewAgentRuns = {
+  /** Work Items of the Project in each Factory board lane. */
+  laneCounts: Record<FactoryBoardLane, number>
+  /** Work Items of the Project on the board, across every lane. */
+  totalCount: number
+  /** Whether the board stopped at a read bound, so the counts can be low. */
+  isIncomplete: boolean
+}
+
+/**
+ * Counts one Project's Work Items in each Factory board lane.
+ *
+ * The lanes come from the shared `classifyFactoryBoardItem` rule evaluated at the board's
+ * `generatedAt`, the same way the Factory board places its tiles, so both screens agree.
+ *
+ * @param board - The Team's Factory board.
+ * @param projectId - Project whose Work Items are counted.
+ * @returns Lane counts and whether the board read was bounded.
+ */
+export function summarizeProjectOverviewAgentRuns(
+  board: TeamAgentRunBoardResponse,
+  projectId: string,
+): ProjectOverviewAgentRuns {
+  const laneCounts: Record<FactoryBoardLane, number> = {
+    processing: 0,
+    'no-run': 0,
+    decision: 0,
+    stalled: 0,
+    failed: 0,
+    completed: 0,
+  }
+  const evaluatedAt = new Date(board.generatedAt)
+  const now = Number.isFinite(evaluatedAt.getTime()) ? evaluatedAt : new Date()
+  let totalCount = 0
+  for (const item of board.items) {
+    if (item.workItem.assignedProjectId !== projectId) continue
+    const lane = classifyFactoryBoardItem(item, now)
+    if (lane === undefined) continue
+    laneCounts[lane] += 1
+    totalCount += 1
+  }
+  return {
+    isIncomplete: board.activeRunsHasMore || board.finishedRunsHasMore || board.startedWorkItemsHasMore,
+    laneCounts,
+    totalCount,
   }
 }
 
