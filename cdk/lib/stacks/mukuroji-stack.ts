@@ -21,7 +21,7 @@ import {
 import { buildStackOutputs } from '../subsystems/outputs';
 import { buildRestoreDrill } from '../subsystems/restore-drill';
 import { buildRuntimeControls } from '../subsystems/runtime-controls';
-import { buildUserIdentity } from '../subsystems/user-identity';
+import { buildUserIdentity, configureUserPoolEmail } from '../subsystems/user-identity';
 import { buildWebDistribution } from '../subsystems/web-distribution';
 import {
   buildAiAssistanceObservabilityWorker,
@@ -207,6 +207,11 @@ export class MukurojiStack extends cdk.Stack {
       edgeOriginSecret: parameters.edgeOriginSecret.valueAsString,
       fileBucket: fileStorage.fileBucket,
       httpApi: apiTransports.httpApi,
+    });
+    configureUserPoolEmail(this, {
+      userIdentity,
+      userPoolIdParameter: parameterInputs.cognitoUserPoolIdParameter,
+      webOrigin: webDistribution.webOrigin,
     });
     const auditProjection = buildAuditProjectionWorker(this, {
       dataStores,
