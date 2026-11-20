@@ -68,6 +68,7 @@ import {
   isAutomationInboundWebhookJsonContentType,
   isAutomationValue,
   normalizeAutomationActionFailure,
+  orderBulkArchiveItems,
   parseAutomationInboundWebhookJson,
   previewBulkOperation,
   readAutomationInboundWebhookBody,
@@ -793,65 +794,6 @@ async function prepareBulkArchiveHierarchyConditionChecks(
   }
 }
 
-/** Parent relations read at once while ordering a Bulk archive. */
-const BULK_ARCHIVE_ORDER_READ_CONCURRENCY = 16
-
-/**
- * Orders Bulk archive items so that each item's hierarchy check sees the items it depends on.
- *
- * Children are archived before their parent, and a parent is restored before its children. Each
- * item's depth counts its ancestors among the items; archiving runs the deepest first, restoring
- * the shallowest first, and items of equal depth keep request order.
- *
- * @param directoryId - Workspace directory ID.
- * @param items - Bulk targets in request order.
- * @param archived - True when the items are archived, false when they are restored.
- * @returns Every item index exactly once, in apply order.
- */
-async function orderBulkArchiveItems(
-  directoryId: string,
-  items: readonly { teamId: string, workItemId: string }[],
-  archived: boolean,
-): Promise<number[]> {
-  const itemKey = (teamId: string, workItemId: string) => `${teamId}\0${workItemId}`
-  const indexByKey = new Map(items.map((item, index) => [itemKey(item.teamId, item.workItemId), index]))
-  const parentIndexes: (number | undefined)[] = []
-  for (let start = 0; start < items.length; start += BULK_ARCHIVE_ORDER_READ_CONCURRENCY) {
-    const batch = await Promise.all(items
-      .slice(start, start + BULK_ARCHIVE_ORDER_READ_CONCURRENCY)
-      .map(async (item) => {
-        const related = await workItemDependencies.workItemConfigurations.listRelations(
-          directoryId,
-          item.teamId,
-          item.workItemId,
-          { types: ['parent'] },
-        )
-        const parent = related.relations.find((relation) =>
-          relation.sourceWorkItemId === item.workItemId && relation.type === 'parent'
-        )
-        return parent ? indexByKey.get(itemKey(item.teamId, parent.targetWorkItemId)) : undefined
-      }))
-    parentIndexes.push(...batch)
-  }
-  const depths = items.map((_, index) => {
-    let depth = 0
-    const visited = new Set([index])
-    for (let parent = parentIndexes[index]; parent !== undefined && !visited.has(parent); parent = parentIndexes[parent]) {
-      visited.add(parent)
-      depth += 1
-    }
-    return depth
-  })
-  return items
-    .map((_, index) => index)
-    .sort((left, right) => {
-      const byDepth = archived
-        ? (depths[right] ?? 0) - (depths[left] ?? 0)
-        : (depths[left] ?? 0) - (depths[right] ?? 0)
-      return byDepth !== 0 ? byDepth : left - right
-    })
-}
-
 /**
  * Turns a failed hierarchy fence of a Bulk archive or restore into a failure an explicit retry re-checks.
  *
@@ -1196,7 +1138,21 @@ function createApiBulkOperationAdapter(
   return {
     async orderItems(request) {
       return request.action.type === 'archive'
-        ? await orderBulkArchiveItems(principal.directoryId, request.items, request.action.archived)
+        ? await orderBulkArchiveItems(
+            request.items,
+            request.action.archived,
+            async (teamId, workItemId) => {
+              const related = await workItemDependencies.workItemConfigurations.listRelations(
+                principal.directoryId,
+                teamId,
+                workItemId,
+                { types: ['parent'] },
+              )
+              return related.relations.find((relation) =>
+                relation.sourceWorkItemId === workItemId && relation.type === 'parent'
+              )?.targetWorkItemId
+            },
+          )
         : request.items.map((_, index) => index)
     },
     async preview(request, itemIndex) {
