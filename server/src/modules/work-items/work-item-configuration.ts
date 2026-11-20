@@ -73,6 +73,10 @@ const CONFIGURATION_WRITE_LOCK_RECORD_KEY = 'CONFIG_WRITE_LOCK'
 const CONFIGURATION_WRITE_LOCK_LEASE_SECONDS = 15 * 60
 const RELATION_GRAPH_RECORD_KEY = 'RELATION_GRAPH'
 const RELATION_RECORD_PREFIX = 'REL#'
+/** Record key prefix of the row that counts restores of a parent Work Item's children. */
+const CHILD_RESTORE_GUARD_RECORD_PREFIX = 'CHILD_RESTORE#'
+/** Entry type of a child restore guard row. */
+const CHILD_RESTORE_GUARD_ENTRY_TYPE = 'child-restore-guard'
 /** Directed relation rows a Team may store; each logical link is a reciprocal pair. */
 const TEAM_RELATION_EDGE_LIMIT = WORK_ITEM_TEAM_RELATION_LINK_LIMIT * 2
 /** Work Items a single cycle validation may visit before failing closed. */
@@ -397,6 +401,147 @@ export function createWorkItemRelationGraphRevisionIncrementTransactionItem(
   }
 }
 
+/**
+ * Creates the key of the row that counts restores of a parent Work Item's children.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team that owns the parent Work Item.
+ * @param parentWorkItemId - Parent Work Item whose children are restored.
+ * @returns The configuration table key of the parent's child restore guard row.
+ */
+function createChildRestoreGuardKey(workspaceId: string, teamId: string, parentWorkItemId: string) {
+  return {
+    scopeKey: createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+    recordKey: `${CHILD_RESTORE_GUARD_RECORD_PREFIX}${encodeURIComponent(
+      readIdentifier(parentWorkItemId, 'Work Item ID'),
+    )}`,
+  }
+}
+
+/**
+ * Creates the write that records one restore of a child Work Item under its parent.
+ *
+ * The parent's guard generation advances by one from the validated value the caller read, so an
+ * archive of the parent that read its children before this restore fails at commit instead of
+ * hiding the restored child. A row changed since the read, or one the reader would reject, fails
+ * the restore instead of being overwritten.
+ *
+ * @param tableName - Work Item configuration table.
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team that owns the parent Work Item.
+ * @param parentWorkItemId - Parent of the Work Item being restored.
+ * @param expectedGeneration - Generation read with `getChildRestoreGeneration`; `0` means no row yet.
+ * @returns One DynamoDB Put or Update ready for the restore transaction.
+ */
+export function createWorkItemChildRestoreGuardAdvance(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  parentWorkItemId: string,
+  expectedGeneration: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (
+    !Number.isSafeInteger(expectedGeneration) ||
+    expectedGeneration < 0 ||
+    expectedGeneration >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemChildRestoreGeneration',
+      'Work Item child restore generation must be a non-negative safe integer below the maximum.',
+    )
+  }
+  const key = createChildRestoreGuardKey(workspaceId, teamId, parentWorkItemId)
+  if (expectedGeneration === 0) {
+    return {
+      Put: {
+        TableName: tableName,
+        Item: {
+          ...key,
+          entryType: CHILD_RESTORE_GUARD_ENTRY_TYPE,
+          schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+          generation: 1,
+        },
+        ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+      },
+    }
+  }
+  return {
+    Update: {
+      TableName: tableName,
+      Key: key,
+      UpdateExpression: 'SET #generation = :nextGeneration',
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': CHILD_RESTORE_GUARD_ENTRY_TYPE,
+        ':schemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':expectedGeneration': expectedGeneration,
+        ':nextGeneration': expectedGeneration + 1,
+      },
+    },
+  }
+}
+
+/**
+ * Creates the check that no child of a parent Work Item was restored since the caller read.
+ *
+ * @param tableName - Work Item configuration table.
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team that owns the parent Work Item.
+ * @param parentWorkItemId - Parent Work Item about to be archived.
+ * @param expectedGeneration - Generation read before the children; `0` means no row yet.
+ * @returns One DynamoDB ConditionCheck ready for the archive transaction.
+ */
+export function createWorkItemChildRestoreGuardConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  parentWorkItemId: string,
+  expectedGeneration: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemChildRestoreGeneration',
+      'Work Item child restore generation must be a non-negative safe integer.',
+    )
+  }
+  const key = createChildRestoreGuardKey(workspaceId, teamId, parentWorkItemId)
+  if (expectedGeneration === 0) {
+    return {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: key,
+        ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+      },
+    }
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: key,
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': CHILD_RESTORE_GUARD_ENTRY_TYPE,
+        ':schemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':expectedGeneration': expectedGeneration,
+      },
+    },
+  }
+}
+
 /** DynamoDB transaction items contributed by a configuration validation boundary. */
 export type WorkItemConfigurationTransactionItems = NonNullable<
   TransactWriteCommandInput['TransactItems']
@@ -633,6 +778,15 @@ export type WorkItemConfigurationClient = {
    * @returns Current positive revision, or zero before graph metadata exists.
    */
   getRelationGraphRevision?(workspaceId: string, teamId: string): Promise<number>
+  /**
+   * Reads how many times a child of the parent Work Item has been restored.
+   *
+   * @param workspaceId - Workspace that owns the parent Work Item.
+   * @param teamId - Team that owns the parent Work Item.
+   * @param parentWorkItemId - Parent Work Item about to be archived, or of a child being restored.
+   * @returns Current generation, or zero before any child was restored.
+   */
+  getChildRestoreGeneration?(workspaceId: string, teamId: string, parentWorkItemId: string): Promise<number>
   /**
    * Reciprocal relation を単一 transaction で作成します。
    *
@@ -2582,6 +2736,41 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       }
       frontier = [...next]
     }
+  }
+
+  /**
+   * Reads a parent Work Item's child restore generation with a strongly consistent read.
+   *
+   * @param workspaceId - Workspace that owns the parent Work Item.
+   * @param teamId - Team that owns the parent Work Item.
+   * @param parentWorkItemId - Parent Work Item about to be archived.
+   * @returns Current generation, or zero before any child was restored.
+   * @throws WorkItemConfigurationError `503 StoredWorkItemConfigurationInvalid` when the row is malformed
+   * or has an unsupported schema.
+   */
+  async getChildRestoreGeneration(
+    workspaceId: string,
+    teamId: string,
+    parentWorkItemId: string,
+  ): Promise<number> {
+    await this.ensureTable()
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: createChildRestoreGuardKey(workspaceId, teamId, parentWorkItemId),
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+    if (!item) return 0
+    if (
+      item.entryType !== CHILD_RESTORE_GUARD_ENTRY_TYPE ||
+      item.schemaVersion !== WORK_ITEM_CONFIGURATION_SCHEMA_VERSION ||
+      typeof item.generation !== 'number' ||
+      !Number.isSafeInteger(item.generation) ||
+      item.generation < 1
+    ) {
+      throw storedConfigurationInvalid()
+    }
+    return item.generation
   }
 
   /**
