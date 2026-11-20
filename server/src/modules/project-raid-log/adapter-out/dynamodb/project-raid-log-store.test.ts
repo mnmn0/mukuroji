@@ -32,7 +32,15 @@ const auditContext = createMutationAuditContext({
 })
 
 /** Commands the fake client received. */
-type SentCommand = { constructor: { name: string }; input: Record<string, unknown> }
+type SentCommand = {
+  /** Command class, identified by its name. */
+  constructor: {
+    /** Command class name, such as `TransactWriteCommand`. */
+    name: string
+  }
+  /** Command input as sent to the client. */
+  input: Record<string, unknown>
+}
 
 /**
  * Builds a document client that answers reads with the given row and writes with the given error.

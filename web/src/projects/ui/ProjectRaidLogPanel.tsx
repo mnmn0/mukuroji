@@ -62,9 +62,24 @@ type EntryFormValues = {
 
 /** Form state: closed, adding a new entry, or editing one. */
 type EditorState =
-  | { mode: 'closed' }
-  | { mode: 'create'; values: EntryFormValues }
-  | { mode: 'edit'; entry: ProjectRaidEntry; values: EntryFormValues }
+  | {
+      /** No form is open. */
+      mode: 'closed'
+    }
+  | {
+      /** A new entry is being added. */
+      mode: 'create'
+      /** Current form values. */
+      values: EntryFormValues
+    }
+  | {
+      /** An existing entry is being edited. */
+      mode: 'edit'
+      /** Entry the form started from. */
+      entry: ProjectRaidEntry
+      /** Current form values. */
+      values: EntryFormValues
+    }
 
 const inputClassName =
   'h-10 rounded-md border border-tone-d3d8df bg-surface px-3 text-sm font-medium text-fg-1c1d1f outline-none transition focus:border-tone-2563eb focus:ring-4 focus:ring-tone-2563eb/10 disabled:bg-[var(--workbench-surface-muted)]'
