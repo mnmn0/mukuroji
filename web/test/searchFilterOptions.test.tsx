@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import type { ProjectDirectoryTeam } from '../src/projects/api'
 import type { ProjectMember } from '../src/projects/api/members'
 import {
+  canAddSearchFilterId,
   createSearchMemberFilterOptions,
   createSearchProjectFilterOptions,
   createSearchTeamFilterOptions,
@@ -110,5 +111,14 @@ describe('SearchFilterPicker', () => {
     expect(html).toContain('Loading members')
     expect(html).toContain('Clear selection')
     expect(html.match(/checked=""/g)).toHaveLength(2)
+  })
+})
+
+describe('canAddSearchFilterId', () => {
+  test('offers an unlisted ID even when it partly matches a listed option', () => {
+    const options = createSearchProjectFilterOptions(teams)
+    expect(canAddSearchFilterId(options, 'api')).toBe(true)
+    expect(canAddSearchFilterId(options, ' project-api ')).toBe(false)
+    expect(canAddSearchFilterId(options, '  ')).toBe(false)
   })
 })

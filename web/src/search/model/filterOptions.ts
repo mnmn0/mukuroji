@@ -123,6 +123,25 @@ export function filterSearchFilterOptions(
 }
 
 /**
+ * Tells whether typed text can be added as a raw ID.
+ *
+ * The check uses an exact ID match rather than the narrowed list, so an unlisted ID such as `api`
+ * stays addable even when it partly matches a listed option such as `project-api`. Selected IDs are
+ * always among the options, so an already selected ID is never offered again.
+ *
+ * @param options - Known options including the selected IDs.
+ * @param query - Text typed into the picker.
+ * @returns Whether the trimmed text is non-empty and is not an existing option ID.
+ */
+export function canAddSearchFilterId(
+  options: readonly SearchFilterOption[],
+  query: string,
+): boolean {
+  const id = query.trim()
+  return Boolean(id) && !options.some((option) => option.value === id)
+}
+
+/**
  * Normalizes picker text for case- and width-insensitive matching.
  *
  * @param value - Text to normalize.

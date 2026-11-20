@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
+  canAddSearchFilterId,
   filterSearchFilterOptions,
   includeSelectedSearchFilterOptions,
   type SearchFilterOption,
@@ -49,7 +50,7 @@ export function SearchFilterPicker({
   const allOptions = includeSelectedSearchFilterOptions(options, selectedValues)
   const visibleOptions = filterSearchFilterOptions(allOptions, query)
   const typedId = query.trim()
-  const canAddTypedId = Boolean(typedId) && visibleOptions.length === 0 && !selected.has(typedId)
+  const canAddTypedId = canAddSearchFilterId(allOptions, query)
 
   /**
    * Toggles one ID while keeping the order in which IDs were selected.
