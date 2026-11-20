@@ -1,8 +1,13 @@
 import type { SubmitWeeklyReportRequest, WeeklyReportNotes, WeeklyReportResponse } from '@mukuroji/contracts'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { createMutationFingerprint, createMutationRequestRunner } from '../../../shared/api/mutationHeaders'
 import { saveWeeklyReportDraft, submitWeeklyReport } from '../api/weeklyReports'
 import { TimeTrackingApiError } from '../api/timeTrackingRequest'
+import {
+  selectWeeklyReportSubmission,
+  weeklyReportSubmissionContent,
+  type PendingWeeklyReportSubmission,
+} from './pendingWeeklyReportSubmission'
 import { useRefreshTimeTrackingQueries } from './refreshTimeTrackingQueries'
 
 /** Saves and submits the signed-in member's weekly report. */
@@ -37,7 +42,9 @@ function isUnreachable(error: unknown) {
 /**
  * Creates the save and submit actions of the member's report for one week. A retry of the same
  * input after a network failure reuses the Idempotency-Key, so a submission that reached the
- * server is not submitted twice. Every time tracking query is refreshed after each attempt.
+ * server is not submitted twice. A submission whose result is unknown is retried as first sent,
+ * even after a refresh read new counts, unless the member changed what it says. Every time
+ * tracking query is refreshed after each attempt.
  *
  * @param accessToken - Bearer token, or undefined while signed out.
  * @param teamId - Team the report belongs to.
@@ -53,6 +60,7 @@ export function useWeeklyReportMutations(
 ): WeeklyReportMutations {
   const refresh = useRefreshTimeTrackingQueries()
   const [runner] = useState(() => createMutationRequestRunner())
+  const pendingSubmission = useRef<PendingWeeklyReportSubmission | null>(null)
 
   /**
    * Returns the token and member key, or fails when signed out.
@@ -77,10 +85,19 @@ export function useWeeklyReportMutations(
 
   const submit = useCallback(async (input: SubmitWeeklyReportRequest) => {
     const { token, member } = requireSession()
-    const fingerprint = await createMutationFingerprint(JSON.stringify(input))
+    const scope = `submit:${teamId}:${weekStart}`
+    const effective = selectWeeklyReportSubmission(pendingSubmission.current, scope, input)
+    const fingerprint = await createMutationFingerprint(JSON.stringify(effective))
     try {
-      return await runner.run(`submit:${teamId}:${weekStart}`, fingerprint, (context) =>
-        submitWeeklyReport(token, teamId, member, weekStart, input, context), isUnreachable)
+      const response = await runner.run(scope, fingerprint, (context) =>
+        submitWeeklyReport(token, teamId, member, weekStart, effective, context), isUnreachable)
+      pendingSubmission.current = null
+      return response
+    } catch (error) {
+      pendingSubmission.current = isUnreachable(error)
+        ? { scope, content: weeklyReportSubmissionContent(effective), input: effective }
+        : null
+      throw error
     } finally {
       await refresh()
     }

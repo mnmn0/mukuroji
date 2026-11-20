@@ -8,6 +8,40 @@ const workItems = [
   { id: 'pricing', teamId: 'core-team', title: 'Update the pricing page', assignedProjectId: 'refero', statusCategory: 'unstarted' },
 ]
 
+/** Notes of a weekly report as the mock stores them. */
+type MockWeeklyReportNotes = {
+  /** Issues and help needed. */
+  issues: string
+  /** Reflection on the week. */
+  reflection: string
+}
+
+/** One Work Item row of a submitted section. */
+type MockWeeklyReportRow = {
+  /** Work Item ID. */
+  workItemId: string
+  /** Minutes recorded against it. */
+  minutes: number
+}
+
+/** A version submitted to the mock. */
+type MockWeeklyReportSubmission = {
+  /** Notes sent with the version. */
+  notes: MockWeeklyReportNotes
+  /** Work Item rows sent in each section. */
+  sections: Record<string, MockWeeklyReportRow[]>
+}
+
+/** The member's week as the mock stores it. */
+type MockWeeklyReportWeek = {
+  /** Saved revision of the notes. */
+  revision: number
+  /** Saved notes. */
+  notes: MockWeeklyReportNotes
+  /** Submitted versions, oldest first. */
+  submissions: MockWeeklyReportSubmission[]
+}
+
 /** Mutable state of the mocked time tracking API. */
 type TimeTrackingMockState = {
   /** Every stored entry. */
@@ -23,7 +57,7 @@ type TimeTrackingMockState = {
   /** Day the Workspace week starts on, 0 (Sunday) to 6. */
   weekStartDay: number
   /** The member's saved notes and submitted bodies of the weekly report, keyed by week. */
-  weeklyReports: Record<string, { revision: number; notes: { issues: string; reflection: string }; submissions: { notes: { issues: string; reflection: string }; sections: Record<string, { workItemId: string; minutes: number }[]> }[] }>
+  weeklyReports: Record<string, MockWeeklyReportWeek>
 }
 
 /**

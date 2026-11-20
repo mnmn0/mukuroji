@@ -6,6 +6,8 @@ export {
   saveWeeklyReportDraftUseCase,
   submitWeeklyReportUseCase,
   toWeeklyReportSubmissionView,
+  type WeeklyReportItemLocation,
+  type WeeklyReportItemLocator,
   type WeeklyReportItemReadCheck,
   type WeeklyReportMemberScope,
 } from './application/weekly-report-use-cases'

@@ -141,16 +141,29 @@ export function TeamTimeTrackingPage() {
 
   if (!teamId) return null
 
+  /**
+   * Builds the link of a view tab. While a weekly report opened at its stored week start is shown,
+   * the weekly report tab keeps that week instead of moving to the Workspace week start.
+   *
+   * @param candidate - View the tab opens.
+   * @returns The tab's path.
+   */
+  const tabHref = (candidate: TimeTrackingView) => {
+    if (candidate === 'report') {
+      return createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
+    }
+    if (candidate === 'weekly-report' && exactReportWeekDay !== undefined) {
+      return createTeamTimeTrackingPath(teamId, 'weekly-report', reportWeekStart, undefined, true)
+    }
+    return createTeamTimeTrackingPath(teamId, candidate, linkWeek)
+  }
+
   return (
     <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error]}>
       <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <TimeTrackingViewTabs
-          getHref={(candidate) => candidate === 'report'
-            ? createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
-            : createTeamTimeTrackingPath(teamId, candidate, linkWeek)}
-          onSelect={(candidate) => { void navigate(candidate === 'report'
-            ? createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
-            : createTeamTimeTrackingPath(teamId, candidate, linkWeek), { replace: true }) }}
+          getHref={tabHref}
+          onSelect={(candidate) => { void navigate(tabHref(candidate), { replace: true }) }}
           t={t}
           view={view}
         />

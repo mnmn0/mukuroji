@@ -28,6 +28,7 @@ async function submitWeek(store: InMemoryWeeklyReportStore, memberKey: string, w
       source: { kind: 'api' },
     }),
     previous: null,
+    receipt: { key: `${memberKey}-${weekStart}`, receipt: 'r' },
     next: { weekStart, revision: 1, updatedAt: at, notes: { issues: '', reflection: '' }, submissionCount: 1, lastSubmittedAt: at },
     submission: {
       version: 1,

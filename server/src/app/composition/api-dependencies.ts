@@ -617,6 +617,7 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
+      loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
     ),
     scheduleBaselines: new DynamoDbProjectScheduleBaselineStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',

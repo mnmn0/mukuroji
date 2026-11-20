@@ -17,6 +17,10 @@ import {
   toSubmitWeeklyReportRequest,
 } from '../src/features/time-tracking/model/personalWeeklyReport'
 import { getTeamWeeklyReportStatus } from '../src/features/time-tracking/api/weeklyReports'
+import {
+  selectWeeklyReportSubmission,
+  weeklyReportSubmissionContent,
+} from '../src/features/time-tracking/mutations/pendingWeeklyReportSubmission'
 import { createWeekPeriod } from '../src/features/time-tracking/model/timePeriod'
 import { reconcileWeeklyReportEditor } from '../src/features/time-tracking/model/weeklyReportNotesEditor'
 import { PersonalWeeklyReport } from '../src/features/time-tracking/ui/PersonalWeeklyReport'
@@ -441,6 +445,33 @@ describe('toSubmitWeeklyReportRequest', () => {
     expect(request.sections.completed).toEqual(report.completed.map((item) => ({ workItemId: item.id, minutes: item.minutes })))
     expect(JSON.stringify(request)).not.toContain('Reduce onboarding friction')
     expect(request.totalMinutes).toBe(report.totalMinutes)
+  })
+})
+
+describe('selectWeeklyReportSubmission', () => {
+  const report = buildPersonalWeeklyReport({
+    weekDays: week.days,
+    today: '2026-11-13',
+    workItems: weeklyReportFixtureWorkItems,
+    entries: timeTrackingFixtureEntries,
+  })
+  const first = toSubmitWeeklyReportRequest(report, { issues: 'Blocked', reflection: '' }, {
+    timeIsPartial: false,
+    expectedSubmissionCount: 0,
+    expectedRevision: 1,
+  })
+  const pending = { scope: 'submit:core-team:2026-11-09', content: weeklyReportSubmissionContent(first), input: first }
+
+  test('retries a submission with a lost response as first sent, even after a refresh read new counts', () => {
+    const refreshed = { ...first, expectedSubmissionCount: 1, expectedRevision: 2 }
+    expect(selectWeeklyReportSubmission(pending, pending.scope, refreshed)).toBe(first)
+  })
+
+  test('sends changed content, or content for another week, as a new submission', () => {
+    const edited = { ...first, expectedSubmissionCount: 1, expectedRevision: 2, notes: { issues: 'Unblocked', reflection: '' } }
+    expect(selectWeeklyReportSubmission(pending, pending.scope, edited)).toBe(edited)
+    expect(selectWeeklyReportSubmission(pending, 'submit:core-team:2026-11-16', first)).toBe(first)
+    expect(selectWeeklyReportSubmission(null, pending.scope, first)).toBe(first)
   })
 })
 

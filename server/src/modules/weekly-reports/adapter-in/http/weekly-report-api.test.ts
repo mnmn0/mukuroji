@@ -95,6 +95,7 @@ async function seedSubmission(memberKey: string) {
       source: { kind: 'api' },
     }),
     previous: null,
+    receipt: { key: `seed-${memberKey}`, receipt: 'seed' },
     next: {
       weekStart: WEEK,
       revision: 1,
@@ -185,6 +186,13 @@ test('saves notes, submits versions, and lists the history of the author', async
   expect(second.status).toBe(201)
   expect(await second.json()).toMatchObject({ submissionCount: 2, submission: { version: 2, notes: { reflection: 'Fixed a typo' } } })
 
+  // A retry of the first request after a later version still answers with the version it produced.
+  const lateRetry = await request(`${OWN_PATH}/submissions`, 'POST', submission(0, 'Good week', 1), 'submit-1')
+  expect(lateRetry.status).toBe(201)
+  const lateReport = await lateRetry.json() as WeeklyReportResponse
+  expect(lateReport.submission).toEqual(report.submission)
+  expect(lateReport.submissionCount).toBe(2)
+
   const first = await request(`${OWN_PATH}?version=1`)
   expect((await first.json() as WeeklyReportResponse).submission?.notes.reflection).toBe('Good week')
   expect((await request(`${OWN_PATH}?version=3`)).status).toBe(404)
@@ -222,7 +230,11 @@ test('lets only the author write a report', async () => {
 })
 
 test('shows a manager the submitted report of a member without the saved notes or hidden Work Items', async () => {
-  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [{ projectId: 'refero', role: 'manager' }] })
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+    detailAssignedProjectIds: { a: 'refero', b: 'secret' },
+  })
   await seedSubmission('sato@example.com')
 
   const read = await request(`/api/teams/core-team/weekly-reports/sato@example.com/${WEEK}`)
@@ -248,6 +260,32 @@ test('shows a manager the submitted report of a member without the saved notes o
   const history = await request('/api/teams/core-team/weekly-reports/sato@example.com')
   expect((await history.json() as WeeklyReportHistoryResponse).weeks).toEqual([
     { weekStart: WEEK, submissionCount: 1, lastSubmittedAt: '2026-11-20T09:00:00.000Z' },
+  ])
+})
+
+test('checks a Work Item at the Project it is in now, and a deleted one at the Project stored at submission', async () => {
+  // `a` was submitted in `refero` and moved to `secret`; `b` was submitted in `secret` and moved to `refero`.
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+    detailAssignedProjectIds: { a: 'secret', b: 'refero' },
+  })
+  await seedSubmission('sato@example.com')
+  const moved = await request(`/api/teams/core-team/weekly-reports/sato@example.com/${WEEK}`)
+  expect((await moved.json() as WeeklyReportResponse).submission?.sections.completed).toEqual([
+    { hidden: true, minutes: 60 },
+    { hidden: false, workItemId: 'b', key: 'SEC-1', title: 'Secret title', minutes: 30 },
+  ])
+
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+    detailMissingIssueIds: ['a', 'b'],
+  })
+  const deleted = await request(`/api/teams/core-team/weekly-reports/sato@example.com/${WEEK}`)
+  expect((await deleted.json() as WeeklyReportResponse).submission?.sections.completed).toEqual([
+    { hidden: false, workItemId: 'a', key: 'REF-1', title: 'Visible title', minutes: 60 },
+    { hidden: true, minutes: 30 },
   ])
 })
 

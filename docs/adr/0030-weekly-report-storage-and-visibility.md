@@ -26,6 +26,9 @@
   書きかけの所感（課題・所感の2つ）、所感の `revision`、提出回数 `submissionCount`、最後の提出時刻を持つ。
 - 提出版の行: `WEEKLY_REPORT#<teamId>#MEMBER#<memberKey>#S#<weekStart>#<version 4桁>`
   （`entryType = weekly-report-submission`）。提出した内容の写しで、`attribute_not_exists` で1回だけ書き、更新しない。
+- 提出の受付行: `WEEKLY_REPORT#<teamId>#MEMBER#<memberKey>#R#<request key>`（`entryType = weekly-report-submission-receipt`）。
+  request key は Team・作成者・週・actor・Idempotency-Key の hash、行には内容込みの receipt hash と作った版番号を持つ。
+  版ごとに1行を残し、更新しない。
 
 `memberKey` は小文字に正規化した Workspace member key、`weekStart` は `YYYY-MM-DD`。
 
@@ -33,9 +36,15 @@
 - 提出は1つの transaction で、週の行の `submissionCount` を CAS で1増やし（所感も同時に保存）、
   提出する所感が編集を始めた時点の `revision` も照合して、別の画面で保存された所感を黙って置き換えない。
   提出版の行を追加し、呼び出し元の membership / Enterprise revision の fence と audit event を入れる。
-  1週あたりの提出は 10 版まで。同じ Idempotency-Key の再送は、週の行に残した最後の提出の receipt で見分けて保存済みの版を返す。
+  同じ transaction で受付行も `attribute_not_exists` で書く。1週あたりの提出は 10 版まで。
+- 提出の再送は、件数を照合する前に受付行を強い整合性の Get で読んで見分ける。receipt が同じならその版を返し、
+  同じ Idempotency-Key で内容が違えば 409（`WeeklyReportIdempotencyConflict`）にする。
+  受付行は版ごとに残るので、応答を失った後に別の版が提出されていても、元の再送は元の版を返す。
+- 保存と提出の応答は、その request が書いた週の行と版から作る（直後に読み直さない）。別の画面の保存や提出を
+  自分の結果として返さないため。
 - 自分の履歴は `begins_with(…#MEMBER#<memberKey>#W#)` の Query を新しい週から読む（ページ送り付き）。
-- 1つの週は週の行の Get と `…#S#<weekStart>#` の Query で読む。
+  提出済みだけを返す場合も DynamoDB の FilterExpression は使わず、行を検証してから絞る。壊れた行が履歴から黙って消えず、読み取りの失敗になる。
+- 1つの週は週の行を Get し、最新版（週の行の `submissionCount`）か指定された版の番号で、提出版の行を完全な key で Get する（Query しない）。
 - 上長の提出状況一覧は、対象メンバーの週の行を BatchGet で読む。
   その週に提出がないメンバーは、前後6日に始まる週の行を `BETWEEN` の Query で探し、提出済みで開始日が最も近い週を
   保存時の開始日つきで返す。Workspace の週の開始曜日を変えた後も、変える前に提出された週報を上長が読めるようにするため。
@@ -51,6 +60,8 @@ Web は下書きの各欄（完了・着手・期限超過・来週・工数）�
 週報を返すとき、各タスクを **読む人の今の権限** で絞る。読む人がそのタスクの Project を viewer 以上で読めない
 （Project 未割当のタスクは Team を読めない）場合、そのタスクは key・title・ID を消し、工数だけを
 「閲覧権限のないタスク」として返す。作成者本人も同じ規則で読む（後で Project を外れた場合も同じ）。
+照合する Project は、そのタスクの **今の** 所属 Project にする（返すたびに Work Item を読む）。提出後に別の Project へ
+移されたタスクを、移す前の Project を読める人に見せないため。削除されたタスクは提出時に写した Project で照合する。
 課題・所感の自由記述は作成者が書いた文なので絞らない。
 Enterprise の role で読む人は、Team を読めるだけでは足りず、そのタスクの Project（Project 未割当なら Team）で
 `work-items.read` を持つ必要がある。
@@ -62,6 +73,13 @@ Enterprise の role で読む人は、Team を読めるだけでは足りず、�
   自分が manager の Project のメンバー（Team 全体の管理者なら Team の全 Project のメンバー）の提出版と履歴、
   その週の提出状況（提出済み・未提出）。書きかけの所感は読めない。
   Project のメンバーかは旧形式の Project 権限を Team に結び付けて判定し、複数の Team が同じ Project ID を持つ曖昧なものは数えない。
+
+### Audit
+
+保存と提出は audit event（`team.weekly_report_draft_saved` / `team.weekly_report_submitted`）を同じ transaction で書く。
+本文は載せない。member key は email のことがあるので、target ID には載せず、Workspace Audit の仮名
+（`MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` による HMAC）に `/weekly-report/<weekStart>[/<version>]` を付けたものにする。
+audit が有効で鍵がない、または不正なときは書き込みを 503 で止める。
 
 ## 検討した選択肢
 

@@ -47,11 +47,31 @@ export type WeeklyReportWeekRecord = {
   submissionCount: number
   /** ISO timestamp of the latest submission. */
   lastSubmittedAt?: string
-  /** Receipt of the request that produced the latest submission, so a retry is recognized. */
-  lastSubmissionReceipt?: string
-  /** Key of that request without its content, so a reused Idempotency-Key is recognized. */
-  lastSubmissionKey?: string
 }
+
+/** Durable record of one submission request, kept for every version so any retry is recognized. */
+export type WeeklyReportSubmissionReceipt = {
+  /** Hash of the request's Idempotency-Key and content. */
+  receipt: string
+  /** Week the request submitted. */
+  weekStart: string
+  /** Version the request produced. */
+  version: number
+}
+
+/** Where a Work Item referenced by a stored version is now. */
+export type WeeklyReportItemLocation = {
+  /** Project the Work Item is assigned to now; absent for a Team-level Work Item. */
+  projectId?: string
+}
+
+/**
+ * Reads where the referenced Work Items are now. Work Items that no longer exist are absent.
+ *
+ * @param workItemIds - Distinct referenced IDs.
+ * @returns Current locations keyed by Work Item ID.
+ */
+export type WeeklyReportItemLocator = (workItemIds: readonly string[]) => Promise<ReadonlyMap<string, WeeklyReportItemLocation>>
 
 /** One submitted version as stored, before it is filtered for a reader. */
 export type StoredWeeklyReportSubmission = {
@@ -100,6 +120,8 @@ export type SaveWeeklyReportWeekInput<TCallerCheck, TAudit> = WeeklyReportMember
 export type SubmitWeeklyReportStoreInput<TCallerCheck, TAudit> = SaveWeeklyReportWeekInput<TCallerCheck, TAudit> & {
   /** New version to add; never replaced once stored. */
   submission: StoredWeeklyReportSubmission
+  /** Receipt stored with the version under the request's key; the write fails if the key exists. */
+  receipt: { key: string; receipt: string }
 }
 
 /** One page of a member's weeks. */
@@ -158,6 +180,14 @@ export type WeeklyReportStore<TCallerCheck, TAudit> = {
    * @returns The version, or `null` when it does not exist.
    */
   getSubmission(scope: WeeklyReportMemberScope, weekStart: string, version: number): Promise<StoredWeeklyReportSubmission | null>
+  /**
+   * Reads the receipt stored by an earlier submission request with the same key.
+   *
+   * @param scope - Author.
+   * @param submissionKey - Key of the request, derived from its Idempotency-Key without content.
+   * @returns The receipt, or `null` when no submission used the key.
+   */
+  getSubmissionReceipt(scope: WeeklyReportMemberScope, submissionKey: string): Promise<WeeklyReportSubmissionReceipt | null>
   /**
    * Replaces a week's notes when the row still has the previous revision.
    *
@@ -221,15 +251,27 @@ function addDays(date: string, days: number): string {
  * @param row - Stored row.
  * @param items - Resolved Work Items keyed by ID.
  * @param canRead - Reader check.
+ * @param locations - Where the Work Items are now; a Work Item found there is checked at its
+ *   current Project instead of the one stored at submission.
  * @returns The visible row, or a hidden row carrying only the minutes.
  */
 function toItemView(
   row: WeeklyReportItemInput,
   items: ReadonlyMap<string, WeeklyReportStoredItem>,
   canRead: WeeklyReportItemReadCheck,
+  locations?: ReadonlyMap<string, WeeklyReportItemLocation>,
 ): WeeklyReportItemView {
   const item = items.get(row.workItemId)
-  if (!item || !canRead(item)) return { hidden: true, minutes: row.minutes }
+  if (!item) return { hidden: true, minutes: row.minutes }
+  const location = locations?.get(item.workItemId)
+  const checked: WeeklyReportStoredItem = location === undefined
+    ? item
+    : {
+        workItemId: item.workItemId,
+        title: item.title,
+        ...(location.projectId === undefined ? {} : { projectId: location.projectId }),
+      }
+  if (!canRead(checked)) return { hidden: true, minutes: row.minutes }
   return {
     hidden: false,
     workItemId: item.workItemId,
@@ -246,14 +288,16 @@ function toItemView(
  *
  * @param submission - Stored version.
  * @param canRead - Reader check.
+ * @param locations - Where the Work Items are now, when known.
  * @returns The version as the reader sees it.
  */
 export function toWeeklyReportSubmissionView(
   submission: StoredWeeklyReportSubmission,
   canRead: WeeklyReportItemReadCheck,
+  locations?: ReadonlyMap<string, WeeklyReportItemLocation>,
 ): WeeklyReportSubmission {
   const items = new Map(submission.items.map((item) => [item.workItemId, item]))
-  const view = (rows: readonly WeeklyReportItemInput[]) => rows.map((row) => toItemView(row, items, canRead))
+  const view = (rows: readonly WeeklyReportItemInput[]) => rows.map((row) => toItemView(row, items, canRead, locations))
   return {
     version: submission.version,
     submittedAt: submission.submittedAt,
@@ -280,6 +324,11 @@ export type ReadWeeklyReportOptions = {
   version?: number
   /** Reader check applied to every Work Item. */
   canReadItem: WeeklyReportItemReadCheck
+  /**
+   * Reads where the version's Work Items are now, so one moved to a Project the reader cannot
+   * read is hidden. Without it, the Project stored at submission is checked.
+   */
+  locateItems?: WeeklyReportItemLocator
 }
 
 /**
@@ -304,19 +353,46 @@ export async function readWeeklyReportUseCase<TCallerCheck, TAudit>(
   if (options.version !== undefined && (version < 1 || version > submissionCount)) {
     throw new ProjectDataError(404, 'WeeklyReportVersionNotFound', 'The weekly report version was not found.')
   }
+  return await buildWeeklyReportResponse(store, scope, weekStart, week, version, options)
+}
+
+/**
+ * Builds a report response from a week row the caller already holds, reading only the requested
+ * version, which never changes once stored.
+ *
+ * @param store - Weekly report persistence.
+ * @param scope - Authorized author.
+ * @param weekStart - First day of the week.
+ * @param week - Week row to report, or `null` when nothing was saved.
+ * @param version - Version to include; 0 for none.
+ * @param options - Reader options.
+ * @returns The report response.
+ * @throws ProjectDataError 502 when the version is missing.
+ */
+async function buildWeeklyReportResponse<TCallerCheck, TAudit>(
+  store: WeeklyReportStore<TCallerCheck, TAudit>,
+  scope: WeeklyReportMemberScope,
+  weekStart: string,
+  week: WeeklyReportWeekRecord | null,
+  version: number,
+  options: ReadWeeklyReportOptions,
+): Promise<WeeklyReportResponse> {
   const submission = version > 0 ? await store.getSubmission(scope, weekStart, version) : null
   if (version > 0 && !submission) {
     throw new ProjectDataError(502, 'WeeklyReportCorruptState', 'The stored weekly report is invalid.')
   }
+  const locations = submission && options.locateItems
+    ? await options.locateItems(submission.items.map((item) => item.workItemId))
+    : undefined
   return {
     teamId: scope.teamId,
     memberKey: scope.memberKey,
     weekStart,
-    submissionCount,
+    submissionCount: week?.submissionCount ?? 0,
     ...(options.includeDraft && week
       ? { draft: { revision: week.revision, updatedAt: week.updatedAt, notes: { ...week.notes } } }
       : {}),
-    ...(submission ? { submission: toWeeklyReportSubmissionView(submission, options.canReadItem) } : {}),
+    ...(submission ? { submission: toWeeklyReportSubmissionView(submission, options.canReadItem, locations) } : {}),
   }
 }
 
@@ -328,7 +404,7 @@ export async function readWeeklyReportUseCase<TCallerCheck, TAudit>(
  * @param weekStart - First day of the week.
  * @param body - Untrusted request body.
  * @param mutation - Mutation time, caller fences, and audit context.
- * @returns The report response with the saved notes and the latest version.
+ * @returns The report response with the notes this request saved and the version they follow.
  * @throws ProjectDataError 400 for an invalid body and 409 for a stale revision.
  */
 export async function saveWeeklyReportDraftUseCase<TCallerCheck, TAudit>(
@@ -336,7 +412,7 @@ export async function saveWeeklyReportDraftUseCase<TCallerCheck, TAudit>(
   scope: WeeklyReportMemberScope,
   weekStart: string,
   body: unknown,
-  mutation: WeeklyReportMutation<TCallerCheck, TAudit> & { canReadItem: WeeklyReportItemReadCheck },
+  mutation: WeeklyReportMutation<TCallerCheck, TAudit> & { canReadItem: WeeklyReportItemReadCheck; locateItems?: WeeklyReportItemLocator },
 ): Promise<WeeklyReportResponse> {
   const record = isRecord(body) ? body : {}
   const expectedRevision = record.expectedRevision
@@ -346,14 +422,18 @@ export async function saveWeeklyReportDraftUseCase<TCallerCheck, TAudit>(
   const notes = parseWeeklyReportNotes(record.notes)
   if (!notes.ok) throw new ProjectDataError(400, 'InvalidWeeklyReport', notes.message)
   const previous = await store.getWeek(scope, weekStart)
-  const readOptions = { includeDraft: true, canReadItem: mutation.canReadItem }
+  const readOptions: ReadWeeklyReportOptions = {
+    includeDraft: true,
+    canReadItem: mutation.canReadItem,
+    ...(mutation.locateItems ? { locateItems: mutation.locateItems } : {}),
+  }
   if (
     previous &&
     previous.revision === expectedRevision + 1 &&
     sameNotes(previous.notes, notes.value)
   ) {
     // The same notes already produced the current revision, and only the response was lost.
-    return await readWeeklyReportUseCase(store, scope, weekStart, readOptions)
+    return await buildWeeklyReportResponse(store, scope, weekStart, previous, previous.submissionCount, readOptions)
   }
   if ((previous?.revision ?? 0) !== expectedRevision) throw staleWeek()
   const next: WeeklyReportWeekRecord = {
@@ -364,7 +444,8 @@ export async function saveWeeklyReportDraftUseCase<TCallerCheck, TAudit>(
     notes: notes.value,
   }
   await store.saveDraft({ ...scope, ...mutation, previous, next })
-  return await readWeeklyReportUseCase(store, scope, weekStart, readOptions)
+  // Answer with what this request stored, not a later save from another window.
+  return await buildWeeklyReportResponse(store, scope, weekStart, next, next.submissionCount, readOptions)
 }
 
 /** Submission-specific inputs of {@link submitWeeklyReportUseCase}. */
@@ -377,6 +458,8 @@ export type SubmitWeeklyReportMutation<TCallerCheck, TAudit> = WeeklyReportMutat
   resolveItems: WeeklyReportItemResolver
   /** Reader check for the response, which the author reads. */
   canReadItem: WeeklyReportItemReadCheck
+  /** Reads where the Work Items of an earlier version are now, for a retried request. */
+  locateItems?: WeeklyReportItemLocator
 }
 
 /**
@@ -404,16 +487,22 @@ export async function submitWeeklyReportUseCase<TCallerCheck, TAudit>(
   const parsed = parseSubmitWeeklyReportRequest(body)
   if (!parsed.ok) throw new ProjectDataError(400, 'InvalidWeeklyReport', parsed.message)
   const request = parsed.value
-  const readOptions = { includeDraft: true, canReadItem: mutation.canReadItem }
+  const readOptions: ReadWeeklyReportOptions = {
+    includeDraft: true,
+    canReadItem: mutation.canReadItem,
+    ...(mutation.locateItems ? { locateItems: mutation.locateItems } : {}),
+  }
+  // The receipt is checked before the count, so a retry is recognized even after later versions.
+  const stored = await store.getSubmissionReceipt(scope, mutation.submissionKey)
+  if (stored) {
+    if (stored.receipt !== mutation.submissionReceipt || stored.weekStart !== weekStart) {
+      throw new ProjectDataError(409, 'WeeklyReportIdempotencyConflict', 'This Idempotency-Key was already used for another submission.')
+    }
+    // This same request already produced a version, and only the response was lost.
+    return await buildWeeklyReportResponse(store, scope, weekStart, await store.getWeek(scope, weekStart), stored.version, readOptions)
+  }
   const previous = await store.getWeek(scope, weekStart)
   const previousCount = previous?.submissionCount ?? 0
-  if (previous?.lastSubmissionReceipt === mutation.submissionReceipt && previousCount === request.expectedSubmissionCount + 1) {
-    // This same request already produced the latest version, and only the response was lost.
-    return await readWeeklyReportUseCase(store, scope, weekStart, readOptions)
-  }
-  if (previous?.lastSubmissionKey === mutation.submissionKey) {
-    throw new ProjectDataError(409, 'WeeklyReportIdempotencyConflict', 'This Idempotency-Key was already used for another submission.')
-  }
   // A stale count means another submission; a stale revision means notes saved elsewhere that
   // this submission would replace.
   if (previousCount !== request.expectedSubmissionCount || (previous?.revision ?? 0) !== request.expectedRevision) {
@@ -458,8 +547,6 @@ export async function submitWeeklyReportUseCase<TCallerCheck, TAudit>(
     notes: request.notes,
     submissionCount: version,
     lastSubmittedAt: mutation.now,
-    lastSubmissionReceipt: mutation.submissionReceipt,
-    lastSubmissionKey: mutation.submissionKey,
   }
   await store.submit({
     ...scope,
@@ -469,8 +556,18 @@ export async function submitWeeklyReportUseCase<TCallerCheck, TAudit>(
     previous,
     next,
     submission,
+    receipt: { key: mutation.submissionKey, receipt: mutation.submissionReceipt },
   })
-  return await readWeeklyReportUseCase(store, scope, weekStart, readOptions)
+  // Answer with the version this request stored, not a later one from another window. Its Work
+  // Items were resolved just now, so their stored Projects are current.
+  return {
+    teamId: scope.teamId,
+    memberKey: scope.memberKey,
+    weekStart,
+    submissionCount: next.submissionCount,
+    draft: { revision: next.revision, updatedAt: next.updatedAt, notes: { ...next.notes } },
+    submission: toWeeklyReportSubmissionView(submission, mutation.canReadItem),
+  }
 }
 
 /**

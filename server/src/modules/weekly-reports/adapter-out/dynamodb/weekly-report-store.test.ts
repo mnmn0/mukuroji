@@ -1,5 +1,6 @@
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { expect, test } from 'bun:test'
+import { WEEKLY_REPORT_MAX_MINUTES } from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../../../audit'
 import type { StoredWeeklyReportSubmission, WeeklyReportWeekRecord } from '../../application/weekly-report-use-cases'
 import { DynamoDbWeeklyReportStore } from './weekly-report-store'
@@ -42,6 +43,12 @@ const submission: StoredWeeklyReportSubmission = {
   timeIsPartial: false,
   notes: { issues: 'Blocked', reflection: 'Fine' },
 }
+
+/** Receipt of the test submission request. */
+const receipt = { key: 'request-hash', receipt: 'content-hash' }
+
+/** Workspace Audit pseudonym key used when audit is on. */
+const pseudonymKey = 'a'.repeat(64)
 
 /** Commands the fake client received. */
 type SentCommand = {
@@ -108,11 +115,11 @@ function cancellation(codes: string[]) {
 
 test('writes the week, the new version, the caller fence, and the audit event in one transaction', async () => {
   const sent: SentCommand[] = []
-  const store = new DynamoDbWeeklyReportStore('planning', fakeClient({}, sent), 'audit')
-  await store.submit({ ...scope, now: week.updatedAt, callerAuthorization, auditContext, previous: null, next: week, submission })
+  const store = new DynamoDbWeeklyReportStore('planning', fakeClient({}, sent), 'audit', pseudonymKey)
+  await store.submit({ ...scope, now: week.updatedAt, callerAuthorization, auditContext, previous: null, next: week, submission, receipt })
   const input = sent[0]?.input
   const items = Array.isArray(input?.TransactItems) ? input.TransactItems : []
-  expect(items).toHaveLength(4)
+  expect(items).toHaveLength(5)
   expect(items[0]).toMatchObject({
     Put: {
       TableName: 'planning',
@@ -126,11 +133,56 @@ test('writes the week, the new version, the caller fence, and the audit event in
       ConditionExpression: 'attribute_not_exists(recordKey)',
     },
   })
-  expect(items[2]).toEqual(callerAuthorization[0])
-  // The audit event names the week and version but carries none of the report text.
-  const audit = JSON.stringify(items[3])
+  expect(items[2]).toMatchObject({
+    Put: {
+      Item: {
+        recordKey: 'WEEKLY_REPORT#t#MEMBER#m%40example.com#R#request-hash',
+        entryType: 'weekly-report-submission-receipt',
+        receipt: 'content-hash',
+        weekStart: '2026-11-16',
+        version: 1,
+      },
+      ConditionExpression: 'attribute_not_exists(recordKey)',
+    },
+  })
+  expect(items[3]).toEqual(callerAuthorization[0])
+  // The audit event names the week and version but carries none of the report text or the member key.
+  const audit = JSON.stringify(items[4])
   expect(audit).toContain('weekly_report_submitted')
+  expect(audit).toContain('/weekly-report/2026-11-16/1')
   expect(audit).not.toContain('Blocked')
+  expect(audit).not.toContain('m@example.com')
+  expect(audit).not.toContain('m%40example.com')
+})
+
+test('refuses an audited write when the Audit pseudonym key is missing', async () => {
+  const sent: SentCommand[] = []
+  const store = new DynamoDbWeeklyReportStore('planning', fakeClient({}, sent), 'audit')
+  await expect(store.submit({ ...scope, now: week.updatedAt, callerAuthorization, auditContext, previous: null, next: week, submission, receipt }))
+    .rejects.toMatchObject({ status: 503, code: 'WeeklyReportAuditUnavailable' })
+  expect(sent).toHaveLength(0)
+})
+
+test('reads a stored submission receipt and refuses one of another member', async () => {
+  const row = {
+    workspaceId: 'w',
+    recordKey: 'WEEKLY_REPORT#t#MEMBER#m%40example.com#R#request-hash',
+    entryType: 'weekly-report-submission-receipt',
+    schemaVersion: 1,
+    teamId: 't',
+    memberKey: 'm@example.com',
+    receipt: 'content-hash',
+    weekStart: '2026-11-16',
+    version: 2,
+  }
+  const sent: SentCommand[] = []
+  const store = new DynamoDbWeeklyReportStore('planning', fakeClient({
+    GetCommand: [{ Item: row }, {}, { Item: { ...row, memberKey: 'other@example.com' } }],
+  }, sent))
+  expect(await store.getSubmissionReceipt(scope, 'request-hash')).toEqual({ receipt: 'content-hash', weekStart: '2026-11-16', version: 2 })
+  expect(sent[0]?.input).toMatchObject({ ConsistentRead: true, Key: { recordKey: row.recordKey } })
+  expect(await store.getSubmissionReceipt(scope, 'request-hash')).toBeNull()
+  await expect(store.getSubmissionReceipt(scope, 'request-hash')).rejects.toMatchObject({ status: 502 })
 })
 
 test('guards a replacement with the previous revision and submission count', async () => {
@@ -152,14 +204,14 @@ test('guards a replacement with the previous revision and submission count', asy
 
 test('maps a failed condition to a conflict and throttling to a retryable failure', async () => {
   const conflict = new DynamoDbWeeklyReportStore('planning', fakeClient({
-    TransactWriteCommand: [cancellation(['ConditionalCheckFailed', 'None', 'None'])],
+    TransactWriteCommand: [cancellation(['None', 'None', 'ConditionalCheckFailed', 'None'])],
   }))
-  await expect(conflict.submit({ ...scope, now: week.updatedAt, callerAuthorization, auditContext, previous: null, next: week, submission }))
+  await expect(conflict.submit({ ...scope, now: week.updatedAt, callerAuthorization, auditContext, previous: null, next: week, submission, receipt }))
     .rejects.toMatchObject({ status: 409, code: 'WeeklyReportConflict' })
   const throttled = new DynamoDbWeeklyReportStore('planning', fakeClient({
-    TransactWriteCommand: [cancellation(['ThrottlingError', 'None', 'None'])],
+    TransactWriteCommand: [cancellation(['ThrottlingError', 'None', 'None', 'None'])],
   }))
-  await expect(throttled.submit({ ...scope, now: week.updatedAt, callerAuthorization, auditContext, previous: null, next: week, submission }))
+  await expect(throttled.submit({ ...scope, now: week.updatedAt, callerAuthorization, auditContext, previous: null, next: week, submission, receipt }))
     .rejects.toMatchObject({ status: 503 })
 })
 
@@ -188,9 +240,14 @@ test('reads a stored version and refuses one with an unknown section', async () 
     ...submission,
   }
   const store = new DynamoDbWeeklyReportStore('planning', fakeClient({
-    GetCommand: [{ Item: row }, { Item: { ...row, sections: { ...submission.sections, extra: [] } } }],
+    GetCommand: [
+      { Item: row },
+      { Item: { ...row, sections: { ...submission.sections, extra: [] } } },
+      { Item: { ...row, totalMinutes: WEEKLY_REPORT_MAX_MINUTES + 1 } },
+    ],
   }))
   expect(await store.getSubmission(scope, '2026-11-16', 1)).toEqual(submission)
+  await expect(store.getSubmission(scope, '2026-11-16', 1)).rejects.toMatchObject({ status: 502 })
   await expect(store.getSubmission(scope, '2026-11-16', 1)).rejects.toMatchObject({ status: 502 })
 })
 
@@ -210,10 +267,26 @@ test('pages the history newest first and keeps reading until the page is full', 
   expect(sent[0]?.input).toMatchObject({
     ScanIndexForward: false,
     Limit: 2,
-    FilterExpression: '#submissionCount > :zero',
     ExclusiveStartKey: { workspaceId: 'w', recordKey: 'WEEKLY_REPORT#t#MEMBER#m%40example.com#W#2026-11-23' },
   })
   expect(sent[1]?.input).toMatchObject({ Limit: 1, ExclusiveStartKey: { recordKey: 'k1' } })
+})
+
+test('skips weeks never submitted only after validating them, so a malformed row fails the history', async () => {
+  const draftOnly = weekRow({
+    recordKey: 'WEEKLY_REPORT#t#MEMBER#m%40example.com#W#2026-11-09',
+    weekStart: '2026-11-09',
+    submissionCount: 0,
+    lastSubmittedAt: undefined,
+  })
+  const store = new DynamoDbWeeklyReportStore('planning', fakeClient({
+    QueryCommand: [
+      { Items: [weekRow(), draftOnly] },
+      { Items: [weekRow({ submissionCount: 'many' })] },
+    ],
+  }))
+  expect(await store.listWeeks(scope, { limit: 5, submittedOnly: true })).toEqual({ weeks: [week], hasMore: false })
+  await expect(store.listWeeks(scope, { limit: 5, submittedOnly: true })).rejects.toMatchObject({ status: 502 })
 })
 
 test('reads several members\' weeks and retries unprocessed keys', async () => {
@@ -225,12 +298,25 @@ test('reads several members\' weeks and retries unprocessed keys', async () => {
         Responses: { planning: [weekRow()] },
         UnprocessedKeys: { planning: { Keys: [{ workspaceId: 'w', recordKey: 'WEEKLY_REPORT#t#MEMBER#o%40example.com#W#2026-11-16' }] } },
       },
-      { Responses: { planning: [] } },
+      {
+        Responses: {
+          planning: [weekRow({ recordKey: 'WEEKLY_REPORT#t#MEMBER#o%40example.com#W#2026-11-16', memberKey: other.memberKey })],
+        },
+      },
     ],
   }, sent))
   const weeks = await store.getWeeks(scope, ['m@example.com', other.memberKey], '2026-11-16')
-  expect([...weeks.entries()]).toEqual([['m@example.com', week]])
+  expect([...weeks.entries()]).toEqual([['m@example.com', week], [other.memberKey, week]])
   expect(sent).toHaveLength(2)
+  // Only the unprocessed key is sent again.
+  expect(sent[1]?.input).toEqual({
+    RequestItems: {
+      planning: {
+        Keys: [{ workspaceId: 'w', recordKey: 'WEEKLY_REPORT#t#MEMBER#o%40example.com#W#2026-11-16' }],
+        ConsistentRead: true,
+      },
+    },
+  })
 })
 
 test('lists the submitted weeks that start within a range, following pages', async () => {
@@ -244,7 +330,6 @@ test('lists the submitted weeks that start within a range, following pages', asy
   expect(await store.listSubmittedWeeksBetween(scope, '2026-11-09', '2026-11-21')).toEqual([week])
   expect(sent[0]?.input).toMatchObject({
     KeyConditionExpression: '#workspaceId = :workspaceId AND #recordKey BETWEEN :from AND :to',
-    FilterExpression: '#submissionCount > :zero',
     ExpressionAttributeValues: {
       ':from': 'WEEKLY_REPORT#t#MEMBER#m%40example.com#W#2026-11-09',
       ':to': 'WEEKLY_REPORT#t#MEMBER#m%40example.com#W#2026-11-21',

@@ -9,6 +9,8 @@ import {
   readWeeklyReportWeekStart,
   saveWeeklyReportDraftUseCase,
   submitWeeklyReportUseCase,
+  type WeeklyReportItemLocation,
+  type WeeklyReportItemLocator,
   type WeeklyReportItemReadCheck,
   type WeeklyReportMemberScope,
 } from '../../modules/weekly-reports'
@@ -30,7 +32,7 @@ import {
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import type { TeamPermissionContext } from '../shared/workspace-access'
 
-/** Most Work Items resolved at once while a report is submitted. */
+/** Most Work Items read at once while a report is submitted or read. */
 const RESOLVE_CONCURRENCY = 8
 
 /**
@@ -91,6 +93,7 @@ export function registerWeeklyReportRoutes(routeApp: Hono): void {
       return c.json(await readWeeklyReportUseCase(workItemDependencies.weeklyReports, scope, weekStart, {
         includeDraft: isAuthor,
         canReadItem: createItemReadCheck(principal, readerContext),
+        locateItems: createItemLocator(principal, scope.teamId),
         ...(version === undefined ? {} : { version }),
       }))
     })
@@ -108,6 +111,7 @@ export function registerWeeklyReportRoutes(routeApp: Hono): void {
         callerAuthorization: await createCallerAuthorization(principal, scope.teamId),
         auditContext: createApiMutationContext(c, principal, body),
         canReadItem: createItemReadCheck(principal, authorContext),
+        locateItems: createItemLocator(principal, scope.teamId),
       }))
     })
   })
@@ -129,6 +133,7 @@ export function registerWeeklyReportRoutes(routeApp: Hono): void {
         submissionKey: createSubmissionHash('key', scope, weekStart, auditContext.actor.id, auditContext.idempotencyKeyHash),
         resolveItems: async (workItemIds) => await resolveAuthorItems(principal, scope.teamId, workItemIds, canReadItem),
         canReadItem,
+        locateItems: createItemLocator(principal, scope.teamId),
       })
       return c.json(response, 201)
     })
@@ -370,6 +375,40 @@ function createItemReadCheck(principal: WorkspacePrincipal, context: TeamPermiss
   }
 }
 
+/** A Work Item as the weekly report routes read it from the Team. */
+type TeamIssue = Awaited<ReturnType<typeof workItemDependencies.teamIssues.getTeamIssueDetail>>['issue']
+
+/**
+ * Reads Work Items of the Team a few at a time, leaving out those that no longer exist.
+ *
+ * @param principal - Reader.
+ * @param teamId - Team ID.
+ * @param workItemIds - Distinct IDs.
+ * @returns The Work Items found, keyed by ID.
+ */
+async function readTeamIssues(principal: WorkspacePrincipal, teamId: string, workItemIds: readonly string[]) {
+  const found = new Map<string, TeamIssue>()
+  const unique = [...new Set(workItemIds)]
+  for (let offset = 0; offset < unique.length; offset += RESOLVE_CONCURRENCY) {
+    const batch = unique.slice(offset, offset + RESOLVE_CONCURRENCY)
+    const issues = await Promise.all(batch.map(async (workItemId) => {
+      try {
+        const { issue } = await workItemDependencies.teamIssues.getTeamIssueDetail(principal.directoryId, teamId, workItemId, {
+          consistentIssueRead: false,
+          includeEvents: false,
+        })
+        return issue.id === workItemId ? issue : undefined
+      } catch (error) {
+        // A deleted Work Item is left out; the caller decides what that means.
+        if (isTeamIssueNotFoundError(error)) return undefined
+        throw error
+      }
+    }))
+    for (const issue of issues) if (issue) found.set(issue.id, issue)
+  }
+  return found
+}
+
 /**
  * Reads the referenced Work Items with the author's permissions, keeping those the author may
  * read and copying their key, title, Project, and planned end.
@@ -387,32 +426,38 @@ async function resolveAuthorItems(
   canRead: WeeklyReportItemReadCheck,
 ) {
   const resolved = new Map<string, WeeklyReportStoredItem>()
-  for (let offset = 0; offset < workItemIds.length; offset += RESOLVE_CONCURRENCY) {
-    const batch = workItemIds.slice(offset, offset + RESOLVE_CONCURRENCY)
-    const items = await Promise.all(batch.map(async (workItemId) => {
-      try {
-        const { issue } = await workItemDependencies.teamIssues.getTeamIssueDetail(principal.directoryId, teamId, workItemId, {
-          consistentIssueRead: false,
-          includeEvents: false,
-        })
-        const plannedEndDate = readWorkItemPlannedEndDate(issue.schedule)
-        const item: WeeklyReportStoredItem = {
-          workItemId: issue.id,
-          ...(issue.key === undefined ? {} : { key: issue.key }),
-          title: issue.title,
-          ...(issue.assignedProjectId === undefined ? {} : { projectId: issue.assignedProjectId }),
-          ...(plannedEndDate === undefined ? {} : { plannedEndDate }),
-        }
-        return item.workItemId === workItemId && canRead(item) ? item : undefined
-      } catch (error) {
-        // A Work Item deleted since the draft was built is left out, like one the author cannot read.
-        if (isTeamIssueNotFoundError(error)) return undefined
-        throw error
-      }
-    }))
-    for (const item of items) if (item) resolved.set(item.workItemId, item)
+  // A Work Item deleted since the draft was built is left out, like one the author cannot read.
+  for (const issue of (await readTeamIssues(principal, teamId, workItemIds)).values()) {
+    const plannedEndDate = readWorkItemPlannedEndDate(issue.schedule)
+    const item: WeeklyReportStoredItem = {
+      workItemId: issue.id,
+      ...(issue.key === undefined ? {} : { key: issue.key }),
+      title: issue.title,
+      ...(issue.assignedProjectId === undefined ? {} : { projectId: issue.assignedProjectId }),
+      ...(plannedEndDate === undefined ? {} : { plannedEndDate }),
+    }
+    if (canRead(item)) resolved.set(item.workItemId, item)
   }
   return resolved
+}
+
+/**
+ * Builds the locator that reads where the Work Items of a stored version are now, so a Work Item
+ * moved to another Project is checked against that Project. A deleted Work Item is absent and
+ * keeps the Project stored at submission.
+ *
+ * @param principal - Reader.
+ * @param teamId - Team ID.
+ * @returns The locator.
+ */
+function createItemLocator(principal: WorkspacePrincipal, teamId: string): WeeklyReportItemLocator {
+  return async (workItemIds) => {
+    const locations = new Map<string, WeeklyReportItemLocation>()
+    for (const issue of (await readTeamIssues(principal, teamId, workItemIds)).values()) {
+      locations.set(issue.id, issue.assignedProjectId === undefined ? {} : { projectId: issue.assignedProjectId })
+    }
+    return locations
+  }
 }
 
 /**

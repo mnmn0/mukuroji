@@ -17,7 +17,7 @@ import {
   type WeeklyReportSectionName,
   type WeeklyReportStoredItem,
 } from '@mukuroji/contracts'
-import { createMutationAuditEventPut, type MutationAuditContext } from '../../../audit'
+import { createMutationAuditEventPut, createWorkspaceMemberAuditEntityId, type MutationAuditContext } from '../../../audit'
 import { ProjectDataError } from '../../../directory'
 import type {
   SaveWeeklyReportWeekInput,
@@ -25,6 +25,7 @@ import type {
   SubmitWeeklyReportStoreInput,
   WeeklyReportMemberScope,
   WeeklyReportStore as Store,
+  WeeklyReportSubmissionReceipt,
   WeeklyReportTeamScope,
   WeeklyReportWeekPage,
   WeeklyReportWeekRecord,
@@ -45,12 +46,16 @@ type SubmitInput = SubmitWeeklyReportStoreInput<WeeklyReportCallerAuthorizationC
 const WEEK_TYPE = 'weekly-report'
 /** Planning-table record type of one submitted version. */
 const SUBMISSION_TYPE = 'weekly-report-submission'
+/** Planning-table record type of one submission request's receipt. */
+const RECEIPT_TYPE = 'weekly-report-submission-receipt'
 /** Schema version of both row types. */
 const SCHEMA_VERSION = 1
 /** Most keys one BatchGetItem request may carry. */
 const BATCH_GET_LIMIT = 100
 /** Attempts of a BatchGetItem request before unprocessed keys are a retryable failure. */
 const BATCH_GET_ATTEMPTS = 4
+/** First wait before unprocessed keys are sent again, doubled on each later attempt. */
+const BATCH_GET_BASE_DELAY_MS = 50
 
 /**
  * Builds the record key prefix of one member's weekly reports in a Team.
@@ -85,6 +90,28 @@ function submissionKey(scope: Pick<WeeklyReportMemberScope, 'teamId' | 'memberKe
   return `${memberPrefix(scope)}#S#${weekStart}#${String(version).padStart(4, '0')}`
 }
 
+/**
+ * Builds the record key of one submission request's receipt.
+ *
+ * @param scope - Team and author.
+ * @param key - Request key, a hash of the week, actor, and Idempotency-Key.
+ * @returns The receipt record key.
+ */
+function receiptKey(scope: Pick<WeeklyReportMemberScope, 'teamId' | 'memberKey'>, key: string) {
+  return `${memberPrefix(scope)}#R#${key}`
+}
+
+/**
+ * Waits before unprocessed BatchGetItem keys are sent again, with full jitter.
+ *
+ * @param attempt - Attempts already made, 1 or more.
+ * @returns Resolves after the wait.
+ */
+async function backOff(attempt: number) {
+  const ceiling = BATCH_GET_BASE_DELAY_MS * 2 ** (attempt - 1)
+  await new Promise((resolve) => { setTimeout(resolve, Math.random() * ceiling) })
+}
+
 /** Stores each member's week and each submitted version as Planning-table rows. */
 export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
   /** Existing Planning table name. */
@@ -93,6 +120,8 @@ export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
   private readonly client: DynamoDBDocumentClient
   /** Audit event table, when audit is configured. */
   private readonly auditTableName: string | undefined
+  /** Workspace Audit pseudonym key, which keeps member keys out of Audit target IDs. */
+  private readonly auditPseudonymKey: string | undefined
 
   /**
    * Creates the store.
@@ -100,11 +129,31 @@ export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
    * @param tableName - Existing Planning table.
    * @param client - Configured document client.
    * @param auditTableName - Audit event table written in the same transaction, when configured.
+   * @param auditPseudonymKey - Workspace Audit pseudonym key; required while audit is on.
    */
-  constructor(tableName: string, client: DynamoDBDocumentClient, auditTableName?: string) {
+  constructor(tableName: string, client: DynamoDBDocumentClient, auditTableName?: string, auditPseudonymKey?: string) {
     this.tableName = tableName
     this.client = client
     this.auditTableName = auditTableName
+    this.auditPseudonymKey = auditPseudonymKey
+  }
+
+  /**
+   * Builds the Audit target ID of a member's week without the member key, which may be an email.
+   *
+   * @param scope - Workspace and author.
+   * @param suffix - Week and, for a version, its number.
+   * @returns The target ID, or a placeholder while audit is off.
+   * @throws ProjectDataError 503 when audit is on and the pseudonym key is missing or invalid.
+   */
+  private auditTargetId(scope: Pick<WeeklyReportMemberScope, 'workspaceId' | 'memberKey'>, suffix: string) {
+    if (!this.auditTableName) return 'audit-disabled'
+    try {
+      if (!this.auditPseudonymKey) throw new TypeError('missing')
+      return `${createWorkspaceMemberAuditEntityId(scope.workspaceId, scope.memberKey, this.auditPseudonymKey)}/weekly-report/${suffix}`
+    } catch {
+      throw new ProjectDataError(503, 'WeeklyReportAuditUnavailable', 'Weekly report audit is not configured.')
+    }
   }
 
   /**
@@ -143,6 +192,7 @@ export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
         .map((memberKey) => ({ workspaceId: scope.workspaceId, recordKey: weekKey({ ...scope, memberKey }, weekStart) }))
       for (let attempt = 0; keys.length > 0; attempt += 1) {
         if (attempt >= BATCH_GET_ATTEMPTS) throw retryableFailure()
+        if (attempt > 0) await backOff(attempt)
         const response = await this.client
           .send(new BatchGetCommand({ RequestItems: { [this.tableName]: { Keys: keys, ConsistentRead: true } } }))
           .catch((error: unknown) => storageFailure(error))
@@ -174,27 +224,20 @@ export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
       ? undefined
       : { workspaceId: scope.workspaceId, recordKey: weekKey(scope, options.before) }
     do {
+      // Rows are validated before the submitted filter, so a malformed row fails the read
+      // instead of disappearing from the history.
       const page = await this.client.send(new QueryCommand({
         TableName: this.tableName,
         KeyConditionExpression: '#workspaceId = :workspaceId AND begins_with(#recordKey, :prefix)',
-        ...(options.submittedOnly ? { FilterExpression: '#submissionCount > :zero' } : {}),
-        ExpressionAttributeNames: {
-          '#workspaceId': 'workspaceId',
-          '#recordKey': 'recordKey',
-          ...(options.submittedOnly ? { '#submissionCount': 'submissionCount' } : {}),
-        },
-        ExpressionAttributeValues: {
-          ':workspaceId': scope.workspaceId,
-          ':prefix': prefix,
-          ...(options.submittedOnly ? { ':zero': 0 } : {}),
-        },
+        ExpressionAttributeNames: { '#workspaceId': 'workspaceId', '#recordKey': 'recordKey' },
+        ExpressionAttributeValues: { ':workspaceId': scope.workspaceId, ':prefix': prefix },
         ScanIndexForward: false,
         Limit: options.limit + 1 - weeks.length,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       })).catch((error: unknown) => storageFailure(error))
       for (const row of page.Items ?? []) {
-        const weekStart = typeof row.weekStart === 'string' ? row.weekStart : ''
-        weeks.push(parseWeekRow(row, scope, weekStart))
+        const week = parseWeekRow(row, scope, typeof row.weekStart === 'string' ? row.weekStart : '')
+        if (!options.submittedOnly || week.submissionCount > 0) weeks.push(week)
       }
       exclusiveStartKey = page.LastEvaluatedKey
     } while (exclusiveStartKey && weeks.length <= options.limit)
@@ -213,23 +256,22 @@ export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
     const weeks: WeeklyReportWeekRecord[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
+      // At most 13 week rows fall in the range; each is validated before the submitted filter.
       const page = await this.client.send(new QueryCommand({
         TableName: this.tableName,
         KeyConditionExpression: '#workspaceId = :workspaceId AND #recordKey BETWEEN :from AND :to',
-        FilterExpression: '#submissionCount > :zero',
-        ExpressionAttributeNames: { '#workspaceId': 'workspaceId', '#recordKey': 'recordKey', '#submissionCount': 'submissionCount' },
+        ExpressionAttributeNames: { '#workspaceId': 'workspaceId', '#recordKey': 'recordKey' },
         ExpressionAttributeValues: {
           ':workspaceId': scope.workspaceId,
           ':from': weekKey(scope, from),
           ':to': weekKey(scope, to),
-          ':zero': 0,
         },
         ConsistentRead: true,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       })).catch((error: unknown) => storageFailure(error))
       for (const row of page.Items ?? []) {
-        const weekStart = typeof row.weekStart === 'string' ? row.weekStart : ''
-        weeks.push(parseWeekRow(row, scope, weekStart))
+        const week = parseWeekRow(row, scope, typeof row.weekStart === 'string' ? row.weekStart : '')
+        if (week.submissionCount > 0) weeks.push(week)
       }
       exclusiveStartKey = page.LastEvaluatedKey
     } while (exclusiveStartKey)
@@ -256,6 +298,38 @@ export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
   }
 
   /**
+   * Reads the receipt stored by an earlier submission request with the same key.
+   *
+   * @param scope - Author.
+   * @param key - Request key.
+   * @returns The validated receipt, or `null`.
+   */
+  async getSubmissionReceipt(scope: WeeklyReportMemberScope, key: string): Promise<WeeklyReportSubmissionReceipt | null> {
+    const { Item: row } = await this.client
+      .send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId: scope.workspaceId, recordKey: receiptKey(scope, key) },
+        ConsistentRead: true,
+      }))
+      .catch((error: unknown) => storageFailure(error))
+    if (!row) return null
+    if (
+      row.workspaceId !== scope.workspaceId ||
+      row.recordKey !== receiptKey(scope, key) ||
+      row.entryType !== RECEIPT_TYPE ||
+      row.schemaVersion !== SCHEMA_VERSION ||
+      row.teamId !== scope.teamId ||
+      row.memberKey !== scope.memberKey ||
+      typeof row.receipt !== 'string' ||
+      !isWeeklyReportDate(row.weekStart) ||
+      !isCount(row.version) || row.version < 1 || row.version > WEEKLY_REPORT_MAX_SUBMISSIONS
+    ) {
+      throw corruptReport()
+    }
+    return { receipt: row.receipt, weekStart: row.weekStart, version: row.version }
+  }
+
+  /**
    * Replaces a week's notes when the row still has the previous revision.
    *
    * @param input - Replacement input.
@@ -267,7 +341,7 @@ export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
       eventType: 'team.weekly_report_draft_saved',
       entityType: 'team',
       entityId: input.teamId,
-      target: { type: WEEK_TYPE, id: `${input.memberKey}#${input.next.weekStart}` },
+      target: { type: WEEK_TYPE, id: this.auditTargetId(input, input.next.weekStart) },
       action: 'weekly_report_draft_saved',
       occurredAt: input.now,
       changes: [],
@@ -298,7 +372,7 @@ export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
       eventType: 'team.weekly_report_submitted',
       entityType: 'team',
       entityId: input.teamId,
-      target: { type: SUBMISSION_TYPE, id: `${input.memberKey}#${input.submission.weekStart}#${input.submission.version}` },
+      target: { type: SUBMISSION_TYPE, id: this.auditTargetId(input, `${input.submission.weekStart}/${input.submission.version}`) },
       action: 'weekly_report_submitted',
       occurredAt: input.now,
       changes: [],
@@ -328,12 +402,30 @@ export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
               ConditionExpression: 'attribute_not_exists(recordKey)',
             },
           },
+          {
+            // Kept for every version, so a retry is recognized after later submissions too.
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                workspaceId: input.workspaceId,
+                recordKey: receiptKey(input, input.receipt.key),
+                entryType: RECEIPT_TYPE,
+                schemaVersion: SCHEMA_VERSION,
+                teamId: input.teamId,
+                memberKey: input.memberKey,
+                receipt: input.receipt.receipt,
+                weekStart: input.submission.weekStart,
+                version: input.submission.version,
+              },
+              ConditionExpression: 'attribute_not_exists(recordKey)',
+            },
+          },
           ...input.callerAuthorization,
           ...(audit ? [audit] : []),
         ],
       }))
     } catch (error) {
-      storageFailure(error, 2 + input.callerAuthorization.length + (audit ? 1 : 0))
+      storageFailure(error, 3 + input.callerAuthorization.length + (audit ? 1 : 0))
     }
   }
 
@@ -378,6 +470,8 @@ export class InMemoryWeeklyReportStore implements WeeklyReportStore {
   private readonly weeks = new Map<string, WeeklyReportWeekRecord>()
   /** Submission rows keyed by Workspace, Team, member, week, and version. */
   private readonly submissions = new Map<string, StoredWeeklyReportSubmission>()
+  /** Submission receipts keyed by Workspace, Team, member, and request key. */
+  private readonly receipts = new Map<string, WeeklyReportSubmissionReceipt>()
 
   /**
    * Reads a copy of one member's week.
@@ -460,6 +554,18 @@ export class InMemoryWeeklyReportStore implements WeeklyReportStore {
   }
 
   /**
+   * Reads a copy of the receipt stored under a request key.
+   *
+   * @param scope - Author.
+   * @param key - Request key.
+   * @returns The receipt, or `null`.
+   */
+  async getSubmissionReceipt(scope: WeeklyReportMemberScope, key: string): Promise<WeeklyReportSubmissionReceipt | null> {
+    const receipt = this.receipts.get(memoryKey(scope, `R#${key}`))
+    return receipt ? { ...receipt } : null
+  }
+
+  /**
    * Replaces a week's notes when the row still has the previous revision.
    *
    * @param input - Replacement input.
@@ -477,10 +583,16 @@ export class InMemoryWeeklyReportStore implements WeeklyReportStore {
   async submit(input: SubmitInput): Promise<void> {
     requireCallerAuthorization(input.callerAuthorization)
     const key = `${memoryKey(input, input.submission.weekStart)}#${input.submission.version}`
-    if (this.submissions.has(key)) throw conflict()
+    const receiptMemoryKey = memoryKey(input, `R#${input.receipt.key}`)
+    if (this.submissions.has(key) || this.receipts.has(receiptMemoryKey)) throw conflict()
     // Checking and writing happen without an await in between, like one transaction.
     this.replaceWeek(input)
     this.submissions.set(key, structuredClone(input.submission))
+    this.receipts.set(receiptMemoryKey, {
+      receipt: input.receipt.receipt,
+      weekStart: input.submission.weekStart,
+      version: input.submission.version,
+    })
   }
 
   /**
@@ -575,9 +687,7 @@ function parseWeekRow(row: Record<string, unknown>, scope: WeeklyReportMemberSco
     !isCount(row.revision) || row.revision < 1 ||
     !isCount(row.submissionCount) || row.submissionCount > WEEKLY_REPORT_MAX_SUBMISSIONS ||
     typeof row.updatedAt !== 'string' ||
-    (row.lastSubmittedAt !== undefined && typeof row.lastSubmittedAt !== 'string') ||
-    (row.lastSubmissionReceipt !== undefined && typeof row.lastSubmissionReceipt !== 'string') ||
-    (row.lastSubmissionKey !== undefined && typeof row.lastSubmissionKey !== 'string')
+    (row.lastSubmittedAt !== undefined && typeof row.lastSubmittedAt !== 'string')
   ) {
     throw corruptReport()
   }
@@ -588,8 +698,6 @@ function parseWeekRow(row: Record<string, unknown>, scope: WeeklyReportMemberSco
     notes: parseStoredNotes(row.notes),
     submissionCount: row.submissionCount,
     ...(typeof row.lastSubmittedAt === 'string' ? { lastSubmittedAt: row.lastSubmittedAt } : {}),
-    ...(typeof row.lastSubmissionReceipt === 'string' ? { lastSubmissionReceipt: row.lastSubmissionReceipt } : {}),
-    ...(typeof row.lastSubmissionKey === 'string' ? { lastSubmissionKey: row.lastSubmissionKey } : {}),
   }
 }
 
@@ -670,6 +778,7 @@ function parseSubmissionRow(
     typeof row.submittedAt !== 'string' ||
     !isWeeklyReportDate(row.weekEnd) ||
     !isCount(row.totalMinutes) ||
+    row.totalMinutes > WEEKLY_REPORT_MAX_MINUTES ||
     typeof row.timeIsPartial !== 'boolean' ||
     !isRecord(row.sections) ||
     !Array.isArray(row.items) ||
