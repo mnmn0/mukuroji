@@ -1,18 +1,81 @@
 import { useId, useRef, useState } from 'react'
+import { useDocumentBacklinks } from '../../documents/queries/useDocumentQueries'
 import { CopyIcon } from '../../shared/ui/icons'
-import { createTaskHandoffBrief, type TaskHandoffInput } from '../model/taskHandoff'
+import { splitAgentRuns } from '../model/agentRunDisplay'
+import {
+  createTaskHandoffBrief,
+  type TaskHandoffAgentRuns,
+  type TaskHandoffDocuments,
+  type TaskHandoffInput,
+  type TaskHandoffLoadState,
+} from '../model/taskHandoff'
+import { useWorkItemAgentRuns } from '../queries/useWorkItemAgentRuns'
 
 /** Inputs for the saved-task handoff disclosure. */
-export type TaskHandoffPanelProps = TaskHandoffInput
+export type TaskHandoffPanelProps = Omit<TaskHandoffInput, 'agentRuns' | 'documents'> & {
+  /** Session access token used to read Agent Runs and linked Documents; without it the brief says they were not read. */
+  accessToken?: string
+}
+
+/**
+ * Builds the load state of supplementary context from an SWR read.
+ * @param enabled - Whether the read was requested.
+ * @param data - Loaded data, if any.
+ * @param error - Read failure, if any.
+ * @param select - Converts the loaded data to the brief's value.
+ * @returns Load state for the brief.
+ */
+function toLoadState<Data, Value>(
+  enabled: boolean,
+  data: Data | undefined,
+  error: unknown,
+  select: (data: Data) => Value,
+): TaskHandoffLoadState<Value> {
+  if (data !== undefined) return { status: 'loaded', value: select(data) }
+  if (!enabled || error) return { status: 'unavailable' }
+  return { status: 'loading' }
+}
 
 /**
  * Scopes clipboard feedback and preview state to the exact saved task snapshot.
- * @param props - Visible saved task and localized handoff labels.
+ * Agent Runs and linked Documents are read with the same requests as their detail panels.
+ * @param props - Visible saved task, access token, and localized handoff labels.
  * @returns A revision-keyed preview and copy control with manual clipboard fallback.
  */
-export function TaskHandoffPanel(props: TaskHandoffPanelProps) {
-  const brief = createTaskHandoffBrief(props)
-  return <TaskHandoffSnapshot brief={brief} key={brief} revision={props.task.revision} t={props.t} />
+export function TaskHandoffPanel({ accessToken, ...props }: TaskHandoffPanelProps) {
+  const { task } = props
+  const canRead = Boolean(accessToken && task.teamId)
+  const runs = useWorkItemAgentRuns(canRead ? accessToken : undefined, task.teamId, task.id)
+  const backlinks = useDocumentBacklinks(
+    canRead ? accessToken : undefined,
+    'work-item',
+    `team/${task.teamId}/issue/${task.id}`,
+  )
+  const agentRuns = toLoadState(canRead, runs.data, runs.error, (data): TaskHandoffAgentRuns => {
+    const { active } = splitAgentRuns(data.items)
+    return active
+      ? { active: { runId: active.runId, agentName: active.agentName, runtime: active.runtime, startedAt: active.startedAt, stalled: active.stalled } }
+      : {}
+  })
+  const documents = toLoadState(canRead, backlinks.data, backlinks.error, (data): TaskHandoffDocuments => ({
+    items: uniqueDocuments(data.backlinks),
+    hasMore: Boolean(data.nextCursor),
+  }))
+  const brief = createTaskHandoffBrief({ ...props, agentRuns, documents })
+  return <TaskHandoffSnapshot brief={brief} key={brief} revision={task.revision} t={props.t} />
+}
+
+/**
+ * Keeps one entry per Document, since a Document can link the same Work Item more than once.
+ * @param backlinks - Backlinks in API order.
+ * @returns Documents in first-seen order.
+ */
+function uniqueDocuments(backlinks: ReadonlyArray<TaskHandoffDocuments['items'][number]>): TaskHandoffDocuments['items'] {
+  const documents = new Map<string, string>()
+  for (const { documentId, documentTitle } of backlinks) {
+    if (!documents.has(documentId)) documents.set(documentId, documentTitle)
+  }
+  return [...documents].map(([documentId, documentTitle]) => ({ documentId, documentTitle }))
 }
 
 /** Inputs for an immutable preview with local clipboard feedback. */
