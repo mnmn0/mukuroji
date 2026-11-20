@@ -23,6 +23,7 @@ COLLABORATION_TABLE="${COLLABORATION_TABLE_NAME:-mukuroji-collaboration-local}"
 WORKSPACE_SEARCH_TABLE="${WORKSPACE_SEARCH_TABLE_NAME:-mukuroji-workspace-search-local}"
 ANALYTICS_TABLE="${ANALYTICS_TABLE_NAME:-mukuroji-analytics-local}"
 ANALYTICS_SCHEDULE_INDEX="${ANALYTICS_SCHEDULE_INDEX_NAME:-ScheduleDueIndex}"
+ANALYTICS_TIME_ENTRY_INDEX="TimeEntryTeamDateIndex"
 NOTIFICATIONS_TABLE="${NOTIFICATIONS_TABLE_NAME:-mukuroji-notifications-local}"
 REALTIME_SESSIONS_TABLE="${REALTIME_SESSIONS_TABLE_NAME:-mukuroji-realtime-sessions-local}"
 AUDIT_EVENTS_TABLE="${AUDIT_EVENTS_TABLE_NAME:-mukuroji-audit-events}"
@@ -976,6 +977,8 @@ if ! aws_local dynamodb describe-table --table-name "$ANALYTICS_TABLE" >/dev/nul
       AttributeName=recordKey,AttributeType=S \
       AttributeName=scheduleShard,AttributeType=S \
       AttributeName=nextDeliveryAtRecordKey,AttributeType=S \
+      AttributeName=teamId,AttributeType=S \
+      AttributeName=startAt,AttributeType=S \
     --key-schema \
       AttributeName=workspaceId,KeyType=HASH \
       AttributeName=recordKey,KeyType=RANGE \
@@ -987,6 +990,14 @@ if ! aws_local dynamodb describe-table --table-name "$ANALYTICS_TABLE" >/dev/nul
           {\"AttributeName\": \"nextDeliveryAtRecordKey\", \"KeyType\": \"RANGE\"}
         ],
         \"Projection\": {\"ProjectionType\": \"ALL\"}
+      },
+      {
+        \"IndexName\": \"$ANALYTICS_TIME_ENTRY_INDEX\",
+        \"KeySchema\": [
+          {\"AttributeName\": \"teamId\", \"KeyType\": \"HASH\"},
+          {\"AttributeName\": \"startAt\", \"KeyType\": \"RANGE\"}
+        ],
+        \"Projection\": {\"ProjectionType\": \"ALL\"}
       }
     ]" \
     --billing-mode PAY_PER_REQUEST \
@@ -994,6 +1005,33 @@ if ! aws_local dynamodb describe-table --table-name "$ANALYTICS_TABLE" >/dev/nul
 fi
 
 aws_local dynamodb wait table-exists --table-name "$ANALYTICS_TABLE"
+
+# Tables created before the time entry date index existed get it added in place, so the Team
+# timesheet and the timesheet reminder can query entries by Team and start time.
+if [ "$(aws_local dynamodb describe-table \
+  --table-name "$ANALYTICS_TABLE" \
+  --query "length(Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_TIME_ENTRY_INDEX'] || \`[]\`)" \
+  --output text)" = "0" ]; then
+  aws_local dynamodb update-table \
+    --table-name "$ANALYTICS_TABLE" \
+    --attribute-definitions \
+      AttributeName=teamId,AttributeType=S \
+      AttributeName=startAt,AttributeType=S \
+    --global-secondary-index-updates "[
+      {
+        \"Create\": {
+          \"IndexName\": \"$ANALYTICS_TIME_ENTRY_INDEX\",
+          \"KeySchema\": [
+            {\"AttributeName\": \"teamId\", \"KeyType\": \"HASH\"},
+            {\"AttributeName\": \"startAt\", \"KeyType\": \"RANGE\"}
+          ],
+          \"Projection\": {\"ProjectionType\": \"ALL\"}
+        }
+      }
+    ]" \
+    >/dev/null
+  aws_local dynamodb wait table-exists --table-name "$ANALYTICS_TABLE"
+fi
 
 if ! aws_local dynamodb describe-table --table-name "$TENANT_ADMINISTRATION_TABLE" >/dev/null 2>&1; then
   aws_local dynamodb create-table \
@@ -1040,6 +1078,9 @@ ANALYTICS_INDEX_SORT_KEY="$(read_analytics_table_schema "Table.GlobalSecondaryIn
 ANALYTICS_INDEX_PARTITION_KEY_TYPE="$(read_analytics_table_schema "Table.AttributeDefinitions[?AttributeName=='scheduleShard'].AttributeType | [0]")"
 ANALYTICS_INDEX_SORT_KEY_TYPE="$(read_analytics_table_schema "Table.AttributeDefinitions[?AttributeName=='nextDeliveryAtRecordKey'].AttributeType | [0]")"
 ANALYTICS_INDEX_PROJECTION_TYPE="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_SCHEDULE_INDEX'] | [0].Projection.ProjectionType")"
+ANALYTICS_TIME_ENTRY_INDEX_PARTITION_KEY="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_TIME_ENTRY_INDEX'] | [0].KeySchema[?KeyType=='HASH'].AttributeName | [0]")"
+ANALYTICS_TIME_ENTRY_INDEX_SORT_KEY="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_TIME_ENTRY_INDEX'] | [0].KeySchema[?KeyType=='RANGE'].AttributeName | [0]")"
+ANALYTICS_TIME_ENTRY_INDEX_PROJECTION_TYPE="$(read_analytics_table_schema "Table.GlobalSecondaryIndexes[?IndexName=='$ANALYTICS_TIME_ENTRY_INDEX'] | [0].Projection.ProjectionType")"
 
 if [ "$ANALYTICS_TABLE_BILLING_MODE" != "PAY_PER_REQUEST" ] ||
   [ "$ANALYTICS_TABLE_PARTITION_KEY" != "workspaceId" ] ||
@@ -1050,9 +1091,12 @@ if [ "$ANALYTICS_TABLE_BILLING_MODE" != "PAY_PER_REQUEST" ] ||
   [ "$ANALYTICS_INDEX_SORT_KEY" != "nextDeliveryAtRecordKey" ] ||
   [ "$ANALYTICS_INDEX_PARTITION_KEY_TYPE" != "S" ] ||
   [ "$ANALYTICS_INDEX_SORT_KEY_TYPE" != "S" ] ||
-  [ "$ANALYTICS_INDEX_PROJECTION_TYPE" != "ALL" ]; then
+  [ "$ANALYTICS_INDEX_PROJECTION_TYPE" != "ALL" ] ||
+  [ "$ANALYTICS_TIME_ENTRY_INDEX_PARTITION_KEY" != "teamId" ] ||
+  [ "$ANALYTICS_TIME_ENTRY_INDEX_SORT_KEY" != "startAt" ] ||
+  [ "$ANALYTICS_TIME_ENTRY_INDEX_PROJECTION_TYPE" != "ALL" ]; then
   echo "Existing Analytics table schema does not match the local API contract: table=$ANALYTICS_TABLE index=$ANALYTICS_SCHEDULE_INDEX" >&2
-  echo "Actual: billingMode=$ANALYTICS_TABLE_BILLING_MODE primaryKey=$ANALYTICS_TABLE_PARTITION_KEY($ANALYTICS_TABLE_PARTITION_KEY_TYPE)/$ANALYTICS_TABLE_SORT_KEY($ANALYTICS_TABLE_SORT_KEY_TYPE) indexKey=$ANALYTICS_INDEX_PARTITION_KEY($ANALYTICS_INDEX_PARTITION_KEY_TYPE)/$ANALYTICS_INDEX_SORT_KEY($ANALYTICS_INDEX_SORT_KEY_TYPE) projection=$ANALYTICS_INDEX_PROJECTION_TYPE" >&2
+  echo "Actual: billingMode=$ANALYTICS_TABLE_BILLING_MODE primaryKey=$ANALYTICS_TABLE_PARTITION_KEY($ANALYTICS_TABLE_PARTITION_KEY_TYPE)/$ANALYTICS_TABLE_SORT_KEY($ANALYTICS_TABLE_SORT_KEY_TYPE) indexKey=$ANALYTICS_INDEX_PARTITION_KEY($ANALYTICS_INDEX_PARTITION_KEY_TYPE)/$ANALYTICS_INDEX_SORT_KEY($ANALYTICS_INDEX_SORT_KEY_TYPE) projection=$ANALYTICS_INDEX_PROJECTION_TYPE timeEntryIndexKey=$ANALYTICS_TIME_ENTRY_INDEX_PARTITION_KEY/$ANALYTICS_TIME_ENTRY_INDEX_SORT_KEY timeEntryProjection=$ANALYTICS_TIME_ENTRY_INDEX_PROJECTION_TYPE" >&2
   exit 1
 fi
 

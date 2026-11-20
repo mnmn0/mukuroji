@@ -1,4 +1,5 @@
 import { useMemo, useState, type Dispatch, type SetStateAction } from 'react'
+import { PERSONAL_NOTIFICATION_REMINDER_DAY_FIELDS } from '@mukuroji/contracts'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import type {
   NotificationChannels,
@@ -6,6 +7,8 @@ import type {
   NotificationPreferences,
 } from '../api'
 import type { NotificationPreferencesController } from '../mutations/useNotifications'
+import { createReminderDaysDraft, readReminderDaysDraft } from '../model/reminderDays'
+import { ReminderDaysFields } from './ReminderDaysFields'
 
 const notificationChannelKeys = ['inApp', 'email', 'push', 'slack'] as const satisfies readonly (keyof NotificationChannels)[]
 const notificationFrequencyOptions = ['instant', 'hourly', 'daily', 'weekly'] as const satisfies readonly NotificationFrequency[]
@@ -35,6 +38,11 @@ export function NotificationSettingsPanel({
   const [draft, setDraft] = useState<NotificationPreferences | undefined>(
     controller.preferences ? clonePreferences(controller.preferences) : undefined,
   )
+  const [reminderDraft, setReminderDraft] = useState(() => createReminderDaysDraft(
+    PERSONAL_NOTIFICATION_REMINDER_DAY_FIELDS,
+    controller.preferences?.reminderDays,
+  ))
+  const [hasInvalidReminderDays, setHasInvalidReminderDays] = useState(false)
 
   if (controller.isLoading) {
     return (
@@ -76,7 +84,10 @@ export function NotificationSettingsPanel({
       data-testid="notification-settings"
       onSubmit={(event) => {
         event.preventDefault()
-        void controller.save(draft)
+        const reminderDays = readReminderDaysDraft(PERSONAL_NOTIFICATION_REMINDER_DAY_FIELDS, reminderDraft)
+        setHasInvalidReminderDays(!reminderDays)
+        if (!reminderDays) return
+        void controller.save({ ...draft, reminderDays })
       }}
     >
       <div className="flex min-w-0 flex-wrap items-start justify-between gap-4 border-b border-[var(--workbench-border)] px-5 py-5">
@@ -224,11 +235,30 @@ export function NotificationSettingsPanel({
             </label>
           </div>
         </fieldset>
+
+        <fieldset className="grid gap-4 px-5 py-5">
+          <legend className="text-sm font-semibold text-[var(--workbench-text)]">
+            {t('workspace.settings.notifications.remindersTitle')}
+          </legend>
+          <p className="text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+            {t('workspace.settings.notifications.remindersDescription')}
+          </p>
+          <ReminderDaysFields
+            draft={reminderDraft}
+            fields={PERSONAL_NOTIFICATION_REMINDER_DAY_FIELDS}
+            placeholderFor={() => t('workspace.reminders.teamValue')}
+            t={t}
+            testIdPrefix="notification-reminder"
+            onChange={(field, value) => setReminderDraft((current) => ({ ...current, [field]: value }))}
+          />
+        </fieldset>
       </div>
 
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-4 border-t border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-4">
         <p aria-live="polite" className="text-sm font-semibold">
-          {controller.hasSaveError ? (
+          {hasInvalidReminderDays ? (
+            <span className="text-fg-red-700">{t('workspace.reminders.invalid')}</span>
+          ) : controller.hasSaveError ? (
             <span className="text-fg-red-700">{t('workspace.settings.notifications.saveError')}</span>
           ) : controller.didSave ? (
             <span className="text-fg-emerald-700">{t('workspace.settings.notifications.saved')}</span>
@@ -256,6 +286,7 @@ function clonePreferences(preferences: NotificationPreferences): NotificationPre
     ...preferences,
     channels: { ...preferences.channels },
     quietHours: { ...preferences.quietHours },
+    ...(preferences.reminderDays ? { reminderDays: { ...preferences.reminderDays } } : {}),
   }
 }
 

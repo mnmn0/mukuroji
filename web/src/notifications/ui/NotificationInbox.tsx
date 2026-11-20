@@ -438,6 +438,9 @@ function formatNotificationEventType(eventType: string, t: (key: MessageKey) => 
 function resolveNotificationEventKey(eventType: string): MessageKey {
   const normalizedEventType = eventType.toLowerCase()
 
+  if (normalizedEventType.startsWith('timesheet.')) {
+    return 'workspace.inbox.event.timesheet'
+  }
   if (normalizedEventType.includes('mention')) {
     return 'workspace.inbox.event.mention'
   }
@@ -526,6 +529,9 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
   if (normalizedReason === 'stale') {
     return t('workspace.inbox.reason.stale')
   }
+  if (normalizedReason === 'timesheet') {
+    return t('workspace.inbox.reason.timesheet')
+  }
 
   return t('workspace.inbox.reason.watch')
 }
@@ -580,6 +586,7 @@ function resolveEventToneClassName(eventType: string) {
     eventKey === 'workspace.inbox.event.due' ||
     eventKey === 'workspace.inbox.event.dueSoon' ||
     eventKey === 'workspace.inbox.event.stale' ||
+    eventKey === 'workspace.inbox.event.timesheet' ||
     eventKey === 'workspace.inbox.event.approval'
   ) {
     return 'border-amber-200 bg-amber-50 text-fg-amber-700'
