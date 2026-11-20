@@ -33,6 +33,11 @@ export interface ServerConfig {
   readonly cognitoEndpoint: string | undefined
   /** Browser origins accepted by the CORS middleware. */
   readonly allowedOrigins: readonly string[]
+  /**
+   * Web app origin that the connector OAuth callback hands off to, when the provider redirect URI
+   * points at an API host other than the Web app. Absent when both share one origin.
+   */
+  readonly connectorOAuthWebOrigin?: string
   /** Port used by the local Bun HTTP server. */
   readonly port: number
   /** Whether workspace-search projections should be maintained. */
@@ -88,6 +93,7 @@ const serverEnvironmentSchema = z.object({
   AWS_REGION: optionalEnvironmentText,
   AWS_DEFAULT_REGION: optionalEnvironmentText,
   ALLOWED_ORIGINS: optionalEnvironmentText,
+  CONNECTOR_OAUTH_WEB_ORIGIN: optionalEnvironmentText,
   DYNAMODB_ENDPOINT: optionalEnvironmentText,
   AWS_ENDPOINT_URL_DYNAMODB: optionalEnvironmentText,
   AWS_ENDPOINT_URL: optionalEnvironmentText,
@@ -184,6 +190,17 @@ function deriveServerConfigValues(
     return z.NEVER
   }
 
+  const connectorOAuthWebOrigin = environment.CONNECTOR_OAUTH_WEB_ORIGIN?.trim()
+    ? readConnectorOAuthWebOrigin(environment.CONNECTOR_OAUTH_WEB_ORIGIN.trim())
+    : undefined
+  if (connectorOAuthWebOrigin === null) {
+    context.addIssue({
+      code: 'custom',
+      message: 'CONNECTOR_OAUTH_WEB_ORIGIN must be an https origin, or an http origin on localhost.',
+    })
+    return z.NEVER
+  }
+
   const cognitoEndpoint = environment.COGNITO_ENDPOINT ?? environment.AWS_ENDPOINT_URL
   return {
     awsRegion,
@@ -205,6 +222,7 @@ function deriveServerConfigValues(
     allowedOrigins: Object.freeze(
       configuredOrigins.length > 0 ? configuredOrigins : [...DEFAULT_ALLOWED_ORIGINS],
     ),
+    ...(connectorOAuthWebOrigin ? { connectorOAuthWebOrigin } : {}),
     port: Number(environment.PORT ?? 3000),
     workspaceSearchProjectionEnabled: environment.NODE_ENV !== 'test' || Boolean(
       environment.WORKSPACE_SEARCH_TABLE_NAME,
@@ -213,6 +231,31 @@ function deriveServerConfigValues(
     production,
     applicationCommitSha: environment.MUKUROJI_APPLICATION_COMMIT_SHA,
   }
+}
+
+/**
+ * Validates the Web app origin used for the connector OAuth callback hand-off.
+ *
+ * @param value - Trimmed configured origin, optionally with one trailing slash.
+ * @returns The normalized origin, or `null` when it is not a bare https (or local http) origin.
+ */
+function readConnectorOAuthWebOrigin(value: string): string | null {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    return null
+  }
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+  if (
+    (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) ||
+    url.username ||
+    url.password ||
+    trimTrailingSlash(value) !== url.origin
+  ) {
+    return null
+  }
+  return url.origin
 }
 
 /**

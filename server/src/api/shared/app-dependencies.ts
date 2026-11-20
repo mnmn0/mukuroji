@@ -115,6 +115,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get projectRaidLogs() {
     return requireAppDependencies().workItems.projectRaidLogs
   },
+  get scheduleBaselines() {
+    return requireAppDependencies().workItems.scheduleBaselines
+  },
   get collections() {
     return requireAppDependencies().workItems.collections
   },

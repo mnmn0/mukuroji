@@ -48,6 +48,14 @@ export interface ConnectorOAuthCallbackAuthorizer {
   ): Promise<void>
 }
 
+/** OAuth callback を完了しようとしている認証済み Workspace user です。 */
+export type ConnectorOAuthCallbackActor = {
+  /** Callback を完了する user の current Workspace ID です。 */
+  workspaceId: string
+  /** Callback を完了する current Workspace user ID です。 */
+  userId: string
+}
+
 /** OAuth provider callback handler の入力です。 */
 export type CompleteConnectorOAuthCallbackInput = {
   /** Provider が返した authorization code です。 */
@@ -382,9 +390,9 @@ export class ConnectorAuthorizationRuntime
   /** Signed callback state を consume し、installation を作成または復旧します。 */
   async completeCallback(
     input: CompleteConnectorOAuthCallbackInput,
+    actor: ConnectorOAuthCallbackActor,
   ): Promise<CompleteConnectorOAuthCallbackResult> {
-    const flow = await this.state.consume(input.state)
-    await this.callbackAuthorizer.authorize(flow.workspaceId, flow.userId)
+    const flow = await this.consumeActorBoundFlow(input.state, actor)
     const adapter = this.requireOAuthAdapter(flow.provider)
     if (adapter.redirectUri !== flow.redirectUri) {
       throw new ConnectorRuntimeError(
@@ -439,10 +447,42 @@ export class ConnectorAuthorizationRuntime
   }
 
   /** Provider denial でも state を exactly once consume し、safe return URL を復元します。 */
-  async abortCallback(input: { /** Signed OAuth state です。 */ state: string }) {
-    const flow = await this.state.consume(input.state)
-    await this.callbackAuthorizer.authorize(flow.workspaceId, flow.userId)
+  async abortCallback(
+    input: { /** Signed OAuth state です。 */ state: string },
+    actor: ConnectorOAuthCallbackActor,
+  ) {
+    const flow = await this.consumeActorBoundFlow(input.state, actor)
     return { returnUrl: flow.returnUrl }
+  }
+
+  /**
+   * Signed state を consume し、flow を開始した Workspace user だけが完了できることを検証します。
+   *
+   * State と PKCE は Mukuroji が flow を開始したことしか示さないため、callback を完了する
+   * 認証済み user が flow 開始者と一致することをここで要求します。不一致でも state は消費済みの
+   * まま残し、漏れた authorization URL を別の user が再利用できないようにします。
+   *
+   * @param state - Provider が返した signed state token です。
+   * @param actor - Callback を完了しようとしている認証済み Workspace user です。
+   * @returns 開始者と一致し、現在も connector を管理できる user の flow です。
+   */
+  private async consumeActorBoundFlow(
+    state: string,
+    actor: ConnectorOAuthCallbackActor,
+  ) {
+    const flow = await this.state.consume(state)
+    if (
+      flow.workspaceId !== actor.workspaceId ||
+      flow.userId !== actor.userId
+    ) {
+      throw new DeveloperPlatformError(
+        403,
+        'ConnectorOAuthActorMismatch',
+        'Connector authorization must be completed by the user who started it.',
+      )
+    }
+    await this.callbackAuthorizer.authorize(flow.workspaceId, flow.userId)
+    return flow
   }
 
   /** Worker が認証失敗を検出した connector へ signed reauthorization URL を保存します。 */

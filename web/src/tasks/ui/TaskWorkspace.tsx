@@ -7,6 +7,7 @@ import type {
   WorkItemDependencyEndpoint,
   WorkItemConfiguration,
   WorkItemPatch,
+  WorkItemScheduleCalendarPolicy,
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
   WorkItemScheduleOperation,
@@ -287,6 +288,8 @@ export type TaskWorkspaceProps = {
   workspaceMembers: WorkspaceMember[]
   /** Team-scoped workflow columns shared by filters and the board. */
   statusColumns: ProjectTaskStatusColumn[]
+  /** Workspace working calendar whose non-working days the Gantt chart shades. */
+  workingCalendar?: WorkItemScheduleCalendarPolicy
 }
 
 /**
@@ -297,6 +300,7 @@ export type TaskWorkspaceProps = {
  */
 export function TaskWorkspace({
   activeTab,
+  workingCalendar,
   scheduleWindowNavigation,
   allTasks,
   bulkProjectOptions,
@@ -808,6 +812,7 @@ export function TaskWorkspace({
           projectId={projectId}
           t={t}
           tasks={tasks}
+          workingCalendar={workingCalendar}
           {...(scheduleWindowNavigation
             ? {
                 onWindowStartMonthChange: scheduleWindowNavigation.onGanttStartMonthChange,

@@ -404,6 +404,8 @@ Secret JSON は string value の object とし、次の key だけを許可し�
 
 `MUKUROJI_CONNECTOR_PROVIDERS_JSON` 自体は JSON array を文字列化した値です。各 provider entry の `clientSecretEnvironmentVariable` は同じ secret object 内の `MUKUROJI_CONNECTOR_<NAME>` を参照させます。Signing secret はそれぞれ独立した十分に長い random value を使います。Warm runtime も約1分の TTL 後に secret を再取得するため、更新は cold start を待たずに反映されます。
 
+Provider の OAuth callback（`/api/developer/connector-oauth/callback`）は接続を完了せず、state と code を URL fragment に載せて Web の `/settings/connectors/oauth-callback` へ 303 で引き渡します。接続を始めた本人がログインしたまま、その画面から `POST /api/developer/connector-oauth/complete` を呼んで完了します。CloudFront 経由で Web と API が同じ origin にある通常の構成では設定は不要です。provider に登録した redirect URI が Web と別の API origin を指す場合（local の Web から HTTP API を直接使う場合など）は、API の process 環境変数 `CONNECTOR_OAUTH_WEB_ORIGIN` に Web の origin（例: `http://localhost:5173`）を設定します。https の origin、または localhost の http origin だけを受け付けます。
+
 OAuth state signing key は、warm runtime の旧・新 keyring が混在しても相互検証できるよう次の順序で rotation します。
 
 1. 旧 key を `CONNECTOR_OAUTH_STATE_SIGNING_SECRET` に維持したまま、新 key を JSON array 文字列の `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON` へ verification-only key として追加します。
