@@ -8,7 +8,6 @@ import {
   type CreateTeamIssueRequestBody,
   type TeamIssueDetailReadOptions,
   type TeamIssueResponseItem,
-  type TeamIssuesResponse,
   type UpdateTeamIssueRequestBody,
   type WorkItemIdempotencyTransaction,
   type WorkItemAuthorizationSnapshot,
@@ -20,7 +19,6 @@ import {
   workspaceDependencies,
   type AutomationActionExecutorDependencies,
 } from './app-dependencies'
-import { WORK_ITEMS_PARTITION_SCAN_LIMIT } from './constants'
 import {
   canAccessAssignedProject,
   type ProjectPrincipal,
@@ -138,39 +136,6 @@ export function filterAccessibleTeamIssues(
 export function getTeamIssuesTableName(): string {
   return getEnv('WORK_ITEMS_TABLE_NAME') ??
     'mukuroji-team-issues-local'
-}
-
-/**
- * Reads a Team's canonical Work Items for an aggregate list within the response limit.
- *
- * @param directoryId - Workspace directory ID.
- * @param context - Team permission context of the principal.
- * @param principal - Authenticated Workspace principal.
- * @param includeArchived - Whether archived Work Items are included.
- * @returns The accessible Work Items of the Team.
- */
-export async function readCanonicalTeamIssuesForAggregate(
-  directoryId: string,
-  context: TeamPermissionContext,
-  principal: ProjectPrincipal,
-  includeArchived = false,
-) {
-  const clientReadLimit = createWorkItemListProbeLimit(WORK_ITEMS_PARTITION_SCAN_LIMIT)
-  const storedIssues = await workItemDependencies.teamIssues.getTeamIssues(
-    directoryId,
-    context.team.id,
-    { limit: clientReadLimit, consistentRead: true, includeArchived },
-  )
-  assertWorkItemListWithinLimit(
-    storedIssues.issues,
-    WORK_ITEMS_PARTITION_SCAN_LIMIT,
-    `Team "${context.team.id}" canonical partition`,
-  )
-
-  return {
-    teamId: context.team.id,
-    issues: filterAccessibleTeamIssues(storedIssues.issues, principal, context),
-  } satisfies TeamIssuesResponse
 }
 
 /**

@@ -83,6 +83,30 @@ export type CreateWorkloadRequestRequest = {
   expectedTeamRevision: number
 }
 
+/** Input sent when a manager changes or cancels a resource request. */
+export type UpdateWorkloadRequestRequest = {
+  /** New request title. */
+  title?: string
+  /** New requested role; an empty string clears it. */
+  role?: string
+  /** New required skill identifiers. */
+  skillIds?: string[]
+  /** New local start date. */
+  fromDate?: string
+  /** New local end date. */
+  toDate?: string
+  /** New total requested effort in minutes. */
+  requestedMinutes?: number
+  /** New confidential flag. */
+  confidential?: boolean
+  /** Set to `canceled` to withdraw the request. */
+  status?: 'canceled'
+  /** Expected request revision. */
+  expectedRevision: number
+  /** Expected Team workload revision. */
+  expectedTeamRevision: number
+}
+
 /** Input sent when a manager creates a resource assignment. */
 export type CreateWorkloadAssignmentRequest = {
   /** Optional request being fulfilled. */
@@ -262,6 +286,28 @@ export async function createWorkloadRequest(
     `/teams/${encodeURIComponent(teamId)}/workload/requests`,
     input,
     'POST',
+  )
+}
+
+/**
+ * Changes or cancels a Team resource request.
+ *
+ * @param accessToken - Authenticated Workspace access token.
+ * @param teamId - Team containing the request.
+ * @param requestId - Request being changed.
+ * @param input - Changed fields, an optional cancel status, and optimistic-concurrency values.
+ */
+export async function updateWorkloadRequest(
+  accessToken: string,
+  teamId: string,
+  requestId: string,
+  input: UpdateWorkloadRequestRequest,
+): Promise<void> {
+  await sendWorkloadMutation(
+    accessToken,
+    `/teams/${encodeURIComponent(teamId)}/workload/requests/${encodeURIComponent(requestId)}`,
+    input,
+    'PATCH',
   )
 }
 
