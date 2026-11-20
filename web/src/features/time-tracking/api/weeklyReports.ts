@@ -1,4 +1,5 @@
 import {
+  isWeeklyReportDate,
   WEEKLY_REPORT_SECTION_NAMES,
   type SubmitWeeklyReportRequest,
   type TeamWeeklyReportMemberStatus,
@@ -322,7 +323,8 @@ export async function getTeamWeeklyReportStatus(
       typeof member.memberKey !== 'string' ||
       !isOptionalString(member.displayName) ||
       !isNonnegativeSafeInteger(member.submissionCount) ||
-      !isOptionalString(member.lastSubmittedAt)
+      !isOptionalString(member.lastSubmittedAt) ||
+      (member.weekStart !== undefined && (typeof member.weekStart !== 'string' || !isWeeklyReportDate(member.weekStart)))
     ) {
       throw invalidResponse('Team weekly reports')
     }
@@ -331,6 +333,8 @@ export async function getTeamWeeklyReportStatus(
       ...(member.displayName === undefined ? {} : { displayName: member.displayName }),
       submissionCount: member.submissionCount,
       ...(member.lastSubmittedAt === undefined ? {} : { lastSubmittedAt: member.lastSubmittedAt }),
+      // Set when the member submitted under an earlier Workspace week start; the report is read there.
+      ...(typeof member.weekStart === 'string' ? { weekStart: member.weekStart } : {}),
     })
   }
   return { teamId: data.teamId, weekStart: data.weekStart, members }

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
@@ -16,6 +16,7 @@ import {
   formatPersonalWeeklyReportMarkdown,
   toSubmitWeeklyReportRequest,
 } from '../src/features/time-tracking/model/personalWeeklyReport'
+import { getTeamWeeklyReportStatus } from '../src/features/time-tracking/api/weeklyReports'
 import { createWeekPeriod } from '../src/features/time-tracking/model/timePeriod'
 import { reconcileWeeklyReportEditor } from '../src/features/time-tracking/model/weeklyReportNotesEditor'
 import { PersonalWeeklyReport } from '../src/features/time-tracking/ui/PersonalWeeklyReport'
@@ -501,5 +502,39 @@ describe('TeamWeeklyReports', () => {
       />,
     )
     expect(markup).toContain(en('timeTracking.teamWeeklyReports.otherWeekStart').replace('{date}', formatters.day('2026-11-10')))
+  })
+})
+
+describe('getTeamWeeklyReportStatus', () => {
+  /** Fetch before a test replaced it. */
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  /**
+   * Answers every request with one JSON body.
+   *
+   * @param body - Response body.
+   */
+  function respondWith(body: unknown) {
+    const fakeFetch: typeof fetch = async () => Response.json(body)
+    globalThis.fetch = fakeFetch
+  }
+
+  test('keeps the stored week start of a report submitted under an earlier week start', async () => {
+    respondWith({
+      teamId: 'core-team',
+      weekStart: '2026-11-15',
+      members: [{ memberKey: 'sato@example.com', submissionCount: 1, lastSubmittedAt: '2026-11-20T09:00:00.000Z', weekStart: '2026-11-16' }],
+    })
+    const status = await getTeamWeeklyReportStatus('token', 'core-team', '2026-11-15')
+    expect(status.members[0]?.weekStart).toBe('2026-11-16')
+  })
+
+  test('rejects a member status with an invalid stored week start', async () => {
+    respondWith({ teamId: 'core-team', weekStart: '2026-11-15', members: [{ memberKey: 'sato@example.com', submissionCount: 1, weekStart: 'later' }] })
+    await expect(getTeamWeeklyReportStatus('token', 'core-team', '2026-11-15')).rejects.toThrow()
   })
 })
