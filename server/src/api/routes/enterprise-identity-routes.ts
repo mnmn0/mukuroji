@@ -81,6 +81,7 @@ import {
   workspaceDependencies,
 } from '../shared/app-dependencies'
 import { createAuthenticationResponse, toProjectPrincipal } from '../shared/authentication-session'
+import { readCognitoAccessTokenUser } from '../shared/cognito-access-token-user'
 import {
   assertEnterpriseCognitoFederationProvider,
   assertEnterpriseCognitoSsoAppClient,
@@ -192,7 +193,7 @@ export async function auditRejectedEnterpriseSecurityMutation(
       } catch {
         return
       }
-      const principal = toProjectPrincipal(await authenticationDependencies.cognito.getUser(token), token)
+      const principal = toProjectPrincipal(await readCognitoAccessTokenUser(token), token)
       const member = await workspaceDependencies.workspaceAccess.getActiveMember(
         principal.directoryId,
         principal.userKey,
