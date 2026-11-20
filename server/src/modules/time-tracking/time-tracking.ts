@@ -8,6 +8,7 @@ import {
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY,
   TIME_ENTRY_CATEGORIES,
   UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
   type RunningTimer,
@@ -117,8 +118,8 @@ export type CreateTimeEntryInput = {
   teamId: string
   /** Optional Project identifier. */
   projectId?: string
-  /** Canonical Work Item identifier. */
-  workItemId: string
+  /** Canonical Work Item identifier; omitted for indirect work, which then requires a `category`. */
+  workItemId?: string
   /** Member recording the work. */
   userId: string
   /** Interval start; required unless `duration` is set. */
@@ -183,12 +184,17 @@ export type UpdateTimeEntryInput = {
    * reuse an authorization decided on an older revision. Excluded from idempotency fingerprints.
    */
   authorizedRevision?: number
-  /** Optional new start. */
+  /**
+   * Optional new start. Sending the stored start and end again keeps a date-and-minutes entry
+   * as one; a different interval makes it a timed entry.
+   */
   startAt?: string
   /** Optional new end. */
   endAt?: string
-  /** Optional new Work Item. */
-  workItemId?: string
+  /** Optional new date and minutes, which keeps or makes the entry a date-and-minutes entry. */
+  duration?: TimeEntryDurationInput
+  /** Optional new Work Item; `null` turns the entry into indirect work, which requires a category. */
+  workItemId?: string | null
   /** Optional new Project. */
   projectId?: string | null
   /** Optional new work category; `null` makes the entry uncategorized. */
@@ -231,6 +237,35 @@ export type TransitionTimeEntryInput = {
   reason?: string
   /** Optional client key used to make audit writes idempotent across retries. */
   idempotencyKey?: string
+}
+
+/** A request to delete a draft or rejected time entry. */
+export type DeleteTimeEntryInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team identifier used to resolve the entry. */
+  teamId: string
+  /** Entry identifier. */
+  entryId: string
+  /** Actor deleting the entry; only the entry owner may delete it. */
+  actorUserId: string
+  /** Expected entry revision. */
+  expectedRevision: number
+  /**
+   * Revision that the caller's authorization checks read. When set, a request whose
+   * expected revision differs is rejected as a conflict. Excluded from idempotency fingerprints.
+   */
+  authorizedRevision?: number
+  /** Optional client key used to make the deletion and its audit idempotent across retries. */
+  idempotencyKey?: string
+}
+
+/** JSON-safe result of deleting a time entry. */
+export type DeletedTimeEntry = {
+  /** Identifier of the deleted entry. */
+  entryId: string
+  /** Always `true`; marks the stored idempotency response. */
+  deleted: true
 }
 
 /** A durable timer start request. */
@@ -436,6 +471,16 @@ export interface TimeTrackingRepository {
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
   ): Promise<void>
+  /**
+   * Deletes a draft or rejected entry when it is still at the expected revision, together with
+   * its audit event and idempotency receipt where supported. Its history records are kept.
+   */
+  deleteEntry(
+    entry: TimeEntry,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ): Promise<void>
   /** Saves an immutable lifecycle history record. */
   saveHistory(workspaceId: string, teamId: string, history: TimeEntryHistory): Promise<void>
   /** Lists immutable lifecycle history for an entry. */
@@ -537,7 +582,7 @@ export class TimeTrackingService {
       workspaceId: normalized.workspaceId,
       teamId: normalized.teamId,
       ...(normalized.projectId ? { projectId: normalized.projectId } : {}),
-      workItemId: normalized.workItemId,
+      ...(normalized.workItemId ? { workItemId: normalized.workItemId } : {}),
       userId: normalized.userId,
       startAt: normalized.startAt,
       endAt: normalized.endAt,
@@ -598,13 +643,19 @@ export class TimeTrackingService {
     if (current.revision !== input.expectedRevision || (input.authorizedRevision !== undefined && input.authorizedRevision !== input.expectedRevision)) {
       throw new TimeTrackingError(409, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
     }
-    const startAt = input.startAt === undefined
-      ? current.startAt
-      : validateInstant(input.startAt, 'Entry start')
-    const endAt = input.endAt === undefined
-      ? current.endAt
-      : validateInstant(input.endAt, 'Entry end')
+    const { startAt, endAt, durationOnly } = resolveUpdatedInterval(current, input)
     validateInterval(startAt, endAt)
+    const workItemId = input.workItemId === undefined
+      ? current.workItemId
+      : input.workItemId === null
+        ? undefined
+        : readIdentifier(input.workItemId, 'Work Item ID')
+    const category = input.category === undefined
+      ? current.category
+      : input.category === null
+        ? undefined
+        : readCategory(input.category)
+    requireWorkItemOrCategory(workItemId, category)
     const currency = input.currency ?? current.currency
     validateCurrency(currency)
     const hourlyRateMinor = input.hourlyRateMinor === undefined
@@ -619,12 +670,12 @@ export class TimeTrackingService {
     const next: TimeEntry = {
       ...current,
       ...(input.projectId === null ? { projectId: undefined } : input.projectId === undefined ? {} : { projectId: readIdentifier(input.projectId, 'Project ID') }),
-      workItemId: input.workItemId === undefined ? current.workItemId : readIdentifier(input.workItemId, 'Work Item ID'),
+      workItemId,
       startAt,
       endAt,
       durationMinutes: calculateDurationMinutes(startAt, endAt),
-      ...(input.startAt === undefined && input.endAt === undefined ? {} : { durationOnly: undefined }),
-      ...(input.category === null ? { category: undefined } : input.category === undefined ? {} : { category: readCategory(input.category) }),
+      durationOnly: durationOnly ? true : undefined,
+      category,
       ...(input.description === null ? { description: undefined } : input.description === undefined ? {} : { description: normalizeDescription(input.description) }),
       billable: input.billable ?? current.billable,
       currency,
@@ -723,6 +774,72 @@ export class TimeTrackingService {
       idempotencyPut,
     )
     return next
+  }
+
+  /**
+   * Deletes the caller's own draft or rejected entry and records a `time-entry.deleted` audit event.
+   *
+   * Submitted, approved, and locked entries cannot be deleted, and nobody but the entry owner may
+   * delete one; a manager rejects time instead. The entry's lifecycle history is kept.
+   *
+   * @param input - Entry, actor, and expected revision.
+   * @returns The deleted entry's identifier.
+   */
+  async deleteEntry(input: DeleteTimeEntryInput): Promise<DeletedTimeEntry> {
+    return await this.withIdempotency(
+      input.workspaceId,
+      input.actorUserId,
+      input.idempotencyKey,
+      'time-entry.delete',
+      input,
+      (completion) => this.deleteEntryInternal(input, completion),
+      readDeletedTimeEntry,
+    )
+  }
+
+  /**
+   * Deletes an entry without the public idempotency wrapper.
+   *
+   * @param input - Entry, actor, and expected revision.
+   * @param completion - Attaches the idempotency receipt to the delete transaction.
+   * @returns The deleted entry's identifier.
+   */
+  private async deleteEntryInternal(
+    input: DeleteTimeEntryInput,
+    completion?: TimeTrackingIdempotencyCompletion,
+  ): Promise<DeletedTimeEntry> {
+    const current = await this.requireEntry(input.workspaceId, input.entryId, input.teamId)
+    if (current.userId !== input.actorUserId) {
+      throw new TimeTrackingError(403, 'TimeEntryAccessDenied', 'Only the entry owner may delete this entry.')
+    }
+    if (!isDeletableStatus(current.status)) {
+      throw new TimeTrackingError(409, 'TimeEntryNotDeletable', 'Only draft and rejected entries can be deleted.')
+    }
+    if (current.revision !== input.expectedRevision || (input.authorizedRevision !== undefined && input.authorizedRevision !== input.expectedRevision)) {
+      throw new TimeTrackingError(409, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
+    }
+    const occurredAt = readNow(this.now).toISOString()
+    const auditPut = this.createAuditEventPut({
+      workspaceId: current.workspaceId,
+      teamId: current.teamId,
+      actorUserId: input.actorUserId,
+      eventType: 'time-entry.deleted',
+      entityType: 'time-entry',
+      entityId: current.id,
+      action: 'deleted',
+      idempotencyKey: input.idempotencyKey ?? this.createId(),
+      requestBody: { action: 'deleted', entryId: current.id, revision: current.revision },
+      before: toAuditEntrySnapshot(current),
+      includeFields: TIME_ENTRY_AUDIT_FIELDS,
+      redactFields: ['hourlyRateMinor', 'actualCostMinor'],
+      metadata: createEntryAuditMetadata(current),
+      path: `/api/teams/${current.teamId}/time-entries/${current.id}`,
+      occurredAt,
+    })
+    const result: DeletedTimeEntry = { entryId: current.id, deleted: true }
+    const idempotencyPut = completion ? await completion(result) : undefined
+    await this.repository.deleteEntry(current, current.revision, auditPut, idempotencyPut)
+    return result
   }
 
   /** Starts the member's one allowed running timer. */
@@ -1071,7 +1188,7 @@ export class TimeTrackingService {
       : input.budgetScope === 'project' && input.budgetScopeId
         ? await this.repository.getBudget(input.workspaceId, 'project', input.budgetScopeId)
         : await this.repository.getBudget(input.workspaceId, 'team', input.teamId)
-    const totalEstimateMinutes = [...new Set(entries.map((entry) => entry.workItemId))]
+    const totalEstimateMinutes = [...new Set(entries.flatMap((entry) => entry.workItemId === undefined ? [] : [entry.workItemId]))]
       .reduce((sum, workItemId) => sum + (estimateByWorkItem.get(workItemId) ?? 0), 0)
     const totalActualCostByCurrency = input.includeCosts
       ? sumCostsByCurrency(entries, period.from, period.to, input.managedProjectIds)
@@ -1230,10 +1347,7 @@ export class TimeTrackingService {
       includeFields: TIME_ENTRY_AUDIT_FIELDS,
       redactFields: ['hourlyRateMinor', 'actualCostMinor'],
       metadata: {
-        teamId: entry.teamId,
-        workItemId: entry.workItemId,
-        status: entry.status,
-        ...(entry.projectId ? { projectId: entry.projectId } : {}),
+        ...createEntryAuditMetadata(entry),
         ...(history.reason ? { reason: history.reason } : {}),
       },
       path: `/api/teams/${entry.teamId}/time-entries/${entry.id}`,
@@ -1334,6 +1448,21 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
   ) {
     await this.saveEntry(entry, expectedRevision)
     await this.saveHistory(entry.workspaceId, entry.teamId, history)
+  }
+
+  /** Deletes a draft or rejected entry at the expected revision. */
+  async deleteEntry(
+    entry: TimeEntry,
+    expectedRevision: number,
+    _auditPut?: AuditTransactWriteItem,
+    _idempotencyPut?: AuditTransactWriteItem,
+  ) {
+    const key = memoryEntryKey(entry.workspaceId, entry.teamId, entry.id)
+    const current = this.entries.get(key)
+    if (!current || current.revision !== expectedRevision || !isDeletableStatus(current.status)) {
+      throw new TimeTrackingError(409, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
+    }
+    this.entries.delete(key)
   }
 
   /** Saves immutable history. */
@@ -1572,6 +1701,38 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     }
   }
 
+  /** Deletes a draft or rejected entry with its audit event in one DynamoDB transaction. */
+  async deleteEntry(
+    entry: TimeEntry,
+    expectedRevision: number,
+    auditPut?: AuditTransactWriteItem,
+    idempotencyPut?: AuditTransactWriteItem,
+  ) {
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Delete: {
+              TableName: this.tableName,
+              Key: { workspaceId: entry.workspaceId, recordKey: entryKey(entry.teamId, entry.id) },
+              ConditionExpression: 'revision = :expectedRevision AND #status IN (:draft, :rejected)',
+              ExpressionAttributeNames: { '#status': 'status' },
+              ExpressionAttributeValues: {
+                ':expectedRevision': expectedRevision,
+                ':draft': 'draft',
+                ':rejected': 'rejected',
+              },
+            },
+          },
+          ...(auditPut ? [auditPut] : []),
+          ...(idempotencyPut ? [idempotencyPut] : []),
+        ],
+      }))
+    } catch (error) {
+      throw mapConditionalWriteError(error, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
+    }
+  }
+
   /** Saves immutable history. */
   async saveHistory(workspaceId: string, teamId: string, history: TimeEntryHistory) {
     await this.documentClient.send(new PutCommand({
@@ -1762,7 +1923,9 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
 function normalizeCreateInput(input: CreateTimeEntryInput, canManageRates: boolean): NormalizedCreateTimeEntryInput {
   const workspaceId = readIdentifier(input.workspaceId, 'Workspace ID')
   const teamId = readIdentifier(input.teamId, 'Team ID')
-  const workItemId = readIdentifier(input.workItemId, 'Work Item ID')
+  const workItemId = input.workItemId === undefined ? undefined : readIdentifier(input.workItemId, 'Work Item ID')
+  const category = input.category === undefined ? undefined : readCategory(input.category)
+  requireWorkItemOrCategory(workItemId, category)
   const userId = readIdentifier(input.userId, 'User ID')
   const { startAt, endAt } = resolveCreateInterval(input)
   validateInterval(startAt, endAt)
@@ -1775,12 +1938,12 @@ function normalizeCreateInput(input: CreateTimeEntryInput, canManageRates: boole
     workspaceId,
     teamId,
     ...(input.projectId ? { projectId: readIdentifier(input.projectId, 'Project ID') } : {}),
-    workItemId,
+    ...(workItemId ? { workItemId } : {}),
     userId,
     startAt,
     endAt,
     durationOnly: input.duration !== undefined,
-    ...(input.category === undefined ? {} : { category: readCategory(input.category) }),
+    ...(category ? { category } : {}),
     ...(input.description ? { description: normalizeDescription(input.description) } : {}),
     billable: input.billable,
     currency,
@@ -1807,7 +1970,18 @@ function resolveCreateInterval(input: CreateTimeEntryInput): { startAt: string; 
   if (input.startAt !== undefined || input.endAt !== undefined) {
     throw new TimeTrackingError(400, 'InvalidRequest', 'Send either start and end times, or a date and minutes, not both.')
   }
-  const { date, minutes, timeZone } = input.duration
+  return resolveDurationInterval(input.duration)
+}
+
+/**
+ * Resolves the interval of a date-and-minutes entry, which starts at local midnight of the date
+ * and must end within that date.
+ *
+ * @param duration - Local date, minutes, and timezone.
+ * @returns Normalized interval start and end instants.
+ */
+function resolveDurationInterval(duration: TimeEntryDurationInput): { startAt: string; endAt: string } {
+  const { date, minutes, timeZone } = duration
   if (!ISO_DATE_PATTERN.test(date) || !isValidCalendarDate(date)) {
     throw new TimeTrackingError(400, 'InvalidDate', 'Work date must be an ISO date.')
   }
@@ -1833,6 +2007,69 @@ function readCategory(value: unknown): TimeEntryCategory {
     throw new TimeTrackingError(400, 'InvalidTimeEntryCategory', `Category must be one of ${TIME_ENTRY_CATEGORIES.join(', ')}.`)
   }
   return category
+}
+
+/**
+ * Resolves the interval of an update and whether the entry stays a date-and-minutes entry.
+ *
+ * A new date and minutes keep or make it one. New times keep it one only when they repeat the
+ * stored interval, so a client that always sends the times does not turn it into a timed entry.
+ *
+ * @param current - Stored entry.
+ * @param input - Update request.
+ * @returns Interval and the date-and-minutes marker of the updated entry.
+ */
+function resolveUpdatedInterval(
+  current: TimeEntry,
+  input: UpdateTimeEntryInput,
+): { startAt: string; endAt: string; durationOnly: boolean } {
+  if (input.duration !== undefined) {
+    if (input.startAt !== undefined || input.endAt !== undefined) {
+      throw new TimeTrackingError(400, 'InvalidRequest', 'Send either start and end times, or a date and minutes, not both.')
+    }
+    return { ...resolveDurationInterval(input.duration), durationOnly: true }
+  }
+  const startAt = input.startAt === undefined ? current.startAt : validateInstant(input.startAt, 'Entry start')
+  const endAt = input.endAt === undefined ? current.endAt : validateInstant(input.endAt, 'Entry end')
+  const unchanged = Date.parse(startAt) === Date.parse(current.startAt) && Date.parse(endAt) === Date.parse(current.endAt)
+  return { startAt, endAt, durationOnly: current.durationOnly === true && unchanged }
+}
+
+/**
+ * Requires a Work Item or, for indirect work such as a meeting, a work category.
+ *
+ * @param workItemId - Work Item of the entry, if any.
+ * @param category - Work category of the entry, if any.
+ */
+function requireWorkItemOrCategory(workItemId: string | undefined, category: TimeEntryCategory | undefined): void {
+  if (workItemId === undefined && category === undefined) {
+    throw new TimeTrackingError(400, 'TimeEntryCategoryRequired', 'An entry without a Work Item requires a work category.')
+  }
+}
+
+/**
+ * Returns whether an entry in this state may be deleted by its owner.
+ *
+ * @param status - Lifecycle state.
+ * @returns `true` for draft and rejected entries.
+ */
+function isDeletableStatus(status: TimeEntryStatus): boolean {
+  return status === 'draft' || status === 'rejected'
+}
+
+/**
+ * Builds the searchable audit metadata of a time-entry mutation.
+ *
+ * @param entry - Entry the event is about.
+ * @returns Team, status, and the Work Item and Project when the entry has them.
+ */
+function createEntryAuditMetadata(entry: TimeEntry): Record<string, unknown> {
+  return {
+    teamId: entry.teamId,
+    ...(entry.workItemId ? { workItemId: entry.workItemId } : {}),
+    status: entry.status,
+    ...(entry.projectId ? { projectId: entry.projectId } : {}),
+  }
 }
 
 /** Validates a lifecycle transition. */
@@ -1888,15 +2125,15 @@ function aggregateEntries(
     const key = groupBy === 'user'
       ? entry.userId
       : groupBy === 'work-item'
-        ? entry.workItemId
+        ? entry.workItemId ?? NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY
         : groupBy === 'category'
           ? entry.category ?? UNCATEGORIZED_TIME_ENTRY_GROUP_KEY
           : entry.projectId ?? 'unassigned'
-    const group = grouped.get(key) ?? createMutableSummaryGroup(key, groupBy === 'category' && key === UNCATEGORIZED_TIME_ENTRY_GROUP_KEY ? 'Uncategorized' : undefined)
+    const group = grouped.get(key) ?? createMutableSummaryGroup(key, readFallbackGroupLabel(groupBy, entry))
     group.minutes += minutes
     group.billableMinutes += entry.billable ? minutes : 0
     group.entryIds.add(entry.id)
-    if (!group.estimateWorkItemIds.has(entry.workItemId)) {
+    if (entry.workItemId !== undefined && !group.estimateWorkItemIds.has(entry.workItemId)) {
       group.estimateMinutes += estimateByWorkItem.get(entry.workItemId) ?? 0
       group.estimateWorkItemIds.add(entry.workItemId)
     }
@@ -1907,6 +2144,19 @@ function aggregateEntries(
   return [...grouped.values()]
     .sort((left, right) => left.key.localeCompare(right.key))
     .map((group) => toSummaryGroup(group, includeCosts))
+}
+
+/**
+ * Returns the label of a report group whose key is a placeholder rather than an identifier.
+ *
+ * @param groupBy - Report grouping.
+ * @param entry - Entry that opens the group.
+ * @returns `Uncategorized` or `No Work Item` for those groups, otherwise `undefined`.
+ */
+function readFallbackGroupLabel(groupBy: TimeTrackingGroupBy, entry: TimeEntry): string | undefined {
+  if (groupBy === 'category' && entry.category === undefined) return 'Uncategorized'
+  if (groupBy === 'work-item' && entry.workItemId === undefined) return 'No Work Item'
+  return undefined
 }
 
 /** Aggregates entries into local day or Monday-based week buckets. */
@@ -1925,6 +2175,7 @@ function aggregateCalendarEntries(
     .map((segment) => ({ entry, segment })))
   const actualMillisecondsByWorkItem = new Map<string, number>()
   for (const { entry, segment } of segments) {
+    if (entry.workItemId === undefined) continue
     const entryDurationMilliseconds = Date.parse(entry.endAt) - Date.parse(entry.startAt)
     const actualMilliseconds = entryDurationMilliseconds * segment.ratio
     actualMillisecondsByWorkItem.set(
@@ -1940,8 +2191,8 @@ function aggregateCalendarEntries(
     group.entryIds.add(entry.id)
     const entryDurationMilliseconds = Date.parse(entry.endAt) - Date.parse(entry.startAt)
     const actualMilliseconds = entryDurationMilliseconds * segment.ratio
-    const workItemActualMilliseconds = actualMillisecondsByWorkItem.get(entry.workItemId) ?? 0
-    group.estimateMinutes += workItemActualMilliseconds > 0
+    const workItemActualMilliseconds = entry.workItemId === undefined ? 0 : actualMillisecondsByWorkItem.get(entry.workItemId) ?? 0
+    group.estimateMinutes += entry.workItemId !== undefined && workItemActualMilliseconds > 0
       ? Math.round((estimateByWorkItem.get(entry.workItemId) ?? 0) * actualMilliseconds / workItemActualMilliseconds)
       : 0
     const cost = costForEntry(entry, segment.minutes, includeCosts, managedProjectIds)
@@ -2115,7 +2366,7 @@ function toAuditEntrySnapshot(entry: TimeEntry): Record<string, unknown> {
     billable: entry.billable,
     currency: entry.currency,
     ...(entry.projectId ? { projectId: entry.projectId } : {}),
-    workItemId: entry.workItemId,
+    ...(entry.workItemId ? { workItemId: entry.workItemId } : {}),
     userId: entry.userId,
     source: entry.source,
   }
@@ -2421,7 +2672,7 @@ function readStoredEntry(value: unknown): TimeEntry {
     workspaceId: readString(record.workspaceId, 'Stored time entry Workspace ID'),
     teamId: readString(record.teamId, 'Stored time entry Team ID'),
     ...(readOptionalString(record.projectId) ? { projectId: readOptionalString(record.projectId) } : {}),
-    workItemId: readString(record.workItemId, 'Stored time entry Work Item ID'),
+    ...(record.workItemId === undefined ? {} : { workItemId: readString(record.workItemId, 'Stored time entry Work Item ID') }),
     userId: readString(record.userId, 'Stored time entry User ID'),
     startAt: readString(record.startAt, 'Stored time entry start'),
     endAt: readString(record.endAt, 'Stored time entry end'),
@@ -2527,6 +2778,19 @@ function readCompletedTimeTrackingMutation(value: unknown): CompletedTimeTrackin
     throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored time tracking mutation response is invalid.')
   }
   return { completed: true }
+}
+
+/**
+ * Validates the replay response of a time entry deletion.
+ *
+ * @param value - Stored idempotency response.
+ * @returns The deleted entry's identifier.
+ */
+function readDeletedTimeEntry(value: unknown): DeletedTimeEntry {
+  if (!isRecord(value) || value.deleted !== true || typeof value.entryId !== 'string') {
+    throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored time entry deletion response is invalid.')
+  }
+  return { entryId: value.entryId, deleted: true }
 }
 
 /** Rejects missing and future persisted schema versions before parsing fields. */

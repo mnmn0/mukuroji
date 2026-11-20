@@ -6,7 +6,7 @@ import { buildPersonalWeeklyReport } from '../model/personalWeeklyReport'
 import { createWeekPeriod } from '../model/timePeriod'
 import { useTimeEntries } from '../queries/useTimeEntries'
 import { PersonalWeeklyReport } from './PersonalWeeklyReport'
-import { createTimeTrackingFormatters } from './timeTrackingText'
+import { createTimeTrackingFormatters, describeTimeEntrySubject } from './timeTrackingText'
 import { useLocalToday } from './useNow'
 
 const emptyWorkItems: readonly CanonicalWorkItem[] = []
@@ -79,7 +79,8 @@ export function PersonalWeeklyReportContainer({
     workItems: workItems ?? emptyWorkItems,
     entries: entries.data?.entries ?? [],
     workItemTitles,
-  }), [entries.data?.entries, today, week.days, workItemTitles, workItems])
+    indirectTitle: (category) => describeTimeEntrySubject(t, category ? { category } : {}, {}),
+  }), [entries.data?.entries, t, today, week.days, workItemTitles, workItems])
 
   return (
     <PersonalWeeklyReport

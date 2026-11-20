@@ -5,7 +5,9 @@ import { groupTimeEntriesByMember, sortTimeEntries, type TimeApprovalGroup } fro
 import { formatMinutes, toLocalDateKey, type TimeWeekPeriod } from '../model/timePeriod'
 import { TimeWeekNavigator } from './TimeWeekNavigator'
 import {
+  describeTimeEntrySubject,
   describeTimeTrackingFailure,
+  formatTimeEntryRange,
   interpolate,
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
@@ -158,7 +160,11 @@ export function TimeApprovalQueue({
    * @returns Date, time range, and Work Item.
    */
   const describeEntry = (entry: TimeEntry) =>
-    `${formatters.day(toLocalDateKey(entry.startAt))} ${formatters.time(entry.startAt)}–${formatters.time(entry.endAt)} ${workItemTitles[entry.workItemId] ?? entry.workItemId}`
+    [
+      formatters.day(toLocalDateKey(entry.startAt)),
+      formatTimeEntryRange(formatters, entry),
+      describeTimeEntrySubject(t, entry, workItemTitles),
+    ].filter(Boolean).join(' ')
 
   /**
    * Renders one member group of submitted entries.

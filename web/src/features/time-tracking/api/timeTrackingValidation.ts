@@ -1,11 +1,13 @@
-import type {
-  RunningTimer,
-  TimeEntry,
-  TimeEntryHistory,
-  TimeEntrySource,
-  TimeEntryStatus,
-  TimeSheet,
-  TimeSummaryGroup,
+import {
+  TIME_ENTRY_CATEGORIES,
+  type RunningTimer,
+  type TimeEntry,
+  type TimeEntryCategory,
+  type TimeEntryHistory,
+  type TimeEntrySource,
+  type TimeEntryStatus,
+  type TimeSheet,
+  type TimeSummaryGroup,
 } from '@mukuroji/contracts'
 import {
   isFiniteNumber,
@@ -49,6 +51,16 @@ function isOptionalNumber(value: unknown): value is number | undefined {
 }
 
 /**
+ * Checks whether a value is a known work category.
+ *
+ * @param value - Unknown JSON value.
+ * @returns Whether the value is one of the contract's categories.
+ */
+function isTimeEntryCategory(value: unknown): value is TimeEntryCategory {
+  return TIME_ENTRY_CATEGORIES.some((category) => category === value)
+}
+
+/**
  * Validates one time entry from the API.
  *
  * @param value - Unknown JSON value.
@@ -58,14 +70,15 @@ export function readTimeEntry(value: unknown): TimeEntry | undefined {
   if (!isRecord(value)) return undefined
   const {
     schemaVersion, id, workspaceId, teamId, projectId, workItemId, userId, startAt, endAt,
-    durationMinutes, description, billable, currency, status, source, revision, hourlyRateMinor,
+    durationMinutes, durationOnly, category, description, billable, currency, status, source, revision, hourlyRateMinor,
     actualCostMinor, createdAt, updatedAt, submittedAt, approvedAt, rejectedAt, lockedAt,
   } = value
   if (
     schemaVersion !== 1 ||
     typeof id !== 'string' || typeof workspaceId !== 'string' || typeof teamId !== 'string' ||
-    !isOptionalString(projectId) || typeof workItemId !== 'string' || typeof userId !== 'string' ||
+    !isOptionalString(projectId) || !isOptionalString(workItemId) || typeof userId !== 'string' ||
     typeof startAt !== 'string' || typeof endAt !== 'string' || !isNonnegativeSafeInteger(durationMinutes) ||
+    (durationOnly !== undefined && durationOnly !== true) || (category !== undefined && !isTimeEntryCategory(category)) ||
     !isOptionalString(description) || typeof billable !== 'boolean' || typeof currency !== 'string' ||
     !isTimeEntryStatus(status) || !isTimeEntrySource(source) || !isNonnegativeSafeInteger(revision) ||
     !isOptionalNumber(hourlyRateMinor) || !isOptionalNumber(actualCostMinor) ||
@@ -80,11 +93,13 @@ export function readTimeEntry(value: unknown): TimeEntry | undefined {
     workspaceId,
     teamId,
     ...(projectId === undefined ? {} : { projectId }),
-    workItemId,
+    ...(workItemId === undefined ? {} : { workItemId }),
     userId,
     startAt,
     endAt,
     durationMinutes,
+    ...(durationOnly === true ? { durationOnly } : {}),
+    ...(category === undefined ? {} : { category }),
     ...(description === undefined ? {} : { description }),
     billable,
     currency,

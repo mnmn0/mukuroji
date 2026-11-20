@@ -28,6 +28,9 @@ export type TimeEntryCategory = typeof TIME_ENTRY_CATEGORIES[number]
 /** Report group key used for entries that have no work category. */
 export const UNCATEGORIZED_TIME_ENTRY_GROUP_KEY = 'uncategorized' as const
 
+/** Report group key used by a `work-item` report for indirect work, which has no Work Item. */
+export const NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY = 'no-work-item' as const
+
 /** Grouping dimension supported by a time tracking report. */
 export type TimeTrackingGroupBy = 'day' | 'week' | 'user' | 'project' | 'work-item' | 'category'
 
@@ -43,8 +46,11 @@ export type TimeEntry = {
   teamId: string
   /** Optional Project associated with the work. */
   projectId?: string
-  /** Canonical Work Item associated with the work. */
-  workItemId: string
+  /**
+   * Canonical Work Item associated with the work; absent for indirect work, such as a meeting,
+   * which then always carries a `category`.
+   */
+  workItemId?: string
   /** Workspace member who recorded the time. */
   userId: string
   /** Inclusive interval start as an ISO 8601 instant. */

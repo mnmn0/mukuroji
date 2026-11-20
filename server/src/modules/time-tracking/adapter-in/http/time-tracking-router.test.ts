@@ -156,6 +156,7 @@ describe('createTimeTrackingRouter', () => {
       ['POST', '/api/teams/team-1/timers', { workItemId: 'work-item-p1', billable: false }],
       ['POST', '/api/time-tracking/timers/timer-1/stop', {}],
       ['DELETE', '/api/time-tracking/timers/timer-1', undefined],
+      ['DELETE', `/api/teams/team-1/time-entries/${entry.id}?expectedRevision=${entry.revision}`, undefined],
       ['PUT', '/api/teams/team-1/time-budget', { amountMinor: 1_000, expectedRevision: 0 }],
       ['PUT', '/api/teams/team-1/projects/project-1/time-budget', { amountMinor: 1_000, expectedRevision: 0 }],
     ]
@@ -296,6 +297,114 @@ describe('createTimeTrackingRouter', () => {
     const managed = await requestAs(fixture.router, 'alice', 'GET', summaryPath('project-1'))
     expect(managed.status).toBe(200)
     expect(await managed.json()).toMatchObject({ budget: { scopeId: 'project-1', amountMinor: 50_000 } })
+  })
+
+  test('records a meeting without a Work Item and carries it through submit, approval, and reports', async () => {
+    const fixture = createProjectFixture()
+    const meetingBody = { category: 'meeting', projectId: 'project-1', date: '2026-08-03', minutes: 120, timeZone: 'Asia/Tokyo', billable: false }
+    const created = await requestAs(fixture.router, 'bob', 'POST', '/api/teams/team-1/time-entries', meetingBody)
+    expect(created.status).toBe(201)
+    const { entry } = await created.json() as { entry: Record<string, unknown> }
+    expect(entry).toMatchObject({ projectId: 'project-1', category: 'meeting', durationMinutes: 120, durationOnly: true, status: 'draft' })
+    expect(entry.workItemId).toBeUndefined()
+
+    const withoutCategory = await requestAs(fixture.router, 'bob', 'POST', '/api/teams/team-1/time-entries', { ...meetingBody, category: undefined })
+    expect(withoutCategory.status).toBe(400)
+    expect(await withoutCategory.json()).toMatchObject({ code: 'TimeEntryCategoryRequired' })
+    const otherProject = await requestAs(fixture.router, 'bob', 'POST', '/api/teams/team-1/time-entries', { ...meetingBody, projectId: 'project-3' })
+    expect(otherProject.status).toBe(403)
+
+    const submitted = await requestAs(fixture.router, 'bob', 'POST', `/api/teams/team-1/time-entries/${String(entry.id)}/submit`, { expectedRevision: 1 })
+    expect(submitted.status).toBe(200)
+    const approved = await requestAs(fixture.router, 'alice', 'POST', `/api/teams/team-1/time-entries/${String(entry.id)}/approve`, { expectedRevision: 2 })
+    expect(approved.status).toBe(200)
+    const history = await requestAs(fixture.router, 'alice', 'GET', `/api/teams/team-1/time-entries/${String(entry.id)}/history`)
+    expect(history.status).toBe(200)
+
+    const period = 'from=2026-08-03&to=2026-08-09&timeZone=Asia/Tokyo'
+    const byWorkItem = await requestAs(fixture.router, 'alice', 'GET', `/api/teams/team-1/time-tracking/summary?${period}&groupBy=work-item`)
+    expect(await byWorkItem.json()).toMatchObject({ totalMinutes: 120, groups: [{ key: 'no-work-item', label: 'No Work Item', minutes: 120 }] })
+    const csv = await requestAs(fixture.router, 'alice', 'GET', `/api/teams/team-1/time-tracking/export?${period}&groupBy=category`)
+    expect(await csv.text()).toContain('meeting,120,0,1')
+  })
+
+  test('turns a Work Item entry into indirect work only when it keeps a category', async () => {
+    const fixture = createProjectFixture()
+    const draft = await createDraft(fixture.router, 'bob', 'work-item-p1')
+    const path = `/api/teams/team-1/time-entries/${draft.id}`
+    const uncategorized = await requestAs(fixture.router, 'bob', 'PATCH', path, { expectedRevision: draft.revision, workItemId: null })
+    expect(uncategorized.status).toBe(400)
+    expect(await uncategorized.json()).toMatchObject({ code: 'TimeEntryCategoryRequired' })
+
+    const indirect = await requestAs(fixture.router, 'bob', 'PATCH', path, { expectedRevision: draft.revision, workItemId: null, category: 'management' })
+    expect(indirect.status).toBe(200)
+    const { entry } = await indirect.json() as { entry: Record<string, unknown> }
+    expect(entry).toMatchObject({ projectId: 'project-1', category: 'management' })
+    expect(entry.workItemId).toBeUndefined()
+
+    const deniedProject = await requestAs(fixture.router, 'bob', 'PATCH', path, { expectedRevision: entry.revision, projectId: 'project-3' })
+    expect(deniedProject.status).toBe(403)
+    const moved = await requestAs(fixture.router, 'bob', 'PATCH', path, { expectedRevision: entry.revision, projectId: 'project-2' })
+    expect(moved.status).toBe(200)
+    expect((await moved.json() as { entry: Record<string, unknown> }).entry.projectId).toBe('project-2')
+  })
+
+  test('keeps a date-and-minutes entry when an edit repeats its times or sends new minutes', async () => {
+    const { router } = createFixture()
+    const headers = { Authorization: 'Bearer token', 'Content-Type': 'application/json' }
+    const created = await router.request('/api/teams/team-1/time-entries', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ category: 'meeting', date: '2026-08-03', minutes: 60, timeZone: 'Asia/Tokyo', billable: false }),
+    })
+    const { entry } = await created.json() as { entry: { id: string; startAt: string; endAt: string } }
+    /** Patches the entry and returns the updated entry. */
+    const patch = async (body: Record<string, unknown>) => {
+      const response = await router.request(`/api/teams/team-1/time-entries/${entry.id}`, { method: 'PATCH', headers, body: JSON.stringify(body) })
+      expect(response.status).toBe(200)
+      return (await response.json() as { entry: Record<string, unknown> }).entry
+    }
+
+    expect(await patch({ expectedRevision: 1, startAt: entry.startAt, endAt: entry.endAt, description: 'Weekly sync' }))
+      .toMatchObject({ durationOnly: true, durationMinutes: 60, description: 'Weekly sync' })
+    expect(await patch({ expectedRevision: 2, date: '2026-08-04', minutes: 90, timeZone: 'Asia/Tokyo' }))
+      .toMatchObject({ durationOnly: true, durationMinutes: 90, startAt: '2026-08-03T15:00:00.000Z' })
+    const timed = await patch({ expectedRevision: 3, startAt: '2026-08-04T01:00:00.000Z', endAt: '2026-08-04T02:00:00.000Z' })
+    expect(timed.durationOnly).toBeUndefined()
+  })
+
+  test('lets only the owner delete a draft or rejected entry', async () => {
+    const fixture = createProjectFixture()
+    /** Deletes an entry as one fixture user at a revision. */
+    const remove = (userKey: string, entryId: string, revision?: number) => requestAs(
+      fixture.router,
+      userKey,
+      'DELETE',
+      `/api/teams/team-1/time-entries/${entryId}${revision === undefined ? '' : `?expectedRevision=${revision}`}`,
+    )
+
+    const draft = await createDraft(fixture.router, 'bob', 'work-item-p1')
+    expect((await remove('alice', draft.id, draft.revision)).status).toBe(403)
+    expect((await remove('guest', draft.id, draft.revision)).status).toBe(403)
+    expect((await remove('bob', draft.id)).status).toBe(400)
+    expect((await remove('bob', draft.id, draft.revision + 1)).status).toBe(409)
+    expect((await remove('bob', draft.id, draft.revision)).status).toBe(204)
+    expect((await remove('bob', draft.id, draft.revision)).status).toBe(404)
+    const listed = await requestAs(fixture.router, 'bob', 'GET', '/api/teams/team-1/time-entries')
+    expect(readEntryIds(await listed.json())).not.toContain(draft.id)
+
+    const submitted = await createDraft(fixture.router, 'bob', 'work-item-p1')
+    await requestAs(fixture.router, 'bob', 'POST', `/api/teams/team-1/time-entries/${submitted.id}/submit`, { expectedRevision: 1 })
+    const notDeletable = await remove('bob', submitted.id, 2)
+    expect(notDeletable.status).toBe(409)
+    expect(await notDeletable.json()).toMatchObject({ code: 'TimeEntryNotDeletable' })
+    await requestAs(fixture.router, 'alice', 'POST', `/api/teams/team-1/time-entries/${submitted.id}/approve`, { expectedRevision: 2 })
+    expect((await remove('bob', submitted.id, 3)).status).toBe(409)
+
+    const rejected = await createDraft(fixture.router, 'bob', 'work-item-p1')
+    await requestAs(fixture.router, 'bob', 'POST', `/api/teams/team-1/time-entries/${rejected.id}/submit`, { expectedRevision: 1 })
+    await requestAs(fixture.router, 'alice', 'POST', `/api/teams/team-1/time-entries/${rejected.id}/reject`, { expectedRevision: 2, reason: 'Duplicate' })
+    expect((await remove('bob', rejected.id, 3)).status).toBe(204)
   })
 })
 

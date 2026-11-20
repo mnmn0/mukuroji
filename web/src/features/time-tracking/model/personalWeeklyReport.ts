@@ -3,6 +3,7 @@ import {
   readWorkItemPlannedStartDate,
   type CanonicalWorkItem,
   type TimeEntry,
+  type TimeEntryCategory,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../../shared/i18n/i18n'
 import { splitTimeEntryMinutesByDay } from './timeEntryLifecycle'
@@ -22,11 +23,11 @@ export type PersonalWeeklyReportItem = {
   minutes: number
 }
 
-/** Minutes the member recorded against one Work Item during the week. */
+/** Minutes the member recorded against one Work Item, or one category of indirect work, during the week. */
 export type PersonalWeeklyReportTimeRow = {
-  /** Work Item identifier. */
+  /** Work Item identifier, or `indirect:<category>` for indirect work. */
   workItemId: string
-  /** Work Item title, or the identifier when the title is unknown. */
+  /** Work Item title (the identifier when unknown), or the indirect-work label. */
   title: string
   /** Recorded minutes. */
   minutes: number
@@ -64,6 +65,8 @@ export type PersonalWeeklyReportInput = {
   entries: readonly TimeEntry[]
   /** Titles of Team Work Items, used for time recorded against items outside `workItems`. */
   workItemTitles?: Readonly<Record<string, string>>
+  /** Labels indirect work (time without a Work Item) by its work category. */
+  indirectTitle?: (category: TimeEntryCategory | undefined) => string
 }
 
 /**
@@ -119,13 +122,17 @@ export function buildPersonalWeeklyReport(input: PersonalWeeklyReportInput): Per
   const nextWeekEnd = shiftLocalDate(weekEnd, 7) ?? weekEnd
 
   const minutesByWorkItem = new Map<string, number>()
+  const indirectTitles = new Map<string, string>()
   let totalMinutes = 0
   for (const entry of input.entries) {
     // Split by day like the timesheet, so the totals match it for entries crossing the week edge.
     let minutes = 0
     for (const dayMinutes of splitTimeEntryMinutesByDay(entry, input.weekDays).values()) minutes += dayMinutes
     if (minutes === 0) continue
-    minutesByWorkItem.set(entry.workItemId, (minutesByWorkItem.get(entry.workItemId) ?? 0) + minutes)
+    // Indirect work is listed once per work category.
+    const key = entry.workItemId ?? `indirect:${entry.category ?? 'uncategorized'}`
+    if (entry.workItemId === undefined) indirectTitles.set(key, input.indirectTitle?.(entry.category) ?? key)
+    minutesByWorkItem.set(key, (minutesByWorkItem.get(key) ?? 0) + minutes)
     totalMinutes += minutes
   }
 
@@ -162,7 +169,7 @@ export function buildPersonalWeeklyReport(input: PersonalWeeklyReportInput): Per
   }
 
   const time = [...minutesByWorkItem.entries()]
-    .map(([workItemId, minutes]) => ({ workItemId, title: titles.get(workItemId) ?? workItemId, minutes }))
+    .map(([workItemId, minutes]) => ({ workItemId, title: indirectTitles.get(workItemId) ?? titles.get(workItemId) ?? workItemId, minutes }))
     .sort((left, right) => right.minutes - left.minutes || left.title.localeCompare(right.title))
 
   return {

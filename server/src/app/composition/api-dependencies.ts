@@ -377,7 +377,7 @@ function createCapacityPlanningDataSource(
       return entries.map((entry) => ({
         memberId: entry.userId,
         ...(entry.projectId ? { projectId: entry.projectId } : {}),
-        workItemId: entry.workItemId,
+        ...(entry.workItemId ? { workItemId: entry.workItemId } : {}),
         startAt: entry.startAt,
         endAt: entry.endAt,
         durationMinutes: entry.durationMinutes,

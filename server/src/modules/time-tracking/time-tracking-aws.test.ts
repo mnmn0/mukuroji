@@ -176,6 +176,45 @@ describe('DynamoDbTimeTrackingRepository', () => {
     expect(JSON.stringify(transactionItems[2])).toContain('audit-table')
   })
 
+  test('deletes a draft with a status-guarded condition and its audit event in one transaction', async () => {
+    const commands: CommandWithInput[] = []
+    const entry = { ...createEntry('project-1'), hourlyRateMinor: 4_000, actualCostMinor: 4_000 }
+    const service = new TimeTrackingService(
+      new DynamoDbTimeTrackingRepository(
+        'analytics-table',
+        createDocumentClient([{ Item: { ...entry, recordKey: `TIME_ENTRY#team-1#${entry.id}` } }, {}], commands),
+      ),
+      {
+        now: () => new Date('2026-08-02T12:00:00.000Z'),
+        createId: () => 'id-1',
+        audit: { tableName: 'audit-table', retentionDays: 30 },
+      },
+    )
+
+    await expect(service.deleteEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: entry.id,
+      actorUserId: 'member-1',
+      expectedRevision: 1,
+    })).resolves.toEqual({ entryId: entry.id, deleted: true })
+
+    const transactionItems = commands[1]?.input.TransactItems
+    if (!Array.isArray(transactionItems)) throw new Error('Expected transaction items.')
+    expect(transactionItems).toHaveLength(2)
+    expect(transactionItems[0]).toMatchObject({
+      Delete: {
+        TableName: 'analytics-table',
+        Key: { workspaceId: 'workspace-1', recordKey: `TIME_ENTRY#team-1#${entry.id}` },
+        ConditionExpression: 'revision = :expectedRevision AND #status IN (:draft, :rejected)',
+      },
+    })
+    const audit = JSON.stringify(transactionItems[1])
+    expect(audit).toContain('audit-table')
+    expect(audit).toContain('time-entry.deleted')
+    expect(audit).not.toContain('hourlyRateMinor')
+  })
+
   test('commits the durable idempotency receipt with the entry transaction', async () => {
     const commands: CommandWithInput[] = []
     let completed = 0

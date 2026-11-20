@@ -58,26 +58,29 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
   router.post('/api/teams/:teamId/time-entries', async (context) => {
     return await withTeam(context, dependencies, 'member', async (principal, teamId, canManage) => {
       const body = asRecord(await dependencies.readJson(context.req))
-      const workItemId = readRequiredString(body.workItemId, 'Work Item ID')
-      const canonicalProjectId = await dependencies.verifyWorkItem(principal, teamId, workItemId, 'member')
+      // Indirect work, such as a meeting, has no Work Item; its Project, when given, is checked directly.
+      const workItemId = body.workItemId === undefined ? undefined : readRequiredString(body.workItemId, 'Work Item ID')
       const requestedProjectId = readOptionalString(body.projectId)
-      if (requestedProjectId !== undefined && requestedProjectId !== canonicalProjectId) {
+      const projectId = workItemId === undefined
+        ? requestedProjectId
+        : await dependencies.verifyWorkItem(principal, teamId, workItemId, 'member')
+      if (workItemId !== undefined && requestedProjectId !== undefined && requestedProjectId !== projectId) {
         throw new TimeTrackingError(400, 'WorkItemProjectMismatch', 'The Project must match the Work Item assignment.')
       }
-      if (canonicalProjectId) {
+      if (projectId) {
         await dependencies.verifyProject(
           principal,
           teamId,
-          canonicalProjectId,
+          projectId,
           body.hourlyRateMinor === undefined ? 'member' : 'manager',
         )
       }
       const entry = await dependencies.getTimeTracking().createEntry({
         workspaceId: principal.directoryId,
         teamId,
-        workItemId,
+        ...(workItemId ? { workItemId } : {}),
         userId: principal.userKey,
-        ...(canonicalProjectId ? { projectId: canonicalProjectId } : {}),
+        ...(projectId ? { projectId } : {}),
         ...readCreateInterval(body),
         ...(body.category === undefined ? {} : { category: readCategory(body.category) }),
         ...(readOptionalString(body.description) ? { description: readOptionalString(body.description) } : {}),
@@ -127,14 +130,27 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         teamId,
         readRequiredString(context.req.param('entryId'), 'Time entry ID'),
       )
-      const currentProjectId = await dependencies.verifyWorkItem(principal, teamId, current.workItemId, 'member')
+      const currentProjectId = current.workItemId === undefined
+        ? current.projectId
+        : await dependencies.verifyWorkItem(principal, teamId, current.workItemId, 'member')
+      if (current.workItemId === undefined && current.projectId) {
+        await dependencies.verifyProject(principal, teamId, current.projectId, 'member')
+      }
       const nextWorkItemId = body.workItemId === undefined
         ? current.workItemId
-        : readRequiredString(body.workItemId, 'Work Item ID')
-      const nextProjectId = body.workItemId === undefined
-        ? currentProjectId
-        : await dependencies.verifyWorkItem(principal, teamId, nextWorkItemId, 'member')
-      if (body.projectId !== undefined && body.projectId !== null && readRequiredString(body.projectId, 'Project ID') !== nextProjectId) {
+        : body.workItemId === null
+          ? undefined
+          : readRequiredString(body.workItemId, 'Work Item ID')
+      const requestedProjectId = body.projectId === undefined || body.projectId === null
+        ? body.projectId
+        : readRequiredString(body.projectId, 'Project ID')
+      // A Work Item entry takes the Work Item's Project; indirect work keeps or names its own.
+      const nextProjectId = nextWorkItemId === undefined
+        ? requestedProjectId === undefined ? current.projectId : requestedProjectId ?? undefined
+        : body.workItemId === undefined
+          ? currentProjectId
+          : await dependencies.verifyWorkItem(principal, teamId, nextWorkItemId, 'member')
+      if (nextWorkItemId !== undefined && typeof requestedProjectId === 'string' && requestedProjectId !== nextProjectId) {
         throw new TimeTrackingError(400, 'WorkItemProjectMismatch', 'The Project must match the Work Item assignment.')
       }
       if (nextProjectId) {
@@ -157,9 +173,8 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         canManageRates: canManageEntry,
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         authorizedRevision: current.revision,
-        ...(body.startAt === undefined ? {} : { startAt: readRequiredString(body.startAt, 'Start time') }),
-        ...(body.endAt === undefined ? {} : { endAt: readRequiredString(body.endAt, 'End time') }),
-        ...(body.workItemId === undefined ? {} : { workItemId: readRequiredString(body.workItemId, 'Work Item ID') }),
+        ...readUpdateInterval(body),
+        ...(body.workItemId === undefined ? {} : { workItemId: nextWorkItemId ?? null }),
         projectId: nextProjectId ?? null,
         ...(body.category === null ? { category: null } : body.category === undefined ? {} : { category: readCategory(body.category) }),
         ...(body.description === null ? { description: null } : body.description === undefined ? {} : { description: readRequiredString(body.description, 'Description') }),
@@ -169,6 +184,29 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
       return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) })
+    })
+  })
+
+  router.delete('/api/teams/:teamId/time-entries/:entryId', async (context) => {
+    return await withTeam(context, dependencies, 'member', async (principal, teamId) => {
+      const entryId = readRequiredString(context.req.param('entryId'), 'Time entry ID')
+      const current = await dependencies.getTimeTracking().getEntry(principal.directoryId, teamId, entryId)
+      // Only the owner may delete, and still needs write access to where the time was recorded.
+      if (current.userId !== principal.userKey) {
+        throw new TimeTrackingError(403, 'TimeEntryAccessDenied', 'Only the entry owner may delete this entry.')
+      }
+      if (current.workItemId) await dependencies.verifyWorkItem(principal, teamId, current.workItemId, 'member')
+      if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, 'member')
+      await dependencies.getTimeTracking().deleteEntry({
+        workspaceId: principal.directoryId,
+        teamId,
+        entryId,
+        actorUserId: principal.userKey,
+        expectedRevision: readExpectedRevisionQuery(context.req.query('expectedRevision')),
+        authorizedRevision: current.revision,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+      })
+      return context.body(null, 204)
     })
   })
 
@@ -182,7 +220,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
           teamId,
           readRequiredString(context.req.param('entryId'), 'Time entry ID'),
         )
-        await dependencies.verifyWorkItem(principal, teamId, current.workItemId, minimum)
+        if (current.workItemId) await dependencies.verifyWorkItem(principal, teamId, current.workItemId, minimum)
         if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, minimum)
         const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
         const entry = await dependencies.getTimeTracking().transitionEntry({
@@ -264,7 +302,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         teamId,
         readRequiredString(context.req.param('entryId'), 'Time entry ID'),
       )
-      await dependencies.verifyWorkItem(principal, teamId, entry.workItemId, 'viewer')
+      if (entry.workItemId) await dependencies.verifyWorkItem(principal, teamId, entry.workItemId, 'viewer')
       if (entry.projectId) await dependencies.verifyProject(principal, teamId, entry.projectId, 'viewer')
       const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
       if (entry.userId !== principal.userKey && !(canManage && canManageProject(managedProjectIds, entry.projectId))) {
@@ -664,6 +702,42 @@ function readCreateInterval(body: Record<string, unknown>): Pick<CreateTimeEntry
       timeZone: body.timeZone === undefined ? 'UTC' : readRequiredString(body.timeZone, 'Time zone'),
     },
   }
+}
+
+/**
+ * Reads the interval changes of an update request: `startAt` and `endAt`, or `date` and `minutes`.
+ *
+ * A `date` and `minutes` update keeps or makes the entry a date-and-minutes entry; it needs both
+ * values and may name the IANA `timeZone` of its date, which defaults to UTC.
+ *
+ * @param body - Parsed JSON request body.
+ * @returns The new times, the new date and minutes, or nothing when the interval is unchanged.
+ */
+function readUpdateInterval(body: Record<string, unknown>): Pick<CreateTimeEntryInput, 'startAt' | 'endAt' | 'duration'> {
+  if (body.date === undefined && body.minutes === undefined) {
+    return {
+      ...(body.startAt === undefined ? {} : { startAt: readRequiredString(body.startAt, 'Start time') }),
+      ...(body.endAt === undefined ? {} : { endAt: readRequiredString(body.endAt, 'End time') }),
+    }
+  }
+  return readCreateInterval(body)
+}
+
+/**
+ * Reads the `expectedRevision` query of a delete request.
+ *
+ * @param value - Raw query value.
+ * @returns The expected entry revision.
+ */
+function readExpectedRevisionQuery(value: string | undefined): number {
+  if (value === undefined || !/^\d+$/u.test(value)) {
+    throw new TimeTrackingError(400, 'InvalidRequest', 'expectedRevision must be a positive integer.')
+  }
+  const revision = Number(value)
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new TimeTrackingError(400, 'InvalidRequest', 'expectedRevision must be a positive integer.')
+  }
+  return revision
 }
 
 /** Reads a work category from a request body. */

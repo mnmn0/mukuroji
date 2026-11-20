@@ -1,4 +1,4 @@
-import type { TimeEntry, TimeEntryStatus } from '@mukuroji/contracts'
+import type { TimeEntry, TimeEntryCategory, TimeEntryStatus } from '@mukuroji/contracts'
 import { readLocalDayRange, shiftLocalDate, toLocalDateKey } from './timePeriod'
 
 /** Longest interval the API accepts for one entry or timer, in minutes. */
@@ -14,10 +14,14 @@ export type TimeEntryDay = {
   totalMinutes: number
 }
 
-/** One Work Item row of the weekly table. */
+/** One row of the weekly table: a Work Item, or one work category of indirect work. */
 export type TimeEntryWeekRow = {
-  /** Work Item identifier. */
-  workItemId: string
+  /** Stable row key: the Work Item identifier, or `indirect:<category>` for indirect work. */
+  key: string
+  /** Work Item identifier; absent for indirect work. */
+  workItemId?: string
+  /** Work category of an indirect-work row. */
+  category?: TimeEntryCategory
   /** Minutes keyed by local date. */
   minutesByDate: Record<string, number>
   /** Sum of the row. */
@@ -152,7 +156,8 @@ export function groupTimeEntriesByDay(entries: readonly TimeEntry[], days: reado
 }
 
 /**
- * Builds the Work Item × day table of a week, splitting entries that cross midnight.
+ * Builds the Work Item × day table of a week, splitting entries that cross midnight. Indirect work
+ * gets one row per work category.
  *
  * @param entries - Entries of the week.
  * @param days - Local dates of the week.
@@ -163,12 +168,19 @@ export function buildTimeEntryWeekRows(entries: readonly TimeEntry[], days: read
   for (const entry of sortTimeEntries(entries)) {
     const minutesByDate = splitTimeEntryMinutesByDay(entry, days)
     if (minutesByDate.size === 0) continue
-    const row = rows.get(entry.workItemId) ?? { workItemId: entry.workItemId, minutesByDate: {}, totalMinutes: 0 }
+    const key = entry.workItemId ?? `indirect:${entry.category ?? 'uncategorized'}`
+    const row = rows.get(key) ?? {
+      key,
+      ...(entry.workItemId === undefined ? {} : { workItemId: entry.workItemId }),
+      ...(entry.workItemId === undefined && entry.category !== undefined ? { category: entry.category } : {}),
+      minutesByDate: {},
+      totalMinutes: 0,
+    }
     for (const [date, minutes] of minutesByDate) {
       row.minutesByDate[date] = (row.minutesByDate[date] ?? 0) + minutes
       row.totalMinutes += minutes
     }
-    rows.set(entry.workItemId, row)
+    rows.set(key, row)
   }
   return [...rows.values()]
 }
