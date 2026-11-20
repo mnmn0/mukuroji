@@ -6,9 +6,10 @@
 #   AWS_REGION=ap-northeast-1 bash scripts/rollback-web.sh <commit>   # restore that release
 #
 # Each deploy keeps its entry files (`index.html`, `sw.js`, the manifest and other
-# non-hashed files) under `releases/<commit SHA>/`. Hashed files under `assets/` are
-# never deleted, so copying a kept release back to the bucket root and invalidating
-# CloudFront is enough to serve it again.
+# non-hashed files) under `releases/<commit SHA>/`. Deploys delete only the hashed
+# `assets/` files that no kept release lists in `release-assets.txt`, so copying a
+# kept release back to the bucket root and invalidating CloudFront is enough to
+# serve it again.
 set -euo pipefail
 
 AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
