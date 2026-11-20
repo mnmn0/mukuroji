@@ -317,6 +317,7 @@ client の設定）で、「ログイン状態を保持」を選ぶと localStor
   拒否されます。同時に member に `signInsRevokedAt` を記録し、再有効化された後も、それより前に
   始まった sign-in（`auth_time`）の SSO token は拒否します（Cognito の global sign-out と同じ扱い）。
   管理者による password reset の「全 session からの sign-out」も同じ `signInsRevokedAt` を記録します。
+  Cognito の global sign-out の前と後に 1 回ずつ書くので、sign-out の途中で終わった SSO sign-in も拒否されます。
 - Break-glass activation は access token ごとに結び付くので、更新後の token には引き継ぎません。
 
 IP policy の誤設定に備えて、保存前に caller の現在 IP への影響を preview します。ただし
