@@ -41,3 +41,4 @@
 | [0012](0012-planning-revision-work-item-counter.md) | Planning の revision を Work Item の更新と Planning の変更で数え分ける | 提案 |
 | [0013](0013-data-migration-runner.md) | 保存済み row の schema 移行を、checkpoint 付きの共通 runner と専用の checkpoint table で行う | 提案 |
 | [0015](0015-account-cost-budget-and-allocation-tag.md) | AWS アカウント全体の月次 Budget と cost allocation tag で費用を見える化する | 提案 |
+| [0016](0016-project-schedule-baseline-row.md) | Project の schedule baseline を Planning table の 1 行に保存する | 提案 |
