@@ -254,7 +254,7 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 - 対象の Team は、その実行で Work Item を走査した Team です。Work Item が 1 件も残っていない Team の工数は督促しません。
 - 通知は Inbox の「工数の提出」として届き、最も古い未提出 entry の週の工数画面（`/teams/{teamId}/timesheet?week=<entry の開始時刻>`。ブラウザが閲覧者の timezone でその時刻を含む週（Workspace の週の始まりの曜日に合わせる）に直します）を開きます。title は持たず、概要は件数と最も古い日付です
 - 対象は Project に紐づく entry だけです。Project のない entry は一般の member の工数画面に出ず、そこから提出できないため督促しません
-- event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` で、scan 時の期限（その時点から n 日前）までに終わっている entry が 1 件も残っていなければ捨てます。日付を直して期限より後に終わる entry になった場合も数えません。残っていれば、その entry の revision を条件にした ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で読み直して捨てます。読み直す手段がない projection では督促を届けません
+- event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` で、同じ Project に属し、scan 時の期限（その時点から n 日前）までに終わっている entry が 1 件も残っていなければ捨てます。日付を直して期限より後に終わる entry になった場合も数えません。残っていれば、その entry の revision を条件にした ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で読み直して捨てます。読み直す手段がない projection では督促を届けません
 - 宛先の権限は、その Project の通知として確認します（その Project を読めること）。Inbox・Slack・Email のどれでも同じで、Team の全 Project を読める必要はありません。読めなくなった Project の entry は、ほかの Project の督促を止めません
 - Slack への配信は送信時に宛先の権限を確認しますが、提出状況は読み直しません。quiet hours や digest で Slack 送信が遅れる間に提出した場合は、Slack に古い督促が届くことがあります
 

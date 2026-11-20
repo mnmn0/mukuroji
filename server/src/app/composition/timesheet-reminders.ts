@@ -58,7 +58,8 @@ export function createTimesheetReminderRevalidator(
         if (
           entry &&
           entry.userId.toLowerCase() === input.memberKey &&
-          entry.projectId !== undefined &&
+          // An entry moved to another Project no longer belongs to the Project this reminder is for.
+          entry.projectId === input.projectId &&
           (entry.status === 'draft' || entry.status === 'rejected') &&
           // An entry whose dates were corrected after the scan must still be past the threshold.
           Date.parse(entry.endAt) <= Date.parse(input.dueBefore)

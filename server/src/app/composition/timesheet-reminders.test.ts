@@ -67,6 +67,7 @@ describe('timesheet reminder adapters', () => {
       ['other-owner', createEntry({ id: 'other-owner', userId: 'other@example.com' })],
       ['no-project', createEntry({ id: 'no-project', projectId: undefined })],
       ['moved', createEntry({ id: 'moved', endAt: '2026-07-11T01:00:00.000Z' })],
+      ['other-project', createEntry({ id: 'other-project', projectId: 'project-2' })],
       ['rejected', createEntry({ id: 'rejected', status: 'rejected', revision: 4 })],
     ])
     const revalidator = createTimesheetReminderRevalidator({
@@ -81,14 +82,14 @@ describe('timesheet reminder adapters', () => {
       metadata: {
         teamId: 'core',
         projectId: 'project-1',
-        timeEntryIds: ['submitted', 'missing', 'other-owner', 'no-project', 'moved', 'rejected'],
+        timeEntryIds: ['submitted', 'missing', 'other-owner', 'no-project', 'moved', 'other-project', 'rejected'],
         timesheetDueBefore: '2026-07-05T00:00:00.000Z',
         notificationCandidates: [{ memberKey: 'Member@Example.com', reason: 'timesheet' }],
       },
     })
     if (!event) throw new Error('Expected a parsed event.')
 
-    expect(event.timeEntryIds).toEqual(['submitted', 'missing', 'other-owner', 'no-project', 'moved', 'rejected'])
+    expect(event.timeEntryIds).toEqual(['submitted', 'missing', 'other-owner', 'no-project', 'moved', 'other-project', 'rejected'])
     expect(event.timesheetDueBefore).toBe('2026-07-05T00:00:00.000Z')
     // The notification save is fenced on the revision of the entry that is still unsubmitted.
     expect(await readTimesheetReminderFence(event, revalidator)).toEqual({
@@ -110,6 +111,11 @@ describe('timesheet reminder adapters', () => {
     expect((await readTimesheetReminderFence(event, revalidator)).current).toBe(false)
     stored.set('rejected', createEntry({ id: 'rejected', status: 'rejected' }))
     expect((await readTimesheetReminderFence({ ...event, timesheetDueBefore: undefined }, revalidator)).current).toBe(false)
+    expect((await readTimesheetReminderFence({ ...event, projectId: undefined }, revalidator)).current).toBe(false)
+    // An entry moved to another Project after the scan does not keep this Project's reminder.
+    stored.set('rejected', createEntry({ id: 'rejected', status: 'rejected', projectId: 'project-2' }))
+    expect((await readTimesheetReminderFence(event, revalidator)).current).toBe(false)
+    stored.set('rejected', createEntry({ id: 'rejected', status: 'rejected' }))
     // Without a revalidator, or without entry IDs, a reminder is never delivered.
     expect((await readTimesheetReminderFence(event, undefined)).current).toBe(false)
     expect((await readTimesheetReminderFence({ ...event, timeEntryIds: [] }, revalidator)).current).toBe(false)
