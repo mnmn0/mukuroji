@@ -219,3 +219,232 @@ function readWorkspaceHolidays(value: unknown): string[] | undefined {
   const holidays = [...new Set(entries.filter(isWorkspaceHolidayDate))].sort()
   return holidays.length <= WORKSPACE_CALENDAR_MAX_HOLIDAYS ? holidays : undefined
 }
+
+/** Inclusive range of Workspace-local calendar dates, both in `YYYY-MM-DD` form. */
+export type WorkspaceCalendarDateRange = {
+  /** First local date of the range. */
+  from: string
+  /** Last local date of the range, inclusive. */
+  to: string
+}
+
+/** Fiscal year and fiscal quarter a local date falls in. */
+export type WorkspaceFiscalQuarter = {
+  /** Fiscal year, named by the calendar year it starts in (an April 2026 start is fiscal 2026). */
+  fiscalYear: number
+  /** Quarter of the fiscal year, from 1 to 4. */
+  quarter: 1 | 2 | 3 | 4
+  /** Local dates the quarter covers. */
+  range: WorkspaceCalendarDateRange
+}
+
+/**
+ * Calendar periods a screen can offer as one-click presets.
+ *
+ * Weeks follow the Workspace week start, and quarters and years follow its fiscal year start.
+ */
+export type WorkspaceCalendarPeriodPreset =
+  | 'this-week'
+  | 'last-week'
+  | 'this-fiscal-quarter'
+  | 'last-fiscal-quarter'
+  | 'this-fiscal-year'
+  | 'last-fiscal-year'
+
+/** Every period preset, in the order screens list them. */
+export const WORKSPACE_CALENDAR_PERIOD_PRESETS: readonly WorkspaceCalendarPeriodPreset[] = [
+  'this-week',
+  'last-week',
+  'this-fiscal-quarter',
+  'last-fiscal-quarter',
+  'this-fiscal-year',
+  'last-fiscal-year',
+]
+
+/** Milliseconds in one UTC day, used to step through calendar dates. */
+const WORKSPACE_CALENDAR_DAY_MILLISECONDS = 86_400_000
+
+/**
+ * Parses a real `YYYY-MM-DD` calendar date.
+ *
+ * @param date - Local calendar date.
+ * @returns The year, month (1 to 12), and day of the date.
+ * @throws RangeError When the value is not a real calendar date.
+ */
+function parseWorkspaceCalendarDate(date: string): { year: number, month: number, day: number } {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(date)
+  const epoch = match ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) : Number.NaN
+  if (!match || Number.isNaN(epoch) || new Date(epoch).toISOString().slice(0, 10) !== date) {
+    throw new RangeError('Workspace calendar date must be a real YYYY-MM-DD date.')
+  }
+  return { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) }
+}
+
+/**
+ * Formats a UTC-midnight epoch as a `YYYY-MM-DD` calendar date.
+ *
+ * @param epoch - Epoch milliseconds at UTC midnight of the date.
+ * @returns The calendar date.
+ */
+function formatWorkspaceCalendarEpoch(epoch: number): string {
+  return new Date(epoch).toISOString().slice(0, 10)
+}
+
+/**
+ * Returns the local date a number of months after the first day of a month.
+ *
+ * @param year - Calendar year of the starting month.
+ * @param month - Starting month, from 1 to 12.
+ * @param months - Months to move; may be negative.
+ * @returns The first day of the resulting month.
+ */
+function firstDayOfWorkspaceMonth(year: number, month: number, months: number): string {
+  return formatWorkspaceCalendarEpoch(Date.UTC(year, month - 1 + months, 1))
+}
+
+/**
+ * Returns the local date a number of days from another.
+ *
+ * @param date - Starting `YYYY-MM-DD` date.
+ * @param days - Days to move; may be negative.
+ * @returns The resulting date.
+ */
+function addWorkspaceCalendarDays(date: string, days: number): string {
+  const { year, month, day } = parseWorkspaceCalendarDate(date)
+  return formatWorkspaceCalendarEpoch(Date.UTC(year, month - 1, day) + days * WORKSPACE_CALENDAR_DAY_MILLISECONDS)
+}
+
+/**
+ * Checks a fiscal year start month.
+ *
+ * @param fiscalYearStartMonth - Candidate month.
+ * @throws RangeError When the month is not an integer from 1 to 12.
+ */
+function assertWorkspaceFiscalYearStartMonth(fiscalYearStartMonth: number): void {
+  if (!Number.isInteger(fiscalYearStartMonth) || fiscalYearStartMonth < 1 || fiscalYearStartMonth > 12) {
+    throw new RangeError('Fiscal year start month must be an integer from 1 to 12.')
+  }
+}
+
+/**
+ * Finds the week that contains a local date.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param weekStartDay - Day the Workspace week starts on.
+ * @returns The seven local dates of that week, starting on the week start day.
+ * @throws RangeError When the date is not a real calendar date.
+ */
+export function workspaceWeekContaining(
+  date: string,
+  weekStartDay: WorkspaceWeekStartDay,
+): WorkspaceCalendarDateRange {
+  const { year, month, day } = parseWorkspaceCalendarDate(date)
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay()
+  const from = addWorkspaceCalendarDays(date, -((weekday - weekStartDay + 7) % 7))
+  return { from, to: addWorkspaceCalendarDays(from, 6) }
+}
+
+/**
+ * Finds the fiscal year that contains a local date.
+ *
+ * A fiscal year is named by the calendar year it starts in, so with an April start
+ * 2027-03-31 belongs to fiscal 2026. A January start makes fiscal years calendar years.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param fiscalYearStartMonth - First month of the fiscal year, from 1 to 12.
+ * @returns The fiscal year and the local dates it covers.
+ * @throws RangeError When the date or the month is invalid.
+ */
+export function workspaceFiscalYearContaining(
+  date: string,
+  fiscalYearStartMonth: number,
+): { fiscalYear: number, range: WorkspaceCalendarDateRange } {
+  assertWorkspaceFiscalYearStartMonth(fiscalYearStartMonth)
+  const { year, month } = parseWorkspaceCalendarDate(date)
+  const fiscalYear = month >= fiscalYearStartMonth ? year : year - 1
+  const from = firstDayOfWorkspaceMonth(fiscalYear, fiscalYearStartMonth, 0)
+  const to = addWorkspaceCalendarDays(firstDayOfWorkspaceMonth(fiscalYear, fiscalYearStartMonth, 12), -1)
+  return { fiscalYear, range: { from, to } }
+}
+
+/**
+ * Finds the fiscal quarter that contains a local date.
+ *
+ * Quarters are three-month blocks counted from the fiscal year start, so with an April start
+ * July to September is the second quarter.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param fiscalYearStartMonth - First month of the fiscal year, from 1 to 12.
+ * @returns The fiscal year, the quarter number, and the local dates the quarter covers.
+ * @throws RangeError When the date or the month is invalid.
+ */
+export function workspaceFiscalQuarterContaining(
+  date: string,
+  fiscalYearStartMonth: number,
+): WorkspaceFiscalQuarter {
+  const { fiscalYear } = workspaceFiscalYearContaining(date, fiscalYearStartMonth)
+  const { year, month } = parseWorkspaceCalendarDate(date)
+  const monthsIntoYear = (year - fiscalYear) * 12 + month - fiscalYearStartMonth
+  const quarterIndex = Math.floor(monthsIntoYear / 3)
+  const from = firstDayOfWorkspaceMonth(fiscalYear, fiscalYearStartMonth, quarterIndex * 3)
+  const to = addWorkspaceCalendarDays(
+    firstDayOfWorkspaceMonth(fiscalYear, fiscalYearStartMonth, quarterIndex * 3 + 3),
+    -1,
+  )
+  return { fiscalYear, quarter: readWorkspaceFiscalQuarterNumber(quarterIndex + 1), range: { from, to } }
+}
+
+/**
+ * Narrows a computed quarter number.
+ *
+ * @param value - Quarter number computed from a month offset inside a fiscal year.
+ * @returns The quarter number.
+ * @throws RangeError When the value is outside 1 to 4.
+ */
+function readWorkspaceFiscalQuarterNumber(value: number): 1 | 2 | 3 | 4 {
+  if (value === 1 || value === 2 || value === 3 || value === 4) return value
+  throw new RangeError('Fiscal quarter must be from 1 to 4.')
+}
+
+/**
+ * Resolves a period preset to the local dates it covers on a given day.
+ *
+ * "This" periods contain `today` and may end after it; "last" periods are the whole period
+ * just before. Only the fiscal year start and week start of the settings are used.
+ *
+ * @param preset - Period to resolve.
+ * @param today - Today's local `YYYY-MM-DD` date in the time zone the period is read in.
+ * @param settings - Workspace fiscal year start month and week start day.
+ * @returns The inclusive local dates of the period.
+ * @throws RangeError When the date or the settings are invalid.
+ */
+export function resolveWorkspaceCalendarPeriod(
+  preset: WorkspaceCalendarPeriodPreset,
+  today: string,
+  settings: Pick<WorkspaceCalendarSettings, 'fiscalYearStartMonth' | 'weekStartDay'>,
+): WorkspaceCalendarDateRange {
+  switch (preset) {
+    case 'this-week':
+      return workspaceWeekContaining(today, settings.weekStartDay)
+    case 'last-week':
+      return workspaceWeekContaining(addWorkspaceCalendarDays(today, -7), settings.weekStartDay)
+    case 'this-fiscal-quarter':
+      return workspaceFiscalQuarterContaining(today, settings.fiscalYearStartMonth).range
+    case 'last-fiscal-quarter': {
+      const current = workspaceFiscalQuarterContaining(today, settings.fiscalYearStartMonth)
+      return workspaceFiscalQuarterContaining(
+        addWorkspaceCalendarDays(current.range.from, -1),
+        settings.fiscalYearStartMonth,
+      ).range
+    }
+    case 'this-fiscal-year':
+      return workspaceFiscalYearContaining(today, settings.fiscalYearStartMonth).range
+    case 'last-fiscal-year': {
+      const current = workspaceFiscalYearContaining(today, settings.fiscalYearStartMonth)
+      return workspaceFiscalYearContaining(
+        addWorkspaceCalendarDays(current.range.from, -1),
+        settings.fiscalYearStartMonth,
+      ).range
+    }
+  }
+}
