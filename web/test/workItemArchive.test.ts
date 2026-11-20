@@ -112,22 +112,32 @@ describe('single Work Item archive', () => {
     })).rejects.toThrow('localized:issues.archive.activeChildren')
   })
 
-  test('checks the hierarchy again when an earlier click left a hierarchy failure', async () => {
-    const requests = installFetchSequence([
-      { action: { type: 'archive', archived: true }, canApply: true, items: [], operationToken: 'preview-token' },
-      {
-        id: 'operation-1',
-        items: [{ status: 'failed', errorCode: 'WorkItemActiveChildren', retryable: true }],
-      },
-      { id: 'operation-1', items: [{ status: 'succeeded' }] },
+  test('retries a hierarchy failure only on the click after the one that showed it', async () => {
+    const preview = { action: { type: 'archive', archived: true }, canApply: true, items: [], operationToken: 'preview-token' }
+    const failed = {
+      id: 'operation-hierarchy',
+      items: [{ status: 'failed', errorCode: 'WorkItemActiveChildren', errorMessage: 'A child Work Item is not archived.', retryable: true }],
+    }
+    const firstClick = installFetchSequence([preview, failed])
+
+    await expect(runArchive(true)).rejects.toThrow('A child Work Item is not archived.')
+    expect(firstClick.map((request) => request.url)).toEqual([
+      '/api/bulk-operations/preview',
+      '/api/bulk-operations',
+    ])
+
+    const secondClick = installFetchSequence([
+      preview,
+      failed,
+      { id: 'operation-hierarchy', items: [{ status: 'succeeded' }] },
     ])
 
     await runArchive(true)
 
-    expect(requests.map((request) => request.url)).toEqual([
+    expect(secondClick.map((request) => request.url)).toEqual([
       '/api/bulk-operations/preview',
       '/api/bulk-operations',
-      '/api/bulk-operations/operation-1/retry',
+      '/api/bulk-operations/operation-hierarchy/retry',
     ])
   })
 

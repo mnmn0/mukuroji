@@ -80,9 +80,8 @@ export function readWorkItemArchiveOperationFailure(
 /**
  * Picks the localized message of an archive failure that the hierarchy rules caused.
  *
- * The server refuses to archive a parent while a child is not archived or when it has too many
- * children to check in one write, and to restore a child while its parent is archived. Its own
- * messages are English, so these are shown localized.
+ * The server refuses to archive a parent while a child is not archived, and to restore a child
+ * while its parent is archived. Its own messages are English, so these are shown localized.
  *
  * @param code - Stable server error code of the failure.
  * @returns The message key, or undefined when the failure keeps the server's message.
