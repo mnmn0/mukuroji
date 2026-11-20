@@ -19,6 +19,8 @@ import {
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
+import { TaskViewPrintButtons } from './TaskViewPrintButtons'
+import { useTaskViewTablePrint } from './taskViewPrint'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 import {
@@ -529,10 +531,17 @@ export function TaskTableView({
     ? displayOrderedTasks.findIndex((task) => createTaskKey(task) === selectedDetailTaskKey)
     : -1
   const {
-    renderedItems: renderedTasks,
-    hiddenCount: hiddenTaskCount,
+    renderedItems: incrementalTasks,
+    hiddenCount: incrementalHiddenTaskCount,
     showMore: showMoreTasks,
   } = useIncrementalRender(displayOrderedTasks, TASK_TABLE_RENDER_STEP, selectedDetailDisplayIndex)
+  const {
+    print: printTable,
+    printsAllRows,
+    rootRef: printRootRef,
+  } = useTaskViewTablePrint('task-table', tableMinimumWidth)
+  const renderedTasks = printsAllRows ? displayOrderedTasks : incrementalTasks
+  const hiddenTaskCount = printsAllRows ? 0 : incrementalHiddenTaskCount
   const renderedTaskKeys = hiddenTaskCount > 0
     ? new Set(renderedTasks.map(createTaskKey))
     : undefined
@@ -611,21 +620,24 @@ export function TaskTableView({
       <section
         aria-label={t('tasks.table.aria')}
         className="workbench-table relative mt-3 overflow-hidden"
+        data-print-root="task-table"
         onKeyDown={handleTableKeyDown}
         onPaste={handleTablePaste}
+        ref={printRootRef}
       >
         {tableAction ? (
           <p
             className={`border-b px-5 py-3 text-sm font-semibold ${tableAction.kind === 'error'
               ? 'border-red-200 bg-red-50 text-fg-red-700'
               : 'border-tone-99d7cf bg-tone-e5f7f4 text-[var(--workbench-primary-text)]'}`}
+            data-print-hidden=""
             data-testid="task-table-action-feedback"
             role={tableAction.kind === 'error' ? 'alert' : 'status'}
           >
             {tableAction.message}
           </p>
         ) : null}
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto" data-print-overflow="">
           <table
             className="w-full table-fixed border-collapse"
             style={{ minWidth: hasTaskRows ? tableMinimumWidth : 0 }}
@@ -635,7 +647,7 @@ export function TaskTableView({
                 {tableColumnPlacements.map((placement) => (
                   <col key={placement.column.field} style={{ width: placement.width }} />
                 ))}
-                <col style={{ width: taskTableActionColumnWidth }} />
+                <col data-print-hidden="" style={{ width: taskTableActionColumnWidth }} />
               </colgroup>
             ) : null}
             {hasTaskRows ? (
@@ -665,8 +677,10 @@ export function TaskTableView({
                     </th>
                   ))}
                   <th className="px-3 py-2.5 text-center text-fg-8f99a8" scope="col">
-                    <span className="sr-only">{t('tasks.action.more')}</span>
-                    <MoreHorizontalIcon className="mx-auto h-5 w-5" />
+                    <div data-print-hidden="">
+                      <span className="sr-only">{t('tasks.action.more')}</span>
+                      <MoreHorizontalIcon className="mx-auto h-5 w-5" />
+                    </div>
                   </th>
                 </tr>
               </thead>
@@ -746,6 +760,7 @@ export function TaskTableView({
           {onCreateTaskOpen ? (
             <button
               className="inline-flex items-center gap-2 text-[var(--workbench-primary-text)] transition hover:text-[var(--workbench-primary-text-hover)]"
+              data-print-hidden=""
               onClick={() => onCreateTaskOpen({ projectId, source: 'table' })}
               type="button"
             >
@@ -753,9 +768,14 @@ export function TaskTableView({
               {t('tasks.addTask')}
             </button>
           ) : <span />}
-          <span className="text-fg-5f6874" data-testid="tasks-count">
-            {t('tasks.count').replace('{count}', String(tasks.length))}
-          </span>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {hasTaskRows ? (
+              <TaskViewPrintButtons onPrint={printTable} t={t} testId="task-table-print" />
+            ) : null}
+            <span className="text-fg-5f6874" data-testid="tasks-count">
+              {t('tasks.count').replace('{count}', String(tasks.length))}
+            </span>
+          </div>
         </div>
       </section>
     </>
@@ -1205,7 +1225,7 @@ function TaskTableRow({
         }
       })}
       <td className="px-2 py-2 text-center">
-        <div className="flex items-center justify-center gap-1">
+        <div className="flex items-center justify-center gap-1" data-print-hidden="">
         {onCreateTaskOpen ? (
           <button
             aria-label={`${t('tasks.addTask')}: ${taskTitle}`}

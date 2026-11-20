@@ -1,4 +1,4 @@
-# 0026. Software factory を deploy 時の任意 module にし、off のときは API の入口で断る
+# 0029. Software factory を deploy 時の任意 module にし、off のときは API の入口で断る
 
 - 状態: 提案
 - 日付: 2026-11-20

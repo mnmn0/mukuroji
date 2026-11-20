@@ -975,6 +975,15 @@ async function normalizeConfigurationRow(
     ) return normalizationFailure()
     return []
   }
+  if (row.entryType === 'child-restore-guard') {
+    const scope = parseConfigurationScope(requireText(row.scopeKey), 'team')
+    if (
+      !recordKey.startsWith('CHILD_RESTORE#') || recordKey === 'CHILD_RESTORE#' || scope.teamId === null ||
+      row.schemaVersion !== WORK_ITEM_CONFIGURATION_SCHEMA_VERSION ||
+      !isPositiveSafeInteger(row.generation)
+    ) return normalizationFailure()
+    return []
+  }
   if (row.entryType === 'configuration-write-lock') {
     parseConfigurationScope(requireText(row.scopeKey))
     if (

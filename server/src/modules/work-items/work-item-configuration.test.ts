@@ -13,6 +13,8 @@ import {
   assertWorkItemChildTypeAllowed,
   assertWorkflowTransitionAllowed,
   assertWorkItemTypeChangeResolution,
+  createWorkItemChildRestoreGuardAdvance,
+  createWorkItemChildRestoreGuardConditionCheck,
   createWorkItemConfigurationScopeKey,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationIds,
@@ -81,6 +83,65 @@ test('encodes configuration scope key components before adding delimiters', () =
     'team',
     'team#one',
   )).toBe('workspace%23owner%40example.com#team#team%23one#work-item-configuration')
+})
+
+test('fences child restores of a parent with one guard row', () => {
+  const key = {
+    scopeKey: 'workspace-1#team#core-team#work-item-configuration',
+    recordKey: 'CHILD_RESTORE#parent%231',
+  }
+  expect(createWorkItemChildRestoreGuardAdvance('Config', 'workspace-1', 'core-team', 'parent#1', 0)).toEqual({
+    Put: {
+      TableName: 'Config',
+      Item: { ...key, entryType: 'child-restore-guard', schemaVersion: 1, generation: 1 },
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  })
+  expect(createWorkItemChildRestoreGuardAdvance('Config', 'workspace-1', 'core-team', 'parent#1', 4)).toEqual({
+    Update: {
+      TableName: 'Config',
+      Key: key,
+      UpdateExpression: 'SET #generation = :nextGeneration',
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'child-restore-guard',
+        ':schemaVersion': 1,
+        ':expectedGeneration': 4,
+        ':nextGeneration': 5,
+      },
+    },
+  })
+  expect(() => createWorkItemChildRestoreGuardAdvance('Config', 'workspace-1', 'core-team', 'parent#1', 1.5))
+    .toThrow('non-negative safe integer')
+  expect(createWorkItemChildRestoreGuardConditionCheck('Config', 'workspace-1', 'core-team', 'parent#1', 0)).toEqual({
+    ConditionCheck: {
+      TableName: 'Config',
+      Key: key,
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  })
+  expect(createWorkItemChildRestoreGuardConditionCheck('Config', 'workspace-1', 'core-team', 'parent#1', 4)).toEqual({
+    ConditionCheck: {
+      TableName: 'Config',
+      Key: key,
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: { ':entryType': 'child-restore-guard', ':schemaVersion': 1, ':expectedGeneration': 4 },
+    },
+  })
+  expect(() => createWorkItemChildRestoreGuardConditionCheck('Config', 'workspace-1', 'core-team', 'parent#1', -1))
+    .toThrow('non-negative safe integer')
 })
 
 test('rejects duplicate status IDs and broken transition references', () => {
@@ -849,6 +910,30 @@ test('classifies invalid stored configuration separately from client validation'
   )
 
   await expect(client.getWorkspaceConfiguration('workspace-1')).rejects.toMatchObject({
+    code: 'StoredWorkItemConfigurationInvalid',
+    status: 503,
+  })
+})
+
+test('reads a child restore generation and rejects a guard row of another schema', async () => {
+  let stored: Record<string, unknown> | undefined
+  const documentClient = {
+    async send() {
+      return { Item: stored }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+
+  expect(await client.getChildRestoreGeneration('workspace-1', 'core-team', 'parent')).toBe(0)
+  stored = { entryType: 'child-restore-guard', schemaVersion: 1, generation: 3 }
+  expect(await client.getChildRestoreGeneration('workspace-1', 'core-team', 'parent')).toBe(3)
+  stored = { entryType: 'child-restore-guard', schemaVersion: 2, generation: 3 }
+  await expect(client.getChildRestoreGeneration('workspace-1', 'core-team', 'parent')).rejects.toMatchObject({
     code: 'StoredWorkItemConfigurationInvalid',
     status: 503,
   })
@@ -2823,4 +2908,50 @@ test('validates the completion Gate', () => {
       completionGate,
     })).toThrow(message)
   }
+})
+
+test('prepares the relation clean-up of a deleted Work Item and refuses one with children', async () => {
+  const store = createInMemoryRelationStore()
+  store.seedRelation('deleted', 'peer', 'blocks')
+  store.seedRelation('deleted', 'peer', 'related')
+  store.seedRelation('deleted', 'parent', 'parent')
+  store.seedRelation('peer', 'other', 'related')
+  store.seedRelation('child', 'owner', 'parent')
+  store.seedGraph(4, 10)
+  const client = store.createClient()
+
+  const cleanup = await client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'deleted')
+
+  expect(cleanup.childWorkItemIds).toEqual([])
+  const [graphAdvance, ...rest] = cleanup.transactItems
+  // Three relations and their reciprocal rows leave the graph in one advance.
+  expect(graphAdvance?.Put?.Item).toMatchObject({ recordKey: 'RELATION_GRAPH', revision: 5, edgeCount: 4 })
+  expect(graphAdvance?.Put?.ExpressionAttributeValues).toEqual({ ':expectedRevision': 4 })
+  const deletedKeys = rest.flatMap((item) => item.Delete ? [String(item.Delete.Key?.recordKey)] : []).sort()
+  expect(deletedKeys).toEqual([
+    'CHILD_RESTORE#deleted',
+    'REL#deleted#blocks#peer',
+    'REL#deleted#parent#parent',
+    'REL#deleted#related#peer',
+    'REL#parent#child#deleted',
+    'REL#peer#blockedBy#deleted',
+    'REL#peer#related#deleted',
+  ])
+  // Only the peer's projection held the deleted Work Item; a parent does not project its children.
+  const endpointUpdates = rest.flatMap((item) => item.Update ? [item.Update] : [])
+  expect(endpointUpdates).toHaveLength(1)
+  expect(endpointUpdates[0]).toMatchObject({
+    TableName: 'work-items-table',
+    Key: { issueId: 'peer' },
+    ExpressionAttributeValues: { ':revision': 1, ':relationIds': ['related:other'] },
+  })
+
+  await expect(client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'owner'))
+    .resolves.toEqual({ childWorkItemIds: ['child'], transactItems: [] })
+  const unrelated = await client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'lonely')
+  expect(unrelated.childWorkItemIds).toEqual([])
+  expect(unrelated.transactItems).toHaveLength(2)
+  expect(unrelated.transactItems[0]?.ConditionCheck?.Key).toMatchObject({ recordKey: 'RELATION_GRAPH' })
+  expect(unrelated.transactItems[1]?.Delete?.Key).toMatchObject({ recordKey: 'CHILD_RESTORE#lonely' })
+  expect(store.transactions).toEqual([])
 })

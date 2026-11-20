@@ -71,7 +71,6 @@ export const planningMessages = {
   'planning.action.delete': 'Delete',
   'planning.action.retry': 'Retry',
   'planning.field.title': 'Name',
-  'planning.field.id': 'ID',
   'planning.field.type': 'Type',
   'planning.field.entityType': 'Plan type',
   'planning.field.parent': 'Parent plan',

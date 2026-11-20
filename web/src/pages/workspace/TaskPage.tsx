@@ -39,6 +39,7 @@ import {
   retryBulkOperation,
   undoBulkOperation,
 } from '../../bulk-operations/api'
+import { readWorkItemArchiveFailureMessageKey } from '../../bulk-operations/model/workItemArchive'
 import { applyWorkItemArchive } from '../../bulk-operations/mutations/workItemArchive'
 import { ArchivedWorkItemsPanelContainer } from '../../issues/ui/ArchivedWorkItemsPanelContainer'
 import { useArchivedWorkItemsRefresh } from '../../issues/queries/useArchivedWorkItems'
@@ -1728,6 +1729,10 @@ export function TaskPage() {
         accessToken,
         archived,
         fallbackErrorMessage: t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'),
+        localizeFailure: (code) => {
+          const key = readWorkItemArchiveFailureMessageKey(code)
+          return key ? t(key) : undefined
+        },
         runner: mutationRequestRunner,
         target: task,
         workspaceId,
