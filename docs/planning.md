@@ -67,7 +67,7 @@ ID を省略する request には `Idempotency-Key` header（1〜256 文字、�
 - 同じ key と同じ body の再送は、最初の request が作った entity の `Location` と現在の snapshot を `201` と `Idempotency-Replayed: true` で返し、entity を増やしません。再送の `expectedRevision` が古くても通ります
 - 同じ key を別の body や別の path で使うと `409 PlanningEntityIdempotencyConflict`、最初の request が処理中なら `409 PlanningEntityIdempotencyInProgress` です
 - ID は Workspace・呼び出し元・操作（作成 / 複製）・key の SHA-256 から決まります。commit 後に応答や受領記録の保存が失われても、同じ key の再送はその ID の entity（archive 済みを含む）を見つけて、作り直さずに同じく replay として返します。この確認は revision の確認より先に行うので、古い `expectedRevision` の再送でも通ります
-- 権限の確認や validation で失敗した request は reservation を解放するので、直した body を同じ key で送り直せます
+- 権限の確認や validation など 4xx で失敗した request は reservation を解放するので、直した body を同じ key で送り直せます。5xx や通信の失敗など commit したか分からない失敗では reservation を残すので、同じ key の再送は最初の request と同じ body のときだけ通ります（reservation の lease の 2 分間は `409 PlanningEntityIdempotencyInProgress`）
 
 Web の作成フォームと複製ボタンは ID を送らず、1 回の操作とその再試行で同じ `Idempotency-Key` を使います。通信失敗や 5xx など結果が分からない失敗の後は、snapshot を読み直していても、同じ内容の再送では最初の `expectedRevision` を送り続けます。body が変わると key も変わり、2 つ目の entity ができてしまうためです。`Location` は CORS の `Access-Control-Expose-Headers` で公開しています。
 

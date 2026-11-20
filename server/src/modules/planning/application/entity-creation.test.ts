@@ -88,6 +88,23 @@ describe('createPlanningEntityWithAssignedId', () => {
     expect(calls).toEqual(['reserve', 'release'])
   })
 
+  test('keeps the reservation when the creation outcome is unknown', async () => {
+    for (const failure of [
+      new PlanningError(503, 'PlanningPersistenceUnavailable', 'Unavailable.'),
+      new Error('connection reset'),
+    ]) {
+      const { idempotency, calls } = createIdempotencyDouble({ status: 'reserved', reservationId: 'r' })
+      await expect(createPlanningEntityWithAssignedId({
+        ...baseInput,
+        idempotency,
+        create: async () => {
+          throw failure
+        },
+      })).rejects.toBe(failure)
+      expect(calls).toEqual(['reserve'])
+    }
+  })
+
   test('maps an unavailable store and an unexpected receipt to stable errors', async () => {
     const unavailable = createIdempotencyDouble(new Error('store down'))
     await expect(createPlanningEntityWithAssignedId({

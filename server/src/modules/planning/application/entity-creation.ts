@@ -121,7 +121,11 @@ export async function createPlanningEntityWithAssignedId<TResult>(
     }
     result = await input.create(entityId)
   } catch (error) {
-    await input.idempotency.releaseIdempotency(reservation).catch(() => undefined)
+    // Only a definite rejection frees the key. After an unknown outcome the reservation keeps the
+    // request fingerprint, so a retry with a different body is still a conflict, not a replay.
+    if (isDefinitePlanningEntityCreationRejection(error)) {
+      await input.idempotency.releaseIdempotency(reservation).catch(() => undefined)
+    }
     throw error
   }
   await input.idempotency
@@ -224,6 +228,21 @@ async function reservePlanningEntityCreation(
       'Planning entity idempotency is unavailable.',
     )
   }
+}
+
+/**
+ * Returns whether a failed creation certainly committed nothing.
+ *
+ * Authorization, validation, and conflict failures carry a 4xx status and are raised before or
+ * instead of the commit. A 5xx status or an error without a status can follow a commit whose
+ * acknowledgement was lost.
+ *
+ * @param error - Thrown value.
+ * @returns True for an error with a 4xx `status`.
+ */
+function isDefinitePlanningEntityCreationRejection(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('status' in error)) return false
+  return typeof error.status === 'number' && error.status >= 400 && error.status < 500
 }
 
 /**
