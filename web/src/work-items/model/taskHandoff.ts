@@ -133,7 +133,8 @@ function describeDocuments(documents: TaskHandoffInput['documents'], t: TaskHand
     return [t(documents?.status === 'loading' ? 'agents.handoff.brief.documentsLoading' : 'agents.handoff.brief.documentsUnavailable')]
   }
   const { items, hasMore } = documents.value
-  if (items.length === 0) return [t('agents.handoff.brief.noDocuments')]
+  // A page can be empty yet have more pages, because the server filters unreadable Documents after paging.
+  if (items.length === 0 && !hasMore) return [t('agents.handoff.brief.noDocuments')]
   return [
     ...items.map((document) => `- ${toSingleLine(document.documentTitle)} (${t('agents.handoff.brief.documentId')}: ${toSingleLine(document.documentId)}, ${t('agents.handoff.brief.documentPath')}: ${createDocumentPath(document.documentId)})`),
     ...(hasMore ? [t('agents.handoff.brief.moreDocuments')] : []),

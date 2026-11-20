@@ -233,6 +233,14 @@ describe('task handoff brief', () => {
       t,
     })
     expect(empty).toContain('No Documents you can view are linked to this task.')
+    const emptyPage = createTaskHandoffBrief({
+      task,
+      includeDescription: true,
+      documents: { status: 'loaded', value: { items: [], hasMore: true } },
+      t,
+    })
+    expect(emptyPage).not.toContain('No Documents you can view are linked to this task.')
+    expect(emptyPage).toContain('More linked Documents exist.')
   })
 
   test('uses Japanese labels for the new sections', () => {
