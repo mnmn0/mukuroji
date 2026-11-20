@@ -2612,6 +2612,64 @@ test('keeps bulk partial failures across retry and safe undo', async () => {
   expect(result.revision).toBe(persistedRevision)
 })
 
+test('applies and retries Bulk items in the adapter order and undoes them in reverse', async () => {
+  const request: BulkOperationRequest = {
+    workspaceId: 'workspace-1',
+    items: [
+      { teamId: 'core', workItemId: 'parent', expectedRevision: 1 },
+      { teamId: 'core', workItemId: 'child', expectedRevision: 1 },
+      { teamId: 'core', workItemId: 'other', expectedRevision: 1 },
+    ],
+    action: { type: 'archive', archived: true },
+  }
+  const applied: number[] = []
+  const undone: number[] = []
+  let failParent = true
+  const adapter: BulkOperationAdapter = {
+    async orderItems() {
+      return [1, 0, 2]
+    },
+    async preview() {
+      return { allowed: true }
+    },
+    async apply(_request, itemIndex) {
+      applied.push(itemIndex)
+      if (itemIndex === 0 && failParent) {
+        throw new AutomationError('conflict', 'WorkItemActiveChildren', 'Child is active.', true)
+      }
+      return { resultingRevision: 2, undoPayload: { archivedAt: null } }
+    },
+    async undo(_operation, itemIndex) {
+      undone.push(itemIndex)
+      return { resultingRevision: 3 }
+    },
+  }
+  const preview = await previewBulkOperation(request, adapter)
+  const operation = await applyBulkOperation(
+    { ...request, operationToken: preview.operationToken },
+    preview,
+    adapter,
+    'owner@example.com',
+  )
+  expect(applied).toEqual([1, 0, 2])
+  expect(operation.items.map((item) => item.status)).toEqual(['failed', 'succeeded', 'succeeded'])
+
+  failParent = false
+  const retried = await retryBulkOperation(operation, adapter)
+  expect(applied).toEqual([1, 0, 2, 0])
+  expect(retried.status).toBe('succeeded')
+
+  await undoBulkOperation(retried, adapter)
+  expect(undone).toEqual([2, 0, 1])
+
+  await expect(applyBulkOperation(
+    { ...request, operationToken: preview.operationToken },
+    preview,
+    { ...adapter, async orderItems() { return [0, 0, 2] } },
+    'other@example.com',
+  )).rejects.toMatchObject({ code: 'BulkOperationInvalid' })
+})
+
 test('accepts a canonical schedule Bulk edit before previewing items', async () => {
   const schedule = createDefaultDueDateWorkItemSchedule('2026-07-31')
   const adapter: BulkOperationAdapter = {

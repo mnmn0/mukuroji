@@ -15,6 +15,7 @@ import {
   ANALYTICS_SCHEDULE_SHARD_COUNT,
   AnalyticsError,
   analyticsFilterIncludesWorkItem,
+  type AnalyticsDeliveryNotifier,
   type AnalyticsDeliveryReceipt,
   type AnalyticsDueReportReference,
   type AnalyticsRepository,
@@ -217,6 +218,8 @@ export type AnalyticsScheduleDependencies = {
   render: AnalyticsScheduleRenderer
   /** Durable write 前に artifact を検証する注入可能な純粋 renderer です。 */
   renderArtifact: AnalyticsScheduleArtifactRenderer
+  /** Idempotent recipient notification written after the receipt is committed. */
+  notifyDelivery: AnalyticsDeliveryNotifier
 }
 
 /** 一つの due report を処理した結果です。 */
@@ -428,15 +431,16 @@ export async function processDueAnalyticsReport(
       scheduledFor,
       recipientMemberKey,
     )
-    if (
-      await hasCompletedAnalyticsScheduleDelivery(
-        current,
-        scheduledFor,
-        recipientMemberKey,
-        occurrenceKey,
-        dependencies.repository,
-      )
-    ) {
+    const completedReceipt = await readCompletedAnalyticsScheduleDelivery(
+      current,
+      scheduledFor,
+      recipientMemberKey,
+      occurrenceKey,
+      dependencies.repository,
+    )
+    if (completedReceipt) {
+      // A retry after a notification failure tells the recipient about the committed snapshot.
+      await notifyCommittedDelivery(current, completedReceipt, recipientMemberKey, now, dependencies)
       continue
     }
     const rendered = await dependencies.render({
@@ -473,27 +477,30 @@ export async function processDueAnalyticsReport(
     await dependencies.renderArtifact({ snapshotRecord, receipt })
     await dependencies.repository.putSnapshot(snapshotRecord)
     result.snapshotsStored += 1
+    let committedReceipt = receipt
     try {
       const receiptResult = await dependencies.repository.putDeliveryReceipt(receipt)
       if (receiptResult.created) {
         result.receiptsCreated += 1
       }
+      committedReceipt = receiptResult.receipt
     } catch (error) {
-      if (
-        error instanceof AnalyticsError &&
-        error.code === 'AnalyticsDeliveryConflict' &&
-        await hasCompletedAnalyticsScheduleDelivery(
-          current,
-          scheduledFor,
-          recipientMemberKey,
-          occurrenceKey,
-          dependencies.repository,
-        )
-      ) {
-        continue
-      }
-      throw error
+      const concurrentReceipt = error instanceof AnalyticsError &&
+        error.code === 'AnalyticsDeliveryConflict'
+        ? await readCompletedAnalyticsScheduleDelivery(
+            current,
+            scheduledFor,
+            recipientMemberKey,
+            occurrenceKey,
+            dependencies.repository,
+          )
+        : undefined
+      if (!concurrentReceipt) throw error
+      committedReceipt = concurrentReceipt
     }
+    // The notification follows the receipt so it always links the committed snapshot. A failure
+    // here leaves the cursor in place, and the retry re-notifies through the completed receipt.
+    await notifyCommittedDelivery(current, committedReceipt, recipientMemberKey, now, dependencies)
   }
 
   const nextRunAt = getNextAnalyticsScheduleOccurrence(current, scheduledFor)
@@ -1209,20 +1216,57 @@ function createAnalyticsScheduleOccurrenceKey(
   return `${scheduledFor}#${definitionHash}#${recipientHash}`
 }
 
-/** Durable receipt と snapshot が recipient の完了 checkpoint を構成するか検証します。 */
-async function hasCompletedAnalyticsScheduleDelivery(
+/**
+ * Notifies one recipient about the snapshot its committed receipt points to.
+ *
+ * @param report - Current report revision being delivered.
+ * @param receipt - Committed receipt that completes the recipient's occurrence.
+ * @param recipientMemberKey - Recipient who passed the current ACL check.
+ * @param now - Schedule invocation time recorded as the delivery time.
+ * @param dependencies - Schedule dependencies holding the idempotent notifier.
+ * @returns A promise that resolves once the notification is durably queued.
+ */
+async function notifyCommittedDelivery(
+  report: AnalyticsReport,
+  receipt: AnalyticsDeliveryReceipt,
+  recipientMemberKey: string,
+  now: Date,
+  dependencies: AnalyticsScheduleDependencies,
+) {
+  await dependencies.notifyDelivery({
+    report,
+    snapshotId: receipt.snapshotId,
+    receipt,
+    recipientMemberKey,
+    deliveredAt: now.toISOString(),
+  })
+}
+
+/**
+ * Reads the receipt that completes one recipient's occurrence.
+ *
+ * A recipient is complete only when the durable receipt and the snapshot it points to both exist.
+ *
+ * @param report - Current report whose occurrence is being delivered.
+ * @param scheduledFor - Scheduled time of the occurrence.
+ * @param recipientMemberKey - Recipient whose checkpoint is read.
+ * @param occurrenceKey - Occurrence key of the schedule time, report definition, and recipient.
+ * @param repository - Repository that stores receipts and snapshots.
+ * @returns The completing receipt, or `undefined` when the recipient still needs a delivery.
+ */
+async function readCompletedAnalyticsScheduleDelivery(
   report: AnalyticsReport,
   scheduledFor: string,
   recipientMemberKey: string,
   occurrenceKey: string,
   repository: AnalyticsRepository,
-) {
+): Promise<AnalyticsDeliveryReceipt | undefined> {
   const receipt = await repository.getDeliveryReceipt(
     report.workspaceId,
     report.id,
     occurrenceKey,
   )
-  if (receipt === undefined) return false
+  if (receipt === undefined) return undefined
   if (
     receipt.workspaceId !== report.workspaceId ||
     receipt.reportId !== report.id ||
@@ -1248,7 +1292,7 @@ async function hasCompletedAnalyticsScheduleDelivery(
   ) {
     throw analyticsDeliveryCheckpointConflict()
   }
-  return true
+  return receipt
 }
 
 /** 不整合な durable delivery checkpoint を fail-closed で拒否します。 */

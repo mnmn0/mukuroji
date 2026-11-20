@@ -193,6 +193,45 @@ describe('IssueCollaborationPanel', () => {
     expect(html).toContain('Demo User が解決策を採用しました。')
   })
 
+  test('labels archive and restore updates in the activity', () => {
+    const html = renderToStaticMarkup(
+      <IssueActivityTab
+        controller={{
+          ...issueCollaborationControllerFixture,
+          activity: [
+            {
+              eventId: 'event-archived',
+              eventType: 'work-item.updated',
+              occurredAt: '2026-07-12T04:00:00.000Z',
+              actorUserId: 'demo@example.com',
+              summary: 'Work Item was archived.',
+            },
+            {
+              eventId: 'event-restored',
+              eventType: 'work-item.updated',
+              occurredAt: '2026-07-12T04:01:00.000Z',
+              actorUserId: 'demo@example.com',
+              summary: 'Work Item was restored.',
+            },
+            {
+              eventId: 'event-updated',
+              eventType: 'work-item.updated',
+              occurredAt: '2026-07-12T04:02:00.000Z',
+              actorUserId: 'demo@example.com',
+              summary: 'Work Item status changed.',
+            },
+          ],
+        }}
+        locale="ja"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('Demo User が Work Item をアーカイブしました。')
+    expect(html).toContain('Demo User が Work Item を復元しました。')
+    expect(html).toContain('Demo User が Work Item を更新しました。')
+  })
+
   test('localizes Work Item relation activity events', () => {
     const eventTypes = [
       'work-item.parent-changed',

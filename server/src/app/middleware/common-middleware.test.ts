@@ -90,6 +90,8 @@ test('replaces client identifiers with canonical server identifiers', async () =
   expect(response.headers.get('Access-Control-Expose-Headers')).toContain(
     'Idempotency-Replayed',
   )
+  // Planning create and duplicate return the server-assigned entity ID in Location.
+  expect(response.headers.get('Access-Control-Expose-Headers')).toContain('Location')
   expect(captured.errors).toEqual([])
   expect(captured.access).toEqual([{
     correlationId: 'generated-correlation',

@@ -38,6 +38,7 @@ import { InMemoryPlanningClient } from '../../../planning/planning'
 import { createWorkItemAuthorizationChangedError } from '../../adapter-out/dynamodb/work-item-client'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { AuthenticatedDeveloperCredential } from '../../../developer-platform/application/ports'
+import { InMemoryCollectionsStore } from '../../../collections'
 import {
   afterEach,
   expect,
@@ -899,6 +900,136 @@ test('rejects Public Work Item deletion while an incident schedule dependency ex
     code: 'PlanningWorkItemDependencyInUse',
     status: 409,
   })
+  expect(calls.issueDeletes).toEqual([])
+})
+
+/** API key that can delete Work Items in the deletion test Workspace. */
+const deletionCredential = {
+  kind: 'api-key',
+  workspaceId: 'workspace-1',
+  credentialId: 'delete-key',
+  subjectUserId: 'demo@example.com',
+  scopes: ['work-items:delete'],
+} satisfies AuthenticatedDeveloperCredential
+
+/**
+ * Configures the fakes a Public Work Item deletion reaches before its clean-up runs.
+ *
+ * @param options - Fake Team Work Item options, such as the delete hook.
+ * @returns The fake call log.
+ */
+function configurePublicWorkItemDeletion(
+  options: Parameters<typeof configureFakeProjectClients>[1] = {},
+) {
+  const calls = configureFakeProjectClients(true, {
+    directoryId: 'workspace-1',
+    workspaceRole: 'owner',
+    teamIssueCount: 2,
+    ...options,
+  })
+  setTestAppDependencies({
+    ...createInMemoryDeveloperPlatformAdapters(),
+    documents: createDocumentFake({
+      async prepareWorkItemDeletionFenceTransactWrite() {
+        return {
+          transactWriteItem: {
+            Put: { TableName: 'DocumentsTable', Item: { activeBacklinkCount: 0 } },
+          },
+        }
+      },
+    }),
+  })
+  return calls
+}
+
+test('refuses a Public Work Item deletion while the Work Item has children', async () => {
+  const calls = configurePublicWorkItemDeletion()
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async prepareWorkItemDeletionRelationCleanup() {
+        return { childWorkItemIds: ['work-item-1'], transactItems: [] }
+      },
+    }),
+  })
+  const service = createCanonicalPublicWorkItemService()
+
+  await expect(runWithTestAppDependencies(() => service.delete(
+    deletionCredential,
+    'core-team',
+    'onboarding-friction',
+    1,
+    { requestId: 'delete-parent', idempotencyKey: 'delete-parent' },
+  ))).rejects.toMatchObject({ status: 409, code: 'conflict' })
+  expect(calls.issueDeletes).toEqual([])
+})
+
+test('commits the relation and Collection clean-up with the Public Work Item deletion', async () => {
+  const relationWrite = { Delete: { TableName: 'ConfigurationTable', Key: { recordKey: 'relation' } } }
+  const collectionWrite = { Put: { TableName: 'PlanningTable', Item: { recordKey: 'COLLECTION#c-1' } } }
+  const cleanupRequests: string[] = []
+  const deletionFenceKinds: string[] = []
+  const calls = configurePublicWorkItemDeletion({
+    issueDeleteHook({ deletionFences }) {
+      deletionFenceKinds.push(...deletionFences.map((fence) => fence.kind))
+      expect(deletionFences.map((fence) => fence.transactWriteItem))
+        .toEqual(expect.arrayContaining([relationWrite, collectionWrite]))
+    },
+  })
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async prepareWorkItemDeletionRelationCleanup(workspaceId, teamId, workItemId) {
+        cleanupRequests.push(`relations:${workspaceId}:${teamId}:${workItemId}`)
+        return { childWorkItemIds: [], transactItems: [relationWrite] }
+      },
+    }),
+    collections: Object.assign(new InMemoryCollectionsStore(), {
+      async prepareWorkItemReferenceCleanup(workspaceId: string, teamId: string, issueId: string) {
+        cleanupRequests.push(`collections:${workspaceId}:${teamId}:${issueId}`)
+        return [collectionWrite]
+      },
+    }),
+  })
+  const service = createCanonicalPublicWorkItemService()
+
+  await runWithTestAppDependencies(() => service.delete(
+    deletionCredential,
+    'core-team',
+    'onboarding-friction',
+    1,
+    { requestId: 'delete-clean', idempotencyKey: 'delete-clean' },
+  ))
+
+  expect(cleanupRequests.sort()).toEqual([
+    'collections:workspace-1:core-team:onboarding-friction',
+    'relations:workspace-1:core-team:onboarding-friction',
+  ])
+  expect(deletionFenceKinds).toEqual(expect.arrayContaining(['relations', 'collections']))
+  expect(calls.issueDeletes.map((deletion) => deletion.issueId)).toEqual(['onboarding-friction'])
+})
+
+test('refuses a Public Work Item deletion whose clean-up does not fit one transaction', async () => {
+  const calls = configurePublicWorkItemDeletion()
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async prepareWorkItemDeletionRelationCleanup() {
+        return {
+          childWorkItemIds: [],
+          transactItems: Array.from({ length: 81 }, (_, index) => ({
+            Delete: { TableName: 'ConfigurationTable', Key: { recordKey: `relation-${index}` } },
+          })),
+        }
+      },
+    }),
+  })
+  const service = createCanonicalPublicWorkItemService()
+
+  await expect(runWithTestAppDependencies(() => service.delete(
+    deletionCredential,
+    'core-team',
+    'onboarding-friction',
+    1,
+    { requestId: 'delete-large', idempotencyKey: 'delete-large' },
+  ))).rejects.toMatchObject({ status: 409, code: 'conflict' })
   expect(calls.issueDeletes).toEqual([])
 })
 

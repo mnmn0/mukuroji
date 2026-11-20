@@ -342,7 +342,9 @@ function formatActivityLabel(
   members: WorkspaceMember[],
   t: (key: MessageKey) => string,
 ): string {
-  const labelKey = activityLabelKeys[event.eventType] ?? inferActivityLabelKey(event.eventType)
+  const labelKey = readArchiveActivityLabelKey(event) ??
+    activityLabelKeys[event.eventType] ??
+    inferActivityLabelKey(event.eventType)
 
   if (!labelKey) return event.summary ?? event.eventType
 
@@ -357,6 +359,22 @@ function formatActivityLabel(
   )
 
   return t(labelKey).replace('{actor}', actor)
+}
+
+/**
+ * Picks the archive or restore label of a Work Item update.
+ *
+ * The server records an archive and a restore as `work-item.updated` and names them only in the
+ * event summary, which it writes from these fixed sentences.
+ *
+ * @param event - Activity event to label.
+ * @returns The archive or restore message key, or undefined for any other event.
+ */
+function readArchiveActivityLabelKey(event: TeamIssueActivityEvent): MessageKey | undefined {
+  if (event.eventType !== 'work-item.updated') return undefined
+  if (event.summary === 'Work Item was archived.') return 'collaboration.activity.workItemArchived'
+  if (event.summary === 'Work Item was restored.') return 'collaboration.activity.workItemRestored'
+  return undefined
 }
 
 /**

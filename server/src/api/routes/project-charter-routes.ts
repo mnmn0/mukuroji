@@ -56,7 +56,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readProjectRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessRead(principal)
-      await requireProjectCharterRead(principal, projectId)
+      await requireProjectCharterRead(principal, teamId, projectId)
       const [state, viewer] = await Promise.all([
         workspaceDependencies.projectDirectory.getProjectCharter(principal.directoryId, teamId, projectId),
         describeProjectCharterViewer(principal, teamId, projectId),
@@ -76,7 +76,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readProjectRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
-      await requireProjectCharterManagement(principal, projectId)
+      await requireProjectCharterManagement(principal, teamId, projectId)
       const state = await updateProjectCharterUseCase(
         {
           store: workspaceDependencies.projectDirectory,
@@ -103,7 +103,7 @@ export function registerProjectCharterRoutes(routeApp: Hono): void {
       const { teamId, projectId } = readProjectRoute(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
-      await requireProjectCharterManagement(principal, projectId)
+      await requireProjectCharterManagement(principal, teamId, projectId)
       const state = await transitionProjectLifecycleUseCase(
         {
           store: workspaceDependencies.projectDirectory,
@@ -140,16 +140,21 @@ function readProjectRoute(c: Context) {
  * Requires a Workspace administrator or a manager of the Project.
  *
  * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team that owns the Project.
  * @param projectId - Project whose charter is changed.
  */
-async function requireProjectCharterManagement(principal: WorkspacePrincipal, projectId: string) {
+async function requireProjectCharterManagement(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+) {
   try {
     requireWorkspaceAdministration(principal)
     return
   } catch (error) {
     if (!(error instanceof WorkspaceAccessError)) throw error
   }
-  await requireProjectPermission(principal, projectId, 'manager')
+  await requireProjectPermission(principal, projectId, 'manager', teamId)
 }
 
 /**
@@ -159,16 +164,21 @@ async function requireProjectCharterManagement(principal: WorkspacePrincipal, pr
  * it; everyone else needs viewer access to the Project.
  *
  * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team that owns the Project.
  * @param projectId - Project whose charter is read.
  */
-async function requireProjectCharterRead(principal: WorkspacePrincipal, projectId: string) {
+async function requireProjectCharterRead(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+) {
   try {
     requireWorkspaceAdministration(principal)
     return
   } catch (error) {
     if (!(error instanceof WorkspaceAccessError)) throw error
   }
-  await requireProjectPermission(principal, projectId, 'viewer')
+  await requireProjectPermission(principal, projectId, 'viewer', teamId)
 }
 
 /**
@@ -222,6 +232,7 @@ async function describeProjectCharterViewer(
     principal.enterprisePermissions === undefined
       ? await allowed(() => requireProjectCharterManagement(
           { ...principal, enterpriseRouteAuthorizedAtResource: false },
+          teamId,
           projectId,
         ))
       : hasEnterprisePermissionAtResource(principal, 'projects.manage', {

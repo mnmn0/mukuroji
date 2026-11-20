@@ -167,6 +167,7 @@ export function registerCommonMiddleware(
       ],
       exposeHeaders: [
         'Idempotency-Replayed',
+        'Location',
         'X-Audit-Truncated',
         'X-Audit-Next-Cursor',
         'X-Correlation-Id',

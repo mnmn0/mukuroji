@@ -216,6 +216,14 @@ const queueWebhookDelivery = (...args: Parameters<
 /** Work Item authorization snapshot を安定化する再読込回数です。 */
 const WORK_ITEM_AUTHORIZATION_SNAPSHOT_RETRY_LIMIT = 3
 
+/**
+ * Most relation and Collection clean-up writes one Work Item delete commits.
+ *
+ * DynamoDB allows 100 items per transaction; the rest are left for the delete itself, its audit,
+ * idempotency, authorization, and the external link, Document, and Agent Run fences.
+ */
+const WORK_ITEM_DELETION_REFERENCE_CLEANUP_LIMIT = 80
+
 async function requireWebhookTeamPermission(
   principal: WorkspacePrincipal,
   teamId: string,
@@ -1703,7 +1711,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           true,
         )
       }
-      const [externalLinkFence, documentBacklinkFence] = await Promise.all([
+      const [externalLinkFence, documentBacklinkFence, relationCleanup, collectionCleanup] = await Promise.all([
         developerPlatformDependencies.transactions.prepareWorkItemDeletionFenceTransactWrite?.({
           workspaceId: principal.directoryId,
           teamId,
@@ -1713,7 +1721,42 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           workspaceId: principal.directoryId,
           workItemId: `team/${teamId}/issue/${workItemId}`,
         }),
+        workItemDependencies.workItemConfigurations.prepareWorkItemDeletionRelationCleanup?.(
+          principal.directoryId,
+          teamId,
+          workItemId,
+        ),
+        workItemDependencies.collections.prepareWorkItemReferenceCleanup?.(
+          principal.directoryId,
+          teamId,
+          workItemId,
+        ),
       ])
+      if (relationCleanup && relationCleanup.childWorkItemIds.length > 0) {
+        // Deleting a parent would leave its children under a Work Item that no longer exists.
+        throw new PublicApiServiceError(
+          409,
+          'conflict',
+          'Delete the child Work Items or move them to another parent before deleting this Work Item.',
+        )
+      }
+      const referenceCleanupFences = [
+        ...(relationCleanup?.transactItems ?? []).map((transactWriteItem) => ({
+          kind: 'relations' as const,
+          transactWriteItem,
+        })),
+        ...(collectionCleanup ?? []).map((transactWriteItem) => ({
+          kind: 'collections' as const,
+          transactWriteItem,
+        })),
+      ]
+      if (referenceCleanupFences.length > WORK_ITEM_DELETION_REFERENCE_CLEANUP_LIMIT) {
+        throw new PublicApiServiceError(
+          409,
+          'conflict',
+          'This Work Item has too many relations and Collection references to delete in one step. Remove some of them first.',
+        )
+      }
       const deletionAuditContext = createPublicMutationAuditContext(principal, mutationContext, {
         method: 'DELETE',
         path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
@@ -1750,6 +1793,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
             transactWriteItem: documentBacklinkFence.transactWriteItem,
           },
           ...agentRunFences,
+          ...referenceCleanupFences,
         ],
         undefined,
         authorizationSnapshot,

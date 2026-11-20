@@ -13,10 +13,12 @@ import {
   processAnalyticsSchedule,
   renderInAppAnalyticsArtifact,
   resolveAnalyticsScheduleProcessingTime,
+  createAnalyticsDeliveryAuditNotifier,
   type AnalyticsScheduleEvent,
 } from '../../modules/analytics'
 import {
   DynamoDbAuditEventsClient,
+  getConfiguredAuditRetentionDays,
 } from '../../modules/audit'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access'
 import {
@@ -82,6 +84,12 @@ export function createProductionAnalyticsScheduleHandler() {
     ),
   })
 
+  const notifyDelivery = createAnalyticsDeliveryAuditNotifier({
+    documentClient,
+    auditEventsTableName: resourceConfig.auditEventsTableName,
+    auditRetentionDays: getConfiguredAuditRetentionDays(),
+  })
+
   /**
    * Processes one Analytics schedule invocation.
    *
@@ -98,6 +106,7 @@ export function createProductionAnalyticsScheduleHandler() {
         },
         render,
         renderArtifact: renderInAppAnalyticsArtifact,
+        notifyDelivery,
       },
     )
   }
