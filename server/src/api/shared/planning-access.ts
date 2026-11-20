@@ -37,6 +37,7 @@ import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import {
   type ProjectPrincipal,
+  readLegacyProjectScopeAccesses,
   requireProjectPermission,
   requireTeamPermission,
   requireWorkspaceAdministration,
@@ -696,6 +697,33 @@ function stripPlanningLatestUpdateCapturedScope(
 }
 
 /**
+ * Loads legacy Planning read scopes for an ACL-delegated principal outside `/api/planning`.
+ *
+ * Request authentication loads these scopes only for Planning routes. Shared readers such as
+ * AI assistance and Work Item scheduling call this before filtering so an unloaded scope is
+ * never treated as an empty ACL.
+ *
+ * @param principal - Authenticated Workspace principal about to read a filtered Planning snapshot.
+ * @returns The same principal, or a copy carrying its current legacy Planning read scopes.
+ */
+export async function withPlanningLegacyReadScope<Principal extends WorkspacePrincipal>(
+  principal: Principal,
+): Promise<Principal> {
+  if (
+    principal.isSystemAdmin ||
+    principal.enterprisePermissions !== undefined ||
+    principal.legacyProjectScopeAccesses !== undefined
+  ) {
+    return principal
+  }
+  return {
+    ...principal,
+    legacyProjectScopeAccesses: await readLegacyProjectScopeAccesses(principal),
+    legacyWorkspaceScopeReadable: principal.workspaceRole !== 'guest',
+  }
+}
+
+/**
  * Removes Planning records outside the principal's current Team and Project scope.
  *
  * @param principal - Authenticated principal whose current access bounds the response.
@@ -716,82 +744,53 @@ export function filterPlanningSnapshotForPrincipal(
       updateTargets: snapshot.updateTargets.map(stripPlanningLatestUpdateCapturedScope),
     }
   }
-  if (principal.enterprisePermissions === undefined) {
-    const projectScopeKeys = new Set(
-      (principal.legacyProjectScopeAccesses ?? []).flatMap((access) =>
-        access.teamId && projectAccessAllows(access, 'viewer')
-          ? [createPlanningProjectScopeKey(access.teamId, access.projectId)]
-          : []
-      ),
-    )
-    const teamIds = new Set(
-      (principal.legacyProjectScopeAccesses ?? []).flatMap((access) =>
-        access.teamId && projectAccessAllows(access, 'viewer')
-          ? [access.teamId]
-          : []
-      ),
-    )
-    const workspaceScopeReadable = principal.legacyWorkspaceScopeReadable === true
-    /** Returns whether one Planning scope is readable through the legacy ACL boundary. */
-    const isLegacyPlanningScopeVisible = (
-      scope: Pick<PlanningEntity, 'teamId' | 'projectId'>,
-    ): boolean => {
-      if (scope.projectId !== undefined) {
-        return scope.teamId !== undefined && projectScopeKeys.has(
-          createPlanningProjectScopeKey(scope.teamId, scope.projectId),
-        )
-      }
-      if (scope.teamId !== undefined) return teamIds.has(scope.teamId)
-      return workspaceScopeReadable
-    }
-    const updateTargets = snapshot.updateTargets
-      .filter((updateTarget) => {
-        const target = updateTarget.target
-        if (target.type === 'initiative') {
-          const entity = snapshot.entities.find((candidate) =>
-            candidate.id === target.entityId
-          )
-          return entity !== undefined && isLegacyPlanningScopeVisible(entity)
-        }
-        return projectScopeKeys.has(createPlanningProjectScopeKey(
-          target.teamId,
-          target.projectId,
-        ))
-      })
-      .map((updateTarget) => {
-        const target = updateTarget.target
-        const currentScope = target.type === 'initiative'
-          ? snapshot.entities.find((entity) => entity.id === target.entityId)
-          : target
-        return filterPlanningLatestUpdateSummaryForPrincipal(
-          updateTarget,
-          currentScope,
-          projectScopeKeys,
-          teamIds,
-          workspaceScopeReadable,
-        )
-      })
-      .map(stripPlanningLatestUpdateCapturedScope)
-    return {
-      ...snapshot,
-      updateTargets,
-    }
-  }
-
+  const legacyAuthorization = principal.enterprisePermissions === undefined
   const projectScopeKeys = new Set(
-    (principal.enterpriseProjectAccesses ?? []).flatMap((access) =>
-      access.teamId
-        ? [createPlanningProjectScopeKey(access.teamId, access.projectId)]
-        : []
-    ),
-  )
-  const teamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
-  const entities = snapshot.entities
-    .filter((entity) => entity.projectId !== undefined
-      ? entity.teamId !== undefined && projectScopeKeys.has(
-          createPlanningProjectScopeKey(entity.teamId, entity.projectId),
+    legacyAuthorization
+      ? (principal.legacyProjectScopeAccesses ?? []).flatMap((access) =>
+          access.teamId && projectAccessAllows(access, 'viewer')
+            ? [createPlanningProjectScopeKey(access.teamId, access.projectId)]
+            : []
         )
-      : entity.teamId !== undefined && teamIds.has(entity.teamId))
+      : (principal.enterpriseProjectAccesses ?? []).flatMap((access) =>
+          access.teamId
+            ? [createPlanningProjectScopeKey(access.teamId, access.projectId)]
+            : []
+        ),
+  )
+  const teamIds = new Set(
+    legacyAuthorization
+      ? (principal.legacyProjectScopeAccesses ?? []).flatMap((access) =>
+          access.teamId && projectAccessAllows(access, 'viewer')
+            ? [access.teamId]
+            : []
+        )
+      : principal.enterpriseAuthorizedTeamIds ?? [],
+  )
+  // Enterprise grants Workspace-scoped Planning only through the Workspace resource handled above.
+  const workspaceScopeReadable = legacyAuthorization &&
+    principal.legacyWorkspaceScopeReadable === true
+  /** Returns whether one Team, Project, or Workspace Planning scope is readable now. */
+  const isPlanningScopeVisible = (
+    scope: Pick<PlanningEntity, 'teamId' | 'projectId'>,
+  ): boolean => {
+    if (scope.projectId !== undefined) {
+      return scope.teamId !== undefined && projectScopeKeys.has(
+        createPlanningProjectScopeKey(scope.teamId, scope.projectId),
+      )
+    }
+    if (scope.teamId !== undefined) return teamIds.has(scope.teamId)
+    return workspaceScopeReadable
+  }
+  /**
+   * Returns whether a Work Item scope is readable now.
+   *
+   * Legacy Work Item projections are already read through the principal's legacy ACL, so only
+   * Enterprise grants are re-applied here.
+   */
+  const isWorkItemScopeVisible = (scope: { teamId: string, projectId?: string }): boolean =>
+    legacyAuthorization || isPlanningScopeVisible(scope)
+  const entities = snapshot.entities.filter(isPlanningScopeVisible)
   const entityIds = new Set(entities.map((entity) => entity.id))
   const scopedEntities = entities.map((entity) => (
     entity.parentId && !entityIds.has(entity.parentId)
@@ -801,13 +800,7 @@ export function filterPlanningSnapshotForPrincipal(
   const dependencies = snapshot.dependencies.filter((dependency) =>
     entityIds.has(dependency.predecessorId) && entityIds.has(dependency.successorId)
   )
-  const workItems = snapshot.workItems.filter((workItem) =>
-    workItem.projectId !== undefined
-      ? projectScopeKeys.has(
-          createPlanningProjectScopeKey(workItem.teamId, workItem.projectId),
-        )
-      : teamIds.has(workItem.teamId)
-  )
+  const workItems = snapshot.workItems.filter(isWorkItemScopeVisible)
   const workItemKeys = new Set(workItems.map((workItem) =>
     createWorkItemDependencyKey({ teamId: workItem.teamId, workItemId: workItem.id })
   ))
@@ -816,11 +809,7 @@ export function filterPlanningSnapshotForPrincipal(
     workItemKeys.has(createWorkItemDependencyKey(dependency.successor))
   )
   const workItemLinks = snapshot.workItemLinks
-    .filter((link) => link.projectId !== undefined
-      ? projectScopeKeys.has(
-          createPlanningProjectScopeKey(link.teamId, link.projectId),
-        )
-      : teamIds.has(link.teamId))
+    .filter(isWorkItemScopeVisible)
     .filter((link) => workItemKeys.has(createWorkItemDependencyKey({
       teamId: link.teamId,
       workItemId: link.workItemId,
@@ -854,6 +843,7 @@ export function filterPlanningSnapshotForPrincipal(
         currentScope,
         projectScopeKeys,
         teamIds,
+        workspaceScopeReadable,
       )
     })
     .map(stripPlanningLatestUpdateCapturedScope)
