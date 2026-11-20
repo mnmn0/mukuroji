@@ -11286,11 +11286,26 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('notification-mark-all-read')).toBeDisabled()
     await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
 
+    let failBrandArchive = true
+    await page.route(/.*\/api\/notifications\/notification-brand-guideline$/, async (route) => {
+      if (route.request().method() === 'PATCH' && failBrandArchive) {
+        failBrandArchive = false
+        await route.fulfill({ status: 500, json: { message: 'Temporary failure.' } })
+        return
+      }
+      await route.fallback()
+    })
     await selectWireframe.check()
     await selectBrand.check()
     await page.getByTestId('notification-bulk-archive').click()
     await expect(wireframeNotification).toHaveCount(0)
+    await expect(brandNotification).toBeVisible()
+    await expect(selectBrand).toBeChecked()
+    await expect(page.getByRole('alert')).toContainText('1件を更新できませんでした')
+    await expect(bulkBar).toContainText('1件を選択中')
+    await page.getByTestId('notification-bulk-archive').click()
     await expect(brandNotification).toHaveCount(0)
+    await expect(page.getByRole('alert')).toHaveCount(0)
 
     await page.getByTestId('notification-filter-archived').click()
     await expect(wireframeNotification).toBeVisible()

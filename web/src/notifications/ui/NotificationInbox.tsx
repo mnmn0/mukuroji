@@ -62,23 +62,18 @@ export function NotificationInbox({
   ]))
   // Selection belongs to one filter view; switching filter or type starts a fresh selection.
   const selectionScope = `${controller.filter}\0${controller.eventType ?? ''}`
-  const [selection, setSelection] = useState<{
-    scope: string
-    ids: ReadonlySet<string>
-    failedCount: number
-  }>(() => ({ scope: selectionScope, ids: new Set(), failedCount: 0 }))
-  const currentSelection = selection.scope === selectionScope
-    ? selection
-    : { scope: selectionScope, ids: new Set<string>(), failedCount: 0 }
+  const [selection, setSelection] = useState<{ scope: string, ids: ReadonlySet<string> }>(
+    () => ({ scope: selectionScope, ids: new Set() }),
+  )
   const selectedNotifications = resolveSelectedNotifications(
-    currentSelection.ids,
+    selection.scope === selectionScope ? selection.ids : new Set(),
     controller.notifications,
   )
   const selectedIds = new Set(selectedNotifications.map((notification) => notification.id))
 
   /** Replaces the selection of the current filter view. */
-  const setSelectedIds = (ids: ReadonlySet<string>, failedCount = 0) => {
-    setSelection({ scope: selectionScope, ids, failedCount })
+  const setSelectedIds = (ids: ReadonlySet<string>) => {
+    setSelection({ scope: selectionScope, ids })
   }
 
   /** Runs a bulk action and keeps only the notifications that failed selected. */
@@ -87,7 +82,7 @@ export function NotificationInbox({
       return
     }
     const result = await controller.bulkUpdate(selectedNotifications, action)
-    setSelectedIds(new Set(result.failedIds), result.failedIds.length)
+    setSelectedIds(new Set(result.failedIds))
   }
 
   return (
@@ -174,9 +169,9 @@ export function NotificationInbox({
           className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700"
           role="alert"
         >
-          {currentSelection.failedCount > 0
+          {controller.bulkFailedCount > 0
             ? t('workspace.inbox.bulk.partialFailure')
-                .replace('{count}', String(currentSelection.failedCount))
+                .replace('{count}', String(controller.bulkFailedCount))
             : t('workspace.inbox.mutationError')}
         </p>
       ) : null}
@@ -326,7 +321,7 @@ function NotificationBulkBar({
       aria-label={t('workspace.inbox.bulk.label')}
       className="flex min-w-0 flex-wrap items-center gap-3 border-b border-[var(--workbench-border)] bg-surface px-5 py-2.5"
       data-testid="notification-bulk-bar"
-      role="toolbar"
+      role="group"
     >
       <label className="inline-flex min-h-9 items-center gap-2 text-sm font-semibold text-[var(--workbench-muted)] max-[760px]:min-h-[44px]">
         <input
