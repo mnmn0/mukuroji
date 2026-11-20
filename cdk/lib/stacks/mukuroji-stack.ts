@@ -207,6 +207,7 @@ export class MukurojiStack extends cdk.Stack {
       edgeOriginSecret: parameters.edgeOriginSecret.valueAsString,
       fileBucket: fileStorage.fileBucket,
       httpApi: apiTransports.httpApi,
+      realtimeWebSocketApi: apiTransports.realtimeWebSocketStage.api,
     });
     configureUserPoolEmail(this, {
       userIdentity,

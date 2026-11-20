@@ -6,6 +6,7 @@ import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { createFileBucketBrowserCorsRule } from './file-storage';
+import { createWebResponseHeadersPolicies } from './web-response-headers';
 
 /** Path pattern CloudFront forwards to the shared HTTP API. */
 export const WEB_API_PATH_PATTERN = '/api/*';
@@ -227,6 +228,8 @@ export type WebDistributionInput = Readonly<{
   readonly httpApi: apigatewayv2.HttpApi;
   /** File bucket whose browser uploads must accept the Web origin. */
   readonly fileBucket: s3.Bucket;
+  /** Realtime WebSocket API the Web app connects to. */
+  readonly realtimeWebSocketApi: apigatewayv2.IWebSocketApi;
   /** Secret CloudFront sends to the API with every `/api/*` request. */
   readonly edgeOriginSecret: string;
 }>;
@@ -257,13 +260,15 @@ export type WebDistributionResources = Readonly<{
  * viewer address and an origin secret to each API request, so rate limits and
  * enterprise IP policies see the user's address instead of an edge address.
  * The file bucket also accepts presigned browser uploads from this origin.
+ * Both behaviors send security headers; the Web app's CSP limits connections
+ * to this origin, the realtime WebSocket API, and the file bucket.
  *
  * The optional `WebDomainName` and `WebCertificateArn` parameters serve the
  * same distribution on a custom domain, which then becomes the canonical
  * origin used in notification links. The CloudFront domain keeps working.
  *
  * @param scope Stack scope used directly to keep construct paths flat.
- * @param input HTTP API and file bucket shared with the rest of the stack.
+ * @param input HTTP API, realtime API, and file bucket shared with the rest of the stack.
  * @returns The Web bucket, distribution, and the app's canonical HTTPS origin.
  */
 export function buildWebDistribution(
@@ -314,13 +319,18 @@ export function buildWebDistribution(
     2,
     cdk.Fn.split('/', input.httpApi.apiEndpoint),
   );
+  const { apiResponseHeadersPolicy, webResponseHeadersPolicy } =
+    createWebResponseHeadersPolicies(scope, {
+      fileBucketSource: `https://*.s3.${scope.region}.${scope.urlSuffix}`,
+      realtimeWebSocketOrigin: input.realtimeWebSocketApi.apiEndpoint,
+    });
   const webDistribution = new cloudfront.Distribution(scope, 'WebDistribution', {
     comment: 'mukuroji Web app and API on one origin',
     defaultBehavior: {
       origin: origins.S3BucketOrigin.withOriginAccessControl(webBucket),
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-      responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+      responseHeadersPolicy: webResponseHeadersPolicy,
       functionAssociations: [{
         eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
         function: spaRoutingFunction,
@@ -336,6 +346,7 @@ export function buildWebDistribution(
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
         originRequestPolicy:
           cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+        responseHeadersPolicy: apiResponseHeadersPolicy,
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
         functionAssociations: [{
           eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,

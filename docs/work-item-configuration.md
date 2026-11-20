@@ -24,6 +24,7 @@ Team configuration scope      = <encoded-directoryId>#team#<encoded-teamId>#work
 CONFIG                         = CONFIG
 Relation graph metadata        = RELATION_GRAPH
 Relation projection            = REL#<encoded-sourceWorkItemId>#<relationType>#<encoded-targetWorkItemId>
+Child restore guard            = CHILD_RESTORE#<encoded-parentWorkItemId>
 ```
 
 ID に key delimiter を許可する場合は、すべての writer / reader で同じ percent-encoding を適用する。relation は Team scope にだけ保存し、Workspace をまたぐ key や Team ID を省略した key を作らない。
@@ -231,6 +232,8 @@ CI、bot / 人の review、merge、未解決 blocker の条件、manager の ove
 ### Reciprocal transaction と graph CAS
 
 Team scope の `RELATION_GRAPH` row は `schemaVersion=1`、単調増加 `revision`、Team の directed relation row 数 `edgeCount` を持つ。Row が無い graph は revision `0` と解釈する。Relation list response は `graphRevision` を返し、作成/削除 input は `expectedGraphRevision` を必須にする。
+
+Team scope の `CHILD_RESTORE#<encoded-parentWorkItemId>` row は `entryType=child-restore-guard`、`schemaVersion=1`、単調増加 `generation` を持つ。子の Work Item を復元する transaction は親の row を強整合で読み、検証した `generation` を条件に 1 進める（row が無ければ `attribute_not_exists` を条件に `generation=1` で作る。type・schema・generation が読んだ値と違う row は上書きせず復元を失敗させる）。親を archive する transaction は子を読む前に読んだ `generation`（row が無ければ `attribute_not_exists`）を ConditionCheck する。子の数によらない 1 項目で「確認の後に子が復元された」ことを検出するための row で、relation の変更には関わらない（[Work Items](work-items.md#archive復元と階層633)）。
 
 Mutation 前に graph revision を読み、その後 endpoint の近傍と循環検証に必要な row を consistent read する。DynamoDB Query は複数 page を一つの snapshot として固定しないため、transaction で最初に読んだ graph revision を condition にし、途中で一件でも relation mutation があれば全 transaction を失敗させる。
 

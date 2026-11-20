@@ -420,6 +420,18 @@ export type PlanningAuthorizationState = {
   updateTargets: PlanningUpdateTargetAuthorizationReference[]
 }
 
+/** Entity ID が確定した Planning entity 作成入力です。ID は呼び出し元が指定するか API が採番します。 */
+export type PlanningEntityCreation = CreatePlanningEntityInput & {
+  /** Workspace 内で一意な新しい entity ID です。 */
+  id: string
+}
+
+/** 複製先 ID が確定した Planning entity 複製入力です。ID は呼び出し元が指定するか API が採番します。 */
+export type PlanningEntityDuplication = DuplicatePlanningEntityInput & {
+  /** Workspace 内で一意な複製後の entity ID です。 */
+  targetId: string
+}
+
 /** Planning domain を読み書きする client contract です。 */
 export type PlanningClient = {
   /** Reads bounded compact activity without scanning immutable updates or annotations.
@@ -455,7 +467,7 @@ export type PlanningClient = {
   /** Planning entity を作成します。 */
   create(
     workspaceId: string,
-    input: CreatePlanningEntityInput,
+    input: PlanningEntityCreation,
     workItemState: PlanningWorkItemState,
   ): Promise<PlanningMutationResponse>
   /** Planning entity の editable fields を更新します。 */
@@ -497,7 +509,7 @@ export type PlanningClient = {
   duplicate(
     workspaceId: string,
     entityId: string,
-    input: DuplicatePlanningEntityInput,
+    input: PlanningEntityDuplication,
     workItemState: PlanningWorkItemState,
   ): Promise<PlanningMutationResponse>
   /** Planning entity の hierarchy / Team / Project scope を移動します。 */
@@ -1118,7 +1130,7 @@ abstract class BasePlanningClient implements PlanningClient {
   /** Planning entity を作成します。 */
   async create(
     workspaceId: string,
-    input: CreatePlanningEntityInput,
+    input: PlanningEntityCreation,
     workItemState: PlanningWorkItemState,
   ) {
     await this.requireIdNotArchived(workspaceId, input.id)
@@ -1622,7 +1634,7 @@ abstract class BasePlanningClient implements PlanningClient {
   async duplicate(
     workspaceId: string,
     entityId: string,
-    input: DuplicatePlanningEntityInput,
+    input: PlanningEntityDuplication,
     workItemState: PlanningWorkItemState,
   ) {
     await this.requireIdNotArchived(workspaceId, input.targetId)
@@ -4853,7 +4865,7 @@ function createLatestPlanningUpdateSummary(update: PlanningUpdate) {
  * @param now - Timestamp recorded as both creation and update time.
  * @returns The canonical stored entity.
  */
-function createStoredEntity(input: CreatePlanningEntityInput, now: string): StoredPlanningEntity {
+function createStoredEntity(input: PlanningEntityCreation, now: string): StoredPlanningEntity {
   const description = readOptionalDescription(input.description)
   const entity: StoredPlanningEntity = {
     id: readIdentifier(input.id, 'Planning entity ID'),

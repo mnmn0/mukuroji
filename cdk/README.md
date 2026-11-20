@@ -1117,6 +1117,15 @@ Web を build して upload し、CloudFront を invalidate します。content 
 `sw.js` などそれ以外の file は `no-cache` で置き換えます。配信後に `WebUrl` を開き、login と Team/project
 一覧の表示を確認します。local の Web から AWS の API を試す場合だけ、HTTP API を直接指定します。
 
+CloudFront は Web と `/api/*` の両方に security header（HSTS、`X-Content-Type-Options`、`X-Frame-Options: DENY`、
+`Referrer-Policy: no-referrer`、Content-Security-Policy）を付けます。Web の CSP は script・style・worker を同じ
+origin に限り、接続先を同じ origin、realtime WebSocket API、file bucket に限ります。file bucket の CORS が
+distribution の domain を参照するため、CloudFront の CSP は bucket 名を書けず、同じ region の S3 endpoint
+（`https://*.s3.<region>.amazonaws.com`）を許可します。`scripts/deploy-web.sh` は `FileBucketName` と
+`RealtimeWebSocketUrl` output から、接続先をこの stack の bucket と WebSocket API だけに絞る `<meta>` CSP を
+`index.html` に加えます。browser は両方の policy を適用します。`/api/*` の CSP は `default-src 'none'` で、
+API の応答が document として開かれても何も読み込みません。
+
 ```sh
 VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 ```

@@ -1005,6 +1005,9 @@ function createFakeWorkItemConfigurationClient(
     async listRelationGraph() {
       return { relations: [], graphRevision: 0 }
     },
+    async getChildRestoreGeneration() {
+      return 0
+    },
     async createRelation(_workspaceId, _teamId, input) {
       return createFakeRelationMutationResponse(input)
     },
@@ -1511,6 +1514,8 @@ function configureFakeProjectClients(
     /** Detail fake が返す legacy search custom fields です。 */
     /** Detail fake が TeamIssueNotFound を返す Work Item ID です。 */
     detailMissingIssueIds?: string[]
+    /** Work Item IDs the detail fake returns as archived. */
+    detailArchivedIssueIds?: string[]
     /** Work Item detail read の障害を再現する error です。 */
     detailReadError?: Error
     /** Work Item detail read の同時実行を観測または制御する hook です。 */
@@ -1531,6 +1536,8 @@ function configureFakeProjectClients(
     workItemRelations?: WorkItemRelation[]
     /** Schedule preview fake が返す relation graph revision です。 */
     workItemRelationGraphRevision?: number
+    /** Archive fake が返す親の子復元 generation です。 */
+    childRestoreGeneration?: number
     /** Project 作成 transaction と template application receipt の同時確定を再現する hook です。 */
     projectCreateHook?: (
       input: Record<string, unknown>,
@@ -2217,11 +2224,18 @@ function configureFakeProjectClients(
             },
           }
         : {}),
-      async listRelations() {
+      async listRelations(_workspaceId: string, _teamId: string, workItemId: string, listOptions?: { types?: readonly string[] }) {
+        // Like the DynamoDB adapter, a read returns only the asked Work Item's relations of the asked types.
         return {
-          relations: (options.workItemRelations ?? []).map((relation) => ({ ...relation })),
+          relations: (options.workItemRelations ?? [])
+            .filter((relation) => relation.sourceWorkItemId === workItemId &&
+              (listOptions?.types === undefined || listOptions.types.includes(relation.type)))
+            .map((relation) => ({ ...relation })),
           graphRevision: options.workItemRelationGraphRevision ?? 0,
         }
+      },
+      async getChildRestoreGeneration() {
+        return options.childRestoreGeneration ?? 0
       },
     }),
     projectDirectory: {
@@ -3103,6 +3117,9 @@ function configureFakeProjectClients(
             dueDate: deriveWorkItemScheduleDueDate(detailSchedule),
             schedule: detailSchedule,
             priority: 'high',
+            ...(options.detailArchivedIssueIds?.includes(issueId)
+              ? { archivedAt: '2026-06-09T00:00:00.000Z', archivedBy: 'demo@example.com' }
+              : {}),
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: options.detailUpdatedAts?.[detailReadIndex] ??
               '2026-06-08T00:00:00.000Z',
