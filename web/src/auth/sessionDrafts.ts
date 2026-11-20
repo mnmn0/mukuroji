@@ -31,6 +31,11 @@ type SessionDraftRegistration = {
   owner: string | undefined
   /** Reads the input's current unsaved value. */
   read: SessionDraftReader
+  /**
+   * Set when the drafts were discarded while the input was mounted, such as on an explicit
+   * sign-out, so its value is not kept again when it unmounts.
+   */
+  discarded: boolean
 }
 
 /** Drafts preserved in this tab, as stored in sessionStorage. */
@@ -69,10 +74,12 @@ export function registerSessionDraft(
   owner: string | undefined,
   read: SessionDraftReader,
 ): () => void {
-  const registration: SessionDraftRegistration = { key, owner, read }
+  const registration: SessionDraftRegistration = { key, owner, read, discarded: false }
   registrations.add(registration)
   return () => {
     registrations.delete(registration)
+    // Input discarded by an explicit sign-out must not come back through the unmount window.
+    if (registration.discarded) return
     let value: unknown
     try {
       value = read()
@@ -80,7 +87,7 @@ export function registerSessionDraft(
       return
     }
     if (value === undefined) return
-    const retained: SessionDraftRegistration = { key, owner, read: () => value }
+    const retained: SessionDraftRegistration = { key, owner, read: () => value, discarded: false }
     retainedRegistrations.add(retained)
     setTimeout(() => {
       retainedRegistrations.delete(retained)
@@ -174,8 +181,12 @@ export function keepSessionDraftsOnlyFor(owner: string | undefined) {
 
 /**
  * Removes every preserved draft of this tab, such as on an explicit sign-out.
+ *
+ * Inputs still mounted are marked so that unmounting them afterwards does not keep their value
+ * again.
  */
 export function discardSessionDrafts() {
+  for (const registration of registrations) registration.discarded = true
   retainedRegistrations.clear()
   discardStoredDrafts()
 }

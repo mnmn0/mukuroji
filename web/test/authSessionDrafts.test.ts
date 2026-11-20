@@ -181,6 +181,19 @@ test('never keeps one account’s input that unmounted after sign-out for the ne
   expect(takeSessionDraft(commentKey, 'member-b')).toBeUndefined()
 })
 
+test('never keeps input discarded by a sign-out again when its page unmounts right after', async () => {
+  const session = signIn(token('member-a', 'access-1'))
+  const unmount = register(commentKey, () => ({ bodyMarkdown: 'Discarded text', mentionMemberKeys: [] }))
+  await signOutWithPushCleanup(session.accessToken, async () => undefined, 10, async () => undefined)
+  // The page goes away right after the sign-out, within the unmount window.
+  unmount()
+
+  signIn(token('member-a', 'access-2'))
+  clearAuthSession()
+
+  expect(takeSessionDraft(commentKey, 'member-a')).toBeUndefined()
+})
+
 test('an input that is empty now wins over its value from moments ago', () => {
   signIn(token('member-a', 'access-1'))
   register(commentKey, () => ({ bodyMarkdown: 'Old text', mentionMemberKeys: [] }))()
