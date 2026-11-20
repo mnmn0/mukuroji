@@ -1057,7 +1057,7 @@ VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 #### Web の release を戻す
 
 各 deploy は `assets/` 以外の file（`index.html`、`sw.js`、manifest など）を bucket の
-`releases/<commit SHA>/` にも残します。`assets/` は消さないため、残した release を bucket の直下へ
+`releases/<commit SHA>/` にも残します。残っている release が使う `assets/` は消さないため、残した release を bucket の直下へ
 copy し直せば、再 build せずに前の release へ戻せます。
 
 ```sh
@@ -1069,8 +1069,21 @@ AWS_REGION=ap-northeast-1 bun run web:rollback -- <commit SHA>
 
 `scripts/rollback-web.sh` は `releases/<commit SHA>/` を bucket の直下へ copy し、直下にだけある file を
 削除してから CloudFront を invalidate します。戻した後に `WebUrl` の Help 画面で SHA が切り替わったことを
-確認します。この仕組みより前に deploy した release は残っていないため戻せません。`releases/` と
-`assets/` は今は自動で削除しないので、古い release の整理は別途行います。
+確認します。この仕組みより前に deploy した release は残っていないため戻せません。
+
+#### Web bucket の保存期間
+
+Web bucket は versioning を有効にし、次の期間で古い file を消します。
+
+- `releases/<commit SHA>/` は最後の upload から 180 日で lifecycle が削除します。戻せるのはこの期間内の
+  release だけです。稼働中の release は bucket の直下にあるので、copy が消えても配信は続きます。
+- 上書き・削除された file の旧 version は 30 日残り、その後 lifecycle が削除します。誤って消した file は
+  この期間内なら `aws s3api list-object-versions` で探して戻せます。
+- `assets/` は日数では消しません。稼働中の release の chunk は deploy しない限り upload し直されないため、
+  日数で消すと配信中の画面が壊れるからです。代わりに各 release が使う `assets/` の一覧を
+  `release-assets.txt` として残し、`web:deploy` が、残っている release、置き換える直前の release、
+  今回の build のどれも使わない `assets/` を削除します。一覧のない release（この仕組みより前の deploy）が
+  残っている間は削除しません。
 
 ## Workspace partition migration
 
