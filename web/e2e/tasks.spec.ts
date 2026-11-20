@@ -2597,6 +2597,10 @@ async function mockAnalyticsReportsPage(
     queryInputs: [],
   }
 
+  await page.route('**/api/workspace/calendar-settings', async (route) => {
+    await route.fulfill({ json: { fiscalYearStartMonth: 4, weekStartDay: 1 } })
+  })
+
   await page.route(
     /.*\/api\/analytics\/reports(?:\?.*)?$/,
     async (route) => {
