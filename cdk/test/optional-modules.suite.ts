@@ -172,23 +172,23 @@ describe('default deployment without optional modules', () => {
   });
 
   test('tells the API and the scheduled jobs that Software factory is off, and skips Agent Run triage', () => {
-    const functions = Object.entries(resources).filter(([, resource]) =>
-      resource.Type === 'AWS::Lambda::Function');
-    const switches = functions
-      .map(([, resource]) => (resource.Properties?.Environment as
-        | { Variables: Record<string, unknown> }
-        | undefined)?.Variables ?? {})
-      .filter((variables) => 'SOFTWARE_FACTORY' in variables);
-    const scheduledJobs = functions.find(([id]) =>
-      id.startsWith('ScheduledJobsFunction') && !id.includes('ServiceRole'));
-    const scheduledJobsVariables = (scheduledJobs?.[1].Properties?.Environment as
-      | { Variables: Record<string, unknown> }
-      | undefined)?.Variables ?? {};
+    const withSwitch = (value: unknown) => ({
+      Properties: { Environment: { Variables: Match.objectLike({ SOFTWARE_FACTORY: value }) } },
+    });
 
-    expect(switches).toHaveLength(2);
-    expect(switches.map((variables) => variables.SOFTWARE_FACTORY)).toEqual(['disabled', 'disabled']);
-    expect(scheduledJobsVariables.SOFTWARE_FACTORY).toBe('disabled');
-    expect(scheduledJobsVariables).not.toHaveProperty('AGENT_RUNS_TABLE_NAME');
+    expect(Object.keys(template.findResources('AWS::Lambda::Function', withSwitch(Match.anyValue()))))
+      .toHaveLength(2);
+    expect(Object.keys(template.findResources('AWS::Lambda::Function', withSwitch('disabled'))))
+      .toHaveLength(2);
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          AGENT_RUNS_TABLE_NAME: Match.absent(),
+          MUKUROJI_RUNTIME_ROLE: 'scheduled-jobs-worker',
+          SOFTWARE_FACTORY: 'disabled',
+        }),
+      },
+    });
     expect(logicalIds.filter((id) => id.startsWith('AgentRunTriageJobPolicy'))).toEqual([]);
   });
 
