@@ -6,7 +6,10 @@ import {
 } from '../../projects/api'
 import { useTeamProjectMembers } from '../../projects/queries/useProjectMembers'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import type { ChecklistWorkItemInput } from '../model/checklistWorkItems'
+import type {
+  ChecklistWorkItemInput,
+  DocumentWorkItemSource,
+} from '../model/checklistWorkItems'
 import { focusFirstModalElement, trapModalFocus } from './modalFocus'
 
 /**
@@ -15,7 +18,7 @@ import { focusFirstModalElement, trapModalFocus } from './modalFocus'
 export type ChecklistWorkItemDialogProps = {
   /** Workspace API token used to read Project members. */
   accessToken?: string
-  /** Text of the checklist item, used as the initial title. */
+  /** Text of the checklist item or note, used as the initial title. */
   itemText: string
   /** Teams and Projects the Work Item can belong to. */
   teams: ProjectDirectoryTeam[]
@@ -34,6 +37,30 @@ export type ChecklistWorkItemDialogProps = {
    * retried; the creation fields are then locked.
    */
   linkOnly?: boolean
+  /**
+   * Kind of Document element the Work Item is created from; defaults to a
+   * checklist item.
+   */
+  source?: DocumentWorkItemSource['kind']
+}
+
+/**
+ * Heading texts that differ between checklist items and Whiteboard notes.
+ */
+const sourceMessageKeys: Readonly<Record<
+  DocumentWorkItemSource['kind'],
+  Readonly<Record<'description' | 'linkOnly' | 'title', MessageKey>>
+>> = {
+  'checklist-item': {
+    description: 'documents.checklistWorkItem.description',
+    linkOnly: 'documents.checklistWorkItem.linkOnly',
+    title: 'documents.checklistWorkItem.title',
+  },
+  'whiteboard-note': {
+    description: 'documents.noteWorkItem.description',
+    linkOnly: 'documents.noteWorkItem.linkOnly',
+    title: 'documents.noteWorkItem.title',
+  },
 }
 
 /**
@@ -51,7 +78,8 @@ type ProjectOption = {
 }
 
 /**
- * Dialog that creates a Work Item from a Document checklist item.
+ * Dialog that creates a Work Item from a Document checklist item or
+ * Whiteboard note.
  *
  * @param props - Item text, Projects, defaults, and callbacks.
  * @returns The modal dialog.
@@ -64,9 +92,11 @@ export function ChecklistWorkItemDialog({
   linkOnly = false,
   onClose,
   onSubmit,
+  source = 'checklist-item',
   t,
   teams,
 }: ChecklistWorkItemDialogProps) {
+  const messageKeys = sourceMessageKeys[source]
   const projectOptions: ProjectOption[] = teams.flatMap((team) =>
     team.projects.map((project) => ({
       label: `${team.name} / ${project.name}`,
@@ -179,10 +209,10 @@ export function ChecklistWorkItemDialog({
           className="m-0 text-lg font-semibold text-[var(--workbench-text)]"
           id={`${fieldId}-title`}
         >
-          {t('documents.checklistWorkItem.title')}
+          {t(messageKeys.title)}
         </h2>
         <p className="m-0 mt-1 text-xs font-medium leading-5 text-[var(--workbench-muted)]">
-          {t('documents.checklistWorkItem.description')}
+          {t(messageKeys.description)}
         </p>
         <form className="mt-5 grid gap-4" onSubmit={(event) => void handleSubmit(event)}>
           {linkOnly ? (
@@ -190,7 +220,7 @@ export function ChecklistWorkItemDialog({
               className="m-0 rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3 text-sm font-semibold text-[var(--workbench-text)]"
               role="status"
             >
-              {t('documents.checklistWorkItem.linkOnly')}
+              {t(messageKeys.linkOnly)}
             </p>
           ) : null}
           <fieldset className="contents" disabled={isSubmitting || linkOnly}>

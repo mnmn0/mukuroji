@@ -7,9 +7,11 @@ import {
   type RefObject,
 } from 'react'
 import type {
+  DocumentRelation,
   DocumentRelationTarget,
   PublicWhiteboardContent,
   WhiteboardFrame,
+  WhiteboardNoteObject,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createWorkItemSearchPath } from '../../shared/routing/paths'
@@ -27,6 +29,7 @@ import {
   createCanonicalWorkItemId,
   parseCanonicalWorkItemId,
 } from '../model/relations'
+import { findWhiteboardNoteWorkItemId } from '../model/checklistWorkItems'
 import { moveWhiteboardObjectWithinCanvas } from '../model/whiteboardGeometry'
 import { useLinkedWorkItem } from '../queries/useLinkedWorkItem'
 import { DocumentRelationTargetPicker } from './DocumentLinkPicker'
@@ -62,6 +65,18 @@ function describeWorkItemCard(
     return `${t('documents.links.loadError')} · ${workItemId}`
   }
   return workItemId || t('documents.whiteboard.work-item')
+}
+
+/**
+ * Actions that turn Whiteboard notes into Work Items and open the linked ones.
+ */
+export type WhiteboardNoteWorkItemControls = {
+  /** Relations of the Document, used to find notes that already have a Work Item. */
+  relations: readonly DocumentRelation[]
+  /** Starts creating a Work Item from a note; omission hides the action. */
+  onCreate?: (note: WhiteboardNoteObject) => void
+  /** Opens the Work Item linked to a note; omission hides the link. */
+  onOpen?: (workItemId: string) => void
 }
 
 /**
@@ -116,6 +131,10 @@ export type WhiteboardCanvasProps = {
    * Work Item object の path を開く callback です。
    */
   onNavigate?: (path: string) => void
+  /**
+   * Create and open actions for Work Items made from notes; omission hides them.
+   */
+  noteWorkItems?: WhiteboardNoteWorkItemControls
 }
 
 /**
@@ -199,6 +218,7 @@ export function WhiteboardCanvas({
   onActiveAnchorChange,
   onDeleteConnector,
   onDeleteFrame,
+  noteWorkItems,
   onDeleteObject,
   onNavigate,
   onUpsertConnector,
@@ -573,6 +593,7 @@ export function WhiteboardCanvas({
         <WhiteboardInspector
           connector={selectedConnector}
           frame={selectedFrame}
+          noteWorkItems={noteWorkItems}
           object={selectedObject}
           t={t}
           onNavigate={onNavigate}
@@ -1074,6 +1095,7 @@ function WorkItemCardRetry({
 function WhiteboardInspector({
   connector,
   frame,
+  noteWorkItems,
   object,
   onConnectorChange,
   onFrameChange,
@@ -1084,6 +1106,7 @@ function WhiteboardInspector({
 }: {
   connector?: WhiteboardConnector
   frame?: WhiteboardFrame
+  noteWorkItems?: WhiteboardNoteWorkItemControls
   object?: WhiteboardObject
   onConnectorChange: (connector: WhiteboardConnector) => void
   onFrameChange: (frame: WhiteboardFrame) => void
@@ -1158,6 +1181,13 @@ function WhiteboardInspector({
               {t('documents.whiteboard.openWorkItem')}
             </button>
           ) : null}
+          {object.type === 'note' ? (
+            <NoteWorkItemAction
+              controls={noteWorkItems}
+              note={object}
+              t={t}
+            />
+          ) : null}
           <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('documents.whiteboard.color')}
             <input
@@ -1205,6 +1235,55 @@ function WhiteboardInspector({
         </label>
       ) : null}
     </aside>
+  )
+}
+
+/**
+ * Shows the Work Item linked to a Whiteboard note, or the action that creates one.
+ *
+ * @param props - Note, controls, and translator.
+ * @returns The open button, the linked badge, the create button, or nothing.
+ */
+export function NoteWorkItemAction({
+  controls,
+  note,
+  t,
+}: {
+  /** Create and open actions; omission renders nothing. */
+  controls?: WhiteboardNoteWorkItemControls
+  /** Note the action belongs to. */
+  note: WhiteboardNoteObject
+  /** Resolves display text. */
+  t: (key: MessageKey) => string
+}) {
+  if (!controls) return null
+  const workItemId = findWhiteboardNoteWorkItemId(controls.relations, note.id)
+  if (workItemId) {
+    const { onOpen } = controls
+    return onOpen ? (
+      <button
+        className="workbench-button-secondary min-h-10 px-3"
+        onClick={() => onOpen(workItemId)}
+        type="button"
+      >
+        {t('documents.noteWorkItem.open')}
+      </button>
+    ) : (
+      <span className="workbench-badge justify-self-start">
+        {t('documents.checklistWorkItem.linked')}
+      </span>
+    )
+  }
+  const { onCreate } = controls
+  if (!onCreate || note.text.trim().length === 0) return null
+  return (
+    <button
+      className="workbench-button-secondary min-h-10 px-3"
+      onClick={() => onCreate(note)}
+      type="button"
+    >
+      {t('documents.noteWorkItem.create')}
+    </button>
   )
 }
 

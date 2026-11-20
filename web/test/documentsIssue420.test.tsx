@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { DocumentChecklistBlock } from '@mukuroji/contracts'
+import type {
+  DocumentChecklistBlock,
+  WhiteboardNoteObject,
+} from '@mukuroji/contracts'
 import { documentRecordFixture } from '../src/documents/fixtures'
 import {
   buildBuiltInDocumentTemplate,
@@ -9,10 +12,15 @@ import {
 } from '../src/documents/model/builtInTemplates'
 import {
   createChecklistItemWorkItemRelation,
+  createDocumentWorkItemRelation,
+  createDocumentWorkItemSourceKey,
   findChecklistItemWorkItemId,
+  findDocumentWorkItemId,
+  findWhiteboardNoteWorkItemId,
 } from '../src/documents/model/checklistWorkItems'
 import { DocumentEditor } from '../src/documents/ui/DocumentEditor'
 import { DocumentHome } from '../src/documents/ui/DocumentHome'
+import { NoteWorkItemAction } from '../src/documents/ui/WhiteboardCanvas'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -173,5 +181,94 @@ describe('checklist items as Work Items', () => {
 
     expect(html).toContain('Open Work Item')
     expect(html).not.toContain('Make Work Item')
+  })
+})
+
+describe('Whiteboard notes as Work Items', () => {
+  const note: WhiteboardNoteObject = {
+    bounds: { height: 120, width: 160, x: 0, y: 0 },
+    id: 'note-decision',
+    text: 'Draft the rollout plan',
+    type: 'note',
+    zIndex: 1,
+  }
+  const relation = createDocumentWorkItemRelation(
+    { documentId: 'doc-board', kind: 'whiteboard-note', objectId: note.id },
+    'team/core/issue/ISSUE-2',
+    new Date('2026-11-20T00:00:00Z'),
+  )
+
+  test('links the Work Item to the note object, not a checklist block', () => {
+    expect(relation.id).toBe('whiteboard-note:note-decision')
+    expect(relation.id.startsWith('system:')).toBe(false)
+    expect(relation.source).toEqual({ kind: 'whiteboard-object', objectId: note.id })
+    expect(findWhiteboardNoteWorkItemId([relation], note.id))
+      .toBe('team/core/issue/ISSUE-2')
+    expect(findWhiteboardNoteWorkItemId([relation], 'note-other')).toBeUndefined()
+    expect(findDocumentWorkItemId([relation], {
+      documentId: 'doc-board',
+      kind: 'whiteboard-note',
+      objectId: note.id,
+    })).toBe('team/core/issue/ISSUE-2')
+  })
+
+  test('keeps note and checklist retries in separate idempotency contexts', () => {
+    const checklistKey = createDocumentWorkItemSourceKey({
+      blockId: 'note-decision',
+      documentId: 'doc-board',
+      itemId: 'item',
+      kind: 'checklist-item',
+    })
+    const noteKey = createDocumentWorkItemSourceKey({
+      documentId: 'doc-board',
+      kind: 'whiteboard-note',
+      objectId: 'note-decision',
+    })
+
+    expect(checklistKey).toBe(JSON.stringify(['doc-board', 'note-decision', 'item']))
+    expect(noteKey).not.toBe(checklistKey)
+  })
+
+  test('offers creation for an unlinked note and opens a linked one', () => {
+    const t = createTranslator('ja')
+    const controls = {
+      onCreate: () => undefined,
+      onOpen: () => undefined,
+      relations: [relation],
+    }
+    const unlinked = renderToStaticMarkup(
+      <NoteWorkItemAction
+        controls={controls}
+        note={{ ...note, id: 'note-new' }}
+        t={t}
+      />,
+    )
+    const linked = renderToStaticMarkup(
+      <NoteWorkItemAction controls={controls} note={note} t={t} />,
+    )
+    const empty = renderToStaticMarkup(
+      <NoteWorkItemAction
+        controls={controls}
+        note={{ ...note, id: 'note-empty', text: '  ' }}
+        t={t}
+      />,
+    )
+
+    expect(unlinked).toContain('Work Item にする')
+    expect(linked).toContain('Work Item を開く')
+    expect(linked).not.toContain('Work Item にする')
+    expect(empty).toBe('')
+  })
+
+  test('hides creation when the viewer cannot edit', () => {
+    const html = renderToStaticMarkup(
+      <NoteWorkItemAction
+        controls={{ relations: [] }}
+        note={note}
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html).toBe('')
   })
 })

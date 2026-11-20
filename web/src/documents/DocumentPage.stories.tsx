@@ -149,6 +149,22 @@ export const Whiteboard: Story = {
 }
 
 /**
+ * Whiteboard の付箋から Work Item を作れる状態です。付箋を選ぶと inspector に作成 action が出ます。
+ */
+export const WhiteboardNoteWorkItem: Story = {
+  args: {
+    actions: {
+      ...screenActions,
+      createWorkItem: async () => 'team/core/issue/ISSUE-42',
+    },
+    data: {
+      ...screenData,
+      selectedDocument: whiteboardRecordFixture,
+    },
+  },
+}
+
+/**
  * Comment と version history を右 drawer で確認する状態です。
  */
 export const VersionHistory: Story = {
