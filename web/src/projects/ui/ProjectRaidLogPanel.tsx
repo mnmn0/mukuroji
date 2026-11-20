@@ -310,140 +310,143 @@ export function ProjectRaidLogPanel({
           data-testid="project-raid-log-form"
           onSubmit={(event) => void handleSubmit(event)}
         >
-          <label className={labelClassName}>
-            {t('projects.raidLog.field.kind')}
-            <select
-              className={inputClassName}
-              data-testid="project-raid-log-kind"
-              disabled={editor.mode === 'edit'}
-              value={editor.values.kind}
-              onChange={(event) => {
-                const kind = PROJECT_RAID_ENTRY_KINDS.find((candidate) => candidate === event.target.value)
-                if (kind) updateValue('kind', kind)
-              }}
-            >
-              {PROJECT_RAID_ENTRY_KINDS.map((kind) => (
-                <option key={kind} value={kind}>{t(kindMessageKey(kind))}</option>
-              ))}
-            </select>
-          </label>
-          <label className={labelClassName}>
-            {t('projects.raidLog.field.status')}
-            <select
-              className={inputClassName}
-              data-testid="project-raid-log-status"
-              value={editor.values.status}
-              onChange={(event) => updateValue('status', event.target.value === 'closed' ? 'closed' : 'open')}
-            >
-              <option value="open">{t('projects.raidLog.status.open')}</option>
-              <option value="closed">{t('projects.raidLog.status.closed')}</option>
-            </select>
-          </label>
-          <label className={`${labelClassName} col-span-full`}>
-            {t('projects.raidLog.field.title')}
-            <input
-              className={inputClassName}
-              data-testid="project-raid-log-title-input"
-              maxLength={PROJECT_RAID_TITLE_MAX_LENGTH}
-              required
-              value={editor.values.title}
-              onChange={(event) => updateValue('title', event.target.value)}
-            />
-          </label>
-          {editor.values.kind === 'risk' ? (
+          {/* Fields stay locked while a save is in flight, so no edit is lost when it completes. */}
+          <fieldset className="contents" disabled={isSaving}>
             <label className={labelClassName}>
-              {t('projects.raidLog.field.probability')}
+              {t('projects.raidLog.field.kind')}
               <select
                 className={inputClassName}
-                data-testid="project-raid-log-probability"
-                value={editor.values.probability}
-                onChange={(event) => updateValue('probability', event.target.value)}
+                data-testid="project-raid-log-kind"
+                disabled={editor.mode === 'edit'}
+                value={editor.values.kind}
+                onChange={(event) => {
+                  const kind = PROJECT_RAID_ENTRY_KINDS.find((candidate) => candidate === event.target.value)
+                  if (kind) updateValue('kind', kind)
+                }}
+              >
+                {PROJECT_RAID_ENTRY_KINDS.map((kind) => (
+                  <option key={kind} value={kind}>{t(kindMessageKey(kind))}</option>
+                ))}
+              </select>
+            </label>
+            <label className={labelClassName}>
+              {t('projects.raidLog.field.status')}
+              <select
+                className={inputClassName}
+                data-testid="project-raid-log-status"
+                value={editor.values.status}
+                onChange={(event) => updateValue('status', event.target.value === 'closed' ? 'closed' : 'open')}
+              >
+                <option value="open">{t('projects.raidLog.status.open')}</option>
+                <option value="closed">{t('projects.raidLog.status.closed')}</option>
+              </select>
+            </label>
+            <label className={`${labelClassName} col-span-full`}>
+              {t('projects.raidLog.field.title')}
+              <input
+                className={inputClassName}
+                data-testid="project-raid-log-title-input"
+                maxLength={PROJECT_RAID_TITLE_MAX_LENGTH}
+                required
+                value={editor.values.title}
+                onChange={(event) => updateValue('title', event.target.value)}
+              />
+            </label>
+            {editor.values.kind === 'risk' ? (
+              <label className={labelClassName}>
+                {t('projects.raidLog.field.probability')}
+                <select
+                  className={inputClassName}
+                  data-testid="project-raid-log-probability"
+                  value={editor.values.probability}
+                  onChange={(event) => updateValue('probability', event.target.value)}
+                >
+                  {ratingOptions.map((rating) => <option key={rating} value={rating}>{rating}</option>)}
+                </select>
+              </label>
+            ) : null}
+            <label className={labelClassName}>
+              {t('projects.raidLog.field.impact')}
+              <select
+                className={inputClassName}
+                data-testid="project-raid-log-impact"
+                value={editor.values.impact}
+                onChange={(event) => updateValue('impact', event.target.value)}
               >
                 {ratingOptions.map((rating) => <option key={rating} value={rating}>{rating}</option>)}
               </select>
             </label>
-          ) : null}
-          <label className={labelClassName}>
-            {t('projects.raidLog.field.impact')}
-            <select
-              className={inputClassName}
-              data-testid="project-raid-log-impact"
-              value={editor.values.impact}
-              onChange={(event) => updateValue('impact', event.target.value)}
-            >
-              {ratingOptions.map((rating) => <option key={rating} value={rating}>{rating}</option>)}
-            </select>
-          </label>
-          <label className={labelClassName}>
-            {t('projects.raidLog.field.reviewDueDate')}
-            <input
-              className={inputClassName}
-              data-testid="project-raid-log-review"
-              type="date"
-              value={editor.values.reviewDueDate}
-              onChange={(event) => updateValue('reviewDueDate', event.target.value)}
-            />
-          </label>
-          <label className={`${labelClassName} col-span-full`}>
-            {t('projects.raidLog.field.description')}
-            <textarea
-              className={textAreaClassName}
-              maxLength={PROJECT_RAID_TEXT_MAX_LENGTH}
-              value={editor.values.description}
-              onChange={(event) => updateValue('description', event.target.value)}
-            />
-          </label>
-          <label className={`${labelClassName} col-span-full`}>
-            {t('projects.raidLog.field.response')}
-            <textarea
-              className={textAreaClassName}
-              maxLength={PROJECT_RAID_TEXT_MAX_LENGTH}
-              value={editor.values.response}
-              onChange={(event) => updateValue('response', event.target.value)}
-            />
-          </label>
-          {hasNewerRevision && latestEditedEntry ? (
-            <div
-              className="col-span-full flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2"
-              role="status"
-            >
-              <p className="text-sm font-semibold text-fg-amber-800">{t('projects.raidLog.conflict.newer')}</p>
+            <label className={labelClassName}>
+              {t('projects.raidLog.field.reviewDueDate')}
+              <input
+                className={inputClassName}
+                data-testid="project-raid-log-review"
+                type="date"
+                value={editor.values.reviewDueDate}
+                onChange={(event) => updateValue('reviewDueDate', event.target.value)}
+              />
+            </label>
+            <label className={`${labelClassName} col-span-full`}>
+              {t('projects.raidLog.field.description')}
+              <textarea
+                className={textAreaClassName}
+                maxLength={PROJECT_RAID_TEXT_MAX_LENGTH}
+                value={editor.values.description}
+                onChange={(event) => updateValue('description', event.target.value)}
+              />
+            </label>
+            <label className={`${labelClassName} col-span-full`}>
+              {t('projects.raidLog.field.response')}
+              <textarea
+                className={textAreaClassName}
+                maxLength={PROJECT_RAID_TEXT_MAX_LENGTH}
+                value={editor.values.response}
+                onChange={(event) => updateValue('response', event.target.value)}
+              />
+            </label>
+            {hasNewerRevision && latestEditedEntry ? (
+              <div
+                className="col-span-full flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2"
+                role="status"
+              >
+                <p className="text-sm font-semibold text-fg-amber-800">{t('projects.raidLog.conflict.newer')}</p>
+                <button
+                  className="workbench-button-secondary min-h-10 px-4"
+                  type="button"
+                  onClick={() => {
+                    setEditor({ mode: 'edit', entry: latestEditedEntry, values: toFormValues(latestEditedEntry) })
+                    setConflictEntryId(undefined)
+                    setSaveError(undefined)
+                  }}
+                >
+                  {t('projects.raidLog.conflict.useLatest')}
+                </button>
+              </div>
+            ) : saveError ? (
+              <p className="col-span-full text-sm font-semibold text-fg-red-700" role="alert">{saveError}</p>
+            ) : null}
+            <div className="col-span-full flex flex-wrap gap-2">
+              <button
+                className="workbench-button-primary min-h-10 px-4 disabled:opacity-50"
+                data-testid="project-raid-log-save"
+                disabled={isSaving}
+                type="submit"
+              >
+                {t('projects.raidLog.save')}
+              </button>
               <button
                 className="workbench-button-secondary min-h-10 px-4"
+                disabled={isSaving}
                 type="button"
                 onClick={() => {
-                  setEditor({ mode: 'edit', entry: latestEditedEntry, values: toFormValues(latestEditedEntry) })
+                  setEditor({ mode: 'closed' })
                   setConflictEntryId(undefined)
-                  setSaveError(undefined)
                 }}
               >
-                {t('projects.raidLog.conflict.useLatest')}
+                {t('projects.raidLog.cancel')}
               </button>
             </div>
-          ) : saveError ? (
-            <p className="col-span-full text-sm font-semibold text-fg-red-700" role="alert">{saveError}</p>
-          ) : null}
-          <div className="col-span-full flex flex-wrap gap-2">
-            <button
-              className="workbench-button-primary min-h-10 px-4 disabled:opacity-50"
-              data-testid="project-raid-log-save"
-              disabled={isSaving}
-              type="submit"
-            >
-              {t('projects.raidLog.save')}
-            </button>
-            <button
-              className="workbench-button-secondary min-h-10 px-4"
-              disabled={isSaving}
-              type="button"
-              onClick={() => {
-                setEditor({ mode: 'closed' })
-                setConflictEntryId(undefined)
-              }}
-            >
-              {t('projects.raidLog.cancel')}
-            </button>
-          </div>
+          </fieldset>
         </form>
       ) : null}
 

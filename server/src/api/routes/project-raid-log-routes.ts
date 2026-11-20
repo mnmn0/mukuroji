@@ -21,6 +21,7 @@ import {
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
 } from '../shared/project-access'
+import { resolveEnterpriseProjectRole } from '../shared/enterprise-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import type { TeamPermissionContext } from '../shared/workspace-access'
 
@@ -203,6 +204,12 @@ function createUpdateReceipt(entryId: string, actorId: string, idempotencyKeyHas
  * Enterprise Team member keeps its effective role), and, for an Enterprise principal,
  * `projects.write` on the Project.
  *
+ * @remarks
+ * The Enterprise Project accesses on the principal carry the role of the current route's
+ * permission, so on a read they are viewer even for a Project member. Once `projects.write`
+ * holds on this Project, the check uses the role that grant gives, the same role a write
+ * request resolves, so the read reports the access the write will get.
+ *
  * @param principal - Authenticated principal.
  * @param teamId - Team that owns the Project.
  * @param projectId - Project ID.
@@ -210,22 +217,34 @@ function createUpdateReceipt(entryId: string, actorId: string, idempotencyKeyHas
  */
 async function canEditProjectRaidLog(principal: WorkspacePrincipal, teamId: string, projectId: string) {
   if (!canWorkspaceBusinessWrite(principal)) return false
-  if (principal.enterprisePermissions !== undefined && !hasEnterprisePermissionAtResource(principal, 'projects.write', {
-    workspaceId: principal.directoryId,
-    kind: 'project',
-    targetId: projectId,
-    parentTeamId: teamId,
-  })) {
-    return false
+  let writer = principal
+  if (principal.enterprisePermissions !== undefined) {
+    if (!hasEnterprisePermissionAtResource(principal, 'projects.write', {
+      workspaceId: principal.directoryId,
+      kind: 'project',
+      targetId: projectId,
+      parentTeamId: teamId,
+    })) {
+      return false
+    }
+    writer = {
+      ...principal,
+      enterpriseProjectAccesses: [
+        ...(principal.enterpriseProjectAccesses ?? []).filter((access) =>
+          access.projectId !== projectId || (access.teamId !== undefined && access.teamId !== teamId)
+        ),
+        { teamId, projectId, role: resolveEnterpriseProjectRole(['projects.write']) },
+      ],
+    }
   }
   let context: TeamPermissionContext
   try {
-    context = await requireTeamPermission(principal, teamId, 'member')
+    context = await requireTeamPermission(writer, teamId, 'member')
   } catch (error) {
     if (error instanceof ProjectDataError && error.status === 403) return false
     throw error
   }
-  return canAccessAssignedProject(principal, context, projectId, 'member')
+  return canAccessAssignedProject(writer, context, projectId, 'member')
 }
 
 /**

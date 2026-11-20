@@ -2,9 +2,13 @@ import { createApiTestHarness } from '../../../../api/test-support/api-test-harn
 const {
   app,
   configureFakeProjectClients,
+  createAccessToken,
   getTestAppDependencies,
   resetTestApp,
+  setTestAppDependencies,
+  withTestEnvironment,
 } = createApiTestHarness()
+import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import type { ProjectRaidEntryResponse, ProjectRaidLogResponse } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 
@@ -139,6 +143,97 @@ test('lets a Project viewer read the log but not change it', async () => {
   })
   expect(response.status).toBe(403)
   expect(await response.json()).toMatchObject({ code: 'ProjectRaidLogForbidden' })
+})
+
+/**
+ * Grants the demo user one Enterprise role on the `refero` Project only.
+ *
+ * @param roleId - Built-in Project role to assign.
+ */
+function grantEnterpriseProjectRole(roleId: 'project:member' | 'project:viewer') {
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (currentWorkspaceId) => ({
+    ...await readSnapshot(currentWorkspaceId),
+    roleAssignments: [{
+      workspaceId,
+      assignmentId: 'refero-grant',
+      principalKind: 'member',
+      principalId: 'demo@example.com',
+      roleId,
+      scope: { workspaceId, kind: 'project', targetId: 'refero', parentTeamId: 'core-team' },
+      source: 'direct',
+    }],
+  })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+}
+
+/**
+ * Sends a request as an Enterprise session.
+ *
+ * @param path - Request path.
+ * @param method - HTTP method.
+ * @param body - JSON body, if any.
+ * @returns The response.
+ */
+function requestAsEnterprise(path: string, method = 'GET', body?: unknown) {
+  return app.request(path, {
+    method,
+    headers: {
+      Authorization: `Bearer ${createAccessToken([], { client_id: 'mukuroji-main-client', token_use: 'access' })}`,
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json', 'Idempotency-Key': 'enterprise-create' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  })
+}
+
+/** Environment that turns the test session into an Enterprise session. */
+const enterpriseEnvironment = {
+  COGNITO_CLIENT_ID: 'mukuroji-main-client',
+  COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+  COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+  COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',
+  ENTERPRISE_SSO_STATE_SECRET: 'test-sso-state-secret-with-at-least-32-characters',
+}
+
+test('reports edit access to an Enterprise member granted only on the Project', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    })
+    grantEnterpriseProjectRole('project:member')
+    const path = '/api/teams/core-team/projects/refero/raid-log'
+    const read = await requestAsEnterprise(path)
+    expect(read.status).toBe(200)
+    expect(await read.json()).toMatchObject({ viewer: { canEdit: true } })
+    const created = await requestAsEnterprise(`${path}/entries`, 'POST', {
+      entry: { kind: 'issue', title: 'A', impact: 3, status: 'open' },
+    })
+    expect(created.status).toBe(201)
+  })
+})
+
+test('keeps an Enterprise Project viewer read-only', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, {
+      workspaceRole: 'member',
+      projectAccesses: [],
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    })
+    grantEnterpriseProjectRole('project:viewer')
+    const path = '/api/teams/core-team/projects/refero/raid-log'
+    const read = await requestAsEnterprise(path)
+    expect(read.status).toBe(200)
+    expect(await read.json()).toMatchObject({ viewer: { canEdit: false } })
+    const created = await requestAsEnterprise(`${path}/entries`, 'POST', {
+      entry: { kind: 'issue', title: 'A', impact: 3, status: 'open' },
+    })
+    expect(created.status).toBe(403)
+  })
 })
 
 test('refuses a change by a member without Project access', async () => {
