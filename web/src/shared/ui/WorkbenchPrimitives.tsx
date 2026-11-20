@@ -1,4 +1,3 @@
-import type { MessageKey } from '../i18n/i18n'
 
 /**
  * Visual tones supported by a Workbench metric card.
@@ -117,50 +116,6 @@ export function ProgressBar({ label, value }: ProgressBarProps) {
         className="h-full rounded-full bg-[var(--workbench-primary)]"
         style={{ width: `${normalizedValue}%` }}
       />
-    </div>
-  )
-}
-
-/**
- * A translated title and description pair displayed by an information grid.
- */
-export type InfoGridItem = readonly [
-  /** Translation key rendered as the information card title. */
-  titleKey: MessageKey,
-  /** Translation key rendered as the information card description. */
-  descriptionKey: MessageKey,
-]
-
-/**
- * Props for a translated Workbench information grid.
- */
-export type InfoGridProps = {
-  /** Translation key pairs rendered as information cards. */
-  items: readonly InfoGridItem[]
-  /** Translator used for card titles and descriptions. */
-  t: (key: MessageKey) => string
-}
-
-/**
- * Renders translated title and description pairs as responsive information cards.
- *
- * @param props - Translation key pairs and translator.
- * @returns A responsive grid of information cards.
- */
-export function InfoGrid({ items, t }: InfoGridProps) {
-  return (
-    <div className="grid grid-cols-2 gap-5 max-[900px]:grid-cols-1">
-      {items.map(([titleKey, descriptionKey]) => (
-        <section
-          className="border-t border-[var(--workbench-border)] py-5"
-          key={titleKey}
-        >
-          <h2 className="text-base font-semibold text-[var(--workbench-text)]">{t(titleKey)}</h2>
-          <p className="mt-2 text-sm leading-6 text-[var(--workbench-muted)]">
-            {t(descriptionKey)}
-          </p>
-        </section>
-      ))}
     </div>
   )
 }

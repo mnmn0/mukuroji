@@ -109,6 +109,22 @@ async function mockAuthenticatedSearchPage(page: Page) {
     })
   })
 
+  await page.route('**/api/projects/*/members', async (route) => {
+    await route.fulfill({
+      json: {
+        projectId: decodeURIComponent(new URL(route.request().url()).pathname.split('/').at(-2) ?? ''),
+        members: [{
+          email: 'ada@example.com',
+          id: 'member-ada',
+          name: 'Ada Lovelace',
+          role: 'member',
+          updatedAt: '2026-07-12T09:00:00.000Z',
+          workspaceStatus: 'active',
+        }],
+      },
+    })
+  })
+
   await page.route(/.*\/api\/search(?:\?.*)?$/, async (route) => {
     const url = new URL(route.request().url())
     const encodedFilters = url.searchParams.get('filters')
@@ -200,6 +216,54 @@ test('Workspace searchはURL state、highlight、cursor pageを復元する', as
   await page.getByRole('button', { name: '続きを読み込む' }).click()
   await expect(page.getByTestId('search-results-board')).toContainText('Launch approval comment')
   await expect.poll(() => state.searchRequests.length).toBeGreaterThanOrEqual(2)
+})
+
+test('担当者・チーム・プロジェクトを名前から選んで絞り込める', async ({ page }) => {
+  const state = await mockAuthenticatedSearchPage(page)
+  await page.goto('/search?v=1&q=launch')
+
+  await page.getByText('複合 filter').click()
+  await page.getByTestId('search-team-filter').getByLabel('デザインチーム').click()
+  await expect(page.getByTestId('search-team-filter').getByLabel('デザインチーム')).toBeChecked()
+  await page.getByTestId('search-project-filter').getByLabel('名前・ID で絞り込む').fill('共通')
+  await page.getByTestId('search-project-filter').getByLabel('共通ローンチ').click()
+  await expect(page.getByTestId('search-project-filter').getByLabel('共通ローンチ')).toBeChecked()
+  await page.getByTestId('search-assignee-filter').getByLabel('Ada Lovelace').click()
+  await expect(page.getByTestId('search-assignee-filter').getByLabel('Ada Lovelace')).toBeChecked()
+
+  await expect(page).toHaveURL(/team=design-team/)
+  await expect(page).toHaveURL(/project=shared-launch/)
+  await expect(page).toHaveURL(/assignee=member-ada/)
+  await expect.poll(() => state.searchRequests.some((filters) =>
+    filters.teamIds?.includes('design-team') &&
+      filters.projectIds?.includes('shared-launch') &&
+      filters.assigneeUserIds?.includes('member-ada'),
+  )).toBe(true)
+
+  await page.getByTestId('search-creator-filter').getByLabel('名前・ID で絞り込む').fill('legacy-user')
+  await page.getByTestId('search-creator-filter').getByRole('button', { name: 'ID「legacy-user」で絞り込む' }).click()
+  await expect(page).toHaveURL(/creator=legacy-user/)
+})
+
+test('メンバーの読み込みに失敗したら再取得できる', async ({ page }) => {
+  await mockAuthenticatedSearchPage(page)
+  let failMembers = true
+  await page.route('**/api/projects/*/members', async (route) => {
+    if (failMembers) {
+      await route.fulfill({ status: 500, json: { message: 'temporary' } })
+      return
+    }
+    await route.fallback()
+  })
+  await page.goto('/search?v=1&q=launch')
+
+  await page.getByText('複合 filter').click()
+  const assigneeFilter = page.getByTestId('search-assignee-filter')
+  await expect(assigneeFilter).toContainText('一部のメンバーを読み込めませんでした')
+  failMembers = false
+  await assigneeFilter.getByRole('button', { name: 'メンバーを再取得' }).click()
+  await expect(assigneeFilter.getByLabel('Ada Lovelace')).toBeVisible()
+  await expect(assigneeFilter.getByRole('button', { name: 'メンバーを再取得' })).toHaveCount(0)
 })
 
 test('Saved viewを作成しfavorite preferenceを更新できる', async ({ page }) => {

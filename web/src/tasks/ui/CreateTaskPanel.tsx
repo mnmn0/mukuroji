@@ -25,6 +25,7 @@ import {
   resolveWorkItemTypeWorkflow,
 } from '../../work-items/model/workItemDisplay'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
+import { pickDuplicatedCustomFieldValues } from '../../issues/model/workItemDuplicate'
 import {
   resolveTaskPriority,
   taskPriorities,
@@ -118,8 +119,11 @@ export function CreateTaskPanel({
   t,
   workspaceMembers,
 }: CreateTaskPanelProps) {
+  const duplicateDraft = context?.duplicate
+  const duplicatedContributors = duplicateDraft?.contributorAssignments ?? []
+  const [carriesContributors, setCarriesContributors] = useState(true)
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
-  const [title, setTitle] = useState('')
+  const [title, setTitle] = useState(duplicateDraft?.title ?? '')
   const [isPanelSubmitting, setIsPanelSubmitting] = useState(false)
   const submissionInFlightRef = useRef(false)
   const dirtyRef = useRef(false)
@@ -163,10 +167,13 @@ export function CreateTaskPanel({
   const quickCaptureAllowed = Boolean(quickCaptureStatusId)
   const hasDetailedScheduleContext = context?.schedule?.mode === 'date-range' ||
     context?.schedule?.mode === 'milestone'
-  const defaultInitialMode: CreateTaskMode = hasDetailedScheduleContext ? 'detailed' : 'quick'
+  const defaultInitialMode: CreateTaskMode = hasDetailedScheduleContext || duplicateDraft
+    ? 'detailed'
+    : 'quick'
   const [mode, setMode] = useState<CreateTaskMode>(initialMode ?? defaultInitialMode)
+  // A duplicate draft carries a description and contributor plan that quick capture cannot keep.
   const effectiveMode: CreateTaskMode = mode === 'quick' &&
-      (!quickCaptureAllowed || hasDetailedScheduleContext)
+      (!quickCaptureAllowed || hasDetailedScheduleContext || duplicateDraft)
     ? 'detailed'
     : mode
   const explicitContextAssigneeUserId = context?.assigneeUserId?.trim() ?? ''
@@ -209,10 +216,17 @@ export function CreateTaskPanel({
       : String(initialSchedule.plannedEffortMinutes),
   )
   const [selectedWorkflowStatusId, setSelectedWorkflowStatusId] = useState(initialWorkflowStatusId)
-  const [priority, setPriority] = useState<CreateWorkItemInput['priority']>('medium')
+  const [priority, setPriority] = useState<CreateWorkItemInput['priority']>(
+    duplicateDraft?.priority ?? 'medium',
+  )
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
-    ? createDefaultCustomFieldValues(customFieldDefinitions, projectId)
+    ? {
+        ...createDefaultCustomFieldValues(customFieldDefinitions, projectId),
+        ...(duplicateDraft && duplicateDraft.workItemTypeId === effectiveWorkItemTypeId
+          ? pickDuplicatedCustomFieldValues(duplicateDraft, customFieldDefinitions)
+          : {}),
+      }
     : {}
   const hasCustomFields = customFieldDefinitions.some((definition) =>
     isCustomFieldApplicable(definition, projectId),
@@ -329,11 +343,16 @@ export function CreateTaskPanel({
             return
           }
 
+          const description = duplicateDraft
+            ? String(formData.get('description') ?? '').trim()
+            : ''
+
           setFieldErrors({})
           submissionInFlightRef.current = true
           setIsPanelSubmitting(true)
           void onSubmit({
             title,
+            ...(description ? { description } : {}),
             assigneeUserId,
             schedule,
             workItemTypeId: effectiveWorkItemTypeId,
@@ -341,6 +360,10 @@ export function CreateTaskPanel({
             customFieldValues: effectiveMode === 'detailed' ? parsedCustomFields.values : {},
             priority,
             ...(effectiveMode === 'quick' ? { quickCapture: true } : {}),
+            ...(effectiveMode === 'detailed' && carriesContributors &&
+              duplicatedContributors.length > 0
+              ? { contributorAssignments: duplicatedContributors }
+              : {}),
           }).catch((error: unknown) => {
             setFieldErrors({
               submit: error instanceof Error ? error.message : t('tasks.create.error'),
@@ -360,7 +383,7 @@ export function CreateTaskPanel({
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] pb-3">
           <div className="flex min-w-0 flex-wrap items-center gap-3">
             <div className="flex items-center gap-1 rounded-md border border-[var(--workbench-border)] bg-surface p-1">
-              {quickCaptureAllowed && !hasDetailedScheduleContext ? (
+              {quickCaptureAllowed && !hasDetailedScheduleContext && !duplicateDraft ? (
                 <button
                   aria-pressed={effectiveMode === 'quick'}
                   className={`min-h-11 rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'quick' ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]' : 'text-[var(--workbench-muted)]'}`}
@@ -396,12 +419,17 @@ export function CreateTaskPanel({
               </span>
             </div>
           </div>
-          {context ? (
+          {context && !duplicateDraft ? (
             <p className="text-xs font-semibold text-[var(--workbench-muted)]">
               {t('tasks.create.context')}
             </p>
           ) : null}
         </div>
+        {duplicateDraft ? (
+          <p className="text-sm font-medium text-[var(--workbench-muted)]" data-testid="create-task-duplicate-note">
+            {t('issues.duplicate.note')}
+          </p>
+        ) : null}
         {configuration ? (
           <label className="grid max-w-[360px] gap-1.5 text-sm font-semibold text-fg-505967">
             {t('tasks.create.workItemType')}
@@ -630,6 +658,31 @@ export function CreateTaskPanel({
               </button>
             </div>
           </div>
+        ) : null}
+        {duplicateDraft && effectiveMode === 'detailed' ? (
+          <label className="grid gap-1.5 text-sm font-semibold text-fg-505967">
+            {t('issues.create.description')}
+            <textarea
+              className="workbench-input min-h-20 w-full min-w-0 px-3 py-2"
+              defaultValue={duplicateDraft.description}
+              name="description"
+              placeholder={t('issues.create.descriptionPlaceholder')}
+            />
+          </label>
+        ) : null}
+        {duplicatedContributors.length > 0 && effectiveMode === 'detailed' ? (
+          <label className="flex min-w-0 items-center gap-2 text-sm font-semibold text-fg-505967">
+            <input
+              checked={carriesContributors}
+              data-testid="create-task-duplicate-contributors"
+              onChange={(event) => setCarriesContributors(event.target.checked)}
+              type="checkbox"
+            />
+            {t('issues.duplicate.contributors').replace(
+              '{count}',
+              String(duplicatedContributors.length),
+            )}
+          </label>
         ) : null}
         <fieldset
           className={`workbench-panel-muted grid gap-3 p-4 ${effectiveMode === 'quick' ? 'hidden' : ''}`}

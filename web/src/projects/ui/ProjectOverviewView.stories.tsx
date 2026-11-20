@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { MemoryRouter } from 'react-router'
 import { expect, within } from 'storybook/test'
+import { factoryBoardFixture } from '../../features/factory-board/fixtures'
 import { planningSnapshotFixture } from '../../planning/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { referoTaskFixtures } from '../../tasks/fixtures'
@@ -8,6 +9,7 @@ import { projectDirectoryFixtures } from '../fixtures'
 import {
   findProjectOverviewUpdateTarget,
   selectProjectOverviewSchedule,
+  summarizeProjectOverviewAgentRuns,
   summarizeProjectOverviewMembers,
   summarizeProjectOverviewWorkItems,
 } from '../model/projectOverview'
@@ -19,6 +21,7 @@ const meta = {
   title: 'Application/Projects/Project Overview',
   component: ProjectOverviewView,
   args: {
+    agentRuns: summarizeProjectOverviewAgentRuns(factoryBoardFixture, 'refero'),
     isMembersLoading: false,
     isPlanningError: false,
     isPlanningLoading: false,
@@ -68,6 +71,8 @@ export const Desktop: Story = {
       .toHaveAttribute('href', '/projects/refero/issues?teamId=core-team')
     await expect(canvas.getByRole('link', { name: '進捗報告を開く' }))
       .toHaveAttribute('href', '/planning/portfolio?targetType=project&teamId=core-team&projectId=refero')
+    await expect(canvas.getByRole('link', { name: 'Factory board を開く' }))
+      .toHaveAttribute('href', '/teams/core-team/factory')
   },
 }
 
@@ -79,6 +84,8 @@ export const Phone: Story = {
 /** Each failed read is shown in its own widget. */
 export const PartialFailure: Story = {
   args: {
+    agentRuns: undefined,
+    agentRunsError: 'load',
     membersError: 'load',
     isPlanningError: true,
     members: undefined,

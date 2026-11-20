@@ -85,6 +85,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get pushSubscriptions() {
     return requireAppDependencies().workItems.pushSubscriptions
   },
+  get teamReminderSettings() {
+    return requireAppDependencies().workItems.teamReminderSettings
+  },
   get agentRuns() {
     return requireAppDependencies().workItems.agentRuns
   },

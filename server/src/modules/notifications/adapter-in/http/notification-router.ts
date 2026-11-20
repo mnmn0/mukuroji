@@ -9,6 +9,7 @@ import {
   type UpdateNotificationPreferencesInput,
   type NotificationPreferences,
 } from '../../notifications'
+import { normalizePersonalReminderDays } from '../../domain/reminder-days'
 
 /**
  * Notification route が参照する認証済み principal の最小表現です。
@@ -278,6 +279,9 @@ function readNotificationPreferencesInput(
       end: quietHours.end as string,
       timeZone: quietHours.timeZone as string,
     },
+    ...(value.reminderDays === undefined
+      ? {}
+      : { reminderDays: normalizePersonalReminderDays(value.reminderDays) }),
   }
 }
 

@@ -57,6 +57,7 @@ const meta = {
     snapshot: analyticsSnapshotFixture,
     snapshots: [],
     teams: projectDirectoryFixtures,
+    calendarSettings: { fiscalYearStartMonth: 4, weekStartDay: 1 },
     timeZone: 'Asia/Tokyo',
     widgets: analyticsWidgetFixtures,
     onBuilderChange: () => undefined,

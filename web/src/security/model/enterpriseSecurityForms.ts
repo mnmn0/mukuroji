@@ -16,6 +16,8 @@ export type EnterpriseSecurityScopeOption = {
   id: string
   /** Selector に表示する scope 名です。 */
   name: string
+  /** Project を所有する Team ID 一覧です。複数 Team に属する Project では全 Team を持ちます。 */
+  parentIds?: string[]
 }
 
 /**

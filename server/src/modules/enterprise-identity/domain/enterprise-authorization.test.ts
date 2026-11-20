@@ -47,6 +47,43 @@ test('evaluates role and guest ceilings without AWS or Hono adapters', () => {
   })).toMatchObject({ allowed: false, reason: 'guest-ceiling' })
 })
 
+test('keeps only guest-assignable direct roles once the member is a guest', () => {
+  /**
+   * Evaluates Project read access for a member that holds one direct Project role.
+   *
+   * @param workspaceRole - Workspace role of the member.
+   * @param roleId - Direct Project role of the member.
+   * @returns The access decision.
+   */
+  const evaluate = (workspaceRole: 'member' | 'guest', roleId: 'project:manager' | 'project:viewer') =>
+    evaluateEnterpriseAccess({
+      permission: 'projects.read',
+      principal: {
+        kind: 'member',
+        principalId: 'member-1',
+        directoryGroupIds: [],
+        workspaceRole,
+        includeWorkspaceRolePermissions: false,
+      },
+      assignments: [{
+        workspaceId: 'workspace-1',
+        assignmentId: 'assignment-1',
+        principalKind: 'member',
+        principalId: 'member-1',
+        roleId,
+        scope: { kind: 'project', workspaceId: 'workspace-1', targetId: 'project-1', parentTeamId: 'team-1' },
+        source: 'direct',
+      }],
+      customRoles: [],
+      groupMappings: [],
+      resource: { kind: 'project', workspaceId: 'workspace-1', targetId: 'project-1', parentTeamId: 'team-1' },
+    }).allowed
+
+  expect(evaluate('member', 'project:manager')).toBe(true)
+  expect(evaluate('guest', 'project:manager')).toBe(false)
+  expect(evaluate('guest', 'project:viewer')).toBe(true)
+})
+
 test('denies unregistered routes and matches parameterized routes', () => {
   const rules = [{
     method: 'GET',

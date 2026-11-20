@@ -49,14 +49,28 @@ export { DynamoDbChannelDeliveryStore } from './adapter-out/dynamodb/channel-del
 export type { ScheduledProjectManagerReader } from './application/ports/project-manager-reader'
 /** Exposes the Project Directory adapter that resolves overdue escalation managers. */
 export { createDynamoDbProjectManagerReader } from './adapter-out/dynamodb/project-manager-reader'
+export { createDynamoDbScheduledWorkItemSource } from './adapter-out/dynamodb/scheduled-work-item-source'
+export type { ScheduledWorkItemSource } from './application/ports/scheduled-work-item-source'
 /** Exposes the recipient-scoped Incoming Webhook transport factory. */
 export { createSlackNotificationSender } from './adapter-out/slack/slack-sender'
 /** Exposes safe Slack delivery logs and backlog metrics. */
 export { createSlackDeliveryTelemetry } from './adapter-out/slack/slack-delivery-telemetry'
 /** Exposes recipient-bound document visibility checks for external notifications. */
 export { isDocumentDeliveryVisible, resolveDocumentDeliveryAccess, resolveNotificationRecipientBoundary } from './application/document-delivery'
+/** Exposes the reminder override and unsubmitted time entry reader ports of the schedule. */
+export type {
+  ScheduledReminderSettingsReader,
+  TeamReminderSettingsRecord,
+  TeamReminderSettingsStore,
+} from './application/ports/reminder-settings-reader'
+export type { ScheduledTimesheetReader } from './application/ports/timesheet-reminder-reader'
+export type { UnsubmittedTimeEntry } from './application/timesheet-reminders'
+/** Exposes reminder override validation shared by HTTP adapters. */
+export { normalizeTeamReminderDays } from './domain/reminder-days'
 export {
+  TIMESHEET_REMINDER_EVENT_TYPE,
   createNotificationScheduleHandler,
+  readReminderPolicyDefaultsFromEnvironment,
   parsePlanningUpdateTargetScheduleProjection,
   type CustomerCompletionPreparation,
   type CustomerCompletionPreparationHandler,

@@ -59,6 +59,7 @@ export function buildAuditProjectionWorker(
   input: AuditProjectionWorkerInput,
 ): AuditProjectionWorkerResources {
   const {
+    analyticsTable,
     auditEventsTable,
     collaborationTable,
     enterpriseIdentityTable,
@@ -106,6 +107,7 @@ export function buildAuditProjectionWorker(
         target: 'node22',
       },
       environment: {
+        ANALYTICS_TABLE_NAME: analyticsTable.tableName,
         // Tenant retention runs in this fan-out, so it writes audit event expiry.
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
@@ -201,6 +203,14 @@ export function buildAuditProjectionWorker(
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem'],
       resources: [planningTable.tableArn],
+    }),
+  );
+  // Timesheet reminders are dropped once their time entries are submitted; the notification save
+  // is conditioned on the revalidated entry so a concurrent submission cancels it.
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:ConditionCheckItem'],
+      resources: [analyticsTable.tableArn],
     }),
   );
   collaborationProjectionFunction.addToRolePolicy(
