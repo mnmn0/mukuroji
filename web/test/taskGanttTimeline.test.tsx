@@ -5,6 +5,7 @@ import { createDefaultDateRangeTaskSchedule } from '../src/tasks/model/taskSched
 import {
   createTaskGanttScaledColumns,
   isTaskGanttScale,
+  listTaskGanttNonWorkingSpans,
   resolveTaskGanttColumnWidth,
   resolveTaskGanttDateSpan,
   resolveTaskGanttProgressPointX,
@@ -122,5 +123,55 @@ describe('task Gantt timeline scales', () => {
 
     expect(html).not.toContain('data-testid="task-gantt-today-line"')
     expect(html).toMatch(/data-testid="task-gantt-today"[^>]*disabled=""/)
+  })
+
+  test('shades only single-day columns that fall on non-working days', () => {
+    const axis = {
+      columnWidth: 20,
+      columns: [
+        { endDate: '2026-11-20', label: '20', startDate: '2026-11-20' },
+        { endDate: '2026-11-21', label: '21', startDate: '2026-11-21' },
+        { endDate: '2026-11-29', label: '11-23', startDate: '2026-11-23' },
+      ],
+    }
+    // The week column also contains Sunday but is not shaded, since it mixes working days.
+    expect(listTaskGanttNonWorkingSpans(axis, (date) => date !== '2026-11-21' && date !== '2026-11-29'))
+      .toEqual([{ date: '2026-11-21', left: 20, right: 40 }])
+  })
+
+  test('shades Workspace holidays and non-working weekdays in the day scale', () => {
+    setSystemTime(new Date('2026-11-20T03:00:00.000Z'))
+    const tasks = [{
+      ...taskViewStoryTasks[0],
+      schedule: createDefaultDateRangeTaskSchedule('2026-11-16', '2026-11-27'),
+    }]
+    const workingCalendar = {
+      holidays: ['2026-11-23'],
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const,
+    }
+
+    const html = renderToStaticMarkup(
+      <TaskGanttView
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        t={t}
+        tasks={tasks}
+        workingCalendar={{ ...workingCalendar, workingWeekdays: [...workingCalendar.workingWeekdays] }}
+      />,
+    )
+
+    const shadedHeaders = [...html.matchAll(/aria-label="(\d{4}-\d{2}-\d{2})"[^>]*data-non-working=""/g)]
+      .map((match) => match[1])
+    // Sundays and the 11/23 holiday are shaded; the working Saturday 11/21 is not.
+    expect(shadedHeaders).toContain('2026-11-22')
+    expect(shadedHeaders).toContain('2026-11-23')
+    expect(shadedHeaders).not.toContain('2026-11-21')
+    expect(shadedHeaders).not.toContain('2026-11-24')
+    expect(html.match(/data-testid="task-gantt-non-working-day"/g)?.length).toBe(shadedHeaders.length)
+
+    const unshaded = renderToStaticMarkup(
+      <TaskGanttView configurationsByTeam={taskViewStoryConfigurationsByTeam} t={t} tasks={tasks} />,
+    )
+    expect(unshaded).not.toContain('data-testid="task-gantt-non-working-day"')
   })
 })
