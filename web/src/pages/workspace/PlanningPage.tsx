@@ -678,6 +678,10 @@ export function PlanningPage() {
           createScopeTeams={manageableCreateScopeTeams}
           directoryTeams={teams}
           ownerOptions={ownerOptions}
+          ownerOptionsErrorMessage={ownerMembers.error || (ownerMembers.data?.errors.length ?? 0) > 0
+            ? t('planning.error.ownerMembers')
+            : undefined}
+          onRetryOwnerOptions={() => void ownerMembers.mutate()}
           onRetry={loadErrorMessage && !mutationErrorMessage
             ? () => void mutatePlanning()
             : undefined}

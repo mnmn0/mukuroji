@@ -19,7 +19,7 @@ import type {
   PlanningWorkItemSummary,
   WorkItemAffectedProject,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
@@ -329,10 +329,14 @@ export type PlanningScreenProps = {
   /** Readable Project directory used to name groups on the cross-Project timeline. */
   directoryTeams?: readonly CrossProjectTimelineDirectoryTeam[]
   /**
-   * Workspace members offered by the owner pickers of the create form and the entity editor.
-   * When empty or omitted, the owner is typed as a member key.
+   * Workspace members suggested by the owner fields of the create form and the entity editor.
+   * The owner can always be typed as a member key.
    */
   ownerOptions?: readonly PlanningOwnerOption[]
+  /** Message shown when some or all members could not be loaded for the owner fields. */
+  ownerOptionsErrorMessage?: string
+  /** Reloads the owner field members after a failure. */
+  onRetryOwnerOptions?: () => void
   /** Current user が target の update schedule を管理できるか判定する callback です。 */
   canManageUpdateCadence?: (target: PlanningUpdateTargetView) => boolean
   /** Current user が target に manual update を公開できるか判定する callback です。 */
@@ -476,7 +480,9 @@ export function PlanningScreen({
   createScopeTeams = [],
   directoryTeams,
   errorMessage,
+  onRetryOwnerOptions,
   ownerOptions = [],
+  ownerOptionsErrorMessage,
   hasMoreUpdateHistory = false,
   initialSelectedEntityId,
   initialSelectedUpdateTarget,
@@ -526,9 +532,20 @@ export function PlanningScreen({
     allowWorkspace: canCreateInScope?.({}) ?? true,
     teams: filterPlanningScopeTeams(createScopeTeams, canCreateInScope),
   }
-  const resolvedOwnerOptions = ownerOptions.length > 0
-    ? resolvePlanningOwnerOptions(ownerOptions, collectPlanningOwnerCandidates(activeEntities))
-    : []
+  const resolvedOwnerOptions = resolvePlanningOwnerOptions(
+    ownerOptions,
+    collectPlanningOwnerCandidates(activeEntities),
+  )
+  const ownerNotice = ownerOptionsErrorMessage ? (
+    <p className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--workbench-danger)]" role="status">
+      {ownerOptionsErrorMessage}
+      {onRetryOwnerOptions ? (
+        <button className="workbench-button-secondary min-h-8 px-3" type="button" onClick={onRetryOwnerOptions}>
+          {labels.retry}
+        </button>
+      ) : null}
+    </p>
+  ) : undefined
   const [selectedEntityId, setSelectedEntityId] = useState(initialSelectedEntityId)
   const [selectedUpdateTarget, setSelectedUpdateTarget] = useState(initialSelectedUpdateTarget)
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
@@ -803,7 +820,8 @@ export function PlanningScreen({
                   key={`planning-entity-editor:${selectedEntity.id}`}
                   labels={labels.entityEditor}
                   ownerCandidates={collectPlanningOwnerCandidates(activeEntities)}
-                  ownerOptions={resolvedOwnerOptions}
+                  ownerNotice={ownerNotice}
+                  ownerOptions={ownerOptions}
                   onSave={onUpdateEntity && (canManageEntity?.(selectedEntity) ?? true)
                     ? onUpdateEntity
                     : undefined}
@@ -816,6 +834,7 @@ export function PlanningScreen({
                 entities={activeEntities}
                 labels={labels}
                 onCreate={onCreateEntity}
+                ownerNotice={ownerNotice}
                 ownerOptions={resolvedOwnerOptions}
               />
               {archive ? (
@@ -1573,6 +1592,7 @@ function CreateEntityPanel({
   entities,
   labels,
   onCreate,
+  ownerNotice,
   ownerOptions,
 }: {
   canCreateInScope?: PlanningScreenProps['canCreateInScope']
@@ -1581,9 +1601,12 @@ function CreateEntityPanel({
   entities: PlanningEntity[]
   labels: PlanningLabels
   onCreate?: PlanningScreenProps['onCreateEntity']
-  /** Members offered by the owner picker; empty keeps the typed owner field. */
+  /** Notice under the owner field, such as a member-list load failure with a retry button. */
+  ownerNotice?: ReactNode
+  /** Members suggested by the owner field; the owner can still be typed. */
   ownerOptions: readonly PlanningOwnerOption[]
 }) {
+  const ownerListId = useId()
   const [entityType, setEntityType] = useState<PlanningEntityType>(() =>
     resolveInitialEntityType(entities),
   )
@@ -1668,19 +1691,18 @@ function CreateEntityPanel({
         <PlanningInput label={labels.entityId} name="entityId" required />
         <PlanningInput label={labels.entity} name="title" required />
         <label className="grid gap-2 text-sm font-semibold">{labels.entityType}<select className="workbench-input h-10 px-3" name="entityType" value={entityType} onChange={(event) => setEntityType(event.target.value as PlanningEntityType)}>{(Object.keys(labels.entityTypes) as PlanningEntityType[]).map((type) => <option key={type} value={type}>{labels.entityTypes[type]}</option>)}</select></label>
-        {ownerOptions.length > 0 ? (
-          <label className="grid gap-2 text-sm font-semibold">
+        <div className="grid content-start gap-2">
+          <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.owner}
-            <select className="workbench-input h-10 px-3" defaultValue="" name="ownerMemberKey" required>
-              <option disabled hidden value="">{labels.ownerPlaceholder}</option>
+            <input autoComplete="off" className="workbench-input h-10 px-3" list={ownerListId} name="ownerMemberKey" placeholder={labels.ownerPlaceholder} required type="text" />
+            <datalist id={ownerListId}>
               {ownerOptions.map((option) => (
-                <option key={option.memberKey} value={option.memberKey}>{option.label}</option>
+                <option key={option.memberKey} label={option.label} value={option.memberKey} />
               ))}
-            </select>
+            </datalist>
           </label>
-        ) : (
-          <PlanningInput label={labels.owner} name="ownerMemberKey" required />
-        )}
+          {ownerNotice}
+        </div>
         {entityType === 'goal' ? (
           <label className="grid gap-2 text-sm font-semibold">
             {labels.goalFramework}
