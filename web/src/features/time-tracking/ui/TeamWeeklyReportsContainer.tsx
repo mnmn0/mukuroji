@@ -47,7 +47,9 @@ export function TeamWeeklyReportsContainer({
   const firstDay = week.days[0] ?? weekStart
   const status = useTeamWeeklyReportStatus(accessToken, teamId, firstDay)
   const [selectedMemberKey, setSelectedMemberKey] = useState<string>()
-  const selectedReport = useWeeklyReport(accessToken, teamId, selectedMemberKey, firstDay)
+  // A report submitted under an earlier Workspace week start is stored under its own start day.
+  const selectedWeekStart = status.data?.members.find((member) => member.memberKey === selectedMemberKey)?.weekStart ?? firstDay
+  const selectedReport = useWeeklyReport(accessToken, teamId, selectedMemberKey, selectedWeekStart)
   const isForbidden = status.error instanceof TimeTrackingApiError && status.error.status === 403
 
   return (

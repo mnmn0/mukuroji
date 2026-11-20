@@ -479,4 +479,27 @@ describe('TeamWeeklyReports', () => {
     const forbidden = renderToStaticMarkup(<TeamWeeklyReports {...props} isForbidden members={undefined} />)
     expect(forbidden).toContain('Only Team managers (Project managers)')
   })
+
+  test('notes a report submitted under an earlier week start', () => {
+    const formatters = createTimeTrackingFormatters('en')
+    const markup = renderToStaticMarkup(
+      <TeamWeeklyReports
+        formatters={formatters}
+        hasLoadError={false}
+        hasSelectedReportError={false}
+        isForbidden={false}
+        memberNames={{}}
+        members={[{ memberKey: 'sato@example.com', submissionCount: 1, lastSubmittedAt: '2026-11-20T09:00:00.000Z', weekStart: '2026-11-10' }]}
+        onMoveWeek={() => undefined}
+        onRetry={() => undefined}
+        onRetrySelectedReport={() => undefined}
+        onSelectMember={() => undefined}
+        selectedMemberKey={undefined}
+        selectedReport={undefined}
+        t={en}
+        week={week}
+      />,
+    )
+    expect(markup).toContain(en('timeTracking.teamWeeklyReports.otherWeekStart').replace('{date}', formatters.day('2026-11-10')))
+  })
 })

@@ -202,6 +202,41 @@ export class DynamoDbWeeklyReportStore implements WeeklyReportStore {
   }
 
   /**
+   * Lists one member's submitted weeks that start within a range, following pages.
+   *
+   * @param scope - Author.
+   * @param from - First week start of the range, inclusive.
+   * @param to - Last week start of the range, inclusive.
+   * @returns The submitted weeks in the range, oldest first.
+   */
+  async listSubmittedWeeksBetween(scope: WeeklyReportMemberScope, from: string, to: string): Promise<WeeklyReportWeekRecord[]> {
+    const weeks: WeeklyReportWeekRecord[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const page = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: '#workspaceId = :workspaceId AND #recordKey BETWEEN :from AND :to',
+        FilterExpression: '#submissionCount > :zero',
+        ExpressionAttributeNames: { '#workspaceId': 'workspaceId', '#recordKey': 'recordKey', '#submissionCount': 'submissionCount' },
+        ExpressionAttributeValues: {
+          ':workspaceId': scope.workspaceId,
+          ':from': weekKey(scope, from),
+          ':to': weekKey(scope, to),
+          ':zero': 0,
+        },
+        ConsistentRead: true,
+        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+      })).catch((error: unknown) => storageFailure(error))
+      for (const row of page.Items ?? []) {
+        const weekStart = typeof row.weekStart === 'string' ? row.weekStart : ''
+        weeks.push(parseWeekRow(row, scope, weekStart))
+      }
+      exclusiveStartKey = page.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return weeks
+  }
+
+  /**
    * Reads one submitted version.
    *
    * @param scope - Author.
@@ -391,6 +426,24 @@ export class InMemoryWeeklyReportStore implements WeeklyReportStore {
       .filter((week) => (options.before === undefined || week.weekStart < options.before) && (!options.submittedOnly || week.submissionCount > 0))
       .sort((left, right) => right.weekStart.localeCompare(left.weekStart))
     return { weeks: weeks.slice(0, options.limit).map((week) => structuredClone(week)), hasMore: weeks.length > options.limit }
+  }
+
+  /**
+   * Lists copies of one member's submitted weeks that start within a range.
+   *
+   * @param scope - Author.
+   * @param from - First week start of the range, inclusive.
+   * @param to - Last week start of the range, inclusive.
+   * @returns The submitted weeks in the range, oldest first.
+   */
+  async listSubmittedWeeksBetween(scope: WeeklyReportMemberScope, from: string, to: string): Promise<WeeklyReportWeekRecord[]> {
+    const prefix = memoryKey(scope, '').slice(0, -2)
+    return [...this.weeks.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([, week]) => week)
+      .filter((week) => week.weekStart >= from && week.weekStart <= to && week.submissionCount > 0)
+      .sort((left, right) => left.weekStart.localeCompare(right.weekStart))
+      .map((week) => structuredClone(week))
   }
 
   /**

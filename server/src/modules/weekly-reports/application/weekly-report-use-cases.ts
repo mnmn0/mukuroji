@@ -141,6 +141,15 @@ export type WeeklyReportStore<TCallerCheck, TAudit> = {
     options: { limit: number; before?: string; submittedOnly: boolean },
   ): Promise<WeeklyReportWeekPage>
   /**
+   * Lists one member's submitted weeks that start within a range of days.
+   *
+   * @param scope - Author.
+   * @param from - First week start of the range, inclusive.
+   * @param to - Last week start of the range, inclusive.
+   * @returns The submitted weeks in the range, oldest first.
+   */
+  listSubmittedWeeksBetween(scope: WeeklyReportMemberScope, from: string, to: string): Promise<WeeklyReportWeekRecord[]>
+  /**
    * Reads one submitted version.
    *
    * @param scope - Author.
@@ -503,8 +512,15 @@ export async function listWeeklyReportHistoryUseCase<TCallerCheck, TAudit>(
   }
 }
 
+/** Members whose fallback weeks are read at the same time. */
+const OVERLAPPING_WEEK_CONCURRENCY = 10
+
 /**
  * Reads the submission state of the members a manager may read, for one week.
+ *
+ * A member without a submission under the requested week start may have submitted the same
+ * calendar week under the start day the Workspace used before. The submitted week that overlaps
+ * the requested one most is then reported with its stored week start, so the manager can open it.
  *
  * @param store - Weekly report persistence.
  * @param scope - Authorized Team.
@@ -519,6 +535,18 @@ export async function readTeamWeeklyReportStatusUseCase<TCallerCheck, TAudit>(
   weekStart: string,
 ): Promise<TeamWeeklyReportStatusResponse> {
   const weeks = await store.getWeeks(scope, members.map((member) => member.memberKey), weekStart)
+  const unsubmitted = members.filter((member) => (weeks.get(member.memberKey)?.submissionCount ?? 0) === 0)
+  for (let offset = 0; offset < unsubmitted.length; offset += OVERLAPPING_WEEK_CONCURRENCY) {
+    await Promise.all(unsubmitted.slice(offset, offset + OVERLAPPING_WEEK_CONCURRENCY).map(async (member) => {
+      const candidates = await store.listSubmittedWeeksBetween(
+        { ...scope, memberKey: member.memberKey },
+        addDays(weekStart, -6),
+        addDays(weekStart, 6),
+      )
+      const closest = pickClosestWeek(candidates, weekStart)
+      if (closest) weeks.set(member.memberKey, closest)
+    }))
+  }
   const rows: TeamWeeklyReportMemberStatus[] = members.map((member) => {
     const week = weeks.get(member.memberKey)
     return {
@@ -526,12 +554,35 @@ export async function readTeamWeeklyReportStatusUseCase<TCallerCheck, TAudit>(
       ...(member.displayName === undefined ? {} : { displayName: member.displayName }),
       submissionCount: week?.submissionCount ?? 0,
       ...(week?.lastSubmittedAt === undefined ? {} : { lastSubmittedAt: week.lastSubmittedAt }),
+      ...(week === undefined || week.weekStart === weekStart ? {} : { weekStart: week.weekStart }),
     }
   })
   rows.sort((left, right) =>
     (left.displayName ?? left.memberKey).localeCompare(right.displayName ?? right.memberKey) ||
     left.memberKey.localeCompare(right.memberKey))
   return { teamId: scope.teamId, weekStart, members: rows }
+}
+
+/**
+ * Picks the submitted week that shares the most days with the requested week.
+ *
+ * @param candidates - Submitted weeks starting within six days of the requested start.
+ * @param weekStart - First day of the requested week.
+ * @returns The week whose start is nearest, the earlier one on a tie, or `undefined`.
+ */
+function pickClosestWeek(candidates: readonly WeeklyReportWeekRecord[], weekStart: string): WeeklyReportWeekRecord | undefined {
+  const target = Date.parse(`${weekStart}T00:00:00Z`)
+  let best: WeeklyReportWeekRecord | undefined
+  let bestDistance = Number.POSITIVE_INFINITY
+  for (const candidate of candidates) {
+    if (candidate.submissionCount === 0) continue
+    const distance = Math.abs(Date.parse(`${candidate.weekStart}T00:00:00Z`) - target)
+    if (distance < bestDistance || (distance === bestDistance && best !== undefined && candidate.weekStart < best.weekStart)) {
+      best = candidate
+      bestDistance = distance
+    }
+  }
+  return best
 }
 
 /**

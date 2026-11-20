@@ -228,5 +228,6 @@ export const timeTrackingMessages = {
   'timeTracking.teamWeeklyReports.status': '状態',
   'timeTracking.teamWeeklyReports.read': '読む',
   'timeTracking.teamWeeklyReports.notSubmitted': 'この週の週報はまだ提出されていません。',
+  'timeTracking.teamWeeklyReports.otherWeekStart': '以前の週の区切りで {date} 始まりの週として提出',
   'timeTracking.teamWeeklyReports.reportLoadError': '週報を読み込めませんでした。',
 } as const

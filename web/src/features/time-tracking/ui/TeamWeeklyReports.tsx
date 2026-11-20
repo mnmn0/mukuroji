@@ -109,6 +109,11 @@ export function TeamWeeklyReports({
                         ? formatWeeklyReportSubmittedStatus(t, formatters, member.submissionCount, member.lastSubmittedAt)
                         : t('timeTracking.weeklyReport.statusNotSubmitted')}
                     </span>
+                    {member.weekStart === undefined ? null : (
+                      <span className="w-full text-xs text-[var(--workbench-muted)]">
+                        {t('timeTracking.teamWeeklyReports.otherWeekStart').replace('{date}', formatters.day(member.weekStart))}
+                      </span>
+                    )}
                   </button>
                 </li>
               ))}

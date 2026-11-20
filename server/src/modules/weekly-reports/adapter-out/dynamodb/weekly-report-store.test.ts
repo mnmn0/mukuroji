@@ -232,3 +232,23 @@ test('reads several members\' weeks and retries unprocessed keys', async () => {
   expect([...weeks.entries()]).toEqual([['m@example.com', week]])
   expect(sent).toHaveLength(2)
 })
+
+test('lists the submitted weeks that start within a range, following pages', async () => {
+  const sent: SentCommand[] = []
+  const store = new DynamoDbWeeklyReportStore('planning', fakeClient({
+    QueryCommand: [
+      { Items: [], LastEvaluatedKey: { workspaceId: 'w', recordKey: 'k1' } },
+      { Items: [weekRow()] },
+    ],
+  }, sent))
+  expect(await store.listSubmittedWeeksBetween(scope, '2026-11-09', '2026-11-21')).toEqual([week])
+  expect(sent[0]?.input).toMatchObject({
+    KeyConditionExpression: '#workspaceId = :workspaceId AND #recordKey BETWEEN :from AND :to',
+    FilterExpression: '#submissionCount > :zero',
+    ExpressionAttributeValues: {
+      ':from': 'WEEKLY_REPORT#t#MEMBER#m%40example.com#W#2026-11-09',
+      ':to': 'WEEKLY_REPORT#t#MEMBER#m%40example.com#W#2026-11-21',
+    },
+  })
+  expect(sent[1]?.input).toMatchObject({ ExclusiveStartKey: { recordKey: 'k1' } })
+})

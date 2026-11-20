@@ -228,5 +228,6 @@ export const timeTrackingMessages = {
   'timeTracking.teamWeeklyReports.status': 'Status',
   'timeTracking.teamWeeklyReports.read': 'Read',
   'timeTracking.teamWeeklyReports.notSubmitted': 'No report has been submitted for this week yet.',
+  'timeTracking.teamWeeklyReports.otherWeekStart': 'Submitted for the week starting {date}, under the earlier week start.',
   'timeTracking.teamWeeklyReports.reportLoadError': 'Could not load the weekly report.',
 } as const

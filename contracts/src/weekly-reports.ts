@@ -187,6 +187,11 @@ export type TeamWeeklyReportMemberStatus = {
   submissionCount: number
   /** ISO timestamp of the latest submission, when one exists. */
   lastSubmittedAt?: string
+  /**
+   * First day of the stored week the status comes from, present only when it differs from the
+   * requested week because the report was submitted under an earlier Workspace week start.
+   */
+  weekStart?: string
 }
 
 /** Response of the Team weekly report status endpoint. */
