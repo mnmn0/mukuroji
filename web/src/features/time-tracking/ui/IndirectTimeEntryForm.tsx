@@ -1,7 +1,7 @@
 import { TIME_ENTRY_CATEGORIES, type TimeEntry, type TimeEntryCategory } from '@mukuroji/contracts'
 import { useId, useState, type FormEvent } from 'react'
 import type { IndirectTimeEntryInput } from '../api/timeEntries'
-import { parseHoursInput, resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
+import { readIndirectMinutes, resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
 import { describeTimeTrackingFailure, timeEntryCategoryKeys, type TimeTrackingTranslator } from './timeTrackingText'
 
 /** A Project a member may record indirect work on. */
@@ -34,20 +34,6 @@ export type IndirectTimeEntryFormProps = {
   onSave: (input: IndirectTimeEntryInput) => Promise<void>
   /** Closes the form without saving. */
   onCancel: () => void
-}
-
-/** Most minutes one local date can hold; the server also rejects minutes past a shorter DST day. */
-const maxIndirectMinutes = 24 * 60
-
-/**
- * Converts the hours typed into the form to whole minutes.
- *
- * @param value - Hours as typed, such as `1.5` or `1:30`.
- * @returns Minutes, or undefined when the value is not a positive amount of at most one day.
- */
-export function readIndirectMinutes(value: string): number | undefined {
-  const minutes = parseHoursInput(value)
-  return minutes !== undefined && minutes >= 1 && minutes <= maxIndirectMinutes ? minutes : undefined
 }
 
 /**

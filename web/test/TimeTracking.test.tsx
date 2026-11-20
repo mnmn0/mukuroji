@@ -40,6 +40,7 @@ import {
   formatMinutes,
   createTrailingPeriod,
   parseHoursInput,
+  readIndirectMinutes,
   readLocalNoon,
   resolveLocalInstant,
   resolveWeekStart,
@@ -51,7 +52,6 @@ import {
 import { classifyTimeTrackingFailure, shouldRetainTimeTrackingMutation } from '../src/features/time-tracking/model/timeTrackingFailure'
 import { PersonalTimesheet } from '../src/features/time-tracking/ui/PersonalTimesheet'
 import { selectIndirectTimeEntryTargets, selectTimeEntryWorkItemChoices } from '../src/features/time-tracking/model/timeEntryWorkItemOptions'
-import { readIndirectMinutes } from '../src/features/time-tracking/ui/IndirectTimeEntryForm'
 import { TimeApprovalQueue } from '../src/features/time-tracking/ui/TimeApprovalQueue'
 import { TimeEntryForm } from '../src/features/time-tracking/ui/TimeEntryForm'
 import { WorkItemTimePanel } from '../src/features/time-tracking/ui/WorkItemTimePanel'
