@@ -766,6 +766,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   /**
    * Records that the member was signed out everywhere.
    *
+   * The cutoff never moves backwards, so overlapping sign-outs keep the latest one.
+   *
    * @param workspaceId - Workspace of the member.
    * @param memberKey - Member that was signed out.
    */
@@ -779,11 +781,15 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           recordKey: createMemberRecordKey(normalizeMemberKey(memberKey)),
         },
         UpdateExpression: 'SET signInsRevokedAt = :now',
-        ConditionExpression: 'attribute_exists(recordKey)',
+        // The cutoff only moves forward: a delayed write of an earlier sign-out must not reopen
+        // the sign-ins a later one refused.
+        ConditionExpression:
+          'attribute_exists(recordKey) AND (attribute_not_exists(signInsRevokedAt) OR signInsRevokedAt < :now)',
         ExpressionAttributeValues: { ':now': this.clock().toISOString() },
       }))
     } catch (error) {
-      // A member without a record has no Workspace session to refuse.
+      // A member without a record has no Workspace session to refuse, and a member whose cutoff
+      // is already later keeps it.
       if (isAwsError(error, 'ConditionalCheckFailedException')) return
       throw toWorkspaceAccessError(error)
     }

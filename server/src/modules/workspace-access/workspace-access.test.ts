@@ -3192,7 +3192,7 @@ test('tracks a credential reset by its idempotency key so that a retry resumes, 
   expect(progressRecords.size).toBe(1)
 })
 
-test('records a sign-out of every session on the member and ignores a missing member', async () => {
+test('records a sign-out of every session on the member, keeping a later cutoff and ignoring a missing member', async () => {
   const inputs: Array<Record<string, unknown>> = []
   let missing = false
   const client = createWorkspaceAccessClientWithDocumentAuthorization(
@@ -3221,7 +3221,8 @@ test('records a sign-out of every session on the member and ignores a missing me
     TableName: 'WorkspaceAccessTable',
     Key: { workspaceId, recordKey: 'MEMBER#sato@example.com' },
     UpdateExpression: 'SET signInsRevokedAt = :now',
-    ConditionExpression: 'attribute_exists(recordKey)',
+    ConditionExpression:
+      'attribute_exists(recordKey) AND (attribute_not_exists(signInsRevokedAt) OR signInsRevokedAt < :now)',
     ExpressionAttributeValues: { ':now': now.toISOString() },
   })
 })
