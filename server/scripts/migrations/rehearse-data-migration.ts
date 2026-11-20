@@ -199,14 +199,16 @@ export async function rehearseDataMigration(arguments_: readonly string[]): Prom
         remainingMilliseconds: 15 * 60 * 1000,
       }, dependencies)
     }
-    const applyPayload = (maxPages?: number) => ({
+    // Enough pages to read the whole seed in one invocation, plus the empty last page.
+    const fullPages = Math.ceil(seed.rows.length / PAGE_SIZE) + 1
+    const applyPayload = (maxPages: number) => ({
       command: 'run',
       migrationId: definition.id,
       apply: true,
       segments: 1,
       pageSize: PAGE_SIZE,
       maxWritesPerSecond: 1000,
-      ...(maxPages === undefined ? {} : { maxPages }),
+      maxPages,
       nonce: randomUUID(),
       operatorProof: 'local-rehearsal',
     })
@@ -219,7 +221,9 @@ export async function rehearseDataMigration(arguments_: readonly string[]): Prom
     const listed = await invoke({ command: 'list' })
     check('list', JSON.stringify(listed).includes(definition.id), listed)
 
-    const dryRun = await invoke({ command: 'run', migrationId: definition.id, segments: 1, pageSize: PAGE_SIZE })
+    const dryRun = await invoke({
+      command: 'run', migrationId: definition.id, segments: 1, pageSize: PAGE_SIZE, maxPages: fullPages,
+    })
     check('dry-run', dryRun.status === 'completed' &&
       JSON.stringify(counters(dryRun)) === JSON.stringify({
         scanned: seed.rows.length,
@@ -229,19 +233,19 @@ export async function rehearseDataMigration(arguments_: readonly string[]): Prom
         vanished: 0,
       }), dryRun)
 
-    const unverified = await invoke({ ...applyPayload(), operatorProof: undefined })
+    const unverified = await invoke({ ...applyPayload(fullPages), operatorProof: undefined })
     check('apply-without-proof-refused', unverified.status === 'error' && unverified.code === 'INVALID_REQUEST', unverified)
 
     const interrupted = await invoke(applyPayload(1))
     check('apply-interrupted', interrupted.status === 'paused' && interrupted.pagesRead === 1, interrupted)
 
-    const midway = await invoke({ command: 'verify', migrationId: definition.id, segments: 1 })
+    const midway = await invoke({ command: 'verify', migrationId: definition.id, segments: 1, maxPages: fullPages })
     check('verify-before-resume', midway.status === 'fail' && typeof midway.pendingRows === 'number' && midway.pendingRows > 0, midway)
 
-    const resumed = await invoke(applyPayload())
+    const resumed = await invoke(applyPayload(fullPages))
     check('apply-resumed', resumed.status === 'completed', resumed)
 
-    const verified = await invoke({ command: 'verify', migrationId: definition.id, segments: 1 })
+    const verified = await invoke({ command: 'verify', migrationId: definition.id, segments: 1, maxPages: fullPages })
     check('verify', verified.status === 'pass' &&
       verified.migratedRows === seed.pending + seed.migrated &&
       verified.pendingRows === 0, verified)

@@ -1182,7 +1182,7 @@ bun run data:migrate:aws run --function-name "$DATA_MIGRATION_FUNCTION" --migrat
 bun run data:migrate:aws verify --function-name "$DATA_MIGRATION_FUNCTION" --migration <id>
 ```
 
-- 1 回の起動は 15 分の上限の 1 分前に新しい page を読むのをやめ、`paused`（exit 3）で終わります。
+- 1 回の起動は、15 分の上限に 1 分と最後の page を書き切る時間を残して新しい page を読むのをやめ、`paused`（exit 3）で終わります。
   同じ command をもう一度実行すると checkpoint の続きから再開します。`verify` は毎回 table 全体を読み直します。
 - `--apply` は operator の AWS credential で STS `GetCallerIdentity` の presigned URL を作り、この起動の
   parameter から作った digest を署名済み header に入れて送ります。function はその URL を自分の region の

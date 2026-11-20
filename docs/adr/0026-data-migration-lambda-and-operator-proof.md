@@ -24,7 +24,7 @@ Lambda の `Invoke` は CloudTrail の data event で、既定では記録され
 
 - `DataMigrationFunction`（Node.js 22、timeout 15 分、非同期 retry 0、trigger なし）を CDK に追加する。
   operator が `bun run data:migrate:aws` で同期起動したときだけ動く。runner と verifier は CLI と同じ code を使い、
-  15 分の上限の 1 分前に新しい page を読むのをやめて `paused` を返す。
+  15 分の上限に 1 分と最後の 1 page を書き込み budget で書き切る最悪の時間を残して新しい page を読むのをやめ、`paused` を返す。
 - 専用の role を作り、allowlist の table（`work-items`、`project-directory`）に `Scan` / `GetItem` / `PutItem`、
   `DataMigrationCheckpointTable` に `Query` / `PutItem` だけを与える。index、削除、table 操作の権限は与えない。
   payload に物理 table 名は載せず、定義の論理 `table` を CDK が渡す allowlist で物理名に変える。

@@ -20,6 +20,9 @@ import {
 /** Time kept back from the Lambda limit so the last page, checkpoint and run record finish. */
 const DEADLINE_SAFETY_MILLISECONDS = 60_000
 
+/** Replacement attempts the runner may spend on one row before a write conflict. */
+const WRITE_ATTEMPTS_PER_ROW = 3
+
 /** Shape of a verifier rejection reason that is safe to log; anything else is dropped. */
 const REASON_CODE_PATTERN = /^[A-Z][A-Z_]{0,39}$/u
 
@@ -191,6 +194,23 @@ export function parseDataMigrationInvocation(event: unknown): DataMigrationInvoc
 }
 
 /**
+ * Computes the worst-case time one applying page spends waiting for its
+ * write budget: every row replaced with every retry at the requested rate.
+ * Reads and dry runs do not write and take no write time. With the accepted
+ * bounds (100 rows, at least 1 write per second) this is at most 5 minutes,
+ * so the deadline always leaves room for one more page.
+ *
+ * @param request - Validated request.
+ * @returns Milliseconds.
+ */
+function pageWriteMilliseconds(request: DataMigrationInvocationRequest): number {
+  if (request.command !== 'run' || request.apply !== true) return 0
+  const pageSize = request.pageSize ?? DATA_MIGRATION_INVOCATION_DEFAULTS.runPageSize
+  const writesPerSecond = request.maxWritesPerSecond ?? DATA_MIGRATION_INVOCATION_DEFAULTS.maxWritesPerSecond
+  return Math.ceil((pageSize * WRITE_ATTEMPTS_PER_ROW * 1000) / writesPerSecond)
+}
+
+/**
  * Handles one operator invocation of the data migration Lambda: lists
  * migrations, runs one bounded slice (dry run unless `apply`), or verifies
  * one. An applying run must carry an operator proof bound to the request;
@@ -229,8 +249,9 @@ export async function handleDataMigrationInvocation(
     if (definition === undefined) return refuse(operation, 'MIGRATION_NOT_FOUND')
     const tableName = dependencies.targetTables.get(definition.table)
     if (tableName === undefined) return refuse(operation, 'TABLE_NOT_CONFIGURED')
+    // A page is never cut short, so the last page must fit between the deadline and the Lambda limit.
     const deadline = dependencies.clock.now() +
-      Math.max(0, context.remainingMilliseconds - DEADLINE_SAFETY_MILLISECONDS)
+      Math.max(0, context.remainingMilliseconds - DEADLINE_SAFETY_MILLISECONDS - pageWriteMilliseconds(request))
     const segments = request.segments ?? DATA_MIGRATION_INVOCATION_DEFAULTS.segments
     if (request.command === 'verify') {
       const stores = await dependencies.createStores({

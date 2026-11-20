@@ -189,6 +189,21 @@ describe('handleDataMigrationInvocation', () => {
       .toEqual({ operation: 'unknown', status: 'error', code: 'INVALID_REQUEST' })
   })
 
+  test('moves the deadline earlier by the worst-case write time of one page', async () => {
+    const { dependencies } = createDependencies()
+    // 3 rows per page at 1 write/s may take 9 s with retries: 69 s left is not enough for another page.
+    const tight = { ...context, remainingMilliseconds: 68_000 }
+    const paused = await handleDataMigrationInvocation(
+      { ...applyPayload, pageSize: 3, maxWritesPerSecond: 1 }, tight, dependencies,
+    )
+    expect(paused).toMatchObject({ status: 'paused', pagesRead: 0 })
+    const enough = { ...context, remainingMilliseconds: 70_000 }
+    const completed = await handleDataMigrationInvocation(
+      { ...applyPayload, pageSize: 3, maxWritesPerSecond: 1 }, enough, dependencies,
+    )
+    expect(completed).toMatchObject({ status: 'completed' })
+  })
+
   test('pauses before the Lambda limit and verifies after resuming', async () => {
     const { dependencies } = createDependencies()
     const nearLimit = { ...context, remainingMilliseconds: 30_000 }

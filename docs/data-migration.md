@@ -60,8 +60,9 @@ runner は `transform` の結果を書き込む前に、次をすべて確かめ
 - table は parallel scan の segment（`segment-<i>-of-<n>`、`--segments`、既定 4、最大 64）に分け、
   segment が checkpoint の partition になります。
 - 1 page は strongly consistent な Scan で最大 100 行（`--page-size`）。1 回の実行で読む page 数は
-  `--max-pages` で上限を決め、使い切ると `paused`（exit 3）で終わります。Lambda では、15 分の上限の 1 分前を
-  過ぎると新しい page を読まずに `paused` で終わります。同じ command をもう一度実行すると
+  `--max-pages` で上限を決め、使い切ると `paused`（exit 3）で終わります。Lambda では、15 分の上限から
+  1 分と「1 page を書き込み budget で書き切るのに最悪かかる時間」（page の行数 × 3 回 ÷ 毎秒の書き込み数）を
+  引いた時刻を過ぎると、新しい page を読まずに `paused` で終わります。page は途中で切らないためです。同じ command をもう一度実行すると
   checkpoint の続きから再開します。
 - 書き込みは `--max-writes-per-second`（既定 25）の間隔を空けます。
 - 1 page を書き終えるたびに checkpoint を compare-and-set で保存します。page の途中で失敗した場合、
