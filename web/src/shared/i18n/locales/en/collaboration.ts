@@ -209,6 +209,8 @@ export const collaborationMessages = {
   'collaboration.activity.watchUnsubscribed': '{actor} stopped watching.',
   'collaboration.activity.workItemCreated': '{actor} created the work item.',
   'collaboration.activity.workItemUpdated': '{actor} updated the work item.',
+  'collaboration.activity.workItemArchived': '{actor} archived the work item.',
+  'collaboration.activity.workItemRestored': '{actor} restored the work item.',
   'collaboration.activity.parentChanged': '{actor} changed the parent.',
   'collaboration.activity.childAdded': '{actor} added a child.',
   'collaboration.activity.childRemoved': '{actor} removed a child.',

@@ -1216,6 +1216,26 @@ describe('cross-domain integrity AWS composition bridge', () => {
     expect(result.failureCodes).toEqual([])
   })
 
+  test('recognizes a child restore guard row as auxiliary configuration', async () => {
+    const rows = createHealthyNativeRows()
+    rows['work-item-configuration'] = [
+      ...rows['work-item-configuration'],
+      {
+        scopeKey: `${encodeURIComponent(WORKSPACE_ID)}#team#${encodeURIComponent(TEAM_ID)}#work-item-configuration`,
+        recordKey: 'CHILD_RESTORE#parent-1',
+        entryType: 'child-restore-guard',
+        schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        generation: 2,
+      },
+    ]
+    const reader = new FixtureAwsReader(createPagesFromNativeRows(rows))
+
+    const result = await runBridge(reader)
+
+    expect(result.status).toBe('pass')
+    expect(result.failureCodes).toEqual([])
+  })
+
   test('rejects Project Directory target rows outside the canonical mapper contract', async () => {
     const [teamValue, projectValue] = createProjectDirectoryRows()
     if (!isRecord(teamValue) || !isRecord(projectValue)) {
