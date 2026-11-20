@@ -457,7 +457,17 @@ export const workspaceMessages = {
   'workspace.settings.eyebrow': '管理',
   'workspace.settings.title': '設定',
   'workspace.settings.description':
-    'このブラウザの表示言語と文字サイズ、ログイン中のアカウントを確認します。',
+    '個人の表示や通知、Workspace の管理、Team ごとの設定を分けて扱います。',
+  'workspace.settings.section.aria': '設定の区分',
+  'workspace.settings.section.personal': '個人',
+  'workspace.settings.section.workspace': 'Workspace 管理',
+  'workspace.settings.section.team': 'Team',
+  'workspace.settings.section.personalDescription':
+    '自分のアカウントにだけ効く設定です。表示、通知、サインイン、AI の利用、agent の接続を変更します。',
+  'workspace.settings.section.workspaceDescription':
+    'Workspace 全体に効く設定です。メンバー、ID・セキュリティ、tenant、ディレクトリ、API と外部連携、自動化を管理します。',
+  'workspace.settings.section.teamDescription':
+    'Team ごとに上書きできる設定です。ワークフローと項目、agent の設定を管理します。',
   'workspace.settings.install.title': 'アプリとしてインストール',
   'workspace.settings.install.description': 'mukuroji をアプリとして追加すると、独立したウィンドウで開きます。アプリのバッジに対応した端末では、アイコンに受信箱の未読数も表示します。',
   'workspace.settings.install.action': 'インストール',
@@ -584,12 +594,6 @@ export const workspaceMessages = {
   'workspace.settings.notifications.pushDevice.result.dismissed': '通知の許可が選ばれなかったため、登録していません。',
   'workspace.settings.notifications.pushDevice.result.denied': '通知が拒否されたため、登録していません。',
   'workspace.settings.notifications.pushDevice.result.failed': 'このデバイスの設定を変更できませんでした。もう一度お試しください。',
-  'workspace.settings.permissionTitle': '権限セット',
-  'workspace.settings.permissionDescription':
-    'チーム別の編集、承認、閲覧権限を管理します。',
-  'workspace.settings.integrationTitle': '外部連携',
-  'workspace.settings.integrationDescription':
-    'チャット、カレンダー、分析基盤との接続を管理します。',
   'workspace.access.eyebrow': 'ワークスペース管理',
   'workspace.access.title': 'アクセス台帳',
   'workspace.access.description':
