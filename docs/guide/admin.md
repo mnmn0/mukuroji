@@ -155,6 +155,9 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   「最終利用」は 1 分ごとにまとめて記録するため、最大 1 分遅れて表示されます。
 - **Webhook**: 外部への通知。**Webhook を追加** で送信先と「配信を許可する Team」を決めます。配信 log から再送できます。
 - **Connector**: GitHub、Slack、Gmail、Google Calendar、Google Drive との連携。
+  一覧には、運用者がこの環境で設定した provider だけが出ます（設定は [`cdk/README.md`](../../cdk/README.md) の
+  connector secret）。設定がなければ「利用できる connector はありません」と表示されます。
+  設定から外した provider に接続済みの account は一覧に残り、切断はできますが新しい接続はできません。
   接続は、**接続** を押した本人が provider の画面で許可したあと、同じアカウントでログインしたまま
   Mukuroji に戻ると完了します。許可の URL を別の人に送ったり、ログインが切れた状態で戻ったり、
   期限（約10分）が切れたりした場合は完了できないので、この画面からもう一度接続してください。

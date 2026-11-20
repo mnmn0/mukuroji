@@ -794,6 +794,11 @@ export type PublicApiDependencies = {
   /** Connector OAuth と sync-conflict recovery の optional provider adapter です。 */
   connectorAuthorization?: ConnectorAuthorizationService
   /**
+   * Lists the providers configured in this runtime. The connector catalog shows only these
+   * providers, and shows none when this dependency is omitted.
+   */
+  listConfiguredConnectorProviders?(): Promise<readonly ConnectorProvider[]>
+  /**
    * Provider redirect URI が Web app と別の API origin を指す場合に、OAuth callback を引き渡す
    * Web app の origin です。省略時は callback と同じ origin の Web app へ引き渡します。
    */
@@ -2044,10 +2049,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     ) {
       throw new PublicApiServiceError(400, 'invalid_request', 'Connector category is invalid.')
     }
+    const configuredProviders = new Set(
+      await dependencies.listConfiguredConnectorProviders?.() ?? [],
+    )
     return c.json(
-      category === undefined
-        ? connectorCatalog
-        : connectorCatalog.filter((connector) => connector.category === category),
+      connectorCatalog.filter((connector) =>
+        configuredProviders.has(connector.provider) &&
+        (category === undefined || connector.category === category)
+      ),
     )
   })
 
