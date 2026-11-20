@@ -23,6 +23,7 @@ import { type FileArtifactsController } from '../../files/mutations/useFileArtif
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { previewTeamIssueWorkItemType, type TeamIssue, type UpdateTeamIssueInput } from '../api'
 import { IssueCollaborationPanel, type IssueSummaryAiAssistance } from './IssueCollaborationPanel'
+import { createIssueCommentSessionDraftKey } from '../model/commentSessionDraft'
 import { type IssueCollaborationController } from '../mutations/useIssueCollaboration'
 import { useDocumentContextPromotion } from '../mutations/useDocumentContextPromotion'
 import { type IssueCollaborationRoute } from '../model/collaborationTabs'
@@ -1157,6 +1158,7 @@ function IssueDetailContent({
             artifacts={artifacts}
             contextDraft={documentContextPromotion.documentContextDraft}
             key={issue.teamId + ':' + issue.id}
+            commentSessionDraftKey={createIssueCommentSessionDraftKey(issue.teamId, issue.id)}
             controller={collaboration}
             currentMemberKey={currentWorkspaceMemberKey}
             focusedCommentId={focusedCommentId}

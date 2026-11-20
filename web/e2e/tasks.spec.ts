@@ -67,6 +67,17 @@ const authSession = {
   tokenType: 'Bearer',
   remember: true,
 }
+/**
+ * Creates an unsigned JWT-shaped access token, so the Web app can tell accounts apart.
+ *
+ * @param subject - Account subject.
+ * @param id - Distinguishes tokens of the same account.
+ * @returns The token.
+ */
+function createJwtShapedAccessToken(subject: string, id: string) {
+  const payload = Buffer.from(JSON.stringify({ sub: subject, jti: id })).toString('base64url')
+  return `header.${payload}.signature`
+}
 const workItemConflictMessage =
   '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。'
 const notificationFixtureNow = new Date('2026-07-12T12:00:00.000Z')
@@ -6265,6 +6276,126 @@ test.describe('authenticated task page', () => {
     expect(discardAfterSave).toContain('コメント')
     await page.getByTestId('task-row-wireframe').click()
     await expect(commentBody).toHaveValue('')
+  })
+
+  test('session が切れて再ログインしても書きかけのコメントを戻し、別アカウントには出さない', async ({ page }) => {
+    const memberToken = createJwtShapedAccessToken('member-a', 'first')
+    await page.addInitScript((session) => {
+      window.localStorage.setItem('mukuroji.auth', JSON.stringify(session))
+    }, { ...authSession, accessToken: memberToken })
+    // The shared mocks expect the fixture token; the account subjects matter only to the Web app.
+    await page.route('**/api/**', async (route) => {
+      await route.fallback({
+        headers: { ...route.request().headers(), authorization: `Bearer ${authSession.accessToken}` },
+      })
+    })
+    await page.route('**/api/auth/sso/discovery?*', async (route) => {
+      await route.fulfill({ json: { loginMode: 'password-or-sso', ssoRequired: false } })
+    })
+    let signInSubject = 'member-a'
+    await page.route('**/api/auth/login', async (route) => {
+      await route.fulfill({
+        json: {
+          accessToken: createJwtShapedAccessToken(signInSubject, 'second'),
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          tokenType: 'Bearer',
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const commentBody = page.locator('textarea[name="body"]')
+    await commentBody.fill('session 切れでも残すコメント')
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe\/comments$/u, async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      await route.fulfill({ json: { code: 'Unauthorized', message: 'Unauthorized' }, status: 401 })
+    })
+    await page.getByRole('button', { name: 'コメントを追加', exact: true }).click()
+
+    await expect(page).toHaveURL(/\/login\?returnTo=/u)
+    await page.unroute(/\/api\/teams\/core-team\/issues\/wireframe\/comments$/u)
+    await page.getByLabel('メールアドレス').fill('member-a@example.com')
+    await page.getByRole('button', { name: '続行', exact: true }).click()
+    await page.getByLabel('パスワード', { exact: true }).fill('MemberA123!')
+    await page.getByRole('button', { name: 'ログイン', exact: true }).click()
+
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    await expect(commentBody).toHaveValue('session 切れでも残すコメント')
+    await expect(page.getByText('セッションが切れる前に書いていたコメントを戻しました。')).toBeVisible()
+
+    // The same input, kept again, must not reach another account that signs in to this tab.
+    await page.route(/\/api\/teams\/core-team\/issues\/wireframe\/comments$/u, async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      await route.fulfill({ json: { code: 'Unauthorized', message: 'Unauthorized' }, status: 401 })
+    })
+    await page.getByRole('button', { name: 'コメントを追加', exact: true }).click()
+    await expect(page).toHaveURL(/\/login\?returnTo=/u)
+    await page.unroute(/\/api\/teams\/core-team\/issues\/wireframe\/comments$/u)
+    signInSubject = 'member-b'
+    await page.getByLabel('メールアドレス').fill('member-b@example.com')
+    await page.getByRole('button', { name: '続行', exact: true }).click()
+    await page.getByLabel('パスワード', { exact: true }).fill('MemberB123!')
+    await page.getByRole('button', { name: 'ログイン', exact: true }).click()
+
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    await expect(commentBody).toBeVisible()
+    await expect(commentBody).toHaveValue('')
+    await expect.poll(() => page.evaluate(() => window.sessionStorage.getItem('mukuroji.auth.sessionDrafts'))).toBeNull()
+  })
+
+  test('裏の再検証で session 切れを検知しても書きかけのコメントを戻す', async ({ page }) => {
+    await page.addInitScript((session) => {
+      window.localStorage.setItem('mukuroji.auth', JSON.stringify(session))
+    }, { ...authSession, accessToken: createJwtShapedAccessToken('member-a', 'first') })
+    // The shared mocks expect the fixture token; the account subjects matter only to the Web app.
+    await page.route('**/api/**', async (route) => {
+      await route.fallback({
+        headers: { ...route.request().headers(), authorization: `Bearer ${authSession.accessToken}` },
+      })
+    })
+    await page.route('**/api/auth/sso/discovery?*', async (route) => {
+      await route.fulfill({ json: { loginMode: 'password-or-sso', ssoRequired: false } })
+    })
+    await page.route('**/api/auth/login', async (route) => {
+      await route.fulfill({
+        json: {
+          accessToken: createJwtShapedAccessToken('member-a', 'second'),
+          expiresAt: Date.now() + 60 * 60 * 1000,
+          tokenType: 'Bearer',
+        },
+      })
+    })
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const commentBody = page.locator('textarea[name="body"]')
+    await commentBody.fill('裏の再検証で切れても残すコメント')
+    await page.route('**/api/auth/me', async (route) => {
+      await route.fulfill({ json: { code: 'Unauthorized', message: 'Unauthorized' }, status: 401 })
+    })
+    // The workspace shell swaps the page for a loading state before it clears the session.
+    // The current-user query dedupes for 10 seconds, so the focus revalidation waits past it.
+    await page.waitForTimeout(10_500)
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event('focus'))
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+
+    await expect(page).toHaveURL(/\/login\?returnTo=/u)
+    await page.unroute('**/api/auth/me')
+    await mockCurrentUser(page, 'member-a@example.com', 'Member A')
+    await page.getByLabel('メールアドレス').fill('member-a@example.com')
+    await page.getByRole('button', { name: '続行', exact: true }).click()
+    await page.getByLabel('パスワード', { exact: true }).fill('MemberA123!')
+    await page.getByRole('button', { name: 'ログイン', exact: true }).click()
+
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    await expect(commentBody).toHaveValue('裏の再検証で切れても残すコメント')
   })
 
   test('コメント下書き中の Project 移動保存は確認拒否で API を送らず保持する', async ({ page }) => {

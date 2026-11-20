@@ -11,12 +11,14 @@ import type {
   TeamIssueCommentReaction,
 } from '../api'
 import { SafeCommentBody } from './SafeCommentBody'
+import { useSessionDraft } from '../../auth/useSessionDraft'
 import type { IssueCollaborationController } from '../mutations/useIssueCollaboration'
 import type { AcceptedResolutionHistoryState } from '../mutations/useIssueContext'
 import {
   formatIssueMentionLabel,
   resolveIssueMentionMemberKeys,
 } from '../model/commentMentions'
+import { parseCommentSessionDraft, type CommentSessionDraft } from '../model/commentSessionDraft'
 import {
   advanceDeepLinkTraversal,
   type DeepLinkTraversalState,
@@ -92,6 +94,11 @@ export type IssueConversationTabProps = {
   onDraftDirtyChange?: (isDirty: boolean) => void
   /** Renders extra read-only details under a comment body, such as an agent report. */
   renderCommentDetails?: (comment: TeamIssueComment) => ReactNode
+  /**
+   * Identifies this Work Item's new-comment input, so an unsent comment survives an ended
+   * session and comes back after the same account signs in again. Without it nothing is kept.
+   */
+  sessionDraftKey?: string
 }
 
 /** Values retained for one root, reply, or edit composer slot. */
@@ -168,6 +175,7 @@ export function IssueConversationTab({
   resolutionErrorStatus,
   onDraftDirtyChange,
   renderCommentDetails,
+  sessionDraftKey,
 }: IssueConversationTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [deleteConfirmationId, setDeleteConfirmationId] = useState<string | undefined>()
@@ -458,6 +466,21 @@ export function IssueConversationTab({
     }
   }, [])
 
+  const [isSessionDraftRestored, setIsSessionDraftRestored] = useState(false)
+  useSessionDraft<CommentSessionDraft>({
+    key: sessionDraftKey,
+    value: rootDraft.isDirty
+      ? { bodyMarkdown: rootDraft.bodyMarkdown, mentionMemberKeys: rootDraft.mentionMemberKeys }
+      : undefined,
+    parse: parseCommentSessionDraft,
+    onRestore: (draft) => {
+      // Input typed since the page came back wins over the preserved one.
+      if (draftStateRef.current.root.isDirty || !hasDraftContentValue(draft)) return
+      updateRootDraft(draft)
+      setIsSessionDraftRestored(true)
+    },
+  })
+
   useEffect(() => {
     queueMicrotask(() => {
       setResolutionSourceTarget((target) =>
@@ -624,6 +647,11 @@ export function IssueConversationTab({
         </p>
       ) : null}
       <div className="border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-4">
+        {isSessionDraftRestored && rootDraft.isDirty ? (
+          <p className="mb-2 text-xs font-semibold text-fg-amber-900" role="status">
+            {t('collaboration.composer.sessionDraftRestored')}
+          </p>
+        ) : null}
         {canCreateComment ? (
           <CommentComposer
             key="root-comment-composer"
