@@ -29,9 +29,14 @@
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `ApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
+| `WebDomainName` | no | Web app と `/api` を配信する独自 domain（例: `wbs.example.com`、小文字）。既定値は空で、空のあいだは CloudFront の domain で配信します。指定すると通知 Email の link などに使う正規 URL（`WebUrl`）がこの domain になります。[独自 domain で配信する](#独自-domain-で配信する) を参照してください。 |
+| `WebCertificateArn` | `WebDomainName` 指定時 | `WebDomainName` を含む、**us-east-1** の発行済み ACM 証明書 ARN。CloudFront は us-east-1 の証明書しか読めません。 |
+| `WebHostedZoneId` | no | `WebDomainName` の A / AAAA alias record を stack に作らせる Route 53 public hosted zone ID。空なら DNS は stack の外で設定します。 |
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
+| `MonthlyCostBudgetUsd` | no | 月次の AWS 予算（USD）。既定値は 20。実績が 80%・100%、予測が 100% を超えると email で知らせます。[費用の目安と予算 alert](#費用の目安と予算-alert) を参照してください。 |
+| `CostBudgetAlertEmail` | no | 予算 alert の送信先 email。既定値は空で、空なら `InitialOwnerEmail` へ送ります。 |
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
 | `RequestEmailWebhookSecret` | `mukuroji:requestEmail` 有効時 | email adapter から渡される envelope の署名検証に使う 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
 | `RequestTokenHashSecret` | yes | public form / reply capability token を保存前に hash する 32–256 文字の secret。CloudFormation では `NoEcho` です。 |
@@ -119,6 +124,84 @@ SSO と AI は独立したオプションです。新規 stack では、それ�
 
 Workspace、複数Project/Team、権限、監査、backup、export/closureは引き続き利用できます。商用plan、seat quota、月次課金集計はありません。
 
+## 費用の目安と予算 alert
+
+新しい環境を作る前に、この節で月額の目安を確認してください。金額は 2026 年 11 月時点の東京リージョン（`ap-northeast-1`）の公開価格をもとにした概算で、税は含みません。実際の額は Cost Explorer で確認します。
+
+### 予算 alert
+
+Stack は AWS Budgets の月次コスト予算（`MonthlyCostBudget`）を 1 つ作り、次のときに email を送ります。予算そのものは無料です。
+
+- その月の実績が予算の 80% を超えたとき
+- その月の実績が予算の 100% を超えたとき
+- その月の予測が予算の 100% を超えたとき
+
+| Parameter | 既定値 | 説明 |
+| --- | --- | --- |
+| `MonthlyCostBudgetUsd` | `20` | 月の予算（USD、1〜100000）。既定値は利用者 50 人程度までの目安です。下の試算を見て環境ごとに決めます。 |
+| `CostBudgetAlertEmail` | 空 | alert の送信先 email。空なら `InitialOwnerEmail` へ送ります。 |
+
+- 予算は AWS アカウント全体の費用を対象にします。cost allocation tag で絞らないのは、tag は Billing console で有効にするまで Budgets に届かず、data transfer や税のように tag の付かない費用もあるためです。Mukuroji 専用のアカウントに deploy してください。他のシステムと同じアカウントでは、他のシステムの費用も合算されます。
+- Budgets は請求データを 1 日に数回まとめて評価するため、通知は費用の発生から最大 1 日ほど遅れます。急な増加をすぐ止める仕組みではありません。
+- 通知が来たら、Cost Explorer の service 別の内訳で増えた service を確かめ、下の固定費・試算と比べます。任意 module、AI、SES の利用、Lambda の実行時間が主な増加要因です。
+- email は AWS Budgets（`budgets@costalerts.amazonaws.com`）から届きます。購読の確認は不要です。迷惑メールに入らないよう、受信側で許可してください。
+
+### Cost allocation tag
+
+Stack は tag を付けられる resource すべてに `mukuroji:application=mukuroji` を付けます（AppConfig の deployment と deployment strategy は、tag を変えると作り直しになるため除きます。どちらも課金されません）。Cost Explorer で Mukuroji の費用を分けて見るには、deploy 後に management account で tag を cost allocation tag として有効にします。
+
+```sh
+# tag は resource ができてから最大 24 時間で一覧に出ます
+aws ce update-cost-allocation-tags-status \
+  --cost-allocation-tags-status TagKey=mukuroji:application,Status=Active
+```
+
+有効にした日以降の費用だけが tag で集計されます。過去の分はさかのぼりません。
+
+### 既定構成の固定費
+
+任意 module をすべて無効にした既定構成で、利用がなくてもかかる費用です。合計はおよそ **月 $6〜8** です。
+
+| 構成要素 | 数 | 月額の目安 | 備考 |
+| --- | --- | --- | --- |
+| CloudWatch metric alarm | 33 個（35 metric） | 約 $2.50 | $0.10 / alarm metric。アカウントの無料枠 10 metric を差し引いた額です。 |
+| CloudWatch composite alarm | 1 個 | $0.50 | |
+| Secrets Manager secret | 4 個 | $1.60 | $0.40 / secret。inbound automation Webhook を 1 つ作るごとに secret が 1 つ増えます。 |
+| KMS customer-managed key | 1 個（`DeveloperPlatformKey`） | $1.00 | request 料金は少量です。 |
+| DynamoDB table（on-demand、PITR 有効） | 25 個 | $0.1〜0.5 | 保存量 25 GB までは無料枠。PITR は保存量 1 GB あたり約 $0.23 です。 |
+| EventBridge の毎分 rule と `ScheduledJobsFunction` | 1 個 | ほぼ $0 | 月 43,200 回の起動（1,024 MB）は、1 回が平均数秒で終われば Lambda の無料枠（100 万 request、40 万 GB 秒）に収まります。無料枠はほかの Lambda と共有です。job が読む DynamoDB の料金は数十セントです。 |
+| SQS の待機中の polling | 3 queue | $0〜1 | Lambda の event source が空の queue を long polling し続けます。無料枠は月 100 万 request、超えた分は $0.40 / 100 万です。 |
+| X-Ray active tracing | 全 Lambda | ほぼ $0 | 月 10 万 trace まで無料。毎分の job で約 4.3 万 trace を使います。 |
+| CloudWatch Logs | 21 log group（90 日保持） | ほぼ $0 | 月 5 GB まで無料。超えた分は取り込み $0.76 / GB です。 |
+| GuardDuty Malware Protection for S3 | 1 plan | ほぼ $0 | 無料枠は月 1,000 object・1 GB。超えた分は scan した容量（米国東部で $0.09 / GB）と評価した object 数で課金されます。 |
+| Cognito user pool（Essentials） | 1 個 | $0 | 月 10,000 MAU まで無料。SAML / OIDC 連携の利用者は無料枠が小さく、超えると MAU 単位で課金されます。 |
+| CloudFront、S3、AppConfig、AWS Budgets | — | ほぼ $0 | CloudFront は月 1 TB・1,000 万 request まで無料です。 |
+
+固定費の大半は alarm、secret、KMS key です。alarm を減らすときは、通知の契約（[Alarm destination contract](#alarm-destination-contract)）と [`docs/operational-readiness.md`](../docs/operational-readiness.md) の alarm 一覧を確認してから、別の変更で行います。
+
+### 任意 module を有効にしたときの増分
+
+| Context key / 設定 | 増える固定費の目安 | 主な内訳 |
+| --- | --- | --- |
+| `mukuroji:restoreDrill` | +$3.5 / 月と復元ごとの料金 | KMS key 2 個（$2）、alarm 14 個（$1.40）、Step Functions。drill ごとに PITR の復元料金（復元量 1 GB あたり約 $0.17）と一時 table の料金がかかります。 |
+| `mukuroji:connectors` | +$1 前後 / 月 | secret 1 個、alarm 3 個、5 分ごとの poll（月 8,640 回）、queue の polling。 |
+| `mukuroji:requestEmail` | +$1 / 月 | secret 2 個、alarm 2 個。 |
+| `mukuroji:tenantLifecycle` | +$0〜2 / 月 | Lambda 6 個と queue 6 個。待機中の queue polling が SQS の無料枠を超えた分です。 |
+| AI（Bedrock の parameter 設定） | 利用量に比例 | token 料金。上限は Workspace の AI 設定で決めます。 |
+| `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
+
+### 利用規模ごとの試算
+
+1 人が 1 営業日に API を約 2,000 回呼ぶと仮定した試算です（Document を 1 時間開くと 3.5 秒ごとの再取得だけで約 1,000 回になります）。月 20 営業日、既定構成、AI なしで計算しています。
+
+| 利用者 | API request / 月 | 従量費の目安 | 合計の目安 |
+| --- | --- | --- | --- |
+| 10 人 | 約 40 万 | 約 $1 | 約 $7〜9 |
+| 50 人 | 約 200 万 | 約 $4〜6 | 約 $11〜14 |
+| 200 人 | 約 800 万 | 約 $25〜30 | 約 $32〜38 |
+
+従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、Lambda（無料枠を超えた request と実行時間）、DynamoDB の読み書き、CloudWatch Logs の取り込み、WebSocket の接続時間です。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
+
 ## API observability
 
 Application Lambda 24個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
@@ -184,7 +267,8 @@ templateとdeployed configurationの両方で照合します。
 
 ## Outputs
 
-- `WebUrl`: Web app と `/api` を配信する CloudFront の URL
+- `WebUrl`: アプリの正規 URL。`WebDomainName` を指定した場合はその domain、空なら CloudFront の domain
+- `WebDistributionDomainName`: CloudFront distribution の domain（`dxxxx.cloudfront.net`）。独自 domain の DNS を stack の外で設定するときの向き先
 - `WebBucketName` / `WebDistributionId`: `bun run web:deploy` が使う Web bucket と distribution
 - `ApiGatewayUrl`: API Gateway HTTP API URL（外部 webhook と、local の Web から直接呼ぶ場合）
 - `UserPoolId` / `UserPoolClientId`: API が使う Cognito user pool と password client（stack が作ったものか、parameter で渡したもの）
@@ -230,6 +314,27 @@ Lambda が同じ deploy で切り替わりますが、切り替え中の数分�
 書き換えるため、client-side route を直接開いても SPA が表示されます。この書き換えは `/api/*` には
 かからないので、API の 404 はそのまま返ります。HTTP API は `<base>/teams/projects` と
 `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
+
+### 独自 domain で配信する
+
+`WebDomainName` と `WebCertificateArn` を一緒に指定すると、同じ distribution が独自 domain でも Web app と
+`/api/*` を配信します。証明書は TLSv1.2_2021 の viewer policy と SNI で使います。CloudFront の domain
+（`WebDistributionDomainName`）も引き続き使えますが、`WebUrl` と通知 Email の link は独自 domain になります。
+3つとも空なら distribution・DNS・link は従来どおりで、既存環境には resource の変更がありません。
+`WebDomainName` だけ、または `WebHostedZoneId` だけを指定すると、CloudFormation の rule が deploy 前に止めます。
+
+1. **us-east-1** の ACM で `WebDomainName` の証明書を発行し、DNS 検証を済ませます（ACM の公開証明書は無料）。
+2. `WebDomainName`、`WebCertificateArn` を指定して deploy します。domain の hosted zone が同じ account の
+   Route 53 にあれば `WebHostedZoneId` も指定し、stack に A / AAAA alias を作らせます。
+   それ以外の DNS では、`WebDomainName` の CNAME を output の `WebDistributionDomainName` に向けます。
+3. 画面と `/api` は同じ origin なので、`ApiAllowedOrigins`（API の CORS）は変えなくて構いません。
+   file bucket の CORS には独自 domain と CloudFront domain の両方を stack が自動で入れます。
+4. Enterprise SSO を使う場合は、Cognito の SSO app client の callback URL を
+   `https://<WebDomainName>/auth/sso/callback` に変え、同じ値を `CognitoSsoRedirectUri` に指定して deploy します。
+   callback は1件だけ許可するため、切り替え後は CloudFront の domain からの SSO login は使えません。
+5. `bun run web:deploy` で配信し直す必要はありません。PWA の `manifest.webmanifest` は `start_url` と `scope` を
+   相対 path で持つため、独自 domain でそのまま install できます。ただし PWA と Web Push の購読は origin ごとなので、
+   CloudFront の domain で install・購読した利用者には、独自 domain で開き直して入れ直してもらいます。
 
 Lambda Function URL は作りません。外部 sender に渡す signed inbound webhook URL は Lambda の version
 に依存しない安定した HTTP API endpoint を使い、CloudFront の origin も同じ HTTP API にそろえます。

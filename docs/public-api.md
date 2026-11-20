@@ -217,7 +217,10 @@ Credential の quota は API key では key ごと、OAuth access token では�
 
 Client は `Retry-After` を優先し、値が無い retryable error では full jitter 付き exponential backoff を使う。`401`、`403`、validation error、idempotency conflict は自動 retry しない。
 
-IP 単位の token endpoint rate limit は Lambda event の `requestContext.http.sourceIp` だけを信頼する。Internet client が指定できる `Forwarded`、`X-Forwarded-For`、`X-Real-IP` は rate-limit identity に使わない。
+Token endpoint（`POST /v1/oauth/token`）は 2 種類の 1 分 window で制限する。
+
+- IP 単位（60 回）: client secret の確認前に、すべての request を数える。IP は CloudFront 経由なら origin secret で検証した viewer address（`x-mukuroji-viewer-address`）、HTTP API を直接呼んだ場合は Lambda event の `requestContext.http.sourceIp` を使う。信頼できる address がない request（Bun server など）は 1 つの bucket を共有する。Internet client が指定できる `Forwarded`、`X-Forwarded-For`、`X-Real-IP` は rate-limit identity に使わない。例外として、`MUKUROJI_REQUEST_TRUSTED_PROXY_ADDRESSES` に登録した proxy から届いた request に限り、`X-Forwarded-For` の先頭の値を使う。この proxy は client が送った転送 header を捨てるか上書きし、自分が見た接続元だけを先頭に置く必要がある。
+- Client 単位（30 回）: client secret と OAuth app の状態を確認できた request だけを数える。公開値の `client_id` を知っているだけの第三者が、誤った secret でその client の token 取得を止めることはできない。誤った secret の試行は IP 単位の制限で抑える。そのため、同じ IP（Bun server では送信元が分からない request 全体）から誤った secret で 60 回試行されると、その window の間は正しい secret を持つ client の request も IP 単位の制限で `429` になる。
 
 ## Signed webhook
 

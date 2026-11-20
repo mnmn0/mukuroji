@@ -48,7 +48,7 @@ import { TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS } from '../shared/constants'
 import { requireTriageTeamAccess } from '../shared/customer-access'
 import { projectWorkItemSearchDocumentBestEffort } from '../shared/document-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
-import { resolveTrustedRequestSource } from '../shared/request-source'
+import { resolveTrustedRequestSource } from '../../infrastructure/http/trusted-request-source'
 import { readOptionalPositiveQueryInteger } from '../shared/input-parsing'
 import {
   createApiMutationContext,

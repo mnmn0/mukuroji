@@ -7,11 +7,13 @@ import {
   previewWorkloadAssignment,
   saveWorkloadProfile,
   saveWorkloadTimeOff,
+  updateWorkloadRequest,
   WorkloadApiError,
   type CreateWorkloadAssignmentRequest,
   type CreateWorkloadRequestRequest,
   type SaveWorkloadProfileRequest,
 } from '../api'
+import { WorkloadRequestList, type WorkloadRequestChange } from './WorkloadRequestList'
 
 /** A Team member option used by workload planning controls. */
 export type WorkloadPlanningMemberOption = {
@@ -112,14 +114,15 @@ export function WorkloadPlanningControls({
 
   if (members.length === 0) return null
 
-  /** Runs one planning mutation and refreshes the authoritative snapshot. */
-  const runMutation = async (operation: () => Promise<unknown>) => {
+  /** Runs one planning mutation, refreshes the authoritative snapshot, and reports success. */
+  const runMutation = async (operation: () => Promise<unknown>): Promise<boolean> => {
     setError(undefined)
     setIsSaving(true)
     try {
       await operation()
       setPreview(undefined)
       await onSaved()
+      return true
     } catch (cause) {
       if (cause instanceof WorkloadApiError && cause.status === 409) {
         try {
@@ -129,9 +132,20 @@ export function WorkloadPlanningControls({
         }
       }
       setError(cause instanceof Error ? cause : new Error(t('workload.controls.error')))
+      return false
     } finally {
       setIsSaving(false)
     }
+  }
+
+  /** Changes or cancels one resource request at its current revision. */
+  const updateRequest = async (request: { id: string; revision: number }, change: WorkloadRequestChange): Promise<boolean> => {
+    if (!accessToken || !teamId) return false
+    return await runMutation(() => updateWorkloadRequest(accessToken, teamId, request.id, {
+      ...change,
+      expectedRevision: request.revision,
+      expectedTeamRevision: teamRevision,
+    }))
   }
 
   /** Saves a full-day or partial-day absence for the selected member. */
@@ -292,6 +306,17 @@ export function WorkloadPlanningControls({
           </div>
         </ControlCard>
       </div>
+
+      {snapshot ? (
+        <WorkloadRequestList
+          isSaving={isSaving}
+          onUpdate={updateRequest}
+          projects={projects}
+          redactedCount={snapshot.redactedRequestCount}
+          requests={snapshot.requests}
+          t={t}
+        />
+      ) : null}
     </section>
   )
 }
@@ -315,7 +340,7 @@ type ProfileFormProps = {
   /** Whether any planning mutation is in flight. */
   isSaving: boolean
   /** Runs a mutation and refreshes the authoritative snapshot. */
-  onMutation: (operation: () => Promise<unknown>) => Promise<void>
+  onMutation: (operation: () => Promise<unknown>) => Promise<boolean>
   /** Resolves localized labels. */
   t: (key: MessageKey) => string
 }

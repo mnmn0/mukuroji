@@ -2793,28 +2793,115 @@ describe('public API router', () => {
     expect(queued).toEqual([])
   })
 
-  test('rate-limits invalid OAuth client attempts and never permits caching token responses', async () => {
+  test('keeps invalid OAuth secrets from using up the client limit and never permits caching token responses', async () => {
+    const { platform, router } = createTestRouter()
+    const oauthApp = await platform.createOAuthApp({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        name: 'Rate limited service',
+        grantTypes: ['client_credentials'],
+        scopes: ['work-items:read'],
+      },
+    })
+    const request = (clientSecret: string, sourceIp: string) => router.request(
+      'http://localhost/v1/oauth/token',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: oauthApp.oauthApp.clientId,
+          client_secret: clientSecret,
+        }).toString(),
+      },
+      { requestContext: { http: { sourceIp } } },
+    )
+
+    // Someone who only knows the public client_id cannot lock the client out.
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const response = await request('invalid-secret', '198.51.100.1')
+      expect(response.status).toBe(401)
+      expect(response.headers.get('Cache-Control')).toBe('no-store')
+      expect(response.headers.get('Pragma')).toBe('no-cache')
+    }
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = await request(oauthApp.clientSecret, '198.51.100.2')
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Cache-Control')).toBe('no-store')
+    }
+    const limited = await request(oauthApp.clientSecret, '198.51.100.3')
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('RateLimit-Limit')).toBe('30')
+    expect(limited.headers.get('Retry-After')).toBe('60')
+    expect(limited.headers.get('Cache-Control')).toBe('no-store')
+  })
+
+  test('still limits wrong OAuth secrets when no trusted client address is available', async () => {
     const { router } = createTestRouter()
-    const request = () => router.request('http://localhost/v1/oauth/token', {
+    // No Lambda request context, as under the Bun server.
+    const request = (attempt: number) => router.request('http://localhost/v1/oauth/token', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Forwarded-For': `198.51.100.${attempt + 1}`,
+      },
       body: new URLSearchParams({
         grant_type: 'client_credentials',
         client_id: 'unknown-client',
         client_secret: 'invalid-secret',
       }).toString(),
     })
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      const response = await request()
-      expect(response.status).toBe(401)
-      expect(response.headers.get('Cache-Control')).toBe('no-store')
-      expect(response.headers.get('Pragma')).toBe('no-cache')
+
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      expect((await request(attempt)).status).toBe(401)
     }
-    const limited = await request()
+    const limited = await request(60)
     expect(limited.status).toBe(429)
-    expect(limited.headers.get('RateLimit-Limit')).toBe('30')
-    expect(limited.headers.get('Retry-After')).toBe('60')
-    expect(limited.headers.get('Cache-Control')).toBe('no-store')
+    expect(limited.headers.get('RateLimit-Limit')).toBe('60')
+  })
+
+  test('limits OAuth token requests by the CloudFront viewer address, not the edge address', async () => {
+    const edgeSecret = 'edge-secret-0123456789abcdef0123456789abcdef'
+    const originalEdgeSecret = process.env.MUKUROJI_EDGE_ORIGIN_SECRET
+    process.env.MUKUROJI_EDGE_ORIGIN_SECRET = edgeSecret
+    try {
+      const { router } = createTestRouter()
+      const request = (viewerAddress: string, attempt: number) => router.request(
+        'http://localhost/v1/oauth/token',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'x-mukuroji-edge-secret': edgeSecret,
+            'x-mukuroji-viewer-address': viewerAddress,
+          },
+          body: new URLSearchParams({
+            grant_type: 'client_credentials',
+            client_id: `unknown-client-${attempt}`,
+            client_secret: 'invalid-secret',
+          }).toString(),
+        },
+        // Every request reaches the API from the same CloudFront edge.
+        {
+          event: { requestContext: { http: { sourceIp: '198.51.100.250' } } },
+          requestContext: { http: { sourceIp: '198.51.100.250' } },
+        },
+      )
+
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        expect((await request('203.0.113.9', attempt)).status).toBe(401)
+      }
+      expect((await request('203.0.113.9', 60)).status).toBe(429)
+      // Another viewer behind the same edge keeps its own bucket.
+      expect((await request('203.0.113.10', 61)).status).toBe(401)
+    } finally {
+      if (originalEdgeSecret === undefined) {
+        delete process.env.MUKUROJI_EDGE_ORIGIN_SECRET
+      } else {
+        process.env.MUKUROJI_EDGE_ORIGIN_SECRET = originalEdgeSecret
+      }
+    }
   })
 
   test('uses the trusted Lambda source IP instead of spoofable forwarding headers', async () => {
@@ -2833,12 +2920,10 @@ describe('public API router', () => {
           client_secret: 'invalid-secret',
         }).toString(),
       },
+      // Shaped like the env that hono/aws-lambda passes to the app.
       {
-        event: {
-          requestContext: {
-            http: { sourceIp: '203.0.113.9' },
-          },
-        },
+        event: { requestContext: { http: { sourceIp: '203.0.113.9' } } },
+        requestContext: { http: { sourceIp: '203.0.113.9' } },
       },
     )
 
