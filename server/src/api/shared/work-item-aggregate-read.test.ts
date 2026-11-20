@@ -118,6 +118,24 @@ test('fails closed for a legacy Project ACL whose Project ID several Teams share
   })
 })
 
+test('does not raise a Team-qualified grant with a legacy role whose Project ID several Teams share', async () => {
+  configureDuplicateProjectIds([{ projectId: 'refero', role: 'manager' }])
+  const principal: ProjectPrincipal = {
+    ...otherTeamViewerPrincipal(),
+    enterpriseLegacyProjectAccessSuppressed: false,
+  }
+
+  await runWithTestAppDependencies(async () => {
+    const contexts = await resolveAccessibleWorkItemTeamContexts(principal)
+    expect(contexts.map((context) => context.team.id)).toEqual(['other-team'])
+    expect(contexts[0]?.projectAccesses).toEqual([
+      { teamId: 'other-team', projectId: 'refero', role: 'viewer' },
+    ])
+    await expect(requireTeamPermission(principal, 'other-team', 'member'))
+      .rejects.toMatchObject({ status: 403, code: 'ProjectAccessDenied' })
+  })
+})
+
 test('keeps a legacy Project ACL whose Project ID belongs to exactly one Team', async () => {
   configureFakeProjectClients(true, { projectAccesses: [{ projectId: 'refero', role: 'viewer' }] })
   const principal = legacyPrincipal()

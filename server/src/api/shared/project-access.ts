@@ -968,29 +968,15 @@ export async function getEffectiveProjectScopeAccessList(
     }
     return current
   }
-  const enterpriseScopesByProject = new Map<string, ProjectAccessEntry[]>()
-  for (const enterpriseAccessValue of enterpriseAccesses) {
-    if (enterpriseAccessValue.teamId === undefined) continue
-    const projectAccesses = enterpriseScopesByProject.get(enterpriseAccessValue.projectId) ?? []
-    projectAccesses.push(qualifyAccess(enterpriseAccessValue))
-    enterpriseScopesByProject.set(enterpriseAccessValue.projectId, projectAccesses)
-  }
-  const unresolvedLegacyRoleByProject = new Map<string, ProjectRole | undefined>()
+  const enterpriseScopedProjectIds = new Set(
+    enterpriseAccesses.flatMap((access) => access.teamId === undefined ? [] : [access.projectId]),
+  )
   const accessByScope = new Map<string, ProjectAccessEntry>()
   for (const access of directAccesses) {
     const qualifiedAccess = qualifyAccess(access)
-    if (
-      access.teamId === undefined &&
-      qualifiedAccess.teamId === undefined &&
-      enterpriseScopesByProject.has(access.projectId)
-    ) {
-      const currentRole = unresolvedLegacyRoleByProject.get(access.projectId)
-      if (
-        !unresolvedLegacyRoleByProject.has(access.projectId) ||
-        access.role && (!currentRole || projectRoleWeights[access.role] > projectRoleWeights[currentRole])
-      ) {
-        unresolvedLegacyRoleByProject.set(access.projectId, access.role)
-      }
+    // A legacy entry whose Project ID several Teams share cannot say which Team it belongs to.
+    // It never lends its role to a Team-qualified Enterprise entry for the same Project ID.
+    if (qualifiedAccess.teamId === undefined && enterpriseScopedProjectIds.has(access.projectId)) {
       continue
     }
     const scopeKey = `${qualifiedAccess.teamId ?? ''}\0${qualifiedAccess.projectId}`
@@ -998,19 +984,8 @@ export async function getEffectiveProjectScopeAccessList(
   }
   for (const enterpriseAccessValue of enterpriseAccesses) {
     const enterpriseAccess = qualifyAccess(enterpriseAccessValue)
-    const unresolvedLegacyRole = unresolvedLegacyRoleByProject.get(enterpriseAccess.projectId)
-    const mergedEnterpriseAccess = unresolvedLegacyRoleByProject.has(enterpriseAccess.projectId) &&
-      unresolvedLegacyRole !== undefined
-      ? { ...enterpriseAccess, role: unresolvedLegacyRole && enterpriseAccess.role &&
-          projectRoleWeights[unresolvedLegacyRole] > projectRoleWeights[enterpriseAccess.role]
-          ? unresolvedLegacyRole
-          : enterpriseAccess.role ?? unresolvedLegacyRole }
-      : enterpriseAccess
-    const scopeKey = `${mergedEnterpriseAccess.teamId ?? ''}\0${mergedEnterpriseAccess.projectId}`
-    accessByScope.set(
-      scopeKey,
-      mergeAccess(accessByScope.get(scopeKey), mergedEnterpriseAccess),
-    )
+    const scopeKey = `${enterpriseAccess.teamId ?? ''}\0${enterpriseAccess.projectId}`
+    accessByScope.set(scopeKey, mergeAccess(accessByScope.get(scopeKey), enterpriseAccess))
   }
   return [...accessByScope.values()]
 }
