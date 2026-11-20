@@ -2,7 +2,8 @@
 
 保存済み row の schema version を上げる変更（例: 見積の統一、Project profile、calendar policy の参照化）が、
 本番 data を消さずに移行するための契約です。設計判断は
-[ADR 0013](adr/0013-data-migration-runner.md) にあります。
+[ADR 0013](adr/0013-data-migration-runner.md)（runner と checkpoint table）と
+[ADR 0031](adr/0031-data-migration-lambda-and-operator-proof.md)（AWS 上の実行と実行者の検証）にあります。
 
 この文書が定めるのは「1 つの table の、1 つの entity の row を、schema version `N` から `N + 1` へ
 移す」migration です。table の新設・key 設計の変更・別 table への copy は対象外で、それぞれ ADR を伴う
@@ -14,10 +15,16 @@
 | --- | --- |
 | `server/src/modules/data-migration/domain/` | migration 定義・checkpoint・counter・failure code の純粋な契約 |
 | `server/src/modules/data-migration/application/` | bounded・再開可能な runner と、読み取り専用の verifier |
+| `server/src/modules/data-migration/adapter-in/lambda/` | Lambda の起動 payload の検証と、run / verify の呼び出し |
 | `server/src/modules/data-migration/adapter-out/dynamodb/` | parallel scan segment で読む row store と、checkpoint table の store |
-| `server/src/app/composition/data-migration.ts` | DynamoDB adapter と実行者（STS）の解決を組み立てる composition root |
-| `server/scripts/migrations/registry.ts` | CLI から実行できる migration の一覧 |
-| `server/scripts/migrations/run-data-migration.ts` | operator 向け CLI（`bun run data:migrate`） |
+| `server/src/modules/data-migration/adapter-out/sts/` | operator の proof（presigned STS `GetCallerIdentity`）の検証 |
+| `server/src/app/composition/data-migration.ts` | DynamoDB adapter・実行者の解決・Lambda と rehearsal の依存を組み立てる composition root |
+| `server/src/app/composition/data-migration-registry.ts` | CLI と Lambda から実行できる migration の一覧 |
+| `server/src/handlers/data-migration-handler.ts` | Lambda の entrypoint（`DataMigrationFunction`） |
+| `server/scripts/migrations/run-data-migration.ts` | table を直接読み書きする CLI（`bun run data:migrate`。local の Floci 向け） |
+| `server/scripts/migrations/invoke-data-migration-lambda.ts` | AWS 上の Lambda を起動する operator 向け command（`bun run data:migrate:aws`） |
+| `server/scripts/migrations/rehearse-data-migration.ts` | Floci で seed → migration → verify を通す rehearsal（`bun run data:migrate:rehearsal`） |
+| `cdk/lib/subsystems/data-migration.ts` | checkpoint table、Lambda、role、operator policy |
 
 migration 定義そのものは、その table を所有する module に置き、registry には一覧として並べるだけにします。
 
@@ -53,7 +60,9 @@ runner は `transform` の結果を書き込む前に、次をすべて確かめ
 - table は parallel scan の segment（`segment-<i>-of-<n>`、`--segments`、既定 4、最大 64）に分け、
   segment が checkpoint の partition になります。
 - 1 page は strongly consistent な Scan で最大 100 行（`--page-size`）。1 回の実行で読む page 数は
-  `--max-pages` で上限を決め、使い切ると `paused`（exit 3）で終わります。同じ command をもう一度実行すると
+  `--max-pages` で上限を決め、使い切ると `paused`（exit 3）で終わります。Lambda では、15 分の上限から
+  1 分と「1 page を書き込み budget で書き切るのに最悪かかる時間」（page の行数 × 3 回 ÷ 毎秒の書き込み数）を
+  引いた時刻を過ぎると、新しい page を読まずに `paused` で終わります。page は途中で切らないためです。同じ command をもう一度実行すると
   checkpoint の続きから再開します。
 - 書き込みは `--max-writes-per-second`（既定 25）の間隔を空けます。
 - 1 page を書き終えるたびに checkpoint を compare-and-set で保存します。page の途中で失敗した場合、
@@ -133,12 +142,43 @@ check が成功」は、この `verify` の `pass` と integrity check の成功
 record を結果で更新します。保存できなければ row を 1 行も書かずに `RUN_LOG_FAILED` で止まります。
 
 - key: `migrationId = RUN#<migration id>`、`partitionId = <開始時刻>#<run ID>`（checkpoint の partition とは分ける）
-- 内容: 実行者（STS `GetCallerIdentity` の ARN。local emulator では `local-emulator`）、物理 table 名、
+- 内容: 実行者（CLI では STS `GetCallerIdentity` の ARN、Lambda では operator の proof を STS で確かめた ARN。
+  local emulator と rehearsal では `local-emulator`）、物理 table 名、
   version、segment 数、状態（`started` → `completed` / `paused` / `failed`）、failure code、page 数、行数、開始・終了時刻
 
 Migration は Workspace をまたいで table 全体を書き換えるため、Workspace 単位の監査 event
-（[event-audit.md](event-audit.md)）ではなく、この run record と CloudTrail の IAM 記録を実行者の記録にします。
-dry run と `verify` は書き込まないので記録しません。
+（[event-audit.md](event-audit.md)）ではなく、この run record を実行者の記録にします。dry run と `verify` は
+書き込まないので run record を作りません。
+
+Lambda で実行した場合は、これに加えて function の log group（1 年保持）に、起動ごとに 1 行の
+`data-migration.invocation` を残します。中身は Lambda の request ID、command、migration ID、論理 table 名、mode、
+status、counter、`--apply` では確かめた実行者の ARN です。物理 table 名、key、row の内容、proof は入りません。
+`list` と、断った起動（不正な payload の `INVALID_REQUEST`、`MIGRATION_NOT_FOUND`、`TABLE_NOT_CONFIGURED`）も
+1 行ずつ残ります。proof を確かめられずに断った `--apply` は `OPERATOR_UNVERIFIED` として、理由の code
+（`STS_REJECTED`、`PROOF_TARGET_INVALID`、`PROOF_EXPIRED`、`ACCOUNT_MISMATCH` など）付きで残ります。
+
+### AWS 上の実行者の確認（operator proof）
+
+Lambda は自分の role で table を読み書きするので、STS に自分を問い合わせても function の role しか分かりません。
+そこで `--apply` の起動には、operator が自分の AWS credential で作った STS `GetCallerIdentity` の presigned URL
+（有効期限 5 分、最大 15 分まで受け付ける）を `operatorProof` として載せます。
+
+- operator 側（`bun run data:migrate:aws`）は、function 名・command・migration ID・`apply`・segment 数・
+  page 数・書き込み budget・起動ごとの nonce から SHA-256 の digest を作り、`x-mukuroji-data-migration-request`
+  header の値として署名に含めます。URL には digest を載せません。
+- Lambda は URL が自分の region の `https://sts.<region>.amazonaws.com/` への `GetCallerIdentity` で、その header が
+  署名に含まれることを確かめてから、自分で計算した digest を header に入れて送ります。payload の別の値や別の起動の
+  proof では署名が合わず、STS が拒否します。redirect は追わず、5 秒で打ち切ります。
+- STS は presigned `GetCallerIdentity` を `X-Amz-Expires` にかかわらず署名から 15 分受け付けるため、Lambda は
+  STS へ送る前に `X-Amz-Date` と `X-Amz-Expires` から期限を自分で確かめます。期限を過ぎた proof は
+  `PROOF_EXPIRED`、署名時刻が 1 分より先の proof は `PROOF_NOT_YET_VALID` で断ります。
+- STS が返した `Arn` と `Account` を使い、`Account` が function の account と違えば断ります。ARN は payload から
+  受け取りません。
+- proof も digest も log や response に出しません。
+
+同じ proof は有効期限内なら同じ payload でもう一度使えますが、その起動も同じ operator の同じ実行として記録され、
+lease が同時実行を防ぎます。function を起動できる principal は `DataMigrationOperatorPolicy` を付けた operator に
+限ります。
 
 ## Evidence
 
@@ -155,6 +195,9 @@ release evidence には、対象 commit、実行した command（物理 table �
 
 ## CLI
 
+AWS 上の table には `bun run data:migrate:aws`（下記）を使います。`bun run data:migrate` は table を直接
+読み書きするので、local の Floci と、table の権限を持つ principal で緊急に実行する場合に限ります。
+
 ```sh
 bun run data:migrate list
 bun run data:migrate run --migration <id> --table-name <table> --checkpoint-table-name <table>
@@ -166,6 +209,47 @@ bun run data:migrate verify --migration <id> --table-name <table> --checkpoint-t
 - exit status: 0 完了 / `pass`、1 失敗、2 使い方の誤り・未登録の migration、3 `paused` / `incomplete`。
 - AWS の table に対する `--apply` は、[server/AGENTS.md](../server/AGENTS.md) のとおりユーザーの明示確認を取ってから実行します。
 
+### AWS 上の Lambda で実行する
+
+```sh
+bun run data:migrate:aws list --function-name <DataMigrationFunctionName>
+bun run data:migrate:aws run --function-name <name> --migration <id>
+bun run data:migrate:aws run --function-name <name> --migration <id> --apply
+bun run data:migrate:aws verify --function-name <name> --migration <id>
+```
+
+- function 名は stack output `DataMigrationFunctionName` です（ARN ではなく名前を渡す）。region は `--region`、
+  なければ `AWS_REGION` / `AWS_DEFAULT_REGION`。
+- payload に物理 table 名は載りません。Lambda は定義の論理 `table` を、CDK が渡す allowlist
+  （`DATA_MIGRATION_TARGET_TABLES`）で物理名に変えます。allowlist に無い table の migration は
+  `TABLE_NOT_CONFIGURED` で断ります。
+- `--segments`、`--page-size`、`--max-pages`、`--max-writes-per-second` と exit status は `data:migrate` と同じです。
+  Lambda が返す JSON をそのまま 1 行で出します。断られた場合の `code` は `INVALID_REQUEST`、`MIGRATION_NOT_FOUND`、
+  `TABLE_NOT_CONFIGURED`、`OPERATOR_UNVERIFIED` と、下記の failure code です。
+- 1 回の起動は同期で待ち、retry しません。CDK の構成と IAM は [cdk/README.md](../cdk/README.md)「Data migration」にあります。
+
+### Floci での rehearsal
+
+```sh
+MUKUROJI_LOCAL_AWS_RUNTIME=floci DYNAMODB_ENDPOINT=http://localhost:4566 bun run data:migrate:rehearsal
+```
+
+local の DynamoDB endpoint でだけ動きます。使い捨ての table に旧 schema の row（既定 60 行、`--rows` で 11〜9999。1 page の 10 行より多くないと中断を再現できない）と
+移行済み・別 entity の row を入れ、Lambda と同じ adapter を通して次を順に確かめ、最後に table を消します
+（`--keep` で残す）。
+
+1. `list` に rehearsal 用の migration が出る
+2. dry run が全行を数え、何も書かない
+3. proof の無い `--apply` を断る
+4. 1 page で止めた `--apply` が `paused` になる
+5. 途中の `verify` が `fail` になる
+6. 再実行した `--apply` が続きから `completed` になる
+7. `verify` が `pass` になる
+8. run record が 2 件（`paused` と `completed`）残る
+
+STS は使えないので、実行者の確認だけは固定の `local-emulator` に置き換えます（実行者の確認は unit test で確かめます）。
+Floci の scan の不具合を避けるため segment は 1 です。
+
 ### Checkpoint table
 
 key は `migrationId`（partition key、S）と `partitionId`（sort key、S）です。checkpoint row は `schemaVersion: 2`
@@ -175,8 +259,8 @@ run record は `RUN#` で始まる別の partition key に置きます。
 local の emulator（Floci）では CLI が初回に table を作ります。Floci の parallel scan は `Limit` 付きで page を
 またぐと segment の割り当てがずれ、行を読み飛ばすことがあります（2026-11 時点の `1.5.33` で確認。実 DynamoDB では
 起きません）。local では `--segments 1` で実行してください。読み飛ばした場合も `verify` は `pending` を数えて
-`fail` になります。AWS 上の table は CDK にまだ定義していません
-（下記「未実装」）。
+`fail` になります。AWS 上では CDK の `DataMigrationCheckpointTable`（`Retain`、PITR、deletion protection）を
+使います。
 
 ## Failure code
 
@@ -207,8 +291,7 @@ local の emulator（Floci）では CLI が初回に table を作ります。Flo
 
 ## 未実装（Issue #365 の残り）
 
-- Floci で旧 schema の seed → migration → verify を 1 command で再現する rehearsal と、CI の smoke
-- Lambda からの実行と、AWS 上の checkpoint table（CDK）
+- rehearsal の CI smoke（`local-runtime.yml` の変更が要る）
 - Team / Workspace の partition を Query で読む row store（今は scan segment のみ）
 - #335・#340・#337 の migration 定義
-- `cdk/README.md` の個別手順の置き換えと、review Skill / `AGENTS.md` の push 前チェックへの組み込み
+- review Skill / `AGENTS.md` の push 前チェックへの組み込み

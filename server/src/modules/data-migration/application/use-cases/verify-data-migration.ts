@@ -8,6 +8,7 @@ import {
 } from '../../domain/data-migration'
 import type {
   DataMigrationCheckpointStore,
+  DataMigrationClock,
   DataMigrationRowStore,
 } from '../ports/data-migration-ports'
 import { assertCheckpointMatches } from './run-data-migration'
@@ -24,6 +25,13 @@ export type VerifyDataMigrationInput = {
   readonly pageSize: number
   /** Page budget; the result is `incomplete` when it runs out. */
   readonly maxPages: number
+  /**
+   * Epoch milliseconds after which no new page is read; the result is then
+   * `incomplete`. Requires `clock`.
+   */
+  readonly deadline?: number
+  /** Time source for `deadline`. */
+  readonly clock?: Pick<DataMigrationClock, 'now'>
 }
 
 /** Content-free evidence of a completion check. */
@@ -36,7 +44,8 @@ export type DataMigrationVerificationReport = {
   readonly toSchemaVersion: number
   /**
    * `pass` when every partition checkpoint is completed and a full read finds
-   * no pending or unknown row; `incomplete` when the page budget ran out.
+   * no pending or unknown row; `incomplete` when the page budget or the
+   * deadline ran out.
    */
   readonly status: 'pass' | 'fail' | 'incomplete'
   /** Stable failure code when the check could not run. */
@@ -86,7 +95,8 @@ export async function verifyDataMigration(
       input.pageSize < 1 ||
       input.pageSize > DATA_MIGRATION_MAX_PAGE_SIZE ||
       !Number.isSafeInteger(input.maxPages) ||
-      input.maxPages < 1
+      input.maxPages < 1 ||
+      (input.deadline !== undefined && (!Number.isFinite(input.deadline) || input.clock === undefined))
     ) {
       throw new DataMigrationFailure('DEFINITION_INVALID')
     }
@@ -99,7 +109,7 @@ export async function verifyDataMigration(
     for (const partitionId of partitionIds) {
       let cursor: string | undefined
       do {
-        if (pagesRead >= input.maxPages) {
+        if (pagesRead >= input.maxPages || deadlinePassed(input)) {
           exhausted = false
           break
         }
@@ -145,4 +155,15 @@ export async function verifyDataMigration(
     completedPartitions,
     ...counts,
   }
+}
+
+/**
+ * Tells whether the verification deadline, when given, has passed.
+ *
+ * @param input - Verification input.
+ * @returns Whether no new page may be read.
+ */
+function deadlinePassed(input: VerifyDataMigrationInput): boolean {
+  if (input.deadline === undefined || input.clock === undefined) return false
+  return input.clock.now() >= input.deadline
 }

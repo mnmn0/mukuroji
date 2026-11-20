@@ -5,6 +5,7 @@ import {
 } from '../../src/app/composition/data-migration'
 import {
   assertValidDataMigrationRegistry,
+  DATA_MIGRATION_INVOCATION_DEFAULTS,
   DATA_MIGRATION_MAX_PAGE_SIZE,
   DATA_MIGRATION_MAX_SEGMENTS,
   DataMigrationFailure,
@@ -15,28 +16,28 @@ import {
   type DataMigrationDefinition,
   type DataMigrationRowStore,
 } from '../../src/modules/data-migration'
-import { dataMigrationRegistry } from './registry'
+import { dataMigrationRegistry } from '../../src/app/composition/data-migration-registry'
 
 /** Process exit status: 0 done, 1 failed, 2 usage error, 3 paused or incomplete. */
 export type DataMigrationCliExitCode = 0 | 1 | 2 | 3
 
 /** Default rows per page for `run`. */
-const DEFAULT_RUN_PAGE_SIZE = 25
+const DEFAULT_RUN_PAGE_SIZE = DATA_MIGRATION_INVOCATION_DEFAULTS.runPageSize
 
 /** Default rows per page for `verify`. */
-const DEFAULT_VERIFY_PAGE_SIZE = DATA_MIGRATION_MAX_PAGE_SIZE
+const DEFAULT_VERIFY_PAGE_SIZE = DATA_MIGRATION_INVOCATION_DEFAULTS.verifyPageSize
 
 /** Default page budget for `run`. */
-const DEFAULT_RUN_MAX_PAGES = 200
+const DEFAULT_RUN_MAX_PAGES = DATA_MIGRATION_INVOCATION_DEFAULTS.runMaxPages
 
 /** Default page budget for `verify`. */
-const DEFAULT_VERIFY_MAX_PAGES = 10_000
+const DEFAULT_VERIFY_MAX_PAGES = DATA_MIGRATION_INVOCATION_DEFAULTS.verifyMaxPages
 
 /** Default parallel scan segments. */
-const DEFAULT_SEGMENTS = 4
+const DEFAULT_SEGMENTS = DATA_MIGRATION_INVOCATION_DEFAULTS.segments
 
 /** Default write budget. */
-const DEFAULT_MAX_WRITES_PER_SECOND = 25
+const DEFAULT_MAX_WRITES_PER_SECOND = DATA_MIGRATION_INVOCATION_DEFAULTS.maxWritesPerSecond
 
 /** Flags that take a value. */
 const VALUE_FLAGS = new Set([
@@ -239,7 +240,7 @@ export function parseDataMigrationCliArguments(arguments_: readonly string[]): D
     maxWritesPerSecond: readInteger(
       values.get('--max-writes-per-second'),
       DEFAULT_MAX_WRITES_PER_SECOND,
-      1000,
+      DATA_MIGRATION_INVOCATION_DEFAULTS.maxWritesPerSecondLimit,
     ),
     apply: booleans.has('--apply'),
   }
