@@ -222,12 +222,14 @@ AI assistance が有効な Workspace では、「Planning draft を生成」で�
 **ダッシュボード**（`/dashboard`）では、ポートフォリオ全体の健全性、更新状態、次の期限、
 次に判断が必要なものを一覧できます。
 
-1 つの Project の状況は、Project 画面の上部の **概要** で確認できます
-（`/projects/<Project ID>/overview?teamId=<Team ID>`）。最新の健全性と次の更新期限、
+1 つの Project の状況は **概要**（`/projects/<Project ID>/overview?teamId=<Team ID>`）で
+確認できます。サイドバーやチーム画面から Project を開くと、最初に概要が表示されます。
+Work Item 一覧からは画面上部の **概要** で戻れます。最新の健全性と次の更新期限、
 Phase・Milestone・Release の予測終了とベースラインからの遅れ、Work Item の完了率と期限超過、
-メンバーとロールを 1 画面にまとめ、各欄から近況（Planning）、Work Item 一覧、タイムライン、
-Factory board、ドキュメントへ移動できます。読み込めなかった欄や読み取り上限を超えた欄は、
-その欄にだけ理由を表示します。
+メンバーとロール、Agent Run のレーン別件数（処理中・Run なし・判断待ち・停滞・失敗・完了。
+Factory board と同じ分類）を 1 画面にまとめ、各欄から近況（Planning）、Work Item 一覧、
+タイムライン、Factory board、ドキュメントへ移動できます。読み込めなかった欄や読み取り上限を
+超えた欄は、その欄にだけ理由を表示します。
 
 ## 9. Project を終結する
 

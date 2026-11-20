@@ -46,6 +46,7 @@ import {
   analyticsReportFixtures,
   analyticsSnapshotFixture,
 } from '../src/analytics/fixtures'
+import { factoryBoardFixture } from '../src/features/factory-board/fixtures'
 import { focusQueueResponseFixture } from '../src/features/focus-queue/fixtures'
 import { aiAssistancePolicyFixture, aiAssistancePreferenceFixture } from '../src/features/ai-assistance/fixtures'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
@@ -1865,6 +1866,11 @@ async function mockAuthenticatedTaskPage(
 
   await page.route(/.*\/api\/teams\/[^/]+\/work-items\/[^/]+\/agent-run-reports(?:\?.*)?$/, async (route) => {
     await route.fulfill({ status: 200, json: { items: [], hasMore: false } })
+  })
+
+  // Factory board read by the Project overview's Agent Run widget.
+  await page.route(/.*\/api\/teams\/[^/]+\/agent-runs$/, async (route) => {
+    await route.fulfill({ status: 200, json: factoryBoardFixture })
   })
 
   await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/relations$/, async (route) => {
@@ -4016,6 +4022,28 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => reopenedWorkItemId).toBe('competitor-report')
     expect(reopenedStatusId).toBe('in-progress')
     expect(requestCounts.issueUpdates).toBe(1)
+  })
+
+  test('Issue #341: サイドバーで Project を開くと概要を既定表示し、Agent Run のレーン件数を表示する', async ({ page }) => {
+    await page.goto('/home')
+
+    await page.getByLabel('メインサイドバー').getByRole('button', { name: 'Refero', exact: true }).click()
+    await expect(page).toHaveURL('/projects/refero/overview?teamId=core-team')
+    await expect(page.getByTestId('project-overview-name')).toHaveText('Refero')
+
+    const agentRuns = page.getByTestId('project-overview-agent-runs')
+    await expect(agentRuns.getByTestId('project-overview-agent-lane-processing')).toContainText('1')
+    await expect(agentRuns.getByTestId('project-overview-agent-lane-decision')).toContainText('2')
+    await expect(agentRuns.getByTestId('project-overview-agent-lane-failed')).toContainText('1')
+    await expect(agentRuns.getByRole('link', { name: 'Factory board を開く' }))
+      .toHaveAttribute('href', '/teams/core-team/factory')
+
+    await page.getByRole('link', { name: 'Work Item 一覧を開く' }).click()
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
+    await expect(page.getByTestId('task-header-project-overview')).toBeVisible()
+
+    await page.getByTestId('task-header-project-overview').click()
+    await expect(page).toHaveURL('/projects/refero/overview?teamId=core-team')
   })
 
   test('主要タスクビューの読み上げ構造とキーボードタブ操作を維持する', async ({ page }) => {
@@ -8883,6 +8911,9 @@ test.describe('authenticated task page', () => {
 
     await sidebar.getByRole('button', { name: 'ブランド刷新', exact: true }).click()
 
+    // Opening a Project from outside its Work Item list starts at its overview (#341).
+    await expect(page).toHaveURL('/projects/brand-refresh/overview?teamId=design-team')
+    await page.getByRole('link', { name: 'Work Item 一覧を開く' }).click()
     await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
     await expect(page.getByTestId('tasks-heading')).toHaveText('ブランド刷新')
     await expect(page.getByTestId('tasks-empty')).toBeVisible()
@@ -9135,6 +9166,9 @@ test.describe('authenticated task page', () => {
       name: 'ブランド刷新',
       exact: true,
     }).click()
+    // Opening a Project from outside its Work Item list starts at its overview (#341).
+    await expect(page).toHaveURL('/projects/brand-refresh/overview?teamId=design-team')
+    await page.getByRole('link', { name: 'Work Item 一覧を開く' }).click()
     await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
     expect(unexpectedDialogCount).toBe(0)
     page.off('dialog', unexpectedDialogHandler)
@@ -10086,6 +10120,9 @@ test.describe('authenticated task page', () => {
 
     await page.getByRole('button', { name: 'プロジェクト 4', exact: true }).click()
     await page.getByRole('button', { name: '新規プロジェクトを開く' }).click()
+    // Opening a Project from outside its Work Item list starts at its overview (#341).
+    await expect(page).toHaveURL('/projects/new-project/overview?teamId=core-team')
+    await page.getByRole('link', { name: 'Work Item 一覧を開く' }).click()
     await expect(page).toHaveURL('/projects/new-project/issues?teamId=core-team')
     await page.getByRole('tab', { name: /権限/ }).click()
     await expect(page.getByTestId('permission-member-row-demo-example-com')).toBeVisible()
@@ -10167,6 +10204,9 @@ test.describe('authenticated task page', () => {
     await expect(sharedLaunchButtons).toHaveCount(2)
     await sharedLaunchButtons.nth(1).click()
 
+    // Opening a Project from outside its Work Item list starts at its overview (#341).
+    await expect(page).toHaveURL('/projects/shared-launch/overview?teamId=design-team')
+    await page.getByRole('link', { name: 'Work Item 一覧を開く' }).click()
     await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team')
     await expect(page.getByTestId('tasks-heading')).toHaveText('共通ローンチ')
     await expect(page.getByLabel('プロジェクトのパンくずリスト')).toContainText(
@@ -11154,7 +11194,8 @@ test.describe('authenticated task page', () => {
     await expect(brandRefreshRow).toContainText('次の対応はありません')
 
     await brandRefreshRow.getByRole('button', { name: 'プロジェクトを開く' }).click()
-    await expect(page).toHaveURL(/\/projects\/brand-refresh\/issues\?teamId=design-team$/)
+    // Opening a Project from a Team view starts at its overview (#341).
+    await expect(page).toHaveURL(/\/projects\/brand-refresh\/overview\?teamId=design-team$/)
   })
 
   test('チームメンバー画面ではプロジェクト横断の権限と負荷を確認できる', async ({ page }) => {
@@ -11191,7 +11232,8 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('team-member-row-viewer2-example-com')).toContainText('viewer')
 
     await page.getByTestId('team-member-project-viewer2-example-com-product-roadmap').click()
-    await expect(page).toHaveURL(/\/projects\/product-roadmap\/issues\?teamId=core-team$/)
+    // Opening a Project from a Team view starts at its overview (#341).
+    await expect(page).toHaveURL(/\/projects\/product-roadmap\/overview\?teamId=core-team$/)
   })
 
   test('通知 Inbox で既読・archive・snooze を永続化し実未読件数へ反映する', async ({ page }) => {
@@ -12350,6 +12392,9 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL('/dashboard')
     await expect(page.getByRole('button', { name: 'ホーム', exact: true })).toBeVisible()
     await page.getByLabel('メインサイドバー').getByRole('button', { name: 'Refero', exact: true }).click()
+    // Opening a Project from outside its Work Item list starts at its overview (#341).
+    await expect(page).toHaveURL('/projects/refero/overview?teamId=core-team')
+    await page.getByRole('link', { name: 'Work Item 一覧を開く' }).click()
     await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
     await page.getByRole('button', { name: '新規タスク', exact: true }).click()
     const nextUserCreateForm = page.getByTestId('create-task-form')
@@ -12456,6 +12501,9 @@ test.describe('authenticated task page', () => {
       await page.getByRole('button', { name: 'ログイン', exact: true }).click()
       await expect(page).toHaveURL('/dashboard')
       await page.getByLabel('メインサイドバー').getByRole('button', { name: 'Refero', exact: true }).click()
+      // Opening a Project from outside its Work Item list starts at its overview (#341).
+      await expect(page).toHaveURL('/projects/refero/overview?teamId=core-team')
+      await page.getByRole('link', { name: 'Work Item 一覧を開く' }).click()
       await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
       await page.getByRole('button', { name: '新規タスク', exact: true }).click()
       const newForm = page.getByTestId('create-task-form')
