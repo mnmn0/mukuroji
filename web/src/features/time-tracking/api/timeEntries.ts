@@ -51,6 +51,12 @@ export type IndirectTimeEntryInput = {
   description: string
   /** Whether the time is chargeable. */
   billable: boolean
+  /**
+   * `true` when editing an entry recorded with start and end times whose date and hours were left
+   * unchanged: the update then keeps its interval instead of turning it into a date-and-minutes
+   * entry, and `date` and `minutes` are not sent. Ignored on creation.
+   */
+  keepRecordedInterval?: true
 }
 
 /** Single-entry lifecycle action. */
@@ -237,7 +243,8 @@ export async function createIndirectTimeEntry(
 }
 
 /**
- * Edits a draft or rejected indirect-work entry, keeping it a date-and-minutes entry.
+ * Edits a draft or rejected indirect-work entry. The entry becomes a date-and-minutes entry unless
+ * `input.keepRecordedInterval` keeps its recorded start and end.
  *
  * @param accessToken - Bearer token of the signed-in member.
  * @param entry - Entry being edited, whose revision is expected.
@@ -262,9 +269,7 @@ export async function updateIndirectTimeEntry(
         expectedRevision: entry.revision,
         category: input.category,
         projectId: input.projectId ?? null,
-        date: input.date,
-        minutes: input.minutes,
-        timeZone: input.timeZone,
+        ...(input.keepRecordedInterval ? {} : { date: input.date, minutes: input.minutes, timeZone: input.timeZone }),
         description: description || null,
         billable: input.billable,
       }),

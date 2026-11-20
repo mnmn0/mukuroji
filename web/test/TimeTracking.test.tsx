@@ -357,6 +357,12 @@ describe('time tracking API', () => {
       expectedRevision: 1, category: 'meeting', projectId: 'refero', date: '2026-11-10', minutes: 90, timeZone: 'Asia/Tokyo', description: null, billable: false,
     })
 
+    requests = respondWith({ entry: { ...meeting, revision: 2 } })
+    await updateIndirectTimeEntry('token', meeting, { ...input, keepRecordedInterval: true }, context)
+    expect(requests[0]?.body).toEqual({
+      expectedRevision: 1, category: 'meeting', projectId: null, description: 'Weekly sync', billable: false,
+    })
+
     requests = respondWith({}, 204)
     await deleteTimeEntry('token', meeting, context)
     expect(requests[0]?.method).toBe('DELETE')

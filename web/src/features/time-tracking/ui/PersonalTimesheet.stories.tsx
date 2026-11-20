@@ -67,6 +67,15 @@ export const IndirectWork: Story = {
         durationMinutes: 120,
         description: 'Weekly sync',
       }),
+      createTimeEntryFixture({
+        id: 'entry-training',
+        workItemId: undefined,
+        category: 'training',
+        startAt: '2026-11-11T09:00:00.000Z',
+        endAt: '2026-11-11T10:30:00.000Z',
+        durationMinutes: 90,
+        description: 'Timed training',
+      }),
     ],
   },
   play: async ({ args, canvasElement }) => {
@@ -80,6 +89,20 @@ export const IndirectWork: Story = {
     await userEvent.click(firstDelete)
     await userEvent.click(canvas.getByRole('button', { name: 'この下書きを削除' }))
     await expect(args.onDeleteEntry).toHaveBeenCalledTimes(1)
+
+    // Editing only the note of a timed entry keeps its start and end.
+    const timedRow = canvas.getByText('Timed training').closest('li')
+    if (!(timedRow instanceof HTMLElement)) throw new Error('Expected the timed entry row.')
+    await userEvent.click(within(timedRow).getByRole('button', { name: /^編集 / }))
+    const form = canvas.getByRole('form', { name: '間接作業を編集' })
+    const note = within(form).getByRole('textbox', { name: 'メモ' })
+    await userEvent.clear(note)
+    await userEvent.type(note, 'Renamed training')
+    await userEvent.click(within(form).getByRole('button', { name: '変更を保存' }))
+    await expect(args.onUpdateIndirectEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'entry-training' }),
+      expect.objectContaining({ description: 'Renamed training', keepRecordedInterval: true }),
+    )
   },
 }
 

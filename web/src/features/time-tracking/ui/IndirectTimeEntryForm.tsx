@@ -91,6 +91,8 @@ export function IndirectTimeEntryForm({
   const currentProjectId = entry?.projectId
   const hasCurrentProject = currentProjectId === undefined || targets.projects.some((project) => project.id === currentProjectId)
   const defaultProjectId = entry ? currentProjectId ?? '' : targets.allowNoProject ? '' : targets.projects[0]?.id ?? ''
+  const defaultDateText = entry ? toLocalDateKey(entry.startAt) : defaultDate
+  const defaultHoursText = entry ? formatHoursInput(entry.durationMinutes) : '1'
 
   /**
    * Validates the inputs and saves the work.
@@ -113,7 +115,11 @@ export function IndirectTimeEntryForm({
     }
     const category = readText('category')
     const date = readText('date')
-    const minutes = readIndirectMinutes(readText('hours'))
+    const hours = readText('hours')
+    // A timed entry keeps its start and end unless the member changes its date or hours.
+    const keepRecordedInterval = entry !== undefined && entry.durationOnly !== true
+      && date === defaultDateText && hours === defaultHoursText
+    const minutes = keepRecordedInterval ? entry.durationMinutes : readIndirectMinutes(hours)
     const projectId = readText('projectId')
     if (!isCategory(category) || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) {
       setError(t('timeTracking.form.invalidTime'))
@@ -134,6 +140,7 @@ export function IndirectTimeEntryForm({
         timeZone: resolveBrowserTimeZone(),
         description: readText('description'),
         billable: data.get('billable') === 'on',
+        ...(keepRecordedInterval ? { keepRecordedInterval } : {}),
       })
     } catch (saveError) {
       setError(describeTimeTrackingFailure(t, saveError))
@@ -184,7 +191,7 @@ export function IndirectTimeEntryForm({
           {t('timeTracking.form.date')}
           <input
             className="workbench-input h-9 w-full min-w-0 px-3"
-            defaultValue={entry ? toLocalDateKey(entry.startAt) : defaultDate}
+            defaultValue={defaultDateText}
             id={`${id}-date`}
             name="date"
             required
@@ -195,7 +202,7 @@ export function IndirectTimeEntryForm({
           {t('timeTracking.indirect.hours')}
           <input
             className="workbench-input h-9 w-full min-w-0 px-3"
-            defaultValue={entry ? formatHoursInput(entry.durationMinutes) : '1'}
+            defaultValue={defaultHoursText}
             id={`${id}-hours`}
             inputMode="decimal"
             name="hours"
