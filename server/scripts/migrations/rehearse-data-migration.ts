@@ -174,6 +174,14 @@ export async function rehearseDataMigration(arguments_: readonly string[]): Prom
       checkpointTableName,
       operator: REHEARSAL_OPERATOR,
     })
+    /**
+     * Invokes the Lambda adapter in-process with a synthetic context: a fresh
+     * request ID per call, a placeholder function and account, and the full
+     * 15 minutes of a Lambda invocation remaining.
+     *
+     * @param payload - Invocation payload, as an operator would send it.
+     * @returns The adapter response.
+     */
     const invoke = async (payload: Readonly<Record<string, unknown>>): Promise<DataMigrationInvocationResponse> => {
       invocation += 1
       return await handleDataMigrationInvocation(payload, {
@@ -185,6 +193,13 @@ export async function rehearseDataMigration(arguments_: readonly string[]): Prom
     }
     // Enough pages to read the whole seed in one invocation, plus the empty last page.
     const fullPages = Math.ceil(seed.rows.length / PAGE_SIZE) + 1
+    /**
+     * Builds an applying run payload. Each call carries a new nonce, as each
+     * operator invocation does; the stub verifier accepts the placeholder proof.
+     *
+     * @param maxPages - Page budget of the invocation.
+     * @returns The payload.
+     */
     const applyPayload = (maxPages: number) => ({
       command: 'run',
       migrationId: definition.id,
@@ -196,10 +211,23 @@ export async function rehearseDataMigration(arguments_: readonly string[]): Prom
       nonce: randomUUID(),
       operatorProof: 'local-rehearsal',
     })
+    /**
+     * Records and prints the outcome of one rehearsal step.
+     *
+     * @param step - Step name.
+     * @param ok - Whether the outcome matched the expectation.
+     * @param result - Content-free response or observation.
+     */
     const check = (step: string, ok: boolean, result: Readonly<Record<string, unknown>>) => {
       steps.push({ step, ok, result })
       console.log(JSON.stringify({ step, ok, result }))
     }
+    /**
+     * Reads the counters of a run response.
+     *
+     * @param response - Adapter response.
+     * @returns The counters, or `undefined` when the response has none.
+     */
     const counters = (response: DataMigrationInvocationResponse) => response.counters
 
     const listed = await invoke({ command: 'list' })

@@ -14,6 +14,9 @@ const PROOF = 'https://sts.ap-northeast-1.amazonaws.com/?Action=GetCallerIdentit
   '&X-Amz-Date=20261120T120000Z&X-Amz-Expires=300' +
   `&X-Amz-SignedHeaders=host%3B${DATA_MIGRATION_OPERATOR_PROOF_HEADER}&X-Amz-Signature=${'b'.repeat(64)}`
 
+/** Signing time of {@link PROOF} in epoch milliseconds. */
+const SIGNED_AT = Date.UTC(2026, 10, 20, 12, 0, 0)
+
 /** Caller ARN STS returns in the fake responses. */
 const ARN = 'arn:aws:sts::123456789012:assumed-role/migration-operator/alice'
 
@@ -34,12 +37,17 @@ function identityResponse(arn = ARN, account = '123456789012'): Response {
  * Creates a verifier over a recording fake `fetch`.
  *
  * @param respond - Response factory.
+ * @param now - Verifier clock; one minute after {@link PROOF} was signed by default.
  * @returns The verifier and the recorded calls.
  */
-function createVerifier(respond: () => Response | Promise<Response> = () => identityResponse()) {
+function createVerifier(
+  respond: () => Response | Promise<Response> = () => identityResponse(),
+  now: () => number = () => SIGNED_AT + 60_000,
+) {
   const calls: { url: string; init: RequestInit }[] = []
   const verify = createStsDataMigrationOperatorVerifier({
     region: 'ap-northeast-1',
+    now,
     fetch: async (url, init) => {
       calls.push({ url, init })
       return await respond()
@@ -103,10 +111,26 @@ describe('createStsDataMigrationOperatorVerifier', () => {
       PROOF.replace('&X-Amz-Signature=', '&X-Amz-Signature=x&X-Amz-Signature='),
       `${PROOF}&RoleArn=arn`,
       PROOF.replace('&X-Amz-Date=20261120T120000Z', ''),
+      PROOF.replace('X-Amz-Date=20261120T120000Z', 'X-Amz-Date=2026-11-20T12:00:00Z'),
+      PROOF.replace('X-Amz-Date=20261120T120000Z', 'X-Amz-Date=20261131T120000Z'),
     ]) {
       expect(await reasonOf(verify({ proof, binding: BINDING, accountId: '123456789012' }))).toBe('PROOF_PARAMETERS_INVALID')
     }
     expect(calls).toEqual([])
+  })
+
+  test('enforces the declared expiry from the signing time, since STS accepts the URL for 15 minutes', async () => {
+    const request = { proof: PROOF, binding: BINDING, accountId: '123456789012' }
+    const atExpiry = createVerifier(undefined, () => SIGNED_AT + 300_000)
+    expect(await atExpiry.verify(request)).toBe(ARN)
+    const expired = createVerifier(undefined, () => SIGNED_AT + 300_001)
+    expect(await reasonOf(expired.verify(request))).toBe('PROOF_EXPIRED')
+    expect(expired.calls).toEqual([])
+    const skewed = createVerifier(undefined, () => SIGNED_AT - 60_000)
+    expect(await skewed.verify(request)).toBe(ARN)
+    const early = createVerifier(undefined, () => SIGNED_AT - 60_001)
+    expect(await reasonOf(early.verify(request))).toBe('PROOF_NOT_YET_VALID')
+    expect(early.calls).toEqual([])
   })
 
   test('rejects a refused, malformed or foreign-account identity', async () => {

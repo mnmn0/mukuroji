@@ -152,8 +152,10 @@ Migration は Workspace をまたいで table 全体を書き換えるため、W
 
 Lambda で実行した場合は、これに加えて function の log group（1 年保持）に、起動ごとに 1 行の
 `data-migration.invocation` を残します。中身は Lambda の request ID、command、migration ID、論理 table 名、mode、
-status、counter、`--apply` では確かめた実行者の ARN です。proof を確かめられずに断った `--apply` も
-`OPERATOR_UNVERIFIED` として、理由の code（`STS_REJECTED`、`PROOF_TARGET_INVALID`、`ACCOUNT_MISMATCH` など）付きで残ります。
+status、counter、`--apply` では確かめた実行者の ARN です。物理 table 名、key、row の内容、proof は入りません。
+`list` と、断った起動（不正な payload の `INVALID_REQUEST`、`MIGRATION_NOT_FOUND`、`TABLE_NOT_CONFIGURED`）も
+1 行ずつ残ります。proof を確かめられずに断った `--apply` は `OPERATOR_UNVERIFIED` として、理由の code
+（`STS_REJECTED`、`PROOF_TARGET_INVALID`、`PROOF_EXPIRED`、`ACCOUNT_MISMATCH` など）付きで残ります。
 
 ### AWS 上の実行者の確認（operator proof）
 
@@ -167,6 +169,9 @@ Lambda は自分の role で table を読み書きするので、STS に自分�
 - Lambda は URL が自分の region の `https://sts.<region>.amazonaws.com/` への `GetCallerIdentity` で、その header が
   署名に含まれることを確かめてから、自分で計算した digest を header に入れて送ります。payload の別の値や別の起動の
   proof では署名が合わず、STS が拒否します。redirect は追わず、5 秒で打ち切ります。
+- STS は presigned `GetCallerIdentity` を `X-Amz-Expires` にかかわらず署名から 15 分受け付けるため、Lambda は
+  STS へ送る前に `X-Amz-Date` と `X-Amz-Expires` から期限を自分で確かめます。期限を過ぎた proof は
+  `PROOF_EXPIRED`、署名時刻が 1 分より先の proof は `PROOF_NOT_YET_VALID` で断ります。
 - STS が返した `Arn` と `Account` を使い、`Account` が function の account と違えば断ります。ARN は payload から
   受け取りません。
 - proof も digest も log や response に出しません。

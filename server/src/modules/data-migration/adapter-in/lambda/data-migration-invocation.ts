@@ -228,11 +228,12 @@ export async function handleDataMigrationInvocation(
   dependencies: DataMigrationInvocationDependencies,
 ): Promise<DataMigrationInvocationResponse> {
   const request = parseDataMigrationInvocation(event)
-  if (request === undefined) return refuse('unknown', 'INVALID_REQUEST')
+  if (request === undefined) return refuse(dependencies, context, 'unknown', 'INVALID_REQUEST')
   const operation = request.command
   try {
     assertValidDataMigrationRegistry(dependencies.registry)
     if (request.command === 'list') {
+      writeAudit(dependencies, context, { operation, status: 'completed', migrations: dependencies.registry.length })
       return {
         operation,
         migrations: dependencies.registry.map((definition) => ({
@@ -246,9 +247,16 @@ export async function handleDataMigrationInvocation(
       }
     }
     const definition = dependencies.registry.find((candidate) => candidate.id === request.migrationId)
-    if (definition === undefined) return refuse(operation, 'MIGRATION_NOT_FOUND')
+    if (definition === undefined) {
+      return refuse(dependencies, context, operation, 'MIGRATION_NOT_FOUND', { migrationId: request.migrationId })
+    }
     const tableName = dependencies.targetTables.get(definition.table)
-    if (tableName === undefined) return refuse(operation, 'TABLE_NOT_CONFIGURED')
+    if (tableName === undefined) {
+      return refuse(dependencies, context, operation, 'TABLE_NOT_CONFIGURED', {
+        migrationId: definition.id,
+        table: definition.table,
+      })
+    }
     // A page is never cut short, so the last page must fit between the deadline and the Lambda limit.
     const deadline = dependencies.clock.now() +
       Math.max(0, context.remainingMilliseconds - DEADLINE_SAFETY_MILLISECONDS - pageWriteMilliseconds(request))
@@ -281,16 +289,12 @@ export async function handleDataMigrationInvocation(
         })
       } catch (error: unknown) {
         const reason = error instanceof Error && REASON_CODE_PATTERN.test(error.message) ? error.message : undefined
-        writeAudit(dependencies, context, {
-          operation,
+        return refuse(dependencies, context, operation, 'OPERATOR_UNVERIFIED', {
           migrationId: definition.id,
           table: definition.table,
           mode: 'apply',
-          status: 'error',
-          code: 'OPERATOR_UNVERIFIED',
           ...(reason === undefined ? {} : { reason }),
         })
-        return refuse(operation, 'OPERATOR_UNVERIFIED')
       }
     }
     const stores = await dependencies.createStores({
@@ -331,16 +335,25 @@ export async function handleDataMigrationInvocation(
 }
 
 /**
- * Builds a refusal response.
+ * Records a refusal in the audit log and builds its response. The audit
+ * line carries only the given validated fields, never the raw event or the
+ * proof.
  *
+ * @param dependencies - Adapter dependencies.
+ * @param context - Invocation facts.
  * @param operation - Command, or `unknown`.
  * @param code - Refusal code.
+ * @param fields - Validated, content-free fields for the audit line only.
  * @returns The response.
  */
 function refuse(
+  dependencies: DataMigrationInvocationDependencies,
+  context: DataMigrationInvocationContext,
   operation: DataMigrationInvocationResponse['operation'],
   code: DataMigrationInvocationErrorCode,
+  fields: Readonly<Record<string, unknown>> = {},
 ): DataMigrationInvocationResponse {
+  writeAudit(dependencies, context, { operation, status: 'error', code, ...fields })
   return { operation, status: 'error', code }
 }
 

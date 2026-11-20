@@ -47,7 +47,7 @@ Lambda の `Invoke` は CloudTrail の data event で、既定では記録され
 - 選択肢 A（採用）: operator が起動する Lambda と presigned STS proof。
   利点: 待機中は費用ゼロ。operator は invoke 権限だけで、table 権限は function の role に閉じる。実行者は STS が
   認証した ARN で、payload の自己申告ではない。追加の AWS service が要らない（EKS の `aws-iam-authenticator` と同じ方式）。
-  欠点: 実行者の確認を自前で実装する（宛先・parameter・header・応答の検証）。proof は有効期限（5 分、最大 15 分）内なら
+  欠点: 実行者の確認を自前で実装する（宛先・parameter・header・応答の検証と、STS が `X-Amz-Expires` を守らないので署名時刻からの期限の検証）。proof は有効期限（5 分、最大 15 分）内なら
   同じ payload で再利用できる。operator 側に `bun` と repository が要る。
 - 選択肢 B: CloudTrail の trail で Lambda の data event を記録する。
   利点: 実装が要らず、AWS 側の記録になる。欠点: trail、S3 bucket、advanced event selector が増え、記録が run record と

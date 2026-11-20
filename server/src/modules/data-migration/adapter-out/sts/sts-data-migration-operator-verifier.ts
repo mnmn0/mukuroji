@@ -13,6 +13,15 @@ export const DATA_MIGRATION_OPERATOR_PROOF_HEADER = 'x-mukuroji-data-migration-r
 /** Longest accepted proof validity in seconds. */
 export const DATA_MIGRATION_OPERATOR_PROOF_MAX_EXPIRES_SECONDS = 900
 
+/**
+ * Largest accepted distance in the future of a proof's signing time, for
+ * clock skew between the operator and the function.
+ */
+export const DATA_MIGRATION_OPERATOR_PROOF_MAX_CLOCK_SKEW_SECONDS = 60
+
+/** Shape of a SigV4 `X-Amz-Date` value. */
+const AMZ_DATE_PATTERN = /^([0-9]{4})([0-9]{2})([0-9]{2})T([0-9]{2})([0-9]{2})([0-9]{2})Z$/u
+
 /** Query parameters a presigned `GetCallerIdentity` URL may carry. */
 const ALLOWED_QUERY_PARAMETERS = new Set([
   'Action',
@@ -59,6 +68,8 @@ export type StsDataMigrationOperatorVerifierOptions = {
   readonly region: string
   /** HTTP client; defaults to the global `fetch`. */
   readonly fetch?: (input: string, init: RequestInit) => Promise<Response>
+  /** Current time in epoch milliseconds; defaults to `Date.now`. */
+  readonly now?: () => number
 }
 
 /** Reason a proof was rejected, for logs and tests only. */
@@ -83,10 +94,12 @@ export class DataMigrationOperatorProofError extends Error {
  * `GetCallerIdentity` URL. The URL must target this region's STS endpoint
  * and must have the binding header signed; the verifier sends that header
  * with the expected binding, so STS accepts the request only when the
- * operator signed this exact invocation. The returned ARN comes from STS,
- * never from the payload.
+ * operator signed this exact invocation. STS honours a presigned
+ * `GetCallerIdentity` URL for 15 minutes whatever `X-Amz-Expires` says, so
+ * the verifier enforces the declared expiry itself from `X-Amz-Date`. The
+ * returned ARN comes from STS, never from the payload.
  *
- * @param options - Region and HTTP client.
+ * @param options - Region, HTTP client and clock.
  * @returns The verifier.
  */
 export function createStsDataMigrationOperatorVerifier(
@@ -94,11 +107,13 @@ export function createStsDataMigrationOperatorVerifier(
 ): DataMigrationOperatorVerifier {
   if (!REGION_PATTERN.test(options.region)) throw new DataMigrationOperatorProofError('REGION_INVALID')
   const fetchImplementation = options.fetch ?? ((input: string, init: RequestInit) => fetch(input, init))
+  const now = options.now ?? (() => Date.now())
   const expectedHost = `sts.${options.region}.amazonaws.com`
   return async (request: DataMigrationOperatorProofRequest): Promise<string> => {
     if (!ACCOUNT_ID_PATTERN.test(request.accountId)) throw new DataMigrationOperatorProofError('ACCOUNT_INVALID')
     if (!/^[0-9a-f]{64}$/u.test(request.binding)) throw new DataMigrationOperatorProofError('BINDING_INVALID')
     const url = parseProofUrl(request.proof, expectedHost)
+    assertProofCurrent(url, now())
     let response: Response
     try {
       response = await fetchImplementation(url.toString(), {
@@ -168,6 +183,37 @@ function parseProofUrl(proof: string, expectedHost: string): URL {
     expires <= DATA_MIGRATION_OPERATOR_PROOF_MAX_EXPIRES_SECONDS
   if (!valid) throw new DataMigrationOperatorProofError('PROOF_PARAMETERS_INVALID')
   return url
+}
+
+/**
+ * Rejects a proof outside its validity window: signed more than the allowed
+ * clock skew in the future, or past its signing time plus `X-Amz-Expires`.
+ * The query parameters were already checked by {@link parseProofUrl}.
+ *
+ * @param url - Parsed proof URL.
+ * @param nowMilliseconds - Current time in epoch milliseconds.
+ */
+function assertProofCurrent(url: URL, nowMilliseconds: number): void {
+  const match = AMZ_DATE_PATTERN.exec(url.searchParams.get('X-Amz-Date') ?? '')
+  if (match === null) throw new DataMigrationOperatorProofError('PROOF_PARAMETERS_INVALID')
+  const [year, month, day, hour, minute, second] = match.slice(1).map(Number)
+  const signedAt = Date.UTC(year ?? 0, (month ?? 0) - 1, day, hour, minute, second)
+  const roundTrip = new Date(signedAt)
+  if (
+    Number.isNaN(signedAt) ||
+    roundTrip.getUTCMonth() + 1 !== month ||
+    roundTrip.getUTCDate() !== day ||
+    roundTrip.getUTCHours() !== hour ||
+    roundTrip.getUTCMinutes() !== minute ||
+    roundTrip.getUTCSeconds() !== second
+  ) {
+    throw new DataMigrationOperatorProofError('PROOF_PARAMETERS_INVALID')
+  }
+  const expiresAt = signedAt + Number(url.searchParams.get('X-Amz-Expires')) * 1000
+  if (signedAt > nowMilliseconds + DATA_MIGRATION_OPERATOR_PROOF_MAX_CLOCK_SKEW_SECONDS * 1000) {
+    throw new DataMigrationOperatorProofError('PROOF_NOT_YET_VALID')
+  }
+  if (nowMilliseconds > expiresAt) throw new DataMigrationOperatorProofError('PROOF_EXPIRED')
 }
 
 /**

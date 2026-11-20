@@ -117,10 +117,17 @@ describe('computeDataMigrationRequestBinding', () => {
 })
 
 describe('handleDataMigrationInvocation', () => {
-  test('lists the registered migrations', async () => {
-    const { dependencies } = createDependencies()
+  test('lists the registered migrations and records the invocation', async () => {
+    const { dependencies, auditLines } = createDependencies()
     const response = await handleDataMigrationInvocation({ command: 'list' }, context, dependencies)
     expect(response).toMatchObject({ operation: 'list', migrations: [{ id: '0001-task-estimate-points', table: 'work-items' }] })
+    expect(auditLines.map((line) => JSON.parse(line))).toEqual([{
+      type: 'data-migration.invocation',
+      requestId: 'request-1',
+      operation: 'list',
+      status: 'completed',
+      migrations: 1,
+    }])
   })
 
   test('dry-runs without a proof and writes nothing', async () => {
@@ -177,8 +184,8 @@ describe('handleDataMigrationInvocation', () => {
     expect(JSON.parse(auditLines[0] ?? '{}')).toMatchObject({ code: 'OPERATOR_UNVERIFIED', mode: 'apply', reason: 'STS_REJECTED' })
   })
 
-  test('refuses an unknown migration and a table outside the allowlist', async () => {
-    const { dependencies } = createDependencies({ targetTables: new Map() })
+  test('refuses an unknown migration and a table outside the allowlist, recording each refusal once', async () => {
+    const { dependencies, auditLines } = createDependencies({ targetTables: new Map() })
     expect(await handleDataMigrationInvocation(
       { command: 'verify', migrationId: '9999-missing' }, context, dependencies,
     )).toEqual({ operation: 'verify', status: 'error', code: 'MIGRATION_NOT_FOUND' })
@@ -187,6 +194,14 @@ describe('handleDataMigrationInvocation', () => {
     )).toEqual({ operation: 'verify', status: 'error', code: 'TABLE_NOT_CONFIGURED' })
     expect(await handleDataMigrationInvocation({ command: 'drop' }, context, dependencies))
       .toEqual({ operation: 'unknown', status: 'error', code: 'INVALID_REQUEST' })
+    expect(await handleDataMigrationInvocation({ ...applyPayload, operatorProof: undefined }, context, dependencies))
+      .toEqual({ operation: 'unknown', status: 'error', code: 'INVALID_REQUEST' })
+    expect(auditLines.map((line) => JSON.parse(line))).toEqual([
+      { type: 'data-migration.invocation', requestId: 'request-1', operation: 'verify', status: 'error', code: 'MIGRATION_NOT_FOUND', migrationId: '9999-missing' },
+      { type: 'data-migration.invocation', requestId: 'request-1', operation: 'verify', status: 'error', code: 'TABLE_NOT_CONFIGURED', migrationId: '0001-task-estimate-points', table: 'work-items' },
+      { type: 'data-migration.invocation', requestId: 'request-1', operation: 'unknown', status: 'error', code: 'INVALID_REQUEST' },
+      { type: 'data-migration.invocation', requestId: 'request-1', operation: 'unknown', status: 'error', code: 'INVALID_REQUEST' },
+    ])
   })
 
   test('moves the deadline earlier by the worst-case write time of one page', async () => {

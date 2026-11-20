@@ -1200,7 +1200,9 @@ bun run data:migrate:aws verify --function-name "$DATA_MIGRATION_FUNCTION" --mig
   STS endpoint へ送り、STS が返した ARN を実行者として run record と log に残します。proof が無い、
   別の起動の proof、期限切れ、別 account のときは `OPERATOR_UNVERIFIED` で、row も checkpoint も書きません。
 - 実行者の記録は checkpoint table の run record（`migrationId = RUN#<id>`）と、function の log group（1 年保持）
-  の `data-migration.invocation` 行です。どちらにも key、row の内容、物理 table 名、proof は含みません。
+  の `data-migration.invocation` 行です。run record には実行者・物理 table 名・状態・counter が入り、
+  row の key・内容と proof は入りません。log 行は `list` や断った起動も含めて起動ごとに 1 行で、論理 table 名
+  だけを使い、物理 table 名・key・row の内容・proof は入りません。
 
 ## Work Item configuration
 
