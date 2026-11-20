@@ -6,11 +6,15 @@ const connectorOAuthRestartPath = '/settings?developerSection=connectors'
 /**
  * Tells whether a path is the Web page that receives connector OAuth callback secrets.
  *
+ * The router matches paths case-insensitively, so this check does too.
+ *
  * @param pathname - URL path without search or hash.
- * @returns Whether the path is the connector OAuth callback page, ignoring a trailing slash.
+ * @returns Whether the path is the connector OAuth callback page, ignoring a trailing slash
+ *   and letter case.
  */
 function isConnectorOAuthCallbackPath(pathname: string) {
-  return pathname.replace(/\/+$/u, '') === CONNECTOR_OAUTH_CALLBACK_APP_PATH
+  return pathname.replace(/\/+$/u, '').toLowerCase() ===
+    CONNECTOR_OAUTH_CALLBACK_APP_PATH.toLowerCase()
 }
 
 /**

@@ -92,6 +92,8 @@ describe('connector OAuth callback secrets', () => {
       callbackPath,
       '/settings/connectors/oauth-callback/?x=1#state=v1.signed-state&cancelled=true',
       '/settings/connectors/oauth-callback',
+      // The router matches paths case-insensitively, so letter case must not bypass this.
+      '/Settings/Connectors/OAUTH-CALLBACK#state=v1.signed-state&code=provider-code',
     ]) {
       expect(resolveSafeLoginReturnPath(path)).toBe('/settings?developerSection=connectors')
     }

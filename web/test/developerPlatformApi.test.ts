@@ -273,6 +273,25 @@ describe('Developer Platform API', () => {
     })
   })
 
+  test('rejects a connector OAuth completion that does not match the contract', async () => {
+    for (const body of [
+      { outcome: 'connected', returnUrl: 'https://evil.example/settings' },
+      { outcome: 'connected', returnUrl: '//evil.example/settings' },
+      { outcome: 'unknown', returnUrl: '/settings' },
+      { outcome: 'cancelled' },
+    ]) {
+      installFetchRecorder(body)
+
+      await expect(
+        completeDeveloperConnectorOAuth(
+          'access-token',
+          { state: 'signed-state', cancelled: true },
+          mutationContext,
+        ),
+      ).rejects.toMatchObject({ code: 'InvalidDeveloperPlatformResponse', retryable: false })
+    }
+  })
+
   test('connects, recovers, disconnects, and resolves connector conflicts', async () => {
     const requests = installFetchRecorder({})
 
