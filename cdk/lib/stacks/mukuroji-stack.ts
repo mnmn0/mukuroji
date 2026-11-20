@@ -13,6 +13,7 @@ import {
 import { buildBootstrapResources } from '../subsystems/bootstrap-resources';
 import { buildCostBudget } from '../subsystems/cost-budget';
 import { buildCrossDomainIntegrityAccess } from '../subsystems/cross-domain-integrity';
+import { buildDataMigration } from '../subsystems/data-migration';
 import { buildDataStores } from '../subsystems/data-stores';
 import {
   buildFileStorage,
@@ -147,6 +148,13 @@ export class MukurojiStack extends cdk.Stack {
       workItemsTable: dataStores.workItemsTable,
       workItemConfigurationTable: dataStores.workItemConfigurationTable,
       workspaceAccessTable: dataStores.workspaceAccessTable,
+    });
+    buildDataMigration(this, {
+      lambdaBuildPaths,
+      targets: [
+        { logicalName: 'work-items', table: dataStores.workItemsTable },
+        { logicalName: 'project-directory', table: dataStores.projectDirectoryTable },
+      ],
     });
     const restoreDrill = parameters.restoreDrillCleanupApproverRoleArn
       ? buildRestoreDrill(this, {

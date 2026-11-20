@@ -14,6 +14,9 @@ const ATTRIBUTE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/u
 /** Upper bound on rows read in one page, matching the bounded-page rule. */
 export const DATA_MIGRATION_MAX_PAGE_SIZE = 100
 
+/** Largest number of parallel scan segments a plan may use. */
+export const DATA_MIGRATION_MAX_SEGMENTS = 64
+
 /** One stored row, as read from the table. */
 export type DataMigrationRow = Readonly<Record<string, unknown>>
 
