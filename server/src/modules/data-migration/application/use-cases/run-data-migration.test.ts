@@ -346,4 +346,47 @@ describe('verifyDataMigration', () => {
       definition: createTaskEstimateMigration(), rowStore: unknown, checkpointStore, pageSize: 10, maxPages: 10,
     })).toMatchObject({ status: 'fail', unknownRows: 1 })
   })
+
+})
+
+describe('data migration deadline', () => {
+  test('pauses at the deadline and resumes from the checkpoint', async () => {
+    const rowStore = createMemoryRowStore({ 'segment-0-of-1': [1, 2, 3, 4].map(createPendingTaskRow) })
+    const checkpointStore = createMemoryCheckpointStore()
+    const clock = createManualClock()
+    const first = await runDataMigration(createInput({
+      rowStore,
+      checkpointStore,
+      clock,
+      maxWritesPerSecond: 1,
+      deadline: clock.now() + 500,
+    }))
+    expect(first.status).toBe('paused')
+    expect(first.pagesRead).toBe(1)
+    expect(first.counters.migrated).toBe(2)
+
+    const second = await runDataMigration(createInput({ rowStore, checkpointStore, clock, runId: 'run-2' }))
+    expect(second.status).toBe('completed')
+    expect(second.counters.migrated).toBe(2)
+  })
+
+  test('rejects a deadline that is not a finite time', async () => {
+    const rowStore = createMemoryRowStore({ 'segment-0-of-1': [createPendingTaskRow(1)] })
+    const report = await runDataMigration(createInput({ rowStore, deadline: Number.NaN }))
+    expect(report).toMatchObject({ status: 'failed', failureCode: 'DEFINITION_INVALID' })
+  })
+
+  test('verify reports incomplete at the deadline and needs a clock for it', async () => {
+    const rowStore = createMemoryRowStore({ 'segment-0-of-1': [1, 2, 3].map(createPendingTaskRow) })
+    const checkpointStore = createMemoryCheckpointStore()
+    const clock = createManualClock()
+    expect(await verifyDataMigration({
+      definition: createTaskEstimateMigration(), rowStore, checkpointStore, pageSize: 1, maxPages: 10,
+      clock, deadline: clock.now(),
+    })).toMatchObject({ status: 'incomplete', scanned: 0 })
+    expect(await verifyDataMigration({
+      definition: createTaskEstimateMigration(), rowStore, checkpointStore, pageSize: 1, maxPages: 10,
+      deadline: clock.now() + 1000,
+    })).toMatchObject({ status: 'fail', failureCode: 'DEFINITION_INVALID' })
+  })
 })
