@@ -8,6 +8,12 @@ import {
 import { NotificationSettingsPanel } from '../src/notifications/ui/NotificationSettingsPanel'
 import { TeamReminderSettingsPanel } from '../src/notifications/ui/TeamReminderSettingsPanel'
 import { createReminderDaysDraft, readReminderDaysDraft } from '../src/notifications/model/reminderDays'
+import {
+  finishTeamReminderSave,
+  listTeamReminderSaveErrors,
+  readTeamReminderSave,
+  startTeamReminderSave,
+} from '../src/notifications/model/teamReminderSaveState'
 import { notificationPreferencesControllerFixture, notificationPreferencesFixture } from '../src/notifications/fixtures'
 import type { TeamReminderSettingsController } from '../src/notifications/mutations/useTeamReminderSettings'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -38,7 +44,11 @@ function findInput(html: string, locale: 'ja' | 'en', field: NotificationReminde
  * @param isSaving - Whether a save is running.
  * @returns Controller fixture.
  */
-function createTeamController(canManage: boolean, isSaving = false): TeamReminderSettingsController {
+function createTeamController(
+  canManage: boolean,
+  isSaving = false,
+  saveResult?: TeamReminderSettingsController['saveResult'],
+): TeamReminderSettingsController {
   return {
     settings: {
       teamId: 'core',
@@ -57,6 +67,7 @@ function createTeamController(canManage: boolean, isSaving = false): TeamReminde
     hasLoadError: false,
     isUnavailable: false,
     isSaving,
+    ...(saveResult ? { saveResult } : {}),
     sessionErrors: [],
     refresh: async () => undefined,
     save: async () => true,
@@ -91,6 +102,35 @@ describe('reminder day settings', () => {
     const savingHtml = renderToStaticMarkup(<TeamReminderSettingsPanel controller={createTeamController(true, true)} t={t} />)
     expect(findInput(savingHtml, 'en', 'dueSoonDays')).toContain('disabled=""')
     expect(findInput(managerHtml, 'en', 'dueSoonDays')).not.toContain('disabled=""')
+    // A failed save ends the saving state, so the manager can edit and retry.
+    const failedHtml = renderToStaticMarkup(<TeamReminderSettingsPanel controller={createTeamController(true, false, 'error')} t={t} />)
+    expect(findInput(failedHtml, 'en', 'dueSoonDays')).not.toContain('disabled=""')
+  })
+
+  test('keeps each Team\'s save state with that Team when the page moves to another Team', () => {
+    const expired = Object.assign(new Error('Session expired'), { status: 401 })
+    // Team A starts saving, then the page moves to Team B.
+    let states = startTeamReminderSave({}, 'team-a')
+    expect(readTeamReminderSave(states, 'team-a')).toEqual({ isSaving: true })
+    expect(readTeamReminderSave(states, 'team-b')).toEqual({ isSaving: false })
+
+    // Team B saves on its own while A is still running.
+    states = startTeamReminderSave(states, 'team-b')
+    states = finishTeamReminderSave(states, 'team-b', 'saved')
+    expect(readTeamReminderSave(states, 'team-b')).toEqual({ isSaving: false, result: 'saved' })
+    expect(readTeamReminderSave(states, 'team-a').isSaving).toBe(true)
+
+    // A's late failure stays with A, but an expired session still reaches the shell from B's page.
+    states = finishTeamReminderSave(states, 'team-a', 'error', expired)
+    expect(readTeamReminderSave(states, 'team-b')).toEqual({ isSaving: false, result: 'saved' })
+    expect(readTeamReminderSave(states, 'team-a')).toEqual({ isSaving: false, result: 'error', error: expired })
+    expect(listTeamReminderSaveErrors(states)).toEqual([expired])
+
+    // Retrying A clears its previous outcome and error.
+    states = startTeamReminderSave(states, 'team-a')
+    expect(readTeamReminderSave(states, 'team-a')).toEqual({ isSaving: true })
+    expect(listTeamReminderSaveErrors(states)).toEqual([])
+    expect(readTeamReminderSave(states, undefined)).toEqual({ isSaving: false })
   })
 
   test('turns blank fields into unset days and rejects anything but whole days from 1 to 365', () => {

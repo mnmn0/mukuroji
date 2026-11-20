@@ -6,6 +6,13 @@ import type {
 } from '@mukuroji/contracts'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from '../api/errors'
+import {
+  finishTeamReminderSave,
+  listTeamReminderSaveErrors,
+  readTeamReminderSave,
+  startTeamReminderSave,
+  type TeamReminderSaveStates,
+} from '../model/teamReminderSaveState'
 import { updateTeamReminderSettings } from '../api/teamReminders'
 import {
   createTeamReminderSettingsKey,
@@ -54,22 +61,15 @@ export function useTeamReminderSettings(
 ): TeamReminderSettingsController {
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const { mutate: mutateCache } = useSWRConfig()
-  const [isSaving, setIsSaving] = useState(false)
-  // Tagged with the saved Team, so a result never shows on another Team's page.
-  const [saveOutcome, setSaveOutcome] = useState<{
-    teamId: string
-    result: NonNullable<TeamReminderSettingsController['saveResult']>
-  }>()
-  const [saveError, setSaveError] = useState<unknown>()
+  // Kept per Team, so a save that finishes after moving to another Team stays with its own Team.
+  const [saveStates, setSaveStates] = useState<TeamReminderSaveStates>({})
   const { data, error, isLoading, mutate } = useTeamReminderSettingsQuery(accessToken, teamId, enabled)
   const save = useCallback(async (days: TeamNotificationReminderDays) => {
     if (!accessToken || !teamId || !data) return false
     // Fixed at save start, so a response that arrives after moving to another Team updates the
     // saved Team's cache entry instead of the one now on screen.
     const key = createTeamReminderSettingsKey(accessToken, teamId)
-    setIsSaving(true)
-    setSaveOutcome(undefined)
-    setSaveError(undefined)
+    setSaveStates((states) => startTeamReminderSave(states, teamId))
     const request = { expectedRevision: data.revision, days }
     try {
       const saved = await mutationRunner.run(
@@ -78,31 +78,26 @@ export function useTeamReminderSettings(
         (context) => updateTeamReminderSettings(accessToken, teamId, request, context),
       )
       await mutateCache(key, saved, { revalidate: false })
-      setSaveOutcome({ teamId, result: 'saved' })
+      setSaveStates((states) => finishTeamReminderSave(states, teamId, 'saved'))
       return true
     } catch (caught) {
       console.error('Team reminder settings update failed:', caught)
-      if (caught instanceof NotificationsApiError && caught.status === 409) {
-        await mutateCache(key).catch(() => undefined)
-        setSaveOutcome({ teamId, result: 'conflict' })
-      } else {
-        setSaveOutcome({ teamId, result: 'error' })
-      }
-      setSaveError(caught)
+      const isConflict = caught instanceof NotificationsApiError && caught.status === 409
+      if (isConflict) await mutateCache(key).catch(() => undefined)
+      setSaveStates((states) => finishTeamReminderSave(states, teamId, isConflict ? 'conflict' : 'error', caught))
       return false
-    } finally {
-      setIsSaving(false)
     }
   }, [accessToken, data, mutateCache, mutationRunner, teamId])
 
+  const currentSave = readTeamReminderSave(saveStates, teamId)
   return {
     ...(data ? { settings: data } : {}),
     isLoading,
     hasLoadError: Boolean(error),
     isUnavailable: error instanceof NotificationsApiError && (error.status === 403 || error.status === 404),
-    isSaving,
-    ...(saveOutcome && saveOutcome.teamId === teamId ? { saveResult: saveOutcome.result } : {}),
-    sessionErrors: [error, saveError],
+    isSaving: currentSave.isSaving,
+    ...(currentSave.result ? { saveResult: currentSave.result } : {}),
+    sessionErrors: [error, ...listTeamReminderSaveErrors(saveStates)],
     refresh: async () => {
       await mutate()
     },
