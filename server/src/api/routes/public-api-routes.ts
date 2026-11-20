@@ -2524,11 +2524,11 @@ const lazyConnectorAuthorization: ConnectorAuthorizationService = {
     return (await requireConfiguredConnectorAuthorization())
       .begin(principal, input, operationId)
   },
-  async completeCallback(input) {
-    return (await requireConfiguredConnectorAuthorization()).completeCallback(input)
+  async completeCallback(input, actor) {
+    return (await requireConfiguredConnectorAuthorization()).completeCallback(input, actor)
   },
-  async abortCallback(input) {
-    return (await requireConfiguredConnectorAuthorization()).abortCallback(input)
+  async abortCallback(input, actor) {
+    return (await requireConfiguredConnectorAuthorization()).abortCallback(input, actor)
   },
   async reauthorize(principal, installationId, operationId) {
     return (await requireConfiguredConnectorAuthorization())
@@ -3183,7 +3183,9 @@ function getPublicApiCursorSecret() {
  * @param routeApp - Hono application that receives the routes.
  */
 export function registerPublicApiRoutes(routeApp: Hono): void {
-  if (!loadServerConfig().runtimeRole) {
+  const serverConfig = loadServerConfig()
+  if (!serverConfig.runtimeRole) {
+    const { connectorOAuthWebOrigin } = serverConfig
     const publicApiDependencies: PublicApiDependencies = {
       apiKeys: createForwardingClient(() => developerPlatformDependencies.apiKeys),
       oauthCredentials: createForwardingClient(
@@ -3217,6 +3219,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       },
       queueWebhookDelivery,
       connectorAuthorization: lazyConnectorAuthorization,
+      ...(connectorOAuthWebOrigin ? { connectorOAuthWebOrigin } : {}),
       mapError: mapPublicApiAdapterError,
     }
     routeApp.route('/api', createPublicApiRouter(publicApiDependencies))

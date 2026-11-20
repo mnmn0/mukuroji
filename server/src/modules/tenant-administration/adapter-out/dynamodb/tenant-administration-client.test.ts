@@ -163,7 +163,13 @@ describe('DynamoDbTenantAdministrationClient', () => {
     )
 
     // A missing governance record does not hide the stored calendar settings.
-    expect((await client.getProfile('workspace-1'))?.calendar).toEqual({ fiscalYearStartMonth: 4, weekStartDay: 0 })
+    // Settings stored before working days existed read as Monday to Friday without holidays.
+    expect((await client.getProfile('workspace-1'))?.calendar).toEqual({
+      fiscalYearStartMonth: 4,
+      weekStartDay: 0,
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      holidays: [],
+    })
     items.delete('PROFILE')
     expect(await client.getProfile('workspace-1')).toBeUndefined()
   })

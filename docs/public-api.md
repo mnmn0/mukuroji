@@ -243,6 +243,8 @@ Connector installation は `connected`、`needs-reauth`、`degraded`、`disconne
 
 Provider ごとの OAuth/pull/push/revoke 実装は `ConnectorAdapter` 境界の後ろに登録する。管理 API は provider token を response や log に露出せず、永続化した installation/link/conflict と current RBAC だけを扱う。
 
+Provider の OAuth callback（`GET /api/developer/connector-oauth/callback`）は Mukuroji の認証情報を持たないため flow を完了しない。state と code（provider が拒否した場合は `cancelled=true`）を URL fragment に載せて Web の `/settings/connectors/oauth-callback` へ 303 で引き渡し、Web が利用者の Bearer token で `POST /api/developer/connector-oauth/complete` を呼ぶ。Server は state を consume したあと、flow を開始した Workspace と user が呼び出し元と一致しなければ 403 を返し、state は再利用できなくなる。Provider の redirect URI が Web と別 origin の API を指す場合は、API の `CONNECTOR_OAUTH_WEB_ORIGIN` に Web の origin を設定する。判断の経緯は [ADR 0014](adr/0014-bind-connector-oauth-callback-to-initiator.md)。
+
 復旧手順は次のとおり。
 
 1. `needs-reauth` では再認証 flow を開始し、短時間有効な state と callback を照合する。成功後に同じ installation ID を `connected` へ戻す。

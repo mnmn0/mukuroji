@@ -2,6 +2,7 @@ import type {
   CreateWorkItemInput,
   WorkItemConfiguration,
   WorkItemSchedule,
+  WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import { useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
@@ -48,6 +49,11 @@ export type CreateTaskPanelProps = {
   assigneeErrorMessage?: string
   /** Active project members that may be assigned to the new task. */
   assigneeOptions: ProjectMember[]
+  /**
+   * Workspace working calendar the new Work Item counts working days with. Without it, the
+   * calendar policy of the context schedule is kept.
+   */
+  calendarPolicy?: WorkItemScheduleCalendarPolicy
   /** Work Item configuration used to validate workflow and custom fields. */
   configuration?: WorkItemConfiguration
   /** Context inherited from the view that opened the create panel. */
@@ -93,6 +99,7 @@ export type CreateTaskPanelProps = {
 export function CreateTaskPanel({
   assigneeErrorMessage,
   assigneeOptions,
+  calendarPolicy,
   configuration,
   context,
   currentUserProjectKey,
@@ -183,7 +190,10 @@ export function CreateTaskPanel({
       : ''
   const hasSelectedAssignee = selectedAssigneeUserId !== undefined
   const isSubmitPending = isSubmitting || isPanelSubmitting
-  const initialSchedule = context?.schedule ?? createDefaultUnscheduledTaskSchedule()
+  const contextSchedule = context?.schedule ?? createDefaultUnscheduledTaskSchedule()
+  const initialSchedule: WorkItemSchedule = calendarPolicy
+    ? { ...contextSchedule, calendarPolicy }
+    : contextSchedule
   const [scheduleMode, setScheduleMode] = useState<WorkItemSchedule['mode']>(initialSchedule.mode)
   const quickCaptureDueDate = resolveTaskScheduleEndDate(initialSchedule) ?? ''
   const initialStartDate = resolveTaskScheduleStartDate(initialSchedule) ?? ''

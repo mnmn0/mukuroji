@@ -906,6 +906,74 @@
         ],
         "type": "string"
       },
+      "CompleteConnectorOAuthInput": {
+        "additionalProperties": false,
+        "oneOf": [
+          {
+            "not": {
+              "required": [
+                "cancelled"
+              ]
+            },
+            "required": [
+              "state",
+              "code"
+            ]
+          },
+          {
+            "not": {
+              "required": [
+                "code"
+              ]
+            },
+            "required": [
+              "state",
+              "cancelled"
+            ]
+          }
+        ],
+        "properties": {
+          "cancelled": {
+            "const": true,
+            "description": "Provider が認可を完了しなかった場合に指定します。",
+            "type": "boolean"
+          },
+          "code": {
+            "description": "Provider が発行した authorization code です。",
+            "maxLength": 8192,
+            "minLength": 1,
+            "type": "string"
+          },
+          "state": {
+            "description": "Provider callback がそのまま返した signed state です。",
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "CompleteConnectorOAuthOutput": {
+        "additionalProperties": false,
+        "properties": {
+          "outcome": {
+            "enum": [
+              "connected",
+              "cancelled"
+            ],
+            "type": "string"
+          },
+          "returnUrl": {
+            "description": "結果を connectorOAuth query に付けた application-relative URL です。",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "returnUrl"
+        ],
+        "type": "object"
+      },
       "ConnectorAuthorizationOutput": {
         "additionalProperties": false,
         "properties": {
@@ -5060,7 +5128,7 @@
     },
     "/api/developer/connector-oauth/callback": {
       "get": {
-        "description": "HMAC 署名済み single-use state と PKCE code を検証し、検証済み application-relative URL へ戻します。",
+        "description": "Provider callback の state と code（または取り消し）を URL fragment に載せて Web の `/settings/connectors/oauth-callback` へ戻します。この request は Mukuroji の認証情報を持たないため flow を完了せず、flow を開始した user が `POST /api/developer/connector-oauth/complete` で完了します。",
         "operationId": "completeManagedConnectorOAuthCallback",
         "parameters": [
           {
@@ -5094,7 +5162,7 @@
         ],
         "responses": {
           "303": {
-            "description": "Connector settings の検証済み return URL へ戻します。",
+            "description": "State と code を fragment に載せた Web の callback page へ戻します。",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -5157,7 +5225,101 @@
           }
         },
         "security": [],
-        "summary": "Provider OAuth callback を完了する",
+        "summary": "Provider OAuth callback を Web へ引き渡す",
+        "tags": [
+          "Connector Management"
+        ]
+      }
+    },
+    "/api/developer/connector-oauth/complete": {
+      "post": {
+        "description": "Provider callback から受け取った signed state と authorization code（または取り消し）を検証し、flow を開始した user と同じ認証済み user の場合だけ installation を作成または復旧します。開始者以外が送った場合は 403 を返し、state は再利用できなくなります。",
+        "operationId": "completeManagedConnectorOAuth",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteConnectorOAuthInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompleteConnectorOAuthOutput"
+                }
+              }
+            },
+            "description": "Connector OAuth flow の結果と戻り先です。",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "enum": [
+                    "no-store"
+                  ],
+                  "type": "string"
+                }
+              },
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "security": [
+          {
+            "CognitoBearer": []
+          }
+        ],
+        "summary": "Connector OAuth flow を完了する",
         "tags": [
           "Connector Management"
         ]
