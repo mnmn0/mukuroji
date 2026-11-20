@@ -152,12 +152,13 @@ import {
   prepareConfiguredUpdateWorkItem,
 } from '../shared/file-approval-access'
 import {
-  getEffectiveProjectAccessList,
+  getEffectiveProjectScopeAccessList,
   hasEnterpriseWorkspacePermission,
   type ProjectPrincipal,
   requireAssignedProjectPermission,
   requireTeamPermission,
   requireWorkspaceBusinessWrite,
+  selectTeamProjectScopeAccesses,
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
@@ -273,15 +274,13 @@ async function readAccessibleWorkItemExportPage(
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
     ? undefined
-    : await getEffectiveProjectAccessList(principal)
+    : await getEffectiveProjectScopeAccessList(principal)
   const contexts: TeamPermissionContext[] = directory.teams.flatMap((team) => {
     if (principal.isSystemAdmin) {
       return [{ team, directory } satisfies TeamPermissionContext]
     }
-    const teamProjectIds = new Set(team.projects.map((project) => project.id))
-    const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
-      teamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer')
-    )
+    const teamProjectAccesses = selectTeamProjectScopeAccesses(projectAccesses ?? [], team)
+      .filter((access) => projectAccessAllows(access, 'viewer'))
     return teamProjectAccesses.length > 0
       ? [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
       : []
