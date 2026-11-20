@@ -3,6 +3,7 @@ import { DOCUMENT_SCHEMA_VERSION, type DocumentDetail } from '@mukuroji/contract
 import { createApiTestHarness } from './test-support/api-test-harness'
 import { createCanonicalPublicDocumentService } from './shared/public-document-access'
 import { DocumentError, type DocumentAccessContext } from '../modules/documents'
+import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import type { AuthenticatedDeveloperCredential } from '../modules/developer-platform/application/ports'
 
 const {
@@ -212,5 +213,60 @@ describe('public Document service', () => {
     // A whiteboard that links the task only through a Work Item card is still linked, so it is unsupported, not missing.
     await expect(read('card-board')).rejects.toMatchObject({ status: 422, code: 'validation_failed' })
     await expect(read('other-card-board')).rejects.toMatchObject({ status: 404, code: 'not_found' })
+  })
+
+  test('hides every Document from an owner whose Enterprise role grants Work Items but no Document permission', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+    })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const readSnapshot = identity.getSnapshot.bind(identity)
+    identity.getSnapshot = async (requestedWorkspaceId) => ({
+      ...await readSnapshot(requestedWorkspaceId),
+      customRoles: [{
+        workspaceId,
+        roleId: 'custom:work-items-only',
+        name: 'Work Items only',
+        permissions: ['work-items.read'],
+        guestAssignable: false,
+        revision: 1,
+        createdAt: NOW,
+        updatedAt: NOW,
+      }],
+      roleAssignments: [{
+        workspaceId,
+        assignmentId: 'work-items-only',
+        principalKind: 'member',
+        principalId: 'demo@example.com',
+        roleId: 'custom:work-items-only',
+        scope: { workspaceId, kind: 'workspace' },
+        source: 'direct',
+      }],
+    })
+    let documentsRead = false
+    setTestAppDependencies({
+      enterpriseIdentity: identity,
+      documents: createDocumentFake({
+        async listBacklinks() {
+          documentsRead = true
+          return { backlinks: [] }
+        },
+        async get() {
+          documentsRead = true
+          return createLinkedDocument('linked', ['team/core-team/issue/task-1'])
+        },
+      }),
+    })
+    const service = createCanonicalPublicDocumentService()
+
+    expect(await runWithTestAppDependencies(() => service
+      .listWorkItemDocuments(credential, 'core-team', 'task-1', undefined, 20))).toEqual({ items: [], hasMore: false })
+    await expect(runWithTestAppDependencies(() => service.getWorkItemDocument(
+      credential, 'core-team', 'task-1', 'linked',
+    ))).rejects.toMatchObject({ status: 404, code: 'not_found' })
+    expect(documentsRead).toBe(false)
   })
 })

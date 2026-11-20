@@ -984,6 +984,24 @@ describe('agent task lifecycle', () => {
 
     const oldServer = fixture([task('one')])
     await expect(oldServer.service.documents('one')).rejects.toMatchObject({ code: 'unsupported' })
+
+    // A task that moves out of the configured Project while its Documents are read returns nothing.
+    const moving = fixture([task('one', { assignedProjectId: 'project-a' })])
+    const move = () => moving.records.set('one', task('one', { assignedProjectId: 'project-b' }))
+    const movingService = createAgentTasks({
+      ...moving.api,
+      async relatedDocuments() {
+        move()
+        return { items: [{ id: 'spec', title: 'Spec' }], hasMore: false }
+      },
+      async document() {
+        move()
+        return content
+      },
+    }, { ...baseScope, assignedProjectId: 'project-a' })
+    await expect(movingService.documents('one')).rejects.toMatchObject({ code: 'out_of_scope' })
+    moving.records.set('one', task('one', { assignedProjectId: 'project-a' }))
+    await expect(movingService.document('one', 'spec')).rejects.toMatchObject({ code: 'out_of_scope' })
   })
 
   test('sends the estimate on its own and passes remaining effort and progress through', async () => {

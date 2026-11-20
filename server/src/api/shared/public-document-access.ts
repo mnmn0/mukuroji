@@ -9,6 +9,7 @@ import {
   type DocumentAccessContext,
 } from '../../modules/documents'
 import type { AuthenticatedDeveloperCredential } from '../../modules/developer-platform/application/ports'
+import { WorkspaceAccessError } from '../../modules/workspace-access'
 import {
   PublicApiServiceError,
   type PublicDocumentService,
@@ -49,6 +50,25 @@ async function resolveCredentialDocumentAccess(
       projectRoles,
       ...createDocumentEnterpriseScopeBoundary(principal),
     },
+  }
+}
+
+/**
+ * Resolves the credential owner's Document access, or nothing when Enterprise RBAC grants no
+ * Document permission. Such an owner can view no Document, which the read paths report the same
+ * way as a hidden Document; other failures still propagate.
+ *
+ * @param credential - Authenticated developer credential.
+ * @returns The owner's Document access, or undefined when every Document is hidden from them.
+ */
+async function resolveCredentialDocumentAccessIfPermitted(
+  credential: AuthenticatedDeveloperCredential,
+): Promise<Awaited<ReturnType<typeof resolveCredentialDocumentAccess>> | undefined> {
+  try {
+    return await resolveCredentialDocumentAccess(credential)
+  } catch (error) {
+    if (error instanceof WorkspaceAccessError && error.code === 'WorkspacePermissionDenied') return undefined
+    throw error
   }
 }
 
@@ -136,7 +156,9 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
     /** Lists visible Documents linked to a Work Item the credential owner can view. */
     async listWorkItemDocuments(credential, teamId, workItemId, continuation, limit) {
       await requireVisibleWorkItem(credential, teamId, workItemId)
-      const { workspaceId, access } = await resolveCredentialDocumentAccess(credential)
+      const documentAccess = await resolveCredentialDocumentAccessIfPermitted(credential)
+      if (documentAccess === undefined) return { items: [], hasMore: false }
+      const { workspaceId, access } = documentAccess
       const page = await workItemDependencies.documents.listBacklinks({
         workspaceId,
         targetKind: 'work-item',
@@ -161,7 +183,11 @@ export function createCanonicalPublicDocumentService(): PublicDocumentService {
     /** Renders a linked page or template the credential owner can view as Markdown. */
     async getWorkItemDocument(credential, teamId, workItemId, documentId) {
       await requireVisibleWorkItem(credential, teamId, workItemId)
-      const { workspaceId, access } = await resolveCredentialDocumentAccess(credential)
+      const documentAccess = await resolveCredentialDocumentAccessIfPermitted(credential)
+      if (documentAccess === undefined) {
+        throw new PublicApiServiceError(404, 'not_found', 'Document was not found.')
+      }
+      const { workspaceId, access } = documentAccess
       const document = await readVisibleDocument(workspaceId, documentId, access)
       const targetId = toWorkItemRelationTargetId(teamId, workItemId)
       if (!linksWorkItem(document, targetId)) {

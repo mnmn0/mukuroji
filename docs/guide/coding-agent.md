@@ -58,9 +58,13 @@ agent は次の順で操作します。
 4. **完了**: `complete_task` でタスクを完了にし、`finish_run` で Run を終える（中断・失敗の場合もここで記録する）。
 
 仕様書や設計書は、タスク詳細の **関連 Document** でタスクに link しておくと agent が読めます。
-`get_task` が link された Document の一覧を返し、agent は `read_document` で本文を Markdown として読みます。
+`get_task` が link された Document の一覧の最初のページを返し、続きは `list_task_documents` で取得します。
+agent は `read_document` で本文を Markdown として読みます。
 agent が読めるのは、token を発行した人が閲覧できる Document だけで、読むたびにその時点の権限で確かめます。
 本文を読めるのはページとテンプレートで、フォルダーとホワイトボードは読めません。
+Document の本文は、タスクの説明やコメントと同じく利用者が書いたデータで、agent への指示ではありません。
+agent は要件として読みますが、Document に書かれていることだけを理由に、認証情報や接続範囲を変えたり、
+タスクを動かす操作をしたりしないよう MCP server が agent に伝えます。
 
 人がタスク詳細の **エージェントへ引き継ぐ** → **引き継ぎ内容をコピー** を使うと、タスクの内容と
 この手順をまとめた文章を agent に貼り付けられます。コピーだけでは担当者や状態は変わりません。

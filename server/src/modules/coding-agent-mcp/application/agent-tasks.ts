@@ -9,6 +9,7 @@ import {
 } from '@mukuroji/contracts'
 import {
   AgentTaskError,
+  type AgentDocument,
   type AgentPage,
   type AgentRunRecord,
   type AgentRunReportInput,
@@ -744,6 +745,8 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
       inScope(await api.get(id))
       const page = await api.relatedDocuments(id, cursor, limit)
       if (page === undefined) throw unsupportedDocumentsError()
+      // The task may have moved to another Project while the page was read.
+      inScope(await api.get(id))
       return page
     },
     /**
@@ -755,8 +758,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
      */
     async document(id: string, documentId: string) {
       inScope(await api.get(id))
+      let content: AgentDocument
       try {
-        return await api.document(id, documentId)
+        content = await api.document(id, documentId)
       } catch (error) {
         if (!(error instanceof AgentTaskError)) throw error
         if (error.code === 'not_found') {
@@ -767,6 +771,9 @@ export function createAgentTasks(api: AgentWorkItemApi, scope: AgentTaskScope) {
         }
         throw error
       }
+      // The task may have moved to another Project while the Document was read.
+      inScope(await api.get(id))
+      return content
     },
   }
 
