@@ -8,8 +8,10 @@ import {
   type BulkOperation,
   type ApprovalRequest,
   type CustomFieldValue,
+  type MemberPreferences,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
+  type UpdateMemberPreferencesInput,
   type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
   type WorkItemAcceptanceCriterion,
@@ -1634,10 +1636,28 @@ function configureFakeProjectClients(
   const workspaceRole = options.workspaceRole ?? 'owner'
   const workspaceStatus = options.workspaceStatus ?? 'active'
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
+  let memberPreferences: MemberPreferences = { revision: 0 }
   let projectQuickAccessPreference = options.projectQuickAccessPreference === undefined
     ? { items: [], revision: 0 }
     : cloneProjectQuickAccessPreferences(options.projectQuickAccessPreference)
   const projectCharterStates = new Map<string, ProjectCharterState>()
+  /** Teams (`teamId`) and Projects (`teamId/projectId`) the fake directory has archived. */
+  const archivedDirectoryKeys = new Set<string>()
+  /** Archive and restore count of each fake Team and Project, keyed like the archived set. */
+  const lifecycleRevisions = new Map<string, number>()
+  /** Names and creators of the Teams the fake directory created, by Team ID. */
+  const createdTeams = new Map<string, { name: string; creatorUserId?: string }>()
+  /**
+   * Archives or restores one fake Team or Project and advances its lifecycle count.
+   *
+   * @param key - `teamId` or `teamId/projectId`.
+   * @param archived - Whether the row becomes archived.
+   */
+  const setDirectoryArchived = (key: string, archived: boolean) => {
+    if (archived) archivedDirectoryKeys.add(key)
+    else archivedDirectoryKeys.delete(key)
+    lifecycleRevisions.set(key, (lifecycleRevisions.get(key) ?? 0) + 1)
+  }
   /** Reads the fake charter state of one Team-owned Project. */
   const readProjectCharterState = (teamId: string, projectId: string): ProjectCharterState =>
     projectCharterStates.get(`${teamId}/${projectId}`) ?? {
@@ -1723,6 +1743,13 @@ function configureFakeProjectClients(
       teamId: string
     }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
+    directoryAdministration: [] as Array<{
+      method: string
+      directoryId: string
+      teamId?: string
+      projectId?: string
+      input?: unknown
+    }>,
     issueCreates: [] as Array<{
       actorUserId: string
       assignedProjectId?: unknown
@@ -1786,6 +1813,11 @@ function configureFakeProjectClients(
     projectQuickAccessReplacements: [] as Array<{
       directoryId: string
       input: UpdateProjectQuickAccessPreferencesInput
+      memberKey: string
+    }>,
+    memberPreferencesReplacements: [] as Array<{
+      directoryId: string
+      input: UpdateMemberPreferencesInput
       memberKey: string
     }>,
     userLists: [] as Array<{
@@ -2274,6 +2306,21 @@ function configureFakeProjectClients(
         }
         return cloneProjectQuickAccessPreferences(projectQuickAccessPreference)
       },
+      async getMemberPreferences() {
+        return { ...memberPreferences }
+      },
+      async replaceMemberPreferences(directoryId, memberKey, input) {
+        calls.memberPreferencesReplacements.push({ directoryId, input: { ...input }, memberKey })
+        if (input.revision !== memberPreferences.revision) {
+          throw new ProjectDataError(
+            409,
+            'MemberPreferencesConflict',
+            'Member preferences changed before this update was saved.',
+          )
+        }
+        memberPreferences = { ...input, revision: input.revision + 1 }
+        return { ...memberPreferences }
+      },
       async getProjectAccess(directoryId, projectId, memberKey = 'demo@example.com') {
         calls.accessChecks.push({ directoryId, projectId })
 
@@ -2371,8 +2418,12 @@ function configureFakeProjectClients(
           memberId: memberKey,
         }
       },
-      async createTeam(directoryId, input) {
+      async createTeam(directoryId, input, _auditContext, creatorUserId) {
         calls.teamCreates.push({ directoryId, name: String(input.name) })
+        createdTeams.set('new-team', {
+          name: String(input.name),
+          ...(creatorUserId ? { creatorUserId } : {}),
+        })
 
         return {
           team: {
@@ -2418,8 +2469,77 @@ function configureFakeProjectClients(
           },
         }
       },
+      async getDirectoryAdministration(directoryId) {
+        calls.directoryAdministration.push({ method: 'get', directoryId })
+
+        return {
+          teams: [{
+            id: 'core-team',
+            nameJa: 'コアチーム',
+            nameEn: 'Core Team',
+            projects: [
+              { id: 'refero', nameJa: 'Refero', nameEn: 'Refero', tone: 'blue' },
+              {
+                id: 'old-project',
+                nameJa: '旧プロジェクト',
+                nameEn: 'Old Project',
+                tone: 'green',
+                archivedAt: '2026-06-06T00:00:00.000Z',
+              },
+            ],
+          }],
+        }
+      },
+      async renameTeam(directoryId, teamId, input) {
+        calls.directoryAdministration.push({ method: 'renameTeam', directoryId, teamId, input })
+
+        return { teamId, nameJa: 'リネーム', nameEn: 'Renamed' }
+      },
+      async renameProject(directoryId, teamId, projectId, input) {
+        calls.directoryAdministration.push({
+          method: 'renameProject',
+          directoryId,
+          teamId,
+          projectId,
+          input,
+        })
+
+        return { teamId, projectId, nameJa: 'リネーム', nameEn: 'Renamed', tone: 'purple' }
+      },
+      async restoreTeam(directoryId, teamId) {
+        calls.directoryAdministration.push({ method: 'restoreTeam', directoryId, teamId })
+        setDirectoryArchived(teamId, false)
+
+        return { teamId }
+      },
+      async restoreProject(directoryId, teamId, projectId) {
+        calls.directoryAdministration.push({
+          method: 'restoreProject',
+          directoryId,
+          teamId,
+          projectId,
+        })
+        setDirectoryArchived(`${teamId}/${projectId}`, false)
+
+        return { teamId, projectId }
+      },
+      async reorderTeams(directoryId, input) {
+        calls.directoryAdministration.push({ method: 'reorderTeams', directoryId, input })
+
+        if (JSON.stringify(input).includes('stale-team')) {
+          throw new ProjectDataError(409, 'DirectoryOrderConflict', 'The Team list changed.')
+        }
+
+        return { teamIds: ['core-team'] }
+      },
+      async reorderProjects(directoryId, teamId, input) {
+        calls.directoryAdministration.push({ method: 'reorderProjects', directoryId, teamId, input })
+
+        return { projectIds: ['refero'] }
+      },
       async archiveTeam(directoryId, teamId, _auditContext, expectedPlanningRevision) {
         calls.teamArchives.push({ directoryId, expectedPlanningRevision, teamId })
+        setDirectoryArchived(teamId, true)
 
         return {
           teamId,
@@ -2435,6 +2555,7 @@ function configureFakeProjectClients(
         workItemRevisionGuards,
       ) {
         const detachedGuards = workItemRevisionGuards.map((guard) => ({ ...guard }))
+        setDirectoryArchived(`${teamId}/${projectId}`, true)
         calls.projectArchives.push({
           directoryId,
           expectedPlanningRevision,
@@ -2455,9 +2576,49 @@ function configureFakeProjectClients(
           archivedAt: '2026-06-06T00:00:00.000Z',
         }
       },
+      /** Reads the fake Team with its archive state and lifecycle count. */
+      async getTeamSearchSource(directoryId, teamId) {
+        calls.directoryReads.push({ directoryId, locale: 'ja', consistentRead: true })
+        const lifecycle = {
+          archived: archivedDirectoryKeys.has(teamId),
+          sourceRevision: lifecycleRevisions.get(teamId) ?? 0,
+        }
+        if (teamId === 'core-team') {
+          return { ...lifecycle, nameJa: 'コアチーム', nameEn: 'Core Team' }
+        }
+        const created = createdTeams.get(teamId)
+        if (created) {
+          return {
+            ...lifecycle,
+            nameJa: created.name,
+            nameEn: created.name,
+            ...(created.creatorUserId ? { creatorUserId: created.creatorUserId } : {}),
+          }
+        }
+        const team = (options.additionalTeams ?? []).find((candidate) => candidate.id === teamId)
+        return team ? { ...lifecycle, nameJa: team.name, nameEn: team.name } : undefined
+      },
       /** Returns a copy of the stored charter state, so callers cannot mutate the fake's state. */
       async getProjectCharter(_directoryId, teamId, projectId) {
         return structuredClone(readProjectCharterState(teamId, projectId))
+      },
+      async getProjectSearchSource(directoryId, teamId, projectId) {
+        calls.directoryReads.push({ directoryId, locale: 'ja', consistentRead: true })
+        const projects = teamId === 'core-team'
+          ? options.teamProjects ?? [{ id: 'refero', name: 'Refero', tone: 'blue' }]
+          : (options.additionalTeams ?? []).find((team) => team.id === teamId)?.projects ?? []
+        const project = projects.find((candidate) => candidate.id === projectId)
+        if (!project) return undefined
+        if (archivedDirectoryKeys.has(teamId)) return undefined
+        const key = `${teamId}/${projectId}`
+        const state = structuredClone(readProjectCharterState(teamId, projectId))
+        return {
+          archived: archivedDirectoryKeys.has(key),
+          state,
+          project: { ...project, lifecycleState: state.lifecycleState },
+          englishName: project.name,
+          sourceRevision: state.revision + (lifecycleRevisions.get(key) ?? 0),
+        }
       },
       /**
        * Replaces the charter when the revision matches and advances the revision.

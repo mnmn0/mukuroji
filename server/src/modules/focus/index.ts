@@ -4,6 +4,7 @@ export {
   createFocusCauseFingerprint,
   createFocusQueue,
   createFocusWorkItemStateKey,
+  focusQueueUsesApprovalSummary,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
   type FocusRelationGraphSource,

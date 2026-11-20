@@ -40,6 +40,9 @@ function createClient(
     async getSnapshot() {
       return snapshot
     },
+    async getProfile() {
+      return snapshot.profile
+    },
     async updateProfile() {
       return snapshot.profile
     },
@@ -96,6 +99,8 @@ test('initializes tenant state from authoritative Workspace owner', async () => 
     requireAdministration() {
       administrationChecks += 1
     },
+    requireAuditDataExport() {},
+    async recordExportDownload() {},
     client,
     tenantExportDownload: {
       async createDownload() {
@@ -148,6 +153,8 @@ test('returns a closing tenant snapshot without requiring an active owner', asyn
       return { directoryId: 'workspace-1', userKey: 'admin-1' }
     },
     requireAdministration() {},
+    requireAuditDataExport() {},
+    async recordExportDownload() {},
     client: createClient(snapshot, ensureCalls),
     tenantExportDownload: {
       async createDownload() {
@@ -202,6 +209,8 @@ test('creates export operations without exposing the trusted advance boundary', 
       return { directoryId: 'workspace-1', userKey: 'owner-1' }
     },
     requireAdministration() {},
+    requireAuditDataExport() {},
+    async recordExportDownload() {},
     client,
     tenantExportDownload: {
       async createDownload() {
@@ -257,11 +266,16 @@ test('returns short-lived download locations for a completed export', async () =
     ...createOperation(),
     status: 'completed',
   })
+  const recordedDownloads: Array<{ operationId: string, fileCount: number }> = []
   const router = createTenantAdministrationRouter({
     async authenticate() {
       return { directoryId: 'workspace-1', userKey: 'owner-1' }
     },
     requireAdministration() {},
+    requireAuditDataExport() {},
+    async recordExportDownload(_context, _principal, operation, download) {
+      recordedDownloads.push({ operationId: operation.operationId, fileCount: download.files.length })
+    },
     client,
     tenantExportDownload: {
       async createDownload(operation) {
@@ -292,6 +306,7 @@ test('returns short-lived download locations for a completed export', async () =
   )
 
   expect(response.status).toBe(200)
+  expect(recordedDownloads).toEqual([{ operationId: 'operation-1', fileCount: 1 }])
   expect(await response.json()).toEqual({
     download: {
       expiresAt: '2026-08-02T00:05:00.000Z',
@@ -334,6 +349,8 @@ test('refuses lifecycle requests when the export and closure workers are not dep
       return { directoryId: 'workspace-1', userKey: 'admin-1' }
     },
     requireAdministration() {},
+    requireAuditDataExport() {},
+    async recordExportDownload() {},
     client,
     tenantExportDownload: {
       async createDownload() {
@@ -382,4 +399,332 @@ test('refuses lifecycle requests when the export and closure workers are not dep
   expect(administration.status).toBe(200)
   const operation = await router.request('/api/tenant/operations/operation-1', { headers })
   expect(operation.status).toBe(200)
+})
+
+test('refuses tenant export requests and downloads without audit export authority', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  let exportRequests = 0
+  let downloads = 0
+  let recordedDownloads = 0
+  client.requestExport = async () => {
+    exportRequests += 1
+    return createOperation()
+  }
+  client.getOperation = async () => ({
+    ...createOperation(),
+    status: 'completed',
+  })
+  const router = createTenantAdministrationRouter({
+    async authenticate() {
+      return { directoryId: 'workspace-1', userKey: 'admin-1' }
+    },
+    requireAdministration() {},
+    requireAuditDataExport() {
+      throw new TenantAdministrationError(403, 'AuditExportPermissionRequired', 'Audit export is required.')
+    },
+    async recordExportDownload() {
+      recordedDownloads += 1
+    },
+    client,
+    tenantExportDownload: {
+      async createDownload() {
+        downloads += 1
+        return { expiresAt: '2026-08-02T00:05:00.000Z', files: [] }
+      },
+    },
+    async resolveInitialization() {
+      return { ownerMemberKey: 'owner-1' }
+    },
+    async readJson(request) {
+      return await request.json()
+    },
+    mapError(_context, error) {
+      if (error instanceof TenantAdministrationError) {
+        return Response.json({ code: error.code }, { status: error.status })
+      }
+      return Response.json({ code: 'UnknownError' }, { status: 500 })
+    },
+  })
+
+  const exportResponse = await router.request('/api/tenant/exports', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ format: 'jsonl' }),
+  })
+  const downloadResponse = await router.request(
+    '/api/tenant/operations/operation-1/download',
+    { headers: { Authorization: 'Bearer token-1' } },
+  )
+
+  expect(exportResponse.status).toBe(403)
+  expect(downloadResponse.status).toBe(403)
+  expect({ exportRequests, downloads, recordedDownloads }).toEqual({
+    exportRequests: 0,
+    downloads: 0,
+    recordedDownloads: 0,
+  })
+})
+
+test('refuses download links when their issuance cannot be audited', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  client.getOperation = async () => ({
+    ...createOperation(),
+    status: 'completed',
+  })
+  const router = createTenantAdministrationRouter({
+    async authenticate() {
+      return { directoryId: 'workspace-1', userKey: 'owner-1' }
+    },
+    requireAdministration() {},
+    requireAuditDataExport() {},
+    async recordExportDownload() {
+      throw new TenantAdministrationError(503, 'TenantAuditUnavailable', 'Audit is unavailable.')
+    },
+    client,
+    tenantExportDownload: {
+      async createDownload() {
+        return {
+          expiresAt: '2026-08-02T00:05:00.000Z',
+          files: [{ name: 'manifest.json', url: 'https://signed.example/export' }],
+        }
+      },
+    },
+    async resolveInitialization() {
+      return { ownerMemberKey: 'owner-1' }
+    },
+    async readJson(request) {
+      return await request.json()
+    },
+    mapError(_context, error) {
+      if (error instanceof TenantAdministrationError) {
+        return Response.json({ code: error.code }, { status: error.status })
+      }
+      return Response.json({ code: 'UnknownError' }, { status: 500 })
+    },
+  })
+
+  const response = await router.request(
+    '/api/tenant/operations/operation-1/download',
+    { headers: { Authorization: 'Bearer token-1' } },
+  )
+
+  expect(response.status).toBe(503)
+  expect(JSON.stringify(await response.json())).not.toContain('signed.example')
+})
+
+/**
+ * Creates a router for a member or an administrator that records profile updates.
+ *
+ * @param client - Tenant application port used by the router.
+ * @param updates - Receives each profile update the router forwards.
+ * @param administrator - Whether the caller passes the administration check.
+ * @returns The tenant administration router under test.
+ */
+function createCalendarRouter(
+  client: TenantAdministrationClient,
+  updates: unknown[] = [],
+  administrator = false,
+) {
+  client.updateProfile = async (_workspaceId, _actor, input) => {
+    updates.push(input)
+    return (await client.getSnapshot('workspace-1')).profile
+  }
+  return createTenantAdministrationRouter({
+    async authenticate() {
+      return { directoryId: 'workspace-1', userKey: 'member-1' }
+    },
+    requireAdministration() {
+      if (!administrator) {
+        throw new TenantAdministrationError(403, 'Forbidden', 'Administrator access is required.')
+      }
+    },
+    requireAuditDataExport() {},
+    async recordExportDownload() {},
+    client,
+    tenantExportDownload: {
+      async createDownload() {
+        return { expiresAt: '2026-08-02T00:05:00.000Z', files: [] }
+      },
+    },
+    async resolveInitialization() {
+      return { ownerMemberKey: 'owner-1' }
+    },
+    async readJson(request) {
+      return await request.json()
+    },
+    mapError(_context, error) {
+      const status = error instanceof TenantAdministrationError ? error.status : 500
+      const code = error instanceof TenantAdministrationError ? error.code : 'UnknownError'
+      return Response.json({ code }, { status })
+    },
+  })
+}
+
+test('lets any member read the Workspace calendar settings, with defaults before setup', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  client.getProfile = async () => undefined
+  const ensureCalls: Array<[string, string]> = []
+  client.ensureSnapshot = async (workspaceId, ownerMemberKey) => {
+    ensureCalls.push([workspaceId, ownerMemberKey])
+    return snapshot
+  }
+
+  const defaults = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+  expect(defaults.status).toBe(200)
+  expect(await defaults.json()).toEqual({
+    fiscalYearStartMonth: 1,
+    weekStartDay: 1,
+    workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+    holidays: [],
+  })
+  // Reading must not initialize tenant state on a member's behalf.
+  expect(ensureCalls).toEqual([])
+
+  client.getProfile = async () => ({
+    ...snapshot.profile,
+    calendar: {
+      fiscalYearStartMonth: 4,
+      weekStartDay: 0,
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday'],
+      holidays: ['2027-01-01'],
+    },
+  })
+  const stored = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+  // Members read the working days and holidays too, so new Work Items can use them.
+  expect(await stored.json()).toEqual({
+    fiscalYearStartMonth: 4,
+    weekStartDay: 0,
+    workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday'],
+    holidays: ['2027-01-01'],
+  })
+
+  const unauthenticated = await createCalendarRouter(client).request('/api/workspace/calendar-settings')
+  expect(unauthenticated.status).toBe(401)
+
+  // A failed read, such as an incomplete tenant record, must not be reported as the defaults.
+  client.getProfile = async () => {
+    throw new TenantAdministrationError(503, 'TenantAdministrationUnavailable', 'Tenant state is unavailable.')
+  }
+  const failed = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+  expect(failed.status).toBe(503)
+})
+
+test('keeps calendar settings changes behind administration and validates them', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const body = {
+    region: snapshot.profile.region,
+    locale: 'ja',
+    defaultPolicy: { defaultMemberRole: 'member' },
+    expectedRevision: 1,
+  }
+  const memberUpdates: unknown[] = []
+  const member = await createCalendarRouter(createClient(snapshot, []), memberUpdates).request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, calendar: { fiscalYearStartMonth: 4, weekStartDay: 1 } }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(member.status).toBe(403)
+  expect(memberUpdates).toEqual([])
+
+  const updates: unknown[] = []
+  const admin = createCalendarRouter(createClient(snapshot, []), updates, true)
+
+  for (const calendar of [
+    { fiscalYearStartMonth: 0, weekStartDay: 1 },
+    { fiscalYearStartMonth: 13, weekStartDay: 1 },
+    { fiscalYearStartMonth: 4.5, weekStartDay: 1 },
+    { fiscalYearStartMonth: 4, weekStartDay: 7 },
+    { fiscalYearStartMonth: '4', weekStartDay: 1 },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, workingWeekdays: [] },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, workingWeekdays: ['funday'] },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, workingWeekdays: 'monday' },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: ['2027-02-30'] },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: ['1969-12-31'] },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: '2027-01-01' },
+    {
+      fiscalYearStartMonth: 4,
+      weekStartDay: 1,
+      holidays: Array.from({ length: 513 }, (_, index) =>
+        new Date(Date.UTC(2027, 0, 1 + index)).toISOString().slice(0, 10)),
+    },
+    null,
+  ]) {
+    const rejected = await admin.request('/api/tenant/profile', {
+      body: JSON.stringify({ ...body, calendar }),
+      headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+      method: 'PATCH',
+    })
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ code: 'InvalidTenantCalendarSettings' })
+  }
+  expect(updates).toEqual([])
+
+  const accepted = await admin.request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, calendar: { fiscalYearStartMonth: 4, weekStartDay: 0, extra: true } }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(accepted.status).toBe(200)
+  // Settings from before working days existed get the Monday-to-Friday default and no holidays.
+  expect(updates).toEqual([{
+    ...body,
+    locale: 'ja',
+    calendar: {
+      fiscalYearStartMonth: 4,
+      weekStartDay: 0,
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      holidays: [],
+    },
+  }])
+
+  const withWorkingDays = await admin.request('/api/tenant/profile', {
+    body: JSON.stringify({
+      ...body,
+      calendar: {
+        fiscalYearStartMonth: 4,
+        weekStartDay: 1,
+        workingWeekdays: ['saturday', 'monday', 'monday', 'tuesday'],
+        holidays: ['2027-05-03', '2027-01-01', '2027-05-03'],
+      },
+    }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(withWorkingDays.status).toBe(200)
+  // Weekdays are stored Monday first and holidays sorted, both without duplicates.
+  expect(updates.at(-1)).toEqual({
+    ...body,
+    locale: 'ja',
+    calendar: {
+      fiscalYearStartMonth: 4,
+      weekStartDay: 1,
+      workingWeekdays: ['monday', 'tuesday', 'saturday'],
+      holidays: ['2027-01-01', '2027-05-03'],
+    },
+  })
 })

@@ -77,6 +77,30 @@ export const PeriodWindow: Story = {
   },
 }
 
+/**
+ * Workspace working calendar with Saturday as a working day and 6/4 as a company holiday: the
+ * holiday and Sunday day columns are shaded under the bars, and Saturday is not.
+ */
+export const WorkingCalendar: Story = {
+  args: {
+    workingCalendar: {
+      holidays: ['2026-06-04'],
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const header = (date: string) =>
+      canvasElement.querySelector(`[role="columnheader"][aria-label="${date}"]`)
+
+    await expect(canvas.getAllByTestId('task-gantt-non-working-day').length).toBeGreaterThan(0)
+    await expect(header('2026-06-04')).toHaveAttribute('data-non-working')
+    await expect(header('2026-06-07')).toHaveAttribute('data-non-working')
+    await expect(header('2026-06-06')).not.toHaveAttribute('data-non-working')
+  },
+}
+
 /** Planned bars with the recorded actual bars below them, one completed late and one in progress. */
 export const PlanAndActual: Story = {
   args: {

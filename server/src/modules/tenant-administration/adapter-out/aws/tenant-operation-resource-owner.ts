@@ -48,7 +48,7 @@ import {
   type TenantOperationResourceOwnerResult,
 } from '../../application/tenant-operation-resource-owner'
 import { TenantAdministrationError } from '../../domain/tenant-administration'
-import { createAuditExportWorkspacePrefix } from '../../../audit'
+import { createAuditExportWorkspacePrefix, toAuditEventView } from '../../../audit'
 
 const RESOURCE_PAGE_SIZE = 20
 
@@ -237,6 +237,11 @@ type TenantFileNamespace = {
   readonly prefix: string
   /** Relative directory used when copying current objects into an export. */
   readonly exportDirectory: string
+  /**
+   * Selects which objects an export copies, by key relative to the prefix. Omitted means every
+   * object. Closure deletion and verification always cover the whole namespace.
+   */
+  readonly exportsObject?: (relativeKey: string) => boolean
 }
 
 /** Every resource cursor accepted by a lifecycle resource owner. */
@@ -379,7 +384,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         ],
       ),
       exactTarget('project-directory', this.config.projectDirectoryTableName, 'directoryId', 'entryKey'),
-      exactTarget('audit-events', this.config.auditEventsTableName, 'directoryId', 'eventId'),
+      exactTarget(AUDIT_EVENTS_EXPORT_TARGET_ID, this.config.auditEventsTableName, 'directoryId', 'eventId'),
       exactTarget('workspace-access', this.config.workspaceAccessTableName, 'workspaceId', 'recordKey'),
       attributeTarget('enterprise-identity', this.config.enterpriseIdentityTableName, 'scopeKey', 'recordKey', [
         workspaceSelector('workspaceId', 'equals'),
@@ -530,6 +535,9 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         bucketName: this.config.auditExportBucketName,
         prefix: createAuditExportWorkspacePrefix(workspaceId),
         exportDirectory: 'audit-exports',
+        // Only the NDJSON parts hold the public audit event view. The job document carries the
+        // request fingerprint and the index markers are bookkeeping, so neither is exported.
+        exportsObject: isAuditExportPartKey,
       },
     ]
   }
@@ -732,7 +740,9 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
       )
       const body = serializeExportPage(
         target.id,
-        page.items,
+        target.id === AUDIT_EVENTS_EXPORT_TARGET_ID
+          ? page.items.map(toAuditEventExportRecord)
+          : page.items,
         operation.exportFormat ?? 'jsonl',
       )
       if (page.items.length > 0) {
@@ -786,6 +796,7 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
     for (const object of response.Contents ?? []) {
       const objectKey = requireTenantFileKey(namespace, object.Key)
       const relativeKey = objectKey.slice(namespace.prefix.length)
+      if (namespace.exportsObject && !namespace.exportsObject(relativeKey)) continue
       await this.s3Client.send(new CopyObjectCommand({
         Bucket: this.config.tenantExportBucketName,
         Key: `${createExportPrefix(operation)}/snapshot/${namespace.exportDirectory}/${relativeKey}`,
@@ -1939,6 +1950,44 @@ function normalizeItems(
   values: Record<string, unknown>[] | undefined,
 ): Record<string, unknown>[] {
   return (values ?? []).filter(isRecord)
+}
+
+/**
+ * Returns whether a key relative to the audit export namespace names an NDJSON export part.
+ *
+ * @param relativeKey - Object key relative to the Workspace audit export prefix.
+ * @returns True for `<exportId>/part-<n>-<sha256>.ndjson` keys.
+ */
+function isAuditExportPartKey(relativeKey: string): boolean {
+  return /^[0-9a-f]{32}\/part-\d{5}-[0-9a-f]{64}\.ndjson$/u.test(relativeKey)
+}
+
+/** Export target ID of the immutable audit event table. */
+const AUDIT_EVENTS_EXPORT_TARGET_ID = 'audit-events'
+
+/**
+ * Projects one stored audit event row onto the public audit event view.
+ *
+ * The stored row also holds the caller IP address and User-Agent, the request fingerprint, the
+ * idempotency key digest, and index keys, which the audit API and audit export never return. A
+ * tenant export must not reveal more of the audit log than those do. A row that is not a valid
+ * audit event fails the export instead of being skipped, so the export never completes with
+ * audit history silently missing.
+ *
+ * @param item - Stored audit event row.
+ * @returns The exported audit event record.
+ * @throws TenantAdministrationError with status 503 when the row is not a valid audit event.
+ */
+function toAuditEventExportRecord(item: Record<string, unknown>): Record<string, unknown> {
+  try {
+    return toAuditEventView(item)
+  } catch (error) {
+    throw new TenantAdministrationError(
+      503,
+      'TenantExportAuditEventInvalid',
+      `A stored audit event could not be exported: ${error instanceof Error ? error.message : 'invalid row'}`,
+    )
+  }
 }
 
 /** Serializes one tenant export page while redacting credential-bearing fields. */

@@ -89,6 +89,8 @@ export interface TenantAdministrationClient extends TenantLifecycleEnforcement {
   ): Promise<TenantAdministrationSnapshot>
   /** Returns the current tenant aggregate without trusting client-supplied tenant IDs. */
   getSnapshot(workspaceId: string): Promise<TenantAdministrationSnapshot>
+  /** Returns only the tenant profile, or undefined when no profile has been stored yet. */
+  getProfile(workspaceId: string): Promise<TenantProfile | undefined>
   /** Updates profile fields with an optimistic revision condition. */
   updateProfile(
     workspaceId: string,

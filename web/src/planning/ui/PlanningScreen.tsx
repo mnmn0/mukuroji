@@ -64,6 +64,7 @@ import {
   type PlanningArchiveController,
   type PlanningArchiveLabels,
 } from './PlanningArchivePanel'
+import { CyclePlanningPanel, type CyclePlanningLabels, type CyclePlanningPanelProps } from './CyclePlanningPanel'
 import {
   PlanningEntityEditor,
   type PlanningEntityEditorLabels,
@@ -81,6 +82,8 @@ import {
  * PlanningScreen が表示する locale 済み文言です。
  */
 export type PlanningLabels = PlanningUpdateLabels & {
+  /** Cycle planning panel の文言です。 */
+  cyclePlanning: CyclePlanningLabels
   /** Planning 画面の eyebrow です。 */
   eyebrow: string
   /** Planning 画面の見出しです。 */
@@ -375,6 +378,12 @@ export type PlanningScreenProps = {
     sourceCycle: PlanningEntity,
     targetCycleId: string,
   ) => void | Promise<void>
+  /** 次の Cycle を作る callback です。 */
+  onCreateNextCycle?: CyclePlanningPanelProps['onCreateNextCycle']
+  /** Cycle の自動化を保存する callback です。 */
+  onUpdateCycleAutomation?: CyclePlanningPanelProps['onUpdateCycleAutomation']
+  /** 複数の Work Item を Cycle に入れる、または外す callback です。 */
+  onSetCycleWorkItems?: CyclePlanningPanelProps['onSetCycleWorkItems']
   /** Timeline で Cycle を選んだときに表示する burndown を描きます。省略すると表示しません。 */
   renderCycleBurndown?: (cycle: PlanningEntity) => ReactNode
   /** Entity archive callback です。 */
@@ -486,6 +495,9 @@ export function PlanningScreen({
   onRetryAccess,
   onRetryUpdateHistory,
   onRolloverCycle,
+  onCreateNextCycle,
+  onUpdateCycleAutomation,
+  onSetCycleWorkItems,
   onViewChange,
   onUpdateWorkItemDependency,
   renderCycleBurndown,
@@ -722,6 +734,18 @@ export function PlanningScreen({
                   onSelectEntity={handleSelectEntity}
                   onUpdateWorkItemDependency={onUpdateWorkItemDependency}
                   renderCycleBurndown={renderCycleBurndown}
+                />
+              ) : null}
+              {activeEntities.length > 0 && activeView === 'timeline' ? (
+                <CyclePlanningPanel
+                  canLinkEntity={canLinkEntity}
+                  canManageEntity={canManageEntity}
+                  canUpdateWorkItemLink={canUpdateWorkItemLink}
+                  labels={labels.cyclePlanning}
+                  snapshot={snapshot}
+                  onCreateNextCycle={onCreateNextCycle}
+                  onSetCycleWorkItems={onSetCycleWorkItems}
+                  onUpdateCycleAutomation={onUpdateCycleAutomation}
                 />
               ) : null}
               {activeEntities.length > 0 && activeView === 'roadmap' ? (

@@ -6,6 +6,7 @@ import type {
   WorkItemDependencyEndpoint,
   WorkItemConfiguration,
   WorkItemSchedule,
+  WorkItemScheduleCalendarPolicy,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
   WorkItemScheduleDependency,
@@ -38,6 +39,7 @@ import {
 } from '../../work-items/ui/WorkItemDependencyPanel'
 import {
   addTaskTimelineDays,
+  countTaskSchedulePolicyWorkingDays,
   createMoveTaskScheduleOperation,
   createReplaceTaskScheduleOperation,
   createResizeTaskScheduleOperation,
@@ -83,6 +85,7 @@ import { resolveWorkItemEffortColumnValue } from '../../work-items/model/workIte
 import {
   createTaskGanttScaledColumns,
   isTaskGanttScale,
+  listTaskGanttNonWorkingSpans,
   resolveTaskGanttColumnWidth,
   resolveTaskGanttDateSpan,
   resolveTaskGanttProgressPointX,
@@ -248,6 +251,11 @@ export type TaskGanttViewProps = {
   planningSnapshot?: PlanningSnapshot
   /** Translator used for Gantt-view labels. */
   t: TaskGanttTranslator
+  /**
+   * Workspace working calendar. Day columns on its non-working weekdays and holidays are shaded;
+   * without it no column is shaded.
+   */
+  workingCalendar?: WorkItemScheduleCalendarPolicy
   /** Opens the create panel with a planning-date context. */
   onCreateTaskOpen?: (context?: TaskScheduleCreateContext) => void
   /** Creates a canonical Work Item schedule dependency. */
@@ -326,6 +334,7 @@ export function TaskGanttView({
   t,
   tasks,
   windowStartMonth,
+  workingCalendar,
 }: TaskGanttViewProps) {
   const timelineWindow = useMemo(
     () => windowStartMonth ? createTaskGanttWindow(windowStartMonth) : undefined,
@@ -435,6 +444,19 @@ export function TaskGanttView({
   const today = getCurrentTaskDate()
   const todaySpan = resolveTaskGanttDateSpan(timelineAxis, today)
   const todayX = todaySpan ? (todaySpan.left + todaySpan.right) / 2 : undefined
+  const nonWorkingSpans = useMemo(
+    () => workingCalendar
+      ? listTaskGanttNonWorkingSpans(
+          timelineAxis,
+          (date) => countTaskSchedulePolicyWorkingDays(date, date, workingCalendar) > 0,
+        )
+      : [],
+    [timelineAxis, workingCalendar],
+  )
+  const nonWorkingDates = useMemo(
+    () => new Set(nonWorkingSpans.map((span) => span.date)),
+    [nonWorkingSpans],
+  )
   // Thousands of rows are rendered in steps; connectors are laid out for rendered rows only.
   const {
     renderedItems: incrementalRows,
@@ -880,6 +902,8 @@ export function TaskGanttView({
             >
               {timelineColumns.map((column) => {
                 const isTodayColumn = column.startDate <= today && today <= column.endDate
+                const isNonWorkingColumn = nonWorkingDates.has(column.startDate) &&
+                  column.startDate === column.endDate
                 return (
                   <div
                     aria-current={isTodayColumn ? 'date' : undefined}
@@ -888,7 +912,10 @@ export function TaskGanttView({
                       : `${column.startDate} – ${column.endDate}`}
                     className={`border-r border-tone-e4e7ec px-1 py-2 text-center text-[10px] font-semibold ${isTodayColumn
                       ? 'bg-[var(--workbench-danger-surface)] text-[var(--workbench-danger)]'
-                      : 'text-fg-667085'}`}
+                      : isNonWorkingColumn
+                        ? 'bg-[var(--workbench-surface-muted)] text-fg-667085'
+                        : 'text-fg-667085'}`}
+                    data-non-working={isNonWorkingColumn ? '' : undefined}
                     data-testid={isTodayColumn ? 'task-gantt-today-column' : undefined}
                     key={column.startDate}
                     role="columnheader"
@@ -1346,6 +1373,20 @@ export function TaskGanttView({
                 />
               ))}
             </svg>
+            {nonWorkingSpans.map((span) => (
+              // Non-working days are shaded under the bars across every rendered row.
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute top-0 z-0 bg-[var(--workbench-surface-muted)]"
+                data-testid="task-gantt-non-working-day"
+                key={span.date}
+                style={{
+                  height: `${dependencyLayout.externalLaneHeight + renderedRowsHeight}px`,
+                  left: `${GANTT_TABLE_WIDTH + span.left}px`,
+                  width: `${span.right - span.left}px`,
+                }}
+              />
+            ))}
             {todayX !== undefined ? (
               // Today's line runs over every rendered row, above the bars and below the task column.
               <div

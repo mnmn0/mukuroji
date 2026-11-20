@@ -1120,6 +1120,25 @@ function resolveFocusItemInvolvement(
 }
 
 /**
+ * Tells whether the Focus queue reads a Work Item's approval summary for the viewer.
+ *
+ * The summary only feeds the approval aggregate of an active Work Item the viewer owns, so
+ * callers can skip reading summaries for every other visible Work Item.
+ *
+ * @param workItem - Canonical Work Item visible to the viewer.
+ * @param viewerMemberKey - Viewer member key, normalized the same way as the queue input.
+ * @returns Whether the approval summary can contribute a Focus signal.
+ */
+export function focusQueueUsesApprovalSummary(
+  workItem: CanonicalWorkItem,
+  viewerMemberKey: string,
+): boolean {
+  if (workItem.archivedAt !== undefined || isTerminalWorkItem(workItem)) return false
+  const viewer = normalizeFocusMemberKey(viewerMemberKey)
+  return resolveFocusItemInvolvement(workItem, viewer, false) === 'owner'
+}
+
+/**
  * Projects and deduplicates every active signal for one Work Item.
  *
  * @param context - Canonical source indexes.

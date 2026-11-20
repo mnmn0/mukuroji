@@ -6,6 +6,9 @@ import { createRestoreDrillCleanupWorkflowName } from './subsystems/restore-dril
 const secretPaths = [
   'ConnectorRuntimeSecret/Resource',
   'DocumentPublicShareTokenSecret/Resource',
+  'EnterpriseIdentityTokenHashKeySecret/Resource',
+  'RequestEmailWebhookKeySecret/Resource',
+  'RequestTokenHashKeySecret/Resource',
 ] as const;
 const deadLetterQueuePaths = [
   'AiAssistanceObservabilityDlq/Resource',
@@ -20,6 +23,8 @@ const lambdaPaths = [
   'AiAssistanceObservabilityFunction/Resource',
   'FileBucketIncarnationMarkerFunction/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/Resource',
+  'CognitoClientContractFunction/Resource',
+  'CognitoClientContractProvider/framework-onEvent/Resource',
   'ApiFunction/Resource',
   'AuditExportWorkerFunction/Resource',
   'WorkItemImportFunction/Resource',
@@ -39,6 +44,8 @@ const managedPolicyRolePaths = [
   'BucketNotificationsHandler050a0587b7544547bf325f094a3db834/Role/Resource',
   'FileBucketIncarnationMarkerFunction/ServiceRole/Resource',
   'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/Resource',
+  'CognitoClientContractFunction/ServiceRole/Resource',
+  'CognitoClientContractProvider/framework-onEvent/ServiceRole/Resource',
   'ApiFunction/ServiceRole/Resource',
   'AuditExportWorkerFunction/ServiceRole/Resource',
   'WorkItemImportFunction/ServiceRole/Resource',
@@ -207,6 +214,12 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
     ['SlackNotificationJobPolicy/Resource'],
   ],
+  // SES authorizes the sending identity (the address or its domain). The statement's
+  // ses:FromAddress condition pins every message to the configured NotificationEmailSender.
+  [
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ses:<AWS::Region>:<AWS::AccountId>:identity/*]',
+    ['EmailNotificationJobPolicy/Resource'],
+  ],
   [
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     [
@@ -260,6 +273,12 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',
     [
       'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<CognitoClientContractFunction2E0ABB34.Arn>:*]',
+    [
+      'CognitoClientContractProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
@@ -416,7 +435,7 @@ const acknowledgedFindings = [
   },
   {
     id: 'AwsSolutions-CFR4',
-    reason: 'The distribution uses the default cloudfront.net certificate, whose viewer TLS policy CloudFront fixes. A custom domain certificate with TLSv1.2_2021 can be added later without changing the origins.',
+    reason: 'Without WebDomainName the distribution uses the default cloudfront.net certificate, whose viewer TLS policy CloudFront fixes. With a custom domain the certificate is set under a CloudFormation condition with TLSv1.2_2021, which the rule cannot evaluate.',
     scopePaths: webDistributionPaths,
   },
   {
@@ -451,6 +470,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-inbound-webhooks/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*/slack/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ses:<AWS::Region>:<AWS::AccountId>:identity/*]',
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<FileProofingTable81DA272F.Arn>/index/*]',
@@ -458,6 +478,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     'AwsSolutions-IAM5[Resource::*]',
     'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<CognitoClientContractFunction2E0ABB34.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessOnEventFunctionA25C5A0C.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessPollFunctionCD017060.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkisComplete30325ABD.Arn>:*]',
@@ -483,7 +504,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:states:<AWS::Region>:<AWS::AccountId>:execution:<RestoreDrillCleanupWorkflowBC990746.Name>:*]',
   ].map((id) => ({
     id,
-    reason: 'The wildcard is constrained to a reviewed S3 prefix, DynamoDB index/export or reserved restore-table namespace, Step Functions execution namespace, Secrets Manager namespace, API Gateway connection, GuardDuty rule, CDK provider resource, KMS grant action family, or CloudWatch DescribeAlarms action.',
+    reason: 'The wildcard is constrained to a reviewed S3 prefix, DynamoDB index/export or reserved restore-table namespace, Step Functions execution namespace, Secrets Manager namespace, SES sending identity pinned by ses:FromAddress, API Gateway connection, GuardDuty rule, CDK provider resource, KMS grant action family, or CloudWatch DescribeAlarms action.',
     scopePaths: iam5FindingScopePaths.get(id),
   })),
 ] as const;
