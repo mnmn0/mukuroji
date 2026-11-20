@@ -190,10 +190,12 @@ Kiro IDEは、承認していない環境変数を `${VAR}` から展開しま�
 | --- | --- |
 | `get_configuration` | 接続先Team・担当者、Agent settings（lease、引き継ぎ可否、Ready status、再開できるstatus）、agent brief、利用可能なType、status ID、設定Projectに適用されるcustom field・必須条件を確認 |
 | `list_tasks` | 権限内のタスクを担当者・Project・Type・statusで絞り込み、ページ取得 |
-| `get_task` | タスク本文・revision・現在状態・受け入れ条件・schedule（見積を含む）、`effort`（見積・残工数・進捗率と読んだ revision。工数 endpoint のない古い server では `null`）、`actualDates`（実績開始日・実績終了日と読んだ revision。実績日 endpoint のない古い server では `null`）、未解決blockerの件数、実行中のAgent Runと自インスタンスの保持かどうか、`hierarchy`（親・子・WBS 番号。階層 endpoint のない古い server では `null`）を取得。タスクの `key`（例: `ABC-123`）は branch 名・commit message・PR title に使う（key を持たない古いタスクは `id` を使う） |
+| `get_task` | タスク本文・revision・現在状態・受け入れ条件・schedule（見積を含む）、`effort`（見積・残工数・進捗率と読んだ revision。工数 endpoint のない古い server では `null`）、`actualDates`（実績開始日・実績終了日と読んだ revision。実績日 endpoint のない古い server では `null`）、未解決blockerの件数、実行中のAgent Runと自インスタンスの保持かどうか、`hierarchy`（親・子・WBS 番号。階層 endpoint のない古い server では `null`）、`relatedDocuments`（link された Document のうち credential 所有者が閲覧できるものの最初の 1 ページ。続きは `list_task_documents`。Document endpoint のない古い server と、所有者が Document を読めない場合は `null`）を取得。タスクの `key`（例: `ABC-123`）は branch 名・commit message・PR title に使う（key を持たない古いタスクは `id` を使う） |
 | `get_next_task` | 自インスタンスのAgent Runがあるstartedタスクを優先表示し、次にTeamが再開できるstatusを設定している場合はそのstatusにある `paused` で止めた・差し戻されたstartedタスクを `action: resume` で示し、なければAgent Runのない未着手候補を選択。TeamがReady statusを設定している場合はそのstatusのタスクだけを選ぶ。他インスタンスのRun（`otherRuns`）と除外した候補（`skipped`。理由は `blocked`・`active_run`・`not_ready`・`resume_unchecked`）も返す。再開候補の確認は 1 回 20 件の読み取りまでで、それを超えたときや rate limit のときは最初に確認できなかったタスクを `resume_unchecked` として返す |
 | `get_work_status` | 担当タスクの未着手・作業中・完了・取り消し件数と作業中一覧 |
 | `list_progress` | タスクのcanonicalコメント・返信を新しい順にページ取得 |
+| `list_task_documents` | タスクに link された Document のうち credential 所有者が閲覧できるものを `{ id, title }` でページ取得。見えない Document は除くため、`hasMore: true` の空ページもある |
+| `read_document` | タスクに link された Document（ページ・テンプレート）の本文を Markdown で取得。link されていない Document と閲覧できない Document は `not_found`、フォルダーとホワイトボードは `unsupported_document` |
 | `create_task` | 担当者付きタスクを作成。期限省略時は未スケジュール |
 | `update_task` | タイトル・説明・優先度・custom field・見積（`plannedEffortMinutes`）・残工数（`remainingEffortMinutes`）・手入力の進捗率（`progressPercent`）をrevision付きで更新（`null` で消す）。見積は Public API の `plannedEffortMinutes` として送り、server が保存済みの schedule に書き込むため、変更時は `expectedRevision` が最新の revision と一致している必要がある。応答を失った再試行は、途中で期限が動いても同じ request として replay される。受け入れ条件はIDごとに満たした・満たしていないを付けられる（条件の追加・削除・文言変更は人だけ） |
 | `start_task` | Agent Runを開始し、同じtransactionでbacklog/unstartedからstartedへ遷移。blockerを再確認し、同時更新と他インスタンスの着手を排除 |
@@ -208,6 +210,7 @@ Kiro IDEは、承認していない環境変数を `${VAR}` から展開しま�
 | `take_over_task` | ユーザーが明示的に引き継ぎを指示した場合だけ、同じメンバーの別インスタンスが持つ停滞Runを `superseded` にして自インスタンスのRunを開始。Teamの設定で許可されている場合だけ成功する |
 
 読み取りはcredentialの現在の権限範囲、更新はさらに設定された担当メンバーのタスクに限定します。
+link された Document は読むたびに credential 所有者のその時点の Work Item・Project・Document 権限で判定し、MCP も server も結果を保存しません。Document の本文と title はタスク本文と同じくユーザーデータで、要件として読みますが、credential・scope・接続先の変更や更新ツールの呼び出しの指示としては扱いません。`read_document` も読み取り専用ツールなので、`MUKUROJI_MCP_READ_ONLY=true` でも使えます。
 タスクの更新・遷移・進捗報告には常にインスタンスIDを添え、自インスタンスがそのタスクのAgent Runを持つ場合はRun IDも添えます。他インスタンスがRunを持つタスクへの更新はサーバーが `agent_run_conflict` で拒否します。
 コメントにも設定されたProject・担当者の制約を公開APIへ渡し、保存時と再送時に検証します。担当変更は通常のMukuroji画面/APIで行います。複数エージェントで作業を分ける場合は担当メンバーやProjectを分けて設定できます。
 

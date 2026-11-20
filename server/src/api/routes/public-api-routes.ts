@@ -176,6 +176,7 @@ import {
   normalizeTeamIssueInput,
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
+import { createCanonicalPublicDocumentService } from '../shared/public-document-access'
 import { readTeamWorkItemHierarchy, readWorkItemHierarchyLinks } from '../shared/work-item-hierarchy'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import {
@@ -3222,6 +3223,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       authenticateManagement: authenticateDeveloperManagement,
       workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),
       agentRuns: createForwardingClient(() => developerPlatformDependencies.publicAgentRuns),
+      documents: createCanonicalPublicDocumentService(),
       openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT,
       get cursorSecret() {
         return getPublicApiCursorSecret()

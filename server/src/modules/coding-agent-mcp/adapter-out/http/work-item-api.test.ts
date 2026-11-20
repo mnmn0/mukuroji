@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import { createAgentWorkItemApi } from './work-item-api'
 import { createAgentTasks } from '../../application/agent-tasks'
+import type { AgentDocument } from '../../application/work-item-api'
 
 const config = { origin: 'https://mukuroji.example.test', token: 'secret-test-token', teamId: 'team' }
 const validTask = { id: 'task', teamId: 'team', revision: 1, title: 'Task', assigneeUserId: 'agent',
@@ -203,6 +204,38 @@ test('reads actual dates from their endpoint and treats an older server as havin
   expect(await api.actualDates('legacy')).toBeUndefined()
   await expect(api.actualDates('other')).rejects.toMatchObject({ code: 'invalid_response' })
   await expect(api.actualDates('invalid')).rejects.toMatchObject({ code: 'invalid_response' })
+})
+
+test('reads linked Documents from their endpoints and treats an older server as having none', async () => {
+  const paths: string[] = []
+  const content: AgentDocument = {
+    schemaVersion: 1, id: 'spec/1', kind: 'page', title: 'Spec', revision: 2,
+    updatedAt: '2026-09-01T00:00:00.000Z', format: 'markdown', content: '# Spec',
+  }
+  const api = createAgentWorkItemApi(config, async (url) => {
+    paths.push(`${url.pathname}${url.search}`)
+    switch (url.pathname) {
+      case '/api/v1/work-items/task/documents':
+        return Response.json({ items: [{ id: 'spec/1', title: 'Spec' }], hasMore: true, nextCursor: 'next' })
+      case '/api/v1/work-items/task/documents/spec%2F1':
+        return Response.json(content)
+      case '/api/v1/work-items/task/documents/other':
+        return Response.json(content)
+      case '/api/v1/work-items/task/documents/board':
+        return Response.json({ ...content, id: 'board', kind: 'whiteboard' })
+      default:
+        return Response.json({ status: 404, code: 'not_found', retryable: false }, { status: 404 })
+    }
+  })
+  expect(await api.relatedDocuments('task', 'cursor', 5)).toEqual({ items: [{ id: 'spec/1', title: 'Spec' }], hasMore: true, nextCursor: 'next' })
+  expect(paths[0]).toBe('/api/v1/work-items/task/documents?teamId=team&cursor=cursor&limit=5')
+  expect(await api.relatedDocuments('legacy')).toBeUndefined()
+  expect(paths[1]).toBe('/api/v1/work-items/legacy/documents?teamId=team&limit=20')
+  expect(await api.document('task', 'spec/1')).toEqual(content)
+  expect(paths[2]).toBe('/api/v1/work-items/task/documents/spec%2F1?teamId=team')
+  await expect(api.document('task', 'other')).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.document('task', 'board')).rejects.toMatchObject({ code: 'invalid_response' })
+  await expect(api.document('task', 'missing')).rejects.toMatchObject({ code: 'not_found' })
 })
 
 const validRun = {

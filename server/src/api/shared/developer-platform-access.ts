@@ -31,6 +31,8 @@ import { evaluateEnterpriseRequestAccess } from './request-authorization'
 export type DeveloperAuthorizationRequirement = {
   /** Operation が要求する Enterprise permission です。 */
   permission: EnterprisePermissionId
+  /** `permission` の代わりに operation を許可する Enterprise permission です。 */
+  alternativePermissions?: readonly EnterprisePermissionId[]
   /** Team scope が既知の場合の canonical Team ID です。 */
   teamId?: string
   /** Project scope が既知の場合の canonical Project ID です。 */
@@ -206,7 +208,10 @@ export async function resolveDeveloperCredentialPrincipal(
         ...(requirement.evaluateProjectScopes === undefined
           ? {}
           : { evaluateProjectScopes: requirement.evaluateProjectScopes }),
-        requiredPermissions: [requirement.permission],
+        requiredPermissions: [
+          requirement.permission,
+          ...(requirement.alternativePermissions ?? []),
+        ],
         ...enterpriseAuthorizationEvaluation,
       })
   if (!requestAccess.allowed) {

@@ -12,6 +12,9 @@ import {
   type PublicWorkItemEffort,
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
+  type PublicDocumentContent,
+  type PublicWorkItemDocument,
+  PUBLIC_WORK_ITEM_DOCUMENT_PAGE_MAX_LIMIT,
   type ApiProblem,
   type ApiProblemCode,
   type ApiProblemViolation,
@@ -459,6 +462,51 @@ export type PublicAgentRunListFilters = {
   workItemId?: string
 }
 
+/**
+ * Read-only access to Documents linked to Work Items, for coding agents. Every read evaluates the
+ * credential owner's current Work Item, Project, and Document permissions.
+ */
+export interface PublicDocumentService {
+  /**
+   * Lists one page of Documents linked to a Work Item that the credential owner can view.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param continuation - Internal continuation from the previous page.
+   * @param limit - Maximum number of relations evaluated in this page.
+   * @returns Visible linked Documents and any remaining internal continuation.
+   */
+  listWorkItemDocuments(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<{
+    /** Visible linked Documents in this page. */
+    items: PublicWorkItemDocument[]
+    /** Whether another page exists. */
+    hasMore: boolean
+    /** Internal continuation wrapped by the public API's signed cursor. */
+    nextContinuation?: string
+  }>
+  /**
+   * Reads one Document linked to a Work Item, when the credential owner can view both, and renders
+   * it as Markdown.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item the Document must link.
+   * @param documentId - Document ID.
+   * @returns The Document content.
+   */
+  getWorkItemDocument(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    documentId: string,
+  ): Promise<PublicDocumentContent>
+}
+
 /** Public Agent Run API and the canonical Work Item and run persistence behind it. */
 export interface PublicAgentRunService {
   /**
@@ -785,6 +833,8 @@ export type PublicApiDependencies = {
   workItems: PublicWorkItemService
   /** Agent Run adapter; Agent Run routes report unavailable when it is not configured. */
   agentRuns?: PublicAgentRunService
+  /** Read-only Document adapter; Document routes report unavailable when it is not configured. */
+  documents?: PublicDocumentService
   /** Public OpenAPI 3.1 document です。 */
   openApiDocument: Record<string, unknown>
   /** Scope-bound cursor を署名する secret です。 */
@@ -1087,6 +1137,34 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
     ))
+  })
+
+  router.get('/v1/work-items/:workItemId/documents', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const documents = requireDocumentService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    return c.json(await createOrderedSignedContinuationPage(c, dependencies, {
+      workspaceId: credential.workspaceId,
+      actorId: `credential:${credential.credentialId}`,
+      resource: `/v1/work-items/${encodeURIComponent(workItemId)}/documents`,
+      filters: { teamId },
+    }, (continuation, limit) => documents.listWorkItemDocuments(
+      credential, teamId, workItemId, continuation, Math.min(limit, PUBLIC_WORK_ITEM_DOCUMENT_PAGE_MAX_LIMIT),
+    )))
+  })
+
+  router.get('/v1/work-items/:workItemId/documents/:documentId', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const documents = requireDocumentService(dependencies)
+    const document = await documents.getWorkItemDocument(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+      readRouteId(c.req.param('documentId'), 'Document ID'),
+    )
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(document)
   })
 
   router.get('/v1/work-items/:workItemId/key', async (c) => {
@@ -4979,6 +5057,19 @@ function requireStoredResponse(value: unknown) {
     )
   }
   return response as { status: 200 | 201 | 202 | 204; body: unknown }
+}
+
+/**
+ * Returns the configured Document service or reports that Documents are unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Document service.
+ */
+function requireDocumentService(dependencies: PublicApiDependencies): PublicDocumentService {
+  if (!dependencies.documents) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Documents are not configured.', true)
+  }
+  return dependencies.documents
 }
 
 /**

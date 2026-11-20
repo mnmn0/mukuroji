@@ -45,6 +45,7 @@ import {
   type PublicApiDependencies,
   type PublicImportSourceInput,
   type PublicAgentRunService,
+  type PublicDocumentService,
   type PublicWorkItemService,
 } from './public-api'
 import { AgentRunError, createAgentRunConflictError, hashAgentInstanceId } from '../agent-runs'
@@ -233,6 +234,8 @@ function createTestRouter(input: {
   workItems?: PublicWorkItemService
   /** Agent Run service used by Agent Run route tests. */
   agentRuns?: PublicAgentRunService
+  /** Document service used by Document route tests. */
+  documents?: PublicDocumentService
   connectorAuthorization?: ConnectorAuthorizationService
   /** Lists the providers configured in the test runtime. */
   listConfiguredConnectorProviders?: PublicApiDependencies['listConfiguredConnectorProviders']
@@ -261,6 +264,7 @@ function createTestRouter(input: {
     enforceActiveWorkspace: input.enforceActiveWorkspace ?? (async () => undefined),
     workItems: input.workItems ?? createDefaultWorkItemService(),
     ...(input.agentRuns ? { agentRuns: input.agentRuns } : {}),
+    ...(input.documents ? { documents: input.documents } : {}),
     openApiDocument: { openapi: '3.1.0' },
     cursorSecret: 'public-api-test-cursor-secret-at-least-32-bytes',
     createRequestId: () => 'request-public-api-test',
@@ -676,6 +680,114 @@ describe('public API router', () => {
     expect(reads).toEqual(['team-1/work-item-1'])
   })
 
+  test('lists Documents linked to a Work Item with the read scope and signs the continuation', async () => {
+    const calls: { continuation: string | undefined; limit: number }[] = []
+    const { platform, router } = createTestRouter({
+      documents: {
+        async listWorkItemDocuments(credential, teamId, workItemId, continuation, limit) {
+          expect(credential.workspaceId).toBe('workspace-1')
+          expect(`${teamId}/${workItemId}`).toBe('team-1/work-item-1')
+          calls.push({ continuation, limit })
+          return continuation === undefined
+            ? { items: [{ id: 'document-1', title: 'Spec' }], hasMore: true, nextContinuation: 'backlink-cursor' }
+            : { items: [], hasMore: false }
+        },
+        async getWorkItemDocument() {
+          throw new Error('not used')
+        },
+      },
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const first = await router.request('http://localhost/v1/work-items/work-item-1/documents?teamId=team-1&limit=80', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const firstBody = await first.json() as { items: unknown[]; hasMore: boolean; nextCursor?: string }
+    const second = await router.request(
+      `http://localhost/v1/work-items/work-item-1/documents?teamId=team-1&limit=80&cursor=${encodeURIComponent(firstBody.nextCursor ?? '')}`,
+      { headers: { Authorization: `Bearer ${reader.secret}` } },
+    )
+    const otherWorkItem = await router.request(
+      `http://localhost/v1/work-items/work-item-2/documents?teamId=team-1&limit=80&cursor=${encodeURIComponent(firstBody.nextCursor ?? '')}`,
+      { headers: { Authorization: `Bearer ${reader.secret}` } },
+    )
+    const denied = await router.request('http://localhost/v1/work-items/work-item-1/documents?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+    const missingTeam = await router.request('http://localhost/v1/work-items/work-item-1/documents', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+
+    expect(first.status).toBe(200)
+    expect(firstBody.items).toEqual([{ id: 'document-1', title: 'Spec' }])
+    expect(firstBody.hasMore).toBe(true)
+    expect(firstBody.nextCursor).not.toContain('backlink-cursor')
+    expect(second.status).toBe(200)
+    expect(await second.json()).toEqual({ items: [], hasMore: false })
+    expect(otherWorkItem.status).toBe(400)
+    expect(calls).toEqual([
+      { continuation: undefined, limit: 50 },
+      { continuation: 'backlink-cursor', limit: 50 },
+    ])
+    expect(denied.status).toBe(403)
+    expect(missingTeam.status).toBe(400)
+  })
+
+  test('reads a linked Document as Markdown with the read scope and never caches it', async () => {
+    const reads: string[] = []
+    const { platform, router } = createTestRouter({
+      documents: {
+        async listWorkItemDocuments() {
+          throw new Error('not used')
+        },
+        async getWorkItemDocument(_credential, teamId, workItemId, documentId) {
+          reads.push(`${teamId}/${workItemId}/${documentId}`)
+          if (documentId !== 'document-1') {
+            throw new PublicApiServiceError(404, 'not_found', 'Document was not found.')
+          }
+          return {
+            schemaVersion: 1, id: documentId, kind: 'page', title: 'Spec', revision: 3,
+            updatedAt: NOW.toISOString(), format: 'markdown', content: '# Spec\n',
+          }
+        },
+      },
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+
+    const response = await router.request('http://localhost/v1/work-items/work-item-1/documents/document-1?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const hidden = await router.request('http://localhost/v1/work-items/work-item-1/documents/document-2?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+    const denied = await router.request('http://localhost/v1/work-items/work-item-1/documents/document-1?teamId=team-1', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await response.json()).toEqual({
+      schemaVersion: 1, id: 'document-1', kind: 'page', title: 'Spec', revision: 3,
+      updatedAt: NOW.toISOString(), format: 'markdown', content: '# Spec\n',
+    })
+    expect(hidden.status).toBe(404)
+    expect(denied.status).toBe(403)
+    expect(reads).toEqual(['team-1/work-item-1/document-1', 'team-1/work-item-1/document-2'])
+  })
+
+  test('reports Document routes as unavailable when no Document service is configured', async () => {
+    const { platform, router } = createTestRouter()
+    const reader = await createApiKey(platform, ['work-items:read'])
+
+    const response = await router.request('http://localhost/v1/work-items/work-item-1/documents/document-1?teamId=team-1', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+
+    expect(response.status).toBe(503)
+  })
+
   test('exposes the authorized Work Item Type creation schema', async () => {
     let requestedTeamId: string | undefined
     let requestedProjectId: string | undefined
@@ -938,6 +1050,8 @@ describe('public API router', () => {
     expect(paths['/api/v1/work-items/{workItemId}/effort']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/key']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/actual-dates']).toHaveProperty('get')
+    expect(paths['/api/v1/work-items/{workItemId}/documents']).toHaveProperty('get')
+    expect(paths['/api/v1/work-items/{workItemId}/documents/{documentId}']).toHaveProperty('get')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('actualStartDate')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('actualEndDate')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('acceptanceCriteria')

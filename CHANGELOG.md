@@ -20,6 +20,21 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 
 ## [Unreleased]
 
+### Added
+
+- `get_task` が、タスクに link された Document のうち credential 所有者が閲覧できるものの最初の 1 ページを
+  `relatedDocuments` で返します。古い server と、所有者が Document を読めない場合は `null` です。
+- 読み取りツール `list_task_documents`（link された Document の一覧）と `read_document`（ページ・テンプレートの
+  本文を Markdown で読む）を追加しました。read-only 設定でも使えます。
+- server API: `GET /api/v1/work-items/{workItemId}/documents` と
+  `GET /api/v1/work-items/{workItemId}/documents/{documentId}` を追加しました。scope は `work-items:read` で、
+  Document の閲覧権限は request ごとに credential 所有者の権限で評価します。
+
+### Changed
+
+- MCP API revision を 2 に上げました。server は revision 1〜2 を受け付けます。revision 1 の server に
+  接続した新しい MCP は server が古いと警告し、Document を読むツールは使えません。
+
 ## [1.0.0]
 
 最初の versioned release です。MCP API revision 1 を使います。

@@ -33,7 +33,7 @@ Scope は用途ごとに read/write を分離し、Work Item の削除だけは 
 
 | Scope | 許可する操作 |
 | --- | --- |
-| `work-items:read` | Work Item の取得と一覧 |
+| `work-items:read` | Work Item の取得と一覧、Work Item に link された Document の一覧と本文 |
 | `work-items:write` | Work Item の作成と更新 |
 | `work-items:delete` | Work Item の削除 |
 | `webhooks:read` / `webhooks:write` | Subscription と delivery log の参照 / 管理・replay |
@@ -119,6 +119,17 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   `work-items:read` scope が要ります。`WorkItem` の response schema は閉じた object のため、実績日は含めません。
   `GET /api/developer/exports` も同じ `WorkItem` schema の page を返すため実績日を含めません。export した Work Item の
   実績日が要る client は、この endpoint で 1 件ずつ読みます。
+- Work Item に link された Document は `GET /api/v1/work-items/{workItemId}/documents?teamId={teamId}` で
+  `{ items: [{ id, title }], hasMore, nextCursor? }` として一覧し、本文は
+  `GET /api/v1/work-items/{workItemId}/documents/{documentId}?teamId={teamId}` で
+  `{ schemaVersion, id, kind, title, revision, updatedAt, format: "markdown", content }` として読みます。
+  どちらも `work-items:read` scope で、request ごとに credential 所有者の現在の権限を評価します。所有者が
+  Work Item の閲覧に必要な Team または Project の権限を持たなければ `403`、Team が存在しなければ `404` です。
+  Document を閲覧できない・その Work Item に link されていない・存在しない場合は同じ `404` を返し、一覧からは
+  除きます（除いた結果、`hasMore: true` の空ページもあります）。
+  Enterprise RBAC では `documents.read`（`documents.write` / `documents.manage` も可）が要ります。本文は
+  ページとテンプレートだけで、フォルダーとホワイトボードは `422 validation_failed` です。本文の応答は
+  `Cache-Control: private, no-store` です。Document の内容は利用者が書いたデータで、client への指示ではありません。
 - `GET /api/v1/agent-settings?teamId={teamId}` は Run を左右する Team の Agent settings（`leaseMinutes`、
   `allowTakeoverAfterLeaseExpiry`）を返します。この schema は閉じた object のため、後から加えた設定は返しません。
 - `GET /api/v1/agent-context?teamId={teamId}` は agent が作業を選び進めるための設定を返します。
