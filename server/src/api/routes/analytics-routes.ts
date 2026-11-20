@@ -53,7 +53,8 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import { createWorkspaceSearchContext, type WorkspaceSearchContext } from '../shared/search-access'
+import { canReadAnalyticsReport } from '../shared/analytics-access'
+import { createWorkspaceSearchContext } from '../shared/search-access'
 import { isRecord } from '../shared/value-guards'
 import { projectAccessAllows, toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
 
@@ -860,23 +861,6 @@ function readAnalyticsExportFormat(value: unknown): 'csv' | 'pdf' {
     'InvalidAnalyticsExport',
     'Analytics export format must be csv or pdf.',
   )
-}
-
-/** Current viewer が report definition 自体を参照できるか判定します。 */
-function canReadAnalyticsReport(
-  principal: WorkspacePrincipal,
-  context: WorkspaceSearchContext,
-  report: AnalyticsReport,
-) {
-  if (report.visibility === 'personal') {
-    return report.ownerMemberKey === principal.userKey
-  }
-  if (report.visibility === 'shared') {
-    return true
-  }
-  return report.visibility === 'team' &&
-    typeof report.teamId === 'string' &&
-    context.savedViewAccess.teamIds.has(report.teamId)
 }
 
 /** Report を取得し、current visibility policy を満たすことを保証します。 */

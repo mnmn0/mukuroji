@@ -12,7 +12,10 @@ import {
   type WorkspaceCommandMenuContextValue,
 } from '../../commands/ui/WorkspaceCommandMenuContext'
 import { focusQueueResponseFixture } from '../../features/focus-queue/fixtures'
-import { notificationInboxControllerFixture } from '../../notifications/fixtures'
+import {
+  notificationInboxControllerFixture,
+  reportDeliveryNotificationFixture,
+} from '../../notifications/fixtures'
 import { WorkspaceInboxView } from '../../notifications/ui/WorkspaceInboxView'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
 import type { TeamProjectMemberAccess } from '../../projects/model/teamInsights'
@@ -571,6 +574,31 @@ export const InboxRoute: Story = {
       t={t}
     />
   ),
+}
+
+/** The `/inbox` route with a scheduled Analytics report delivery for its recipient. */
+export const InboxWithReportDelivery: Story = {
+  render: () => (
+    <WorkspaceInboxView
+      locale="ja"
+      notificationInbox={{
+        ...notificationInboxControllerFixture,
+        availableEventTypes: [reportDeliveryNotificationFixture.eventType],
+        hasMore: false,
+        notifications: [reportDeliveryNotificationFixture],
+        unreadCount: 1,
+      }}
+      t={t}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByText('週次ポートフォリオ')).toBeVisible()
+    await expect(canvas.getAllByText(t('workspace.inbox.event.reportDelivered')).length).toBeGreaterThan(0)
+    await expect(canvas.getByText(t('workspace.inbox.reason.reportRecipient'))).toBeVisible()
+    await expect(canvas.getByText(t('workspace.inbox.summary.reportDelivered'))).toBeVisible()
+  },
 }
 
 /** The `/inbox` route when the notification stream is empty. */
