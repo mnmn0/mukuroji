@@ -86,3 +86,23 @@ export function createTimeTrackingFormatters(locale: Locale): TimeTrackingFormat
     date: (instant) => dateFormatter.format(new Date(instant)),
   }
 }
+
+/**
+ * Formats the label of a submitted version.
+ *
+ * @param t - Translator.
+ * @param formatters - Date and time formatters.
+ * @param version - Version number.
+ * @param submittedAt - ISO timestamp of the submission.
+ * @returns The status text, such as "Submitted (version 2, Nov 20 09:00)".
+ */
+export function formatWeeklyReportSubmittedStatus(
+  t: TimeTrackingTranslator,
+  formatters: TimeTrackingFormatters,
+  version: number,
+  submittedAt: string,
+): string {
+  return t('timeTracking.weeklyReport.statusSubmitted')
+    .replace('{version}', String(version))
+    .replace('{time}', `${formatters.date(submittedAt)} ${formatters.time(submittedAt)}`)
+}

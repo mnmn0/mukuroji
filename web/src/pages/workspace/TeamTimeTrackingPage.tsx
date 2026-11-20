@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
 import { PersonalWeeklyReportContainer } from '../../features/time-tracking/ui/PersonalWeeklyReportContainer'
+import { TeamWeeklyReportsContainer } from '../../features/time-tracking/ui/TeamWeeklyReportsContainer'
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
 import { TimeReportContainer } from '../../features/time-tracking/ui/TimeReportContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
@@ -21,8 +22,8 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 const emptyTeamProjects: ProjectDirectoryProject[] = []
 
 /**
- * Renders a Team's time tracking: the member's weekly timesheet and weekly report, the manager's
- * approval queue, and the Team report with its CSV export and budgets.
+ * Renders a Team's time tracking: the member's weekly timesheet and weekly report, the managers'
+ * weekly report status and approval queue, and the Team report with its CSV export and budgets.
  *
  * The view, week, and report period live in the URL so a reload or shared link opens the same view.
  *
@@ -35,7 +36,10 @@ export function TeamTimeTrackingPage() {
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const viewParam = searchParams.get('view')
-  const view: TimeTrackingView = viewParam === 'approvals' || viewParam === 'report' || viewParam === 'weekly-report'
+  const view: TimeTrackingView = viewParam === 'approvals' ||
+    viewParam === 'report' ||
+    viewParam === 'weekly-report' ||
+    viewParam === 'team-weekly-reports'
     ? viewParam
     : 'timesheet'
   const reportFrom = searchParams.get('from')
@@ -62,7 +66,7 @@ export function TeamTimeTrackingPage() {
     accessToken,
     activeTeam?.id,
     activeTeam?.projects ?? emptyTeamProjects,
-    enabled && (view === 'approvals' || view === 'report'),
+    enabled && (view === 'approvals' || view === 'report' || view === 'team-weekly-reports'),
   )
   const teamScope = useMemo(() => ({ kind: 'team' as const, teamId: teamId ?? '' }), [teamId])
   // The Team task-view list carries the server's effective write scopes, enterprise grants included.
@@ -182,12 +186,24 @@ export function TeamTimeTrackingPage() {
             locale={workspace.locale}
             memberKey={workspace.userKey}
             onMoveWeek={moveWeek}
+            onOpenWeek={(nextWeekStart) => open('weekly-report', nextWeekStart)}
             onRetryWorkItems={() => { void myWorkItems.mutate().catch(() => undefined) }}
             teamId={teamId}
             weekStart={weekStart}
             weekStartDay={calendarSettings.settings.weekStartDay}
             workItems={myWorkItems.data}
             workItemTitles={workItemTitles}
+          />
+        ) : view === 'team-weekly-reports' ? (
+          <TeamWeeklyReportsContainer
+            accessToken={accessToken}
+            key={`${teamId}:team-weekly-reports:${weekStart}`}
+            locale={workspace.locale}
+            memberNames={memberNames}
+            onMoveWeek={moveWeek}
+            teamId={teamId}
+            weekStart={weekStart}
+            weekStartDay={calendarSettings.settings.weekStartDay}
           />
         ) : view === 'approvals' ? (
           <TimeApprovalQueueContainer

@@ -395,7 +395,7 @@ export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
  */
 export function createTeamTimeTrackingPath(
   teamId: string,
-  view: 'timesheet' | 'weekly-report' | 'approvals' | 'report' = 'timesheet',
+  view: 'timesheet' | 'weekly-report' | 'team-weekly-reports' | 'approvals' | 'report' = 'timesheet',
   weekStart?: string,
   report?: { from: string; to: string; groupBy: string },
 ) {
