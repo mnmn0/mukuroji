@@ -494,6 +494,7 @@ durable retryしません。既存connectionは強制切断されず、blocked�
 `/api/ready`の確認は`bun run runtime-control:enable` / `bun run runtime-control:disable`が1コマンドで
 行います（使い方は`cdk/README.md`の「Application 処理を有効にする」）。Change recordの保存、
 reviewerの確認、fresh `runtime-control.evaluated` recordの確認はoperatorが別に行います。
+停止では、止める操作をalarmの状態で妨げないよう手順3のalarm確認を行いません。
 
 1. Change/incident record に stack、account、region、4つの output、現在の document/revision、
    変更理由、owner、想定時間、re-enable 条件、worker replay owner を保存する。

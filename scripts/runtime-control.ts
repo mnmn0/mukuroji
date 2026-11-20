@@ -249,6 +249,22 @@ export function buildChangeDescription(mode: RuntimeControlMode, revision: numbe
 }
 
 /**
+ * Parses JSON printed by the `aws` CLI.
+ *
+ * @param output - Standard output of an `aws` command run with `--output json`.
+ * @param command - Command name for the error message.
+ * @returns The parsed value.
+ * @throws RuntimeControlError when the output is not JSON.
+ */
+function parseJson(output: string, command: string): unknown {
+  try {
+    return JSON.parse(output)
+  } catch {
+    throw new RuntimeControlError(`aws ${command} did not print JSON.`)
+  }
+}
+
+/**
  * Parses JSON printed by the `aws` CLI into an object.
  *
  * @param output - Standard output of an `aws` command run with `--output json`.
@@ -256,7 +272,7 @@ export function buildChangeDescription(mode: RuntimeControlMode, revision: numbe
  * @returns The parsed object.
  */
 function parseObject(output: string, command: string): Record<string, unknown> {
-  const value: unknown = JSON.parse(output)
+  const value = parseJson(output, command)
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new RuntimeControlError(`aws ${command} did not return an object.`)
   }
@@ -294,7 +310,7 @@ async function readTarget(
     'cloudformation', 'describe-stacks', '--region', region, '--stack-name', stackName,
     '--query', 'Stacks[0].Outputs', '--output', 'json',
   ])
-  const parsed: unknown = JSON.parse(output)
+  const parsed = parseJson(output, 'cloudformation describe-stacks')
   const outputs = new Map<string, string>()
   if (Array.isArray(parsed)) {
     for (const entry of parsed) {
@@ -331,20 +347,20 @@ async function assertAlarmReady(
   region: string,
   stackName: string,
 ): Promise<void> {
-  const alarmNames: unknown = JSON.parse(await aws([
+  const alarmNames = parseJson(await aws([
     'cloudformation', 'describe-stack-resources', '--region', region, '--stack-name', stackName,
     '--query',
     "StackResources[?ResourceType=='AWS::CloudWatch::Alarm' && starts_with(LogicalResourceId, 'RuntimeControlConfigurationFailureAlarm')].PhysicalResourceId",
     '--output', 'json',
-  ]))
+  ]), 'cloudformation describe-stack-resources')
   if (!Array.isArray(alarmNames) || alarmNames.length !== 1 || typeof alarmNames[0] !== 'string') {
     throw new RuntimeControlError('Could not find exactly one RuntimeControlConfigurationFailureAlarm in the stack.')
   }
   const alarmName = alarmNames[0]
-  const alarms: unknown = JSON.parse(await aws([
+  const alarms = parseJson(await aws([
     'cloudwatch', 'describe-alarms', '--region', region, '--alarm-names', alarmName,
     '--query', 'MetricAlarms[].[StateValue, ActionsEnabled]', '--output', 'json',
-  ]))
+  ]), 'cloudwatch describe-alarms')
   const alarm: unknown = Array.isArray(alarms) && alarms.length === 1 ? alarms[0] : undefined
   if (!Array.isArray(alarm) || alarm[0] !== 'OK' || alarm[1] !== true) {
     throw new RuntimeControlError(
@@ -386,10 +402,10 @@ export async function runRuntimeControl(
 
   if (request.mode === 'enabled') await assertAlarmReady(aws, region, stackName)
 
-  const versionNumbers: unknown = JSON.parse(await appconfig(
+  const versionNumbers = parseJson(await appconfig(
     'list-hosted-configuration-versions', '--configuration-profile-id', target.configurationProfileId,
     '--query', 'Items[].VersionNumber', '--output', 'json',
-  ))
+  ), 'appconfig list-hosted-configuration-versions')
   const latestVersion = Array.isArray(versionNumbers)
     ? Math.max(0, ...versionNumbers.filter((value): value is number => typeof value === 'number'))
     : 0

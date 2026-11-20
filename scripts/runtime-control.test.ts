@@ -63,6 +63,7 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
   const files = new Map<string, string>([['/work/latest.json', '{"schemaVersion":1,"mode":"disabled","revision":4}']])
   const deploymentStates = [...(options.deploymentStates ?? ['DEPLOYING', 'BAKING', 'COMPLETE'])]
   const readyStatuses = [...(options.readyStatuses ?? [200])]
+  let clock = Date.parse('2026-11-20T06:00:00.000Z')
   const answer = (args: readonly string[]): unknown => {
     const command = `${args[0]} ${args[1]}`
     switch (command) {
@@ -97,14 +98,16 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
         if (args[0] === 'sts') return 'arn:aws:iam::123456789012:user/operator\n'
         return JSON.stringify(answer(args))
       },
-      httpStatus: async () => readyStatuses.shift(),
+      httpStatus: async () => (readyStatuses.length > 1 ? readyStatuses.shift() : readyStatuses[0]),
       readText: async (path) => files.get(path) ?? '',
       writeText: async (path, content) => {
         files.set(path, content)
       },
       workDirectory: '/work',
-      sleep: async () => {},
-      now: () => new Date('2026-11-20T06:00:00.000Z'),
+      sleep: async (milliseconds) => {
+        clock += milliseconds
+      },
+      now: () => new Date(clock),
       log: () => {},
     },
   }
@@ -192,6 +195,12 @@ describe('runRuntimeControl', () => {
     const fake = fakeDependencies({ environmentState: 'DEPLOYING' })
     await expect(runRuntimeControl({ mode: 'disabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
       .rejects.toThrow('Wait for that deployment')
+  })
+
+  test('fails when /api/ready does not reach the new mode in time', async () => {
+    const fake = fakeDependencies({ readyStatuses: [200] })
+    await expect(runRuntimeControl({ mode: 'disabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
+      .rejects.toThrow('returned 200 instead of 503')
   })
 
   test('fails when AppConfig rolls the deployment back', async () => {
