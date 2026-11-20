@@ -16,6 +16,7 @@ import {
   DynamoDbPlanningClient,
   InMemoryPlanningClient,
   PlanningError,
+  type PlanningEntityCreation,
   type PlanningWorkItemState,
 } from './planning'
 
@@ -25,7 +26,7 @@ function createCycle(
   id: string,
   expectedRevision: number,
   overrides: Partial<CreatePlanningEntityInput> = {},
-): CreatePlanningEntityInput {
+): PlanningEntityCreation {
   return {
     id,
     type: 'cycle',
