@@ -115,6 +115,9 @@ export const workItemDependencies: WorkItemDependencies = {
   get savedUpdateFeeds() {
     return requireAppDependencies().workItems.savedUpdateFeeds
   },
+  get scheduleBaselines() {
+    return requireAppDependencies().workItems.scheduleBaselines
+  },
   get collections() {
     return requireAppDependencies().workItems.collections
   },

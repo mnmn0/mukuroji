@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   GetCommand,
   TransactWriteCommand,
@@ -10,6 +11,7 @@ import type {
 import type {
   SaveTeamReminderSettingsInput,
   ScheduledReminderSettingsReader,
+  TeamReminderSettingsReceipt,
   TeamReminderSettingsRecord,
   TeamReminderSettingsStore,
 } from '../../application/ports/reminder-settings-reader'
@@ -30,6 +32,9 @@ const teamReminderPartitionSuffix = '!team-reminder-settings'
 
 /** Item type stored on Team reminder rows. */
 const teamReminderItemType = 'team-reminder-settings'
+
+/** Item type stored on the receipt of a settings update sent with an idempotency key. */
+const teamReminderReceiptItemType = 'team-reminder-settings-receipt'
 
 /** DynamoDB store for Team reminder overrides and the schedule's view of personal overrides. */
 export class DynamoDbReminderSettingsStore
@@ -66,7 +71,21 @@ export class DynamoDbReminderSettingsStore
       Key: createTeamReminderKey(workspaceId, teamId),
       ConsistentRead: true,
     }))
-    return parseTeamReminderRow(response.Item)
+    return parseTeamReminderRow(response.Item, workspaceId, teamId)
+  }
+
+  /** @inheritdoc */
+  async getMutationReceipt(
+    workspaceId: string,
+    teamId: string,
+    idempotencyKey: string,
+  ): Promise<TeamReminderSettingsReceipt | undefined> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: createTeamReminderReceiptKey(workspaceId, teamId, idempotencyKey),
+      ConsistentRead: true,
+    }))
+    return parseTeamReminderReceipt(response.Item, workspaceId, teamId)
   }
 
   /**
@@ -81,8 +100,27 @@ export class DynamoDbReminderSettingsStore
       days: input.days,
       revision: input.expectedRevision + 1,
       updatedAt: input.now.toISOString(),
-      ...(input.mutation ? { lastMutation: input.mutation } : {}),
     }
+    const authorizationChecks = input.authorizationConditionChecks ?? []
+    const receiptPuts = input.mutation
+      ? [{
+          Put: {
+            TableName: this.tableName,
+            Item: {
+              ...createTeamReminderReceiptKey(input.workspaceId, input.teamId, input.mutation.idempotencyKey),
+              itemType: teamReminderReceiptItemType,
+              workspaceId: input.workspaceId,
+              teamId: input.teamId,
+              requestFingerprint: input.mutation.requestFingerprint,
+              days: next.days,
+              revision: next.revision,
+              updatedAt: next.updatedAt,
+            },
+            // The key was unused when the use case read it; a concurrent use cancels this save.
+            ConditionExpression: 'attribute_not_exists(recipientKey)',
+          },
+        }]
+      : []
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
@@ -97,12 +135,6 @@ export class DynamoDbReminderSettingsStore
                 days: next.days,
                 revision: next.revision,
                 updatedAt: next.updatedAt,
-                ...(input.mutation
-                  ? {
-                      lastIdempotencyKey: input.mutation.idempotencyKey,
-                      lastRequestFingerprint: input.mutation.requestFingerprint,
-                    }
-                  : {}),
               },
               ...(input.expectedRevision === 0
                 ? { ConditionExpression: 'attribute_not_exists(recipientKey)' }
@@ -113,18 +145,29 @@ export class DynamoDbReminderSettingsStore
                   }),
             },
           },
+          ...receiptPuts,
+          ...authorizationChecks,
           ...(input.auditPut ? [input.auditPut] : []),
         ],
       }))
     } catch (error) {
-      if (isConditionalTransactionFailure(error)) {
+      const failed = readFailedConditionIndexes(error)
+      if (!failed) throw error
+      const authorizationStart = 1 + receiptPuts.length
+      const authorizationChanged = failed.some((index) =>
+        index >= authorizationStart && index < authorizationStart + authorizationChecks.length)
+      if (authorizationChanged && !failed.some((index) => index < authorizationStart)) {
         throw new NotificationError(
           409,
-          'NotificationReminderSettingsConflict',
-          'Team reminder settings changed before this update was saved.',
+          'TeamReminderSettingsAuthorizationChanged',
+          'Team permissions changed before this update was saved. Reload and try again.',
         )
       }
-      throw error
+      throw new NotificationError(
+        409,
+        'NotificationReminderSettingsConflict',
+        'Team reminder settings changed before this update was saved.',
+      )
     }
     return next
   }
@@ -174,17 +217,87 @@ function createTeamReminderKey(workspaceId: string, teamId: string) {
 }
 
 /**
+ * Builds the NotificationsTable key of the receipt of an update sent with an idempotency key.
+ *
+ * The key is hashed so a client-chosen value never shapes the sort key.
+ *
+ * @param workspaceId - Canonical Workspace ID.
+ * @param teamId - Team ID.
+ * @param idempotencyKey - `Idempotency-Key` the client sent.
+ * @returns Partition and sort key in the Team reminder partition.
+ */
+function createTeamReminderReceiptKey(workspaceId: string, teamId: string, idempotencyKey: string) {
+  const key = createTeamReminderKey(workspaceId, teamId)
+  const digest = createHash('sha256').update(idempotencyKey).digest('hex')
+  return { ...key, notificationKey: `${key.notificationKey}#MUTATION#${digest}` }
+}
+
+/**
  * Validates a stored Team reminder row.
  *
  * @param value - Stored row, or undefined when none exists.
+ * @param workspaceId - Workspace ID the row was read for.
+ * @param teamId - Team ID the row was read for.
  * @returns The parsed record.
- * @throws Error when the row is corrupt, so the schedule retries instead of using defaults.
+ * @throws Error when the row is corrupt or belongs to another scope, so the schedule retries
+ * instead of using defaults.
  */
-function parseTeamReminderRow(value: Record<string, unknown> | undefined): TeamReminderSettingsRecord {
+function parseTeamReminderRow(
+  value: Record<string, unknown> | undefined,
+  workspaceId: string,
+  teamId: string,
+): TeamReminderSettingsRecord {
   if (!value) return { days: {}, revision: 0 }
+  if (value.itemType !== teamReminderItemType) {
+    throw new Error('Stored Team reminder settings are invalid.')
+  }
+  return parseStoredRecord(value, workspaceId, teamId)
+}
+
+/**
+ * Validates a stored update receipt.
+ *
+ * @param value - Stored receipt, or undefined when none exists.
+ * @param workspaceId - Workspace ID the receipt was read for.
+ * @param teamId - Team ID the receipt was read for.
+ * @returns The parsed receipt, or undefined when none exists.
+ * @throws Error when the receipt is corrupt or belongs to another scope.
+ */
+function parseTeamReminderReceipt(
+  value: Record<string, unknown> | undefined,
+  workspaceId: string,
+  teamId: string,
+): TeamReminderSettingsReceipt | undefined {
+  if (!value) return undefined
+  const requestFingerprint = value.requestFingerprint
+  if (
+    value.itemType !== teamReminderReceiptItemType ||
+    typeof requestFingerprint !== 'string' ||
+    !requestFingerprint
+  ) {
+    throw new Error('Stored Team reminder settings receipt is invalid.')
+  }
+  return { requestFingerprint, record: parseStoredRecord(value, workspaceId, teamId) }
+}
+
+/**
+ * Validates the scope, revision, overrides, and save time shared by settings rows and receipts.
+ *
+ * @param value - Stored row.
+ * @param workspaceId - Workspace ID the row was read for.
+ * @param teamId - Team ID the row was read for.
+ * @returns The parsed record.
+ * @throws Error when a field is invalid or the stored IDs differ from the requested scope.
+ */
+function parseStoredRecord(
+  value: Record<string, unknown>,
+  workspaceId: string,
+  teamId: string,
+): TeamReminderSettingsRecord {
   const revision = value.revision
   if (
-    value.itemType !== teamReminderItemType ||
+    value.workspaceId !== workspaceId.trim() ||
+    value.teamId !== teamId.trim() ||
     typeof revision !== 'number' ||
     !Number.isSafeInteger(revision) ||
     revision < 1
@@ -200,28 +313,27 @@ function parseTeamReminderRow(value: Record<string, unknown> | undefined): TeamR
   const updatedAt = typeof value.updatedAt === 'string' && Number.isFinite(Date.parse(value.updatedAt))
     ? value.updatedAt
     : undefined
-  const lastMutation = typeof value.lastIdempotencyKey === 'string' &&
-    typeof value.lastRequestFingerprint === 'string'
-    ? { idempotencyKey: value.lastIdempotencyKey, requestFingerprint: value.lastRequestFingerprint }
-    : undefined
   return {
     days,
     revision,
     ...(updatedAt ? { updatedAt } : {}),
-    ...(lastMutation ? { lastMutation } : {}),
   }
 }
 
 /**
- * Reports whether a transaction failed because a condition did not hold.
+ * Lists the transaction items whose condition did not hold.
  *
  * @param error - Error thrown by the transaction.
- * @returns Whether a conditional check cancelled the transaction.
+ * @returns Indexes of the failed conditions, or undefined when the error is not a conditional cancellation.
  */
-function isConditionalTransactionFailure(error: unknown) {
-  if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') return false
+function readFailedConditionIndexes(error: unknown) {
+  if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') return undefined
   const reasons: unknown = Reflect.get(error, 'CancellationReasons')
-  return Array.isArray(reasons) && reasons.some((reason: unknown) =>
+  if (!Array.isArray(reasons)) return undefined
+  const failed = reasons.flatMap((reason: unknown, index) =>
     typeof reason === 'object' && reason !== null &&
-    Reflect.get(reason, 'Code') === 'ConditionalCheckFailed')
+      Reflect.get(reason, 'Code') === 'ConditionalCheckFailed'
+      ? [index]
+      : [])
+  return failed.length > 0 ? failed : undefined
 }

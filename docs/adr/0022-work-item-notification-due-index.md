@@ -1,4 +1,4 @@
-# 0017. 期限通知の schedule を Work Items table の sparse な期限 index で読む
+# 0022. 期限通知の schedule を Work Items table の sparse な期限 index で読む
 
 - 状態: 提案
 - 日付: 2026-11-20

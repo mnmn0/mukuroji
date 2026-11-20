@@ -1,4 +1,4 @@
-# 0016. Team の通知日数設定を NotificationsTable の Workspace 内 partition に保存する
+# 0018. Team の通知日数設定を NotificationsTable の Workspace 内 partition に保存する
 
 - 状態: 提案
 - 日付: 2026-11-19
@@ -25,8 +25,13 @@ member partition）に足せるが、Team の設定には保存先がない。
   `<workspaceId>#` で始まるので、Workspace の削除・export の既存の範囲に入る。
 - 行は `revision` を持ち、`PUT /api/teams/{teamId}/notification-reminders` は `expectedRevision` を条件にした
   transaction で保存する。同じ transaction で `notification-reminders.updated` の audit event を書く。
-- 行に最後の `Idempotency-Key` と request の fingerprint（`expectedRevision` と日数の sha256）を残す。
-  同じ key・同じ fingerprint の再送は保存済みの設定を返し、同じ key・別の body は 409 `IdempotencyKeyReused` にする。
+- `Idempotency-Key` 付きの保存では、同じ partition の sort key `TEAM#<teamId>#MUTATION#<key の sha256>` に receipt 行を
+  同じ transaction で書く。receipt は request の fingerprint（`expectedRevision` と日数の sha256）と、その保存で書いた
+  設定を持ち、`attribute_not_exists` を条件にする。同じ key・同じ fingerprint の再送は、後に別の保存を挟んでいても
+  receipt の設定を返し、同じ key・別の body は 409 `IdempotencyKeyReused` にする。
+- 保存の transaction には、route で確認した呼び出し元の Workspace member 行の `version` と Enterprise の CONTROL
+  revision の ConditionCheck も入れる。確認から保存までの間に権限が変わると、revision の競合と区別できる 409
+  `TeamReminderSettingsAuthorizationChanged` で取り消す。
 - 工数の督促の配信時の読み直しは、Analytics table の time entry の `revision` を条件にした ConditionCheck を
   通知の保存と同じ transaction に入れる。そのため projection の role に Analytics table への
   `dynamodb:ConditionCheckItem` を足す。
@@ -39,13 +44,15 @@ member partition）に足せるが、Team の設定には保存先がない。
   API が Planning table の書き込み権限を持つことになり、通知の module 境界を越える。
 - NotificationsTable の Workspace 内 partition に置く（採用）: 既存の削除・export・IAM の範囲に収まり、Team 単位の
   get 1 回で読める。
-- 冪等性を専用の idempotency 行で持つ: 複数 key の履歴を残せるが、transaction の item が増える。設定は Team ごとに
-  直近 1 回の再送だけを救えば十分なので、設定の行に最後の 1 件だけ残す。
+- 冪等性を設定の行に最後の 1 件だけ残す: transaction の item は増えないが、別の key の保存を挟むと古い key の記録が
+  消え、その key を別の body で送ると通ってしまう。「同じ key の別の入力は拒否する」契約を守れないので採らない。
+- 冪等性を専用の receipt 行で持つ（採用）: transaction の item が 1 つ増え、保存のたびに小さな行が残る。
 
 ## 結果
 
 - Team の設定は Workspace の削除・export に自動で含まれ、新しい table を増やさない。
-- 再送は直近の 1 回分だけ救える。別の変更を挟んだ後に古い key を再送すると、revision の競合として 409 になる。
+- 再送は key ごとに救える。receipt は Workspace の partition にあるので、Workspace の削除・export に含まれる。
+- 権限を失った manager の保存は、確認と保存の間に失効しても確定しない。
 - 工数の督促は、配信直前に提出された entry に対して通知が残ることがなくなる。代わりに projection が Analytics table
   への ConditionCheckItem 権限を持つ。
 - 現在の契約は [`docs/notifications.md`](../notifications.md) の「リマインドの日数」と「工数の督促」に書く。

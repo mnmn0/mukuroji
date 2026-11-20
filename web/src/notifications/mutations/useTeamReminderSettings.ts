@@ -1,12 +1,23 @@
 import { useCallback, useRef, useState } from 'react'
+import { useSWRConfig } from 'swr'
 import type {
   TeamNotificationReminderDays,
   TeamNotificationReminderSettings,
 } from '@mukuroji/contracts'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from '../api/errors'
+import {
+  finishTeamReminderSave,
+  listTeamReminderSaveErrors,
+  readTeamReminderSave,
+  startTeamReminderSave,
+  type TeamReminderSaveStates,
+} from '../model/teamReminderSaveState'
 import { updateTeamReminderSettings } from '../api/teamReminders'
-import { useTeamReminderSettingsQuery } from '../queries/useTeamReminderSettingsQuery'
+import {
+  createTeamReminderSettingsKey,
+  useTeamReminderSettingsQuery,
+} from '../queries/useTeamReminderSettingsQuery'
 
 /** State and actions of the Team reminder settings panel. */
 export type TeamReminderSettingsController = {
@@ -49,16 +60,16 @@ export function useTeamReminderSettings(
   enabled = true,
 ): TeamReminderSettingsController {
   const mutationRunner = useRef(createMutationRequestRunner()).current
-  const [isSaving, setIsSaving] = useState(false)
-  const [saveResult, setSaveResult] = useState<TeamReminderSettingsController['saveResult']>()
-  const [saveError, setSaveError] = useState<unknown>()
+  const { mutate: mutateCache } = useSWRConfig()
+  // Kept per Team, so a save that finishes after moving to another Team stays with its own Team.
+  const [saveStates, setSaveStates] = useState<TeamReminderSaveStates>({})
   const { data, error, isLoading, mutate } = useTeamReminderSettingsQuery(accessToken, teamId, enabled)
-
   const save = useCallback(async (days: TeamNotificationReminderDays) => {
     if (!accessToken || !teamId || !data) return false
-    setIsSaving(true)
-    setSaveResult(undefined)
-    setSaveError(undefined)
+    // Fixed at save start, so a response that arrives after moving to another Team updates the
+    // saved Team's cache entry instead of the one now on screen.
+    const key = createTeamReminderSettingsKey(accessToken, teamId)
+    setSaveStates((states) => startTeamReminderSave(states, teamId))
     const request = { expectedRevision: data.revision, days }
     try {
       const saved = await mutationRunner.run(
@@ -66,32 +77,27 @@ export function useTeamReminderSettings(
         JSON.stringify(request),
         (context) => updateTeamReminderSettings(accessToken, teamId, request, context),
       )
-      await mutate(saved, { revalidate: false })
-      setSaveResult('saved')
+      await mutateCache(key, saved, { revalidate: false })
+      setSaveStates((states) => finishTeamReminderSave(states, teamId, 'saved'))
       return true
     } catch (caught) {
       console.error('Team reminder settings update failed:', caught)
-      setSaveError(caught)
-      if (caught instanceof NotificationsApiError && caught.status === 409) {
-        setSaveResult('conflict')
-        await mutate().catch(() => undefined)
-      } else {
-        setSaveResult('error')
-      }
+      const isConflict = caught instanceof NotificationsApiError && caught.status === 409
+      if (isConflict) await mutateCache(key).catch(() => undefined)
+      setSaveStates((states) => finishTeamReminderSave(states, teamId, isConflict ? 'conflict' : 'error', caught))
       return false
-    } finally {
-      setIsSaving(false)
     }
-  }, [accessToken, data, mutate, mutationRunner, teamId])
+  }, [accessToken, data, mutateCache, mutationRunner, teamId])
 
+  const currentSave = readTeamReminderSave(saveStates, teamId)
   return {
     ...(data ? { settings: data } : {}),
     isLoading,
     hasLoadError: Boolean(error),
     isUnavailable: error instanceof NotificationsApiError && (error.status === 403 || error.status === 404),
-    isSaving,
-    ...(saveResult ? { saveResult } : {}),
-    sessionErrors: [error, saveError],
+    isSaving: currentSave.isSaving,
+    ...(currentSave.result ? { saveResult: currentSave.result } : {}),
+    sessionErrors: [error, ...listTeamReminderSaveErrors(saveStates)],
     refresh: async () => {
       await mutate()
     },

@@ -237,6 +237,8 @@ export type TimesheetReminderRevalidator = {
     entryIds: readonly string[]
     /** An entry must have ended at or before this instant to still be due. */
     dueBefore: string
+    /** Project the reminder is authorized against; the entry must still belong to it. */
+    projectId: string
   }): Promise<ProjectionConditionCheck | undefined>
 }
 
@@ -1635,7 +1637,8 @@ export async function readTimesheetReminderFence(
     !memberKey ||
     event.notificationCandidates.length !== 1 ||
     !event.timeEntryIds?.length ||
-    !event.timesheetDueBefore
+    !event.timesheetDueBefore ||
+    !event.projectId
   ) {
     return { current: false }
   }
@@ -1645,6 +1648,7 @@ export async function readTimesheetReminderFence(
     memberKey,
     entryIds: event.timeEntryIds,
     dueBefore: event.timesheetDueBefore,
+    projectId: event.projectId,
   })
   return condition ? { current: true, condition } : { current: false }
 }

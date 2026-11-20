@@ -38,8 +38,14 @@ export type TeamReminderSettingsRecord = {
   revision: number
   /** When the overrides were last saved. */
   updatedAt?: string
-  /** Request that wrote this revision, so a retry after a lost response can be replayed. */
-  lastMutation?: TeamReminderSettingsMutation
+}
+
+/** Durable record of one committed settings update, kept per idempotency key. */
+export type TeamReminderSettingsReceipt = {
+  /** Hash of the request that used the key, so a reused key with a new body is detected. */
+  requestFingerprint: string
+  /** Settings the request saved, returned again when the request is retried. */
+  record: TeamReminderSettingsRecord
 }
 
 /** Identity of one settings update request. */
@@ -64,8 +70,13 @@ export type SaveTeamReminderSettingsInput = {
   now: Date
   /** Audit event put written in the same transaction, when auditing is configured. */
   auditPut?: AuditTransactWriteItem
-  /** Request identity stored with the revision, when the client sent an idempotency key. */
+  /** Request identity saved as a durable receipt, when the client sent an idempotency key. */
   mutation?: TeamReminderSettingsMutation
+  /**
+   * Read-only checks on the caller's authorization rows, committed with the save so a manager
+   * whose access changed after the route checked it cannot save.
+   */
+  authorizationConditionChecks?: readonly AuditTransactWriteItem[]
 }
 
 /** Store of Team reminder overrides used by the settings API. */
@@ -78,6 +89,19 @@ export type TeamReminderSettingsStore = {
    * @returns The saved overrides, or an empty revision-0 record when none are saved.
    */
   getTeamSettings(workspaceId: string, teamId: string): Promise<TeamReminderSettingsRecord>
+  /**
+   * Reads the receipt of a committed update that used an idempotency key.
+   *
+   * @param workspaceId - Canonical Workspace ID.
+   * @param teamId - Team ID.
+   * @param idempotencyKey - `Idempotency-Key` the client sent.
+   * @returns The receipt, or undefined when no committed update used the key.
+   */
+  getMutationReceipt(
+    workspaceId: string,
+    teamId: string,
+    idempotencyKey: string,
+  ): Promise<TeamReminderSettingsReceipt | undefined>
   /**
    * Replaces a Team's overrides when the stored revision still matches.
    *

@@ -862,15 +862,26 @@ export function createNotificationRecipientKey(workspaceId: string, memberKey: s
 
 /**
  * Parses stored preferences, falling back to defaults for an invalid row unless strict reads are requested.
+ * Invalid stored reminder days always fail, even when the read is not strict.
  * @param value - Stored row; an absent row uses the default preferences.
  * @param strict - Rejects corrupt existing rows so external delivery can retry and alert.
  * @returns Validated notification preferences.
+ * @throws Error for a corrupt row in strict mode, or for invalid stored reminder days.
  */
 export function parseStoredNotificationPreferences(
   value: Record<string, unknown> | undefined,
   strict = false,
 ): NotificationPreferences {
   if (!value) return cloneDefaultPreferences()
+  // Reminder days are newer than the lenient legacy fallback below: a corrupt value is never
+  // replaced with defaults, which a later inheriting save would otherwise write back.
+  if (value.reminderDays !== undefined) {
+    try {
+      normalizePersonalReminderDays(value.reminderDays)
+    } catch {
+      throw new Error('Invalid stored notification preferences.')
+    }
+  }
   try {
     if (value.itemType !== 'preferences') {
       throw new Error('Invalid stored notification preferences.')

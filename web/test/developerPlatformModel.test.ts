@@ -27,7 +27,10 @@ import {
   developerPlatformResourcesFixture,
   developerSyncConflictsFixture,
 } from '../src/developer-platform/fixtures'
-import { buildConnectorAuthorizationReturnUrl } from '../src/developer-platform/mutations/connectorAuthorization'
+import {
+  buildConnectorAuthorizationReturnUrl,
+  readConnectorOAuthCallbackFragment,
+} from '../src/developer-platform/mutations/connectorAuthorization'
 import { runDeveloperPlatformMutation } from '../src/developer-platform/mutations/runDeveloperPlatformMutation'
 
 describe('Developer Platform connector model', () => {
@@ -224,6 +227,25 @@ describe('Developer Platform mutation refresh', () => {
 })
 
 describe('Developer Platform connector authorization', () => {
+  test('reads connector OAuth callback values only from a well-formed fragment', () => {
+    expect(readConnectorOAuthCallbackFragment('#state=v1.signed&code=provider%2Bcode'))
+      .toEqual({ state: 'v1.signed', code: 'provider+code' })
+    expect(readConnectorOAuthCallbackFragment('state=v1.signed&cancelled=true'))
+      .toEqual({ state: 'v1.signed', cancelled: true })
+    for (const malformed of [
+      '',
+      '#code=provider-code',
+      '#state=v1.signed',
+      '#state=v1.signed&code=',
+      '#state=v1.signed&cancelled=false',
+      '#state=v1.signed&cancelled=true&code=provider-code',
+      '#state=a&state=b&code=provider-code',
+      '#state=v1.signed&code=a&code=b',
+    ]) {
+      expect(readConnectorOAuthCallbackFragment(malformed)).toBeUndefined()
+    }
+  })
+
   test('preserves route state and selects connectors in the return URL', () => {
     expect(
       buildConnectorAuthorizationReturnUrl(

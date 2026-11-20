@@ -62,8 +62,8 @@ export type MemberCredentialResetPorts = {
   resetPassword(memberKey: string): Promise<void>
   /** Removes the member's authenticator app. */
   disableAuthenticator(memberKey: string): Promise<void>
-  /** Signs the member out of every session. */
-  signOutEverywhere(memberKey: string): Promise<void>
+  /** Signs the member out of every session, including locally verified SSO sessions. */
+  signOutEverywhere(workspaceId: string, memberKey: string): Promise<void>
   /**
    * Records a failure that does not undo the completed reset, with the request's correlation
    * ID so that an operator can find the action to recover.
@@ -156,12 +156,12 @@ export async function resetMemberCredential(
     // Signing out first must succeed: if it fails, nothing changed yet and a retry with the same
     // key resumes safely, whereas repeating the reset could undo a password the member already
     // set. The second sign-out closes sessions started in between and is best effort.
-    await ports.signOutEverywhere(member.memberKey)
+    await ports.signOutEverywhere(input.workspaceId, member.memberKey)
     await markApplying()
     await ports.resetPassword(member.memberKey)
     await retryBestEffort(
       ports,
-      () => ports.signOutEverywhere(member.memberKey),
+      () => ports.signOutEverywhere(input.workspaceId, member.memberKey),
       'Failed to sign the member out again after a password reset.',
       input.auditContext?.correlationId,
     )

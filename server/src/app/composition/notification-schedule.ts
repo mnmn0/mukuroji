@@ -1,9 +1,9 @@
 import {
-  DynamoDbReminderSettingsStore,
   createDynamoDbProjectManagerReader,
   createDynamoDbScheduledWorkItemSource,
   createNotificationScheduleHandler,
 } from '../../modules/notifications'
+import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
 import { DynamoDbTimeTrackingRepository } from '../../modules/time-tracking'
 import { createTimesheetReader } from './timesheet-reminders'
 import {
