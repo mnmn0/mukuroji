@@ -1,4 +1,4 @@
-# 0002. Project のリスク・課題・変更要求を Planning table の1登録1行で持つ
+# 0016. Project のリスク・課題・変更要求を Planning table の1登録1行で持つ
 
 - 状態: 提案
 - 日付: 2026-11-19

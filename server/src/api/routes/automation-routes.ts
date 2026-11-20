@@ -18,6 +18,7 @@ import {
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
+import { resolveTrustedClientAddress } from '../../infrastructure/http/trusted-request-source'
 import { CognitoServiceError } from '../../modules/authentication'
 import { ProjectDataError, readLocalizedNames } from '../../modules/directory'
 import {
@@ -151,6 +152,7 @@ import {
   requireTeamConfigurationAdministration,
   requireTeamPermission,
   requireWorkspaceAdministration,
+  requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
@@ -188,13 +190,28 @@ async function readAutomationJson(c: Context) {
   return value
 }
 
+/**
+ * Authenticates an Automation request and enforces the minimum Workspace access for it.
+ *
+ * Automation rules, templates, recurring Work, and execution history describe the whole
+ * Workspace, so even read access excludes guests. Callers that mutate data add their own
+ * stricter check.
+ *
+ * @param c - Hono request context carrying the bearer token.
+ * @param manage - Whether the route requires Workspace administration.
+ * @returns The authenticated Workspace principal.
+ */
 async function authenticateAutomationPrincipal(c: Context, manage = false) {
   const accessToken = readBearerAccessToken(c)
   if (!accessToken) {
     throw new AutomationError('unauthenticated', 'AutomationAuthenticationRequired', 'Bearer token is required.')
   }
   const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-  if (manage) requireWorkspaceAdministration(principal)
+  if (manage) {
+    requireWorkspaceAdministration(principal)
+  } else {
+    requireWorkspaceBusinessRead(principal)
+  }
   return principal
 }
 
@@ -2328,7 +2345,7 @@ async function deliverTriageWebhook(
         requestId: c.req.header('X-Request-Id'),
         method: 'POST',
         route: path,
-        ipAddress: c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+        ipAddress: resolveTrustedClientAddress(c),
         userAgent: c.req.header('User-Agent'),
       },
     })
@@ -2729,7 +2746,7 @@ export function registerAutomationRoutes(routeApp: Hono): void {
           requestId: c.req.header('X-Request-Id'),
           method: 'POST',
           route: path,
-          ipAddress: c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+          ipAddress: resolveTrustedClientAddress(c),
           userAgent: c.req.header('User-Agent'),
         },
       })

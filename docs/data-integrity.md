@@ -63,6 +63,14 @@ missing exact object versions, and metadata/tag differences. A normal fixture
 also covers historical Audit Events so the gate does not report those as
 false positives.
 
+Agent Runs are checked by a separate, read-only verifier,
+`bun run --silent agent-runs:integrity -- check`. It reads each Team
+partition of the Agent Runs table with bounded, strongly consistent Query
+pages and reports counts and sample Workspace, Team, Work Item, and Run IDs
+under a caller-supplied correlation ID, never member IDs or instance hashes.
+Its invariants and the manual repair steps are in
+[Software factory](./software-factory.md#agent-run-の整合性検査と手動修復).
+
 ## Explicit non-goals
 
 Version one does not:

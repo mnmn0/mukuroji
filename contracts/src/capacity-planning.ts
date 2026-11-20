@@ -344,6 +344,38 @@ export type CreateResourceRequestInput = {
   actorMemberId: string
 }
 
+/** Input for changing or canceling an existing resource request. */
+export type UpdateResourceRequestInput = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team identifier. */
+  teamId: string
+  /** Request identifier. */
+  requestId: string
+  /** New request title. */
+  title?: string
+  /** New requested role; an empty string clears the role. */
+  role?: string
+  /** New required skills. */
+  skillIds?: string[]
+  /** New inclusive requested start date. */
+  fromDate?: string
+  /** New inclusive requested end date. */
+  toDate?: string
+  /** New total requested effort in minutes. */
+  requestedMinutes?: number
+  /** New confidential visibility flag. */
+  confidential?: boolean
+  /** Set to `canceled` to withdraw the request; fill states are derived from assignments. */
+  status?: Extract<ResourceRequestStatus, 'canceled'>
+  /** Expected request revision. */
+  expectedRevision: number
+  /** Expected Team workload revision. */
+  expectedTeamRevision: number
+  /** Actor performing the mutation. */
+  actorMemberId: string
+}
+
 /** Input for creating a resource assignment. */
 export type CreateResourceAssignmentInput = {
   /** Workspace identifier. */
