@@ -490,7 +490,10 @@ secret-free な `503 application/problem+json` と `Retry-After: 15` を返し�
 durable retryしません。既存connectionは強制切断されず、blocked中の`$disconnect` cleanupは
 実行されない場合があるため、logical expiryとDynamoDB TTLに委ねます。
 
-通常の operator update は次の順序で行います。
+通常の operator update は次の順序で行います。手順3〜5と、6のうち`get-deployment`の完了待ちと
+`/api/ready`の確認は`bun run runtime-control:enable` / `bun run runtime-control:disable`が1コマンドで
+行います（使い方は`cdk/README.md`の「Application 処理を有効にする」）。Change recordの保存、
+reviewerの確認、fresh `runtime-control.evaluated` recordの確認はoperatorが別に行います。
 
 1. Change/incident record に stack、account、region、4つの output、現在の document/revision、
    変更理由、owner、想定時間、re-enable 条件、worker replay owner を保存する。
