@@ -32,6 +32,18 @@ afterEach(() => {
   resetTestApp()
 })
 
+/**
+ * Creates the shared Analytics query with a period that starts before the fake Work Items were
+ * last updated, so their entity timelines still have to be read.
+ *
+ * @returns Analytics query input whose period covers the fake Work Item updates.
+ */
+function createHistoryAnalyticsQueryInput(): AnalyticsQueryInput {
+  const query = createAnalyticsQueryInput()
+  query.filter.period = { ...query.filter.period, from: '2026-06-01T00:00:00.000Z' }
+  return query
+}
+
 test('keeps Analytics queries independent from the 200-item aggregate list limit', async () => {
   const calls = configureFakeProjectClients(true, { teamIssueCount: 250 })
   const auditQueries: Array<Record<string, unknown>> = []
@@ -49,9 +61,9 @@ test('keeps Analytics queries independent from the 200-item aggregate list limit
   })
 
   const response = await analyticsApiRequest('/api/analytics/query', {
-    ...createAnalyticsQueryInput(),
+    ...createHistoryAnalyticsQueryInput(),
     filter: {
-      ...createAnalyticsQueryInput().filter,
+      ...createHistoryAnalyticsQueryInput().filter,
       teamIds: ['core-team'],
     },
   })
@@ -122,9 +134,9 @@ test('fails before audit reads when canonical entity fan-out exceeds the API cap
   })
 
   const response = await analyticsApiRequest('/api/analytics/query', {
-    ...createAnalyticsQueryInput(),
+    ...createHistoryAnalyticsQueryInput(),
     filter: {
-      ...createAnalyticsQueryInput().filter,
+      ...createHistoryAnalyticsQueryInput().filter,
       teamIds: ['core-team'],
     },
   })
@@ -133,6 +145,41 @@ test('fails before audit reads when canonical entity fan-out exceeds the API cap
   expect(await response.json()).toMatchObject({
     code: 'AnalyticsHistoryLimitExceeded',
   })
+  expect(auditReads).toBe(0)
+})
+
+test('evaluates a 3,000-item Team without reading timelines untouched since the period start', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 3_000 })
+  let auditReads = 0
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        auditReads += 1
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, teamIds: ['core-team'] },
+  })
+  const snapshotResponse = await analyticsApiRequest('/api/analytics/export', {
+    format: 'csv',
+    query: { ...query, filter: { ...query.filter, teamIds: ['core-team'] } },
+  })
+
+  expect(response.status).toBe(200)
+  const body = await response.json() as {
+    snapshot: { widgets: Array<{ sampleSize: number; value: number | null }> }
+  }
+  expect(body.snapshot.widgets[0]).toMatchObject({ sampleSize: 3_000, value: 3_000 })
+  expect(snapshotResponse.status).toBe(200)
   expect(auditReads).toBe(0)
 })
 
@@ -151,7 +198,7 @@ test('narrows Analytics reads to the listed Work Items before the history fan-ou
       },
     },
   })
-  const query = createAnalyticsQueryInput()
+  const query = createHistoryAnalyticsQueryInput()
 
   const response = await analyticsApiRequest('/api/analytics/query', {
     ...query,
@@ -210,9 +257,9 @@ test('bounds shared Analytics page reads for paginated canonical events', async 
   })
 
   const response = await analyticsApiRequest('/api/analytics/query', {
-    ...createAnalyticsQueryInput(),
+    ...createHistoryAnalyticsQueryInput(),
     filter: {
-      ...createAnalyticsQueryInput().filter,
+      ...createHistoryAnalyticsQueryInput().filter,
       teamIds: ['core-team'],
     },
   })
@@ -383,7 +430,7 @@ test('filters inaccessible Work Items and unrelated audit pages before Analytics
 
   const response = await analyticsApiRequest(
     '/api/analytics/query',
-    createAnalyticsQueryInput(),
+    createHistoryAnalyticsQueryInput(),
   )
 
   expect(response.status).toBe(200)

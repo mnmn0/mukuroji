@@ -136,9 +136,9 @@ export type StartAgentRunRequest = {
   workflowStatusId: string
   /** Client runtime that drives the agent. */
   runtime: AgentRunRuntime
-  /** Display name of the agent. */
+  /** Display name of the agent. Letters and digits in any script, spaces, `.`, `_`, or `-`, without surrounding spaces. */
   agentName: string
-  /** Opaque, stable identifier of the agent instance; the server stores only its hash. */
+  /** Opaque, stable identifier of the agent instance; the server stores only its hash. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -160,9 +160,9 @@ export type ResumeAgentRunRequest = {
   expectedRevision: number
   /** Client runtime that drives the agent. */
   runtime: AgentRunRuntime
-  /** Display name of the agent. */
+  /** Display name of the agent. Letters and digits in any script, spaces, `.`, `_`, or `-`, without surrounding spaces. */
   agentName: string
-  /** Opaque, stable identifier of the agent instance; the server stores only its hash. */
+  /** Opaque, stable identifier of the agent instance; the server stores only its hash. It has no surrounding whitespace or control characters. */
   instanceId: string
   /**
    * Run the agent expects to resume from, such as the `resumedFromRun` that next-task selection offered.
@@ -183,9 +183,9 @@ export type ResumeAgentRunResponse = {
 export type TakeOverAgentRunRequest = {
   /** Client runtime that drives the agent taking over. */
   runtime: AgentRunRuntime
-  /** Display name of the agent taking over. */
+  /** Display name of the agent taking over. Letters and digits in any script, spaces, `.`, `_`, or `-`, without surrounding spaces. */
   agentName: string
-  /** Opaque, stable identifier of the instance taking over; the server stores only its hash. */
+  /** Opaque, stable identifier of the instance taking over; the server stores only its hash. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -199,7 +199,7 @@ export type TakeOverAgentRunResponse = {
 
 /** Request body that extends the lease of an agent's own run. */
 export type HeartbeatAgentRunRequest = {
-  /** Instance identifier sent when the run started; other instances cannot extend the lease. */
+  /** Instance identifier sent when the run started; other instances cannot extend the lease. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -207,7 +207,7 @@ export type HeartbeatAgentRunRequest = {
 export type FinishAgentRunRequest = {
   /** Reason the agent is closing the run. */
   outcome: AgentRunFinishOutcome
-  /** Instance identifier sent when the run started; other instances cannot close the run. */
+  /** Instance identifier sent when the run started; other instances cannot close the run. It has no surrounding whitespace or control characters. */
   instanceId: string
 }
 
@@ -215,7 +215,7 @@ export type FinishAgentRunRequest = {
 export type AgentRunMutationFence = {
   /** Active run of the caller for the mutated Work Item. */
   agentRunId?: string
-  /** Opaque instance identifier of the caller; the server compares only its hash. */
+  /** Opaque instance identifier of the caller; the server compares only its hash. It has no surrounding whitespace or control characters. */
   agentInstanceId?: string
 }
 
@@ -348,7 +348,7 @@ export type AgentRunReport = {
 
 /** Request body that saves a structured report and its comment for an agent's own run. */
 export type ReportAgentRunRequest = {
-  /** Instance identifier sent when the run started; other instances cannot report on the run. */
+  /** Instance identifier sent when the run started; other instances cannot report on the run. It has no surrounding whitespace or control characters. */
   instanceId: string
   /** Kind of report; `progress` when omitted. */
   kind?: AgentRunReportKind
@@ -507,9 +507,10 @@ export const FACTORY_BOARD_COMPLETED_WINDOW_HOURS = 24
 export const FACTORY_BOARD_MAX_ACTIVE_RUNS = 100
 
 /**
- * Largest number of finished runs one Factory board response evaluates while it looks for runs that
- * finished within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS}. Finished runs are stored in run ID
- * order, so the response says when the evaluation stopped before reading every finished run.
+ * Largest number of finished runs one Factory board response reads from each of two groups, newest
+ * finish first: runs that finished within {@link FACTORY_BOARD_COMPLETED_WINDOW_HOURS} other than
+ * failures, and failed runs of any age. Older finished runs are never read, so the bound depends only
+ * on recent and failed runs, and the response says when either group was left partly unread.
  */
 export const FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS = 500
 
@@ -651,4 +652,109 @@ export function classifyFactoryBoardItem(item: FactoryBoardItem, now: Date): Fac
   if (run.outcome === 'paused' && started) return 'decision'
   if (run.outcome === 'completed' && finishedRecently) return 'completed'
   return started ? 'no-run' : undefined
+}
+
+/** Longest period in days one Factory analytics request can cover. */
+export const FACTORY_ANALYTICS_MAX_PERIOD_DAYS = 92
+
+/**
+ * Largest number of finished runs one Factory analytics response reads from each of two groups,
+ * failed runs and the other finished runs, newest finish first. The response says when either group
+ * was left partly unread.
+ */
+export const FACTORY_ANALYTICS_MAX_EVALUATED_FINISHED_RUNS = 1_000
+
+/**
+ * Largest number of Work Items whose run and report history one Factory analytics response reads.
+ * Runs of further Work Items are left out and the response says so.
+ */
+export const FACTORY_ANALYTICS_MAX_WORK_ITEMS = 200
+
+/** Largest number of runs, newest first, read for one Work Item. */
+export const FACTORY_ANALYTICS_MAX_RUNS_PER_WORK_ITEM = 100
+
+/** Largest number of structured reports, newest first, read for one Work Item. */
+export const FACTORY_ANALYTICS_MAX_REPORTS_PER_WORK_ITEM = 300
+
+/**
+ * Stations whose dwell time Factory analytics measures, in line order. They match the stations of the
+ * Factory board line view while a run is open: `build` until the first report or after a `progress`
+ * report, `verify` after a `verification` report, `artifact` after an `artifact` report, and `decision`
+ * after a `blocker` or `handoff` report or from a `paused` finish until the run that resumed the Work Item.
+ */
+export const FACTORY_ANALYTICS_STAGES = ['build', 'verify', 'artifact', 'decision'] as const
+
+/** One station whose dwell time Factory analytics measures. */
+export type FactoryAnalyticsStage = (typeof FACTORY_ANALYTICS_STAGES)[number]
+
+/** Number of finished runs per outcome. */
+export type FactoryAnalyticsOutcomeCounts = Record<AgentRunOutcome, number>
+
+/** Dwell time of one station across the runs that entered it. */
+export type FactoryAnalyticsStageLeadTime = {
+  /** Station. */
+  stage: FactoryAnalyticsStage
+  /** Median hours a run spent in the station; null when no run entered it. */
+  medianHours: number | null
+  /** Number of runs that entered the station and whose history was complete. */
+  sampleSize: number
+}
+
+/** Run outcome rates of one group of finished runs. */
+export type FactoryAnalyticsRunSummary = {
+  /** Runs that finished in the period. */
+  finishedRuns: number
+  /** Finished runs per outcome. */
+  outcomes: FactoryAnalyticsOutcomeCounts
+  /**
+   * Percentage of finished runs that completed, among runs that did not stop as `paused`. A paused
+   * run hands the Work Item to a person on purpose and is neither a success nor a failure. Null when
+   * no run counts.
+   */
+  successRate: number | null
+  /**
+   * Runs started on a Work Item whose previous run finished as `failed` or `completed`: the agent ran
+   * again after a failure or after it had called the work done.
+   */
+  reworkRuns: number
+  /** Percentage of finished runs that were rework; null when no run finished. */
+  reworkRate: number | null
+  /** Runs that a person released or another instance took over (`released` and `superseded`). */
+  interventions: number
+}
+
+/** Run outcome rates of the runs of one runtime. */
+export type FactoryAnalyticsRuntimeSummary = FactoryAnalyticsRunSummary & {
+  /** Runtime of the runs. */
+  runtime: AgentRunRuntime
+}
+
+/**
+ * Factory analytics of one Team for a period, returned by
+ * `GET /api/teams/{teamId}/agent-runs/analytics?from=...&to=...`. It counts the runs that finished in
+ * the period on Work Items the viewer can see, from the stored runs and structured reports; token and
+ * cost usage is not part of it. Every read is bounded and a `...HasMore` flag says when the counts
+ * leave runs out.
+ */
+export type TeamFactoryAnalyticsResponse = FactoryAnalyticsRunSummary & {
+  /** UTC ISO 8601 time the server read the data. */
+  generatedAt: string
+  /** UTC ISO 8601 start of the period, inclusive. */
+  from: string
+  /** UTC ISO 8601 end of the period, inclusive. */
+  to: string
+  /** Median dwell time per station, in {@link FACTORY_ANALYTICS_STAGES} order. */
+  stageLeadTimes: FactoryAnalyticsStageLeadTime[]
+  /** Outcome rates per runtime, for runtimes with at least one finished run, in {@link AGENT_RUN_RUNTIMES} order. */
+  runtimes: FactoryAnalyticsRuntimeSummary[]
+  /** Whether finished runs beyond {@link FACTORY_ANALYTICS_MAX_EVALUATED_FINISHED_RUNS} were left unread. */
+  finishedRunsHasMore: boolean
+  /** Whether Work Items beyond {@link FACTORY_ANALYTICS_MAX_WORK_ITEMS} were left unread. */
+  workItemsHasMore: boolean
+  /**
+   * Whether some Work Item had more runs or reports than one response reads. Older runs of that Work
+   * Item may be missing from the counts, and rework and dwell time leave out the runs whose history
+   * was cut.
+   */
+  historyHasMore: boolean
 }

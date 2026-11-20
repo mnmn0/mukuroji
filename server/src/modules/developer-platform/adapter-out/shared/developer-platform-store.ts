@@ -153,6 +153,71 @@ export const IDEMPOTENCY_RESERVATION_LEASE_SECONDS = 2 * 60
 /** Maximum conditional-write retries for one idempotency reservation. */
 const IDEMPOTENCY_RESERVATION_MAX_RETRIES = 3
 
+/** Conditional-write attempts for one API key revocation before it reports a conflict. */
+const API_KEY_REVOKE_MAX_ATTEMPTS = 3
+
+/** Minimum gap between two last-used writes of the same credential. */
+const CREDENTIAL_LAST_USED_WRITE_INTERVAL_MS = 60 * 1_000
+
+/** Reads the stored `value.lastUsedAt` of a credential row, if any. */
+function readStoredLastUsedAt(record: { value: unknown } | undefined) {
+  const value = record?.value
+  if (typeof value !== 'object' || value === null) return undefined
+  const lastUsedAt = (value as { lastUsedAt?: unknown }).lastUsedAt
+  return typeof lastUsedAt === 'string' ? lastUsedAt : undefined
+}
+
+/** Adds the optional `value.lastUsedAt` guard to a version-conditioned DynamoDB Put. */
+function withExpectedLastUsedAtCondition(
+  condition: {
+    ConditionExpression: string
+    ExpressionAttributeNames: Record<string, string>
+    ExpressionAttributeValues: Record<string, unknown>
+  },
+  expected: PutRecordCondition['expectedLastUsedAt'],
+) {
+  if (!expected) return condition
+  const names = {
+    ...condition.ExpressionAttributeNames,
+    '#recordValue': 'value',
+    '#recordLastUsedAt': 'lastUsedAt',
+  }
+  return expected.value === undefined
+    ? {
+        ConditionExpression:
+          `${condition.ConditionExpression} AND ` +
+          'attribute_not_exists(#recordValue.#recordLastUsedAt)',
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: condition.ExpressionAttributeValues,
+      }
+    : {
+        ConditionExpression:
+          `${condition.ConditionExpression} AND ` +
+          '#recordValue.#recordLastUsedAt = :expectedRecordLastUsedAt',
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: {
+          ...condition.ExpressionAttributeValues,
+          ':expectedRecordLastUsedAt': expected.value,
+        },
+      }
+}
+
+/**
+ * Returns whether a credential use at `now` should update the stored last-used time.
+ *
+ * @param lastUsedAt - The stored last-used time, if any.
+ * @param now - The time of the current use.
+ * @returns `true` when the stored value is missing, unreadable, in the future, or older than
+ *   the write interval.
+ */
+export function shouldRecordCredentialUse(lastUsedAt: string | undefined, now: Date) {
+  if (!lastUsedAt) return true
+  const previous = Date.parse(lastUsedAt)
+  return !Number.isFinite(previous) ||
+    now.getTime() - previous >= CREDENTIAL_LAST_USED_WRITE_INTERVAL_MS ||
+    now.getTime() < previous
+}
+
 /** Webhook delivery log と index locator を保持する期間です。 */
 export const WEBHOOK_DELIVERY_RETENTION_SECONDS = 90 * 24 * 60 * 60
 
@@ -701,6 +766,13 @@ type PutRecordCondition = {
   ifAbsent?: boolean
   /** 現在の version が一致する場合だけ置換します。 */
   expectedVersion?: number
+  /**
+   * Replaces the row only while `value.lastUsedAt` still equals this value (`undefined`
+   * means absent). Last-used writes do not move the version, so a full-row credential
+   * write uses this to avoid erasing a use recorded after its read. Only
+   * `putCredentialRecord` honors it.
+   */
+  expectedLastUsedAt?: { value: string | undefined }
 }
 
 /** 書き込みと同じ transaction で、書き換えずに状態だけを確かめる別 row です。 */
@@ -870,6 +942,18 @@ abstract class DeveloperPlatformStorageKernel {
     expectedAppVersion: number,
     tokenRecord: DeveloperPlatformRecord,
     authRecord: DeveloperPlatformRecord,
+  ): Promise<boolean>
+
+  /**
+   * Records credential use without changing the row version, so frequent use never
+   * makes version-conditioned revocation or rotation fail. Only updates the row while
+   * it still holds the same secret digest and the last-used time the caller observed,
+   * so concurrent uses write at most once. Returns false when the row changed.
+   */
+  protected abstract touchCredentialLastUsedAt(
+    record: DeveloperPlatformRecord,
+    lastUsedAt: string,
+    observedLastUsedAt: string | undefined,
   ): Promise<boolean>
 
   /** Credential domain row と対応 auth row を原子的に削除します。 */
@@ -1647,8 +1731,25 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
     return result
   }
 
-  /** API key を revoke します。 */
+  /**
+   * API key を revoke します。
+   *
+   * A concurrent admin write (for example a rotation) can move the row version between
+   * the read and the write, so the revocation re-reads and retries a few times instead
+   * of failing on the first conflict.
+   */
   async revokeApiKey(request: RevokeApiKeyRequest) {
+    for (let attempt = 1; ; attempt += 1) {
+      const revoked = await this.tryRevokeApiKey(request)
+      if (revoked) return revoked
+      if (attempt >= API_KEY_REVOKE_MAX_ATTEMPTS) throw persistenceConflict()
+    }
+  }
+
+  /** Revokes the API key once; returns undefined when the row changed concurrently. */
+  private async tryRevokeApiKey(
+    request: RevokeApiKeyRequest,
+  ): Promise<ApiKeySummary | undefined> {
     const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
     const apiKeyId = readIdentifier(request.apiKeyId, 'API key ID')
     const record = await this.requireRecord(
@@ -1675,7 +1776,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
           undefined,
           authRecord ? createCredentialAuthDelete(authRecord) : undefined,
         )
-        if (!saved) throw persistenceConflict()
+        if (!saved) return undefined
       }
       return clone(current)
     }
@@ -1695,7 +1796,11 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       ...record,
       value: apiKey,
       version: record.version + 1,
-    }, true), { expectedVersion: record.version }, undefined,
+    }, true), {
+      expectedVersion: record.version,
+      // A use recorded after this read must survive the revocation write.
+      expectedLastUsedAt: { value: readStoredLastUsedAt(record) },
+    }, undefined,
     authRecord ? createCredentialAuthDelete(authRecord) : undefined,
     undefined,
     this.createApiKeyAuditPut(apiKey, record, {
@@ -1706,7 +1811,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       summary: 'API key was revoked.',
       actorId: request.actorUserId,
     }))
-    if (!saved) throw persistenceConflict()
+    if (!saved) return undefined
     return clone(apiKey)
   }
 
@@ -1847,13 +1952,10 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
       throw unauthorized('ApiKeyRevoked', 'API key has been revoked.')
     }
     assertRequiredScopes(current.scopes, request.requiredScopes)
-    const lastUsedAt = now.toISOString()
-    const apiKey: ApiKeySummary = { ...current, lastUsedAt }
-    await this.putRecord({
-      ...record,
-      value: apiKey,
-      version: record.version + 1,
-    }, { expectedVersion: record.version })
+    if (shouldRecordCredentialUse(current.lastUsedAt, now)) {
+      // Best effort: a lost race only skips one last-used update.
+      await this.touchCredentialLastUsedAt(record, now.toISOString(), current.lastUsedAt)
+    }
     return {
       kind: 'api-key',
       workspaceId: record.workspaceId,
@@ -2089,6 +2191,7 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
         'OAuth app does not allow the client_credentials grant.',
       )
     }
+    await request.admitVerifiedClient?.({ oauthAppId: oauthApp.id })
     const scopes = request.scopes === undefined
       ? [...oauthApp.scopes]
       : readScopes(request.scopes)
@@ -2207,17 +2310,16 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
       throw unauthorized('OAuthAppRevoked', 'OAuth app has been revoked.')
     }
     assertRequiredScopes(token.scopes, request.requiredScopes)
-    await this.putRecord({
-      ...record,
-      value: { ...token, lastUsedAt: now.toISOString() } satisfies StoredOAuthTokenValue,
-      version: record.version + 1,
-    }, { expectedVersion: record.version })
+    if (shouldRecordCredentialUse(token.lastUsedAt, now)) {
+      await this.touchCredentialLastUsedAt(record, now.toISOString(), token.lastUsedAt)
+    }
     return {
       kind: 'oauth-token',
       workspaceId: record.workspaceId,
       credentialId: token.id,
       subjectUserId: token.subjectUserId,
       oauthAppId: token.oauthAppId,
+      principalId: `oauth-app:${token.oauthAppId}`,
       scopes: [...token.scopes],
       expiresAt: token.expiresAt,
     } satisfies AuthenticatedDeveloperCredential
@@ -5130,6 +5232,10 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
       condition.expectedVersion !== undefined &&
       currentRecord?.version !== condition.expectedVersion
     ) return false
+    if (
+      condition.expectedLastUsedAt &&
+      readStoredLastUsedAt(currentRecord) !== condition.expectedLastUsedAt.value
+    ) return false
     if (conditionCheck) {
       const checkedRecord = this.records.get(
         createMemoryKey(conditionCheck.workspaceId, conditionCheck.recordKey),
@@ -5224,6 +5330,27 @@ export class InMemoryDeveloperPlatformStorage extends RateLimitCapabilityStorage
     this.records.set(appKey, clone(appRecord))
     this.records.set(tokenKey, clone(tokenRecord))
     this.records.set(authKey, clone(authRecord))
+    return true
+  }
+
+  /** Records credential use in memory under the same secret and last-used conditions as DynamoDB. */
+  protected async touchCredentialLastUsedAt(
+    record: DeveloperPlatformRecord,
+    lastUsedAt: string,
+    observedLastUsedAt: string | undefined,
+  ) {
+    const key = createMemoryKey(record.workspaceId, record.recordKey)
+    const current = this.records.get(key)
+    if (
+      !current ||
+      current.entryType !== record.entryType ||
+      !current.secretDigest ||
+      current.secretDigest !== record.secretDigest ||
+      typeof current.value !== 'object' ||
+      current.value === null ||
+      (current.value as { lastUsedAt?: unknown }).lastUsedAt !== observedLastUsedAt
+    ) return false
+    this.records.set(key, { ...current, value: { ...current.value, lastUsedAt } })
     return true
   }
 
@@ -6223,13 +6350,13 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
         }
       : condition.expectedVersion === undefined
         ? {}
-        : {
+        : withExpectedLastUsedAtCondition({
             ConditionExpression: '#recordVersion = :expectedRecordVersion',
             ExpressionAttributeNames: { '#recordVersion': 'version' },
             ExpressionAttributeValues: {
               ':expectedRecordVersion': condition.expectedVersion,
             },
-          }
+          }, condition.expectedLastUsedAt)
     const authCondition = authWrite?.condition.ifAbsent
       ? {
           ConditionExpression:
@@ -6364,6 +6491,49 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
       return true
     } catch (error) {
       if (isTransactionConditionFailure(error)) return false
+      throw toPersistenceError(error)
+    }
+  }
+
+  /** Records credential use with a field update conditioned on the secret and the observed last-used time. */
+  protected async touchCredentialLastUsedAt(
+    record: DeveloperPlatformRecord,
+    lastUsedAt: string,
+    observedLastUsedAt: string | undefined,
+  ) {
+    if (!record.secretDigest) return false
+    try {
+      await this.documentClient.send(new UpdateCommand({
+        TableName: this.tableName,
+        Key: {
+          workspaceId: record.workspaceId,
+          recordKey: record.recordKey,
+        },
+        UpdateExpression: 'SET #value.#lastUsedAt = :lastUsedAt',
+        ConditionExpression:
+          'attribute_exists(recordKey) AND #entryType = :entryType AND ' +
+          '#secretDigest = :secretDigest AND ' +
+          (observedLastUsedAt === undefined
+            ? 'attribute_not_exists(#value.#lastUsedAt)'
+            : '#value.#lastUsedAt = :observedLastUsedAt'),
+        ExpressionAttributeNames: {
+          '#value': 'value',
+          '#lastUsedAt': 'lastUsedAt',
+          '#entryType': 'entryType',
+          '#secretDigest': 'secretDigest',
+        },
+        ExpressionAttributeValues: {
+          ':lastUsedAt': lastUsedAt,
+          ':entryType': record.entryType,
+          ':secretDigest': record.secretDigest,
+          ...(observedLastUsedAt === undefined
+            ? {}
+            : { ':observedLastUsedAt': observedLastUsedAt }),
+        },
+      }))
+      return true
+    } catch (error) {
+      if (isNamedError(error, 'ConditionalCheckFailedException')) return false
       throw toPersistenceError(error)
     }
   }
@@ -7289,11 +7459,13 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
         UpdateExpression:
           'SET entryType = :entryType, #value = if_not_exists(#value, :value), ' +
           'expiresAt = :expiresAt, #version = if_not_exists(#version, :zero) + :one ' +
-          'ADD consumed :cost',
+          'ADD #consumed :cost',
         ConditionExpression:
-          'attribute_not_exists(consumed) OR ' +
-          '(#value.#limit = :limit AND #value.#resetAt = :resetAt AND consumed <= :maximumBefore)',
+          'attribute_not_exists(#consumed) OR ' +
+          '(#value.#limit = :limit AND #value.#resetAt = :resetAt AND #consumed <= :maximumBefore)',
+        // CONSUMED is a DynamoDB reserved word, so the counter is referenced by alias.
         ExpressionAttributeNames: {
+          '#consumed': 'consumed',
           '#value': 'value',
           '#limit': 'limit',
           '#resetAt': 'resetAt',

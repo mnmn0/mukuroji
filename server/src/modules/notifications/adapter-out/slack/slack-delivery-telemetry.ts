@@ -1,4 +1,5 @@
-import type { SlackDeliveryTelemetry } from '../../application/slack-delivery'
+import type { ChannelDeliveryTelemetry } from '../../application/channel-delivery'
+import { createChannelDeliveryTelemetry } from '../channel-delivery-telemetry'
 
 /**
  * Creates structured failure logs and CloudWatch Embedded Metric Format queue metrics.
@@ -9,22 +10,6 @@ import type { SlackDeliveryTelemetry } from '../../application/slack-delivery'
 export function createSlackDeliveryTelemetry(
   write: (event: string) => void = console.log,
   now: () => number = Date.now,
-): SlackDeliveryTelemetry {
-  return {
-    reportFailure(failure) {
-      write(JSON.stringify({ event: 'SlackNotificationFailed', ...failure }))
-    },
-    reportQueueHealth(oldestDueAgeSeconds, invalidCandidates) {
-      write(JSON.stringify({
-        _aws: {
-          Timestamp: now(),
-          CloudWatchMetrics: [{ Namespace: 'Mukuroji/Notifications', Dimensions: [['Channel']], Metrics: [
-            { Name: 'OldestDueAgeSeconds', Unit: 'Seconds' },
-            { Name: 'InvalidQueueCandidates', Unit: 'Count' },
-          ] }],
-        },
-        Channel: 'Slack', OldestDueAgeSeconds: oldestDueAgeSeconds, InvalidQueueCandidates: invalidCandidates,
-      }))
-    },
-  }
+): ChannelDeliveryTelemetry {
+  return createChannelDeliveryTelemetry('Slack', write, now)
 }

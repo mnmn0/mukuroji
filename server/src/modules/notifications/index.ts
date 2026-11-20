@@ -7,6 +7,7 @@ export {
   parseStoredNotificationPreferences,
   requiresCurrentWorkItemAssignee,
   isSlackNotificationEligible,
+  isEmailNotificationEligible,
   toNotificationItem,
   type CountUnreadNotificationsInput,
   type ListNotificationsInput,
@@ -32,6 +33,18 @@ export {
 export { slackDeliveryShard } from './domain/slack-delivery'
 /** Exposes the application workflow that delivers due Slack notifications. */
 export { deliverDueSlackNotifications } from './application/slack-delivery'
+/** Exposes the deterministic shard key used when queuing Email notifications. */
+export { emailDeliveryShard } from './domain/channel-delivery'
+/** Exposes the application workflow that delivers due Email notifications. */
+export { deliverDueEmailNotifications } from './application/email-delivery'
+/** Exposes the shared delivery ports the Email composition implements. */
+export type { ChannelDelivery } from './application/channel-delivery'
+/** Exposes the verified-address Email transport factory. */
+export { createEmailNotificationSender, type EmailRecipientLookup } from './adapter-out/email/email-sender'
+/** Exposes safe per-channel delivery logs and backlog metrics. */
+export { createChannelDeliveryTelemetry } from './adapter-out/channel-delivery-telemetry'
+/** Exposes the DynamoDB due queue for one external channel. */
+export { DynamoDbChannelDeliveryStore } from './adapter-out/dynamodb/channel-delivery-store'
 /** Exposes the Project manager reader port used by overdue escalation. */
 export type { ScheduledProjectManagerReader } from './application/ports/project-manager-reader'
 /** Exposes the Project Directory adapter that resolves overdue escalation managers. */

@@ -42,6 +42,11 @@ const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
     surface: 'automation-schedule',
   },
   {
+    filename: 'cycle-schedule-handler.ts',
+    exportName: 'handler',
+    surface: 'automation-schedule',
+  },
+  {
     filename: 'connector-handler.ts',
     exportName: 'queueHandler',
     surface: 'connector-sync',
@@ -60,6 +65,11 @@ const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
     filename: 'enterprise-scim-group-job-worker-handler.ts',
     exportName: 'handler',
     surface: 'enterprise-scim-group-job',
+  },
+  {
+    filename: 'email-notifications-handler.ts',
+    exportName: 'handler',
+    surface: 'notification-schedule',
   },
   {
     filename: 'slack-notifications-handler.ts',

@@ -2,8 +2,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { isIP } from 'node:net'
 import { getConnInfo } from 'hono/aws-lambda'
 import type { Context } from 'hono'
-import { resolveRequestClientKey } from './http'
-import { getEnv } from './runtime-config'
+import { loadServerConfig } from '../config/server-config'
 
 /** Origin header carrying the secret CloudFront adds to every API request. */
 export const EDGE_ORIGIN_SECRET_HEADER = 'x-mukuroji-edge-secret'
@@ -13,6 +12,43 @@ export const EDGE_VIEWER_ADDRESS_HEADER = 'x-mukuroji-viewer-address'
 
 /** Runtime variable holding the secret CloudFront sends in `EDGE_ORIGIN_SECRET_HEADER`. */
 const EDGE_ORIGIN_SECRET_ENVIRONMENT_NAME = 'MUKUROJI_EDGE_ORIGIN_SECRET'
+
+/** Marker returned when no trusted client address is available. */
+export const UNAVAILABLE_REQUEST_SOURCE = 'transport-unavailable'
+
+/**
+ * Reads one runtime variable from the validated server configuration.
+ *
+ * @param name - Variable name.
+ * @returns The variable value, or `undefined` when it is not set.
+ */
+function readEnvironment(name: string) {
+  return loadServerConfig().environment[name]
+}
+
+/**
+ * Resolves a rate-limit client key from the transport source and trusted proxies.
+ *
+ * @param transportSource - Network peer observed by the server transport.
+ * @param forwardedFor - Untrusted forwarded chain supplied by the request.
+ * @param trustedProxyAddresses - Transport peers allowed to supply the forwarded chain.
+ * @returns The trusted client source or a stable unavailable marker.
+ */
+export function resolveRequestClientKey(
+  transportSource: string | undefined,
+  forwardedFor: string | undefined,
+  trustedProxyAddresses: ReadonlySet<string>,
+) {
+  const normalizedTransportSource = transportSource?.trim()
+  if (normalizedTransportSource && trustedProxyAddresses.has(normalizedTransportSource)) {
+    const forwardedSource = forwardedFor
+      ?.split(',')
+      .map((entry) => entry.trim())
+      .find(Boolean)
+    if (forwardedSource) return forwardedSource
+  }
+  return normalizedTransportSource || UNAVAILABLE_REQUEST_SOURCE
+}
 
 /**
  * Returns the viewer address CloudFront forwarded, when the request proves it came through CloudFront.
@@ -55,7 +91,7 @@ export function resolveTrustedRequestSource(c: Context) {
   const edgeViewerAddress = resolveEdgeViewerAddress(
     c.req.header(EDGE_ORIGIN_SECRET_HEADER),
     c.req.header(EDGE_VIEWER_ADDRESS_HEADER),
-    getEnv(EDGE_ORIGIN_SECRET_ENVIRONMENT_NAME)?.trim(),
+    readEnvironment(EDGE_ORIGIN_SECRET_ENVIRONMENT_NAME)?.trim(),
   )
   if (edgeViewerAddress) return edgeViewerAddress
 
@@ -69,10 +105,24 @@ export function resolveTrustedRequestSource(c: Context) {
     transportSource,
     c.req.header('X-Forwarded-For'),
     new Set(
-      (getEnv('MUKUROJI_REQUEST_TRUSTED_PROXY_ADDRESSES') ?? '')
+      (readEnvironment('MUKUROJI_REQUEST_TRUSTED_PROXY_ADDRESSES') ?? '')
         .split(',')
         .map((entry) => entry.trim())
         .filter(Boolean),
     ),
   )
+}
+
+/**
+ * Resolves the trusted client IP address recorded in audit events and used as a rate-limit subject.
+ *
+ * Unlike `resolveTrustedRequestSource`, this never falls back to a marker: a source that is not an
+ * IP literal is reported as unknown so that callers do not record or key on a made-up value.
+ *
+ * @param c - Hono request context.
+ * @returns The trusted client IP literal, or `undefined` when none is available.
+ */
+export function resolveTrustedClientAddress(c: Context) {
+  const source = resolveTrustedRequestSource(c)
+  return isIP(source) === 0 ? undefined : source
 }

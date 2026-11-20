@@ -36,22 +36,51 @@ Web の業務領域フォルダを `features/` と `entities/` へ移す順序�
 bun install
 ```
 
-ローカル環境を初めて起動する前に `openssl rand -hex 32` を2回実行し、それぞれ独立した
-64桁の小文字hex出力をgit管理外の `.env` に保存してください。Docker Compose が Floci
+### ローカルで1コマンド起動する
+
+Docker と Bun 1.3.10 があれば、clone 後に次の2つでログインできる状態まで起動します。
+
+```sh
+bun install
+bun run dev
+```
+
+`bun run dev` は次を順に行います。
+
+1. `.env.example` を元に git 管理外の `.env` を作り、空の secret を生成して `chmod 600` にする
+   （`bun run local:setup` と同じ。既存の値は上書きしません）。`.floci/generated` がなければ、
+   Floci コンテナ（uid 1001）が native Linux でも書き込めるよう sticky bit 付きの `1777` で作ります
+2. `bun run floci:up` と同じ手順で Floci を起動し、ready hook の完了を待つ
+3. `server:dev`・`workers:dev`・`web:dev` をまとめて起動し、出力に `[server]` などの名前を付ける
+
+http://localhost:5173 を開き、初期 owner の `demo@example.com` / `Password123!` でログインします。
+`Ctrl+C` で server・worker・Web を止めます（worker は処理中の batch を終えてから止まります）。
+どれか1つが終了したときも、残りを止めて同じ終了コードで終わります。Floci は次回の起動を速くするため
+動かしたままにするので、止めるときは `bun run dev:down` を使います。
+
+### `.env` の secret
+
+`.env` には次の2つの secret が必要です。`bun run local:setup` または `bun run dev` が生成します。
+手で作る場合は `openssl rand -hex 32` を2回実行し、それぞれ独立した64桁の小文字hex出力を
+保存して `chmod 600 .env` で owner 以外からの読み取りを禁止してください。Docker Compose が Floci
 コンテナへ渡すのは Workspace audit key だけで、ready hook がその形式を検証します。
 Enterprise credential secret は host 上の `server:dev` と `floci:deploy-backend` が
-`.env` から直接読み込み、Floci コンテナには渡しません。保存後は `chmod 600 .env` で
-owner以外からの読み取りを禁止してください。
+`.env` から直接読み込み、Floci コンテナには渡しません。
 
 ```dotenv
 MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-output>
 ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET=<different-64-character-lowercase-hex-output>
 ```
 
+既存の `.env` に形式の違う値があると、setup は値を置き換えずにエラーで止まります。Workspace audit key は
+ローカルの監査データと結び付くため、一度決めた値を変えないでください。
+
 ローカルのSSOも既定では無効です。以前の `.env` に `ENTERPRISE_SSO_STATE_SECRET` がある場合、
 SSOを使わなければ削除し、`bun run floci:up` で生成設定を更新してください。SSOを使う場合のみ、
 独立したstate secret、Hosted UI、外部IdPを含む5項目の設定を揃えます。Flociが作る検証用OAuth
 clientだけでは外部SSOを有効にしません。
+
+### Codex cloud とレビュー Skill
 
 Codex cloud のカスタムセットアップスクリプトには、以下を指定できます。
 
@@ -116,6 +145,8 @@ user が付けた最新 event だけを承認として受け入れます。
 Bun は `packageManager` / `.bun-version` / CI と同じ **1.3.10** を使います。
 `bun --version` で確認してください。バージョン管理ツールまたはBunの公式配布から
 指定版を用意し、PATHの先頭に配置します。
+
+`bun run dev` を使わずに個別に起動する場合:
 
 ```sh
 bun run floci:up

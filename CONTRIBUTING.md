@@ -26,10 +26,12 @@ mukuroji への変更（コード・文書・インフラ）を提案する人�
 
 - Bun は `.bun-version` と同じ **1.3.10** を使い、依存はルートで `bun install` します。
   各 workspace に `bun.lock` を作らないでください。
-- AWS が必要な動作はローカルのエミュレーター Floci（`bun run floci:up`）で確認します。
+- `bun run dev` で `.env` の用意、Floci、server・worker・Web の起動までをまとめて行います。
+  止めるときは `Ctrl+C`、Floci も止めるときは `bun run dev:down` です。
+- AWS が必要な動作はローカルのエミュレーター Floci で確認します。
   実 AWS アカウントへの deploy・migration・削除は maintainer の明示確認なしに行いません。
-- `.env` の secret は `openssl rand -hex 32` で作り、`chmod 600 .env` にします。
-  `.env` と `.floci/generated/` はコミットしません。
+- `.env` は `bun run local:setup`（`bun run dev` も実行）が `.env.example` から作り、secret を生成して
+  `chmod 600` にします。`.env` と `.floci/generated/` はコミットしません。
 
 ## 3. ブランチを切って実装する
 

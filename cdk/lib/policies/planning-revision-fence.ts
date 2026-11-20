@@ -26,6 +26,8 @@ export function grantPlanningRevisionFenceAccess(
           'schemaVersion',
           'revision',
           'updatedAt',
+          // Counts the Work Item advances so Planning edits can tell them from Planning changes.
+          'sourceRevisionCount',
         ],
       },
       'ForAllValues:StringLike': {

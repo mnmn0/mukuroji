@@ -2806,3 +2806,21 @@ test('validates the parent completion policy', () => {
     parentCompletionPolicy: 'block',
   })).toThrow('Parent completion policy must be warn or reject.')
 })
+
+test('validates the completion Gate', () => {
+  expect(createConfiguration({
+    completionGate: { acceptanceCriteria: 'required', noPendingApprovals: 'warn', humanApproval: 'off' },
+  }).completionGate).toEqual({ acceptanceCriteria: 'required', noPendingApprovals: 'warn', humanApproval: 'off' })
+  expect(createConfiguration().completionGate).toBeUndefined()
+  for (const [completionGate, message] of [
+    ['required', 'Completion Gate must be an object.'],
+    [{ ciChecks: 'required' }, 'Completion Gate condition "ciChecks" is not supported.'],
+    [{ acceptanceCriteria: 'block' }, 'Completion Gate condition "acceptanceCriteria" must be off, warn, or required.'],
+  ] as const) {
+    expect(() => validateWorkItemConfiguration({
+      ...structuredClone(DEFAULT_WORK_ITEM_CONFIGURATION),
+      scopeId: 'workspace-1',
+      completionGate,
+    })).toThrow(message)
+  }
+})

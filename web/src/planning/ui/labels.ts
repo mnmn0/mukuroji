@@ -1,8 +1,10 @@
 import {
   createTranslator,
   type Locale,
+  type MessageKey,
 } from '../../shared/i18n/i18n'
 import type { PlanningLabels } from './PlanningScreen'
+import type { PlanningEntityEditorLabels } from './PlanningEntityEditor'
 import { formatPlanningUpdateDate } from '../model/date'
 
 /**
@@ -69,6 +71,33 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     dependencyType: t('planning.field.type'),
     dependencyLag: t('planning.field.lagDays'),
     addDependency: t('planning.action.addDependency'),
+    cyclePlanning: {
+      panel: t('planning.cycle.panel'),
+      select: t('planning.cycle.select'),
+      empty: t('planning.cycle.empty'),
+      commitment: (count, capacity) => t('planning.cycle.commitment')
+        .replace('{count}', String(count))
+        .replace('{capacity}', String(capacity)),
+      remaining: (count) => t('planning.cycle.remaining').replace('{count}', String(count)),
+      carriedOver: (count) => t('planning.cycle.carriedOver').replace('{count}', String(count)),
+      carriedOverBadge: t('planning.cycle.carriedOverBadge'),
+      automation: t('planning.cycle.automation'),
+      automationCreateNext: t('planning.cycle.automation.createNext'),
+      automationRolloverAtEnd: t('planning.cycle.automation.rolloverAtEnd'),
+      automationNote: t('planning.cycle.automation.note'),
+      automationSave: t('planning.cycle.automation.save'),
+      createNext: t('planning.cycle.next.create'),
+      nextExists: (title) => t('planning.cycle.next.exists').replace('{title}', title),
+      backlog: t('planning.cycle.backlog'),
+      backlogEmpty: t('planning.cycle.backlog.empty'),
+      items: t('planning.cycle.items'),
+      itemsEmpty: t('planning.cycle.items.empty'),
+      selectFirst: (count) => t('planning.cycle.selectFirst').replace('{count}', String(count)),
+      clearSelection: t('planning.cycle.clearSelection'),
+      add: (count) => t('planning.cycle.add').replace('{count}', String(count)),
+      remove: (count) => t('planning.cycle.remove').replace('{count}', String(count)),
+      selectionLimit: (count) => t('planning.cycle.selectionLimit').replace('{count}', String(count)),
+    },
     cycleRollover: t('planning.action.rollover'),
     sourceCycle: t('planning.section.cycles'),
     targetCycle: t('planning.field.targetCycle'),
@@ -133,6 +162,7 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
         ]
       },
     },
+    entityEditor: createPlanningEntityEditorLabels(t),
     portfolioTitle: t('planning.view.portfolio'),
     portfolioDescription: t('planning.description'),
     entity: t('planning.field.title'),
@@ -297,6 +327,69 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       goal: t('planning.goalFramework.goal'),
       objective: t('planning.goalFramework.objective'),
       'key-result': t('planning.goalFramework.key-result'),
+    },
+  }
+}
+
+/**
+ * Creates the localized labels of the Planning entity editor.
+ *
+ * @param t - Translator for the display locale.
+ * @returns Labels for every editor field, option and message.
+ */
+function createPlanningEntityEditorLabels(t: (key: MessageKey) => string): PlanningEntityEditorLabels {
+  return {
+    title: t('planning.editor.title'),
+    name: t('planning.field.title'),
+    description: t('planning.editor.description'),
+    owner: t('planning.field.owner'),
+    ownerHint: t('planning.editor.ownerHint'),
+    status: t('planning.field.status'),
+    health: t('planning.field.health'),
+    risk: t('planning.field.risk'),
+    progressMode: t('planning.editor.progressMode'),
+    manualProgress: t('planning.editor.manualProgress'),
+    baselineStart: t('planning.field.baselineStart'),
+    baselineEnd: t('planning.field.baselineEnd'),
+    forecastStart: t('planning.field.forecastStart'),
+    forecastEnd: t('planning.field.forecastEnd'),
+    baselineDate: t('planning.editor.baselineDate'),
+    forecastDate: t('planning.editor.forecastDate'),
+    save: t('planning.action.save'),
+    reset: t('planning.editor.reset'),
+    unchanged: t('planning.editor.unchanged'),
+    readOnly: t('planning.readOnly'),
+    problems: {
+      'title-required': t('planning.editor.problem.titleRequired'),
+      'owner-required': t('planning.editor.problem.ownerRequired'),
+      'date-required': t('planning.editor.problem.dateRequired'),
+      'date-range': t('planning.editor.problem.dateRange'),
+      'manual-progress': t('planning.editor.problem.manualProgress'),
+    },
+    statuses: {
+      proposed: t('planning.status.proposed'),
+      planned: t('planning.status.planned'),
+      active: t('planning.status.active'),
+      paused: t('planning.status.paused'),
+      completed: t('planning.status.completed'),
+      canceled: t('planning.status.canceled'),
+    },
+    healthValues: {
+      unknown: t('planning.health.unknown'),
+      'on-track': t('planning.health.on-track'),
+      'at-risk': t('planning.health.at-risk'),
+      'off-track': t('planning.health.off-track'),
+    },
+    riskValues: {
+      none: t('planning.risk.none'),
+      low: t('planning.risk.low'),
+      medium: t('planning.risk.medium'),
+      high: t('planning.risk.high'),
+      critical: t('planning.risk.critical'),
+    },
+    progressModes: {
+      automatic: t('planning.editor.progressMode.automatic'),
+      manual: t('planning.editor.progressMode.manual'),
     },
   }
 }

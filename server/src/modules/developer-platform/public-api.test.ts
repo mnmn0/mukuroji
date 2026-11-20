@@ -327,6 +327,83 @@ describe('public API router', () => {
     expect((await router.request(path)).status).toBe(401)
   })
 
+  test('keys rate limits and idempotency on the OAuth app instead of each access token', async () => {
+    let creates = 0
+    const { router } = createTestRouter({ workItems: createDefaultWorkItemService({
+      async addComment(credential, _teamId, _id, body) {
+        creates += 1
+        return { id: `comment-${creates}`, actorUserId: credential.subjectUserId, body, createdAt: NOW.toISOString() }
+      },
+    }) })
+    // Register OAuth apps and issue tokens through the HTTP endpoints integrations use.
+    const registerClient = async (name: string) => {
+      const response = await router.request('http://localhost/developer/oauth-apps', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer session-token',
+          'Content-Type': 'application/json',
+          'Idempotency-Key': `register-${name}`,
+        },
+        body: JSON.stringify({
+          name,
+          grantTypes: ['client_credentials'],
+          scopes: ['work-items:read', 'work-items:write'],
+        }),
+      })
+      expect(response.status).toBe(201)
+      const registered = await response.json() as {
+        oauthApp: { clientId: string }
+        clientSecret: string
+      }
+      return new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: registered.oauthApp.clientId,
+        client_secret: registered.clientSecret,
+      }).toString()
+    }
+    const requestToken = async (grant: string) => {
+      const response = await router.request('http://localhost/v1/oauth/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: grant,
+      })
+      expect(response.status).toBe(200)
+      return (await response.json() as { access_token: string }).access_token
+    }
+    const grant = await registerClient('Retrying integration')
+    const first = await requestToken(grant)
+    const second = await requestToken(grant)
+    expect(second).not.toBe(first)
+    const path = '/v1/work-items/work-item-1/comments?teamId=team-1&assignedProjectId=project-1&assigneeUserId=user-1'
+    const send = (accessToken: string) => router.request(path, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'oauth-retry-key',
+      },
+      body: JSON.stringify({ body: 'Tests pass.' }),
+    })
+
+    const created = await send(first)
+    expect(created.status).toBe(201)
+    expect(created.headers.get('RateLimit-Remaining')).toBe('119')
+    // A retry with a newly issued token replays instead of creating a second comment.
+    const retried = await send(second)
+    expect(retried.status).toBe(201)
+    expect(retried.headers.get('Idempotency-Replayed')).toBe('true')
+    expect(creates).toBe(1)
+    // Both tokens draw from one rate-limit bucket.
+    expect(retried.headers.get('RateLimit-Remaining')).toBe('118')
+
+    // Another OAuth app keeps its own bucket and idempotency scope.
+    const other = await send(await requestToken(await registerClient('Other integration')))
+    expect(other.status).toBe(201)
+    expect(other.headers.get('Idempotency-Replayed')).toBeNull()
+    expect(other.headers.get('RateLimit-Remaining')).toBe('119')
+    expect(creates).toBe(2)
+  })
+
   test('preserves empty comment page continuations and binds cursors to Team, Project, task, credential, and limit', async () => {
     const { platform, router } = createTestRouter({ workItems: createDefaultWorkItemService({
       async listComments(_credential, _team, _id, continuation, _limit, project) {
@@ -2602,28 +2679,115 @@ describe('public API router', () => {
     expect(queued).toEqual([])
   })
 
-  test('rate-limits invalid OAuth client attempts and never permits caching token responses', async () => {
+  test('keeps invalid OAuth secrets from using up the client limit and never permits caching token responses', async () => {
+    const { platform, router } = createTestRouter()
+    const oauthApp = await platform.createOAuthApp({
+      workspaceId: 'workspace-1',
+      createdByUserId: 'user-1',
+      input: {
+        name: 'Rate limited service',
+        grantTypes: ['client_credentials'],
+        scopes: ['work-items:read'],
+      },
+    })
+    const request = (clientSecret: string, sourceIp: string) => router.request(
+      'http://localhost/v1/oauth/token',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'client_credentials',
+          client_id: oauthApp.oauthApp.clientId,
+          client_secret: clientSecret,
+        }).toString(),
+      },
+      { requestContext: { http: { sourceIp } } },
+    )
+
+    // Someone who only knows the public client_id cannot lock the client out.
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const response = await request('invalid-secret', '198.51.100.1')
+      expect(response.status).toBe(401)
+      expect(response.headers.get('Cache-Control')).toBe('no-store')
+      expect(response.headers.get('Pragma')).toBe('no-cache')
+    }
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      const response = await request(oauthApp.clientSecret, '198.51.100.2')
+      expect(response.status).toBe(200)
+      expect(response.headers.get('Cache-Control')).toBe('no-store')
+    }
+    const limited = await request(oauthApp.clientSecret, '198.51.100.3')
+    expect(limited.status).toBe(429)
+    expect(limited.headers.get('RateLimit-Limit')).toBe('30')
+    expect(limited.headers.get('Retry-After')).toBe('60')
+    expect(limited.headers.get('Cache-Control')).toBe('no-store')
+  })
+
+  test('still limits wrong OAuth secrets when no trusted client address is available', async () => {
     const { router } = createTestRouter()
-    const request = () => router.request('http://localhost/v1/oauth/token', {
+    // No Lambda request context, as under the Bun server.
+    const request = (attempt: number) => router.request('http://localhost/v1/oauth/token', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Forwarded-For': `198.51.100.${attempt + 1}`,
+      },
       body: new URLSearchParams({
         grant_type: 'client_credentials',
         client_id: 'unknown-client',
         client_secret: 'invalid-secret',
       }).toString(),
     })
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      const response = await request()
-      expect(response.status).toBe(401)
-      expect(response.headers.get('Cache-Control')).toBe('no-store')
-      expect(response.headers.get('Pragma')).toBe('no-cache')
+
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      expect((await request(attempt)).status).toBe(401)
     }
-    const limited = await request()
+    const limited = await request(60)
     expect(limited.status).toBe(429)
-    expect(limited.headers.get('RateLimit-Limit')).toBe('30')
-    expect(limited.headers.get('Retry-After')).toBe('60')
-    expect(limited.headers.get('Cache-Control')).toBe('no-store')
+    expect(limited.headers.get('RateLimit-Limit')).toBe('60')
+  })
+
+  test('limits OAuth token requests by the CloudFront viewer address, not the edge address', async () => {
+    const edgeSecret = 'edge-secret-0123456789abcdef0123456789abcdef'
+    const originalEdgeSecret = process.env.MUKUROJI_EDGE_ORIGIN_SECRET
+    process.env.MUKUROJI_EDGE_ORIGIN_SECRET = edgeSecret
+    try {
+      const { router } = createTestRouter()
+      const request = (viewerAddress: string, attempt: number) => router.request(
+        'http://localhost/v1/oauth/token',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'x-mukuroji-edge-secret': edgeSecret,
+            'x-mukuroji-viewer-address': viewerAddress,
+          },
+          body: new URLSearchParams({
+            grant_type: 'client_credentials',
+            client_id: `unknown-client-${attempt}`,
+            client_secret: 'invalid-secret',
+          }).toString(),
+        },
+        // Every request reaches the API from the same CloudFront edge.
+        {
+          event: { requestContext: { http: { sourceIp: '198.51.100.250' } } },
+          requestContext: { http: { sourceIp: '198.51.100.250' } },
+        },
+      )
+
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        expect((await request('203.0.113.9', attempt)).status).toBe(401)
+      }
+      expect((await request('203.0.113.9', 60)).status).toBe(429)
+      // Another viewer behind the same edge keeps its own bucket.
+      expect((await request('203.0.113.10', 61)).status).toBe(401)
+    } finally {
+      if (originalEdgeSecret === undefined) {
+        delete process.env.MUKUROJI_EDGE_ORIGIN_SECRET
+      } else {
+        process.env.MUKUROJI_EDGE_ORIGIN_SECRET = originalEdgeSecret
+      }
+    }
   })
 
   test('uses the trusted Lambda source IP instead of spoofable forwarding headers', async () => {
@@ -2642,12 +2806,10 @@ describe('public API router', () => {
           client_secret: 'invalid-secret',
         }).toString(),
       },
+      // Shaped like the env that hono/aws-lambda passes to the app.
       {
-        event: {
-          requestContext: {
-            http: { sourceIp: '203.0.113.9' },
-          },
-        },
+        event: { requestContext: { http: { sourceIp: '203.0.113.9' } } },
+        requestContext: { http: { sourceIp: '203.0.113.9' } },
       },
     )
 

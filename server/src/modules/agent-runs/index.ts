@@ -39,6 +39,13 @@ export {
   type ValidatedAgentSettingsUpdate,
 } from './domain/agent-run'
 export {
+  calculateFactoryAnalytics,
+  type FactoryAnalyticsInput,
+  type FactoryAnalyticsReportFacts,
+  type FactoryAnalyticsResult,
+  type FactoryAnalyticsWorkItemHistory,
+} from './domain/agent-run-analytics'
+export {
   createAgentRunReportCommentBody,
   readAgentRunArtifactUrl,
   readReportAgentRunRequest,
@@ -54,6 +61,7 @@ export {
   createAgentRunPartition,
   type AgentRunDocumentClient,
   type AgentRunFenceInput,
+  type AgentRunFinishedGroup,
   type AgentRunPage,
   type AgentRunReportPage,
   type AgentRunStore,
@@ -63,6 +71,14 @@ export {
   type AgentRunTriageTeamPage,
   type AgentRunTransactItem,
 } from './adapter-out/dynamodb/agent-run-store'
+export {
+  assertAgentRunIntegrityBounds,
+  runAgentRunsIntegrityCheck,
+  type AgentRunIntegrityBounds,
+  type AgentRunIntegrityClient,
+  type AgentRunIntegrityEvidence,
+  type AgentRunIntegrityTeam,
+} from './adapter-out/dynamodb/agent-run-integrity'
 export {
   InMemoryAgentRunStore,
   InMemoryTransactionCanceledError,

@@ -85,7 +85,7 @@ Comment notification は `commentId` と `rootCommentId` を追加します。We
 - frequency: instant、hourly、daily、weekly
 - quiet hours: enabled、start、end、IANA time zone
 
-in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録し、対応 channel の transport が有効な環境で同じ予定を使用できます。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
+in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録します。Email は送信元を設定した環境で [Email 配信](#email-配信) がこの予定を使います。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
 
 ## Web Push の購読
 
@@ -172,6 +172,42 @@ Workspace直下のPlanning通知もWorkspaceリソースで認可します。担
 Workspace全体のAutomation notifyで明示的に選ばれたactiveなguest受信者にも、Inboxと同じ通知を配信します。現在のWorkspace閲覧権限とguest・外部アクセス制限を適用し、TeamやProject、Planningを参照する通知の認可は引き続き各sourceの権限で評価します。
 
 Work Itemの担当者だけに向けた通知は、担当変更・状態変更・日程変更も含め、現在の担当者との一致をInboxと共通の条件で確認します。Cognitoから削除済みの受信者は再試行せず配信を抑止し、一時的なCognito障害のみ再試行します。通知設定は認可処理の後にも読み直し、その間のSlack無効化・quiet hours変更を反映します。
+
+## Email 配信
+
+通知設定の **Email** を有効にすると、担当・メンション・返信・期限・承認などの既存通知を、受信者の Cognito profile にある確認済みのメールアドレスへ 1 通ずつ送ります。送信には Amazon SES（API v2）を使います（[ADR 0005](adr/0005-notification-email-ses-transport.md)）。
+
+### 有効にする
+
+送信は deploy 時の opt-in です。CloudFormation parameter `NotificationEmailSender`（既定は空）に SES で検証した送信元アドレスを 1 つ指定すると有効になります。空のあいだは projection が Email の配信予定を書かず、scheduled job も queue を読まないため、後から有効にしても過去の通知はまとめて送られません。メンバーが Email を選んでも、設定が保存されるだけです（設定画面の「無効」表示は後続で入れます）。
+
+運用者は有効にする前に次を行います。
+
+- SES でこのアドレスか、そのドメインを verified identity にする。本番では sandbox を解除する。
+- 送信元ドメインの SPF・DKIM（Easy DKIM）・DMARC を DNS に設定する。
+- SES の account-level suppression list を bounce と complaint について有効にしておく。suppression 中の宛先へは SES が送らないため、bounce した宛先へ送り続けることはありません。運用者は SES console の suppression list（`ListSuppressedDestinations`）で確認・削除できます。
+
+Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信元と一致する場合だけ許可します。本文の deep link はアプリの正規 URL（`NOTIFICATION_EMAIL_APP_ORIGIN`）で絶対 URL にします。stack は `WebDomainName` を指定すればその独自 domain、空なら CloudFront の domain を渡します（[cdk/README.md](../cdk/README.md#独自-domain-で配信する)）。
+
+### 宛先と抑止
+
+宛先は送るたびに、現在の Workspace membership の Cognito username（`username`、なければ email、なければ member key）で `AdminGetUser` を読み、`email_verified` が `true` の `email` だけを使います。membership がない・無効、Cognito user の削除・無効化、未確認アドレスでは配信を抑止し（`emailDeliveryStatus: suppressed`、`emailLastCode` に `EmailRecipientMissing` / `EmailRecipientUnverified`）、alarm は出しません。Cognito の一時障害は再試行します。
+
+有効化時刻は Slack と同じく server が `emailEnabledAt` として保存し、それより前に発生したイベントは送りません。Email transport の導入前から Email を有効にしていた設定は、最後に保存した時刻を境界にします。
+
+### 配信の規則
+
+配信 queue は [Slack 配信](#slack-配信) と同じ実装を使い、属性と index だけが分かれています。通知と同じ transaction で `emailQueueShard`（`email#<番号>`）・`emailNextAttemptAt`・`emailDeliveryStatus`・`emailAttempts` を保存し、16 shard の sparse GSI `EmailDeliveryIndex` から毎分最大32件を処理します。Slack と Email を両方有効にした通知は、それぞれ独立に送ります。どちらの channel の更新も通知 row の `version` を進めるため、一方が期限内の lease を持っている間は他方は claim せず、次の実行で取り直します（互いの送信直前の version 確認を取り消し合わないため）。
+
+再認可・quiet hours と snooze の再確認・lease・version 条件・最大5試行の再試行は Slack と同じです。宛先の読み取りから SES への送信までは合計30秒の期限で打ち切り、送信直前に延長した60秒の lease が切れた後に送ることはありません。frequency は既存の delivery plan の遅延として扱い、通知ごとに 1 通送ります（複数通知を 1 通にまとめる digest ではありません）。SES の throttling（`TooManyRequestsException` など）と一時障害は再試行し、`MessageRejected`・未検証の送信元などは再試行せず失敗にします。応答を失った送信を再試行するため、まれに同じ通知が2通届くことがあります。
+
+本文は ja / en 併記のプレーンテキストです。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
+
+### 失敗の調査
+
+永続的失敗は notification row の `emailDeliveryStatus: failed` と秘密情報を含まない `emailLastCode` に残り、row を `EmailDeliveryIndex` の `email-failed#<番号>` partition へ移して `emailFailureReference` を記録します。CloudWatch の `EmailNotificationFailed` ログの `shard`・`dueAt`・`reference` で Slack と同じ手順で対象を特定できます。ログにはメールアドレスと本文を含めません。`Mukuroji/Notifications` の `OldestDueAgeSeconds`（`Channel: Email`）が15分以上の状態で3回続くと `EmailNotificationBacklogAlarm` を出します。`notification-schedule` runtime control で停止できます。
+
+ローカルでは `floci:up` が index を追加し、`workers:dev` が同じ job を毎分実行します。`NOTIFICATION_EMAIL_SENDER` と `NOTIFICATION_EMAIL_APP_ORIGIN`（loopback 以外は HTTPS）を設定した場合だけ送ります。
 
 ## Due / overdue scan
 

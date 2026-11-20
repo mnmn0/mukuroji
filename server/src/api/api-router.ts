@@ -16,6 +16,7 @@ import { registerNotificationsRoutes } from './routes/notifications-routes'
 import { registerAutomationRoutes } from './routes/automation-routes'
 import { registerWorkItemsRoutes } from './routes/work-items-routes'
 import { registerProjectCharterRoutes } from './routes/project-charter-routes'
+import { registerDirectoryAdministrationRoutes } from './routes/directory-administration-routes'
 import { registerCollaborationRoutes } from './routes/collaboration-routes'
 import { registerRequestIntakeRoutes } from './routes/request-intake-routes'
 import { registerCollectionsRoutes } from './routes/collections-routes'
@@ -121,8 +122,9 @@ export type {
 export {
   getAllowedOrigins,
   normalizeLambdaApiEvent,
-  resolveRequestClientKey,
 } from './shared/http'
+
+export { resolveRequestClientKey } from '../infrastructure/http/trusted-request-source'
 
 export {
   shouldEnableWorkspaceSearchProjection,
@@ -168,6 +170,7 @@ registerNotificationsRoutes(routeApp)
 registerAutomationRoutes(routeApp)
 registerWorkItemsRoutes(routeApp)
 registerProjectCharterRoutes(routeApp)
+registerDirectoryAdministrationRoutes(routeApp)
 registerCollaborationRoutes(routeApp)
 registerRequestIntakeRoutes(routeApp)
 registerCollectionsRoutes(routeApp)
