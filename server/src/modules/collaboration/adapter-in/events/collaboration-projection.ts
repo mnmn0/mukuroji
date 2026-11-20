@@ -2298,6 +2298,8 @@ async function isEligibleRecipient(
     (
       event.planningNotificationKind !== undefined ||
       planningUpdateActivityEventTypes.has(event.eventType) ||
+      // Timesheet access can come from an Enterprise role alone, so it is evaluated here too.
+      event.eventType === TIMESHEET_REMINDER_EVENT_TYPE ||
       enforceContentAuthorization
     ) &&
     (event.projectId !== undefined || event.teamId !== undefined || enforceContentAuthorization)

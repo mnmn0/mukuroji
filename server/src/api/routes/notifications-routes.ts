@@ -15,6 +15,7 @@ import {
   canWorkspaceBusinessWrite,
   requireTeamPermission,
   requireWorkspaceBusinessWrite,
+  resolveEnterpriseAuditActorKind,
 } from '../shared/project-access'
 import {
   createNotificationVisibilityFilter,
@@ -63,6 +64,10 @@ export function registerNotificationsRoutes(routeApp: Hono): void {
           principal.actorId,
           principal.userKey,
           input.body,
+          undefined,
+          // Service accounts and break-glass principals keep their Enterprise actor in the audit.
+          resolveEnterpriseAuditActorKind(principal),
+          principal.enterpriseBreakGlassActivationId,
         ),
         {
           directoryId: principal.directoryId,
