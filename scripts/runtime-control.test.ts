@@ -69,7 +69,7 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
     switch (command) {
       case 'cloudformation describe-stacks':
         return stackOutputs
-      case 'cloudformation describe-stack-resources':
+      case 'cloudformation list-stack-resources':
         return ['mukuroji-runtime-control-alarm']
       case 'cloudwatch describe-alarms':
         return [options.alarm ?? ['OK', true]]

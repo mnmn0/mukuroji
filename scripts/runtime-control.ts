@@ -348,11 +348,13 @@ async function assertAlarmReady(
   stackName: string,
 ): Promise<void> {
   const alarmNames = parseJson(await aws([
-    'cloudformation', 'describe-stack-resources', '--region', region, '--stack-name', stackName,
+    // describe-stack-resources returns only the first 100 resources; the CLI pages list-stack-resources
+    // and applies a JSON --query to the merged result.
+    'cloudformation', 'list-stack-resources', '--region', region, '--stack-name', stackName,
     '--query',
-    "StackResources[?ResourceType=='AWS::CloudWatch::Alarm' && starts_with(LogicalResourceId, 'RuntimeControlConfigurationFailureAlarm')].PhysicalResourceId",
+    "StackResourceSummaries[?ResourceType=='AWS::CloudWatch::Alarm' && starts_with(LogicalResourceId, 'RuntimeControlConfigurationFailureAlarm')].PhysicalResourceId",
     '--output', 'json',
-  ]), 'cloudformation describe-stack-resources')
+  ]), 'cloudformation list-stack-resources')
   if (!Array.isArray(alarmNames) || alarmNames.length !== 1 || typeof alarmNames[0] !== 'string') {
     throw new RuntimeControlError('Could not find exactly one RuntimeControlConfigurationFailureAlarm in the stack.')
   }
