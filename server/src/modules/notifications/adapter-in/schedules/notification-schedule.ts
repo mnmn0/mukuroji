@@ -25,8 +25,16 @@ import { createPlanningUpdatePublicTargetKey } from '../../../collaboration'
 import { isCanonicalWorkItemRecord, isWorkItemKeyRegistryRecord } from '../../../work-items'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 import type { ScheduledProjectManagerReader } from '../../application/ports/project-manager-reader'
+import type { ScheduledReminderSettingsReader } from '../../application/ports/reminder-settings-reader'
+import type { ScheduledTimesheetReader } from '../../application/ports/timesheet-reminder-reader'
+import {
+  TIMESHEET_REMINDER_LOOKBACK_DAYS,
+  evaluateTimesheetReminders,
+  type TimesheetReminderCandidate,
+} from '../../application/timesheet-reminders'
 import {
   DEFAULT_WORK_ITEM_REMINDER_POLICY,
+  createReminderPolicyResolver,
   evaluateScheduledWorkItemNotifications,
   normalizeWorkItemReminderPolicy,
   type ScheduledNotificationCandidate,
@@ -100,6 +108,15 @@ export type NotificationScheduleRunOptions = {
   reminderPolicy?: Partial<WorkItemReminderPolicy>
   /** Resolves Project managers for overdue escalation; without it no escalation is emitted. */
   projectManagerReader?: ScheduledProjectManagerReader
+  /** Reads Team and personal reminder overrides; without it every recipient gets the defaults. */
+  reminderSettingsReader?: ScheduledReminderSettingsReader
+  /** Reads unsubmitted time entries; without it no timesheet reminder is emitted. */
+  timesheetReader?: ScheduledTimesheetReader
+  /**
+   * UTC hour (0-23) of the one hourly run per day that sends timesheet reminders. Defaults to
+   * {@link defaultTimesheetReminderHourUtc}.
+   */
+  timesheetReminderHourUtc?: number
 }
 
 /** 期限通知 schedule の完了結果です。 */
@@ -210,12 +227,17 @@ type PlanningScheduledTargetScope = {
   projectId?: string
 }
 
+/** Audit event type of a timesheet submission reminder. */
+export const TIMESHEET_REMINDER_EVENT_TYPE = 'timesheet.submission-reminder'
+
 const scheduleActorId = 'system:notification-schedule'
 const scheduleActorMemberKey = 'system'
 const defaultScanPageSize = 100
 const defaultMaxScanPages = 1_000
 const defaultAuditRetentionDays = 2_555
 const maximumPlanningNotificationOffsetHours = 24 * 365
+/** 00:00 UTC, which is 09:00 in Japan, where the first customers work. */
+const defaultTimesheetReminderHourUtc = 0
 
 /**
  * Creates an EventBridge schedule adapter bound to an injected DocumentClient.
@@ -223,12 +245,16 @@ const maximumPlanningNotificationOffsetHours = 24 * 365
  * @param documentClient DocumentClient used by the schedule.
  * @param prepareCustomerCompletionNotifications Optional durable Customer preparation handler.
  * @param projectManagerReader Optional Project manager reader for overdue escalation.
+ * @param reminderSettingsReader Optional Team and personal reminder override reader.
+ * @param timesheetReader Optional unsubmitted time entry reader for timesheet reminders.
  * @returns An EventBridge-compatible notification schedule handler.
  */
 export function createNotificationScheduleHandler(
   documentClient: NotificationScheduleDocumentClient,
   prepareCustomerCompletionNotifications?: CustomerCompletionPreparationHandler,
   projectManagerReader?: ScheduledProjectManagerReader,
+  reminderSettingsReader?: ScheduledReminderSettingsReader,
+  timesheetReader?: ScheduledTimesheetReader,
 ) {
   return async (
     event: NotificationScheduleEvent = {},
@@ -260,25 +286,69 @@ export function createNotificationScheduleHandler(
         ? { prepareCustomerCompletionNotifications }
         : {}),
       ...(projectManagerReader ? { projectManagerReader } : {}),
-      reminderPolicy: {
-        dueSoonDays: readPositiveIntegerEnvironment(
-          'NOTIFICATION_DUE_SOON_DAYS',
-          DEFAULT_WORK_ITEM_REMINDER_POLICY.dueSoonDays,
-        ),
-        overdueReminderIntervalDays: readPositiveIntegerEnvironment(
-          'NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS',
-          DEFAULT_WORK_ITEM_REMINDER_POLICY.overdueReminderIntervalDays,
-        ),
-        overdueEscalationDays: readPositiveIntegerEnvironment(
-          'NOTIFICATION_OVERDUE_ESCALATION_DAYS',
-          DEFAULT_WORK_ITEM_REMINDER_POLICY.overdueEscalationDays,
-        ),
-        staleStartedDays: readPositiveIntegerEnvironment(
-          'NOTIFICATION_STALE_STARTED_DAYS',
-          DEFAULT_WORK_ITEM_REMINDER_POLICY.staleStartedDays,
-        ),
-      },
+      ...(reminderSettingsReader ? { reminderSettingsReader } : {}),
+      ...(timesheetReader ? { timesheetReader } : {}),
+      timesheetReminderHourUtc: readTimesheetReminderHourUtc(),
+      reminderPolicy: readReminderPolicyDefaultsFromEnvironment(),
     })
+}
+
+/**
+ * Reads the deployment default reminder thresholds from the environment. Unset variables use
+ * {@link DEFAULT_WORK_ITEM_REMINDER_POLICY}; Teams and members override the result.
+ *
+ * @returns Validated default thresholds.
+ * @throws RangeError when a configured value is not a valid day count.
+ */
+export function readReminderPolicyDefaultsFromEnvironment(): WorkItemReminderPolicy {
+  return normalizeWorkItemReminderPolicy({
+    dueSoonDays: readPositiveIntegerEnvironment(
+      'NOTIFICATION_DUE_SOON_DAYS',
+      DEFAULT_WORK_ITEM_REMINDER_POLICY.dueSoonDays,
+    ),
+    overdueReminderIntervalDays: readPositiveIntegerEnvironment(
+      'NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS',
+      DEFAULT_WORK_ITEM_REMINDER_POLICY.overdueReminderIntervalDays,
+    ),
+    overdueEscalationDays: readPositiveIntegerEnvironment(
+      'NOTIFICATION_OVERDUE_ESCALATION_DAYS',
+      DEFAULT_WORK_ITEM_REMINDER_POLICY.overdueEscalationDays,
+    ),
+    staleStartedDays: readPositiveIntegerEnvironment(
+      'NOTIFICATION_STALE_STARTED_DAYS',
+      DEFAULT_WORK_ITEM_REMINDER_POLICY.staleStartedDays,
+    ),
+    timesheetReminderDays: readPositiveIntegerEnvironment(
+      'NOTIFICATION_TIMESHEET_REMINDER_DAYS',
+      DEFAULT_WORK_ITEM_REMINDER_POLICY.timesheetReminderDays,
+    ),
+  })
+}
+
+/**
+ * Reads the UTC hour of the daily timesheet reminder run.
+ *
+ * @returns Hour from 0 to 23.
+ * @throws RangeError when the configured value is not an hour.
+ */
+function readTimesheetReminderHourUtc() {
+  const configured = loadServerConfig().environment.NOTIFICATION_TIMESHEET_REMINDER_HOUR_UTC?.trim()
+  if (!configured) return defaultTimesheetReminderHourUtc
+  return readHourUtc(Number(configured))
+}
+
+/**
+ * Validates a UTC hour.
+ *
+ * @param value - Candidate hour.
+ * @returns The hour.
+ * @throws RangeError when the value is not an integer from 0 to 23.
+ */
+function readHourUtc(value: number) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 23) {
+    throw new RangeError('Timesheet reminder hour must be an integer between 0 and 23.')
+  }
+  return value
 }
 
 /**
@@ -306,6 +376,14 @@ export async function runNotificationSchedule(
     100_000,
   )
   const reminderPolicy = normalizeWorkItemReminderPolicy(options.reminderPolicy)
+  const resolveReminderPolicy = createReminderPolicyResolver(
+    reminderPolicy,
+    options.reminderSettingsReader,
+  )
+  const timesheetReminderHourUtc = readHourUtc(
+    options.timesheetReminderHourUtc ?? defaultTimesheetReminderHourUtc,
+  )
+  const scannedTeams = new Map<string, { workspaceId: string, teamId: string }>()
   const projectManagersByWorkspace = new Map<
     string,
     Promise<ReadonlyMap<string, readonly string[]>>
@@ -372,7 +450,24 @@ export async function runNotificationSchedule(
           // A newer completion marker won the race; leave it for the next scan.
         }
       }
-      const evaluation = evaluateScheduledWorkItemNotifications(item, now, reminderPolicy)
+      const itemScope = readWorkItemReminderScope(item)
+      if (itemScope) {
+        scannedTeams.set(`${itemScope.workspaceId}\0${itemScope.teamId}`, {
+          workspaceId: itemScope.workspaceId,
+          teamId: itemScope.teamId,
+        })
+      }
+      const evaluation = evaluateScheduledWorkItemNotifications(
+        item,
+        now,
+        itemScope?.assigneeMemberKey
+          ? await resolveReminderPolicy(
+              itemScope.workspaceId,
+              itemScope.teamId,
+              itemScope.assigneeMemberKey,
+            )
+          : reminderPolicy,
+      )
       const candidates = [...evaluation.candidates]
       const managerReader = options.projectManagerReader
       if (evaluation.escalation?.projectId && managerReader) {
@@ -397,38 +492,50 @@ export async function runNotificationSchedule(
       }
 
       for (const candidate of candidates) {
-        const auditEvent = createScheduledNotificationAuditEvent(
-          candidate,
-          now,
-          auditRetentionDays,
-          options.requestId,
+        await putScheduledAuditEvent(
+          options.documentClient,
+          auditEventsTableName,
+          createScheduledNotificationAuditEvent(
+            candidate,
+            now,
+            auditRetentionDays,
+            options.requestId,
+          ),
+          result,
         )
-
-        try {
-          await options.documentClient.send(new PutCommand({
-            TableName: auditEventsTableName,
-            Item: auditEvent,
-            ConditionExpression:
-              'attribute_not_exists(#directoryId) AND attribute_not_exists(#eventId)',
-            ExpressionAttributeNames: {
-              '#directoryId': 'directoryId',
-              '#eventId': 'eventId',
-            },
-          }))
-          result.emittedEvents += 1
-        } catch (error) {
-          if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
-            result.duplicateEvents += 1
-            continue
-          }
-
-          throw error
-        }
       }
     }
 
     exclusiveStartKey = response.LastEvaluatedKey
   } while (exclusiveStartKey)
+
+  if (options.timesheetReader && now.getUTCHours() === timesheetReminderHourUtc) {
+    const from = new Date(now.getTime() - TIMESHEET_REMINDER_LOOKBACK_DAYS * 86_400_000)
+    for (const { workspaceId, teamId } of scannedTeams.values()) {
+      const entries = await options.timesheetReader.listUnsubmittedEntries(
+        workspaceId,
+        teamId,
+        from,
+        now,
+      )
+      const reminders = await evaluateTimesheetReminders(
+        workspaceId,
+        teamId,
+        entries,
+        now,
+        async (memberKey) =>
+          (await resolveReminderPolicy(workspaceId, teamId, memberKey)).timesheetReminderDays,
+      )
+      for (const reminder of reminders) {
+        await putScheduledAuditEvent(
+          options.documentClient,
+          auditEventsTableName,
+          createTimesheetReminderAuditEvent(reminder, now, auditRetentionDays, options.requestId),
+          result,
+        )
+      }
+    }
+  }
 
   if (options.planningTableName) {
     await queryDuePlanningUpdateTargets({
@@ -448,6 +555,58 @@ export async function runNotificationSchedule(
   }
 
   return result
+}
+
+/**
+ * Reads the Workspace, Team, and owner of a canonical Work Item row for reminder resolution.
+ *
+ * @param item - Untrusted Work Items table row.
+ * @returns The scope, or undefined for a row that is not a canonical Work Item.
+ */
+function readWorkItemReminderScope(item: Record<string, unknown>) {
+  if (!isCanonicalWorkItemRecord(item)) return undefined
+  return {
+    workspaceId: item.directoryId,
+    teamId: item.teamId,
+    assigneeMemberKey: item.assigneeUserId.toLowerCase(),
+  }
+}
+
+/**
+ * Stores one scheduled audit event unless an earlier run already stored it.
+ *
+ * @param documentClient - DocumentClient used for the put.
+ * @param tableName - AuditEvents table name.
+ * @param auditEvent - Event with a deterministic ID.
+ * @param result - Run counters updated in place.
+ * @returns A promise that resolves after the event is stored or found to be a duplicate.
+ */
+async function putScheduledAuditEvent(
+  documentClient: NotificationScheduleDocumentClient,
+  tableName: string,
+  auditEvent: Record<string, unknown>,
+  result: NotificationScheduleResult,
+) {
+  try {
+    await documentClient.send(new PutCommand({
+      TableName: tableName,
+      Item: auditEvent,
+      ConditionExpression:
+        'attribute_not_exists(#directoryId) AND attribute_not_exists(#eventId)',
+      ExpressionAttributeNames: {
+        '#directoryId': 'directoryId',
+        '#eventId': 'eventId',
+      },
+    }))
+    result.emittedEvents += 1
+  } catch (error) {
+    if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+      result.duplicateEvents += 1
+      return
+    }
+
+    throw error
+  }
 }
 
 /** Reads and validates the durable Customer completion marker on a Work Item row.
@@ -868,6 +1027,7 @@ function createScheduledNotificationAuditEvent(
             candidate.reason,
             candidate.assigneeMemberKey,
             String(candidate.repetition ?? 0),
+            ...reminderIntervalKeyParts(candidate, DEFAULT_WORK_ITEM_REMINDER_POLICY.staleStartedDays),
           ]
         : [
             candidate.workspaceId,
@@ -876,6 +1036,12 @@ function createScheduledNotificationAuditEvent(
             candidate.reason,
             candidate.assigneeMemberKey,
             String(candidate.repetition ?? 0),
+            ...(candidate.reason === 'overdue-reminder'
+              ? reminderIntervalKeyParts(
+                  candidate,
+                  DEFAULT_WORK_ITEM_REMINDER_POLICY.overdueReminderIntervalDays,
+                )
+              : []),
           ]
   const idempotencyDigest = createHash('sha256').update(idempotencyParts.join('\0')).digest('hex')
   const idempotencyKey = `notification-schedule-v1:${idempotencyDigest}`
@@ -936,6 +1102,107 @@ function createScheduledNotificationAuditEvent(
       ...(candidate.reopenedAt ? { workItemReopenedAt: candidate.reopenedAt } : {}),
       ...(candidate.repetition === undefined ? {} : { repetition: candidate.repetition }),
       notificationCandidates,
+    },
+    expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),
+    outboxStatus: 'pending',
+  })
+}
+
+/**
+ * Returns the interval key part of a numbered reminder.
+ *
+ * A reminder is numbered by how many intervals have passed, so the same number means a different
+ * day once a Team or member changes the interval. A non-default interval joins the key so its
+ * numbering does not collide with reminders sent under another interval; the default interval
+ * adds nothing, which keeps the keys of reminders sent before intervals became configurable.
+ *
+ * @param candidate - Numbered reminder stage.
+ * @param defaultIntervalDays - Built-in default interval for the stage.
+ * @returns Extra key parts.
+ */
+function reminderIntervalKeyParts(
+  candidate: ScheduledNotificationCandidate,
+  defaultIntervalDays: number,
+) {
+  const interval = candidate.reminderIntervalDays
+  return interval === undefined || interval === defaultIntervalDays
+    ? []
+    : [`interval:${interval}`]
+}
+
+/**
+ * Creates the audit event that reminds one member to submit a Team's time entries.
+ *
+ * The event ID is derived from the Workspace, Team, member, threshold, and the threshold-long
+ * period since the Unix epoch, so retries and the other hourly runs of the same period are
+ * duplicates. The event names the oldest unsubmitted entries so delivery can drop the reminder
+ * once they are all submitted.
+ *
+ * @param candidate - Member, entries, and period.
+ * @param now - Schedule execution instant.
+ * @param auditRetentionDays - Audit event retention.
+ * @param requestId - Schedule execution ID.
+ * @returns Audit event row.
+ */
+function createTimesheetReminderAuditEvent(
+  candidate: TimesheetReminderCandidate,
+  now: Date,
+  auditRetentionDays: number,
+  requestId?: string,
+) {
+  const entityId = `team/${candidate.teamId}/timesheet`
+  const occurredAt = now.toISOString()
+  const idempotencyDigest = createHash('sha256').update([
+    candidate.workspaceId,
+    entityId,
+    TIMESHEET_REMINDER_EVENT_TYPE,
+    candidate.memberKey,
+    candidate.projectId,
+    String(candidate.reminderDays),
+    String(candidate.cycle),
+  ].join('\0')).digest('hex')
+  const context = createMutationAuditContext({
+    workspaceId: candidate.workspaceId,
+    actor: {
+      id: scheduleActorId,
+      kind: 'system',
+      displayName: 'Mukuroji notification schedule',
+    },
+    idempotencyKey: `notification-schedule-v1:${idempotencyDigest}`,
+    occurredAt,
+    request: {
+      method: 'SCHEDULE',
+      path: '/internal/notification-schedule',
+      body: { entityId, projectId: candidate.projectId, reason: 'timesheet', cycle: candidate.cycle },
+    },
+    source: {
+      kind: 'system',
+      method: 'SCHEDULE',
+      route: '/internal/notification-schedule',
+      ...(requestId ? { requestId } : {}),
+    },
+  })
+  // The browser resolves the instant to the week in the reader's own timezone.
+  const search = new URLSearchParams({ week: candidate.oldestStartAt })
+  const oldestDate = candidate.oldestStartAt.slice(0, 10)
+  return createAuditEvent({
+    context,
+    eventType: TIMESHEET_REMINDER_EVENT_TYPE,
+    entity: { type: 'timesheet', id: entityId },
+    action: 'submission-reminder',
+    changes: [],
+    summary: candidate.unsubmittedCount === 1
+      ? `1 time entry from ${oldestDate} has not been submitted.`
+      : `${candidate.unsubmittedCount} time entries since ${oldestDate} have not been submitted.`,
+    metadata: {
+      actorMemberKey: scheduleActorMemberKey,
+      teamId: candidate.teamId,
+      // Recipients are authorized against the entries' Project, which the timesheet lists.
+      projectId: candidate.projectId,
+      deepLink: `/teams/${encodeURIComponent(candidate.teamId)}/timesheet?${search.toString()}`,
+      timeEntryIds: candidate.entryIds,
+      timesheetDueBefore: candidate.dueBefore,
+      notificationCandidates: [{ memberKey: candidate.memberKey, reason: 'timesheet' }],
     },
     expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),
     outboxStatus: 'pending',
