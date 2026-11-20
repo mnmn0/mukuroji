@@ -751,13 +751,15 @@ function isTerminalTemplateApplicationError(
 /**
  * Checks that archiving or restoring one Bulk item keeps the Work Item hierarchy whole.
  *
- * Other items of the same operation in the same Team are left out of the check, so a parent can
- * be archived together with its children and a child restored together with its parent.
+ * A preview passes the other items of the operation, which are left out of the check, so a parent
+ * can be previewed together with its children. Applying passes none: the items are ordered so that
+ * children are archived before their parent and a parent is restored before its children, and each
+ * item checks what the earlier ones committed.
  *
  * @param directoryId - Workspace directory ID.
  * @param target - Work Item being archived or restored.
  * @param archived - True when the item is archived, false when it is restored.
- * @param operationItems - Every target of the Bulk operation.
+ * @param operationItems - Items counted as already changed; empty when applying.
  * @returns Condition checks to commit with the item's update.
  * @throws AutomationError retryable `conflict` when a child is still active or the parent is archived.
  */
@@ -789,6 +791,65 @@ async function prepareBulkArchiveHierarchyConditionChecks(
     }
     throw error
   }
+}
+
+/** Parent relations read at once while ordering a Bulk archive. */
+const BULK_ARCHIVE_ORDER_READ_CONCURRENCY = 16
+
+/**
+ * Orders Bulk archive items so that each item's hierarchy check sees the items it depends on.
+ *
+ * Children are archived before their parent, and a parent is restored before its children. Each
+ * item's depth counts its ancestors among the items; archiving runs the deepest first, restoring
+ * the shallowest first, and items of equal depth keep request order.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param items - Bulk targets in request order.
+ * @param archived - True when the items are archived, false when they are restored.
+ * @returns Every item index exactly once, in apply order.
+ */
+async function orderBulkArchiveItems(
+  directoryId: string,
+  items: readonly { teamId: string, workItemId: string }[],
+  archived: boolean,
+): Promise<number[]> {
+  const itemKey = (teamId: string, workItemId: string) => `${teamId}\0${workItemId}`
+  const indexByKey = new Map(items.map((item, index) => [itemKey(item.teamId, item.workItemId), index]))
+  const parentIndexes: (number | undefined)[] = []
+  for (let start = 0; start < items.length; start += BULK_ARCHIVE_ORDER_READ_CONCURRENCY) {
+    const batch = await Promise.all(items
+      .slice(start, start + BULK_ARCHIVE_ORDER_READ_CONCURRENCY)
+      .map(async (item) => {
+        const related = await workItemDependencies.workItemConfigurations.listRelations(
+          directoryId,
+          item.teamId,
+          item.workItemId,
+          { types: ['parent'] },
+        )
+        const parent = related.relations.find((relation) =>
+          relation.sourceWorkItemId === item.workItemId && relation.type === 'parent'
+        )
+        return parent ? indexByKey.get(itemKey(item.teamId, parent.targetWorkItemId)) : undefined
+      }))
+    parentIndexes.push(...batch)
+  }
+  const depths = items.map((_, index) => {
+    let depth = 0
+    const visited = new Set([index])
+    for (let parent = parentIndexes[index]; parent !== undefined && !visited.has(parent); parent = parentIndexes[parent]) {
+      visited.add(parent)
+      depth += 1
+    }
+    return depth
+  })
+  return items
+    .map((_, index) => index)
+    .sort((left, right) => {
+      const byDepth = archived
+        ? (depths[right] ?? 0) - (depths[left] ?? 0)
+        : (depths[left] ?? 0) - (depths[right] ?? 0)
+      return byDepth !== 0 ? byDepth : left - right
+    })
 }
 
 /**
@@ -923,6 +984,7 @@ function createApiBulkOperationAdapter(
   const prepareAction = async (
     request: BulkOperationRequest,
     itemIndex: number,
+    previewsOperation: boolean,
   ) => {
     const loaded = await loadItem(request, itemIndex)
     const { action } = request
@@ -958,11 +1020,13 @@ function createApiBulkOperationAdapter(
           throw error
         }
       }
+      // A preview runs before any item is written, so it counts the other items of the operation
+      // as already archived or restored. Applying checks what earlier items actually committed.
       const configurationConditionChecks = await prepareBulkArchiveHierarchyConditionChecks(
         principal.directoryId,
         loaded.item,
         action.archived,
-        request.items,
+        previewsOperation ? request.items : [],
       )
       body = {
         archivedAt: action.archived ? new Date().toISOString() : null,
@@ -1130,8 +1194,13 @@ function createApiBulkOperationAdapter(
   }
 
   return {
+    async orderItems(request) {
+      return request.action.type === 'archive'
+        ? await orderBulkArchiveItems(principal.directoryId, request.items, request.action.archived)
+        : request.items.map((_, index) => index)
+    },
     async preview(request, itemIndex) {
-      const prepared = await prepareAction(request, itemIndex)
+      const prepared = await prepareAction(request, itemIndex, true)
       return {
         allowed: true,
         undoPayload: createBulkUndoPayload(request.action, prepared.detail.issue),
@@ -1140,7 +1209,7 @@ function createApiBulkOperationAdapter(
     async apply(request, itemIndex, checkpoint) {
       let prepared: Awaited<ReturnType<typeof prepareAction>>
       try {
-        prepared = await prepareAction(request, itemIndex)
+        prepared = await prepareAction(request, itemIndex, false)
       } catch (error) {
         const recovered = canAttemptResponseLossRecovery(error)
           ? await recoverAppliedItem(request, itemIndex, checkpoint)
@@ -1275,13 +1344,14 @@ function createApiBulkOperationAdapter(
           )
         : undefined
       // Undoing an archive restores the Work Item and undoing a restore archives it again, so the
-      // undo keeps the hierarchy whole the same way the operation itself did.
+      // undo keeps the hierarchy whole the same way the operation itself did. Undo runs the items
+      // in reverse apply order, so it checks what earlier undone items actually committed.
       const archiveHierarchyConditionChecks = operation.action.type === 'archive'
         ? await prepareBulkArchiveHierarchyConditionChecks(
             principal.directoryId,
             item,
             restoresArchive,
-            operation.items,
+            [],
           )
         : []
       let mutationBody: UpdateTeamIssueRequestBody = {

@@ -1091,14 +1091,18 @@ test('restores a child under an active parent and records the restore on the par
   })
 })
 
-test('archives a parent together with its active child in one operation', async () => {
+test('archives a parent together with its active child by archiving the child first', async () => {
+  const archivedIds: string[] = []
   const calls = configureFakeProjectClients(true, {
     teamIssueCount: 2,
-    workItemRelations: [{
-      sourceWorkItemId: 'onboarding-friction',
-      type: 'child',
-      targetWorkItemId: 'child-work-item',
-    }],
+    detailArchivedIssueIds: archivedIds,
+    workItemRelations: [
+      { sourceWorkItemId: 'onboarding-friction', type: 'child', targetWorkItemId: 'child-work-item' },
+      { sourceWorkItemId: 'child-work-item', type: 'parent', targetWorkItemId: 'onboarding-friction' },
+    ],
+    issueUpdateHook(input) {
+      archivedIds.push(input.issueId)
+    },
   })
   setTestAppDependencies({
     bulkOperations: createBulkOperationAutomationFake().client,
@@ -1115,7 +1119,74 @@ test('archives a parent together with its active child in one operation', async 
 
   expect(operation).toMatchObject({ status: 'succeeded' })
   expect(calls.issueUpdates.map((update) => update.issueId))
-    .toEqual(['onboarding-friction', 'child-work-item'])
+    .toEqual(['child-work-item', 'onboarding-friction'])
+})
+
+test('keeps the parent active when its child fails in the same archive operation', async () => {
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    workItemRelations: [
+      { sourceWorkItemId: 'onboarding-friction', type: 'child', targetWorkItemId: 'child-work-item' },
+      { sourceWorkItemId: 'child-work-item', type: 'parent', targetWorkItemId: 'onboarding-friction' },
+    ],
+    issueUpdateHook(input) {
+      if (input.issueId === 'child-work-item') {
+        throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'Work Item changed after it was selected.')
+      }
+    },
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { operation } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: true },
+    items: [
+      { teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 },
+      { teamId: 'core-team', workItemId: 'child-work-item', expectedRevision: 1 },
+    ],
+  })
+
+  expect(operation).toMatchObject({
+    status: 'failed',
+    items: [
+      { workItemId: 'onboarding-friction', status: 'failed', errorCode: 'WorkItemActiveChildren', retryable: true },
+      { workItemId: 'child-work-item', status: 'failed' },
+    ],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('restores a child together with its archived parent by restoring the parent first', async () => {
+  const archivedIds = ['onboarding-friction', 'parent-work-item']
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailArchivedIssueIds: archivedIds,
+    workItemRelations: [
+      { sourceWorkItemId: 'onboarding-friction', type: 'parent', targetWorkItemId: 'parent-work-item' },
+      { sourceWorkItemId: 'parent-work-item', type: 'child', targetWorkItemId: 'onboarding-friction' },
+    ],
+    issueUpdateHook(input) {
+      archivedIds.splice(archivedIds.indexOf(input.issueId), 1)
+    },
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { operation } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: false },
+    items: [
+      { teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 },
+      { teamId: 'core-team', workItemId: 'parent-work-item', expectedRevision: 1 },
+    ],
+  })
+
+  expect(operation).toMatchObject({ status: 'succeeded' })
+  expect(calls.issueUpdates.map((update) => update.issueId))
+    .toEqual(['parent-work-item', 'onboarding-friction'])
 })
 
 test('refuses to restore a child while its parent is archived', async () => {

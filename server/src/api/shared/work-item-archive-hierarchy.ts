@@ -37,10 +37,11 @@ export type WorkItemArchiveHierarchyCheckInput = {
   /** True when the Work Item is being archived, false when it is being restored. */
   archived: boolean
   /**
-   * Other Work Items of the same Team that the same operation archives or restores.
+   * Other Work Items of the same Team that a not yet applied operation will archive or restore.
    *
-   * Archiving a parent together with its children, or restoring a child together with its
-   * parent, is allowed, so these are left out of the check and its fences.
+   * A preview counts them as already changed and leaves them out of the check, so a parent can be
+   * previewed together with its children. Applying passes none and checks what earlier items of
+   * the operation committed.
    */
   sameOperationWorkItemIds?: ReadonlySet<string>
 }

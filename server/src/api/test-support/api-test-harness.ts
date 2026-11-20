@@ -2224,9 +2224,13 @@ function configureFakeProjectClients(
             },
           }
         : {}),
-      async listRelations() {
+      async listRelations(_workspaceId: string, _teamId: string, workItemId: string, listOptions?: { types?: readonly string[] }) {
+        // Like the DynamoDB adapter, a read returns only the asked Work Item's relations of the asked types.
         return {
-          relations: (options.workItemRelations ?? []).map((relation) => ({ ...relation })),
+          relations: (options.workItemRelations ?? [])
+            .filter((relation) => relation.sourceWorkItemId === workItemId &&
+              (listOptions?.types === undefined || listOptions.types.includes(relation.type)))
+            .map((relation) => ({ ...relation })),
           graphRevision: options.workItemRelationGraphRevision ?? 0,
         }
       },
