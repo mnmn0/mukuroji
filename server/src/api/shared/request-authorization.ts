@@ -380,6 +380,11 @@ const enterpriseRoutePermissionRules = [
     permission: 'teams.manage',
   },
   {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/notification-reminders',
+    permission: 'teams.manage',
+  },
+  {
     method: 'POST',
     pathPattern: '/api/teams/:teamId/triage-entries/:entryId/customer-request',
     permission: 'requests.manage',

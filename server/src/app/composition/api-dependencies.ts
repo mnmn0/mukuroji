@@ -101,6 +101,8 @@ import {
   createFocusStateClient,
 } from '../../modules/focus'
 import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
+import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
+import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
 import { DynamoDbAgentRunStore, InMemoryAgentRunStore } from '../../modules/agent-runs'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
@@ -575,6 +577,10 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     pushSubscriptions: new DynamoDbPushSubscriptionStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.PUSH_SUBSCRIPTIONS_TABLE_NAME ?? 'mukuroji-push-subscriptions-local',
+    ),
+    teamReminderSettings: new DynamoDbReminderSettingsStore(
+      createDynamoDbDocumentClient(),
+      getConfiguredNotificationsTableName(),
     ),
     agentRuns: new DynamoDbAgentRunStore(
       createDynamoDbDocumentClient(),
