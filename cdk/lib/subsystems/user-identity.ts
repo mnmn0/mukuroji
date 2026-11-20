@@ -303,13 +303,13 @@ function buildVerificationEmail(webOrigin: string): CognitoEmailTemplate {
     subject: 'Mukuroji の確認コード / Your Mukuroji verification code',
     body: [
       '<p>Mukuroji の確認コード: {####}</p>',
-      '<p>パスワードを再設定するときは、開いている再設定画面にこのコードを入力してください。'
-        + `画面を閉じた場合は ${link} からやり直せます。`
+      '<p>パスワードを再設定するときは、再設定画面でこのコードと新しいパスワードを入力してください。'
+        + `画面を開いていない場合は ${link} から始めると、新しいコードが届きます。`
         + '心当たりがない場合は、このメールを無視してください。</p>',
       '<hr>',
       '<p>Your Mukuroji verification code: {####}</p>',
-      '<p>To reset your password, enter this code on the reset page you have open. '
-        + `If you closed it, start again at ${link}. `
+      '<p>To reset your password, enter this code and a new password on the reset page. '
+        + `If the page is not open, start at ${link} and a new code will be sent. `
         + 'If you did not request this, you can ignore this email.</p>',
     ].join('\n'),
   };
