@@ -129,7 +129,9 @@ const CREATED_WORK_ITEM_ID_ATTEMPT_LIMIT = 5
  *
  * The Planning revision is also the bounded source-version fence for roll-ups. Updating it
  * in the same transaction as every canonical Work Item mutation lets a Planning publish use
- * one condition instead of one condition per source Work Item.
+ * one condition instead of one condition per source Work Item. `sourceRevisionCount` counts
+ * these advances so Planning edits that do not depend on Work Items can tell them apart from
+ * Planning changes and are not rejected by them.
  *
  * @param planningTableName - Optional Planning table configured for the runtime.
  * @param workspaceId - Workspace whose canonical Work Item projection changes.
@@ -149,7 +151,7 @@ function createPlanningRevisionIncrementTransactionItem(
       UpdateExpression:
         'SET #entryType = if_not_exists(#entryType, :entryType), ' +
         '#schemaVersion = if_not_exists(#schemaVersion, :schemaVersion), ' +
-        '#updatedAt = :updatedAt ADD #revision :increment',
+        '#updatedAt = :updatedAt ADD #revision :increment, #sourceRevisionCount :increment',
       ConditionExpression:
         '(attribute_not_exists(#entryType) AND ' +
         'attribute_not_exists(#schemaVersion) AND attribute_not_exists(#revision)) OR (' +
@@ -160,6 +162,7 @@ function createPlanningRevisionIncrementTransactionItem(
         '#schemaVersion': 'schemaVersion',
         '#updatedAt': 'updatedAt',
         '#revision': 'revision',
+        '#sourceRevisionCount': 'sourceRevisionCount',
       },
       ExpressionAttributeValues: {
         ':entryType': 'planning-meta',

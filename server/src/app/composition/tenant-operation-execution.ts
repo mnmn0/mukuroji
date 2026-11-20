@@ -43,13 +43,6 @@ export function createProductionTenantOperationExecutor(): TenantOperationExecut
     async reconcileAuditRetention(workspaceId) {
       return await client.reconcileAuditRetention(workspaceId)
     },
-    async reconcileAuditEventRetention(workspaceId, eventId, occurredAt) {
-      await client.reconcileAuditEventRetention(
-        workspaceId,
-        eventId,
-        occurredAt,
-      )
-    },
     async dispatchOperationExecution(job) {
       const owner = resolveTenantOperationResourceOwner(job.step)
       await sqs.send(new SendMessageCommand({

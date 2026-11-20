@@ -593,6 +593,30 @@ describe('collaboration projection pure helpers', () => {
       { ...preferences, slackEnabledAt: undefined })
     expect(state.deliveryChannels).toEqual(['inApp'])
   })
+  test('queues Email only when the deployment configured a sender and the event is inside the opt-in period', () => {
+    const previous = process.env.NOTIFICATION_EMAIL_SENDER
+    const candidate = { memberKey: 'member@example.com', reasons: ['mention'] }
+    const preferences = { ...DEFAULT_NOTIFICATION_PREFERENCES,
+      channels: { inApp: true, email: true, push: false }, emailEnabledAt: '2026-07-12T12:00:00.000Z' }
+    try {
+      for (const sender of ['', 'notify@example.com']) {
+        process.env.NOTIFICATION_EMAIL_SENDER = sender
+        for (const occurredAt of ['2026-07-12T11:59:59.999Z', '2026-07-12T12:00:00.000Z']) {
+          const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences)
+          const row = createNotificationProjectionItem(createProjectionEvent({ occurredAt }), candidate, state)
+          const queued = Boolean(sender) && occurredAt === preferences.emailEnabledAt
+          expect(row.deliveryChannels).toContain('email')
+          expect(row.emailQueueShard !== undefined).toBe(queued)
+          expect(row.emailNextAttemptAt).toBe(queued ? state.deliveryAfter : undefined)
+          expect(row.emailDeliveryStatus).toBe(queued ? 'pending' : undefined)
+          expect(row.slackQueueShard).toBeUndefined()
+        }
+      }
+    } finally {
+      if (previous === undefined) delete process.env.NOTIFICATION_EMAIL_SENDER
+      else process.env.NOTIFICATION_EMAIL_SENDER = previous
+    }
+  })
   test('preserves approval source and requires current file visibility and Files permission', async () => {
     const keys = ['WORK_ITEMS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
     const previous = keys.map((key) => process.env[key])

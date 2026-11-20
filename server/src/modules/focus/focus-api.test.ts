@@ -1009,6 +1009,33 @@ test('hydrates owned Work Items with permission-safe approval summaries', async 
   })
 })
 
+test('does not read approval summaries for Work Items the viewer does not own', async () => {
+  await withTestEnvironment({ FILE_PROOFING_TABLE_NAME: 'focus-api-test' }, async () => {
+    configureFocusSources('member', undefined, 3)
+    configureFakeAuthenticatedUser({
+      email: 'demo@example.com',
+      'custom:directory_id': 'user#demo@example.com',
+    })
+    let approvalSummaryReads = 0
+    setTestAppDependencies({
+      fileProofing: createFileProofingStub({
+        async getApprovalSummaries() {
+          approvalSummaryReads += 1
+          return new Map()
+        },
+        async listReviewerApprovals() {
+          return { approvals: [] }
+        },
+      }),
+    })
+
+    const response = await focusRequest('/api/focus')
+
+    expect(response.status).toBe(200)
+    expect(approvalSummaryReads).toBe(0)
+  })
+})
+
 test('supports scoped Enterprise Focus reads while omitting unauthorized source signals', async () => {
   await withTestEnvironment({
     COGNITO_HOSTED_UI_DOMAIN: 'https://mukuroji.auth.ap-northeast-1.amazoncognito.com',

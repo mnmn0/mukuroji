@@ -46,11 +46,22 @@ Canonical row と entity index の audit history は同時には更新されな�
 一致し、各latest revisionのupdate eventが到達済みであることを確認します。不整合は有界回数だけ
 再試行し、揃わない場合は部分的なsnapshotを返さず`503`でfail-closedにします。
 
+Audit history を読むのは、`updatedAt` が query 期間の開始（`filter.period.from`）以降の Work Item
+だけです。Canonical Work Item の変更は audit event と同じ transaction で書かれ、`updatedAt` を
+event 時刻にそろえます。そのため期間開始より前から更新のない Work Item には、期間内の完了、
+`started` への遷移、Project scope change がなく、期間開始から `asOf` までの各評価時点の state は
+現在の canonical row と同じです。Engine はこの Work Item を history なしでも同じ metric 値で評価する
+ため、canonical row 自体を事前集計として使い、entity timeline を読みません。期間開始を解釈できない
+場合はすべての Work Item の history を、`updatedAt` を解釈できない Work Item はその history を読みます。Read barrier の latest revision 確認も、
+history を読む Work Item だけに適用します（読まない Work Item は前後2回の canonical read の
+fingerprint 一致で変更がないことを確認します）。定期配信の runner も同じ選択を使います。
+
 1 query の上限は Team partition 100件、1 partition 10,000 Work Item、現在参照可能な Work Item
-合計10,000件、canonical entity timeline 500件、全timelineを通じた Audit page query 500回、
-返却されたAudit event合計10,000件、1 entityあたり100 pageです。
+合計10,000件、history を読む canonical entity timeline 500件、全timelineを通じた Audit page query
+500回、返却されたAudit event合計10,000件、1 entityあたり100 pageです。
 canonical identity と一致しない event は採用せず、query 数と返却event数の上限は消費します。
-501件以上の Work Item は history read 前に `413` で fail-fast します。
+期間開始以降に更新された Work Item が501件以上ある場合は history read 前に `413` で fail-fast します。
+Web は `413` を受けると、期間を短くするか Team / Project で絞り込むよう表示します。
 上限に達した場合は部分集計を成功扱いせず
 `413` で fail-closed に終了します。Partition数と合計Work Item上限は、Team/Project filterで
 読み取るTeam partition数を減らして回避できます。1つのTeam自体が10,000件を超える場合は、
@@ -126,6 +137,10 @@ Forecast は query / report の `forecastWeighting: "effort"` で、完了した
 残工数（記録された残工数、なければ見積）の合計 `remainingEffortHours` から完了日を予測します。この場合の
 `dailyThroughput` は 1 日あたりの見積時間です。`weighting` と `forecastWeighting` は query hash、snapshot、
 evidence、定期配信の hash に含まれます。
+
+Software factory の Run の成功率・手戻り率・工程別の滞在時間は、まだ Analytics engine の metric ではなく、
+Factory board の期間サマリーとして別 API で計算します。定義は
+[Software factory の「期間サマリー」](software-factory.md#期間サマリーanalytics) を参照してください。
 
 ## Timezone and date boundaries
 

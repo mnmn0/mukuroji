@@ -2191,6 +2191,7 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
         'OAuth app does not allow the client_credentials grant.',
       )
     }
+    await request.admitVerifiedClient?.({ oauthAppId: oauthApp.id })
     const scopes = request.scopes === undefined
       ? [...oauthApp.scopes]
       : readScopes(request.scopes)
@@ -7458,11 +7459,13 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
         UpdateExpression:
           'SET entryType = :entryType, #value = if_not_exists(#value, :value), ' +
           'expiresAt = :expiresAt, #version = if_not_exists(#version, :zero) + :one ' +
-          'ADD consumed :cost',
+          'ADD #consumed :cost',
         ConditionExpression:
-          'attribute_not_exists(consumed) OR ' +
-          '(#value.#limit = :limit AND #value.#resetAt = :resetAt AND consumed <= :maximumBefore)',
+          'attribute_not_exists(#consumed) OR ' +
+          '(#value.#limit = :limit AND #value.#resetAt = :resetAt AND #consumed <= :maximumBefore)',
+        // CONSUMED is a DynamoDB reserved word, so the counter is referenced by alias.
         ExpressionAttributeNames: {
+          '#consumed': 'consumed',
           '#value': 'value',
           '#limit': 'limit',
           '#resetAt': 'resetAt',

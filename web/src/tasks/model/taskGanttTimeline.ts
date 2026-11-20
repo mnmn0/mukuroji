@@ -146,6 +146,36 @@ export function resolveTaskGanttDateSpan(
   return { left, right: left + dayWidth }
 }
 
+/** Horizontal span of one non-working day on a timeline axis. */
+export type TaskGanttNonWorkingSpan = TaskGanttDateSpan & {
+  /** Non-working local date in `YYYY-MM-DD` form. */
+  date: string
+}
+
+/**
+ * Lists the day columns that fall on non-working days, so the chart can shade them.
+ *
+ * Only single-day columns are listed: a week, month, or quarter column mixes working and
+ * non-working days, so shading it would hide which days are working.
+ *
+ * @param axis - Timeline columns and their width.
+ * @param isWorkingDate - Tells whether a local date is a working day.
+ * @returns The span of every non-working day column, in timeline order.
+ */
+export function listTaskGanttNonWorkingSpans(
+  axis: TaskGanttTimelineAxis,
+  isWorkingDate: (date: string) => boolean,
+): TaskGanttNonWorkingSpan[] {
+  return axis.columns.flatMap((column, index) =>
+    column.startDate === column.endDate && !isWorkingDate(column.startDate)
+      ? [{
+          date: column.startDate,
+          left: index * axis.columnWidth,
+          right: (index + 1) * axis.columnWidth,
+        }]
+      : [])
+}
+
 /**
  * Places one row on the progress line (イナズマ線).
  *

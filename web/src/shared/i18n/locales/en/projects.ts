@@ -50,7 +50,7 @@ export const projectsMessages = {
   'projects.directory.archive.label': 'Archive {name}',
   'projects.directory.archive.title': 'Archive project',
   'projects.directory.archive.description':
-    'Archive {name} and hide it from the directory and sidebar. It cannot currently be restored from this screen.',
+    'Archive {name} and hide it from the directory and sidebar. You can restore it under Settings, Teams and projects.',
   'projects.directory.archive.cancel': 'Cancel',
   'projects.directory.archive.confirm': 'Archive',
   'projects.directory.archive.saving': 'Archiving',
@@ -161,6 +161,30 @@ export const projectsMessages = {
   'projects.overview.error.planning': 'Planning data could not be loaded, so health and milestones are not shown.',
   'projects.overview.error.members': 'Members could not be loaded.',
   'projects.overview.error.membersDenied': 'Your Project role cannot view the member list. Ask a Project manager if you need it.',
+  'projects.administration.title': 'Teams and projects',
+  'projects.administration.description': 'Rename, reorder, and restore archived teams and projects. IDs and URLs stay the same.',
+  'projects.administration.loading': 'Loading teams and projects…',
+  'projects.administration.loadError': 'Teams and projects could not be loaded.',
+  'projects.administration.retry': 'Reload',
+  'projects.administration.empty': 'There are no active teams.',
+  'projects.administration.nameJa': 'Japanese name',
+  'projects.administration.nameEn': 'English name (Japanese name if empty)',
+  'projects.administration.save': 'Save',
+  'projects.administration.cancel': 'Cancel',
+  'projects.administration.renameShort': 'Rename',
+  'projects.administration.rename': 'Rename {name}',
+  'projects.administration.moveUp': 'Move {name} up',
+  'projects.administration.moveDown': 'Move {name} down',
+  'projects.administration.archived': 'Archived',
+  'projects.administration.archivedEmpty': 'There are no archived teams or projects.',
+  'projects.administration.archivedTeam': 'Team. Restoring it shows its projects again as they were.',
+  'projects.administration.archivedProject': 'Project of {team}',
+  'projects.administration.restoreShort': 'Restore',
+  'projects.administration.restore': 'Restore {name}',
+  'projects.administration.restoring': 'Restoring',
+  'projects.administration.error.action': 'The change could not be saved. Try again later.',
+  'projects.administration.error.conflict': 'Another change got there first. The list was reloaded; try again.',
+  'projects.administration.error.cleanupPending': 'The archive is still being cleaned up. Try restoring again in a few minutes.',
 } as const satisfies Record<
   Extract<
     MessageKey,
@@ -169,6 +193,7 @@ export const projectsMessages = {
     | `projects.lifecycle.${string}`
     | `projects.charter.${string}`
     | `projects.overview.${string}`
+    | `projects.administration.${string}`
   >,
   string
 >

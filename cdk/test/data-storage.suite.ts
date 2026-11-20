@@ -6,6 +6,10 @@ import {
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
+import {
+  COST_ALLOCATION_TAG_KEY,
+  COST_ALLOCATION_TAG_VALUE,
+} from '../lib/aspects/cost-allocation-tags';
 
 test('stateful resources keep pinned logical IDs and enable retain with PITR', () => {
   const template = synthesizedTemplate;
@@ -65,6 +69,20 @@ test('stateful resources keep pinned logical IDs and enable retain with PITR', (
           { AttributeName: 'retentionDueAt', KeyType: 'RANGE' },
         ],
         Projection: { ProjectionType: 'KEYS_ONLY' },
+      }),
+    ]),
+  }));
+
+  // The Factory board reads finished runs by Team and finish time without scanning older runs.
+  expect(resources.AgentRunsTableB0DA56A7.Properties).toEqual(expect.objectContaining({
+    GlobalSecondaryIndexes: expect.arrayContaining([
+      expect.objectContaining({
+        IndexName: 'FinishedRunIndex',
+        KeySchema: [
+          { AttributeName: 'finishedRunPartition', KeyType: 'HASH' },
+          { AttributeName: 'finishedRunSortKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'INCLUDE', NonKeyAttributes: ['runId', 'workItemId', 'outcome', 'finishedAt'] },
       }),
     ]),
   }));
@@ -479,6 +497,7 @@ test('planning data uses retained storage with a sparse update schedule due inde
       PointInTimeRecoverySpecification: {
         PointInTimeRecoveryEnabled: true,
       },
+      Tags: [{ Key: COST_ALLOCATION_TAG_KEY, Value: COST_ALLOCATION_TAG_VALUE }],
     },
     UpdateReplacePolicy: 'Retain',
     DeletionPolicy: 'Retain',
@@ -522,6 +541,7 @@ test('developer platform uses a retained TTL table with a lookup GSI', () => {
         AttributeName: 'expiresAt',
         Enabled: true,
       },
+      Tags: [{ Key: COST_ALLOCATION_TAG_KEY, Value: COST_ALLOCATION_TAG_VALUE }],
     },
     UpdateReplacePolicy: 'Retain',
     DeletionPolicy: 'Retain',
@@ -624,12 +644,19 @@ test('file bucket is private durable and scoped for direct browser transfers', (
   const webDistributionLogicalId = Object.keys(
     template.findResources('AWS::CloudFront::Distribution'),
   )[0];
-  const webOrigins = [{
+  const distributionOrigin = {
     'Fn::Join': ['', [
       'https://',
       { 'Fn::GetAtt': [webDistributionLogicalId, 'DomainName'] },
     ]],
-  }];
+  };
+  const webOrigins = {
+    'Fn::If': [
+      'WebCustomDomainConfigured',
+      [{ 'Fn::Join': ['', ['https://', { Ref: 'WebDomainName' }]] }, distributionOrigin],
+      [distributionOrigin],
+    ],
+  };
 
   template.hasResourceProperties('AWS::S3::Bucket', {
     BucketEncryption: {
@@ -940,6 +967,14 @@ test('collaboration notifications and realtime sessions use production-safe Dyna
         KeySchema: [
           { AttributeName: 'slackQueueShard', KeyType: 'HASH' },
           { AttributeName: 'slackNextAttemptAt', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      }),
+      Match.objectLike({
+        IndexName: 'EmailDeliveryIndex',
+        KeySchema: [
+          { AttributeName: 'emailQueueShard', KeyType: 'HASH' },
+          { AttributeName: 'emailNextAttemptAt', KeyType: 'RANGE' },
         ],
         Projection: { ProjectionType: 'KEYS_ONLY' },
       }),

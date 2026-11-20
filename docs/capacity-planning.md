@@ -27,11 +27,11 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 
 ## Resource requests and assignments
 
-`ResourceRequest` は project、role、skill、期間、requested effort、confidential flag を持ちます。assignment の allocation 合計に応じて `open`、`partially-filled`、`filled` を導出します。
+`ResourceRequest` は project、role、skill、期間、requested effort、confidential flag を持ちます。assignment の allocation 合計に応じて `open`、`partially-filled`、`filled` を導出します。Team manager は（Project 付きの request は、その Project の manager でもある場合に） `PATCH /api/teams/:teamId/workload/requests/:requestId` で title、role、skill、期間、requested effort、confidential flag を変更し、`status: "canceled"` で取り消せます。request の `expectedRevision` と Team の `expectedTeamRevision` を検証し、stale write は `409` で拒否します。取消は、その request を埋める assignment がすべて `canceled` のときだけ受け付け（残っていれば `409 ResourceRequestHasActiveAssignments`）、取り消した request は変更できず、新しい assignment の追加や紐づく assignment の再有効化も `409 ResourceRequestCanceled` で拒否します。confidential な request は、confidential を見られない manager には `404` を返します。
 
 `ResourceAssignment` は member、project / Work Item（必要に応じて Cycle / recurring-work の識別子も保持）、期間、allocation、planned effort、status を持ちます。drag/drop の reschedule / reassign は assignment の `expectedRevision` と Team の `expectedTeamRevision` を同時に検証し、stale write を `409` で拒否します。`POST /api/teams/:teamId/workload/what-if` は同じ計算を使いますが保存しません。
 
-Team member 画面では、稼働プロファイル、time off、resource request、assignment の作成と what-if preview を実行できます。保存済み assignment は元の期間を保ったまま heatmap のセル間で drag/drop して reschedule / reassign できます。assignment の詳細メニューにはキーボードで実行できる移動フォームもあります。
+Team member 画面では、稼働プロファイル、time off、resource request、assignment の作成と what-if preview を実行できます。resource request の一覧では、status と request ID を確認し、request を編集・取消できます。保存済み assignment は元の期間を保ったまま heatmap のセル間で drag/drop して reschedule / reassign できます。assignment の詳細メニューにはキーボードで実行できる移動フォームもあります。
 
 ## Visibility
 
@@ -48,6 +48,7 @@ Team member 画面では、稼働プロファイル、time off、resource reques
 - `PUT /api/teams/:teamId/workload/profiles/:memberId`
 - `PUT /api/teams/:teamId/workload/profiles/:memberId/time-off/:timeOffId`
 - `POST /api/teams/:teamId/workload/requests`
+- `PATCH /api/teams/:teamId/workload/requests/:requestId`
 - `POST /api/teams/:teamId/workload/assignments`
 - `PATCH /api/teams/:teamId/workload/assignments/:assignmentId`
 - `POST /api/teams/:teamId/workload/what-if`

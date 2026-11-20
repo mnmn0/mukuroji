@@ -123,6 +123,20 @@ describe('time tracking periods', () => {
     expect(week.to).toBe('2026-11-15T15:00:00.000Z')
   })
 
+  test('starts weeks on the Workspace week start day', () => {
+    // 2026-11-12 is a Thursday.
+    expect(resolveWeekStart('2026-11-12', undefined, 0)).toBe('2026-11-08')
+    expect(resolveWeekStart('2026-11-08', undefined, 0)).toBe('2026-11-08')
+    expect(resolveWeekStart('2026-11-12', undefined, 6)).toBe('2026-11-07')
+    expect(resolveWeekStart('2026-11-12', undefined, 4)).toBe('2026-11-12')
+    expect(resolveWeekStart('2026-11-11', undefined, 4)).toBe('2026-11-05')
+    expect(shiftWeek('2026-11-08', 1, 0)).toBe('2026-11-15')
+    const sundayWeek = createWeekPeriod('2026-11-12', 0)
+    expect(sundayWeek.days).toEqual(['2026-11-08', '2026-11-09', '2026-11-10', '2026-11-11', '2026-11-12', '2026-11-13', '2026-11-14'])
+    expect(sundayWeek.from).toBe('2026-11-07T15:00:00.000Z')
+    expect(sundayWeek.to).toBe('2026-11-14T15:00:00.000Z')
+  })
+
   test('converts local inputs and formats durations', () => {
     expect(toInstantFromLocal('2026-11-10', '09:30')).toBe('2026-11-10T00:30:00.000Z')
     expect(toInstantFromLocal('2026-02-30', '09:30')).toBeUndefined()

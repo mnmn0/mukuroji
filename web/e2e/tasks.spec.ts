@@ -5098,6 +5098,74 @@ test.describe('authenticated task page', () => {
     )
   })
 
+  test('Issue #337: 新規 Work Item は Workspace の稼働曜日と休日で稼働日数を数える', async ({ page }) => {
+    const workingWeekdays = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+    await page.route('**/api/workspace/calendar-settings', async (route) => {
+      await route.fulfill({
+        json: {
+          fiscalYearStartMonth: 4,
+          weekStartDay: 1,
+          workingWeekdays,
+          holidays: ['2026-06-09', '2026-06-10'],
+        },
+      })
+    })
+    await setScheduleFixtureClock(page)
+    const calendarSettingsResponse = page.waitForResponse('**/api/workspace/calendar-settings')
+    await page.goto('/projects/refero/issues')
+    await calendarSettingsResponse
+
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await page.getByRole('button', {
+      name: '2026-06-08 を始点または終点にして期間を作成',
+    }).click()
+    await page.getByRole('button', {
+      name: '2026-06-13 を始点または終点にして期間を作成',
+    }).click()
+
+    const createTaskForm = page.getByTestId('create-task-form')
+    await createTaskForm.locator('input[name="title"]').fill('Workspace calendar task')
+    await createTaskForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+    const createRequest = page.waitForRequest((request) =>
+      request.method() === 'POST' && /\/api\/teams\/[^/]+\/issues$/u.test(new URL(request.url()).pathname))
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    // 6/8–6/13 has six days: the Workspace holidays 6/9 and 6/10 are skipped and Saturday 6/13
+    // counts, so four working days instead of the Monday-to-Friday default's five.
+    const body: unknown = (await createRequest).postDataJSON()
+    expect(body).toMatchObject({
+      schedule: {
+        calendarPolicy: { holidays: ['2026-06-09', '2026-06-10'], timeZone: 'Asia/Tokyo', workingWeekdays },
+        durationDays: 4,
+        endDate: '2026-06-13',
+        mode: 'date-range',
+        startDate: '2026-06-08',
+      },
+    })
+  })
+
+  test('Issue #337: 稼働カレンダーを取得できないときは既定で扱うことを示し再読み込みできる', async ({ page }) => {
+    let calendarReads = 0
+    await page.route('**/api/workspace/calendar-settings', async (route) => {
+      calendarReads += 1
+      if (calendarReads === 1) {
+        await route.fulfill({ status: 500, json: { message: 'unavailable' } })
+        return
+      }
+      await route.fulfill({
+        json: { fiscalYearStartMonth: 1, weekStartDay: 1, workingWeekdays: ['monday'], holidays: [] },
+      })
+    })
+    await setScheduleFixtureClock(page)
+    await page.goto('/projects/refero/issues')
+
+    const calendarError = page.getByTestId('project-workspace-calendar-error')
+    await expect(calendarError).toContainText('Workspace の稼働カレンダーを取得できませんでした。')
+    await calendarError.getByRole('button', { name: 'もう一度読み込む' }).click()
+    await expect(calendarError).toHaveCount(0)
+    expect(calendarReads).toBe(2)
+  })
+
   test('Issue #188: schedule preview の permission error は理由を表示し更新しない', async ({ page }) => {
     await setScheduleFixtureClock(page)
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
@@ -11735,6 +11803,25 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => analyticsState.queryInputs.at(-1)?.widgets.map(
       (widget) => widget.id,
     )).toEqual(analyticsReportFixtures[0].widgets.map((widget) => widget.id))
+  })
+
+  test('Analyticsの集計上限を超えたときは対象の絞り込み方を表示する', async ({ page }) => {
+    await mockAnalyticsReportsPage(page)
+    await page.route('**/api/analytics/query', async (route) => {
+      await route.fulfill({
+        status: 413,
+        json: {
+          code: 'AnalyticsHistoryLimitExceeded',
+          message: 'Analytics history requires more than 500 entity timeline queries. Narrow the report scope.',
+        },
+      })
+    })
+
+    await page.goto('/reports')
+
+    await expect(page.getByRole('alert')).toContainText(
+      '集計対象が上限を超えました。期間を短くするか、Team や Project で絞り込んでください。',
+    )
   })
 
   test('Analyticsの非canonical queryは現行URLへ戻して表示を継続する', async ({ page }) => {

@@ -319,13 +319,20 @@ function queryPlanningPage(
  * @returns The client, its mutable rows, every Query input, every transaction it wrote, and a
  * control whose `rejectAuthorizationAtWrite` cancels that write (1-based) on its
  * `workspace-access` condition checks, as DynamoDB does when the caller's membership changed.
+ * The control's `advanceWorkItemRevisionOnMetaRead` advances META the way a canonical Work Item
+ * write does right after that strong META read (1-based), and `readMeta` returns the stored row.
  */
 function createFakePlanningTable(
   rows: Record<string, unknown>[],
   pageSize = 1_000_000,
   sharesRevisionWithWorkItems = false,
 ) {
-  const control = { rejectAuthorizationAtWrite: 0 }
+  let metaReads = 0
+  const control = {
+    rejectAuthorizationAtWrite: 0,
+    advanceWorkItemRevisionOnMetaRead: new Set<number>(),
+    readMeta: () => ({ ...meta }),
+  }
   let meta: Record<string, unknown> = {
     workspaceId: 'FENCE#workspace-1',
     recordKey: 'META',
@@ -346,7 +353,18 @@ function createFakePlanningTable(
       if (command.constructor.name === 'GetCommand') {
         const key = command.input.Key
         if (typeof key !== 'object' || key === null || !('recordKey' in key)) return {}
-        if ('workspaceId' in key && key.workspaceId === 'FENCE#workspace-1') return { Item: meta }
+        if ('workspaceId' in key && key.workspaceId === 'FENCE#workspace-1') {
+          const read = { ...meta }
+          metaReads += 1
+          if (control.advanceWorkItemRevisionOnMetaRead.has(metaReads)) {
+            meta = {
+              ...meta,
+              revision: Number(meta.revision) + 1,
+              sourceRevisionCount: Number(meta.sourceRevisionCount ?? 0) + 1,
+            }
+          }
+          return { Item: read }
+        }
         const item = rows.find((row) => row.recordKey === key.recordKey)
         return item ? { Item: { ...item } } : {}
       }
@@ -1718,10 +1736,66 @@ describe('planning domain', () => {
     })
   })
 
-  test('rejects an oversized atomic Cycle rollover before changing the source', async () => {
+  test('rolls over more than one batch of incomplete Work Items across calls', async () => {
     const workItemState: PlanningWorkItemState = {
       workItems: Array.from({ length: 50 }, (_, index) =>
         createWorkItem(`work-${index}`, 'unstarted')
+      ),
+    }
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create(
+      'workspace-1',
+      createCycleInput('cycle-source', 0, { projectId: 'project-1', capacity: 50 }),
+      workItemState,
+    )
+    await client.create(
+      'workspace-1',
+      createCycleInput('cycle-target', 1, { projectId: 'project-1', capacity: 50 }),
+      workItemState,
+    )
+    await client.update('workspace-1', 'cycle-target', {
+      expectedRevision: 2,
+      patch: { baseline: NEXT_CYCLE_RANGE, forecast: NEXT_CYCLE_RANGE },
+    }, workItemState)
+    for (let index = 0; index < workItemState.workItems.length; index += 1) {
+      await client.putWorkItemLink('workspace-1', {
+        teamId: 'team-1',
+        workItemId: `work-${index}`,
+        cycleId: 'cycle-source',
+        goalIds: [],
+        expectedRevision: index + 3,
+      }, workItemState)
+    }
+
+    const first = await client.rolloverCycle('workspace-1', 'cycle-source', {
+      targetCycleId: 'cycle-target',
+      expectedRevision: 53,
+    }, workItemState)
+    expect(first.movedWorkItemIds).toHaveLength(49)
+    expect(first.remainingWorkItemCount).toBe(1)
+    expect(getEntity(first.planning.entities, 'cycle-source').status).not.toBe('completed')
+
+    const second = await client.rolloverCycle('workspace-1', 'cycle-source', {
+      targetCycleId: 'cycle-target',
+      expectedRevision: 54,
+    }, workItemState)
+    expect(second.movedWorkItemIds).toHaveLength(1)
+    expect(second.remainingWorkItemCount).toBe(0)
+    expect(getEntity(second.planning.entities, 'cycle-source').status).toBe('completed')
+    expect(second.planning.workItemLinks).toHaveLength(50)
+    for (const link of second.planning.workItemLinks) {
+      expect(link).toMatchObject({
+        cycleId: 'cycle-target',
+        carriedOverFromCycleId: 'cycle-source',
+        carriedOverAt: NOW.toISOString(),
+      })
+    }
+  })
+
+  test('rejects a completing rollover that must guard more Work Items than one transaction holds', async () => {
+    const workItemState: PlanningWorkItemState = {
+      workItems: Array.from({ length: 50 }, (_, index) =>
+        createWorkItem(`work-${index}`, 'completed')
       ),
     }
     const client = new InMemoryPlanningClient(() => NOW)
@@ -4482,6 +4556,70 @@ describe('planning persistence', () => {
     for (const write of writes) {
       expect((write.TransactItems as unknown[]).length).toBeLessThanOrEqual(100)
     }
+  })
+
+  test('records Work Item counters on META and rebases Planning edits over them', async () => {
+    const { client, control, writes } = createFakePlanningTable([createStoredCycle('cycle-1')])
+
+    await client.update('workspace-1', 'cycle-1', {
+      expectedRevision: 1,
+      patch: { title: 'Renamed' },
+    }, EMPTY_WORK_ITEMS)
+    expect(control.readMeta()).toMatchObject({
+      revision: 2,
+      sourceRevisionCount: 0,
+      structureRevision: 2,
+      structureSourceRevisionCount: 0,
+    })
+
+    // A Work Item write lands while the edit reads the graph: the read retries at the new
+    // revision, and the edit rebases over it because only a Work Item advanced META.
+    const metaReadsBeforeEdit = 2
+    control.advanceWorkItemRevisionOnMetaRead.add(metaReadsBeforeEdit + 1)
+    const moved = await client.update('workspace-1', 'cycle-1', {
+      expectedRevision: 2,
+      patch: { title: 'Renamed again' },
+    }, EMPTY_WORK_ITEMS)
+
+    expect(moved.planning.revision).toBe(4)
+    expect(control.readMeta()).toMatchObject({
+      revision: 4,
+      sourceRevisionCount: 1,
+      structureRevision: 4,
+      structureSourceRevisionCount: 1,
+    })
+    expect(writes).toHaveLength(2)
+    expect(await client.isWorkItemOnlyRevisionAdvance('workspace-1', 3, 4)).toBe(false)
+  })
+
+  test('rejects META counters that are not non-negative integers', async () => {
+    const commands: string[] = []
+    const documentClient = {
+      async send(command: { constructor: { name: string } }) {
+        commands.push(command.constructor.name)
+        return {
+          Item: {
+            workspaceId: 'FENCE#workspace-1',
+            recordKey: 'META',
+            entryType: 'planning-meta',
+            schemaVersion: 1,
+            revision: 3,
+            sourceRevisionCount: -1,
+          },
+        }
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    await expect(client.isWorkItemOnlyRevisionAdvance('workspace-1', 2, 3))
+      .rejects.toMatchObject({ status: 503, code: 'InvalidPlanningData' })
+    expect(commands).toEqual(['GetCommand'])
   })
 
   test('moves an archived Goal and its links out of the live graph and restores them', async () => {

@@ -12,6 +12,7 @@ import type {
   CreateResourceAssignmentInput,
   CreateResourceRequestInput,
   UpdateResourceAssignmentInput,
+  UpdateResourceRequestInput,
   WorkloadCell,
   WorkloadHoliday,
   WorkloadMemberProfile,
@@ -444,6 +445,77 @@ export class CapacityPlanningService {
     return clone(requireRequest(state, requestId))
   }
 
+  /**
+   * Changes or cancels a resource request using optimistic concurrency.
+   *
+   * A request can be canceled only after every assignment that fills it is canceled, so a
+   * canceled request never keeps reserving capacity. Canceled requests are read-only.
+   *
+   * @param input - Changed request fields, an optional cancel status, and expected revisions.
+   * @param access - Whether the actor may see confidential requests; hidden requests are reported as missing.
+   * @returns The saved request.
+   */
+  async updateRequest(
+    input: UpdateResourceRequestInput,
+    access: {
+      /** Whether the actor may read and change confidential requests. */
+      canViewConfidential: boolean
+    },
+  ): Promise<ResourceRequest> {
+    validateIdentifier(input.workspaceId, 'Workspace ID')
+    validateIdentifier(input.teamId, 'Team ID')
+    validateIdentifier(input.requestId, 'Request ID')
+    return await this.mutateState(input.workspaceId, input.teamId, input.expectedTeamRevision, (state) => {
+      const current = requireRequest(state, input.requestId)
+      if (current.confidential && !access.canViewConfidential) {
+        throw new CapacityPlanningError(404, 'ResourceRequestNotFound', 'The resource request was not found.')
+      }
+      if (current.revision !== input.expectedRevision) {
+        throw new CapacityPlanningError(409, 'ResourceRequestRevisionConflict', 'The resource request was changed by another request.')
+      }
+      if (current.status === 'canceled') {
+        throw new CapacityPlanningError(409, 'ResourceRequestCanceled', 'A canceled resource request cannot be changed.')
+      }
+      const title = input.title === undefined ? current.title : input.title.trim()
+      if (!title) throw new CapacityPlanningError(400, 'InvalidResourceRequest', 'A resource request title is required.')
+      const fromDate = input.fromDate ?? current.fromDate
+      const toDate = input.toDate ?? current.toDate
+      validateDateRange(fromDate, toDate)
+      const requestedMinutes = input.requestedMinutes ?? current.requestedMinutes
+      validateNonNegativeInteger(requestedMinutes, 'Requested minutes')
+      if (input.status === 'canceled' && state.assignments.some((assignment) =>
+        assignment.requestId === current.id && assignment.status !== 'canceled'
+      )) {
+        throw new CapacityPlanningError(
+          409,
+          'ResourceRequestHasActiveAssignments',
+          'Cancel the assignments that fill this resource request before canceling it.',
+        )
+      }
+      const role = input.role === undefined ? current.role : input.role.trim() || undefined
+      const timestamp = this.now().toISOString()
+      const next: ResourceRequest = {
+        ...current,
+        title,
+        skillIds: input.skillIds === undefined
+          ? current.skillIds
+          : normalizeStringList(input.skillIds, 'Request skills', MAX_SKILLS),
+        fromDate,
+        toDate,
+        requestedMinutes,
+        confidential: input.confidential ?? current.confidential,
+        ...(input.status === 'canceled' ? { status: 'canceled' } : {}),
+        revision: current.revision + 1,
+        updatedAt: timestamp,
+      }
+      if (role) next.role = role
+      else delete next.role
+      replaceById(state.requests, next, 'id')
+      refreshRequestStatuses(state, timestamp)
+      return clone(requireRequest(state, next.id))
+    })
+  }
+
   /** Creates an assignment for a profile and optionally fulfills a request. */
   async createAssignment(input: CreateResourceAssignmentInput): Promise<ResourceAssignment> {
     validateAssignmentFields(input)
@@ -453,6 +525,9 @@ export class CapacityPlanningService {
       }
       requireProfile(state, input.memberId)
       const request = input.requestId ? requireRequest(state, input.requestId) : undefined
+      if (request?.status === 'canceled' && input.status !== 'canceled') {
+        throw new CapacityPlanningError(409, 'ResourceRequestCanceled', 'A canceled resource request cannot receive assignments.')
+      }
       if (request?.projectId && input.projectId && request.projectId !== input.projectId) {
         throw new CapacityPlanningError(400, 'InvalidResourceAssignment', 'The assignment Project must match its resource request.')
       }
@@ -504,6 +579,14 @@ export class CapacityPlanningService {
       if (!current) throw new CapacityPlanningError(404, 'ResourceAssignmentNotFound', 'The resource assignment was not found.')
       if (current.revision !== input.expectedRevision) {
         throw new CapacityPlanningError(409, 'ResourceAssignmentRevisionConflict', 'The resource assignment was changed by another request.')
+      }
+      const status = input.status ?? current.status
+      if (
+        current.requestId &&
+        status !== 'canceled' &&
+        state.requests.some((request) => request.id === current.requestId && request.status === 'canceled')
+      ) {
+        throw new CapacityPlanningError(409, 'ResourceRequestCanceled', 'An assignment for a canceled resource request cannot be reactivated.')
       }
       const memberId = input.memberId ?? current.memberId
       requireProfile(state, memberId)
@@ -1143,6 +1226,7 @@ function requireRequest(state: CapacityPlanningState, requestId: string): Resour
 /** Refreshes request status from the allocation committed against it. */
 function refreshRequestStatuses(state: CapacityPlanningState, timestamp: string): void {
   for (const request of state.requests) {
+    if (request.status === 'canceled') continue
     const assigned = state.assignments
       .filter((assignment) => assignment.requestId === request.id && assignment.status !== 'canceled')
       .reduce((total, assignment) => total + assignment.allocationMinutes, 0)

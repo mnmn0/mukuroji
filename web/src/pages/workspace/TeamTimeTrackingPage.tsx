@@ -1,11 +1,13 @@
 import { useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
+import { PersonalWeeklyReportContainer } from '../../features/time-tracking/ui/PersonalWeeklyReportContainer'
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
 import { TimeReportContainer } from '../../features/time-tracking/ui/TimeReportContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
 import { selectTimeEntryWorkItemChoices } from '../../features/time-tracking/model/timeEntryWorkItemOptions'
 import { resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
+import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { resolveTimeReportGroupBy, resolveTimeReportRange } from '../../features/time-tracking/model/timeReport'
 import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import type { ProjectDirectoryProject } from '../../projects/api'
@@ -19,8 +21,8 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 const emptyTeamProjects: ProjectDirectoryProject[] = []
 
 /**
- * Renders a Team's time tracking: the member's weekly timesheet, the manager's approval queue, and
- * the Team report with its CSV export and budgets.
+ * Renders a Team's time tracking: the member's weekly timesheet and weekly report, the manager's
+ * approval queue, and the Team report with its CSV export and budgets.
  *
  * The view, week, and report period live in the URL so a reload or shared link opens the same view.
  *
@@ -33,8 +35,9 @@ export function TeamTimeTrackingPage() {
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const viewParam = searchParams.get('view')
-  const view: TimeTrackingView = viewParam === 'approvals' || viewParam === 'report' ? viewParam : 'timesheet'
-  const weekStart = resolveWeekStart(searchParams.get('week'))
+  const view: TimeTrackingView = viewParam === 'approvals' || viewParam === 'report' || viewParam === 'weekly-report'
+    ? viewParam
+    : 'timesheet'
   const reportFrom = searchParams.get('from')
   const reportTo = searchParams.get('to')
   const reportRange = useMemo(() => resolveTimeReportRange(reportFrom, reportTo), [reportFrom, reportTo])
@@ -42,14 +45,24 @@ export function TeamTimeTrackingPage() {
   const activeTeam = workspace.teams.find((team) => team.id === teamId)
   const enabled = workspace.canLoadWorkspaceData && activeTeam !== undefined
   const accessToken = enabled ? workspace.accessToken : undefined
+  const calendarSettings = useWorkspaceCalendarSettings(accessToken, enabled)
+  const weekStartDay = calendarSettings.settings?.weekStartDay
+  const requestedWeek = searchParams.get('week') ?? undefined
+  const weekStart = resolveWeekStart(requestedWeek, undefined, weekStartDay)
+  // Until the week start is known, view tabs keep the requested week as is, so a provisional
+  // Monday-based date never replaces it in the URL.
+  const linkWeek = calendarSettings.settings ? weekStart : requestedWeek
   // Filtered on the server, so other Teams' Work Items cannot push the read past its size limit.
   const teamWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '' }), [teamId])
   const workItems = useWorkspaceWorkItems(accessToken, enabled, false, teamWorkItemFilter)
+  // The weekly report lists only the member's own Work Items, filtered by the server.
+  const myWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '', involvement: 'mine' as const }), [teamId])
+  const myWorkItems = useWorkspaceWorkItems(accessToken, enabled && view === 'weekly-report', false, myWorkItemFilter)
   const projectMembers = useWorkspaceProjectMembers(
     accessToken,
     activeTeam?.id,
     activeTeam?.projects ?? emptyTeamProjects,
-    enabled && view !== 'timesheet',
+    enabled && (view === 'approvals' || view === 'report'),
   )
   const teamScope = useMemo(() => ({ kind: 'team' as const, teamId: teamId ?? '' }), [teamId])
   // The Team task-view list carries the server's effective write scopes, enterprise grants included.
@@ -87,9 +100,9 @@ export function TeamTimeTrackingPage() {
    * Opens a view and week through the URL.
    *
    * @param nextView - View to show.
-   * @param nextWeekStart - Monday of the week to show.
+   * @param nextWeekStart - First day of the week to show; undefined shows the current week.
    */
-  const open = (nextView: TimeTrackingView, nextWeekStart: string) => {
+  const open = (nextView: TimeTrackingView, nextWeekStart: string | undefined) => {
     void navigate(createTeamTimeTrackingPath(teamId ?? '', nextView, nextWeekStart), { replace: true })
   }
 
@@ -99,21 +112,21 @@ export function TeamTimeTrackingPage() {
    * @param weeks - Weeks to move.
    */
   const moveWeek = (weeks: number) => {
-    open(view, weeks === 0 ? resolveWeekStart(null) : shiftWeek(weekStart, weeks))
+    open(view, weeks === 0 ? resolveWeekStart(null, undefined, weekStartDay) : shiftWeek(weekStart, weeks, weekStartDay))
   }
 
   if (!teamId) return null
 
   return (
-    <WorkspaceRouteContent sessionErrors={[workItems.error, writeAccess.error, projectMembers.error]}>
+    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error]}>
       <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <TimeTrackingViewTabs
           getHref={(candidate) => candidate === 'report'
             ? createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
-            : createTeamTimeTrackingPath(teamId, candidate, weekStart)}
+            : createTeamTimeTrackingPath(teamId, candidate, linkWeek)}
           onSelect={(candidate) => { void navigate(candidate === 'report'
             ? createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
-            : createTeamTimeTrackingPath(teamId, candidate, weekStart), { replace: true }) }}
+            : createTeamTimeTrackingPath(teamId, candidate, linkWeek), { replace: true }) }}
           t={t}
           view={view}
         />
@@ -143,6 +156,39 @@ export function TeamTimeTrackingPage() {
             range={reportRange}
             teamId={teamId}
           />
+        ) : !calendarSettings.settings ? (
+          calendarSettings.error ? (
+            <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
+              <span>{t('timeTracking.page.calendarSettingsError')}</span>
+              <button
+                className="workbench-button-secondary min-h-8 px-3"
+                onClick={calendarSettings.retry}
+                type="button"
+              >
+                {t('timeTracking.page.calendarSettingsRetry')}
+              </button>
+            </div>
+          ) : (
+            // Weekly views are laid out only once the Workspace week start is known.
+            <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">
+              {t('timeTracking.page.calendarSettingsLoading')}
+            </p>
+          )
+        ) : view === 'weekly-report' ? (
+          <PersonalWeeklyReportContainer
+            accessToken={accessToken}
+            hasWorkItemError={Boolean(myWorkItems.error)}
+            key={`${teamId}:weekly-report:${weekStart}`}
+            locale={workspace.locale}
+            memberKey={workspace.userKey}
+            onMoveWeek={moveWeek}
+            onRetryWorkItems={() => { void myWorkItems.mutate().catch(() => undefined) }}
+            teamId={teamId}
+            weekStart={weekStart}
+            weekStartDay={calendarSettings.settings.weekStartDay}
+            workItems={myWorkItems.data}
+            workItemTitles={workItemTitles}
+          />
         ) : view === 'approvals' ? (
           <TimeApprovalQueueContainer
             accessToken={accessToken}
@@ -152,6 +198,7 @@ export function TeamTimeTrackingPage() {
             onMoveWeek={moveWeek}
             teamId={teamId}
             weekStart={weekStart}
+            weekStartDay={calendarSettings.settings.weekStartDay}
             workItemTitles={workItemTitles}
           />
         ) : (
@@ -163,6 +210,7 @@ export function TeamTimeTrackingPage() {
             onMoveWeek={moveWeek}
             teamId={teamId}
             weekStart={weekStart}
+            weekStartDay={calendarSettings.settings.weekStartDay}
             isLoadingWorkItemOptions={isLoadingWorkItemOptions}
             workItemOptions={workItemOptions}
             workItemTitles={workItemTitles}
