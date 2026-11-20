@@ -794,6 +794,11 @@ export type EnterpriseMemberRoleAssignmentDeleteOptions = {
 
 /** Conditions checked atomically when a direct member assignment is created. */
 export type EnterpriseMemberRoleAssignmentCreateOptions = {
+  /**
+   * Effective permissions of the caller. The assigned role, read from the state being written,
+   * must not hold any permission outside them.
+   */
+  callerPermissions?: readonly EnterprisePermissionId[]
   /** Permissions that the assigned role must not hold, read from the state being written. */
   forbiddenPermissions?: readonly EnterprisePermissionId[]
 }
@@ -801,7 +806,7 @@ export type EnterpriseMemberRoleAssignmentCreateOptions = {
 /** Conditions checked atomically when a custom role is saved. */
 export type EnterpriseCustomRoleUpdateOptions = {
   /**
-   * Permissions that the role must not gain while a direct member assignment references it, so
+   * Permissions that the role must not newly gain while a direct member assignment references it, so
    * editing a role cannot grant what assigning it directly would be refused.
    */
   forbiddenMemberAssignmentPermissions?: readonly EnterprisePermissionId[]

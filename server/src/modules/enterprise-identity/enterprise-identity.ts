@@ -796,9 +796,11 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
           'Custom role name must be unique in the Workspace.',
         )
       }
+      // Only permissions the edit adds are protected, so admins can still maintain the role.
       if (
         role.permissions.some((permission) =>
-          options.forbiddenMemberAssignmentPermissions?.includes(permission)
+          options.forbiddenMemberAssignmentPermissions?.includes(permission) &&
+          !existing?.permissions.includes(permission)
         ) &&
         state.roleAssignments.some((assignment) =>
           assignment.roleId === role.roleId &&
@@ -1011,10 +1013,22 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
           'Role assignment references an unknown role.',
         )
       }
+      const rolePermissions = resolveEnterpriseRolePermissions(
+        state.customRoles,
+        assignment.roleId,
+      )
+      const callerPermissions = options.callerPermissions
       if (
-        resolveEnterpriseRolePermissions(state.customRoles, assignment.roleId)
-          .some((permission) => options.forbiddenPermissions?.includes(permission))
+        callerPermissions &&
+        rolePermissions.some((permission) => !callerPermissions.includes(permission))
       ) {
+        throw new EnterpriseIdentityError(
+          403,
+          'EnterpriseRoleAssignmentDenied',
+          'The selected role exceeds your effective permissions or is invalid for this scope.',
+        )
+      }
+      if (rolePermissions.some((permission) => options.forbiddenPermissions?.includes(permission))) {
         throw new EnterpriseIdentityError(
           403,
           'EnterpriseRoleAssignmentAdminProtected',

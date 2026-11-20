@@ -485,3 +485,79 @@ test('stops an admin from adding administrative permissions to a role assigned t
       .rejects.toMatchObject({ status: 403, code: 'EnterpriseRoleAssignmentAdminProtected' })
   })
 })
+
+test('checks the full grant ceiling against the role stored when the assignment is written', async () => {
+  const identity = new InMemoryEnterpriseIdentityClient()
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:reader',
+    name: 'Reader',
+    permissions: ['workspace.read', 'work-items.read', 'work-items.write'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: '2026-11-19T00:00:00.000Z',
+    updatedAt: '2026-11-19T00:00:00.000Z',
+  })
+  const assignment = {
+    workspaceId,
+    assignmentId: 'assignment-reader',
+    principalKind: 'member' as const,
+    principalId: 'sato@example.com',
+    roleId: 'custom:reader' as const,
+    scope: { workspaceId, kind: 'workspace' as const },
+    source: 'direct' as const,
+  }
+
+  await expect(identity.putMemberRoleAssignment(assignment, undefined, {
+    callerPermissions: ['workspace.read', 'work-items.read', 'members.manage'],
+  })).rejects.toMatchObject({ status: 403, code: 'EnterpriseRoleAssignmentDenied' })
+  expect((await identity.getSnapshot(workspaceId)).roleAssignments).toEqual([])
+  await expect(identity.putMemberRoleAssignment(assignment, undefined, {
+    callerPermissions: ['workspace.read', 'work-items.read', 'work-items.write'],
+  })).resolves.toMatchObject({ roleId: 'custom:reader' })
+})
+
+test('lets an admin keep maintaining an assigned role that already holds administrative permissions', async () => {
+  await withTestEnvironment(enterpriseEnvironment, async () => {
+    configureFakeProjectClients(true, { workspaceRole: 'admin' })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    const permissionIds = ['workspace.read' as const, 'members.read' as const, 'members.manage' as const]
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:desk',
+      name: 'Desk',
+      permissions: permissionIds,
+      guestAssignable: false,
+      revision: 1,
+      createdAt: '2026-11-19T00:00:00.000Z',
+      updatedAt: '2026-11-19T00:00:00.000Z',
+    })
+    // An owner assigned the role, so it already holds an administrative permission.
+    await identity.putMemberRoleAssignment({
+      workspaceId,
+      assignmentId: 'assignment-desk',
+      principalKind: 'member',
+      principalId: 'sato@example.com',
+      roleId: 'custom:desk',
+      scope: { workspaceId, kind: 'workspace' },
+      source: 'direct',
+    })
+
+    const impact = await sendAssignmentRequest(
+      '/api/enterprise/security/roles/custom%3Adesk/impact',
+      'POST',
+      { expectedVersion: 1, permissionIds },
+    )
+    const { impact: { confirmationToken } } = await impact.json() as {
+      impact: { confirmationToken: string }
+    }
+    const renamed = await sendAssignmentRequest(
+      '/api/enterprise/security/roles/custom%3Adesk',
+      'PUT',
+      { expectedVersion: 1, name: 'Member desk', permissionIds, impactConfirmationToken: confirmationToken },
+    )
+    expect(renamed.status).toBe(200)
+    expect((await identity.getSnapshot(workspaceId)).customRoles[0]?.name).toBe('Member desk')
+  })
+})

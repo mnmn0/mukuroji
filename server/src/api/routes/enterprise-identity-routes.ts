@@ -3767,7 +3767,7 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
         scopeType === 'workspace' ? undefined : readEnterpriseText(body?.scopeId, 'Scope ID'),
         typeof body?.scopeParentId === 'string' ? body.scopeParentId.trim() : undefined,
       )
-      // The role is re-checked in the stored state, so a concurrent role edit cannot slip through.
+      // The role's grant ceiling is re-checked in the stored state, so a concurrent role edit cannot slip through.
       const assignment = await workspaceDependencies.enterpriseIdentity.authorization
         .putMemberRoleAssignment({
           workspaceId: principal.directoryId,
@@ -3782,9 +3782,12 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           scope,
           source: 'direct',
         }, createWorkspaceMutationContext(c, principal, body, requestIdempotencyKey),
-        isEnterpriseOwnerLevelCaller(principal)
-          ? {}
-          : { forbiddenPermissions: [...enterpriseAdministrativePermissionIds] })
+        {
+          callerPermissions: principal.enterprisePermissions,
+          ...(isEnterpriseOwnerLevelCaller(principal)
+            ? {}
+            : { forbiddenPermissions: [...enterpriseAdministrativePermissionIds] }),
+        })
       return c.json({ assignment: toEnterpriseMemberRoleAssignmentView(assignment) }, 201)
     } catch (error) {
       return toEnterpriseIdentityBoundaryErrorResponse(c, error)

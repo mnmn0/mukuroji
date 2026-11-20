@@ -34,7 +34,8 @@ assignment の和集合と `workspace.read` だけで評価する（`includeWork
   持つ member を owner / admin に変える操作も拒否し、guest になった member の direct assignment は
   guest 可の role だけを評価する。
 - メンバーに direct assignment されている custom role に管理系 permission を足す編集も owner 相当だけに
-  許す。割り当て時の管理系 role の判定は、書き込む state の role 定義で再確認する。
+  許す。既に持つ管理系 permission を残したままの名前や説明の編集は妨げない。割り当て時は、caller が持たない
+  permission と管理系 permission を含まないことを、書き込む state の role 定義で再確認する。
 - 監査 event の public metadata では member を Workspace Audit の member 仮名（`memberId`）で示し、
   member key や email を残さない。
 - Built-in role に `workspace:portfolio-viewer`（全 Team・Project の読み取り）と
