@@ -52,6 +52,8 @@ export function getAuthSession() {
   // An expired access token is still a live session while a refresh token can renew it; the
   // authenticated fetch refreshes it before the next API request.
   if (entry.session.expiresAt <= Date.now() && !entry.session.refreshToken) {
+    // The session ends here rather than in clearAuthSession, so the input on screen is kept now.
+    preserveSessionDrafts(readAccessTokenSubject(entry.session.accessToken))
     entry.storage.removeItem(storageKey)
     markTabSignedOut()
     void clearAppBadgeAndNotifyTabs()

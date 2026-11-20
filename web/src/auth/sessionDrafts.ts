@@ -27,6 +27,8 @@ type SessionDraftReader = () => unknown
 type SessionDraftRegistration = {
   /** Identifies the input across page loads, such as the Work Item it belongs to. */
   key: string
+  /** Account that was signed in when the input mounted; only its drafts are kept for it. */
+  owner: string | undefined
   /** Reads the input's current unsaved value. */
   read: SessionDraftReader
 }
@@ -57,11 +59,17 @@ const retainedRegistrations = new Set<SessionDraftRegistration>()
  * Registers an input whose unsaved value is preserved when the session ends.
  *
  * @param key - Identifies the input across page loads.
+ * @param owner - Account signed in when the input mounted. The input is kept only when that
+ * account's session ends, so its text never moves to an account that signs in later.
  * @param read - Reads the current unsaved value; returning `undefined` keeps nothing.
  * @returns A function that removes the registration.
  */
-export function registerSessionDraft(key: string, read: SessionDraftReader): () => void {
-  const registration: SessionDraftRegistration = { key, read }
+export function registerSessionDraft(
+  key: string,
+  owner: string | undefined,
+  read: SessionDraftReader,
+): () => void {
+  const registration: SessionDraftRegistration = { key, owner, read }
   registrations.add(registration)
   return () => {
     registrations.delete(registration)
@@ -72,7 +80,7 @@ export function registerSessionDraft(key: string, read: SessionDraftReader): () 
       return
     }
     if (value === undefined) return
-    const retained: SessionDraftRegistration = { key, read: () => value }
+    const retained: SessionDraftRegistration = { key, owner, read: () => value }
     retainedRegistrations.add(retained)
     setTimeout(() => {
       retainedRegistrations.delete(retained)
@@ -90,26 +98,37 @@ export function registerSessionDraft(key: string, read: SessionDraftReader): () 
  * could not be withheld from another account later.
  */
 export function preserveSessionDrafts(owner: string | undefined) {
-  // Inputs that unmounted moments ago come first, so a mounted input of the same key wins.
-  const sources = [...retainedRegistrations, ...registrations]
+  const retained = [...retainedRegistrations]
   retainedRegistrations.clear()
-  if (!owner || sources.length === 0) return
-  const now = Date.now()
-  const stored = readStoredDrafts()
-  const drafts: Record<string, StoredSessionDraft> = stored?.owner === owner ? { ...stored.drafts } : {}
-  let preserved = false
-  for (const registration of sources) {
+  if (!owner) return
+  // Inputs that unmounted moments ago come first, so a mounted input of the same key wins,
+  // even when it is empty now.
+  const values = new Map<string, unknown>()
+  for (const registration of [...retained, ...registrations]) {
+    if (registration.owner !== owner) continue
     let value: unknown
     try {
       value = registration.read()
     } catch {
       continue
     }
-    if (value === undefined) continue
-    drafts[registration.key] = { savedAt: now, value }
-    preserved = true
+    values.set(registration.key, value)
   }
-  if (!preserved) return
+  if (values.size === 0) return
+  const now = Date.now()
+  const stored = readStoredDrafts()
+  const drafts: Record<string, StoredSessionDraft> = stored?.owner === owner ? { ...stored.drafts } : {}
+  for (const [key, value] of values) {
+    if (value === undefined) {
+      delete drafts[key]
+    } else {
+      drafts[key] = { savedAt: now, value }
+    }
+  }
+  if (Object.keys(drafts).length === 0) {
+    if (stored?.owner === owner) discardStoredDrafts()
+    return
+  }
   writeStoredDrafts({ owner, drafts })
 }
 
@@ -158,6 +177,13 @@ export function keepSessionDraftsOnlyFor(owner: string | undefined) {
  */
 export function discardSessionDrafts() {
   retainedRegistrations.clear()
+  discardStoredDrafts()
+}
+
+/**
+ * Removes the preserved drafts from this tab's sessionStorage.
+ */
+function discardStoredDrafts() {
   try {
     window.sessionStorage.removeItem(storageKey)
   } catch {

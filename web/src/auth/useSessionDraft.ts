@@ -41,9 +41,7 @@ export function useSessionDraft<Draft>({ key, value, parse, onRestore }: UseSess
   useEffect(() => {
     if (!key || restoredKeyRef.current === key) return
     restoredKeyRef.current = key
-    const session = readStoredAuthSession()
-    const owner = session ? readAccessTokenSubject(session.accessToken) : undefined
-    const preserved = takeSessionDraft(key, owner)
+    const preserved = takeSessionDraft(key, readTabAccountOwner())
     if (preserved === undefined) return
     const draft = parseRef.current(preserved)
     if (draft !== undefined) onRestoreRef.current(draft)
@@ -51,6 +49,16 @@ export function useSessionDraft<Draft>({ key, value, parse, onRestore }: UseSess
 
   useEffect(() => {
     if (!key) return undefined
-    return registerSessionDraft(key, () => valueRef.current)
+    return registerSessionDraft(key, readTabAccountOwner(), () => valueRef.current)
   }, [key])
+}
+
+/**
+ * Reads the account signed in to this tab, as the owner of its drafts.
+ *
+ * @returns The account's token subject, or `undefined` when the tab has no account it can name.
+ */
+function readTabAccountOwner(): string | undefined {
+  const session = readStoredAuthSession()
+  return session ? readAccessTokenSubject(session.accessToken) : undefined
 }

@@ -79,9 +79,13 @@ function signIn(accessToken: string): AuthSession {
  *
  * @param key - Input key.
  * @param read - Reads the input's value.
+ * @param owner - Account signed in when the input mounted.
+ * @returns A function that unmounts the input.
  */
-function register(key: string, read: () => unknown) {
-  unregister.push(registerSessionDraft(key, read))
+function register(key: string, read: () => unknown, owner: string | undefined = 'member-a') {
+  const remove = registerSessionDraft(key, owner, read)
+  unregister.push(remove)
+  return remove
 }
 
 beforeEach(() => {
@@ -135,7 +139,7 @@ test('signing in as another account removes the previous account’s input at on
 test('keeps input whose page unmounted just before the session was cleared', async () => {
   signIn(token('member-a', 'access-1'))
   // A route can swap the page for a loading state in the same commit that clears the session.
-  registerSessionDraft(commentKey, () => ({ bodyMarkdown: 'Unmounted moments ago', mentionMemberKeys: [] }))()
+  registerSessionDraft(commentKey, 'member-a', () => ({ bodyMarkdown: 'Unmounted moments ago', mentionMemberKeys: [] }))()
   clearAuthSession()
   expect(takeSessionDraft(commentKey, 'member-a')).toEqual({
     bodyMarkdown: 'Unmounted moments ago',
@@ -145,9 +149,45 @@ test('keeps input whose page unmounted just before the session was cleared', asy
   resetAuthSessionTabAccount()
   Reflect.set(globalThis, 'window', { localStorage: new MemoryStorage(), sessionStorage: new MemoryStorage() })
   signIn(token('member-a', 'access-2'))
-  registerSessionDraft(commentKey, () => ({ bodyMarkdown: 'Left long ago', mentionMemberKeys: [] }))()
+  registerSessionDraft(commentKey, 'member-a', () => ({ bodyMarkdown: 'Left long ago', mentionMemberKeys: [] }))()
   await Bun.sleep(1_100)
   clearAuthSession()
+  expect(takeSessionDraft(commentKey, 'member-a')).toBeUndefined()
+})
+
+test('keeps input when an expired session without a refresh token is found on read', () => {
+  const session = signIn(token('member-a', 'access-1'))
+  saveAuthSession({ ...session, expiresAt: Date.now() - 1, refreshToken: undefined })
+  register(commentKey, () => ({ bodyMarkdown: 'Expired while typing', mentionMemberKeys: [] }))
+
+  expect(getAuthSession()).toBeNull()
+
+  expect(takeSessionDraft(commentKey, 'member-a')).toEqual({
+    bodyMarkdown: 'Expired while typing',
+    mentionMemberKeys: [],
+  })
+})
+
+test('never keeps one account’s input that unmounted after sign-out for the next account', async () => {
+  const session = signIn(token('member-a', 'access-1'))
+  const unmount = register(commentKey, () => ({ bodyMarkdown: 'Member A text', mentionMemberKeys: [] }))
+  await signOutWithPushCleanup(session.accessToken, async () => undefined, 10, async () => undefined)
+  // The page goes away right after the sign-out, within the unmount window.
+  unmount()
+
+  signIn(token('member-b', 'access-2'))
+  clearAuthSession()
+
+  expect(takeSessionDraft(commentKey, 'member-b')).toBeUndefined()
+})
+
+test('an input that is empty now wins over its value from moments ago', () => {
+  signIn(token('member-a', 'access-1'))
+  register(commentKey, () => ({ bodyMarkdown: 'Old text', mentionMemberKeys: [] }))()
+  register(commentKey, () => undefined)
+
+  clearAuthSession()
+
   expect(takeSessionDraft(commentKey, 'member-a')).toBeUndefined()
 })
 
