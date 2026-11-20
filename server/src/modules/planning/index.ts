@@ -12,6 +12,8 @@ export {
   type PlanningCallerAuthorizationConditionCheck,
   type PlanningClient,
   type PlanningEntityAuthorizationReference,
+  type PlanningEntityCreation,
+  type PlanningEntityDuplication,
   type PlanningMutationTransaction,
   type PlanningMutationTransactionResult,
   type PlanningUpdateAnnotationTransactionResult,

@@ -58,6 +58,19 @@ DynamoDB client は、デコード済みの graph を META の `revision` と `u
 
 Team / Project / Portfolio 単位の読み取りへの分割は、Issue #369 の後続の変更で行います。それまでは、critical path、roll-up、cross-Project dependency はこれまでどおり Workspace 全体の live graph から計算します。退避済みの entity と参照は計算に含めません。
 
+#### Entity ID の採番
+
+`POST /api/planning/entities` の `id` と `POST /api/planning/entities/:entityId/duplicate` の `targetId` は省略できます。省略すると server が `pe-` と 32 桁の 16 進数からなる ID を採番し、`Location` header（`/api/planning/entities/<ID>`）で返します。ID を指定した request はこれまでどおり受け付け、`Idempotency-Key` を見ません。
+
+ID を省略する request には `Idempotency-Key` header（1〜256 文字、制御文字なし）が必要です。無いと `400 InvalidPlanningEntityIdempotencyKey` になります。採番は Work Item dependency と同じ Developer Platform の idempotency reservation を使い、呼び出し元ごとに key・method・path・body を結びつけます。
+
+- 同じ key と同じ body の再送は、最初の request が作った entity の `Location` と現在の snapshot を `201` と `Idempotency-Replayed: true` で返し、entity を増やしません。再送の `expectedRevision` が古くても通ります
+- 同じ key を別の body や別の path で使うと `409 PlanningEntityIdempotencyConflict`、最初の request が処理中なら `409 PlanningEntityIdempotencyInProgress` です
+- ID は Workspace・呼び出し元・操作（作成 / 複製）・key の SHA-256 から決まります。commit 後に受領記録の保存だけが失敗しても、再送は同じ ID を作ろうとして `409 PlanningEntityExists` になるので、entity は 2 つになりません
+- 権限の確認や validation で失敗した request は reservation を解放するので、直した body を同じ key で送り直せます
+
+Web の作成フォームと複製ボタンは ID を送らず、1 回の操作とその再試行で同じ `Idempotency-Key` を使います。
+
 #### Archive と復元
 
 `POST /api/planning/entities/:entityId/archive` は、entity を archive した revision を確定したあと、archive 済み entity を live graph から同じ Workspace partition の退避用 row へ移します。退避用 row の prefix（`ARCHIVE_ENTITY#`、`ARCHIVE_REF#`）は live graph の prefix と重ならないため、live の読み取りでは読まれず、容量にも数えません。退避用 row の key は複数の ID をつなぐため、DynamoDB の sort key の上限（1,024 byte）を超える部分は `#` と SHA-256 digest に置き換えます。ID そのものは row に保存します。

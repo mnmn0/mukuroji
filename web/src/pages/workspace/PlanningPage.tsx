@@ -720,7 +720,7 @@ export function PlanningPage() {
             ? (input) => {
                 if (!canManagePlanningScope(user, input, planningAccess)) return
                 return runMutation(
-                  `planning:entity:${input.id}:create`,
+                  'planning:entity:create',
                   [snapshot.revision, input],
                   (context) => createPlanningEntity(accessToken, {
                     ...input,
@@ -898,12 +898,11 @@ export function PlanningPage() {
             : undefined}
           archive={archive.controller}
           onDuplicateEntity={canManagePlanning && snapshot && accessToken
-            ? (entity, targetId) => runMutation(
-                `planning:entity:${entity.id}:duplicate:${targetId}`,
-                [snapshot.revision, targetId],
+            ? (entity) => runMutation(
+                `planning:entity:${entity.id}:duplicate`,
+                snapshot.revision,
                 (context) => duplicatePlanningEntity(accessToken, entity.id, {
                   expectedRevision: snapshot.revision,
-                  targetId,
                 }, context),
               )
             : undefined}

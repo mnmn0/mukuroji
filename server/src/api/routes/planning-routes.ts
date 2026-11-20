@@ -57,6 +57,8 @@ import {
 import {
   PlanningError,
   type PlanningCallerAuthorizationConditionCheck,
+  type PlanningEntityCreation,
+  type PlanningEntityDuplication,
   type PlanningUpdateCadenceTransactionResult,
   type PlanningMutationTransaction,
   type PlanningUpdateAnnotationTransactionResult,
@@ -80,6 +82,7 @@ import {
   type UpdateFeedReader,
 } from '../../modules/update-feed'
 import type {
+  IdempotencyDecision,
   IdempotencyMutationToken,
   ReleaseIdempotencyRequest,
   ReserveIdempotencyRequest,
@@ -1488,6 +1491,233 @@ async function releasePlanningWorkItemDependencyReservation(
   await developerPlatformDependencies.idempotency
     .releaseIdempotency(request)
     .catch(() => undefined)
+}
+
+/** Planning entity mutation that can receive a server-assigned entity ID. */
+type PlanningEntityCreationOperation = 'create' | 'duplicate'
+
+/** Prefix of Planning entity IDs assigned by the server. */
+const SERVER_ASSIGNED_PLANNING_ENTITY_ID_PREFIX = 'pe-'
+
+/** Stable schema discriminator for Planning entity creation receipts. */
+const PLANNING_ENTITY_CREATION_RECEIPT_SCHEMA = 'planning-entity-creation'
+
+/** Current Planning entity creation receipt version. */
+const PLANNING_ENTITY_CREATION_RECEIPT_VERSION = 1
+
+/** Outcome of reserving one create or duplicate request that omitted the new entity ID. */
+type PlanningEntityCreationReservation =
+  | {
+      /** A request with the same key already created the entity. */
+      status: 'replay'
+      /** Server-assigned ID of the entity the earlier request created. */
+      entityId: string
+    }
+  | {
+      /** This request owns the reservation and must create the entity. */
+      status: 'reserved'
+      /** Server-assigned ID the new entity must use. */
+      entityId: string
+      /** Reservation to complete after the commit or release after a failure. */
+      reservation: ReleaseIdempotencyRequest
+    }
+
+/**
+ * Validates the request key required when a create or duplicate request omits the new entity ID.
+ *
+ * @param value - Raw `Idempotency-Key` header value.
+ * @returns Trimmed key safe for the durable reservation port.
+ */
+function readRequiredPlanningEntityIdempotencyKey(value: string | undefined): string {
+  const key = value?.trim() ?? ''
+  const hasControlCharacter = [...key].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (!key || key.length > 256 || hasControlCharacter) {
+    throw new PlanningError(
+      400,
+      'InvalidPlanningEntityIdempotencyKey',
+      'Idempotency-Key with 1 to 256 characters and no control characters is required when the entity ID is omitted.',
+    )
+  }
+  return key
+}
+
+/**
+ * Derives the entity ID for one idempotent create or duplicate request.
+ *
+ * The ID depends only on the caller and the request key, so a retry that lost the stored receipt
+ * still targets the same ID and fails instead of creating a second entity.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param idempotencyKey - Validated caller-provided request key.
+ * @param operation - Mutation that creates the entity.
+ * @returns Workspace-unique entity ID with the server-assigned prefix.
+ */
+function createServerAssignedPlanningEntityId(
+  principal: WorkspacePrincipal,
+  idempotencyKey: string,
+  operation: PlanningEntityCreationOperation,
+): string {
+  const digest = createHash('sha256')
+    .update(
+      `planning-entity-id-v1\0${principal.directoryId}\0${principal.actorId}\0${operation}\0${idempotencyKey}`,
+    )
+    .digest('hex')
+    .slice(0, 32)
+  return `${SERVER_ASSIGNED_PLANNING_ENTITY_ID_PREFIX}${digest}`
+}
+
+/**
+ * Creates the compact receipt stored for one successful entity creation.
+ *
+ * @param workspaceId - Opaque Workspace reservation identity.
+ * @param operation - Mutation that created the entity.
+ * @param entityId - Server-assigned ID of the created entity.
+ * @returns Replay response holding only the original status and entity ID.
+ */
+function createPlanningEntityCreationReceipt(
+  workspaceId: string,
+  operation: PlanningEntityCreationOperation,
+  entityId: string,
+) {
+  return {
+    status: 201,
+    body: {
+      schema: PLANNING_ENTITY_CREATION_RECEIPT_SCHEMA,
+      version: PLANNING_ENTITY_CREATION_RECEIPT_VERSION,
+      workspaceId,
+      operation,
+      entityId,
+    },
+  }
+}
+
+/**
+ * Reserves one create or duplicate request that omitted the new entity ID.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param idempotencyKeyHeader - Raw `Idempotency-Key` header value.
+ * @param operation - Mutation that creates the entity.
+ * @param path - Canonical API path bound to the reservation.
+ * @param body - Parsed JSON body bound to the reservation.
+ * @returns Replay of an earlier success, or a reservation this request owns.
+ */
+async function reservePlanningEntityCreation(
+  principal: WorkspacePrincipal,
+  idempotencyKeyHeader: string | undefined,
+  operation: PlanningEntityCreationOperation,
+  path: string,
+  body: unknown,
+): Promise<PlanningEntityCreationReservation> {
+  const idempotencyKey = readRequiredPlanningEntityIdempotencyKey(idempotencyKeyHeader)
+  const entityId = createServerAssignedPlanningEntityId(principal, idempotencyKey, operation)
+  const request: ReserveIdempotencyRequest = {
+    workspaceId: createWorkItemScheduleIdempotencyWorkspaceId(principal.directoryId),
+    credentialId: createWorkItemScheduleIdempotencyUserId(
+      principal.directoryId,
+      principal.actorId,
+    ),
+    idempotencyKey,
+    requestFingerprint: createHash('sha256')
+      .update(`POST\n${path}\n${stableDigestStringify(body)}`)
+      .digest('hex'),
+  }
+  let decision: IdempotencyDecision
+  try {
+    decision = await developerPlatformDependencies.idempotency.reserveIdempotency(request)
+  } catch (error) {
+    if (error instanceof DeveloperPlatformError && error.code === 'IdempotencyKeyConflict') {
+      throw new PlanningError(
+        409,
+        'PlanningEntityIdempotencyConflict',
+        'Idempotency-Key was already used for a different Planning request.',
+      )
+    }
+    throw planningEntityIdempotencyUnavailable()
+  }
+  if (decision.status === 'in-progress') {
+    throw new PlanningError(
+      409,
+      'PlanningEntityIdempotencyInProgress',
+      'The same Planning entity request is still in progress.',
+    )
+  }
+  if (decision.status === 'replay') {
+    const expected = createPlanningEntityCreationReceipt(request.workspaceId, operation, entityId)
+    if (stableDigestStringify(decision.response) !== stableDigestStringify(expected)) {
+      throw new PlanningError(
+        502,
+        'PlanningEntityIdempotencyReceiptInvalid',
+        'The stored Planning entity receipt is invalid.',
+      )
+    }
+    return { status: 'replay', entityId }
+  }
+  return {
+    status: 'reserved',
+    entityId,
+    reservation: { ...request, reservationId: decision.reservationId },
+  }
+}
+
+/** Creates the stable failure used when entity creation idempotency persistence is unavailable. */
+function planningEntityIdempotencyUnavailable(): PlanningError {
+  return new PlanningError(
+    503,
+    'PlanningEntityIdempotencyUnavailable',
+    'Planning entity idempotency is unavailable.',
+  )
+}
+
+/**
+ * Stores the receipt of a committed entity creation for later replays.
+ *
+ * A lost receipt does not risk a duplicate, because a retry derives the same entity ID and the
+ * domain rejects it as an existing entity.
+ *
+ * @param reservation - Reservation owned by the committed request.
+ * @param operation - Mutation that created the entity.
+ * @param entityId - Server-assigned ID of the created entity.
+ */
+async function completePlanningEntityCreation(
+  reservation: ReleaseIdempotencyRequest,
+  operation: PlanningEntityCreationOperation,
+  entityId: string,
+): Promise<void> {
+  await developerPlatformDependencies.idempotency
+    .completeIdempotency({
+      ...reservation,
+      response: createPlanningEntityCreationReceipt(reservation.workspaceId, operation, entityId),
+    })
+    .catch(() => undefined)
+}
+
+/**
+ * Reads the current Planning snapshot visible to the principal for an idempotent replay.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Current Planning snapshot filtered for the principal.
+ */
+async function readPlanningSnapshotForPrincipal(
+  principal: WorkspacePrincipal,
+): Promise<PlanningSnapshot> {
+  const workItemState = await readPlanningWorkItemState(principal)
+  return filterPlanningSnapshotForPrincipal(
+    principal,
+    await workItemDependencies.planning.get(principal.directoryId, workItemState),
+  )
+}
+
+/**
+ * Creates the `Location` header value of one Planning entity.
+ *
+ * @param entityId - Created entity ID.
+ * @returns Canonical entity API path.
+ */
+function createPlanningEntityLocation(entityId: string): string {
+  return `/api/planning/entities/${encodeURIComponent(entityId)}`
 }
 
 /** Stable operation stored in one Planning update annotation mutation receipt. */
@@ -3854,6 +4084,8 @@ export function registerPlanningRoutes(routeApp: Hono): void {
   /** Planning hierarchy に entity を作成します。 */
   routeApp.post('/api/planning/entities', async (c) => {
     const accessToken = readBearerAccessToken(c)
+    let reservationToRelease: ReleaseIdempotencyRequest | undefined
+    let mutationCommitted = false
     if (!accessToken) {
       return c.json({ message: 'Bearer token is required.' }, 401)
     }
@@ -3862,6 +4094,23 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       const input = await readPlanningJson<CreatePlanningEntityInput>(c.req)
+      let entityId = input.id
+      if (entityId === undefined) {
+        const assigned = await reservePlanningEntityCreation(
+          principal,
+          c.req.header('Idempotency-Key'),
+          'create',
+          '/api/planning/entities',
+          input,
+        )
+        if (assigned.status === 'replay') {
+          c.header('Idempotency-Replayed', 'true')
+          c.header('Location', createPlanningEntityLocation(assigned.entityId))
+          return c.json(await readPlanningSnapshotForPrincipal(principal), 201)
+        }
+        reservationToRelease = assigned.reservation
+        entityId = assigned.entityId
+      }
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
       await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
@@ -3878,9 +4127,18 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         )
       }
       await requirePlanningActiveOwner(principal, input.ownerMemberKey)
-      const response = await workItemDependencies.planning.create(principal.directoryId, input, workItemState)
+      const creation: PlanningEntityCreation = { ...input, id: entityId }
+      const response = await workItemDependencies.planning.create(principal.directoryId, creation, workItemState)
+      mutationCommitted = true
+      if (reservationToRelease) {
+        await completePlanningEntityCreation(reservationToRelease, 'create', entityId)
+      }
+      c.header('Location', createPlanningEntityLocation(entityId))
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning), 201)
     } catch (error) {
+      if (reservationToRelease && !mutationCommitted) {
+        await releasePlanningWorkItemDependencyReservation(reservationToRelease)
+      }
       return toPlanningErrorResponse(c, error)
     }
   })
@@ -4047,6 +4305,8 @@ export function registerPlanningRoutes(routeApp: Hono): void {
   /** Planning entity を link や dependency を持たない新規 entity として複製します。 */
   routeApp.post('/api/planning/entities/:entityId/duplicate', async (c) => {
     const accessToken = readBearerAccessToken(c)
+    let reservationToRelease: ReleaseIdempotencyRequest | undefined
+    let mutationCommitted = false
     if (!accessToken) {
       return c.json({ message: 'Bearer token is required.' }, 401)
     }
@@ -4056,6 +4316,23 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessWrite(principal)
       const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
       const input = await readPlanningJson<DuplicatePlanningEntityInput>(c.req)
+      let targetId = input.targetId
+      if (targetId === undefined) {
+        const assigned = await reservePlanningEntityCreation(
+          principal,
+          c.req.header('Idempotency-Key'),
+          'duplicate',
+          `/api/planning/entities/${entityId}/duplicate`,
+          input,
+        )
+        if (assigned.status === 'replay') {
+          c.header('Idempotency-Replayed', 'true')
+          c.header('Location', createPlanningEntityLocation(assigned.entityId))
+          return c.json(await readPlanningSnapshotForPrincipal(principal), 201)
+        }
+        reservationToRelease = assigned.reservation
+        targetId = assigned.entityId
+      }
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
       await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
@@ -4075,9 +4352,18 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           'member',
         )
       }
-      const response = await workItemDependencies.planning.duplicate(principal.directoryId, entityId, input, workItemState)
+      const duplication: PlanningEntityDuplication = { ...input, targetId }
+      const response = await workItemDependencies.planning.duplicate(principal.directoryId, entityId, duplication, workItemState)
+      mutationCommitted = true
+      if (reservationToRelease) {
+        await completePlanningEntityCreation(reservationToRelease, 'duplicate', targetId)
+      }
+      c.header('Location', createPlanningEntityLocation(targetId))
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning), 201)
     } catch (error) {
+      if (reservationToRelease && !mutationCommitted) {
+        await releasePlanningWorkItemDependencyReservation(reservationToRelease)
+      }
       return toPlanningErrorResponse(c, error)
     }
   })

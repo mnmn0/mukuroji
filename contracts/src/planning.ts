@@ -548,10 +548,15 @@ export type PlanningSnapshot = {
   updatedAt?: string
 }
 
-/** Planning entity 作成 API の入力です。 */
+/**
+ * Planning entity 作成 API の入力です。
+ *
+ * `id` を省略すると server が Workspace 内で一意な ID を採番します。その場合は
+ * `Idempotency-Key` header が必須で、同じ key の再送では同じ entity を返します。
+ */
 export type CreatePlanningEntityInput = {
-  /** 新しい entity ID です。 */
-  id: string
+  /** 新しい entity ID です。省略すると server が採番します。 */
+  id?: string
   /** 新しい entity の種別です。 */
   type: PlanningEntityType
   /** 新しい entity の title です。 */
@@ -714,10 +719,15 @@ export type PlanningWorkItemLinkInput = {
   expectedRevision: number
 }
 
-/** Planning entity 複製 API の入力です。 */
+/**
+ * Planning entity 複製 API の入力です。
+ *
+ * `targetId` を省略すると server が Workspace 内で一意な ID を採番します。その場合は
+ * `Idempotency-Key` header が必須で、同じ key の再送では同じ複製を返します。
+ */
 export type DuplicatePlanningEntityInput = {
-  /** 複製後の entity ID です。 */
-  targetId: string
+  /** 複製後の entity ID です。省略すると server が採番します。 */
+  targetId?: string
   /** 複製後に上書きする title です。 */
   title?: string
   /** 複製後の親 entity ID です。 */
