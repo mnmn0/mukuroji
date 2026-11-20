@@ -177,6 +177,7 @@ import {
   enforceActiveTenantForWorkspace,
   requireActiveWorkspaceAssignee,
 } from '../shared/workspace-access'
+import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 
 async function readAutomationJson(c: Context) {
   const value = await readJson<unknown>(c.req)
@@ -472,6 +473,7 @@ async function executeAutomationTemplateApplication(
         ? expandProjectTemplateWorkItems(
             templateWorkItems,
             requireProjectTemplateStartDate(target.startDate),
+            await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
           )
         : []
       if (expandedWorkItems.length > 0) {

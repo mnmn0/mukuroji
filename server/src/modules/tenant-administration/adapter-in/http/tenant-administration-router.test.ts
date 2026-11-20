@@ -593,6 +593,7 @@ test('lets any member read the Workspace calendar settings, with defaults before
     weekStartDay: 1,
     workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
     holidays: [],
+    publicHolidays: 'japan',
   })
   // Reading must not initialize tenant state on a member's behalf.
   expect(ensureCalls).toEqual([])
@@ -604,6 +605,7 @@ test('lets any member read the Workspace calendar settings, with defaults before
       weekStartDay: 0,
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday'],
       holidays: ['2027-01-01'],
+      publicHolidays: 'none',
     },
   })
   const stored = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
@@ -615,6 +617,7 @@ test('lets any member read the Workspace calendar settings, with defaults before
     weekStartDay: 0,
     workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday'],
     holidays: ['2027-01-01'],
+    publicHolidays: 'none',
   })
 
   const unauthenticated = await createCalendarRouter(client).request('/api/workspace/calendar-settings')
@@ -666,6 +669,7 @@ test('keeps calendar settings changes behind administration and validates them',
     { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: ['2027-02-30'] },
     { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: ['1969-12-31'] },
     { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: '2027-01-01' },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, publicHolidays: 'us' },
     {
       fiscalYearStartMonth: 4,
       weekStartDay: 1,
@@ -690,7 +694,8 @@ test('keeps calendar settings changes behind administration and validates them',
     method: 'PATCH',
   })
   expect(accepted.status).toBe(200)
-  // Settings from before working days existed get the Monday-to-Friday default and no holidays.
+  // Settings from before working days existed get the Monday-to-Friday default, no company
+  // holidays, and the Japanese national holidays.
   expect(updates).toEqual([{
     ...body,
     locale: 'ja',
@@ -699,6 +704,7 @@ test('keeps calendar settings changes behind administration and validates them',
       weekStartDay: 0,
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
       holidays: [],
+      publicHolidays: 'japan',
     },
   }])
 
@@ -710,6 +716,7 @@ test('keeps calendar settings changes behind administration and validates them',
         weekStartDay: 1,
         workingWeekdays: ['saturday', 'monday', 'monday', 'tuesday'],
         holidays: ['2027-05-03', '2027-01-01', '2027-05-03'],
+        publicHolidays: 'none',
       },
     }),
     headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
@@ -725,6 +732,7 @@ test('keeps calendar settings changes behind administration and validates them',
       weekStartDay: 1,
       workingWeekdays: ['monday', 'tuesday', 'saturday'],
       holidays: ['2027-01-01', '2027-05-03'],
+      publicHolidays: 'none',
     },
   })
 })

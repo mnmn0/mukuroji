@@ -1636,12 +1636,23 @@ export function createTestAppDependencies(): AppDependencies {
       },
     }),
   }
+  // Work Item creation reads the Workspace working calendar; tests without a tenant table read it
+  // as never saved, which gives the default calendar.
+  const tenantAdministration = new Proxy(production.workspace.tenantAdministration, {
+    get(target, property, receiver) {
+      if (property === 'getProfile') {
+        return async () => undefined
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
   const timeTrackingService = new TimeTrackingService(new InMemoryTimeTrackingRepository())
   return {
     ...production,
     operational: createTestOperationalDependencies(),
     workspace: {
       ...production.workspace,
+      tenantAdministration,
       customers: new InMemoryCustomerClient(),
       tenantLifecycleEnforcement: createTestTenantLifecycleEnforcement(),
     },

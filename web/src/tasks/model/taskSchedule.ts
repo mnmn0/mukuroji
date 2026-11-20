@@ -2,6 +2,7 @@ import {
   DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
+  createWorkspaceWorkItemCalendarPolicy,
   deriveWorkItemScheduleDueDate,
   type DateRangeWorkItemSchedule,
   type DueDateWorkItemSchedule,
@@ -82,18 +83,15 @@ export function createDefaultTaskScheduleCalendarPolicy(): WorkItemScheduleCalen
  *
  * @param settings - Workspace calendar settings, or undefined before they load or when the read
  *   fails.
- * @returns The Workspace time zone with the Workspace working weekdays and holidays, or the
- *   default Monday-to-Friday policy without holidays when no settings are available.
+ * @returns The Workspace time zone with the Workspace working weekdays and days off (company
+ *   holidays and, when the Workspace uses them, national holidays), or the default
+ *   Monday-to-Friday policy without holidays when no settings are available.
  */
 export function createWorkspaceTaskScheduleCalendarPolicy(
   settings: WorkspaceCalendarSettings | undefined,
 ): WorkItemScheduleCalendarPolicy {
   if (!settings) return createDefaultTaskScheduleCalendarPolicy()
-  return {
-    holidays: [...settings.holidays],
-    timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
-    workingWeekdays: [...settings.workingWeekdays],
-  }
+  return createWorkspaceWorkItemCalendarPolicy(settings)
 }
 
 /**

@@ -1245,7 +1245,7 @@ describe('public API router', () => {
     const receivedDueDates: string[] = []
     const workItems = createDefaultWorkItemService({
       async create(_credential, input) {
-        if (input.schedule.mode !== 'due-date') {
+        if (input.schedule?.mode !== 'due-date') {
           throw new Error('Expected a deadline-only schedule.')
         }
         receivedDueDates.push(input.schedule.dueDate)
@@ -1283,6 +1283,45 @@ describe('public API router', () => {
       expect((await request(valid)).status).toBe(201)
     }
     expect(receivedDueDates).toEqual(['1000-01-01', '2024-02-29', '2026-04-30'])
+  })
+
+  test('accepts a create request without a schedule, with or without a due date, for the server to complete', async () => {
+    const received: unknown[] = []
+    const workItems = createDefaultWorkItemService({
+      async create(_credential, input) {
+        received.push({ schedule: input.schedule, dueDate: input.dueDate })
+        return createWorkItem()
+      },
+    })
+    const { platform, router } = createTestRouter({ workItems })
+    const apiKey = await createApiKey(platform, ['work-items:write'])
+    const request = (key: string, fields: Record<string, unknown>) => router.request('http://localhost/v1/work-items', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey.secret}`,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': key,
+      },
+      body: JSON.stringify({
+        teamId: 'team-1',
+        title: 'Workspace calendar',
+        assigneeUserId: 'user-1',
+        priority: 'medium',
+        ...fields,
+      }),
+    })
+
+    expect((await request('due-date', { dueDate: '2026-12-01' })).status).toBe(201)
+    expect((await request('unscheduled', {})).status).toBe(201)
+    expect(received).toEqual([
+      { schedule: undefined, dueDate: '2026-12-01' },
+      { schedule: undefined, dueDate: undefined },
+    ])
+    const both = await request('both', { dueDate: '2026-12-01', schedule: createDueDateSchedule('2026-12-01') })
+    expect(both.status).toBe(400)
+    expect(await both.json()).toMatchObject({ code: 'validation_failed' })
+    expect((await request('bad-date', { dueDate: '2026-02-30' })).status).toBe(400)
+    expect(received).toHaveLength(2)
   })
 
   test('passes estimate, remaining effort, and manual progress updates, including clears, and rejects invalid amounts', async () => {

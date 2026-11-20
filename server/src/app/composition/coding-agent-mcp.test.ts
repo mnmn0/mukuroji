@@ -54,7 +54,7 @@ function startFakeApi() {
     // Liveness is public, so the MCP must read it without the API credential.
     if (new URL(request.url).pathname === '/api/health') {
       if (request.headers.get('Authorization') !== null) return Response.json({}, { status: 400 })
-      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 2, minimumApiRevision: 1 } })
+      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 3, minimumApiRevision: 1 } })
     }
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     const url = new URL(request.url)
@@ -241,7 +241,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     expect((await client.listTools()).tools).toHaveLength(20)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
-      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 2, serverCompatibility: { status: 'compatible', server: { apiRevision: 2, minimumApiRevision: 1 } } },
+      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 3, serverCompatibility: { status: 'compatible', server: { apiRevision: 3, minimumApiRevision: 1 } } },
     } })
     expect(client.getServerVersion()).toMatchObject({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'start', task: { id: 'task' }, ownRuns: [] } })
@@ -360,7 +360,7 @@ test('reuses a known server compatibility and retries an unknown one', async () 
     healthRequests += 1
     // The first read fails as a transient outage would; later reads report the range.
     return healthRequests === 1 ? Response.json({}, { status: 503 })
-      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 2, minimumApiRevision: 1 } })
+      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 3, minimumApiRevision: 1 } })
   } })
   try {
     const factory = composeCodingAgentMcp({ MUKUROJI_MCP_URL: `http://127.0.0.1:${api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',

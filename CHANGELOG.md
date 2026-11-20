@@ -29,11 +29,16 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 - server API: `GET /api/v1/work-items/{workItemId}/documents` と
   `GET /api/v1/work-items/{workItemId}/documents/{documentId}` を追加しました。scope は `work-items:read` で、
   Document の閲覧権限は request ごとに credential 所有者の権限で評価します。
+- server API: `POST /api/v1/work-items` の `schedule` を省略できるようにし、`dueDate` を追加しました。`schedule` を
+  省略すると server が Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の祝日）を付けます。
 
 ### Changed
 
 - MCP API revision を 2 に上げました。server は revision 1〜2 を受け付けます。revision 1 の server に
   接続した新しい MCP は server が古いと警告し、Document を読むツールは使えません。
+- `create_task` が `schedule` を送らず、Workspace の稼働カレンダーで Work Item を作るようにしました。
+  MCP API revision を 3 に上げ、server は revision 1〜3 を受け付けます。revision 2 以前の server に接続した新しい MCP は
+  server が古いと警告し、`create_task` は失敗します。
 
 ## [1.0.0]
 

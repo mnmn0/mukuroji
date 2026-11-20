@@ -81,6 +81,8 @@ import {
 } from '../../projects/queries/useProjectMembers'
 import { createTeamIssuesPath } from '../../shared/routing/paths'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
+import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
+import { createWorkspaceTaskScheduleCalendarPolicy } from '../../tasks/model/taskSchedule'
 import { useOptionalWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import {
   createWorkItemRelation,
@@ -198,6 +200,14 @@ export function TeamIssuePage() {
     key: planningKey,
     mutate: mutatePlanning,
   } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
+  // New Work Items and the Gantt chart use the Workspace calendar; a failed read keeps the default.
+  const workspaceCalendar = useWorkspaceCalendarSettings(accessToken, Boolean(user && !currentUserError))
+  const workspaceCalendarPolicy = useMemo(
+    () => workspaceCalendar.settings
+      ? createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings)
+      : undefined,
+    [workspaceCalendar.settings],
+  )
   const {
     data: teams = emptyTeams,
     error: projectDirectoryError,
@@ -1024,6 +1034,7 @@ export function TeamIssuePage() {
         : undefined}
       planningErrorMessage={planningErrorMessage}
       planningSnapshot={planningSnapshot}
+      workingCalendar={workspaceCalendarPolicy}
       selectedIssueId={resolvedSelectedIssueId}
       relations={issueDetail && issueDetail.issue.id === resolvedSelectedIssueId
         ? issueDetail.relations ?? []

@@ -185,6 +185,7 @@ import {
   withWorkItemPlannedEffort,
 } from '../shared/work-item-effort'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
+import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
   rejectInternalWorkItemCreateFields,
@@ -726,19 +727,68 @@ export type IdempotentWorkItemCreate = {
   requestDigest: string
 }
 
+/** Work Item create input that may leave out its schedule to use the Workspace working calendar. */
+type PublicCreateWorkItemInput = Omit<CreateWorkItemInput, 'schedule'> & {
+  /** Complete schedule; the Workspace working calendar is used when it is left out. */
+  schedule?: CreateWorkItemInput['schedule']
+  /** Deadline of a Work Item created without a schedule. */
+  dueDate?: string
+}
+
+/**
+ * Rejects internal fields of a public create input.
+ *
+ * `dueDate` is a create field of the Public API, used only when the schedule is left out, so it is
+ * set aside before the shared check that rejects a written `dueDate`.
+ *
+ * @param input - Create input from the client.
+ */
+function rejectInternalPublicCreateWorkItemFields(input: PublicCreateWorkItemInput): void {
+  const { dueDate: _dueDate, ...fields } = input
+  rejectInternalWorkItemCreateFields(fields)
+}
+
+/**
+ * Gives a Work Item created without a schedule the Workspace working calendar.
+ *
+ * The Workspace calendar is read only when the schedule is left out, so a complete schedule is
+ * stored as sent. The new schedule is due on `dueDate`, or unscheduled without one.
+ *
+ * @param directoryId - Workspace directory that owns the new Work Item.
+ * @param input - Create input from the client.
+ * @returns The input with a complete canonical schedule and no `dueDate`.
+ */
+async function completePublicCreateWorkItemSchedule(
+  directoryId: string,
+  input: PublicCreateWorkItemInput,
+): Promise<CreateWorkItemInput> {
+  const { schedule, dueDate, ...fields } = input
+  if (schedule) return { ...fields, schedule }
+  const calendarPolicy = await readWorkspaceWorkItemCalendarPolicy(directoryId)
+  return {
+    ...fields,
+    schedule: dueDate === undefined
+      ? { mode: 'unscheduled', calendarPolicy }
+      : { mode: 'due-date', dueDate, calendarPolicy },
+  }
+}
+
 async function createCanonicalPublicWorkItem(
   principal: WorkspacePrincipal,
   teamId: string,
-  input: CreateWorkItemInput,
+  input: PublicCreateWorkItemInput,
   context: PublicMutationContext,
   requestPath: string,
   idempotentCreate?: IdempotentWorkItemCreate,
   authorizationSnapshot?: WorkItemAuthorizationSnapshot,
 ) {
-  rejectInternalWorkItemCreateFields(input)
+  rejectInternalPublicCreateWorkItemFields(input)
   requireWorkspaceBusinessWrite(principal)
   const permission = await requireTeamPermission(principal, teamId, 'member')
-  const body = normalizeTeamIssueInput(input, permission.team)
+  const body = normalizeTeamIssueInput(
+    await completePublicCreateWorkItemSchedule(principal.directoryId, input),
+    permission.team,
+  )
   const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
     principal.directoryId,
     permission.team,
@@ -1496,7 +1546,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
 
     async authorizeCreate(credential, input) {
       const { teamId, ...workItemInput } = input
-      rejectInternalWorkItemCreateFields(workItemInput)
+      rejectInternalPublicCreateWorkItemFields(workItemInput)
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write',
         teamId,
@@ -1518,7 +1568,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
 
     async create(credential, input, context) {
       const { teamId, ...workItemInput } = input
-      rejectInternalWorkItemCreateFields(workItemInput)
+      rejectInternalPublicCreateWorkItemFields(workItemInput)
       const authorization = await resolveStableWorkItemAuthorization(
         credential.workspaceId,
         async () => await resolveDeveloperCredentialPrincipal(credential, {
@@ -2586,6 +2636,7 @@ async function validatePublicImport(
     input.format,
     input.source.content,
     input.mapping,
+    await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
   )
   const errorsByRow = new Map<number, ImportRowError[]>(
     preview.rows.map((row) => [row.row, [...row.errors]]),
@@ -3041,7 +3092,7 @@ function createPublicApiWorkItemCreateIdentity(
   credentialId: string,
   context: PublicMutationContext,
   teamId: string,
-  input: CreateWorkItemInput,
+  input: PublicCreateWorkItemInput,
 ): IdempotentWorkItemCreate {
   const requestIdentity =
     `${workspaceId}\n${credentialId}\n${context.idempotencyKey}\n${teamId}`

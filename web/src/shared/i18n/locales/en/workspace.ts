@@ -874,6 +874,8 @@ export const workspaceMessages = {
   'workspace.tenantAdministration.addHoliday': 'Add holiday',
   'workspace.tenantAdministration.noHolidays': 'No holidays yet.',
   'workspace.tenantAdministration.removeHoliday': 'Remove holiday {date}',
+  'workspace.tenantAdministration.publicHolidays': 'Treat Japanese national holidays as days off',
+  'workspace.tenantAdministration.publicHolidaysHint': 'National and substitute holidays for {first} to {last} are included, so they need not be added as company holidays.',
   'workspace.tenantAdministration.memberRole': 'Member',
   'workspace.tenantAdministration.guestRole': 'Guest',
   'workspace.tenantAdministration.saveProfile': 'Save profile',

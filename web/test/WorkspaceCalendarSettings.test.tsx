@@ -49,6 +49,7 @@ const snapshot = {
       weekStartDay: 0,
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
       holidays: ['2027-01-01', '2027-05-03'],
+      publicHolidays: 'none',
     },
     status: 'active',
     revision: 2,
@@ -80,11 +81,13 @@ describe('Workspace calendar settings', () => {
       workingWeekdays: ['tuesday', 'monday'],
       holidays: ['2027-05-03', '2027-01-01'],
     })
+    // Settings saved before national holidays existed use the Japanese ones.
     expect(await getWorkspaceCalendarSettings('token-1')).toEqual({
       fiscalYearStartMonth: 4,
       weekStartDay: 1,
       workingWeekdays: ['monday', 'tuesday'],
       holidays: ['2027-01-01', '2027-05-03'],
+      publicHolidays: 'japan',
     })
     expect(urls[0]?.endsWith('/workspace/calendar-settings')).toBe(true)
 
@@ -92,6 +95,9 @@ describe('Workspace calendar settings', () => {
     await expect(getWorkspaceCalendarSettings('token-1')).rejects.toThrow()
 
     mockFetch({ fiscalYearStartMonth: 4, weekStartDay: 1, holidays: ['2027-13-01'] })
+    await expect(getWorkspaceCalendarSettings('token-1')).rejects.toThrow()
+
+    mockFetch({ fiscalYearStartMonth: 4, weekStartDay: 1, publicHolidays: 'us' })
     await expect(getWorkspaceCalendarSettings('token-1')).rejects.toThrow()
   })
 
@@ -131,6 +137,8 @@ describe('Workspace calendar settings', () => {
     expect(html).not.toMatch(/data-testid="tenant-working-weekday-sunday"[^>]*checked/u)
     expect(html).toContain('<time dateTime="2027-01-01">2027-01-01</time>')
     expect(html).toContain('休日 2027-05-03 を削除')
+    expect(html).toContain('日本の祝日を休日にする')
+    expect(html).not.toMatch(/data-testid="tenant-public-holidays"[^>]*checked/u)
   })
 
   test('edits working weekdays and holidays without leaving the Workspace without working days', () => {
@@ -139,6 +147,7 @@ describe('Workspace calendar settings', () => {
       weekStartDay: 1 as const,
       workingWeekdays: ['tuesday' as const],
       holidays: ['2027-05-03'],
+      publicHolidays: 'none' as const,
     }
     expect(setWorkspaceWorkingWeekday(calendar, 'monday', true)?.workingWeekdays)
       .toEqual(['monday', 'tuesday'])
@@ -167,6 +176,15 @@ describe('Workspace calendar settings', () => {
       timeZone: 'Asia/Tokyo',
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
     })
+    // With the Japanese national holidays on, they are days off next to the company holidays.
+    const withNationalHolidays = createWorkspaceTaskScheduleCalendarPolicy({
+      ...snapshot.profile.calendar,
+      publicHolidays: 'japan',
+    })
+    expect(withNationalHolidays.holidays).toContain('2027-01-01')
+    expect(withNationalHolidays.holidays).toContain('2026-11-23')
+    expect(withNationalHolidays.holidays).toContain('2027-05-03')
+    expect(withNationalHolidays.holidays.filter((date) => date === '2027-05-03')).toHaveLength(1)
     // Before the settings load, new Work Items keep the Monday-to-Friday default.
     expect(createWorkspaceTaskScheduleCalendarPolicy(undefined)).toEqual({
       holidays: [],

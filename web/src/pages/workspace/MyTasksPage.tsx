@@ -89,6 +89,8 @@ import {
 } from '../../work-items/model/workItemDisplay'
 import { useWorkspaceTaskStatusMutation } from '../../workspace/mutations/useWorkspaceTaskStatusMutation'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
+import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
+import { createWorkspaceTaskScheduleCalendarPolicy } from '../../tasks/model/taskSchedule'
 import {
   WorkspaceConfigurationLoadNotice,
   WorkspaceTaskLoadNotice,
@@ -168,6 +170,14 @@ export function MyTasksPage() {
     workspace.teams,
     includeArchivedWorkItems,
     myTasksWorkItemFilter,
+  )
+  // The Gantt chart shades the Workspace days off once the calendar loads.
+  const workspaceCalendar = useWorkspaceCalendarSettings(workspace.accessToken, workspace.canLoadWorkspaceData)
+  const workspaceCalendarPolicy = useMemo(
+    () => workspaceCalendar.settings
+      ? createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings)
+      : undefined,
+    [workspaceCalendar.settings],
   )
   const { contributorTaskKeys, myTasks } = useMemo(() => {
     const contributorKeys = new Set<string>()
@@ -972,6 +982,7 @@ export function MyTasksPage() {
             })
           }}
           ganttOutline={myTasksGanttOutline}
+          workingCalendar={workspaceCalendarPolicy}
           calendarMonth={myTasksCalendarMonth}
           onCalendarMonthChange={setMyTasksCalendarMonth}
           outlineNotice={isMyTasksOutlineShown ? (

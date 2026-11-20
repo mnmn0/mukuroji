@@ -1,6 +1,5 @@
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import {
-  createDefaultUnscheduledWorkItemSchedule,
   fitWorkItemTitle,
   type CreateManualTriageEntryInput,
   type TriageBulkActionInput,
@@ -88,6 +87,7 @@ import {
   requireActiveWorkspaceAssignee,
   type TeamPermissionContext,
 } from '../shared/workspace-access'
+import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 
 async function authorizeRequestLink(c: Context, resolution: RequestLinkResolution) {
   if (resolution.accessMode === 'public') return
@@ -1006,6 +1006,7 @@ async function acceptTriageEntryAsNewWorkItem(
         entry.source.submissionId,
       )
     : undefined
+  const workspaceCalendarPolicy = await readWorkspaceWorkItemCalendarPolicy(request.workspaceId)
   const formConversion = submission && entry.retention.redactedAt === undefined
     ? createRequestWorkItemInput(submission, {
         action: 'convert',
@@ -1014,7 +1015,7 @@ async function acceptTriageEntryAsNewWorkItem(
           teamId: request.teamId,
           ...(request.action.projectId ? { projectId: request.action.projectId } : {}),
         },
-      })
+      }, workspaceCalendarPolicy)
     : undefined
   const teamContext = await requireTeamPermission(principal, request.teamId, 'member')
   const assignedProjectId = request.action.projectId ?? entry.projectId
@@ -1038,14 +1039,14 @@ async function acceptTriageEntryAsNewWorkItem(
     ...(formConversion?.input ?? (entry.retention.redactedAt !== undefined
       ? {
           title: 'Retained source',
-          schedule: createDefaultUnscheduledWorkItemSchedule(),
+          schedule: { mode: 'unscheduled', calendarPolicy: workspaceCalendarPolicy },
           priority: 'medium',
         }
       : {
           // Triage accepts titles up to 500 code points; a Work Item title is shorter.
           title: fitWorkItemTitle(entry.sourcePreview.title),
           ...(entry.sourcePreview.body ? { description: entry.sourcePreview.body } : {}),
-          schedule: createDefaultUnscheduledWorkItemSchedule(),
+          schedule: { mode: 'unscheduled', calendarPolicy: workspaceCalendarPolicy },
           priority: 'medium',
         })),
     assignedProjectId: assignedProjectId ?? null,

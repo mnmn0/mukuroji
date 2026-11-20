@@ -207,6 +207,7 @@ export function TeamIssueScreen({
   onUpdateScheduleDependency,
   planningErrorMessage,
   planningSnapshot,
+  workingCalendar,
   createIssueProjects,
   relations = [],
   resolvedConfiguration,
@@ -1464,6 +1465,7 @@ export function TeamIssueScreen({
                   <CreateIssuePanel
                     key={`create-issue-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}-${createDuplicateDraft?.sourceWorkItemId ?? ''}`}
                     assigneeOptions={assigneeOptions}
+                    calendarPolicy={workingCalendar}
                     canCreateUnassignedIssue={canCreateUnassignedIssue}
                     configuration={configuration}
                     duplicateDraft={createDuplicateDraft}
@@ -1697,6 +1699,7 @@ export function TeamIssueScreen({
                       planningSnapshot={planningSnapshot}
                       t={t}
                       tasks={visibleIssues}
+                      workingCalendar={workingCalendar}
                     />
                   ) : (
                     <IssueBoard

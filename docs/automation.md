@@ -95,7 +95,7 @@ Project 適用は application ID を Project ID として使い、Team、localiz
 
 ### Project template の WBS
 
-Project template の `workItems` は Project 内に作る Work Item の木（最大 50 件、4 階層）で、各 item は `title`（改行を含めない）、Project 開始日からの `startOffsetWorkingDays`（0 は開始日以降の最初の稼働日）、`durationWorkingDays`（1 以上）、`children` を持つ。稼働日は Work Item の既定 calendar（月〜金、祝日なし）で数える。WBS を持つ template の適用は target に `startDate`（`YYYY-MM-DD`）を必須とし、無い場合は何も作らずに `AutomationProjectTemplateStartDateRequired` で失敗する。
+Project template の `workItems` は Project 内に作る Work Item の木（最大 50 件、4 階層）で、各 item は `title`（改行を含めない）、Project 開始日からの `startOffsetWorkingDays`（0 は開始日以降の最初の稼働日）、`durationWorkingDays`（1 以上）、`children` を持つ。稼働日は適用時点の Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の祝日）で数え、各 Work Item はその calendar policy を持つ（[稼働カレンダーと日本の祝日](workspace-calendar-holidays.md)）。WBS を持つ template の適用は target に `startDate`（`YYYY-MM-DD`）を必須とし、無い場合は何も作らずに `AutomationProjectTemplateStartDateRequired` で失敗する。
 
 適用は次の順に進む。
 

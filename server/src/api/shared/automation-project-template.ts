@@ -5,6 +5,7 @@ import {
   type AutomationProjectTemplateWorkItem,
   type AutomationTemplateApplication,
   type DateRangeWorkItemSchedule,
+  type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import type { Context } from 'hono'
 import {
@@ -48,21 +49,20 @@ export type ExpandedProjectTemplateWorkItem = {
  *
  * A start offset of `n` puts the Work Item on the `(n + 1)`th working day on or after the Project
  * start date, and its end is the last of `durationWorkingDays` working days from there. Working
- * days follow the default Work Item calendar (Monday to Friday, no holidays).
+ * days follow the given calendar, which is the Workspace working calendar when a template is
+ * applied, and every Work Item keeps a copy of it.
  *
  * @param workItems - Top-level template Work Items with their children.
  * @param startDate - Project start date in `YYYY-MM-DD` form.
+ * @param calendarPolicy - Working calendar that counts the days; defaults to Monday to Friday
+ *   without holidays.
  * @returns Every Work Item in depth-first order, parents before their children.
  */
 export function expandProjectTemplateWorkItems(
   workItems: readonly AutomationProjectTemplateWorkItem[],
   startDate: string,
+  calendarPolicy: WorkItemScheduleCalendarPolicy = DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
 ): ExpandedProjectTemplateWorkItem[] {
-  const calendarPolicy = {
-    timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
-    workingWeekdays: [...DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.workingWeekdays],
-    holidays: [],
-  }
   const expanded: ExpandedProjectTemplateWorkItem[] = []
   const visit = (items: readonly AutomationProjectTemplateWorkItem[], parentIndex?: number) => {
     for (const item of items) {
