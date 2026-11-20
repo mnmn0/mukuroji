@@ -404,6 +404,8 @@ Secret JSON は string value の object とし、次の key だけを許可し�
 
 `MUKUROJI_CONNECTOR_PROVIDERS_JSON` 自体は JSON array を文字列化した値です。各 provider entry の `clientSecretEnvironmentVariable` は同じ secret object 内の `MUKUROJI_CONNECTOR_<NAME>` を参照させます。Signing secret はそれぞれ独立した十分に長い random value を使います。Warm runtime も約1分の TTL 後に secret を再取得するため、更新は cold start を待たずに反映されます。
 
+Provider の OAuth callback（`/api/developer/connector-oauth/callback`）は接続を完了せず、state と code を URL fragment に載せて Web の `/settings/connectors/oauth-callback` へ 303 で引き渡します。接続を始めた本人がログインしたまま、その画面から `POST /api/developer/connector-oauth/complete` を呼んで完了します。CloudFront 経由で Web と API が同じ origin にある通常の構成では設定は不要です。provider に登録した redirect URI が Web と別の API origin を指す場合（local の Web から HTTP API を直接使う場合など）は、API の process 環境変数 `CONNECTOR_OAUTH_WEB_ORIGIN` に Web の origin（例: `http://localhost:5173`）を設定します。https の origin、または localhost の http origin だけを受け付けます。
+
 OAuth state signing key は、warm runtime の旧・新 keyring が混在しても相互検証できるよう次の順序で rotation します。
 
 1. 旧 key を `CONNECTOR_OAUTH_STATE_SIGNING_SECRET` に維持したまま、新 key を JSON array 文字列の `CONNECTOR_OAUTH_STATE_PREVIOUS_SIGNING_SECRETS_JSON` へ verification-only key として追加します。
@@ -990,6 +992,34 @@ local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566` と `AWS_REGION`
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
+#### Application 処理を有効にする（runtime control）
+
+deploy した直後の runtime control は `disabled` なので、API は `/api/health` 以外に `503` を返し、
+worker も処理を始めません。次の 1 コマンドで有効にします。
+
+```sh
+AWS_REGION=ap-northeast-1 bun run runtime-control:enable
+```
+
+`scripts/runtime-control.ts` は `aws` CLI で次を順に行い、どこかで失敗すると止まります。
+
+1. stack output から AppConfig の ID 4 つと `WebUrl` を読む。
+2. AppConfig environment で別の deployment が進行中でないこと、`RuntimeControlConfigurationFailureAlarm`
+   が `OK` かつ actions 有効であることを確かめる（alarm の確認は有効化のときだけ）。
+3. 最新の hosted version の `revision` に 1 を足した document を hosted version として作る。
+   誰が（`sts get-caller-identity` の ARN）いつ切り替えたかを version と deployment の description に残す。
+4. stack の canary strategy で deployment を始め、`COMPLETE` まで待つ（rollout 20 分 + bake 10 分で約 30 分）。
+   `ROLLED_BACK` になったら失敗として止まる。
+5. `WebUrl` の `/api/ready` が `200` を返すまで最大 3 分確認する。
+
+止めるときは `bun run runtime-control:disable` を使います。`/api/ready` が `503` になれば完了です。
+incident commander が即時停止を決めたときだけ、`-- --all-at-once` を付けて `AppConfig.AllAtOnce` で
+配布します（bake の 10 分は待ちます）。省いた理由は change record に残します。stack 名が `Mukuroji`
+でない場合は `MUKUROJI_STACK_NAME` を指定します。local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566`
+を付けて同じように実行できます。change record に残す内容と、deployment 中に確認する
+`runtime-control.evaluated` record は [operational readiness](../docs/operational-readiness.md#dynamic-runtime-control)
+を参照してください。読み取りだけを通す maintenance mode はまだありません。
+
 ### 3. Bootstrap と API を検証する
 
 Stack が user pool を作った場合、初期 owner は最初のサインインで password を変えるまで
@@ -1064,7 +1094,7 @@ VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 #### Web の release を戻す
 
 各 deploy は `assets/` 以外の file（`index.html`、`sw.js`、manifest など）を bucket の
-`releases/<commit SHA>/` にも残します。`assets/` は消さないため、残した release を bucket の直下へ
+`releases/<commit SHA>/` にも残します。残っている release が使う `assets/` は消さないため、残した release を bucket の直下へ
 copy し直せば、再 build せずに前の release へ戻せます。
 
 ```sh
@@ -1076,8 +1106,22 @@ AWS_REGION=ap-northeast-1 bun run web:rollback -- <commit SHA>
 
 `scripts/rollback-web.sh` は `releases/<commit SHA>/` を bucket の直下へ copy し、直下にだけある file を
 削除してから CloudFront を invalidate します。戻した後に `WebUrl` の Help 画面で SHA が切り替わったことを
-確認します。この仕組みより前に deploy した release は残っていないため戻せません。`releases/` と
-`assets/` は今は自動で削除しないので、古い release の整理は別途行います。
+確認します。この仕組みより前に deploy した release は残っていないため戻せません。
+
+#### Web bucket の保存期間
+
+Web bucket は versioning を有効にし、次の期間で古い file を消します。
+
+- `releases/<commit SHA>/` は最後の upload から 180 日で lifecycle が削除します。戻せるのはこの期間内の
+  release だけです。稼働中の release は bucket の直下にあるので、copy が消えても配信は続きます。
+- 上書き・削除された file の旧 version は 30 日残り、その後 lifecycle が削除します。誤って消した file は
+  この期間内なら `aws s3api list-object-versions` で探して戻せます。
+- `assets/` は日数では消しません。稼働中の release の chunk は deploy しない限り upload し直されないため、
+  日数で消すと配信中の画面が壊れるからです。代わりに各 release が使う `assets/` の一覧を
+  `release-assets.txt` として残し、`web:deploy` が、残っている release、置き換える直前の release、
+  今回の build のどれも使わない `assets/` を削除します。直近 24 時間に upload された file は、同時に走った
+  別の deploy のものかもしれないので残します。一覧のない release（この仕組みより前の deploy）が
+  残っている間は削除しません。
 
 ## Workspace partition migration
 
@@ -1173,7 +1217,7 @@ Deploy前後に次を確認します。
 
 ## Notification schedule
 
-期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として handler 内で retry され、最終失敗は `ScheduledJobsDlq` に保存されます。DLQ message の error message に失敗した job 名が入ります。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。`CollaborationProjectionDlqUrl` と `ScheduledJobsDlqUrl` の滞留、Inbox の unread count も監視します。
+期限 schedule は1時間ごとに Work Items table の sparse GSI `WorkItemNotificationDueIndex`（partition `notificationScheduleShard` の16 shard、sort `notificationDueKey`）を query し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。index に載るのは archive されていない未完了の Work Item のうち、期限があるもの（sort key は期限日）と着手中のもの（sort key は `0000-00-00` で毎回読む）だけです。完了・archive・期限の削除で index から外れるため、読み取り量は Work Item の総数ではなく、期限が近い・超過した・着手中の Work Item の数に比例します。query 範囲は今日（UTC）+ 366 日までで、page 上限はありません。Customer 完了通知の marker は `WorkItemCustomerCompletionPreparationIndex`（KEYS_ONLY）から読みます。工数の督促は Project directory の Team 一覧を1日1回だけ読み、`NOTIFICATION_SCHEDULE_MAX_PAGES` は Planning の index と directory の読み取りにだけ使います。index 属性のない既存 row は次に更新されたときに index に入ります。既存 row への一括付与は #365 の migration 契約で行います。上限到達などで失敗した場合も例外として handler 内で retry され、最終失敗は `ScheduledJobsDlq` に保存されます。DLQ message の error message に失敗した job 名が入ります。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査して再実行してください。`CollaborationProjectionDlqUrl` と `ScheduledJobsDlqUrl` の滞留、Inbox の unread count も監視します。
 
 ## Scheduled jobs
 

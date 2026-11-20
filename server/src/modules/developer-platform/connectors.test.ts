@@ -59,6 +59,8 @@ describe('ConnectorRegistry', () => {
     const registry = new ConnectorRegistry([createAdapter()])
     expect(registry.get('github').definition.category).toBe('source-control')
     expect(() => registry.get('slack')).toThrow(ConnectorAdapterError)
+    expect(registry.listProviders()).toEqual(['github'])
+    expect(new ConnectorRegistry().listProviders()).toEqual([])
   })
 
   test('rejects adapter metadata or resource capabilities that drift from the catalog', () => {

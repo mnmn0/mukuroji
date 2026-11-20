@@ -37,6 +37,7 @@ export const collaborationMessages = {
   'collaboration.composer.discardConfirm': '保存していないコメントの下書きを破棄しますか？',
   'collaboration.composer.targetUnavailable': 'このコメントは現在編集できません。入力した下書きは下に保持しています。',
   'collaboration.composer.discardDraft': '下書きを破棄',
+  'collaboration.composer.sessionDraftRestored': 'セッションが切れる前に書いていたコメントを戻しました。内容を確認して送信してください。',
   'collaboration.comment.reply': '返信',
   'collaboration.comment.edit': '編集',
   'collaboration.comment.delete': '削除',

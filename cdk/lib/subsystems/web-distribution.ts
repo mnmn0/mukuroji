@@ -14,6 +14,12 @@ export const WEB_API_PATH_PATTERN = '/api/*';
 /** Origin header carrying the secret that proves a request came through CloudFront. */
 export const EDGE_ORIGIN_SECRET_HEADER = 'x-mukuroji-edge-secret';
 
+/** Days a release copy under `releases/<commit SHA>/` stays restorable after its last upload. */
+export const WEB_RELEASE_RETENTION_DAYS = 180;
+
+/** Days a replaced or deleted Web file stays recoverable as a noncurrent version. */
+export const WEB_NONCURRENT_VERSION_RETENTION_DAYS = 30;
+
 /** Origin header carrying the viewer address CloudFront observed. */
 export const EDGE_VIEWER_ADDRESS_HEADER = 'x-mukuroji-viewer-address';
 
@@ -244,8 +250,12 @@ export type WebDistributionResources = Readonly<{
 /**
  * Serves the Web app and the API from one CloudFront domain.
  *
- * The built SPA lives in a private bucket read through origin access
- * control. `/api/*` goes to the HTTP API without caching, so the browser
+ * The built SPA lives in a private, versioned bucket read through origin
+ * access control. Release copies under `releases/` expire after
+ * {@link WEB_RELEASE_RETENTION_DAYS} days, and replaced or deleted files stay
+ * recoverable for {@link WEB_NONCURRENT_VERSION_RETENTION_DAYS} days.
+ * `scripts/deploy-web.sh` removes hashed `assets/` files that no kept release
+ * uses, because an age-based rule would also expire assets of a live release. `/api/*` goes to the HTTP API without caching, so the browser
  * calls the API on the same origin and needs no CORS. CloudFront adds the
  * viewer address and an origin secret to each API request, so rate limits and
  * enterprise IP policies see the user's address instead of an edge address.
@@ -269,8 +279,27 @@ export function buildWebDistribution(
     blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
     encryption: s3.BucketEncryption.S3_MANAGED,
     enforceSSL: true,
+    lifecycleRules: [
+      {
+        expiration: cdk.Duration.days(WEB_RELEASE_RETENTION_DAYS),
+        id: 'ExpireOldWebReleases',
+        prefix: 'releases/',
+      },
+      {
+        abortIncompleteMultipartUploadAfter: cdk.Duration.days(7),
+        id: 'ExpireReplacedWebFiles',
+        noncurrentVersionExpiration: cdk.Duration.days(
+          WEB_NONCURRENT_VERSION_RETENTION_DAYS,
+        ),
+      },
+      {
+        expiredObjectDeleteMarker: true,
+        id: 'RemoveExpiredWebDeleteMarkers',
+      },
+    ],
     objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
     removalPolicy: cdk.RemovalPolicy.RETAIN,
+    versioned: true,
   });
   const spaRoutingFunction = new cloudfront.Function(scope, 'WebSpaRoutingFunction', {
     code: cloudfront.FunctionCode.fromInline(SPA_ROUTING_FUNCTION_CODE),

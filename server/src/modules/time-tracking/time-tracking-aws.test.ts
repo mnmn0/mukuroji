@@ -82,7 +82,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
     expect(entries.map((candidate) => candidate.id)).toEqual([entry.id])
     expect(commands[0]?.input.IndexName).toBe('TimeEntryTeamDateIndex')
     expect(commands[0]?.input.KeyConditionExpression).toBe(
-      'teamId = :teamId AND startAt >= :queryFrom AND startAt < :queryTo',
+      'teamId = :teamId AND startAt BETWEEN :queryFrom AND :queryTo',
     )
     expect(commands[0]?.input.ExpressionAttributeValues).toEqual({
       ':teamId': 'team-1',

@@ -125,6 +125,11 @@ export type IssueCollaborationPanelProps = {
   className?: string
   /** Renders extra read-only details under a comment body, such as an agent report. */
   renderCommentDetails?: (comment: TeamIssueComment) => ReactNode
+  /**
+   * Identifies this Work Item's new-comment input, so an unsent comment survives an ended
+   * session and comes back after the same account signs in again.
+   */
+  commentSessionDraftKey?: string
 }
 
 /**
@@ -140,6 +145,7 @@ export function IssueCollaborationPanel({
   aiAssistance,
   artifacts,
   className = '',
+  commentSessionDraftKey,
   contextDraft: externalContextDraft,
   controller,
   currentMemberKey,
@@ -497,6 +503,7 @@ export function IssueCollaborationPanel({
           <IssueConversationTab
             artifacts={artifacts}
             renderCommentDetails={renderCommentDetails}
+            {...(commentSessionDraftKey ? { sessionDraftKey: commentSessionDraftKey } : {})}
             canAcceptResolution={
               !readOnlyMessage && controller.context.capabilities.canAcceptResolution
             }

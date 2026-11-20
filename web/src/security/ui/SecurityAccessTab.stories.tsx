@@ -1,6 +1,9 @@
+import type { ComponentProps } from 'react'
+import { useState } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import { createTranslator } from '../../shared/i18n/i18n'
+import type { CreateEnterpriseMemberRoleAssignmentInput } from '../api'
 import { enterpriseSecuritySnapshotFixture } from '../fixtures'
 import type { EnterpriseSecurityScopeOption } from '../model/enterpriseSecurityForms'
 import { SecurityAccessTab } from './SecurityAccessTab'
@@ -28,8 +31,10 @@ const meta = {
     snapshot: enterpriseSecuritySnapshotFixture,
     t: createTranslator('en'),
     onCreateMapping: fn(async () => undefined),
+    onCreateMemberRoleAssignment: fn(async () => undefined),
     onCreateRole: fn(async () => undefined),
     onDeleteMapping: fn(async () => undefined),
+    onDeleteMemberRoleAssignment: fn(async () => undefined),
     onPreviewRoleImpact: fn(async () => ({
       assignmentCount: 0,
       blocking: false,
@@ -77,5 +82,75 @@ export const CreateMappingInteraction: Story = {
         roleId: 'workspace:member',
       }),
     )
+  },
+}
+
+/**
+ * Renders the access tab with a snapshot that keeps the member assignments the story creates.
+ *
+ * @param props - Access tab props from the story args.
+ * @returns The access tab whose assignment list shows each created assignment.
+ */
+function AccessTabWithAssignments(props: ComponentProps<typeof SecurityAccessTab>) {
+  const [snapshot, setSnapshot] = useState(props.snapshot)
+
+  /**
+   * Sends the assignment to the story spy, then adds it to the rendered snapshot.
+   *
+   * @param input - Assignment that the form submitted.
+   */
+  const createAssignment = async (input: CreateEnterpriseMemberRoleAssignmentInput) => {
+    await props.onCreateMemberRoleAssignment?.(input)
+    setSnapshot((current) => ({
+      ...current,
+      memberRoleAssignments: [
+        ...current.memberRoleAssignments,
+        {
+          id: `story-${input.memberKey}-${input.roleId}`,
+          memberKey: input.memberKey,
+          roleId: input.roleId,
+          scopeId: input.scopeId,
+          scopeType: input.scopeType,
+        },
+      ],
+    }))
+  }
+
+  return (
+    <SecurityAccessTab
+      {...props}
+      snapshot={snapshot}
+      onCreateMemberRoleAssignment={createAssignment}
+    />
+  )
+}
+
+/** Assigns the auditor role to one member and shows it in the member assignment list. */
+export const AssignMemberRole: Story = {
+  args: {
+    t: createTranslator('ja'),
+  },
+  render: (args) => <AccessTabWithAssignments {...args} />,
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const form = within(canvas.getByTestId('security-member-assignment-form'))
+
+    await userEvent.selectOptions(form.getByLabelText('メンバー'), 'auditor@example.com')
+    await userEvent.selectOptions(form.getByLabelText('ロール'), 'workspace:auditor')
+    await userEvent.click(form.getByRole('button', { name: '割り当てを追加' }))
+
+    await expect(args.onCreateMemberRoleAssignment).toHaveBeenCalledWith({
+      memberKey: 'auditor@example.com',
+      roleId: 'workspace:auditor',
+      scopeId: 'workspace-demo',
+      scopeType: 'workspace',
+    })
+    const table = within(canvas.getByTestId('security-member-assignment-table'))
+    const createdRow = (await table.findAllByRole('row')).find((row) => {
+      const cells = within(row)
+      return cells.queryByText(/auditor@example\.com/) !== null &&
+        cells.queryByText('監査担当') !== null
+    })
+    await expect(createdRow).toBeDefined()
   },
 }

@@ -64,6 +64,37 @@ test('serves the SPA from a private bucket through origin access control', () =>
   }));
 });
 
+test('versions the Web bucket and expires old releases and replaced files', () => {
+  const webBuckets = Object.entries(
+    synthesizedTemplate.findResources('AWS::S3::Bucket'),
+  ).filter(([logicalId]) => logicalId.startsWith('WebBucket'));
+  expect(webBuckets).toHaveLength(1);
+  const properties = webBuckets[0][1].Properties;
+
+  expect(properties.VersioningConfiguration).toEqual({ Status: 'Enabled' });
+  expect(properties.LifecycleConfiguration).toEqual({
+    Rules: [
+      {
+        ExpirationInDays: 180,
+        Id: 'ExpireOldWebReleases',
+        Prefix: 'releases/',
+        Status: 'Enabled',
+      },
+      {
+        AbortIncompleteMultipartUpload: { DaysAfterInitiation: 7 },
+        Id: 'ExpireReplacedWebFiles',
+        NoncurrentVersionExpiration: { NoncurrentDays: 30 },
+        Status: 'Enabled',
+      },
+      {
+        ExpiredObjectDeleteMarker: true,
+        Id: 'RemoveExpiredWebDeleteMarkers',
+        Status: 'Enabled',
+      },
+    ],
+  });
+});
+
 /**
  * Returns the code of the one CloudFront Function whose logical ID starts with the prefix.
  *

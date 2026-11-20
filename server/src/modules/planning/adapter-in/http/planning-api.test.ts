@@ -780,6 +780,189 @@ test('filters legacy Planning update targets by their Team-qualified Project ACL
   }])
 })
 
+/**
+ * Seeds Workspace, Team, readable Project, and private Project Planning entities with dependencies.
+ *
+ * @param planning - In-memory Planning client receiving the graph.
+ */
+async function seedLegacyPlanningScopeGraph(planning: InMemoryPlanningClient): Promise<void> {
+  const workspaceId = 'user#demo@example.com'
+  const entities = [
+    { id: 'ws-portfolio', type: 'portfolio' as const },
+    { id: 'ws-roadmap', type: 'roadmap' as const, parentId: 'ws-portfolio' },
+    { id: 'team-roadmap', type: 'roadmap' as const, parentId: 'ws-portfolio', teamId: 'core-team' },
+    {
+      id: 'refero-phase',
+      type: 'phase' as const,
+      parentId: 'ws-roadmap',
+      teamId: 'core-team',
+      projectId: 'refero',
+    },
+    {
+      id: 'refero-milestone',
+      type: 'milestone' as const,
+      parentId: 'refero-phase',
+      teamId: 'core-team',
+      projectId: 'refero',
+    },
+    {
+      id: 'private-phase',
+      type: 'phase' as const,
+      parentId: 'ws-roadmap',
+      teamId: 'core-team',
+      projectId: 'private-project',
+    },
+    {
+      id: 'private-milestone',
+      type: 'milestone' as const,
+      parentId: 'private-phase',
+      teamId: 'core-team',
+      projectId: 'private-project',
+    },
+  ]
+  let revision = 0
+  for (const entity of entities) {
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput(entity.id, revision++),
+      title: `Entity ${entity.id}`,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+      teamId: undefined,
+      projectId: undefined,
+      ...(entity.type === 'milestone'
+        ? {
+            baseline: { startDate: '2026-07-14', endDate: '2026-07-14' },
+            forecast: { startDate: '2026-07-14', endDate: '2026-07-14' },
+          }
+        : {}),
+      ...entity,
+    }, { workItems: [] })
+  }
+  for (const [id, predecessorId, successorId] of [
+    ['refero-phase-to-milestone', 'refero-phase', 'refero-milestone'],
+    ['private-phase-to-refero', 'private-phase', 'refero-milestone'],
+    ['refero-to-private-milestone', 'refero-milestone', 'private-milestone'],
+    ['team-to-private', 'team-roadmap', 'private-phase'],
+  ] as const) {
+    await planning.createDependency(workspaceId, {
+      id,
+      predecessorId,
+      successorId,
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: revision++,
+    }, { workItems: [] })
+  }
+}
+
+test('filters legacy Planning entities and dependencies by Project, Team, and Workspace scope', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const body: PlanningSnapshot = await response.json()
+  expect(body.entities.map((entity) => [entity.id, entity.parentId ?? null])).toEqual([
+    ['refero-milestone', 'refero-phase'],
+    ['refero-phase', 'ws-roadmap'],
+    ['team-roadmap', 'ws-portfolio'],
+    ['ws-portfolio', null],
+    ['ws-roadmap', 'ws-portfolio'],
+  ])
+  expect(body.dependencies.map((dependency) => dependency.id)).toEqual([
+    'refero-phase-to-milestone',
+  ])
+  const visibleIds = new Set(body.entities.map((entity) => entity.id))
+  expect(body.criticalPath.entityIds.every((entityId) => visibleIds.has(entityId))).toBe(true)
+  expect(Object.keys(body.criticalPath.slackByEntityId).every((entityId) =>
+    visibleIds.has(entityId)
+  )).toBe(true)
+})
+
+test('hides Workspace-scoped and other Project Planning entities from a legacy guest', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'guest',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const body: PlanningSnapshot = await response.json()
+  expect(body.entities.map((entity) => [entity.id, entity.parentId ?? null])).toEqual([
+    ['refero-milestone', 'refero-phase'],
+    ['refero-phase', null],
+    ['team-roadmap', null],
+  ])
+  expect(body.dependencies.map((dependency) => dependency.id)).toEqual([
+    'refero-phase-to-milestone',
+  ])
+})
+
+test('hides Planning entities and Work Items when a legacy Project ID belongs to several Teams', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+    additionalTeams: [{
+      id: 'other-team',
+      name: 'Other Team',
+      projects: [{ id: 'refero', name: 'Other Refero', tone: 'purple' }],
+    }],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const body: PlanningSnapshot = await response.json()
+  expect(body.entities.map((entity) => entity.id)).toEqual(['ws-portfolio', 'ws-roadmap'])
+  expect(body.dependencies).toEqual([])
+  expect(body.workItems).toEqual([])
+  expect(body.workItemLinks).toEqual([])
+})
+
+test('returns no Planning entities to a legacy guest without Project access', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'guest',
+    projectAccesses: [],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const body: PlanningSnapshot = await response.json()
+  expect(body.entities).toEqual([])
+  expect(body.dependencies).toEqual([])
+  expect(body.criticalPath).toEqual({ entityIds: [], totalDurationDays: 0, slackByEntityId: {} })
+})
+
 test('commits Inbox audit events with update publishes and comments', async () => {
   await withTestEnvironment({ AUDIT_EVENTS_TABLE_NAME: 'AuditEventsTable' }, async () => {
     configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
@@ -1587,7 +1770,8 @@ test('requires the exact Team-qualified Project access when Project IDs are dupl
   const teamScopedInitiativeDenied = await planningApiRequest(
     '/api/planning/updates?targetType=initiative&entityId=core-team-initiative',
   )
-  expect(teamScopedInitiativeDenied.status).toBe(403)
+  // The Team-scoped Initiative is outside the legacy Planning snapshot, so it is not disclosed.
+  expect(teamScopedInitiativeDenied.status).toBe(404)
   const allowed = await planningApiRequest(
     '/api/planning/updates?targetType=project&teamId=other-team&projectId=refero',
   )

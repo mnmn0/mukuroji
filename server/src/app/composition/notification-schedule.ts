@@ -1,7 +1,11 @@
 import {
   createDynamoDbProjectManagerReader,
+  createDynamoDbScheduledWorkItemSource,
   createNotificationScheduleHandler,
 } from '../../modules/notifications'
+import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
+import { DynamoDbTimeTrackingRepository } from '../../modules/time-tracking'
+import { createTimesheetReader } from './timesheet-reminders'
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
@@ -50,11 +54,22 @@ export function createRetentionAwareNotificationScheduleHandler(
 export function createProductionNotificationScheduleHandler() {
   const documentClient = createDynamoDbDocumentClient(createDynamoDbClient())
   const customerClient = new DynamoDbCustomerClient({ documentClient })
-  const projectDirectoryTableName =
-    loadServerConfig().environment.PROJECT_DIRECTORY_TABLE_NAME?.trim()
+  const environment = loadServerConfig().environment
+  const projectDirectoryTableName = environment.PROJECT_DIRECTORY_TABLE_NAME?.trim()
   if (!projectDirectoryTableName) throw new Error('PROJECT_DIRECTORY_TABLE_NAME is required.')
+  const notificationsTableName = environment.NOTIFICATIONS_TABLE_NAME?.trim()
+  if (!notificationsTableName) throw new Error('NOTIFICATIONS_TABLE_NAME is required.')
+  const analyticsTableName = environment.ANALYTICS_TABLE_NAME?.trim()
+  if (!analyticsTableName) throw new Error('ANALYTICS_TABLE_NAME is required.')
+  const workItemsTableName = environment.WORK_ITEMS_TABLE_NAME?.trim()
+  if (!workItemsTableName) throw new Error('WORK_ITEMS_TABLE_NAME is required.')
   const notificationHandler = createNotificationScheduleHandler(
     documentClient,
+    createDynamoDbScheduledWorkItemSource({
+      documentClient,
+      workItemsTableName,
+      projectDirectoryTableName,
+    }),
     async ({ workspaceId, teamId, workItemId }) => {
       await customerClient.prepareCompletionNotifications(
         workspaceId,
@@ -67,6 +82,8 @@ export function createProductionNotificationScheduleHandler() {
       documentClient,
       tableName: projectDirectoryTableName,
     }),
+    new DynamoDbReminderSettingsStore(documentClient, notificationsTableName),
+    createTimesheetReader(new DynamoDbTimeTrackingRepository(analyticsTableName, documentClient)),
   )
   return createRetentionAwareNotificationScheduleHandler(
     customerClient,

@@ -1,4 +1,5 @@
 import type { ComponentType } from 'react'
+import { CONNECTOR_OAUTH_CALLBACK_APP_PATH } from '@mukuroji/contracts'
 import { Navigate, createBrowserRouter, type LazyRouteFunction, type RouteObject } from 'react-router'
 import { LoginPage } from '../pages/auth/LoginPage'
 import { NotFoundPage } from '../pages/public/NotFoundPage'
@@ -94,8 +95,24 @@ export const appRoutes: RouteObject[] = [
                     lazy: lazyPage(async () => (await import('../pages/workspace/SettingsPage')).SettingsPage),
                   },
                   {
+                    path: '/settings/personal',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/SettingsPage')).SettingsPage),
+                  },
+                  {
+                    path: '/settings/workspace',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/SettingsPage')).SettingsPage),
+                  },
+                  {
+                    path: '/settings/team',
+                    lazy: lazyPage(async () => (await import('../pages/workspace/SettingsPage')).SettingsPage),
+                  },
+                  {
                     path: '/settings/agent-connection',
                     lazy: lazyPage(async () => (await import('../pages/workspace/AgentConnectionPage')).AgentConnectionPage),
+                  },
+                  {
+                    path: CONNECTOR_OAUTH_CALLBACK_APP_PATH,
+                    lazy: lazyPage(async () => (await import('../pages/workspace/ConnectorOAuthCallbackPage')).ConnectorOAuthCallbackPage),
                   },
                   {
                     path: '/settings/security',

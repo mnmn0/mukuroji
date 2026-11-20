@@ -650,11 +650,29 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
             'Workspace member was not found.',
           )
         }
+        const enterpriseSnapshot =
+          await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
         requireEnterpriseExternalAccessAllowed(
-          await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId),
+          enterpriseSnapshot,
           existingMember.email,
           role,
         )
+        // Direct role assignments replace the Workspace role during authorization, so an owner
+        // or admin with assignments would not get the role they were given.
+        if (
+          (role === 'owner' || role === 'admin') &&
+          enterpriseSnapshot.roleAssignments.some((assignment) =>
+            assignment.principalKind === 'member' &&
+            assignment.source === 'direct' &&
+            assignment.principalId === existingMember.memberKey
+          )
+        ) {
+          throw new WorkspaceAccessError(
+            409,
+            'WorkspaceMemberRoleAssignmentsPresent',
+            'Remove the member role assignments before making this member an owner or admin.',
+          )
+        }
       }
       const auditContext = createWorkspaceMutationContext(
         c,

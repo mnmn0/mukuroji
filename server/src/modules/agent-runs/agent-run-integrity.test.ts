@@ -1,11 +1,14 @@
 import { describe, expect, test } from 'bun:test'
-import { QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb'
+import { GetCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb'
 import {
   checkAgentRunPartition,
   runAgentRunsIntegrityCheck,
   summarizeAgentRunIntegrityFindings,
   type AgentRunIntegrityClient,
   type AgentRunIntegrityFailureCode,
+  type AgentRunWorkItemLookup,
+  type AgentRunWorkItemReference,
+  type AgentRunWorkItemState,
 } from './adapter-out/dynamodb/agent-run-integrity'
 import {
   DynamoDbAgentRunStore,
@@ -329,7 +332,7 @@ describe('checkAgentRunPartition', () => {
  * @returns Client and sent commands.
  */
 function createFakeClient(partitions: Record<string, Record<string, unknown>[]>, pageSize = 2) {
-  const commands: Array<QueryCommand | ScanCommand> = []
+  const commands: Array<QueryCommand | ScanCommand | GetCommand> = []
   const page = (items: Record<string, unknown>[], startKey: Record<string, unknown> | undefined, limit: number | undefined) => {
     const offset = typeof startKey?.offset === 'number' ? startKey.offset : 0
     const next = offset + Math.min(pageSize, limit ?? pageSize)
@@ -341,6 +344,12 @@ function createFakeClient(partitions: Record<string, Record<string, unknown>[]>,
       if (command instanceof ScanCommand) {
         const all = Object.entries(partitions).flatMap(([key, rows]) => rows.map(() => ({ directoryTeamId: key })))
         return page(all, command.input.ExclusiveStartKey, command.input.Limit)
+      }
+      if (command instanceof GetCommand) {
+        const key = command.input.Key
+        const rows = typeof key?.directoryTeamId === 'string' ? partitions[key.directoryTeamId] ?? [] : []
+        const item = rows.find((row) => row.recordKey === key?.recordKey)
+        return item === undefined ? {} : { Item: item }
       }
       const key = command.input.ExpressionAttributeValues?.[':partition']
       return page(typeof key === 'string' ? partitions[key] ?? [] : [], command.input.ExclusiveStartKey, command.input.Limit)
@@ -456,7 +465,7 @@ describe('runAgentRunsIntegrityCheck', () => {
     })
     expect(evidence.status).toBe('incomplete')
     expect(evidence.reads.items).toBe(1)
-    expect(commands.map((command) => command.input.Limit)).toEqual([1])
+    expect(commands.filter((command) => command instanceof QueryCommand).map((command) => command.input.Limit)).toEqual([1])
   })
 
   test('stops when a page repeats its continuation key', async () => {
@@ -486,5 +495,98 @@ describe('runAgentRunsIntegrityCheck', () => {
       now,
     })).rejects.toThrow(RangeError)
     expect(commands).toEqual([])
+  })
+})
+
+/**
+ * Builds a Work Item lookup that serves fixed states and records each read.
+ *
+ * @param states - State by Work Item ID; Work Items not listed are open.
+ * @returns Lookup and the reads it served.
+ */
+function createWorkItemLookup(states: Record<string, AgentRunWorkItemState>) {
+  const reads: AgentRunWorkItemReference[] = []
+  const lookup: AgentRunWorkItemLookup = {
+    async read(workItem) {
+      reads.push(workItem)
+      return states[workItem.workItemId] ?? { kind: 'present', archived: false }
+    },
+  }
+  return { lookup, reads }
+}
+
+describe('runAgentRunsIntegrityCheck with the Work Item check', () => {
+  const bounds = { pageSize: 100, maxPages: 100, maxItems: 1000 }
+  const now = new Date('2026-11-20T00:00:00.000Z')
+  const activeSample = { directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1', runId: runId(1) }
+
+  test('reads the Work Item of each active run and passes an open one', async () => {
+    const { client, commands } = createFakeClient({ [partition]: healthyRows() }, 100)
+    const { lookup, reads } = createWorkItemLookup({})
+    const evidence = await runAgentRunsIntegrityCheck({
+      client, tableName: 'agent-runs', teams: [team], bounds, correlationId: 'corr-w1', now, workItems: lookup,
+    })
+    expect(evidence.status).toBe('pass')
+    expect(evidence.counts).toMatchObject({ activeRuns: 1, workItemsChecked: 1, unconfirmedFindings: 0 })
+    expect(reads).toEqual([{ directoryId: 'workspace-1', teamId: 'core', workItemId: 'task-1' }])
+    expect(commands.some((command) => command instanceof GetCommand)).toBe(false)
+  })
+
+  test.each<[string, AgentRunWorkItemState, AgentRunIntegrityFailureCode]>([
+    ['deleted', { kind: 'missing' }, 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED'],
+    ['archived', { kind: 'present', archived: true }, 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_ARCHIVED'],
+  ])('reports an active run on a %s Work Item after reading the run again', async (_name, state, code) => {
+    const { client, commands } = createFakeClient({ [partition]: healthyRows() }, 100)
+    const { lookup } = createWorkItemLookup({ 'task-1': state })
+    const evidence = await runAgentRunsIntegrityCheck({
+      client, tableName: 'agent-runs', teams: [team], bounds, correlationId: 'corr-w2', now, workItems: lookup,
+    })
+    expect(evidence.status).toBe('fail')
+    expect(evidence.failures).toEqual([{ code, count: 1, samples: [activeSample] }])
+    const gets = commands.filter((command) => command instanceof GetCommand)
+    expect(gets.map((command) => command.input)).toEqual([{
+      TableName: 'agent-runs',
+      Key: { directoryTeamId: partition, recordKey: `agent-run#${runId(1)}` },
+      ConsistentRead: true,
+    }])
+    expect(JSON.stringify(evidence)).not.toContain('member-secret-1')
+  })
+
+  test('reports a Work Item row it cannot read without reading the run again', async () => {
+    const { client, commands } = createFakeClient({ [partition]: healthyRows() }, 100)
+    const { lookup } = createWorkItemLookup({ 'task-1': { kind: 'malformed' } })
+    const evidence = await runAgentRunsIntegrityCheck({
+      client, tableName: 'agent-runs', teams: [team], bounds, correlationId: 'corr-w3', now, workItems: lookup,
+    })
+    expect(evidence.failures).toEqual([{ code: 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_UNREADABLE', count: 1, samples: [activeSample] }])
+    expect(commands.some((command) => command instanceof GetCommand)).toBe(false)
+  })
+
+  test('does not report a run that closed after its Work Item was read', async () => {
+    const rows = healthyRows()
+    const released = serializeRun(finishAgentRun(createRun(1, 'task-1'), 'released', 'person', finishedAt))
+    const { client } = createFakeClient({ [partition]: rows }, 100)
+    const reread: AgentRunIntegrityClient = {
+      // The archive transaction released the run between the partition read and the run read.
+      send: async (command) => command instanceof GetCommand ? { Item: released } : client.send(command),
+    }
+    const { lookup } = createWorkItemLookup({ 'task-1': { kind: 'present', archived: true } })
+    const evidence = await runAgentRunsIntegrityCheck({
+      client: reread, tableName: 'agent-runs', teams: [team], bounds, correlationId: 'corr-w4', now, workItems: lookup,
+    })
+    expect(evidence.status).toBe('pass')
+    expect(evidence.counts).toMatchObject({ workItemsChecked: 1, unconfirmedFindings: 1 })
+  })
+
+  test('stops at the page bound while reading Work Items', async () => {
+    const { client } = createFakeClient({ [partition]: healthyRows() }, 100)
+    const { lookup, reads } = createWorkItemLookup({})
+    const evidence = await runAgentRunsIntegrityCheck({
+      client, tableName: 'agent-runs', teams: [team], bounds: { pageSize: 100, maxPages: 1, maxItems: 100 }, correlationId: 'corr-w5', now, workItems: lookup,
+    })
+    expect(evidence.status).toBe('incomplete')
+    expect(evidence.incompleteReason).toBe('page-limit')
+    expect(evidence.counts).toMatchObject({ partitions: 1, workItemsChecked: 0 })
+    expect(reads).toEqual([])
   })
 })

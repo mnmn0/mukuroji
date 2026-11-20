@@ -273,6 +273,8 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
     async actualDates() { return undefined },
     async taskKey() { return undefined },
     async hierarchy() { return undefined },
+    async relatedDocuments() { return undefined },
+    async document() { throw new AgentTaskError('not_found', 'Not found') },
     ...overrides,
   }
   /** Releases a run as a person would from the Web application. */
@@ -924,6 +926,84 @@ describe('agent task lifecycle', () => {
       task: { id: 'one' },
       hierarchy: { parentWorkItemId: 'phase', childWorkItemIds: ['sub'], wbsNumber: '2.1' },
     })
+  })
+
+  test('shows the first page of linked Documents and keeps get_task working without them', async () => {
+    const reads: { id: string; cursor?: string; limit?: number }[] = []
+    const page = { items: [{ id: 'spec', title: 'Spec' }], hasMore: true, nextCursor: 'next' }
+    const { service } = fixture([task('one')], {
+      async relatedDocuments(id, cursor, limit) {
+        reads.push({ id, ...(cursor === undefined ? {} : { cursor }), ...(limit === undefined ? {} : { limit }) })
+        return page
+      },
+    })
+    expect(await service.get('one')).toMatchObject({ task: { id: 'one' }, relatedDocuments: page })
+    expect(reads).toEqual([{ id: 'one', limit: 20 }])
+
+    const oldServer = fixture([task('one')])
+    expect(await oldServer.service.get('one')).toMatchObject({ relatedDocuments: null })
+    const noDocumentPermission = fixture([task('one')], {
+      async relatedDocuments() { throw new AgentTaskError('forbidden', 'Denied') },
+    })
+    expect(await noDocumentPermission.service.get('one')).toMatchObject({ relatedDocuments: null })
+    const outage = fixture([task('one')], {
+      async relatedDocuments() { throw new AgentTaskError('unavailable', 'Down', true) },
+    })
+    await expect(outage.service.get('one')).rejects.toMatchObject({ code: 'unavailable' })
+  })
+
+  test('reads linked Documents only through tasks inside the configured Project', async () => {
+    const reads: string[] = []
+    const content = {
+      schemaVersion: 1 as const, id: 'spec', kind: 'page' as const, title: 'Spec', revision: 2,
+      updatedAt: '2026-09-01T00:00:00.000Z', format: 'markdown' as const, content: '# Spec',
+    }
+    const api = {
+      async relatedDocuments(id: string, cursor?: string) {
+        reads.push(`list:${id}:${cursor ?? ''}`)
+        return { items: [{ id: 'spec', title: 'Spec' }], hasMore: false }
+      },
+      async document(id: string, documentId: string) {
+        reads.push(`read:${id}:${documentId}`)
+        if (documentId === 'board') throw new AgentTaskError('invalid_request', 'Rejected')
+        if (documentId !== 'spec') throw new AgentTaskError('not_found', 'Not found')
+        return content
+      },
+    }
+    const { service } = fixture([task('one', { assignedProjectId: 'project-a' }), task('two', { assignedProjectId: 'project-b' })], api)
+    const scoped = fixture([task('one', { assignedProjectId: 'project-a' }), task('two', { assignedProjectId: 'project-b' })], api)
+    const scopedService = createAgentTasks(scoped.api, { ...baseScope, assignedProjectId: 'project-a' })
+
+    expect(await service.documents('one', 'cursor')).toEqual({ items: [{ id: 'spec', title: 'Spec' }], hasMore: false })
+    expect(await service.document('one', 'spec')).toEqual(content)
+    await expect(service.document('one', 'missing')).rejects.toMatchObject({ code: 'not_found' })
+    await expect(service.document('one', 'board')).rejects.toMatchObject({ code: 'unsupported_document' })
+    await expect(scopedService.documents('two')).rejects.toMatchObject({ code: 'out_of_scope' })
+    await expect(scopedService.document('two', 'spec')).rejects.toMatchObject({ code: 'out_of_scope' })
+    expect(reads).toEqual(['list:one:cursor', 'read:one:spec', 'read:one:missing', 'read:one:board'])
+
+    const oldServer = fixture([task('one')])
+    await expect(oldServer.service.documents('one')).rejects.toMatchObject({ code: 'unsupported' })
+
+    // A task that moves out of the configured Project while its Documents are read returns nothing.
+    const moving = fixture([task('one', { assignedProjectId: 'project-a' })])
+    const move = () => moving.records.set('one', task('one', { assignedProjectId: 'project-b' }))
+    const movingService = createAgentTasks({
+      ...moving.api,
+      async relatedDocuments() {
+        move()
+        return { items: [{ id: 'spec', title: 'Spec' }], hasMore: false }
+      },
+      async document() {
+        move()
+        return content
+      },
+    }, { ...baseScope, assignedProjectId: 'project-a' })
+    await expect(movingService.get('one')).rejects.toMatchObject({ code: 'out_of_scope' })
+    moving.records.set('one', task('one', { assignedProjectId: 'project-a' }))
+    await expect(movingService.documents('one')).rejects.toMatchObject({ code: 'out_of_scope' })
+    moving.records.set('one', task('one', { assignedProjectId: 'project-a' }))
+    await expect(movingService.document('one', 'spec')).rejects.toMatchObject({ code: 'out_of_scope' })
   })
 
   test('sends the estimate on its own and passes remaining effort and progress through', async () => {

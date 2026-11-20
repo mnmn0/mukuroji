@@ -29,6 +29,7 @@ import {
   expect,
   test,
 } from 'bun:test'
+import { generateKeyPairSync, sign } from 'node:crypto'
 
 afterEach(() => {
   resetTestApp()
@@ -1676,6 +1677,87 @@ test('refreshes and revokes tokens with the issuing app client', async () => {
       input: { Token: 'sso-refresh-token', ClientId: 'mukuroji-sso-client' },
     },
   ])
+})
+
+test('reads an SSO access token user with AdminGetUser after verifying it with the pool JWKS', async () => {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  const issuer = 'https://cognito-idp.ap-northeast-1.amazonaws.com/ap-northeast-1_ssoverify'
+  const encode = (value: Record<string, unknown>) =>
+    Buffer.from(JSON.stringify(value)).toString('base64url')
+  const createToken = (claims: Record<string, unknown>) => {
+    const signingInput = `${encode({ alg: 'RS256', kid: 'kid-1' })}.${encode({
+      sub: 'sub-1',
+      username: 'EnterpriseOidc_User-1',
+      client_id: 'mukuroji-sso-client',
+      iss: issuer,
+      token_use: 'access',
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+      ...claims,
+    })}`
+    return `${signingInput}.${sign('RSA-SHA256', Buffer.from(signingInput), privateKey).toString('base64url')}`
+  }
+  const userRecords: Array<Record<string, unknown>> = [
+    { Username: 'EnterpriseOidc_User-1', Enabled: true, UserAttributes: [
+      { Name: 'sub', Value: 'sub-1' },
+      { Name: 'email', Value: 'user@example.com' },
+    ] },
+    { Username: 'EnterpriseOidc_User-1', Enabled: false, UserAttributes: [
+      { Name: 'sub', Value: 'sub-1' },
+    ] },
+    { Username: 'EnterpriseOidc_User-1', Enabled: true, UserAttributes: [
+      { Name: 'sub', Value: 'sub-other' },
+    ] },
+  ]
+  const commands: Array<{ name: string; input: Record<string, unknown> }> = []
+  const sdkClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      commands.push({ name: command.constructor.name, input: command.input })
+      return userRecords.shift() ?? {}
+    },
+  } as unknown as CognitoIdentityProviderClient
+  const originalFetch = globalThis.fetch
+  const fetchedUrls: string[] = []
+  globalThis.fetch = Object.assign(async (input: string | URL | Request) => {
+    fetchedUrls.push(String(input))
+    return Response.json({
+      keys: [{ ...publicKey.export({ format: 'jwk' }), kid: 'kid-1', alg: 'RS256', use: 'sig' }],
+    })
+  }, { preconnect: originalFetch.preconnect })
+
+  try {
+    await withTestEnvironment({ COGNITO_ISSUER: issuer }, async () => {
+      const client = new AwsCognitoClient(sdkClient, 'ap-northeast-1_ssoverify', 'mukuroji-client')
+      const token = createToken({})
+
+      await expect(client.getUserFromVerifiedAccessToken(token, 'mukuroji-sso-client'))
+        .resolves.toMatchObject({
+          Username: 'EnterpriseOidc_User-1',
+          UserAttributes: [
+            { Name: 'sub', Value: 'sub-1' },
+            { Name: 'email', Value: 'user@example.com' },
+          ],
+          token: { sub: 'sub-1', username: 'EnterpriseOidc_User-1' },
+        })
+      // A disabled user and a username now held by another identity are both refused.
+      await expect(client.getUserFromVerifiedAccessToken(token, 'mukuroji-sso-client'))
+        .rejects.toMatchObject({ status: 401, code: 'NotAuthorizedException' })
+      await expect(client.getUserFromVerifiedAccessToken(token, 'mukuroji-sso-client'))
+        .rejects.toMatchObject({ status: 401, code: 'NotAuthorizedException' })
+      // A token of the password client is not read through this path.
+      await expect(client.getUserFromVerifiedAccessToken(
+        createToken({ client_id: 'mukuroji-client' }),
+        'mukuroji-sso-client',
+      )).rejects.toMatchObject({ status: 401, code: 'NotAuthorizedException' })
+    })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+
+  expect(fetchedUrls).toEqual([`${issuer}/.well-known/jwks.json`])
+  expect(commands).toEqual(Array.from({ length: 3 }, () => ({
+    name: 'AdminGetUserCommand',
+    input: { UserPoolId: 'ap-northeast-1_ssoverify', Username: 'EnterpriseOidc_User-1' },
+  })))
 })
 
 test('repairs a missing email verification of a confirmed invited user when a reset is requested', async () => {

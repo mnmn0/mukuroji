@@ -8,6 +8,7 @@ import {
 } from '@mukuroji/contracts'
 import {
   DeveloperPlatformApiError,
+  completeDeveloperConnectorOAuth,
   connectDeveloperConnector,
   createDeveloperApiKey,
   createDeveloperExternalLink,
@@ -19,6 +20,7 @@ import {
   dryRunDeveloperImport,
   getDeveloperPlatformResources,
   getPersonalCredentialAdministration,
+  listAvailableDeveloperConnectorProviders,
   listDeveloperExternalLinks,
   listDeveloperSyncConflicts,
   replayDeveloperWebhookDelivery,
@@ -103,6 +105,23 @@ describe('Developer Platform API', () => {
     expect(requests[0]?.init.headers).toMatchObject({
       Authorization: 'Bearer access-token',
     })
+  })
+
+  test('lists the connector providers configured in the environment', async () => {
+    const requests = installFetchRecorder([
+      { provider: 'github', category: 'source-control', name: 'GitHub', capabilities: [] },
+    ])
+
+    await expect(listAvailableDeveloperConnectorProviders('access-token'))
+      .resolves.toEqual(['github'])
+    expect(requests.map(({ url }) => url)).toEqual(['/api/developer/connectors'])
+  })
+
+  test('rejects a connector catalog response without provider identifiers', async () => {
+    installFetchRecorder([{ name: 'GitHub' }])
+
+    await expect(listAvailableDeveloperConnectorProviders('access-token'))
+      .rejects.toBeInstanceOf(DeveloperPlatformApiError)
   })
 
   test('gets the personal credential policy and member-issued key IDs separately', async () => {
@@ -242,6 +261,53 @@ describe('Developer Platform API', () => {
       scopes: ['work-items:read'],
       expiresAt: '2026-10-01T23:59:59.999Z',
     })
+  })
+
+  test('completes a connector OAuth flow with the signed-in member token', async () => {
+    const requests = installFetchRecorder({
+      outcome: 'connected',
+      returnUrl: '/settings?developerSection=connectors&connectorOAuth=connected',
+    })
+
+    await expect(
+      completeDeveloperConnectorOAuth(
+        'access-token',
+        { state: 'signed-state', code: 'provider-code' },
+        mutationContext,
+      ),
+    ).resolves.toEqual({
+      outcome: 'connected',
+      returnUrl: '/settings?developerSection=connectors&connectorOAuth=connected',
+    })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.url).toBe('/api/developer/connector-oauth/complete')
+    expect(requests[0]?.init.method).toBe('POST')
+    expect(new Headers(requests[0]?.init.headers).get('Authorization')).toBe('Bearer access-token')
+    expect(new Headers(requests[0]?.init.headers).get('Idempotency-Key'))
+      .toBe(mutationContext.idempotencyKey)
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
+      state: 'signed-state',
+      code: 'provider-code',
+    })
+  })
+
+  test('rejects a connector OAuth completion that does not match the contract', async () => {
+    for (const body of [
+      { outcome: 'connected', returnUrl: 'https://evil.example/settings' },
+      { outcome: 'connected', returnUrl: '//evil.example/settings' },
+      { outcome: 'unknown', returnUrl: '/settings' },
+      { outcome: 'cancelled' },
+    ]) {
+      installFetchRecorder(body)
+
+      await expect(
+        completeDeveloperConnectorOAuth(
+          'access-token',
+          { state: 'signed-state', cancelled: true },
+          mutationContext,
+        ),
+      ).rejects.toMatchObject({ code: 'InvalidDeveloperPlatformResponse', retryable: false })
+    }
   })
 
   test('connects, recovers, disconnects, and resolves connector conflicts', async () => {

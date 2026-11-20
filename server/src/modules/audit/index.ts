@@ -23,6 +23,7 @@ export {
   createWorkspaceInvitationAuditEntityId,
   createWorkspaceMemberAuditEntityId,
   createWorkspaceMemberAuditEntityIdFromKeyBytes,
+  WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV,
   ensureLocalAuditEventsTable,
   getConfiguredAuditRetentionDays,
   getConfiguredAuditTableName,

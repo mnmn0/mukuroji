@@ -12,11 +12,17 @@ import {
   type PublicWorkItemEffort,
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
+  type PublicDocumentContent,
+  type PublicWorkItemDocument,
+  PUBLIC_WORK_ITEM_DOCUMENT_PAGE_MAX_LIMIT,
   type ApiProblem,
   type ApiProblemCode,
   type ApiProblemViolation,
   type ApiScope,
   type CanonicalWorkItem,
+  type CompleteConnectorOAuthInput,
+  type CompleteConnectorOAuthOutput,
+  CONNECTOR_OAUTH_CALLBACK_APP_PATH,
   type ConnectorAuthorizationOutput,
   type ConnectorDefinition,
   type ConnectorInstallation,
@@ -456,6 +462,51 @@ export type PublicAgentRunListFilters = {
   workItemId?: string
 }
 
+/**
+ * Read-only access to Documents linked to Work Items, for coding agents. Every read evaluates the
+ * credential owner's current Work Item, Project, and Document permissions.
+ */
+export interface PublicDocumentService {
+  /**
+   * Lists one page of Documents linked to a Work Item that the credential owner can view.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param continuation - Internal continuation from the previous page.
+   * @param limit - Maximum number of relations evaluated in this page.
+   * @returns Visible linked Documents and any remaining internal continuation.
+   */
+  listWorkItemDocuments(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<{
+    /** Visible linked Documents in this page. */
+    items: PublicWorkItemDocument[]
+    /** Whether another page exists. */
+    hasMore: boolean
+    /** Internal continuation wrapped by the public API's signed cursor. */
+    nextContinuation?: string
+  }>
+  /**
+   * Reads one Document linked to a Work Item, when the credential owner can view both, and renders
+   * it as Markdown.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item the Document must link.
+   * @param documentId - Document ID.
+   * @returns The Document content.
+   */
+  getWorkItemDocument(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    documentId: string,
+  ): Promise<PublicDocumentContent>
+}
+
 /** Public Agent Run API and the canonical Work Item and run persistence behind it. */
 export interface PublicAgentRunService {
   /**
@@ -684,23 +735,32 @@ export interface ConnectorAuthorizationService {
     input: CreateConnectorInstallationInput,
     operationId?: string,
   ): Promise<ConnectorAuthorizationOutput>
-  /** Signed single-use state と authorization code を検証して OAuth callback を完了します。 */
-  completeCallback(input: {
-    /** Provider が発行した authorization code です。 */
-    code: string
-    /** Authorization 開始時に作成した signed state です。 */
-    state: string
-  }): Promise<{
+  /**
+   * Signed single-use state と authorization code を検証し、flow を開始した user として
+   * OAuth callback を完了します。
+   */
+  completeCallback(
+    input: {
+      /** Provider が発行した authorization code です。 */
+      code: string
+      /** Authorization 開始時に作成した signed state です。 */
+      state: string
+    },
+    actor: DeveloperManagementPrincipal,
+  ): Promise<{
     /** 作成または復旧した secret-free installation です。 */
     installation: ConnectorInstallation
     /** 検証済み application-relative return URL です。 */
     returnUrl: string
   }>
-  /** Provider denial 時も signed state を consume し、検証済み return URL を返します。 */
-  abortCallback(input: {
-    /** Authorization 開始時に作成した signed state です。 */
-    state: string
-  }): Promise<{
+  /** Provider denial 時も flow 開始者の signed state を consume し、検証済み return URL を返します。 */
+  abortCallback(
+    input: {
+      /** Authorization 開始時に作成した signed state です。 */
+      state: string
+    },
+    actor: DeveloperManagementPrincipal,
+  ): Promise<{
     /** 検証済み application-relative return URL です。 */
     returnUrl: string
   }>
@@ -773,6 +833,8 @@ export type PublicApiDependencies = {
   workItems: PublicWorkItemService
   /** Agent Run adapter; Agent Run routes report unavailable when it is not configured. */
   agentRuns?: PublicAgentRunService
+  /** Read-only Document adapter; Document routes report unavailable when it is not configured. */
+  documents?: PublicDocumentService
   /** Public OpenAPI 3.1 document です。 */
   openApiDocument: Record<string, unknown>
   /** Scope-bound cursor を署名する secret です。 */
@@ -781,6 +843,16 @@ export type PublicApiDependencies = {
   queueWebhookDelivery?(workspaceId: string, deliveryId: string): Promise<void>
   /** Connector OAuth と sync-conflict recovery の optional provider adapter です。 */
   connectorAuthorization?: ConnectorAuthorizationService
+  /**
+   * Lists the providers configured in this runtime. The connector catalog shows only these
+   * providers, and shows none when this dependency is omitted.
+   */
+  listConfiguredConnectorProviders?(): Promise<readonly ConnectorProvider[]>
+  /**
+   * Provider redirect URI が Web app と別の API origin を指す場合に、OAuth callback を引き渡す
+   * Web app の origin です。省略時は callback と同じ origin の Web app へ引き渡します。
+   */
+  connectorOAuthWebOrigin?: string
   /** Existing domain error を stable public error へ変換します。 */
   mapError?(error: unknown): PublicApiServiceError | undefined
   /** Test で request ID を固定する generator です。 */
@@ -1065,6 +1137,34 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
     ))
+  })
+
+  router.get('/v1/work-items/:workItemId/documents', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const documents = requireDocumentService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    return c.json(await createOrderedSignedContinuationPage(c, dependencies, {
+      workspaceId: credential.workspaceId,
+      actorId: `credential:${credential.credentialId}`,
+      resource: `/v1/work-items/${encodeURIComponent(workItemId)}/documents`,
+      filters: { teamId },
+    }, (continuation, limit) => documents.listWorkItemDocuments(
+      credential, teamId, workItemId, continuation, Math.min(limit, PUBLIC_WORK_ITEM_DOCUMENT_PAGE_MAX_LIMIT),
+    )))
+  })
+
+  router.get('/v1/work-items/:workItemId/documents/:documentId', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const documents = requireDocumentService(dependencies)
+    const document = await documents.getWorkItemDocument(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+      readRouteId(c.req.param('documentId'), 'Document ID'),
+    )
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(document)
   })
 
   router.get('/v1/work-items/:workItemId/key', async (c) => {
@@ -2027,10 +2127,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     ) {
       throw new PublicApiServiceError(400, 'invalid_request', 'Connector category is invalid.')
     }
+    const configuredProviders = new Set(
+      await dependencies.listConfiguredConnectorProviders?.() ?? [],
+    )
     return c.json(
-      category === undefined
-        ? connectorCatalog
-        : connectorCatalog.filter((connector) => connector.category === category),
+      connectorCatalog.filter((connector) =>
+        configuredProviders.has(connector.provider) &&
+        (category === undefined || connector.category === category)
+      ),
     )
   })
 
@@ -2042,13 +2146,69 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       throw unavailableManagementMutation('Connector OAuth callback')
     }
     const state = readOAuthCallbackValue(c.req.query('state'), 'OAuth state', 2_048)
+    const fragment = new URLSearchParams({ state })
     if (c.req.query('error') !== undefined) {
-      const result = await dependencies.connectorAuthorization.abortCallback({ state })
-      return c.redirect(appendConnectorCallbackOutcome(result.returnUrl, 'cancelled'), 303)
+      fragment.set('cancelled', 'true')
+    } else {
+      fragment.set(
+        'code',
+        readOAuthCallbackValue(c.req.query('code'), 'OAuth authorization code', 8_192),
+      )
     }
-    const code = readOAuthCallbackValue(c.req.query('code'), 'OAuth authorization code', 8_192)
-    const result = await dependencies.connectorAuthorization.completeCallback({ code, state })
-    return c.redirect(appendConnectorCallbackOutcome(result.returnUrl, 'connected'), 303)
+    // The provider redirect carries no Mukuroji credential, so completing here would let anyone
+    // holding the authorization URL install their provider account. Hand the values to the Web app
+    // in the fragment, which is not sent to servers or in Referer, and let the signed-in user who
+    // started the flow complete it.
+    return c.redirect(
+      `${dependencies.connectorOAuthWebOrigin ?? ''}${CONNECTOR_OAUTH_CALLBACK_APP_PATH}` +
+        `#${fragment.toString()}`,
+      303,
+    )
+  })
+
+  router.post('/developer/connector-oauth/complete', async (c) => {
+    c.header('Cache-Control', 'no-store')
+    c.header('Pragma', 'no-cache')
+    const principal = await requireManagementCapability(c, dependencies, 'canManageIntegrations')
+    const input = readCompleteConnectorOAuthInput(await readJson(c))
+    if (!dependencies.connectorAuthorization) {
+      readIdempotencyKey(c.req.header('Idempotency-Key'))
+      throw unavailableManagementMutation('Connector OAuth completion')
+    }
+    // The state names one single-use flow, so it identifies the request without keeping a
+    // digest of the provider's authorization code in the idempotency record.
+    const fingerprint = {
+      state: input.state,
+      outcome: input.code === undefined ? 'cancelled' : 'connected',
+    }
+    return executeManagementIdempotentJson(
+      c,
+      dependencies,
+      principal,
+      fingerprint,
+      async () => {
+        if (input.code === undefined) {
+          const result = await dependencies.connectorAuthorization!.abortCallback(
+            { state: input.state },
+            principal,
+          )
+          const body: CompleteConnectorOAuthOutput = {
+            outcome: 'cancelled',
+            returnUrl: appendConnectorCallbackOutcome(result.returnUrl, 'cancelled'),
+          }
+          return { status: 200, body }
+        }
+        const result = await dependencies.connectorAuthorization!.completeCallback(
+          { code: input.code, state: input.state },
+          principal,
+        )
+        const body: CompleteConnectorOAuthOutput = {
+          outcome: 'connected',
+          returnUrl: appendConnectorCallbackOutcome(result.returnUrl, 'connected'),
+        }
+        return { status: 200, body }
+      },
+    )
   })
 
   router.get('/developer/connector-installations', async (c) => {
@@ -3791,6 +3951,51 @@ function readConnectorProvider(value: unknown): ConnectorProvider {
   return provider as ConnectorProvider
 }
 
+/**
+ * Validates the Web app's request to complete a connector OAuth flow.
+ *
+ * @param value - Parsed JSON request body.
+ * @returns The signed state with exactly one of an authorization code or a cancellation marker.
+ */
+function readCompleteConnectorOAuthInput(value: unknown): CompleteConnectorOAuthInput {
+  const body = requireRecord(value, 'Connector OAuth completion input is required.')
+  assertAllowedFields(
+    body,
+    ['state', 'code', 'cancelled'],
+    'Connector OAuth completion input',
+  )
+  const state = readOAuthCompletionValue(body.state, 'OAuth state', 2_048)
+  if (body.cancelled !== undefined) {
+    if (body.cancelled !== true || body.code !== undefined) {
+      throw new PublicApiServiceError(
+        400,
+        'validation_failed',
+        'Specify either an OAuth authorization code or cancelled: true.',
+      )
+    }
+    return { state, cancelled: true }
+  }
+  return {
+    state,
+    code: readOAuthCompletionValue(body.code, 'OAuth authorization code', 8_192),
+  }
+}
+
+/**
+ * Reads one OAuth callback value forwarded by the Web app.
+ *
+ * @param value - Untrusted JSON value.
+ * @param label - Field label used in the validation error.
+ * @param maximumLength - Largest accepted length.
+ * @returns The validated value.
+ */
+function readOAuthCompletionValue(value: unknown, label: string, maximumLength: number) {
+  if (typeof value !== 'string') {
+    throw new PublicApiServiceError(400, 'validation_failed', `${label} is invalid.`)
+  }
+  return readOAuthCallbackValue(value, label, maximumLength)
+}
+
 function readConnectorAuthorizationInput(value: unknown): CreateConnectorInstallationInput {
   const body = requireRecord(value, 'Connector authorization input is required.')
   assertAllowedFields(
@@ -4852,6 +5057,19 @@ function requireStoredResponse(value: unknown) {
     )
   }
   return response as { status: 200 | 201 | 202 | 204; body: unknown }
+}
+
+/**
+ * Returns the configured Document service or reports that Documents are unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Document service.
+ */
+function requireDocumentService(dependencies: PublicApiDependencies): PublicDocumentService {
+  if (!dependencies.documents) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Documents are not configured.', true)
+  }
+  return dependencies.documents
 }
 
 /**

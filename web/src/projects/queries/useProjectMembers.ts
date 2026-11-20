@@ -2,12 +2,13 @@ import useSWR from 'swr'
 import { getProjectMembers } from '../api/members'
 import { getProjectUsers } from '../api/users'
 import {
+  loadActiveDirectoryMembers,
   loadActiveProjectMembers,
   loadTeamProjectMembers,
   loadPlanningProjectRoles,
   loadWorkspaceProjectMembers,
 } from './projectMembers'
-import type { ProjectDirectoryProject } from '../api/directory'
+import type { ProjectDirectoryProject, ProjectDirectoryTeam } from '../api/directory'
 import type { PlanningProjectRoleScope } from '../../planning/model/permissions'
 
 const projectMemberQueryConfig = {
@@ -97,6 +98,35 @@ export function useActiveProjectMembers(
   const query = useSWR(
     key,
     ([, token]) => loadActiveProjectMembers(token, projectIds),
+    projectMemberQueryConfig,
+  )
+
+  return { ...query, key }
+}
+
+/**
+ * Loads the active members of every Project in a Team directory, such as for an owner picker.
+ *
+ * @param accessToken - Bearer token for the Project member API.
+ * @param teams - Teams, each with the Projects whose members to load.
+ * @param enabled - Whether the query runs.
+ * @returns SWR state of the de-duplicated active members and request errors.
+ */
+export function useActiveDirectoryMembers(
+  accessToken: string | undefined,
+  teams: readonly ProjectDirectoryTeam[],
+  enabled = true,
+) {
+  const scopeKey = teams
+    .flatMap((team) => team.projects.map((project) => `${team.id}\0${project.id}`))
+    .join('\n')
+  const key = accessToken && enabled && scopeKey
+    ? ['active-directory-members', accessToken, scopeKey] as const
+    : null
+
+  const query = useSWR(
+    key,
+    ([, token]) => loadActiveDirectoryMembers(token, teams),
     projectMemberQueryConfig,
   )
 

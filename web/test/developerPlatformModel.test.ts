@@ -27,15 +27,46 @@ import {
   developerPlatformResourcesFixture,
   developerSyncConflictsFixture,
 } from '../src/developer-platform/fixtures'
-import { buildConnectorAuthorizationReturnUrl } from '../src/developer-platform/mutations/connectorAuthorization'
+import {
+  buildConnectorAuthorizationReturnUrl,
+  readConnectorOAuthCallbackFragment,
+} from '../src/developer-platform/mutations/connectorAuthorization'
 import { runDeveloperPlatformMutation } from '../src/developer-platform/mutations/runDeveloperPlatformMutation'
 
 describe('Developer Platform connector model', () => {
+  test('lists only configured or installed providers and marks unconfigured ones unavailable', () => {
+    const catalog = completeDeveloperConnectorCatalog(
+      developerPlatformLabelsFixture.connectorCatalog,
+      [{ ...developerPlatformResourcesFixture.connectors[0]!, provider: 'slack' }],
+      developerPlatformLabelsFixture.helpText.installedConnector,
+      ['github'],
+    )
+
+    expect(catalog.map((item) => [item.provider, item.availability])).toEqual([
+      ['github', 'available'],
+      ['slack', 'not-configured'],
+    ])
+  })
+
+  test('keeps availability unknown until the configured providers load', () => {
+    const catalog = completeDeveloperConnectorCatalog(
+      developerPlatformLabelsFixture.connectorCatalog,
+      [{ ...developerPlatformResourcesFixture.connectors[0]!, provider: 'slack' }],
+      developerPlatformLabelsFixture.helpText.installedConnector,
+      undefined,
+    )
+
+    expect(catalog.map((item) => [item.provider, item.availability])).toEqual([
+      ['slack', 'unknown'],
+    ])
+  })
+
   test('completes and filters connector catalog with installed account metadata', () => {
     const catalog = completeDeveloperConnectorCatalog(
       developerPlatformLabelsFixture.connectorCatalog,
       developerPlatformResourcesFixture.connectors,
       developerPlatformLabelsFixture.helpText.installedConnector,
+      developerPlatformLabelsFixture.connectorCatalog.map((item) => item.provider),
     )
 
     expect(catalog.length).toBeGreaterThanOrEqual(
@@ -224,6 +255,25 @@ describe('Developer Platform mutation refresh', () => {
 })
 
 describe('Developer Platform connector authorization', () => {
+  test('reads connector OAuth callback values only from a well-formed fragment', () => {
+    expect(readConnectorOAuthCallbackFragment('#state=v1.signed&code=provider%2Bcode'))
+      .toEqual({ state: 'v1.signed', code: 'provider+code' })
+    expect(readConnectorOAuthCallbackFragment('state=v1.signed&cancelled=true'))
+      .toEqual({ state: 'v1.signed', cancelled: true })
+    for (const malformed of [
+      '',
+      '#code=provider-code',
+      '#state=v1.signed',
+      '#state=v1.signed&code=',
+      '#state=v1.signed&cancelled=false',
+      '#state=v1.signed&cancelled=true&code=provider-code',
+      '#state=a&state=b&code=provider-code',
+      '#state=v1.signed&code=a&code=b',
+    ]) {
+      expect(readConnectorOAuthCallbackFragment(malformed)).toBeUndefined()
+    }
+  })
+
   test('preserves route state and selects connectors in the return URL', () => {
     expect(
       buildConnectorAuthorizationReturnUrl(
