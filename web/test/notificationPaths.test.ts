@@ -35,6 +35,18 @@ describe('notification deep links', () => {
     )
   })
 
+  test('opens a delivered report snapshot on a Team report notification', () => {
+    expect(resolveNotificationPath({
+      deepLink: '/reports?v=1&report=weekly-report&snapshot=snapshot-1',
+      eventType: 'analytics.report.delivered',
+      id: 'notification-report-1',
+      occurredAt: '2026-07-12T00:00:00.000Z',
+      reasons: ['report-recipient'],
+      state: 'unread',
+      teamId: 'core-team',
+    })).toBe('/reports?v=1&report=weekly-report&snapshot=snapshot-1')
+  })
+
   test('rejects the removed path-parameter Team Issue deep link', () => {
     expect(resolveNotificationPath({
       commentId: 'comment-1',

@@ -6,6 +6,11 @@ export {
   resolveAnalyticsScheduleProcessingTime,
   type AnalyticsScheduleEvent,
 } from './adapter-in/schedules/analytics-schedule'
+/** Scheduled delivery notification emitted through the audit outbox. */
+export {
+  ANALYTICS_REPORT_DELIVERED_EVENT_TYPE,
+  createAnalyticsDeliveryAuditNotifier,
+} from './adapter-out/dynamodb/analytics-delivery-notifier'
 export {
   AnalyticsError,
   analyticsFilterIncludesWorkItem,

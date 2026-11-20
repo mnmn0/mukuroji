@@ -12,11 +12,13 @@ import { requiresCurrentWorkItemAssignee } from '../../modules/notifications'
 import { TriageError } from '../../modules/triage'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
 import { createPlanningUpdateTargetRecordKey, type PlanningAuthorizationState } from '../../modules/planning'
+import { ANALYTICS_REPORT_DELIVERED_EVENT_TYPE } from '../../modules/analytics'
 import {
   DocumentError,
   type DocumentAccessContext,
   type DocumentProjectRole,
 } from '../../modules/documents'
+import { canReadAnalyticsReport } from './analytics-access'
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import {
   ENTERPRISE_PLANNING_READ_PERMISSIONS,
@@ -35,7 +37,21 @@ import {
   type WorkspacePrincipal,
 } from './project-access'
 import { requiresCurrentTriageOwner } from './request-intake-access'
+import { createWorkspaceSearchContext } from './search-access'
 import { projectAccessAllows } from './workspace-access'
+
+/** Current Inbox visibility of one scheduled Analytics delivery notification. */
+type AnalyticsDeliveryNotificationVisibility =
+  | {
+    /** The recipient can still open the delivered report. */
+    readable: true
+    /** Current report name replacing the name captured at delivery. */
+    name: string
+  }
+  | {
+    /** The report is gone or no longer admits the recipient. */
+    readable: false
+  }
 
 /**
  * Converts notification failures into an HTTP error response.
@@ -336,6 +352,18 @@ export async function createNotificationVisibilityFilter(
         }).allowed
       )
     : false
+  const enterpriseWorkItemWorkspaceReadable = enterpriseEvaluation
+    ? ENTERPRISE_WORK_ITEM_READ_PERMISSIONS.some((permission) =>
+        evaluateEnterpriseAccess({
+          permission,
+          principal: enterpriseEvaluation.principal,
+          assignments: enterpriseEvaluation.assignments,
+          customRoles: enterpriseEvaluation.snapshot.customRoles,
+          groupMappings: enterpriseEvaluation.groupMappings,
+          resource: { workspaceId: principal.directoryId, kind: 'workspace' },
+        }).allowed
+      )
+    : false
   const accessibleProjectIds = new Set(
     projectAccesses
       .filter((access) =>
@@ -511,6 +539,8 @@ export async function createNotificationVisibilityFilter(
     }),
   }
   const documentVisibilities = new Map<string, Promise<boolean>>()
+  const analyticsReportVisibilities = new Map<string, Promise<AnalyticsDeliveryNotificationVisibility>>()
+  let analyticsSearchContext: ReturnType<typeof createWorkspaceSearchContext> | undefined
   const watcherVisibilities = new Map<string, Promise<boolean>>()
   let planningAuthorizationState: Promise<PlanningAuthorizationState> | undefined
 
@@ -541,7 +571,48 @@ export async function createNotificationVisibilityFilter(
     return visibility
   }
 
+  /**
+   * Re-checks a scheduled Analytics delivery against the report's current visibility.
+   *
+   * The snapshot list applies the recipient's data ACL again when the link is opened; this check
+   * removes the notification itself once the report is deleted or no longer admits the recipient.
+   *
+   * @param reportId - Delivered report ID from the notification's entity.
+   * @returns The current readability and report name.
+   */
+  const readAnalyticsReportVisibility = (reportId: string) => {
+    let visibility = analyticsReportVisibilities.get(reportId)
+    if (!visibility) {
+      visibility = (async (): Promise<AnalyticsDeliveryNotificationVisibility> => {
+        // Analytics routes require Work Item read; Inbox alone only requires Workspace read.
+        if (
+          isEnterpriseContentPrincipal &&
+          !enterpriseWorkItemWorkspaceReadable &&
+          workItemReadableTeamIds.size === 0 &&
+          workItemReadableProjectScopeKeys.size === 0
+        ) {
+          return { readable: false }
+        }
+        const report = await workItemDependencies.analytics.getReport(principal.directoryId, reportId)
+        if (!report) return { readable: false }
+        analyticsSearchContext ??= createWorkspaceSearchContext(principal)
+        return canReadAnalyticsReport(principal, await analyticsSearchContext, report)
+          ? { readable: true, name: report.name }
+          : { readable: false }
+      })()
+      analyticsReportVisibilities.set(reportId, visibility)
+    }
+    return visibility
+  }
+
   return async (notification: NotificationItem) => {
+    if (notification.eventType === ANALYTICS_REPORT_DELIVERED_EVENT_TYPE) {
+      if (!notification.entityId) return false
+      const visibility = await readAnalyticsReportVisibility(notification.entityId)
+      if (!visibility.readable) return false
+      notification.title = visibility.name
+      return true
+    }
     if (planningUpdateActivityEventTypes.has(notification.eventType)) {
       planningAuthorizationState ??=
         workItemDependencies.planning.getAuthorizationState(principal.directoryId)
