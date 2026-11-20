@@ -114,6 +114,7 @@ export function registerProjectRaidLogRoutes(routeApp: Hono): void {
           callerAuthorization: await createCallerAuthorization(principal, teamId, projectId),
           auditContext,
           updateReceipt: createUpdateReceipt(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash, auditContext.requestFingerprint),
+          updateKey: createUpdateKey(entryId, auditContext.actor.id, auditContext.idempotencyKeyHash),
         },
       )
       return c.json(response)
@@ -195,6 +196,21 @@ async function createCallerAuthorization(principal: WorkspacePrincipal, teamId: 
 function createUpdateReceipt(entryId: string, actorId: string, idempotencyKeyHash: string, requestFingerprint: string) {
   return createHash('sha256')
     .update(JSON.stringify(['project-raid-entry-update', entryId, actorId, idempotencyKeyHash, requestFingerprint]))
+    .digest('hex')
+}
+
+/**
+ * Derives the key of an update request without its content, so the same Idempotency-Key sent
+ * again with other content is told apart from a retry.
+ *
+ * @param entryId - Entry being updated.
+ * @param actorId - Requesting actor.
+ * @param idempotencyKeyHash - Hash of the request's idempotency key.
+ * @returns A hexadecimal key.
+ */
+function createUpdateKey(entryId: string, actorId: string, idempotencyKeyHash: string) {
+  return createHash('sha256')
+    .update(JSON.stringify(['project-raid-entry-update-key', entryId, actorId, idempotencyKeyHash]))
     .digest('hex')
 }
 

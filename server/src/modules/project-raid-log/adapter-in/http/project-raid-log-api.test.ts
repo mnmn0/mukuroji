@@ -94,6 +94,14 @@ test('creates, edits, closes, and lists Project log entries', async () => {
   expect(closedEntry.reviewDueDate).toBeUndefined()
   expect(typeof closedEntry.closedAt).toBe('string')
 
+  // The same key with other content on the new revision is a different request, not a retry.
+  const reusedUpdateKey = await request(`${path}/entries/${createdEntry.id}`, 'PUT', {
+    expectedRevision: 2,
+    entry: { kind: 'risk', title: 'Vendor delay', probability: 1, impact: 1, status: 'open' },
+  }, 'close-1')
+  expect(reusedUpdateKey.status).toBe(409)
+  expect(await reusedUpdateKey.json()).toMatchObject({ code: 'ProjectRaidEntryIdempotencyConflict' })
+
   const stale = await request(`${path}/entries/${createdEntry.id}`, 'PUT', {
     expectedRevision: 1,
     entry: { kind: 'risk', title: 'Vendor delay', probability: 2, impact: 4, status: 'open' },

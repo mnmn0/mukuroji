@@ -125,8 +125,14 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
     if (!row) return null
     const entry = parseStoredEntry(row, scope)
     const receipt = row.lastUpdateReceipt
+    const updateKey = row.lastUpdateKey
     if (receipt !== undefined && typeof receipt !== 'string') throw corruptLog()
-    return { entry, ...(receipt === undefined ? {} : { lastUpdateReceipt: receipt }) }
+    if (updateKey !== undefined && typeof updateKey !== 'string') throw corruptLog()
+    return {
+      entry,
+      ...(receipt === undefined ? {} : { lastUpdateReceipt: receipt }),
+      ...(updateKey === undefined ? {} : { lastUpdateKey: updateKey }),
+    }
   }
 
   /**
@@ -259,6 +265,7 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
                 ...rowIdentity(input, input.next.id),
                 creationFingerprint,
                 lastUpdateReceipt: input.updateReceipt,
+                lastUpdateKey: input.updateKey,
                 ...input.next,
               },
               ConditionExpression: '#type = :type AND #revision = :revision',
@@ -315,7 +322,7 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
 /** Isolated store for route and application tests. */
 export class InMemoryProjectRaidLogStore implements ProjectRaidLogStore {
   /** Entries and their creation and update receipts keyed by Workspace, Team, Project, and entry. */
-  private readonly rows = new Map<string, { entry: ProjectRaidEntry; creationFingerprint: string; lastUpdateReceipt?: string }>()
+  private readonly rows = new Map<string, { entry: ProjectRaidEntry; creationFingerprint: string; lastUpdateReceipt?: string; lastUpdateKey?: string }>()
 
   /**
    * Reads copies of every entry of a Project log.
@@ -363,6 +370,7 @@ export class InMemoryProjectRaidLogStore implements ProjectRaidLogStore {
     return {
       entry: structuredClone(row.entry),
       ...(row.lastUpdateReceipt === undefined ? {} : { lastUpdateReceipt: row.lastUpdateReceipt }),
+      ...(row.lastUpdateKey === undefined ? {} : { lastUpdateKey: row.lastUpdateKey }),
     }
   }
 
@@ -406,6 +414,7 @@ export class InMemoryProjectRaidLogStore implements ProjectRaidLogStore {
       entry: structuredClone(input.next),
       creationFingerprint: existing.creationFingerprint,
       lastUpdateReceipt: input.updateReceipt,
+      lastUpdateKey: input.updateKey,
     })
     return input.next
   }

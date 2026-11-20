@@ -44,6 +44,8 @@ export type UpdateProjectRaidEntryStoreInput<TCallerCheck, TAudit> = ProjectRaid
     next: ProjectRaidEntry
     /** Receipt of this update request, stored with the entry so a retried request is recognized. */
     updateReceipt: string
+    /** Key of this update request without its content, stored so a reused key is recognized. */
+    updateKey: string
   }
 
 /** One stored entry with the receipt of the update that produced its current revision. */
@@ -52,6 +54,8 @@ export type ProjectRaidEntryRecord = {
   entry: ProjectRaidEntry
   /** Receipt of the update that produced this revision; absent until the first update. */
   lastUpdateReceipt?: string
+  /** Key of the update that produced this revision; absent until the first update. */
+  lastUpdateKey?: string
 }
 
 /** Persistence port of Project risk, issue, and change request logs. */
@@ -156,7 +160,7 @@ export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   scope: ProjectRaidLogScope,
   entryId: string,
   body: unknown,
-  mutation: ProjectRaidLogMutation<TCallerCheck, TAudit> & { updateReceipt: string },
+  mutation: ProjectRaidLogMutation<TCallerCheck, TAudit> & { updateReceipt: string; updateKey: string },
 ): Promise<ProjectRaidEntryResponse> {
   const expectedRevision = isRecord(body) ? body.expectedRevision : undefined
   if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
@@ -174,6 +178,10 @@ export async function updateProjectRaidEntryUseCase<TCallerCheck, TAudit>(
   ) {
     // The same request already produced the current revision, and only its response was lost.
     return { teamId: scope.teamId, projectId: scope.projectId, entry: previous }
+  }
+  if (record.lastUpdateKey === mutation.updateKey && record.lastUpdateReceipt !== mutation.updateReceipt) {
+    // The key produced the current revision with other content; reusing it is a different request.
+    throw new ProjectDataError(409, 'ProjectRaidEntryIdempotencyConflict', 'This Idempotency-Key was already used for another change.')
   }
   if (previous.revision !== expectedRevision) {
     throw new ProjectDataError(409, 'ProjectRaidEntryConflict', 'The log entry changed. Reload and try again.')
