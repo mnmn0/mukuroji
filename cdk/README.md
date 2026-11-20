@@ -992,6 +992,34 @@ local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566` と `AWS_REGION`
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
+#### Application 処理を有効にする（runtime control）
+
+deploy した直後の runtime control は `disabled` なので、API は `/api/health` 以外に `503` を返し、
+worker も処理を始めません。次の 1 コマンドで有効にします。
+
+```sh
+AWS_REGION=ap-northeast-1 bun run runtime-control:enable
+```
+
+`scripts/runtime-control.ts` は `aws` CLI で次を順に行い、どこかで失敗すると止まります。
+
+1. stack output から AppConfig の ID 4 つと `WebUrl` を読む。
+2. AppConfig environment で別の deployment が進行中でないこと、`RuntimeControlConfigurationFailureAlarm`
+   が `OK` かつ actions 有効であることを確かめる（alarm の確認は有効化のときだけ）。
+3. 最新の hosted version の `revision` に 1 を足した document を hosted version として作る。
+   誰が（`sts get-caller-identity` の ARN）いつ切り替えたかを version と deployment の description に残す。
+4. stack の canary strategy で deployment を始め、`COMPLETE` まで待つ（rollout 20 分 + bake 10 分で約 30 分）。
+   `ROLLED_BACK` になったら失敗として止まる。
+5. `WebUrl` の `/api/ready` が `200` を返すまで最大 3 分確認する。
+
+止めるときは `bun run runtime-control:disable` を使います。`/api/ready` が `503` になれば完了です。
+incident commander が即時停止を決めたときだけ、`-- --all-at-once` を付けて `AppConfig.AllAtOnce` で
+配布します（bake の 10 分は待ちます）。省いた理由は change record に残します。stack 名が `Mukuroji`
+でない場合は `MUKUROJI_STACK_NAME` を指定します。local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566`
+を付けて同じように実行できます。change record に残す内容と、deployment 中に確認する
+`runtime-control.evaluated` record は [operational readiness](../docs/operational-readiness.md#dynamic-runtime-control)
+を参照してください。読み取りだけを通す maintenance mode はまだありません。
+
 ### 3. Bootstrap と API を検証する
 
 Stack が user pool を作った場合、初期 owner は最初のサインインで password を変えるまで
