@@ -2722,7 +2722,7 @@ test('deprovisions a directory member atomically with the Planning revision and 
         Update: {
           TableName: 'WorkspaceAccessTable',
           ConditionExpression:
-            'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId',
+            'version = :expectedVersion AND #role <> :owner AND provisioningSource = :directory AND externalIdentityId = :externalIdentityId AND (attribute_not_exists(signInsRevokedAt) OR signInsRevokedAt < :signInsRevokedAt)',
         },
       },
       {
@@ -2763,6 +2763,61 @@ test('deprovisions a directory member atomically with the Planning revision and 
         },
       },
     ],
+  })
+})
+
+test('deprovisioning keeps a later sign-in cutoff written by a concurrent sign-out', async () => {
+  const laterCutoff = new Date(now.getTime() + 5_000).toISOString()
+  let target = {
+    ...createWorkspaceMember('sato@example.com', 'member', 'active', 4),
+    provisioningSource: 'directory' as const,
+    externalIdentityId: 'scim-user-123',
+  }
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') return { Item: toMemberItem(target) }
+      if (command.constructor.name !== 'TransactWriteCommand') return {}
+      transactions.push(command.input)
+      if (transactions.length === 1) {
+        // A password reset signs the member out between the read and this transaction.
+        target = { ...target, signInsRevokedAt: laterCutoff }
+        throw Object.assign(new Error('Transaction cancelled'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+        })
+      }
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    'AuditTable',
+  )
+
+  const member = await client.deprovisionDirectoryMember(
+    workspaceId,
+    target.memberKey,
+    {
+      externalIdentityId: target.externalIdentityId,
+      expectedVersion: target.version,
+      expectedPlanningRevision: 9,
+      expectedDocumentAuthorizationRevision: 3,
+    },
+    createAuditContext('directory-deprovision'),
+  )
+
+  const expectedCutoff = new Date(now.getTime() + 5_001).toISOString()
+  expect(transactions).toHaveLength(2)
+  expect(member).toMatchObject({ status: 'deactivated', signInsRevokedAt: expectedCutoff })
+  expect(transactions[1]).toMatchObject({
+    TransactItems: expect.arrayContaining([{
+      Update: expect.objectContaining({
+        ExpressionAttributeValues: expect.objectContaining({ ':signInsRevokedAt': expectedCutoff }),
+      }),
+    }]),
   })
 })
 
