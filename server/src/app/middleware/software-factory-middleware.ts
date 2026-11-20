@@ -1,5 +1,5 @@
-import type { Context, Hono } from 'hono'
-import { SOFTWARE_FACTORY_NOT_DEPLOYED_CODE } from '../../infrastructure/config/software-factory'
+import type { Hono } from 'hono'
+import { softwareFactoryNotDeployedResponse } from '../../infrastructure/http/software-factory-not-deployed'
 
 /**
  * Dependencies of the Software factory deployment gate.
@@ -63,35 +63,6 @@ const SOFTWARE_FACTORY_ROUTES: readonly SoftwareFactoryRoute[] = [
 ]
 
 /**
- * Builds the response for a route of a module this deployment does not include.
- *
- * Public API paths answer with a problem document so that API clients parse it like their
- * other errors; Web paths use the `{ code, message }` body the Web API already returns.
- *
- * @param context - Request context.
- * @returns A non-retryable 503 response.
- */
-function softwareFactoryNotDeployed(context: Context): Response {
-  const message = 'Software factory is not deployed in this environment.'
-  context.header('Cache-Control', 'no-store')
-  const path = context.req.path
-  if (path.startsWith('/api/v1/') || path.startsWith('/api/developer/')) {
-    return context.json({
-      type: 'https://docs.mukuroji.app/problems/software_factory_not_deployed',
-      title: 'Software Factory Not Deployed',
-      status: 503,
-      code: SOFTWARE_FACTORY_NOT_DEPLOYED_CODE,
-      detail: message,
-      instance: path,
-      retryable: false,
-    }, 503, {
-      'Content-Type': 'application/problem+json; charset=utf-8',
-    })
-  }
-  return context.json({ code: SOFTWARE_FACTORY_NOT_DEPLOYED_CODE, message }, 503)
-}
-
-/**
  * Registers the gate that refuses Software factory routes when the deployment omits the
  * module. It runs before authentication so that no Agent Run, agent setting, or credential
  * work starts.
@@ -111,7 +82,11 @@ export function registerSoftwareFactoryMiddleware(
         const method = context.req.method.toUpperCase()
         const refused = method !== 'OPTIONS' &&
           (route.methods === undefined || route.methods.includes(method))
-        if (refused && !dependencies.deployed()) return softwareFactoryNotDeployed(context)
+        if (refused && !dependencies.deployed()) {
+          const publicApi = context.req.path.startsWith('/api/v1/') ||
+            context.req.path.startsWith('/api/developer/')
+          return softwareFactoryNotDeployedResponse(context, publicApi ? 'problem' : 'web')
+        }
         return await next()
       })
     }

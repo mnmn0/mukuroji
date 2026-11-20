@@ -27,6 +27,10 @@ agent 設定が見えて使えた。画面を隠すだけでは、API を直接�
   - 本人用 agent token: `/developer/me/agent-connection` と、発行・rotate（`POST`）
 - 本人用 token の失効（`DELETE /developer/me/api-keys/:id`）は off でも許す。on の期間に発行された token を
   消せるようにするため。
+- 管理者用の `POST /developer/api-keys/:id/rotate` も、対象が本人用 token のときは off で同じ 503 を返す。
+  作成者本人なら本人用 token もこの経路で rotate できるため。key の種類は route だけでは分からないので、
+  middleware ではなく route 本体で key を引いてから判定する。Workspace の API key の rotate は off でも変えない。
+- 管理者は off でも **API と外部連携** の一覧から本人用 token（「個人用」）を失効できる。
 - MCP の WBS 読み取り（`get_task` など）が使う Public API の Work Item の読み書きは off でも残す。Workspace の
   API key や連携でも使う汎用 API であり、Software factory 固有ではないため。off では本人用 token を新しく
   発行できないので、MCP を新たに接続する経路は実質なくなる。
