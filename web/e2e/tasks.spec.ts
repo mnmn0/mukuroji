@@ -5066,7 +5066,7 @@ test.describe('authenticated task page', () => {
     const requestCounts = getMockRequestCounts(page)
     const createRequest = page.waitForRequest((request) =>
       request.method() === 'POST' &&
-      /\/api\/teams\/core-team\/issues$/u.test(new URL(request.url()).pathname))
+      new URL(request.url()).pathname.endsWith('/api/teams/core-team/issues'))
 
     await page.getByTestId('task-row-wireframe').click({ button: 'right' })
     await page.getByTestId('project-task-action-context-menu')
