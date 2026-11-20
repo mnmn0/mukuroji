@@ -11242,7 +11242,7 @@ test.describe('authenticated task page', () => {
       'notification-row-notification-archived-unread',
     )
     await expect(archivedUnreadNotification).toBeVisible()
-    await expect(archivedUnreadNotification.getByLabel('未読')).toHaveCount(0)
+    await expect(archivedUnreadNotification.getByLabel('未読', { exact: true })).toHaveCount(0)
     await expect(
       archivedUnreadNotification.getByRole('button', { name: '既読にする' }),
     ).toBeVisible()
@@ -11261,8 +11261,73 @@ test.describe('authenticated task page', () => {
       'notification-row-notification-snoozed-unread',
     )
     await expect(snoozedUnreadNotification).toBeVisible()
-    await expect(snoozedUnreadNotification.getByLabel('未読')).toHaveCount(0)
+    await expect(snoozedUnreadNotification.getByLabel('未読', { exact: true })).toHaveCount(0)
     await expect.poll(() => requestCounts.notificationUpdates).toBeGreaterThanOrEqual(4)
+  })
+
+  test('通知 Inbox で複数選択した通知をまとめて既読・archive・戻すにできる', async ({ page }) => {
+    await page.clock.setFixedTime(notificationFixtureNow)
+
+    await page.goto('/inbox')
+    await expect(page.getByTestId('notification-inbox')).toBeVisible()
+    const bulkBar = page.getByTestId('notification-bulk-bar')
+    const wireframeNotification = page.getByTestId('notification-row-notification-wireframe')
+    const brandNotification = page.getByTestId('notification-row-notification-brand-guideline')
+    const selectWireframe = page.getByTestId('notification-select-notification-wireframe')
+    const selectBrand = page.getByTestId('notification-select-notification-brand-guideline')
+
+    await expect(wireframeNotification.getByLabel('未読', { exact: true })).toBeVisible()
+    await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
+    await selectWireframe.check()
+    await page.getByTestId('notification-filter-unread').click()
+    await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
+    await page.getByTestId('notification-filter-all').click()
+    await expect(selectWireframe).not.toBeChecked()
+    await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
+    await selectWireframe.check()
+    await selectBrand.check()
+    await expect(bulkBar).toContainText('2件を選択中')
+    await page.getByTestId('notification-bulk-mark-read').click()
+    await expect(wireframeNotification.getByLabel('未読', { exact: true })).toHaveCount(0)
+    await expect(page.getByTestId('notification-mark-all-read')).toBeDisabled()
+    await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
+
+    let failBrandArchive = true
+    await page.route(/.*\/api\/notifications\/notification-brand-guideline$/, async (route) => {
+      if (route.request().method() === 'PATCH' && failBrandArchive) {
+        failBrandArchive = false
+        await route.fulfill({ status: 500, json: { message: 'Temporary failure.' } })
+        return
+      }
+      await route.fallback()
+    })
+    await selectWireframe.check()
+    await selectBrand.check()
+    await page.getByTestId('notification-bulk-archive').click()
+    await expect(wireframeNotification).toHaveCount(0)
+    await expect(brandNotification).toBeVisible()
+    await expect(selectBrand).toBeChecked()
+    await expect(page.getByRole('alert')).toContainText('1件を更新できませんでした')
+    await expect(bulkBar).toContainText('1件を選択中')
+    await page.getByTestId('notification-bulk-archive').click()
+    await expect(brandNotification).toHaveCount(0)
+    await expect(page.getByRole('alert')).toHaveCount(0)
+
+    await page.getByTestId('notification-filter-archived').click()
+    await expect(wireframeNotification).toBeVisible()
+    await expect(brandNotification).toBeVisible()
+    await expect(bulkBar).toContainText('通知を選ぶとまとめて操作できます')
+    await page.getByTestId('notification-select-all').check()
+    await expect(selectWireframe).toBeChecked()
+    await expect(selectBrand).toBeChecked()
+    await page.getByTestId('notification-bulk-restore').click()
+    await expect(wireframeNotification).toHaveCount(0)
+    await expect(brandNotification).toHaveCount(0)
+
+    // The fixed test clock keeps SWR's cached All page fresh, so check the restored rows in Read.
+    await page.getByTestId('notification-filter-read').click()
+    await expect(wireframeNotification).toBeVisible()
+    await expect(brandNotification).toBeVisible()
   })
 
   test('Issue #192 の共同作業タブで判断のページング、採用解決策、利用不能な情報源を操作できる', async ({ page }) => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { createFocusPath } from '../../shared/routing/paths'
 import type { InboxNotification, NotificationFilter } from '../api'
@@ -7,7 +7,14 @@ import {
   groupNotificationsByDate,
   type NotificationSnoozeOption,
 } from '../model/presentation'
-import type { NotificationInboxController } from '../mutations/useNotifications'
+import {
+  resolveSelectedNotifications,
+  updateNotificationSelection,
+} from '../model/selection'
+import type {
+  BulkNotificationAction,
+  NotificationInboxController,
+} from '../mutations/useNotifications'
 
 const notificationFilters = ['all', 'unread', 'read', 'archived', 'snoozed'] as const satisfies readonly NotificationFilter[]
 const snoozeOptions = ['one-hour', 'tomorrow', 'next-week'] as const satisfies readonly NotificationSnoozeOption[]
@@ -53,6 +60,34 @@ export function NotificationInbox({
     ...(controller.eventType ? [controller.eventType] : []),
     ...controller.availableEventTypes,
   ]))
+  // Selection belongs to one filter view; switching filter or type starts a fresh selection.
+  const selectionScope = `${controller.filter}\0${controller.eventType ?? ''}`
+  const [selection, setSelection] = useState<{ scope: string, ids: ReadonlySet<string> }>(
+    () => ({ scope: selectionScope, ids: new Set() }),
+  )
+  if (selection.scope !== selectionScope) {
+    // Drop the stored IDs so returning to the previous filter does not restore its selection.
+    setSelection({ scope: selectionScope, ids: new Set() })
+  }
+  const selectedNotifications = resolveSelectedNotifications(
+    selection.scope === selectionScope ? selection.ids : new Set(),
+    controller.notifications,
+  )
+  const selectedIds = new Set(selectedNotifications.map((notification) => notification.id))
+
+  /** Replaces the selection of the current filter view. */
+  const setSelectedIds = (ids: ReadonlySet<string>) => {
+    setSelection({ scope: selectionScope, ids })
+  }
+
+  /** Runs a bulk action and keeps only the notifications that failed selected. */
+  const runBulkAction = async (action: BulkNotificationAction) => {
+    if (selectedNotifications.length === 0) {
+      return
+    }
+    const result = await controller.bulkUpdate(selectedNotifications, action)
+    setSelectedIds(new Set(result.failedIds))
+  }
 
   return (
     <div className="grid gap-5" data-testid="notification-inbox">
@@ -107,7 +142,11 @@ export function NotificationInbox({
             <button
               className="workbench-button-secondary min-h-10 px-3 disabled:cursor-not-allowed disabled:opacity-55"
               data-testid="notification-mark-all-read"
-              disabled={controller.unreadCount === 0 || controller.pendingNotificationId === 'mark-all'}
+              disabled={
+                controller.unreadCount === 0 ||
+                controller.pendingNotificationId === 'mark-all' ||
+                controller.isBulkPending
+              }
               onClick={() => void controller.markAllRead()}
               type="button"
             >
@@ -134,7 +173,10 @@ export function NotificationInbox({
           className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700"
           role="alert"
         >
-          {t('workspace.inbox.mutationError')}
+          {controller.bulkFailedCount > 0
+            ? t('workspace.inbox.bulk.partialFailure')
+                .replace('{count}', String(controller.bulkFailedCount))
+            : t('workspace.inbox.mutationError')}
         </p>
       ) : null}
 
@@ -155,6 +197,17 @@ export function NotificationInbox({
           </div>
         ) : groups.length > 0 ? (
           <div data-testid="notification-list">
+            <NotificationBulkBar
+              controller={controller}
+              loadedCount={controller.notifications.length}
+              onClear={() => setSelectedIds(new Set())}
+              onRun={(action) => void runBulkAction(action)}
+              onSelectAll={(selected) => setSelectedIds(selected
+                ? new Set(controller.notifications.map((notification) => notification.id))
+                : new Set())}
+              selectedNotifications={selectedNotifications}
+              t={t}
+            />
             {groups.map((group) => (
               <section key={group.key}>
                 <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-y border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-2.5 first:border-t-0">
@@ -174,6 +227,10 @@ export function NotificationInbox({
                       notification={notification}
                       onOpenFocus={onOpenFocus}
                       onOpenNotification={onOpenNotification}
+                      checked={selectedIds.has(notification.id)}
+                      onCheckedChange={(checked) => setSelectedIds(
+                        updateNotificationSelection(selectedIds, notification.id, checked),
+                      )}
                       selected={selectedEventId !== undefined && notification.eventId === selectedEventId}
                       t={t}
                     />
@@ -220,18 +277,132 @@ export function NotificationInbox({
   )
 }
 
+/**
+ * Toolbar for selecting loaded notifications and applying one action to all selected rows.
+ *
+ * @param props - Controller, current selection, and selection callbacks.
+ * @returns The bulk action bar shown above the notification list.
+ */
+function NotificationBulkBar({
+  controller,
+  loadedCount,
+  onClear,
+  onRun,
+  onSelectAll,
+  selectedNotifications,
+  t,
+}: {
+  /** Inbox controller providing the current filter and pending state. */
+  controller: NotificationInboxController
+  /** Number of notifications currently loaded in the list. */
+  loadedCount: number
+  /** Clears the selection. */
+  onClear: () => void
+  /** Runs one bulk action over the selection. */
+  onRun: (action: BulkNotificationAction) => void
+  /** Selects every loaded notification, or clears the selection. */
+  onSelectAll: (selected: boolean) => void
+  /** Selected notifications that are still in the list. */
+  selectedNotifications: readonly InboxNotification[]
+  /** Translator for the current locale. */
+  t: (key: MessageKey) => string
+}) {
+  const selectAllRef = useRef<HTMLInputElement>(null)
+  const selectedCount = selectedNotifications.length
+  const allSelected = selectedCount > 0 && selectedCount === loadedCount
+  // Any running mutation may touch the selected rows, so bulk actions wait for it.
+  const isBusy = controller.isBulkPending || controller.pendingNotificationId !== undefined
+  const canMarkRead = selectedNotifications.some((notification) => !notification.readAt)
+  const archiveAction: BulkNotificationAction = controller.filter === 'archived' ? 'restore' : 'archive'
+
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = selectedCount > 0 && !allSelected
+    }
+  }, [allSelected, selectedCount])
+
+  return (
+    <div
+      aria-label={t('workspace.inbox.bulk.label')}
+      className="flex min-w-0 flex-wrap items-center gap-3 border-b border-[var(--workbench-border)] bg-surface px-5 py-2.5"
+      data-testid="notification-bulk-bar"
+      role="group"
+    >
+      <label className="inline-flex min-h-9 items-center gap-2 text-sm font-semibold text-[var(--workbench-muted)] max-[760px]:min-h-[44px]">
+        <input
+          aria-label={t('workspace.inbox.bulk.selectAll')}
+          checked={allSelected}
+          className="h-4 w-4 accent-[var(--workbench-primary)]"
+          data-testid="notification-select-all"
+          disabled={controller.isBulkPending}
+          onChange={(event) => onSelectAll(event.target.checked)}
+          ref={selectAllRef}
+          type="checkbox"
+        />
+        <span role="status">
+          {selectedCount > 0
+            ? t('workspace.inbox.bulk.selected').replace('{count}', String(selectedCount))
+            : t('workspace.inbox.bulk.none')}
+        </span>
+      </label>
+      {selectedCount > 0 ? (
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <button
+            className="workbench-button-secondary min-h-9 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-55 max-[760px]:min-h-[44px]"
+            data-testid="notification-bulk-mark-read"
+            disabled={isBusy || !canMarkRead}
+            onClick={() => onRun('mark-read')}
+            type="button"
+          >
+            {t('workspace.inbox.bulk.markRead')}
+          </button>
+          <button
+            className="workbench-button-secondary min-h-9 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-55 max-[760px]:min-h-[44px]"
+            data-testid={`notification-bulk-${archiveAction}`}
+            disabled={isBusy}
+            onClick={() => onRun(archiveAction)}
+            type="button"
+          >
+            {t(archiveAction === 'restore'
+              ? 'workspace.inbox.bulk.restore'
+              : 'workspace.inbox.bulk.archive')}
+          </button>
+          <button
+            className="min-h-9 rounded-md px-2.5 text-xs font-semibold text-[var(--workbench-muted)] transition hover:text-[var(--workbench-primary-text)] disabled:opacity-50 max-[760px]:min-h-[44px]"
+            data-testid="notification-bulk-clear"
+            disabled={controller.isBulkPending}
+            onClick={onClear}
+            type="button"
+          >
+            {t('workspace.inbox.bulk.clear')}
+          </button>
+          {controller.isBulkPending ? (
+            <span className="text-xs font-semibold text-[var(--workbench-muted-soft)]" role="status">
+              {t('workspace.inbox.bulk.running')}
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function NotificationRow({
+  checked,
   controller,
   locale,
   notification,
+  onCheckedChange,
   onOpenFocus,
   onOpenNotification,
   selected,
   t,
 }: {
+  checked: boolean
   controller: NotificationInboxController
   locale: Locale
   notification: InboxNotification
+  onCheckedChange: (checked: boolean) => void
   onOpenFocus?: (notification: InboxNotification) => void
   onOpenNotification?: (notification: InboxNotification) => void
   selected: boolean
@@ -240,7 +411,8 @@ function NotificationRow({
   const rowRef = useRef<HTMLElement>(null)
   const isUnread = notification.state === 'unread'
   const isRead = notification.state === 'read' || Boolean(notification.readAt)
-  const isPending = controller.pendingNotificationId === notification.id
+  // Rows wait while a bulk action runs because it may be updating them.
+  const isPending = controller.pendingNotificationId === notification.id || controller.isBulkPending
   const eventLabel = formatNotificationEventType(notification.eventType, t)
   const title = notification.title?.trim() || eventLabel
   const summary = notification.summary?.trim() || createNotificationFallbackSummary(notification, eventLabel, t)
@@ -270,55 +442,68 @@ function NotificationRow({
           role="status"
         />
       ) : null}
-      <button
-        className="group grid min-w-0 grid-cols-[40px_minmax(0,1fr)] gap-3 text-left disabled:cursor-default"
-        disabled={!onOpenNotification || isPending}
-        onClick={() => {
-          void controller.markRead(notification).then(() => onOpenNotification?.(notification))
-        }}
-        type="button"
-      >
-        <span
-          aria-hidden="true"
-          className={`grid h-10 w-10 place-items-center rounded-full border text-sm font-bold ${resolveEventToneClassName(notification.eventType)}`}
+      <div className="flex min-w-0 items-start gap-3">
+        <label className="-ml-2 flex h-10 w-8 shrink-0 cursor-pointer items-center justify-center max-[760px]:-ml-3 max-[760px]:h-11 max-[760px]:w-11">
+          <input
+            aria-label={t('workspace.inbox.bulk.selectOne').replace('{title}', title)}
+            checked={checked}
+            className="h-4 w-4 accent-[var(--workbench-primary)]"
+            data-testid={`notification-select-${createNotificationTestToken(notification.id)}`}
+            disabled={controller.isBulkPending}
+            onChange={(event) => onCheckedChange(event.target.checked)}
+            type="checkbox"
+          />
+        </label>
+        <button
+          className="group grid min-w-0 flex-1 grid-cols-[40px_minmax(0,1fr)] gap-3 text-left disabled:cursor-default"
+          disabled={!onOpenNotification || isPending}
+          onClick={() => {
+            void controller.markRead(notification).then(() => onOpenNotification?.(notification))
+          }}
+          type="button"
         >
-          {resolveEventGlyph(notification.eventType)}
-        </span>
-        <span className="min-w-0">
-          <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="text-xs font-bold uppercase tracking-[0.07em] text-[var(--workbench-primary-text)]">
-              {eventLabel}
+          <span
+            aria-hidden="true"
+            className={`grid h-10 w-10 place-items-center rounded-full border text-sm font-bold ${resolveEventToneClassName(notification.eventType)}`}
+          >
+            {resolveEventGlyph(notification.eventType)}
+          </span>
+          <span className="min-w-0">
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="text-xs font-bold uppercase tracking-[0.07em] text-[var(--workbench-primary-text)]">
+                {eventLabel}
+              </span>
+              <time
+                className="text-xs font-semibold text-[var(--workbench-muted-soft)]"
+                dateTime={notification.occurredAt}
+                title={formatNotificationDate(notification.occurredAt, locale, true)}
+              >
+                {formatNotificationDate(notification.occurredAt, locale, false)}
+              </time>
             </span>
-            <time
-              className="text-xs font-semibold text-[var(--workbench-muted-soft)]"
-              dateTime={notification.occurredAt}
-              title={formatNotificationDate(notification.occurredAt, locale, true)}
-            >
-              {formatNotificationDate(notification.occurredAt, locale, false)}
-            </time>
+            <span className={`mt-1 block truncate text-sm text-[var(--workbench-text)] ${isUnread ? 'font-bold' : 'font-semibold'}`}>
+              {title}
+            </span>
+            <span className="mt-1 block text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+              {summary}
+            </span>
+            <span className="mt-2 flex flex-wrap items-center gap-2">
+              {notification.actorLabel ? (
+                <span className="text-xs font-semibold text-[var(--workbench-muted)]">
+                  {notification.actorLabel}
+                </span>
+              ) : null}
+              {notification.reasons.slice(0, 3).map((reason) => (
+                <span className="workbench-badge" key={reason}>
+                  {formatNotificationReason(reason, t)}
+                </span>
+              ))}
+            </span>
           </span>
-          <span className={`mt-1 block truncate text-sm text-[var(--workbench-text)] ${isUnread ? 'font-bold' : 'font-semibold'}`}>
-            {title}
-          </span>
-          <span className="mt-1 block text-sm font-medium leading-6 text-[var(--workbench-muted)]">
-            {summary}
-          </span>
-          <span className="mt-2 flex flex-wrap items-center gap-2">
-            {notification.actorLabel ? (
-              <span className="text-xs font-semibold text-[var(--workbench-muted)]">
-                {notification.actorLabel}
-              </span>
-            ) : null}
-            {notification.reasons.slice(0, 3).map((reason) => (
-              <span className="workbench-badge" key={reason}>
-                {formatNotificationReason(reason, t)}
-              </span>
-            ))}
-          </span>
-        </span>
-      </button>
+        </button>
+      </div>
 
-      <div className="flex flex-wrap items-center justify-end gap-2 self-center max-[760px]:justify-start max-[760px]:pl-[52px]">
+      <div className="flex flex-wrap items-center justify-end gap-2 self-center max-[760px]:justify-start max-[760px]:pl-[96px]">
         {notification.reasons.includes('mention') && notification.teamId && notification.issueId ? (
           <a
             className="inline-flex min-h-9 items-center rounded-md border border-[var(--workbench-border)] bg-surface px-2.5 text-xs font-semibold text-[var(--workbench-primary-text)] transition hover:border-tone-99d7cf focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--workbench-primary)] max-[760px]:min-h-[44px]"
