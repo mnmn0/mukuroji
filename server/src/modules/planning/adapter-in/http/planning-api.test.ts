@@ -917,6 +917,34 @@ test('hides Workspace-scoped and other Project Planning entities from a legacy g
   ])
 })
 
+test('hides Planning entities and Work Items when a legacy Project ID belongs to several Teams', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+    additionalTeams: [{
+      id: 'other-team',
+      name: 'Other Team',
+      projects: [{ id: 'refero', name: 'Other Refero', tone: 'purple' }],
+    }],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const body: PlanningSnapshot = await response.json()
+  expect(body.entities.map((entity) => entity.id)).toEqual(['ws-portfolio', 'ws-roadmap'])
+  expect(body.dependencies).toEqual([])
+  expect(body.workItems).toEqual([])
+  expect(body.workItemLinks).toEqual([])
+})
+
 test('returns no Planning entities to a legacy guest without Project access', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'guest',
