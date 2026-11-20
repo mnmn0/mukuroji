@@ -2083,6 +2083,33 @@ test('requires an Idempotency-Key only when the create or duplicate request omit
   expect(snapshot.entities.map((entity) => entity.id)).toEqual(['portfolio-explicit'])
 })
 
+test('releases the reservation of a rejected create so the fixed body can reuse the key', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planning = new InMemoryPlanningClient()
+  setTestAppDependencies({
+    planning,
+    idempotency: createInMemoryDeveloperPlatformAdapters().idempotency,
+  })
+
+  const rejected = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createServerAssignedPortfolioInput(0, ''),
+    'assign-fixed-retry',
+  )
+  expect(rejected.status).toBe(400)
+
+  const fixed = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createServerAssignedPortfolioInput(0, 'Fixed portfolio'),
+    'assign-fixed-retry',
+  )
+  expect(fixed.status).toBe(201)
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.entities.map((entity) => entity.id)).toEqual([readCreatedPlanningEntityId(fixed)])
+})
+
 test('assigns the duplicate ID on the server and does not copy twice for the same Idempotency-Key', async () => {
   configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
   const planning = new InMemoryPlanningClient()
