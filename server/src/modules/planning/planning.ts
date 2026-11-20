@@ -14,6 +14,9 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  CYCLE_AUTO_CREATE_LEAD_DAYS,
+  CYCLE_ROLLOVER_BATCH_SIZE,
+  CYCLE_WORK_ITEMS_BATCH_LIMIT,
   PLANNING_SCHEMA_VERSION,
   PLANNING_UPDATE_CONTENT_VERSION,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
@@ -25,7 +28,10 @@ import {
   type CreatePlanningDependencyInput,
   type CreatePlanningEntityInput,
   type CreateWorkItemScheduleDependencyInput,
+  type CreateNextCycleInput,
+  type CycleAutomation,
   type CycleRolloverInput,
+  type CycleWorkItemsInput,
   type DuplicatePlanningEntityInput,
   type MovePlanningEntityInput,
   type ListPlanningUpdatesInput,
@@ -77,6 +83,10 @@ import {
   type WorkItemScheduleDependency,
   type WorkItemScheduleDependencyConflict,
 } from '@mukuroji/contracts'
+import {
+  createPlanningCycleScheduleRecordKey,
+  createPlanningCycleScheduleShard,
+} from './cycle-schedule-index'
 import {
   createPlanningUpdateNextNotificationAtRecordKey,
   createPlanningUpdateScheduleShard,
@@ -174,7 +184,7 @@ const DEFAULT_UPDATE_HISTORY_PAGE_SIZE = 25
 const UPDATE_VERSION_WIDTH = 16
 const MAX_REMINDER_HOURS = 24 * 365
 const MAX_UPDATE_CADENCE_COUNT = 1_000
-const MAX_ROLLOVER_LINK_MUTATIONS = 49
+const MAX_ROLLOVER_LINK_MUTATIONS = CYCLE_ROLLOVER_BATCH_SIZE
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const planningTimeZoneFormatters = new Map<string, Intl.DateTimeFormat>()
 
@@ -184,7 +194,36 @@ type PlanningMeta = {
   revision: number
   /** Last mutation timestamp, when persisted. */
   updatedAt?: string
+  /** Counters that tell Work Item advances apart from Planning structure commits. */
+  revisionFence?: PlanningRevisionFence
 }
+
+/**
+ * META counters that show which writers advanced the shared revision.
+ *
+ * Canonical Work Item writes add one to both `revision` and `sourceRevisionCount`. Every Planning
+ * commit records its own revision and the source count it saw. When the revisions after that
+ * commit equal the source advances after it, only Work Items changed the revision since then.
+ * A writer that advances `revision` without the counter keeps the two apart, so an unknown
+ * writer always counts as a Planning change.
+ */
+type PlanningRevisionFence = {
+  /** Work Item advances counted on META since the counter was created. */
+  sourceRevisionCount: number
+  /** META revision written by the latest Planning commit, when one wrote the counters. */
+  structureRevision?: number
+  /** `sourceRevisionCount` at that Planning commit. */
+  structureSourceRevisionCount?: number
+}
+
+/** Planning mutation attempts while only Work Item writes keep advancing the revision. */
+const PLANNING_WORK_ITEM_REBASE_ATTEMPT_LIMIT = 3
+
+/** Strong graph reads attempted while Work Item writes advance META during the read. */
+const PLANNING_STABLE_READ_ATTEMPT_LIMIT = 3
+
+/** Mutation options for Planning-only changes that Work Item edits must not block. */
+const REBASE_OVER_WORK_ITEM_CHANGES: PlanningMutateOptions = { rebaseOverWorkItemChanges: true }
 
 /** Schema version of the persisted Planning META fencing row. */
 export const PLANNING_STORAGE_SCHEMA_VERSION = 1 as const
@@ -392,6 +431,19 @@ export type PlanningClient = {
   get(workspaceId: string, workItemState: PlanningWorkItemState): Promise<PlanningSnapshot>
   /** 外部 authorization transaction を束縛する global revision を返します。 */
   getAuthorizationRevision(workspaceId: string): Promise<number>
+  /**
+   * Returns whether only canonical Work Item writes advanced the revision between two reads.
+   *
+   * @param workspaceId - Owning Workspace.
+   * @param expectedRevision - Revision the caller read.
+   * @param observedRevision - Newer revision read for authorization.
+   * @returns True when the Planning graph is the same at both revisions.
+   */
+  isWorkItemOnlyRevisionAdvance(
+    workspaceId: string,
+    expectedRevision: number,
+    observedRevision: number,
+  ): Promise<boolean>
   /** 認可用に read-time filtering 前の Work Item link を返します。 */
   getWorkItemLinkForAuthorization(
     workspaceId: string,
@@ -627,7 +679,58 @@ export type PlanningClient = {
     input: CycleRolloverInput,
     workItemState: PlanningWorkItemState,
   ): Promise<PlanningMutationResponse>
+  /** Cadence に従って次の Cycle を作ります。 */
+  createNextCycle(
+    workspaceId: string,
+    sourceCycleId: string,
+    input: CreateNextCycleInput,
+    workItemState: PlanningWorkItemState,
+  ): Promise<PlanningMutationResponse & { cycleId: string }>
+  /** 複数の Work Item を Cycle に入れる、または Cycle から外します。 */
+  setCycleWorkItems(
+    workspaceId: string,
+    cycleId: string,
+    input: CycleWorkItemsInput,
+    workItemState: PlanningWorkItemState,
+  ): Promise<PlanningMutationResponse>
+  /** Cycle の自動化を1段階だけ進めます。 */
+  runCycleAutomationStep(
+    workspaceId: string,
+    cycleId: string,
+    loadWorkItems: CycleAutomationWorkItemLoader,
+  ): Promise<CycleAutomationStepResult>
 }
+
+/**
+ * Reads the canonical Work Items linked to a Cycle for an automation step.
+ *
+ * @param links - Live links of the Cycle being rolled over.
+ * @returns Work Item projection that covers those links.
+ */
+export type CycleAutomationWorkItemLoader = (
+  links: readonly PlanningWorkItemLink[],
+) => Promise<PlanningWorkItemState>
+
+/** Result of one Cycle automation step. */
+export type CycleAutomationStepResult =
+  | {
+      /** Nothing is due for this Cycle now. */
+      action: 'idle'
+    }
+  | {
+      /** The next Cycle was created. */
+      action: 'created-next'
+      /** Created Cycle ID. */
+      cycleId: string
+    }
+  | {
+      /** One rollover batch was committed. */
+      action: 'rolled-over'
+      /** Moved Work Item count in this batch. */
+      movedCount: number
+      /** Incomplete Work Items still waiting in the source Cycle. */
+      remainingWorkItemCount: number
+    }
 
 /** 永続化する entity から read-time 派生値を除いた shape です。 */
 type StoredPlanningEntity = Omit<PlanningEntity, 'linkedWorkItemCount' | 'progress' | 'rollupHealth'>
@@ -646,6 +749,8 @@ type StoredPlanningUpdateTarget = Omit<PlanningUpdateTargetSummary, 'updateState
 type PlanningWorkspaceState = {
   /** Global optimistic concurrency revision です。 */
   revision: number
+  /** META counters read with `revision`, when the stored row has them. */
+  revisionFence?: PlanningRevisionFence
   /** Planning entities です。 */
   entities: StoredPlanningEntity[]
   /** Directed dependencies です。 */
@@ -678,6 +783,16 @@ type PlanningWorkItemDependencyTransactionSource = {
   dependency: WorkItemScheduleDependency
 }
 
+/** How one Planning mutation treats a revision that moved after the caller's read. */
+type PlanningMutateOptions = {
+  /**
+   * Accepts a caller revision that only canonical Work Item writes have advanced since, and
+   * retries the commit when such a write lands first. Only for mutations whose result does not
+   * depend on Work Item state, or that guard every Work Item they read with its own revision.
+   */
+  rebaseOverWorkItemChanges?: boolean
+}
+
 /** Mutation が返す rollover の追加情報です。 */
 type PlanningMutationResult = {
   /** Mutation 後の state です。 */
@@ -686,6 +801,8 @@ type PlanningMutationResult = {
   movedWorkItemIds?: string[]
   /** Rollover で元 Cycle に残した未完了 Work Item IDs です。 */
   retainedWorkItemIds?: string[]
+  /** Rollover でまだ移動していない未完了 Work Item の件数です。 */
+  remainingWorkItemCount?: number
   /** Planning commit と同じ transaction で検証する Work Item revisions です。 */
   workItemConditions?: PlanningWorkItemCondition[]
   /** Minimal Work Item dependency value used to prepare a durable completion receipt. */
@@ -807,6 +924,14 @@ abstract class BasePlanningClient implements PlanningClient {
 
   /** Workspace state を storage から読み込みます。 */
   protected abstract readState(workspaceId: string): Promise<PlanningWorkspaceState>
+
+  /**
+   * Strongly reads only the revision metadata, without the graph.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @returns The current revision and its Work Item counters.
+   */
+  protected abstract readRevisionMeta(workspaceId: string): Promise<PlanningMeta>
 
   /** Storage から target-local immutable history の1 pageを返します。 */
   protected abstract readUpdateHistory(
@@ -1006,7 +1131,7 @@ abstract class BasePlanningClient implements PlanningClient {
       const next = { ...state, entities: [...state.entities, entity] }
       validatePlanningState(next)
       return { state: next }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning entity の editable fields を更新します。 */
@@ -1046,6 +1171,13 @@ abstract class BasePlanningClient implements PlanningClient {
           : { goalFramework: readGoalFramework(patch.goalFramework) }),
         updatedAt: now,
       }
+      if (patch.automation !== undefined) {
+        const automation = patch.automation === null
+          ? undefined
+          : readCycleAutomation(patch.automation)
+        if (automation === undefined) delete updated.automation
+        else updated.automation = automation
+      }
       if (patch.description !== undefined) {
         const description = readOptionalDescription(patch.description)
         if (description === undefined) delete updated.description
@@ -1057,8 +1189,9 @@ abstract class BasePlanningClient implements PlanningClient {
       }
       const next = replaceEntity(state, updated)
       validatePlanningState(next)
+      requireCycleChainCompatible(next, updated)
       return { state: next }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /**
@@ -1508,11 +1641,14 @@ abstract class BasePlanningClient implements PlanningClient {
         updatedAt: now,
       }
       delete copy.archivedAt
+      delete copy.nextCycleId
+      // Automation runs without the caller's permissions, so only a manager turns it on.
+      delete copy.automation
       if (copy.parentId) requireActiveEntity(state, copy.parentId)
       const next = { ...state, entities: [...state.entities, copy] }
       validatePlanningState(next)
       return { state: next }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning entity の hierarchy / Team / Project scope を移動します。 */
@@ -1547,8 +1683,11 @@ abstract class BasePlanningClient implements PlanningClient {
         }),
       }
       validatePlanningState(next)
+      for (const entity of next.entities) {
+        if (entity.id === current.id || descendantIds.has(entity.id)) requireCycleChainCompatible(next, entity)
+      }
       return { state: next }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Project / Initiative update cadence を設定または解除します。 */
@@ -1939,7 +2078,7 @@ abstract class BasePlanningClient implements PlanningClient {
       const next = { ...state, dependencies: [...state.dependencies, dependency] }
       validatePlanningState(next)
       return { state: next }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning dependency を削除します。 */
@@ -1960,7 +2099,7 @@ abstract class BasePlanningClient implements PlanningClient {
           dependencies: state.dependencies.filter((dependency) => dependency.id !== id),
         },
       }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /**
@@ -2156,6 +2295,10 @@ abstract class BasePlanningClient implements PlanningClient {
           ? {}
           : { milestoneId: readIdentifier(input.milestoneId, 'Milestone ID') }),
         goalIds: readUniqueIdentifiers(input.goalIds, 'Goal ID'),
+        // The carry-over history describes how the Work Item reached its current Cycle.
+        ...(current?.cycleId !== undefined && current.cycleId === input.cycleId
+          ? readCarryOverHistory(current)
+          : {}),
         createdAt: current?.createdAt ?? now,
       }
       if ((link.projectId ?? summary.projectId) !== summary.projectId) {
@@ -2180,7 +2323,7 @@ abstract class BasePlanningClient implements PlanningClient {
           revision: readRevision(summary.revision),
         }],
       }
-    })
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Work Item planning link を削除します。 */
@@ -2211,13 +2354,22 @@ abstract class BasePlanningClient implements PlanningClient {
     })
   }
 
-  /** Cycle を完了し、policy に従って未完了 Work Item を rollover します。 */
+  /**
+   * Cycle を完了し、policy に従って未完了 Work Item を rollover します。
+   *
+   * 1回で移動する link は {@link MAX_ROLLOVER_LINK_MUTATIONS} 件までです。残りがある間は元の Cycle を
+   * 完了せず、残数を返します。同じ呼び出しを繰り返すと続きを移動し、最後の呼び出しで完了します。
+   */
   async rolloverCycle(
     workspaceId: string,
     sourceCycleId: string,
     input: CycleRolloverInput,
     workItemState: PlanningWorkItemState,
   ) {
+    // Where every canonical Work Item write advances META, the caller's expectedRevision CAS already
+    // fails if a linked Work Item changed after the caller's snapshot. Elsewhere each Work Item the
+    // step depends on is guarded itself.
+    const guardEachWorkItem = !this.workItemWritesAdvanceRevision()
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const source = requireActiveEntity(state, sourceCycleId)
       const target = requireActiveEntity(state, input.targetCycleId)
@@ -2258,19 +2410,12 @@ abstract class BasePlanningClient implements PlanningClient {
         )
       }
       const summaries = createWorkItemMap(workItemState)
-      const movedWorkItemIds: string[] = []
-      const retainedWorkItemIds: string[] = []
-      const sourceLinks = state.workItemLinks.filter((link) => link.cycleId === source.id)
-      if (sourceLinks.length > MAX_ROLLOVER_LINK_MUTATIONS) {
-        throw new PlanningError(
-          413,
-          'PlanningCycleRolloverLimitExceeded',
-          `Cycle rollover cannot validate more than ${MAX_ROLLOVER_LINK_MUTATIONS} Work Items at once.`,
-        )
-      }
-      const workItemConditions: PlanningWorkItemCondition[] = []
-      const links = state.workItemLinks.map((link) => {
-        if (link.cycleId !== source.id) return link
+      const sourceLinks = state.workItemLinks
+        .filter((link) => link.cycleId === source.id)
+        .sort(comparePlanningWorkItemLinks)
+      const incompleteLinks: PlanningWorkItemLink[] = []
+      const conditionByKey = new Map<string, PlanningWorkItemCondition>()
+      for (const link of sourceLinks) {
         const summary = summaries.get(createWorkItemKey(link.teamId, link.workItemId))
         if (!summary) {
           throw new PlanningError(503, 'PlanningWorkItemMissing', 'A linked Work Item is missing.')
@@ -2281,35 +2426,250 @@ abstract class BasePlanningClient implements PlanningClient {
             'A linked Work Item changed Project. Re-link it before rollover.',
           )
         }
-        workItemConditions.push({
+        conditionByKey.set(createWorkItemKey(link.teamId, link.workItemId), {
           teamId: link.teamId,
           workItemId: link.workItemId,
           revision: readRevision(summary.revision),
         })
-        if (summary.statusCategory === 'completed' || summary.statusCategory === 'canceled') {
-          return link
+        if (summary.statusCategory !== 'completed' && summary.statusCategory !== 'canceled') {
+          incompleteLinks.push(link)
         }
-        if (source.carryOverPolicy === 'move-incomplete') {
-          movedWorkItemIds.push(link.workItemId)
-          return { ...link, cycleId: target.id }
-        }
-        retainedWorkItemIds.push(link.workItemId)
-        return link
-      })
-      const completedSource: StoredPlanningEntity = {
-        ...source,
-        status: 'completed',
-        updatedAt: now,
       }
-      const next = { ...replaceEntity(state, completedSource), workItemLinks: links }
+      const moving = source.carryOverPolicy === 'move-incomplete'
+        ? incompleteLinks.slice(0, MAX_ROLLOVER_LINK_MUTATIONS)
+        : []
+      const remainingWorkItemCount = source.carryOverPolicy === 'move-incomplete'
+        ? incompleteLinks.length - moving.length
+        : 0
+      const completesSource = remainingWorkItemCount === 0
+      // The completing step relies on every source link's status, so it guards all of them; an
+      // intermediate step only relies on the incomplete links it moves.
+      const guardedLinks = completesSource ? sourceLinks : moving
+      if (guardEachWorkItem && guardedLinks.length > MAX_ROLLOVER_LINK_MUTATIONS) {
+        throw new PlanningError(
+          413,
+          'PlanningCycleRolloverLimitExceeded',
+          `Cycle rollover cannot validate more than ${MAX_ROLLOVER_LINK_MUTATIONS} Work Items at once.`,
+        )
+      }
+      const workItemConditions = guardEachWorkItem
+        ? guardedLinks.map((link) => conditionByKey.get(createWorkItemKey(link.teamId, link.workItemId))!)
+        : []
+      const movingKeys = new Set(moving.map((link) => createWorkItemKey(link.teamId, link.workItemId)))
+      const links = state.workItemLinks.map((link) =>
+        movingKeys.has(createWorkItemKey(link.teamId, link.workItemId))
+          ? { ...link, cycleId: target.id, carriedOverFromCycleId: source.id, carriedOverAt: now }
+          : link
+      )
+      const retainedWorkItemIds = source.carryOverPolicy === 'move-incomplete'
+        ? []
+        : incompleteLinks.map((link) => link.workItemId)
+      const nextSource: StoredPlanningEntity = completesSource
+        ? { ...source, status: 'completed', updatedAt: now }
+        : source
+      const next = { ...replaceEntity(state, nextSource), workItemLinks: links }
       validateCycleCapacities(next)
       return {
         state: next,
-        movedWorkItemIds: movedWorkItemIds.sort(),
+        movedWorkItemIds: moving.map((link) => link.workItemId).sort(),
         retainedWorkItemIds: retainedWorkItemIds.sort(),
+        remainingWorkItemCount,
         workItemConditions,
       }
     })
+  }
+
+  /** Cadence に従って次の Cycle を作り、元の Cycle に `nextCycleId` を記録します。 */
+  async createNextCycle(
+    workspaceId: string,
+    sourceCycleId: string,
+    input: CreateNextCycleInput,
+    workItemState: PlanningWorkItemState,
+  ) {
+    const normalizedSourceId = readIdentifier(sourceCycleId, 'Cycle ID')
+    const nextCycleId = createNextCycleId(normalizedSourceId)
+    await this.requireIdNotArchived(workspaceId, nextCycleId)
+    const response = await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
+      const source = requireActiveEntity(state, normalizedSourceId)
+      if (source.type !== 'cycle' || !source.cadence) {
+        throw invalid('PlanningCycleRequired', 'The next Cycle can be created only from a Cycle.')
+      }
+      if (source.status === 'canceled') {
+        throw conflict('PlanningCycleCanceled', 'A canceled Cycle has no next Cycle.')
+      }
+      if (source.nextCycleId !== undefined) {
+        throw conflict('PlanningCycleNextExists', 'The next Cycle has already been created.')
+      }
+      if (findEntity(state, nextCycleId)) {
+        throw conflict('PlanningEntityExists', `Planning entity "${nextCycleId}" already exists.`)
+      }
+      const range = createNextCycleRange(source, source.cadence)
+      const created: StoredPlanningEntity = {
+        id: nextCycleId,
+        type: 'cycle',
+        title: createNextCycleTitle(source.title),
+        ...(source.teamId === undefined ? {} : { teamId: source.teamId }),
+        ...(source.projectId === undefined ? {} : { projectId: source.projectId }),
+        ownerMemberKey: source.ownerMemberKey,
+        status: 'planned',
+        health: 'unknown',
+        risk: 'none',
+        progressMode: 'automatic',
+        baseline: { ...range },
+        forecast: { ...range },
+        cadence: { ...source.cadence },
+        ...(source.capacity === undefined ? {} : { capacity: source.capacity }),
+        ...(source.carryOverPolicy === undefined ? {} : { carryOverPolicy: source.carryOverPolicy }),
+        ...(source.automation === undefined ? {} : { automation: { ...source.automation } }),
+        createdAt: now,
+        updatedAt: now,
+      }
+      validateEntityFields(created)
+      const next = {
+        ...replaceEntity(state, { ...source, nextCycleId, updatedAt: now }),
+      }
+      next.entities = [...next.entities, created]
+      validatePlanningState(next)
+      return { state: next }
+    })
+    return { ...response, cycleId: nextCycleId }
+  }
+
+  /** 複数の Work Item を1回で Cycle に入れる、または Cycle から外します。 */
+  async setCycleWorkItems(
+    workspaceId: string,
+    cycleId: string,
+    input: CycleWorkItemsInput,
+    workItemState: PlanningWorkItemState,
+  ) {
+    const items = readCycleWorkItemReferences(input.workItems)
+    if (input.action !== 'add' && input.action !== 'remove') {
+      throw invalid('PlanningCycleWorkItemsActionInvalid', 'Cycle Work Item action must be add or remove.')
+    }
+    return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
+      const cycle = requireActiveEntity(state, cycleId)
+      if (cycle.type !== 'cycle') {
+        throw invalid('PlanningCycleRequired', 'Work Items can be added only to a Cycle.')
+      }
+      if (input.action === 'add' && (cycle.status === 'completed' || cycle.status === 'canceled')) {
+        throw conflict('PlanningEntityClosed', 'Completed or canceled Planning entities cannot receive links.')
+      }
+      const linksByKey = new Map(state.workItemLinks.map((link) =>
+        [createWorkItemKey(link.teamId, link.workItemId), link] as const
+      ))
+      const workItemConditions: PlanningWorkItemCondition[] = []
+      for (const item of items) {
+        const summary = requireWorkItem(workItemState, item.teamId, item.workItemId)
+        const key = createWorkItemKey(item.teamId, item.workItemId)
+        const current = linksByKey.get(key)
+        if (input.action === 'add') {
+          if (current?.cycleId === cycle.id) continue
+          if (current !== undefined && current.projectId !== summary.projectId) {
+            throw conflict(
+              'PlanningWorkItemProjectMismatch',
+              'A linked Work Item changed Project. Re-link it before changing its Cycle.',
+            )
+          }
+          const link: PlanningWorkItemLink = current === undefined
+            ? {
+                teamId: item.teamId,
+                workItemId: item.workItemId,
+                ...(summary.projectId === undefined ? {} : { projectId: summary.projectId }),
+                cycleId: cycle.id,
+                goalIds: [],
+                createdAt: now,
+              }
+            : withoutCarryOverHistory({ ...current, cycleId: cycle.id })
+          validateWorkItemLink(state, link)
+          linksByKey.set(key, link)
+        } else {
+          if (current?.cycleId !== cycle.id) continue
+          const link = withoutCarryOverHistory({ ...current })
+          delete link.cycleId
+          if (link.milestoneId === undefined && link.goalIds.length === 0) linksByKey.delete(key)
+          else linksByKey.set(key, link)
+        }
+        workItemConditions.push({
+          teamId: item.teamId,
+          workItemId: item.workItemId,
+          revision: readRevision(summary.revision),
+        })
+      }
+      const next = { ...state, workItemLinks: [...linksByKey.values()] }
+      validateCycleCapacities(next)
+      return { state: next, workItemConditions }
+    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+  }
+
+  /**
+   * Cycle の自動化を1段階だけ進めます。
+   *
+   * 期日を過ぎていれば次の Cycle を作り、終了日を過ぎていれば rollover を1 batch だけ実行します。
+   * 呼び出し元は `idle` が返るまで繰り返します。
+   *
+   * @param workspaceId - Owning Workspace.
+   * @param cycleId - Cycle found through the schedule index.
+   * @param loadWorkItems - Reads the canonical Work Items linked to the Cycle.
+   * @returns What this step did.
+   */
+  async runCycleAutomationStep(
+    workspaceId: string,
+    cycleId: string,
+    loadWorkItems: CycleAutomationWorkItemLoader,
+  ): Promise<CycleAutomationStepResult> {
+    const state = await this.readState(readIdentifier(workspaceId, 'Workspace ID'))
+    const cycle = findEntity(state, cycleId)
+    if (!cycle) return { action: 'idle' }
+    const action = resolveDueCycleAutomation(cycle, state, this.now())
+    if (action === undefined) return { action: 'idle' }
+    if (action === 'create-next') {
+      const response = await this.createNextCycle(
+        workspaceId,
+        cycle.id,
+        { expectedRevision: state.revision },
+        { workItems: [] },
+      )
+      return { action: 'created-next', cycleId: response.cycleId }
+    }
+    const links = state.workItemLinks.filter((link) => link.cycleId === cycle.id)
+    const workItemState = await loadWorkItems(links)
+    const response = await this.rolloverCycle(
+      workspaceId,
+      cycle.id,
+      { targetCycleId: cycle.nextCycleId!, expectedRevision: state.revision },
+      workItemState,
+    )
+    return {
+      action: 'rolled-over',
+      movedCount: response.movedWorkItemIds.length,
+      remainingWorkItemCount: response.remainingWorkItemCount ?? 0,
+    }
+  }
+
+  /**
+   * Returns whether a caller's revision still describes the current Planning graph.
+   *
+   * The revision may be older than the current one when only canonical Work Item writes advanced
+   * it since then. Mutations that do not depend on Work Item state accept such a revision.
+   *
+   * @param workspaceIdValue - Candidate Workspace identifier.
+   * @param expectedRevisionValue - Planning revision the caller read.
+   * @param observedRevisionValue - Newer revision the caller has just read and authorized against.
+   * @returns True when Planning did not change between the two revisions.
+   */
+  async isWorkItemOnlyRevisionAdvance(
+    workspaceIdValue: string,
+    expectedRevisionValue: number,
+    observedRevisionValue: number,
+  ) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const expectedRevision = readRevision(expectedRevisionValue)
+    const observedRevision = readRevision(observedRevisionValue)
+    if (expectedRevision === observedRevision) return true
+    if (expectedRevision > observedRevision) return false
+    const meta = await this.readRevisionMeta(workspaceId)
+    return observedRevision <= meta.revision &&
+      isWorkItemOnlyRevisionAdvance(meta, expectedRevision)
   }
 
   /**
@@ -2321,6 +2681,7 @@ abstract class BasePlanningClient implements PlanningClient {
    * @param mutation - Pure state transition applied after the revision check.
    * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
    * @param transaction - Optional durable completion receipt prepared before persistence.
+   * @param options - Whether the mutation may rebase over Work Item-only revision advances.
    * @returns The updated Planning snapshot and mutation metadata.
    */
   private async mutate(
@@ -2330,13 +2691,64 @@ abstract class BasePlanningClient implements PlanningClient {
     mutation: (state: PlanningWorkspaceState, now: string) => PlanningMutationResult,
     authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
     transaction?: PlanningMutationTransaction<PlanningMutationTransactionResult>,
+    options: PlanningMutateOptions = {},
   ) {
     const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
     const expectedRevision = readRevision(expectedRevisionValue)
-    const before = await this.readState(workspaceId)
-    if (before.revision !== expectedRevision) {
-      throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+    // A durable receipt is prepared once for one exact revision, so it is never rebased.
+    const rebase = options.rebaseOverWorkItemChanges === true && transaction === undefined
+    for (let attempt = 1; ; attempt += 1) {
+      const before = await this.readState(workspaceId)
+      if (
+        before.revision !== expectedRevision &&
+        !(rebase && isWorkItemOnlyRevisionAdvance(before, expectedRevision))
+      ) {
+        throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+      }
+      try {
+        return await this.commitMutation(
+          workspaceId,
+          before,
+          workItemState,
+          mutation,
+          authorizationConditionChecks,
+          transaction,
+        )
+      } catch (error) {
+        // Another write landed between the read and the commit. Each attempt re-reads the graph
+        // and is accepted again only if Planning itself is still unchanged since the caller's read.
+        if (
+          rebase &&
+          attempt < PLANNING_WORK_ITEM_REBASE_ATTEMPT_LIMIT &&
+          error instanceof PlanningError &&
+          error.code === 'PlanningRevisionConflict'
+        ) {
+          continue
+        }
+        throw error
+      }
     }
+  }
+
+  /**
+   * Applies a domain mutation to one strongly read graph and commits it with a revision CAS.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @param before - Graph read for this attempt; its revision is the commit's CAS value.
+   * @param workItemState - Canonical Work Item projection used by the mutation.
+   * @param mutation - Pure state transition applied to a copy of `before`.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
+   * @param transaction - Optional durable completion receipt prepared before persistence.
+   * @returns The updated Planning snapshot and mutation metadata.
+   */
+  private async commitMutation(
+    workspaceId: string,
+    before: PlanningWorkspaceState,
+    workItemState: PlanningWorkItemState,
+    mutation: (state: PlanningWorkspaceState, now: string) => PlanningMutationResult,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[],
+    transaction: PlanningMutationTransaction<PlanningMutationTransactionResult> | undefined,
+  ) {
     const result = mutation(structuredClone(before), this.now().toISOString())
     validatePlanningState(result.state)
     const afterUsage = measurePlanningLiveGraph(workspaceId, result.state)
@@ -2414,6 +2826,9 @@ abstract class BasePlanningClient implements PlanningClient {
       planning,
       movedWorkItemIds: result.movedWorkItemIds ?? [],
       retainedWorkItemIds: result.retainedWorkItemIds ?? [],
+      ...(result.remainingWorkItemCount === undefined
+        ? {}
+        : { remainingWorkItemCount: result.remainingWorkItemCount }),
       ...(result.publishedUpdate === undefined
         ? {}
         : { publishedUpdate: structuredClone(result.publishedUpdate) }),
@@ -2606,6 +3021,43 @@ export class InMemoryPlanningClient extends BasePlanningClient {
   /** In-memory state を返します。DynamoDB の revision cache と同じく、読み取り側は変更できません。 */
   protected async readState(workspaceId: string) {
     return deepFreeze(structuredClone(this.states.get(workspaceId) ?? createEmptyPlanningState()))
+  }
+
+  /**
+   * Returns the in-memory revision and its Work Item counters.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @returns The current revision metadata.
+   */
+  protected async readRevisionMeta(workspaceId: string): Promise<PlanningMeta> {
+    const state = this.states.get(workspaceId)
+    return {
+      revision: state?.revision ?? 0,
+      ...(state?.revisionFence === undefined ? {} : { revisionFence: { ...state.revisionFence } }),
+    }
+  }
+
+  /**
+   * Advances the revision the way a canonical Work Item write advances the shared DynamoDB META.
+   *
+   * The in-memory Work Item clients do not share this store, so callers that model a Work Item
+   * write against this client call it themselves.
+   *
+   * @param workspaceIdValue - Workspace whose Work Item changed.
+   * @param updatedAt - Timestamp of the Work Item write.
+   */
+  recordWorkItemRevision(workspaceIdValue: string, updatedAt = new Date().toISOString()) {
+    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const current = this.states.get(workspaceId) ?? createEmptyPlanningState()
+    this.states.set(workspaceId, {
+      ...structuredClone(current),
+      revision: current.revision + 1,
+      revisionFence: {
+        ...current.revisionFence,
+        sourceRevisionCount: (current.revisionFence?.sourceRevisionCount ?? 0) + 1,
+      },
+      updatedAt,
+    })
   }
 
   /** In-memory immutable history の1 pageを返します。 */
@@ -2825,7 +3277,14 @@ export class InMemoryPlanningClient extends BasePlanningClient {
       }
       this.archives.set(workspaceId, archive)
     }
-    this.states.set(workspaceId, structuredClone(after))
+    this.states.set(workspaceId, {
+      ...structuredClone(after),
+      revisionFence: createCommittedRevisionFence({
+        ...after,
+        // The CAS above proves no Work Item write landed since `before` was read.
+        revisionFence: current.revisionFence,
+      }),
+    })
   }
 }
 
@@ -2938,6 +3397,30 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
    */
   protected async readState(workspaceId: string) {
     await this.ensureTable()
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.readStableState(workspaceId)
+      } catch (error) {
+        // Canonical Work Item writes advance META at any time; a read retries past them.
+        if (
+          attempt < PLANNING_STABLE_READ_ATTEMPT_LIMIT &&
+          error instanceof PlanningError &&
+          error.code === 'PlanningRevisionConflict'
+        ) {
+          continue
+        }
+        throw error
+      }
+    }
+  }
+
+  /**
+   * Strongly reads META, then the graph rows, then META again.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @returns The live graph state at one stable revision.
+   */
+  private async readStableState(workspaceId: string) {
     const before = await this.readMeta(workspaceId)
     const cached = this.readCachedGraph(workspaceId, before)
     const items = await this.queryLiveGraphRows(
@@ -3552,7 +4035,11 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
   ) {
     await this.ensureTable()
     const beforeRows = createPlanningRowMap(workspaceId, before)
-    const afterRows = createPlanningRowMap(workspaceId, after)
+    // The META CAS below proves no Work Item write advanced the counters since `before` was read.
+    const afterRows = createPlanningRowMap(workspaceId, {
+      ...after,
+      revisionFence: before.revisionFence,
+    })
     const mutations: NonNullable<TransactWriteCommandInput['TransactItems']> = []
     for (const [recordKey, item] of afterRows) {
       if (recordKey === META_RECORD_KEY || recordsEqual(item, beforeRows.get(recordKey))) continue
@@ -3753,6 +4240,17 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       }
       throw toPersistenceError(error)
     }
+  }
+
+  /**
+   * Strongly reads the META row without the graph.
+   *
+   * @param workspaceId - Normalized Workspace identifier.
+   * @returns The current revision metadata.
+   */
+  protected async readRevisionMeta(workspaceId: string) {
+    await this.ensureTable()
+    return this.readMeta(workspaceId)
   }
 
   /** Local DynamoDB 利用時だけ table を bootstrap します。 */
@@ -4380,6 +4878,7 @@ function createStoredEntity(input: CreatePlanningEntityInput, now: string): Stor
     ...(input.carryOverPolicy === undefined
       ? {}
       : { carryOverPolicy: readCarryOverPolicy(input.carryOverPolicy) }),
+    ...optionalCycleAutomation(input.automation),
     ...(input.goalFramework === undefined
       ? {}
       : { goalFramework: readGoalFramework(input.goalFramework) }),
@@ -4477,7 +4976,20 @@ function validateEntityFields(entity: StoredPlanningEntity) {
     readCadence(entity.cadence)
     readCapacity(entity.capacity)
     readCarryOverPolicy(entity.carryOverPolicy)
-  } else if (entity.cadence || entity.capacity !== undefined || entity.carryOverPolicy) {
+    if (entity.automation !== undefined) readCycleAutomation(entity.automation)
+    if (entity.nextCycleId !== undefined) {
+      readIdentifier(entity.nextCycleId, 'Next Cycle ID')
+      if (entity.nextCycleId === entity.id) {
+        throw invalid('PlanningCycleNextInvalid', 'A Cycle cannot be its own next Cycle.')
+      }
+    }
+  } else if (
+    entity.cadence ||
+    entity.capacity !== undefined ||
+    entity.carryOverPolicy ||
+    entity.automation !== undefined ||
+    entity.nextCycleId !== undefined
+  ) {
     throw invalid('PlanningCycleFieldsInvalid', 'Only Cycle entities can define cycle fields.')
   }
   if (entity.goalFramework !== undefined && entity.type !== 'goal') {
@@ -5998,10 +6510,28 @@ function createPlanningRowMap(workspaceId: string, state: PlanningWorkspaceState
     schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
     revision: state.revision,
     updatedAt: state.updatedAt,
+    ...createCommittedRevisionFence(state),
   })
   for (const entity of state.entities) {
     const recordKey = createEntityRecordKey(entity.id)
-    rows.set(recordKey, { workspaceId, recordKey, entryType: 'planning-entity', ...entity })
+    const cycleDueAt = resolveCycleAutomationDueAt(entity, state)
+    rows.set(recordKey, {
+      workspaceId,
+      recordKey,
+      entryType: 'planning-entity',
+      ...entity,
+      // Sparse due-index attributes let the Cycle schedule find due Cycles without a scan.
+      ...(cycleDueAt === undefined
+        ? {}
+        : {
+            updateScheduleShard: createPlanningCycleScheduleShard(workspaceId, recordKey),
+            nextNotificationAtRecordKey: createPlanningCycleScheduleRecordKey(
+              workspaceId,
+              recordKey,
+              cycleDueAt,
+            ),
+          }),
+    })
   }
   for (const dependency of state.dependencies) {
     const recordKey = createDependencyRecordKey(dependency.id)
@@ -6046,11 +6576,12 @@ function createPlanningRowMap(workspaceId: string, state: PlanningWorkspaceState
 
 function readPlanningRows(
   rows: readonly Record<string, unknown>[],
-  meta: { revision: number; updatedAt?: string },
+  meta: PlanningMeta,
   workspaceId: string,
 ): PlanningWorkspaceState {
   const state: PlanningWorkspaceState = {
     revision: meta.revision,
+    ...(meta.revisionFence === undefined ? {} : { revisionFence: { ...meta.revisionFence } }),
     entities: [],
     dependencies: [],
     workItemDependencies: [],
@@ -6166,6 +6697,10 @@ function readStoredPlanningEntity(row: Record<string, unknown>): StoredPlanningE
     ...(row.carryOverPolicy === undefined
       ? {}
       : { carryOverPolicy: readCarryOverPolicy(row.carryOverPolicy) }),
+    ...optionalCycleAutomation(row.automation),
+    ...(row.nextCycleId === undefined
+      ? {}
+      : { nextCycleId: readIdentifier(row.nextCycleId, 'Next Cycle ID') }),
     ...(row.goalFramework === undefined
       ? {}
       : { goalFramework: readGoalFramework(row.goalFramework) }),
@@ -6800,6 +7335,7 @@ function readStoredPlanningWorkItemLink(row: Record<string, unknown>): PlanningW
       ? {}
       : { milestoneId: readIdentifier(row.milestoneId, 'Milestone ID') }),
     goalIds: readUniqueIdentifiers(row.goalIds, 'Goal ID'),
+    ...readCarryOverHistory(row),
     createdAt: readTimestamp(row.createdAt, 'Work Item link timestamp'),
   }
 }
@@ -8691,6 +9227,248 @@ function readCarryOverPolicy(value: unknown): NonNullable<PlanningEntity['carryO
   throw invalid('PlanningCarryOverPolicyInvalid', 'Cycle carry-over policy is invalid.')
 }
 
+/** Prefix of the server-derived ID of a next Cycle. */
+const NEXT_CYCLE_ID_PREFIX = 'cycle-next-'
+
+/**
+ * Derives the ID of the Cycle created after a source Cycle, so a retried creation cannot add two.
+ *
+ * @param sourceCycleId - Source Cycle ID.
+ * @returns Stable next Cycle ID.
+ */
+function createNextCycleId(sourceCycleId: string) {
+  return `${NEXT_CYCLE_ID_PREFIX}${createHash('sha256').update(sourceCycleId).digest('hex').slice(0, 32)}`
+}
+
+/** Last day covered by a Cycle, counting a forecast that runs past the baseline. */
+function cycleEndDate(cycle: StoredPlanningEntity) {
+  return cycle.forecast.endDate > cycle.baseline.endDate
+    ? cycle.forecast.endDate
+    : cycle.baseline.endDate
+}
+
+/**
+ * Computes the date range of the Cycle that follows a source Cycle.
+ *
+ * @param source - Source Cycle.
+ * @param cadence - Source Cycle cadence.
+ * @returns Range starting the day after the source ends and spanning one cadence.
+ */
+function createNextCycleRange(source: StoredPlanningEntity, cadence: PlanningCadence) {
+  const startDate = shiftIsoDate(cycleEndDate(source), 1)
+  const endDate = startDate === undefined
+    ? undefined
+    : cadence.unit === 'week'
+      ? shiftIsoDate(startDate, cadence.count * 7 - 1)
+      : shiftIsoDate(addIsoDateMonths(startDate, cadence.count), -1)
+  if (startDate === undefined || endDate === undefined) {
+    throw invalid('PlanningCycleNextDateInvalid', 'The next Cycle dates are out of range.')
+  }
+  return { startDate, endDate }
+}
+
+/** Adds calendar months to a date, clamping the day to the end of the target month. */
+function addIsoDateMonths(value: string, months: number) {
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(5, 7))
+  const day = Number(value.slice(8, 10))
+  const monthIndex = year * 12 + month - 1 + months
+  const targetYear = Math.floor(monthIndex / 12)
+  const targetMonth = monthIndex % 12
+  const lastDay = new Date(Date.UTC(targetYear, targetMonth + 1, 0)).getUTCDate()
+  return new Date(Date.UTC(targetYear, targetMonth, Math.min(day, lastDay))).toISOString().slice(0, 10)
+}
+
+/**
+ * Names the next Cycle by advancing the last number in the source title.
+ *
+ * @param title - Source Cycle title.
+ * @returns `Sprint 13` after `Sprint 12`, or the title followed by ` 2` when it has no number.
+ */
+function createNextCycleTitle(title: string) {
+  const match = /^(.*?)(\d+)(\D*)$/u.exec(title)
+  if (!match) return readTitle(`${title} 2`)
+  const [, prefix = '', digits = '', suffix = ''] = match
+  const next = String(BigInt(digits) + 1n).padStart(digits.length, '0')
+  return readTitle(`${prefix}${next}${suffix}`)
+}
+
+/**
+ * Returns when the next automation step of a Cycle becomes due.
+ *
+ * Cycle dates have no time zone, so a date passes at 00:00 UTC of the following day.
+ *
+ * @param entity - Planning entity.
+ * @param state - Live graph used to check the next Cycle.
+ * @returns ISO timestamp, or undefined when nothing is pending.
+ */
+function resolveCycleAutomationDueAt(
+  entity: StoredPlanningEntity,
+  state: PlanningWorkspaceState,
+) {
+  if (
+    entity.type !== 'cycle' ||
+    entity.archivedAt !== undefined ||
+    entity.automation === undefined ||
+    entity.status === 'completed' ||
+    entity.status === 'canceled'
+  ) {
+    return undefined
+  }
+  const endDate = cycleEndDate(entity)
+  const rolloverDate = shiftIsoDate(endDate, 1)
+  if (entity.nextCycleId === undefined) {
+    const createDate = entity.automation.createNext
+      ? shiftIsoDate(endDate, -CYCLE_AUTO_CREATE_LEAD_DAYS)
+      : rolloverDate
+    return createDate === undefined ? undefined : `${createDate}T00:00:00.000Z`
+  }
+  if (!entity.automation.rolloverAtEnd || rolloverDate === undefined) return undefined
+  const next = findEntity(state, entity.nextCycleId)
+  if (
+    next === undefined ||
+    next.archivedAt !== undefined ||
+    next.status === 'completed' ||
+    next.status === 'canceled'
+  ) {
+    return undefined
+  }
+  return `${rolloverDate}T00:00:00.000Z`
+}
+
+/**
+ * Rejects an edit that would make a Cycle's automated rollover into its next Cycle impossible.
+ *
+ * Automation creates the next Cycle once and records it, so an accepted edit that breaks the
+ * scope, cadence, or date order would leave the automated rollover failing on every run.
+ *
+ * @param state - Graph after the edit.
+ * @param entity - Edited entity.
+ */
+function requireCycleChainCompatible(state: PlanningWorkspaceState, entity: StoredPlanningEntity) {
+  if (entity.type !== 'cycle') return
+  const isPending = (cycle: StoredPlanningEntity) =>
+    cycle.archivedAt === undefined && cycle.status !== 'completed' && cycle.status !== 'canceled'
+  const pairs: Array<[StoredPlanningEntity, StoredPlanningEntity]> = []
+  const next = entity.nextCycleId === undefined ? undefined : findEntity(state, entity.nextCycleId)
+  if (next) pairs.push([entity, next])
+  for (const candidate of state.entities) {
+    if (candidate.id !== entity.id && candidate.nextCycleId === entity.id) pairs.push([candidate, entity])
+  }
+  for (const [source, target] of pairs) {
+    if (source.automation?.rolloverAtEnd !== true || !isPending(source) || !isPending(target)) continue
+    if (
+      target.baseline.startDate <= source.baseline.endDate ||
+      target.forecast.startDate <= source.forecast.endDate ||
+      source.teamId !== target.teamId ||
+      source.projectId !== target.projectId ||
+      source.cadence?.unit !== target.cadence?.unit ||
+      source.cadence?.count !== target.cadence?.count
+    ) {
+      throw conflict(
+        'PlanningCycleNextIncompatible',
+        `Cycle "${target.id}" must keep the scope and cadence of Cycle "${source.id}" and start after it ends. ` +
+          'Change both Cycles together, or roll over by hand first.',
+      )
+    }
+  }
+}
+
+/**
+ * Decides which automation step of a Cycle is due now.
+ *
+ * @param cycle - Cycle entity.
+ * @param state - Live graph.
+ * @param now - Current time.
+ * @returns The due step, or undefined.
+ */
+function resolveDueCycleAutomation(
+  cycle: StoredPlanningEntity,
+  state: PlanningWorkspaceState,
+  now: Date,
+): 'create-next' | 'rollover' | undefined {
+  const dueAt = resolveCycleAutomationDueAt(cycle, state)
+  if (dueAt === undefined || Date.parse(dueAt) > now.getTime()) return undefined
+  if (cycle.nextCycleId === undefined) return 'create-next'
+  // A predecessor still rolling into this Cycle goes first. Completing this Cycle earlier would
+  // stop the predecessor's rollover and strand its unfinished Work Items.
+  const predecessorPending = state.entities.some((candidate) =>
+    candidate.id !== cycle.id &&
+    candidate.nextCycleId === cycle.id &&
+    resolveCycleAutomationDueAt(candidate, state) !== undefined
+  )
+  return predecessorPending ? undefined : 'rollover'
+}
+
+/** Validates the Work Item references of a Cycle bulk change. */
+function readCycleWorkItemReferences(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > CYCLE_WORK_ITEMS_BATCH_LIMIT) {
+    throw invalid(
+      'PlanningCycleWorkItemsInvalid',
+      `Choose 1 to ${CYCLE_WORK_ITEMS_BATCH_LIMIT} Work Items.`,
+    )
+  }
+  const keys = new Set<string>()
+  return value.map((item: unknown) => {
+    if (!isRecord(item)) {
+      throw invalid('PlanningCycleWorkItemsInvalid', 'Cycle Work Item reference is invalid.')
+    }
+    const teamId = readIdentifier(item.teamId, 'Team ID')
+    const workItemId = readIdentifier(item.workItemId, 'Work Item ID')
+    const key = createWorkItemKey(teamId, workItemId)
+    if (keys.has(key)) {
+      throw invalid('PlanningCycleWorkItemsInvalid', 'Cycle Work Items must be unique.')
+    }
+    keys.add(key)
+    return { teamId, workItemId }
+  })
+}
+
+/** Drops the carry-over history of a link whose Cycle is changed by hand. */
+function withoutCarryOverHistory(link: PlanningWorkItemLink): PlanningWorkItemLink {
+  const result = { ...link }
+  delete result.carriedOverFromCycleId
+  delete result.carriedOverAt
+  return result
+}
+
+/**
+ * Validates a Cycle automation setting.
+ *
+ * @param value - Untrusted automation candidate.
+ * @returns Canonical automation, or undefined when every switch is off.
+ */
+function readCycleAutomation(value: unknown): CycleAutomation | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.createNext !== 'boolean' ||
+    typeof value.rolloverAtEnd !== 'boolean' ||
+    Object.keys(value).some((key) => key !== 'createNext' && key !== 'rolloverAtEnd')
+  ) {
+    throw invalid('PlanningCycleAutomationInvalid', 'Cycle automation is invalid.')
+  }
+  if (!value.createNext && !value.rolloverAtEnd) return undefined
+  return { createNext: value.createNext, rolloverAtEnd: value.rolloverAtEnd }
+}
+
+/** Returns the stored automation field, omitted when absent or fully disabled. */
+function optionalCycleAutomation(value: unknown): { automation?: CycleAutomation } {
+  if (value === undefined) return {}
+  const automation = readCycleAutomation(value)
+  return automation === undefined ? {} : { automation }
+}
+
+/** Reads the optional carry-over history of a Work Item link. */
+function readCarryOverHistory(
+  source: Record<string, unknown>,
+): Pick<PlanningWorkItemLink, 'carriedOverFromCycleId' | 'carriedOverAt'> {
+  if (source.carriedOverFromCycleId === undefined && source.carriedOverAt === undefined) return {}
+  return {
+    carriedOverFromCycleId: readIdentifier(source.carriedOverFromCycleId, 'Carried-over Cycle ID'),
+    carriedOverAt: readTimestamp(source.carriedOverAt, 'Carried-over timestamp'),
+  }
+}
+
 function readTimestamp(value: unknown, label: string) {
   if (
     typeof value !== 'string' ||
@@ -8823,9 +9601,95 @@ function readPlanningMetaItem(
   ) {
     throw persistenceInvalid('Planning metadata is invalid.')
   }
+  const revisionFence = readPlanningRevisionFence(
+    readOptionalStoredCounter(item.sourceRevisionCount),
+    readOptionalStoredCounter(item.structureRevision),
+    readOptionalStoredCounter(item.structureSourceRevisionCount),
+  )
   return {
     revision: item.revision,
     ...(item.updatedAt === undefined ? {} : { updatedAt: item.updatedAt }),
+    ...(revisionFence === undefined ? {} : { revisionFence }),
+  }
+}
+
+/**
+ * Validates an optional stored META counter.
+ *
+ * @param value - Untrusted attribute value.
+ * @returns The counter, or undefined when it is absent.
+ */
+function readOptionalStoredCounter(value: unknown): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw persistenceInvalid('Planning metadata is invalid.')
+  }
+  return value
+}
+
+/**
+ * Builds the revision fence from validated META counters.
+ *
+ * @param sourceRevisionCount - Work Item advance counter, when stored.
+ * @param structureRevision - Revision of the latest Planning commit that wrote counters.
+ * @param structureSourceRevisionCount - Work Item counter at that Planning commit.
+ * @returns The fence, or undefined before any Work Item write or Planning commit stored counters.
+ */
+function readPlanningRevisionFence(
+  sourceRevisionCount: number | undefined,
+  structureRevision: number | undefined,
+  structureSourceRevisionCount: number | undefined,
+): PlanningRevisionFence | undefined {
+  if (sourceRevisionCount === undefined) return undefined
+  // Both structure attributes are written together; a half-written pair is ignored.
+  return structureRevision === undefined || structureSourceRevisionCount === undefined
+    ? { sourceRevisionCount }
+    : { sourceRevisionCount, structureRevision, structureSourceRevisionCount }
+}
+
+/**
+ * Returns whether only canonical Work Item writes advanced META after a caller's revision.
+ *
+ * Every increment after the latest Planning commit must be a counted Work Item increment, and
+ * the caller must have read that commit. A META row without counters is treated as changed.
+ *
+ * @param meta - Strongly read revision and counters.
+ * @param expectedRevision - Revision the caller read.
+ * @returns True when the Planning graph at `expectedRevision` equals the graph at `meta.revision`.
+ */
+function isWorkItemOnlyRevisionAdvance(
+  meta: Pick<PlanningMeta, 'revision' | 'revisionFence'>,
+  expectedRevision: number,
+) {
+  if (meta.revision === expectedRevision) return true
+  const fence = meta.revisionFence
+  if (
+    fence?.structureRevision === undefined ||
+    fence.structureSourceRevisionCount === undefined ||
+    expectedRevision < fence.structureRevision ||
+    expectedRevision > meta.revision
+  ) {
+    return false
+  }
+  return meta.revision - fence.structureRevision ===
+    fence.sourceRevisionCount - fence.structureSourceRevisionCount
+}
+
+/**
+ * Marks a graph about to be committed as the latest Planning change on META.
+ *
+ * The commit's CAS on `revision` means no Work Item write landed since `state` was read, so its
+ * counter is still current.
+ *
+ * @param state - Graph carrying the revision it commits and the counter it was read with.
+ * @returns META counters to persist with the commit.
+ */
+function createCommittedRevisionFence(state: PlanningWorkspaceState): Required<PlanningRevisionFence> {
+  const sourceRevisionCount = state.revisionFence?.sourceRevisionCount ?? 0
+  return {
+    sourceRevisionCount,
+    structureRevision: state.revision,
+    structureSourceRevisionCount: sourceRevisionCount,
   }
 }
 

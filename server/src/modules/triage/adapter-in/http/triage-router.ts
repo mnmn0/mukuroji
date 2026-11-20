@@ -1,5 +1,6 @@
 import type { Context } from 'hono'
 import { Hono } from 'hono'
+import { resolveTrustedClientAddress } from '../../../../infrastructure/http/trusted-request-source'
 import {
   TRIAGE_BULK_ACTION_LIMIT,
   type CreateManualTriageEntryInput,
@@ -1129,7 +1130,7 @@ function createTriageApiAuditContext(
         requestId: context.req.header('X-Request-Id'),
         method: context.req.method,
         route: path,
-        ipAddress: context.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+        ipAddress: resolveTrustedClientAddress(context),
         userAgent: context.req.header('User-Agent'),
       },
     })

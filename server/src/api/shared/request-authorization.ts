@@ -314,6 +314,12 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/planning/work-item-dependencies*',
     permission: 'planning.manage',
   },
+  {
+    // Bulk Cycle membership is a link change; the route still checks each Cycle and Work Item.
+    method: 'POST',
+    pathPattern: '/api/planning/cycles/:cycleId/work-items',
+    permission: 'planning.write',
+  },
   { method: '*', pathPattern: '/api/planning/cycles*', permission: 'planning.manage' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/read-state', permission: 'planning.read' },
   { method: 'PUT', pathPattern: '/api/planning/update-feed/saved', permission: 'planning.read' },
@@ -396,6 +402,11 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'GET',
     pathPattern: '/api/teams/:teamId/agent-runs',
+    permission: 'work-items.read',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/agent-runs/analytics',
     permission: 'work-items.read',
   },
   {
@@ -553,6 +564,17 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/projects/:projectId/archive',
     permission: 'projects.manage',
   },
+  // Restoring or renaming a Project is gated like archiving it.
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/restore',
+    permission: 'projects.manage',
+  },
+  {
+    method: 'PATCH',
+    pathPattern: '/api/teams/:teamId/projects/:projectId',
+    permission: 'projects.manage',
+  },
   {
     method: 'GET',
     pathPattern: '/api/teams/:teamId/projects/:projectId/charter',
@@ -576,6 +598,32 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'PATCH',
     pathPattern: '/api/teams/:teamId/archive',
+    permission: 'teams.manage',
+  },
+  // Listing archived Teams, reordering, restoring, and renaming are gated like archiving.
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/directory',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/order',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PATCH',
+    pathPattern: '/api/teams/:teamId/restore',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/project-order',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'PATCH',
+    pathPattern: '/api/teams/:teamId',
     permission: 'teams.manage',
   },
   {
@@ -618,6 +666,12 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'PUT',
     pathPattern: '/api/ai-assistance/preferences/me',
+    permission: 'workspace.read',
+  },
+  // A member's own display preferences change no shared Workspace data.
+  {
+    method: '*',
+    pathPattern: '/api/me/preferences',
     permission: 'workspace.read',
   },
   // Push availability and the caller's own device registration change no shared Workspace data.
@@ -674,6 +728,27 @@ function requireSignInAfterMemberSignOut(accessToken: string, signInsRevokedAt: 
       'Single sign-on is required for this Workspace account.',
     )
   }
+}
+
+/**
+ * Returns whether a request starts, advances, or downloads a tenant lifecycle operation.
+ *
+ * These routes are guarded by `workspace.manage`, which is not a privileged permission, yet they
+ * export the whole tenant, including its audit log, or irreversibly close it. They therefore get
+ * the same MFA and recent-authentication policy as audit export and member administration.
+ *
+ * @param context - Hono request context.
+ * @returns True when the request is a privileged tenant lifecycle request.
+ */
+function isPrivilegedTenantLifecycleRequest(context: Context): boolean {
+  const method = context.req.method
+  const path = context.req.path
+  if (method === 'GET') {
+    return /^\/api\/tenant\/operations\/[^/]+\/download$/u.test(path)
+  }
+  return path === '/api/tenant/exports' ||
+    path === '/api/tenant/closures' ||
+    /^\/api\/tenant\/operations\/[^/]+\/(?:pause|resume|verify)$/u.test(path)
 }
 
 /**
@@ -961,7 +1036,7 @@ export async function authenticateWorkspacePrincipal(
       now: nowSeconds,
       authenticationMethods,
       clientIp: resolveEnterpriseClientIp(context),
-      privileged: [
+      privileged: isPrivilegedTenantLifecycleRequest(context) || [
         requestAccess.grantedRoutePermission,
         ...(requiredPermissions ?? []),
       ].some((permission) =>
@@ -1533,6 +1608,18 @@ function requiresEnterpriseDirectGrant(path: string): boolean {
   return /^\/api\/collections(?:\/|$)/u.test(path)
 }
 
+/**
+ * Returns whether a path under `/api/teams/` addresses every Team rather than one Team.
+ *
+ * @param path - Request path.
+ * @returns Whether the path is a Workspace-wide Team collection route.
+ */
+function isWorkspaceTeamCollectionPath(path: string | undefined): boolean {
+  return path === '/api/teams/projects' ||
+    path === '/api/teams/directory' ||
+    path === '/api/teams/order'
+}
+
 /** Returns whether the notification list needs Enterprise content scopes for visibility checks. */
 function shouldEvaluateEnterpriseNotificationScopes(context?: Context): boolean {
   return context?.req.method === 'GET' && (
@@ -1733,7 +1820,7 @@ async function resolveEnterpriseAuthorizationResource(
       parentTeamId,
     }
   }
-  if (path === '/api/teams/projects') {
+  if (isWorkspaceTeamCollectionPath(path)) {
     return { workspaceId, kind: 'workspace' as const }
   }
   const pathTeamId = path?.match(/\/teams\/([^/]+)/u)?.[1]

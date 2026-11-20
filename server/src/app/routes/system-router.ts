@@ -1,4 +1,9 @@
 import { Hono } from 'hono'
+import {
+  CODING_AGENT_MCP_API_REVISION,
+  CODING_AGENT_MCP_MINIMUM_API_REVISION,
+  type CodingAgentMcpCompatibility,
+} from '@mukuroji/contracts'
 import { classifyApiError } from '../../infrastructure/observability/api-observability'
 import {
   type ReadinessFailureRecorder,
@@ -28,6 +33,7 @@ export interface SystemRouterDependencies {
 
 /**
  * Creates root banner, liveness, and dependency-aware readiness routes.
+ * Liveness also reports the coding agent MCP API revisions this build serves.
  *
  * @param dependencies - Operational probes kept outside domain modules.
  * @returns A router exposing safe system status contracts.
@@ -41,12 +47,18 @@ export function createSystemRouter(
   const recordFailure =
     dependencies.recordFailure ?? recordReadinessFailure
 
+  const codingAgentMcp: CodingAgentMcpCompatibility = {
+    apiRevision: CODING_AGENT_MCP_API_REVISION,
+    minimumApiRevision: CODING_AGENT_MCP_MINIMUM_API_REVISION,
+  }
+
   router.get('/', (context) => context.text('mukuroji API'))
   router.get('/api/health', (context) => {
     context.header('Cache-Control', 'no-store')
     return context.json({
       ok: true,
       status: 'alive',
+      codingAgentMcp,
       ...(dependencies.applicationCommitSha === undefined
         ? {}
         : { applicationCommitSha: dependencies.applicationCommitSha }),

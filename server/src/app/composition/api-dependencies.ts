@@ -66,9 +66,6 @@ import {
   InMemoryCustomerClient,
 } from '../../modules/customers'
 import {
-  DynamoDbDashboardSummaryClient,
-} from '../../modules/analytics'
-import {
   DynamoDbAnalyticsRepository,
   InMemoryAnalyticsRepository,
 } from '../../modules/analytics/analytics'
@@ -85,6 +82,7 @@ import { DynamoDbAutomationRepository } from '../../modules/automation'
 import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { createDynamoDbDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-adapters'
+import { createInMemoryDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { DeveloperPlatformTransactionPort } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-transaction-port'
 import type { IdempotencyPort } from '../../modules/developer-platform'
 import {
@@ -534,7 +532,6 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
   })
   return {
     customers: new DynamoDbCustomerClient(),
-    dashboardSummary: new DynamoDbDashboardSummaryClient(),
     projectDirectory: new DynamoDbProjectDirectoryClient(),
     auditEvents,
     ...(auditExports ? { auditExports } : {}),
@@ -1642,6 +1639,11 @@ export function createTestAppDependencies(): AppDependencies {
       requestIntake,
     },
     automation,
+    developerPlatform: {
+      ...production.developerPlatform,
+      // Sign-in attempt limits count in this store, so tests need it without a DynamoDB table.
+      rateLimits: createInMemoryDeveloperPlatformAdapters().rateLimits,
+    },
     timeTracking: { timeTrackingService },
     capacityPlanning: {
       capacityPlanningService: new CapacityPlanningService(
@@ -1689,9 +1691,6 @@ export function overrideAppDependencies(
     workspace: {
       ...dependencies.workspace,
       ...(overrides.customers ? { customers: overrides.customers } : {}),
-      ...(overrides.dashboardSummary
-        ? { dashboardSummary: overrides.dashboardSummary }
-        : {}),
       ...(overrides.projectDirectory
         ? { projectDirectory: overrides.projectDirectory }
         : {}),
@@ -1718,6 +1717,9 @@ export function overrideAppDependencies(
         : {}),
       ...(overrides.tenantAdministration
         ? { tenantAdministration: overrides.tenantAdministration }
+        : {}),
+      ...(overrides.tenantExportDownload
+        ? { tenantExportDownload: overrides.tenantExportDownload }
         : {}),
       ...(overrides.tenantLifecycleEnforcement
         ? {

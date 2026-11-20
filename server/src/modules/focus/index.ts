@@ -4,11 +4,17 @@ export {
   createFocusCauseFingerprint,
   createFocusQueue,
   createFocusWorkItemStateKey,
+  focusQueueUsesApprovalSummary,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
   type FocusRelationGraphSource,
   type ResolveFocusEffectivePoliciesInput,
 } from './focus-queue'
+
+export {
+  isFocusSlaAnchor,
+  normalizeFocusSlaWorkItemTypeIds,
+} from './focus-sla-policy'
 
 export {
   DynamoDbFocusStateClient,

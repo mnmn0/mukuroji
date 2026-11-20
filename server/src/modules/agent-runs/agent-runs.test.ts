@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { PUBLIC_API_OPENAPI_DOCUMENT } from '@mukuroji/contracts'
 import {
   GetCommand,
   QueryCommand,
@@ -18,6 +19,7 @@ import {
   readAgentRunMutationFence,
   readFinishAgentRunRequest,
   readHeartbeatAgentRunRequest,
+  readResumeAgentRunRequest,
   readStartAgentRunRequest,
   readUpdateAgentSettingsRequest,
   splitAgentRunMutationFence,
@@ -108,6 +110,30 @@ describe('Agent Run domain', () => {
     }
   })
 
+  test('documents the agent name and instance ID rules on every request schema that takes them', () => {
+    const documented: string[] = []
+    for (const [name, schema] of Object.entries(PUBLIC_API_OPENAPI_DOCUMENT.components.schemas)) {
+      if (!name.endsWith('Request') || !('properties' in schema)) continue
+      for (const [field, property] of Object.entries(schema.properties)) {
+        if (field !== 'agentName' && field !== 'instanceId' && field !== 'agentInstanceId') continue
+        // Generated clients check only the length, so the description must name what the server also rejects.
+        expect(property).toMatchObject({ description: expect.stringContaining('rejected with validation_failed') })
+        documented.push(`${name}.${field}`)
+      }
+    }
+    expect(documented).toEqual(expect.arrayContaining([
+      'StartAgentRunRequest.agentName',
+      'StartAgentRunRequest.instanceId',
+      'TakeOverAgentRunRequest.agentName',
+      'TakeOverAgentRunRequest.instanceId',
+      'ResumeAgentRunRequest.agentName',
+      'ResumeAgentRunRequest.instanceId',
+      'HeartbeatAgentRunRequest.instanceId',
+      'FinishAgentRunRequest.instanceId',
+      'ReportAgentRunRequest.instanceId',
+    ]))
+  })
+
   test('derives stalled from the lease at read time without changing the state', () => {
     const run = createRun()
     expect(run.leaseExpiresAt).toBe('2026-10-22T00:30:00.000Z')
@@ -145,14 +171,14 @@ describe('Agent Run domain', () => {
     expect(() => readHeartbeatAgentRunRequest({})).toThrow(AgentRunError)
     expect(() => readHeartbeatAgentRunRequest(undefined)).toThrow(AgentRunError)
     expect(readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false }))
-      .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false })
+      .toEqual({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false })
     // Ready statuses and briefs are optional; empty briefs are dropped.
     expect(readUpdateAgentSettingsRequest({
       expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
       readyStatusIds: ['ready'], brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.', cdk: '  ' },
     })).toEqual({
       expectedRevision: 2, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false,
-      readyStatusIds: ['ready'], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.' },
+      readyStatusIds: ['ready'], resumableStatusIds: [], requireAcceptanceCriteria: false, brief: 'Run bun test.', projectBriefs: { web: 'Use Storybook.' },
       fileFailedRunsToTriage: false, fileStalledRunsToTriage: false,
     })
     const base = { expectedRevision: 0, leaseMinutes: 30, allowTakeoverAfterLeaseExpiry: false }
@@ -247,6 +273,77 @@ describe('DynamoDB Agent Run store', () => {
     })
   })
 
+  test('indexes a closed run by finish time, with failed runs in their own partition', async () => {
+    const store = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const runId = 'run_00000000-0000-4000-8000-000000000001'
+    const [released] = store.createCloseItems(finishAgentRun(createRun(), 'released', 'member-2', now))
+    expect(released?.Update?.UpdateExpression).toContain('#finishedRunPartition = :finishedRunPartition, #finishedRunSortKey = :finishedRunSortKey')
+    expect(released?.Update?.ExpressionAttributeValues).toMatchObject({
+      ':finishedRunPartition': 'workspace-1#team#core#finished-run',
+      ':finishedRunSortKey': `${now.toISOString()}#${runId}`,
+    })
+    const [failed] = store.createCloseItems(finishAgentRun(createRun(), 'failed', 'agent', now))
+    expect(failed?.Update?.ExpressionAttributeValues).toMatchObject({ ':finishedRunPartition': 'workspace-1#team#core#failed-run' })
+
+    const entry = {
+      directoryTeamId: 'workspace-1#team#core', recordKey: `agent-run#${runId}`, runId, workItemId: 'task-1', outcome: 'completed',
+      finishedAt: now.toISOString(), finishedRunPartition: 'workspace-1#team#core#finished-run', finishedRunSortKey: `${now.toISOString()}#${runId}`,
+    }
+    const listed = createClient([{ Items: [entry], LastEvaluatedKey: { finishedRunPartition: entry.finishedRunPartition, finishedRunSortKey: entry.finishedRunSortKey, directoryTeamId: entry.directoryTeamId, recordKey: entry.recordKey } }])
+    const page = await new DynamoDbAgentRunStore(listed.client, 'AgentRuns')
+      .listFinishedRunsByTime('workspace-1', 'core', 'other', '2026-10-21T00:00:00.000Z', undefined, 100)
+    expect(page.runs).toEqual([{ runId, workItemId: 'task-1', outcome: 'completed', finishedAt: now.toISOString() }])
+    expect(listed.commands[0]?.input).toMatchObject({
+      IndexName: 'FinishedRunIndex',
+      KeyConditionExpression: '#finishedRunPartition = :partition AND #finishedRunSortKey >= :since',
+      ExpressionAttributeValues: { ':partition': 'workspace-1#team#core#finished-run', ':since': '2026-10-21T00:00:00.000Z' },
+      ScanIndexForward: false,
+    })
+    // An end bound keeps every run that finished at it and skips later runs inside the query.
+    const bounded = createClient()
+    await new DynamoDbAgentRunStore(bounded.client, 'AgentRuns')
+      .listFinishedRunsByTime('workspace-1', 'core', 'other', '2026-10-21T00:00:00.000Z', undefined, 100, '2026-10-22T00:00:00.000Z')
+    expect(bounded.commands[0]?.input).toMatchObject({
+      KeyConditionExpression: '#finishedRunPartition = :partition AND #finishedRunSortKey BETWEEN :since AND :until',
+      ExpressionAttributeValues: { ':since': '2026-10-21T00:00:00.000Z', ':until': '2026-10-22T00:00:00.000Z#~' },
+    })
+    const untilOnly = createClient()
+    await new DynamoDbAgentRunStore(untilOnly.client, 'AgentRuns')
+      .listFinishedRunsByTime('workspace-1', 'core', 'failed', undefined, undefined, 100, '2026-10-22T00:00:00.000Z')
+    expect(untilOnly.commands[0]?.input).toMatchObject({ KeyConditionExpression: '#finishedRunPartition = :partition AND #finishedRunSortKey <= :until' })
+    await expect(new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, undefined, 100, 'yesterday'))
+      .rejects.toMatchObject({ category: 'validation_failed' })
+    // The cursor continues only the same Team and group.
+    const next = createClient()
+    await new DynamoDbAgentRunStore(next.client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, page.nextCursor, 100)
+    expect(next.commands[0]?.input).toMatchObject({ KeyConditionExpression: '#finishedRunPartition = :partition', ExclusiveStartKey: { recordKey: entry.recordKey } })
+    await expect(new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'failed', undefined, page.nextCursor, 100))
+      .rejects.toMatchObject({ category: 'validation_failed' })
+    // A failed run in the other partition, or a key that disagrees with the run, fails closed.
+    const misplaced = createClient([{ Items: [{ ...entry, outcome: 'failed' }] }])
+    await expect(new DynamoDbAgentRunStore(misplaced.client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, undefined, 100))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    const forged = createClient([{ Items: [{ ...entry, finishedRunSortKey: `${now.toISOString()}#run_other` }] }])
+    await expect(new DynamoDbAgentRunStore(forged.client, 'AgentRuns').listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, undefined, 100))
+      .rejects.toMatchObject({ category: 'temporarily_unavailable' })
+  })
+
+  test('lists finished runs by time in memory the same way, newest first and failed runs apart', async () => {
+    const store = new InMemoryAgentRunStore()
+    const later = new Date(now.getTime() + 60_000)
+    store.seed(finishAgentRun(createRun({ runId: 'run_00000000-0000-4000-8000-000000000001', workItemId: 'task-1' }), 'completed', 'agent', now))
+    store.seed(finishAgentRun(createRun({ runId: 'run_00000000-0000-4000-8000-000000000002', workItemId: 'task-2' }), 'released', 'member-2', later))
+    store.seed(finishAgentRun(createRun({ runId: 'run_00000000-0000-4000-8000-000000000003', workItemId: 'task-3' }), 'failed', 'agent', now))
+    const other = await store.listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, undefined, 100)
+    expect(other.runs.map((run) => run.workItemId)).toEqual(['task-2', 'task-1'])
+    const recent = await store.listFinishedRunsByTime('workspace-1', 'core', 'other', later.toISOString(), undefined, 100)
+    expect(recent.runs.map((run) => run.workItemId)).toEqual(['task-2'])
+    const earlier = await store.listFinishedRunsByTime('workspace-1', 'core', 'other', undefined, undefined, 100, now.toISOString())
+    expect(earlier.runs.map((run) => run.workItemId)).toEqual(['task-1'])
+    const failed = await store.listFinishedRunsByTime('workspace-1', 'core', 'failed', undefined, undefined, 100)
+    expect(failed.runs).toEqual([{ runId: 'run_00000000-0000-4000-8000-000000000003', workItemId: 'task-3', outcome: 'failed', finishedAt: now.toISOString() }])
+  })
+
   test('clears the Triage outbox without ever creating a row for a run deleted since it was listed', async () => {
     const missing = createClient([() => {
       throw Object.assign(new Error('missing'), { name: 'ConditionalCheckFailedException' })
@@ -319,7 +416,9 @@ describe('DynamoDB Agent Run store', () => {
     const superseded = finishAgentRun(createRun(), 'superseded', 'member-1', later)
     const successor = createRun({
       runId: 'run_00000000-0000-4000-8000-000000000002', instanceIdHash: hashAgentInstanceId('laptop-2'),
-      startedAt: later.toISOString(), lastHeartbeatAt: later.toISOString(),
+      // The start time sits after a stalled run whose clock was ahead; the lease is still compared with
+      // the real time of the take over.
+      startedAt: new Date(later.getTime() + 60_000).toISOString(), lastHeartbeatAt: later.toISOString(),
     })
     const [update, claim, revoke, put, unrevoke] = store.createTakeOverItems(superseded, successor)
     expect(update?.Update).toMatchObject({
@@ -340,6 +439,52 @@ describe('DynamoDB Agent Run store', () => {
     expect(unrevoke?.Delete).toBeDefined()
     expect(() => store.createTakeOverItems(superseded, { ...successor, instanceIdHash: superseded.instanceIdHash })).toThrow(TypeError)
     expect(() => store.createTakeOverItems(finishAgentRun(createRun(), 'released', 'member-2', later), successor)).toThrow(TypeError)
+  })
+
+  test('records the newest run with every start and reads it strongly', async () => {
+    const run = createRun()
+    const builder = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const latest = builder.createStartItems(run)[3]?.Put
+    expect(latest).toMatchObject({ Item: { entityType: 'agent-run-latest', workItemId: run.workItemId, runId: run.runId } })
+    expect(latest).not.toHaveProperty('ConditionExpression')
+    expect(builder.createStartItems(run, { runId: undefined })[3]?.Put?.ConditionExpression).toBe('attribute_not_exists(recordKey)')
+    expect(builder.createStartItems(run, { runId: 'run_00000000-0000-4000-8000-0000000000aa' })[3]?.Put).toMatchObject({
+      ConditionExpression: '#runId = :latestRunId', ExpressionAttributeValues: { ':latestRunId': 'run_00000000-0000-4000-8000-0000000000aa' },
+    })
+    const { client, commands } = createClient([{ Item: latest?.Item }, {}, { Item: { ...latest?.Item, runId: 'not-a-run' } }])
+    const reader = new DynamoDbAgentRunStore(client, 'AgentRuns')
+    expect(await reader.getLatestRunId('workspace-1', 'core', run.workItemId)).toBe(run.runId)
+    expect(commands[0]?.input).toMatchObject({ ConsistentRead: true })
+    expect(await reader.getLatestRunId('workspace-1', 'core', run.workItemId)).toBeUndefined()
+    await expect(reader.getLatestRunId('workspace-1', 'core', run.workItemId)).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+  })
+
+  test('keeps the run a resume links to and fails closed on a malformed link', async () => {
+    const resumed = { ...createRun(), resumedFromRunId: 'run_00000000-0000-4000-8000-0000000000aa' }
+    const item = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns').createStartItems(resumed)[0]?.Put?.Item
+    expect(item).toMatchObject({ resumedFromRunId: resumed.resumedFromRunId })
+    const { client } = createClient([
+      { Item: item },
+      { Item: { ...item, resumedFromRunId: 'not-a-run' } },
+      { Item: { ...item, resumedFromRunId: resumed.runId } },
+    ])
+    const reader = new DynamoDbAgentRunStore(client, 'AgentRuns')
+    expect(await reader.getRun('workspace-1', 'core', resumed.runId)).toEqual(resumed)
+    await expect(reader.getRun('workspace-1', 'core', resumed.runId)).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    await expect(reader.getRun('workspace-1', 'core', resumed.runId)).rejects.toMatchObject({ category: 'temporarily_unavailable' })
+    expect(readResumeAgentRunRequest({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1' }))
+      .toEqual({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceIdHash: hashAgentInstanceId('laptop-1') })
+    expect(() => readResumeAgentRunRequest({ runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1' })).toThrow(AgentRunError)
+    expect(readResumeAgentRunRequest({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1', expectedPreviousRunId: resumed.runId }))
+      .toMatchObject({ expectedPreviousRunId: resumed.runId })
+    expect(() => readResumeAgentRunRequest({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1', expectedPreviousRunId: 'run-1' }))
+      .toThrow(AgentRunError)
+    expect(() => readResumeAgentRunRequest({ expectedRevision: 4, runtime: 'kiro', agentName: 'Kiro', instanceId: 'laptop-1', workflowStatusId: 'doing' }))
+      .toThrow(AgentRunError)
+    expect(readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, resumableStatusIds: ['doing'] }))
+      .toMatchObject({ resumableStatusIds: ['doing'] })
+    expect(() => readUpdateAgentSettingsRequest({ expectedRevision: 0, leaseMinutes: 5, allowTakeoverAfterLeaseExpiry: false, resumableStatusIds: ['doing', 'doing'] }))
+      .toThrow(AgentRunError)
   })
 
   test('reads runs strictly and fails closed on rows from another Team', async () => {
@@ -377,6 +522,57 @@ describe('DynamoDB Agent Run store', () => {
     const page = await new DynamoDbAgentRunStore(client, 'AgentRuns').listWorkItemRuns('workspace-1', 'core', 'task-1', undefined, 20)
     expect(page.runs).toMatchObject([{ runId: run.runId, state: 'finished', outcome: 'released' }])
     expect(commands[1]?.input).toMatchObject({ ConsistentRead: true, Key: { recordKey: `agent-run#${run.runId}` } })
+  })
+
+  test('puts the strongly read newest run first when the history index has not caught up', async () => {
+    const builder = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const older = finishAgentRun(createRun(), 'paused', 'agent', now)
+    const newer = finishAgentRun(createRun({ runId: 'run_00000000-0000-4000-8000-000000000002', startedAt: '2026-10-22T01:00:00.000Z' }), 'failed', 'agent', now)
+    const [olderPut] = builder.createStartItems(older)
+    const [newerPut, , , latestPut] = builder.createStartItems(newer)
+    const olderItem = olderPut?.Put?.Item
+    const newerItem = newerPut?.Put?.Item
+    const latestItem = latestPut?.Put?.Item
+    if (!olderItem || !newerItem || !latestItem) throw new Error('The start items need run and newest-run puts.')
+    // The index returns only the older run; the newest-run row names the newer one.
+    const responses = () => [{ Items: [olderItem] }, { Item: olderItem }, { Item: latestItem }, { Item: newerItem }]
+    const full = await new DynamoDbAgentRunStore(createClient(responses()).client, 'AgentRuns')
+      .listWorkItemRuns('workspace-1', 'core', 'task-1', undefined, 20)
+    expect(full.runs.map((run) => [run.runId, run.outcome])).toEqual([[newer.runId, 'failed'], [older.runId, 'paused']])
+    expect(full.nextCursor).toBeUndefined()
+    // A full page keeps its size and continues after the newest run, so the older one comes next.
+    const { client, commands } = createClient([...responses(), { Items: [olderItem] }, { Item: olderItem }])
+    const reader = new DynamoDbAgentRunStore(client, 'AgentRuns')
+    const first = await reader.listWorkItemRuns('workspace-1', 'core', 'task-1', undefined, 1)
+    expect(first.runs.map((run) => run.runId)).toEqual([newer.runId])
+    const second = await reader.listWorkItemRuns('workspace-1', 'core', 'task-1', first.nextCursor, 1)
+    expect(commands[4]?.input).toMatchObject({ ExclusiveStartKey: { recordKey: `agent-run#${newer.runId}`, workItemRunSortKey: `${newer.startedAt}#${newer.runId}` } })
+    expect(second.runs.map((run) => run.runId)).toEqual([older.runId])
+  })
+
+  test('keeps the history order when the newest-run row names a run that started earlier', async () => {
+    const builder = new DynamoDbAgentRunStore(createClient().client, 'AgentRuns')
+    const earlier = finishAgentRun(createRun(), 'paused', 'agent', now)
+    const later = finishAgentRun(createRun({ runId: 'run_00000000-0000-4000-8000-000000000002', startedAt: '2026-10-22T01:00:00.000Z' }), 'paused', 'agent', now)
+    const [earlierPut, , , latestPut] = builder.createStartItems(earlier)
+    const [laterPut] = builder.createStartItems(later)
+    const earlierItem = earlierPut?.Put?.Item
+    const laterItem = laterPut?.Put?.Item
+    const latestItem = latestPut?.Put?.Item
+    if (!earlierItem || !laterItem || !latestItem) throw new Error('The start items need run and newest-run puts.')
+    // The index returns only the later run; the newest-run row names the run that started earlier.
+    const responses = () => [{ Items: [laterItem] }, { Item: laterItem }, { Item: latestItem }, { Item: earlierItem }]
+    const full = await new DynamoDbAgentRunStore(createClient(responses()).client, 'AgentRuns')
+      .listWorkItemRuns('workspace-1', 'core', 'task-1', undefined, 20)
+    expect(full.runs.map((run) => run.runId)).toEqual([later.runId, earlier.runId])
+    // A page of one keeps the index order, and its cursor continues with the earlier run instead of skipping the later one.
+    const { client, commands } = createClient([...responses(), { Items: [earlierItem] }, { Item: earlierItem }])
+    const reader = new DynamoDbAgentRunStore(client, 'AgentRuns')
+    const first = await reader.listWorkItemRuns('workspace-1', 'core', 'task-1', undefined, 1)
+    expect(first.runs.map((run) => run.runId)).toEqual([later.runId])
+    const second = await reader.listWorkItemRuns('workspace-1', 'core', 'task-1', first.nextCursor, 1)
+    expect(commands[4]?.input).toMatchObject({ ExclusiveStartKey: { workItemRunSortKey: `${later.startedAt}#${later.runId}` } })
+    expect(second.runs.map((run) => run.runId)).toEqual([earlier.runId])
   })
 
   test('rate-limits explicit heartbeats and reports a finished run as not active', async () => {
@@ -480,9 +676,9 @@ describe('DynamoDB Agent Run store', () => {
     }
     const old = createClient([{ Item: legacy }])
     expect(await new DynamoDbAgentRunStore(old.client, 'AgentRuns').getSettings('workspace-1', 'core'))
-      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, updatedAt: now.toISOString(), updatedBy: 'member-1' })
+      .toEqual({ schemaVersion: 1, teamId: 'core', revision: 3, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: [], resumableStatusIds: [], requireAcceptanceCriteria: false, projectBriefs: {}, fileFailedRunsToTriage: false, fileStalledRunsToTriage: false, updatedAt: now.toISOString(), updatedBy: 'member-1' })
     // An explicit null is corrupt rather than absent: it must not lift the Ready gate.
-    for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { requireAcceptanceCriteria: 'yes' }, { acceptanceCriteriaFieldId: '' }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
+    for (const corrupt of [{ readyStatusIds: [7] }, { readyStatusIds: null }, { resumableStatusIds: [''] }, { resumableStatusIds: null }, { requireAcceptanceCriteria: 'yes' }, { acceptanceCriteriaFieldId: '' }, { brief: '' }, { brief: null }, { projectBriefs: { web: 3 } }, { projectBriefs: [] }, { projectBriefs: null }]) {
       const client = createClient([{ Item: { ...legacy, ...corrupt } }])
       await expect(new DynamoDbAgentRunStore(client.client, 'AgentRuns').getSettings('workspace-1', 'core'))
         .rejects.toMatchObject({ category: 'temporarily_unavailable' })
@@ -502,7 +698,7 @@ describe('DynamoDB Agent Run store', () => {
       })
     }
     const first = createClient([{}])
-    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: ['ready'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', brief: 'Brief', projectBriefs: { web: 'Web brief' }, fileFailedRunsToTriage: true, fileStalledRunsToTriage: false }
+    const update = { expectedRevision: 0, leaseMinutes: 45, allowTakeoverAfterLeaseExpiry: true, readyStatusIds: ['ready'], resumableStatusIds: ['doing'], requireAcceptanceCriteria: true, acceptanceCriteriaFieldId: 'acceptance', brief: 'Brief', projectBriefs: { web: 'Web brief' }, fileFailedRunsToTriage: true, fileStalledRunsToTriage: false }
     const saved = await new DynamoDbAgentRunStore(first.client, 'AgentRuns').saveSettings('workspace-1', 'core', update, 'member-1', now, 'key-1', [])
     expect(saved).toMatchObject({ revision: 1, leaseMinutes: 45, updatedBy: 'member-1' })
     const command = first.commands[0]

@@ -1,5 +1,7 @@
 import {
   AGENT_RUN_ARTIFACT_TYPES,
+  AGENT_RUN_RUNTIMES,
+  FACTORY_ANALYTICS_STAGES,
   AGENT_RUN_REPORT_KINDS,
   AGENT_RUN_VERIFICATION_STATUSES,
   isAgentRunArtifactUrl,
@@ -9,10 +11,15 @@ import {
   type AgentRunRuntime,
   type AgentRunVerification,
   type AgentRunView,
+  type FactoryAnalyticsOutcomeCounts,
+  type FactoryAnalyticsRunSummary,
+  type FactoryAnalyticsRuntimeSummary,
+  type FactoryAnalyticsStageLeadTime,
   type FactoryBoardItem,
   type FactoryBoardReportSummary,
   type FactoryBoardWorkItem,
   type TeamAgentRunBoardResponse,
+  type TeamFactoryAnalyticsResponse,
   type WorkItemAgentRunReportsResponse,
   type WorkItemAgentRunsResponse,
 } from '@mukuroji/contracts'
@@ -95,6 +102,141 @@ export async function getTeamAgentRunBoard(accessToken: string, teamId: string):
   const board = readTeamAgentRunBoard(data)
   if (!board) throw new WorkItemConfigurationApiError(502, 'The Factory board returned an unexpected response.')
   return board
+}
+
+/**
+ * Reads the Factory analytics of a Team for a period: outcome rates, rework, interventions, and the
+ * median time runs spent in each station, overall and per runtime.
+ *
+ * @param accessToken - Session access token.
+ * @param teamId - Team ID.
+ * @param period - UTC ISO 8601 bounds of the period, both inclusive.
+ * @param period.from - Start of the period.
+ * @param period.to - End of the period.
+ * @returns Factory analytics of the period.
+ */
+export async function getTeamFactoryAnalytics(
+  accessToken: string,
+  teamId: string,
+  period: { from: string; to: string },
+): Promise<TeamFactoryAnalyticsResponse> {
+  const query = new URLSearchParams({ from: period.from, to: period.to })
+  const data = await requestJson(`${apiBaseUrl}/teams/${encodeURIComponent(teamId)}/agent-runs/analytics?${query}`, accessToken)
+  const analytics = readTeamFactoryAnalytics(data)
+  if (!analytics) throw new WorkItemConfigurationApiError(502, 'Factory analytics returned an unexpected response.')
+  return analytics
+}
+
+/**
+ * Checks that a value is null or a finite percentage.
+ *
+ * @param value - Unknown value.
+ * @returns True for null or a number from 0 to 100.
+ */
+function isRateOrNull(value: unknown): value is number | null {
+  return value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100)
+}
+
+/**
+ * Validates finished-run counts per outcome.
+ *
+ * @param value - Unknown JSON value.
+ * @returns Counts, or undefined when any outcome is missing or invalid.
+ */
+function readOutcomeCounts(value: unknown): FactoryAnalyticsOutcomeCounts | undefined {
+  if (!isRecord(value)) return undefined
+  const { completed, paused, failed, released, superseded } = value
+  if (
+    !isNonnegativeSafeInteger(completed) || !isNonnegativeSafeInteger(paused) || !isNonnegativeSafeInteger(failed) ||
+    !isNonnegativeSafeInteger(released) || !isNonnegativeSafeInteger(superseded)
+  ) {
+    return undefined
+  }
+  return { completed, paused, failed, released, superseded }
+}
+
+/**
+ * Validates the outcome rates shared by the whole Team and each runtime.
+ *
+ * @param value - Unknown JSON record.
+ * @returns Run summary, or undefined when any part is invalid.
+ */
+function readRunSummary(value: Record<string, unknown>): FactoryAnalyticsRunSummary | undefined {
+  const outcomes = readOutcomeCounts(value.outcomes)
+  const { finishedRuns, successRate, reworkRuns, reworkRate, interventions } = value
+  if (
+    !outcomes || !isNonnegativeSafeInteger(finishedRuns) || !isRateOrNull(successRate) ||
+    !isNonnegativeSafeInteger(reworkRuns) || !isRateOrNull(reworkRate) || !isNonnegativeSafeInteger(interventions)
+  ) {
+    return undefined
+  }
+  return { finishedRuns, outcomes, successRate, reworkRuns, reworkRate, interventions }
+}
+
+/**
+ * Validates the dwell time of one station.
+ *
+ * @param value - Unknown JSON value.
+ * @returns Station dwell time, or undefined when it is invalid.
+ */
+function readStageLeadTime(value: unknown): FactoryAnalyticsStageLeadTime | undefined {
+  if (!isRecord(value)) return undefined
+  const stage = FACTORY_ANALYTICS_STAGES.find((candidate) => candidate === value.stage)
+  const { medianHours, sampleSize } = value
+  const validMedian = medianHours === null || (typeof medianHours === 'number' && Number.isFinite(medianHours) && medianHours >= 0)
+  if (stage === undefined || !validMedian || !isNonnegativeSafeInteger(sampleSize)) return undefined
+  return { stage, medianHours, sampleSize }
+}
+
+/**
+ * Validates the outcome rates of one runtime.
+ *
+ * @param value - Unknown JSON value.
+ * @returns Runtime summary, or undefined when it is invalid.
+ */
+function readRuntimeSummary(value: unknown): FactoryAnalyticsRuntimeSummary | undefined {
+  if (!isRecord(value)) return undefined
+  const runtime = AGENT_RUN_RUNTIMES.find((candidate) => candidate === value.runtime)
+  const summary = readRunSummary(value)
+  return runtime === undefined || !summary ? undefined : { runtime, ...summary }
+}
+
+/**
+ * Validates a Factory analytics response. Any malformed part fails the whole response, so the summary
+ * never shows numbers it could not read.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The analytics, or undefined when any part is not supported.
+ */
+function readTeamFactoryAnalytics(value: unknown): TeamFactoryAnalyticsResponse | undefined {
+  if (!isRecord(value) || !Array.isArray(value.stageLeadTimes) || !Array.isArray(value.runtimes)) return undefined
+  const { generatedAt, from, to, finishedRunsHasMore, workItemsHasMore, historyHasMore } = value
+  const summary = readRunSummary(value)
+  const stageLeadTimes = value.stageLeadTimes.map(readStageLeadTime)
+  const runtimes = value.runtimes.map(readRuntimeSummary)
+  if (
+    !summary ||
+    typeof generatedAt !== 'string' || !Number.isFinite(Date.parse(generatedAt)) ||
+    typeof from !== 'string' || !Number.isFinite(Date.parse(from)) ||
+    typeof to !== 'string' || !Number.isFinite(Date.parse(to)) ||
+    typeof finishedRunsHasMore !== 'boolean' || typeof workItemsHasMore !== 'boolean' || typeof historyHasMore !== 'boolean'
+  ) {
+    return undefined
+  }
+  const validStages = stageLeadTimes.filter((stage): stage is FactoryAnalyticsStageLeadTime => stage !== undefined)
+  const validRuntimes = runtimes.filter((runtime): runtime is FactoryAnalyticsRuntimeSummary => runtime !== undefined)
+  if (validStages.length !== stageLeadTimes.length || validRuntimes.length !== runtimes.length) return undefined
+  return {
+    generatedAt,
+    from,
+    to,
+    ...summary,
+    stageLeadTimes: validStages,
+    runtimes: validRuntimes,
+    finishedRunsHasMore,
+    workItemsHasMore,
+    historyHasMore,
+  }
 }
 
 /**
@@ -270,11 +412,13 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
   const leaseExpiresAt = time('leaseExpiresAt')
   const finishedAt = value.finishedAt === undefined ? undefined : time('finishedAt')
   const finishedBy = value.finishedBy === undefined ? undefined : text('finishedBy')
+  const resumedFromRunId = value.resumedFromRunId === undefined ? undefined : text('resumedFromRunId')
   if (
     value.schemaVersion !== 1 || !runId || !teamId || !workItemId || !assigneeUserId || !agentName ||
     !runtime || !runtimes.has(runtime) || !state || (outcome !== undefined && !outcomes.has(outcome)) ||
     (value.outcome !== undefined && outcome === undefined) || !startedAt || !lastHeartbeatAt || !leaseExpiresAt ||
     (value.finishedAt !== undefined && !finishedAt) || (value.finishedBy !== undefined && !finishedBy) ||
+    (value.resumedFromRunId !== undefined && !resumedFromRunId) ||
     !isPositiveSafeInteger(value.startRevision) || !isPositiveSafeInteger(value.leaseMinutes) ||
     !isNonnegativeSafeInteger(value.reportCount) || typeof value.stalled !== 'boolean' || typeof value.canRelease !== 'boolean'
   ) {
@@ -300,6 +444,7 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
     ...(finishedBy === undefined ? {} : { finishedBy }),
     reportCount: value.reportCount,
     canRelease: value.canRelease,
+    ...(resumedFromRunId === undefined ? {} : { resumedFromRunId }),
   }
 }
 

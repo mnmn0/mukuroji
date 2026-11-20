@@ -48,6 +48,7 @@ export {
   normalizeWorkItemScheduleOperation,
   previewWorkItemScheduleChange,
   workItemScheduleInstantToLocalDate,
+  workItemScheduleLocalDateToStartInstant,
 } from './domain/work-item-schedule'
 export {
   WORK_ITEM_SCHEDULE_CASCADE_LIMIT,
@@ -69,6 +70,7 @@ export {
  */
 export {
   MAX_WORK_ITEM_CONFIGURATION_ITEM_SERIALIZED_BYTES,
+  WorkItemCompletionGateError,
   WorkItemConfigurationError,
   assertWorkItemChildTypeAllowed,
   assertWorkflowTransitionAllowed,

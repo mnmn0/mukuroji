@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  CYCLE_WORK_ITEMS_BATCH_LIMIT,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type ConfigurePlanningUpdateCadenceInput,
@@ -8,7 +9,10 @@ import {
   type CreateWorkItemScheduleDependencyInput,
   type CreatePlanningEntityInput,
   type ScheduleDependencyConstraint,
+  type CreateNextCycleInput,
+  type CreateNextCycleResponse,
   type CycleRolloverInput,
+  type CycleWorkItemsInput,
   type DuplicatePlanningEntityInput,
   type MovePlanningEntityInput,
   type PlanningEntity,
@@ -32,7 +36,6 @@ import {
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
 import { type Locale, ProjectDataError, type ProjectAccessEntry, type ProjectRole } from '../../modules/directory'
-import { type TeamIssueResponseItem } from '../../modules/work-items'
 import {
   WorkspaceAccessError,
   type WorkspaceMember,
@@ -88,7 +91,7 @@ import {
   workItemDependencies,
   workspaceDependencies,
 } from '../shared/app-dependencies'
-import { WORK_ITEMS_PARTITION_SCAN_LIMIT, WORK_ITEMS_TEAM_READ_LIMIT } from '../shared/constants'
+import { WORK_ITEMS_AGGREGATE_TEAM_LIMIT } from '../shared/constants'
 import { resolveDeveloperManagementPrincipal } from '../shared/developer-platform-access'
 import {
   hasUnqualifiedEnterpriseProjectScope,
@@ -136,8 +139,8 @@ import { isRecord, stableDigestStringify } from '../shared/value-guards'
 import {
   createWorkItemListLimitExceededError,
   loadAuthorizedTeamIssue,
-  readCanonicalTeamIssuesForAggregate,
 } from '../shared/work-item-access'
+import { readAllAccessibleWorkItems } from '../shared/work-item-aggregate-read'
 import {
   createWorkItemScheduleIdempotencyUserId,
   createWorkItemScheduleIdempotencyWorkspaceId,
@@ -153,10 +156,6 @@ const MAX_PLANNING_UPDATE_EXPORT_COUNT = 10_000
 
 /** Maximum UTF-8 payload size accepted for one Planning export. */
 const MAX_PLANNING_UPDATE_EXPORT_BYTES = 16_000_000
-
-/** Planning publish が一度に評価する canonical Work Item の最大数です。 */
-const PLANNING_CANONICAL_WORK_ITEM_LIMIT =
-  WORK_ITEMS_TEAM_READ_LIMIT * WORK_ITEMS_PARTITION_SCAN_LIMIT
 
 async function readPlanningJson<T>(request: { json: () => Promise<unknown> }) {
   const body = await readJson<unknown>(request)
@@ -427,6 +426,69 @@ function requirePlanningAuthorizationRevision(
   }
 }
 
+/**
+ * Accepts a caller revision that only canonical Work Item writes have advanced since.
+ *
+ * Work Item writes advance the shared Planning revision, so a Planning edit that does not depend
+ * on Work Item state would otherwise fail whenever anyone edits a Work Item. The authorization
+ * checks that follow read the current snapshot, which then holds the same Planning graph as the
+ * caller's revision.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param currentRevision - Revision of the snapshot the route just read.
+ * @param expectedRevision - Untrusted revision sent by the caller.
+ */
+async function requirePlanningRevisionUnchangedByPlanning(
+  principal: WorkspacePrincipal,
+  currentRevision: number,
+  expectedRevision: unknown,
+) {
+  if (
+    typeof expectedRevision === 'number' &&
+    Number.isSafeInteger(expectedRevision) &&
+    expectedRevision >= 0 &&
+    expectedRevision < currentRevision &&
+    await workItemDependencies.planning.isWorkItemOnlyRevisionAdvance(
+      principal.directoryId,
+      expectedRevision,
+      currentRevision,
+    )
+  ) {
+    return
+  }
+  requirePlanningAuthorizationRevision(currentRevision, expectedRevision)
+}
+
+/**
+ * Requires the Work Item projection to hold the revision that was just authorized.
+ *
+ * The link mutation guards the projection revision in its transaction. Matching it to the
+ * authorized revision makes the commit fail if the Work Item changes (for example, moves to a
+ * Project the caller cannot access) after authorization, even when the Planning revision rebases.
+ *
+ * @param workItemState - Work Item projection passed to the Planning mutation.
+ * @param teamId - Owning Team of the authorized Work Item.
+ * @param workItemId - Authorized Work Item.
+ * @param authorizedRevision - Canonical revision read during authorization.
+ */
+function requireAuthorizedPlanningWorkItemRevision(
+  workItemState: PlanningWorkItemState,
+  teamId: string,
+  workItemId: string,
+  authorizedRevision: number,
+) {
+  const summary = workItemState.workItems.find((candidate) =>
+    candidate.teamId === teamId && candidate.id === workItemId
+  )
+  if (summary?.revision !== authorizedRevision) {
+    throw new PlanningError(
+      409,
+      'PlanningWorkItemChanged',
+      'A canonical Work Item changed. Reload Planning and try again.',
+    )
+  }
+}
+
 async function requirePlanningActiveOwner(
   principal: WorkspacePrincipal,
   ownerMemberKey: unknown,
@@ -633,6 +695,28 @@ function readPlanningWorkItemDependencyEndpoint(
   return {
     teamId: readPlanningIdentifier(value.teamId, `${label} Team ID`),
     workItemId: readPlanningIdentifier(value.workItemId, `${label} Work Item ID`),
+  }
+}
+
+/**
+ * Requires the caller to manage Planning at a Cycle's scope before it changes the Cycle's automation.
+ *
+ * Automation later runs `/next` and rollover without the caller, so it needs the same
+ * `planning.manage` (or legacy manager role) as those routes, evaluated at the Cycle's own scope.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param scope - Team / Project scope of the Cycle.
+ */
+async function requirePlanningAutomationManagement(
+  principal: WorkspacePrincipal,
+  scope: Pick<PlanningEntity, 'teamId' | 'projectId'>,
+) {
+  if (!await canManagePlanningEntityScope(principal, scope)) {
+    throw new PlanningError(
+      403,
+      'ProjectAccessDenied',
+      'Planning manage permission is required to change Cycle automation.',
+    )
   }
 }
 
@@ -1254,33 +1338,21 @@ async function readCanonicalPlanningWorkItemState(
   const selectedTeams = scope?.teamId === undefined
     ? directory.teams
     : directory.teams.filter((team) => team.id === scope.teamId)
-  if (scope?.teamId === undefined && selectedTeams.length > WORK_ITEMS_TEAM_READ_LIMIT) {
+  if (selectedTeams.length > WORK_ITEMS_AGGREGATE_TEAM_LIMIT) {
     throw createWorkItemListLimitExceededError(
-      `Workspace has more than ${WORK_ITEMS_TEAM_READ_LIMIT} Teams for a Planning publish.`,
+      `Workspace has more than ${WORK_ITEMS_AGGREGATE_TEAM_LIMIT} Teams for a Planning publish.`,
     )
   }
   const servicePrincipal = { ...principal, isSystemAdmin: true }
-  const workItemsByKey = new Map<string, TeamIssueResponseItem>()
-  for (const team of selectedTeams) {
-    const response = await readCanonicalTeamIssuesForAggregate(
-      principal.directoryId,
-      { team, directory } satisfies TeamPermissionContext,
-      servicePrincipal,
-    )
-    for (const workItem of response.issues) {
-      if (scope?.projectId !== undefined && workItem.assignedProjectId !== scope.projectId) {
-        continue
-      }
-      workItemsByKey.set(`${workItem.teamId}\0${workItem.id}`, workItem)
-      if (workItemsByKey.size > PLANNING_CANONICAL_WORK_ITEM_LIMIT) {
-        throw createWorkItemListLimitExceededError(
-          `Planning publish spans more than ${PLANNING_CANONICAL_WORK_ITEM_LIMIT} Work Items.`,
-        )
-      }
-    }
-  }
+  const contexts = selectedTeams
+    .map((team) => ({ team, directory }) satisfies TeamPermissionContext)
+    .sort((left, right) => left.team.id < right.team.id ? -1 : left.team.id > right.team.id ? 1 : 0)
+  const workItems = await readAllAccessibleWorkItems(servicePrincipal, contexts, {
+    includeArchived: false,
+    ...(scope?.projectId === undefined ? {} : { filter: { projectId: scope.projectId } }),
+  })
   return {
-    workItems: [...workItemsByKey.values()].map((workItem) => ({
+    workItems: workItems.map((workItem) => ({
       id: workItem.id,
       revision: workItem.revision,
       teamId: workItem.teamId,
@@ -3792,8 +3864,11 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const input = await readPlanningJson<CreatePlanningEntityInput>(c.req)
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
       await requirePlanningScopePermission(principal, input, 'member')
+      if (isRecord(input) && input.automation !== undefined) {
+        await requirePlanningAutomationManagement(principal, input)
+      }
       if (input.parentId) {
         await requirePlanningEntityPermission(
           principal,
@@ -3824,8 +3899,11 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const input = await readPlanningJson<UpdatePlanningEntityInput>(c.req)
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
-      await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'member')
+      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
+      const entity = await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'member')
+      if (isRecord(input.patch) && input.patch.automation !== undefined) {
+        await requirePlanningAutomationManagement(principal, entity)
+      }
       if (isRecord(input.patch) && input.patch.ownerMemberKey !== undefined) {
         await requirePlanningActiveOwner(principal, input.patch.ownerMemberKey)
       }
@@ -3980,7 +4058,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const input = await readPlanningJson<DuplicatePlanningEntityInput>(c.req)
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
       const source = await requirePlanningEntityPermission(
         principal,
         snapshot.entities,
@@ -4018,7 +4096,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const input = await readPlanningJson<MovePlanningEntityInput>(c.req)
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
       await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'manager')
       for (const descendant of collectActivePlanningDescendants(snapshot.entities, entityId)) {
         await requirePlanningScopePermission(principal, descendant, 'manager')
@@ -4053,7 +4131,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const input = await readPlanningJson<CreatePlanningDependencyInput>(c.req)
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
       await Promise.all([
         requirePlanningEntityPermission(
           principal,
@@ -4089,7 +4167,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const input = await readPlanningJson<PlanningRevisionInput>(c.req)
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
       const dependency = snapshot.dependencies.find((candidate) => candidate.id === dependencyId)
       if (!dependency) {
         throw new PlanningError(404, 'PlanningDependencyNotFound', 'Planning dependency was not found.')
@@ -4471,7 +4549,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       }
       const workItemState = await readPlanningWorkItemState(principal)
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
-      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
       const current = await workItemDependencies.planning.getWorkItemLinkForAuthorization(
         principal.directoryId,
         teamId,
@@ -4485,6 +4563,12 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         )
       }
       await requirePlanningLinkEntityPermissions(principal, snapshot.entities, input)
+      requireAuthorizedPlanningWorkItemRevision(
+        workItemState,
+        teamId,
+        workItemId,
+        detail.issue.revision,
+      )
       const response = await workItemDependencies.planning.putWorkItemLink(principal.directoryId, input, workItemState)
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
     } catch (error) {
@@ -4522,6 +4606,101 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         teamId,
         workItemId,
         input,
+        workItemState,
+      )
+      return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /** Cadence に従って次の Cycle を作ります。 */
+  routeApp.post('/api/planning/cycles/:cycleId/next', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const cycleId = readPlanningRouteId(c.req.param('cycleId'), 'Cycle ID')
+      const input = await readPlanningJson<CreateNextCycleInput>(c.req)
+      const workItemState = await readPlanningWorkItemState(principal)
+      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+      requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+      await requirePlanningEntityPermission(principal, snapshot.entities, cycleId, 'manager')
+      const response = await workItemDependencies.planning.createNextCycle(
+        principal.directoryId,
+        cycleId,
+        input,
+        workItemState,
+      )
+      return c.json({
+        cycleId: response.cycleId,
+        planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
+      } satisfies CreateNextCycleResponse, 201)
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /** 複数の Work Item を1回で Cycle に入れる、または Cycle から外します。 */
+  routeApp.post('/api/planning/cycles/:cycleId/work-items', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const cycleId = readPlanningRouteId(c.req.param('cycleId'), 'Cycle ID')
+      const input = await readPlanningJson<CycleWorkItemsInput>(c.req)
+      const references: unknown = input.workItems
+      if (
+        !Array.isArray(references) ||
+        references.length === 0 ||
+        references.length > CYCLE_WORK_ITEMS_BATCH_LIMIT
+      ) {
+        throw new PlanningError(
+          400,
+          'PlanningCycleWorkItemsInvalid',
+          `Choose 1 to ${CYCLE_WORK_ITEMS_BATCH_LIMIT} Work Items.`,
+        )
+      }
+      const items = references.map((reference: unknown) => {
+        const candidate = (typeof reference === 'object' && reference !== null
+          ? reference
+          : {}) as Record<string, unknown>
+        return {
+          teamId: readPlanningIdentifier(candidate.teamId, 'Team ID'),
+          workItemId: readPlanningIdentifier(candidate.workItemId, 'Work Item ID'),
+        }
+      })
+      const workItemState = await readPlanningWorkItemState(principal)
+      const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+      await requirePlanningRevisionUnchangedByPlanning(principal, snapshot.revision, input.expectedRevision)
+      await requirePlanningEntityPermission(principal, snapshot.entities, cycleId, 'member', true)
+      const currentCycleIds = new Set<string>()
+      await Promise.all(items.map(async ({ teamId, workItemId }) => {
+        await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+        const current = await workItemDependencies.planning.getWorkItemLinkForAuthorization(
+          principal.directoryId,
+          teamId,
+          workItemId,
+        )
+        if (current?.cycleId !== undefined && current.cycleId !== cycleId) {
+          currentCycleIds.add(current.cycleId)
+        }
+      }))
+      await Promise.all([...currentCycleIds].map((currentCycleId) =>
+        requirePlanningEntityPermission(principal, snapshot.entities, currentCycleId, 'member', true)
+      ))
+      const response = await workItemDependencies.planning.setCycleWorkItems(
+        principal.directoryId,
+        cycleId,
+        { ...input, workItems: items },
         workItemState,
       )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))

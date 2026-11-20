@@ -178,6 +178,30 @@ export const projectAutomationTemplateFixture: Extract<
   workspaceId: 'workspace-demo',
 }
 
+/** WBS（親子と稼働日の予定）を持つ Project template fixture です。 */
+export const projectWbsAutomationTemplateFixture: Extract<
+  AutomationTemplate,
+  { kind: 'project' }
+> = {
+  ...projectAutomationTemplateFixture,
+  id: 'template-project-standard',
+  name: 'Standard project',
+  payload: {
+    nameEn: 'Standard project',
+    nameJa: '標準プロジェクト',
+    tone: 'green',
+    workItems: [
+      {
+        title: 'Requirements',
+        startOffsetWorkingDays: 0,
+        durationWorkingDays: 5,
+        children: [{ title: 'Interviews', startOffsetWorkingDays: 0, durationWorkingDays: 2 }],
+      },
+      { title: 'Design', startOffsetWorkingDays: 5, durationWorkingDays: 3 },
+    ],
+  },
+}
+
 /** Status/transition matrix を含む Workflow template fixture です。 */
 export const workflowAutomationTemplateFixture: Extract<
   AutomationTemplate,
@@ -229,6 +253,22 @@ export const projectTemplateApplicationFixture: AutomationTemplateApplication = 
   templateVersion: projectAutomationTemplateFixture.version,
   updatedAt: fixtureTimestamp,
   workspaceId: 'workspace-demo',
+}
+
+/** WBS 付き Project template application の成功 receipt fixture です。 */
+export const projectWbsTemplateApplicationFixture: AutomationTemplateApplication = {
+  ...projectTemplateApplicationFixture,
+  id: 'application-project-standard',
+  result: {
+    kind: 'project',
+    name: '標準プロジェクト',
+    projectId: 'application-project-standard',
+    teamId: 'core-team',
+    workItemCount: 3,
+  },
+  target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-07' },
+  templateId: projectWbsAutomationTemplateFixture.id,
+  templateVersion: projectWbsAutomationTemplateFixture.version,
 }
 
 /** Workflow template application の成功 receipt fixture です。 */

@@ -1,9 +1,21 @@
 export {
   CustomerApiError,
+  createCustomer,
+  createCustomerContact,
+  createCustomerRequest,
   createCustomerRequestFromTriage,
   createCustomerSavedView,
+  deleteCustomerContact,
   getCustomer,
   getCustomerSavedViews,
   getCustomers,
   getProjectCustomerImpact,
+  linkCustomerRequestProject,
+  linkCustomerRequestWorkItem,
+  unlinkCustomerRequestProject,
+  unlinkCustomerRequestWorkItem,
+  updateCustomer,
+  updateCustomerContact,
+  updateCustomerRequest,
 } from './customers'
+export type { CreateCustomerRequestBody, CustomerRequestWorkItemTarget } from './customers'

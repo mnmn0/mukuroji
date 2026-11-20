@@ -14,6 +14,7 @@ import {
   ANALYTICS_SCHEDULE_RECIPIENT_LIMIT,
   ANALYTICS_SCHEDULE_SHARD_COUNT,
   AnalyticsError,
+  analyticsFilterIncludesWorkItem,
   type AnalyticsDeliveryReceipt,
   type AnalyticsDueReportReference,
   type AnalyticsRepository,
@@ -21,6 +22,7 @@ import {
   createAnalyticsCsv,
   createAnalyticsPdf,
   createAnalyticsSnapshot,
+  selectAnalyticsWorkItemsRequiringHistory,
 } from '../../analytics'
 import type { WorkspaceMember } from '../../../workspace-access'
 import { isRecord } from '../../../../infrastructure/runtime/value-guards'
@@ -764,7 +766,7 @@ async function readRecipientAuthorizedData(
     const events = await readRecipientAuditEvents(
       report.workspaceId,
       historyReadAt,
-      workItems,
+      selectAnalyticsWorkItemsRequiringHistory(workItems, report.filter.period.from),
       auditClient,
     )
     const verifiedWorkItems = await readRecipientWorkItems(
@@ -780,7 +782,10 @@ async function readRecipientAuthorizedData(
         createAnalyticsScheduleWorkItemsFingerprint(verifiedWorkItems)
     ) {
       assertAnalyticsScheduleAuditCoverage(
-        verifiedWorkItems,
+        selectAnalyticsWorkItemsRequiringHistory(
+          verifiedWorkItems,
+          report.filter.period.from,
+        ),
         events,
       )
       return { workItems: verifiedWorkItems, events }
@@ -959,8 +964,12 @@ async function readRecipientWorkItems(
     }
   }
 
+  const listedTeamIds = report.filter.workItems === undefined
+    ? undefined
+    : new Set(report.filter.workItems.map((reference) => reference.teamId))
   const teams = directory.teams.filter((team) => {
     if (filteredTeamIds !== undefined && !filteredTeamIds.has(team.id)) return false
+    if (listedTeamIds !== undefined && !listedTeamIds.has(team.id)) return false
     return team.projects.some((project) => {
       return readableProjectIds.has(project.id) &&
         (filteredProjectIds === undefined || filteredProjectIds.has(project.id))
@@ -977,6 +986,7 @@ async function readRecipientWorkItems(
     for (const workItem of response.issues) {
       if (
         workItem.teamId === team.id &&
+        analyticsFilterIncludesWorkItem(report.filter, workItem.teamId, workItem.id) &&
         (
           workItem.assignedProjectId === undefined ||
           readableProjectIds.has(workItem.assignedProjectId)

@@ -8,6 +8,11 @@ mukuroji は、人間とコーディングエージェントが同じタスク�
 
 このリポジトリは Bun workspaces で構成されています。依存関係と lockfile はルートで管理します。
 
+使い方は [利用者ガイド](docs/guide/README.md)（PM・メンバー・管理者・coding agent 利用者向け）、
+全体の構成は [アーキテクチャ概要](docs/architecture.md) と [用語集](docs/glossary.md) を参照してください。
+変更の提案方法は [CONTRIBUTING.md](CONTRIBUTING.md)、脆弱性の報告は [SECURITY.md](SECURITY.md) にあります。
+ライセンスは [Apache License 2.0](LICENSE) です（[NOTICE](NOTICE)）。
+
 ## 構成
 
 - `web/`: React + TypeScript + Vite のフロントエンド
@@ -31,22 +36,51 @@ Web の業務領域フォルダを `features/` と `entities/` へ移す順序�
 bun install
 ```
 
-ローカル環境を初めて起動する前に `openssl rand -hex 32` を2回実行し、それぞれ独立した
-64桁の小文字hex出力をgit管理外の `.env` に保存してください。Docker Compose が Floci
+### ローカルで1コマンド起動する
+
+Docker と Bun 1.3.10 があれば、clone 後に次の2つでログインできる状態まで起動します。
+
+```sh
+bun install
+bun run dev
+```
+
+`bun run dev` は次を順に行います。
+
+1. `.env.example` を元に git 管理外の `.env` を作り、空の secret を生成して `chmod 600` にする
+   （`bun run local:setup` と同じ。既存の値は上書きしません）。`.floci/generated` がなければ、
+   Floci コンテナ（uid 1001）が native Linux でも書き込めるよう sticky bit 付きの `1777` で作ります
+2. `bun run floci:up` と同じ手順で Floci を起動し、ready hook の完了を待つ
+3. `server:dev`・`workers:dev`・`web:dev` をまとめて起動し、出力に `[server]` などの名前を付ける
+
+http://localhost:5173 を開き、初期 owner の `demo@example.com` / `Password123!` でログインします。
+`Ctrl+C` で server・worker・Web を止めます（worker は処理中の batch を終えてから止まります）。
+どれか1つが終了したときも、残りを止めて同じ終了コードで終わります。Floci は次回の起動を速くするため
+動かしたままにするので、止めるときは `bun run dev:down` を使います。
+
+### `.env` の secret
+
+`.env` には次の2つの secret が必要です。`bun run local:setup` または `bun run dev` が生成します。
+手で作る場合は `openssl rand -hex 32` を2回実行し、それぞれ独立した64桁の小文字hex出力を
+保存して `chmod 600 .env` で owner 以外からの読み取りを禁止してください。Docker Compose が Floci
 コンテナへ渡すのは Workspace audit key だけで、ready hook がその形式を検証します。
 Enterprise credential secret は host 上の `server:dev` と `floci:deploy-backend` が
-`.env` から直接読み込み、Floci コンテナには渡しません。保存後は `chmod 600 .env` で
-owner以外からの読み取りを禁止してください。
+`.env` から直接読み込み、Floci コンテナには渡しません。
 
 ```dotenv
 MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<64-character-lowercase-hex-output>
 ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET=<different-64-character-lowercase-hex-output>
 ```
 
+既存の `.env` に形式の違う値があると、setup は値を置き換えずにエラーで止まります。Workspace audit key は
+ローカルの監査データと結び付くため、一度決めた値を変えないでください。
+
 ローカルのSSOも既定では無効です。以前の `.env` に `ENTERPRISE_SSO_STATE_SECRET` がある場合、
 SSOを使わなければ削除し、`bun run floci:up` で生成設定を更新してください。SSOを使う場合のみ、
 独立したstate secret、Hosted UI、外部IdPを含む5項目の設定を揃えます。Flociが作る検証用OAuth
 clientだけでは外部SSOを有効にしません。
+
+### Codex cloud とレビュー Skill
 
 Codex cloud のカスタムセットアップスクリプトには、以下を指定できます。
 
@@ -112,6 +146,8 @@ Bun は `packageManager` / `.bun-version` / CI と同じ **1.3.10** を使いま
 `bun --version` で確認してください。バージョン管理ツールまたはBunの公式配布から
 指定版を用意し、PATHの先頭に配置します。
 
+`bun run dev` を使わずに個別に起動する場合:
+
 ```sh
 bun run floci:up
 # 初期化完了を最大300秒待ちます。成功してから起動
@@ -124,6 +160,9 @@ bun run web:dev
 
 - DynamoDB Admin: http://localhost:8001 （`DYNAMODB_ADMIN_PORT` で変更可）。
   テーブルの閲覧・編集ができるため、host の loopback だけに公開します。
+- Floci: http://localhost:4566 （`FLOCI_PORT` で変更可）。認証のない AWS emulator のため
+  host の loopback だけに公開し、image は digest で固定します。Docker socket は
+  Lambda を実行する `floci:up:lambda` のときだけ渡します。
 - S3: versioning と local Web origin 向け CORS を設定した `mukuroji-files-local` と
   `mukuroji-work-item-import-local`。ready hook の再実行で既存objectを削除しません。
 - SQS: import、Webhook配送、connector同期の3 queue。それぞれ専用DLQ、
@@ -182,11 +221,11 @@ secret は owner-only の root `.env` だけに保持します。Workspace audit
 へ渡し、Enterprise credential/state secret は関連する root package scripts が
 `--env-file=.env` を指定して host process へ明示的に渡します。
 
-同じ ready hook で DynamoDB table `mukuroji-dashboard-local`,
+同じ ready hook で DynamoDB table
 `mukuroji-team-issues-local`, `mukuroji-project-directory-local`,
 `mukuroji-workspace-access-local`, `mukuroji-enterprise-identity-local`,
 `mukuroji-workspace-search-local`, `mukuroji-analytics-local` も作成し、
-ダッシュボード集計、canonical Work Item、
+canonical Work Item、
 サイドバー用チーム/プロジェクト階層、Workspace metadata/member を投入します。
 Analytics table は保存済みレポート、immutable snapshot、定期配信 receipt を保持し、
 `ScheduleDueIndex` で配信対象を取得できる本番同等の key schema を使います。
@@ -217,9 +256,15 @@ command を安全に再実行できます。その後の作成・更新は通常
 Floci 上の Lambda + API Gateway に backend をデプロイする場合:
 
 ```sh
-bun run floci:up
+bun run floci:up:lambda
 bun run floci:deploy-backend
 ```
+
+Floci は Lambda を host の Docker daemon 上の container として実行するため、
+`floci:up:lambda` は `docker-compose.lambda.yml` を重ねて Docker socket を Floci に渡します。
+socket を持つ container は host の root 相当の操作ができるので、Lambda を使わないときは
+`floci:up` で起動し直してください。`floci:deploy-backend` は socket のない Floci を検出すると、
+deploy の前に停止します。
 
 `floci:deploy-backend` は `server:build:lambda` で `server/src/handlers/api.handler.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は ready hook が生成した `ANALYTICS_TABLE_NAME` と `ANALYTICS_SCHEDULE_INDEX_NAME` を Lambda に渡します。また、確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡し、Secrets Manager の内部 HTTP endpoint と明示的な `MUKUROJI_LOCAL_AWS_RUNTIME=floci` marker を組にして渡します。管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
 
@@ -282,7 +327,6 @@ Web で各 API がどの環境変数をどの順で参照するかは `web/src/s
 - `COGNITO_SSO_USER_POOL_CLIENT_NAME`: Floci が作る SSO client 名。未指定時は `mukuroji-sso-local`
 - `ENTERPRISE_SSO_STATE_SECRET`: SSO state 署名専用の 32–256 文字 secret
 - `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL_DYNAMODB` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
-- `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
 - `PROJECT_DIRECTORY_TABLE_NAME`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
 - `WORKSPACE_ACCESS_TABLE_NAME`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
 - `WORK_ITEMS_TABLE_NAME`: Work Item を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
@@ -321,7 +365,7 @@ Web で各 API がどの環境変数をどの順で参照するかは `web/src/s
 - `MUKUROJI_REQUEST_TOKEN_HASH_SECRET`: request/reply capability の hash に使う別の 32–256 文字の secret
 - `MUKUROJI_EDGE_ORIGIN_SECRET`: CloudFront が API request に付ける 32–128 文字の secret。一致した request だけ CloudFront が観測した viewer address を rate limit と Enterprise IP policy に使います。環境作成時に生成して secret store に保存し、毎回の deploy で同じ値を渡します。
 
-API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
+API サーバーは `/api/workspace/access`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
 `/api/search`, `/api/saved-views`, `/api/audit/events`,
 `/api/notifications`, `/api/documents`, `/api/automation/rules`, `/api/automation/templates`,

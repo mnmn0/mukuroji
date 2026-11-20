@@ -87,11 +87,15 @@ credential を共有する agent 同士を敵対的に隔離するものでは�
 (なし) --start--> active --finish(completed|paused|failed)--> finished
                  active --release(人)-------------------------> finished(released)
                  active --take over(別 instance, 設定で許可時)--> finished(superseded) + 新 active
+finished(paused|completed など) + Work Item が started --resume(同じ assignee)--> 新 active
 ```
 
 - `active` かつ `leaseExpiresAt < now` を停滞として read 時に導出する。停滞は `state` を変えず、
   scheduler も動かさない。停滞 Run も fence として有効であり、人の解放か、設定で許可された
   take over だけが次の Run を開始できる。
+- `active` Run がない `started` の Work Item は、同じ assignee が resume で新しい Run を始められる
+  （[止まった Run の再開](#止まった-run-の再開)）。新しい Run は直前の Run の `runId` を
+  `resumedFromRunId` として持つ。
 - `paused` は agent が自分の意思で作業を中断した終了（レビュー待ちへ移動、blocker で停止、
   ユーザーからの指示）である。Work Item の workflow status は別途 `move_task` で変える。
 - `failed` は agent が完了できないと判断した終了である。Work Item の status は変えない。
@@ -143,15 +147,17 @@ credential を共有する agent 同士を敵対的に隔離するものでは�
 | --- | --- | --- | --- |
 | table | `directoryTeamId` | `agent-run#<runId>` | Run の正本 |
 | table | `directoryTeamId` | `agent-run-claim#<workItemId>` | Work Item ごとの `active` Run を 1 件に固定する claim row |
+| table | `directoryTeamId` | `agent-run-latest#<workItemId>` | Work Item で最後に始まった Run の `runId`。start、take over、resume の transaction で書き、resume と Run 履歴の先頭ページが強整合で読む。index にまだない最新 Run は先頭ページの先頭に足す |
 | table | `directoryTeamId` | `agent-run-revoked#<workItemId>#<member と instance の hash>` | 人が解放した、または別 instance が引き継いだ Run の member と instance。fence が強整合で読む |
 | table | `directoryTeamId` | `agent-settings-mutation#<key hash>` | Agent settings の保存ごとの receipt。同じ key の再送を判定する |
 | `WorkItemRunIndex` | `directoryTeamId#<workItemId>` | `<startedAt>#<runId>` | Work Item 詳細の Run 履歴 |
 | `ActiveRunIndex`（sparse） | `directoryTeamId` | `<leaseExpiresAt>#<runId>` | board の処理中・停滞一覧。`finished` で key を外す |
+| `FinishedRunIndex`（sparse） | `directoryTeamId#failed-run` または `directoryTeamId#finished-run` | `<finishedAt>#<runId>` | board の完了・失敗 lane。Run を閉じる transaction で key を書く。`failed` は別 partition。projection は `runId`・`workItemId`・`outcome`・`finishedAt` |
 
 claim row は `runId` と `instanceId` hash を持ち、start の transaction で「存在しない」条件付き
 put、finish / release / take over の transaction で同じ `runId` 条件付き delete または置換を行う。
 claim row が残り Run row が `finished` になった不整合は strict reader が fail-closed で `503` とし、
-[data-integrity](data-integrity.md) の verify script に検査を追加する。
+[Agent Run の整合性検査](#agent-run-の整合性検査と手動修復) で定期的に検出する。
 
 revocation row は Run を `released` または `superseded` で閉じる transaction で書き、同じ member と
 instance がその Work Item で Run を開始する transaction でだけ削除する。別 instance の Run が開始・
@@ -265,6 +271,7 @@ Team ごとの設定を Work Item configuration とは別の `agent-settings` co
 | `requireAcceptanceCriteria` | `false` | `true` なら受け入れ条件が 1 件以上ある Work Item だけを Ready とする。 |
 | `leaseMinutes` | `30` | 新しい Run の lease。 |
 | `allowTakeoverAfterLeaseExpiry` | `false` | `true` なら停滞 Run を同じ assignee の別 instance が `take_over_task` で引き継げる。 |
+| `resumableStatusIds[]` | `[]` | `active` Run のない Work Item を resume してよい `started` category の status ID（最大 50 件）。`get_next_task` はこの status の Work Item だけを再開候補として示す。空の場合は明示的な resume がどの `started` status でもでき、`get_next_task` は再開候補を示さない。 |
 | `brief` | なし | Team の agent brief。Markdown、最大 16 KiB。 |
 | `projectBriefs{}` | `{}` | Project ID ごとの brief。Team brief の後に連結して返す。 |
 | `acceptanceCriteriaFieldId` | なし | 受け入れ条件の代替 custom field。 |
@@ -348,6 +355,33 @@ Factory board には、同じ data を工場のラインとして見せる「ラ
 - `prefers-reduced-motion` ではコンベア、作業者、カメラの動きと自動再生を止める。工程と item は
   SVG の外の工程バーと panel から keyboard で操作でき、SVG には工程ごとの件数を含む説明を付ける。
 
+### 期間サマリー（analytics）
+
+Factory board の上部に、期間内に終わった Run の集計を出す。data は session 認証の内部 API
+`GET /api/teams/{teamId}/agent-runs/analytics?from=...&to=...`（`TeamFactoryAnalyticsResponse`）から取得し、
+保存済みの Run と構造化 report だけから read 時に計算する。新しい保存 field や audit の読み取りは足さない。
+
+- 対象は `finishedAt` が期間（両端を含む UTC instant、最長 92 日）に入る Run のうち、閲覧者が見られる
+  Work Item の Run。削除された Work Item は除き、アーカイブ済みは数える。権限は board と同じく Team の
+  viewer 以上で、Work Item ごとに割り当て Project の viewer 権限を確認する。
+- 成功率は `completed` ÷（終了した Run − `paused`）。`paused` は人へ意図して渡した停止なので成否に数えない。
+- 手戻りは、同じ Work Item の直前の Run が `failed` または `completed` で終わった後に始まった Run。
+  `paused` 後の再開、解放や take over の後の Run は手戻りに数えない。手戻り率は手戻り Run ÷ 終了した Run。
+- 人の介入は `released` と `superseded`（take over された Run）の数。override は記録がないため数えない。
+- 工程別の滞在時間は、Run の開始から `実装`、各 report の時点からその kind の工程（`progress` は実装、
+  `verification` は検証、`artifact` は成果物、`blocker` / `handoff` は判断）に入り、終了までを工程ごとに
+  足し、工程に入った Run の中央値を返す。`paused` で終わった Run は、同じ Work Item の次の Run が始まるまでを
+  判断に足す。次の Run がまだない待ちは数えない。受付（Run なしの `started`）は Work Item の履歴が要るため
+  まだ測らない。
+- 全体と runtime ごとに同じ率を返す。
+- 読み取りは上限付きで、上限で止まったときは flag で知らせる: 終了 Run の index は期間の両端で絞り、failed とそれ以外を
+  それぞれ新しい順に最大 1,000 件（`finishedRunsHasMore`）、履歴を読む Work Item は最大 200 件
+  （`workItemsHasMore`）、Work Item ごとの Run は最大 100 件、report は最大 300 件。直前の Run や report が
+  読めなかった Run は件数と成功率には入れ、手戻りと滞在時間からは外す。Run が 100 件を超える
+  Work Item で読めなかった古い Run が期間内に終わっている可能性があるときも知らせる（`historyHasMore`）。
+- token / 費用の報告（`finish_run` / `report_progress` の `usage`）、Analytics engine の metric・widget・snapshot
+  への統合、Work Item / Project 別の集計は後続とする。
+
 ## Triage への自動起票
 
 `failed` で終わった Run と停滞した Run を、Team の Triage に `agent-run` source の entry として
@@ -416,6 +450,7 @@ Run は Work Item の sub-resource とし、新しい scope は追加しない�
 | `POST /v1/agent-runs/{runId}/reports` | 構造化 report と comment の保存。 |
 | `POST /v1/agent-runs/{runId}/finish` | 終了。body は `outcome` と Run 開始時と同じ `instanceId`。 |
 | `POST /v1/work-items/{workItemId}/agent-runs/{runId}/take-over` | 停滞 Run の引き継ぎ。設定で許可時のみ。 |
+| `POST /v1/work-items/{workItemId}/agent-runs/resume?teamId=` | `active` Run のない `started` Work Item で新しい Run を始める。body は `expectedRevision`、`runtime`、`agentName`、`instanceId` と、任意の `expectedPreviousRunId`（直前の Run がこれと違えば `409`）。応答は新しい `run` と、あれば直前の Run `resumedFromRun`。Work Item の status は変えない。 |
 | `PATCH /v1/work-items/{workItemId}` / `POST .../comments` | 既存。任意 `agentRunId` と `agentInstanceId` を追加。 |
 
 内部 API は Web 画面だけが使い、Public OpenAPI document には含めない。次を提供する。
@@ -437,8 +472,9 @@ Run 固有の理由は既存の `conflict` / `forbidden` に対応する problem
 | `409` | `conflict` | `agent_run_not_active` | 指定 Run が `finished`、別 instance のもの、または対象 Work Item と一致しない |
 | `403` | `forbidden` | `agent_run_forbidden` | credential の actor が Work Item または Run の `assigneeUserId` と異なる |
 | `403` | `forbidden` | `agent_run_takeover_disabled` | Team の Agent settings が take over を許可していない |
-| `409` | `conflict` | `invalid_transition` | start 対象が `backlog` / `unstarted` でない、または遷移先が `started` でない |
+| `409` | `conflict` | `invalid_transition` | start 対象が `backlog` / `unstarted` でない、遷移先が `started` でない、または resume 対象が `started` でない |
 | `409` | `conflict` | `not_ready` | start 対象が Agent settings の Ready 条件を満たさない（Slice 3） |
+| `409` | `conflict` | `not_resumable` | resume 対象の status が Agent settings の `resumableStatusIds` に含まれない |
 | `400` | `validation_failed` | `invalid_artifact_url` | report の URL が許可形式でない |
 
 Run と claim の行が食い違う場合は修復せず `503 temporarily_unavailable` とする。
@@ -447,7 +483,7 @@ OpenAPI document と `api:contract:check` の baseline を同じ変更で更新�
 
 ### 冪等性と競合
 
-- start、report、finish、take over は既存どおり `Idempotency-Key` を必須とし、同じ key と同じ
+- start、report、finish、take over、resume は既存どおり `Idempotency-Key` を必須とし、同じ key と同じ
   引数の再送は保存済み receipt を返す。異なる引数は `409 idempotency_conflict`。
 - 同じ revision に対する異なる key の並行 start は、Work Item の revision CAS と claim row の
   条件付き put のどちらかで 1 つだけ成功する。敗者は `agent_run_conflict` を受け取り、Work
@@ -473,12 +509,13 @@ tool は次のとおり変更・追加する。
 
 | Tool | 変更 |
 | --- | --- |
-| `get_configuration` | `agentSettings`（`readyStatusIds`、`requireAcceptanceCriteria`、`leaseMinutes`、`allowTakeoverAfterLeaseExpiry`）と `brief` を追加。 |
-| `get_next_task` | `ownRuns`、`otherRuns`、`skipped` を追加。Ready 判定を Agent settings に従わせる。 |
+| `get_configuration` | `agentSettings`（`readyStatusIds`、`resumableStatusIds`、`requireAcceptanceCriteria`、`leaseMinutes`、`allowTakeoverAfterLeaseExpiry`）と `brief` を追加。 |
+| `get_next_task` | `ownRuns`、`otherRuns`、`skipped` を追加。Ready 判定を Agent settings に従わせる。Team が `resumableStatusIds` を選んでいれば、新規の作業より先に、その status で `paused` で止めた、または差し戻された `started` の Work Item を `action=resume` と `resumedFromRun` で返す。 |
 | `get_task` | `acceptanceCriteria` と `activeRun`（自他の区別付き）を追加。 |
 | `start_task` | Run の start endpoint を呼ぶ。戻り値に `run` を追加。`not_ready` と `agent_run_conflict` をそのまま返す。 |
 | `heartbeat`（新規） | `runId` を受け取り lease を延長する。 |
 | `finish_run`（新規） | `runId`、`outcome`、`idempotencyKey`。`complete_task` の後、または中断・失敗時に呼ぶ。 |
+| `resume_task`（新規） | `taskId`、`expectedRevision`、`idempotencyKey`。`active` Run のない `started` の自分の Work Item で新しい Run を始める。`start_task` を `started` の Work Item に呼ぶと `resume_task` を使うよう案内する `invalid_transition` を返す。 |
 | `take_over_task`（新規） | 停滞 Run を `superseded` にして新しい Run を開始する。tool は常に登録し、Team の設定が許可していない場合は server が `agent_run_takeover_disabled` を返す。ユーザーが明示的に引き継ぎを指示した場合だけ使う。 |
 | `report_progress` | `kind`、`verifications`、`artifacts`、`changedFileCount` を任意で追加。対象 Work Item と `workItemId` が一致する自分の `active` Run があれば report endpoint を呼ぶ。なければ `message` だけの場合は従来の comment endpoint（`agentInstanceId` 付き）を呼び、構造化 field がある場合は endpoint を呼ばずに `agent_run_not_active` を返す。 |
 | `update_task` / `move_task` / `complete_task` / `cancel_task` / `reopen_task` | 常に `agentInstanceId` を添え、対象 Work Item と `workItemId` が一致する自分の `active` Run があればその `runId` を `agentRunId` として添える。別の Work Item の Run は使わない。一致する Run がなく対象 Work Item に別 instance の `active` Run がある場合は server の fence で `agent_run_conflict` になる。 |
@@ -507,9 +544,9 @@ tool は次のとおり変更・追加する。
   `assigneeUserId` と一致し、Team の Work Item 更新権限を持つ場合だけ許可する。
 - Run の読み取りは Work Item を閲覧できる member に許可する。`instanceId` hash と
   `credentialId` は Team 管理権限を持つ member にだけ返す。
-- 解放と take over の実行者は audit event の actor として記録する。
+- 解放、take over、resume の実行者は audit event の actor として記録する。
 - audit event は entity type `agent-run` を追加し、`agent-run.started`、`agent-run.reported`、
-  `agent-run.finished`、`agent-run.released`、`agent-run.taken-over` を既存の
+  `agent-run.finished`、`agent-run.released`、`agent-run.taken-over`、`agent-run.resumed` を既存の
   mutation transaction と outbox で記録する。heartbeat は audit event を作らず
   `lastHeartbeatAt` だけを更新する。actor は credential owner の member とし、`metadata` に
   `runtime` と `agentName` を持つ。
@@ -583,7 +620,8 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   開始直後や process 再起動直後でも同じ Run を扱える。所有は member と instance の組で判定し、claim の
   読み取りにも担当者を含める。それ以外の自 Run は `ownRuns` に残し、agent に
   `finish_run` を促す。
-  Run のない `started` Work Item は再開対象にしない。
+  Run のない `started` Work Item は自動では再開対象にしない（明示的な resume は
+  [止まった Run の再開](#止まった-run-の再開) を参照）。
 - take over は `POST /v1/work-items/{workItemId}/agent-runs/{runId}/take-over` で受け付ける。
   `allowTakeoverAfterLeaseExpiry` が `true`、Work Item と停滞 Run の担当者がどちらも credential の
   member、Work Item が `started`、Run が別 instance のもので lease が切れている場合だけ成功する。停滞 Run の `superseded`
@@ -598,8 +636,9 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   変更は `403`、`started` 以外への移動は `invalid_transition`、take over の無効化は
   `agent_run_takeover_disabled`、それ以外の変更は `409` として返す。
   Work Item の status は変えない。
-- 後へ回した点: Agent settings の Web 編集画面（API は提供済み）、data-integrity の verify script
-  による claim / Run 不整合の検査。不整合は読み取り時に fail-closed で検出する。
+- 後へ回した点: Agent settings の Web 編集画面（API は提供済み）。不整合は読み取り時に fail-closed で
+  検出する。claim / Run 不整合の検査は後に
+  [Agent Run の整合性検査](#agent-run-の整合性検査と手動修復) として追加した。
 
 ### Slice 2 の実装状況
 
@@ -612,8 +651,10 @@ Slice 1 は実装済みである。設計からの具体化と、意図的に後
   成果物 link、変更ファイル数を chip で表示する（blocker と handoff は判断待ちとして強調）。chip は一覧
   API が返す新しい report（既定 100 件、約 1 MB まで）に限り、それより古い comment は本文だけを表示する。
   `docs/coding-agent-mcp.md` に Claude Code / Codex / Kiro の設定例を置き、`mcp.mjs` は Node.js でも
-  起動できる単一ファイルとして、同梱ライセンス一覧と一緒に build する。GitHub Release への自動添付は、
-  workflow の追加に別の権限が要るため次の変更で入れる。
+  起動できる単一ファイルとして、同梱ライセンス一覧と checksum と一緒に build する。MCP は version と
+  MCP API revision を持ち、server の `GET /api/health` が返す範囲と照合して非互換を警告する。変更は
+  `CHANGELOG.md` に記録する。tag から GitHub Release を作る workflow は `docs/coding-agent-mcp.md` の付録にあり、
+  workflow の追加に別の権限が要るため maintainer が追加する。
 
 ### Slice 3 の実装状況
 
@@ -664,10 +705,12 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
   - `ActiveRunIndex` の lease の早い順に最大 100 件。index は結果整合のため、各 Run を強整合で
     読み直し、`active` のものだけを使う。1 つの Work Item に `active` Run が 2 件あれば claim の
     不変条件が壊れているため、`503` で fail-closed にする。
-  - 終了済み Run を最大 500 件評価し、直近 24 時間に終了した Run と、時期を問わず `failed` で終了した Run の
-    Work Item を拾う。終了済み Run は
-    run ID 順に保存され終了時刻の index がないため、Team の終了済み Run が 500 件を超えると完了 lane が
-    欠けうる。その場合は `finishedRunsHasMore: true` を返す。
+  - `FinishedRunIndex` から、直近 24 時間に `failed` 以外で終了した Run と、時期を問わず `failed` で終了した
+    Run を、それぞれ終了の新しい順に最大 500 件読み、その Work Item を拾う。24 時間より前に `failed` 以外で
+    終了した Run は読まないため、Team の終了済み Run の総数には依存しない。どちらかが 500 件で止まった場合は
+    `finishedRunsHasMore: true` を返す。失敗の partition は解決済みの失敗も残るため、失敗の総数が 500 件を
+    超える Team では古い失敗が欠けうる（[ADR 0006](adr/0006-finished-run-index.md)）。index の key がない
+    既存の終了済み Run への付与は #365 の migration で行う。
   - Work Item を更新の新しい順に最大 300 件評価し、閲覧できる `started` のものを拾う。status category の
     index はない。
 - 候補の Work Item はそれぞれ強整合で読み直し、archive・削除済みと、閲覧できない Project のものを除く
@@ -714,13 +757,131 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
   代わりを使う。読み取りの失敗は request の correlation ID、Team ID、error code だけを記録し、member を含みうる message は記録しない。filter の選択肢は
   表示名の順に並べ、同じ表示名の担当者には member ID を添える。
 
+## 止まった Run の再開
+
+`finish_run(paused)` で止めた、またはレビューで差し戻されて `started` に戻った Work Item は、
+claim がないまま `started` に残る。同じ assignee がこれを続けるための resume を Slice 4 の後に足した。
+
+- `POST /v1/work-items/{workItemId}/agent-runs/resume` は、credential の member が Work Item の
+  assignee、Work Item が `started`、`resumableStatusIds` が空かその status を含み、`expectedRevision` が
+  現在の revision と一致し、claim row がない場合だけ新しい `active` Run を作る。Run と claim の put、
+  Work Item revision と設定 revision の ConditionCheck、start と同じ認可 snapshot（Project member の権限変更でも上がる member の status と version、Team と Project のアーカイブで上がる planning revision、Enterprise 管理の Workspace では Enterprise の control revision）の ConditionCheck、新しい Run の `agent-run.resumed` audit event
+  （`metadata.resumedFromRunId` に直前の Run）、idempotency receipt を 1 つの transaction で確定する。Work Item の status は変えないため、
+  レビュー待ちなどから作業中へ戻す場合は agent が続けて `move_task` を呼ぶ。
+- 直前の Run は `agent-run-latest#<workItemId>` row を強整合で読んで決め、その `runId` を新しい Run の
+  `resumedFromRunId` として保存する。resume の transaction はこの row がまだ同じ Run を指していることを条件に
+  新しい Run へ置き換えるため、読み取り後に別の Run が始まると `409` になる。結果整合の Run 履歴 index は、
+  この row がない（row の導入前に最後の Run が始まった）Work Item でだけ使う。最新 Run が `active` なら別 instance が作業中として
+  `agent_run_conflict` を返す。Run が一度もない `started` Work Item（旧 MCP build や人の操作で
+  開始されたもの）も明示的な resume はでき、その場合はリンクを持たない。
+- `expectedPreviousRunId` を送ると、直前の Run がその Run でなければ `409` を返す。`get_next_task` が
+  `paused` の Run を見て再開候補を示した後に、別の Run が始まって `failed` などで終わった場合に、
+  人の判断が要る Run から自動で再開しないためである。指定しない resume（ユーザーが明示的に頼んだもの）は
+  従来どおり直前の Run が何で終わっていても再開できる。
+- 通常の start、再開、take over で始まる Run の `startedAt` は直前の Run の `startedAt` より必ず後にする（時計がずれていても 1 ms 後）。動かすのは `startedAt` だけで、
+  `lastHeartbeatAt` と lease はこのサーバーの現在時刻から数えるため、再開直後の heartbeat と report は拒まれない。Run 履歴
+  index は `startedAt#runId` の降順なので、`agent-run-latest` row が指す Run と履歴の先頭が一致する。履歴の
+  1 ページ目で index にまだない最新 Run を補うときも、同じ順序の位置に入れて cursor と矛盾させない。
+- MCP の `resume_task` は claim の判定を API に任せる。応答を失った再送は、その後に別 instance が再開していても
+  同じ key の receipt を再生する。API が `agent_run_conflict` を返したときは claim を読み直し、自 instance が
+  持っている場合だけ `already_running` に変える。`get_next_task` の候補から再開するときは
+  `resumedFromRun.runId` を `previousRunId` に渡し、API の `expectedPreviousRunId` として送る。`get_next_task` は
+  未解決の `blockedBy` がある Work Item を再開候補にせず、`skipped` に `blocked` として残す。
+- 競合: 読み取り後に別 instance が claim を取った場合は claim を読み直して `agent_run_conflict`、
+  ConditionCheck で取り消された場合は Work Item と設定を読み直し、担当者の変更は `403`、`started`
+  以外への移動は `invalid_transition`、現在の status が `resumableStatusIds` から外れた場合は `not_resumable`、
+  revision や設定のそれ以外の変更（現在の status を許したままの `resumableStatusIds` の変更を含む）は `409`、
+  呼び出し元の認可 snapshot の変更は `409 WorkItemAuthorizationChanged` を返す。
+- Public の `AgentRun` schema は閉じているため `resumedFromRunId` は載せず、応答の `resumedFromRun` で
+  直前の Run を返す。設定値 `resumableStatusIds` は開いた `AgentContext` で返す。Web の内部 API の
+  Run には `resumedFromRunId` を含める。
+- MCP の `get_next_task` は、自 instance の Run を `in_progress` として返した後、Team が
+  `resumableStatusIds` を選んでいる場合だけ、その status にある claim のない `started` タスクを優先順に見て
+  最新 Run を 1 件ずつ読み、最新 Run が
+  `paused` または `completed` で終了していれば `action=resume` と `resumedFromRun` を返す。最新 Run が
+  `failed` / `released` のもの、Run がないものは人の判断を待つため候補にしない。`resumableStatusIds` の外の
+  status にあるタスクは読み取らず、`skipped` にも出さない。再開候補の探索は新規タスクの選定とは別に
+  最新 Run と依存関係の読み取りを合わせて 20 回までとし、それを超えたときや API が `429` を返したときは
+  探索をやめ、最初に確認できなかったタスクを `skipped` の `resume_unchecked` として返す（示せないタスクが多くても、
+  選定が止まったり rate limit を使い切ったりしない）。agent はそのタスクを自分で確かめるか、後で呼び直す。
+  候補がなければ従来どおり
+  Ready の新規タスクを選ぶ。`resumableStatusIds` が空の Team で再開候補を示さないのは、レビュー待ちで
+  `paused` にした Work Item をすぐ再開してしまうためである。その場合 agent はユーザーの指示でだけ
+  `resume_task` を呼ぶ。
+- Web: Agent settings 画面に「再開できる status」を足し、`started` category の status だけを選べる。
+  Work Item の Run パネルと Factory board（tile、ライン表示、detail）は、再開で始まった Run に
+  「再開」の印を付ける。lane は既存どおり `classifyFactoryBoardItem` で決まり、再開した `active` Run は
+  処理中または停滞に入る。
+
+## Agent Run の整合性検査と手動修復
+
+`bun run --silent agent-runs:integrity -- check` は `AgentRunsTable` を読むだけの検査で、修復はしない。
+Team partition ごとに強整合の Query を上限付きで読み、partition を最後まで読めた Team だけを判定する。
+各 page の Limit は残りの item 上限を超えない。強整合でも複数 page・複数 row は 1 つの snapshot ではなく、
+page の間に Run が終わると claim のない Run に見えることがある。そのため違反が見つかった partition は
+もう一度読み、2 回とも同じ違反が出たものだけを failure にする。片方だけの違反は並行書き込みとして
+`unconfirmedFindings` に数え、失敗にしない。
+`--team <workspaceId>/<teamId>` を省くと、key だけを射影した強整合の Scan で Team partition を列挙する。
+列挙の読み取りも同じ上限に数える。
+
+```sh
+bun run --silent agent-runs:integrity -- check \
+  --region ap-northeast-1 \
+  --table mukuroji-agent-runs \
+  --profile reviewed-operator \
+  --page-size 100 --max-pages 1000 --max-items 100000 \
+  --correlation-id <運用記録の ID>
+```
+
+出力は 1 行の JSON evidence で、`correlationId`、`checkedAt`、上限、読んだ page と item の数、row の種類別件数、
+failure code ごとの件数と最大 5 件のサンプル（Workspace ID、Team ID、Work Item ID、Run ID）を含む。
+member ID、instance hash、revocation row の sort key（両者の hash を含む）は出力しない。
+AWS の error 本文も出力せず、error 名と `correlationId` だけを返す。exit code は `pass` が 0、
+`fail` と上限で止まった `incomplete` が 1、引数や読み取りの失敗が 2 で、`incomplete` は合格にしない。
+`AWS_ENDPOINT_URL` など SDK 標準の設定はそのまま効くため、ローカルでは Floci の table に対して実行できる。
+
+検査する不変条件:
+
+| failure code | 不変条件 |
+| --- | --- |
+| `AGENT_RUN_MULTIPLE_ACTIVE_RUNS` | 1 Work Item に `active` Run は 1 件まで |
+| `AGENT_RUN_CLAIM_RUN_MISSING` / `AGENT_RUN_CLAIM_RUN_NOT_ACTIVE` / `AGENT_RUN_CLAIM_HOLDER_MISMATCH` | claim row の `runId` は同じ Work Item・member・instance の `active` Run を指す。`finished` Run に claim は残らない |
+| `AGENT_RUN_ACTIVE_RUN_UNCLAIMED` | `active` Run はその Work Item の claim row が指す |
+| `AGENT_RUN_INDEX_KEYS_MISMATCH` | Run row の `WorkItemRunIndex` / `ActiveRunIndex` / `FinishedRunIndex` の key 属性が Run の値と一致し、`active` だけが `ActiveRunIndex`、`finished` だけが `FinishedRunIndex` の key を持つ。`FinishedRunIndex` 導入前に閉じた Run は key がなくても失敗にせず、`legacyFinishedRunsWithoutIndexKeys` に数える |
+| `AGENT_RUN_OUTBOX_KEY_INVALID` | Triage outbox key（`triage-failed-run`）は `failed` で終わった Run にだけあり、sort key が `<時刻>#<partition>#<runId>` |
+| `AGENT_RUN_REVOCATION_ORPHANED` | revocation row は同じ Work Item・member・instance の `released` / `superseded` Run を指す。Run row は Work Item の削除後も残るため、削除済み Work Item の revocation も同じ条件で判定する |
+| `AGENT_RUN_REVOCATION_BLOCKS_ACTIVE_RUN` | 同じ member と instance の `active` Run がある Work Item に revocation row は残らない |
+| `AGENT_RUN_LATEST_RUN_INVALID` | `agent-run-latest` row は同じ Work Item の Run を指し、`active` Run があればそれを指す |
+| `AGENT_RUN_WATERMARK_INVALID` | 停滞走査の watermark / resume は `<leaseExpiresAt>#<runId>` で、partition の Run を指し、その Run の lease より後ろにない |
+| `AGENT_RUN_ROW_MALFORMED` / `AGENT_RUN_ROW_UNRECOGNIZED` / `AGENT_RUN_PARTITION_UNRESOLVED` | row が strict reader と同じ形で読め、既知の種類で、partition key が `<workspaceId>#team#<teamId>` |
+
+report row と Agent settings の row は件数だけを数え、内容は検査しない。
+
+手動修復は検査の自動処理にせず、運用者が change record に `correlationId` を残して行う。どの修復も、
+対象の row をサンプルの ID で強整合に読み直し、evidence と同じ状態であることを確かめてから、読んだ値を
+条件にした conditional write で行う。書いた後に同じ Team を `--team` で再検査し、`pass` を確かめる。
+修復は audit event を書かないため、change record が監査の記録になる。
+
+| failure code | 手順 |
+| --- | --- |
+| `AGENT_RUN_CLAIM_RUN_MISSING` / `AGENT_RUN_CLAIM_RUN_NOT_ACTIVE` | Run row がない、または `finished` であることを読み直してから、claim row を `runId = <サンプルの runId>` 条件で削除する。claim の削除だけで Work Item は新しい start を受け付ける |
+| `AGENT_RUN_ACTIVE_RUN_UNCLAIMED` / `AGENT_RUN_MULTIPLE_ACTIVE_RUNS` / `AGENT_RUN_CLAIM_HOLDER_MISMATCH` | claim が指していない `active` Run を解放する。1 つの transaction で、Run row を `state = active` 条件で `state=finished`、`outcome=released`、`finishedAt`、`finishedBy` に更新して `FinishedRunIndex` の key を書き、`activeRunPartition`・`activeRunSortKey`・`lastHeartbeatRequestAt` を外す。同じ transaction で Run row の member と instance hash から revocation row を put する。claim が指す Run は残す。claim が指す Run の member や instance が claim と違う場合は、その Run も同じ手順で解放し、claim を `runId` 条件で削除する |
+| `AGENT_RUN_INDEX_KEYS_MISMATCH` | Run row の値から key 属性を書き直す。`active` は `activeRunSortKey = <leaseExpiresAt>#<runId>`、`finished` は `FinishedRunIndex` の key を書き、反対側の key を外す |
+| `AGENT_RUN_OUTBOX_KEY_INVALID` | `failed` 以外の Run から `triageIndexPartition` と `triageIndexSortKey` を `outcome <> failed` 条件で外す。`failed` の Run で sort key が壊れている場合は `<finishedAt>#<partition>#<runId>` に書き直す |
+| `AGENT_RUN_REVOCATION_BLOCKS_ACTIVE_RUN` | `active` Run が同じ member と instance のものであることを読み直してから revocation row を削除する |
+| `AGENT_RUN_REVOCATION_ORPHANED` | 削除しない。revocation row は解放済み instance を止める tombstone なので、原因を調べてから判断する |
+| `AGENT_RUN_LATEST_RUN_INVALID` | `active` Run があればその Run、なければ `WorkItemRunIndex` で最も新しい Run を指すよう、`runId = <読んだ値>` 条件で書き直す |
+| `AGENT_RUN_WATERMARK_INVALID` | watermark row を削除する。次の停滞走査は先頭から読み直し、起票済みの Run は Triage の source claim で重複しない |
+| `AGENT_RUN_ROW_MALFORMED` / `AGENT_RUN_ROW_UNRECOGNIZED` / `AGENT_RUN_PARTITION_UNRESOLVED` | 自動の手順はない。書き込んだ経路を特定し、PITR の時点と比べてから個別に直す |
+
 ## 後続 Phase
 
 - GitHub adapter を `ConnectorAdapter` 境界の後ろに実装し、report の `pull-request` artifact を
   external link と突き合わせて CI、レビュー、merge 状態を取り込む。
 - Work Item に Gate（CI、bot review、人の承認）を持たせ、`complete` 遷移の server 検証に
   組み込む。既存の approval action を再利用する。
-- stage 別 lead time、Run の成功 / 手戻り率、token 費用を analytics に追加する。
+- token 費用を analytics に追加し、stage 別 lead time と Run の成功 / 手戻り率（「期間サマリー」）を
+  Analytics engine の metric と snapshot に統合する。
 - hooks による heartbeat、planner / implementer / reviewer の多段 Run を Work Item relation と
   Run の親子で表現する。
 
@@ -731,6 +892,9 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
 - 責任者は人間の member のまま、runtime と instance は Run に記録する。
 - lease は tool 呼び出しで延長し、停滞は人が判断する。自動 take over は既定で無効。
 - Ready は Agent settings が指す workflow status で表し、workflow configuration の schema は変えない。
+- Run のない `started` Work Item は Ready に含めず自動でも拾わないが、assignee は resume で明示的に
+  続けられる。`get_next_task` が再開候補として示すのは、Team が選んだ再開可能 status にあり、最新 Run が
+  `paused` / `completed` で終わったものだけとする。
 - Run と report は public API の Work Item sub-resource とし、新しい scope を作らない。
 
 保留:
@@ -738,4 +902,3 @@ Slice 3 は 3 つの変更に分けて入れ、すべて実装済み。
 - `leaseMinutes` の既定値 30 分が実際の作業間隔に合うか。Slice 1 の運用で見直す。
 - report を Update Feed と Inbox digest に出すか。Phase 1 は comment の既存配信に任せる。
 - Kiro と Codex の resources / prompts 対応。確認結果を `docs/coding-agent-mcp.md` に記す。
-- Run のない `started` Work Item を将来 Ready 判定でどう扱うか。

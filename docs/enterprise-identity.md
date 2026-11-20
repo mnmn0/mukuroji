@@ -471,7 +471,11 @@ CDK parameter `CognitoUserPoolClientId` と `CognitoSsoUserPoolClientId` は、�
 deploy 前に拒否します。`EnterpriseIdentityTokenHashSecret` は NoEcho で API Lambda の
 `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET` に渡します。`EnterpriseSsoStateSecret` も NoEcho で
 `ENTERPRISE_SSO_STATE_SECRET` に渡し、credential HMAC と OAuth state の鍵を分離します。
-Output には出しません。Local development
+Output には出しません。SCIM group job、connector sync、Work Item import の各 worker には値を
+環境変数で渡さず、値を持つ `EnterpriseIdentityTokenHashKeySecret` の ARN を
+`ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET_SECRET_ARN` で渡します。worker は cold start で読み、
+`ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET` に戻します。SCIM group job の pseudonym key も同じく
+`WorkspaceAuditPseudonymSecret` から読みます。Local development
 では root `.env` に同名の安定した secret を置き、Docker Compose、ready hook、backend deploy、
 `server:dev` で同じ値を使用します。Generated env file には secret を複製しません。
 

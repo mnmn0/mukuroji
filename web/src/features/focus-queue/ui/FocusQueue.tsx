@@ -46,6 +46,7 @@ import type {
   FocusQueueSnoozeFeedback,
 } from '../mutations/useFocusQueueActions'
 import { FocusPolicyPanel } from './FocusPolicyPanel'
+import { FocusUpdateDeadlines } from './FocusUpdateDeadlines'
 import {
   resolveWorkItemTypeDefinition,
   resolveWorkItemTypeLabel,
@@ -374,6 +375,10 @@ export function FocusQueue({
             </button>
           </span>
         </div>
+      ) : null}
+
+      {response?.updateDeadlines && response.updateDeadlines.length > 0 ? (
+        <FocusUpdateDeadlines deadlines={response.updateDeadlines} locale={locale} t={t} />
       ) : null}
 
       <div

@@ -46,11 +46,22 @@ Canonical row と entity index の audit history は同時には更新されな�
 一致し、各latest revisionのupdate eventが到達済みであることを確認します。不整合は有界回数だけ
 再試行し、揃わない場合は部分的なsnapshotを返さず`503`でfail-closedにします。
 
+Audit history を読むのは、`updatedAt` が query 期間の開始（`filter.period.from`）以降の Work Item
+だけです。Canonical Work Item の変更は audit event と同じ transaction で書かれ、`updatedAt` を
+event 時刻にそろえます。そのため期間開始より前から更新のない Work Item には、期間内の完了、
+`started` への遷移、Project scope change がなく、期間開始から `asOf` までの各評価時点の state は
+現在の canonical row と同じです。Engine はこの Work Item を history なしでも同じ metric 値で評価する
+ため、canonical row 自体を事前集計として使い、entity timeline を読みません。期間開始を解釈できない
+場合はすべての Work Item の history を、`updatedAt` を解釈できない Work Item はその history を読みます。Read barrier の latest revision 確認も、
+history を読む Work Item だけに適用します（読まない Work Item は前後2回の canonical read の
+fingerprint 一致で変更がないことを確認します）。定期配信の runner も同じ選択を使います。
+
 1 query の上限は Team partition 100件、1 partition 10,000 Work Item、現在参照可能な Work Item
-合計10,000件、canonical entity timeline 500件、全timelineを通じた Audit page query 500回、
-返却されたAudit event合計10,000件、1 entityあたり100 pageです。
+合計10,000件、history を読む canonical entity timeline 500件、全timelineを通じた Audit page query
+500回、返却されたAudit event合計10,000件、1 entityあたり100 pageです。
 canonical identity と一致しない event は採用せず、query 数と返却event数の上限は消費します。
-501件以上の Work Item は history read 前に `413` で fail-fast します。
+期間開始以降に更新された Work Item が501件以上ある場合は history read 前に `413` で fail-fast します。
+Web は `413` を受けると、期間を短くするか Team / Project で絞り込むよう表示します。
 上限に達した場合は部分集計を成功扱いせず
 `413` で fail-closed に終了します。Partition数と合計Work Item上限は、Team/Project filterで
 読み取るTeam partition数を減らして回避できます。1つのTeam自体が10,000件を超える場合は、
@@ -101,6 +112,21 @@ Metric contract の version は snapshot に固定します。同じ入力、met
 | Scope change | 期間中の Project assignment の追加、削除、移動に相当する event 数。 |
 | Velocity | 期間の週数で正規化した completed Work Item 数。 |
 | SLA | Widget の `slaTargetHours` 以下で完了した eligible Work Item の割合。 |
+| Remaining scope | 評価時点で archive されておらず、`completed` / `canceled` ではない Work Item 数。Chart の各 point は burnup 用に `scope`（`canceled` を除く total scope）と `completed` を `segments` で返します。`weighting: "effort"` では残工数（記録された残工数、なければ見積）の合計時間で、burnup の `scope` と `completed` は見積の合計時間です（残工数の消化が scope の減少に見えないようにするため）。 |
+| Cumulative flow | 評価時点で archive されていない Work Item 数。Chart の各 point は status category（`completed` / `started` / `unstarted` / `backlog` / `canceled`）ごとの件数を `segments` で返します。 |
+
+Remaining scope と cumulative flow は WIP と同じく、chart の bucket ごとに bucket 末（`asOf` を超えない）時点へ
+state を巻き戻して評価する state metric です。期間の途中で作成された Work Item は作成後の bucket から scope に入るため、
+burnup の `scope` で scope 追加を区別できます。これらの metric の追加で既存 metric の値と version は変わりません。
+
+Chart widget の `visualization` は `line` / `bar` に加え、`area`（`segments` の積み上げ面、CFD 用）、`burndown`
+（残量と、最初の point の残量から期間末に 0 へ向かう ideal line）、`burnup`（`scope` と `completed` の 2 本線）を
+選べます。ideal line は保存値ではなく、snapshot の series から表示時に引きます。
+
+Filter の `workItems`（`{ teamId, workItemId }` の一覧、最大500件）は対象 Work Item を明示的に絞ります。Cycle の
+burndown は Planning の Work Item link から Cycle に属する Work Item を列挙してこの filter に渡します。API は列挙された
+Team partition だけを読み、列挙された Work Item だけを history read の対象にするため、500件を超える Team でも
+Cycle 単位の chart を計算できます。Cycle 所属の履歴は保存していないため、過去の bucket も現在の所属で評価します。
 
 既定では throughput と velocity は item count を単位とし、任意の数値 custom field を暗黙に story point として扱いません。
 Throughput / velocity widget は `weighting: "effort"` を指定すると、完了した Work Item の正本見積
@@ -111,6 +137,10 @@ Forecast は query / report の `forecastWeighting: "effort"` で、完了した
 残工数（記録された残工数、なければ見積）の合計 `remainingEffortHours` から完了日を予測します。この場合の
 `dailyThroughput` は 1 日あたりの見積時間です。`weighting` と `forecastWeighting` は query hash、snapshot、
 evidence、定期配信の hash に含まれます。
+
+Software factory の Run の成功率・手戻り率・工程別の滞在時間は、まだ Analytics engine の metric ではなく、
+Factory board の期間サマリーとして別 API で計算します。定義は
+[Software factory の「期間サマリー」](software-factory.md#期間サマリーanalytics) を参照してください。
 
 ## Timezone and date boundaries
 

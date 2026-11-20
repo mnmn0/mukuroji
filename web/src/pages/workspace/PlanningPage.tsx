@@ -13,6 +13,7 @@ import {
   type CurrentUser,
 } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
+import { CycleBurndown } from '../../analytics/ui/CycleBurndownPanel'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession, type AuthSession } from '../../auth/session'
 import {
@@ -45,6 +46,8 @@ import {
   putPlanningWorkItemLink,
   resolvePlanningErrorMessageKey,
   rolloverPlanningCycle,
+  createNextPlanningCycle,
+  setPlanningCycleWorkItems,
   removePlanningUpdateReaction,
   updatePlanningEntity,
   updateWorkItemScheduleDependency,
@@ -54,8 +57,10 @@ import {
 import {
   createMissingPlanningTargetUpdateView,
   createPlanningTargetUpdateView,
+  derivePlanningUpdateAcknowledgement,
   extractPlanningUpdateCommentMentions,
   planningUpdateTargetsAreEqual,
+  type PlanningUpdateAcknowledgementView,
   type PlanningUpdateTargetDetailView,
   type PlanningUpdateTargetSummaryView,
   type PlanningUpdateCollaborationController,
@@ -148,6 +153,10 @@ export function PlanningPage() {
     mutate: mutatePlanning,
     key: planningKey,
   } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
+  const browserTimeZone = useMemo(
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+    [],
+  )
   const projectScopes = useMemo(
     () => teams.flatMap((team) => team.projects.map((project) => ({
       teamId: team.id,
@@ -206,18 +215,26 @@ export function PlanningPage() {
     updateHistory.data?.updates,
     Boolean(user && !currentUserError),
   )
+  // Derive reviewer confirmation only from loaded reactions so loading never reads as unconfirmed.
+  const selectedUpdateReviewerMemberKey = selectedUpdateTarget && updateAnnotations.data
+    ? snapshot?.updateTargets.find((summary) =>
+        planningUpdateTargetsAreEqual(summary.target, selectedUpdateTarget)
+      )?.cadence?.escalationMemberKey
+    : undefined
   const updateAnnotationViews = useMemo(
     () => createPlanningUpdateAnnotationViews(
       updateHistory.data?.updates,
       updateAnnotations.data?.comments,
       updateAnnotations.data?.reactions,
       currentUserProjectKey,
+      selectedUpdateReviewerMemberKey,
     ),
     [
       updateAnnotations.data?.comments,
       updateAnnotations.data?.reactions,
       updateHistory.data?.updates,
       currentUserProjectKey,
+      selectedUpdateReviewerMemberKey,
     ],
   )
   const updateTargetDetails = useMemo(
@@ -556,6 +573,7 @@ export function PlanningPage() {
             ? togglePlanningUpdateWatch
             : undefined,
           reactionsByUpdateId: updateAnnotationViews.reactionsByUpdateId,
+          acknowledgementsByUpdateId: updateAnnotationViews.acknowledgementsByUpdateId,
           watch: updateWatch.data
             ? {
                 subscribed: updateWatch.data.subscribed,
@@ -599,6 +617,19 @@ export function PlanningPage() {
           isUpdateHistoryLoading={Boolean(updateHistory.key && updateHistory.isLoading)}
           key={`${selectedEntityId ?? ''}:${selectedUpdateTarget ? createPlanningUpdateTargetKey(selectedUpdateTarget) : ''}`}
           labels={labels}
+          renderCycleBurndown={accessToken && snapshot
+            ? (cycle) => (
+                <CycleBurndown
+                  accessToken={accessToken}
+                  cycle={cycle}
+                  key={cycle.id}
+                  links={snapshot.workItemLinks}
+                  locale={locale}
+                  t={t}
+                  timeZone={browserTimeZone}
+                />
+              )
+            : undefined}
           snapshot={snapshot}
           updateHistoryErrorMessage={updateHistoryErrorMessage}
           updateCollaboration={updateCollaboration}
@@ -633,6 +664,7 @@ export function PlanningPage() {
           canUpdateWorkItemLink={(workItem) =>
             canUpdatePlanningWorkItemLink(user, workItem, planningAccess)}
           createScopeTeams={manageableCreateScopeTeams}
+          directoryTeams={teams}
           onRetry={loadErrorMessage && !mutationErrorMessage
             ? () => void mutatePlanning()
             : undefined}
@@ -771,14 +803,69 @@ export function PlanningPage() {
               }
             : undefined}
           onRolloverCycle={canManagePlanning && snapshot && accessToken
-            ? (sourceCycle, targetCycleId) => runMutation(
-                `planning:cycle:${sourceCycle.id}:rollover`,
-                [snapshot.revision, targetCycleId],
-                (context) => rolloverPlanningCycle(accessToken, sourceCycle.id, {
+            ? async (sourceCycle, targetCycleId) => {
+                // One call moves at most one batch; repeat until the source Cycle completes.
+                let revision = snapshot.revision
+                for (let batch = 0; batch < 100; batch += 1) {
+                  let next: { remaining: number; revision: number } | undefined
+                  await runMutation(
+                    `planning:cycle:${sourceCycle.id}:rollover`,
+                    [revision, targetCycleId],
+                    (context) => rolloverPlanningCycle(accessToken, sourceCycle.id, {
+                      expectedRevision: revision,
+                      targetCycleId,
+                    }, context).then((result) => {
+                      next = {
+                        remaining: result.remainingWorkItemCount ?? 0,
+                        revision: result.planning.revision,
+                      }
+                      return result.planning
+                    }),
+                  )
+                  if (!next || next.remaining === 0) return
+                  revision = next.revision
+                }
+                // The safety cap ran out before the source Cycle completed; tell the user to run it again.
+                setMutationErrorMessage(t('planning.rollover.incomplete'))
+              }
+            : undefined}
+          onCreateNextCycle={canManagePlanning && snapshot && accessToken
+            ? (cycle) => runMutation(
+                `planning:cycle:${cycle.id}:next`,
+                snapshot.revision,
+                (context) => createNextPlanningCycle(accessToken, cycle.id, {
                   expectedRevision: snapshot.revision,
-                  targetCycleId,
                 }, context).then((result) => result.planning),
               )
+            : undefined}
+          onUpdateCycleAutomation={canManagePlanning && snapshot && accessToken
+            ? (cycle, automation) => runMutation(
+                `planning:entity:${cycle.id}:automation`,
+                [snapshot.revision, automation],
+                (context) => updatePlanningEntity(accessToken, cycle.id, {
+                  expectedRevision: snapshot.revision,
+                  patch: { automation },
+                }, context),
+              )
+            : undefined}
+          onSetCycleWorkItems={canMutatePlanningContent && snapshot && accessToken
+            ? (cycle, action, workItems) => {
+                const input = {
+                  action,
+                  workItems: workItems.map((workItem) => ({
+                    teamId: workItem.teamId,
+                    workItemId: workItem.id,
+                  })),
+                  expectedRevision: snapshot.revision,
+                }
+                return runMutation(
+                  `planning:cycle:${cycle.id}:work-items`,
+                  input,
+                  (context) => setPlanningCycleWorkItems(accessToken, cycle.id, input, context),
+                  undefined,
+                  { rethrowOnFailure: true },
+                )
+              }
             : undefined}
           onArchiveEntity={canManagePlanning && snapshot && accessToken
             ? async (entity) => {
@@ -814,6 +901,19 @@ export function PlanningPage() {
                     parentId: target.parent?.id,
                     teamId: target.teamId,
                     projectId: target.projectId,
+                  }, context),
+                )
+              }
+            : undefined}
+          onUpdateEntity={canManagePlanning && snapshot && accessToken
+            ? (entity, patch) => {
+                if (!canManagePlanningScope(user, entity, planningAccess)) return
+                return runMutation(
+                  `planning:entity:${entity.id}:edit`,
+                  [snapshot.revision, patch],
+                  (context) => updatePlanningEntity(accessToken, entity.id, {
+                    expectedRevision: snapshot.revision,
+                    patch,
                   }, context),
                 )
               }
@@ -1003,16 +1103,19 @@ function createPlanningUpdateTargetDetails(
  * @param comments - Loaded append-only comments across the visible versions.
  * @param reactions - Loaded member reactions across the visible versions.
  * @param currentMemberKey - Normalized Workspace member key for viewer-state projection.
- * @returns Comment and reaction maps keyed by immutable update ID.
+ * @param reviewerMemberKey - Cadence escalation member whose confirmation reaction marks an update reviewed.
+ * @returns Comment, reaction, and reviewer confirmation maps keyed by immutable update ID.
  */
 function createPlanningUpdateAnnotationViews(
   updates: readonly PlanningUpdate[] = [],
   comments: readonly PlanningUpdateComment[] = [],
   reactions: readonly PlanningUpdateReaction[] = [],
   currentMemberKey = '',
+  reviewerMemberKey?: string,
 ) {
   const commentsByUpdateId: Record<string, PlanningUpdateCommentView[]> = {}
   const reactionsByUpdateId: Record<string, PlanningUpdateReactionView[]> = {}
+  const acknowledgementsByUpdateId: Record<string, PlanningUpdateAcknowledgementView> = {}
 
   for (const update of updates) {
     commentsByUpdateId[update.id] = comments
@@ -1041,9 +1144,15 @@ function createPlanningUpdateAnnotationViews(
       reaction,
       reactedByViewer: aggregate.reactedByViewer,
     }))
+    const acknowledgement = derivePlanningUpdateAcknowledgement(
+      reactions,
+      update.version,
+      reviewerMemberKey,
+    )
+    if (acknowledgement) acknowledgementsByUpdateId[update.id] = acknowledgement
   }
 
-  return { commentsByUpdateId, reactionsByUpdateId }
+  return { acknowledgementsByUpdateId, commentsByUpdateId, reactionsByUpdateId }
 }
 
 /**

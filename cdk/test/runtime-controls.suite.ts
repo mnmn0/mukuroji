@@ -5,6 +5,10 @@ import {
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
+import {
+  COST_ALLOCATION_TAG_KEY,
+  COST_ALLOCATION_TAG_VALUE,
+} from '../lib/aspects/cost-allocation-tags';
 
 const runtimeControlEnvironmentKeys = [
   'MUKUROJI_RUNTIME_CONTROL_APPCONFIG_APPLICATION_ID',
@@ -64,6 +68,10 @@ const restoreDrillFunctionIds = new Set([
 
 const fileStorageInfrastructureFunctionIds = new Set([
   'FileBucketIncarnationMarkerFunctionBCDA95D8',
+]);
+
+const bootstrapInfrastructureFunctionIds = new Set([
+  'CognitoClientContractFunction2E0ABB34',
 ]);
 
 const observabilityInfrastructureFunctionIds = new Set([
@@ -141,6 +149,7 @@ test('retains a validated hosted baseline and deploys it all at once', () => {
     Description:
       'Dynamic operational controls shared by Mukuroji application runtimes.',
     Name: 'mukuroji-runtime-controls',
+    Tags: [{ Key: COST_ALLOCATION_TAG_KEY, Value: COST_ALLOCATION_TAG_VALUE }],
   });
   expect(resources.RuntimeControlEnvironment.Properties).toEqual(
     expect.objectContaining({
@@ -386,7 +395,10 @@ test('waits read-only for a naturally OK actionable alarm before environment cre
     expect(resources[logicalId]).toEqual(expect.objectContaining({
       DeletionPolicy: 'Retain',
       UpdateReplacePolicy: 'Retain',
-      Properties: { RetentionInDays: 90 },
+      Properties: {
+        RetentionInDays: 90,
+        Tags: [{ Key: COST_ALLOCATION_TAG_KEY, Value: COST_ALLOCATION_TAG_VALUE }],
+      },
       Type: 'AWS::Logs::LogGroup',
     }));
   }
@@ -608,6 +620,7 @@ test('binds exact runtime-control settings through API config and nineteen direc
       return runtimeControlPlaneFunctionIds.has(logicalId) ||
         restoreDrillFunctionIds.has(logicalId) ||
         fileStorageInfrastructureFunctionIds.has(logicalId) ||
+        bootstrapInfrastructureFunctionIds.has(logicalId) ||
         observabilityInfrastructureFunctionIds.has(logicalId) ||
         logicalId.startsWith('AWS679f53fac002430cb0da5b7982bd2287') ||
         (

@@ -64,7 +64,8 @@ bun run server:dev
 server は既定で `http://localhost:4566` の Floci Cognito / DynamoDB に接続します。
 Ready hook は password/API 用 `mukuroji-web-local` と Hosted UI SSO 専用
 `mukuroji-sso-local` を別の public client として作成します。
-`floci:deploy-backend` は Lambda から Secrets Manager emulator へ接続するため、
+`floci:deploy-backend` は Docker socket を渡す `floci:up:lambda` で起動した Floci を前提とします。
+Lambda から Secrets Manager emulator へ接続するため、
 `http://floci:4566` と `MUKUROJI_LOCAL_AWS_RUNTIME=floci` を必ず組にして渡します。
 この marker は `NODE_ENV=production` では無効です。通常の AWS runtime では設定せず、
 選択した region と一致する Secrets Manager standard/FIPS HTTPS endpoint を使います。
@@ -221,7 +222,6 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 
 - `POST /api/auth/login`, `GET /api/auth/me`, `GET /api/auth/sso/discovery`,
   `POST /api/auth/sso/start`, `POST /api/auth/sso/exchange`
-- `GET /api/dashboard/summary`
 - `/api/analytics/query`, `/api/analytics/evidence`, `/api/analytics/export`
 - `/api/analytics/reports`, `/api/analytics/reports/{reportId}/snapshots`
 - `POST /api/teams`, `GET /api/teams/projects`
@@ -231,6 +231,7 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `/api/notifications`, `/api/notifications/unread-count`, `/api/notification-preferences`
 - `GET /api/push/config`, `PUT /api/push-subscriptions`, `DELETE /api/push-subscriptions`
 - `GET /api/teams/{teamId}/work-items/{workItemId}/agent-runs`, `POST /api/teams/{teamId}/agent-runs/{runId}/release`
+- `GET /api/teams/{teamId}/agent-runs/analytics`
 - `GET /api/teams/{teamId}/agent-settings`, `PUT /api/teams/{teamId}/agent-settings`
 - `/api/request-forms`, `/api/request-queue`, `/api/request-submissions/{submissionId}`
 - `/api/request-intake/{token}`, `GET /api/request-threads/{threadToken}`, `/api/request-threads/{threadToken}/replies`
@@ -244,7 +245,6 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNAMODB`, or `AWS_ENDPOINT_URL`.
 Default local table names are:
 
-- `MUKUROJI_DASHBOARD_TABLE=mukuroji-dashboard-local`
 - `PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local`
 - `COLLABORATION_TABLE_NAME=mukuroji-collaboration-local`
 - `DOCUMENTS_TABLE_NAME`（未指定時は `mukuroji-documents-local`）

@@ -23,6 +23,8 @@ import {
   DynamoDbAgentRunStore,
   isSameSettingsSave,
   type AgentRunFenceInput,
+  type AgentRunFinishedGroup,
+  type AgentRunFinishedPage,
   type AgentRunPage,
   type AgentRunReportPage,
   type AgentRunStore,
@@ -40,6 +42,8 @@ type InMemoryAgentRunState = {
   runs: Map<string, StoredAgentRun>
   /** Claims by `<directoryId>|<teamId>|<workItemId>`. */
   claims: Map<string, StoredAgentRunClaim>
+  /** Newest run ID by `<directoryId>|<teamId>|<workItemId>`. */
+  latestRuns: Map<string, string>
   /** Revoked instances by `<directoryId>|<teamId>|<workItemId>|<assigneeUserId>|<instanceIdHash>`. */
   revocations: Set<string>
   /** Settings by `<directoryId>|<teamId>`. */
@@ -121,7 +125,7 @@ function revocationKey(directoryId: string, teamId: string, revocation: AgentRun
 export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore {
   /** Current state. */
   readonly state: InMemoryAgentRunState = {
-    runs: new Map(), claims: new Map(), revocations: new Set(), settings: new Map(), reports: new Map(),
+    runs: new Map(), claims: new Map(), latestRuns: new Map(), revocations: new Set(), settings: new Map(), reports: new Map(),
     triageOutbox: new Set(), triageOutboxDeferrals: new Map(), stallWatermarks: new Map(), stallResumes: new Map(),
   }
   /** Builder that produces DynamoDB-shaped items. */
@@ -141,6 +145,7 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
    */
   seed(run: StoredAgentRun): void {
     this.state.runs.set(key(run.directoryId, run.teamId, run.runId), structuredClone(run))
+    this.state.latestRuns.set(key(run.directoryId, run.teamId, run.workItemId), run.runId)
     if (run.outcome === 'released' || run.outcome === 'superseded') {
       this.state.revocations.add(revocationKey(run.directoryId, run.teamId, run))
     }
@@ -164,6 +169,11 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   async getClaim(directoryId: string, teamId: string, workItemId: string): Promise<StoredAgentRunClaim | undefined> {
     const claim = this.state.claims.get(key(directoryId, teamId, workItemId))
     return claim ? { ...claim } : undefined
+  }
+
+  /** @inheritdoc */
+  async getLatestRunId(directoryId: string, teamId: string, workItemId: string): Promise<string | undefined> {
+    return this.state.latestRuns.get(key(directoryId, teamId, workItemId))
   }
 
   /** @inheritdoc */
@@ -317,6 +327,34 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
+  async listFinishedRunsByTime(
+    directoryId: string,
+    teamId: string,
+    group: AgentRunFinishedGroup,
+    since: string | undefined,
+    cursor: string | undefined,
+    limit: number,
+    until?: string,
+  ): Promise<AgentRunFinishedPage> {
+    const entries = [...this.state.runs.values()].flatMap((run) => {
+      if (run.directoryId !== directoryId || run.teamId !== teamId || run.state !== 'finished') return []
+      if (run.outcome === undefined || run.finishedAt === undefined) return []
+      if ((run.outcome === 'failed') !== (group === 'failed')) return []
+      if (since !== undefined && `${run.finishedAt}#${run.runId}` < since) return []
+      if (until !== undefined && `${run.finishedAt}#${run.runId}` > `${until}#~`) return []
+      return [{ runId: run.runId, workItemId: run.workItemId, outcome: run.outcome, finishedAt: run.finishedAt }]
+    }).sort((left, right) => `${right.finishedAt}#${right.runId}`.localeCompare(`${left.finishedAt}#${left.runId}`))
+    const offset = cursor === undefined ? 0 : Number(cursor)
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new AgentRunError('validation_failed', 'The cursor is invalid.', { pointer: '/cursor' })
+    }
+    return {
+      runs: entries.slice(offset, offset + limit),
+      ...(offset + limit < entries.length ? { nextCursor: String(offset + limit) } : {}),
+    }
+  }
+
+  /** @inheritdoc */
   async listWorkItemReports(directoryId: string, teamId: string, workItemId: string, cursor: string | undefined, limit: number): Promise<AgentRunReportPage> {
     /**
      * Builds the creation-time sort key the DynamoDB store uses.
@@ -381,9 +419,12 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
   }
 
   /** @inheritdoc */
-  createStartItems(run: StoredAgentRun): AgentRunTransactItem[] {
-    const [runPut, claimPut, revocationDelete] = this.#builder.createStartItems(run)
-    if (!runPut || !claimPut || !revocationDelete) throw new Error('The start builder returned an unexpected item count.')
+  createStartItems(run: StoredAgentRun, latest?: {
+    /** Newest run ID the caller read, or undefined when it read none. */
+    runId: string | undefined
+  }): AgentRunTransactItem[] {
+    const [runPut, claimPut, revocationDelete, latestPut] = this.#builder.createStartItems(run, latest)
+    if (!runPut || !claimPut || !revocationDelete || !latestPut) throw new Error('The start builder returned an unexpected item count.')
     const runKey = key(run.directoryId, run.teamId, run.runId)
     const claimKey = key(run.directoryId, run.teamId, run.workItemId)
     return [
@@ -405,6 +446,10 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
       this.#register(revocationDelete, {
         check: () => true,
         apply: (state) => { state.revocations.delete(revocationKey(run.directoryId, run.teamId, run)) },
+      }),
+      this.#register(latestPut, {
+        check: (state) => latest === undefined || state.latestRuns.get(claimKey) === latest.runId,
+        apply: (state) => { state.latestRuns.set(claimKey, run.runId) },
       }),
     ]
   }
@@ -475,8 +520,8 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
 
   /** @inheritdoc */
   createTakeOverItems(superseded: StoredAgentRun, successor: StoredAgentRun): AgentRunTransactItem[] {
-    const [runUpdate, claimPut, revocationPut, runPut, revocationDelete] = this.#builder.createTakeOverItems(superseded, successor)
-    if (!runUpdate || !claimPut || !revocationPut || !runPut || !revocationDelete) {
+    const [runUpdate, claimPut, revocationPut, runPut, revocationDelete, latestPut] = this.#builder.createTakeOverItems(superseded, successor)
+    if (!runUpdate || !claimPut || !revocationPut || !runPut || !revocationDelete || !latestPut) {
       throw new Error('The take over builder returned an unexpected item count.')
     }
     const supersededKey = key(superseded.directoryId, superseded.teamId, superseded.runId)
@@ -487,7 +532,7 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
         check: (state) => {
           const current = state.runs.get(supersededKey)
           return current?.state === 'active' && current.instanceIdHash === superseded.instanceIdHash &&
-            current.leaseExpiresAt < successor.startedAt
+            current.leaseExpiresAt < successor.lastHeartbeatAt
         },
         apply: (state) => {
           const current = state.runs.get(supersededKey)
@@ -524,6 +569,10 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
       this.#register(revocationDelete, {
         check: () => true,
         apply: (state) => { state.revocations.delete(revocationKey(successor.directoryId, successor.teamId, successor)) },
+      }),
+      this.#register(latestPut, {
+        check: () => true,
+        apply: (state) => { state.latestRuns.set(claimKey, successor.runId) },
       }),
     ]
   }

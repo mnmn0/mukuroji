@@ -27,6 +27,7 @@ import type {
 } from '@mukuroji/contracts'
 import { randomUUID } from 'node:crypto'
 import type { Context, Hono } from 'hono'
+import { resolveTrustedClientAddress } from '../../../../infrastructure/http/trusted-request-source'
 import {
   createMutationAuditContext,
   type MutationAuditContext,
@@ -44,6 +45,7 @@ import type {
 import {
   DOCUMENT_BACKLINK_MAX_PAGE_LIMIT,
   DOCUMENT_COMMENT_MAX_PAGE_LIMIT,
+  DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
   DOCUMENT_MAX_BACKLINK_COUNT,
   DOCUMENT_MAX_ITEM_BYTES,
   DOCUMENT_MAX_OPERATION_COUNT,
@@ -62,9 +64,13 @@ export const DOCUMENT_API_MAX_MEMBER_GRANT_COUNT = 100
 /** Member source-of-truth read の最大同時実行数です。 */
 const DOCUMENT_API_VALIDATION_CONCURRENCY = 8
 
-/** 一つの batched backlink request で評価する row の最大件数です。 */
-const DOCUMENT_API_BACKLINK_BATCH_READ_LIMIT =
-  DOCUMENT_MAX_BACKLINK_COUNT
+/**
+ * 一つの batched backlink request で評価する row の最大件数です。
+ *
+ * 読み切れなかった target は `pending` として次の request に回すため、
+ * Document の link 上限とは独立した read budget です。
+ */
+const DOCUMENT_API_BACKLINK_BATCH_READ_LIMIT = 14
 
 /**
  * Batched backlink query の検証済み target です。
@@ -1115,8 +1121,7 @@ function createDocumentCommentAuditContext(
         requestId: c.req.header('X-Request-Id'),
         method: c.req.method,
         route: path,
-        ipAddress:
-          c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+        ipAddress: resolveTrustedClientAddress(c),
         userAgent: c.req.header('User-Agent'),
       },
       ...(c.req.header('X-Correlation-Id')?.trim()
@@ -1342,6 +1347,17 @@ function readCreateDocumentRelationTargets(
       )
     : []
   requireDocumentRelationTargetLimit(targets)
+  if (targets.length > DOCUMENT_MAX_BACKLINK_CHANGE_COUNT) {
+    throw new DocumentError(
+      413,
+      'DocumentBacklinkChangeLimitExceeded',
+      `A Document change can add or remove at most ${DOCUMENT_MAX_BACKLINK_CHANGE_COUNT} links at once.`,
+      {
+        changeCount: targets.length,
+        maxChangeCount: DOCUMENT_MAX_BACKLINK_CHANGE_COUNT,
+      },
+    )
+  }
   return targets
 }
 

@@ -228,3 +228,67 @@ export function readWorkItemHierarchyMoveShortcut(
     default: return undefined
   }
 }
+
+/**
+ * Builds the key that identifies one Work Item's collapsed outline row across Teams.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param workItemId - Work Item ID.
+ * @returns A key unique within the Workspace.
+ */
+export function createWorkItemOutlineKey(teamId: string, workItemId: string): string {
+  return `${teamId}:${workItemId}`
+}
+
+/**
+ * Orders shown Work Items of one or more Teams as outlines, one Team after another.
+ *
+ * Teams follow the order in which their first Work Item appears. A Team whose hierarchy is
+ * missing (not read, too large, or failed) keeps its Work Items flat in their given order, so a
+ * view that spans Teams still shows every Work Item when one Team's hierarchy is unavailable.
+ *
+ * @param items - Shown Work Items in their fallback order.
+ * @param hierarchies - Hierarchy nodes in outline order, by Team ID.
+ * @param collapsedKeys - Keys from {@link createWorkItemOutlineKey} of the collapsed rows.
+ * @returns Visible rows in outline order.
+ */
+export function createMultiTeamWorkItemOutlineRows<Item extends { id: string, teamId: string }>(
+  items: readonly Item[],
+  hierarchies: ReadonlyMap<string, readonly TeamWorkItemHierarchyNode[]>,
+  collapsedKeys: ReadonlySet<string>,
+): WorkItemOutlineRow<Item>[] {
+  const itemsByTeam = new Map<string, Item[]>()
+  for (const item of items) {
+    const teamItems = itemsByTeam.get(item.teamId)
+    if (teamItems) teamItems.push(item)
+    else itemsByTeam.set(item.teamId, [item])
+  }
+  return [...itemsByTeam].flatMap(([teamId, teamItems]) => {
+    const nodes = hierarchies.get(teamId)
+    if (!nodes) {
+      return teamItems.map((item) => ({ item, depth: 0, hasChildren: false, collapsed: false }))
+    }
+    const collapsedIds = new Set(
+      teamItems
+        .filter((item) => collapsedKeys.has(createWorkItemOutlineKey(teamId, item.id)))
+        .map((item) => item.id),
+    )
+    return createWorkItemOutlineRows(teamItems, nodes, collapsedIds)
+  })
+}
+
+/**
+ * Reads the WBS number of every Work Item in a set of Team hierarchies.
+ *
+ * @param hierarchies - Hierarchy nodes by Team ID.
+ * @returns WBS numbers by {@link createWorkItemOutlineKey} key.
+ */
+export function createWorkItemWbsNumberIndex(
+  hierarchies: ReadonlyMap<string, readonly TeamWorkItemHierarchyNode[]>,
+): Map<string, string> {
+  const index = new Map<string, string>()
+  for (const [teamId, nodes] of hierarchies) {
+    for (const node of nodes) index.set(createWorkItemOutlineKey(teamId, node.workItemId), node.wbsNumber)
+  }
+  return index
+}

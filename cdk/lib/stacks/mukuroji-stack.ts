@@ -2,6 +2,8 @@ import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { configureAlarmRouting } from '../aspects/alarm-routing';
+import { configureCostAllocationTags } from '../aspects/cost-allocation-tags';
+import { configureStatefulResourceGuards } from '../aspects/stateful-resource-guards';
 import { buildLambdaBuildPaths } from '../config/lambda-build-paths';
 import { buildStackParameters, type StackParameters } from '../config/stack-parameters';
 import {
@@ -9,6 +11,7 @@ import {
   buildApiTransportsAndRealtime,
 } from '../subsystems/api-realtime';
 import { buildBootstrapResources } from '../subsystems/bootstrap-resources';
+import { buildCostBudget } from '../subsystems/cost-budget';
 import { buildCrossDomainIntegrityAccess } from '../subsystems/cross-domain-integrity';
 import { buildDataStores } from '../subsystems/data-stores';
 import {
@@ -35,9 +38,11 @@ import { buildRequestEmailWorker } from '../subsystems/workers/request-email';
 import { buildScheduledJobsWorker } from '../subsystems/workers/scheduled-jobs';
 import {
   defineAnalyticsScheduleJob,
+  defineCycleScheduleJob,
   defineNotificationScheduleJob,
 } from '../subsystems/workers/schedules';
 import { defineSlackNotificationJob } from '../subsystems/workers/slack-notifications';
+import { defineEmailNotificationJob } from '../subsystems/workers/email-notifications';
 import { buildTenantOperationWorker } from '../subsystems/workers/tenant-operation';
 import { defineTriageScheduleJob } from '../subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from '../subsystems/workers/webhook-delivery';
@@ -118,6 +123,8 @@ export class MukurojiStack extends cdk.Stack {
     const runtimeControls = buildRuntimeControls(this, { lambdaBuildPaths });
     const dataStores = buildDataStores(this, {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
+      enterpriseIdentityTokenHashSecret:
+        parameters.enterpriseIdentityTokenHashSecret,
       workspaceAuditPseudonymKey: parameters.workspaceAuditPseudonymKey,
     });
     const fileStorage = buildFileStorage(this, {
@@ -259,8 +266,10 @@ export class MukurojiStack extends cdk.Stack {
         defineTriageScheduleJob({ dataStores, parameters }),
         defineAgentRunTriageJob({ dataStores, parameters }),
         defineSlackNotificationJob(this, { dataStores, parameters }),
+        defineEmailNotificationJob(this, { dataStores, parameters, webOrigin: webDistribution.webOrigin }),
         defineAnalyticsScheduleJob({ dataStores, parameters }),
         defineNotificationScheduleJob({ dataStores, parameters }),
+        defineCycleScheduleJob({ dataStores, parameters }),
       ],
     });
     const tenantOperationWorker = buildTenantOperationWorker(this, {
@@ -304,10 +313,18 @@ export class MukurojiStack extends cdk.Stack {
     configureAlarmRouting(this, {
       notificationTopicArns: parameters.alarmNotificationTopicArns,
     });
+    configureStatefulResourceGuards(this);
+    configureCostAllocationTags(this);
+    buildCostBudget(this, {
+      monthlyBudgetUsd: parameters.monthlyCostBudgetUsd,
+      alertEmail: parameters.costBudgetAlertEmail,
+      fallbackEmail: parameters.initialOwnerEmail,
+    });
     buildBootstrapResources(this, {
       dataStores,
       parameters,
       demoDataEnabled,
+      lambdaBuildPaths,
     });
     const { connectorChannels } = workerChannels;
     const { connectorRuntimeSecret } = dataStores;

@@ -1,5 +1,4 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
-import { isIP } from 'node:net'
 import {
   isWorkItemProgressPercent,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
@@ -9,6 +8,7 @@ import {
   type AgentContext,
   type PublicAgentSettings,
   type PublicWorkItemAcceptanceCriteria,
+  type PublicWorkItemActualDates,
   type PublicWorkItemEffort,
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
@@ -55,6 +55,7 @@ import {
   type WorkItemTypeChangeResolution,
   type StartAgentRunResponse,
   type ReportAgentRunResponse,
+  type ResumeAgentRunResponse,
   type TakeOverAgentRunResponse,
   type TeamIssueCommentResponseItem,
 } from '@mukuroji/contracts'
@@ -69,12 +70,14 @@ import {
   readHeartbeatAgentRunRequest,
   readReportAgentRunRequest,
   readStartAgentRunRequest,
+  readResumeAgentRunRequest,
   readTakeOverAgentRunRequest,
   splitAgentRunMutationFence,
   type ValidatedAgentRunFence,
   type ValidatedAgentRunFinish,
   type ValidatedAgentRunReport,
   type ValidatedAgentRunStart,
+  type ValidatedAgentRunResume,
   type ValidatedAgentRunTakeOver,
 } from '../agent-runs'
 import type {
@@ -91,6 +94,7 @@ import type {
   WebhookDeliveryPort,
   WebhookSubscriptionPort,
 } from './application/ports'
+import { readCredentialPrincipalKey } from './credential-principal'
 import { DeveloperPlatformError } from './errors'
 import {
   decidePersonalCredentialIssuance,
@@ -100,6 +104,7 @@ import {
 } from './domain/personal-credential-policy'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
 import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-projection'
+import { resolveTrustedRequestSource } from '../../infrastructure/http/trusted-request-source'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
 
 /** Public API が一 credential に許可する1分あたりの既定 request 数です。 */
@@ -108,10 +113,10 @@ export const PUBLIC_API_RATE_LIMIT = 120
 /** Maximum accepted public API request body size. */
 const PUBLIC_API_BODY_MAX_BYTES = 10 * 1024 * 1024
 
-/** OAuth token endpoint が一 client ID に許可する1分あたりの request 数です。 */
+/** OAuth token endpoint が secret を確認できた一 client ID に許可する1分あたりの request 数です。 */
 export const OAUTH_TOKEN_CLIENT_RATE_LIMIT = 30
 
-/** OAuth token endpoint が一 source IP に許可する1分あたりの request 数です。 */
+/** OAuth token endpoint が信頼できる一 client IP に許可する1分あたりの request 数です（secret 確認前に数える）。 */
 export const OAUTH_TOKEN_IP_RATE_LIMIT = 60
 
 /** Public Work Item page の既定件数です。 */
@@ -271,6 +276,18 @@ export interface PublicWorkItemService {
     teamId: string,
     workItemId: string,
   ): Promise<PublicWorkItemEffort>
+  /**
+   * Reads the actual start and end dates of a Work Item after current RBAC checks.
+   * @param credential - Authenticated developer credential used for current RBAC checks.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The dates that are recorded, with the Work Item revision they were read at.
+   */
+  getActualDates(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+  ): Promise<PublicWorkItemActualDates>
   /**
    * Reads the short immutable key of a Work Item after current RBAC checks.
    * @param credential - Authenticated developer credential used for current RBAC checks.
@@ -608,6 +625,32 @@ export interface PublicAgentRunService {
     idempotency: IdempotencyMutationToken,
   ): Promise<TakeOverAgentRunResponse>
   /**
+   * Revalidates resume permissions before replaying a resume receipt.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item being resumed.
+   * @returns A promise that resolves when the caller may still act on the Work Item.
+   */
+  authorizeResume(credential: AuthenticatedDeveloperCredential, teamId: string, workItemId: string): Promise<void>
+  /**
+   * Starts a new run of the assignee on a started Work Item that no run claims, linked to its newest earlier run.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item being resumed.
+   * @param request - Revision read by the caller, and its runtime, agent name, and instance hash.
+   * @param context - Request and idempotency identifiers.
+   * @param idempotency - Idempotency reservation token.
+   * @returns The new run and the earlier run it resumes.
+   */
+  resume(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    request: ValidatedAgentRunResume,
+    context: PublicMutationContext,
+    idempotency: IdempotencyMutationToken,
+  ): Promise<ResumeAgentRunResponse>
+  /**
    * Reads the Team Agent settings that govern runs.
    * @param credential - Authenticated developer credential.
    * @param teamId - Team ID.
@@ -927,22 +970,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
 
   router.post('/v1/oauth/token', async (c) => {
     setSecretResponseHeaders(c)
-    const clientIp = readTrustedClientIp(c)
-    if (clientIp) {
-      await enforceOAuthTokenRateLimit(
-        c,
-        dependencies,
-        `ip:${digestRateLimitSubject(clientIp)}`,
-        OAUTH_TOKEN_IP_RATE_LIMIT,
-      )
-    }
-    const input = await readOAuthTokenInput(c)
+    // Without a trusted address (for example under the Bun server, which has no Lambda request
+    // context) every such request shares one bucket, so wrong secrets stay bounded there too.
     await enforceOAuthTokenRateLimit(
       c,
       dependencies,
-      `client:${digestRateLimitSubject(input.clientId)}`,
-      OAUTH_TOKEN_CLIENT_RATE_LIMIT,
+      `ip:${digestRateLimitSubject(resolveTrustedRequestSource(c))}`,
+      OAUTH_TOKEN_IP_RATE_LIMIT,
     )
+    const input = await readOAuthTokenInput(c)
     if (input.grantType !== 'client_credentials') {
       throw new PublicApiServiceError(400, 'invalid_request', 'grant_type must be client_credentials.')
     }
@@ -950,6 +986,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       clientId: input.clientId,
       clientSecret: input.clientSecret,
       ...(input.scopes.length > 0 ? { scopes: input.scopes } : {}),
+      // The client bucket counts only callers that proved the secret, so knowing the public
+      // client_id is not enough to lock the client out. Wrong secrets count against the IP bucket.
+      // It is keyed on the verified app's internal ID, so nothing from the request body is hashed.
+      admitVerifiedClient: (client) => enforceOAuthTokenRateLimit(
+        c,
+        dependencies,
+        `client:${client.oauthAppId}`,
+        OAUTH_TOKEN_CLIENT_RATE_LIMIT,
+      ),
     })
     return c.json({
       access_token: token.accessToken,
@@ -1007,6 +1052,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
   router.get('/v1/work-items/:workItemId/effort', async (c) => {
     const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
     return c.json(await dependencies.workItems.getEffort(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+    ))
+  })
+
+  router.get('/v1/work-items/:workItemId/actual-dates', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await dependencies.workItems.getActualDates(
       credential,
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
@@ -1288,6 +1342,21 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       body: await agentRuns.report(credential, teamId, runId, reportRequest, context, idempotency, assignedProjectId),
     }), {
       authorizeReplay: () => agentRuns.authorizeReport(credential, teamId, runId, reportRequest.instanceIdHash, assignedProjectId),
+    })
+  })
+
+  router.post('/v1/work-items/:workItemId/agent-runs/resume', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:write'])
+    const agentRuns = requireAgentRunService(dependencies)
+    const rawBody = await readJson(c)
+    const input = readResumeAgentRunRequest(rawBody)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    return executeIdempotentJson(c, dependencies, credential, rawBody, async (context, idempotency) => ({
+      status: 201,
+      body: await agentRuns.resume(credential, teamId, workItemId, input, context, idempotency),
+    }), {
+      authorizeReplay: () => agentRuns.authorizeResume(credential, teamId, workItemId),
     })
   })
 
@@ -2660,7 +2729,7 @@ async function authenticatePublicRequest(
   }
   const rateLimit = await dependencies.rateLimits.consumeRateLimit({
     workspaceId: credential.workspaceId,
-    credentialId: credential.credentialId,
+    credentialId: readCredentialPrincipalKey(credential),
     limit: PUBLIC_API_RATE_LIMIT,
     windowSeconds: 60,
   })
@@ -2752,26 +2821,6 @@ async function enforceOAuthTokenRateLimit(
       true,
     )
   }
-}
-
-function readTrustedClientIp(c: Context) {
-  const environment = isObjectRecord(c.env) ? c.env : undefined
-  const event = environment && isObjectRecord(environment.event)
-    ? environment.event
-    : undefined
-  const requestContext = event && isObjectRecord(event.requestContext)
-    ? event.requestContext
-    : undefined
-  const http = requestContext && isObjectRecord(requestContext.http)
-    ? requestContext.http
-    : undefined
-  if (typeof http?.sourceIp !== 'string') return undefined
-  const normalized = http.sourceIp.trim()
-  return isIP(normalized) !== 0 ? normalized : undefined
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function digestRateLimitSubject(value: string) {
@@ -2912,7 +2961,7 @@ async function executeIdempotentJson(
 ) {
   return executeIdempotent(c, dependencies, {
     workspaceId: credential.workspaceId,
-    credentialId: credential.credentialId,
+    credentialId: readCredentialPrincipalKey(credential),
   }, body, operation, options)
 }
 

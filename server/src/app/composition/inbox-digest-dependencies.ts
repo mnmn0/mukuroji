@@ -26,7 +26,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
         scimDirectory: unavailable(), scimAuthentication: unavailable(), scimCredentialAdministration: unavailable(),
         provisioning: unavailable(), serviceAccountAuthentication: unavailable(), serviceAccountAdministration: unavailable(), breakGlass: unavailable(),
       },
-      customers: unavailable(), dashboardSummary: unavailable(), auditEvents: unavailable(),
+      customers: unavailable(), auditEvents: unavailable(),
       enterpriseSessionActivity: unavailable(), enterpriseIdentityProviderConnectionTester: unsupported,
       tenantAdministration: unavailable(), tenantExportDownload: unavailable(), tenantLifecycleEnforcement: unavailable(),
     },

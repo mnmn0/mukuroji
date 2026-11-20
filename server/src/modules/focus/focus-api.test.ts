@@ -22,6 +22,7 @@ import {
   createDefaultDueDateWorkItemSchedule,
   type ApprovalRequest,
   type EnterprisePermissionId,
+  type PlanningUpdateTarget,
 } from '@mukuroji/contracts'
 
 const {
@@ -786,6 +787,80 @@ test('bounds watcher point reads to the accessible Focus item window', async () 
   expect(watcherReads).toBe(200)
 })
 
+test('lists health update deadlines the viewer owns in Projects readable by ACL', async () => {
+  // No Work Items: the Project ACL alone authorizes the update target.
+  configureFocusSources('member', undefined, 0)
+  configureFakeAuthenticatedUser({
+    email: 'sato@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  const planning = new InMemoryPlanningClient()
+  const emptyWorkItems: PlanningWorkItemState = { workItems: [] }
+  // A Workspace-scoped Initiative is readable without Work Item evidence and keeps its title.
+  const hierarchy = [
+    { id: 'workspace-portfolio', type: 'portfolio' },
+    { id: 'workspace-roadmap', type: 'roadmap', parentId: 'workspace-portfolio' },
+    { id: 'workspace-initiative', type: 'initiative', parentId: 'workspace-roadmap' },
+  ] as const
+  for (const [index, entity] of hierarchy.entries()) {
+    await planning.create('user#demo@example.com', {
+      ...entity,
+      title: entity.id === 'workspace-initiative' ? 'Workspace initiative' : entity.id,
+      ownerMemberKey: 'owner@example.com',
+      status: 'planned',
+      health: 'on-track',
+      risk: 'none',
+      progressMode: 'automatic',
+      baseline: { startDate: '2020-01-01', endDate: '2020-01-31' },
+      forecast: { startDate: '2020-01-01', endDate: '2020-01-31' },
+      expectedRevision: index,
+    }, emptyWorkItems)
+  }
+  const targets: PlanningUpdateTarget[] = [
+    { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    { type: 'project', teamId: 'hidden-team', projectId: 'hidden-project' },
+    { type: 'initiative', entityId: 'workspace-initiative' },
+  ]
+  for (const [index, target] of targets.entries()) {
+    await planning.configureUpdateCadence('user#demo@example.com', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'sato@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2020-01-06T09:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: hierarchy.length + index,
+    }, emptyWorkItems)
+  }
+  setTestAppDependencies({ planning })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  if (!isRecord(body) || !Array.isArray(body.sections)) throw new Error('Expected a Focus response.')
+  expect(body.sections.every((section) =>
+    isRecord(section) && Array.isArray(section.items) && section.items.length === 0
+  )).toBeTrue()
+  expect(body.updateDeadlines).toEqual([{
+    id: 'update-due:initiative:workspace-initiative:2020-01-06T09%3A00%3A00.000Z',
+    target: { type: 'initiative', entityId: 'workspace-initiative' },
+    title: 'Workspace initiative',
+    state: 'overdue',
+    dueAt: '2020-01-06T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=initiative&entityId=workspace-initiative',
+  }, {
+    id: 'update-due:project:core-team:refero:2020-01-06T09%3A00%3A00.000Z',
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    title: expect.any(String),
+    state: 'overdue',
+    dueAt: '2020-01-06T09:00:00.000Z',
+    deepLink: '/planning/portfolio?targetType=project&teamId=core-team&projectId=refero',
+  }])
+})
+
 test('drops Focus mention notifications whose collaboration source was removed', async () => {
   configureFocusSources()
   const notification = {
@@ -931,6 +1006,33 @@ test('hydrates owned Work Items with permission-safe approval summaries', async 
         source: expect.objectContaining({ kind: 'approval' }),
       }),
     ]))
+  })
+})
+
+test('does not read approval summaries for Work Items the viewer does not own', async () => {
+  await withTestEnvironment({ FILE_PROOFING_TABLE_NAME: 'focus-api-test' }, async () => {
+    configureFocusSources('member', undefined, 3)
+    configureFakeAuthenticatedUser({
+      email: 'demo@example.com',
+      'custom:directory_id': 'user#demo@example.com',
+    })
+    let approvalSummaryReads = 0
+    setTestAppDependencies({
+      fileProofing: createFileProofingStub({
+        async getApprovalSummaries() {
+          approvalSummaryReads += 1
+          return new Map()
+        },
+        async listReviewerApprovals() {
+          return { approvals: [] }
+        },
+      }),
+    })
+
+    const response = await focusRequest('/api/focus')
+
+    expect(response.status).toBe(200)
+    expect(approvalSummaryReads).toBe(0)
   })
 })
 
@@ -1334,6 +1436,49 @@ test('validates and version-checks user policy replacements', async () => {
   })
   expect(invalid.status).toBe(400)
   expect(await invalid.json()).toMatchObject({ code: 'InvalidFocusInput' })
+})
+
+test('stores SLA scope overrides and rejects invalid SLA scope values', async () => {
+  configureFocusSources('manager')
+  const response = await focusRequest('/api/focus/policies', 'PUT', {
+    target: { type: 'user' },
+    expectedVersion: 0,
+    overrides: {
+      slaEnabled: true,
+      slaAnchor: 'started',
+      slaWorkItemTypeIds: ['request', 'incident', 'request'],
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    policy: {
+      overrides: {
+        slaEnabled: true,
+        slaAnchor: 'started',
+        slaWorkItemTypeIds: ['incident', 'request'],
+      },
+    },
+    effectivePolicies: [{
+      baseSettings: { slaEnabled: true, slaAnchor: 'planned-start', slaWorkItemTypeIds: [] },
+      settings: { slaAnchor: 'started', slaWorkItemTypeIds: ['incident', 'request'] },
+    }],
+  })
+
+  for (const overrides of [
+    { slaAnchor: 'due-date' },
+    { slaEnabled: 'false' },
+    { slaWorkItemTypeIds: [' request'] },
+    { slaWorkItemTypeIds: 'request' },
+  ]) {
+    const invalid = await focusRequest('/api/focus/policies', 'PUT', {
+      target: { type: 'user' },
+      expectedVersion: 1,
+      overrides,
+    })
+    expect(invalid.status).toBe(400)
+    expect(await invalid.json()).toMatchObject({ code: 'InvalidFocusInput' })
+  }
 })
 
 test('returns the committed policy when a contributing layer changes after the write', async () => {

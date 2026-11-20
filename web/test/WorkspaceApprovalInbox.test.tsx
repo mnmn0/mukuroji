@@ -157,7 +157,7 @@ describe('Workspace approval Inbox', () => {
       />,
     )
 
-    expect(html).toContain('On track')
+    expect(html).toContain('>On track</span>')
     expect(html).toContain('Overdue')
     expect(html).toContain('Launch scope remains healthy.')
     expect(html).toContain('data-testid="dashboard-update-summary-core-team-refero"')
@@ -165,7 +165,7 @@ describe('Workspace approval Inbox', () => {
     expect(html).toContain('2026-08-01')
     expect(html).toContain('2026-08-08')
     expect(html).toContain('min-[761px]:min-w-[1180px]')
-    expect(html).not.toContain('Off track')
+    expect(html).not.toContain('>Off track</span>')
   })
 
   for (const viewName of ['Home', 'Dashboard']) {

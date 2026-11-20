@@ -2,11 +2,14 @@ import {
   useMemo,
   useState,
 } from 'react'
-import type {
-  TenantOperation,
-  TenantProfile,
-  TenantGovernancePolicy,
-  TenantAdministrationSnapshot,
+import {
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  isWorkspaceWeekStartDay,
+  type TenantOperation,
+  type TenantProfile,
+  type TenantGovernancePolicy,
+  type TenantAdministrationSnapshot,
+  type WorkspaceWeekStartDay,
 } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
@@ -46,6 +49,34 @@ const tenantAdministrationInfoItems: ReadonlyArray<
     'workspace.tenantAdministration.workflowDescription',
   ],
 ]
+
+/** Months offered as the first month of the fiscal year. */
+const fiscalYearStartMonthOptions = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] as const
+
+/** Week start days offered, Monday first as most Japanese teams count weeks. */
+const weekStartDayOptions: readonly WorkspaceWeekStartDay[] = [1, 2, 3, 4, 5, 6, 0]
+
+/** Label keys of each week start day. */
+const weekStartDayLabelKeys: Record<WorkspaceWeekStartDay, MessageKey> = {
+  0: 'workspace.tenantAdministration.weekday.sunday',
+  1: 'workspace.tenantAdministration.weekday.monday',
+  2: 'workspace.tenantAdministration.weekday.tuesday',
+  3: 'workspace.tenantAdministration.weekday.wednesday',
+  4: 'workspace.tenantAdministration.weekday.thursday',
+  5: 'workspace.tenantAdministration.weekday.friday',
+  6: 'workspace.tenantAdministration.weekday.saturday',
+}
+
+/**
+ * Reads a fiscal year start month from a select value.
+ *
+ * @param value - Option value of the month select.
+ * @returns The month from 1 to 12, or January when the value is not one.
+ */
+function readFiscalYearStartMonth(value: string): number {
+  const month = Number(value)
+  return Number.isInteger(month) && month >= 1 && month <= 12 ? month : 1
+}
 
 /**
  * Connects tenant administration data and mutations to the settings view.
@@ -244,6 +275,7 @@ export function TenantAdministrationPanel({
     ? Math.round((activeOperation.completedSteps.length / operationSteps) * 100)
     : 0
   const tenantLifecycleLocked = profile.status !== 'active'
+  const calendar = profile.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
   const tenantClosed = profile.status === 'closed'
 
   return (
@@ -327,6 +359,46 @@ export function TenantAdministrationPanel({
               >
                 <option value="member">{t('workspace.tenantAdministration.memberRole')}</option>
                 <option value="guest">{t('workspace.tenantAdministration.guestRole')}</option>
+              </select>
+            </label>
+            <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('workspace.tenantAdministration.fiscalYearStartMonth')}
+              <select
+                className="workbench-input"
+                data-testid="tenant-fiscal-year-start-month"
+                disabled={tenantLifecycleLocked}
+                onChange={(event) => onChangeProfile({
+                  ...profile,
+                  calendar: {
+                    ...calendar,
+                    fiscalYearStartMonth: readFiscalYearStartMonth(event.target.value),
+                  },
+                })}
+                value={calendar.fiscalYearStartMonth}
+              >
+                {fiscalYearStartMonthOptions.map((month) => (
+                  <option key={month} value={month}>
+                    {t('workspace.tenantAdministration.monthOption').replace('{month}', String(month))}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+              {t('workspace.tenantAdministration.weekStartDay')}
+              <select
+                className="workbench-input"
+                data-testid="tenant-week-start-day"
+                disabled={tenantLifecycleLocked}
+                onChange={(event) => {
+                  const weekStartDay = Number(event.target.value)
+                  if (!isWorkspaceWeekStartDay(weekStartDay)) return
+                  onChangeProfile({ ...profile, calendar: { ...calendar, weekStartDay } })
+                }}
+                value={calendar.weekStartDay}
+              >
+                {weekStartDayOptions.map((day) => (
+                  <option key={day} value={day}>{t(weekStartDayLabelKeys[day])}</option>
+                ))}
               </select>
             </label>
           </div>

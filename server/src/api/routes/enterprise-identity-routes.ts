@@ -50,8 +50,12 @@ import {
   assertEnterpriseCognitoProviderBinding,
   assertEnterpriseIdentityProviderReady,
   canAssignEnterpriseRole,
+  deactivateEnterpriseScimUserDesiredState,
   ipMatchesCidr,
   resolveEnterpriseRolePermissions,
+  resolveEnterpriseScimMemberKey,
+  saveEnterpriseScimUserDesiredState,
+  type EnterpriseScimUserDesiredStateDependencies,
 } from '../../modules/enterprise-identity'
 import {
   createDefaultEnterpriseSecurityPolicy,
@@ -100,6 +104,7 @@ import {
   toAuthErrorResponse,
 } from '../shared/http'
 import { summarizeMfaEnrollment } from '../../modules/workspace-access'
+import { resolveTrustedClientAddress } from '../../infrastructure/http/trusted-request-source'
 import { createRequestMemberSignInSecurityPorts } from '../shared/member-sign-in-security'
 import { requireWorkspaceMemberHasNoOwnedPlanningEntities } from '../shared/planning-access'
 import {
@@ -180,7 +185,20 @@ export async function auditRejectedEnterpriseSecurityMutation(
       actorKind = 'service'
     } else {
       if (!token) return
+      // GetUser accepts any token Cognito issued in this region, so the token must first be
+      // bound to the configured pool and clients, and its holder must still be an active member
+      // of the Workspace it names. Otherwise an outsider could append audit events to it.
+      try {
+        validateConfiguredCognitoAccessToken(token)
+      } catch {
+        return
+      }
       const principal = toProjectPrincipal(await readCognitoAccessTokenUser(token), token)
+      const member = await workspaceDependencies.workspaceAccess.getActiveMember(
+        principal.directoryId,
+        principal.userKey,
+      )
+      if (!member) return
       workspaceId = principal.directoryId
       actorId = principal.actorId
     }
@@ -209,7 +227,7 @@ export async function auditRejectedEnterpriseSecurityMutation(
         requestId,
         method: c.req.method,
         route: c.req.path,
-        ipAddress: resolveEnterpriseClientIp(c),
+        ipAddress: resolveTrustedClientAddress(c),
         userAgent: c.req.header('User-Agent'),
       },
     })
@@ -1379,9 +1397,7 @@ async function applyEnterpriseScimUserState(
   auditContext: MutationAuditContext,
   desiredGroupOverlays: readonly EnterpriseScimGroup[] = [],
 ) {
-  const memberKey = user.linkedMemberKey ??
-    user.emails[0]?.trim().toLowerCase() ??
-    user.userName.trim().toLowerCase()
+  const memberKey = resolveEnterpriseScimMemberKey(user)
   const existing = await workspaceDependencies.workspaceAccess.getMember(user.workspaceId, memberKey)
   if (user.active) {
     const snapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(user.workspaceId)
@@ -1458,6 +1474,18 @@ async function applyEnterpriseScimUserState(
     user.version,
     auditContext,
   )
+}
+
+/**
+ * Builds the ports for storing SCIM user desired state from the request dependencies.
+ *
+ * @returns Directory store and Workspace member reader for SCIM user desired state.
+ */
+function createEnterpriseScimUserDesiredStateDependencies(): EnterpriseScimUserDesiredStateDependencies {
+  return {
+    scimDirectory: workspaceDependencies.enterpriseIdentity.scimDirectory,
+    workspaceAccess: workspaceDependencies.workspaceAccess,
+  }
 }
 
 async function requireEnterpriseScimDeprovisionAllowed(
@@ -3978,7 +4006,9 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           snapshot,
         )
       }
-      const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.upsertScimUser(
+      const user = await saveEnterpriseScimUserDesiredState(
+        createEnterpriseScimUserDesiredStateDependencies(),
+        snapshot,
         input,
         createEnterpriseScimMutationContext(
           c,
@@ -4056,7 +4086,9 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           snapshot,
         )
       }
-      const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.upsertScimUser(
+      const user = await saveEnterpriseScimUserDesiredState(
+        createEnterpriseScimUserDesiredStateDependencies(),
+        snapshot,
         input,
         createEnterpriseScimMutationContext(
           c,
@@ -4098,10 +4130,10 @@ export function registerEnterpriseIdentityRoutes(routeApp: Hono): void {
           snapshot,
         )
       }
-      const user = await workspaceDependencies.enterpriseIdentity.scimDirectory.deactivateScimUser(
-        workspaceId,
-        credential.identityProviderId,
-        userId,
+      const user = await deactivateEnterpriseScimUserDesiredState(
+        createEnterpriseScimUserDesiredStateDependencies(),
+        snapshot,
+        existing,
         readScimIdempotencyKey(c, `delete-user:${userId}`),
         createEnterpriseScimMutationContext(
           c,

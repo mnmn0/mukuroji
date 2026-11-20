@@ -1,4 +1,4 @@
-import type { AgentRunReport, AgentRunView, FactoryBoardItem, FactoryBoardReportSummary, TeamAgentRunBoardResponse } from '@mukuroji/contracts'
+import type { AgentRunReport, AgentRunView, FactoryBoardItem, FactoryBoardReportSummary, TeamAgentRunBoardResponse, TeamFactoryAnalyticsResponse } from '@mukuroji/contracts'
 
 /** Read time of the fixture board. */
 export const factoryBoardFixtureNow = '2026-10-22T02:00:00.000Z'
@@ -45,7 +45,11 @@ export const factoryBoardFixtureItems: FactoryBoardItem[] = [
   },
   {
     workItem: { id: 'release-notes', title: 'リリースノートの下書きを作る', workflowStatusId: 'in-progress', statusCategory: 'started', assigneeUserId: 'tanaka@example.com' },
-    run: createRun('release-notes', 2, { runtime: 'codex', agentName: 'Codex', assigneeUserId: 'tanaka@example.com', leaseExpiresAt: '2026-10-22T02:25:00.000Z' }),
+    // Resumed after an earlier paused run of the same Work Item.
+    run: createRun('release-notes', 2, {
+      runtime: 'codex', agentName: 'Codex', assigneeUserId: 'tanaka@example.com', leaseExpiresAt: '2026-10-22T02:25:00.000Z',
+      resumedFromRunId: 'run_00000000-0000-4000-8000-000000000099',
+    }),
   },
   {
     workItem: { id: 'manual-start', title: '人が開始した調査タスク', workflowStatusId: 'in-progress', statusCategory: 'started', assignedProjectId: 'refero', assigneeUserId: 'sato@example.com', assigneeName: '佐藤 花子', assigneeEmail: 'sato@example.com' },
@@ -145,3 +149,29 @@ export const factoryBoardFixtureReports: AgentRunReport[] = [
 
 /** Project names of the fixture Team. */
 export const factoryBoardFixtureProjectNames: Record<string, string> = { refero: 'Refero' }
+
+/** Factory analytics of the fixture Team for the last 30 days. */
+export const factoryAnalyticsFixture: TeamFactoryAnalyticsResponse = {
+  generatedAt: factoryBoardFixtureNow,
+  from: '2026-09-22T02:00:00.000Z',
+  to: factoryBoardFixtureNow,
+  finishedRuns: 42,
+  outcomes: { completed: 30, paused: 4, failed: 5, released: 2, superseded: 1 },
+  successRate: 78.9,
+  reworkRuns: 6,
+  reworkRate: 14.3,
+  interventions: 3,
+  stageLeadTimes: [
+    { stage: 'build', medianHours: 1.75, sampleSize: 42 },
+    { stage: 'verify', medianHours: 0.4, sampleSize: 31 },
+    { stage: 'artifact', medianHours: 0.25, sampleSize: 28 },
+    { stage: 'decision', medianHours: 5.5, sampleSize: 9 },
+  ],
+  runtimes: [
+    { runtime: 'claude-code', finishedRuns: 30, outcomes: { completed: 23, paused: 3, failed: 3, released: 1, superseded: 0 }, successRate: 85.2, reworkRuns: 4, reworkRate: 13.3, interventions: 1 },
+    { runtime: 'codex', finishedRuns: 12, outcomes: { completed: 7, paused: 1, failed: 2, released: 1, superseded: 1 }, successRate: 63.6, reworkRuns: 2, reworkRate: 16.7, interventions: 2 },
+  ],
+  finishedRunsHasMore: false,
+  workItemsHasMore: false,
+  historyHasMore: false,
+}

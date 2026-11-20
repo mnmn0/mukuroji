@@ -280,7 +280,7 @@ Web の Project 画面（`TaskPage`）は、表示中のレイアウトに合わ
 
 - Web の Team 画面と、Project のテーブル・ボードは一覧全体を cursor で読み切る。1 一覧 10,000 件を超えると読み込めない。Project の期限カレンダーとガントは表示期間と期限なしの Work Item だけを読む（期限なしが 10,000 件を超えると読み込めない）。
 - 期間で絞る読み取りも、DynamoDB では並び順 GSI を評価予算つきで読み、期間外の row を評価後に除く。範囲用の GSI は未追加。
-- Planning publish は 20 Team と partition あたり 1,000 件、Task view の relation 解決は 20 Team の上限のまま。
+- Planning publish の canonical 読み取りは集約読み取りと同じ最大 100 Team・全体 10,000 件、Task view の relation 解決は最大 100 Team（1 request の強整合 point read は 2,000 回まで）。Planning の snapshot と mutation は今も閲覧できる Work Item を全件読む（#459）。
 - Work Item 作成は Team partition 全件を読まない。ID は key から決め、`sortOrder` は並び順 GSI の最大値を 1 件だけ読んで 10 足す。GSI は結果整合なので、ほぼ同時の作成で同じ `sortOrder` になることがある（一覧は ID で順序を決める）。
 
 ## 階層（WBS）と roll-up
@@ -293,6 +293,14 @@ Web の Project 画面（`TaskPage`）は、表示中のレイアウトに合わ
 - 1 Team 1,000 件（`WORK_ITEM_HIERARCHY_MAX_ITEMS`）を超えると `413 WorkItemListLimitExceeded` を返す。
 
 Web の Team Work Item テーブルは、表示設定の「階層（WBS）で表示する」をオンにすると（グループ化していないとき）この木を outline として表示する。行は階層の順に並び、WBS 番号・字下げ・折りたたみ（ブラウザごとに Team 単位で記憶）・子の集計を示す。フィルタで親が隠れた行は、表示されている一番近い祖先の下に入る。タイトルにフォーカスがある行（または J/K で選んだ行）で Alt+Shift+→ / ← を押すと 1 つ下 / 上の階層へ、Alt+Shift+↑ / ↓ で兄弟の中で並べ替える。折りたたまれた行は J/K と一括選択の対象から外れる。
+
+同じ表示設定は、ほかの画面の outline とガントにも効く。複数 Team の Work Item を並べる画面は、表示中の Work Item の Team ごとに階層を読み（`useTeamWorkItemHierarchies`）、Team ごとの木を最初に現れた順に並べる。階層を読めなかった Team（1,000 件超の `413` など）の Work Item は階層なしで並べ、「一部の Team の階層を読み込めませんでした」と再読み込みボタンを出す。
+
+- Project のテーブル: グループ化していないとき、Team 画面と同じく階層の順・WBS 番号・字下げ・折りたたみ・子の集計を示す。階層の移動（Alt+Shift+矢印）は Team 画面だけで行う。折りたたみはブラウザごと・Project 単位で記憶する。
+- ガント（Project・Team・マイタスク）: 行を階層の順に並べ、WBS 番号と字下げを示し、子を持つ行は折りたためる。子孫を持つ行には、計画バーの上に子孫の最早開始〜最遅終了（roll-up の `startDate` / `endDate`）を示すサマリーバーを描く。サマリーバーの日付は読める子孫すべてから作るので、フィルタや表示期間で子が隠れていても変わらない。表示期間を決めないガントは、サマリーバーも入るように期間を広げる。
+- Team とマイタスクのガント: Team 画面の表示形式に「ガント」を、マイタスクに「ボード / ガント」の切り替えを足した。表示設定のグループで「プロジェクト」を選ぶと、複数 Project の Work Item を Project ごとの見出しの下にまとめる（ほかのグループ項目でもまとめられる）。グループの件数には折りたたんで隠れた行も数える。階層の outline はグループの中で作り、親が別のグループにある行はそのグループの最上位に置く。この 2 つのガントは表示専用で、日程の変更は詳細 pane で行う。マイタスクの折りたたみはブラウザごとに記憶する。
+- 検索: Work Item の結果のタイトルの前に WBS 番号を示す。番号は結果に含まれる Team の階層から読み、読めない Team の結果は番号なしで示す。WBS 番号での絞り込みはしない。
+- Export: 開発者設定の Work Item export（CSV / JSON）に `wbsNumber` を入れる。Team ごとに階層を 1 回読み、読めない Team と archive 済みの Work Item は空にする。
 
 ## 運用
 

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { Readable } from 'node:stream'
 import { describe, expect, test } from 'bun:test'
 import { CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
@@ -6,6 +7,11 @@ import { S3Client } from '@aws-sdk/client-s3'
 import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { TenantOperation } from '@mukuroji/contracts'
+import {
+  createAuditEvent,
+  createMutationAuditContext,
+  toAuditEventView,
+} from '../../../audit'
 import {
   TENANT_OPERATION_EXECUTION_JOB_VERSION,
   type TenantOperationExecutionJob,
@@ -844,6 +850,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         targetIndex: 18,
         phase: 'snapshot',
         processedCount: 0,
+        snapshotRunId: 'a'.repeat(32),
       },
     }
 
@@ -863,7 +870,234 @@ describe('AwsTenantOperationResourceOwner', () => {
           ':tenant0': { S: 'WORKSPACE#workspace-1#' },
         },
       })
-      expect(exportPaths[0]).toContain('/snapshot/data/focus/')
+      expect(exportPaths[0]).toContain(`/snapshot-runs/${'a'.repeat(32)}/data/focus/`)
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  for (const includeMalformedRow of [false, true]) test(includeMalformedRow
+    ? 'fails the export page instead of skipping a malformed audit event'
+    : 'exports audit events only through the public audit event view', async () => {
+    const auditEvent = createAuditEvent({
+      context: createMutationAuditContext({
+        workspaceId: 'workspace-1',
+        actor: { id: 'member-1', kind: 'user' },
+        idempotencyKey: 'audit-export-redaction',
+        request: { method: 'POST', path: '/api/projects', body: { name: 'Visible' } },
+        source: {
+          kind: 'api',
+          route: '/api/projects',
+          ipAddress: '198.51.100.23',
+          userAgent: 'SecretAgent/1.0',
+        },
+      }),
+      eventType: 'project.created',
+      entity: { type: 'project', id: 'project-1' },
+      summary: 'Visible audit summary',
+      expiresAt: 1_900_000_000,
+    })
+    const storedRow = {
+      ...auditEvent,
+      directoryId: 'workspace-1',
+      actorKey: 'workspace-1#user#member-1',
+    }
+    const dynamoRequests: unknown[] = []
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          dynamoRequests.push(readJsonRequestBody(request))
+          return {
+            response: {
+              body: new TextEncoder().encode(JSON.stringify({
+                Items: includeMalformedRow
+                  ? [
+                      toDynamoAttributeMap(storedRow),
+                      toDynamoAttributeMap({ directoryId: 'workspace-1', eventId: 'malformed-1', ipAddress: '203.0.113.9' }),
+                    ]
+                  : [toDynamoAttributeMap(storedRow)],
+              })),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const exportBodies: string[] = []
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          exportBodies.push(readTextRequestBody(request))
+          return {
+            response: {
+              body: new Uint8Array(),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation('workspace-1'),
+      kind: 'export',
+      currentStep: 'snapshot',
+      completedSteps: [],
+      exportFormat: 'jsonl',
+      revision: 1,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId: 'workspace-1',
+      operationId: 'operation-1',
+      step: 'snapshot',
+      cursor: {
+        targetIndex: 11,
+        phase: 'snapshot',
+        processedCount: 0,
+        snapshotRunId: 'a'.repeat(32),
+      },
+    }
+
+    try {
+      if (includeMalformedRow) {
+        await expect(owner.execute(job, operation)).rejects.toMatchObject({
+          status: 503,
+          code: 'TenantExportAuditEventInvalid',
+        })
+        expect(exportBodies).toEqual([])
+        return
+      }
+      await owner.execute(job, operation)
+
+      expect(dynamoRequests[0]).toMatchObject({ TableName: 'audit-events' })
+      expect(exportBodies).toHaveLength(1)
+      const records = exportBodies[0]!.trim().split('\n').map((line) => JSON.parse(line))
+      expect(records).toEqual([
+        { resource: 'audit-events', record: JSON.parse(JSON.stringify(toAuditEventView(auditEvent))) },
+      ])
+      for (const hidden of [
+        '198.51.100.23',
+        'SecretAgent/1.0',
+        auditEvent.requestFingerprint,
+        'actorKey',
+      ]) {
+        expect(exportBodies[0]).not.toContain(hidden)
+      }
+      expect(exportBodies[0]).toContain('Visible audit summary')
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('exports only the NDJSON parts of asynchronous audit export jobs', async () => {
+    const workspaceId = 'workspace/one'
+    const auditPrefix = `audit-exports/${createHash('sha256').update(workspaceId).digest('hex')}/`
+    const exportId = 'c'.repeat(32)
+    const partKey = `${auditPrefix}${exportId}/part-00001-${'d'.repeat(64)}.ndjson`
+    const listedKeys = [
+      `${auditPrefix}${exportId}/job.json`,
+      `${auditPrefix}index/0000000000001-${exportId}`,
+      partKey,
+    ]
+    const listedPrefixes: string[] = []
+    const copiedSources: string[] = []
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const listedPrefix = readHttpQueryValue(request, 'prefix')
+          if (readHttpQueryValue(request, 'list-type') === '2' && listedPrefix) {
+            listedPrefixes.push(listedPrefix)
+            const contents = listedKeys
+              .map((key) => `<Contents><Key>${key}</Key><Size>7</Size></Contents>`)
+              .join('')
+            return createS3XmlResponse(
+              `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` +
+              `<Name>audit-exports</Name><Prefix>${listedPrefix}</Prefix>` +
+              `<KeyCount>${listedKeys.length}</KeyCount><MaxKeys>20</MaxKeys>` +
+              `<IsTruncated>false</IsTruncated>${contents}</ListBucketResult>`,
+            )
+          }
+          const copySource = readHttpHeader(request, 'x-amz-copy-source')
+          if (copySource) {
+            copiedSources.push(decodeURIComponent(copySource))
+            return createS3XmlResponse(
+              '<CopyObjectResult><ETag>"etag-1"</ETag></CopyObjectResult>',
+            )
+          }
+          throw new Error('Unexpected S3 export request.')
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation(workspaceId),
+      kind: 'export',
+      currentStep: 'snapshot',
+      completedSteps: [],
+      exportFormat: 'jsonl',
+      revision: 1,
+    }
+    const job: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId,
+      operationId: operation.operationId,
+      step: 'snapshot',
+      cursor: {
+        targetIndex: 25,
+        phase: 'snapshot',
+        processedCount: 0,
+        snapshotRunId: 'b'.repeat(32),
+      },
+    }
+
+    try {
+      const result = await owner.execute(job, operation)
+
+      expect(result).toMatchObject({ status: 'continuing' })
+      expect(listedPrefixes).toEqual([auditPrefix])
+      expect(copiedSources).toEqual([`audit-exports/${partKey}`])
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -959,6 +1193,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         targetIndex: 22,
         phase: 'snapshot',
         processedCount: 0,
+        snapshotRunId: 'b'.repeat(32),
       },
     }
 
@@ -998,6 +1233,253 @@ describe('AwsTenantOperationResourceOwner', () => {
         '/snapshot/work-item-import-sources/job-1/source.source',
       )
       expect(importSources.nextJob.cursor?.targetIndex).toBe(25)
+      expect(importSources.nextJob.cursor?.snapshotRunId).toBe('b'.repeat(32))
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('keeps restarted and redelivered export snapshots from duplicating data pages', async () => {
+    const dynamoRequests: unknown[] = []
+    const lowLevelClient = new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          const body = readJsonRequestBody(request)
+          dynamoRequests.push(body)
+          const hasStartKey = isRecord(body) && body.ExclusiveStartKey !== undefined
+          return {
+            response: {
+              body: new TextEncoder().encode(JSON.stringify(hasStartKey
+                ? { Items: [{ issueId: { S: 'issue-2' } }] }
+                : {
+                    Items: [{ issueId: { S: 'issue-1' } }],
+                    LastEvaluatedKey: {
+                      issueId: { S: 'issue-1' },
+                      directoryTeamId: { S: 'workspace-1#team-1' },
+                    },
+                  })),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+    const exportPaths: string[] = []
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          if (isRecord(request)) {
+            const path = Reflect.get(request, 'path')
+            if (typeof path === 'string') exportPaths.push(path)
+          }
+          return {
+            response: { body: new Uint8Array(), headers: {}, statusCode: 200 },
+          }
+        },
+      },
+    })
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation('workspace-1'),
+      kind: 'export',
+      currentStep: 'snapshot',
+      completedSteps: [],
+      exportFormat: 'jsonl',
+      revision: 1,
+    }
+    const freshJob: TenantOperationExecutionJob = {
+      version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+      workspaceId: 'workspace-1',
+      operationId: 'operation-1',
+      step: 'snapshot',
+    }
+
+    try {
+      const firstRun = await owner.execute(freshJob, operation)
+      const resumedRun = await owner.execute(freshJob, operation)
+      if (firstRun.status !== 'continuing' || resumedRun.status !== 'continuing') {
+        throw new Error('Expected snapshot continuations.')
+      }
+      const firstRunId = firstRun.nextJob.cursor?.snapshotRunId
+      const resumedRunId = resumedRun.nextJob.cursor?.snapshotRunId
+      expect(firstRunId).toMatch(/^[a-f0-9]{32}$/u)
+      expect(resumedRunId).toMatch(/^[a-f0-9]{32}$/u)
+      expect(resumedRunId).not.toBe(firstRunId)
+      expect(exportPaths[0]).toContain(`/snapshot-runs/${firstRunId}/data/work-items/`)
+      expect(exportPaths[1]).toContain(`/snapshot-runs/${resumedRunId}/data/work-items/`)
+
+      // A redelivered page message sends a second continuation with a fresh ciphertext. Both
+      // branches must write the next page to the same object instead of a second copy.
+      const pageJob: TenantOperationExecutionJob = {
+        ...freshJob,
+        cursor: {
+          targetIndex: 0,
+          phase: 'snapshot',
+          processedCount: 0,
+          snapshotRunId: 'c'.repeat(32),
+        },
+      }
+      const original = await owner.execute(pageJob, operation)
+      const redelivered = await owner.execute(pageJob, operation)
+      if (original.status !== 'continuing' || redelivered.status !== 'continuing') {
+        throw new Error('Expected snapshot continuations.')
+      }
+      expect(exportPaths[2]).toBe(exportPaths[3])
+      expect(redelivered.nextJob.cursor?.position)
+        .not.toBe(original.nextJob.cursor?.position)
+      await owner.execute(original.nextJob, operation)
+      await owner.execute(redelivered.nextJob, operation)
+      expect(exportPaths[4]).toContain(`/snapshot-runs/${'c'.repeat(32)}/data/work-items/`)
+      expect(exportPaths[5]).toBe(exportPaths[4])
+      expect(exportPaths[4]).not.toBe(exportPaths[2])
+
+      // A continuation queued before snapshot runs existed restarts from the first target.
+      const legacy = await owner.execute({
+        ...freshJob,
+        cursor: { targetIndex: 5, phase: 'snapshot', processedCount: 40 },
+      }, operation)
+      if (legacy.status !== 'continuing') throw new Error('Expected a restarted run.')
+      expect(dynamoRequests.at(-1)).toMatchObject({ TableName: 'work-items' })
+      expect(dynamoRequests.at(-1)).not.toHaveProperty('ExclusiveStartKey')
+      expect(legacy.nextJob.cursor).toMatchObject({ targetIndex: 0, processedCount: 1 })
+      expect(legacy.nextJob.cursor?.snapshotRunId).toMatch(/^[a-f0-9]{32}$/u)
+    } finally {
+      documentClient.destroy()
+      s3Client.destroy()
+      cognitoClient.destroy()
+    }
+  })
+
+  test('records the completed snapshot run in the marker and the manifest', async () => {
+    const objects = new Map<string, string>()
+    const s3Client = new S3Client({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          if (!isRecord(request)) throw new Error('Expected an S3 request.')
+          const path = Reflect.get(request, 'path')
+          const method = Reflect.get(request, 'method')
+          if (typeof path !== 'string') throw new Error('Expected an S3 path.')
+          if (method === 'PUT') {
+            objects.set(path, readTextRequestBody(request))
+            return {
+              response: { body: new Uint8Array(), headers: { etag: '"etag-1"' }, statusCode: 200 },
+            }
+          }
+          const stored = objects.get(path)
+          if (method === 'GET' && stored !== undefined) {
+            return {
+              response: {
+                body: Readable.from([Buffer.from(stored)]),
+                headers: { etag: '"marker-etag"' },
+                statusCode: 200,
+              },
+            }
+          }
+          throw new Error(`Unexpected S3 request ${String(method)} ${path}`)
+        },
+      },
+    })
+    const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    }))
+    const cognitoClient = new CognitoIdentityProviderClient({
+      credentials: testCredentials,
+      region: 'ap-northeast-1',
+    })
+    const owner = new AwsTenantOperationResourceOwner({
+      owner: 'export',
+      documentClient,
+      s3Client,
+      cognitoClient,
+      secretsManagerClient: inertSecretsManagerClient,
+      config: createConfig(),
+      pseudonymKey: testPseudonymKey,
+    })
+    const operation: TenantOperation = {
+      ...createOperation('workspace-1'),
+      currentStep: 'export',
+      completedSteps: [],
+      revision: 1,
+    }
+    const runId = 'd'.repeat(32)
+
+    try {
+      const snapshotDone = await owner.execute({
+        version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
+        workspaceId: 'workspace-1',
+        operationId: 'operation-1',
+        step: 'export',
+        cursor: {
+          // 22 tables, 4 file namespaces, and 2 trailing tables precede the completion index.
+          targetIndex: 28,
+          phase: 'snapshot',
+          processedCount: 12,
+          snapshotRunId: runId,
+        },
+      }, operation)
+      if (snapshotDone.status !== 'continuing') {
+        throw new Error('Expected the prepare continuation.')
+      }
+      expect(snapshotDone.nextJob.cursor).toEqual({
+        targetIndex: 0,
+        phase: 'prepare',
+        processedCount: 12,
+      })
+      const markerEntry = [...objects].find(([path]) => path.endsWith('/snapshot-complete.json'))
+      expect(JSON.parse(markerEntry?.[1] ?? '{}')).toMatchObject({
+        snapshotRunId: runId,
+        processedCount: 12,
+      })
+
+      await owner.execute(snapshotDone.nextJob, operation)
+      const manifestEntry = [...objects].find(([path]) => path.endsWith('/manifest.json'))
+      const manifest: unknown = JSON.parse(manifestEntry?.[1] ?? '{}')
+      expect(manifest).toMatchObject({
+        schemaVersion: 2,
+        snapshotRunId: runId,
+        snapshotMarkerEtag: 'marker-etag',
+      })
+      expect(isRecord(manifest) && String(manifest.snapshotDataPrefix))
+        .toEndWith(`/snapshot-runs/${runId}/data/`)
+
+      // A marker written before snapshot runs existed still prepares, in the legacy layout.
+      if (!markerEntry) throw new Error('Expected the snapshot marker.')
+      objects.set(markerEntry[0], JSON.stringify({ schemaVersion: 1, processedCount: 12 }))
+      const legacyPrepared = await owner.execute(snapshotDone.nextJob, operation)
+      expect(legacyPrepared.status).toBe('continuing')
+      const legacyManifest: unknown = JSON.parse(
+        [...objects].find(([path]) => path.endsWith('/manifest.json'))?.[1] ?? '{}',
+      )
+      expect(legacyManifest).toMatchObject({ schemaVersion: 2 })
+      expect(legacyManifest).not.toHaveProperty('snapshotRunId')
+
+      objects.set(markerEntry[0], JSON.stringify({ schemaVersion: 2, snapshotRunId: '../x' }))
+      await expect(owner.execute(snapshotDone.nextJob, operation)).rejects.toMatchObject({
+        code: 'TenantExportSnapshotMarkerInvalid',
+      })
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -1545,3 +2027,33 @@ describe('AwsTenantOperationResourceOwner', () => {
     }
   })
 })
+
+/**
+ * Encodes a plain value as a DynamoDB JSON attribute value for fake low-level responses.
+ *
+ * @param value - Plain JSON-compatible value.
+ * @returns The DynamoDB attribute value.
+ */
+function toDynamoAttributeValue(value: unknown): unknown {
+  if (value === null || value === undefined) return { NULL: true }
+  if (typeof value === 'string') return { S: value }
+  if (typeof value === 'number') return { N: String(value) }
+  if (typeof value === 'boolean') return { BOOL: value }
+  if (Array.isArray(value)) return { L: value.map(toDynamoAttributeValue) }
+  if (isRecord(value)) return { M: toDynamoAttributeMap(value) }
+  throw new TypeError('Unsupported DynamoDB test value.')
+}
+
+/**
+ * Encodes a plain record as a DynamoDB JSON item for fake low-level responses.
+ *
+ * @param record - Plain JSON-compatible record.
+ * @returns The DynamoDB item.
+ */
+function toDynamoAttributeMap(record: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(record)
+      .filter(([, entry]) => entry !== undefined)
+      .map(([key, entry]) => [key, toDynamoAttributeValue(entry)]),
+  )
+}

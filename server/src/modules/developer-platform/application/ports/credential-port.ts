@@ -82,6 +82,12 @@ export type AuthenticatedDeveloperCredential = {
   subjectUserId: string
   /** Issuing OAuth application when the credential is a token. */
   oauthAppId?: string
+  /**
+   * Stable caller identity for rate limits and idempotency. OAuth tokens get a new
+   * credential ID on every issuance, so they carry their issuing app here; when it is
+   * absent, the credential ID is the caller identity.
+   */
+  principalId?: string
   /** Scopes granted to the credential. */
   scopes: ApiScope[]
   /** Credential expiry timestamp when one exists. */
@@ -127,6 +133,19 @@ export type IssueOAuthTokenRequest = {
   scopes?: readonly ApiScope[]
   /** Requested token lifetime in seconds. */
   expiresInSeconds?: number
+  /**
+   * Runs once the client secret and app status are verified, before a token is stored.
+   *
+   * Lets the caller apply a per-client limit that callers without the secret cannot use up.
+   * Throwing rejects the request without issuing a token.
+   */
+  admitVerifiedClient?: (client: VerifiedOAuthClient) => Promise<void>
+}
+
+/** OAuth app whose client secret the token endpoint has verified. */
+export type VerifiedOAuthClient = {
+  /** Internal identifier of the verified OAuth app. */
+  oauthAppId: string
 }
 
 /** OAuth token endpoint result. */

@@ -22,7 +22,6 @@ import {
   isWorkspaceTaskAssignedToUser,
   isWorkspaceTaskOverdue,
   parseWorkspaceTaskDueDate,
-  resolveWorkspacePortfolioRisk,
   resolveWorkspaceTaskInvolvement,
 } from '../src/work-items/model/workspaceWorkItems'
 
@@ -258,11 +257,9 @@ describe('Workspace Work Item model', () => {
     const designRow = rows.find((row) => row.id === 'design-team-shared-launch')
 
     expect(coreRow?.progress).toBe(100)
-    expect(coreRow?.risk).toBe('low')
     expect(coreRow?.teamId).toBe('core-team')
     expect(coreRow?.projectId).toBe('shared-launch')
     expect(designRow?.progress).toBe(0)
-    expect(designRow?.risk).toBe('watch')
     expect(designRow?.teamId).toBe('design-team')
     expect(designRow?.projectId).toBe('shared-launch')
   })
@@ -292,10 +289,6 @@ describe('Workspace Work Item model', () => {
       null,
       null,
     ])
-  })
-
-  test('does not report an empty Project portfolio as low risk', () => {
-    expect(resolveWorkspacePortfolioRisk(undefined)).toBe('clear')
   })
 
   test('creates summary and progress without transport-only metadata', () => {

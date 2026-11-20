@@ -2,8 +2,11 @@ import { createHash } from 'node:crypto'
 import { hostname, userInfo } from 'node:os'
 import { AGENT_RUN_RUNTIMES, type AgentRunRuntime } from '@mukuroji/contracts'
 import { z } from 'zod'
+import type { McpServer } from '@modelcontextprotocol/server'
 import { createCodingAgentMcpServer } from '../../modules/coding-agent-mcp/adapter-in/mcp/server'
+import { readServerCompatibility } from '../../modules/coding-agent-mcp/adapter-out/http/server-compatibility'
 import { createAgentWorkItemApi } from '../../modules/coding-agent-mcp/adapter-out/http/work-item-api'
+import { assessServerCompatibility, type ServerCompatibility } from '../../modules/coding-agent-mcp/application/compatibility'
 import { AgentTaskError } from '../../modules/coding-agent-mcp/application/work-item-api'
 
 const configSchema = z.object({
@@ -48,24 +51,54 @@ export function deriveAgentInstanceId(runtime: AgentRunRuntime, assigneeUserId: 
     .digest('hex')
 }
 
+/** Server factory for stdio clients, with the shared server compatibility check. */
+export type CodingAgentMcpFactory = {
+  /**
+   * Creates one MCP server for a client connection.
+   *
+   * @returns An unconnected MCP server.
+   */
+  (): McpServer
+  /**
+   * Compares this MCP build with the configured server. A known result is reused for the
+   * process; an unknown one is read again on the next call.
+   *
+   * @returns The compatibility status and message.
+   */
+  serverCompatibility: () => Promise<ServerCompatibility>
+}
+
 /**
  * Composes the MCP server without initializing AWS clients or the HTTP application.
  * @param environment - Process environment or isolated test configuration.
  * @returns A server factory compatible with modern and legacy MCP stdio clients.
  */
-export function composeCodingAgentMcp(environment: Record<string, string | undefined> = process.env) {
+export function composeCodingAgentMcp(environment: Record<string, string | undefined> = process.env): CodingAgentMcpFactory {
   const parsed = configSchema.safeParse(environment)
   if (!parsed.success) {
     throw new AgentTaskError('configuration', 'Set MUKUROJI_MCP_URL, MUKUROJI_MCP_TOKEN, MUKUROJI_MCP_TEAM_ID, and MUKUROJI_MCP_ASSIGNEE_ID. Check optional PROJECT_ID, AGENT_NAME, READ_ONLY, RUNTIME, and INSTANCE_ID values.')
   }
   const config = parsed.data
   const api = createAgentWorkItemApi({ origin: config.MUKUROJI_MCP_URL, token: config.MUKUROJI_MCP_TOKEN, teamId: config.MUKUROJI_MCP_TEAM_ID })
-  return () => createCodingAgentMcpServer(api, {
+  let compatibility: Promise<ServerCompatibility> | undefined
+  /** Reads the server's served MCP API revisions, reusing a known result and retrying an unknown one. */
+  const serverCompatibility = () => {
+    const pending = compatibility ?? readServerCompatibility(config.MUKUROJI_MCP_URL).then((server) => {
+      const assessed = assessServerCompatibility(server)
+      // A transient failure must not hide the server's range for the rest of the process.
+      if (assessed.status === 'unknown') compatibility = undefined
+      return assessed
+    })
+    compatibility = pending
+    return pending
+  }
+  const createServer = () => createCodingAgentMcpServer(api, {
     assigneeUserId: config.MUKUROJI_MCP_ASSIGNEE_ID,
     assignedProjectId: config.MUKUROJI_MCP_PROJECT_ID,
     agentName: config.MUKUROJI_MCP_AGENT_NAME,
     runtime: config.MUKUROJI_MCP_RUNTIME,
     instanceId: config.MUKUROJI_MCP_INSTANCE_ID ??
       deriveAgentInstanceId(config.MUKUROJI_MCP_RUNTIME, config.MUKUROJI_MCP_ASSIGNEE_ID),
-  }, config.MUKUROJI_MCP_READ_ONLY === 'true')
+  }, config.MUKUROJI_MCP_READ_ONLY === 'true', serverCompatibility)
+  return Object.assign(createServer, { serverCompatibility })
 }

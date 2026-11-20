@@ -20,16 +20,20 @@ export const WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID =
  * The shared template turns on every optional module so each suite can assert its resources.
  *
  * @param props - Optional modules to deploy; every module is on by default.
+ * @param extraContext - Additional feature flags, such as those set in `cdk.json`.
  * @returns The synthesized CloudFormation template.
  */
 export function createTemplate(
   props: MukurojiStackProps = ALL_STACK_MODULE_PROPS,
+  extraContext: Record<string, unknown> = {},
 ): Template {
   const app = new cdk.App({
     context: {
       '@aws-cdk/aws-iam:minimizePolicies': true,
       '@aws-cdk/aws-lambda:createNewPoliciesWithAddToRolePolicy': false,
+      '@aws-cdk/aws-lambda:useCdkManagedLogGroup': true,
       '@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy': true,
+      ...extraContext,
     },
   });
   cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
@@ -208,7 +212,7 @@ export const COGNITO_USER_POOL_CLIENT_ID_VALUE = {
 
 /** Description of the Lambda that runs every periodic job. */
 export const SCHEDULED_JOBS_FUNCTION_DESCRIPTION =
-  'Runs the periodic Automation, Triage, Agent Run, Slack, analytics, and notification jobs.';
+  'Runs the periodic Automation, Triage, Agent Run, Slack, analytics, notification, and Cycle jobs.';
 
 /**
  * Finds the logical ID of the Lambda that runs every periodic job.
