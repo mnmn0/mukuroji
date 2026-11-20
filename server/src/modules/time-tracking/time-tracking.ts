@@ -2662,10 +2662,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** Reads a stored time entry. */
+/** Reads a stored time entry; an entry without both a Work Item and a category is invalid. */
 function readStoredEntry(value: unknown): TimeEntry {
   const record = readRecord(value)
   readSchemaVersion(record, 'Stored time entry')
+  if (record.workItemId === undefined && record.category === undefined) {
+    throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored time entry has neither a Work Item nor a category.')
+  }
   return {
     schemaVersion: 1,
     id: readString(record.id, 'Stored time entry ID'),

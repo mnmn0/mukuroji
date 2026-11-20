@@ -1,5 +1,5 @@
 import type { TimeEntry } from '@mukuroji/contracts'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import type { IndirectTimeEntryInput, TimeEntryDraftInput } from '../api/timeEntries'
 import { isTimeEntryEditable } from '../model/timeEntryLifecycle'
 import { formatMinutes, toLocalDateKey } from '../model/timePeriod'
@@ -68,7 +68,10 @@ export function TimeEntryList({
   const [editingEntry, setEditingEntry] = useState<TimeEntry>()
   const [pendingEntryId, setPendingEntryId] = useState<string>()
   const [failure, setFailure] = useState<{ entryId: string; message: string }>()
-  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string>()
+  // The revision shown when the member opened the confirmation: a later change makes the delete
+  // fail as a revision conflict instead of removing time the member did not see.
+  const [confirmingDelete, setConfirmingDelete] = useState<{ entryId: string; revision: number }>()
+  const deleteButtons = useRef(new Map<string, HTMLButtonElement>())
 
   /**
    * Submits one entry and keeps its failure next to it.
@@ -89,19 +92,32 @@ export function TimeEntryList({
   }
 
   /**
+   * Closes the delete confirmation and returns keyboard focus to the entry's delete button.
+   *
+   * @param entryId - Entry whose confirmation closes.
+   */
+  const closeDeleteConfirmation = (entryId: string) => {
+    setConfirmingDelete(undefined)
+    deleteButtons.current.get(entryId)?.focus()
+  }
+
+  /**
    * Deletes one entry after the member confirmed it, keeping a failure next to it.
    *
    * @param entry - Entry to delete.
+   * @param revision - Revision the member saw when confirming.
    */
-  const deleteEntry = async (entry: TimeEntry) => {
+  const deleteEntry = async (entry: TimeEntry, revision: number) => {
     if (!onDelete || pendingEntryId) return
     setPendingEntryId(entry.id)
     setFailure(undefined)
     try {
-      await onDelete(entry)
-      setConfirmingDeleteId(undefined)
+      await onDelete({ ...entry, revision })
+      setConfirmingDelete(undefined)
     } catch (error) {
       setFailure({ entryId: entry.id, message: describeTimeTrackingFailure(t, error) })
+      // Reopening the confirmation reads the entry again, so a conflict can be confirmed anew.
+      closeDeleteConfirmation(entry.id)
     } finally {
       setPendingEntryId(undefined)
     }
@@ -208,11 +224,17 @@ export function TimeEntryList({
                 {onDelete ? (
                   // Stays in place while the confirmation is open, so keyboard focus is not lost.
                   <button
-                    aria-expanded={confirmingDeleteId === entry.id}
+                    aria-expanded={confirmingDelete?.entryId === entry.id}
                     aria-label={`${t('timeTracking.entry.delete')} ${label}`}
                     className="workbench-button-secondary min-h-8 px-3"
                     disabled={pendingEntryId !== undefined}
-                    onClick={() => setConfirmingDeleteId(confirmingDeleteId === entry.id ? undefined : entry.id)}
+                    onClick={() => setConfirmingDelete(
+                      confirmingDelete?.entryId === entry.id ? undefined : { entryId: entry.id, revision: entry.revision },
+                    )}
+                    ref={(button) => {
+                      if (button) deleteButtons.current.set(entry.id, button)
+                      else deleteButtons.current.delete(entry.id)
+                    }}
                     type="button"
                   >
                     {t('timeTracking.entry.delete')}
@@ -220,13 +242,13 @@ export function TimeEntryList({
                 ) : null}
               </div>
             ) : null}
-            {editable && onDelete && confirmingDeleteId === entry.id ? (
+            {editable && onDelete && confirmingDelete?.entryId === entry.id ? (
               <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5" data-testid="time-entry-delete-confirm">
                 <p className="text-sm font-medium text-fg-red-700">{t('timeTracking.entry.deleteQuestion')}</p>
                 <button
                   className="workbench-button-secondary min-h-8 px-3 text-fg-red-700"
                   disabled={pendingEntryId !== undefined}
-                  onClick={() => { void deleteEntry(entry) }}
+                  onClick={() => { void deleteEntry(entry, confirmingDelete.revision) }}
                   type="button"
                 >
                   {t('timeTracking.entry.deleteConfirm')}
@@ -234,7 +256,7 @@ export function TimeEntryList({
                 <button
                   className="workbench-button-secondary min-h-8 px-3"
                   disabled={pendingEntryId !== undefined}
-                  onClick={() => setConfirmingDeleteId(undefined)}
+                  onClick={() => closeDeleteConfirmation(entry.id)}
                   type="button"
                 >
                   {t('timeTracking.entry.deleteCancel')}

@@ -87,6 +87,9 @@ export const IndirectWork: Story = {
     const [firstDelete] = canvas.getAllByRole('button', { name: /^削除 / })
     if (!firstDelete) throw new Error('Expected a delete button.')
     await userEvent.click(firstDelete)
+    await userEvent.click(canvas.getByRole('button', { name: '削除をやめる' }))
+    await expect(firstDelete).toHaveFocus()
+    await userEvent.click(firstDelete)
     await userEvent.click(canvas.getByRole('button', { name: 'この下書きを削除' }))
     await expect(args.onDeleteEntry).toHaveBeenCalledTimes(1)
 

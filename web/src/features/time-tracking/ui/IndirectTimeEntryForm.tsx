@@ -1,7 +1,7 @@
 import { TIME_ENTRY_CATEGORIES, type TimeEntry, type TimeEntryCategory } from '@mukuroji/contracts'
 import { useId, useState, type FormEvent } from 'react'
 import type { IndirectTimeEntryInput } from '../api/timeEntries'
-import { readIndirectMinutes, resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
+import { parseHoursInput, readIndirectMinutes, resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
 import { describeTimeTrackingFailure, timeEntryCategoryKeys, type TimeTrackingTranslator } from './timeTrackingText'
 
 /** A Project a member may record indirect work on. */
@@ -104,7 +104,7 @@ export function IndirectTimeEntryForm({
     const hours = readText('hours')
     // A timed entry keeps its start and end unless the member changes its date or hours.
     const keepRecordedInterval = entry !== undefined && entry.durationOnly !== true
-      && date === defaultDateText && hours === defaultHoursText
+      && date === defaultDateText && (hours === defaultHoursText || parseHoursInput(hours) === entry.durationMinutes)
     const minutes = keepRecordedInterval ? entry.durationMinutes : readIndirectMinutes(hours)
     const projectId = readText('projectId')
     if (!isCategory(category) || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) {

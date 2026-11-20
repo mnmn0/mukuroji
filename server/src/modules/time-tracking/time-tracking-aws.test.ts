@@ -215,6 +215,18 @@ describe('DynamoDbTimeTrackingRepository', () => {
     expect(audit).not.toContain('hourlyRateMinor')
   })
 
+  test('refuses a stored entry with neither a Work Item nor a category', async () => {
+    const { workItemId: _workItemId, ...entry } = createEntry('project-1')
+    const repository = new DynamoDbTimeTrackingRepository(
+      'analytics-table',
+      createDocumentClient([{ Item: { ...entry, recordKey: `TIME_ENTRY#team-1#${entry.id}` } }], []),
+    )
+
+    await expect(repository.getEntry('workspace-1', 'team-1', entry.id)).rejects.toMatchObject({
+      code: 'InvalidStoredTimeTrackingRecord',
+    })
+  })
+
   test('commits the durable idempotency receipt with the entry transaction', async () => {
     const commands: CommandWithInput[] = []
     let completed = 0
