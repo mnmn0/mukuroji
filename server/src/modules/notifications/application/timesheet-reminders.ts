@@ -24,7 +24,7 @@ export type UnsubmittedTimeEntry = {
   endAt: string
 }
 
-/** One timesheet submission reminder for one member of one Team. */
+/** One timesheet submission reminder for one member's entries in one Project of one Team. */
 export type TimesheetReminderCandidate = {
   /** Workspace containing the Team. */
   workspaceId: string
@@ -38,7 +38,7 @@ export type TimesheetReminderCandidate = {
   unsubmittedCount: number
   /** Start of the oldest unsubmitted entry. */
   oldestStartAt: string
-  /** Project of the oldest unsubmitted entry; delivery is authorized against it. */
+  /** Project the entries were recorded against; delivery is authorized against it. */
   projectId: string
   /** Entries that ended at or before this instant were due; delivery revalidates against it. */
   dueBefore: string
@@ -49,9 +49,10 @@ export type TimesheetReminderCandidate = {
 }
 
 /**
- * Groups a Team's unsubmitted entries into one reminder per member.
+ * Groups a Team's unsubmitted entries into one reminder per member and Project.
  *
- * An entry is due for submission once `reminderDays` have passed since it ended. A member with at
+ * Each reminder is authorized against its own Project, so entries in a Project the member can no
+ * longer read cannot hold back the reminder for a Project they can still submit. An entry is due for submission once `reminderDays` have passed since it ended. A member with at
  * least one such entry gets one reminder per `reminderDays`-long period counted from the Unix
  * epoch, so the reminder repeats on that interval while drafts remain and never repeats inside
  * one period.
@@ -61,7 +62,8 @@ export type TimesheetReminderCandidate = {
  * @param entries - Draft and rejected entries read for the Team.
  * @param now - Schedule execution instant.
  * @param reminderDaysFor - Resolves the member's effective reminder threshold.
- * @returns One candidate per member with an entry past the threshold, ordered by member key.
+ * @returns One candidate per member and Project with an entry past the threshold, ordered by
+ *   member key and then Project ID.
  */
 export async function evaluateTimesheetReminders(
   workspaceId: string,
@@ -80,24 +82,31 @@ export async function evaluateTimesheetReminders(
   for (const memberKey of [...entriesByMember.keys()].sort()) {
     const reminderDays = await reminderDaysFor(memberKey)
     const thresholdMilliseconds = reminderDays * dayMilliseconds
-    const due = (entriesByMember.get(memberKey) ?? [])
-      .filter((entry) => now.getTime() - Date.parse(entry.endAt) >= thresholdMilliseconds)
-      .sort((left, right) =>
+    const dueByProject = new Map<string, UnsubmittedTimeEntry[]>()
+    for (const entry of entriesByMember.get(memberKey) ?? []) {
+      if (now.getTime() - Date.parse(entry.endAt) < thresholdMilliseconds) continue
+      const projectEntries = dueByProject.get(entry.projectId) ?? []
+      projectEntries.push(entry)
+      dueByProject.set(entry.projectId, projectEntries)
+    }
+    for (const projectId of [...dueByProject.keys()].sort()) {
+      const due = (dueByProject.get(projectId) ?? []).sort((left, right) =>
         left.startAt.localeCompare(right.startAt) || left.entryId.localeCompare(right.entryId))
-    const oldest = due[0]
-    if (!oldest) continue
-    candidates.push({
-      workspaceId,
-      teamId,
-      memberKey,
-      entryIds: due.slice(0, TIMESHEET_REMINDER_MAX_ENTRY_IDS).map((entry) => entry.entryId),
-      unsubmittedCount: due.length,
-      oldestStartAt: oldest.startAt,
-      projectId: oldest.projectId,
-      dueBefore: new Date(now.getTime() - thresholdMilliseconds).toISOString(),
-      reminderDays,
-      cycle: Math.floor(now.getTime() / thresholdMilliseconds),
-    })
+      const oldest = due[0]
+      if (!oldest) continue
+      candidates.push({
+        workspaceId,
+        teamId,
+        memberKey,
+        entryIds: due.slice(0, TIMESHEET_REMINDER_MAX_ENTRY_IDS).map((entry) => entry.entryId),
+        unsubmittedCount: due.length,
+        oldestStartAt: oldest.startAt,
+        projectId,
+        dueBefore: new Date(now.getTime() - thresholdMilliseconds).toISOString(),
+        reminderDays,
+        cycle: Math.floor(now.getTime() / thresholdMilliseconds),
+      })
+    }
   }
   return candidates
 }

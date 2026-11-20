@@ -271,6 +271,24 @@ describe('timesheet reminder evaluation', () => {
       cycle: Math.floor(now.getTime() / (7 * 86_400_000)),
     }])
   })
+
+  test('sends one reminder per Project so an unreadable Project cannot hold back another', async () => {
+    const reminders = await evaluateTimesheetReminders(
+      'workspace-1',
+      'core',
+      [
+        { entryId: 'old-a', memberKey: 'a@example.com', projectId: 'archive', startAt: '2026-07-01T09:00:00.000Z', endAt: '2026-07-01T10:00:00.000Z' },
+        { entryId: 'b-1', memberKey: 'a@example.com', projectId: 'platform', startAt: '2026-07-08T09:00:00.000Z', endAt: '2026-07-08T10:00:00.000Z' },
+        { entryId: 'b-2', memberKey: 'a@example.com', projectId: 'platform', startAt: '2026-07-09T09:00:00.000Z', endAt: '2026-07-09T10:00:00.000Z' },
+      ],
+      now,
+      async () => 7,
+    )
+    expect(reminders.map((reminder) => [reminder.projectId, reminder.entryIds, reminder.oldestStartAt])).toEqual([
+      ['archive', ['old-a'], '2026-07-01T09:00:00.000Z'],
+      ['platform', ['b-1', 'b-2'], '2026-07-08T09:00:00.000Z'],
+    ])
+  })
 })
 
 describe('Team reminder settings routes', () => {
