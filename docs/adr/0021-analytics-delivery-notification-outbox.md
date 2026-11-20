@@ -25,6 +25,9 @@ stream を読む collaboration projection が持っている。ADR 0008 で Audi
   `/reports?v=1&report=<id>&snapshot=<id>` を deep link にする。Team visibility の report は Team ID を
   載せ、projection と外部送信の直前の認可で Team access を再確認させる。Report と同じく、Team の
   Project のどれかを読めれば Team access ありとする（外部送信の汎用ルールは Team の全 Project を要求）。
+  Shared / personal report は Team を載せないため、外部送信では Enterprise の Work Item 閲覧権限が
+  Workspace・Team・Project のどれか1つにあればよいとする（汎用ルールは Workspace 全体の権限を要求）。
+  Analytics の route と Inbox が範囲付きの権限を受け入れるのに合わせる。
 - Inbox の表示時は report を読み直し、現在の visibility（personal / team / shared）を満たさない
   通知を隠す。Link 先の snapshot は従来どおり現在の permission scope で絞る。
 - scheduled-jobs Lambda には AuditEvents table への `dynamodb:PutItem` と `AUDIT_RETENTION_DAYS` を

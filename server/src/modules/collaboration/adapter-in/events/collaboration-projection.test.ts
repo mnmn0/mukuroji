@@ -631,6 +631,39 @@ describe('collaboration projection pure helpers', () => {
       ]))
       expect(await authorizeNotificationDelivery(team, memberKey, identity, cache)).toBe(true)
       expect(await authorizeNotificationDelivery({ ...team, eventType: 'work-item.updated' }, memberKey, identity, cache)).toBe(false)
+      // An Enterprise recipient whose Work Item read covers one Project reads shared reports, as
+      // the Analytics routes and Inbox allow; the generic rule needs a Workspace-wide grant.
+      let scoped = createRealtimeEnterpriseSnapshot({
+        roleAssignments: [{ workspaceId: 'workspace-1', assignmentId: 'assignment-1', principalKind: 'member', principalId: memberKey,
+          roleId: 'custom:reader', source: 'direct', scope: { workspaceId: 'workspace-1', kind: 'project', targetId: 'platform' } }],
+        customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:reader', name: 'Reader', permissions: ['work-items.read'],
+          guestAssignable: true, revision: 1, createdAt: shared.occurredAt, updatedAt: shared.occurredAt }],
+      })
+      const scopedIdentity = { getSnapshot: async () => scoped }
+      cache.enterpriseSnapshots.clear()
+      expect(await authorizeNotificationDelivery(shared, memberKey, scopedIdentity, cache)).toBe(true)
+      expect(await authorizeNotificationDelivery(team, memberKey, scopedIdentity, cache)).toBe(true)
+      expect(await authorizeNotificationDelivery({ ...shared, eventType: 'work-item.updated' }, memberKey, scopedIdentity, cache))
+        .toBe(false)
+      // The same grant on a Project outside the Team does not open the Team report.
+      scoped = { ...scoped, roleAssignments: scoped.roleAssignments.map((assignment) =>
+        ({ ...assignment, scope: { workspaceId: 'workspace-1', kind: 'project', targetId: 'elsewhere' } })) }
+      cache.directories.set('workspace-1', Promise.resolve([
+        { entryType: 'team', teamId: 'core' }, { entryType: 'project', teamId: 'core', projectId: 'platform' },
+        { entryType: 'team', teamId: 'other' }, { entryType: 'project', teamId: 'other', projectId: 'elsewhere' },
+      ]))
+      cache.enterpriseSnapshots.clear()
+      expect(await authorizeNotificationDelivery(shared, memberKey, scopedIdentity, cache)).toBe(true)
+      expect(await authorizeNotificationDelivery(team, memberKey, scopedIdentity, cache)).toBe(false)
+      // Without any Work Item read, the shared report stays in-app only.
+      cache.enterpriseSnapshots.clear()
+      const unscoped = createRealtimeEnterpriseSnapshot({ roleAssignments: [{ workspaceId: 'workspace-1', assignmentId: 'assignment-2',
+        principalKind: 'member', principalId: memberKey, roleId: 'custom:none', source: 'direct',
+        scope: { workspaceId: 'workspace-1', kind: 'workspace' } }],
+      customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:none', name: 'None', permissions: ['workspace.read'],
+        guestAssignable: true, revision: 1, createdAt: shared.occurredAt, updatedAt: shared.occurredAt }] })
+      expect(await authorizeNotificationDelivery(shared, memberKey, { getSnapshot: async () => unscoped }, cache)).toBe(false)
+      cache.enterpriseSnapshots.clear()
       role = 'guest'
       expect(await authorizeNotificationDelivery(shared, memberKey, identity, cache)).toBe(false)
     } finally {

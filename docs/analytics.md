@@ -226,7 +226,8 @@ collaboration projection がこの event を受信者の Inbox 行に変え、�
 有効にしていれば同じ channel delivery queue に載せます。Event は report ID を entity、snapshot ID を
 target に持ち、`/reports?v=1&report=<id>&snapshot=<id>` を deep link にします。Team visibility の
 report は event に Team ID を載せ、projection と外部送信の直前に recipient の Team access を再確認します。
-Report と同じく、Team の Project のどれかを読めれば Team access ありとします。
+Report と同じく、Team の Project のどれかを読めれば Team access ありとします。Shared / personal report
+の外部送信は、Enterprise の Work Item 閲覧権限が Workspace・Team・Project のどれか1つにあれば送ります。
 
 Inbox は表示のたびに report を読み直し、report が削除されたか recipient が現在の visibility
 （personal は owner、team は Team の参照権限、shared は Workspace member）を満たさない場合は通知を
