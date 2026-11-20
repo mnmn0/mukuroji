@@ -5,6 +5,28 @@ import {
   TimeTrackingService,
   type CreateTimeEntryInput,
 } from './time-tracking'
+import type { TimePeriodClose } from '@mukuroji/contracts'
+
+/** In-memory repository that closes a month right after a write has read the close list. */
+class RacingCloseRepository extends InMemoryTimeTrackingRepository {
+  /** Month close to store once, after the next close list read. */
+  pendingClose: TimePeriodClose | undefined
+
+  /**
+   * Lists closes, then stores the pending close as if another request closed the month.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param teamId - Team identifier.
+   * @returns The closes as they were before the racing close.
+   */
+  override async listPeriodCloses(workspaceId: string, teamId: string): Promise<TimePeriodClose[]> {
+    const closes = await super.listPeriodCloses(workspaceId, teamId)
+    const pending = this.pendingClose
+    this.pendingClose = undefined
+    if (pending) await this.createPeriodClose(pending)
+    return closes
+  }
+}
 
 /** Creates a service with deterministic IDs and a clock in August 2026. */
 function createFixture() {
@@ -55,6 +77,27 @@ async function errorCode(operation: () => Promise<unknown>): Promise<string> {
 }
 
 describe('TimeTrackingService month close', () => {
+  test('rejects an entry write when the month is closed after the close check read', async () => {
+    const repository = new RacingCloseRepository()
+    const service = new TimeTrackingService(repository, {
+      now: () => new Date('2026-08-02T12:00:00.000Z'),
+      createId: () => 'entry-1',
+    })
+    repository.pendingClose = {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      month: '2026-07',
+      timeZone: 'UTC',
+      closedBy: 'manager-1',
+      closedAt: '2026-08-02T12:00:00.000Z',
+    }
+
+    expect(await errorCode(() => service.createEntry(entryInput('2026-07-31T01:00:00.000Z', '2026-07-31T02:00:00.000Z'), false)))
+      .toBe('TimePeriodClosed')
+    expect(await service.listEntries({ workspaceId: 'workspace-1', teamId: 'team-1' })).toHaveLength(0)
+  })
+
   test('rejects creating and editing entries in a closed month and allows them again after reopening', async () => {
     const { service } = createFixture()
     const entry = await service.createEntry(entryInput('2026-07-31T01:00:00.000Z', '2026-07-31T02:00:00.000Z'), false)

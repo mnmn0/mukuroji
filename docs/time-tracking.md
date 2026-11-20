@@ -39,7 +39,7 @@ Reopening requires a non-empty `reason` and removes the close. Both operations w
 
 Only a caller who manages every Project of the Team (a system administrator or a direct enterprise Team grant with `teams.manage`) may close or reopen; a manager of only some Projects receives `TimePeriodCloseDenied`. Every member of the Team can list the closed months.
 
-The closed-month check reads the closes before the entry write and is not part of the same transaction, so a write racing with a close can still land in the month. Member and role rate cards, the Workspace default currency, and per-period budgets from #398 are not implemented yet.
+The entry write transaction also rechecks the close row of every month its intervals can touch in any timezone, so a close or reopen that lands between the check and the write cancels the write with `409 TimePeriodClosed`; the client reloads and retries. Member and role rate cards, the Workspace default currency, and per-period budgets from #398 are not implemented yet.
 
 ## Write access and manager scope
 

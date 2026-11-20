@@ -88,6 +88,9 @@ const PERIOD_CLOSE_PREFIX = 'TIME_CLOSE#'
 const MONTH_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])$/u
 const MIN_CLOSE_YEAR = 1970
 const MAX_CLOSE_YEAR = 9998
+// IANA offsets stay within UTC-12 and UTC+14, so a local month can only start or end this far
+// from the UTC month boundary.
+const MAX_TIME_ZONE_OFFSET_MILLISECONDS = 14 * 60 * 60_000
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
 const ISO_INSTANT_PATTERN = /T.*(?:Z|[+-]\d{2}:\d{2})$/u
 const CURRENCY_PATTERN = /^[A-Z]{3}$/u
@@ -335,6 +338,27 @@ export type SaveTimeBudgetInput = {
   idempotencyKey?: string
 }
 
+/** One month whose close state an entry write relied on. */
+export type TimePeriodGuardMonth = {
+  /** Month as `YYYY-MM`. */
+  month: string
+  /** Close timestamp that was read, or undefined when the month was open. */
+  closedAt?: string
+}
+
+/**
+ * Month close state that an entry write was validated against. The write is rejected when any
+ * of these months is closed, reopened, or closed again before the write commits.
+ */
+export type TimePeriodGuard = {
+  /** Workspace identifier. */
+  workspaceId: string
+  /** Team identifier. */
+  teamId: string
+  /** Months that the written intervals can touch in any timezone. */
+  months: ReadonlyArray<TimePeriodGuardMonth>
+}
+
 /** A request to close one month of a Team's time entries. */
 export type CloseTimePeriodInput = {
   /** Workspace identifier. */
@@ -472,6 +496,7 @@ export interface TimeTrackingRepository {
     expectedRevision?: number,
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
+    periodGuard?: TimePeriodGuard,
   ): Promise<void>
   /** Saves an immutable lifecycle history record. */
   saveHistory(workspaceId: string, teamId: string, history: TimeEntryHistory): Promise<void>
@@ -490,6 +515,7 @@ export interface TimeTrackingRepository {
     history: TimeEntryHistory,
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
+    periodGuard?: TimePeriodGuard,
   ): Promise<void>
   /** Reads a Team or Project budget. */
   getBudget(workspaceId: string, scopeType: 'team' | 'project', scopeId: string): Promise<TimeBudget | undefined>
@@ -573,7 +599,7 @@ export class TimeTrackingService {
     completion?: TimeTrackingIdempotencyCompletion,
   ): Promise<TimeEntry> {
     const normalized = normalizeCreateInput(input, canManageRates)
-    await this.requireOpenPeriod(normalized.workspaceId, normalized.teamId, [normalized])
+    const periodGuard = await this.requireOpenPeriod(normalized.workspaceId, normalized.teamId, [normalized])
     const now = readNow(this.now)
     const entry: TimeEntry = {
       schemaVersion: 1,
@@ -610,6 +636,7 @@ export class TimeTrackingService {
       undefined,
       auditPut,
       idempotencyPut,
+      periodGuard,
     )
     return entry
   }
@@ -659,7 +686,7 @@ export class TimeTrackingService {
     if (input.hourlyRateMinor !== undefined && !input.canManageRates) {
       throw new TimeTrackingError(403, 'ConfidentialRateDenied', 'Only a manager may change hourly rates.')
     }
-    await this.requireOpenPeriod(current.workspaceId, current.teamId, [current, { startAt, endAt }])
+    const periodGuard = await this.requireOpenPeriod(current.workspaceId, current.teamId, [current, { startAt, endAt }])
     const now = readNow(this.now).toISOString()
     const next: TimeEntry = {
       ...current,
@@ -689,6 +716,7 @@ export class TimeTrackingService {
       current.revision,
       auditPut,
       idempotencyPut,
+      periodGuard,
     )
     return next
   }
@@ -734,7 +762,9 @@ export class TimeTrackingService {
       throw new TimeTrackingError(409, 'InvalidTimeEntryTransition', `Cannot ${input.action} an entry in ${current.status} state.`)
     }
     // Locking is how a closed month's approved entries are finalized, so only lock is allowed there.
-    if (input.action !== 'lock') await this.requireOpenPeriod(current.workspaceId, current.teamId, [current])
+    const periodGuard = input.action === 'lock'
+      ? undefined
+      : await this.requireOpenPeriod(current.workspaceId, current.teamId, [current])
     const now = readNow(this.now).toISOString()
     const { approvedAt: _approvedAt, lockedAt: _lockedAt, ...withoutApproval } = current
     const next: TimeEntry = {
@@ -765,6 +795,7 @@ export class TimeTrackingService {
       current.revision,
       auditPut,
       idempotencyPut,
+      periodGuard,
     )
     return next
   }
@@ -863,7 +894,7 @@ export class TimeTrackingService {
       : validateInstant(input.endedAt, 'Timer end')
     validateInterval(timer.startedAt, endedAt)
     const normalizedCurrency = validateCurrency(input.currency)
-    await this.requireOpenPeriod(timer.workspaceId, timer.teamId, [{ startAt: timer.startedAt, endAt: endedAt }])
+    const periodGuard = await this.requireOpenPeriod(timer.workspaceId, timer.teamId, [{ startAt: timer.startedAt, endAt: endedAt }])
     if (input.hourlyRateMinor !== undefined && !input.canManageRates) {
       throw new TimeTrackingError(403, 'ConfidentialRateDenied', 'Only a manager may set an hourly rate.')
     }
@@ -902,6 +933,7 @@ export class TimeTrackingService {
       history,
       auditPut,
       idempotencyPut,
+      periodGuard,
     )
     return entry
   }
@@ -1122,7 +1154,7 @@ export class TimeTrackingService {
       'time-period.close',
       input,
       (completion) => this.closePeriodInternal(input, completion),
-      readStoredPeriodClose,
+      readPeriodCloseValue,
     )
   }
 
@@ -1163,7 +1195,7 @@ export class TimeTrackingService {
       'time-period.reopen',
       input,
       (completion) => this.reopenPeriodInternal(input, completion),
-      readStoredPeriodClose,
+      readPeriodCloseValue,
     )
   }
 
@@ -1201,13 +1233,14 @@ export class TimeTrackingService {
    * @param workspaceId - Workspace identifier.
    * @param teamId - Team identifier.
    * @param intervals - Intervals the change reads or writes.
+   * @returns The close state the write must still match when it commits.
    * @throws TimeTrackingError with `TimePeriodClosed` when any interval overlaps a closed month.
    */
   private async requireOpenPeriod(
     workspaceId: string,
     teamId: string,
     intervals: ReadonlyArray<{ startAt: string; endAt: string }>,
-  ): Promise<void> {
+  ): Promise<TimePeriodGuard> {
     const closes = await this.repository.listPeriodCloses(workspaceId, teamId)
     for (const close of closes) {
       const bounds = monthBounds(close.month, close.timeZone)
@@ -1216,6 +1249,15 @@ export class TimeTrackingService {
       if (overlaps) {
         throw new TimeTrackingError(409, 'TimePeriodClosed', `Time in ${close.month} is closed. Ask a manager to reopen the month first.`)
       }
+    }
+    const closedAtByMonth = new Map(closes.map((close) => [close.month, close.closedAt]))
+    return {
+      workspaceId,
+      teamId,
+      months: candidateCloseMonths(intervals).map((month) => {
+        const closedAt = closedAtByMonth.get(month)
+        return closedAt === undefined ? { month } : { month, closedAt }
+      }),
     }
   }
 
@@ -1525,6 +1567,20 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     this.periodCloses.delete(key)
   }
 
+  /**
+   * Rejects a write whose month close state changed after it was validated.
+   *
+   * @param guard - Close state the write was validated against.
+   * @throws TimeTrackingError with `TimePeriodClosed` when any guarded month changed.
+   */
+  private requirePeriodGuard(guard: TimePeriodGuard | undefined): void {
+    if (!guard) return
+    for (const month of guard.months) {
+      const current = this.periodCloses.get(periodCloseKey(guard.workspaceId, guard.teamId, month.month))
+      if (current?.closedAt !== month.closedAt) throw periodGuardError()
+    }
+  }
+
   /** Lists matching entries. */
   async listEntries(input: ListTimeEntriesInput): Promise<TimeEntry[]> {
     const from = input.from ? Date.parse(input.from) : Number.NEGATIVE_INFINITY
@@ -1563,7 +1619,9 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     expectedRevision?: number,
     _auditPut?: AuditTransactWriteItem,
     _idempotencyPut?: AuditTransactWriteItem,
+    periodGuard?: TimePeriodGuard,
   ) {
+    this.requirePeriodGuard(periodGuard)
     await this.saveEntry(entry, expectedRevision)
     await this.saveHistory(entry.workspaceId, entry.teamId, history)
   }
@@ -1619,12 +1677,14 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     history: TimeEntryHistory,
     _auditPut?: AuditTransactWriteItem,
     _idempotencyPut?: AuditTransactWriteItem,
+    periodGuard?: TimePeriodGuard,
   ) {
     const key = timerKey(timer.workspaceId, timer.userId)
     const current = this.timers.get(key)
     if (!current || current.id !== timer.id || current.revision !== timer.revision) {
       throw new TimeTrackingError(409, 'RunningTimerConflict', 'The running timer changed before it was stopped.')
     }
+    this.requirePeriodGuard(periodGuard)
     this.timers.delete(key)
     await this.saveEntry(entry)
     await this.saveHistory(entry.workspaceId, entry.teamId, history)
@@ -1768,10 +1828,13 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     expectedRevision?: number,
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
+    periodGuard?: TimePeriodGuard,
   ) {
+    const guardChecks = createPeriodGuardChecks(this.tableName, periodGuard)
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
+          ...guardChecks,
           {
             Put: {
               TableName: this.tableName,
@@ -1800,6 +1863,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
         ],
       }))
     } catch (error) {
+      if (isPeriodGuardFailure(error, guardChecks.length)) throw periodGuardError()
       throw mapConditionalWriteError(error, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
     }
   }
@@ -1905,10 +1969,13 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     history: TimeEntryHistory,
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
+    periodGuard?: TimePeriodGuard,
   ) {
+    const guardChecks = createPeriodGuardChecks(this.tableName, periodGuard)
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
+          ...guardChecks,
           {
             Delete: {
               TableName: this.tableName,
@@ -1943,6 +2010,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
         ],
       }))
     } catch (error) {
+      if (isPeriodGuardFailure(error, guardChecks.length)) throw periodGuardError()
       throw mapConditionalWriteError(error, 'RunningTimerConflict', 'The running timer changed before it was stopped.')
     }
   }
@@ -2005,7 +2073,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
         ScanIndexForward: true,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
-      closes.push(...(response.Items ?? []).map(readStoredPeriodClose))
+      closes.push(...(response.Items ?? []).map((item) => readStoredPeriodClose(item, workspaceId, teamId)))
       exclusiveStartKey = response.LastEvaluatedKey
     } while (exclusiveStartKey)
     return closes
@@ -2879,19 +2947,46 @@ function readStoredBudget(value: unknown): TimeBudget {
   }
 }
 
-/** Reads a stored month close. */
-function readStoredPeriodClose(value: unknown): TimePeriodClose {
+/**
+ * Reads a month close value, such as an idempotent replay response.
+ *
+ * @param value - Stored month close value.
+ * @returns The validated month close.
+ * @throws TimeTrackingError with `InvalidStoredTimeTrackingRecord` for a malformed value.
+ */
+function readPeriodCloseValue(value: unknown): TimePeriodClose {
   const record = readRecord(value)
   readSchemaVersion(record, 'Stored month close')
+  const month = readString(record.month, 'Stored month close month')
+  if (!MONTH_PATTERN.test(month)) throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored month close month is invalid.')
   return {
     schemaVersion: 1,
     workspaceId: readString(record.workspaceId, 'Stored month close Workspace ID'),
     teamId: readString(record.teamId, 'Stored month close Team ID'),
-    month: readString(record.month, 'Stored month close month'),
+    month,
     timeZone: readString(record.timeZone, 'Stored month close timezone'),
     closedBy: readString(record.closedBy, 'Stored month close actor'),
     closedAt: readString(record.closedAt, 'Stored month close timestamp'),
   }
+}
+
+/**
+ * Reads a stored month close row and rejects a row whose key and payload disagree, because a
+ * mismatched month would make the close check guard a different month than the key.
+ *
+ * @param value - Stored DynamoDB item.
+ * @param workspaceId - Workspace whose partition was queried.
+ * @param teamId - Team whose close prefix was queried.
+ * @returns The validated month close.
+ * @throws TimeTrackingError with `InvalidStoredTimeTrackingRecord` for a malformed or mismatched row.
+ */
+function readStoredPeriodClose(value: unknown, workspaceId: string, teamId: string): TimePeriodClose {
+  const close = readPeriodCloseValue(value)
+  const recordKey = readRecord(value).recordKey
+  if (close.workspaceId !== workspaceId || close.teamId !== teamId || recordKey !== periodCloseRecordKey(teamId, close.month)) {
+    throw new TimeTrackingError(500, 'InvalidStoredTimeTrackingRecord', 'Stored month close does not match its key.')
+  }
+  return close
 }
 
 /** Validates the replay response for a void timer cancellation. */
@@ -3064,6 +3159,68 @@ function periodCloseRecordKey(teamId: string, month: string): string {
 /** Builds an in-memory month close key that includes the Workspace boundary. */
 function periodCloseKey(workspaceId: string, teamId: string, month: string): string {
   return `${workspaceId}\0${periodCloseRecordKey(teamId, month)}`
+}
+
+/**
+ * Lists the UTC months that a local month in any timezone could share with the intervals.
+ *
+ * @param intervals - Intervals a write reads or writes.
+ * @returns Months as `YYYY-MM`, in order and without duplicates.
+ */
+function candidateCloseMonths(intervals: ReadonlyArray<{ startAt: string; endAt: string }>): string[] {
+  const months = new Set<string>()
+  for (const interval of intervals) {
+    const first = new Date(Date.parse(interval.startAt) - MAX_TIME_ZONE_OFFSET_MILLISECONDS)
+    const last = new Date(Date.parse(interval.endAt) + MAX_TIME_ZONE_OFFSET_MILLISECONDS)
+    const cursor = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth(), 1))
+    while (cursor.getTime() <= last.getTime()) {
+      months.add(cursor.toISOString().slice(0, 7))
+      cursor.setUTCMonth(cursor.getUTCMonth() + 1)
+    }
+  }
+  return [...months].sort()
+}
+
+/**
+ * Builds transaction checks that hold only while each guarded month keeps the close state read.
+ *
+ * @param tableName - Time tracking table name.
+ * @param guard - Close state the write was validated against.
+ * @returns One `ConditionCheck` per guarded month.
+ */
+function createPeriodGuardChecks(tableName: string, guard: TimePeriodGuard | undefined) {
+  if (!guard) return []
+  return guard.months.map((month) => ({
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { workspaceId: guard.workspaceId, recordKey: periodCloseRecordKey(guard.teamId, month.month) },
+      ...(month.closedAt === undefined
+        ? { ConditionExpression: 'attribute_not_exists(recordKey)' }
+        : {
+            ConditionExpression: 'closedAt = :closedAt',
+            ExpressionAttributeValues: { ':closedAt': month.closedAt },
+          }),
+    },
+  }))
+}
+
+/**
+ * Returns whether a transaction was cancelled by one of its leading month close checks.
+ *
+ * @param error - Error thrown by the transaction.
+ * @param guardCount - Number of month close checks at the start of the transaction.
+ * @returns True when a month close check failed.
+ */
+function isPeriodGuardFailure(error: unknown, guardCount: number): boolean {
+  if (guardCount === 0 || !isRecord(error) || error.name !== 'TransactionCanceledException') return false
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons)) return false
+  return reasons.slice(0, guardCount).some((reason) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed')
+}
+
+/** Creates the error for a write whose month was closed or reopened after validation. */
+function periodGuardError(): TimeTrackingError {
+  return new TimeTrackingError(409, 'TimePeriodClosed', 'A month this entry touches was closed or reopened while saving. Reload and try again.')
 }
 
 /** Clones test repository values without exposing mutable state. */

@@ -109,8 +109,10 @@ Project の **テーブル** と Team の **Issues** のテーブル（WBS 表�
 - **月を締める**: `POST /api/teams/:teamId/time-periods/:month/close`（`month` は `YYYY-MM`、本文の `timeZone` で月の境界を決めます。既定は UTC）。
   締めた月にかかる記録は、追加・修正・提出・承認・差し戻しができなくなります。承認済みの記録のロックだけはできます。
 - **締めを解除する**: `POST /api/teams/:teamId/time-periods/:month/reopen` に `reason`（必須）を付けます。理由は監査ログに残ります。
-- **承認後に差し戻す**: 承認済み・ロック済みの記録を `POST /api/teams/:teamId/time-entries/:entryId/return` に `reason`（必須）を付けて差し戻すと、
-  記録は「差し戻し」に戻り、メンバーが修正して再提出できます。
+- **承認後に差し戻す**: 承認済み・ロック済みの記録を `POST /api/teams/:teamId/time-entries/:entryId/return` で差し戻すと、
+  記録は「差し戻し」に戻り、メンバーが修正して再提出できます。本文には `reason`（必須）と、記録を読んだときの `revision` を
+  `expectedRevision`（必須）として付けます。ほかの人が先に記録を変えていると `409` になるので、記録を読み直して最新の
+  `revision` で送り直してください。
 
 月の締めと解除は Team のすべての Project を管理できる人（システム管理者、または Team の管理権限を持つ人）だけが行えます。
 
