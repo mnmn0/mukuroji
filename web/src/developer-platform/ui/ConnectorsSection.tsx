@@ -7,6 +7,7 @@ import {
   formatConflictMergeDraft,
   formatSyncConflictValue,
   isDeveloperSyncConflictResolution,
+  type DeveloperConnectorCatalogEntry,
   type DeveloperConnectorCatalogItem,
   type DeveloperSyncConflictResolution,
 } from '../model/connectors'
@@ -23,7 +24,11 @@ export type ConnectorsSectionProps = {
   /** Whether connector and conflict mutations are available. */
   canManage: boolean
   /** Connector catalog entries that match the current search query. */
-  catalog: DeveloperConnectorCatalogItem[]
+  catalog: DeveloperConnectorCatalogEntry[]
+  /** Safe message shown when the configured connector providers cannot be loaded. */
+  availabilityErrorMessage?: string
+  /** Retries loading the configured connector providers. */
+  onRetryAvailability?: () => void
   /** Validation messages keyed by synchronization-conflict identifier. */
   conflictMergeErrors: Record<string, string | undefined>
   /** Editable JSON merge drafts keyed by conflict and field identifiers. */
@@ -89,6 +94,8 @@ export function ConnectorsSection({
   busyOperation,
   canManage,
   catalog,
+  availabilityErrorMessage,
+  onRetryAvailability,
   conflictMergeErrors,
   conflictMergedValueDrafts,
   conflictResolutions,
@@ -384,6 +391,26 @@ export function ConnectorsSection({
           />
         </label>
 
+        {availabilityErrorMessage ? (
+          <div
+            className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3"
+            role="alert"
+          >
+            <p className="text-sm font-semibold text-fg-red-800">
+              {availabilityErrorMessage}
+            </p>
+            {onRetryAvailability ? (
+              <button
+                className="workbench-button-secondary min-h-9 px-3"
+                onClick={onRetryAvailability}
+                type="button"
+              >
+                {labels.retry}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
         {catalog.length ? (
           <div className="mt-4 grid grid-cols-2 gap-4 max-[1180px]:grid-cols-1">
             {catalog.map((item) => {
@@ -521,7 +548,11 @@ export function ConnectorsSection({
                     </p>
                   )}
 
-                  {canManage && onConnect ? (
+                  {!item.available ? (
+                    <p className="mt-4 text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+                      {labels.helpText.connectorNotConfigured}
+                    </p>
+                  ) : canManage && onConnect ? (
                     <div className="mt-4 flex flex-wrap gap-2">
                       <button
                         className={
@@ -544,10 +575,17 @@ export function ConnectorsSection({
             })}
           </div>
         ) : (
-          <EmptyState
-            description={labels.helpText.connectorSearchEmpty}
-            title={labels.headings.connectorSearchEmpty}
-          />
+          query.trim() ? (
+            <EmptyState
+              description={labels.helpText.connectorSearchEmpty}
+              title={labels.headings.connectorSearchEmpty}
+            />
+          ) : (
+            <EmptyState
+              description={labels.helpText.connectorCatalogEmpty}
+              title={labels.headings.connectorCatalogEmpty}
+            />
+          )
         )}
       </section>
     </div>

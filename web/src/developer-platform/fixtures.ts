@@ -328,6 +328,7 @@ export const developerPlatformLabelsFixture = {
     apiKeys: 'API keys',
     apiKeysEmpty: 'No API keys yet',
     connectors: 'Connector catalog',
+    connectorCatalogEmpty: 'No connectors are available',
     connectorSearchEmpty: 'No matching resources',
     'create-api-key': 'Create an API key',
     'create-oauth-app': 'Register an OAuth app',
@@ -361,7 +362,13 @@ export const developerPlatformLabelsFixture = {
       'Create a narrowly scoped key for your first server-side integration.',
     connectorConflict:
       'Synchronization is paused. Review the field differences in the sync conflict list above to recover it.',
+    connectorAvailabilityError:
+      'The connectors available in this environment could not be checked. New connections stay hidden until they load.',
+    connectorCatalogEmpty:
+      'Only providers configured in this environment are listed. Once an operator configures a provider, you can connect it here.',
     connectorCount: '{count} accounts',
+    connectorNotConfigured:
+      'This provider is not configured in this environment, so new accounts cannot be connected.',
     connectors:
       'Search providers and the resources they map, then connect or recover an installation.',
     connectorSearchEmpty:

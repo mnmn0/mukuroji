@@ -390,6 +390,9 @@ export function createDeveloperPlatformLabels(
         : 'Member-issued agent keys',
       apiKeysEmpty: ja ? 'API key はまだありません' : 'No API keys yet',
       connectors: ja ? 'Connector catalog' : 'Connector catalog',
+      connectorCatalogEmpty: ja
+        ? '利用できる connector はありません'
+        : 'No connectors are available',
       connectorSearchEmpty: ja
         ? '一致する resource がありません'
         : 'No matching resources',
@@ -434,7 +437,16 @@ export function createDeveloperPlatformLabels(
       connectorConflict: ja
         ? '同期は一時停止中です。上の同期競合一覧から差分を確認して復旧してください。'
         : 'Synchronization is paused. Review the field differences in the sync conflict list above to recover it.',
+      connectorAvailabilityError: ja
+        ? 'この環境で使える connector を確認できませんでした。確認できるまで、新しい接続は表示しません。'
+        : 'The connectors available in this environment could not be checked. New connections stay hidden until they load.',
+      connectorCatalogEmpty: ja
+        ? 'この環境で設定済みの provider だけを表示します。運用者が provider を設定すると、ここから接続できます。'
+        : 'Only providers configured in this environment are listed. Once an operator configures a provider, you can connect it here.',
       connectorCount: ja ? '{count} account' : '{count} accounts',
+      connectorNotConfigured: ja
+        ? 'この provider はこの環境で設定されていないため、新しい account は接続できません。'
+        : 'This provider is not configured in this environment, so new accounts cannot be connected.',
       connectors: ja
         ? 'Provider と mapping 対象を検索し、接続または復旧します。'
         : 'Search providers and the resources they map, then connect or recover an installation.',

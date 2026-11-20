@@ -46,6 +46,7 @@ import { buildConnectorAuthorizationReturnUrl } from '../mutations/connectorAuth
 import { runDeveloperPlatformMutation } from '../mutations/runDeveloperPlatformMutation'
 import { exportDeveloperWorkItems } from '../queries/developerExport'
 import {
+  useAvailableDeveloperConnectorProviders,
   useDeveloperPlatformResources,
   useDeveloperSyncConflicts,
   usePersonalCredentialAdministration,
@@ -112,6 +113,14 @@ export function DeveloperPlatformPanelContainer({
     isValidating: isResourcesValidating,
     key: resourceKey,
   } = useDeveloperPlatformResources(mutationSession.accessToken)
+  const {
+    data: availableConnectorProviders,
+    error: availableConnectorProvidersError,
+    mutate: mutateAvailableConnectorProviders,
+  } = useAvailableDeveloperConnectorProviders(
+    mutationSession.accessToken,
+    resources?.capabilities.canManageIntegrations ?? false,
+  )
   const {
     data: personalCredentials,
     error: personalCredentialsError,
@@ -246,6 +255,17 @@ export function DeveloperPlatformPanelContainer({
       labels={labels}
       loadErrorMessage={error ? labels.loadError : undefined}
       resources={resources}
+      availableConnectorProviders={availableConnectorProviders}
+      connectorAvailabilityErrorMessage={
+        availableConnectorProvidersError
+          ? labels.helpText.connectorAvailabilityError
+          : undefined
+      }
+      onRetryConnectorAvailability={() => {
+        void mutateAvailableConnectorProviders().catch(() => {
+          // The query error stays visible with its retry action.
+        })
+      }}
       personalCredentials={displayedPersonalCredentials}
       personalCredentialsPending={personalCredentialsPending}
       personalCredentialsLoadError={Boolean(personalCredentialsError)}

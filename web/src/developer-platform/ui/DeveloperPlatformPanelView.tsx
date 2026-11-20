@@ -64,6 +64,12 @@ import { WebhooksSection } from './WebhooksSection'
 export type DeveloperPlatformPanelProps = {
   /** Developer Platform aggregate resources. */
   resources?: DeveloperPlatformOverview
+  /** Connector providers configured in this environment; omitted while unknown, which offers none. */
+  availableConnectorProviders?: readonly string[]
+  /** Safe message shown when the configured connector providers cannot be loaded. */
+  connectorAvailabilityErrorMessage?: string
+  /** Retries loading the configured connector providers. */
+  onRetryConnectorAvailability?: () => void
   /** Policy and IDs of member-issued agent keys; omitted hides the policy control and badges. */
   personalCredentials?: PersonalCredentialAdministration
   /** Whether member-issued keys are still unknown, which hides API key rotation. */
@@ -178,6 +184,9 @@ export function DeveloperPlatformPanel({
   labels,
   loadErrorMessage,
   resources,
+  availableConnectorProviders,
+  connectorAvailabilityErrorMessage,
+  onRetryConnectorAvailability,
   personalCredentials,
   personalCredentialsPending,
   personalCredentialsLoadError,
@@ -356,6 +365,7 @@ export function DeveloperPlatformPanel({
     labels.connectorCatalog,
     resources.connectors,
     labels.helpText.installedConnector,
+    availableConnectorProviders ?? [],
   )
   const filteredConnectorCatalog = filterDeveloperConnectorCatalog(
     completeConnectorCatalog,
@@ -788,6 +798,8 @@ export function DeveloperPlatformPanel({
               busyOperation={busyOperation}
               canManage={canManageIntegrations}
               catalog={filteredConnectorCatalog}
+              availabilityErrorMessage={connectorAvailabilityErrorMessage}
+              onRetryAvailability={onRetryConnectorAvailability}
               conflictMergeErrors={conflictMergeErrors}
               conflictMergedValueDrafts={conflictMergedValueDrafts}
               conflictResolutions={conflictResolutions}
