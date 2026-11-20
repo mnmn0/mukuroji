@@ -110,27 +110,25 @@ describe('createWorkItemLookup', () => {
     return { state: await lookup.read(workItem), commands }
   }
 
-  test('reads the key, creation time, and archive time with a strongly consistent Get', async () => {
-    const { state, commands } = await read({ issueId: 'task-1', createdAt: '2026-10-01T00:00:00.000Z' })
-    expect(state).toEqual({ kind: 'present', createdAt: '2026-10-01T00:00:00.000Z', archived: false })
+  test('reads the key and archive time with a strongly consistent Get', async () => {
+    const { state, commands } = await read({ issueId: 'task-1' })
+    expect(state).toEqual({ kind: 'present', archived: false })
     const command = commands[0]
     if (!(command instanceof GetCommand)) throw new Error('Expected a Get.')
     expect(command.input).toEqual({
       TableName: 'mukuroji-work-items',
       Key: { directoryTeamId: 'workspace-1#team#core', issueId: 'task-1' },
       ConsistentRead: true,
-      ProjectionExpression: '#issueId, #createdAt, #archivedAt',
-      ExpressionAttributeNames: { '#issueId': 'issueId', '#createdAt': 'createdAt', '#archivedAt': 'archivedAt' },
+      ProjectionExpression: '#issueId, #archivedAt',
+      ExpressionAttributeNames: { '#issueId': 'issueId', '#archivedAt': 'archivedAt' },
     })
   })
 
   test('classifies missing, archived, and malformed rows', async () => {
     expect((await read(undefined)).state).toEqual({ kind: 'missing' })
-    expect((await read({ issueId: 'task-1', createdAt: '2026-10-01T00:00:00.000Z', archivedAt: '2026-10-02T00:00:00.000Z' })).state)
-      .toEqual({ kind: 'present', createdAt: '2026-10-01T00:00:00.000Z', archived: true })
-    expect((await read({ issueId: 'task-2', createdAt: '2026-10-01T00:00:00.000Z' })).state).toEqual({ kind: 'malformed' })
-    expect((await read({ issueId: 'task-1' })).state).toEqual({ kind: 'malformed' })
-    expect((await read({ issueId: 'task-1', createdAt: '2026-10-01T00:00:00.000Z', archivedAt: null })).state).toEqual({ kind: 'malformed' })
+    expect((await read({ issueId: 'task-1', archivedAt: '2026-10-02T00:00:00.000Z' })).state).toEqual({ kind: 'present', archived: true })
+    expect((await read({ issueId: 'task-2' })).state).toEqual({ kind: 'malformed' })
+    expect((await read({ issueId: 'task-1', archivedAt: null })).state).toEqual({ kind: 'malformed' })
   })
 })
 

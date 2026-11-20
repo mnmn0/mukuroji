@@ -501,7 +501,7 @@ describe('runAgentRunsIntegrityCheck', () => {
 /**
  * Builds a Work Item lookup that serves fixed states and records each read.
  *
- * @param states - State by Work Item ID; Work Items not listed are open and older than every run.
+ * @param states - State by Work Item ID; Work Items not listed are open.
  * @returns Lookup and the reads it served.
  */
 function createWorkItemLookup(states: Record<string, AgentRunWorkItemState>) {
@@ -509,7 +509,7 @@ function createWorkItemLookup(states: Record<string, AgentRunWorkItemState>) {
   const lookup: AgentRunWorkItemLookup = {
     async read(workItem) {
       reads.push(workItem)
-      return states[workItem.workItemId] ?? { kind: 'present', createdAt: '2026-10-01T00:00:00.000Z', archived: false }
+      return states[workItem.workItemId] ?? { kind: 'present', archived: false }
     },
   }
   return { lookup, reads }
@@ -534,8 +534,7 @@ describe('runAgentRunsIntegrityCheck with the Work Item check', () => {
 
   test.each<[string, AgentRunWorkItemState, AgentRunIntegrityFailureCode]>([
     ['deleted', { kind: 'missing' }, 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED'],
-    ['archived', { kind: 'present', createdAt: '2026-10-01T00:00:00.000Z', archived: true }, 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_ARCHIVED'],
-    ['re-created after the run started', { kind: 'present', createdAt: '2026-10-23T00:00:00.000Z', archived: false }, 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED'],
+    ['archived', { kind: 'present', archived: true }, 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_ARCHIVED'],
   ])('reports an active run on a %s Work Item after reading the run again', async (_name, state, code) => {
     const { client, commands } = createFakeClient({ [partition]: healthyRows() }, 100)
     const { lookup } = createWorkItemLookup({ 'task-1': state })
@@ -571,7 +570,7 @@ describe('runAgentRunsIntegrityCheck with the Work Item check', () => {
       // The archive transaction released the run between the partition read and the run read.
       send: async (command) => command instanceof GetCommand ? { Item: released } : client.send(command),
     }
-    const { lookup } = createWorkItemLookup({ 'task-1': { kind: 'present', createdAt: '2026-10-01T00:00:00.000Z', archived: true } })
+    const { lookup } = createWorkItemLookup({ 'task-1': { kind: 'present', archived: true } })
     const evidence = await runAgentRunsIntegrityCheck({
       client: reread, tableName: 'agent-runs', teams: [team], bounds, correlationId: 'corr-w4', now, workItems: lookup,
     })

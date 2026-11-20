@@ -825,7 +825,7 @@ page の間に Run が終わると claim のない Run に見えることがあ�
 列挙の読み取りも同じ上限に数える。
 
 `--work-items-table <WorkItemsTable の名前>` を付けると、判定した partition の `active` Run ごとに、その
-Work Item の row を強整合の GetItem で読む（射影は `issueId`・`createdAt`・`archivedAt` だけ）。Work Item の
+Work Item の row を強整合の GetItem で読む（射影は `issueId`・`archivedAt` だけ）。Work Item の
 削除・archive は同じ transaction で `active` Run を解放するため、削除・archive 済みの Work Item に `active` Run が
 残っていれば解放漏れである。Work Item を読んだ後に Run row を強整合でもう一度読み、まだ同じ Run が `active`
 のときだけ failure にする（Run は `active` から `finished` へ一方向にしか変わらないため、Work Item を読んだ
@@ -864,9 +864,9 @@ AWS の error 本文も出力せず、error 名と `correlationId` だけを返�
 | `AGENT_RUN_LATEST_RUN_INVALID` | `agent-run-latest` row は同じ Work Item の Run を指し、`active` Run があればそれを指す |
 | `AGENT_RUN_WATERMARK_INVALID` | 停滞走査の watermark / resume は `<leaseExpiresAt>#<runId>` で、partition の Run を指し、その Run の lease より後ろにない |
 | `AGENT_RUN_ROW_MALFORMED` / `AGENT_RUN_ROW_UNRECOGNIZED` / `AGENT_RUN_PARTITION_UNRESOLVED` | row が strict reader と同じ形で読め、既知の種類で、partition key が `<workspaceId>#team#<teamId>` |
-| `AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED` | （`--work-items-table` 指定時）`active` Run の Work Item が存在する。Work Item の `createdAt` が Run の `startedAt` より後なら、削除後に同じ ID で作り直された別の Work Item なので、これも削除として扱う |
+| `AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED` | （`--work-items-table` 指定時）`active` Run の Work Item が存在する。削除後に同じ ID で作り直された Work Item に古い Run が残る場合は検出できない（Run と Work Item の世代を結ぶ値がなく、`createdAt` と `startedAt` は別の server の時計なので前後で判定しない） |
 | `AGENT_RUN_ACTIVE_RUN_WORK_ITEM_ARCHIVED` | （`--work-items-table` 指定時）`active` Run の Work Item は archive されていない |
-| `AGENT_RUN_ACTIVE_RUN_WORK_ITEM_UNREADABLE` | （`--work-items-table` 指定時）Work Item の row の `issueId` が Run と一致し、`createdAt` と（あれば）`archivedAt` が時刻として読める |
+| `AGENT_RUN_ACTIVE_RUN_WORK_ITEM_UNREADABLE` | （`--work-items-table` 指定時）Work Item の row の `issueId` が Run と一致し、`archivedAt` があれば時刻として読める |
 
 report row と Agent settings の row は件数だけを数え、内容は検査しない。
 
@@ -886,7 +886,7 @@ report row と Agent settings の row は件数だけを数え、内容は検査
 | `AGENT_RUN_LATEST_RUN_INVALID` | `active` Run があればその Run、なければ `WorkItemRunIndex` で最も新しい Run を指すよう、`runId = <読んだ値>` 条件で書き直す |
 | `AGENT_RUN_WATERMARK_INVALID` | watermark row を削除する。次の停滞走査は先頭から読み直し、起票済みの Run は Triage の source claim で重複しない |
 | `AGENT_RUN_ROW_MALFORMED` / `AGENT_RUN_ROW_UNRECOGNIZED` / `AGENT_RUN_PARTITION_UNRESOLVED` | 自動の手順はない。書き込んだ経路を特定し、PITR の時点と比べてから個別に直す |
-| `AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED` / `AGENT_RUN_ACTIVE_RUN_WORK_ITEM_ARCHIVED` | Work Item が削除・archive 済み（または作り直し）であることを強整合で読み直してから、`AGENT_RUN_ACTIVE_RUN_UNCLAIMED` と同じ 1 つの transaction で Run を `released` として閉じ、revocation row を put し、claim row があれば `runId = <サンプルの runId>` 条件で削除する。Work Item の削除・archive 時と同じ結果になる。解放しなかった削除・archive の経路も特定する |
+| `AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED` / `AGENT_RUN_ACTIVE_RUN_WORK_ITEM_ARCHIVED` | Work Item が削除・archive 済みであることを強整合で読み直してから、`AGENT_RUN_ACTIVE_RUN_UNCLAIMED` と同じ 1 つの transaction で Run を `released` として閉じ、revocation row を put し、claim row があれば `runId = <サンプルの runId>` 条件で削除する。Work Item の削除・archive 時と同じ結果になる。解放しなかった削除・archive の経路も特定する |
 | `AGENT_RUN_ACTIVE_RUN_WORK_ITEM_UNREADABLE` | 自動の手順はない。Work Items 側の検査（`work-items:integrity`）で row を確かめてから個別に直す |
 
 ## 後続 Phase

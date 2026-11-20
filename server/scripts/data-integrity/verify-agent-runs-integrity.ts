@@ -257,8 +257,8 @@ function isTimestampAttribute(value: unknown): value is string {
 }
 
 /**
- * Creates the Work Item lookup of a check. It reads only the key, creation time, and archive time
- * of one Work Items row with a strongly consistent Get, so no title or member reaches the check.
+ * Creates the Work Item lookup of a check. It reads only the key and archive time of one Work Items
+ * row with a strongly consistent Get, so no title or member reaches the check.
  *
  * @param client - Client that sends the Get.
  * @param tableName - Work Items table name.
@@ -271,15 +271,15 @@ export function createWorkItemLookup(client: AgentRunIntegrityClient, tableName:
         TableName: tableName,
         Key: { directoryTeamId: `${directoryId}#team#${teamId}`, issueId: workItemId },
         ConsistentRead: true,
-        ProjectionExpression: '#issueId, #createdAt, #archivedAt',
-        ExpressionAttributeNames: { '#issueId': 'issueId', '#createdAt': 'createdAt', '#archivedAt': 'archivedAt' },
+        ProjectionExpression: '#issueId, #archivedAt',
+        ExpressionAttributeNames: { '#issueId': 'issueId', '#archivedAt': 'archivedAt' },
       }))
       const item = response.Item
       if (item === undefined) return { kind: 'missing' }
-      if (item.issueId !== workItemId || !isTimestampAttribute(item.createdAt)) return { kind: 'malformed' }
+      if (item.issueId !== workItemId) return { kind: 'malformed' }
       // Unarchiving removes the attribute, so any stored value must be a timestamp.
       if (item.archivedAt !== undefined && !isTimestampAttribute(item.archivedAt)) return { kind: 'malformed' }
-      return { kind: 'present', createdAt: item.createdAt, archived: item.archivedAt !== undefined }
+      return { kind: 'present', archived: item.archivedAt !== undefined }
     },
   }
 }

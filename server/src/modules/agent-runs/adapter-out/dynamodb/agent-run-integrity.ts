@@ -129,8 +129,6 @@ export type AgentRunIntegrityActiveRun = {
   workItemId: string
   /** Run ID. */
   runId: string
-  /** Start time of the run. */
-  startedAt: string
 }
 
 /** Result of checking one fully read Team partition. */
@@ -152,8 +150,6 @@ export type AgentRunWorkItemState =
   | {
     /** The Work Item row was read. */
     kind: 'present'
-    /** Creation time of the row; later than a run's start when the ID was reused after a delete. */
-    createdAt: string
     /** Whether the Work Item is archived. */
     archived: boolean
   }
@@ -671,7 +667,7 @@ export function checkAgentRunPartition(team: AgentRunIntegrityTeam, rows: readon
 
   const activeRuns = [...runs.values()]
     .filter((run) => run.state === 'active')
-    .map((run) => ({ workItemId: run.workItemId, runId: run.runId, startedAt: run.startedAt }))
+    .map((run) => ({ workItemId: run.workItemId, runId: run.runId }))
   return { counts, findings, activeRuns }
 }
 
@@ -862,25 +858,21 @@ async function discoverTeams(input: {
 }
 
 /**
- * Chooses the violation a Work Item state shows for an active run.
+ * Chooses the violation a Work Item state shows for an active run. A Work Item re-created with the
+ * ID of a deleted one is not detected: no durable incarnation marker ties a run to its Work Item, and
+ * creation and start times come from different servers' clocks.
  *
  * @param state - Work Item state.
- * @param run - Active run that names the Work Item.
  * @returns The failure code, or undefined when the Work Item may hold an active run.
  */
-function classifyWorkItemState(state: AgentRunWorkItemState, run: AgentRunIntegrityActiveRun): AgentRunIntegrityFailureCode | undefined {
+function classifyWorkItemState(state: AgentRunWorkItemState): AgentRunIntegrityFailureCode | undefined {
   switch (state.kind) {
     case 'missing':
       return 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED'
     case 'malformed':
       return 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_UNREADABLE'
-    case 'present': {
-      if (!isTimestamp(state.createdAt)) return 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_UNREADABLE'
-      if (state.archived) return 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_ARCHIVED'
-      // A start needs the Work Item to exist, so a row created after the run started is a new Work
-      // Item that reuses the ID of a deleted one.
-      return Date.parse(state.createdAt) > Date.parse(run.startedAt) ? 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_DELETED' : undefined
-    }
+    case 'present':
+      return state.archived ? 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_ARCHIVED' : undefined
   }
 }
 
@@ -928,7 +920,7 @@ async function checkActiveRunWorkItems(input: {
     })
     if (state === undefined) return false
     input.counts.workItemsChecked += 1
-    const code = classifyWorkItemState(state.value, run)
+    const code = classifyWorkItemState(state.value)
     if (code === undefined) continue
     const sample = { directoryId: team.directoryId, teamId: team.teamId, workItemId: run.workItemId, runId: run.runId }
     if (code === 'AGENT_RUN_ACTIVE_RUN_WORK_ITEM_UNREADABLE') {
