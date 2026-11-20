@@ -35,10 +35,12 @@ type UpdateInput = UpdateProjectRaidEntryStoreInput<ProjectRaidLogCallerAuthoriz
 const ENTRY_TYPE = 'project-raid-entry'
 /** Planning-table record type of the per-Project entry counter. */
 const COUNTER_TYPE = 'project-raid-log'
+/** Schema version of the counter and entry rows. */
+const SCHEMA_VERSION = 1
 /** Fields whose values are recorded in audit changes. */
 const AUDIT_FIELDS = ['kind', 'title', 'description', 'probability', 'impact', 'response', 'reviewDueDate', 'status', 'revision']
 /** Free-text fields whose values are redacted in audit changes. */
-const AUDIT_REDACTED_FIELDS = ['description', 'response']
+const AUDIT_REDACTED_FIELDS = ['title', 'description', 'response']
 
 /**
  * Builds the record key prefix shared by a Project log's counter and entries.
@@ -164,8 +166,9 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
             Update: {
               TableName: this.tableName,
               Key: { workspaceId: input.workspaceId, recordKey: counterKey(input) },
-              UpdateExpression: 'SET #count = if_not_exists(#count, :zero) + :one, #type = :type, #teamId = :teamId, #projectId = :projectId, #schemaVersion = :schemaVersion',
-              ConditionExpression: 'attribute_not_exists(recordKey) OR (#type = :type AND #count < :max)',
+              UpdateExpression: 'SET #count = if_not_exists(#count, :zero) + :one, #type = if_not_exists(#type, :type), #teamId = if_not_exists(#teamId, :teamId), #projectId = if_not_exists(#projectId, :projectId), #schemaVersion = if_not_exists(#schemaVersion, :schemaVersion)',
+              // An existing counter must be this Project's, in the known schema, and below the limit.
+              ConditionExpression: 'attribute_not_exists(recordKey) OR (#type = :type AND #schemaVersion = :schemaVersion AND #teamId = :teamId AND #projectId = :projectId AND #count < :max)',
               ExpressionAttributeNames: {
                 '#count': 'entryCount',
                 '#type': 'entryType',
@@ -180,7 +183,7 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
                 ':type': COUNTER_TYPE,
                 ':teamId': input.teamId,
                 ':projectId': input.projectId,
-                ':schemaVersion': 1,
+                ':schemaVersion': SCHEMA_VERSION,
               },
             },
           },
@@ -190,6 +193,13 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
       }))
     } catch (error) {
       const reasons = readCancellationCodes(error)
+      const transactionSize = 2 + input.callerAuthorization.length + (audit ? 1 : 0)
+      const callerAuthorizationFailed = reasons
+        ?.slice(2, 2 + input.callerAuthorization.length)
+        .includes('ConditionalCheckFailed') ?? false
+      // A caller whose access changed gets the same answer as for any other write, even when
+      // the entry or the counter also failed.
+      if (callerAuthorizationFailed) return storageFailure(error, transactionSize)
       if (reasons?.[0] === 'ConditionalCheckFailed') {
         // The entry ID comes from the request's idempotency key, so an existing entry means the
         // same request was already applied, unless it carried different content.
@@ -198,9 +208,13 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
         throw new ProjectDataError(409, 'ProjectRaidEntryIdempotencyConflict', 'This Idempotency-Key was already used for another log entry.')
       }
       if (reasons?.[1] === 'ConditionalCheckFailed') {
-        throw new ProjectDataError(413, 'ProjectRaidLogFull', `A Project log can hold at most ${PROJECT_RAID_LOG_MAX_ENTRIES} entries.`)
+        // Only a valid counter at the limit means the log is full; any other counter is corrupt.
+        if (isCounterAtLimit(await this.readCounter(input), input)) {
+          throw new ProjectDataError(413, 'ProjectRaidLogFull', `A Project log can hold at most ${PROJECT_RAID_LOG_MAX_ENTRIES} entries.`)
+        }
+        throw corruptLog()
       }
-      return storageFailure(error, 2 + input.callerAuthorization.length + (audit ? 1 : 0))
+      return storageFailure(error, transactionSize)
     }
     return input.entry
   }
@@ -263,6 +277,23 @@ export class DynamoDbProjectRaidLogStore implements ProjectRaidLogStore {
   }
 
   /**
+   * Reads the raw per-Project counter row with a strongly consistent read.
+   *
+   * @param scope - Team and Project.
+   * @returns The raw row, or `undefined`.
+   */
+  private async readCounter(scope: ProjectRaidLogScope): Promise<Record<string, unknown> | undefined> {
+    const { Item: row } = await this.client
+      .send(new GetCommand({
+        TableName: this.tableName,
+        Key: { workspaceId: scope.workspaceId, recordKey: counterKey(scope) },
+        ConsistentRead: true,
+      }))
+      .catch((error: unknown) => storageFailure(error))
+    return row
+  }
+
+  /**
    * Reads the raw row of one entry with a strongly consistent read.
    *
    * @param scope - Team and Project.
@@ -293,10 +324,30 @@ export class InMemoryProjectRaidLogStore implements ProjectRaidLogStore {
    * @returns The entries.
    */
   async list(scope: ProjectRaidLogScope): Promise<ProjectRaidEntry[]> {
+    return this.rowsOf(scope).map((row) => structuredClone(row.entry))
+  }
+
+  /**
+   * Counts the entries of a Project log synchronously.
+   *
+   * @param scope - Team and Project.
+   * @returns The number of entries.
+   */
+  private countEntries(scope: ProjectRaidLogScope) {
+    return this.rowsOf(scope).length
+  }
+
+  /**
+   * Selects the stored rows of a Project log.
+   *
+   * @param scope - Team and Project.
+   * @returns The rows, not copied.
+   */
+  private rowsOf(scope: ProjectRaidLogScope) {
     const prefix = JSON.stringify([scope.workspaceId, scope.teamId, scope.projectId]).slice(0, -1)
     return [...this.rows.entries()]
       .filter(([key]) => key.startsWith(`${prefix},`))
-      .map(([, row]) => structuredClone(row.entry))
+      .map(([, row]) => row)
   }
 
   /**
@@ -329,7 +380,9 @@ export class InMemoryProjectRaidLogStore implements ProjectRaidLogStore {
       if (existing.creationFingerprint === input.creationFingerprint) return structuredClone(existing.entry)
       throw new ProjectDataError(409, 'ProjectRaidEntryIdempotencyConflict', 'This Idempotency-Key was already used for another log entry.')
     }
-    if ((await this.list(input)).length >= PROJECT_RAID_LOG_MAX_ENTRIES) {
+    // Counting and adding happen without an await in between, so concurrent creates cannot both
+    // pass the limit or the duplicate check.
+    if (this.countEntries(input) >= PROJECT_RAID_LOG_MAX_ENTRIES) {
       throw new ProjectDataError(413, 'ProjectRaidLogFull', `A Project log can hold at most ${PROJECT_RAID_LOG_MAX_ENTRIES} entries.`)
     }
     this.rows.set(key, { entry: structuredClone(input.entry), creationFingerprint: input.creationFingerprint })
@@ -381,7 +434,7 @@ function rowIdentity(scope: ProjectRaidLogScope, entryId: string) {
     workspaceId: scope.workspaceId,
     recordKey: entryKey(scope, entryId),
     entryType: ENTRY_TYPE,
-    schemaVersion: 1,
+    schemaVersion: SCHEMA_VERSION,
     teamId: scope.teamId,
     projectId: scope.projectId,
   }
@@ -436,13 +489,31 @@ function parseStoredEntry(row: Record<string, unknown>, scope: ProjectRaidLogSco
     row.workspaceId !== scope.workspaceId ||
     row.recordKey !== entryKey(scope, entry.id) ||
     row.entryType !== ENTRY_TYPE ||
-    row.schemaVersion !== 1 ||
+    row.schemaVersion !== SCHEMA_VERSION ||
     row.teamId !== scope.teamId ||
     row.projectId !== scope.projectId
   ) {
     throw corruptLog()
   }
   return entry
+}
+
+/**
+ * Tells whether a counter row belongs to the Project, has the known schema, and is at the limit.
+ *
+ * @param row - Raw counter row, or `undefined` when it is missing.
+ * @param scope - Team and Project the counter must belong to.
+ * @returns Whether the counter is valid and full.
+ */
+function isCounterAtLimit(row: Record<string, unknown> | undefined, scope: ProjectRaidLogScope) {
+  return row !== undefined &&
+    row.entryType === COUNTER_TYPE &&
+    row.schemaVersion === SCHEMA_VERSION &&
+    row.teamId === scope.teamId &&
+    row.projectId === scope.projectId &&
+    typeof row.entryCount === 'number' &&
+    Number.isSafeInteger(row.entryCount) &&
+    row.entryCount >= PROJECT_RAID_LOG_MAX_ENTRIES
 }
 
 /**

@@ -37,7 +37,12 @@ export function useSaveProjectRaidEntry({ accessToken, teamId, projectId }: Proj
     if (pendingSave.current?.fingerprint !== fingerprint) {
       pendingSave.current = { fingerprint, context: createMutationRequestContext() }
     }
-    const { context } = pendingSave.current
+    const attempt = pendingSave.current
+    const { context } = attempt
+    /** Drops this save's context, but not one that a different save started meanwhile. */
+    const clearAttempt = () => {
+      if (pendingSave.current === attempt) pendingSave.current = undefined
+    }
     try {
       if (entry) {
         await updateProjectRaidEntry(accessToken, teamId, projectId, entry.id, entry.revision, input, context)
@@ -46,12 +51,12 @@ export function useSaveProjectRaidEntry({ accessToken, teamId, projectId }: Proj
       }
     } catch (error) {
       if (error instanceof ProjectDirectoryApiError && error.status < 500) {
-        pendingSave.current = undefined
+        clearAttempt()
         if (error.status === 409) void mutate(key)
       }
       throw error
     }
-    pendingSave.current = undefined
+    clearAttempt()
     await mutate(key)
   }, [accessToken, mutate, projectId, teamId])
 }

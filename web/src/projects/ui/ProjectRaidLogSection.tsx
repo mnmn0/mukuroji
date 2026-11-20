@@ -19,6 +19,11 @@ export type ProjectRaidLogSectionProps = {
   canEdit: boolean
   /** Translator for every label. */
   t: (key: MessageKey) => string
+  /**
+   * Receives each failed load with the access token it was sent with, so an expired session can
+   * be sent to sign in again without acting on a token that was already replaced.
+   */
+  onSessionError?: (error: unknown, requestAccessToken: string) => void
 }
 
 /**
@@ -47,8 +52,9 @@ export function ProjectRaidLogSection({
   canMutate,
   canEdit,
   t,
+  onSessionError,
 }: ProjectRaidLogSectionProps) {
-  const log = useProjectRaidLog(accessToken, teamId, projectId, enabled)
+  const log = useProjectRaidLog(accessToken, teamId, projectId, enabled, onSessionError)
   const { mutate } = log
   const save = useSaveProjectRaidEntry({ accessToken, teamId, projectId })
 

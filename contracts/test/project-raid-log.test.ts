@@ -63,6 +63,17 @@ describe('parseProjectRaidEntryInput', () => {
     expect(parseProjectRaidEntryInput({ ...base, status: 'deleted' }).ok).toBe(false)
     expect(parseProjectRaidEntryInput([]).ok).toBe(false)
   })
+
+  test('keeps line breaks and Japanese text but rejects characters JSON escapes to six bytes', () => {
+    const base = { kind: 'issue', title: 'A', impact: 3, status: 'open' }
+    const accepted = parseProjectRaidEntryInput({ ...base, title: '納期遅延 🚚', description: '一行目\n\t二行目\r\n三行目' })
+    expect(accepted.ok && accepted.value.description).toBe('一行目\n\t二行目\r\n三行目')
+    expect(parseProjectRaidEntryInput({ ...base, title: 'A\u0001B' }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, description: 'x\u0000y' }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, response: 'x\u009Fy' }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, response: 'x\uD800y' }).ok).toBe(false)
+    expect(parseProjectRaidEntryInput({ ...base, description: 'x\uDC00' }).ok).toBe(false)
+  })
 })
 
 describe('parseProjectRaidEntry', () => {
@@ -70,6 +81,14 @@ describe('parseProjectRaidEntry', () => {
     expect(parseProjectRaidEntry(entry())).toEqual(entry())
     expect(parseProjectRaidEntry({ ...entry(), title: ' Vendor delay' })).toBeUndefined()
     expect(parseProjectRaidEntry({ ...entry(), revision: 0 })).toBeUndefined()
+  })
+
+  test('requires real UTC timestamps', () => {
+    expect(parseProjectRaidEntry(entry({ createdAt: '2026-11-19T00:00:00Z' }))).toBeDefined()
+    expect(parseProjectRaidEntry({ ...entry(), createdAt: 'yesterday' })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...entry(), updatedAt: '2026-02-30T00:00:00.000Z' })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...entry(), updatedAt: '2026-11-19T24:00:00.000Z' })).toBeUndefined()
+    expect(parseProjectRaidEntry({ ...entry(), status: 'closed', closedAt: '2026-11-19' })).toBeUndefined()
   })
 })
 

@@ -29,6 +29,17 @@ export const PROJECT_RAID_LOG_MAX_ENTRIES = 300
 
 /** Pattern of a `YYYY-MM-DD` date. */
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/u
+/** UTC ISO 8601 timestamp, such as `2026-11-20T08:00:00.000Z`, split into date and time parts. */
+const TIMESTAMP_PATTERN = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/u
+/**
+ * Control characters other than tab, line feed, and carriage return. JSON escapes each of them
+ * to six bytes, so allowing them would let a full log outgrow the response size the length
+ * limits are chosen for.
+ */
+// eslint-disable-next-line no-control-regex -- these control characters are what the check rejects.
+const DISALLOWED_CONTROL_CHARACTER = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u
+/** A UTF-16 surrogate without its pair, which JSON also escapes to six bytes. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
 
 /** One risk, issue, or change request recorded for a Project. */
 export type ProjectRaidEntry = {
@@ -203,6 +214,31 @@ function isCalendarDate(value: unknown): value is string {
 }
 
 /**
+ * Checks whether a value is a real UTC timestamp in ISO 8601, as the server records them.
+ *
+ * @param value - Value to check.
+ * @returns Whether the value is a valid timestamp string.
+ */
+function isTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const match = TIMESTAMP_PATTERN.exec(value)
+  if (!match) return false
+  const [, date, hours, minutes, seconds] = match
+  return isCalendarDate(date) && Number(hours) < 24 && Number(minutes) < 60 && Number(seconds) < 60
+}
+
+/**
+ * Checks whether text holds only characters that keep its JSON size close to its length: no
+ * control character other than tab and line breaks, and no unpaired surrogate.
+ *
+ * @param text - Text to check.
+ * @returns Whether the text may be stored.
+ */
+function hasStorableCharacters(text: string) {
+  return !DISALLOWED_CONTROL_CHARACTER.test(text) && !LONE_SURROGATE.test(text)
+}
+
+/**
  * Reads an optional text field, trimming it and treating an empty string as absent.
  *
  * @param value - Raw field value.
@@ -214,7 +250,7 @@ function readOptionalText(value: unknown, maxLength: number): string | undefined
   if (typeof value !== 'string') return null
   const text = value.trim()
   if (text.length === 0) return undefined
-  return text.length <= maxLength ? text : null
+  return text.length <= maxLength && hasStorableCharacters(text) ? text : null
 }
 
 /**
@@ -234,13 +270,16 @@ export function parseProjectRaidEntryInput(value: unknown): ProjectRaidEntryInpu
   if (normalizedTitle.length > PROJECT_RAID_TITLE_MAX_LENGTH) {
     return { ok: false, message: `Entry title must be at most ${PROJECT_RAID_TITLE_MAX_LENGTH} characters.` }
   }
+  if (!hasStorableCharacters(normalizedTitle)) {
+    return { ok: false, message: 'Entry title must not contain control characters.' }
+  }
   const normalizedDescription = readOptionalText(description, PROJECT_RAID_TEXT_MAX_LENGTH)
   if (normalizedDescription === null) {
-    return { ok: false, message: `Entry description must be text of at most ${PROJECT_RAID_TEXT_MAX_LENGTH} characters.` }
+    return { ok: false, message: `Entry description must be text of at most ${PROJECT_RAID_TEXT_MAX_LENGTH} characters without control characters.` }
   }
   const normalizedResponse = readOptionalText(response, PROJECT_RAID_TEXT_MAX_LENGTH)
   if (normalizedResponse === null) {
-    return { ok: false, message: `Entry response must be text of at most ${PROJECT_RAID_TEXT_MAX_LENGTH} characters.` }
+    return { ok: false, message: `Entry response must be text of at most ${PROJECT_RAID_TEXT_MAX_LENGTH} characters without control characters.` }
   }
   if (kind === 'risk') {
     if (!isRating(probability)) return { ok: false, message: 'Risk probability must be an integer from 1 to 5.' }
@@ -278,8 +317,8 @@ export function parseProjectRaidEntry(value: unknown): ProjectRaidEntry | undefi
   const { id, revision, createdAt, updatedAt, closedAt } = value
   if (typeof id !== 'string' || id.length === 0) return undefined
   if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) return undefined
-  if (typeof createdAt !== 'string' || typeof updatedAt !== 'string') return undefined
-  if (closedAt !== undefined && typeof closedAt !== 'string') return undefined
+  if (!isTimestamp(createdAt) || !isTimestamp(updatedAt)) return undefined
+  if (closedAt !== undefined && !isTimestamp(closedAt)) return undefined
   const input = parseProjectRaidEntryInput(value)
   if (!input.ok) return undefined
   // Stored and returned entries are already normalized, so a value that normalization would

@@ -422,7 +422,9 @@ export function ProjectRaidLogPanel({
                   {t('projects.raidLog.conflict.useLatest')}
                 </button>
               </div>
-            ) : saveError ? (
+            ) : null}
+            {/* Shown on its own, so a failed save onto the newer revision is not hidden by the notice. */}
+            {saveError ? (
               <p className="col-span-full text-sm font-semibold text-fg-red-700" role="alert">{saveError}</p>
             ) : null}
             <div className="col-span-full flex flex-wrap gap-2">

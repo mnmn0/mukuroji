@@ -2118,6 +2118,12 @@ export function TaskPage() {
             projectId={projectId}
             t={t}
             teamId={interactionTeamId}
+            onSessionError={(error, requestAccessToken) => {
+              // Same rule as the charter: only a failure of the current session's token signs out.
+              if (isSameAuthSessionToken(getAuthSession()?.accessToken, requestAccessToken)) {
+                redirectEnterpriseSessionError(error)
+              }
+            }}
           />
         </>
       )}

@@ -277,7 +277,16 @@ function toProjectRaidLogErrorResponse(c: Context, error: unknown) {
     (error.code.startsWith('ProjectRaid') || error.code === 'InvalidProjectRaidEntry')
   ) {
     const status = toProjectRaidLogStatus(error.status)
-    if (status >= 500) console.error(error)
+    if (status >= 500) {
+      // Request headers tie the failure to the request log; the body is not recorded.
+      console.error('Project log request failed.', {
+        status,
+        code: error.code,
+        requestId: c.req.header('X-Request-Id'),
+        correlationId: c.req.header('X-Correlation-Id')?.trim(),
+        error,
+      })
+    }
     return c.json({ code: error.code, message: error.message }, status)
   }
   return toProjectDataErrorResponse(c, error)

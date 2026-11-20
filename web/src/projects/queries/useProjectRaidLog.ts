@@ -20,6 +20,8 @@ export function projectRaidLogKey(accessToken: string, teamId: string, projectId
  * @param teamId - Team that owns the Project; reading is skipped without it.
  * @param projectId - Project ID.
  * @param enabled - Whether the current session may load the log.
+ * @param onError - Receives each failed load with the access token it was sent with, so an
+ * expired session can be sent to sign in again without acting on a token already replaced.
  * @returns SWR state of the log response.
  */
 export function useProjectRaidLog(
@@ -27,10 +29,18 @@ export function useProjectRaidLog(
   teamId: string | undefined,
   projectId: string,
   enabled: boolean,
+  onError?: (error: unknown, requestAccessToken: string) => void,
 ) {
   return useSWR(
     accessToken && teamId && enabled ? projectRaidLogKey(accessToken, teamId, projectId) : null,
-    ([, token, currentTeamId, currentProjectId]) => getProjectRaidLog(token, currentTeamId, currentProjectId),
+    async ([, token, currentTeamId, currentProjectId]) => {
+      try {
+        return await getProjectRaidLog(token, currentTeamId, currentProjectId)
+      } catch (error) {
+        onError?.(error, token)
+        throw error
+      }
+    },
     { shouldRetryOnError: false },
   )
 }
