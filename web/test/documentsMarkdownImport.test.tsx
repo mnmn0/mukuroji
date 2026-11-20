@@ -213,6 +213,17 @@ describe('Markdown import', () => {
     expect(calls).toBeLessThanOrEqual(201 * 2)
   })
 
+  test('keeps an inline code span with triple backticks as paragraph text', () => {
+    expect(blocksOf('```example```\n\nnext')).toEqual([
+      { id: 'block-1', text: '```example```', type: 'paragraph' },
+      { id: 'block-2', text: 'next', type: 'paragraph' },
+    ])
+  })
+
+  test('reports too many headings instead of throwing', () => {
+    expect(convert('#\n'.repeat(149_999))).toEqual({ code: 'too-many-blocks', ok: false })
+  })
+
   test('pads short table rows and ignores extra cells', () => {
     const blocks = blocksOf('a | b\n--|--\n1\n1 | 2 | 3\n')
     expect(blocks[0]).toMatchObject({

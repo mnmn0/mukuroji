@@ -101,7 +101,7 @@ type RawHeading = {
 type ScannedBlock = DocumentBlock | RawHeading
 
 /** Opening line of a fenced code block. */
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)?.*$/u
+const FENCE_OPEN = /^ {0,3}(?:(`{3,})[ \t]*([^\s`]*)[^`]*|(~{3,})[ \t]*(\S*).*)$/u
 
 /** ATX heading line. */
 const ATX_HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/u
@@ -165,8 +165,10 @@ export function convertMarkdownToDocument(
 
   const shallowest = titleTaken
     ? 2
-    : Math.min(
-        ...body.flatMap((block) => (block.type === 'raw-heading' ? [block.rawLevel] : [])),
+    : body.reduce(
+        (lowest, block) =>
+          block.type === 'raw-heading' ? Math.min(lowest, block.rawLevel) : lowest,
+        6,
       )
   const blocks = body.map((block): DocumentBlock =>
     block.type === 'raw-heading'
@@ -235,9 +237,9 @@ function scanBlocks(
     }
 
     const fence = FENCE_OPEN.exec(line)
-    if (fence?.[1]) {
+    const marker = fence?.[1] ?? fence?.[3]
+    if (fence && marker) {
       flushParagraph()
-      const marker = fence[1]
       const close = new RegExp(`^ {0,3}${marker[0] === '`' ? '`' : '~'}{${marker.length},}[ \\t]*$`, 'u')
       const content: string[] = []
       index += 1
@@ -246,7 +248,7 @@ function scanBlocks(
         index += 1
       }
       index += 1
-      blocks.push(createFencedBlock(fence[2] ?? '', content.join('\n'), createId))
+      blocks.push(createFencedBlock(fence[2] ?? fence[4] ?? '', content.join('\n'), createId))
       continue
     }
 
