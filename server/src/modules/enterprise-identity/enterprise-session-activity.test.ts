@@ -36,10 +36,15 @@ function createDynamoSessionActivityClient(
       if (typeof key !== 'string') throw new TypeError('The row is missing a connection ID.')
       const existing = rows.get(key)
       const currentTime: unknown = command.input.ExpressionAttributeValues?.[':currentTime']
+      const expiresAt: unknown = command.input.ExpressionAttributeValues?.[':expiresAt']
       const conditionFailed = command.input.ConditionExpression === 'attribute_not_exists(connectionId)'
         ? existing !== undefined
-        : typeof currentTime === 'number' && typeof existing?.lastSeenAt === 'number' &&
-          existing.lastSeenAt > currentTime
+        : command.input.ConditionExpression ===
+            'attribute_not_exists(connectionId) OR expiresAt < :expiresAt'
+          ? existing !== undefined && typeof expiresAt === 'number' &&
+            typeof existing.expiresAt === 'number' && existing.expiresAt >= expiresAt
+          : typeof currentTime === 'number' && typeof existing?.lastSeenAt === 'number' &&
+            existing.lastSeenAt > currentTime
       if (conditionFailed) {
         throw Object.assign(new Error('The conditional request failed'), {
           name: 'ConditionalCheckFailedException',
@@ -278,4 +283,59 @@ test('reports a DynamoDB failure while continuing a session as unavailable', asy
     code: 'EnterpriseSessionActivityUnavailable',
     status: 503,
   })
+})
+
+test('remembers a signed-out sign-in per Workspace until its tokens expire', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const dynamo = createDynamoSessionActivityClient(rows)
+  const memory = new InMemoryEnterpriseSessionActivityClient()
+
+  for (const client of [dynamo, memory]) {
+    expect(await client.isSignInRevoked('workspace-a', 'origin-1')).toBe(false)
+    await client.revokeSignIn({ workspaceId: 'workspace-a', signInId: 'origin-1', expiresAt: 1_800 })
+    expect(await client.isSignInRevoked('workspace-a', 'origin-1')).toBe(true)
+    expect(await client.isSignInRevoked('workspace-a', 'origin-2')).toBe(false)
+    expect(await client.isSignInRevoked('workspace-b', 'origin-1')).toBe(false)
+    await expect(client.revokeSignIn({ workspaceId: 'workspace-a', signInId: ' ', expiresAt: 1_800 }))
+      .rejects.toMatchObject({ code: 'EnterpriseSessionDenied' })
+  }
+  // A later sign-out with an earlier bound keeps the longer revocation.
+  await dynamo.revokeSignIn({ workspaceId: 'workspace-a', signInId: 'origin-1', expiresAt: 900 })
+  // The record carries the table TTL attribute, so DynamoDB removes it after the tokens expire.
+  expect([...rows.values()]).toEqual([{
+    connectionId: 'HTTP_SIGN_IN_REVOKED#workspace-a#origin-1',
+    itemType: 'http-sign-in-revocation',
+    workspaceId: 'workspace-a',
+    expiresAt: 1_800,
+  }])
+})
+
+test('fails closed on a sign-out record of another Workspace or shape', async () => {
+  const rows = new Map<string, Record<string, unknown>>([
+    ['HTTP_SIGN_IN_REVOKED#workspace-a#origin-1', {
+      connectionId: 'HTTP_SIGN_IN_REVOKED#workspace-a#origin-1',
+      itemType: 'http-sign-in-revocation',
+      workspaceId: 'workspace-b',
+      expiresAt: 1_800,
+    }],
+    ['HTTP_SIGN_IN_REVOKED#workspace-a#origin-2', {
+      connectionId: 'HTTP_SIGN_IN_REVOKED#workspace-a#origin-2',
+      workspaceId: 'workspace-a',
+    }],
+  ])
+  const client = createDynamoSessionActivityClient(rows)
+
+  for (const signInId of ['origin-1', 'origin-2']) {
+    await expect(client.isSignInRevoked('workspace-a', signInId))
+      .rejects.toMatchObject({ status: 503, code: 'EnterpriseSessionActivityUnavailable' })
+  }
+})
+
+test('reports a DynamoDB failure of the sign-out record as unavailable', async () => {
+  const client = createDynamoSessionActivityClient(new Map(), new Error('DynamoDB is down'))
+
+  await expect(client.revokeSignIn({ workspaceId: 'workspace-a', signInId: 'origin-1', expiresAt: 1_800 }))
+    .rejects.toMatchObject({ status: 503, code: 'EnterpriseSessionActivityUnavailable' })
+  await expect(client.isSignInRevoked('workspace-a', 'origin-1'))
+    .rejects.toMatchObject({ status: 503, code: 'EnterpriseSessionActivityUnavailable' })
 })

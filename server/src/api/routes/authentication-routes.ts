@@ -7,6 +7,7 @@ import {
   readCognitoMfaChallengeName,
   type AuthTokenSet,
   type InitiateAuthResponse,
+  type VerifiedAccessTokenUser,
 } from '../../modules/authentication'
 import { createPolicyMfaSetupPorts } from '../../app/composition/policy-mfa-setup'
 import { ProjectDataError } from '../../modules/directory'
@@ -23,17 +24,21 @@ import { readCognitoMfaSetupChallenge } from '../shared/account-security'
 import { canManageAiAssistanceWorkspace } from '../shared/ai-assistance-access'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { consumeAuthenticationAttempt } from '../shared/authentication-attempt-limit'
-import { createAuthenticationResponse } from '../shared/authentication-session'
+import { createAuthenticationResponse, toProjectPrincipal } from '../shared/authentication-session'
+import {
+  readCognitoAccessTokenUser,
+  readEnterpriseSsoSignOutUser,
+  resolveEnterpriseSsoAccessTokenClientId,
+  revokeEnterpriseSsoSignIn,
+} from '../shared/cognito-access-token-user'
 import { hasCustomerManagementAccess, hasCustomerReadAccess } from '../shared/customer-access'
 import {
   isEnterpriseSsoConfigured,
   toEnterpriseIdentityErrorResponse,
   validateConfiguredCognitoAccessToken,
-  type CognitoAccessTokenClaims,
 } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
-import { getEnv } from '../shared/runtime-config'
-import { decodeJwtPayload, readUserAttribute } from '../shared/token-claims'
+import { readUserAttribute } from '../shared/token-claims'
 import {
   canWorkspaceBusinessWrite,
   toProjectDataErrorResponse,
@@ -125,10 +130,29 @@ function readRefreshToken(value: unknown) {
  * @returns The SSO client ID for an SSO session, or undefined for the password client.
  */
 function resolveSessionClientId(accessToken: string | undefined) {
-  const ssoClientId = getEnv('COGNITO_SSO_CLIENT_ID')?.trim()
-  if (!ssoClientId || !accessToken) return undefined
-  const claims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
-  return claims?.client_id === ssoClientId ? ssoClientId : undefined
+  return resolveEnterpriseSsoAccessTokenClientId(accessToken)
+}
+
+/**
+ * Signs an enterprise SSO sign-in out of the API after Cognito revoked its refresh token.
+ *
+ * The API verifies SSO access tokens locally, so Cognito's revocation does not reach them; the
+ * sign-out is recorded for every access token of the sign-in instead. The presented token may be
+ * expired while a newer token of the sign-in is still valid, so expiry does not skip the record.
+ * A token whose signature fails or whose user is disabled or gone is refused anyway.
+ *
+ * @param accessToken - Bearer access token of the session being signed out.
+ */
+async function signOutEnterpriseSsoSession(accessToken: string) {
+  let user: VerifiedAccessTokenUser | undefined
+  try {
+    user = await readEnterpriseSsoSignOutUser(accessToken)
+  } catch (error) {
+    if (error instanceof CognitoServiceError && error.status === 401) return
+    throw error
+  }
+  if (!user) return
+  await revokeEnterpriseSsoSignIn(accessToken, toProjectPrincipal(user, accessToken).directoryId)
 }
 
 /**
@@ -712,7 +736,9 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
    * Body の `refreshToken` は必須です。Cognito の RevokeToken は refresh token と、それから
    * 発行された access token をすべて失効させるので、sign-out 後は refresh token で session を
    * 再開できず、残った access token も API で拒否されます。SSO session は
-   * `Authorization: Bearer <access token>` から SSO の app client を判別します。成功時は 204 です。
+   * `Authorization: Bearer <access token>` から SSO の app client を判別します。SSO の access token は
+   * API が署名で検証するため Cognito の失効が届かず、その sign-in の全 access token を server 側でも
+   * 失効扱いにします。成功時は 204 です。
    */
   routeApp.post('/api/auth/logout', async (c) => {
     c.header('Cache-Control', 'no-store')
@@ -735,12 +761,19 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
     }
 
     try {
-      await cognito.revokeRefreshToken(
-        refreshToken,
-        resolveSessionClientId(readBearerAccessToken(c)),
-      )
+      const accessToken = readBearerAccessToken(c)
+      const ssoClientId = resolveSessionClientId(accessToken)
+      await cognito.revokeRefreshToken(refreshToken, ssoClientId)
+      if (ssoClientId && accessToken) await signOutEnterpriseSsoSession(accessToken)
       return c.body(null, 204)
     } catch (error) {
+      // The refresh token is revoked, but the sign-out of locally verified tokens is not recorded.
+      if (error instanceof EnterpriseSessionActivityError) {
+        return c.json({
+          code: 'EnterpriseSessionActivityUnavailable' as const,
+          message: 'Sign-out could not be recorded. Try signing out again.',
+        }, 503)
+      }
       return toAuthErrorResponse(c, error)
     }
   })
@@ -762,7 +795,7 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
 
     try {
       validateConfiguredCognitoAccessToken(accessToken)
-      const user = await authenticationDependencies.cognito.getUser(accessToken)
+      const user = await readCognitoAccessTokenUser(accessToken)
       const principal = await authenticateWorkspacePrincipal(accessToken, user, c)
 
       return c.json({

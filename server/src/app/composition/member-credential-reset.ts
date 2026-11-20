@@ -87,10 +87,18 @@ export function createMemberCredentialResetPorts(
       if (!adminDisableSoftwareTokenMfa) throw createCredentialResetUnavailableError()
       await adminDisableSoftwareTokenMfa.call(cognito, memberKey)
     },
-    async signOutEverywhere(memberKey) {
+    async signOutEverywhere(workspaceId, memberKey) {
       const { globallySignOutWorkspaceUser } = cognito
-      if (!globallySignOutWorkspaceUser) throw createCredentialResetUnavailableError()
+      const { revokeMemberSignIns } = workspaceAccess
+      if (!globallySignOutWorkspaceUser || !revokeMemberSignIns) {
+        throw createCredentialResetUnavailableError()
+      }
+      // Cognito global sign-out does not reach SSO tokens the API verifies itself. The cutoff is
+      // written first so a failed sign-out still refuses them, and again afterwards so an SSO
+      // sign-in that completed while Cognito was signing the user out is refused too.
+      await revokeMemberSignIns.call(workspaceAccess, workspaceId, memberKey)
       await globallySignOutWorkspaceUser.call(cognito, memberKey)
+      await revokeMemberSignIns.call(workspaceAccess, workspaceId, memberKey)
     },
     reportFailure(message, error, correlationId) {
       console.error(message, {
