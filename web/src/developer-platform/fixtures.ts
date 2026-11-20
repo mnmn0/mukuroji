@@ -364,6 +364,8 @@ export const developerPlatformLabelsFixture = {
       'Synchronization is paused. Review the field differences in the sync conflict list above to recover it.',
     connectorAvailabilityError:
       'The connectors available in this environment could not be checked. New connections stay hidden until they load.',
+    connectorAvailabilityLoading:
+      'Checking the connectors available in this environment',
     connectorCatalogEmpty:
       'Only providers configured in this environment are listed. Once an operator configures a provider, you can connect it here.',
     connectorCount: '{count} accounts',

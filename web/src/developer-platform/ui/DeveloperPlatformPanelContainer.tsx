@@ -116,6 +116,7 @@ export function DeveloperPlatformPanelContainer({
   const {
     data: availableConnectorProviders,
     error: availableConnectorProvidersError,
+    isLoading: isAvailableConnectorProvidersLoading,
     mutate: mutateAvailableConnectorProviders,
   } = useAvailableDeveloperConnectorProviders(
     mutationSession.accessToken,
@@ -261,6 +262,7 @@ export function DeveloperPlatformPanelContainer({
           ? labels.helpText.connectorAvailabilityError
           : undefined
       }
+      isConnectorAvailabilityLoading={isAvailableConnectorProvidersLoading}
       onRetryConnectorAvailability={() => {
         void mutateAvailableConnectorProviders().catch(() => {
           // The query error stays visible with its retry action.

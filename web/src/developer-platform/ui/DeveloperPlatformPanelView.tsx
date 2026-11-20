@@ -68,6 +68,8 @@ export type DeveloperPlatformPanelProps = {
   availableConnectorProviders?: readonly string[]
   /** Safe message shown when the configured connector providers cannot be loaded. */
   connectorAvailabilityErrorMessage?: string
+  /** Whether the configured connector providers are still loading. */
+  isConnectorAvailabilityLoading?: boolean
   /** Retries loading the configured connector providers. */
   onRetryConnectorAvailability?: () => void
   /** Policy and IDs of member-issued agent keys; omitted hides the policy control and badges. */
@@ -186,6 +188,7 @@ export function DeveloperPlatformPanel({
   resources,
   availableConnectorProviders,
   connectorAvailabilityErrorMessage,
+  isConnectorAvailabilityLoading,
   onRetryConnectorAvailability,
   personalCredentials,
   personalCredentialsPending,
@@ -799,6 +802,7 @@ export function DeveloperPlatformPanel({
               canManage={canManageIntegrations}
               catalog={filteredConnectorCatalog}
               availabilityErrorMessage={connectorAvailabilityErrorMessage}
+              isAvailabilityLoading={isConnectorAvailabilityLoading}
               onRetryAvailability={onRetryConnectorAvailability}
               conflictMergeErrors={conflictMergeErrors}
               conflictMergedValueDrafts={conflictMergedValueDrafts}

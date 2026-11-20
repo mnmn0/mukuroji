@@ -76,6 +76,24 @@ describe('DeveloperPlatformPanel connector management', () => {
     expect(html).not.toContain('Slack')
   })
 
+  test('shows a loading state instead of an empty catalog while availability loads', () => {
+    const html = renderToStaticMarkup(
+      <DeveloperPlatformPanel
+        initialSection="connectors"
+        labels={developerPlatformLabelsFixture}
+        resources={{ ...developerPlatformResourcesFixture, connectors: [] }}
+        isConnectorAvailabilityLoading
+      />,
+    )
+
+    expect(html).toContain(
+      developerPlatformLabelsFixture.helpText.connectorAvailabilityLoading,
+    )
+    expect(html).not.toContain(
+      developerPlatformLabelsFixture.headings.connectorCatalogEmpty,
+    )
+  })
+
   test('explains an empty catalog and a failed availability check', () => {
     const html = renderToStaticMarkup(
       <DeveloperPlatformPanel

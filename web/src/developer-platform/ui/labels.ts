@@ -440,6 +440,9 @@ export function createDeveloperPlatformLabels(
       connectorAvailabilityError: ja
         ? 'この環境で使える connector を確認できませんでした。確認できるまで、新しい接続は表示しません。'
         : 'The connectors available in this environment could not be checked. New connections stay hidden until they load.',
+      connectorAvailabilityLoading: ja
+        ? 'この環境で使える connector を確認しています'
+        : 'Checking the connectors available in this environment',
       connectorCatalogEmpty: ja
         ? 'この環境で設定済みの provider だけを表示します。運用者が provider を設定すると、ここから接続できます。'
         : 'Only providers configured in this environment are listed. Once an operator configures a provider, you can connect it here.',

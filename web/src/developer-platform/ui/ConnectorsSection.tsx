@@ -27,6 +27,8 @@ export type ConnectorsSectionProps = {
   catalog: DeveloperConnectorCatalogEntry[]
   /** Safe message shown when the configured connector providers cannot be loaded. */
   availabilityErrorMessage?: string
+  /** Whether the configured connector providers are still loading. */
+  isAvailabilityLoading?: boolean
   /** Retries loading the configured connector providers. */
   onRetryAvailability?: () => void
   /** Validation messages keyed by synchronization-conflict identifier. */
@@ -95,6 +97,7 @@ export function ConnectorsSection({
   canManage,
   catalog,
   availabilityErrorMessage,
+  isAvailabilityLoading,
   onRetryAvailability,
   conflictMergeErrors,
   conflictMergedValueDrafts,
@@ -548,7 +551,7 @@ export function ConnectorsSection({
                     </p>
                   )}
 
-                  {!item.available ? (
+                  {canManage && !item.available ? (
                     <p className="mt-4 text-xs font-medium leading-5 text-[var(--workbench-muted)]">
                       {labels.helpText.connectorNotConfigured}
                     </p>
@@ -573,6 +576,15 @@ export function ConnectorsSection({
                 </article>
               )
             })}
+          </div>
+        ) : isAvailabilityLoading ? (
+          <div
+            aria-label={labels.helpText.connectorAvailabilityLoading}
+            className="mt-4 grid grid-cols-2 gap-4 max-[1180px]:grid-cols-1"
+            role="status"
+          >
+            <div className="h-36 animate-pulse rounded-lg bg-slate-100" />
+            <div className="h-36 animate-pulse rounded-lg bg-slate-100" />
           </div>
         ) : (
           query.trim() ? (
