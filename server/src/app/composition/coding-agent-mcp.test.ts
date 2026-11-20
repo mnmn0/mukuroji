@@ -54,7 +54,7 @@ function startFakeApi() {
     // Liveness is public, so the MCP must read it without the API credential.
     if (new URL(request.url).pathname === '/api/health') {
       if (request.headers.get('Authorization') !== null) return Response.json({}, { status: 400 })
-      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 1, minimumApiRevision: 1 } })
+      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 2, minimumApiRevision: 1 } })
     }
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     const url = new URL(request.url)
@@ -125,6 +125,12 @@ function startFakeApi() {
         leaseMinutes: 30, startedAt: task.updatedAt, lastHeartbeatAt: task.updatedAt, leaseExpiresAt: '2026-09-01T00:30:00.000Z', stalled: false, reportCount: 0 }
       runs.push({ run, instanceId: body.instanceId })
       return Response.json({ run, workItem: task }, { status: 201 })
+    }
+    if (url.pathname === '/api/v1/work-items/task/documents') return Response.json({ items: [{ id: 'spec', title: 'Spec' }], hasMore: false })
+    if (url.pathname === '/api/v1/work-items/task/documents/spec') {
+      return Response.json({
+        schemaVersion: 1, id: 'spec', kind: 'page', title: 'Spec', revision: 1, updatedAt: task.updatedAt, format: 'markdown', content: '# Spec',
+      })
     }
     if (url.pathname.endsWith('/comments')) {
       if (request.method === 'POST') {
@@ -217,6 +223,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     clients.push(readOnly)
     const readTools = (await readOnly.listTools()).tools.map((tool) => tool.name)
     expect(readTools).toContain('get_next_task')
+    expect(readTools).toEqual(expect.arrayContaining(['list_task_documents', 'read_document']))
     for (const name of ['start_task', 'report_progress', 'heartbeat', 'finish_run', 'take_over_task', 'resume_task']) expect(readTools).not.toContain(name)
     expect((await readOnly.readResource({ uri: 'mukuroji://agent/workflow' })).contents).toHaveLength(1)
     expect((await readOnly.readResource({ uri: 'mukuroji://project/web/brief' })).contents)
@@ -224,13 +231,17 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     expect((await readOnly.listResourceTemplates()).resourceTemplates.map((template) => template.uriTemplate))
       .toContain('mukuroji://project/{projectId}/brief')
     expect((await readOnly.getPrompt({ name: 'work-on-next-task', arguments: {} })).messages).toHaveLength(1)
+    expect((await call(readOnly, 'list_task_documents', { taskId: 'task' })).content)
+      .toMatchObject({ data: { items: [{ id: 'spec', title: 'Spec' }], hasMore: false } })
+    expect((await call(readOnly, 'read_document', { taskId: 'task', documentId: 'spec' })).content)
+      .toMatchObject({ data: { id: 'spec', format: 'markdown', content: '# Spec' } })
 
     const client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
     clients.push(client)
-    expect((await client.listTools()).tools).toHaveLength(18)
+    expect((await client.listTools()).tools).toHaveLength(20)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
-      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 1, serverCompatibility: { status: 'compatible', server: { apiRevision: 1, minimumApiRevision: 1 } } },
+      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 2, serverCompatibility: { status: 'compatible', server: { apiRevision: 2, minimumApiRevision: 1 } } },
     } })
     expect(client.getServerVersion()).toMatchObject({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'start', task: { id: 'task' }, ownRuns: [] } })
@@ -331,7 +342,7 @@ test('the distributable Node bundle serves the same tools over stdio', async () 
     expect(await version.exited).toBe(0)
     expect((await new Response(version.stdout).text()).trim()).toBe(CODING_AGENT_MCP_VERSION)
     client = await connect(fake.api.port, 'auto', { MUKUROJI_MCP_RUNTIME: 'codex' }, join(outdir, 'mcp.mjs'), node)
-    expect((await client.listTools()).tools).toHaveLength(18)
+    expect((await client.listTools()).tools).toHaveLength(20)
     expect((await call(client, 'get_configuration')).content).toMatchObject({
       data: { runtime: 'codex', mcp: { version: CODING_AGENT_MCP_VERSION, serverCompatibility: { status: 'compatible' } } },
     })
@@ -349,7 +360,7 @@ test('reuses a known server compatibility and retries an unknown one', async () 
     healthRequests += 1
     // The first read fails as a transient outage would; later reads report the range.
     return healthRequests === 1 ? Response.json({}, { status: 503 })
-      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 1, minimumApiRevision: 1 } })
+      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 2, minimumApiRevision: 1 } })
   } })
   try {
     const factory = composeCodingAgentMcp({ MUKUROJI_MCP_URL: `http://127.0.0.1:${api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',

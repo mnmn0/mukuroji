@@ -15,6 +15,7 @@ export {
   retryBulkOperation,
   undoBulkOperation,
 } from './application/bulk-operation-service'
+export { orderBulkArchiveItems } from './application/bulk-archive-order'
 export {
   type AutomationActionExecutionContext,
   type AutomationActionExecutor,

@@ -475,6 +475,10 @@ export type SidebarProps = {
    */
   onSelectTeamView?: (teamId: string, viewId: SidebarTeamViewId) => void
   /**
+   * Whether the deployment serves Software factory, which owns the Team Factory board view.
+   */
+  showFactoryBoard?: boolean
+  /**
    * プロジェクトが選択されたときに呼ばれます。
    */
   onSelectProject?: (projectId: string, teamId: string) => void
@@ -758,6 +762,7 @@ export function Sidebar({
   onArchiveProject,
   onSelectNav,
   onSelectTeamView,
+  showFactoryBoard = true,
   onSelectProject,
   onShowAllQuickAccess,
   onShowAllProjects,
@@ -1178,6 +1183,7 @@ export function Sidebar({
                   activeTeamViewId={activeTeamViewId}
                   collapsed={isCollapsed}
                   labels={resolvedLabels}
+                  showFactoryBoard={showFactoryBoard}
                   team={currentTeam}
                   onSelectTeamView={updateActiveTeamView}
                 />
@@ -2201,6 +2207,7 @@ function CurrentTeamNavigation({
   activeTeamViewId,
   collapsed,
   labels,
+  showFactoryBoard,
   team,
   onSelectTeamView,
 }: {
@@ -2212,6 +2219,8 @@ function CurrentTeamNavigation({
   collapsed: boolean
   /** Resolved sidebar labels. */
   labels: SidebarLabels
+  /** Whether the Team Factory board view is offered. */
+  showFactoryBoard: boolean
   /** Current Team whose views are displayed. */
   team: SidebarTeam
   /** Navigates to one current-Team view. */
@@ -2235,13 +2244,15 @@ function CurrentTeamNavigation({
         label={labels.triage}
         onClick={() => onSelectTeamView(team.id, 'triage')}
       />
-      <SubNavButton
-        active={isTeamActive && activeTeamViewId === 'factory'}
-        collapsed={collapsed}
-        icon={LanesIcon}
-        label={labels.factoryBoard}
-        onClick={() => onSelectTeamView(team.id, 'factory')}
-      />
+      {showFactoryBoard ? (
+        <SubNavButton
+          active={isTeamActive && activeTeamViewId === 'factory'}
+          collapsed={collapsed}
+          icon={LanesIcon}
+          label={labels.factoryBoard}
+          onClick={() => onSelectTeamView(team.id, 'factory')}
+        />
+      ) : null}
       <SubNavButton
         active={isTeamActive && activeTeamViewId === 'issues'}
         collapsed={collapsed}

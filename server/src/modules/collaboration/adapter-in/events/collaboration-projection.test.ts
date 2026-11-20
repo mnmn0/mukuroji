@@ -4,6 +4,8 @@ import { AdminListGroupsForUserCommand, CognitoIdentityProviderClient } from '@a
 import { DocumentError, type GetDocumentRequest } from '../../../documents'
 import type { ApprovalNotificationSource } from '../../../files'
 import { DEFAULT_NOTIFICATION_PREFERENCES } from '../../../notifications/notifications'
+import { createAnalyticsDeliveryAuditNotifier } from '../../../analytics'
+import { TIMESHEET_REMINDER_EVENT_TYPE } from '../../../notifications'
 import { S3Client } from '@aws-sdk/client-s3'
 import {
   WORK_ITEM_SCHEMA_VERSION,
@@ -553,6 +555,124 @@ describe('collaboration projection pure helpers', () => {
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
     }
   })
+  test('projects a scheduled Analytics delivery to its recipient and re-checks Team access for external delivery', async () => {
+    const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    /** Writes one delivery through the public notifier and parses the captured outbox row. */
+    const delivery = async (visibility: 'shared' | 'team') => {
+      const items: Record<string, unknown>[] = []
+      const notify = createAnalyticsDeliveryAuditNotifier({
+        auditEventsTableName: 'audit-events',
+        auditRetentionDays: 30,
+        documentClient: {
+          async send(command) {
+            if (command.input.Item) items.push(command.input.Item)
+            return {}
+          },
+        },
+      })
+      await notify({
+        report: {
+          schemaVersion: 1, id: 'weekly-report', workspaceId: 'workspace-1', name: 'Weekly portfolio', visibility,
+          ...(visibility === 'team' ? { teamId: 'core' } : {}), ownerMemberKey: 'owner@example.com', timeZone: 'UTC',
+          revision: 1, filter: { period: { from: '2026-07-01T00:00:00.000Z', to: '2026-07-31T23:59:59.999Z' } },
+          widgets: [], createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
+        },
+        snapshotId: 'snapshot-1',
+        receipt: { workspaceId: 'workspace-1', reportId: 'weekly-report', occurrenceKey: 'occurrence', reportRevision: 1,
+          format: 'csv', snapshotId: 'snapshot-1', recipientMemberKeys: [memberKey], createdAt: '2026-07-12T12:00:00.000Z' },
+        recipientMemberKey: memberKey,
+        deliveredAt: '2026-07-12T12:00:00.000Z',
+      })
+      const [item] = items
+      return item ? parseAuditProjectionEvent(item) : undefined
+    }
+    const shared = await delivery('shared')
+    const team = await delivery('team')
+    if (!shared || !team) throw new Error('Analytics delivery events must parse.')
+    // The system actor never removes the recipient, and the row keeps the report link and title.
+    const [candidate] = groupNotificationCandidates(shared)
+    expect(candidate).toEqual({ memberKey, reasons: ['report-recipient'] })
+    if (!candidate) throw new Error('Analytics delivery must have one candidate.')
+    expect(createNotificationProjectionItem(shared, candidate, createNotificationProjectionDeliveryState(
+      `${shared.workspaceId}#${memberKey}`, shared.occurredAt, DEFAULT_NOTIFICATION_PREFERENCES,
+    ))).toMatchObject({
+      eventType: 'analytics.report.delivered',
+      entityId: 'weekly-report',
+      title: 'Weekly portfolio',
+      deepLink: '/reports?v=1&report=weekly-report&snapshot=snapshot-1',
+    })
+    expect(team.teamId).toBe('core')
+
+    let role = 'member'
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async () => ({
+      Item: { entryType: 'workspace-member', memberKey, role, status: 'active' }, $metadata: {},
+    }))
+    const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+    const cache = createNotificationDeliveryAuthorizationCache()
+    cache.expiresAt = Date.now() + 60_000
+    cache.directories.set('workspace-1', Promise.resolve([{ entryType: 'team', teamId: 'core' }]))
+    try {
+      expect(await authorizeNotificationDelivery(shared, memberKey, identity, cache)).toBe(true)
+      // A Team report goes out only while the recipient can still read that Team.
+      expect(await authorizeNotificationDelivery(team, memberKey, identity, cache)).toBe(false)
+      cache.directories.set('workspace-1', Promise.resolve([
+        { entryType: 'team', teamId: 'core' }, { entryType: 'project', teamId: 'core', projectId: 'platform' },
+        { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
+      ]))
+      expect(await authorizeNotificationDelivery(team, memberKey, identity, cache)).toBe(true)
+      // One readable Project is enough, as for the report itself; the generic Team rule needs all.
+      cache.directories.set('workspace-1', Promise.resolve([
+        { entryType: 'team', teamId: 'core' }, { entryType: 'project', teamId: 'core', projectId: 'platform' },
+        { entryType: 'project', teamId: 'core', projectId: 'private' },
+        { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'viewer' },
+      ]))
+      expect(await authorizeNotificationDelivery(team, memberKey, identity, cache)).toBe(true)
+      expect(await authorizeNotificationDelivery({ ...team, eventType: 'work-item.updated' }, memberKey, identity, cache)).toBe(false)
+      // An Enterprise recipient whose Work Item read covers one Project reads shared reports, as
+      // the Analytics routes and Inbox allow; the generic rule needs a Workspace-wide grant.
+      let scoped = createRealtimeEnterpriseSnapshot({
+        roleAssignments: [{ workspaceId: 'workspace-1', assignmentId: 'assignment-1', principalKind: 'member', principalId: memberKey,
+          roleId: 'custom:reader', source: 'direct', scope: { workspaceId: 'workspace-1', kind: 'project', targetId: 'platform' } }],
+        customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:reader', name: 'Reader', permissions: ['work-items.read'],
+          guestAssignable: true, revision: 1, createdAt: shared.occurredAt, updatedAt: shared.occurredAt }],
+      })
+      const scopedIdentity = { getSnapshot: async () => scoped }
+      cache.enterpriseSnapshots.clear()
+      expect(await authorizeNotificationDelivery(shared, memberKey, scopedIdentity, cache)).toBe(true)
+      expect(await authorizeNotificationDelivery(team, memberKey, scopedIdentity, cache)).toBe(true)
+      expect(await authorizeNotificationDelivery({ ...shared, eventType: 'work-item.updated' }, memberKey, scopedIdentity, cache))
+        .toBe(false)
+      // The same grant on a Project outside the Team does not open the Team report.
+      scoped = { ...scoped, roleAssignments: scoped.roleAssignments.map((assignment) =>
+        ({ ...assignment, scope: { workspaceId: 'workspace-1', kind: 'project', targetId: 'elsewhere' } })) }
+      cache.directories.set('workspace-1', Promise.resolve([
+        { entryType: 'team', teamId: 'core' }, { entryType: 'project', teamId: 'core', projectId: 'platform' },
+        { entryType: 'team', teamId: 'other' }, { entryType: 'project', teamId: 'other', projectId: 'elsewhere' },
+      ]))
+      cache.enterpriseSnapshots.clear()
+      expect(await authorizeNotificationDelivery(shared, memberKey, scopedIdentity, cache)).toBe(true)
+      expect(await authorizeNotificationDelivery(team, memberKey, scopedIdentity, cache)).toBe(false)
+      // Without any Work Item read, the shared report stays in-app only.
+      cache.enterpriseSnapshots.clear()
+      const unscoped = createRealtimeEnterpriseSnapshot({ roleAssignments: [{ workspaceId: 'workspace-1', assignmentId: 'assignment-2',
+        principalKind: 'member', principalId: memberKey, roleId: 'custom:none', source: 'direct',
+        scope: { workspaceId: 'workspace-1', kind: 'workspace' } }],
+      customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:none', name: 'None', permissions: ['workspace.read'],
+        guestAssignable: true, revision: 1, createdAt: shared.occurredAt, updatedAt: shared.occurredAt }] })
+      expect(await authorizeNotificationDelivery(shared, memberKey, { getSnapshot: async () => unscoped }, cache)).toBe(false)
+      cache.enterpriseSnapshots.clear()
+      role = 'guest'
+      expect(await authorizeNotificationDelivery(shared, memberKey, identity, cache)).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
   test('keeps explicitly selected workspace Automation notifications visible to active guests', async () => {
     const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
     const previous = keys.map((key) => process.env[key])
@@ -747,6 +867,42 @@ describe('collaboration projection pure helpers', () => {
       expect(await authorizeNotificationDelivery(dueSoon, memberKey, identity, cache)).toBe(false)
     } finally {
       setSystemTime()
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+  test('authorizes a timesheet reminder against its entry Project, not every Team Project', async () => {
+    const keys = ['WORKSPACE_ACCESS_TABLE_NAME', 'COGNITO_USER_POOL_ID']
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const memberKey = 'member@example.com'
+    const cache = createNotificationDeliveryAuthorizationCache()
+    cache.expiresAt = Date.now() + 60_000
+    cache.directories.set('workspace-1', Promise.resolve([
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      { entryType: 'project', teamId: 'core', projectId: 'secret' },
+      { entryType: 'project-member', teamId: 'core', projectId: 'platform', memberKey, role: 'member' },
+    ]))
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (!(command instanceof GetCommand)) throw new Error('Unexpected command')
+      return { Item: { entryType: 'workspace-member', memberKey, role: 'member', status: 'active' }, $metadata: {} }
+    })
+    const identity = { getSnapshot: async () => createRealtimeEnterpriseSnapshot() }
+    const reminder = createProjectionEvent({
+      eventType: TIMESHEET_REMINDER_EVENT_TYPE, teamId: 'core', projectId: 'platform',
+      scopeKey: 'workspace-1#team#core', entityId: 'team/core/timesheet',
+      timeEntryIds: ['entry-1'], timesheetDueBefore: '2026-07-05T00:00:00.000Z',
+      notificationCandidates: [{ memberKey, reason: 'timesheet' }],
+    })
+    try {
+      expect(await authorizeNotificationDelivery(reminder, memberKey, identity, cache)).toBe(true)
+      // The member cannot read the other Project, nor the Team as a whole.
+      expect(await authorizeNotificationDelivery({ ...reminder, projectId: 'secret' }, memberKey, identity, cache)).toBe(false)
+      expect(await authorizeNotificationDelivery({ ...reminder, projectId: undefined }, memberKey, identity, cache)).toBe(false)
+    } finally {
       send.mockRestore()
       groups.mockRestore()
       keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
@@ -2472,6 +2628,188 @@ describe('collaboration projection pure helpers', () => {
       expect(await processCollaborationProjectionBatch({ Records: [record('no-group')] }, dependencies))
         .toEqual({ batchItemFailures: [] })
       expect(notifications.some((item) => item.eventId === 'no-group')).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
+  test('projects a timesheet reminder for a member whose Project access is an Enterprise role only', async () => {
+    const keys = [
+      'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
+      'WORK_ITEMS_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME',
+      'PLANNING_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID',
+    ]
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const notifications: Array<Record<string, unknown>> = []
+    const notificationTransactions: unknown[][] = []
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand) {
+        if (command.input.TableName === 'WORKSPACE_ACCESS_TABLE_NAME') {
+          const recordKey = String(command.input.Key?.recordKey)
+          return { Item: { entryType: 'workspace-member', memberKey: recordKey.slice('MEMBER#'.length), role: 'member', status: 'active' }, $metadata: {} }
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof QueryCommand) {
+        if (command.input.TableName === 'COLLABORATION_TABLE_NAME') return { Items: [], $metadata: {} }
+        if (command.input.TableName === 'PROJECT_DIRECTORY_TABLE_NAME') {
+          // No legacy project-member row: access comes only from the Enterprise role below.
+          return { Items: [
+            { entryType: 'team', teamId: 'core' },
+            { entryType: 'project', teamId: 'core', projectId: 'platform' },
+          ], $metadata: {} }
+        }
+      }
+      if (command instanceof TransactWriteCommand) {
+        const items = command.input.TransactItems ?? []
+        if (items.some((item) => item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME')) notificationTransactions.push(items)
+        for (const item of items) {
+          if (item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME' && item.Put.Item) notifications.push(item.Put.Item)
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof PutCommand) return { $metadata: {} }
+      throw new Error('Unexpected projection command')
+    })
+    let assigned = true
+    const snapshot = () => createRealtimeEnterpriseSnapshot({
+      customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:work-item-reader', name: 'Work Item reader',
+        permissions: ['work-items.read'], guestAssignable: false, revision: 1,
+        createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z' }],
+      roleAssignments: assigned ? [{ workspaceId: 'workspace-1', assignmentId: 'reader', principalKind: 'member',
+        principalId: 'member@example.com', roleId: 'custom:work-item-reader', source: 'direct',
+        scope: { workspaceId: 'workspace-1', kind: 'project', targetId: 'platform' } }] : [],
+    })
+    const entryRevisionCheck = { ConditionCheck: {
+      TableName: 'AnalyticsTable', Key: { workspaceId: 'workspace-1', recordKey: 'TIME_ENTRY#core#entry-1' },
+      ConditionExpression: '#revision = :revision', ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':revision': 1 },
+    } }
+    const dependencies = {
+      deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
+      curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
+      enterpriseIdentity: { getSnapshot: async () => snapshot() },
+      timesheetReminders: { findUnsubmittedEntry: async () => entryRevisionCheck },
+    }
+    const record = (eventId: string) => ({
+      eventName: 'INSERT', dynamodb: { SequenceNumber: eventId, NewImage: {
+        eventId: { S: eventId }, eventType: { S: TIMESHEET_REMINDER_EVENT_TYPE }, workspaceId: { S: 'workspace-1' },
+        entityType: { S: 'timesheet' }, entityId: { S: 'team/core/timesheet' },
+        occurredAt: { S: '2026-07-12T00:00:00.000Z' }, outboxStatus: { S: 'pending' },
+        metadata: { M: {
+          actorMemberKey: { S: 'system:notification-schedule' }, teamId: { S: 'core' }, projectId: { S: 'platform' },
+          deepLink: { S: '/teams/core/timesheet?week=2026-07-01T00%3A00%3A00.000Z' },
+          timeEntryIds: { L: [{ S: 'entry-1' }] }, timesheetDueBefore: { S: '2026-07-05T00:00:00.000Z' },
+          notificationCandidates: { L: [{ M: { memberKey: { S: 'member@example.com' }, reason: { S: 'timesheet' } } }] },
+        } },
+      } },
+    })
+    try {
+      expect(await processCollaborationProjectionBatch({ Records: [record('enterprise-reader')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.map((item) => [item.eventId, item.recipientMemberKey]))
+        .toEqual([['enterprise-reader', 'member@example.com']])
+      // The entry revision fence commits first, in the same transaction as the notification.
+      expect(notificationTransactions).toHaveLength(1)
+      expect(notificationTransactions[0]?.[0]).toEqual(entryRevisionCheck)
+      expect(notificationTransactions[0]).toContainEqual(expect.objectContaining({
+        Put: expect.objectContaining({ TableName: 'NOTIFICATIONS_TABLE_NAME' }),
+      }))
+
+      // Without the role there is no legacy membership either, so the reminder is not projected.
+      assigned = false
+      expect(await processCollaborationProjectionBatch({ Records: [record('no-role')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.some((item) => item.eventId === 'no-role')).toBe(false)
+    } finally {
+      send.mockRestore()
+      groups.mockRestore()
+      keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index] })
+    }
+  })
+
+  test('projects a Team report delivery for a recipient whose Project access is an Enterprise role only', async () => {
+    const keys = [
+      'PROCESSED_AUDIT_EVENTS_TABLE_NAME', 'WORKSPACE_ACCESS_TABLE_NAME', 'NOTIFICATIONS_TABLE_NAME',
+      'WORK_ITEMS_TABLE_NAME', 'COLLABORATION_TABLE_NAME', 'PROJECT_DIRECTORY_TABLE_NAME',
+      'PLANNING_TABLE_NAME', 'SYSTEM_ADMIN_GROUPS', 'COGNITO_USER_POOL_ID',
+    ]
+    const previous = keys.map((key) => process.env[key])
+    keys.forEach((key) => { process.env[key] = key })
+    const notifications: Array<Record<string, unknown>> = []
+    const groups = spyOn(CognitoIdentityProviderClient.prototype, 'send').mockImplementation(async () => ({ Groups: [], $metadata: {} }))
+    const send = spyOn(DynamoDBDocumentClient.prototype, 'send').mockImplementation(async (command) => {
+      if (command instanceof GetCommand) {
+        if (command.input.TableName === 'WORKSPACE_ACCESS_TABLE_NAME') {
+          const recordKey = String(command.input.Key?.recordKey)
+          return { Item: { entryType: 'workspace-member', memberKey: recordKey.slice('MEMBER#'.length), role: 'member', status: 'active' }, $metadata: {} }
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof QueryCommand) {
+        if (command.input.TableName === 'COLLABORATION_TABLE_NAME') return { Items: [], $metadata: {} }
+        if (command.input.TableName === 'PROJECT_DIRECTORY_TABLE_NAME') {
+          // No legacy project-member row: access comes only from the Enterprise role below.
+          return { Items: [
+            { entryType: 'team', teamId: 'core' },
+            { entryType: 'project', teamId: 'core', projectId: 'platform' },
+            { entryType: 'team', teamId: 'other' },
+            { entryType: 'project', teamId: 'other', projectId: 'elsewhere' },
+          ], $metadata: {} }
+        }
+      }
+      if (command instanceof TransactWriteCommand) {
+        for (const item of command.input.TransactItems ?? []) {
+          if (item.Put?.TableName === 'NOTIFICATIONS_TABLE_NAME' && item.Put.Item) notifications.push(item.Put.Item)
+        }
+        return { $metadata: {} }
+      }
+      if (command instanceof PutCommand) return { $metadata: {} }
+      throw new Error('Unexpected projection command')
+    })
+    let grantedProjectId = 'platform'
+    const snapshot = () => createRealtimeEnterpriseSnapshot({
+      customRoles: [{ workspaceId: 'workspace-1', roleId: 'custom:work-item-reader', name: 'Work Item reader',
+        permissions: ['work-items.read'], guestAssignable: false, revision: 1,
+        createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z' }],
+      roleAssignments: [{ workspaceId: 'workspace-1', assignmentId: 'reader', principalKind: 'member',
+        principalId: 'member@example.com', roleId: 'custom:work-item-reader', source: 'direct',
+        scope: { workspaceId: 'workspace-1', kind: 'project', targetId: grantedProjectId } }],
+    })
+    const dependencies = {
+      deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
+      curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
+      enterpriseIdentity: { getSnapshot: async () => snapshot() },
+    }
+    const record = (eventId: string) => ({
+      eventName: 'INSERT', dynamodb: { SequenceNumber: eventId, NewImage: {
+        eventId: { S: eventId }, eventType: { S: 'analytics.report.delivered' }, workspaceId: { S: 'workspace-1' },
+        entityType: { S: 'analytics-report' }, entityId: { S: 'weekly-report' },
+        targetType: { S: 'analytics-snapshot' }, targetId: { S: 'snapshot-1' },
+        occurredAt: { S: '2026-07-12T00:00:00.000Z' }, outboxStatus: { S: 'pending' },
+        metadata: { M: {
+          actorMemberKey: { S: 'system' }, teamId: { S: 'core' },
+          deepLink: { S: '/reports?v=1&report=weekly-report&snapshot=snapshot-1' },
+          notificationTitle: { S: 'Weekly portfolio' },
+          notificationCandidates: { L: [{ M: { memberKey: { S: 'member@example.com' }, reason: { S: 'report-recipient' } } }] },
+        } },
+      } },
+    })
+    try {
+      expect(await processCollaborationProjectionBatch({ Records: [record('same-team-grant')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.map((item) => [item.eventId, item.recipientMemberKey]))
+        .toEqual([['same-team-grant', 'member@example.com']])
+
+      // A grant on another Team's Project does not open this Team's report.
+      grantedProjectId = 'elsewhere'
+      expect(await processCollaborationProjectionBatch({ Records: [record('other-team-grant')] }, dependencies))
+        .toEqual({ batchItemFailures: [] })
+      expect(notifications.some((item) => item.eventId === 'other-team-grant')).toBe(false)
     } finally {
       send.mockRestore()
       groups.mockRestore()

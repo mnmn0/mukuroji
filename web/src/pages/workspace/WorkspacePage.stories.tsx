@@ -12,7 +12,10 @@ import {
   type WorkspaceCommandMenuContextValue,
 } from '../../commands/ui/WorkspaceCommandMenuContext'
 import { focusQueueResponseFixture } from '../../features/focus-queue/fixtures'
-import { notificationInboxControllerFixture } from '../../notifications/fixtures'
+import {
+  notificationInboxControllerFixture,
+  reportDeliveryNotificationFixture,
+} from '../../notifications/fixtures'
 import { WorkspaceInboxView } from '../../notifications/ui/WorkspaceInboxView'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
 import type { TeamProjectMemberAccess } from '../../projects/model/teamInsights'
@@ -40,6 +43,7 @@ import {
   WorkspaceRouteContent,
 } from '../../workspace/ui/WorkspaceRoute'
 import type { WorkspaceRouteContextValue } from '../../workspace/ui/WorkspaceRouteProvider'
+import { SettingsSectionNav } from '../../workspace/ui/SettingsSectionNav'
 import { WorkspaceSettingsView } from '../../workspace/ui/WorkspaceSettingsView'
 import { createWorkItemSummaryFromWorkItems } from '../../work-items/model/workItemSummary'
 
@@ -160,6 +164,7 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   canManageCustomerRequests: true,
   canManageCustomerViews: true,
   canViewCustomerSensitiveData: true,
+  softwareFactoryEnabled: true,
   canLoadWorkspaceData: true,
   canManageWorkspaceConfiguration: true,
   canMutateTeamConfiguration: true,
@@ -572,6 +577,31 @@ export const InboxRoute: Story = {
   ),
 }
 
+/** The `/inbox` route with a scheduled Analytics report delivery for its recipient. */
+export const InboxWithReportDelivery: Story = {
+  render: () => (
+    <WorkspaceInboxView
+      locale="ja"
+      notificationInbox={{
+        ...notificationInboxControllerFixture,
+        availableEventTypes: [reportDeliveryNotificationFixture.eventType],
+        hasMore: false,
+        notifications: [reportDeliveryNotificationFixture],
+        unreadCount: 1,
+      }}
+      t={t}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await expect(canvas.getByText('週次ポートフォリオ')).toBeVisible()
+    await expect(canvas.getAllByText(t('workspace.inbox.event.reportDelivered')).length).toBeGreaterThan(0)
+    await expect(canvas.getByText(t('workspace.inbox.reason.reportRecipient'))).toBeVisible()
+    await expect(canvas.getByText(t('workspace.inbox.summary.reportDelivered'))).toBeVisible()
+  },
+}
+
 /** The `/inbox` route when the notification stream is empty. */
 export const InboxWithoutNotifications: Story = {
   render: () => (
@@ -715,7 +745,12 @@ export const HelpRoute: Story = {
   render: () => <HelpWorkspaceView t={t} />,
 }
 
-/** The `/settings` route display preferences without authenticated feature requests. */
+/** The navigation between personal, Workspace admin, and Team settings, on the Team area. */
+export const SettingsSectionNavigation: Story = {
+  render: () => <SettingsSectionNav current="team" t={t} />,
+}
+
+/** The `/settings/personal` route display preferences without authenticated feature requests. */
 export const SettingsRoute: Story = {
   render: () => (
     <WorkspaceSettingsView

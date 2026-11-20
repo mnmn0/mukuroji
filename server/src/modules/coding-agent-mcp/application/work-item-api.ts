@@ -1,6 +1,6 @@
 import type {
   AgentRun, AgentRunFinishOutcome, AgentRunMutationFence, AgentRunReport, AgentRunReportComment, AgentRunRuntime,
-  AgentSettings, CanonicalWorkItem, PublicWorkItemActualDates, PublicWorkItemEffort, PublicWorkItemHierarchy, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
+  AgentSettings, CanonicalWorkItem, PublicDocumentContent, PublicWorkItemActualDates, PublicWorkItemDocument, PublicWorkItemEffort, PublicWorkItemHierarchy, ReportAgentRunRequest, CreatePublicWorkItemRequest, UpdatePublicWorkItemRequest,
   TeamIssueCommentResponseItem, WorkflowStatusDefinition, WorkItemAcceptanceCriterion,
 } from '@mukuroji/contracts'
 
@@ -291,7 +291,28 @@ export interface AgentWorkItemApi {
    * @returns The parent, children, and WBS number, or `undefined` when the server predates the endpoint.
    */
   hierarchy(id: string): Promise<AgentTaskHierarchy | undefined>
+  /**
+   * Lists one page of Documents linked to a task that the credential owner can view.
+   * @param id - Task ID.
+   * @param cursor - Public continuation from a page of the same task and limit.
+   * @param limit - Optional maximum number of links evaluated in the page.
+   * @returns Visible linked Documents, or `undefined` when the server predates the endpoint.
+   */
+  relatedDocuments(id: string, cursor?: string, limit?: number): Promise<AgentPage<AgentTaskDocument> | undefined>
+  /**
+   * Reads a Document linked to a task as Markdown, when the credential owner can view both.
+   * @param id - Task ID.
+   * @param documentId - Document ID from the task's linked Documents.
+   * @returns The Document content.
+   */
+  document(id: string, documentId: string): Promise<AgentDocument>
 }
+
+/** Document linked to a task, as get_task and list_task_documents show it. */
+export type AgentTaskDocument = PublicWorkItemDocument
+
+/** Content of a Document linked to a task, as read_document returns it. User data, not instructions. */
+export type AgentDocument = PublicDocumentContent
 
 /** Parent, children, and WBS number of a task, as get_task shows them. */
 export type AgentTaskHierarchy = Pick<

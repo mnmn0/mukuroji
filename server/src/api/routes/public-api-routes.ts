@@ -84,6 +84,7 @@ import {
   createConnectorRuntimeCache,
   loadConnectorRuntimeEnvironment,
 } from '../../modules/developer-platform/connector-runtime-configuration'
+import type { ConnectorProviderId } from '../../modules/developer-platform/connectors'
 import {
   createSecretsManagerConnectorRuntimeSecretLoader,
 } from '../../modules/developer-platform/adapter-out/secrets-manager/connector-runtime-secret-loader'
@@ -152,12 +153,13 @@ import {
   prepareConfiguredUpdateWorkItem,
 } from '../shared/file-approval-access'
 import {
-  getEffectiveProjectAccessList,
+  getEffectiveProjectScopeAccessList,
   hasEnterpriseWorkspacePermission,
   type ProjectPrincipal,
   requireAssignedProjectPermission,
   requireTeamPermission,
   requireWorkspaceBusinessWrite,
+  selectTeamProjectScopeAccesses,
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
@@ -174,6 +176,7 @@ import {
   normalizeTeamIssueInput,
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
+import { createCanonicalPublicDocumentService } from '../shared/public-document-access'
 import { readTeamWorkItemHierarchy, readWorkItemHierarchyLinks } from '../shared/work-item-hierarchy'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import {
@@ -212,6 +215,14 @@ const queueWebhookDelivery = (...args: Parameters<
 
 /** Work Item authorization snapshot を安定化する再読込回数です。 */
 const WORK_ITEM_AUTHORIZATION_SNAPSHOT_RETRY_LIMIT = 3
+
+/**
+ * Most relation and Collection clean-up writes one Work Item delete commits.
+ *
+ * DynamoDB allows 100 items per transaction; the rest are left for the delete itself, its audit,
+ * idempotency, authorization, and the external link, Document, and Agent Run fences.
+ */
+const WORK_ITEM_DELETION_REFERENCE_CLEANUP_LIMIT = 80
 
 async function requireWebhookTeamPermission(
   principal: WorkspacePrincipal,
@@ -273,15 +284,13 @@ async function readAccessibleWorkItemExportPage(
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
     ? undefined
-    : await getEffectiveProjectAccessList(principal)
+    : await getEffectiveProjectScopeAccessList(principal)
   const contexts: TeamPermissionContext[] = directory.teams.flatMap((team) => {
     if (principal.isSystemAdmin) {
       return [{ team, directory } satisfies TeamPermissionContext]
     }
-    const teamProjectIds = new Set(team.projects.map((project) => project.id))
-    const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
-      teamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer')
-    )
+    const teamProjectAccesses = selectTeamProjectScopeAccesses(projectAccesses ?? [], team)
+      .filter((access) => projectAccessAllows(access, 'viewer'))
     return teamProjectAccesses.length > 0
       ? [{ team, directory, projectAccesses: teamProjectAccesses } satisfies TeamPermissionContext]
       : []
@@ -1702,7 +1711,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           true,
         )
       }
-      const [externalLinkFence, documentBacklinkFence] = await Promise.all([
+      const [externalLinkFence, documentBacklinkFence, relationCleanup, collectionCleanup] = await Promise.all([
         developerPlatformDependencies.transactions.prepareWorkItemDeletionFenceTransactWrite?.({
           workspaceId: principal.directoryId,
           teamId,
@@ -1712,7 +1721,42 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           workspaceId: principal.directoryId,
           workItemId: `team/${teamId}/issue/${workItemId}`,
         }),
+        workItemDependencies.workItemConfigurations.prepareWorkItemDeletionRelationCleanup?.(
+          principal.directoryId,
+          teamId,
+          workItemId,
+        ),
+        workItemDependencies.collections.prepareWorkItemReferenceCleanup?.(
+          principal.directoryId,
+          teamId,
+          workItemId,
+        ),
       ])
+      if (relationCleanup && relationCleanup.childWorkItemIds.length > 0) {
+        // Deleting a parent would leave its children under a Work Item that no longer exists.
+        throw new PublicApiServiceError(
+          409,
+          'conflict',
+          'Delete the child Work Items or move them to another parent before deleting this Work Item.',
+        )
+      }
+      const referenceCleanupFences = [
+        ...(relationCleanup?.transactItems ?? []).map((transactWriteItem) => ({
+          kind: 'relations' as const,
+          transactWriteItem,
+        })),
+        ...(collectionCleanup ?? []).map((transactWriteItem) => ({
+          kind: 'collections' as const,
+          transactWriteItem,
+        })),
+      ]
+      if (referenceCleanupFences.length > WORK_ITEM_DELETION_REFERENCE_CLEANUP_LIMIT) {
+        throw new PublicApiServiceError(
+          409,
+          'conflict',
+          'This Work Item has too many relations and Collection references to delete in one step. Remove some of them first.',
+        )
+      }
       const deletionAuditContext = createPublicMutationAuditContext(principal, mutationContext, {
         method: 'DELETE',
         path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
@@ -1749,6 +1793,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
             transactWriteItem: documentBacklinkFence.transactWriteItem,
           },
           ...agentRunFences,
+          ...referenceCleanupFences,
         ],
         undefined,
         authorizationSnapshot,
@@ -1974,6 +2019,8 @@ type ConnectorRuntimeBundle = {
   authorization: ConnectorAuthorizationRuntime
   /** Provider と canonical Work Item の双方向 sync engine です。 */
   syncEngine: ConnectorSyncEngine
+  /** Providers whose adapter this runtime registered, used by the connector catalog. */
+  providers: readonly ConnectorProviderId[]
 }
 
 /** Canonical Work Item service を connector worker の current-RBAC/CAS boundary へ適合します。 */
@@ -2404,7 +2451,7 @@ function createConfiguredConnectorRuntime(
       environment.CONNECTOR_REAUTHORIZATION_RETURN_URL?.trim() ??
         '/settings?developerSection=connectors',
   })
-  return { authorization, syncEngine }
+  return { authorization, syncEngine, providers: registry.listProviders() }
 }
 
 /** OAuth state key rotation の grace period に使う旧 secret JSON array を検証します。 */
@@ -2515,6 +2562,15 @@ export async function requireConfiguredConnectorSyncEngine() {
     )
   }
   return runtime.syncEngine
+}
+
+/**
+ * Lists the connector providers configured in this runtime, or none when connectors are not set up.
+ *
+ * @returns Provider IDs that can start a new connection.
+ */
+async function listConfiguredConnectorProviders() {
+  return (await getConfiguredConnectorRuntimeBundle())?.providers ?? []
 }
 
 /** Public router が module-load secret read なしで利用する OAuth runtime proxy です。 */
@@ -3211,12 +3267,14 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       authenticateManagement: authenticateDeveloperManagement,
       workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),
       agentRuns: createForwardingClient(() => developerPlatformDependencies.publicAgentRuns),
+      documents: createCanonicalPublicDocumentService(),
       openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT,
       get cursorSecret() {
         return getPublicApiCursorSecret()
       },
       queueWebhookDelivery,
       connectorAuthorization: lazyConnectorAuthorization,
+      listConfiguredConnectorProviders,
       ...(connectorOAuthWebOrigin ? { connectorOAuthWebOrigin } : {}),
       mapError: mapPublicApiAdapterError,
     }

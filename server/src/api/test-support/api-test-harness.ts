@@ -719,6 +719,7 @@ function createWorkspaceAccessFake(
     markMemberCredentialActionApplying: async () => undefined,
     readMemberCredentialActionProgress: async () => 'none',
     completeMemberCredentialAction: async () => undefined,
+    revokeMemberSignIns: async () => undefined,
     reconcileDirectoryMember: unsupported,
     deprovisionDirectoryMember: unsupported,
     ...overrides,
@@ -1003,6 +1004,9 @@ function createFakeWorkItemConfigurationClient(
     },
     async listRelationGraph() {
       return { relations: [], graphRevision: 0 }
+    },
+    async getChildRestoreGeneration() {
+      return 0
     },
     async createRelation(_workspaceId, _teamId, input) {
       return createFakeRelationMutationResponse(input)
@@ -1510,6 +1514,8 @@ function configureFakeProjectClients(
     /** Detail fake が返す legacy search custom fields です。 */
     /** Detail fake が TeamIssueNotFound を返す Work Item ID です。 */
     detailMissingIssueIds?: string[]
+    /** Work Item IDs the detail fake returns as archived. */
+    detailArchivedIssueIds?: string[]
     /** Work Item detail read の障害を再現する error です。 */
     detailReadError?: Error
     /** Work Item detail read の同時実行を観測または制御する hook です。 */
@@ -1530,6 +1536,8 @@ function configureFakeProjectClients(
     workItemRelations?: WorkItemRelation[]
     /** Schedule preview fake が返す relation graph revision です。 */
     workItemRelationGraphRevision?: number
+    /** Archive fake が返す親の子復元 generation です。 */
+    childRestoreGeneration?: number
     /** Project 作成 transaction と template application receipt の同時確定を再現する hook です。 */
     projectCreateHook?: (
       input: Record<string, unknown>,
@@ -1710,6 +1718,8 @@ function configureFakeProjectClients(
     projectLifecycleTransitions,
     cognitoIdentityProviderDescriptions: [] as string[],
     cognitoSsoAppClientDescriptions: [] as string[],
+    /** App clients named by locally verified access token reads (enterprise SSO tokens). */
+    verifiedAccessTokenReads: [] as string[],
     directoryReads: [] as Array<{
       directoryId: string
       locale: string
@@ -2073,6 +2083,11 @@ function configureFakeProjectClients(
           ],
         }
       },
+      async getUserFromVerifiedAccessToken(accessToken, clientId, verificationOptions) {
+        calls.verifiedAccessTokenReads.push(clientId)
+        const token = verifyFakeAccessToken(accessToken, clientId, verificationOptions?.allowExpired)
+        return { ...await this.getUser(accessToken), token }
+      },
       async listUsers(input) {
         calls.userLists.push(input)
         const page = options.cognitoUserPages?.[calls.userLists.length - 1]
@@ -2209,11 +2224,18 @@ function configureFakeProjectClients(
             },
           }
         : {}),
-      async listRelations() {
+      async listRelations(_workspaceId: string, _teamId: string, workItemId: string, listOptions?: { types?: readonly string[] }) {
+        // Like the DynamoDB adapter, a read returns only the asked Work Item's relations of the asked types.
         return {
-          relations: (options.workItemRelations ?? []).map((relation) => ({ ...relation })),
+          relations: (options.workItemRelations ?? [])
+            .filter((relation) => relation.sourceWorkItemId === workItemId &&
+              (listOptions?.types === undefined || listOptions.types.includes(relation.type)))
+            .map((relation) => ({ ...relation })),
           graphRevision: options.workItemRelationGraphRevision ?? 0,
         }
+      },
+      async getChildRestoreGeneration() {
+        return options.childRestoreGeneration ?? 0
       },
     }),
     projectDirectory: {
@@ -3095,6 +3117,9 @@ function configureFakeProjectClients(
             dueDate: deriveWorkItemScheduleDueDate(detailSchedule),
             schedule: detailSchedule,
             priority: 'high',
+            ...(options.detailArchivedIssueIds?.includes(issueId)
+              ? { archivedAt: '2026-06-09T00:00:00.000Z', archivedBy: 'demo@example.com' }
+              : {}),
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: options.detailUpdatedAts?.[detailReadIndex] ??
               '2026-06-08T00:00:00.000Z',
@@ -3748,6 +3773,46 @@ function createWorkspaceBootstrapItems() {
       username: 'owner-cognito-id',
     },
   ]
+}
+
+/**
+ * Stands in for JWKS verification of a fake access token from {@link createAccessToken}.
+ *
+ * A token whose signature segment is `invalid-signature`, that names another app client, that is
+ * not an access token or that has expired is rejected like a real verification failure.
+ *
+ * @param accessToken - Fake access token.
+ * @param clientId - App client the token must have been issued to.
+ * @param allowExpired - Accepts an expired token, as sign-out does.
+ * @returns The claims a real verification would return.
+ */
+function verifyFakeAccessToken(accessToken: string, clientId: string, allowExpired = false) {
+  const [, encodedPayload = '', signature] = accessToken.split('.')
+  let claims: Record<string, unknown> = {}
+  try {
+    const decoded: unknown = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'))
+    if (typeof decoded === 'object' && decoded !== null && !Array.isArray(decoded)) {
+      claims = Object.fromEntries(Object.entries(decoded))
+    }
+  } catch {
+    claims = {}
+  }
+  const expiresAt = typeof claims.exp === 'number' ? claims.exp : Math.floor(Date.now() / 1_000) + 3_600
+  if (
+    signature === 'invalid-signature' ||
+    claims.client_id !== clientId ||
+    claims.token_use !== 'access' ||
+    (!allowExpired && expiresAt <= Math.floor(Date.now() / 1_000))
+  ) {
+    throw new CognitoServiceError(401, 'NotAuthorizedException', 'Access token is invalid.')
+  }
+  return {
+    sub: typeof claims.sub === 'string' ? claims.sub : 'demo-sub',
+    username: typeof claims.username === 'string' ? claims.username : 'demo@example.com',
+    clientId,
+    expiresAt,
+    ...(typeof claims.origin_jti === 'string' ? { originJti: claims.origin_jti } : {}),
+  }
 }
 
 function createAccessToken(groups: string[] = [], claims: Record<string, unknown> = {}) {

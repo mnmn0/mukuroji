@@ -39,6 +39,7 @@ import {
   retryBulkOperation,
   undoBulkOperation,
 } from '../../bulk-operations/api'
+import { readWorkItemArchiveFailureMessageKey } from '../../bulk-operations/model/workItemArchive'
 import { applyWorkItemArchive } from '../../bulk-operations/mutations/workItemArchive'
 import { ArchivedWorkItemsPanelContainer } from '../../issues/ui/ArchivedWorkItemsPanelContainer'
 import { useArchivedWorkItemsRefresh } from '../../issues/queries/useArchivedWorkItems'
@@ -63,6 +64,7 @@ import {
   createProjectCharterPersonCandidates,
 } from '../../projects/model/projectCharterView'
 import { ProjectCharterSection } from '../../projects/ui/ProjectCharterSection'
+import { ProjectRaidLogSection } from '../../projects/ui/ProjectRaidLogSection'
 import {
   TeamIssuesApiError,
   type TeamIssue,
@@ -283,6 +285,7 @@ export function TaskPage() {
     isQuickAccessLoading,
     isQuickAccessSaving,
     onToggleProjectQuickAccess,
+    softwareFactoryEnabled,
   } = useWorkspaceRouteContext()
   const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
   const refreshArchivedWorkItems = useArchivedWorkItemsRefresh()
@@ -1726,6 +1729,10 @@ export function TaskPage() {
         accessToken,
         archived,
         fallbackErrorMessage: t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'),
+        localizeFailure: (code) => {
+          const key = readWorkItemArchiveFailureMessageKey(code)
+          return key ? t(key) : undefined
+        },
         runner: mutationRequestRunner,
         target: task,
         workspaceId,
@@ -2045,6 +2052,7 @@ export function TaskPage() {
       key={taskScopeKey}
       scheduleWindowNavigation={scheduleWindowNavigation}
       aiAssistanceEnabled={aiPlanningAssistanceEnabled}
+      softwareFactoryEnabled={softwareFactoryEnabled}
       aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled}
       renderAiAssistance={taskDetailAiAssistanceRenderer}
       workspaceId={workspaceId}
@@ -2089,25 +2097,42 @@ export function TaskPage() {
       canAccessTriage={canAccessTriage}
       canManageProjectMembers={canManageProjectMembers}
       projectCharterPanel={(
-        <ProjectCharterSection
-          accessToken={accessToken}
-          canDecideProposal={canMutateContent && isWorkspaceAdministrator}
-          canEdit={canEditProjectCharter}
-          canMutate={canMutateContent}
-          draftStore={projectCharterDraftStore}
-          enabled={Boolean(user && !currentUserError)}
-          members={projectCharterCandidates}
-          projectId={projectId}
-          t={t}
-          teamId={interactionTeamId}
-          onSessionError={(error, requestAccessToken) => {
-            // A late failure of a request sent with a token that was replaced since, such as one
-            // from before signing in again, must not clear the current session.
-            if (isSameAuthSessionToken(getAuthSession()?.accessToken, requestAccessToken)) {
-              redirectEnterpriseSessionError(error)
-            }
-          }}
-        />
+        <>
+          <ProjectCharterSection
+            accessToken={accessToken}
+            canDecideProposal={canMutateContent && isWorkspaceAdministrator}
+            canEdit={canEditProjectCharter}
+            canMutate={canMutateContent}
+            draftStore={projectCharterDraftStore}
+            enabled={Boolean(user && !currentUserError)}
+            members={projectCharterCandidates}
+            projectId={projectId}
+            t={t}
+            teamId={interactionTeamId}
+            onSessionError={(error, requestAccessToken) => {
+              // A late failure of a request sent with a token that was replaced since, such as one
+              // from before signing in again, must not clear the current session.
+              if (isSameAuthSessionToken(getAuthSession()?.accessToken, requestAccessToken)) {
+                redirectEnterpriseSessionError(error)
+              }
+            }}
+          />
+          <ProjectRaidLogSection
+            accessToken={accessToken}
+            canEdit={canMutateProjectTasks}
+            canMutate={canMutateContent}
+            enabled={Boolean(user && !currentUserError)}
+            projectId={projectId}
+            t={t}
+            teamId={interactionTeamId}
+            onSessionError={(error, requestAccessToken) => {
+              // Same rule as the charter: only a failure of the current session's token signs out.
+              if (isSameAuthSessionToken(getAuthSession()?.accessToken, requestAccessToken)) {
+                redirectEnterpriseSessionError(error)
+              }
+            }}
+          />
+        </>
       )}
       canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
       collaboration={collaboration}

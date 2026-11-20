@@ -1,7 +1,9 @@
-import type {
-  PlanningHealth,
-  PlanningUpdateState,
-  PlanningUpdateTargetSummary,
+import {
+  FACTORY_BOARD_LANES,
+  type FactoryBoardLane,
+  type PlanningHealth,
+  type PlanningUpdateState,
+  type PlanningUpdateTargetSummary,
 } from '@mukuroji/contracts'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router'
@@ -18,6 +20,7 @@ import { ProgressBar } from '../../shared/ui/WorkbenchPrimitives'
 import type { ProjectDirectoryProject, ProjectDirectoryTeam } from '../api/directory'
 import {
   resolveProjectOverviewMemberName,
+  type ProjectOverviewAgentRuns,
   type ProjectOverviewMembers,
   type ProjectOverviewSchedule,
   type ProjectOverviewWorkItemSummary,
@@ -28,6 +31,9 @@ export type ProjectOverviewWorkItemsError = 'load' | 'limit'
 
 /** Why the Project members could not be shown: a failed read, or a role that may not read them. */
 export type ProjectOverviewMembersError = 'load' | 'denied'
+
+/** Why the Agent Run lane counts could not be shown: a failed read, or a role that may not read the board. */
+export type ProjectOverviewAgentRunsError = 'load' | 'denied'
 
 /** Props for the pure Project overview view. */
 export type ProjectOverviewViewProps = {
@@ -59,12 +65,22 @@ export type ProjectOverviewViewProps = {
   membersError?: ProjectOverviewMembersError
   /** Whether the Project members are still loading. */
   isMembersLoading: boolean
+  /** Whether to show the Agent Run lane counts, which only Software factory deployments serve. */
+  showAgentRuns?: boolean
+  /** Agent Run lane counts of the Project, absent while loading or after a failure. */
+  agentRuns?: ProjectOverviewAgentRuns
+  /** Why the Agent Run lane counts could not be shown, absent when they loaded or are loading. */
+  agentRunsError?: ProjectOverviewAgentRunsError
+  /** Whether the Team's Factory board is still loading. */
+  isAgentRunsLoading?: boolean
   /** Reads the Project Work Items again after a failure. */
   onRetryWorkItems?: () => void
   /** Reads the Planning snapshot again after a failure. */
   onRetryPlanning?: () => void
   /** Reads the Project members again after a failure. */
   onRetryMembers?: () => void
+  /** Reads the Team's Factory board again after a failure. */
+  onRetryAgentRuns?: () => void
 }
 
 /** Badge tokens for reported Project health. */
@@ -94,6 +110,9 @@ const linkClassName =
  * @returns The pure Project overview.
  */
 export function ProjectOverviewView({
+  agentRuns,
+  agentRunsError,
+  isAgentRunsLoading = false,
   isMembersLoading,
   isPlanningError,
   isPlanningLoading,
@@ -101,11 +120,13 @@ export function ProjectOverviewView({
   locale,
   members,
   membersError,
+  onRetryAgentRuns,
   onRetryMembers,
   onRetryPlanning,
   onRetryWorkItems,
   project,
   schedule,
+  showAgentRuns = true,
   t,
   team,
   updateTarget,
@@ -219,6 +240,27 @@ export function ProjectOverviewView({
             t={t}
           />
         </OverviewSection>
+
+        {showAgentRuns ? (
+          <OverviewSection
+            meta={agentRuns
+              ? t('projects.overview.agentRuns.total').replace('{count}', String(agentRuns.totalCount))
+              : undefined}
+            testId="project-overview-agent-runs"
+            title={t('projects.overview.agentRuns.title')}
+          >
+            <AgentRunsContent
+              agentRuns={agentRuns}
+              error={agentRunsError}
+              isLoading={isAgentRunsLoading}
+              onRetry={onRetryAgentRuns}
+              t={t}
+            />
+            <Link className={linkClassName} to={createTeamViewPath(team.id, 'factory')}>
+              {t('projects.overview.agentRuns.openFactory')}
+            </Link>
+          </OverviewSection>
+        ) : null}
       </div>
 
       <nav
@@ -229,9 +271,6 @@ export function ProjectOverviewView({
         <span className="text-sm font-semibold text-[var(--workbench-text)]">
           {t('projects.overview.links.title')}
         </span>
-        <Link className={linkClassName} to={createTeamViewPath(team.id, 'factory')}>
-          {t('projects.overview.links.factory')}
-        </Link>
         <Link className={linkClassName} to={workspaceNavPaths.documents}>
           {t('projects.overview.links.documents')}
         </Link>
@@ -604,6 +643,62 @@ function MembersContent({ error, isLoading, members, onRetry, t }: MembersConten
         <StatusText>
           {t('projects.overview.members.hidden').replace('{count}', String(members.hiddenCount))}
         </StatusText>
+      ) : null}
+    </div>
+  )
+}
+
+/** Lanes whose non-zero count asks for a person's attention. */
+const attentionLanes: ReadonlySet<FactoryBoardLane> = new Set<FactoryBoardLane>(['decision', 'stalled', 'failed'])
+
+/** Props for the Agent Run widget content. */
+type AgentRunsContentProps = {
+  /** Lane counts of the Project. */
+  agentRuns?: ProjectOverviewAgentRuns
+  /** Why the counts could not be shown. */
+  error?: ProjectOverviewAgentRunsError
+  /** Whether the board is loading. */
+  isLoading: boolean
+  /** Reads the board again after a failure. */
+  onRetry?: () => void
+  /** Resolves localized labels. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders how many of the Project's Work Items are in each Factory board lane.
+ *
+ * @param props - Lane counts and load state.
+ * @returns Agent Run widget content.
+ */
+function AgentRunsContent({ agentRuns, error, isLoading, onRetry, t }: AgentRunsContentProps) {
+  if (error === 'denied') return <StatusText>{t('projects.overview.error.agentRunsDenied')}</StatusText>
+  if (error) {
+    return <StatusText isError onRetry={onRetry} t={t}>{t('projects.overview.error.agentRuns')}</StatusText>
+  }
+  if (isLoading || !agentRuns) return <StatusText>{t('projects.overview.loading')}</StatusText>
+
+  return (
+    <div className="grid gap-3">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm min-[600px]:grid-cols-3">
+        {FACTORY_BOARD_LANES.map((lane) => {
+          const value = agentRuns.laneCounts[lane]
+          return (
+            <div className="min-w-0" data-testid={`project-overview-agent-lane-${lane}`} key={lane}>
+              <dt className="text-xs font-medium text-[var(--workbench-muted)]">{t(`factoryBoard.lane.${lane}`)}</dt>
+              <dd
+                className={`text-lg font-semibold tabular-nums ${
+                  attentionLanes.has(lane) && value > 0 ? 'text-fg-red-700' : 'text-[var(--workbench-text)]'
+                }`}
+              >
+                {value}
+              </dd>
+            </div>
+          )
+        })}
+      </dl>
+      {agentRuns.isIncomplete ? (
+        <StatusText>{t('projects.overview.agentRuns.incomplete')}</StatusText>
       ) : null}
     </div>
   )

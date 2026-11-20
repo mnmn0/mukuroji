@@ -16,6 +16,7 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from '../audit/audit'
+import { createWorkItemNotificationScheduleUpdate } from '../work-items'
 import {
   DynamoDbFileProofingClient,
   FILE_UPLOAD_MAX_SIZE_BYTES,
@@ -2024,6 +2025,10 @@ describe('file proofing domain', () => {
         workflowSchemaVersion: 1,
         expectedRevision: 4,
         actualDates: { actualStartDate: '2026-07-01', actualEndDate: '2026-07-12' },
+        notificationSchedule: createWorkItemNotificationScheduleUpdate('workspace-1', 'core', 'issue-1', {
+          statusCategory: 'completed',
+          dueDate: '2026-07-20',
+        }),
         configurationConditionChecks: [{
           ConditionCheck: {
             TableName: 'work-item-configuration',
@@ -2052,7 +2057,11 @@ describe('file proofing domain', () => {
     expect(completionUpdate?.UpdateExpression).toContain(
       '#actualStartDate = :actualStartDate, #actualEndDate = :actualEndDate',
     )
-    expect(completionUpdate?.UpdateExpression).not.toContain('REMOVE')
+    // Completing the Work Item takes it out of the notification due index in the same update.
+    expect(completionUpdate?.UpdateExpression).toContain(
+      '#notificationScheduleShard = :notificationScheduleShard',
+    )
+    expect(completionUpdate?.UpdateExpression).toMatch(/ REMOVE #notificationDueKey$/)
     expect(state.documentClient.items.get(createMemoryKey({
       workspaceId: scope.workspaceId,
       recordKey: 'META',

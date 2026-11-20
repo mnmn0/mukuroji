@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(501)
-  expect(new Set(inventory).size).toBe(497)
+  expect(inventory).toHaveLength(530)
+  expect(new Set(inventory).size).toBe(526)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
@@ -19,6 +19,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/work-items/keys/:key')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/key')
   expect(inventory).toContain('GET /api/teams/:teamId/work-item-hierarchy')
+  expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
+  expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
+  expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/schedule-baseline')
   // A Work Item may be named `hierarchy`, so the Team hierarchy must not sit under `/issues/`.
@@ -77,6 +80,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/acceptance-criteria')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/effort')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/actual-dates')
+  expect(inventory).toContain('GET /api/v1/work-items/:workItemId/documents')
+  expect(inventory).toContain('GET /api/v1/work-items/:workItemId/documents/:documentId')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-runs')
   expect(inventory).toContain('GET /api/teams/:teamId/work-items/:workItemId/agent-run-reports')
   expect(inventory).toContain('GET /api/teams/:teamId/agent-runs')
@@ -96,6 +101,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/teams/:teamId/time-periods/:month/close')
   expect(inventory).toContain('POST /api/teams/:teamId/time-periods/:month/reopen')
   expect(inventory).toContain('POST /api/teams/:teamId/time-entries/:entryId/return')
+  expect(inventory).toContain('GET /api/teams/:teamId/notification-reminders')
+  expect(inventory).toContain('PUT /api/teams/:teamId/notification-reminders')
   expect(inventory).toContain('POST /api/developer/connector-oauth/complete')
   // Team and Project IDs never change, so renaming is a PATCH on the stable resource.
   expect(inventory).toContain('GET /api/teams/directory')
@@ -105,10 +112,17 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/teams/:teamId/project-order')
   expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId')
   expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId/restore')
+  expect(inventory).toContain('POST /api/enterprise/security/role-assignments')
+  expect(inventory).toContain('DELETE /api/enterprise/security/role-assignments/:assignmentId')
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
+  // The Software factory deployment gate runs ahead of the Agent Run, agent setting, and agent
+  // credential routes (#632).
+  expect(inventory).toContain('ALL /api/v1/agent-runs/*')
+  expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
+  expect(inventory).toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'a098c8861a1fc7877df6c4fd0d78f7d89fe6cce14dba17e14139d9bb1aa515b1',
+    '1a18e6943f9b00688e662ce16430c967e41189bb022bca6dee6395070bf79145',
   )
 })

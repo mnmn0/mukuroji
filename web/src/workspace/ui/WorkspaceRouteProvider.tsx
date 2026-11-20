@@ -98,6 +98,7 @@ import {
 } from '../../shared/lib/preferences/theme'
 import {
   createProjectIssuesPath,
+  createProjectOverviewPath,
   createTeamIssuesPath,
   createTeamViewPath,
   workspaceNavPaths,
@@ -162,6 +163,11 @@ export type WorkspaceRouteContextValue = {
   canManageCustomerRequests: boolean
   /** Whether the current user may create or update Customer saved views. */
   canManageCustomerViews: boolean
+  /**
+   * Whether the deployment serves Software factory: the Factory board, Agent Run history and
+   * lanes, Agent settings, agent connection, and Work Item handoff to an agent.
+   */
+  softwareFactoryEnabled: boolean
   /** Returns whether one AI workflow is currently enabled by rollout and saved settings. */
   isAiAssistanceTaskEnabled?: (task: AiAssistanceTask) => boolean
   /** Whether the current user may perform team-scoped content mutations. */
@@ -202,7 +208,7 @@ export type WorkspaceRouteContextValue = {
   onSelectNav: (navId: SidebarNavId) => void
   /** Navigates to a fixed view owned by a team. */
   onSelectTeamView: (teamId: string, viewId: SidebarTeamViewId) => void
-  /** Navigates to a project's issue route within its owning team. */
+  /** Navigates to a project's overview, its default view, within its owning team. */
   onSelectProject: (projectId: string, teamId: string) => void
   /** Tests whether one Team-owned Project is currently starred. */
   isProjectQuickAccess: (item: ProjectQuickAccessItem) => boolean
@@ -376,6 +382,8 @@ export function WorkspaceRouteProvider() {
   const canReadCustomers = user?.canReadCustomers ?? false
   const canManageCustomerRequests = user?.canManageCustomerRequests ?? false
   const canManageCustomerViews = user?.canManageCustomerViews ?? false
+  // Hidden until the server says the deployment serves it, so the default deploy never flashes it.
+  const softwareFactoryEnabled = user?.softwareFactoryEnabled === true
   const canMutateTeamConfiguration = canMutateWorkspaceContent(user)
   const hasQuickAccessLoadError = Boolean(quickAccessError)
   const quickAccessProjects = useMemo(
@@ -831,10 +839,18 @@ export function WorkspaceRouteProvider() {
     navigate(createTeamViewPath(teamId, viewId))
   }, [navigate])
 
-  /** Navigates to the selected project's issue route. */
+  const isOnProjectIssues = useMatch('/projects/:projectId/issues') !== null
+
+  /**
+   * Navigates to the selected project's overview, the default view of a Project. Switching
+   * Projects from a Project's Work Item list keeps the list, so moving between Projects does not
+   * leave the view the person is working in.
+   */
   const handleSelectProject = useCallback((projectId: string, teamId: string) => {
-    navigate(createProjectIssuesPath(projectId, teamId))
-  }, [navigate])
+    navigate(isOnProjectIssues
+      ? createProjectIssuesPath(projectId, teamId)
+      : createProjectOverviewPath(projectId, teamId))
+  }, [isOnProjectIssues, navigate])
 
   /** Navigates to the assigned project or owning team route represented by a task. */
   const handleOpenTask = useCallback((task: CanonicalWorkItem) => {
@@ -866,6 +882,7 @@ export function WorkspaceRouteProvider() {
     canManageAiAssistance,
     canManageCustomerViews,
     canViewCustomerSensitiveData,
+    softwareFactoryEnabled,
     isAiAssistanceTaskEnabled,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,
@@ -932,6 +949,7 @@ export function WorkspaceRouteProvider() {
     canManageAiAssistance,
     canManageCustomerViews,
     canViewCustomerSensitiveData,
+    softwareFactoryEnabled,
     isAiAssistanceTaskEnabled,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,

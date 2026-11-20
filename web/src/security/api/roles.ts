@@ -18,6 +18,15 @@ export type EnterpriseAssignableRoleIds = {
   }
   /** Workspace-scoped service account へ割り当て可能な role ID です。 */
   serviceAccounts: string[]
+  /** Member 個人への割り当てで scope ごとに選択可能な role ID です。 */
+  members: {
+    /** Workspace scope へ割り当て可能な role ID です。 */
+    workspace: string[]
+    /** Team scope へ割り当て可能な role ID です。 */
+    team: string[]
+    /** Project scope へ割り当て可能な role ID です。 */
+    project: string[]
+  }
 }
 
 /**

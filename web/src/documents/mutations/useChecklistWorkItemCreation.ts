@@ -12,9 +12,10 @@ import {
   resolveCreateWorkflowStatuses,
   resolveWorkItemTypes,
 } from '../../work-items/model/workItemDisplay'
-import type {
-  ChecklistItemSource,
-  ChecklistWorkItemInput,
+import {
+  createDocumentWorkItemSourceKey,
+  type ChecklistWorkItemInput,
+  type DocumentWorkItemSource,
 } from '../model/checklistWorkItems'
 import { createCanonicalWorkItemId } from '../model/relations'
 
@@ -29,9 +30,9 @@ export type UseChecklistWorkItemCreationOptions = {
 }
 
 /**
- * Creates Work Items from Document checklist items.
+ * Creates Work Items from Document checklist items and Whiteboard notes.
  *
- * Retries share an idempotency context only for the same source item, so a
+ * Retries share an idempotency context only for the same source element, so a
  * lost response is recovered for that item and never reused by another item
  * with the same values.
  *
@@ -45,18 +46,18 @@ export function useChecklistWorkItemCreation({
   const [mutationRunner] = useState(createMutationRequestRunner)
 
   /**
-   * Creates a Work Item assigned to a Project for one checklist item.
+   * Creates a Work Item assigned to a Project for one checklist item or note.
    *
    * Like the quick create form, the Work Item is captured into a backlog
    * status when the Team has one, so required custom fields can be filled in
    * later.
    *
-   * @param source - Document checklist item the Work Item is created from.
+   * @param source - Checklist item or Whiteboard note the Work Item is created from.
    * @param input - Team, Project, title, owner, and optional deadline.
    * @returns Canonical ID of the created Work Item.
    */
   const createWorkItem = async (
-    source: ChecklistItemSource,
+    source: DocumentWorkItemSource,
     input: ChecklistWorkItemInput,
   ): Promise<string> => {
     if (!accessToken) throw new Error(errorMessage)
@@ -88,11 +89,7 @@ export function useChecklistWorkItemCreation({
         : {}),
     }
     const issue = await mutationRunner.run(
-      `issue:create:document-checklist:${JSON.stringify([
-        source.documentId,
-        source.blockId,
-        source.itemId,
-      ])}`,
+      `issue:create:document-checklist:${createDocumentWorkItemSourceKey(source)}`,
       JSON.stringify([input.teamId, request]),
       (context) => createTeamIssue(input.teamId, accessToken, request, context),
     )

@@ -12,6 +12,7 @@ import {
 import { enterpriseSecuritySnapshotFixture } from '../src/security/fixtures'
 import { EnterpriseSecurityApiError } from '../src/security/api'
 import { requiresFreshEnterpriseAuthentication } from '../src/security/model/enterpriseAuthentication'
+import { createWorkspaceSecurityScopeOptions } from '../src/security/model/workspaceSecurityScopes'
 
 const scopeOptions = [
   { id: 'workspace-demo', name: 'Workspace', type: 'workspace' as const },
@@ -417,6 +418,103 @@ describe('EnterpriseSecurityPanel', () => {
     expect(html).not.toContain('Sync attention')
     expect(html).not.toContain('Privileged paths')
     expect(html).toContain('data-testid="security-overview"')
+  })
+
+  test('lists member role assignments and offers non-owner members to assign', () => {
+    const snapshot = {
+      ...enterpriseSecuritySnapshotFixture,
+      members: [
+        ...enterpriseSecuritySnapshotFixture.members,
+        { email: 'owner@example.com', memberKey: 'owner@example.com', role: 'owner' as const },
+      ],
+    }
+    const html = renderToStaticMarkup(
+      <EnterpriseSecurityPanel
+        initialTab="access"
+        locale="en"
+        scopeOptions={scopeOptions}
+        snapshot={snapshot}
+        onCreateMemberRoleAssignment={async () => undefined}
+        onDeleteMemberRoleAssignment={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('data-testid="security-member-assignment-form"')
+    expect(html).toContain('PMO Lead (pmo@example.com)')
+    expect(html).toContain('All Projects viewer')
+    expect(html).toContain('Auditor')
+    expect(html).toContain('<option value="auditor@example.com">')
+    expect(html).not.toContain('<option value="owner@example.com">')
+
+    const readOnly = renderToStaticMarkup(
+      <EnterpriseSecurityPanel
+        initialTab="access"
+        locale="en"
+        scopeOptions={scopeOptions}
+        snapshot={{
+          ...enterpriseSecuritySnapshotFixture,
+          capabilities: {
+            ...enterpriseSecuritySnapshotFixture.capabilities,
+            canManageMappings: false,
+          },
+        }}
+      />,
+    )
+    expect(readOnly).toContain('data-testid="security-member-assignment-table"')
+    expect(readOnly).not.toContain('data-testid="security-member-assignment-form"')
+  })
+
+  test('asks for the owning Team of a Project shared by several Teams', () => {
+    const sharedScopeOptions = createWorkspaceSecurityScopeOptions(
+      [
+        { id: 'core-team', name: 'Core team', projects: [{ id: 'shared', name: 'Shared' }] },
+        { id: 'design-team', name: 'Design team', projects: [{ id: 'shared', name: 'Shared' }] },
+      ],
+      'Workspace',
+    )
+    const sharedProject = sharedScopeOptions.find((scope) => scope.type === 'project')
+    expect(sharedProject?.parentIds).toEqual(['core-team', 'design-team'])
+    expect(sharedScopeOptions.filter((scope) => scope.type === 'project')).toHaveLength(1)
+
+    const html = renderToStaticMarkup(
+      <EnterpriseSecurityPanel
+        initialTab="access"
+        locale="en"
+        scopeOptions={[
+          ...sharedScopeOptions.filter((scope) => scope.type === 'project'),
+          ...sharedScopeOptions.filter((scope) => scope.type !== 'project'),
+        ]}
+        snapshot={{
+          ...enterpriseSecuritySnapshotFixture,
+          memberRoleAssignments: [{
+            id: 'assignment-design',
+            memberKey: 'pmo@example.com',
+            roleId: 'project:viewer',
+            scopeType: 'project',
+            scopeId: 'shared',
+            scopeParentId: 'design-team',
+          }],
+        }}
+        onCreateMemberRoleAssignment={async () => undefined}
+        onDeleteMemberRoleAssignment={async () => undefined}
+      />,
+    )
+    expect(html).toContain('Project · Shared (Owning Team: Design team)')
+    expect(html).toContain('Owning Team')
+    expect(html).toContain('<option value="core-team">Core team</option>')
+    expect(html).toContain('<option value="design-team">Design team</option>')
+
+    const singleTeam = renderToStaticMarkup(
+      <EnterpriseSecurityPanel
+        initialTab="access"
+        locale="en"
+        scopeOptions={scopeOptions}
+        snapshot={enterpriseSecuritySnapshotFixture}
+        onCreateMemberRoleAssignment={async () => undefined}
+        onDeleteMemberRoleAssignment={async () => undefined}
+      />,
+    )
+    expect(singleTeam).not.toContain('Owning Team')
   })
 
   test('gates mapping and custom-role editors with separate capabilities', () => {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as customResources from 'aws-cdk-lib/custom-resources';
 
 /**
@@ -35,6 +36,47 @@ const canonicalWorkflowStatusCategories = {
   review: 'started',
   done: 'completed',
 } as const;
+
+/**
+ * Number of shards of the Work Item notification schedule indexes.
+ *
+ * Mirrors `WORK_ITEM_NOTIFICATION_SCHEDULE_SHARD_COUNT` in the server `work-items` module.
+ */
+const workItemNotificationScheduleShardCount = 16;
+
+/**
+ * Creates the notification schedule index attributes of a seeded Work Item.
+ *
+ * Mirrors `createWorkItemNotificationScheduleAttributes` in the server `work-items` module, which
+ * the CDK workspace cannot import; both test suites pin the same shard so the copies cannot drift.
+ *
+ * @param workspaceId - Canonical Workspace (directory) identifier.
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Work Item identifier.
+ * @param statusCategory - Workflow status category of the seed.
+ * @param dueDate - Canonical `YYYY-MM-DD` deadline of the seed.
+ * @returns DynamoDB attribute values for `notificationScheduleShard` and `notificationDueKey`.
+ */
+export function createSeedWorkItemNotificationScheduleAttributes(
+  workspaceId: string,
+  teamId: string,
+  issueId: string,
+  statusCategory: string,
+  dueDate: string,
+) {
+  const digest = createHash('sha256').update(`${workspaceId}\0${teamId}\0${issueId}`).digest();
+  const shardIndex = digest.readUInt8(0) % workItemNotificationScheduleShardCount;
+  const dueKey = statusCategory === 'started'
+    ? '0000-00-00'
+    : statusCategory === 'backlog' || statusCategory === 'unstarted'
+      ? dueDate
+      : undefined;
+
+  return {
+    notificationScheduleShard: { S: `work-item-schedule-${String(shardIndex).padStart(2, '0')}` },
+    ...(dueKey === undefined ? {} : { notificationDueKey: { S: dueKey } }),
+  };
+}
 
 /**
  * Deterministic timestamp used by canonical Work Item seed records.
@@ -463,6 +505,13 @@ export function createCanonicalWorkItemTransactItems(tableName: string, director
           priority: { S: priority },
           createdAt: { S: canonicalWorkItemSeedTimestamp },
           updatedAt: { S: canonicalWorkItemSeedTimestamp },
+          ...createSeedWorkItemNotificationScheduleAttributes(
+            directoryId,
+            teamId,
+            workItemId,
+            canonicalWorkflowStatusCategories[workflowStatusId],
+            dueDate,
+          ),
         },
       },
     };

@@ -12,6 +12,8 @@ export {
   type PlanningCallerAuthorizationConditionCheck,
   type PlanningClient,
   type PlanningEntityAuthorizationReference,
+  type PlanningEntityCreation,
+  type PlanningEntityDuplication,
   type PlanningMutationTransaction,
   type PlanningMutationTransactionResult,
   type PlanningUpdateAnnotationTransactionResult,
@@ -22,6 +24,11 @@ export {
   type PlanningWorkItemDependencyTransactionResult,
   type PlanningWorkItemState,
 } from './planning'
+
+export {
+  createPlanningEntityWithAssignedId,
+  type PlanningEntityCreationWithAssignedIdOutcome,
+} from './application/entity-creation'
 
 export {
   createPlanningUpdateNextNotificationAtRecordKey,

@@ -1,6 +1,7 @@
 /** Time tracking module public application and persistence surface. */
 export {
   DynamoDbTimeTrackingRepository,
+  createTimeEntryRevisionCondition,
   InMemoryTimeTrackingRepository,
   TimeTrackingError,
   TimeTrackingService,

@@ -340,6 +340,8 @@ describe('PlanningScreen', () => {
     expect(html).toContain('aria-label="1 affected Milestones: milestone-beta"')
     expect(html).toContain('data-testid="cycle-rollover"')
     expect(html).toContain('data-testid="planning-create-entity"')
+    // The server assigns new entity IDs, so the form does not ask for one.
+    expect(html).not.toContain('name="entityId"')
     expect(html).toContain(labels.dependencyLag)
     expect(html).toContain(`name="goalFramework"`)
     expect(html).toContain('value="objective"')
@@ -368,7 +370,38 @@ describe('PlanningScreen', () => {
     expect(html).toContain('value="core-team"')
     expect(html).toContain(`>${labels.archive}</button>`)
     expect(html).toContain(`>${labels.duplicate}</button>`)
+    expect(html).not.toContain('name="targetId"')
     expect(html).toContain(`>${labels.move}</button>`)
+  })
+
+  test('picks the root move Team and Project from the directory', () => {
+    const html = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="timeline"
+        canCreateInScope={(scope) => scope.teamId !== 'viewer-team'}
+        canManageEntity={() => true}
+        createScopeTeams={[
+          {
+            id: 'core-team',
+            name: 'Core team',
+            projects: [{ id: 'refero', name: 'Refero' }],
+          },
+          { id: 'next-team', name: 'Next team', projects: [] },
+          { id: 'viewer-team', name: 'Viewer team', projects: [] },
+        ]}
+        initialSelectedEntityId="cycle-14"
+        labels={labels}
+        snapshot={planningSnapshotFixture}
+        onMoveEntity={() => undefined}
+      />,
+    )
+    const scope = html.slice(html.indexOf('data-testid="planning-root-move-scope"'))
+    expect(scope).toContain('<select class="workbench-input h-10 px-3" name="teamId" required="">')
+    expect(scope).toContain('<option value="core-team" selected="">Core team</option>')
+    expect(scope).toContain('<option value="next-team">Next team</option>')
+    expect(scope).not.toContain('Viewer team')
+    expect(scope).toContain('<option value="refero">Refero</option>')
+    expect(scope).not.toContain('name="teamId" value=')
   })
 
   test('renders the Cycle burndown slot only for a selected Cycle in Timeline', () => {

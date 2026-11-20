@@ -63,6 +63,7 @@ wiring も stack に含めません。Context は `bin/cdk.ts` だけが読み�
 | `mukuroji:connectors` | Connector sync / poll worker、sync queue と DLQ、`ConnectorRuntimeSecret` と `ConnectorRuntimeConfiguration` parameter。 | API は connector provider を読み込まず、audit projection は connector への fan-out を行いません（`CONNECTOR_SYNC_ENABLED=false`）。Webhook と public API は使えます。 |
 | `mukuroji:requestEmail` | 外部の mail relay が invoke する `RequestEmailIngestionFunction`、DLQ、alarm。`RequestEmailWebhookSecret` parameter が必要になります。 | 公開フォームと手動での依頼登録は使えます。メールからの依頼取り込みだけがありません。 |
 | `mukuroji:tenantLifecycle` | テナントのエクスポートと閉鎖を実行する 6 つの resource owner Lambda（export、access、identity、data、secrets、verification）、それぞれの execution queue、エクスポート成果物を置く `TenantExportBucket`。API にはその bucket の読み取り権限を付けます。 | API はエクスポート・閉鎖の要求と、操作の download・pause・resume・verify を `503 TenantLifecycleNotDeployed` で断ります（`TENANT_LIFECYCLE_OPERATIONS=disabled`）。テナントのプロフィールとガバナンス設定、操作の参照は使えます。`TenantOperationFunction` は残り、監査ログの保持期間の処理だけを行います。 |
+| `mukuroji:softwareFactory` | 追加の resource はありません。API と scheduled-jobs Lambda に `SOFTWARE_FACTORY=enabled` を渡し、scheduled-jobs Lambda に Agent Run triage job（毎分）とその IAM policy を足します。 | API は Agent Run（Web の Factory board・Work Item の Run 履歴と報告・期間サマリー・release、Public API の Agent Run 系と `/v1/agent-settings`・`/v1/agent-context`）、Team の agent 設定、本人用 agent token（`/developer/me/agent-connection` と発行・rotate）を認証前に `503 SoftwareFactoryNotDeployed` で断ります（`SOFTWARE_FACTORY=disabled`）。Agent Run triage job は動きません。Web は `/api/auth/me` の `softwareFactoryEnabled` を見て Factory board、agent 接続、Team の agent 設定、Work Item の「エージェントへ引き継ぐ」と Run 履歴、Project 概要の Agent Run 欄、ヘルプの coding agent ガイドを出しません。Public API の Work Item の読み書きと本人用 token の失効は使えます。 |
 
 有効にするときは、`cdk diff` / `cdk deploy` に context と、そのモジュールの parameter を足します。
 
@@ -187,6 +188,7 @@ aws ce update-cost-allocation-tags-status \
 | `mukuroji:connectors` | +$1 前後 / 月 | secret 1 個、alarm 3 個、5 分ごとの poll（月 8,640 回）、queue の polling。 |
 | `mukuroji:requestEmail` | +$1 / 月 | secret 2 個、alarm 2 個。 |
 | `mukuroji:tenantLifecycle` | +$0〜2 / 月 | Lambda 6 個と queue 6 個。待機中の queue polling が SQS の無料枠を超えた分です。 |
+| `mukuroji:softwareFactory` | ほぼ $0 | 毎分の Agent Run triage job。opt-in した Team がなければ AgentRuns table の index を読むだけです。 |
 | AI（Bedrock の parameter 設定） | 利用量に比例 | token 料金。上限は Workspace の AI 設定で決めます。 |
 | `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
 
@@ -992,6 +994,34 @@ local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566` と `AWS_REGION`
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
+#### Application 処理を有効にする（runtime control）
+
+deploy した直後の runtime control は `disabled` なので、API は `/api/health` 以外に `503` を返し、
+worker も処理を始めません。次の 1 コマンドで有効にします。
+
+```sh
+AWS_REGION=ap-northeast-1 bun run runtime-control:enable
+```
+
+`scripts/runtime-control.ts` は `aws` CLI で次を順に行い、どこかで失敗すると止まります。
+
+1. stack output から AppConfig の ID 4 つと `WebUrl` を読む。
+2. AppConfig environment で別の deployment が進行中でないこと、`RuntimeControlConfigurationFailureAlarm`
+   が `OK` かつ actions 有効であることを確かめる（alarm の確認は有効化のときだけ）。
+3. 最新の hosted version の `revision` に 1 を足した document を hosted version として作る。
+   誰が（`sts get-caller-identity` の ARN）いつ切り替えたかを version と deployment の description に残す。
+4. stack の canary strategy で deployment を始め、`COMPLETE` まで待つ（rollout 20 分 + bake 10 分で約 30 分）。
+   `ROLLED_BACK` になったら失敗として止まる。
+5. `WebUrl` の `/api/ready` が `200` を返すまで最大 3 分確認する。
+
+止めるときは `bun run runtime-control:disable` を使います。`/api/ready` が `503` になれば完了です。
+incident commander が即時停止を決めたときだけ、`-- --all-at-once` を付けて `AppConfig.AllAtOnce` で
+配布します（bake の 10 分は待ちます）。省いた理由は change record に残します。stack 名が `Mukuroji`
+でない場合は `MUKUROJI_STACK_NAME` を指定します。local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566`
+を付けて同じように実行できます。change record に残す内容と、deployment 中に確認する
+`runtime-control.evaluated` record は [operational readiness](../docs/operational-readiness.md#dynamic-runtime-control)
+を参照してください。読み取りだけを通す maintenance mode はまだありません。
+
 ### 3. Bootstrap と API を検証する
 
 Stack が user pool を作った場合、初期 owner は最初のサインインで password を変えるまで
@@ -1046,6 +1076,15 @@ Web を build して upload し、CloudFront を invalidate します。content 
 `sw.js` などそれ以外の file は `no-cache` で置き換えます。配信後に `WebUrl` を開き、login と Team/project
 一覧の表示を確認します。local の Web から AWS の API を試す場合だけ、HTTP API を直接指定します。
 
+CloudFront は Web と `/api/*` の両方に security header（HSTS、`X-Content-Type-Options`、`X-Frame-Options: DENY`、
+`Referrer-Policy: no-referrer`、Content-Security-Policy）を付けます。Web の CSP は script・style・worker を同じ
+origin に限り、接続先を同じ origin、realtime WebSocket API、file bucket に限ります。file bucket の CORS が
+distribution の domain を参照するため、CloudFront の CSP は bucket 名を書けず、同じ region の S3 endpoint
+（`https://*.s3.<region>.amazonaws.com`）を許可します。`scripts/deploy-web.sh` は `FileBucketName` と
+`RealtimeWebSocketUrl` output から、接続先をこの stack の bucket と WebSocket API だけに絞る `<meta>` CSP を
+`index.html` に加えます。browser は両方の policy を適用します。`/api/*` の CSP は `default-src 'none'` で、
+API の応答が document として開かれても何も読み込みません。
+
 ```sh
 VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 ```
@@ -1057,7 +1096,7 @@ VITE_API_BASE_URL="$API_GATEWAY_URL" bun run web:dev
 #### Web の release を戻す
 
 各 deploy は `assets/` 以外の file（`index.html`、`sw.js`、manifest など）を bucket の
-`releases/<commit SHA>/` にも残します。`assets/` は消さないため、残した release を bucket の直下へ
+`releases/<commit SHA>/` にも残します。残っている release が使う `assets/` は消さないため、残した release を bucket の直下へ
 copy し直せば、再 build せずに前の release へ戻せます。
 
 ```sh
@@ -1069,8 +1108,22 @@ AWS_REGION=ap-northeast-1 bun run web:rollback -- <commit SHA>
 
 `scripts/rollback-web.sh` は `releases/<commit SHA>/` を bucket の直下へ copy し、直下にだけある file を
 削除してから CloudFront を invalidate します。戻した後に `WebUrl` の Help 画面で SHA が切り替わったことを
-確認します。この仕組みより前に deploy した release は残っていないため戻せません。`releases/` と
-`assets/` は今は自動で削除しないので、古い release の整理は別途行います。
+確認します。この仕組みより前に deploy した release は残っていないため戻せません。
+
+#### Web bucket の保存期間
+
+Web bucket は versioning を有効にし、次の期間で古い file を消します。
+
+- `releases/<commit SHA>/` は最後の upload から 180 日で lifecycle が削除します。戻せるのはこの期間内の
+  release だけです。稼働中の release は bucket の直下にあるので、copy が消えても配信は続きます。
+- 上書き・削除された file の旧 version は 30 日残り、その後 lifecycle が削除します。誤って消した file は
+  この期間内なら `aws s3api list-object-versions` で探して戻せます。
+- `assets/` は日数では消しません。稼働中の release の chunk は deploy しない限り upload し直されないため、
+  日数で消すと配信中の画面が壊れるからです。代わりに各 release が使う `assets/` の一覧を
+  `release-assets.txt` として残し、`web:deploy` が、残っている release、置き換える直前の release、
+  今回の build のどれも使わない `assets/` を削除します。直近 24 時間に upload された file は、同時に走った
+  別の deploy のものかもしれないので残します。一覧のない release（この仕組みより前の deploy）が
+  残っている間は削除しません。
 
 ## Workspace partition migration
 
@@ -1166,7 +1219,7 @@ Deploy前後に次を確認します。
 
 ## Notification schedule
 
-期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として handler 内で retry され、最終失敗は `ScheduledJobsDlq` に保存されます。DLQ message の error message に失敗した job 名が入ります。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。`CollaborationProjectionDlqUrl` と `ScheduledJobsDlqUrl` の滞留、Inbox の unread count も監視します。
+期限 schedule は1時間ごとに Work Items table の sparse GSI `WorkItemNotificationDueIndex`（partition `notificationScheduleShard` の16 shard、sort `notificationDueKey`）を query し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。index に載るのは archive されていない未完了の Work Item のうち、期限があるもの（sort key は期限日）と着手中のもの（sort key は `0000-00-00` で毎回読む）だけです。完了・archive・期限の削除で index から外れるため、読み取り量は Work Item の総数ではなく、期限が近い・超過した・着手中の Work Item の数に比例します。query 範囲は今日（UTC）+ 366 日までで、page 上限はありません。Customer 完了通知の marker は `WorkItemCustomerCompletionPreparationIndex`（KEYS_ONLY）から読みます。工数の督促は Project directory の Team 一覧を1日1回だけ読み、`NOTIFICATION_SCHEDULE_MAX_PAGES` は Planning の index と directory の読み取りにだけ使います。index 属性のない既存 row は次に更新されたときに index に入ります。既存 row への一括付与は #365 の migration 契約で行います。上限到達などで失敗した場合も例外として handler 内で retry され、最終失敗は `ScheduledJobsDlq` に保存されます。DLQ message の error message に失敗した job 名が入ります。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査して再実行してください。`CollaborationProjectionDlqUrl` と `ScheduledJobsDlqUrl` の滞留、Inbox の unread count も監視します。
 
 ## Scheduled jobs
 

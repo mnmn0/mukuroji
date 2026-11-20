@@ -6,12 +6,19 @@ import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as route53Targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { createFileBucketBrowserCorsRule } from './file-storage';
+import { createWebResponseHeadersPolicies } from './web-response-headers';
 
 /** Path pattern CloudFront forwards to the shared HTTP API. */
 export const WEB_API_PATH_PATTERN = '/api/*';
 
 /** Origin header carrying the secret that proves a request came through CloudFront. */
 export const EDGE_ORIGIN_SECRET_HEADER = 'x-mukuroji-edge-secret';
+
+/** Days a release copy under `releases/<commit SHA>/` stays restorable after its last upload. */
+export const WEB_RELEASE_RETENTION_DAYS = 180;
+
+/** Days a replaced or deleted Web file stays recoverable as a noncurrent version. */
+export const WEB_NONCURRENT_VERSION_RETENTION_DAYS = 30;
 
 /** Origin header carrying the viewer address CloudFront observed. */
 export const EDGE_VIEWER_ADDRESS_HEADER = 'x-mukuroji-viewer-address';
@@ -221,6 +228,8 @@ export type WebDistributionInput = Readonly<{
   readonly httpApi: apigatewayv2.HttpApi;
   /** File bucket whose browser uploads must accept the Web origin. */
   readonly fileBucket: s3.Bucket;
+  /** Realtime WebSocket API the Web app connects to. */
+  readonly realtimeWebSocketApi: apigatewayv2.IWebSocketApi;
   /** Secret CloudFront sends to the API with every `/api/*` request. */
   readonly edgeOriginSecret: string;
 }>;
@@ -241,19 +250,25 @@ export type WebDistributionResources = Readonly<{
 /**
  * Serves the Web app and the API from one CloudFront domain.
  *
- * The built SPA lives in a private bucket read through origin access
- * control. `/api/*` goes to the HTTP API without caching, so the browser
+ * The built SPA lives in a private, versioned bucket read through origin
+ * access control. Release copies under `releases/` expire after
+ * {@link WEB_RELEASE_RETENTION_DAYS} days, and replaced or deleted files stay
+ * recoverable for {@link WEB_NONCURRENT_VERSION_RETENTION_DAYS} days.
+ * `scripts/deploy-web.sh` removes hashed `assets/` files that no kept release
+ * uses, because an age-based rule would also expire assets of a live release. `/api/*` goes to the HTTP API without caching, so the browser
  * calls the API on the same origin and needs no CORS. CloudFront adds the
  * viewer address and an origin secret to each API request, so rate limits and
  * enterprise IP policies see the user's address instead of an edge address.
  * The file bucket also accepts presigned browser uploads from this origin.
+ * Both behaviors send security headers; the Web app's CSP limits connections
+ * to this origin, the realtime WebSocket API, and the file bucket.
  *
  * The optional `WebDomainName` and `WebCertificateArn` parameters serve the
  * same distribution on a custom domain, which then becomes the canonical
  * origin used in notification links. The CloudFront domain keeps working.
  *
  * @param scope Stack scope used directly to keep construct paths flat.
- * @param input HTTP API and file bucket shared with the rest of the stack.
+ * @param input HTTP API, realtime API, and file bucket shared with the rest of the stack.
  * @returns The Web bucket, distribution, and the app's canonical HTTPS origin.
  */
 export function buildWebDistribution(
@@ -264,8 +279,27 @@ export function buildWebDistribution(
     blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
     encryption: s3.BucketEncryption.S3_MANAGED,
     enforceSSL: true,
+    lifecycleRules: [
+      {
+        expiration: cdk.Duration.days(WEB_RELEASE_RETENTION_DAYS),
+        id: 'ExpireOldWebReleases',
+        prefix: 'releases/',
+      },
+      {
+        abortIncompleteMultipartUploadAfter: cdk.Duration.days(7),
+        id: 'ExpireReplacedWebFiles',
+        noncurrentVersionExpiration: cdk.Duration.days(
+          WEB_NONCURRENT_VERSION_RETENTION_DAYS,
+        ),
+      },
+      {
+        expiredObjectDeleteMarker: true,
+        id: 'RemoveExpiredWebDeleteMarkers',
+      },
+    ],
     objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED,
     removalPolicy: cdk.RemovalPolicy.RETAIN,
+    versioned: true,
   });
   const spaRoutingFunction = new cloudfront.Function(scope, 'WebSpaRoutingFunction', {
     code: cloudfront.FunctionCode.fromInline(SPA_ROUTING_FUNCTION_CODE),
@@ -285,13 +319,18 @@ export function buildWebDistribution(
     2,
     cdk.Fn.split('/', input.httpApi.apiEndpoint),
   );
+  const { apiResponseHeadersPolicy, webResponseHeadersPolicy } =
+    createWebResponseHeadersPolicies(scope, {
+      fileBucketSource: `https://*.s3.${scope.region}.${scope.urlSuffix}`,
+      realtimeWebSocketOrigin: input.realtimeWebSocketApi.apiEndpoint,
+    });
   const webDistribution = new cloudfront.Distribution(scope, 'WebDistribution', {
     comment: 'mukuroji Web app and API on one origin',
     defaultBehavior: {
       origin: origins.S3BucketOrigin.withOriginAccessControl(webBucket),
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
-      responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+      responseHeadersPolicy: webResponseHeadersPolicy,
       functionAssociations: [{
         eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
         function: spaRoutingFunction,
@@ -307,6 +346,7 @@ export function buildWebDistribution(
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
         originRequestPolicy:
           cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+        responseHeadersPolicy: apiResponseHeadersPolicy,
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
         functionAssociations: [{
           eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,

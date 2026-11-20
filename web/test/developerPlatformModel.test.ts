@@ -34,11 +34,39 @@ import {
 import { runDeveloperPlatformMutation } from '../src/developer-platform/mutations/runDeveloperPlatformMutation'
 
 describe('Developer Platform connector model', () => {
+  test('lists only configured or installed providers and marks unconfigured ones unavailable', () => {
+    const catalog = completeDeveloperConnectorCatalog(
+      developerPlatformLabelsFixture.connectorCatalog,
+      [{ ...developerPlatformResourcesFixture.connectors[0]!, provider: 'slack' }],
+      developerPlatformLabelsFixture.helpText.installedConnector,
+      ['github'],
+    )
+
+    expect(catalog.map((item) => [item.provider, item.availability])).toEqual([
+      ['github', 'available'],
+      ['slack', 'not-configured'],
+    ])
+  })
+
+  test('keeps availability unknown until the configured providers load', () => {
+    const catalog = completeDeveloperConnectorCatalog(
+      developerPlatformLabelsFixture.connectorCatalog,
+      [{ ...developerPlatformResourcesFixture.connectors[0]!, provider: 'slack' }],
+      developerPlatformLabelsFixture.helpText.installedConnector,
+      undefined,
+    )
+
+    expect(catalog.map((item) => [item.provider, item.availability])).toEqual([
+      ['slack', 'unknown'],
+    ])
+  })
+
   test('completes and filters connector catalog with installed account metadata', () => {
     const catalog = completeDeveloperConnectorCatalog(
       developerPlatformLabelsFixture.connectorCatalog,
       developerPlatformResourcesFixture.connectors,
       developerPlatformLabelsFixture.helpText.installedConnector,
+      developerPlatformLabelsFixture.connectorCatalog.map((item) => item.provider),
     )
 
     expect(catalog.length).toBeGreaterThanOrEqual(

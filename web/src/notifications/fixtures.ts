@@ -3,6 +3,7 @@ import type {
   NotificationInboxController,
   NotificationPreferencesController,
 } from './mutations/useNotifications'
+import type { TeamReminderSettingsController } from './mutations/useTeamReminderSettings'
 
 /**
  * Storybook と UI test で使う notification-backed Inbox の通知です。
@@ -51,16 +52,37 @@ export const notificationFixtures: InboxNotification[] = [
 ]
 
 /**
+ * Storybook と UI test で使う、定期配信されたレポートの通知です。
+ */
+export const reportDeliveryNotificationFixture: InboxNotification = {
+  id: 'notification-report-delivered-1',
+  eventId: 'event-analytics-report-delivered-1',
+  eventType: 'analytics.report.delivered',
+  reasons: ['report-recipient'],
+  title: '週次ポートフォリオ',
+  summary: 'A scheduled report snapshot is ready.',
+  deepLink: '/reports?v=1&report=weekly-report&snapshot=snapshot-1',
+  occurredAt: '2026-07-13T08:00:12.000Z',
+  state: 'unread',
+}
+
+/**
  * Storybook で NotificationInbox を操作可能にする controller fixture です。
  */
 export const notificationInboxControllerFixture: NotificationInboxController = {
   archive: async () => true,
   availableEventTypes: notificationFixtures.map((notification) => notification.eventType),
+  bulkFailedCount: 0,
+  bulkUpdate: async (notifications) => ({
+    failedIds: [],
+    succeededIds: notifications.map((notification) => notification.id),
+  }),
   eventType: undefined,
   filter: 'all',
   hasLoadError: false,
   hasMore: true,
   hasMutationError: false,
+  isBulkPending: false,
   isLoading: false,
   isLoadingMore: false,
   loadMore: async () => undefined,
@@ -107,6 +129,33 @@ export const notificationPreferencesControllerFixture: NotificationPreferencesCo
   isLoading: false,
   isSaving: false,
   preferences: notificationPreferencesFixture,
+  refresh: async () => undefined,
+  save: async () => true,
+}
+
+/**
+ * Team reminder settings controller fixture for a Team manager in Storybook and tests.
+ */
+export const teamReminderSettingsControllerFixture: TeamReminderSettingsController = {
+  settings: {
+    teamId: 'core',
+    days: { dueSoonDays: 2, overdueEscalationDays: 14 },
+    defaults: {
+      dueSoonDays: 3,
+      overdueReminderIntervalDays: 7,
+      overdueEscalationDays: 7,
+      staleStartedDays: 7,
+      timesheetReminderDays: 7,
+    },
+    revision: 3,
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    canManage: true,
+  },
+  isLoading: false,
+  hasLoadError: false,
+  isUnavailable: false,
+  isSaving: false,
+  sessionErrors: [],
   refresh: async () => undefined,
   save: async () => true,
 }

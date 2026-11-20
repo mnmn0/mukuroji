@@ -12,6 +12,9 @@ import {
   type PublicWorkItemEffort,
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
+  type PublicDocumentContent,
+  type PublicWorkItemDocument,
+  PUBLIC_WORK_ITEM_DOCUMENT_PAGE_MAX_LIMIT,
   type ApiProblem,
   type ApiProblemCode,
   type ApiProblemViolation,
@@ -107,6 +110,8 @@ import {
 } from './domain/personal-credential-policy'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
 import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-projection'
+import { isSoftwareFactoryDeployed } from '../../infrastructure/config/software-factory'
+import { softwareFactoryNotDeployedResponse } from '../../infrastructure/http/software-factory-not-deployed'
 import { resolveTrustedRequestSource } from '../../infrastructure/http/trusted-request-source'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
 
@@ -459,6 +464,51 @@ export type PublicAgentRunListFilters = {
   workItemId?: string
 }
 
+/**
+ * Read-only access to Documents linked to Work Items, for coding agents. Every read evaluates the
+ * credential owner's current Work Item, Project, and Document permissions.
+ */
+export interface PublicDocumentService {
+  /**
+   * Lists one page of Documents linked to a Work Item that the credential owner can view.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param continuation - Internal continuation from the previous page.
+   * @param limit - Maximum number of relations evaluated in this page.
+   * @returns Visible linked Documents and any remaining internal continuation.
+   */
+  listWorkItemDocuments(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    continuation: string | undefined,
+    limit: number,
+  ): Promise<{
+    /** Visible linked Documents in this page. */
+    items: PublicWorkItemDocument[]
+    /** Whether another page exists. */
+    hasMore: boolean
+    /** Internal continuation wrapped by the public API's signed cursor. */
+    nextContinuation?: string
+  }>
+  /**
+   * Reads one Document linked to a Work Item, when the credential owner can view both, and renders
+   * it as Markdown.
+   * @param credential - Authenticated developer credential whose owner's permissions are evaluated.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item the Document must link.
+   * @param documentId - Document ID.
+   * @returns The Document content.
+   */
+  getWorkItemDocument(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    workItemId: string,
+    documentId: string,
+  ): Promise<PublicDocumentContent>
+}
+
 /** Public Agent Run API and the canonical Work Item and run persistence behind it. */
 export interface PublicAgentRunService {
   /**
@@ -785,6 +835,8 @@ export type PublicApiDependencies = {
   workItems: PublicWorkItemService
   /** Agent Run adapter; Agent Run routes report unavailable when it is not configured. */
   agentRuns?: PublicAgentRunService
+  /** Read-only Document adapter; Document routes report unavailable when it is not configured. */
+  documents?: PublicDocumentService
   /** Public OpenAPI 3.1 document です。 */
   openApiDocument: Record<string, unknown>
   /** Scope-bound cursor を署名する secret です。 */
@@ -793,6 +845,11 @@ export type PublicApiDependencies = {
   queueWebhookDelivery?(workspaceId: string, deliveryId: string): Promise<void>
   /** Connector OAuth と sync-conflict recovery の optional provider adapter です。 */
   connectorAuthorization?: ConnectorAuthorizationService
+  /**
+   * Lists the providers configured in this runtime. The connector catalog shows only these
+   * providers, and shows none when this dependency is omitted.
+   */
+  listConfiguredConnectorProviders?(): Promise<readonly ConnectorProvider[]>
   /**
    * Provider redirect URI が Web app と別の API origin を指す場合に、OAuth callback を引き渡す
    * Web app の origin です。省略時は callback と同じ origin の Web app へ引き渡します。
@@ -804,6 +861,11 @@ export type PublicApiDependencies = {
   createRequestId?: () => string
   /** Cursor expiry と rate-limit header の計算に使う clock です。 */
   now?: () => Date
+  /**
+   * Reads whether this deployment serves Software factory; defaults to the
+   * `SOFTWARE_FACTORY` runtime switch. Personal agent keys cannot be rotated while it is off.
+   */
+  softwareFactoryDeployed?: () => boolean
 }
 
 const connectorCatalog = [
@@ -1082,6 +1144,34 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       readRequiredQuery(c.req.query('teamId'), 'teamId'),
       readRouteId(c.req.param('workItemId'), 'Work Item ID'),
     ))
+  })
+
+  router.get('/v1/work-items/:workItemId/documents', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const documents = requireDocumentService(dependencies)
+    const teamId = readRequiredQuery(c.req.query('teamId'), 'teamId')
+    const workItemId = readRouteId(c.req.param('workItemId'), 'Work Item ID')
+    return c.json(await createOrderedSignedContinuationPage(c, dependencies, {
+      workspaceId: credential.workspaceId,
+      actorId: `credential:${credential.credentialId}`,
+      resource: `/v1/work-items/${encodeURIComponent(workItemId)}/documents`,
+      filters: { teamId },
+    }, (continuation, limit) => documents.listWorkItemDocuments(
+      credential, teamId, workItemId, continuation, Math.min(limit, PUBLIC_WORK_ITEM_DOCUMENT_PAGE_MAX_LIMIT),
+    )))
+  })
+
+  router.get('/v1/work-items/:workItemId/documents/:documentId', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const documents = requireDocumentService(dependencies)
+    const document = await documents.getWorkItemDocument(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('workItemId'), 'Work Item ID'),
+      readRouteId(c.req.param('documentId'), 'Document ID'),
+    )
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(document)
   })
 
   router.get('/v1/work-items/:workItemId/key', async (c) => {
@@ -1579,6 +1669,15 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const apiKey = (await dependencies.apiKeys.listApiKeys(principal.workspaceId))
       .find((candidate) => candidate.id === apiKeyId)
     requireResourceCreator(apiKey, principal.userId, 'API key')
+    // A personal agent key is a Software factory credential: rotating it here would issue a new
+    // secret that the /developer/me routes refuse while the module is off.
+    if (
+      !(dependencies.softwareFactoryDeployed ?? isSoftwareFactoryDeployed)() &&
+      (await dependencies.apiKeys.listPersonalApiKeys(principal.workspaceId))
+        .some((candidate) => candidate.id === apiKeyId)
+    ) {
+      return softwareFactoryNotDeployedResponse(c, 'problem')
+    }
     return executeManagementIdempotentJson(
       c,
       dependencies,
@@ -2044,10 +2143,14 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     ) {
       throw new PublicApiServiceError(400, 'invalid_request', 'Connector category is invalid.')
     }
+    const configuredProviders = new Set(
+      await dependencies.listConfiguredConnectorProviders?.() ?? [],
+    )
     return c.json(
-      category === undefined
-        ? connectorCatalog
-        : connectorCatalog.filter((connector) => connector.category === category),
+      connectorCatalog.filter((connector) =>
+        configuredProviders.has(connector.provider) &&
+        (category === undefined || connector.category === category)
+      ),
     )
   })
 
@@ -4970,6 +5073,19 @@ function requireStoredResponse(value: unknown) {
     )
   }
   return response as { status: 200 | 201 | 202 | 204; body: unknown }
+}
+
+/**
+ * Returns the configured Document service or reports that Documents are unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Document service.
+ */
+function requireDocumentService(dependencies: PublicApiDependencies): PublicDocumentService {
+  if (!dependencies.documents) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'Documents are not configured.', true)
+  }
+  return dependencies.documents
 }
 
 /**

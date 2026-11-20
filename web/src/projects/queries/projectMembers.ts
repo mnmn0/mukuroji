@@ -4,7 +4,7 @@ import {
   type ProjectMember,
   type ProjectMemberRole,
 } from '../api/members'
-import type { ProjectDirectoryProject } from '../api/directory'
+import type { ProjectDirectoryProject, ProjectDirectoryTeam } from '../api/directory'
 import type { TeamProjectMemberAccess } from '../model/teamInsights'
 import type { PlanningProjectRoleScope } from '../../planning/model/permissions'
 
@@ -100,6 +100,45 @@ export async function loadActiveProjectMembers(
 ) {
   const responses = await Promise.allSettled(
     projectIds.map((projectId) => getProjectMembers(accessToken, projectId)),
+  )
+  const membersById = new Map<string, ProjectMember>()
+
+  for (const response of responses) {
+    if (response.status !== 'fulfilled') {
+      continue
+    }
+
+    for (const member of response.value) {
+      membersById.set(member.id, member)
+    }
+  }
+
+  return {
+    errors: responses.flatMap((response) =>
+      response.status === 'rejected' ? [response.reason] : []
+    ),
+    members: Array.from(membersById.values()).filter(isActiveProjectAssignmentCandidate),
+  }
+}
+
+/**
+ * Loads the active assignment candidates of every Project in a Team directory.
+ *
+ * Each request is Team-qualified so a Project ID shared by several Teams resolves to the right
+ * Project. Members are de-duplicated by member key, and failed Projects are reported in `errors`
+ * instead of rejecting the aggregate.
+ *
+ * @param accessToken - Bearer token for the Project member API.
+ * @param teams - Teams, each with the Projects whose members to load.
+ * @returns Active members across the directory and request errors.
+ */
+export async function loadActiveDirectoryMembers(
+  accessToken: string,
+  teams: readonly ProjectDirectoryTeam[],
+) {
+  const responses = await Promise.allSettled(
+    teams.flatMap((team) =>
+      team.projects.map((project) => getProjectMembers(accessToken, project.id, team.id))),
   )
   const membersById = new Map<string, ProjectMember>()
 

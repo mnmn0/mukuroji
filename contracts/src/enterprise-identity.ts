@@ -56,6 +56,8 @@ export const ENTERPRISE_BUILT_IN_ROLE_IDS = [
   'workspace:admin',
   'workspace:member',
   'workspace:guest',
+  'workspace:portfolio-viewer',
+  'workspace:auditor',
   'team:manager',
   'team:member',
   'project:manager',

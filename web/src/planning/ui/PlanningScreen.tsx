@@ -19,7 +19,7 @@ import type {
   PlanningWorkItemSummary,
   WorkItemAffectedProject,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
@@ -69,7 +69,11 @@ import {
   PlanningEntityEditor,
   type PlanningEntityEditorLabels,
 } from './PlanningEntityEditor'
-import { collectPlanningOwnerCandidates } from '../model/entityEditor'
+import {
+  collectPlanningOwnerCandidates,
+  resolvePlanningOwnerOptions,
+  type PlanningOwnerOption,
+} from '../model/entityEditor'
 import {
   PlanningLatestUpdateSummary,
   PlanningUpdateDetailPane,
@@ -122,6 +126,8 @@ export type PlanningLabels = PlanningUpdateLabels & {
   progress: string
   /** Owner の列見出しです。 */
   owner: string
+  /** Placeholder of the owner picker in the create form. */
+  ownerPlaceholder: string
   /** Health の列見出しです。 */
   health: string
   /** Risk の列見出しです。 */
@@ -186,8 +192,6 @@ export type PlanningLabels = PlanningUpdateLabels & {
   entityActions: string
   /** Archive ボタンの文言です。 */
   archive: string
-  /** Duplicate target ID field の文言です。 */
-  duplicateId: string
   /** Duplicate ボタンの文言です。 */
   duplicate: string
   /** Move target field の文言です。 */
@@ -214,8 +218,6 @@ export type PlanningLabels = PlanningUpdateLabels & {
   portfolioDescription: string
   /** Entity name の列見出しです。 */
   entity: string
-  /** Entity ID field の文言です。 */
-  entityId: string
   /** Entity type field の文言です。 */
   entityType: string
   /** Team scope field の文言です。 */
@@ -322,6 +324,15 @@ export type PlanningScreenProps = {
   createScopeTeams?: readonly ProjectDirectoryTeam[]
   /** Readable Project directory used to name groups on the cross-Project timeline. */
   directoryTeams?: readonly CrossProjectTimelineDirectoryTeam[]
+  /**
+   * Workspace members suggested by the owner fields of the create form and the entity editor.
+   * The owner can always be typed as a member key.
+   */
+  ownerOptions?: readonly PlanningOwnerOption[]
+  /** Message shown when some or all members could not be loaded for the owner fields. */
+  ownerOptionsErrorMessage?: string
+  /** Reloads the owner field members after a failure. */
+  onRetryOwnerOptions?: () => void
   /** Current user が target の update schedule を管理できるか判定する callback です。 */
   canManageUpdateCadence?: (target: PlanningUpdateTargetView) => boolean
   /** Current user が target に manual update を公開できるか判定する callback です。 */
@@ -391,7 +402,7 @@ export type PlanningScreenProps = {
   /** Archive 済みの計画の一覧と復元です。省略すると一覧を表示しません。 */
   archive?: PlanningArchiveController
   /** Entity duplicate callback です。 */
-  onDuplicateEntity?: (entity: PlanningEntity, targetId: string) => void | Promise<void>
+  onDuplicateEntity?: (entity: PlanningEntity) => void | Promise<void>
   /** Entity move callback です。 */
   onMoveEntity?: (
     entity: PlanningEntity,
@@ -465,6 +476,9 @@ export function PlanningScreen({
   createScopeTeams = [],
   directoryTeams,
   errorMessage,
+  onRetryOwnerOptions,
+  ownerOptions = [],
+  ownerOptionsErrorMessage,
   hasMoreUpdateHistory = false,
   initialSelectedEntityId,
   initialSelectedUpdateTarget,
@@ -510,6 +524,24 @@ export function PlanningScreen({
     () => snapshot?.entities.filter((entity) => !entity.archivedAt) ?? [],
     [snapshot],
   )
+  const moveScope: PlanningMoveScope = {
+    allowWorkspace: canCreateInScope?.({}) ?? true,
+    teams: filterPlanningScopeTeams(createScopeTeams, canCreateInScope),
+  }
+  const resolvedOwnerOptions = resolvePlanningOwnerOptions(
+    ownerOptions,
+    collectPlanningOwnerCandidates(activeEntities),
+  )
+  const ownerNotice = ownerOptionsErrorMessage ? (
+    <p className="flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--workbench-danger)]" role="status">
+      {ownerOptionsErrorMessage}
+      {onRetryOwnerOptions ? (
+        <button className="workbench-button-secondary min-h-8 px-3" type="button" onClick={onRetryOwnerOptions}>
+          {labels.retry}
+        </button>
+      ) : null}
+    </p>
+  ) : undefined
   const [selectedEntityId, setSelectedEntityId] = useState(initialSelectedEntityId)
   const [selectedUpdateTarget, setSelectedUpdateTarget] = useState(initialSelectedUpdateTarget)
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
@@ -713,6 +745,7 @@ export function PlanningScreen({
                 <TimelineView
                   canManageEntity={canManageEntity}
                   directoryTeams={directoryTeams}
+                  moveScope={moveScope}
                   canManageWorkItemDependencyEndpoint={canManageWorkItemDependencyEndpoint}
                   labels={labels}
                   isAiOperationPending={isAiOperationPending}
@@ -751,6 +784,7 @@ export function PlanningScreen({
               {activeEntities.length > 0 && activeView === 'roadmap' ? (
                 <RoadmapView
                   canLinkEntity={canLinkEntity}
+                  moveScope={moveScope}
                   canManageEntity={canManageEntity}
                   canUpdateWorkItemLink={canUpdateWorkItemLink}
                   labels={labels}
@@ -782,6 +816,8 @@ export function PlanningScreen({
                   key={`planning-entity-editor:${selectedEntity.id}`}
                   labels={labels.entityEditor}
                   ownerCandidates={collectPlanningOwnerCandidates(activeEntities)}
+                  ownerNotice={ownerNotice}
+                  ownerOptions={ownerOptions}
                   onSave={onUpdateEntity && (canManageEntity?.(selectedEntity) ?? true)
                     ? onUpdateEntity
                     : undefined}
@@ -794,6 +830,8 @@ export function PlanningScreen({
                 entities={activeEntities}
                 labels={labels}
                 onCreate={onCreateEntity}
+                ownerNotice={ownerNotice}
+                ownerOptions={resolvedOwnerOptions}
               />
               {archive ? (
                 <PlanningArchivePanel
@@ -840,6 +878,7 @@ function TimelineView({
   directoryTeams,
   isAiOperationPending = false,
   labels,
+  moveScope,
   onArchiveEntity,
   onChangeMilestoneDate,
   onCreateDependency,
@@ -866,6 +905,8 @@ function TimelineView({
   /** Whether AI review is pending and target selection must remain stable. */
   isAiOperationPending?: boolean
   labels: PlanningLabels
+  /** Team / Project scopes offered when a Portfolio or Cycle moves to the root. */
+  moveScope: PlanningMoveScope
   onArchiveEntity?: PlanningScreenProps['onArchiveEntity']
   onChangeMilestoneDate?: PlanningScreenProps['onChangeMilestoneDate']
   onCreateDependency?: PlanningScreenProps['onCreateDependency']
@@ -1069,6 +1110,7 @@ function TimelineView({
             entities={snapshot.entities.filter((entity) => !entity.archivedAt)}
             entity={detailEntity}
             labels={labels}
+            moveScope={moveScope}
             onArchive={(canManageEntity?.(detailEntity) ?? true)
               ? onArchiveEntity
               : undefined}
@@ -1271,6 +1313,7 @@ function RoadmapView({
   canUpdateWorkItemLink,
   isAiOperationPending = false,
   labels,
+  moveScope,
   onArchiveEntity,
   onDeleteWorkItemLink,
   onDuplicateEntity,
@@ -1287,6 +1330,8 @@ function RoadmapView({
   /** Whether AI review is pending and target selection must remain stable. */
   isAiOperationPending?: boolean
   labels: PlanningLabels
+  /** Team / Project scopes offered when a Portfolio or Cycle moves to the root. */
+  moveScope: PlanningMoveScope
   onArchiveEntity?: PlanningScreenProps['onArchiveEntity']
   onDeleteWorkItemLink?: PlanningScreenProps['onDeleteWorkItemLink']
   onDuplicateEntity?: PlanningScreenProps['onDuplicateEntity']
@@ -1365,6 +1410,7 @@ function RoadmapView({
               entity={selectedEntity}
               key={`roadmap-actions:${createPlanningEntityDetailKey(selectedEntity)}`}
               labels={labels}
+              moveScope={moveScope}
               onArchive={canManageSelectedEntity ? onArchiveEntity : undefined}
               onDuplicate={canManageSelectedEntity ? onDuplicateEntity : undefined}
               onMove={canManageSelectedEntity ? onMoveEntity : undefined}
@@ -1458,6 +1504,7 @@ function EntityActions({
   entities,
   entity,
   labels,
+  moveScope,
   onArchive,
   onDuplicate,
   onMove,
@@ -1466,6 +1513,8 @@ function EntityActions({
   entities: PlanningEntity[]
   entity: PlanningEntity
   labels: PlanningLabels
+  /** Team / Project scopes offered when a Portfolio or Cycle moves to the root. */
+  moveScope: PlanningMoveScope
   onArchive?: PlanningScreenProps['onArchiveEntity']
   onDuplicate?: PlanningScreenProps['onDuplicateEntity']
   onMove?: PlanningScreenProps['onMoveEntity']
@@ -1495,14 +1544,7 @@ function EntityActions({
       <p className="text-sm font-semibold text-[var(--workbench-muted)]">{entity.title}</p>
       {onArchive ? <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={() => void onArchive(entity)}>{labels.archive}</button> : null}
       {canDuplicate && onDuplicate ? (
-        <form className="grid gap-2" onSubmit={(event) => {
-          event.preventDefault()
-          const targetId = String(new FormData(event.currentTarget).get('targetId') ?? '').trim()
-          if (targetId) void onDuplicate(entity, targetId)
-        }}>
-          <label className="grid gap-2 text-sm font-semibold">{labels.duplicateId}<input className="workbench-input h-10 px-3" name="targetId" required /></label>
-          <button className="workbench-button-secondary min-h-10 px-4" type="submit">{labels.duplicate}</button>
-        </form>
+        <button className="workbench-button-secondary min-h-10 px-4" type="button" onClick={() => void onDuplicate(entity)}>{labels.duplicate}</button>
       ) : null}
       {canMove && onMove ? (
         <form className="grid gap-2" onSubmit={(event) => {
@@ -1518,19 +1560,11 @@ function EntityActions({
         }}>
           <label className="grid gap-2 text-sm font-semibold">{labels.moveTarget}<select className="workbench-input h-10 px-3" defaultValue={canMoveToRoot ? '' : defaultMoveParentId} name="parentId" required={!canMoveToRoot}>{canMoveToRoot ? <option value="">{labels.moveToRoot}</option> : null}{moveTargets.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.title}</option>)}</select></label>
           {canMoveToRoot ? (
-            <div className="grid grid-cols-2 gap-3" data-testid="planning-root-move-scope">
-              <PlanningInput
-                defaultValue={entity.teamId}
-                label={labels.team}
-                name="teamId"
-                required={entity.type === 'cycle'}
-              />
-              <PlanningInput
-                defaultValue={entity.projectId}
-                label={labels.project}
-                name="projectId"
-              />
-            </div>
+            <RootMoveScopeFields
+              entity={entity}
+              labels={labels}
+              scope={moveScope}
+            />
           ) : null}
           <button className="workbench-button-secondary min-h-10 px-4" type="submit">{labels.move}</button>
         </form>
@@ -1547,6 +1581,8 @@ function CreateEntityPanel({
   entities,
   labels,
   onCreate,
+  ownerNotice,
+  ownerOptions,
 }: {
   canCreateInScope?: PlanningScreenProps['canCreateInScope']
   canManageEntity?: PlanningScreenProps['canManageEntity']
@@ -1554,21 +1590,18 @@ function CreateEntityPanel({
   entities: PlanningEntity[]
   labels: PlanningLabels
   onCreate?: PlanningScreenProps['onCreateEntity']
+  /** Notice under the owner field, such as a member-list load failure with a retry button. */
+  ownerNotice?: ReactNode
+  /** Members suggested by the owner field; the owner can still be typed. */
+  ownerOptions: readonly PlanningOwnerOption[]
 }) {
+  const ownerListId = useId()
   const [entityType, setEntityType] = useState<PlanningEntityType>(() =>
     resolveInitialEntityType(entities),
   )
   const [goalFramework, setGoalFramework] = useState<PlanningGoalFramework>('goal')
   const canCreateInWorkspace = canCreateInScope?.({}) ?? true
-  const manageableScopeTeams = createScopeTeams.flatMap((team) =>
-    canCreateInScope?.({ teamId: team.id }) === false
-      ? []
-      : [{
-          ...team,
-          projects: team.projects.filter((project) =>
-            canCreateInScope?.({ teamId: team.id, projectId: project.id }) ?? true),
-        }],
-  )
+  const manageableScopeTeams = filterPlanningScopeTeams(createScopeTeams, canCreateInScope)
   const [selectedTeamId, setSelectedTeamId] = useState(
     canCreateInWorkspace ? '' : manageableScopeTeams[0]?.id ?? '',
   )
@@ -1612,7 +1645,6 @@ function CreateEntityPanel({
         const projectId = parent?.projectId ?? (requestedProjectId || undefined)
         if (canCreateInScope && !canCreateInScope({ teamId, projectId })) return
         const input: Omit<CreatePlanningEntityInput, 'expectedRevision'> = {
-          id: String(data.get('entityId') ?? '').trim(),
           type: entityType,
           title: String(data.get('title') ?? '').trim(),
           ownerMemberKey: String(data.get('ownerMemberKey') ?? '').trim(),
@@ -1637,17 +1669,27 @@ function CreateEntityPanel({
               : 'move-incomplete',
           } : {}),
         }
-        if (input.id && input.title && input.ownerMemberKey && baseline.startDate && baseline.endDate) {
+        if (input.title && input.ownerMemberKey && baseline.startDate && baseline.endDate) {
           void onCreate?.(input)
         }
       }}
     >
       <h2 className="text-base font-semibold text-[var(--workbench-text)]">{labels.createEntity}</h2>
       <div className="grid grid-cols-4 gap-3 max-[1000px]:grid-cols-2 max-[640px]:grid-cols-1">
-        <PlanningInput label={labels.entityId} name="entityId" required />
         <PlanningInput label={labels.entity} name="title" required />
         <label className="grid gap-2 text-sm font-semibold">{labels.entityType}<select className="workbench-input h-10 px-3" name="entityType" value={entityType} onChange={(event) => setEntityType(event.target.value as PlanningEntityType)}>{(Object.keys(labels.entityTypes) as PlanningEntityType[]).map((type) => <option key={type} value={type}>{labels.entityTypes[type]}</option>)}</select></label>
-        <PlanningInput label={labels.owner} name="ownerMemberKey" required />
+        <div className="grid content-start gap-2">
+          <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+            {labels.owner}
+            <input autoComplete="off" className="workbench-input h-10 px-3" list={ownerListId} name="ownerMemberKey" placeholder={labels.ownerPlaceholder} required type="text" />
+            <datalist id={ownerListId}>
+              {ownerOptions.map((option) => (
+                <option key={option.memberKey} label={option.label} value={option.memberKey} />
+              ))}
+            </datalist>
+          </label>
+          {ownerNotice}
+        </div>
         {entityType === 'goal' ? (
           <label className="grid gap-2 text-sm font-semibold">
             {labels.goalFramework}
@@ -1903,6 +1945,104 @@ function OptionalEntitySelect({ defaultValue, entities, label, name }: { default
 
 function MultiEntitySelect({ defaultValue, entities, label, name }: { defaultValue: string[]; entities: PlanningEntity[]; label: string; name: string }) {
   return <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">{label}<select className="workbench-input min-h-24 p-2" defaultValue={defaultValue} multiple name={name}>{entities.map((entity) => <option key={entity.id} value={entity.id}>{entity.title}</option>)}</select></label>
+}
+
+/** Team / Project scopes a Portfolio or Cycle can move to at the root of the plan. */
+type PlanningMoveScope = {
+  /** Whether the root move may clear the Team and keep the entity Workspace-wide. */
+  allowWorkspace: boolean
+  /** Teams, each with the Projects, where the current user may place Planning roots. */
+  teams: readonly ProjectDirectoryTeam[]
+}
+
+/**
+ * Keeps the Teams and Projects where the current user may create or place a Planning root.
+ *
+ * @param teams - Manageable Team / Project directory passed to the screen.
+ * @param canCreateInScope - Optional scope permission check.
+ * @returns Teams the user may use, each limited to the Projects the user may use.
+ */
+function filterPlanningScopeTeams(
+  teams: readonly ProjectDirectoryTeam[],
+  canCreateInScope: PlanningScreenProps['canCreateInScope'],
+): ProjectDirectoryTeam[] {
+  return teams.flatMap((team) =>
+    canCreateInScope?.({ teamId: team.id }) === false
+      ? []
+      : [{
+          ...team,
+          projects: team.projects.filter((project) =>
+            canCreateInScope?.({ teamId: team.id, projectId: project.id }) ?? true),
+        }],
+  )
+}
+
+/**
+ * Lets the user pick the destination Team and Project when a Portfolio or Cycle moves to the root.
+ *
+ * The entity's current Team and Project stay selectable even when the directory no longer lists
+ * them, so opening the form never silently moves the entity elsewhere.
+ *
+ * @param props - Entity being moved, labels and the allowed scopes.
+ * @returns Team and Project selects named `teamId` and `projectId`.
+ */
+function RootMoveScopeFields({
+  entity,
+  labels,
+  scope,
+}: {
+  /** Entity being moved. */
+  entity: PlanningEntity
+  /** Screen labels. */
+  labels: PlanningLabels
+  /** Team / Project scopes the entity may move to. */
+  scope: PlanningMoveScope
+}) {
+  const teamRequired = entity.type === 'cycle' || !scope.allowWorkspace
+  const teams: ProjectDirectoryTeam[] = entity.teamId && !scope.teams.some((team) => team.id === entity.teamId)
+    ? [...scope.teams, { id: entity.teamId, name: entity.teamId, projects: [] }]
+    : [...scope.teams]
+  const [teamId, setTeamId] = useState(() =>
+    entity.teamId ?? (teamRequired ? teams[0]?.id ?? '' : ''))
+  const [projectId, setProjectId] = useState(entity.projectId ?? '')
+  const selectedTeam = teams.find((team) => team.id === teamId)
+  const projects = selectedTeam && teamId === entity.teamId && entity.projectId &&
+    !selectedTeam.projects.some((project) => project.id === entity.projectId)
+    ? [...selectedTeam.projects, { id: entity.projectId, name: entity.projectId }]
+    : selectedTeam?.projects ?? []
+  return (
+    <div className="grid grid-cols-2 gap-3 max-[520px]:grid-cols-1" data-testid="planning-root-move-scope">
+      <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+        {labels.team}
+        <select
+          className="workbench-input h-10 px-3"
+          name="teamId"
+          required={teamRequired}
+          value={teamId}
+          onChange={(event) => {
+            setTeamId(event.target.value)
+            setProjectId('')
+          }}
+        >
+          {teamRequired ? null : <option value="">-</option>}
+          {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+        </select>
+      </label>
+      <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+        {labels.project}
+        <select
+          className="workbench-input h-10 px-3"
+          disabled={!selectedTeam}
+          name="projectId"
+          value={projectId}
+          onChange={(event) => setProjectId(event.target.value)}
+        >
+          <option value="">-</option>
+          {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+        </select>
+      </label>
+    </div>
+  )
 }
 
 function PlanningInput({ defaultValue, label, name, required = false, type = 'text' }: { defaultValue?: string; label: string; name: string; required?: boolean; type?: 'date' | 'number' | 'text' }) {

@@ -13,16 +13,16 @@ import {
   type Locale,
   type MessageKey,
 } from '../../shared/i18n/i18n'
-import { InfoGrid, SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
+import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
 
 /**
- * Inputs for the Workspace settings view.
+ * Inputs for the personal settings view.
  */
 export type WorkspaceSettingsViewProps = {
+  /** Composed account settings (sign-in, AI access) rendered after notifications. */
+  accountSections?: ReactNode
   /** Composed app installation section rendered after display preferences. */
   appInstallSection?: ReactNode
-  /** Composed administrative settings rendered after the security link. */
-  configurationSections?: ReactNode
   /** Currently selected font-size preference. */
   fontSizePreference: FontSizePreference
   /** Whether display preferences failed to save to the account. */
@@ -41,6 +41,8 @@ export type WorkspaceSettingsViewProps = {
   onThemePreferenceChange: (preference: ThemePreference) => void
   /** Callback that saves a time zone; undefined follows the browser. */
   onTimeZoneChange?: (timeZone: string | undefined) => void
+  /** Whether to link the agent connection page, which only Software factory deployments serve. */
+  showAgentConnection?: boolean
   /** Localized message resolver. */
   t: (key: MessageKey) => string
   /** Currently selected color theme. */
@@ -77,14 +79,15 @@ const themePreferenceLabelKeys: Record<ThemePreference, MessageKey> = {
 }
 
 /**
- * Renders Workspace preferences around page-composed settings sections.
+ * Renders the personal settings area: display preferences, app install, notifications,
+ * account sections, the agent connection link, and the signed-in account.
  *
  * @param props - Preference data, actions, and composed section content.
- * @returns The complete Workspace settings view.
+ * @returns The personal settings view.
  */
 export function WorkspaceSettingsView({
+  accountSections,
   appInstallSection,
-  configurationSections,
   fontSizePreference,
   isPreferencesSaveFailed = false,
   locale,
@@ -94,6 +97,7 @@ export function WorkspaceSettingsView({
   onRetryPreferencesSave,
   onThemePreferenceChange,
   onTimeZoneChange,
+  showAgentConnection = true,
   t,
   themePreference,
   timeZone,
@@ -251,70 +255,42 @@ export function WorkspaceSettingsView({
 
       {notificationSettingsSection}
 
-      <InfoGrid
-        items={[
-          ['workspace.settings.profileTitle', 'workspace.settings.profileDescription'],
-          ['workspace.settings.permissionTitle', 'workspace.settings.permissionDescription'],
-          ['workspace.settings.integrationTitle', 'workspace.settings.integrationDescription'],
-        ]}
-        t={t}
-      />
+      {accountSections}
 
-      <Link
-        className="workbench-panel group flex min-w-0 items-center justify-between gap-5 p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
-        data-testid="agent-connection-settings-link"
-        to="/settings/agent-connection"
-      >
-        <span className="min-w-0">
-          <span className="workbench-eyebrow">
-            {t('agents.connect.eyebrow')}
-          </span>
-          <strong className="mt-2 block text-lg font-semibold text-[var(--workbench-text)]">
-            {t('agents.connect.open')}
-          </strong>
-          <span className="mt-2 block max-w-[760px] text-sm font-medium leading-6 text-[var(--workbench-muted)]">
-            {t('agents.connect.openDescription')}
-          </span>
-        </span>
-        <span
-          aria-hidden="true"
-          className="grid h-11 w-11 flex-none place-items-center rounded-full border border-[var(--workbench-border)] bg-surface text-lg font-semibold text-[var(--workbench-primary-text)] transition-transform group-hover:translate-x-0.5"
+      {showAgentConnection ? (
+        <Link
+          className="workbench-panel group flex min-w-0 items-center justify-between gap-5 p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
+          data-testid="agent-connection-settings-link"
+          to="/settings/agent-connection"
         >
-          →
-        </span>
-      </Link>
-
-      <Link
-        className="workbench-panel group flex min-w-0 items-center justify-between gap-5 border-tone-99d7cf bg-tone-f3fbfa p-5 transition hover:border-[var(--workbench-primary)] hover:shadow-sm"
-        data-testid="enterprise-security-settings-link"
-        to="/settings/security"
-      >
-        <span className="min-w-0">
-          <span className="workbench-eyebrow">
-            {t('workspace.settings.securityEyebrow')}
+          <span className="min-w-0">
+            <span className="workbench-eyebrow">
+              {t('agents.connect.eyebrow')}
+            </span>
+            <strong className="mt-2 block text-lg font-semibold text-[var(--workbench-text)]">
+              {t('agents.connect.open')}
+            </strong>
+            <span className="mt-2 block max-w-[760px] text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+              {t('agents.connect.openDescription')}
+            </span>
           </span>
-          <strong className="mt-2 block text-lg font-semibold text-[var(--workbench-text)]">
-            {t('workspace.settings.securityTitle')}
-          </strong>
-          <span className="mt-2 block max-w-[760px] text-sm font-medium leading-6 text-[var(--workbench-muted)]">
-            {t('workspace.settings.securityDescription')}
+          <span
+            aria-hidden="true"
+            className="grid h-11 w-11 flex-none place-items-center rounded-full border border-[var(--workbench-border)] bg-surface text-lg font-semibold text-[var(--workbench-primary-text)] transition-transform group-hover:translate-x-0.5"
+          >
+            →
           </span>
-        </span>
-        <span
-          aria-hidden="true"
-          className="grid h-11 w-11 flex-none place-items-center rounded-full border border-tone-99d7cf bg-surface text-lg font-semibold text-[var(--workbench-primary-text)] transition-transform group-hover:translate-x-0.5"
-        >
-          →
-        </span>
-      </Link>
+        </Link>
+      ) : null}
 
-      {configurationSections}
-
-      <section className="workbench-panel p-5">
+      <section className="workbench-panel p-5" data-testid="settings-profile">
         <p className="workbench-eyebrow">{t('workspace.user.label')}</p>
         <h2 className="mt-2 text-lg font-semibold text-[var(--workbench-text)]">
           {t('workspace.settings.profileTitle')}
         </h2>
+        <p className="mt-1 text-sm font-medium leading-6 text-[var(--workbench-muted)]">
+          {t('workspace.settings.profileDescription')}
+        </p>
         <p className="mt-3 break-all text-sm font-medium text-[var(--workbench-muted)]">
           {userLabel}
         </p>

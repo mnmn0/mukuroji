@@ -512,6 +512,7 @@ function WorkspaceRouteShell({
           onSelectNav={workspace.onSelectNav}
           onSelectProject={workspace.onSelectProject}
           onSelectTeamView={workspace.onSelectTeamView}
+          showFactoryBoard={workspace.softwareFactoryEnabled}
           onShowAllQuickAccess={() => navigate(createQuickAccessProjectsPath())}
           onShowAllProjects={() => navigate(createProjectsPath())}
           quickAccessProjects={workspace.quickAccessProjects}
@@ -757,7 +758,12 @@ function resolveWorkspaceRouteMetadata(
     return shareRouteMetadata
   }
 
-  if (matchPath('/settings', pathname)) {
+  if (
+    matchPath('/settings', pathname) ||
+    matchPath('/settings/personal', pathname) ||
+    matchPath('/settings/workspace', pathname) ||
+    matchPath('/settings/team', pathname)
+  ) {
     return settingsRouteMetadata
   }
 

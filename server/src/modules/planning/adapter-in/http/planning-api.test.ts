@@ -780,6 +780,189 @@ test('filters legacy Planning update targets by their Team-qualified Project ACL
   }])
 })
 
+/**
+ * Seeds Workspace, Team, readable Project, and private Project Planning entities with dependencies.
+ *
+ * @param planning - In-memory Planning client receiving the graph.
+ */
+async function seedLegacyPlanningScopeGraph(planning: InMemoryPlanningClient): Promise<void> {
+  const workspaceId = 'user#demo@example.com'
+  const entities = [
+    { id: 'ws-portfolio', type: 'portfolio' as const },
+    { id: 'ws-roadmap', type: 'roadmap' as const, parentId: 'ws-portfolio' },
+    { id: 'team-roadmap', type: 'roadmap' as const, parentId: 'ws-portfolio', teamId: 'core-team' },
+    {
+      id: 'refero-phase',
+      type: 'phase' as const,
+      parentId: 'ws-roadmap',
+      teamId: 'core-team',
+      projectId: 'refero',
+    },
+    {
+      id: 'refero-milestone',
+      type: 'milestone' as const,
+      parentId: 'refero-phase',
+      teamId: 'core-team',
+      projectId: 'refero',
+    },
+    {
+      id: 'private-phase',
+      type: 'phase' as const,
+      parentId: 'ws-roadmap',
+      teamId: 'core-team',
+      projectId: 'private-project',
+    },
+    {
+      id: 'private-milestone',
+      type: 'milestone' as const,
+      parentId: 'private-phase',
+      teamId: 'core-team',
+      projectId: 'private-project',
+    },
+  ]
+  let revision = 0
+  for (const entity of entities) {
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput(entity.id, revision++),
+      title: `Entity ${entity.id}`,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+      teamId: undefined,
+      projectId: undefined,
+      ...(entity.type === 'milestone'
+        ? {
+            baseline: { startDate: '2026-07-14', endDate: '2026-07-14' },
+            forecast: { startDate: '2026-07-14', endDate: '2026-07-14' },
+          }
+        : {}),
+      ...entity,
+    }, { workItems: [] })
+  }
+  for (const [id, predecessorId, successorId] of [
+    ['refero-phase-to-milestone', 'refero-phase', 'refero-milestone'],
+    ['private-phase-to-refero', 'private-phase', 'refero-milestone'],
+    ['refero-to-private-milestone', 'refero-milestone', 'private-milestone'],
+    ['team-to-private', 'team-roadmap', 'private-phase'],
+  ] as const) {
+    await planning.createDependency(workspaceId, {
+      id,
+      predecessorId,
+      successorId,
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: revision++,
+    }, { workItems: [] })
+  }
+}
+
+test('filters legacy Planning entities and dependencies by Project, Team, and Workspace scope', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const body: PlanningSnapshot = await response.json()
+  expect(body.entities.map((entity) => [entity.id, entity.parentId ?? null])).toEqual([
+    ['refero-milestone', 'refero-phase'],
+    ['refero-phase', 'ws-roadmap'],
+    ['team-roadmap', 'ws-portfolio'],
+    ['ws-portfolio', null],
+    ['ws-roadmap', 'ws-portfolio'],
+  ])
+  expect(body.dependencies.map((dependency) => dependency.id)).toEqual([
+    'refero-phase-to-milestone',
+  ])
+  const visibleIds = new Set(body.entities.map((entity) => entity.id))
+  expect(body.criticalPath.entityIds.every((entityId) => visibleIds.has(entityId))).toBe(true)
+  expect(Object.keys(body.criticalPath.slackByEntityId).every((entityId) =>
+    visibleIds.has(entityId)
+  )).toBe(true)
+})
+
+test('hides Workspace-scoped and other Project Planning entities from a legacy guest', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'guest',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const body: PlanningSnapshot = await response.json()
+  expect(body.entities.map((entity) => [entity.id, entity.parentId ?? null])).toEqual([
+    ['refero-milestone', 'refero-phase'],
+    ['refero-phase', null],
+    ['team-roadmap', null],
+  ])
+  expect(body.dependencies.map((dependency) => dependency.id)).toEqual([
+    'refero-phase-to-milestone',
+  ])
+})
+
+test('hides Planning entities and Work Items when a legacy Project ID belongs to several Teams', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+    additionalTeams: [{
+      id: 'other-team',
+      name: 'Other Team',
+      projects: [{ id: 'refero', name: 'Other Refero', tone: 'purple' }],
+    }],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const body: PlanningSnapshot = await response.json()
+  expect(body.entities.map((entity) => entity.id)).toEqual(['ws-portfolio', 'ws-roadmap'])
+  expect(body.dependencies).toEqual([])
+  expect(body.workItems).toEqual([])
+  expect(body.workItemLinks).toEqual([])
+})
+
+test('returns no Planning entities to a legacy guest without Project access', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'guest',
+    projectAccesses: [],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const body: PlanningSnapshot = await response.json()
+  expect(body.entities).toEqual([])
+  expect(body.dependencies).toEqual([])
+  expect(body.criticalPath).toEqual({ entityIds: [], totalDurationDays: 0, slackByEntityId: {} })
+})
+
 test('commits Inbox audit events with update publishes and comments', async () => {
   await withTestEnvironment({ AUDIT_EVENTS_TABLE_NAME: 'AuditEventsTable' }, async () => {
     configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
@@ -1587,7 +1770,8 @@ test('requires the exact Team-qualified Project access when Project IDs are dupl
   const teamScopedInitiativeDenied = await planningApiRequest(
     '/api/planning/updates?targetType=initiative&entityId=core-team-initiative',
   )
-  expect(teamScopedInitiativeDenied.status).toBe(403)
+  // The Team-scoped Initiative is outside the legacy Planning snapshot, so it is not disclosed.
+  expect(teamScopedInitiativeDenied.status).toBe(404)
   const allowed = await planningApiRequest(
     '/api/planning/updates?targetType=project&teamId=other-team&projectId=refero',
   )
@@ -1783,6 +1967,227 @@ test('rejects guest recipients for Workspace-scoped Initiative cadence', async (
   expect(await escalationDenied.json()).toMatchObject({
     code: 'PlanningUpdateRecipientAccessDenied',
   })
+})
+
+/** Creates a portfolio create body that leaves the entity ID to the server. */
+function createServerAssignedPortfolioInput(expectedRevision: number, title = 'Assigned portfolio') {
+  return {
+    type: 'portfolio',
+    title,
+    ownerMemberKey: 'demo@example.com',
+    status: 'planned',
+    health: 'on-track',
+    risk: 'low',
+    progressMode: 'automatic',
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    expectedRevision,
+  }
+}
+
+/**
+ * Reads the entity ID from the `Location` header of a create or duplicate response.
+ *
+ * @param response - Successful create or duplicate response.
+ * @returns Decoded entity ID.
+ */
+function readCreatedPlanningEntityId(response: Response): string {
+  const location = response.headers.get('Location') ?? ''
+  expect(location).toStartWith('/api/planning/entities/')
+  return decodeURIComponent(location.slice('/api/planning/entities/'.length))
+}
+
+test('assigns the entity ID on the server and replays the same create for the same Idempotency-Key', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planning = new InMemoryPlanningClient()
+  setTestAppDependencies({
+    planning,
+    idempotency: createInMemoryDeveloperPlatformAdapters().idempotency,
+  })
+  const input = createServerAssignedPortfolioInput(0)
+
+  const created = await planningApiRequest('/api/planning/entities', 'POST', input, 'assign-create-1')
+  expect(created.status).toBe(201)
+  const entityId = readCreatedPlanningEntityId(created)
+  expect(entityId).toMatch(/^pe-[0-9a-f]{32}$/u)
+  const createdSnapshot: unknown = await created.json()
+  expect(createdSnapshot).toMatchObject({
+    revision: 1,
+    entities: [expect.objectContaining({ id: entityId, title: 'Assigned portfolio' })],
+  })
+
+  const replayed = await planningApiRequest('/api/planning/entities', 'POST', input, 'assign-create-1')
+  expect(replayed.status).toBe(201)
+  expect(replayed.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(readCreatedPlanningEntityId(replayed)).toBe(entityId)
+  expect(await replayed.json()).toMatchObject({ revision: 1 })
+
+  const other = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createServerAssignedPortfolioInput(1, 'Second portfolio'),
+    'assign-create-2',
+  )
+  expect(other.status).toBe(201)
+  expect(readCreatedPlanningEntityId(other)).not.toBe(entityId)
+
+  const reused = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createServerAssignedPortfolioInput(2, 'Different body'),
+    'assign-create-1',
+  )
+  expect(reused.status).toBe(409)
+  expect(await reused.json()).toMatchObject({ code: 'PlanningEntityIdempotencyConflict' })
+
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.revision).toBe(2)
+  expect(snapshot.entities.map((entity) => entity.title).sort()).toEqual([
+    'Assigned portfolio',
+    'Second portfolio',
+  ])
+})
+
+test('requires an Idempotency-Key only when the create or duplicate request omits the ID', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planning = new InMemoryPlanningClient()
+  setTestAppDependencies({
+    planning,
+    idempotency: createInMemoryDeveloperPlatformAdapters().idempotency,
+  })
+
+  const missingKey = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createServerAssignedPortfolioInput(0),
+  )
+  expect(missingKey.status).toBe(400)
+  expect(await missingKey.json()).toMatchObject({ code: 'InvalidPlanningEntityIdempotencyKey' })
+
+  const explicit = await planningApiRequest('/api/planning/entities', 'POST', {
+    ...createServerAssignedPortfolioInput(0),
+    id: 'portfolio-explicit',
+  })
+  expect(explicit.status).toBe(201)
+  expect(readCreatedPlanningEntityId(explicit)).toBe('portfolio-explicit')
+
+  const duplicateWithoutKey = await planningApiRequest(
+    '/api/planning/entities/portfolio-explicit/duplicate',
+    'POST',
+    { expectedRevision: 1 },
+  )
+  expect(duplicateWithoutKey.status).toBe(400)
+  expect(await duplicateWithoutKey.json()).toMatchObject({ code: 'InvalidPlanningEntityIdempotencyKey' })
+
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.entities.map((entity) => entity.id)).toEqual(['portfolio-explicit'])
+})
+
+test('releases the reservation of a rejected create so the fixed body can reuse the key', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planning = new InMemoryPlanningClient()
+  setTestAppDependencies({
+    planning,
+    idempotency: createInMemoryDeveloperPlatformAdapters().idempotency,
+  })
+
+  const rejected = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createServerAssignedPortfolioInput(0, ''),
+    'assign-fixed-retry',
+  )
+  expect(rejected.status).toBe(400)
+
+  const fixed = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createServerAssignedPortfolioInput(0, 'Fixed portfolio'),
+    'assign-fixed-retry',
+  )
+  expect(fixed.status).toBe(201)
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.entities.map((entity) => entity.id)).toEqual([readCreatedPlanningEntityId(fixed)])
+})
+
+test('assigns the duplicate ID on the server and does not copy twice for the same Idempotency-Key', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planning = new InMemoryPlanningClient()
+  setTestAppDependencies({
+    planning,
+    idempotency: createInMemoryDeveloperPlatformAdapters().idempotency,
+  })
+  const source = await planningApiRequest('/api/planning/entities', 'POST', {
+    ...createServerAssignedPortfolioInput(0, 'Source portfolio'),
+    id: 'portfolio-source',
+  })
+  expect(source.status).toBe(201)
+
+  const duplicated = await planningApiRequest(
+    '/api/planning/entities/portfolio-source/duplicate',
+    'POST',
+    { expectedRevision: 1 },
+    'assign-duplicate-1',
+  )
+  expect(duplicated.status).toBe(201)
+  const copyId = readCreatedPlanningEntityId(duplicated)
+  expect(copyId).toMatch(/^pe-[0-9a-f]{32}$/u)
+
+  const replayed = await planningApiRequest(
+    '/api/planning/entities/portfolio-source/duplicate',
+    'POST',
+    { expectedRevision: 1 },
+    'assign-duplicate-1',
+  )
+  expect(replayed.status).toBe(201)
+  expect(replayed.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(readCreatedPlanningEntityId(replayed)).toBe(copyId)
+
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.revision).toBe(2)
+  expect(snapshot.entities.map((entity) => [entity.id, entity.title]).sort()).toEqual([
+    [copyId, 'Source portfolio copy'],
+    ['portfolio-source', 'Source portfolio'],
+  ].sort())
+})
+
+test('returns the created entity instead of a second one when the create receipt was lost', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planning = new InMemoryPlanningClient()
+  const platform = createInMemoryDeveloperPlatformAdapters()
+  setTestAppDependencies({
+    planning,
+    idempotency: {
+      reserveIdempotency: (request) => platform.idempotency.reserveIdempotency(request),
+      async completeIdempotency() {
+        throw new Error('receipt lost')
+      },
+      releaseIdempotency: (request) => platform.idempotency.releaseIdempotency(request),
+    },
+  })
+  const input = createServerAssignedPortfolioInput(0)
+
+  const created = await planningApiRequest('/api/planning/entities', 'POST', input, 'assign-lost-receipt')
+  expect(created.status).toBe(201)
+  // The reservation stays incomplete, so a retry cannot run a second create.
+  const retried = await planningApiRequest('/api/planning/entities', 'POST', input, 'assign-lost-receipt')
+  expect(retried.status).toBe(409)
+
+  // After the reservation is gone, the same request finds the entity under its derived ID and
+  // returns it, even though its revision is now stale.
+  setTestAppDependencies({ planning, idempotency: createInMemoryDeveloperPlatformAdapters().idempotency })
+  const afterExpiry = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    input,
+    'assign-lost-receipt',
+  )
+  expect(afterExpiry.status).toBe(201)
+  expect(afterExpiry.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(readCreatedPlanningEntityId(afterExpiry)).toBe(readCreatedPlanningEntityId(created))
+
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.entities).toHaveLength(1)
 })
 
 test('lets managers build a scoped hierarchy and dependency graph', async () => {

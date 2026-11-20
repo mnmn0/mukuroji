@@ -70,6 +70,7 @@ import {
 import { createPlanningUpdateTargetKey } from '../../planning/model/targetKey'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import { usePlanningArchive } from '../../planning/mutations/usePlanningArchive'
+import { createPlanningEntityCreationRetryTracker } from '../../planning/mutations/entityCreationRetry'
 import {
   hasPlanningUpdateViewerReaction,
   revalidatePlanningUpdateHistoryAfterPublish,
@@ -99,7 +100,11 @@ import {
   type ProjectDirectoryTeam,
   type ProjectMemberRole,
 } from '../../projects/api'
-import { usePlanningProjectRoles } from '../../projects/queries/useProjectMembers'
+import {
+  useActiveDirectoryMembers,
+  usePlanningProjectRoles,
+} from '../../projects/queries/useProjectMembers'
+import { formatProjectMemberOption } from '../../issues/model/teamIssueDisplay'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
 import { createWorkItemDependencyMutationId } from '../../work-items/model/workItemDependencies'
 import {
@@ -123,6 +128,8 @@ export function PlanningPage() {
   const [searchParams] = useSearchParams()
   const { isAiAssistanceTaskEnabled } = useWorkspaceRouteContext()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
+  // Retries of a create or duplicate whose outcome is unknown must resend the same body and key.
+  const entityCreationRetries = useRef(createPlanningEntityCreationRetryTracker()).current
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
@@ -247,6 +254,14 @@ export function PlanningPage() {
     [selectedUpdateTarget, snapshot, teams, updateHistory.data?.updates],
   )
   const canManagePlanning = canManageAnyPlanningScope(user, planningAccess)
+  const ownerMembers = useActiveDirectoryMembers(accessToken, teams, canManagePlanning)
+  const ownerOptions = useMemo(
+    () => (ownerMembers.data?.members ?? []).map((member) => ({
+      memberKey: member.id,
+      label: formatProjectMemberOption(member),
+    })),
+    [ownerMembers.data?.members],
+  )
   const archive = usePlanningArchive({
     accessToken,
     canManageEntity: (entity) => canManagePlanningScope(user, entity, planningAccess),
@@ -665,6 +680,11 @@ export function PlanningPage() {
             canUpdatePlanningWorkItemLink(user, workItem, planningAccess)}
           createScopeTeams={manageableCreateScopeTeams}
           directoryTeams={teams}
+          ownerOptions={ownerOptions}
+          ownerOptionsErrorMessage={ownerMembers.error || (ownerMembers.data?.errors.length ?? 0) > 0
+            ? t('planning.error.ownerMembers')
+            : undefined}
+          onRetryOwnerOptions={() => void ownerMembers.mutate()}
           onRetry={loadErrorMessage && !mutationErrorMessage
             ? () => void mutatePlanning()
             : undefined}
@@ -702,13 +722,19 @@ export function PlanningPage() {
           onCreateEntity={canManagePlanning && snapshot && accessToken
             ? (input) => {
                 if (!canManagePlanningScope(user, input, planningAccess)) return
+                const creationKey = `planning:entity:create:${JSON.stringify(input)}`
+                const expectedRevision = entityCreationRetries.resolveRevision(
+                  creationKey,
+                  snapshot.revision,
+                )
                 return runMutation(
-                  `planning:entity:${input.id}:create`,
-                  [snapshot.revision, input],
-                  (context) => createPlanningEntity(accessToken, {
-                    ...input,
-                    expectedRevision: snapshot.revision,
-                  }, context),
+                  creationKey,
+                  [expectedRevision, input],
+                  (context) => entityCreationRetries.track(
+                    creationKey,
+                    expectedRevision,
+                    () => createPlanningEntity(accessToken, { ...input, expectedRevision }, context),
+                  ),
                 )
               }
             : undefined}
@@ -881,14 +907,22 @@ export function PlanningPage() {
             : undefined}
           archive={archive.controller}
           onDuplicateEntity={canManagePlanning && snapshot && accessToken
-            ? (entity, targetId) => runMutation(
-                `planning:entity:${entity.id}:duplicate:${targetId}`,
-                [snapshot.revision, targetId],
-                (context) => duplicatePlanningEntity(accessToken, entity.id, {
-                  expectedRevision: snapshot.revision,
-                  targetId,
-                }, context),
-              )
+            ? (entity) => {
+                const creationKey = `planning:entity:${entity.id}:duplicate`
+                const expectedRevision = entityCreationRetries.resolveRevision(
+                  creationKey,
+                  snapshot.revision,
+                )
+                return runMutation(
+                  creationKey,
+                  expectedRevision,
+                  (context) => entityCreationRetries.track(
+                    creationKey,
+                    expectedRevision,
+                    () => duplicatePlanningEntity(accessToken, entity.id, { expectedRevision }, context),
+                  ),
+                )
+              }
             : undefined}
           onMoveEntity={canManagePlanning && snapshot && accessToken
             ? (entity, target) => {

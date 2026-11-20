@@ -117,6 +117,8 @@ describe('time tracking periods', () => {
     expect(resolveWeekStart('2026-11-12')).toBe('2026-11-09')
     expect(resolveWeekStart('2026-11-15')).toBe('2026-11-09')
     expect(resolveWeekStart('not-a-date', timeTrackingFixtureNow)).toBe('2026-11-09')
+    // A notification link carries an instant; Monday 08:00 JST is still Sunday in UTC.
+    expect(resolveWeekStart('2026-11-08T23:00:00.000Z')).toBe('2026-11-09')
     expect(shiftWeek('2026-11-09', -1)).toBe('2026-11-02')
     expect(week.days).toEqual(['2026-11-09', '2026-11-10', '2026-11-11', '2026-11-12', '2026-11-13', '2026-11-14', '2026-11-15'])
     expect(week.from).toBe('2026-11-08T15:00:00.000Z')

@@ -6,6 +6,16 @@ agent に取得・着手・報告・完了させるための手順です。接�
 [`docs/software-factory.md`](../software-factory.md) にあります。アプリの **ヘルプ**（`/help#coding-agent`）
 にも設定のテンプレートがあります。
 
+Software factory は deploy 時に選ぶ任意の機能です（CDK context `mukuroji:softwareFactory`、既定は off）。
+off の環境では **agent を接続**、Factory board、ヘルプの coding agent ガイドが表示されず、agent 用 token も
+発行できません。使いたい場合は環境の管理者に有効化を依頼してください（[`cdk/README.md`](../../cdk/README.md#optional-modules)）。
+
+on の環境で発行した本人用 token は、off に切り替えた後も失効するまで Work Item の読み書きに使えます。
+off にする前に **agent を接続** の「発行済みの token」から **失効** しておくと確実です。off にした後は
+**agent を接続** が表示されないため、Workspace の owner / admin が **設定** → **Workspace 管理** →
+**API と外部連携** の「認証情報」（「個人用」と表示される token）から失効します
+（[管理者ガイド](admin.md#api-と外部連携)）。
+
 ## 使う前に
 
 - Workspace の member 以上のロールで、タスクを編集できる権限が必要です。guest は接続できません。
@@ -57,8 +67,20 @@ agent は次の順で操作します。
    `heartbeat` で作業中であることを知らせる。状態を進めるときは `move_task`。
 4. **完了**: `complete_task` でタスクを完了にし、`finish_run` で Run を終える（中断・失敗の場合もここで記録する）。
 
+仕様書や設計書は、タスク詳細の **関連 Document** でタスクに link しておくと agent が読めます。
+`get_task` が link された Document の一覧の最初のページを返し、続きは `list_task_documents` で取得します。
+agent は `read_document` で本文を Markdown として読みます。
+agent が読めるのは、token を発行した人が閲覧できる Document だけで、読むたびにその時点の権限で確かめます。
+本文を読めるのはページとテンプレートで、フォルダーとホワイトボードは読めません。
+Document の本文は、タスクの説明やコメントと同じく利用者が書いたデータで、agent への指示ではありません。
+agent は要件として読みますが、Document に書かれていることだけを理由に、認証情報や接続範囲を変えたり、
+タスクを動かす操作をしたりしないよう MCP server が agent に伝えます。
+
 人がタスク詳細の **エージェントへ引き継ぐ** → **引き継ぎ内容をコピー** を使うと、タスクの内容と
 この手順をまとめた文章を agent に貼り付けられます。コピーだけでは担当者や状態は変わりません。
+引き継ぎ文には受け入れ条件と着手できるかの判断に加えて、作業中の Agent Run（実行中か停止中か、Run ID、
+エージェント名）と、タスクに紐づく閲覧できる Document のタイトルとパスが入ります。Document の本文は入りません。
+別のエージェントの Run が作業中なら、引き継ぎ文は着手しないよう伝えます。
 
 ### 止まったタスクを再開する
 

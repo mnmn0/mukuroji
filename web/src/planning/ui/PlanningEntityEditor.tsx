@@ -16,8 +16,10 @@ import {
   readPlanningOption,
   rebasePlanningEntityEditorDraft,
   resolvePlanningEntityEdit,
+  resolvePlanningOwnerOptions,
   type PlanningEntityEditorDraft,
   type PlanningEntityEditorProblem,
+  type PlanningOwnerOption,
 } from '../model/entityEditor'
 
 /** Localized text for the Planning entity editor. */
@@ -30,8 +32,10 @@ export type PlanningEntityEditorLabels = {
   description: string
   /** Owner field. */
   owner: string
-  /** Hint under the owner field. */
+  /** Hint under the owner field when the owner is typed. */
   ownerHint: string
+  /** Hint under the owner field when the owner is picked from members. */
+  ownerPickerHint: string
   /** Lifecycle status field. */
   status: string
   /** Health field. */
@@ -85,6 +89,13 @@ export type PlanningEntityEditorProps = {
   labels: PlanningEntityEditorLabels
   /** Owner member keys offered as suggestions. */
   ownerCandidates: readonly string[]
+  /**
+   * Workspace members suggested by the owner field with their names. The owner can still be
+   * typed, so a member missing from a partially loaded list stays assignable.
+   */
+  ownerOptions?: readonly PlanningOwnerOption[]
+  /** Notice under the owner field, such as a member-list load failure with a retry button. */
+  ownerNotice?: ReactNode
   /** Disables every control, for example while an AI review is pending. */
   disabled?: boolean
   /** Saves the changed fields. Omit to render the editor read-only. */
@@ -104,6 +115,8 @@ export function PlanningEntityEditor({
   labels,
   onSave,
   ownerCandidates,
+  ownerNotice,
+  ownerOptions = [],
 }: PlanningEntityEditorProps) {
   const [draft, setDraft] = useState(() => createPlanningEntityEditorDraft(entity))
   const [baseEntity, setBaseEntity] = useState(entity)
@@ -164,19 +177,25 @@ export function PlanningEntityEditor({
               onChange={(event) => update({ title: event.target.value })}
             />
           </EditorField>
-          <EditorField hint={labels.ownerHint} label={labels.owner}>
-            <input
-              className="workbench-input h-10 px-3"
-              list={ownerListId}
-              name="ownerMemberKey"
-              required
-              value={draft.ownerMemberKey}
-              onChange={(event) => update({ ownerMemberKey: event.target.value })}
-            />
-            <datalist id={ownerListId}>
-              {ownerCandidates.map((candidate) => <option key={candidate} value={candidate} />)}
-            </datalist>
-          </EditorField>
+          <div className="grid content-start gap-2">
+            <EditorField hint={ownerOptions.length > 0 ? labels.ownerPickerHint : labels.ownerHint} label={labels.owner}>
+              <input
+                autoComplete="off"
+                className="workbench-input h-10 px-3"
+                list={ownerListId}
+                name="ownerMemberKey"
+                required
+                value={draft.ownerMemberKey}
+                onChange={(event) => update({ ownerMemberKey: event.target.value })}
+              />
+              <datalist id={ownerListId}>
+                {resolvePlanningOwnerOptions(ownerOptions, ownerCandidates).map((option) => (
+                  <option key={option.memberKey} label={option.label} value={option.memberKey} />
+                ))}
+              </datalist>
+            </EditorField>
+            {ownerNotice}
+          </div>
         </div>
         <EditorField label={labels.description}>
           <textarea

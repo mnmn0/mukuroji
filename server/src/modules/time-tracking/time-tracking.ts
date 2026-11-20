@@ -1672,11 +1672,16 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     const to = input.to === undefined ? undefined : normalizeEntryBoundary(input.to)
     const hasDateRange = from !== undefined || to !== undefined
     do {
+      // DynamoDB allows one sort-key condition, so a closed range uses BETWEEN; its inclusive
+      // upper bound is trimmed by the `startAt >= to` check below.
       const keyConditionParts = hasDateRange
         ? [
             'teamId = :teamId',
-            ...(from ? ['startAt >= :queryFrom'] : []),
-            ...(to ? ['startAt < :queryTo'] : []),
+            ...(from && to
+              ? ['startAt BETWEEN :queryFrom AND :queryTo']
+              : from
+                ? ['startAt >= :queryFrom']
+                : ['startAt < :queryTo']),
           ]
         : ['workspaceId = :workspaceId', 'begins_with(recordKey, :prefix)']
       const expressionAttributeValues = hasDateRange
@@ -2995,6 +3000,35 @@ function readTransactionCancellationCodes(error: unknown): string[] {
   return error.CancellationReasons.flatMap((reason) =>
     isRecord(reason) && typeof reason.Code === 'string' ? [reason.Code] : []
   )
+}
+
+/**
+ * Builds a transaction condition that holds only while a time entry keeps the given revision, so
+ * a write that relied on reading the entry is cancelled when the entry changes.
+ *
+ * @param tableName - Analytics table that stores time entries.
+ * @param workspaceId - Canonical Workspace ID.
+ * @param teamId - Team ID.
+ * @param entryId - Time entry ID.
+ * @param revision - Revision that was read.
+ * @returns A `ConditionCheck` transaction item.
+ */
+export function createTimeEntryRevisionCondition(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  entryId: string,
+  revision: number,
+) {
+  return {
+    ConditionCheck: {
+      TableName: readIdentifier(tableName, 'Time tracking table name'),
+      Key: { workspaceId, recordKey: entryKey(teamId, entryId) },
+      ConditionExpression: '#revision = :revision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':revision': revision },
+    },
+  }
 }
 
 /** Builds an entry key. */
