@@ -68,13 +68,13 @@ export function ProjectOverviewPage() {
       ? 'denied'
       : 'load'
     : undefined
-  // The board hook keeps the previous Team's board while another Team's board loads, so the
-  // counts wait for the current Team's read instead of counting the wrong board.
+  // The board hook keeps the previous Team's board while another Team's board loads or after its
+  // read fails, so the counts need a successful read of the current Team's board.
   const agentRuns = useMemo(
-    () => agentRunBoard.data && projectId && !agentRunBoard.isLoading
+    () => agentRunBoard.data && projectId && !agentRunBoard.isLoading && !agentRunBoard.error
       ? summarizeProjectOverviewAgentRuns(agentRunBoard.data, projectId)
       : undefined,
-    [agentRunBoard.data, agentRunBoard.isLoading, projectId],
+    [agentRunBoard.data, agentRunBoard.error, agentRunBoard.isLoading, projectId],
   )
   const updateTarget = team && projectId && planning.data
     ? findProjectOverviewUpdateTarget(planning.data.updateTargets, team.id, projectId)
