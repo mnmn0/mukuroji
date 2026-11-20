@@ -31,6 +31,7 @@ function startFakeApi() {
   const notes: { id: string; actorUserId: string; body: string; createdAt: string }[] = []
   const commentBodies: Record<string, unknown>[] = []
   const reportBodies: Record<string, unknown>[] = []
+  const createBodies: Record<string, unknown>[] = []
   const seenKeys: string[] = []
   const runs: FakeRun[] = []
   /** Builds an Agent Run problem response. */
@@ -146,6 +147,12 @@ function startFakeApi() {
       }
       return Response.json({ items: notes, hasMore: false })
     }
+    if (url.pathname === '/api/v1/work-items' && request.method === 'POST') {
+      const body: unknown = await request.json()
+      if (!body || typeof body !== 'object') return Response.json({}, { status: 400 })
+      createBodies.push({ ...body })
+      return Response.json({ ...task, id: 'created', revision: 1 }, { status: 201 })
+    }
     if (request.method === 'PATCH') {
       const body: unknown = await request.json()
       if (!body || typeof body !== 'object' || !('expectedRevision' in body) || body.expectedRevision !== task.revision ||
@@ -161,6 +168,7 @@ function startFakeApi() {
   return {
     api,
     commentBodies,
+    createBodies,
     reportBodies,
     seenKeys,
     /** Releases the active run and moves the task back to Todo, as a person would. */
@@ -311,6 +319,28 @@ test('two instances of one member never share a claim, and a release lets the ot
     expect((await call(first, 'get_next_task')).content).toMatchObject({ data: { action: 'none', ownRuns: [], otherRuns: [{ runtime: 'codex' }] } })
   } finally {
     for (const client of clients) await client.close()
+    await fake.api.stop(true)
+  }
+}, 30_000)
+
+test('create_task leaves the schedule to the server so the Workspace working calendar applies', async () => {
+  const fake = startFakeApi()
+  let client: Client | undefined
+  try {
+    client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
+    for (const dueDate of ['2026-12-01', undefined]) {
+      const created = await call(client, 'create_task', {
+        title: 'Follow-up', idempotencyKey: crypto.randomUUID(), ...(dueDate ? { dueDate } : {}),
+      })
+      expect(created.isError).toBe(false)
+    }
+
+    expect(fake.createBodies).toHaveLength(2)
+    expect(fake.createBodies[0]).toMatchObject({ dueDate: '2026-12-01', assigneeUserId: 'agent', teamId: 'team' })
+    for (const body of fake.createBodies) expect(body).not.toHaveProperty('schedule')
+    expect(fake.createBodies[1]).not.toHaveProperty('dueDate')
+  } finally {
+    await client?.close()
     await fake.api.stop(true)
   }
 }, 30_000)
