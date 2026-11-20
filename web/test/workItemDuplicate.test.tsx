@@ -150,6 +150,39 @@ describe('Work Item duplicate draft', () => {
   })
 })
 
+test('keeps a Project duplicate in detailed mode and asks for an owner who is no longer a member', () => {
+  const t = createTranslator('ja')
+  const draft = createWorkItemDuplicateDraft({ ...source, schedule: { mode: 'unscheduled' } })
+  const markup = renderToStaticMarkup(
+    <CreateTaskPanel
+      assigneeOptions={taskViewStoryProjectMembers.filter((member) => member.id !== source.assigneeUserId)}
+      configuration={teamWorkItemConfigurationFixture}
+      context={{
+        assigneeUserId: source.assigneeUserId,
+        duplicate: draft,
+        projectId: 'refero',
+        schedule: { mode: 'unscheduled' },
+        source: 'duplicate',
+        teamId: source.teamId,
+        workItemTypeId: draft.workItemTypeId,
+      }}
+      initialMode="quick"
+      isAssigneeOptionsLoading={false}
+      isSubmitting={false}
+      locale="ja"
+      projectId="refero"
+      t={t}
+      workspaceMembers={[]}
+      onCancel={() => undefined}
+      onSubmit={async () => undefined}
+    />,
+  )
+
+  expect(markup).not.toContain('クイック登録')
+  expect(markup).toContain('name="description"')
+  expect(markup).toContain('引き継いだ担当者は現在の候補にいません。')
+})
+
 describe('Task action menu extra actions', () => {
   const registryRows = [
     { destructive: false, id: 'open', label: 'Open', separatorBefore: false },

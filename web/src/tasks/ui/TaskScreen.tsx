@@ -3251,26 +3251,26 @@ export function TaskScreen({
   /**
    * Opens the create panel with a draft copied from an existing Project task.
    *
-   * The copy keeps the source Team, Project, Type, schedule, and owner when the owner is still a
-   * Project member. Nothing is saved until the member submits the panel.
+   * The copy keeps the source Team, Project, Type, schedule, and owner. Nothing is saved until
+   * the member submits the panel.
    *
    * @param task - Project task to duplicate.
    */
   const handleDuplicateTask = useCallback((task: CanonicalWorkItem) => {
     if (isAiOperationPendingRef.current) return
     const duplicate = createWorkItemDuplicateDraft(task)
+    // The create panel checks the owner against Project members once they load and asks for a
+    // new owner when the source owner is no longer one.
     handleProjectCreateClick({
+      assigneeUserId: task.assigneeUserId,
       duplicate,
       projectId: task.assignedProjectId ?? projectId,
       schedule: task.schedule,
       source: 'duplicate',
       teamId: task.teamId,
       workItemTypeId: duplicate.workItemTypeId,
-      ...(assigneeOptions.some((member) => member.id === task.assigneeUserId)
-        ? { assigneeUserId: task.assigneeUserId }
-        : {}),
     })
-  }, [assigneeOptions, handleProjectCreateClick, projectId])
+  }, [handleProjectCreateClick, projectId])
 
   /**
    * Returns an existing relation editor mutation to a pending canonical Relation action.

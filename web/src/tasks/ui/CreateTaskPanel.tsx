@@ -171,8 +171,9 @@ export function CreateTaskPanel({
     ? 'detailed'
     : 'quick'
   const [mode, setMode] = useState<CreateTaskMode>(initialMode ?? defaultInitialMode)
+  // A duplicate draft carries a description and contributor plan that quick capture cannot keep.
   const effectiveMode: CreateTaskMode = mode === 'quick' &&
-      (!quickCaptureAllowed || hasDetailedScheduleContext)
+      (!quickCaptureAllowed || hasDetailedScheduleContext || duplicateDraft)
     ? 'detailed'
     : mode
   const explicitContextAssigneeUserId = context?.assigneeUserId?.trim() ?? ''
@@ -382,7 +383,7 @@ export function CreateTaskPanel({
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--workbench-border)] pb-3">
           <div className="flex min-w-0 flex-wrap items-center gap-3">
             <div className="flex items-center gap-1 rounded-md border border-[var(--workbench-border)] bg-surface p-1">
-              {quickCaptureAllowed && !hasDetailedScheduleContext ? (
+              {quickCaptureAllowed && !hasDetailedScheduleContext && !duplicateDraft ? (
                 <button
                   aria-pressed={effectiveMode === 'quick'}
                   className={`min-h-11 rounded px-3 py-1.5 text-sm font-semibold ${effectiveMode === 'quick' ? 'bg-tone-e5f7f4 text-[var(--workbench-primary-text)]' : 'text-[var(--workbench-muted)]'}`}
