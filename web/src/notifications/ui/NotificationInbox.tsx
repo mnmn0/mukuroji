@@ -438,15 +438,17 @@ function NotificationRow({
         />
       ) : null}
       <div className="flex min-w-0 items-start gap-3">
-        <input
-          aria-label={t('workspace.inbox.bulk.selectOne').replace('{title}', title)}
-          checked={checked}
-          className="mt-3 h-4 w-4 shrink-0 accent-[var(--workbench-primary)]"
-          data-testid={`notification-select-${createNotificationTestToken(notification.id)}`}
-          disabled={controller.isBulkPending}
-          onChange={(event) => onCheckedChange(event.target.checked)}
-          type="checkbox"
-        />
+        <label className="-ml-2 flex h-10 w-8 shrink-0 cursor-pointer items-center justify-center max-[760px]:-ml-3 max-[760px]:h-11 max-[760px]:w-11">
+          <input
+            aria-label={t('workspace.inbox.bulk.selectOne').replace('{title}', title)}
+            checked={checked}
+            className="h-4 w-4 accent-[var(--workbench-primary)]"
+            data-testid={`notification-select-${createNotificationTestToken(notification.id)}`}
+            disabled={controller.isBulkPending}
+            onChange={(event) => onCheckedChange(event.target.checked)}
+            type="checkbox"
+          />
+        </label>
         <button
           className="group grid min-w-0 flex-1 grid-cols-[40px_minmax(0,1fr)] gap-3 text-left disabled:cursor-default"
           disabled={!onOpenNotification || isPending}
@@ -496,7 +498,7 @@ function NotificationRow({
         </button>
       </div>
 
-      <div className="flex flex-wrap items-center justify-end gap-2 self-center max-[760px]:justify-start max-[760px]:pl-[80px]">
+      <div className="flex flex-wrap items-center justify-end gap-2 self-center max-[760px]:justify-start max-[760px]:pl-[96px]">
         {notification.reasons.includes('mention') && notification.teamId && notification.issueId ? (
           <a
             className="inline-flex min-h-9 items-center rounded-md border border-[var(--workbench-border)] bg-surface px-2.5 text-xs font-semibold text-[var(--workbench-primary-text)] transition hover:border-tone-99d7cf focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--workbench-primary)] max-[760px]:min-h-[44px]"
