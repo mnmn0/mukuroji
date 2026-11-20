@@ -31,7 +31,6 @@ export const issuesMessages = {
   'issues.archive.archiveError': 'Could not archive the Work Item',
   'issues.archive.restoreError': 'Could not restore the Work Item',
   'issues.archive.activeChildren': 'A child Work Item is not archived. Archive the children or move them to another parent first.',
-  'issues.archive.tooManyChildren': 'This Work Item has too many children to archive it on its own. Select it with its children and archive them together.',
   'issues.archive.parentArchived': 'The parent Work Item is archived. Restore the parent first.',
   'issues.archive.listTitle': 'Archived Work Items',
   'issues.archive.listDescription': 'Archived Work Items are hidden from the table, board, and Gantt. Restore them here one at a time.',

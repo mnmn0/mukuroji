@@ -13,6 +13,8 @@ import {
   assertWorkItemChildTypeAllowed,
   assertWorkflowTransitionAllowed,
   assertWorkItemTypeChangeResolution,
+  createWorkItemChildRestoreGuardAdvance,
+  createWorkItemChildRestoreGuardConditionCheck,
   createWorkItemConfigurationScopeKey,
   createWorkItemConfigurationGuardConditionChecks,
   createWorkItemRelationIds,
@@ -81,6 +83,44 @@ test('encodes configuration scope key components before adding delimiters', () =
     'team',
     'team#one',
   )).toBe('workspace%23owner%40example.com#team#team%23one#work-item-configuration')
+})
+
+test('fences child restores of a parent with one guard row', () => {
+  const key = {
+    scopeKey: 'workspace-1#team#core-team#work-item-configuration',
+    recordKey: 'CHILD_RESTORE#parent%231',
+  }
+  expect(createWorkItemChildRestoreGuardAdvance('Config', 'workspace-1', 'core-team', 'parent#1')).toEqual({
+    Update: {
+      TableName: 'Config',
+      Key: key,
+      UpdateExpression: 'SET #entryType = :entryType, #schemaVersion = :schemaVersion ADD #generation :one',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: { ':entryType': 'child-restore-guard', ':schemaVersion': 1, ':one': 1 },
+    },
+  })
+  expect(createWorkItemChildRestoreGuardConditionCheck('Config', 'workspace-1', 'core-team', 'parent#1', 0)).toEqual({
+    ConditionCheck: {
+      TableName: 'Config',
+      Key: key,
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  })
+  expect(createWorkItemChildRestoreGuardConditionCheck('Config', 'workspace-1', 'core-team', 'parent#1', 4)).toEqual({
+    ConditionCheck: {
+      TableName: 'Config',
+      Key: key,
+      ConditionExpression: '#generation = :expectedGeneration',
+      ExpressionAttributeNames: { '#generation': 'generation' },
+      ExpressionAttributeValues: { ':expectedGeneration': 4 },
+    },
+  })
+  expect(() => createWorkItemChildRestoreGuardConditionCheck('Config', 'workspace-1', 'core-team', 'parent#1', -1))
+    .toThrow('non-negative safe integer')
 })
 
 test('rejects duplicate status IDs and broken transition references', () => {

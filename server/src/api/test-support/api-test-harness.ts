@@ -1005,6 +1005,9 @@ function createFakeWorkItemConfigurationClient(
     async listRelationGraph() {
       return { relations: [], graphRevision: 0 }
     },
+    async getChildRestoreGeneration() {
+      return 0
+    },
     async createRelation(_workspaceId, _teamId, input) {
       return createFakeRelationMutationResponse(input)
     },
@@ -1533,6 +1536,8 @@ function configureFakeProjectClients(
     workItemRelations?: WorkItemRelation[]
     /** Schedule preview fake が返す relation graph revision です。 */
     workItemRelationGraphRevision?: number
+    /** Archive fake が返す親の子復元 generation です。 */
+    childRestoreGeneration?: number
     /** Project 作成 transaction と template application receipt の同時確定を再現する hook です。 */
     projectCreateHook?: (
       input: Record<string, unknown>,
@@ -2224,6 +2229,9 @@ function configureFakeProjectClients(
           relations: (options.workItemRelations ?? []).map((relation) => ({ ...relation })),
           graphRevision: options.workItemRelationGraphRevision ?? 0,
         }
+      },
+      async getChildRestoreGeneration() {
+        return options.childRestoreGeneration ?? 0
       },
     }),
     projectDirectory: {

@@ -112,11 +112,28 @@ describe('single Work Item archive', () => {
     })).rejects.toThrow('localized:issues.archive.activeChildren')
   })
 
+  test('checks the hierarchy again when an earlier click left a hierarchy failure', async () => {
+    const requests = installFetchSequence([
+      { action: { type: 'archive', archived: true }, canApply: true, items: [], operationToken: 'preview-token' },
+      {
+        id: 'operation-1',
+        items: [{ status: 'failed', errorCode: 'WorkItemActiveChildren', retryable: true }],
+      },
+      { id: 'operation-1', items: [{ status: 'succeeded' }] },
+    ])
+
+    await runArchive(true)
+
+    expect(requests.map((request) => request.url)).toEqual([
+      '/api/bulk-operations/preview',
+      '/api/bulk-operations',
+      '/api/bulk-operations/operation-1/retry',
+    ])
+  })
+
   test('maps only the hierarchy failures to localized messages', () => {
     expect(readWorkItemArchiveFailureMessageKey('WorkItemActiveChildren'))
       .toBe('issues.archive.activeChildren')
-    expect(readWorkItemArchiveFailureMessageKey('WorkItemTooManyChildren'))
-      .toBe('issues.archive.tooManyChildren')
     expect(readWorkItemArchiveFailureMessageKey('WorkItemParentArchived'))
       .toBe('issues.archive.parentArchived')
     expect(readWorkItemArchiveFailureMessageKey('WorkItemRevisionConflict')).toBeUndefined()

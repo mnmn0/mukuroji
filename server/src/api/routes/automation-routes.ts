@@ -756,7 +756,7 @@ function isTerminalTemplateApplicationError(
  * @param archived - True when the item is archived, false when it is restored.
  * @param operationItems - Every target of the Bulk operation.
  * @returns Condition checks to commit with the item's update.
- * @throws AutomationError `conflict` when a child is still active or the parent is archived.
+ * @throws AutomationError retryable `conflict` when a child is still active or the parent is archived.
  */
 async function prepareBulkArchiveHierarchyConditionChecks(
   directoryId: string,
@@ -779,7 +779,10 @@ async function prepareBulkArchiveHierarchyConditionChecks(
     )
   } catch (error) {
     if (error instanceof WorkItemConfigurationError && error.status === 409) {
-      throw new AutomationError('conflict', error.code, error.message)
+      // The hierarchy can be fixed without touching this Work Item, and a fixed hierarchy leaves
+      // the request and its operation token unchanged. A retryable failure lets the next explicit
+      // attempt check the hierarchy again instead of returning the stored failure.
+      throw new AutomationError('conflict', error.code, error.message, true)
     }
     throw error
   }

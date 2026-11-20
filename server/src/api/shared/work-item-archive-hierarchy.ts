@@ -1,5 +1,7 @@
 import { type WorkItemDependencies } from '../../app/composition/app-dependencies'
 import {
+  createWorkItemChildRestoreGuardAdvance,
+  createWorkItemChildRestoreGuardConditionCheck,
   createWorkItemRelationGraphRevisionConditionCheck,
   createWorkItemRevisionConditionCheck,
   isTeamIssueNotFoundError,
@@ -15,21 +17,8 @@ import { getWorkItemConfigurationTableName } from './work-item-configuration'
 /** Child Work Items read at once while checking that a parent can be archived. */
 const ARCHIVE_CHILD_READ_CONCURRENCY = 16
 
-/**
- * Most Work Item revision fences one archive or restore commits with its update.
- *
- * DynamoDB allows 100 items per transaction. The rest are left for the update itself, its event,
- * audit, authorization, and Agent Run fences the persistence adapter adds. A parent with more
- * children than this is not archived on its own, because an unfenced child could be restored
- * between the check and the archive.
- */
-const ARCHIVE_HIERARCHY_REVISION_FENCE_BUDGET = 60
-
 /** Error code of an archive refused because a child Work Item is not archived. */
 export const WORK_ITEM_ACTIVE_CHILDREN_ERROR_CODE = 'WorkItemActiveChildren'
-
-/** Error code of an archive refused because the parent has too many children to fence. */
-export const WORK_ITEM_TOO_MANY_CHILDREN_ERROR_CODE = 'WorkItemTooManyChildren'
 
 /** Error code of a restore refused because the parent Work Item is archived. */
 export const WORK_ITEM_PARENT_ARCHIVED_ERROR_CODE = 'WorkItemParentArchived'
@@ -59,41 +48,48 @@ export type WorkItemArchiveHierarchyCheckInput = {
  * Archiving is refused while a child that is not archived remains, so an archived parent never
  * hides active children from the WBS. Restoring is refused while the parent is archived, so a
  * restored child does not land at the top of the WBS under a hidden parent. What was read is
- * fenced into the update: the relation graph revision catches a child or parent attached
- * meanwhile, and each read Work Item's revision catches it being archived or restored meanwhile.
+ * fenced into the update with a fixed number of items, however many children the parent has:
+ * the relation graph revision catches a child or parent attached meanwhile, the parent's
+ * revision catches the parent being archived before a restore, and the parent's child restore
+ * generation, which every restore advances, catches a child restored before an archive.
  *
  * @param input - Work Item, direction, and the other targets of the same operation.
  * @param dependencies - Relation and Work Item persistence.
- * @returns Condition checks to commit with the archive or restore.
+ * @returns Transaction items to commit with the archive or restore.
  * @throws WorkItemConfigurationError `409 WorkItemActiveChildren` when archiving a parent that has
- * a child that is not archived, `409 WorkItemTooManyChildren` when archiving a parent with more
- * children outside the operation than one transaction can fence, or `409 WorkItemParentArchived`
- * when restoring a child whose parent is archived.
+ * a child that is not archived, or `409 WorkItemParentArchived` when restoring a child whose
+ * parent is archived.
  */
 export async function prepareWorkItemArchiveHierarchyConditionChecks(
   input: WorkItemArchiveHierarchyCheckInput,
   dependencies: Pick<WorkItemDependencies, 'teamIssues' | 'workItemConfigurations'>,
 ): Promise<WorkItemConfigurationTransactionItems> {
   const { directoryId, teamId, workItemId, archived } = input
+  const configurations = dependencies.workItemConfigurations
+  // The generation is read before the children, so a restore committed after this read fails the
+  // archive and one committed before it shows up as an active child below.
+  let childRestoreGeneration: number | undefined
+  if (archived) {
+    if (!configurations.getChildRestoreGeneration) {
+      throw new WorkItemConfigurationError(
+        503,
+        'WorkItemArchiveGuardUnavailable',
+        'Work Item archive cannot be checked right now.',
+      )
+    }
+    childRestoreGeneration = await configurations.getChildRestoreGeneration(directoryId, teamId, workItemId)
+  }
   const relationType = archived ? 'child' : 'parent'
-  const related = await dependencies.workItemConfigurations.listRelations(
+  const related = await configurations.listRelations(
     directoryId,
     teamId,
     workItemId,
     { types: [relationType] },
   )
-  const relatedIds = [...new Set(related.relations
+  const allRelatedIds = [...new Set(related.relations
     .filter((relation) => relation.sourceWorkItemId === workItemId && relation.type === relationType)
     .map((relation) => relation.targetWorkItemId))]
-    .filter((relatedId) => !input.sameOperationWorkItemIds?.has(relatedId))
-  if (relatedIds.length > ARCHIVE_HIERARCHY_REVISION_FENCE_BUDGET) {
-    throw new WorkItemConfigurationError(
-      409,
-      WORK_ITEM_TOO_MANY_CHILDREN_ERROR_CODE,
-      `A parent with more than ${ARCHIVE_HIERARCHY_REVISION_FENCE_BUDGET} children cannot be archived on its own. ` +
-        'Archive it together with its children in one operation.',
-    )
-  }
+  const relatedIds = allRelatedIds.filter((relatedId) => !input.sameOperationWorkItemIds?.has(relatedId))
   const issues = await readExistingWorkItems(directoryId, teamId, relatedIds, dependencies)
   if (archived && issues.some((issue) => issue.archivedAt === undefined)) {
     throw new WorkItemConfigurationError(
@@ -116,14 +112,35 @@ export async function prepareWorkItemArchiveHierarchyConditionChecks(
     teamId,
     related.graphRevision,
   )
+  if (childRestoreGeneration !== undefined) {
+    return [
+      graphConditionCheck,
+      createWorkItemChildRestoreGuardConditionCheck(
+        getWorkItemConfigurationTableName(),
+        directoryId,
+        teamId,
+        workItemId,
+        childRestoreGeneration,
+      ),
+    ]
+  }
+  // A child has one parent, so a restore writes a fixed number of items. The parent's guard
+  // advances even when the same operation restores the parent, so every restore of a child is
+  // seen by an archive of its parent that read the children before it.
   return [
     graphConditionCheck,
-    ...issues.map((issue) => createWorkItemRevisionConditionCheck(
+    ...issues.map((parent) => createWorkItemRevisionConditionCheck(
       getTeamIssuesTableName(),
       directoryId,
       teamId,
-      issue.id,
-      issue.revision,
+      parent.id,
+      parent.revision,
+    )),
+    ...allRelatedIds.map((parentId) => createWorkItemChildRestoreGuardAdvance(
+      getWorkItemConfigurationTableName(),
+      directoryId,
+      teamId,
+      parentId,
     )),
   ]
 }

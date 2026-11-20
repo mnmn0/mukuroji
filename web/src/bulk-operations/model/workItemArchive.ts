@@ -89,9 +89,8 @@ export function readWorkItemArchiveOperationFailure(
  */
 export function readWorkItemArchiveFailureMessageKey(
   code: string | undefined,
-): 'issues.archive.activeChildren' | 'issues.archive.tooManyChildren' | 'issues.archive.parentArchived' | undefined {
+): 'issues.archive.activeChildren' | 'issues.archive.parentArchived' | undefined {
   if (code === 'WorkItemActiveChildren') return 'issues.archive.activeChildren'
-  if (code === 'WorkItemTooManyChildren') return 'issues.archive.tooManyChildren'
   if (code === 'WorkItemParentArchived') return 'issues.archive.parentArchived'
   return undefined
 }
