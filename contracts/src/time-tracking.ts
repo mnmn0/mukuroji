@@ -217,7 +217,9 @@ export type TimeTrackingSummary = {
   /**
    * Whether the caller manages time in the Team. When `false`, the report totals only the
    * caller's own entries; when `true`, it also totals other members' entries in the Projects the
-   * caller manages and entries without a Project.
+   * caller manages and entries without a Project. Exception: a report grouped by Work Item
+   * (`groupBy=work-item`) totals every member's entries in the caller's visible Projects and
+   * outside Projects whatever this flag says, so the flag alone does not tell that report's scope.
    */
   canManageTeam: boolean
 }

@@ -242,7 +242,8 @@ export function readTimeSheet(value: unknown): TimeSheet | undefined {
   ) {
     return undefined
   }
-  const canManageTeam = readCanManageTeam(value.canManageTeam, value.costsRedacted)
+  // An older API sent costs only to Team managers, so the cost flag stands in for the manager flag.
+  const canManageTeam = readCanManageTeam(value.canManageTeam, !value.costsRedacted)
   if (canManageTeam === undefined) return undefined
   return {
     from: value.from,
@@ -258,15 +259,15 @@ export function readTimeSheet(value: unknown): TimeSheet | undefined {
 /**
  * Reads whether the caller manages time in the Team from a report response.
  *
- * An API deployed before the flag existed omits it; there only Team managers received costs,
- * so `costsRedacted` stands in for it until both sides are updated.
+ * An API deployed before the flag existed omits it, and the caller supplies the value that keeps
+ * that older response's meaning until both sides are updated.
  *
  * @param value - The response's `canManageTeam` value.
- * @param costsRedacted - The response's `costsRedacted` flag.
+ * @param fallback - Value used when an older API omits the flag.
  * @returns The flag, or undefined when the value is present but not a boolean.
  */
-export function readCanManageTeam(value: unknown, costsRedacted: boolean): boolean | undefined {
-  if (value === undefined) return !costsRedacted
+export function readCanManageTeam(value: unknown, fallback: boolean): boolean | undefined {
+  if (value === undefined) return fallback
   return typeof value === 'boolean' ? value : undefined
 }
 

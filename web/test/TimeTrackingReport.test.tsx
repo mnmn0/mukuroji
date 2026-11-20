@@ -188,6 +188,11 @@ describe('time report API', () => {
     respondWith({ ...timeReportFixtureMemberSummary, budget: { amountMinor: 'many' } })
     await expect(getTimeTrackingSummary('token', 'core-team', { ...timeReportFixtureRange, timeZone: 'UTC', groupBy: 'day' }))
       .rejects.toBeInstanceOf(TimeTrackingApiError)
+
+    // An older API without the flag totalled everyone's time, so no own-time-only notice applies.
+    respondWith({ ...timeReportFixtureMemberSummary, canManageTeam: undefined })
+    expect((await getTimeTrackingSummary('token', 'core-team', { ...timeReportFixtureRange, timeZone: 'UTC', groupBy: 'day' })).canManageTeam)
+      .toBe(true)
   })
 
   test('downloads the CSV of the same period and grouping without the budget scope', async () => {

@@ -122,7 +122,8 @@ export function readTimeTrackingSummary(value: unknown): TimeTrackingSummary | u
   ) {
     return undefined
   }
-  const parsedCanManageTeam = readCanManageTeam(canManageTeam, costsRedacted)
+  // An older API totalled every member's visible time, so its report is not limited to the caller.
+  const parsedCanManageTeam = readCanManageTeam(canManageTeam, true)
   if (parsedCanManageTeam === undefined) return undefined
   return {
     from,
