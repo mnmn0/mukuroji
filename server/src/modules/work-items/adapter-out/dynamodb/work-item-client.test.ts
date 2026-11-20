@@ -2882,7 +2882,13 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
             workspaceId: 'FENCE#workspace-1',
             recordKey: 'META',
           },
-          UpdateExpression: expect.stringContaining('ADD #revision :increment'),
+          // The counter tells this Work Item advance apart from Planning changes.
+          UpdateExpression: expect.stringContaining(
+            'ADD #revision :increment, #sourceRevisionCount :increment',
+          ),
+          ExpressionAttributeNames: expect.objectContaining({
+            '#sourceRevisionCount': 'sourceRevisionCount',
+          }),
         }),
       },
     ])

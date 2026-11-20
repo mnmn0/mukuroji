@@ -435,7 +435,7 @@ const acknowledgedFindings = [
   },
   {
     id: 'AwsSolutions-CFR4',
-    reason: 'The distribution uses the default cloudfront.net certificate, whose viewer TLS policy CloudFront fixes. A custom domain certificate with TLSv1.2_2021 can be added later without changing the origins.',
+    reason: 'Without WebDomainName the distribution uses the default cloudfront.net certificate, whose viewer TLS policy CloudFront fixes. With a custom domain the certificate is set under a CloudFormation condition with TLSv1.2_2021, which the rule cannot evaluate.',
     scopePaths: webDistributionPaths,
   },
   {

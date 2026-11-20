@@ -87,6 +87,8 @@ const FILE_ID_INDEX_NAME = 'FileIdIndex'
 /**
  * Creates the Planning META update for a canonical Work Item transition.
  *
+ * Like every canonical Work Item write, it also counts the advance in `sourceRevisionCount`.
+ *
  * @param planningTableName - Optional Planning table configured for the runtime.
  * @param workspaceId - Workspace whose canonical Work Item projection changes.
  * @param updatedAt - Mutation timestamp written to Planning META.
@@ -105,7 +107,7 @@ function createPlanningRevisionIncrementTransactionItem(
       UpdateExpression:
         'SET #entryType = if_not_exists(#entryType, :entryType), ' +
         '#schemaVersion = if_not_exists(#schemaVersion, :schemaVersion), ' +
-        '#updatedAt = :updatedAt ADD #revision :increment',
+        '#updatedAt = :updatedAt ADD #revision :increment, #sourceRevisionCount :increment',
       ConditionExpression:
         '(attribute_not_exists(#entryType) AND ' +
         'attribute_not_exists(#schemaVersion) AND attribute_not_exists(#revision)) OR (' +
@@ -116,6 +118,7 @@ function createPlanningRevisionIncrementTransactionItem(
         '#schemaVersion': 'schemaVersion',
         '#updatedAt': 'updatedAt',
         '#revision': 'revision',
+        '#sourceRevisionCount': 'sourceRevisionCount',
       },
       ExpressionAttributeValues: {
         ':entryType': 'planning-meta',

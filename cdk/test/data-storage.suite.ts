@@ -6,6 +6,10 @@ import {
   findApiRuntimeConfigurationSource,
   synthesizedTemplate,
 } from './test-support';
+import {
+  COST_ALLOCATION_TAG_KEY,
+  COST_ALLOCATION_TAG_VALUE,
+} from '../lib/aspects/cost-allocation-tags';
 
 test('stateful resources keep pinned logical IDs and enable retain with PITR', () => {
   const template = synthesizedTemplate;
@@ -512,6 +516,7 @@ test('planning data uses retained storage with a sparse update schedule due inde
       PointInTimeRecoverySpecification: {
         PointInTimeRecoveryEnabled: true,
       },
+      Tags: [{ Key: COST_ALLOCATION_TAG_KEY, Value: COST_ALLOCATION_TAG_VALUE }],
     },
     UpdateReplacePolicy: 'Retain',
     DeletionPolicy: 'Retain',
@@ -555,6 +560,7 @@ test('developer platform uses a retained TTL table with a lookup GSI', () => {
         AttributeName: 'expiresAt',
         Enabled: true,
       },
+      Tags: [{ Key: COST_ALLOCATION_TAG_KEY, Value: COST_ALLOCATION_TAG_VALUE }],
     },
     UpdateReplacePolicy: 'Retain',
     DeletionPolicy: 'Retain',
@@ -657,12 +663,19 @@ test('file bucket is private durable and scoped for direct browser transfers', (
   const webDistributionLogicalId = Object.keys(
     template.findResources('AWS::CloudFront::Distribution'),
   )[0];
-  const webOrigins = [{
+  const distributionOrigin = {
     'Fn::Join': ['', [
       'https://',
       { 'Fn::GetAtt': [webDistributionLogicalId, 'DomainName'] },
     ]],
-  }];
+  };
+  const webOrigins = {
+    'Fn::If': [
+      'WebCustomDomainConfigured',
+      [{ 'Fn::Join': ['', ['https://', { Ref: 'WebDomainName' }]] }, distributionOrigin],
+      [distributionOrigin],
+    ],
+  };
 
   template.hasResourceProperties('AWS::S3::Bucket', {
     BucketEncryption: {

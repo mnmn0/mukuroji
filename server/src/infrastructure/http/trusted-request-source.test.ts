@@ -4,8 +4,9 @@ import {
   EDGE_ORIGIN_SECRET_HEADER,
   EDGE_VIEWER_ADDRESS_HEADER,
   resolveEdgeViewerAddress,
+  resolveTrustedClientAddress,
   resolveTrustedRequestSource,
-} from './request-source'
+} from './trusted-request-source'
 
 const edgeSecret = 'edge-secret-0123456789abcdef0123456789abcdef'
 const originalEdgeSecret = process.env.MUKUROJI_EDGE_ORIGIN_SECRET
@@ -72,4 +73,33 @@ test('ignores forged viewer headers on direct HTTP API requests', async () => {
     [EDGE_ORIGIN_SECRET_HEADER]: edgeSecret,
     [EDGE_VIEWER_ADDRESS_HEADER]: '203.0.113.7',
   })).toBe('transport-unavailable')
+})
+
+test('reports no client address instead of a spoofable forwarded value', async () => {
+  delete process.env.MUKUROJI_EDGE_ORIGIN_SECRET
+  const app = new Hono()
+  app.get('/address', (c) => c.json({ address: resolveTrustedClientAddress(c) ?? null }))
+
+  const spoofed = await app.request('/address', { headers: { 'X-Forwarded-For': '10.0.0.1' } })
+  expect(await spoofed.json()).toEqual({ address: null })
+
+  const direct = await app.request('/address', {}, {
+    requestContext: { http: { sourceIp: '198.51.100.7' } },
+  })
+  expect(await direct.json()).toEqual({ address: '198.51.100.7' })
+})
+
+test('reports the CloudFront viewer address as the client address', async () => {
+  process.env.MUKUROJI_EDGE_ORIGIN_SECRET = edgeSecret
+  const app = new Hono()
+  app.get('/address', (c) => c.json({ address: resolveTrustedClientAddress(c) ?? null }))
+
+  const response = await app.request('/address', {
+    headers: {
+      [EDGE_ORIGIN_SECRET_HEADER]: edgeSecret,
+      [EDGE_VIEWER_ADDRESS_HEADER]: '203.0.113.7',
+      'X-Forwarded-For': '10.0.0.1',
+    },
+  }, { requestContext: { http: { sourceIp: '198.51.100.250' } } })
+  expect(await response.json()).toEqual({ address: '203.0.113.7' })
 })

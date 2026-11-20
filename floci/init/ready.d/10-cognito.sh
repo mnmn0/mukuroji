@@ -459,6 +459,9 @@ if ! aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" >/dev/nu
       AttributeName=directoryProjectId,AttributeType=S \
       AttributeName=sortOrder,AttributeType=N \
       AttributeName=updatedAt,AttributeType=S \
+      AttributeName=notificationScheduleShard,AttributeType=S \
+      AttributeName=notificationDueKey,AttributeType=S \
+      AttributeName=customerCompletionPreparationAt,AttributeType=S \
     --key-schema \
       AttributeName=directoryTeamId,KeyType=HASH \
       AttributeName=issueId,KeyType=RANGE \
@@ -486,6 +489,22 @@ if ! aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" >/dev/nu
           {"AttributeName": "updatedAt", "KeyType": "RANGE"}
         ],
         "Projection": {"ProjectionType": "ALL"}
+      },
+      {
+        "IndexName": "WorkItemNotificationDueIndex",
+        "KeySchema": [
+          {"AttributeName": "notificationScheduleShard", "KeyType": "HASH"},
+          {"AttributeName": "notificationDueKey", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "ALL"}
+      },
+      {
+        "IndexName": "WorkItemCustomerCompletionPreparationIndex",
+        "KeySchema": [
+          {"AttributeName": "notificationScheduleShard", "KeyType": "HASH"},
+          {"AttributeName": "customerCompletionPreparationAt", "KeyType": "RANGE"}
+        ],
+        "Projection": {"ProjectionType": "KEYS_ONLY"}
       }
     ]' \
     --billing-mode PAY_PER_REQUEST \
@@ -513,6 +532,49 @@ if [ "$TEAM_ISSUE_UPDATED_AT_INDEX_STATUS" != "ACTIVE" ]; then
   exit 1
 fi
 
+# Local tables created before the notification schedule indexes gain them here, one per update.
+ensure_work_item_index() {
+  index_name="$1"
+  sort_key="$2"
+  projection_type="$3"
+  index_count="$(aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" \
+    --query "length(Table.GlobalSecondaryIndexes[?IndexName=='$index_name'] || \`[]\`)" \
+    --output text)"
+  if [ "$index_count" = 0 ]; then
+    aws_local dynamodb update-table --table-name "$WORK_ITEMS_TABLE" \
+      --attribute-definitions \
+        AttributeName=notificationScheduleShard,AttributeType=S \
+        "AttributeName=$sort_key,AttributeType=S" \
+      --global-secondary-index-updates "[{\"Create\":{\"IndexName\":\"$index_name\",\"KeySchema\":[{\"AttributeName\":\"notificationScheduleShard\",\"KeyType\":\"HASH\"},{\"AttributeName\":\"$sort_key\",\"KeyType\":\"RANGE\"}],\"Projection\":{\"ProjectionType\":\"$projection_type\"}}}]" \
+      >/dev/null
+  fi
+  index_status=""
+  index_wait_attempt=0
+  while [ "$index_wait_attempt" -lt 60 ]; do
+    index_status="$(aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" \
+      --query "Table.GlobalSecondaryIndexes[?IndexName=='$index_name'] | [0].IndexStatus" \
+      --output text)"
+    if [ "$index_status" = "ACTIVE" ]; then
+      return 0
+    fi
+    index_wait_attempt=$((index_wait_attempt + 1))
+    sleep 1
+  done
+  echo "DynamoDB index $index_name did not become active for table $WORK_ITEMS_TABLE." >&2
+  return 1
+}
+
+ensure_work_item_index WorkItemNotificationDueIndex notificationDueKey ALL
+ensure_work_item_index WorkItemCustomerCompletionPreparationIndex customerCompletionPreparationAt KEYS_ONLY
+
+# Mirrors createWorkItemNotificationScheduleShard in the server work-items module: the first
+# sha256 byte of "<workspace>\0<team>\0<issue>" modulo 16, which is its second hex digit.
+work_item_notification_schedule_shard() {
+  shard_digest="$(printf '%s\000%s\000%s' "$1" "$2" "$3" | sha256sum)"
+  shard_low_nibble="$(printf '%s' "$shard_digest" | cut -c2)"
+  printf 'work-item-schedule-%02d' "$(printf '%d' "0x$shard_low_nibble")"
+}
+
 WORK_ITEM_SEED_TIMESTAMP="2026-06-01T00:00:00.000Z"
 
 seed_work_item() {
@@ -525,6 +587,13 @@ seed_work_item() {
   due_date="$7"
   priority="$8"
   put_item_error=""
+  notification_schedule_shard="$(work_item_notification_schedule_shard "$PROJECT_DIRECTORY_ID" core-team "$work_item_id")"
+  # Mirrors createWorkItemNotificationDueKey: started is always read, open Work Items by deadline.
+  case "$status_category" in
+    started) notification_due_key_attribute=', "notificationDueKey": {"S": "0000-00-00"}' ;;
+    backlog|unstarted) notification_due_key_attribute=", \"notificationDueKey\": {\"S\": \"$due_date\"}" ;;
+    *) notification_due_key_attribute="" ;;
+  esac
 
   if ! put_item_error="$(aws_local dynamodb put-item \
     --table-name "$WORK_ITEMS_TABLE" \
@@ -564,7 +633,8 @@ seed_work_item() {
       }},
       \"priority\": {\"S\": \"$priority\"},
       \"createdAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
-      \"updatedAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"}
+      \"updatedAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
+      \"notificationScheduleShard\": {\"S\": \"$notification_schedule_shard\"}$notification_due_key_attribute
     }" \
     --condition-expression 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)' \
     2>&1 >/dev/null)"; then

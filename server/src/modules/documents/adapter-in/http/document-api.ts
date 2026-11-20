@@ -27,6 +27,7 @@ import type {
 } from '@mukuroji/contracts'
 import { randomUUID } from 'node:crypto'
 import type { Context, Hono } from 'hono'
+import { resolveTrustedClientAddress } from '../../../../infrastructure/http/trusted-request-source'
 import {
   createMutationAuditContext,
   type MutationAuditContext,
@@ -1120,8 +1121,7 @@ function createDocumentCommentAuditContext(
         requestId: c.req.header('X-Request-Id'),
         method: c.req.method,
         route: path,
-        ipAddress:
-          c.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+        ipAddress: resolveTrustedClientAddress(c),
         userAgent: c.req.header('User-Agent'),
       },
       ...(c.req.header('X-Correlation-Id')?.trim()
