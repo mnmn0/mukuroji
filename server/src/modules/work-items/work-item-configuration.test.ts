@@ -95,6 +95,8 @@ test('fences child restores of a parent with one guard row', () => {
       TableName: 'Config',
       Key: key,
       UpdateExpression: 'SET #entryType = :entryType, #schemaVersion = :schemaVersion ADD #generation :one',
+      ConditionExpression:
+        'attribute_not_exists(recordKey) OR (#entryType = :entryType AND #schemaVersion = :schemaVersion)',
       ExpressionAttributeNames: {
         '#entryType': 'entryType',
         '#schemaVersion': 'schemaVersion',
@@ -114,9 +116,14 @@ test('fences child restores of a parent with one guard row', () => {
     ConditionCheck: {
       TableName: 'Config',
       Key: key,
-      ConditionExpression: '#generation = :expectedGeneration',
-      ExpressionAttributeNames: { '#generation': 'generation' },
-      ExpressionAttributeValues: { ':expectedGeneration': 4 },
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: { ':entryType': 'child-restore-guard', ':schemaVersion': 1, ':expectedGeneration': 4 },
     },
   })
   expect(() => createWorkItemChildRestoreGuardConditionCheck('Config', 'workspace-1', 'core-team', 'parent#1', -1))
@@ -889,6 +896,30 @@ test('classifies invalid stored configuration separately from client validation'
   )
 
   await expect(client.getWorkspaceConfiguration('workspace-1')).rejects.toMatchObject({
+    code: 'StoredWorkItemConfigurationInvalid',
+    status: 503,
+  })
+})
+
+test('reads a child restore generation and rejects a guard row of another schema', async () => {
+  let stored: Record<string, unknown> | undefined
+  const documentClient = {
+    async send() {
+      return { Item: stored }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+
+  expect(await client.getChildRestoreGeneration('workspace-1', 'core-team', 'parent')).toBe(0)
+  stored = { entryType: 'child-restore-guard', schemaVersion: 1, generation: 3 }
+  expect(await client.getChildRestoreGeneration('workspace-1', 'core-team', 'parent')).toBe(3)
+  stored = { entryType: 'child-restore-guard', schemaVersion: 2, generation: 3 }
+  await expect(client.getChildRestoreGeneration('workspace-1', 'core-team', 'parent')).rejects.toMatchObject({
     code: 'StoredWorkItemConfigurationInvalid',
     status: 503,
   })

@@ -422,7 +422,8 @@ function createChildRestoreGuardKey(workspaceId: string, teamId: string, parentW
  * Creates the write that records one restore of a child Work Item under its parent.
  *
  * The parent's guard generation advances by one, so an archive of the parent that read its
- * children before this restore fails at commit instead of hiding the restored child.
+ * children before this restore fails at commit instead of hiding the restored child. A stored row
+ * of another type or schema fails the restore instead of being overwritten.
  *
  * @param tableName - Work Item configuration table.
  * @param workspaceId - Owning Workspace identifier.
@@ -441,6 +442,9 @@ export function createWorkItemChildRestoreGuardAdvance(
       TableName: tableName,
       Key: createChildRestoreGuardKey(workspaceId, teamId, parentWorkItemId),
       UpdateExpression: 'SET #entryType = :entryType, #schemaVersion = :schemaVersion ADD #generation :one',
+      // An existing row of another type or schema is left alone and fails the restore closed.
+      ConditionExpression:
+        'attribute_not_exists(recordKey) OR (#entryType = :entryType AND #schemaVersion = :schemaVersion)',
       ExpressionAttributeNames: {
         '#entryType': 'entryType',
         '#schemaVersion': 'schemaVersion',
@@ -493,9 +497,18 @@ export function createWorkItemChildRestoreGuardConditionCheck(
     ConditionCheck: {
       TableName: tableName,
       Key: key,
-      ConditionExpression: '#generation = :expectedGeneration',
-      ExpressionAttributeNames: { '#generation': 'generation' },
-      ExpressionAttributeValues: { ':expectedGeneration': expectedGeneration },
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': CHILD_RESTORE_GUARD_ENTRY_TYPE,
+        ':schemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':expectedGeneration': expectedGeneration,
+      },
     },
   }
 }
@@ -2703,7 +2716,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param teamId - Team that owns the parent Work Item.
    * @param parentWorkItemId - Parent Work Item about to be archived.
    * @returns Current generation, or zero before any child was restored.
-   * @throws WorkItemConfigurationError `503 StoredWorkItemConfigurationInvalid` when the row is malformed.
+   * @throws WorkItemConfigurationError `503 StoredWorkItemConfigurationInvalid` when the row is malformed
+   * or has an unsupported schema.
    */
   async getChildRestoreGeneration(
     workspaceId: string,
@@ -2720,6 +2734,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     if (!item) return 0
     if (
       item.entryType !== CHILD_RESTORE_GUARD_ENTRY_TYPE ||
+      item.schemaVersion !== WORK_ITEM_CONFIGURATION_SCHEMA_VERSION ||
       typeof item.generation !== 'number' ||
       !Number.isSafeInteger(item.generation) ||
       item.generation < 1

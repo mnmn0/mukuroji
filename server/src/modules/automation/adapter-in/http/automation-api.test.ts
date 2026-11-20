@@ -1000,7 +1000,7 @@ test('archives a parent with more children than one Bulk request holds using a f
   expect(configurationConditionChecks[1]).toMatchObject({
     ConditionCheck: {
       Key: { recordKey: 'CHILD_RESTORE#onboarding-friction' },
-      ConditionExpression: '#generation = :expectedGeneration',
+      ConditionExpression: '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
       ExpressionAttributeValues: { ':expectedGeneration': 3 },
     },
   })
