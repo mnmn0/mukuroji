@@ -23,6 +23,9 @@ export const WORK_ITEM_ACTIVE_CHILDREN_ERROR_CODE = 'WorkItemActiveChildren'
 /** Error code of a restore refused because the parent Work Item is archived. */
 export const WORK_ITEM_PARENT_ARCHIVED_ERROR_CODE = 'WorkItemParentArchived'
 
+/** Error code of an archive or restore whose hierarchy changed between the check and the write. */
+export const WORK_ITEM_HIERARCHY_CHANGED_ERROR_CODE = 'WorkItemHierarchyChanged'
+
 /** Inputs of one archive or restore hierarchy check. */
 export type WorkItemArchiveHierarchyCheckInput = {
   /** Workspace directory ID. */

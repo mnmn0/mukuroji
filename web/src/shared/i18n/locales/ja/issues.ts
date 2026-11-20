@@ -32,6 +32,7 @@ export const issuesMessages = {
   'issues.archive.restoreError': '復元できませんでした',
   'issues.archive.activeChildren': 'アーカイブしていない子の Work Item があります。子を先にアーカイブするか、別の親へ移してください',
   'issues.archive.parentArchived': '親の Work Item がアーカイブされています。親を先に復元してください',
+  'issues.archive.hierarchyChanged': '確認中に親子関係が変わりました。もう一度お試しください',
   'issues.archive.listTitle': 'アーカイブ済み Work Item',
   'issues.archive.listDescription': 'アーカイブした Work Item は一覧・ボード・ガントに出ません。ここから 1 件ずつ復元できます。',
   'issues.archive.loading': 'アーカイブ済み Work Item を読み込んでいます…',

@@ -55,6 +55,7 @@ import type {
 } from '../../application/ports'
 import { AutomationError } from '../../domain/automation-error'
 import { TriageError } from '../../../triage'
+import { ProjectDataError } from '../../../directory'
 import { toAutomationInboundWebhookEndpoint } from '../../application/inbound-webhook-view'
 import type {
   AutomationInboundWebhookSecretStore,
@@ -1003,6 +1004,53 @@ test('archives a parent with more children than one Bulk request holds using a f
       ExpressionAttributeValues: { ':expectedGeneration': 3 },
     },
   })
+})
+
+test('keeps a hierarchy fence failure retryable so an explicit retry checks the hierarchy again', async () => {
+  let failFence = true
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    detailArchivedIssueIds: ['child-work-item'],
+    workItemRelations: [{
+      sourceWorkItemId: 'onboarding-friction',
+      type: 'child',
+      targetWorkItemId: 'child-work-item',
+    }],
+    issueUpdateHook() {
+      if (failFence) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemConfigurationRevisionConflict',
+          'Work Item configuration changed during the mutation.',
+        )
+      }
+    },
+  })
+  setTestAppDependencies({
+    bulkOperations: createBulkOperationAutomationFake().client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const { operation } = await previewAndApplyBulkArchive({
+    action: { type: 'archive', archived: true },
+    items: [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 1 }],
+  })
+
+  expect(operation).toMatchObject({
+    status: 'failed',
+    items: [{ status: 'failed', errorCode: 'WorkItemHierarchyChanged', retryable: true }],
+  })
+  if (!operation || typeof operation !== 'object' || !('id' in operation) || typeof operation.id !== 'string') {
+    throw new Error('expected a stored Bulk operation')
+  }
+  failFence = false
+  const retried = await app.request(`/api/bulk-operations/${operation.id}/retry`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+  })
+  expect(retried.status).toBe(200)
+  expect(await retried.json()).toMatchObject({ status: 'succeeded', items: [{ status: 'succeeded' }] })
+  expect(calls.issueUpdates.map((update) => update.issueId)).toEqual(['onboarding-friction'])
 })
 
 test('restores a child under an active parent and records the restore on the parent', async () => {

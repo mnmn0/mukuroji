@@ -146,6 +146,8 @@ describe('single Work Item archive', () => {
       .toBe('issues.archive.activeChildren')
     expect(readWorkItemArchiveFailureMessageKey('WorkItemParentArchived'))
       .toBe('issues.archive.parentArchived')
+    expect(readWorkItemArchiveFailureMessageKey('WorkItemHierarchyChanged'))
+      .toBe('issues.archive.hierarchyChanged')
     expect(readWorkItemArchiveFailureMessageKey('WorkItemRevisionConflict')).toBeUndefined()
     expect(readWorkItemArchiveFailureMessageKey(undefined)).toBeUndefined()
   })

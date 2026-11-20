@@ -140,7 +140,10 @@ import {
   toFileProofingErrorResponse,
 } from '../shared/file-approval-access'
 import { createAgentRunReleaseOnRemovalItems } from '../shared/agent-run-access'
-import { prepareWorkItemArchiveHierarchyConditionChecks } from '../shared/work-item-archive-hierarchy'
+import {
+  prepareWorkItemArchiveHierarchyConditionChecks,
+  WORK_ITEM_HIERARCHY_CHANGED_ERROR_CODE,
+} from '../shared/work-item-archive-hierarchy'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
   readWorkItemActualDateCorrection,
@@ -789,6 +792,34 @@ async function prepareBulkArchiveHierarchyConditionChecks(
 }
 
 /**
+ * Turns a failed hierarchy fence of a Bulk archive or restore into a failure an explicit retry re-checks.
+ *
+ * The fences of an archive or restore are its only configuration condition checks, so a
+ * configuration conflict means a relation, a parent, or a child restore changed after the check.
+ * That leaves this Work Item and the request unchanged, so a non-retryable failure would be returned
+ * again for every later attempt of the same request.
+ *
+ * @param error - Failure of the Work Item update.
+ * @param hierarchyFenced - True when the update carried hierarchy fences.
+ * @returns A retryable `conflict` for a hierarchy fence failure, otherwise the error unchanged.
+ */
+function toBulkArchiveFenceFailure(error: unknown, hierarchyFenced: boolean): unknown {
+  if (
+    hierarchyFenced &&
+    error instanceof ProjectDataError &&
+    error.code === 'WorkItemConfigurationRevisionConflict'
+  ) {
+    return new AutomationError(
+      'conflict',
+      WORK_ITEM_HIERARCHY_CHANGED_ERROR_CODE,
+      'The Work Item hierarchy changed while it was checked. Try again.',
+      true,
+    )
+  }
+  return error
+}
+
+/**
  * Converts Planning failures into the stable Automation action error contract.
  *
  * @param error - Planning failure raised while preparing one bulk mutation.
@@ -1152,7 +1183,7 @@ function createApiBulkOperationAdapter(
           ? await recoverAppliedItem(request, itemIndex, checkpoint)
           : undefined
         if (recovered) return recovered
-        throw error
+        throw toBulkArchiveFenceFailure(error, request.action.type === 'archive')
       }
       await projectWorkItemMutationSearchDocumentBestEffort(
         principal.directoryId,
@@ -1312,7 +1343,7 @@ function createApiBulkOperationAdapter(
           ? await recoverUndoneItem(operation, itemIndex, request, item)
           : undefined
         if (recovered) return recovered
-        throw error
+        throw toBulkArchiveFenceFailure(error, archiveHierarchyConditionChecks.length > 0)
       }
       await projectWorkItemMutationSearchDocumentBestEffort(
         principal.directoryId,

@@ -80,17 +80,19 @@ export function readWorkItemArchiveOperationFailure(
 /**
  * Picks the localized message of an archive failure that the hierarchy rules caused.
  *
- * The server refuses to archive a parent while a child is not archived, and to restore a child
- * while its parent is archived. Its own messages are English, so these are shown localized.
+ * The server refuses to archive a parent while a child is not archived, to restore a child while
+ * its parent is archived, and either change when the parent or children changed during the check.
+ * Its own messages are English, so these are shown localized.
  *
  * @param code - Stable server error code of the failure.
  * @returns The message key, or undefined when the failure keeps the server's message.
  */
 export function readWorkItemArchiveFailureMessageKey(
   code: string | undefined,
-): 'issues.archive.activeChildren' | 'issues.archive.parentArchived' | undefined {
+): 'issues.archive.activeChildren' | 'issues.archive.parentArchived' | 'issues.archive.hierarchyChanged' | undefined {
   if (code === 'WorkItemActiveChildren') return 'issues.archive.activeChildren'
   if (code === 'WorkItemParentArchived') return 'issues.archive.parentArchived'
+  if (code === 'WorkItemHierarchyChanged') return 'issues.archive.hierarchyChanged'
   return undefined
 }
 
