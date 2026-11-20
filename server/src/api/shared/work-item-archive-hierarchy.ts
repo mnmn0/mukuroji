@@ -72,17 +72,17 @@ export async function prepareWorkItemArchiveHierarchyConditionChecks(
   const configurations = dependencies.workItemConfigurations
   // The generation is read before the children, so a restore committed after this read fails the
   // archive and one committed before it shows up as an active child below.
-  let childRestoreGeneration: number | undefined
-  if (archived) {
-    if (!configurations.getChildRestoreGeneration) {
-      throw new WorkItemConfigurationError(
-        503,
-        'WorkItemArchiveGuardUnavailable',
-        'Work Item archive cannot be checked right now.',
-      )
-    }
-    childRestoreGeneration = await configurations.getChildRestoreGeneration(directoryId, teamId, workItemId)
+  const getChildRestoreGeneration = configurations.getChildRestoreGeneration?.bind(configurations)
+  if (!getChildRestoreGeneration) {
+    throw new WorkItemConfigurationError(
+      503,
+      'WorkItemArchiveGuardUnavailable',
+      'Work Item archive cannot be checked right now.',
+    )
   }
+  const childRestoreGeneration = archived
+    ? await getChildRestoreGeneration(directoryId, teamId, workItemId)
+    : undefined
   const relationType = archived ? 'child' : 'parent'
   const related = await configurations.listRelations(
     directoryId,
@@ -129,8 +129,9 @@ export async function prepareWorkItemArchiveHierarchyConditionChecks(
     ]
   }
   // A child has one parent, so a restore writes a fixed number of items. The parent's guard
-  // advances even when the same operation restores the parent, so every restore of a child is
-  // seen by an archive of its parent that read the children before it.
+  // advances from the validated generation it read, even when the same operation restores the
+  // parent, so every restore of a child is seen by an archive of its parent that read the
+  // children before it.
   return [
     graphConditionCheck,
     ...issues.map((parent) => createWorkItemRevisionConditionCheck(
@@ -140,12 +141,13 @@ export async function prepareWorkItemArchiveHierarchyConditionChecks(
       parent.id,
       parent.revision,
     )),
-    ...allRelatedIds.map((parentId) => createWorkItemChildRestoreGuardAdvance(
+    ...await Promise.all(allRelatedIds.map(async (parentId) => createWorkItemChildRestoreGuardAdvance(
       getWorkItemConfigurationTableName(),
       directoryId,
       teamId,
       parentId,
-    )),
+      await getChildRestoreGeneration(directoryId, teamId, parentId),
+    ))),
   ]
 }
 

@@ -21,7 +21,7 @@ archive できなくなった。
 （`entryType=child-restore-guard`、`schemaVersion=1`、単調増加の `generation`）を置く。
 
 - 子を復元する transaction は、親の revision の ConditionCheck に加えて、親の guard row の `generation` を
-  `ADD 1` で進める。row が無ければ作る。
+  読んで検証した値を条件に 1 進める。row が無ければ作る。
 - 親を archive する transaction は、子を読む前に guard row を強整合で読み、その `generation`
   （row が無ければ `attribute_not_exists`）と relation graph の revision を ConditionCheck する。
 - 読んだ子ごとの revision は fence しない。子の数による上限（`WorkItemTooManyChildren`）は設けない。

@@ -90,21 +90,35 @@ test('fences child restores of a parent with one guard row', () => {
     scopeKey: 'workspace-1#team#core-team#work-item-configuration',
     recordKey: 'CHILD_RESTORE#parent%231',
   }
-  expect(createWorkItemChildRestoreGuardAdvance('Config', 'workspace-1', 'core-team', 'parent#1')).toEqual({
+  expect(createWorkItemChildRestoreGuardAdvance('Config', 'workspace-1', 'core-team', 'parent#1', 0)).toEqual({
+    Put: {
+      TableName: 'Config',
+      Item: { ...key, entryType: 'child-restore-guard', schemaVersion: 1, generation: 1 },
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  })
+  expect(createWorkItemChildRestoreGuardAdvance('Config', 'workspace-1', 'core-team', 'parent#1', 4)).toEqual({
     Update: {
       TableName: 'Config',
       Key: key,
-      UpdateExpression: 'SET #entryType = :entryType, #schemaVersion = :schemaVersion ADD #generation :one',
+      UpdateExpression: 'SET #generation = :nextGeneration',
       ConditionExpression:
-        'attribute_not_exists(recordKey) OR (#entryType = :entryType AND #schemaVersion = :schemaVersion)',
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
       ExpressionAttributeNames: {
         '#entryType': 'entryType',
         '#schemaVersion': 'schemaVersion',
         '#generation': 'generation',
       },
-      ExpressionAttributeValues: { ':entryType': 'child-restore-guard', ':schemaVersion': 1, ':one': 1 },
+      ExpressionAttributeValues: {
+        ':entryType': 'child-restore-guard',
+        ':schemaVersion': 1,
+        ':expectedGeneration': 4,
+        ':nextGeneration': 5,
+      },
     },
   })
+  expect(() => createWorkItemChildRestoreGuardAdvance('Config', 'workspace-1', 'core-team', 'parent#1', 1.5))
+    .toThrow('non-negative safe integer')
   expect(createWorkItemChildRestoreGuardConditionCheck('Config', 'workspace-1', 'core-team', 'parent#1', 0)).toEqual({
     ConditionCheck: {
       TableName: 'Config',

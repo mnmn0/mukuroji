@@ -1057,6 +1057,7 @@ test('restores a child under an active parent and records the restore on the par
   const configurationConditionChecks: unknown[] = []
   const calls = configureFakeProjectClients(true, {
     teamIssueCount: 2,
+    childRestoreGeneration: 2,
     detailArchivedIssueIds: ['onboarding-friction'],
     workItemRelations: [{
       sourceWorkItemId: 'onboarding-friction',
@@ -1086,7 +1087,8 @@ test('restores a child under an active parent and records the restore on the par
   expect(configurationConditionChecks[2]).toMatchObject({
     Update: {
       Key: { recordKey: 'CHILD_RESTORE#parent-work-item' },
-      UpdateExpression: 'SET #entryType = :entryType, #schemaVersion = :schemaVersion ADD #generation :one',
+      UpdateExpression: 'SET #generation = :nextGeneration',
+      ExpressionAttributeValues: { ':expectedGeneration': 2, ':nextGeneration': 3 },
     },
   })
 })

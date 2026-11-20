@@ -421,30 +421,58 @@ function createChildRestoreGuardKey(workspaceId: string, teamId: string, parentW
 /**
  * Creates the write that records one restore of a child Work Item under its parent.
  *
- * The parent's guard generation advances by one, so an archive of the parent that read its
- * children before this restore fails at commit instead of hiding the restored child. A stored row
- * of another type or schema fails the restore instead of being overwritten.
+ * The parent's guard generation advances by one from the validated value the caller read, so an
+ * archive of the parent that read its children before this restore fails at commit instead of
+ * hiding the restored child. A row changed since the read, or one the reader would reject, fails
+ * the restore instead of being overwritten.
  *
  * @param tableName - Work Item configuration table.
  * @param workspaceId - Owning Workspace identifier.
  * @param teamId - Team that owns the parent Work Item.
  * @param parentWorkItemId - Parent of the Work Item being restored.
- * @returns One DynamoDB Update ready for the restore transaction.
+ * @param expectedGeneration - Generation read with `getChildRestoreGeneration`; `0` means no row yet.
+ * @returns One DynamoDB Put or Update ready for the restore transaction.
  */
 export function createWorkItemChildRestoreGuardAdvance(
   tableName: string,
   workspaceId: string,
   teamId: string,
   parentWorkItemId: string,
+  expectedGeneration: number,
 ): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (
+    !Number.isSafeInteger(expectedGeneration) ||
+    expectedGeneration < 0 ||
+    expectedGeneration >= Number.MAX_SAFE_INTEGER
+  ) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemChildRestoreGeneration',
+      'Work Item child restore generation must be a non-negative safe integer below the maximum.',
+    )
+  }
+  const key = createChildRestoreGuardKey(workspaceId, teamId, parentWorkItemId)
+  if (expectedGeneration === 0) {
+    return {
+      Put: {
+        TableName: tableName,
+        Item: {
+          ...key,
+          entryType: CHILD_RESTORE_GUARD_ENTRY_TYPE,
+          schemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+          generation: 1,
+        },
+        ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+      },
+    }
+  }
   return {
     Update: {
       TableName: tableName,
-      Key: createChildRestoreGuardKey(workspaceId, teamId, parentWorkItemId),
-      UpdateExpression: 'SET #entryType = :entryType, #schemaVersion = :schemaVersion ADD #generation :one',
-      // An existing row of another type or schema is left alone and fails the restore closed.
+      Key: key,
+      UpdateExpression: 'SET #generation = :nextGeneration',
       ConditionExpression:
-        'attribute_not_exists(recordKey) OR (#entryType = :entryType AND #schemaVersion = :schemaVersion)',
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #generation = :expectedGeneration',
       ExpressionAttributeNames: {
         '#entryType': 'entryType',
         '#schemaVersion': 'schemaVersion',
@@ -453,7 +481,8 @@ export function createWorkItemChildRestoreGuardAdvance(
       ExpressionAttributeValues: {
         ':entryType': CHILD_RESTORE_GUARD_ENTRY_TYPE,
         ':schemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-        ':one': 1,
+        ':expectedGeneration': expectedGeneration,
+        ':nextGeneration': expectedGeneration + 1,
       },
     },
   }
@@ -754,7 +783,7 @@ export type WorkItemConfigurationClient = {
    *
    * @param workspaceId - Workspace that owns the parent Work Item.
    * @param teamId - Team that owns the parent Work Item.
-   * @param parentWorkItemId - Parent Work Item about to be archived.
+   * @param parentWorkItemId - Parent Work Item about to be archived, or of a child being restored.
    * @returns Current generation, or zero before any child was restored.
    */
   getChildRestoreGeneration?(workspaceId: string, teamId: string, parentWorkItemId: string): Promise<number>
