@@ -40,6 +40,7 @@ import {
 } from '../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
+import { useWorkspaceProjectMembers } from '../projects/queries/useProjectMembers'
 import {
   useTeamWorkItemConfigurations,
 } from '../work-items/queries/useWorkItemConfigurations'
@@ -81,6 +82,12 @@ import {
   type NaturalLanguageSearchComposerProps,
 } from './ui/NaturalLanguageSearchComposer'
 import { SearchCountReport } from './ui/SearchCountReport'
+import { SearchFilterPicker } from './ui/SearchFilterPicker'
+import {
+  createSearchMemberFilterOptions,
+  createSearchProjectFilterOptions,
+  createSearchTeamFilterOptions,
+} from './model/filterOptions'
 import { createSearchStatusOptions, type SearchStatusOption } from './model/statusOptions'
 import { useOptionalWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 import { readRecord } from '../shared/api/jsonValidation'
@@ -702,6 +709,7 @@ export function SearchPage() {
                     : undefined}
                   routeSignature={routeSignature}
                   routeState={routeState}
+                  teams={teams}
                   selectedSavedView={selectedSavedView}
                   statusOptions={statusOptions}
                   workItemTypes={workItemTypes}
@@ -808,6 +816,8 @@ type SearchToolbarProps = {
   selectedSavedView?: SavedWorkspaceView
   /** Server-authorized workflow status options. */
   statusOptions: readonly SearchStatusOption[]
+  /** Teams and Projects visible to the current user, used as Team and Project filter options. */
+  teams: readonly ProjectDirectoryTeam[]
   /** Team-qualified Work Item Types available in the visible Team configurations. */
   workItemTypes: readonly SearchWorkItemTypeOption[]
   /** Localized message resolver. */
@@ -835,10 +845,40 @@ function SearchToolbar({
   routeSignature,
   selectedSavedView,
   statusOptions,
+  teams,
   workItemTypes,
   t,
 }: SearchToolbarProps) {
   const entityTypes = getSearchEntityTypes(routeState.filters)
+  const selectedAssigneeIds = getSearchFilterValues(routeState.filters, 'assigneeUserIds')
+  const selectedCreatorIds = getSearchFilterValues(routeState.filters, 'creatorUserIds')
+  const [areFiltersOpen, setAreFiltersOpen] = useState(false)
+  const teamFilterOptions = useMemo(() => createSearchTeamFilterOptions(teams), [teams])
+  const projectFilterOptions = useMemo(() => createSearchProjectFilterOptions(teams), [teams])
+  const memberSourceProjects = useMemo(
+    () => projectFilterOptions.map((option) => ({ id: option.value, name: option.label })),
+    [projectFilterOptions],
+  )
+  // Members are read per Project, so they load only once the filters are open or a member is selected.
+  const {
+    data: projectMembers,
+    error: projectMembersError,
+    isLoading: isProjectMembersLoading,
+  } = useWorkspaceProjectMembers(
+    accessToken,
+    'search',
+    memberSourceProjects,
+    areFiltersOpen || selectedAssigneeIds.length > 0 || selectedCreatorIds.length > 0,
+  )
+  const memberFilterOptions = useMemo(
+    () => createSearchMemberFilterOptions(projectMembers?.members ?? []),
+    [projectMembers],
+  )
+  const memberStatusMessage = isProjectMembersLoading
+    ? t('search.filters.membersLoading')
+    : projectMembersError || (projectMembers?.errors.length ?? 0) > 0
+      ? t('search.filters.membersError')
+      : undefined
   const statuses = getSearchStatuses(routeState.filters)
   const selectedWorkItemTypeIds = getSearchFilterValues(routeState.filters, 'workItemTypeIds')
   const columns = getSearchColumns(routeState.layout)
@@ -944,7 +984,10 @@ function SearchToolbar({
         ))}
       </div>
 
-      <details className="mt-3 border-y border-[var(--workbench-border)] py-3">
+      <details
+        className="mt-3 border-y border-[var(--workbench-border)] py-3"
+        onToggle={(event) => setAreFiltersOpen(event.currentTarget.open)}
+      >
         <summary className="cursor-pointer text-sm font-semibold text-[var(--workbench-text)]">{t('search.filters.title')}</summary>
         <div className="mt-4 grid gap-4">
           <div className="grid gap-2">
@@ -976,10 +1019,40 @@ function SearchToolbar({
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3 max-[760px]:grid-cols-1">
-            <CommaSeparatedInput filterKey="assigneeUserIds" label={t('search.filters.assignee')} routeState={routeState} onFiltersChange={onFiltersChange} />
-            <CommaSeparatedInput filterKey="creatorUserIds" label={t('search.filters.creator')} routeState={routeState} onFiltersChange={onFiltersChange} />
-            <CommaSeparatedInput filterKey="teamIds" label={t('search.filters.team')} routeState={routeState} onFiltersChange={onFiltersChange} />
-            <CommaSeparatedInput filterKey="projectIds" label={t('search.filters.project')} routeState={routeState} onFiltersChange={onFiltersChange} />
+            <SearchFilterPicker
+              label={t('search.filters.assigneePicker')}
+              onChange={(assigneeUserIds) => onFiltersChange({ assigneeUserIds })}
+              options={memberFilterOptions}
+              selectedValues={selectedAssigneeIds}
+              statusMessage={memberStatusMessage}
+              t={t}
+              testId="search-assignee-filter"
+            />
+            <SearchFilterPicker
+              label={t('search.filters.creatorPicker')}
+              onChange={(creatorUserIds) => onFiltersChange({ creatorUserIds })}
+              options={memberFilterOptions}
+              selectedValues={selectedCreatorIds}
+              statusMessage={memberStatusMessage}
+              t={t}
+              testId="search-creator-filter"
+            />
+            <SearchFilterPicker
+              label={t('search.filters.teamPicker')}
+              onChange={(teamIds) => onFiltersChange({ teamIds })}
+              options={teamFilterOptions}
+              selectedValues={getSearchFilterValues(routeState.filters, 'teamIds')}
+              t={t}
+              testId="search-team-filter"
+            />
+            <SearchFilterPicker
+              label={t('search.filters.projectPicker')}
+              onChange={(projectIds) => onFiltersChange({ projectIds })}
+              options={projectFilterOptions}
+              selectedValues={getSearchFilterValues(routeState.filters, 'projectIds')}
+              t={t}
+              testId="search-project-filter"
+            />
             <CommaSeparatedInput filterKey="relationIds" label={t('search.filters.relation')} routeState={routeState} onFiltersChange={onFiltersChange} />
             <label className="grid gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
               {t('search.filters.dateField')}
