@@ -14,6 +14,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Health | `/api/health` の liveness と、current-enabled runtime controlを先に確認してからDynamoDBを検証する `/api/ready` を分離し、readiness responseを`no-store`にする | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
 | Trace | CDK が管理する全29個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する。API Lambda は sampled trace ごとに `mukuroji-api-request` subsegment を送り、`correlation_id`、`request_id`、`route_group` を annotation として登録する | API 以外の worker Lambda の annotation、unsampled trace の検索は未実装 |
 | Alarm | API、queue、DLQ（audit export の `AuditExportDlqAlarm` と `AuditExportQueueAgeAlarm` を含む）、async destination、runtime control、restore drill（任意 module を有効にした場合）の56 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な55件のtest evidenceを確認するまで unattended production とみなさないこと |
+| Cost | AWS アカウント全体の月次 Budget（`MonthlyCostBudgetUsd`、既定 $20）が実績 80%・100% と予測 100% で email（`CostBudgetAlertEmail`、空なら初期 owner）を送る。tag を付けられる全 resource に `mukuroji:application=mukuroji` を付ける。構成要素ごとの目安は [`cdk/README.md`](../cdk/README.md#費用の目安と予算-alert) | Mukuroji 専用アカウントに deploy し、cost allocation tag を Billing console で有効にすること。Budgets の通知は最大 1 日遅れるため、急増の自動停止には使えない |
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | MCP release | tag `mcp-v*` の push で `mcp.mjs`、ライセンス一覧、checksum を build し、Sigstore 署名の build provenance を付けて GitHub Release に添付する。trust root は main だけで、tag が `origin/main` の祖先でない commit を指すと失敗する。workflow の既定権限は空、job は `contents: write`（Release 作成）、`id-token: write`（署名）、`attestations: write`（provenance 保存）だけを持ち、checkout は credential を残さない。tag と `CODING_AGENT_MCP_VERSION`、`CHANGELOG.md` の section が揃わないと公開しない（[coding agent MCP](coding-agent-mcp.md#releaseの作り方)） | workflow（`.github/workflows/mcp-release.yml`）は maintainer による追加待ち（[付録](coding-agent-mcp.md#付録-release-workflow)）。`mcp-v*` tag の作成を maintainer に限る ruleset と `mcp-release` environment の承認者は環境側で設定すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する。Storybook の主要画面を light/dark で screenshot 比較し、build 後の JS/CSS gzip size を `web/performance-budget.json` と照合する（[web quality gates](web-quality-gates.md)） | Chromium と mock API による回帰 proxy であり、実 screen reader と実ブラウザでの runtime performance（LCP、INP）計測は未実装。screenshot 比較と budget の CI job は maintainer による workflow 追加待ち（[付録](web-quality-gates.md#付録-ci-workflow)） |
@@ -693,6 +694,7 @@ production では先に別 environment で同一 artifact を検証し、変更 
 4. Response の request/correlation ID と JSON completion log が一致し、EMF metric が到着する。
 5. API alarm、DLQ、queue age、destination failure が `OK` で、telemetry に no-data がない。
 6. Migration marker/checkpoint/integrity check が成功し、新旧 client の contract test が通る。
+   Data migration の checkpoint と `verify` の契約は [Data migration](./data-migration.md) を参照する。
 7. AI assistanceを含むdeployでは同じfull SHAのmanual `production-like-live-eval`が成功し、namespace
    `Mukuroji/AIAssistance`、exact
    `Service=mukuroji-ai-assistance, ApplicationCommitSha=<evaluated full SHA>` dimension setの
@@ -708,8 +710,8 @@ failure destination error、security regression のいずれかは自動継続�
 
 1. Incident を宣言し、新しい deploy/migration/write を停止する。
 2. 直前 commit、stack event、alarm、request/event locator、data evidence を固定する。
-3. Data migration がある場合は、その migration contract に従って writer を止めたまま
-   rollback する。
+3. Data migration がある場合は、その migration contract（[Data migration](./data-migration.md#rollback)）に従って
+   writer を止めたまま rollback する。
 4. Schema-compatible な code/infrastructure は直前の成功code/configurationを、新しい
    `ApiRuntimeConfigurationRevision`とその他の同じ必須parameterでforward deployする。
    Retained secretの物理名を再作成するために旧revisionを再利用せず、retained resourceを

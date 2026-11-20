@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { configureAlarmRouting } from '../aspects/alarm-routing';
+import { configureCostAllocationTags } from '../aspects/cost-allocation-tags';
 import { configureStatefulResourceGuards } from '../aspects/stateful-resource-guards';
 import { buildLambdaBuildPaths } from '../config/lambda-build-paths';
 import { buildStackParameters, type StackParameters } from '../config/stack-parameters';
@@ -10,6 +11,7 @@ import {
   buildApiTransportsAndRealtime,
 } from '../subsystems/api-realtime';
 import { buildBootstrapResources } from '../subsystems/bootstrap-resources';
+import { buildCostBudget } from '../subsystems/cost-budget';
 import { buildCrossDomainIntegrityAccess } from '../subsystems/cross-domain-integrity';
 import { buildDataStores } from '../subsystems/data-stores';
 import {
@@ -312,6 +314,12 @@ export class MukurojiStack extends cdk.Stack {
       notificationTopicArns: parameters.alarmNotificationTopicArns,
     });
     configureStatefulResourceGuards(this);
+    configureCostAllocationTags(this);
+    buildCostBudget(this, {
+      monthlyBudgetUsd: parameters.monthlyCostBudgetUsd,
+      alertEmail: parameters.costBudgetAlertEmail,
+      fallbackEmail: parameters.initialOwnerEmail,
+    });
     buildBootstrapResources(this, {
       dataStores,
       parameters,

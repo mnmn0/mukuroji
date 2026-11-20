@@ -123,8 +123,9 @@ export type {
 export {
   getAllowedOrigins,
   normalizeLambdaApiEvent,
-  resolveRequestClientKey,
 } from './shared/http'
+
+export { resolveRequestClientKey } from '../infrastructure/http/trusted-request-source'
 
 export {
   shouldEnableWorkspaceSearchProjection,

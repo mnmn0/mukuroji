@@ -82,6 +82,7 @@ import { DynamoDbAutomationRepository } from '../../modules/automation'
 import { SecretsManagerAutomationInboundWebhookSecretStore } from '../../modules/automation'
 import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { createDynamoDbDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-adapters'
+import { createInMemoryDeveloperPlatformAdapters } from '../../modules/developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { DeveloperPlatformTransactionPort } from '../../modules/developer-platform/adapter-out/dynamodb/developer-platform-transaction-port'
 import type { IdempotencyPort } from '../../modules/developer-platform'
 import {
@@ -1645,6 +1646,11 @@ export function createTestAppDependencies(): AppDependencies {
       requestIntake,
     },
     automation,
+    developerPlatform: {
+      ...production.developerPlatform,
+      // Sign-in attempt limits count in this store, so tests need it without a DynamoDB table.
+      rateLimits: createInMemoryDeveloperPlatformAdapters().rateLimits,
+    },
     timeTracking: { timeTrackingService },
     capacityPlanning: {
       capacityPlanningService: new CapacityPlanningService(

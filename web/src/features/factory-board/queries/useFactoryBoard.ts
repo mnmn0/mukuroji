@@ -1,5 +1,6 @@
 import useSWR from 'swr'
-import { getTeamAgentRunBoard, listWorkItemAgentRunReports } from '../../../work-items/api/agentRuns'
+import { getTeamAgentRunBoard, getTeamFactoryAnalytics, listWorkItemAgentRunReports } from '../../../work-items/api/agentRuns'
+import { createFactoryAnalyticsPeriod, type FactoryAnalyticsPeriodDays } from '../model/factoryAnalytics'
 
 /**
  * Interval for reading the board again while it stays open. Each read evaluates many runs and Work
@@ -53,6 +54,30 @@ export function useFactoryBoardReports(
     {
       dedupingInterval: 10_000,
       refreshInterval: factoryBoardReportsRefreshInterval,
+      shouldRetryOnError: false,
+    },
+  )
+}
+
+/**
+ * Reads a Team's Factory analytics for the period that ends at read time. The key holds the period
+ * length rather than its bounds, so the period moves forward on each read instead of changing the key
+ * on every render.
+ *
+ * @param accessToken - Session access token; reading is skipped without it.
+ * @param teamId - Team ID; reading is skipped without it.
+ * @param days - Period length in days.
+ * @returns SWR state of the analytics.
+ */
+export function useFactoryAnalytics(accessToken: string | undefined, teamId: string | undefined, days: FactoryAnalyticsPeriodDays) {
+  return useSWR(
+    accessToken && teamId ? ['factory-analytics', accessToken, teamId, days] as const : null,
+    ([, token, currentTeamId, currentDays]) =>
+      getTeamFactoryAnalytics(token, currentTeamId, createFactoryAnalyticsPeriod(currentDays, new Date())),
+    {
+      dedupingInterval: 60_000,
+      // Another period's numbers are never shown under the newly selected period.
+      revalidateOnFocus: false,
       shouldRetryOnError: false,
     },
   )

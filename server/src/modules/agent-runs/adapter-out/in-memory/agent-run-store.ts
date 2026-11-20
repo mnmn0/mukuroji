@@ -334,12 +334,14 @@ export class InMemoryAgentRunStore implements AgentRunStore, AgentRunTriageStore
     since: string | undefined,
     cursor: string | undefined,
     limit: number,
+    until?: string,
   ): Promise<AgentRunFinishedPage> {
     const entries = [...this.state.runs.values()].flatMap((run) => {
       if (run.directoryId !== directoryId || run.teamId !== teamId || run.state !== 'finished') return []
       if (run.outcome === undefined || run.finishedAt === undefined) return []
       if ((run.outcome === 'failed') !== (group === 'failed')) return []
       if (since !== undefined && `${run.finishedAt}#${run.runId}` < since) return []
+      if (until !== undefined && `${run.finishedAt}#${run.runId}` > `${until}#~`) return []
       return [{ runId: run.runId, workItemId: run.workItemId, outcome: run.outcome, finishedAt: run.finishedAt }]
     }).sort((left, right) => `${right.finishedAt}#${right.runId}`.localeCompare(`${left.finishedAt}#${left.runId}`))
     const offset = cursor === undefined ? 0 : Number(cursor)
