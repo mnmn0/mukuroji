@@ -9,6 +9,9 @@ import {
   type BuiltInDocumentTemplateKey,
   type BuiltInTemplateCreateOptions,
 } from '../model/builtInTemplates'
+import type { MarkdownImportErrorCode } from '../model/markdownImport'
+import type { MarkdownDocumentImportRequest } from '../mutations/useMarkdownDocumentImport'
+import { MarkdownImportSection } from './MarkdownImportSection'
 
 /**
  * Documents home の props です。
@@ -49,6 +52,17 @@ export type DocumentHomeProps = {
    * Whether a page is being created from a bundled template.
    */
   isCreatingFromBuiltInTemplate?: boolean
+  /**
+   * Creates a page from pasted or uploaded Markdown and resolves with why the
+   * Markdown cannot become a page, if it cannot.
+   */
+  onImportMarkdown?: (
+    request: MarkdownDocumentImportRequest,
+  ) => Promise<MarkdownImportErrorCode | undefined>
+  /**
+   * Whether a page is being created from Markdown.
+   */
+  isImportingMarkdown?: boolean
 }
 
 /**
@@ -57,8 +71,10 @@ export type DocumentHomeProps = {
 export function DocumentHome({
   documents,
   isCreatingFromBuiltInTemplate = false,
+  isImportingMarkdown = false,
   onCreateDocument,
   onCreateFromBuiltInTemplate,
+  onImportMarkdown,
   onInstantiateTemplate,
   onSelectDocument,
   t,
@@ -142,6 +158,15 @@ export function DocumentHome({
           projects={projectSpaces}
           t={t}
           onCreate={onCreateFromBuiltInTemplate}
+        />
+      ) : null}
+
+      {onImportMarkdown ? (
+        <MarkdownImportSection
+          isImporting={isImportingMarkdown}
+          projects={projectSpaces}
+          t={t}
+          onImport={onImportMarkdown}
         />
       ) : null}
 

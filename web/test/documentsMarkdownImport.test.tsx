@@ -1,0 +1,202 @@
+import { describe, expect, test } from 'bun:test'
+import { renderToStaticMarkup } from 'react-dom/server'
+import type { DocumentBlock } from '@mukuroji/contracts'
+import {
+  convertMarkdownToDocument,
+  MARKDOWN_IMPORT_MAX_BLOCKS,
+  titleFromMarkdownFileName,
+} from '../src/documents/model/markdownImport'
+import { DocumentHome } from '../src/documents/ui/DocumentHome'
+import { createTranslator } from '../src/shared/i18n/i18n'
+
+/**
+ * Returns sequential IDs so converted blocks are deterministic.
+ *
+ * @returns ID factory.
+ */
+function createSequentialId() {
+  let next = 0
+  return (prefix: string) => `${prefix}-${++next}`
+}
+
+/**
+ * Converts Markdown with a sequential ID factory.
+ *
+ * @param source - Markdown text.
+ * @param fallbackTitle - Title used without a leading `#` heading.
+ * @returns The conversion result.
+ */
+function convert(source: string, fallbackTitle = 'fallback') {
+  return convertMarkdownToDocument(source, {
+    createId: createSequentialId(),
+    fallbackTitle,
+  })
+}
+
+/**
+ * Converts Markdown and returns its blocks, failing the test on an error.
+ *
+ * @param source - Markdown text.
+ * @returns Converted blocks.
+ */
+function blocksOf(source: string): DocumentBlock[] {
+  const result = convert(source)
+  if (!result.ok) throw new Error(`conversion failed: ${result.code}`)
+  return result.blocks
+}
+
+describe('Markdown import', () => {
+  test('reads back a page exported as Markdown', () => {
+    const exported = [
+      '# 設計書 \\[draft\\]',
+      '',
+      '## 背景',
+      '',
+      '本文の 1 行目',
+      '2 行目は \\*強調ではない\\*',
+      '',
+      '### 詳細',
+      '',
+      '| 項目 | 値 |',
+      '| --- | --- |',
+      '| a\\|b | 1<br>2 |',
+      '',
+      '```ts',
+      'const value = 1',
+      '```',
+      '',
+      '- [ ] 宿題',
+      '- [x] 済み',
+      '',
+      '```mermaid',
+      'graph TD; A-->B',
+      '```',
+      '',
+    ].join('\n')
+
+    const result = convert(exported)
+    if (!result.ok) throw new Error(result.code)
+    expect(result.title).toBe('設計書 [draft]')
+    expect(result.blocks.map((block) => block.type)).toEqual([
+      'heading',
+      'paragraph',
+      'heading',
+      'table',
+      'code',
+      'checklist',
+      'diagram',
+    ])
+    expect(result.blocks[0]).toMatchObject({ level: 1, text: '背景' })
+    expect(result.blocks[1]).toMatchObject({ text: '本文の 1 行目\n2 行目は *強調ではない*' })
+    expect(result.blocks[2]).toMatchObject({ level: 2, text: '詳細' })
+    expect(result.blocks[3]).toMatchObject({
+      columns: ['項目', '値'],
+      rows: [{ cells: [{ text: 'a|b' }, { text: '1\n2' }] }],
+    })
+    expect(result.blocks[4]).toMatchObject({ code: 'const value = 1', language: 'ts' })
+    expect(result.blocks[5]).toMatchObject({
+      items: [
+        { checked: false, text: '宿題' },
+        { checked: true, text: '済み' },
+      ],
+    })
+    expect(result.blocks[6]).toMatchObject({ format: 'mermaid', source: 'graph TD; A-->B' })
+    const ids = result.blocks.map((block) => block.id)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  test('keeps several top-level headings as headings and uses the fallback title', () => {
+    const result = convert('# A\n\ntext\n\n# B\n\n#### deep\n', 'notes')
+    if (!result.ok) throw new Error(result.code)
+    expect(result.title).toBe('notes')
+    expect(result.blocks.flatMap((block) =>
+      block.type === 'heading' ? [[block.level, block.text]] : [])).toEqual([
+      [1, 'A'],
+      [1, 'B'],
+      [3, 'deep'],
+    ])
+  })
+
+  test('starts heading levels at the shallowest heading when there is no title', () => {
+    const blocks = blocksOf('## Section\n\n### Sub\n')
+    expect(blocks).toMatchObject([
+      { level: 1, text: 'Section', type: 'heading' },
+      { level: 2, text: 'Sub', type: 'heading' },
+    ])
+  })
+
+  test('keeps lists, quotes, links, and HTML as plain paragraph text', () => {
+    const blocks = blocksOf('- one\n- two\n\n> quote\n\n[link](javascript:alert(1)) <b>x</b>\n\n---\n')
+    expect(blocks).toEqual([
+      { id: 'block-1', text: '- one\n- two', type: 'paragraph' },
+      { id: 'block-2', text: '> quote', type: 'paragraph' },
+      { id: 'block-3', text: '[link](javascript:alert(1)) <b>x</b>', type: 'paragraph' },
+    ])
+  })
+
+  test('keeps code fences verbatim and drops unsafe languages', () => {
+    const blocks = blocksOf('~~~~ bad<lang>\n# not a heading\n\\*kept\\*\n~~~~\n\n```\nunterminated')
+    expect(blocks).toEqual([
+      { code: '# not a heading\n\\*kept\\*', id: 'block-1', type: 'code' },
+      { code: 'unterminated', id: 'block-2', type: 'code' },
+    ])
+  })
+
+  test('pads short table rows and ignores extra cells', () => {
+    const blocks = blocksOf('a | b\n--|--\n1\n1 | 2 | 3\n')
+    expect(blocks[0]).toMatchObject({
+      columns: ['a', 'b'],
+      rows: [
+        { cells: [{ text: '1' }, { text: '' }] },
+        { cells: [{ text: '1' }, { text: '2' }] },
+      ],
+    })
+  })
+
+  test('reports Markdown the server would reject', () => {
+    expect(convert(' \n\n')).toEqual({ code: 'empty', ok: false })
+    expect(convert(Array.from(
+      { length: MARKDOWN_IMPORT_MAX_BLOCKS + 1 },
+      (_, index) => `p${index}`,
+    ).join('\n\n'))).toEqual({ code: 'too-many-blocks', ok: false })
+    expect(convert('x'.repeat(50_001))).toEqual({ code: 'block-too-long', ok: false })
+    expect(convert('a'.repeat(300_001))).toEqual({ code: 'too-large', ok: false })
+    const wideHeader = `|${Array.from({ length: 51 }, () => 'c').join('|')}|`
+    const wideDelimiter = `|${Array.from({ length: 51 }, () => '-').join('|')}|`
+    expect(convert(`${wideHeader}\n${wideDelimiter}\n`)).toEqual({
+      code: 'table-too-large',
+      ok: false,
+    })
+  })
+
+  test('ignores a byte order mark and Windows line endings', () => {
+    const result = convert('\uFEFF# Title\r\n\r\nbody\r\n')
+    expect(result).toEqual({
+      blocks: [{ id: 'block-1', text: 'body', type: 'paragraph' }],
+      ok: true,
+      title: 'Title',
+    })
+  })
+
+  test('derives a title from the file name', () => {
+    expect(titleFromMarkdownFileName('README.md')).toBe('README')
+    expect(titleFromMarkdownFileName('議事録 11-20.markdown')).toBe('議事録 11-20')
+    expect(titleFromMarkdownFileName('notes')).toBe('notes')
+  })
+
+  test('shows the import section on the Documents home only when importing is allowed', () => {
+    const t = createTranslator('ja')
+    const props = {
+      documents: [],
+      onSelectDocument: () => undefined,
+      t,
+      teams: [],
+    }
+    expect(renderToStaticMarkup(<DocumentHome {...props} />)).not.toContain('Markdown を取り込む')
+    const markup = renderToStaticMarkup(
+      <DocumentHome {...props} onImportMarkdown={async () => undefined} />,
+    )
+    expect(markup).toContain('Markdown を取り込む')
+    expect(markup).toContain('type="file"')
+  })
+})
