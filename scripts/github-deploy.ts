@@ -5,6 +5,7 @@
  *   AWS_REGION=ap-northeast-1 bun run deploy:github deploy
  *   AWS_REGION=ap-northeast-1 bun run deploy:github runtime-control-enable
  *   AWS_REGION=ap-northeast-1 bun run deploy:github runtime-control-disable
+ *   AWS_REGION=ap-northeast-1 bun run deploy:github runtime-control-disable-all-at-once
  *   AWS_REGION=ap-northeast-1 WEB_RELEASE_COMMIT=<sha> bun run deploy:github web-rollback
  *
  * `deploy` reads the non-secret stack parameters from SSM Parameter Store under
@@ -27,12 +28,14 @@ export type GitHubDeployOperation =
   | 'deploy'
   | 'runtime-control-enable'
   | 'runtime-control-disable'
+  | 'runtime-control-disable-all-at-once'
   | 'web-rollback'
 
 const OPERATIONS: readonly GitHubDeployOperation[] = [
   'deploy',
   'runtime-control-enable',
   'runtime-control-disable',
+  'runtime-control-disable-all-at-once',
   'web-rollback',
 ]
 
@@ -543,9 +546,27 @@ async function deploy(
   if (head.exitCode !== 0 || head.stdout.trim() !== context.commitSha) {
     throw new GitHubDeployError(`The checkout is not ${context.commitSha}.`)
   }
+  // A re-run of an old workflow run keeps its old GITHUB_SHA; never let it roll production back.
+  const mainTip = await dependencies.run(['git', 'ls-remote', '--exit-code', 'origin', 'refs/heads/main'])
+  const mainSha = mainTip.stdout.trim().split(/\s+/)[0] ?? ''
+  if (mainTip.exitCode !== 0 || !/^[0-9a-f]{40}$/.test(mainSha)) {
+    throw new GitHubDeployError('Could not read the current main commit from origin.')
+  }
+  if (mainSha !== context.commitSha) {
+    throw new GitHubDeployError(
+      `${context.commitSha} is no longer the tip of main (${mainSha}). Deploy the latest run instead; ` +
+        'to roll back, revert on main.',
+    )
+  }
   const revision = buildRuntimeConfigurationRevision(context.runId, context.runAttempt)
   const configuration = await readDeployConfiguration(dependencies, context.region)
   const before = await readStack(dependencies, context.region, context.stackName)
+  if (before?.status === 'ROLLBACK_COMPLETE') {
+    dependencies.log(
+      `${context.stackName} is ROLLBACK_COMPLETE after a failed first create. cdk deploy deletes it and creates it again; ` +
+        'the stored secrets are kept and reused.',
+    )
+  }
   const secrets = await ensureDeploySecrets(dependencies, context.region, before !== undefined)
   const apiAllowedOrigins = configuration.apiAllowedOrigins || (before?.outputs.get('WebUrl')?.replace(/\/+$/, '') ?? '')
   const parameters = buildStackParameters(configuration, secrets, context.commitSha, revision, apiAllowedOrigins)
@@ -581,6 +602,10 @@ async function deploy(
     `| Stack | \`${context.stackName}\` (${context.region}, ${after?.status ?? 'unknown'}) |`,
     `| ApiRuntimeConfigurationRevision | \`${revision}\` |`,
     `| CDK outputs SHA-256 | \`${digest}\` |`,
+    `| WorkspaceDirectoryId | \`${configuration.workspaceDirectoryId}\` |`,
+    `| InitialOwnerEmail | \`${configuration.initialOwnerEmail}\` |`,
+    `| Alarm topics | \`${configuration.alarmPrimaryTopicName}\`, \`${configuration.alarmSecondaryTopicName}\` |`,
+    `| ApiAllowedOrigins | ${apiAllowedOrigins ? `\`${apiAllowedOrigins}\`` : 'stack default'} |`,
     `| Web | ${webUrl} |`,
     '',
     before === undefined
@@ -613,10 +638,16 @@ export async function runGitHubDeploy(
     case 'deploy':
       return deploy(context, dependencies, timing)
     case 'runtime-control-enable':
+      await runStreaming(dependencies, ['bun', 'scripts/runtime-control.ts', 'enable'], 'scripts/runtime-control.ts')
+      return undefined
     case 'runtime-control-disable':
+      await runStreaming(dependencies, ['bun', 'scripts/runtime-control.ts', 'disable'], 'scripts/runtime-control.ts')
+      return undefined
+    case 'runtime-control-disable-all-at-once':
+      // Emergency stop decided by the incident commander: AppConfig.AllAtOnce instead of the canary.
       await runStreaming(
         dependencies,
-        ['bun', 'scripts/runtime-control.ts', operation === 'runtime-control-enable' ? 'enable' : 'disable'],
+        ['bun', 'scripts/runtime-control.ts', 'disable', '--all-at-once'],
         'scripts/runtime-control.ts',
       )
       return undefined

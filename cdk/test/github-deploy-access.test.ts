@@ -133,6 +133,14 @@ describe('GitHub deploy access template', () => {
     expect(deny?.Condition).toEqual({ Bool: { 'ssm:Overwrite': 'true' } });
   });
 
+  test('runtime control changes only AppConfig resources that carry the application tag', () => {
+    const write = permissions.find((statement) => statement.Sid === 'SwitchMukurojiRuntimeControl');
+    expect(write?.Action).toEqual(['appconfig:CreateHostedConfigurationVersion', 'appconfig:StartDeployment']);
+    expect(write?.Condition).toEqual({ StringEquals: { 'aws:ResourceTag/mukuroji:application': 'mukuroji' } });
+    const read = permissions.find((statement) => statement.Sid === 'ReadRuntimeControl');
+    expect(actions(read ?? { Effect: 'Allow', Action: [] }).every((action) => /^appconfig:(Get|List)/.test(action))).toBe(true);
+  });
+
   test('runtime control may start a deployment with the stack strategy', () => {
     const strategy = permissions.find((statement) => statement.Sid === 'UseRuntimeControlDeploymentStrategy');
     expect(strategy?.Action).toBe('appconfig:StartDeployment');

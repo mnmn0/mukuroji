@@ -64,9 +64,9 @@
     },
     "WebBucketNamePrefix": {
       "Type": "String",
-      "Default": "mukuroji-webbucket",
+      "Default": "mukuroji-webbucket12880f5b-",
       "AllowedPattern": "^[a-z0-9][a-z0-9.-]{2,62}$",
-      "Description": "Prefix of the Web bucket name CloudFormation generates (lowercase stack name, '-', 'webbucket')."
+      "Description": "Prefix of the Web bucket name CloudFormation generates: '<lowercase stack name>-<lowercase WebBucket logical ID>-'. cdk/test/web-distribution.suite.ts keeps the default in sync with the stack."
     }
   },
   "Conditions": {
@@ -191,18 +191,23 @@
                   "Resource": { "Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*" }
                 },
                 {
-                  "Sid": "SwitchRuntimeControl",
+                  "Sid": "ReadRuntimeControl",
                   "Effect": "Allow",
                   "Action": [
                     "appconfig:GetEnvironment",
                     "appconfig:ListHostedConfigurationVersions",
                     "appconfig:GetHostedConfigurationVersion",
-                    "appconfig:CreateHostedConfigurationVersion",
-                    "appconfig:StartDeployment",
                     "appconfig:GetDeployment",
                     "appconfig:ListDeployments"
                   ],
                   "Resource": { "Fn::Sub": "arn:${AWS::Partition}:appconfig:${AWS::Region}:${AWS::AccountId}:application/*" }
+                },
+                {
+                  "Sid": "SwitchMukurojiRuntimeControl",
+                  "Effect": "Allow",
+                  "Action": ["appconfig:CreateHostedConfigurationVersion", "appconfig:StartDeployment"],
+                  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:appconfig:${AWS::Region}:${AWS::AccountId}:application/*" },
+                  "Condition": { "StringEquals": { "aws:ResourceTag/mukuroji:application": "mukuroji" } }
                 },
                 {
                   "Sid": "UseRuntimeControlDeploymentStrategy",

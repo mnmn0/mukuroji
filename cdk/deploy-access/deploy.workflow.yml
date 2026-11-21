@@ -21,6 +21,7 @@ on:
           - deploy
           - runtime-control-enable
           - runtime-control-disable
+          - runtime-control-disable-all-at-once
           - web-rollback
       web_release_commit:
         description: For web-rollback only. Full 40-character commit SHA of the Web release to restore.

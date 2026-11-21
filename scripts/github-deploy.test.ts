@@ -46,6 +46,8 @@ interface FakeOptions {
   readonly healthCommits?: readonly (string | undefined)[]
   /** Exit code of `cdk deploy`. */
   readonly cdkExitCode?: number
+  /** Commit at the tip of main on origin. */
+  readonly mainSha?: string
 }
 
 /**
@@ -78,12 +80,27 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
   let stackExists = options.stackExists ?? false
   let generated = 0
   const healthCommits = [...(options.healthCommits ?? [commitSha])]
+  /**
+   * Builds a successful command result.
+   *
+   * @param stdout - Standard output to return.
+   * @returns A result with exit code 0.
+   */
   const ok = (stdout: string): CommandResult => ({ exitCode: 0, stdout, stderr: '' })
 
+  /**
+   * Records a command and answers it like the fake account; `put-parameter` stores a new secret
+   * and `cdk deploy` makes the stack exist.
+   *
+   * @param command - Program and arguments.
+   * @param commandOptions - Working directory and output handling.
+   * @returns The fake result.
+   */
   const run = async (command: readonly string[], commandOptions?: CommandOptions): Promise<CommandResult> => {
     calls.push({ command, ...(commandOptions === undefined ? {} : { options: commandOptions }) })
     const joined = command.join(' ')
     if (joined === 'git rev-parse HEAD') return ok(`${commitSha}\n`)
+    if (joined.startsWith('git ls-remote')) return ok(`${options.mainSha ?? commitSha}\trefs/heads/main\n`)
     if (joined.startsWith('aws ssm get-parameters-by-path')) {
       return ok(JSON.stringify({ Parameters: options.config ?? config }))
     }
@@ -327,6 +344,14 @@ describe('runGitHubDeploy', () => {
     )
   })
 
+  test('refuses to deploy a commit that is no longer the tip of main, such as a re-run of an old run', async () => {
+    const fake = fakeDependencies({ stackExists: true, storedSecrets: storedSecrets(), mainSha: 'b'.repeat(40) })
+    await expect(runGitHubDeploy('deploy', context, fake.dependencies, fastTiming)).rejects.toThrow(
+      'is no longer the tip of main',
+    )
+    expect(fake.calls.some((call) => call.command[0] === 'bun' || call.command[0] === 'aws')).toBe(false)
+  })
+
   test('refuses a checkout that is not GITHUB_SHA', async () => {
     const fake = fakeDependencies()
     await expect(
@@ -337,9 +362,13 @@ describe('runGitHubDeploy', () => {
   test('runs runtime control and Web rollback through the existing scripts', async () => {
     const fake = fakeDependencies()
     await runGitHubDeploy('runtime-control-enable', context, fake.dependencies, fastTiming)
+    await runGitHubDeploy('runtime-control-disable', context, fake.dependencies, fastTiming)
+    await runGitHubDeploy('runtime-control-disable-all-at-once', context, fake.dependencies, fastTiming)
     await runGitHubDeploy('web-rollback', { ...context, webReleaseCommit: 'a'.repeat(40) }, fake.dependencies, fastTiming)
     expect(fake.calls.map((call) => call.command.join(' '))).toEqual([
       'bun scripts/runtime-control.ts enable',
+      'bun scripts/runtime-control.ts disable',
+      'bun scripts/runtime-control.ts disable --all-at-once',
       `bash scripts/rollback-web.sh ${'a'.repeat(40)}`,
     ])
   })

@@ -755,8 +755,13 @@ bootstrap の CloudFormation execution role が行います。
 stack の secret parameter（`WorkspaceAuditPseudonymKey`、`EnterpriseIdentityTokenHashSecret`、`RequestTokenHashSecret`、
 `EdgeOriginSecret`）は SSM の SecureString（`/mukuroji/deploy/secrets/`）に置きます。stack がまだないときだけ script が
 32 byte の乱数で作り、上書きせずに保存します。stack ができた後に値がなければ、新しい値で audit ID や token hash が
-変わらないよう deploy を止めます。値を消したときは同じ値を戻してください。SSO・AI・任意 module の parameter は
+変わらないよう deploy を止めます。値を消したときは同じ値を戻してください。SSO・AI の parameter は
 script が渡さないので、CDK の既定どおり前回の値が残ります。有効にするときは script に足す PR を出します。
+
+[任意 module](#optional-modules) の CDK context も script は渡さないため、この経路で deploy する stack では
+`cdk/cdk.json` の `context` に書いた module だけが有効になります。現在はどれも書いていないので、本番の stack は
+任意 module なしです。有効にするときは `cdk/cdk.json` に `"mukuroji:connectors": true` などを足す PR を出し、
+その module の parameter も script に足します。書いた後に消すと、次の deploy で module の resource が削除されます。
 
 `ApiRuntimeConfigurationRevision` は run ごとに `gh-<run id>-<attempt>` になり、再実行でも同じ値を使いません。
 `ApplicationCommitSha` は checkout した `GITHUB_SHA` で、deploy 後に `WebUrl` の `/api/health` が同じ値を返すまで待ちます。
@@ -808,10 +813,17 @@ origin にするときは deploy access stack の `ApiAllowedOrigins` を更新�
 | operation | すること |
 | --- | --- |
 | `deploy` | 選んだ branch（`main` のみ）の先頭を deploy します。 |
-| `runtime-control-enable` / `runtime-control-disable` | [runtime control](#application-処理を有効にするruntime-control) を切り替えます。 |
+| `runtime-control-enable` / `runtime-control-disable` | [runtime control](#application-処理を有効にするruntime-control) を切り替えます（canary で約 30 分）。 |
+| `runtime-control-disable-all-at-once` | incident commander が即時停止を決めたときだけ使います。`AppConfig.AllAtOnce` で止めます（bake の 10 分は待ちます）。 |
 | `web-rollback` | `web_release_commit` に指定した 40 文字の SHA の Web release に戻します（[Web の release を戻す](#web-の-release-を戻す)）。 |
 
-stack を前の commit に戻すときは、`main` で該当の PR を revert して通常どおり deploy します（[Rollback](#rollback) の forward deploy）。
+`deploy` は対象の commit が今の `main` の先頭でないと AWS に触れる前に止まります。古い run を再実行して本番を
+前の commit に戻すことはできません。stack を前の commit に戻すときは、`main` で該当の PR を revert して通常どおり
+deploy します（[Rollback](#rollback) の forward deploy）。
+
+初回の stack 作成が失敗して `ROLLBACK_COMPLETE` になった場合は、job の log と CloudFormation の stack event で原因を
+直してから再実行します。`cdk deploy` が失敗した stack を消して作り直し、SSM の secret はそのまま使います。
+`Retain` の table・bucket・user pool は失敗した stack から外れて残るので、作り直しが成功した後に不要なものを手で削除します。
 job の summary には commit、revision、CDK outputs の SHA-256、`WebUrl` が残り、Environment の deployment 履歴と合わせて
 change record にします。PR ごとの read-only な `cdk diff`、post-deploy の smoke e2e はまだありません（#362 の残り）。
 
