@@ -261,7 +261,7 @@ Update の publish とコメントは、Planning の書き込みと同じ transa
 
 Entity の作成・複製・更新・移動・archive・復元も、Planning の書き込みと同じ transaction で audit event を 1 件保存します。Event type は `planning-entity.created` / `.duplicated` / `.updated` / `.moved` / `.archived` / `.restored`、audit の entity は `{ type: 'planning-entity', id: <entity ID> }` です。`changes` は変更前後の stored field（`createdAt` / `updatedAt` を除く）の差分で、作成と複製は全 field の `after`、archive と復元は `archivedAt` の付け外しになります。Metadata は操作者の member key、entity type、commit した Planning revision、現在の Team / Project scope、複製元 ID（複製）、scope が一緒に移った子孫の件数（移動）です。Audit write は commit の試行ごとに作り直すので、Work Item の更新だけで進んだ revision を越える rebase（ADR 0012）はそのまま効きます。Audit table が無い環境では書き込みません。どの event も通知や webhook の対象ではありません。退避の続き（archive 済み entity の再 archive）は event を作りません。
 
-`GET /api/planning/entities/:entityId/activity?limit=&cursor=&direction=` は 1 entity の audit event を新しい順に返します（audit の entity index を読みます）。Live graph で呼び出し元に見える entity なら閲覧者が読め、live graph から退避済みの entity は、退避一覧と同じく復元できる manager だけが読めます。見えない entity は `404 PlanningEntityNotFound` です。各 event には操作者の member key を `actorUserId` として付けます。
+`GET /api/planning/entities/:entityId/activity?limit=&cursor=&direction=` は 1 entity の audit event を新しい順に返します（audit の entity index を読みます）。Live graph で呼び出し元に見える entity なら閲覧者が読め、live graph から退避済みの entity は、退避一覧と同じく復元できる manager だけが読めます。見えない entity は `404 PlanningEntityNotFound` です。さらに event ごとに、記録した Team / Project scope（移動の event は移動元の scope も）を immutable update の記録時 scope と同じ規則で閲覧できるか確かめ、読めない event は返しません。別の Project から移ってきた entity の、移動前の履歴は移動先の閲覧者には見えません。そのため page の件数が `limit` より少なくても `nextCursor` が続くことがあります。各 event には操作者の member key を `actorUserId` として付けます。
 
 主な HTTP endpoint は次の通りです。
 

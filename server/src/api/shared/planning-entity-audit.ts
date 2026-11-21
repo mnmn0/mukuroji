@@ -1,5 +1,6 @@
 import {
   type AuditEventPage,
+  type AuditEventV1,
   createAuditFieldChanges,
   toAuditEventView,
   type MutationAuditContext,
@@ -159,4 +160,50 @@ export function toPlanningEntityActivityPageView(page: AuditEventPage) {
     }),
     ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
   }
+}
+
+/** Team / Project scope an entity had when an audit event recorded it. */
+export type PlanningEntityAuditScope = {
+  /** Team scope, when any. */
+  teamId?: string
+  /** Project scope, when any. */
+  projectId?: string
+}
+
+/**
+ * Lists every scope whose content one Planning entity audit event shows.
+ *
+ * The event records the scope after the change; a move also shows the scope it left, rebuilt from
+ * its `teamId` / `projectId` changes. A reader must be able to view each scope, so history written
+ * while the entity sat in another Team or Project stays hidden from readers of the current scope.
+ *
+ * @param event - Stored Planning entity audit event.
+ * @returns The scopes to authorize, or `undefined` when the recorded scope is malformed.
+ */
+export function readPlanningEntityAuditScopes(
+  event: AuditEventV1,
+): PlanningEntityAuditScope[] | undefined {
+  const metadata = event.metadata ?? {}
+  const teamId = metadata.teamId
+  const projectId = metadata.projectId
+  if (
+    (teamId !== undefined && typeof teamId !== 'string') ||
+    (projectId !== undefined && typeof projectId !== 'string')
+  ) {
+    return undefined
+  }
+  const current: PlanningEntityAuditScope = {
+    ...(teamId === undefined ? {} : { teamId }),
+    ...(projectId === undefined ? {} : { projectId }),
+  }
+  const previous: PlanningEntityAuditScope = { ...current }
+  let moved = false
+  for (const change of event.changes) {
+    if (change.field !== 'teamId' && change.field !== 'projectId') continue
+    if (change.before !== undefined && typeof change.before !== 'string') return undefined
+    moved = true
+    if (change.before === undefined) delete previous[change.field]
+    else previous[change.field] = change.before
+  }
+  return moved ? [current, previous] : [current]
 }

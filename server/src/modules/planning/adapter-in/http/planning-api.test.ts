@@ -1190,6 +1190,19 @@ test('records Planning entity changes in audit and returns them as entity activi
       ],
     })
     expect((await planningApiRequest('/api/planning/entities/missing-entity/activity')).status).toBe(404)
+
+    // A reader of the Team the copy moved into sees no history from its Workspace-scoped past.
+    configureFakeProjectClients(false, {
+      workspaceRole: 'guest',
+      role: 'viewer',
+      projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    })
+    const teamActivity = await planningApiRequest('/api/planning/entities/audited-copy/activity')
+    expect(teamActivity.status).toBe(200)
+    const teamBody: unknown = await teamActivity.json()
+    expect(isRecord(teamBody) && Array.isArray(teamBody.events)
+      ? teamBody.events.map((event) => isRecord(event) ? event.eventType : undefined)
+      : undefined).toEqual(['planning-entity.restored', 'planning-entity.archived'])
   })
 })
 

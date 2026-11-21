@@ -34,6 +34,7 @@ import {
   type WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
+import type { AuditEventV1 } from '../../modules/audit/audit'
 import type { Context } from 'hono'
 import { type Locale, ProjectDataError, type ProjectAccessEntry, type ProjectRole } from '../../modules/directory'
 import {
@@ -106,6 +107,7 @@ import { readAuditEventQuery, readLocale } from '../shared/input-parsing'
 import {
   createPlanningEntityAuditTransaction,
   PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
+  readPlanningEntityAuditScopes,
   toPlanningEntityActivityPageView,
 } from '../shared/planning-entity-audit'
 import {
@@ -1012,6 +1014,41 @@ async function filterPlanningUpdatesByCapturedScope(
     }
   }
   return visible
+}
+
+/**
+ * Checks whether the caller may read one Planning entity audit event.
+ *
+ * Every scope the event shows is authorized like an immutable update's captured scope, so history
+ * recorded while the entity was in another Team or Project stays hidden after a move.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param event - Stored audit event of the entity.
+ * @param authorizationCache - Request-local scope authorizations keyed by Team and Project.
+ * @returns Whether the event may be returned.
+ */
+async function canReadPlanningEntityAuditEvent(
+  principal: WorkspacePrincipal,
+  event: AuditEventV1,
+  authorizationCache: Map<string, Promise<void>>,
+): Promise<boolean> {
+  const scopes = readPlanningEntityAuditScopes(event)
+  if (!scopes) return false
+  for (const scope of scopes) {
+    const scopeKey = JSON.stringify([scope.teamId ?? null, scope.projectId ?? null])
+    let authorization = authorizationCache.get(scopeKey)
+    if (!authorization) {
+      authorization = requirePlanningUpdateCapturedScopePermission(principal, scope)
+      authorizationCache.set(scopeKey, authorization)
+    }
+    try {
+      await authorization
+    } catch (error) {
+      if (isPlanningVisibilityAuthorizationError(error)) return false
+      throw error
+    }
+  }
+  return true
 }
 
 /** Returns whether an authorization failure should hide one historical row. */
@@ -4124,7 +4161,14 @@ export function registerPlanningRoutes(routeApp: Hono): void {
             id: entityId,
           }),
         )
-        return c.json(toPlanningEntityActivityPageView(page))
+        const scopeAuthorizations = new Map<string, Promise<void>>()
+        const events = []
+        for (const event of page.events) {
+          if (await canReadPlanningEntityAuditEvent(principal, event, scopeAuthorizations)) {
+            events.push(event)
+          }
+        }
+        return c.json(toPlanningEntityActivityPageView({ ...page, events }))
       } catch (error) {
         if (error instanceof TypeError || error instanceof RangeError) {
           return c.json({ code: 'InvalidAuditQuery', message: error.message }, 400)
