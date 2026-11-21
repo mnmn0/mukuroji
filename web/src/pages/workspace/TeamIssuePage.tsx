@@ -82,7 +82,10 @@ import {
 } from '../../projects/queries/useProjectMembers'
 import { createTeamIssuesPath } from '../../shared/routing/paths'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
-import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
+import {
+  useWorkspaceCalendarSettings,
+  workspaceCalendarErrorMessageKey,
+} from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { createWorkspaceTaskScheduleCalendarPolicy } from '../../tasks/model/taskSchedule'
 import { useOptionalWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import {
@@ -204,8 +207,10 @@ export function TeamIssuePage() {
   // New Work Items and the Gantt chart use the Workspace calendar; a failed read keeps the default and
   // shows a notice with a retry.
   const workspaceCalendar = useWorkspaceCalendarSettings(accessToken, Boolean(user && !currentUserError))
+  const workspaceCalendarErrorKey = workspaceCalendarErrorMessageKey(workspaceCalendar)
   const workspaceCalendarPolicy = useMemo(
-    // After a failed read the default calendar is used, as the notice says.
+    // After a failed first read the default calendar is used, and after a failed reload the
+    // calendar loaded earlier stays in use, as the notice says.
     () => workspaceCalendar.settings || workspaceCalendar.error
       ? createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings)
       : undefined,
@@ -1043,7 +1048,7 @@ export function TeamIssuePage() {
       planningErrorMessage={planningErrorMessage}
       planningSnapshot={planningSnapshot}
       workingCalendar={workspaceCalendarPolicy}
-      workingCalendarErrorMessage={workspaceCalendar.error ? t('tasks.workspaceCalendar.error') : undefined}
+      workingCalendarErrorMessage={workspaceCalendarErrorKey ? t(workspaceCalendarErrorKey) : undefined}
       onRetryWorkingCalendar={workspaceCalendar.retry}
       selectedIssueId={resolvedSelectedIssueId}
       relations={issueDetail && issueDetail.issue.id === resolvedSelectedIssueId

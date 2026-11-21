@@ -1,6 +1,7 @@
 import { GetCommand, PutCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { JapanesePublicHolidayStore } from '../../application/japanese-public-holiday-sync'
 import {
+  InvalidStoredJapanesePublicHolidaysError,
   readStoredJapanesePublicHolidays,
   type StoredJapanesePublicHolidays,
 } from '../../domain/japanese-public-holidays'
@@ -21,20 +22,26 @@ const ENTRY_TYPE = 'japanese-public-holidays'
  * Keeps the synced Japanese national holidays in one row of the tenant administration table.
  */
 export class DynamoDbJapanesePublicHolidayStore implements JapanesePublicHolidayStore {
+  /** Tenant administration table. */
+  private readonly tableName: string
+  /** DynamoDB document client. */
+  private readonly documentClient: DynamoDBDocumentClient
+
   /**
    * @param tableName - Tenant administration table.
    * @param documentClient - DynamoDB document client.
    */
-  constructor(
-    private readonly tableName: string,
-    private readonly documentClient: DynamoDBDocumentClient,
-  ) {}
+  constructor(tableName: string, documentClient: DynamoDBDocumentClient) {
+    this.tableName = tableName
+    this.documentClient = documentClient
+  }
 
   /**
    * Reads the stored list.
    *
    * @returns The list, or undefined before the first sync.
-   * @throws Error when the stored row is malformed, so it is never used silently.
+   * @throws InvalidStoredJapanesePublicHolidaysError when the stored row is malformed, so it is
+   *   never used silently.
    */
   async get(): Promise<StoredJapanesePublicHolidays | undefined> {
     const result = await this.documentClient.send(new GetCommand({
@@ -45,7 +52,7 @@ export class DynamoDbJapanesePublicHolidayStore implements JapanesePublicHoliday
     const stored = result.Item.entryType === ENTRY_TYPE
       ? readStoredJapanesePublicHolidays(result.Item)
       : undefined
-    if (!stored) throw new Error('Stored Japanese national holidays are invalid.')
+    if (!stored) throw new InvalidStoredJapanesePublicHolidaysError()
     return stored
   }
 

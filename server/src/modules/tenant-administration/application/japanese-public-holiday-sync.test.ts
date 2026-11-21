@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { listJapanesePublicHolidays, type JapanesePublicHoliday } from '@mukuroji/contracts'
 import {
+  InvalidStoredJapanesePublicHolidaysError,
   JapanesePublicHolidaySourceError,
   parseCabinetOfficeHolidayCsv,
   readStoredJapanesePublicHolidays,
@@ -176,9 +177,44 @@ describe('monthly national holiday sync', () => {
     expect(invalid.written).toEqual([])
   })
 
+  test('refuses a list that ends before the stored one, so next year is never dropped', async () => {
+    const previous: StoredJapanesePublicHolidays = {
+      holidays: fullList,
+      fetchedAt: '2026-11-01T00:00:00.000Z',
+      fetchedMonth: '2026-11',
+      sourceSha256: 'a'.repeat(64),
+    }
+    const { store, written } = memoryStore(previous)
+    await expect(syncJapanesePublicHolidays({
+      store,
+      source: textSource(toCabinetOfficeCsv(fullList.filter((holiday) => holiday.date < '2027-01-01'))).source,
+      now: () => new Date('2026-12-01T00:00:00.000Z'),
+    })).rejects.toThrow('before the stored list')
+    expect(written).toEqual([])
+  })
+
+  test('replaces a malformed stored row with the next valid list', async () => {
+    const written: StoredJapanesePublicHolidays[] = []
+    const result = await syncJapanesePublicHolidays({
+      store: {
+        async get() {
+          throw new InvalidStoredJapanesePublicHolidaysError()
+        },
+        async put(holidays) {
+          written.push(holidays)
+        },
+      },
+      source: textSource(toCabinetOfficeCsv(fullList)).source,
+      now: () => new Date('2026-12-01T00:00:00.000Z'),
+    })
+
+    expect(result).toMatchObject({ status: 'updated', lastYear: 2027 })
+    expect(written[0]?.holidays).toEqual(fullList)
+  })
+
   test('reads stored rows strictly', () => {
     const stored = {
-      holidays: [{ date: '2026-01-01', name: '元日' }],
+      holidays: fullList,
       fetchedAt: '2026-11-01T00:00:00.000Z',
       fetchedMonth: '2026-11',
       sourceSha256: 'b'.repeat(64),
@@ -189,6 +225,17 @@ describe('monthly national holiday sync', () => {
     expect(readStoredJapanesePublicHolidays({
       ...stored,
       holidays: [{ date: '2026-01-02', name: '休日' }, { date: '2026-01-01', name: '元日' }],
+    })).toBeUndefined()
+    // The years must pass the same checks as a fetched list and reach the year of the fetch.
+    expect(readStoredJapanesePublicHolidays({ ...stored, holidays: [{ date: '2026-01-01', name: '元日' }] }))
+      .toBeUndefined()
+    expect(readStoredJapanesePublicHolidays({
+      ...stored,
+      holidays: fullList.filter((holiday) => holiday.date < '2026-01-01'),
+    })).toBeUndefined()
+    expect(readStoredJapanesePublicHolidays({
+      ...stored,
+      holidays: [{ date: '2019-01-01', name: '元日' }, ...fullList],
     })).toBeUndefined()
     expect(toJapanDate(new Date('2026-12-31T15:00:00.000Z'))).toBe('2027-01-01')
   })
@@ -233,6 +280,32 @@ describe('national holiday dates for new Work Items', () => {
     expect(await dates.listDates()).toEqual(['2028-01-01'])
     expect(reads).toBe(3)
     expect(errors).toHaveLength(1)
+  })
+
+  test('adds the bundled years after the last synced year', async () => {
+    const throughThisYear = fullList.filter((holiday) => holiday.date < '2027-01-01')
+    const dates = createJapanesePublicHolidayDates({
+      store: {
+        async get() {
+          return {
+            holidays: throughThisYear,
+            fetchedAt: '2026-11-01T00:00:00.000Z',
+            fetchedMonth: '2026-11',
+            sourceSha256: 'd'.repeat(64),
+          }
+        },
+      },
+      cacheMilliseconds: 3_600_000,
+      now: () => 0,
+      logError: () => undefined,
+    })
+    const bundledNextYear = listJapanesePublicHolidays()
+      .filter((holiday) => holiday.date.startsWith('2027-'))
+      .map((holiday) => holiday.date)
+
+    expect(bundledNextYear.length).toBeGreaterThan(0)
+    expect(await dates.listDates())
+      .toEqual([...throughThisYear.map((holiday) => holiday.date), ...bundledNextYear])
   })
 
   test('uses the bundled list when the first read fails', async () => {

@@ -241,22 +241,42 @@ function readWorkspacePublicHolidayCalendar(value: unknown): WorkspacePublicHoli
  *
  * Company holidays and, when the Workspace uses them, the national holidays are merged.
  * A Work Item schedule keeps at most {@link WORKSPACE_CALENDAR_MAX_HOLIDAYS} holidays, so when the
- * merged list is longer the oldest dates are left out; they matter least to new schedules.
+ * merged list is longer only the dates nearest the reference date are kept, a later date winning a
+ * tie. The days off around today, such as this year's and next year's national holidays, matter
+ * most to a new schedule.
  *
  * @param settings - Company holidays and national holiday choice of the Workspace.
  * @param nationalHolidayDates - National holiday dates the server synced from the Cabinet Office;
  *   the bundled national holidays are used when omitted.
+ * @param referenceDate - `YYYY-MM-DD` date the kept dates are nearest to; today in Japan by default.
  * @returns Sorted unique local `YYYY-MM-DD` dates.
  */
 export function listWorkspaceDaysOff(
   settings: Pick<WorkspaceCalendarSettings, 'holidays' | 'publicHolidays'>,
   nationalHolidayDates?: readonly string[],
+  referenceDate: string = todayInJapan(),
 ): string[] {
   const nationalHolidays = settings.publicHolidays === 'japan'
     ? nationalHolidayDates ?? listJapanesePublicHolidays().map((holiday) => holiday.date)
     : []
   const daysOff = [...new Set([...settings.holidays, ...nationalHolidays])].sort()
-  return daysOff.slice(Math.max(0, daysOff.length - WORKSPACE_CALENDAR_MAX_HOLIDAYS))
+  if (daysOff.length <= WORKSPACE_CALENDAR_MAX_HOLIDAYS) return daysOff
+  const reference = Date.parse(`${referenceDate}T00:00:00.000Z`)
+  const distance = (date: string) => Math.abs(Date.parse(`${date}T00:00:00.000Z`) - reference)
+  return [...daysOff]
+    .sort((left, right) => distance(left) - distance(right) || right.localeCompare(left))
+    .slice(0, WORKSPACE_CALENDAR_MAX_HOLIDAYS)
+    .sort()
+}
+
+/**
+ * Reads today's date in Japan, the time zone of Work Item calendars.
+ *
+ * @returns Today's `YYYY-MM-DD` date in Asia/Tokyo.
+ */
+function todayInJapan(): string {
+  // Japan has no daylight saving time, so a fixed nine-hour offset is exact.
+  return new Date(Date.now() + 9 * 60 * 60 * 1_000).toISOString().slice(0, 10)
 }
 
 /**

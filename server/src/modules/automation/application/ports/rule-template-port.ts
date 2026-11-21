@@ -101,8 +101,9 @@ export interface AutomationRuleTemplatePort<TCompletionMutation = unknown> {
     expectedRevision: number,
   ): Promise<void>
   /**
-   * Reserves a pinned template-application receipt. A new receipt of a Project template keeps
-   * `calendarPolicy`; a replay returns the receipt with the policy it already pinned.
+   * Reserves a pinned template-application receipt. A new receipt of a Project template keeps the
+   * policy `readCalendarPolicy` returns; a replay returns the receipt with the policy it already
+   * pinned without calling it, so a failed calendar read never blocks a replay.
    */
   reserveTemplateApplication(
     workspaceId: string,
@@ -110,7 +111,7 @@ export interface AutomationRuleTemplatePort<TCompletionMutation = unknown> {
     templateId: string,
     target: AutomationTemplateApplicationTarget,
     idempotencyKey: string,
-    calendarPolicy?: WorkItemScheduleCalendarPolicy,
+    readCalendarPolicy?: () => Promise<WorkItemScheduleCalendarPolicy>,
   ): Promise<AutomationTemplateApplication>
   /** Reads a template-application receipt. */
   getTemplateApplication(

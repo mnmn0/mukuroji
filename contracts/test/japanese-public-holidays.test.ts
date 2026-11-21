@@ -127,12 +127,21 @@ describe('Workspace days off', () => {
     expect(listWorkspaceDaysOff({ holidays: ['2026-12-29'], publicHolidays: 'none' })).toEqual(['2026-12-29'])
   })
 
-  test('keeps the newest dates when the merged list exceeds the Work Item schedule limit', () => {
+  test('keeps the dates nearest today when the merged list exceeds the Work Item schedule limit', () => {
     const companyHolidays = Array.from({ length: WORKSPACE_CALENDAR_MAX_HOLIDAYS }, (_, index) =>
       isoDate(Date.UTC(2030, 0, 1) + index * DAY))
-    const daysOff = listWorkspaceDaysOff({ holidays: companyHolidays, publicHolidays: 'japan' })
+    const daysOff = listWorkspaceDaysOff({ holidays: companyHolidays, publicHolidays: 'japan' }, undefined, '2026-11-21')
     expect(daysOff).toHaveLength(WORKSPACE_CALENDAR_MAX_HOLIDAYS)
-    expect(daysOff).toEqual(companyHolidays)
+    expect(daysOff).toEqual([...daysOff].sort())
+    // This year's and next year's national holidays stay; the furthest company holidays go.
+    expect(daysOff).toContain('2026-11-23')
+    expect(daysOff).toContain('2027-01-01')
+    expect(daysOff).toContain('2027-11-23')
+    expect(daysOff).toContain('2030-01-01')
+    expect(daysOff).not.toContain(companyHolidays.at(-1))
+    // The same inputs always give the same dates.
+    expect(listWorkspaceDaysOff({ holidays: companyHolidays, publicHolidays: 'japan' }, undefined, '2026-11-21'))
+      .toEqual(daysOff)
   })
 
   test('creates the Work Item calendar policy from the Workspace settings', () => {

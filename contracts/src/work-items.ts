@@ -132,16 +132,19 @@ export const DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY: WorkItemScheduleCalenda
  * @param settings - Workspace working weekdays, company holidays, and national holiday choice.
  * @param nationalHolidayDates - National holiday dates synced from the Cabinet Office; the bundled
  *   national holidays are used when omitted.
+ * @param referenceDate - Date the kept days off are nearest to when there are too many; today in
+ *   Japan by default.
  * @returns A new policy that shares no arrays with the settings.
  */
 export function createWorkspaceWorkItemCalendarPolicy(
   settings: Pick<WorkspaceCalendarSettings, 'workingWeekdays' | 'holidays' | 'publicHolidays'>,
   nationalHolidayDates?: readonly string[],
+  referenceDate?: string,
 ): WorkItemScheduleCalendarPolicy {
   return {
     timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
     workingWeekdays: [...settings.workingWeekdays],
-    holidays: listWorkspaceDaysOff(settings, nationalHolidayDates),
+    holidays: listWorkspaceDaysOff(settings, nationalHolidayDates, referenceDate),
   }
 }
 

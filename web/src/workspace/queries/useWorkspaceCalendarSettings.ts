@@ -60,3 +60,18 @@ export function useWorkspaceCalendarSettings(
     retry: () => { void query.mutate().catch(() => undefined) },
   }
 }
+
+/**
+ * Picks the notice for a failed calendar read, so it names the calendar the screen really uses.
+ *
+ * @param calendar - State of the calendar settings read.
+ * @returns The message key, or undefined when the latest read did not fail.
+ */
+export function workspaceCalendarErrorMessageKey(
+  calendar: Pick<WorkspaceCalendarSettingsQuery, 'settings' | 'error'>,
+): 'tasks.workspaceCalendar.error' | 'tasks.workspaceCalendar.staleError' | undefined {
+  if (!calendar.error) return undefined
+  // After a failed reload the calendar loaded earlier stays in use; before any read succeeds the
+  // Monday-to-Friday default is used.
+  return calendar.settings ? 'tasks.workspaceCalendar.staleError' : 'tasks.workspaceCalendar.error'
+}

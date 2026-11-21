@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { TenantAdministrationSnapshot } from '@mukuroji/contracts'
 import { getWorkspaceCalendarSettings } from '../src/workspace/api/tenantAdministration'
+import { workspaceCalendarErrorMessageKey } from '../src/workspace/queries/useWorkspaceCalendarSettings'
 import { createWorkspaceTaskScheduleCalendarPolicy } from '../src/tasks/model/taskSchedule'
 import {
   addWorkspaceHoliday,
@@ -208,5 +209,14 @@ describe('Workspace calendar settings', () => {
       timeZone: 'Asia/Tokyo',
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
     })
+  })
+
+  test('names the calendar in use when a read fails', () => {
+    expect(workspaceCalendarErrorMessageKey({ settings: undefined, error: undefined })).toBeUndefined()
+    expect(workspaceCalendarErrorMessageKey({ settings: undefined, error: new Error('offline') }))
+      .toBe('tasks.workspaceCalendar.error')
+    // A failed reload keeps the settings read earlier, so the notice says so.
+    expect(workspaceCalendarErrorMessageKey({ settings: snapshot.profile.calendar, error: new Error('offline') }))
+      .toBe('tasks.workspaceCalendar.staleError')
   })
 })

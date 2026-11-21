@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto'
 import { listJapanesePublicHolidays } from '@mukuroji/contracts'
 import {
+  InvalidStoredJapanesePublicHolidaysError,
+  JapanesePublicHolidaySourceError,
+  lastJapanesePublicHolidayYear,
   parseCabinetOfficeHolidayCsv,
   selectSyncedJapanesePublicHolidays,
   toJapanDate,
@@ -54,8 +57,9 @@ export type JapanesePublicHolidaySyncDependencies = {
  * Fetches the Cabinet Office holiday list once a month and stores it.
  *
  * The scheduled job runs several times a day; only the first run of a month in Japan fetches, and a
- * failed fetch is tried again on the next run. A list that fails validation is never stored, so the
- * previous month's list stays in use, and the error reaches the job's dead-letter queue.
+ * failed fetch is tried again on the next run. A list that fails validation, or ends before the
+ * stored one, is never stored, so the previous month's list stays in use, and the error reaches the
+ * job's dead-letter queue. A malformed stored row is replaced by the next valid list.
  *
  * @param dependencies - Store, source, and clock.
  * @returns Whether the stored list was already current or was replaced.
@@ -66,13 +70,21 @@ export async function syncJapanesePublicHolidays(
   const now = dependencies.now()
   const today = toJapanDate(now)
   const month = today.slice(0, 7)
-  const stored = await dependencies.store.get()
+  const stored = await readStoredOrUndefined(dependencies.store)
   if (stored?.fetchedMonth === month) return { status: 'current', fetchedMonth: month }
   const bytes = await dependencies.source.fetch()
   const holidays = selectSyncedJapanesePublicHolidays(
     parseCabinetOfficeHolidayCsv(dependencies.source.decode(bytes)),
     today,
   )
+  const storedLastYear = stored ? lastJapanesePublicHolidayYear(stored.holidays) : undefined
+  const fetchedLastYear = lastJapanesePublicHolidayYear(holidays)
+  if (storedLastYear !== undefined && (fetchedLastYear === undefined || fetchedLastYear < storedLastYear)) {
+    // A shorter list would drop holidays already known, such as next year's.
+    throw new JapanesePublicHolidaySourceError(
+      `The list ends in ${fetchedLastYear}, before the stored list (${storedLastYear}).`,
+    )
+  }
   await dependencies.store.put({
     holidays,
     fetchedAt: now.toISOString(),
@@ -86,6 +98,24 @@ export async function syncJapanesePublicHolidays(
   }
 }
 
+/**
+ * Reads the stored list for the sync, treating a malformed row as missing so a valid list can
+ * replace it.
+ *
+ * @param store - Durable copy of the list.
+ * @returns The stored list, or undefined when none is stored or the row is malformed.
+ */
+async function readStoredOrUndefined(
+  store: JapanesePublicHolidayStore,
+): Promise<StoredJapanesePublicHolidays | undefined> {
+  try {
+    return await store.get()
+  } catch (error) {
+    if (error instanceof InvalidStoredJapanesePublicHolidaysError) return undefined
+    throw error
+  }
+}
+
 /** Pause before the store is read again after a failed read. */
 const FAILED_READ_PAUSE_MILLISECONDS = 60_000
 
@@ -93,7 +123,9 @@ const FAILED_READ_PAUSE_MILLISECONDS = 60_000
 export interface JapanesePublicHolidayDates {
   /**
    * Lists the national holiday dates: the latest synced list, the last one this process read when
-   * the store cannot be read, or the bundled list before the first sync.
+   * the store cannot be read, or the bundled list before the first sync. Bundled years after the
+   * synced list's last year are added, so a list fetched before next year is published keeps the
+   * bundled next year.
    */
   listDates(): Promise<string[]>
 }
@@ -131,6 +163,16 @@ export function createJapanesePublicHolidayDates(
    * @returns The bundled dates.
    */
   const bundled = () => listJapanesePublicHolidays().map((holiday) => holiday.date)
+  /**
+   * Adds the bundled dates of the years after the last synced year.
+   *
+   * @param synced - Synced dates in date order.
+   * @returns The synced dates followed by the later bundled ones.
+   */
+  const withBundledLaterYears = (synced: string[]) => {
+    const lastSyncedYear = synced.at(-1)?.slice(0, 4) ?? ''
+    return [...synced, ...bundled().filter((date) => date.slice(0, 4) > lastSyncedYear)]
+  }
 
   /**
    * Reads the store and refreshes the cache.
@@ -140,7 +182,7 @@ export function createJapanesePublicHolidayDates(
   async function read(): Promise<string[]> {
     try {
       const stored = await options.store.get()
-      const dates = stored ? stored.holidays.map((holiday) => holiday.date) : bundled()
+      const dates = stored ? withBundledLaterYears(stored.holidays.map((holiday) => holiday.date)) : bundled()
       cached = { dates, readAt: options.now() }
       return [...dates]
     } catch (error) {

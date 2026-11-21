@@ -78,6 +78,17 @@ export function parseCabinetOfficeHolidayCsv(text: string): JapanesePublicHolida
   return holidays
 }
 
+/** A stored holiday row is not one the sync could have written. */
+export class InvalidStoredJapanesePublicHolidaysError extends Error {
+  /**
+   * @param message - What is wrong with the stored row.
+   */
+  constructor(message = 'Stored Japanese national holidays are invalid.') {
+    super(message)
+    this.name = 'InvalidStoredJapanesePublicHolidaysError'
+  }
+}
+
 /**
  * Keeps the recent years of a source list after checking that it looks like the real calendar.
  *
@@ -94,10 +105,27 @@ export function selectSyncedJapanesePublicHolidays(
   today: string,
 ): JapanesePublicHoliday[] {
   const kept = holidays.filter((holiday) => yearOf(holiday.date) >= JAPANESE_PUBLIC_HOLIDAY_SYNC_MIN_YEAR)
+  checkJapanesePublicHolidayYears(kept, yearOf(today))
+  return kept.map((holiday) => ({ ...holiday }))
+}
+
+/**
+ * Checks that a list from {@link JAPANESE_PUBLIC_HOLIDAY_SYNC_MIN_YEAR} onward has every year, each
+ * with a plausible count of days off, through at least a given year.
+ *
+ * @param holidays - Days off from the first kept year onward.
+ * @param minimumLastYear - Year the list must reach.
+ * @returns The last year the list covers.
+ * @throws JapanesePublicHolidaySourceError when a year is missing or implausible.
+ */
+function checkJapanesePublicHolidayYears(
+  holidays: readonly JapanesePublicHoliday[],
+  minimumLastYear: number,
+): number {
   const counts = new Map<number, number>()
-  for (const holiday of kept) counts.set(yearOf(holiday.date), (counts.get(yearOf(holiday.date)) ?? 0) + 1)
+  for (const holiday of holidays) counts.set(yearOf(holiday.date), (counts.get(yearOf(holiday.date)) ?? 0) + 1)
   const lastYear = Math.max(...counts.keys())
-  if (!Number.isFinite(lastYear) || lastYear < yearOf(today)) {
+  if (!Number.isFinite(lastYear) || lastYear < minimumLastYear) {
     throw new JapanesePublicHolidaySourceError('The list does not reach the current year.')
   }
   for (let year = JAPANESE_PUBLIC_HOLIDAY_SYNC_MIN_YEAR; year <= lastYear; year += 1) {
@@ -106,11 +134,24 @@ export function selectSyncedJapanesePublicHolidays(
       throw new JapanesePublicHolidaySourceError(`${year} has ${count} days off.`)
     }
   }
-  return kept.map((holiday) => ({ ...holiday }))
+  return lastYear
 }
 
 /**
- * Reads a stored holiday list, rejecting anything the sync could not have written.
+ * Reads the last year a holiday list covers.
+ *
+ * @param holidays - Days off in date order.
+ * @returns The year of the last day off, or undefined for an empty list.
+ */
+export function lastJapanesePublicHolidayYear(holidays: readonly JapanesePublicHoliday[]): number | undefined {
+  const last = holidays.at(-1)
+  return last ? yearOf(last.date) : undefined
+}
+
+/**
+ * Reads a stored holiday list, rejecting anything the sync could not have written: every row must
+ * be well formed, and the years must pass the same checks as a fetched list, reaching the year of
+ * the fetch.
  *
  * @param value - Stored item.
  * @returns The stored list, or undefined when it is missing or malformed.
@@ -142,6 +183,12 @@ export function readStoredJapanesePublicHolidays(value: unknown): StoredJapanese
     const previous = read.at(-1)
     if (previous && previous.date >= date) return undefined
     read.push({ date, name })
+  }
+  if (read[0] && yearOf(read[0].date) < JAPANESE_PUBLIC_HOLIDAY_SYNC_MIN_YEAR) return undefined
+  try {
+    checkJapanesePublicHolidayYears(read, yearOf(toJapanDate(new Date(fetchedAt))))
+  } catch {
+    return undefined
   }
   return { holidays: read, fetchedAt, fetchedMonth, sourceSha256 }
 }

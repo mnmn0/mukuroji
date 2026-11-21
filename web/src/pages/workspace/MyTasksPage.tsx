@@ -89,7 +89,10 @@ import {
 } from '../../work-items/model/workItemDisplay'
 import { useWorkspaceTaskStatusMutation } from '../../workspace/mutations/useWorkspaceTaskStatusMutation'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
-import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
+import {
+  useWorkspaceCalendarSettings,
+  workspaceCalendarErrorMessageKey,
+} from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { createWorkspaceTaskScheduleCalendarPolicy } from '../../tasks/model/taskSchedule'
 import {
   WorkspaceConfigurationLoadNotice,
@@ -174,8 +177,10 @@ export function MyTasksPage() {
   // The Gantt chart shades the Workspace days off once the calendar loads; a failed read shows a
   // notice with a retry.
   const workspaceCalendar = useWorkspaceCalendarSettings(workspace.accessToken, workspace.canLoadWorkspaceData)
+  const workspaceCalendarErrorKey = workspaceCalendarErrorMessageKey(workspaceCalendar)
   const workspaceCalendarPolicy = useMemo(
-    // After a failed read the default calendar is used, as the notice says.
+    // After a failed first read the default calendar is used, and after a failed reload the
+    // calendar loaded earlier stays in use, as the notice says.
     () => workspaceCalendar.settings || workspaceCalendar.error
       ? createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings)
       : undefined,
@@ -932,13 +937,13 @@ export function MyTasksPage() {
           onRetry={() => void workItems.mutateConfigurations()}
           t={t}
         />
-        {workspaceCalendar.error ? (
+        {workspaceCalendarErrorKey ? (
           <div
             className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-warning-border)] bg-[var(--workbench-warning-surface)] px-4 py-3"
             data-testid="my-tasks-workspace-calendar-error"
             role="alert"
           >
-            <p className="text-sm font-semibold text-[var(--workbench-warning)]">{t('tasks.workspaceCalendar.error')}</p>
+            <p className="text-sm font-semibold text-[var(--workbench-warning)]">{t(workspaceCalendarErrorKey)}</p>
             <button className="workbench-button-secondary min-h-9 px-3" onClick={workspaceCalendar.retry} type="button">
               {t('tasks.workspaceCalendar.retry')}
             </button>
