@@ -3,6 +3,7 @@ import { readWorkItemPlannedEndDate, type WeeklyReportStoredItem } from '@mukuro
 import type { Context, Hono } from 'hono'
 import { normalizeProjectMemberKey, ProjectDataError } from '../../modules/directory'
 import {
+  buildTeamWeeklySummary,
   listWeeklyReportHistoryUseCase,
   readTeamWeeklyReportStatusUseCase,
   readWeeklyReportUseCase,
@@ -14,8 +15,14 @@ import {
   type WeeklyReportItemReadCheck,
   type WeeklyReportMemberScope,
 } from '../../modules/weekly-reports'
-import { isTeamIssueNotFoundError } from '../../modules/work-items'
+import {
+  isTeamIssueNotFoundError,
+  workItemScheduleInstantToLocalDate,
+  type TeamIssueResponseItem,
+} from '../../modules/work-items'
+import { mapInOrderWithConcurrency } from '../shared/agent-run-access'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import { WORK_ITEMS_SUMMARY_SCAN_LIMIT } from '../shared/constants'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import {
@@ -30,6 +37,8 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
+import { forEachTeamPartitionPage } from '../shared/work-item-aggregate-read'
+import { createWorkItemListLimitExceededError } from '../shared/work-item-access'
 import type { TeamPermissionContext } from '../shared/workspace-access'
 
 /** Most Work Items read at once while a report is submitted or read. */
@@ -58,6 +67,36 @@ export function registerWeeklyReportRoutes(routeApp: Hono): void {
         roster,
         weekStart,
       ))
+    })
+  })
+
+  /**
+   * Summarizes a week of the Team and of each Project the reader may read: completed Work Items,
+   * delays against the Project schedule baseline, overdue Work Items, and Milestones reached.
+   * Any Team viewer may read it; only Work Items the reader may read are counted.
+   */
+  routeApp.get('/api/teams/:teamId/weekly-summary', async (c) => {
+    return await withPrincipal(c, async (principal) => {
+      requireWorkspaceBusinessRead(principal)
+      const teamId = readTeamId(c)
+      const weekStart = readWeeklyReportWeekStart(c.req.query('weekStart'), today())
+      const context = await requireTeamPermission(principal, teamId, 'viewer')
+      const canReadProject = createProjectReadCheck(principal, context)
+      const projectIds = context.team.projects.map((project) => project.id).filter((projectId) => canReadProject(projectId))
+      const [workItems, baselines] = await Promise.all([
+        readSummaryWorkItems(principal, context, canReadProject),
+        readProjectBaselines(principal.directoryId, teamId, projectIds),
+      ])
+      const now = new Date()
+      return c.json(buildTeamWeeklySummary({
+        teamId,
+        weekStart,
+        now,
+        projectIds,
+        baselines,
+        workItems,
+        localToday: (workItem) => readLocalToday(now, workItem),
+      }))
     })
   })
 
@@ -355,24 +394,96 @@ async function readManagedRoster(principal: WorkspacePrincipal, teamId: string) 
  * @returns The check.
  */
 function createItemReadCheck(principal: WorkspacePrincipal, context: TeamPermissionContext): WeeklyReportItemReadCheck {
+  const canReadProject = createProjectReadCheck(principal, context)
+  return (item) => canReadProject(item.projectId)
+}
+
+/**
+ * Builds the check that tells whether the reader may read the Work Items of one Project of the
+ * Team, or the Team-level Work Items outside any Project (which need only Team access, which the
+ * route already required).
+ *
+ * @param principal - Reader.
+ * @param context - Reader's Team context at viewer level.
+ * @returns The check, taking a Project ID or `undefined` for Work Items outside any Project.
+ */
+function createProjectReadCheck(principal: WorkspacePrincipal, context: TeamPermissionContext) {
   const teamId = context.team.id
   const teamProjectIds = new Set(context.team.projects.map((project) => project.id))
-  return (item) => {
+  return (projectId: string | undefined) => {
     // Team access does not imply Work Item access under Enterprise roles: the reader needs
     // `work-items.read` at the Work Item's Project, or at the Team for a Team-level Work Item.
     if (
       principal.enterpriseAuthorizationEvaluation !== undefined &&
       !principal.isSystemAdmin &&
-      !hasEnterprisePermissionAtResource(principal, 'work-items.read', item.projectId === undefined
+      !hasEnterprisePermissionAtResource(principal, 'work-items.read', projectId === undefined
         ? { workspaceId: principal.directoryId, kind: 'team', targetId: teamId }
-        : { workspaceId: principal.directoryId, kind: 'project', targetId: item.projectId, parentTeamId: teamId })
+        : { workspaceId: principal.directoryId, kind: 'project', targetId: projectId, parentTeamId: teamId })
     ) {
       return false
     }
-    if (item.projectId === undefined) return true
-    return (principal.isSystemAdmin || teamProjectIds.has(item.projectId)) &&
-      canAccessAssignedProject(principal, context, item.projectId, 'viewer')
+    if (projectId === undefined) return true
+    return (principal.isSystemAdmin || teamProjectIds.has(projectId)) &&
+      canAccessAssignedProject(principal, context, projectId, 'viewer')
   }
+}
+
+/**
+ * Returns today's date in a Work Item's schedule calendar. An unreadable calendar falls back to
+ * the UTC date, so one malformed Work Item does not fail the whole summary.
+ *
+ * @param now - Instant the summary is computed at.
+ * @param workItem - Work Item.
+ * @returns Local `YYYY-MM-DD` date.
+ */
+function readLocalToday(now: Date, workItem: TeamIssueResponseItem) {
+  try {
+    return workItemScheduleInstantToLocalDate(now, workItem.schedule.calendarPolicy)
+  } catch {
+    return now.toISOString().slice(0, 10)
+  }
+}
+
+/**
+ * Reads the Team's non-archived Work Items the reader may read, for the weekly summary.
+ *
+ * @param principal - Reader.
+ * @param context - Reader's Team context at viewer level.
+ * @param canReadProject - Reader's Project check.
+ * @returns The readable Work Items.
+ * @throws ProjectDataError 413 when the Team has more Work Items than one summary reads.
+ */
+async function readSummaryWorkItems(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  canReadProject: (projectId: string | undefined) => boolean,
+) {
+  const workItems: TeamIssueResponseItem[] = []
+  let scanned = 0
+  await forEachTeamPartitionPage(principal, context, false, (issues, rawCount) => {
+    scanned += rawCount
+    if (scanned > WORK_ITEMS_SUMMARY_SCAN_LIMIT) {
+      throw createWorkItemListLimitExceededError(
+        `This Team has more than ${WORK_ITEMS_SUMMARY_SCAN_LIMIT} Work Items to summarize.`,
+      )
+    }
+    for (const issue of issues) if (canReadProject(issue.assignedProjectId)) workItems.push(issue)
+  })
+  return workItems
+}
+
+/**
+ * Reads the latest schedule baseline of each Project.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param teamId - Team ID.
+ * @param projectIds - Readable Projects of the Team.
+ * @returns Each Project's baseline, or `null` when none was captured.
+ */
+async function readProjectBaselines(directoryId: string, teamId: string, projectIds: readonly string[]) {
+  const baselines = await mapInOrderWithConcurrency(projectIds, RESOLVE_CONCURRENCY, async (projectId) =>
+    [projectId, await workItemDependencies.scheduleBaselines.get(directoryId, teamId, projectId)] as const)
+  return new Map(baselines)
 }
 
 /** A Work Item as the weekly report routes read it from the Team. */
