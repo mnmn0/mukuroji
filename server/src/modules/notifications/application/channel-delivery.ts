@@ -30,6 +30,8 @@ export type ChannelDelivery = {
   daysUntilDue?: number
   /** Work Item reopen time an escalation was scanned under, when the item had reopened. */
   workItemReopenedAt?: string
+  /** Author of the unsubmitted weekly report, when this is a weekly report reminder or escalation. */
+  weeklyReportAuthorMemberKey?: string
   /** Original approval target, retained independently from its parent Work Item. */
   targetId?: string
   /** Original file subject, when the source is file-backed. */

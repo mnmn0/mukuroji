@@ -632,6 +632,9 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   if (normalizedEventType.startsWith('timesheet.')) {
     return 'workspace.inbox.event.timesheet'
   }
+  if (normalizedEventType.startsWith('weekly-report.')) {
+    return 'workspace.inbox.event.weeklyReport'
+  }
   if (normalizedEventType.includes('mention')) {
     return 'workspace.inbox.event.mention'
   }
@@ -686,6 +689,12 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
 
   if (normalizedReason.includes('mention')) {
     return t('workspace.inbox.reason.mention')
+  }
+  if (normalizedReason === 'weekly-report') {
+    return t('workspace.inbox.reason.weeklyReport')
+  }
+  if (normalizedReason === 'weekly-report-escalation') {
+    return t('workspace.inbox.reason.weeklyReportEscalation')
   }
   if (normalizedReason.includes('reply')) {
     return t('workspace.inbox.reason.reply')
@@ -800,6 +809,7 @@ function resolveEventToneClassName(eventType: string) {
     eventKey === 'workspace.inbox.event.dueSoon' ||
     eventKey === 'workspace.inbox.event.stale' ||
     eventKey === 'workspace.inbox.event.timesheet' ||
+    eventKey === 'workspace.inbox.event.weeklyReport' ||
     eventKey === 'workspace.inbox.event.approval'
   ) {
     return 'border-amber-200 bg-amber-50 text-fg-amber-700'

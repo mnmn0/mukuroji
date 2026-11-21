@@ -257,4 +257,17 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 - 宛先の権限は、その Project の通知として確認します（その Project を読めること）。Inbox・Slack・Email のどれでも同じで、Team の全 Project を読める必要はありません。読めなくなった Project の entry は、ほかの Project の督促を止めません
 - Slack への配信は送信時に宛先の権限を確認しますが、提出状況は読み直しません。quiet hours や digest で Slack 送信が遅れる間に提出した場合は、Slack に古い督促が届くことがあります
 
+### 週報の督促
+
+週報（ADR 0030）を出していない人に、週に 1 回 `weekly-report.submission-reminder` が届きます。出さないまま週が明けると、その人が書いている Project の manager に `weekly-report.submission-escalation` が届きます（ADR 0033）。
+
+- 時刻は schedule Lambda の環境変数で決めます。`NOTIFICATION_WEEKLY_REPORT_REMINDER_AT`（既定 `fri@17`）が本人への督促、`NOTIFICATION_WEEKLY_REPORT_ESCALATION_AT`（既定 `mon@10`）が manager への通知で、どちらも `<曜日の英語3文字>@<時 0〜23>` か `off` です。`NOTIFICATION_WEEKLY_REPORT_TIME_ZONE`（既定 `Asia/Tokyo`）の現地時刻で読みます。schedule は 1 時間ごとなので、その時の実行で 1 回だけ作ります。失敗した回は送りません。督促を `off` にすると manager への通知も止まります。今の CDK はこれらを設定しないので既定値です
+- 対象の週は、督促の日を含む Workspace の週（tenant profile の calendar の `weekStartDay`、未設定なら月曜始まり）です。manager への通知は、直近の督促の日を含む週について出します（既定では金曜を含む週）
+- 書く人は、Team の active な Project に unarchived の `manager` / `member` で入っている人です。viewer、archive 済みの Team・Project・membership、複数の Team が同じ ID を使う Project は除きます。Enterprise の role だけで入っていて membership 行がない人は対象外です
+- 未提出は、週の行（`WEEKLY_REPORT#<team>#MEMBER#<member>#W#<week>`）がないか `submissionCount` が 0 のことです
+- 本人への督促は Team ごとに 1 通で、本人が書いている最初の Project（ID 順）の通知として認可します。manager への通知は作成者 × manager ごとに 1 通で、作成者本人には送りません。重複排除 key は Workspace・Team・週・種類・作成者・宛先です
+- 通知は Inbox の「週報の提出」として届き、本人は `/teams/{teamId}/timesheet?view=weekly-report&week=<週の開始日>`、manager は `view=team-weekly-reports` の同じ週を開きます。概要は週の開始日と、manager 向けには作成者の表示名です
+- projection は配信時に週の行を強整合で読み直し、提出済みなら捨てます。未提出なら「週の行がないか `submissionCount = 0`」の ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で捨てます。読み直す手段がない projection では届けません
+- 宛先の権限は event の Project の通知として確認し、さらに作成者がその Project に `manager` / `member` で残っていること、manager への通知では宛先がその Project の manager であることを、projection と Slack・Email の送信時の両方で確かめます。Slack・Email の送信時は提出状況を読み直しません
+
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

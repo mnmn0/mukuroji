@@ -1783,3 +1783,91 @@ describe('configurable reminder days and timesheet reminders', () => {
     expect(nextPeriod[0]?.eventId).not.toBe(reminder?.eventId)
   })
 })
+
+describe('weekly report reminders', () => {
+  test('reminds unsubmitted authors on Friday and tells their managers on Monday, once per week', async () => {
+    const submittedReads: Array<[string, string, string[], string]> = []
+    const weeklyReportReader = {
+      async readWeekStartDay() {
+        return 1 as const
+      },
+      async readTeamRosters(workspaceId: string) {
+        return [{
+          workspaceId,
+          teamId: 'core-team',
+          projects: [{
+            projectId: 'platform',
+            writers: [
+              { memberKey: 'manager@example.com', displayName: 'Manager' },
+              { memberKey: 'member@example.com', displayName: 'Member' },
+              { memberKey: 'done@example.com' },
+            ],
+            managerMemberKeys: ['manager@example.com'],
+          }],
+        }]
+      },
+      async readSubmittedMembers(workspaceId: string, teamId: string, memberKeys: readonly string[], weekStart: string) {
+        submittedReads.push([workspaceId, teamId, [...memberKeys], weekStart])
+        return new Set(['done@example.com', 'manager@example.com'])
+      },
+    }
+    const run = async (now: string) => {
+      const recording = createRecordingDocumentClient((name, input) => {
+        if (name !== 'ScanCommand') return {}
+        return input.TableName === 'ProjectDirectoryTable'
+          ? { Items: [{ directoryId: 'workspace-1', entryType: 'team', teamId: 'core-team' }] }
+          : { Items: [] }
+      })
+      await runNotificationSchedule(createRunOptions(recording.client, {
+        now: new Date(now),
+        weeklyReportReader,
+      }))
+      return recording.commands
+        .filter(({ name }) => name === 'PutCommand')
+        .map(({ input }) => readPutItem(input))
+        .filter((event) => String(event.eventType).startsWith('weekly-report.'))
+    }
+
+    // Thursday, and Friday outside 17:00 in Japan, send nothing and read nothing.
+    expect(await run('2026-11-19T08:00:00.000Z')).toEqual([])
+    expect(await run('2026-11-20T09:00:00.000Z')).toEqual([])
+    expect(submittedReads).toEqual([])
+
+    const [reminder, ...otherReminders] = await run('2026-11-20T08:00:00.000Z')
+    expect(otherReminders).toEqual([])
+    expect(submittedReads).toEqual([[
+      'workspace-1', 'core-team', ['manager@example.com', 'member@example.com', 'done@example.com'], '2026-11-16',
+    ]])
+    expect(reminder).toMatchObject({
+      eventType: 'weekly-report.submission-reminder',
+      entityType: 'weekly-report',
+      entityId: 'team/core-team/weekly-report/2026-11-16',
+      summary: 'Your weekly report for the week of 2026-11-16 has not been submitted.',
+      metadata: {
+        teamId: 'core-team',
+        projectId: 'platform',
+        deepLink: '/teams/core-team/timesheet?view=weekly-report&week=2026-11-16',
+        weeklyReportWeekStart: '2026-11-16',
+        weeklyReportAuthorMemberKey: 'member@example.com',
+        notificationCandidates: [{ memberKey: 'member@example.com', reason: 'weekly-report' }],
+      },
+    })
+    // A retry of the same hour is the same event.
+    expect((await run('2026-11-20T08:30:00.000Z'))[0]?.eventId).toBe(reminder?.eventId)
+
+    const [escalation, ...otherEscalations] = await run('2026-11-23T01:00:00.000Z')
+    expect(otherEscalations).toEqual([])
+    expect(escalation).toMatchObject({
+      eventType: 'weekly-report.submission-escalation',
+      entityId: 'team/core-team/weekly-report/2026-11-16',
+      summary: 'Member has not submitted the weekly report for the week of 2026-11-16.',
+      metadata: {
+        projectId: 'platform',
+        deepLink: '/teams/core-team/timesheet?view=team-weekly-reports&week=2026-11-16',
+        weeklyReportAuthorMemberKey: 'member@example.com',
+        notificationCandidates: [{ memberKey: 'manager@example.com', reason: 'weekly-report-escalation' }],
+      },
+    })
+    expect(escalation?.eventId).not.toBe(reminder?.eventId)
+  })
+})

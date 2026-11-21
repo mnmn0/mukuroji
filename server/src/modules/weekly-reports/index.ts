@@ -13,6 +13,7 @@ export {
 } from './application/weekly-report-use-cases'
 export {
   DynamoDbWeeklyReportStore,
+  createWeeklyReportUnsubmittedCondition,
   InMemoryWeeklyReportStore,
   type WeeklyReportCallerAuthorizationCheck,
   type WeeklyReportStore,

@@ -36,6 +36,16 @@ import {
   evaluateTimesheetReminders,
   type TimesheetReminderCandidate,
 } from '../../application/timesheet-reminders'
+import type { ScheduledWeeklyReportReader } from '../../application/ports/weekly-report-reminder-reader'
+import {
+  DEFAULT_WEEKLY_REPORT_REMINDER_TIMING,
+  evaluateWeeklyReportReminders,
+  readWeeklyReportReminderTiming,
+  resolveWeeklyReportReminderRun,
+  weeklyReportWeekStart,
+  type WeeklyReportReminderCandidate,
+  type WeeklyReportReminderTiming,
+} from '../../application/weekly-report-reminders'
 import {
   DEFAULT_WORK_ITEM_REMINDER_POLICY,
   createReminderPolicyResolver,
@@ -124,6 +134,13 @@ export type NotificationScheduleRunOptions = {
    * {@link defaultTimesheetReminderHourUtc}.
    */
   timesheetReminderHourUtc?: number
+  /** Reads weekly report rosters and submissions; without it no weekly report reminder is emitted. */
+  weeklyReportReader?: ScheduledWeeklyReportReader
+  /**
+   * When weekly report reminders and escalations go out. Defaults to
+   * {@link DEFAULT_WEEKLY_REPORT_REMINDER_TIMING}.
+   */
+  weeklyReportReminderTiming?: WeeklyReportReminderTiming
 }
 
 /** 期限通知 schedule の完了結果です。 */
@@ -237,6 +254,18 @@ type PlanningScheduledTargetScope = {
 /** Audit event type of a timesheet submission reminder. */
 export const TIMESHEET_REMINDER_EVENT_TYPE = 'timesheet.submission-reminder'
 
+/** Audit event type that reminds an author to submit their weekly report. */
+export const WEEKLY_REPORT_REMINDER_EVENT_TYPE = 'weekly-report.submission-reminder'
+
+/** Audit event type that tells a manager a member's weekly report is still unsubmitted. */
+export const WEEKLY_REPORT_ESCALATION_EVENT_TYPE = 'weekly-report.submission-escalation'
+
+/** Recipient reason of a weekly report reminder to its author. */
+export const WEEKLY_REPORT_REMINDER_REASON = 'weekly-report'
+
+/** Recipient reason of a weekly report escalation to a manager. */
+export const WEEKLY_REPORT_ESCALATION_REASON = 'weekly-report-escalation'
+
 const scheduleActorId = 'system:notification-schedule'
 const scheduleActorMemberKey = 'system'
 const defaultScanPageSize = 100
@@ -255,6 +284,7 @@ const defaultTimesheetReminderHourUtc = 0
  * @param projectManagerReader Optional Project manager reader for overdue escalation.
  * @param reminderSettingsReader Optional Team and personal reminder override reader.
  * @param timesheetReader Optional unsubmitted time entry reader for timesheet reminders.
+ * @param weeklyReportReader Optional roster and submission reader for weekly report reminders.
  * @returns An EventBridge-compatible notification schedule handler.
  */
 export function createNotificationScheduleHandler(
@@ -264,6 +294,7 @@ export function createNotificationScheduleHandler(
   projectManagerReader?: ScheduledProjectManagerReader,
   reminderSettingsReader?: ScheduledReminderSettingsReader,
   timesheetReader?: ScheduledTimesheetReader,
+  weeklyReportReader?: ScheduledWeeklyReportReader,
 ) {
   return async (
     event: NotificationScheduleEvent = {},
@@ -298,6 +329,7 @@ export function createNotificationScheduleHandler(
       ...(reminderSettingsReader ? { reminderSettingsReader } : {}),
       ...(timesheetReader ? { timesheetReader } : {}),
       timesheetReminderHourUtc: readTimesheetReminderHourUtc(),
+      ...readWeeklyReportReminderOptions(weeklyReportReader),
       reminderPolicy: readReminderPolicyDefaultsFromEnvironment(),
     })
 }
@@ -344,6 +376,30 @@ function readTimesheetReminderHourUtc() {
   const configured = loadServerConfig().environment.NOTIFICATION_TIMESHEET_REMINDER_HOUR_UTC?.trim()
   if (!configured) return defaultTimesheetReminderHourUtc
   return readHourUtc(Number(configured))
+}
+
+/**
+ * Reads the weekly report reminder timing from the environment and pairs it with the reader.
+ *
+ * `NOTIFICATION_WEEKLY_REPORT_REMINDER_AT` (default `fri@17`) and
+ * `NOTIFICATION_WEEKLY_REPORT_ESCALATION_AT` (default `mon@10`) take a weekday and an hour, or
+ * `off`; `NOTIFICATION_WEEKLY_REPORT_TIME_ZONE` (default `Asia/Tokyo`) is the zone of both.
+ *
+ * @param reader - Weekly report reader, when the composition provides one.
+ * @returns The reader and timing, or nothing when there is no reader or reminders are off.
+ * @throws RangeError when a configured value is invalid.
+ */
+function readWeeklyReportReminderOptions(
+  reader: ScheduledWeeklyReportReader | undefined,
+): Pick<NotificationScheduleRunOptions, 'weeklyReportReader' | 'weeklyReportReminderTiming'> {
+  if (!reader) return {}
+  const environment = loadServerConfig().environment
+  const timing = readWeeklyReportReminderTiming({
+    timeZone: environment.NOTIFICATION_WEEKLY_REPORT_TIME_ZONE,
+    reminder: environment.NOTIFICATION_WEEKLY_REPORT_REMINDER_AT,
+    escalation: environment.NOTIFICATION_WEEKLY_REPORT_ESCALATION_AT,
+  })
+  return timing ? { weeklyReportReader: reader, weeklyReportReminderTiming: timing } : {}
 }
 
 /**
@@ -502,11 +558,24 @@ export async function runNotificationSchedule(
     emitWorkItemNotifications,
   ))
 
+  let teamList: Awaited<ReturnType<ScheduledWorkItemSource['listTeams']>>['teams'] | undefined
+  /**
+   * Lists the Teams once per run, for whichever daily or weekly pass needs them first.
+   *
+   * @returns Distinct Workspace and Team pairs.
+   */
+  const listTeams = async () => {
+    if (!teamList) {
+      const { teams, progress } = await options.workItemSource.listTeams(readOptions)
+      addReadProgress(result, progress)
+      teamList = teams
+    }
+    return teamList
+  }
+
   if (options.timesheetReader && now.getUTCHours() === timesheetReminderHourUtc) {
     const from = new Date(now.getTime() - TIMESHEET_REMINDER_LOOKBACK_DAYS * 86_400_000)
-    const { teams, progress } = await options.workItemSource.listTeams(readOptions)
-    addReadProgress(result, progress)
-    for (const { workspaceId, teamId } of teams) {
+    for (const { workspaceId, teamId } of await listTeams()) {
       const entries = await options.timesheetReader.listUnsubmittedEntries(
         workspaceId,
         teamId,
@@ -528,6 +597,40 @@ export async function runNotificationSchedule(
           createTimesheetReminderAuditEvent(reminder, now, auditRetentionDays, options.requestId),
           result,
         )
+      }
+    }
+  }
+
+  const weeklyReportReader = options.weeklyReportReader
+  const weeklyReportRun = weeklyReportReader
+    ? resolveWeeklyReportReminderRun(now, options.weeklyReportReminderTiming ?? DEFAULT_WEEKLY_REPORT_REMINDER_TIMING)
+    : undefined
+  if (weeklyReportReader && weeklyReportRun) {
+    // Only Workspaces with a Team in the directory are read; their rosters come from one query each.
+    const workspaceIds = [...new Set((await listTeams()).map((team) => team.workspaceId))].sort()
+    for (const workspaceId of workspaceIds) {
+      const weekStart = weeklyReportWeekStart(
+        weeklyReportRun.date,
+        await weeklyReportReader.readWeekStartDay(workspaceId),
+      )
+      for (const roster of await weeklyReportReader.readTeamRosters(workspaceId)) {
+        const memberKeys = [...new Set(roster.projects.flatMap((project) =>
+          project.writers.map((writer) => writer.memberKey)))]
+        if (memberKeys.length === 0) continue
+        const submitted = await weeklyReportReader.readSubmittedMembers(
+          workspaceId,
+          roster.teamId,
+          memberKeys,
+          weekStart,
+        )
+        for (const candidate of evaluateWeeklyReportReminders(roster, weeklyReportRun.kind, weekStart, submitted)) {
+          await putScheduledAuditEvent(
+            options.documentClient,
+            auditEventsTableName,
+            createWeeklyReportReminderAuditEvent(candidate, now, auditRetentionDays, options.requestId),
+            result,
+          )
+        }
       }
     }
   }
@@ -1220,6 +1323,89 @@ function createTimesheetReminderAuditEvent(
       timeEntryIds: candidate.entryIds,
       timesheetDueBefore: candidate.dueBefore,
       notificationCandidates: [{ memberKey: candidate.memberKey, reason: 'timesheet' }],
+    },
+    expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),
+    outboxStatus: 'pending',
+  })
+}
+
+/**
+ * Creates the audit event that reminds an author, or tells one manager, about an unsubmitted
+ * weekly report.
+ *
+ * The event ID is derived from the Workspace, Team, author, recipient, week, and kind, so retries
+ * and later runs for the same week are duplicates. Delivery reads the week again and drops the
+ * notification once the week has been submitted.
+ *
+ * @param candidate - Author, recipient, Project, and week.
+ * @param now - Schedule execution instant.
+ * @param auditRetentionDays - Audit event retention.
+ * @param requestId - Schedule execution ID.
+ * @returns Audit event row.
+ */
+function createWeeklyReportReminderAuditEvent(
+  candidate: WeeklyReportReminderCandidate,
+  now: Date,
+  auditRetentionDays: number,
+  requestId?: string,
+) {
+  const escalation = candidate.kind === 'escalation'
+  const eventType = escalation ? WEEKLY_REPORT_ESCALATION_EVENT_TYPE : WEEKLY_REPORT_REMINDER_EVENT_TYPE
+  const reason = escalation ? WEEKLY_REPORT_ESCALATION_REASON : WEEKLY_REPORT_REMINDER_REASON
+  // Member keys may be email addresses, so the entity ID names only the Team and the week.
+  const entityId = `team/${candidate.teamId}/weekly-report/${candidate.weekStart}`
+  const occurredAt = now.toISOString()
+  const idempotencyDigest = createHash('sha256').update([
+    candidate.workspaceId,
+    entityId,
+    eventType,
+    candidate.authorMemberKey,
+    candidate.recipientMemberKey,
+  ].join('\0')).digest('hex')
+  const context = createMutationAuditContext({
+    workspaceId: candidate.workspaceId,
+    actor: {
+      id: scheduleActorId,
+      kind: 'system',
+      displayName: 'Mukuroji notification schedule',
+    },
+    idempotencyKey: `notification-schedule-v1:${idempotencyDigest}`,
+    occurredAt,
+    request: {
+      method: 'SCHEDULE',
+      path: '/internal/notification-schedule',
+      body: { entityId, projectId: candidate.projectId, reason, weekStart: candidate.weekStart },
+    },
+    source: {
+      kind: 'system',
+      method: 'SCHEDULE',
+      route: '/internal/notification-schedule',
+      ...(requestId ? { requestId } : {}),
+    },
+  })
+  const search = new URLSearchParams({
+    view: escalation ? 'team-weekly-reports' : 'weekly-report',
+    week: candidate.weekStart,
+  })
+  const author = candidate.authorDisplayName ?? 'A member'
+  return createAuditEvent({
+    context,
+    eventType,
+    entity: { type: 'weekly-report', id: entityId },
+    action: escalation ? 'submission-escalation' : 'submission-reminder',
+    changes: [],
+    summary: escalation
+      ? `${author} has not submitted the weekly report for the week of ${candidate.weekStart}.`
+      : `Your weekly report for the week of ${candidate.weekStart} has not been submitted.`,
+    metadata: {
+      actorMemberKey: scheduleActorMemberKey,
+      teamId: candidate.teamId,
+      // The author writes in this Project and, for an escalation, the recipient manages it.
+      projectId: candidate.projectId,
+      deepLink: `/teams/${encodeURIComponent(candidate.teamId)}/timesheet?${search.toString()}`,
+      weeklyReportWeekStart: candidate.weekStart,
+      weeklyReportAuthorMemberKey: candidate.authorMemberKey,
+      notificationCandidates: [{ memberKey: candidate.recipientMemberKey, reason }],
     },
     expiresAt: calculateAuditExpiresAt(occurredAt, auditRetentionDays),
     outboxStatus: 'pending',
