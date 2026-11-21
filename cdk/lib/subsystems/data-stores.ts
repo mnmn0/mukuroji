@@ -231,6 +231,9 @@ export function buildDataStores(
     partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
     billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    // Only Work Item history rows carry this attribute; they expire with their oldest audit
+    // event so the copy never outlives the audit retention (ADR 0042).
+    timeToLiveAttribute: 'historyExpiresAt',
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
   });

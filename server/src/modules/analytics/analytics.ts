@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  BatchGetCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -42,7 +43,17 @@ import {
   type CreateAnalyticsReportInput,
   type UpdateAnalyticsReportInput,
 } from '@mukuroji/contracts'
-import type { AuditEventV1, AuditFieldChange, AuditValue } from '../audit'
+import type { AuditFieldChange, AuditValue } from '../audit'
+import {
+  ANALYTICS_WORK_ITEM_HISTORY_RECORD_PREFIX,
+  createAnalyticsWorkItemHistoryRecordKey,
+  measureAnalyticsWorkItemHistoryRow,
+  normalizeAnalyticsFieldPath,
+  parseStoredAnalyticsWorkItemHistoryRow,
+  type AnalyticsHistoryEvent,
+  type AnalyticsWorkItemHistoryKey,
+  type AnalyticsWorkItemHistoryRow,
+} from './analytics-work-item-history'
 import { analyticsPdfFont } from './analytics-pdf-font'
 
 const REPORT_RECORD_PREFIX = 'REPORT#'
@@ -275,7 +286,7 @@ export type AnalyticsEngineInput = {
   /** Current viewer の認可を通過した canonical Work Item だけを渡します。 */
   workItems: readonly CanonicalWorkItem[]
   /** `workItems` と同じ認可 scope に絞った immutable event だけを渡します。 */
-  events: readonly AuditEventV1[]
+  events: readonly AnalyticsHistoryEvent[]
   /** Current viewer が参照できる Project ID の server-side allowlist です。 */
   authorizedProjectIds: ReadonlySet<string>
   /** Snapshot を再現する query です。 */
@@ -287,7 +298,7 @@ export type AnalyticsEvidenceEngineInput = {
   /** Current viewer の認可を通過した canonical Work Item だけを渡します。 */
   workItems: readonly CanonicalWorkItem[]
   /** `workItems` と同じ認可 scope に絞った immutable event だけを渡します。 */
-  events: readonly AuditEventV1[]
+  events: readonly AnalyticsHistoryEvent[]
   /** Current viewer が参照できる Project ID の server-side allowlist です。 */
   authorizedProjectIds: ReadonlySet<string>
   /** Scope-bound cursor を含む evidence query です。 */
@@ -428,7 +439,33 @@ export type AnalyticsRepository = {
     reportId: string,
     occurrenceKey: string,
   ): Promise<AnalyticsDeliveryReceipt | undefined>
+  /**
+   * Reads the per-Work-Item Analytics history rows that exist for the given Work Items.
+   *
+   * Optional: repositories without history rows make readers fall back to the audit timeline.
+   */
+  getWorkItemHistoryRows?(
+    workspaceId: string,
+    workItems: readonly Pick<AnalyticsWorkItemHistoryKey, 'teamId' | 'workItemId'>[],
+  ): Promise<AnalyticsWorkItemHistoryRow[]>
 }
+
+/** Number of keys DynamoDB accepts in one BatchGetItem request. */
+const ANALYTICS_HISTORY_BATCH_GET_SIZE = 100
+
+/** BatchGetItem requests issued at the same time when reading history rows. */
+const ANALYTICS_HISTORY_BATCH_GET_CONCURRENCY = 4
+
+/** Consecutive BatchGetItem calls without progress before failing the read. */
+const ANALYTICS_HISTORY_BATCH_GET_MAX_ATTEMPTS = 5
+
+/**
+ * Serialized bytes of history rows one Analytics read may hold.
+ *
+ * The API Lambda has 512 MiB of memory, and rows are parsed and cloned after they are read, so
+ * the budget stays well below it. Reports past it get the same 413 as the event-count limit.
+ */
+const ANALYTICS_HISTORY_ROW_BYTE_LIMIT = 64 * 1024 * 1024
 
 /** DynamoDB Analytics repository の設定です。 */
 export type DynamoDbAnalyticsRepositoryOptions = {
@@ -569,7 +606,7 @@ type AnalyticsWorkItemState = {
 /** Status category の一つの immutable transition です。 */
 type AnalyticsStatusTransition = {
   /** Transition event です。 */
-  event: AuditEventV1
+  event: AnalyticsHistoryEvent
   /** Transition 前の category です。 */
   before?: string
   /** Transition 後の category です。 */
@@ -581,7 +618,7 @@ type AnalyticsStatusTransition = {
 /** Assigned Project の一つの immutable change です。 */
 type AnalyticsScopeChange = {
   /** Change event です。 */
-  event: AuditEventV1
+  event: AnalyticsHistoryEvent
   /** Change instant の epoch milliseconds です。 */
   occurredAt: number
   /** Change 前の Project ID です。 */
@@ -595,7 +632,7 @@ type AnalyticsWorkItemFact = {
   /** `asOf` 時点の state です。 */
   state: AnalyticsWorkItemState
   /** Work Item に対応する event です。 */
-  events: AuditEventV1[]
+  events: AnalyticsHistoryEvent[]
   /** Creation instant の epoch milliseconds です。 */
   createdAt: number
   /** 有効な最終 completion instant です。 */
@@ -1716,10 +1753,10 @@ function normalizeDateRange(value: unknown, label: string): AnalyticsDateRange {
  */
 function indexAuthorizedEvents(
   workItems: readonly CanonicalWorkItem[],
-  events: readonly AuditEventV1[],
+  events: readonly AnalyticsHistoryEvent[],
 ) {
   const byCanonicalEntityId = new Map<string, string>()
-  const result = new Map<string, AuditEventV1[]>()
+  const result = new Map<string, AnalyticsHistoryEvent[]>()
   for (const item of workItems) {
     const key = workItemKey(item.teamId, item.id)
     const entityId = `team/${item.teamId}/issue/${item.id}`
@@ -1740,7 +1777,7 @@ function indexAuthorizedEvents(
 
   for (const itemEvents of result.values()) {
     itemEvents.sort(compareAuditEvents)
-    const unique = new Map<string, AuditEventV1>()
+    const unique = new Map<string, AnalyticsHistoryEvent>()
     for (const event of itemEvents) {
       const current = unique.get(event.eventId)
       if (current && canonicalJson(current) !== canonicalJson(event)) {
@@ -1765,7 +1802,7 @@ function indexAuthorizedEvents(
  * @param event Audit event on a Work Item entity timeline.
  * @returns True when the event targets the same Work Item as its entity.
  */
-function isWorkItemSelfTargetedEvent(event: AuditEventV1) {
+function isWorkItemSelfTargetedEvent(event: AnalyticsHistoryEvent) {
   return event.targetType === 'work-item' &&
     event.target.type === 'work-item' &&
     event.targetId === event.target.id &&
@@ -1774,7 +1811,7 @@ function isWorkItemSelfTargetedEvent(event: AuditEventV1) {
 
 function createFilteredFacts(
   workItems: readonly CanonicalWorkItem[],
-  eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
+  eventsByWorkItem: ReadonlyMap<string, readonly AnalyticsHistoryEvent[]>,
   normalized: NormalizedAnalyticsQuery,
   authorizedProjectIds: ReadonlySet<string>,
 ) {
@@ -1801,7 +1838,7 @@ function createFilteredFacts(
 
 function createFact(
   item: CanonicalWorkItem,
-  events: readonly AuditEventV1[],
+  events: readonly AnalyticsHistoryEvent[],
   asOf: number,
 ): AnalyticsWorkItemFact | undefined {
   const createdAt = Date.parse(item.createdAt)
@@ -1937,30 +1974,6 @@ function rewindStateChange(state: AnalyticsWorkItemState, change: AuditFieldChan
   setAnalyticsStateField(state, field, change.before)
 }
 
-function normalizeAnalyticsFieldPath(field: string) {
-  if (field === 'workflowStatusCategory' || field === 'workflow.category') {
-    return 'statusCategory'
-  }
-  if (
-    field === 'title' ||
-    field === 'assignedProjectId' ||
-    field === 'assigneeUserId' ||
-    field === 'workItemTypeId' ||
-    field === 'statusCategory' ||
-    field === 'dueDate' ||
-    field === 'createdAt' ||
-    field === 'updatedAt' ||
-    field === 'archivedAt' ||
-    field === 'customFieldValues' ||
-    field.startsWith('customFieldValues.') ||
-    field === 'schedule' ||
-    field === 'remainingEffortMinutes'
-  ) {
-    return field
-  }
-  return undefined
-}
-
 function setAnalyticsStateField(
   state: AnalyticsWorkItemState,
   field: string,
@@ -2024,7 +2037,7 @@ function setAnalyticsStateField(
   }
 }
 
-function createStatusTransitions(event: AuditEventV1): AnalyticsStatusTransition[] {
+function createStatusTransitions(event: AnalyticsHistoryEvent): AnalyticsStatusTransition[] {
   const occurredAt = Date.parse(event.occurredAt)
   if (!Number.isFinite(occurredAt)) return []
   return event.changes.flatMap((change) => {
@@ -2042,7 +2055,7 @@ function createStatusTransitions(event: AuditEventV1): AnalyticsStatusTransition
   })
 }
 
-function createScopeChanges(event: AuditEventV1): AnalyticsScopeChange[] {
+function createScopeChanges(event: AnalyticsHistoryEvent): AnalyticsScopeChange[] {
   const occurredAt = Date.parse(event.occurredAt)
   if (!Number.isFinite(occurredAt)) return []
   return event.changes.flatMap((change) => {
@@ -2130,7 +2143,7 @@ function createWidgetResult(
   widget: AnalyticsWidget,
   facts: readonly AnalyticsWorkItemFact[],
   workItems: readonly CanonicalWorkItem[],
-  eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
+  eventsByWorkItem: ReadonlyMap<string, readonly AnalyticsHistoryEvent[]>,
   normalized: NormalizedAnalyticsQuery,
   authorizedProjectIds: ReadonlySet<string>,
 ): AnalyticsWidgetResult {
@@ -2197,7 +2210,7 @@ function createWidgetResult(
 function createMetricSeries(
   widget: AnalyticsWidget,
   workItems: readonly CanonicalWorkItem[],
-  eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
+  eventsByWorkItem: ReadonlyMap<string, readonly AnalyticsHistoryEvent[]>,
   normalized: NormalizedAnalyticsQuery,
   authorizedProjectIds: ReadonlySet<string>,
 ) {
@@ -2296,7 +2309,7 @@ function createMetricGroups(
   widget: AnalyticsWidget,
   facts: readonly AnalyticsWorkItemFact[],
   workItems: readonly CanonicalWorkItem[],
-  eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
+  eventsByWorkItem: ReadonlyMap<string, readonly AnalyticsHistoryEvent[]>,
   normalized: NormalizedAnalyticsQuery,
   authorizedProjectIds: ReadonlySet<string>,
 ) {
@@ -2711,7 +2724,7 @@ function createFactEvidence(
   metric: AnalyticsMetricKey,
   occurredAt: number,
   value?: number,
-  explicitEvent?: AuditEventV1,
+  explicitEvent?: AnalyticsHistoryEvent,
 ): AnalyticsEvidenceItem {
   const event = explicitEvent ?? fact.events.find((candidate) =>
     Date.parse(candidate.occurredAt) === occurredAt &&
@@ -3892,6 +3905,111 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
             ),
           }),
     }
+  }
+
+  /**
+   * Reads the history rows of the given Work Items with eventually consistent BatchGetItem.
+   *
+   * Callers compare each row's covered revision with the canonical revision, so a stale read only
+   * sends that Work Item to the audit timeline. Malformed rows are skipped for the same reason.
+   *
+   * @param workspaceId - Workspace that owns the rows.
+   * @param workItems - Team and Work Item IDs to read.
+   * @returns The valid rows that exist, in no particular order.
+   */
+  async getWorkItemHistoryRows(
+    workspaceId: string,
+    workItems: readonly Pick<AnalyticsWorkItemHistoryKey, 'teamId' | 'workItemId'>[],
+  ): Promise<AnalyticsWorkItemHistoryRow[]> {
+    const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+    const recordKeys = [...new Set(workItems.map((workItem) =>
+      createAnalyticsWorkItemHistoryRecordKey(workItem.teamId, workItem.workItemId)
+    ))]
+    const chunks: string[][] = []
+    for (let index = 0; index < recordKeys.length; index += ANALYTICS_HISTORY_BATCH_GET_SIZE) {
+      chunks.push(recordKeys.slice(index, index + ANALYTICS_HISTORY_BATCH_GET_SIZE))
+    }
+    const rows: AnalyticsWorkItemHistoryRow[] = []
+    const budget = { bytes: 0 }
+    let nextChunk = 0
+    /** Reads the next unassigned chunk until every chunk has been read. */
+    const readChunks = async () => {
+      while (nextChunk < chunks.length) {
+        const chunk = chunks[nextChunk]
+        nextChunk += 1
+        if (!chunk) return
+        rows.push(...await this.batchGetWorkItemHistoryRows(normalizedWorkspaceId, chunk, budget))
+      }
+    }
+    await Promise.all(Array.from(
+      { length: Math.min(ANALYTICS_HISTORY_BATCH_GET_CONCURRENCY, chunks.length) },
+      readChunks,
+    ))
+    return rows
+  }
+
+  /**
+   * Reads one BatchGetItem chunk of history rows, retrying unprocessed keys.
+   *
+   * @param workspaceId - Workspace that owns the rows.
+   * @param recordKeys - At most 100 history record keys.
+   * @param budget - Serialized bytes of rows kept so far by the whole read, shared by all chunks.
+   * @returns The valid rows that exist.
+   * @throws When DynamoDB keeps returning unprocessed keys, or the rows exceed the byte budget.
+   */
+  private async batchGetWorkItemHistoryRows(
+    workspaceId: string,
+    recordKeys: readonly string[],
+    budget: { bytes: number },
+  ) {
+    const rows: AnalyticsWorkItemHistoryRow[] = []
+    let pending = recordKeys.map((recordKey) => ({ workspaceId, recordKey }))
+    // BatchGetItem also returns unprocessed keys when one partition exceeds 1 MB per call, which
+    // is normal for large history rows. Only calls that make no progress count as failed attempts.
+    let stalledAttempts = 0
+    while (pending.length > 0 && stalledAttempts < ANALYTICS_HISTORY_BATCH_GET_MAX_ATTEMPTS) {
+      if (stalledAttempts > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 2 ** stalledAttempts * 25))
+      }
+      const requested = pending.length
+      const response = await this.documentClient.send(new BatchGetCommand({
+        RequestItems: {
+          [this.tableName]: { Keys: pending, ConsistentRead: false },
+        },
+      }))
+      for (const item of response.Responses?.[this.tableName] ?? []) {
+        if (item.workspaceId !== workspaceId) continue
+        if (
+          typeof item.recordKey !== 'string' ||
+          !item.recordKey.startsWith(ANALYTICS_WORK_ITEM_HISTORY_RECORD_PREFIX)
+        ) continue
+        const row = parseStoredAnalyticsWorkItemHistoryRow(item)
+        if (!row) continue
+        budget.bytes += measureAnalyticsWorkItemHistoryRow(row)
+        if (budget.bytes > ANALYTICS_HISTORY_ROW_BYTE_LIMIT) {
+          throw new AnalyticsError(
+            413,
+            'AnalyticsHistoryLimitExceeded',
+            'Analytics history for the authorized Work Items exceeds the safe query limit. Narrow the report scope.',
+          )
+        }
+        rows.push(row)
+      }
+      pending = (response.UnprocessedKeys?.[this.tableName]?.Keys ?? []).flatMap((key) =>
+        typeof key.workspaceId === 'string' && typeof key.recordKey === 'string'
+          ? [{ workspaceId: key.workspaceId, recordKey: key.recordKey }]
+          : []
+      )
+      stalledAttempts = pending.length < requested ? 0 : stalledAttempts + 1
+    }
+    if (pending.length > 0) {
+      throw new AnalyticsError(
+        503,
+        'AnalyticsHistoryReadUnavailable',
+        'Analytics history could not be read. Retry the request.',
+      )
+    }
+    return rows
   }
 
   /** 指定 shard で実行期限を迎えた schedule 付き report を keyset page で返します。 */
@@ -5129,7 +5247,7 @@ function deliveryMapKey(workspaceId: string, reportId: string, occurrenceKey: st
   )}`
 }
 
-function compareAuditEvents(left: AuditEventV1, right: AuditEventV1) {
+function compareAuditEvents(left: AnalyticsHistoryEvent, right: AnalyticsHistoryEvent) {
   return left.occurredAt.localeCompare(right.occurredAt) ||
     left.eventId.localeCompare(right.eventId)
 }

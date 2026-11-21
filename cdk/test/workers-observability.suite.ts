@@ -532,7 +532,11 @@ test('analytics scheduled delivery reauthorizes source data and notifies through
       })
       .filter((action): action is string => typeof action === 'string');
 
+  // Work Item history rows expire with their oldest audit event (ADR 0042).
+  expect(template.toJSON().Resources[analyticsTableLogicalId].Properties.TimeToLiveSpecification)
+    .toEqual({ AttributeName: 'historyExpiresAt', Enabled: true });
   expect(new Set(actionsForResource(analyticsTableLogicalId))).toEqual(new Set([
+    'dynamodb:BatchGetItem',
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
@@ -563,8 +567,14 @@ test('analytics scheduled delivery reauthorizes source data and notifies through
     .filter((action): action is string =>
       typeof action === 'string' && action.startsWith('dynamodb:')
     );
+  // BatchGetItem is allowed only on the Analytics table above, for history rows (ADR 0042).
+  expect(scheduleStatements.filter((statement) => {
+    const action = (statement as { Action?: unknown }).Action;
+    return Array.isArray(action) && action.includes('dynamodb:BatchGetItem');
+  }).map((statement) => (statement as { Resource?: unknown }).Resource)).toEqual([
+    { 'Fn::GetAtt': [analyticsTableLogicalId, 'Arn'] },
+  ]);
   for (const forbiddenAction of [
-    'dynamodb:BatchGetItem',
     'dynamodb:BatchWriteItem',
     'dynamodb:DeleteItem',
     'dynamodb:Scan',
@@ -962,7 +972,7 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
       S3Key: Match.stringLikeRegexp('\\.zip$'),
     },
     Description:
-      'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.',
+      'Projects audit outbox events into collaboration, Webhook, connector deliveries, tenant retention, and Analytics history.',
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
     Environment: {
@@ -1436,7 +1446,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(deliveryPolicies).toContain('sqs:SendMessage');
   const projectionFunction = Object.values(resources).find((resource) =>
     (resource as { Properties?: { Description?: string } }).Properties?.Description ===
-      'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.'
+      'Projects audit outbox events into collaboration, Webhook, connector deliveries, tenant retention, and Analytics history.'
   ) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
   const deliveryFunction = Object.values(resources).find((resource) =>
     (resource as { Properties?: { Description?: string } }).Properties?.Description ===
@@ -1642,7 +1652,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   }
   template.hasResourceProperties('AWS::Lambda::Function', {
     Description:
-      'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.',
+      'Projects audit outbox events into collaboration, Webhook, connector deliveries, tenant retention, and Analytics history.',
     Handler: 'index.handler',
     Environment: {
       Variables: Match.objectLike({
