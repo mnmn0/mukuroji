@@ -442,6 +442,12 @@ async function readTarget(
   }
   const auditKeys = ['AuditEventsTableName', 'WorkspaceDirectoryId', 'TenantAdministrationTableName']
   const missingAuditKeys = auditKeys.filter((key) => !outputs.get(key))
+  let retentionDays: number | string
+  try {
+    retentionDays = readRetentionDays(parameters.get('AuditRetentionDays'))
+  } catch (error) {
+    retentionDays = error instanceof Error ? error.message : String(error)
+  }
   return {
     applicationId: required('RuntimeControlApplicationId'),
     environmentId: required('RuntimeControlEnvironmentId'),
@@ -450,11 +456,13 @@ async function readTarget(
     webUrl: required('WebUrl').replace(/\/+$/, ''),
     auditLog: missingAuditKeys.length > 0
       ? { problem: `Stack ${stackName} has no ${missingAuditKeys.join(', ')} output for the audit log. Deploy the stack first.` }
+      : typeof retentionDays === 'string'
+      ? { problem: retentionDays }
       : {
           audit: {
             tableName: required('AuditEventsTableName'),
             workspaceId: required('WorkspaceDirectoryId'),
-            retentionDays: readRetentionDays(parameters.get('AuditRetentionDays')),
+            retentionDays,
             legalHold: false,
           },
           tenantAdministrationTableName: required('TenantAdministrationTableName'),

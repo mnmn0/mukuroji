@@ -457,6 +457,26 @@ describe('audit log records', () => {
     expect(fake.lines.some((line) => line.includes('has no TenantAdministrationTableName output'))).toBe(true)
   })
 
+  test('still stops when the audit retention parameter is invalid, and refuses other switches', async () => {
+    const run = async (mode: 'enabled' | 'disabled') => {
+      const fake = fakeDependencies({ readyStatuses: [mode === 'disabled' ? 503 : 200] })
+      const original = fake.dependencies.aws
+      const aws: RuntimeControlDependencies['aws'] = async (args) =>
+        args[1] === 'describe-stacks'
+          ? JSON.stringify({ Outputs: stackOutputs, Parameters: [{ ParameterKey: 'AuditRetentionDays', ParameterValue: '0' }] })
+          : await original(args)
+      const outcome = await runRuntimeControl({ mode, allAtOnce: true }, 'r', 'Mukuroji', { ...fake.dependencies, aws }, timing)
+        .then(() => 'done', (error: unknown) => error instanceof Error ? error.message : String(error))
+      return { fake, outcome }
+    }
+    const stop = await run('disabled')
+    expect(stop.outcome).toBe('done')
+    expect(stop.fake.auditItems).toHaveLength(0)
+    const start = await run('enabled')
+    expect(start.outcome).toContain('AuditRetentionDays is not a positive integer')
+    expect(start.fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(false)
+  })
+
   test('refuses a stack without the audit outputs before changing anything', async () => {
     const fake = fakeDependencies()
     const original = fake.dependencies.aws
