@@ -130,7 +130,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(context.req.query('to') ? { to: context.req.query('to') } : {}),
         ...(context.req.query('status') ? { status: readStatus(context.req.query('status')) } : {}),
         ...(context.req.query('limit') === undefined ? {} : { limit: readEntryLimit(context.req.query('limit')) }),
-        ...(projectIds ? { projectIds } : {}),
+        ...(projectIds ? { projectIds, includeUnassigned: true } : {}),
       })
       return context.json({ entries: entries.map((entry) => redactEntry(entry, canManage, managedProjectIds)) })
     })
@@ -277,7 +277,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
           from,
           to,
           userId: action === 'submit' ? principal.userKey : undefined,
-          ...(projectIds ? { projectIds } : {}),
+          ...(projectIds ? { projectIds, includeUnassigned: true } : {}),
         })
         const eligible = entries.filter((entry) => action === 'submit'
           ? entry.status === 'draft' || entry.status === 'rejected'
@@ -453,6 +453,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const input = readReportInput(context, principal.directoryId, teamId, canManage)
       input.projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
       input.managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+      input.viewer = { userId: principal.userKey, canManage, includeAllMembers: input.groupBy === 'work-item' }
       if (input.budgetScope === 'project' && input.budgetScopeId) await dependencies.verifyProject(principal, teamId, input.budgetScopeId, 'viewer')
       return context.json(await dependencies.getTimeTracking().createSummary(input))
     })
@@ -463,6 +464,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const input = readReportInput(context, principal.directoryId, teamId, canManage)
       input.projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
       input.managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+      input.viewer = { userId: principal.userKey, canManage }
       return context.json(await dependencies.getTimeTracking().createTimesheet(input))
     })
   })
@@ -472,6 +474,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const input = readReportInput(context, principal.directoryId, teamId, canManage)
       input.projectIds = await dependencies.getAccessibleProjectIds(principal, teamId)
       input.managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
+      input.viewer = { userId: principal.userKey, canManage, includeAllMembers: input.groupBy === 'work-item' }
       const csv = await dependencies.getTimeTracking().createCsv(input)
       return new Response(csv, {
         status: 200,
@@ -627,14 +630,17 @@ function readReportInput(
 }
 
 /**
- * Returns whether the principal manages the Project that owns a time entry.
+ * Returns whether a Team time manager manages the Project that owns a time entry.
+ *
+ * Callers combine it with the Team-level manager check: entries without a Project belong to the
+ * Team, so every Team time manager manages them.
  *
  * @param managedProjectIds - Managed Project IDs, or `undefined` for a principal who manages every Project.
- * @param projectId - Project of the entry; entries without a Project are managed only by unrestricted principals.
- * @returns `true` when the principal may manage time recorded on the Project.
+ * @param projectId - Project of the entry, if any.
+ * @returns `true` when the entry has no Project or the principal manages its Project.
  */
 function canManageProject(managedProjectIds: ReadonlySet<string> | undefined, projectId: string | undefined): boolean {
-  return managedProjectIds === undefined || (projectId !== undefined && managedProjectIds.has(projectId))
+  return managedProjectIds === undefined || projectId === undefined || managedProjectIds.has(projectId)
 }
 
 /**
@@ -664,8 +670,10 @@ type EntryListScope = {
 /**
  * Chooses which entries a list request may return.
  *
- * Other users' entries are listed only from the Projects the principal manages,
- * so managing one Project does not expose time recorded on another.
+ * Other users' entries are listed only from the Projects the principal manages
+ * and from outside any Project, so managing one Project does not expose time
+ * recorded on another. The caller lets entries without a Project through the
+ * Project allowlist; the owner filter keeps them to the caller's own for members.
  *
  * @param actorUserId - Member key of the requesting principal.
  * @param requestedUserId - Owner filter from the query, if any.
@@ -687,7 +695,7 @@ function resolveEntryListScope(
 
 /** Removes confidential money fields for general Workspace members. */
 function redactEntry(entry: TimeEntry, includeCosts: boolean, managedProjectIds?: ReadonlySet<string>): TimeEntry {
-  if (includeCosts && (managedProjectIds === undefined || (entry.projectId !== undefined && managedProjectIds.has(entry.projectId)))) return entry
+  if (includeCosts && canManageProject(managedProjectIds, entry.projectId)) return entry
   const { hourlyRateMinor: _hourlyRateMinor, actualCostMinor: _actualCostMinor, ...visible } = entry
   return visible
 }

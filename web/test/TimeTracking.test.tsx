@@ -391,9 +391,16 @@ describe('time tracking API', () => {
   })
 
   test('reads the manager signal of the Team timesheet', async () => {
-    const requests = respondWith({ ...timeTrackingFixtureTeamTimesheet, costsRedacted: true })
-    expect((await getTeamTimesheet('token', 'core-team', { ...week, timeZone: 'Asia/Tokyo' })).costsRedacted).toBe(true)
+    const requests = respondWith({ ...timeTrackingFixtureTeamTimesheet, costsRedacted: true, canManageTeam: false })
+    expect(await getTeamTimesheet('token', 'core-team', { ...week, timeZone: 'Asia/Tokyo' })).toMatchObject({ costsRedacted: true, canManageTeam: false })
     expect(new URL(requests[0]?.url ?? '', 'http://localhost').searchParams.get('timeZone')).toBe('Asia/Tokyo')
+  })
+
+  test('falls back to the cost flag when an older API omits the manager signal', async () => {
+    respondWith({ ...timeTrackingFixtureTeamTimesheet, costsRedacted: true, canManageTeam: undefined })
+    expect((await getTeamTimesheet('token', 'core-team', { ...week, timeZone: 'Asia/Tokyo' })).canManageTeam).toBe(false)
+    respondWith({ ...timeTrackingFixtureTeamTimesheet, canManageTeam: 'yes' })
+    await expect(getTeamTimesheet('token', 'core-team', { ...week, timeZone: 'Asia/Tokyo' })).rejects.toThrow()
   })
 
   test('reports a request that never reached the API as offline', async () => {

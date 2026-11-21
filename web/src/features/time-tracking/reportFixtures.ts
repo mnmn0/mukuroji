@@ -25,9 +25,10 @@ export const timeReportFixtureManagerSummary: TimeTrackingSummary = {
   totalActualCostByCurrency: { JPY: 110_000 },
   totalActualCostMinor: 110_000,
   costsRedacted: false,
+  canManageTeam: true,
 }
 
-/** The same report as a member without cost access receives it. */
+/** The same period as a member without cost access receives it: only their own time. */
 export const timeReportFixtureMemberSummary: TimeTrackingSummary = {
   from: timeReportFixtureManagerSummary.from,
   to: timeReportFixtureManagerSummary.to,
@@ -35,12 +36,12 @@ export const timeReportFixtureMemberSummary: TimeTrackingSummary = {
   groupBy: 'user',
   groups: [
     { key: 'aoi@example.com', label: 'aoi@example.com', minutes: 750, billableMinutes: 600, entryCount: 5, estimateMinutes: 900 },
-    { key: 'ren@example.com', label: 'ren@example.com', minutes: 420, billableMinutes: 0, entryCount: 3 },
   ],
-  totalMinutes: 1_170,
+  totalMinutes: 750,
   totalBillableMinutes: 600,
   totalEstimateMinutes: 900,
   costsRedacted: true,
+  canManageTeam: false,
 }
 
 /** Project-grouped report carrying the Team budget, for the budget panel. */
