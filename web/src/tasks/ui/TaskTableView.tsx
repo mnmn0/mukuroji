@@ -1,4 +1,5 @@
 import {
+  deriveWorkItemBaselineEndDelayDays,
   deriveWorkItemScheduleVariance,
   type BulkOperation,
   type BulkOperationPreview,
@@ -8,6 +9,7 @@ import {
   type WorkItemConfiguration,
   type CanonicalWorkItem,
   type WorkItemPriority,
+  type ProjectScheduleBaselineEntry,
 } from '@mukuroji/contracts'
 import {
   Fragment,
@@ -74,6 +76,10 @@ import {
 } from '../model/taskActualDates'
 import { TaskInlineCustomFields } from './TaskInlineCustomFields'
 import { WorkItemAssigneeAvatar } from '../../work-items/ui/WorkItemAssigneeAvatar'
+import {
+  WORK_ITEM_BASELINE_END_DELAY_COLUMN,
+  type WorkItemBaselineLookup,
+} from '../../work-items/model/workItemScheduleBaselines'
 import { resolveWorkflowStatusCategory } from '../../work-items/model/workItemDisplay'
 import {
   TaskCustomFieldSummary,
@@ -143,6 +149,11 @@ export type TaskTableViewProps = {
   personLabels: Readonly<Record<string, string>>
   /** Visible fields, density, wrapping, and grouping selected by the effective view. */
   presentation?: TaskViewPresentationSettings
+  /**
+   * Finds each Work Item's Project baseline for the baseline delay column; undefined while the
+   * baselines load, which shows the column as empty.
+   */
+  scheduleBaselineFor?: WorkItemBaselineLookup
   /** Hierarchy outline; when present, rows nest by hierarchy and grouping is not applied. */
   outline?: TaskTableOutline
   /** Project identifier used to reset bulk-operation toolbar state. */
@@ -226,6 +237,8 @@ type TaskTableRowProps = {
   personLabels: Readonly<Record<string, string>>
   /** Effective density and text-wrapping settings. */
   presentation?: TaskViewPresentationSettings
+  /** Baseline entry of the row's Work Item, or undefined when it has none or it is loading. */
+  scheduleBaseline?: ProjectScheduleBaselineEntry
   /** Placement of the row in the hierarchy outline; absent outside an outline. */
   outlineRow?: WorkItemOutlineRow<CanonicalWorkItem>
   /** Shows or hides the rows nested under this row's Work Item. */
@@ -280,6 +293,7 @@ export function TaskTableView({
   presentation,
   outline,
   projectId,
+  scheduleBaselineFor,
   selectedBulkItems,
   selectedDetailTaskKey,
   selectedTaskKeys,
@@ -567,6 +581,7 @@ export function TaskTableView({
       personOptions={personOptions}
       personLabels={personLabels}
       presentation={presentation}
+      scheduleBaseline={scheduleBaselineFor?.(task)}
       {...(outlineRowByKey?.has(createTaskKey(task)) && outline
         ? {
             outlineRow: outlineRowByKey.get(createTaskKey(task)),
@@ -831,6 +846,7 @@ function TaskTableRow({
   personOptions,
   personLabels,
   presentation,
+  scheduleBaseline,
   outlineRow,
   onToggleOutlineCollapsed,
   projectId,
@@ -1150,6 +1166,24 @@ function TaskTableRow({
               </td>
             )
           }
+          case WORK_ITEM_BASELINE_END_DELAY_COLUMN: {
+            const delay = scheduleBaseline
+              ? deriveWorkItemBaselineEndDelayDays(scheduleBaseline, task)
+              : undefined
+            const tone = resolveTaskScheduleVarianceTone(delay)
+            return (
+              <td
+                {...columnCellProps}
+                className={`whitespace-nowrap ${cellPadding} ${
+                  tone ? taskScheduleVarianceToneClasses[tone] : 'text-fg-8f99a8'
+                }`}
+                data-testid={`task-baseline-delay-${task.id}`}
+                key={field}
+              >
+                {formatTaskScheduleVariance(delay, t)}
+              </td>
+            )
+          }
           case 'priority': return (
             <td {...columnCellProps} className={cellPadding} key={field}>
               {canEditTask ? (
@@ -1293,6 +1327,7 @@ function isSupportedProjectTaskColumn(field: string): boolean {
     'actualEndDate',
     'startDelayDays',
     'completionDelayDays',
+    WORK_ITEM_BASELINE_END_DELAY_COLUMN,
     'priority',
     'workItemType',
     'project',
@@ -1318,6 +1353,7 @@ function resolveTaskTableColumnLabel(
     case 'actualEndDate': return t('tasks.column.actualEndDate')
     case 'startDelayDays': return t('tasks.column.startDelayDays')
     case 'completionDelayDays': return t('tasks.column.completionDelayDays')
+    case WORK_ITEM_BASELINE_END_DELAY_COLUMN: return t('tasks.column.baselineEndDelayDays')
     case 'priority': return t('tasks.column.priority')
     case 'workItemType': return t('tasks.column.workItemType')
     case 'project': return t('workspace.column.project')

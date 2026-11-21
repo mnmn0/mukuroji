@@ -2,13 +2,15 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { CanonicalWorkItem, WorkItemSchedule } from '@mukuroji/contracts'
 import { teamIssueFixtures } from '../src/issues/fixtures'
-import { IssueTable, TEAM_ISSUE_BASELINE_DELAY_COLUMN } from '../src/issues/ui/TeamIssueTable'
+import { IssueTable } from '../src/issues/ui/TeamIssueTable'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
+import { TaskTableView } from '../src/tasks/ui/TaskTableView'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 import {
   collectWorkItemBaselineProjects,
   createWorkItemBaselineLookup,
+  WORK_ITEM_BASELINE_END_DELAY_COLUMN,
   WORK_ITEM_BASELINE_PROJECT_LIMIT,
 } from '../src/work-items/model/workItemScheduleBaselines'
 
@@ -131,7 +133,7 @@ describe('schedule baseline overlay', () => {
         ]}
         locale="ja"
         presentation={{
-          columns: [{ field: 'title' }, { field: TEAM_ISSUE_BASELINE_DELAY_COLUMN }],
+          columns: [{ field: 'title' }, { field: WORK_ITEM_BASELINE_END_DELAY_COLUMN }],
           display: {
             showArchived: false,
             showAssigneeAvatars: false,
@@ -151,5 +153,57 @@ describe('schedule baseline overlay', () => {
     expect(html).toContain('3 日遅れ')
     expect(html).toContain('1 日前倒し')
     expect(html).toMatch(/data-testid="team-issue-baseline-delay-new"[^>]*>—</)
+  })
+
+  test('shows the baseline delay column in the Project WBS table', () => {
+    const presentation = {
+      columns: [{ field: 'title' }, { field: WORK_ITEM_BASELINE_END_DELAY_COLUMN }],
+      display: {
+        showArchived: false,
+        showAssigneeAvatars: false,
+        showCompleted: true,
+        showEmptyGroups: false,
+        showSubtasks: true,
+        wrapTitles: false,
+      },
+    }
+    /**
+     * Renders the Project table with the given baseline lookup.
+     *
+     * @param scheduleBaselineFor - Baseline lookup, or undefined while baselines load.
+     * @returns The table markup.
+     */
+    const render = (scheduleBaselineFor?: typeof lookup) => renderToStaticMarkup(
+      <TaskTableView
+        bulkProjectOptions={[]}
+        bulkWorkspaceId=""
+        configuration={teamWorkItemConfigurationFixture}
+        configurationsByTeam={{}}
+        locale="ja"
+        personLabels={{}}
+        presentation={presentation}
+        projectId="p"
+        scheduleBaselineFor={scheduleBaselineFor}
+        selectedBulkItems={[]}
+        selectedTaskKeys={[]}
+        t={t}
+        tasks={[
+          createItem('late'),
+          createItem('late', { teamId: 'other' }),
+          createItem('new'),
+        ]}
+        visibleBulkItems={[]}
+        onBulkOperationComplete={() => undefined}
+        onSelectTask={() => undefined}
+        onTaskSelectionChange={() => undefined}
+        onVisibleTaskSelectionChange={() => undefined}
+      />,
+    )
+    const html = render(lookup)
+    expect(html).toContain('ベースライン比の遅れ')
+    expect(html).toMatch(/data-testid="task-baseline-delay-late"[^>]*>3 日遅れ</)
+    expect(html).toMatch(/data-testid="task-baseline-delay-new"[^>]*>—</)
+    // While the baselines load, every cell stays empty instead of guessing.
+    expect(render(undefined)).not.toContain('日遅れ')
   })
 })
