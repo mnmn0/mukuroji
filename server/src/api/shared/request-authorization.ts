@@ -273,6 +273,13 @@ const enterpriseRoutePermissionRules = [
     permission: 'documents.manage',
     alternativePermissions: ['documents.write', 'documents.read'],
   },
+  // A change-signal subscription only lets a reader refetch what it can already read.
+  {
+    method: 'POST',
+    pathPattern: '/api/documents/:documentId/realtime/tickets',
+    permission: 'documents.manage',
+    alternativePermissions: ['documents.write', 'documents.read'],
+  },
   {
     method: '*',
     pathPattern: '/api/documents/:documentId/shares',
