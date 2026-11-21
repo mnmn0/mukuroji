@@ -28,8 +28,8 @@ on:
         required: false
         default: ''
 
-# One production operation at a time. A newer pending run replaces an older one that is still
-# waiting for approval; a running deploy is never cancelled.
+# One production operation at a time. Runs that arrive while one is waiting for approval or running
+# queue up, and only the newest queued run is kept. A running deploy is never cancelled.
 concurrency:
   group: deploy-production
   cancel-in-progress: false

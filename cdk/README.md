@@ -800,8 +800,9 @@ origin にするときは deploy access stack の `ApiAllowedOrigins` を更新�
 
 ### いつもの deploy と手動の操作
 
-`main` に merge するたびに `Deploy` が承認待ちになります。承認するまで待ち、新しい merge があれば古い承認待ちは
-新しいものに置き換わります。動いている deploy は止めません。`Run workflow` の `operation` で次も実行できます。
+`main` に merge するたびに `Deploy` が承認待ちになります。production の操作は一度に 1 つだけで、承認待ちか実行中の run が
+あるあいだに来た run は順番待ちになります。順番待ちは最新の 1 つだけが残り、古い順番待ちは取り消されます。
+最新だけを deploy したいときは、古い承認待ちを `Reject` すると次の run が承認待ちになります。動いている deploy は止めません。`Run workflow` の `operation` で次も実行できます。
 
 | operation | すること |
 | --- | --- |
