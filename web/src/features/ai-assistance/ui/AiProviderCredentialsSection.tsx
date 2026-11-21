@@ -1,6 +1,7 @@
 import type {
   AiAssistanceExternalProvider,
   AiAssistanceProviderCredentialStatus,
+  AiAssistanceProviderCredentials,
 } from '@mukuroji/contracts'
 import { useState } from 'react'
 import type { MessageKey } from '../../../shared/i18n/i18n'
@@ -26,10 +27,7 @@ export type AiProviderCredentialsSectionProps = {
 }
 
 /**
- * Lets a Workspace administrator register, replace, or remove Claude API and OpenAI keys.
- *
- * Keys are write-only: the input is cleared after each request and the server
- * returns only whether a key exists and its last four characters.
+ * Connects the provider key status query and key actions to the view.
  *
  * @param props - Authentication, cache scope, and translator.
  * @returns The provider key section, or null until the scope is known.
@@ -50,6 +48,50 @@ export function AiProviderCredentialsSection({
 
   if (!query.enabled) return null
   return (
+    <AiProviderCredentialsView
+      loadFailed={query.error !== undefined}
+      mutations={mutations}
+      onRetry={() => void query.mutate()}
+      t={t}
+      {...(query.data === undefined ? {} : { credentials: query.data })}
+    />
+  )
+}
+
+/** Props for the pure provider key view. */
+export type AiProviderCredentialsViewProps = {
+  /** Key-free status per provider; undefined while loading. */
+  credentials?: AiAssistanceProviderCredentials
+  /** Whether the latest status request failed. */
+  loadFailed: boolean
+  /** Revision-fenced save and remove actions. */
+  mutations: AiProviderCredentialMutations
+  /** Reloads the status after a failure. */
+  onRetry: () => void
+  /** Localized message resolver. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Lets a Workspace administrator register, replace, or remove Claude API and OpenAI keys.
+ *
+ * Keys are write-only: the input is cleared after each request and the server
+ * returns only whether a key exists and its last four characters. The section
+ * hides itself when the deployment enables no external provider.
+ *
+ * @param props - Status, load state, key actions, and translator.
+ * @returns The provider key section, or null when no provider is enabled.
+ */
+export function AiProviderCredentialsView({
+  credentials,
+  loadFailed,
+  mutations,
+  onRetry,
+  t,
+}: AiProviderCredentialsViewProps) {
+  const enabledProviders = credentials?.providers.filter((status) => status.deploymentEnabled)
+  if (!loadFailed && enabledProviders !== undefined && enabledProviders.length === 0) return null
+  return (
     <section
       className="workbench-panel mt-4 px-5 py-6 sm:px-7"
       data-testid="ai-provider-credentials-section"
@@ -60,17 +102,26 @@ export function AiProviderCredentialsSection({
       <p className="mt-1 max-w-2xl text-app-caption leading-5 text-[var(--workbench-muted)]">
         {t('ai.settings.providers.description')}
       </p>
-      {query.error ? (
-        <p className="mt-4 text-app-caption font-semibold text-[var(--workbench-danger)]" role="alert">
-          {t('ai.settings.loadError')}
-        </p>
-      ) : !query.data ? (
+      {loadFailed ? (
+        <div className="mt-4 grid gap-3">
+          <p className="text-app-caption font-semibold text-[var(--workbench-danger)]" role="alert">
+            {t('ai.settings.loadError')}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-[44px] justify-self-start px-4"
+            onClick={onRetry}
+            type="button"
+          >
+            {t('ai.settings.retry')}
+          </button>
+        </div>
+      ) : enabledProviders === undefined ? (
         <p className="mt-4 text-app-caption text-[var(--workbench-muted)]" role="status">
           {t('ai.settings.providers.loading')}
         </p>
       ) : (
         <ul className="mt-4 grid gap-4">
-          {query.data.providers.filter((status) => status.deploymentEnabled).map((status) => (
+          {enabledProviders.map((status) => (
             <ProviderRow
               key={status.provider}
               mutations={mutations}

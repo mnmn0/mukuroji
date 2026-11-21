@@ -105,7 +105,8 @@ test('omitted model disables AI even with stale provider and budget settings', a
   Bun.env.AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE = 'invalid-unused-budget'
   Bun.env.AWS_BEARER_TOKEN_BEDROCK = 'unused-when-disabled'
   try {
-    const { aiAssistanceService } = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
+    const { aiAssistanceService, aiProviderCredentialService } =
+      createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
     const actor = {
       workspaceId: 'workspace-1',
       memberId: 'member-1',
@@ -119,6 +120,16 @@ test('omitted model disables AI even with stale provider and budget settings', a
       enabled: false,
     })
     await expect(aiAssistanceService.getPolicy(actor)).rejects.toMatchObject({ code: 'AiAssistanceDisabled' })
+    // The key section hides itself instead of failing to load when no external provider is on.
+    expect(await aiProviderCredentialService?.list(actor)).toEqual({
+      schemaVersion: 1,
+      providers: [
+        { provider: 'anthropic', deploymentEnabled: false, configured: false, revision: 0 },
+        { provider: 'openai', deploymentEnabled: false, configured: false, revision: 0 },
+      ],
+    })
+    await expect(aiProviderCredentialService?.list({ ...actor, canManagePolicy: false }))
+      .rejects.toMatchObject({ code: 'AiAssistanceDisabled' })
     await expect(aiAssistanceService.updatePreference(actor, {
       enabled: true, expectedRevision: 0,
     })).rejects.toMatchObject({ code: 'AiAssistanceDisabled' })

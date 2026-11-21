@@ -42,6 +42,7 @@ import type {
   WorkspaceDependencies,
 } from './app-dependencies'
 import {
+  AI_ASSISTANCE_EXTERNAL_PROVIDERS,
   AiAssistanceError,
   createAiAssistanceAvailableModels,
   createAiAssistanceService,
@@ -1223,7 +1224,22 @@ function createLazyAiProviderCredentialService(
     )
   }
   return {
-    list: async (actor) => await require().list(actor),
+    list: async (actor) => {
+      const service = resolve()
+      if (service !== undefined) return await service.list(actor)
+      if (!actor.canManagePolicy) return require().list(actor)
+      // A Bedrock-only or AI-disabled deployment reports every provider as off so the
+      // settings screen can hide the key section instead of showing a load error.
+      return {
+        schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
+        providers: AI_ASSISTANCE_EXTERNAL_PROVIDERS.map((provider) => ({
+          provider,
+          deploymentEnabled: false,
+          configured: false,
+          revision: 0,
+        })),
+      }
+    },
     put: async (actor, provider, request, authorization) =>
       await require().put(actor, provider, request, authorization),
     delete: async (actor, provider, request, authorization) =>
