@@ -106,11 +106,11 @@ Project ごとに最新の schedule baseline を 1 つ保存できる（#336 の
 
 `GET` は Project の viewer が読め、今読める Work Item の entry だけを返す。baseline が無い Project では `baseline: null`。現在の予定との差（`startSlipDays` / `endSlipDays`、正が後ろ倒し）は `deriveWorkItemScheduleSlip` で read 時に導出し、Web の詳細ペインの「ベースラインとのずれ」に出す。baseline のない Work Item の表示と既存 API は変わらない。
 
-Project・Team の Gantt は、表示中の Work Item の Project（Team ごと、最大 50）の baseline を読み、各行の予定バーの下に baseline の期間を細いバーで重ね、行の左に終了の差（`+3d` など）を出す。Team の表は列「ベースライン比の遅れ」で同じ差を出す（並べ替え・グループ化には使えない）。差は `deriveWorkItemBaselineEndDelayDays` で導出し、週次まとめ（#631）の「遅れ」と同じく、完了した Work Item は実績終了日、未完了は今の予定終了日を baseline の終了日と比べる。取り消した Work Item、baseline 後に作った Work Item、読めない Project の Work Item には差を出さない。baseline は Gantt を開いているとき、または表にこの列があるときだけ読む。
+Project・Team の Gantt は、表示中の Work Item の Project（Team ごと、最大 50）の baseline を読み、各行の予定バーの下に baseline の期間を細いバーで重ね、行の左に終了の差（`+3d` など）を出す。Project の WBS 表と Team の表は列「ベースライン比の遅れ」（`baselineEndDelayDays`）で同じ差を出す（並べ替え・グループ化・filter には使えない）。差は `deriveWorkItemBaselineEndDelayDays` で導出し、週次まとめ（#631）の「遅れ」と同じく、完了した Work Item は実績終了日、未完了は今の予定終了日を baseline の終了日と比べる。取り消した Work Item、baseline 後に作った Work Item、読めない Project の Work Item には差を出さない。baseline は Gantt を開いているとき、または表にこの列があるときだけ読む。
 
 保存（初回と置き換え）は baseline の行と同じ transaction で audit event を書く。`project.schedule_baseline_captured`（初回）と `project.schedule_baseline_replaced`（置き換え）で、entity は Project、target は `project-schedule-baseline`。changes には revision・保存時刻・Work Item 数の前後だけを残し、Work Item の ID と日付は残さない。audit の書き込みが失敗すると baseline も保存されない。
 
-まだ無いもの: 名前付きの複数 baseline、予定工数の固定、Project の WBS 表の列、Focus の `slipped` signal と通知、Planning update の evidence 自動提示。
+まだ無いもの: 名前付きの複数 baseline、予定工数の固定、Focus の `slipped` signal と通知、Planning update の evidence 自動提示。
 
 ### Estimate, remaining effort, and progress
 

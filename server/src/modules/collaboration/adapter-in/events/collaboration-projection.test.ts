@@ -253,6 +253,13 @@ describe('collaboration projection pure helpers', () => {
         record('title-only', 'work-item.updated', {
           actorMemberKey: 'actor@example.com', teamId: 'core', issueId: 'example', projectId: 'platform',
         }),
+        record('blocker-cleared', 'work-item.blocker-removed', {
+          actorMemberKey: 'actor@example.com', teamId: 'core', issueId: 'example', projectId: 'platform',
+          notificationTitle: 'Example', notificationCandidates: [{ memberKey: 'owner@example.com', reason: 'assignee' }],
+        }),
+        record('blocking-cleared', 'work-item.blocking-removed', {
+          actorMemberKey: 'actor@example.com', teamId: 'core', issueId: 'example', projectId: 'platform',
+        }),
         record('published', 'planning-update.health-degraded', {
           actorMemberKey: 'actor@example.com', teamId: 'core', projectId: 'platform',
           planningTargetType: 'project', planningTargetId: 'platform',
@@ -295,6 +302,7 @@ describe('collaboration projection pure helpers', () => {
       expect(watcherQueries.sort()).toEqual([
         'workspace-1#planning-update#project/core/platform',
         'workspace-1#work-item#team/core/issue/example',
+        'workspace-1#work-item#team/core/issue/example',
       ])
       expect(notifications.filter((item) => item.eventId === 'published').map((item) => [item.recipientMemberKey, item.reasons]).sort())
         .toEqual([
@@ -321,6 +329,14 @@ describe('collaboration projection pure helpers', () => {
           ['watcher@example.com', ['watcher']],
         ])
       expect(notifications.some((item) => item.eventId === 'title-only')).toBe(false)
+      // A cleared blocker reaches the blocked item's assignee and watchers, never the actor.
+      expect(notifications.filter((item) => item.eventId === 'blocker-cleared')
+        .map((item) => [item.recipientMemberKey, item.reasons, item.title]).sort())
+        .toEqual([
+          ['owner@example.com', ['assignee', 'watcher'], 'Example'],
+          ['watcher@example.com', ['watcher'], 'Example'],
+        ])
+      expect(notifications.some((item) => item.eventId === 'blocking-cleared')).toBe(false)
       expect(notifications.filter((item) => item.eventId === 'escalation').map((item) => item.recipientMemberKey))
         .toEqual(['lead@example.com'])
     } finally {
@@ -340,6 +356,24 @@ describe('collaboration projection pure helpers', () => {
     expect(notifiesWorkItemChangeWatchers(event)).toBe(true)
     expect(notifiesWorkItemChangeWatchers({ ...event, notificationCandidates: [] })).toBe(false)
     expect(notifiesWorkItemChangeWatchers({ ...event, eventType: 'work-item.created' })).toBe(false)
+    expect(createSubscribedWatcherScopes(event)).toEqual([
+      { entityKey: 'workspace-1#work-item#team/core/issue/example', reason: 'watcher' },
+    ])
+  })
+
+  test('notifies the item watchers of a cleared blocker even without an assignee', () => {
+    const event = createProjectionEvent({
+      eventType: 'work-item.blocker-removed',
+      projectId: 'platform',
+      notificationCandidates: [{ memberKey: 'owner@example.com', reason: 'assignee' }],
+    })
+
+    expect(notifiesWorkItemChangeWatchers(event)).toBe(true)
+    expect(notifiesWorkItemChangeWatchers({ ...event, notificationCandidates: [] })).toBe(true)
+    // Adding a blocker or the blocker's own side of the removal notifies nobody.
+    expect(notifiesWorkItemChangeWatchers({ ...event, eventType: 'work-item.blocker-added' })).toBe(false)
+    expect(notifiesWorkItemChangeWatchers({ ...event, eventType: 'work-item.blocking-removed' })).toBe(false)
+    // Project watchers follow comments, not each Work Item's relation changes.
     expect(createSubscribedWatcherScopes(event)).toEqual([
       { entityKey: 'workspace-1#work-item#team/core/issue/example', reason: 'watcher' },
     ])

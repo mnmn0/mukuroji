@@ -155,14 +155,18 @@ type RelationAuditChange = {
   workItemId: string
   /** Event type naming the change from the endpoint's point of view. */
   eventType: WorkItemRelationAuditEventType
-  /** Relation type from the endpoint's point of view. */
-  relationType: WorkItemRelationType
+  /** Relation type from the endpoint's point of view; omitted for a top-level reorder. */
+  relationType?: WorkItemRelationType
   /** Other endpoint of an added or removed link; omitted for a parent change. */
   relatedWorkItemId?: string
   /** Parent before a parent change; omitted when the child had no parent. */
   previousParentWorkItemId?: string
-  /** Parent after a parent change; omitted when the parent was removed. */
+  /** Parent after a parent change or of a reorder; omitted when there is no parent. */
   parentWorkItemId?: string
+  /** Sibling rank before a reorder; omitted when the child followed its default rank. */
+  previousHierarchyRank?: string
+  /** Sibling rank stored by a reorder. */
+  hierarchyRank?: string
 }
 
 /** Activity fallback summaries for the relation audit event types. */
@@ -176,6 +180,34 @@ const RELATION_AUDIT_SUMMARIES: Record<WorkItemRelationAuditEventType, string> =
   'work-item.blocking-removed': 'This Work Item no longer blocks another Work Item.',
   'work-item.relation-added': 'A related Work Item was linked.',
   'work-item.relation-removed': 'A related Work Item was unlinked.',
+  'work-item.sibling-order-changed': 'The order among siblings was changed.',
+}
+
+/**
+ * Builds the notification metadata that sends a cleared blocker to the blocked Work Item's assignee.
+ *
+ * Only `work-item.blocker-removed` notifies. The projection resolves the endpoint's current
+ * watchers, drops the actor, and checks the assignee and the Project scope again at delivery.
+ *
+ * @param change - Endpoint change recorded by the event.
+ * @param audit - Request audit input carrying the endpoints read during authorization.
+ * @returns Metadata fields to merge into the event, or none when the change does not notify.
+ */
+function createRelationNotificationMetadata(
+  change: RelationAuditChange,
+  audit: WorkItemRelationAuditInput | undefined,
+): Record<string, unknown> {
+  if (change.eventType !== 'work-item.blocker-removed') return {}
+  const endpoint = audit?.notificationEndpoints?.get(change.workItemId)
+  if (!endpoint) return {}
+  return {
+    ...(endpoint.assignedProjectId ? { projectId: endpoint.assignedProjectId } : {}),
+    deepLink: endpoint.deepLink,
+    notificationTitle: endpoint.title,
+    notificationCandidates: endpoint.assigneeMemberKey.trim() === ''
+      ? []
+      : [{ memberKey: endpoint.assigneeMemberKey, reason: 'assignee' }],
+  }
 }
 
 /**
@@ -217,6 +249,34 @@ function describeRelationAuditChange(
     relationType: relation.type,
     relatedWorkItemId: related,
   }
+}
+
+/**
+ * Describes a reorder among siblings as an audit change on the moved child.
+ *
+ * @param workItemId - Child whose sibling rank changed.
+ * @param parentWorkItemId - Unchanged parent of the child; null for a top-level Work Item.
+ * @param previousHierarchyRank - Rank stored before the reorder; undefined for the default rank.
+ * @param hierarchyRank - Rank stored by the reorder.
+ * @returns The endpoint change to record.
+ */
+function describeSiblingReorderAuditChange(
+  workItemId: string,
+  parentWorkItemId: string | null,
+  previousHierarchyRank: string | undefined,
+  hierarchyRank: string,
+): RelationAuditChange {
+  const change: RelationAuditChange = {
+    workItemId,
+    eventType: 'work-item.sibling-order-changed',
+    hierarchyRank,
+  }
+  if (parentWorkItemId) {
+    change.relationType = 'parent'
+    change.parentWorkItemId = parentWorkItemId
+  }
+  if (previousHierarchyRank) change.previousHierarchyRank = previousHierarchyRank
+  return change
 }
 
 /**
@@ -600,6 +660,24 @@ export type WorkItemRelationAuditInput = {
   context: MutationAuditContext
   /** Workspace member key that the Work Item activity shows as the actor. */
   actorMemberKey: string
+  /**
+   * Notification details of the endpoints read during authorization, keyed by Work Item ID.
+   * An endpoint whose blocker is removed notifies its assignee only when its details are here;
+   * its current watchers are notified either way.
+   */
+  notificationEndpoints?: ReadonlyMap<string, WorkItemRelationNotificationEndpoint>
+}
+
+/** Endpoint details that let a relation audit event notify the endpoint's assignee. */
+export type WorkItemRelationNotificationEndpoint = {
+  /** Current assignee member key; empty when the Work Item has no assignee. */
+  assigneeMemberKey: string
+  /** Work Item title shown in the notification. */
+  title: string
+  /** App-relative path that opens the Work Item. */
+  deepLink: string
+  /** Project assignment the recipient must be able to read; omitted for a Team-only item. */
+  assignedProjectId?: string
 }
 
 /** Audit event types recorded on each endpoint when a Work Item relation changes. */
@@ -613,6 +691,7 @@ const WORK_ITEM_RELATION_AUDIT_EVENT_TYPES = [
   'work-item.blocking-removed',
   'work-item.relation-added',
   'work-item.relation-removed',
+  'work-item.sibling-order-changed',
 ] as const
 
 /** One audit event type recorded when a Work Item relation changes. */
@@ -2114,10 +2193,11 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     ) {
       // A rank already stored is declarative success too: the move committed and only its
       // response was lost, so the retry's older graph revision must not turn it into a conflict.
-      if (
-        normalized.hierarchyRank !== undefined &&
-        await this.readStoredHierarchyRank(workspaceId, teamId, child.workItemId) !== normalized.hierarchyRank
-      ) {
+      const hierarchyRank = normalized.hierarchyRank
+      const previousHierarchyRank = hierarchyRank === undefined
+        ? undefined
+        : await this.readStoredHierarchyRank(workspaceId, teamId, child.workItemId)
+      if (hierarchyRank !== undefined && previousHierarchyRank !== hierarchyRank) {
         // The rank was chosen among the siblings the caller saw, so it needs their graph revision.
         // The rank write advances that revision, so a concurrent reorder or parent change conflicts.
         assertExpectedGraphRevision(graph.revision, normalized.expectedGraphRevision)
@@ -2125,13 +2205,26 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           workspaceId,
           teamId,
           child,
-          normalized.hierarchyRank,
+          hierarchyRank,
           graph,
           // The parent and the configuration guards authorized the reorder, so a parent moved to
           // another Project or a guard that changed before the commit refuses it.
           normalized.nextParent
             ? { parent: normalized.nextParent, configurationConditionChecks }
             : undefined,
+          (occurredAt, nextGraphRevision) => this.createRelationAuditPuts(
+            workspaceId,
+            teamId,
+            audit,
+            occurredAt,
+            nextGraphRevision,
+            [describeSiblingReorderAuditChange(
+              child.workItemId,
+              parentWorkItemId,
+              previousHierarchyRank,
+              hierarchyRank,
+            )],
+          ),
         )
         return { previousParentWorkItemId, parentWorkItemId, graphRevision }
       }
@@ -2297,6 +2390,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param graph - Relation graph state read before the unchanged parent was observed.
    * @param authorization - The unchanged parent and the configuration guards that authorized the
    *   reorder, checked again in the transaction; omitted for a top-level Work Item.
+   * @param createAuditPuts - Builds the reorder audit event Puts committed with the rank, given the
+   *   commit timestamp and the graph revision the reorder writes.
    * @returns The graph revision after the reorder.
    */
   private async writeHierarchyRank(
@@ -2309,6 +2404,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       parent: WorkItemRelationEndpointSnapshot
       configurationConditionChecks: NonNullable<TransactWriteCommandInput['TransactItems']>
     },
+    createAuditPuts: (
+      occurredAt: string,
+      graphRevision: number,
+    ) => NonNullable<TransactWriteCommandInput['TransactItems']> = () => [],
   ): Promise<number> {
     const item = createRelationEndpointTransactionItem(
       this.workItemsTableName,
@@ -2338,6 +2437,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
                 ...authorization.configurationConditionChecks,
               ]
             : []),
+          // Audit Puts come last so the fence indexes checked below keep their positions.
+          ...createAuditPuts(new Date().toISOString(), graph.revision + 1),
         ],
       }))
       return graph.revision + 1
@@ -3009,13 +3110,16 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           ...(audit ? { actorMemberKey: audit.actorMemberKey } : {}),
           teamId,
           issueId: change.workItemId,
-          relationType: change.relationType,
+          ...(change.relationType ? { relationType: change.relationType } : {}),
           ...(change.relatedWorkItemId ? { relatedWorkItemId: change.relatedWorkItemId } : {}),
           ...(change.previousParentWorkItemId
             ? { previousParentWorkItemId: change.previousParentWorkItemId }
             : {}),
           ...(change.parentWorkItemId ? { parentWorkItemId: change.parentWorkItemId } : {}),
+          ...(change.previousHierarchyRank ? { previousHierarchyRank: change.previousHierarchyRank } : {}),
+          ...(change.hierarchyRank ? { hierarchyRank: change.hierarchyRank } : {}),
           graphRevision,
+          ...createRelationNotificationMetadata(change, audit),
         },
         sequence,
       })

@@ -128,6 +128,7 @@ import {
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
 import { useProjectTaskActions } from '../../task-views/mutations/useProjectTaskActions'
 import { useWorkItemScheduleBaselines } from '../../work-items/queries/useWorkItemScheduleBaselines'
+import { WORK_ITEM_BASELINE_END_DELAY_COLUMN } from '../../work-items/model/workItemScheduleBaselines'
 import {
   createTaskSurfaceActionBaseContext,
   resolveTaskSurfaceActionTarget,
@@ -1279,8 +1280,15 @@ export function TaskScreen({
     () => selectedBulkItems.map((item) => item.selectionKey),
     [selectedBulkItems],
   )
-  // The Gantt chart overlays each Work Item's Project baseline, read only while it is shown.
-  const scheduleBaselineFor = useWorkItemScheduleBaselines(accessToken, visibleTasks, activeTab === 'gantt')
+  // Baselines are read only while the Gantt chart or the table's baseline column shows them.
+  const scheduleBaselineFor = useWorkItemScheduleBaselines(
+    accessToken,
+    visibleTasks,
+    activeTab === 'gantt' || (
+      activeTab === 'table' &&
+      (taskViewPresentation?.columns ?? []).some((column) => column.field === WORK_ITEM_BASELINE_END_DELAY_COLUMN)
+    ),
+  )
   // "Select visible" and keyboard moves cover only the rows shown, in their order: the Gantt
   // chart's schedule and outline order, or the table's outline order. An outline leaves out the
   // children of collapsed parents.

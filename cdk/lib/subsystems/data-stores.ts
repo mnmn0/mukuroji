@@ -511,6 +511,16 @@ export function buildDataStores(
     timeToLiveAttribute: 'expiresAt',
   });
 
+  // Sparse: only search document rows carry `searchTitleKey` (their record key), so a keyword
+  // search reads the small title fields of every document instead of the full rows (ADR 0037).
+  workspaceSearchTable.addGlobalSecondaryIndex({
+    indexName: 'SearchTitleIndex',
+    partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'searchTitleKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.INCLUDE,
+    nonKeyAttributes: ['entityId', 'title', 'subtitle'],
+  });
+
   const notificationsTable = new dynamodb.Table(stack, 'NotificationsTable', {
     partitionKey: { name: 'recipientKey', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'notificationKey', type: dynamodb.AttributeType.STRING },

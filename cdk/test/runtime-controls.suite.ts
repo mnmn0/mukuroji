@@ -190,7 +190,7 @@ test('retains a validated hosted baseline and deploys it all at once', () => {
     additionalProperties: false,
     properties: {
       mode: {
-        enum: ['enabled', 'disabled'],
+        enum: ['enabled', 'disabled', 'read-only'],
         type: 'string',
       },
       revision: {
@@ -391,7 +391,7 @@ test('waits read-only for a naturally OK actionable alarm before environment cre
       MemorySize: 256,
       Runtime: 'nodejs22.x',
       Timeout: 30,
-      TracingConfig: { Mode: 'Active' },
+      TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
     }));
   }
 

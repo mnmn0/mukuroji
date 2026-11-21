@@ -8,11 +8,13 @@ import type {
   TenantOperation,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
+  WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
   WorkspaceCalendarSettingsResponse,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  readWeeklyReportReminderSettings,
   readWorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
 import {
@@ -350,6 +352,9 @@ function readTenantProfileInput(value: unknown): UpdateTenantProfileInput {
     locale: validateTenantLocale(body.locale),
     defaultPolicy: readTenantDefaultPolicy(body.defaultPolicy),
     ...(body.calendar === undefined ? {} : { calendar: readTenantCalendarInput(body.calendar) }),
+    ...(body.weeklyReportReminders === undefined
+      ? {}
+      : { weeklyReportReminders: readTenantWeeklyReportReminderInput(body.weeklyReportReminders) }),
     expectedRevision: validateTenantInteger(body.expectedRevision, 1_000_000, 'InvalidTenantRevision'),
   }
 }
@@ -372,6 +377,26 @@ function readTenantCalendarInput(value: unknown): WorkspaceCalendarSettings {
     )
   }
   return calendar
+}
+
+/**
+ * Validates the weekly report reminder settings of a profile update.
+ *
+ * @param value - Untrusted `weeklyReportReminders` field of the request body.
+ * @returns The validated settings.
+ * @throws TenantAdministrationError When a flag, weekday, or hour is invalid, or both notices use
+ *   the same hour.
+ */
+function readTenantWeeklyReportReminderInput(value: unknown): WeeklyReportReminderSettings {
+  const settings = readWeeklyReportReminderSettings(value)
+  if (!settings) {
+    throw new TenantAdministrationError(
+      400,
+      'InvalidWeeklyReportReminderSettings',
+      'Weekly report reminder flags, weekdays, or hours are invalid, or both notices use the same hour.',
+    )
+  }
+  return settings
 }
 
 function readTenantGovernanceInput(value: unknown): UpdateTenantGovernanceInput {

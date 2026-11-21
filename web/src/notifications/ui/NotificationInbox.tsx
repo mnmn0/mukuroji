@@ -632,6 +632,9 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   if (normalizedEventType.startsWith('timesheet.')) {
     return 'workspace.inbox.event.timesheet'
   }
+  if (normalizedEventType.startsWith('weekly-report.')) {
+    return 'workspace.inbox.event.weeklyReport'
+  }
   if (normalizedEventType.includes('mention')) {
     return 'workspace.inbox.event.mention'
   }
@@ -674,6 +677,9 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   if (normalizedEventType.includes('stale')) {
     return 'workspace.inbox.event.stale'
   }
+  if (normalizedEventType === 'work-item.blocker-removed') {
+    return 'workspace.inbox.event.blockerCleared'
+  }
   if (normalizedEventType.includes('status') || normalizedEventType.includes('work-item')) {
     return 'workspace.inbox.event.status'
   }
@@ -686,6 +692,12 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
 
   if (normalizedReason.includes('mention')) {
     return t('workspace.inbox.reason.mention')
+  }
+  if (normalizedReason === 'weekly-report') {
+    return t('workspace.inbox.reason.weeklyReport')
+  }
+  if (normalizedReason === 'weekly-report-escalation') {
+    return t('workspace.inbox.reason.weeklyReportEscalation')
   }
   if (normalizedReason.includes('reply')) {
     return t('workspace.inbox.reason.reply')
@@ -731,7 +743,7 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
 }
 
 /**
- * Resolves the row summary, localizing the fixed text of scheduled report deliveries.
+ * Resolves the row summary, localizing the fixed text of scheduled report deliveries and cleared blockers.
  *
  * @param notification - Notification shown in the row.
  * @param eventLabel - Localized event label used by the fallback summary.
@@ -745,6 +757,9 @@ function resolveNotificationSummary(
 ) {
   if (notification.eventType === analyticsReportDeliveredEventType) {
     return t('workspace.inbox.summary.reportDelivered')
+  }
+  if (notification.eventType === 'work-item.blocker-removed') {
+    return t('workspace.inbox.summary.blockerCleared')
   }
   return notification.summary?.trim() || createNotificationFallbackSummary(notification, eventLabel, t)
 }
@@ -800,6 +815,7 @@ function resolveEventToneClassName(eventType: string) {
     eventKey === 'workspace.inbox.event.dueSoon' ||
     eventKey === 'workspace.inbox.event.stale' ||
     eventKey === 'workspace.inbox.event.timesheet' ||
+    eventKey === 'workspace.inbox.event.weeklyReport' ||
     eventKey === 'workspace.inbox.event.approval'
   ) {
     return 'border-amber-200 bg-amber-50 text-fg-amber-700'

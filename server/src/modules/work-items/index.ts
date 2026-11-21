@@ -101,6 +101,7 @@ export {
   type WorkItemConfigurationGuard,
   type WorkItemConfigurationTransactionItems,
   type WorkItemConfigurationUsageCheck,
+  type WorkItemRelationNotificationEndpoint,
 } from './work-item-configuration'
 export {
   WorkItemImportError,

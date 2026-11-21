@@ -163,11 +163,11 @@ aws ce update-cost-allocation-tags-status \
 
 ### 既定構成の固定費
 
-任意 module をすべて無効にした既定構成で、利用がなくてもかかる費用です。合計はおよそ **月 $7〜9** です。
+任意 module をすべて無効にした既定構成で、利用がなくてもかかる費用です。合計はおよそ **月 $6〜8** です。
 
 | 構成要素 | 数 | 月額の目安 | 備考 |
 | --- | --- | --- | --- |
-| CloudWatch metric alarm | 33 個（35 metric） | 約 $2.50 | $0.10 / alarm metric。アカウントの無料枠 10 metric を差し引いた額です。 |
+| CloudWatch metric alarm | 23 個（25 metric） | 約 $1.50 | $0.10 / alarm metric。アカウントの無料枠 10 metric を差し引いた額です。AI の alarm 10 個は AI を設定したときだけ作ります（下の増分の表）。 |
 | CloudWatch composite alarm | 1 個 | $0.50 | |
 | CloudWatch custom metric（EMF） | 約 15 系列 | 約 $1.50 | $0.30 / metric。アカウントの無料枠 10 metric を差し引いた額です。`Mukuroji/RuntimeControl` 5 個（毎分の heartbeat）、`Mukuroji/API` 6 個（API が呼ばれている時間だけ）、`Mukuroji/Notifications` 4 個（Slack と Email の channel ごと）。AI を設定すると `Mukuroji/AIAssistance` が増えます。metric は data が届いた時間単位で課金されるため、dimension を 1 つ足すと系列の数だけ固定費が増えます。 |
 | Secrets Manager secret | 4 個 | $1.60 | $0.40 / secret。inbound automation Webhook を 1 つ作るごとに secret が 1 つ増えます。 |
@@ -175,7 +175,7 @@ aws ce update-cost-allocation-tags-status \
 | DynamoDB table（on-demand、PITR 有効） | 26 個 | $0.1〜0.5 | 保存量 25 GB までは無料枠。PITR は保存量 1 GB あたり約 $0.23 です。 |
 | EventBridge の毎分 rule と `ScheduledJobsFunction` | 1 個 | ほぼ $0 | 月 43,200 回の起動（1,024 MB）は、1 回が平均数秒で終われば Lambda の無料枠（100 万 request、40 万 GB 秒）に収まります。無料枠はほかの Lambda と共有です。job が読む DynamoDB の料金は数十セントです。 |
 | SQS の待機中の polling | 3 queue | $0〜1 | Lambda の event source が空の queue を long polling し続けます。無料枠は月 100 万 request、超えた分は $0.40 / 100 万です。 |
-| X-Ray active tracing | application Lambda | $0〜1 | 月 10 万 trace まで無料、超えた分は $5 / 100 万 trace。毎分の job だけで約 4.3 万 trace を使い、API request も記録されます（下の試算の従量費に含めています）。 |
+| X-Ray | application Lambda | $0 | 既定の `LambdaTracingMode=PassThrough` では trace を記録しません。調査で必要なときだけ `Active` にします（[X-Ray tracing の切り替え](#x-ray-tracing-の切り替え)）。 |
 | CloudWatch Logs | 22 log group（90 日保持、data migration は 365 日） | ほぼ $0 | 月 5 GB まで無料。超えた分は取り込み $0.76 / GB です。 |
 | GuardDuty Malware Protection for S3 | 1 plan | ほぼ $0 | 無料枠は月 1,000 object・1 GB。超えた分は scan した容量（米国東部で $0.09 / GB）と評価した object 数で課金されます。 |
 | Cognito user pool（Essentials） | 1 個 | $0 | 月 10,000 MAU まで無料。SAML / OIDC 連携の利用者は無料枠が小さく、超えると MAU 単位で課金されます。 |
@@ -192,7 +192,8 @@ aws ce update-cost-allocation-tags-status \
 | `mukuroji:requestEmail` | +$1 / 月 | secret 2 個、alarm 2 個。 |
 | `mukuroji:tenantLifecycle` | +$0〜2 / 月 | Lambda 6 個と queue 6 個。待機中の queue polling が SQS の無料枠を超えた分です。 |
 | `mukuroji:softwareFactory` | ほぼ $0 | 毎分の Agent Run triage job。opt-in した Team がなければ AgentRuns table の index を読むだけです。 |
-| AI（Bedrock の parameter 設定） | 利用量に比例 | token 料金。上限は Workspace の AI 設定で決めます。 |
+| AI（Bedrock の parameter 設定） | +$1 / 月と利用量に比例 | AI の alarm 10 個（$1）。token 料金の上限は Workspace の AI 設定で決めます。 |
+| `LambdaTracingMode=Active`（X-Ray） | 利用量に比例 | 月 10 万 trace まで無料、超えた分は $5 / 100 万 trace。sampling は 1 秒あたり 1 request と残りの 5% で、毎分の job だけで月約 4.3 万 trace、50 人で月約 70 万 trace（約 $3）です。 |
 | `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
 | `CognitoEmailSender`（SES） | 利用量に比例 | 招待と再設定のメール。1,000 通あたり約 $0.10。 |
 
@@ -202,16 +203,26 @@ aws ce update-cost-allocation-tags-status \
 
 | 利用者 | API request / 月 | 従量費の目安 | 合計の目安 |
 | --- | --- | --- | --- |
-| 10 人 | 約 40 万 | 約 $2〜3 | 約 $10〜12 |
-| 50 人 | 約 200 万 | 約 $8〜10 | 約 $16〜19 |
-| 200 人 | 約 800 万 | 約 $30〜35 | 約 $38〜44 |
+| 10 人 | 約 40 万 | 約 $2〜3 | 約 $8〜11 |
+| 50 人 | 約 200 万 | 約 $5〜7 | 約 $11〜15 |
+| 200 人 | 約 800 万 | 約 $25〜30 | 約 $31〜38 |
 
-従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、X-Ray（Lambda の既定の sampling は 1 秒あたり 1 request と残りの 5%。50 人で月約 70 万 trace、約 $3）、DynamoDB の読み書き、Lambda（無料枠を超えた request と実行時間）、CloudWatch Logs の取り込み、WebSocket の接続時間です。税（日本の請求では消費税 10%）、独自 domain の Route 53 hosted zone（$0.50 / 月）、AI の token 料金は含みません。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
+従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、DynamoDB の読み書き、Lambda（無料枠を超えた request と実行時間）、CloudWatch Logs の取り込み、WebSocket の接続時間です。税（日本の請求では消費税 10%）、独自 domain の Route 53 hosted zone（$0.50 / 月）、AI の token 料金は含みません。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
+
+### X-Ray tracing の切り替え
+
+既定では X-Ray に trace を記録しません。障害調査で API の流れを trace で追いたいときだけ、
+`--parameters LambdaTracingMode=Active` を付けて deploy します。調査が終わったら `PassThrough` に戻してください。
+切り替えで変わるのは Lambda の tracing mode と state machine の tracing flag だけで、IAM role は変わりません。
+API は alias が指す published version で動き、version の tracing mode は公開後に変えられないため、`LambdaTracingMode` を変えた deploy では API の新しい version を公開して alias を切り替えます（`ApiRuntimeConfigurationRevision` の増分は不要です）。
+`PassThrough` の間は API log の `traceId` に対応する trace が X-Ray にないため、`invocationId` と UTC の時間帯から
+Lambda log を起点に調査します（[`docs/operational-readiness.md`](../docs/operational-readiness.md)）。
 
 ## API observability
 
-Application Lambda 24個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
-trace/telemetry write action だけを追加します。API Lambda は readiness probe 用に
+Application Lambda と restore drill の state machine は `LambdaTracingMode` parameter に従います。既定の
+`PassThrough` では X-Ray に trace を記録せず、`Active` にすると active tracing になります。各 execution
+role には切り替えても role が変わらないよう、X-Ray が要求する trace/telemetry write action だけを常に追加します。API Lambda は readiness probe 用に
 `AuditEventsTable`、`WorkItemsTable`、`WorkspaceAccessTable` への `dynamodb:DescribeTable` だけを
 持つ独立 policy を使います。
 
@@ -219,6 +230,7 @@ Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HT
 application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。51 metric alarmと
 1 composite alarmのうち、notification無効のfast-burn component 2件を除く50件の
 `AlarmActions` は、必須parameterで指定した既存のprimary/secondary SNS topicへ接続します。
+AI の alarm 10件（`AiAssistance*`）は AI を設定した stack にだけ作ります。
 Stackはtopic、subscription、Incident Manager escalation planを作成・変更しません。Topic ownerは
 同一account/regionのstandard topicを用意し、managed rosterへのsubscription、暗号化key policy、
 test notificationの受信をdeploy前に確認してください。CloudWatchはalarm遷移時に両topicへ同時に
@@ -734,6 +746,99 @@ IAM は1つの role に付く inline policy を合計10,240文字（空白を除
 - API role の DynamoDB と SQS の権限は customer-managed policy（`ApiTableDataPolicy`、`ApiAnalyticsTablePolicy`、`ApiFeatureDataPolicy`、`ApiTransactionConditionPolicy`）に置きます。API Lambda はこれらの policy ができてから作られます。
 - Role の inline が上限に近づいたら、`grants.*` に `ManagedPolicyPrincipal`（`cdk/lib/policies/managed-policy-principal.ts`）を渡して、権限を customer-managed policy へ移します。
 
+## GitHub Actions から deploy する
+
+本番環境は 1 つで、`main` の commit を GitHub Actions の `production` Environment から deploy します。
+job は OIDC で `mukuroji-github-deploy` role を引き受けるので、AWS の access key は GitHub に置きません。
+role を引き受けられるのは `mnmn0/mukuroji` の `production` Environment で動く job だけで、Environment は
+`main` に限り、required reviewer の承認を待ちます。判断の理由は [ADR 0039](../docs/adr/0039-github-actions-oidc-deploy.md) を参照してください。
+
+| 置き場所 | 中身 |
+| --- | --- |
+| [`deploy-access/github-deploy-access.template.json`](deploy-access/github-deploy-access.template.json) | 一度だけ作る CloudFormation stack。GitHub の OIDC provider、deploy role、alarm 用 SNS topic 2 つ、deploy の非 secret 値（SSM `/mukuroji/deploy/config/`）。 |
+| [`deploy-access/deploy.workflow.yml`](deploy-access/deploy.workflow.yml) | `.github/workflows/deploy.yml` に置く workflow。`scripts/github-deploy.ts` を呼ぶだけです。 |
+| [`../scripts/github-deploy.ts`](../scripts/github-deploy.ts) | deploy の手順。SSM から値を読み、`cdk deploy`、`scripts/deploy-web.sh`、`/api/health` の commit 確認を行います。 |
+
+deploy role 自身が持つ権限は、CDK bootstrap の deploy / file-publishing / lookup role を引き受けること、
+`Mukuroji` stack の参照、Web bucket への upload と CloudFront の invalidation、runtime control の AppConfig 操作、
+`/mukuroji/deploy/` の SSM parameter の読み取りと新規作成（上書きは Deny）だけです。stack の変更は CDK の標準どおり
+bootstrap の CloudFormation execution role が行います。
+
+stack の secret parameter（`WorkspaceAuditPseudonymKey`、`EnterpriseIdentityTokenHashSecret`、`RequestTokenHashSecret`、
+`EdgeOriginSecret`）は SSM の SecureString（`/mukuroji/deploy/secrets/`）に置きます。stack がまだないときだけ script が
+32 byte の乱数で作り、上書きせずに保存します。stack ができた後に値がなければ、新しい値で audit ID や token hash が
+変わらないよう deploy を止めます。値を消したときは同じ値を戻してください。SSO・AI の parameter は
+script が渡さないので、CDK の既定どおり前回の値が残ります。有効にするときは script に足す PR を出します。
+
+[任意 module](#optional-modules) の CDK context も script は渡さないため、この経路で deploy する stack では
+`cdk/cdk.json` の `context` に書いた module だけが有効になります。現在はどれも書いていないので、本番の stack は
+任意 module なしです。有効にするときは `cdk/cdk.json` に `"mukuroji:connectors": true` などを足す PR を出し、
+その module の parameter も script に足します。書いた後に消すと、次の deploy で module の resource が削除されます。
+
+`ApiRuntimeConfigurationRevision` は run ごとに `gh-<run id>-<attempt>` になり、再実行でも同じ値を使いません。
+`ApplicationCommitSha` は checkout した `GITHUB_SHA` で、deploy 後に `WebUrl` の `/api/health` が同じ値を返すまで待ちます。
+初回の deploy では `ApiAllowedOrigins` を渡さず、2 回目からは stack の `WebUrl` を渡します。独自 domain など別の
+origin にするときは deploy access stack の `ApiAllowedOrigins` を更新します。
+
+費用: public repository の GitHub Actions は無料です。SNS の email 通知と SSM の standard parameter も無料枠に収まります。
+
+### 最初に一度だけ行うこと
+
+1. AWS console で region を東京（ap-northeast-1）にして CloudShell を開き、次を実行します。`OWNER_EMAIL` は
+   初期 owner の小文字の email です。account に GitHub の OIDC provider が既にある場合は、最後の
+   `--parameter-overrides` に `ExistingGitHubOidcProviderArn=<その ARN>` を足します。
+
+   ```sh
+   export AWS_REGION=ap-northeast-1
+   export OWNER_EMAIL=owner@example.com
+   curl -fsSLo github-deploy-access.json \
+     https://raw.githubusercontent.com/mnmn0/mukuroji/main/cdk/deploy-access/github-deploy-access.template.json
+   npx --yes aws-cdk@2.1132.0 bootstrap "aws://$(aws sts get-caller-identity --query Account --output text)/$AWS_REGION"
+   aws cloudformation deploy --region "$AWS_REGION" --stack-name MukurojiGitHubDeployAccess \
+     --template-file github-deploy-access.json --capabilities CAPABILITY_NAMED_IAM \
+     --parameter-overrides InitialOwnerEmail="$OWNER_EMAIL"
+   aws cloudformation describe-stacks --region "$AWS_REGION" --stack-name MukurojiGitHubDeployAccess \
+     --query "Stacks[0].Outputs[?OutputKey=='DeployRoleArn'].OutputValue" --output text
+   ```
+
+   alarm の送り先を owner 以外にするときは `AlarmPrimaryEmail=` と `AlarmSecondaryEmail=` も渡します（できれば別の人か mailbox）。
+2. SNS から届く 2 通の「Subscription Confirmation」メールで、それぞれ `Confirm subscription` を押します。
+3. GitHub の repository の Settings → Environments で `production` を作り、次を設定します。
+   - Required reviewers: 承認する人（例: `mnmn0`）
+   - Deployment branches and tags: Selected branches and tags で `main` だけ
+   - Environment variables: `AWS_DEPLOY_ROLE_ARN` に手順 1 の最後に表示された ARN。region を変えたときだけ `AWS_REGION` も
+4. `deploy-access/deploy.workflow.yml` の内容を `.github/workflows/deploy.yml` として追加し、`main` に merge します。
+   Claude の GitHub App は workflow file を push できないため、この 1 回は GitHub の画面から追加します。
+5. merge で動いた `Deploy` workflow の `Review deployments` で承認します。初回は 30〜40 分ほどかかります。
+6. Actions → `Deploy` → `Run workflow` で `runtime-control-enable` を選んで実行し、承認します（約 30 分）。
+   ここまで API は `/api/health` と `/api/ready` 以外（サインインの `/api/auth/*` を含む）に `503` を返すので、
+   owner のサインインはこの後に行います。
+7. 初期 owner に Cognito から仮パスワードのメールが届いています。`WebUrl`（job の summary に出ます）でサインインし、
+   パスワードを変えて MFA を設定します。
+
+### いつもの deploy と手動の操作
+
+`main` に merge するたびに `Deploy` が承認待ちになります。production の操作は一度に 1 つだけで、承認待ちか実行中の run が
+あるあいだに来た run は順番待ちになります。順番待ちは最新の 1 つだけが残り、古い順番待ちは取り消されます。
+最新だけを deploy したいときは、古い承認待ちを `Reject` すると次の run が承認待ちになります。動いている deploy は止めません。`Run workflow` の `operation` で次も実行できます。
+
+| operation | すること |
+| --- | --- |
+| `deploy` | 選んだ branch（`main` のみ）の先頭を deploy します。 |
+| `runtime-control-enable` / `runtime-control-disable` | [runtime control](#application-処理を有効にするruntime-control) を切り替えます（canary で約 30 分）。 |
+| `runtime-control-disable-all-at-once` | incident commander が即時停止を決めたときだけ使います。`AppConfig.AllAtOnce` で止めます（bake の 10 分は待ちます）。 |
+| `web-rollback` | `web_release_commit` に指定した 40 文字の SHA の Web release に戻します（[Web の release を戻す](#web-の-release-を戻す)）。 |
+
+`deploy` は対象の commit が今の `main` の先頭でないと AWS に触れる前に止まります。古い run を再実行して本番を
+前の commit に戻すことはできません。stack を前の commit に戻すときは、`main` で該当の PR を revert して通常どおり
+deploy します（[Rollback](#rollback) の forward deploy）。
+
+初回の stack 作成が失敗して `ROLLBACK_COMPLETE` になった場合は、job の log と CloudFormation の stack event で原因を
+直してから再実行します。`cdk deploy` が失敗した stack を消して作り直し、SSM の secret はそのまま使います。
+`Retain` の table・bucket・user pool は失敗した stack から外れて残るので、作り直しが成功した後に不要なものを手で削除します。
+job の summary には commit、revision、CDK outputs の SHA-256、`WebUrl` が残り、Environment の deployment 履歴と合わせて
+change record にします。PR ごとの read-only な `cdk diff`、post-deploy の smoke e2e はまだありません（#362 の残り）。
+
 ## Fresh deployment
 
 ### 1. Cognito と値を準備する
@@ -1066,15 +1171,26 @@ AWS_REGION=ap-northeast-1 bun run runtime-control:enable
    誰が（`sts get-caller-identity` の ARN）いつ切り替えたかを version と deployment の description に残す。
 4. stack の canary strategy で deployment を始め、`COMPLETE` まで待つ（rollout 20 分 + bake 10 分で約 30 分）。
    `ROLLED_BACK` になったら失敗として止まる。
-5. `WebUrl` の `/api/ready` が `200` を返すまで最大 3 分確認する。
+5. `WebUrl` の `/api/ready` が `200` を返し、`/api/maintenance` が `{"state":"none"}` を返すまで最大 3 分確認する。
 
-止めるときは `bun run runtime-control:disable` を使います。`/api/ready` が `503` になれば完了です。
+止めるときは `bun run runtime-control:disable` を使います。`/api/ready` が `503`、`/api/maintenance` が
+`stopped` になれば完了です。
 incident commander が即時停止を決めたときだけ、`-- --all-at-once` を付けて `AppConfig.AllAtOnce` で
 配布します（bake の 10 分は待ちます）。省いた理由は change record に残します。stack 名が `Mukuroji`
 でない場合は `MUKUROJI_STACK_NAME` を指定します。local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566`
 を付けて同じように実行できます。change record に残す内容と、deployment 中に確認する
 `runtime-control.evaluated` record は [operational readiness](../docs/operational-readiness.md#dynamic-runtime-control)
-を参照してください。読み取りだけを通す maintenance mode はまだありません。
+を参照してください。
+
+migration など、閲覧は続けて変更だけを止めたいときは `bun run runtime-control:read-only` を使います。
+API は `GET` / `HEAD` と、sign-in・token の更新・preview などの読み取り用 `POST` だけを通し、それ以外の変更を
+`503`（problem の `code` は `maintenance_read_only`）で断ります。worker と WebSocket は `disabled` と同じく
+止まります。`/api/ready` は `503`、`/api/maintenance` は `read-only` になれば完了です。alarm の確認はしません。
+終わったら `bun run runtime-control:enable` で戻します。Web は「メンテナンス中」のバナーを出し、
+`stopped` と `read-only` を障害（`unavailable`）と区別して表示します。sign-in の rate limit や監査 event など
+付随する書き込みは残るので、書き込みを完全に止める必要がある作業は `disable` を使います
+（[ADR 0034](../docs/adr/0034-read-only-maintenance-mode.md)）。local で表示を確かめるときは、API を
+`MUKUROJI_LOCAL_RUNTIME_CONTROL_MODE=read-only`（または `disabled`）で起動します。
 
 ### 3. Bootstrap と API を検証する
 
