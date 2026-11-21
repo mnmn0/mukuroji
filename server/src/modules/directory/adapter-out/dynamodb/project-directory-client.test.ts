@@ -1017,10 +1017,13 @@ test('DynamoDB directory client stops retrying a Project ID after repeated reser
     expanded: true,
   }
   let conflictCode = 'ConditionalCheckFailed'
+  let otherItemCode = 'None'
   const reservationConflict = () => Object.assign(new Error('Transaction was canceled.'), {
     name: 'TransactionCanceledException',
     CancellationReasons: [
-      ...Array.from({ length: 6 }, () => ({ Code: 'None' })),
+      { Code: 'None' },
+      { Code: otherItemCode },
+      ...Array.from({ length: 4 }, () => ({ Code: 'None' })),
       { Code: conflictCode },
     ],
   })
@@ -1069,6 +1072,23 @@ test('DynamoDB directory client stops retrying a Project ID after repeated reser
     { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
   )).rejects.toMatchObject({ status: 409 })
   expect(transactions).toBe(1)
+  conflictCode = 'ConditionalCheckFailed'
+
+  // An unrelated failure on another item is not an ID conflict: no retry, and no 409.
+  for (const idempotencyResourceId of [undefined, 'application_1']) {
+    transactions = 0
+    otherItemCode = 'ValidationError'
+    conflictCode = 'TransactionConflict'
+    const failure = await client.createProject(
+      'workspace-1',
+      'core-team',
+      { ...(idempotencyResourceId ? { idempotencyResourceId } : {}), name: 'Web' },
+      { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
+    ).catch((error: unknown) => error)
+    expect(failure).toMatchObject({ code: 'TransactionCanceledException' })
+    expect(transactions).toBe(1)
+  }
+  otherItemCode = 'None'
   conflictCode = 'ConditionalCheckFailed'
 
   transactions = 0

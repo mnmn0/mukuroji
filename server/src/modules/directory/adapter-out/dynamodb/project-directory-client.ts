@@ -4732,13 +4732,19 @@ function isTransactionConditionalFailureAt(error: unknown, index: number) {
     reasons[index].Code === 'ConditionalCheckFailed'
 }
 
+/** Cancellation reasons that mean another creation holds the same keys, not a failed request. */
+const PROJECT_ID_CONTENTION_REASON_CODES = new Set(['ConditionalCheckFailed', 'TransactionConflict'])
+
 /**
  * Checks whether a Project creation was canceled because its Project ID reservation is taken,
  * either committed by an earlier creation or held by a concurrent transaction.
  *
+ * Every other item must have succeeded or failed for the same contention reasons; a validation,
+ * throughput, or other infrastructure failure on any item is not classified as an ID conflict.
+ *
  * @param error - Error thrown by the creation transaction.
  * @param index - Position of the reservation Put in the transaction.
- * @returns True when the reservation, and not only another item, blocked the creation.
+ * @returns True when the reservation, and no unrelated failure, blocked the creation.
  */
 function isProjectIdReservationTakenAt(error: unknown, index: number) {
   if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
@@ -4746,10 +4752,13 @@ function isProjectIdReservationTakenAt(error: unknown, index: number) {
   }
 
   const reasons = error.CancellationReasons
-  const reason = Array.isArray(reasons) ? reasons[index] : undefined
+  if (!Array.isArray(reasons)) return false
+  const codes = reasons.map((reason) => isRecord(reason) ? reason.Code : undefined)
 
-  return isRecord(reason) &&
-    (reason.Code === 'ConditionalCheckFailed' || reason.Code === 'TransactionConflict')
+  return PROJECT_ID_CONTENTION_REASON_CODES.has(String(codes[index])) &&
+    codes.every((code) =>
+      code === undefined || code === 'None' || PROJECT_ID_CONTENTION_REASON_CODES.has(String(code))
+    )
 }
 
 function requireDynamoDbTransactionCapacity(
