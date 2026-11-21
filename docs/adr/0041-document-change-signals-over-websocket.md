@@ -19,8 +19,10 @@ scope ごとの invalidation が既にある。Shinji は 2026-11-21 に「WebSo
 - Document の subscription は 5 分（token の有効期限が先ならそれまで）で失効させ、延長しない。
   client は失効の 30 秒前に新しい ticket で接続し直す。これで ACL の変更（private 化、share の削除、
   member の無効化）が最長 5 分で効く。
-- realtime Lambda は接続時と message ごとに member の active 状態、system admin の Cognito group、
-  Enterprise session の鮮度を確かめ直す。Document の session からの typing・presence の送信は拒否する。
+- realtime Lambda は接続時と fan-out ごとに、Team や Work Item に依存しない確認を Work Item の購読と
+  同じように行う：member の active 状態、system admin の Cognito group、break-glass でない場合の SSO と
+  provider binding、guest・外部 collaborator・deprovision の境界、外部 member には外部用の上限を使う
+  Enterprise session の鮮度。Document の session からの typing・presence の送信は拒否する。
 - API Lambda が変更後に `{type: 'document.changed', documentId, part, originClientId?, occurredAt}` を
   scope の接続へ送る。signal は本文・comment・名前を含まず、client は認可済みの HTTP API で取り直す。
   送信は best effort とし、失敗は log に残すだけで変更 request は成功させる。

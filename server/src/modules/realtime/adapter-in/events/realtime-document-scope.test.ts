@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test'
+import type { EnterpriseIdentitySnapshot } from '@mukuroji/contracts'
 import {
+  evaluateRealtimeMemberBoundary,
   toRealtimeScopeAttributes,
   toRealtimeSessionItem,
 } from './realtime'
@@ -80,4 +82,64 @@ test('keeps Work Item rows unchanged and still requires their team and issue', (
     issueId: 'issue-1',
   })
   expect(toRealtimeSessionItem({ ...baseRow(), teamId: 'core' })).toBeUndefined()
+})
+
+/**
+ * Builds an enterprise snapshot whose only verified domain is example.com.
+ *
+ * @returns The snapshot.
+ */
+function verifiedDomainSnapshot(): EnterpriseIdentitySnapshot {
+  return {
+    workspaceId: 'workspace-1',
+    identityProviders: [],
+    domains: [{
+      workspaceId: 'workspace-1',
+      domainId: 'domain-1',
+      domain: 'example.com',
+      status: 'verified',
+      revision: 1,
+      verificationRecordName: '_mukuroji.example.com',
+      verifiedAt: '2026-07-18T00:00:00.000Z',
+      enforceSso: false,
+      createdAt: '2026-07-18T00:00:00.000Z',
+      updatedAt: '2026-07-18T00:00:00.000Z',
+    }],
+    customRoles: [],
+    groupMappings: [],
+    roleAssignments: [],
+    scimUsers: [],
+    scimGroups: [],
+    scimCredentials: [],
+    serviceAccounts: [],
+    breakGlassAccounts: [],
+    provisioningRuns: [],
+    provisioningLogs: [],
+  }
+}
+
+test('classifies members outside the verified domains as external for Document sessions', () => {
+  const snapshot = verifiedDomainSnapshot()
+
+  expect(evaluateRealtimeMemberBoundary(
+    snapshot,
+    'member@example.com',
+    'member@example.com',
+    'member',
+    [],
+  )).toMatchObject({ external: false, boundaryDenied: false })
+  expect(evaluateRealtimeMemberBoundary(
+    snapshot,
+    'partner@partner.example',
+    'partner@partner.example',
+    'member',
+    [],
+  )).toMatchObject({ external: true, boundaryDenied: false })
+  expect(evaluateRealtimeMemberBoundary(
+    snapshot,
+    'guest@example.com',
+    'guest@example.com',
+    'guest',
+    [],
+  )).toMatchObject({ external: true })
 })

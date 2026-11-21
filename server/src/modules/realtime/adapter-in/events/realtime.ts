@@ -397,39 +397,52 @@ export function hasCurrentRealtimeEnterpriseSsoAssurance(
     })
 }
 
+/** Workspace-level enterprise standing of a realtime member, independent of the scope. */
+type RealtimeMemberBoundary = {
+  /** Directory principal resolved from SCIM and current Cognito groups. */
+  directoryPrincipal: ReturnType<typeof resolveEnterpriseDirectoryPrincipal>
+  /** Whether the member is a guest or outside the verified domains. */
+  external: boolean
+  /** Whether guest, external-collaborator, or deprovisioning policy denies the member. */
+  boundaryDenied: boolean
+}
+
 /**
- * Current SCIM/Cognito groups、custom roles、authoritative mappings、external ceiling を統合し、
- * authoritative enterprise authorization または legacy project ACL のどちらかを選択します。
+ * Evaluates the Workspace-level enterprise boundary that applies to every realtime scope.
+ *
+ * @param snapshot - Current enterprise identity snapshot.
+ * @param memberKey - Normalized member key.
+ * @param memberEmail - Member email used for the verified-domain check.
+ * @param workspaceRole - Current Workspace role.
+ * @param cognitoGroupIds - Current Cognito groups of the member.
+ * @returns The directory principal, whether the member is external, and whether policy denies it.
  */
-export function evaluateRealtimeEnterpriseAccess(
-  input: EvaluateRealtimeEnterpriseAccessInput,
-): RealtimeEnterpriseAccess {
-  const memberKey = normalizeMemberKey(input.memberKey)
-  const memberDomain = normalizeEmailDomain(input.memberEmail)
+export function evaluateRealtimeMemberBoundary(
+  snapshot: EnterpriseIdentitySnapshot,
+  memberKey: string,
+  memberEmail: string,
+  workspaceRole: EvaluateRealtimeEnterpriseAccessInput['workspaceRole'],
+  cognitoGroupIds: string[],
+): RealtimeMemberBoundary {
+  const memberDomain = normalizeEmailDomain(memberEmail)
   const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(
-    input.snapshot,
+    snapshot,
     memberKey,
-    input.cognitoGroupIds,
+    cognitoGroupIds,
   )
-  const {
-    compatibleGroupMappings,
-    compatibleRoleAssignments,
-    directoryGroupIds,
-    directoryGroupMemberships,
-  } = directoryPrincipal
-  const verifiedDomains = input.snapshot.domains.filter((domain) =>
+  const verifiedDomains = snapshot.domains.filter((domain) =>
     domain.status === 'verified'
   )
   const managedDomain = verifiedDomains.length === 0 || verifiedDomains.some((domain) =>
     domain.domain.trim().toLowerCase() === memberDomain
   )
-  const external = input.workspaceRole === 'guest' || !managedDomain
-  const recoveryAccount = input.snapshot.breakGlassAccounts.some((account) =>
+  const external = workspaceRole === 'guest' || !managedDomain
+  const recoveryAccount = snapshot.breakGlassAccounts.some((account) =>
     account.status === 'active' &&
     normalizeMemberKey(account.linkedMemberKey) === memberKey
   )
-  const externalPolicy = input.snapshot.policy?.externalAccess
-  const guestDenied = input.workspaceRole === 'guest' && externalPolicy !== undefined &&
+  const externalPolicy = snapshot.policy?.externalAccess
+  const guestDenied = workspaceRole === 'guest' && externalPolicy !== undefined &&
     (
       !externalPolicy.allowGuests ||
       externalPolicy.allowedGuestDomains.length > 0 &&
@@ -438,10 +451,39 @@ export function evaluateRealtimeEnterpriseAccess(
         )
     )
   const collaboratorDenied =
-    input.workspaceRole !== 'guest' &&
+    workspaceRole !== 'guest' &&
     !managedDomain &&
     externalPolicy?.allowExternalCollaborators === false &&
     !recoveryAccount
+  return {
+    directoryPrincipal,
+    external,
+    boundaryDenied: guestDenied || collaboratorDenied || directoryPrincipal.deprovisioned,
+  }
+}
+
+/**
+ * Current SCIM/Cognito groups、custom roles、authoritative mappings、external ceiling を統合し、
+ * authoritative enterprise authorization または legacy project ACL のどちらかを選択します。
+ */
+export function evaluateRealtimeEnterpriseAccess(
+  input: EvaluateRealtimeEnterpriseAccessInput,
+): RealtimeEnterpriseAccess {
+  const memberKey = normalizeMemberKey(input.memberKey)
+  const { directoryPrincipal, external, boundaryDenied: enterpriseBoundaryDenied } =
+    evaluateRealtimeMemberBoundary(
+      input.snapshot,
+      memberKey,
+      input.memberEmail,
+      input.workspaceRole,
+      input.cognitoGroupIds,
+    )
+  const {
+    compatibleGroupMappings,
+    compatibleRoleAssignments,
+    directoryGroupIds,
+    directoryGroupMemberships,
+  } = directoryPrincipal
   const workspaceRoleSuppressed = directoryPrincipal.directoryManaged ||
     compatibleRoleAssignments.some((assignment) =>
       assignment.principalKind === 'member' &&
@@ -500,8 +542,6 @@ export function evaluateRealtimeEnterpriseAccess(
       ? { projectScopeOwnerTeamId: input.projectScopeOwnerTeamId }
       : {}),
   })
-  const enterpriseBoundaryDenied =
-    guestDenied || collaboratorDenied || directoryPrincipal.deprovisioned
   const enterpriseAuthorizationAuthoritative = workspaceRoleSuppressed ||
     input.currentSystemAdministrator || input.breakGlass
   const ceilingAllowsRead = permissionCeiling === undefined ||
@@ -1259,6 +1299,7 @@ async function isRealtimeSessionAuthorized(
       session,
       cognitoGroupCache,
       enterpriseSnapshotCache,
+      breakGlassCache,
     )
   }
   const memberKey = normalizeMemberKey(session.memberKey)
@@ -1399,22 +1440,26 @@ async function isRealtimeSessionAuthorized(
  * Re-checks a Document subscription before it receives a change signal.
  *
  * The API checked the member's Document view permission when it issued the ticket, and the
- * subscription expires within five minutes. Until then
- * this check keeps the subscription only while the member is still active, a system-admin
- * ticket still belongs to a current system administrator, and the Workspace session policy
- * (lifetime, idle time, re-authentication, and IP allowlist) still accepts the session.
- * Signals carry no Document content; the client reads changes through the API, which applies
- * the current Document permission.
+ * subscription expires within five minutes. Until then this check applies everything about
+ * the member that does not depend on a Team or Work Item, as the Work Item check does: an
+ * active member row, a current system administrator for a system-admin ticket, SSO assurance
+ * and provider bindings unless break-glass is active, the guest, external-collaborator and
+ * deprovisioning boundary, and the session policy (lifetime, idle time, re-authentication,
+ * MFA, and IP allowlist) with the external limits for external members. Signals carry no
+ * Document content; the client reads changes through the API, which applies the current
+ * Document permission.
  *
  * @param session - Document ticket or connection row.
  * @param cognitoGroupCache - Per-fan-out cache of current Cognito groups by username.
  * @param enterpriseSnapshotCache - Per-fan-out cache of enterprise snapshots by Workspace.
+ * @param breakGlassCache - Per-fan-out cache of break-glass activations by session.
  * @returns Whether the subscription may receive signals.
  */
 async function isRealtimeDocumentSessionAuthorized(
   session: RealtimeSessionItem,
   cognitoGroupCache: Map<string, Promise<string[]>>,
   enterpriseSnapshotCache: Map<string, Promise<EnterpriseIdentitySnapshot>>,
+  breakGlassCache: Map<string, Promise<boolean>>,
 ) {
   if (!session.documentId) return false
   const memberKey = normalizeMemberKey(session.memberKey)
@@ -1438,17 +1483,18 @@ async function isRealtimeDocumentSessionAuthorized(
   const workspaceRole = readRealtimeWorkspaceRole(member.role)
   if (!workspaceRole) return false
 
-  if (session.systemAdmin) {
-    const memberEmail = readOptionalString(member.email) ?? memberKey
-    const username = readOptionalString(member.username) ?? memberEmail
-    let cognitoGroupsPromise = cognitoGroupCache.get(username)
-    if (!cognitoGroupsPromise) {
-      cognitoGroupsPromise = readCurrentRealtimeCognitoGroups(username)
-      cognitoGroupCache.set(username, cognitoGroupsPromise)
-    }
-    if (!hasConfiguredRealtimeSystemAdminGroup(await cognitoGroupsPromise)) {
-      return false
-    }
+  const memberEmail = readOptionalString(member.email) ?? memberKey
+  const username = readOptionalString(member.username) ?? memberEmail
+  let cognitoGroupsPromise = cognitoGroupCache.get(username)
+  if (!cognitoGroupsPromise) {
+    cognitoGroupsPromise = readCurrentRealtimeCognitoGroups(username)
+    cognitoGroupCache.set(username, cognitoGroupsPromise)
+  }
+  const cognitoGroupIds = await cognitoGroupsPromise
+  const currentSystemAdministrator = session.systemAdmin &&
+    hasConfiguredRealtimeSystemAdminGroup(cognitoGroupIds)
+  if (session.systemAdmin && !currentSystemAdministrator) {
+    return false
   }
 
   let snapshotPromise = enterpriseSnapshotCache.get(session.workspaceId)
@@ -1457,12 +1503,55 @@ async function isRealtimeDocumentSessionAuthorized(
     enterpriseSnapshotCache.set(session.workspaceId, snapshotPromise)
   }
   const snapshot = await snapshotPromise
+  const breakGlassKey =
+    `${session.workspaceId}\0${memberKey}\0${session.authenticationSessionId}`
+  let breakGlassPromise = breakGlassCache.get(breakGlassKey)
+  if (!breakGlassPromise) {
+    const registeredRecoveryAccount = snapshot.breakGlassAccounts.some((account) =>
+      account.status === 'active' &&
+      normalizeMemberKey(account.linkedMemberKey) === memberKey
+    )
+    breakGlassPromise = registeredRecoveryAccount
+      ? getEnterpriseIdentityClient()
+        .getActiveBreakGlassActivation(
+          session.workspaceId,
+          memberKey,
+          session.authenticationSessionId,
+        )
+        .then((activation) => activation !== undefined)
+      : Promise.resolve(false)
+    breakGlassCache.set(breakGlassKey, breakGlassPromise)
+  }
+  const breakGlass = await breakGlassPromise
+  if (!breakGlass) {
+    if (!hasCurrentRealtimeEnterpriseSsoAssurance(
+      snapshot,
+      memberEmail,
+      session.authenticationMethods,
+    )) return false
+    if (!await hasValidRealtimeCognitoProviderBindings(
+      snapshot,
+      memberKey,
+      memberEmail,
+      loadServerConfig().environment.COGNITO_ENTERPRISE_IDP_NAME?.trim() ?? '',
+      readRealtimeCognitoProviderBinding,
+    )) return false
+  }
+
+  const boundary = evaluateRealtimeMemberBoundary(
+    snapshot,
+    memberKey,
+    memberEmail,
+    workspaceRole,
+    cognitoGroupIds,
+  )
+  if (boundary.boundaryDenied) return false
   return isRealtimeEnterpriseSessionFresh(
     snapshot.policy,
     session,
-    workspaceRole === 'guest',
-    session.systemAdmin,
-    false,
+    boundary.external,
+    currentSystemAdministrator || breakGlass,
+    breakGlass,
   )
 }
 

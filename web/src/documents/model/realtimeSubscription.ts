@@ -111,14 +111,23 @@ export function startDocumentRealtimeSubscription(
     const sessionExpiresAt = ticket.sessionExpiresAt
       ? Date.parse(ticket.sessionExpiresAt)
       : Number.NaN
-    const lifetimeMs = Number.isFinite(sessionExpiresAt)
-      ? sessionExpiresAt - now()
-      : defaultSessionLifetimeMs
+    const expiresAtMs = Number.isFinite(sessionExpiresAt)
+      ? sessionExpiresAt
+      : now() + defaultSessionLifetimeMs
     let opened = false
+    let abandoned = false
 
     socket.addEventListener('open', () => {
       if (stopped) {
         socket.close()
+        return
+      }
+      // The handshake may have taken a while: measure what is left of the subscription now.
+      const remainingMs = expiresAtMs - now()
+      if (remainingMs <= 0) {
+        abandoned = true
+        socket.close()
+        retryAfterFailure()
         return
       }
       opened = true
@@ -133,7 +142,7 @@ export function startDocumentRealtimeSubscription(
         options.onChange('presence')
       }
       hasConnected = true
-      schedule(Math.max(minimumRetryDelayMs, lifetimeMs - renewalLeadMs))
+      schedule(Math.max(Math.min(minimumRetryDelayMs, remainingMs), remainingMs - renewalLeadMs))
       const ping = () => {
         if (stopped || active !== socket) return
         try {
@@ -146,7 +155,7 @@ export function startDocumentRealtimeSubscription(
       }
       setTimer(ping, documentRealtimePingIntervalMs)
       // The server stops signalling an expired subscription even if the socket stays open.
-      setTimer(() => loseActive(socket), Math.max(minimumRetryDelayMs, lifetimeMs))
+      setTimer(() => loseActive(socket), remainingMs)
     })
     socket.addEventListener('message', (event) => {
       if (active !== socket) return
@@ -166,7 +175,7 @@ export function startDocumentRealtimeSubscription(
         return
       }
       // A replacement that never opened: retry while the current socket keeps working.
-      if (!opened && !stopped) retryAfterFailure()
+      if (!opened && !abandoned && !stopped) retryAfterFailure()
     })
   }
 

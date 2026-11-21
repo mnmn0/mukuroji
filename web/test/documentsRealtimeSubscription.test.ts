@@ -227,6 +227,33 @@ describe('Document realtime subscription', () => {
     harness.stop()
   })
 
+  test('measures the remaining subscription when a slow handshake finishes', async () => {
+    const harness = await startHarness([ticket('t1'), ticket('t2', 10)])
+    const socket = harness.sockets[0]
+    await harness.advance(35_000)
+    socket?.emit('open')
+    // 300 s were left when the ticket arrived; renewal still starts 30 s before second 300.
+    await harness.advance(234_999)
+    expect(harness.ticketRequests()).toBe(1)
+    await harness.advance(1)
+    expect(harness.ticketRequests()).toBe(2)
+    // Without a replacement the client stops treating the socket as connected at second 300.
+    await harness.advance(30_000)
+    expect(harness.connected).toEqual([true, false])
+    harness.stop()
+  })
+
+  test('drops a socket that opens after its subscription expired', async () => {
+    const harness = await startHarness([ticket('t1', 1), ticket('t2', 10)])
+    await harness.advance(61_000)
+    harness.sockets[0]?.emit('open')
+    expect(harness.connected).toEqual([])
+    expect(harness.sockets[0]?.closed).toBeTrue()
+    await harness.advance(5_000)
+    expect(harness.ticketRequests()).toBe(2)
+    harness.stop()
+  })
+
   test('re-reads every part after reconnecting from a gap', async () => {
     const harness = await startHarness([ticket('t1'), ticket('t2')])
     harness.sockets[0]?.emit('open')
