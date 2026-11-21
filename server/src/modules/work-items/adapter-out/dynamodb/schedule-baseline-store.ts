@@ -11,6 +11,7 @@ import {
   type ProjectScheduleBaseline,
   type ProjectScheduleBaselineEntry,
 } from '@mukuroji/contracts'
+import { createAuditFieldChanges, createMutationAuditEventPut, type MutationAuditContext } from '../../../audit'
 import { ProjectDataError } from '../../../directory'
 import type {
   CaptureProjectScheduleBaselineInput as CaptureInput,
@@ -20,14 +21,17 @@ import type {
 /** DynamoDB condition checks that pin the caller's authorization in the same transaction. */
 export type ScheduleBaselineCallerAuthorizationCheck = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 
-/** Capture input with DynamoDB authorization fences. */
-export type CaptureProjectScheduleBaselineInput = CaptureInput<ScheduleBaselineCallerAuthorizationCheck>
+/** Capture input with DynamoDB authorization fences and the request audit context. */
+export type CaptureProjectScheduleBaselineInput = CaptureInput<ScheduleBaselineCallerAuthorizationCheck, MutationAuditContext>
 
-/** Baseline persistence bound to DynamoDB authorization fences. */
-export type ProjectScheduleBaselineStore = BaselineStore<ScheduleBaselineCallerAuthorizationCheck>
+/** Baseline persistence bound to DynamoDB authorization fences and the request audit context. */
+export type ProjectScheduleBaselineStore = BaselineStore<ScheduleBaselineCallerAuthorizationCheck, MutationAuditContext>
 
 /** Planning-table record type of a Project schedule baseline. */
 const ENTRY_TYPE = 'project-schedule-baseline'
+
+/** Baseline fields whose values the audit event records. */
+const AUDIT_FIELDS = ['revision', 'capturedAt', 'entryCount'] as const
 
 /**
  * Builds the Planning-table record key of a Project schedule baseline.
@@ -61,16 +65,20 @@ export class DynamoDbProjectScheduleBaselineStore implements ProjectScheduleBase
   private readonly tableName: string
   /** Injected document client. */
   private readonly client: DynamoDBDocumentClient
+  /** Audit event table, when audit is configured. */
+  private readonly auditTableName: string | undefined
 
   /**
    * Creates the store.
    *
    * @param tableName - Existing Planning table.
    * @param client - Configured document client.
+   * @param auditTableName - Audit event table written in the same transaction, when configured.
    */
-  constructor(tableName: string, client: DynamoDBDocumentClient) {
+  constructor(tableName: string, client: DynamoDBDocumentClient, auditTableName?: string) {
     this.tableName = tableName
     this.client = client
+    this.auditTableName = auditTableName
   }
 
   /**
@@ -108,6 +116,7 @@ export class DynamoDbProjectScheduleBaselineStore implements ProjectScheduleBase
       capturedAt: input.capturedAt,
       entries: input.entries.map((entry) => ({ ...entry })),
     }
+    const audit = createScheduleBaselineAuditPut(this.auditTableName, input, baseline)
     try {
       await this.client.send(new TransactWriteCommand({
         TransactItems: [
@@ -135,19 +144,54 @@ export class DynamoDbProjectScheduleBaselineStore implements ProjectScheduleBase
             },
           },
           ...input.callerAuthorization,
+          ...(audit ? [audit] : []),
         ],
       }))
     } catch (error) {
-      return storageFailure(error, input.callerAuthorization.length + 1)
+      return storageFailure(error, input.callerAuthorization.length + 1 + (audit ? 1 : 0))
     }
     return baseline
   }
+}
+
+/**
+ * Builds the audit event of a capture: `project.schedule_baseline_captured` for a Project's first
+ * baseline and `project.schedule_baseline_replaced` when it replaces one.
+ *
+ * The event keeps the revision, capture time, and Work Item count of both baselines, and not the
+ * Work Item IDs or dates, which the baseline row itself holds.
+ *
+ * @param auditTableName - Audit event table, when configured.
+ * @param input - Capture input.
+ * @param baseline - Baseline being stored.
+ * @returns The conditional audit Put, or undefined when audit is not configured.
+ */
+function createScheduleBaselineAuditPut(
+  auditTableName: string | undefined,
+  input: CaptureProjectScheduleBaselineInput,
+  baseline: ProjectScheduleBaseline,
+) {
+  const action = input.previous ? 'schedule_baseline_replaced' : 'schedule_baseline_captured'
+  const after = { revision: baseline.revision, capturedAt: baseline.capturedAt, entryCount: baseline.entries.length }
+  return createMutationAuditEventPut(auditTableName, input.auditContext, {
+    directoryId: input.workspaceId,
+    eventType: `project.${action}`,
+    entityType: 'project',
+    entityId: input.projectId,
+    target: { type: ENTRY_TYPE, id: input.projectId },
+    action,
+    occurredAt: input.capturedAt,
+    changes: createAuditFieldChanges(input.previous ?? undefined, after, AUDIT_FIELDS),
+    metadata: { teamId: input.teamId, projectId: input.projectId },
+  })
 }
 
 /** Isolated store for route and application tests. */
 export class InMemoryProjectScheduleBaselineStore implements ProjectScheduleBaselineStore {
   /** Baselines keyed by Workspace, Team, and Project. */
   private readonly baselines = new Map<string, ProjectScheduleBaseline>()
+  /** Audit events the captures would write, oldest first, for tests to inspect. */
+  readonly auditEvents: { eventType: string; projectId: string; actorId: string; revision: number }[] = []
 
   /**
    * Reads a copy of a Project's baseline.
@@ -179,6 +223,12 @@ export class InMemoryProjectScheduleBaselineStore implements ProjectScheduleBase
       entries: input.entries.map((entry) => ({ ...entry })),
     }
     this.baselines.set(key, structuredClone(baseline))
+    this.auditEvents.push({
+      eventType: input.previous ? 'project.schedule_baseline_replaced' : 'project.schedule_baseline_captured',
+      projectId: input.projectId,
+      actorId: input.auditContext.actor.id,
+      revision: baseline.revision,
+    })
     return baseline
   }
 }

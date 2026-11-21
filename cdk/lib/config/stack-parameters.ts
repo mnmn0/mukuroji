@@ -147,6 +147,10 @@ export interface StackParameters {
   readonly monthlyCostBudgetUsd: cdk.CfnParameter;
   /** Recipient of the cost budget alerts; empty sends them to the initial owner. */
   readonly costBudgetAlertEmail: cdk.CfnParameter;
+  /** X-Ray tracing mode of application Lambdas: `PassThrough` (default) or `Active`. */
+  readonly lambdaTracingMode: cdk.CfnParameter;
+  /** Whether `LambdaTracingMode` turns X-Ray active tracing on. */
+  readonly lambdaTracingActive: cdk.CfnCondition;
   /** Secret authenticating request intake email Webhooks, declared only with the request email module. */
   readonly requestEmailWebhookSecret: cdk.CfnParameter | undefined;
   /** Secret used to hash public request and reply tokens. */
@@ -615,6 +619,16 @@ export function buildStackParameters(
     description:
       'Email address that receives the cost budget alerts. Empty sends them to InitialOwnerEmail.',
   });
+  const lambdaTracingMode = new cdk.CfnParameter(stack, 'LambdaTracingMode', {
+    type: 'String',
+    default: 'PassThrough',
+    allowedValues: ['PassThrough', 'Active'],
+    description:
+      'X-Ray tracing of application Lambdas and state machines. PassThrough records no traces and costs nothing; Active samples 1 request per second plus 5% for investigation.',
+  });
+  const lambdaTracingActive = new cdk.CfnCondition(stack, 'LambdaTracingActive', {
+    expression: cdk.Fn.conditionEquals(lambdaTracingMode.valueAsString, 'Active'),
+  });
   const requestEmailWebhookSecret = options.requestEmailEnabled === true
     ? new cdk.CfnParameter(stack, 'RequestEmailWebhookSecret', {
       type: 'String',
@@ -872,6 +886,8 @@ export function buildStackParameters(
     notificationEmailSender,
     monthlyCostBudgetUsd,
     costBudgetAlertEmail,
+    lambdaTracingMode,
+    lambdaTracingActive,
     requestEmailWebhookSecret,
     requestTokenHashSecret,
     edgeOriginSecret,

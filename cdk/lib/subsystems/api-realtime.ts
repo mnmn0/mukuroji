@@ -10,6 +10,7 @@ import {
   resolveLambdaHandlerEntry,
   type LambdaBuildPaths,
 } from '../config/lambda-build-paths';
+import { deployOnlyWhen } from '../config/conditional-resources';
 import type { StackParameters } from '../config/stack-parameters';
 import { ManagedPolicyPrincipal } from '../policies/managed-policy-principal';
 import type { DataStoreResources } from './data-stores';
@@ -503,6 +504,10 @@ export function buildApiRuntime(
           input.parameters.apiRuntimeConfigurationRevision.valueAsString,
           'application commit',
           input.parameters.applicationCommitSha.valueAsString,
+          // Published versions keep the tracing mode they were created with, so a
+          // tracing change must publish a new version for the live alias.
+          'tracing',
+          input.parameters.lambdaTracingMode.valueAsString,
         ]),
       },
       bundling: {
@@ -1037,6 +1042,8 @@ export function buildApiRuntime(
     threshold: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
+  // AI alarms cost $0.10 each per month, so they exist only when AI is configured.
+  const aiAlarmCondition = input.parameters.aiAssistanceAnyProviderConfigured;
   const aiMetricConfiguration = {
     namespace: 'Mukuroji/AIAssistance',
     dimensionsMap: {
@@ -1044,7 +1051,7 @@ export function buildApiRuntime(
     },
     period: cdk.Duration.minutes(5),
   };
-  new cloudwatch.Alarm(scope, 'AiAssistanceProviderFailureAlarm', {
+  deployOnlyWhen(new cloudwatch.Alarm(scope, 'AiAssistanceProviderFailureAlarm', {
     alarmDescription:
       'Detects failed AI assistance provider attempts after durable attempt finalization.',
     comparisonOperator:
@@ -1058,8 +1065,9 @@ export function buildApiRuntime(
     }),
     threshold: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-  });
-  new cloudwatch.Alarm(scope, 'AiAssistanceProviderThrottleAlarm', {
+  }), aiAlarmCondition);
+
+  deployOnlyWhen(new cloudwatch.Alarm(scope, 'AiAssistanceProviderThrottleAlarm', {
     alarmDescription:
       'Detects repeated upstream AI provider throttling separately from local budget admission.',
     comparisonOperator:
@@ -1073,8 +1081,9 @@ export function buildApiRuntime(
     }),
     threshold: 3,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-  });
-  new cloudwatch.Alarm(scope, 'AiAssistanceInvalidOutputAlarm', {
+  }), aiAlarmCondition);
+
+  deployOnlyWhen(new cloudwatch.Alarm(scope, 'AiAssistanceInvalidOutputAlarm', {
     alarmDescription:
       'Detects AI provider responses rejected by the strict structured-output boundary.',
     comparisonOperator:
@@ -1088,8 +1097,9 @@ export function buildApiRuntime(
     }),
     threshold: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-  });
-  new cloudwatch.Alarm(scope, 'AiAssistanceProviderLatencyAlarm', {
+  }), aiAlarmCondition);
+
+  deployOnlyWhen(new cloudwatch.Alarm(scope, 'AiAssistanceProviderLatencyAlarm', {
     alarmDescription:
       'Detects sustained p95 AI provider latency above the generation budget.',
     comparisonOperator:
@@ -1103,8 +1113,9 @@ export function buildApiRuntime(
     }),
     threshold: cdk.Duration.seconds(12).toMilliseconds(),
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-  });
-  new cloudwatch.Alarm(scope, 'AiAssistanceUsageUnavailableAlarm', {
+  }), aiAlarmCondition);
+
+  deployOnlyWhen(new cloudwatch.Alarm(scope, 'AiAssistanceUsageUnavailableAlarm', {
     alarmDescription:
       'Detects provider attempts without complete token or cost accounting.',
     comparisonOperator:
@@ -1118,7 +1129,8 @@ export function buildApiRuntime(
     }),
     threshold: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-  });
+  }), aiAlarmCondition);
+
   const apiAvailabilityFastBurnFiveMinuteAlarm = new cloudwatch.Alarm(
     scope,
     'ApiAvailabilityFastBurnFiveMinuteAlarm',

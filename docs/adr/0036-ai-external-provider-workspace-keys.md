@@ -47,8 +47,12 @@ parameter で1つに固定され、利用者は接続先を選べない。手元
 ## 結果
 
 - Workspace の管理者が設定画面から Claude API と OpenAI のキーを登録し、model を選べる。
-- 追加費用は KMS の request 料金（1万 request あたり $0.03 程度）だけで、固定費は増えない。
-  provider の token 料金はそれぞれの提供元へ直接かかる。
+- キーの保存で増える費用は KMS の request 料金（1万 request あたり $0.03 程度）だけで、
+  secret の固定費は増えない。provider の token 料金はそれぞれの提供元へ直接かかる。
+- ADR 0040 の「AI が有効なときだけ AI の alarm 10 個を作る」判定は、Bedrock か外部 provider の
+  どちらかが有効な condition `AiAssistanceAnyProviderConfigured` に揃える。`AiExternalProviders`
+  は既定で有効なので、既定の deploy では alarm 10 個（月 $1）が作られる。不要なら
+  `AiExternalProviders=` を空にする。
 - 外部 provider の model を選ぶと、redaction 済みの prompt が AWS の外の提供元へ送られる。
   これは設定画面と利用者ガイドに書く。
 - キーの検証は形式（接頭辞と文字種）だけで、登録時に提供元へ問い合わせない。誤ったキーは

@@ -6,6 +6,7 @@ import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
+import { deployOnlyWhen } from '../../config/conditional-resources';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { DataStoreResources } from '../data-stores';
 
@@ -154,7 +155,7 @@ export function buildAiAssistanceObservabilityWorker(
     }
   }
 
-  new cloudwatch.Alarm(
+  deployOnlyWhen(new cloudwatch.Alarm(
     scope,
     'AiAssistanceObservabilityProjectionFailureAlarm',
     {
@@ -176,9 +177,9 @@ export function buildAiAssistanceObservabilityWorker(
       threshold: 1,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
-  );
+  ), input.aiAssistanceConfigured);
 
-  new cloudwatch.Alarm(
+  deployOnlyWhen(new cloudwatch.Alarm(
     scope,
     'AiAssistanceObservabilityFunctionErrorAlarm',
     {
@@ -195,8 +196,8 @@ export function buildAiAssistanceObservabilityWorker(
       threshold: 1,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
-  );
-  new cloudwatch.Alarm(
+  ), input.aiAssistanceConfigured);
+  deployOnlyWhen(new cloudwatch.Alarm(
     scope,
     'AiAssistanceObservabilityFunctionThrottleAlarm',
     {
@@ -213,8 +214,8 @@ export function buildAiAssistanceObservabilityWorker(
       threshold: 1,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
-  );
-  new cloudwatch.Alarm(
+  ), input.aiAssistanceConfigured);
+  deployOnlyWhen(new cloudwatch.Alarm(
     scope,
     'AiAssistanceObservabilityIteratorAgeAlarm',
     {
@@ -231,8 +232,8 @@ export function buildAiAssistanceObservabilityWorker(
       threshold: cdk.Duration.minutes(5).toMilliseconds(),
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
-  );
-  new cloudwatch.Alarm(scope, 'AiAssistanceObservabilityDlqAlarm', {
+  ), input.aiAssistanceConfigured);
+  deployOnlyWhen(new cloudwatch.Alarm(scope, 'AiAssistanceObservabilityDlqAlarm', {
     alarmDescription:
       'Detects terminal AI assistance records that exhausted observability stream retries.',
     comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
@@ -244,7 +245,8 @@ export function buildAiAssistanceObservabilityWorker(
     }),
     threshold: 1,
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
-  });
+  }), input.aiAssistanceConfigured);
+
 
   return {
     aiAssistanceObservabilityDlq,

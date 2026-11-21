@@ -132,3 +132,35 @@ test('leaves the AppConfig deployment untagged so the tag never replaces it', ()
     Tags: Match.absent(),
   });
 });
+
+test('records no X-Ray traces unless LambdaTracingMode turns active tracing back on', () => {
+  synthesizedTemplate.hasParameter('LambdaTracingMode', {
+    Default: 'PassThrough',
+    AllowedValues: ['PassThrough', 'Active'],
+  });
+  synthesizedTemplate.hasCondition('LambdaTracingActive', {
+    'Fn::Equals': [{ Ref: 'LambdaTracingMode' }, 'Active'],
+  });
+  const literallyTraced = Object.entries(
+    synthesizedTemplate.findResources('AWS::Lambda::Function'),
+  ).filter(([, resource]) => JSON.stringify(resource).includes('"Mode":"Active"'))
+    .map(([logicalId]) => logicalId);
+  expect(literallyTraced).toEqual([]);
+  const stateMachines = Object.values(
+    synthesizedTemplate.findResources('AWS::StepFunctions::StateMachine'),
+  );
+  expect(stateMachines.length).toBeGreaterThan(0);
+  for (const stateMachine of stateMachines) {
+    expect(JSON.stringify(stateMachine)).not.toContain('"Enabled":true');
+  }
+});
+
+test('creates the AI alarms only when Bedrock or an external AI provider is enabled', () => {
+  const aiAlarms = Object.entries(synthesizedTemplate.findResources('AWS::CloudWatch::Alarm'))
+    .filter(([logicalId]) => logicalId.startsWith('AiAssistance'));
+
+  expect(aiAlarms).toHaveLength(10);
+  for (const [, alarm] of aiAlarms) {
+    expect(alarm.Condition).toBe('AiAssistanceAnyProviderConfigured');
+  }
+});

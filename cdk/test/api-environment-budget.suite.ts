@@ -856,6 +856,8 @@ describe('API runtime configuration externalization', () => {
         ref('ApiRuntimeConfigurationRevision'),
         'application commit',
         ref('ApplicationCommitSha'),
+        'tracing',
+        ref('LambdaTracingMode'),
       ]),
     );
 

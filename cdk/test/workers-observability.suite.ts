@@ -22,7 +22,7 @@ test('Slack notifications use the sparse due queue with bounded execution and re
   const template = synthesizedTemplate;
   template.hasResourceProperties('AWS::Lambda::Function', {
     Description: SCHEDULED_JOBS_FUNCTION_DESCRIPTION,
-    TracingConfig: { Mode: 'Active' },
+    TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
     Environment: { Variables: Match.objectLike({
       NOTIFICATIONS_TABLE_NAME: { Ref: 'NotificationsTable76DCFC6C' },
       DOCUMENTS_TABLE_NAME: { Ref: 'DocumentsTable7E808EE5' },
@@ -2039,7 +2039,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
   const queues = template.findResources('AWS::SQS::Queue');
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
-    TracingConfig: { Mode: 'Active' },
+    TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
   }, 28);
 
   for (const logicalIdPrefix of [
@@ -2165,7 +2165,7 @@ test('AI observability consumes only terminal AI rows with bounded stream retrie
       MemorySize: 256,
       Runtime: 'nodejs22.x',
       Timeout: 30,
-      TracingConfig: { Mode: 'Active' },
+      TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
       Environment: {
         Variables: expect.objectContaining({
           MUKUROJI_APPLICATION_COMMIT_SHA: {
