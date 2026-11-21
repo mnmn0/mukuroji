@@ -12,7 +12,9 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
   CanonicalWorkItem,
+  ProjectScheduleBaselineEntry,
 } from '@mukuroji/contracts'
+import { deriveWorkItemBaselineEndDelayDays } from '@mukuroji/contracts'
 import { TeamIssuesApiError } from '../../issues/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
@@ -83,6 +85,12 @@ import { printTaskView, type TaskViewPrintPaper } from './taskViewPrint'
 import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
 import { formatShowMoreLabel, TASK_TABLE_RENDER_STEP } from '../model/taskListRendering'
 import { resolveWorkItemEffortColumnValue } from '../../work-items/model/workItemEffort'
+import type { WorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
+import {
+  formatTaskScheduleVariance,
+  resolveTaskScheduleVarianceTone,
+  taskScheduleVarianceToneClasses,
+} from '../model/taskActualDates'
 import {
   createTaskGanttScaledColumns,
   isTaskGanttScale,
@@ -121,6 +129,8 @@ type GanttRowLayout = {
   barHeight: number
   /** Vertical offset of the actual bar, just below the planned bar. */
   actualBarTop: number
+  /** Vertical offset of the thin baseline bar, below the actual bar. */
+  baselineBarTop: number
 }
 
 /** Row geometry of the standard layout, with the schedule editors under each title. */
@@ -128,6 +138,7 @@ const GANTT_STANDARD_ROW_LAYOUT: GanttRowLayout = {
   actualBarTop: 70,
   barHeight: 36,
   barTop: 28,
+  baselineBarTop: 84,
   rowHeight: 124,
   summaryBarTop: 10,
 }
@@ -137,8 +148,16 @@ const GANTT_COMPACT_ROW_LAYOUT: GanttRowLayout = {
   actualBarTop: 36,
   barHeight: 22,
   barTop: 12,
+  baselineBarTop: 48,
   rowHeight: 48,
   summaryBarTop: 2,
+}
+
+/** One-line layout with room for the baseline bar under the actual bar. */
+const GANTT_COMPACT_BASELINE_ROW_LAYOUT: GanttRowLayout = {
+  ...GANTT_COMPACT_ROW_LAYOUT,
+  baselineBarTop: 48,
+  rowHeight: 54,
 }
 
 const MAX_GANTT_TIMELINE_COLUMNS = 180
@@ -283,6 +302,11 @@ export type TaskGanttViewProps = {
   outline?: TaskGanttOutline
   /** Groups the rows, such as by Project, under heading rows. */
   group?: TaskGanttGrouping
+  /**
+   * Finds each Work Item's Project baseline. When set, rows with a baseline get a thin baseline
+   * bar under the plan and the days their end moved against it.
+   */
+  scheduleBaselineFor?: WorkItemBaselineLookup
 }
 
 /** Props for the Gantt schedule-preview dialog. */
@@ -324,6 +348,7 @@ export function TaskGanttView({
   outline,
   planningSnapshot,
   projectId,
+  scheduleBaselineFor,
   t,
   tasks,
   windowStartMonth,
@@ -393,7 +418,9 @@ export function TaskGanttView({
   /** Whether a move to today waits for the period containing today to render. */
   const todayScrollPendingRef = useRef(false)
   const printRootRef = useRef<HTMLElement>(null)
-  const rowLayout = isCompact ? GANTT_COMPACT_ROW_LAYOUT : GANTT_STANDARD_ROW_LAYOUT
+  const rowLayout = isCompact
+    ? scheduleBaselineFor ? GANTT_COMPACT_BASELINE_ROW_LAYOUT : GANTT_COMPACT_ROW_LAYOUT
+    : GANTT_STANDARD_ROW_LAYOUT
   const barCenterOffset = rowLayout.barTop + rowLayout.barHeight / 2
   const timelineRange = useMemo(
     () => timelineWindow
@@ -410,13 +437,15 @@ export function TaskGanttView({
           rows.flatMap((row) => {
             const range = resolveGanttActualDateRange(row.task, row.schedule)
             const rollup = row.outline?.node?.rollup
+            const baseline = resolveGanttBaselineDateRange(scheduleBaselineFor?.(row.task))
             return [
               ...(range ? [range.startDate, range.endDate] : []),
               ...(rollup?.startDate && rollup.endDate ? [rollup.startDate, rollup.endDate] : []),
+              ...(baseline ? [baseline.startDate, baseline.endDate] : []),
             ]
           }),
         ),
-    [dependencyRows, rows, timelineWindow],
+    [dependencyRows, rows, scheduleBaselineFor, timelineWindow],
   )
   const scaledTimeline = useMemo(
     () => scale === 'auto' ? undefined : createTaskGanttScaledColumns(timelineRange, scale),
@@ -998,6 +1027,23 @@ export function TaskGanttView({
                   .replace('{start}', row.task.actualStartDate)
                   .replace('{end}', row.task.actualEndDate ?? t('tasks.gantt.actualInProgress'))
               : undefined
+            const baselineEntry = scheduleBaselineFor?.(row.task)
+            const baselineRange = resolveGanttBaselineDateRange(baselineEntry)
+            const baselineBar = baselineRange
+              ? createGanttDateRangeBar(baselineRange.startDate, baselineRange.endDate, timelineAxis)
+              : undefined
+            const baselineDelayDays = baselineEntry
+              ? deriveWorkItemBaselineEndDelayDays(baselineEntry, row.task)
+              : undefined
+            const baselineDelayLabel = baselineDelayDays === undefined
+              ? undefined
+              : t('tasks.gantt.baselineDelay').replace('{delay}', formatTaskScheduleVariance(baselineDelayDays, t))
+            const baselineDelayTone = resolveTaskScheduleVarianceTone(baselineDelayDays)
+            const baselineBarLabel = baselineRange
+              ? `${t('tasks.gantt.baselineBar')
+                  .replace('{start}', baselineRange.startDate)
+                  .replace('{end}', baselineRange.endDate)}${baselineDelayLabel ? `, ${baselineDelayLabel}` : ''}`
+              : undefined
             const progressPercent = resolveWorkItemEffortColumnValue(
               row.task,
               'progress',
@@ -1081,6 +1127,16 @@ export function TaskGanttView({
                       )}
                     </div>
                     <span className="flex items-center gap-2">
+                      {baselineDelayLabel && baselineDelayTone && baselineDelayDays !== undefined ? (
+                        <span
+                          aria-label={baselineDelayLabel}
+                          className={`whitespace-nowrap text-xs font-semibold tabular-nums ${taskScheduleVarianceToneClasses[baselineDelayTone]}`}
+                          data-testid={`task-gantt-baseline-delay-${row.task.id}`}
+                          title={baselineDelayLabel}
+                        >
+                          {formatGanttBaselineDelay(baselineDelayDays)}
+                        </span>
+                      ) : null}
                       {onCreateTaskOpen && !isCompact ? (
                         <button
                           aria-label={`${t('tasks.gantt.add')}: ${resolveWorkItemTitle(row.task)}`}
@@ -1306,6 +1362,22 @@ export function TaskGanttView({
                         width: `${actualBar.width}px`,
                       }}
                       title={actualBarLabel}
+                    />
+                  ) : null}
+                  {baselineBar && baselineBarLabel ? (
+                    // The baseline sits under the plan and the actual bar, so a moved plan shows
+                    // as an offset between the two.
+                    <div
+                      aria-label={baselineBarLabel}
+                      className="absolute z-[2] h-1.5 rounded-sm border border-tone-98a2b3 bg-tone-d0d5dd"
+                      data-testid={`task-gantt-baseline-bar-${row.task.id}`}
+                      role="img"
+                      style={{
+                        left: `${baselineBar.left}px`,
+                        top: `${rowLayout.baselineBarTop}px`,
+                        width: `${baselineBar.width}px`,
+                      }}
+                      title={baselineBarLabel}
                     />
                   ) : null}
                 </div>
@@ -2264,6 +2336,32 @@ function createGanttActualBar(
 ): GanttBar | undefined {
   const range = resolveGanttActualDateRange(task, schedule)
   return range ? createGanttDateRangeBar(range.startDate, range.endDate, axis) : undefined
+}
+
+/**
+ * Resolves the range a baseline bar covers: the frozen start to the frozen end, or the end
+ * alone for a deadline-only entry.
+ *
+ * @param entry - Baseline entry of the Work Item, if any.
+ * @returns The inclusive range, or undefined when the entry has no end date.
+ */
+function resolveGanttBaselineDateRange(
+  entry: ProjectScheduleBaselineEntry | undefined,
+): { startDate: string, endDate: string } | undefined {
+  if (!entry?.endDate) return undefined
+  const startDate = entry.startDate && entry.startDate <= entry.endDate ? entry.startDate : entry.endDate
+  return { startDate, endDate: entry.endDate }
+}
+
+/**
+ * Formats a signed baseline end delay as a short chip text.
+ *
+ * @param days - Positive when behind the baseline, negative when ahead.
+ * @returns Text such as `+3d`, `-2d`, or `±0d`.
+ */
+function formatGanttBaselineDelay(days: number): string {
+  if (days === 0) return '±0d'
+  return days > 0 ? `+${days}d` : `${days}d`
 }
 
 /**

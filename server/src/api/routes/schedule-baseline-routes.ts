@@ -11,6 +11,7 @@ import { readBearerAccessToken } from '../shared/http'
 import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import {
   canAccessAssignedProject,
+  createApiMutationContext,
   requireTeamPermission,
   requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
@@ -23,7 +24,8 @@ import { projectAccessAllows, type TeamPermissionContext } from '../shared/works
  *
  * Reading needs viewer access to the Project and returns only the entries of Work Items the
  * reader may currently see. Capturing needs manager access to the Project, because a baseline
- * is the approved plan that later slips are measured against.
+ * is the approved plan that later slips are measured against, and every capture is written to
+ * the audit log in the same transaction.
  *
  * @param routeApp - Hono app the routes are added to.
  */
@@ -68,6 +70,7 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
             [],
             principal.principalKind !== 'service-account',
           ),
+          auditContext: createApiMutationContext(c, principal, {}),
         },
       )
       return c.json(response, 201)
