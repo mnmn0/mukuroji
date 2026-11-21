@@ -627,10 +627,10 @@ async function recordAuditEvent(
     await dependencies.writeText(itemPath, toDynamoDbItemJson(buildRuntimeControlAuditEvent(audit, change, step)))
     await dependencies.aws(buildAuditPutItemArguments(audit.tableName, region, itemPath))
   } catch (error) {
-    if (error instanceof RuntimeControlError) {
-      throw new RuntimeControlError(`Could not record ${RUNTIME_CONTROL_AUDIT_EVENT_TYPES[step.phase]} in the audit log: ${error.message}`)
-    }
-    throw error
+    // Any failure here, including a builder or file error, is an audit-write failure that the
+    // caller decides about, so a stop can continue and the original switch error is not masked.
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new RuntimeControlError(`Could not record ${RUNTIME_CONTROL_AUDIT_EVENT_TYPES[step.phase]} in the audit log: ${reason}`)
   }
   dependencies.log(`Recorded ${RUNTIME_CONTROL_AUDIT_EVENT_TYPES[step.phase]} in the audit log.`)
 }
