@@ -206,6 +206,8 @@ const standardTaskViewFields = [
   'project',
   'team',
 ]
+/** Columns that only the table shows, without filters, sorting, or grouping. */
+const taskViewDisplayOnlyColumns = ['baselineEndDelayDays']
 
 /**
  * Preserves the identity of a Work Item file scope until its route identifiers change.
@@ -644,6 +646,7 @@ export function TaskPage() {
   const taskViewColumns = useMemo(
     () => [
       ...standardTaskViewFields,
+      ...taskViewDisplayOnlyColumns,
       ...WORK_ITEM_EFFORT_COLUMN_FIELDS,
       ...(taskViewCustomFields.length > 0 ? ['customFields'] : []),
       ...taskViewCustomFields.map((field) => `custom:${field.id}`),
@@ -749,6 +752,7 @@ export function TaskPage() {
       { id: 'estimate', label: t('tasks.column.estimate') },
       { id: 'remainingEffort', label: t('tasks.column.remainingEffort') },
       { id: 'progress', label: t('tasks.column.progress') },
+      { id: 'baselineEndDelayDays', label: t('tasks.column.baselineEndDelayDays') },
       ...(taskViewCustomFields.length > 0
         ? [{ id: 'customFields', label: t('workItems.fields.title') }]
         : []),
@@ -760,7 +764,8 @@ export function TaskPage() {
     [t, taskViewCustomFields],
   )
   const taskViewSortOptions = useMemo(
-    () => taskViewFieldOptions.filter((option) => option.id !== 'customFields'),
+    () => taskViewFieldOptions.filter((option) =>
+      option.id !== 'customFields' && !taskViewDisplayOnlyColumns.includes(option.id)),
     [taskViewFieldOptions],
   )
   const taskViewGroupOptions = useMemo(

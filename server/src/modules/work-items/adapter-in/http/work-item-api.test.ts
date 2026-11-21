@@ -35,6 +35,7 @@ import {
   DEFAULT_WORK_ITEM_TYPE,
 } from '@mukuroji/contracts'
 import { InMemoryPlanningClient } from '../../../planning/planning'
+import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { createWorkItemAuthorizationChangedError } from '../../adapter-out/dynamodb/work-item-client'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { AuthenticatedDeveloperCredential } from '../../../developer-platform/application/ports'
@@ -2627,6 +2628,111 @@ test('allows active system administrators to be mentioned without project member
     expect(writes).toHaveLength(1)
     expect(writes[0]?.mentionMemberKeys).toEqual(['admin@example.com'])
   }
+})
+
+test('allows a member who can view only through a personal Enterprise role to be mentioned', async () => {
+  for (const unassignedIssue of [false, true]) {
+    configureFakeProjectClients(true, {
+      mentionAccessDeniedMemberKeys: ['pmo@example.com'],
+      unassignedIssue,
+    })
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const readIdentity = identity.getSnapshot.bind(identity)
+    identity.getSnapshot = async (workspaceId) => ({
+      ...await readIdentity(workspaceId),
+      roleAssignments: [{
+        workspaceId,
+        assignmentId: 'pmo-portfolio-viewer',
+        principalKind: 'member',
+        principalId: 'pmo@example.com',
+        roleId: 'workspace:portfolio-viewer',
+        scope: { workspaceId, kind: 'workspace' },
+        source: 'direct',
+      }],
+    })
+    const writes: Parameters<CollaborationClient['createComment']>[0][] = []
+    setTestAppDependencies({
+      enterpriseIdentity: identity,
+      collaboration: createCollaborationStub({
+        async createComment(input) {
+          writes.push(input)
+          return {
+            id: 'pmo-mention',
+            rootCommentId: 'pmo-mention',
+            authorMemberKey: input.actorMemberKey,
+            bodyMarkdown: input.bodyMarkdown,
+            version: 1,
+            mentionMemberKeys: input.mentionMemberKeys ?? [],
+            createdAt: '2026-07-12T00:00:00.000Z',
+            updatedAt: '2026-07-12T00:00:00.000Z',
+            acceptedResolutions: [],
+            reactions: [],
+          }
+        },
+      }),
+    })
+
+    const mention = (memberKey: string) => app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        bodyMarkdown: 'Please review this.',
+        mentionMemberKeys: [memberKey],
+      }),
+    })
+
+    expect((await mention('pmo@example.com')).status).toBe(201)
+    expect(writes.map((write) => write.mentionMemberKeys)).toEqual([['pmo@example.com']])
+  }
+})
+
+test('rejects a mention whose legacy Project membership Enterprise no longer honors', async () => {
+  configureFakeProjectClients(true, { role: 'manager' })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (workspaceId) => ({
+    ...await readIdentity(workspaceId),
+    roleAssignments: [{
+      workspaceId,
+      assignmentId: 'sato-auditor',
+      principalKind: 'member',
+      principalId: 'sato@example.com',
+      roleId: 'workspace:auditor',
+      scope: { workspaceId, kind: 'workspace' },
+      source: 'direct',
+    }],
+  })
+  let writes = 0
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    collaboration: createCollaborationStub({
+      async createComment() {
+        writes += 1
+        throw new Error('Collaboration store must not be called.')
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      bodyMarkdown: 'Please review this, @Sato.',
+      mentionMemberKeys: ['sato@example.com'],
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    message: 'Mentioned Workspace member "sato@example.com" cannot view the assigned project.',
+  })
+  expect(writes).toBe(0)
 })
 
 test('allows a Workspace owner with viewer access to moderate a comment', async () => {

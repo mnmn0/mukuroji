@@ -104,6 +104,33 @@ function receiptKey(scope: Pick<WeeklyReportMemberScope, 'teamId' | 'memberKey'>
 }
 
 /**
+ * Builds a transaction condition that holds while a member's week has no submitted version.
+ *
+ * A notification about an unsubmitted report is saved with it, so a submission that lands
+ * between the check and the save cancels the notification.
+ *
+ * @param tableName - Planning table.
+ * @param scope - Workspace, Team, and author.
+ * @param weekStart - First day of the week.
+ * @returns The `ConditionCheck` transaction item.
+ */
+export function createWeeklyReportUnsubmittedCondition(
+  tableName: string,
+  scope: WeeklyReportMemberScope,
+  weekStart: string,
+) {
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { workspaceId: scope.workspaceId, recordKey: weekKey(scope, weekStart) },
+      ConditionExpression: 'attribute_not_exists(#recordKey) OR #submissionCount = :zero',
+      ExpressionAttributeNames: { '#recordKey': 'recordKey', '#submissionCount': 'submissionCount' },
+      ExpressionAttributeValues: { ':zero': 0 },
+    },
+  }
+}
+
+/**
  * Waits before unprocessed BatchGetItem keys are sent again, with full jitter.
  *
  * @param attempt - Attempts already made, 1 or more.

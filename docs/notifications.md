@@ -16,6 +16,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 - Work Item archive / restore: `archive-change`
 - 上記の変更の作成者: `creator`（責任者と同じ人なら 1 件にまとまる）
 - 上記の変更の item watcher: `watcher`（projection が現在の購読から解決する。Project watcher には送らない。title や説明だけの変更では送らない）
+- blocker の解除（`work-item.blocker-removed`、block されていた側の event）: 責任者に `assignee`、item watcher に `watcher`。責任者がいない Work Item でも watcher には送る。blocker を追加したときと、block していた側の `work-item.blocking-removed` では送らない。relation を消した本人には送らない。Work Item の削除で relation が消えた場合と、blocker が完了しただけの場合は対象外（relation 自体は残る）
 - 定期 due scan: `due` / `due-soon` / `overdue` / `escalation` / `stale`
 - 定期 timesheet scan: `timesheet`（未提出の工数の督促）
 - comment / reply: `mention` / `reply` / `watcher` / `project-watcher`
@@ -256,5 +257,18 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 - event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` で、同じ Project に属し、scan 時の期限（その時点から n 日前）までに終わっている entry が 1 件も残っていなければ捨てます。日付を直して期限より後に終わる entry になった場合も数えません。残っていれば、その entry の revision を条件にした ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で読み直して捨てます。読み直す手段がない projection では督促を届けません
 - 宛先の権限は、その Project の通知として確認します（その Project を読めること）。Inbox・Slack・Email のどれでも同じで、Team の全 Project を読める必要はありません。読めなくなった Project の entry は、ほかの Project の督促を止めません
 - Slack への配信は送信時に宛先の権限を確認しますが、提出状況は読み直しません。quiet hours や digest で Slack 送信が遅れる間に提出した場合は、Slack に古い督促が届くことがあります
+
+### 週報の督促
+
+週報（ADR 0030）を出していない人に、週に 1 回 `weekly-report.submission-reminder` が届きます。出さないまま週が明けると、その人が書いている Project の manager に `weekly-report.submission-escalation` が届きます（ADR 0035）。
+
+- 時刻は Workspace ごとの設定で、tenant profile の `weeklyReportReminders`（`enabled`・`reminder`・`escalationEnabled`・`escalation`、時刻は `{ weekday: 0〜6, hour: 0〜23 }`）に保存します。**設定** → **Workspace 管理** → **テナント管理** で、`PATCH /api/tenant/profile`（owner / admin、Enterprise では `workspace.manage`、`expectedRevision` の比較つき）から変えます。保存していない Workspace は既定（本人へ金曜 17 時、manager へ月曜 10 時）です。時刻は日本時間（`Asia/Tokyo`）で読みます。schedule は 1 時間ごとで、毎回 Workspace ごとに tenant profile を読み、その時の実行で 1 回だけ作ります。失敗した回は送りません。本人への督促を止めると manager への通知も止まります。閉鎖中・閉鎖済みの Workspace には送りません。両方を有効にして同じ曜日・時刻にはできません（`400 InvalidWeeklyReportReminderSettings`）
+- 対象の週は、督促の日を含む Workspace の週（tenant profile の calendar の `weekStartDay`、未設定なら月曜始まり）です。manager への通知は、直近の督促の日を含む週について出します（既定では金曜を含む週）
+- 書く人は、Team の active な Project に unarchived の `manager` / `member` で入っている人です。viewer、archive 済みの Team・Project・membership、複数の Team が同じ ID を使う Project は除きます。Enterprise の role だけで入っていて membership 行がない人は対象外です
+- 未提出は、週の行（`WEEKLY_REPORT#<team>#MEMBER#<member>#W#<week>`）がないか `submissionCount` が 0 のことです
+- 本人への督促は Team ごとに 1 通で、本人が書いている最初の Project（ID 順）の通知として認可します。manager への通知は作成者 × manager ごとに 1 通で、作成者本人には送りません。重複排除 key は Workspace・Team・週・種類・作成者・宛先です
+- 通知は Inbox の「週報の提出」として届き、本人は `/teams/{teamId}/timesheet?view=weekly-report&week=<週の開始日>`、manager は `view=team-weekly-reports` の同じ週を開きます。概要は週の開始日と、manager 向けには作成者の表示名です
+- projection は配信時に週の行を強整合で読み直し、提出済みなら捨てます。未提出なら「週の行がないか `submissionCount = 0`」の ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で捨てます。読み直す手段がない projection では届けません
+- 宛先の権限は event の Project の通知として確認し、さらに作成者がその Project に `manager` / `member` で残っていること、manager への通知では宛先がその Project の manager であることを、projection と Slack・Email の送信時の両方で確かめます。Slack・Email の送信時は提出状況を読み直しません
 
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

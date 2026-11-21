@@ -50,6 +50,7 @@ const activityLabelKeys: Record<string, MessageKey> = {
   'work-item.blocking-removed': 'collaboration.activity.blockingRemoved',
   'work-item.relation-added': 'collaboration.activity.relationAdded',
   'work-item.relation-removed': 'collaboration.activity.relationRemoved',
+  'work-item.sibling-order-changed': 'collaboration.activity.siblingOrderChanged',
   'context-item.created': 'collaboration.activity.contextItemCreated',
   'context-item.updated': 'collaboration.activity.contextItemUpdated',
   'context-item.superseded': 'collaboration.activity.contextItemSuperseded',

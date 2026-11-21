@@ -3,6 +3,7 @@ import type {
   AiAssistanceDraft,
   AiAssistanceGeneration,
   AiAssistancePolicy,
+  AiAssistanceProvider,
   AiAssistancePreference,
   AiAssistanceTask,
   AiAssistanceUncertainty,
@@ -288,7 +289,9 @@ export type AiAssistanceAuthorizationCallbacks = {
 
 /** Provider request passed through the replaceable model gateway port. */
 export type AiModelGenerationInput = {
-  /** Selected deployment-allowlisted Bedrock model identifier. */
+  /** Workspace whose provider key and policy govern this call. */
+  workspaceId: string
+  /** Selected deployment-allowlisted model identifier. */
   modelId: string
   /** Requested product workflow. */
   task: AiAssistanceTask
@@ -826,8 +829,15 @@ export type AiAssistanceServiceOptions = {
   store: AiAssistanceStore
   /** Default policy returned before a Workspace policy is explicitly written. */
   defaultPolicy: AiAssistancePolicy
-  /** Deployment-level Bedrock model allowlist enforced above Workspace policy. */
+  /** Deployment-level model allowlist (Bedrock and enabled external models) enforced above Workspace policy. */
   deploymentAllowedModelIds: readonly string[]
+  /** Resolves the provider that serves a model; Bedrock when omitted. */
+  resolveModelProvider?: (modelId: string) => AiAssistanceProvider
+  /**
+   * Checks, before any budget is reserved, that the Workspace can call the
+   * model's provider (for example that an external provider key is registered).
+   */
+  isModelReady?: (workspaceId: string, modelId: string) => Promise<boolean>
   /** Prompt template version retained in every generation. */
   promptVersion: string
   /** Optional append-only audit boundary for successful policy transitions. */

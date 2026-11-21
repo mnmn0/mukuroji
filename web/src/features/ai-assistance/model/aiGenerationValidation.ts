@@ -823,7 +823,7 @@ function isUncertainty(value: unknown): boolean {
 /** Validates technical generation details and provider usage. */
 function isGenerationDetails(value: unknown): boolean {
   return isRecord(value) &&
-    value.provider === 'bedrock' &&
+    (value.provider === 'bedrock' || value.provider === 'anthropic' || value.provider === 'openai') &&
     isBoundedNonEmptyTrimmedString(value.modelId, aiAssistanceModelIdMaximumLength) &&
     isBoundedNonEmptyTrimmedString(value.promptVersion, aiAssistancePromptVersionMaximumLength) &&
     isBoundedNonEmptyTrimmedString(value.traceId, aiAssistanceTraceIdMaximumLength) &&

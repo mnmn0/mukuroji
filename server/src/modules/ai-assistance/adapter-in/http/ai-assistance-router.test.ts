@@ -557,7 +557,7 @@ describe('createAiAssistanceRouter', () => {
       new AiAssistanceError(
         'rate-limit',
         'AiAssistanceProviderRateLimited',
-        'Bedrock Runtime rate limit was exceeded.',
+        'The AI provider rate limit was exceeded.',
       ),
       new AiAssistanceError(
         'upstream',

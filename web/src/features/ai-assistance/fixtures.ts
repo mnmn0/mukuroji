@@ -2,6 +2,7 @@ import type {
   AiAssistanceGeneration,
   AiAssistancePolicy,
   AiAssistancePreference,
+  AiAssistanceProviderCredentials,
 } from '@mukuroji/contracts'
 
 /** Available intake triage generation used by Request and Team adoption stories. */
@@ -321,3 +322,19 @@ export const aiAssistancePolicyFixture = {
   revision: 4,
   updatedAt: '2026-08-25T02:20:00.000Z',
 } satisfies AiAssistancePolicy
+
+/** Key-free provider status with a registered Claude API key and no OpenAI key. */
+export const aiProviderCredentialsFixture = {
+  schemaVersion: 1,
+  providers: [
+    {
+      provider: 'anthropic',
+      deploymentEnabled: true,
+      configured: true,
+      keyHint: 'WXYZ',
+      revision: 2,
+      updatedAt: '2026-11-21T08:00:00.000Z',
+    },
+    { provider: 'openai', deploymentEnabled: true, configured: false, revision: 0 },
+  ],
+} satisfies AiAssistanceProviderCredentials

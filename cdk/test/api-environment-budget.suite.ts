@@ -197,6 +197,9 @@ const expectedIdentityConfiguration = {
 };
 
 const expectedDataConfiguration = {
+  AI_ASSISTANCE_PROVIDER_CREDENTIAL_KMS_KEY_ID: base64(
+    getAtt('DeveloperPlatformKeyCFFB4400', 'Arn'),
+  ),
   ANALYTICS_SCHEDULE_INDEX_NAME: base64('ScheduleDueIndex'),
   ANALYTICS_TABLE_NAME: base64(ref('AnalyticsTable3F84C304')),
   AUDIT_EVENTS_TABLE_NAME: base64(ref('AuditEventsTable0723963E')),
@@ -822,6 +825,7 @@ describe('API runtime configuration externalization', () => {
       AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD:
         ref('AiBedrockOutputPricePerMillionTokensUsd'),
       AI_ASSISTANCE_DEFAULT_MODEL_ID: ref('AiBedrockModelId'),
+      AI_ASSISTANCE_EXTERNAL_PROVIDERS: ref('AiExternalProviders'),
       AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE: '4',
       AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE: '4000000',
       AI_ASSISTANCE_TABLE_NAME: ref('WorkspaceSearchTable2575AD6B'),

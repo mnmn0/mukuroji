@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type {
   AiAssistancePolicy,
   ResolvedWorkItemConfiguration,
@@ -15,7 +16,12 @@ import {
   DynamoDbWeeklyReportStore,
   InMemoryWeeklyReportStore,
 } from '../../modules/weekly-reports'
-import { AI_ASSISTANCE_SCHEMA_VERSION, listJapanesePublicHolidays } from '@mukuroji/contracts'
+import {
+  AI_ASSISTANCE_MAX_AVAILABLE_MODELS,
+  AI_ASSISTANCE_SCHEMA_VERSION,
+  listJapanesePublicHolidays,
+  type AiAssistanceAvailableModel,
+} from '@mukuroji/contracts'
 import { createProductionJapanesePublicHolidayDates } from './japanese-public-holidays'
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
 import {
@@ -37,14 +43,27 @@ import type {
   WorkspaceDependencies,
 } from './app-dependencies'
 import {
+  AI_ASSISTANCE_EXTERNAL_PROVIDERS,
+  AiAssistanceError,
+  createAiAssistanceAvailableModels,
   createAiAssistanceService,
+  createAiProviderCredentialService,
   createDisabledAiAssistanceService,
   createAiAssistanceEmfObservability,
+  createKmsAiProviderCredentialCipher,
+  createLocalAiProviderCredentialCipher,
   createMastraBedrockAiModelGateway,
+  createRoutingAiModelGateway,
   DynamoDbAiAssistanceStore,
+  findAiAssistanceExternalModel,
+  listAiAssistanceExternalModels,
+  parseAiAssistanceExternalProviders,
   type AiAssistancePolicyAudit,
   type AiAssistancePolicyAuditInput,
   type AiAssistanceService,
+  type AiProviderCredentialAuditInput,
+  type AiProviderCredentialCipher,
+  type AiProviderCredentialService,
 } from '../../modules/ai-assistance'
 import {
   createDynamoDbClient,
@@ -892,37 +911,75 @@ function createAiAssistancePolicyAudit(
   }
 }
 
+/** Production AI dependencies resolved together on first AI use. */
+type ProductionAiAssistanceRuntime = {
+  /** Policy, generation, review, and feedback use cases. */
+  service: AiAssistanceService
+  /** Workspace provider keys; absent when AI or every external provider is disabled. */
+  providerCredentials?: AiProviderCredentialService
+  /** Deployment models a Workspace policy may allow. */
+  availableModels: readonly AiAssistanceAvailableModel[]
+}
+
 /**
- * Creates the production AI service with SigV4 credentials and exact model allowlists.
+ * Creates the production AI runtime with SigV4 Bedrock, Workspace-keyed external providers, and exact model allowlists.
+ *
+ * AI stays disabled when neither a Bedrock model nor an external provider is
+ * configured. External providers need the KMS key used for envelope encryption
+ * of Workspace API keys in production.
  *
  * @param auditEvents - Existing Workspace audit persistence boundary.
- * @returns Mastra/Bedrock service backed by the existing Workspace Search table.
+ * @returns Service, provider key service, and model list backed by the existing Workspace Search table.
  */
-function createProductionAiAssistanceService(
+function createProductionAiAssistanceRuntime(
   auditEvents: AuditEventsClient,
-): AiAssistanceService {
+): ProductionAiAssistanceRuntime {
   if (!auditEvents) {
     throw new TypeError('AI assistance audit events dependency is required.')
   }
   const config = loadServerConfig()
   const environment = config.environment
-  const configuredDefaultModelId = environment.AI_ASSISTANCE_DEFAULT_MODEL_ID?.trim()
-  if (!configuredDefaultModelId) return createDisabledAiAssistanceService()
+  const configuredDefaultModelId = environment.AI_ASSISTANCE_DEFAULT_MODEL_ID?.trim() || undefined
+  const enabledExternalProviders = parseAiAssistanceExternalProviders(
+    environment.AI_ASSISTANCE_EXTERNAL_PROVIDERS,
+  )
+  const externalModels = listAiAssistanceExternalModels(enabledExternalProviders)
+  if (!configuredDefaultModelId && externalModels.length === 0) {
+    return { service: createDisabledAiAssistanceService(), availableModels: [] }
+  }
   if (environment.AWS_BEARER_TOKEN_BEDROCK !== undefined) {
     throw new TypeError(
       'AWS_BEARER_TOKEN_BEDROCK is not supported; use the Lambda execution role or the standard AWS credential chain.',
     )
   }
-  const defaultModelId = configuredDefaultModelId
-  const allowedModelIds = readAiAssistanceAllowedModelIds(
-    environment.AI_ASSISTANCE_ALLOWED_MODEL_IDS,
-    defaultModelId,
-  )
-  if (!allowedModelIds.includes(defaultModelId)) {
+  const bedrockModelIds = configuredDefaultModelId === undefined
+    ? []
+    : readAiAssistanceAllowedModelIds(
+        environment.AI_ASSISTANCE_ALLOWED_MODEL_IDS,
+        configuredDefaultModelId,
+      )
+  if (configuredDefaultModelId !== undefined && !bedrockModelIds.includes(configuredDefaultModelId)) {
     throw new TypeError(
       'AI_ASSISTANCE_DEFAULT_MODEL_ID must be included in AI_ASSISTANCE_ALLOWED_MODEL_IDS.',
     )
   }
+  if (bedrockModelIds.some((modelId) => findAiAssistanceExternalModel(modelId) !== undefined)) {
+    throw new TypeError(
+      'AI_ASSISTANCE_ALLOWED_MODEL_IDS must contain Bedrock model IDs, not external provider model IDs.',
+    )
+  }
+  const externalDefaultModel = externalModels[0]
+  const defaultModelId = configuredDefaultModelId ?? externalDefaultModel?.modelId
+  if (defaultModelId === undefined) {
+    throw new TypeError('AI assistance requires a Bedrock or external default model.')
+  }
+  const availableModels = createAiAssistanceAvailableModels(bedrockModelIds, externalModels)
+  if (availableModels.length > AI_ASSISTANCE_MAX_AVAILABLE_MODELS) {
+    throw new TypeError(
+      `AI assistance can list at most ${AI_ASSISTANCE_MAX_AVAILABLE_MODELS} models; reduce AI_ASSISTANCE_ALLOWED_MODEL_IDS or AI_ASSISTANCE_EXTERNAL_PROVIDERS.`,
+    )
+  }
+  const allowedModelIds = availableModels.map((model) => model.modelId)
   const workspaceGenerationLimitPerMinute = readAiAssistanceBudgetInteger(
     environment.AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE,
     'AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE',
@@ -987,7 +1044,7 @@ function createProductionAiAssistanceService(
   const defaultPolicy: AiAssistancePolicy = {
     schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
     enabled: true,
-    allowedModelIds,
+    allowedModelIds: configuredDefaultModelId === undefined ? allowedModelIds : bedrockModelIds,
     defaultModelId,
     enabledTasks: ['triage', 'summary', 'search', 'planning'],
     retentionDays: DEFAULT_AI_ASSISTANCE_RETENTION_DAYS,
@@ -1002,21 +1059,44 @@ function createProductionAiAssistanceService(
     workspaceAccessTableName,
     enterpriseIdentityTableName,
   )
-  return createAiAssistanceService({
-    gateway: createMastraBedrockAiModelGateway({
-      region: environment.AI_ASSISTANCE_BEDROCK_REGION?.trim() || config.awsRegion,
-      credentialProvider: fromNodeProviderChain(),
-      ...(inputTokenPrice === undefined || outputTokenPrice === undefined
-        ? {}
-        : {
-            pricingByModelId: {
-              [defaultModelId]: {
-                inputPerMillionTokensUsd: inputTokenPrice,
-                outputPerMillionTokensUsd: outputTokenPrice,
+  // A Bedrock-only deployment never reads provider keys, so it needs no cipher or KMS key.
+  const providerCredentials = enabledExternalProviders.size === 0
+    ? undefined
+    : createAiProviderCredentialService({
+        store,
+        cipher: createAiProviderCredentialCipher(environment, config.production),
+        enabledProviders: enabledExternalProviders,
+        createAuditEvent: createAiProviderCredentialAuditEvent,
+      })
+  const bedrockGateway = configuredDefaultModelId === undefined
+    ? undefined
+    : createMastraBedrockAiModelGateway({
+        region: environment.AI_ASSISTANCE_BEDROCK_REGION?.trim() || config.awsRegion,
+        credentialProvider: fromNodeProviderChain(),
+        ...(inputTokenPrice === undefined || outputTokenPrice === undefined
+          ? {}
+          : {
+              pricingByModelId: {
+                [configuredDefaultModelId]: {
+                  inputPerMillionTokensUsd: inputTokenPrice,
+                  outputPerMillionTokensUsd: outputTokenPrice,
+                },
               },
-            },
-          }),
+            }),
+      })
+  const service = createAiAssistanceService({
+    gateway: createRoutingAiModelGateway({
+      ...(bedrockGateway === undefined ? {} : { bedrock: bedrockGateway }),
+      resolveApiKey: async (workspaceId, provider) =>
+        await providerCredentials?.resolveApiKey(workspaceId, provider),
     }),
+    resolveModelProvider: (modelId) =>
+      findAiAssistanceExternalModel(modelId)?.provider ?? 'bedrock',
+    isModelReady: async (workspaceId, modelId) => {
+      const externalModel = findAiAssistanceExternalModel(modelId)
+      if (externalModel === undefined) return true
+      return await providerCredentials?.isConfigured(workspaceId, externalModel.provider) ?? false
+    },
     store,
     defaultPolicy,
     deploymentAllowedModelIds: allowedModelIds,
@@ -1033,6 +1113,88 @@ function createProductionAiAssistanceService(
     memberTokenLimitPerMinute,
     worstCaseTokensPerGeneration,
   })
+  return {
+    service,
+    ...(providerCredentials === undefined ? {} : { providerCredentials }),
+    availableModels,
+  }
+}
+
+/**
+ * Selects the provider key cipher: KMS envelope in production, a fixed local key otherwise.
+ *
+ * @param environment - Runtime environment.
+ * @param production - Whether the runtime is production.
+ * @returns Context-bound cipher.
+ * @throws TypeError when production lacks the KMS key ID.
+ */
+function createAiProviderCredentialCipher(
+  environment: Readonly<Record<string, string | undefined>>,
+  production: boolean,
+): AiProviderCredentialCipher {
+  const keyId = environment.AI_ASSISTANCE_PROVIDER_CREDENTIAL_KMS_KEY_ID?.trim()
+  if (keyId) return createKmsAiProviderCredentialCipher(keyId)
+  if (production) {
+    throw new TypeError(
+      'AI_ASSISTANCE_PROVIDER_CREDENTIAL_KMS_KEY_ID must be set when external AI providers are enabled.',
+    )
+  }
+  const localKey = environment.AI_ASSISTANCE_PROVIDER_CREDENTIAL_LOCAL_KEY?.trim()
+  return createLocalAiProviderCredentialCipher(
+    localKey ? Buffer.from(localKey, 'base64') : LOCAL_DEVELOPMENT_PROVIDER_CREDENTIAL_KEY,
+  )
+}
+
+/**
+ * Publicly known fallback key for local development without KMS.
+ *
+ * It is stable so keys saved to a persistent local table still decrypt after a
+ * restart; production never reaches it because production requires KMS.
+ */
+const LOCAL_DEVELOPMENT_PROVIDER_CREDENTIAL_KEY = createHash('sha256')
+  .update('mukuroji-local-development-ai-provider-credential-key')
+  .digest()
+
+/**
+ * Builds the key-free audit event for one provider key change.
+ *
+ * @param input - Actor, provider, action, and revisions.
+ * @returns Audit event that records only the provider, revision, and whether a key exists.
+ */
+function createAiProviderCredentialAuditEvent(
+  input: AiProviderCredentialAuditInput,
+): AuditEventV1 {
+  const route = '/api/ai-assistance/provider-credentials/:provider'
+  const method = input.action === 'deleted' ? 'DELETE' : 'PUT'
+  const context = createMutationAuditContext({
+    workspaceId: input.actor.workspaceId,
+    actor: { id: input.actor.actorId, kind: input.actor.auditActorKind },
+    idempotencyKey:
+      `ai-assistance-provider-credential:${input.actor.workspaceId}:${input.provider}:${input.revision}`,
+    request: {
+      method,
+      path: `/api/ai-assistance/provider-credentials/${input.provider}`,
+      body: { expectedRevision: input.previousRevision, revision: input.revision },
+    },
+    source: { kind: 'api', method, route },
+    occurredAt: input.occurredAt,
+  })
+  return createAuditEvent({
+    context,
+    eventType: 'ai-assistance.provider-credential.updated',
+    entity: { type: 'workspace', id: input.actor.workspaceId },
+    target: { type: 'workspace', id: input.actor.workspaceId },
+    action: input.action,
+    before: { provider: input.provider, configured: input.action !== 'created', revision: input.previousRevision },
+    after: { provider: input.provider, configured: input.action !== 'deleted', revision: input.revision },
+    summary: 'AI provider API key was changed.',
+    metadata: {
+      provider: input.provider,
+      previousRevision: input.previousRevision,
+      revision: input.revision,
+    },
+    expiresAt: calculateAuditExpiresAt(input.occurredAt, getConfiguredAuditRetentionDays()),
+  })
 }
 
 /**
@@ -1044,10 +1206,65 @@ function createProductionAiAssistanceService(
 export function createProductionAiAssistanceDependencies(
   auditEvents: AuditEventsClient,
 ): AiAssistanceDependencies {
+  let runtime: ProductionAiAssistanceRuntime | undefined
+  /** Resolves the runtime once for this dependency graph. */
+  const resolveRuntime = () => {
+    runtime ??= createProductionAiAssistanceRuntime(auditEvents)
+    return runtime
+  }
   return {
-    aiAssistanceService: createLazyAiAssistanceService(
-      () => createProductionAiAssistanceService(auditEvents),
+    aiAssistanceService: createLazyAiAssistanceService(() => resolveRuntime().service),
+    aiProviderCredentialService: createLazyAiProviderCredentialService(
+      () => resolveRuntime().providerCredentials,
     ),
+    getAiAssistanceAvailableModels: () => resolveRuntime().availableModels,
+  }
+}
+
+/**
+ * Creates a provider key service proxy that resolves the runtime on first use.
+ *
+ * @param resolve - Returns the configured service, or undefined when AI is disabled.
+ * @returns Service that rejects every call while AI is disabled.
+ */
+function createLazyAiProviderCredentialService(
+  resolve: () => AiProviderCredentialService | undefined,
+): AiProviderCredentialService {
+  /** Returns the configured service or throws the stable disabled error. */
+  function require(): AiProviderCredentialService {
+    const service = resolve()
+    if (service !== undefined) return service
+    throw new AiAssistanceError(
+      'authorization',
+      'AiAssistanceDisabled',
+      'AI assistance is not configured for this deployment.',
+    )
+  }
+  return {
+    list: async (actor) => {
+      const service = resolve()
+      if (service !== undefined) return await service.list(actor)
+      if (!actor.canManagePolicy) return require().list(actor)
+      // A Bedrock-only or AI-disabled deployment reports every provider as off so the
+      // settings screen can hide the key section instead of showing a load error.
+      return {
+        schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
+        providers: AI_ASSISTANCE_EXTERNAL_PROVIDERS.map((provider) => ({
+          provider,
+          deploymentEnabled: false,
+          configured: false,
+          revision: 0,
+        })),
+      }
+    },
+    put: async (actor, provider, request, authorization) =>
+      await require().put(actor, provider, request, authorization),
+    delete: async (actor, provider, request, authorization) =>
+      await require().delete(actor, provider, request, authorization),
+    isConfigured: async (workspaceId, provider) =>
+      await require().isConfigured(workspaceId, provider),
+    resolveApiKey: async (workspaceId, provider) =>
+      await require().resolveApiKey(workspaceId, provider),
   }
 }
 

@@ -199,9 +199,11 @@ export function buildAuditProjectionWorker(
   auditEventsTable.grantStreamRead(collaborationProjectionFunction);
   collaborationTable.grants.readData(collaborationProjectionFunction);
   notificationsTable.grants.readWriteData(collaborationProjectionFunction);
+  // Weekly report reminders are dropped once the week is submitted; the notification save is
+  // conditioned on the week row so a concurrent submission cancels it.
   collaborationProjectionFunction.addToRolePolicy(
     new iam.PolicyStatement({
-      actions: ['dynamodb:GetItem'],
+      actions: ['dynamodb:GetItem', 'dynamodb:ConditionCheckItem'],
       resources: [planningTable.tableArn],
     }),
   );

@@ -6,12 +6,12 @@ Mukuroji の AI assistance は Mastra から Amazon Bedrock Runtime の Converse
 
 ## Production configuration
 
-AI は CDK 未設定で無効です。有効にする場合は model ID に `jp.anthropic.claude-sonnet-4-6` を明示し、下記の関連 parameter をまとめて指定します。Bedrock Runtime region は API Lambda と
+Bedrock は CDK 未設定で無効です（外部 provider は下の [External providers](#external-providers-claude-api-and-openai) を参照）。Bedrock を有効にする場合は model ID に `jp.anthropic.claude-sonnet-4-6` を明示し、下記の関連 parameter をまとめて指定します。Bedrock Runtime region は API Lambda と
 同じ `AWS::Region` です。JP Geo inference profile は Tokyo (`ap-northeast-1`) または Osaka
 (`ap-northeast-3`) からだけ呼び出せるため、この model ID を使う stack はそのどちらかへ
 deployします。Tokyo からは Tokyo と Osaka の両方へ route されます。
 
-CDK deploy では次の parameter を固定します。全項目未設定ならproviderも永続storeも初期化せず、保存済みpolicyにかかわらず生成を拒否します。設定画面に無効状態を表示し、個人設定から有効化できません。Webはserverのavailabilityを使いますが、緊急時には `VITE_AI_ASSISTANCE_ENABLED=false` でもUIを隠せます。既存stackでの無効化は[CDK手順](../cdk/README.md#optional-sso-and-ai)に従い全値を空にしてruntime revisionを更新します。
+CDK deploy では次の parameter を固定します。Bedrock の全項目が未設定で、`AiExternalProviders` も空なら、providerも永続storeも初期化せず、保存済みpolicyにかかわらず生成を拒否します（`AiExternalProviders` は既定で `anthropic,openai` です）。設定画面に無効状態を表示し、個人設定から有効化できません。Webはserverのavailabilityを使いますが、緊急時には `VITE_AI_ASSISTANCE_ENABLED=false` でもUIを隠せます。既存stackでの無効化は[CDK手順](../cdk/README.md#optional-sso-and-ai)に従い、Bedrock の全値と `AiExternalProviders` を空にしてruntime revisionを更新します。
 
 | Parameter | Contract |
 | --- | --- |
@@ -48,7 +48,11 @@ AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE=4
 AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE=32000000
 AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE=4000000
 AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION=1000000
+AI_ASSISTANCE_EXTERNAL_PROVIDERS=<AiExternalProviders>
 ```
+
+`AI_ASSISTANCE_PROVIDER_CREDENTIAL_KMS_KEY_ID`（`DeveloperPlatformKey` の ARN）は Lambda environment の
+4 KB 上限を避けるため API runtime configuration secret に入れます。
 
 現在の allowlist は一つだけです。Request の `modelId` が異なる場合に IAM failureへ任せず、
 application boundaryでも拒否します。AI generation record は既存 Workspace Search table の
@@ -214,6 +218,43 @@ Primary statementは `AiBedrockModelArn` のexact ARNだけを対象にします
 Anthropic modelを初めて使うaccountでは、deploy前にBedrock model access、Marketplace prerequisites、
 必要なFTU手続きが完了していることも確認します。
 
+## External providers (Claude API and OpenAI)
+
+Bedrock に加えて、Claude API（Anthropic）と OpenAI を接続先に選べます（[ADR 0036](adr/0036-ai-external-provider-workspace-keys.md)）。
+
+- **Deploy switch**: `AiExternalProviders`（既定 `anthropic,openai`、空で無効）を `AI_ASSISTANCE_EXTERNAL_PROVIDERS`
+  として API に渡します。未設定・空の server は外部 provider を一切読み込みません。Bedrock が未設定でも
+  外部 provider が1つでもあれば AI は有効になり、既定 policy は全外部 model を許可します。
+- **Model catalog**: model ID は全 provider で一意で、server の catalog（`ai-assistance-model-catalog.ts`）が
+  model ID から provider と token 単価を決めます。2026-11-21 に提供元の料金表で確認した値です。
+
+  | Provider | Model ID | Input / Output（USD / 100万 token） |
+  | --- | --- | --- |
+  | `anthropic` | `claude-sonnet-5-5`（既定） | 2 / 10 |
+  | `anthropic` | `claude-opus-5-5` | 4 / 20 |
+  | `anthropic` | `claude-haiku-5-5` | 0.1 / 0.5 |
+  | `openai` | `gpt-6.2-sol` | 2 / 10 |
+
+  Bedrock の allowlist（`AI_ASSISTANCE_ALLOWED_MODEL_IDS`）に外部 model ID を入れると起動時に拒否します。
+  Policy の応答には、この環境で使える model と provider を `availableModels` として返します。
+- **呼び出し**: provider の公式 SDK（`@anthropic-ai/sdk`、`openai`）を Mastra gateway の runner として使い、
+  出力 schema の検証、予約、budget、監査、redaction、timeout は Bedrock と共通です。SDK の自動 retry は切り、
+  Claude API の server 側 fallback は単価が変わるため使いません。Claude API の structured outputs は optional property が
+  24 個までなので、出力 schema は system prompt に JSON Schema として載せ、返った JSON を gateway が検証します
+  （prompt caching も単価が変わるため使いません）。OpenAI は Responses API に `store: false`、non-strict の JSON schema で送ります。
+  Bedrock と外部 model を合わせて 40 個を超える構成は起動時に拒否します（Web が受け取れる上限）。
+- **API キー**: Workspace 管理者（`workspace.manage`）が provider ごとに1つ登録します。
+  `GET /api/ai-assistance/provider-credentials` は登録状況と末尾4文字だけを返し、
+  `PUT /api/ai-assistance/provider-credentials/{provider}`（`apiKey`、`expectedRevision`）と
+  `DELETE ...?expectedRevision=` で変更します。応答はすべて `Cache-Control: private, no-store` です。
+  キーは `DeveloperPlatformKey` の data key（encryption context `mukuroji:service=ai-assistance`、
+  `mukuroji:purpose=provider-credential`、Workspace、provider）で AES-256-GCM 暗号化し、
+  Workspace Search table の `AI_PROVIDER_CREDENTIAL#<provider>` row に置きます。変更は revision の CAS、
+  Workspace membership の再確認、監査 event（キーは含めない）を1つの transaction で書きます。
+- **キーが無いとき**: 選んだ model の provider にキーが無ければ、budget を予約する前に
+  `AiAssistanceProviderCredentialMissing`（400）を返します。生成中に削除された場合は `AiAssistanceProviderError` です。
+- **データの送り先**: 外部 model を選ぶと、redaction と member alias を適用した prompt が AWS の外の提供元へ送られます。
+
 ## Local development
 
 Local development は個人access keyを `.env` へ保存せず、AWS IAM Identity Centerまたはreview済みの
@@ -237,6 +278,12 @@ export AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION=1000000
 unset AWS_BEARER_TOKEN_BEDROCK
 bun run server:dev
 ```
+
+外部 provider を local で試す場合は `AI_ASSISTANCE_EXTERNAL_PROVIDERS=anthropic`（または `openai`、
+`anthropic,openai`）を加え、設定画面からキーを登録します。Local では KMS の代わりに
+`AI_ASSISTANCE_PROVIDER_CREDENTIAL_LOCAL_KEY`（base64 の 32 byte）の鍵で暗号化します。未設定なら
+code に書いた公開の開発用鍵を使うため、再起動しても登録したキーは読めますが、本物のキーは登録しないでください。Floci の KMS で確かめる場合は
+`AI_ASSISTANCE_PROVIDER_CREDENTIAL_KMS_KEY_ID` に Floci の key ARN を指定します。Production では KMS key ID が必須です。
 
 Local principalにもproductionと同じexact profile/destination ARN boundaryを適用します。通常のunit testは
 Mastra実行境界へ決定的なrunnerを注入し、AWS network、credential、課金modelを呼びません。

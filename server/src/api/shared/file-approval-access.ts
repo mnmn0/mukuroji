@@ -56,6 +56,10 @@ import {
 } from './app-dependencies'
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import { readJson } from './http'
+import {
+  canMemberViewWorkItemScope,
+  createMemberWorkItemVisibilityReads,
+} from './member-work-item-visibility'
 import { toProjectDataErrorResponse, type WorkspacePrincipal } from './project-access'
 import { isRecord } from './value-guards'
 import { readAcceptanceCriteriaChange } from './work-item-acceptance-criteria'
@@ -66,7 +70,7 @@ import {
   readWorkItemTypeChangeResolution,
   requireActiveCustomFieldPeople,
 } from './work-item-configuration'
-import { projectAccessAllows, toWorkspaceAccessErrorResponse } from './workspace-access'
+import { toWorkspaceAccessErrorResponse } from './workspace-access'
 
 /**
  * Requires every approval reviewer to be active and able to view the target Work Item.
@@ -86,12 +90,7 @@ export async function requireApprovalReviewers(
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
 ) {
-  const directory = assignedProjectId
-    ? undefined
-    : await dependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja', true)
-  const teamProjectIds = new Set(
-    directory?.teams.find((team) => team.id === teamId)?.projects.map((project) => project.id) ?? [],
-  )
+  const visibilityReads = createMemberWorkItemVisibilityReads(workspaceId, dependencies)
   return await Promise.all(reviewerMemberKeys.map(async (memberKey) => {
     const member = await dependencies.workspaceAccess.getActiveMember(
       workspaceId,
@@ -104,36 +103,25 @@ export async function requireApprovalReviewers(
         `Reviewer "${memberKey}" is not an active Workspace member.`,
       )
     }
-    const reviewerIsSystemAdmin = await dependencies.cognito.isSystemAdmin(
-      member.memberKey,
+    const canView = await canMemberViewWorkItemScope(
+      member,
+      {
+        workspaceId,
+        teamId,
+        ...(assignedProjectId ? { assignedProjectId } : {}),
+        permissions: ['work-items.read', 'files.read'],
+      },
+      dependencies,
+      visibilityReads,
     )
-    if (assignedProjectId && !reviewerIsSystemAdmin) {
-      const projectAccess = await dependencies.projectDirectory.getProjectAccess(
-        workspaceId,
-        assignedProjectId,
-        member.memberKey,
+    if (!canView) {
+      throw new FileProofingError(
+        409,
+        'ApprovalReviewerAccessDenied',
+        assignedProjectId
+          ? `Reviewer "${memberKey}" cannot view the assigned project.`
+          : `Reviewer "${memberKey}" cannot view the Work Item team.`,
       )
-      if (!projectAccess || !projectAccessAllows(projectAccess, 'viewer')) {
-        throw new FileProofingError(
-          409,
-          'ApprovalReviewerAccessDenied',
-          `Reviewer "${memberKey}" cannot view the assigned project.`,
-        )
-      }
-    } else if (!assignedProjectId && !reviewerIsSystemAdmin) {
-      const projectAccesses = await dependencies.projectDirectory.getProjectAccessList(
-        workspaceId,
-        member.memberKey,
-      )
-      if (!projectAccesses.some((access) =>
-        teamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer')
-      )) {
-        throw new FileProofingError(
-          409,
-          'ApprovalReviewerAccessDenied',
-          `Reviewer "${memberKey}" cannot view the Work Item team.`,
-        )
-      }
     }
     return member
   }))

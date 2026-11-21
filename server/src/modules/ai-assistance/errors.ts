@@ -37,6 +37,9 @@ export type AiAssistanceErrorCode =
   | 'AiAssistanceProviderError'
   | 'AiAssistanceProviderRateLimited'
   | 'AiAssistanceProviderTimeout'
+  | 'AiAssistanceProviderNotEnabled'
+  | 'AiAssistanceProviderCredentialMissing'
+  | 'InvalidAiAssistanceProviderCredential'
   | 'InvalidAiAssistanceRecord'
 
 /** Application error that keeps HTTP and AWS implementation details out of the domain. */
