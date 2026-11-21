@@ -5,6 +5,7 @@ import {
   DescribeTableCommand,
   DescribeTimeToLiveCommand,
   DynamoDBClient,
+  UpdateTableCommand,
   UpdateTimeToLiveCommand,
 } from '@aws-sdk/client-dynamodb'
 import { GetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
@@ -30,6 +31,9 @@ import {
   ensureLocalWorkspaceSearchTable,
   migrateSavedWorkspaceView,
   WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH,
+  WORKSPACE_SEARCH_TITLE_INDEX_ATTRIBUTES,
+  WORKSPACE_SEARCH_TITLE_INDEX_KEY,
+  WORKSPACE_SEARCH_TITLE_INDEX_NAME,
 } from './workspace-search'
 
 test('keeps the unprocessed DynamoDB page behind the opaque search cursor', async () => {
@@ -1356,7 +1360,9 @@ test('returns a Work Item title match on the first page behind thousands of comm
   const client = new DynamoDbWorkspaceSearchClient(
     'search-table',
     createMemoryDocumentClient([...comments, workItem], {
-      observeQuery: (prefix) => queriedPrefixes.push(prefix),
+      observeQuery: (prefix, _recordKeys, indexName) => {
+        if (!indexName) queriedPrefixes.push(prefix)
+      },
     }),
     {} as DynamoDBClient,
     false,
@@ -4238,6 +4244,10 @@ test('waits for a newly created local search table to become active', async () =
             { AttributeName: 'workspaceId', KeyType: 'HASH' },
             { AttributeName: 'recordKey', KeyType: 'RANGE' },
           ],
+          GlobalSecondaryIndexes: [{
+            IndexName: WORKSPACE_SEARCH_TITLE_INDEX_NAME,
+            IndexStatus: describeCount >= 3 ? 'ACTIVE' : 'CREATING',
+          }],
         },
       }
     },
@@ -4248,6 +4258,7 @@ test('waits for a newly created local search table to become active', async () =
   expect(commands).toEqual([
     'DescribeTableCommand',
     'CreateTableCommand',
+    'DescribeTableCommand',
     'DescribeTableCommand',
     'DescribeTableCommand',
     'DescribeTimeToLiveCommand',
@@ -4273,6 +4284,10 @@ test('enables and verifies expiresAt TTL on an existing local search table', asy
               { AttributeName: 'workspaceId', KeyType: 'HASH' },
               { AttributeName: 'recordKey', KeyType: 'RANGE' },
             ],
+            GlobalSecondaryIndexes: [{
+              IndexName: WORKSPACE_SEARCH_TITLE_INDEX_NAME,
+              IndexStatus: 'ACTIVE',
+            }],
           },
         }
       }
@@ -4293,10 +4308,65 @@ test('enables and verifies expiresAt TTL on an existing local search table', asy
 
   expect(commands).toEqual([
     'DescribeTableCommand',
+    'DescribeTableCommand',
     'DescribeTimeToLiveCommand',
     'UpdateTimeToLiveCommand',
     'DescribeTimeToLiveCommand',
   ])
+})
+
+test('adds the title index to an existing local search table that predates it', async () => {
+  const commands: string[] = []
+  const updates: UpdateTableCommand[] = []
+  let indexStatus: string | undefined
+  const dynamoDbClient = {
+    async send(
+      command: DescribeTableCommand | UpdateTableCommand | DescribeTimeToLiveCommand,
+    ) {
+      commands.push(command.constructor.name)
+      if (command instanceof UpdateTableCommand) {
+        updates.push(command)
+        indexStatus = 'CREATING'
+        return {}
+      }
+      if (command instanceof DescribeTimeToLiveCommand) {
+        return { TimeToLiveDescription: { AttributeName: 'expiresAt', TimeToLiveStatus: 'ENABLED' } }
+      }
+      const currentStatus = indexStatus
+      if (indexStatus === 'CREATING') indexStatus = 'ACTIVE'
+      return {
+        Table: {
+          TableStatus: 'ACTIVE',
+          KeySchema: [
+            { AttributeName: 'workspaceId', KeyType: 'HASH' },
+            { AttributeName: 'recordKey', KeyType: 'RANGE' },
+          ],
+          ...(currentStatus
+            ? { GlobalSecondaryIndexes: [{ IndexName: WORKSPACE_SEARCH_TITLE_INDEX_NAME, IndexStatus: currentStatus }] }
+            : {}),
+        },
+      }
+    },
+  } as unknown as DynamoDBClient
+
+  await ensureLocalWorkspaceSearchTable('search-table', dynamoDbClient)
+
+  expect(commands).toEqual([
+    'DescribeTableCommand',
+    'DescribeTableCommand',
+    'UpdateTableCommand',
+    'DescribeTableCommand',
+    'DescribeTableCommand',
+    'DescribeTimeToLiveCommand',
+  ])
+  expect(updates[0]?.input.GlobalSecondaryIndexUpdates?.[0]?.Create).toEqual({
+    IndexName: WORKSPACE_SEARCH_TITLE_INDEX_NAME,
+    KeySchema: [
+      { AttributeName: 'workspaceId', KeyType: 'HASH' },
+      { AttributeName: WORKSPACE_SEARCH_TITLE_INDEX_KEY, KeyType: 'RANGE' },
+    ],
+    Projection: { ProjectionType: 'INCLUDE', NonKeyAttributes: ['entityId', 'title', 'subtitle'] },
+  })
 })
 
 test('waits for a disabling local TTL operation before enabling expiresAt', async () => {
@@ -4315,6 +4385,10 @@ test('waits for a disabling local TTL operation before enabling expiresAt', asyn
               { AttributeName: 'workspaceId', KeyType: 'HASH' },
               { AttributeName: 'recordKey', KeyType: 'RANGE' },
             ],
+            GlobalSecondaryIndexes: [{
+              IndexName: WORKSPACE_SEARCH_TITLE_INDEX_NAME,
+              IndexStatus: 'ACTIVE',
+            }],
           },
         }
       }
@@ -4337,6 +4411,7 @@ test('waits for a disabling local TTL operation before enabling expiresAt', asyn
 
   expect(commands).toEqual([
     'DescribeTableCommand',
+    'DescribeTableCommand',
     'DescribeTimeToLiveCommand',
     'DescribeTimeToLiveCommand',
     'UpdateTimeToLiveCommand',
@@ -4354,8 +4429,8 @@ function createMemoryDocumentClient(
       items: Map<string, Record<string, unknown>>,
       transactItems: Array<Record<string, Record<string, unknown>>>,
     ) => void
-    /** Observes the record keys returned by each in-memory query page. */
-    observeQuery?: (prefix: string, recordKeys: readonly string[]) => void
+    /** Observes the record keys returned by each in-memory query page, and the index it read. */
+    observeQuery?: (prefix: string, recordKeys: readonly string[], indexName?: string) => void
     /** Mutates or observes in-memory state immediately before one point read. */
     beforeGet?: (
       items: Map<string, Record<string, unknown>>,
@@ -4401,6 +4476,9 @@ function createMemoryDocumentClient(
           throw new Error('query failed')
         }
         const prefix = String(expressionValues?.[':prefix'] ?? '')
+        if (input.IndexName === WORKSPACE_SEARCH_TITLE_INDEX_NAME) {
+          return queryMemoryTitleIndex(tableItems, prefix, input, control.observeQuery)
+        }
         const startKey = (input.ExclusiveStartKey as { recordKey?: string } | undefined)?.recordKey
         const matching = tableItems.filter((item) =>
           String(item.recordKey).startsWith(prefix) && (!startKey || String(item.recordKey) > startKey)
@@ -4448,6 +4526,60 @@ function createMemoryDocumentClient(
       return {}
     },
   } as unknown as DynamoDBDocumentClient
+}
+
+/**
+ * Answers a title index query the way the sparse INCLUDE GSI does: only rows with the index key,
+ * in index key order, with the key and projected attributes only.
+ *
+ * @param tableItems - Items of the queried Workspace partition.
+ * @param prefix - Entity type prefix of the key condition.
+ * @param input - Query command input.
+ * @param observeQuery - Optional observer of the returned page.
+ * @returns One in-memory query page.
+ */
+function queryMemoryTitleIndex(
+  tableItems: Array<Record<string, unknown>>,
+  prefix: string,
+  input: Record<string, unknown>,
+  observeQuery?: (prefix: string, recordKeys: readonly string[], indexName?: string) => void,
+) {
+  const startKey = (input.ExclusiveStartKey as Record<string, unknown> | undefined)?.[
+    WORKSPACE_SEARCH_TITLE_INDEX_KEY
+  ]
+  const indexKey = (item: Record<string, unknown>) => {
+    const value = item[WORKSPACE_SEARCH_TITLE_INDEX_KEY]
+    return typeof value === 'string' ? value : undefined
+  }
+  const matching = tableItems
+    .filter((item) => {
+      const key = indexKey(item)
+      return key !== undefined && key.startsWith(prefix) && (typeof startKey !== 'string' || key > startKey)
+    })
+    .sort((left, right) => String(indexKey(left)).localeCompare(String(indexKey(right))))
+  const limit = typeof input.Limit === 'number' ? input.Limit : matching.length
+  const page = matching.slice(0, limit)
+  observeQuery?.(prefix, page.map((item) => String(item.recordKey)), WORKSPACE_SEARCH_TITLE_INDEX_NAME)
+  const projected = page.map((item) => Object.fromEntries(Object.entries(item).filter(([name]) =>
+    name === 'workspaceId' ||
+    name === 'recordKey' ||
+    name === WORKSPACE_SEARCH_TITLE_INDEX_KEY ||
+    (WORKSPACE_SEARCH_TITLE_INDEX_ATTRIBUTES as readonly string[]).includes(name)
+  )))
+  const last = page.at(-1)
+  return {
+    Items: projected,
+    ScannedCount: page.length,
+    ...(matching.length > page.length && last
+      ? {
+          LastEvaluatedKey: {
+            workspaceId: last.workspaceId,
+            recordKey: last.recordKey,
+            [WORKSPACE_SEARCH_TITLE_INDEX_KEY]: last[WORKSPACE_SEARCH_TITLE_INDEX_KEY],
+          },
+        }
+      : {}),
+  }
 }
 
 function applyMemoryTransactionItem(
@@ -4589,4 +4721,181 @@ test('carries the charter revision on a Project search document so older project
 
   expect(document.sourceRevision).toBe(3)
   expect(document.body).toContain('OPS-1')
+})
+
+/**
+ * Creates a stored Work Item search row as the projection writers persist it, title index key
+ * included.
+ *
+ * @param id - Team-local Work Item ID.
+ * @param title - Work Item title.
+ * @param body - Optional Work Item description.
+ * @returns The DynamoDB item.
+ */
+function createTitleIndexedWorkItemItem(id: string, title: string, body?: string) {
+  const document = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: `team/core/issue/${id}`,
+    title,
+    ...(body ? { body } : {}),
+    url: `/teams/core/issues?issueId=${id}`,
+    teamId: 'core',
+  })
+  return { ...document, [WORKSPACE_SEARCH_TITLE_INDEX_KEY]: document.recordKey }
+}
+
+/** Viewer that can read the `core` Team. */
+const coreTeamViewer = {
+  viewerUserId: 'viewer@example.com',
+  isSystemAdmin: false,
+  projectIds: new Set<string>(),
+  teamIds: new Set(['core']),
+}
+
+test('stores the title index key with each upserted search document', async () => {
+  const documentClient = createMemoryDocumentClient([])
+  const client = new DynamoDbWorkspaceSearchClient('search-table', documentClient, {} as DynamoDBClient, false)
+
+  const document = await client.upsertDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: 'team/core/issue/issue-1',
+    title: 'Rollout checklist',
+    url: '/teams/core/issues?issueId=issue-1',
+    teamId: 'core',
+  })
+  const stored = await documentClient.send(new GetCommand({
+    TableName: 'search-table',
+    Key: { workspaceId: 'workspace-1', recordKey: document.recordKey },
+  }))
+
+  expect(stored.Item?.[WORKSPACE_SEARCH_TITLE_INDEX_KEY]).toBe(document.recordKey)
+  expect(createWorkspaceSearchDocument(document).projectionDigest).toBe(document.projectionDigest)
+})
+
+test('finds a Work Item title match behind more Work Items than one page evaluates', async () => {
+  const items = Array.from({ length: 2_500 }, (_, index) =>
+    createTitleIndexedWorkItemItem(`item-${String(index).padStart(5, '0')}`, `Task ${index}`)
+  )
+  const match = createTitleIndexedWorkItemItem('zz-last', 'Rollout checklist')
+  items.push(match)
+  const fullRowReads: string[] = []
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient(items, {
+      beforeGet: (_items, _workspaceId, recordKey) => fullRowReads.push(recordKey),
+    }),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    limit: 10,
+    filters: { keyword: 'ROLLOUT' },
+    access: coreTeamViewer,
+  })
+
+  expect(response.results.map(({ id }) => id)).toEqual(['team/core/issue/zz-last'])
+  // Only the title match is read as a full row.
+  expect(fullRowReads).toEqual([match.recordKey])
+})
+
+test('returns title matches before body-only matches across pages without duplicates', async () => {
+  const items = [
+    createTitleIndexedWorkItemItem('a-body', 'Unrelated', 'rollout steps live in the body'),
+    createTitleIndexedWorkItemItem('b-title', 'Rollout plan'),
+    createTitleIndexedWorkItemItem('c-title', 'Second rollout'),
+    // A row written before the title index existed is still found by the scan.
+    createWorkspaceSearchDocument({
+      workspaceId: 'workspace-1',
+      entityType: 'work-item',
+      entityId: 'team/core/issue/d-legacy',
+      title: 'Legacy rollout',
+      url: '/teams/core/issues?issueId=d-legacy',
+      teamId: 'core',
+    }),
+  ]
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient(items),
+    {} as DynamoDBClient,
+    false,
+  )
+  const ids: string[] = []
+  let cursor: string | undefined
+  for (let pageNumber = 0; pageNumber < 10; pageNumber += 1) {
+    const response = await client.search({
+      workspaceId: 'workspace-1',
+      limit: 1,
+      filters: { keyword: 'rollout' },
+      access: coreTeamViewer,
+      ...(cursor ? { cursor } : {}),
+    })
+    ids.push(...response.results.map(({ id }) => id))
+    cursor = response.nextCursor
+    if (!cursor) break
+  }
+
+  expect(ids).toEqual([
+    'team/core/issue/b-title',
+    'team/core/issue/c-title',
+    'team/core/issue/a-body',
+    'team/core/issue/d-legacy',
+  ])
+})
+
+test('keeps title index matches outside the viewer scope out of the results', async () => {
+  const hidden = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'work-item',
+    entityId: 'team/secret/issue/issue-1',
+    title: 'Rollout secret',
+    url: '/teams/secret/issues?issueId=issue-1',
+    teamId: 'secret',
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([
+      { ...hidden, [WORKSPACE_SEARCH_TITLE_INDEX_KEY]: hidden.recordKey },
+      createTitleIndexedWorkItemItem('issue-2', 'Rollout visible'),
+    ]),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    filters: { keyword: 'rollout' },
+    access: coreTeamViewer,
+  })
+
+  expect(response.results.map(({ id }) => id)).toEqual(['team/core/issue/issue-2'])
+})
+
+test('rejects a title phase cursor for a query without a keyword', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([
+      createTitleIndexedWorkItemItem('issue-1', 'Rollout one'),
+      createTitleIndexedWorkItemItem('issue-2', 'Rollout two'),
+    ]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const first = await client.search({
+    workspaceId: 'workspace-1',
+    limit: 1,
+    filters: { keyword: 'rollout' },
+    access: coreTeamViewer,
+  })
+
+  expect(first.nextCursor).toBeString()
+  await expect(client.search({
+    workspaceId: 'workspace-1',
+    limit: 1,
+    access: coreTeamViewer,
+    ...(first.nextCursor ? { cursor: first.nextCursor } : {}),
+  })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
 })
