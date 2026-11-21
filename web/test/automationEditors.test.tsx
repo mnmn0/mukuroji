@@ -3,7 +3,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import {
   AutomationRuleEditor,
   AutomationTemplateEditor,
+  BaselineSlipDaysField,
 } from '../src/automation/ui/AutomationEditors'
+import { createTranslator } from '../src/shared/i18n/i18n'
 import {
   createDefaultAutomationWorkflowTemplatePayload,
   createAutomationTrigger,
@@ -57,6 +59,21 @@ describe('Automation editors', () => {
     expect(html).toContain('ベースラインより何日遅れたら')
     expect(html).toContain('inputMode="numeric"')
     expect(html).toContain('aria-describedby="automation-rule-baseline-slip-days-hint"')
+  })
+
+  test('explains an out-of-range baseline-slip day count next to the field', () => {
+    const t = createTranslator('ja')
+    const render = (value: string) =>
+      renderToStaticMarkup(<BaselineSlipDaysField t={t} value={value} onChange={() => undefined} />)
+    for (const value of ['', '1', '365']) {
+      expect(render(value)).not.toContain('aria-invalid')
+    }
+    for (const value of ['0', '366']) {
+      const html = render(value)
+      expect(html).toContain('aria-invalid="true"')
+      expect(html).toContain('aria-describedby="automation-rule-baseline-slip-days-error automation-rule-baseline-slip-days-hint"')
+      expect(html).toContain('1〜365 の整数で入力してください。')
+    }
   })
 
   test('renders Work Item Type trigger direction controls', () => {

@@ -274,7 +274,7 @@ export function parseWorkItemBaselineSlipChange(value: unknown): WorkItemBaselin
   const previousDelayDays: unknown = Reflect.get(value, 'previousDelayDays')
   const delayDays: unknown = Reflect.get(value, 'delayDays')
   if (typeof baselineRevision !== 'number' || !Number.isSafeInteger(baselineRevision) || baselineRevision < 1) return undefined
-  if (typeof baselineEndDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(baselineEndDate)) return undefined
+  if (!isCalendarDate(baselineEndDate)) return undefined
   if (typeof delayDays !== 'number' || !Number.isSafeInteger(delayDays) || delayDays < 1) return undefined
   if (previousDelayDays !== undefined && (
     typeof previousDelayDays !== 'number' ||

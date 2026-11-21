@@ -41,6 +41,7 @@ export const automationMessages = {
   'automation.rule.triggerConfiguration': 'トリガー対象 ID / 値',
   'automation.rule.baselineSlipDays': 'ベースラインより何日遅れたら',
   'automation.rule.baselineSlipDaysHint': "Project の今のベースラインより、予定終了日がこの日数以上遅れた変更で1回だけ動きます。空欄は1日です。",
+  'automation.rule.baselineSlipDaysInvalid': '1〜365 の整数で入力してください。',
   'automation.rule.triggerTeam': 'トリガー対象 Team',
   'automation.rule.triggerWorkItemType': 'トリガー対象 Work Item Type ID',
   'automation.rule.triggerWorkItemTypeFrom': '変更元 Work Item Type ID',

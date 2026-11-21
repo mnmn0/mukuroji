@@ -41,6 +41,7 @@ export const automationMessages = {
   'automation.rule.triggerConfiguration': 'Trigger target ID / value',
   'automation.rule.baselineSlipDays': 'Days behind baseline',
   'automation.rule.baselineSlipDaysHint': "Runs once, on the change that moves an open Work Item's planned end this many days or more past the Project's active baseline. Leave blank for 1 day.",
+  'automation.rule.baselineSlipDaysInvalid': 'Enter a whole number of days from 1 to 365.',
   'automation.rule.triggerTeam': 'Trigger Team',
   'automation.rule.triggerWorkItemType': 'Trigger Work Item Type ID',
   'automation.rule.triggerWorkItemTypeFrom': 'Source Work Item Type ID',

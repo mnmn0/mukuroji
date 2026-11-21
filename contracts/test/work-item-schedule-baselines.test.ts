@@ -208,6 +208,8 @@ describe('baseline slip changes', () => {
     expect(parseWorkItemBaselineSlipChange({ ...slip, delayDays: 0 })).toBeUndefined()
     expect(parseWorkItemBaselineSlipChange({ ...slip, previousDelayDays: 4 })).toBeUndefined()
     expect(parseWorkItemBaselineSlipChange({ ...slip, baselineEndDate: '12/10' })).toBeUndefined()
+    expect(parseWorkItemBaselineSlipChange({ ...slip, baselineEndDate: '2026-02-30' })).toBeUndefined()
+    expect(parseWorkItemBaselineSlipChange({ ...slip, baselineEndDate: '2026-13-01' })).toBeUndefined()
     expect(parseWorkItemBaselineSlipChange({ ...slip, baselineRevision: 0 })).toBeUndefined()
     expect(parseWorkItemBaselineSlipChange('slip')).toBeUndefined()
   })
