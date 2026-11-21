@@ -1,6 +1,7 @@
 /** Registers deterministic bootstrap and custom resource tests. */
 import { expect, test } from '@jest/globals';
 import {
+  createCanonicalWorkItemMemberIndexTransactItems,
   createCanonicalWorkItemTransactItems,
   createDemoProjectOwnerAccessTransactItems,
   createProjectDirectoryTransactItems,
@@ -290,7 +291,8 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(workItemPayload).toContain('core-team');
   expect(workItemPayload).toContain('assignedProjectId');
   expect(workItemPayload).toContain('2026-06-01T00:00:00.000Z');
-  expect(workItemPayload.match(/schemaVersion/g)).toHaveLength(10);
+  // 10 canonical Work Items plus one member index row each (ADR 0038).
+  expect(workItemPayload.match(/schemaVersion/g)).toHaveLength(20);
   expect(workItemPayload.match(/workflowSchemaVersion/g)).toHaveLength(10);
   expect(workItemPayload.match(/workflowStatusId/g)).toHaveLength(10);
   expect(workItemPayload.match(/statusCategory/g)).toHaveLength(10);
@@ -308,7 +310,8 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(workItemPayload).not.toMatch(/"status":\{"S":/);
   expect(workItemPayload).not.toContain('"titleKey"');
   expect(workItemPayload.match(/revision/g)).toHaveLength(10);
-  expect(workItemPayload).not.toContain('"workItemId"');
+  // Only the member index rows name their Work Item in `workItemId`; canonical rows do not.
+  expect(workItemPayload.match(/"workItemId"/g)).toHaveLength(10);
   expect(workItemPayload).not.toContain('migrationSourceKey');
   expect(workItemPayload).not.toMatch(/"source":\{"S":/);
   expect(workItemPayload).not.toMatch(/"migrationSource":\{"S":/);
@@ -431,6 +434,20 @@ test('bootstrap payload builders preserve deterministic keys, conditions, and id
   expect(seededIndexAttributes.wireframe).toEqual(['work-item-schedule-01', '0000-00-00']);
   expect(seededIndexAttributes['seo-research']).toEqual(['work-item-schedule-06', '2026-06-09']);
   expect(seededIndexAttributes['competitor-report']?.[1]).toBeUndefined();
+  // Owners find seeded Work Items in Focus through the member index (ADR 0038). The keys are pinned
+  // to what the server's createWorkItemMemberIndexRecord returns for the same Work Item.
+  const memberIndexItems = createCanonicalWorkItemMemberIndexTransactItems('WorkItemsTable', 'directory-1');
+  expect(memberIndexItems).toHaveLength(10);
+  expect(memberIndexItems[0]?.Put.Item).toEqual({
+    directoryTeamId: { S: 'directory-1#member-work-items#sato@example.com' },
+    issueId: { S: 'core-team#wireframe' },
+    entryType: { S: 'work-item-member-index' },
+    schemaVersion: { N: '1' },
+    directoryId: { S: 'directory-1' },
+    memberKey: { S: 'sato@example.com' },
+    teamId: { S: 'core-team' },
+    workItemId: { S: 'wireframe' },
+  });
 
   expect(directoryItems).toHaveLength(13);
   expect(directoryItems.filter(({ Put }) => 'ConditionExpression' in Put)).toHaveLength(9);

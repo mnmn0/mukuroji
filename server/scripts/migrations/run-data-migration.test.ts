@@ -52,7 +52,10 @@ describe('data migration CLI', () => {
   test('the shipped registry is valid', async () => {
     const { dependencies, output } = createDependencies(dataMigrationRegistry)
     expect(await runDataMigrationCli(['list'], dependencies)).toBe(0)
-    expect(JSON.parse(output[0] ?? '{}')).toEqual({ operation: 'list', migrations: [] })
+    expect(JSON.parse(output[0] ?? '{}')).toEqual({
+      operation: 'list',
+      migrations: [expect.objectContaining({ id: '0001-work-item-member-index', writerPolicy: 'revision-fenced' })],
+    })
   })
 
   test('dry-runs by default and writes nothing', async () => {

@@ -154,8 +154,10 @@ export function parseDataMigrationCheckpoint(
     typeof targetTable !== 'string' ||
     targetTable.length === 0 ||
     !isPositiveInteger(partitionCount) ||
-    !isPositiveInteger(fromSchemaVersion) ||
+    // A derive migration starts from version 0: its source rows have no derived rows yet.
+    !isNonNegativeInteger(fromSchemaVersion) ||
     !isPositiveInteger(toSchemaVersion) ||
+    toSchemaVersion !== fromSchemaVersion + 1 ||
     (status !== 'in-progress' && status !== 'completed') ||
     !isPositiveInteger(revision) ||
     !isIsoTime(updatedAt) ||
@@ -220,6 +222,16 @@ function parseCounters(value: unknown): DataMigrationCounters {
  */
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+}
+
+/**
+ * Checks for a non-negative safe integer.
+ *
+ * @param value - Candidate value.
+ * @returns Whether the value is a safe integer of 0 or more.
+ */
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 /**

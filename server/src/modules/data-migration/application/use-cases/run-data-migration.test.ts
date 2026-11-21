@@ -8,6 +8,7 @@ import {
 } from '../../test-support/data-migration-fakes'
 import { runDataMigration, type RunDataMigrationInput } from './run-data-migration'
 import { verifyDataMigration } from './verify-data-migration'
+import type { DataMigrationDeriveDefinition } from '../../domain/data-migration'
 
 /**
  * Builds run input with test defaults.
@@ -388,5 +389,91 @@ describe('data migration deadline', () => {
       definition: createTaskEstimateMigration(), rowStore, checkpointStore, pageSize: 1, maxPages: 10,
       deadline: clock.now() + 1000,
     })).toMatchObject({ status: 'fail', failureCode: 'DEFINITION_INVALID' })
+  })
+})
+
+describe('derive migrations', () => {
+  /** Creates a definition that derives one owner index row per task. */
+  function createOwnerIndexMigration(): DataMigrationDeriveDefinition {
+    return {
+      kind: 'derive',
+      id: '0002-task-owner-index',
+      description: 'Index tasks by owner.',
+      table: 'work-items',
+      keyAttributes: ['pk', 'sk'],
+      versionAttribute: 'schemaVersion',
+      fromSchemaVersion: 0,
+      toSchemaVersion: 1,
+      writerPolicy: 'revision-fenced',
+      revisionAttribute: 'revision',
+      classify: (row) => row.entity === 'task' ? 'pending' : 'unrelated',
+      derive: (row) => [{
+        pk: `OWNER#${String(row.owner)}`,
+        sk: `${String(row.pk)}#${String(row.sk)}`,
+        entity: 'owner-index',
+        schemaVersion: 1,
+      }],
+    }
+  }
+
+  test('writes derived rows next to sources, fenced by revision, and verifies them', async () => {
+    const rowStore = createMemoryRowStore({
+      'segment-0-of-1': [
+        { pk: 'TEAM#a', sk: 'TASK#1', entity: 'task', owner: 'sato', revision: 3 },
+        { pk: 'TEAM#a', sk: 'META', entity: 'team' },
+      ],
+    })
+    const checkpointStore = createMemoryCheckpointStore()
+    const definition = createOwnerIndexMigration()
+
+    const dryRun = await runDataMigration(createInput({ definition, rowStore, checkpointStore, mode: 'dry-run' }))
+    expect(dryRun.counters).toMatchObject({ migrated: 1, unrelated: 1 })
+    expect(rowStore.rows.has('OWNER#sato|TEAM#a#TASK#1')).toBeFalse()
+    const before = await verifyDataMigration({ definition, rowStore, checkpointStore, pageSize: 10, maxPages: 10 })
+    expect(before).toMatchObject({ status: 'fail', pendingRows: 1 })
+
+    const report = await runDataMigration(createInput({ definition, rowStore, checkpointStore }))
+
+    expect(report.status).toBe('completed')
+    expect(report.counters).toEqual({ scanned: 2, migrated: 1, alreadyMigrated: 0, unrelated: 1, vanished: 0 })
+    expect(rowStore.rows.get('OWNER#sato|TEAM#a#TASK#1')).toEqual({
+      pk: 'OWNER#sato', sk: 'TEAM#a#TASK#1', entity: 'owner-index', schemaVersion: 1,
+    })
+    expect(rowStore.rows.get('TEAM#a|TASK#1')).toMatchObject({ revision: 3, owner: 'sato' })
+    const verified = await verifyDataMigration({ definition, rowStore, checkpointStore, pageSize: 10, maxPages: 10 })
+    expect(verified).toMatchObject({ status: 'pass', migratedRows: 1, pendingRows: 0 })
+  })
+
+  test('re-derives from the fresh source after a concurrent write', async () => {
+    const rowStore = createMemoryRowStore({
+      'segment-0-of-1': [{ pk: 'TEAM#a', sk: 'TASK#1', entity: 'task', owner: 'sato', revision: 3 }],
+    })
+    let first = true
+    rowStore.beforeReplace = () => {
+      if (!first) return true
+      first = false
+      rowStore.rows.set('TEAM#a|TASK#1', { pk: 'TEAM#a', sk: 'TASK#1', entity: 'task', owner: 'kato', revision: 4 })
+      return false
+    }
+
+    const report = await runDataMigration(createInput({ definition: createOwnerIndexMigration(), rowStore }))
+
+    expect(report.counters.migrated).toBe(1)
+    expect(rowStore.rows.has('OWNER#sato|TEAM#a#TASK#1')).toBeFalse()
+    expect(rowStore.rows.has('OWNER#kato|TEAM#a#TASK#1')).toBeTrue()
+  })
+
+  test('rejects derived rows that would be read as sources', async () => {
+    const definition: DataMigrationDeriveDefinition = {
+      ...createOwnerIndexMigration(),
+      derive: (row) => [{ ...row, sk: 'COPY' , schemaVersion: 1 }],
+    }
+    const rowStore = createMemoryRowStore({
+      'segment-0-of-1': [{ pk: 'TEAM#a', sk: 'TASK#1', entity: 'task', owner: 'sato', revision: 3 }],
+    })
+
+    const report = await runDataMigration(createInput({ definition, rowStore }))
+
+    expect(report).toMatchObject({ status: 'failed', failureCode: 'TRANSFORM_INVALID' })
   })
 })

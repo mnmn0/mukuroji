@@ -49,12 +49,14 @@ import {
   focusQueueUsesApprovalSummary,
   isFocusSlaAnchor,
   normalizeFocusSlaWorkItemTypeIds,
+  readFocusWorkItemWindow,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
   type FocusRelationGraphSource,
   type FocusSnoozeRecord,
   type FocusStateSnapshot,
 } from '../../modules/focus'
+import type { WorkItemMemberIndexReference } from '../../modules/work-items'
 import {
   evaluateEnterpriseAccess,
   type EnterpriseAuthorizationResource,
@@ -90,9 +92,12 @@ import {
 } from '../shared/notification-access'
 import {
   createPlanningCallerAuthorizationConditionChecks,
-  readAccessibleWorkItems,
   toPlanningErrorResponse,
 } from '../shared/planning-access'
+import {
+  readAllAccessibleWorkItems,
+  resolveAccessibleWorkItemTeamContexts,
+} from '../shared/work-item-aggregate-read'
 import {
   createApiMutationContext,
   getEffectiveProjectAccessList,
@@ -108,6 +113,7 @@ import { isRecord, stableDigestStringify } from '../shared/value-guards'
 import {
   canWriteTeamIssue,
   createWorkItemListLimitExceededError,
+  filterAccessibleTeamIssues,
   loadAuthorizedTeamIssue,
 } from '../shared/work-item-access'
 import {
@@ -1497,7 +1503,12 @@ async function readFocusQueue(
   principal: WorkspacePrincipal,
   now: Date,
 ): Promise<FocusQueueResponse> {
-  const { workItems: accessibleWorkItems } = await readAccessibleWorkItems(principal)
+  const notificationsPromise = readFocusNotifications(principal, now)
+  const {
+    workItems: accessibleWorkItems,
+    relationGraphs: rawRelationGraphs,
+    reviewerApprovals: reviewerApprovalCandidates,
+  } = await readFocusWorkItemWindowForPrincipal(principal, notificationsPromise)
   const workItemsPromise = hydrateFocusApprovalSummaries(
     principal,
     accessibleWorkItems,
@@ -1521,12 +1532,12 @@ async function readFocusQueue(
       initiativeTitlesById: readFocusInitiativeTitlesById(snapshot, planning),
     }
   })
-  const relationGraphsPromise = readFocusRelationGraphs(
-    principal.directoryId,
-    accessibleWorkItems,
+  const relationGraphsPromise = Promise.resolve(
+    filterFocusRelationGraphs(rawRelationGraphs, accessibleWorkItems),
   )
-  const approvalsPromise = readFocusReviewerApprovals(principal, accessibleWorkItems)
-  const notificationsPromise = readFocusNotifications(principal, now)
+  const approvalsPromise = Promise.resolve(
+    filterFocusReviewerApprovals(principal, reviewerApprovalCandidates, accessibleWorkItems),
+  )
   const workItemPermissionsPromise = readFocusWorkItemPermissionsByKey(
     principal,
     accessibleWorkItems,
@@ -1592,37 +1603,127 @@ async function readFocusQueue(
   return createFocusQueue({ ...baseInput, watchingByWorkItemKey })
 }
 
+/** Work Items and their sources read for one Focus projection, before source filtering. */
+type FocusRouteWorkItemWindow = {
+  /** ACL-filtered, non-archived canonical Work Items the projection may need. */
+  workItems: CanonicalWorkItem[]
+  /** Unfiltered relation graphs of the Teams read. */
+  relationGraphs: FocusRelationGraphSource[]
+  /** Pending approvals assigned to the viewer on readable Teams, before Files filtering. */
+  reviewerApprovals: ApprovalRequest[]
+}
+
 /**
- * Reads one authoritative relation graph per visible Team.
+ * Wires the Focus Work Item window use case (ADR 0038) to the route's stores and access checks.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param notificationsPromise - Mention notifications already being read for the projection.
+ * @returns Work Items, relation graphs, and reviewer approval candidates.
+ */
+async function readFocusWorkItemWindowForPrincipal(
+  principal: WorkspacePrincipal,
+  notificationsPromise: Promise<NotificationItem[]>,
+): Promise<FocusRouteWorkItemWindow> {
+  const teamIssues = workItemDependencies.teamIssues
+  const contexts = await resolveAccessibleWorkItemTeamContexts(principal)
+  const contextByTeamId = new Map(contexts.map((context) => [context.team.id, context]))
+  const filesReadableTeamIds = new Set(contexts.flatMap((context) =>
+    canReadFocusScopedSource(principal, 'files.read', context.team.id) ||
+      context.team.projects.some((project) =>
+        canReadFocusScopedSource(principal, 'files.read', context.team.id, project.id)
+      )
+      ? [context.team.id]
+      : []
+  ))
+  const { listMemberWorkItemReferences, getTeamIssuesByReferences } = teamIssues
+  const window = await readFocusWorkItemWindow({
+    readableTeamIds: contexts.map((context) => context.team.id),
+    notifications: notificationsPromise,
+    reviewerApprovals: readFocusReviewerApprovals(
+      principal,
+      (teamId) => filesReadableTeamIds.has(teamId),
+      filesReadableTeamIds.size > 0,
+    ),
+    ...(listMemberWorkItemReferences === undefined
+      ? {}
+      : {
+        listMemberWorkItemReferences: (limit: number) =>
+          listMemberWorkItemReferences.call(teamIssues, principal.directoryId, principal.userKey, limit),
+      }),
+    ...(getTeamIssuesByReferences === undefined
+      ? {}
+      : {
+        readWorkItemsByReferences: (references: readonly WorkItemMemberIndexReference[]) =>
+          getTeamIssuesByReferences.call(teamIssues, principal.directoryId, references),
+      }),
+    readAllAccessibleWorkItems: () =>
+      readAllAccessibleWorkItems(principal, contexts, { includeArchived: false }),
+    readRelationGraphs: (teamIds) => readFocusRelationGraphs(principal.directoryId, teamIds),
+    readPlanningDependencies: async () =>
+      (await workItemDependencies.planning.getAuthorizationState(principal.directoryId)).workItemDependencies,
+    filterAccessibleTeamWorkItems: (teamId, workItems) => {
+      const context = contextByTeamId.get(teamId)
+      return context === undefined ? [] : filterAccessibleTeamIssues([...workItems], principal, context)
+    },
+    createLimitExceededError: (limit) =>
+      createWorkItemListLimitExceededError(`Focus needs more than ${limit} Work Items.`),
+  })
+  return {
+    workItems: window.workItems,
+    relationGraphs: window.relationGraphs,
+    reviewerApprovals: window.reviewerApprovals,
+  }
+}
+
+/**
+ * Reads one authoritative relation graph per Team.
  *
  * @param workspaceId - Workspace that owns the relation graphs.
- * @param workItems - Current ACL-filtered canonical Work Items.
- * @returns Endpoint-filtered Team graphs.
+ * @param teamIds - Teams whose graphs are read.
+ * @returns Unfiltered Team graphs in Team ID order.
  */
 async function readFocusRelationGraphs(
   workspaceId: string,
-  workItems: readonly CanonicalWorkItem[],
+  teamIds: readonly string[],
 ): Promise<FocusRelationGraphSource[]> {
   const configuration = workItemDependencies.workItemConfigurations
+  return Promise.all([...new Set(teamIds)]
+    .sort((left, right) => left.localeCompare(right))
+    .map(async (teamId) => {
+      const graph = await configuration.listRelationGraph(workspaceId, teamId)
+      return { teamId, graphRevision: graph.graphRevision, relations: graph.relations }
+    }))
+}
+
+/**
+ * Keeps only relations whose source and target Work Items are both visible.
+ *
+ * @param graphs - Unfiltered Team graphs.
+ * @param workItems - Current ACL-filtered canonical Work Items.
+ * @returns Endpoint-filtered graphs of Teams with at least one visible Work Item.
+ */
+function filterFocusRelationGraphs(
+  graphs: readonly FocusRelationGraphSource[],
+  workItems: readonly CanonicalWorkItem[],
+): FocusRelationGraphSource[] {
   const visibleIdsByTeam = new Map<string, Set<string>>()
   for (const workItem of workItems) {
     const visibleIds = visibleIdsByTeam.get(workItem.teamId) ?? new Set<string>()
     visibleIds.add(workItem.id)
     visibleIdsByTeam.set(workItem.teamId, visibleIds)
   }
-  return Promise.all([...visibleIdsByTeam.entries()]
-    .sort(([leftTeamId], [rightTeamId]) => leftTeamId.localeCompare(rightTeamId))
-    .map(async ([teamId, visibleIds]) => {
-      const graph = await configuration.listRelationGraph(workspaceId, teamId)
-      return {
-        teamId,
-        graphRevision: graph.graphRevision,
-        relations: graph.relations.filter((relation) =>
-          visibleIds.has(relation.sourceWorkItemId) &&
-          visibleIds.has(relation.targetWorkItemId)
-        ),
-      }
-    }))
+  return graphs.flatMap((graph) => {
+    const visibleIds = visibleIdsByTeam.get(graph.teamId)
+    if (visibleIds === undefined) return []
+    return [{
+      teamId: graph.teamId,
+      graphRevision: graph.graphRevision,
+      relations: graph.relations.filter((relation) =>
+        visibleIds.has(relation.sourceWorkItemId) &&
+        visibleIds.has(relation.targetWorkItemId)
+      ),
+    }]
+  })
 }
 
 /**
@@ -2299,25 +2400,22 @@ function requireFocusWatchPostcondition(actual: boolean, expected: boolean): voi
 }
 
 /**
- * Reads a bounded pending-approval window through Work Item and Files reauthorization.
+ * Reads a bounded pending-approval window of the viewer's reviewer approvals on readable Teams.
+ *
+ * Files reauthorization against the canonical Work Item happens later in
+ * {@link filterFocusReviewerApprovals}, once the referenced Work Items are read.
  *
  * @param principal - Current authenticated Workspace principal.
- * @param workItems - Current ACL-filtered canonical Work Items.
+ * @param isReadableTeam - Whether a Team may hold Files-readable Work Items.
+ * @param anyReadable - Whether any Team may; when not, no approval page is read.
  * @returns Deduplicated pending approvals currently assigned to the viewer.
  */
 async function readFocusReviewerApprovals(
   principal: WorkspacePrincipal,
-  workItems: readonly CanonicalWorkItem[],
+  isReadableTeam: (teamId: string) => boolean,
+  anyReadable: boolean,
 ): Promise<ApprovalRequest[]> {
-  const readableWorkItemKeys = new Set(workItems
-    .filter((workItem) => canReadFocusScopedSource(
-      principal,
-      'files.read',
-      workItem.teamId,
-      workItem.assignedProjectId,
-    ))
-    .map((workItem) => createFocusWorkItemKey(workItem.teamId, workItem.id)))
-  if (readableWorkItemKeys.size === 0) return []
+  if (!anyReadable) return []
   const approvals = new Map<string, ApprovalRequest>()
   const visitedCursors = new Set<string>()
   const sourcePageBudget = { remaining: FOCUS_APPROVAL_MAX_PAGES }
@@ -2335,10 +2433,7 @@ async function readFocusReviewerApprovals(
       if (
         approval.teamId !== undefined &&
         approval.issueId !== undefined &&
-        readableWorkItemKeys.has(createFocusWorkItemKey(
-          approval.teamId,
-          approval.issueId,
-        )) &&
+        isReadableTeam(approval.teamId) &&
         !approvals.has(approval.id)
       ) {
         approvals.set(approval.id, approval)
@@ -2368,6 +2463,34 @@ async function readFocusReviewerApprovals(
     )
   }
   return [...approvals.values()]
+}
+
+/**
+ * Keeps reviewer approvals whose Work Item is visible and whose Files source is readable.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param approvals - Reviewer approval window read for the projection.
+ * @param workItems - Current ACL-filtered canonical Work Items.
+ * @returns Approvals attached to readable Work Items, in window order.
+ */
+function filterFocusReviewerApprovals(
+  principal: WorkspacePrincipal,
+  approvals: readonly ApprovalRequest[],
+  workItems: readonly CanonicalWorkItem[],
+): ApprovalRequest[] {
+  const readableWorkItemKeys = new Set(workItems
+    .filter((workItem) => canReadFocusScopedSource(
+      principal,
+      'files.read',
+      workItem.teamId,
+      workItem.assignedProjectId,
+    ))
+    .map((workItem) => createFocusWorkItemKey(workItem.teamId, workItem.id)))
+  return approvals.filter((approval) =>
+    approval.teamId !== undefined &&
+    approval.issueId !== undefined &&
+    readableWorkItemKeys.has(createFocusWorkItemKey(approval.teamId, approval.issueId))
+  )
 }
 
 /**
