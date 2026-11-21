@@ -321,6 +321,8 @@ function bindApiRuntimeConfiguration(
         String(RUNTIME_CONTROL_MINIMUM_POLL_INTERVAL_SECONDS),
       MUKUROJI_RUNTIME_CONTROL_SCOPE: 'api',
       REALTIME_WEBSOCKET_URL: realtimeWebSocketStage.url,
+      // Document mutations post content-free change signals to subscribers.
+      WEBSOCKET_CALLBACK_ENDPOINT: realtimeWebSocketStage.callbackUrl,
       COGNITO_CLIENT_ID: cognitoUserPoolClientId,
       COGNITO_ENTERPRISE_IDP_NAME:
         cognitoEnterpriseIdpName.valueAsString,
@@ -633,6 +635,8 @@ export function buildApiRuntime(
     statements: [
       new iam.PolicyStatement({
         actions: [
+          // Analytics reads per-Work-Item history rows in batches (ADR 0042).
+          'dynamodb:BatchGetItem',
           'dynamodb:DeleteItem',
           'dynamodb:DescribeTable',
           'dynamodb:GetItem',
@@ -1317,6 +1321,8 @@ export function buildApiTransportsAndRealtime(
     }),
   );
   realtimeWebSocketStage.grantManagementApiAccess(realtimeFunction);
+  // The API posts Document change signals; the grant covers only this stage's @connections.
+  realtimeWebSocketStage.grantManagementApiAccess(apiFunction);
 
   const workspaceAuditPseudonymSecret = bindApiRuntimeConfiguration(
     scope,

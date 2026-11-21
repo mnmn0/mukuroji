@@ -46,6 +46,7 @@ import {
   type WorkItemParentMutationResponse,
   type WorkItemRelationMutationResponse,
   type WorkItemRelationsResponse,
+  type WorkItemRelationEventType,
   type WorkItemRelationType,
 } from '@mukuroji/contracts'
 import {
@@ -201,7 +202,6 @@ function createRelationNotificationMetadata(
   const endpoint = audit?.notificationEndpoints?.get(change.workItemId)
   if (!endpoint) return {}
   return {
-    ...(endpoint.assignedProjectId ? { projectId: endpoint.assignedProjectId } : {}),
     deepLink: endpoint.deepLink,
     notificationTitle: endpoint.title,
     notificationCandidates: endpoint.assigneeMemberKey.trim() === ''
@@ -680,22 +680,8 @@ export type WorkItemRelationNotificationEndpoint = {
   assignedProjectId?: string
 }
 
-/** Audit event types recorded on each endpoint when a Work Item relation changes. */
-const WORK_ITEM_RELATION_AUDIT_EVENT_TYPES = [
-  'work-item.parent-changed',
-  'work-item.child-added',
-  'work-item.child-removed',
-  'work-item.blocker-added',
-  'work-item.blocker-removed',
-  'work-item.blocking-added',
-  'work-item.blocking-removed',
-  'work-item.relation-added',
-  'work-item.relation-removed',
-  'work-item.sibling-order-changed',
-] as const
-
 /** One audit event type recorded when a Work Item relation changes. */
-type WorkItemRelationAuditEventType = typeof WORK_ITEM_RELATION_AUDIT_EVENT_TYPES[number]
+type WorkItemRelationAuditEventType = WorkItemRelationEventType
 
 /** Relation types projected into a Work Item's `relationIds`; `child` is excluded. */
 export const WORK_ITEM_PROJECTED_RELATION_TYPES: readonly WorkItemRelationType[] = [
@@ -1890,25 +1876,26 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       this.readChangedRelationIds(workspaceId, teamId, reciprocalRelation, { add: [reciprocalRelation] }),
     ])
 
+    const endpoints: RelationTransactionEndpoint[] = [
+      {
+        workItemId: normalized.sourceWorkItemId,
+        expectedRevision: normalized.sourceExpectedRevision,
+        assignedProjectId: normalized.sourceAssignedProjectId,
+        relationIds: sourceRelationIds,
+        // A child that gains a parent starts from the default order there, as with replaceParent.
+        ...(normalized.type === 'parent' ? { hierarchyRank: null } : {}),
+      },
+      {
+        workItemId: normalized.targetWorkItemId,
+        expectedRevision: normalized.targetExpectedRevision,
+        assignedProjectId: normalized.targetAssignedProjectId,
+        relationIds: targetRelationIds,
+      },
+    ]
     await this.sendRelationTransaction(workspaceId, teamId, {
       expectedRevision: graph.revision,
       nextEdgeCount,
-      endpoints: [
-        {
-          workItemId: normalized.sourceWorkItemId,
-          expectedRevision: normalized.sourceExpectedRevision,
-          assignedProjectId: normalized.sourceAssignedProjectId,
-          relationIds: sourceRelationIds,
-          // A child that gains a parent starts from the default order there, as with replaceParent.
-          ...(normalized.type === 'parent' ? { hierarchyRank: null } : {}),
-        },
-        {
-          workItemId: normalized.targetWorkItemId,
-          expectedRevision: normalized.targetExpectedRevision,
-          assignedProjectId: normalized.targetAssignedProjectId,
-          relationIds: targetRelationIds,
-        },
-      ],
+      endpoints,
       edgeMutations: [
         createRelationPut(this.tableName, workspaceId, teamId, relation),
         createRelationPut(this.tableName, workspaceId, teamId, reciprocalRelation),
@@ -1917,7 +1904,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       auditPuts: this.createRelationAuditPuts(workspaceId, teamId, audit, createdAt, graph.revision + 1, [
         describeRelationAuditChange(relation, 'added'),
         describeRelationAuditChange(reciprocalRelation, 'added'),
-      ]),
+      ], endpoints),
       classifyCancellation: () => this.classifyRelationTransactionCancellation(
         workspaceId,
         teamId,
@@ -1979,26 +1966,27 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       this.readChangedRelationIds(workspaceId, teamId, relation, { remove: [relation] }),
       this.readChangedRelationIds(workspaceId, teamId, reciprocalRelation, { remove: [reciprocalRelation] }),
     ])
+    const endpoints: RelationTransactionEndpoint[] = [
+      {
+        workItemId: normalized.sourceWorkItemId,
+        expectedRevision: normalized.sourceExpectedRevision,
+        assignedProjectId: normalized.sourceAssignedProjectId,
+        relationIds: sourceRelationIds,
+        // A child that loses its parent drops the sibling rank that only meant something under it.
+        ...(normalized.type === 'parent' ? { hierarchyRank: null } : {}),
+      },
+      {
+        workItemId: normalized.targetWorkItemId,
+        expectedRevision: normalized.targetExpectedRevision,
+        assignedProjectId: normalized.targetAssignedProjectId,
+        relationIds: targetRelationIds,
+        ...(normalized.type === 'child' ? { hierarchyRank: null } : {}),
+      },
+    ]
     await this.sendRelationTransaction(workspaceId, teamId, {
       expectedRevision: graph.revision,
       nextEdgeCount: graph.edgeCount - 2,
-      endpoints: [
-        {
-          workItemId: normalized.sourceWorkItemId,
-          expectedRevision: normalized.sourceExpectedRevision,
-          assignedProjectId: normalized.sourceAssignedProjectId,
-          relationIds: sourceRelationIds,
-          // A child that loses its parent drops the sibling rank that only meant something under it.
-          ...(normalized.type === 'parent' ? { hierarchyRank: null } : {}),
-        },
-        {
-          workItemId: normalized.targetWorkItemId,
-          expectedRevision: normalized.targetExpectedRevision,
-          assignedProjectId: normalized.targetAssignedProjectId,
-          relationIds: targetRelationIds,
-          ...(normalized.type === 'child' ? { hierarchyRank: null } : {}),
-        },
-      ],
+      endpoints,
       edgeMutations: [
         createRelationDelete(this.tableName, workspaceId, teamId, relation),
         createRelationDelete(this.tableName, workspaceId, teamId, reciprocalRelation),
@@ -2014,6 +2002,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           describeRelationAuditChange(relation, 'removed'),
           describeRelationAuditChange(reciprocalRelation, 'removed'),
         ],
+        endpoints,
       ),
       classifyCancellation: () => this.classifyRelationTransactionCancellation(
         workspaceId,
@@ -2224,6 +2213,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
               previousHierarchyRank,
               hierarchyRank,
             )],
+            [child],
           ),
         )
         return { previousParentWorkItemId, parentWorkItemId, graphRevision }
@@ -2305,14 +2295,15 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       child.workItemId,
       { add: childAdded, remove: childRemoved },
     )
+    const endpoints: RelationTransactionEndpoint[] = [
+      { ...child, relationIds: childRelationIds, hierarchyRank: normalized.hierarchyRank ?? null },
+      ...(normalized.currentParent ? [normalized.currentParent] : []),
+      ...(normalized.nextParent ? [normalized.nextParent] : []),
+    ]
     await this.sendRelationTransaction(workspaceId, teamId, {
       expectedRevision: graph.revision,
       nextEdgeCount,
-      endpoints: [
-        { ...child, relationIds: childRelationIds, hierarchyRank: normalized.hierarchyRank ?? null },
-        ...(normalized.currentParent ? [normalized.currentParent] : []),
-        ...(normalized.nextParent ? [normalized.nextParent] : []),
-      ],
+      endpoints,
       edgeMutations: [
         ...removed.map((relation) => createRelationDelete(this.tableName, workspaceId, teamId, relation)),
         ...added.map((relation) => createRelationPut(this.tableName, workspaceId, teamId, relation)),
@@ -2332,7 +2323,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
         ...added
           .filter((relation) => relation.type === 'child')
           .map((relation) => describeRelationAuditChange(relation, 'added')),
-      ]),
+      ], endpoints),
       classifyCancellation: () => this.classifyParentReplacementCancellation(
         workspaceId,
         teamId,
@@ -3083,6 +3074,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param occurredAt - Commit timestamp shared by every event of the mutation.
    * @param graphRevision - Relation graph revision written by the mutation.
    * @param changes - Endpoint changes in a deterministic order.
+   * @param endpoints - Endpoint snapshots guarded by the same transaction; each change's endpoint
+   * must be among them so its event records the Project assignment the commit checked.
    * @returns Audit event Puts, or none when auditing is not configured.
    */
   private createRelationAuditPuts(
@@ -3092,8 +3085,17 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     occurredAt: string,
     graphRevision: number,
     changes: readonly RelationAuditChange[],
+    endpoints: readonly WorkItemRelationEndpointSnapshot[],
   ): NonNullable<TransactWriteCommandInput['TransactItems']> {
     return changes.flatMap((change, sequence) => {
+      const endpoint = endpoints.find((candidate) => candidate.workItemId === change.workItemId)
+      if (!endpoint) {
+        throw new WorkItemConfigurationError(
+          500,
+          'WorkItemRelationAuditEndpointMissing',
+          'A relation audit event has no guarded endpoint snapshot.',
+        )
+      }
       const put = createMutationAuditEventPut(this.auditTableName, audit?.context, {
         directoryId: workspaceId,
         eventType: change.eventType,
@@ -3110,6 +3112,12 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           ...(audit ? { actorMemberKey: audit.actorMemberKey } : {}),
           teamId,
           issueId: change.workItemId,
+          // Webhook delivery and notifications check the endpoint's Project, which the endpoint
+          // guard in the same transaction pins to this value.
+          ...(endpoint.assignedProjectId ? { projectId: endpoint.assignedProjectId } : {}),
+          // Marks that the Project scope above is complete: events written before it was recorded
+          // lack `projectId` even for Project-assigned Work Items, so webhooks skip them.
+          projectScopeRecorded: true,
           ...(change.relationType ? { relationType: change.relationType } : {}),
           ...(change.relatedWorkItemId ? { relatedWorkItemId: change.relatedWorkItemId } : {}),
           ...(change.previousParentWorkItemId

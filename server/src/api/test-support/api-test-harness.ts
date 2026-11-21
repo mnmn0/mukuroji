@@ -95,7 +95,10 @@ import {
   type UpdateTeamIssueResponse,
   type WorkItemAuthorizationSnapshot,
   type WorkItemKeyLocation,
+  listWorkItemMemberIndexKeys,
+  normalizeWorkItemMemberIndexKey,
 } from '../../modules/work-items'
+import { workspaceDependencies as ambientWorkspaceDependencies } from '../shared/app-dependencies'
 import { type DocumentClient } from '../../modules/documents'
 import { InMemoryPlanningClient } from '../../modules/planning/planning'
 import {
@@ -864,6 +867,8 @@ function createTeamIssuesFake(
       throw new Error('Unexpected Team Issues client call.')
     },
     getTeamIssues: unsupported,
+    listMemberWorkItemReferences: unsupported,
+    getTeamIssuesByReferences: unsupported,
     getTeamHierarchyEntries: unsupported,
     getPublicWorkItemPage: unsupported,
     getWorkItemKeyLocation: unsupported,
@@ -1789,6 +1794,14 @@ function configureFakeProjectClients(
       limit?: number
       teamId: string
       startAfterIssueId?: string
+    }>,
+    memberIndexReads: [] as Array<{
+      directoryId: string
+      memberKey: string
+    }>,
+    issueReferenceReads: [] as Array<{
+      directoryId: string
+      references: Array<{ teamId: string; workItemId: string }>
     }>,
     publicIssuePageReads: [] as Array<{
       directoryId: string
@@ -2972,6 +2985,43 @@ function configureFakeProjectClients(
       },
     },
     teamIssues: {
+      /**
+       * Derives member index references from every fake Team partition, like the stored index.
+       *
+       * @param directoryId - Workspace ID.
+       * @param memberKey - Member whose owned or contributed Work Items are listed.
+       * @param limit - Most references accepted.
+       * @returns References in Team, then Work Item order.
+       */
+      async listMemberWorkItemReferences(directoryId, memberKey, limit) {
+        calls.memberIndexReads.push({ directoryId, memberKey })
+        const normalized = normalizeWorkItemMemberIndexKey(memberKey)
+        const directory = await ambientWorkspaceDependencies.projectDirectory.getProjectDirectory(directoryId, 'ja')
+        const references = directory.teams.flatMap((team) =>
+          createFakeTeamIssues(team.id)
+            .filter((issue) => normalized !== undefined && listWorkItemMemberIndexKeys(issue).includes(normalized))
+            .map((issue) => ({ teamId: team.id, workItemId: issue.id }))
+        )
+        if (references.length > limit) {
+          throw new ProjectDataError(413, 'WorkItemListLimitExceeded', 'Member index limit exceeded.')
+        }
+        return references
+      },
+      /**
+       * Reads fake Work Items by Team-qualified reference.
+       *
+       * @param directoryId - Workspace ID.
+       * @param references - Work Items to read.
+       * @returns Existing fake Work Items, archived ones included.
+       */
+      async getTeamIssuesByReferences(directoryId, references) {
+        calls.issueReferenceReads.push({ directoryId, references: references.map((reference) => ({ ...reference })) })
+        const wanted = new Set(references.map((reference) => `${reference.teamId}\u0000${reference.workItemId}`))
+        const teamIds = [...new Set(references.map((reference) => reference.teamId))].sort()
+        return teamIds.flatMap((teamId) =>
+          createFakeTeamIssues(teamId).filter((issue) => wanted.has(`${teamId}\u0000${issue.id}`))
+        )
+      },
       async getTeamIssues(directoryId, teamId, readOptions) {
         calls.issueReads.push({
           directoryId,

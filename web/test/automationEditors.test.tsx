@@ -73,6 +73,33 @@ describe('Automation editors', () => {
     expect(html).toContain('value="both"')
   })
 
+  test('serializes a relation trigger for one or every relation change', () => {
+    expect(createAutomationTrigger('relation', '')).toEqual({ type: 'relation' })
+    expect(createAutomationTrigger('relation', 'work-item.blocker-removed')).toEqual({
+      eventTypes: ['work-item.blocker-removed'],
+      type: 'relation',
+    })
+    expect(isAutomationTriggerConfigurationValid('relation', '')).toBe(true)
+    expect(isAutomationTriggerConfigurationValid('relation', 'work-item.parent-changed')).toBe(true)
+    expect(isAutomationTriggerConfigurationValid('relation', 'work-item.updated')).toBe(false)
+  })
+
+  test('renders the relation change picker with every relation event', () => {
+    const html = renderToStaticMarkup(
+      <AutomationRuleEditor
+        initialTriggerType="relation"
+        locale="ja"
+        onCreate={async () => undefined}
+      />,
+    )
+
+    expect(html).toContain('data-testid="automation-rule-relation-event"')
+    expect(html).toContain('すべての変更')
+    expect(html).toContain('value="work-item.blocker-removed"')
+    expect(html).toContain('blocker の解除')
+    expect(html).toContain('value="work-item.sibling-order-changed"')
+  })
+
   test('keeps valid schedule time fields valid when only the cadence is invalid', () => {
     const html = renderToStaticMarkup(
       <AutomationRuleEditor

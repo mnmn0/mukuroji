@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import type { WebhookEventType } from '@mukuroji/contracts'
 import {
   createAuditEvent,
   createMutationAuditContext,
@@ -230,6 +231,137 @@ test('projects one bounded subscription page and queues a durable continuation',
   })
   const deliveries = await platform.listWebhookDeliveries({ workspaceId: 'workspace-1' })
   expect(deliveries.deliveries).toHaveLength(12)
+})
+
+test('delivers a relation event scoped to the endpoint Project without the other endpoint', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const platform = createPlatform(() => now)
+  const relation = await createSubscription(platform, {
+    name: 'Blocker subscription',
+    eventTypes: ['work-item.blocker-removed'],
+  })
+  const updates = await createSubscription(platform, {
+    name: 'Update subscription',
+    eventTypes: ['work-item.updated'],
+  })
+  const base = createWorkItemAuditEvent(now)
+  const event = createAuditEvent({
+    context: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Sato' },
+      idempotencyKey: 'relation-delete-1',
+      request: { method: 'DELETE', path: '/api/teams/team-1/issues/build/relations', body: {} },
+      source: { kind: 'api', requestId: 'relation-delete-1' },
+      occurredAt: now.toISOString(),
+    }),
+    eventType: 'work-item.blocker-removed',
+    entity: { type: 'work-item', id: 'team/team-1/issue/build' },
+    action: 'blocker-removed',
+    summary: 'A blocker was removed.',
+    metadata: {
+      adapter: 'work-item-relation',
+      teamId: 'team-1',
+      issueId: 'build',
+      projectId: 'project-1',
+      relationType: 'blockedBy',
+      relatedWorkItemId: 'secret-design',
+      graphRevision: 2,
+      projectScopeRecorded: true,
+    },
+    outboxStatus: 'pending',
+    expiresAt: base.expiresAt,
+  })
+  const authorizations: Array<[string, string, string | undefined]> = []
+  const queued: WebhookQueueMessage[] = []
+
+  const response = await processWebhookDeliveryBatch({
+    Records: [createProjectionSqsRecord(event.eventId)],
+  }, {
+    featureAvailability: enabledFeatureAvailability,
+    auditEvents: { getEvent: async () => event },
+    developerPlatform: platform,
+    authorizer: {
+      async canDeliver(_workspaceId, subscription, teamId, projectId) {
+        authorizations.push([subscription.id, teamId, projectId])
+        return true
+      },
+    },
+    projections: createMemoryProjectionStore(),
+    queue: createRecordingQueue(queued),
+    claims: createMemoryClaimStore(),
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      throw new Error('Projection must not perform HTTP delivery.')
+    },
+  })
+
+  expect(response).toEqual({ batchItemFailures: [] })
+  expect(authorizations).toEqual([[relation.subscription.id, 'team-1', 'project-1']])
+  const deliveries = await platform.listWebhookDeliveries({ workspaceId: 'workspace-1' })
+  expect(deliveries.deliveries.map((delivery) => [delivery.subscriptionId, delivery.eventType]))
+    .toEqual([[relation.subscription.id, 'work-item.blocker-removed']])
+  expect(deliveries.deliveries.some((delivery) => delivery.subscriptionId === updates.subscription.id))
+    .toBe(false)
+  // The other endpoint may be in a Project the subscription creator cannot read.
+  expect(JSON.stringify(toPublicWebhookEventData(event))).not.toContain('secret-design')
+})
+
+test('skips a relation event written before its Project scope was recorded', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const base = createWorkItemAuditEvent(now)
+  // An older writer left `projectId` out even for a Project-assigned Work Item.
+  const legacy = createAuditEvent({
+    context: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Sato' },
+      idempotencyKey: 'relation-legacy-1',
+      request: { method: 'POST', path: '/api/teams/team-1/issues/build/relations', body: {} },
+      source: { kind: 'api', requestId: 'relation-legacy-1' },
+      occurredAt: now.toISOString(),
+    }),
+    eventType: 'work-item.blocker-added',
+    entity: { type: 'work-item', id: 'team/team-1/issue/build' },
+    action: 'blocker-added',
+    summary: 'A blocker was added.',
+    metadata: { adapter: 'work-item-relation', teamId: 'team-1', issueId: 'build', graphRevision: 1 },
+    outboxStatus: 'pending',
+    expiresAt: base.expiresAt,
+  })
+  const queued: WebhookQueueMessage[] = []
+
+  await processWebhookProjectionBatch({
+    Records: [{ eventName: 'INSERT', dynamodb: { SequenceNumber: '301', NewImage: marshallRecord(legacy) } }],
+  }, {
+    featureAvailability: enabledFeatureAvailability,
+    queue: createRecordingQueue(queued),
+  })
+  expect(queued).toEqual([])
+
+  const platform = createPlatform(() => now)
+  await createSubscription(platform, { eventTypes: ['work-item.blocker-added'] })
+  const response = await processWebhookDeliveryBatch({
+    Records: [createProjectionSqsRecord(legacy.eventId)],
+  }, {
+    featureAvailability: enabledFeatureAvailability,
+    auditEvents: { getEvent: async () => legacy },
+    developerPlatform: platform,
+    authorizer: {
+      async canDeliver() {
+        throw new Error('A legacy relation event must not reach authorization.')
+      },
+    },
+    projections: createMemoryProjectionStore(),
+    queue: createRecordingQueue(queued),
+    claims: createMemoryClaimStore(),
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      throw new Error('Projection must not perform HTTP delivery.')
+    },
+  })
+  expect(response).toEqual({ batchItemFailures: [] })
+  expect((await platform.listWebhookDeliveries({ workspaceId: 'workspace-1' })).deliveries).toEqual([])
 })
 
 test('does not expand a projection page chain after duplicate messages and send response loss', async () => {
@@ -943,7 +1075,7 @@ async function createSubscription(
   options: {
     name?: string
     teamIds?: string[]
-    eventTypes?: Array<'work-item.created' | 'work-item.updated'>
+    eventTypes?: WebhookEventType[]
   } = {},
 ) {
   return await platform.createWebhookSubscription({

@@ -2043,6 +2043,7 @@ test('records a blocker change on both endpoints in the relation transaction', a
         relationType: 'blocks',
         relatedWorkItemId: 'build',
         graphRevision: 1,
+        projectScopeRecorded: true,
       },
       publicView: expect.any(String),
     },
@@ -2086,6 +2087,37 @@ test('records a blocker change on both endpoints in the relation transaction', a
   ])
 })
 
+test('records each endpoint Project guarded by the relation transaction on its own event', async () => {
+  const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
+  const client = store.createClient()
+
+  await client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'design',
+    targetWorkItemId: 'build',
+    type: 'blocks',
+    expectedGraphRevision: 0,
+    sourceExpectedRevision: 1,
+    targetExpectedRevision: 4,
+    sourceAssignedProjectId: 'project-a',
+  }, [], createRelationAudit('relation-create-project-1'))
+  await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3, assignedProjectId: 'project-b' },
+    nextParent: { workItemId: 'phase', expectedRevision: 1 },
+    expectedGraphRevision: 1,
+  }, [], createRelationAudit('parent-project-1'))
+
+  // Webhook delivery checks the Project of the endpoint each event belongs to.
+  expect(store.transactions.flatMap(readRelationAuditEvents).map((event) => [
+    event.eventType,
+    event.metadata,
+  ])).toEqual([
+    ['work-item.blocking-added', expect.objectContaining({ issueId: 'design', projectId: 'project-a' })],
+    ['work-item.blocker-added', expect.not.objectContaining({ projectId: expect.anything() })],
+    ['work-item.parent-changed', expect.objectContaining({ issueId: 'task', projectId: 'project-b' })],
+    ['work-item.child-added', expect.not.objectContaining({ projectId: expect.anything() })],
+  ])
+})
+
 test('records a reorder among siblings on the moved child with both ranks', async () => {
   const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
   store.seedRelation('task', 'phase-a', 'parent')
@@ -2123,6 +2155,7 @@ test('records a reorder among siblings on the moved child with both ranks', asyn
       parentWorkItemId: 'phase-a',
       hierarchyRank: 'k',
       graphRevision: 6,
+      projectScopeRecorded: true,
     },
     publicView: expect.any(String),
   }])
@@ -2161,6 +2194,7 @@ test('records a top-level reorder without a parent', async () => {
         issueId: 'task',
         hierarchyRank: 'k',
         graphRevision: 3,
+        projectScopeRecorded: true,
       },
     ]])
 })

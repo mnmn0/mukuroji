@@ -1,12 +1,16 @@
 import {
   APPROVAL_MAX_REVIEWERS,
   AUTOMATION_BASELINE_SLIP_MAX_DAYS,
+  AUTOMATION_RELATION_TRIGGER_MAX_EVENT_TYPES,
+  WORK_ITEM_RELATION_EVENT_TYPES,
+  isWorkItemRelationEventType,
   type AutomationAction,
   type AutomationCondition,
   type AutomationRateLimit,
   type AutomationRetryPolicy,
   type AutomationTrigger,
   type CreateAutomationRuleInput,
+  type WorkItemRelationEventType,
 } from '@mukuroji/contracts'
 import {
   isAutomationWebhookSecretAlias,
@@ -187,6 +191,13 @@ function validateAutomationTrigger(value: unknown): AutomationTrigger {
         type: 'comment',
         ...(trigger.kind === undefined ? {} : { kind: trigger.kind }),
       }
+    case 'relation':
+      return {
+        type: 'relation',
+        ...(trigger.eventTypes === undefined ? {} : {
+          eventTypes: validateRelationTriggerEventTypes(trigger.eventTypes),
+        }),
+      }
     case 'form':
       return {
         type: 'form',
@@ -205,6 +216,27 @@ function validateAutomationTrigger(value: unknown): AutomationTrigger {
     default:
       throw invalidInput('Automation trigger type is invalid.')
   }
+}
+
+/**
+ * Validates the event type filter of a relation trigger.
+ *
+ * @param value - Untrusted event type list.
+ * @returns The distinct relation event types in the canonical order.
+ */
+function validateRelationTriggerEventTypes(value: unknown): WorkItemRelationEventType[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > AUTOMATION_RELATION_TRIGGER_MAX_EVENT_TYPES ||
+    !value.every(isWorkItemRelationEventType)
+  ) {
+    throw invalidInput(
+      'Automation relation trigger event types must list 1 to ' +
+        `${AUTOMATION_RELATION_TRIGGER_MAX_EVENT_TYPES} relation event types.`,
+    )
+  }
+  return WORK_ITEM_RELATION_EVENT_TYPES.filter((eventType) => value.includes(eventType))
 }
 
 /** Validates a top-level condition list. */

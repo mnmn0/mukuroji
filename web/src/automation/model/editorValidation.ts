@@ -1,5 +1,6 @@
 import {
   AUTOMATION_BASELINE_SLIP_MAX_DAYS,
+  isWorkItemRelationEventType,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
@@ -53,6 +54,7 @@ export function isAutomationTriggerConfigurationValid(
   if (automationTriggerRequiresConfiguration(type) && !value) return false
   if (type === 'due' && value && value !== 'changed' && value !== 'due' && value !== 'overdue') return false
   if (type === 'baseline-slip' && value && readBaselineSlipDays(value) === undefined) return false
+  if (type === 'relation' && value && !isWorkItemRelationEventType(value)) return false
   return true
 }
 
@@ -388,6 +390,8 @@ export function createAutomationTrigger(
     }
     case 'form':
       return { type, formId: value }
+    case 'relation':
+      return { type, ...(isWorkItemRelationEventType(value) ? { eventTypes: [value] } : {}) }
     case 'status':
       return { type, ...(value ? { toStatusId: value } : {}) }
     case 'webhook':

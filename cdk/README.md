@@ -201,15 +201,15 @@ aws ce update-cost-allocation-tags-status \
 
 ### 利用規模ごとの試算
 
-1 人が 1 営業日に API を約 2,000 回呼ぶと仮定した試算です（Document を 1 時間開くと 3.5 秒ごとの再取得だけで約 1,000 回になります）。月 20 営業日、既定構成、AI なしで計算しています。
+1 人が 1 営業日に API を約 1,500 回呼ぶと仮定した試算です。Document 画面は WebSocket の変更通知を受けている間、本文・comment・presence の再取得を 60 秒ごとに落とすため、1 時間開いても約 500 回です（WebSocket がない環境や接続断では従来の 3.5〜4 秒ごとの polling に戻り、1 時間で約 3,400 回になります。ADR 0041）。月 20 営業日、既定構成、AI なしで計算しています。
 
 | 利用者 | API request / 月 | 従量費の目安 | 合計の目安 |
 | --- | --- | --- | --- |
-| 10 人 | 約 40 万 | 約 $2〜3 | 約 $8〜11 |
-| 50 人 | 約 200 万 | 約 $5〜7 | 約 $11〜15 |
-| 200 人 | 約 800 万 | 約 $25〜30 | 約 $31〜38 |
+| 10 人 | 約 30 万 | 約 $2〜3 | 約 $8〜11 |
+| 50 人 | 約 150 万 | 約 $4〜5 | 約 $10〜13 |
+| 200 人 | 約 600 万 | 約 $19〜23 | 約 $25〜31 |
 
-従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、DynamoDB の読み書き、Lambda（無料枠を超えた request と実行時間）、CloudWatch Logs の取り込み、WebSocket の接続時間です。税（日本の請求では消費税 10%）、独自 domain の Route 53 hosted zone（$0.50 / 月）、AI の token 料金は含みません。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
+従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、DynamoDB の読み書き、Lambda（無料枠を超えた request と実行時間）、CloudWatch Logs の取り込み、WebSocket の接続時間と message（Document の変更通知は 100 万件あたり $1.14）です。税（日本の請求では消費税 10%）、独自 domain の Route 53 hosted zone（$0.50 / 月）、AI の token 料金は含みません。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
 
 ### X-Ray tracing の切り替え
 
@@ -1344,7 +1344,7 @@ Deploy 時は `cdk diff` で canonical table の意図しない replacement/dele
 - `DataMigrationFunction` は schedule も event source も持たず、起動されたときだけ動きます（timeout 15 分、
   非同期起動の retry 0）。待機中の費用はかかりません。
 - function の role は allowlist の table（今は `work-items` = `WorkItemsTable` と `project-directory` =
-  `ProjectDirectoryTable`）に `Scan` / `GetItem` / `PutItem`、`DataMigrationCheckpointTable` に `Query` /
+  `ProjectDirectoryTable`）に `Scan` / `GetItem` / `PutItem` / `ConditionCheckItem`（`derive` migration の元 row の確認、ADR 0038）、`DataMigrationCheckpointTable` に `Query` /
   `PutItem` だけを持ちます。別の table を移行する migration は、`cdk/lib/stacks/mukuroji-stack.ts` の
   `buildDataMigration` の `targets` に同じ PR で table を足します。
 - `DataMigrationCheckpointTable` は `Retain`、PITR、deletion protection 付きです。checkpoint と run record

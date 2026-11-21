@@ -1750,6 +1750,11 @@ export type UpdateDocumentPresenceInput = {
    * 現在選択している content です。null で selection を解除します。
    */
   selection?: DocumentPresenceSelection | null
+  /**
+   * 他の閲覧者へ presence の変更を通知するかどうかです。lease の延長だけなら false にし、
+   * 参加直後や selection の変更時は true にします。省略時は通知します。
+   */
+  announce?: boolean
 }
 
 /**
