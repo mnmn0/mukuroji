@@ -4,6 +4,7 @@ import {
   buildRuntimeControlDocument,
   classifyDeploymentState,
   parseRuntimeControlArguments,
+  readDocumentMode,
   readDocumentRevision,
   maintenanceMatchesMode,
   readyMatchesMode,
@@ -11,6 +12,7 @@ import {
   RuntimeControlError,
   type RuntimeControlDependencies,
 } from './runtime-control'
+import { buildRuntimeControlAuditEvent, readGitHubRun, toDynamoDbItemJson } from './runtime-control-audit'
 
 const timing = {
   deploymentPollMilliseconds: 1,
@@ -25,7 +27,12 @@ const stackOutputs = [
   { OutputKey: 'RuntimeControlConfigurationProfileId', OutputValue: 'prof1' },
   { OutputKey: 'RuntimeControlCanaryDeploymentStrategyId', OutputValue: 'canary1' },
   { OutputKey: 'WebUrl', OutputValue: 'https://app.example.com/' },
+  { OutputKey: 'AuditEventsTableName', OutputValue: 'Mukuroji-AuditEventsTable1-ABC' },
+  { OutputKey: 'WorkspaceDirectoryId', OutputValue: 'workspace#production' },
+  { OutputKey: 'TenantAdministrationTableName', OutputValue: 'Mukuroji-TenantAdministrationTable1-DEF' },
 ]
+
+const stackParameters = [{ ParameterKey: 'AuditRetentionDays', ParameterValue: '400' }]
 
 /**
  * Options for the fake AWS account used by {@link fakeDependencies}.
@@ -41,6 +48,16 @@ interface FakeOptions {
   readonly alarm?: readonly [string, boolean]
   /** AppConfig environment state. */
   readonly environmentState?: string
+  /** Audit phases whose `put-item` fails. */
+  readonly failingAuditPhases?: readonly string[]
+  /** `get-item` output for the Workspace governance record; defaults to no record. */
+  readonly governance?: string
+  /** `get-item` outputs for later reads, used in order before falling back to `governance`. */
+  readonly laterGovernance?: readonly string[]
+  /** Completed deployments as `[DeploymentNumber, ConfigurationVersion]`. */
+  readonly completedDeployments?: readonly (readonly [number, string])[]
+  /** GitHub Actions run passed to the script. */
+  readonly gitHubRun?: RuntimeControlDependencies['gitHubRun']
 }
 
 /**
@@ -53,6 +70,10 @@ interface Fake {
   readonly calls: string[][]
   /** Files written by the script. */
   readonly files: Map<string, string>
+  /** DynamoDB JSON of the audit items stored, in order. */
+  readonly auditItems: Record<string, unknown>[]
+  /** Every progress line. */
+  readonly lines: string[]
 }
 
 /**
@@ -63,16 +84,29 @@ interface Fake {
  */
 function fakeDependencies(options: FakeOptions = {}): Fake {
   const calls: string[][] = []
-  const files = new Map<string, string>([['/work/latest.json', '{"schemaVersion":1,"mode":"disabled","revision":4}']])
+  const auditItems: Record<string, unknown>[] = []
+  const lines: string[] = []
+  const files = new Map<string, string>([
+    // The latest stored version (revision 4) never deployed; the served one is version 2.
+    ['/work/latest.json', '{"schemaVersion":1,"mode":"enabled","revision":4}'],
+    ['/work/deployed.json', '{"schemaVersion":1,"mode":"disabled","revision":3}'],
+  ])
   const deploymentStates = [...(options.deploymentStates ?? ['DEPLOYING', 'BAKING', 'COMPLETE'])]
+  let governanceReads = 0
   const readyStatuses = [...(options.readyStatuses ?? [200])]
   const maintenanceStates = options.maintenanceStates === undefined ? undefined : [...options.maintenanceStates]
   let clock = Date.parse('2026-11-20T06:00:00.000Z')
+  /**
+   * Answers one `aws` CLI call like the fake account would.
+   *
+   * @param args - CLI arguments after `aws`.
+   * @returns The parsed JSON the CLI would print.
+   */
   const answer = (args: readonly string[]): unknown => {
     const command = `${args[0]} ${args[1]}`
     switch (command) {
       case 'cloudformation describe-stacks':
-        return stackOutputs
+        return { Outputs: stackOutputs, Parameters: stackParameters }
       case 'cloudformation list-stack-resources':
         return ['mukuroji-runtime-control-alarm']
       case 'cloudwatch describe-alarms':
@@ -89,6 +123,22 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
         return { DeploymentNumber: 7, State: 'DEPLOYING' }
       case 'appconfig get-deployment':
         return { State: deploymentStates.shift() ?? 'COMPLETE', PercentageComplete: 100 }
+      case 'appconfig list-deployments':
+        return options.completedDeployments ?? [[5, '1'], [6, '2']]
+      case 'dynamodb get-item': {
+        governanceReads += 1
+        const later = governanceReads > 1 ? options.laterGovernance?.[governanceReads - 2] : undefined
+        const governance = later ?? options.governance
+        return governance === undefined ? {} : JSON.parse(governance)
+      }
+      case 'dynamodb put-item': {
+        const itemArgument = args[args.indexOf('--item') + 1] ?? ''
+        const path = itemArgument.replace(/^file:\/\//, '')
+        const phase = /audit-(\w+)\.json$/.exec(path)?.[1] ?? ''
+        if (options.failingAuditPhases?.includes(phase)) throw new RuntimeControlError('aws dynamodb put-item failed: AccessDenied')
+        auditItems.push(JSON.parse(files.get(path) ?? '{}'))
+        return {}
+      }
       default:
         throw new Error(`unexpected aws ${command}`)
     }
@@ -96,6 +146,8 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
   return {
     calls,
     files,
+    auditItems,
+    lines,
     dependencies: {
       aws: async (args) => {
         calls.push([...args])
@@ -115,11 +167,15 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
         files.set(path, content)
       },
       workDirectory: '/work',
+      gitHubRun: options.gitHubRun,
+      randomId: () => 'switch-1',
       sleep: async (milliseconds) => {
         clock += milliseconds
       },
       now: () => new Date(clock),
-      log: () => {},
+      log: (line) => {
+        lines.push(line)
+      },
     },
   }
 }
@@ -246,5 +302,313 @@ describe('maintenanceMatchesMode', () => {
     expect(maintenanceMatchesMode('read-only', 'read-only')).toBe(true)
     expect(maintenanceMatchesMode('read-only', 'stopped')).toBe(false)
     expect(maintenanceMatchesMode('enabled', undefined)).toBe(false)
+  })
+})
+
+/**
+ * Reads a string attribute from DynamoDB JSON.
+ *
+ * @param item - Stored item.
+ * @param key - Attribute name.
+ * @returns The string, or `undefined` when the attribute is not a string.
+ */
+function stringAttribute(item: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = item?.[key]
+  if (typeof value !== 'object' || value === null || !('S' in value)) return undefined
+  return typeof value.S === 'string' ? value.S : undefined
+}
+
+/**
+ * Reads `metadata.runtimeControl` of a stored audit item as plain values.
+ *
+ * @param item - Stored item.
+ * @returns Metadata keys with their string or number values.
+ */
+function metadataOf(item: Record<string, unknown> | undefined): Record<string, string | number> {
+  const metadata = item?.metadata
+  if (typeof metadata !== 'object' || metadata === null || !('M' in metadata)) return {}
+  const outer: unknown = metadata.M
+  if (typeof outer !== 'object' || outer === null || !('runtimeControl' in outer)) return {}
+  const runtimeControl: unknown = outer.runtimeControl
+  if (typeof runtimeControl !== 'object' || runtimeControl === null || !('M' in runtimeControl)) return {}
+  const map: unknown = runtimeControl.M
+  if (typeof map !== 'object' || map === null) return {}
+  const result: Record<string, string | number> = {}
+  for (const [key, value] of Object.entries(map)) {
+    if (typeof value !== 'object' || value === null) continue
+    if ('S' in value && typeof value.S === 'string') result[key] = value.S
+    if ('N' in value && typeof value.N === 'string') result[key] = Number(value.N)
+  }
+  return result
+}
+
+describe('audit log records', () => {
+  test('records the start before AppConfig changes and the completion after the checks', async () => {
+    const fake = fakeDependencies({ readyStatuses: [200] })
+    await runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'ap-northeast-1', 'Mukuroji', fake.dependencies, timing)
+
+    const commands = fake.calls.map((call) => `${call[0]} ${call[1]}`)
+    expect(commands.indexOf('dynamodb put-item')).toBeLessThan(commands.indexOf('appconfig create-hosted-configuration-version'))
+    expect(commands.lastIndexOf('dynamodb put-item')).toBeGreaterThan(commands.lastIndexOf('appconfig get-deployment'))
+    const put = fake.calls.find((call) => call[1] === 'put-item') ?? []
+    expect(put[put.indexOf('--table-name') + 1]).toBe('Mukuroji-AuditEventsTable1-ABC')
+    expect(put[put.indexOf('--condition-expression') + 1]).toContain('attribute_not_exists(#eventId)')
+
+    expect(fake.auditItems.map((item) => stringAttribute(item, 'eventType'))).toEqual([
+      'runtime-control.change-started',
+      'runtime-control.change-completed',
+    ])
+    const [started, completed] = fake.auditItems
+    expect(stringAttribute(started, 'workspaceId')).toBe('workspace#production')
+    expect(stringAttribute(started, 'actorUserId')).toBe('arn:aws:iam::123456789012:user/operator')
+    expect(stringAttribute(started, 'outboxStatus')).toBe('suppressed')
+    expect(stringAttribute(started, 'entityId')).toBe('appconfig:app1:prof1')
+    expect(stringAttribute(started, 'correlationId')).toBe(stringAttribute(completed, 'correlationId'))
+    expect(stringAttribute(started, 'eventId')).not.toBe(stringAttribute(completed, 'eventId'))
+    expect(metadataOf(started)).toEqual({ switchId: 'switch-1', mode: 'enabled', revision: 5, strategy: 'canary', previousMode: 'disabled' })
+    expect(metadataOf(completed)).toMatchObject({ hostedVersionNumber: 5, deploymentNumber: 7 })
+    // Retention follows the stack parameter: 400 days after the event.
+    const occurredAt = Date.parse(stringAttribute(completed, 'occurredAt') ?? '')
+    expect(completed?.expiresAt).toEqual({ N: String(Math.floor(occurredAt / 1000) + 400 * 86_400) })
+  })
+
+  test('changes nothing when the start cannot be recorded for an enable or read-only switch', async () => {
+    for (const mode of ['enabled', 'read-only'] as const) {
+      const fake = fakeDependencies({ failingAuditPhases: ['started'] })
+      await expect(runRuntimeControl({ mode, allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
+        .rejects.toThrow('Nothing was changed')
+      expect(fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(false)
+    }
+  })
+
+  test('still stops when the start cannot be recorded, and warns', async () => {
+    const fake = fakeDependencies({ failingAuditPhases: ['started'], readyStatuses: [503] })
+    const result = await runRuntimeControl({ mode: 'disabled', allAtOnce: true }, 'r', 'Mukuroji', fake.dependencies, timing)
+
+    expect(result.readyStatus).toBe(503)
+    expect(fake.lines.some((line) => line.startsWith('Warning: Could not record runtime-control.change-started'))).toBe(true)
+    expect(fake.auditItems.map((item) => stringAttribute(item, 'eventType'))).toEqual(['runtime-control.change-completed'])
+  })
+
+  test('only warns when the completion cannot be recorded', async () => {
+    const fake = fakeDependencies({ failingAuditPhases: ['completed'], readyStatuses: [503] })
+    await runRuntimeControl({ mode: 'disabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(fake.lines.some((line) => line.includes('completed step is missing from the audit log'))).toBe(true)
+  })
+
+  test('records a failure with its reason and the deployment it reached', async () => {
+    const fake = fakeDependencies({ deploymentStates: ['DEPLOYING', 'ROLLED_BACK'] })
+    await expect(runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
+      .rejects.toThrow('ROLLED_BACK')
+
+    const failed = fake.auditItems.at(-1)
+    expect(stringAttribute(failed, 'eventType')).toBe('runtime-control.change-failed')
+    expect(metadataOf(failed)).toMatchObject({ failureReason: 'deployment-rolled-back', hostedVersionNumber: 5, deploymentNumber: 7 })
+  })
+
+  test('records a readiness timeout as its own reason', async () => {
+    const fake = fakeDependencies({ readyStatuses: [200] })
+    await expect(runRuntimeControl({ mode: 'disabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
+      .rejects.toThrow('expected 503')
+    expect(metadataOf(fake.auditItems.at(-1))).toMatchObject({ failureReason: 'readiness-timeout' })
+  })
+
+  test('names the GitHub Actions run that made the switch', async () => {
+    const gitHubRun = readGitHubRun({
+      GITHUB_ACTIONS: 'true',
+      GITHUB_REPOSITORY: 'mnmn0/mukuroji',
+      GITHUB_RUN_ID: '42',
+      GITHUB_RUN_ATTEMPT: '2',
+      GITHUB_ACTOR: 'someone',
+      GITHUB_TRIGGERING_ACTOR: 'approver',
+    })
+    const fake = fakeDependencies({ readyStatuses: [503], gitHubRun })
+    await runRuntimeControl({ mode: 'disabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+
+    expect(JSON.stringify(fake.auditItems[0]?.metadata)).toContain(
+      '"runUrl":{"S":"https://github.com/mnmn0/mukuroji/actions/runs/42/attempts/2"}',
+    )
+    expect(JSON.stringify(fake.auditItems[0]?.metadata)).toContain('"actor":{"S":"approver"}')
+    const actor = fake.auditItems[0]?.actor
+    expect(JSON.stringify(actor)).toContain('GitHub Actions (approver)')
+  })
+
+  test('reads no GitHub run outside GitHub Actions', () => {
+    expect(readGitHubRun({ GITHUB_RUN_ID: '42' })).toBeUndefined()
+    expect(readGitHubRun({ GITHUB_ACTIONS: 'true', GITHUB_RUN_ID: '42' })).toBeUndefined()
+  })
+
+  test('reads the previous mode only when the schema accepts it', () => {
+    expect(readDocumentMode('{"mode":"read-only","revision":3}')).toBe('read-only')
+    expect(readDocumentMode('{"mode":"paused"}')).toBeUndefined()
+    expect(readDocumentMode('nope')).toBeUndefined()
+  })
+
+  test('still stops without the audit outputs, and warns', async () => {
+    const fake = fakeDependencies({ readyStatuses: [503] })
+    const original = fake.dependencies.aws
+    const aws: RuntimeControlDependencies['aws'] = async (args) =>
+      args[1] === 'describe-stacks'
+        ? JSON.stringify({ Outputs: stackOutputs.filter((output) => output.OutputKey !== 'TenantAdministrationTableName') })
+        : await original(args)
+    await runRuntimeControl({ mode: 'disabled', allAtOnce: true }, 'r', 'Mukuroji', { ...fake.dependencies, aws }, timing)
+    expect(fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(true)
+    expect(fake.auditItems).toHaveLength(0)
+    expect(fake.lines.some((line) => line.includes('has no TenantAdministrationTableName output'))).toBe(true)
+  })
+
+  test('still stops when the audit retention parameter is invalid, and refuses other switches', async () => {
+    const run = async (mode: 'enabled' | 'disabled') => {
+      const fake = fakeDependencies({ readyStatuses: [mode === 'disabled' ? 503 : 200] })
+      const original = fake.dependencies.aws
+      const aws: RuntimeControlDependencies['aws'] = async (args) =>
+        args[1] === 'describe-stacks'
+          ? JSON.stringify({ Outputs: stackOutputs, Parameters: [{ ParameterKey: 'AuditRetentionDays', ParameterValue: '0' }] })
+          : await original(args)
+      const outcome = await runRuntimeControl({ mode, allAtOnce: true }, 'r', 'Mukuroji', { ...fake.dependencies, aws }, timing)
+        .then(() => 'done', (error: unknown) => error instanceof Error ? error.message : String(error))
+      return { fake, outcome }
+    }
+    const stop = await run('disabled')
+    expect(stop.outcome).toBe('done')
+    expect(stop.fake.auditItems).toHaveLength(0)
+    const start = await run('enabled')
+    expect(start.outcome).toContain('AuditRetentionDays is not a positive integer')
+    expect(start.fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(false)
+  })
+
+  test('refuses a stack without the audit outputs before changing anything', async () => {
+    const fake = fakeDependencies()
+    const original = fake.dependencies.aws
+    const aws: RuntimeControlDependencies['aws'] = async (args) =>
+      args[1] === 'describe-stacks'
+        ? JSON.stringify({ Outputs: stackOutputs.filter((output) => output.OutputKey !== 'AuditEventsTableName') })
+        : await original(args)
+    await expect(runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', { ...fake.dependencies, aws }, timing))
+      .rejects.toThrow('has no AuditEventsTableName output')
+  })
+})
+
+describe('toDynamoDbItemJson', () => {
+  test('writes nested values as DynamoDB JSON', () => {
+    const event = buildRuntimeControlAuditEvent(
+      { tableName: 't', workspaceId: 'workspace#a', retentionDays: 30, legalHold: false },
+      {
+        switchId: 's', applicationId: 'a', configurationProfileId: 'p', mode: 'read-only', previousMode: undefined,
+        revision: 2, allAtOnce: false, callerArn: 'arn:x', gitHubRun: undefined,
+      },
+      { phase: 'started', occurredAt: new Date(0) },
+    )
+    const item: unknown = JSON.parse(toDynamoDbItemJson(event))
+    expect(item).toMatchObject({
+      schemaVersion: { N: '1' },
+      changes: { L: [{ M: { field: { S: 'mode' }, after: { S: 'read-only' } } }] },
+      actor: { M: { kind: { S: 'service' } } },
+    })
+  })
+})
+
+/**
+ * Builds a `get-item` result shaped like a persisted governance row (`payload` holds the JSON record).
+ *
+ * @param auditRetentionDays - Retention in days.
+ * @param legalHold - Whether a legal hold is on.
+ * @returns The `aws dynamodb get-item` output.
+ */
+function governanceRow(auditRetentionDays: number, legalHold: boolean): string {
+  const payload = {
+    workspaceId: 'workspace#production',
+    auditRetentionDays,
+    legalHold,
+    dataResidency: 'ap-northeast-1',
+    revision: 2,
+    updatedAt: '2026-11-01T00:00:00.000Z',
+    updatedBy: 'member-1',
+  }
+  return JSON.stringify({ Item: { payload: { S: JSON.stringify(payload) } } })
+}
+
+describe('Workspace retention and the served mode', () => {
+  test('applies the Workspace governance retention instead of the stack default', async () => {
+    const fake = fakeDependencies({
+      readyStatuses: [503],
+      governance: governanceRow(90, false),
+    })
+    await runRuntimeControl({ mode: 'disabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+
+    const get = fake.calls.find((call) => call[1] === 'get-item') ?? []
+    expect(get[get.indexOf('--table-name') + 1]).toBe('Mukuroji-TenantAdministrationTable1-DEF')
+    expect(get).toContain('--consistent-read')
+    expect(get[get.indexOf('--projection-expression') + 1]).toBe('payload')
+    const started = fake.auditItems[0]
+    const occurredAt = Date.parse(stringAttribute(started, 'occurredAt') ?? '')
+    expect(started?.expiresAt).toEqual({ N: String(Math.floor(occurredAt / 1000) + 90 * 86_400) })
+  })
+
+  test('keeps the events without a TTL under a legal hold', async () => {
+    const fake = fakeDependencies({
+      readyStatuses: [503],
+      governance: governanceRow(90, true),
+    })
+    await runRuntimeControl({ mode: 'read-only', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(fake.auditItems).toHaveLength(2)
+    for (const item of fake.auditItems) expect(item.expiresAt).toBeUndefined()
+  })
+
+  test('changes nothing when the governance record is invalid for an enable', async () => {
+    const fake = fakeDependencies({ governance: JSON.stringify({ Item: { payload: { S: JSON.stringify({ legalHold: 'yes' }) } } }) })
+    await expect(runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
+      .rejects.toThrow('Could not read the Workspace audit retention')
+    expect(fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(false)
+  })
+
+  test('stops without a TTL on its events when the governance record cannot be read', async () => {
+    const fake = fakeDependencies({
+      readyStatuses: [503],
+      governance: JSON.stringify({ Item: { payload: { S: JSON.stringify({ legalHold: 'yes' }) } } }),
+    })
+    await runRuntimeControl({ mode: 'disabled', allAtOnce: true }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(true)
+    expect(fake.auditItems.map((item) => stringAttribute(item, 'eventType'))).toEqual(['runtime-control.change-completed'])
+    for (const item of fake.auditItems) expect(item.expiresAt).toBeUndefined()
+  })
+
+  test('rereads the governance before the completion, so a hold set during the rollout applies', async () => {
+    const fake = fakeDependencies({
+      readyStatuses: [503],
+      governance: governanceRow(90, false),
+      laterGovernance: [governanceRow(90, true)],
+    })
+    await runRuntimeControl({ mode: 'read-only', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(fake.calls.filter((call) => call[1] === 'get-item')).toHaveLength(2)
+    expect(fake.auditItems[0]?.expiresAt).toBeDefined()
+    expect(fake.auditItems[1]?.expiresAt).toBeUndefined()
+  })
+
+  test('writes the completion without a TTL when the governance cannot be reread', async () => {
+    const fake = fakeDependencies({
+      readyStatuses: [503],
+      governance: governanceRow(90, false),
+      laterGovernance: [JSON.stringify({ Item: { payload: { S: '{}' } } })],
+    })
+    await runRuntimeControl({ mode: 'read-only', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(fake.auditItems.map((item) => stringAttribute(item, 'eventType')))
+      .toEqual(['runtime-control.change-started', 'runtime-control.change-completed'])
+    expect(fake.auditItems[1]?.expiresAt).toBeUndefined()
+  })
+
+  test('takes the before-value from the latest completed deployment, not the latest stored version', async () => {
+    const fake = fakeDependencies({ readyStatuses: [200] })
+    await runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    const read = fake.calls.filter((call) => call[1] === 'get-hosted-configuration-version').at(-1) ?? []
+    expect(read[read.indexOf('--version-number') + 1]).toBe('2')
+    expect(metadataOf(fake.auditItems[0])).toMatchObject({ previousMode: 'disabled' })
+  })
+
+  test('leaves the before-value out when no deployment completed', async () => {
+    const fake = fakeDependencies({ readyStatuses: [200], completedDeployments: [] })
+    await runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(metadataOf(fake.auditItems[0]).previousMode).toBeUndefined()
+    expect(JSON.stringify(fake.auditItems[0]?.changes)).not.toContain('before')
   })
 })

@@ -38,6 +38,9 @@ jobs:
       - name: Strict typecheck Public API compatibility checker
         run: bun run typecheck:api-contract
 
+      - name: Strict typecheck operator scripts
+        run: bun run typecheck:scripts
+
       - name: Strict typecheck all Server TypeScript
         run: bun run typecheck:server
 
@@ -73,6 +76,9 @@ jobs:
 
       - name: Test Public API compatibility checker
         run: bun run api:contract:test
+
+      - name: Test operator scripts
+        run: bun run scripts:test
 
       - name: Run Server unit and integration tests
         run: bun run server:test
