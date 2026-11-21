@@ -8,15 +8,28 @@ import { AiAssistanceError } from '../../errors'
 export type AiProviderCredentialKmsClient = {
   /** Generates a fresh AES-256 data key bound to the encryption context. */
   generateDataKey(input: {
+    /** KMS key that wraps the data key. */
     keyId: string
+    /** Encryption context the IAM grant and decryption must match. */
     encryptionContext: Readonly<Record<string, string>>
-  }): Promise<{ plaintext: Uint8Array, ciphertextBlob: Uint8Array }>
+  }): Promise<{
+    /** Plaintext data key used once for AES-GCM; never the API key itself. */
+    plaintext: Uint8Array
+    /** The same data key encrypted by KMS, stored next to the ciphertext. */
+    ciphertextBlob: Uint8Array
+  }>
   /** Decrypts a stored data key with the same encryption context. */
   decrypt(input: {
+    /** KMS key expected to have wrapped the data key. */
     keyId: string
+    /** Encrypted data key read from the stored row. */
     ciphertextBlob: Uint8Array
+    /** Encryption context the data key was generated with. */
     encryptionContext: Readonly<Record<string, string>>
-  }): Promise<{ plaintext: Uint8Array }>
+  }): Promise<{
+    /** Plaintext data key; never the API key itself. */
+    plaintext: Uint8Array
+  }>
 }
 
 /**

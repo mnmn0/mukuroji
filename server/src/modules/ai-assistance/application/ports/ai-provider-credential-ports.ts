@@ -106,16 +106,41 @@ export type AiProviderCredentialAuditInput = {
 
 /** Application service for manager-owned provider keys. */
 export interface AiProviderCredentialService {
-  /** Lists key status for every external provider without key material. */
+  /**
+   * Lists key status for every external provider without key material.
+   *
+   * @param actor - Workspace manager reading the status; non-managers are rejected.
+   * @returns Configured flag, last four characters, and revision per provider.
+   */
   list(actor: AiAssistanceActor): Promise<AiAssistanceProviderCredentials>
-  /** Registers or replaces one provider key. */
+  /**
+   * Registers or replaces one provider key.
+   *
+   * The write commits only when `request.expectedRevision` matches the stored
+   * revision and the fence from `authorization.getCommitFence()` still holds, so a
+   * manager who lost the role or a stale editor cannot overwrite the key.
+   *
+   * @param actor - Workspace manager making the change.
+   * @param provider - External provider the key authenticates to.
+   * @param request - Plaintext key and the revision the editor last saw.
+   * @param authorization - Fresh management check and commit fence.
+   * @returns Key-free status for every provider after the change.
+   */
   put(
     actor: AiAssistanceActor,
     provider: AiAssistanceExternalProvider,
     request: PutAiAssistanceProviderCredentialRequest,
     authorization: AiAssistancePolicyAuthorization,
   ): Promise<AiAssistanceProviderCredentials>
-  /** Removes one provider key. */
+  /**
+   * Removes one provider key under the same revision and commit-fence checks as `put`.
+   *
+   * @param actor - Workspace manager making the change.
+   * @param provider - External provider whose key is removed.
+   * @param request - Revision the editor last saw.
+   * @param authorization - Fresh management check and commit fence.
+   * @returns Key-free status for every provider after the change.
+   */
   delete(
     actor: AiAssistanceActor,
     provider: AiAssistanceExternalProvider,
@@ -127,6 +152,7 @@ export interface AiProviderCredentialService {
    *
    * @param workspaceId - Workspace that will run a generation.
    * @param provider - External provider of the selected model.
+   * @returns Whether an encrypted key row exists.
    */
   isConfigured(
     workspaceId: string,

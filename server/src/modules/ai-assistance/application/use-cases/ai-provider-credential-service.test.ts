@@ -42,18 +42,25 @@ const testCipher: AiProviderCredentialCipher = {
 
 /** In-memory store that records writes and enforces the revision fence. */
 function createStore(): AiProviderCredentialStore & {
+  /** Stored rows by Workspace and provider. */
   rows: Map<string, StoredAiProviderCredential>
+  /** Audit events committed with each write. */
   audits: AuditEventV1[]
+  /** Member and commit fence passed to each write. */
+  writes: Array<{ memberId: string, fence: unknown }>
 } {
   const rows = new Map<string, StoredAiProviderCredential>()
   const audits: AuditEventV1[] = []
+  const writes: Array<{ memberId: string, fence: unknown }> = []
   return {
     rows,
     audits,
+    writes,
     async getProviderCredential(workspaceId, provider) {
       return rows.get(`${workspaceId}:${provider}`)
     },
-    async putProviderCredentialWithAudit(_memberId, credential, expectedRevision, _fence, audit) {
+    async putProviderCredentialWithAudit(memberId, credential, expectedRevision, fence, audit) {
+      writes.push({ memberId, fence })
       const key = `${credential.workspaceId}:${credential.provider}`
       if ((rows.get(key)?.revision ?? 0) !== expectedRevision) throw new Error('conflict')
       rows.set(key, credential)
@@ -127,7 +134,7 @@ describe('createAiProviderCredentialService', () => {
   })
 
   test('replaces and removes a key with advancing revisions', async () => {
-    const { service, auditInputs } = createService()
+    const { service, store, auditInputs } = createService()
     await service.put(manager, 'anthropic', { apiKey: 'sk-ant-first-key-000001', expectedRevision: 0 }, currentAuthorization)
     await service.put(manager, 'anthropic', { apiKey: 'sk-ant-second-key-00002', expectedRevision: 1 }, currentAuthorization)
 
@@ -142,6 +149,8 @@ describe('createAiProviderCredentialService', () => {
     })
     expect(auditInputs.map((input) => input.action)).toEqual(['created', 'updated', 'deleted'])
     expect(await service.resolveApiKey('workspace-1', 'anthropic')).toBeUndefined()
+    const fence = await currentAuthorization.getCommitFence?.()
+    expect(store.writes).toEqual(Array.from({ length: 3 }, () => ({ memberId: manager.memberId, fence })))
   })
 
   test('rejects a stale revision, a non-manager, a disabled provider, and a mismatched key', async () => {

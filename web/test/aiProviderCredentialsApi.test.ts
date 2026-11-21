@@ -94,5 +94,10 @@ describe('AI provider credential API', () => {
     expect(remove?.url).toEndWith('/provider-credentials/anthropic?expectedRevision=3')
     expect(remove?.init.method).toBe('DELETE')
     expect(remove?.init.body).toBeUndefined()
+    for (const request of [put, remove]) {
+      const headers = new Headers(request?.init.headers)
+      expect(headers.get('Idempotency-Key')).toBe(mutationContext.idempotencyKey)
+      expect(headers.get('X-Correlation-Id')).toBe(mutationContext.correlationId)
+    }
   })
 })
