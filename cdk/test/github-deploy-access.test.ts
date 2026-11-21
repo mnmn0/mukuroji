@@ -149,6 +149,20 @@ describe('GitHub deploy access template', () => {
     });
   });
 
+  test('runtime control may only add audit events to the deployment Workspace partition of the audit table', () => {
+    const audit = permissions.find((statement) => statement.Sid === 'RecordRuntimeControlAudit');
+    expect(audit?.Action).toBe('dynamodb:PutItem');
+    expect(audit?.Resource).toEqual({
+      'Fn::Sub': 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MukurojiStackName}-AuditEventsTable*',
+    });
+    expect(audit?.Condition).toEqual({
+      'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [{ Ref: 'WorkspaceDirectoryId' }] },
+    });
+    const dynamoDbActions = permissions.filter((statement) => statement.Effect === 'Allow').flatMap(actions)
+      .filter((action) => action.startsWith('dynamodb:'));
+    expect(dynamoDbActions).toEqual(['dynamodb:PutItem']);
+  });
+
   test('alarm topics accept publishes only from CloudWatch alarms in this account', () => {
     const topicPolicy = statements(at('Resources', 'AlarmTopicPolicy', 'Properties', 'PolicyDocument', 'Statement'));
     const allow = topicPolicy.find((statement) => statement.Effect === 'Allow');

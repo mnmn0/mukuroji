@@ -761,7 +761,10 @@ role を引き受けられるのは `mnmn0/mukuroji` の `production` Environmen
 
 deploy role 自身が持つ権限は、CDK bootstrap の deploy / file-publishing / lookup role を引き受けること、
 `Mukuroji` stack の参照、Web bucket への upload と CloudFront の invalidation、runtime control の AppConfig 操作、
-`/mukuroji/deploy/` の SSM parameter の読み取りと新規作成（上書きは Deny）だけです。stack の変更は CDK の標準どおり
+`/mukuroji/deploy/` の SSM parameter の読み取りと新規作成（上書きは Deny）、runtime control の切り替えを監査ログに残す
+audit table（`WorkspaceDirectoryId` の partition だけ）への `dynamodb:PutItem` だけです。
+2026-11-21 より前の template で deploy access stack を作った場合は、手順 1 の `curl` と `aws cloudformation deploy` を
+もう一度実行して、この権限を足してください。stack の変更は CDK の標準どおり
 bootstrap の CloudFormation execution role が行います。
 
 stack の secret parameter（`WorkspaceAuditPseudonymKey`、`EnterpriseIdentityTokenHashSecret`、`RequestTokenHashSecret`、
@@ -1169,6 +1172,11 @@ AWS_REGION=ap-northeast-1 bun run runtime-control:enable
    が `OK` かつ actions 有効であることを確かめる（alarm の確認は有効化のときだけ）。
 3. 最新の hosted version の `revision` に 1 を足した document を hosted version として作る。
    誰が（`sts get-caller-identity` の ARN）いつ切り替えたかを version と deployment の description に残す。
+   その前に、Workspace の監査ログ（stack output `AuditEventsTableName`）へ `runtime-control.change-started` を書き、
+   終わったら `runtime-control.change-completed` か `runtime-control.change-failed` を書く。実行する credential には
+   この table への `dynamodb:PutItem` が要る（`WorkspaceDirectoryId` の partition だけに絞れる。GitHub Actions の deploy
+   role は持っている）。開始を記録できないと `enable` と `read-only` は何も変えずに止まり、`disable` は警告を出して
+   止める操作を続ける（[ADR 0044](../docs/adr/0044-runtime-control-switch-audit-events.md)）。
 4. stack の canary strategy で deployment を始め、`COMPLETE` まで待つ（rollout 20 分 + bake 10 分で約 30 分）。
    `ROLLED_BACK` になったら失敗として止まる。
 5. `WebUrl` の `/api/ready` が `200` を返し、`/api/maintenance` が `{"state":"none"}` を返すまで最大 3 分確認する。

@@ -1598,6 +1598,8 @@ const publicAuditMetadataFields = new Set([
   'projectId',
   'roleId',
   'rootCommentId',
+  // Operator runtime-control switches (scripts/runtime-control.ts); holds no secret or tenant data.
+  'runtimeControl',
   'scopeKind',
   'teamId',
 ])

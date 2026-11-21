@@ -288,6 +288,10 @@ Project）・ロールを選んで **割り当てを追加** します。SCIM �
   組み込みロールでは owner だけが持ち、admin は export できません。ダウンロード URL の発行は監査ログに記録されます。
   export・閉鎖・ダウンロードと操作の中断・再開・検証は、セキュリティポリシーの「重要操作の再認証」の対象です。
 
+運用者が runtime control（メンテナンスの切り替えと停止・再開）を切り替えると、監査ログに
+`runtime-control.change-started` と、`runtime-control.change-completed` または `runtime-control.change-failed` が残ります。
+切り替えた AWS の実行者（GitHub Actions からの場合は起動した GitHub のユーザーと run）と時刻が分かります。
+
 監査ログには現在 Web の画面がありません。API（`/api/audit/events`、`/api/audit/exports`）から取得します。
 仕様は [`docs/event-audit.md`](../event-audit.md) を参照してください。
 
