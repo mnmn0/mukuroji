@@ -1,10 +1,11 @@
 import {
-  countWorkItemCalendarDaysBetween,
+  deriveWorkItemBaselineEndDelayDays,
   readWorkItemPlannedEndDate,
   weeklyReportWeekEnd,
   WEEKLY_SUMMARY_SECTION_ITEM_LIMIT,
   type CanonicalWorkItem,
   type ProjectScheduleBaseline,
+  type ProjectScheduleBaselineEntry,
   type TeamWeeklySummaryResponse,
   type WeeklySummaryItem,
   type WeeklySummaryScope,
@@ -56,8 +57,8 @@ type SectionAccumulator = {
 type ScopeAccumulator = {
   /** Project ID, or undefined for Work Items outside any Project. */
   projectId?: string
-  /** Planned end of each Work Item in the baseline, keyed by Work Item ID. */
-  baselineEnds?: ReadonlyMap<string, string>
+  /** Baseline entry of each Work Item, keyed by Work Item ID. */
+  baselineEntries?: ReadonlyMap<string, ProjectScheduleBaselineEntry>
   /** Baseline of the Project, `null` when none, undefined outside any Project. */
   baseline?: ProjectScheduleBaseline | null
   /** Section accumulators. */
@@ -91,8 +92,7 @@ export function buildTeamWeeklySummary<TWorkItem extends WeeklySummaryWorkItem>(
       ...(baseline === null
         ? {}
         : {
-            baselineEnds: new Map(baseline.entries.flatMap((entry) =>
-              entry.endDate === undefined ? [] : [[entry.workItemId, entry.endDate] as const])),
+            baselineEntries: new Map(baseline.entries.map((entry) => [entry.workItemId, entry] as const)),
           }),
       sections: createSections(),
     })
@@ -113,7 +113,8 @@ export function buildTeamWeeklySummary<TWorkItem extends WeeklySummaryWorkItem>(
     if (!scope) continue
 
     const plannedEndDate = readWorkItemPlannedEndDate(workItem.schedule)
-    const baselineEndDate = scope.baselineEnds?.get(workItem.id)
+    const baselineEntry = scope.baselineEntries?.get(workItem.id)
+    const baselineEndDate = baselineEntry?.endDate
     const item: WeeklySummaryItem = {
       workItemId: workItem.id,
       ...(workItem.key === undefined ? {} : { key: workItem.key }),
@@ -138,8 +139,10 @@ export function buildTeamWeeklySummary<TWorkItem extends WeeklySummaryWorkItem>(
       const cutoff = today < dayAfterWeek ? today : dayAfterWeek
       if (plannedEndDate < cutoff) add(scope.sections.overdue, item, plannedEndDate)
     }
-    const measuredEnd = completedInWeek ? workItem.actualEndDate : open ? plannedEndDate : undefined
-    const delayDays = countWorkItemCalendarDaysBetween(baselineEndDate, measuredEnd)
+    // Same measure as the Gantt baseline overlay; a Work Item completed before the week is not listed.
+    const delayDays = baselineEntry !== undefined && (completedInWeek || open)
+      ? deriveWorkItemBaselineEndDelayDays(baselineEntry, workItem)
+      : undefined
     if (delayDays !== undefined && delayDays > 0) {
       // Most delayed first.
       add(scope.sections.delayed, { ...item, delayDays }, -delayDays)

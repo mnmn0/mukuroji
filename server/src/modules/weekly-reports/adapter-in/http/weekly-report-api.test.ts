@@ -417,7 +417,15 @@ test('summarizes the week of each readable Project without Work Items of other P
     entries: [{ workItemId: 'late', endDate: '2026-11-20' }],
     capturedAt: '2026-11-01T00:00:00.000Z',
     expectedRevision: 0,
+    previous: null,
     callerAuthorization: [],
+    auditContext: createMutationAuditContext({
+      workspaceId: 'user#demo@example.com',
+      actor: { id: 'demo@example.com', kind: 'user', displayName: 'Manager' },
+      idempotencyKey: 'baseline',
+      request: { method: 'POST', path: '/baseline', body: {} },
+      source: { kind: 'api' },
+    }),
   })
 
   const response = await request(`/api/teams/core-team/weekly-summary?weekStart=${WEEK}`)
