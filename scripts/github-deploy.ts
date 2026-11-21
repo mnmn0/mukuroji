@@ -584,7 +584,7 @@ async function deploy(
     `| Web | ${webUrl} |`,
     '',
     before === undefined
-      ? 'First deploy: runtime control is `disabled`. Run the workflow with `runtime-control-enable` after the owner signs in.'
+      ? 'First deploy: runtime control is `disabled`, so sign-in also returns 503. Run the workflow with `runtime-control-enable` before the owner signs in.'
       : '',
     '',
   ].join('\n'))

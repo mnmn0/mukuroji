@@ -793,10 +793,11 @@ origin にするときは deploy access stack の `ApiAllowedOrigins` を更新�
 4. `deploy-access/deploy.workflow.yml` の内容を `.github/workflows/deploy.yml` として追加し、`main` に merge します。
    Claude の GitHub App は workflow file を push できないため、この 1 回は GitHub の画面から追加します。
 5. merge で動いた `Deploy` workflow の `Review deployments` で承認します。初回は 30〜40 分ほどかかります。
-6. 初期 owner に Cognito から仮パスワードのメールが届きます。`WebUrl`（job の summary に出ます）でサインインし、
+6. Actions → `Deploy` → `Run workflow` で `runtime-control-enable` を選んで実行し、承認します（約 30 分）。
+   ここまで API は `/api/health` と `/api/ready` 以外（サインインの `/api/auth/*` を含む）に `503` を返すので、
+   owner のサインインはこの後に行います。
+7. 初期 owner に Cognito から仮パスワードのメールが届いています。`WebUrl`（job の summary に出ます）でサインインし、
    パスワードを変えて MFA を設定します。
-7. Actions → `Deploy` → `Run workflow` で `runtime-control-enable` を選んで実行し、承認します（約 30 分）。
-   ここまで API は `/api/health` 以外に `503` を返します。
 
 ### いつもの deploy と手動の操作
 

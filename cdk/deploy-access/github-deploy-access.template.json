@@ -205,6 +205,12 @@
                   "Resource": { "Fn::Sub": "arn:${AWS::Partition}:appconfig:${AWS::Region}:${AWS::AccountId}:application/*" }
                 },
                 {
+                  "Sid": "UseRuntimeControlDeploymentStrategy",
+                  "Effect": "Allow",
+                  "Action": "appconfig:StartDeployment",
+                  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:appconfig:${AWS::Region}:${AWS::AccountId}:deploymentstrategy/*" }
+                },
+                {
                   "Sid": "ReadRuntimeControlAlarm",
                   "Effect": "Allow",
                   "Action": "cloudwatch:DescribeAlarms",

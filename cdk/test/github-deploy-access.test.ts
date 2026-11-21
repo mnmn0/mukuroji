@@ -133,6 +133,14 @@ describe('GitHub deploy access template', () => {
     expect(deny?.Condition).toEqual({ Bool: { 'ssm:Overwrite': 'true' } });
   });
 
+  test('runtime control may start a deployment with the stack strategy', () => {
+    const strategy = permissions.find((statement) => statement.Sid === 'UseRuntimeControlDeploymentStrategy');
+    expect(strategy?.Action).toBe('appconfig:StartDeployment');
+    expect(strategy?.Resource).toEqual({
+      'Fn::Sub': 'arn:${AWS::Partition}:appconfig:${AWS::Region}:${AWS::AccountId}:deploymentstrategy/*',
+    });
+  });
+
   test('alarm topics accept publishes only from CloudWatch alarms in this account', () => {
     const topicPolicy = statements(at('Resources', 'AlarmTopicPolicy', 'Properties', 'PolicyDocument', 'Statement'));
     const allow = topicPolicy.find((statement) => statement.Effect === 'Allow');
