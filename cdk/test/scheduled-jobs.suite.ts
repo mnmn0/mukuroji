@@ -50,7 +50,7 @@ test('retries jobs in the handler, not the Lambda, and keeps failures in a retai
     Handler: 'index.handler',
     MemorySize: 1024,
     Timeout: 900,
-    TracingConfig: { Mode: 'Active' },
+    TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
     Environment: { Variables: Match.objectLike({ MUKUROJI_RUNTIME_ROLE: 'scheduled-jobs-worker' }) },
   });
   template.hasResourceProperties('AWS::Lambda::EventInvokeConfig', {

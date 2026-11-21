@@ -3,6 +3,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { configureAlarmRouting } from '../aspects/alarm-routing';
 import { configureCostAllocationTags } from '../aspects/cost-allocation-tags';
+import { configureLambdaTracing } from '../aspects/lambda-tracing';
 import { configureStatefulResourceGuards } from '../aspects/stateful-resource-guards';
 import { buildLambdaBuildPaths } from '../config/lambda-build-paths';
 import { buildStackParameters, type StackParameters } from '../config/stack-parameters';
@@ -119,9 +120,20 @@ export class MukurojiStack extends cdk.Stack {
       connectorsEnabled,
       requestEmailEnabled,
     });
+    // The user pool's email links to the app URL, which exists only once the Web distribution,
+    // built from resources that need the pool, is built below.
+    let webOrigin: string | undefined;
     const userIdentity = buildUserIdentity(this, {
       userPoolIdParameter: parameterInputs.cognitoUserPoolIdParameter,
       userPoolClientIdParameter: parameterInputs.cognitoUserPoolClientIdParameter,
+      webOrigin: cdk.Lazy.string({
+        produce: () => {
+          if (webOrigin === undefined) {
+            throw new Error('The Web distribution must be built before the stack synthesizes.');
+          }
+          return webOrigin;
+        },
+      }),
     });
     const parameters: StackParameters = {
       ...parameterInputs,
@@ -226,6 +238,7 @@ export class MukurojiStack extends cdk.Stack {
       httpApi: apiTransports.httpApi,
       realtimeWebSocketApi: apiTransports.realtimeWebSocketStage.api,
     });
+    webOrigin = webDistribution.webOrigin;
     const auditProjection = buildAuditProjectionWorker(this, {
       dataStores,
       fileStorage,
@@ -339,6 +352,10 @@ export class MukurojiStack extends cdk.Stack {
     });
     configureStatefulResourceGuards(this);
     configureCostAllocationTags(this);
+    configureLambdaTracing(this, {
+      tracingMode: parameters.lambdaTracingMode,
+      tracingActive: parameters.lambdaTracingActive,
+    });
     buildCostBudget(this, {
       monthlyBudgetUsd: parameters.monthlyCostBudgetUsd,
       alertEmail: parameters.costBudgetAlertEmail,

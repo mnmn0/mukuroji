@@ -294,6 +294,26 @@ function projectCodeRawItem(
 }
 
 /**
+ * Creates a valid low-level Project ID reservation row.
+ *
+ * @param overrides - Exact attributes that should replace valid defaults.
+ * @returns One raw DynamoDB item suitable for the normalization boundary.
+ */
+function projectIdRawItem(
+  overrides: Readonly<Record<string, AttributeValue>> = {},
+): Record<string, AttributeValue> {
+  return {
+    directoryId: { S: 'PROJECT_ID#workspace%231' },
+    entryKey: { S: 'PROJECT#refero' },
+    entryType: { S: 'project-id' },
+    workspaceId: { S: 'workspace#1' },
+    projectId: { S: 'refero' },
+    createdAt: { S: CHECKED_AT },
+    ...overrides,
+  }
+}
+
+/**
  * Wraps one raw row in a complete single-page DynamoDB response.
  *
  * @param item - Raw DynamoDB item returned by Scan.
@@ -594,6 +614,49 @@ describe('cross-domain normalized page reader boundary', () => {
       // A reservation the writer never produces: not upper-case, or not a valid code at all.
       projectCodeRawItem({ code: { S: 'ops-1' }, entryKey: { S: 'CODE#ops-1' } }),
       projectCodeRawItem({ code: { S: 'OPS 1' }, entryKey: { S: 'CODE#OPS 1' } }),
+    ]
+
+    for (const row of malformedRows) {
+      const fixture = new FixtureRawReader({ pages: [rawItemPage(row)] })
+      const reader = createCrossDomainIntegrityNormalizedPageReader(
+        readerConfiguration(),
+      )
+      installFixtureRawReader(reader, fixture)
+      try {
+        await expect(reader.readPage(pageRequest(undefined, 'project-directory')))
+          .rejects.toEqual(
+            new CrossDomainIntegrityNormalizedPageReaderFailure(
+              'AWS_RESPONSE_INVALID',
+            ),
+          )
+      } finally {
+        reader.close()
+      }
+    }
+  })
+
+  test('accepts a canonical Project ID reservation row as auxiliary data', async () => {
+    const fixture = new FixtureRawReader({ pages: [rawItemPage(projectIdRawItem())] })
+    const reader = createCrossDomainIntegrityNormalizedPageReader(
+      readerConfiguration(),
+    )
+    installFixtureRawReader(reader, fixture)
+    try {
+      await expect(reader.readPage(pageRequest(undefined, 'project-directory')))
+        .resolves.toMatchObject({ items: [], retainedUnitCount: 0 })
+    } finally {
+      reader.close()
+    }
+  })
+
+  test('fails closed on malformed Project ID reservation rows', async () => {
+    const malformedRows = [
+      projectIdRawItem({ directoryId: { S: 'workspace#1' } }),
+      projectIdRawItem({ directoryId: { S: 'PROJECT_ID#workspace#1' } }),
+      projectIdRawItem({ entryKey: { S: 'PROJECT#other' } }),
+      projectIdRawItem({ projectId: { S: '' } }),
+      projectIdRawItem({ projectId: { S: 'a/b' }, entryKey: { S: 'PROJECT#a/b' } }),
+      projectIdRawItem({ createdAt: { S: 'yesterday' } }),
     ]
 
     for (const row of malformedRows) {

@@ -94,10 +94,15 @@ Work Item relation の追加・削除と親の付け替えは、relation row と
 | `work-item.blocker-added` / `work-item.blocker-removed` | ブロックされる側 | `relatedWorkItemId`（ブロックする側） |
 | `work-item.blocking-added` / `work-item.blocking-removed` | ブロックする側 | `relatedWorkItemId`（ブロックされる側） |
 | `work-item.relation-added` / `work-item.relation-removed` | `related` / `duplicate` の両端 | `relatedWorkItemId` |
+| `work-item.sibling-order-changed` | 同じ親の中（または最上位）で並べ替えた子 | `parentWorkItemId`（最上位では無し）、`previousHierarchyRank` / `hierarchyRank` |
 
 `metadata` はほかに `adapter=work-item-relation`、`actorMemberKey`、`teamId`、`issueId`、`relationType`（記録する側から見た type）、`graphRevision` を持つ。相手の Work Item は閲覧者が見られない Project に属することがあるので、相手の ID は公開 view に出る `changes` には入れず（`changes` は空）、公開 view が出さない `metadata` にだけ保存する。activity は「誰がいつ何の種類の relation を変えたか」だけを表示し、相手の Work Item を閲覧者の権限で絞って表示するのは後続変更とする。relation 変更は Work Item の `revision` と `updatedAt` を変えないので、event も `work-item.updated` とは別の type にし、Analytics の scope change（`work-item.updated` の field 変更）と区別する。Audit table が構成されている環境で audit context のない relation mutation は `500` で拒否する。
 
-通知、Automation trigger、webhook の event type はこれらをまだ扱わない（#377 の残り）。
+兄弟の並べ替え（親を変えずに `hierarchyRank` だけを書く `PUT .../parent`）は、rank の書き込みと graph revision の CAS と同じ transaction に、動かした子だけの `work-item.sibling-order-changed` を 1 件書く。親や兄弟の activity には出さない。rank が既に保存済みの retry は何も書かないので event も増えない。rank は公開 view に出さず `metadata` にだけ置く。
+
+`work-item.blocker-removed` は、route が認可時に読んだ block されていた側の責任者・title・deep link・Project を `metadata` の `notificationCandidates`（`assignee`）・`notificationTitle`・`deepLink`・`projectId` に入れ、projection がその Work Item の現在の watcher も加えて通知する（[通知](./notifications.md)）。ほかの relation event は通知しない。
+
+Automation trigger と webhook の event type はこれらをまだ扱わない（#377 の残り）。
 
 ## DynamoDB key
 
