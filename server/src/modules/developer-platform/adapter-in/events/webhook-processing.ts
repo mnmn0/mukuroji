@@ -1745,7 +1745,6 @@ function normalizeQueueDelay(value: number | undefined) {
   return Math.min(WEBHOOK_QUEUE_MAX_DELAY_SECONDS, Math.ceil(value))
 }
 
-
 function unmarshalDynamoMap(
   value: Record<string, WebhookDynamoAttributeValue>,
 ): Record<string, unknown> {

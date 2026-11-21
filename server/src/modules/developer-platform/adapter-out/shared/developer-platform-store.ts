@@ -15,20 +15,20 @@ import {
   UpdateCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
-import type {
-  ApiKeyIssuance,
-  ApiKeySummary,
-  PersonalCredentialPolicy,
-  ApiScope,
-  ConnectorInstallation,
-  ExternalWorkItemLink,
-  ImportJob,
-  OAuthAppSummary,
-  WebhookDelivery,
-  WebhookEventEnvelope,
-  WebhookSubscription,
+import {
+  isWebhookEventType,
+  type ApiKeyIssuance,
+  type ApiKeySummary,
+  type PersonalCredentialPolicy,
+  type ApiScope,
+  type ConnectorInstallation,
+  type ExternalWorkItemLink,
+  type ImportJob,
+  type OAuthAppSummary,
+  type WebhookDelivery,
+  type WebhookEventEnvelope,
+  type WebhookSubscription,
 } from '@mukuroji/contracts'
-import { isWebhookEventType } from '@mukuroji/contracts'
 import {
   createMutationAuditContext,
   createMutationAuditEventPut,
