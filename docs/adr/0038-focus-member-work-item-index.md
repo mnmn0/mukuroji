@@ -84,8 +84,11 @@ Project の付け替えのたびに後続側の counter を直す必要があり
 - 最初の定義は `0001-work-item-member-index`（`work-items` table）。Work Item 本体の row を `pending`、index row と
   key registry の row を `unrelated` にする。
 - Lambda の role に、allowlist の table への `dynamodb:ConditionCheckItem` を足す（Put と同じ table だけ）。
-- 手順: この PR の deploy 後、`bun run data:migrate:aws run --function-name <name> --migration 0001-work-item-member-index --apply` →
-  `verify`（同じ引数）。
+- 手順: この PR の deploy 後、`bun run data:migrate:aws run --function-name <name> --migration 0001-work-item-member-index --apply`
+  を実行し、続けて `bun run data:migrate:aws verify --function-name <name> --migration 0001-work-item-member-index`
+  を実行する（verify に `--apply` は付けない）。
+- verify は派生 row が一致しないとき派生元を強い整合性で読み直す。revision が変わっていれば新しい row から派生し直して確かめ、
+  変わっていなければ失敗のままにする。
   deploy から backfill が終わるまでの間は、index row のない既存の Work Item が「担当・Contributor だから」という理由では
   Focus に出ない（mention・review・blocker では出る）。この時点で本番環境はまだないので、初回 deploy の環境では
   この間は生じない。

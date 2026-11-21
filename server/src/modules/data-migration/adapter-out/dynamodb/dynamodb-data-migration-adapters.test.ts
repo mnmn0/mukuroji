@@ -117,6 +117,60 @@ describe('DynamoDB row store', () => {
     expect(await store.replaceRow({ definition, row, expectedRevision: 3 })).toBe('condition-failed')
   })
 
+  test('writes derived rows in one transaction fenced on the source and classifies its failures', async () => {
+    let failure: Error | undefined
+    const { documentClient, calls } = createInterceptedClient(() => {
+      if (failure !== undefined) throw failure
+      return {}
+    })
+    const store = createDynamoDbDataMigrationRowStore({ documentClient, tableName: 'work-items', totalSegments: 1 })
+    const definition = createTaskEstimateMigration({ writerPolicy: 'revision-fenced', revisionAttribute: 'revision' })
+    const request = {
+      definition,
+      sourceKey: { pk: 'TEAM#a', sk: 'TASK#1' },
+      expectedRevision: 3,
+      rows: [
+        { pk: 'OWNER#sato', sk: 'TEAM#a#TASK#1', entity: 'owner-index' },
+        { pk: 'OWNER#kato', sk: 'TEAM#a#TASK#1', entity: 'owner-index' },
+      ],
+    }
+
+    expect(await store.writeDerivedRows(request)).toBe('replaced')
+    expect(calls[0]).toMatchObject({
+      commandName: 'TransactWriteItemsCommand',
+      input: {
+        TransactItems: [
+          {
+            ConditionCheck: {
+              TableName: 'work-items',
+              Key: { pk: { S: 'TEAM#a' }, sk: { S: 'TASK#1' } },
+              ConditionExpression: 'attribute_exists(#key0) AND attribute_exists(#key1) AND #revision = :expectedRevision',
+              ExpressionAttributeNames: { '#key0': 'pk', '#key1': 'sk', '#revision': 'revision' },
+              ExpressionAttributeValues: { ':expectedRevision': { N: '3' } },
+            },
+          },
+          { Put: { TableName: 'work-items', Item: { pk: { S: 'OWNER#sato' } } } },
+          { Put: { TableName: 'work-items', Item: { pk: { S: 'OWNER#kato' } } } },
+        ],
+      },
+    })
+
+    failure = Object.assign(namedError('TransactionCanceledException'), {
+      CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
+    })
+    expect(await store.writeDerivedRows(request)).toBe('condition-failed')
+
+    failure = Object.assign(namedError('TransactionCanceledException'), {
+      CancellationReasons: [{ Code: 'None' }, { Code: 'TransactionConflict' }, { Code: 'None' }],
+    })
+    await expect(store.writeDerivedRows(request)).rejects.toMatchObject({ code: 'UPSTREAM_FAILURE' })
+
+    failure = namedError('ProvisionedThroughputExceededException')
+    await expect(store.writeDerivedRows(request)).rejects.toMatchObject({
+      code: 'UPSTREAM_FAILURE', detail: 'ProvisionedThroughputExceededException',
+    })
+  })
+
   test('classifies other SDK errors without exposing them', async () => {
     const { documentClient } = createInterceptedClient(() => {
       throw namedError('ProvisionedThroughputExceededException')

@@ -123,10 +123,14 @@ export function createMemoryRowStore(
     },
     writeDerivedRows: async ({ definition, sourceKey, expectedRevision, rows: derivedRows }) => {
       store.replaceCalls += 1
-      const stored = rows.get(`${String(sourceKey.pk)}|${String(sourceKey.sk)}`)
+      const sourceRowKey = `${String(sourceKey.pk)}|${String(sourceKey.sk)}`
+      const before = rows.get(sourceRowKey)
+      if (before === undefined) return 'condition-failed'
+      if (store.beforeReplace !== undefined && !store.beforeReplace(before)) return 'condition-failed'
+      // The hook may stand in for a concurrent writer, so check the source as it is now.
+      const stored = rows.get(sourceRowKey)
       if (
         stored === undefined ||
-        (store.beforeReplace !== undefined && !store.beforeReplace(stored)) ||
         (definition.revisionAttribute !== undefined && stored[definition.revisionAttribute] !== expectedRevision)
       ) {
         return 'condition-failed'

@@ -128,8 +128,11 @@ export async function verifyDataMigration(
           counts.scanned += 1
           const rowClass = classifyDataMigrationRow(input.definition, row)
           if (rowClass === 'pending' && input.definition.kind === 'derive') {
-            if (await hasEveryDerivedRow(input, row)) counts.migratedRows += 1
-            else counts.pendingRows += 1
+            const derivedClass = await classifyDerivedRows(input, row)
+            if (derivedClass === 'migrated') counts.migratedRows += 1
+            else if (derivedClass === 'pending') counts.pendingRows += 1
+            else if (derivedClass === 'unrelated') counts.unrelatedRows += 1
+            else counts.unknownRows += 1
           } else if (rowClass === 'pending') counts.pendingRows += 1
           else if (rowClass === 'migrated') counts.migratedRows += 1
           else if (rowClass === 'unrelated') counts.unrelatedRows += 1
@@ -161,6 +164,41 @@ export async function verifyDataMigration(
     ...counts,
   }
 }
+
+/**
+ * Classifies a `derive` source row by its derived rows, tolerating a concurrent writer.
+ *
+ * A writer that changes the source after the scan also rewrites its derived rows, so a mismatch
+ * is checked again against a strong read of the source. A changed revision re-derives from the
+ * fresh row; an unchanged one keeps the mismatch. A source deleted meanwhile has nothing left to
+ * derive and counts as unrelated.
+ *
+ * @param input - Verification input with a `derive` definition.
+ * @param scanned - Source row classified as `pending` by the scan.
+ * @returns `migrated` when every derived row is stored, otherwise the row's final class.
+ */
+async function classifyDerivedRows(
+  input: VerifyDataMigrationInput,
+  scanned: Readonly<Record<string, unknown>>,
+): Promise<'migrated' | 'pending' | 'unrelated' | 'unknown'> {
+  const { definition } = input
+  const revision = definition.revisionAttribute
+  let row = scanned
+  for (let attempt = 0; attempt < DERIVED_ROW_RECHECK_ATTEMPTS; attempt += 1) {
+    if (await hasEveryDerivedRow(input, row)) return 'migrated'
+    if (revision === undefined) return 'pending'
+    const fresh = await input.rowStore.getRow(extractDataMigrationRowKey(definition, row))
+    if (fresh === undefined) return 'unrelated'
+    if (JSON.stringify(fresh[revision]) === JSON.stringify(row[revision])) return 'pending'
+    const freshClass = classifyDataMigrationRow(definition, fresh)
+    if (freshClass !== 'pending') return freshClass
+    row = fresh
+  }
+  return 'pending'
+}
+
+/** Strong re-reads of a source whose derived rows did not match before verify reports it pending. */
+const DERIVED_ROW_RECHECK_ATTEMPTS = 3
 
 /**
  * Tells whether every row a source row derives is stored with the derived content.

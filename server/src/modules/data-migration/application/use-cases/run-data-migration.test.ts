@@ -463,6 +463,57 @@ describe('derive migrations', () => {
     expect(rowStore.rows.has('OWNER#kato|TEAM#a#TASK#1')).toBeTrue()
   })
 
+  test('checks the source as the concurrent writer left it, even when the hook lets the write go on', async () => {
+    const rowStore = createMemoryRowStore({
+      'segment-0-of-1': [{ pk: 'TEAM#a', sk: 'TASK#1', entity: 'task', owner: 'sato', revision: 3 }],
+    })
+    let first = true
+    rowStore.beforeReplace = () => {
+      if (first) {
+        first = false
+        rowStore.rows.set('TEAM#a|TASK#1', { pk: 'TEAM#a', sk: 'TASK#1', entity: 'task', owner: 'kato', revision: 4 })
+      }
+      return true
+    }
+
+    const report = await runDataMigration(createInput({ definition: createOwnerIndexMigration(), rowStore }))
+
+    expect(report.counters.migrated).toBe(1)
+    expect(rowStore.replaceCalls).toBe(2)
+    expect(rowStore.rows.has('OWNER#sato|TEAM#a#TASK#1')).toBeFalse()
+    expect(rowStore.rows.has('OWNER#kato|TEAM#a#TASK#1')).toBeTrue()
+  })
+
+  test('verify re-reads a source whose derived rows changed after the scan', async () => {
+    const stale = { pk: 'TEAM#a', sk: 'TASK#1', entity: 'task', owner: 'sato', revision: 3 }
+    const rowStore = createMemoryRowStore({
+      'segment-0-of-1': [{ pk: 'TEAM#a', sk: 'TASK#1', entity: 'task', owner: 'kato', revision: 4 }],
+    })
+    rowStore.rows.set('OWNER#kato|TEAM#a#TASK#1', {
+      pk: 'OWNER#kato', sk: 'TEAM#a#TASK#1', entity: 'owner-index', schemaVersion: 1,
+    })
+    const definition = createOwnerIndexMigration()
+    // The scan saw revision 3; a writer moved the row to revision 4 and its index before the check.
+    const scanningStore = { ...rowStore, readPage: async () => ({ rows: [{ ...stale }] }) }
+
+    const changed = await verifyDataMigration({
+      definition, rowStore: scanningStore, checkpointStore: createMemoryCheckpointStore(), pageSize: 10, maxPages: 10,
+    })
+    expect(changed).toMatchObject({ migratedRows: 1, pendingRows: 0 })
+
+    rowStore.rows.set('TEAM#a|TASK#1', { ...stale })
+    const unchanged = await verifyDataMigration({
+      definition, rowStore: scanningStore, checkpointStore: createMemoryCheckpointStore(), pageSize: 10, maxPages: 10,
+    })
+    expect(unchanged).toMatchObject({ migratedRows: 0, pendingRows: 1 })
+
+    rowStore.rows.delete('TEAM#a|TASK#1')
+    const deleted = await verifyDataMigration({
+      definition, rowStore: scanningStore, checkpointStore: createMemoryCheckpointStore(), pageSize: 10, maxPages: 10,
+    })
+    expect(deleted).toMatchObject({ migratedRows: 0, pendingRows: 0, unrelatedRows: 1 })
+  })
+
   test('rejects derived rows that would be read as sources', async () => {
     const definition: DataMigrationDeriveDefinition = {
       ...createOwnerIndexMigration(),

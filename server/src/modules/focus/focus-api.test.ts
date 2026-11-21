@@ -211,7 +211,7 @@ function configureFocusSources(
   role: 'viewer' | 'member' | 'manager' = 'member',
   detailReadHook?: (issueId: string) => Promise<void>,
   teamIssueCount = 1,
-  workspaceRole: 'member' | 'guest' = 'member',
+  workspaceRole: 'owner' | 'member' | 'guest' = 'member',
   additionalTeams?: Array<{ id: string; name: string; projects: Array<{ id: string; name: string; tone: 'purple' }> }>,
 ) {
   const projectCalls = configureFakeProjectClients(true, {
@@ -576,11 +576,12 @@ test('projects visible notifications from every Inbox state and deduplicates eve
 })
 
 test('reads only referenced Work Items instead of every Team partition (ADR 0038)', async () => {
+  // A Workspace owner may read all 50 Teams, so a complete read would touch every partition.
   const { projectCalls: calls } = configureFocusSources(
-    'member',
+    'manager',
     undefined,
     100,
-    'member',
+    'owner',
     Array.from({ length: 49 }, (_, index) => ({
       id: `wide-team-${index}`,
       name: `Wide Team ${index}`,

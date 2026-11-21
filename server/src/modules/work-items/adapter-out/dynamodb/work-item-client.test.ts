@@ -4759,3 +4759,109 @@ test('DynamoDB reference read fails closed when unprocessed keys never drain', a
     .rejects.toMatchObject({ status: 503, code: 'WorkItemBatchReadIncomplete' })
   expect(calls).toBe(5)
 })
+
+test('DynamoDB reference read keeps retrying while each round makes progress', async () => {
+  const references = Array.from({ length: 7 }, (_, index) => ({ teamId: 'core-team', workItemId: `w${index}` }))
+  let calls = 0
+  const documentClient = {
+    async send(command: { input: { RequestItems: Record<string, { Keys: Array<{ issueId: string }> }> } }) {
+      calls += 1
+      const [first, ...rest] = command.input.RequestItems.WorkItemsTable?.Keys ?? []
+      return {
+        Responses: { WorkItemsTable: first === undefined ? [] : [createReferenceReadItem('core-team', first.issueId)] },
+        ...(rest.length > 0 ? { UnprocessedKeys: { WorkItemsTable: { Keys: rest } } } : {}),
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable', documentClient, {} as DynamoDBClient, false)
+
+  const items = await client.getTeamIssuesByReferences('workspace-1', references)
+
+  expect(items).toHaveLength(7)
+  expect(calls).toBe(7)
+})
+
+test('DynamoDB Work Item delete moves member index deletes after the commit when the transaction is full', async () => {
+  const contributorAssignments = Array.from({ length: 20 }, (_, index) => ({
+    assignmentId: index.toString(16).padStart(32, '0'),
+    memberUserId: `member-${String(index).padStart(2, '0')}@example.com`,
+    status: 'planned',
+  }))
+  const currentIssue = {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'full-delete',
+    sortOrder: 10,
+    title: 'Full delete',
+    assigneeUserId: 'sato@example.com',
+    contributorAssignments,
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  /**
+   * Builds the given number of deletion fences.
+   *
+   * @param count - Fences to build.
+   * @returns External-link fences.
+   */
+  const createFences = (count: number) => Array.from({ length: count }, (_, index) => ({
+    kind: 'external-links' as const,
+    transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { fence: index } } },
+  }))
+  for (const [fenceCount, expectInline] of [[2, true], [80, false]] as const) {
+    const transactions: Array<NonNullable<TransactWriteCommandInput['TransactItems']>> = []
+    const batchWrites: Array<Record<string, Array<{ DeleteRequest: { Key: Record<string, string> } }>>> = []
+    const documentClient = {
+      async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+        if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          transactions.push(command.input.TransactItems as NonNullable<TransactWriteCommandInput['TransactItems']>)
+        }
+        if (command.constructor.name === 'BatchWriteCommand') {
+          batchWrites.push(command.input.RequestItems as (typeof batchWrites)[number])
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient('IssuesTable', 'IssueEventsTable', documentClient, {} as DynamoDBClient, false)
+
+    await client.deleteTeamIssue(
+      'workspace-1',
+      'core-team',
+      'full-delete',
+      1,
+      'demo@example.com',
+      undefined,
+      undefined,
+      createFences(fenceCount),
+    )
+
+    const transaction = transactions[0] ?? []
+    expect(transaction.length).toBeLessThanOrEqual(100)
+    const inlineIndexDeletes = transaction.filter((item) =>
+      String(item.Delete?.Key?.directoryTeamId ?? '').includes('#member-work-items#'))
+    const deferredKeys = batchWrites.flatMap((requests) => requests.IssuesTable ?? [])
+      .map((request) => request.DeleteRequest.Key.directoryTeamId)
+    if (expectInline) {
+      expect(inlineIndexDeletes).toHaveLength(21)
+      expect(batchWrites).toHaveLength(0)
+    } else {
+      expect(inlineIndexDeletes).toHaveLength(0)
+      expect(batchWrites).toHaveLength(1)
+      expect(deferredKeys).toHaveLength(21)
+      expect(deferredKeys).toContain('workspace-1#member-work-items#sato@example.com')
+    }
+  }
+})

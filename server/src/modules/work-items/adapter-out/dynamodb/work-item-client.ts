@@ -84,12 +84,14 @@ import type {
 } from '@aws-sdk/client-dynamodb'
 import {
   BatchGetCommand,
+  BatchWriteCommand,
   DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb'
 import type {
+  BatchWriteCommandInput,
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
@@ -1822,12 +1824,14 @@ export class DynamoDbTeamIssuesClient {
             directoryTeamId: createDirectoryTeamId(directoryId, reference.teamId),
             issueId: reference.workItemId,
           }))
-        for (let attempt = 0; keys.length > 0; attempt += 1) {
-          if (attempt >= WORK_ITEM_BATCH_GET_ATTEMPTS) {
+        // Only rounds that make no progress count toward the limit, so a slow but advancing
+        // read is not failed while throttling eases.
+        for (let stalledRounds = 0; keys.length > 0;) {
+          if (stalledRounds >= WORK_ITEM_BATCH_GET_ATTEMPTS) {
             throw new ProjectDataError(503, 'WorkItemBatchReadIncomplete', 'Work Items could not be read.')
           }
           // Unprocessed keys mean the table is throttling; back off before asking again.
-          if (attempt > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** (attempt - 1))
+          if (stalledRounds > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** (stalledRounds - 1))
           const response = await this.documentClient.send(new BatchGetCommand({
             RequestItems: { [this.issueTableName]: { Keys: keys, ConsistentRead: true } },
           }))
@@ -1838,7 +1842,9 @@ export class DynamoDbTeamIssuesClient {
             }
             items.push(item)
           }
-          keys = response.UnprocessedKeys?.[this.issueTableName]?.Keys ?? []
+          const unprocessed = response.UnprocessedKeys?.[this.issueTableName]?.Keys ?? []
+          stalledRounds = unprocessed.length < keys.length ? 0 : stalledRounds + 1
+          keys = unprocessed
         }
       }
     } catch (error) {
@@ -3575,39 +3581,49 @@ export class DynamoDbTeamIssuesClient {
       ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
     ]
 
+    const deletionItems: WorkItemTransactWriteItem[] = [
+      {
+        Delete: {
+          TableName: this.issueTableName,
+          Key: { directoryTeamId, issueId },
+          ConditionExpression:
+            'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :expectedRevision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+        },
+      },
+      ...deletionFences.map((fence) => fence.transactWriteItem),
+      ...(auditPut ? [auditPut] : []),
+      ...effectiveAuthorizationConditionChecks,
+      ...(idempotencyCompletion
+        ? [idempotencyCompletion.transactWriteItem]
+        : []),
+      ...(planningRevisionMutation ? [planningRevisionMutation] : []),
+    ]
+    const memberIndexDeletes = createWorkItemMemberIndexTransactItems(
+      this.issueTableName,
+      directoryId,
+      teamId,
+      issueId,
+      beforeIssue,
+      undefined,
+    )
+    // The index Deletes ride in the transaction when they fit. Otherwise they run after the commit:
+    // a leftover index row only makes Focus read a Work Item that no longer exists, which it drops.
+    const memberIndexDeletesInline =
+      deletionItems.length + memberIndexDeletes.length <= WORK_ITEM_TRANSACT_WRITE_ITEM_LIMIT
+
     try {
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
-            {
-              Delete: {
-                TableName: this.issueTableName,
-                Key: { directoryTeamId, issueId },
-                ConditionExpression:
-                  'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :expectedRevision',
-                ExpressionAttributeNames: { '#revision': 'revision' },
-                ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
-              },
-            },
-            ...deletionFences.map((fence) => fence.transactWriteItem),
-            ...(auditPut ? [auditPut] : []),
-            ...effectiveAuthorizationConditionChecks,
-            ...(idempotencyCompletion
-              ? [idempotencyCompletion.transactWriteItem]
-              : []),
-            ...(planningRevisionMutation ? [planningRevisionMutation] : []),
+            ...deletionItems,
             // Unconditional and last, so they never shift the cancellation indexes above.
-            ...createWorkItemMemberIndexTransactItems(
-              this.issueTableName,
-              directoryId,
-              teamId,
-              issueId,
-              beforeIssue,
-              undefined,
-            ),
+            ...(memberIndexDeletesInline ? memberIndexDeletes : []),
           ],
         }),
       )
+      if (!memberIndexDeletesInline) await this.deleteMemberIndexRowsAfterCommit(memberIndexDeletes)
 
       return { issue: toTeamIssueResponseItem(beforeIssue) }
     } catch (error) {
@@ -3661,6 +3677,34 @@ export class DynamoDbTeamIssuesClient {
       }
 
       throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Deletes member index rows after a Work Item delete committed without them.
+   *
+   * Best effort: a row left behind only points Focus at a missing Work Item, which the
+   * reference read leaves out, so a failure here does not fail the committed delete.
+   *
+   * @param items - Unconditional index Delete actions from the delete transaction.
+   */
+  private async deleteMemberIndexRowsAfterCommit(items: readonly WorkItemTransactWriteItem[]) {
+    const keys = items.flatMap((item) => (item.Delete === undefined ? [] : [item.Delete.Key]))
+    try {
+      for (let offset = 0; offset < keys.length; offset += WORK_ITEM_BATCH_WRITE_SIZE) {
+        let requests: NonNullable<BatchWriteCommandInput['RequestItems']>[string] = keys
+          .slice(offset, offset + WORK_ITEM_BATCH_WRITE_SIZE)
+          .map((key) => ({ DeleteRequest: { Key: key } }))
+        for (let attempt = 0; requests.length > 0 && attempt < WORK_ITEM_BATCH_GET_ATTEMPTS; attempt += 1) {
+          if (attempt > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** (attempt - 1))
+          const response = await this.documentClient.send(new BatchWriteCommand({
+            RequestItems: { [this.issueTableName]: requests },
+          }))
+          requests = response.UnprocessedItems?.[this.issueTableName] ?? []
+        }
+      }
+    } catch {
+      // The delete already committed; a stale index row is harmless (see above).
     }
   }
 
@@ -4820,6 +4864,15 @@ const WORK_ITEM_BATCH_GET_ATTEMPTS = 5
 
 /** First wait before re-reading unprocessed BatchGet keys; doubles on each retry. */
 const WORK_ITEM_BATCH_GET_RETRY_BASE_MS = 25
+
+/** One action of a Work Item TransactWriteItems call. */
+type WorkItemTransactWriteItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+
+/** Requests per BatchWriteItem call, the DynamoDB maximum. */
+const WORK_ITEM_BATCH_WRITE_SIZE = 25
+
+/** Actions per TransactWriteItems call, the DynamoDB maximum. */
+const WORK_ITEM_TRANSACT_WRITE_ITEM_LIMIT = 100
 
 /**
  * Creates the error returned when one member has more index rows than a read allows.
