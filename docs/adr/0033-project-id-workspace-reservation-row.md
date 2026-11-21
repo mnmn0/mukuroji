@@ -48,7 +48,9 @@ Project の ID は作成時に名前から作る（ASCII の名前なら slug、
   片方は `web-2` のような別の ID になる。予約 row を書かない前の版が同時に動く間は保証できない。今は deploy 済みの
   環境がないのでその期間はない。将来この版より前へ rollback する場合は、戻している間に別 Team で同名の
   Project を作ると ID が重なりうる（メンバー・watch・通知が混ざる）。その間に作られた重複は integrity check の
-  `DUPLICATE_RECORD` で見つける。
+  `DUPLICATE_RECORD` で見つける。切替手順は設けず、この版より前へ戻す rollback をした場合は、再 deploy の後に
+  cross-domain integrity check を実行して重複がないことを確かめる。重複が見つかったら片方の Project ID を
+  data migration で付け替える。
 - 候補 ID を決める directory の読み取りは強整合にする。予約 row のない既存 Project の ID を見落とさないため。
 - Project 作成の transaction が 1 項目増える（上限 100 に対して余裕がある）。
 - 初回 deploy 前の変更なので、既存 Project の予約 row を埋める backfill は用意しない。予約 row のない
