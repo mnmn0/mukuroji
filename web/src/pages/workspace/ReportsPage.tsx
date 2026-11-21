@@ -99,8 +99,7 @@ export function ReportsPage() {
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [initialTimeZone] = useState(() => getDefaultAnalyticsTimeZone())
-  const [initialFilter] = useState(() =>
-    createDefaultAnalyticsFilter(new Date(), initialTimeZone))
+  const [initialFilterNow] = useState(() => new Date())
   const [widgetDraft, setWidgetDraft] = useState(() => ({
     sourceKey: 'ad-hoc',
     widgets: [] as AnalyticsWidget[],
@@ -154,6 +153,13 @@ export function ReportsPage() {
     teams.map((team) => team.id).sort(),
     Boolean(user && !currentUserError && !isProjectDirectoryLoading),
   )
+  // The ad-hoc default stays within the viewer's own Teams so that a new report starts from a
+  // scope that is less likely to hit the Analytics history limit.
+  const initialFilter = useMemo(() => createDefaultAnalyticsFilter(
+    initialFilterNow,
+    initialTimeZone,
+    teams.map((team) => team.id),
+  ), [initialFilterNow, initialTimeZone, teams])
   const workItemTypes = useMemo<AnalyticsWorkItemTypeOption[]>(() =>
     teams
       .flatMap((team) => resolveWorkItemTypes(
@@ -401,6 +407,7 @@ export function ReportsPage() {
     if (
       searchParamString ||
       isReportsLoading ||
+      isProjectDirectoryLoading ||
       reports.length > 0 ||
       hasStartedAdHoc
     ) {
@@ -422,6 +429,7 @@ export function ReportsPage() {
     hasStartedAdHoc,
     initialFilter,
     initialTimeZone,
+    isProjectDirectoryLoading,
     isReportsLoading,
     reports.length,
     searchParamString,
