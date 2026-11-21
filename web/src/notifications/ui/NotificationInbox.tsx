@@ -674,6 +674,9 @@ function resolveNotificationEventKey(eventType: string): MessageKey {
   if (normalizedEventType.includes('stale')) {
     return 'workspace.inbox.event.stale'
   }
+  if (normalizedEventType === 'work-item.blocker-removed') {
+    return 'workspace.inbox.event.blockerCleared'
+  }
   if (normalizedEventType.includes('status') || normalizedEventType.includes('work-item')) {
     return 'workspace.inbox.event.status'
   }
@@ -731,7 +734,7 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
 }
 
 /**
- * Resolves the row summary, localizing the fixed text of scheduled report deliveries.
+ * Resolves the row summary, localizing the fixed text of scheduled report deliveries and cleared blockers.
  *
  * @param notification - Notification shown in the row.
  * @param eventLabel - Localized event label used by the fallback summary.
@@ -745,6 +748,9 @@ function resolveNotificationSummary(
 ) {
   if (notification.eventType === analyticsReportDeliveredEventType) {
     return t('workspace.inbox.summary.reportDelivered')
+  }
+  if (notification.eventType === 'work-item.blocker-removed') {
+    return t('workspace.inbox.summary.blockerCleared')
   }
   return notification.summary?.trim() || createNotificationFallbackSummary(notification, eventLabel, t)
 }
