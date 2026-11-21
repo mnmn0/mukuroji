@@ -867,7 +867,9 @@ async function runAwsChecks(
   }))
 
   checks.push(guarded('alarms', async () => checkAlarms(await awsJson(dependencies, [
+    // Without --alarm-types the CLI returns only metric alarms, and the stack also has composite alarms.
     'cloudwatch', 'describe-alarms', '--region', region, '--state-value', 'ALARM',
+    '--alarm-types', 'MetricAlarm', 'CompositeAlarm',
     '--alarm-name-prefix', `${environment.stackName}-`,
   ]))))
 

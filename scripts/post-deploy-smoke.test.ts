@@ -306,6 +306,9 @@ describe('runPostDeploySmoke', () => {
     const verbs = new Set(fake.calls.map((args) => args[1]?.split('-')[0]))
     for (const verb of verbs) expect(['describe', 'get', 'list', 'head', 'admin', 'filter']).toContain(verb)
     expect(fake.calls.filter((args) => args[1] === 'admin-get-user').length).toBe(1)
+    const alarmCall = fake.calls.find((args) => args[1] === 'describe-alarms') ?? []
+    expect(alarmCall.slice(alarmCall.indexOf('--alarm-types') + 1, alarmCall.indexOf('--alarm-types') + 3))
+      .toEqual(['MetricAlarm', 'CompositeAlarm'])
     expect(formatSmokeReport(results)).toContain('0 fail')
   })
 

@@ -67,25 +67,29 @@ MUKUROJI_WEB_URL=https://dxxxx.cloudfront.net bun run deploy:smoke -- --skip-aws
 | `alarm-subscriptions` | alarm 用 SNS topic 2 つに確認済みの購読がある | SNS の確認メールで `Confirm subscription` を押す |
 | `authenticated-api` | owner token で `/api/teams/projects`（CloudFront）、`/teams/projects` と `/api/teams/projects`（HTTP API）が同じ応答 | token が新しいか、Workspace の bootstrap を確認 |
 
-owner の access token は、owner のパスワードと認証アプリのコードで取ります。パスワードを shell の履歴に残さないよう
-`read -s` で読みます。
+owner の access token は、画面と同じ `/api/auth/login` と `/api/auth/challenge/mfa` で取ります。Cognito を直接呼んで
+取った token には、Workspace が MFA を必須にしたときに API が確かめる MFA の記録が付かないため使えません。
+パスワードは shell の履歴にも process の引数にも残さないよう、`read -s` で読んで標準入力から送ります（`jq` を使います）。
 
 ```sh
-CLIENT_ID="$(aws cloudformation describe-stacks --region "$AWS_REGION" --stack-name Mukuroji \
-  --query "Stacks[0].Outputs[?OutputKey=='UserPoolClientId'].OutputValue | [0]" --output text)"
+WEB_URL="$(aws cloudformation describe-stacks --region "$AWS_REGION" --stack-name Mukuroji \
+  --query "Stacks[0].Outputs[?OutputKey=='WebUrl'].OutputValue | [0]" --output text)"
+OWNER_EMAIL="$(aws ssm get-parameter --region "$AWS_REGION" --name /mukuroji/deploy/config/initial-owner-email \
+  --query Parameter.Value --output text)"
 read -rs -p 'Password: ' OWNER_PASSWORD; echo
-SESSION="$(aws cognito-idp initiate-auth --region "$AWS_REGION" --client-id "$CLIENT_ID" \
-  --auth-flow USER_PASSWORD_AUTH --auth-parameters "USERNAME=$OWNER_EMAIL,PASSWORD=$OWNER_PASSWORD" \
-  --query Session --output text)"
+LOGIN="$(OWNER_PASSWORD="$OWNER_PASSWORD" jq -n --arg email "$OWNER_EMAIL" '{email: $email, password: env.OWNER_PASSWORD}' |
+  curl -fsS -H 'Content-Type: application/json' --data-binary @- "${WEB_URL%/}/api/auth/login")"
 unset OWNER_PASSWORD
 read -r -p 'Authenticator code: ' CODE
-export MUKUROJI_SMOKE_ACCESS_TOKEN="$(aws cognito-idp respond-to-auth-challenge --region "$AWS_REGION" \
-  --client-id "$CLIENT_ID" --challenge-name SOFTWARE_TOKEN_MFA --session "$SESSION" \
-  --challenge-responses "USERNAME=$OWNER_EMAIL,SOFTWARE_TOKEN_MFA_CODE=$CODE" \
-  --query AuthenticationResult.AccessToken --output text)"
+export MUKUROJI_SMOKE_ACCESS_TOKEN="$(jq --arg code "$CODE" '{email, challenge, session, code: $code}' <<<"$LOGIN" |
+  curl -fsS -H 'Content-Type: application/json' --data-binary @- "${WEB_URL%/}/api/auth/challenge/mfa" | jq -r .accessToken)"
+unset LOGIN CODE
 AWS_REGION=ap-northeast-1 bun run deploy:smoke
 unset MUKUROJI_SMOKE_ACCESS_TOKEN
 ```
+
+`/api/auth/login` の応答に `challenge` がなく `accessToken` があるとき（MFA を登録していない）は、先に Settings で認証アプリを
+登録します。
 
 ## 本番で初めて動くもの
 
