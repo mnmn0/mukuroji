@@ -92,26 +92,32 @@ Work Item Relation Graph の `blocks` / `blockedBy` は意味上の blocker で�
 
 ### Schedule baseline と slip
 
-Project ごとに最新の schedule baseline を 1 つ保存できる（#336 の最初の範囲）。`POST /api/teams/{teamId}/projects/{projectId}/schedule-baseline` は Project manager（Team を通した manager と system admin を含む）だけが呼べ、その Project に割り当てられた archive されていない全 Work Item の予定開始日・予定終了日（期限）を固定して Planning table の 1 行に保存する。保存し直すと revision が 1 つ進み、前の baseline は残らない。保存は idempotency key を持たないため、応答が失われた後に押し直すと、その時点の予定で新しい revision になる（Web は自動再送しない）。
+Project ごとに名前付きの schedule baseline を 20 件まで保存でき、そのうち 1 つが **基準（active）** になる（ADR 0016、0043）。`POST /api/teams/{teamId}/projects/{projectId}/schedule-baseline` は Project manager（Team を通した manager と system admin を含む）だけが呼べ、その Project に割り当てられた archive されていない全 Work Item の予定開始日・予定終了日（期限）・予定工数（`plannedEffortMinutes`）を固定して新しい baseline として保存し、基準にする。body の `name`（任意、前後の空白を除いて 80 文字まで、制御文字不可）が名前になる。保存するたびに基準の `revision` が 1 つ進み、前の baseline は保存済みとして残る。21 件目を保存すると、基準ではない最も古いものが消える。保存は idempotency key を持たないため、応答が失われた後に押し直すと、その時点の予定で新しい baseline になる（Web は自動再送しない）。
+
+`PUT .../schedule-baseline/active`（body `{ baselineId, expectedRevision }`）は Project manager だけが呼べ、保存済みの baseline を基準に切り替える。`expectedRevision` は読んだときの基準の `revision` で、その間に保存・切り替えが入っていれば 409 になる。切り替えても baseline の中身（保存時刻を含む）は変わらず、基準の `revision` だけが進む。
 
 | Status | `code` | 意味 |
 | --- | --- | --- |
 | `403` | `ScheduleBaselineForbidden` | Project を読めるが manager ではない（保存時）。Team 自体に権限が無い場合は Team の判定で 403 になり、`code` は無い。 |
 | `404` | `ProjectNotFound` | Team 外の Project、または読めない Project。存在を明かさない。 |
-| `409` | `ScheduleBaselineConflict` | 保存中に別の保存が revision を進めた、または保存の途中で権限が変わった。読み直して再実行する。 |
+| `400` | `InvalidScheduleBaselineRequest` | `name`・`baselineId`・`expectedRevision` が不正、または body が JSON でない。 |
+| `404` | `ScheduleBaselineNotFound` | 指定した `baselineId` が保存されていない（読み取り・切り替え）。 |
+| `409` | `ScheduleBaselineConflict` | 保存・切り替えの間に別の保存・切り替えが revision を進めた、または途中で権限が変わった。読み直して再実行する。 |
 | `413` | `WorkItemListLimitExceeded` | Team 全体（Project 単位ではない）の archive されていない Work Item が 1,000 件を超える。 |
 | `502` | `ScheduleBaselineCorruptState` / `ScheduleBaselineStorageFailure` | 保存済みの行が壊れている、または保存先が失敗した。 |
 | `503` | `ScheduleBaselineRetryable` / `ScheduleBaselineUnavailable` / `ScheduleBaselineAuthorizationUnavailable` | 一時的に保存・読み込みできない。 |
 
-`GET` は Project の viewer が読め、今読める Work Item の entry だけを返す。baseline が無い Project では `baseline: null`。現在の予定との差（`startSlipDays` / `endSlipDays`、正が後ろ倒し）は `deriveWorkItemScheduleSlip` で read 時に導出し、Web の詳細ペインの「ベースラインとのずれ」に出す。baseline のない Work Item の表示と既存 API は変わらない。
+`GET` は Project の viewer が読め、基準の baseline（`?baselineId=` を付けるとその保存済み baseline）の、今読める Work Item の entry だけを返す。応答の `activeBaselineId` が基準の ID、`savedBaselines` が保存済みの一覧（新しい順、entries なし、Work Item 数は読めないものも含む）。baseline が無い Project では `baseline: null`・`savedBaselines: []`。ADR 0016 の形式で保存された baseline は `legacy-r<revision>` の ID で出し、次の保存・切り替えで保存済みの行に書き出す。現在の予定との差（`startSlipDays` / `endSlipDays`、正が後ろ倒し、`effortDeltaMinutes`、正が工数増）は `deriveWorkItemScheduleSlip` で read 時に導出し、Web の詳細ペインの「ベースラインとのずれ」に出す。詳細ペインでは保存済みの baseline を選んで比べられ（その人の表示だけが変わる）、Project manager は表示中のものを基準に切り替えられる。保存・切り替えの応答も、GET と同じく今読める Work Item の entry だけを返す（保存される行は全 entry を持つ）。baseline のない Work Item の表示と既存 API は変わらない。
 
 Project・Team の Gantt は、表示中の Work Item の Project（Team ごと、最大 50）の baseline を読み、各行の予定バーの下に baseline の期間を細いバーで重ね、行の左に終了の差（`+3d` など）を出す。Project の WBS 表と Team の表は列「ベースライン比の遅れ」（`baselineEndDelayDays`）で同じ差を出す（並べ替え・グループ化・filter には使えない）。差は `deriveWorkItemBaselineEndDelayDays` で導出し、週次まとめ（#631）の「遅れ」と同じく、完了した Work Item は実績終了日、未完了は今の予定終了日を baseline の終了日と比べる。取り消した Work Item、baseline 後に作った Work Item、読めない Project の Work Item には差を出さない。baseline は Gantt を開いているとき、または表にこの列があるときだけ読む。
 
-保存（初回と置き換え）は baseline の行と同じ transaction で audit event を書く。`project.schedule_baseline_captured`（初回）と `project.schedule_baseline_replaced`（置き換え）で、entity は Project、target は `project-schedule-baseline`。changes には revision・保存時刻・Work Item 数の前後だけを残し、Work Item の ID と日付は残さない。audit の書き込みが失敗すると baseline も保存されない。
+保存・切り替えは baseline の行と同じ transaction で audit event を書く。`project.schedule_baseline_captured`（初回）、`project.schedule_baseline_replaced`（2 回目以降の保存）、`project.schedule_baseline_activated`（切り替え）で、entity は Project、target は `project-schedule-baseline`。changes には baseline ID・revision・保存時刻・Work Item 数の前後だけを残し、名前・Work Item の ID と日付は残さない。metadata には保存済みの件数と、上限で消した baseline の ID を残す。audit の書き込みが失敗すると baseline も保存されない。
+
+Planning の Project / Initiative の近況（Planning update）の作成欄は、対象範囲の Work Item の Project の基準 baseline を読み、基準より終了が遅れている未完了の Work Item と、baseline より予測終了が遅い Milestone を遅れの大きい順に出す。「遅れ n 件を根拠に添付」で、これらを Work Item / Planning entity の evidence として 1 回でまとめて添付できる（手で選んだ根拠の分を 1 件残し、最大 99 件）。前回の近況が根拠にしていないものには「前回以降に新規」と出す。Planning の snapshot は実績終了日を持たないので、完了した Work Item は出さない。baseline を読めない Project が 1 つでもあると、欠けた一覧を出さずに読み込み直しを促す。
 
 Focus は、責任者または Contributor の未完了 Work Item が baseline より Team 設定の日数以上遅れると `slipped` signal を出す（`docs/focus.md`）。
 
-まだ無いもの: 名前付きの複数 baseline、予定工数の固定、`slipped` の通知と Automation trigger、Planning update の evidence 自動提示。
+まだ無いもの: Focus の `slipped` signal の通知・Automation trigger、Cycle 単位の baseline。
 
 ### Estimate, remaining effort, and progress
 

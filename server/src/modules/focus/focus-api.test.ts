@@ -1027,10 +1027,14 @@ test('raises slipped from the baseline of the Projects the viewer works in', asy
             { workItemId: 'onboarding-friction', endDate: '2026-06-10' },
             { workItemId: 'not-visible', endDate: '2026-06-01' },
           ],
+          savedBaselines: [],
         }
       },
-      async capture() {
-        throw new Error('Focus must not capture baselines.')
+      async getSaved() {
+        throw new Error('Focus must not read saved baselines.')
+      },
+      async write() {
+        throw new Error('Focus must not write baselines.')
       },
     },
   })
@@ -1062,8 +1066,11 @@ test('does not read baselines for Work Items the viewer does not own or contribu
         baselineReads += 1
         return null
       },
-      async capture() {
-        throw new Error('Focus must not capture baselines.')
+      async getSaved() {
+        throw new Error('Focus must not read saved baselines.')
+      },
+      async write() {
+        throw new Error('Focus must not write baselines.')
       },
     },
   })
@@ -1085,8 +1092,11 @@ test('fails closed when a Project baseline cannot be read', async () => {
       async get() {
         throw new ProjectDataError(503, 'ScheduleBaselineRetryable', 'The baseline read was throttled.')
       },
-      async capture() {
-        throw new Error('Focus must not capture baselines.')
+      async getSaved() {
+        throw new Error('Focus must not read saved baselines.')
+      },
+      async write() {
+        throw new Error('Focus must not write baselines.')
       },
     },
   })

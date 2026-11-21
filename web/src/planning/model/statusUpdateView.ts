@@ -121,7 +121,7 @@ export function createPlanningUpdateEvidenceCandidates(
  * @param initiative - Initiative entity resolved for an Initiative target.
  * @returns Whether the record belongs to the exact authorized target envelope.
  */
-function planningEvidenceScopeMatchesTarget(
+export function planningEvidenceScopeMatchesTarget(
   scope: { teamId?: string; projectId?: string },
   target: PlanningUpdateTargetView,
   initiative: PlanningSnapshot['entities'][number] | undefined,
