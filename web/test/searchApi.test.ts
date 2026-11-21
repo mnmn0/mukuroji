@@ -8,8 +8,10 @@ import {
 import {
   createSavedWorkspaceView,
   getSavedWorkspaceViews,
+  mergeCommandMenuSearchResults,
   resolveSearchApiBaseUrl,
   searchWorkspaceAcrossCursors,
+  searchWorkspaceForCommandMenu,
 } from '../src/search/api'
 
 const originalFetch = globalThis.fetch
@@ -90,6 +92,75 @@ describe('Workspace search cursor aggregation', () => {
 
     expect(response.results).toEqual([])
     expect(requests).toHaveLength(5)
+  })
+})
+
+describe('Command menu search', () => {
+  test('keeps Project matches when Work Item title matches fill the Workspace-wide page', async () => {
+    const requestedFilters: unknown[] = []
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url, 'https://example.test')
+      const filters: unknown = JSON.parse(url.searchParams.get('filters') ?? '{}')
+      requestedFilters.push(filters)
+      const projectOnly = JSON.stringify(filters).includes('"entityTypes":["project"]')
+      const results = projectOnly
+        ? [createProjectResult('login-platform')]
+        : createResults('login-task', 12)
+      return Response.json({ schemaVersion: SEARCH_SCHEMA_VERSION, results })
+    }) as typeof fetch
+
+    const response = await searchWorkspaceForCommandMenu('access-token', 'login')
+
+    expect(requestedFilters).toContainEqual({ keyword: 'login' })
+    expect(requestedFilters).toContainEqual({ keyword: 'login', entityTypes: ['project'] })
+    expect(response.results).toHaveLength(12)
+    expect(response.results.slice(0, 11).every((result) => result.entityType === 'work-item')).toBe(true)
+    expect(response.results.at(-1)).toMatchObject({ entityType: 'project', id: 'login-platform' })
+  })
+
+  test('falls back to Workspace-wide results when the Project-only search fails', async () => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url, 'https://example.test')
+      if ((url.searchParams.get('filters') ?? '').includes('entityTypes')) {
+        return Response.json({ message: 'unavailable' }, { status: 503 })
+      }
+      return Response.json({ schemaVersion: SEARCH_SCHEMA_VERSION, results: [createResult('only-task')] })
+    }) as typeof fetch
+
+    const response = await searchWorkspaceForCommandMenu('access-token', 'only')
+
+    expect(response.results.map((result) => result.id)).toEqual(['only-task'])
+  })
+
+  test('keeps API order, deduplicates and appends only the Projects the page did not reach', () => {
+    const document = { ...createResult('spec'), entityType: 'document' as const, url: '/documents/spec' }
+    const merged = mergeCommandMenuSearchResults(
+      [createResult('task-1'), createProjectResult('alpha'), document],
+      [createProjectResult('alpha'), createProjectResult('beta')],
+    )
+
+    expect(merged.map((result) => `${result.entityType}:${result.id}`)).toEqual([
+      'work-item:task-1',
+      'project:alpha',
+      'document:spec',
+      'project:beta',
+    ])
+    expect(mergeCommandMenuSearchResults(createResults('task', 12), [])).toHaveLength(12)
+    const crowded = mergeCommandMenuSearchResults(
+      createResults('task', 12),
+      ['a', 'b', 'c', 'd', 'e'].map(createProjectResult),
+    )
+    expect(crowded).toHaveLength(12)
+    expect(crowded.filter((result) => result.entityType === 'project').map((result) => result.id))
+      .toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  test('does not drop a Project from the page when trimming makes room for others', () => {
+    const workspace = [...createResults('task', 10), createProjectResult('a'), createResult('task-11')]
+    const merged = mergeCommandMenuSearchResults(workspace, [createProjectResult('a'), createProjectResult('b')])
+
+    expect(merged).toHaveLength(12)
+    expect(merged.map((result) => result.id).slice(-3)).toEqual(['task-10', 'a', 'b'])
   })
 })
 
@@ -204,6 +275,23 @@ function createResult(id: string): WorkspaceSearchResult {
     teamId: 'core-team',
     title: id,
     url: `/teams/core-team/issues/${id}`,
+  }
+}
+
+/**
+ * Creates a Project search result for command menu tests.
+ *
+ * @param id - Project ID.
+ * @returns A permitted Project result.
+ */
+function createProjectResult(id: string): WorkspaceSearchResult {
+  return {
+    entityType: 'project',
+    highlights: [],
+    id,
+    teamId: 'core-team',
+    title: id,
+    url: `/teams/core-team/projects/${id}`,
   }
 }
 

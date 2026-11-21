@@ -7,10 +7,10 @@ import {
   type KeyboardEvent,
 } from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router'
-import type { SearchEntityType, WorkspaceSearchFilters, WorkspaceSearchResult } from '@mukuroji/contracts'
+import type { SearchEntityType, WorkspaceSearchResult } from '@mukuroji/contracts'
 import { getAuthSession } from '../../auth/session'
 import { createTranslator, getInitialLocale, type Locale, type MessageKey } from '../../shared/i18n/i18n'
-import { resolveSearchResultPath, searchWorkspaceAcrossCursors } from '../../search/api'
+import { resolveSearchResultPath, searchWorkspaceForCommandMenu } from '../../search/api'
 import {
   createWorkspaceCommandMenuWorkItemActionRegistry,
   executeWorkspaceCommandMenuWorkItemAction,
@@ -343,11 +343,7 @@ export function WorkspaceCommandMenu({
       setLoadingQuery(normalizedQuery)
       setErrorMessage(undefined)
       setErrorQuery('')
-      const filters: WorkspaceSearchFilters = { keyword: query.trim() }
-
-      void searchWorkspaceAcrossCursors(accessToken, filters, {
-        pageLimit: 5,
-        resultLimit: 12,
+      void searchWorkspaceForCommandMenu(accessToken, query.trim(), {
         signal: abortController.signal,
       })
         .then((response) => {
