@@ -59,13 +59,25 @@ comment・file・context item など Analytics が使わない event も載る�
   4. 今の read barrier（前後 2 回の canonical read の fingerprint 一致と、latest revision の event の到達確認）は
      そのまま使う。history row から来た event も同じ確認を通す。
 - history を読む Work Item の上限は、history row で読める分について、今の「参照可能な Work Item 合計 10,000 件」に揃える。
-  audit 経路で読む Work Item が 500 件を超えたときだけ今と同じ `413` を返す。
+  history row から読む entry は 1 query 合計 200,000 件まで（API Lambda の memory に収まる量）とし、超えたら `413`。
+  audit 経路で読む Work Item が 500 件を超えたときも今と同じ `413` を返す。
 - 権限の判定は変えない。history row は、現在の ACL を通った canonical Work Item の分だけ読み、巻き戻した Project が
   現在読めない event は今と同じく engine が除外する。
 - 保持期間と legal hold は audit event に合わせる。projection は entry を足すときに、tenant の audit 保持期間を過ぎた
   entry を落とす。reader も保持期間を過ぎた entry を使わない。Tenant の閉鎖では `AnalyticsTable` の Workspace
   partition と一緒に消える。
 - 既存の Work Item は data migration runner（ADR 0013・0031）で backfill する（下の「移行と backfill」）。
+
+Issue #371 の「やること」は Team・Project ごとの日次集計（選択肢 B）を挙げているが、完了条件のうち
+「事前集計の値が既存 engine の値と一致する」と「権限のない Work Item が集計値に含まれない」を filter・group-by・
+`asOf` を含めて満たせないため、engine に渡す入力（履歴）の側を事前に圧縮する A を推奨する。完了条件との対応は次のとおり。
+
+- 3,000 件の Work Item を持つ Project・複数 Project をまたぐ report: history row で読むので 500 件の上限にかからない。
+  表示・snapshot・export・定期配信は同じ reader を通る。
+- 既存 engine と同じ値: engine は変えず、同じ fixture を audit 経路と history row 経路の両方で集計して、snapshot の
+  metric 値と evidence が一致することを test で確かめる（projection の重複・順序の飛び・`overflow` の場合も含める）。
+- 権限: 読む Work Item は今と同じ現在の ACL で選ぶ。
+- 追加の固定費: なし（下の費用）。
 
 ## 検討した選択肢
 
