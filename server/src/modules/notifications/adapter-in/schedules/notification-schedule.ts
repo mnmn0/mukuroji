@@ -601,6 +601,25 @@ export async function runNotificationSchedule(
     }
   }
 
+  if (options.planningTableName) {
+    await queryDuePlanningUpdateTargets({
+      options,
+      auditEventsTableName,
+      auditRetentionDays,
+      maxScanPages,
+      now,
+      planningTableName: requireText(options.planningTableName, 'Planning table name'),
+      scheduleIndexName: requireText(
+        options.planningUpdateScheduleIndexName ?? PLANNING_UPDATE_SCHEDULE_DUE_INDEX_NAME,
+        'Planning update schedule index name',
+      ),
+      result,
+      scanPageSize,
+    })
+  }
+
+  // Weekly report reminders run last, so a failure here cannot hold back the other notifications
+  // of the run; a retry of the same scheduled event reaches the same slot again.
   const weeklyReportReader = options.weeklyReportReader
   const weeklyReportRun = weeklyReportReader
     ? resolveWeeklyReportReminderRun(now, options.weeklyReportReminderTiming ?? DEFAULT_WEEKLY_REPORT_REMINDER_TIMING)
@@ -633,23 +652,6 @@ export async function runNotificationSchedule(
         }
       }
     }
-  }
-
-  if (options.planningTableName) {
-    await queryDuePlanningUpdateTargets({
-      options,
-      auditEventsTableName,
-      auditRetentionDays,
-      maxScanPages,
-      now,
-      planningTableName: requireText(options.planningTableName, 'Planning table name'),
-      scheduleIndexName: requireText(
-        options.planningUpdateScheduleIndexName ?? PLANNING_UPDATE_SCHEDULE_DUE_INDEX_NAME,
-        'Planning update schedule index name',
-      ),
-      result,
-      scanPageSize,
-    })
   }
 
   return result
