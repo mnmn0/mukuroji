@@ -119,9 +119,20 @@ export class MukurojiStack extends cdk.Stack {
       connectorsEnabled,
       requestEmailEnabled,
     });
+    // The user pool's email links to the app URL, which exists only once the Web distribution,
+    // built from resources that need the pool, is built below.
+    let webOrigin: string | undefined;
     const userIdentity = buildUserIdentity(this, {
       userPoolIdParameter: parameterInputs.cognitoUserPoolIdParameter,
       userPoolClientIdParameter: parameterInputs.cognitoUserPoolClientIdParameter,
+      webOrigin: cdk.Lazy.string({
+        produce: () => {
+          if (webOrigin === undefined) {
+            throw new Error('The Web distribution must be built before the stack synthesizes.');
+          }
+          return webOrigin;
+        },
+      }),
     });
     const parameters: StackParameters = {
       ...parameterInputs,
@@ -226,6 +237,7 @@ export class MukurojiStack extends cdk.Stack {
       httpApi: apiTransports.httpApi,
       realtimeWebSocketApi: apiTransports.realtimeWebSocketStage.api,
     });
+    webOrigin = webDistribution.webOrigin;
     const auditProjection = buildAuditProjectionWorker(this, {
       dataStores,
       fileStorage,

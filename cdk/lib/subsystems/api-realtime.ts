@@ -11,6 +11,7 @@ import {
   type LambdaBuildPaths,
 } from '../config/lambda-build-paths';
 import type { StackParameters } from '../config/stack-parameters';
+import { ManagedPolicyPrincipal } from '../policies/managed-policy-principal';
 import type { DataStoreResources } from './data-stores';
 import type { FileStorageResources } from './file-storage';
 import {
@@ -559,20 +560,31 @@ export function buildApiRuntime(
   );
   bindRuntimeControls(input.runtimeControls, apiFunction, 'api', false);
 
-  workItemsTable.grants.readWriteData(apiFunction);
-  teamIssueEventsTable.grants.readWriteData(apiFunction);
-  projectDirectoryTable.grants.readWriteData(apiFunction);
-  auditEventsTable.grants.readWriteData(apiFunction);
-  workspaceAccessTable.grants.readWriteData(apiFunction);
-  tenantAdministrationTable.grants.readWriteData(apiFunction);
-  documentsTable.grants.readWriteData(apiFunction);
-  collaborationTable.grants.readWriteData(apiFunction);
-  customersTable.grants.readWriteData(apiFunction);
-  fileProofingTable.grants.readWriteData(apiFunction);
-  notificationsTable.grants.readWriteData(apiFunction);
-  pushSubscriptionsTable.grants.readWriteData(apiFunction);
-  agentRunsTable.grants.readWriteData(apiFunction);
-  apiFunction.addToRolePolicy(new iam.PolicyStatement({
+  if (!apiFunction.role) {
+    throw new Error('API Lambda execution role was not created.');
+  }
+  const apiRole = apiFunction.role;
+  // The API's DynamoDB and queue access lives in customer-managed policies. IAM caps a role's
+  // inline policies at 10,240 characters in total, and the API role's statements exceed that
+  // once CloudFormation resolves the ARNs; each managed policy has its own 6,144 characters.
+  const apiTableDataPolicy = new iam.ManagedPolicy(scope, 'ApiTableDataPolicy', {
+    roles: [apiRole],
+  });
+  const apiTableDataGrantee = new ManagedPolicyPrincipal(apiRole, apiTableDataPolicy);
+  workItemsTable.grants.readWriteData(apiTableDataGrantee);
+  teamIssueEventsTable.grants.readWriteData(apiTableDataGrantee);
+  projectDirectoryTable.grants.readWriteData(apiTableDataGrantee);
+  auditEventsTable.grants.readWriteData(apiTableDataGrantee);
+  workspaceAccessTable.grants.readWriteData(apiTableDataGrantee);
+  tenantAdministrationTable.grants.readWriteData(apiTableDataGrantee);
+  documentsTable.grants.readWriteData(apiTableDataGrantee);
+  collaborationTable.grants.readWriteData(apiTableDataGrantee);
+  customersTable.grants.readWriteData(apiTableDataGrantee);
+  fileProofingTable.grants.readWriteData(apiTableDataGrantee);
+  notificationsTable.grants.readWriteData(apiTableDataGrantee);
+  pushSubscriptionsTable.grants.readWriteData(apiTableDataGrantee);
+  agentRunsTable.grants.readWriteData(apiTableDataGrantee);
+  apiTableDataPolicy.addStatements(new iam.PolicyStatement({
     actions: [
       'dynamodb:GetItem',
       'dynamodb:PutItem',
@@ -580,27 +592,72 @@ export function buildApiRuntime(
     ],
     resources: [focusTable.tableArn],
   }));
-  workspaceSearchTable.grants.readWriteData(apiFunction);
-  realtimeSessionsTable.grants.readWriteData(apiFunction);
-  const apiCapacityPlanningDataPolicy = new iam.Policy(
-    scope,
-    'ApiCapacityPlanningDataPolicy',
-    {
-      statements: [new iam.PolicyStatement({
+  workspaceSearchTable.grants.readWriteData(apiTableDataGrantee);
+  realtimeSessionsTable.grants.readWriteData(apiTableDataGrantee);
+  apiTableDataPolicy.addStatements(new iam.PolicyStatement({
+    actions: ['dynamodb:DescribeTable'],
+    resources: [
+      auditEventsTable.tableArn,
+      workItemsTable.tableArn,
+      workspaceAccessTable.tableArn,
+    ],
+  }));
+  // The Planning, Analytics, and Work Item configuration statements have the same actions and
+  // each sit in a different policy, so CDK does not merge them and each table keeps a
+  // statement of its own.
+  apiTableDataPolicy.addStatements(new iam.PolicyStatement({
+    actions: [
+      'dynamodb:DeleteItem',
+      'dynamodb:DescribeTable',
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+      'dynamodb:UpdateItem',
+    ],
+    resources: [planningTable.tableArn],
+  }));
+  const apiAnalyticsTablePolicy = new iam.ManagedPolicy(scope, 'ApiAnalyticsTablePolicy', {
+    roles: [apiRole],
+    statements: [
+      new iam.PolicyStatement({
+        actions: [
+          'dynamodb:DeleteItem',
+          'dynamodb:DescribeTable',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:Query',
+          'dynamodb:UpdateItem',
+        ],
+        resources: [analyticsTable.tableArn],
+      }),
+      new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [`${analyticsTable.tableArn}/index/TimeEntryTeamDateIndex`],
+      }),
+      // Time entry writes recheck the Team's month close rows inside their transaction.
+      new iam.PolicyStatement({
+        actions: ['dynamodb:ConditionCheckItem'],
+        resources: [analyticsTable.tableArn],
+        conditions: {
+          'ForAnyValue:StringEquals': {
+            'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+          },
+        },
+      }),
+    ],
+  });
+  const apiFeatureDataPolicy = new iam.ManagedPolicy(scope, 'ApiFeatureDataPolicy', {
+    roles: [apiRole],
+    statements: [
+      new iam.PolicyStatement({
         actions: [
           'dynamodb:DescribeTable',
           'dynamodb:GetItem',
           'dynamodb:PutItem',
         ],
         resources: [capacityPlanningTable.tableArn],
-      })],
-    },
-  );
-  const apiAutomationDataPolicy = new iam.Policy(
-    scope,
-    'ApiAutomationDataPolicy',
-    {
-      statements: [new iam.PolicyStatement({
+      }),
+      new iam.PolicyStatement({
         actions: [
           'dynamodb:ConditionCheckItem',
           'dynamodb:DeleteItem',
@@ -612,14 +669,8 @@ export function buildApiRuntime(
           'dynamodb:UpdateItem',
         ],
         resources: [automationTable.tableArn, `${automationTable.tableArn}/index/*`],
-      })],
-    },
-  );
-  const apiEnterpriseIdentityDataPolicy = new iam.Policy(
-    scope,
-    'ApiEnterpriseIdentityDataPolicy',
-    {
-      statements: [new iam.PolicyStatement({
+      }),
+      new iam.PolicyStatement({
         actions: [
           'dynamodb:BatchWriteItem',
           'dynamodb:DeleteItem',
@@ -630,14 +681,8 @@ export function buildApiRuntime(
           'dynamodb:UpdateItem',
         ],
         resources: [enterpriseIdentityTable.tableArn],
-      })],
-    },
-  );
-  const apiWorkItemConfigurationDataPolicy = new iam.Policy(
-    scope,
-    'ApiWorkItemConfigurationDataPolicy',
-    {
-      statements: [new iam.PolicyStatement({
+      }),
+      new iam.PolicyStatement({
         actions: [
           'dynamodb:DeleteItem',
           'dynamodb:DescribeTable',
@@ -647,14 +692,8 @@ export function buildApiRuntime(
           'dynamodb:UpdateItem',
         ],
         resources: [workItemConfigurationTable.tableArn],
-      })],
-    },
-  );
-  const apiRequestIntakeDataPolicy = new iam.Policy(
-    scope,
-    'ApiRequestIntakeDataPolicy',
-    {
-      statements: [new iam.PolicyStatement({
+      }),
+      new iam.PolicyStatement({
         actions: [
           'dynamodb:DescribeTable',
           'dynamodb:GetItem',
@@ -666,73 +705,87 @@ export function buildApiRuntime(
           requestIntakeTable.tableArn,
           `${requestIntakeTable.tableArn}/index/*`,
         ],
-      })],
-    },
-  );
-  const apiTransactionConditionCheckPolicy = new iam.Policy(
-    scope,
-    'ApiTransactWritePolicy',
-    {
-      statements: [new iam.PolicyStatement({
-        actions: ['dynamodb:ConditionCheckItem'],
-        resources: [
-          workItemsTable.tableArn,
-          requestIntakeTable.tableArn,
-          projectDirectoryTable.tableArn,
-          workspaceAccessTable.tableArn,
-          planningTable.tableArn,
-          enterpriseIdentityTable.tableArn,
-          workItemConfigurationTable.tableArn,
-          documentsTable.tableArn,
-          collaborationTable.tableArn,
-          fileProofingTable.tableArn,
-          focusTable.tableArn,
-          workspaceSearchTable.tableArn,
-          customersTable.tableArn,
+      }),
+      new iam.PolicyStatement({
+        actions: [
+          'dynamodb:ConditionCheckItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:GetItem',
+          'dynamodb:PutItem',
+          'dynamodb:Query',
+          'dynamodb:UpdateItem',
         ],
-        conditions: {
-          'ForAnyValue:StringEquals': {
-            'dynamodb:EnclosingOperation': ['TransactWriteItems'],
-          },
-        },
-      })],
-    },
-  );
-  const apiDeveloperPlatformDataPolicy = new iam.Policy(
+        resources: [developerPlatformTable.tableArn],
+      }),
+      new iam.PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [
+          `${developerPlatformTable.tableArn}/index/LookupKeyIndex`,
+        ],
+      }),
+      new iam.PolicyStatement({
+        actions: ['sqs:SendMessage'],
+        resources: [
+          auditExportQueue.queueArn,
+          webhookDeliveryQueue.queueArn,
+          workItemImportQueue.queueArn,
+        ],
+      }),
+    ],
+  });
+  const apiTransactionConditionPolicy = new iam.ManagedPolicy(
     scope,
-    'ApiDeveloperPlatformDataPolicy',
+    'ApiTransactionConditionPolicy',
     {
+      roles: [apiRole],
       statements: [
         new iam.PolicyStatement({
-          actions: [
-            'dynamodb:ConditionCheckItem',
-            'dynamodb:DeleteItem',
-            'dynamodb:GetItem',
-            'dynamodb:PutItem',
-            'dynamodb:Query',
-            'dynamodb:UpdateItem',
+          actions: ['dynamodb:ConditionCheckItem'],
+          resources: [
+            workItemsTable.tableArn,
+            requestIntakeTable.tableArn,
+            projectDirectoryTable.tableArn,
+            workspaceAccessTable.tableArn,
+            planningTable.tableArn,
+            enterpriseIdentityTable.tableArn,
+            workItemConfigurationTable.tableArn,
+            documentsTable.tableArn,
+            collaborationTable.tableArn,
+            fileProofingTable.tableArn,
+            focusTable.tableArn,
+            workspaceSearchTable.tableArn,
+            customersTable.tableArn,
           ],
-          resources: [developerPlatformTable.tableArn],
+          conditions: {
+            'ForAnyValue:StringEquals': {
+              'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+            },
+          },
         }),
         new iam.PolicyStatement({
-          actions: ['dynamodb:Query'],
-          resources: [
-            `${developerPlatformTable.tableArn}/index/LookupKeyIndex`,
-          ],
-        }),
-        new iam.PolicyStatement({
-          actions: ['sqs:SendMessage'],
-          resources: [
-            auditExportQueue.queueArn,
-            webhookDeliveryQueue.queueArn,
-            workItemImportQueue.queueArn,
-          ],
+          actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem'],
+          resources: [auditEventsTable.tableArn],
+          conditions: {
+            'ForAnyValue:StringEquals': {
+              'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+            },
+          },
         }),
       ],
     },
   );
-  if (!apiFunction.role) {
-    throw new Error('API Lambda execution role was not created.');
+  // The API must not serve requests before its data permissions exist.
+  const apiFunctionResource = apiFunction.node.defaultChild;
+  if (!apiFunctionResource) {
+    throw new Error('API Lambda function resource was not created.');
+  }
+  for (const policy of [
+    apiTableDataPolicy,
+    apiAnalyticsTablePolicy,
+    apiFeatureDataPolicy,
+    apiTransactionConditionPolicy,
+  ]) {
+    apiFunctionResource.node.addDependency(policy);
   }
   const apiBedrockModelInvokePolicy = new iam.Policy(
     scope,
@@ -744,7 +797,7 @@ export function buildApiRuntime(
       })],
     },
   );
-  apiFunction.role.attachInlinePolicy(apiBedrockModelInvokePolicy);
+  apiRole.attachInlinePolicy(apiBedrockModelInvokePolicy);
   const apiBedrockModelInvokePolicyResource = apiBedrockModelInvokePolicy.node.defaultChild;
   if (!(apiBedrockModelInvokePolicyResource instanceof iam.CfnPolicy)) {
     throw new Error('API Bedrock model IAM policy was not created.');
@@ -768,7 +821,7 @@ export function buildApiRuntime(
       })],
     },
   );
-  apiFunction.role.attachInlinePolicy(apiBedrockDestinationModelInvokePolicy);
+  apiRole.attachInlinePolicy(apiBedrockDestinationModelInvokePolicy);
   const apiBedrockDestinationModelInvokePolicyResource =
     apiBedrockDestinationModelInvokePolicy.node.defaultChild;
   if (!(apiBedrockDestinationModelInvokePolicyResource instanceof iam.CfnPolicy)) {
@@ -776,7 +829,7 @@ export function buildApiRuntime(
   }
   apiBedrockDestinationModelInvokePolicyResource.cfnOptions.condition =
     aiBedrockDestinationModelArnsConfigured;
-  apiFunction.role.attachInlinePolicy(new iam.Policy(
+  apiRole.attachInlinePolicy(new iam.Policy(
     scope,
     'ApiDeveloperPlatformKmsPolicy',
     {
@@ -817,75 +870,8 @@ export function buildApiRuntime(
       ],
     },
   ));
-  const apiPlanningDataPolicy = new iam.Policy(scope, 'ApiPlanningDataPolicy', {
-    statements: [new iam.PolicyStatement({
-      actions: [
-        'dynamodb:DeleteItem',
-        'dynamodb:DescribeTable',
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:Query',
-        'dynamodb:UpdateItem',
-      ],
-      resources: [planningTable.tableArn],
-    })],
-  });
-  const apiAnalyticsDataPolicy = new iam.Policy(scope, 'ApiAnalyticsDataPolicy', {
-    statements: [
-      new iam.PolicyStatement({
-        actions: [
-          'dynamodb:DeleteItem',
-          'dynamodb:DescribeTable',
-          'dynamodb:GetItem',
-          'dynamodb:PutItem',
-          'dynamodb:Query',
-          'dynamodb:UpdateItem',
-        ],
-        resources: [analyticsTable.tableArn],
-      }),
-      new iam.PolicyStatement({
-        actions: ['dynamodb:Query'],
-        resources: [`${analyticsTable.tableArn}/index/TimeEntryTeamDateIndex`],
-      }),
-      // Time entry writes recheck the Team's month close rows inside their transaction.
-      new iam.PolicyStatement({
-        actions: ['dynamodb:ConditionCheckItem'],
-        resources: [analyticsTable.tableArn],
-        conditions: {
-          'ForAnyValue:StringEquals': {
-            'dynamodb:EnclosingOperation': ['TransactWriteItems'],
-          },
-        },
-      }),
-    ],
-  });
-  const apiAuditTransactionDataPolicy = new iam.Policy(
-    scope,
-    'ApiAuditTransactionDataPolicy',
-    {
-      statements: [new iam.PolicyStatement({
-        actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem'],
-        resources: [auditEventsTable.tableArn],
-        conditions: {
-          'ForAnyValue:StringEquals': {
-            'dynamodb:EnclosingOperation': ['TransactWriteItems'],
-          },
-        },
-      })],
-    },
-  );
-  apiFunction.role.attachInlinePolicy(apiAutomationDataPolicy);
-  apiFunction.role.attachInlinePolicy(apiEnterpriseIdentityDataPolicy);
-  apiFunction.role.attachInlinePolicy(apiWorkItemConfigurationDataPolicy);
-  apiFunction.role.attachInlinePolicy(apiDeveloperPlatformDataPolicy);
-  apiFunction.role.attachInlinePolicy(apiPlanningDataPolicy);
-  apiFunction.role.attachInlinePolicy(apiCapacityPlanningDataPolicy);
-  apiFunction.role.attachInlinePolicy(apiAnalyticsDataPolicy);
-  apiFunction.role.attachInlinePolicy(apiAuditTransactionDataPolicy);
-  apiFunction.role.attachInlinePolicy(apiRequestIntakeDataPolicy);
-  apiFunction.role.attachInlinePolicy(apiTransactionConditionCheckPolicy);
   connectorRuntimeSecret?.grantRead(apiFunction);
-  apiFunction.role.attachInlinePolicy(new iam.Policy(
+  apiRole.attachInlinePolicy(new iam.Policy(
     scope,
     'ApiAutomationWebhookSecretPolicy',
     {
@@ -895,7 +881,7 @@ export function buildApiRuntime(
       })],
     },
   ));
-  apiFunction.role.attachInlinePolicy(new iam.Policy(
+  apiRole.attachInlinePolicy(new iam.Policy(
     scope,
     'ApiAutomationInboundWebhookSecretPolicy',
     {
@@ -972,20 +958,6 @@ export function buildApiRuntime(
       resources: [cognitoUserPoolArn],
     }),
   );
-  apiFunction.role.attachInlinePolicy(new iam.Policy(
-    scope,
-    'ApiReadinessPolicy',
-    {
-      statements: [new iam.PolicyStatement({
-        actions: ['dynamodb:DescribeTable'],
-        resources: [
-          auditEventsTable.tableArn,
-          workItemsTable.tableArn,
-          workspaceAccessTable.tableArn,
-        ],
-      })],
-    },
-  ));
 
   new cloudwatch.Alarm(scope, 'ApiFunctionErrorAlarm', {
     alarmDescription:
