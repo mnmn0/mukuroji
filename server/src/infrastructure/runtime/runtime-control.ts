@@ -1,7 +1,10 @@
 /**
  * Runtime-control states accepted from the trusted configuration source.
+ *
+ * `read-only` is a maintenance state: the API keeps serving reads and rejects
+ * changes, while workers and realtime handlers stay stopped as in `disabled`.
  */
-export type RuntimeControlMode = 'disabled' | 'enabled'
+export type RuntimeControlMode = 'disabled' | 'enabled' | 'read-only'
 
 /**
  * Bounded freshness and validation states exposed to guards and telemetry.
@@ -238,7 +241,7 @@ export function parseRuntimeControlDocument(
     typeof parsed.revision !== 'number' ||
     !Number.isSafeInteger(parsed.revision) ||
     parsed.revision <= 0 ||
-    (parsed.mode !== 'enabled' && parsed.mode !== 'disabled')
+    !isRuntimeControlMode(parsed.mode)
   ) {
     throw new RuntimeControlDocumentError()
   }
@@ -659,6 +662,22 @@ export function runtimeControlAllowsExecution(
 }
 
 /**
+ * Returns whether a snapshot permits the API to serve read-only requests.
+ *
+ * Both `enabled` and the `read-only` maintenance mode admit reads, under the
+ * same current-or-bounded-stale rule as {@link runtimeControlAllowsExecution}.
+ *
+ * @param snapshot - Effective request snapshot.
+ * @returns Whether a request that changes nothing may begin.
+ */
+export function runtimeControlAllowsReads(
+  snapshot: RuntimeControlSnapshot,
+): boolean {
+  return (snapshot.mode === 'enabled' || snapshot.mode === 'read-only') &&
+    (snapshot.status === 'current' || snapshot.status === 'stale')
+}
+
+/**
  * Returns whether a snapshot is healthy enough to admit new traffic.
  *
  * @param snapshot - Effective readiness snapshot.
@@ -724,6 +743,16 @@ function readPositiveDuration(
     throw new TypeError(`${label} must be a positive safe integer.`)
   }
   return duration
+}
+
+/**
+ * Checks whether a parsed value is one of the accepted modes.
+ *
+ * @param value - Unknown parsed JSON value.
+ * @returns Whether the value is a runtime-control mode.
+ */
+function isRuntimeControlMode(value: unknown): value is RuntimeControlMode {
+  return value === 'enabled' || value === 'disabled' || value === 'read-only'
 }
 
 /**

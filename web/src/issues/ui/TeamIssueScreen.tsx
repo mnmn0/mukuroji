@@ -108,7 +108,7 @@ import {
   type TeamIssueActionMenuOpenHandler,
   type TeamIssueScreenProps,
 } from './teamIssueScreenShared'
-import { IssueTable, TEAM_ISSUE_BASELINE_DELAY_COLUMN } from './TeamIssueTable'
+import { IssueTable } from './TeamIssueTable'
 import {
   createWorkItemOutlineRows,
   planWorkItemHierarchyMove,
@@ -130,6 +130,7 @@ import { listTaskGanttRowTasks, type TaskGanttGrouping } from '../../tasks/model
 import { resolveTeamIssueGroupValue } from '../model/teamIssueDisplay'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { useWorkItemScheduleBaselines } from '../../work-items/queries/useWorkItemScheduleBaselines'
+import { WORK_ITEM_BASELINE_END_DELAY_COLUMN } from '../../work-items/model/workItemScheduleBaselines'
 
 /** Message shown when a hierarchy move cannot be made. */
 const outlineMoveBlockMessageKeys = {
@@ -579,7 +580,7 @@ export function TeamIssueScreen({
     visibleIssues,
     viewMode === 'gantt' || (
       viewMode === 'table' &&
-      (taskViewPresentation?.columns ?? []).some((column) => column.field === TEAM_ISSUE_BASELINE_DELAY_COLUMN)
+      (taskViewPresentation?.columns ?? []).some((column) => column.field === WORK_ITEM_BASELINE_END_DELAY_COLUMN)
     ),
   )
   const ganttGroupBy = viewMode === 'gantt' ? taskViewPresentation?.groupBy : undefined

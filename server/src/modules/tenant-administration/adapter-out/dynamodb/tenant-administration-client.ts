@@ -23,9 +23,10 @@ import type {
   TenantRetentionReconciliation,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
+  WeeklyReportReminderSettings,
   WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
-import { readWorkspaceCalendarSettings } from '@mukuroji/contracts'
+import { readWeeklyReportReminderSettings, readWorkspaceCalendarSettings } from '@mukuroji/contracts'
 import { calculateAuditExpiresAt } from '../../../audit'
 import {
   TENANT_CLOSURE_STEPS,
@@ -276,6 +277,9 @@ export class DynamoDbTenantAdministrationClient implements
       locale: validateTenantLocale(input.locale),
       defaultPolicy: readTenantDefaultPolicy(input.defaultPolicy),
       ...(input.calendar ? { calendar: readStoredWorkspaceCalendar(input.calendar) } : {}),
+      ...(input.weeklyReportReminders
+        ? { weeklyReportReminders: readStoredWeeklyReportReminders(input.weeklyReportReminders) }
+        : {}),
       revision: current.revision + 1,
       updatedAt: this.now(),
     }
@@ -1986,6 +1990,9 @@ function readTenantProfile(value: unknown): TenantProfile {
     locale: validateTenantLocale(value.locale),
     defaultPolicy: policy,
     ...(value.calendar === undefined ? {} : { calendar: readStoredWorkspaceCalendar(value.calendar) }),
+    ...(value.weeklyReportReminders === undefined
+      ? {}
+      : { weeklyReportReminders: readStoredWeeklyReportReminders(value.weeklyReportReminders) }),
     status,
     ...(closedAt ? { closedAt } : {}),
     ...(closedByOperationId ? { closedByOperationId } : {}),
@@ -1993,6 +2000,19 @@ function readTenantProfile(value: unknown): TenantProfile {
     createdAt,
     updatedAt,
   }
+}
+
+/**
+ * Reads stored or already-validated weekly report reminder settings.
+ *
+ * @param value - Settings candidate.
+ * @returns The settings.
+ * @throws Error when the settings are invalid.
+ */
+function readStoredWeeklyReportReminders(value: unknown): WeeklyReportReminderSettings {
+  const settings = readWeeklyReportReminderSettings(value)
+  if (!settings) throw new Error('invalid weekly report reminder settings')
+  return settings
 }
 
 /**

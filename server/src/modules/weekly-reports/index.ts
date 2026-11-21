@@ -18,6 +18,7 @@ export {
 } from './application/weekly-summary'
 export {
   DynamoDbWeeklyReportStore,
+  createWeeklyReportUnsubmittedCondition,
   InMemoryWeeklyReportStore,
   type WeeklyReportCallerAuthorizationCheck,
   type WeeklyReportStore,

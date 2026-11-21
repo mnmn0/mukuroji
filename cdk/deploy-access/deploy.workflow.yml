@@ -1,0 +1,80 @@
+# Copy this file to .github/workflows/deploy.yml.
+#
+# Deploys main to the single production environment after a required reviewer approves the
+# `production` GitHub Environment. The job assumes the role from
+# cdk/deploy-access/github-deploy-access.template.json with OIDC; there are no AWS keys in GitHub.
+# Every step lives in scripts/github-deploy.ts, so changes to the deploy go through normal PRs
+# and this file rarely changes.
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: What to run against production.
+        type: choice
+        default: deploy
+        options:
+          - deploy
+          - runtime-control-enable
+          - runtime-control-disable
+          - runtime-control-disable-all-at-once
+          - web-rollback
+      web_release_commit:
+        description: For web-rollback only. Full 40-character commit SHA of the Web release to restore.
+        type: string
+        required: false
+        default: ''
+
+# One production operation at a time. Runs that arrive while one is waiting for approval or running
+# queue up, and only the newest queued run is kept. A running deploy is never cancelled.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  production:
+    name: deploy-production
+    if: github.repository == 'mnmn0/mukuroji' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment:
+      name: production
+      url: ${{ steps.run.outputs.web_url }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.10
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'ap-northeast-1' }}
+          role-duration-seconds: 7200
+          role-session-name: mukuroji-deploy-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Run
+        id: run
+        env:
+          OPERATION: ${{ inputs.operation || 'deploy' }}
+          WEB_RELEASE_COMMIT: ${{ inputs.web_release_commit }}
+        run: bun scripts/github-deploy.ts "$OPERATION"

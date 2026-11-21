@@ -12,7 +12,11 @@ import type {
   UpdateTenantProfileInput,
   WorkspaceCalendarSettingsResponse,
 } from '@mukuroji/contracts'
-import { readWorkspaceCalendarSettings, readWorkspaceNationalHolidayDates } from '@mukuroji/contracts'
+import {
+  readWeeklyReportReminderSettings,
+  readWorkspaceCalendarSettings,
+  readWorkspaceNationalHolidayDates,
+} from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkspaceAccessApiError } from './errors'
 import { isRecord } from '../../shared/api/jsonValidation'
@@ -327,6 +331,8 @@ function isTenantProfile(value: unknown): value is TenantProfile {
     (value.locale === 'ja' || value.locale === 'en') &&
     isTenantDefaultPolicy(value.defaultPolicy) &&
     (value.calendar === undefined || readWorkspaceCalendarSettings(value.calendar) !== undefined) &&
+    (value.weeklyReportReminders === undefined ||
+      readWeeklyReportReminderSettings(value.weeklyReportReminders) !== undefined) &&
     (value.status === 'active' || value.status === 'closing' || value.status === 'closed') &&
     (value.closedAt === undefined || typeof value.closedAt === 'string') &&
     (value.closedByOperationId === undefined || typeof value.closedByOperationId === 'string') &&

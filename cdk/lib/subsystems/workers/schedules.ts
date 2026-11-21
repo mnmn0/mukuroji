@@ -105,6 +105,7 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
     notificationsTable,
     planningTable,
     projectDirectoryTable,
+    tenantAdministrationTable,
     workItemsTable,
   } = input.dataStores;
   const { auditRetentionDays } = input.parameters;
@@ -123,12 +124,19 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
       PLANNING_TABLE_NAME: planningTable.tableName,
       PLANNING_UPDATE_SCHEDULE_INDEX_NAME: 'UpdateScheduleDueIndex',
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+      TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
       WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
     },
     grant: (grantee) => {
+      // Planning update targets, and the weekly report rows that decide who is reminded.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:BatchGetItem'],
+        resources: [planningTable.tableArn],
+      }));
+      // The Workspace week start day decides which week a weekly report reminder is about.
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:GetItem'],
-        resources: [planningTable.tableArn],
+        resources: [tenantAdministrationTable.tableArn],
       }));
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:Query'],

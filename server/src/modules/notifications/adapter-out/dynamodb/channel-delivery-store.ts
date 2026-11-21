@@ -238,6 +238,10 @@ function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | 
     row.workItemReopenedAt !== undefined &&
     (typeof row.workItemReopenedAt !== 'string' || !Number.isFinite(Date.parse(row.workItemReopenedAt)))
   ) throw invalidRow()
+  if (
+    row.weeklyReportAuthorMemberKey !== undefined &&
+    (typeof row.weeklyReportAuthorMemberKey !== 'string' || !row.weeklyReportAuthorMemberKey.trim())
+  ) throw invalidRow()
   return {
     workspaceId: row.workspaceId, memberKey: row.recipientMemberKey, recipientKey, notificationKey,
     attempts, version: row.version, nextAttemptAt,
@@ -249,6 +253,9 @@ function parseDelivery(names: ChannelAttributes, row: Record<string, unknown> | 
       : {}),
     ...(typeof row.daysUntilDue === 'number' ? { daysUntilDue: row.daysUntilDue } : {}),
     ...(typeof row.workItemReopenedAt === 'string' ? { workItemReopenedAt: row.workItemReopenedAt } : {}),
+    ...(typeof row.weeklyReportAuthorMemberKey === 'string'
+      ? { weeklyReportAuthorMemberKey: row.weeklyReportAuthorMemberKey }
+      : {}),
     ...(typeof row.fileId === 'string' ? { fileId: row.fileId } : {}),
     ...(typeof row.targetId === 'string' ? { targetId: row.targetId } : {}),
   }

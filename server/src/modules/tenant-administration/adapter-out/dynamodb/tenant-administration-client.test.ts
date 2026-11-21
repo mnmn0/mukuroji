@@ -172,6 +172,17 @@ describe('DynamoDbTenantAdministrationClient', () => {
       holidays: [],
       publicHolidays: 'japan',
     })
+    const reminders = {
+      enabled: true,
+      reminder: { weekday: 4, hour: 9 },
+      escalationEnabled: false,
+      escalation: { weekday: 1, hour: 10 },
+    }
+    items.set('PROFILE', { ...items.get('PROFILE'), weeklyReportReminders: reminders })
+    expect((await client.getProfile('workspace-1'))?.weeklyReportReminders).toEqual(reminders)
+    // Stored settings that no longer validate fail the read instead of falling back to defaults.
+    items.set('PROFILE', { ...items.get('PROFILE'), weeklyReportReminders: { ...reminders, reminder: { weekday: 9, hour: 9 } } })
+    await expect(client.getProfile('workspace-1')).rejects.toThrow()
     items.delete('PROFILE')
     expect(await client.getProfile('workspace-1')).toBeUndefined()
   })
