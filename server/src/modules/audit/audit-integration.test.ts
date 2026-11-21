@@ -137,7 +137,7 @@ test('team issue mutations keep state, specialized activity, and generic audit a
   const transaction = recording.commands.find((command) => command.name === 'TransactWriteCommand')
   const items = readTransactItems(transaction)
 
-  expect(items).toHaveLength(4)
+  expect(items).toHaveLength(5)
   expect(items[0]).toMatchObject({
     Put: {
       TableName: 'IssuesTable',
@@ -185,6 +185,9 @@ test('team issue mutations keep state, specialized activity, and generic audit a
       TableName: 'IssuesTable',
       Item: { entryType: 'work-item-key', key: 'CT-1', workItemId: 'ct-1' },
     },
+  })
+  expect(items[4]).toMatchObject({
+    Put: { TableName: 'IssuesTable', Item: { entryType: 'work-item-member-index', workItemId: 'ct-1' } },
   })
 })
 

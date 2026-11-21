@@ -220,3 +220,10 @@ export {
   type WorkItemNotificationScheduleAttributes,
   type WorkItemNotificationScheduleUpdate,
 } from './work-item-notification-schedule-index'
+export {
+  isWorkItemMemberIndexRow,
+  listWorkItemMemberIndexKeys,
+  normalizeWorkItemMemberIndexKey,
+  type WorkItemMemberIndexReference,
+} from './work-item-member-index'
+export { workItemMemberIndexMigration } from './work-item-member-index-migration'

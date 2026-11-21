@@ -23,6 +23,7 @@ import {
 import {
   isCanonicalWorkItemRecord,
   isWorkItemKeyRegistryRecord,
+  isWorkItemMemberIndexRow,
 } from '../../src/modules/work-items'
 import { validateDocumentPayload } from '../../src/modules/documents'
 import { isStoredProjectCharter } from '../../src/modules/directory'
@@ -892,6 +893,8 @@ function mapProjectDirectoryItemRow(
 export function mapWorkItem(item: Record<string, unknown>): SearchProjectionOperation | undefined {
   // The Work Item key registry shares the table; its rows are not searchable Work Items.
   if (isWorkItemKeyRegistryRecord(item)) return undefined
+  // Focus member index rows (ADR 0038) share the table too and are not Work Items.
+  if (isWorkItemMemberIndexRow(item)) return undefined
   if (!isCanonicalWorkItemRecord(item)) {
     throw new TypeError(
       'Workspace search backfill encountered a non-canonical Work Item row.',

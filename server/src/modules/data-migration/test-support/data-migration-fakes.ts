@@ -1,6 +1,6 @@
 import type {
   DataMigrationCheckpoint,
-  DataMigrationDefinition,
+  DataMigrationTransformDefinition,
   DataMigrationRow,
   DataMigrationRunRecord,
 } from '../domain/data-migration'
@@ -18,8 +18,8 @@ import type {
  * @returns The definition.
  */
 export function createTaskEstimateMigration(
-  overrides: Partial<DataMigrationDefinition> = {},
-): DataMigrationDefinition {
+  overrides: Partial<DataMigrationTransformDefinition> = {},
+): DataMigrationTransformDefinition {
   return {
     id: '0001-task-estimate-points',
     description: 'Store task estimates as points.',
@@ -119,6 +119,23 @@ export function createMemoryRowStore(
         return 'condition-failed'
       }
       rows.set(key, { ...row })
+      return 'replaced'
+    },
+    writeDerivedRows: async ({ definition, sourceKey, expectedRevision, rows: derivedRows }) => {
+      store.replaceCalls += 1
+      const sourceRowKey = `${String(sourceKey.pk)}|${String(sourceKey.sk)}`
+      const before = rows.get(sourceRowKey)
+      if (before === undefined) return 'condition-failed'
+      if (store.beforeReplace !== undefined && !store.beforeReplace(before)) return 'condition-failed'
+      // The hook may stand in for a concurrent writer, so check the source as it is now.
+      const stored = rows.get(sourceRowKey)
+      if (
+        stored === undefined ||
+        (definition.revisionAttribute !== undefined && stored[definition.revisionAttribute] !== expectedRevision)
+      ) {
+        return 'condition-failed'
+      }
+      for (const row of derivedRows) rows.set(`${String(row.pk)}|${String(row.sk)}`, { ...row })
       return 'replaced'
     },
   }

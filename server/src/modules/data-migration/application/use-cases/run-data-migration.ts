@@ -4,6 +4,7 @@ import {
   classifyDataMigrationRow,
   createEmptyDataMigrationCounters,
   DATA_MIGRATION_MAX_PAGE_SIZE,
+  deriveDataMigrationRows,
   DataMigrationFailure,
   extractDataMigrationRowKey,
   transformDataMigrationRow,
@@ -544,8 +545,52 @@ async function applyRows(
     const rowClass = classes[index]
     if (rowClass === 'unrelated') counters.unrelated += 1
     else if (rowClass === 'migrated') counters.alreadyMigrated += 1
-    else counters[await replacePendingRow(input, state, lease, row)] += 1
+    else if (input.definition.kind === 'derive') {
+      counters[await writeDerivedRowsOf(input, state, lease, row)] += 1
+    } else counters[await replacePendingRow(input, state, lease, row)] += 1
   }
+}
+
+/**
+ * Writes the derived rows of one pending source row, re-reading the source
+ * after a lost condition.
+ *
+ * @param input - Run input.
+ * @param state - Shared run state.
+ * @param lease - Lease-holding state of the partition.
+ * @param pending - Source row classified as `pending`.
+ * @returns The counter the row adds to.
+ */
+async function writeDerivedRowsOf(
+  input: RunDataMigrationInput,
+  state: RunState,
+  lease: PartitionLease,
+  pending: DataMigrationRow,
+): Promise<'migrated' | 'unrelated' | 'vanished'> {
+  const { definition } = input
+  const sourceKey = extractDataMigrationRowKey(definition, pending)
+  let row = pending
+  for (let attempt = 0; attempt < MAX_REPLACE_ATTEMPTS; attempt += 1) {
+    const rows = deriveDataMigrationRows(definition, row)
+    await acquireWrite(input, state)
+    await renewLeaseIfNeeded(input, lease)
+    const outcome = await input.rowStore.writeDerivedRows({
+      definition,
+      sourceKey,
+      rows,
+      ...(definition.revisionAttribute === undefined
+        ? {}
+        : { expectedRevision: row[definition.revisionAttribute] }),
+    })
+    if (outcome === 'replaced') return 'migrated'
+    const fresh = await input.rowStore.getRow(sourceKey)
+    if (fresh === undefined) return 'vanished'
+    const freshClass = classifyDataMigrationRow(definition, fresh)
+    if (freshClass === 'unrelated') return 'unrelated'
+    if (freshClass !== 'pending') throw new DataMigrationFailure('UNKNOWN_ROW')
+    row = fresh
+  }
+  throw new DataMigrationFailure('WRITE_CONFLICT')
 }
 
 /**
@@ -660,7 +705,8 @@ async function dryRunPartition(
         if (rowClass === 'unrelated') pageCounters.unrelated += 1
         else if (rowClass === 'migrated') pageCounters.alreadyMigrated += 1
         else {
-          transformDataMigrationRow(input.definition, row)
+          if (input.definition.kind === 'derive') deriveDataMigrationRows(input.definition, row)
+          else transformDataMigrationRow(input.definition, row)
           pageCounters.migrated += 1
         }
       }

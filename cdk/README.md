@@ -1344,7 +1344,7 @@ Deploy 時は `cdk diff` で canonical table の意図しない replacement/dele
 - `DataMigrationFunction` は schedule も event source も持たず、起動されたときだけ動きます（timeout 15 分、
   非同期起動の retry 0）。待機中の費用はかかりません。
 - function の role は allowlist の table（今は `work-items` = `WorkItemsTable` と `project-directory` =
-  `ProjectDirectoryTable`）に `Scan` / `GetItem` / `PutItem`、`DataMigrationCheckpointTable` に `Query` /
+  `ProjectDirectoryTable`）に `Scan` / `GetItem` / `PutItem` / `ConditionCheckItem`（`derive` migration の元 row の確認、ADR 0038）、`DataMigrationCheckpointTable` に `Query` /
   `PutItem` だけを持ちます。別の table を移行する migration は、`cdk/lib/stacks/mukuroji-stack.ts` の
   `buildDataMigration` の `targets` に同じ PR で table を足します。
 - `DataMigrationCheckpointTable` は `Retain`、PITR、deletion protection 付きです。checkpoint と run record
