@@ -4,6 +4,9 @@ import type {
   ProjectScheduleBaselineEntry,
 } from '@mukuroji/contracts'
 
+/** Table column showing how far each Work Item ends behind its Project baseline. */
+export const WORK_ITEM_BASELINE_END_DELAY_COLUMN = 'baselineEndDelayDays'
+
 /** Most Projects whose baselines one list reads at once. */
 export const WORK_ITEM_BASELINE_PROJECT_LIMIT = 50
 

@@ -346,6 +346,9 @@ function bindApiRuntimeConfiguration(
       DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: developerPlatformKey.keyArn,
       DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
       DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: developerPlatformKey.keyArn,
+      // Workspace AI provider API keys reuse the envelope key under their own
+      // encryption context instead of one Secrets Manager secret per key.
+      AI_ASSISTANCE_PROVIDER_CREDENTIAL_KMS_KEY_ID: developerPlatformKey.keyArn,
       DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
       DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: developerPlatformKey.keyArn,
       DOCUMENTS_TABLE_NAME: documentsTable.tableName,
@@ -542,6 +545,10 @@ export function buildApiRuntime(
   apiFunction.addEnvironment(
     'AI_ASSISTANCE_TABLE_NAME',
     workspaceSearchTable.tableName,
+  );
+  apiFunction.addEnvironment(
+    'AI_ASSISTANCE_EXTERNAL_PROVIDERS',
+    input.parameters.aiExternalProviders.valueAsString,
   );
   apiFunction.addEnvironment(
     'AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE',
@@ -872,6 +879,16 @@ export function buildApiRuntime(
             },
           },
         }),
+        new iam.PolicyStatement({
+          actions: ['kms:Decrypt', 'kms:GenerateDataKey'],
+          resources: [developerPlatformKey.keyArn],
+          conditions: {
+            StringEquals: {
+              'kms:EncryptionContext:mukuroji:purpose': 'provider-credential',
+              'kms:EncryptionContext:mukuroji:service': 'ai-assistance',
+            },
+          },
+        }),
       ],
     },
   ));
@@ -1026,7 +1043,7 @@ export function buildApiRuntime(
     treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
   });
   // AI alarms cost $0.10 each per month, so they exist only when AI is configured.
-  const aiAlarmCondition = input.parameters.aiAssistanceConfigured;
+  const aiAlarmCondition = input.parameters.aiAssistanceAnyProviderConfigured;
   const aiMetricConfiguration = {
     namespace: 'Mukuroji/AIAssistance',
     dimensionsMap: {
