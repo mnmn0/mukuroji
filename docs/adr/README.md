@@ -58,4 +58,5 @@
 | [0030](0030-weekly-report-storage-and-visibility.md) | 週報を Planning table に週ごとの行と提出版ごとの行で持ち、読む人の権限でタスクを絞る | 提案 |
 | [0031](0031-data-migration-lambda-and-operator-proof.md) | Data migration を operator が起動する Lambda で実行し、実行者を presigned STS proof で確かめる | 提案 |
 | [0032](0032-japanese-public-holiday-monthly-sync.md) | 日本の祝日を内閣府の CSV から月に1回取り込み、tenant administration table の共有 row に置く | 提案 |
+| [0033](0033-project-id-workspace-reservation-row.md) | Project ID を Workspace ごとの予約 row で一意にし、衝突したら別の ID で作り直す | 提案 |
 | [0034](0034-read-only-maintenance-mode.md) | Runtime control に `read-only` mode を足し、API の入口で HTTP method と読み取り用 POST の一覧で変更を断る | 提案 |
