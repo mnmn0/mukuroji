@@ -2982,7 +2982,10 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
       let planningCondition: unknown
       const documentClient = {
         async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
-          if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+          // The Project has no schedule baseline row in the Planning table.
+          if (command.constructor.name === 'GetCommand') {
+            return command.input.TableName === 'PlanningTable' ? {} : { Item: currentIssue }
+          }
           if (command.constructor.name === 'TransactWriteCommand') {
             const transactItems = command.input.TransactItems as Array<{
               ConditionCheck?: { TableName?: string }
