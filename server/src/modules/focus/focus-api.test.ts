@@ -204,19 +204,22 @@ function createOversizedFocusNotificationClient(): NotificationClient {
  * @param detailReadHook - Optional hook used to simulate authorization loss.
  * @param teamIssueCount - Number of visible canonical Work Items returned by the fixture.
  * @param workspaceRole - Workspace membership role used by the authorization fixture.
+ * @param additionalTeams - Extra Teams returned by the directory fixture.
  * @returns Captured source calls and the isolated idempotency adapters.
  */
 function configureFocusSources(
   role: 'viewer' | 'member' | 'manager' = 'member',
   detailReadHook?: (issueId: string) => Promise<void>,
   teamIssueCount = 1,
-  workspaceRole: 'member' | 'guest' = 'member',
+  workspaceRole: 'owner' | 'member' | 'guest' = 'member',
+  additionalTeams?: Array<{ id: string; name: string; projects: Array<{ id: string; name: string; tone: 'purple' }> }>,
 ) {
-  configureFakeProjectClients(true, {
+  const projectCalls = configureFakeProjectClients(true, {
     role,
     workspaceRole,
     teamIssueCount,
     ...(detailReadHook === undefined ? {} : { detailReadHook }),
+    ...(additionalTeams === undefined ? {} : { additionalTeams }),
   })
   const notificationCalls: string[] = []
   const watcherMutations: string[] = []
@@ -282,6 +285,7 @@ function configureFocusSources(
   return {
     developerPlatform,
     notificationCalls,
+    projectCalls,
     watcherAuthorizationConditionChecks,
     watcherMutations,
     watcherExpectedStates,
@@ -569,6 +573,65 @@ test('projects visible notifications from every Inbox state and deduplicates eve
     'archived:',
     'snoozed:',
   ])
+})
+
+test('reads only referenced Work Items instead of every Team partition (ADR 0038)', async () => {
+  // A Workspace owner may read all 50 Teams, so a complete read would touch every partition.
+  const { projectCalls: calls } = configureFocusSources(
+    'manager',
+    undefined,
+    100,
+    'owner',
+    Array.from({ length: 49 }, (_, index) => ({
+      id: `wide-team-${index}`,
+      name: `Wide Team ${index}`,
+      projects: [{ id: `wide-project-${index}`, name: `Wide Project ${index}`, tone: 'purple' as const }],
+    })),
+  )
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  readFocusItem(await response.json(), 'onboarding-friction')
+  expect(calls.issueReads).toHaveLength(0)
+  expect(calls.memberIndexReads).toEqual([
+    { directoryId: 'user#demo@example.com', memberKey: 'demo@example.com' },
+  ])
+  expect(calls.issueReferenceReads.flatMap((read) => read.references)).toEqual([
+    { teamId: 'core-team', workItemId: 'onboarding-friction' },
+  ])
+})
+
+test('keeps owned Work Items from the member index and the blocked count from relation endpoints', async () => {
+  const { projectCalls: calls } = configureFocusSources('member', undefined, 3)
+  configureFakeAuthenticatedUser({ email: 'sato@example.com', 'custom:directory_id': 'user#demo@example.com' })
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelationGraph(_workspaceId: string, teamId: string) {
+        return {
+          teamId,
+          graphRevision: 1,
+          relations: teamId === 'core-team'
+            ? [{
+                id: 'relation-blocked',
+                type: 'blockedBy' as const,
+                sourceWorkItemId: 'work-item-1',
+                targetWorkItemId: 'work-item-2',
+                createdAt: '2026-06-01T00:00:00.000Z',
+              }]
+            : [],
+        }
+      },
+    }),
+  })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  readFocusItem(body, 'work-item-1')
+  expect(calls.issueReads).toHaveLength(0)
+  expect(isRecord(body) && body.metrics).toEqual({ blocked: 1 })
 })
 
 test('fails closed when mention history exceeds the four-page source window', async () => {
@@ -1027,10 +1090,14 @@ test('raises slipped from the baseline of the Projects the viewer works in', asy
             { workItemId: 'onboarding-friction', endDate: '2026-06-10' },
             { workItemId: 'not-visible', endDate: '2026-06-01' },
           ],
+          savedBaselines: [],
         }
       },
-      async capture() {
-        throw new Error('Focus must not capture baselines.')
+      async getSaved() {
+        throw new Error('Focus must not read saved baselines.')
+      },
+      async write() {
+        throw new Error('Focus must not write baselines.')
       },
     },
   })
@@ -1062,8 +1129,11 @@ test('does not read baselines for Work Items the viewer does not own or contribu
         baselineReads += 1
         return null
       },
-      async capture() {
-        throw new Error('Focus must not capture baselines.')
+      async getSaved() {
+        throw new Error('Focus must not read saved baselines.')
+      },
+      async write() {
+        throw new Error('Focus must not write baselines.')
       },
     },
   })
@@ -1085,8 +1155,11 @@ test('fails closed when a Project baseline cannot be read', async () => {
       async get() {
         throw new ProjectDataError(503, 'ScheduleBaselineRetryable', 'The baseline read was throttled.')
       },
-      async capture() {
-        throw new Error('Focus must not capture baselines.')
+      async getSaved() {
+        throw new Error('Focus must not read saved baselines.')
+      },
+      async write() {
+        throw new Error('Focus must not write baselines.')
       },
     },
   })

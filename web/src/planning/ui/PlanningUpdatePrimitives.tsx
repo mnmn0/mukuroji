@@ -15,6 +15,12 @@ import {
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import { isSafeApplicationPath } from '../../shared/routing/applicationPath'
 import { routeAiPlanningDraftAdoption } from '../model/aiDraftAdoption'
+import {
+  evidenceKey,
+  mergePlanningUpdateEvidence,
+  PLANNING_UPDATE_EVIDENCE_LIMIT,
+  type PlanningBaselineDelaysView,
+} from '../model/baselineDelayEvidence'
 import { isValidPlanningDateTime, readNonNegativeNumber } from '../model/cadenceForm'
 import {
   PLANNING_UPDATE_ACKNOWLEDGEMENT_REACTION,
@@ -131,6 +137,8 @@ export type PlanningUpdateLabels = {
   evidenceLabelPlaceholder: string
   /** Evidence URL placeholder. */
   evidenceUrlPlaceholder: string
+  /** Copy of the baseline delay section of the composer. */
+  baselineDelays?: PlanningBaselineDelayLabels
   /** Publish action label. */
   publishUpdate: string
   /** Immutable history heading. */
@@ -294,6 +302,8 @@ export type PlanningUpdateDetailPaneProps = {
   collaboration?: PlanningUpdateCollaborationController
   /** Canonical evidence choices visible in the selected target scope. */
   evidenceCandidates?: PlanningUpdateEvidenceCandidates
+  /** Records behind the baseline that the composer can attach as evidence. */
+  baselineDelays?: PlanningBaselineDelaysView
 }
 
 /**
@@ -304,6 +314,7 @@ export type PlanningUpdateDetailPaneProps = {
  */
 export function PlanningUpdateDetailPane({
   aiAssistance,
+  baselineDelays,
   collaboration,
   evidenceCandidates,
   hasMoreHistory = false,
@@ -406,6 +417,7 @@ export function PlanningUpdateDetailPane({
         />
         <PlanningStatusUpdateComposer
           aiAssistance={aiAssistance}
+          baselineDelays={baselineDelays}
           evidenceCandidates={evidenceCandidates}
           health={summary.health}
           labels={labels}
@@ -648,8 +660,44 @@ export function PlanningUpdateCadenceEditor({
   )
 }
 
+/** Localized copy of the baseline delay section of the update composer. */
+export type PlanningBaselineDelayLabels = {
+  /** Section heading. */
+  title: string
+  /** What the section lists. */
+  description: string
+  /** Shown while the baselines load. */
+  loading: string
+  /** Shown when nothing is delayed. */
+  none: string
+  /** Shown when a baseline could not be read. */
+  loadError: string
+  /** Retry button label. */
+  retry: string
+  /** Attach button label for a number of records. */
+  attach: (count: number) => string
+  /** Button that removes the attached records. */
+  detach: string
+  /** Status after attaching a number of records. */
+  attached: (count: number) => string
+  /** Note for records left out by the evidence limit. */
+  omitted: (count: number, limit: number) => string
+  /** Delay label for a number of days. */
+  delay: (days: number) => string
+  /** Badge of a record the previous update did not cite. */
+  newSinceLastUpdate: string
+  /** Badge of a record the previous update cited. */
+  reportedBefore: string
+  /** Kind label of a Milestone. */
+  milestone: string
+  /** Kind label of a Work Item. */
+  workItem: string
+}
+
 /** Props for the structured manual update composer. */
 export type PlanningStatusUpdateComposerProps = {
+  /** Records behind the baseline that can be attached as evidence in one action. */
+  baselineDelays?: PlanningBaselineDelaysView
   /** Optional explicit AI generation access for the selected Planning target. */
   aiAssistance?: PlanningStatusUpdateAiAssistance
   /** Current progress captured by the server when the update is published. */
@@ -758,6 +806,7 @@ function createAiPlanningEvidenceSeed(
  */
 export function PlanningStatusUpdateComposer({
   aiAssistance,
+  baselineDelays,
   evidenceCandidates = { planningEntities: [], workItems: [] },
   health,
   initialDraft,
@@ -778,6 +827,13 @@ export function PlanningStatusUpdateComposer({
     useState<PendingAiPlanningDraft>()
   const stagedAiDraftDuringPublishRef = useRef(false)
   const [aiEvidenceSeed, setAiEvidenceSeed] = useState<AiPlanningEvidenceSeed>()
+  const [attachedDelays, setAttachedDelays] = useState<readonly PlanningUpdateEvidence[]>([])
+  // Only records still listed for the selected target count, so switching targets or a reload
+  // never submits evidence from another scope.
+  const listedDelayKeys = new Set(
+    baselineDelays?.status === 'ready' ? baselineDelays.candidates.map((candidate) => candidate.key) : [],
+  )
+  const currentAttachedDelays = attachedDelays.filter((evidence) => listedDelayKeys.has(evidenceKey(evidence)))
   const [aiGenerationReference, setAiGenerationReference] = useState<string>()
   const [formSeed, setFormSeed] = useState<PlanningStatusUpdateFormSeed>({
     draft: initialDraft,
@@ -947,8 +1003,13 @@ export function PlanningStatusUpdateComposer({
             return
           }
 
-          const evidence = readPlanningUpdateEvidence(data, evidenceCandidates)
-          if (!evidence) {
+          const manualEvidence = readPlanningUpdateEvidence(data, evidenceCandidates)
+          if (!manualEvidence) {
+            setFormError(labels.formInvalid)
+            return
+          }
+          const evidence = mergePlanningUpdateEvidence(manualEvidence, currentAttachedDelays)
+          if (evidence.length > PLANNING_UPDATE_EVIDENCE_LIMIT) {
             setFormError(labels.formInvalid)
             return
           }
@@ -976,6 +1037,7 @@ export function PlanningStatusUpdateComposer({
               setIsFormDirty(false)
               setAiEvidenceSeed(undefined)
               setAiGenerationReference(undefined)
+              setAttachedDelays([])
               if (!stagedAiDraftDuringPublishRef.current) setPendingAiDraft(undefined)
               if (wasAiSeeded) {
                 setEvidenceType('none')
@@ -1076,6 +1138,19 @@ export function PlanningStatusUpdateComposer({
           <legend className="text-sm font-semibold text-[var(--workbench-text)]">
             {labels.evidence}
           </legend>
+          {baselineDelays && labels.baselineDelays ? (
+            <PlanningBaselineDelaySection
+              attached={currentAttachedDelays}
+              delays={baselineDelays}
+              disabled={formDisabled}
+              labels={labels.baselineDelays}
+              onChange={(next) => {
+                isFormDirtyRef.current = true
+                setIsFormDirty(true)
+                setAttachedDelays(next)
+              }}
+            />
+          ) : null}
           {aiGenerationReference && aiT ? (
             <p className="border-l-2 border-teal-500 bg-teal-50 px-3 py-2 text-xs font-semibold text-fg-teal-950">
               {aiEvidenceSeed
@@ -1196,6 +1271,106 @@ export function PlanningStatusUpdateComposer({
         </button>
       </form>
     </section>
+  )
+}
+
+/** Props for the baseline delay section of the composer. */
+type PlanningBaselineDelaySectionProps = {
+  /** Load state of the delayed records. */
+  delays: PlanningBaselineDelaysView
+  /** Evidence attached from this section. */
+  attached: readonly PlanningUpdateEvidence[]
+  /** Whether the form is frozen. */
+  disabled: boolean
+  /** Localized copy. */
+  labels: PlanningBaselineDelayLabels
+  /** Replaces the attached evidence. */
+  onChange: (attached: readonly PlanningUpdateEvidence[]) => void
+}
+
+/** Most delayed records the section lists before folding the rest into a count. */
+const BASELINE_DELAY_LIST_LIMIT = 20
+
+/**
+ * Lists the records behind the baseline and attaches all of them as evidence in one action.
+ *
+ * One slot is left for the evidence chosen by hand, so the attached records never push the
+ * update past the server's evidence limit.
+ *
+ * @param props - Delays, attached evidence, and the change callback.
+ * @returns The section.
+ */
+function PlanningBaselineDelaySection({
+  delays,
+  attached,
+  disabled,
+  labels,
+  onChange,
+}: PlanningBaselineDelaySectionProps) {
+  const candidates = delays.status === 'ready' ? delays.candidates : []
+  const attachable = candidates.slice(0, PLANNING_UPDATE_EVIDENCE_LIMIT - 1)
+  const omittedCount = candidates.length - attachable.length
+  return (
+    <div className="grid gap-2 border-l-2 border-amber-500 bg-amber-50 px-3 py-2 text-fg-amber-950" data-testid="planning-update-baseline-delays">
+      <p className="text-sm font-semibold">{labels.title}</p>
+      <p className="text-xs font-medium leading-5">{labels.description}</p>
+      {delays.status === 'loading' ? <p className="text-xs" role="status">{labels.loading}</p> : null}
+      {delays.status === 'error' ? (
+        <div className="flex flex-wrap items-center gap-2" role="alert">
+          <p className="text-xs">{labels.loadError}</p>
+          <button className="workbench-button-secondary min-h-[44px] px-3" onClick={delays.retry} type="button">
+            {labels.retry}
+          </button>
+        </div>
+      ) : null}
+      {delays.status === 'ready' && candidates.length === 0 ? <p className="text-xs">{labels.none}</p> : null}
+      {candidates.length > 0 ? (
+        <ul className="grid gap-1 text-xs">
+          {candidates.slice(0, BASELINE_DELAY_LIST_LIMIT).map((candidate) => (
+            <li className="flex flex-wrap items-center gap-x-2 gap-y-0.5" key={candidate.key}>
+              <span className="font-semibold">{candidate.kind === 'milestone' ? labels.milestone : labels.workItem}</span>
+              <span className="min-w-0 break-words">{candidate.title}</span>
+              <span className="font-semibold text-fg-red-700">{labels.delay(candidate.delayDays)}</span>
+              <span className="rounded border border-amber-300 px-1">
+                {candidate.reportedBefore ? labels.reportedBefore : labels.newSinceLastUpdate}
+              </span>
+            </li>
+          ))}
+          {candidates.length > BASELINE_DELAY_LIST_LIMIT ? (
+            <li>{`+${candidates.length - BASELINE_DELAY_LIST_LIMIT}`}</li>
+          ) : null}
+        </ul>
+      ) : null}
+      {attachable.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {attached.length === 0 ? (
+            <button
+              className="workbench-button-secondary min-h-[44px] px-3"
+              disabled={disabled}
+              onClick={() => onChange(attachable.map((candidate) => candidate.evidence))}
+              type="button"
+            >
+              {labels.attach(attachable.length)}
+            </button>
+          ) : (
+            <>
+              <p className="text-xs font-semibold" role="status">{labels.attached(attached.length)}</p>
+              <button
+                className="workbench-button-secondary min-h-[44px] px-3"
+                disabled={disabled}
+                onClick={() => onChange([])}
+                type="button"
+              >
+                {labels.detach}
+              </button>
+            </>
+          )}
+        </div>
+      ) : null}
+      {omittedCount > 0 ? (
+        <p className="text-xs">{labels.omitted(omittedCount, PLANNING_UPDATE_EVIDENCE_LIMIT - 1)}</p>
+      ) : null}
+    </div>
   )
 }
 

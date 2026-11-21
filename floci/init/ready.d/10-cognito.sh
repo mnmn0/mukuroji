@@ -643,6 +643,25 @@ seed_work_item() {
       *) printf '%s\n' "$put_item_error" >&2; return 1 ;;
     esac
   fi
+
+  # Mirrors createWorkItemMemberIndexRecord (ADR 0038) so the owner finds the seed in Focus.
+  # Seed IDs and member keys are lowercase ASCII without reserved characters, so no encoding applies.
+  if ! put_item_error="$(aws_local dynamodb put-item \
+    --table-name "$WORK_ITEMS_TABLE" \
+    --item "{
+      \"directoryTeamId\": {\"S\": \"$PROJECT_DIRECTORY_ID#member-work-items#$assignee_user_id\"},
+      \"issueId\": {\"S\": \"core-team#$work_item_id\"},
+      \"entryType\": {\"S\": \"work-item-member-index\"},
+      \"schemaVersion\": {\"N\": \"1\"},
+      \"directoryId\": {\"S\": \"$PROJECT_DIRECTORY_ID\"},
+      \"memberKey\": {\"S\": \"$assignee_user_id\"},
+      \"teamId\": {\"S\": \"core-team\"},
+      \"workItemId\": {\"S\": \"$work_item_id\"}
+    }" \
+    2>&1 >/dev/null)"; then
+    printf '%s\n' "$put_item_error" >&2
+    return 1
+  fi
 }
 
 seed_work_item "wireframe" 10 "新しいランディングページのワイヤーフレーム作成" "sato@example.com" "in-progress" "started" "2026-06-03" "high"

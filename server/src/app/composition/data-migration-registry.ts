@@ -1,4 +1,5 @@
 import type { DataMigrationDefinition } from '../../modules/data-migration'
+import { workItemMemberIndexMigration } from '../../modules/work-items'
 
 /**
  * Every migration the CLI and the data migration Lambda can run, in identifier order.
@@ -7,4 +8,6 @@ import type { DataMigrationDefinition } from '../../modules/data-migration'
  * same PR, following `docs/data-migration.md`. Definitions live in the module
  * that owns the table and are only listed here.
  */
-export const dataMigrationRegistry: readonly DataMigrationDefinition[] = []
+export const dataMigrationRegistry: readonly DataMigrationDefinition[] = [
+  workItemMemberIndexMigration,
+]

@@ -35,10 +35,12 @@ export type WorkItemBaselineProjectResult = WorkItemBaselineProject & {
  * A Project is keyed by its owner Team too, because Project IDs may repeat across Teams.
  *
  * @param workItems - Work Items shown.
+ * @param limit - Most Projects to return; a list that must stay complete passes `Infinity`.
  * @returns The Projects whose baselines the list needs.
  */
 export function collectWorkItemBaselineProjects(
   workItems: readonly Pick<CanonicalWorkItem, 'teamId' | 'assignedProjectId'>[],
+  limit: number = WORK_ITEM_BASELINE_PROJECT_LIMIT,
 ): WorkItemBaselineProject[] {
   const projects = new Map<string, WorkItemBaselineProject>()
   for (const workItem of workItems) {
@@ -48,7 +50,7 @@ export function collectWorkItemBaselineProjects(
   }
   return [...projects.entries()]
     .sort(([first], [second]) => first < second ? -1 : first > second ? 1 : 0)
-    .slice(0, WORK_ITEM_BASELINE_PROJECT_LIMIT)
+    .slice(0, limit)
     .map(([, project]) => project)
 }
 

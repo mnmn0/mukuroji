@@ -618,7 +618,7 @@ const enterpriseRoutePermissionRules = [
   },
   {
     method: '*',
-    pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline*',
     permission: 'projects.manage',
   },
   {

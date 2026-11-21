@@ -83,7 +83,7 @@ test('captures a Project baseline and returns only readable entries', async () =
 
   const empty = await request(path)
   expect(empty.status).toBe(200)
-  expect(await empty.json()).toEqual({ teamId: 'core-team', projectId, baseline: null })
+  expect(await empty.json()).toEqual({ teamId: 'core-team', projectId, baseline: null, savedBaselines: [] })
 
   const captured = await request(path, 'POST')
   expect(captured.status).toBe(201)
@@ -144,7 +144,10 @@ test('answers 409 with its code when a capture conflicts', async () => {
       async get() {
         return null
       },
-      async capture() {
+      async getSaved() {
+        return null
+      },
+      async write() {
         throw new ProjectDataError(409, 'ScheduleBaselineConflict', 'The schedule baseline changed.')
       },
     },
@@ -175,4 +178,73 @@ test('refuses a capture by a Project viewer with 403', async () => {
   )
   expect(response.status).toBe(403)
   expect(await response.json()).toMatchObject({ code: 'ScheduleBaselineForbidden' })
+})
+
+/**
+ * Sends an authenticated JSON request.
+ *
+ * @param path - Request path.
+ * @param method - HTTP method.
+ * @param body - JSON body.
+ * @returns The response.
+ */
+function sendJson(path: string, method: string, body: unknown) {
+  return app.request(path, {
+    method,
+    headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+}
+
+test('saves named baselines, reads a saved one, and switches the active one', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  const projectId = base.assignedProjectId
+  if (!projectId) throw new Error('The fake Work Item has no Project.')
+  let schedule = createDefaultDueDateWorkItemSchedule('2026-12-10')
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamHierarchyEntries() {
+        return [entry(base, 'task-1', { schedule })]
+      },
+    }),
+  })
+  const path = `/api/teams/core-team/projects/${projectId}/schedule-baseline`
+
+  expect((await sendJson(path, 'POST', { name: '\u0007' })).status).toBe(400)
+  expect((await sendJson(path, 'POST', { name: 'x'.repeat(81) })).status).toBe(400)
+
+  const first = await sendJson(path, 'POST', { name: '  計画承認  ' })
+  expect(first.status).toBe(201)
+  const firstBody = await first.json() as ProjectScheduleBaselineResponse
+  expect(firstBody.baseline?.name).toBe('計画承認')
+  const firstId = firstBody.activeBaselineId ?? ''
+
+  schedule = createDefaultDueDateWorkItemSchedule('2026-12-20')
+  const second = await request(path, 'POST')
+  const secondBody = await second.json() as ProjectScheduleBaselineResponse
+  expect(secondBody.savedBaselines.map((item) => item.id)).toEqual([secondBody.activeBaselineId ?? '', firstId])
+
+  const old = await request(`${path}?baselineId=${firstId}`)
+  expect(await old.json()).toMatchObject({ baseline: { id: firstId, entries: [{ endDate: '2026-12-10' }] } })
+  expect((await request(`${path}?baselineId=missing`)).status).toBe(404)
+  expect((await request(`${path}?baselineId=bad%20id`)).status).toBe(400)
+
+  const stale = await sendJson(`${path}/active`, 'PUT', { baselineId: firstId, expectedRevision: 1 })
+  expect(stale.status).toBe(409)
+  const switched = await sendJson(`${path}/active`, 'PUT', { baselineId: firstId, expectedRevision: 2 })
+  expect(switched.status).toBe(200)
+  expect(await switched.json()).toMatchObject({ activeBaselineId: firstId, baseline: { revision: 3, name: '計画承認' } })
+  expect(await (await request(path)).json()).toMatchObject({ activeBaselineId: firstId, baseline: { entries: [{ endDate: '2026-12-10' }] } })
+})
+
+test('refuses a switch by a Project viewer with 403', async () => {
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const base = await readBaseIssue()
+  const response = await sendJson(
+    `/api/teams/core-team/projects/${base.assignedProjectId ?? 'missing'}/schedule-baseline/active`,
+    'PUT',
+    { baselineId: 'b1', expectedRevision: 1 },
+  )
+  expect(response.status).toBe(403)
 })

@@ -519,6 +519,39 @@ export function createCanonicalWorkItemTransactItems(tableName: string, director
 }
 
 /**
+ * Creates the Focus member index rows of the demo Work Item owners (ADR 0038).
+ *
+ * The server's `work-item-member-index.ts` builds the same keys; both test suites pin the value
+ * for the `wireframe` seed so that a drift between the two is caught.
+ *
+ * @param tableName - Canonical Work Item table name.
+ * @param directoryId - Canonical workspace directory identifier.
+ * @returns Conditional DynamoDB Put operations, one per demo Work Item.
+ */
+export function createCanonicalWorkItemMemberIndexTransactItems(tableName: string, directoryId: string) {
+  return canonicalWorkItemItems.map(([projectId, workItemId, , , assigneeUserId]) => {
+    const teamId = projectOwnerTeamIds[projectId];
+
+    return {
+      Put: {
+        TableName: tableName,
+        ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
+        Item: {
+          directoryTeamId: { S: `${directoryId}#member-work-items#${assigneeUserId}` },
+          issueId: { S: `${encodeURIComponent(teamId)}#${encodeURIComponent(workItemId)}` },
+          entryType: { S: 'work-item-member-index' },
+          schemaVersion: { N: '1' },
+          directoryId: { S: directoryId },
+          memberKey: { S: assigneeUserId },
+          teamId: { S: teamId },
+          workItemId: { S: workItemId },
+        },
+      },
+    };
+  });
+}
+
+/**
  * Creates the initial Team and Project directory seed transaction.
  *
  * @param tableName - Project directory table name.

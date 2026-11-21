@@ -5,7 +5,10 @@ import {
   createProjectScheduleBaselineEntry,
   deriveWorkItemBaselineEndDelayDays,
   deriveWorkItemScheduleSlip,
+  normalizeProjectScheduleBaselineName,
   parseProjectScheduleBaselineResponse,
+  parseSavedProjectScheduleBaselines,
+  PROJECT_SCHEDULE_BASELINE_MAX_SAVED,
   type WorkItemSchedule,
 } from '../src/index'
 
@@ -76,13 +79,14 @@ describe('schedule baseline', () => {
       teamId: 't',
       projectId: 'p',
       baseline: null,
+      savedBaselines: [],
     })
     const valid = {
       teamId: 't',
       projectId: 'p',
       baseline: { revision: 1, capturedAt: '2026-11-19T00:00:00.000Z', entries: [{ workItemId: 'a', endDate: '2026-12-05' }] },
     }
-    expect(parseProjectScheduleBaselineResponse(valid)).toEqual(valid)
+    expect(parseProjectScheduleBaselineResponse(valid)).toEqual({ ...valid, savedBaselines: [] })
     expect(parseProjectScheduleBaselineResponse({ ...valid, baseline: { ...valid.baseline, revision: 0 } })).toBeUndefined()
     expect(parseProjectScheduleBaselineResponse({
       ...valid,
@@ -97,5 +101,54 @@ describe('schedule baseline', () => {
     for (const capturedAt of ['broken', '2026-11-19', '2026-02-30T00:00:00.000Z', '2026-11-19T00:00:00Z']) {
       expect(parseProjectScheduleBaselineResponse({ ...valid, baseline: { ...valid.baseline, capturedAt } })).toBeUndefined()
     }
+  })
+
+  test('freezes the planned effort and derives the effort change', () => {
+    const schedule = { ...createDefaultDueDateWorkItemSchedule('2026-12-05'), plannedEffortMinutes: 480 }
+    const entry = createProjectScheduleBaselineEntry('a', schedule)
+    expect(entry).toEqual({ workItemId: 'a', endDate: '2026-12-05', plannedEffortMinutes: 480 })
+    expect(deriveWorkItemScheduleSlip(entry, { ...schedule, plannedEffortMinutes: 600 })).toEqual({
+      endSlipDays: 0,
+      effortDeltaMinutes: 120,
+    })
+    // Without an estimate on either side there is no effort change.
+    expect(deriveWorkItemScheduleSlip({ workItemId: 'a', endDate: '2026-12-05' }, schedule)).toEqual({ endSlipDays: 0 })
+  })
+
+  test('validates named baselines and the saved list', () => {
+    const saved = { id: 'b1', name: '計画承認', capturedAt: '2026-11-19T00:00:00.000Z', entryCount: 1 }
+    const valid = {
+      teamId: 't',
+      projectId: 'p',
+      activeBaselineId: 'b1',
+      savedBaselines: [saved],
+      baseline: {
+        revision: 1,
+        id: 'b1',
+        name: '計画承認',
+        capturedAt: '2026-11-19T00:00:00.000Z',
+        entries: [{ workItemId: 'a', endDate: '2026-12-05', plannedEffortMinutes: 60 }],
+      },
+    }
+    expect(parseProjectScheduleBaselineResponse(valid)).toEqual(valid)
+    expect(parseProjectScheduleBaselineResponse({ ...valid, savedBaselines: [saved, saved] })).toBeUndefined()
+    expect(parseProjectScheduleBaselineResponse({ ...valid, activeBaselineId: 'bad id' })).toBeUndefined()
+    expect(parseProjectScheduleBaselineResponse({ ...valid, baseline: { ...valid.baseline, name: ' padded ' } })).toBeUndefined()
+    expect(parseProjectScheduleBaselineResponse({
+      ...valid,
+      baseline: { ...valid.baseline, entries: [{ workItemId: 'a', plannedEffortMinutes: -1 }] },
+    })).toBeUndefined()
+    expect(parseSavedProjectScheduleBaselines(
+      Array.from({ length: PROJECT_SCHEDULE_BASELINE_MAX_SAVED + 2 }, (_, index) => ({ ...saved, id: `b${index}` })),
+    )).toBeUndefined()
+  })
+
+  test('normalizes requested names', () => {
+    expect(normalizeProjectScheduleBaselineName(undefined)).toBeUndefined()
+    expect(normalizeProjectScheduleBaselineName('   ')).toBeUndefined()
+    expect(normalizeProjectScheduleBaselineName('  Q4 承認 ')).toBe('Q4 承認')
+    expect(normalizeProjectScheduleBaselineName('a'.repeat(81))).toBeNull()
+    expect(normalizeProjectScheduleBaselineName('line\nbreak')).toBeNull()
+    expect(normalizeProjectScheduleBaselineName(3)).toBeNull()
   })
 })
