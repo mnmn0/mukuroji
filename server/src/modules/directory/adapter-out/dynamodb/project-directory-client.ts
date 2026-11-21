@@ -2492,11 +2492,11 @@ export class DynamoDbProjectDirectoryClient {
           }
 
           if (
-            isTransactionConditionalFailureAt(error, projectIdReservationIndex) &&
+            isProjectIdReservationTakenAt(error, projectIdReservationIndex) &&
             idempotencyResourceId === undefined &&
             attempt < PROJECT_ID_RESERVATION_MAX_ATTEMPTS
           ) {
-            // Another Team's concurrent creation, or an earlier one, owns this ID; pick another.
+            // Another Team's creation owns this ID, or is committing it right now; pick another.
             unavailableProjectIds.add(projectId)
             continue
           }
@@ -4717,6 +4717,26 @@ function isTransactionConditionalFailureAt(error: unknown, index: number) {
   return Array.isArray(reasons) &&
     isRecord(reasons[index]) &&
     reasons[index].Code === 'ConditionalCheckFailed'
+}
+
+/**
+ * Checks whether a Project creation was canceled because its Project ID reservation is taken,
+ * either committed by an earlier creation or held by a concurrent transaction.
+ *
+ * @param error - Error thrown by the creation transaction.
+ * @param index - Position of the reservation Put in the transaction.
+ * @returns True when the reservation, and not only another item, blocked the creation.
+ */
+function isProjectIdReservationTakenAt(error: unknown, index: number) {
+  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+
+  const reasons = error.CancellationReasons
+  const reason = Array.isArray(reasons) ? reasons[index] : undefined
+
+  return isRecord(reason) &&
+    (reason.Code === 'ConditionalCheckFailed' || reason.Code === 'TransactionConflict')
 }
 
 function requireDynamoDbTransactionCapacity(

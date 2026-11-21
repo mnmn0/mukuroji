@@ -22,7 +22,8 @@ Project の ID は作成時に名前から作る（ASCII の名前なら slug、
   - sort key `entryKey`: `PROJECT#<projectId>`
   - 属性: `entryType = project-id`、`workspaceId`、`projectId`、`createdAt`
   - `attribute_not_exists` 付きの Put にする。Project 行・作成者のメンバー行と同じ transaction で commit する。
-- 予約 row の条件だけで失敗したら（別の Team が同じ ID を先に取った）、directory を強整合で読み直し、
+- 予約 row が理由で失敗したら（別の Team が同じ ID を先に取った `ConditionalCheckFailed`、または同時に書いている
+  `TransactionConflict`）、directory を強整合で読み直し、
   その ID を除いて別の ID を選び、最大 3 回まで作り直す。3 回とも取れなければ 409 を返す。
 - 冪等キーから ID が決まる作成（template の適用など）は ID を変えられないので、作り直さずに 409 を返す。
   同じ要求の再送は既存の Project を返す既存の経路で扱う。

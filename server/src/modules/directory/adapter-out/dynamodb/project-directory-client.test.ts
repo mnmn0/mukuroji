@@ -963,11 +963,12 @@ test('DynamoDB directory client stops retrying a Project ID after repeated reser
     nameEn: 'Core',
     expanded: true,
   }
+  let conflictCode = 'ConditionalCheckFailed'
   const reservationConflict = () => Object.assign(new Error('Transaction was canceled.'), {
     name: 'TransactionCanceledException',
     CancellationReasons: [
       ...Array.from({ length: 6 }, () => ({ Code: 'None' })),
-      { Code: 'ConditionalCheckFailed' },
+      { Code: conflictCode },
     ],
   })
   const documentClient = {
@@ -996,6 +997,17 @@ test('DynamoDB directory client stops retrying a Project ID after repeated reser
     { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
   )).rejects.toMatchObject({ status: 409 })
   expect(transactions).toBe(3)
+
+  transactions = 0
+  conflictCode = 'TransactionConflict'
+  await expect(client.createProject(
+    'workspace-1',
+    'core-team',
+    { name: 'Web' },
+    { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
+  )).rejects.toMatchObject({ code: 'TransactionCanceledException' })
+  expect(transactions).toBe(3)
+  conflictCode = 'ConditionalCheckFailed'
 
   transactions = 0
   await expect(client.createProject(
