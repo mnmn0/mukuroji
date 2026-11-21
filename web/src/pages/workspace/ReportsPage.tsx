@@ -406,6 +406,8 @@ export function ReportsPage() {
   useEffect(() => {
     if (
       searchParamString ||
+      // Wait for the viewer and their Teams so the committed default carries the Team scope.
+      !user ||
       isReportsLoading ||
       isProjectDirectoryLoading ||
       reports.length > 0 ||
@@ -433,6 +435,7 @@ export function ReportsPage() {
     isReportsLoading,
     reports.length,
     searchParamString,
+    user,
   ])
 
   const resetFeedback = () => {
