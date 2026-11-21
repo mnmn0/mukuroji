@@ -31,6 +31,7 @@ function startFakeApi() {
   const notes: { id: string; actorUserId: string; body: string; createdAt: string }[] = []
   const commentBodies: Record<string, unknown>[] = []
   const reportBodies: Record<string, unknown>[] = []
+  const createBodies: Record<string, unknown>[] = []
   const seenKeys: string[] = []
   const runs: FakeRun[] = []
   /** Builds an Agent Run problem response. */
@@ -54,7 +55,7 @@ function startFakeApi() {
     // Liveness is public, so the MCP must read it without the API credential.
     if (new URL(request.url).pathname === '/api/health') {
       if (request.headers.get('Authorization') !== null) return Response.json({}, { status: 400 })
-      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 2, minimumApiRevision: 1 } })
+      return Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 3, minimumApiRevision: 1 } })
     }
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     const url = new URL(request.url)
@@ -146,6 +147,12 @@ function startFakeApi() {
       }
       return Response.json({ items: notes, hasMore: false })
     }
+    if (url.pathname === '/api/v1/work-items' && request.method === 'POST') {
+      const body: unknown = await request.json()
+      if (!body || typeof body !== 'object') return Response.json({}, { status: 400 })
+      createBodies.push({ ...body })
+      return Response.json({ ...task, id: 'created', revision: 1 }, { status: 201 })
+    }
     if (request.method === 'PATCH') {
       const body: unknown = await request.json()
       if (!body || typeof body !== 'object' || !('expectedRevision' in body) || body.expectedRevision !== task.revision ||
@@ -161,6 +168,7 @@ function startFakeApi() {
   return {
     api,
     commentBodies,
+    createBodies,
     reportBodies,
     seenKeys,
     /** Releases the active run and moves the task back to Todo, as a person would. */
@@ -241,7 +249,7 @@ test('real stdio clients discover tools and run the task lifecycle with an Agent
     expect((await client.listTools()).tools).toHaveLength(20)
     expect((await call(client, 'get_configuration')).content).toMatchObject({ data: {
       runtime: 'claude-code', agentSettings: { leaseMinutes: 30, readyStatusIds: [] }, brief: 'Run bun test.',
-      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 2, serverCompatibility: { status: 'compatible', server: { apiRevision: 2, minimumApiRevision: 1 } } },
+      mcp: { version: CODING_AGENT_MCP_VERSION, apiRevision: 3, serverCompatibility: { status: 'compatible', server: { apiRevision: 3, minimumApiRevision: 1 } } },
     } })
     expect(client.getServerVersion()).toMatchObject({ name: 'mukuroji-tasks', version: CODING_AGENT_MCP_VERSION })
     expect((await call(client, 'get_next_task')).content).toMatchObject({ data: { action: 'start', task: { id: 'task' }, ownRuns: [] } })
@@ -315,6 +323,28 @@ test('two instances of one member never share a claim, and a release lets the ot
   }
 }, 30_000)
 
+test('create_task leaves the schedule to the server so the Workspace working calendar applies', async () => {
+  const fake = startFakeApi()
+  let client: Client | undefined
+  try {
+    client = await connect(fake.api.port, 'legacy', { MUKUROJI_MCP_RUNTIME: 'claude-code', MUKUROJI_MCP_INSTANCE_ID: 'instance-a' })
+    for (const dueDate of ['2026-12-01', undefined]) {
+      const created = await call(client, 'create_task', {
+        title: 'Follow-up', idempotencyKey: crypto.randomUUID(), ...(dueDate ? { dueDate } : {}),
+      })
+      expect(created.isError).toBe(false)
+    }
+
+    expect(fake.createBodies).toHaveLength(2)
+    expect(fake.createBodies[0]).toMatchObject({ dueDate: '2026-12-01', assigneeUserId: 'agent', teamId: 'team' })
+    for (const body of fake.createBodies) expect(body).not.toHaveProperty('schedule')
+    expect(fake.createBodies[1]).not.toHaveProperty('dueDate')
+  } finally {
+    await client?.close()
+    await fake.api.stop(true)
+  }
+}, 30_000)
+
 test('the distributable Node bundle serves the same tools over stdio', async () => {
   // Runs the script behind `bun run mcp:build`, which produces the distributable bundle.
   const outdir = await mkdtemp(join(tmpdir(), 'mukuroji-mcp-bundle-'))
@@ -360,7 +390,7 @@ test('reuses a known server compatibility and retries an unknown one', async () 
     healthRequests += 1
     // The first read fails as a transient outage would; later reads report the range.
     return healthRequests === 1 ? Response.json({}, { status: 503 })
-      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 2, minimumApiRevision: 1 } })
+      : Response.json({ ok: true, status: 'alive', codingAgentMcp: { apiRevision: 3, minimumApiRevision: 1 } })
   } })
   try {
     const factory = composeCodingAgentMcp({ MUKUROJI_MCP_URL: `http://127.0.0.1:${api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',

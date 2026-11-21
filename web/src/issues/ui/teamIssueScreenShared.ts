@@ -1,5 +1,6 @@
 import type {
   PlanningSnapshot,
+  WorkItemScheduleCalendarPolicy,
   ResolvedWorkItemConfiguration,
   TeamWorkItemHierarchyNode,
   TaskViewDefinition,
@@ -182,6 +183,15 @@ export type TeamIssueScreenProps = {
   relations?: readonly WorkItemRelation[]
   /** Authoritative Planning snapshot used by every canonical dependency surface. */
   planningSnapshot?: PlanningSnapshot
+  /**
+   * Workspace working calendar: new Work Items keep it and the Gantt shades its days off. The
+   * default calendar is used and nothing is shaded when it is omitted.
+   */
+  workingCalendar?: WorkItemScheduleCalendarPolicy
+  /** Shown when the Workspace working calendar could not be read, so the default is in use. */
+  workingCalendarErrorMessage?: string
+  /** Reads the Workspace working calendar again after a failure. */
+  onRetryWorkingCalendar?: () => void
   /** Whether canonical Planning dependency data is loading. */
   isPlanningLoading?: boolean
   /** Planning dependency load error shown without hiding Team Issues. */

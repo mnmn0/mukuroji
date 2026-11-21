@@ -15,7 +15,8 @@ import {
   DynamoDbWeeklyReportStore,
   InMemoryWeeklyReportStore,
 } from '../../modules/weekly-reports'
-import { AI_ASSISTANCE_SCHEMA_VERSION } from '@mukuroji/contracts'
+import { AI_ASSISTANCE_SCHEMA_VERSION, listJapanesePublicHolidays } from '@mukuroji/contracts'
+import { createProductionJapanesePublicHolidayDates } from './japanese-public-holidays'
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
 import {
   createCanonicalPublicAgentRunService,
@@ -552,6 +553,7 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
     tenantAdministration,
+    nationalHolidays: createProductionJapanesePublicHolidayDates(),
     tenantExportDownload: createProductionTenantExportDownloadClient(),
     tenantLifecycleEnforcement: tenantAdministration,
   }
@@ -1646,12 +1648,33 @@ export function createTestAppDependencies(): AppDependencies {
       },
     }),
   }
+  // Work Item creation reads the Workspace working calendar; tests without a tenant table read it
+  // as never saved, which gives the default calendar.
+  const tenantAdministration = new Proxy(production.workspace.tenantAdministration, {
+    /**
+     * Answers `getProfile` as never saved and forwards every other member.
+     *
+     * @param target - Production tenant administration client.
+     * @param property - Member being read.
+     * @param receiver - Proxy the member is read through.
+     * @returns The member to use.
+     */
+    get(target, property, receiver) {
+      if (property === 'getProfile') {
+        return async () => undefined
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
   const timeTrackingService = new TimeTrackingService(new InMemoryTimeTrackingRepository())
   return {
     ...production,
     operational: createTestOperationalDependencies(),
     workspace: {
       ...production.workspace,
+      tenantAdministration,
+      // Tests have no synced list, so the bundled national holidays are used.
+      nationalHolidays: { listDates: async () => listJapanesePublicHolidays().map((holiday) => holiday.date) },
       customers: new InMemoryCustomerClient(),
       tenantLifecycleEnforcement: createTestTenantLifecycleEnforcement(),
     },

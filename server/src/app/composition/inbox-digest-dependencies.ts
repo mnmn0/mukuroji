@@ -28,7 +28,7 @@ export function createInboxDigestAppDependencies(planningTable: string, enterpri
       },
       customers: unavailable(), auditEvents: unavailable(),
       enterpriseSessionActivity: unavailable(), enterpriseIdentityProviderConnectionTester: unsupported,
-      tenantAdministration: unavailable(), tenantExportDownload: unavailable(), tenantLifecycleEnforcement: unavailable(),
+      tenantAdministration: unavailable(), nationalHolidays: unavailable(), tenantExportDownload: unavailable(), tenantLifecycleEnforcement: unavailable(),
     },
     workItems: {
       planning: new DynamoDbPlanningClient(planningTable, client, undefined, false),

@@ -8,6 +8,7 @@ import type {
   CreateAutomationTemplateInput,
   UpdateAutomationRuleInput,
   UpdateAutomationTemplateInput,
+  WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 
 /** Persistence capability required by Rule and Template use cases. */
@@ -99,13 +100,18 @@ export interface AutomationRuleTemplatePort<TCompletionMutation = unknown> {
     templateId: string,
     expectedRevision: number,
   ): Promise<void>
-  /** Reserves a pinned template-application receipt. */
+  /**
+   * Reserves a pinned template-application receipt. A new receipt of a Project template keeps the
+   * policy `readCalendarPolicy` returns; a replay returns the receipt with the policy it already
+   * pinned without calling it, so a failed calendar read never blocks a replay.
+   */
   reserveTemplateApplication(
     workspaceId: string,
     actorId: string,
     templateId: string,
     target: AutomationTemplateApplicationTarget,
     idempotencyKey: string,
+    readCalendarPolicy?: () => Promise<WorkItemScheduleCalendarPolicy>,
   ): Promise<AutomationTemplateApplication>
   /** Reads a template-application receipt. */
   getTemplateApplication(

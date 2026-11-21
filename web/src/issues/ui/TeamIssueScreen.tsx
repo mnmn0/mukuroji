@@ -208,6 +208,9 @@ export function TeamIssueScreen({
   onUpdateScheduleDependency,
   planningErrorMessage,
   planningSnapshot,
+  workingCalendar,
+  workingCalendarErrorMessage,
+  onRetryWorkingCalendar,
   createIssueProjects,
   relations = [],
   resolvedConfiguration,
@@ -1465,6 +1468,7 @@ export function TeamIssueScreen({
                   <CreateIssuePanel
                     key={`create-issue-${createWorkItemTypeId ?? ''}-${createWorkflowStatusId ?? ''}-${createDuplicateDraft?.sourceWorkItemId ?? ''}`}
                     assigneeOptions={assigneeOptions}
+                    calendarPolicy={workingCalendar}
                     canCreateUnassignedIssue={canCreateUnassignedIssue}
                     configuration={configuration}
                     duplicateDraft={createDuplicateDraft}
@@ -1583,6 +1587,20 @@ export function TeamIssueScreen({
                     {issueErrorMessage}
                   </p>
                 ) : null}
+                {workingCalendarErrorMessage ? (
+                  <div
+                    className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-warning-border)] bg-[var(--workbench-warning-surface)] px-4 py-3"
+                    data-testid="team-issue-workspace-calendar-error"
+                    role="alert"
+                  >
+                    <p className="text-sm font-semibold text-[var(--workbench-warning)]">{workingCalendarErrorMessage}</p>
+                    {onRetryWorkingCalendar ? (
+                      <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetryWorkingCalendar} type="button">
+                        {t('tasks.workspaceCalendar.retry')}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
                 {planningErrorMessage ? (
                   <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
                     <p className="text-sm font-bold text-fg-red-700">{planningErrorMessage}</p>
@@ -1698,6 +1716,7 @@ export function TeamIssueScreen({
                       planningSnapshot={planningSnapshot}
                       t={t}
                       tasks={visibleIssues}
+                      workingCalendar={workingCalendar}
                     />
                   ) : (
                     <IssueBoard

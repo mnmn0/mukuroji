@@ -4,8 +4,6 @@ import {
   AGENT_RUN_ARTIFACT_URL_PATTERN,
   AGENT_RUN_REPORT_LINE_PATTERN,
   AGENT_RUN_REPORT_MESSAGE_PATTERN,
-  createDefaultDueDateWorkItemSchedule,
-  createDefaultUnscheduledWorkItemSchedule,
   isAgentRunArtifactUrl,
 } from '@mukuroji/contracts'
 import { createAgentTasks, type AgentTaskScope } from '../../application/agent-tasks'
@@ -127,7 +125,8 @@ export function createCodingAgentMcpServer(
     }), annotations: writeAnnotations,
   }, ({ idempotencyKey, dueDate, ...input }) => result(() => tasks.create({
     ...input, assigneeUserId: scope.assigneeUserId,
-    schedule: dueDate ? createDefaultDueDateWorkItemSchedule(dueDate) : createDefaultUnscheduledWorkItemSchedule(),
+    // Without a schedule the server uses the Workspace working calendar, as the Web does.
+    ...(dueDate ? { dueDate } : {}),
   }, idempotencyKey)))
   server.registerTool('update_task', {
     description: 'Update assigned task title, description, priority, custom fields, estimate (plannedEffortMinutes), remaining effort, or progress percent with revision conflict protection, and mark acceptance criteria met or unmet by ID. Description replaces the full text; use report_progress to append notes. Only people add, remove, or reword acceptance criteria.',

@@ -2,6 +2,7 @@ import {
   type CanonicalWorkItem,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ResolvedWorkItemConfiguration,
+  type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import { Fragment, useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
@@ -90,6 +91,8 @@ export type MyTasksWorkspaceViewProps = {
   onViewModeChange?: (mode: MyTasksViewMode) => void
   /** Hierarchy shown as an outline by the Gantt chart. */
   ganttOutline?: TaskGanttOutline
+  /** Workspace working calendar whose days off the Gantt shades; nothing is shaded when omitted. */
+  workingCalendar?: WorkItemScheduleCalendarPolicy
   /** Month the calendar shows, in `YYYY-MM` form; the view keeps its own month when omitted. */
   calendarMonth?: string
   /** Moves the calendar to another month, together with `calendarMonth`. */
@@ -133,6 +136,7 @@ export function MyTasksWorkspaceView({
   viewMode = 'board',
   onViewModeChange,
   ganttOutline,
+  workingCalendar,
   calendarMonth: controlledCalendarMonth,
   onCalendarMonthChange,
   outlineNotice,
@@ -366,6 +370,7 @@ export function MyTasksWorkspaceView({
           outline={ganttOutline}
           t={t}
           tasks={ganttTasks}
+          workingCalendar={workingCalendar}
         />
       </div>
     )
