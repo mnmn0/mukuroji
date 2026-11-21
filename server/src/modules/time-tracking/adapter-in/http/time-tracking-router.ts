@@ -9,6 +9,7 @@ import {
 import {
   TimeTrackingError,
   type CreateTimeEntryInput,
+  type TimeTrackingAuthorizationConditionCheck,
   type TimeTrackingReportInput,
   type TimeTrackingService,
 } from '../../time-tracking'
@@ -46,6 +47,14 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
   verifyProject(principal: Principal, teamId: string, projectId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<void>
   /** Verifies that a referenced Work Item belongs to the selected Team. */
   verifyWorkItem(principal: Principal, teamId: string, workItemId: string, minimum?: 'viewer' | 'member' | 'manager'): Promise<string | undefined>
+  /**
+   * Builds read-only checks on the caller's authorization rows, committed with a delete so a
+   * member whose access was removed after the route's check cannot delete.
+   *
+   * @param principal - Entry owner the route authorized.
+   * @returns Transaction condition checks; empty when the deployment has none to fence.
+   */
+  createAuthorizationConditionChecks(principal: Principal): readonly TimeTrackingAuthorizationConditionCheck[]
   /** Returns the application service bound to the current app. */
   getTimeTracking(): TimeTrackingService
   /** Safely parses a JSON request body. */
@@ -213,6 +222,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         actorUserId: principal.userKey,
         expectedRevision,
         ...(current ? { authorizedRevision: current.revision } : {}),
+        authorizationConditionChecks: dependencies.createAuthorizationConditionChecks(principal),
         ...(idempotencyKey ? { idempotencyKey } : {}),
       })
       return context.body(null, 204)

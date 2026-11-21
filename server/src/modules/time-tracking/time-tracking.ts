@@ -32,6 +32,9 @@ import {
   type AuditTransactWriteItem,
 } from '../audit'
 
+/** Transaction condition check on a caller authorization row, built by the HTTP composition. */
+export type TimeTrackingAuthorizationConditionCheck = AuditTransactWriteItem
+
 /** Decision returned by the shared idempotency receipt store. */
 export type TimeTrackingIdempotencyDecision =
   | { status: 'reserved'; reservationId: string }
@@ -264,6 +267,12 @@ export type DeleteTimeEntryInput = {
    * expected revision differs is rejected as a conflict. Excluded from idempotency fingerprints.
    */
   authorizedRevision?: number
+  /**
+   * Read-only checks on the caller's authorization rows, committed with the delete so a member
+   * whose access was removed after the route's check cannot delete. Excluded from idempotency
+   * fingerprints.
+   */
+  authorizationConditionChecks?: readonly TimeTrackingAuthorizationConditionCheck[]
   /** Optional client key used to make the deletion and its audit idempotent across retries. */
   idempotencyKey?: string
 }
@@ -536,7 +545,8 @@ export interface TimeTrackingRepository {
   /**
    * Deletes a draft or rejected entry when it is still at the expected revision, together with
    * its audit event and idempotency receipt where supported, and while every month in
-   * `periodGuard` keeps the close state it was validated against. Its history records are kept.
+   * `periodGuard` keeps the close state it was validated against and every
+   * `authorizationChecks` row still holds. Its history records are kept.
    */
   deleteEntry(
     entry: TimeEntry,
@@ -544,6 +554,7 @@ export interface TimeTrackingRepository {
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
     periodGuard?: TimePeriodGuard,
+    authorizationChecks?: readonly TimeTrackingAuthorizationConditionCheck[],
   ): Promise<void>
   /** Saves an immutable lifecycle history record. */
   saveHistory(workspaceId: string, teamId: string, history: TimeEntryHistory): Promise<void>
@@ -917,7 +928,14 @@ export class TimeTrackingService {
     })
     const result: DeletedTimeEntry = { entryId: current.id, deleted: true }
     const idempotencyPut = completion ? await completion(result) : undefined
-    await this.repository.deleteEntry(current, current.revision, auditPut, idempotencyPut, periodGuard)
+    await this.repository.deleteEntry(
+      current,
+      current.revision,
+      auditPut,
+      idempotencyPut,
+      periodGuard,
+      input.authorizationConditionChecks,
+    )
     return result
   }
 
@@ -1751,6 +1769,7 @@ export class InMemoryTimeTrackingRepository implements TimeTrackingRepository {
     _auditPut?: AuditTransactWriteItem,
     _idempotencyPut?: AuditTransactWriteItem,
     periodGuard?: TimePeriodGuard,
+    _authorizationChecks?: readonly TimeTrackingAuthorizationConditionCheck[],
   ) {
     this.requirePeriodGuard(periodGuard)
     const key = memoryEntryKey(entry.workspaceId, entry.teamId, entry.id)
@@ -2010,6 +2029,7 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
     auditPut?: AuditTransactWriteItem,
     idempotencyPut?: AuditTransactWriteItem,
     periodGuard?: TimePeriodGuard,
+    authorizationChecks: readonly TimeTrackingAuthorizationConditionCheck[] = [],
   ) {
     const guardChecks = createPeriodGuardChecks(this.tableName, periodGuard)
     try {
@@ -2029,12 +2049,20 @@ export class DynamoDbTimeTrackingRepository implements TimeTrackingRepository {
               },
             },
           },
+          ...authorizationChecks,
           ...(auditPut ? [auditPut] : []),
           ...(idempotencyPut ? [idempotencyPut] : []),
         ],
       }))
     } catch (error) {
       if (isPeriodGuardFailure(error, guardChecks.length)) throw periodGuardError()
+      if (isAuthorizationCheckOnlyFailure(error, guardChecks.length + 1, authorizationChecks.length)) {
+        throw new TimeTrackingError(
+          409,
+          'TimeEntryAuthorizationChanged',
+          'Your access to this Team changed before the entry was deleted. Reload and try again.',
+        )
+      }
       throw mapConditionalWriteError(error, 'TimeEntryRevisionConflict', 'The time entry was changed by another request.')
     }
   }
@@ -3495,6 +3523,23 @@ function isPeriodGuardFailure(error: unknown, guardCount: number): boolean {
   return reasons.slice(0, guardCount).some((reason) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed')
 }
 
+/**
+ * Returns whether a transaction was cancelled only by the caller authorization checks, and not by
+ * an earlier item such as the entry's own revision condition.
+ *
+ * @param error - Error thrown by the transaction.
+ * @param start - Index of the first authorization check.
+ * @param count - Number of authorization checks.
+ * @returns True when an authorization check failed and no item before them did.
+ */
+function isAuthorizationCheckOnlyFailure(error: unknown, start: number, count: number): boolean {
+  if (count === 0 || !isRecord(error) || error.name !== 'TransactionCanceledException') return false
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons)) return false
+  const failed = (reason: unknown) => isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
+  return reasons.slice(start, start + count).some(failed) && !reasons.slice(0, start).some(failed)
+}
+
 /** Creates the error for a write whose month was closed or reopened after validation. */
 function periodGuardError(): TimeTrackingError {
   return new TimeTrackingError(409, 'TimePeriodClosed', 'A month this entry touches was closed or reopened while saving. Reload and try again.')
@@ -3523,6 +3568,7 @@ const IDEMPOTENCY_FINGERPRINT_EXCLUDED_KEYS: ReadonlySet<string> = new Set([
   'canManageRates',
   'canApprove',
   'authorizedRevision',
+  'authorizationConditionChecks',
 ])
 
 /** Creates a stable request fingerprint while excluding the idempotency key itself. */

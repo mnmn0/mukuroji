@@ -63,6 +63,17 @@ function createDocumentClient(
   return client
 }
 
+/** Stand-in for the owner's Workspace membership check that the HTTP composition builds. */
+const ownerMembershipCheck = {
+  ConditionCheck: {
+    TableName: 'workspace-access-table',
+    Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#member-1' },
+    ConditionExpression: '#entryType = :memberEntryType AND #status = :active AND #version = :expectedVersion',
+    ExpressionAttributeNames: { '#entryType': 'entryType', '#status': 'status', '#version': 'version' },
+    ExpressionAttributeValues: { ':memberEntryType': 'workspace-member', ':active': 'active', ':expectedVersion': 3 },
+  },
+}
+
 describe('DynamoDbTimeTrackingRepository', () => {
   test('uses the team date index for bounded entry queries', async () => {
     const entry = createEntry('visible-project')
@@ -207,14 +218,15 @@ describe('DynamoDbTimeTrackingRepository', () => {
       entryId: entry.id,
       actorUserId: 'member-1',
       expectedRevision: 1,
+      authorizationConditionChecks: [ownerMembershipCheck],
     })).resolves.toEqual({ entryId: entry.id, deleted: true })
 
     // The closed months are read before the delete, and the entry's open month is rechecked in it.
     expect(commands[1]?.input.ExpressionAttributeValues).toMatchObject({ ':prefix': 'TIME_CLOSE#team-1#' })
     const transactionItems = commands[2]?.input.TransactItems
     if (!Array.isArray(transactionItems)) throw new Error('Expected transaction items.')
-    expect(transactionItems.length).toBeGreaterThanOrEqual(3)
-    const guardCount = transactionItems.length - 2
+    expect(transactionItems.length).toBeGreaterThanOrEqual(4)
+    const guardCount = transactionItems.length - 3
     for (const check of transactionItems.slice(0, guardCount)) {
       expect(check).toMatchObject({ ConditionCheck: { ConditionExpression: 'attribute_not_exists(recordKey)' } })
     }
@@ -226,10 +238,51 @@ describe('DynamoDbTimeTrackingRepository', () => {
         ConditionExpression: 'revision = :expectedRevision AND #status IN (:draft, :rejected)',
       },
     })
-    const audit = JSON.stringify(transactionItems[guardCount + 1])
+    // The owner's membership is rechecked in the same transaction, so a removed member cannot delete.
+    expect(transactionItems[guardCount + 1]).toEqual(ownerMembershipCheck)
+    const audit = JSON.stringify(transactionItems[guardCount + 2])
     expect(audit).toContain('audit-table')
     expect(audit).toContain('time-entry.deleted')
     expect(audit).not.toContain('hourlyRateMinor')
+  })
+
+  test('reports a delete cancelled by the owner membership check as an authorization change', async () => {
+    const entry = createEntry('project-1')
+    /** Builds a client whose delete transaction fails with the given cancellation reasons. */
+    const createFailingClient = (reasons: readonly string[]) => {
+      const client = DynamoDBDocumentClient.from(new DynamoDBClient({}))
+      const responses: unknown[] = [{ Item: { ...entry, recordKey: `TIME_ENTRY#team-1#${entry.id}` } }, { Items: [] }]
+      Object.defineProperty(client, 'send', {
+        configurable: true,
+        value: async (): Promise<unknown> => {
+          if (responses.length > 0) return responses.shift()
+          throw Object.assign(new Error('Transaction cancelled'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: reasons.map((Code) => ({ Code })),
+          })
+        },
+      })
+      return client
+    }
+    /** Deletes the entry through a client that fails with the given reasons. */
+    const remove = (reasons: readonly string[]) => new TimeTrackingService(
+      new DynamoDbTimeTrackingRepository('analytics-table', createFailingClient(reasons)),
+      { now: () => new Date('2026-08-02T12:00:00.000Z'), createId: () => 'id-1' },
+    ).deleteEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: entry.id,
+      actorUserId: 'member-1',
+      expectedRevision: 1,
+      authorizationConditionChecks: [ownerMembershipCheck],
+    })
+
+    // Items: the open-month guard, the delete, then the membership check.
+    await expect(remove(['None', 'None', 'ConditionalCheckFailed']))
+      .rejects.toMatchObject({ status: 409, code: 'TimeEntryAuthorizationChanged' })
+    // A changed entry still reports a revision conflict even if the membership also moved.
+    await expect(remove(['None', 'ConditionalCheckFailed', 'ConditionalCheckFailed']))
+      .rejects.toMatchObject({ status: 409, code: 'TimeEntryRevisionConflict' })
   })
 
   test('refuses a stored entry with neither a Work Item nor a category', async () => {

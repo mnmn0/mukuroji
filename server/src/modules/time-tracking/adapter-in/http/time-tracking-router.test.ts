@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import { createTimeTrackingRouter } from './time-tracking-router'
 import {
   InMemoryTimeTrackingRepository,
@@ -72,6 +72,7 @@ function createFixture(canManageRates = false, idempotency?: TimeTrackingIdempot
     getManagedProjectIds: async () => undefined,
     verifyProject: async () => {},
     verifyWorkItem: async () => undefined,
+    createAuthorizationConditionChecks: () => [],
     getTimeTracking: () => service,
     readJson: async (request) => await request.json(),
     mapError: (context, error) => {
@@ -459,7 +460,41 @@ describe('createTimeTrackingRouter', () => {
     await requestAs(fixture.router, 'alice', 'POST', `/api/teams/team-1/time-entries/${rejected.id}/reject`, { expectedRevision: 2, reason: 'Duplicate' })
     expect((await remove('bob', rejected.id, 3)).status).toBe(204)
   })
+
+  test('commits the owner authorization checks with the delete', async () => {
+    const fixture = createProjectFixture()
+    const draft = await createDraft(fixture.router, 'bob', 'work-item-p1')
+    const deleteEntry = spyOn(fixture.service, 'deleteEntry')
+
+    const response = await requestAs(
+      fixture.router,
+      'bob',
+      'DELETE',
+      `/api/teams/team-1/time-entries/${draft.id}?expectedRevision=${draft.revision}`,
+    )
+
+    expect(response.status).toBe(204)
+    expect(deleteEntry).toHaveBeenCalledWith(expect.objectContaining({
+      authorizationConditionChecks: [authorizationCheckFor('bob')],
+    }))
+  })
 })
+
+/**
+ * Builds a stand-in authorization check that names the member it fences.
+ *
+ * @param userKey - Fixture user the check belongs to.
+ * @returns A transaction condition check item.
+ */
+function authorizationCheckFor(userKey: string) {
+  return {
+    ConditionCheck: {
+      TableName: 'workspace-access-table',
+      Key: { workspaceId: 'workspace-1', recordKey: `MEMBER#${userKey}` },
+      ConditionExpression: 'attribute_exists(recordKey)',
+    },
+  }
+}
 
 /** Project role held by a fixture user, keyed by Project ID. */
 type FixtureProjectRoles = Record<string, 'viewer' | 'member' | 'manager'>
@@ -524,6 +559,7 @@ function createProjectFixture() {
       if (!projectsWith(principal.userKey, minimum).has(projectId)) throw deny()
       return projectId
     },
+    createAuthorizationConditionChecks: (principal) => [authorizationCheckFor(principal.userKey)],
     getTimeTracking: () => service,
     readJson: async (request) => await request.json(),
     mapError: (context, error) => {
