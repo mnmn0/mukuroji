@@ -115,6 +115,8 @@ Project・Team の Gantt は、表示中の Work Item の Project（Team ごと�
 
 Planning の Project / Initiative の近況（Planning update）の作成欄は、対象範囲の Work Item の Project の基準 baseline を読み、基準より終了が遅れている未完了の Work Item と、baseline より予測終了が遅い Milestone を遅れの大きい順に出す。「遅れ n 件を根拠に添付」で、これらを Work Item / Planning entity の evidence として 1 回でまとめて添付できる（手で選んだ根拠の分を 1 件残し、最大 99 件）。前回の近況が根拠にしていないものには「前回以降に新規」と出す。Planning の snapshot は実績終了日を持たないので、完了した Work Item は出さない。baseline を読めない Project が 1 つでもあると、欠けた一覧を出さずに読み込み直しを促す。
 
+Focus は、責任者または Contributor の未完了 Work Item が baseline より Team 設定の日数以上遅れると `slipped` signal を出す（`docs/focus.md`）。
+
 まだ無いもの: Focus の `slipped` signal の通知・Automation trigger、Cycle 単位の baseline。
 
 ### Estimate, remaining effort, and progress

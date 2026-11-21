@@ -18,8 +18,10 @@ import {
   createFocusCauseFingerprint,
   createFocusQueue,
   focusQueueUsesApprovalSummary,
+  focusQueueUsesScheduleBaseline,
   resolveFocusEffectivePolicies,
   type FocusRelationGraphSource,
+  type FocusScheduleBaselineSource,
 } from './focus-queue'
 
 /** Optional canonical sources and recipient state used by test projections. */
@@ -30,6 +32,8 @@ type QueueFixture = {
   planning?: PlanningSnapshot
   /** Optional authoritative semantic relation graphs. */
   relationGraphs?: readonly FocusRelationGraphSource[]
+  /** Optional readable Project schedule baseline entries. */
+  scheduleBaselines?: readonly FocusScheduleBaselineSource[]
   /** Optional current-reviewer approval requests. */
   approvals?: readonly ApprovalRequest[]
   /** Optional permission-filtered notification events. */
@@ -1251,6 +1255,137 @@ describe('Focus queue projection', () => {
       'viewer',
     )).toBeFalse()
   })
+
+  describe('baseline slip', () => {
+    /**
+     * Builds an unfinished Project Work Item due on the given date.
+     *
+     * @param id - Work Item ID.
+     * @param dueDate - Current planned end.
+     * @param overrides - Fields replacing the fixture's.
+     * @returns Canonical Work Item assigned to Project `project-a`.
+     */
+    const createProjectItem = (
+      id: string,
+      dueDate: string,
+      overrides: Partial<CanonicalWorkItem> = {},
+    ): CanonicalWorkItem => ({
+      ...createWorkItem(id, 'viewer', 'medium', 'started', dueDate),
+      assignedProjectId: 'project-a',
+      dueDateUpdatedAt: '2026-08-07T10:00:00.000Z',
+      ...overrides,
+    })
+    /**
+     * Builds a baseline entry of Project `project-a`.
+     *
+     * @param workItemId - Work Item ID.
+     * @param endDate - Planned end frozen by the baseline.
+     * @param revision - Baseline revision.
+     * @returns Baseline source.
+     */
+    const createBaseline = (
+      workItemId: string,
+      endDate: string,
+      revision = 1,
+    ): FocusScheduleBaselineSource => ({
+      teamId: 'team-a',
+      projectId: 'project-a',
+      revision,
+      capturedAt: '2026-08-05T00:00:00.000Z',
+      entry: { workItemId, endDate },
+    })
+
+    test('raises slipped once the planned end is the threshold behind the baseline', () => {
+      const late = createProjectItem('late', '2026-08-20')
+      const slightlyLate = createProjectItem('slightly-late', '2026-08-17')
+      const queue = projectQueue({
+        workItems: [late, slightlyLate],
+        scheduleBaselines: [
+          createBaseline('late', '2026-08-15'),
+          createBaseline('slightly-late', '2026-08-15'),
+        ],
+      })
+      const item = findFocusItem(queue, 'late')
+      expect(item.signals.map((signal) => signal.type)).toEqual(['slipped'])
+      const [signal] = item.signals
+      expect(signal?.source.kind).toBe('schedule-baseline')
+      expect(signal?.resolution.condition).toBe('baseline-recovered')
+      expect(signal?.source.occurredAt).toBe('2026-08-07T10:00:00.000Z')
+      expect(signal?.source.deepLink).toBeDefined()
+      expect(item.rank.score).toBe(60)
+      expect(item.section).toBe('next')
+      // Two days behind is under the default three-day threshold.
+      expect(findOptionalFocusItem(queue, 'slightly-late')).toBeUndefined()
+    })
+
+    test('uses the Team threshold and the slipped weight', () => {
+      const slightlyLate = createProjectItem('slightly-late', '2026-08-17')
+      const queue = projectQueue({
+        workItems: [slightlyLate],
+        scheduleBaselines: [createBaseline('slightly-late', '2026-08-15')],
+        teamPolicies: [createPolicy('team-policy', { type: 'team', teamId: 'team-a' }, 1, {
+          slippedThresholdDays: 2,
+          weights: { slipped: 80 },
+        })],
+      })
+      const item = findFocusItem(queue, 'slightly-late')
+      expect(item.signals.map((signal) => signal.type)).toEqual(['slipped'])
+      expect(item.rank.score).toBe(80)
+      expect(item.section).toBe('now')
+      const policy = queue.effectivePolicies.find((candidate) => candidate.id === item.effectivePolicyId)
+      expect(policy?.settings.slippedThresholdDays).toBe(2)
+      expect(policy?.baseSettings.slippedThresholdDays).toBe(3)
+    })
+
+    test('dates the slip from the baseline when the end moved before it', () => {
+      const late = createProjectItem('late', '2026-08-20', { dueDateUpdatedAt: '2026-08-01T00:00:00.000Z' })
+      const queue = projectQueue({
+        workItems: [late],
+        scheduleBaselines: [createBaseline('late', '2026-08-15')],
+      })
+      expect(findFocusItem(queue, 'late').signals[0]?.source.occurredAt).toBe('2026-08-05T00:00:00.000Z')
+    })
+
+    test('changes the cause when the baseline is captured again', () => {
+      const late = createProjectItem('late', '2026-08-20')
+      const first = findFocusItem(projectQueue({
+        workItems: [late],
+        scheduleBaselines: [createBaseline('late', '2026-08-15', 1)],
+      }), 'late')
+      const second = findFocusItem(projectQueue({
+        workItems: [late],
+        scheduleBaselines: [createBaseline('late', '2026-08-14', 2)],
+      }), 'late')
+      expect(first.signals[0]?.id).not.toBe(second.signals[0]?.id)
+    })
+
+    test('omits slipped for other Projects, finished work, and unrelated viewers', () => {
+      const moved = createProjectItem('moved', '2026-08-20', { assignedProjectId: 'project-b' })
+      const done = createProjectItem('done', '2026-08-20', {
+        statusCategory: 'completed',
+        workflowStatusId: 'completed',
+        actualEndDate: '2026-08-20',
+      })
+      const someoneElse = createProjectItem('someone-else', '2026-08-20', { assigneeUserId: 'other' })
+      const contributor = withContributors(
+        createProjectItem('contributor', '2026-08-20', { assigneeUserId: 'other' }),
+        [{ assignmentId: 'c'.repeat(32), memberUserId: 'viewer', status: 'in-progress' }],
+      )
+      const queue = projectQueue({
+        workItems: [moved, done, someoneElse, contributor],
+        scheduleBaselines: ['moved', 'done', 'someone-else', 'contributor']
+          .map((id) => createBaseline(id, '2026-08-10')),
+      })
+      expect(findOptionalFocusItem(queue, 'moved')).toBeUndefined()
+      expect(findOptionalFocusItem(queue, 'done')?.signals ?? []).toEqual([])
+      expect(findOptionalFocusItem(queue, 'someone-else')).toBeUndefined()
+      expect(findFocusItem(queue, 'contributor').signals.map((signal) => signal.type)).toEqual(['slipped'])
+      expect(focusQueueUsesScheduleBaseline(contributor, 'VIEWER')).toBe(true)
+      expect(focusQueueUsesScheduleBaseline(someoneElse, 'viewer')).toBe(false)
+      expect(focusQueueUsesScheduleBaseline(done, 'viewer')).toBe(false)
+      expect(focusQueueUsesScheduleBaseline({ ...moved, assignedProjectId: undefined }, 'viewer')).toBe(false)
+    })
+  })
 })
 
 /**
@@ -1277,6 +1412,9 @@ function projectQueue(fixture: QueueFixture): FocusQueueResponse {
     ...(fixture.relationGraphs === undefined
       ? {}
       : { relationGraphs: fixture.relationGraphs }),
+    ...(fixture.scheduleBaselines === undefined
+      ? {}
+      : { scheduleBaselines: fixture.scheduleBaselines }),
     reviewerApprovals: fixture.approvals ?? [],
     notifications: fixture.notifications ?? [],
     teamPolicies: fixture.teamPolicies ?? [],
