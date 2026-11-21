@@ -939,10 +939,11 @@ export const RelationActivity: Story = {
     await expect(canvas.getByText(/同じ親の中での並び順を変更しました/)).toBeVisible()
     await expect(canvas.getByText(/この Work Item をブロックする項目を解除しました/)).toBeVisible()
     await expect(canvas.getByText('変更前の親')).toBeVisible()
-    await expect(canvas.getByRole('link', { name: /CT-18 決済フローの再設計/ })).toHaveAttribute(
-      'href',
-      '/browse/CT-18',
-    )
+    const parentLinks = canvas.getAllByRole('link', { name: /CT-18 決済フローの再設計/ })
+    await expect(parentLinks).toHaveLength(2)
+    for (const link of parentLinks) {
+      await expect(link).toHaveAttribute('href', '/browse/CT-18')
+    }
     await expect(canvas.getAllByTestId('activity-relation-work-items')).toHaveLength(3)
   },
 }
