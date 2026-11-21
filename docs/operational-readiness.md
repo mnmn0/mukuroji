@@ -520,6 +520,9 @@ durable retryしません。既存connectionは強制切断されず、blocked�
 `/api/ready`の確認は`bun run runtime-control:enable` / `bun run runtime-control:disable`が1コマンドで
 行います（使い方は`cdk/README.md`の「Application 処理を有効にする」）。Change recordの保存、
 reviewerの確認、fresh `runtime-control.evaluated` recordの確認はoperatorが別に行います。
+Scriptは切り替えの開始・完了・失敗をWorkspaceの監査ログに`runtime-control.change-*` eventとして記録します
+（[ADR 0044](adr/0044-runtime-control-switch-audit-events.md)、[event-audit](event-audit.md#runtime-control-の切り替え-event)）。
+これは change record の代わりではなく、利用者側から見える記録です。
 停止では、止める操作をalarmの状態で妨げないよう手順3のalarm確認を行いません。
 
 1. Change/incident record に stack、account、region、4つの output、現在の document/revision、
