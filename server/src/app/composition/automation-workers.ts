@@ -28,6 +28,8 @@ import {
 } from '../../modules/documents/adapter-out/dynamodb/document-authorization'
 import { createDefaultFileProofingClient } from '../../modules/files/file-proofing'
 import { DynamoDbCustomerClient } from '../../modules/customers'
+import { DynamoDbEnterpriseIdentityReadClient } from '../../modules/enterprise-identity'
+import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { DynamoDbTeamIssuesClient } from '../../modules/work-items'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import { DynamoDbWorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
@@ -51,6 +53,9 @@ function createAutomationActionDependencies(
       documentAuthorizationRevisionMutationPort:
         new DynamoDbDocumentAuthorizationRevisionMutationAdapter(),
     }),
+    enterpriseIdentity: new DynamoDbEnterpriseIdentityReadClient(
+      readRequiredEnterpriseIdentityTableName(),
+    ),
     auditEvents: createAuditEventsClient(),
     teamIssues,
     customers: new DynamoDbCustomerClient(),
@@ -62,6 +67,19 @@ function createAutomationActionDependencies(
     workspaceSearchProjectionEnabled: shouldEnableWorkspaceSearchProjection(),
     automation,
   }
+}
+
+/**
+ * Reads the Enterprise Identity table that reviewer access checks evaluate.
+ *
+ * @returns The configured table name.
+ */
+function readRequiredEnterpriseIdentityTableName() {
+  const tableName = loadServerConfig().environment.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
+  if (!tableName) {
+    throw new TypeError('ENTERPRISE_IDENTITY_TABLE_NAME is required by Automation actions.')
+  }
+  return tableName
 }
 
 /**

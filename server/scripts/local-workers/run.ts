@@ -26,6 +26,7 @@ process.env.FILE_PROOFING_TABLE_NAME ??= 'mukuroji-file-proofing'
 process.env.PLANNING_TABLE_NAME ??= 'mukuroji-planning-local'
 process.env.PLANNING_UPDATE_SCHEDULE_INDEX_NAME ??= 'UpdateScheduleDueIndex'
 process.env.REQUEST_INTAKE_TABLE_NAME ??= 'mukuroji-request-intake-local'
+process.env.ENTERPRISE_IDENTITY_TABLE_NAME ??= 'mukuroji-enterprise-identity-local'
 
 const queueUrls = ['WORK_ITEM_IMPORT_QUEUE_URL', 'WEBHOOK_DELIVERY_QUEUE_URL', 'CONNECTOR_SYNC_QUEUE_URL'].map((key) => {
   const value = process.env[key]
