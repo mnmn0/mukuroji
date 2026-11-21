@@ -20,8 +20,9 @@ import type { PlanningUpdateTargetView } from '../model/statusUpdateView'
 /**
  * Reads the active baselines of the selected update target and lists what is behind them.
  *
- * Unlike the Gantt overlay, a Project whose baseline fails to load fails the whole list, so the
- * composer never presents an incomplete list as "nothing is behind".
+ * Unlike the Gantt overlay, every Project in the target is read, and a Project whose baseline
+ * fails to load fails the whole list, so the composer never presents an incomplete list as
+ * "nothing is behind".
  *
  * @param accessToken - Bearer token, or undefined before sign-in.
  * @param snapshot - Authorized Planning snapshot.
@@ -40,7 +41,7 @@ export function usePlanningBaselineDelays(
   const active = Boolean(accessToken && snapshot && target && enabled)
   const projects = useMemo(
     () => active && snapshot && target
-      ? collectWorkItemBaselineProjects(listPlanningTargetBaselineWorkItems(snapshot, target))
+      ? collectWorkItemBaselineProjects(listPlanningTargetBaselineWorkItems(snapshot, target), Number.POSITIVE_INFINITY)
       : [],
     [active, snapshot, target],
   )
@@ -66,6 +67,9 @@ export function usePlanningBaselineDelays(
   }, [active, data, error, mutate, projects.length, snapshot, target, updates])
 }
 
+/** Most baseline reads in flight at once, so a wide Initiative does not flood the API. */
+const BASELINE_READ_CONCURRENCY = 8
+
 /**
  * Reads every Project's active baseline, failing when any read fails.
  *
@@ -79,13 +83,30 @@ async function readAllProjectBaselines(
   accessToken: string,
   projects: readonly WorkItemBaselineProject[],
 ): Promise<WorkItemBaselineProjectResult[]> {
-  return Promise.all(projects.map(async (project) => {
-    try {
-      const response = await getProjectScheduleBaseline(project.teamId, project.projectId, accessToken)
-      return { ...project, baseline: response.baseline }
-    } catch (error) {
-      if (error instanceof WorkItemConfigurationApiError && error.status === 404) return { ...project, baseline: null }
-      throw error
-    }
-  }))
+  const results: WorkItemBaselineProjectResult[] = []
+  for (let start = 0; start < projects.length; start += BASELINE_READ_CONCURRENCY) {
+    const batch = projects.slice(start, start + BASELINE_READ_CONCURRENCY)
+    results.push(...await Promise.all(batch.map((project) => readProjectBaseline(accessToken, project))))
+  }
+  return results
+}
+
+/**
+ * Reads one Project's active baseline.
+ *
+ * @param accessToken - Bearer token.
+ * @param project - Project to read.
+ * @returns The baseline, or `null` when the Project answers 404.
+ */
+async function readProjectBaseline(
+  accessToken: string,
+  project: WorkItemBaselineProject,
+): Promise<WorkItemBaselineProjectResult> {
+  try {
+    const response = await getProjectScheduleBaseline(project.teamId, project.projectId, accessToken)
+    return { ...project, baseline: response.baseline }
+  } catch (error) {
+    if (error instanceof WorkItemConfigurationApiError && error.status === 404) return { ...project, baseline: null }
+    throw error
+  }
 }
