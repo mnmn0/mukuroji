@@ -253,3 +253,29 @@ test('treats a member without a Cognito user as having no groups', async () => {
     dependencies,
   )).toBe(false)
 })
+
+test('keeps a personal grant when reading Cognito groups fails', async () => {
+  const groupAssignment: EnterpriseRoleAssignment = {
+    ...assignment('workspace:portfolio-viewer'),
+    assignmentId: 'unrelated-group',
+    principalKind: 'directory-group',
+    principalId: 'some-group',
+  }
+  const unavailable = new CognitoServiceError(503, 'ServiceUnavailable', 'Cognito is unavailable.')
+  const dependenciesFor = (roleAssignments: EnterpriseRoleAssignment[]): MemberWorkItemVisibilityDependencies => ({
+    ...createDependencies({ roleAssignments }),
+    cognito: {
+      isSystemAdmin: async () => false,
+      getUserGroups: async () => { throw unavailable },
+    },
+  })
+  const visible = (dependencies: MemberWorkItemVisibilityDependencies) => canMemberViewWorkItemScope(
+    { memberKey: MEMBER_KEY, email: MEMBER_KEY, role: 'member' },
+    { workspaceId: WORKSPACE_ID, teamId: 'core-team', assignedProjectId: 'refero', permissions: ['work-items.read'] },
+    dependencies,
+  )
+
+  expect(await visible(dependenciesFor([assignment('workspace:portfolio-viewer'), groupAssignment]))).toBe(true)
+  // Without a personal grant the decision depends on the groups, so the read failure surfaces.
+  await expect(visible(dependenciesFor([groupAssignment]))).rejects.toBe(unavailable)
+})

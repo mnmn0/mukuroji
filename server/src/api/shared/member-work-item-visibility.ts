@@ -143,36 +143,30 @@ async function hasWorkItemScopeAccess(
     return false
   }
 
-  // Cognito groups only match role assignments made directly to a group, so skip the read
-  // when the snapshot has none.
-  const cognitoGroupIds = snapshot.roleAssignments.some((assignment) =>
-    assignment.principalKind === 'directory-group'
-  )
-    ? await readMemberCognitoGroups(memberKey, dependencies)
-    : []
-  const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(snapshot, memberKey, cognitoGroupIds)
-  if (directoryPrincipal.deprovisioned) return false
-  const needsProjectScopeQualification =
-    hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleRoleAssignments) ||
-    hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleGroupMappings)
-  const assignments = needsProjectScopeQualification
-    ? qualifyEnterpriseProjectScopes(directoryPrincipal.compatibleRoleAssignments, activeDirectory)
-    : directoryPrincipal.compatibleRoleAssignments
-  const groupMappings = needsProjectScopeQualification
-    ? qualifyEnterpriseProjectScopes(directoryPrincipal.compatibleGroupMappings, activeDirectory)
-    : directoryPrincipal.compatibleGroupMappings
-  const enterpriseAuthoritative = directoryPrincipal.directoryManaged ||
-    assignments.some((assignment) =>
-      assignment.principalKind === 'member' &&
-        assignment.principalId.trim().toLowerCase() === memberKey ||
-      assignment.principalKind === 'directory-group' && (
-        assignment.source === 'directory-mapping' ||
-        directoryPrincipal.directoryGroupIds.includes(assignment.principalId)
-      )
-    ) || groupMappings.some((mapping) => mapping.enabled)
-
-  if (enterpriseAuthoritative) {
-    return listWorkItemScopeResources(scope, team).some((resource) => {
+  const evaluateEnterprise = (cognitoGroupIds: readonly string[]) => {
+    const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(snapshot, memberKey, cognitoGroupIds)
+    if (directoryPrincipal.deprovisioned) {
+      return { deprovisioned: true, authoritative: true, allowed: false }
+    }
+    const needsProjectScopeQualification =
+      hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleRoleAssignments) ||
+      hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleGroupMappings)
+    const assignments = needsProjectScopeQualification
+      ? qualifyEnterpriseProjectScopes(directoryPrincipal.compatibleRoleAssignments, activeDirectory)
+      : directoryPrincipal.compatibleRoleAssignments
+    const groupMappings = needsProjectScopeQualification
+      ? qualifyEnterpriseProjectScopes(directoryPrincipal.compatibleGroupMappings, activeDirectory)
+      : directoryPrincipal.compatibleGroupMappings
+    const authoritative = directoryPrincipal.directoryManaged ||
+      assignments.some((assignment) =>
+        assignment.principalKind === 'member' &&
+          assignment.principalId.trim().toLowerCase() === memberKey ||
+        assignment.principalKind === 'directory-group' && (
+          assignment.source === 'directory-mapping' ||
+          directoryPrincipal.directoryGroupIds.includes(assignment.principalId)
+        )
+      ) || groupMappings.some((mapping) => mapping.enabled)
+    const allowed = authoritative && listWorkItemScopeResources(scope, team).some((resource) => {
       const access = evaluateEnterpriseAccess({
         permission: scope.permissions[0] ?? 'work-items.read',
         principal: {
@@ -193,7 +187,22 @@ async function hasWorkItemScopeAccess(
       })
       return scope.permissions.every((permission) => access.permissions.includes(permission))
     })
+    return { deprovisioned: false, authoritative, allowed }
   }
+
+  // Enterprise grants only add permissions, so a grant found without Cognito groups stands
+  // whatever the groups are, and a group read that fails cannot take it away.
+  const withoutGroups = evaluateEnterprise([])
+  if (withoutGroups.deprovisioned) return false
+  if (withoutGroups.allowed) return true
+  // Cognito groups only match role assignments made directly to a group, so skip the read
+  // when the snapshot has none.
+  const enterprise = snapshot.roleAssignments.some((assignment) =>
+    assignment.principalKind === 'directory-group'
+  )
+    ? evaluateEnterprise(await readMemberCognitoGroups(memberKey, dependencies))
+    : withoutGroups
+  if (enterprise.authoritative) return enterprise.allowed
 
   const accesses = await dependencies.projectDirectory.getProjectAccessList(
     scope.workspaceId,
