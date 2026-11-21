@@ -739,7 +739,7 @@ IAM は1つの role に付く inline policy を合計10,240文字（空白を除
 本番環境は 1 つで、`main` の commit を GitHub Actions の `production` Environment から deploy します。
 job は OIDC で `mukuroji-github-deploy` role を引き受けるので、AWS の access key は GitHub に置きません。
 role を引き受けられるのは `mnmn0/mukuroji` の `production` Environment で動く job だけで、Environment は
-`main` に限り、required reviewer の承認を待ちます。判断の理由は [ADR 0036](../docs/adr/0036-github-actions-oidc-deploy.md) を参照してください。
+`main` に限り、required reviewer の承認を待ちます。判断の理由は [ADR 0039](../docs/adr/0039-github-actions-oidc-deploy.md) を参照してください。
 
 | 置き場所 | 中身 |
 | --- | --- |

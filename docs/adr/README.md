@@ -59,4 +59,4 @@
 | [0031](0031-data-migration-lambda-and-operator-proof.md) | Data migration を operator が起動する Lambda で実行し、実行者を presigned STS proof で確かめる | 提案 |
 | [0032](0032-japanese-public-holiday-monthly-sync.md) | 日本の祝日を内閣府の CSV から月に1回取り込み、tenant administration table の共有 row に置く | 提案 |
 | [0033](0033-project-id-workspace-reservation-row.md) | Project ID を Workspace ごとの予約 row で一意にし、衝突したら別の ID で作り直す | 提案 |
-| [0036](0036-github-actions-oidc-deploy.md) | 本番への deploy を GitHub Actions から OIDC の role で行い、deploy の値を SSM に置く | 提案 |
+| [0039](0039-github-actions-oidc-deploy.md) | 本番への deploy を GitHub Actions から OIDC の role で行い、deploy の値を SSM に置く | 提案 |

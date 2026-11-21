@@ -1,4 +1,4 @@
-# 0036. 本番への deploy を GitHub Actions から OIDC の role で行い、deploy の値を SSM に置く
+# 0039. 本番への deploy を GitHub Actions から OIDC の role で行い、deploy の値を SSM に置く
 
 - 状態: 提案
 - 日付: 2026-11-21
