@@ -16,6 +16,7 @@ import {
   type RuntimeControlResources,
 } from '../runtime-controls';
 import type { WorkerChannels } from './channels';
+import { skipRuntimeControlAuditEvents } from './audit-stream-filters';
 
 /**
  * Inputs required by the audit outbox projection worker.
@@ -165,6 +166,7 @@ export function buildAuditProjectionWorker(
       retryAttempts: 3,
       reportBatchItemFailures: true,
       onFailure: new lambdaEventSources.SqsDlq(collaborationProjectionDlq),
+      filters: skipRuntimeControlAuditEvents(),
     }),
   );
   new cloudwatch.Alarm(scope, 'CollaborationProjectionDlqAlarm', {
