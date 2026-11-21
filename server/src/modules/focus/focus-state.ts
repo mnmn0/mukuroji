@@ -867,6 +867,7 @@ function normalizePolicyOverrides(value: unknown): FocusPolicyOverrides {
     ...readOptionalPolicyNumber(value, 'cycleDueSoonDays', 0, 365),
     ...readOptionalPolicyNumber(value, 'slaHours', 1, 24 * 365),
     ...readOptionalSlaPolicyFields(value),
+    ...readOptionalPolicyNumber(value, 'slippedThresholdDays', 1, 365),
     ...readOptionalPolicyNumber(value, 'nowScoreThreshold', 0, 100_000),
   }
 }
@@ -908,6 +909,7 @@ function normalizeWeightOverrides(value: unknown): FocusPolicyOverrides['weights
     ...readOptionalPolicyNumber(value, 'mention', 0, 10_000),
     ...readOptionalPolicyNumber(value, 'sla', 0, 10_000),
     ...readOptionalPolicyNumber(value, 'cycle', 0, 10_000),
+    ...readOptionalPolicyNumber(value, 'slipped', 0, 10_000),
   }
 }
 

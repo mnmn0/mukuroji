@@ -242,6 +242,8 @@ export async function activateProjectScheduleBaselineUseCase<
     revision: previous.revision + 1,
   }
   const { kept, dropped } = trimSavedBaselines(listed, baseline.id)
+  // Read visibility before the write so a failed or oversized read cannot follow a committed switch.
+  const readableIds = await readReadableWorkItemIds(dependencies, isReadable)
   const stored = await dependencies.store.write({
     ...scope,
     kind: 'activate',
@@ -258,7 +260,7 @@ export async function activateProjectScheduleBaselineUseCase<
   return {
     ...responseScope(scope),
     // The stored baseline keeps every entry; the response shows only what the caller may see now.
-    baseline: await keepReadableEntries(dependencies, stored, isReadable),
+    baseline: keepEntriesOf(stored, readableIds),
     activeBaselineId: baseline.id,
     savedBaselines: kept,
   }
@@ -281,9 +283,35 @@ async function keepReadableEntries<
   baseline: ProjectScheduleBaseline,
   isReadable: (workItem: TWorkItem) => boolean,
 ): Promise<ProjectScheduleBaseline> {
-  const readableIds = new Set(
-    (await readBoundedTeamWorkItems(dependencies)).filter(isReadable).map((workItem) => workItem.id),
-  )
+  return keepEntriesOf(baseline, await readReadableWorkItemIds(dependencies, isReadable))
+}
+
+/**
+ * Lists the IDs of the Team's Work Items the reader may currently see.
+ *
+ * @param dependencies - Work Item reader.
+ * @param isReadable - Whether the reader may see a Work Item.
+ * @returns The readable Work Item IDs.
+ */
+async function readReadableWorkItemIds<
+  TCallerCheck,
+  TWorkItem extends ScheduleBaselineWorkItem,
+  TAuditContext,
+>(
+  dependencies: ProjectScheduleBaselineDependencies<TCallerCheck, TWorkItem, TAuditContext>,
+  isReadable: (workItem: TWorkItem) => boolean,
+): Promise<ReadonlySet<string>> {
+  return new Set((await readBoundedTeamWorkItems(dependencies)).filter(isReadable).map((workItem) => workItem.id))
+}
+
+/**
+ * Keeps only the entries whose Work Item ID is listed.
+ *
+ * @param baseline - Baseline with every entry.
+ * @param readableIds - Work Item IDs the reader may see.
+ * @returns A copy of the baseline with those entries.
+ */
+function keepEntriesOf(baseline: ProjectScheduleBaseline, readableIds: ReadonlySet<string>): ProjectScheduleBaseline {
   return { ...baseline, entries: baseline.entries.filter((entry) => readableIds.has(entry.workItemId)) }
 }
 
