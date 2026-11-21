@@ -1,4 +1,4 @@
-import type { WorkItemConfiguration } from '@mukuroji/contracts'
+import { deriveWorkItemBaselineEndDelayDays, type WorkItemConfiguration } from '@mukuroji/contracts'
 import { Fragment, type CSSProperties } from 'react'
 import { ChevronIcon, MoreHorizontalIcon } from '../../shared/ui/icons'
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
@@ -45,6 +45,15 @@ import {
   type WorkItemOutlineRow,
 } from '../../work-items/model/workItemHierarchy'
 import { WorkItemHierarchyRollupSummary } from '../../work-items/ui/WorkItemHierarchyRollupSummary'
+import type { WorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
+import {
+  formatTaskScheduleVariance,
+  resolveTaskScheduleVarianceTone,
+  taskScheduleVarianceToneClasses,
+} from '../../tasks/model/taskActualDates'
+
+/** Column showing how far each Work Item ends behind its Project baseline. */
+export const TEAM_ISSUE_BASELINE_DELAY_COLUMN = 'baselineEndDelayDays'
 
 /** Hierarchy outline shown by the Team Work Item table instead of groups. */
 export type IssueTableOutline = {
@@ -77,6 +86,7 @@ export function IssueTable({
   onOpenIssue,
   outline,
   presentation,
+  scheduleBaselineFor,
   selectedIssueKeys,
   selectedIssueId,
   t,
@@ -96,6 +106,11 @@ export function IssueTable({
   /** Hierarchy outline; when present, rows nest by hierarchy and grouping is not applied. */
   outline?: IssueTableOutline
   presentation?: TaskViewPresentationSettings
+  /**
+   * Finds each Work Item's Project baseline for the baseline delay column; undefined while the
+   * baselines load, which shows the column as empty.
+   */
+  scheduleBaselineFor?: WorkItemBaselineLookup
   selectedIssueKeys: readonly string[]
   selectedIssueId?: string
   t: (key: MessageKey) => string
@@ -395,6 +410,21 @@ export function IssueTable({
                 {issue.teamId}
               </td>
             )
+            case TEAM_ISSUE_BASELINE_DELAY_COLUMN: {
+              const entry = scheduleBaselineFor?.(issue)
+              const days = entry ? deriveWorkItemBaselineEndDelayDays(entry, issue) : undefined
+              const tone = resolveTaskScheduleVarianceTone(days)
+              return (
+                <td
+                  {...columnCellProps}
+                  className={`${cellPadding} text-sm font-medium ${tone ? taskScheduleVarianceToneClasses[tone] : 'text-[var(--workbench-muted)]'}`}
+                  data-testid={`team-issue-baseline-delay-${issue.id}`}
+                  key={field}
+                >
+                  {formatTaskScheduleVariance(days, t)}
+                </td>
+              )
+            }
             case 'estimate':
             case 'remainingEffort':
             case 'progress': return (
@@ -552,6 +582,7 @@ function isSupportedTeamIssueColumn(field: string): boolean {
     'priority',
     'workItemType',
     'team',
+    TEAM_ISSUE_BASELINE_DELAY_COLUMN,
     ...WORK_ITEM_EFFORT_COLUMN_FIELDS,
   ].includes(field) || field.startsWith('custom:')
 }
@@ -572,6 +603,7 @@ function resolveIssueTableColumnLabel(
     case 'priority': return t('tasks.column.priority')
     case 'workItemType': return t('tasks.column.workItemType')
     case 'team': return t('workspace.column.team')
+    case TEAM_ISSUE_BASELINE_DELAY_COLUMN: return t('tasks.column.baselineEndDelayDays')
     case 'estimate': return t('tasks.column.estimate')
     case 'remainingEffort': return t('tasks.column.remainingEffort')
     case 'progress': return t('tasks.column.progress')

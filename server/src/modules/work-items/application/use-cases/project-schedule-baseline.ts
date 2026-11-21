@@ -9,7 +9,7 @@ import {
 import { ProjectDataError } from '../../../directory'
 
 /** Input of one Project schedule baseline capture, as the persistence port receives it. */
-export type CaptureProjectScheduleBaselineInput<TCallerCheck> = {
+export type CaptureProjectScheduleBaselineInput<TCallerCheck, TAuditContext = undefined> = {
   /** Workspace directory ID. */
   workspaceId: string
   /** Team that owns the Project. */
@@ -25,12 +25,26 @@ export type CaptureProjectScheduleBaselineInput<TCallerCheck> = {
    * The write fails when another capture committed in between.
    */
   expectedRevision: number
+  /** The baseline being replaced, or `null` for the Project's first capture. */
+  previous: ProjectScheduleBaselineSummary | null
   /** Server-built conditions that fail the write when the caller lost access. */
   callerAuthorization: readonly TCallerCheck[]
+  /** Request audit context; the store records the capture in the same write. */
+  auditContext: TAuditContext
+}
+
+/** What the audit event records about a baseline: no Work Item IDs or dates. */
+export type ProjectScheduleBaselineSummary = {
+  /** Baseline revision. */
+  revision: number
+  /** ISO timestamp of the capture. */
+  capturedAt: string
+  /** Number of Work Items the baseline holds. */
+  entryCount: number
 }
 
 /** Persistence port for the latest schedule baseline of each Project. */
-export type ProjectScheduleBaselineStore<TCallerCheck> = {
+export type ProjectScheduleBaselineStore<TCallerCheck, TAuditContext = undefined> = {
   /**
    * Reads the latest baseline of a Project.
    *
@@ -46,7 +60,7 @@ export type ProjectScheduleBaselineStore<TCallerCheck> = {
    * @param input - Capture input.
    * @returns The stored baseline.
    */
-  capture(input: CaptureProjectScheduleBaselineInput<TCallerCheck>): Promise<ProjectScheduleBaseline>
+  capture(input: CaptureProjectScheduleBaselineInput<TCallerCheck, TAuditContext>): Promise<ProjectScheduleBaseline>
 }
 
 /** Work Item fields the baseline use cases read. */
@@ -56,9 +70,13 @@ export type ScheduleBaselineWorkItem = Pick<CanonicalWorkItem, 'id' | 'schedule'
 }
 
 /** Dependencies shared by the baseline use cases. */
-export type ProjectScheduleBaselineDependencies<TCallerCheck, TWorkItem extends ScheduleBaselineWorkItem> = {
+export type ProjectScheduleBaselineDependencies<
+  TCallerCheck,
+  TWorkItem extends ScheduleBaselineWorkItem,
+  TAuditContext = undefined,
+> = {
   /** Baseline persistence. */
-  store: ProjectScheduleBaselineStore<TCallerCheck>
+  store: ProjectScheduleBaselineStore<TCallerCheck, TAuditContext>
   /**
    * Reads the Team's non-archived Work Items, at most `limit + 1` so a larger Team is detected.
    *
@@ -82,13 +100,17 @@ export type ProjectScheduleBaselineScope = {
  *
  * @param dependencies - Store and Work Item reader.
  * @param scope - Authorized Team and Project.
- * @param capture - Capture time and the caller's commit-time authorization fences.
+ * @param capture - Capture time, the caller's commit-time authorization fences, and the audit context.
  * @returns The response with the stored baseline.
  */
-export async function captureProjectScheduleBaselineUseCase<TCallerCheck, TWorkItem extends ScheduleBaselineWorkItem>(
-  dependencies: ProjectScheduleBaselineDependencies<TCallerCheck, TWorkItem>,
+export async function captureProjectScheduleBaselineUseCase<
+  TCallerCheck,
+  TWorkItem extends ScheduleBaselineWorkItem,
+  TAuditContext,
+>(
+  dependencies: ProjectScheduleBaselineDependencies<TCallerCheck, TWorkItem, TAuditContext>,
   scope: ProjectScheduleBaselineScope,
-  capture: { capturedAt: string; callerAuthorization: readonly TCallerCheck[] },
+  capture: { capturedAt: string; callerAuthorization: readonly TCallerCheck[]; auditContext: TAuditContext },
 ): Promise<ProjectScheduleBaselineResponse> {
   // Pin the revision before reading the plan, so an older snapshot cannot replace a newer capture.
   const previous = await dependencies.store.get(scope.workspaceId, scope.teamId, scope.projectId)
@@ -97,9 +119,13 @@ export async function captureProjectScheduleBaselineUseCase<TCallerCheck, TWorkI
   const baseline = await dependencies.store.capture({
     ...scope,
     expectedRevision: previous?.revision ?? 0,
+    previous: previous
+      ? { revision: previous.revision, capturedAt: previous.capturedAt, entryCount: previous.entries.length }
+      : null,
     entries: workItems.map((workItem) => createProjectScheduleBaselineEntry(workItem.id, workItem.schedule)),
     capturedAt: capture.capturedAt,
     callerAuthorization: capture.callerAuthorization,
+    auditContext: capture.auditContext,
   })
   return { teamId: scope.teamId, projectId: scope.projectId, baseline }
 }
@@ -113,8 +139,12 @@ export async function captureProjectScheduleBaselineUseCase<TCallerCheck, TWorkI
  * @param isReadable - Whether the reader may see a Work Item.
  * @returns The response; `baseline` is `null` when none was captured.
  */
-export async function readProjectScheduleBaselineUseCase<TCallerCheck, TWorkItem extends ScheduleBaselineWorkItem>(
-  dependencies: ProjectScheduleBaselineDependencies<TCallerCheck, TWorkItem>,
+export async function readProjectScheduleBaselineUseCase<
+  TCallerCheck,
+  TWorkItem extends ScheduleBaselineWorkItem,
+  TAuditContext,
+>(
+  dependencies: ProjectScheduleBaselineDependencies<TCallerCheck, TWorkItem, TAuditContext>,
   scope: ProjectScheduleBaselineScope,
   isReadable: (workItem: TWorkItem) => boolean,
 ): Promise<ProjectScheduleBaselineResponse> {
@@ -137,8 +167,12 @@ export async function readProjectScheduleBaselineUseCase<TCallerCheck, TWorkItem
  * @returns The Team's Work Items.
  * @throws ProjectDataError 413 when the Team has more Work Items than one baseline holds.
  */
-async function readBoundedTeamWorkItems<TCallerCheck, TWorkItem extends ScheduleBaselineWorkItem>(
-  dependencies: ProjectScheduleBaselineDependencies<TCallerCheck, TWorkItem>,
+async function readBoundedTeamWorkItems<
+  TCallerCheck,
+  TWorkItem extends ScheduleBaselineWorkItem,
+  TAuditContext,
+>(
+  dependencies: ProjectScheduleBaselineDependencies<TCallerCheck, TWorkItem, TAuditContext>,
 ): Promise<TWorkItem[]> {
   const workItems = await dependencies.readTeamWorkItems(PROJECT_SCHEDULE_BASELINE_MAX_ENTRIES)
   if (workItems.length > PROJECT_SCHEDULE_BASELINE_MAX_ENTRIES) {
