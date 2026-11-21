@@ -8,6 +8,40 @@ const workItems = [
   { id: 'pricing', teamId: 'core-team', title: 'Update the pricing page', assignedProjectId: 'refero', statusCategory: 'unstarted' },
 ]
 
+/** Notes of a weekly report as the mock stores them. */
+type MockWeeklyReportNotes = {
+  /** Issues and help needed. */
+  issues: string
+  /** Reflection on the week. */
+  reflection: string
+}
+
+/** One Work Item row of a submitted section. */
+type MockWeeklyReportRow = {
+  /** Work Item ID. */
+  workItemId: string
+  /** Minutes recorded against it. */
+  minutes: number
+}
+
+/** A version submitted to the mock. */
+type MockWeeklyReportSubmission = {
+  /** Notes sent with the version. */
+  notes: MockWeeklyReportNotes
+  /** Work Item rows sent in each section. */
+  sections: Record<string, MockWeeklyReportRow[]>
+}
+
+/** The member's week as the mock stores it. */
+type MockWeeklyReportWeek = {
+  /** Saved revision of the notes. */
+  revision: number
+  /** Saved notes. */
+  notes: MockWeeklyReportNotes
+  /** Submitted versions, oldest first. */
+  submissions: MockWeeklyReportSubmission[]
+}
+
 /** Mutable state of the mocked time tracking API. */
 type TimeTrackingMockState = {
   /** Every stored entry. */
@@ -22,6 +56,8 @@ type TimeTrackingMockState = {
   writableProjectIds: string[]
   /** Day the Workspace week starts on, 0 (Sunday) to 6. */
   weekStartDay: number
+  /** The member's saved notes and submitted bodies of the weekly report, keyed by week. */
+  weeklyReports: Record<string, MockWeeklyReportWeek>
 }
 
 /**
@@ -31,7 +67,7 @@ type TimeTrackingMockState = {
  * @returns Mutable mock state.
  */
 async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
-  const state: TimeTrackingMockState = { entries: [], reasons: {}, isManager: false, idempotencyKeys: [], writableProjectIds: ['refero'], weekStartDay: 1 }
+  const state: TimeTrackingMockState = { entries: [], reasons: {}, isManager: false, idempotencyKeys: [], writableProjectIds: ['refero'], weekStartDay: 1, weeklyReports: {} }
   await page.clock.setFixedTime(new Date('2026-11-10T01:00:00.000Z'))
   await page.addInitScript(() => {
     localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'time-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
@@ -60,6 +96,59 @@ async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
   } } }))
   await page.route((url) => url.pathname === '/api/time-tracking/timers/active', (route) => route.fulfill({ json: { timer: null } }))
   await page.route((url) => url.pathname === '/api/workspace/calendar-settings', (route) => route.fulfill({ json: { fiscalYearStartMonth: 4, weekStartDay: state.weekStartDay } }))
+  await page.route((url) => url.pathname.startsWith('/api/teams/core-team/weekly-reports'), async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const parts = url.pathname.replace('/api/teams/core-team/weekly-reports', '').split('/').filter(Boolean).map(decodeURIComponent)
+    const titles: Record<string, string> = Object.fromEntries(workItems.map((item) => [item.id, item.title]))
+    /** Builds the report response of a week as the stored state says. */
+    const respond = (memberKey: string, weekStart: string, status = 200) => {
+      const stored = memberKey === 'demo@example.com' ? state.weeklyReports[weekStart] : undefined
+      const latest = stored?.submissions.at(-1)
+      const view = (rows: { workItemId: string; minutes: number }[]) => rows.map((row) => ({ hidden: false, workItemId: row.workItemId, title: titles[row.workItemId] ?? row.workItemId, minutes: row.minutes }))
+      return route.fulfill({ status, json: {
+        teamId: 'core-team',
+        memberKey,
+        weekStart,
+        submissionCount: stored?.submissions.length ?? 0,
+        ...(stored && memberKey === 'demo@example.com' ? { draft: { revision: stored.revision, updatedAt: '2026-11-10T01:00:00.000Z', notes: stored.notes } } : {}),
+        ...(latest ? { submission: {
+          version: stored?.submissions.length ?? 1,
+          submittedAt: '2026-11-10T01:00:00.000Z',
+          weekStart,
+          weekEnd: '2026-11-15',
+          sections: Object.fromEntries(['completed', 'started', 'overdue', 'upcoming'].map((name) => [name, view(latest.sections[name] ?? [])])),
+          time: [],
+          totalMinutes: 0,
+          timeIsPartial: false,
+          notes: latest.notes,
+        } } : {}),
+      } })
+    }
+    if (parts.length === 0) {
+      if (!state.isManager) return route.fulfill({ status: 403, json: { code: 'WeeklyReportForbidden' } })
+      const weekStart = url.searchParams.get('weekStart') ?? ''
+      return route.fulfill({ json: { teamId: 'core-team', weekStart, members: [
+        { memberKey: 'demo@example.com', submissionCount: state.weeklyReports[weekStart]?.submissions.length ?? 0, ...(state.weeklyReports[weekStart]?.submissions.length ? { lastSubmittedAt: '2026-11-10T01:00:00.000Z' } : {}) },
+        { memberKey: 'sato@example.com', submissionCount: 0 },
+      ] } })
+    }
+    const [memberKey = '', weekStart, action] = parts
+    if (weekStart === undefined) {
+      return route.fulfill({ json: { teamId: 'core-team', memberKey, weeks: Object.entries(state.weeklyReports).map(([week, stored]) => ({ weekStart: week, submissionCount: stored.submissions.length })) } })
+    }
+    if (request.method() === 'GET') return respond(memberKey, weekStart)
+    const input = request.postDataJSON()
+    const stored = state.weeklyReports[weekStart] ?? { revision: 0, notes: { issues: '', reflection: '' }, submissions: [] }
+    if (action === 'draft') {
+      if (input.expectedRevision !== stored.revision) return route.fulfill({ status: 409, json: { code: 'WeeklyReportConflict' } })
+      state.weeklyReports[weekStart] = { ...stored, revision: stored.revision + 1, notes: input.notes }
+      return respond(memberKey, weekStart)
+    }
+    if (input.expectedSubmissionCount !== stored.submissions.length || input.expectedRevision !== stored.revision) return route.fulfill({ status: 409, json: { code: 'WeeklyReportConflict' } })
+    state.weeklyReports[weekStart] = { revision: stored.revision + 1, notes: input.notes, submissions: [...stored.submissions, { notes: input.notes, sections: input.sections }] }
+    return respond(memberKey, weekStart, 201)
+  })
   await page.route((url) => url.pathname.startsWith('/api/teams/core-team/time') && !url.pathname.includes('/projects'), async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -305,7 +394,7 @@ test.describe('Time tracking', () => {
     })
 
     await page.goto('/teams/core-team/timesheet')
-    await page.getByRole('link', { name: 'Weekly report' }).click()
+    await page.getByRole('link', { name: 'Weekly report', exact: true }).click()
     await expect(page).toHaveURL(/view=weekly-report/u)
     const report = page.getByTestId('personal-weekly-report')
     await expect(report).toContainText('Reduce onboarding friction')
@@ -320,5 +409,56 @@ test.describe('Time tracking', () => {
     await page.getByRole('button', { name: 'Copy Markdown' }).click()
     await expect(page.getByRole('status').filter({ hasText: 'Copied.' })).toBeVisible()
     expect(await page.evaluate(() => navigator.clipboard.readText())).toContain('# Weekly report')
+  })
+
+  test('saves, submits, and reloads the member weekly report', async ({ page }) => {
+    const state = await mockTimeTracking(page)
+    await page.route((url) => url.pathname === '/api/work-items' && url.searchParams.get('involvement') === 'mine', (route) =>
+      route.fulfill({ json: { workItems: [{ ...workItems[0], statusCategory: 'completed', actualEndDate: '2026-11-10', schedule: { mode: 'unscheduled' } }] } }))
+
+    await page.goto('/teams/core-team/timesheet?view=weekly-report&week=2026-11-09')
+    const report = page.getByTestId('personal-weekly-report')
+    await expect(report.getByTestId('weekly-report-status')).toHaveText('Not submitted')
+    await page.getByLabel('Issues and requests for help').fill('Waiting for review.')
+    await expect(report).toContainText('You have unsaved changes.')
+    await page.getByRole('button', { name: 'Save draft', exact: true }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'Saved.' })).toBeVisible()
+    expect(state.weeklyReports['2026-11-09']?.notes.issues).toBe('Waiting for review.')
+
+    await page.getByLabel('Reflection').fill('Onboarding shipped.')
+    await page.getByRole('button', { name: 'Submit', exact: true }).click()
+    await expect(page.getByRole('status').filter({ hasText: 'Submitted.' })).toBeVisible()
+    await expect(report.getByTestId('weekly-report-status')).toContainText('Submitted (version 1')
+    const submitted = state.weeklyReports['2026-11-09']?.submissions[0]
+    expect(submitted?.notes).toEqual({ issues: 'Waiting for review.', reflection: 'Onboarding shipped.' })
+    expect(submitted?.sections.completed).toEqual([{ workItemId: 'onboarding', minutes: 0 }])
+
+    await page.reload()
+    await expect(page.getByLabel('Reflection')).toHaveValue('Onboarding shipped.')
+    await expect(page.getByRole('button', { name: 'Submit again', exact: true })).toBeVisible()
+    await expect(page.getByTestId('weekly-report-history')).toContainText('Submitted (version 1)')
+  })
+
+  test('shows a manager who submitted the weekly report and what they wrote', async ({ page }) => {
+    const state = await mockTimeTracking(page)
+    state.isManager = true
+    state.weeklyReports['2026-11-09'] = {
+      revision: 1,
+      notes: { issues: '', reflection: 'Good week.' },
+      submissions: [{ notes: { issues: '', reflection: 'Good week.' }, sections: { completed: [{ workItemId: 'onboarding', minutes: 60 }] } }],
+    }
+
+    await page.goto('/teams/core-team/timesheet?view=team-weekly-reports&week=2026-11-09')
+    const view = page.getByTestId('team-weekly-reports')
+    await expect(view).toContainText('1 of 2 submitted')
+    await view.getByRole('button', { name: /Demo Member/u }).click()
+    await expect(view.getByTestId('submitted-weekly-report')).toContainText('Reduce onboarding friction')
+    await expect(view.getByTestId('submitted-weekly-report')).toContainText('Good week.')
+  })
+
+  test('tells a member without a managed Project that the Team weekly reports are for managers', async ({ page }) => {
+    await mockTimeTracking(page)
+    await page.goto('/teams/core-team/timesheet?view=team-weekly-reports&week=2026-11-09')
+    await expect(page.getByTestId('team-weekly-reports')).toContainText('Only Team managers')
   })
 })

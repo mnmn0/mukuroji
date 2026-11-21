@@ -10,9 +10,9 @@ import type {
   TenantRetentionReconciliation,
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
-  WorkspaceCalendarSettings,
+  WorkspaceCalendarSettingsResponse,
 } from '@mukuroji/contracts'
-import { readWorkspaceCalendarSettings } from '@mukuroji/contracts'
+import { readWorkspaceCalendarSettings, readWorkspaceNationalHolidayDates } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { WorkspaceAccessApiError } from './errors'
 import { isRecord } from '../../shared/api/jsonValidation'
@@ -43,22 +43,22 @@ export async function getTenantAdministration(
  *
  * @param accessToken - Bearer token used for the read.
  * @param signal - Optional cancellation signal for the request.
- * @returns The validated Workspace calendar settings.
+ * @returns The validated Workspace calendar settings, with the national holiday dates the server
+ *   uses when it sends them.
  * @throws WorkspaceAccessApiError When the request fails or the response is malformed.
  */
 export async function getWorkspaceCalendarSettings(
   accessToken: string,
   signal?: AbortSignal,
-): Promise<WorkspaceCalendarSettings> {
-  const settings = readWorkspaceCalendarSettings(await sendTenantRequest(
-    '/workspace/calendar-settings',
-    accessToken,
-    { signal },
-  ))
+): Promise<WorkspaceCalendarSettingsResponse> {
+  const body = await sendTenantRequest('/workspace/calendar-settings', accessToken, { signal })
+  const settings = readWorkspaceCalendarSettings(body)
   if (!settings) {
     throw new WorkspaceAccessApiError(502, 'tenant.administration.invalidResponse')
   }
-  return settings
+  // A missing or malformed list falls back to the bundled national holidays.
+  const nationalHolidayDates = readWorkspaceNationalHolidayDates(body)
+  return nationalHolidayDates ? { ...settings, nationalHolidayDates } : settings
 }
 
 /**

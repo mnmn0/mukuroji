@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   DEFAULT_WORK_ITEM_TYPE,
+  DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ApiProblem,
   type CanonicalWorkItem,
@@ -14,6 +15,7 @@ import {
   type ImportReport,
   type ImportRowError,
   type UpdatePublicWorkItemRequest,
+  type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -185,6 +187,7 @@ import {
   withWorkItemPlannedEffort,
 } from '../shared/work-item-effort'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
+import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
   rejectInternalWorkItemCreateFields,
@@ -734,19 +737,68 @@ export type IdempotentWorkItemCreate = {
   requestDigest: string
 }
 
+/** Work Item create input that may leave out its schedule to use the Workspace working calendar. */
+type PublicCreateWorkItemInput = Omit<CreateWorkItemInput, 'schedule'> & {
+  /** Complete schedule; the Workspace working calendar is used when it is left out. */
+  schedule?: CreateWorkItemInput['schedule']
+  /** Deadline of a Work Item created without a schedule. */
+  dueDate?: string
+}
+
+/**
+ * Rejects internal fields of a public create input.
+ *
+ * `dueDate` is a create field of the Public API, used only when the schedule is left out, so it is
+ * set aside before the shared check that rejects a written `dueDate`.
+ *
+ * @param input - Create input from the client.
+ */
+function rejectInternalPublicCreateWorkItemFields(input: PublicCreateWorkItemInput): void {
+  const { dueDate: _dueDate, ...fields } = input
+  rejectInternalWorkItemCreateFields(fields)
+}
+
+/**
+ * Gives a Work Item created without a schedule the Workspace working calendar.
+ *
+ * The Workspace calendar is read only when the schedule is left out, so a complete schedule is
+ * stored as sent. The new schedule is due on `dueDate`, or unscheduled without one.
+ *
+ * @param directoryId - Workspace directory that owns the new Work Item.
+ * @param input - Create input from the client.
+ * @returns The input with a complete canonical schedule and no `dueDate`.
+ */
+async function completePublicCreateWorkItemSchedule(
+  directoryId: string,
+  input: PublicCreateWorkItemInput,
+): Promise<CreateWorkItemInput> {
+  const { schedule, dueDate, ...fields } = input
+  if (schedule) return { ...fields, schedule }
+  const calendarPolicy = await readWorkspaceWorkItemCalendarPolicy(directoryId)
+  return {
+    ...fields,
+    schedule: dueDate === undefined
+      ? { mode: 'unscheduled', calendarPolicy }
+      : { mode: 'due-date', dueDate, calendarPolicy },
+  }
+}
+
 async function createCanonicalPublicWorkItem(
   principal: WorkspacePrincipal,
   teamId: string,
-  input: CreateWorkItemInput,
+  input: PublicCreateWorkItemInput,
   context: PublicMutationContext,
   requestPath: string,
   idempotentCreate?: IdempotentWorkItemCreate,
   authorizationSnapshot?: WorkItemAuthorizationSnapshot,
 ) {
-  rejectInternalWorkItemCreateFields(input)
+  rejectInternalPublicCreateWorkItemFields(input)
   requireWorkspaceBusinessWrite(principal)
   const permission = await requireTeamPermission(principal, teamId, 'member')
-  const body = normalizeTeamIssueInput(input, permission.team)
+  const body = normalizeTeamIssueInput(
+    await completePublicCreateWorkItemSchedule(principal.directoryId, input),
+    permission.team,
+  )
   const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
     principal.directoryId,
     permission.team,
@@ -1504,7 +1556,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
 
     async authorizeCreate(credential, input) {
       const { teamId, ...workItemInput } = input
-      rejectInternalWorkItemCreateFields(workItemInput)
+      rejectInternalPublicCreateWorkItemFields(workItemInput)
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write',
         teamId,
@@ -1526,7 +1578,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
 
     async create(credential, input, context) {
       const { teamId, ...workItemInput } = input
-      rejectInternalWorkItemCreateFields(workItemInput)
+      rejectInternalPublicCreateWorkItemFields(workItemInput)
       const authorization = await resolveStableWorkItemAuthorization(
         credential.workspaceId,
         async () => await resolveDeveloperCredentialPrincipal(credential, {
@@ -1878,6 +1930,8 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         }
       }
       await requirePublicImportPermission(principal, input)
+      // Read before the job exists, so a failed read leaves nothing to fail and the client can retry.
+      const defaultCalendarPolicy = await readWorkspaceWorkItemCalendarPolicy(principal.directoryId)
       const jobId = createWorkItemImportJobId(
         principal.directoryId,
         principal.userKey,
@@ -1917,6 +1971,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           format: input.format,
           sourceContent: input.source.content,
           mapping: input.mapping,
+          defaultCalendarPolicy,
           requestFingerprint: createHash('sha256')
             .update(`management-import-v1\n${mutationContext.idempotencyKey}`)
             .digest('hex'),
@@ -2617,9 +2672,20 @@ async function requirePublicImportPermission(
   return permission
 }
 
+/**
+ * Validates an import source against the current permissions and Team configuration.
+ *
+ * @param principal - Workspace principal running the import.
+ * @param input - Import source, Team, and mapping.
+ * @param calendarPolicy - Calendar policy for rows without one. A queued execution passes the
+ *   policy it pinned, so a retry keeps each row's request digest; otherwise the current Workspace
+ *   working calendar is read.
+ * @returns The dry-run report and the valid row inputs.
+ */
 async function validatePublicImport(
   principal: WorkspacePrincipal,
   input: PublicImportSourceInput,
+  calendarPolicy?: WorkItemScheduleCalendarPolicy,
 ) {
   const permission = await requirePublicImportPermission(principal, input)
   const configuration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
@@ -2630,6 +2696,7 @@ async function validatePublicImport(
     input.format,
     input.source.content,
     input.mapping,
+    calendarPolicy ?? await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
   )
   const errorsByRow = new Map<number, ImportRowError[]>(
     preview.rows.map((row) => [row.row, [...row.errors]]),
@@ -2966,6 +3033,8 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
     async validate(execution, sourceContent) {
       try {
         const principal = await resolveWorkItemImportPrincipal(execution)
+        // Rows keep the calendar pinned when the job was staged, so a retry hashes the same input.
+        // An execution staged before the calendar was pinned validated its rows with the default.
         const validation = await validatePublicImport(principal, {
           format: execution.format,
           source: {
@@ -2978,7 +3047,7 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
             ? { assignedProjectId: execution.assignedProjectId }
             : {}),
           mapping: execution.mapping,
-        })
+        }, execution.defaultCalendarPolicy ?? DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY)
         return { report: validation.report, rows: validation.validInputs }
       } catch (error) {
         throw toWorkItemImportWorkerError(error)
@@ -3085,7 +3154,7 @@ function createPublicApiWorkItemCreateIdentity(
   credentialId: string,
   context: PublicMutationContext,
   teamId: string,
-  input: CreateWorkItemInput,
+  input: PublicCreateWorkItemInput,
 ): IdempotentWorkItemCreate {
   const requestIdentity =
     `${workspaceId}\n${credentialId}\n${context.idempotencyKey}\n${teamId}`

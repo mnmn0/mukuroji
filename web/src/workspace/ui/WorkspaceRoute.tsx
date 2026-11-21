@@ -512,6 +512,7 @@ function WorkspaceRouteShell({
           onSelectNav={workspace.onSelectNav}
           onSelectProject={workspace.onSelectProject}
           onSelectTeamView={workspace.onSelectTeamView}
+          showFactoryBoard={workspace.softwareFactoryEnabled}
           onShowAllQuickAccess={() => navigate(createQuickAccessProjectsPath())}
           onShowAllProjects={() => navigate(createProjectsPath())}
           quickAccessProjects={workspace.quickAccessProjects}

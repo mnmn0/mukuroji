@@ -1416,6 +1416,10 @@
           "description": {
             "type": "string"
           },
+          "dueDate": {
+            "$ref": "#/components/schemas/WorkItemScheduleDate",
+            "description": "Deadline for a Work Item created without schedule; it gets a due-date schedule under the Workspace working calendar. Cannot be combined with schedule."
+          },
           "priority": {
             "enum": [
               "high",
@@ -1429,7 +1433,8 @@
             "type": "boolean"
           },
           "schedule": {
-            "$ref": "#/components/schemas/WorkItemSchedule"
+            "$ref": "#/components/schemas/WorkItemSchedule",
+            "description": "Complete schedule with its calendar policy. When left out, the Work Item uses the Workspace working calendar (working weekdays, company holidays, and national holidays) and is due on dueDate, or unscheduled without one. Cannot be combined with dueDate."
           },
           "teamId": {
             "type": "string"
@@ -1450,7 +1455,6 @@
           "teamId",
           "title",
           "assigneeUserId",
-          "schedule",
           "priority"
         ],
         "type": "object"

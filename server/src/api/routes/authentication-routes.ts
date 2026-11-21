@@ -22,6 +22,7 @@ import {
 } from '../../modules/enterprise-identity'
 import { readCognitoMfaSetupChallenge } from '../shared/account-security'
 import { canManageAiAssistanceWorkspace } from '../shared/ai-assistance-access'
+import { isSoftwareFactoryDeployed } from '../../infrastructure/config/software-factory'
 import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { consumeAuthenticationAttempt } from '../shared/authentication-attempt-limit'
 import { createAuthenticationResponse, toProjectPrincipal } from '../shared/authentication-session'
@@ -814,6 +815,7 @@ export function registerAuthenticationRoutes(routeApp: Hono): void {
         canManageCustomerRequests: hasCustomerManagementAccess(principal),
         canViewCustomerSensitiveData: hasCustomerManagementAccess(principal),
         canManageCustomerViews: canManageCustomerViews(principal),
+        softwareFactoryEnabled: isSoftwareFactoryDeployed(),
       })
     } catch (error) {
       if (error instanceof WorkspaceAccessError) {

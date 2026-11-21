@@ -164,6 +164,7 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   canManageCustomerRequests: true,
   canManageCustomerViews: true,
   canViewCustomerSensitiveData: true,
+  softwareFactoryEnabled: true,
   canLoadWorkspaceData: true,
   canManageWorkspaceConfiguration: true,
   canMutateTeamConfiguration: true,

@@ -180,6 +180,11 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
 coding agent に任せる作業の範囲を Team ごとに決めます。**設定** → **Team** → **エージェント設定**
 （変更は Team の管理者のみ）。仕組みは [`docs/software-factory.md`](../software-factory.md)。
 
+この欄は Software factory を有効にして deploy した環境（CDK context `mukuroji:softwareFactory=true`）にだけ
+表示されます。既定の deploy では Factory board、agent 接続、Work Item の「エージェントへ引き継ぐ」と Run 履歴も
+表示されず、API は Agent Run 系の操作を `503 SoftwareFactoryNotDeployed` で断ります
+（[`cdk/README.md`](../../cdk/README.md#optional-modules)）。
+
 - 「リース時間（分）」: agent が作業を確保しておける時間（5〜240分、既定30分）。
   期限切れ後に同じ担当者の別インスタンスが引き継ぐことを許可するかも選べます。
 - 「着手可能なステータス」: agent に提示してよい状態（バックログ / 未着手の区分から選ぶ）。
@@ -264,9 +269,13 @@ Project）・ロールを選んで **割り当てを追加** します。SCIM �
 
 - 「テナント profile」: owner、region、locale、招待時にロールを省略したときの「既定 member role」。
   「会計年度の開始月」と「週の開始曜日」もここで決めます。週の開始曜日は工数のタイムシート・承認・週報の週と、レポートの期間（今週・先週）に使われます。会計年度の開始月はレポートの期間（今四半期・今年度など）に使われます。決めていなければ 1 月始まり・月曜始まりです。
-  「稼働曜日」と「会社の休日」（日付を選んで **休日を追加**、最大512日）も Workspace 全体で決めます。
-  task 画面から新しく作る Work Item はこの稼働曜日と休日で稼働日数を数え、Gantt の日単位の列では稼働日でない日を網掛けします。
-  すでにある Work Item の日程は変わりません。決めていなければ月〜金が稼働日で、休日はありません。
+  「稼働曜日」、「日本の祝日を休日にする」、「会社の休日」（日付を選んで **休日を追加**、最大512日）も Workspace 全体で決めます。
+  日本の祝日（振替休日を含む）は内閣府が公表する一覧を毎月初めに自動で取り込むので、会社の休日に足す必要はありません。
+  取り込めないときは前回取り込んだ一覧、それも無ければアプリに同梱した一覧を使います（出典: 内閣府「国民の祝日」について）。
+  新しく作る Work Item は、task 画面・Team の Issue 画面・Public API・MCP・Project template の適用・依頼フォーム・import の
+  どれから作っても、この稼働曜日と休日で稼働日数を数えます。Project・Team の Issue・My Tasks の Gantt の日単位の列では、
+  稼働日でない日を網掛けします。
+  すでにある Work Item の日程は変わりません。決めていなければ月〜金が稼働日で、日本の祝日が休日です。
 - 「データ governance」: 監査ログの保持日数（30日以上）と legal hold。
 - 「Export と閉鎖」: テナント全体の export（成果物は30日で失効）と、テナントの閉鎖
   （`CLOSE` と入力して開始。中断・再開・検証ができます）。

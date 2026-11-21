@@ -8,6 +8,11 @@ Software factory とは、要求が Work Item として入ってから、Ready �
 Codex、Kiro など）が [Coding Agent MCP](coding-agent-mcp.md) を通じて参加し、人は判断点だけに
 介在し、作業の証拠が mukuroji に残る状態を指す。
 
+Software factory は deploy 時の任意 module である（CDK context `mukuroji:softwareFactory`、既定は off。
+[ADR 0029](adr/0029-software-factory-deploy-switch.md)）。off の deploy では API が Agent Run、Team の agent 設定、
+本人用 agent token の発行を `503 SoftwareFactoryNotDeployed` で断り、Agent Run triage job は動かず、Web は入口を
+表示しない。Public API の Work Item の読み書きは off でも使える。
+
 Phase 1 の範囲は次の 5 つである。
 
 1. Agent Run: agent process による Work Item の claim を表す entity と lease

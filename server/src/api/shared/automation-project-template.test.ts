@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test'
+import type { WorkItemScheduleWeekday } from '@mukuroji/contracts'
 import { expandProjectTemplateWorkItems } from './automation-project-template'
 
 test('places template Work Items on working days from the Project start, parents first', () => {
@@ -33,4 +34,22 @@ test('places template Work Items on working days from the Project start, parents
     mode: 'date-range',
     calendarPolicy: { workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'], holidays: [] },
   })
+})
+
+test('counts template working days with the given Workspace calendar and keeps it on every Work Item', () => {
+  const calendarPolicy = {
+    timeZone: 'Asia/Tokyo',
+    workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'] satisfies WorkItemScheduleWeekday[],
+    holidays: ['2026-12-08'],
+  }
+  const expanded = expandProjectTemplateWorkItems([
+    { title: '要件定義', startOffsetWorkingDays: 0, durationWorkingDays: 3 },
+  ], '2026-12-07', calendarPolicy)
+  expect(expanded[0]?.schedule).toMatchObject({
+    startDate: '2026-12-07',
+    endDate: '2026-12-10',
+    durationDays: 3,
+    calendarPolicy: { holidays: ['2026-12-08'] },
+  })
+  expect(expanded[0]?.schedule.calendarPolicy).not.toBe(calendarPolicy)
 })

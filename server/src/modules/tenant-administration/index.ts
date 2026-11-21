@@ -67,3 +67,16 @@ export type {
   TenantOperationResourceOwnerResult,
   TenantOperationResourceOwnerExecutorOptions,
 } from './application/tenant-operation-resource-owner'
+export {
+  CABINET_OFFICE_HOLIDAYS_CSV_URL,
+  JapanesePublicHolidaySourceError,
+  type StoredJapanesePublicHolidays,
+} from './domain/japanese-public-holidays'
+export {
+  createJapanesePublicHolidayDates,
+  syncJapanesePublicHolidays,
+  type JapanesePublicHolidayDates,
+  type JapanesePublicHolidayStore,
+} from './application/japanese-public-holiday-sync'
+export { DynamoDbJapanesePublicHolidayStore } from './adapter-out/dynamodb/japanese-public-holiday-store'
+export { createCabinetOfficeHolidaySource } from './adapter-out/http/cabinet-office-holiday-source'

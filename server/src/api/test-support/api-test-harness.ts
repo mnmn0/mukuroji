@@ -1483,6 +1483,15 @@ function configureFakeProjectClients(
       /** Canonical owner Team when the test exercises duplicate Project IDs. */
       teamId?: string
     }>
+    /** Access entries returned for other members, keyed by member key, instead of {@link projectAccesses}. */
+    projectAccessesByMember?: Record<string, Array<{
+      /** Project identifier returned by the fake access directory. */
+      projectId: string
+      /** Optional role granted to the member. */
+      role?: ProjectRole
+      /** Canonical owner Team when the test exercises duplicate Project IDs. */
+      teamId?: string
+    }>>
     role?: ProjectRole
     /** Cognito current group membership fake が返す group 名です。 */
     cognitoUserGroups?: string[]
@@ -2368,6 +2377,11 @@ function configureFakeProjectClients(
 
         if (options.mentionAccessDeniedMemberKeys?.includes(memberKey)) {
           return []
+        }
+
+        const memberAccesses = options.projectAccessesByMember?.[memberKey]
+        if (memberAccesses) {
+          return memberAccesses
         }
 
         if (options.projectAccesses) {

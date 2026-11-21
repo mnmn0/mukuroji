@@ -2,6 +2,7 @@ import type {
   CanonicalWorkItem,
   CreateWorkItemInput,
   WorkItemPatch,
+  WorkItemSchedule,
 } from './work-items'
 import type { WorkItemAcceptanceCriterionMark } from './work-item-acceptance-criteria'
 import type {
@@ -1506,11 +1507,22 @@ export type ListPublicWorkItemsRequest = {
  *
  * Contributors are managed only through the Workspace API, so `contributorAssignments` is not accepted.
  */
-export type CreatePublicWorkItemRequest = Omit<CreateWorkItemInput, 'contributorAssignments'> & {
+export type CreatePublicWorkItemRequest = Omit<CreateWorkItemInput, 'contributorAssignments' | 'schedule'> & {
   /**
    * Work Item を所有する Team ID です。
    */
   teamId: string
+  /**
+   * Complete schedule with its calendar policy. When it is left out, the Work Item uses the
+   * Workspace working calendar (working weekdays, company holidays, and national holidays) and is
+   * due on `dueDate`, or unscheduled without one. Cannot be combined with `dueDate`.
+   */
+  schedule?: WorkItemSchedule
+  /**
+   * Deadline as a local `YYYY-MM-DD` date for a Work Item created without `schedule`; it gets a
+   * due-date schedule under the Workspace working calendar.
+   */
+  dueDate?: string
 }
 
 /**

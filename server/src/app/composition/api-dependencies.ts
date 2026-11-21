@@ -11,7 +11,12 @@ import {
   DynamoDbProjectRaidLogStore,
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
-import { AI_ASSISTANCE_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  DynamoDbWeeklyReportStore,
+  InMemoryWeeklyReportStore,
+} from '../../modules/weekly-reports'
+import { AI_ASSISTANCE_SCHEMA_VERSION, listJapanesePublicHolidays } from '@mukuroji/contracts'
+import { createProductionJapanesePublicHolidayDates } from './japanese-public-holidays'
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
 import {
   createCanonicalPublicAgentRunService,
@@ -377,7 +382,7 @@ function createCapacityPlanningDataSource(
       return entries.map((entry) => ({
         memberId: entry.userId,
         ...(entry.projectId ? { projectId: entry.projectId } : {}),
-        workItemId: entry.workItemId,
+        ...(entry.workItemId ? { workItemId: entry.workItemId } : {}),
         startAt: entry.startAt,
         endAt: entry.endAt,
         durationMinutes: entry.durationMinutes,
@@ -548,6 +553,7 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
     tenantAdministration,
+    nationalHolidays: createProductionJapanesePublicHolidayDates(),
     tenantExportDownload: createProductionTenantExportDownloadClient(),
     tenantLifecycleEnforcement: tenantAdministration,
   }
@@ -608,6 +614,12 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
+    ),
+    weeklyReports: new DynamoDbWeeklyReportStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+      loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
     ),
     scheduleBaselines: new DynamoDbProjectScheduleBaselineStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
@@ -1636,12 +1648,33 @@ export function createTestAppDependencies(): AppDependencies {
       },
     }),
   }
+  // Work Item creation reads the Workspace working calendar; tests without a tenant table read it
+  // as never saved, which gives the default calendar.
+  const tenantAdministration = new Proxy(production.workspace.tenantAdministration, {
+    /**
+     * Answers `getProfile` as never saved and forwards every other member.
+     *
+     * @param target - Production tenant administration client.
+     * @param property - Member being read.
+     * @param receiver - Proxy the member is read through.
+     * @returns The member to use.
+     */
+    get(target, property, receiver) {
+      if (property === 'getProfile') {
+        return async () => undefined
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
   const timeTrackingService = new TimeTrackingService(new InMemoryTimeTrackingRepository())
   return {
     ...production,
     operational: createTestOperationalDependencies(),
     workspace: {
       ...production.workspace,
+      tenantAdministration,
+      // Tests have no synced list, so the bundled national holidays are used.
+      nationalHolidays: { listDates: async () => listJapanesePublicHolidays().map((holiday) => holiday.date) },
       customers: new InMemoryCustomerClient(),
       tenantLifecycleEnforcement: createTestTenantLifecycleEnforcement(),
     },
@@ -1652,6 +1685,7 @@ export function createTestAppDependencies(): AppDependencies {
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
+      weeklyReports: new InMemoryWeeklyReportStore(),
       scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
       collections: new InMemoryCollectionsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
@@ -1781,6 +1815,7 @@ export function overrideAppDependencies(
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
+      ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),
       ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),
       ...(overrides.collections ? { collections: overrides.collections } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),

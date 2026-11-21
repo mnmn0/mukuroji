@@ -57,6 +57,7 @@ import type { RequestIntakeClient } from '../../modules/request-intake/request-i
 import type { TriageClient } from '../../modules/triage'
 import type { ProjectScheduleBaselineStore, TeamIssuesClient } from '../../modules/work-items'
 import type { ProjectRaidLogStore } from '../../modules/project-raid-log'
+import type { WeeklyReportStore } from '../../modules/weekly-reports'
 import type { WorkItemConfigurationClient } from '../../modules/work-items/work-item-configuration'
 import type {
   WorkItemImportExecutionStore,
@@ -66,6 +67,7 @@ import type {
 import type { WorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import type {
+  JapanesePublicHolidayDates,
   TenantAdministrationClient,
   TenantLifecycleEnforcement,
   TenantExportDownloadPort,
@@ -140,6 +142,8 @@ export interface WorkspaceDependencies {
   enterpriseIdentityProviderConnectionTester: EnterpriseIdentityProviderConnectionTester
   /** Provides tenant profile, governance, and lifecycle state. */
   tenantAdministration: TenantAdministrationClient
+  /** Lists the Japanese national holiday dates new Work Items use. */
+  nationalHolidays: JapanesePublicHolidayDates
   /** Provides authorized access to completed tenant export artifacts. */
   tenantExportDownload: TenantExportDownloadPort
   /** Enforces tenant lifecycle state at authenticated route boundaries. */
@@ -198,6 +202,8 @@ export interface WorkItemDependencies {
   savedUpdateFeeds: SavedUpdateFeedsPersistence
   /** Provides each Project's risk, issue, and change request log. */
   projectRaidLogs: ProjectRaidLogStore
+  /** Provides members' saved and submitted weekly reports. */
+  weeklyReports: WeeklyReportStore
   /** Provides the latest schedule baseline of each Project. */
   scheduleBaselines: ProjectScheduleBaselineStore
   /** Provides Workspace Collections that reference canonical Work Items. */

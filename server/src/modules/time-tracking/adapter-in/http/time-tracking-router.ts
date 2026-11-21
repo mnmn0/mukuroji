@@ -9,6 +9,7 @@ import {
 import {
   TimeTrackingError,
   type CreateTimeEntryInput,
+  type TimeTrackingAuthorizationConditionCheck,
   type TimeTrackingReportInput,
   type TimeTrackingService,
 } from '../../time-tracking'
@@ -35,12 +36,25 @@ export type TimeTrackingRouterDependencies<Principal extends TimeTrackingPrincip
   canManageRates(principal: Principal, teamId: string): Promise<boolean>
   /** Returns the Project allowlist visible inside the selected Team. */
   getAccessibleProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
+  /**
+   * Returns whether the principal manages every Project of a Team: a system administrator or a
+   * direct Team grant with manage permission, not a manager of only some Projects.
+   */
+  canManageWholeTeam(principal: Principal, teamId: string): Promise<boolean>
   /** Returns the Project IDs for which the principal may view confidential costs. */
   getManagedProjectIds(principal: Principal, teamId: string): Promise<ReadonlySet<string> | undefined>
   /** Verifies Project-level access for a Team operation. */
   verifyProject(principal: Principal, teamId: string, projectId: string, minimum: 'viewer' | 'member' | 'manager'): Promise<void>
   /** Verifies that a referenced Work Item belongs to the selected Team. */
   verifyWorkItem(principal: Principal, teamId: string, workItemId: string, minimum?: 'viewer' | 'member' | 'manager'): Promise<string | undefined>
+  /**
+   * Builds read-only checks on the caller's authorization rows, committed with a delete so a
+   * member whose access was removed after the route's check cannot delete.
+   *
+   * @param principal - Entry owner the route authorized.
+   * @returns Transaction condition checks; empty when the deployment has none to fence.
+   */
+  createAuthorizationConditionChecks(principal: Principal): readonly TimeTrackingAuthorizationConditionCheck[]
   /** Returns the application service bound to the current app. */
   getTimeTracking(): TimeTrackingService
   /** Safely parses a JSON request body. */
@@ -58,26 +72,29 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
   router.post('/api/teams/:teamId/time-entries', async (context) => {
     return await withTeam(context, dependencies, 'member', async (principal, teamId, canManage) => {
       const body = asRecord(await dependencies.readJson(context.req))
-      const workItemId = readRequiredString(body.workItemId, 'Work Item ID')
-      const canonicalProjectId = await dependencies.verifyWorkItem(principal, teamId, workItemId, 'member')
+      // Indirect work, such as a meeting, has no Work Item; its Project, when given, is checked directly.
+      const workItemId = body.workItemId === undefined ? undefined : readRequiredString(body.workItemId, 'Work Item ID')
       const requestedProjectId = readOptionalString(body.projectId)
-      if (requestedProjectId !== undefined && requestedProjectId !== canonicalProjectId) {
+      const projectId = workItemId === undefined
+        ? requestedProjectId
+        : await dependencies.verifyWorkItem(principal, teamId, workItemId, 'member')
+      if (workItemId !== undefined && requestedProjectId !== undefined && requestedProjectId !== projectId) {
         throw new TimeTrackingError(400, 'WorkItemProjectMismatch', 'The Project must match the Work Item assignment.')
       }
-      if (canonicalProjectId) {
+      if (projectId) {
         await dependencies.verifyProject(
           principal,
           teamId,
-          canonicalProjectId,
+          projectId,
           body.hourlyRateMinor === undefined ? 'member' : 'manager',
         )
       }
       const entry = await dependencies.getTimeTracking().createEntry({
         workspaceId: principal.directoryId,
         teamId,
-        workItemId,
+        ...(workItemId ? { workItemId } : {}),
         userId: principal.userKey,
-        ...(canonicalProjectId ? { projectId: canonicalProjectId } : {}),
+        ...(projectId ? { projectId } : {}),
         ...readCreateInterval(body),
         ...(body.category === undefined ? {} : { category: readCategory(body.category) }),
         ...(readOptionalString(body.description) ? { description: readOptionalString(body.description) } : {}),
@@ -127,14 +144,27 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         teamId,
         readRequiredString(context.req.param('entryId'), 'Time entry ID'),
       )
-      const currentProjectId = await dependencies.verifyWorkItem(principal, teamId, current.workItemId, 'member')
+      const currentProjectId = current.workItemId === undefined
+        ? current.projectId
+        : await dependencies.verifyWorkItem(principal, teamId, current.workItemId, 'member')
+      if (current.workItemId === undefined && current.projectId) {
+        await dependencies.verifyProject(principal, teamId, current.projectId, 'member')
+      }
       const nextWorkItemId = body.workItemId === undefined
         ? current.workItemId
-        : readRequiredString(body.workItemId, 'Work Item ID')
-      const nextProjectId = body.workItemId === undefined
-        ? currentProjectId
-        : await dependencies.verifyWorkItem(principal, teamId, nextWorkItemId, 'member')
-      if (body.projectId !== undefined && body.projectId !== null && readRequiredString(body.projectId, 'Project ID') !== nextProjectId) {
+        : body.workItemId === null
+          ? undefined
+          : readRequiredString(body.workItemId, 'Work Item ID')
+      const requestedProjectId = body.projectId === undefined || body.projectId === null
+        ? body.projectId
+        : readRequiredString(body.projectId, 'Project ID')
+      // A Work Item entry takes the Work Item's Project; indirect work keeps or names its own.
+      const nextProjectId = nextWorkItemId === undefined
+        ? requestedProjectId === undefined ? current.projectId : requestedProjectId ?? undefined
+        : body.workItemId === undefined
+          ? currentProjectId
+          : await dependencies.verifyWorkItem(principal, teamId, nextWorkItemId, 'member')
+      if (nextWorkItemId !== undefined && typeof requestedProjectId === 'string' && requestedProjectId !== nextProjectId) {
         throw new TimeTrackingError(400, 'WorkItemProjectMismatch', 'The Project must match the Work Item assignment.')
       }
       if (nextProjectId) {
@@ -157,9 +187,8 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         canManageRates: canManageEntry,
         expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
         authorizedRevision: current.revision,
-        ...(body.startAt === undefined ? {} : { startAt: readRequiredString(body.startAt, 'Start time') }),
-        ...(body.endAt === undefined ? {} : { endAt: readRequiredString(body.endAt, 'End time') }),
-        ...(body.workItemId === undefined ? {} : { workItemId: readRequiredString(body.workItemId, 'Work Item ID') }),
+        ...readUpdateInterval(body),
+        ...(body.workItemId === undefined ? {} : { workItemId: nextWorkItemId ?? null }),
         projectId: nextProjectId ?? null,
         ...(body.category === null ? { category: null } : body.category === undefined ? {} : { category: readCategory(body.category) }),
         ...(body.description === null ? { description: null } : body.description === undefined ? {} : { description: readRequiredString(body.description, 'Description') }),
@@ -172,7 +201,35 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     })
   })
 
-  for (const action of ['submit', 'approve', 'reject', 'lock'] as const) {
+  router.delete('/api/teams/:teamId/time-entries/:entryId', async (context) => {
+    return await withTeam(context, dependencies, 'member', async (principal, teamId) => {
+      const entryId = readRequiredString(context.req.param('entryId'), 'Time entry ID')
+      const expectedRevision = readExpectedRevisionQuery(context.req.query('expectedRevision'))
+      const idempotencyKey = readOptionalIdempotencyKey(context)
+      const current = await readEntryUnlessReplayable(dependencies.getTimeTracking(), principal.directoryId, teamId, entryId, idempotencyKey)
+      if (current) {
+        // Only the owner may delete, and still needs write access to the Project the time is stored on.
+        // The Work Item is not checked, so a draft on a Work Item that was removed can still be deleted.
+        if (current.userId !== principal.userKey) {
+          throw new TimeTrackingError(403, 'TimeEntryAccessDenied', 'Only the entry owner may delete this entry.')
+        }
+        if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, 'member')
+      }
+      await dependencies.getTimeTracking().deleteEntry({
+        workspaceId: principal.directoryId,
+        teamId,
+        entryId,
+        actorUserId: principal.userKey,
+        expectedRevision,
+        ...(current ? { authorizedRevision: current.revision } : {}),
+        authorizationConditionChecks: dependencies.createAuthorizationConditionChecks(principal),
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+      })
+      return context.body(null, 204)
+    })
+  })
+
+  for (const action of ['submit', 'approve', 'reject', 'lock', 'return'] as const) {
     router.post(`/api/teams/:teamId/time-entries/:entryId/${action}`, async (context) => {
       const minimum = action === 'submit' ? 'member' : 'manager'
       return await withTeam(context, dependencies, minimum, async (principal, teamId, canManage) => {
@@ -182,7 +239,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
           teamId,
           readRequiredString(context.req.param('entryId'), 'Time entry ID'),
         )
-        await dependencies.verifyWorkItem(principal, teamId, current.workItemId, minimum)
+        if (current.workItemId) await dependencies.verifyWorkItem(principal, teamId, current.workItemId, minimum)
         if (current.projectId) await dependencies.verifyProject(principal, teamId, current.projectId, minimum)
         const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
         const entry = await dependencies.getTimeTracking().transitionEntry({
@@ -257,6 +314,45 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
     })
   }
 
+  router.get('/api/teams/:teamId/time-periods', async (context) => {
+    return await withTeam(context, dependencies, 'viewer', async (principal, teamId) => {
+      const closedPeriods = await dependencies.getTimeTracking().listClosedPeriods(principal.directoryId, teamId)
+      return context.json({ closedPeriods })
+    })
+  })
+
+  router.post('/api/teams/:teamId/time-periods/:month/close', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, canManage) => {
+      await requireWholeTeamManager(dependencies, principal, teamId, canManage)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const period = await dependencies.getTimeTracking().closePeriod({
+        workspaceId: principal.directoryId,
+        teamId,
+        month: readRequiredString(context.req.param('month'), 'Month'),
+        timeZone: body.timeZone === undefined ? 'UTC' : readRequiredString(body.timeZone, 'Time zone'),
+        actorUserId: principal.userKey,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+      })
+      return context.json({ period }, 201)
+    })
+  })
+
+  router.post('/api/teams/:teamId/time-periods/:month/reopen', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, canManage) => {
+      await requireWholeTeamManager(dependencies, principal, teamId, canManage)
+      const body = asRecord(await dependencies.readJson(context.req))
+      const period = await dependencies.getTimeTracking().reopenPeriod({
+        workspaceId: principal.directoryId,
+        teamId,
+        month: readRequiredString(context.req.param('month'), 'Month'),
+        actorUserId: principal.userKey,
+        reason: typeof body.reason === 'string' ? body.reason : '',
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+      })
+      return context.json({ period })
+    })
+  })
+
   router.get('/api/teams/:teamId/time-entries/:entryId/history', async (context) => {
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
       const entry = await dependencies.getTimeTracking().getEntry(
@@ -264,7 +360,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         teamId,
         readRequiredString(context.req.param('entryId'), 'Time entry ID'),
       )
-      await dependencies.verifyWorkItem(principal, teamId, entry.workItemId, 'viewer')
+      if (entry.workItemId) await dependencies.verifyWorkItem(principal, teamId, entry.workItemId, 'viewer')
       if (entry.projectId) await dependencies.verifyProject(principal, teamId, entry.projectId, 'viewer')
       const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
       if (entry.userId !== principal.userKey && !(canManage && canManageProject(managedProjectIds, entry.projectId))) {
@@ -472,6 +568,26 @@ async function withTeam<Principal extends TimeTrackingPrincipal>(
   })
 }
 
+/**
+ * Requires a manager of every Project in the Team, because a month close applies to all of its time.
+ *
+ * @param dependencies - Router dependencies used to read the Team management scope.
+ * @param principal - Authenticated caller.
+ * @param teamId - Team whose month is closed or reopened.
+ * @param canManage - Whether the caller manages time in the Team at all.
+ * @throws TimeTrackingError when the caller manages only some Projects of the Team.
+ */
+async function requireWholeTeamManager<Principal extends TimeTrackingPrincipal>(
+  dependencies: TimeTrackingRouterDependencies<Principal>,
+  principal: Principal,
+  teamId: string,
+  canManage: boolean,
+): Promise<void> {
+  if (!canManage || !await dependencies.canManageWholeTeam(principal, teamId)) {
+    throw new TimeTrackingError(403, 'TimePeriodCloseDenied', 'Only a manager of the whole Team may close or reopen a month.')
+  }
+}
+
 /** Reads a report query into an application input. */
 function readReportInput(
   context: Context,
@@ -672,6 +788,71 @@ function readCreateInterval(body: Record<string, unknown>): Pick<CreateTimeEntry
       timeZone: body.timeZone === undefined ? 'UTC' : readRequiredString(body.timeZone, 'Time zone'),
     },
   }
+}
+
+/**
+ * Reads the interval changes of an update request: `startAt` and `endAt`, or `date` and `minutes`.
+ *
+ * A `date` and `minutes` update keeps or makes the entry a date-and-minutes entry; it needs both
+ * values and may name the IANA `timeZone` of its date, which defaults to UTC.
+ *
+ * @param body - Parsed JSON request body.
+ * @returns The new times, the new date and minutes, or nothing when the interval is unchanged.
+ */
+function readUpdateInterval(body: Record<string, unknown>): Pick<CreateTimeEntryInput, 'startAt' | 'endAt' | 'duration'> {
+  if (body.date === undefined && body.minutes === undefined) {
+    return {
+      ...(body.startAt === undefined ? {} : { startAt: readRequiredString(body.startAt, 'Start time') }),
+      ...(body.endAt === undefined ? {} : { endAt: readRequiredString(body.endAt, 'End time') }),
+    }
+  }
+  return readCreateInterval(body)
+}
+
+/**
+ * Reads the entry a delete request targets.
+ *
+ * A retried delete whose first attempt committed finds the entry gone. With an idempotency key
+ * the service then replays the stored result for the same actor and request, or reports the entry
+ * missing when no such result exists, so the missing entry is not an error here.
+ *
+ * @param service - Time tracking service.
+ * @param workspaceId - Workspace of the caller.
+ * @param teamId - Team in the route.
+ * @param entryId - Entry in the route.
+ * @param idempotencyKey - Key of the request, if any.
+ * @returns The entry, or `undefined` when it is missing and the request can be replayed.
+ */
+async function readEntryUnlessReplayable(
+  service: TimeTrackingService,
+  workspaceId: string,
+  teamId: string,
+  entryId: string,
+  idempotencyKey: string | undefined,
+): Promise<TimeEntry | undefined> {
+  try {
+    return await service.getEntry(workspaceId, teamId, entryId)
+  } catch (error) {
+    if (idempotencyKey !== undefined && error instanceof TimeTrackingError && error.code === 'TimeEntryNotFound') return undefined
+    throw error
+  }
+}
+
+/**
+ * Reads the `expectedRevision` query of a delete request.
+ *
+ * @param value - Raw query value.
+ * @returns The expected entry revision.
+ */
+function readExpectedRevisionQuery(value: string | undefined): number {
+  if (value === undefined || !/^\d+$/u.test(value)) {
+    throw new TimeTrackingError(400, 'InvalidRequest', 'expectedRevision must be a positive integer.')
+  }
+  const revision = Number(value)
+  if (!Number.isSafeInteger(revision) || revision < 1) {
+    throw new TimeTrackingError(400, 'InvalidRequest', 'expectedRevision must be a positive integer.')
+  }
+  return revision
 }
 
 /** Reads a work category from a request body. */

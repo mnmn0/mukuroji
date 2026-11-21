@@ -1,4 +1,4 @@
-import type { TimeEntry, TimeEntryHistory, TimeEntryStatus } from '@mukuroji/contracts'
+import type { TimeEntry, TimeEntryCategory, TimeEntryHistory, TimeEntryStatus } from '@mukuroji/contracts'
 import { isRecord, isStringArray } from '../../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
 import {
@@ -33,6 +33,30 @@ export type TimeEntryDraftInput = {
   description: string
   /** Whether the interval is chargeable. */
   billable: boolean
+}
+
+/** Fields of indirect work, such as a meeting: time without a Work Item, entered as a date and minutes. */
+export type IndirectTimeEntryInput = {
+  /** Work category, which names the indirect work. */
+  category: TimeEntryCategory
+  /** Project the time belongs to; omitted for Team-level work. */
+  projectId?: string
+  /** Local work date as `YYYY-MM-DD`. */
+  date: string
+  /** Worked minutes within the date. */
+  minutes: number
+  /** IANA timezone that defines the local date. */
+  timeZone: string
+  /** Optional explanation; an empty string clears it on update. */
+  description: string
+  /** Whether the time is chargeable. */
+  billable: boolean
+  /**
+   * `true` when editing an entry recorded with start and end times whose date and hours were left
+   * unchanged: the update then keeps its interval instead of turning it into a date-and-minutes
+   * entry, and `date` and `minutes` are not sent. Ignored on creation.
+   */
+  keepRecordedInterval?: true
 }
 
 /** Single-entry lifecycle action. */
@@ -184,6 +208,94 @@ export async function updateTimeEntry(
     },
   )
   return readEntryEnvelope(data, 'Time entry update')
+}
+
+/**
+ * Records indirect work as a draft entry without a Work Item.
+ *
+ * @param accessToken - Bearer token of the signed-in member.
+ * @param teamId - Team the time belongs to.
+ * @param input - Category, Project, date, and minutes.
+ * @param context - Mutation identity shared by retries.
+ * @returns Created draft.
+ */
+export async function createIndirectTimeEntry(
+  accessToken: string,
+  teamId: string,
+  input: IndirectTimeEntryInput,
+  context: MutationRequestContext,
+): Promise<TimeEntry> {
+  const description = input.description.trim()
+  const data = await requestTimeTrackingJson(createTeamTimeTrackingUrl(teamId, '/time-entries'), accessToken, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...createMutationHeaders(context) },
+    body: JSON.stringify({
+      category: input.category,
+      ...(input.projectId ? { projectId: input.projectId } : {}),
+      date: input.date,
+      minutes: input.minutes,
+      timeZone: input.timeZone,
+      ...(description ? { description } : {}),
+      billable: input.billable,
+    }),
+  })
+  return readEntryEnvelope(data, 'Indirect time entry creation')
+}
+
+/**
+ * Edits a draft or rejected indirect-work entry. The entry becomes a date-and-minutes entry unless
+ * `input.keepRecordedInterval` keeps its recorded start and end.
+ *
+ * @param accessToken - Bearer token of the signed-in member.
+ * @param entry - Entry being edited, whose revision is expected.
+ * @param input - Replacement fields.
+ * @param context - Mutation identity shared by retries.
+ * @returns Updated entry.
+ */
+export async function updateIndirectTimeEntry(
+  accessToken: string,
+  entry: Pick<TimeEntry, 'id' | 'revision' | 'teamId'>,
+  input: IndirectTimeEntryInput,
+  context: MutationRequestContext,
+): Promise<TimeEntry> {
+  const description = input.description.trim()
+  const data = await requestTimeTrackingJson(
+    createTeamTimeTrackingUrl(entry.teamId, `/time-entries/${encodeURIComponent(entry.id)}`),
+    accessToken,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...createMutationHeaders(context) },
+      body: JSON.stringify({
+        expectedRevision: entry.revision,
+        category: input.category,
+        projectId: input.projectId ?? null,
+        ...(input.keepRecordedInterval ? {} : { date: input.date, minutes: input.minutes, timeZone: input.timeZone }),
+        description: description || null,
+        billable: input.billable,
+      }),
+    },
+  )
+  return readEntryEnvelope(data, 'Indirect time entry update')
+}
+
+/**
+ * Deletes the member's own draft or rejected entry.
+ *
+ * @param accessToken - Bearer token of the signed-in member.
+ * @param entry - Entry to delete, whose revision is expected.
+ * @param context - Mutation identity shared by retries.
+ */
+export async function deleteTimeEntry(
+  accessToken: string,
+  entry: Pick<TimeEntry, 'id' | 'revision' | 'teamId'>,
+  context: MutationRequestContext,
+): Promise<void> {
+  const query = new URLSearchParams({ expectedRevision: String(entry.revision) })
+  await requestTimeTrackingJson(
+    createTeamTimeTrackingUrl(entry.teamId, `/time-entries/${encodeURIComponent(entry.id)}?${query.toString()}`),
+    accessToken,
+    { method: 'DELETE', headers: createMutationHeaders(context) },
+  )
 }
 
 /**

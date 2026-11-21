@@ -11,6 +11,7 @@ import {
   type BulkOperationRequest,
   type RecurringSchedule,
   type RecurringWork,
+  type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import {
   type AutomationErrorCategory,
@@ -627,6 +628,60 @@ describe('automation management create idempotency', () => {
       { kind: 'project', teamId: 'other' },
       'apply-1',
     )).rejects.toMatchObject({ code: 'IdempotencyConflict' })
+  })
+
+  test('pins the calendar of a Project template application and keeps it on a replay', async () => {
+    const { documentClient } = createIdempotencyDocumentClient()
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
+    const template = await client.createTemplate('workspace-1', {
+      kind: 'project',
+      name: 'Launch project',
+      enabled: true,
+      payload: { name: 'Launch', tone: 'purple' },
+    })
+    const target = { kind: 'project' as const, teamId: 'core', startDate: '2026-12-01' }
+    const pinned: WorkItemScheduleCalendarPolicy = {
+      timeZone: 'Asia/Tokyo', workingWeekdays: ['monday'], holidays: ['2026-12-08'],
+    }
+
+    const application = await client.reserveTemplateApplication(
+      'workspace-1', 'owner@example.com', template.id, target, 'apply-calendar', async () => pinned,
+    )
+    // A replay returns the pinned receipt without reading the calendar, even when the read fails.
+    const replay = await client.reserveTemplateApplication(
+      'workspace-1', 'owner@example.com', template.id, target, 'apply-calendar', async () => {
+        throw new Error('calendar unavailable')
+      },
+    )
+
+    expect(application.calendarPolicy).toEqual(pinned)
+    expect(replay.calendarPolicy).toEqual(pinned)
+    expect((await client.getTemplateApplication('workspace-1', application.id))?.calendarPolicy).toEqual(pinned)
+  })
+
+  test('rejects a pinned calendar with an impossible date, an unknown weekday, or an unknown time zone', async () => {
+    const { documentClient, items } = createIdempotencyDocumentClient()
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
+    const template = await client.createTemplate('workspace-1', {
+      kind: 'project',
+      name: 'Launch project',
+      enabled: true,
+      payload: { name: 'Launch', tone: 'purple' },
+    })
+    const application = await client.reserveTemplateApplication(
+      'workspace-1', 'owner@example.com', template.id, { kind: 'project', teamId: 'core' }, 'apply-invalid',
+      async () => ({ timeZone: 'Asia/Tokyo', workingWeekdays: ['monday'], holidays: ['2026-12-08'] }),
+    )
+    const stored = [...items.values()].find((item) => item.entryType === 'template-application')
+    if (!stored) throw new Error('expected a stored template application')
+    for (const calendarPolicy of [
+      { timeZone: 'Asia/Tokyo', workingWeekdays: ['monday'], holidays: ['2026-02-30'] },
+      { timeZone: 'Asia/Tokyo', workingWeekdays: ['funday'], holidays: [] },
+      { timeZone: 'Mars/Olympus', workingWeekdays: ['monday'], holidays: [] },
+    ]) {
+      stored.calendarPolicy = calendarPolicy
+      await expect(client.getTemplateApplication('workspace-1', application.id)).rejects.toThrow()
+    }
   })
 
   test('validates every Work Item template field at the server boundary', () => {

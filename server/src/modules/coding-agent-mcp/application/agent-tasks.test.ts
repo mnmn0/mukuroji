@@ -65,7 +65,10 @@ function fixture(initial: AgentTask[] = [task()], overrides: Partial<AgentWorkIt
       }
     },
     async create(input) {
-      const created = task('created', input)
+      // The server gives a Work Item without a schedule the Workspace calendar; this fake uses the
+      // fixture's schedule.
+      const { dueDate: _dueDate, schedule, ...fields } = input
+      const created = task('created', { ...fields, ...(schedule ? { schedule } : {}) })
       records.set(created.id, created)
       return created
     },

@@ -57,6 +57,9 @@ export const workspaceDependencies: WorkspaceDependencies = {
   get tenantAdministration() {
     return requireAppDependencies().workspace.tenantAdministration
   },
+  get nationalHolidays() {
+    return requireAppDependencies().workspace.nationalHolidays
+  },
   get tenantExportDownload() {
     return requireAppDependencies().workspace.tenantExportDownload
   },
@@ -117,6 +120,9 @@ export const workItemDependencies: WorkItemDependencies = {
   },
   get projectRaidLogs() {
     return requireAppDependencies().workItems.projectRaidLogs
+  },
+  get weeklyReports() {
+    return requireAppDependencies().workItems.weeklyReports
   },
   get scheduleBaselines() {
     return requireAppDependencies().workItems.scheduleBaselines

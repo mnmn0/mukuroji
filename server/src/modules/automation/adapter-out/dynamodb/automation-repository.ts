@@ -17,6 +17,9 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   AUTOMATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
+  isWorkspaceCalendarWeekday,
+  isWorkspaceHolidayDate,
   type AutomationInboundWebhookLifecycleInput,
   type AutomationAction,
   type AutomationExecution,
@@ -26,6 +29,7 @@ import {
   type AutomationTemplateApplicationResult,
   type AutomationTemplateApplicationTarget,
   type AutomationTrigger,
+  type WorkItemScheduleCalendarPolicy,
   type BulkOperation,
   type CreateAutomationRuleInput,
   type CreateAutomationInboundWebhookEndpointInput,
@@ -641,13 +645,26 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     await this.deleteCurrent(workspaceId, `TEMPLATE#${encodeKey(templateId)}`, expectedRevision)
   }
 
-  /** Current enabled template version を固定した application receipt を予約します。 */
+  /**
+   * Current enabled template version を固定した application receipt を予約します。Project template
+   * の新しい receipt には WBS を数える稼働カレンダーも固定します。既存の receipt はカレンダーを
+   * 読まずにそのまま返します。
+   *
+   * @param workspaceId - Workspace ID.
+   * @param actorId - Actor who applies the template.
+   * @param templateId - Template to apply.
+   * @param target - Where the template is applied.
+   * @param idempotencyKey - Client idempotency key.
+   * @param readCalendarPolicy - Reads the Workspace calendar for a new Project template receipt.
+   * @returns The new or existing receipt.
+   */
   async reserveTemplateApplication(
     workspaceId: string,
     actorId: string,
     templateId: string,
     target: AutomationTemplateApplicationTarget,
     idempotencyKey: string,
+    readCalendarPolicy?: () => Promise<WorkItemScheduleCalendarPolicy>,
   ) {
     await this.ensureTable()
     const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
@@ -688,6 +705,7 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
     if (target.kind !== template.kind) {
       throw invalidInput('Template application target does not match the template kind.')
     }
+    const calendarPolicy = template.kind === 'project' ? await readCalendarPolicy?.() : undefined
     const now = new Date().toISOString()
     const application: AutomationTemplateApplication = {
       schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -698,6 +716,9 @@ export class DynamoDbAutomationRepository implements AutomationRepository<
       templateVersion: template.version,
       kind: template.kind,
       target: structuredClone(target),
+      ...(calendarPolicy
+        ? { calendarPolicy: structuredClone(calendarPolicy) }
+        : {}),
       status: 'pending',
       revision: 1,
       createdAt: now,
@@ -3715,6 +3736,50 @@ function readBulkOperation(item: Record<string, unknown>) {
   return value
 }
 
+/**
+ * Checks the shape of a calendar policy pinned on a template application.
+ *
+ * @param value - Stored value.
+ * @returns Whether it has a supported time zone, known working weekdays, and real holiday dates
+ *   within the Work Item schedule limit.
+ */
+function isStoredCalendarPolicy(value: unknown): value is WorkItemScheduleCalendarPolicy {
+  if (typeof value !== 'object' || value === null) return false
+  const timeZone: unknown = Reflect.get(value, 'timeZone')
+  const workingWeekdays: unknown = Reflect.get(value, 'workingWeekdays')
+  const holidays: unknown = Reflect.get(value, 'holidays')
+  return typeof timeZone === 'string' && isSupportedTimeZone(timeZone) &&
+    isStringArray(workingWeekdays) && workingWeekdays.length > 0 &&
+    workingWeekdays.every(isWorkspaceCalendarWeekday) &&
+    isStringArray(holidays) && holidays.length <= WORK_ITEM_SCHEDULE_MAX_HOLIDAYS &&
+    holidays.every(isWorkspaceHolidayDate)
+}
+
+/**
+ * Checks that the runtime knows an IANA time zone.
+ *
+ * @param timeZone - Time zone name.
+ * @returns Whether it can format dates.
+ */
+function isSupportedTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Checks that a value is an array of strings.
+ *
+ * @param value - Candidate value.
+ * @returns Whether every entry is a string.
+ */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string')
+}
+
 function readTemplateApplication(item: Record<string, unknown>) {
   const value = stripStorage<AutomationTemplateApplication>(item)
   if (
@@ -3725,7 +3790,8 @@ function readTemplateApplication(item: Record<string, unknown>) {
       value.status !== 'succeeded' &&
       value.status !== 'failed') ||
     !Number.isSafeInteger(value.revision) ||
-    value.revision < 1
+    value.revision < 1 ||
+    !(value.calendarPolicy === undefined || isStoredCalendarPolicy(value.calendarPolicy))
   ) {
     throw storedInvalid('template application')
   }

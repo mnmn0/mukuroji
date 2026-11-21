@@ -2,10 +2,14 @@ import type { TimeEntry } from '@mukuroji/contracts'
 import { useMemo } from 'react'
 import { createMutationRequestRunner, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
 import {
+  createIndirectTimeEntry,
   createTimeEntry,
+  deleteTimeEntry,
   transitionTimeEntry,
   transitionTimesheet,
+  updateIndirectTimeEntry,
   updateTimeEntry,
+  type IndirectTimeEntryInput,
   type TimeEntryDraftInput,
   type TimeEntryTransitionAction,
   type TimesheetTransitionResult,
@@ -19,6 +23,12 @@ export type TimeEntryMutations = {
   create: (teamId: string, input: TimeEntryDraftInput) => Promise<TimeEntry>
   /** Edits a draft or rejected entry. */
   update: (entry: TimeEntry, input: TimeEntryDraftInput) => Promise<TimeEntry>
+  /** Records indirect work without a Work Item. */
+  createIndirect: (teamId: string, input: IndirectTimeEntryInput) => Promise<TimeEntry>
+  /** Edits a draft or rejected indirect-work entry. */
+  updateIndirect: (entry: TimeEntry, input: IndirectTimeEntryInput) => Promise<TimeEntry>
+  /** Deletes the member's own draft or rejected entry. */
+  remove: (entry: TimeEntry) => Promise<void>
   /** Applies one lifecycle action to one entry. */
   transition: (entry: TimeEntry, action: TimeEntryTransitionAction, reason?: string) => Promise<TimeEntry>
   /** Applies one lifecycle action to every eligible entry of a period. */
@@ -75,6 +85,21 @@ export function useTimeEntryMutations(accessToken: string | undefined): TimeEntr
         `time-entry:update:${entry.teamId}:${entry.id}`,
         JSON.stringify([entry.revision, input]),
         (context) => updateTimeEntry(accessToken ?? '', entry, input, context),
+      ),
+      createIndirect: (teamId, input) => run(
+        `time-entry:create-indirect:${teamId}`,
+        JSON.stringify(input),
+        (context) => createIndirectTimeEntry(accessToken ?? '', teamId, input, context),
+      ),
+      updateIndirect: (entry, input) => run(
+        `time-entry:update:${entry.teamId}:${entry.id}`,
+        JSON.stringify([entry.revision, input]),
+        (context) => updateIndirectTimeEntry(accessToken ?? '', entry, input, context),
+      ),
+      remove: (entry) => run(
+        `time-entry:delete:${entry.teamId}:${entry.id}`,
+        JSON.stringify([entry.revision]),
+        (context) => deleteTimeEntry(accessToken ?? '', entry, context),
       ),
       transition: (entry, action, reason) => run(
         `time-entry:${action}:${entry.teamId}:${entry.id}`,
