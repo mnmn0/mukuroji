@@ -7,7 +7,7 @@ import {
   createTaskEstimateMigration,
 } from '../../src/modules/data-migration/test-support/data-migration-fakes'
 import type { DataMigrationDefinition } from '../../src/modules/data-migration'
-import { dataMigrationRegistry } from './registry'
+import { dataMigrationRegistry } from '../../src/app/composition/data-migration-registry'
 import {
   parseDataMigrationCliArguments,
   runDataMigrationCli,

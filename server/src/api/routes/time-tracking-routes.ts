@@ -10,6 +10,7 @@ import {
 import { TimeTrackingError } from '../../modules/time-tracking'
 import { requireAppDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
+import { createPlanningCallerAuthorizationConditionChecks } from '../shared/planning-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
   requireTeamPermission,
@@ -95,6 +96,8 @@ export function registerTimeTrackingRoutes(routeApp: Hono): void {
       await requireTeamPermission(principal, teamId, minimum)
     },
     canManageRates: async (principal, teamId) => await readTeamManagerContext(principal, teamId) !== undefined,
+    canManageWholeTeam: async (principal, teamId) =>
+      principal.isSystemAdmin || (await readTeamManagerContext(principal, teamId))?.directTeamGrant === true,
     getAccessibleProjectIds: async (principal, teamId) => {
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       if (principal.isSystemAdmin) return undefined
@@ -132,6 +135,10 @@ export function registerTimeTrackingRoutes(routeApp: Hono): void {
       const { detail } = await loadAuthorizedTeamIssue(principal, teamId, workItemId, minimum)
       return detail.issue.assignedProjectId ?? undefined
     },
+    // Fences the owner's membership version and Enterprise control revision, so a member removed
+    // after the check cannot delete.
+    createAuthorizationConditionChecks: (principal) =>
+      createPlanningCallerAuthorizationConditionChecks(principal, [], principal.principalKind !== 'service-account'),
     getTimeTracking: () => timeTrackingDependencies.timeTrackingService,
     readJson,
     mapError: toTimeTrackingErrorResponse,

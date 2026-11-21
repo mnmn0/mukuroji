@@ -28,6 +28,9 @@ export type TimeEntryCategory = typeof TIME_ENTRY_CATEGORIES[number]
 /** Report group key used for entries that have no work category. */
 export const UNCATEGORIZED_TIME_ENTRY_GROUP_KEY = 'uncategorized' as const
 
+/** Report group key used by a `work-item` report for indirect work, which has no Work Item. */
+export const NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY = 'no-work-item' as const
+
 /** Grouping dimension supported by a time tracking report. */
 export type TimeTrackingGroupBy = 'day' | 'week' | 'user' | 'project' | 'work-item' | 'category'
 
@@ -43,8 +46,11 @@ export type TimeEntry = {
   teamId: string
   /** Optional Project associated with the work. */
   projectId?: string
-  /** Canonical Work Item associated with the work. */
-  workItemId: string
+  /**
+   * Canonical Work Item associated with the work; absent for indirect work, such as a meeting,
+   * which then always carries a `category`.
+   */
+  workItemId?: string
   /** Workspace member who recorded the time. */
   userId: string
   /** Inclusive interval start as an ISO 8601 instant. */
@@ -124,8 +130,11 @@ export type TimeEntryHistory = {
   id: string
   /** Time entry identifier. */
   entryId: string
-  /** Lifecycle operation that created the record. */
-  action: 'created' | 'updated' | 'submitted' | 'approved' | 'rejected' | 'locked'
+  /**
+   * Lifecycle operation that created the record. `returned` is a manager sending an approved or
+   * locked entry back to `rejected` so the member can correct it; it always carries a reason.
+   */
+  action: 'created' | 'updated' | 'submitted' | 'approved' | 'rejected' | 'locked' | 'returned'
   /** Previous lifecycle state when applicable. */
   fromStatus?: TimeEntryStatus
   /** New lifecycle state when applicable. */
@@ -136,6 +145,30 @@ export type TimeEntryHistory = {
   reason?: string
   /** History creation timestamp. */
   occurredAt: string
+}
+
+/**
+ * A closed month of a Team's time entries.
+ *
+ * While a month is closed, entries whose interval overlaps it cannot be created, edited, or moved
+ * through the lifecycle, except for locking approved entries. A manager reopens the month with a
+ * reason.
+ */
+export type TimePeriodClose = {
+  /** Contract schema version. */
+  schemaVersion: typeof TIME_TRACKING_SCHEMA_VERSION
+  /** Owning Workspace identifier. */
+  workspaceId: string
+  /** Team whose entries the close applies to. */
+  teamId: string
+  /** Closed calendar month as `YYYY-MM`. */
+  month: string
+  /** IANA timezone that defines the first and last instant of the month. */
+  timeZone: string
+  /** Manager who closed the month. */
+  closedBy: string
+  /** Close timestamp. */
+  closedAt: string
 }
 
 /** A budget for a Team or Project and optional local-date period. */

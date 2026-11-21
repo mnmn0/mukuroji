@@ -65,6 +65,8 @@ export type ProjectOverviewViewProps = {
   membersError?: ProjectOverviewMembersError
   /** Whether the Project members are still loading. */
   isMembersLoading: boolean
+  /** Whether to show the Agent Run lane counts, which only Software factory deployments serve. */
+  showAgentRuns?: boolean
   /** Agent Run lane counts of the Project, absent while loading or after a failure. */
   agentRuns?: ProjectOverviewAgentRuns
   /** Why the Agent Run lane counts could not be shown, absent when they loaded or are loading. */
@@ -124,6 +126,7 @@ export function ProjectOverviewView({
   onRetryWorkItems,
   project,
   schedule,
+  showAgentRuns = true,
   t,
   team,
   updateTarget,
@@ -238,24 +241,26 @@ export function ProjectOverviewView({
           />
         </OverviewSection>
 
-        <OverviewSection
-          meta={agentRuns
-            ? t('projects.overview.agentRuns.total').replace('{count}', String(agentRuns.totalCount))
-            : undefined}
-          testId="project-overview-agent-runs"
-          title={t('projects.overview.agentRuns.title')}
-        >
-          <AgentRunsContent
-            agentRuns={agentRuns}
-            error={agentRunsError}
-            isLoading={isAgentRunsLoading}
-            onRetry={onRetryAgentRuns}
-            t={t}
-          />
-          <Link className={linkClassName} to={createTeamViewPath(team.id, 'factory')}>
-            {t('projects.overview.agentRuns.openFactory')}
-          </Link>
-        </OverviewSection>
+        {showAgentRuns ? (
+          <OverviewSection
+            meta={agentRuns
+              ? t('projects.overview.agentRuns.total').replace('{count}', String(agentRuns.totalCount))
+              : undefined}
+            testId="project-overview-agent-runs"
+            title={t('projects.overview.agentRuns.title')}
+          >
+            <AgentRunsContent
+              agentRuns={agentRuns}
+              error={agentRunsError}
+              isLoading={isAgentRunsLoading}
+              onRetry={onRetryAgentRuns}
+              t={t}
+            />
+            <Link className={linkClassName} to={createTeamViewPath(team.id, 'factory')}>
+              {t('projects.overview.agentRuns.openFactory')}
+            </Link>
+          </OverviewSection>
+        ) : null}
       </div>
 
       <nav

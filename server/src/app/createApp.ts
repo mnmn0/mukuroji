@@ -22,7 +22,11 @@ import {
 import {
   registerRuntimeControlMiddleware,
 } from './middleware/runtime-control-middleware'
+import {
+  registerSoftwareFactoryMiddleware,
+} from './middleware/software-factory-middleware'
 import { createSystemRouter } from './routes/system-router'
+import { isSoftwareFactoryDeployed } from '../infrastructure/config/software-factory'
 
 /**
  * Creates an API application with common middleware and domain routers.
@@ -48,6 +52,9 @@ export function createApp(dependencies: AppDependencies): Hono {
     app,
     auditRejectedEnterpriseSecurityMutation,
   )
+  registerSoftwareFactoryMiddleware(app, {
+    deployed: () => isSoftwareFactoryDeployed(),
+  })
   app.route('/', createSystemRouter({
     ...(dependencies.operational.applicationCommitSha === undefined
       ? {}

@@ -16,6 +16,9 @@ export const REQUEST_EMAIL_CONTEXT_KEY = 'mukuroji:requestEmail';
 /** Context key that turns on the optional tenant export and closure workers. */
 export const TENANT_LIFECYCLE_CONTEXT_KEY = 'mukuroji:tenantLifecycle';
 
+/** Context key that turns on Software factory: Agent Runs, Agent settings, and agent credentials. */
+export const SOFTWARE_FACTORY_CONTEXT_KEY = 'mukuroji:softwareFactory';
+
 /** Optional-module switches the stack receives through its Props. */
 type StackModuleProps = Pick<
   MukurojiStackProps,
@@ -23,6 +26,7 @@ type StackModuleProps = Pick<
   | 'connectorsEnabled'
   | 'requestEmailEnabled'
   | 'tenantLifecycleEnabled'
+  | 'softwareFactoryEnabled'
   | 'demoDataEnabled'
 >;
 
@@ -32,6 +36,7 @@ export const ALL_STACK_MODULE_PROPS: StackModuleProps = {
   connectorsEnabled: true,
   requestEmailEnabled: true,
   tenantLifecycleEnabled: true,
+  softwareFactoryEnabled: true,
   demoDataEnabled: true,
 };
 
@@ -61,6 +66,7 @@ export function readStackModuleProps(app: Construct): StackModuleProps {
     connectorsEnabled: readBooleanContext(app, CONNECTORS_CONTEXT_KEY),
     requestEmailEnabled: readBooleanContext(app, REQUEST_EMAIL_CONTEXT_KEY),
     tenantLifecycleEnabled: readBooleanContext(app, TENANT_LIFECYCLE_CONTEXT_KEY),
+    softwareFactoryEnabled: readBooleanContext(app, SOFTWARE_FACTORY_CONTEXT_KEY),
     demoDataEnabled: readBooleanContext(app, DEMO_DATA_CONTEXT_KEY),
   };
 }

@@ -22,7 +22,8 @@ export function useRejectionReasons(accessToken: string | undefined, entries: re
       const reasons = await Promise.all(rejected.map(async (entry) => {
         const history = await listTimeEntryHistory(token, entry.teamId, entry.id)
         const rejection = history
-          .filter((record) => record.action === 'rejected')
+          // A manager's return of approved time also ends in `rejected` and carries the reason.
+          .filter((record) => record.action === 'rejected' || record.action === 'returned')
           .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt))
           .at(-1)
         return [entry.id, rejection?.reason ?? ''] as const

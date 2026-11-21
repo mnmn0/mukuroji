@@ -5,7 +5,9 @@ import { groupTimeEntriesByMember, sortTimeEntries, type TimeApprovalGroup } fro
 import { formatMinutes, toLocalDateKey, type TimeWeekPeriod } from '../model/timePeriod'
 import { TimeWeekNavigator } from './TimeWeekNavigator'
 import {
+  describeTimeEntrySubject,
   describeTimeTrackingFailure,
+  formatTimeEntryRange,
   interpolate,
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
@@ -158,7 +160,25 @@ export function TimeApprovalQueue({
    * @returns Date, time range, and Work Item.
    */
   const describeEntry = (entry: TimeEntry) =>
-    `${formatters.day(toLocalDateKey(entry.startAt))} ${formatters.time(entry.startAt)}–${formatters.time(entry.endAt)} ${workItemTitles[entry.workItemId] ?? entry.workItemId}`
+    [
+      formatters.day(toLocalDateKey(entry.startAt)),
+      formatTimeEntryRange(formatters, entry),
+      describeTimeEntrySubject(t, entry, workItemTitles),
+    ].filter(Boolean).join(' ')
+
+  /**
+   * Names an entry for accessible button names; an entry recorded as a date and minutes has no
+   * time range, so its minutes tell apart entries of one member on one day.
+   *
+   * @param entry - Entry to name.
+   * @returns Date, time range or minutes, and Work Item.
+   */
+  const nameEntry = (entry: TimeEntry) =>
+    [
+      formatters.day(toLocalDateKey(entry.startAt)),
+      formatTimeEntryRange(formatters, entry) || formatMinutes(entry.durationMinutes),
+      describeTimeEntrySubject(t, entry, workItemTitles),
+    ].filter(Boolean).join(' ')
 
   /**
    * Renders one member group of submitted entries.
@@ -199,7 +219,7 @@ export function TimeApprovalQueue({
             ) : (
               <div className="flex flex-wrap gap-2">
                 <button
-                  aria-label={`${t('timeTracking.approval.approve')} ${memberName(entry.userId)} ${describeEntry(entry)}`}
+                  aria-label={`${t('timeTracking.approval.approve')} ${memberName(entry.userId)} ${nameEntry(entry)}`}
                   className="workbench-button-primary min-h-8 px-3"
                   disabled={pendingKey !== undefined}
                   onClick={() => { void runAction(`approve:${entry.id}`, () => onTransitionEntry(entry, 'approve'), t('timeTracking.approval.approved')) }}
@@ -208,7 +228,7 @@ export function TimeApprovalQueue({
                   {t('timeTracking.approval.approve')}
                 </button>
                 <button
-                  aria-label={`${t('timeTracking.approval.reject')} ${memberName(entry.userId)} ${describeEntry(entry)}`}
+                  aria-label={`${t('timeTracking.approval.reject')} ${memberName(entry.userId)} ${nameEntry(entry)}`}
                   className="workbench-button-secondary min-h-8 px-3"
                   disabled={pendingKey !== undefined}
                   onClick={() => setRejectingEntryId(entry.id)}
@@ -318,7 +338,7 @@ export function TimeApprovalQueue({
                     <span className="font-semibold tabular-nums text-[var(--workbench-text)]">{formatMinutes(entry.durationMinutes)}</span>
                     <span className="min-w-0 flex-1 break-words text-[var(--workbench-muted)]">{describeEntry(entry)}</span>
                     <button
-                      aria-label={`${t('timeTracking.approval.lock')} ${memberName(entry.userId)} ${describeEntry(entry)}`}
+                      aria-label={`${t('timeTracking.approval.lock')} ${memberName(entry.userId)} ${nameEntry(entry)}`}
                       className="workbench-button-secondary min-h-8 px-3"
                       disabled={pendingKey !== undefined}
                       onClick={() => { void runAction(`lock:${entry.id}`, () => onTransitionEntry(entry, 'lock'), t('timeTracking.approval.locked')) }}

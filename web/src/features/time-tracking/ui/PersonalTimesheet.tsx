@@ -1,6 +1,6 @@
 import type { TimeEntry } from '@mukuroji/contracts'
 import { useId, useState } from 'react'
-import type { TimeEntryDraftInput, TimesheetTransitionResult } from '../api/timeEntries'
+import type { IndirectTimeEntryInput, TimeEntryDraftInput, TimesheetTransitionResult } from '../api/timeEntries'
 import {
   buildTimeEntryWeekRows,
   countTimeEntriesByStatus,
@@ -8,10 +8,12 @@ import {
   sumTimeEntryMinutesInDays,
 } from '../model/timeEntryLifecycle'
 import { formatMinutes, type TimeWeekPeriod } from '../model/timePeriod'
+import { IndirectTimeEntryForm, type IndirectTimeEntryTargets } from './IndirectTimeEntryForm'
 import { TimeEntryForm, type TimeEntryWorkItemOption } from './TimeEntryForm'
 import { TimeEntryList } from './TimeEntryList'
 import { TimeWeekNavigator } from './TimeWeekNavigator'
 import {
+  describeTimeEntrySubject,
   describeTimeTrackingFailure,
   interpolate,
   timeEntryStatusKeys,
@@ -55,6 +57,14 @@ export type PersonalTimesheetProps = {
   onUpdateEntry: (entry: TimeEntry, input: TimeEntryDraftInput) => Promise<unknown>
   /** Submits one entry. */
   onSubmitEntry: (entry: TimeEntry) => Promise<unknown>
+  /** Where indirect work may be recorded; nothing can be recorded while it is unknown. */
+  indirectTargets?: IndirectTimeEntryTargets
+  /** Records indirect work without a Work Item. */
+  onCreateIndirectEntry: (input: IndirectTimeEntryInput) => Promise<unknown>
+  /** Edits indirect work. */
+  onUpdateIndirectEntry: (entry: TimeEntry, input: IndirectTimeEntryInput) => Promise<unknown>
+  /** Deletes one draft or rejected entry. */
+  onDeleteEntry: (entry: TimeEntry) => Promise<unknown>
   /** Submits every draft and rejected entry of the week. */
   onSubmitWeek: () => Promise<TimesheetTransitionResult>
 }
@@ -69,14 +79,18 @@ export function PersonalTimesheet({
   entries,
   formatters,
   hasLoadError = false,
+  indirectTargets,
   isLoading = false,
   isPartial = false,
   onCreateEntry,
+  onCreateIndirectEntry,
+  onDeleteEntry,
   onMoveWeek,
   onRetry,
   onSubmitEntry,
   onSubmitWeek,
   onUpdateEntry,
+  onUpdateIndirectEntry,
   rejectionReasons,
   t,
   today,
@@ -86,7 +100,9 @@ export function PersonalTimesheet({
   workItemTitles,
 }: PersonalTimesheetProps) {
   const id = useId()
-  const [isCreating, setIsCreating] = useState(false)
+  const [creating, setCreating] = useState<'work-item' | 'indirect'>()
+  const canRecordIndirect = indirectTargets !== undefined &&
+    (indirectTargets.allowNoProject || indirectTargets.projects.length > 0)
   const [isSubmittingWeek, setIsSubmittingWeek] = useState(false)
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
   const days = groupTimeEntriesByDay(entries, week.days)
@@ -137,11 +153,19 @@ export function PersonalTimesheet({
         <div className="flex flex-wrap gap-2">
           <button
             className="workbench-button-secondary min-h-9 px-3"
-            disabled={isCreating || workItemOptions.length === 0}
-            onClick={() => setIsCreating(true)}
+            disabled={creating !== undefined || workItemOptions.length === 0}
+            onClick={() => setCreating('work-item')}
             type="button"
           >
             {t('timeTracking.panel.addEntry')}
+          </button>
+          <button
+            className="workbench-button-secondary min-h-9 px-3"
+            disabled={creating !== undefined || !canRecordIndirect}
+            onClick={() => setCreating('indirect')}
+            type="button"
+          >
+            {t('timeTracking.indirect.add')}
           </button>
           <button
             className="workbench-button-primary min-h-9 px-3"
@@ -165,17 +189,30 @@ export function PersonalTimesheet({
       </div>
       {message?.tone === 'error' ? <p className="text-sm font-semibold text-fg-red-700" role="alert">{message.text}</p> : null}
 
-      {isCreating ? (
+      {creating === 'work-item' ? (
         <TimeEntryForm
           defaultDate={defaultDate}
-          onCancel={() => setIsCreating(false)}
+          onCancel={() => setCreating(undefined)}
           onSave={async (input) => {
             await onCreateEntry(input)
-            setIsCreating(false)
+            setCreating(undefined)
             setMessage({ tone: 'status', text: t('timeTracking.entry.created') })
           }}
           t={t}
           workItemOptions={workItemOptions}
+        />
+      ) : null}
+      {creating === 'indirect' && indirectTargets ? (
+        <IndirectTimeEntryForm
+          defaultDate={defaultDate}
+          onCancel={() => setCreating(undefined)}
+          onSave={async (input) => {
+            await onCreateIndirectEntry(input)
+            setCreating(undefined)
+            setMessage({ tone: 'status', text: t('timeTracking.entry.created') })
+          }}
+          t={t}
+          targets={indirectTargets}
         />
       ) : null}
 
@@ -205,9 +242,9 @@ export function PersonalTimesheet({
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr className="border-t border-[var(--workbench-border)]" key={row.workItemId}>
+                <tr className="border-t border-[var(--workbench-border)]" key={row.key}>
                   <th className="sticky left-0 max-w-[220px] truncate bg-surface px-3 py-2 text-left font-medium text-[var(--workbench-text)]" scope="row">
-                    {workItemTitles[row.workItemId] ?? row.workItemId}
+                    {describeTimeEntrySubject(t, row, workItemTitles)}
                   </th>
                   {week.days.map((date) => (
                     <td className="px-2 py-2 text-right tabular-nums text-[var(--workbench-text)]" key={date}>
@@ -240,8 +277,14 @@ export function PersonalTimesheet({
           <TimeEntryList
             entries={day.entries}
             formatters={formatters}
+            {...(indirectTargets ? { indirectTargets } : {})}
+            onDelete={async (entry) => {
+              await onDeleteEntry(entry)
+              setMessage({ tone: 'status', text: t('timeTracking.entry.deleted') })
+            }}
             onSubmit={onSubmitEntry}
             onUpdate={onUpdateEntry}
+            onUpdateIndirect={onUpdateIndirectEntry}
             {...(rejectionReasons ? { rejectionReasons } : {})}
             t={t}
             workItemOptions={workItemOptions}

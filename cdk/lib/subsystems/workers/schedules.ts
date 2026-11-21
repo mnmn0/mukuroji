@@ -227,3 +227,38 @@ export function defineCycleScheduleJob(input: ScheduleWorkerInput): ScheduledJob
     },
   };
 }
+
+/**
+ * Defines the six-hourly job that stores the Cabinet Office national holiday list once a month.
+ *
+ * The list goes in one shared row of the tenant administration table, which the API reads when it
+ * builds a new Work Item's calendar. The job may write only that row, and it reaches the Cabinet
+ * Office over the Lambda's default internet access.
+ *
+ * @param input Shared data stores and parameters.
+ * @returns Environment and grants the job adds to the scheduled-jobs Lambda.
+ */
+export function defineJapanesePublicHolidaySyncJob(input: ScheduleWorkerInput): ScheduledJobGrant {
+  const { tenantAdministrationTable } = input.dataStores;
+
+  return {
+    id: 'JapanesePublicHolidaySync',
+    runtimeScope: 'automation-schedule',
+    // One statement, so it stays in the shared role's inline policy.
+    policy: 'shared-role',
+    environment: {
+      TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
+    },
+    grant: (grantee) => {
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+        resources: [tenantAdministrationTable.tableArn],
+        conditions: {
+          'ForAllValues:StringEquals': {
+            'dynamodb:LeadingKeys': ['system#public-holidays'],
+          },
+        },
+      }));
+    },
+  };
+}

@@ -1,4 +1,5 @@
 import {
+  NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY,
   UNCATEGORIZED_TIME_ENTRY_GROUP_KEY,
   type TimeEntryCategory,
   type TimeSummaryGroup,
@@ -12,6 +13,7 @@ import { formatMinutes } from '../model/timePeriod'
 import {
   describeTimeTrackingFailure,
   interpolate,
+  timeEntryCategoryKeys,
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
@@ -69,17 +71,6 @@ const groupByKeys = {
   category: 'timeTracking.report.groupBy.category',
 } as const satisfies Record<TimeTrackingGroupBy, string>
 
-/** Message key of each work category. */
-const categoryKeys = {
-  design: 'timeTracking.report.category.design',
-  implementation: 'timeTracking.report.category.implementation',
-  review: 'timeTracking.report.category.review',
-  meeting: 'timeTracking.report.category.meeting',
-  management: 'timeTracking.report.category.management',
-  training: 'timeTracking.report.category.training',
-  leave: 'timeTracking.report.category.leave',
-} as const satisfies Record<TimeEntryCategory, string>
-
 /**
  * Returns whether a report key names a known work category.
  *
@@ -87,7 +78,7 @@ const categoryKeys = {
  * @returns Whether the key is a category with a message.
  */
 function isCategoryKey(key: string): key is TimeEntryCategory {
-  return Object.hasOwn(categoryKeys, key)
+  return Object.hasOwn(timeEntryCategoryKeys, key)
 }
 
 /**
@@ -137,10 +128,11 @@ export function TimeReport({
       case 'project':
         return group.key === 'unassigned' ? t('timeTracking.report.noProject') : labels.projects[group.key] ?? group.label
       case 'work-item':
+        if (group.key === NO_WORK_ITEM_TIME_ENTRY_GROUP_KEY) return t('timeTracking.report.noWorkItem')
         return labels.workItems[group.key] ?? group.label
       case 'category':
         if (group.key === UNCATEGORIZED_TIME_ENTRY_GROUP_KEY) return t('timeTracking.report.category.uncategorized')
-        return isCategoryKey(group.key) ? t(categoryKeys[group.key]) : group.label
+        return isCategoryKey(group.key) ? t(timeEntryCategoryKeys[group.key]) : group.label
     }
   }
 

@@ -10,6 +10,7 @@ import {
   type CuratedContextActorSnapshot,
   type CuratedContextCapabilities,
   type CuratedContextItem,
+  type WorkItemScheduleCalendarPolicy,
   type CuratedContextQuote,
   type CuratedContextSource,
   type RequestSubmission,
@@ -304,6 +305,7 @@ import {
 } from '../shared/work-item-contributors'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import { changesWorkItemSchedulePlacement, readWorkItemEffortChange } from '../shared/work-item-effort'
+import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 import { projectTeamSearchDocumentBestEffort } from './directory-administration-routes'
 import { projectProjectSearchDocumentBestEffort } from './project-charter-routes'
 
@@ -709,11 +711,13 @@ async function createRequestActionTriageContribution(
  *
  * @param submission - Stored Request submission whose answers must be isolated.
  * @param overrides - Validated conversion options supplied by the operator.
+ * @param workspaceCalendarPolicy - Workspace working calendar the new Work Item keeps.
  * @returns A Work Item input derived without retained source answers.
  */
 function createRetentionSafeRequestWorkItemInput(
   submission: RequestSubmission,
   overrides: Extract<RequestSubmissionActionInput, { action: 'convert' }>,
+  workspaceCalendarPolicy: WorkItemScheduleCalendarPolicy,
 ) {
   return createRequestWorkItemInput(
     { ...submission, answers: {} },
@@ -721,6 +725,7 @@ function createRetentionSafeRequestWorkItemInput(
       ...overrides,
       title: overrides.title?.trim() || 'Retained source',
     },
+    workspaceCalendarPolicy,
   )
 }
 
@@ -3676,9 +3681,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         return c.json(submission)
       }
       const triageEntry = await readRequestTriageEntry(principal.directoryId, submission)
+      const workspaceCalendarPolicy = await readWorkspaceWorkItemCalendarPolicy(principal.directoryId)
       const conversion = triageEntry.retention.redactedAt !== undefined
-        ? createRetentionSafeRequestWorkItemInput(submission, body)
-        : createRequestWorkItemInput(submission, body)
+        ? createRetentionSafeRequestWorkItemInput(submission, body, workspaceCalendarPolicy)
+        : createRequestWorkItemInput(submission, body, workspaceCalendarPolicy)
       const teamContext = await requireTeamPermission(principal, conversion.target.teamId, 'member')
       requireAssignedProjectPermission(
         principal,

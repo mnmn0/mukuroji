@@ -293,3 +293,17 @@ export function parseHoursInput(value: string): number | undefined {
 export function resolveBrowserTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 }
+
+/** Most minutes one local date can hold; the server also rejects minutes past a shorter DST day. */
+const maxIndirectMinutes = 24 * 60
+
+/**
+ * Converts the hours typed into the indirect-work form to whole minutes.
+ *
+ * @param value - Hours as typed, such as `1.5` or `1:30`.
+ * @returns Minutes, or undefined when the value is not a positive amount of at most one day.
+ */
+export function readIndirectMinutes(value: string): number | undefined {
+  const minutes = parseHoursInput(value)
+  return minutes !== undefined && minutes >= 1 && minutes <= maxIndirectMinutes ? minutes : undefined
+}

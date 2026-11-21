@@ -1,13 +1,26 @@
+import type { SubmitWeeklyReportRequest, WeeklyReportHistoryEntry, WeeklyReportResponse } from '@mukuroji/contracts'
 import { useId, useMemo, useState } from 'react'
 import {
   formatPersonalWeeklyReportMarkdown,
+  toSubmitWeeklyReportRequest,
   type PersonalWeeklyReport as PersonalWeeklyReportFacts,
   type PersonalWeeklyReportItem,
   type PersonalWeeklyReportNotes,
 } from '../model/personalWeeklyReport'
 import { formatMinutes, type TimeWeekPeriod } from '../model/timePeriod'
+import {
+  readWeeklyReportSavedBase,
+  reconcileWeeklyReportEditor,
+  sameWeeklyReportNotes,
+  type WeeklyReportEditorState,
+  type WeeklyReportNotesBase,
+} from '../model/weeklyReportNotesEditor'
+import { SubmittedWeeklyReport } from './SubmittedWeeklyReport'
 import { TimeWeekNavigator } from './TimeWeekNavigator'
-import type { TimeTrackingFormatters, TimeTrackingTranslator } from './timeTrackingText'
+import { formatWeeklyReportSubmittedStatus, type TimeTrackingFormatters, type TimeTrackingTranslator } from './timeTrackingText'
+
+/** Outcome of saving or submitting a weekly report, decided by the container from the API answer. */
+export type WeeklyReportActionResult = 'done' | 'conflict' | 'limit' | 'failed'
 
 /** Props of the member's weekly report. */
 export type PersonalWeeklyReportProps = {
@@ -31,6 +44,66 @@ export type PersonalWeeklyReportProps = {
   onRetry: () => void
   /** Copies text to the clipboard; rejects when the browser refuses. */
   onCopy: (text: string) => Promise<void>
+  /** The member's saved notes and latest submission of the week; undefined until read. */
+  savedReport: WeeklyReportResponse | undefined
+  /** The member's recent weeks, newest first, when read. */
+  history?: readonly WeeklyReportHistoryEntry[]
+  /** Whether reading the recent weeks failed. */
+  hasHistoryError?: boolean
+  /** Reads the recent weeks again after they failed. */
+  onRetryHistory?: () => void
+  /**
+   * Saves the notes without submitting.
+   *
+   * @param expectedRevision - Saved revision the notes replace; 0 when nothing was saved.
+   * @param notes - Notes to save.
+   * @returns The outcome.
+   */
+  onSaveDraft: (expectedRevision: number, notes: PersonalWeeklyReportNotes) => Promise<WeeklyReportActionResult>
+  /**
+   * Submits a new version.
+   *
+   * @param request - Submission body built from the facts and notes.
+   * @returns The outcome.
+   */
+  onSubmit: (request: SubmitWeeklyReportRequest) => Promise<WeeklyReportActionResult>
+  /**
+   * Opens another week from the history.
+   *
+   * @param weekStart - First day of the week.
+   */
+  onOpenWeek: (weekStart: string) => void
+}
+
+/** Props of the notes, actions, and preview of a weekly report. */
+type WeeklyReportComposerProps = Pick<
+  PersonalWeeklyReportProps,
+  't' | 'formatters' | 'report' | 'isPartial' | 'onCopy' | 'onSaveDraft' | 'onSubmit'
+> & {
+  /** The member's saved notes and latest submission of the week. */
+  savedReport: WeeklyReportResponse
+  /** Notes being edited, kept by the parent so a failed read does not discard them. */
+  editor: WeeklyReportEditor
+}
+
+/** Notes editor shared by the weekly report and its composer. */
+type WeeklyReportEditor = {
+  /** Notes as the member is typing them. */
+  notes: PersonalWeeklyReportNotes
+  /** Revision a save expects: the one the edit started from. */
+  baseRevision: number
+  /** Whether the notes differ from the saved notes the edit started from. */
+  isDirty: boolean
+  /** Notes saved elsewhere after the edit started, while the member has unsaved changes. */
+  externalChange?: WeeklyReportNotesBase
+  /**
+   * Replaces the notes being typed.
+   *
+   * @param update - Builds the next notes from the current ones.
+   */
+  setNotes: (update: (current: PersonalWeeklyReportNotes) => PersonalWeeklyReportNotes) => void
+  /** Drops the unsaved changes and starts again from the notes saved elsewhere. */
+  loadSaved: () => void
 }
 
 /** Props of one fact list. */
@@ -76,27 +149,68 @@ function ReportItemList({ items, t, title }: ReportItemListProps) {
 }
 
 /**
- * Shows the facts of the member's week, lets them add issues and a reflection, and copies the
- * report as Markdown.
+ * Keeps the notes being edited for the whole life of the week's view, reconciled with every read
+ * of the saved report.
  *
- * @param props - Week, facts, and actions.
- * @returns Weekly report view.
+ * @param savedReport - Latest saved report, or undefined until it is read.
+ * @returns The editor, or undefined until the saved report is first read.
  */
-export function PersonalWeeklyReport({
+function useWeeklyReportEditor(savedReport: WeeklyReportResponse | undefined): WeeklyReportEditor | undefined {
+  const [state, setState] = useState<WeeklyReportEditorState>()
+  let current = state
+  if (savedReport && state?.seen !== savedReport) {
+    current = reconcileWeeklyReportEditor(state, savedReport)
+    setState(current)
+  }
+  if (!current) return undefined
+  const saved = readWeeklyReportSavedBase(current.seen)
+  const isDirty = !sameWeeklyReportNotes(current.notes, current.base.notes)
+  return {
+    notes: current.notes,
+    baseRevision: current.base.revision,
+    isDirty,
+    ...(saved.revision !== current.base.revision ? { externalChange: saved } : {}),
+    setNotes: (update) => setState((previous) => previous ? { ...previous, notes: update(previous.notes) } : previous),
+    loadSaved: () => setState((previous) => previous
+      ? { ...previous, notes: readWeeklyReportSavedBase(previous.seen).notes, base: readWeeklyReportSavedBase(previous.seen) }
+      : previous),
+  }
+}
+
+/**
+ * Message key of a failed save or submission.
+ *
+ * @param result - Outcome other than `done`.
+ * @param action - Which action failed.
+ * @returns Message key.
+ */
+function failureMessageKey(result: Exclude<WeeklyReportActionResult, 'done'>, action: 'save' | 'submit') {
+  if (result === 'conflict') return 'timeTracking.weeklyReport.conflict' as const
+  if (result === 'limit') return 'timeTracking.weeklyReport.submissionLimit' as const
+  return action === 'save' ? 'timeTracking.weeklyReport.saveFailed' as const : 'timeTracking.weeklyReport.submitFailed' as const
+}
+
+/**
+ * Edits the member's notes, saves or submits them with the facts, and copies the Markdown. It
+ * mounts once the saved report is read, so the fields start from the saved notes.
+ *
+ * @param props - Facts, saved report, and actions.
+ * @returns Notes, actions, and preview.
+ */
+function WeeklyReportComposer({
+  editor,
   formatters,
-  hasLoadError,
-  isLoading,
   isPartial,
   onCopy,
-  onMoveWeek,
-  onRetry,
+  onSaveDraft,
+  onSubmit,
   report,
+  savedReport,
   t,
-  week,
-}: PersonalWeeklyReportProps) {
-  const id = useId()
-  const [notes, setNotes] = useState<PersonalWeeklyReportNotes>({ issues: '', reflection: '' })
+}: WeeklyReportComposerProps) {
+  const { externalChange, isDirty, notes, setNotes } = editor
   const [message, setMessage] = useState<{ tone: 'error' | 'status'; text: string }>()
+  const [busy, setBusy] = useState(false)
   const markdown = useMemo(
     () => formatPersonalWeeklyReportMarkdown(report, notes, t, { timeIsPartial: isPartial }),
     [isPartial, notes, report, t],
@@ -111,6 +225,194 @@ export function PersonalWeeklyReport({
       setMessage({ tone: 'error', text: t('timeTracking.weeklyReport.copyFailed') })
     }
   }
+
+  /**
+   * Runs a save or submission and reports the outcome.
+   *
+   * @param action - Which action runs.
+   * @param expectedRevision - Revision a save expects; the one the edit started from by default.
+   */
+  const run = async (action: 'save' | 'submit', expectedRevision = editor.baseRevision) => {
+    setBusy(true)
+    setMessage(undefined)
+    try {
+      const result = action === 'save'
+        ? await onSaveDraft(expectedRevision, notes)
+        : await onSubmit(toSubmitWeeklyReportRequest(report, notes, {
+            timeIsPartial: isPartial,
+            expectedSubmissionCount: savedReport.submissionCount,
+            expectedRevision: editor.baseRevision,
+          }))
+      setMessage(result === 'done'
+        ? { tone: 'status', text: t(action === 'save' ? 'timeTracking.weeklyReport.saved' : 'timeTracking.weeklyReport.submittedMessage') }
+        : { tone: 'error', text: t(failureMessageKey(result, action)) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="grid min-w-0 content-start gap-3">
+      <p className="text-sm font-semibold text-[var(--workbench-text)]" data-testid="weekly-report-status">
+        {savedReport.submission
+          ? formatWeeklyReportSubmittedStatus(t, formatters, savedReport.submission.version, savedReport.submission.submittedAt)
+          : t('timeTracking.weeklyReport.statusNotSubmitted')}
+      </p>
+      <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+        {t('timeTracking.weeklyReport.issuesNote')}
+        <textarea
+          className="workbench-input min-h-24 w-full min-w-0 px-3 py-2 font-normal"
+          maxLength={4000}
+          onChange={(event) => setNotes((current) => ({ ...current, issues: event.target.value }))}
+          value={notes.issues}
+        />
+      </label>
+      <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+        {t('timeTracking.weeklyReport.reflectionNote')}
+        <textarea
+          className="workbench-input min-h-24 w-full min-w-0 px-3 py-2 font-normal"
+          maxLength={4000}
+          onChange={(event) => setNotes((current) => ({ ...current, reflection: event.target.value }))}
+          value={notes.reflection}
+        />
+      </label>
+      <p className="text-xs text-[var(--workbench-muted)]">{t('timeTracking.weeklyReport.notesHint')}</p>
+      {isDirty ? <p className="text-xs font-semibold text-fg-amber-800">{t('timeTracking.weeklyReport.unsaved')}</p> : null}
+      {externalChange ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-fg-amber-800" role="status">
+          <span>{t('timeTracking.weeklyReport.externalChange')}</span>
+          <button className="workbench-button-secondary min-h-8 px-3" disabled={busy} onClick={editor.loadSaved} type="button">
+            {t('timeTracking.weeklyReport.loadSaved')}
+          </button>
+          <button
+            className="workbench-button-secondary min-h-8 px-3"
+            disabled={busy}
+            onClick={() => { void run('save', externalChange.revision) }}
+            type="button"
+          >
+            {t('timeTracking.weeklyReport.overwriteSaved')}
+          </button>
+        </div>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-3">
+        <button className="workbench-button-primary min-h-9 px-3" disabled={busy || externalChange !== undefined} onClick={() => { void run('submit') }} type="button">
+          {t(savedReport.submissionCount > 0 ? 'timeTracking.weeklyReport.resubmit' : 'timeTracking.weeklyReport.submit')}
+        </button>
+        <button className="workbench-button-secondary min-h-9 px-3" disabled={busy || !isDirty || externalChange !== undefined} onClick={() => { void run('save') }} type="button">
+          {t('timeTracking.weeklyReport.saveDraft')}
+        </button>
+        <button className="workbench-button-secondary min-h-9 px-3" onClick={() => { void copy() }} type="button">
+          {t('timeTracking.weeklyReport.copy')}
+        </button>
+        {message ? (
+          <span
+            className={`text-sm font-semibold ${message.tone === 'error' ? 'text-fg-red-700' : 'text-[var(--workbench-muted)]'}`}
+            role={message.tone === 'error' ? 'alert' : 'status'}
+          >
+            {message.text}
+          </span>
+        ) : null}
+      </div>
+      <section aria-label={t('timeTracking.weeklyReport.preview')} className="grid min-w-0 gap-1">
+        <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{t('timeTracking.weeklyReport.preview')}</h3>
+        <pre className="max-h-[480px] min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-3 text-xs text-[var(--workbench-text)]" data-testid="weekly-report-markdown">
+          {markdown}
+        </pre>
+      </section>
+      {savedReport.submission ? (
+        <details className="grid min-w-0 gap-2 rounded-md border border-[var(--workbench-border)] p-3">
+          <summary className="cursor-pointer text-sm font-semibold text-[var(--workbench-text)]">{t('timeTracking.weeklyReport.submittedContent')}</summary>
+          <SubmittedWeeklyReport formatters={formatters} submission={savedReport.submission} t={t} />
+        </details>
+      ) : null}
+    </div>
+  )
+}
+
+/** Props of the member's recent weeks. */
+type WeeklyReportHistoryListProps = {
+  /** Translator. */
+  t: TimeTrackingTranslator
+  /** Date and time formatters. */
+  formatters: TimeTrackingFormatters
+  /** Recent weeks, newest first. */
+  weeks: readonly WeeklyReportHistoryEntry[]
+  /** Week shown, marked as current. */
+  currentWeekStart: string
+  /**
+   * Opens a week.
+   *
+   * @param weekStart - First day of the week.
+   */
+  onOpenWeek: (weekStart: string) => void
+}
+
+/**
+ * Lists the member's recent weeks with whether each was submitted.
+ *
+ * @param props - Weeks and navigation.
+ * @returns History list.
+ */
+function WeeklyReportHistoryList({ currentWeekStart, formatters, onOpenWeek, t, weeks }: WeeklyReportHistoryListProps) {
+  return (
+    <section className="grid min-w-0 gap-2" data-testid="weekly-report-history">
+      <h3 className="text-base font-semibold text-[var(--workbench-text)]">{t('timeTracking.weeklyReport.history')}</h3>
+      {weeks.length === 0 ? (
+        <p className="text-sm text-[var(--workbench-muted)]">{t('timeTracking.weeklyReport.historyEmpty')}</p>
+      ) : (
+        <ul className="grid min-w-0 gap-1 text-sm">
+          {weeks.map((entry) => (
+            <li className="flex min-w-0 flex-wrap items-center gap-x-3" key={entry.weekStart}>
+              <button
+                aria-current={entry.weekStart === currentWeekStart ? 'true' : undefined}
+                className="font-semibold text-[var(--workbench-primary)] underline-offset-2 hover:underline"
+                onClick={() => onOpenWeek(entry.weekStart)}
+                type="button"
+              >
+                {formatters.day(entry.weekStart)}
+              </button>
+              <span className="text-[var(--workbench-muted)]">
+                {entry.submissionCount > 0
+                  ? t('timeTracking.weeklyReport.historySubmitted').replace('{version}', String(entry.submissionCount))
+                  : t('timeTracking.weeklyReport.historyDraft')}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+/**
+ * Shows the facts of the member's week, lets them add issues and a reflection, save and submit the
+ * report, copy it as Markdown, and open past weeks.
+ *
+ * @param props - Week, facts, saved report, and actions.
+ * @returns Weekly report view.
+ */
+export function PersonalWeeklyReport({
+  formatters,
+  hasLoadError,
+  hasHistoryError = false,
+  history,
+  isLoading,
+  isPartial,
+  onCopy,
+  onMoveWeek,
+  onOpenWeek,
+  onRetry,
+  onRetryHistory,
+  onSaveDraft,
+  onSubmit,
+  report,
+  savedReport,
+  t,
+  week,
+}: PersonalWeeklyReportProps) {
+  const id = useId()
+  // Owned here, above the loading and error branches, so a failed read never discards typed notes.
+  const editor = useWeeklyReportEditor(savedReport)
 
   return (
     <section aria-labelledby={`${id}-title`} className="grid min-w-0 gap-4" data-testid="personal-weekly-report">
@@ -130,9 +432,9 @@ export function PersonalWeeklyReport({
         </p>
       ) : null}
 
-      {isLoading ? (
+      {isLoading || (!hasLoadError && (!savedReport || !editor)) ? (
         <p className="text-sm text-[var(--workbench-muted)]" role="status">{t('timeTracking.weeklyReport.loading')}</p>
-      ) : hasLoadError ? null : (
+      ) : hasLoadError || !savedReport || !editor ? null : (
         <div className="grid min-w-0 gap-4 lg:grid-cols-2">
           <div className="grid min-w-0 content-start gap-4">
             <section className="grid min-w-0 gap-2">
@@ -162,46 +464,32 @@ export function PersonalWeeklyReport({
                 ))}
               </ul>
             </section>
+            {hasHistoryError ? (
+              <section className="grid min-w-0 gap-2">
+                <h3 className="text-base font-semibold text-[var(--workbench-text)]">{t('timeTracking.weeklyReport.history')}</h3>
+                <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
+                  <span>{t('timeTracking.weeklyReport.historyLoadError')}</span>
+                  {onRetryHistory ? (
+                    <button className="workbench-button-secondary min-h-8 px-3" onClick={onRetryHistory} type="button">{t('timeTracking.weeklyReport.retry')}</button>
+                  ) : null}
+                </div>
+              </section>
+            ) : history ? (
+              <WeeklyReportHistoryList currentWeekStart={week.days[0] ?? ''} formatters={formatters} onOpenWeek={onOpenWeek} t={t} weeks={history} />
+            ) : null}
           </div>
 
-          <div className="grid min-w-0 content-start gap-3">
-            <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('timeTracking.weeklyReport.issuesNote')}
-              <textarea
-                className="workbench-input min-h-24 w-full min-w-0 px-3 py-2 font-normal"
-                onChange={(event) => setNotes((current) => ({ ...current, issues: event.target.value }))}
-                value={notes.issues}
-              />
-            </label>
-            <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('timeTracking.weeklyReport.reflectionNote')}
-              <textarea
-                className="workbench-input min-h-24 w-full min-w-0 px-3 py-2 font-normal"
-                onChange={(event) => setNotes((current) => ({ ...current, reflection: event.target.value }))}
-                value={notes.reflection}
-              />
-            </label>
-            <p className="text-xs text-[var(--workbench-muted)]">{t('timeTracking.weeklyReport.notesNotSaved')}</p>
-            <div className="flex flex-wrap items-center gap-3">
-              <button className="workbench-button-primary min-h-9 px-3" onClick={() => { void copy() }} type="button">
-                {t('timeTracking.weeklyReport.copy')}
-              </button>
-              {message ? (
-                <span
-                  className={`text-sm font-semibold ${message.tone === 'error' ? 'text-fg-red-700' : 'text-[var(--workbench-muted)]'}`}
-                  role={message.tone === 'error' ? 'alert' : 'status'}
-                >
-                  {message.text}
-                </span>
-              ) : null}
-            </div>
-            <section aria-label={t('timeTracking.weeklyReport.preview')} className="grid min-w-0 gap-1">
-              <h3 className="text-sm font-semibold text-[var(--workbench-text)]">{t('timeTracking.weeklyReport.preview')}</h3>
-              <pre className="max-h-[480px] min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-3 text-xs text-[var(--workbench-text)]" data-testid="weekly-report-markdown">
-                {markdown}
-              </pre>
-            </section>
-          </div>
+          <WeeklyReportComposer
+            editor={editor}
+            formatters={formatters}
+            isPartial={isPartial}
+            onCopy={onCopy}
+            onSaveDraft={onSaveDraft}
+            onSubmit={onSubmit}
+            report={report}
+            savedReport={savedReport}
+            t={t}
+          />
         </div>
       )}
     </section>

@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   createDefaultDueDateWorkItemSchedule,
   type CanonicalWorkItem,
+  type WorkItemScheduleCalendarPolicy,
   type TeamWorkItemHierarchyNode,
   type WorkspaceSearchResult,
 } from '@mukuroji/contracts'
@@ -12,6 +14,10 @@ import { TeamIssueScreen } from '../src/issues/ui/TeamIssueScreen'
 import { SearchResultCollection } from '../src/search/ui/SearchResultCollection'
 import { readSearchWorkItemIdentity } from '../src/search/model/searchWbsNumbers'
 import { createTaskGanttRows, listTaskGanttRowTasks } from '../src/tasks/model/taskGanttRows'
+import {
+  createDefaultDateRangeTaskSchedule,
+  createWorkspaceTaskScheduleCalendarPolicy,
+} from '../src/tasks/model/taskSchedule'
 import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
 import { TaskTableView } from '../src/tasks/ui/TaskTableView'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -356,6 +362,60 @@ describe('My Tasks Gantt', () => {
     expect(html.indexOf('task-gantt-timeline-other-team-item')).toBeLessThan(html.indexOf('task-gantt-wbs-phase'))
     expect(html.indexOf('task-gantt-wbs-phase')).toBeLessThan(html.indexOf('task-gantt-wbs-task'))
     expect(html).not.toContain('task-gantt-wbs-other-team-item')
+  })
+})
+
+describe('My Tasks Gantt working calendar', () => {
+  test('shades the Workspace days off, including Japanese national holidays', () => {
+    const task = createItem('holiday-week', '2026-11-27', {
+      schedule: createDefaultDateRangeTaskSchedule('2026-11-16', '2026-11-27'),
+    })
+    const render = (workingCalendar?: WorkItemScheduleCalendarPolicy) => renderToStaticMarkup(
+      <MyTasksWorkspaceView
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={{ 'core-team': { configuration: teamWorkItemConfigurationFixture } }}
+        onViewModeChange={() => undefined}
+        t={t}
+        tasks={[task]}
+        teams={projectDirectoryFixtures}
+        viewMode="gantt"
+        workingCalendar={workingCalendar}
+      />,
+    )
+
+    const html = render(createWorkspaceTaskScheduleCalendarPolicy({
+      ...DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+      publicHolidays: 'japan',
+    }))
+    const shaded = [...html.matchAll(/aria-label="(\d{4}-\d{2}-\d{2})"[^>]*data-non-working=""/g)]
+      .map((match) => match[1])
+    // 11/23 (勤労感謝の日) is a Monday holiday; the weekend is off and 11/24 is a working day.
+    expect(shaded).toContain('2026-11-23')
+    expect(shaded).toContain('2026-11-22')
+    expect(shaded).not.toContain('2026-11-24')
+    expect(render()).not.toContain('data-testid="task-gantt-non-working-day"')
+  })
+})
+
+describe('Team Issue working calendar notice', () => {
+  test('shows a retry when the Workspace working calendar could not be read', () => {
+    const render = (message?: string) => renderToStaticMarkup(
+      <TeamIssueScreen
+        issues={[]}
+        locale="ja"
+        onRetryWorkingCalendar={() => undefined}
+        resolvedConfiguration={{ configuration: teamWorkItemConfigurationFixture }}
+        teamId="core-team"
+        teams={projectDirectoryFixtures}
+        userInitial="J"
+        workingCalendarErrorMessage={message}
+      />,
+    )
+
+    const html = render(t('tasks.workspaceCalendar.error'))
+    expect(html).toContain('data-testid="team-issue-workspace-calendar-error"')
+    expect(html).toContain(t('tasks.workspaceCalendar.retry'))
+    expect(render()).not.toContain('team-issue-workspace-calendar-error')
   })
 })
 

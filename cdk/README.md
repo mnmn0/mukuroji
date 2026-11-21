@@ -65,6 +65,7 @@ wiring も stack に含めません。Context は `bin/cdk.ts` だけが読み�
 | `mukuroji:connectors` | Connector sync / poll worker、sync queue と DLQ、`ConnectorRuntimeSecret` と `ConnectorRuntimeConfiguration` parameter。 | API は connector provider を読み込まず、audit projection は connector への fan-out を行いません（`CONNECTOR_SYNC_ENABLED=false`）。Webhook と public API は使えます。 |
 | `mukuroji:requestEmail` | 外部の mail relay が invoke する `RequestEmailIngestionFunction`、DLQ、alarm。`RequestEmailWebhookSecret` parameter が必要になります。 | 公開フォームと手動での依頼登録は使えます。メールからの依頼取り込みだけがありません。 |
 | `mukuroji:tenantLifecycle` | テナントのエクスポートと閉鎖を実行する 6 つの resource owner Lambda（export、access、identity、data、secrets、verification）、それぞれの execution queue、エクスポート成果物を置く `TenantExportBucket`。API にはその bucket の読み取り権限を付けます。 | API はエクスポート・閉鎖の要求と、操作の download・pause・resume・verify を `503 TenantLifecycleNotDeployed` で断ります（`TENANT_LIFECYCLE_OPERATIONS=disabled`）。テナントのプロフィールとガバナンス設定、操作の参照は使えます。`TenantOperationFunction` は残り、監査ログの保持期間の処理だけを行います。 |
+| `mukuroji:softwareFactory` | 追加の resource はありません。API と scheduled-jobs Lambda に `SOFTWARE_FACTORY=enabled` を渡し、scheduled-jobs Lambda に Agent Run triage job（毎分）とその IAM policy を足します。 | API は Agent Run（Web の Factory board・Work Item の Run 履歴と報告・期間サマリー・release、Public API の Agent Run 系と `/v1/agent-settings`・`/v1/agent-context`）、Team の agent 設定、本人用 agent token（`/developer/me/agent-connection` と発行・rotate）を認証前に `503 SoftwareFactoryNotDeployed` で断ります（`SOFTWARE_FACTORY=disabled`）。Agent Run triage job は動きません。Web は `/api/auth/me` の `softwareFactoryEnabled` を見て Factory board、agent 接続、Team の agent 設定、Work Item の「エージェントへ引き継ぐ」と Run 履歴、Project 概要の Agent Run 欄、ヘルプの coding agent ガイドを出しません。Public API の Work Item の読み書きと本人用 token の失効は使えます。 |
 
 有効にするときは、`cdk diff` / `cdk deploy` に context と、そのモジュールの parameter を足します。
 
@@ -189,6 +190,7 @@ aws ce update-cost-allocation-tags-status \
 | `mukuroji:connectors` | +$1 前後 / 月 | secret 1 個、alarm 3 個、5 分ごとの poll（月 8,640 回）、queue の polling。 |
 | `mukuroji:requestEmail` | +$1 / 月 | secret 2 個、alarm 2 個。 |
 | `mukuroji:tenantLifecycle` | +$0〜2 / 月 | Lambda 6 個と queue 6 個。待機中の queue polling が SQS の無料枠を超えた分です。 |
+| `mukuroji:softwareFactory` | ほぼ $0 | 毎分の Agent Run triage job。opt-in した Team がなければ AgentRuns table の index を読むだけです。 |
 | AI（Bedrock の parameter 設定） | 利用量に比例 | token 料金。上限は Workspace の AI 設定で決めます。 |
 | `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
 | `CognitoEmailSender`（SES） | 利用量に比例 | 招待と再設定のメール。1,000 通あたり約 $0.10。 |
@@ -285,6 +287,7 @@ templateとdeployed configurationの両方で照合します。
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
 - `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
 - `FileBucketIncarnationMarkerKey`, `FileBucketIncarnationMarkerVersionId`, `FileBucketIncarnationMarkerChecksumSha256`, `FileBucketIncarnationMarkerSize`（同名 bucket 再作成を検出する固定 marker の exact S3 version、base64 SHA-256、byte size。cross-domain integrity operator の明示入力に使い、current version へ fallback しない）
+- `DataMigrationFunctionName`, `DataMigrationCheckpointTableName`, `DataMigrationOperatorPolicyArn`（operator が起動する data migration の Lambda、checkpoint と run record の table、その Lambda の invoke だけを許す未接続 policy。下記「Data migration」）
 - `CrossDomainIntegrityOperatorPolicyArn`（6表の `Scan` / `DescribeTable`、exact FileBucket の `GetBucketVersioning`、`workspaces/*` の exact-version read、出力された marker VersionId に条件固定した marker exact-key read だけを持つ未接続 read-only policy）
 - `NotificationsTableName`, `CollaborationProjectionDlqUrl`
 - `ScheduledJobsFunctionName`, `ScheduledJobsDlqUrl`（定期ジョブをまとめて実行する Lambda と、その失敗を14日保持する Retain DLQ）
@@ -1186,7 +1189,10 @@ Web bucket は versioning を有効にし、次の期間で古い file を消し
 6. fresh token で CloudFront と HTTP API の両 endpoint を検証してから write を再開する。
 7. rollback window 中は旧 partition を削除しない。
 
-大量 data の migration を shell の `scan | put-item` で即時実行しないでください。pagination、retry、conditional write、件数/内容照合を備えた一時 migration job として review・dry run してから実行します。
+大量 data の migration を shell の `scan | put-item` で即時実行しないでください。この移行は key を変える copy なので、
+下記「Data migration」の runner（同じ key の row の schema version を 1 つ上げるだけ）の対象外です。
+[docs/data-migration.md](../docs/data-migration.md) のとおり ADR を伴う個別の変更として、pagination、retry、
+conditional write、件数・内容の照合を備えた job を review・dry run してから実行します。
 
 ## Canonical Work Item deploy
 
@@ -1194,7 +1200,54 @@ CDK は canonical Work Item store として `WorkItemsTable` を作成し、tabl
 
 Demo data を有効にした場合、demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast は行いません。
 
-Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を CloudFront 経由と API Gateway 直接の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
+Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を CloudFront 経由と API Gateway 直接の両方で確認します。
+
+保存済み row の schema を変える deploy では、row を削除して作り直さず、
+[docs/data-migration.md](../docs/data-migration.md) の契約（dual-read の deploy → migration → `verify` の
+`pass` → dual-read の終了）に従い、下記「Data migration」の手順で移行します。
+
+## Data migration
+
+保存済み row の schema version を上げる migration は、stack にある `DataMigrationFunction` を operator が起動して
+実行します。migration の契約、dual-read の deploy 順、rollback、evidence は
+[docs/data-migration.md](../docs/data-migration.md)、設計判断は
+[ADR 0031](../docs/adr/0031-data-migration-lambda-and-operator-proof.md) にあります。
+
+- `DataMigrationFunction` は schedule も event source も持たず、起動されたときだけ動きます（timeout 15 分、
+  非同期起動の retry 0）。待機中の費用はかかりません。
+- function の role は allowlist の table（今は `work-items` = `WorkItemsTable` と `project-directory` =
+  `ProjectDirectoryTable`）に `Scan` / `GetItem` / `PutItem`、`DataMigrationCheckpointTable` に `Query` /
+  `PutItem` だけを持ちます。別の table を移行する migration は、`cdk/lib/stacks/mukuroji-stack.ts` の
+  `buildDataMigration` の `targets` に同じ PR で table を足します。
+- `DataMigrationCheckpointTable` は `Retain`、PITR、deletion protection 付きです。checkpoint と run record
+  （実行者の記録）を持つので、migration が終わっても削除しません。
+- operator には table の権限を渡さず、`DataMigrationOperatorPolicyArn` の policy（この function の
+  `lambda:InvokeFunction` だけ）を付けた principal で実行します。
+
+```sh
+export DATA_MIGRATION_FUNCTION="$(aws cloudformation describe-stacks \
+  --region "$AWS_REGION" \
+  --stack-name Mukuroji \
+  --query "Stacks[0].Outputs[?OutputKey=='DataMigrationFunctionName'].OutputValue | [0]" \
+  --output text)"
+
+bun run data:migrate:aws list --function-name "$DATA_MIGRATION_FUNCTION"
+bun run data:migrate:aws run --function-name "$DATA_MIGRATION_FUNCTION" --migration <id>
+# 書き込みはユーザーの明示確認を取ってから
+bun run data:migrate:aws run --function-name "$DATA_MIGRATION_FUNCTION" --migration <id> --apply
+bun run data:migrate:aws verify --function-name "$DATA_MIGRATION_FUNCTION" --migration <id>
+```
+
+- 1 回の起動は、15 分の上限に 1 分と最後の page を書き切る時間を残して新しい page を読むのをやめ、`paused`（exit 3）で終わります。
+  同じ command をもう一度実行すると checkpoint の続きから再開します。`verify` は毎回 table 全体を読み直します。
+- `--apply` は operator の AWS credential で STS `GetCallerIdentity` の presigned URL を作り、この起動の
+  parameter から作った digest を署名済み header に入れて送ります。function はその URL を自分の region の
+  STS endpoint へ送り、STS が返した ARN を実行者として run record と log に残します。proof が無い、
+  別の起動の proof、期限切れ、別 account のときは `OPERATOR_UNVERIFIED` で、row も checkpoint も書きません。
+- 実行者の記録は checkpoint table の run record（`migrationId = RUN#<id>`）と、function の log group（1 年保持）
+  の `data-migration.invocation` 行です。run record には実行者・物理 table 名・状態・counter が入り、
+  row の key・内容と proof は入りません。log 行は `list` や断った起動も含めて起動ごとに 1 行で、論理 table 名
+  だけを使い、物理 table 名・key・row の内容・proof は入りません。
 
 ## Work Item configuration
 

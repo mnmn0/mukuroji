@@ -38,8 +38,8 @@ export type WorkloadTimeEntry = {
   memberId: string
   /** Optional Project identifier used for project-scoped visibility. */
   projectId?: string
-  /** Canonical Work Item identifier. */
-  workItemId: string
+  /** Canonical Work Item identifier; absent for indirect work such as meetings. */
+  workItemId?: string
   /** Inclusive instant start. */
   startAt: string
   /** Exclusive instant end. */
@@ -965,10 +965,12 @@ function createActualMinutesByMemberDate(
         if (selectedDates.has(date)) {
           memberActual.byDate.set(date, (memberActual.byDate.get(date) ?? 0) + overlapMinutes)
         }
-        memberActual.byWorkItemId.set(
-          entry.workItemId,
-          (memberActual.byWorkItemId.get(entry.workItemId) ?? 0) + overlapMinutes,
-        )
+        if (entry.workItemId !== undefined) {
+          memberActual.byWorkItemId.set(
+            entry.workItemId,
+            (memberActual.byWorkItemId.get(entry.workItemId) ?? 0) + overlapMinutes,
+          )
+        }
       }
     }
     result.set(entry.memberId, memberActual)

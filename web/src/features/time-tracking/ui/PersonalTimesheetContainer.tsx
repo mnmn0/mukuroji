@@ -6,6 +6,7 @@ import { createWeekPeriod } from '../model/timePeriod'
 import { useTimeEntryMutations } from '../mutations/useTimeEntryMutations'
 import { useRejectionReasons } from '../queries/useRejectionReasons'
 import { useTimeEntries } from '../queries/useTimeEntries'
+import type { IndirectTimeEntryTargets } from './IndirectTimeEntryForm'
 import { PersonalTimesheet } from './PersonalTimesheet'
 import type { TimeEntryWorkItemOption } from './TimeEntryForm'
 import { createTimeTrackingFormatters } from './timeTrackingText'
@@ -29,6 +30,8 @@ export type PersonalTimesheetContainerProps = {
   workItemOptions: readonly TimeEntryWorkItemOption[]
   /** Whether the offered Work Items are still being resolved. */
   isLoadingWorkItemOptions?: boolean
+  /** Where the member may record indirect work; undefined while it is being resolved. */
+  indirectTargets?: IndirectTimeEntryTargets
   /** Titles of every Team Work Item, including ones the member can no longer record against. */
   workItemTitles: Readonly<Record<string, string>>
   /** Moves the week; 0 returns to the current week. */
@@ -43,6 +46,7 @@ export type PersonalTimesheetContainerProps = {
  */
 export function PersonalTimesheetContainer({
   accessToken,
+  indirectTargets,
   isLoadingWorkItemOptions = false,
   locale,
   memberKey,
@@ -66,15 +70,19 @@ export function PersonalTimesheetContainer({
       entries={entries.data?.entries ?? []}
       formatters={formatters}
       hasLoadError={Boolean(entries.error ?? rejectionReasons.error)}
+      {...(indirectTargets ? { indirectTargets } : {})}
       isLoading={entries.isLoading}
       isLoadingWorkItemOptions={isLoadingWorkItemOptions}
       isPartial={entries.data?.complete === false}
       onCreateEntry={(input) => mutations.create(teamId, input)}
+      onCreateIndirectEntry={(input) => mutations.createIndirect(teamId, input)}
+      onDeleteEntry={(entry) => mutations.remove(entry)}
       onMoveWeek={onMoveWeek}
       onRetry={() => { void Promise.all([entries.mutate(), rejectionReasons.mutate()]).catch(() => undefined) }}
       onSubmitEntry={(entry) => mutations.transition(entry, 'submit')}
       onSubmitWeek={() => mutations.transitionPeriod(teamId, 'submit', week)}
       onUpdateEntry={(entry, input) => mutations.update(entry, input)}
+      onUpdateIndirectEntry={(entry, input) => mutations.updateIndirect(entry, input)}
       {...(rejectionReasons.data ? { rejectionReasons: rejectionReasons.data } : {})}
       t={t}
       today={today}

@@ -163,6 +163,11 @@ export type WorkspaceRouteContextValue = {
   canManageCustomerRequests: boolean
   /** Whether the current user may create or update Customer saved views. */
   canManageCustomerViews: boolean
+  /**
+   * Whether the deployment serves Software factory: the Factory board, Agent Run history and
+   * lanes, Agent settings, agent connection, and Work Item handoff to an agent.
+   */
+  softwareFactoryEnabled: boolean
   /** Returns whether one AI workflow is currently enabled by rollout and saved settings. */
   isAiAssistanceTaskEnabled?: (task: AiAssistanceTask) => boolean
   /** Whether the current user may perform team-scoped content mutations. */
@@ -377,6 +382,8 @@ export function WorkspaceRouteProvider() {
   const canReadCustomers = user?.canReadCustomers ?? false
   const canManageCustomerRequests = user?.canManageCustomerRequests ?? false
   const canManageCustomerViews = user?.canManageCustomerViews ?? false
+  // Hidden until the server says the deployment serves it, so the default deploy never flashes it.
+  const softwareFactoryEnabled = user?.softwareFactoryEnabled === true
   const canMutateTeamConfiguration = canMutateWorkspaceContent(user)
   const hasQuickAccessLoadError = Boolean(quickAccessError)
   const quickAccessProjects = useMemo(
@@ -875,6 +882,7 @@ export function WorkspaceRouteProvider() {
     canManageAiAssistance,
     canManageCustomerViews,
     canViewCustomerSensitiveData,
+    softwareFactoryEnabled,
     isAiAssistanceTaskEnabled,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,
@@ -941,6 +949,7 @@ export function WorkspaceRouteProvider() {
     canManageAiAssistance,
     canManageCustomerViews,
     canViewCustomerSensitiveData,
+    softwareFactoryEnabled,
     isAiAssistanceTaskEnabled,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,

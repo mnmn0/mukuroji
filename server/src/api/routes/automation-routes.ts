@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
   type AutomationAction,
   type AutomationExecutionStatus,
   type AutomationInboundWebhookDeliveryResponse,
@@ -183,6 +184,7 @@ import {
   enforceActiveTenantForWorkspace,
   requireActiveWorkspaceAssignee,
 } from '../shared/workspace-access'
+import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 
 async function readAutomationJson(c: Context) {
   const value = await readJson<unknown>(c.req)
@@ -478,6 +480,8 @@ async function executeAutomationTemplateApplication(
         ? expandProjectTemplateWorkItems(
             templateWorkItems,
             requireProjectTemplateStartDate(target.startDate),
+            // A receipt reserved before the calendar was pinned expanded its WBS with the default.
+            application.calendarPolicy ?? DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
           )
         : []
       if (expandedWorkItems.length > 0) {
@@ -2990,12 +2994,15 @@ export function registerAutomationRoutes(routeApp: Hono): void {
       if (input.target.kind === 'workflow' && input.target.scopeType === 'team') {
         await requireTeamConfigurationAdministration(principal, input.target.scopeId)
       }
+      // A Project template's WBS keeps the calendar of the first request on every retry; a retry
+      // returns its receipt without reading the calendar again.
       const application = await automationDependencies.ruleTemplates.reserveTemplateApplication(
         principal.directoryId,
         principal.actorId,
         c.req.param('templateId'),
         input.target,
         idempotencyKey,
+        () => readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
       )
       return c.json(await executeAutomationTemplateApplication(c, principal, application))
     } catch (error) {

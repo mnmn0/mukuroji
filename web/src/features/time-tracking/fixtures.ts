@@ -5,8 +5,11 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
   type CanonicalWorkItem,
   type RunningTimer,
+  type TeamWeeklyReportMemberStatus,
   type TimeEntry,
   type TimeSheet,
+  type WeeklyReportResponse,
+  type WeeklyReportSubmission,
 } from '@mukuroji/contracts'
 
 /** Monday of the fixture week. */
@@ -216,4 +219,43 @@ export const weeklyReportFixtureWorkItems: CanonicalWorkItem[] = [
     dueDate: '2026-11-18',
     schedule: createDefaultDueDateWorkItemSchedule('2026-11-18'),
   }),
+]
+
+/** A submitted weekly report as a manager who cannot view the invoice task reads it. */
+export const weeklyReportFixtureSubmission: WeeklyReportSubmission = {
+  version: 1,
+  submittedAt: '2026-11-13T08:30:00.000Z',
+  weekStart: timeTrackingFixtureWeekStart,
+  weekEnd: '2026-11-15',
+  sections: {
+    completed: [{ hidden: false, workItemId: 'onboarding', key: 'CORE-12', title: 'Reduce onboarding friction', plannedEndDate: '2026-11-12', minutes: 150 }],
+    started: [{ hidden: false, workItemId: 'pricing', key: 'CORE-15', title: 'Update the pricing page', plannedEndDate: '2026-11-20', minutes: 60 }],
+    overdue: [{ hidden: true, minutes: 0 }],
+    upcoming: [{ hidden: false, workItemId: 'survey', key: 'CORE-21', title: 'Send the customer survey', plannedEndDate: '2026-11-18', minutes: 0 }],
+  },
+  time: [
+    { hidden: false, workItemId: 'onboarding', key: 'CORE-12', title: 'Reduce onboarding friction', minutes: 150 },
+    { hidden: false, workItemId: 'pricing', key: 'CORE-15', title: 'Update the pricing page', minutes: 60 },
+    { hidden: true, minutes: 30 },
+  ],
+  indirectTime: [{ category: 'meeting', minutes: 45 }],
+  totalMinutes: 285,
+  timeIsPartial: false,
+  notes: { issues: 'Waiting for the pricing review.', reflection: 'Onboarding shipped on time.' },
+}
+
+/** The member's saved notes and first submission of the fixture week. */
+export const weeklyReportFixtureSaved: WeeklyReportResponse = {
+  teamId: 'core-team',
+  memberKey: 'demo@example.com',
+  weekStart: timeTrackingFixtureWeekStart,
+  submissionCount: 1,
+  draft: { revision: 2, updatedAt: '2026-11-13T08:30:00.000Z', notes: weeklyReportFixtureSubmission.notes },
+  submission: weeklyReportFixtureSubmission,
+}
+
+/** Submission state of the Team members for the fixture week. */
+export const teamWeeklyReportFixtureMembers: TeamWeeklyReportMemberStatus[] = [
+  { memberKey: 'demo@example.com', submissionCount: 1, lastSubmittedAt: '2026-11-13T08:30:00.000Z' },
+  { memberKey: 'sato@example.com', submissionCount: 0 },
 ]

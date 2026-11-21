@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(506)
-  expect(new Set(inventory).size).toBe(502)
+  expect(inventory).toHaveLength(536)
+  expect(new Set(inventory).size).toBe(532)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
@@ -22,6 +22,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId')
+  expect(inventory).toContain('GET /api/teams/:teamId/weekly-reports')
+  expect(inventory).toContain('GET /api/teams/:teamId/weekly-reports/:memberKey/:weekStart')
+  expect(inventory).toContain('POST /api/teams/:teamId/weekly-reports/:memberKey/:weekStart/submissions')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/schedule-baseline')
   // A Work Item may be named `hierarchy`, so the Team hierarchy must not sit under `/issues/`.
@@ -97,6 +100,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PUT /api/me/preferences')
   expect(inventory).toContain('GET /api/developer/credential-policy')
   expect(inventory).toContain('PUT /api/developer/credential-policy')
+  expect(inventory).toContain('GET /api/teams/:teamId/time-periods')
+  expect(inventory).toContain('POST /api/teams/:teamId/time-periods/:month/close')
+  expect(inventory).toContain('POST /api/teams/:teamId/time-periods/:month/reopen')
+  expect(inventory).toContain('POST /api/teams/:teamId/time-entries/:entryId/return')
   expect(inventory).toContain('GET /api/teams/:teamId/notification-reminders')
   expect(inventory).toContain('PUT /api/teams/:teamId/notification-reminders')
   expect(inventory).toContain('POST /api/developer/connector-oauth/complete')
@@ -110,10 +117,16 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId/restore')
   expect(inventory).toContain('POST /api/enterprise/security/role-assignments')
   expect(inventory).toContain('DELETE /api/enterprise/security/role-assignments/:assignmentId')
+  expect(inventory).toContain('DELETE /api/teams/:teamId/time-entries/:entryId')
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
+  // The Software factory deployment gate runs ahead of the Agent Run, agent setting, and agent
+  // credential routes (#632).
+  expect(inventory).toContain('ALL /api/v1/agent-runs/*')
+  expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
+  expect(inventory).toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '81fb7995fc8d048b6db6ebe7ba333818f750b98119e2f524b87a16a8db601932',
+    '139b1b9e5ce65eadf433fb1649687f9ef8e430855ca3c91a64934f6c5324c73b',
   )
 })

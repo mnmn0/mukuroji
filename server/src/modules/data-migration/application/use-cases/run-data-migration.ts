@@ -46,6 +46,12 @@ export type RunDataMigrationInput = {
   readonly pageSize: number
   /** Page budget of this run; the run pauses when it is spent. */
   readonly maxPages: number
+  /**
+   * Epoch milliseconds after which no new page is read, so that a caller with
+   * a hard time limit (such as a Lambda invocation) pauses instead of being
+   * cut off. Omitted, only the page budget bounds the run.
+   */
+  readonly deadline?: number
   /** Upper bound on row replacements per second. */
   readonly maxWritesPerSecond: number
   /** Lease length in milliseconds; defaults to five minutes. */
@@ -76,7 +82,7 @@ export type DataMigrationRunReport = {
   readonly mode: 'apply' | 'dry-run'
   /** Run identifier. */
   readonly runId: string
-  /** `completed` when every partition is done, `paused` when the page budget ran out. */
+  /** `completed` when every partition is done, `paused` when the page budget or the deadline ran out. */
   readonly status: 'completed' | 'paused' | 'failed'
   /** Stable failure code when `status` is `failed`. */
   readonly failureCode?: DataMigrationFailureCode
@@ -151,7 +157,7 @@ export async function runDataMigration(input: RunDataMigrationInput): Promise<Da
       runRecord = started
     }
     for (const partitionId of partitionIds) {
-      if (state.pagesRead >= input.maxPages) {
+      if (!hasPageBudget(input, state)) {
         status = 'paused'
         state.partitions.push(notStartedReport(partitionId, checkpoints.get(partitionId)))
         continue
@@ -224,8 +230,22 @@ function assertRunInput(input: RunDataMigrationInput): void {
     Number.isFinite(input.maxWritesPerSecond) &&
     input.maxWritesPerSecond > 0 &&
     Number.isSafeInteger(lease) &&
-    lease > 0
+    lease > 0 &&
+    (input.deadline === undefined || Number.isFinite(input.deadline))
   if (!valid) throw new DataMigrationFailure('DEFINITION_INVALID')
+}
+
+/**
+ * Tells whether the run may read another page: the page budget is not spent
+ * and the deadline, when given, has not passed.
+ *
+ * @param input - Run input.
+ * @param state - Shared run state.
+ * @returns Whether another page may be read.
+ */
+function hasPageBudget(input: RunDataMigrationInput, state: RunState): boolean {
+  if (state.pagesRead >= input.maxPages) return false
+  return input.deadline === undefined || input.clock.now() < input.deadline
 }
 
 /**
@@ -363,7 +383,7 @@ async function applyPartition(
     counters: runCounters,
   })
   try {
-    while (state.pagesRead < input.maxPages) {
+    while (hasPageBudget(input, state)) {
       const cursor = lease.current.cursor
       const page = await input.rowStore.readPage({
         partitionId,
@@ -622,7 +642,7 @@ async function dryRunPartition(
   let cursor: string | undefined
   let status: DataMigrationPartitionReport['status'] = 'in-progress'
   try {
-    while (state.pagesRead < input.maxPages) {
+    while (hasPageBudget(input, state)) {
       const page = await input.rowStore.readPage({
         partitionId,
         ...(cursor === undefined ? {} : { cursor }),

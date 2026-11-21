@@ -2,11 +2,13 @@ import {
   createScheduledJobsDispatcher,
   type ScheduledJob,
 } from '../app/composition/scheduled-jobs'
+import { isSoftwareFactoryDeployed } from '../infrastructure/config/software-factory'
 import { handler as agentRunTriageHandler } from './agent-run-triage-handler'
 import { handler as analyticsScheduleHandler } from './analytics-schedule-handler'
 import { handler as automationScheduleHandler } from './automation-schedule-handler'
 import { handler as cycleScheduleHandler } from './cycle-schedule-handler'
 import { handler as emailNotificationHandler } from './email-notifications-handler'
+import { handler as japanesePublicHolidaySyncHandler } from './japanese-public-holiday-sync-handler'
 import { handler as notificationScheduleHandler } from './notification-schedule-handler'
 import { handler as slackNotificationHandler } from './slack-notifications-handler'
 import { handler as triageScheduleHandler } from './triage-schedule-handler'
@@ -26,7 +28,38 @@ export const scheduledJobs: readonly ScheduledJob[] = Object.freeze([
   { name: 'analytics-schedule', everyMinutes: 5, attempts: 3, run: analyticsScheduleHandler },
   { name: 'notification-schedule', everyMinutes: 60, attempts: 3, run: notificationScheduleHandler },
   { name: 'cycle-schedule', everyMinutes: 60, attempts: 3, run: cycleScheduleHandler },
+  // Runs every six hours but fetches only once a month; a failed fetch waits for the next run.
+  {
+    name: 'japanese-public-holiday-sync',
+    everyMinutes: 360,
+    attempts: 2,
+    run: () => japanesePublicHolidaySyncHandler(),
+  },
 ])
 
+/** Jobs that belong to the Software factory module and stop when it is not deployed. */
+const SOFTWARE_FACTORY_JOB_NAMES: ReadonlySet<string> = new Set(['agent-run-triage'])
+
+/**
+ * Lists the jobs this deployment runs.
+ *
+ * Without Software factory the stack grants the Agent Run triage job no table access, so the
+ * job is left out instead of failing every minute.
+ *
+ * @param jobs - Every job the Lambda owns.
+ * @param softwareFactoryDeployed - Whether the deployment includes Software factory.
+ * @returns Jobs to dispatch, in their original order.
+ */
+export function selectDeployedScheduledJobs(
+  jobs: readonly ScheduledJob[],
+  softwareFactoryDeployed: boolean,
+): readonly ScheduledJob[] {
+  return softwareFactoryDeployed
+    ? jobs
+    : jobs.filter((job) => !SOFTWARE_FACTORY_JOB_NAMES.has(job.name))
+}
+
 /** Runs the jobs due at the scheduled minute of an EventBridge event. */
-export const handler = createScheduledJobsDispatcher(scheduledJobs)
+export const handler = createScheduledJobsDispatcher(
+  selectDeployedScheduledJobs(scheduledJobs, isSoftwareFactoryDeployed()),
+)

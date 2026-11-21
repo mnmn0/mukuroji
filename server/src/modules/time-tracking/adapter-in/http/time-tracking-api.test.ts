@@ -48,3 +48,17 @@ test('rejects time tracking mutations from a Workspace guest even with a Project
   const listed = await app.request('/api/teams/core-team/time-entries', { headers })
   expect(listed.status).toBe(200)
 })
+
+test('rejects a month close from a manager of only some Projects of the Team', async () => {
+  configureFakeProjectClients(false, {
+    role: 'manager',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'manager' }],
+  })
+  const response = await app.request('/api/teams/core-team/time-periods/2026-07/close', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${createAccessToken()}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ timeZone: 'UTC' }),
+  })
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ code: 'TimePeriodCloseDenied' })
+})

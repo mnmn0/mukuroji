@@ -5,6 +5,7 @@ import type {
   ImportDryRunReport,
   ImportFieldMapping,
   ImportReport,
+  WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import { WORK_ITEM_IMPORT_MAX_BYTES } from './work-item-transfer'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
@@ -66,6 +67,12 @@ export type WorkItemImportExecution = {
   format: 'csv' | 'json'
   /** Job に固定した field mapping です。 */
   mapping: ImportFieldMapping[]
+  /**
+   * Row の schedule に calendarPolicy がないときに使う、job 作成時の Workspace 稼働カレンダーです。
+   * 再試行でも同じ値を使い、row の request digest を変えません。これを持たない古い execution は
+   * 既定の policy を使います。
+   */
+  defaultCalendarPolicy?: WorkItemScheduleCalendarPolicy
   /** Dry-run/source/job metadata を束縛する request digest です。 */
   requestDigest: string
   /** Immutable source locator です。 */
@@ -163,6 +170,8 @@ export type StageWorkItemImportRequest = {
   sourceContent: string
   /** Dry-run 済み field mapping です。 */
   mapping: ImportFieldMapping[]
+  /** Execution に固定する Workspace 稼働カレンダーです。既存 execution の値は置き換えません。 */
+  defaultCalendarPolicy?: WorkItemScheduleCalendarPolicy
   /** API idempotency fingerprint です。原文 key は保存しません。 */
   requestFingerprint: string
 }
@@ -473,6 +482,9 @@ export async function stageWorkItemImport(
       ...(request.assignedProjectId ? { assignedProjectId: request.assignedProjectId } : {}),
       format: request.format,
       mapping: structuredClone(request.mapping),
+      ...(request.defaultCalendarPolicy
+        ? { defaultCalendarPolicy: structuredClone(request.defaultCalendarPolicy) }
+        : {}),
       requestDigest,
       source,
       status: 'queued',

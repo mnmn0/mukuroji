@@ -1,11 +1,14 @@
 import type { TimeEntry } from '@mukuroji/contracts'
-import { useState } from 'react'
-import type { TimeEntryDraftInput } from '../api/timeEntries'
+import { useRef, useState } from 'react'
+import type { IndirectTimeEntryInput, TimeEntryDraftInput } from '../api/timeEntries'
 import { isTimeEntryEditable } from '../model/timeEntryLifecycle'
 import { formatMinutes, toLocalDateKey } from '../model/timePeriod'
+import { IndirectTimeEntryForm, type IndirectTimeEntryTargets } from './IndirectTimeEntryForm'
 import { TimeEntryForm, type TimeEntryWorkItemOption } from './TimeEntryForm'
 import {
+  describeTimeEntrySubject,
   describeTimeTrackingFailure,
+  formatTimeEntryRange,
   timeEntryStatusBadgeClasses,
   timeEntryStatusKeys,
   type TimeTrackingFormatters,
@@ -30,6 +33,12 @@ export type TimeEntryListProps = {
   onUpdate?: (entry: TimeEntry, input: TimeEntryDraftInput) => Promise<unknown>
   /** Submits one draft or rejected entry; omitted when the list is read-only. */
   onSubmit?: (entry: TimeEntry) => Promise<unknown>
+  /** Edits a draft or rejected indirect-work entry; without it such entries are not editable here. */
+  onUpdateIndirect?: (entry: TimeEntry, input: IndirectTimeEntryInput) => Promise<unknown>
+  /** Projects offered when editing indirect work. */
+  indirectTargets?: IndirectTimeEntryTargets
+  /** Deletes one draft or rejected entry after the member confirms; omitted when entries cannot be deleted here. */
+  onDelete?: (entry: TimeEntry) => Promise<unknown>
   /** Whether each row shows its date, for lists that are not grouped by day. */
   showDate?: boolean
 }
@@ -43,8 +52,11 @@ export type TimeEntryListProps = {
 export function TimeEntryList({
   entries,
   formatters,
+  indirectTargets,
+  onDelete,
   onSubmit,
   onUpdate,
+  onUpdateIndirect,
   rejectionReasons = {},
   showDate = false,
   t,
@@ -56,6 +68,10 @@ export function TimeEntryList({
   const [editingEntry, setEditingEntry] = useState<TimeEntry>()
   const [pendingEntryId, setPendingEntryId] = useState<string>()
   const [failure, setFailure] = useState<{ entryId: string; message: string }>()
+  // The revision shown when the member opened the confirmation: a later change makes the delete
+  // fail as a revision conflict instead of removing time the member did not see.
+  const [confirmingDelete, setConfirmingDelete] = useState<{ entryId: string; revision: number }>()
+  const deleteButtons = useRef(new Map<string, HTMLButtonElement>())
 
   /**
    * Submits one entry and keeps its failure next to it.
@@ -75,12 +91,64 @@ export function TimeEntryList({
     }
   }
 
+  /**
+   * Closes the delete confirmation and returns keyboard focus to the entry's delete button.
+   *
+   * @param entryId - Entry whose confirmation closes.
+   */
+  const closeDeleteConfirmation = (entryId: string) => {
+    setConfirmingDelete(undefined)
+    deleteButtons.current.get(entryId)?.focus()
+  }
+
+  /**
+   * Deletes one entry after the member confirmed it, keeping a failure next to it.
+   *
+   * @param entry - Entry to delete.
+   * @param revision - Revision the member saw when confirming.
+   */
+  const deleteEntry = async (entry: TimeEntry, revision: number) => {
+    if (!onDelete || pendingEntryId) return
+    setPendingEntryId(entry.id)
+    setFailure(undefined)
+    try {
+      await onDelete({ ...entry, revision })
+      setConfirmingDelete(undefined)
+    } catch (error) {
+      setFailure({ entryId: entry.id, message: describeTimeTrackingFailure(t, error) })
+      // Reopening the confirmation reads the entry again, so a conflict can be confirmed anew.
+      closeDeleteConfirmation(entry.id)
+    } finally {
+      setPendingEntryId(undefined)
+    }
+  }
+
   return (
     <ul className="grid min-w-0 gap-2">
       {entries.map((entry) => {
         const editable = isTimeEntryEditable(entry)
         const reason = rejectionReasons[entry.id]
-        if (editingEntry?.id === entry.id && onUpdate) {
+        const isIndirect = entry.workItemId === undefined
+        const canEdit = isIndirect ? onUpdateIndirect !== undefined && indirectTargets !== undefined : onUpdate !== undefined
+        const label = `${formatters.date(entry.startAt)} ${formatTimeEntryRange(formatters, entry) || formatMinutes(entry.durationMinutes)}`
+        if (editingEntry?.id === entry.id && isIndirect && onUpdateIndirect && indirectTargets) {
+          return (
+            <li className="min-w-0" key={entry.id}>
+              <IndirectTimeEntryForm
+                defaultDate={toLocalDateKey(editingEntry.startAt)}
+                entry={editingEntry}
+                onCancel={() => setEditingEntry(undefined)}
+                onSave={async (input) => {
+                  await onUpdateIndirect(editingEntry, input)
+                  setEditingEntry(undefined)
+                }}
+                t={t}
+                targets={indirectTargets}
+              />
+            </li>
+          )
+        }
+        if (editingEntry?.id === entry.id && !isIndirect && onUpdate) {
           return (
             <li className="min-w-0" key={entry.id}>
               <TimeEntryForm
@@ -107,7 +175,7 @@ export function TimeEntryList({
               <span className={timeEntryStatusBadgeClasses[entry.status]}>{t(timeEntryStatusKeys[entry.status])}</span>
               <span className="text-sm font-semibold tabular-nums text-[var(--workbench-text)]">
                 {showDate ? `${formatters.day(toLocalDateKey(entry.startAt))} ` : ''}
-                {formatters.time(entry.startAt)}–{formatters.time(entry.endAt)}
+                {formatTimeEntryRange(formatters, entry)}
               </span>
               <span className="text-sm font-semibold tabular-nums text-[var(--workbench-muted)]">
                 {formatMinutes(entry.durationMinutes)}
@@ -115,9 +183,9 @@ export function TimeEntryList({
               {entry.billable ? <span className="workbench-badge">{t('timeTracking.entry.billable')}</span> : null}
               {entry.source === 'timer' ? <span className="workbench-badge">{t('timeTracking.entry.timer')}</span> : null}
             </div>
-            {workItemTitles ? (
+            {workItemTitles || isIndirect ? (
               <p className="truncate text-sm font-medium text-[var(--workbench-text)]">
-                {workItemTitles[entry.workItemId] ?? entry.workItemId}
+                {describeTimeEntrySubject(t, entry, workItemTitles ?? {})}
               </p>
             ) : null}
             {entry.description ? (
@@ -129,11 +197,11 @@ export function TimeEntryList({
                 {t('timeTracking.entry.rejectionReason')}: {reason || t('timeTracking.entry.rejectionReasonMissing')}
               </p>
             ) : null}
-            {editable && (onUpdate || onSubmit) ? (
+            {editable && (canEdit || onSubmit || onDelete) ? (
               <div className="flex flex-wrap gap-2">
-                {onUpdate ? (
+                {canEdit ? (
                   <button
-                    aria-label={`${t('timeTracking.entry.edit')} ${formatters.date(entry.startAt)} ${formatters.time(entry.startAt)}`}
+                    aria-label={`${t('timeTracking.entry.edit')} ${label}`}
                     className="workbench-button-secondary min-h-8 px-3"
                     disabled={pendingEntryId !== undefined}
                     onClick={() => setEditingEntry(entry)}
@@ -144,7 +212,7 @@ export function TimeEntryList({
                 ) : null}
                 {onSubmit ? (
                   <button
-                    aria-label={`${entry.status === 'rejected' ? t('timeTracking.entry.resubmit') : t('timeTracking.entry.submit')} ${formatters.date(entry.startAt)} ${formatters.time(entry.startAt)}`}
+                    aria-label={`${entry.status === 'rejected' ? t('timeTracking.entry.resubmit') : t('timeTracking.entry.submit')} ${label}`}
                     className="workbench-button-primary min-h-8 px-3"
                     disabled={pendingEntryId !== undefined}
                     onClick={() => { void submitEntry(entry) }}
@@ -153,6 +221,46 @@ export function TimeEntryList({
                     {entry.status === 'rejected' ? t('timeTracking.entry.resubmit') : t('timeTracking.entry.submit')}
                   </button>
                 ) : null}
+                {onDelete ? (
+                  // Stays in place while the confirmation is open, so keyboard focus is not lost.
+                  <button
+                    aria-expanded={confirmingDelete?.entryId === entry.id}
+                    aria-label={`${t('timeTracking.entry.delete')} ${label}`}
+                    className="workbench-button-secondary min-h-8 px-3"
+                    disabled={pendingEntryId !== undefined}
+                    onClick={() => setConfirmingDelete(
+                      confirmingDelete?.entryId === entry.id ? undefined : { entryId: entry.id, revision: entry.revision },
+                    )}
+                    ref={(button) => {
+                      if (button) deleteButtons.current.set(entry.id, button)
+                      else deleteButtons.current.delete(entry.id)
+                    }}
+                    type="button"
+                  >
+                    {t('timeTracking.entry.delete')}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {editable && onDelete && confirmingDelete?.entryId === entry.id ? (
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5" data-testid="time-entry-delete-confirm">
+                <p className="text-sm font-medium text-fg-red-700">{t('timeTracking.entry.deleteQuestion')}</p>
+                <button
+                  className="workbench-button-secondary min-h-8 px-3 text-fg-red-700"
+                  disabled={pendingEntryId !== undefined}
+                  onClick={() => { void deleteEntry(entry, confirmingDelete.revision) }}
+                  type="button"
+                >
+                  {t('timeTracking.entry.deleteConfirm')}
+                </button>
+                <button
+                  className="workbench-button-secondary min-h-8 px-3"
+                  disabled={pendingEntryId !== undefined}
+                  onClick={() => closeDeleteConfirmation(entry.id)}
+                  type="button"
+                >
+                  {t('timeTracking.entry.deleteCancel')}
+                </button>
               </div>
             ) : null}
             {failure?.entryId === entry.id ? (

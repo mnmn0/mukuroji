@@ -177,3 +177,19 @@ test('keeps the shared role within the IAM policy size quotas', () => {
   expect(managedPolicies.length + (Array.isArray(awsManagedPolicies) ? awsManagedPolicies.length : 0))
     .toBeLessThanOrEqual(10);
 });
+
+test('lets the national holiday sync write only its shared tenant administration row', () => {
+  const template = synthesizedTemplate;
+
+  template.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: {
+      Statement: Match.arrayWith([Match.objectLike({
+        Action: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+        Condition: {
+          'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['system#public-holidays'] },
+        },
+        Resource: { 'Fn::GetAtt': [Match.stringLikeRegexp('^TenantAdministrationTable'), 'Arn'] },
+      })]),
+    },
+  });
+});
