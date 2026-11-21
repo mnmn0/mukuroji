@@ -105,7 +105,8 @@ test('omitted model disables AI even with stale provider and budget settings', a
   Bun.env.AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE = 'invalid-unused-budget'
   Bun.env.AWS_BEARER_TOKEN_BEDROCK = 'unused-when-disabled'
   try {
-    const { aiAssistanceService } = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
+    const { aiAssistanceService, aiProviderCredentialService } =
+      createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
     const actor = {
       workspaceId: 'workspace-1',
       memberId: 'member-1',
@@ -119,6 +120,16 @@ test('omitted model disables AI even with stale provider and budget settings', a
       enabled: false,
     })
     await expect(aiAssistanceService.getPolicy(actor)).rejects.toMatchObject({ code: 'AiAssistanceDisabled' })
+    // The key section hides itself instead of failing to load when no external provider is on.
+    expect(await aiProviderCredentialService?.list(actor)).toEqual({
+      schemaVersion: 1,
+      providers: [
+        { provider: 'anthropic', deploymentEnabled: false, configured: false, revision: 0 },
+        { provider: 'openai', deploymentEnabled: false, configured: false, revision: 0 },
+      ],
+    })
+    await expect(aiProviderCredentialService?.list({ ...actor, canManagePolicy: false }))
+      .rejects.toMatchObject({ code: 'AiAssistanceDisabled' })
     await expect(aiAssistanceService.updatePreference(actor, {
       enabled: true, expectedRevision: 0,
     })).rejects.toMatchObject({ code: 'AiAssistanceDisabled' })
@@ -519,4 +530,34 @@ test('binds assignment destination and owner references to the action transactio
   })
 
   expect(contribution.transactItems).toHaveLength(2)
+})
+
+test('lazily rejects a deployment that lists more models than Web accepts', () => {
+  const names = [
+    'AI_ASSISTANCE_DEFAULT_MODEL_ID',
+    'AI_ASSISTANCE_ALLOWED_MODEL_IDS',
+    'AI_ASSISTANCE_EXTERNAL_PROVIDERS',
+  ] as const
+  const originals = names.map((name) => Bun.env[name])
+  const bedrockModelIds = Array.from({ length: 40 }, (_, index) => `jp.anthropic.model-${index}`)
+  Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID = bedrockModelIds[0]
+  Bun.env.AI_ASSISTANCE_ALLOWED_MODEL_IDS = bedrockModelIds.join(',')
+  Bun.env.AI_ASSISTANCE_EXTERNAL_PROVIDERS = 'anthropic'
+  try {
+    const dependencies = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
+    expect(() => dependencies.aiAssistanceService.getPolicy({
+      workspaceId: 'workspace-1',
+      memberId: 'member-1',
+      actorId: 'member-1',
+      auditActorKind: 'user',
+      traceId: 'trace-1',
+      canManagePolicy: false,
+    })).toThrow('AI assistance can list at most 40 models')
+  } finally {
+    names.forEach((name, index) => {
+      const original = originals[index]
+      if (original === undefined) delete Bun.env[name]
+      else Bun.env[name] = original
+    })
+  }
 })
