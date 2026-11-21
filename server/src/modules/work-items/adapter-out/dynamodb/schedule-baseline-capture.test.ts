@@ -137,6 +137,25 @@ test('keeps earlier named baselines and switches the active one', async () => {
   await expect(readProjectScheduleBaselineUseCase(dependencies, scope, readable, 'missing')).rejects.toMatchObject({ status: 404 })
 })
 
+test('switches nothing when the Work Items cannot be read for the response', async () => {
+  const store = new InMemoryProjectScheduleBaselineStore()
+  const dependencies = namedDependencies(store, () => ({ endDate: '2026-12-10' }))
+  const write = { callerAuthorization: [], auditContext }
+  await captureProjectScheduleBaselineUseCase(dependencies, scope, { ...write, capturedAt: '2026-11-19T00:00:00.000Z' })
+  await captureProjectScheduleBaselineUseCase(dependencies, scope, { ...write, capturedAt: '2026-11-20T00:00:00.000Z' })
+  const failing = {
+    ...dependencies,
+    async readTeamWorkItems(): Promise<never> {
+      throw new Error('read failed')
+    },
+  }
+
+  await expect(activateProjectScheduleBaselineUseCase(failing, scope, { baselineId: 'b1', expectedRevision: 2 }, { ...write, capturedAt: '2026-11-21T00:00:00.000Z' }, () => true))
+    .rejects.toThrow('read failed')
+  expect(await store.get('w', 't', 'p')).toMatchObject({ id: 'b2', revision: 2 })
+  expect(store.auditEvents).toHaveLength(2)
+})
+
 test('drops the oldest saved baseline beyond the limit', async () => {
   const store = new InMemoryProjectScheduleBaselineStore()
   const dependencies = namedDependencies(store, () => ({ endDate: '2026-12-10' }))
