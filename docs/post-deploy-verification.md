@@ -37,7 +37,7 @@ MUKUROJI_WEB_URL=https://dxxxx.cloudfront.net bun run deploy:smoke -- --skip-aws
 
 | 時点 | コマンド | 期待する結果 |
 | --- | --- | --- |
-| 手順 5（`Deploy` の承認）の後 | `bun run deploy:smoke -- --runtime disabled` | `fail` なし。`appconfig-deployment` は deployment がまだないので `warn`、`owner-sign-in` は `FORCE_CHANGE_PASSWORD` で `warn` |
+| 手順 5（`Deploy` の承認）の後 | `bun run deploy:smoke -- --runtime disabled` | `fail` なし。`appconfig-deployment` は stack が作る最初の deployment（`disabled`）で `pass`、`owner-sign-in` は `FORCE_CHANGE_PASSWORD` で `warn` |
 | 手順 6（`runtime-control-enable`）の後 | `bun run deploy:smoke` | `runtime-control` と `appconfig-deployment` が `pass` |
 | 手順 7（owner のサインインと MFA）の後 | token を付けて `bun run deploy:smoke` | `owner-sign-in` と `authenticated-api` が `pass` |
 | 有効化から 6 時間以内の次の UTC 0・6・12・18 時の後 | `bun run deploy:smoke` | `holiday-sync` が `pass` |

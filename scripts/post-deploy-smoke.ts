@@ -583,7 +583,8 @@ export function checkAppConfigDeployment(deployments: unknown): SmokeCheckResult
     }
   }
   if (latest === undefined) {
-    return { name: 'appconfig-deployment', status: 'warn', detail: 'No AppConfig deployment yet; runtime control has never been switched.' }
+    // The stack deploys the first (disabled) document itself, so an empty list means it did not finish.
+    return { name: 'appconfig-deployment', status: 'fail', detail: 'No AppConfig deployment; the stack should have deployed the first document.' }
   }
   const state = stringField(latest, 'State') ?? 'unknown'
   const number = String(latest.DeploymentNumber)

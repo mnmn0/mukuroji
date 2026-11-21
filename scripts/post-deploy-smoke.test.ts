@@ -189,7 +189,7 @@ describe('AWS checks', () => {
     expect(checkAppConfigDeployment({ Items: [{ DeploymentNumber: 1, State: 'ROLLED_BACK' }, { DeploymentNumber: 2, State: 'COMPLETE' }] }).status)
       .toBe('pass')
     expect(checkAppConfigDeployment({ Items: [{ DeploymentNumber: 3, State: 'BAKING' }] }).status).toBe('warn')
-    expect(checkAppConfigDeployment({ Items: [] }).status).toBe('warn')
+    expect(checkAppConfigDeployment({ Items: [] }).status).toBe('fail')
   })
 })
 
