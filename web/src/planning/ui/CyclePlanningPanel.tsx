@@ -23,6 +23,8 @@ export type CyclePlanningLabels = {
   empty: string
   /** Committed Work Items against the capacity. */
   commitment: (count: number, capacity: number) => string
+  /** The Cycle holds as many Work Items as its capacity allows. */
+  capacityFull: string
   /** Capacity still available. */
   remaining: (count: number) => string
   /** Work Items carried over into the Cycle. */
@@ -207,6 +209,11 @@ function CycleDetail({
           </span>
         ) : null}
       </div>
+      {open && canChangeItems && backlog.length > 0 && summary.committed >= summary.capacity ? (
+        <p className="text-sm font-medium text-[var(--workbench-muted)]" data-testid="cycle-planning-capacity-full">
+          {labels.capacityFull}
+        </p>
+      ) : null}
 
       <div className="grid grid-cols-2 gap-5 max-[1100px]:grid-cols-1">
         <CycleAutomationForm
