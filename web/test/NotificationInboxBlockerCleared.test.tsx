@@ -1,25 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import type { InboxNotification } from '../src/notifications/api'
-import { notificationInboxControllerFixture } from '../src/notifications/fixtures'
+import {
+  blockerClearedNotificationFixture as blockerClearedNotification,
+  notificationInboxControllerFixture,
+} from '../src/notifications/fixtures'
 import { NotificationInbox } from '../src/notifications/ui/NotificationInbox'
 import type { Locale } from '../src/shared/i18n/i18n'
-
-/** Cleared-blocker notification as the server stores it, with its English fallback summary. */
-const blockerClearedNotification: InboxNotification = {
-  id: 'notification-blocker-cleared-1',
-  eventId: 'event-blocker-removed-1',
-  eventType: 'work-item.blocker-removed',
-  reasons: ['assignee', 'watcher'],
-  actorLabel: '佐藤 花子',
-  title: 'リリース手順を作る',
-  summary: 'A blocker was removed.',
-  teamId: 'core-team',
-  projectId: 'refero',
-  issueId: 'release-steps',
-  occurredAt: '2026-07-12T03:20:00.000Z',
-  state: 'unread',
-}
 
 describe('cleared blocker notification', () => {
   test('shows a localized label and summary instead of the stored English summary', () => {
