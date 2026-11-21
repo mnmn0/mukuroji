@@ -2491,14 +2491,14 @@ export class DynamoDbProjectDirectoryClient {
             await this.throwCreateProjectTransactionCancellationResult(directoryId, teamId, error)
           }
 
-          if (
-            isProjectIdReservationTakenAt(error, projectIdReservationIndex) &&
-            idempotencyResourceId === undefined &&
-            attempt < PROJECT_ID_RESERVATION_MAX_ATTEMPTS
-          ) {
-            // Another Team's creation owns this ID, or is committing it right now; pick another.
-            unavailableProjectIds.add(projectId)
-            continue
+          if (isProjectIdReservationTakenAt(error, projectIdReservationIndex)) {
+            if (idempotencyResourceId === undefined && attempt < PROJECT_ID_RESERVATION_MAX_ATTEMPTS) {
+              // Another Team's creation owns this ID, or is committing it right now; pick another.
+              unavailableProjectIds.add(projectId)
+              continue
+            }
+
+            throw createProjectDataConflictError()
           }
 
           if (hasTransactionConditionalFailure(error)) {

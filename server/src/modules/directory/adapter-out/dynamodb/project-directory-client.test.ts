@@ -1005,8 +1005,17 @@ test('DynamoDB directory client stops retrying a Project ID after repeated reser
     'core-team',
     { name: 'Web' },
     { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
-  )).rejects.toMatchObject({ code: 'TransactionCanceledException' })
+  )).rejects.toMatchObject({ status: 409 })
   expect(transactions).toBe(3)
+
+  transactions = 0
+  await expect(client.createProject(
+    'workspace-1',
+    'core-team',
+    { idempotencyResourceId: 'application_1', name: 'Web' },
+    { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
+  )).rejects.toMatchObject({ status: 409 })
+  expect(transactions).toBe(1)
   conflictCode = 'ConditionalCheckFailed'
 
   transactions = 0
