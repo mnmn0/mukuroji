@@ -3,10 +3,11 @@ import { createInvalidTimeTrackingResponseError, createTeamTimeTrackingUrl, requ
 import { readTimeSheet } from './timeTrackingValidation'
 
 /**
- * Reads the Team's daily and weekly totals for a period.
+ * Reads the caller's daily and weekly totals in a Team for a period.
  *
- * The response also tells whether the caller manages the Team: confidential costs are withheld
- * (`costsRedacted`) from everyone else.
+ * The response tells whether the caller manages time in the Team (`canManageTeam`). Members get
+ * only their own time; Team time managers also get other members' time in the Projects they
+ * manage and outside any Project.
  *
  * @param accessToken - Bearer token of the signed-in member.
  * @param teamId - Team whose entries are totalled.

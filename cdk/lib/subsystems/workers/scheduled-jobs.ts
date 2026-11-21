@@ -10,6 +10,7 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
+import { ManagedPolicyPrincipal } from '../../policies/managed-policy-principal';
 import {
   bindRuntimeControls,
   type RuntimeControlResources,
@@ -89,51 +90,6 @@ function mergeJobEnvironments(
 }
 
 /**
- * Principal that adds statements to one job's policy on the shared role.
- */
-class JobPolicyPrincipal extends iam.PrincipalBase {
-  /** The shared role's account, so grants stay identity-based instead of resource-based. */
-  override readonly principalAccount: string | undefined;
-
-  /**
-   * @param role Shared Lambda role the policy is attached to.
-   * @param policy The job's own policy.
-   */
-  constructor(
-    private readonly role: iam.IRole,
-    private readonly policy: iam.ManagedPolicy,
-  ) {
-    super();
-    this.principalAccount = role.principalAccount;
-  }
-
-  /** The shared role's principal, which every job runs as. */
-  get policyFragment(): iam.PrincipalPolicyFragment {
-    return this.role.policyFragment;
-  }
-
-  /**
-   * Keeps two job principals of one role distinct when CDK deduplicates principals.
-   *
-   * @returns A key unique to the job's policy.
-   */
-  dedupeString(): string | undefined {
-    return `JobPolicyPrincipal:${this.policy.node.path}`;
-  }
-
-  /**
-   * Adds a statement to the job's own policy.
-   *
-   * @param statement Statement to add.
-   * @returns The policy that holds it.
-   */
-  override addToPrincipalPolicy(statement: iam.PolicyStatement): iam.AddToPrincipalPolicyResult {
-    this.policy.addStatements(statement);
-    return { statementAdded: true, policyDependable: this.policy };
-  }
-}
-
-/**
  * Grants each job through its own customer-managed policy on the shared role, so the
  * permissions stay reviewable per job and each policy has its own 6,144-character quota.
  *
@@ -160,7 +116,7 @@ function grantJobsSeparately(
     // Customer-managed, so the jobs' statements do not count toward the role's 10,240-character
     // inline policy quota.
     const policy = new iam.ManagedPolicy(scope, `${job.id}JobPolicy`, { roles: [role] });
-    job.grant(new JobPolicyPrincipal(role, policy), role);
+    job.grant(new ManagedPolicyPrincipal(role, policy), role);
     // The first scheduled run must not start before the job's permissions exist.
     for (const construct of scope.node.findAll()) {
       const isPolicy = construct instanceof iam.Policy || construct instanceof iam.ManagedPolicy;

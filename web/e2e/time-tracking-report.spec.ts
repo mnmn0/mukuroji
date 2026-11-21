@@ -40,6 +40,7 @@ function createSummary(state: TimeReportMockState, query: URLSearchParams): Time
     ...(costs ? { totalActualCostByCurrency: { JPY: 75_000 }, totalActualCostMinor: 75_000 } : {}),
     ...(costs && state.budget && query.get('budgetScope') === 'team' ? { budget: state.budget } : {}),
     costsRedacted: !costs,
+    canManageTeam: costs,
   }
 }
 

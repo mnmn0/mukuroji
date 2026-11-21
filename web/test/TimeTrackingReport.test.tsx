@@ -188,6 +188,11 @@ describe('time report API', () => {
     respondWith({ ...timeReportFixtureMemberSummary, budget: { amountMinor: 'many' } })
     await expect(getTimeTrackingSummary('token', 'core-team', { ...timeReportFixtureRange, timeZone: 'UTC', groupBy: 'day' }))
       .rejects.toBeInstanceOf(TimeTrackingApiError)
+
+    // An older API without the flag totalled everyone's time, so no own-time-only notice applies.
+    respondWith({ ...timeReportFixtureMemberSummary, canManageTeam: undefined })
+    expect((await getTimeTrackingSummary('token', 'core-team', { ...timeReportFixtureRange, timeZone: 'UTC', groupBy: 'day' })).canManageTeam)
+      .toBe(true)
   })
 
   test('downloads the CSV of the same period and grouping without the budget scope', async () => {
@@ -256,9 +261,11 @@ describe('time report views', () => {
     expect(manager).toContain('Aoi Tanaka')
     expect(manager).toContain('ren@example.com')
     expect(manager).toContain('19:30')
+    expect(manager).not.toContain('time-report-own-only')
     const member = renderToStaticMarkup(<TimeReport {...reportProps} summary={timeReportFixtureMemberSummary} />)
     expect(member).not.toContain('Actual cost')
     expect(member).toContain('12:30')
+    expect(member).toContain('Only the time you recorded is totalled here.')
   })
 
   test('labels Project rows and entries without a Project', () => {
