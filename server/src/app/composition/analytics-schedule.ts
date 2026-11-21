@@ -82,6 +82,7 @@ export function createProductionAnalyticsScheduleHandler() {
       dynamoDbClient,
       shouldBootstrapLocalDynamoDb(),
     ),
+    workItemHistory: repository,
   })
 
   const notifyDelivery = createAnalyticsDeliveryAuditNotifier({
