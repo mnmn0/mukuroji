@@ -806,11 +806,15 @@ export function registerDocumentApiRoutes(
         color: createPresenceColor(principal.memberKey),
         ...(selection !== undefined ? { selection } : {}),
       })
-      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
-        documentId,
-        part: 'presence',
-        originClientId: input.clientId,
-      })
+      // A heartbeat that only extends the lease is not signalled: with N viewers every
+      // heartbeat would make the other N - 1 re-read presence.
+      if (input.announce !== false) {
+        await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+          documentId,
+          part: 'presence',
+          originClientId: input.clientId,
+        })
+      }
       return c.json({})
     })
   })
@@ -1752,6 +1756,9 @@ function parseDocumentPresenceInput(value: unknown): UpdateDocumentPresenceInput
     'InvalidDocumentPresence',
     'Presence client ID is required.',
   )
+  if (input.announce !== undefined && typeof input.announce !== 'boolean') {
+    throw new DocumentError(400, 'InvalidDocumentPresence', 'Presence announce flag is invalid.')
+  }
   if (input.selection !== undefined && input.selection !== null) {
     if (!isRecord(input.selection)) {
       throw new DocumentError(400, 'InvalidDocumentPresence', 'Presence selection is invalid.')
@@ -2591,12 +2598,28 @@ async function publishDocumentChangeBestEffort(
   change: DocumentRealtimeChange,
 ) {
   if (!dependencies.publishChange) return
+  let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    await dependencies.publishChange(workspaceId, change)
+    // The change is already saved: a slow notification must not hold the response.
+    const deadline = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), DOCUMENT_CHANGE_NOTIFICATION_TIMEOUT_MILLISECONDS)
+    })
+    const outcome = await Promise.race([
+      dependencies.publishChange(workspaceId, change).then((): 'sent' => 'sent'),
+      deadline,
+    ])
+    if (outcome === 'timeout') {
+      console.error('Document change notification timed out.')
+    }
   } catch (error) {
     console.error('Document change notification failed:', error)
+  } finally {
+    clearTimeout(timer)
   }
 }
+
+/** Longest wait for a change notification before the write responds without it. */
+const DOCUMENT_CHANGE_NOTIFICATION_TIMEOUT_MILLISECONDS = 2_000
 
 async function upsertSearchDocumentBestEffort(
   dependencies: DocumentApiDependencies,

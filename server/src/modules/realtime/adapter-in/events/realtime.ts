@@ -9,6 +9,7 @@ import {
   DescribeIdentityProviderCommand,
 } from '@aws-sdk/client-cognito-identity-provider'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { NodeHttpHandler } from '@smithy/node-http-handler'
 import {
   DeleteCommand,
   DynamoDBDocumentClient,
@@ -272,6 +273,10 @@ const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
   marshallOptions: { removeUndefinedValues: true },
 })
 const managementApiClients = new Map<string, ApiGatewayManagementApiClient>()
+/** Longest wait for a TCP connection to the API Gateway Management API. */
+const MANAGEMENT_API_CONNECTION_TIMEOUT_MILLISECONDS = 1_000
+/** Longest wait for one API Gateway Management API response. */
+const MANAGEMENT_API_REQUEST_TIMEOUT_MILLISECONDS = 2_000
 let enterpriseIdentityClient: EnterpriseIdentityReadCapability | undefined
 const defaultExternalPermissionCeiling = [
   'workspace.read',
@@ -1658,6 +1663,11 @@ function getManagementApiClient(endpoint: string) {
   const client = new ApiGatewayManagementApiClient({
     endpoint,
     region: getAwsRegion(),
+    // A stalled connection must not hold the API request that publishes a change signal.
+    requestHandler: new NodeHttpHandler({
+      connectionTimeout: MANAGEMENT_API_CONNECTION_TIMEOUT_MILLISECONDS,
+      requestTimeout: MANAGEMENT_API_REQUEST_TIMEOUT_MILLISECONDS,
+    }),
   })
   managementApiClients.set(endpoint, client)
   return client

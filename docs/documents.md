@@ -75,6 +75,7 @@ heartbeat を送り、期限切れ collaborator を表示しません。
 Document の scope で接続します。ticket は `canView` を満たす member にだけ発行し、subscription は
 5 分で失効します（client が失効前に接続し直し、接続中は 30 秒ごとに ping を送ります）。本文・comment・presence・share が変わると API が
 `document.changed` の signal（Document ID と変わった部分だけ）を送り、client は HTTP API で取り直します。
+presence の heartbeat は、参加直後と selection が変わったとき（`announce: true`）だけ signal を送ります。
 接続中の再取得は 60 秒ごとで、WebSocket がない環境や接続断では本文 3.5 秒・comment と presence 4 秒の
 polling に戻ります。ADR 0041 を参照してください。一覧は評価件数と返却件数を
 制限し、任意の `clientId` を大量に作ることで他 user を押し出せない構造です。

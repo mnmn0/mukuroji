@@ -203,8 +203,9 @@ describe('Document realtime subscription', () => {
     socket?.emit('message', signal({ originClientId: 'client-self' }))
     socket?.emit('message', signal({ documentId: 'doc-2' }))
     socket?.emit('message', 'not json')
-    expect(harness.changes).toEqual(['comments'])
-    // The first connection does not re-read: the page just loaded.
+    // The first connection re-reads too: changes between the page's first read and the
+    // subscription were never signalled.
+    expect(harness.changes).toEqual(['document', 'comments', 'presence', 'comments'])
     harness.stop()
     expect(socket?.closed).toBeTrue()
   })
@@ -212,18 +213,20 @@ describe('Document realtime subscription', () => {
   test('opens a replacement before the subscription expires without a gap', async () => {
     const harness = await startHarness([ticket('t1'), ticket('t2', 10)])
     harness.sockets[0]?.emit('open')
+    const initialReads = ['document', 'comments', 'presence']
+    expect(harness.changes).toEqual(initialReads)
     await harness.advance(4 * 60_000 + 30_000)
     expect(harness.ticketRequests()).toBe(2)
     const replacement = harness.sockets[1]
     replacement?.emit('open')
     expect(harness.sockets[0]?.closed).toBeTrue()
     expect(harness.connected).toEqual([true, true])
-    expect(harness.changes).toEqual([])
+    expect(harness.changes).toEqual(initialReads)
     // The old socket's expiry no longer affects the replacement.
     await harness.advance(30_000)
     expect(harness.connected).toEqual([true, true])
     harness.sockets[0]?.emit('message', signal({ originClientId: 'client-other' }))
-    expect(harness.changes).toEqual([])
+    expect(harness.changes).toEqual(initialReads)
     harness.stop()
   })
 
@@ -262,8 +265,21 @@ describe('Document realtime subscription', () => {
     await harness.advance(5_000)
     harness.sockets[1]?.emit('open')
     expect(harness.connected).toEqual([true, false, true])
-    expect(harness.changes).toEqual(['document', 'comments', 'presence'])
+    expect(harness.changes).toEqual([
+      'document', 'comments', 'presence',
+      'document', 'comments', 'presence',
+    ])
     harness.stop()
+  })
+
+  test('closes a socket that is still connecting when stopped', async () => {
+    const harness = await startHarness([ticket('t1')])
+    const socket = harness.sockets[0]
+    expect(socket?.closed).toBeFalse()
+    harness.stop()
+    expect(socket?.closed).toBeTrue()
+    socket?.emit('open')
+    expect(harness.connected).toEqual([])
   })
 
   test('backs off after failed ticket requests', async () => {

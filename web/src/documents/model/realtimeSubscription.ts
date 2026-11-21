@@ -57,8 +57,8 @@ export type DocumentRealtimeSubscriptionOptions = {
  * Keeps a Document change-signal subscription open until it is stopped.
  *
  * The socket is replaced before the server-side subscription expires, and a lost socket is
- * retried with backoff. After a gap with no open socket every part is read again, because
- * signals sent while disconnected are lost.
+ * retried with backoff. Whenever a socket opens with no other socket already open, every part
+ * is read again, because signals sent before it opened are lost.
  *
  * @param options - Ticket and socket factories plus callbacks.
  * @returns A function that stops the subscription.
@@ -75,7 +75,8 @@ export function startDocumentRealtimeSubscription(
   let active: DocumentRealtimeSocket | null = null
   let renewal: unknown
   let failures = 0
-  let hasConnected = false
+  /** Every socket created and not yet closed, including ones still connecting. */
+  const sockets = new Set<DocumentRealtimeSocket>()
 
   const schedule = (delayMs: number) => {
     clearTimer(renewal)
@@ -108,6 +109,7 @@ export function startDocumentRealtimeSubscription(
     const url = new URL(ticket.websocketUrl)
     url.searchParams.set('ticket', ticket.ticket)
     const socket = options.createSocket(url.toString())
+    sockets.add(socket)
     const sessionExpiresAt = ticket.sessionExpiresAt
       ? Date.parse(ticket.sessionExpiresAt)
       : Number.NaN
@@ -136,12 +138,14 @@ export function startDocumentRealtimeSubscription(
       failures = 0
       options.onConnectedChange(true)
       previous?.close()
-      if (hasConnected && !previous) {
+      // Signals sent before this socket opened were missed, including those between the
+      // page's first read and its first subscription, so every part is read again. A
+      // replacement that overlaps the previous socket missed nothing.
+      if (!previous) {
         options.onChange('document')
         options.onChange('comments')
         options.onChange('presence')
       }
-      hasConnected = true
       schedule(Math.max(Math.min(minimumRetryDelayMs, remainingMs), remainingMs - renewalLeadMs))
       const ping = () => {
         if (stopped || active !== socket) return
@@ -170,6 +174,7 @@ export function startDocumentRealtimeSubscription(
       options.onChange(signal.part)
     })
     socket.addEventListener('close', () => {
+      sockets.delete(socket)
       if (active === socket) {
         loseActive(socket)
         return
@@ -184,7 +189,8 @@ export function startDocumentRealtimeSubscription(
   return () => {
     stopped = true
     clearTimer(renewal)
-    active?.close()
+    for (const socket of sockets) socket.close()
+    sockets.clear()
     active = null
   }
 }

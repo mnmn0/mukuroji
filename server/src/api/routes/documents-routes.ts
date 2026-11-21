@@ -11,8 +11,11 @@ import {
   registerDocumentApiRoutes,
   type DocumentApiPrincipal,
 } from '../../modules/documents/adapter-in/http/document-api'
-import { createDocumentRealtimeScopeKey, RealtimeTicketError } from '../../modules/realtime'
-import { publishRealtimeScopeSignal } from '../../modules/realtime/adapter-in/events/realtime'
+import {
+  createDocumentRealtimeScopeKey,
+  publishRealtimeScopeSignal,
+  RealtimeTicketError,
+} from '../../modules/realtime'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { readDocumentAuthorizationSnapshot } from '../shared/document-access'
 import { createDocumentEnterpriseScopeBoundary } from '../shared/project-access'

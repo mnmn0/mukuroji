@@ -14,3 +14,4 @@ export {
   type RealtimeTicketPrincipal,
   type RealtimeTicketRouterDependencies,
 } from './adapter-in/http/realtime-ticket-router'
+export { publishRealtimeScopeSignal } from './adapter-in/events/realtime'

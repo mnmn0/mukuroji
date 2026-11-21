@@ -2451,3 +2451,52 @@ test('signals content-free Document changes after writes and keeps the write whe
     },
   ])
 })
+
+test('does not signal a presence heartbeat that only extends the lease', async () => {
+  const changes: unknown[] = []
+  const app = createTestApp(
+    createDocumentClient({
+      async heartbeatPresence() {
+        return undefined
+      },
+    }),
+    {
+      async publishChange(_workspaceId, change) {
+        changes.push(change)
+      },
+    },
+  )
+  const request = (body: unknown) => app.request('/api/documents/document-1/presence', {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer token', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+
+  expect((await request({ clientId: 'client-a', announce: false })).status).toBe(200)
+  expect(changes).toEqual([])
+  expect((await request({ clientId: 'client-a', announce: true })).status).toBe(200)
+  expect(changes).toHaveLength(1)
+  expect((await request({ clientId: 'client-a', announce: 'yes' })).status).toBe(400)
+})
+
+test('answers a write without waiting for a stalled change notification', async () => {
+  const app = createTestApp(
+    createDocumentClient({
+      async heartbeatPresence() {
+        return undefined
+      },
+    }),
+    {
+      publishChange: () => new Promise<void>(() => undefined),
+    },
+  )
+  const started = Date.now()
+  const response = await app.request('/api/documents/document-1/presence', {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientId: 'client-a' }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(Date.now() - started).toBeLessThan(5_000)
+})
