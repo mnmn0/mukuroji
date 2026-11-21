@@ -998,7 +998,7 @@ describe('Analytics work item history rows', () => {
     ])
   })
 
-  test('reads the audit timeline when a row has expired entries or cannot be read', async () => {
+  test('reads the audit timeline when a row has expired entries or a read fails temporarily', async () => {
     const item = createWorkItem('fallback', { revision: 1 })
     const row: AnalyticsWorkItemHistoryRow = {
       ...createEmptyAnalyticsWorkItemHistoryRow({ workspaceId, teamId: 'core', workItemId: 'fallback' }),
@@ -1044,6 +1044,24 @@ describe('Analytics work item history rows', () => {
       },
     })
     await expect(tooLarge).rejects.toMatchObject({ status: 413 })
+    const denied = readAnalyticsWorkItemHistoryEvents({
+      ...base,
+      historyReader: {
+        getWorkItemHistoryRows: async () => {
+          throw Object.assign(new Error('denied'), { name: 'AccessDeniedException' })
+        },
+      },
+    })
+    await expect(denied).rejects.toMatchObject({ name: 'AccessDeniedException' })
+    await readAnalyticsWorkItemHistoryEvents({
+      ...base,
+      historyReader: {
+        getWorkItemHistoryRows: async () => {
+          throw new AnalyticsError(503, 'AnalyticsHistoryReadUnavailable', 'retry')
+        },
+      },
+    })
+    expect(auditReads).toBe(3)
   })
 
   test('rejects stored entries whose occurrence time is not a valid timestamp', () => {

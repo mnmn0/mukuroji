@@ -52,7 +52,7 @@ comment・file・context item など Analytics が使わない event も載る�
 - 読み取り（API の `readAuthorizedAnalyticsData` と定期配信の runner の両方）は次のようにする。
   1. history が要る Work Item（`selectAnalyticsWorkItemsRequiringHistory` の結果）の history row を BatchGetItem
      （100 key ずつ、強整合性の読み取り）で読む。保持期限の変更を書いた row を古い期限のまま読まないため。
-     BatchGetItem が失敗したときは、その query の全 Work Item を audit から読む（row の合計サイズ超過の `413` は除く）。
+     BatchGetItem が throttling など一時的に失敗したときは、その query の全 Work Item を audit から読む。権限エラーや row の合計サイズ超過の `413` はそのまま返す。
   2. `coveredRevision` が canonical の `revision` と一致し、`overflow` でない row は `entries` を engine 用の
      `AuditEventV1` の形に戻して使う。`eventId` は元の audit event のものなので、evidence は今と同じ event を指す。
   3. row がない、`coveredRevision` が古い（projection の遅れ）、`overflow` の Work Item だけ、今の entity timeline の

@@ -97,16 +97,28 @@ export async function readAnalyticsWorkItemHistoryEvents<T extends AnalyticsHist
   return [...historyEvents, ...await input.readAuditEvents(fallback)]
 }
 
+/** DynamoDB error names of temporary failures that send the read to the audit path. */
+const TRANSIENT_HISTORY_READ_ERRORS = new Set([
+  'ProvisionedThroughputExceededException',
+  'RequestLimitExceeded',
+  'ThrottlingException',
+  'InternalServerError',
+  'ServiceUnavailable',
+  'TimeoutError',
+])
+
 /**
- * Reads history rows, treating a failed read as no rows so every Work Item uses the audit path.
+ * Reads history rows, treating a temporary failure as no rows so every Work Item uses the audit
+ * path.
  *
- * Only the byte budget's 413 is kept, because the audit path would hit its own limit too.
+ * Other failures, such as a denied permission or the byte budget's 413, are thrown so they are
+ * not hidden behind a successful report.
  *
  * @param historyReader - History row reader.
  * @param workspaceId - Workspace whose rows are read.
  * @param workItems - Work Items to read.
- * @returns The rows read, or none when the read failed.
- * @throws AnalyticsError 413 when the rows exceed the byte budget.
+ * @returns The rows read, or none when the read failed temporarily.
+ * @throws AnalyticsError 413 when the rows exceed the byte budget, and any non-temporary error.
  */
 async function readHistoryRows(
   historyReader: AnalyticsWorkItemHistoryReader,
@@ -119,13 +131,29 @@ async function readHistoryRows(
       workItems.map((workItem) => ({ teamId: workItem.teamId, workItemId: workItem.id })),
     )
   } catch (error) {
-    if (error instanceof AnalyticsError && error.status === 413) throw error
+    if (!isTransientHistoryReadError(error)) throw error
     console.warn('Analytics history rows could not be read; using the audit timeline.', {
       code: error instanceof AnalyticsError ? error.code : 'AnalyticsHistoryRowReadFailed',
       name: error instanceof Error ? error.name : 'Error',
     })
     return []
   }
+}
+
+/**
+ * Returns whether a history row read failed temporarily.
+ *
+ * @param error - Thrown value.
+ * @returns True for the reader's own 503, DynamoDB throttling or server errors, and timeouts.
+ */
+function isTransientHistoryReadError(error: unknown) {
+  if (error instanceof AnalyticsError) return error.status === 503
+  if (!(error instanceof Error)) return false
+  if (TRANSIENT_HISTORY_READ_ERRORS.has(error.name)) return true
+  const status: unknown = Reflect.get(error, '$metadata')
+  if (typeof status !== 'object' || status === null) return false
+  const httpStatusCode: unknown = Reflect.get(status, 'httpStatusCode')
+  return typeof httpStatusCode === 'number' && httpStatusCode >= 500
 }
 
 /**
