@@ -12,6 +12,16 @@ export {
 } from './focus-queue'
 
 export {
+  FOCUS_MEMBER_INDEX_LIMIT,
+  FOCUS_WORK_ITEM_REFERENCE_LIMIT,
+  readFocusWorkItemWindow,
+  type FocusPlanningDependencyReference,
+  type FocusWorkItemSourceReference,
+  type FocusWorkItemWindow,
+  type FocusWorkItemWindowPorts,
+} from './focus-work-item-window'
+
+export {
   isFocusSlaAnchor,
   normalizeFocusSlaWorkItemTypeIds,
 } from './focus-sla-policy'
