@@ -69,8 +69,13 @@ comment・file・context item など Analytics が使わない event も載る�
   entry の `expiresAt` を `historyExpiresAt` として持たせ、`AnalyticsTable` の TTL にする（この table の TTL を持つ
   row は history row だけ）。audit の保持期間を過ぎた値が row に残り続けないようにするためで、消えた row は次の
   event で audit から作り直される。Tenant の閉鎖では `AnalyticsTable` の Workspace partition と一緒に消える。
-- Projection の失敗（throttle など）は log に残して batch を失敗にしない。row が canonical の revision に追いつかない
-  だけで reader は audit から読み、次の event で作り直されるため、同じ fan-out の通知などを再試行・DLQ に巻き込まない。
+- Projection の更新が失敗したら（throttle など）、その Work Item の row を消して batch は失敗にしない。保持期限の
+  変更は revision を進めないため、古い期限のまま row を残すと最新に見えてしまう。row を消せば reader は audit から読み、
+  次の event で作り直される。同じ fan-out の通知などを再試行・DLQ に巻き込むのは、row を消すことも失敗したときだけにする。
+- entity index は結果整合性なので、作り直しの直前に書かれた event が読めないことがある。`coveredRevision` を revision 1
+  以外から数え始める（古い event が保持期間で消えている）のは、最も古い entry が 1 時間より前のときだけにする。revision は
+  時刻とともに増えるため、それより前の revision はさらに古く、index の遅れではなく保持期間で消えたと判断できる。
+  そうでなければ `coveredRevision` を 0 にして audit から読ませる。
 - 既存の Work Item は data migration runner（ADR 0013・0031）で backfill する（下の「移行と backfill」）。
 
 Issue #371 の「やること」は Team・Project ごとの日次集計（選択肢 B）を挙げているが、完了条件のうち

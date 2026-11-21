@@ -6,9 +6,11 @@ import {
   type AnalyticsQueryInput,
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
+import { BatchGetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   ANALYTICS_METRIC_DEFINITIONS,
   AnalyticsError,
+  DynamoDbAnalyticsRepository,
   createAnalyticsSnapshot,
   queryAnalyticsEvidence,
   selectAnalyticsWorkItemsRequiringHistory,
@@ -546,6 +548,40 @@ describe('Analytics work item history rows', () => {
     expect(events).toHaveLength(3_000)
   })
 
+  test('drains BatchGetItem responses that return one row per call', async () => {
+    const stored = new Map(Array.from({ length: 12 }, (_, index) => {
+      const row = createEmptyAnalyticsWorkItemHistoryRow({
+        workspaceId,
+        teamId: 'core',
+        workItemId: `size-${index}`,
+      })
+      const item = toStoredAnalyticsWorkItemHistoryRow({ ...row, coveredRevision: 1 })
+      return [item.recordKey, item]
+    }))
+    let calls = 0
+    /** Returns one requested row per call, like a partition hitting the 1 MB response limit. */
+    const send = async (command: unknown) => {
+      if (!(command instanceof BatchGetCommand)) throw new Error('unexpected command')
+      calls += 1
+      const keys = command.input.RequestItems?.['analytics-table']?.Keys ?? []
+      const [first, ...rest] = keys
+      const item = typeof first?.recordKey === 'string' ? stored.get(first.recordKey) : undefined
+      return {
+        Responses: { 'analytics-table': item ? [item] : [] },
+        ...(rest.length === 0 ? {} : { UnprocessedKeys: { 'analytics-table': { Keys: rest } } }),
+      }
+    }
+    // Same test-double pattern as analytics.test.ts: only `send` is exercised.
+    const client = { send } as unknown as DynamoDBDocumentClient
+    const rows = await new DynamoDbAnalyticsRepository('analytics-table', client)
+      .getWorkItemHistoryRows(workspaceId, [...stored.values()].map((item) => ({
+        teamId: item.teamId,
+        workItemId: item.workItemId,
+      })))
+    expect(rows).toHaveLength(12)
+    expect(calls).toBe(12)
+  })
+
   test('rejects reads that would restore more history entries than the limit', async () => {
     const item = createWorkItem('large', { revision: 1 })
     const entry = {
@@ -656,6 +692,7 @@ describe('Analytics work item history rows', () => {
 
   test('drops expired entries on write and expires the row with its oldest entry', () => {
     const key = { workspaceId, teamId: 'core', workItemId: 'ttl' }
+    const now = Date.parse('2026-06-01T00:00:00.000Z') / 1000
     const entry = (revision: number, expiresAt?: number) => ({
       eventId: `ttl-${revision}`,
       eventType: 'work-item.updated',
@@ -667,12 +704,12 @@ describe('Analytics work item history rows', () => {
     })
     const row = mergeAnalyticsWorkItemHistoryEntries(
       createEmptyAnalyticsWorkItemHistoryRow(key),
-      [entry(1, 100), entry(2, 300), entry(3, 200), entry(4)],
-      150,
+      [entry(1, now - 10), entry(2, now + 300), entry(3, now + 200), entry(4)],
+      now,
     )
     expect(row.entries.map((stored) => stored.eventId)).toEqual(['ttl-2', 'ttl-3', 'ttl-4'])
     expect(row.coveredRevision).toBe(4)
-    expect(toStoredAnalyticsWorkItemHistoryRow(row).historyExpiresAt).toBe(200)
+    expect(toStoredAnalyticsWorkItemHistoryRow(row).historyExpiresAt).toBe(now + 200)
     const held = mergeAnalyticsWorkItemHistoryEntries(createEmptyAnalyticsWorkItemHistoryRow(key), [entry(1)])
     expect('historyExpiresAt' in toStoredAnalyticsWorkItemHistoryRow(held)).toBe(false)
   })
@@ -697,10 +734,51 @@ describe('Analytics work item history rows', () => {
         { store, readWorkItemTimeline: createTimeline([]).readWorkItemTimeline },
       )
       expect(response.batchItemFailures).toEqual([])
+      const key = { workspaceId, teamId: 'core', workItemId: 'failing' }
+      store.rows.set(`${workspaceId}|${createAnalyticsWorkItemHistoryRecordKey('core', 'failing')}`, {
+        ...createEmptyAnalyticsWorkItemHistoryRow(key),
+        coveredRevision: 1,
+      })
+      const retried = await processAnalyticsWorkItemHistoryProjectionBatch(
+        { Records: [streamRecord({ ...created, expiresAt: 1_900_000_000 }, 'MODIFY')] },
+        { store, readWorkItemTimeline: createTimeline([]).readWorkItemTimeline },
+      )
+      expect(retried.batchItemFailures).toEqual([])
+      expect(store.rows.size).toBe(0)
+      store.deleteRow = async () => {
+        throw new Error('still throttled')
+      }
+      const failed = await processAnalyticsWorkItemHistoryProjectionBatch(
+        { Records: [streamRecord(created)] },
+        { store, readWorkItemTimeline: createTimeline([]).readWorkItemTimeline },
+      )
+      expect(failed.batchItemFailures).toEqual([{ itemIdentifier: 'failing-1' }])
     } finally {
       console.error = original
     }
-    expect(errors).toHaveLength(1)
+    expect(errors).toHaveLength(3)
+  })
+
+  test('does not start coverage after revision 1 while the audit index may still be catching up', async () => {
+    const item = createWorkItem('recent')
+    const second = createAuditEvent('recent-2', item, '2026-11-21T11:59:00.000Z', [], { afterRevision: 2 })
+    const third = createAuditEvent('recent-3', item, '2026-11-21T12:00:00.000Z', [], { afterRevision: 3 })
+    const store = new MemoryHistoryStore()
+    const key = { workspaceId, teamId: 'core', workItemId: 'recent' }
+    // The index has not returned revisions 1 and 2 yet; only revision 3 itself is known.
+    await processAnalyticsWorkItemHistoryProjectionBatch({ Records: [streamRecord(third)] }, {
+      store,
+      readWorkItemTimeline: createTimeline([]).readWorkItemTimeline,
+      now: () => new Date('2026-11-21T12:00:30.000Z'),
+    })
+    expect((await store.getRow(key)).row?.coveredRevision).toBe(0)
+    // Hours later, revision 2 is the oldest retained event, so earlier ones have expired.
+    await processAnalyticsWorkItemHistoryProjectionBatch({ Records: [streamRecord(second)] }, {
+      store,
+      readWorkItemTimeline: createTimeline([second, third]).readWorkItemTimeline,
+      now: () => new Date('2026-11-21T15:00:00.000Z'),
+    })
+    expect((await store.getRow(key)).row?.coveredRevision).toBe(3)
   })
 
   test('deletes the row when the Work Item is deleted and skips attached records', async () => {

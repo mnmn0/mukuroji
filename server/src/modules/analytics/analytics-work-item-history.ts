@@ -305,7 +305,7 @@ export function mergeAnalyticsWorkItemHistoryEntries(
     .sort(compareHistoryEntries)
   const next: AnalyticsWorkItemHistoryRow = {
     ...row,
-    coveredRevision: calculateCoveredRevision(merged),
+    coveredRevision: calculateCoveredRevision(merged, nowEpochSeconds),
     overflow: false,
     entries: merged,
     rowVersion: row.rowVersion + 1,
@@ -334,22 +334,45 @@ export function hasAnalyticsWorkItemHistoryGap(
 }
 
 /**
+ * Age after which a revision missing from the audit entity index can only have expired.
+ *
+ * The index is eventually consistent, so a rebuild can miss events written moments ago. Revisions
+ * increase with time, so when the lowest revision present is older than this, every earlier
+ * revision is older still and is missing because the audit retention removed it.
+ */
+export const ANALYTICS_HISTORY_INDEX_SETTLE_SECONDS = 60 * 60
+
+/**
  * Calculates the highest revision reached without gaps from the lowest stored revision.
  *
- * Audit events older than the tenant retention can be gone, so coverage starts at the lowest
+ * Audit events older than the tenant retention can be gone, so coverage may start at the lowest
  * revision present instead of revision 1, matching what the audit timeline itself still holds.
+ * It does so only when that revision is old enough that earlier ones cannot be index lag.
  *
- * @param entries - History entries.
- * @returns The covered revision, or 0 when no entry carries a revision.
+ * @param entries - History entries in occurrence order.
+ * @param nowEpochSeconds - Current time; without it the lowest revision is trusted (tests only).
+ * @returns The covered revision, or 0 when coverage cannot be established.
  */
-function calculateCoveredRevision(entries: readonly AnalyticsWorkItemHistoryEntry[]) {
-  const revisions = new Set<number>()
+function calculateCoveredRevision(
+  entries: readonly AnalyticsWorkItemHistoryEntry[],
+  nowEpochSeconds?: number,
+) {
+  const revisions = new Map<number, AnalyticsWorkItemHistoryEntry>()
   for (const entry of entries) {
     const revision = entry.metadata?.afterRevision
-    if (revision !== undefined) revisions.add(revision)
+    if (revision !== undefined) revisions.set(revision, entry)
   }
   if (revisions.size === 0) return 0
-  let covered = Math.min(...revisions)
+  let covered = Math.min(...revisions.keys())
+  if (covered > 1 && nowEpochSeconds !== undefined) {
+    const baselineAt = Date.parse(revisions.get(covered)?.occurredAt ?? '') / 1000
+    if (
+      !Number.isFinite(baselineAt) ||
+      baselineAt > nowEpochSeconds - ANALYTICS_HISTORY_INDEX_SETTLE_SECONDS
+    ) {
+      return 0
+    }
+  }
   while (revisions.has(covered + 1)) covered += 1
   return covered
 }

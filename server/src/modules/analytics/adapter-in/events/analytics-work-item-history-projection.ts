@@ -50,12 +50,13 @@ export type AnalyticsWorkItemHistoryProjectionDependencies = {
  * row only when it covers the canonical revision, so a row that falls behind is never wrong,
  * only unused.
  *
- * Failures are logged and never fail the batch, so this optimization cannot hold back or
- * dead-letter the other projections of the fan-out.
+ * A failed update deletes the Work Item's row instead of failing the batch, so this optimization
+ * rarely holds back the other projections of the fan-out; the record is retried only when the
+ * delete fails too.
  *
  * @param event - AuditEvents stream batch.
  * @param dependencies - History store, audit timeline reader, and clock.
- * @returns Always no failures.
+ * @returns The failed stream checkpoint when a row could be neither updated nor deleted.
  */
 export async function processAnalyticsWorkItemHistoryProjectionBatch(
   event: DynamoStreamEvent,
@@ -81,13 +82,21 @@ export async function processAnalyticsWorkItemHistoryProjectionBatch(
         await upsertHistoryEntry(key, input.entry, record.eventName === 'INSERT', dependencies)
       }
     } catch (error) {
-      // A failed update leaves the row behind the canonical revision, which readers already
-      // treat as "use the audit timeline", and the next event of the Work Item rebuilds it.
-      // Failing the record would instead retry, and eventually dead-letter, the whole fan-out.
       console.error('Analytics history projection failed.', {
         code: readErrorText(error, 'code') ?? 'AnalyticsHistoryProjectionFailed',
         name: readErrorText(error, 'name') ?? 'Error',
       })
+      // A failed update cannot be left in place: a retention change keeps the revision, so a row
+      // with the old expiry would still look current. Deleting the row sends the Work Item to the
+      // audit timeline until its next event rebuilds it. Only when that also fails is the record
+      // retried, which re-runs the whole fan-out.
+      try {
+        await dependencies.store.deleteRow(key)
+      } catch {
+        const sequenceNumber = record.dynamodb?.SequenceNumber
+        if (!sequenceNumber) throw error
+        return { batchItemFailures: [{ itemIdentifier: sequenceNumber }] }
+      }
     }
   }
   return { batchItemFailures: [] }

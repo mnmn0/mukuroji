@@ -455,7 +455,7 @@ const ANALYTICS_HISTORY_BATCH_GET_SIZE = 100
 /** BatchGetItem requests issued at the same time when reading history rows. */
 const ANALYTICS_HISTORY_BATCH_GET_CONCURRENCY = 4
 
-/** Attempts for keys that DynamoDB returns as unprocessed before failing the read. */
+/** Consecutive BatchGetItem calls without progress before failing the read. */
 const ANALYTICS_HISTORY_BATCH_GET_MAX_ATTEMPTS = 5
 
 /** DynamoDB Analytics repository の設定です。 */
@@ -3949,14 +3949,14 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
   private async batchGetWorkItemHistoryRows(workspaceId: string, recordKeys: readonly string[]) {
     const rows: AnalyticsWorkItemHistoryRow[] = []
     let pending = recordKeys.map((recordKey) => ({ workspaceId, recordKey }))
-    for (
-      let attempt = 0;
-      pending.length > 0 && attempt < ANALYTICS_HISTORY_BATCH_GET_MAX_ATTEMPTS;
-      attempt += 1
-    ) {
-      if (attempt > 0) {
-        await new Promise((resolve) => setTimeout(resolve, 2 ** attempt * 25))
+    // BatchGetItem also returns unprocessed keys when one partition exceeds 1 MB per call, which
+    // is normal for large history rows. Only calls that make no progress count as failed attempts.
+    let stalledAttempts = 0
+    while (pending.length > 0 && stalledAttempts < ANALYTICS_HISTORY_BATCH_GET_MAX_ATTEMPTS) {
+      if (stalledAttempts > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 2 ** stalledAttempts * 25))
       }
+      const requested = pending.length
       const response = await this.documentClient.send(new BatchGetCommand({
         RequestItems: {
           [this.tableName]: { Keys: pending, ConsistentRead: false },
@@ -3976,6 +3976,7 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
           ? [{ workspaceId: key.workspaceId, recordKey: key.recordKey }]
           : []
       )
+      stalledAttempts = pending.length < requested ? 0 : stalledAttempts + 1
     }
     if (pending.length > 0) {
       throw new AnalyticsError(
