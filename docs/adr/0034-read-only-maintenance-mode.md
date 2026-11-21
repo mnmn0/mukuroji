@@ -24,7 +24,8 @@ AppConfig の runtime control は `enabled` / `disabled` の 2 値で、本番 m
 - Worker、WebSocket、`/api/ready` は `read-only` を `disabled` と同じく扱う。background の処理は変更を伴い、
   ready は「新しい traffic を全面的に受けられる」ことを表すため。
 - operator が配布した `disabled` は problem `code` `maintenance` で返し、AppConfig の取得失敗や不正 document の
-  `temporarily_unavailable` と区別する。maintenance の response には `Mukuroji-Maintenance` header
+  `temporarily_unavailable` と区別する。Public API（`/api/v1/`、`/api/developer/`）は problem `code` が公開済みの
+  閉じた enum なので `temporarily_unavailable` のまま返し、header と `detail` で maintenance を伝える。maintenance の response には `Mukuroji-Maintenance` header
   （`read-only` / `stopped`）を付け、CORS で公開する。
 - `GET /api/maintenance` を middleware の中で認証なしに答え、`none` / `read-only` / `stopped` / `unavailable`
   を返す。Web と operator script が使う。値は `contracts/src/maintenance.ts` が所有する。

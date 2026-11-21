@@ -92,6 +92,16 @@ export function resolveMaintenanceState(
 }
 
 /**
+ * Tells whether a path belongs to the versioned Public API, whose problem codes are a closed enum.
+ *
+ * @param path - Request path.
+ * @returns Whether the path is under `/api/v1/` or `/api/developer/`.
+ */
+function isPublicApiPath(path: string): boolean {
+  return path.startsWith('/api/v1/') || path.startsWith('/api/developer/')
+}
+
+/**
  * Marks a response as one that must not be cached.
  *
  * @param context - Request context whose response headers are set.
@@ -196,11 +206,14 @@ export function registerRuntimeControlMiddleware(
     const problem = maintenance === 'read-only' || maintenance === 'stopped'
       ? BLOCKED_PROBLEMS[maintenance]
       : BLOCKED_PROBLEMS.unavailable
+    // The Public API's problem `code` is a closed enum, so its clients keep receiving
+    // `temporarily_unavailable` and learn about the maintenance from the header and detail.
+    const publicApi = isPublicApiPath(context.req.path)
     return context.json({
-      type: problem.type,
+      type: publicApi ? BLOCKED_PROBLEMS.unavailable.type : problem.type,
       title: problem.title,
       status: 503,
-      code: problem.code,
+      code: publicApi ? BLOCKED_PROBLEMS.unavailable.code : problem.code,
       detail: problem.detail,
       correlationId,
       retryable: true,

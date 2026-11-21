@@ -479,7 +479,8 @@ preview、Analytics query）だけを通し、それ以外を `503`、`Retry-Aft
 `Mukuroji-Maintenance: read-only` header を付けます。Worker、WebSocket、`/api/ready` は `read-only` を
 `disabled` と同じく扱います。operator が配布した `disabled`（current または bounded-stale）は problem
 `code` `maintenance` と `Mukuroji-Maintenance: stopped` を返し、取得失敗・不正 document の
-`temporarily_unavailable` と区別します。`GET /api/maintenance` は認証なしで `none`、`read-only`、`stopped`、
+`temporarily_unavailable` と区別します。Public API（`/api/v1/`、`/api/developer/`）は公開済みの code enum を
+守るため `temporarily_unavailable` のまま、header と `detail` で maintenance を伝えます。`GET /api/maintenance` は認証なしで `none`、`read-only`、`stopped`、
 `unavailable` のどれかを返し、Web の maintenance 表示と operator script の確認に使います。
 付随する書き込み（sign-in の rate limit、監査 event、sign-in 時の membership 照合）は止めないため、
 書き込みを完全に止める必要がある作業では `disabled` を使います。

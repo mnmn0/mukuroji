@@ -407,3 +407,22 @@ test('keeps an outage distinct from maintenance', async () => {
   expect(response.headers.get('Mukuroji-Maintenance')).toBeNull()
   expect(await response.json()).toMatchObject({ code: 'temporarily_unavailable' })
 })
+
+test('keeps the Public API problem code within its published enum during maintenance', async () => {
+  const app = new Hono()
+  registerRuntimeControlMiddleware(app, {
+    createIdentifier: () => 'generated',
+    provider: providerFor({ mode: 'read-only', status: 'current' }, () => {}),
+    recordObservation() {},
+  })
+  app.post('/api/v1/work-items', (context) => context.json({ ok: true }, 201))
+
+  const response = await app.request('/api/v1/work-items', { method: 'POST' })
+  expect(response.status).toBe(503)
+  expect(response.headers.get('Mukuroji-Maintenance')).toBe('read-only')
+  expect(await response.json()).toMatchObject({
+    type: 'https://docs.mukuroji.app/problems/temporarily_unavailable',
+    code: 'temporarily_unavailable',
+    detail: 'The service is in read-only maintenance. Changes cannot be saved until it ends.',
+  })
+})
