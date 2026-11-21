@@ -9,7 +9,7 @@ import { useWeeklyReportMutations } from '../mutations/useWeeklyReportMutations'
 import { useTimeEntries } from '../queries/useTimeEntries'
 import { useWeeklyReport, useWeeklyReportHistory } from '../queries/useWeeklyReports'
 import { PersonalWeeklyReport, type WeeklyReportActionResult } from './PersonalWeeklyReport'
-import { createTimeTrackingFormatters } from './timeTrackingText'
+import { createTimeTrackingFormatters, describeTimeEntrySubject } from './timeTrackingText'
 import { useLocalToday } from './useNow'
 
 const emptyWorkItems: readonly CanonicalWorkItem[] = []
@@ -117,7 +117,8 @@ export function PersonalWeeklyReportContainer({
     workItems: workItems ?? emptyWorkItems,
     entries: entries.data?.entries ?? [],
     workItemTitles,
-  }), [entries.data?.entries, today, week.days, workItemTitles, workItems])
+    indirectTitle: (category) => describeTimeEntrySubject(t, category ? { category } : {}, {}),
+  }), [entries.data?.entries, t, today, week.days, workItemTitles, workItems])
 
   return (
     <PersonalWeeklyReport

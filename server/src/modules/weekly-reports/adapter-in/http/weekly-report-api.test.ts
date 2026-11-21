@@ -68,7 +68,8 @@ function submission(expectedSubmissionCount: number, reflection = 'Good week', e
       { workItemId: 'item-visible', minutes: 90 },
       { workItemId: 'item-other-project', minutes: 30 },
     ],
-    totalMinutes: 120,
+    indirectTime: [{ category: 'meeting', minutes: 45 }],
+    totalMinutes: 165,
     timeIsPartial: false,
     notes: { issues: ' Need review ', reflection },
   }
@@ -116,6 +117,7 @@ async function seedSubmission(memberKey: string) {
         upcoming: [],
       },
       time: [{ workItemId: 'b', minutes: 30 }],
+      indirectTime: [],
       items: [
         { workItemId: 'a', key: 'REF-1', title: 'Visible title', projectId: 'refero' },
         { workItemId: 'b', key: 'SEC-1', title: 'Secret title', projectId: 'secret' },
@@ -163,7 +165,9 @@ test('saves notes, submits versions, and lists the history of the author', async
       upcoming: [],
     },
     time: [{ hidden: false, workItemId: 'item-visible', minutes: 90 }],
-    totalMinutes: 120,
+    // Indirect work references no Work Item, so it is kept as sent.
+    indirectTime: [{ category: 'meeting', minutes: 45 }],
+    totalMinutes: 165,
   })
 
   const retried = await request(`${OWN_PATH}/submissions`, 'POST', submission(0, 'Good week', 1), 'submit-1')
@@ -218,6 +222,13 @@ test('rejects invalid weeks and bodies', async () => {
   expect(tooLong.status).toBe(400)
   const badMinutes = await request(`${OWN_PATH}/submissions`, 'POST', { ...submission(0), totalMinutes: -1 })
   expect(badMinutes.status).toBe(400)
+  const unknownCategory = await request(`${OWN_PATH}/submissions`, 'POST', { ...submission(0), indirectTime: [{ category: 'lunch', minutes: 30 }] })
+  expect(unknownCategory.status).toBe(400)
+  const repeatedCategory = await request(`${OWN_PATH}/submissions`, 'POST', {
+    ...submission(0),
+    indirectTime: [{ category: 'meeting', minutes: 30 }, { category: 'meeting', minutes: 15 }],
+  })
+  expect(repeatedCategory.status).toBe(400)
 })
 
 test('lets only the author write a report', async () => {

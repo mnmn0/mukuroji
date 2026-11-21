@@ -4,6 +4,7 @@ import {
   type CanonicalWorkItem,
   type SubmitWeeklyReportRequest,
   type TimeEntry,
+  type TimeEntryCategory,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../../shared/i18n/i18n'
 import { splitTimeEntryMinutesByDay } from './timeEntryLifecycle'
@@ -23,14 +24,18 @@ export type PersonalWeeklyReportItem = {
   minutes: number
 }
 
-/** Minutes the member recorded against one Work Item during the week. */
+/** Minutes the member recorded against one Work Item, or one category of indirect work, during the week. */
 export type PersonalWeeklyReportTimeRow = {
-  /** Work Item identifier. */
+  /** Work Item identifier, or `indirect:<category>` for indirect work. */
   workItemId: string
-  /** Work Item title, or the identifier when the title is unknown. */
+  /** Work Item title (the identifier when unknown), or the indirect-work label. */
   title: string
   /** Recorded minutes. */
   minutes: number
+  /** Set on a row of indirect work, which references no Work Item. */
+  indirect?: true
+  /** Work category of an indirect-work row; absent for indirect work saved without one. */
+  category?: TimeEntryCategory
 }
 
 /** Facts of one member's week, derived only from data the member can already read. */
@@ -65,6 +70,8 @@ export type PersonalWeeklyReportInput = {
   entries: readonly TimeEntry[]
   /** Titles of Team Work Items, used for time recorded against items outside `workItems`. */
   workItemTitles?: Readonly<Record<string, string>>
+  /** Labels indirect work (time without a Work Item) by its work category. */
+  indirectTitle?: (category: TimeEntryCategory | undefined) => string
 }
 
 /**
@@ -120,13 +127,22 @@ export function buildPersonalWeeklyReport(input: PersonalWeeklyReportInput): Per
   const nextWeekEnd = shiftLocalDate(weekEnd, 7) ?? weekEnd
 
   const minutesByWorkItem = new Map<string, number>()
+  const indirectRows = new Map<string, { title: string; category?: TimeEntryCategory }>()
   let totalMinutes = 0
   for (const entry of input.entries) {
     // Split by day like the timesheet, so the totals match it for entries crossing the week edge.
     let minutes = 0
     for (const dayMinutes of splitTimeEntryMinutesByDay(entry, input.weekDays).values()) minutes += dayMinutes
     if (minutes === 0) continue
-    minutesByWorkItem.set(entry.workItemId, (minutesByWorkItem.get(entry.workItemId) ?? 0) + minutes)
+    // Indirect work is listed once per work category.
+    const key = entry.workItemId ?? `indirect:${entry.category ?? 'uncategorized'}`
+    if (entry.workItemId === undefined) {
+      indirectRows.set(key, {
+        title: input.indirectTitle?.(entry.category) ?? key,
+        ...(entry.category === undefined ? {} : { category: entry.category }),
+      })
+    }
+    minutesByWorkItem.set(key, (minutesByWorkItem.get(key) ?? 0) + minutes)
     totalMinutes += minutes
   }
 
@@ -163,7 +179,11 @@ export function buildPersonalWeeklyReport(input: PersonalWeeklyReportInput): Per
   }
 
   const time = [...minutesByWorkItem.entries()]
-    .map(([workItemId, minutes]) => ({ workItemId, title: titles.get(workItemId) ?? workItemId, minutes }))
+    .map(([workItemId, minutes]): PersonalWeeklyReportTimeRow => {
+      const indirect = indirectRows.get(workItemId)
+      if (indirect === undefined) return { workItemId, title: titles.get(workItemId) ?? workItemId, minutes }
+      return { workItemId, title: indirect.title, minutes, indirect: true, ...(indirect.category === undefined ? {} : { category: indirect.category }) }
+    })
     .sort((left, right) => right.minutes - left.minutes || left.title.localeCompare(right.title))
 
   return {
@@ -299,7 +319,12 @@ export function toSubmitWeeklyReportRequest(
       overdue: rows(report.overdue),
       upcoming: rows(report.upcoming),
     },
-    time: report.time.map((row) => ({ workItemId: row.workItemId, minutes: row.minutes })),
+    time: report.time.flatMap((row) => row.indirect ? [] : [{ workItemId: row.workItemId, minutes: row.minutes }]),
+    // Indirect work references no Work Item, so it is sent per work category instead. Rows without
+    // a category cannot be named this way and only count toward the total.
+    indirectTime: report.time.flatMap((row) => row.indirect && row.category !== undefined
+      ? [{ category: row.category, minutes: row.minutes }]
+      : []),
     totalMinutes: report.totalMinutes,
     timeIsPartial: options.timeIsPartial,
     notes: { issues: notes.issues.trim(), reflection: notes.reflection.trim() },

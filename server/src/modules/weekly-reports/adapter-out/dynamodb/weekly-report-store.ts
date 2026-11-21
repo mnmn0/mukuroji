@@ -8,10 +8,12 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   isWeeklyReportDate,
+  parseWeeklyReportIndirectTime,
   WEEKLY_REPORT_MAX_MINUTES,
   WEEKLY_REPORT_MAX_SUBMISSIONS,
   WEEKLY_REPORT_MAX_WORK_ITEMS,
   WEEKLY_REPORT_SECTION_NAMES,
+  type WeeklyReportIndirectTime,
   type WeeklyReportItemInput,
   type WeeklyReportNotes,
   type WeeklyReportSectionName,
@@ -702,6 +704,21 @@ function parseWeekRow(row: Record<string, unknown>, scope: WeeklyReportMemberSco
 }
 
 /**
+ * Validates stored indirect-work rows.
+ *
+ * @param value - Raw rows; absent on versions submitted before indirect work was reported.
+ * @returns The rows.
+ * @throws ProjectDataError when a row is malformed.
+ */
+function parseStoredIndirectTime(value: unknown): WeeklyReportIndirectTime[] {
+  // Versions submitted before indirect work was reported have no rows.
+  if (value === undefined) return []
+  const parsed = parseWeeklyReportIndirectTime(value)
+  if (!parsed.ok) throw corruptReport()
+  return parsed.value
+}
+
+/**
  * Validates stored Work Item rows.
  *
  * @param value - Raw rows.
@@ -801,6 +818,7 @@ function parseSubmissionRow(
     weekEnd: row.weekEnd,
     sections,
     time: parseStoredRows(row.time),
+    indirectTime: parseStoredIndirectTime(row.indirectTime),
     items: row.items.map(parseStoredItem),
     totalMinutes: row.totalMinutes,
     timeIsPartial: row.timeIsPartial,

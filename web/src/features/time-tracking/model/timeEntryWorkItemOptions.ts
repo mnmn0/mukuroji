@@ -35,3 +35,34 @@ export function selectTimeEntryWorkItemChoices(
     .map((item) => ({ id: item.id, title: item.title }))
     .sort((left, right) => left.title.localeCompare(right.title))
 }
+
+/** Where a member may record indirect work, such as a meeting, in one Team. */
+export type IndirectTimeEntryTargetChoices = {
+  /** Team Projects the server would accept the time on, sorted by name. */
+  projects: Array<{ id: string; name: string }>
+  /** Whether time without a Project may be recorded, which needs the Team scope. */
+  allowNoProject: boolean
+}
+
+/**
+ * Lists where the server would accept indirect work: Projects with a Team-qualified write scope,
+ * and no Project when the Team scope is writable, the same rule as a Work Item without a Project.
+ *
+ * @param projects - Projects of the Team.
+ * @param teamId - Team whose time is being recorded.
+ * @param capabilities - Server-effective write scopes.
+ * @returns Writable Projects and whether no Project may be chosen.
+ */
+export function selectIndirectTimeEntryTargets(
+  projects: readonly { id: string; name: string }[],
+  teamId: string,
+  capabilities: TaskViewWorkItemWriteCapabilities,
+): IndirectTimeEntryTargetChoices {
+  return {
+    projects: projects
+      .filter((project) => capabilities.writableProjectScopes.some((scope) => scope.teamId === teamId && scope.projectId === project.id))
+      .map((project) => ({ id: project.id, name: project.name }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
+    allowNoProject: capabilities.writableTeamIds.includes(teamId),
+  }
+}

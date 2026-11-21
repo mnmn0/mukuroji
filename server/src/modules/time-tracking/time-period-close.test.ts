@@ -160,6 +160,43 @@ describe('TimeTrackingService month close', () => {
     expect(updated.description).toBe('late fix')
   })
 
+  test('rejects deleting a draft in a closed month and moving date-and-minutes time into one', async () => {
+    const { service } = createFixture()
+    const closedDraft = await service.createEntry(entryInput('2026-07-20T01:00:00.000Z', '2026-07-20T02:00:00.000Z'), false)
+    const openDraft = await service.createEntry(entryInput('2026-08-03T01:00:00.000Z', '2026-08-03T02:00:00.000Z'), false)
+    await service.closePeriod({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      month: '2026-07',
+      timeZone: 'Asia/Tokyo',
+      actorUserId: 'manager-1',
+    })
+
+    expect(await errorCode(() => service.deleteEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: closedDraft.id,
+      actorUserId: 'member-1',
+      expectedRevision: closedDraft.revision,
+    }))).toBe('TimePeriodClosed')
+    expect(await errorCode(() => service.updateEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: openDraft.id,
+      actorUserId: 'member-1',
+      canManageRates: false,
+      expectedRevision: openDraft.revision,
+      duration: { date: '2026-07-30', minutes: 60, timeZone: 'Asia/Tokyo' },
+    }))).toBe('TimePeriodClosed')
+    await expect(service.deleteEntry({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      entryId: openDraft.id,
+      actorUserId: 'member-1',
+      expectedRevision: openDraft.revision,
+    })).resolves.toEqual({ entryId: openDraft.id, deleted: true })
+  })
+
   test('uses the close timezone for month boundaries and keeps other Teams open', async () => {
     const { service } = createFixture()
     await service.closePeriod({

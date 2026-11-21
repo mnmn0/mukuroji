@@ -7,7 +7,7 @@ import { TeamWeeklyReportsContainer } from '../../features/time-tracking/ui/Team
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
 import { TimeReportContainer } from '../../features/time-tracking/ui/TimeReportContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
-import { selectTimeEntryWorkItemChoices } from '../../features/time-tracking/model/timeEntryWorkItemOptions'
+import { selectIndirectTimeEntryTargets, selectTimeEntryWorkItemChoices } from '../../features/time-tracking/model/timeEntryWorkItemOptions'
 import { resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { resolveTimeReportGroupBy, resolveTimeReportRange } from '../../features/time-tracking/model/timeReport'
@@ -96,6 +96,12 @@ export function TeamTimeTrackingPage() {
     () => selectTimeEntryWorkItemChoices(workItems.data ?? [], teamId ?? '', writeAccess.data?.capabilities),
     [teamId, workItems.data, writeAccess.data?.capabilities],
   )
+  // Indirect work goes on a Project the member may write, or on the Team when it allows time without one.
+  const indirectTargets = useMemo(() => {
+    const capabilities = writeAccess.data?.capabilities
+    if (!capabilities || !teamId) return undefined
+    return selectIndirectTimeEntryTargets(activeTeam?.projects ?? emptyTeamProjects, teamId, capabilities)
+  }, [activeTeam?.projects, teamId, writeAccess.data?.capabilities])
   // Until both reads land, an empty list means unknown, not "nothing writable".
   const isLoadingWorkItemOptions = !workItems.data || !writeAccess.data
   const workItemTitles = useMemo(
@@ -263,6 +269,7 @@ export function TeamTimeTrackingPage() {
             weekStart={weekStart}
             weekStartDay={calendarSettings.settings.weekStartDay}
             isLoadingWorkItemOptions={isLoadingWorkItemOptions}
+            {...(indirectTargets ? { indirectTargets } : {})}
             workItemOptions={workItemOptions}
             workItemTitles={workItemTitles}
           />

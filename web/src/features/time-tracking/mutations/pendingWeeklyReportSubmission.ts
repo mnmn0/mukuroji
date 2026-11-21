@@ -18,7 +18,7 @@ export type PendingWeeklyReportSubmission = {
  * @returns A stable string of the content.
  */
 export function weeklyReportSubmissionContent(input: SubmitWeeklyReportRequest) {
-  return JSON.stringify([input.sections, input.time, input.totalMinutes, input.timeIsPartial, input.notes])
+  return JSON.stringify([input.sections, input.time, input.indirectTime ?? [], input.totalMinutes, input.timeIsPartial, input.notes])
 }
 
 /**

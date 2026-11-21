@@ -1,7 +1,15 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
-import { listTimeEntries, transitionTimeEntry, transitionTimesheet, updateTimeEntry } from '../src/features/time-tracking/api/timeEntries'
+import {
+  createIndirectTimeEntry,
+  deleteTimeEntry,
+  listTimeEntries,
+  transitionTimeEntry,
+  transitionTimesheet,
+  updateIndirectTimeEntry,
+  updateTimeEntry,
+} from '../src/features/time-tracking/api/timeEntries'
 import { TimeTrackingApiError } from '../src/features/time-tracking/api/timeTrackingRequest'
 import { readTimeEntryHistory } from '../src/features/time-tracking/api/timeTrackingValidation'
 import { getActiveTimer, stopTimer } from '../src/features/time-tracking/api/timers'
@@ -33,6 +41,7 @@ import {
   formatMinutes,
   createTrailingPeriod,
   parseHoursInput,
+  readIndirectMinutes,
   readLocalNoon,
   resolveLocalInstant,
   resolveWeekStart,
@@ -43,11 +52,15 @@ import {
 } from '../src/features/time-tracking/model/timePeriod'
 import { classifyTimeTrackingFailure, shouldRetainTimeTrackingMutation } from '../src/features/time-tracking/model/timeTrackingFailure'
 import { PersonalTimesheet } from '../src/features/time-tracking/ui/PersonalTimesheet'
-import { selectTimeEntryWorkItemChoices } from '../src/features/time-tracking/model/timeEntryWorkItemOptions'
+import { selectIndirectTimeEntryTargets, selectTimeEntryWorkItemChoices } from '../src/features/time-tracking/model/timeEntryWorkItemOptions'
 import { TimeApprovalQueue } from '../src/features/time-tracking/ui/TimeApprovalQueue'
 import { TimeEntryForm } from '../src/features/time-tracking/ui/TimeEntryForm'
 import { WorkItemTimePanel } from '../src/features/time-tracking/ui/WorkItemTimePanel'
-import { createTimeTrackingFormatters } from '../src/features/time-tracking/ui/timeTrackingText'
+import {
+  createTimeTrackingFormatters,
+  describeTimeEntrySubject,
+  formatTimeEntryRange,
+} from '../src/features/time-tracking/ui/timeTrackingText'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { createTeamTimeTrackingPath } from '../src/shared/routing/paths'
 
@@ -175,17 +188,45 @@ describe('time tracking model', () => {
   test('builds the Work Item × day table and lifecycle counts', () => {
     const rows = buildTimeEntryWeekRows(timeTrackingFixtureEntries, week.days)
     expect(rows).toEqual([
-      { workItemId: 'onboarding', minutesByDate: { '2026-11-09': 90, '2026-11-10': 60, '2026-11-11': 45 }, totalMinutes: 195 },
-      { workItemId: 'pricing', minutesByDate: { '2026-11-10': 120 }, totalMinutes: 120 },
+      { key: 'onboarding', workItemId: 'onboarding', minutesByDate: { '2026-11-09': 90, '2026-11-10': 60, '2026-11-11': 45 }, totalMinutes: 195 },
+      { key: 'pricing', workItemId: 'pricing', minutesByDate: { '2026-11-10': 120 }, totalMinutes: 120 },
     ])
     expect(countTimeEntriesByStatus(timeTrackingFixtureEntries)).toEqual({ draft: 1, submitted: 1, approved: 1, rejected: 1, locked: 0 })
+  })
+
+  test('gives indirect work one row per work category', () => {
+    const meeting = createTimeEntryFixture({ id: 'meeting', workItemId: undefined, category: 'meeting', durationOnly: true, startAt: '2026-11-09T15:00:00.000Z', endAt: '2026-11-09T17:00:00.000Z', durationMinutes: 120 })
+    const nextMeeting = createTimeEntryFixture({ ...meeting, id: 'meeting-2', startAt: '2026-11-10T15:00:00.000Z', endAt: '2026-11-10T16:00:00.000Z', durationMinutes: 60 })
+    expect(buildTimeEntryWeekRows([meeting, nextMeeting], week.days)).toEqual([
+      { key: 'indirect:meeting', category: 'meeting', minutesByDate: { '2026-11-10': 120, '2026-11-11': 60 }, totalMinutes: 180 },
+    ])
+    expect(describeTimeEntrySubject(createTranslator('ja'), meeting, {})).toBe('間接作業・会議')
+    expect(describeTimeEntrySubject(t, meeting, {})).toBe('Indirect: Meeting')
+    expect(formatTimeEntryRange(formatters, meeting)).toBe('')
+  })
+
+  test('reads indirect hours as whole minutes within one day', () => {
+    expect(readIndirectMinutes('1.5')).toBe(90)
+    expect(readIndirectMinutes('0:15')).toBe(15)
+    expect(readIndirectMinutes('24')).toBe(1440)
+    for (const invalid of ['', '0', '-1', '24.5', 'abc']) expect(readIndirectMinutes(invalid)).toBeUndefined()
+  })
+
+  test('offers indirect work only on writable Projects, and without one only with the Team scope', () => {
+    const projects = [{ id: 'refero', name: 'Refero' }, { id: 'atlas', name: 'Atlas' }]
+    expect(selectIndirectTimeEntryTargets(projects, 'core-team', {
+      writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }, { teamId: 'other-team', projectId: 'atlas' }],
+      writableTeamIds: [],
+    })).toEqual({ projects: [{ id: 'refero', name: 'Refero' }], allowNoProject: false })
+    expect(selectIndirectTimeEntryTargets(projects, 'core-team', { writableProjectScopes: [], writableTeamIds: ['core-team'] }))
+      .toEqual({ projects: [], allowNoProject: true })
   })
 
   test('splits entries that cross local midnight across days and weeks', () => {
     // 23:00 Wednesday to 01:00 Thursday in Japan time.
     const overnight = createTimeEntryFixture({ id: 'overnight', startAt: '2026-11-11T14:00:00.000Z', endAt: '2026-11-11T16:00:00.000Z', durationMinutes: 120 })
     expect(buildTimeEntryWeekRows([overnight], week.days)).toEqual([
-      { workItemId: 'onboarding', minutesByDate: { '2026-11-11': 60, '2026-11-12': 60 }, totalMinutes: 120 },
+      { key: 'onboarding', workItemId: 'onboarding', minutesByDate: { '2026-11-11': 60, '2026-11-12': 60 }, totalMinutes: 120 },
     ])
     const days = groupTimeEntriesByDay([overnight], week.days)
     expect(days.map((day) => [day.date, day.entries.map((entry) => entry.id), day.totalMinutes]).filter(([, , minutes]) => minutes)).toEqual([
@@ -300,6 +341,35 @@ describe('time tracking API', () => {
     expect(submitted.status).toBe('submitted')
     expect(requests[0]?.url).toEndWith('/time-entries/entry-rejected/submit')
     expect(requests[0]?.body).toEqual({ expectedRevision: 4 })
+  })
+
+  test('records indirect work as a date and minutes, keeps it so on edit, and deletes a draft', async () => {
+    const meeting = createTimeEntryFixture({ id: 'meeting', workItemId: undefined, category: 'meeting', durationOnly: true, durationMinutes: 90 })
+    let requests = respondWith({ entry: meeting })
+    const input = { category: 'meeting' as const, date: '2026-11-10', minutes: 90, timeZone: 'Asia/Tokyo', description: ' Weekly sync ', billable: false }
+    const created = await createIndirectTimeEntry('token', 'core-team', input, context)
+    expect(created).toMatchObject({ category: 'meeting', durationOnly: true })
+    expect(created.workItemId).toBeUndefined()
+    expect(requests[0]?.body).toEqual({ category: 'meeting', date: '2026-11-10', minutes: 90, timeZone: 'Asia/Tokyo', description: 'Weekly sync', billable: false })
+
+    requests = respondWith({ entry: { ...meeting, revision: 2 } })
+    await updateIndirectTimeEntry('token', meeting, { ...input, projectId: 'refero', description: '' }, context)
+    expect(requests[0]?.method).toBe('PATCH')
+    expect(requests[0]?.body).toEqual({
+      expectedRevision: 1, category: 'meeting', projectId: 'refero', date: '2026-11-10', minutes: 90, timeZone: 'Asia/Tokyo', description: null, billable: false,
+    })
+
+    requests = respondWith({ entry: { ...meeting, revision: 2 } })
+    await updateIndirectTimeEntry('token', meeting, { ...input, keepRecordedInterval: true }, context)
+    expect(requests[0]?.body).toEqual({
+      expectedRevision: 1, category: 'meeting', projectId: null, description: 'Weekly sync', billable: false,
+    })
+
+    requests = respondWith({}, 204)
+    await deleteTimeEntry('token', meeting, context)
+    expect(requests[0]?.method).toBe('DELETE')
+    expect(requests[0]?.url).toEndWith('/teams/core-team/time-entries/meeting?expectedRevision=1')
+    expect(requests[0]?.headers.get('Idempotency-Key')).toBe('key-1')
   })
 
   test('reports the entries a period-wide action could not change', async () => {
