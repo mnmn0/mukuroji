@@ -22,7 +22,10 @@ import {
   resolveFocusSnoozeUntil,
 } from '../src/features/focus-queue/model/focusQueue'
 import { FocusQueue } from '../src/features/focus-queue/ui/FocusQueue'
-import { readFocusPolicyOverrides } from '../src/features/focus-queue/model/focusPolicyForm'
+import {
+  readFocusPolicyOverrides,
+  readUnparsedNumberFieldNames,
+} from '../src/features/focus-queue/model/focusPolicyForm'
 import { FocusQueueApiError } from '../src/features/focus-queue/api/focusQueue'
 import { resolveFocusQueueResponse } from '../src/features/focus-queue/queries/useFocusQueue'
 import { resolveWorkspaceFocusOverviewState } from '../src/features/focus-queue/queries/useWorkspaceFocusOverview'
@@ -194,6 +197,28 @@ describe('Focus queue', () => {
       invalidFieldNames: ['dueSoonDays'],
       overrides: { weights: { urgent: 42 } },
     })
+  })
+
+  test('reads the slipped threshold and weight from the policy form', () => {
+    const formData = new FormData()
+    formData.set('slippedThresholdDays', '5')
+    formData.set('weight-slipped', '70')
+    expect(readFocusPolicyOverrides(formData)).toEqual({
+      invalidFieldNames: [],
+      overrides: { slippedThresholdDays: 5, weights: { slipped: 70 } },
+    })
+    formData.set('slippedThresholdDays', '0')
+    expect(readFocusPolicyOverrides(formData).invalidFieldNames).toEqual(['slippedThresholdDays'])
+    formData.set('slippedThresholdDays', '1.5')
+    expect(readFocusPolicyOverrides(formData).invalidFieldNames).toEqual(['slippedThresholdDays'])
+  })
+
+  test('reports number inputs the browser could not parse instead of inheriting them', () => {
+    expect(readUnparsedNumberFieldNames([
+      { name: 'slippedThresholdDays', validity: { badInput: true } },
+      { name: 'dueSoonDays', validity: { badInput: false } },
+      { name: '', validity: { badInput: true } },
+    ])).toEqual(['slippedThresholdDays'])
   })
 
   test('reads SLA scope overrides from the policy form and inherits blank SLA fields', () => {

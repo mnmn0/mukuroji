@@ -47,6 +47,9 @@ export type {
   AiAssistanceOfflineRecordedUsage,
 } from './offline-evaluation-types'
 
+/** Synthetic Workspace ID passed to the gateway; the offline runner never reads provider keys. */
+const OFFLINE_EVALUATION_WORKSPACE_ID = 'offline-evaluation-workspace'
+
 /** One evidence-bearing claim and the citations emitted beside it. */
 type EvaluatedClaim = {
   /** Citation identifiers emitted for the claim. */
@@ -111,6 +114,7 @@ export function createAiAssistanceOfflineReviewDigests(
       id: evaluationCase.id,
       promptSha256: createSha256(createAiAssistanceGenerationPrompt({
         ...evaluationCase.modelInput,
+        workspaceId: OFFLINE_EVALUATION_WORKSPACE_ID,
         modelId: provenance.modelId,
         traceId: createOfflineTraceId(evaluationCase.id),
         maxOutputTokens: evaluationCase.budgets.maxOutputTokens,
@@ -395,6 +399,7 @@ async function replayProductionGateway(
   try {
     const generation = await gateway.generate({
       ...evaluationCase.modelInput,
+      workspaceId: OFFLINE_EVALUATION_WORKSPACE_ID,
       modelId: provenance.modelId,
       traceId: createOfflineTraceId(evaluationCase.id),
       maxOutputTokens: evaluationCase.budgets.maxOutputTokens,
