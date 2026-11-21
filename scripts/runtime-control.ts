@@ -5,10 +5,11 @@
  *   AWS_REGION=ap-northeast-1 bun run runtime-control:enable
  *   AWS_REGION=ap-northeast-1 bun run runtime-control:disable
  *   AWS_REGION=ap-northeast-1 bun run runtime-control:disable --all-at-once
+ *   AWS_REGION=ap-northeast-1 bun run runtime-control:read-only
  *
  * The script reads the AppConfig identifiers and the Web URL from the stack outputs, creates a hosted
  * configuration version with the next revision, starts the deployment, waits until AppConfig reports
- * it complete, and then checks that `/api/ready` matches the new mode. It calls the `aws` CLI, so the
+ * it complete, and then checks that `/api/ready` and `/api/maintenance` match the new mode. It calls the `aws` CLI, so the
  * caller's normal AWS credentials and `AWS_ENDPOINT_URL` (for an emulator) apply.
  */
 
@@ -17,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 /** Runtime-control mode that the hosted configuration schema accepts. */
-export type RuntimeControlMode = 'enabled' | 'disabled'
+export type RuntimeControlMode = 'enabled' | 'disabled' | 'read-only'
 
 /**
  * Parsed command-line request.
@@ -63,6 +64,13 @@ export interface RuntimeControlDependencies {
    * @returns The status code, or `undefined` when the request failed.
    */
   readonly httpStatus: (url: string) => Promise<number | undefined>
+  /**
+   * Reads the `state` that `GET /api/maintenance` reports.
+   *
+   * @param url - Maintenance status URL.
+   * @returns The reported state, or `undefined` when the request or its body failed.
+   */
+  readonly maintenanceState: (url: string) => Promise<string | undefined>
   /**
    * Reads a file that an `aws` command wrote.
    *
@@ -146,11 +154,19 @@ const defaultTiming: RuntimeControlTiming = {
 }
 
 const usage = [
-  'Usage: bun scripts/runtime-control.ts <enable|disable> [--all-at-once]',
+  'Usage: bun scripts/runtime-control.ts <enable|disable|read-only> [--all-at-once]',
   '  enable          Deploy mode "enabled" with the stack canary strategy (about 30 minutes).',
   '  disable         Deploy mode "disabled" with the stack canary strategy.',
+  '  read-only       Deploy mode "read-only": reads keep working and changes are rejected.',
   '  --all-at-once   Use AppConfig.AllAtOnce, for an emergency stop decided by the incident commander.',
 ].join('\n')
+
+/** Mode deployed by each command-line command. */
+const commandModes: Readonly<Record<string, RuntimeControlMode>> = Object.freeze({
+  enable: 'enabled',
+  disable: 'disabled',
+  'read-only': 'read-only',
+})
 
 /**
  * Parses the command-line arguments.
@@ -163,9 +179,10 @@ export function parseRuntimeControlArguments(argv: readonly string[]): RuntimeCo
   let mode: RuntimeControlMode | undefined
   let allAtOnce = false
   for (const argument of argv) {
-    if (argument === 'enable' || argument === 'disable') {
-      if (mode !== undefined) throw new RuntimeControlError(`Pass enable or disable once.\n${usage}`)
-      mode = argument === 'enable' ? 'enabled' : 'disabled'
+    const commandMode = Object.hasOwn(commandModes, argument) ? commandModes[argument] : undefined
+    if (commandMode !== undefined) {
+      if (mode !== undefined) throw new RuntimeControlError(`Pass one of enable, disable, or read-only once.\n${usage}`)
+      mode = commandMode
     } else if (argument === '--all-at-once') {
       allAtOnce = true
     } else {
@@ -228,10 +245,23 @@ export function classifyDeploymentState(state: string): 'complete' | 'failed' | 
  *
  * @param mode - Deployed mode.
  * @param status - HTTP status from `/api/ready`, or `undefined` when unreachable.
- * @returns True for 200 after enabling and 503 after disabling.
+ * @returns True for 200 after enabling, and 503 after disabling or switching to read-only, which
+ * does not admit new traffic as fully ready.
  */
 export function readyMatchesMode(mode: RuntimeControlMode, status: number | undefined): boolean {
   return mode === 'enabled' ? status === 200 : status === 503
+}
+
+/**
+ * Tells whether `GET /api/maintenance` reflects the deployed mode.
+ *
+ * @param mode - Deployed mode.
+ * @param state - Reported maintenance state, or `undefined` when unreadable.
+ * @returns True when the API reports the state that the mode produces.
+ */
+export function maintenanceMatchesMode(mode: RuntimeControlMode, state: string | undefined): boolean {
+  const expected = mode === 'enabled' ? 'none' : mode === 'read-only' ? 'read-only' : 'stopped'
+  return state === expected
 }
 
 /**
@@ -467,19 +497,23 @@ export async function runRuntimeControl(
   }
 
   const readyUrl = `${target.webUrl}/api/ready`
+  const maintenanceUrl = `${target.webUrl}/api/maintenance`
   const expected = request.mode === 'enabled' ? '200' : '503'
   const readyDeadline = dependencies.now().getTime() + timing.readyTimeoutMilliseconds
   let readyStatus = await dependencies.httpStatus(readyUrl)
-  while (!readyMatchesMode(request.mode, readyStatus)) {
+  let maintenance = await dependencies.maintenanceState(maintenanceUrl)
+  while (!readyMatchesMode(request.mode, readyStatus) || !maintenanceMatchesMode(request.mode, maintenance)) {
     if (dependencies.now().getTime() > readyDeadline) {
       throw new RuntimeControlError(
-        `Deployment ${deploymentNumber} is COMPLETE, but ${readyUrl} returned ${readyStatus ?? 'no response'} instead of ${expected}.`,
+        `Deployment ${deploymentNumber} is COMPLETE, but ${readyUrl} returned ${readyStatus ?? 'no response'} ` +
+          `(expected ${expected}) and ${maintenanceUrl} reported ${maintenance ?? 'no state'}.`,
       )
     }
     await dependencies.sleep(timing.readyPollMilliseconds)
     readyStatus = await dependencies.httpStatus(readyUrl)
+    maintenance = await dependencies.maintenanceState(maintenanceUrl)
   }
-  log(`${readyUrl} returned ${readyStatus}. Runtime control is ${request.mode} at revision ${revision}.`)
+  log(`${readyUrl} returned ${readyStatus} and the maintenance state is ${maintenance}. Runtime control is ${request.mode} at revision ${revision}.`)
   return { revision, versionNumber, deploymentNumber, readyStatus }
 }
 
@@ -518,7 +552,29 @@ async function requestStatus(url: string): Promise<number | undefined> {
 }
 
 /**
- * Entry point for `bun run runtime-control:enable` and `runtime-control:disable`.
+ * Reads the maintenance state from `GET /api/maintenance`.
+ *
+ * @param url - Maintenance status URL.
+ * @returns The reported state, or `undefined` on any failure.
+ */
+async function requestMaintenanceState(url: string): Promise<string | undefined> {
+  try {
+    const response = await fetch(url, { cache: 'no-store', redirect: 'manual', signal: AbortSignal.timeout(10_000) })
+    if (!response.ok) {
+      await response.body?.cancel()
+      return undefined
+    }
+    const body: unknown = await response.json()
+    if (typeof body !== 'object' || body === null || !('state' in body)) return undefined
+    return typeof body.state === 'string' ? body.state : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Entry point for `bun run runtime-control:enable`, `runtime-control:disable`, and
+ * `runtime-control:read-only`.
  *
  * @returns The process exit code.
  */
@@ -532,6 +588,7 @@ async function main(): Promise<number> {
     await runRuntimeControl(request, region, stackName, {
       aws: runAws,
       httpStatus: requestStatus,
+      maintenanceState: requestMaintenanceState,
       readText: (path) => readFile(path, 'utf8'),
       writeText: (path, content) => writeFile(path, content, { mode: 0o600 }),
       workDirectory,

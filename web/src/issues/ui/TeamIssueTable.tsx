@@ -45,15 +45,15 @@ import {
   type WorkItemOutlineRow,
 } from '../../work-items/model/workItemHierarchy'
 import { WorkItemHierarchyRollupSummary } from '../../work-items/ui/WorkItemHierarchyRollupSummary'
-import type { WorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
+import {
+  WORK_ITEM_BASELINE_END_DELAY_COLUMN,
+  type WorkItemBaselineLookup,
+} from '../../work-items/model/workItemScheduleBaselines'
 import {
   formatTaskScheduleVariance,
   resolveTaskScheduleVarianceTone,
   taskScheduleVarianceToneClasses,
 } from '../../tasks/model/taskActualDates'
-
-/** Column showing how far each Work Item ends behind its Project baseline. */
-export const TEAM_ISSUE_BASELINE_DELAY_COLUMN = 'baselineEndDelayDays'
 
 /** Hierarchy outline shown by the Team Work Item table instead of groups. */
 export type IssueTableOutline = {
@@ -410,7 +410,7 @@ export function IssueTable({
                 {issue.teamId}
               </td>
             )
-            case TEAM_ISSUE_BASELINE_DELAY_COLUMN: {
+            case WORK_ITEM_BASELINE_END_DELAY_COLUMN: {
               const entry = scheduleBaselineFor?.(issue)
               const days = entry ? deriveWorkItemBaselineEndDelayDays(entry, issue) : undefined
               const tone = resolveTaskScheduleVarianceTone(days)
@@ -582,7 +582,7 @@ function isSupportedTeamIssueColumn(field: string): boolean {
     'priority',
     'workItemType',
     'team',
-    TEAM_ISSUE_BASELINE_DELAY_COLUMN,
+    WORK_ITEM_BASELINE_END_DELAY_COLUMN,
     ...WORK_ITEM_EFFORT_COLUMN_FIELDS,
   ].includes(field) || field.startsWith('custom:')
 }
@@ -603,7 +603,7 @@ function resolveIssueTableColumnLabel(
     case 'priority': return t('tasks.column.priority')
     case 'workItemType': return t('tasks.column.workItemType')
     case 'team': return t('workspace.column.team')
-    case TEAM_ISSUE_BASELINE_DELAY_COLUMN: return t('tasks.column.baselineEndDelayDays')
+    case WORK_ITEM_BASELINE_END_DELAY_COLUMN: return t('tasks.column.baselineEndDelayDays')
     case 'estimate': return t('tasks.column.estimate')
     case 'remainingEffort': return t('tasks.column.remainingEffort')
     case 'progress': return t('tasks.column.progress')
