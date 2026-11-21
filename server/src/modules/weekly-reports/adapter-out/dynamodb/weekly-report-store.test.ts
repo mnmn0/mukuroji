@@ -38,6 +38,7 @@ const submission: StoredWeeklyReportSubmission = {
   weekEnd: '2026-11-22',
   sections: { completed: [{ workItemId: 'a', minutes: 30 }], started: [], overdue: [], upcoming: [] },
   time: [{ workItemId: 'a', minutes: 30 }],
+  indirectTime: [{ category: 'meeting', minutes: 45 }],
   items: [{ workItemId: 'a', title: 'A', projectId: 'p' }],
   totalMinutes: 30,
   timeIsPartial: false,
@@ -239,15 +240,21 @@ test('reads a stored version and refuses one with an unknown section', async () 
     memberKey: 'm@example.com',
     ...submission,
   }
+  const { indirectTime: _indirectTime, ...legacyRow } = row
   const store = new DynamoDbWeeklyReportStore('planning', fakeClient({
     GetCommand: [
       { Item: row },
       { Item: { ...row, sections: { ...submission.sections, extra: [] } } },
       { Item: { ...row, totalMinutes: WEEKLY_REPORT_MAX_MINUTES + 1 } },
+      { Item: legacyRow },
+      { Item: { ...row, indirectTime: [{ category: 'lunch', minutes: 30 }] } },
     ],
   }))
   expect(await store.getSubmission(scope, '2026-11-16', 1)).toEqual(submission)
   await expect(store.getSubmission(scope, '2026-11-16', 1)).rejects.toMatchObject({ status: 502 })
+  await expect(store.getSubmission(scope, '2026-11-16', 1)).rejects.toMatchObject({ status: 502 })
+  // A version submitted before indirect work was reported reads as having none.
+  expect(await store.getSubmission(scope, '2026-11-16', 1)).toEqual({ ...submission, indirectTime: [] })
   await expect(store.getSubmission(scope, '2026-11-16', 1)).rejects.toMatchObject({ status: 502 })
 })
 

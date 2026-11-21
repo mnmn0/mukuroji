@@ -1,6 +1,11 @@
 import type { WeeklyReportItemView, WeeklyReportSubmission } from '@mukuroji/contracts'
 import { formatMinutes } from '../model/timePeriod'
-import { formatWeeklyReportSubmittedStatus, type TimeTrackingFormatters, type TimeTrackingTranslator } from './timeTrackingText'
+import {
+  describeTimeEntrySubject,
+  formatWeeklyReportSubmittedStatus,
+  type TimeTrackingFormatters,
+  type TimeTrackingTranslator,
+} from './timeTrackingText'
 
 /** Props of a submitted weekly report. */
 export type SubmittedWeeklyReportProps = {
@@ -102,6 +107,12 @@ export function SubmittedWeeklyReport({ formatters, submission, t }: SubmittedWe
               <span className={`min-w-0 break-words ${row.hidden ? 'italic text-[var(--workbench-muted)]' : ''}`}>
                 {row.hidden ? t('timeTracking.weeklyReport.hiddenItem') : row.title}
               </span>
+              <span className="tabular-nums">{formatMinutes(row.minutes)}</span>
+            </li>
+          ))}
+          {submission.indirectTime.map((row) => (
+            <li className="flex min-w-0 justify-between gap-3" key={`indirect-${row.category}`}>
+              <span className="min-w-0 break-words">{describeTimeEntrySubject(t, { category: row.category }, {})}</span>
               <span className="tabular-nums">{formatMinutes(row.minutes)}</span>
             </li>
           ))}

@@ -32,6 +32,10 @@ export type PersonalWeeklyReportTimeRow = {
   title: string
   /** Recorded minutes. */
   minutes: number
+  /** Set on a row of indirect work, which references no Work Item. */
+  indirect?: true
+  /** Work category of an indirect-work row; absent for indirect work saved without one. */
+  category?: TimeEntryCategory
 }
 
 /** Facts of one member's week, derived only from data the member can already read. */
@@ -123,7 +127,7 @@ export function buildPersonalWeeklyReport(input: PersonalWeeklyReportInput): Per
   const nextWeekEnd = shiftLocalDate(weekEnd, 7) ?? weekEnd
 
   const minutesByWorkItem = new Map<string, number>()
-  const indirectTitles = new Map<string, string>()
+  const indirectRows = new Map<string, { title: string; category?: TimeEntryCategory }>()
   let totalMinutes = 0
   for (const entry of input.entries) {
     // Split by day like the timesheet, so the totals match it for entries crossing the week edge.
@@ -132,7 +136,12 @@ export function buildPersonalWeeklyReport(input: PersonalWeeklyReportInput): Per
     if (minutes === 0) continue
     // Indirect work is listed once per work category.
     const key = entry.workItemId ?? `indirect:${entry.category ?? 'uncategorized'}`
-    if (entry.workItemId === undefined) indirectTitles.set(key, input.indirectTitle?.(entry.category) ?? key)
+    if (entry.workItemId === undefined) {
+      indirectRows.set(key, {
+        title: input.indirectTitle?.(entry.category) ?? key,
+        ...(entry.category === undefined ? {} : { category: entry.category }),
+      })
+    }
     minutesByWorkItem.set(key, (minutesByWorkItem.get(key) ?? 0) + minutes)
     totalMinutes += minutes
   }
@@ -170,7 +179,11 @@ export function buildPersonalWeeklyReport(input: PersonalWeeklyReportInput): Per
   }
 
   const time = [...minutesByWorkItem.entries()]
-    .map(([workItemId, minutes]) => ({ workItemId, title: indirectTitles.get(workItemId) ?? titles.get(workItemId) ?? workItemId, minutes }))
+    .map(([workItemId, minutes]): PersonalWeeklyReportTimeRow => {
+      const indirect = indirectRows.get(workItemId)
+      if (indirect === undefined) return { workItemId, title: titles.get(workItemId) ?? workItemId, minutes }
+      return { workItemId, title: indirect.title, minutes, indirect: true, ...(indirect.category === undefined ? {} : { category: indirect.category }) }
+    })
     .sort((left, right) => right.minutes - left.minutes || left.title.localeCompare(right.title))
 
   return {
@@ -306,7 +319,12 @@ export function toSubmitWeeklyReportRequest(
       overdue: rows(report.overdue),
       upcoming: rows(report.upcoming),
     },
-    time: report.time.map((row) => ({ workItemId: row.workItemId, minutes: row.minutes })),
+    time: report.time.flatMap((row) => row.indirect ? [] : [{ workItemId: row.workItemId, minutes: row.minutes }]),
+    // Indirect work references no Work Item, so it is sent per work category instead. Rows without
+    // a category cannot be named this way and only count toward the total.
+    indirectTime: report.time.flatMap((row) => row.indirect && row.category !== undefined
+      ? [{ category: row.category, minutes: row.minutes }]
+      : []),
     totalMinutes: report.totalMinutes,
     timeIsPartial: options.timeIsPartial,
     notes: { issues: notes.issues.trim(), reflection: notes.reflection.trim() },

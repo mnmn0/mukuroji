@@ -1,3 +1,5 @@
+import { TIME_ENTRY_CATEGORIES, type TimeEntryCategory } from './time-tracking'
+
 /** Sections of a weekly report that list Work Items. */
 export type WeeklyReportSectionName = 'completed' | 'started' | 'overdue' | 'upcoming'
 
@@ -44,6 +46,17 @@ export type WeeklyReportItemInput = {
   minutes: number
 }
 
+/**
+ * Minutes the member recorded as indirect work (time without a Work Item, such as a meeting) in one
+ * work category during the week.
+ */
+export type WeeklyReportIndirectTime = {
+  /** Work category of the indirect work. */
+  category: TimeEntryCategory
+  /** Minutes recorded in the category in the week. */
+  minutes: number
+}
+
 /** Request body that saves the member's notes for a week without submitting. */
 export type SaveWeeklyReportDraftRequest = {
   /** Draft revision read before the change; 0 when no draft exists yet. */
@@ -62,6 +75,8 @@ export type SubmitWeeklyReportRequest = {
   sections: Record<WeeklyReportSectionName, WeeklyReportItemInput[]>
   /** Recorded time per Work Item, largest first. */
   time: WeeklyReportItemInput[]
+  /** Recorded indirect work per work category, largest first; treated as empty when omitted. */
+  indirectTime?: WeeklyReportIndirectTime[]
   /** Total recorded minutes in the week. */
   totalMinutes: number
   /** Whether only part of the member's time entries could be read when the report was drafted. */
@@ -121,6 +136,8 @@ export type WeeklyReportSubmission = {
   sections: Record<WeeklyReportSectionName, WeeklyReportItemView[]>
   /** Recorded time per Work Item. */
   time: WeeklyReportItemView[]
+  /** Recorded indirect work per work category. */
+  indirectTime: WeeklyReportIndirectTime[]
   /** Total recorded minutes the author reported. */
   totalMinutes: number
   /** Whether the author's time was only partly read when the report was drafted. */
@@ -318,6 +335,45 @@ function parseItemInputs(value: unknown, label: string): WeeklyReportParseResult
 }
 
 /**
+ * Reports whether a value is a known time entry work category.
+ *
+ * @param value - Untrusted value.
+ * @returns True for a category in {@link TIME_ENTRY_CATEGORIES}.
+ */
+function isTimeEntryCategory(value: unknown): value is TimeEntryCategory {
+  return TIME_ENTRY_CATEGORIES.some((category) => category === value)
+}
+
+/**
+ * Validates indirect-work rows, one per work category.
+ *
+ * @param value - Untrusted rows.
+ * @param label - Field name used in messages.
+ * @returns The rows, or the first problem found.
+ */
+export function parseWeeklyReportIndirectTime(
+  value: unknown,
+  label = 'indirectTime',
+): WeeklyReportParseResult<WeeklyReportIndirectTime[]> {
+  if (!Array.isArray(value)) return { ok: false, message: `${label} must be an array.` }
+  if (value.length > TIME_ENTRY_CATEGORIES.length) {
+    return { ok: false, message: `${label} may list each work category once.` }
+  }
+  const rows: WeeklyReportIndirectTime[] = []
+  const seen = new Set<TimeEntryCategory>()
+  for (const row of value) {
+    if (!isRecord(row) || !isTimeEntryCategory(row.category)) {
+      return { ok: false, message: `${label} rows need a known work category.` }
+    }
+    if (!isMinutes(row.minutes)) return { ok: false, message: `${label} minutes must be a whole number of minutes.` }
+    if (seen.has(row.category)) return { ok: false, message: `${label} may list each work category once.` }
+    seen.add(row.category)
+    rows.push({ category: row.category, minutes: row.minutes })
+  }
+  return { ok: true, value: rows }
+}
+
+/**
  * Validates an untrusted submission body.
  *
  * @param value - Untrusted request body.
@@ -351,6 +407,8 @@ export function parseSubmitWeeklyReportRequest(value: unknown): WeeklyReportPars
   }
   const time = parseItemInputs(value.time ?? [], 'time')
   if (!time.ok) return time
+  const indirectTime = parseWeeklyReportIndirectTime(value.indirectTime ?? [])
+  if (!indirectTime.ok) return indirectTime
   const distinct = new Set<string>()
   for (const rows of [...Object.values(sections), time.value]) {
     for (const row of rows) distinct.add(row.workItemId)
@@ -371,6 +429,7 @@ export function parseSubmitWeeklyReportRequest(value: unknown): WeeklyReportPars
       expectedRevision,
       sections,
       time: time.value,
+      indirectTime: indirectTime.value,
       totalMinutes: value.totalMinutes,
       timeIsPartial: value.timeIsPartial === true,
       notes: notes.value,

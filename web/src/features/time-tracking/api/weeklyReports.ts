@@ -1,5 +1,6 @@
 import {
   isWeeklyReportDate,
+  parseWeeklyReportIndirectTime,
   WEEKLY_REPORT_SECTION_NAMES,
   type SubmitWeeklyReportRequest,
   type TeamWeeklyReportMemberStatus,
@@ -111,9 +112,10 @@ function readSubmission(value: unknown): WeeklyReportSubmission | undefined {
   }
   const { completed, started, overdue, upcoming } = sections
   const time = readItems(value.time)
+  const indirectTime = parseWeeklyReportIndirectTime(value.indirectTime ?? [])
   const notes = readNotes(value.notes)
   if (
-    !completed || !started || !overdue || !upcoming || !time || !notes ||
+    !completed || !started || !overdue || !upcoming || !time || !indirectTime.ok || !notes ||
     !isNonnegativeSafeInteger(value.version) ||
     typeof value.submittedAt !== 'string' ||
     typeof value.weekStart !== 'string' ||
@@ -130,6 +132,7 @@ function readSubmission(value: unknown): WeeklyReportSubmission | undefined {
     weekEnd: value.weekEnd,
     sections: { completed, started, overdue, upcoming },
     time,
+    indirectTime: indirectTime.value,
     totalMinutes: value.totalMinutes,
     timeIsPartial: value.timeIsPartial,
     notes,

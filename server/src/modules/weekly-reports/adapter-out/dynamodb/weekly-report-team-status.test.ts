@@ -37,6 +37,7 @@ async function submitWeek(store: InMemoryWeeklyReportStore, memberKey: string, w
       weekEnd: weekStart,
       sections: { completed: [], started: [], overdue: [], upcoming: [] },
       time: [],
+      indirectTime: [],
       items: [],
       totalMinutes: 0,
       timeIsPartial: false,

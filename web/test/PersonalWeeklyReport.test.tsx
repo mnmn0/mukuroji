@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
+import { createDefaultDueDateWorkItemSchedule, type TimeEntry } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   createTimeEntryFixture,
@@ -446,6 +446,29 @@ describe('toSubmitWeeklyReportRequest', () => {
     expect(JSON.stringify(request)).not.toContain('Reduce onboarding friction')
     expect(request.totalMinutes).toBe(report.totalMinutes)
   })
+
+  test('sends indirect work per work category instead of as Work Items', () => {
+    const meeting: TimeEntry = { ...createLocalEntry('meeting', 'unused', '2026-11-10', 9, 45), category: 'meeting' }
+    delete meeting.workItemId
+    const report = buildPersonalWeeklyReport({
+      weekDays: week.days,
+      today: '2026-11-13',
+      workItems: weeklyReportFixtureWorkItems,
+      entries: [...timeTrackingFixtureEntries, meeting],
+      indirectTitle: (category) => `Indirect: ${category ?? 'none'}`,
+    })
+    expect(report.time).toContainEqual({ workItemId: 'indirect:meeting', title: 'Indirect: meeting', minutes: 45, indirect: true, category: 'meeting' })
+
+    const request = toSubmitWeeklyReportRequest(report, { issues: '', reflection: '' }, {
+      timeIsPartial: false,
+      expectedSubmissionCount: 0,
+      expectedRevision: 0,
+    })
+
+    expect(request.indirectTime).toEqual([{ category: 'meeting', minutes: 45 }])
+    expect(request.time.map((row) => row.workItemId)).not.toContain('indirect:meeting')
+    expect(request.totalMinutes).toBe(report.totalMinutes)
+  })
 })
 
 describe('selectWeeklyReportSubmission', () => {
@@ -484,6 +507,8 @@ describe('SubmittedWeeklyReport', () => {
     expect(html).toContain('Reduce onboarding friction')
     expect(html).toContain('閲覧権限のないタスク')
     expect(html).toContain('Waiting for the pricing review.')
+    // Indirect work is listed by its work category.
+    expect(html).toContain('間接作業・会議')
   })
 })
 

@@ -9,6 +9,7 @@ import {
   type TeamWeeklyReportMemberStatus,
   type TeamWeeklyReportStatusResponse,
   type WeeklyReportHistoryResponse,
+  type WeeklyReportIndirectTime,
   type WeeklyReportItemInput,
   type WeeklyReportItemView,
   type WeeklyReportNotes,
@@ -87,6 +88,8 @@ export type StoredWeeklyReportSubmission = {
   sections: Record<WeeklyReportSectionName, WeeklyReportItemInput[]>
   /** Recorded time rows, referencing {@link items}. */
   time: WeeklyReportItemInput[]
+  /** Recorded indirect work per work category; it references no Work Item. */
+  indirectTime: WeeklyReportIndirectTime[]
   /** Every referenced Work Item, resolved by the server with the author's permissions. */
   items: WeeklyReportStoredItem[]
   /** Total recorded minutes the author reported. */
@@ -310,6 +313,7 @@ export function toWeeklyReportSubmissionView(
       upcoming: view(submission.sections.upcoming),
     },
     time: view(submission.time),
+    indirectTime: submission.indirectTime.map((row) => ({ ...row })),
     totalMinutes: submission.totalMinutes,
     timeIsPartial: submission.timeIsPartial,
     notes: { ...submission.notes },
@@ -535,6 +539,7 @@ export async function submitWeeklyReportUseCase<TCallerCheck, TAudit>(
     weekEnd: weeklyReportWeekEnd(weekStart),
     sections,
     time,
+    indirectTime: request.indirectTime ?? [],
     items,
     totalMinutes: request.totalMinutes,
     timeIsPartial: request.timeIsPartial,

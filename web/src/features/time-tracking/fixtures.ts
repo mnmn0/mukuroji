@@ -238,7 +238,8 @@ export const weeklyReportFixtureSubmission: WeeklyReportSubmission = {
     { hidden: false, workItemId: 'pricing', key: 'CORE-15', title: 'Update the pricing page', minutes: 60 },
     { hidden: true, minutes: 30 },
   ],
-  totalMinutes: 240,
+  indirectTime: [{ category: 'meeting', minutes: 45 }],
+  totalMinutes: 285,
   timeIsPartial: false,
   notes: { issues: 'Waiting for the pricing review.', reflection: 'Onboarding shipped on time.' },
 }
