@@ -174,8 +174,11 @@ describe('weekly report reminder adapters', () => {
       store: {
         getWeeks: async (_scope, memberKeys) => new Map(memberKeys.map((memberKey, index) => [memberKey, createWeek(index)])),
       },
-      readProfile: async (workspaceId) => workspaceId === 'sunday'
+      readProfile: async (workspaceId) => workspaceId === 'closing'
+        ? { status: 'closing' }
+        : workspaceId === 'sunday'
         ? {
+            status: 'active',
             calendar: {
               fiscalYearStartMonth: 1,
               weekStartDay: 0,
@@ -205,6 +208,10 @@ describe('weekly report reminder adapters', () => {
     expect(await reader.readWorkspaceSettings('workspace-1')).toEqual({
       weekStartDay: 1,
       reminders: DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+    })
+    expect(await reader.readWorkspaceSettings('closing')).toEqual({
+      weekStartDay: 1,
+      reminders: { ...DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS, enabled: false },
     })
     expect([...await reader.readSubmittedMembers('workspace-1', 'core', ['a@example.com', 'b@example.com', 'c@example.com'], '2026-11-16')])
       .toEqual(['b@example.com', 'c@example.com'])

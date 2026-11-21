@@ -20,6 +20,8 @@ export type WeeklyReportReaderSources = {
   store: Pick<WeeklyReportStore, 'getWeeks'>
   /** Reads a Workspace's tenant profile, which holds its calendar and reminder settings. */
   readProfile(workspaceId: string): Promise<{
+    /** Tenant lifecycle; a closing or closed Workspace is not reminded. */
+    status: 'active' | 'closing' | 'closed'
     /** Saved calendar settings; absent until the Workspace saves its own. */
     calendar?: WorkspaceCalendarSettings
     /** Saved reminder settings; absent until the Workspace saves its own. */
@@ -39,9 +41,11 @@ export function createWeeklyReportReader(sources: WeeklyReportReaderSources): Sc
   return {
     async readWorkspaceSettings(workspaceId) {
       const profile = await sources.readProfile(workspaceId)
+      const reminders = profile?.weeklyReportReminders ?? DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS
       return {
         weekStartDay: (profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS).weekStartDay,
-        reminders: profile?.weeklyReportReminders ?? DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+        // A Workspace being closed keeps its settings but is no longer reminded.
+        reminders: profile && profile.status !== 'active' ? { ...reminders, enabled: false } : reminders,
       }
     },
     readTeamRosters: sources.readTeamRosters,
