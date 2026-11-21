@@ -95,7 +95,7 @@ export function registerWeeklyReportRoutes(routeApp: Hono): void {
         projectIds,
         baselines,
         workItems,
-        localToday: (workItem) => workItemScheduleInstantToLocalDate(now, workItem.schedule.calendarPolicy),
+        localToday: (workItem) => readLocalToday(now, workItem),
       }))
     })
   })
@@ -425,6 +425,22 @@ function createProjectReadCheck(principal: WorkspacePrincipal, context: TeamPerm
     if (projectId === undefined) return true
     return (principal.isSystemAdmin || teamProjectIds.has(projectId)) &&
       canAccessAssignedProject(principal, context, projectId, 'viewer')
+  }
+}
+
+/**
+ * Returns today's date in a Work Item's schedule calendar. An unreadable calendar falls back to
+ * the UTC date, so one malformed Work Item does not fail the whole summary.
+ *
+ * @param now - Instant the summary is computed at.
+ * @param workItem - Work Item.
+ * @returns Local `YYYY-MM-DD` date.
+ */
+function readLocalToday(now: Date, workItem: TeamIssueResponseItem) {
+  try {
+    return workItemScheduleInstantToLocalDate(now, workItem.schedule.calendarPolicy)
+  } catch {
+    return now.toISOString().slice(0, 10)
   }
 }
 
