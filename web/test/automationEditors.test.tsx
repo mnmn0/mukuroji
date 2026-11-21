@@ -55,7 +55,8 @@ describe('Automation editors', () => {
       />,
     )
     expect(html).toContain('ベースラインより何日遅れたら')
-    expect(html).toContain('type="number"')
+    expect(html).toContain('inputMode="numeric"')
+    expect(html).toContain('aria-describedby="automation-rule-baseline-slip-days-hint"')
   })
 
   test('renders Work Item Type trigger direction controls', () => {

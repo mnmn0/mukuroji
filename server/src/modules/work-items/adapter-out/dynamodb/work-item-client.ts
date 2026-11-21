@@ -1603,7 +1603,7 @@ export class DynamoDbTeamIssuesClient {
    * Measures how much one change moved a Project Work Item further behind its active baseline.
    *
    * The baseline is read only when the change can move the measured end: a new schedule, a move
-   * to another Project, or a status change. A failed read is logged and leaves the change
+   * to another Project, or a reopen. A failed read is logged and leaves the change
    * unannotated, so a baseline outage never blocks Work Item edits.
    *
    * @param directoryId - Workspace directory ID.
@@ -1625,10 +1625,14 @@ export class DynamoDbTeamIssuesClient {
   ): Promise<WorkItemBaselineSlipChange | undefined> {
     const projectId = after.assignedProjectId
     if (!this.planningTableName || !projectId || after.archivedAt) return undefined
+    // Only a reopen changes the measured end among status changes: a completed or canceled item
+    // is measured by its actual end, while moves between open statuses keep the planned end.
+    const reopened = (before.statusCategory === 'completed' || before.statusCategory === 'canceled') &&
+      before.statusCategory !== after.statusCategory
     if (
       workItemSchedulesEqual(before.schedule, after.schedule) &&
       before.assignedProjectId === projectId &&
-      before.statusCategory === after.statusCategory
+      !reopened
     ) return undefined
     const readKey = `${teamId}\0${projectId}`
     let read = baselineReads.get(readKey)

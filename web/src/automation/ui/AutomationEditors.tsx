@@ -511,18 +511,20 @@ export function AutomationRuleEditor({
           <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('automation.rule.baselineSlipDays')}
             <input
+              aria-describedby="automation-rule-baseline-slip-days-hint"
               className="workbench-input min-h-10 px-3 tabular-nums text-[var(--workbench-text)]"
               data-testid="automation-rule-trigger-configuration"
               inputMode="numeric"
-              max={AUTOMATION_BASELINE_SLIP_MAX_DAYS}
-              min="1"
+              maxLength={String(AUTOMATION_BASELINE_SLIP_MAX_DAYS).length}
+              pattern="[0-9]*"
               placeholder="1"
-              step="1"
-              type="number"
               value={triggerConfiguration}
               onChange={(event) => setTriggerConfiguration(event.target.value)}
             />
-            <span className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+            <span
+              className="text-xs font-medium leading-5 text-[var(--workbench-muted)]"
+              id="automation-rule-baseline-slip-days-hint"
+            >
               {t('automation.rule.baselineSlipDaysHint')}
             </span>
           </label>

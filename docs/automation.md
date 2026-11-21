@@ -34,7 +34,7 @@ Condition は event snapshot と現在の Work Item snapshot のどちらを読�
 
 `{ "type": "baseline-slip", "minDelayDays": 3 }` は、未完了の Work Item の予定終了日が、所属 Project の今の schedule baseline の終了日より `minDelayDays` 日（1〜365、省略時 1）以上遅れたときに動く。遅れの数え方は週次まとめ・Gantt・Focus の `slipped` と同じ `deriveWorkItemBaselineEndDelayDays` で、閾値を下から越えた変更で1回だけ動き、さらに遅れても同じ rule は動かない（閾値未満に戻ってから再び越えると、また動く）。
 
-判定は Work Item の書き込み側で行う。日程・所属 Project・status が変わる更新と依存関係の連鎖更新では、Work Item の Team と Project の今の baseline を1回読み、変更前後の遅れを比べる。変更後も未完了で、遅れが1日以上かつ変更前より大きいときだけ、`work-item.updated` / `work-item.schedule-cascade-updated` の audit event の `metadata.baselineSlip` に `baselineRevision`、`baselineEndDate`、`previousDelayDays`（変更前に比べられる終了日がなければ省略）、`delayDays` を書く。trigger はこの値だけを見る。
+判定は Work Item の書き込み側で行う。日程や所属 Project が変わる更新、完了・中止からの再開、依存関係の連鎖更新では、Work Item の Team と Project の今の baseline を1回読み、変更前後の遅れを比べる。変更後も未完了で、遅れが1日以上かつ変更前より大きいときだけ、`work-item.updated` / `work-item.schedule-cascade-updated` の audit event の `metadata.baselineSlip` に `baselineRevision`、`baselineEndDate`、`previousDelayDays`（変更前に比べられる終了日がなければ省略）、`delayDays` を書く。trigger はこの値だけを見る。
 
 完了・中止にした変更、予定終了日を前に戻した変更、baseline を保存し直したり切り替えたりした操作は対象外。baseline の読み取りに失敗しても Work Item の更新は止めず、その変更には `baselineSlip` を書かない（その変更では通知・trigger が動かない）。
 

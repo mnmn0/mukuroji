@@ -237,6 +237,14 @@ test('does not read the baseline for edits that cannot move the end, or for item
   )
   expect(titleOnly.reads.baseline).toBe(0)
 
+  const started = createClient(storedIssue(), baselineRow)
+  await started.client.updateTeamIssue(
+    'workspace-1', 'core-team', 'wireframe',
+    { workflowSchemaVersion: 1, workflowStatusId: 'doing', statusCategory: 'started', expectedRevision: 1 },
+    'demo@example.com', auditContext(),
+  )
+  expect(started.reads.baseline).toBe(0)
+
   const { assignedProjectId: _project, directoryProjectId: _directoryProject, ...unassigned } = storedIssue()
   const noProject = createClient(unassigned, baselineRow)
   await moveDeadline(noProject.client, '2026-06-20')
@@ -281,4 +289,28 @@ test('reads the baseline once per Project for a dependency cascade and records e
     { baselineRevision: 1, baselineEndDate: '2026-06-01', previousDelayDays: 2, delayDays: 4 },
     { baselineRevision: 1, baselineEndDate: '2026-06-03', previousDelayDays: 0, delayDays: 2 },
   ])
+})
+
+test('measures a reopened Work Item against the baseline again', async () => {
+  const baselineRow = await storedBaselineRow([{ workItemId: 'wireframe', endDate: '2026-05-25' }])
+  const { client, transactions, reads } = createClient(storedIssue({
+    workflowStatusId: 'done',
+    statusCategory: 'completed',
+    actualStartDate: '2026-05-20',
+    actualEndDate: '2026-05-26',
+  }), baselineRow)
+
+  await client.updateTeamIssue(
+    'workspace-1', 'core-team', 'wireframe',
+    { workflowSchemaVersion: 1, workflowStatusId: 'doing', statusCategory: 'started', expectedRevision: 1 },
+    'demo@example.com', auditContext(),
+  )
+
+  expect(reads.baseline).toBe(1)
+  expect(readAudit(transactions[0]).baselineSlip).toEqual({
+    baselineRevision: 1,
+    baselineEndDate: '2026-05-25',
+    previousDelayDays: 1,
+    delayDays: 9,
+  })
 })
