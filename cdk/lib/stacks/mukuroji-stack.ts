@@ -13,6 +13,7 @@ import {
 import { buildBootstrapResources } from '../subsystems/bootstrap-resources';
 import { buildCostBudget } from '../subsystems/cost-budget';
 import { buildCrossDomainIntegrityAccess } from '../subsystems/cross-domain-integrity';
+import { buildDataMigration } from '../subsystems/data-migration';
 import { buildDataStores } from '../subsystems/data-stores';
 import {
   buildFileStorage,
@@ -39,6 +40,7 @@ import { buildScheduledJobsWorker } from '../subsystems/workers/scheduled-jobs';
 import {
   defineAnalyticsScheduleJob,
   defineCycleScheduleJob,
+  defineJapanesePublicHolidaySyncJob,
   defineNotificationScheduleJob,
 } from '../subsystems/workers/schedules';
 import { defineSlackNotificationJob } from '../subsystems/workers/slack-notifications';
@@ -155,6 +157,13 @@ export class MukurojiStack extends cdk.Stack {
       workItemsTable: dataStores.workItemsTable,
       workItemConfigurationTable: dataStores.workItemConfigurationTable,
       workspaceAccessTable: dataStores.workspaceAccessTable,
+    });
+    buildDataMigration(this, {
+      lambdaBuildPaths,
+      targets: [
+        { logicalName: 'work-items', table: dataStores.workItemsTable },
+        { logicalName: 'project-directory', table: dataStores.projectDirectoryTable },
+      ],
     });
     const restoreDrill = parameters.restoreDrillCleanupApproverRoleArn
       ? buildRestoreDrill(this, {
@@ -279,6 +288,7 @@ export class MukurojiStack extends cdk.Stack {
         defineAnalyticsScheduleJob({ dataStores, parameters }),
         defineNotificationScheduleJob({ dataStores, parameters }),
         defineCycleScheduleJob({ dataStores, parameters }),
+        defineJapanesePublicHolidaySyncJob({ dataStores, parameters }),
       ],
     });
     // The API and the scheduled-jobs Lambda read this to refuse Software factory routes and to

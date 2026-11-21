@@ -48,6 +48,14 @@ Credential の scope は作成後に変更しない。権限を変える場合�
 
 `GET /api/v1/work-items/{workItemId}/key?teamId={teamId}` は Work Item の `ABC-123` 形式の `key` を `{ schemaVersion, teamId, workItemId, createdAt, key }` で返します。`createdAt` は Work Item の作成時刻で、削除後に同じ ID で作り直された Work Item とを区別するのに使えます。key は Workspace 内で一意で、作成後は変わりません。key を持つ前に作られた Work Item では `key` を省きます。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。既存の `WorkItem` は closed schema なので `key` を含めません。操作の path には従来どおり `id` を使います。Work Item の `title` は 1〜256 文字（Unicode code point）で、超えると `400 validation_failed` を返します。
 
+## Work Item の作成と稼働カレンダー
+
+`POST /api/v1/work-items` の `schedule` は省略できます。省略すると server が Workspace の稼働カレンダー（稼働曜日・会社の休日・
+日本の祝日）を `calendarPolicy` に付け、`dueDate`（`YYYY-MM-DD`）があればその日が期限の `due-date`、なければ `unscheduled` の
+Work Item を作ります。Web で作る Work Item と同じ日で稼働日数を数えるには、こちらを使います。`schedule` を送った場合は、その
+`calendarPolicy` をそのまま保存します。`schedule` と `dueDate` は同時に送れず、`400 validation_failed` になります。
+詳しくは [稼働カレンダーと日本の祝日](workspace-calendar-holidays.md) を参照してください。
+
 ## Work Item の階層
 
 `GET /api/v1/work-items/{workItemId}/hierarchy?teamId={teamId}` は Work Item の親と子を `{ schemaVersion, teamId, workItemId, parentWorkItemId, childWorkItemIds, wbsNumber? }` で返します（`WorkItemHierarchy`）。`childWorkItemIds` は読める子だけを兄弟の順に並べます。`wbsNumber` は Team の木の中の番号（`1.2.3`）です。`parentWorkItemId` は、親がない場合と、credential が親を読めない場合に `null` です。Team の Work Item が階層の上限（1,000 件）を超える場合は木を作らず、この Work Item の relation から親と子を返します。このときは `wbsNumber` を省き、`childWorkItemIds` は ID 順です。archive 済みの Work Item は、どちらの場合も階層の外として親 `null`・子なしを返します。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。
@@ -280,7 +288,7 @@ External link の削除は link、provider identity claim、link 固有の sync 
 
 Import は mapping の作成、dry-run、source の再送、report 確認の順に進める。
 
-1. UTF-8 の CSV または JSON source と、`sourceField` から canonical/custom `targetField` への mapping を送る。
+1. UTF-8 の CSV または JSON source と、`sourceField` から canonical/custom `targetField` への mapping を送る。`schedule` に `calendarPolicy` がない行は Workspace の稼働カレンダーを使い、`date-range` で `durationDays` もない行はその稼働カレンダーで稼働日数を数える。
 2. `/api/developer/imports/dry-run` で parse、変換、required field、workflow status、custom field、Team/Project access を検証する。Dry-run は Work Item や ImportJob を保存せず、`totalRows`、`validRows`、`invalidRows`、row/field error と sample preview を返す。
 3. Error を修正し、`POST /api/developer/imports` へ同じ mapping と source 全体を再送する。API は現在の管理権限を確認し、source を暗号化・versioning 済み storage に固定して durable job を queue するため、row ごとの remote validation 完了を待たない。
 4. 成功時は `202 Accepted` と `queued` の import record を返す。Worker は durable queue から job を取得し、現在の Team/Project access、workflow、assignee、custom field 設定を再検証してから `running`、`completed` または `failed` へ遷移させる。実行中も row ごとに current RBAC を確認し、終了後は validation failure の場合も集計と bounded row error report を取得できる。

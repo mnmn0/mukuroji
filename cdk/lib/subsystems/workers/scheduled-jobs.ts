@@ -32,6 +32,12 @@ export type ScheduledJobGrant = Readonly<{
    * job's own policy on the shared role; `role` is the shared role itself.
    */
   readonly grant: (grantee: iam.IPrincipal, role: iam.IRole) => void;
+  /**
+   * Where the job's statements go: its own customer-managed policy (the default), or the shared
+   * role's inline policy for a job with one small statement, since a role holds at most ten
+   * managed policies.
+   */
+  readonly policy?: 'own' | 'shared-role';
 }>;
 
 /**
@@ -102,6 +108,10 @@ function grantJobsSeparately(
     throw new Error('Scheduled jobs Lambda execution role was not created.');
   }
   for (const job of jobs) {
+    if (job.policy === 'shared-role') {
+      job.grant(role, role);
+      continue;
+    }
     const existing = new Set(scope.node.findAll());
     // Customer-managed, so the jobs' statements do not count toward the role's 10,240-character
     // inline policy quota.

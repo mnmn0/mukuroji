@@ -4,9 +4,12 @@ import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { buildPersonalWeeklyReport } from '../model/personalWeeklyReport'
 import { createWeekPeriod } from '../model/timePeriod'
+import { TimeTrackingApiError } from '../api/timeTrackingRequest'
+import { useWeeklyReportMutations } from '../mutations/useWeeklyReportMutations'
 import { useTimeEntries } from '../queries/useTimeEntries'
-import { PersonalWeeklyReport } from './PersonalWeeklyReport'
-import { createTimeTrackingFormatters } from './timeTrackingText'
+import { useWeeklyReport, useWeeklyReportHistory } from '../queries/useWeeklyReports'
+import { PersonalWeeklyReport, type WeeklyReportActionResult } from './PersonalWeeklyReport'
+import { createTimeTrackingFormatters, describeTimeEntrySubject } from './timeTrackingText'
 import { useLocalToday } from './useNow'
 
 const emptyWorkItems: readonly CanonicalWorkItem[] = []
@@ -33,6 +36,8 @@ export type PersonalWeeklyReportContainerProps = {
   workItemTitles: Readonly<Record<string, string>>
   /** Moves the week; 0 returns to the current week. */
   onMoveWeek: (weeks: number) => void
+  /** Opens the week starting on a date, from the history. */
+  onOpenWeek: (weekStart: string) => void
   /** Retries the member's Work Item read. */
   onRetryWorkItems: () => void
 }
@@ -49,6 +54,35 @@ async function writeClipboardText(text: string): Promise<void> {
 }
 
 /**
+ * Maps a save or submission failure to the outcome the view reports.
+ *
+ * @param error - Thrown error.
+ * @returns The outcome.
+ */
+function toActionResult(error: unknown): WeeklyReportActionResult {
+  if (error instanceof TimeTrackingApiError) {
+    if (error.code === 'WeeklyReportSubmissionLimit') return 'limit'
+    if (error.status === 409) return 'conflict'
+  }
+  return 'failed'
+}
+
+/**
+ * Runs a save or submission and turns its outcome into a result.
+ *
+ * @param action - The API call.
+ * @returns The outcome.
+ */
+async function runAction(action: () => Promise<unknown>): Promise<WeeklyReportActionResult> {
+  try {
+    await action()
+    return 'done'
+  } catch (error) {
+    return toActionResult(error)
+  }
+}
+
+/**
  * Connects the member's weekly report to their time entries and Work Items.
  *
  * @param props - Team, week, member, and the member's Work Items.
@@ -60,6 +94,7 @@ export function PersonalWeeklyReportContainer({
   locale,
   memberKey,
   onMoveWeek,
+  onOpenWeek,
   onRetryWorkItems,
   teamId,
   weekStart,
@@ -73,28 +108,39 @@ export function PersonalWeeklyReportContainer({
   const today = useLocalToday()
   // Without the member key a manager would read the whole Team's entries, so nothing is read.
   const entries = useTimeEntries(accessToken, teamId, week, memberKey ? { userId: memberKey } : {}, memberKey !== undefined)
+  const saved = useWeeklyReport(accessToken, teamId, memberKey, week.days[0] ?? weekStart)
+  const history = useWeeklyReportHistory(accessToken, teamId, memberKey)
+  const mutations = useWeeklyReportMutations(accessToken, teamId, memberKey, week.days[0] ?? weekStart)
   const report = useMemo(() => buildPersonalWeeklyReport({
     weekDays: week.days,
     today,
     workItems: workItems ?? emptyWorkItems,
     entries: entries.data?.entries ?? [],
     workItemTitles,
-  }), [entries.data?.entries, today, week.days, workItemTitles, workItems])
+    indirectTitle: (category) => describeTimeEntrySubject(t, category ? { category } : {}, {}),
+  }), [entries.data?.entries, t, today, week.days, workItemTitles, workItems])
 
   return (
     <PersonalWeeklyReport
       formatters={formatters}
       // Without the member key the entries cannot be read, so the report is unavailable, not empty.
-      hasLoadError={Boolean(entries.error) || hasWorkItemError || memberKey === undefined}
-      isLoading={entries.isLoading || (workItems === undefined && !hasWorkItemError)}
+      hasLoadError={Boolean(entries.error) || Boolean(saved.error) || hasWorkItemError || memberKey === undefined}
+      {...(history.data ? { history: history.data.weeks } : {})}
+      hasHistoryError={Boolean(history.error)}
+      isLoading={entries.isLoading || saved.isLoading || (workItems === undefined && !hasWorkItemError)}
       isPartial={entries.data?.complete === false}
       onCopy={writeClipboardText}
       onMoveWeek={onMoveWeek}
+      onOpenWeek={onOpenWeek}
       onRetry={() => {
         onRetryWorkItems()
-        void entries.mutate().catch(() => undefined)
+        void Promise.all([entries.mutate(), saved.mutate(), history.mutate()]).catch(() => undefined)
       }}
+      onRetryHistory={() => { void history.mutate().catch(() => undefined) }}
+      onSaveDraft={(expectedRevision, notes) => runAction(() => mutations.saveDraft(expectedRevision, notes))}
+      onSubmit={(request) => runAction(() => mutations.submit(request))}
       report={report}
+      savedReport={saved.data}
       t={t}
       week={week}
     />

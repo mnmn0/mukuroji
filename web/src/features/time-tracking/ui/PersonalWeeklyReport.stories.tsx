@@ -5,6 +5,7 @@ import {
   timeTrackingFixtureEntries,
   timeTrackingFixtureWeekStart,
   timeTrackingFixtureWorkItems,
+  weeklyReportFixtureSaved,
   weeklyReportFixtureWorkItems,
 } from '../fixtures'
 import { buildPersonalWeeklyReport } from '../model/personalWeeklyReport'
@@ -36,6 +37,11 @@ const meta = {
     onMoveWeek: fn(),
     onRetry: fn(),
     onCopy: fn(async () => undefined),
+    savedReport: { teamId: 'core-team', memberKey: 'demo@example.com', weekStart: week.days[0] ?? '', submissionCount: 0 },
+    history: [{ weekStart: '2026-11-02', submissionCount: 1, lastSubmittedAt: '2026-11-06T09:00:00.000Z' }],
+    onSaveDraft: fn(async () => 'done' as const),
+    onSubmit: fn(async () => 'done' as const),
+    onOpenWeek: fn(),
   },
 } satisfies Meta<typeof PersonalWeeklyReport>
 
@@ -48,6 +54,16 @@ export const Default: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.getByTestId('weekly-report-markdown')).toHaveTextContent('CORE-12 Reduce onboarding friction')
+  },
+}
+
+/** A week already submitted once, with its saved notes. */
+export const Submitted: Story = {
+  args: { savedReport: weeklyReportFixtureSaved },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('weekly-report-status')).toHaveTextContent('第1版')
+    await expect(canvas.getByRole('button', { name: '再提出する' })).toBeVisible()
   },
 }
 

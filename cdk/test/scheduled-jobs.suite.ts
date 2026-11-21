@@ -125,3 +125,19 @@ test('grants the jobs through the role only, never through table resource polici
 
   expect(tablesTrustingRole).toEqual([]);
 });
+
+test('lets the national holiday sync write only its shared tenant administration row', () => {
+  const template = synthesizedTemplate;
+
+  template.hasResourceProperties('AWS::IAM::Policy', {
+    PolicyDocument: {
+      Statement: Match.arrayWith([Match.objectLike({
+        Action: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+        Condition: {
+          'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': ['system#public-holidays'] },
+        },
+        Resource: { 'Fn::GetAtt': [Match.stringLikeRegexp('^TenantAdministrationTable'), 'Arn'] },
+      })]),
+    },
+  });
+});

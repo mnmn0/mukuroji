@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(530)
-  expect(new Set(inventory).size).toBe(526)
+  expect(inventory).toHaveLength(536)
+  expect(new Set(inventory).size).toBe(532)
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
@@ -22,6 +22,9 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/raid-log')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/raid-log/entries')
   expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/raid-log/entries/:entryId')
+  expect(inventory).toContain('GET /api/teams/:teamId/weekly-reports')
+  expect(inventory).toContain('GET /api/teams/:teamId/weekly-reports/:memberKey/:weekStart')
+  expect(inventory).toContain('POST /api/teams/:teamId/weekly-reports/:memberKey/:weekStart/submissions')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/schedule-baseline')
   // A Work Item may be named `hierarchy`, so the Team hierarchy must not sit under `/issues/`.
@@ -114,6 +117,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('PATCH /api/teams/:teamId/projects/:projectId/restore')
   expect(inventory).toContain('POST /api/enterprise/security/role-assignments')
   expect(inventory).toContain('DELETE /api/enterprise/security/role-assignments/:assignmentId')
+  expect(inventory).toContain('DELETE /api/teams/:teamId/time-entries/:entryId')
   // The Work Item estimate lives on the Work Item schedule, so time tracking has no estimate routes.
   expect(inventory.some((route) => route.endsWith('/time-estimate'))).toBe(false)
   expect(inventory.filter((route) => route === 'ALL /api/*')).toHaveLength(5)
@@ -123,6 +127,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '1a18e6943f9b00688e662ce16430c967e41189bb022bca6dee6395070bf79145',
+    '139b1b9e5ce65eadf433fb1649687f9ef8e430855ca3c91a64934f6c5324c73b',
   )
 })

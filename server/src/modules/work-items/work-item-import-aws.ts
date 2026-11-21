@@ -31,6 +31,7 @@ import {
   type WorkItemImportSourceStore,
 } from './work-item-import'
 import { WORK_ITEM_IMPORT_MAX_BYTES } from './work-item-transfer'
+import { isWorkItemSchedule } from './domain/work-item-schedule'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 
 const executionRecordPrefix = 'IMPORT_EXECUTION#'
@@ -648,6 +649,10 @@ function readExecutionItem(value: Record<string, unknown>): WorkItemImportExecut
     !(value.assignedProjectId === undefined || isText(value.assignedProjectId)) ||
     !(value.format === 'csv' || value.format === 'json') ||
     !Array.isArray(value.mapping) ||
+    !(value.defaultCalendarPolicy === undefined || isWorkItemSchedule({
+      mode: 'unscheduled',
+      calendarPolicy: value.defaultCalendarPolicy,
+    })) ||
     !isText(value.requestDigest) ||
     !isExecutionStatus(value.status) ||
     !Number.isSafeInteger(value.checkpointRow) ||

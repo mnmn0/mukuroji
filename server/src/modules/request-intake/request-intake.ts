@@ -28,6 +28,7 @@ import {
   type RequestAnswerValue,
   type RequestAttachment,
   type RequestAttachmentUploadInput,
+  type WorkItemScheduleCalendarPolicy,
   type RequestAttachmentUploadSession,
   type RequestEmailEnvelope,
   type RequestForm,
@@ -717,10 +718,19 @@ export function resolveRequestRouting(
     configuration.defaultTarget
 }
 
-/** Submission snapshot と convert override から canonical Work Item input を作成します。 */
+/**
+ * Submission snapshot と convert override から canonical Work Item input を作成します。
+ *
+ * @param submission - Stored Request submission.
+ * @param overrides - Validated conversion options supplied by the operator.
+ * @param workspaceCalendarPolicy - Workspace working calendar the new Work Item keeps; defaults to
+ *   the Monday-to-Friday policy without holidays.
+ * @returns The routing target and the Work Item input.
+ */
 export function createRequestWorkItemInput(
   submission: RequestSubmission,
   overrides: Extract<RequestSubmissionActionInput, { action: 'convert' }>,
+  workspaceCalendarPolicy: WorkItemScheduleCalendarPolicy = DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
 ) {
   const target = validateRoutingTarget({
     ...submission.routingTarget,
@@ -753,9 +763,9 @@ export function createRequestWorkItemInput(
   // The offset counts from the submission's Workspace-local date, not its UTC date, so a form
   // submitted early in the morning in Japan does not get a deadline one day too early.
   const calendarPolicy = {
-    holidays: [...DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.holidays],
-    timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
-    workingWeekdays: [...DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.workingWeekdays],
+    holidays: [...workspaceCalendarPolicy.holidays],
+    timeZone: workspaceCalendarPolicy.timeZone,
+    workingWeekdays: [...workspaceCalendarPolicy.workingWeekdays],
   }
   const dueDate = new Date(`${toWorkspaceLocalDate(submission.createdAt, calendarPolicy.timeZone)}T00:00:00.000Z`)
   dueDate.setUTCDate(dueDate.getUTCDate() + target.dueDateOffsetDays)

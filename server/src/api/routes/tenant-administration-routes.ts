@@ -133,6 +133,9 @@ export function registerTenantAdministrationRoutes(routeApp: Hono): void {
     get tenantExportDownload() {
       return workspaceDependencies.tenantExportDownload
     },
+    get nationalHolidays() {
+      return workspaceDependencies.nationalHolidays
+    },
     async resolveInitialization(principal) {
       const activeMembers = await workspaceDependencies.workspaceAccess.listActiveMembers(
         principal.directoryId,

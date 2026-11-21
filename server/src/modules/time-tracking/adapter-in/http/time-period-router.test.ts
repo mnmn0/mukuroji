@@ -36,6 +36,7 @@ function createFixture(scope: { canManage: boolean; wholeTeam: boolean }) {
     getManagedProjectIds: async () => undefined,
     verifyProject: async () => {},
     verifyWorkItem: async () => undefined,
+    createAuthorizationConditionChecks: () => [],
     getTimeTracking: () => service,
     readJson: async (request) => await request.json(),
     mapError: (context, error) => {

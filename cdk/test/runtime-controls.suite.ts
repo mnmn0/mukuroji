@@ -79,6 +79,14 @@ const observabilityInfrastructureFunctionIds = new Set([
 ]);
 
 /**
+ * Operator-invoked functions. They are not runtime-controlled because a
+ * `pause-writers` data migration runs while application processing is stopped.
+ */
+const operatorFunctionIds = new Set([
+  'DataMigrationFunction313678B9',
+]);
+
+/**
  * Narrows an unknown synthesized value to a string-keyed record.
  *
  * @param value Candidate synthesized value.
@@ -622,6 +630,7 @@ test('binds exact runtime-control settings through API config and nineteen direc
         fileStorageInfrastructureFunctionIds.has(logicalId) ||
         bootstrapInfrastructureFunctionIds.has(logicalId) ||
         observabilityInfrastructureFunctionIds.has(logicalId) ||
+        operatorFunctionIds.has(logicalId) ||
         logicalId.startsWith('AWS679f53fac002430cb0da5b7982bd2287') ||
         (
           typeof description === 'string' &&

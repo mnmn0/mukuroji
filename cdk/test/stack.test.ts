@@ -3,6 +3,7 @@ import './parameters-config.suite';
 import './bedrock-ai.suite';
 import './data-storage.suite';
 import './cross-domain-integrity.suite';
+import './data-migration.suite';
 import './restore-drill.suite';
 import './security-iam-api.suite';
 import './api-environment-budget.suite';

@@ -1,4 +1,4 @@
-import type { TimeEntryStatus } from '@mukuroji/contracts'
+import type { TimeEntry, TimeEntryCategory, TimeEntryStatus } from '@mukuroji/contracts'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
 import { classifyTimeTrackingFailure } from '../model/timeTrackingFailure'
 
@@ -31,6 +31,51 @@ export const timeEntryStatusBadgeClasses: Record<TimeEntryStatus, string> = {
   approved: 'workbench-badge-success',
   rejected: 'workbench-badge-danger',
   locked: 'workbench-badge',
+}
+
+/** Message key of each work category. */
+export const timeEntryCategoryKeys = {
+  design: 'timeTracking.report.category.design',
+  implementation: 'timeTracking.report.category.implementation',
+  review: 'timeTracking.report.category.review',
+  meeting: 'timeTracking.report.category.meeting',
+  management: 'timeTracking.report.category.management',
+  training: 'timeTracking.report.category.training',
+  leave: 'timeTracking.report.category.leave',
+} as const satisfies Record<TimeEntryCategory, MessageKey>
+
+/**
+ * Names what an entry was spent on: its Work Item, or its work category for indirect work.
+ *
+ * @param t - Translator.
+ * @param entry - Entry to describe.
+ * @param workItemTitles - Work Item titles keyed by identifier.
+ * @returns The Work Item title (or identifier), or an indirect-work label with the category.
+ */
+export function describeTimeEntrySubject(
+  t: TimeTrackingTranslator,
+  entry: Pick<TimeEntry, 'category' | 'workItemId'>,
+  workItemTitles: Readonly<Record<string, string>>,
+): string {
+  if (entry.workItemId !== undefined) return workItemTitles[entry.workItemId] ?? entry.workItemId
+  const category = entry.category === undefined
+    ? t('timeTracking.report.category.uncategorized')
+    : t(timeEntryCategoryKeys[entry.category])
+  return interpolate(t('timeTracking.entry.indirect'), { category })
+}
+
+/**
+ * Formats the local time range of an entry.
+ *
+ * @param formatters - Date and time formatters.
+ * @param entry - Entry to format.
+ * @returns `HH:MM–HH:MM`, or an empty string for a date-and-minutes entry whose times carry no meaning.
+ */
+export function formatTimeEntryRange(
+  formatters: TimeTrackingFormatters,
+  entry: Pick<TimeEntry, 'durationOnly' | 'endAt' | 'startAt'>,
+): string {
+  return entry.durationOnly ? '' : `${formatters.time(entry.startAt)}–${formatters.time(entry.endAt)}`
 }
 
 /**
@@ -87,4 +132,24 @@ export function createTimeTrackingFormatters(locale: Locale): TimeTrackingFormat
     time: (instant) => timeFormatter.format(new Date(instant)),
     date: (instant) => dateFormatter.format(new Date(instant)),
   }
+}
+
+/**
+ * Formats the label of a submitted version.
+ *
+ * @param t - Translator.
+ * @param formatters - Date and time formatters.
+ * @param version - Version number.
+ * @param submittedAt - ISO timestamp of the submission.
+ * @returns The status text, such as "Submitted (version 2, Nov 20 09:00)".
+ */
+export function formatWeeklyReportSubmittedStatus(
+  t: TimeTrackingTranslator,
+  formatters: TimeTrackingFormatters,
+  version: number,
+  submittedAt: string,
+): string {
+  return t('timeTracking.weeklyReport.statusSubmitted')
+    .replace('{version}', String(version))
+    .replace('{time}', `${formatters.date(submittedAt)} ${formatters.time(submittedAt)}`)
 }

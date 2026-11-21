@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { S3Client } from '@aws-sdk/client-s3'
 import type { SQSClient } from '@aws-sdk/client-sqs'
-import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
+import { createDefaultDueDateWorkItemSchedule, type WorkItemScheduleCalendarPolicy } from '@mukuroji/contracts'
 import {
   S3WorkItemImportSourceStore,
   SqsWorkItemImportQueue,
@@ -40,6 +40,24 @@ describe('durable Work Item import', () => {
     ])
     expect(JSON.stringify(fixture.queued)).not.toContain('Ship durable import')
     expect(JSON.stringify(first)).not.toContain('request-1')
+  })
+
+  test('pins the Workspace calendar when staging and keeps it when a retry reads a changed one', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-calendar')
+    const pinned: WorkItemScheduleCalendarPolicy = {
+      timeZone: 'Asia/Tokyo', workingWeekdays: ['monday', 'tuesday'], holidays: ['2026-11-23'],
+    }
+
+    const first = await stageWorkItemImport({ ...createStageRequest(jobId), defaultCalendarPolicy: pinned }, fixture)
+    const replay = await stageWorkItemImport({
+      ...createStageRequest(jobId),
+      defaultCalendarPolicy: { ...pinned, holidays: [] },
+    }, fixture)
+
+    expect(first.defaultCalendarPolicy).toEqual(pinned)
+    expect(replay.defaultCalendarPolicy).toEqual(pinned)
+    expect(fixture.execution?.defaultCalendarPolicy).toEqual(pinned)
   })
 
   test('resumes from a durable row receipt without duplicating completed rows', async () => {

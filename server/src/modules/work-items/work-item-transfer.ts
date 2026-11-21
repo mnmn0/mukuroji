@@ -5,8 +5,10 @@ import {
   type CustomFieldValue,
   type WorkItemPriority,
   type WorkItemSchedule,
+  type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import {
+  calculateWorkItemScheduleDurationDays,
   normalizeWorkItemSchedule,
   WorkItemScheduleError,
 } from './domain/work-item-schedule'
@@ -116,11 +118,21 @@ const supportedTargetFields = new Set([
   'priority',
 ])
 
-/** CSV/JSON text を mapping し、書き込みを行わず canonical input を検証します。 */
+/**
+ * CSV/JSON text を mapping し、書き込みを行わず canonical input を検証します。
+ *
+ * @param format - Source format.
+ * @param data - Source text.
+ * @param mapping - Source column to Work Item field mapping.
+ * @param defaultCalendarPolicy - Workspace working calendar for a row whose schedule leaves out its
+ *   calendar policy; without it such a row is rejected.
+ * @returns Mapped rows with their errors.
+ */
 export function previewWorkItemImport(
   format: WorkItemTransferFormat,
   data: string,
   mapping: readonly WorkItemTransferMapping[],
+  defaultCalendarPolicy?: WorkItemScheduleCalendarPolicy,
 ): WorkItemTransferPreview {
   validateImportSize(data)
   const normalizedMapping = normalizeMapping(mapping)
@@ -134,7 +146,8 @@ export function previewWorkItemImport(
     )
   }
 
-  const rows = sourceRows.map((source, index) => mapImportRow(source, index + 1, normalizedMapping))
+  const rows = sourceRows.map((source, index) =>
+    mapImportRow(source, index + 1, normalizedMapping, defaultCalendarPolicy))
   const errors = rows.flatMap((row) => row.errors)
   return {
     totalRows: rows.length,
@@ -328,6 +341,7 @@ function mapImportRow(
   source: Record<string, unknown>,
   row: number,
   mapping: ReadonlyMap<string, WorkItemTransferMapping>,
+  defaultCalendarPolicy: WorkItemScheduleCalendarPolicy | undefined,
 ): WorkItemTransferPreviewRow {
   const errors: WorkItemTransferRowError[] = []
   const values = new Map<string, unknown>()
@@ -351,7 +365,7 @@ function mapImportRow(
     'assigneeUserId',
     errors,
   )
-  const schedule = readImportSchedule(read('schedule'), row, errors)
+  const schedule = readImportSchedule(read('schedule'), row, errors, defaultCalendarPolicy)
   const priority = readPriority(read('priority'), row, errors)
   const description = readOptionalImportString(read('description'), row, 'description', errors)
   const assignedProjectId = readOptionalImportString(
@@ -520,15 +534,20 @@ function readOptionalImportString(
  *
  * CSV cells carry the schedule as JSON text, while JSON imports may provide the object directly.
  *
+ * A schedule without `calendarPolicy` takes the Workspace working calendar when one is given, and a
+ * date range without `durationDays` then gets the working dates of its range.
+ *
  * @param value - Imported schedule object or JSON text.
  * @param row - One-based data row number.
  * @param errors - Mutable row error collection.
+ * @param defaultCalendarPolicy - Workspace working calendar for a schedule without a policy.
  * @returns A canonical schedule, or undefined after recording an error.
  */
 function readImportSchedule(
   value: unknown,
   row: number,
   errors: WorkItemTransferRowError[],
+  defaultCalendarPolicy: WorkItemScheduleCalendarPolicy | undefined,
 ): WorkItemSchedule | undefined {
   if (isEmptyImportValue(value)) {
     if (!errors.some((error) => error.field === 'schedule')) {
@@ -552,7 +571,11 @@ function readImportSchedule(
   }
 
   try {
-    return normalizeWorkItemSchedule(candidate)
+    return normalizeWorkItemSchedule(
+      defaultCalendarPolicy === undefined
+        ? candidate
+        : withImportCalendarPolicy(candidate, defaultCalendarPolicy),
+    )
   } catch (error) {
     const message = error instanceof WorkItemScheduleError
       ? error.message
@@ -564,6 +587,38 @@ function readImportSchedule(
       message,
     })
     return undefined
+  }
+}
+
+/**
+ * Gives an imported schedule the Workspace working calendar when it has no calendar policy.
+ *
+ * @param candidate - Parsed schedule value, still untrusted.
+ * @param defaultCalendarPolicy - Workspace working calendar.
+ * @returns The value with a policy and, for a date range, a duration; other values unchanged so
+ *   canonical validation reports them.
+ */
+function withImportCalendarPolicy(
+  candidate: unknown,
+  defaultCalendarPolicy: WorkItemScheduleCalendarPolicy,
+): unknown {
+  if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)) return candidate
+  if (Reflect.get(candidate, 'calendarPolicy') !== undefined) return candidate
+  const startDate: unknown = Reflect.get(candidate, 'startDate')
+  const endDate: unknown = Reflect.get(candidate, 'endDate')
+  const durationDays: unknown = Reflect.get(candidate, 'durationDays')
+  const completed = { ...candidate, calendarPolicy: structuredClone(defaultCalendarPolicy) }
+  if (
+    Reflect.get(candidate, 'mode') !== 'date-range' ||
+    durationDays !== undefined ||
+    typeof startDate !== 'string' ||
+    typeof endDate !== 'string'
+  ) {
+    return completed
+  }
+  return {
+    ...completed,
+    durationDays: calculateWorkItemScheduleDurationDays(startDate, endDate, defaultCalendarPolicy),
   }
 }
 

@@ -1,5 +1,5 @@
 import type { WorkflowDefinition } from './work-item-configuration'
-import type { WorkItemSchedule } from './work-items'
+import type { WorkItemSchedule, WorkItemScheduleCalendarPolicy } from './work-items'
 
 /** Automation domain の現在の schema version です。 */
 export const AUTOMATION_SCHEMA_VERSION = 1 as const
@@ -549,6 +549,11 @@ export type AutomationTemplateApplication = {
   kind: 'project' | 'workflow'
   /** 適用先です。 */
   target: AutomationTemplateApplicationTarget
+  /**
+   * Project template の WBS を数える Workspace 稼働カレンダーです。予約時に固定し、再試行でも
+   * 同じ値を使います。これを持たない application は既定の policy を使います。
+   */
+  calendarPolicy?: WorkItemScheduleCalendarPolicy
   /** Application 状態です。 */
   status: 'pending' | 'running' | 'succeeded' | 'failed'
   /** Application の optimistic revision です。 */
