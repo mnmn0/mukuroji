@@ -259,7 +259,7 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 
 ### 週報の督促
 
-週報（ADR 0030）を出していない人に、週に 1 回 `weekly-report.submission-reminder` が届きます。出さないまま週が明けると、その人が書いている Project の manager に `weekly-report.submission-escalation` が届きます（ADR 0033）。
+週報（ADR 0030）を出していない人に、週に 1 回 `weekly-report.submission-reminder` が届きます。出さないまま週が明けると、その人が書いている Project の manager に `weekly-report.submission-escalation` が届きます（ADR 0035）。
 
 - 時刻は Workspace ごとの設定で、tenant profile の `weeklyReportReminders`（`enabled`・`reminder`・`escalationEnabled`・`escalation`、時刻は `{ weekday: 0〜6, hour: 0〜23 }`）に保存します。**設定** → **Workspace 管理** → **テナント管理** で、`PATCH /api/tenant/profile`（owner / admin、Enterprise では `workspace.manage`、`expectedRevision` の比較つき）から変えます。保存していない Workspace は既定（本人へ金曜 17 時、manager へ月曜 10 時）です。時刻は日本時間（`Asia/Tokyo`）で読みます。schedule は 1 時間ごとで、毎回 Workspace ごとに tenant profile を読み、その時の実行で 1 回だけ作ります。失敗した回は送りません。本人への督促を止めると manager への通知も止まります。両方を有効にして同じ曜日・時刻にはできません（`400 InvalidWeeklyReportReminderSettings`）
 - 対象の週は、督促の日を含む Workspace の週（tenant profile の calendar の `weekStartDay`、未設定なら月曜始まり）です。manager への通知は、直近の督促の日を含む週について出します（既定では金曜を含む週）

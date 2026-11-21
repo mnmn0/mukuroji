@@ -23,7 +23,7 @@ test('derives isolated metric identities from AppConfig application and profile 
   )).toBeUndefined()
 })
 
-test('emits aggregate and per-surface runtime-control EMF dimensions', () => {
+test('emits runtime-control EMF metrics with only the aggregate dimension set', () => {
   const records: string[] = []
   const record = createRuntimeControlObservationRecorder(
     { controlId: 'stack:runtime-controls' },
@@ -49,7 +49,6 @@ test('emits aggregate and per-surface runtime-control EMF dimensions', () => {
         Namespace: 'Mukuroji/RuntimeControl',
         Dimensions: [
           ['Service', 'ControlId'],
-          ['Service', 'ControlId', 'Surface'],
         ],
         Metrics: [
           { Name: 'BlockedCount', Unit: 'Count' },

@@ -1,4 +1,4 @@
-# 0033. 週報の未提出を、工数の督促と同じ通知 schedule と projection の fence で知らせる
+# 0035. 週報の未提出を、工数の督促と同じ通知 schedule と projection の fence で知らせる
 
 - 状態: 提案
 - 日付: 2026-11-21
