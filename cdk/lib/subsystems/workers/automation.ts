@@ -18,6 +18,7 @@ import {
   type RuntimeControlResources,
 } from '../runtime-controls';
 import type { ScheduledJobGrant } from './scheduled-jobs';
+import { skipRuntimeControlAuditEvents } from './audit-stream-filters';
 
 /**
  * Inputs required by automation event and schedule workers.
@@ -143,6 +144,7 @@ export function buildAutomationWorkers(
       retryAttempts: 3,
       reportBatchItemFailures: true,
       onFailure: new lambdaEventSources.SqsDlq(automationEventDlq),
+      filters: skipRuntimeControlAuditEvents(),
     }),
   );
   auditEventsTable.grantStreamRead(automationEventFunction);

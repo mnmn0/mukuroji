@@ -149,6 +149,35 @@ describe('GitHub deploy access template', () => {
     });
   });
 
+  test('runtime control may only add audit events to the deployment Workspace partition of the audit table', () => {
+    const audit = permissions.find((statement) => statement.Sid === 'RecordRuntimeControlAudit');
+    expect(audit?.Action).toBe('dynamodb:PutItem');
+    expect(audit?.Resource).toEqual({
+      'Fn::Sub': 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MukurojiStackName}-AuditEventsTable*',
+    });
+    expect(audit?.Condition).toEqual({
+      'ForAllValues:StringEquals': { 'dynamodb:LeadingKeys': [{ Ref: 'WorkspaceDirectoryId' }] },
+    });
+    const dynamoDbActions = permissions.filter((statement) => statement.Effect === 'Allow').flatMap(actions)
+      .filter((action) => action.startsWith('dynamodb:'));
+    expect(dynamoDbActions).toEqual(['dynamodb:GetItem', 'dynamodb:PutItem']);
+  });
+
+  test('runtime control may read only the record payload of the deployment Workspace governance', () => {
+    const read = permissions.find((statement) => statement.Sid === 'ReadWorkspaceAuditRetention');
+    expect(read?.Action).toBe('dynamodb:GetItem');
+    expect(read?.Resource).toEqual({
+      'Fn::Sub': 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MukurojiStackName}-TenantAdministrationTable*',
+    });
+    expect(read?.Condition).toEqual({
+      'ForAllValues:StringEquals': {
+        'dynamodb:LeadingKeys': [{ Ref: 'WorkspaceDirectoryId' }],
+        'dynamodb:Attributes': ['workspaceId', 'recordKey', 'payload'],
+      },
+      StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+    });
+  });
+
   test('alarm topics accept publishes only from CloudWatch alarms in this account', () => {
     const topicPolicy = statements(at('Resources', 'AlarmTopicPolicy', 'Properties', 'PolicyDocument', 'Statement'));
     const allow = topicPolicy.find((statement) => statement.Effect === 'Allow');
