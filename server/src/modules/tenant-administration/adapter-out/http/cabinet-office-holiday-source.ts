@@ -34,6 +34,12 @@ export function createCabinetOfficeHolidaySource(
   }
   const fetcher = options.fetcher ?? ((target: URL, init: RequestInit) => fetch(target, init))
   return {
+    /**
+     * Downloads the CSV.
+     *
+     * @returns The body bytes.
+     * @throws Error when the source answers an error status or the body is too large.
+     */
     async fetch() {
       const response = await fetcher(url, {
         redirect: 'error',
@@ -48,6 +54,12 @@ export function createCabinetOfficeHolidaySource(
       }
       return await readCappedBody(response)
     },
+    /**
+     * Decodes the Shift_JIS CSV, rejecting bytes that are not valid Shift_JIS.
+     *
+     * @param bytes - Body bytes.
+     * @returns The CSV text.
+     */
     decode(bytes) {
       return new TextDecoder('shift_jis', { fatal: true }).decode(bytes)
     },

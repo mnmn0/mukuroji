@@ -125,6 +125,11 @@ export function createJapanesePublicHolidayDates(
 ): JapanesePublicHolidayDates {
   let cached: { dates: string[]; readAt: number } | undefined
   let pending: Promise<string[]> | undefined
+  /**
+   * Lists the bundled national holiday dates.
+   *
+   * @returns The bundled dates.
+   */
   const bundled = () => listJapanesePublicHolidays().map((holiday) => holiday.date)
 
   /**
@@ -152,6 +157,11 @@ export function createJapanesePublicHolidayDates(
   }
 
   return {
+    /**
+     * Lists the national holiday dates, reading the store when the cached read has expired.
+     *
+     * @returns A copy of the dates.
+     */
     async listDates() {
       if (cached && options.now() - cached.readAt < options.cacheMilliseconds) return [...cached.dates]
       pending ??= read().finally(() => {

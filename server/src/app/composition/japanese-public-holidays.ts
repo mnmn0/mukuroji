@@ -38,6 +38,11 @@ export function createProductionJapanesePublicHolidayDates(): JapanesePublicHoli
     store: createProductionJapanesePublicHolidayStore(),
     cacheMilliseconds: NATIONAL_HOLIDAY_CACHE_MILLISECONDS,
     now: () => Date.now(),
+    /**
+     * Logs a failed read without the stored data.
+     *
+     * @param error - Failure of the store read.
+     */
     logError(error) {
       console.error(JSON.stringify({
         message: 'Japanese national holidays could not be read; using the previous or bundled list',

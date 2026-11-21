@@ -1641,6 +1641,14 @@ export function createTestAppDependencies(): AppDependencies {
   // Work Item creation reads the Workspace working calendar; tests without a tenant table read it
   // as never saved, which gives the default calendar.
   const tenantAdministration = new Proxy(production.workspace.tenantAdministration, {
+    /**
+     * Answers `getProfile` as never saved and forwards every other member.
+     *
+     * @param target - Production tenant administration client.
+     * @param property - Member being read.
+     * @param receiver - Proxy the member is read through.
+     * @returns The member to use.
+     */
     get(target, property, receiver) {
       if (property === 'getProfile') {
         return async () => undefined
