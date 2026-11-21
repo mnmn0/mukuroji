@@ -4,7 +4,7 @@ import './index.css'
 import App from './app/App'
 import { startAppServiceWorker } from './app/pwa/appServiceWorker'
 import { installAuthSessionFetch } from './auth/sessionRefresh'
-import { installAppMaintenanceObserver } from './app/maintenance/useMaintenanceStatus'
+import { installAppMaintenanceObserver } from './app/maintenance/maintenanceObserver'
 import { startAppInstallPrompt } from './shared/lib/pwa/installPrompt'
 import {
   applyFontSizePreference,

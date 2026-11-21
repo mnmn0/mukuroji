@@ -28,6 +28,8 @@ export const READ_ONLY_POST_ROUTES: readonly string[] = Object.freeze([
   '/api/auth/sso/start',
   '/api/auth/sso/exchange',
   '/api/analytics/query',
+  '/api/analytics/evidence',
+  '/api/analytics/export',
   '/api/bulk-operations/preview',
   '/api/teams/:teamId/issues/:issueId/schedule/preview',
   '/api/teams/:teamId/issues/:issueId/work-item-type-preview',

@@ -12,12 +12,13 @@ import { resolveApiBaseUrl, type ApiBaseUrlScope } from './apiBaseUrl'
  */
 export type MaintenanceNoticeState = 'none' | 'read-only' | 'stopped'
 
-/** Maintenance state of one API, as the SWR cache holds it. */
+/** Maintenance state of one API while it is in maintenance. */
+export type ApiMaintenanceState = 'read-only' | 'stopped'
+
+/** Maintenance states of the APIs that reported one, as the SWR cache holds them. */
 export type MaintenanceStatus = {
-  /** State to show. */
-  readonly state: MaintenanceNoticeState
-  /** Absolute API base URL that reported the state; its status endpoint is the one to poll. */
-  readonly apiBaseUrl?: string
+  /** State of each API in maintenance, keyed by its absolute base URL. */
+  readonly apis: Readonly<Record<string, ApiMaintenanceState>>
 }
 
 /**
@@ -36,7 +37,7 @@ export type MaintenanceObservation = {
 }
 
 /** Status shown before any API answered. */
-export const normalMaintenanceStatus: MaintenanceStatus = Object.freeze({ state: 'none' })
+export const normalMaintenanceStatus: MaintenanceStatus = Object.freeze({ apis: Object.freeze({}) })
 
 /**
  * API paths whose answers never carry the maintenance header: liveness and readiness skip the
@@ -102,10 +103,32 @@ export function readMaintenanceObservation(
 }
 
 /**
+ * Returns a status with one API's state replaced.
+ *
+ * @param status - Current status.
+ * @param apiBaseUrl - Absolute API base URL.
+ * @param state - New state of that API; `none` removes it.
+ * @returns The next status, or the same object when nothing changed.
+ */
+export function setApiMaintenanceState(
+  status: MaintenanceStatus,
+  apiBaseUrl: string,
+  state: MaintenanceNoticeState,
+): MaintenanceStatus {
+  if ((status.apis[apiBaseUrl] ?? 'none') === state) return status
+  const apis: Record<string, ApiMaintenanceState> = {}
+  for (const [base, value] of Object.entries(status.apis)) {
+    if (base !== apiBaseUrl) apis[base] = value
+  }
+  if (state !== 'none') apis[apiBaseUrl] = state
+  return { apis }
+}
+
+/**
  * Applies an observation to the cached status.
  *
- * A `clear` only ends the maintenance that the same API reported, so an unrelated API cannot
- * hide another API's maintenance.
+ * Each API keeps its own state, so one API returning to normal cannot hide another API's
+ * maintenance.
  *
  * @param current - Cached status.
  * @param observation - What a response said.
@@ -115,9 +138,19 @@ export function applyMaintenanceObservation(
   current: MaintenanceStatus | undefined,
   observation: MaintenanceObservation,
 ): MaintenanceStatus {
-  const status = current ?? normalMaintenanceStatus
-  if (observation.kind === 'report') return { state: observation.state, apiBaseUrl: observation.apiBaseUrl }
-  return status.apiBaseUrl === observation.apiBaseUrl ? { state: 'none' } : status
+  return setApiMaintenanceState(current ?? normalMaintenanceStatus, observation.apiBaseUrl, observation.state)
+}
+
+/**
+ * Summarizes the status into the one state to show; a stopped API outweighs a read-only one.
+ *
+ * @param status - Cached status.
+ * @returns The state to show.
+ */
+export function summarizeMaintenanceState(status: MaintenanceStatus): MaintenanceNoticeState {
+  const states = Object.values(status.apis)
+  if (states.includes('stopped')) return 'stopped'
+  return states.includes('read-only') ? 'read-only' : 'none'
 }
 
 /**
@@ -125,21 +158,46 @@ export function applyMaintenanceObservation(
  *
  * @param apiBaseUrl - Absolute API base URL.
  * @param send - `fetch` to use.
- * @returns The status to show. An outage counts as `none`.
- * @throws When the request fails or the answer is unreadable, so SWR keeps the cached status.
+ * @returns The state of that API. An outage counts as `none`.
+ * @throws When the request fails or the answer is unreadable, so the cached state stays.
  */
-export async function fetchMaintenanceStatus(
+export async function fetchMaintenanceState(
   apiBaseUrl: string,
   send: typeof fetch,
-): Promise<MaintenanceStatus> {
+): Promise<MaintenanceNoticeState> {
   const response = await send(`${apiBaseUrl}${MAINTENANCE_STATUS_PATH}`, { cache: 'no-store' })
   if (!response.ok) throw new Error(`Maintenance status answered ${response.status}.`)
   const body: unknown = await response.json()
   const reported = typeof body === 'object' && body !== null && 'state' in body ? body.state : undefined
   if (!isMaintenanceState(reported)) throw new Error('Maintenance status is unreadable.')
-  return reported === 'read-only' || reported === 'stopped'
-    ? { state: reported, apiBaseUrl }
-    : { state: 'none' }
+  return reported === 'read-only' || reported === 'stopped' ? reported : 'none'
+}
+
+/**
+ * Asks every API in maintenance for its state.
+ *
+ * @param status - Cached status.
+ * @param send - `fetch` to use.
+ * @returns The refreshed status. An API that could not be asked keeps its cached state.
+ */
+export async function refreshMaintenanceStatus(
+  status: MaintenanceStatus,
+  send: typeof fetch,
+): Promise<MaintenanceStatus> {
+  const bases = Object.keys(status.apis)
+  const answers = await Promise.all(bases.map(async (base) => {
+    try {
+      return await fetchMaintenanceState(base, send)
+    } catch {
+      return undefined
+    }
+  }))
+  let next = status
+  bases.forEach((base, index) => {
+    const answer = answers[index]
+    if (answer !== undefined) next = setApiMaintenanceState(next, base, answer)
+  })
+  return next
 }
 
 /**

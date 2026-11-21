@@ -3,9 +3,11 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { MaintenanceBanner } from '../src/app/maintenance/MaintenanceNotice'
 import {
   applyMaintenanceObservation,
-  fetchMaintenanceStatus,
+  fetchMaintenanceState,
   installMaintenanceFetchObserver,
   readMaintenanceObservation,
+  refreshMaintenanceStatus,
+  summarizeMaintenanceState,
   type MaintenanceObservation,
 } from '../src/shared/api/maintenance'
 
@@ -49,26 +51,39 @@ describe('readMaintenanceObservation', () => {
 })
 
 describe('applyMaintenanceObservation', () => {
-  test('lets only the reporting API end its maintenance', () => {
-    const reported = applyMaintenanceObservation(undefined, { kind: 'report', state: 'read-only', apiBaseUrl: workspaceApi })
-    expect(reported).toEqual({ state: 'read-only', apiBaseUrl: workspaceApi })
-    expect(applyMaintenanceObservation(reported, { kind: 'clear', state: 'none', apiBaseUrl: sharedApi })).toBe(reported)
-    expect(applyMaintenanceObservation(reported, { kind: 'clear', state: 'none', apiBaseUrl: workspaceApi })).toEqual({ state: 'none' })
+  test('keeps each API in maintenance until that API recovers', () => {
+    const stopped = applyMaintenanceObservation(undefined, { kind: 'report', state: 'stopped', apiBaseUrl: workspaceApi })
+    const both = applyMaintenanceObservation(stopped, { kind: 'report', state: 'read-only', apiBaseUrl: sharedApi })
+    expect(summarizeMaintenanceState(both)).toBe('stopped')
+    const sharedBack = applyMaintenanceObservation(both, { kind: 'clear', state: 'none', apiBaseUrl: sharedApi })
+    expect(sharedBack).toEqual({ apis: { [workspaceApi]: 'stopped' } })
+    expect(summarizeMaintenanceState(sharedBack)).toBe('stopped')
+    const allBack = applyMaintenanceObservation(sharedBack, { kind: 'clear', state: 'none', apiBaseUrl: workspaceApi })
+    expect(summarizeMaintenanceState(allBack)).toBe('none')
+    // A clear from an API that was never in maintenance changes nothing.
+    expect(applyMaintenanceObservation(allBack, { kind: 'clear', state: 'none', apiBaseUrl: sharedApi })).toBe(allBack)
   })
 })
 
-describe('fetchMaintenanceStatus', () => {
-  test('asks the reporting API and treats an outage as no maintenance', async () => {
+describe('refreshMaintenanceStatus', () => {
+  test('asks every API in maintenance and keeps a state it could not refresh', async () => {
     const requested: string[] = []
-    const answers = [{ state: 'stopped' }, { state: 'unavailable' }, { state: 'paused' }]
     const send: typeof fetch = async (input) => {
-      requested.push(String(input))
-      return Response.json(answers.shift())
+      const url = String(input)
+      requested.push(url)
+      if (url.startsWith(workspaceApi)) return new Response(null, { status: 502 })
+      return Response.json({ state: 'unavailable' })
     }
-    expect(await fetchMaintenanceStatus(workspaceApi, send)).toEqual({ state: 'stopped', apiBaseUrl: workspaceApi })
-    expect(await fetchMaintenanceStatus(workspaceApi, send)).toEqual({ state: 'none' })
-    await expect(fetchMaintenanceStatus(workspaceApi, send)).rejects.toThrow('unreadable')
-    expect(requested[0]).toBe(`${workspaceApi}/maintenance`)
+    const status = { apis: { [sharedApi]: 'read-only', [workspaceApi]: 'stopped' } } as const
+    expect(await refreshMaintenanceStatus(status, send)).toEqual({ apis: { [workspaceApi]: 'stopped' } })
+    expect(requested.sort()).toEqual([`${sharedApi}/maintenance`, `${workspaceApi}/maintenance`])
+  })
+
+  test('reads each reported state', async () => {
+    const answers = [{ state: 'stopped' }, { state: 'paused' }]
+    const send: typeof fetch = async () => Response.json(answers.shift())
+    expect(await fetchMaintenanceState(workspaceApi, send)).toBe('stopped')
+    await expect(fetchMaintenanceState(workspaceApi, send)).rejects.toThrow('unreadable')
   })
 })
 

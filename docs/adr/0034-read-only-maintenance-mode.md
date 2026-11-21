@@ -17,7 +17,8 @@ AppConfig の runtime control は `enabled` / `disabled` の 2 値で、本番 m
 - `read-only` のとき API の runtime-control middleware（authentication・route より前）は次だけを通す。
   - `GET` と `HEAD`。
   - `server/src/app/middleware/read-only-request-registry.ts` に列挙した `POST`（sign-in、MFA challenge、
-    token の更新、logout、SSO の開始と交換、Analytics query、各 preview）。照合には Hono の `TrieRouter` を使い、
+    token の更新、logout、SSO の開始と交換、Analytics の query・evidence・export、各 preview。Update feed digest の
+    preview は配信 receipt を書くので含めない）。照合には Hono の `TrieRouter` を使い、
     route と同じ path 規則で一致させる。
 - それ以外の method と列挙していない `POST` は、`503`、`Retry-After: 15`、problem `code`
   `maintenance_read_only` で断る。新しい変更 route は一覧に足さなくても断られる（fail closed）。
@@ -30,8 +31,8 @@ AppConfig の runtime control は `enabled` / `disabled` の 2 値で、本番 m
 - `GET /api/maintenance` を middleware の中で認証なしに答え、`none` / `read-only` / `stopped` / `unavailable`
   を返す。Web と operator script が使う。値は `contracts/src/maintenance.ts` が所有する。
 - Web は `fetch` を包んで header から状態を知り、SWR の cache（`app/maintenance-status`）に置いて画面上部に
-  バナーを出す。表示中は maintenance を報告した API の `/api/maintenance` を 30 秒ごとに読み、終われば消す。
-  別の API の通常応答では消さない。保存に失敗した画面は入力を消さずに残すので（session 切れの 503 と同じ扱い）、バナーで
+  バナーを出す。状態は API の base URL ごとに持ち、maintenance 中の各 API の `/api/maintenance` を 30 秒ごとに読む。
+  ある API が戻っても、別の API の maintenance は表示し続ける。保存に失敗した画面は入力を消さずに残すので（session 切れの 503 と同じ扱い）、バナーで
   「再読み込みせず待つ」よう案内する。
 
 ## 検討した選択肢

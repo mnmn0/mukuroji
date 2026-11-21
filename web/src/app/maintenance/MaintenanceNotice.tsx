@@ -6,7 +6,7 @@ import {
   type Locale,
 } from '../../shared/i18n/i18n'
 import type { MaintenanceNoticeState } from '../../shared/api/maintenance'
-import { useMaintenanceStatus } from './useMaintenanceStatus'
+import { useMaintenanceStatus } from './queries/useMaintenanceStatus'
 import { announce } from '../../shared/lib/liveAnnouncements'
 
 /**
@@ -30,7 +30,7 @@ export type MaintenanceBannerProps = {
  * @returns The maintenance banner, or nothing while the service runs normally.
  */
 export function MaintenanceNotice() {
-  const { state } = useMaintenanceStatus()
+  const state = useMaintenanceStatus()
   return <MaintenanceBanner state={state} />
 }
 
