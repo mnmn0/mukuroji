@@ -303,6 +303,9 @@ Provider未呼び出しが確定した失敗はprovider outcomeを持たない�
 EMFの`refusalReason`はboundedな`content-filter`だけを許可します。Human rejectは別の
 `DecisionRejectedCount`であり、model refusalへ混在させません。
 
+次の表と上の`AiAssistanceObservabilityDlqAlarm`の計10個は、AIを設定したstack（`AiAssistanceConfigured`）にだけ作ります。
+AI未設定のstackにはこれらのalarmがありません。
+
 | Alarm | 条件 | Severity | 解釈 | Content-free evidence |
 | --- | --- | --- | --- | --- |
 | `AiAssistanceProviderFailureAlarm` | `ProviderFailureCount Sum >= 1` / 5分 | SEV2 | Durable finalizationされたprovider attemptが成功以外で終了した。throttle、timeout、model refusal、invalid outputを含み、専用metricとも重複する | Alarm history、UTC window、`Service` / `Task` / `Outcome` / `Model`、`failureCategory`、`failureCode`、bounded `refusalReason`、token/costの有無、latency。Promptや生成本文は保存しない |
