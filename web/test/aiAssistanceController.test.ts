@@ -47,6 +47,14 @@ describe('AI assistance controller safety', () => {
     })
     expect(classifyAiAssistanceError(new AiAssistanceApiError(
       400,
+      'missing key',
+      'AiAssistanceProviderCredentialMissing',
+    ))).toEqual({
+      code: 'AiAssistanceProviderCredentialMissing',
+      kind: 'provider-key',
+    })
+    expect(classifyAiAssistanceError(new AiAssistanceApiError(
+      400,
       'invalid provider output',
       'InvalidAiAssistanceOutput',
     ))).toEqual({

@@ -1,4 +1,8 @@
-import type { EnterpriseIdentityProvider, TriageEntry } from '@mukuroji/contracts'
+import type {
+  AiAssistanceAvailableModel,
+  EnterpriseIdentityProvider,
+  TriageEntry,
+} from '@mukuroji/contracts'
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import type { AnalyticsRepository } from '../../modules/analytics/analytics'
 import type {
@@ -8,7 +12,10 @@ import type {
 } from '../../modules/audit/audit'
 import type { CognitoClient } from '../../modules/authentication'
 import type { CustomerClient } from '../../modules/customers'
-import type { AiAssistanceService } from '../../modules/ai-assistance'
+import type {
+  AiAssistanceService,
+  AiProviderCredentialService,
+} from '../../modules/ai-assistance'
 import type {
   AutomationBulkOperationPort,
   AutomationExecutionServicePort,
@@ -288,6 +295,10 @@ export interface CapacityPlanningDependencies {
 export interface AiAssistanceDependencies {
   /** Provides policy, generation, review, and feedback application use cases. */
   aiAssistanceService: AiAssistanceService
+  /** Manages Workspace API keys for external AI providers. */
+  aiProviderCredentialService?: AiProviderCredentialService
+  /** Reads the deployment models a Workspace policy may allow. */
+  getAiAssistanceAvailableModels?(): readonly AiAssistanceAvailableModel[]
 }
 
 /** Operational dependencies required by system routes. */
