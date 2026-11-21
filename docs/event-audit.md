@@ -121,7 +121,7 @@ operator が `bun run runtime-control:*`（GitHub Actions の deploy workflow �
 絞っており、`runtimeControl` はその対象（secret や tenant の data を含まない）。同じ実行の event は `correlationId`
 `runtime-control:<switchId>` を共有する。operator の通知・自動化の対象ではないので `outboxStatus=suppressed` で書き、AuditEvents stream の consumer
 （audit projection、automation worker）は event source の filter でこの `entityType` を受け取らない。保持期限は書く前に
-script が Workspace の governance（保持日数・legal hold）を読んで付ける。`changes` の before は最新の `COMPLETE`
+script が Workspace の governance（保持日数・legal hold）を読んで付ける。governance を読めないまま続けた `disable` の event には TTL を付けない。`changes` の before は最新の `COMPLETE`
 deployment の mode で、分からないときは省く。
 開始の記録に失敗した場合、`enable` と `read-only` は何も変えずに止まり、`disable` は止める操作を優先して警告だけ出す。
 完了・失敗の記録に失敗した場合は警告だけ出す（切り替え自体は済んでいるため）。

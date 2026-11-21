@@ -567,11 +567,15 @@ export async function runRuntimeControl(
   const record = (step: RuntimeControlAuditStep): Promise<void> =>
     recordAuditEvent(audit, change, step, region, dependencies)
 
+  let retentionKnown = false
   try {
     audit = await readWorkspaceRetention(target, region, dependencies)
+    retentionKnown = true
     await record({ phase: 'started', occurredAt: dependencies.now() })
   } catch (error) {
     if (!(error instanceof RuntimeControlError)) throw error
+    // Without the Workspace policy a legal hold may be active, so the stop writes its events without a TTL.
+    if (!retentionKnown) audit = { ...target.audit, legalHold: true }
     // A stop must not wait for the audit table: the incident may be the reason to stop.
     if (request.mode !== 'disabled') {
       throw new RuntimeControlError(`${error.message}\nNothing was changed. Fix the audit write and run the command again.`)

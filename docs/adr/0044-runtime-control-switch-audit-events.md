@@ -31,7 +31,8 @@ Workspace の監査 event に載せないと決めたが、runtime control の�
   （失敗後の再実行は同じ revision を使い得るため）。
 - 保持期限は書く前に script が Workspace の governance（tenant administration table の `GOVERNANCE` row）を強整合で読み、
   legal hold なら TTL を付けず、そうでなければ `auditRetentionDays` から計算する。governance がない Workspace は
-  stack parameter `AuditRetentionDays` を使う。通知・自動化の対象ではないので `outboxStatus=suppressed` で書く。
+  stack parameter `AuditRetentionDays` を使う。governance を読めないまま続ける `disable` は、legal hold 中かもしれないので
+  TTL を付けずに書く。通知・自動化の対象ではないので `outboxStatus=suppressed` で書く。
 - 停止・read-only の完了 event は worker が止まっている間に書くので、AuditEvents stream の 2 つの consumer
   （audit projection と automation worker）には届けない。event source mapping の filter で `entityType=runtime-control`
   の record を落とす（`entityType` のない record は従来どおり届ける）。届けると、止まった consumer が retry を使い切って

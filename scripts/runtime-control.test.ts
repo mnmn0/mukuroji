@@ -516,6 +516,17 @@ describe('Workspace retention and the served mode', () => {
     expect(fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(false)
   })
 
+  test('stops without a TTL on its events when the governance record cannot be read', async () => {
+    const fake = fakeDependencies({
+      readyStatuses: [503],
+      governance: JSON.stringify({ Item: { payload: { S: JSON.stringify({ legalHold: 'yes' }) } } }),
+    })
+    await runRuntimeControl({ mode: 'disabled', allAtOnce: true }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(true)
+    expect(fake.auditItems.map((item) => stringAttribute(item, 'eventType'))).toEqual(['runtime-control.change-completed'])
+    for (const item of fake.auditItems) expect(item.expiresAt).toBeUndefined()
+  })
+
   test('takes the before-value from the latest completed deployment, not the latest stored version', async () => {
     const fake = fakeDependencies({ readyStatuses: [200] })
     await runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
