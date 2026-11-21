@@ -1,6 +1,8 @@
 /** Registers tests for the CloudFront distribution that serves the Web app and API. */
 import { expect, test } from '@jest/globals';
 import { Match } from 'aws-cdk-lib/assertions';
+import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
 import {
   API_CONTENT_SECURITY_POLICY,
   buildWebContentSecurityPolicy,
@@ -442,4 +444,41 @@ test('sends a deny-all CSP and security headers with /api/* responses', () => {
   expect(API_CONTENT_SECURITY_POLICY).toBe(
     "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   );
+});
+
+/**
+ * Reads the default Web bucket name prefix of the GitHub deploy access template.
+ *
+ * @returns The `WebBucketNamePrefix` parameter default, or `undefined` when it is missing.
+ */
+function readWebBucketNamePrefix(): string | undefined {
+  const template: unknown = JSON.parse(
+    readFileSync(path.join(__dirname, '../deploy-access/github-deploy-access.template.json'), 'utf8'),
+  );
+  let value: unknown = template;
+  for (const key of ['Parameters', 'WebBucketNamePrefix', 'Default']) {
+    value = typeof value === 'object' && value !== null ? Reflect.get(value, key) : undefined;
+  }
+  return typeof value === 'string' ? value : undefined;
+}
+
+test('the GitHub deploy role may write only to the Web bucket name CloudFormation generates', () => {
+  const webBucketIds = Object.keys(synthesizedTemplate.findResources('AWS::S3::Bucket')).filter((id) =>
+    /^WebBucket[0-9A-F]{8}$/.test(id),
+  );
+  expect(webBucketIds).toHaveLength(1);
+  // CloudFormation names the bucket `<stack name>-<logical ID>-<random suffix>` in lowercase.
+  expect(readWebBucketNamePrefix()).toBe(`mukuroji-${webBucketIds[0]?.toLowerCase()}-`);
+});
+
+test('runtime-control AppConfig resources carry the tag the GitHub deploy role requires to change them', () => {
+  for (const type of ['AWS::AppConfig::Application', 'AWS::AppConfig::Environment', 'AWS::AppConfig::ConfigurationProfile']) {
+    const resources = Object.values(synthesizedTemplate.findResources(type));
+    expect(resources.length).toBeGreaterThan(0);
+    for (const resource of resources) {
+      expect(resource.Properties.Tags).toEqual(
+        expect.arrayContaining([{ Key: 'mukuroji:application', Value: 'mukuroji' }]),
+      );
+    }
+  }
 });

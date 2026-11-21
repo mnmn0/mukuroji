@@ -387,6 +387,12 @@ environment evidenceに残すまで、上記ack targetは実効性を持ちま�
 
 ## Deploy と rollback
 
+本番への deploy は GitHub Actions の `production` Environment（`main` 限定、required reviewer の承認）から、
+OIDC で引き受ける `mukuroji-github-deploy` role で行います。手順、手動の operation、job summary に残る証跡は
+[`cdk/README.md` の GitHub Actions から deploy する](../cdk/README.md#github-actions-から-deploy-する) を参照してください。
+下の gate のうち 1（commit と parameter の固定）と 4（revision の更新）は `scripts/github-deploy.ts` が行い、
+post-deploy では `/api/health` の `applicationCommitSha` が deploy した commit と一致するまで待ちます。
+
 ### Pre-deploy gate
 
 1. Deploy commit OID、build artifact digest、target account/region/stack/parameters を固定する。
