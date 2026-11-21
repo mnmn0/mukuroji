@@ -2230,7 +2230,21 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
-   * DynamoDB にチーム配下のプロジェクトを作成します。
+   * Creates a Project under an active Team, with its creator as manager, in one transaction.
+   *
+   * The Project ID is reserved across every Team of the Workspace. A generated ID that another
+   * Team reserved first is replaced with a fresh one, up to three attempts. A fixed
+   * `idempotencyResourceId` is never replaced: when a Project with that ID and the same input
+   * already exists it is returned (after committing `completionTransactItems` against it), and any
+   * other reservation conflict fails with 409.
+   *
+   * @param directoryId - Workspace directory ID.
+   * @param teamId - Team that owns the new Project.
+   * @param input - Names, tone, lifecycle state, and optional fixed ID.
+   * @param creator - Creator member key and the Workspace member version it was authorized with.
+   * @param auditContext - Audit metadata written in the same transaction.
+   * @param completionTransactItems - Caller writes committed atomically with the creation or replay.
+   * @returns The created or replayed Project.
    */
   async createProject(
     directoryId: string,
@@ -2262,10 +2276,9 @@ export class DynamoDbProjectDirectoryClient {
     try {
       const unavailableProjectIds = new Set<string>()
       for (let attempt = 1; ; attempt += 1) {
-        const items = await this.readValidDirectoryItems(
-          directoryId,
-          Boolean(idempotencyResourceId) || attempt > 1,
-        )
+        // Strongly consistent so an ID committed before this read, which may predate reservation
+        // rows, is never offered again.
+        const items = await this.readValidDirectoryItems(directoryId, true)
         const team = items.find((item): item is ProjectDirectoryTeamItem =>
           item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
         )

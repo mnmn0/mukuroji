@@ -44,7 +44,12 @@ Project の ID は作成時に名前から作る（ASCII の名前なら slug、
 
 ## 結果
 
-- 同じ ID の Project が 2 つ commit されることはなくなる。同時に作った片方は `web-2` のような別の ID になる。
+- 全ての API がこの版で Project を作る限り、同じ ID の Project が 2 つ commit されることはなくなる。同時に作った
+  片方は `web-2` のような別の ID になる。予約 row を書かない前の版が同時に動く間は保証できない。今は deploy 済みの
+  環境がないのでその期間はない。将来この版より前へ rollback する場合は、戻している間に別 Team で同名の
+  Project を作ると ID が重なりうる（メンバー・watch・通知が混ざる）。その間に作られた重複は integrity check の
+  `DUPLICATE_RECORD` で見つける。
+- 候補 ID を決める directory の読み取りは強整合にする。予約 row のない既存 Project の ID を見落とさないため。
 - Project 作成の transaction が 1 項目増える（上限 100 に対して余裕がある）。
 - 初回 deploy 前の変更なので、既存 Project の予約 row を埋める backfill は用意しない。予約 row のない
   既存 Project の ID は、作成時の snapshot で除外されるので新しい Project と重ならない。
