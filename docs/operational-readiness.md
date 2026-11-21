@@ -567,6 +567,9 @@ deployment 開始から全 runtime 停止までが15秒とは記録しません�
 record として必ず記録します。Current-enabled の allowed 評価はwarm runtime・surface・revision
 ごとに最大60秒間隔のheartbeatとして記録し、定常trafficに比例したlog取り込みを避けます。
 Recordはbounded な `surface`、`outcome`、`mode`、`status`、revision/ageを持ちます。
+Metric の dimension は `Service` と `ControlId` だけです。`surface` は record の field
+として Logs Insights で調べ、metric の dimension にはしません。heartbeat が毎分出るため、
+surface ごとの dimension は warm な surface 1 つにつき custom metric 5 個の固定費になります。
 `ControlId`はruntimeがpollするのと同じ
 AppConfig application IDとconfiguration profile IDから決定的に構成し、alarmも同じdimension
 だけを監視します。これにより別stackや同名stack再作成の直近metricを混在させません。
