@@ -1,3 +1,4 @@
+import { MAINTENANCE_STATE_HEADER } from '@mukuroji/contracts'
 import type { Context, Hono, MiddlewareHandler } from 'hono'
 import { cors } from 'hono/cors'
 import { HTTPException } from 'hono/http-exception'
@@ -168,6 +169,7 @@ export function registerCommonMiddleware(
       exposeHeaders: [
         'Idempotency-Replayed',
         'Location',
+        MAINTENANCE_STATE_HEADER,
         'X-Audit-Truncated',
         'X-Audit-Next-Cursor',
         'X-Correlation-Id',

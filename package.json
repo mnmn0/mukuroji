@@ -38,6 +38,7 @@
     "cdk:nag": "bun --filter cdk nag",
     "runtime-control:enable": "bun scripts/runtime-control.ts enable",
     "runtime-control:disable": "bun scripts/runtime-control.ts disable",
+    "runtime-control:read-only": "bun scripts/runtime-control.ts read-only",
     "runtime-control:test": "bun test scripts/runtime-control.test.ts",
     "deploy:github": "bun scripts/github-deploy.ts",
     "deploy:github:test": "bun test scripts/github-deploy.test.ts",
