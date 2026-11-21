@@ -4,10 +4,10 @@ import {
   createMutationAuditContext,
   type AuditEventV1,
 } from '../../../audit'
-import { createLocalAiProviderCredentialCipher } from '../../adapter-out/kms/kms-ai-provider-credential-cipher'
 import type { AiAssistanceActor, AiAssistancePolicyAuthorization } from '../ports/ai-assistance-ports'
 import type {
   AiProviderCredentialAuditInput,
+  AiProviderCredentialCipher,
   AiProviderCredentialStore,
   StoredAiProviderCredential,
 } from '../ports/ai-provider-credential-ports'
@@ -25,6 +25,19 @@ const manager: AiAssistanceActor = {
 const currentAuthorization: AiAssistancePolicyAuthorization = {
   isCurrent: async () => true,
   getCommitFence: async () => ({ workspaceMemberVersion: 1, workspaceRole: 'admin' }),
+}
+
+/** Reversible test cipher bound to the Workspace and provider, so a moved row cannot be read. */
+const testCipher: AiProviderCredentialCipher = {
+  async encrypt(plaintext, workspaceId, provider) {
+    return `test.${Buffer.from(`${workspaceId}|${provider}|${plaintext}`).toString('base64url')}`
+  },
+  async decrypt(ciphertext, workspaceId, provider) {
+    const decoded = Buffer.from(ciphertext.slice('test.'.length), 'base64url').toString('utf8')
+    const prefix = `${workspaceId}|${provider}|`
+    if (!decoded.startsWith(prefix)) throw new Error('context mismatch')
+    return decoded.slice(prefix.length)
+  },
 }
 
 /** In-memory store that records writes and enforces the revision fence. */
@@ -54,7 +67,7 @@ function createService(store = createStore()) {
   const auditInputs: AiProviderCredentialAuditInput[] = []
   const service = createAiProviderCredentialService({
     store,
-    cipher: createLocalAiProviderCredentialCipher(new Uint8Array(32).fill(7)),
+    cipher: testCipher,
     enabledProviders: new Set(['anthropic']),
     createAuditEvent: (input) => {
       auditInputs.push(input)
