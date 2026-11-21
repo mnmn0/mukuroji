@@ -220,7 +220,7 @@ Anthropic modelを初めて使うaccountでは、deploy前にBedrock model acces
 
 ## External providers (Claude API and OpenAI)
 
-Bedrock に加えて、Claude API（Anthropic）と OpenAI を接続先に選べます（[ADR 0034](adr/0034-ai-external-provider-workspace-keys.md)）。
+Bedrock に加えて、Claude API（Anthropic）と OpenAI を接続先に選べます（[ADR 0036](adr/0036-ai-external-provider-workspace-keys.md)）。
 
 - **Deploy switch**: `AiExternalProviders`（既定 `anthropic,openai`、空で無効）を `AI_ASSISTANCE_EXTERNAL_PROVIDERS`
   として API に渡します。未設定・空の server は外部 provider を一切読み込みません。Bedrock が未設定でも

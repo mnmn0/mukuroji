@@ -1,4 +1,4 @@
-# 0034. AI の接続先に Claude API と OpenAI を加え、API キーを Workspace ごとに KMS で暗号化して AI 用 table に置く
+# 0036. AI の接続先に Claude API と OpenAI を加え、API キーを Workspace ごとに KMS で暗号化して AI 用 table に置く
 
 - 状態: 提案
 - 日付: 2026-11-21

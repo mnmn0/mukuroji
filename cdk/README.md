@@ -122,7 +122,7 @@ SSO と AI は独立したオプションです。新規 stack では、それ�
 
 - SSO: `CognitoSsoUserPoolClientId`、`CognitoHostedUiDomain`、`CognitoSsoRedirectUri`、`CognitoEnterpriseIdpName`、`EnterpriseSsoStateSecret` の5項目をまとめて設定します。未設定時はSSO discovery/redirectと保存済みdomainのSSO強制を使わず、通常のpassword/MFA loginを使います。
 - AI: `AiBedrockModelId`、`AiBedrockModelArn`、input/outputの両token単価をまとめて設定します。現在サポートするJP profileには `AiBedrockDestinationModelArns` も必要です。未設定時は保存済みWorkspace policyにかかわらずAI操作を拒否し、Bedrock呼び出しIAM policyを作らず、AI observabilityのstream mappingを無効にします。データ保持のため既存table、queue、log、worker定義は維持します。Webの別途opt-in buildは不要です。
-- 外部 AI provider: `AiExternalProviders`（既定 `anthropic,openai`）で、Workspace 管理者が API キーを登録して使える provider を決めます。空にすると Bedrock だけになります。Bedrock が未設定でもこの値が空でなければ AI は有効になり、AI observability の stream mapping も有効です。API キーは Secrets Manager ではなく既存の `DeveloperPlatformKey` で暗号化して Workspace Search table に保存するため、固定費は増えません（[ADR 0034](../docs/adr/0034-ai-external-provider-workspace-keys.md)）。
+- 外部 AI provider: `AiExternalProviders`（既定 `anthropic,openai`）で、Workspace 管理者が API キーを登録して使える provider を決めます。空にすると Bedrock だけになります。Bedrock が未設定でもこの値が空でなければ AI は有効になり、AI observability の stream mapping も有効です。API キーは Secrets Manager ではなく既存の `DeveloperPlatformKey` で暗号化して Workspace Search table に保存するため、固定費は増えません（[ADR 0036](../docs/adr/0036-ai-external-provider-workspace-keys.md)）。
 
 既存stackの更新ではCloudFormationが前回のparameter値を保持するため、省略だけでは無効化されません。無効にするサービスの上記全parameterへ明示的に空文字を渡し、`ApiRuntimeConfigurationRevision` を更新してください。たとえばAIなら `--parameters AiBedrockModelId=` に加え、ARN、単価2項目、destination ARNも空にします。SSOなら5項目をすべて空にします。API version/aliasの切り替えで新しい設定が適用されます。既に開始した呼び出しの即時取り消しは行いません。
 
