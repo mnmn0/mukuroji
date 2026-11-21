@@ -14,6 +14,8 @@ class FakeSocket implements DocumentRealtimeSocket {
   readonly url: string
   /** Whether the subscription closed this socket. */
   closed = false
+  /** Frames the subscription sent. */
+  readonly sent: string[] = []
   /** Registered listeners by event name. */
   private readonly listeners = new Map<SocketEvent, Array<(event: { data?: unknown }) => void>>()
 
@@ -34,6 +36,15 @@ class FakeSocket implements DocumentRealtimeSocket {
    */
   addEventListener(type: SocketEvent, listener: (event: { data?: unknown }) => void): void {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener])
+  }
+
+  /**
+   * Records a sent frame.
+   *
+   * @param data - Frame text.
+   */
+  send(data: string): void {
+    this.sent.push(data)
   }
 
   /** Marks the socket closed. */
@@ -242,6 +253,21 @@ describe('Document realtime subscription', () => {
     expect(harness.ticketRequests()).toBe(3)
     expect(harness.sockets).toHaveLength(1)
     harness.stop()
+  })
+
+  test('pings the open socket so the server keeps the subscription active', async () => {
+    const harness = await startHarness([ticket('t1'), ticket('t2')])
+    const socket = harness.sockets[0]
+    socket?.emit('open')
+    await harness.advance(29_999)
+    expect(socket?.sent).toEqual([])
+    await harness.advance(1)
+    expect(socket?.sent).toEqual([JSON.stringify({ action: 'ping' })])
+    await harness.advance(30_000)
+    expect(socket?.sent).toHaveLength(2)
+    harness.stop()
+    await harness.advance(60_000)
+    expect(socket?.sent).toHaveLength(2)
   })
 
   test('stays on polling when the deployment has no WebSocket', async () => {

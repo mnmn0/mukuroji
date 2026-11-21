@@ -11,7 +11,7 @@ import {
   registerDocumentApiRoutes,
   type DocumentApiPrincipal,
 } from '../../modules/documents/adapter-in/http/document-api'
-import { createDocumentRealtimeScopeKey } from '../../modules/realtime'
+import { createDocumentRealtimeScopeKey, RealtimeTicketError } from '../../modules/realtime'
 import { publishRealtimeScopeSignal } from '../../modules/realtime/adapter-in/events/realtime'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { readDocumentAuthorizationSnapshot } from '../shared/document-access'
@@ -280,17 +280,25 @@ export function registerDocumentsRoutes(routeApp: Hono): void {
       if (!accessToken) {
         throw new DocumentError(401, 'DocumentAuthenticationRequired', 'Bearer token is required.')
       }
-      return await workItemDependencies.realtimeTickets.createDocumentTicket({
-        workspaceId: principal.workspaceId,
-        memberKey: principal.memberKey,
-        documentId,
-        systemAdmin: principal.isSystemAdmin,
-        ...await readRealtimeAuthenticationContext(
-          accessToken,
-          principal.workspaceId,
-          context,
-        ),
-      })
+      try {
+        return await workItemDependencies.realtimeTickets.createDocumentTicket({
+          workspaceId: principal.workspaceId,
+          memberKey: principal.memberKey,
+          documentId,
+          systemAdmin: principal.isSystemAdmin,
+          ...await readRealtimeAuthenticationContext(
+            accessToken,
+            principal.workspaceId,
+            context,
+          ),
+        })
+      } catch (error) {
+        // A runtime without the WebSocket API is expected; the page keeps polling.
+        if (error instanceof RealtimeTicketError && error.code === 'RealtimeUnavailable') {
+          return undefined
+        }
+        throw error
+      }
     },
     publishChange: async (workspaceId, change) => {
       await publishRealtimeScopeSignal(

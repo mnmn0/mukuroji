@@ -198,13 +198,14 @@ export type DocumentApiDependencies = {
   ) => Promise<void>
   /**
    * 閲覧権限を確認済みの Document について、変更通知を購読する短命 ticket を発行します。
-   * 未設定の runtime では ticket route が 503 を返し、画面は polling を続けます。
+   * 未設定、または WebSocket のない runtime（undefined を返す）では ticket route が
+   * 503 `RealtimeUnavailable` を返し、画面は polling を続けます。
    */
   issueRealtimeTicket?: (
     principal: DocumentApiPrincipal,
     documentId: string,
     context: Context,
-  ) => Promise<DocumentRealtimeTicket>
+  ) => Promise<DocumentRealtimeTicket | undefined>
   /**
    * Document の購読者へ内容を含まない変更通知を best-effort で送ります。
    */
@@ -368,12 +369,11 @@ export function registerDocumentApiRoutes(
   app.post('/api/documents/:documentId/realtime/tickets', async (c) => {
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const documentId = readRequiredDocumentId(c)
-      if (!dependencies.issueRealtimeTicket) {
-        return c.json({
-          code: 'RealtimeUnavailable',
-          message: 'Realtime WebSocket is not configured; use the polling fallback.',
-        }, 503)
-      }
+      const realtimeUnavailable = () => c.json({
+        code: 'RealtimeUnavailable',
+        message: 'Realtime WebSocket is not configured; use the polling fallback.',
+      }, 503)
+      if (!dependencies.issueRealtimeTicket) return realtimeUnavailable()
       // Reading the Document applies the caller's current view permission before a ticket
       // for its change signals exists.
       const document = await dependencies.getClient().get({
@@ -383,7 +383,8 @@ export function registerDocumentApiRoutes(
         includeArchived: true,
       })
       requireDocumentCapability(document.capabilities.canView, 'DocumentViewDenied')
-      return c.json(await dependencies.issueRealtimeTicket(principal, document.id, c), 201)
+      const ticket = await dependencies.issueRealtimeTicket(principal, document.id, c)
+      return ticket ? c.json(ticket, 201) : realtimeUnavailable()
     })
   })
 

@@ -12,6 +12,11 @@ const renewalLeadMs = 30_000
 const minimumRetryDelayMs = 5_000
 /** Longest wait before reconnecting after repeated failures. */
 const maximumRetryDelayMs = 5 * 60_000
+/**
+ * Interval of socket pings. A receive-only socket must still refresh its server-side
+ * activity, or a Workspace idle timeout as short as one minute drops the subscription.
+ */
+export const documentRealtimePingIntervalMs = 30_000
 
 /** Minimal WebSocket surface the subscription uses, so tests can supply a fake. */
 export type DocumentRealtimeSocket = {
@@ -20,6 +25,8 @@ export type DocumentRealtimeSocket = {
     type: 'open' | 'close' | 'error' | 'message',
     listener: (event: { data?: unknown }) => void,
   ): void
+  /** Sends a text frame. */
+  send(data: string): void
   /** Closes the socket. */
   close(): void
 }
@@ -127,6 +134,17 @@ export function startDocumentRealtimeSubscription(
       }
       hasConnected = true
       schedule(Math.max(minimumRetryDelayMs, lifetimeMs - renewalLeadMs))
+      const ping = () => {
+        if (stopped || active !== socket) return
+        try {
+          socket.send(JSON.stringify({ action: 'ping' }))
+        } catch {
+          loseActive(socket)
+          return
+        }
+        setTimer(ping, documentRealtimePingIntervalMs)
+      }
+      setTimer(ping, documentRealtimePingIntervalMs)
       // The server stops signalling an expired subscription even if the socket stays open.
       setTimer(() => loseActive(socket), Math.max(minimumRetryDelayMs, lifetimeMs))
     })

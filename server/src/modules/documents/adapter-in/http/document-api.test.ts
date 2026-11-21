@@ -2372,15 +2372,26 @@ test('issues a Document realtime ticket only after the caller can view the Docum
 })
 
 test('reports realtime as unavailable when the runtime cannot issue tickets', async () => {
-  const app = createTestApp(createDocumentClient({}))
-
-  const response = await app.request('/api/documents/document-1/realtime/tickets', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer token' },
+  const withoutIssuer = createTestApp(createDocumentClient({}))
+  const withoutWebSocket = createTestApp(createDocumentClient({
+    async get() {
+      return pageDocument
+    },
+  }), {
+    async issueRealtimeTicket() {
+      return undefined
+    },
   })
 
-  expect(response.status).toBe(503)
-  expect(await response.json()).toMatchObject({ code: 'RealtimeUnavailable' })
+  for (const app of [withoutIssuer, withoutWebSocket]) {
+    const response = await app.request('/api/documents/document-1/realtime/tickets', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer token' },
+    })
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ code: 'RealtimeUnavailable' })
+  }
 })
 
 test('signals content-free Document changes after writes and keeps the write when signalling fails', async () => {
@@ -2388,10 +2399,18 @@ test('signals content-free Document changes after writes and keeps the write whe
   const app = createTestApp(
     createDocumentClient({
       async resolveComment() {
-        return {
+        const comment: DocumentComment = {
           id: 'comment-1',
           documentId: 'document-1',
-        } as unknown as Awaited<ReturnType<DocumentHttpApplication['resolveComment']>>
+          anchor: { type: 'document' },
+          body: 'Resolved comment',
+          mentions: [],
+          authorUserId: 'owner@example.com',
+          resolved: true,
+          createdAt: '2026-07-18T00:00:00.000Z',
+          updatedAt: '2026-07-18T00:00:00.000Z',
+        }
+        return comment
       },
       async heartbeatPresence() {
         return undefined
