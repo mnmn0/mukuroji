@@ -6,6 +6,7 @@ import {
   type CanonicalWorkItem,
   type RunningTimer,
   type TeamWeeklyReportMemberStatus,
+  type TeamWeeklySummaryResponse,
   type TimeEntry,
   type TimeSheet,
   type WeeklyReportResponse,
@@ -259,3 +260,54 @@ export const teamWeeklyReportFixtureMembers: TeamWeeklyReportMemberStatus[] = [
   { memberKey: 'demo@example.com', submissionCount: 1, lastSubmittedAt: '2026-11-13T08:30:00.000Z' },
   { memberKey: 'sato@example.com', submissionCount: 0 },
 ]
+
+/** Weekly summary of the fixture week: one Project with a baseline, one without, and Team-level Work Items. */
+export const teamWeeklySummaryFixture: TeamWeeklySummaryResponse = {
+  teamId: 'core-team',
+  weekStart: timeTrackingFixtureWeekStart,
+  weekEnd: '2026-11-15',
+  generatedAt: '2026-11-13T03:00:00.000Z',
+  totals: { completed: 3, delayed: 1, overdue: 2, milestonesReached: 1 },
+  scopes: [
+    {
+      projectId: 'refero',
+      baseline: { revision: 2, capturedAt: '2026-11-01T00:00:00.000Z' },
+      completed: {
+        count: 2,
+        items: [
+          { workItemId: 'onboarding', key: 'REF-1', title: 'Onboarding checklist', plannedEndDate: '2026-11-10', actualEndDate: '2026-11-10' },
+          { workItemId: 'beta-release', key: 'REF-4', title: 'Beta release', plannedEndDate: '2026-11-12', actualEndDate: '2026-11-12' },
+        ],
+      },
+      delayed: {
+        count: 1,
+        items: [{ workItemId: 'billing', key: 'REF-2', title: 'Billing export', plannedEndDate: '2026-11-20', baselineEndDate: '2026-11-14', delayDays: 6 }],
+      },
+      overdue: {
+        count: 1,
+        items: [{ workItemId: 'review', key: 'REF-3', title: 'Security review', plannedEndDate: '2026-11-11' }],
+      },
+      milestonesReached: {
+        count: 1,
+        items: [{ workItemId: 'beta-release', key: 'REF-4', title: 'Beta release', plannedEndDate: '2026-11-12', actualEndDate: '2026-11-12' }],
+      },
+    },
+    {
+      projectId: 'mobile',
+      baseline: null,
+      completed: { count: 0, items: [] },
+      delayed: { count: 0, items: [] },
+      overdue: { count: 1, items: [{ workItemId: 'push', title: 'Push notifications', plannedEndDate: '2026-11-12' }] },
+      milestonesReached: { count: 0, items: [] },
+    },
+    {
+      completed: { count: 1, items: [{ workItemId: 'retro', title: 'Team retrospective', actualEndDate: '2026-11-13' }] },
+      delayed: { count: 0, items: [] },
+      overdue: { count: 0, items: [] },
+      milestonesReached: { count: 0, items: [] },
+    },
+  ],
+}
+
+/** Project names of {@link teamWeeklySummaryFixture}. */
+export const teamWeeklySummaryFixtureProjectNames: Readonly<Record<string, string>> = { refero: 'Refero', mobile: 'Mobile app' }

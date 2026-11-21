@@ -12,6 +12,11 @@ export {
   type WeeklyReportMemberScope,
 } from './application/weekly-report-use-cases'
 export {
+  buildTeamWeeklySummary,
+  type TeamWeeklySummaryInput,
+  type WeeklySummaryWorkItem,
+} from './application/weekly-summary'
+export {
   DynamoDbWeeklyReportStore,
   InMemoryWeeklyReportStore,
   type WeeklyReportCallerAuthorizationCheck,

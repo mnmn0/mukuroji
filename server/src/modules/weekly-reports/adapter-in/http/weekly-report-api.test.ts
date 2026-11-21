@@ -6,11 +6,13 @@ const {
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
-import type {
-  EnterpriseCustomRole,
-  TeamWeeklyReportStatusResponse,
-  WeeklyReportHistoryResponse,
-  WeeklyReportResponse,
+import {
+  createDefaultDueDateWorkItemSchedule,
+  type EnterpriseCustomRole,
+  type TeamWeeklySummaryResponse,
+  type TeamWeeklyReportStatusResponse,
+  type WeeklyReportHistoryResponse,
+  type WeeklyReportResponse,
 } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 import { createMutationAuditContext } from '../../../audit'
@@ -395,4 +397,39 @@ test('hides other members\' reports and the Team status from a member who manage
 test('requires a bearer token', async () => {
   const response = await app.request(OWN_PATH)
   expect(response.status).toBe(401)
+})
+
+test('summarizes the week of each readable Project without Work Items of other Projects', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [{ projectId: 'refero', role: 'viewer' }] })
+  const dependencies = getTestAppDependencies().workItems
+  const [template] = (await dependencies.teamIssues.getTeamIssues('user#demo@example.com', 'core-team')).issues
+  if (!template) throw new Error('The fake Team has no Work Item.')
+  const issues = [
+    { ...template, id: 'done', title: 'Done in refero', statusCategory: 'completed' as const, actualEndDate: '2026-11-18' },
+    { ...template, id: 'late', title: 'Late in refero', schedule: createDefaultDueDateWorkItemSchedule('2026-11-25') },
+    { ...template, id: 'hidden', title: 'Secret title', assignedProjectId: 'secret', statusCategory: 'completed' as const, actualEndDate: '2026-11-18' },
+  ]
+  dependencies.teamIssues.getTeamIssues = async (_directoryId, teamId) => ({ teamId, issues, evaluatedCount: issues.length })
+  await dependencies.scheduleBaselines.capture({
+    workspaceId: 'user#demo@example.com',
+    teamId: 'core-team',
+    projectId: 'refero',
+    entries: [{ workItemId: 'late', endDate: '2026-11-20' }],
+    capturedAt: '2026-11-01T00:00:00.000Z',
+    expectedRevision: 0,
+    callerAuthorization: [],
+  })
+
+  const response = await request(`/api/teams/core-team/weekly-summary?weekStart=${WEEK}`)
+  expect(response.status).toBe(200)
+  const summary = await response.json() as TeamWeeklySummaryResponse
+  expect(summary).toMatchObject({ teamId: 'core-team', weekStart: WEEK, weekEnd: '2026-11-22' })
+  expect(summary.scopes.map((scope) => scope.projectId)).toEqual(['refero'])
+  expect(summary.scopes[0]).toMatchObject({
+    baseline: { revision: 1, capturedAt: '2026-11-01T00:00:00.000Z' },
+    completed: { count: 1, items: [{ workItemId: 'done', title: 'Done in refero' }] },
+    delayed: { count: 1, items: [{ workItemId: 'late', delayDays: 5, baselineEndDate: '2026-11-20' }] },
+  })
+  expect(JSON.stringify(summary)).not.toContain('Secret title')
+  expect((await request('/api/teams/core-team/weekly-summary?weekStart=2099-01-05')).status).toBe(400)
 })

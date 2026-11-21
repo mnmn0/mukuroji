@@ -4,6 +4,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
 import { PersonalWeeklyReportContainer } from '../../features/time-tracking/ui/PersonalWeeklyReportContainer'
 import { TeamWeeklyReportsContainer } from '../../features/time-tracking/ui/TeamWeeklyReportsContainer'
+import { TeamWeeklySummaryContainer } from '../../features/time-tracking/ui/TeamWeeklySummaryContainer'
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
 import { TimeReportContainer } from '../../features/time-tracking/ui/TimeReportContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
@@ -52,7 +53,8 @@ export function TeamTimeTrackingPage() {
   const view: TimeTrackingView = viewParam === 'approvals' ||
     viewParam === 'report' ||
     viewParam === 'weekly-report' ||
-    viewParam === 'team-weekly-reports'
+    viewParam === 'team-weekly-reports' ||
+    viewParam === 'weekly-summary'
     ? viewParam
     : 'timesheet'
   const reportFrom = searchParams.get('from')
@@ -120,11 +122,15 @@ export function TeamTimeTrackingPage() {
     return names
   }, [projectMembers.data?.members])
   const teamProjects = activeTeam?.projects ?? emptyTeamProjects
+  const projectNames = useMemo(
+    () => Object.fromEntries(teamProjects.map((project) => [project.id, project.name])),
+    [teamProjects],
+  )
   const reportLabels = useMemo(() => ({
     members: memberNames,
-    projects: Object.fromEntries(teamProjects.map((project) => [project.id, project.name])),
+    projects: projectNames,
     workItems: workItemTitles,
-  }), [memberNames, teamProjects, workItemTitles])
+  }), [memberNames, projectNames, workItemTitles])
 
   /**
    * Opens a view and week through the URL.
@@ -242,6 +248,17 @@ export function TeamTimeTrackingPage() {
             locale={workspace.locale}
             memberNames={memberNames}
             onMoveWeek={moveWeek}
+            teamId={teamId}
+            weekStart={weekStart}
+            weekStartDay={calendarSettings.settings.weekStartDay}
+          />
+        ) : view === 'weekly-summary' ? (
+          <TeamWeeklySummaryContainer
+            accessToken={accessToken}
+            key={`${teamId}:weekly-summary:${weekStart}`}
+            locale={workspace.locale}
+            onMoveWeek={moveWeek}
+            projectNames={projectNames}
             teamId={teamId}
             weekStart={weekStart}
             weekStartDay={calendarSettings.settings.weekStartDay}
