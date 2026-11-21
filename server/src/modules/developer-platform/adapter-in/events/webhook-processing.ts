@@ -8,11 +8,11 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs'
-import type {
-  WebhookDelivery,
-  WebhookEventEnvelope,
-  WebhookEventType,
-  WebhookSubscription,
+import {
+  isWebhookEventType,
+  type WebhookDelivery,
+  type WebhookEventEnvelope,
+  type WebhookSubscription,
 } from '@mukuroji/contracts'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
@@ -1745,17 +1745,6 @@ function normalizeQueueDelay(value: number | undefined) {
   return Math.min(WEBHOOK_QUEUE_MAX_DELAY_SECONDS, Math.ceil(value))
 }
 
-function isWebhookEventType(value: string): value is WebhookEventType {
-  return value === 'work-item.created' ||
-    value === 'work-item.updated' ||
-    value === 'work-item.deleted' ||
-    value === 'external-link.created' ||
-    value === 'external-link.updated' ||
-    value === 'sync-conflict.created' ||
-    value === 'sync-conflict.resolved' ||
-    value === 'import.completed' ||
-    value === 'import.failed'
-}
 
 function unmarshalDynamoMap(
   value: Record<string, WebhookDynamoAttributeValue>,

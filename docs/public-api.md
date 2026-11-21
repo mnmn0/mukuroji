@@ -237,6 +237,10 @@ Token endpoint（`POST /v1/oauth/token`）は 2 種類の 1 分 window で制限
 
 Webhook body は `WebhookEventEnvelope` で、retry と手動 replay の間も同じ event ID を保つ。Delivery request には次の header を付ける。
 
+購読できる event type は `WebhookEventType`（contracts の `WEBHOOK_EVENT_TYPES`）で、Work Item の作成・更新・削除、[Work Item relation の event](./event-audit.md#work-item-relation-の-event)（`work-item.parent-changed`、`work-item.blocker-removed` など 10 種）、external link、同期競合、import の event を含む。Work Item の event はすべて `work-items:read` scope を要求する。event type は今後も追加するので、consumer は知らない `type` の delivery を `2xx` で受けて無視する（[ADR 0045](./adr/0045-relation-events-for-automation-and-webhooks.md)）。
+
+Relation の event は変更を記録した側の Work Item 1 件の event で、`data.entity.id` が `team/<teamId>/issue/<issueId>`、`data.metadata` が `teamId` と（Project に割り当てられていれば）`projectId` を持つ。相手の Work Item は subscription 作成者が見られない Project にあることがあるので、相手の ID・title は payload に含めない。配信の可否は、ほかの Work Item event と同じく記録した側の Team と Project に対する作成者の現在の権限で決める。
+
 Subscription 作成時は `teamIds` を必須とし、作成者がその時点で閲覧できる Team だけを登録できる。Server は event enqueue 時にも作成者の current Team access と event の `teamId` を再検証し、許可済み selector 外の Team data を endpoint へ送信しない。Subscription metadata には `createdByUserId` と `teamIds` を保存する。
 
 - `X-Mukuroji-Event-Id`: envelope の event ID

@@ -1,4 +1,5 @@
 import {
+  isWorkItemRelationEventType,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
@@ -51,6 +52,7 @@ export function isAutomationTriggerConfigurationValid(
   const value = configuration.trim()
   if (automationTriggerRequiresConfiguration(type) && !value) return false
   if (type === 'due' && value && value !== 'changed' && value !== 'due' && value !== 'overdue') return false
+  if (type === 'relation' && value && !isWorkItemRelationEventType(value)) return false
   return true
 }
 
@@ -370,6 +372,8 @@ export function createAutomationTrigger(
       return { type, reason: value === 'changed' || value === 'overdue' ? value : 'due' }
     case 'form':
       return { type, formId: value }
+    case 'relation':
+      return { type, ...(isWorkItemRelationEventType(value) ? { eventTypes: [value] } : {}) }
     case 'status':
       return { type, ...(value ? { toStatusId: value } : {}) }
     case 'webhook':

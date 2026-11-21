@@ -28,6 +28,7 @@ import type {
   WebhookEventEnvelope,
   WebhookSubscription,
 } from '@mukuroji/contracts'
+import { isWebhookEventType } from '@mukuroji/contracts'
 import {
   createMutationAuditContext,
   createMutationAuditEventPut,
@@ -8444,20 +8445,9 @@ function readEventTypes(values: WebhookSubscription['eventTypes']) {
   if (!Array.isArray(values) || values.length === 0 || values.length > 32) {
     throw invalid('WebhookEventTypesInvalid', 'At least one Webhook event type is required.')
   }
-  const allowed = new Set<WebhookSubscription['eventTypes'][number]>([
-    'work-item.created',
-    'work-item.updated',
-    'work-item.deleted',
-    'external-link.created',
-    'external-link.updated',
-    'sync-conflict.created',
-    'sync-conflict.resolved',
-    'import.completed',
-    'import.failed',
-  ])
   const eventTypes: WebhookSubscription['eventTypes'] = []
   for (const value of values) {
-    if (!allowed.has(value)) {
+    if (!isWebhookEventType(value)) {
       throw invalid('WebhookEventTypeInvalid', `Webhook event type "${String(value)}" is invalid.`)
     }
     if (!eventTypes.includes(value)) eventTypes.push(value)

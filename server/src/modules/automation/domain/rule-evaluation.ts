@@ -1,7 +1,8 @@
-import type {
-  AutomationCondition,
-  AutomationTrigger,
-  AutomationValue,
+import {
+  isWorkItemRelationEventType,
+  type AutomationCondition,
+  type AutomationTrigger,
+  type AutomationValue,
 } from '@mukuroji/contracts'
 
 /** A field change carried by a durable Automation trigger event. */
@@ -103,6 +104,10 @@ export function matchesAutomationTrigger(
         trigger.kind === undefined || trigger.kind === 'any' || trigger.kind === commentKind
       )
     }
+    case 'relation':
+      return isWorkItemRelationEventType(event.eventType) && (
+        trigger.eventTypes === undefined || trigger.eventTypes.includes(event.eventType)
+      )
     case 'form':
       return event.eventType === 'form.submitted' && metadata.formId === trigger.formId
     case 'webhook':

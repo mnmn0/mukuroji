@@ -19,9 +19,12 @@ Trigger は次を扱う。
 - due date
 - custom field
 - comment
+- relation（Work Item の親子・blocker・関連 link の変更と兄弟の並べ替え）
 - form
 - webhook
 - schedule
+
+Relation trigger は `eventTypes`（1〜10 件、[relation の event](./event-audit.md#work-item-relation-の-event) の `work-item.parent-changed` などから選ぶ）で対象を絞り、省略するとすべての relation 変更で動く。relation の event は両端の Work Item に 1 件ずつ記録されるので、1 つの変更で両端の event type がそれぞれ一致すればルールは両端で 1 回ずつ動き、`workItem.` の condition と action は event を記録した側の Work Item を対象にする。相手の Work Item は `event.metadata.relatedWorkItemId`（親の変更では `parentWorkItemId` / `previousParentWorkItemId`）で condition に使える。Rule を編集できるのは Workspace 管理者だけなので、相手が管理者の見られない Project にあっても問題にならない。
 
 Action は assign、move、update、create、comment、notify、approval、webhook を扱う。Webhook の secret 本文は rule response や実行履歴へ返さず、`[A-Za-z0-9._-]{1,128}` の secret alias だけを保存する。実体は Workspace ID の SHA-256 hash と alias から `mukuroji/automation-webhooks/{workspaceHash}/{alias}` を導出し、Secrets Manager から実行時に取得する。
 
