@@ -65,8 +65,12 @@ comment・file・context item など Analytics が使わない event も載る�
   現在読めない event は今と同じく engine が除外する。
 - 保持期間と legal hold は audit event に合わせる。entry は元の audit event の `expiresAt` を持ち、tenant の保持期間の
   反映や legal hold で audit event が更新されると（stream の MODIFY）、projection が同じ entry の `expiresAt` を
-  書き換える。reader は `expiresAt` を過ぎた entry を使わない。Tenant の閉鎖では `AnalyticsTable` の Workspace
-  partition と一緒に消える。
+  書き換える。projection は書き込みのたびに `expiresAt` を過ぎた entry を落とし、reader も使わない。row には最も早い
+  entry の `expiresAt` を `historyExpiresAt` として持たせ、`AnalyticsTable` の TTL にする（この table の TTL を持つ
+  row は history row だけ）。audit の保持期間を過ぎた値が row に残り続けないようにするためで、消えた row は次の
+  event で audit から作り直される。Tenant の閉鎖では `AnalyticsTable` の Workspace partition と一緒に消える。
+- Projection の失敗（throttle など）は log に残して batch を失敗にしない。row が canonical の revision に追いつかない
+  だけで reader は audit から読み、次の event で作り直されるため、同じ fan-out の通知などを再試行・DLQ に巻き込まない。
 - 既存の Work Item は data migration runner（ADR 0013・0031）で backfill する（下の「移行と backfill」）。
 
 Issue #371 の「やること」は Team・Project ごとの日次集計（選択肢 B）を挙げているが、完了条件のうち

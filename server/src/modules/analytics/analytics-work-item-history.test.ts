@@ -29,15 +29,13 @@ import {
   type AnalyticsHistoryEvent,
   type AnalyticsWorkItemHistoryKey,
   type AnalyticsWorkItemHistoryRow,
+  type AnalyticsWorkItemHistoryRowRead,
+  type AnalyticsWorkItemHistoryStore,
 } from './analytics-work-item-history'
 import {
   processAnalyticsWorkItemHistoryProjectionBatch,
   type AnalyticsWorkItemTimeline,
 } from './adapter-in/events/analytics-work-item-history-projection'
-import type {
-  AnalyticsWorkItemHistoryRowRead,
-  AnalyticsWorkItemHistoryStore,
-} from './adapter-out/dynamodb/analytics-work-item-history-store'
 import { AUDIT_SCHEMA_VERSION, type AuditEventV1, type AuditFieldChange } from '../audit/audit'
 import type {
   DynamoAttributeValue,
@@ -514,6 +512,40 @@ describe('Analytics work item history rows', () => {
     expect(result.map((event) => event.eventId)).toEqual(['covered-1', 'covered-2'])
   })
 
+  test('reads 3,000 Work Items from history rows without the 500 audit timeline limit', async () => {
+    const store = new MemoryHistoryStore()
+    const workItems = Array.from({ length: 3_000 }, (_, index) =>
+      createWorkItem(`bulk-${index}`, { revision: 1 })
+    )
+    for (const item of workItems) {
+      const input = readAnalyticsWorkItemHistoryEvent(createAuditEvent(
+        `${item.id}-created`,
+        item,
+        '2026-01-01T00:00:00.000Z',
+        [],
+        { eventType: 'work-item.created', action: 'created', afterRevision: 1 },
+      ))
+      if (!input) throw new Error('not a history event')
+      await store.putRow(
+        mergeAnalyticsWorkItemHistoryEntries(
+          createEmptyAnalyticsWorkItemHistoryRow({ workspaceId, teamId: item.teamId, workItemId: item.id }),
+          [input.entry],
+        ),
+        { row: undefined, exists: false },
+      )
+    }
+    const events = await readAnalyticsWorkItemHistoryEvents({
+      workspaceId,
+      workItems,
+      historyReadAt: '2026-02-01T00:00:00.000Z',
+      historyReader: store,
+      readAuditEvents: async () => {
+        throw new Error('no Work Item should need the audit timeline')
+      },
+    })
+    expect(events).toHaveLength(3_000)
+  })
+
   test('rejects reads that would restore more history entries than the limit', async () => {
     const item = createWorkItem('large', { revision: 1 })
     const entry = {
@@ -620,6 +652,55 @@ describe('Analytics work item history rows', () => {
     expect(toAnalyticsHistoryEvents(row, '2027-01-01T00:00:00.000Z', 1_700_000_000)).toHaveLength(1)
     expect(toAnalyticsHistoryEvents(row, '2027-01-01T00:00:00.000Z', 1_800_000_000)).toHaveLength(0)
     expect(toAnalyticsHistoryEvents(row, '2025-12-31T00:00:00.000Z', 1_700_000_000)).toHaveLength(0)
+  })
+
+  test('drops expired entries on write and expires the row with its oldest entry', () => {
+    const key = { workspaceId, teamId: 'core', workItemId: 'ttl' }
+    const entry = (revision: number, expiresAt?: number) => ({
+      eventId: `ttl-${revision}`,
+      eventType: 'work-item.updated',
+      action: 'updated',
+      occurredAt: `2026-01-0${revision}T00:00:00.000Z`,
+      changes: [],
+      metadata: { afterRevision: revision },
+      ...(expiresAt === undefined ? {} : { expiresAt }),
+    })
+    const row = mergeAnalyticsWorkItemHistoryEntries(
+      createEmptyAnalyticsWorkItemHistoryRow(key),
+      [entry(1, 100), entry(2, 300), entry(3, 200), entry(4)],
+      150,
+    )
+    expect(row.entries.map((stored) => stored.eventId)).toEqual(['ttl-2', 'ttl-3', 'ttl-4'])
+    expect(row.coveredRevision).toBe(4)
+    expect(toStoredAnalyticsWorkItemHistoryRow(row).historyExpiresAt).toBe(200)
+    const held = mergeAnalyticsWorkItemHistoryEntries(createEmptyAnalyticsWorkItemHistoryRow(key), [entry(1)])
+    expect('historyExpiresAt' in toStoredAnalyticsWorkItemHistoryRow(held)).toBe(false)
+  })
+
+  test('logs store failures without failing the stream batch', async () => {
+    const item = createWorkItem('failing')
+    const created = createAuditEvent('failing-1', item, '2026-01-01T00:00:00.000Z', [], {
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+    })
+    const store = new MemoryHistoryStore()
+    store.getRow = async () => {
+      throw Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' })
+    }
+    const errors: unknown[] = []
+    const original = console.error
+    console.error = (...args: unknown[]) => { errors.push(args) }
+    try {
+      const response = await processAnalyticsWorkItemHistoryProjectionBatch(
+        { Records: [streamRecord(created)] },
+        { store, readWorkItemTimeline: createTimeline([]).readWorkItemTimeline },
+      )
+      expect(response.batchItemFailures).toEqual([])
+    } finally {
+      console.error = original
+    }
+    expect(errors).toHaveLength(1)
   })
 
   test('deletes the row when the Work Item is deleted and skips attached records', async () => {

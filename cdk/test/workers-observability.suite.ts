@@ -532,6 +532,9 @@ test('analytics scheduled delivery reauthorizes source data and notifies through
       })
       .filter((action): action is string => typeof action === 'string');
 
+  // Work Item history rows expire with their oldest audit event (ADR 0042).
+  expect(template.toJSON().Resources[analyticsTableLogicalId].Properties.TimeToLiveSpecification)
+    .toEqual({ AttributeName: 'historyExpiresAt', Enabled: true });
   expect(new Set(actionsForResource(analyticsTableLogicalId))).toEqual(new Set([
     'dynamodb:BatchGetItem',
     'dynamodb:GetItem',

@@ -10,32 +10,9 @@ import {
   toStoredAnalyticsWorkItemHistoryRow,
   type AnalyticsWorkItemHistoryKey,
   type AnalyticsWorkItemHistoryRow,
+  type AnalyticsWorkItemHistoryRowRead,
+  type AnalyticsWorkItemHistoryStore,
 } from '../../analytics-work-item-history'
-
-/** Result of reading one history row for an update. */
-export type AnalyticsWorkItemHistoryRowRead = {
-  /** Parsed row, or undefined when it is missing or malformed. */
-  row: AnalyticsWorkItemHistoryRow | undefined
-  /** Whether an item exists under the history key, even if it could not be parsed. */
-  exists: boolean
-}
-
-/** Write side of the per-Work-Item Analytics history rows. */
-export type AnalyticsWorkItemHistoryStore = {
-  /** Reads one row with a strongly consistent read. */
-  getRow(key: AnalyticsWorkItemHistoryKey): Promise<AnalyticsWorkItemHistoryRowRead>
-  /**
-   * Saves a row if the stored row is still the one that was read.
-   *
-   * @returns False when another writer changed the row first.
-   */
-  putRow(
-    row: AnalyticsWorkItemHistoryRow,
-    previous: AnalyticsWorkItemHistoryRowRead,
-  ): Promise<boolean>
-  /** Deletes a row; deleting a missing row succeeds. */
-  deleteRow(key: AnalyticsWorkItemHistoryKey): Promise<void>
-}
 
 /** DynamoDB implementation of {@link AnalyticsWorkItemHistoryStore} on the Analytics table. */
 export class DynamoDbAnalyticsWorkItemHistoryStore implements AnalyticsWorkItemHistoryStore {

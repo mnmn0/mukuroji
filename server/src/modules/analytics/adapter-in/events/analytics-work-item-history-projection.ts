@@ -4,10 +4,6 @@ import type {
   DynamoAttributeValue,
   DynamoStreamEvent,
 } from '../../../../infrastructure/aws/dynamodb-stream'
-import type {
-  AnalyticsWorkItemHistoryRowRead,
-  AnalyticsWorkItemHistoryStore,
-} from '../../adapter-out/dynamodb/analytics-work-item-history-store'
 import {
   createEmptyAnalyticsWorkItemHistoryRow,
   hasAnalyticsWorkItemHistoryGap,
@@ -16,6 +12,8 @@ import {
   type AnalyticsWorkItemHistoryEntry,
   type AnalyticsWorkItemHistoryKey,
   type AnalyticsWorkItemHistoryRow,
+  type AnalyticsWorkItemHistoryRowRead,
+  type AnalyticsWorkItemHistoryStore,
 } from '../../analytics-work-item-history'
 
 /** Attempts of the read-merge-write cycle before the record is retried by Lambda. */
@@ -39,6 +37,8 @@ export type AnalyticsWorkItemHistoryProjectionDependencies = {
     teamId: string,
     workItemId: string,
   ): Promise<AnalyticsWorkItemTimeline>
+  /** Clock used to drop entries past their audit retention; defaults to the system clock. */
+  now?: () => Date
 }
 
 /**
@@ -50,9 +50,12 @@ export type AnalyticsWorkItemHistoryProjectionDependencies = {
  * row only when it covers the canonical revision, so a row that falls behind is never wrong,
  * only unused.
  *
+ * Failures are logged and never fail the batch, so this optimization cannot hold back or
+ * dead-letter the other projections of the fan-out.
+ *
  * @param event - AuditEvents stream batch.
- * @param dependencies - History store and audit timeline reader.
- * @returns The failed stream checkpoint, or no failures.
+ * @param dependencies - History store, audit timeline reader, and clock.
+ * @returns Always no failures.
  */
 export async function processAnalyticsWorkItemHistoryProjectionBatch(
   event: DynamoStreamEvent,
@@ -78,13 +81,13 @@ export async function processAnalyticsWorkItemHistoryProjectionBatch(
         await upsertHistoryEntry(key, input.entry, record.eventName === 'INSERT', dependencies)
       }
     } catch (error) {
+      // A failed update leaves the row behind the canonical revision, which readers already
+      // treat as "use the audit timeline", and the next event of the Work Item rebuilds it.
+      // Failing the record would instead retry, and eventually dead-letter, the whole fan-out.
       console.error('Analytics history projection failed.', {
         code: readErrorText(error, 'code') ?? 'AnalyticsHistoryProjectionFailed',
         name: readErrorText(error, 'name') ?? 'Error',
       })
-      const sequenceNumber = record.dynamodb?.SequenceNumber
-      if (!sequenceNumber) throw error
-      return { batchItemFailures: [{ itemIdentifier: sequenceNumber }] }
     }
   }
   return { batchItemFailures: [] }
@@ -124,7 +127,7 @@ async function upsertHistoryEntry(
  * @param entry - Entry from the stream record.
  * @param inserted - Whether the stream record is the event's first write.
  * @param current - Row read for this attempt.
- * @param dependencies - Audit timeline reader.
+ * @param dependencies - Audit timeline reader and clock.
  * @returns The next row, or undefined when the timeline shows the Work Item was deleted.
  */
 async function buildNextRow(
@@ -141,7 +144,8 @@ async function buildNextRow(
   const rebuild = current.row
     ? hasAnalyticsWorkItemHistoryGap(current.row, entry)
     : !startsHistory
-  if (!rebuild) return mergeAnalyticsWorkItemHistoryEntries(base, [entry])
+  const nowEpochSeconds = Math.floor((dependencies.now?.() ?? new Date()).getTime() / 1000)
+  if (!rebuild) return mergeAnalyticsWorkItemHistoryEntries(base, [entry], nowEpochSeconds)
 
   const timeline = await dependencies.readWorkItemTimeline(
     key.workspaceId,
@@ -163,7 +167,7 @@ async function buildNextRow(
     entries.push(timelineInput.entry)
   }
   entries.push(entry)
-  return mergeAnalyticsWorkItemHistoryEntries(base, entries)
+  return mergeAnalyticsWorkItemHistoryEntries(base, entries, nowEpochSeconds)
 }
 
 /**

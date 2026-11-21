@@ -85,6 +85,31 @@ export type AnalyticsWorkItemHistoryRow = AnalyticsWorkItemHistoryKey & {
   rowVersion: number
 }
 
+/** Result of reading one history row for an update. */
+export type AnalyticsWorkItemHistoryRowRead = {
+  /** Parsed row, or undefined when it is missing or malformed. */
+  row: AnalyticsWorkItemHistoryRow | undefined
+  /** Whether an item exists under the history key, even if it could not be parsed. */
+  exists: boolean
+}
+
+/** Write side of the per-Work-Item Analytics history rows. */
+export type AnalyticsWorkItemHistoryStore = {
+  /** Reads one row with a strongly consistent read. */
+  getRow(key: AnalyticsWorkItemHistoryKey): Promise<AnalyticsWorkItemHistoryRowRead>
+  /**
+   * Saves a row if the stored row is still the one that was read.
+   *
+   * @returns False when another writer changed the row first.
+   */
+  putRow(
+    row: AnalyticsWorkItemHistoryRow,
+    previous: AnalyticsWorkItemHistoryRowRead,
+  ): Promise<boolean>
+  /** Deletes a row; deleting a missing row succeeds. */
+  deleteRow(key: AnalyticsWorkItemHistoryKey): Promise<void>
+}
+
 /**
  * Builds the canonical audit entity ID of a Work Item.
  *
@@ -252,23 +277,32 @@ export function createEmptyAnalyticsWorkItemHistoryRow(
  * Merges history entries into a row.
  *
  * Entries are keyed by event ID; a later copy of the same event replaces the earlier one, so
- * an audit retention change (a new `expiresAt`) updates the entry. Coverage is recomputed, and a
- * row that no longer fits in one item is marked as overflowed and keeps no entries.
+ * an audit retention change (a new `expiresAt`) updates the entry. Entries past their audit
+ * retention are dropped. Coverage is recomputed, and a row that no longer fits in one item is
+ * marked as overflowed and keeps no entries.
  *
  * @param row - Current row.
  * @param entries - Entries to merge.
+ * @param nowEpochSeconds - Current time; when given, expired entries are dropped.
  * @returns The merged row with an incremented `rowVersion`.
  */
 export function mergeAnalyticsWorkItemHistoryEntries(
   row: AnalyticsWorkItemHistoryRow,
   entries: readonly AnalyticsWorkItemHistoryEntry[],
+  nowEpochSeconds?: number,
 ): AnalyticsWorkItemHistoryRow {
   if (row.overflow) {
     return { ...row, rowVersion: row.rowVersion + 1 }
   }
   const byEventId = new Map(row.entries.map((entry) => [entry.eventId, entry]))
   for (const entry of entries) byEventId.set(entry.eventId, entry)
-  const merged = [...byEventId.values()].sort(compareHistoryEntries)
+  const merged = [...byEventId.values()]
+    .filter((entry) =>
+      nowEpochSeconds === undefined ||
+      entry.expiresAt === undefined ||
+      entry.expiresAt > nowEpochSeconds
+    )
+    .sort(compareHistoryEntries)
   const next: AnalyticsWorkItemHistoryRow = {
     ...row,
     coveredRevision: calculateCoveredRevision(merged),
@@ -382,6 +416,9 @@ export function toAnalyticsHistoryEvents(
     }))
 }
 
+/** DynamoDB TTL attribute of the Analytics table, set only on history rows. */
+export const ANALYTICS_WORK_ITEM_HISTORY_TTL_ATTRIBUTE = 'historyExpiresAt'
+
 /**
  * Serializes a history row for DynamoDB.
  *
@@ -389,7 +426,13 @@ export function toAnalyticsHistoryEvents(
  * @returns The DynamoDB item, keyed by `workspaceId` and `recordKey`.
  */
 export function toStoredAnalyticsWorkItemHistoryRow(row: AnalyticsWorkItemHistoryRow) {
+  const expiries = row.entries.flatMap((entry) =>
+    entry.expiresAt === undefined ? [] : [entry.expiresAt]
+  )
   return {
+    // DynamoDB TTL deletes the row once its oldest entry passes the audit retention, so the row
+    // never keeps audit data longer than the audit table does; the next event rebuilds it.
+    ...(expiries.length === 0 ? {} : { historyExpiresAt: Math.min(...expiries) }),
     workspaceId: row.workspaceId,
     recordKey: createAnalyticsWorkItemHistoryRecordKey(row.teamId, row.workItemId),
     entryType: ANALYTICS_WORK_ITEM_HISTORY_ENTRY_TYPE,

@@ -217,9 +217,34 @@ export function buildAuditProjectionWorker(
   );
   // Analytics history rows (ADR 0042): read-merge-write of one row per Work Item, rebuilt from the
   // Work Item's audit entity timeline when the row is missing or has a revision gap.
+  // PutItem may only write items made of history-row attributes, so the projection cannot
+  // replace a report, snapshot, or time entry with its own content.
   collaborationProjectionFunction.addToRolePolicy(
     new iam.PolicyStatement({
-      actions: ['dynamodb:PutItem', 'dynamodb:DeleteItem'],
+      actions: ['dynamodb:PutItem'],
+      resources: [analyticsTable.tableArn],
+      conditions: {
+        'ForAllValues:StringEquals': {
+          'dynamodb:Attributes': [
+            'workspaceId',
+            'recordKey',
+            'entryType',
+            'schemaVersion',
+            'teamId',
+            'workItemId',
+            'coveredRevision',
+            'overflow',
+            'entries',
+            'rowVersion',
+            'historyExpiresAt',
+          ],
+        },
+      },
+    }),
+  );
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:DeleteItem'],
       resources: [analyticsTable.tableArn],
     }),
   );
