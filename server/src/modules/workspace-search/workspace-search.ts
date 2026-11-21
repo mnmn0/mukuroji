@@ -885,6 +885,7 @@ const taskViewBuiltInLayoutFields = new Set([
   'actualEndDate',
   'startDelayDays',
   'completionDelayDays',
+  'baselineEndDelayDays',
 ])
 
 /**
