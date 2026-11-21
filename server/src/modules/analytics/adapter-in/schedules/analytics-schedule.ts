@@ -27,6 +27,11 @@ import {
 } from '../../analytics'
 import type { WorkspaceMember } from '../../../workspace-access'
 import { isRecord } from '../../../../infrastructure/runtime/value-guards'
+import {
+  readAnalyticsWorkItemHistoryEvents,
+  type AnalyticsWorkItemHistoryReader,
+} from '../../analytics-history-reader'
+import type { AnalyticsHistoryEvent } from '../../analytics-work-item-history'
 
 const ANALYTICS_SCHEDULE_PAGE_SIZE = 100
 const ANALYTICS_SCHEDULE_MAX_PAGES = 100
@@ -162,6 +167,8 @@ export type AnalyticsScheduleRendererDependencies = {
   systemAdmin: AnalyticsScheduleSystemAdminClient
   /** Immutable audit history です。 */
   auditEvents: AnalyticsScheduleAuditClient
+  /** Per-Work-Item history rows read before the audit timeline; optional. */
+  workItemHistory?: AnalyticsWorkItemHistoryReader
 }
 
 /** 一つの recipient snapshot を描画する入力です。 */
@@ -600,6 +607,7 @@ export function createAnalyticsScheduleRenderer(
       dependencies.workItems,
       historyReadAt,
       dependencies.auditEvents,
+      dependencies.workItemHistory,
     )
     const currentAuthorization = await readAnalyticsScheduleAuthorization(
       report,
@@ -756,6 +764,7 @@ async function readRecipientAuthorizedData(
   workItemsClient: AnalyticsScheduleWorkItemsClient,
   historyReadAt: string,
   auditClient: AnalyticsScheduleAuditClient,
+  historyReader: AnalyticsWorkItemHistoryReader | undefined,
 ) {
   let workItems = await readRecipientWorkItems(
     report,
@@ -770,12 +779,18 @@ async function readRecipientAuthorizedData(
     attempt < ANALYTICS_SCHEDULE_READ_BARRIER_MAX_ATTEMPTS;
     attempt += 1
   ) {
-    const events = await readRecipientAuditEvents(
-      report.workspaceId,
+    const events = await readAnalyticsWorkItemHistoryEvents({
+      workspaceId: report.workspaceId,
+      workItems: selectAnalyticsWorkItemsRequiringHistory(workItems, report.filter.period.from),
       historyReadAt,
-      selectAnalyticsWorkItemsRequiringHistory(workItems, report.filter.period.from),
-      auditClient,
-    )
+      historyReader,
+      readAuditEvents: async (fallbackWorkItems) => await readRecipientAuditEvents(
+        report.workspaceId,
+        historyReadAt,
+        fallbackWorkItems,
+        auditClient,
+      ),
+    })
     const verifiedWorkItems = await readRecipientWorkItems(
       report,
       directory,
@@ -833,8 +848,15 @@ function assertAnalyticsScheduleWorkItemsAtCutoff(
  */
 function assertAnalyticsScheduleAuditCoverage(
   workItems: readonly CanonicalWorkItem[],
-  events: readonly AuditEventV1[],
+  events: readonly AnalyticsHistoryEvent[],
 ) {
+  // Group once so the check stays linear in the event count for reports of 10,000 Work Items.
+  const eventsByEntityId = new Map<string, AnalyticsHistoryEvent[]>()
+  for (const event of events) {
+    const group = eventsByEntityId.get(event.entityId)
+    if (group) group.push(event)
+    else eventsByEntityId.set(event.entityId, [event])
+  }
   for (const workItem of workItems) {
     if (workItem.revision <= 1) continue
     const updatedAt = Date.parse(workItem.updatedAt)
@@ -842,7 +864,7 @@ function assertAnalyticsScheduleAuditCoverage(
       workItem.teamId,
       workItem.id,
     )
-    const covered = events.some((event) =>
+    const covered = (eventsByEntityId.get(canonicalEntityId) ?? []).some((event) =>
       Date.parse(event.occurredAt) === updatedAt &&
       isAnalyticsScheduleLatestWorkItemUpdate(
         event,
@@ -868,7 +890,7 @@ function assertAnalyticsScheduleAuditCoverage(
  * @returns True when the event identity and canonical revision metadata match.
  */
 function isAnalyticsScheduleLatestWorkItemUpdate(
-  event: AuditEventV1,
+  event: AnalyticsHistoryEvent,
   workItem: CanonicalWorkItem,
   canonicalEntityId: string,
 ) {
@@ -1126,7 +1148,7 @@ async function readRecipientAuditEvents(
  * @returns True when both persisted entity IDs exactly match the query identity.
  */
 function isCanonicalAnalyticsScheduleEvent(
-  event: AuditEventV1,
+  event: AnalyticsHistoryEvent,
   canonicalEntityId: string,
 ) {
   return event.entityType === 'work-item' &&

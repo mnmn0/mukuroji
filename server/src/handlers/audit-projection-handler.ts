@@ -46,6 +46,7 @@ async function createProductionAuditProjectionHandler(
     connectorProjection,
     webhook,
     tenantAuditRetention,
+    analyticsWorkItemHistory,
   ] = await Promise.all([
     import('../modules/audit/adapter-in/events/audit-projection'),
     import('./collaboration-projection-handler'),
@@ -54,11 +55,14 @@ async function createProductionAuditProjectionHandler(
       : Promise.resolve(undefined),
     import('../app/composition/webhook'),
     import('../app/composition/tenant-audit-retention-projection'),
+    import('../app/composition/analytics-work-item-history-projection'),
   ])
   const webhookProjectionHandler =
     webhook.createProductionWebhookProjectionHandler()
   const tenantAuditRetentionHandler =
     tenantAuditRetention.createProductionTenantAuditRetentionProjectionHandler()
+  const analyticsWorkItemHistoryHandler =
+    analyticsWorkItemHistory.createProductionAnalyticsWorkItemHistoryProjectionHandler()
 
   return async (event) => await auditProjection.processAuditProjectionBatch(
     event,
@@ -66,6 +70,7 @@ async function createProductionAuditProjectionHandler(
       collaborationProjection.handler,
       webhookProjectionHandler,
       tenantAuditRetentionHandler,
+      analyticsWorkItemHistoryHandler,
       ...(connectorProjection ? [connectorProjection.auditProjectionHandler] : []),
     ],
   )

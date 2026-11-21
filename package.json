@@ -42,6 +42,8 @@
     "runtime-control:test": "bun test scripts/runtime-control.test.ts",
     "deploy:github": "bun scripts/github-deploy.ts",
     "deploy:github:test": "bun test scripts/github-deploy.test.ts",
+    "deploy:smoke": "bun scripts/post-deploy-smoke.ts",
+    "deploy:smoke:test": "bun test scripts/post-deploy-smoke.test.ts",
     "demo-data:remove": "bun cdk/scripts/remove-demo-data.ts",
     "web:dev": "bun --filter web dev",
     "web:lint": "bun --filter web lint",

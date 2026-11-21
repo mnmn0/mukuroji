@@ -126,7 +126,7 @@ Work Item は Team が所有します。他の module（planning、analytics、n
 
 | Stream | 処理する Lambda | 内容 |
 | --- | --- | --- |
-| AuditEventsTable | CollaborationProjectionFunction（`audit-projection-handler.ts`） | 受信箱の通知、realtime 配信、検索への反映、Webhook 配送と Connector 同期の queue 投入 |
+| AuditEventsTable | CollaborationProjectionFunction（`audit-projection-handler.ts`） | 受信箱の通知、realtime 配信、検索への反映、Webhook 配送と Connector 同期の queue 投入、Analytics の Work Item 履歴 row（[ADR 0042](adr/0042-analytics-work-item-history-rows.md)） |
 | AuditEventsTable | AutomationEventFunction（`automation-event-handler.ts`） | オートメーションのルール実行 |
 | AuditEventsTable（INSERT） | TenantOperationFunction | 監査 event への保持期間・legal hold の適用 |
 | EnterpriseIdentityTable | EnterpriseScimGroupJobFunction、EnterpriseIdentityMaintenanceFunction | SCIM group の反映、世代の整理 |
@@ -147,6 +147,7 @@ AuditEventsTable の stream が outbox を兼ねます。業務 table の更新�
 | Tenant*ExecutionQueue ×6（任意） | テナント操作の各 capability Lambda | TenantOperationFunction |
 
 どの queue も専用の DLQ を持ち、最大受信回数は5回です。stream の処理失敗も DLQ に送り、黙って捨てません。
+ただし Analytics の history row の projection は例外です。row の更新に失敗したら row を消してエラーログを出し、その Work Item は audit timeline から読みます。DLQ には送りません。row を消すのにも失敗したときだけ、stream の再試行の対象になります（ADR 0042）。
 
 ### スケジュール
 

@@ -17,6 +17,7 @@ export type FocusSignalType =
   | 'mention'
   | 'sla'
   | 'cycle'
+  | 'slipped'
 
 /** Canonical source kinds from which a Focus signal can be projected. */
 export type FocusSignalSourceKind =
@@ -29,6 +30,7 @@ export type FocusSignalSourceKind =
   | 'notification'
   | 'service-level-policy'
   | 'planning-cycle'
+  | 'schedule-baseline'
 
 /** Durable source evidence that produced a Focus signal. */
 export type FocusSignalSource = {
@@ -66,6 +68,7 @@ export type FocusSignalResolutionCondition =
   | 'mention-acknowledged'
   | 'sla-restored'
   | 'cycle-changed'
+  | 'baseline-recovered'
   | 'source-removed'
 
 /** Current resolution state and condition of a Focus signal. */
@@ -189,6 +192,8 @@ export type FocusSignalWeights = {
   sla: number
   /** Weight assigned to cycle signals. */
   cycle: number
+  /** Weight assigned to signals of Work Items that end behind their Project schedule baseline. */
+  slipped: number
 }
 
 /** Optional signal weights replaced by one Team or user policy layer. */
@@ -211,6 +216,8 @@ export type FocusSignalWeightOverrides = {
   sla?: number
   /** Optional cycle weight override. */
   cycle?: number
+  /** Optional baseline slip weight override. */
+  slipped?: number
 }
 
 /**
@@ -243,6 +250,11 @@ export type FocusPolicySettings = {
    * Work Items without a stored Type use the built-in `default` Type ID.
    */
   slaWorkItemTypeIds: string[]
+  /**
+   * Calendar days an unfinished Work Item's planned end must be behind its Project schedule
+   * baseline before it receives the `slipped` signal.
+   */
+  slippedThresholdDays: number
   /** Inclusive score threshold that places an actionable item in Now. */
   nowScoreThreshold: number
 }
@@ -263,6 +275,8 @@ export type FocusPolicyOverrides = {
   slaAnchor?: FocusSlaAnchor
   /** Optional replacement of the Work Item Types that receive the `sla` signal; empty means every Type. */
   slaWorkItemTypeIds?: string[]
+  /** Optional replacement of the baseline delay, in calendar days, that raises `slipped`. */
+  slippedThresholdDays?: number
   /** Optional Now-section score threshold replacement. */
   nowScoreThreshold?: number
 }
