@@ -87,7 +87,10 @@ import type {
 } from '@aws-sdk/lib-dynamodb'
 import {
   createSearchWorkItemTypeKey,
+  crossesWorkItemBaselineSlipThreshold,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  deriveWorkItemBaselineSlipChange,
+  WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS,
   createDefaultWorkItemHierarchyRank,
   isWorkItemEffortMinutes,
   isWorkItemProgressPercent,
@@ -115,8 +118,11 @@ import type {
   WorkItemRelation,
   WorkItemSchedule,
   WorkItemTriageContextEventSnapshot,
+  WorkItemBaselineSlipChange,
   WorkItemTriageContextSnapshot,
 } from '@mukuroji/contracts'
+import type { ActiveProjectScheduleBaseline } from '../../application/use-cases/project-schedule-baseline'
+import { DynamoDbProjectScheduleBaselineStore } from './schedule-baseline-store'
 
 /** Physical Planning META key that serializes canonical Work Item projections. */
 const PLANNING_META_RECORD_KEY = 'META'
@@ -1594,6 +1600,58 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
+   * Measures how much one change moved a Project Work Item further behind its active baseline.
+   *
+   * The baseline is read only when the change can move the measured end: a new schedule, a move
+   * to another Project, or a status change. A failed read is logged and leaves the change
+   * unannotated, so a baseline outage never blocks Work Item edits.
+   *
+   * @param directoryId - Workspace directory ID.
+   * @param teamId - Team that owns the Work Item and its Project.
+   * @param issueId - Work Item ID.
+   * @param before - Stored Work Item before the change.
+   * @param after - Work Item the change writes.
+   * @param baselineReads - Reads shared by the Work Items of one cascade, keyed by Team and Project,
+   *   so a cascade reads each Project's baseline once.
+   * @returns The slip to record on the audit event, or `undefined` when there is none.
+   */
+  private async readWorkItemBaselineSlip(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    before: TeamIssueItem,
+    after: TeamIssueItem,
+    baselineReads: Map<string, Promise<ActiveProjectScheduleBaseline | null>> = new Map(),
+  ): Promise<WorkItemBaselineSlipChange | undefined> {
+    const projectId = after.assignedProjectId
+    if (!this.planningTableName || !projectId || after.archivedAt) return undefined
+    if (
+      workItemSchedulesEqual(before.schedule, after.schedule) &&
+      before.assignedProjectId === projectId &&
+      before.statusCategory === after.statusCategory
+    ) return undefined
+    const readKey = `${teamId}\0${projectId}`
+    let read = baselineReads.get(readKey)
+    if (!read) {
+      read = new DynamoDbProjectScheduleBaselineStore(this.planningTableName, this.documentClient)
+        .get(directoryId, teamId, projectId)
+      baselineReads.set(readKey, read)
+    }
+    let baseline
+    try {
+      baseline = await read
+    } catch (error) {
+      console.warn('Work Item baseline slip could not be measured:', error)
+      return undefined
+    }
+    const entry = baseline?.entries.find((candidate) => candidate.workItemId === issueId)
+    if (!baseline || !entry) return undefined
+    // Moving in from another Project has no comparable "before" against this baseline.
+    const comparableBefore = before.assignedProjectId === projectId ? before : undefined
+    return deriveWorkItemBaselineSlipChange(baseline.revision, entry, comparableBefore, after)
+  }
+
+  /**
    * Prepares permission-safe duplicate-source provenance for a combined Triage transaction.
    *
    * The immutable event lives in the canonical Work Item event partition and deliberately omits
@@ -2568,6 +2626,7 @@ export class DynamoDbTeamIssuesClient {
     }
 
     const occurredAt = new Date().toISOString()
+    const baselineReads = new Map<string, Promise<ActiveProjectScheduleBaseline | null>>()
     const prepared = await Promise.all(updates.map(async (update, sequence) => {
       const expectedRevision = readWorkItemExpectedRevision(update.expectedRevision)
       const beforeIssue = await this.getRequiredTeamIssueItem(
@@ -2606,6 +2665,14 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue schedule was updated by a dependency cascade.',
         createdAt: occurredAt,
       })
+      const baselineSlip = await this.readWorkItemBaselineSlip(
+        directoryId,
+        update.teamId,
+        update.workItemId,
+        beforeIssue,
+        afterIssue,
+        baselineReads,
+      )
       const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.schedule-cascade-updated',
@@ -2614,7 +2681,8 @@ export class DynamoDbTeamIssuesClient {
         action: 'schedule-cascade-updated',
         sequence,
         occurredAt,
-        summary: createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        summary: createWorkItemBaselineSlipSummary(baselineSlip) ??
+          createWorkItemNotificationSummary(beforeIssue, afterIssue),
         changes: createAuditFieldChanges(beforeIssue, afterIssue, ['dueDate', 'schedule']),
         metadata: {
           adapter: 'canonical-work-item',
@@ -2624,7 +2692,11 @@ export class DynamoDbTeamIssuesClient {
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(update.teamId, update.workItemId),
           notificationTitle: afterIssue.title,
-          notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
+          notificationCandidates: [
+            ...createWorkItemNotificationCandidates(beforeIssue, afterIssue),
+            ...createWorkItemBaselineSlipCandidates(afterIssue, baselineSlip),
+          ],
+          ...(baselineSlip ? { baselineSlip } : {}),
           beforeRevision: expectedRevision,
           afterRevision: expectedRevision + 1,
           cascadeSize: updates.length,
@@ -3178,6 +3250,13 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was updated.',
         createdAt: expressionAttributeValues[':updatedAt'] as string,
       })
+      const baselineSlip = await this.readWorkItemBaselineSlip(
+        directoryId,
+        teamId,
+        issueId,
+        beforeIssue,
+        afterIssue,
+      )
       auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.updated',
@@ -3185,7 +3264,8 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'updated',
         occurredAt: expressionAttributeValues[':updatedAt'] as string,
-        summary: createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        summary: createWorkItemBaselineSlipSummary(baselineSlip) ??
+          createWorkItemNotificationSummary(beforeIssue, afterIssue),
         changes: createAuditFieldChanges(auditBeforeIssue, auditAfterIssue, [
           'title',
           'description',
@@ -3215,7 +3295,11 @@ export class DynamoDbTeamIssuesClient {
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: afterIssue.title,
-          notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
+          notificationCandidates: [
+            ...createWorkItemNotificationCandidates(beforeIssue, afterIssue),
+            ...createWorkItemBaselineSlipCandidates(afterIssue, baselineSlip),
+          ],
+          ...(baselineSlip ? { baselineSlip } : {}),
           beforeRevision: expectedRevision,
           afterRevision: nextRevision,
           ...(completionTransition ? { completionTransition: true } : {}),
@@ -5556,6 +5640,36 @@ export function createWorkItemNotificationCandidates(
   }
 
   return candidates
+}
+
+/**
+ * Notifies the assignee when a change is the one that put the Work Item
+ * {@link WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS} or more days behind its baseline.
+ *
+ * @param after - Work Item after the change.
+ * @param slip - Slip recorded for the change, if any.
+ * @returns The `baseline-slip` candidate, or none.
+ */
+function createWorkItemBaselineSlipCandidates(
+  after: Pick<TeamIssueItem, 'assigneeUserId'>,
+  slip: WorkItemBaselineSlipChange | undefined,
+): Array<{ memberKey: string; reason: string }> {
+  if (!slip || !after.assigneeUserId) return []
+  if (!crossesWorkItemBaselineSlipThreshold(slip, WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS)) return []
+  return [{ memberKey: after.assigneeUserId, reason: 'baseline-slip' }]
+}
+
+/**
+ * Describes a change that crossed the notification threshold, so the notification says why.
+ *
+ * @param slip - Slip recorded for the change, if any.
+ * @returns The summary, or `undefined` when the change did not cross the threshold.
+ */
+function createWorkItemBaselineSlipSummary(slip: WorkItemBaselineSlipChange | undefined): string | undefined {
+  if (!slip || !crossesWorkItemBaselineSlipThreshold(slip, WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS)) {
+    return undefined
+  }
+  return `Work Item now ends ${slip.delayDays} days after its schedule baseline.`
 }
 
 /**

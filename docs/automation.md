@@ -17,6 +17,7 @@ Trigger は次を扱う。
 - status
 - assignee
 - due date
+- baseline slip（Project の今の schedule baseline より予定終了日が遅れた変更。下の「baseline slip trigger」を参照）
 - custom field
 - comment
 - form
@@ -28,6 +29,16 @@ Action は assign、move、update、create、comment、notify、approval、webho
 Approval action は event が指す canonical Work Item 自体を承認対象にし、通常の file approval と同じ main row、reviewer Inbox projection、summary、decision/cancel API、audit transaction を利用する。作成前に owner Team と assigned Project が active であること、全 reviewer が active Workspace member かつ対象 Work Item を閲覧できること、指定した完了 workflow status が現在の configuration で遷移可能であることを強整合 read で再検証する。Requester は `service` identity の `automation:<ruleId>` として保存し、人間 requester と誤認して cancel/notification の対象にはしない。
 
 Condition は event snapshot と現在の Work Item snapshot のどちらを読むかを field path で明示する。Field path の namespace、比較 operator、値の型と condition tree の深さは保存前に検証し、実行時に存在しない field は `not-exists` 以外では一致しない。
+
+### baseline slip trigger
+
+`{ "type": "baseline-slip", "minDelayDays": 3 }` は、未完了の Work Item の予定終了日が、所属 Project の今の schedule baseline の終了日より `minDelayDays` 日（1〜365、省略時 1）以上遅れたときに動く。遅れの数え方は週次まとめ・Gantt・Focus の `slipped` と同じ `deriveWorkItemBaselineEndDelayDays` で、閾値を下から越えた変更で1回だけ動き、さらに遅れても同じ rule は動かない（閾値未満に戻ってから再び越えると、また動く）。
+
+判定は Work Item の書き込み側で行う。日程・所属 Project・status が変わる更新と依存関係の連鎖更新では、Work Item の Team と Project の今の baseline を1回読み、変更前後の遅れを比べる。変更後も未完了で、遅れが1日以上かつ変更前より大きいときだけ、`work-item.updated` / `work-item.schedule-cascade-updated` の audit event の `metadata.baselineSlip` に `baselineRevision`、`baselineEndDate`、`previousDelayDays`（変更前に比べられる終了日がなければ省略）、`delayDays` を書く。trigger はこの値だけを見る。
+
+完了・中止にした変更、予定終了日を前に戻した変更、baseline を保存し直したり切り替えたりした操作は対象外。baseline の読み取りに失敗しても Work Item の更新は止めず、その変更には `baselineSlip` を書かない（その変更では通知・trigger が動かない）。
+
+同じ判定で、遅れが `WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS`（3日、Focus の既定閾値と同じ）を越えた変更では、担当者に理由 `baseline-slip` の通知を送り、通知の概要を「baseline より N 日遅れ」にする。作成者と watcher には通常の日程変更通知と同じく届く。Team ごとの閾値は Focus の優先ルールだけで、通知の閾値は今は固定。
 
 ## 実行と冪等性
 

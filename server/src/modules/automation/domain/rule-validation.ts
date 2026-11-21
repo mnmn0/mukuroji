@@ -1,5 +1,6 @@
 import {
   APPROVAL_MAX_REVIEWERS,
+  AUTOMATION_BASELINE_SLIP_MAX_DAYS,
   type AutomationAction,
   type AutomationCondition,
   type AutomationRateLimit,
@@ -132,6 +133,23 @@ function validateAutomationTrigger(value: unknown): AutomationTrigger {
         type: 'due',
         ...(trigger.reason === undefined ? {} : { reason: trigger.reason }),
       }
+    case 'baseline-slip': {
+      const minDelayDays: unknown = trigger.minDelayDays
+      if (
+        minDelayDays !== undefined && (
+          typeof minDelayDays !== 'number' ||
+          !Number.isSafeInteger(minDelayDays) ||
+          minDelayDays < 1 ||
+          minDelayDays > AUTOMATION_BASELINE_SLIP_MAX_DAYS
+        )
+      ) {
+        throw invalidInput('Automation baseline slip trigger days are invalid.')
+      }
+      return {
+        type: 'baseline-slip',
+        ...(typeof minDelayDays === 'number' ? { minDelayDays } : {}),
+      }
+    }
     case 'custom-field':
       return {
         type: 'custom-field',

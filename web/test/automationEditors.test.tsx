@@ -7,6 +7,7 @@ import {
 import {
   createDefaultAutomationWorkflowTemplatePayload,
   createAutomationTrigger,
+  isAutomationTriggerConfigurationValid,
   parseAutomationTemplatePayload,
 } from '../src/automation/model/editorValidation'
 
@@ -33,6 +34,28 @@ describe('Automation editors', () => {
       toWorkItemTypeId: 'feature',
       type: 'work-item-type',
     })
+  })
+
+  test('serializes and validates the baseline-slip day count', () => {
+    expect(createAutomationTrigger('baseline-slip', ' 5 ')).toEqual({ type: 'baseline-slip', minDelayDays: 5 })
+    expect(createAutomationTrigger('baseline-slip', '')).toEqual({ type: 'baseline-slip' })
+    expect(isAutomationTriggerConfigurationValid('baseline-slip', '')).toBe(true)
+    expect(isAutomationTriggerConfigurationValid('baseline-slip', '365')).toBe(true)
+    for (const value of ['0', '366', '1.5', 'three']) {
+      expect(isAutomationTriggerConfigurationValid('baseline-slip', value)).toBe(false)
+    }
+  })
+
+  test('renders the baseline-slip day field', () => {
+    const html = renderToStaticMarkup(
+      <AutomationRuleEditor
+        initialTriggerType="baseline-slip"
+        locale="ja"
+        onCreate={async () => undefined}
+      />,
+    )
+    expect(html).toContain('ベースラインより何日遅れたら')
+    expect(html).toContain('type="number"')
   })
 
   test('renders Work Item Type trigger direction controls', () => {

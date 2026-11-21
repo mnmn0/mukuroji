@@ -1,4 +1,5 @@
 import {
+  AUTOMATION_BASELINE_SLIP_MAX_DAYS,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
@@ -51,7 +52,20 @@ export function isAutomationTriggerConfigurationValid(
   const value = configuration.trim()
   if (automationTriggerRequiresConfiguration(type) && !value) return false
   if (type === 'due' && value && value !== 'changed' && value !== 'due' && value !== 'overdue') return false
+  if (type === 'baseline-slip' && value && readBaselineSlipDays(value) === undefined) return false
   return true
+}
+
+/**
+ * Reads the day count typed for a baseline-slip trigger.
+ *
+ * @param value - Trimmed editor value.
+ * @returns Whole days from 1 to the server maximum, or `undefined` when the value is not one.
+ */
+function readBaselineSlipDays(value: string): number | undefined {
+  if (!/^\d+$/.test(value)) return undefined
+  const days = Number(value)
+  return days >= 1 && days <= AUTOMATION_BASELINE_SLIP_MAX_DAYS ? days : undefined
 }
 
 /** Action type ごとの設定値が作成可能か返します。 */
@@ -368,6 +382,10 @@ export function createAutomationTrigger(
       }
     case 'due':
       return { type, reason: value === 'changed' || value === 'overdue' ? value : 'due' }
+    case 'baseline-slip': {
+      const minDelayDays = readBaselineSlipDays(value)
+      return { type, ...(minDelayDays === undefined ? {} : { minDelayDays }) }
+    }
     case 'form':
       return { type, formId: value }
     case 'status':

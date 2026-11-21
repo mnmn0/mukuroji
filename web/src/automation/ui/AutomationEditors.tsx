@@ -1,4 +1,5 @@
 import {
+  AUTOMATION_BASELINE_SLIP_MAX_DAYS,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   type AutomationInboundWebhookEndpoint,
   type AutomationProjectTemplatePayload,
@@ -56,6 +57,7 @@ const automationTriggerTypes = [
   'status',
   'assignee',
   'due',
+  'baseline-slip',
   'custom-field',
   'work-item-type',
   'comment',
@@ -112,6 +114,7 @@ const triggerLabelKeys: Record<AutomationTriggerType, MessageKey> = {
   status: 'automation.trigger.statusChange',
   assignee: 'automation.trigger.assigneeChange',
   due: 'automation.trigger.dueDate',
+  'baseline-slip': 'automation.trigger.baselineSlip',
   'custom-field': 'automation.trigger.customFieldChange',
   'work-item-type': 'automation.trigger.workItemTypeChange',
   comment: 'automation.trigger.comment',
@@ -502,6 +505,25 @@ export function AutomationRuleEditor({
               {activeWebhookEndpoints.length === 0
                 ? t('automation.rule.webhookEndpointEmpty')
                 : t('automation.rule.webhookEndpointHint')}
+            </span>
+          </label>
+        ) : triggerType === 'baseline-slip' ? (
+          <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('automation.rule.baselineSlipDays')}
+            <input
+              className="workbench-input min-h-10 px-3 tabular-nums text-[var(--workbench-text)]"
+              data-testid="automation-rule-trigger-configuration"
+              inputMode="numeric"
+              max={AUTOMATION_BASELINE_SLIP_MAX_DAYS}
+              min="1"
+              placeholder="1"
+              step="1"
+              type="number"
+              value={triggerConfiguration}
+              onChange={(event) => setTriggerConfiguration(event.target.value)}
+            />
+            <span className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+              {t('automation.rule.baselineSlipDaysHint')}
             </span>
           </label>
         ) : triggerType !== 'schedule' ? (

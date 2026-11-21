@@ -1,7 +1,9 @@
-import type {
-  AutomationCondition,
-  AutomationTrigger,
-  AutomationValue,
+import {
+  crossesWorkItemBaselineSlipThreshold,
+  parseWorkItemBaselineSlipChange,
+  type AutomationCondition,
+  type AutomationTrigger,
+  type AutomationValue,
 } from '@mukuroji/contracts'
 
 /** A field change carried by a durable Automation trigger event. */
@@ -78,6 +80,11 @@ export function matchesAutomationTrigger(
           ? 'overdue'
           : findChange(event, 'dueDate') ? 'changed' : undefined
       return reason !== undefined && (trigger.reason === undefined || trigger.reason === reason)
+    }
+    case 'baseline-slip': {
+      const slip = parseWorkItemBaselineSlipChange(metadata.baselineSlip)
+      return slip !== undefined &&
+        crossesWorkItemBaselineSlipThreshold(slip, trigger.minDelayDays ?? 1)
     }
     case 'custom-field':
       return event.changes.some((change) =>
