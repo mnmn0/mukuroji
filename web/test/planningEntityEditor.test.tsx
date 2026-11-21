@@ -118,6 +118,60 @@ describe('planning entity edit patch', () => {
     expect(problem({ progressMode: 'manual', manualProgress: 'abc' })).toBe('manual-progress')
   })
 
+  test('changes a Cycle cadence, capacity and carry-over policy', () => {
+    const cycle = fixtureEntity('cycle-14')
+    expect(resolvePlanningEntityEdit(cycle, createPlanningEntityEditorDraft(cycle), 2)).toEqual({
+      kind: 'unchanged',
+    })
+    expect(resolvePlanningEntityEdit(cycle, {
+      ...createPlanningEntityEditorDraft(cycle),
+      cadenceUnit: 'month',
+      cadenceCount: '1',
+      capacity: '30',
+      carryOverPolicy: 'keep-incomplete',
+    }, 2)).toEqual({
+      kind: 'patch',
+      patch: {
+        cadence: { unit: 'month', count: 1 },
+        capacity: 30,
+        carryOverPolicy: 'keep-incomplete',
+      },
+    })
+  })
+
+  test('rejects Cycle settings that would refuse Work Items', () => {
+    const cycle = fixtureEntity('cycle-14')
+    const draft = createPlanningEntityEditorDraft(cycle)
+    const problem = (change: Partial<PlanningEntityEditorDraft>, committed = 2) => {
+      const result = resolvePlanningEntityEdit(cycle, { ...draft, ...change }, committed)
+      return result.kind === 'invalid' ? result.problem : result.kind
+    }
+    expect(problem({ cadenceCount: '0' })).toBe('cadence-count')
+    expect(problem({ cadenceCount: '1.5' })).toBe('cadence-count')
+    expect(problem({ capacity: '0' })).toBe('capacity')
+    expect(problem({ capacity: '' })).toBe('capacity')
+    expect(problem({ capacity: '2.5' })).toBe('capacity')
+    expect(problem({ capacity: '1' })).toBe('capacity-below-committed')
+    expect(problem({ capacity: '2' })).toBe('patch')
+  })
+
+  test('keeps a stored capacity of 0 so other Cycle fields stay editable', () => {
+    const cycle = { ...fixtureEntity('cycle-14'), capacity: 0 }
+    expect(resolvePlanningEntityEdit(cycle, {
+      ...createPlanningEntityEditorDraft(cycle),
+      title: 'Cycle 14 renamed',
+    })).toEqual({ kind: 'patch', patch: { title: 'Cycle 14 renamed' } })
+  })
+
+  test('ignores Cycle fields for other entities', () => {
+    const phase = fixtureEntity('phase-build')
+    expect(resolvePlanningEntityEdit(phase, {
+      ...createPlanningEntityEditorDraft(phase),
+      capacity: 'not a number',
+      cadenceCount: '',
+    })).toEqual({ kind: 'unchanged' })
+  })
+
   test('accepts stored fractional manual progress so unrelated edits can be saved', () => {
     const phase = { ...fixtureEntity('phase-build'), manualProgress: 12.5 }
     expect(resolvePlanningEntityEdit(phase, {
@@ -224,7 +278,7 @@ describe('planning entity editor', () => {
     expect(editor).toContain(labels.entityEditor.save)
   })
 
-  test('is read-only without permission and hidden for Cycles', () => {
+  test('is read-only without permission', () => {
     const readOnly = renderToStaticMarkup(
       <PlanningScreen
         activeView="roadmap"
@@ -239,6 +293,9 @@ describe('planning entity editor', () => {
     expect(editor).toContain('<fieldset class="grid gap-3" disabled=""')
     expect(editor).toContain(labels.entityEditor.readOnly)
 
+  })
+
+  test('shows the Cycle settings with the Work Items already in the Cycle', () => {
     const cycle = renderToStaticMarkup(
       <PlanningScreen
         activeView="timeline"
@@ -248,7 +305,23 @@ describe('planning entity editor', () => {
         onUpdateEntity={() => undefined}
       />,
     )
-    expect(cycle).not.toContain('data-testid="planning-entity-editor"')
+    const editor = cycle.slice(cycle.indexOf('data-testid="planning-entity-editor"'))
+    expect(editor).toContain('data-testid="planning-entity-editor-cycle"')
+    expect(editor).toContain('name="cadenceCount"')
+    expect(editor).toContain('name="capacity"')
+    expect(editor).toContain('name="carryOverPolicy"')
+    expect(editor).toContain(labels.entityEditor.capacityHint(2))
+
+    const phase = renderToStaticMarkup(
+      <PlanningScreen
+        activeView="roadmap"
+        initialSelectedEntityId="phase-build"
+        labels={labels}
+        snapshot={planningSnapshotFixture}
+        onUpdateEntity={() => undefined}
+      />,
+    )
+    expect(phase).not.toContain('data-testid="planning-entity-editor-cycle"')
   })
   test('suggests members by name while the owner stays typeable', () => {
     const html = renderToStaticMarkup(
