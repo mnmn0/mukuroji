@@ -3,6 +3,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 import { configureAlarmRouting } from '../aspects/alarm-routing';
 import { configureCostAllocationTags } from '../aspects/cost-allocation-tags';
+import { configureLambdaTracing } from '../aspects/lambda-tracing';
 import { configureStatefulResourceGuards } from '../aspects/stateful-resource-guards';
 import { buildLambdaBuildPaths } from '../config/lambda-build-paths';
 import { buildStackParameters, type StackParameters } from '../config/stack-parameters';
@@ -351,6 +352,10 @@ export class MukurojiStack extends cdk.Stack {
     });
     configureStatefulResourceGuards(this);
     configureCostAllocationTags(this);
+    configureLambdaTracing(this, {
+      tracingMode: parameters.lambdaTracingMode,
+      tracingActive: parameters.lambdaTracingActive,
+    });
     buildCostBudget(this, {
       monthlyBudgetUsd: parameters.monthlyCostBudgetUsd,
       alertEmail: parameters.costBudgetAlertEmail,
