@@ -47,12 +47,14 @@ import {
   createFocusQueue,
   createFocusWorkItemStateKey as createFocusWorkItemKey,
   focusQueueUsesApprovalSummary,
+  focusQueueUsesScheduleBaseline,
   isFocusSlaAnchor,
   normalizeFocusSlaWorkItemTypeIds,
   readFocusWorkItemWindow,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
   type FocusRelationGraphSource,
+  type FocusScheduleBaselineSource,
   type FocusSnoozeRecord,
   type FocusStateSnapshot,
 } from '../../modules/focus'
@@ -162,6 +164,9 @@ const FOCUS_WATCHER_READ_BATCH_SIZE = 16
 /** Maximum Focus items whose watcher state is resolved for one queue. */
 const FOCUS_WATCHER_READ_LIMIT = 400
 
+/** Most Projects whose schedule baseline one Focus queue reads for the `slipped` signal. */
+const FOCUS_SCHEDULE_BASELINE_PROJECT_LIMIT = 100
+
 /** Stable Focus HTTP boundary error. */
 class FocusApiError extends Error {
   /** HTTP status returned for this failure. */
@@ -238,6 +243,7 @@ function readFocusPolicyOverrides(value: unknown): FocusPolicyOverrides {
     'slaEnabled',
     'slaAnchor',
     'slaWorkItemTypeIds',
+    'slippedThresholdDays',
     'nowScoreThreshold',
   ])
   const weights = overrides.weights === undefined
@@ -271,6 +277,13 @@ function readFocusPolicyOverrides(value: unknown): FocusPolicyOverrides {
     throw invalidFocusInput('slaAnchor must be created, planned-start, or started.')
   }
   const slaWorkItemTypeIds = readOptionalFocusSlaWorkItemTypeIds(overrides.slaWorkItemTypeIds)
+  const slippedThresholdDays = readOptionalFocusPolicyNumber(
+    overrides.slippedThresholdDays,
+    'slippedThresholdDays',
+    1,
+    365,
+    true,
+  )
   const nowScoreThreshold = readOptionalFocusPolicyNumber(
     overrides.nowScoreThreshold,
     'nowScoreThreshold',
@@ -286,6 +299,7 @@ function readFocusPolicyOverrides(value: unknown): FocusPolicyOverrides {
     ...(overrides.slaEnabled === undefined ? {} : { slaEnabled: overrides.slaEnabled }),
     ...(overrides.slaAnchor === undefined ? {} : { slaAnchor: overrides.slaAnchor }),
     ...(slaWorkItemTypeIds === undefined ? {} : { slaWorkItemTypeIds }),
+    ...(slippedThresholdDays === undefined ? {} : { slippedThresholdDays }),
     ...(nowScoreThreshold === undefined ? {} : { nowScoreThreshold }),
   }
 }
@@ -325,6 +339,7 @@ function readFocusSignalWeightOverrides(
     'mention',
     'sla',
     'cycle',
+    'slipped',
   ])
   const blocker = readOptionalFocusPolicyNumber(weights.blocker, 'blocker', 0, 10_000, false)
   const urgent = readOptionalFocusPolicyNumber(weights.urgent, 'urgent', 0, 10_000, false)
@@ -341,6 +356,7 @@ function readFocusSignalWeightOverrides(
   const mention = readOptionalFocusPolicyNumber(weights.mention, 'mention', 0, 10_000, false)
   const sla = readOptionalFocusPolicyNumber(weights.sla, 'sla', 0, 10_000, false)
   const cycle = readOptionalFocusPolicyNumber(weights.cycle, 'cycle', 0, 10_000, false)
+  const slipped = readOptionalFocusPolicyNumber(weights.slipped, 'slipped', 0, 10_000, false)
   return {
     ...(blocker === undefined ? {} : { blocker }),
     ...(urgent === undefined ? {} : { urgent }),
@@ -351,6 +367,7 @@ function readFocusSignalWeightOverrides(
     ...(mention === undefined ? {} : { mention }),
     ...(sla === undefined ? {} : { sla }),
     ...(cycle === undefined ? {} : { cycle }),
+    ...(slipped === undefined ? {} : { slipped }),
   }
 }
 
@@ -1538,6 +1555,7 @@ async function readFocusQueue(
   const approvalsPromise = Promise.resolve(
     filterFocusReviewerApprovals(principal, reviewerApprovalCandidates, accessibleWorkItems),
   )
+  const scheduleBaselinesPromise = readFocusScheduleBaselines(principal, accessibleWorkItems)
   const workItemPermissionsPromise = readFocusWorkItemPermissionsByKey(
     principal,
     accessibleWorkItems,
@@ -1562,6 +1580,7 @@ async function readFocusQueue(
     editableTeamPolicyIds,
     state,
     projectTitlesByKey,
+    scheduleBaselines,
   ] =
     await Promise.all([
       workItemsPromise,
@@ -1573,6 +1592,7 @@ async function readFocusQueue(
       editableTeamPolicyIdsPromise,
       statePromise,
       projectTitlesPromise,
+      scheduleBaselinesPromise,
     ])
   const baseInput: CreateFocusQueueInput = {
     now,
@@ -1582,6 +1602,7 @@ async function readFocusQueue(
     projectTitlesByKey,
     initiativeTitlesById,
     relationGraphs,
+    scheduleBaselines,
     reviewerApprovals,
     notifications,
     teamPolicies: state.teamPolicies,
@@ -1611,6 +1632,87 @@ type FocusRouteWorkItemWindow = {
   relationGraphs: FocusRelationGraphSource[]
   /** Pending approvals assigned to the viewer on readable Teams, before Files filtering. */
   reviewerApprovals: ApprovalRequest[]
+}
+
+/** Viewer's unfinished Work Items in one Team-owned Project, for the baseline read. */
+type FocusBaselineProjectWorkItems = {
+  /** Team that owns the Project. */
+  teamId: string
+  /** Project whose baseline is read. */
+  projectId: string
+  /** Work Items whose baseline entries the queue uses. */
+  workItemIds: Set<string>
+}
+
+/**
+ * Reads the latest schedule baseline of each Project in which the viewer owns or contributes to
+ * an unfinished Work Item, keeping only the entries of those Work Items.
+ *
+ * The Work Items are already filtered by current read permission, which for a Project Work Item
+ * requires access to its Project, so no entry of an unreadable Work Item is used. A failed read
+ * fails the queue instead of silently dropping the `slipped` signal.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param workItems - Current ACL-filtered canonical Work Items.
+ * @returns Baseline entries of the viewer's Project Work Items.
+ */
+async function readFocusScheduleBaselines(
+  principal: WorkspacePrincipal,
+  workItems: readonly CanonicalWorkItem[],
+): Promise<FocusScheduleBaselineSource[]> {
+  const workItemIdsByProject = new Map<string, FocusBaselineProjectWorkItems>()
+  for (const workItem of workItems) {
+    if (!focusQueueUsesScheduleBaseline(workItem, principal.userKey)) continue
+    const projectId = workItem.assignedProjectId
+    if (projectId === undefined) continue
+    const key = JSON.stringify([workItem.teamId, projectId])
+    const project = workItemIdsByProject.get(key) ?? { teamId: workItem.teamId, projectId, workItemIds: new Set<string>() }
+    project.workItemIds.add(workItem.id)
+    workItemIdsByProject.set(key, project)
+  }
+  if (workItemIdsByProject.size > FOCUS_SCHEDULE_BASELINE_PROJECT_LIMIT) {
+    throw new FocusApiError(
+      413,
+      'FocusScheduleBaselineLimitExceeded',
+      `Focus can compare schedule baselines for at most ${FOCUS_SCHEDULE_BASELINE_PROJECT_LIMIT} Projects.`,
+    )
+  }
+  const projects = [...workItemIdsByProject.entries()]
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([, project]) => project)
+  const baselines = await Promise.all(projects.map(async (project) => {
+    try {
+      return {
+        project,
+        baseline: await workItemDependencies.scheduleBaselines.get(
+          principal.directoryId,
+          project.teamId,
+          project.projectId,
+        ),
+      }
+    } catch (error) {
+      // A throttled read can be retried; other baseline failures stay server errors.
+      if (error instanceof ProjectDataError && error.status === 503) {
+        throw new FocusApiError(
+          503,
+          'FocusScheduleBaselineUnavailable',
+          'A Project schedule baseline could not be read. Try again.',
+        )
+      }
+      throw error
+    }
+  }))
+  return baselines.flatMap(({ project, baseline }) => baseline === null
+    ? []
+    : baseline.entries
+        .filter((entry) => project.workItemIds.has(entry.workItemId))
+        .map((entry) => ({
+          teamId: project.teamId,
+          projectId: project.projectId,
+          revision: baseline.revision,
+          capturedAt: baseline.capturedAt,
+          entry,
+        })))
 }
 
 /**

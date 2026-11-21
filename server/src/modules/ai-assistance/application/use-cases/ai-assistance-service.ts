@@ -4,6 +4,7 @@ import {
   type AiAssistanceDraft,
   type AiAssistanceGeneration,
   type AiAssistancePolicy,
+  type AiAssistanceProvider,
   type AiAssistancePreference,
   type AiAssistanceTask,
   type CreateAiAssistanceFeedbackRequest,
@@ -152,6 +153,8 @@ export function createAiAssistanceService(
     DEFAULT_MEMBER_TOKEN_LIMIT_PER_MINUTE
   const worstCaseTokensPerGeneration = options.worstCaseTokensPerGeneration ??
     DEFAULT_WORST_CASE_TOKENS_PER_GENERATION
+  const resolveModelProvider = options.resolveModelProvider ??
+    ((): AiAssistanceProvider => 'bedrock')
   const now = options.now ?? (() => new Date())
   const createId = options.createId ?? (() => crypto.randomUUID())
 
@@ -452,11 +455,26 @@ export function createAiAssistanceService(
     }
     requireGenerationEnabled(policy, preference, request.task)
     const modelId = selectModelId(request.modelId, policy, deploymentAllowedModelIds)
-    const createdAt = now()
+    // Fix the start before the readiness check so key resolution counts toward the deadline.
     const generationRequestStartedAtMs = normalizeGenerationRequestStartedAtMs(
       requestStartedAtMs,
-      createdAt.getTime(),
+      now().getTime(),
     )
+    if (options.isModelReady) {
+      const ready = await withinGenerationDeadline(
+        options.isModelReady(actor.workspaceId, modelId),
+        generationDeadlineMs - GENERATION_DEADLINE_HEADROOM_MS -
+          Math.max(0, now().getTime() - generationRequestStartedAtMs),
+      )
+      if (!ready) {
+        throw new AiAssistanceError(
+          'validation',
+          'AiAssistanceProviderCredentialMissing',
+          'An administrator must register an API key for the selected AI model provider.',
+        )
+      }
+    }
+    const createdAt = now()
     const generationId = createId()
     const expiresAt = new Date(
       createdAt.getTime() + policy.retentionDays * RETENTION_DAY_MS,
@@ -551,7 +569,7 @@ export function createAiAssistanceService(
             citations: context.citations,
           },
           details: {
-            provider: 'bedrock',
+            provider: resolveModelProvider(modelId),
             modelId,
             promptVersion: options.promptVersion,
             traceId: actor.traceId,
@@ -600,7 +618,7 @@ export function createAiAssistanceService(
         throw new AiAssistanceError(
           'timeout',
           'AiAssistanceProviderTimeout',
-          'The AI assistance request exceeded its end-to-end deadline before Bedrock started.',
+          'The AI assistance request exceeded its end-to-end deadline before the AI provider started.',
         )
       }
       const attemptStartedAtValue = now()
@@ -635,6 +653,7 @@ export function createAiAssistanceService(
         )
       }
       const generatedModelResult = await options.gateway.generate({
+        workspaceId: actor.workspaceId,
         modelId,
         task: request.task,
         locale: request.locale,
@@ -743,7 +762,7 @@ export function createAiAssistanceService(
           uncertainty: safeOutput.uncertainty,
         },
         details: {
-          provider: 'bedrock',
+          provider: resolveModelProvider(modelId),
           modelId,
           promptVersion: options.promptVersion,
           traceId: modelResult.providerTraceId ?? actor.traceId,
@@ -1250,6 +1269,40 @@ function normalizeGenerationRequestStartedAtMs(
     return createdAtMs
   }
   return requestStartedAtMs
+}
+
+/**
+ * Bounds a pre-reservation check by the remaining end-to-end generation deadline.
+ *
+ * @param check - Pending check, such as provider key resolution.
+ * @param remainingMs - Milliseconds left before the deadline headroom.
+ * @returns The check result when it settles in time.
+ * @throws A timeout error when no time remains or the check does not settle in time.
+ */
+async function withinGenerationDeadline<Result>(
+  check: Promise<Result>,
+  remainingMs: number,
+): Promise<Result> {
+  const timeoutError = () => new AiAssistanceError(
+    'timeout',
+    'AiAssistanceProviderTimeout',
+    'The AI assistance request exceeded its end-to-end deadline before the AI provider started.',
+  )
+  if (remainingMs <= 0) {
+    void check.catch(() => undefined)
+    throw timeoutError()
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      check,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(timeoutError()), remainingMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 /**

@@ -1072,6 +1072,93 @@ test('hydrates owned Work Items with permission-safe approval summaries', async 
   })
 })
 
+test('raises slipped from the baseline of the Projects the viewer works in', async () => {
+  configureFocusSources()
+  configureFakeAuthenticatedUser({
+    email: 'sato@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  const baselineReads: string[] = []
+  setTestAppDependencies({
+    scheduleBaselines: {
+      async get(workspaceId, teamId, projectId) {
+        baselineReads.push(`${workspaceId}/${teamId}/${projectId}`)
+        return {
+          revision: 2,
+          capturedAt: '2026-06-01T00:00:00.000Z',
+          entries: [
+            { workItemId: 'onboarding-friction', endDate: '2026-06-10' },
+            { workItemId: 'not-visible', endDate: '2026-06-01' },
+          ],
+        }
+      },
+      async capture() {
+        throw new Error('Focus must not capture baselines.')
+      },
+    },
+  })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  expect(baselineReads).toEqual(['user#demo@example.com/core-team/refero'])
+  const item = readFocusItem(await response.json(), 'onboarding-friction')
+  expect(item.signals).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      type: 'slipped',
+      source: expect.objectContaining({ kind: 'schedule-baseline' }),
+      resolution: expect.objectContaining({ condition: 'baseline-recovered' }),
+    }),
+  ]))
+})
+
+test('does not read baselines for Work Items the viewer does not own or contribute to', async () => {
+  configureFocusSources('member', undefined, 3)
+  configureFakeAuthenticatedUser({
+    email: 'demo@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  let baselineReads = 0
+  setTestAppDependencies({
+    scheduleBaselines: {
+      async get() {
+        baselineReads += 1
+        return null
+      },
+      async capture() {
+        throw new Error('Focus must not capture baselines.')
+      },
+    },
+  })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  expect(baselineReads).toBe(0)
+})
+
+test('fails closed when a Project baseline cannot be read', async () => {
+  configureFocusSources()
+  configureFakeAuthenticatedUser({
+    email: 'sato@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  setTestAppDependencies({
+    scheduleBaselines: {
+      async get() {
+        throw new ProjectDataError(503, 'ScheduleBaselineRetryable', 'The baseline read was throttled.')
+      },
+      async capture() {
+        throw new Error('Focus must not capture baselines.')
+      },
+    },
+  })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(503)
+})
+
 test('does not read approval summaries for Work Items the viewer does not own', async () => {
   await withTestEnvironment({ FILE_PROOFING_TABLE_NAME: 'focus-api-test' }, async () => {
     configureFocusSources('member', undefined, 3)
@@ -1533,6 +1620,39 @@ test('stores SLA scope overrides and rejects invalid SLA scope values', async ()
     { slaEnabled: 'false' },
     { slaWorkItemTypeIds: [' request'] },
     { slaWorkItemTypeIds: 'request' },
+  ]) {
+    const invalid = await focusRequest('/api/focus/policies', 'PUT', {
+      target: { type: 'user' },
+      expectedVersion: 1,
+      overrides,
+    })
+    expect(invalid.status).toBe(400)
+    expect(await invalid.json()).toMatchObject({ code: 'InvalidFocusInput' })
+  }
+})
+
+test('stores the slipped threshold and weight and rejects invalid values', async () => {
+  configureFocusSources('manager')
+  const response = await focusRequest('/api/focus/policies', 'PUT', {
+    target: { type: 'user' },
+    expectedVersion: 0,
+    overrides: { slippedThresholdDays: 5, weights: { slipped: 90 } },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    policy: { overrides: { slippedThresholdDays: 5, weights: { slipped: 90 } } },
+    effectivePolicies: [{
+      baseSettings: { slippedThresholdDays: 3, weights: { slipped: 60 } },
+      settings: { slippedThresholdDays: 5, weights: { slipped: 90 } },
+    }],
+  })
+
+  for (const overrides of [
+    { slippedThresholdDays: 0 },
+    { slippedThresholdDays: 1.5 },
+    { slippedThresholdDays: 366 },
+    { weights: { slipped: -1 } },
   ]) {
     const invalid = await focusRequest('/api/focus/policies', 'PUT', {
       target: { type: 'user' },

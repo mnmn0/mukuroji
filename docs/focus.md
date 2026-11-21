@@ -16,6 +16,7 @@ Focus は「今も解消していない注意事項」を利用者ごとに並�
 | `mention` | permission-filtered notification event | source の削除、または対象 Work Item の完了 |
 | `sla` | effective policy の起点（既定は開始予定日）と SLA 時間 | Work Item の完了。起点の変更（開始予定日を先へ動かす）、対象 Type から外す、Team が SLA を無効にする、のいずれでも消える |
 | `cycle` | Planning Work Item link と cycle forecast | cycle 変更、または Work Item の完了 |
+| `slipped` | Work Item の Project の最新 schedule baseline（#336） | 予定終了日が閾値未満の遅れに戻る、baseline を保存し直して差が閾値未満になる、Project から外れる、または Work Item の完了・キャンセル |
 
 各 signal は source ID/event ID、原因が実際に生じた日時、再評価時刻、存在する場合は source revision、解消条件、source を開ける現在権限を返します。priority、期限、approval は aggregate 全体の汎用更新時刻ではなく、それぞれの causal timestamp を使います。移行前の Work Item に field-specific timestamp がない場合だけ、無関係な後続編集で原因を新しく見せないよう `createdAt` へ保守的に fallback します。relation/dependency、review request、mention、cycle は source 自身の作成時刻・event ID・revision を保持します。画面はこの情報から「なぜ入ったか」と「何をすれば消えるか」を表示し、独自の順位計算は行いません。
 
@@ -33,6 +34,17 @@ WBS の Work Item は着手の数週間前に作られるため、`sla` は作�
 - `slaWorkItemTypeIds` に Type ID を並べると、その Type だけに `sla` を出します。空の配列はすべての Type です。Type を持たない古い Work Item は `default` として扱います。
 - `slaEnabled: false` で `sla` を出しません。Team policy に設定すると Team 単位で無効にでき、個人 policy でさらに上書きできます。
 - これらは他の設定と同じく product default → Team → 個人の順に疎な override で合成し、effective policy の `settings` と fingerprint に含めます。
+
+### `slipped` と schedule baseline
+
+`slipped` は、利用者が責任者または Contributor の未完了 Work Item が、今の Project の最新 baseline より `slippedThresholdDays`（既定 3、1〜365）日以上遅れて終わる予定のときに出ます（#336）。
+
+- 遅れは `deriveWorkItemBaselineEndDelayDays` で数えます。週次まとめ（#631）・Gantt・WBS 表・Team の表の「ベースライン比の遅れ」と同じで、未完了の Work Item は今の予定終了日と baseline の終了日を暦日で比べます。
+- baseline の entry は、Work Item が今その Project に割り当てられている場合だけ使います。baseline 後に作った Work Item、baseline に終了日がない Work Item には出しません。
+- 原因の発生時刻は、予定終了日の変更時刻（`dueDateUpdatedAt`、なければ `createdAt`）と baseline の保存時刻の遅い方です。source ID は Project、baseline の revision、今の予定終了日を含むので、baseline を保存し直すか日程が動くと別の原因になり、古い snooze に隠れません。
+- 重みは `weights.slipped`（既定 60）で、閾値と同じく product default → Team → 個人の順に合成します。既定の重みだけでは Now の閾値（75）に届かず Next に入ります。
+- baseline は、責任者または Contributor の未完了 Work Item がある Project（Team ごと）だけを読みます（最大 100 Project、超えると `413 FocusScheduleBaselineLimitExceeded`）。Work Item は ACL で絞った後のものだけを使い、それ以外の entry は捨てます。baseline の読み取りが throttle されると `503 FocusScheduleBaselineUnavailable` で fail closed します。
+- 通知と Automation trigger はまだありません。
 
 ### 進捗報告の提出期限
 

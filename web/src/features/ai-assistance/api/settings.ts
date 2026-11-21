@@ -1,10 +1,16 @@
 import type {
+  AiAssistanceAvailableModel,
+  AiAssistanceExternalProvider,
   AiAssistancePolicy,
   AiAssistancePreference,
+  AiAssistanceProvider,
+  AiAssistanceProviderCredentialStatus,
+  AiAssistanceProviderCredentials,
   AiAssistanceTask,
   UpdateAiAssistancePolicyRequest,
   UpdateAiAssistancePreferenceRequest,
 } from '@mukuroji/contracts'
+import { AI_ASSISTANCE_MAX_AVAILABLE_MODELS } from '@mukuroji/contracts'
 import {
   createMutationHeaders,
   type MutationRequestContext,
@@ -17,6 +23,8 @@ import { isRecord } from '../../../shared/api/jsonValidation'
 
 const aiAssistanceSettingsApiBaseUrl = `${resolveAiAssistanceApiBaseUrl(import.meta.env)}/ai-assistance`
 const aiAssistanceTasks = ['triage', 'summary', 'search', 'planning'] as const satisfies readonly AiAssistanceTask[]
+const aiAssistanceProviders = ['bedrock', 'anthropic', 'openai'] as const satisfies readonly AiAssistanceProvider[]
+const aiAssistanceExternalProviders = ['anthropic', 'openai'] as const satisfies readonly AiAssistanceExternalProvider[]
 
 /**
  * Loads the active Workspace AI policy for an authorized administrator.
@@ -46,6 +54,68 @@ export async function updateAiAssistancePolicy(
     headers: createMutationHeaders(mutationContext),
     method: 'PUT',
   }))
+}
+
+/**
+ * Loads the key status of every external AI provider for a Workspace manager.
+ *
+ * @param accessToken - Bearer token for an authorized Workspace administrator.
+ * @returns Key-free status per provider.
+ */
+export async function getAiAssistanceProviderCredentials(
+  accessToken: string,
+): Promise<AiAssistanceProviderCredentials> {
+  return parseAiAssistanceProviderCredentials(await requestJson('/provider-credentials', accessToken))
+}
+
+/**
+ * Registers or replaces one provider API key; the response never contains the key.
+ *
+ * @param accessToken - Bearer token for an authorized Workspace administrator.
+ * @param provider - External provider the key is for.
+ * @param apiKey - Plaintext key typed by the administrator.
+ * @param expectedRevision - Key revision observed before editing.
+ * @param mutationContext - Idempotency and correlation headers.
+ * @returns Key-free status per provider.
+ */
+export async function putAiAssistanceProviderCredential(
+  accessToken: string,
+  provider: AiAssistanceExternalProvider,
+  apiKey: string,
+  expectedRevision: number,
+  mutationContext: MutationRequestContext,
+): Promise<AiAssistanceProviderCredentials> {
+  return parseAiAssistanceProviderCredentials(await requestJson(
+    `/provider-credentials/${provider}`,
+    accessToken,
+    {
+      body: JSON.stringify({ apiKey, expectedRevision }),
+      headers: createMutationHeaders(mutationContext),
+      method: 'PUT',
+    },
+  ))
+}
+
+/**
+ * Removes one provider API key.
+ *
+ * @param accessToken - Bearer token for an authorized Workspace administrator.
+ * @param provider - External provider whose key is removed.
+ * @param expectedRevision - Key revision observed before removing.
+ * @param mutationContext - Idempotency and correlation headers.
+ * @returns Key-free status per provider.
+ */
+export async function deleteAiAssistanceProviderCredential(
+  accessToken: string,
+  provider: AiAssistanceExternalProvider,
+  expectedRevision: number,
+  mutationContext: MutationRequestContext,
+): Promise<AiAssistanceProviderCredentials> {
+  return parseAiAssistanceProviderCredentials(await requestJson(
+    `/provider-credentials/${provider}?expectedRevision=${expectedRevision}`,
+    accessToken,
+    { headers: createMutationHeaders(mutationContext), method: 'DELETE' },
+  ))
 }
 
 /**
@@ -111,6 +181,7 @@ function parseAiAssistancePolicy(value: unknown): AiAssistancePolicy {
     throw invalidResponseError()
   }
 
+  const availableModels = parseAvailableModels(value.availableModels)
   return {
     schemaVersion: 1,
     enabled: value.enabled,
@@ -120,7 +191,60 @@ function parseAiAssistancePolicy(value: unknown): AiAssistancePolicy {
     retentionDays: value.retentionDays,
     revision: value.revision,
     updatedAt: value.updatedAt,
+    ...(availableModels === undefined ? {} : { availableModels }),
   }
+}
+
+/**
+ * Validates the optional server-owned deployment model list.
+ *
+ * @param value - Unknown `availableModels` field.
+ * @returns The validated list, or undefined when absent.
+ * @throws {AiAssistanceApiError} If the field is present but malformed.
+ */
+function parseAvailableModels(value: unknown): AiAssistanceAvailableModel[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length > AI_ASSISTANCE_MAX_AVAILABLE_MODELS) throw invalidResponseError()
+  return value.map((entry: unknown) => {
+    if (!isRecord(entry) || !isIdentifier(entry.modelId)) throw invalidResponseError()
+    const provider = aiAssistanceProviders.find((candidate) => candidate === entry.provider)
+    if (provider === undefined) throw invalidResponseError()
+    return { modelId: entry.modelId, provider }
+  })
+}
+
+/**
+ * Validates the key-free provider status response.
+ *
+ * @param value - Unknown JSON returned by the provider key endpoints.
+ * @returns Validated status per provider.
+ * @throws {AiAssistanceApiError} If the response is malformed.
+ */
+function parseAiAssistanceProviderCredentials(value: unknown): AiAssistanceProviderCredentials {
+  if (!isRecord(value) || value.schemaVersion !== 1 || !Array.isArray(value.providers)) {
+    throw invalidResponseError()
+  }
+  const providers = value.providers.map((entry: unknown): AiAssistanceProviderCredentialStatus => {
+    if (!isRecord(entry) ||
+      typeof entry.deploymentEnabled !== 'boolean' ||
+      typeof entry.configured !== 'boolean' ||
+      !isNonNegativeInteger(entry.revision) ||
+      (entry.keyHint !== undefined && (typeof entry.keyHint !== 'string' || entry.keyHint.length !== 4)) ||
+      (entry.updatedAt !== undefined && !isIsoTimestamp(entry.updatedAt))) {
+      throw invalidResponseError()
+    }
+    const provider = aiAssistanceExternalProviders.find((candidate) => candidate === entry.provider)
+    if (provider === undefined) throw invalidResponseError()
+    return {
+      provider,
+      deploymentEnabled: entry.deploymentEnabled,
+      configured: entry.configured,
+      ...(typeof entry.keyHint === 'string' ? { keyHint: entry.keyHint } : {}),
+      revision: entry.revision,
+      ...(typeof entry.updatedAt === 'string' ? { updatedAt: entry.updatedAt } : {}),
+    }
+  })
+  return { schemaVersion: 1, providers }
 }
 
 /** Validates an untrusted personal AI preference response. */
@@ -214,7 +338,7 @@ function invalidResponseError(status = 502): AiAssistanceApiError {
   )
 }
 
-/** Validates the bounded Bedrock model allowlist returned by the API. */
+/** Validates the bounded model allowlist returned by the API. */
 function isModelIdArray(value: unknown): value is string[] {
   return Array.isArray(value) &&
     value.length >= 1 &&

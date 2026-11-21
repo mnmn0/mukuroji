@@ -5,9 +5,11 @@ export {
   createFocusQueue,
   createFocusWorkItemStateKey,
   focusQueueUsesApprovalSummary,
+  focusQueueUsesScheduleBaseline,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
   type FocusRelationGraphSource,
+  type FocusScheduleBaselineSource,
   type ResolveFocusEffectivePoliciesInput,
 } from './focus-queue'
 

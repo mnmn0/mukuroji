@@ -110,7 +110,9 @@ Project・Team の Gantt は、表示中の Work Item の Project（Team ごと�
 
 保存（初回と置き換え）は baseline の行と同じ transaction で audit event を書く。`project.schedule_baseline_captured`（初回）と `project.schedule_baseline_replaced`（置き換え）で、entity は Project、target は `project-schedule-baseline`。changes には revision・保存時刻・Work Item 数の前後だけを残し、Work Item の ID と日付は残さない。audit の書き込みが失敗すると baseline も保存されない。
 
-まだ無いもの: 名前付きの複数 baseline、予定工数の固定、Focus の `slipped` signal と通知、Planning update の evidence 自動提示。
+Focus は、責任者または Contributor の未完了 Work Item が baseline より Team 設定の日数以上遅れると `slipped` signal を出す（`docs/focus.md`）。
+
+まだ無いもの: 名前付きの複数 baseline、予定工数の固定、`slipped` の通知と Automation trigger、Planning update の evidence 自動提示。
 
 ### Estimate, remaining effort, and progress
 

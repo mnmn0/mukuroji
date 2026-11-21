@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "5.0.58",
+    "@anthropic-ai/sdk": "1.5.0",
     "@aws-sdk/client-apigatewaymanagementapi": "^3.1057.0",
     "@aws-sdk/client-appconfigdata": "3.1057.0",
     "@aws-sdk/client-cloudwatch": "3.1057.0",
@@ -41,6 +42,7 @@
     "@smithy/node-http-handler": "4.9.5",
     "@smithy/signature-v4": "5.6.4",
     "hono": "^4.13.16",
+    "openai": "7.52.0",
     "zod": "4.6.6"
   },
   "devDependencies": {

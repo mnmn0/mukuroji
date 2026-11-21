@@ -190,6 +190,10 @@ type HarnessConfiguration = {
   generationCommitResponseError?: unknown
   /** Enables the adapter-style provider-attempt recovery call. */
   recoverGenerationAttempts?: boolean
+  /** Reports whether the Workspace can call the selected model's provider. */
+  isModelReady?: (workspaceId: string, modelId: string) => Promise<boolean>
+  /** Resolves the provider recorded for the selected model. */
+  resolveModelProvider?: (modelId: string) => 'bedrock' | 'anthropic' | 'openai'
 }
 
 /** Creates a service harness with deterministic fake ports. */
@@ -614,6 +618,12 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     defaultPolicy: createPolicy(),
     deploymentAllowedModelIds: ['model-1'],
     promptVersion: 'ai-assistance-v1',
+    ...(configuration.isModelReady === undefined
+      ? {}
+      : { isModelReady: configuration.isModelReady }),
+    ...(configuration.resolveModelProvider === undefined
+      ? {}
+      : { resolveModelProvider: configuration.resolveModelProvider }),
     ...(configuration.observability === undefined
       ? {}
       : { observability: configuration.observability }),
@@ -1377,6 +1387,62 @@ describe('createAiAssistanceService', () => {
       outcome: 'succeeded',
       providerOutcome: 'succeeded',
     })])
+  })
+
+  test('rejects a model whose provider key is missing before reserving budget', async () => {
+    const checked: string[] = []
+    const harness = createHarness({
+      isModelReady: async (workspaceId, modelId) => {
+        checked.push(`${workspaceId}:${modelId}`)
+        return false
+      },
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-missing-provider-key',
+    )).rejects.toMatchObject({ code: 'AiAssistanceProviderCredentialMissing' })
+
+    expect(checked).toEqual([`${createActor().workspaceId}:model-1`])
+    expect(harness.budgetReservationCount()).toBe(0)
+    expect(harness.gatewayInputs).toHaveLength(0)
+  })
+
+  test('bounds the provider key check by the end-to-end deadline before reserving budget', async () => {
+    const harness = createHarness({
+      generationDeadlineMs: 2_000,
+      providerTimeoutMs: 500,
+      isModelReady: () => new Promise<boolean>(() => undefined),
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-slow-provider-key',
+    )).rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
+
+    expect(harness.budgetReservationCount()).toBe(0)
+    expect(harness.gatewayInputs).toHaveLength(0)
+  })
+
+  test('records the provider of the selected model and passes the Workspace to the gateway', async () => {
+    const harness = createHarness({
+      isModelReady: async () => true,
+      resolveModelProvider: () => 'anthropic',
+    })
+
+    const generation = await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-external-provider',
+    )
+
+    expect(generation.details.provider).toBe('anthropic')
+    expect(harness.gatewayInputs[0]?.workspaceId).toBe(createActor().workspaceId)
   })
 
   test('does not invoke the provider when the durable attempt start write fails', async () => {

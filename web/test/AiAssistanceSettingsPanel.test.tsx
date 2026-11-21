@@ -42,7 +42,7 @@ describe('AiAssistanceSettingsPanel', () => {
     expect(html).toContain('Use AI assistance for my account')
     expect(html).toContain('Save personal setting')
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Save personal setting<\/button>/)
-    expect(html).not.toContain('Allowed Bedrock model IDs')
+    expect(html).not.toContain('Allowed model IDs')
     expect(html).not.toContain(aiAssistancePolicyFixture.defaultModelId)
   })
 
@@ -81,7 +81,7 @@ describe('AiAssistanceSettingsPanel', () => {
     )
 
     expect(html).toContain('Workspace policy')
-    expect(html).toContain('Allowed Bedrock model IDs')
+    expect(html).toContain('Allowed model IDs')
     expect(html).toContain('Revision 4')
     expect(html).toContain('Save Workspace policy')
     expect(html).toContain(aiAssistancePolicyFixture.defaultModelId)
@@ -164,6 +164,6 @@ describe('AiAssistanceSettingsPanel', () => {
 
     expect(html).toContain('AI assistance settings could not be loaded')
     expect(html).toContain('Workspace policy')
-    expect(html).toContain('Allowed Bedrock model IDs')
+    expect(html).toContain('Allowed model IDs')
   })
 })

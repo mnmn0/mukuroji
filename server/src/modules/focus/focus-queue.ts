@@ -22,9 +22,14 @@ import type {
   FocusSlaAnchor,
   FocusUpdateDeadline,
   PlanningSnapshot,
+  ProjectScheduleBaselineEntry,
   WorkItemRelation,
 } from '@mukuroji/contracts'
-import { DEFAULT_WORK_ITEM_TYPE_ID, FOCUS_SCHEMA_VERSION } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  deriveWorkItemBaselineEndDelayDays,
+  FOCUS_SCHEMA_VERSION,
+} from '@mukuroji/contracts'
 import { createHash } from 'node:crypto'
 import type { NotificationItem } from '../notifications'
 import {
@@ -68,6 +73,7 @@ export const DEFAULT_FOCUS_POLICY_SETTINGS: FocusPolicySettings = {
     mention: 45,
     sla: 75,
     cycle: 25,
+    slipped: 60,
   },
   dueSoonDays: 3,
   cycleDueSoonDays: 2,
@@ -75,6 +81,7 @@ export const DEFAULT_FOCUS_POLICY_SETTINGS: FocusPolicySettings = {
   slaEnabled: true,
   slaAnchor: 'planned-start',
   slaWorkItemTypeIds: [],
+  slippedThresholdDays: 3,
   nowScoreThreshold: 75,
 }
 
@@ -98,6 +105,20 @@ export type FocusRelationGraphSource = {
   graphRevision: number
   /** Relations whose source and target Work Items are both currently visible. */
   relations: readonly WorkItemRelation[]
+}
+
+/** Frozen planned dates of one readable Work Item in the latest baseline of its Project. */
+export type FocusScheduleBaselineSource = {
+  /** Team that owns the Project and the Work Item. */
+  teamId: string
+  /** Project whose baseline holds the entry. */
+  projectId: string
+  /** Baseline revision, which changes when the baseline is captured again. */
+  revision: number
+  /** ISO timestamp of the baseline capture. */
+  capturedAt: string
+  /** Baseline entry of the Work Item. */
+  entry: ProjectScheduleBaselineEntry
 }
 
 /** ACL-filtered canonical sources and recipient state used to project Focus. */
@@ -128,6 +149,12 @@ export type CreateFocusQueueInput = {
    * Relation-only blockers are omitted when this evidence is unavailable.
    */
   relationGraphs?: readonly FocusRelationGraphSource[]
+  /**
+   * Baseline entries of readable Work Items, read from the latest baseline of each Work Item's
+   * current Project. An entry is used only while the Work Item is still assigned to that Project.
+   * The `slipped` signal is omitted when this evidence is unavailable.
+   */
+  scheduleBaselines?: readonly FocusScheduleBaselineSource[]
   /** Reviewer approval requests already reauthorized for the current caller. */
   reviewerApprovals: readonly ApprovalRequest[]
   /** Notification events already filtered by current source visibility. */
@@ -241,6 +268,8 @@ type FocusProjectionContext = {
   approvalsByWorkItemKey: ReadonlyMap<string, readonly ApprovalRequest[]>
   /** Visible notifications grouped by Team-qualified Work Item identity. */
   notificationsByWorkItemKey: ReadonlyMap<string, readonly NotificationItem[]>
+  /** Schedule baseline entries keyed by Team-qualified Work Item identity. */
+  scheduleBaselinesByWorkItemKey: ReadonlyMap<string, FocusScheduleBaselineSource>
 }
 
 /** Internal item projection retained until section ordering is complete. */
@@ -565,6 +594,7 @@ function applyPolicyOverrides(
     slaEnabled: overrides?.slaEnabled ?? base.slaEnabled,
     slaAnchor: overrides?.slaAnchor ?? base.slaAnchor,
     slaWorkItemTypeIds: overrides?.slaWorkItemTypeIds ?? base.slaWorkItemTypeIds,
+    slippedThresholdDays: overrides?.slippedThresholdDays ?? base.slippedThresholdDays,
     nowScoreThreshold: overrides?.nowScoreThreshold ?? base.nowScoreThreshold,
   })
 }
@@ -590,6 +620,7 @@ function mergeSignalWeights(
     mention: overrides?.mention ?? base.mention,
     sla: overrides?.sla ?? base.sla,
     cycle: overrides?.cycle ?? base.cycle,
+    slipped: overrides?.slipped ?? base.slipped,
   }
 }
 
@@ -614,6 +645,7 @@ function normalizePolicySettings(settings: FocusPolicySettings): FocusPolicySett
     throw new RangeError('Focus SLA anchor is not supported.')
   }
   const slaWorkItemTypeIds = normalizeFocusSlaWorkItemTypeIds(settings.slaWorkItemTypeIds)
+  requireBoundedInteger(settings.slippedThresholdDays, 1, 365, 'Focus slipped threshold days')
   requireBoundedFiniteNumber(
     settings.nowScoreThreshold,
     0,
@@ -628,6 +660,7 @@ function normalizePolicySettings(settings: FocusPolicySettings): FocusPolicySett
     slaEnabled: settings.slaEnabled,
     slaAnchor: settings.slaAnchor,
     slaWorkItemTypeIds,
+    slippedThresholdDays: settings.slippedThresholdDays,
     nowScoreThreshold: settings.nowScoreThreshold,
   }
 }
@@ -813,6 +846,7 @@ function signalOrder(type: FocusSignalType): number {
     case 'mention': return 6
     case 'sla': return 7
     case 'cycle': return 8
+    case 'slipped': return 9
   }
 }
 
@@ -903,6 +937,12 @@ function createProjectionContext(
     ),
     approvalsByWorkItemKey,
     notificationsByWorkItemKey,
+    scheduleBaselinesByWorkItemKey: new Map(
+      (input.scheduleBaselines ?? []).map((source) => [
+        createWorkItemKey(source.teamId, source.entry.workItemId),
+        source,
+      ]),
+    ),
   }
 }
 
@@ -1139,6 +1179,31 @@ export function focusQueueUsesApprovalSummary(
 }
 
 /**
+ * Tells whether the Focus queue reads a Work Item's Project schedule baseline for the viewer.
+ *
+ * Only the `slipped` signal uses the baseline, and it is projected for unfinished Work Items in a
+ * Project that the viewer owns or contributes to.
+ *
+ * @param workItem - Canonical Work Item visible to the viewer.
+ * @param viewerMemberKey - Viewer member key, normalized the same way as the queue input.
+ * @returns Whether the baseline can contribute a Focus signal.
+ */
+export function focusQueueUsesScheduleBaseline(
+  workItem: CanonicalWorkItem,
+  viewerMemberKey: string,
+): boolean {
+  if (
+    workItem.archivedAt !== undefined ||
+    isTerminalWorkItem(workItem) ||
+    workItem.assignedProjectId === undefined
+  ) {
+    return false
+  }
+  const viewer = normalizeFocusMemberKey(viewerMemberKey)
+  return resolveFocusItemInvolvement(workItem, viewer, false) !== 'related'
+}
+
+/**
  * Projects and deduplicates every active signal for one Work Item.
  *
  * @param context - Canonical source indexes.
@@ -1174,10 +1239,10 @@ function createProjectedSignals(
 }
 
 /**
- * Projects the Work Item's own priority, deadline, blocker, SLA, and cycle signals.
+ * Projects the Work Item's own priority, deadline, blocker, SLA, cycle, and baseline slip signals.
  *
  * Owners and contributors both carry out the work, so both see priority, deadline,
- * blocker, and cycle signals. The SLA signal tracks the accountable owner's response
+ * blocker, cycle, and baseline slip signals. The SLA signal tracks the accountable owner's response
  * obligation and is projected only for the owner.
  *
  * @param context - Canonical source indexes.
@@ -1200,7 +1265,57 @@ function createOwnedWorkItemSignals(
     ...createBlockerSignals(context, workItem),
     ...(involvement === 'owner' ? createSlaSignal(context, workItem, policy) : []),
     ...createCycleSignals(context, workItem, policy.settings.cycleDueSoonDays),
+    ...createSlippedSignal(context, workItem, policy.settings.slippedThresholdDays),
   ]
+}
+
+/**
+ * Projects a Work Item whose planned end is at least the threshold behind its Project baseline.
+ *
+ * The delay is the same one the weekly summary, the Gantt baseline overlay, and the WBS tables
+ * show. The signal resolves when the plan comes back within the threshold or the baseline is
+ * captured again.
+ *
+ * @param context - Projection context holding the readable baseline entries.
+ * @param workItem - Unfinished Work Item the viewer owns or contributes to.
+ * @param thresholdDays - Inclusive calendar-day delay that raises the signal.
+ * @returns Zero or one slipped signal.
+ */
+function createSlippedSignal(
+  context: FocusProjectionContext,
+  workItem: CanonicalWorkItem,
+  thresholdDays: number,
+): ProjectedSignal[] {
+  const source = context.scheduleBaselinesByWorkItemKey.get(
+    createWorkItemKey(workItem.teamId, workItem.id),
+  )
+  if (source === undefined || workItem.assignedProjectId !== source.projectId) return []
+  const delayDays = deriveWorkItemBaselineEndDelayDays(source.entry, workItem)
+  if (delayDays === undefined || delayDays < thresholdDays) return []
+  // The slip became visible when the end date moved or, for an older move, when the baseline was taken.
+  const endChangedAt = selectCausalTimestamp(workItem.dueDateUpdatedAt, workItem.createdAt)
+  const occurredAt = Date.parse(endChangedAt) > Date.parse(source.capturedAt)
+    ? endChangedAt
+    : source.capturedAt
+  return [createProjectedSignal({
+    type: 'slipped',
+    sourceKind: 'schedule-baseline',
+    sourceId: createCausalSourceId(
+      [
+        createWorkItemSourceId(workItem),
+        'baseline',
+        encodeURIComponent(source.projectId),
+        String(source.revision),
+        encodeURIComponent(workItem.dueDate),
+      ].join(':'),
+      occurredAt,
+    ),
+    occurredAt,
+    evaluatedAt: context.evaluatedAt,
+    sourceVersion: workItem.revision,
+    deepLink: createWorkItemDeepLink(workItem),
+    resolutionCondition: 'baseline-recovered',
+  })]
 }
 
 /**
@@ -1841,6 +1956,7 @@ function readSignalWeight(weights: FocusSignalWeights, type: FocusSignalType): n
     case 'mention': return weights.mention
     case 'sla': return weights.sla
     case 'cycle': return weights.cycle
+    case 'slipped': return weights.slipped
   }
 }
 
