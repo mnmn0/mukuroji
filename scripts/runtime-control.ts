@@ -564,6 +564,12 @@ export async function runRuntimeControl(
     gitHubRun: dependencies.gitHubRun,
   }
   let audit = target.audit
+  /**
+   * Writes one step of this switch to the audit log with the current retention.
+   *
+   * @param step - Phase and details of the step.
+   * @returns Resolves once the event is stored.
+   */
   const record = (step: RuntimeControlAuditStep): Promise<void> =>
     recordAuditEvent(audit, change, step, region, dependencies)
 
