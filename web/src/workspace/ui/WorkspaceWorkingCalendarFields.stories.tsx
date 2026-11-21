@@ -13,6 +13,7 @@ const sampleCalendar: WorkspaceCalendarSettings = {
   weekStartDay: 1,
   workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],
   holidays: ['2027-01-01', '2027-01-02', '2027-05-03'],
+  publicHolidays: 'japan',
 }
 
 /** Calendar with a single working weekday, whose checkbox cannot be cleared. */
@@ -21,6 +22,7 @@ const singleWeekdayCalendar: WorkspaceCalendarSettings = {
   weekStartDay: 1,
   workingWeekdays: ['monday'],
   holidays: [],
+  publicHolidays: 'none',
 }
 
 /** Props of {@link EditableWorkingCalendar}. */
@@ -57,7 +59,7 @@ const meta = {
   },
 } satisfies Meta<typeof WorkspaceWorkingCalendarFields>
 
-/** Working weekday and company holiday editor of the tenant administration settings. */
+/** Working weekday, national holiday, and company holiday editor of the tenant administration settings. */
 export default meta
 
 /** Story variants for the working calendar editor. */
@@ -75,6 +77,9 @@ export const Editable: Story = {
     await expect(canvas.queryByText('2027-01-02')).not.toBeInTheDocument()
     await userEvent.click(canvas.getByTestId('tenant-working-weekday-saturday'))
     await expect(canvas.getByTestId('tenant-working-weekday-saturday')).not.toBeChecked()
+    await expect(canvas.getByTestId('tenant-public-holidays')).toBeChecked()
+    await userEvent.click(canvas.getByTestId('tenant-public-holidays'))
+    await expect(canvas.getByTestId('tenant-public-holidays')).not.toBeChecked()
   },
 }
 

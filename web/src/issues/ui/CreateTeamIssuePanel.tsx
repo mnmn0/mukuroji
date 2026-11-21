@@ -1,4 +1,4 @@
-import type { WorkItemConfiguration } from '@mukuroji/contracts'
+import type { WorkItemConfiguration, WorkItemScheduleCalendarPolicy } from '@mukuroji/contracts'
 import { useState } from 'react'
 import { type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { type CreateTeamIssueInput } from '../api'
@@ -43,6 +43,7 @@ import {
  */
 export function CreateIssuePanel({
   assigneeOptions,
+  calendarPolicy,
   canCreateUnassignedIssue,
   configuration,
   duplicateDraft,
@@ -57,6 +58,8 @@ export function CreateIssuePanel({
   workspaceMembers,
 }: {
   assigneeOptions: ProjectMember[]
+  /** Workspace working calendar the new Work Item keeps; the default policy is used when omitted. */
+  calendarPolicy?: WorkItemScheduleCalendarPolicy
   /** Whether an unassigned Team-owned Work Item is an authorized create destination. */
   canCreateUnassignedIssue: boolean
   configuration?: WorkItemConfiguration
@@ -142,9 +145,12 @@ export function CreateIssuePanel({
           const assignedProjectId = String(formData.get('assignedProjectId') ?? '').trim()
           const assigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
           const dueDate = String(formData.get('dueDate') ?? '').trim()
-          const schedule = dueDate
+          const defaultSchedule = dueDate
             ? createDefaultDueDateTaskSchedule(dueDate)
             : createDefaultUnscheduledTaskSchedule()
+          const schedule = calendarPolicy
+            ? { ...defaultSchedule, calendarPolicy: structuredClone(calendarPolicy) }
+            : defaultSchedule
           const workflowStatusId = String(
             formData.get('workflowStatusId') ?? initialWorkflowStatusId,
           ).trim()

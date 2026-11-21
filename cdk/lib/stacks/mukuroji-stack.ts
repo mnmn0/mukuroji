@@ -40,6 +40,7 @@ import { buildScheduledJobsWorker } from '../subsystems/workers/scheduled-jobs';
 import {
   defineAnalyticsScheduleJob,
   defineCycleScheduleJob,
+  defineJapanesePublicHolidaySyncJob,
   defineNotificationScheduleJob,
 } from '../subsystems/workers/schedules';
 import { defineSlackNotificationJob } from '../subsystems/workers/slack-notifications';
@@ -287,6 +288,7 @@ export class MukurojiStack extends cdk.Stack {
         defineAnalyticsScheduleJob({ dataStores, parameters }),
         defineNotificationScheduleJob({ dataStores, parameters }),
         defineCycleScheduleJob({ dataStores, parameters }),
+        defineJapanesePublicHolidaySyncJob({ dataStores, parameters }),
       ],
     });
     // The API and the scheduled-jobs Lambda read this to refuse Software factory routes and to

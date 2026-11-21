@@ -539,7 +539,21 @@ function createCalendarRouter(
     updates.push(input)
     return (await client.getSnapshot('workspace-1')).profile
   }
-  return createTenantAdministrationRouter({
+  return createTenantAdministrationRouter(createCalendarRouterDependencies(client, administrator))
+}
+
+/**
+ * Builds the router dependencies the calendar tests use.
+ *
+ * @param client - Tenant administration client.
+ * @param administrator - Whether the principal may change settings.
+ * @returns Router dependencies.
+ */
+function createCalendarRouterDependencies(
+  client: TenantAdministrationClient,
+  administrator = false,
+): Parameters<typeof createTenantAdministrationRouter<{ directoryId: string, userKey: string }>>[0] {
+  return {
     async authenticate() {
       return { directoryId: 'workspace-1', userKey: 'member-1' }
     },
@@ -567,7 +581,7 @@ function createCalendarRouter(
       const code = error instanceof TenantAdministrationError ? error.code : 'UnknownError'
       return Response.json({ code }, { status })
     },
-  })
+  }
 }
 
 test('lets any member read the Workspace calendar settings, with defaults before setup', async () => {
@@ -593,6 +607,7 @@ test('lets any member read the Workspace calendar settings, with defaults before
     weekStartDay: 1,
     workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
     holidays: [],
+    publicHolidays: 'japan',
   })
   // Reading must not initialize tenant state on a member's behalf.
   expect(ensureCalls).toEqual([])
@@ -604,6 +619,7 @@ test('lets any member read the Workspace calendar settings, with defaults before
       weekStartDay: 0,
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday'],
       holidays: ['2027-01-01'],
+      publicHolidays: 'none',
     },
   })
   const stored = await createCalendarRouter(client).request('/api/workspace/calendar-settings', {
@@ -615,6 +631,7 @@ test('lets any member read the Workspace calendar settings, with defaults before
     weekStartDay: 0,
     workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday'],
     holidays: ['2027-01-01'],
+    publicHolidays: 'none',
   })
 
   const unauthenticated = await createCalendarRouter(client).request('/api/workspace/calendar-settings')
@@ -628,6 +645,29 @@ test('lets any member read the Workspace calendar settings, with defaults before
     headers: { Authorization: 'Bearer token-1' },
   })
   expect(failed.status).toBe(503)
+})
+
+test('sends the national holiday dates the server uses with the calendar settings', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const client = createClient(snapshot, [])
+  client.getProfile = async () => undefined
+  const router = createTenantAdministrationRouter({
+    ...createCalendarRouterDependencies(client),
+    nationalHolidays: { listDates: async () => ['2027-01-01', '2028-01-01'] },
+  })
+
+  const response = await router.request('/api/workspace/calendar-settings', {
+    headers: { Authorization: 'Bearer token-1' },
+  })
+
+  expect(await response.json()).toMatchObject({
+    publicHolidays: 'japan',
+    nationalHolidayDates: ['2027-01-01', '2028-01-01'],
+  })
 })
 
 test('keeps calendar settings changes behind administration and validates them', async () => {
@@ -666,6 +706,7 @@ test('keeps calendar settings changes behind administration and validates them',
     { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: ['2027-02-30'] },
     { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: ['1969-12-31'] },
     { fiscalYearStartMonth: 4, weekStartDay: 1, holidays: '2027-01-01' },
+    { fiscalYearStartMonth: 4, weekStartDay: 1, publicHolidays: 'us' },
     {
       fiscalYearStartMonth: 4,
       weekStartDay: 1,
@@ -690,7 +731,8 @@ test('keeps calendar settings changes behind administration and validates them',
     method: 'PATCH',
   })
   expect(accepted.status).toBe(200)
-  // Settings from before working days existed get the Monday-to-Friday default and no holidays.
+  // Settings from before working days existed get the Monday-to-Friday default, no company
+  // holidays, and the Japanese national holidays.
   expect(updates).toEqual([{
     ...body,
     locale: 'ja',
@@ -699,6 +741,7 @@ test('keeps calendar settings changes behind administration and validates them',
       weekStartDay: 0,
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
       holidays: [],
+      publicHolidays: 'japan',
     },
   }])
 
@@ -710,6 +753,7 @@ test('keeps calendar settings changes behind administration and validates them',
         weekStartDay: 1,
         workingWeekdays: ['saturday', 'monday', 'monday', 'tuesday'],
         holidays: ['2027-05-03', '2027-01-01', '2027-05-03'],
+        publicHolidays: 'none',
       },
     }),
     headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
@@ -725,6 +769,7 @@ test('keeps calendar settings changes behind administration and validates them',
       weekStartDay: 1,
       workingWeekdays: ['monday', 'tuesday', 'saturday'],
       holidays: ['2027-01-01', '2027-05-03'],
+      publicHolidays: 'none',
     },
   })
 })

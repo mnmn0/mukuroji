@@ -388,6 +388,7 @@ export const workItemsMessages = {
   'tasks.addTask': 'タスクを追加',
   'tasks.create.title': 'タスク名',
   'tasks.workspaceCalendar.error': 'Workspace の稼働カレンダーを取得できませんでした。新しい Work Item と Gantt は、月〜金を稼働日・休日なしとして扱っています。',
+  'tasks.workspaceCalendar.staleError': 'Workspace の稼働カレンダーを読み直せませんでした。新しい Work Item と Gantt は、前回読み込んだカレンダーを使っています。',
   'tasks.workspaceCalendar.retry': 'もう一度読み込む',
   'tasks.create.titlePlaceholder': '例: リリース前チェック',
   'tasks.create.assignee': '担当者',

@@ -3493,15 +3493,21 @@ function readCreatePublicWorkItemRequest(value: unknown): CreatePublicWorkItemRe
     'workflowStatusId',
     'customFieldValues',
     'schedule',
+    'dueDate',
     'priority',
     'workItemTypeId',
   ], 'Work Item body')
   const description = readOptionalString(body.description, 'description', 100_000)
+  if (body.schedule !== undefined && body.dueDate !== undefined) {
+    throw new PublicApiServiceError(400, 'validation_failed', 'Send schedule or dueDate, not both.')
+  }
   return {
     teamId: readIdentifier(body.teamId, 'teamId'),
     title: readRequiredString(body.title, 'title'),
     assigneeUserId: readIdentifier(body.assigneeUserId, 'assigneeUserId'),
-    schedule: readPublicWorkItemSchedule(body.schedule),
+    // Without a schedule the server uses the Workspace working calendar.
+    ...(body.schedule === undefined ? {} : { schedule: readPublicWorkItemSchedule(body.schedule) }),
+    ...(body.dueDate === undefined ? {} : { dueDate: readIsoDate(body.dueDate, 'dueDate') }),
     priority: readPriority(body.priority),
     ...(description !== undefined ? { description } : {}),
     ...(body.assignedProjectId !== undefined

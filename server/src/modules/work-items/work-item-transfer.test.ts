@@ -4,6 +4,7 @@ import {
   WORK_ITEM_TITLE_MAX_LENGTH,
   createDefaultDueDateWorkItemSchedule,
   type CanonicalWorkItem,
+  type WorkItemScheduleWeekday,
 } from '@mukuroji/contracts'
 import {
   WorkItemTransferError,
@@ -42,6 +43,33 @@ describe('Work Item import dry-run', () => {
       'RequiredFieldMissing',
       'InvalidPriority',
     ])
+  })
+
+  test('uses the Workspace calendar for a schedule without a calendar policy', () => {
+    const workspacePolicy = {
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'] satisfies WorkItemScheduleWeekday[],
+      holidays: ['2026-11-23'],
+    }
+    const rows = [
+      { Name: 'Due', Owner: 'sato', Schedule: { mode: 'due-date', dueDate: '2026-11-24' } },
+      { Name: 'Range', Owner: 'sato', Schedule: { mode: 'date-range', startDate: '2026-11-20', endDate: '2026-11-24' } },
+      { Name: 'Kept', Owner: 'sato', Schedule: dueDateSchedule },
+    ]
+    const preview = previewWorkItemImport('json', JSON.stringify(rows), mapping, workspacePolicy)
+
+    expect(preview.errors).toEqual([])
+    expect(preview.rows[0]?.input?.schedule).toEqual({
+      mode: 'due-date',
+      dueDate: '2026-11-24',
+      calendarPolicy: workspacePolicy,
+    })
+    // 11/20 (Fri) and 11/24 (Tue) count; the weekend and the 11/23 holiday do not.
+    expect(preview.rows[1]?.input?.schedule).toMatchObject({ durationDays: 2, calendarPolicy: workspacePolicy })
+    expect(preview.rows[2]?.input?.schedule).toEqual(dueDateSchedule)
+
+    const withoutWorkspace = previewWorkItemImport('json', JSON.stringify(rows.slice(0, 1)), mapping)
+    expect(withoutWorkspace.errors.map((error) => error.code)).toEqual(['InvalidSchedule'])
   })
 
   test('JSON array と string array custom field を扱う', () => {

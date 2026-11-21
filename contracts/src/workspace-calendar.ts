@@ -1,3 +1,5 @@
+import { listJapanesePublicHolidays } from './japanese-public-holidays'
+
 /**
  * IANA time zone that decides the Workspace's local calendar date ("today").
  *
@@ -98,6 +100,16 @@ export const WORKSPACE_CALENDAR_MAX_HOLIDAYS = 512
 /** Earliest year accepted for a Workspace holiday; Work Item schedules accept these dates too. */
 const WORKSPACE_CALENDAR_MIN_HOLIDAY_YEAR = 1970
 
+/**
+ * National holidays a Workspace treats as days off on top of its company holidays.
+ *
+ * `japan` uses the Japanese holidays bundled with the application; `none` uses company holidays only.
+ */
+export type WorkspacePublicHolidayCalendar = 'japan' | 'none'
+
+/** Every national holiday choice, in the order the settings screen lists them. */
+export const WORKSPACE_PUBLIC_HOLIDAY_CALENDARS: readonly WorkspacePublicHolidayCalendar[] = ['japan', 'none']
+
 /** Workspace-wide calendar settings that decide fiscal years, weeks, and working days. */
 export type WorkspaceCalendarSettings = {
   /** First month of the fiscal year, from 1 (January) to 12 (December). */
@@ -108,20 +120,23 @@ export type WorkspaceCalendarSettings = {
   workingWeekdays: WorkspaceCalendarWeekday[]
   /** Company holidays as local `YYYY-MM-DD` dates, sorted ascending without duplicates. */
   holidays: string[]
+  /** National holidays that are days off in addition to the company holidays. */
+  publicHolidays: WorkspacePublicHolidayCalendar
 }
 
 /**
  * Calendar settings of a Workspace that has not chosen its own.
  *
- * They keep the behavior from before the settings existed: calendar-year fiscal years,
- * Monday-based weeks, and Monday-to-Friday working days without holidays, as the timesheet,
- * capacity planning, and new Work Item schedules already use.
+ * Calendar-year fiscal years, Monday-based weeks, and Monday-to-Friday working days as the
+ * timesheet and capacity planning already use, without company holidays but with the bundled
+ * Japanese national holidays as days off.
  */
 export const DEFAULT_WORKSPACE_CALENDAR_SETTINGS: WorkspaceCalendarSettings = {
   fiscalYearStartMonth: 1,
   weekStartDay: 1,
   workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
   holidays: [],
+  publicHolidays: 'japan',
 }
 
 /**
@@ -139,8 +154,9 @@ export function isWorkspaceWeekStartDay(value: unknown): value is WorkspaceWeekS
  * Reads untrusted Workspace calendar settings.
  *
  * Settings stored before working days existed carry only the fiscal year and week start, so a
- * missing `workingWeekdays` reads as Monday to Friday and missing `holidays` as none. Weekdays come
- * back in Monday-first order and holidays sorted, both without duplicates.
+ * missing `workingWeekdays` reads as Monday to Friday and missing `holidays` as none. Settings
+ * stored before national holidays existed read as using the Japanese holidays. Weekdays come back
+ * in Monday-first order and holidays sorted, both without duplicates.
  *
  * @param value - Untrusted candidate, such as a request body field or a stored record.
  * @returns Settings built from the value, or undefined when any field is invalid.
@@ -160,8 +176,112 @@ export function readWorkspaceCalendarSettings(value: unknown): WorkspaceCalendar
   }
   const workingWeekdays = readWorkspaceWorkingWeekdays(Reflect.get(value, 'workingWeekdays'))
   const holidays = readWorkspaceHolidays(Reflect.get(value, 'holidays'))
-  if (!workingWeekdays || !holidays) return undefined
-  return { fiscalYearStartMonth, weekStartDay, workingWeekdays, holidays }
+  const publicHolidays = readWorkspacePublicHolidayCalendar(Reflect.get(value, 'publicHolidays'))
+  if (!workingWeekdays || !holidays || !publicHolidays) return undefined
+  return { fiscalYearStartMonth, weekStartDay, workingWeekdays, holidays, publicHolidays }
+}
+
+/**
+ * Workspace calendar settings as `GET /api/workspace/calendar-settings` returns them, with the
+ * national holiday dates the server uses for new Work Items.
+ */
+export type WorkspaceCalendarSettingsResponse = WorkspaceCalendarSettings & {
+  /**
+   * Japanese national holiday dates the server uses now: the latest list synced from the Cabinet
+   * Office, or the bundled list before the first sync. Older servers leave it out.
+   */
+  nationalHolidayDates?: string[]
+}
+
+/** Most national holiday dates a calendar settings response may carry. */
+export const WORKSPACE_NATIONAL_HOLIDAY_DATES_MAX = 2_000
+
+/**
+ * Reads the national holiday dates of an untrusted calendar settings response.
+ *
+ * @param value - Untrusted response body.
+ * @returns Sorted unique dates, or undefined when the field is missing or invalid.
+ */
+export function readWorkspaceNationalHolidayDates(value: unknown): string[] | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const dates: unknown = Reflect.get(value, 'nationalHolidayDates')
+  if (
+    !Array.isArray(dates) ||
+    dates.length > WORKSPACE_NATIONAL_HOLIDAY_DATES_MAX ||
+    !dates.every(isWorkspaceHolidayDate)
+  ) {
+    return undefined
+  }
+  return [...new Set(dates)].sort()
+}
+
+/**
+ * Narrows an untrusted value to a national holiday choice.
+ *
+ * @param value - Untrusted candidate.
+ * @returns Whether the value names a national holiday choice.
+ */
+export function isWorkspacePublicHolidayCalendar(value: unknown): value is WorkspacePublicHolidayCalendar {
+  return WORKSPACE_PUBLIC_HOLIDAY_CALENDARS.some((calendar) => calendar === value)
+}
+
+/**
+ * Reads the national holiday choice of untrusted calendar settings.
+ *
+ * @param value - Untrusted `publicHolidays` field.
+ * @returns The choice, the default when the field is missing, or undefined when it is invalid.
+ */
+function readWorkspacePublicHolidayCalendar(value: unknown): WorkspacePublicHolidayCalendar | undefined {
+  if (value === undefined) return DEFAULT_WORKSPACE_CALENDAR_SETTINGS.publicHolidays
+  return isWorkspacePublicHolidayCalendar(value) ? value : undefined
+}
+
+/**
+ * Lists every date the Workspace takes off besides its non-working weekdays.
+ *
+ * Company holidays and, when the Workspace uses them, the national holidays are merged.
+ * A Work Item schedule keeps at most {@link WORKSPACE_CALENDAR_MAX_HOLIDAYS} holidays. When the
+ * merged list is longer, the national holidays of the reference year and the next year are always
+ * kept, and the remaining places go to the other dates nearest the reference date, a later date
+ * winning a tie. Company holidays far from today are the ones left out.
+ *
+ * @param settings - Company holidays and national holiday choice of the Workspace.
+ * @param nationalHolidayDates - National holiday dates the server synced from the Cabinet Office;
+ *   the bundled national holidays are used when omitted.
+ * @param referenceDate - `YYYY-MM-DD` date the kept dates are nearest to; today in Japan by default.
+ * @returns Sorted unique local `YYYY-MM-DD` dates.
+ */
+export function listWorkspaceDaysOff(
+  settings: Pick<WorkspaceCalendarSettings, 'holidays' | 'publicHolidays'>,
+  nationalHolidayDates?: readonly string[],
+  referenceDate: string = todayInJapan(),
+): string[] {
+  const nationalHolidays = settings.publicHolidays === 'japan'
+    ? nationalHolidayDates ?? listJapanesePublicHolidays().map((holiday) => holiday.date)
+    : []
+  const daysOff = [...new Set([...settings.holidays, ...nationalHolidays])].sort()
+  if (daysOff.length <= WORKSPACE_CALENDAR_MAX_HOLIDAYS) return daysOff
+  const referenceYear = Number(referenceDate.slice(0, 4))
+  const keptYears = new Set([String(referenceYear), String(referenceYear + 1)])
+  // This year's and next year's national holidays come first; they fit, since a year has at most
+  // a few dozen.
+  const required = new Set(nationalHolidays.filter((date) => keptYears.has(date.slice(0, 4))))
+  const reference = Date.parse(`${referenceDate}T00:00:00.000Z`)
+  const distance = (date: string) => Math.abs(Date.parse(`${date}T00:00:00.000Z`) - reference)
+  const others = daysOff
+    .filter((date) => !required.has(date))
+    .sort((left, right) => distance(left) - distance(right) || right.localeCompare(left))
+  return [...required, ...others].slice(0, WORKSPACE_CALENDAR_MAX_HOLIDAYS).sort()
+}
+
+/**
+ * Reads today's date in Japan, the time zone of Work Item calendars.
+ *
+ * @returns Today's `YYYY-MM-DD` date in Asia/Tokyo.
+ */
+function todayInJapan(): string {
+  // Japan has no daylight saving time, so a fixed nine-hour offset is exact.
+  return new Date(Date.now() + 9 * 60 * 60 * 1_000).toISOString().slice(0, 10)
 }
 
 /**

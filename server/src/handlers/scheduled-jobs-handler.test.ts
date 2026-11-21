@@ -12,6 +12,7 @@ test('keeps the cadence and retry policy each scheduled worker had as its own La
       { name: 'analytics-schedule', everyMinutes: 5, attempts: 3 },
       { name: 'notification-schedule', everyMinutes: 60, attempts: 3 },
       { name: 'cycle-schedule', everyMinutes: 60, attempts: 3 },
+      { name: 'japanese-public-holiday-sync', everyMinutes: 360, attempts: 2 },
     ])
 })
 
@@ -25,6 +26,7 @@ test('runs each job through its runtime-control guarded entrypoint', async () =>
     'automation-schedule-handler',
     'cycle-schedule-handler',
     'email-notifications-handler',
+    'japanese-public-holiday-sync-handler',
     'notification-schedule-handler',
     'slack-notifications-handler',
     'triage-schedule-handler',
@@ -43,5 +45,6 @@ test('leaves the Agent Run triage job out when Software factory is not deployed'
     'analytics-schedule',
     'notification-schedule',
     'cycle-schedule',
+    'japanese-public-holiday-sync',
   ])
 })

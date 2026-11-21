@@ -5268,6 +5268,7 @@ test.describe('authenticated task page', () => {
           weekStartDay: 1,
           workingWeekdays,
           holidays: ['2026-06-09', '2026-06-10'],
+          publicHolidays: 'none',
         },
       })
     })

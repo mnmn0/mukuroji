@@ -36,7 +36,8 @@ export type WorkspaceWorkingCalendarFieldsProps = {
 }
 
 /**
- * Edits the weekdays the whole Workspace works on and its company holidays.
+ * Edits the weekdays the whole Workspace works on, whether national holidays are days off, and its
+ * company holidays.
  *
  * New Work Items count working days with these settings, so at least one weekday always stays
  * checked and holidays stay sorted without duplicates.
@@ -100,6 +101,21 @@ export function WorkspaceWorkingCalendarFields({
           })}
         </div>
       </fieldset>
+      <div className="grid gap-1">
+        <label className="inline-flex items-center gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
+          <input
+            checked={calendar.publicHolidays === 'japan'}
+            data-testid="tenant-public-holidays"
+            disabled={disabled}
+            onChange={(event) => onChange({ ...calendar, publicHolidays: event.target.checked ? 'japan' : 'none' })}
+            type="checkbox"
+          />
+          {t('workspace.tenantAdministration.publicHolidays')}
+        </label>
+        <p className="text-xs text-[var(--workbench-muted)]">
+          {t('workspace.tenantAdministration.publicHolidaysHint')}
+        </p>
+      </div>
       <div className="grid gap-2">
         <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]" htmlFor="tenant-holiday-draft">
           {t('workspace.tenantAdministration.holidays')}
