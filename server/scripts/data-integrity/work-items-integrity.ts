@@ -26,8 +26,11 @@ const DIGEST_VERSION = 1
 const DIGEST_BYTE_LENGTH = 32
 const MAX_SCAN_PAGES = 100_000
 const MAX_SCAN_ITEMS = 1_000_000
-/** Member index rows a scan may read on top of MAX_SCAN_ITEMS: one owner and 20 contributors per Work Item. */
-const MAX_SCAN_MEMBER_INDEX_ITEMS = MAX_SCAN_ITEMS * 21
+/**
+ * Member index rows a scan may read on top of MAX_SCAN_ITEMS. Four per Work Item on average (an
+ * owner and three contributors) keeps the in-memory digest list within a few times the old bound.
+ */
+const MAX_SCAN_MEMBER_INDEX_ITEMS = MAX_SCAN_ITEMS * 4
 
 const requiredStringAttributeNames = [
   'assigneeUserId',

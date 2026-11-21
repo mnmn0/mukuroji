@@ -1826,12 +1826,13 @@ export class DynamoDbTeamIssuesClient {
           }))
         // Only rounds that make no progress count toward the limit, so a slow but advancing
         // read is not failed while throttling eases.
-        for (let stalledRounds = 0; keys.length > 0;) {
+        for (let round = 0, stalledRounds = 0; keys.length > 0; round += 1) {
           if (stalledRounds >= WORK_ITEM_BATCH_GET_ATTEMPTS) {
             throw new ProjectDataError(503, 'WorkItemBatchReadIncomplete', 'Work Items could not be read.')
           }
-          // Unprocessed keys mean the table is throttling; back off before asking again.
-          if (stalledRounds > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** (stalledRounds - 1))
+          // Unprocessed keys mean the table is throttling; back off before asking again, longer
+          // after each round that made no progress.
+          if (round > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** Math.max(0, stalledRounds - 1))
           const response = await this.documentClient.send(new BatchGetCommand({
             RequestItems: { [this.issueTableName]: { Keys: keys, ConsistentRead: true } },
           }))

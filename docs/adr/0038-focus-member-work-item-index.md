@@ -129,6 +129,9 @@ relation の端点の読み取りは relation の数に比例する。relation �
 - 5,000 件・50 Team の Workspace でも、Focus の 1 回の表示が Workspace 全体の Work Item を読まない。
 - queue と blocked 件数の結果、権限の判定は変わらない。利用者から見える挙動は変わらないので、利用者ガイドは更新しない。
 - Work Item の責任者・Contributor を書き換える経路を足すときは、`work-item-member-index.ts` の差分を同じ transaction に入れる。
+- 例外は削除だけとする。削除 transaction が DynamoDB の上限 100 action を超える場合（削除の fence が多いとき）は、
+  index row の Delete を commit 後に BatchWriteItem で行う。失敗しても削除は成功のままにする。残った index row は
+  存在しない Work Item を指すだけで、Focus の参照読み取りが除くので表示は変わらない。
 - 完了した Work Item の index row が溜まって読み直す件数が増えたら、index row に「完了した時刻」を持たせて Query で除く。
 - `docs/data-migration.md` に `derive` の契約を書き足す。ADR 0013 の「別の row を作る移行は対象外」は、この ADR の
   `derive` の範囲（同じ table に、元の row から決まる row を作るだけ）で緩める。
