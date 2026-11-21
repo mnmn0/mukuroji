@@ -144,6 +144,22 @@ describe('Workspace days off', () => {
       .toEqual(daysOff)
   })
 
+  test('keeps this year\'s and next year\'s national holidays even when company holidays are all nearer', () => {
+    // 512 company holidays around 2026-01-01 are all nearer than 2027-11-23.
+    const companyHolidays = Array.from({ length: WORKSPACE_CALENDAR_MAX_HOLIDAYS }, (_, index) =>
+      isoDate(Date.UTC(2026, 0, 1) + (index - 255) * DAY))
+    const daysOff = listWorkspaceDaysOff({ holidays: companyHolidays, publicHolidays: 'japan' }, undefined, '2026-01-01')
+    const nationalThisAndNextYear = listJapanesePublicHolidays()
+      .map((holiday) => holiday.date)
+      .filter((date) => date.startsWith('2026-') || date.startsWith('2027-'))
+
+    expect(daysOff).toHaveLength(WORKSPACE_CALENDAR_MAX_HOLIDAYS)
+    for (const date of nationalThisAndNextYear) expect(daysOff).toContain(date)
+    // The company holidays furthest from the reference date make room for them.
+    expect(daysOff).not.toContain(companyHolidays[0])
+    expect(daysOff).toContain('2026-01-02')
+  })
+
   test('creates the Work Item calendar policy from the Workspace settings', () => {
     const policy = createWorkspaceWorkItemCalendarPolicy({
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],

@@ -240,10 +240,10 @@ function readWorkspacePublicHolidayCalendar(value: unknown): WorkspacePublicHoli
  * Lists every date the Workspace takes off besides its non-working weekdays.
  *
  * Company holidays and, when the Workspace uses them, the national holidays are merged.
- * A Work Item schedule keeps at most {@link WORKSPACE_CALENDAR_MAX_HOLIDAYS} holidays, so when the
- * merged list is longer only the dates nearest the reference date are kept, a later date winning a
- * tie. The days off around today, such as this year's and next year's national holidays, matter
- * most to a new schedule.
+ * A Work Item schedule keeps at most {@link WORKSPACE_CALENDAR_MAX_HOLIDAYS} holidays. When the
+ * merged list is longer, the national holidays of the reference year and the next year are always
+ * kept, and the remaining places go to the other dates nearest the reference date, a later date
+ * winning a tie. Company holidays far from today are the ones left out.
  *
  * @param settings - Company holidays and national holiday choice of the Workspace.
  * @param nationalHolidayDates - National holiday dates the server synced from the Cabinet Office;
@@ -261,12 +261,17 @@ export function listWorkspaceDaysOff(
     : []
   const daysOff = [...new Set([...settings.holidays, ...nationalHolidays])].sort()
   if (daysOff.length <= WORKSPACE_CALENDAR_MAX_HOLIDAYS) return daysOff
+  const referenceYear = Number(referenceDate.slice(0, 4))
+  const keptYears = new Set([String(referenceYear), String(referenceYear + 1)])
+  // This year's and next year's national holidays come first; they fit, since a year has at most
+  // a few dozen.
+  const required = new Set(nationalHolidays.filter((date) => keptYears.has(date.slice(0, 4))))
   const reference = Date.parse(`${referenceDate}T00:00:00.000Z`)
   const distance = (date: string) => Math.abs(Date.parse(`${date}T00:00:00.000Z`) - reference)
-  return [...daysOff]
+  const others = daysOff
+    .filter((date) => !required.has(date))
     .sort((left, right) => distance(left) - distance(right) || right.localeCompare(left))
-    .slice(0, WORKSPACE_CALENDAR_MAX_HOLIDAYS)
-    .sort()
+  return [...required, ...others].slice(0, WORKSPACE_CALENDAR_MAX_HOLIDAYS).sort()
 }
 
 /**
