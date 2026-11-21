@@ -686,6 +686,12 @@ export type WorkItemDeletionRelationAuditInput = {
    * @returns The deep link.
    */
   createDeepLink: (workItemId: string) => string
+  /**
+   * First audit sequence slot of the endpoint events. Event IDs derive from the idempotency key
+   * and the slot only, so the slots must not overlap the delete event and any other event the
+   * caller commits with the delete.
+   */
+  firstSequence: number
 }
 
 /** Endpoint details that let a relation audit event notify the endpoint's assignee. */
@@ -2196,6 +2202,7 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           graph.revision + 1,
           reciprocals.map((reciprocal) => describeRelationAuditChange(reciprocal, 'removed')),
           snapshots,
+          audit?.firstSequence,
         ),
       ],
     }
@@ -3137,6 +3144,8 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
    * @param changes - Endpoint changes in a deterministic order.
    * @param endpoints - Endpoint snapshots guarded by the same transaction; each change's endpoint
    * must be among them so its event records the Project assignment the commit checked.
+   * @param firstSequence - Audit sequence slot of the first change; later changes take the next
+   * slots.
    * @returns Audit event Puts, or none when auditing is not configured.
    */
   private createRelationAuditPuts(
@@ -3147,8 +3156,10 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     graphRevision: number,
     changes: readonly RelationAuditChange[],
     endpoints: readonly WorkItemRelationEndpointSnapshot[],
+    firstSequence = 0,
   ): NonNullable<TransactWriteCommandInput['TransactItems']> {
-    return changes.flatMap((change, sequence) => {
+    return changes.flatMap((change, index) => {
+      const sequence = firstSequence + index
       const endpoint = endpoints.find((candidate) => candidate.workItemId === change.workItemId)
       if (!endpoint) {
         throw new WorkItemConfigurationError(

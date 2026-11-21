@@ -65,6 +65,7 @@ import type {
 } from '../../modules/developer-platform/application/ports'
 import { readCredentialPrincipalKey } from '../../modules/developer-platform/credential-principal'
 import {
+  AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM,
   createAgentRunDeletionFences,
   createAgentRunMutationFenceExtension,
   prepareAgentRunCommentFence,
@@ -1787,6 +1788,8 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
             context: deletionAuditContext,
             actorMemberKey: principal.userKey,
             createDeepLink: (endpointId) => createTeamIssueDeepLink(teamId, endpointId),
+            // The delete event takes slot 0 and a released Agent Run the next one.
+            firstSequence: AGENT_RUN_AUDIT_SEQUENCE_WITH_WORK_ITEM + 1,
           },
         ),
         workItemDependencies.collections.prepareWorkItemReferenceCleanup?.(

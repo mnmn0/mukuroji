@@ -28,7 +28,7 @@ import {
   validateWorkItemConfiguration,
   type WorkItemRelationNotificationEndpoint,
 } from './work-item-configuration'
-import { createMutationAuditContext, toAuditEventView } from '../audit'
+import { createAuditEventId, createMutationAuditContext, toAuditEventView } from '../audit'
 
 test('validates the built-in workflow and resolves configured statuses', () => {
   const configuration = validateWorkItemConfiguration(DEFAULT_WORK_ITEM_CONFIGURATION)
@@ -3191,12 +3191,21 @@ test('records the removed relations on the other endpoints when a Work Item is d
   store.seedGraph(2, 4)
   const client = store.createClient()
 
+  const audit = createRelationAudit('work-item-delete-1')
   const cleanup = await client.prepareWorkItemDeletionRelationCleanup('workspace-1', 'core-team', 'design', {
-    ...createRelationAudit('work-item-delete-1'),
+    ...audit,
     createDeepLink: (workItemId) => `/teams/core-team/issues?issueId=${workItemId}`,
+    firstSequence: 2,
   })
 
   const events = readRelationAuditEvents({ TransactItems: cleanup.transactItems })
+  // Event IDs derive from the idempotency key and the slot only, so the endpoint events start
+  // after the slots the delete event (0) and a released Agent Run (1) take in the same transaction.
+  const entity = { type: 'work-item', id: 'team/core-team/issue/design' }
+  expect(events.map((event) => event.eventId)).toEqual([
+    createAuditEventId(audit.context, 'work-item.blocker-removed', entity, 2),
+    createAuditEventId(audit.context, 'work-item.child-removed', entity, 3),
+  ])
   // The deleted Work Item records only its own delete; each other endpoint records its side.
   expect(events.map((event) => [event.entityId, event.eventType])).toEqual([
     ['team/core-team/issue/build', 'work-item.blocker-removed'],

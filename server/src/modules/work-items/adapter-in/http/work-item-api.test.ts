@@ -983,6 +983,8 @@ test('commits the relation and Collection clean-up with the Public Work Item del
         // The other endpoints record the removed relations under the delete's audit context.
         expect(audit?.context.workspaceId).toBe(workspaceId)
         expect(audit?.createDeepLink('peer')).toBe('/teams/core-team/issues?issueId=peer')
+        // Slots 0 and 1 belong to the delete event and a released Agent Run.
+        expect(audit?.firstSequence).toBe(2)
         return { childWorkItemIds: [], transactItems: [relationWrite] }
       },
     }),
