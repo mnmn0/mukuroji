@@ -617,6 +617,8 @@ function hasAnalyticsLatestAuditCoverage(
   workItems: readonly CanonicalWorkItem[],
   events: readonly AnalyticsHistoryEvent[],
 ) {
+  // Group once so the check stays linear in the event count for reports of 10,000 Work Items.
+  const eventsByEntityId = groupAnalyticsHistoryEventsByEntityId(events)
   return workItems.every((workItem) => {
     if (workItem.revision <= 1) return true
     const canonicalEntityId = createTeamIssueAuditEntityId(
@@ -624,12 +626,28 @@ function hasAnalyticsLatestAuditCoverage(
       workItem.id,
     )
     const updatedAt = Date.parse(workItem.updatedAt)
-    return events.some((event) =>
+    return (eventsByEntityId.get(canonicalEntityId) ?? []).some((event) =>
       Date.parse(event.occurredAt) === updatedAt &&
       isAnalyticsLatestWorkItemUpdate(event, workItem, canonicalEntityId) &&
       isCanonicalAnalyticsAuditEvent(event, canonicalEntityId)
     )
   })
+}
+
+/**
+ * Groups history events by their entity ID.
+ *
+ * @param events Canonical audit events read for the request.
+ * @returns The events of each entity, in input order.
+ */
+function groupAnalyticsHistoryEventsByEntityId(events: readonly AnalyticsHistoryEvent[]) {
+  const grouped = new Map<string, AnalyticsHistoryEvent[]>()
+  for (const event of events) {
+    const group = grouped.get(event.entityId)
+    if (group) group.push(event)
+    else grouped.set(event.entityId, [event])
+  }
+  return grouped
 }
 
 /**

@@ -850,6 +850,13 @@ function assertAnalyticsScheduleAuditCoverage(
   workItems: readonly CanonicalWorkItem[],
   events: readonly AnalyticsHistoryEvent[],
 ) {
+  // Group once so the check stays linear in the event count for reports of 10,000 Work Items.
+  const eventsByEntityId = new Map<string, AnalyticsHistoryEvent[]>()
+  for (const event of events) {
+    const group = eventsByEntityId.get(event.entityId)
+    if (group) group.push(event)
+    else eventsByEntityId.set(event.entityId, [event])
+  }
   for (const workItem of workItems) {
     if (workItem.revision <= 1) continue
     const updatedAt = Date.parse(workItem.updatedAt)
@@ -857,7 +864,7 @@ function assertAnalyticsScheduleAuditCoverage(
       workItem.teamId,
       workItem.id,
     )
-    const covered = events.some((event) =>
+    const covered = (eventsByEntityId.get(canonicalEntityId) ?? []).some((event) =>
       Date.parse(event.occurredAt) === updatedAt &&
       isAnalyticsScheduleLatestWorkItemUpdate(
         event,
