@@ -1667,6 +1667,7 @@ function getManagementApiClient(endpoint: string) {
     requestHandler: new NodeHttpHandler({
       connectionTimeout: MANAGEMENT_API_CONNECTION_TIMEOUT_MILLISECONDS,
       requestTimeout: MANAGEMENT_API_REQUEST_TIMEOUT_MILLISECONDS,
+      throwOnRequestTimeout: true,
     }),
   })
   managementApiClients.set(endpoint, client)
