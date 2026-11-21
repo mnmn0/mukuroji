@@ -23,8 +23,10 @@ import { join } from 'node:path'
 import {
   RUNTIME_CONTROL_AUDIT_EVENT_TYPES,
   buildAuditPutItemArguments,
+  buildGovernanceGetItemArguments,
   buildRuntimeControlAuditEvent,
   readGitHubRun,
+  readGovernanceRetention,
   type RuntimeControlAuditChange,
   type RuntimeControlAuditStep,
   type RuntimeControlAuditTarget,
@@ -60,8 +62,10 @@ export interface RuntimeControlTarget {
   readonly canaryDeploymentStrategyId: string
   /** Canonical Web URL; `/api/ready` is reached through it. */
   readonly webUrl: string
-  /** Workspace audit table, Workspace ID, and retention for the switch's audit events. */
+  /** Workspace audit table, Workspace ID, and the stack's default retention for the switch's audit events. */
   readonly audit: RuntimeControlAuditTarget
+  /** Tenant administration table that holds the Workspace governance (retention and legal hold). */
+  readonly tenantAdministrationTableName: string
 }
 
 /**
@@ -438,7 +442,9 @@ async function readTarget(
       tableName: required('AuditEventsTableName'),
       workspaceId: required('WorkspaceDirectoryId'),
       retentionDays: readRetentionDays(parameters.get('AuditRetentionDays')),
+      legalHold: false,
     },
+    tenantAdministrationTableName: required('TenantAdministrationTableName'),
   }
 }
 
@@ -551,16 +557,18 @@ export async function runRuntimeControl(
     applicationId: target.applicationId,
     configurationProfileId: target.configurationProfileId,
     mode: request.mode,
-    previousMode: readDocumentMode(latestContent),
+    previousMode: await readDeployedMode(appconfig, target, dependencies),
     revision,
     allAtOnce: request.allAtOnce,
     callerArn: caller,
     gitHubRun: dependencies.gitHubRun,
   }
+  let audit = target.audit
   const record = (step: RuntimeControlAuditStep): Promise<void> =>
-    recordAuditEvent(target.audit, change, step, region, dependencies)
+    recordAuditEvent(audit, change, step, region, dependencies)
 
   try {
+    audit = await readWorkspaceRetention(target, region, dependencies)
     await record({ phase: 'started', occurredAt: dependencies.now() })
   } catch (error) {
     if (!(error instanceof RuntimeControlError)) throw error
@@ -587,6 +595,71 @@ export async function runRuntimeControl(
     deploymentNumber: result.deploymentNumber,
   }, log)
   return result
+}
+
+/**
+ * Reads the Workspace governance so the events get the tenant retention and legal hold.
+ *
+ * @param target - Stack outputs.
+ * @param region - AWS region.
+ * @param dependencies - Side effects.
+ * @returns The audit target with the Workspace retention applied.
+ * @throws RuntimeControlError when the governance record cannot be read.
+ */
+async function readWorkspaceRetention(
+  target: RuntimeControlTarget,
+  region: string,
+  dependencies: RuntimeControlDependencies,
+): Promise<RuntimeControlAuditTarget> {
+  try {
+    const output = await dependencies.aws(
+      buildGovernanceGetItemArguments(target.tenantAdministrationTableName, region, target.audit.workspaceId),
+    )
+    return { ...target.audit, ...readGovernanceRetention(output, target.audit.retentionDays) }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new RuntimeControlError(`Could not read the Workspace audit retention: ${reason}`)
+  }
+}
+
+/**
+ * Reads the mode that the environment currently serves, for the audit before-value.
+ *
+ * The latest stored hosted version can be one that never deployed or that AppConfig rolled back,
+ * so the mode comes from the latest `COMPLETE` deployment instead.
+ *
+ * @param appconfig - Runs one `aws appconfig` command for the target application.
+ * @param target - Stack outputs.
+ * @param dependencies - Side effects.
+ * @returns The served mode, or `undefined` when it cannot be established.
+ */
+async function readDeployedMode(
+  appconfig: (command: string, ...args: string[]) => Promise<string>,
+  target: RuntimeControlTarget,
+  dependencies: RuntimeControlDependencies,
+): Promise<RuntimeControlMode | undefined> {
+  try {
+    const deployments = parseJson(await appconfig(
+      'list-deployments', '--environment-id', target.environmentId,
+      '--query', "Items[?State=='COMPLETE'].[DeploymentNumber, ConfigurationVersion]", '--output', 'json',
+    ), 'appconfig list-deployments')
+    if (!Array.isArray(deployments)) return undefined
+    let latest: { number: number, version: string } | undefined
+    for (const entry of deployments) {
+      if (!Array.isArray(entry) || typeof entry[0] !== 'number' || typeof entry[1] !== 'string') continue
+      if (!latest || entry[0] > latest.number) latest = { number: entry[0], version: entry[1] }
+    }
+    if (!latest) return undefined
+    const path = join(dependencies.workDirectory, 'deployed.json')
+    await appconfig(
+      'get-hosted-configuration-version', '--configuration-profile-id', target.configurationProfileId,
+      '--version-number', latest.version, '--output', 'json', path,
+    )
+    return readDocumentMode(await dependencies.readText(path))
+  } catch {
+    // The before-value is informational; leave it out rather than guess.
+    return undefined
+  }
 }
 
 /**

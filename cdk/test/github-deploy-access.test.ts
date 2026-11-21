@@ -160,7 +160,22 @@ describe('GitHub deploy access template', () => {
     });
     const dynamoDbActions = permissions.filter((statement) => statement.Effect === 'Allow').flatMap(actions)
       .filter((action) => action.startsWith('dynamodb:'));
-    expect(dynamoDbActions).toEqual(['dynamodb:PutItem']);
+    expect(dynamoDbActions).toEqual(['dynamodb:GetItem', 'dynamodb:PutItem']);
+  });
+
+  test('runtime control may read only the retention fields of the deployment Workspace governance', () => {
+    const read = permissions.find((statement) => statement.Sid === 'ReadWorkspaceAuditRetention');
+    expect(read?.Action).toBe('dynamodb:GetItem');
+    expect(read?.Resource).toEqual({
+      'Fn::Sub': 'arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MukurojiStackName}-TenantAdministrationTable*',
+    });
+    expect(read?.Condition).toEqual({
+      'ForAllValues:StringEquals': {
+        'dynamodb:LeadingKeys': [{ Ref: 'WorkspaceDirectoryId' }],
+        'dynamodb:Attributes': ['workspaceId', 'recordKey', 'auditRetentionDays', 'legalHold'],
+      },
+      StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
+    });
   });
 
   test('alarm topics accept publishes only from CloudWatch alarms in this account', () => {

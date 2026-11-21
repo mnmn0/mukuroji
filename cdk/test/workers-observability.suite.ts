@@ -1177,6 +1177,23 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
   }
 });
 
+test('audit stream consumers skip the operator runtime-control switch events', () => {
+  const resources = synthesizedTemplate.toJSON().Resources as Record<string, { Type?: string; Properties?: Record<string, unknown> }>;
+  const auditMappings = Object.values(resources).filter((resource) =>
+    resource.Type === 'AWS::Lambda::EventSourceMapping' &&
+    JSON.stringify(resource.Properties?.EventSourceArn).includes('AuditEventsTable0723963E')
+  );
+  // The audit projection and the automation worker are the two AuditEvents stream readers.
+  expect(auditMappings).toHaveLength(2);
+  for (const mapping of auditMappings) {
+    const filters = (mapping.Properties?.FilterCriteria as { Filters?: { Pattern?: string }[] } | undefined)?.Filters ?? [];
+    expect(filters.map((filter) => JSON.parse(filter.Pattern ?? '{}'))).toEqual([
+      { dynamodb: { NewImage: { entityType: { S: [{ 'anything-but': ['runtime-control'] }] } } } },
+      { dynamodb: { NewImage: { entityType: [{ exists: false }] } } },
+    ]);
+  }
+});
+
 test('audit Webhook projection and SQS delivery are durable encrypted and observable', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;

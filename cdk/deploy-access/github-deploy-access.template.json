@@ -222,6 +222,19 @@
                   "Resource": { "Fn::Sub": "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*" }
                 },
                 {
+                  "Sid": "ReadWorkspaceAuditRetention",
+                  "Effect": "Allow",
+                  "Action": "dynamodb:GetItem",
+                  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MukurojiStackName}-TenantAdministrationTable*" },
+                  "Condition": {
+                    "ForAllValues:StringEquals": {
+                      "dynamodb:LeadingKeys": [{ "Ref": "WorkspaceDirectoryId" }],
+                      "dynamodb:Attributes": ["workspaceId", "recordKey", "auditRetentionDays", "legalHold"]
+                    },
+                    "StringEqualsIfExists": { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }
+                  }
+                },
+                {
                   "Sid": "RecordRuntimeControlAudit",
                   "Effect": "Allow",
                   "Action": "dynamodb:PutItem",

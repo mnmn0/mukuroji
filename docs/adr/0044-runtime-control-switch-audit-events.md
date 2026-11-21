@@ -29,13 +29,22 @@ Workspace の監査 event に載せないと決めたが、runtime control の�
   STS caller ARN。GitHub Actions では起動した login と run を `displayName` と `metadata` に入れる。
   同じ実行の event は実行ごとの乱数 `switchId` で `correlationId` を共有し、event ID も `switchId` から決める
   （失敗後の再実行は同じ revision を使い得るため）。
-- 保持期限は stack parameter `AuditRetentionDays` から計算し、tenant の retention・legal hold は既存の
-  projection が後で反映する。通知・自動化の対象ではないので `outboxStatus=suppressed` で書く。
+- 保持期限は書く前に script が Workspace の governance（tenant administration table の `GOVERNANCE` row）を強整合で読み、
+  legal hold なら TTL を付けず、そうでなければ `auditRetentionDays` から計算する。governance がない Workspace は
+  stack parameter `AuditRetentionDays` を使う。通知・自動化の対象ではないので `outboxStatus=suppressed` で書く。
+- 停止・read-only の完了 event は worker が止まっている間に書くので、AuditEvents stream の 2 つの consumer
+  （audit projection と automation worker）には届けない。event source mapping の filter で `entityType=runtime-control`
+  の record を落とす（`entityType` のない record は従来どおり届ける）。届けると、止まった consumer が retry を使い切って
+  DLQ に送り、DLQ alarm が切り替えのたびに鳴る。tenant retention の projection はこの event を処理しないので、上の
+  事前の反映が唯一の保持期限になる。
+- `changes` の before と `previousMode` は、最新の hosted version ではなく最新の `COMPLETE` deployment の version から
+  読む（作っただけの version や rollback された version は配布中の設定ではないため）。読めないときは before を省く。
 - 開始を記録できなければ、`enable` と `read-only` は AppConfig を変えずに止まる。`disable` は監査 table の障害が
   止める理由になり得るので、警告を出して止める操作を続ける。完了・失敗を記録できないときは警告だけ出す。
 - GitHub Actions の deploy role（`cdk/deploy-access/github-deploy-access.template.json`）に、
-  `${MukurojiStackName}-AuditEventsTable*` への `dynamodb:PutItem` を `dynamodb:LeadingKeys` = `WorkspaceDirectoryId`
-  の条件付きで足す。手元から実行する operator の credential にも同じ権限が要る。
+  `${MukurojiStackName}-AuditEventsTable*` への `dynamodb:PutItem` と、`${MukurojiStackName}-TenantAdministrationTable*`
+  への `dynamodb:GetItem`（`auditRetentionDays`・`legalHold` と key だけ）を、どちらも `dynamodb:LeadingKeys` =
+  `WorkspaceDirectoryId` の条件付きで足す。手元から実行する operator の credential にも同じ権限が要る。
 
 ## 検討した選択肢
 
@@ -63,6 +72,8 @@ Workspace の監査 event に載せないと決めたが、runtime control の�
   強制できないので、key を知っていれば既存 event の上書きもできる（削除・読み取りの権限はない。上書きは stream と
   PITR に残る）。実行者を強く証明する、または改ざんを防ぐ必要が出たら選択肢 C に移る。
 - actor の ID は STS caller ARN なので、AWS account ID と IAM の user / role 名が Workspace の監査ログを読める人に見える。
+- governance を読んでから event を書くまでの間に保持期間や legal hold が変わると、その event だけ古い値になる。
+  保持設定を変えると動く再計算 job が Workspace の event をまとめて更新するので、job が後から読む event は揃う。
 - 2026-11-21 より前の template で deploy access stack を作った環境は、template を更新するまで切り替えが
   `enable` / `read-only` で止まる（`disable` は警告を出して続く）。
 - ADR 0034 の「アプリの監査 log への自動保存は未実装のまま」はこの ADR で実装した。

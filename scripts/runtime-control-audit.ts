@@ -46,8 +46,13 @@ export interface RuntimeControlAuditTarget {
   readonly tableName: string
   /** Canonical Workspace ID of the deployment (stack output `WorkspaceDirectoryId`). */
   readonly workspaceId: string
-  /** Stack parameter `AuditRetentionDays`; tenant retention still applies through the projection. */
+  /**
+   * Retention in days: the Workspace governance `auditRetentionDays`, or the stack parameter
+   * `AuditRetentionDays` when the Workspace has no governance record.
+   */
   readonly retentionDays: number
+  /** Whether the Workspace governance has a legal hold, which keeps the events without a TTL. */
+  readonly legalHold: boolean
 }
 
 /**
@@ -207,7 +212,11 @@ export function buildRuntimeControlAuditEvent(
       after: change.mode,
     }],
     summary: summarize(change, step),
-    expiresAt: calculateAuditExpiresAt(occurredAt, target.retentionDays),
+    // The audit stream projections skip these events (they are written while workers may be
+    // stopped), so the tenant retention and legal hold are applied here instead of by projection.
+    ...(target.legalHold
+      ? { retentionSuspended: true }
+      : { expiresAt: calculateAuditExpiresAt(occurredAt, target.retentionDays) }),
     // The audit view publishes only allowlisted metadata keys; `runtimeControl` is one of them.
     metadata: { runtimeControl },
     // Operator events are records only; Automation and notifications must not act on them.
@@ -267,6 +276,48 @@ function toAttributeValue(value: unknown): DynamoDbAttributeValue {
     return { M: map }
   }
   throw new TypeError(`Audit items cannot hold a ${typeof value}.`)
+}
+
+/**
+ * Reads the Workspace governance retention from a `get-item` result of the tenant administration table.
+ *
+ * @param output - JSON printed by `aws dynamodb get-item`.
+ * @param defaultRetentionDays - Stack retention used when the Workspace has no governance record.
+ * @returns The retention and legal hold to apply.
+ * @throws TypeError when the record exists but its fields are not valid.
+ */
+export function readGovernanceRetention(
+  output: string,
+  defaultRetentionDays: number,
+): { readonly retentionDays: number, readonly legalHold: boolean } {
+  const parsed: unknown = output.trim() === '' ? {} : JSON.parse(output)
+  const item: unknown = typeof parsed === 'object' && parsed !== null && 'Item' in parsed ? parsed.Item : undefined
+  if (typeof item !== 'object' || item === null) return { retentionDays: defaultRetentionDays, legalHold: false }
+  const days: unknown = 'auditRetentionDays' in item ? item.auditRetentionDays : undefined
+  const hold: unknown = 'legalHold' in item ? item.legalHold : undefined
+  const daysText = typeof days === 'object' && days !== null && 'N' in days ? days.N : undefined
+  const holdValue = typeof hold === 'object' && hold !== null && 'BOOL' in hold ? hold.BOOL : undefined
+  const retentionDays = Number(daysText)
+  if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || typeof holdValue !== 'boolean') {
+    throw new TypeError('The Workspace governance record has no valid auditRetentionDays and legalHold.')
+  }
+  return { retentionDays, legalHold: holdValue }
+}
+
+/**
+ * Builds the `aws dynamodb get-item` arguments that read the Workspace governance record.
+ *
+ * @param tableName - Tenant administration table name.
+ * @param region - AWS region.
+ * @param workspaceId - Canonical Workspace ID.
+ * @returns Arguments after `aws`.
+ */
+export function buildGovernanceGetItemArguments(tableName: string, region: string, workspaceId: string): string[] {
+  return [
+    'dynamodb', 'get-item', '--region', region, '--table-name', tableName,
+    '--key', JSON.stringify({ workspaceId: { S: workspaceId }, recordKey: { S: 'GOVERNANCE' } }),
+    '--consistent-read', '--projection-expression', 'auditRetentionDays, legalHold', '--output', 'json',
+  ]
 }
 
 /**

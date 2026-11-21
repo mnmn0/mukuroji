@@ -29,6 +29,7 @@ const stackOutputs = [
   { OutputKey: 'WebUrl', OutputValue: 'https://app.example.com/' },
   { OutputKey: 'AuditEventsTableName', OutputValue: 'Mukuroji-AuditEventsTable1-ABC' },
   { OutputKey: 'WorkspaceDirectoryId', OutputValue: 'workspace#production' },
+  { OutputKey: 'TenantAdministrationTableName', OutputValue: 'Mukuroji-TenantAdministrationTable1-DEF' },
 ]
 
 const stackParameters = [{ ParameterKey: 'AuditRetentionDays', ParameterValue: '400' }]
@@ -49,6 +50,10 @@ interface FakeOptions {
   readonly environmentState?: string
   /** Audit phases whose `put-item` fails. */
   readonly failingAuditPhases?: readonly string[]
+  /** `get-item` output for the Workspace governance record; defaults to no record. */
+  readonly governance?: string
+  /** Completed deployments as `[DeploymentNumber, ConfigurationVersion]`. */
+  readonly completedDeployments?: readonly (readonly [number, string])[]
   /** GitHub Actions run passed to the script. */
   readonly gitHubRun?: RuntimeControlDependencies['gitHubRun']
 }
@@ -79,7 +84,11 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
   const calls: string[][] = []
   const auditItems: Record<string, unknown>[] = []
   const lines: string[] = []
-  const files = new Map<string, string>([['/work/latest.json', '{"schemaVersion":1,"mode":"disabled","revision":4}']])
+  const files = new Map<string, string>([
+    // The latest stored version (revision 4) never deployed; the served one is version 2.
+    ['/work/latest.json', '{"schemaVersion":1,"mode":"enabled","revision":4}'],
+    ['/work/deployed.json', '{"schemaVersion":1,"mode":"disabled","revision":3}'],
+  ])
   const deploymentStates = [...(options.deploymentStates ?? ['DEPLOYING', 'BAKING', 'COMPLETE'])]
   const readyStatuses = [...(options.readyStatuses ?? [200])]
   const maintenanceStates = options.maintenanceStates === undefined ? undefined : [...options.maintenanceStates]
@@ -105,6 +114,10 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
         return { DeploymentNumber: 7, State: 'DEPLOYING' }
       case 'appconfig get-deployment':
         return { State: deploymentStates.shift() ?? 'COMPLETE', PercentageComplete: 100 }
+      case 'appconfig list-deployments':
+        return options.completedDeployments ?? [[5, '1'], [6, '2']]
+      case 'dynamodb get-item':
+        return options.governance === undefined ? {} : JSON.parse(options.governance)
       case 'dynamodb put-item': {
         const itemArgument = args[args.indexOf('--item') + 1] ?? ''
         const path = itemArgument.replace(/^file:\/\//, '')
@@ -433,7 +446,7 @@ describe('audit log records', () => {
 describe('toDynamoDbItemJson', () => {
   test('writes nested values as DynamoDB JSON', () => {
     const event = buildRuntimeControlAuditEvent(
-      { tableName: 't', workspaceId: 'workspace#a', retentionDays: 30 },
+      { tableName: 't', workspaceId: 'workspace#a', retentionDays: 30, legalHold: false },
       {
         switchId: 's', applicationId: 'a', configurationProfileId: 'p', mode: 'read-only', previousMode: undefined,
         revision: 2, allAtOnce: false, callerArn: 'arn:x', gitHubRun: undefined,
@@ -446,5 +459,54 @@ describe('toDynamoDbItemJson', () => {
       changes: { L: [{ M: { field: { S: 'mode' }, after: { S: 'read-only' } } }] },
       actor: { M: { kind: { S: 'service' } } },
     })
+  })
+})
+
+describe('Workspace retention and the served mode', () => {
+  test('applies the Workspace governance retention instead of the stack default', async () => {
+    const fake = fakeDependencies({
+      readyStatuses: [503],
+      governance: '{"Item":{"auditRetentionDays":{"N":"90"},"legalHold":{"BOOL":false}}}',
+    })
+    await runRuntimeControl({ mode: 'disabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+
+    const get = fake.calls.find((call) => call[1] === 'get-item') ?? []
+    expect(get[get.indexOf('--table-name') + 1]).toBe('Mukuroji-TenantAdministrationTable1-DEF')
+    expect(get).toContain('--consistent-read')
+    const started = fake.auditItems[0]
+    const occurredAt = Date.parse(stringAttribute(started, 'occurredAt') ?? '')
+    expect(started?.expiresAt).toEqual({ N: String(Math.floor(occurredAt / 1000) + 90 * 86_400) })
+  })
+
+  test('keeps the events without a TTL under a legal hold', async () => {
+    const fake = fakeDependencies({
+      readyStatuses: [503],
+      governance: '{"Item":{"auditRetentionDays":{"N":"90"},"legalHold":{"BOOL":true}}}',
+    })
+    await runRuntimeControl({ mode: 'read-only', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(fake.auditItems).toHaveLength(2)
+    for (const item of fake.auditItems) expect(item.expiresAt).toBeUndefined()
+  })
+
+  test('changes nothing when the governance record is invalid for an enable', async () => {
+    const fake = fakeDependencies({ governance: '{"Item":{"legalHold":{"S":"yes"}}}' })
+    await expect(runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
+      .rejects.toThrow('Could not read the Workspace audit retention')
+    expect(fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(false)
+  })
+
+  test('takes the before-value from the latest completed deployment, not the latest stored version', async () => {
+    const fake = fakeDependencies({ readyStatuses: [200] })
+    await runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    const read = fake.calls.filter((call) => call[1] === 'get-hosted-configuration-version').at(-1) ?? []
+    expect(read[read.indexOf('--version-number') + 1]).toBe('2')
+    expect(metadataOf(fake.auditItems[0])).toMatchObject({ previousMode: 'disabled' })
+  })
+
+  test('leaves the before-value out when no deployment completed', async () => {
+    const fake = fakeDependencies({ readyStatuses: [200], completedDeployments: [] })
+    await runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(metadataOf(fake.auditItems[0]).previousMode).toBeUndefined()
+    expect(JSON.stringify(fake.auditItems[0]?.changes)).not.toContain('before')
   })
 })
