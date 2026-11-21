@@ -70,6 +70,7 @@ const focusSignalTypes: ReadonlySet<string> = new Set([
   'mention',
   'sla',
   'cycle',
+  'slipped',
 ])
 
 const focusSignalSourceKinds: ReadonlySet<string> = new Set([
@@ -82,6 +83,7 @@ const focusSignalSourceKinds: ReadonlySet<string> = new Set([
   'notification',
   'service-level-policy',
   'planning-cycle',
+  'schedule-baseline',
 ])
 
 const focusResolutionConditions: ReadonlySet<string> = new Set([
@@ -95,6 +97,7 @@ const focusResolutionConditions: ReadonlySet<string> = new Set([
   'mention-acknowledged',
   'sla-restored',
   'cycle-changed',
+  'baseline-recovered',
   'source-removed',
 ])
 
@@ -546,6 +549,7 @@ function isFocusPolicySettings(value: unknown): value is FocusPolicySettings {
     typeof value.slaEnabled === 'boolean' &&
     focusSlaAnchors.has(String(value.slaAnchor)) &&
     isFocusSlaWorkItemTypeIds(value.slaWorkItemTypeIds) &&
+    isBoundedSafeInteger(value.slippedThresholdDays, 1, 365) &&
     isBoundedFiniteNumber(value.nowScoreThreshold, 0, 100_000)
 }
 
@@ -568,7 +572,8 @@ function isFocusSignalWeights(value: unknown): boolean {
     isBoundedFiniteNumber(value.reviewRequest, 0, 10_000) &&
     isBoundedFiniteNumber(value.mention, 0, 10_000) &&
     isBoundedFiniteNumber(value.sla, 0, 10_000) &&
-    isBoundedFiniteNumber(value.cycle, 0, 10_000)
+    isBoundedFiniteNumber(value.cycle, 0, 10_000) &&
+    isBoundedFiniteNumber(value.slipped, 0, 10_000)
 }
 
 /** Returns whether an unknown value is one policy provenance layer. */
@@ -600,6 +605,7 @@ function isFocusPolicyOverrides(value: unknown): value is FocusPolicyOverrides {
     (value.slaEnabled === undefined || typeof value.slaEnabled === 'boolean') &&
     (value.slaAnchor === undefined || focusSlaAnchors.has(String(value.slaAnchor))) &&
     (value.slaWorkItemTypeIds === undefined || isFocusSlaWorkItemTypeIds(value.slaWorkItemTypeIds)) &&
+    isOptionalBoundedSafeInteger(value.slippedThresholdDays, 1, 365) &&
     isOptionalBoundedFiniteNumber(value.nowScoreThreshold, 0, 100_000)
 }
 
@@ -614,7 +620,8 @@ function isFocusSignalWeightOverrides(value: unknown): boolean {
     isOptionalBoundedFiniteNumber(value.reviewRequest, 0, 10_000) &&
     isOptionalBoundedFiniteNumber(value.mention, 0, 10_000) &&
     isOptionalBoundedFiniteNumber(value.sla, 0, 10_000) &&
-    isOptionalBoundedFiniteNumber(value.cycle, 0, 10_000)
+    isOptionalBoundedFiniteNumber(value.cycle, 0, 10_000) &&
+    isOptionalBoundedFiniteNumber(value.slipped, 0, 10_000)
 }
 
 /**
