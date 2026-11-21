@@ -49,7 +49,6 @@ test('emits aggregate and per-surface runtime-control EMF dimensions', () => {
         Namespace: 'Mukuroji/RuntimeControl',
         Dimensions: [
           ['Service', 'ControlId'],
-          ['Service', 'ControlId', 'Surface'],
         ],
         Metrics: [
           { Name: 'BlockedCount', Unit: 'Count' },
