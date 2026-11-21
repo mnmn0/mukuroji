@@ -11,7 +11,7 @@ Bedrock は CDK 未設定で無効です（外部 provider は下の [External p
 (`ap-northeast-3`) からだけ呼び出せるため、この model ID を使う stack はそのどちらかへ
 deployします。Tokyo からは Tokyo と Osaka の両方へ route されます。
 
-CDK deploy では次の parameter を固定します。全項目未設定ならproviderも永続storeも初期化せず、保存済みpolicyにかかわらず生成を拒否します。設定画面に無効状態を表示し、個人設定から有効化できません。Webはserverのavailabilityを使いますが、緊急時には `VITE_AI_ASSISTANCE_ENABLED=false` でもUIを隠せます。既存stackでの無効化は[CDK手順](../cdk/README.md#optional-sso-and-ai)に従い全値を空にしてruntime revisionを更新します。
+CDK deploy では次の parameter を固定します。Bedrock の全項目が未設定で、`AiExternalProviders` も空なら、providerも永続storeも初期化せず、保存済みpolicyにかかわらず生成を拒否します（`AiExternalProviders` は既定で `anthropic,openai` です）。設定画面に無効状態を表示し、個人設定から有効化できません。Webはserverのavailabilityを使いますが、緊急時には `VITE_AI_ASSISTANCE_ENABLED=false` でもUIを隠せます。既存stackでの無効化は[CDK手順](../cdk/README.md#optional-sso-and-ai)に従い、Bedrock の全値と `AiExternalProviders` を空にしてruntime revisionを更新します。
 
 | Parameter | Contract |
 | --- | --- |
@@ -239,7 +239,10 @@ Bedrock に加えて、Claude API（Anthropic）と OpenAI を接続先に選べ
   Policy の応答には、この環境で使える model と provider を `availableModels` として返します。
 - **呼び出し**: provider の公式 SDK（`@anthropic-ai/sdk`、`openai`）を Mastra gateway の runner として使い、
   出力 schema の検証、予約、budget、監査、redaction、timeout は Bedrock と共通です。SDK の自動 retry は切り、
-  Claude API の server 側 fallback は単価が変わるため使いません。OpenAI は Responses API に `store: false` で送ります。
+  Claude API の server 側 fallback は単価が変わるため使いません。Claude API の structured outputs は optional property が
+  24 個までなので、出力 schema は system prompt に JSON Schema として載せ、返った JSON を gateway が検証します
+  （prompt caching も単価が変わるため使いません）。OpenAI は Responses API に `store: false`、non-strict の JSON schema で送ります。
+  Bedrock と外部 model を合わせて 40 個を超える構成は起動時に拒否します（Web が受け取れる上限）。
 - **API キー**: Workspace 管理者（`workspace.manage`）が provider ごとに1つ登録します。
   `GET /api/ai-assistance/provider-credentials` は登録状況と末尾4文字だけを返し、
   `PUT /api/ai-assistance/provider-credentials/{provider}`（`apiKey`、`expectedRevision`）と
@@ -278,8 +281,8 @@ bun run server:dev
 
 外部 provider を local で試す場合は `AI_ASSISTANCE_EXTERNAL_PROVIDERS=anthropic`（または `openai`、
 `anthropic,openai`）を加え、設定画面からキーを登録します。Local では KMS の代わりに
-`AI_ASSISTANCE_PROVIDER_CREDENTIAL_LOCAL_KEY`（base64 の 32 byte）の鍵で暗号化し、未設定なら起動ごとの
-乱数鍵を使うため、再起動すると登録したキーは読めなくなります。Floci の KMS で確かめる場合は
+`AI_ASSISTANCE_PROVIDER_CREDENTIAL_LOCAL_KEY`（base64 の 32 byte）の鍵で暗号化します。未設定なら
+code に書いた公開の開発用鍵を使うため、再起動しても登録したキーは読めますが、本物のキーは登録しないでください。Floci の KMS で確かめる場合は
 `AI_ASSISTANCE_PROVIDER_CREDENTIAL_KMS_KEY_ID` に Floci の key ARN を指定します。Production では KMS key ID が必須です。
 
 Local principalにもproductionと同じexact profile/destination ARN boundaryを適用します。通常のunit testは

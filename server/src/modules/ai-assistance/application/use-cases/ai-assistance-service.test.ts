@@ -1410,6 +1410,24 @@ describe('createAiAssistanceService', () => {
     expect(harness.gatewayInputs).toHaveLength(0)
   })
 
+  test('bounds the provider key check by the end-to-end deadline before reserving budget', async () => {
+    const harness = createHarness({
+      generationDeadlineMs: 2_000,
+      providerTimeoutMs: 500,
+      isModelReady: () => new Promise<boolean>(() => undefined),
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-slow-provider-key',
+    )).rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
+
+    expect(harness.budgetReservationCount()).toBe(0)
+    expect(harness.gatewayInputs).toHaveLength(0)
+  })
+
   test('records the provider of the selected model and passes the Workspace to the gateway', async () => {
     const harness = createHarness({
       isModelReady: async () => true,

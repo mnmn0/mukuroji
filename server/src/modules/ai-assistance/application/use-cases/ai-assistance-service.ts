@@ -455,18 +455,26 @@ export function createAiAssistanceService(
     }
     requireGenerationEnabled(policy, preference, request.task)
     const modelId = selectModelId(request.modelId, policy, deploymentAllowedModelIds)
-    if (options.isModelReady && !await options.isModelReady(actor.workspaceId, modelId)) {
-      throw new AiAssistanceError(
-        'validation',
-        'AiAssistanceProviderCredentialMissing',
-        'An administrator must register an API key for the selected AI model provider.',
-      )
-    }
-    const createdAt = now()
+    // Fix the start before the readiness check so key resolution counts toward the deadline.
     const generationRequestStartedAtMs = normalizeGenerationRequestStartedAtMs(
       requestStartedAtMs,
-      createdAt.getTime(),
+      now().getTime(),
     )
+    if (options.isModelReady) {
+      const ready = await withinGenerationDeadline(
+        options.isModelReady(actor.workspaceId, modelId),
+        generationDeadlineMs - GENERATION_DEADLINE_HEADROOM_MS -
+          Math.max(0, now().getTime() - generationRequestStartedAtMs),
+      )
+      if (!ready) {
+        throw new AiAssistanceError(
+          'validation',
+          'AiAssistanceProviderCredentialMissing',
+          'An administrator must register an API key for the selected AI model provider.',
+        )
+      }
+    }
+    const createdAt = now()
     const generationId = createId()
     const expiresAt = new Date(
       createdAt.getTime() + policy.retentionDays * RETENTION_DAY_MS,
@@ -610,7 +618,7 @@ export function createAiAssistanceService(
         throw new AiAssistanceError(
           'timeout',
           'AiAssistanceProviderTimeout',
-          'The AI assistance request exceeded its end-to-end deadline before Bedrock started.',
+          'The AI assistance request exceeded its end-to-end deadline before the AI provider started.',
         )
       }
       const attemptStartedAtValue = now()
@@ -1261,6 +1269,40 @@ function normalizeGenerationRequestStartedAtMs(
     return createdAtMs
   }
   return requestStartedAtMs
+}
+
+/**
+ * Bounds a pre-reservation check by the remaining end-to-end generation deadline.
+ *
+ * @param check - Pending check, such as provider key resolution.
+ * @param remainingMs - Milliseconds left before the deadline headroom.
+ * @returns The check result when it settles in time.
+ * @throws A timeout error when no time remains or the check does not settle in time.
+ */
+async function withinGenerationDeadline<Result>(
+  check: Promise<Result>,
+  remainingMs: number,
+): Promise<Result> {
+  const timeoutError = () => new AiAssistanceError(
+    'timeout',
+    'AiAssistanceProviderTimeout',
+    'The AI assistance request exceeded its end-to-end deadline before the AI provider started.',
+  )
+  if (remainingMs <= 0) {
+    void check.catch(() => undefined)
+    throw timeoutError()
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      check,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(timeoutError()), remainingMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 /**

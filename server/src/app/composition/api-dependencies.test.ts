@@ -531,3 +531,33 @@ test('binds assignment destination and owner references to the action transactio
 
   expect(contribution.transactItems).toHaveLength(2)
 })
+
+test('lazily rejects a deployment that lists more models than Web accepts', () => {
+  const names = [
+    'AI_ASSISTANCE_DEFAULT_MODEL_ID',
+    'AI_ASSISTANCE_ALLOWED_MODEL_IDS',
+    'AI_ASSISTANCE_EXTERNAL_PROVIDERS',
+  ] as const
+  const originals = names.map((name) => Bun.env[name])
+  const bedrockModelIds = Array.from({ length: 40 }, (_, index) => `jp.anthropic.model-${index}`)
+  Bun.env.AI_ASSISTANCE_DEFAULT_MODEL_ID = bedrockModelIds[0]
+  Bun.env.AI_ASSISTANCE_ALLOWED_MODEL_IDS = bedrockModelIds.join(',')
+  Bun.env.AI_ASSISTANCE_EXTERNAL_PROVIDERS = 'anthropic'
+  try {
+    const dependencies = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
+    expect(() => dependencies.aiAssistanceService.getPolicy({
+      workspaceId: 'workspace-1',
+      memberId: 'member-1',
+      actorId: 'member-1',
+      auditActorKind: 'user',
+      traceId: 'trace-1',
+      canManagePolicy: false,
+    })).toThrow('AI assistance can list at most 40 models')
+  } finally {
+    names.forEach((name, index) => {
+      const original = originals[index]
+      if (original === undefined) delete Bun.env[name]
+      else Bun.env[name] = original
+    })
+  }
+})

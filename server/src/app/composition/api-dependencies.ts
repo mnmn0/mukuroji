@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import type {
   AiAssistancePolicy,
   ResolvedWorkItemConfiguration,
@@ -17,6 +17,7 @@ import {
   InMemoryWeeklyReportStore,
 } from '../../modules/weekly-reports'
 import {
+  AI_ASSISTANCE_MAX_AVAILABLE_MODELS,
   AI_ASSISTANCE_SCHEMA_VERSION,
   listJapanesePublicHolidays,
   type AiAssistanceAvailableModel,
@@ -973,6 +974,11 @@ function createProductionAiAssistanceRuntime(
     throw new TypeError('AI assistance requires a Bedrock or external default model.')
   }
   const availableModels = createAiAssistanceAvailableModels(bedrockModelIds, externalModels)
+  if (availableModels.length > AI_ASSISTANCE_MAX_AVAILABLE_MODELS) {
+    throw new TypeError(
+      `AI assistance can list at most ${AI_ASSISTANCE_MAX_AVAILABLE_MODELS} models; reduce AI_ASSISTANCE_ALLOWED_MODEL_IDS or AI_ASSISTANCE_EXTERNAL_PROVIDERS.`,
+    )
+  }
   const allowedModelIds = availableModels.map((model) => model.modelId)
   const workspaceGenerationLimitPerMinute = readAiAssistanceBudgetInteger(
     environment.AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE,
@@ -1135,9 +1141,19 @@ function createAiProviderCredentialCipher(
   }
   const localKey = environment.AI_ASSISTANCE_PROVIDER_CREDENTIAL_LOCAL_KEY?.trim()
   return createLocalAiProviderCredentialCipher(
-    localKey ? Buffer.from(localKey, 'base64') : randomBytes(32),
+    localKey ? Buffer.from(localKey, 'base64') : LOCAL_DEVELOPMENT_PROVIDER_CREDENTIAL_KEY,
   )
 }
+
+/**
+ * Publicly known fallback key for local development without KMS.
+ *
+ * It is stable so keys saved to a persistent local table still decrypt after a
+ * restart; production never reaches it because production requires KMS.
+ */
+const LOCAL_DEVELOPMENT_PROVIDER_CREDENTIAL_KEY = createHash('sha256')
+  .update('mukuroji-local-development-ai-provider-credential-key')
+  .digest()
 
 /**
  * Builds the key-free audit event for one provider key change.

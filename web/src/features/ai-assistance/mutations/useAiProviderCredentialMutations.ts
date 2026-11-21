@@ -58,7 +58,10 @@ export function useAiProviderCredentialMutations({
     try {
       const pending = request()
       const result = await (guardRequest ? guardRequest(pending) : pending)
-      await mutateCredentials(result, { revalidate: false })
+      await mutateCredentials(
+        (current) => mergeProviderCredentialStatuses(current, result),
+        { revalidate: false },
+      )
       return success
     } catch (error) {
       if (error instanceof AiAssistanceApiError && error.code === 'InvalidAiAssistanceProviderCredential') {
@@ -101,4 +104,28 @@ export function useAiProviderCredentialMutations({
   ), [accessToken, run])
 
   return { saveKey, removeKey }
+}
+
+/**
+ * Keeps the newer status per provider so a late response cannot roll back a parallel change.
+ *
+ * Each provider revision only grows, including on removal, so the higher revision is newer.
+ *
+ * @param current - Cached key-free status, if any.
+ * @param incoming - Key-free status returned by the latest write.
+ * @returns The incoming list with any newer cached provider rows kept.
+ */
+export function mergeProviderCredentialStatuses(
+  current: AiAssistanceProviderCredentials | undefined,
+  incoming: AiAssistanceProviderCredentials,
+): AiAssistanceProviderCredentials {
+  if (current === undefined) return incoming
+  const cached = new Map(current.providers.map((status) => [status.provider, status]))
+  return {
+    ...incoming,
+    providers: incoming.providers.map((status) => {
+      const previous = cached.get(status.provider)
+      return previous !== undefined && previous.revision > status.revision ? previous : status
+    }),
+  }
 }

@@ -118,13 +118,13 @@ IAM grant も用途ごとの condition で絞っているため、key を分け�
 
 ### Optional SSO and AI
 
-SSO と AI は独立したオプションです。新規 stack では、それぞれの関連 parameter をすべて省略すると無効になります。一部だけの指定は CloudFormation rule が拒否します。SSOはruntimeでも不完全な設定を拒否し、password loginへ暗黙に切り替えません。
+SSO と AI は独立したオプションです。新規 stack では、SSO は関連 parameter をすべて省略すると無効になります。AI は `AiExternalProviders` が既定で有効なため、無効にするには Bedrock の parameter を省略したうえで `AiExternalProviders=` を空にします。一部だけの指定は CloudFormation rule が拒否します。SSOはruntimeでも不完全な設定を拒否し、password loginへ暗黙に切り替えません。
 
 - SSO: `CognitoSsoUserPoolClientId`、`CognitoHostedUiDomain`、`CognitoSsoRedirectUri`、`CognitoEnterpriseIdpName`、`EnterpriseSsoStateSecret` の5項目をまとめて設定します。未設定時はSSO discovery/redirectと保存済みdomainのSSO強制を使わず、通常のpassword/MFA loginを使います。
-- AI: `AiBedrockModelId`、`AiBedrockModelArn`、input/outputの両token単価をまとめて設定します。現在サポートするJP profileには `AiBedrockDestinationModelArns` も必要です。未設定時は保存済みWorkspace policyにかかわらずAI操作を拒否し、Bedrock呼び出しIAM policyを作らず、AI observabilityのstream mappingを無効にします。データ保持のため既存table、queue、log、worker定義は維持します。Webの別途opt-in buildは不要です。
+- AI: `AiBedrockModelId`、`AiBedrockModelArn`、input/outputの両token単価をまとめて設定します。現在サポートするJP profileには `AiBedrockDestinationModelArns` も必要です。Bedrock が未設定で `AiExternalProviders` も空のときは保存済みWorkspace policyにかかわらずAI操作を拒否し、Bedrock呼び出しIAM policyを作らず、AI observabilityのstream mappingを無効にします。データ保持のため既存table、queue、log、worker定義は維持します。Webの別途opt-in buildは不要です。
 - 外部 AI provider: `AiExternalProviders`（既定 `anthropic,openai`）で、Workspace 管理者が API キーを登録して使える provider を決めます。空にすると Bedrock だけになります。Bedrock が未設定でもこの値が空でなければ AI は有効になり、AI observability の stream mapping も有効です。API キーは Secrets Manager ではなく既存の `DeveloperPlatformKey` で暗号化して Workspace Search table に保存するため、固定費は増えません（[ADR 0036](../docs/adr/0036-ai-external-provider-workspace-keys.md)）。
 
-既存stackの更新ではCloudFormationが前回のparameter値を保持するため、省略だけでは無効化されません。無効にするサービスの上記全parameterへ明示的に空文字を渡し、`ApiRuntimeConfigurationRevision` を更新してください。たとえばAIなら `--parameters AiBedrockModelId=` に加え、ARN、単価2項目、destination ARNも空にします。SSOなら5項目をすべて空にします。API version/aliasの切り替えで新しい設定が適用されます。既に開始した呼び出しの即時取り消しは行いません。
+既存stackの更新ではCloudFormationが前回のparameter値を保持するため、省略だけでは無効化されません。無効にするサービスの上記全parameterへ明示的に空文字を渡し、`ApiRuntimeConfigurationRevision` を更新してください。たとえばAIを止めるなら `--parameters AiBedrockModelId=` に加え、ARN、単価2項目、destination ARN、`AiExternalProviders=` も空にします。Bedrock だけを止めて外部 provider を残す場合は `AiExternalProviders` を空にしません。SSOなら5項目をすべて空にします。API version/aliasの切り替えで新しい設定が適用されます。既に開始した呼び出しの即時取り消しは行いません。
 
 Workspace、複数Project/Team、権限、監査、backup、export/closureは引き続き利用できます。商用plan、seat quota、月次課金集計はありません。
 

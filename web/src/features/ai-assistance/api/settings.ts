@@ -10,6 +10,7 @@ import type {
   UpdateAiAssistancePolicyRequest,
   UpdateAiAssistancePreferenceRequest,
 } from '@mukuroji/contracts'
+import { AI_ASSISTANCE_MAX_AVAILABLE_MODELS } from '@mukuroji/contracts'
 import {
   createMutationHeaders,
   type MutationRequestContext,
@@ -203,7 +204,7 @@ function parseAiAssistancePolicy(value: unknown): AiAssistancePolicy {
  */
 function parseAvailableModels(value: unknown): AiAssistanceAvailableModel[] | undefined {
   if (value === undefined) return undefined
-  if (!Array.isArray(value) || value.length > 40) throw invalidResponseError()
+  if (!Array.isArray(value) || value.length > AI_ASSISTANCE_MAX_AVAILABLE_MODELS) throw invalidResponseError()
   return value.map((entry: unknown) => {
     if (!isRecord(entry) || !isIdentifier(entry.modelId)) throw invalidResponseError()
     const provider = aiAssistanceProviders.find((candidate) => candidate === entry.provider)

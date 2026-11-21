@@ -30,6 +30,8 @@ parameter で1つに固定され、利用者は接続先を選べない。手元
   Workspace と provider を AAD に入れ、別の row へ移しても復号できない。
 - 呼び出しは provider の公式 SDK（`@anthropic-ai/sdk`、`openai`）で行い、既存の Mastra gateway に
   runner として差し込む。出力の検証、予約・budget・監査・redaction の流れは Bedrock と共通にする。
+  Claude API の structured outputs は optional property を 24 個までしか受け付けず、4 task の出力 schema を
+  合わせると超えるため、schema は system prompt に載せて gateway の厳格な検証に任せる。
   キーが無い model は budget を予約する前に `AiAssistanceProviderCredentialMissing` で断る。
 - 使える外部 provider は deploy 時の parameter `AiExternalProviders`（既定 `anthropic,openai`）で決め、
   空にすると今までどおり Bedrock だけになる。

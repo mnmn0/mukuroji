@@ -191,6 +191,8 @@ export function AiAssistanceSettingsPanelContainer({
     />
     {canManagePolicy && deploymentEnabled ? (
       <AiProviderCredentialsSection
+        // Remount per Workspace and member so a typed key or late save never crosses scopes.
+        key={`${workspaceId ?? ''}:${cacheScope ?? ''}`}
         accessToken={accessToken}
         t={t}
         {...(cacheScope === undefined ? {} : { cacheScope })}

@@ -20,6 +20,9 @@ export type AiAssistanceAvailableModel = {
   provider: AiAssistanceProvider
 }
 
+/** Most deployment models one policy response may list; Web rejects longer lists. */
+export const AI_ASSISTANCE_MAX_AVAILABLE_MODELS = 40
+
 /** Product workflow supported by AI assistance. */
 export type AiAssistanceTask = 'triage' | 'summary' | 'search' | 'planning'
 

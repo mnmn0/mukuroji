@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import type { MastraStructuredGenerationInput } from '../mastra/mastra-bedrock-ai-model-gateway'
-import { runOpenAiStructuredGeneration } from './external-provider-runners'
+import {
+  runAnthropicStructuredGeneration,
+  runOpenAiStructuredGeneration,
+} from './external-provider-runners'
 
 const originalFetch = globalThis.fetch
 
@@ -66,5 +69,44 @@ describe('runOpenAiStructuredGeneration', () => {
       outputTokens: 2,
       traceId: 'resp_1',
     })
+  })
+})
+
+describe('runAnthropicStructuredGeneration', () => {
+  test('sends the output schema as instructions instead of a strict structured-output grammar', async () => {
+    const requests: unknown[] = []
+    globalThis.fetch = Object.assign(
+      async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        requests.push(typeof init?.body === 'string' ? JSON.parse(init.body) : undefined)
+        return Response.json({
+          id: 'msg_1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-haiku-5-5',
+          content: [{ type: 'text', text: '```json\n{"ok":true}\n```' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 2 },
+        })
+      },
+      { preconnect: originalFetch.preconnect },
+    )
+
+    const result = await runAnthropicStructuredGeneration('sk-ant-test-key-000000', {
+      ...createInput(),
+      modelId: 'claude-haiku-5-5',
+    })
+
+    expect(result).toMatchObject({
+      object: { ok: true },
+      finishReason: 'end_turn',
+      inputTokens: 10,
+      outputTokens: 2,
+      traceId: 'msg_1',
+    })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({ output_config: { effort: 'low' } })
+    expect(requests[0]).not.toHaveProperty('output_config.format')
+    expect(JSON.stringify(requests[0])).toContain('The object must match this JSON Schema')
   })
 })
