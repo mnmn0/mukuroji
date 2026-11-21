@@ -1731,7 +1731,8 @@ function indexAuthorizedEvents(
     if (
       event.entityType !== 'work-item' ||
       event.entity.type !== 'work-item' ||
-      event.entityId !== event.entity.id
+      event.entityId !== event.entity.id ||
+      !isWorkItemSelfTargetedEvent(event)
     ) continue
     const key = byCanonicalEntityId.get(event.entityId)
     if (key) result.get(key)?.push(event)
@@ -1753,6 +1754,22 @@ function indexAuthorizedEvents(
     itemEvents.splice(0, itemEvents.length, ...unique.values())
   }
   return result
+}
+
+/**
+ * Checks whether an audit event describes the Work Item itself rather than an item attached to it.
+ *
+ * Context items, comments, files, and approvals share the Work Item entity timeline but target
+ * their own records, and their `title` or `state` changes must not rewind the Work Item.
+ *
+ * @param event Audit event on a Work Item entity timeline.
+ * @returns True when the event targets the same Work Item as its entity.
+ */
+function isWorkItemSelfTargetedEvent(event: AuditEventV1) {
+  return event.targetType === 'work-item' &&
+    event.target.type === 'work-item' &&
+    event.targetId === event.target.id &&
+    event.targetId === event.entityId
 }
 
 function createFilteredFacts(

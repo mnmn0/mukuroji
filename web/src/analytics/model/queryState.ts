@@ -179,11 +179,13 @@ export function serializeAnalyticsRouteState(state: AnalyticsRouteState) {
  *
  * @param now - 期間終端を決める日時です。
  * @param timeZone - Calendar date を解釈する IANA timezone です。
+ * @param teamIds - 既定で絞り込む閲覧者の Team ID です。空または省略時は Team で絞り込みません。
  * @returns 指定 timezone の30 calendar daysをUTC instantへ変換した filter です。
  */
 export function createDefaultAnalyticsFilter(
   now = new Date(),
   timeZone = 'UTC',
+  teamIds: readonly string[] = [],
 ) {
   const endDate = formatAnalyticsCalendarDate(now.toISOString(), timeZone)
   const end = new Date(`${endDate}T00:00:00.000Z`)
@@ -204,6 +206,7 @@ export function createDefaultAnalyticsFilter(
         'end',
       ),
     },
+    ...(teamIds.length > 0 ? { teamIds: [...new Set(teamIds)].sort() } : {}),
   } as AnalyticsFilter
 }
 
