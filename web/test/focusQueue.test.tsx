@@ -196,6 +196,20 @@ describe('Focus queue', () => {
     })
   })
 
+  test('reads the slipped threshold and weight from the policy form', () => {
+    const formData = new FormData()
+    formData.set('slippedThresholdDays', '5')
+    formData.set('weight-slipped', '70')
+    expect(readFocusPolicyOverrides(formData)).toEqual({
+      invalidFieldNames: [],
+      overrides: { slippedThresholdDays: 5, weights: { slipped: 70 } },
+    })
+    formData.set('slippedThresholdDays', '0')
+    expect(readFocusPolicyOverrides(formData).invalidFieldNames).toEqual(['slippedThresholdDays'])
+    formData.set('slippedThresholdDays', '1.5')
+    expect(readFocusPolicyOverrides(formData).invalidFieldNames).toEqual(['slippedThresholdDays'])
+  })
+
   test('reads SLA scope overrides from the policy form and inherits blank SLA fields', () => {
     const formData = new FormData()
     formData.set('slaEnabled', '')

@@ -32,6 +32,7 @@ const focusPolicyWeightFields: readonly FocusPolicyWeightField[] = Object.freeze
   { field: 'mention', signalType: 'mention' },
   { field: 'sla', signalType: 'sla' },
   { field: 'cycle', signalType: 'cycle' },
+  { field: 'slipped', signalType: 'slipped' },
 ])
 
 /** Props for the effective Focus policy disclosure and personal override editor. */
@@ -243,6 +244,16 @@ export function FocusPolicyPanel({
               min="1"
               name="slaHours"
               value={storedPolicy?.overrides.slaHours}
+            />
+            <PolicyNumberField
+              effectiveValue={inheritedSettings.slippedThresholdDays}
+              errorMessage={t('workspace.focus.policy.fieldError')}
+              invalid={invalidFieldNames.includes('slippedThresholdDays')}
+              label={t('workspace.focus.policy.slippedThresholdDays')}
+              max="365"
+              min="1"
+              name="slippedThresholdDays"
+              value={storedPolicy?.overrides.slippedThresholdDays}
             />
             <label className="grid gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
               <span>{t('workspace.focus.policy.slaEnabled')}</span>
