@@ -39,6 +39,11 @@ import {
   queryAnalyticsEvidence,
   selectAnalyticsWorkItemsRequiringHistory,
 } from '../../modules/analytics/analytics'
+import {
+  readAnalyticsWorkItemHistoryEvents,
+  type AnalyticsWorkItemHistoryReader,
+} from '../../modules/analytics/analytics-history-reader'
+import type { AnalyticsHistoryEvent } from '../../modules/analytics/analytics-work-item-history'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
@@ -490,14 +495,20 @@ async function readAuthorizedAnalyticsData(
     attempt < ANALYTICS_READ_BARRIER_MAX_ATTEMPTS;
     attempt += 1
   ) {
-    const events = await readAuthorizedAnalyticsAuditEvents(
-      principal.directoryId,
-      selectAnalyticsWorkItemsRequiringHistory(
+    const events = await readAnalyticsWorkItemHistoryEvents({
+      workspaceId: principal.directoryId,
+      workItems: selectAnalyticsWorkItemsRequiringHistory(
         accessible.workItems,
         filter.period.from,
       ),
       historyReadAt,
-    )
+      historyReader: readAnalyticsWorkItemHistoryReader(),
+      readAuditEvents: async (workItems) => await readAuthorizedAnalyticsAuditEvents(
+        principal.directoryId,
+        workItems,
+        historyReadAt,
+      ),
+    })
     const verified = await readAccessibleAnalyticsWorkItems(
       principal,
       filter,
@@ -525,6 +536,17 @@ async function readAuthorizedAnalyticsData(
   }
 
   throw createAnalyticsReadBarrierError()
+}
+
+/**
+ * Returns the history row reader of the configured Analytics repository, when it has one.
+ *
+ * @returns The reader, or undefined so every Work Item uses the audit timeline.
+ */
+function readAnalyticsWorkItemHistoryReader(): AnalyticsWorkItemHistoryReader | undefined {
+  const repository = workItemDependencies.analytics
+  const getWorkItemHistoryRows = repository.getWorkItemHistoryRows?.bind(repository)
+  return getWorkItemHistoryRows ? { getWorkItemHistoryRows } : undefined
 }
 
 /** Canonical state が audit cutoff 以下であることを fail-closed に検証します。 */
@@ -593,7 +615,7 @@ function stableAnalyticsApiStringify(value: unknown): string {
  */
 function hasAnalyticsLatestAuditCoverage(
   workItems: readonly CanonicalWorkItem[],
-  events: readonly AuditEventV1[],
+  events: readonly AnalyticsHistoryEvent[],
 ) {
   return workItems.every((workItem) => {
     if (workItem.revision <= 1) return true
@@ -619,7 +641,7 @@ function hasAnalyticsLatestAuditCoverage(
  * @returns True when event identity, metadata, revision, and action all match.
  */
 function isAnalyticsLatestWorkItemUpdate(
-  event: AuditEventV1,
+  event: AnalyticsHistoryEvent,
   workItem: CanonicalWorkItem,
   canonicalEntityId: string,
 ) {
@@ -743,7 +765,7 @@ async function readAuthorizedAnalyticsAuditEvents(
  * @returns True when both persisted entity IDs exactly match the query identity.
  */
 function isCanonicalAnalyticsAuditEvent(
-  event: AuditEventV1,
+  event: AnalyticsHistoryEvent,
   canonicalEntityId: string,
 ) {
   return event.entityType === 'work-item' &&

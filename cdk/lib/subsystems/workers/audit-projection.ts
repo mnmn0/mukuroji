@@ -99,7 +99,7 @@ export function buildAuditProjectionWorker(
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
       description:
-        'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.',
+        'Projects audit outbox events into collaboration, Webhook, connector deliveries, tenant retention, and Analytics history.',
       bundling: {
         bundleAwsSDK: true,
         minify: true,
@@ -213,6 +213,20 @@ export function buildAuditProjectionWorker(
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem', 'dynamodb:ConditionCheckItem'],
       resources: [analyticsTable.tableArn],
+    }),
+  );
+  // Analytics history rows (ADR 0042): read-merge-write of one row per Work Item, rebuilt from the
+  // Work Item's audit entity timeline when the row is missing or has a revision gap.
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:PutItem', 'dynamodb:DeleteItem'],
+      resources: [analyticsTable.tableArn],
+    }),
+  );
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [`${auditEventsTable.tableArn}/index/EntityOccurredAtIndex`],
     }),
   );
   collaborationProjectionFunction.addToRolePolicy(

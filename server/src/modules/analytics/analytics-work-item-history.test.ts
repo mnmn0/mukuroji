@@ -1,0 +1,700 @@
+import { describe, expect, test } from 'bun:test'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+  type AnalyticsQueryInput,
+  type CanonicalWorkItem,
+} from '@mukuroji/contracts'
+import {
+  ANALYTICS_METRIC_DEFINITIONS,
+  AnalyticsError,
+  createAnalyticsSnapshot,
+  queryAnalyticsEvidence,
+  selectAnalyticsWorkItemsRequiringHistory,
+} from './analytics'
+import {
+  readAnalyticsWorkItemHistoryEvents,
+  type AnalyticsWorkItemHistoryReader,
+} from './analytics-history-reader'
+import {
+  ANALYTICS_WORK_ITEM_HISTORY_MAX_BYTES,
+  createAnalyticsWorkItemHistoryRecordKey,
+  createEmptyAnalyticsWorkItemHistoryRow,
+  mergeAnalyticsWorkItemHistoryEntries,
+  parseStoredAnalyticsWorkItemHistoryRow,
+  readAnalyticsWorkItemHistoryEvent,
+  toAnalyticsHistoryEvents,
+  toStoredAnalyticsWorkItemHistoryRow,
+  type AnalyticsHistoryEvent,
+  type AnalyticsWorkItemHistoryKey,
+  type AnalyticsWorkItemHistoryRow,
+} from './analytics-work-item-history'
+import {
+  processAnalyticsWorkItemHistoryProjectionBatch,
+  type AnalyticsWorkItemTimeline,
+} from './adapter-in/events/analytics-work-item-history-projection'
+import type {
+  AnalyticsWorkItemHistoryRowRead,
+  AnalyticsWorkItemHistoryStore,
+} from './adapter-out/dynamodb/analytics-work-item-history-store'
+import { AUDIT_SCHEMA_VERSION, type AuditEventV1, type AuditFieldChange } from '../audit/audit'
+import type {
+  DynamoAttributeValue,
+  DynamoStreamRecord,
+} from '../../infrastructure/aws/dynamodb-stream'
+
+const workspaceId = 'workspace-1'
+const authorizedProjectIds = new Set(['project-1', 'project-2', 'project-a'])
+
+/**
+ * Builds a canonical Work Item for tests.
+ *
+ * @param id - Work Item ID.
+ * @param overrides - Fields to override.
+ * @returns The Work Item.
+ */
+function createWorkItem(id: string, overrides: Partial<CanonicalWorkItem> = {}): CanonicalWorkItem {
+  const dueDate = overrides.dueDate ?? '2026-01-10'
+  return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    id,
+    teamId: 'core',
+    title: `Work ${id}`,
+    assigneeUserId: 'user-1',
+    creatorMemberKey: 'member-1',
+    priority: 'medium',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    workflowStatusId: 'status-backlog',
+    statusCategory: 'backlog',
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    customFieldValues: {},
+    relationIds: [],
+    source: 'dynamodb',
+    ...overrides,
+    dueDate,
+    schedule: overrides.schedule ?? createDefaultDueDateWorkItemSchedule(dueDate),
+  }
+}
+
+/** Options of {@link createAuditEvent}. */
+type AuditEventOptions = {
+  /** Event type; defaults to `work-item.updated`. */
+  eventType?: string
+  /** Action; defaults to `updated`. */
+  action?: string
+  /** Canonical revision after the mutation; omitted for attached records. */
+  afterRevision?: number
+  /** Target entity ID; defaults to the Work Item itself. */
+  targetId?: string
+  /** Audit retention expiry. */
+  expiresAt?: number
+}
+
+/**
+ * Builds an audit event on a Work Item's entity timeline.
+ *
+ * @param eventId - Event ID.
+ * @param workItem - Work Item the timeline belongs to.
+ * @param occurredAt - Occurrence time.
+ * @param changes - Field changes.
+ * @param options - Event type, revision, and target overrides.
+ * @returns The audit event.
+ */
+function createAuditEvent(
+  eventId: string,
+  workItem: Pick<CanonicalWorkItem, 'teamId' | 'id'>,
+  occurredAt: string,
+  changes: AuditFieldChange[],
+  options: AuditEventOptions = {},
+): AuditEventV1 {
+  const entityId = `team/${workItem.teamId}/issue/${workItem.id}`
+  const targetId = options.targetId ?? entityId
+  const targetType = options.targetId ? 'comment' : 'work-item'
+  return {
+    schemaVersion: AUDIT_SCHEMA_VERSION,
+    eventId,
+    directoryId: workspaceId,
+    workspaceId,
+    workspaceKey: workspaceId,
+    eventType: options.eventType ?? 'work-item.updated',
+    occurredAt,
+    occurredAtEventId: `${occurredAt}#${eventId}`,
+    workspaceEventKey: `${occurredAt}#${eventId}`,
+    actor: { id: 'user-1', kind: 'user' },
+    actorUserId: 'user-1',
+    actorKey: `${workspaceId}#user-1`,
+    actorEventKey: `${occurredAt}#${eventId}`,
+    entity: { type: 'work-item', id: entityId },
+    entityType: 'work-item',
+    entityId,
+    entityKey: `${workspaceId}#work-item#${entityId}`,
+    entityEventKey: `${occurredAt}#${eventId}`,
+    target: { type: targetType, id: targetId },
+    targetType,
+    targetId,
+    targetKey: `${workspaceId}#${targetType}#${targetId}`,
+    targetEventKey: `${occurredAt}#${eventId}`,
+    changes,
+    action: options.action ?? 'updated',
+    correlationId: eventId,
+    idempotencyKeyHash: eventId,
+    requestFingerprint: eventId,
+    source: 'api',
+    outboxStatus: 'pending',
+    ...(options.afterRevision === undefined
+      ? {}
+      : {
+          metadata: {
+            adapter: 'canonical-work-item',
+            teamId: workItem.teamId,
+            issueId: workItem.id,
+            afterRevision: options.afterRevision,
+          },
+        }),
+    ...(options.expiresAt === undefined ? {} : { expiresAt: options.expiresAt }),
+  }
+}
+
+/**
+ * Simulates Work Items whose every mutation writes an audit event with its revision, plus
+ * comment events that share the Work Item timeline.
+ *
+ * @param count - Number of Work Items.
+ * @returns Final canonical Work Items and every audit event, in write order.
+ */
+function simulateHistory(count: number) {
+  let seed = 42
+  /** Returns the next deterministic pseudo-random integer below the bound. */
+  const next = (bound: number) => {
+    seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648
+    return seed % bound
+  }
+  /** Picks a deterministic pseudo-random element. */
+  const pick = <T,>(values: readonly T[]): T => {
+    const value = values[next(values.length)]
+    if (value === undefined) throw new Error('empty pick')
+    return value
+  }
+  const statuses = ['backlog', 'unstarted', 'started', 'completed', 'canceled'] as const
+  const projects = ['project-1', 'project-2', 'project-a', 'project-hidden'] as const
+  const hour = 60 * 60 * 1_000
+  const start = Date.parse('2026-01-01T00:00:00.000Z')
+  const workItems: CanonicalWorkItem[] = []
+  const events: AuditEventV1[] = []
+  for (let index = 0; index < count; index += 1) {
+    let at = start + next(24 * 60) * hour
+    const createdAt = new Date(at).toISOString()
+    let item = createWorkItem(`item-${String(index).padStart(3, '0')}`, {
+      createdAt,
+      updatedAt: createdAt,
+      statusCategory: pick(statuses),
+      assignedProjectId: pick(projects),
+    })
+    events.push(createAuditEvent(`${item.id}-created`, item, createdAt, [], {
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+    }))
+    const changeCount = next(8)
+    for (let change = 0; change < changeCount; change += 1) {
+      at += (1 + next(24 * 6)) * hour
+      const occurredAt = new Date(at).toISOString()
+      if (next(4) === 0) {
+        events.push(createAuditEvent(`${item.id}-comment-${change}`, item, occurredAt, [
+          { field: 'title', before: 'old comment', after: 'new comment' },
+        ], { targetId: `comment-${item.id}-${change}`, eventType: 'comment.updated' }))
+        continue
+      }
+      let changes: AuditFieldChange[]
+      let after: CanonicalWorkItem
+      if (next(3) === 0) {
+        const assignedProjectId = pick(projects)
+        changes = [
+          { field: 'assignedProjectId', before: item.assignedProjectId ?? null, after: assignedProjectId },
+          { field: 'priority', before: 'medium', after: 'high' },
+        ]
+        after = { ...item, assignedProjectId }
+      } else {
+        const statusCategory = pick(statuses)
+        changes = [{ field: 'statusCategory', before: item.statusCategory, after: statusCategory }]
+        after = { ...item, statusCategory }
+      }
+      after = { ...after, revision: item.revision + 1, updatedAt: occurredAt }
+      events.push(createAuditEvent(`${item.id}-${change}`, item, occurredAt, changes, {
+        afterRevision: after.revision,
+      }))
+      item = after
+    }
+    workItems.push(item)
+  }
+  return { workItems, events }
+}
+
+/** In-memory {@link AnalyticsWorkItemHistoryStore} that also reads rows like the repository. */
+class MemoryHistoryStore implements AnalyticsWorkItemHistoryStore, AnalyticsWorkItemHistoryReader {
+  /** Stored rows by record key. */
+  readonly rows = new Map<string, AnalyticsWorkItemHistoryRow>()
+  /** Number of successful writes. */
+  writes = 0
+
+  /**
+   * Reads one row.
+   *
+   * @param key - Row identity.
+   * @returns The row read.
+   */
+  async getRow(key: AnalyticsWorkItemHistoryKey): Promise<AnalyticsWorkItemHistoryRowRead> {
+    const row = this.rows.get(this.recordKey(key))
+    return { row: row ? structuredClone(row) : undefined, exists: row !== undefined }
+  }
+
+  /**
+   * Writes one row when the stored version still matches.
+   *
+   * @param row - Row to save.
+   * @param previous - Read the row was built from.
+   * @returns Whether the write applied.
+   */
+  async putRow(row: AnalyticsWorkItemHistoryRow, previous: AnalyticsWorkItemHistoryRowRead) {
+    const stored = this.rows.get(this.recordKey(row))
+    if ((stored?.rowVersion ?? undefined) !== previous.row?.rowVersion) return false
+    const roundTripped = parseStoredAnalyticsWorkItemHistoryRow(
+      JSON.parse(JSON.stringify(toStoredAnalyticsWorkItemHistoryRow(row))),
+    )
+    if (!roundTripped) throw new Error('row does not round-trip')
+    this.rows.set(this.recordKey(row), roundTripped)
+    this.writes += 1
+    return true
+  }
+
+  /**
+   * Deletes one row.
+   *
+   * @param key - Row identity.
+   */
+  async deleteRow(key: AnalyticsWorkItemHistoryKey) {
+    this.rows.delete(this.recordKey(key))
+  }
+
+  /**
+   * Reads the rows of the given Work Items.
+   *
+   * @param id - Workspace ID.
+   * @param workItems - Work Items to read.
+   * @returns Existing rows.
+   */
+  async getWorkItemHistoryRows(
+    id: string,
+    workItems: readonly Pick<AnalyticsWorkItemHistoryKey, 'teamId' | 'workItemId'>[],
+  ) {
+    return workItems.flatMap((workItem) => {
+      const row = this.rows.get(this.recordKey({ workspaceId: id, ...workItem }))
+      return row ? [structuredClone(row)] : []
+    })
+  }
+
+  /**
+   * Builds the map key of a row.
+   *
+   * @param key - Row identity.
+   * @returns The key.
+   */
+  private recordKey(key: AnalyticsWorkItemHistoryKey) {
+    return `${key.workspaceId}|${createAnalyticsWorkItemHistoryRecordKey(key.teamId, key.workItemId)}`
+  }
+}
+
+/**
+ * Converts a plain value to a DynamoDB stream attribute.
+ *
+ * @param value - Plain value.
+ * @returns The stream attribute.
+ */
+function marshal(value: unknown): DynamoAttributeValue {
+  if (value === null) return { NULL: true }
+  if (typeof value === 'string') return { S: value }
+  if (typeof value === 'number') return { N: String(value) }
+  if (typeof value === 'boolean') return { BOOL: value }
+  if (Array.isArray(value)) return { L: value.map(marshal) }
+  if (typeof value === 'object') {
+    return {
+      M: Object.fromEntries(
+        Object.entries(value).filter(([, entry]) => entry !== undefined)
+          .map(([key, entry]) => [key, marshal(entry)]),
+      ),
+    }
+  }
+  throw new Error('unsupported value')
+}
+
+/**
+ * Builds an AuditEvents stream record.
+ *
+ * @param event - Audit event.
+ * @param eventName - Stream event name.
+ * @returns The stream record.
+ */
+function streamRecord(event: AuditEventV1, eventName: 'INSERT' | 'MODIFY' = 'INSERT'): DynamoStreamRecord {
+  const image = marshal(event).M
+  if (!image) throw new Error('not a map')
+  return { eventName, dynamodb: { NewImage: image, SequenceNumber: event.eventId } }
+}
+
+/**
+ * Builds a timeline reader over a fixed list of audit events.
+ *
+ * @param events - Events the audit table holds.
+ * @returns A reader and a counter of reads.
+ */
+function createTimeline(events: readonly AuditEventV1[]) {
+  const reads: string[] = []
+  return {
+    reads,
+    /**
+     * Returns the events of one Work Item.
+     *
+     * @param _workspaceId - Workspace ID.
+     * @param teamId - Team ID.
+     * @param workItemId - Work Item ID.
+     * @returns The timeline.
+     */
+    async readWorkItemTimeline(
+      _workspaceId: string,
+      teamId: string,
+      workItemId: string,
+    ): Promise<AnalyticsWorkItemTimeline> {
+      reads.push(workItemId)
+      const entityId = `team/${teamId}/issue/${workItemId}`
+      return {
+        events: events.filter((event) => event.entityId === entityId)
+          .sort((left, right) => left.occurredAt.localeCompare(right.occurredAt)),
+        complete: true,
+      }
+    },
+  }
+}
+
+const query: AnalyticsQueryInput = {
+  filter: {
+    period: { from: '2026-02-01T00:00:00.000Z', to: '2026-03-15T00:00:00.000Z' },
+    includeArchived: true,
+  },
+  widgets: [
+    ...(Object.keys(ANALYTICS_METRIC_DEFINITIONS) as Array<keyof typeof ANALYTICS_METRIC_DEFINITIONS>)
+      .map((metric) => ({
+        id: `chart-${metric}`,
+        title: metric,
+        type: 'chart' as const,
+        metric,
+        groupBy: { dimension: 'week' as const },
+        ...(metric === 'sla' ? { slaTargetHours: 240 } : {}),
+      })),
+    {
+      id: 'by-project',
+      title: 'By project',
+      type: 'table',
+      metric: 'remaining-scope',
+      groupBy: { dimension: 'project' },
+    },
+  ],
+  asOf: '2026-03-10T12:00:00.000Z',
+  timeZone: 'Asia/Tokyo',
+}
+
+describe('Analytics work item history rows', () => {
+  test('produces the same snapshot and evidence as reading every audit timeline', async () => {
+    const { workItems, events } = simulateHistory(180)
+    const store = new MemoryHistoryStore()
+    const timeline = createTimeline(events)
+    for (const event of events) {
+      const response = await processAnalyticsWorkItemHistoryProjectionBatch(
+        { Records: [streamRecord(event)] },
+        { store, readWorkItemTimeline: timeline.readWorkItemTimeline },
+      )
+      expect(response.batchItemFailures).toEqual([])
+    }
+    expect(timeline.reads).toEqual([])
+
+    const historyWorkItems = selectAnalyticsWorkItemsRequiringHistory(
+      workItems,
+      query.filter.period.from,
+    )
+    const historyEvents = await readAnalyticsWorkItemHistoryEvents({
+      workspaceId,
+      workItems: historyWorkItems,
+      historyReadAt: '2026-04-01T00:00:00.000Z',
+      historyReader: store,
+      readAuditEvents: async () => {
+        throw new Error('every Work Item should be covered by its history row')
+      },
+    })
+    const auditEvents = events.filter((event) =>
+      historyWorkItems.some((item) => event.entityId === `team/${item.teamId}/issue/${item.id}`)
+    )
+    const fromAudit = createAnalyticsSnapshot({
+      workItems,
+      events: auditEvents,
+      query,
+      authorizedProjectIds,
+    })
+    const fromHistory = createAnalyticsSnapshot({
+      workItems,
+      events: historyEvents,
+      query,
+      authorizedProjectIds,
+    })
+    expect(fromHistory).toEqual(fromAudit)
+    expect(fromAudit.widgets.some((widget) => (widget.value ?? 0) > 0)).toBe(true)
+
+    for (const metric of ['throughput', 'cycle-time', 'wip', 'scope-change'] as const) {
+      const evidence = {
+        metric,
+        filter: query.filter,
+        asOf: query.asOf,
+        timeZone: query.timeZone,
+        limit: 200,
+      }
+      expect(queryAnalyticsEvidence({
+        workItems,
+        events: historyEvents,
+        evidence,
+        authorizedProjectIds,
+      })).toEqual(queryAnalyticsEvidence({
+        workItems,
+        events: auditEvents,
+        evidence,
+        authorizedProjectIds,
+      }))
+    }
+  })
+
+  test('falls back to the audit timeline for missing, stale, and overflowed rows', async () => {
+    const covered = createWorkItem('covered', { revision: 2 })
+    const stale = createWorkItem('stale', { revision: 3 })
+    const missing = createWorkItem('missing', { revision: 2 })
+    const overflowed = createWorkItem('overflowed', { revision: 2 })
+    const store = new MemoryHistoryStore()
+    const rowFor = (item: CanonicalWorkItem, revisions: number[]) =>
+      mergeAnalyticsWorkItemHistoryEntries(
+        createEmptyAnalyticsWorkItemHistoryRow({ workspaceId, teamId: item.teamId, workItemId: item.id }),
+        revisions.map((revision) => {
+          const input = readAnalyticsWorkItemHistoryEvent(createAuditEvent(
+            `${item.id}-${revision}`,
+            item,
+            `2026-01-0${revision}T00:00:00.000Z`,
+            [],
+            { afterRevision: revision },
+          ))
+          if (!input) throw new Error('not a history event')
+          return input.entry
+        }),
+      )
+    for (const row of [
+      rowFor(covered, [1, 2]),
+      rowFor(stale, [1, 2]),
+      { ...rowFor(overflowed, [1, 2]), overflow: true, entries: [] },
+    ]) {
+      await store.putRow(row, { row: undefined, exists: false })
+    }
+    const fallback: string[] = []
+    const result = await readAnalyticsWorkItemHistoryEvents({
+      workspaceId,
+      workItems: [covered, stale, missing, overflowed],
+      historyReadAt: '2026-02-01T00:00:00.000Z',
+      historyReader: store,
+      readAuditEvents: async (items) => {
+        fallback.push(...items.map((item) => item.id))
+        return []
+      },
+    })
+    expect(fallback).toEqual(['stale', 'missing', 'overflowed'])
+    expect(result.map((event) => event.eventId)).toEqual(['covered-1', 'covered-2'])
+  })
+
+  test('rejects reads that would restore more history entries than the limit', async () => {
+    const item = createWorkItem('large', { revision: 1 })
+    const entry = {
+      eventId: 'e',
+      eventType: 'work-item.created',
+      action: 'created',
+      occurredAt: '2026-01-01T00:00:00.000Z',
+      changes: [],
+      metadata: { afterRevision: 1 },
+    }
+    const row: AnalyticsWorkItemHistoryRow = {
+      ...createEmptyAnalyticsWorkItemHistoryRow({ workspaceId, teamId: 'core', workItemId: 'large' }),
+      coveredRevision: 1,
+      entries: Array.from({ length: 200_001 }, (_, index) => ({ ...entry, eventId: `e-${index}` })),
+    }
+    const reader: AnalyticsWorkItemHistoryReader = {
+      getWorkItemHistoryRows: async () => [row],
+    }
+    const read = readAnalyticsWorkItemHistoryEvents({
+      workspaceId,
+      workItems: [item],
+      historyReadAt: '2026-02-01T00:00:00.000Z',
+      historyReader: reader,
+      readAuditEvents: async () => [],
+    })
+    expect(read).rejects.toBeInstanceOf(AnalyticsError)
+  })
+
+  test('rebuilds from the audit timeline when the row is missing or has a revision gap', async () => {
+    const item = createWorkItem('gap')
+    const created = createAuditEvent('gap-1', item, '2026-01-01T00:00:00.000Z', [], {
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+    })
+    const second = createAuditEvent('gap-2', item, '2026-01-02T00:00:00.000Z', [
+      { field: 'statusCategory', before: 'backlog', after: 'started' },
+    ], { afterRevision: 2 })
+    const third = createAuditEvent('gap-3', item, '2026-01-03T00:00:00.000Z', [
+      { field: 'statusCategory', before: 'started', after: 'completed' },
+    ], { afterRevision: 3 })
+    const store = new MemoryHistoryStore()
+    const timeline = createTimeline([created, second, third])
+
+    // The projection sees revision 3 first: no row exists, so it rebuilds from the timeline.
+    await processAnalyticsWorkItemHistoryProjectionBatch(
+      { Records: [streamRecord(third)] },
+      { store, readWorkItemTimeline: timeline.readWorkItemTimeline },
+    )
+    const key = { workspaceId, teamId: 'core', workItemId: 'gap' }
+    expect((await store.getRow(key)).row?.coveredRevision).toBe(3)
+    expect(timeline.reads).toEqual(['gap'])
+
+    // Replays are no-ops and do not write.
+    const writes = store.writes
+    await processAnalyticsWorkItemHistoryProjectionBatch(
+      { Records: [streamRecord(created), streamRecord(second)] },
+      { store, readWorkItemTimeline: timeline.readWorkItemTimeline },
+    )
+    expect(store.writes).toBe(writes)
+  })
+
+  test('stops coverage at a gap that the audit index has not caught up with', async () => {
+    const item = createWorkItem('lag')
+    const created = createAuditEvent('lag-1', item, '2026-01-01T00:00:00.000Z', [], {
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+    })
+    const second = createAuditEvent('lag-2', item, '2026-01-02T00:00:00.000Z', [], {
+      afterRevision: 2,
+    })
+    const third = createAuditEvent('lag-3', item, '2026-01-03T00:00:00.000Z', [], {
+      afterRevision: 3,
+    })
+    const store = new MemoryHistoryStore()
+    const dependencies = { store, readWorkItemTimeline: createTimeline([created]).readWorkItemTimeline }
+    await processAnalyticsWorkItemHistoryProjectionBatch({ Records: [streamRecord(created)] }, dependencies)
+    await processAnalyticsWorkItemHistoryProjectionBatch({ Records: [streamRecord(third)] }, dependencies)
+    const key = { workspaceId, teamId: 'core', workItemId: 'lag' }
+    expect((await store.getRow(key)).row?.coveredRevision).toBe(1)
+    await processAnalyticsWorkItemHistoryProjectionBatch({ Records: [streamRecord(second)] }, dependencies)
+    expect((await store.getRow(key)).row?.coveredRevision).toBe(3)
+  })
+
+  test('updates retention expiry on MODIFY and drops expired entries when reading', async () => {
+    const item = createWorkItem('retention')
+    const created = createAuditEvent('retention-1', item, '2026-01-01T00:00:00.000Z', [], {
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+      expiresAt: 2_000_000_000,
+    })
+    const store = new MemoryHistoryStore()
+    const dependencies = { store, readWorkItemTimeline: createTimeline([]).readWorkItemTimeline }
+    await processAnalyticsWorkItemHistoryProjectionBatch({ Records: [streamRecord(created)] }, dependencies)
+    await processAnalyticsWorkItemHistoryProjectionBatch({
+      Records: [streamRecord({ ...created, expiresAt: 1_800_000_000 }, 'MODIFY')],
+    }, dependencies)
+    const key = { workspaceId, teamId: 'core', workItemId: 'retention' }
+    const row = (await store.getRow(key)).row
+    expect(row?.entries.map((entry) => entry.expiresAt)).toEqual([1_800_000_000])
+    if (!row) throw new Error('row missing')
+    expect(toAnalyticsHistoryEvents(row, '2027-01-01T00:00:00.000Z', 1_700_000_000)).toHaveLength(1)
+    expect(toAnalyticsHistoryEvents(row, '2027-01-01T00:00:00.000Z', 1_800_000_000)).toHaveLength(0)
+    expect(toAnalyticsHistoryEvents(row, '2025-12-31T00:00:00.000Z', 1_700_000_000)).toHaveLength(0)
+  })
+
+  test('deletes the row when the Work Item is deleted and skips attached records', async () => {
+    const item = createWorkItem('deleted')
+    const created = createAuditEvent('deleted-1', item, '2026-01-01T00:00:00.000Z', [], {
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+    })
+    const comment = createAuditEvent('deleted-c', item, '2026-01-02T00:00:00.000Z', [
+      { field: 'title', before: 'a', after: 'b' },
+    ], { targetId: 'comment-1' })
+    const deleted = createAuditEvent('deleted-2', item, '2026-01-03T00:00:00.000Z', [], {
+      eventType: 'work-item.deleted',
+      action: 'deleted',
+    })
+    const store = new MemoryHistoryStore()
+    const dependencies = { store, readWorkItemTimeline: createTimeline([]).readWorkItemTimeline }
+    await processAnalyticsWorkItemHistoryProjectionBatch({
+      Records: [streamRecord(created), streamRecord(comment)],
+    }, dependencies)
+    const key = { workspaceId, teamId: 'core', workItemId: 'deleted' }
+    expect((await store.getRow(key)).row?.entries.map((entry) => entry.eventId)).toEqual(['deleted-1'])
+    await processAnalyticsWorkItemHistoryProjectionBatch({ Records: [streamRecord(deleted)] }, dependencies)
+    expect((await store.getRow(key)).exists).toBe(false)
+  })
+
+  test('marks a row that does not fit as overflowed', () => {
+    const key = { workspaceId, teamId: 'core', workItemId: 'big' }
+    const entries = Array.from({ length: 400 }, (_, index) => ({
+      eventId: `big-${index}`,
+      eventType: 'work-item.updated',
+      action: 'updated',
+      occurredAt: new Date(Date.UTC(2026, 0, 1) + index * 1_000).toISOString(),
+      changes: [{ field: 'title', before: 'x'.repeat(500), after: 'y'.repeat(500) }],
+      metadata: { afterRevision: index + 1 },
+    }))
+    const row = mergeAnalyticsWorkItemHistoryEntries(createEmptyAnalyticsWorkItemHistoryRow(key), entries)
+    expect(JSON.stringify(entries).length).toBeGreaterThan(ANALYTICS_WORK_ITEM_HISTORY_MAX_BYTES)
+    expect(row.overflow).toBe(true)
+    expect(row.entries).toEqual([])
+  })
+
+  test('keeps only Analytics fields and rejects malformed stored rows', () => {
+    const item = createWorkItem('fields')
+    const input = readAnalyticsWorkItemHistoryEvent(createAuditEvent('fields-2', item, '2026-01-02T00:00:00.000Z', [
+      { field: 'statusCategory', before: 'backlog', after: 'started' },
+      { field: 'description', before: 'secret', after: 'other' },
+      { field: 'customFieldValues.points', before: 1, after: 3 },
+    ], { afterRevision: 2 }))
+    expect(input?.entry.changes.map((change) => change.field)).toEqual([
+      'statusCategory',
+      'customFieldValues.points',
+    ])
+    const restored: AnalyticsHistoryEvent[] = input
+      ? toAnalyticsHistoryEvents(
+          mergeAnalyticsWorkItemHistoryEntries(
+            createEmptyAnalyticsWorkItemHistoryRow({ workspaceId, teamId: 'core', workItemId: 'fields' }),
+            [input.entry],
+          ),
+          '2026-02-01T00:00:00.000Z',
+          0,
+        )
+      : []
+    expect(restored[0]?.metadata).toEqual({
+      adapter: 'canonical-work-item',
+      teamId: 'core',
+      issueId: 'fields',
+      afterRevision: 2,
+    })
+    expect(parseStoredAnalyticsWorkItemHistoryRow({
+      ...toStoredAnalyticsWorkItemHistoryRow(
+        createEmptyAnalyticsWorkItemHistoryRow({ workspaceId, teamId: 'core', workItemId: 'fields' }),
+      ),
+      recordKey: createAnalyticsWorkItemHistoryRecordKey('core', 'other'),
+    })).toBeUndefined()
+  })
+})

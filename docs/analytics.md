@@ -56,6 +56,16 @@ event 時刻にそろえます。そのため期間開始より前から更新�
 history を読む Work Item だけに適用します（読まない Work Item は前後2回の canonical read の
 fingerprint 一致で変更がないことを確認します）。定期配信の runner も同じ選択を使います。
 
+History は Work Item ごとの history row（`AnalyticsTable` の `WORK_ITEM_HISTORY#<teamId>#<workItemId>`、
+[ADR 0042](adr/0042-analytics-work-item-history-rows.md)）から先に読みます。Row は audit projection の fan-out が
+AuditEvents stream から作り、target が Work Item 自身の event だけを、engine が読む field の変更、revision の
+metadata、audit の保持期限（`expiresAt`）に絞って持ちます。Row の `coveredRevision`（途切れずにそろった最大の
+canonical revision）が canonical の `revision` と一致し、`overflow` でない Work Item だけ row を使い、row がない・
+古い・`overflow` の Work Item は下の entity timeline の query で読みます。どちらから読んだ event にも同じ read barrier を
+かけるので、結果は全 Work Item の entity timeline を読んだ場合と同じです。Row から復元する entry は 1 query 合計
+200,000 件まで、保持期限を過ぎた entry は使いません。Projection は row がないとき（revision 1 の INSERT を除く）や
+revision が飛んだときに entity timeline から row を作り直し、Work Item の削除で row を消します。
+
 1 query の上限は Team partition 100件、1 partition 10,000 Work Item、現在参照可能な Work Item
 合計10,000件、history を読む canonical entity timeline 500件、全timelineを通じた Audit page query
 500回、返却されたAudit event合計10,000件、1 entityあたり100 pageです。
@@ -63,7 +73,7 @@ canonical identity と一致しない event は採用せず、query 数と返却
 Work Item の entity timeline には context item・comment・file など Work Item に付く record の event も
 載りますが、state の巻き戻しと遷移には target が Work Item 自身の event だけを使います
 （context item の `title` 変更で Work Item の表示名が巻き戻らないようにするため）。
-期間開始以降に更新された Work Item が501件以上ある場合は history read 前に `413` で fail-fast します。
+History row で読めない（entity timeline の query が要る）Work Item が501件以上ある場合は、その query の前に `413` で fail-fast します。
 Web は `413` を受けると、期間を短くするか Team / Project で絞り込むよう表示します。
 Web の新規 ad-hoc query は、上限にかかりにくいよう直近30日と閲覧者が見られる Team を既定の filter にします。
 上限に達した場合は部分集計を成功扱いせず

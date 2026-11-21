@@ -126,7 +126,7 @@ Work Item は Team が所有します。他の module（planning、analytics、n
 
 | Stream | 処理する Lambda | 内容 |
 | --- | --- | --- |
-| AuditEventsTable | CollaborationProjectionFunction（`audit-projection-handler.ts`） | 受信箱の通知、realtime 配信、検索への反映、Webhook 配送と Connector 同期の queue 投入 |
+| AuditEventsTable | CollaborationProjectionFunction（`audit-projection-handler.ts`） | 受信箱の通知、realtime 配信、検索への反映、Webhook 配送と Connector 同期の queue 投入、Analytics の Work Item 履歴 row（[ADR 0042](adr/0042-analytics-work-item-history-rows.md)） |
 | AuditEventsTable | AutomationEventFunction（`automation-event-handler.ts`） | オートメーションのルール実行 |
 | AuditEventsTable（INSERT） | TenantOperationFunction | 監査 event への保持期間・legal hold の適用 |
 | EnterpriseIdentityTable | EnterpriseScimGroupJobFunction、EnterpriseIdentityMaintenanceFunction | SCIM group の反映、世代の整理 |

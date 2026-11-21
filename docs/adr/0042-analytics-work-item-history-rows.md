@@ -32,7 +32,7 @@ comment・file・context item など Analytics が使わない event も載る�
 
 ## 決定
 
-選択肢 A を採る（Shinji の承認後に実装する）。
+選択肢 A を採る（2026-11-21 に Shinji が承認）。
 
 - `AnalyticsTable` に Work Item ごとの history row を足す。
   - key: partition `workspaceId`、sort `WORK_ITEM_HISTORY#<encodeURIComponent(teamId)>#<encodeURIComponent(workItemId)>`。
@@ -63,8 +63,9 @@ comment・file・context item など Analytics が使わない event も載る�
   audit 経路で読む Work Item が 500 件を超えたときも今と同じ `413` を返す。
 - 権限の判定は変えない。history row は、現在の ACL を通った canonical Work Item の分だけ読み、巻き戻した Project が
   現在読めない event は今と同じく engine が除外する。
-- 保持期間と legal hold は audit event に合わせる。projection は entry を足すときに、tenant の audit 保持期間を過ぎた
-  entry を落とす。reader も保持期間を過ぎた entry を使わない。Tenant の閉鎖では `AnalyticsTable` の Workspace
+- 保持期間と legal hold は audit event に合わせる。entry は元の audit event の `expiresAt` を持ち、tenant の保持期間の
+  反映や legal hold で audit event が更新されると（stream の MODIFY）、projection が同じ entry の `expiresAt` を
+  書き換える。reader は `expiresAt` を過ぎた entry を使わない。Tenant の閉鎖では `AnalyticsTable` の Workspace
   partition と一緒に消える。
 - 既存の Work Item は data migration runner（ADR 0013・0031）で backfill する（下の「移行と backfill」）。
 
@@ -129,6 +130,8 @@ Analytics の query（画面・evidence・定期配信の合計）月 3,000 回�
      `verify`（すべての canonical Work Item に `coveredRevision` が canonical の revision と一致する row、または
      `overflow` の row がある）を通す。
    - 費用: Work Item 1 万件で、scan 約 2,000 RRU、audit の query 約 1 万〜2 万 RRU、書き込み約 2 万 WRU。1 回 $0.05 未満。
+   - runner の拡張は PR #671 の上に積むため、この ADR を入れる PR とは別の PR にする。この PR が最初の deploy より前に
+     入る環境では、すべての Work Item が作成時から row を持つので backfill は要らない。
 3. backfill の途中でも結果は正しい。row がない Work Item は audit から読むため、backfill が進むほど `413` が出にくくなるだけ。
 4. 戻すとき: reader を今の audit 経路に戻す deploy だけでよい。history row は残しても読まれない。消すときは
    `WORK_ITEM_HISTORY#` の prefix を消す。
@@ -142,5 +145,5 @@ Analytics の query（画面・evidence・定期配信の合計）月 3,000 回�
   Work Item だけ audit から読むことで吸収する。
 - 見直す条件: 1 query で読む history row が 1 万に近づいたら Team ごとの partition に分ける。filter のない
   Team 単位のダッシュボードで応答時間が問題になったら、選択肢 B を A の上の cache として検討する。
-- 実装の PR で更新する文書: `docs/analytics.md`（history の読み方と上限）、`docs/architecture.md`（AnalyticsTable と
-  projection の fan-out）、`docs/data-migration.md`（migration の一覧）、利用者ガイドの `413` の説明。
+- 更新した文書: `docs/analytics.md`（history の読み方と上限）、`docs/architecture.md`（projection の fan-out）、
+  `docs/guide/pm.md`（集計できる件数）。`docs/data-migration.md`（migration の一覧）は backfill の PR で更新する。
