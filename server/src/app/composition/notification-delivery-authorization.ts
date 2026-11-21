@@ -41,6 +41,7 @@ export function createProductionNotificationDeliveryAuthorizer(
       workItemUpdatedAt: delivery.workItemUpdatedAt,
       daysUntilDue: delivery.daysUntilDue,
       workItemReopenedAt: delivery.workItemReopenedAt,
+      weeklyReportAuthorMemberKey: delivery.weeklyReportAuthorMemberKey,
       targetId: delivery.targetId,
       fileId: delivery.fileId,
       outboxStatus: 'pending',

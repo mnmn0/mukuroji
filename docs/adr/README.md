@@ -59,5 +59,6 @@
 | [0031](0031-data-migration-lambda-and-operator-proof.md) | Data migration を operator が起動する Lambda で実行し、実行者を presigned STS proof で確かめる | 提案 |
 | [0032](0032-japanese-public-holiday-monthly-sync.md) | 日本の祝日を内閣府の CSV から月に1回取り込み、tenant administration table の共有 row に置く | 提案 |
 | [0033](0033-project-id-workspace-reservation-row.md) | Project ID を Workspace ごとの予約 row で一意にし、衝突したら別の ID で作り直す | 提案 |
+| [0035](0035-weekly-report-submission-reminders.md) | 週報の未提出を、工数の督促と同じ通知 schedule と projection の fence で知らせる | 提案 |
 | [0037](0037-workspace-search-title-index.md) | Keyword 検索はタイトルだけを持つ sparse GSI を先に読み、本文だけの一致は従来の scan で探す | 提案 |
 | [0040](0040-xray-tracing-off-by-default.md) | X-Ray tracing を既定で止め、AI の alarm を AI 設定時だけ作る | 提案 |

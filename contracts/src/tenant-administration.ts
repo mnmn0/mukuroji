@@ -1,3 +1,4 @@
+import type { WeeklyReportReminderSettings } from './weekly-report-reminders'
 import type { WorkspaceCalendarSettings } from './workspace-calendar'
 
 /**
@@ -34,6 +35,8 @@ export type TenantProfile = {
   defaultPolicy: TenantDefaultPolicy
   /** Fiscal year and week settings; absent until an administrator chooses them. */
   calendar?: WorkspaceCalendarSettings
+  /** When unsubmitted weekly reports are reminded; absent until an administrator chooses. */
+  weeklyReportReminders?: WeeklyReportReminderSettings
   /** Whether normal tenant access remains enabled. */
   status: 'active' | 'closing' | 'closed'
   /** Timestamp at which a verified closure sealed the tenant. */
@@ -234,6 +237,8 @@ export type UpdateTenantProfileInput = {
   defaultPolicy: TenantDefaultPolicy
   /** Fiscal year and week settings; omitted keeps the stored settings. */
   calendar?: WorkspaceCalendarSettings
+  /** Weekly report reminder settings; omitted keeps the stored settings. */
+  weeklyReportReminders?: WeeklyReportReminderSettings
   /** Revision read before editing the profile. */
   expectedRevision: number
 }

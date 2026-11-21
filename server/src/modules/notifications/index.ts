@@ -65,10 +65,18 @@ export type {
 } from './application/ports/reminder-settings-reader'
 export type { ScheduledTimesheetReader } from './application/ports/timesheet-reminder-reader'
 export type { UnsubmittedTimeEntry } from './application/timesheet-reminders'
+/** Exposes the weekly report reminder reader port and its Project Directory roster adapter. */
+export type { ScheduledWeeklyReportReader } from './application/ports/weekly-report-reminder-reader'
+export type { WeeklyReportTeamRoster } from './application/weekly-report-reminders'
+export { createDynamoDbWeeklyReportRosterReader } from './adapter-out/dynamodb/weekly-report-roster-reader'
 /** Exposes reminder override validation shared by HTTP adapters. */
 export { normalizeTeamReminderDays } from './domain/reminder-days'
 export {
   TIMESHEET_REMINDER_EVENT_TYPE,
+  WEEKLY_REPORT_ESCALATION_EVENT_TYPE,
+  WEEKLY_REPORT_ESCALATION_REASON,
+  WEEKLY_REPORT_REMINDER_EVENT_TYPE,
+  WEEKLY_REPORT_REMINDER_REASON,
   createNotificationScheduleHandler,
   readReminderPolicyDefaultsFromEnvironment,
   parsePlanningUpdateTargetScheduleProjection,
