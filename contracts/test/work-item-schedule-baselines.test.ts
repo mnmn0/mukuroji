@@ -3,6 +3,7 @@ import {
   createDefaultDueDateWorkItemSchedule,
   createDefaultUnscheduledWorkItemSchedule,
   createProjectScheduleBaselineEntry,
+  deriveWorkItemBaselineEndDelayDays,
   deriveWorkItemScheduleSlip,
   parseProjectScheduleBaselineResponse,
   type WorkItemSchedule,
@@ -49,6 +50,25 @@ describe('schedule baseline', () => {
       endSlipDays: -1,
     })
     expect(deriveWorkItemScheduleSlip(baseline, createDefaultUnscheduledWorkItemSchedule())).toEqual({})
+  })
+
+  test('measures the end delay like the weekly summary: actual end once completed, plan while open', () => {
+    const baseline = createProjectScheduleBaselineEntry('a', range('2026-12-01', '2026-12-05'))
+    const open = { schedule: range('2026-12-01', '2026-12-08'), statusCategory: 'started' as const }
+    expect(deriveWorkItemBaselineEndDelayDays(baseline, open)).toBe(3)
+    expect(deriveWorkItemBaselineEndDelayDays(baseline, {
+      ...open,
+      statusCategory: 'completed',
+      actualEndDate: '2026-12-04',
+    })).toBe(-1)
+    // Completed without a recorded end, or canceled, has nothing to measure.
+    expect(deriveWorkItemBaselineEndDelayDays(baseline, { ...open, statusCategory: 'completed' })).toBeUndefined()
+    expect(deriveWorkItemBaselineEndDelayDays(baseline, { ...open, statusCategory: 'canceled' })).toBeUndefined()
+    expect(deriveWorkItemBaselineEndDelayDays({ workItemId: 'a' }, open)).toBeUndefined()
+    expect(deriveWorkItemBaselineEndDelayDays(baseline, {
+      schedule: createDefaultUnscheduledWorkItemSchedule(),
+      statusCategory: 'unstarted',
+    })).toBeUndefined()
   })
 
   test('validates untrusted responses', () => {
