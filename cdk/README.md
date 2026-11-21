@@ -814,7 +814,23 @@ origin にするときは deploy access stack の `ApiAllowedOrigins` を更新�
    ここまで API は `/api/health` と `/api/ready` 以外（サインインの `/api/auth/*` を含む）に `503` を返すので、
    owner のサインインはこの後に行います。
 7. 初期 owner に Cognito から仮パスワードのメールが届いています。`WebUrl`（job の summary に出ます）でサインインし、
-   パスワードを変えて MFA を設定します。
+   パスワードを変えます。続けて Settings で認証アプリ（TOTP）の MFA を設定します。仮パスワードの期限は 7 日です。
+   期限が切れたら CloudShell で `aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <owner の email>
+   --message-action RESEND` を実行して送り直します。
+8. 初期 owner は stack が `mukuroji-system-admins` group に入れているので、サイドバーの「チームを追加」から最初の Team を
+   作れます。Team と Project は stack が作らないため、ここから画面で作ります。
+
+#### 初回 deploy の後に確かめること
+
+- 祝日: `ScheduledJobs` Lambda が runtime control を有効にした後、6 時間ごとに内閣府の CSV を取りに行き、月に 1 回保存します
+  （[ADR 0032](../docs/adr/0032-japanese-public-holiday-monthly-sync.md)）。手で取り込む手順はありません。
+  取得に失敗しても同梱の祝日を使うので Work Item の作成は止まりません。CloudWatch Logs の名前に `ScheduledJobsLogGroup` を含む log group で
+  `japanese-public-holiday-sync` が失敗し続けていないかだけ確認します。
+- Data migration: `bun run data:migrate:aws list --function-name <DataMigrationFunctionName>` で登録済みの移行を確認します。
+  新しく作った stack には移す既存 row がないので、初回 deploy の後に実行する移行はありません。既存データの backfill
+  （例: Focus の担当者索引）は、その移行を含む commit を既存環境へ deploy したときだけ [Data migration](#data-migration) の手順で実行します。
+- CORS: 初回の job summary では `ApiAllowedOrigins` が `stack default`（localhost）と表示されます。Web は CloudFront の
+  同じ origin から `/api` を呼ぶので影響はなく、次の deploy から `WebUrl` が自動で入ります。
 
 ### いつもの deploy と手動の操作
 
