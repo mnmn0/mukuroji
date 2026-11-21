@@ -22,6 +22,7 @@ import {
 } from '../../planning'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { CognitoServiceError } from '../../../authentication'
+import { type AuditEventV1, normalizeAuditEvent } from '../../../audit/audit'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbInboxDigestStore } from '../../../update-feed'
@@ -1070,6 +1071,158 @@ test('commits Inbox audit events with update publishes and comments', async () =
     expect(invalidMentions.status).toBe(400)
     expect(await invalidMentions.json()).toMatchObject({ code: 'InvalidPlanningUpdateCommentMentions' })
   })
+})
+
+test('records Planning entity changes in audit and returns them as entity activity', async () => {
+  await withTestEnvironment({ AUDIT_EVENTS_TABLE_NAME: 'AuditEventsTable' }, async () => {
+    configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+    const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+    const events: AuditEventV1[] = []
+    /** Stores the audit write a route-supplied transaction prepares, as the commit would. */
+    const record = <T>(transaction: { prepare(result: T): Promise<unknown>; rebaseSafe?: boolean } | undefined) => {
+      expect(transaction?.rebaseSafe).toBe(true)
+      return transaction && {
+        rebaseSafe: transaction.rebaseSafe,
+        async prepare(result: T) {
+          const contribution = await transaction.prepare(result)
+          const item = isRecord(contribution) && isRecord(contribution.transactWriteItem) &&
+            isRecord(contribution.transactWriteItem.Put) ? contribution.transactWriteItem.Put : undefined
+          expect(item?.TableName).toBe('AuditEventsTable')
+          if (item) events.push(normalizeAuditEvent(item.Item))
+          return contribution
+        },
+      }
+    }
+    const create = planning.create.bind(planning)
+    planning.create = (workspaceId, input, state, transaction) =>
+      create(workspaceId, input, state, record(transaction))
+    const update = planning.update.bind(planning)
+    planning.update = (workspaceId, entityId, input, state, transaction) =>
+      update(workspaceId, entityId, input, state, record(transaction))
+    const duplicate = planning.duplicate.bind(planning)
+    planning.duplicate = (workspaceId, entityId, input, state, transaction) =>
+      duplicate(workspaceId, entityId, input, state, record(transaction))
+    const move = planning.move.bind(planning)
+    planning.move = (workspaceId, entityId, input, state, transaction) =>
+      move(workspaceId, entityId, input, state, record(transaction))
+    const archive = planning.archive.bind(planning)
+    planning.archive = (workspaceId, entityId, input, state, transaction) =>
+      archive(workspaceId, entityId, input, state, record(transaction))
+    const restore = planning.restore.bind(planning)
+    planning.restore = (workspaceId, entityId, input, state, options) =>
+      restore(workspaceId, entityId, input, state, { ...options, transaction: record(options?.transaction) })
+    setTestAppDependencies({
+      planning,
+      auditEvents: {
+        async getEvent() {
+          return undefined
+        },
+        async query(query) {
+          return {
+            events: events.filter((event) =>
+              event.entity.type === query.entityType && event.entity.id === query.entityId).reverse(),
+          }
+        },
+      },
+    })
+
+    expect((await planningApiRequest('/api/planning/entities', 'POST', {
+      ...createServerAssignedPortfolioInput(0, 'Audited portfolio'),
+      id: 'audited-portfolio',
+    })).status).toBe(201)
+    expect((await planningApiRequest('/api/planning/entities/audited-portfolio', 'PATCH', {
+      expectedRevision: 1,
+      patch: { title: 'Renamed portfolio', health: 'at-risk' },
+    })).status).toBe(200)
+    expect((await planningApiRequest('/api/planning/entities/audited-portfolio/duplicate', 'POST', {
+      expectedRevision: 2,
+      targetId: 'audited-copy',
+    })).status).toBe(201)
+    const moved = await planningApiRequest('/api/planning/entities/audited-copy/move', 'POST', {
+      expectedRevision: 3,
+      teamId: 'core-team',
+    })
+    expect(moved.status).toBe(200)
+    expect((await planningApiRequest('/api/planning/entities/audited-copy/archive', 'POST', {
+      expectedRevision: 4,
+    })).status).toBe(200)
+    const archived = await planning.get('user#demo@example.com', { workItems: [] })
+    expect((await planningApiRequest('/api/planning/entities/audited-copy/restore', 'POST', {
+      expectedRevision: archived.revision,
+    })).status).toBe(200)
+
+    expect(events.map((event) => event.eventType)).toEqual([
+      'planning-entity.created',
+      'planning-entity.updated',
+      'planning-entity.duplicated',
+      'planning-entity.moved',
+      'planning-entity.archived',
+      'planning-entity.restored',
+    ])
+    expect(events[1]).toMatchObject({
+      entity: { type: 'planning-entity', id: 'audited-portfolio' },
+      action: 'updated',
+      summary: 'Updated portfolio: Renamed portfolio',
+      changes: [
+        { field: 'health', before: 'on-track', after: 'at-risk' },
+        { field: 'title', before: 'Audited portfolio', after: 'Renamed portfolio' },
+      ],
+      metadata: { actorMemberKey: 'demo@example.com', planningEntityType: 'portfolio', planningRevision: 2 },
+    })
+    expect(events[2]).toMatchObject({
+      entity: { id: 'audited-copy' },
+      metadata: { sourceEntityId: 'audited-portfolio' },
+    })
+    expect(events[3]).toMatchObject({
+      changes: [{ field: 'teamId', after: 'core-team' }],
+      metadata: { teamId: 'core-team', movedDescendantCount: 0 },
+    })
+    expect(events[4]).toMatchObject({ changes: [{ field: 'archivedAt', after: '2026-08-07T00:00:00.000Z' }] })
+    expect(events[5]).toMatchObject({ changes: [{ field: 'archivedAt', before: '2026-08-07T00:00:00.000Z' }] })
+
+    const activity = await planningApiRequest('/api/planning/entities/audited-portfolio/activity')
+    expect(activity.status).toBe(200)
+    const body: unknown = await activity.json()
+    expect(body).toMatchObject({
+      events: [
+        { eventType: 'planning-entity.updated', actorUserId: 'demo@example.com' },
+        { eventType: 'planning-entity.created', actorUserId: 'demo@example.com' },
+      ],
+    })
+    expect((await planningApiRequest('/api/planning/entities/missing-entity/activity')).status).toBe(404)
+  })
+})
+
+test('hides Planning entity activity from members who cannot see the entity', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planning = new InMemoryPlanningClient()
+  let queries = 0
+  setTestAppDependencies({
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        queries += 1
+        return { events: [] }
+      },
+    },
+  })
+  expect((await planningApiRequest('/api/planning/entities', 'POST', {
+    ...createServerAssignedPortfolioInput(0, 'Workspace portfolio'),
+    id: 'hidden-portfolio',
+  })).status).toBe(201)
+  expect((await planningApiRequest('/api/planning/entities/hidden-portfolio/activity')).status).toBe(200)
+
+  configureFakeProjectClients(false, {
+    workspaceRole: 'guest',
+    role: 'viewer',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+  })
+  const hidden = await planningApiRequest('/api/planning/entities/hidden-portfolio/activity')
+  expect(hidden.status).toBe(404)
+  expect(queries).toBe(1)
 })
 
 test('configures, publishes, pages, exports, and watches a qualified Project update', async () => {

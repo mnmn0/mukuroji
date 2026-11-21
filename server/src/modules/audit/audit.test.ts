@@ -810,3 +810,29 @@ test('bootstraps a local table with the CDK-compatible base key and GSIs', async
     },
   })
 })
+
+test('leaves the timeline name out of a query without a time range', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+    region: 'us-east-1',
+    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+  }))
+  Object.assign(documentClient, {
+    async send(command: { input: Record<string, unknown> }) {
+      commands.push(command.input)
+      return { Items: [], Count: 0 }
+    },
+  })
+  const client = new DynamoDbAuditEventsClient(documentClient, 'AuditTable')
+
+  await client.query({ workspaceId: 'workspace-1', entityType: 'planning-entity', entityId: 'p1' })
+  await client.countEventsConsistently({ workspaceId: 'workspace-1', actorId: 'actor-1', durableAfter: 1 })
+
+  // DynamoDB rejects a request whose ExpressionAttributeNames holds a name no expression uses.
+  for (const command of commands) {
+    expect(command.ExpressionAttributeNames).not.toHaveProperty('#timelineKey')
+    expect(JSON.stringify([command.KeyConditionExpression, command.FilterExpression]))
+      .not.toContain('#timelineKey')
+  }
+  expect(commands).toHaveLength(2)
+})

@@ -102,7 +102,12 @@ import {
   qualifyEnterpriseProjectScopes,
 } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
-import { readLocale } from '../shared/input-parsing'
+import { readAuditEventQuery, readLocale } from '../shared/input-parsing'
+import {
+  createPlanningEntityAuditTransaction,
+  PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
+  toPlanningEntityActivityPageView,
+} from '../shared/planning-entity-audit'
 import {
   createPlanningUpdateCommentAuditEvent,
   createPlanningUpdatePublishAuditEvent,
@@ -779,6 +784,26 @@ async function requirePlanningScopePermission(
   if (!teamId && !projectId && !principal.isSystemAdmin && !allowWorkspaceScopeMember) {
     requireWorkspaceAdministration(principal)
   }
+}
+
+/**
+ * Creates the audit transaction committed with one Planning entity change from this request.
+ *
+ * @param c - Hono request context.
+ * @param principal - Authenticated Workspace principal making the change.
+ * @param body - Validated request values recorded in the audit request fingerprint.
+ * @returns The audit transaction, or `undefined` when audit is not configured.
+ */
+function createPlanningEntityRouteAuditTransaction(
+  c: Context,
+  principal: WorkspacePrincipal,
+  body: unknown,
+) {
+  return createPlanningEntityAuditTransaction(
+    principal.directoryId,
+    createApiMutationContext(c, principal, body),
+    principal.userKey,
+  )
 }
 
 async function requirePlanningEntityPermission(
@@ -3974,7 +3999,12 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         }
         await requirePlanningActiveOwner(principal, input.ownerMemberKey)
         const creation: PlanningEntityCreation = { ...input, id: entityId }
-        return workItemDependencies.planning.create(principal.directoryId, creation, workItemState)
+        return workItemDependencies.planning.create(
+          principal.directoryId,
+          creation,
+          workItemState,
+          createPlanningEntityRouteAuditTransaction(c, principal, creation),
+        )
       }
       if (input.id !== undefined) {
         const response = await create(input.id)
@@ -4018,7 +4048,13 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       if (isRecord(input.patch) && input.patch.ownerMemberKey !== undefined) {
         await requirePlanningActiveOwner(principal, input.patch.ownerMemberKey)
       }
-      const response = await workItemDependencies.planning.update(principal.directoryId, entityId, input, workItemState)
+      const response = await workItemDependencies.planning.update(
+        principal.directoryId,
+        entityId,
+        input,
+        workItemState,
+        createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...input }),
+      )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
     } catch (error) {
       return toPlanningErrorResponse(c, error)
@@ -4041,8 +4077,60 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
       requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
       await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'manager')
-      const response = await workItemDependencies.planning.archive(principal.directoryId, entityId, input, workItemState)
+      const response = await workItemDependencies.planning.archive(
+        principal.directoryId,
+        entityId,
+        input,
+        workItemState,
+        createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...input }),
+      )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Planning entity の作成・変更・archive などの活動を新しい順の cursor page で返します。
+   * Live graph で見える entity は閲覧者、退避済み entity は復元できる manager だけが読めます。
+   */
+  routeApp.get('/api/planning/entities/:entityId/activity', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
+      const snapshot = await workItemDependencies.planning.get(
+        principal.directoryId,
+        await readPlanningWorkItemState(principal),
+      )
+      const visible = filterPlanningSnapshotForPrincipal(principal, snapshot).entities
+        .some((entity) => entity.id === entityId)
+      if (!visible) {
+        const archived = snapshot.entities.some((entity) => entity.id === entityId)
+          ? undefined
+          : await workItemDependencies.planning.getArchivedEntity(principal.directoryId, entityId)
+        if (!archived || !await canManagePlanningEntityScope(principal, archived)) {
+          throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
+        }
+      }
+      try {
+        const page = await workspaceDependencies.auditEvents.query(
+          readAuditEventQuery(c, principal.directoryId, {
+            type: PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
+            id: entityId,
+          }),
+        )
+        return c.json(toPlanningEntityActivityPageView(page))
+      } catch (error) {
+        if (error instanceof TypeError || error instanceof RangeError) {
+          return c.json({ code: 'InvalidAuditQuery', message: error.message }, 400)
+        }
+        throw error
+      }
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }
@@ -4112,6 +4200,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
               return false
             }
           },
+          transaction: createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...input }),
         },
       )
       return c.json({
@@ -4192,7 +4281,13 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           )
         }
         const duplication: PlanningEntityDuplication = { ...input, targetId }
-        return workItemDependencies.planning.duplicate(principal.directoryId, entityId, duplication, workItemState)
+        return workItemDependencies.planning.duplicate(
+          principal.directoryId,
+          entityId,
+          duplication,
+          workItemState,
+          createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...duplication }),
+        )
       }
       if (input.targetId !== undefined) {
         const response = await duplicate(input.targetId)
@@ -4246,7 +4341,13 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         )
       }
       requirePlanningMoveDoesNotInvalidateUpdateCadence(snapshot, entityId, input)
-      const response = await workItemDependencies.planning.move(principal.directoryId, entityId, input, workItemState)
+      const response = await workItemDependencies.planning.move(
+        principal.directoryId,
+        entityId,
+        input,
+        workItemState,
+        createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...input }),
+      )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
     } catch (error) {
       return toPlanningErrorResponse(c, error)
