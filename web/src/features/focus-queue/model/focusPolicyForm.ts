@@ -22,6 +22,37 @@ export type FocusPolicyFormReadResult = {
   overrides: FocusPolicyOverrides
 }
 
+/** The part of a form input that tells whether the browser parsed its typed text. */
+export type FocusPolicyNumberInputState = {
+  /** Form field name read by the policy parser. */
+  readonly name: string
+  /** Browser validity state for the typed text. */
+  readonly validity: {
+    /** True when the browser could not convert the typed text to a value. */
+    readonly badInput: boolean
+  }
+}
+
+/**
+ * Lists inputs whose typed text the browser could not parse as a number.
+ *
+ * A `type="number"` input holding text such as `1e` submits an empty value,
+ * which `readFocusPolicyOverrides` would read as "inherit" and so silently drop
+ * a stored override. Intentionally empty inputs are not reported.
+ *
+ * @param inputs - The policy form's input controls.
+ * @returns Names of inputs whose `validity.badInput` is set.
+ */
+export function readUnparsedNumberFieldNames(
+  inputs: Iterable<FocusPolicyNumberInputState>,
+): string[] {
+  const names: string[] = []
+  for (const input of inputs) {
+    if (input.name !== '' && input.validity.badInput) names.push(input.name)
+  }
+  return names
+}
+
 /**
  * Parses a sparse Focus policy replacement from trusted form controls.
  *
@@ -45,6 +76,7 @@ export function readFocusPolicyOverrides(
   const mention = readOptionalPolicyNumber(formData, 'weight-mention', 0, 10_000)
   const sla = readOptionalPolicyNumber(formData, 'weight-sla', 0, 10_000)
   const cycle = readOptionalPolicyNumber(formData, 'weight-cycle', 0, 10_000)
+  const slipped = readOptionalPolicyNumber(formData, 'weight-slipped', 0, 10_000)
   const dueSoonDays = readOptionalPolicyNumber(formData, 'dueSoonDays', 0, 365, true)
   const cycleDueSoonDays = readOptionalPolicyNumber(
     formData,
@@ -54,6 +86,13 @@ export function readFocusPolicyOverrides(
     true,
   )
   const slaHours = readOptionalPolicyNumber(formData, 'slaHours', 1, 8_760, true)
+  const slippedThresholdDays = readOptionalPolicyNumber(
+    formData,
+    'slippedThresholdDays',
+    1,
+    365,
+    true,
+  )
   const nowScoreThreshold = readOptionalPolicyNumber(
     formData,
     'nowScoreThreshold',
@@ -77,9 +116,11 @@ export function readFocusPolicyOverrides(
     ['weight-mention', mention],
     ['weight-sla', sla],
     ['weight-cycle', cycle],
+    ['weight-slipped', slipped],
     ['dueSoonDays', dueSoonDays],
     ['cycleDueSoonDays', cycleDueSoonDays],
     ['slaHours', slaHours],
+    ['slippedThresholdDays', slippedThresholdDays],
     ['nowScoreThreshold', nowScoreThreshold],
     ['slaEnabled', slaEnabled],
     ['slaAnchor', slaAnchor],
@@ -95,6 +136,7 @@ export function readFocusPolicyOverrides(
     ...(overdue.value === undefined ? {} : { overdue: overdue.value }),
     ...(reviewRequest.value === undefined ? {} : { reviewRequest: reviewRequest.value }),
     ...(sla.value === undefined ? {} : { sla: sla.value }),
+    ...(slipped.value === undefined ? {} : { slipped: slipped.value }),
     ...(urgent.value === undefined ? {} : { urgent: urgent.value }),
   }
   return {
@@ -109,6 +151,9 @@ export function readFocusPolicyOverrides(
         ? {}
         : { nowScoreThreshold: nowScoreThreshold.value }),
       ...(slaHours.value === undefined ? {} : { slaHours: slaHours.value }),
+      ...(slippedThresholdDays.value === undefined
+        ? {}
+        : { slippedThresholdDays: slippedThresholdDays.value }),
       ...(slaEnabled.value === undefined ? {} : { slaEnabled: slaEnabled.value }),
       ...(slaAnchor.value === undefined ? {} : { slaAnchor: slaAnchor.value }),
       ...(slaWorkItemTypeIds.value === undefined

@@ -134,7 +134,9 @@ Enterprise ロールは Directory group mapping のほか、メンバー個人�
 | 実行履歴 | 各ルールの実行結果。失敗したものは **再試行** できる |
 
 トリガーは ステータス変更、担当者変更、期限変更・到来、カスタムフィールド変更、Work Item Type 変更、
-コメント、フォーム送信、Webhook 受信、スケジュール。アクションは 担当者を割り当て、状態の移動、
+コメント、親子・blocker の変更、フォーム送信、Webhook 受信、スケジュール。
+「親子・blocker の変更」は「対象の変更」で blocker の解除などを 1 つ選ぶか、すべての変更で動かします。
+変更は両方の Work Item に記録されるので、たとえば「blocker の解除」は block されていた側の Work Item でだけ動きます。アクションは 担当者を割り当て、状態の移動、
 フィールドを更新、Work Item を作成、コメントを追加、通知を送信、承認を依頼、Webhook を送信 です。
 暴走を防ぐため「最大試行回数」と「1分あたりの最大実行数」を必ず確認してください。
 
@@ -167,6 +169,8 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   timeout 後に新しい token で再送するときも、同じ `Idempotency-Key` を使えば二重に作成されません。
   「最終利用」は 1 分ごとにまとめて記録するため、最大 1 分遅れて表示されます。
 - **Webhook**: 外部への通知。**Webhook を追加** で送信先と「配信を許可する Team」を決めます。配信 log から再送できます。
+  Work Item の作成・更新・削除に加えて、親の変更、子の追加・削除、blocker の追加・解除、関連の追加・削除、
+  並び順の変更も選べます。これらは相手の Work Item を含まず、変更された側の Work Item だけを送ります。
 - **Connector**: GitHub、Slack、Gmail、Google Calendar、Google Drive との連携。
   一覧には、運用者がこの環境で設定した provider だけが出ます（設定は [`cdk/README.md`](../../cdk/README.md) の
   connector secret）。設定がなければ「利用できる connector はありません」と表示されます。

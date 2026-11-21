@@ -1,8 +1,9 @@
-import type {
-  CanonicalWorkItem,
-  CreateWorkItemInput,
-  WorkItemPatch,
-  WorkItemSchedule,
+import {
+  WORK_ITEM_RELATION_EVENT_TYPES,
+  type CanonicalWorkItem,
+  type CreateWorkItemInput,
+  type WorkItemPatch,
+  type WorkItemSchedule,
 } from './work-items'
 import type { WorkItemAcceptanceCriterionMark } from './work-item-acceptance-criteria'
 import type {
@@ -516,18 +517,37 @@ export type OAuthTokenOutput = {
 }
 
 /**
+ * Every event type a Webhook subscription can subscribe to.
+ *
+ * New event types may be added; a consumer ignores an event type it does not know.
+ */
+export const WEBHOOK_EVENT_TYPES = [
+  'work-item.created',
+  'work-item.updated',
+  'work-item.deleted',
+  ...WORK_ITEM_RELATION_EVENT_TYPES,
+  'external-link.created',
+  'external-link.updated',
+  'sync-conflict.created',
+  'sync-conflict.resolved',
+  'import.completed',
+  'import.failed',
+] as const
+
+/**
  * Webhook が購読できる event type です。
  */
-export type WebhookEventType =
-  | 'work-item.created'
-  | 'work-item.updated'
-  | 'work-item.deleted'
-  | 'external-link.created'
-  | 'external-link.updated'
-  | 'sync-conflict.created'
-  | 'sync-conflict.resolved'
-  | 'import.completed'
-  | 'import.failed'
+export type WebhookEventType = typeof WEBHOOK_EVENT_TYPES[number]
+
+/**
+ * Tests whether a value is an event type a Webhook subscription can subscribe to.
+ *
+ * @param value - Value to test.
+ * @returns Whether the value is one of {@link WEBHOOK_EVENT_TYPES}.
+ */
+export function isWebhookEventType(value: unknown): value is WebhookEventType {
+  return WEBHOOK_EVENT_TYPES.some((eventType) => eventType === value)
+}
 
 /**
  * Webhook subscription の配信状態です。

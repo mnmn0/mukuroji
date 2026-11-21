@@ -843,7 +843,9 @@ deploy します（[Rollback](#rollback) の forward deploy）。
 直してから再実行します。`cdk deploy` が失敗した stack を消して作り直し、SSM の secret はそのまま使います。
 `Retain` の table・bucket・user pool は失敗した stack から外れて残るので、作り直しが成功した後に不要なものを手で削除します。
 job の summary には commit、revision、CDK outputs の SHA-256、`WebUrl` が残り、Environment の deployment 履歴と合わせて
-change record にします。PR ごとの read-only な `cdk diff`、post-deploy の smoke e2e はまだありません（#362 の残り）。
+change record にします。deploy の後は [本番 deploy 後の確認](../docs/post-deploy-verification.md) の
+`bun run deploy:smoke` で CloudFront・runtime control・Cognito・alarm・DLQ などを読み取りだけで確かめ、結果も change record に残します。
+PR ごとの read-only な `cdk diff` はまだありません（#362 の残り）。
 
 ## Fresh deployment
 

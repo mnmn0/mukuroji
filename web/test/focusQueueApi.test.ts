@@ -281,6 +281,11 @@ describe('Focus queue API', () => {
     if (!weights) throw new Error('The Focus fixture requires effective weights.')
     weights.blocker = 10_001
 
+    const missingSlippedThreshold = structuredClone(focusQueueResponseFixture)
+    const slippedSettings = missingSlippedThreshold.effectivePolicies[0]?.settings
+    if (!slippedSettings) throw new Error('The Focus fixture requires effective settings.')
+    slippedSettings.slippedThresholdDays = 0
+
     const fractionalOverrides = structuredClone(focusQueueResponseFixture)
     if (!fractionalOverrides.userPolicy) {
       throw new Error('The Focus fixture requires a user policy.')
@@ -316,6 +321,7 @@ describe('Focus queue API', () => {
     for (const response of [
       fractionalSettings,
       boundedSettings,
+      missingSlippedThreshold,
       fractionalOverrides,
       boundedOverrides,
       duplicateEditableTeam,
