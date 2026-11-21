@@ -3,11 +3,13 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { MaintenanceBanner } from '../src/app/maintenance/MaintenanceNotice'
 import {
   applyMaintenanceObservation,
+  refreshMaintenanceStatus,
+  summarizeMaintenanceState,
+} from '../src/app/maintenance/queries/maintenanceStatus'
+import {
   fetchMaintenanceState,
   installMaintenanceFetchObserver,
   readMaintenanceObservation,
-  refreshMaintenanceStatus,
-  summarizeMaintenanceState,
   type MaintenanceObservation,
 } from '../src/shared/api/maintenance'
 
@@ -33,6 +35,16 @@ describe('readMaintenanceObservation', () => {
       .toEqual({ kind: 'report', state: 'read-only', apiBaseUrl: sharedApi })
     expect(readMaintenanceObservation(`${workspaceApi}/documents`, response(503, 'stopped'), bases, pageUrl))
       .toEqual({ kind: 'report', state: 'stopped', apiBaseUrl: workspaceApi })
+  })
+
+  test('attributes a request to the most specific nested base', () => {
+    const nestedApi = `${sharedApi}/workspace`
+    for (const order of [[sharedApi, nestedApi], [nestedApi, sharedApi]]) {
+      expect(readMaintenanceObservation('/api/workspace/documents', response(503, 'read-only'), order, pageUrl))
+        .toEqual({ kind: 'report', state: 'read-only', apiBaseUrl: nestedApi })
+      expect(readMaintenanceObservation('/api/teams', response(200, 'read-only'), order, pageUrl))
+        .toEqual({ kind: 'report', state: 'read-only', apiBaseUrl: sharedApi })
+    }
   })
 
   test('clears only on an ordinary gated answer from an API', () => {

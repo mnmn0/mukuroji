@@ -1,14 +1,16 @@
 import useSWR, { mutate as mutateGlobalCache, useSWRConfig } from 'swr'
+import type {
+  ApiMaintenanceState,
+  MaintenanceNoticeState,
+  MaintenanceObservation,
+} from '../../../shared/api/maintenance'
 import {
   applyMaintenanceObservation,
   normalMaintenanceStatus,
   refreshMaintenanceStatus,
   summarizeMaintenanceState,
-  type ApiMaintenanceState,
-  type MaintenanceNoticeState,
-  type MaintenanceObservation,
   type MaintenanceStatus,
-} from '../../../shared/api/maintenance'
+} from './maintenanceStatus'
 
 /** SWR key of the maintenance status. */
 const maintenanceStatusKey = 'app/maintenance-status'
