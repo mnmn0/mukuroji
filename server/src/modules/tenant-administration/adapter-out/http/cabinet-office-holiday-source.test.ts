@@ -37,6 +37,16 @@ describe('Cabinet Office holiday source', () => {
       fetcher: async () => new Response(new Uint8Array(600 * 1024)),
     })
     await expect(oversized.fetch()).rejects.toThrow('too large')
+    // A streamed body without a length header is cut off at the cap.
+    const streamed = createCabinetOfficeHolidaySource({
+      url: 'https://example.test/holidays.csv',
+      fetcher: async () => new Response(new ReadableStream({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(64 * 1024))
+        },
+      })),
+    })
+    await expect(streamed.fetch()).rejects.toThrow('too large')
     const failed = createCabinetOfficeHolidaySource({
       url: 'https://example.test/holidays.csv',
       fetcher: async () => new Response('', { status: 503 }),

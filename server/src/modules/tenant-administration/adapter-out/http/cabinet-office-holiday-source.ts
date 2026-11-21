@@ -46,14 +46,42 @@ export function createCabinetOfficeHolidaySource(
       if (declaredLength > MAX_SOURCE_BYTES) {
         throw new JapanesePublicHolidaySourceError('The national holiday source is too large.')
       }
-      const bytes = new Uint8Array(await response.arrayBuffer())
-      if (bytes.byteLength > MAX_SOURCE_BYTES) {
-        throw new JapanesePublicHolidaySourceError('The national holiday source is too large.')
-      }
-      return bytes
+      return await readCappedBody(response)
     },
     decode(bytes) {
       return new TextDecoder('shift_jis', { fatal: true }).decode(bytes)
     },
   }
+}
+
+/**
+ * Reads a response body, stopping as soon as it passes {@link MAX_SOURCE_BYTES}, so a body without
+ * a length header is never held in memory beyond the cap.
+ *
+ * @param response - Response whose body is read.
+ * @returns The body bytes.
+ * @throws JapanesePublicHolidaySourceError when the body is larger than the cap.
+ */
+async function readCappedBody(response: Response): Promise<Uint8Array> {
+  if (!response.body) return new Uint8Array()
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > MAX_SOURCE_BYTES) {
+      await reader.cancel()
+      throw new JapanesePublicHolidaySourceError('The national holiday source is too large.')
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return bytes
 }
