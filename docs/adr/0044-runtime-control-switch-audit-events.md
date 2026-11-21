@@ -43,7 +43,7 @@ Workspace の監査 event に載せないと決めたが、runtime control の�
   止める理由になり得るので、警告を出して止める操作を続ける。完了・失敗を記録できないときは警告だけ出す。
 - GitHub Actions の deploy role（`cdk/deploy-access/github-deploy-access.template.json`）に、
   `${MukurojiStackName}-AuditEventsTable*` への `dynamodb:PutItem` と、`${MukurojiStackName}-TenantAdministrationTable*`
-  への `dynamodb:GetItem`（`auditRetentionDays`・`legalHold` と key だけ）を、どちらも `dynamodb:LeadingKeys` =
+  への `dynamodb:GetItem`（保持設定を JSON で持つ `payload` 属性と key だけ）を、どちらも `dynamodb:LeadingKeys` =
   `WorkspaceDirectoryId` の条件付きで足す。手元から実行する operator の credential にも同じ権限が要る。
 
 ## 検討した選択肢

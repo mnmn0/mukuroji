@@ -293,11 +293,20 @@ export function readGovernanceRetention(
   const parsed: unknown = output.trim() === '' ? {} : JSON.parse(output)
   const item: unknown = typeof parsed === 'object' && parsed !== null && 'Item' in parsed ? parsed.Item : undefined
   if (typeof item !== 'object' || item === null) return { retentionDays: defaultRetentionDays, legalHold: false }
-  const days: unknown = 'auditRetentionDays' in item ? item.auditRetentionDays : undefined
-  const hold: unknown = 'legalHold' in item ? item.legalHold : undefined
-  const daysText = typeof days === 'object' && days !== null && 'N' in days ? days.N : undefined
-  const holdValue = typeof hold === 'object' && hold !== null && 'BOOL' in hold ? hold.BOOL : undefined
-  const retentionDays = Number(daysText)
+  // The tenant administration client stores each record as a JSON string in `payload`.
+  const payloadAttribute: unknown = 'payload' in item ? item.payload : undefined
+  const payloadText = typeof payloadAttribute === 'object' && payloadAttribute !== null && 'S' in payloadAttribute
+    ? payloadAttribute.S
+    : undefined
+  if (typeof payloadText !== 'string') throw new TypeError('The Workspace governance record has no payload.')
+  const payload: unknown = JSON.parse(payloadText)
+  const days: unknown = typeof payload === 'object' && payload !== null && 'auditRetentionDays' in payload
+    ? payload.auditRetentionDays
+    : undefined
+  const holdValue: unknown = typeof payload === 'object' && payload !== null && 'legalHold' in payload
+    ? payload.legalHold
+    : undefined
+  const retentionDays = typeof days === 'number' ? days : Number.NaN
   if (!Number.isSafeInteger(retentionDays) || retentionDays < 1 || typeof holdValue !== 'boolean') {
     throw new TypeError('The Workspace governance record has no valid auditRetentionDays and legalHold.')
   }
@@ -316,7 +325,7 @@ export function buildGovernanceGetItemArguments(tableName: string, region: strin
   return [
     'dynamodb', 'get-item', '--region', region, '--table-name', tableName,
     '--key', JSON.stringify({ workspaceId: { S: workspaceId }, recordKey: { S: 'GOVERNANCE' } }),
-    '--consistent-read', '--projection-expression', 'auditRetentionDays, legalHold', '--output', 'json',
+    '--consistent-read', '--projection-expression', 'payload', '--output', 'json',
   ]
 }
 

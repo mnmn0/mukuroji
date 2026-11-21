@@ -163,7 +163,7 @@ describe('GitHub deploy access template', () => {
     expect(dynamoDbActions).toEqual(['dynamodb:GetItem', 'dynamodb:PutItem']);
   });
 
-  test('runtime control may read only the retention fields of the deployment Workspace governance', () => {
+  test('runtime control may read only the record payload of the deployment Workspace governance', () => {
     const read = permissions.find((statement) => statement.Sid === 'ReadWorkspaceAuditRetention');
     expect(read?.Action).toBe('dynamodb:GetItem');
     expect(read?.Resource).toEqual({
@@ -172,7 +172,7 @@ describe('GitHub deploy access template', () => {
     expect(read?.Condition).toEqual({
       'ForAllValues:StringEquals': {
         'dynamodb:LeadingKeys': [{ Ref: 'WorkspaceDirectoryId' }],
-        'dynamodb:Attributes': ['workspaceId', 'recordKey', 'auditRetentionDays', 'legalHold'],
+        'dynamodb:Attributes': ['workspaceId', 'recordKey', 'payload'],
       },
       StringEqualsIfExists: { 'dynamodb:Select': 'SPECIFIC_ATTRIBUTES' },
     });

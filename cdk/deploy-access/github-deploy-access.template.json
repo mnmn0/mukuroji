@@ -229,7 +229,7 @@
                   "Condition": {
                     "ForAllValues:StringEquals": {
                       "dynamodb:LeadingKeys": [{ "Ref": "WorkspaceDirectoryId" }],
-                      "dynamodb:Attributes": ["workspaceId", "recordKey", "auditRetentionDays", "legalHold"]
+                      "dynamodb:Attributes": ["workspaceId", "recordKey", "payload"]
                     },
                     "StringEqualsIfExists": { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }
                   }

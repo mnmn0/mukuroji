@@ -462,17 +462,38 @@ describe('toDynamoDbItemJson', () => {
   })
 })
 
+/**
+ * Builds a `get-item` result shaped like a persisted governance row (`payload` holds the JSON record).
+ *
+ * @param auditRetentionDays - Retention in days.
+ * @param legalHold - Whether a legal hold is on.
+ * @returns The `aws dynamodb get-item` output.
+ */
+function governanceRow(auditRetentionDays: number, legalHold: boolean): string {
+  const payload = {
+    workspaceId: 'workspace#production',
+    auditRetentionDays,
+    legalHold,
+    dataResidency: 'ap-northeast-1',
+    revision: 2,
+    updatedAt: '2026-11-01T00:00:00.000Z',
+    updatedBy: 'member-1',
+  }
+  return JSON.stringify({ Item: { payload: { S: JSON.stringify(payload) } } })
+}
+
 describe('Workspace retention and the served mode', () => {
   test('applies the Workspace governance retention instead of the stack default', async () => {
     const fake = fakeDependencies({
       readyStatuses: [503],
-      governance: '{"Item":{"auditRetentionDays":{"N":"90"},"legalHold":{"BOOL":false}}}',
+      governance: governanceRow(90, false),
     })
     await runRuntimeControl({ mode: 'disabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
 
     const get = fake.calls.find((call) => call[1] === 'get-item') ?? []
     expect(get[get.indexOf('--table-name') + 1]).toBe('Mukuroji-TenantAdministrationTable1-DEF')
     expect(get).toContain('--consistent-read')
+    expect(get[get.indexOf('--projection-expression') + 1]).toBe('payload')
     const started = fake.auditItems[0]
     const occurredAt = Date.parse(stringAttribute(started, 'occurredAt') ?? '')
     expect(started?.expiresAt).toEqual({ N: String(Math.floor(occurredAt / 1000) + 90 * 86_400) })
@@ -481,7 +502,7 @@ describe('Workspace retention and the served mode', () => {
   test('keeps the events without a TTL under a legal hold', async () => {
     const fake = fakeDependencies({
       readyStatuses: [503],
-      governance: '{"Item":{"auditRetentionDays":{"N":"90"},"legalHold":{"BOOL":true}}}',
+      governance: governanceRow(90, true),
     })
     await runRuntimeControl({ mode: 'read-only', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
     expect(fake.auditItems).toHaveLength(2)
@@ -489,7 +510,7 @@ describe('Workspace retention and the served mode', () => {
   })
 
   test('changes nothing when the governance record is invalid for an enable', async () => {
-    const fake = fakeDependencies({ governance: '{"Item":{"legalHold":{"S":"yes"}}}' })
+    const fake = fakeDependencies({ governance: JSON.stringify({ Item: { payload: { S: JSON.stringify({ legalHold: 'yes' }) } } }) })
     await expect(runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
       .rejects.toThrow('Could not read the Workspace audit retention')
     expect(fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(false)
