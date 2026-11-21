@@ -38,13 +38,11 @@ import {
 } from '../../application/timesheet-reminders'
 import type { ScheduledWeeklyReportReader } from '../../application/ports/weekly-report-reminder-reader'
 import {
-  DEFAULT_WEEKLY_REPORT_REMINDER_TIMING,
   evaluateWeeklyReportReminders,
-  readWeeklyReportReminderTiming,
   resolveWeeklyReportReminderRun,
+  toWeeklyReportReminderTiming,
   weeklyReportWeekStart,
   type WeeklyReportReminderCandidate,
-  type WeeklyReportReminderTiming,
 } from '../../application/weekly-report-reminders'
 import {
   DEFAULT_WORK_ITEM_REMINDER_POLICY,
@@ -134,13 +132,11 @@ export type NotificationScheduleRunOptions = {
    * {@link defaultTimesheetReminderHourUtc}.
    */
   timesheetReminderHourUtc?: number
-  /** Reads weekly report rosters and submissions; without it no weekly report reminder is emitted. */
-  weeklyReportReader?: ScheduledWeeklyReportReader
   /**
-   * When weekly report reminders and escalations go out. Defaults to
-   * {@link DEFAULT_WEEKLY_REPORT_REMINDER_TIMING}.
+   * Reads Workspace reminder settings, rosters, and submissions; without it no weekly report
+   * reminder is emitted.
    */
-  weeklyReportReminderTiming?: WeeklyReportReminderTiming
+  weeklyReportReader?: ScheduledWeeklyReportReader
 }
 
 /** 期限通知 schedule の完了結果です。 */
@@ -329,7 +325,7 @@ export function createNotificationScheduleHandler(
       ...(reminderSettingsReader ? { reminderSettingsReader } : {}),
       ...(timesheetReader ? { timesheetReader } : {}),
       timesheetReminderHourUtc: readTimesheetReminderHourUtc(),
-      ...readWeeklyReportReminderOptions(weeklyReportReader),
+      ...(weeklyReportReader ? { weeklyReportReader } : {}),
       reminderPolicy: readReminderPolicyDefaultsFromEnvironment(),
     })
 }
@@ -376,30 +372,6 @@ function readTimesheetReminderHourUtc() {
   const configured = loadServerConfig().environment.NOTIFICATION_TIMESHEET_REMINDER_HOUR_UTC?.trim()
   if (!configured) return defaultTimesheetReminderHourUtc
   return readHourUtc(Number(configured))
-}
-
-/**
- * Reads the weekly report reminder timing from the environment and pairs it with the reader.
- *
- * `NOTIFICATION_WEEKLY_REPORT_REMINDER_AT` (default `fri@17`) and
- * `NOTIFICATION_WEEKLY_REPORT_ESCALATION_AT` (default `mon@10`) take a weekday and an hour, or
- * `off`; `NOTIFICATION_WEEKLY_REPORT_TIME_ZONE` (default `Asia/Tokyo`) is the zone of both.
- *
- * @param reader - Weekly report reader, when the composition provides one.
- * @returns The reader and timing, or nothing when there is no reader or reminders are off.
- * @throws RangeError when a configured value is invalid.
- */
-function readWeeklyReportReminderOptions(
-  reader: ScheduledWeeklyReportReader | undefined,
-): Pick<NotificationScheduleRunOptions, 'weeklyReportReader' | 'weeklyReportReminderTiming'> {
-  if (!reader) return {}
-  const environment = loadServerConfig().environment
-  const timing = readWeeklyReportReminderTiming({
-    timeZone: environment.NOTIFICATION_WEEKLY_REPORT_TIME_ZONE,
-    reminder: environment.NOTIFICATION_WEEKLY_REPORT_REMINDER_AT,
-    escalation: environment.NOTIFICATION_WEEKLY_REPORT_ESCALATION_AT,
-  })
-  return timing ? { weeklyReportReader: reader, weeklyReportReminderTiming: timing } : {}
 }
 
 /**
@@ -621,17 +593,16 @@ export async function runNotificationSchedule(
   // Weekly report reminders run last, so a failure here cannot hold back the other notifications
   // of the run; a retry of the same scheduled event reaches the same slot again.
   const weeklyReportReader = options.weeklyReportReader
-  const weeklyReportRun = weeklyReportReader
-    ? resolveWeeklyReportReminderRun(now, options.weeklyReportReminderTiming ?? DEFAULT_WEEKLY_REPORT_REMINDER_TIMING)
-    : undefined
-  if (weeklyReportReader && weeklyReportRun) {
-    // Only Workspaces with a Team in the directory are read; their rosters come from one query each.
+  if (weeklyReportReader) {
+    // Each Workspace chooses its own hours, so its settings are read on every run; the rosters
+    // and weeks are read only in a Workspace whose slot this hour is.
     const workspaceIds = [...new Set((await listTeams()).map((team) => team.workspaceId))].sort()
     for (const workspaceId of workspaceIds) {
-      const weekStart = weeklyReportWeekStart(
-        weeklyReportRun.date,
-        await weeklyReportReader.readWeekStartDay(workspaceId),
-      )
+      const settings = await weeklyReportReader.readWorkspaceSettings(workspaceId)
+      const timing = toWeeklyReportReminderTiming(settings.reminders)
+      const run = timing ? resolveWeeklyReportReminderRun(now, timing) : undefined
+      if (!run) continue
+      const weekStart = weeklyReportWeekStart(run.date, settings.weekStartDay)
       for (const roster of await weeklyReportReader.readTeamRosters(workspaceId)) {
         const memberKeys = [...new Set(roster.projects.flatMap((project) =>
           project.writers.map((writer) => writer.memberKey)))]
@@ -642,7 +613,7 @@ export async function runNotificationSchedule(
           memberKeys,
           weekStart,
         )
-        for (const candidate of evaluateWeeklyReportReminders(roster, weeklyReportRun.kind, weekStart, submitted)) {
+        for (const candidate of evaluateWeeklyReportReminders(roster, run.kind, weekStart, submitted)) {
           await putScheduledAuditEvent(
             options.documentClient,
             auditEventsTableName,

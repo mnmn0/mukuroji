@@ -670,6 +670,64 @@ test('sends the national holiday dates the server uses with the calendar setting
   })
 })
 
+test('keeps weekly report reminder settings behind administration and validates them', async () => {
+  const snapshot = createDefaultTenantAdministrationSnapshot(
+    'workspace-1',
+    'owner-1',
+    '2026-08-02T00:00:00.000Z',
+  )
+  const body = {
+    region: snapshot.profile.region,
+    locale: 'ja',
+    defaultPolicy: { defaultMemberRole: 'member' },
+    expectedRevision: 1,
+  }
+  const settings = {
+    enabled: true,
+    reminder: { weekday: 4, hour: 9 },
+    escalationEnabled: false,
+    escalation: { weekday: 1, hour: 10 },
+  }
+  const memberUpdates: unknown[] = []
+  const member = await createCalendarRouter(createClient(snapshot, []), memberUpdates).request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, weeklyReportReminders: settings }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(member.status).toBe(403)
+  expect(memberUpdates).toEqual([])
+
+  const updates: unknown[] = []
+  const admin = createCalendarRouter(createClient(snapshot, []), updates, true)
+  for (const weeklyReportReminders of [
+    null,
+    { ...settings, enabled: 'yes' },
+    { ...settings, reminder: { weekday: 7, hour: 9 } },
+    { ...settings, reminder: { weekday: 4, hour: 24 } },
+    { ...settings, reminder: { weekday: 4, hour: 9.5 } },
+    { ...settings, escalation: undefined },
+    // Both notices on in the same hour.
+    { ...settings, escalationEnabled: true, escalation: { weekday: 4, hour: 9 } },
+  ]) {
+    const rejected = await admin.request('/api/tenant/profile', {
+      body: JSON.stringify({ ...body, weeklyReportReminders }),
+      headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+      method: 'PATCH',
+    })
+    expect(rejected.status).toBe(400)
+    expect(await rejected.json()).toEqual({ code: 'InvalidWeeklyReportReminderSettings' })
+  }
+  expect(updates).toEqual([])
+
+  const accepted = await admin.request('/api/tenant/profile', {
+    body: JSON.stringify({ ...body, weeklyReportReminders: { ...settings, extra: true } }),
+    headers: { Authorization: 'Bearer token-1', 'Content-Type': 'application/json' },
+    method: 'PATCH',
+  })
+  expect(accepted.status).toBe(200)
+  expect(updates).toEqual([{ ...body, weeklyReportReminders: settings }])
+})
+
 test('keeps calendar settings changes behind administration and validates them', async () => {
   const snapshot = createDefaultTenantAdministrationSnapshot(
     'workspace-1',

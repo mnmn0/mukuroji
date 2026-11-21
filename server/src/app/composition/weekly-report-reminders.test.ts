@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS } from '@mukuroji/contracts'
 import {
   isCurrentWeeklyReportRecipient,
   parseAuditProjectionEvent,
@@ -182,12 +183,29 @@ describe('weekly report reminder adapters', () => {
               holidays: [],
               publicHolidays: 'none',
             },
+            weeklyReportReminders: {
+              enabled: false,
+              reminder: { weekday: 4, hour: 9 },
+              escalationEnabled: true,
+              escalation: { weekday: 1, hour: 10 },
+            },
           }
         : undefined,
       readTeamRosters: readRosters,
     })
-    expect(await reader.readWeekStartDay('sunday')).toBe(0)
-    expect(await reader.readWeekStartDay('workspace-1')).toBe(1)
+    expect(await reader.readWorkspaceSettings('sunday')).toEqual({
+      weekStartDay: 0,
+      reminders: {
+        enabled: false,
+        reminder: { weekday: 4, hour: 9 },
+        escalationEnabled: true,
+        escalation: { weekday: 1, hour: 10 },
+      },
+    })
+    expect(await reader.readWorkspaceSettings('workspace-1')).toEqual({
+      weekStartDay: 1,
+      reminders: DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+    })
     expect([...await reader.readSubmittedMembers('workspace-1', 'core', ['a@example.com', 'b@example.com', 'c@example.com'], '2026-11-16')])
       .toEqual(['b@example.com', 'c@example.com'])
   })

@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import { DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS } from '@mukuroji/contracts'
 import {
-  DEFAULT_WEEKLY_REPORT_REMINDER_TIMING,
   evaluateWeeklyReportReminders,
-  readWeeklyReportReminderTiming,
   resolveWeeklyReportReminderRun,
+  toWeeklyReportReminderTiming,
   weeklyReportWeekStart,
   type WeeklyReportTeamRoster,
 } from './weekly-report-reminders'
@@ -33,21 +33,22 @@ const roster: WeeklyReportTeamRoster = {
 }
 
 describe('weekly report reminder timing', () => {
-  test('defaults to Friday 17:00 and Monday 10:00 in Japan, and reads overrides', () => {
-    expect(readWeeklyReportReminderTiming({})).toEqual(DEFAULT_WEEKLY_REPORT_REMINDER_TIMING)
-    expect(readWeeklyReportReminderTiming({ reminder: 'THU@9', escalation: 'off', timeZone: 'UTC' })).toEqual({
-      timeZone: 'UTC',
-      reminder: { weekday: 4, hour: 9 },
+  test('reads the Workspace settings in Japan time, and turns off with the reminder', () => {
+    expect(toWeeklyReportReminderTiming()).toEqual({
+      timeZone: 'Asia/Tokyo',
+      reminder: { weekday: 5, hour: 17 },
+      escalation: { weekday: 1, hour: 10 },
     })
-    expect(readWeeklyReportReminderTiming({ reminder: 'off', escalation: 'mon@10' })).toBeUndefined()
-    expect(() => readWeeklyReportReminderTiming({ reminder: 'friday@17' })).toThrow(RangeError)
-    expect(() => readWeeklyReportReminderTiming({ reminder: 'fri@24' })).toThrow(RangeError)
-    expect(() => readWeeklyReportReminderTiming({ timeZone: 'Mars/Olympus' })).toThrow(RangeError)
-    expect(() => readWeeklyReportReminderTiming({ reminder: 'fri@17', escalation: 'fri@17' })).toThrow(RangeError)
+    expect(toWeeklyReportReminderTiming({ ...DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS, escalationEnabled: false })).toEqual({
+      timeZone: 'Asia/Tokyo',
+      reminder: { weekday: 5, hour: 17 },
+    })
+    expect(toWeeklyReportReminderTiming({ ...DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS, enabled: false })).toBeUndefined()
   })
 
   test('acts only in the configured local hours and points the escalation at the reminded week', () => {
-    const timing = DEFAULT_WEEKLY_REPORT_REMINDER_TIMING
+    const timing = toWeeklyReportReminderTiming()
+    if (!timing) throw new Error('Expected the default timing.')
     // Friday 2026-11-20 17:00 in Japan is 08:00 UTC.
     expect(resolveWeeklyReportReminderRun(new Date('2026-11-20T08:00:00.000Z'), timing)).toEqual({ kind: 'reminder', date: '2026-11-20' })
     expect(resolveWeeklyReportReminderRun(new Date('2026-11-20T08:59:59.000Z'), timing)).toEqual({ kind: 'reminder', date: '2026-11-20' })

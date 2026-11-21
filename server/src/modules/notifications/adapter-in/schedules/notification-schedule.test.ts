@@ -1,6 +1,7 @@
 import { describe, expect, spyOn, test } from 'bun:test'
 import {
   createDefaultDueDateWorkItemSchedule,
+  DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
@@ -1787,9 +1788,10 @@ describe('configurable reminder days and timesheet reminders', () => {
 describe('weekly report reminders', () => {
   test('reminds unsubmitted authors on Friday and tells their managers on Monday, once per week', async () => {
     const submittedReads: Array<[string, string, string[], string]> = []
+    let reminders = DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS
     const weeklyReportReader = {
-      async readWeekStartDay() {
-        return 1 as const
+      async readWorkspaceSettings() {
+        return { weekStartDay: 1 as const, reminders }
       },
       async readTeamRosters(workspaceId: string) {
         return [{
@@ -1869,5 +1871,17 @@ describe('weekly report reminders', () => {
       },
     })
     expect(escalation?.eventId).not.toBe(reminder?.eventId)
+
+    // The Workspace owner moves the reminder to Thursday 9:00 and turns the escalation off.
+    reminders = {
+      ...DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+      reminder: { weekday: 4, hour: 9 },
+      escalationEnabled: false,
+    }
+    expect(await run('2026-11-20T08:00:00.000Z')).toEqual([])
+    expect(await run('2026-11-23T01:00:00.000Z')).toEqual([])
+    expect((await run('2026-11-19T00:00:00.000Z')).map((event) => event.eventType)).toEqual(['weekly-report.submission-reminder'])
+    reminders = { ...reminders, enabled: false }
+    expect(await run('2026-11-19T00:00:00.000Z')).toEqual([])
   })
 })

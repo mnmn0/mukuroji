@@ -261,7 +261,7 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 
 週報（ADR 0030）を出していない人に、週に 1 回 `weekly-report.submission-reminder` が届きます。出さないまま週が明けると、その人が書いている Project の manager に `weekly-report.submission-escalation` が届きます（ADR 0033）。
 
-- 時刻は schedule Lambda の環境変数で決めます。`NOTIFICATION_WEEKLY_REPORT_REMINDER_AT`（既定 `fri@17`）が本人への督促、`NOTIFICATION_WEEKLY_REPORT_ESCALATION_AT`（既定 `mon@10`）が manager への通知で、どちらも `<曜日の英語3文字>@<時 0〜23>` か `off` です。`NOTIFICATION_WEEKLY_REPORT_TIME_ZONE`（既定 `Asia/Tokyo`）の現地時刻で読みます。schedule は 1 時間ごとなので、その時の実行で 1 回だけ作ります。失敗した回は送りません。督促を `off` にすると manager への通知も止まります。今の CDK はこれらを設定しないので既定値です
+- 時刻は Workspace ごとの設定で、tenant profile の `weeklyReportReminders`（`enabled`・`reminder`・`escalationEnabled`・`escalation`、時刻は `{ weekday: 0〜6, hour: 0〜23 }`）に保存します。**設定** → **Workspace 管理** → **テナント管理** で、`PATCH /api/tenant/profile`（owner / admin、Enterprise では `workspace.manage`、`expectedRevision` の比較つき）から変えます。保存していない Workspace は既定（本人へ金曜 17 時、manager へ月曜 10 時）です。時刻は日本時間（`Asia/Tokyo`）で読みます。schedule は 1 時間ごとで、毎回 Workspace ごとに tenant profile を読み、その時の実行で 1 回だけ作ります。失敗した回は送りません。本人への督促を止めると manager への通知も止まります。両方を有効にして同じ曜日・時刻にはできません（`400 InvalidWeeklyReportReminderSettings`）
 - 対象の週は、督促の日を含む Workspace の週（tenant profile の calendar の `weekStartDay`、未設定なら月曜始まり）です。manager への通知は、直近の督促の日を含む週について出します（既定では金曜を含む週）
 - 書く人は、Team の active な Project に unarchived の `manager` / `member` で入っている人です。viewer、archive 済みの Team・Project・membership、複数の Team が同じ ID を使う Project は除きます。Enterprise の role だけで入っていて membership 行がない人は対象外です
 - 未提出は、週の行（`WEEKLY_REPORT#<team>#MEMBER#<member>#W#<week>`）がないか `submissionCount` が 0 のことです

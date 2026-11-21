@@ -1,15 +1,14 @@
 import {
+  DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
   DEFAULT_WORKSPACE_TIME_ZONE,
   toWorkspaceLocalDate,
   workspaceWeekContaining,
+  type WeeklyReportReminderSettings,
   type WorkspaceWeekStartDay,
 } from '@mukuroji/contracts'
 
 /** Milliseconds in one day. */
 const dayMilliseconds = 86_400_000
-
-/** Weekday names accepted by the timing settings, indexed by `Date#getUTCDay()`. */
-const weekdayNames = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const
 
 /** One weekly local time at which the hourly schedule acts. */
 export type WeeklyReportReminderSlot = {
@@ -29,11 +28,21 @@ export type WeeklyReportReminderTiming = {
   escalation?: WeeklyReportReminderSlot
 }
 
-/** Timing used when the deployment does not configure one: Friday 17:00 and Monday 10:00 in Japan. */
-export const DEFAULT_WEEKLY_REPORT_REMINDER_TIMING: WeeklyReportReminderTiming = {
-  timeZone: DEFAULT_WORKSPACE_TIME_ZONE,
-  reminder: { weekday: 5, hour: 17 },
-  escalation: { weekday: 1, hour: 10 },
+/**
+ * Turns a Workspace's reminder settings into the schedule timing, in the Workspace time zone.
+ *
+ * @param settings - Stored settings; the defaults when the Workspace has not chosen its own.
+ * @returns The timing, or undefined when reminders are off. Escalation needs the reminder.
+ */
+export function toWeeklyReportReminderTiming(
+  settings: WeeklyReportReminderSettings = DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+): WeeklyReportReminderTiming | undefined {
+  if (!settings.enabled) return undefined
+  return {
+    timeZone: DEFAULT_WORKSPACE_TIME_ZONE,
+    reminder: settings.reminder,
+    ...(settings.escalationEnabled ? { escalation: settings.escalation } : {}),
+  }
 }
 
 /** What one hourly run sends, and which local date the target week contains. */
@@ -90,62 +99,6 @@ export type WeeklyReportReminderCandidate = {
   recipientMemberKey: string
   /** Project the delivery is authorized against; the author writes in it and the manager manages it. */
   projectId: string
-}
-
-/**
- * Reads a weekly slot setting such as `fri@17`.
- *
- * @param value - Setting text: a three-letter English weekday, `@`, and an hour from 0 to 23.
- * @param label - Setting name used in the error.
- * @returns The slot.
- * @throws RangeError when the text is not a slot.
- */
-export function parseWeeklyReportReminderSlot(value: string, label: string): WeeklyReportReminderSlot {
-  const match = /^([a-z]{3})@(\d{1,2})$/u.exec(value.trim().toLowerCase())
-  const weekday = match ? weekdayNames.findIndex((name) => name === match[1]) : -1
-  const hour = match ? Number(match[2]) : Number.NaN
-  if (weekday < 0 || !Number.isInteger(hour) || hour < 0 || hour > 23) {
-    throw new RangeError(`${label} must look like fri@17: a weekday (sun-sat), @, and an hour from 0 to 23.`)
-  }
-  return { weekday, hour }
-}
-
-/**
- * Builds the reminder timing from deployment settings.
- *
- * @param settings - Raw settings; a blank value keeps the default, `off` turns the slot off.
- * @returns The timing, or undefined when reminders are off. Escalation needs the reminder.
- * @throws RangeError when a setting is invalid or both slots are the same hour.
- */
-export function readWeeklyReportReminderTiming(settings: {
-  /** IANA time zone. */
-  timeZone?: string | undefined
-  /** Reminder slot such as `fri@17`, or `off`. */
-  reminder?: string | undefined
-  /** Escalation slot such as `mon@10`, or `off`. */
-  escalation?: string | undefined
-}): WeeklyReportReminderTiming | undefined {
-  const reminderText = settings.reminder?.trim()
-  if (reminderText?.toLowerCase() === 'off') return undefined
-  const timeZone = settings.timeZone?.trim() || DEFAULT_WEEKLY_REPORT_REMINDER_TIMING.timeZone
-  try {
-    toWorkspaceLocalDate(0, timeZone)
-  } catch {
-    throw new RangeError('Weekly report reminder time zone must be an IANA time zone.')
-  }
-  const reminder = reminderText
-    ? parseWeeklyReportReminderSlot(reminderText, 'Weekly report reminder')
-    : DEFAULT_WEEKLY_REPORT_REMINDER_TIMING.reminder
-  const escalationText = settings.escalation?.trim()
-  const escalation = escalationText?.toLowerCase() === 'off'
-    ? undefined
-    : escalationText
-      ? parseWeeklyReportReminderSlot(escalationText, 'Weekly report escalation')
-      : DEFAULT_WEEKLY_REPORT_REMINDER_TIMING.escalation
-  if (escalation && escalation.weekday === reminder.weekday && escalation.hour === reminder.hour) {
-    throw new RangeError('Weekly report escalation must not use the reminder hour.')
-  }
-  return { timeZone, reminder, ...(escalation ? { escalation } : {}) }
 }
 
 /**

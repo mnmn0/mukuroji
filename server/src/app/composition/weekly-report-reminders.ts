@@ -1,8 +1,9 @@
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
+  DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  type WeeklyReportReminderSettings,
   type WorkspaceCalendarSettings,
-  type WorkspaceWeekStartDay,
 } from '@mukuroji/contracts'
 import type { WeeklyReportReminderRevalidator } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
 import type { ScheduledWeeklyReportReader, WeeklyReportTeamRoster } from '../../modules/notifications'
@@ -17,10 +18,12 @@ import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infras
 export type WeeklyReportReaderSources = {
   /** Weekly report rows. */
   store: Pick<WeeklyReportStore, 'getWeeks'>
-  /** Reads a Workspace's tenant profile, which holds its calendar settings. */
+  /** Reads a Workspace's tenant profile, which holds its calendar and reminder settings. */
   readProfile(workspaceId: string): Promise<{
     /** Saved calendar settings; absent until the Workspace saves its own. */
     calendar?: WorkspaceCalendarSettings
+    /** Saved reminder settings; absent until the Workspace saves its own. */
+    weeklyReportReminders?: WeeklyReportReminderSettings
   } | undefined>
   /** Lists a Workspace's Team rosters from the Project Directory. */
   readTeamRosters(workspaceId: string): Promise<WeeklyReportTeamRoster[]>
@@ -34,9 +37,12 @@ export type WeeklyReportReaderSources = {
  */
 export function createWeeklyReportReader(sources: WeeklyReportReaderSources): ScheduledWeeklyReportReader {
   return {
-    async readWeekStartDay(workspaceId): Promise<WorkspaceWeekStartDay> {
+    async readWorkspaceSettings(workspaceId) {
       const profile = await sources.readProfile(workspaceId)
-      return (profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS).weekStartDay
+      return {
+        weekStartDay: (profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS).weekStartDay,
+        reminders: profile?.weeklyReportReminders ?? DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+      }
     },
     readTeamRosters: sources.readTeamRosters,
     async readSubmittedMembers(workspaceId, teamId, memberKeys, weekStart) {

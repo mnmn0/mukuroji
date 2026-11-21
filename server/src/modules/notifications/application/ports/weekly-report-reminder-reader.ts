@@ -1,15 +1,23 @@
-import type { WorkspaceWeekStartDay } from '@mukuroji/contracts'
+import type { WeeklyReportReminderSettings, WorkspaceWeekStartDay } from '@mukuroji/contracts'
 import type { WeeklyReportTeamRoster } from '../weekly-report-reminders'
+
+/** The Workspace settings that decide when reminders go out and which week they are about. */
+export type WeeklyReportWorkspaceSettings = {
+  /** Day the Workspace week starts on. */
+  weekStartDay: WorkspaceWeekStartDay
+  /** Whether and when reminders and escalations go out. */
+  reminders: WeeklyReportReminderSettings
+}
 
 /** Reads what weekly report reminders are built from. */
 export type ScheduledWeeklyReportReader = {
   /**
-   * Reads the day the Workspace week starts on, which decides the week a reminder is about.
+   * Reads the Workspace week start day and reminder settings.
    *
    * @param workspaceId - Canonical Workspace ID.
-   * @returns The week start day; the default for a Workspace without calendar settings.
+   * @returns The settings; the defaults for a Workspace that has not saved its own.
    */
-  readWeekStartDay(workspaceId: string): Promise<WorkspaceWeekStartDay>
+  readWorkspaceSettings(workspaceId: string): Promise<WeeklyReportWorkspaceSettings>
   /**
    * Lists the Teams of a Workspace with the members expected to write weekly reports.
    *

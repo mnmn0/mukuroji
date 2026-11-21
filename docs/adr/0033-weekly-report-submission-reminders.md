@@ -7,7 +7,7 @@
 ## 背景
 
 #631 の残りとして、週報を出していない人に提出を促し、出さないまま週が明けたら上長にも知らせたい。
-時刻は「金曜 17 時に本人、月曜に上長」を仮の案とし、後から変えやすくしておく。
+時刻は「金曜 17 時に本人、月曜に上長」を既定とし、Workspace の owner / admin が設定で変えられるようにする。
 
 工数の督促（`timesheet.submission-reminder`）は、1 時間ごとの通知 schedule が audit outbox event を書き、
 collaboration projection が配信時に元データを読み直して、まだ未提出のときだけ通知行を作る。
@@ -15,10 +15,14 @@ collaboration projection が配信時に元データを読み直して、まだ�
 
 ## 決定
 
-- 1 時間ごとの通知 schedule に週報のパスを足す。実行時刻の現地の曜日・時（既定 `Asia/Tokyo`）が
-  督促の枠（既定 `fri@17`）なら本人への督促、上長通知の枠（既定 `mon@10`）なら上長への通知を作る。
-  枠は schedule Lambda の環境変数 `NOTIFICATION_WEEKLY_REPORT_REMINDER_AT` / `NOTIFICATION_WEEKLY_REPORT_ESCALATION_AT`
-  （`off` で止める）と `NOTIFICATION_WEEKLY_REPORT_TIME_ZONE` で変える。schedule は 1 時間ごとなので分は指定しない。
+- 1 時間ごとの通知 schedule に週報のパスを足す。実行時刻の日本時間（`Asia/Tokyo`）の曜日・時が
+  督促の枠なら本人への督促、上長通知の枠なら上長への通知を作る。schedule は 1 時間ごとなので分は指定しない。
+- 枠は Workspace の設定とし、tenant profile に `weeklyReportReminders`
+  （`enabled`・`reminder`・`escalationEnabled`・`escalation`、枠は `{ weekday, hour }`）として保存する。
+  変更は既存の `PATCH /api/tenant/profile`（Workspace 管理の権限と `expectedRevision` の比較）で行い、
+  契約と検証（両方有効で同じ枠は拒否）は `contracts` の `readWeeklyReportReminderSettings` が持つ。
+  保存していない Workspace は既定（本人 金曜 17 時、上長 月曜 10 時）。本人への督促を止めると上長通知も止まる。
+  schedule は毎回 Workspace ごとに tenant profile を GetItem する。
 - 対象の週は、督促の日を含む Workspace の週（週の開始曜日は tenant profile の calendar 設定）。上長への通知は、
   その時点から見て直近の督促の日を含む週について出す。
 - 書く人は、Team の active な Project の unarchived な `manager` / `member` の membership を持つ人
@@ -38,7 +42,8 @@ collaboration projection が配信時に元データを読み直して、まだ�
 
 - 別の EventBridge rule（金曜・月曜の cron）を足す: 時刻が正確だが、rule と Lambda 設定が増え、時刻変更が CDK の変更になる。
   既存の 1 時間ごとの schedule で足りる。
-- Team ごとの設定にする: 柔軟だが、設定画面・API・保存が要る。今は deploy 全体の環境変数にし、要望が出たら足す。
+- schedule Lambda の環境変数にする: 実装は小さいが、時刻の変更が deploy の変更になり、Workspace ごとに変えられない。
+- Team ごとの設定にする: 柔軟だが、Team 設定の画面・権限・保存が増える。今は Workspace の設定にし、要望が出たら足す。
 - 上長には未提出者をまとめた 1 通にする: 通知は少ないが、配信時の再検証（全員分の読み直し）と
   一部だけ提出された場合の扱いが複雑になる。今は作成者×上長ごとにし、件数が問題になったら digest で束ねる。
 
@@ -49,4 +54,5 @@ collaboration projection が配信時に元データを読み直して、まだ�
 - schedule の枠の時刻の実行が失敗した週は、その回の通知を送らない（工数の督促と同じ）。祝日は考慮しない。
 - Enterprise の role だけで Project に入っていて membership 行がない人は対象にならない。
 - 週の開始曜日を変えた週は、変える前の区切りで提出した人にも督促が届くことがある。
-- 更新した文書: `docs/notifications.md`、`docs/guide/member.md`、`docs/guide/pm.md`。
+- 時刻は日本時間に固定（Workspace の time zone は今は `Asia/Tokyo` 固定）。
+- 更新した文書: `docs/notifications.md`、`docs/guide/admin.md`、`docs/guide/member.md`、`docs/guide/pm.md`。
