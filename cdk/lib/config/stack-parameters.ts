@@ -133,6 +133,10 @@ export interface StackParameters {
   readonly aiBedrockDestinationModelArns: cdk.CfnParameter;
   /** Whether destination foundation-model permissions must be synthesized. */
   readonly aiBedrockDestinationModelArnsConfigured: cdk.CfnCondition;
+  /** External AI providers (Claude API, OpenAI) that Workspace managers may register keys for. */
+  readonly aiExternalProviders: cdk.CfnParameter;
+  /** Whether Bedrock or at least one external AI provider is enabled. */
+  readonly aiAssistanceAnyProviderConfigured: cdk.CfnCondition;
   /** Anonymous request submission limit per capability and hour. */
   readonly requestRateLimitPerHour: cdk.CfnParameter;
   /** Web Push VAPID public key; empty disables push subscriptions. */
@@ -469,6 +473,24 @@ export function buildStackParameters(
   const aiAssistanceConfigured = new cdk.CfnCondition(stack, 'AiAssistanceConfigured', {
     expression: cdk.Fn.conditionNot(cdk.Fn.conditionEquals(aiBedrockModelId.valueAsString, '')),
   });
+  const aiExternalProviders = new cdk.CfnParameter(stack, 'AiExternalProviders', {
+    type: 'String',
+    default: 'anthropic,openai',
+    maxLength: 16,
+    allowedValues: ['', 'anthropic', 'openai', 'anthropic,openai'],
+    description:
+      'External AI providers whose API keys Workspace managers may register; empty keeps AI on Bedrock only.',
+  });
+  const aiAssistanceAnyProviderConfigured = new cdk.CfnCondition(
+    stack,
+    'AiAssistanceAnyProviderConfigured',
+    {
+      expression: cdk.Fn.conditionOr(
+        aiAssistanceConfigured,
+        cdk.Fn.conditionNot(cdk.Fn.conditionEquals(aiExternalProviders.valueAsString, '')),
+      ),
+    },
+  );
   new cdk.CfnRule(stack, 'AiAssistanceConfigurationComplete', {
     assertions: [{
       assert: cdk.Fn.conditionOr(
@@ -857,6 +879,8 @@ export function buildStackParameters(
     aiBedrockModelArn,
     aiBedrockDestinationModelArns,
     aiBedrockDestinationModelArnsConfigured,
+    aiExternalProviders,
+    aiAssistanceAnyProviderConfigured,
     requestRateLimitPerHour,
     webPushVapidPublicKey,
     notificationEmailSender,

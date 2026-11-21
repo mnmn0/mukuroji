@@ -25,6 +25,7 @@ export type AiAssistanceErrorKind =
   | 'conflict'
   | 'rate-limit'
   | 'provider'
+  | 'provider-key'
   | 'validation'
   | 'generic'
 
@@ -944,6 +945,9 @@ export function classifyAiAssistanceError(error: unknown): AiAssistanceControlle
   if (error.status === 403) return { code: error.code, kind: 'permission' }
   if (error.status === 409) return { code: error.code, kind: 'conflict' }
   if (error.status === 429) return { code: error.code, kind: 'rate-limit' }
+  if (error.code === 'AiAssistanceProviderCredentialMissing') {
+    return { code: error.code, kind: 'provider-key' }
+  }
   if (error.code === 'AiAssistancePersistenceError') {
     return { code: error.code, kind: 'generic' }
   }

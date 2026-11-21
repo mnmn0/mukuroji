@@ -3,6 +3,7 @@ import {
   createRuntimeControlProvider,
   parseRuntimeControlDocument,
   runtimeControlAllowsExecution,
+  runtimeControlAllowsReads,
   runtimeControlIsReady,
   type RuntimeControlDocument,
   type RuntimeControlSnapshot,
@@ -50,6 +51,11 @@ test('parses only the exact version-one document contract', () => {
     mode: 'enabled',
   })
   expect(Object.isFrozen(parsed)).toBeTrue()
+  expect(parseRuntimeControlDocument(encodeJson({
+    schemaVersion: 1,
+    revision: 43,
+    mode: 'read-only',
+  })).mode).toBe('read-only')
 
   for (const candidate of [
     null,
@@ -510,4 +516,28 @@ test('allows stale enabled execution but requires current enabled readiness', ()
 
   expect(runtimeControlAllowsExecution(staleEnabled)).toBeTrue()
   expect(runtimeControlIsReady(staleEnabled)).toBeFalse()
+})
+
+test('read-only admits reads only, never worker execution or readiness', () => {
+  for (const status of ['current', 'stale'] as const) {
+    const readOnly = {
+      mode: 'read-only',
+      revision: 2,
+      status,
+    } satisfies RuntimeControlSnapshot
+    expect(runtimeControlAllowsReads(readOnly)).toBeTrue()
+    expect(runtimeControlAllowsExecution(readOnly)).toBeFalse()
+    expect(runtimeControlIsReady(readOnly)).toBeFalse()
+  }
+  expect(runtimeControlAllowsReads({
+    mode: 'enabled',
+    status: 'current',
+  })).toBeTrue()
+  for (const snapshot of [
+    { mode: 'disabled', status: 'current' },
+    { mode: 'disabled', status: 'unavailable' },
+    { mode: 'disabled', status: 'invalid' },
+  ] satisfies RuntimeControlSnapshot[]) {
+    expect(runtimeControlAllowsReads(snapshot)).toBeFalse()
+  }
 })

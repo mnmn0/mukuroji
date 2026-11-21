@@ -683,7 +683,7 @@ const generationSchema = z.object({
     }).strict(),
   ]),
   details: z.object({
-    provider: z.literal('bedrock'),
+    provider: z.enum(['bedrock', 'anthropic', 'openai']),
     modelId: identifierSchema,
     promptVersion: identifierSchema,
     traceId: identifierSchema,
