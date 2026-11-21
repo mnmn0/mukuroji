@@ -24,6 +24,7 @@ import {
   RuntimeControlBlockedError,
   runtimeControlAllowsExecution,
   runtimeControlIsReady,
+  type RuntimeControlMode,
   type RuntimeControlProvider,
   type RuntimeControlSnapshot,
   type RuntimeControlSurface,
@@ -101,7 +102,8 @@ export function createProductionRuntimeControlObservationRecorder(
  * Creates a scoped provider from production configuration.
  *
  * Non-production runtimes are explicitly enabled for local development and
- * tests. Production identifiers, numeric bounds, or scope mismatches return an
+ * tests, unless `MUKUROJI_LOCAL_RUNTIME_CONTROL_MODE` names another mode to try
+ * maintenance locally. Production identifiers, numeric bounds, or scope mismatches return an
  * unavailable fail-closed provider without throwing during module startup.
  *
  * @param surface - Deployed scope expected by this runtime, one of the configured scopes.
@@ -114,7 +116,9 @@ export function createProductionRuntimeControlProvider(
 ): RuntimeControlProvider {
   const config = loadServerConfig(options.environment)
   if (!config.production) {
-    return createStaticRuntimeControlProvider('enabled')
+    return createStaticRuntimeControlProvider(readLocalRuntimeControlMode(
+      config.environment.MUKUROJI_LOCAL_RUNTIME_CONTROL_MODE,
+    ))
   }
 
   const environment = config.environment
@@ -365,4 +369,20 @@ function readSeconds(
  */
 function secondsToMilliseconds(seconds: number): number {
   return seconds * 1_000
+}
+
+/**
+ * Reads the static mode of a non-production runtime.
+ *
+ * @param value - Raw `MUKUROJI_LOCAL_RUNTIME_CONTROL_MODE` value.
+ * @returns `enabled` when unset; the named mode when valid; otherwise `disabled`, failing closed.
+ */
+function readLocalRuntimeControlMode(
+  value: string | undefined,
+): RuntimeControlMode {
+  const mode = value?.trim()
+  if (!mode) return 'enabled'
+  return mode === 'enabled' || mode === 'read-only' || mode === 'disabled'
+    ? mode
+    : 'disabled'
 }

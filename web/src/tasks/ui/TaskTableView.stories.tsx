@@ -3,6 +3,10 @@ import { expect, fn, within } from 'storybook/test'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { createWorkItemDependencySummaries } from '../../work-items/model/workItemDependencies'
+import {
+  createWorkItemBaselineLookup,
+  WORK_ITEM_BASELINE_END_DELAY_COLUMN,
+} from '../../work-items/model/workItemScheduleBaselines'
 import { TaskTableView } from './TaskTableView'
 import {
   taskViewStoryConfigurationsByTeam,
@@ -122,6 +126,67 @@ export const PlanAndActual: Story = {
       { ...taskViewStoryTasks[1], actualStartDate: '2026-06-02' },
       taskViewStoryTasks[2],
     ],
+  },
+}
+
+/** Columns of the baseline delay stories. */
+const baselineDelayPresentation = {
+  columns: [
+    { field: 'title' },
+    { field: 'status' },
+    { field: 'dueDate' },
+    { field: WORK_ITEM_BASELINE_END_DELAY_COLUMN },
+  ],
+  density: 'comfortable' as const,
+  display: {
+    showArchived: false,
+    showAssigneeAvatars: true,
+    showCompleted: true,
+    showEmptyGroups: true,
+    showSubtasks: true,
+    wrapTitles: false,
+  },
+}
+
+/**
+ * WBS rows beside how far each ends behind the Project baseline: one late, one early, one added
+ * after the baseline, and one without a planned end.
+ */
+export const BaselineDelay: Story = {
+  args: {
+    presentation: baselineDelayPresentation,
+    scheduleBaselineFor: createWorkItemBaselineLookup([{
+      teamId: 'core-team',
+      projectId: 'refero',
+      baseline: {
+        revision: 1,
+        capturedAt: '2026-05-25T00:00:00.000Z',
+        entries: [
+          { workItemId: 'wireframe', startDate: '2026-05-28', endDate: '2026-06-01' },
+          { workItemId: 'brand-guideline', endDate: '2026-06-07' },
+          { workItemId: 'competitor-report' },
+        ],
+      },
+    }]),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getAllByText('ベースライン比の遅れ').length).toBeGreaterThan(0)
+    await expect(canvas.getByTestId('task-baseline-delay-wireframe')).toHaveTextContent('2 日遅れ')
+    await expect(canvas.getByTestId('task-baseline-delay-brand-guideline')).toHaveTextContent('2 日前倒し')
+    await expect(canvas.getByTestId('task-baseline-delay-seo-research')).toHaveTextContent('—')
+    await expect(canvas.getByTestId('task-baseline-delay-competitor-report')).toHaveTextContent('—')
+  },
+}
+
+/** The baseline delay column while the baselines are still loading. */
+export const BaselineDelayLoading: Story = {
+  args: {
+    presentation: baselineDelayPresentation,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('task-baseline-delay-wireframe')).toHaveTextContent('—')
   },
 }
 

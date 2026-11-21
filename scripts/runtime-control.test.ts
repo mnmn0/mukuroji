@@ -5,6 +5,7 @@ import {
   classifyDeploymentState,
   parseRuntimeControlArguments,
   readDocumentRevision,
+  maintenanceMatchesMode,
   readyMatchesMode,
   runRuntimeControl,
   RuntimeControlError,
@@ -34,6 +35,8 @@ interface FakeOptions {
   readonly deploymentStates?: readonly string[]
   /** Statuses returned by successive `/api/ready` requests. */
   readonly readyStatuses?: readonly (number | undefined)[]
+  /** States returned by successive `/api/maintenance` requests; defaults to the one the mode expects. */
+  readonly maintenanceStates?: readonly (string | undefined)[]
   /** `StateValue` and `ActionsEnabled` of the alarm. */
   readonly alarm?: readonly [string, boolean]
   /** AppConfig environment state. */
@@ -63,6 +66,7 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
   const files = new Map<string, string>([['/work/latest.json', '{"schemaVersion":1,"mode":"disabled","revision":4}']])
   const deploymentStates = [...(options.deploymentStates ?? ['DEPLOYING', 'BAKING', 'COMPLETE'])]
   const readyStatuses = [...(options.readyStatuses ?? [200])]
+  const maintenanceStates = options.maintenanceStates === undefined ? undefined : [...options.maintenanceStates]
   let clock = Date.parse('2026-11-20T06:00:00.000Z')
   const answer = (args: readonly string[]): unknown => {
     const command = `${args[0]} ${args[1]}`
@@ -99,6 +103,13 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
         return JSON.stringify(answer(args))
       },
       httpStatus: async () => (readyStatuses.length > 1 ? readyStatuses.shift() : readyStatuses[0]),
+      maintenanceState: async () => {
+        if (maintenanceStates) return maintenanceStates.length > 1 ? maintenanceStates.shift() : maintenanceStates[0]
+        // Follow the document the script deployed, like the API does once the deployment completes.
+        const deployed: unknown = JSON.parse(files.get('/work/runtime-control.json') ?? '{}')
+        const mode = typeof deployed === 'object' && deployed !== null && 'mode' in deployed ? deployed.mode : undefined
+        return mode === 'enabled' ? 'none' : mode === 'read-only' ? 'read-only' : 'stopped'
+      },
       readText: async (path) => files.get(path) ?? '',
       writeText: async (path, content) => {
         files.set(path, content)
@@ -117,11 +128,14 @@ describe('parseRuntimeControlArguments', () => {
   test('reads the mode and the all-at-once flag', () => {
     expect(parseRuntimeControlArguments(['enable'])).toEqual({ mode: 'enabled', allAtOnce: false })
     expect(parseRuntimeControlArguments(['disable', '--all-at-once'])).toEqual({ mode: 'disabled', allAtOnce: true })
+    expect(parseRuntimeControlArguments(['read-only'])).toEqual({ mode: 'read-only', allAtOnce: false })
   })
 
   test('rejects a missing, repeated, or unknown argument', () => {
     expect(() => parseRuntimeControlArguments([])).toThrow(RuntimeControlError)
     expect(() => parseRuntimeControlArguments(['enable', 'disable'])).toThrow(RuntimeControlError)
+    expect(() => parseRuntimeControlArguments(['read-only', 'enable'])).toThrow(RuntimeControlError)
+    expect(() => parseRuntimeControlArguments(['toString'])).toThrow(RuntimeControlError)
     expect(() => parseRuntimeControlArguments(['enable', '--force'])).toThrow(RuntimeControlError)
   })
 })
@@ -200,12 +214,37 @@ describe('runRuntimeControl', () => {
   test('fails when /api/ready does not reach the new mode in time', async () => {
     const fake = fakeDependencies({ readyStatuses: [200] })
     await expect(runRuntimeControl({ mode: 'disabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
-      .rejects.toThrow('returned 200 instead of 503')
+      .rejects.toThrow('returned 200 (expected 503)')
+  })
+
+  test('switches to read-only without the alarm check and waits for the maintenance state', async () => {
+    const fake = fakeDependencies({ alarm: ['ALARM', true], readyStatuses: [503], maintenanceStates: ['none', 'read-only'] })
+    const result = await runRuntimeControl({ mode: 'read-only', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+
+    expect(result.readyStatus).toBe(503)
+    expect(JSON.parse(fake.files.get('/work/runtime-control.json') ?? '')).toEqual({ schemaVersion: 1, mode: 'read-only', revision: 5 })
+    expect(fake.calls.some((call) => call[1] === 'describe-alarms')).toBe(false)
+  })
+
+  test('fails when /api/maintenance keeps reporting another state', async () => {
+    const fake = fakeDependencies({ readyStatuses: [503], maintenanceStates: ['stopped'] })
+    await expect(runRuntimeControl({ mode: 'read-only', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
+      .rejects.toThrow('reported stopped')
   })
 
   test('fails when AppConfig rolls the deployment back', async () => {
     const fake = fakeDependencies({ deploymentStates: ['DEPLOYING', 'ROLLED_BACK'] })
     await expect(runRuntimeControl({ mode: 'enabled', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing))
       .rejects.toThrow('ROLLED_BACK')
+  })
+})
+
+describe('maintenanceMatchesMode', () => {
+  test('maps each mode to the state the API reports', () => {
+    expect(maintenanceMatchesMode('enabled', 'none')).toBe(true)
+    expect(maintenanceMatchesMode('disabled', 'stopped')).toBe(true)
+    expect(maintenanceMatchesMode('read-only', 'read-only')).toBe(true)
+    expect(maintenanceMatchesMode('read-only', 'stopped')).toBe(false)
+    expect(maintenanceMatchesMode('enabled', undefined)).toBe(false)
   })
 })

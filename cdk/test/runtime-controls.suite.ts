@@ -190,7 +190,7 @@ test('retains a validated hosted baseline and deploys it all at once', () => {
     additionalProperties: false,
     properties: {
       mode: {
-        enum: ['enabled', 'disabled'],
+        enum: ['enabled', 'disabled', 'read-only'],
         type: 'string',
       },
       revision: {

@@ -80,7 +80,8 @@ export function createRuntimeControlMetricControlId(
 
 /**
  * Binds runtime-control observations to one validated stack control identity.
- * Routine current-enabled observations are emitted as a bounded heartbeat per
+ * Routine current-enabled observations, and reads admitted in current
+ * read-only maintenance, are emitted as a bounded heartbeat per
  * warm execution surface; every blocked, stale, invalid, or unavailable
  * observation is emitted immediately.
  *
@@ -103,7 +104,8 @@ export function createRuntimeControlObservationRecorder(
   return (observation) => {
     if (
       observation.outcome === 'allowed' &&
-      observation.snapshot.mode === 'enabled' &&
+      (observation.snapshot.mode === 'enabled' ||
+        observation.snapshot.mode === 'read-only') &&
       observation.snapshot.status === 'current'
     ) {
       const previous = lastCurrentAllowedBySurface.get(

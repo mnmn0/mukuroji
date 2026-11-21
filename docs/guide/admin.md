@@ -291,6 +291,14 @@ Project）・ロールを選んで **割り当てを追加** します。SCIM �
 監査ログには現在 Web の画面がありません。API（`/api/audit/events`、`/api/audit/exports`）から取得します。
 仕様は [`docs/event-audit.md`](../event-audit.md) を参照してください。
 
+## メンテナンスに切り替える
+
+移行作業や障害対応で変更だけを止めたいときは、運用者が `bun run runtime-control:read-only` で
+読み取り専用のメンテナンスに切り替えます。閲覧とサインインは続けられ、変更は理由付きで断られます。
+すべて止める場合は `bun run runtime-control:disable`、戻すときは `bun run runtime-control:enable` です。
+どの場合もメンバーの画面には「メンテナンス中」のバナーが出ます。手順は
+[cdk/README.md](../../cdk/README.md#application-処理を有効にするruntime-control) を参照してください。
+
 ## まだ提供していない機能
 
 - 外部チャット（Slack / Microsoft Teams）とのスレッド同期は契約のみで、画面と接続はまだありません
