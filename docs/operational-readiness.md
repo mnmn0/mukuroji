@@ -485,8 +485,9 @@ runtimeのdurable fenceではありません。通常変更ではdeploymentご�
 （[ADR 0034](adr/0034-read-only-maintenance-mode.md)）。API は `GET` / `HEAD` と
 `server/src/app/middleware/read-only-request-registry.ts` に列挙した読み取り用 `POST`（sign-in、MFA challenge、
 token 更新、logout、SSO の開始と交換、Analytics の query・evidence・export、bulk operation の preview、
-Work item の schedule preview と type 変更 preview）だけを通します。Update feed digest の preview は
-配信 receipt を書くので含めません。それ以外は `503`、`Retry-After: 15`、problem `code` `maintenance_read_only` で route 処理より前に断ります。通した response と断った response には
+Work item の schedule preview と type 変更 preview、Document の backlink 一括取得、security policy の
+preview）だけを通します。Update feed digest の preview は配信 receipt を書き、provisioning の preview は
+後で適用する preview を保存するので含めません。それ以外は `503`、`Retry-After: 15`、problem `code` `maintenance_read_only` で route 処理より前に断ります。通した response と断った response には
 `Mukuroji-Maintenance: read-only` header を付けます。Worker、WebSocket、`/api/ready` は `read-only` を
 `disabled` と同じく扱います。operator が配布した `disabled`（current または bounded-stale）は problem
 `code` `maintenance` と `Mukuroji-Maintenance: stopped` を返し、取得失敗・不正 document の
