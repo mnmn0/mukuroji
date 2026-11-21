@@ -8,11 +8,11 @@ import {
 import {
   createSavedWorkspaceView,
   getSavedWorkspaceViews,
-  mergeCommandMenuSearchResults,
   resolveSearchApiBaseUrl,
   searchWorkspaceAcrossCursors,
-  searchWorkspaceForCommandMenu,
 } from '../src/search/api'
+import { mergeCommandMenuSearchResults } from '../src/search/model/commandMenuResults'
+import { searchWorkspaceForCommandMenu } from '../src/search/queries/commandMenuSearch'
 
 const originalFetch = globalThis.fetch
 

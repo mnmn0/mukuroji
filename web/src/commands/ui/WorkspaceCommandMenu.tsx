@@ -10,7 +10,8 @@ import { Outlet, useLocation, useNavigate } from 'react-router'
 import type { SearchEntityType, WorkspaceSearchResult } from '@mukuroji/contracts'
 import { getAuthSession } from '../../auth/session'
 import { createTranslator, getInitialLocale, type Locale, type MessageKey } from '../../shared/i18n/i18n'
-import { resolveSearchResultPath, searchWorkspaceForCommandMenu } from '../../search/api'
+import { resolveSearchResultPath } from '../../search/api'
+import { searchWorkspaceForCommandMenu } from '../../search/queries/commandMenuSearch'
 import {
   createWorkspaceCommandMenuWorkItemActionRegistry,
   executeWorkspaceCommandMenuWorkItemAction,
