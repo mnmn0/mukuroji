@@ -156,7 +156,7 @@ async function mockTimeTracking(page: Page): Promise<TimeTrackingMockState> {
     const key = request.headers()['idempotency-key']
     if (key) state.idempotencyKeys.push(key)
     if (path === '/timesheet' && request.method() === 'GET') {
-      return route.fulfill({ json: { from: url.searchParams.get('from'), to: url.searchParams.get('to'), timeZone: 'Asia/Tokyo', days: [], weeks: [], costsRedacted: !state.isManager } })
+      return route.fulfill({ json: { from: url.searchParams.get('from'), to: url.searchParams.get('to'), timeZone: 'Asia/Tokyo', days: [], weeks: [], costsRedacted: !state.isManager, canManageTeam: state.isManager } })
     }
     if (path === '/time-entries' && request.method() === 'GET') {
       const status = url.searchParams.get('status')

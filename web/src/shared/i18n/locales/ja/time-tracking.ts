@@ -144,6 +144,7 @@ export const timeTrackingMessages = {
   'timeTracking.report.weekOf': '{date} の週',
   'timeTracking.report.noProject': 'Project なし',
   'timeTracking.report.noWorkItem': 'タスクなし（間接作業）',
+  'timeTracking.report.ownTimeOnly': 'あなたが記録した工数だけを集計しています。タスク別の集計では、閲覧できるタスクの全員分の合計が出ます。',
   'timeTracking.report.total': '合計',
   'timeTracking.report.column.minutes': '実績',
   'timeTracking.report.column.billable': '請求可能',

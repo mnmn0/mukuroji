@@ -2238,7 +2238,7 @@ async function mockAuthenticatedTaskPage(
     }
     const path = new URL(route.request().url()).pathname
     if (path.endsWith('/time-entries')) await route.fulfill({ json: { entries: [] } })
-    else if (path.endsWith('/timesheet')) await route.fulfill({ json: { from: '2026-11-10', to: '2026-11-10', timeZone: 'Asia/Tokyo', days: [], weeks: [], costsRedacted: true } })
+    else if (path.endsWith('/timesheet')) await route.fulfill({ json: { from: '2026-11-10', to: '2026-11-10', timeZone: 'Asia/Tokyo', days: [], weeks: [], costsRedacted: true, canManageTeam: false } })
     else await route.fulfill({ json: { totalMinutes: 0, groups: [] } })
   })
 
