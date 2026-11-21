@@ -436,16 +436,127 @@ async function getAuthorizedProjectQuickAccessKeys(
   ))
 }
 
+/** Other endpoint of a relation activity event that the viewer may read. */
+type RelationActivityCounterpart = {
+  /** Team-local Work Item ID of the other endpoint. */
+  id: string
+  /** Team that owns the other endpoint. */
+  teamId: string
+  /** Short Work Item key, omitted for a Work Item created before keys existed. */
+  key?: string
+  /** Current title of the other endpoint. */
+  title: string
+}
+
+/** Maps a relation audit metadata field naming the other endpoint to the activity view field it fills. */
+type RelationActivityCounterpartField = {
+  /** Metadata field the relation audit event stores the other endpoint ID in. */
+  metadataField: 'relatedWorkItemId' | 'parentWorkItemId' | 'previousParentWorkItemId'
+  /** Activity view field that carries the resolved endpoint. */
+  viewField: 'relatedWorkItem' | 'parentWorkItem' | 'previousParentWorkItem'
+}
+
+/** Relation audit metadata fields that name another Work Item, in display order. */
+const RELATION_ACTIVITY_COUNTERPART_FIELDS: readonly RelationActivityCounterpartField[] = [
+  { metadataField: 'relatedWorkItemId', viewField: 'relatedWorkItem' },
+  { metadataField: 'parentWorkItemId', viewField: 'parentWorkItem' },
+  { metadataField: 'previousParentWorkItemId', viewField: 'previousParentWorkItem' },
+]
+
+/**
+ * Reads the other endpoint IDs a relation audit event recorded in its private metadata.
+ *
+ * @param event - Audit event from the Work Item activity page.
+ * @returns Pairs of activity view field and endpoint ID; empty for a non-relation event.
+ */
+function readRelationActivityCounterpartIds(event: AuditEventPage['events'][number]) {
+  const metadata = event.metadata
+  if (!metadata || metadata.adapter !== 'work-item-relation') return []
+  return RELATION_ACTIVITY_COUNTERPART_FIELDS.flatMap(({ metadataField, viewField }) => {
+    const workItemId = metadata[metadataField]
+    return typeof workItemId === 'string' && workItemId.trim() !== ''
+      ? [{ viewField, workItemId }]
+      : []
+  })
+}
+
+/**
+ * Resolves the other endpoints of relation activity events that the viewer may read.
+ *
+ * Relations stay inside one Team, so each endpoint is read from the Work Item's Team. An endpoint
+ * in a Project the viewer cannot read, or one deleted since, is left out, so the activity keeps
+ * hiding it as before.
+ *
+ * @param principal - Viewer of the activity.
+ * @param context - Viewer's permission context in the Team.
+ * @param teamId - Team that owns the Work Item and every relation endpoint.
+ * @param events - Activity page events.
+ * @returns Readable endpoints by Work Item ID.
+ */
+async function readVisibleRelationActivityCounterparts(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  teamId: string,
+  events: AuditEventPage['events'],
+): Promise<ReadonlyMap<string, RelationActivityCounterpart>> {
+  const workItemIds = [...new Set(events.flatMap((event) =>
+    readRelationActivityCounterpartIds(event).map(({ workItemId }) => workItemId)
+  ))]
+  const counterparts = new Map<string, RelationActivityCounterpart>()
+
+  for (
+    let offset = 0;
+    offset < workItemIds.length;
+    offset += WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY
+  ) {
+    const batch = workItemIds.slice(offset, offset + WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY)
+    await Promise.all(batch.map(async (workItemId) => {
+      let issue: TeamIssueResponseItem
+      try {
+        issue = (await workItemDependencies.teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          teamId,
+          workItemId,
+          { consistentIssueRead: true, includeEvents: false },
+        )).issue
+      } catch (error) {
+        // A Work Item deleted after the event has no title left to show.
+        if (isTeamIssueNotFoundError(error)) return
+        throw error
+      }
+      if (!canAccessAssignedProject(principal, context, issue.assignedProjectId, 'viewer')) return
+      counterparts.set(workItemId, {
+        id: issue.id,
+        teamId: issue.teamId,
+        ...(issue.key ? { key: issue.key } : {}),
+        title: issue.title,
+      })
+    }))
+  }
+
+  return counterparts
+}
+
 /**
  * Creates the Work Item activity response with its Web-compatible actor identifier.
  *
  * @param page - Permission-filtered audit event page.
+ * @param counterparts - Relation endpoints the viewer may read, by Work Item ID.
  * @returns Activity page retaining the shared actor snapshot and stable actorUserId.
  */
-function toWorkItemActivityPageView(page: AuditEventPage) {
+function toWorkItemActivityPageView(
+  page: AuditEventPage,
+  counterparts: ReadonlyMap<string, RelationActivityCounterpart>,
+) {
   return {
     events: page.events.map((event) => {
       const view = toAuditEventView(event)
+      const relationWorkItems = Object.fromEntries(
+        readRelationActivityCounterpartIds(event).flatMap(({ viewField, workItemId }) => {
+          const counterpart = counterparts.get(workItemId)
+          return counterpart ? [[viewField, counterpart]] : []
+        }),
+      )
       const actorMemberKey = event.metadata?.actorMemberKey
       const metadata = {
         ...view.metadata,
@@ -458,6 +569,7 @@ function toWorkItemActivityPageView(page: AuditEventPage) {
           ? actorMemberKey
           : view.actor.id,
         metadata,
+        ...relationWorkItems,
       }
     }),
     ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
@@ -4731,7 +4843,14 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         }),
       )
 
-      return c.json(toWorkItemActivityPageView(page))
+      const counterparts = await readVisibleRelationActivityCounterparts(
+        principal,
+        context,
+        teamId,
+        page.events,
+      )
+
+      return c.json(toWorkItemActivityPageView(page, counterparts))
     } catch (error) {
       if (error instanceof CognitoServiceError) {
         return toCognitoDirectoryErrorResponse(c, error)

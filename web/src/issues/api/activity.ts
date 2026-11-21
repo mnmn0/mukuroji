@@ -43,6 +43,20 @@ export type TeamIssueActivity = {
 }
 
 /**
+ * Other endpoint of a relation activity event, present only when the viewer may read it.
+ */
+export type TeamIssueActivityWorkItem = {
+  /** Team-local Work Item ID. */
+  id: string
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Short Work Item key, omitted for a Work Item created before keys existed. */
+  key?: string
+  /** Current title of the Work Item. */
+  title: string
+}
+
+/**
  * append-only audit 基盤から取得する Work Item activity です。
  */
 export type TeamIssueActivityEvent = {
@@ -70,6 +84,12 @@ export type TeamIssueActivityEvent = {
    * UI 表示に許可された event metadata です。
    */
   metadata?: Record<string, unknown>
+  /** Work Item linked or unlinked by a relation event, when the viewer may read it. */
+  relatedWorkItem?: TeamIssueActivityWorkItem
+  /** Parent after a parent change or of a reorder, when the viewer may read it. */
+  parentWorkItem?: TeamIssueActivityWorkItem
+  /** Parent before a parent change, when the viewer may read it. */
+  previousParentWorkItem?: TeamIssueActivityWorkItem
 }
 
 /**
@@ -164,7 +184,28 @@ function isTeamIssueActivityEvent(
     typeof value.occurredAt === 'string' &&
     typeof value.actorUserId === 'string' &&
     (value.summary === undefined || typeof value.summary === 'string') &&
-    (value.metadata === undefined || isRecord(value.metadata))
+    (value.metadata === undefined || isRecord(value.metadata)) &&
+    isOptionalTeamIssueActivityWorkItem(value.relatedWorkItem) &&
+    isOptionalTeamIssueActivityWorkItem(value.parentWorkItem) &&
+    isOptionalTeamIssueActivityWorkItem(value.previousParentWorkItem)
+  )
+}
+
+/**
+ * Validates an optional relation endpoint of an activity event.
+ *
+ * @param value - Untrusted endpoint candidate.
+ * @returns Whether the value is absent or a complete endpoint.
+ */
+function isOptionalTeamIssueActivityWorkItem(
+  value: unknown,
+): value is TeamIssueActivityWorkItem | undefined {
+  return value === undefined || (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.teamId === 'string' &&
+    (value.key === undefined || typeof value.key === 'string') &&
+    typeof value.title === 'string'
   )
 }
 

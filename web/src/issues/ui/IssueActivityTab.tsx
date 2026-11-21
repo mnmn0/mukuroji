@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTranslator } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
-import type { TeamIssueActivityEvent } from '../api'
+import type { TeamIssueActivityEvent, TeamIssueActivityWorkItem } from '../api'
 import type { IssueCollaborationController } from '../mutations/useIssueCollaboration'
 import { groupIssueActivity } from '../model/activityGroups'
 import {
@@ -10,6 +10,7 @@ import {
   type DeepLinkTraversalState,
 } from '../model/deepLinkTraversal'
 import { ChevronIcon } from '../../shared/ui/icons'
+import { createTeamIssuesPath, createWorkItemKeyPath } from '../../shared/routing/paths'
 
 /**
  * Props for the Work Item activity ledger.
@@ -305,6 +306,7 @@ function ActivityEventRow({
         <p className="font-medium leading-5 text-[var(--workbench-text)]">
           {formatActivityLabel(event, members, t)}
         </p>
+        <ActivityRelationWorkItems event={event} t={t} />
         <time
           className="mt-1 block text-[0.68rem] text-[var(--workbench-muted-soft)]"
           dateTime={event.occurredAt}
@@ -327,6 +329,79 @@ function ActivityEventRow({
         </button>
       ) : null}
     </li>
+  )
+}
+
+/** One relation endpoint shown under an activity label. */
+type ActivityRelationWorkItem = {
+  /** Label naming the endpoint's role; omitted when the event label already names it. */
+  labelKey?: MessageKey
+  /** Endpoint the viewer may read. */
+  workItem: TeamIssueActivityWorkItem
+}
+
+/**
+ * Lists the relation endpoints of an event in reading order: the previous parent before the new one.
+ *
+ * @param event - Activity event whose endpoints the server resolved for the viewer.
+ * @returns Endpoints to show; empty when the event has none or the viewer may read none.
+ */
+function readActivityRelationWorkItems(event: TeamIssueActivityEvent): ActivityRelationWorkItem[] {
+  const workItems: ActivityRelationWorkItem[] = []
+  if (event.relatedWorkItem) workItems.push({ workItem: event.relatedWorkItem })
+  if (event.previousParentWorkItem) {
+    workItems.push({
+      labelKey: 'collaboration.activity.previousParentWorkItem',
+      workItem: event.previousParentWorkItem,
+    })
+  }
+  if (event.parentWorkItem) {
+    workItems.push({ labelKey: 'collaboration.activity.parentWorkItem', workItem: event.parentWorkItem })
+  }
+  return workItems
+}
+
+/**
+ * Props for the relation endpoints of one activity event.
+ */
+type ActivityRelationWorkItemsProps = {
+  /** Event whose endpoints are shown. */
+  event: TeamIssueActivityEvent
+  /** Collaboration translator. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders links to the other Work Items of a relation event that the viewer may read.
+ *
+ * @param props - Event and translator.
+ * @returns The endpoint list, or null when there is nothing to show.
+ */
+function ActivityRelationWorkItems({ event, t }: ActivityRelationWorkItemsProps) {
+  const workItems = readActivityRelationWorkItems(event)
+  if (workItems.length === 0) return null
+
+  return (
+    <ul className="mt-1 grid gap-0.5 text-xs" data-testid="activity-relation-work-items">
+      {workItems.map(({ labelKey, workItem }) => (
+        <li className="flex min-w-0 items-baseline gap-1.5" key={`${labelKey ?? 'related'}-${workItem.id}`}>
+          {labelKey ? (
+            <span className="whitespace-nowrap text-[var(--workbench-muted)]">{t(labelKey)}</span>
+          ) : null}
+          <a
+            className="min-w-0 truncate font-semibold text-[var(--workbench-primary-text)] underline-offset-2 hover:underline"
+            href={workItem.key
+              ? createWorkItemKeyPath(workItem.key)
+              : createTeamIssuesPath(workItem.teamId, workItem.id)}
+            title={workItem.title}
+          >
+            {workItem.key ? <span className="font-mono">{workItem.key}</span> : null}
+            {workItem.key ? ' ' : null}
+            {workItem.title}
+          </a>
+        </li>
+      ))}
+    </ul>
   )
 }
 
