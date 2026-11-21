@@ -98,6 +98,7 @@ const knownProjectDirectoryAuxiliaryEntryTypes = new Set([
   'member-preferences',
   'planning-meta',
   'project-code',
+  'project-id',
   'project-member',
   'project-quick-access',
   'webhook-team-grant',
@@ -1203,6 +1204,16 @@ function validateProjectDirectoryAuxiliaryRow(
       normalizeProjectCode(code) !== code ||
       directoryId !== `PROJECT_CODE#${encodeURIComponent(workspaceId)}` ||
       entryKey !== `CODE#${code}`
+    ) normalizationFailure()
+    return
+  }
+  if (row.entryType === 'project-id') {
+    const workspaceId = requireText(row.workspaceId)
+    const projectId = requireProjectDirectoryIdentifier(row.projectId)
+    requireCanonicalTimestamp(row.createdAt)
+    if (
+      directoryId !== `PROJECT_ID#${encodeURIComponent(workspaceId)}` ||
+      entryKey !== `PROJECT#${projectId}`
     ) normalizationFailure()
     return
   }

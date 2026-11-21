@@ -35,6 +35,8 @@
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
+| `CognitoEmailSender` | no | stack が作る user pool の招待・パスワード再設定メールを SES から送るときの送信元アドレス。既定値は空で、空のあいだは Cognito の既定の送信機能（1日 50 通まで）を使います。既存の user pool を使う場合は指定できません。[招待と再設定のメールを SES から送る](#招待と再設定のメールを-ses-から送る) を参照してください。 |
+| `CognitoEmailSesIdentity` | no | `CognitoEmailSender` を認可する SES の検証済み identity（アドレスかドメイン）。既定値は空で、空なら `CognitoEmailSender` のアドレス自体を使います。ドメインを検証した場合はそのドメインを指定します。 |
 | `MonthlyCostBudgetUsd` | no | 月次の AWS 予算（USD）。既定値は 20。実績が 80%・100%、予測が 100% を超えると email で知らせます。[費用の目安と予算 alert](#費用の目安と予算-alert) を参照してください。 |
 | `CostBudgetAlertEmail` | no | 予算 alert の送信先 email。既定値は空で、空なら `InitialOwnerEmail` へ送ります。 |
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
@@ -120,7 +122,7 @@ SSO と AI は独立したオプションです。新規 stack では、それ�
 
 - SSO: `CognitoSsoUserPoolClientId`、`CognitoHostedUiDomain`、`CognitoSsoRedirectUri`、`CognitoEnterpriseIdpName`、`EnterpriseSsoStateSecret` の5項目をまとめて設定します。未設定時はSSO discovery/redirectと保存済みdomainのSSO強制を使わず、通常のpassword/MFA loginを使います。
 - AI: `AiBedrockModelId`、`AiBedrockModelArn`、input/outputの両token単価をまとめて設定します。現在サポートするJP profileには `AiBedrockDestinationModelArns` も必要です。未設定時は保存済みWorkspace policyにかかわらずAI操作を拒否し、Bedrock呼び出しIAM policyを作らず、AI observabilityのstream mappingを無効にします。データ保持のため既存table、queue、log、worker定義は維持します。Webの別途opt-in buildは不要です。
-- 外部 AI provider: `AiExternalProviders`（既定 `anthropic,openai`）で、Workspace 管理者が API キーを登録して使える provider を決めます。空にすると Bedrock だけになります。Bedrock が未設定でもこの値が空でなければ AI は有効になり、AI observability の stream mapping も有効です。API キーは Secrets Manager ではなく既存の `DeveloperPlatformKey` で暗号化して Workspace Search table に保存するため、固定費は増えません（[ADR 0033](../docs/adr/0033-ai-external-provider-workspace-keys.md)）。
+- 外部 AI provider: `AiExternalProviders`（既定 `anthropic,openai`）で、Workspace 管理者が API キーを登録して使える provider を決めます。空にすると Bedrock だけになります。Bedrock が未設定でもこの値が空でなければ AI は有効になり、AI observability の stream mapping も有効です。API キーは Secrets Manager ではなく既存の `DeveloperPlatformKey` で暗号化して Workspace Search table に保存するため、固定費は増えません（[ADR 0034](../docs/adr/0034-ai-external-provider-workspace-keys.md)）。
 
 既存stackの更新ではCloudFormationが前回のparameter値を保持するため、省略だけでは無効化されません。無効にするサービスの上記全parameterへ明示的に空文字を渡し、`ApiRuntimeConfigurationRevision` を更新してください。たとえばAIなら `--parameters AiBedrockModelId=` に加え、ARN、単価2項目、destination ARNも空にします。SSOなら5項目をすべて空にします。API version/aliasの切り替えで新しい設定が適用されます。既に開始した呼び出しの即時取り消しは行いません。
 
@@ -193,6 +195,7 @@ aws ce update-cost-allocation-tags-status \
 | AI（Bedrock の parameter 設定） | 利用量に比例 | token 料金。上限は Workspace の AI 設定で決めます。 |
 | AI（Claude API・OpenAI のキー登録） | 利用量に比例 | token 料金は各提供元へ直接かかります。AWS 側はキー復号の KMS request（1万回あたり約 $0.03）だけです。 |
 | `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
+| `CognitoEmailSender`（SES） | 利用量に比例 | 招待と再設定のメール。1,000 通あたり約 $0.10。 |
 
 ### 利用規模ごとの試算
 
@@ -725,6 +728,13 @@ aws logs describe-log-groups --log-group-name-prefix /aws/lambda/<StackName>- \
 
 Table を意図して削除する場合は、先に `aws dynamodb update-table --table-name <name> --no-deletion-protection-enabled` で保護を外します。
 
+## IAM policy の大きさ
+
+IAM は1つの role に付く inline policy を合計10,240文字（空白を除く）まで、customer-managed policy を1本6,144文字まで、role あたり10本までに制限します。Floci はこの上限を検査しないため、`cdk/test/iam-policy-quotas.suite.ts` が全 role について、ARN を長めの値に置き換えた見積もりで inline の合計と各 managed policy が上限の80%以下、managed policy が10本以下であることを確かめます。
+
+- API role の DynamoDB と SQS の権限は customer-managed policy（`ApiTableDataPolicy`、`ApiAnalyticsTablePolicy`、`ApiFeatureDataPolicy`、`ApiTransactionConditionPolicy`）に置きます。API Lambda はこれらの policy ができてから作られます。
+- Role の inline が上限に近づいたら、`grants.*` に `ManagedPolicyPrincipal`（`cdk/lib/policies/managed-policy-principal.ts`）を渡して、権限を customer-managed policy へ移します。
+
 ## Fresh deployment
 
 ### 1. Cognito と値を準備する
@@ -740,8 +750,9 @@ Table を意図して削除する場合は、先に `aws dynamodb update-table -
 Cognito の既定 email が初期 owner に仮パスワードを送り、owner は最初のサインインで新しい password に
 変えます。この場合、下の `prepare-workspace-cognito.sh` と group 作成手順は不要です。
 `COGNITO_USER_POOL_ID` と `COGNITO_USER_POOL_CLIENT_ID` は空のまま deploy し、deploy 後の検証では `UserPoolId` /
-`UserPoolClientId` output の値を使います。Cognito の既定 email は1日あたりの送信数が少ないため、
-招待が多い場合は SES の設定を user pool に追加してください。SSO を使う場合は、stack が作った
+`UserPoolClientId` output の値を使います。Cognito の既定 email は1日 50 通までなので、
+全社のメンバーを招待する前に [招待と再設定のメールを SES から送る](#招待と再設定のメールを-ses-から送る)
+を済ませてください。SSO を使う場合は、stack が作った
 user pool に IdP と SSO 専用 client を追加し、その client ID を SSO parameter に渡します。
 
 既存の user pool を使う場合は、以下の条件をそろえてから両 parameter を渡します。password client の
@@ -823,6 +834,47 @@ aws cognito-idp admin-add-user-to-group \
   --username "$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --group-name "$SYSTEM_ADMIN_GROUP"
 ```
+
+#### 招待と再設定のメールを SES から送る
+
+stack が作る user pool は、招待メール（仮パスワード）と確認コードのメール（パスワード再設定と email の確認）を
+日本語と英語の文面で送ります。文面には `WebUrl` の `/login` と `/forgot-password` への link が入ります
+（独自 domain を設定していれば独自 domain）。送信は既定では Cognito の送信機能で、1日 50 通までに限られ、
+送信元も `no-reply@verificationemail.com` になります。全社のメンバーを招待する前に、次の手順で SES から送るように
+切り替えます。通知 Email（`NotificationEmailSender`）と同じアドレスと identity を使えます。
+
+1. stack と同じ region の SES で、送信元アドレスかそのドメインを検証します。ドメインの場合は Easy DKIM の
+   CNAME を DNS に追加し、SPF / DMARC も設定します。user pool は stack と同じ region の identity だけを使います。
+
+   ```sh
+   aws sesv2 create-email-identity --region "$AWS_REGION" --email-identity example.com
+   aws sesv2 get-email-identity --region "$AWS_REGION" --email-identity example.com \
+     --query '{verified: VerifiedForSendingStatus, dkim: DkimAttributes.Status}'
+   ```
+
+2. sandbox の解除と送信上限を確認します。sandbox のあいだは検証済みのアドレスにしか送れず、1日 200 通までです。
+
+   ```sh
+   aws sesv2 get-account --region "$AWS_REGION" \
+     --query '{production: ProductionAccessEnabled, quota: SendQuota}'
+   ```
+
+   `production` が `false` なら、SES console の「本番アクセスをリクエスト」か
+   `aws sesv2 put-account-details --production-access-enabled --mail-type TRANSACTIONAL --website-url <WebUrl> --use-case-description '<用途>'`
+   で解除を申請します。審査には通常 1 日ほどかかります。`quota.Max24HourSend` が一度に招待する人数と
+   通知 Email の合計より少なければ、Service Quotas で SES の送信上限の引き上げも申請します。
+3. `CognitoEmailSender` に送信元アドレスを指定して deploy します。ドメインを検証した場合は
+   `CognitoEmailSesIdentity` にそのドメインを指定します。Cognito は初回に service-linked role
+   `AWSServiceRoleForAmazonCognitoIdpEmailService` を作り、それで SES を呼びます。deploy する role に
+   `iam:CreateServiceLinkedRole` が要ります。
+4. 自分宛てに member を招待して招待メールが指定の送信元から届くこと、login 画面の「パスワードを忘れた場合」で
+   確認コードが届くことを確かめます。届かない場合は SES の送信統計と suppression list を確認します。
+
+Cognito の既定の送信機能に戻すときは、`CognitoEmailSender` と `CognitoEmailSesIdentity` の両方を空にして deploy します
+（例: `--parameters CognitoEmailSender= --parameters CognitoEmailSesIdentity=`）。`CognitoEmailSesIdentity` だけが残っていると
+rule が deploy 前に止めます。文面はどちらでも同じです。
+既存の user pool を渡す場合、stack は user pool のメール設定を変えないため、`CognitoEmailSender` を指定すると
+deploy 前に rule が止めます。既存の user pool では Cognito console の「メッセージング」で SES を設定してください。
 
 ### 2. Build、test、diff、deploy
 
