@@ -2326,3 +2326,128 @@ const publicShare: DocumentPublicShare = {
   createdByUserId: 'owner@example.com',
   createdAt: '2026-07-18T00:00:00.000Z',
 }
+
+test('issues a Document realtime ticket only after the caller can view the Document', async () => {
+  const issued: string[] = []
+  const app = createTestApp(
+    createDocumentClient({
+      async get(input) {
+        if (input.documentId === 'hidden') {
+          throw new DocumentError(404, 'DocumentNotFound', 'Document was not found.')
+        }
+        return pageDocument
+      },
+    }),
+    {
+      async issueRealtimeTicket(principal, documentId) {
+        issued.push(`${principal.memberKey}:${documentId}`)
+        return {
+          ticket: 'one-time-ticket',
+          websocketUrl: 'wss://realtime.example.com/production',
+          expiresAt: '2026-07-18T00:01:00.000Z',
+          sessionExpiresAt: '2026-07-18T00:05:00.000Z',
+        }
+      },
+    },
+  )
+  const headers = { Authorization: 'Bearer token' }
+
+  const allowed = await app.request('/api/documents/document-1/realtime/tickets', {
+    method: 'POST',
+    headers,
+  })
+  const hidden = await app.request('/api/documents/hidden/realtime/tickets', {
+    method: 'POST',
+    headers,
+  })
+  const anonymous = await app.request('/api/documents/document-1/realtime/tickets', {
+    method: 'POST',
+  })
+
+  expect(allowed.status).toBe(201)
+  expect(await allowed.json()).toMatchObject({ ticket: 'one-time-ticket' })
+  expect(hidden.status).toBe(404)
+  expect(anonymous.status).toBe(401)
+  expect(issued).toEqual(['owner@example.com:document-1'])
+})
+
+test('reports realtime as unavailable when the runtime cannot issue tickets', async () => {
+  const withoutIssuer = createTestApp(createDocumentClient({}))
+  const withoutWebSocket = createTestApp(createDocumentClient({
+    async get() {
+      return pageDocument
+    },
+  }), {
+    async issueRealtimeTicket() {
+      return undefined
+    },
+  })
+
+  for (const app of [withoutIssuer, withoutWebSocket]) {
+    const response = await app.request('/api/documents/document-1/realtime/tickets', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer token' },
+    })
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toMatchObject({ code: 'RealtimeUnavailable' })
+  }
+})
+
+test('signals content-free Document changes after writes and keeps the write when signalling fails', async () => {
+  const changes: unknown[] = []
+  const app = createTestApp(
+    createDocumentClient({
+      async resolveComment() {
+        const comment: DocumentComment = {
+          id: 'comment-1',
+          documentId: 'document-1',
+          anchor: { type: 'document' },
+          body: 'Resolved comment',
+          mentions: [],
+          authorUserId: 'owner@example.com',
+          resolved: true,
+          createdAt: '2026-07-18T00:00:00.000Z',
+          updatedAt: '2026-07-18T00:00:00.000Z',
+        }
+        return comment
+      },
+      async heartbeatPresence() {
+        return undefined
+      },
+    }),
+    {
+      async publishChange(workspaceId, change) {
+        changes.push({ workspaceId, ...change })
+        if (change.part === 'presence') throw new Error('socket endpoint down')
+      },
+    },
+  )
+  const headers = {
+    Authorization: 'Bearer token',
+    'Content-Type': 'application/json',
+  }
+
+  const resolved = await app.request('/api/documents/document-1/comments/comment-1/resolve', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ resolved: true }),
+  })
+  const heartbeat = await app.request('/api/documents/document-1/presence', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ clientId: 'client-a' }),
+  })
+
+  expect(resolved.status).toBe(200)
+  expect(heartbeat.status).toBe(200)
+  expect(changes).toEqual([
+    { workspaceId: 'workspace-1', documentId: 'document-1', part: 'comments' },
+    {
+      workspaceId: 'workspace-1',
+      documentId: 'document-1',
+      part: 'presence',
+      originClientId: 'client-a',
+    },
+  ])
+})

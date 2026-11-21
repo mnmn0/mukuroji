@@ -69,7 +69,14 @@ Whiteboard の作成と、28 件を超える link の差分を持つ version へ
 14 件までです。読み切れなかった target は `pending` に入れて返し、client が続きを要求します。
 
 Presence は user / Document ごとに一つの置換可能な短い lease として保存します。画面は
-heartbeat と polling を行い、期限切れ collaborator を表示しません。一覧は評価件数と返却件数を
+heartbeat を送り、期限切れ collaborator を表示しません。
+
+画面は `POST /api/documents/{documentId}/realtime/tickets` で ticket を取り、既存の WebSocket に
+Document の scope で接続します。ticket は `canView` を満たす member にだけ発行し、subscription は
+5 分で失効します（client が失効前に接続し直し、接続中は 30 秒ごとに ping を送ります）。本文・comment・presence・share が変わると API が
+`document.changed` の signal（Document ID と変わった部分だけ）を送り、client は HTTP API で取り直します。
+接続中の再取得は 60 秒ごとで、WebSocket がない環境や接続断では本文 3.5 秒・comment と presence 4 秒の
+polling に戻ります。ADR 0041 を参照してください。一覧は評価件数と返却件数を
 制限し、任意の `clientId` を大量に作ることで他 user を押し出せない構造です。
 
 Comment は root / reply、block・text・whiteboard object anchor を保持します。解決済み root
@@ -127,6 +134,7 @@ Document 最大 payload の末尾まで検索対象になります。
 - `POST /api/documents/{documentId}/comments/{commentId}/resolve`
 - `GET|PUT /api/documents/{documentId}/presence`
 - `DELETE /api/documents/{documentId}/presence/{clientId}`
+- `POST /api/documents/{documentId}/realtime/tickets`
 - `PUT|DELETE /api/documents/{documentId}/favorite`
 - `POST /api/documents/{documentId}/recent`
 - `GET|POST|DELETE /api/documents/{documentId}/shares`

@@ -174,6 +174,15 @@ const expectedCoreConfiguration = {
     ref('AWS::URLSuffix'),
     '/production',
   ])),
+  WEBSOCKET_CALLBACK_ENDPOINT: base64(join('', [
+    'https://',
+    ref('RealtimeWebSocketApiC99C6240'),
+    '.execute-api.',
+    ref('AWS::Region'),
+    '.',
+    ref('AWS::URLSuffix'),
+    '/production',
+  ])),
 };
 
 const expectedIdentityConfiguration = {
@@ -781,6 +790,12 @@ describe('API runtime configuration externalization', () => {
       ref(WORKSPACE_AUDIT_PSEUDONYM_SECRET_LOGICAL_ID),
       ref(DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET_LOGICAL_ID),
     ]));
+    // The API publishes content-free Document change signals to subscribed sockets.
+    const manageConnectionsStatements = statements.filter((statement) =>
+      isRecord(statement) &&
+      statement.Action === 'execute-api:ManageConnections');
+    expect(manageConnectionsStatements).toHaveLength(1);
+    expect(JSON.stringify(manageConnectionsStatements[0])).toContain('RealtimeWebSocketApi');
   });
 
   test('publishes a revision-bound version and routes both transports through live', () => {
