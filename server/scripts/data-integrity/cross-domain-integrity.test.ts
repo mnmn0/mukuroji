@@ -418,6 +418,22 @@ test('detects known missing, orphaned, cross-tenant, and metadata corruption', a
   ])
 })
 
+test('detects one Project ID owned by two Teams of the same Workspace', async () => {
+  const healthy = createHealthyItems()
+  const project = healthy.find((item) => item.kind === 'project')
+  if (project?.kind !== 'project') throw new Error('Healthy fixture has no Project.')
+  const otherTeamProject: CrossDomainIntegrityItem = { ...project, teamId: 'other-team' }
+  const otherWorkspaceProject: CrossDomainIntegrityItem = {
+    ...project,
+    workspaceId: 'tenant-secret-other',
+    teamId: 'other-team',
+  }
+
+  expect((await run([...healthy, otherWorkspaceProject])).failureCodes).not.toContain('DUPLICATE_RECORD')
+  expect((await run([...healthy, otherTeamProject])).failureCodes).toContain('DUPLICATE_RECORD')
+  expect((await run([otherTeamProject, ...healthy])).failureCodes).toContain('DUPLICATE_RECORD')
+})
+
 test('detects relation endpoint and project corruption without exposing their IDs', async () => {
   const items = createHealthyItems().filter((item) =>
     !(item.kind === 'work-item' && item.workItemId === 'work-secret-b') &&

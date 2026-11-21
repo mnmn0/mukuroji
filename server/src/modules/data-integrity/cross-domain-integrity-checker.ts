@@ -675,6 +675,8 @@ type CrossDomainIndexes = {
   teamWorkspaces: Map<string, Set<string>>
   /** Projects by exact tenant and Team scope. */
   projects: Set<string>
+  /** Owning Team of each Project ID within one tenant. */
+  projectTeamsByWorkspaceId: Map<string, string>
   /** Projects grouped by repeated ID. */
   projectsById: Map<string, CrossDomainProject[]>
   /** Relation projections by exact identity. */
@@ -1871,6 +1873,7 @@ function buildIndexes(
     teams: new Set(),
     teamWorkspaces: new Map(),
     projects: new Set(),
+    projectTeamsByWorkspaceId: new Map(),
     projectsById: new Map(),
     relations: new Set(),
     relationItems: [],
@@ -1926,6 +1929,15 @@ function indexItem(
   if (item.kind === 'project') {
     const key = projectKey(item.workspaceId, item.teamId, item.projectId)
     if (indexes.projects.has(key)) failures.add('DUPLICATE_RECORD')
+    // Project member, watch, and notification rows are keyed by the Project ID alone, so one ID
+    // must not belong to two Teams of the same Workspace.
+    const workspaceProjectKey = compositeKey([item.workspaceId, item.projectId])
+    const owningTeamId = indexes.projectTeamsByWorkspaceId.get(workspaceProjectKey)
+    if (owningTeamId === undefined) {
+      indexes.projectTeamsByWorkspaceId.set(workspaceProjectKey, item.teamId)
+    } else if (owningTeamId !== item.teamId) {
+      failures.add('DUPLICATE_RECORD')
+    }
     indexes.projects.add(key)
     appendGrouped(indexes.projectsById, item.projectId, item)
     return

@@ -12215,6 +12215,30 @@ test.describe('authenticated task page', () => {
     )
   })
 
+  test('保存済みレポートがないときは直近30日と自分のTeamを既定の絞り込みにする', async ({ page }) => {
+    await mockAnalyticsReportsPage(page)
+    await page.route(
+      /.*\/api\/analytics\/reports(?:\?.*)?$/,
+      async (route) => {
+        await route.fulfill({ json: { reports: [] } })
+      },
+    )
+    const directoryResponse = page.waitForResponse('**/api/teams/projects**')
+
+    await page.goto('/reports')
+
+    const directory = await (await directoryResponse).json() as {
+      teams: Array<{ id: string }>
+    }
+    const teamIds = directory.teams.map((team) => team.id).sort()
+    expect(teamIds.length).toBeGreaterThan(0)
+    await expect.poll(() => new URL(page.url()).searchParams.getAll('team')).toEqual(teamIds)
+    const searchParams = new URL(page.url()).searchParams
+    const from = Date.parse(searchParams.get('from') ?? '')
+    const to = Date.parse(searchParams.get('to') ?? '')
+    expect(Math.round((to - from) / 86_400_000)).toBe(30)
+  })
+
   test('Analyticsの非canonical queryは現行URLへ戻して表示を継続する', async ({ page }) => {
     await mockAnalyticsReportsPage(page)
 

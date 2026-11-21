@@ -404,8 +404,8 @@ test('analytics state is retained with a due-delivery index and scoped API acces
 
   const apiAnalyticsPolicy = Object.entries(template.toJSON().Resources)
     .find(([logicalId, resource]) =>
-      logicalId.startsWith('ApiAnalyticsDataPolicy') &&
-      (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+      logicalId.startsWith('ApiAnalyticsTablePolicy') &&
+      (resource as { Type?: string }).Type === 'AWS::IAM::ManagedPolicy'
     )?.[1];
   expect(JSON.stringify(apiAnalyticsPolicy)).toContain(analyticsTableLogicalId);
   // Time entry writes recheck month close rows with a ConditionCheck inside their transaction.
@@ -414,8 +414,8 @@ test('analytics state is retained with a due-delivery index and scoped API acces
 
   const apiTransactionConditionCheckPolicy = Object.entries(template.toJSON().Resources)
     .find(([logicalId, resource]) =>
-      logicalId.startsWith('ApiTransactWritePolicy') &&
-      (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+      logicalId.startsWith('ApiTransactionConditionPolicy') &&
+      (resource as { Type?: string }).Type === 'AWS::IAM::ManagedPolicy'
     )?.[1];
   const serializedApiTransactionConditionCheckPolicy = JSON.stringify(
     apiTransactionConditionCheckPolicy,
@@ -896,7 +896,7 @@ test('file bucket incarnation marker is create-once, immutable, and published ex
       MemorySize: 256,
       Runtime: 'nodejs22.x',
       Timeout: 30,
-      TracingConfig: { Mode: 'Active' },
+      TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
     }),
   }));
   const providerPrincipalBoundary =
@@ -1036,6 +1036,7 @@ test('workspace search persists documents views and preferences in one retained 
     AttributeDefinitions: [
       { AttributeName: 'workspaceId', AttributeType: 'S' },
       { AttributeName: 'recordKey', AttributeType: 'S' },
+      { AttributeName: 'searchTitleKey', AttributeType: 'S' },
     ],
     BillingMode: 'PAY_PER_REQUEST',
     KeySchema: [
@@ -1063,7 +1064,17 @@ test('workspace search persists documents views and preferences in one retained 
     DeletionPolicy: 'Retain',
     UpdateReplacePolicy: 'Retain',
   }));
-  expect(resource.Properties.GlobalSecondaryIndexes).toBeUndefined();
+  expect(resource.Properties.GlobalSecondaryIndexes).toEqual([{
+    IndexName: 'SearchTitleIndex',
+    KeySchema: [
+      { AttributeName: 'workspaceId', KeyType: 'HASH' },
+      { AttributeName: 'searchTitleKey', KeyType: 'RANGE' },
+    ],
+    Projection: {
+      ProjectionType: 'INCLUDE',
+      NonKeyAttributes: ['entityId', 'title', 'subtitle'],
+    },
+  }]);
 });
 
 test('documents use one retained workspace-partitioned table with expiry support', () => {

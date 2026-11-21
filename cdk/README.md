@@ -35,6 +35,8 @@
 | `SystemAdminGroups` | no | system-admin とみなす comma-separated Cognito group。既定値は `mukuroji-system-admins`。 |
 | `ConnectorRuntimeConfiguration` | no（`mukuroji:connectors` 有効時だけ存在） | connector 用 Secrets Manager secret の初期 JSON。`NoEcho`、既定値 `{}`。本番 credential は parameter で渡さず、deploy 後に secret value を更新します。 |
 | `NotificationEmailSender` | no | 通知を Email で送るときの SES 送信元アドレス。既定値は空で、空のあいだは Email 配信を行いません（通知設定の Email は保存だけされます）。設定前に SES でこのアドレスかドメインを検証し、sandbox を解除してください。送信元ドメインの SPF / DKIM / DMARC は運用者が DNS に設定します。詳しくは [`docs/notifications.md`](../docs/notifications.md#email-配信) を参照してください。 |
+| `CognitoEmailSender` | no | stack が作る user pool の招待・パスワード再設定メールを SES から送るときの送信元アドレス。既定値は空で、空のあいだは Cognito の既定の送信機能（1日 50 通まで）を使います。既存の user pool を使う場合は指定できません。[招待と再設定のメールを SES から送る](#招待と再設定のメールを-ses-から送る) を参照してください。 |
+| `CognitoEmailSesIdentity` | no | `CognitoEmailSender` を認可する SES の検証済み identity（アドレスかドメイン）。既定値は空で、空なら `CognitoEmailSender` のアドレス自体を使います。ドメインを検証した場合はそのドメインを指定します。 |
 | `MonthlyCostBudgetUsd` | no | 月次の AWS 予算（USD）。既定値は 20。実績が 80%・100%、予測が 100% を超えると email で知らせます。[費用の目安と予算 alert](#費用の目安と予算-alert) を参照してください。 |
 | `CostBudgetAlertEmail` | no | 予算 alert の送信先 email。既定値は空で、空なら `InitialOwnerEmail` へ送ります。 |
 | `RequestRateLimitPerHour` | no | public request capability ごとの1時間あたり submit 上限。既定値は 10、範囲は 1–10000 です。 |
@@ -139,7 +141,7 @@ Stack は AWS Budgets の月次コスト予算（`MonthlyCostBudget`）を 1 つ
 
 | Parameter | 既定値 | 説明 |
 | --- | --- | --- |
-| `MonthlyCostBudgetUsd` | `20` | 月の予算（USD、1〜100000）。既定値は利用者 50 人程度までの目安です。下の試算を見て環境ごとに決めます。 |
+| `MonthlyCostBudgetUsd` | `20` | 月の予算（USD、1〜100000）。既定値は利用者 50 人程度（試算で約 $16〜19）までの目安です。下の試算を見て環境ごとに決めます。 |
 | `CostBudgetAlertEmail` | 空 | alert の送信先 email。空なら `InitialOwnerEmail` へ送ります。 |
 
 - 予算は AWS アカウント全体の費用を対象にします。cost allocation tag で絞らないのは、tag は Billing console で有効にするまで Budgets に届かず、data transfer や税のように tag の付かない費用もあるためです。Mukuroji 専用のアカウントに deploy してください。他のシステムと同じアカウントでは、他のシステムの費用も合算されます。
@@ -165,20 +167,21 @@ aws ce update-cost-allocation-tags-status \
 
 | 構成要素 | 数 | 月額の目安 | 備考 |
 | --- | --- | --- | --- |
-| CloudWatch metric alarm | 33 個（35 metric） | 約 $2.50 | $0.10 / alarm metric。アカウントの無料枠 10 metric を差し引いた額です。 |
+| CloudWatch metric alarm | 23 個（25 metric） | 約 $1.50 | $0.10 / alarm metric。アカウントの無料枠 10 metric を差し引いた額です。AI の alarm 10 個は AI を設定したときだけ作ります（下の増分の表）。 |
 | CloudWatch composite alarm | 1 個 | $0.50 | |
+| CloudWatch custom metric（EMF） | 約 15 系列 | 約 $1.50 | $0.30 / metric。アカウントの無料枠 10 metric を差し引いた額です。`Mukuroji/RuntimeControl` 5 個（毎分の heartbeat）、`Mukuroji/API` 6 個（API が呼ばれている時間だけ）、`Mukuroji/Notifications` 4 個（Slack と Email の channel ごと）。AI を設定すると `Mukuroji/AIAssistance` が増えます。metric は data が届いた時間単位で課金されるため、dimension を 1 つ足すと系列の数だけ固定費が増えます。 |
 | Secrets Manager secret | 4 個 | $1.60 | $0.40 / secret。inbound automation Webhook を 1 つ作るごとに secret が 1 つ増えます。 |
 | KMS customer-managed key | 1 個（`DeveloperPlatformKey`） | $1.00 | request 料金は少量です。 |
-| DynamoDB table（on-demand、PITR 有効） | 25 個 | $0.1〜0.5 | 保存量 25 GB までは無料枠。PITR は保存量 1 GB あたり約 $0.23 です。 |
+| DynamoDB table（on-demand、PITR 有効） | 26 個 | $0.1〜0.5 | 保存量 25 GB までは無料枠。PITR は保存量 1 GB あたり約 $0.23 です。 |
 | EventBridge の毎分 rule と `ScheduledJobsFunction` | 1 個 | ほぼ $0 | 月 43,200 回の起動（1,024 MB）は、1 回が平均数秒で終われば Lambda の無料枠（100 万 request、40 万 GB 秒）に収まります。無料枠はほかの Lambda と共有です。job が読む DynamoDB の料金は数十セントです。 |
 | SQS の待機中の polling | 3 queue | $0〜1 | Lambda の event source が空の queue を long polling し続けます。無料枠は月 100 万 request、超えた分は $0.40 / 100 万です。 |
-| X-Ray active tracing | 全 Lambda | ほぼ $0 | 月 10 万 trace まで無料。毎分の job で約 4.3 万 trace を使います。 |
-| CloudWatch Logs | 21 log group（90 日保持） | ほぼ $0 | 月 5 GB まで無料。超えた分は取り込み $0.76 / GB です。 |
+| X-Ray | application Lambda | $0 | 既定の `LambdaTracingMode=PassThrough` では trace を記録しません。調査で必要なときだけ `Active` にします（[X-Ray tracing の切り替え](#x-ray-tracing-の切り替え)）。 |
+| CloudWatch Logs | 22 log group（90 日保持、data migration は 365 日） | ほぼ $0 | 月 5 GB まで無料。超えた分は取り込み $0.76 / GB です。 |
 | GuardDuty Malware Protection for S3 | 1 plan | ほぼ $0 | 無料枠は月 1,000 object・1 GB。超えた分は scan した容量（米国東部で $0.09 / GB）と評価した object 数で課金されます。 |
 | Cognito user pool（Essentials） | 1 個 | $0 | 月 10,000 MAU まで無料。SAML / OIDC 連携の利用者は無料枠が小さく、超えると MAU 単位で課金されます。 |
 | CloudFront、S3、AppConfig、AWS Budgets | — | ほぼ $0 | CloudFront は月 1 TB・1,000 万 request まで無料です。 |
 
-固定費の大半は alarm、secret、KMS key です。alarm を減らすときは、通知の契約（[Alarm destination contract](#alarm-destination-contract)）と [`docs/operational-readiness.md`](../docs/operational-readiness.md) の alarm 一覧を確認してから、別の変更で行います。
+固定費の大半は alarm、secret、KMS key、custom metric です。alarm を減らすときは、通知の契約（[Alarm destination contract](#alarm-destination-contract)）と [`docs/operational-readiness.md`](../docs/operational-readiness.md) の alarm 一覧を確認してから、別の変更で行います。
 
 ### 任意 module を有効にしたときの増分
 
@@ -189,8 +192,10 @@ aws ce update-cost-allocation-tags-status \
 | `mukuroji:requestEmail` | +$1 / 月 | secret 2 個、alarm 2 個。 |
 | `mukuroji:tenantLifecycle` | +$0〜2 / 月 | Lambda 6 個と queue 6 個。待機中の queue polling が SQS の無料枠を超えた分です。 |
 | `mukuroji:softwareFactory` | ほぼ $0 | 毎分の Agent Run triage job。opt-in した Team がなければ AgentRuns table の index を読むだけです。 |
-| AI（Bedrock の parameter 設定） | 利用量に比例 | token 料金。上限は Workspace の AI 設定で決めます。 |
+| AI（Bedrock の parameter 設定） | +$1 / 月と利用量に比例 | AI の alarm 10 個（$1）。token 料金の上限は Workspace の AI 設定で決めます。 |
+| `LambdaTracingMode=Active`（X-Ray） | 利用量に比例 | 月 10 万 trace まで無料、超えた分は $5 / 100 万 trace。sampling は 1 秒あたり 1 request と残りの 5% で、毎分の job だけで月約 4.3 万 trace、50 人で月約 70 万 trace（約 $3）です。 |
 | `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
+| `CognitoEmailSender`（SES） | 利用量に比例 | 招待と再設定のメール。1,000 通あたり約 $0.10。 |
 
 ### 利用規模ごとの試算
 
@@ -198,16 +203,26 @@ aws ce update-cost-allocation-tags-status \
 
 | 利用者 | API request / 月 | 従量費の目安 | 合計の目安 |
 | --- | --- | --- | --- |
-| 10 人 | 約 40 万 | 約 $1 | 約 $7〜9 |
-| 50 人 | 約 200 万 | 約 $4〜6 | 約 $11〜14 |
-| 200 人 | 約 800 万 | 約 $25〜30 | 約 $32〜38 |
+| 10 人 | 約 40 万 | 約 $2〜3 | 約 $8〜11 |
+| 50 人 | 約 200 万 | 約 $5〜7 | 約 $11〜15 |
+| 200 人 | 約 800 万 | 約 $25〜30 | 約 $31〜38 |
 
-従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、Lambda（無料枠を超えた request と実行時間）、DynamoDB の読み書き、CloudWatch Logs の取り込み、WebSocket の接続時間です。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
+従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、DynamoDB の読み書き、Lambda（無料枠を超えた request と実行時間）、CloudWatch Logs の取り込み、WebSocket の接続時間です。税（日本の請求では消費税 10%）、独自 domain の Route 53 hosted zone（$0.50 / 月）、AI の token 料金は含みません。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
+
+### X-Ray tracing の切り替え
+
+既定では X-Ray に trace を記録しません。障害調査で API の流れを trace で追いたいときだけ、
+`--parameters LambdaTracingMode=Active` を付けて deploy します。調査が終わったら `PassThrough` に戻してください。
+切り替えで変わるのは Lambda の tracing mode と state machine の tracing flag だけで、IAM role は変わりません。
+API は alias が指す published version で動き、version の tracing mode は公開後に変えられないため、`LambdaTracingMode` を変えた deploy では API の新しい version を公開して alias を切り替えます（`ApiRuntimeConfigurationRevision` の増分は不要です）。
+`PassThrough` の間は API log の `traceId` に対応する trace が X-Ray にないため、`invocationId` と UTC の時間帯から
+Lambda log を起点に調査します（[`docs/operational-readiness.md`](../docs/operational-readiness.md)）。
 
 ## API observability
 
-Application Lambda 24個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
-trace/telemetry write action だけを追加します。API Lambda は readiness probe 用に
+Application Lambda と restore drill の state machine は `LambdaTracingMode` parameter に従います。既定の
+`PassThrough` では X-Ray に trace を記録せず、`Active` にすると active tracing になります。各 execution
+role には切り替えても role が変わらないよう、X-Ray が要求する trace/telemetry write action だけを常に追加します。API Lambda は readiness probe 用に
 `AuditEventsTable`、`WorkItemsTable`、`WorkspaceAccessTable` への `dynamodb:DescribeTable` だけを
 持つ独立 policy を使います。
 
@@ -215,6 +230,7 @@ Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HT
 application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。51 metric alarmと
 1 composite alarmのうち、notification無効のfast-burn component 2件を除く50件の
 `AlarmActions` は、必須parameterで指定した既存のprimary/secondary SNS topicへ接続します。
+AI の alarm 10件（`AiAssistance*`）は AI を設定した stack にだけ作ります。
 Stackはtopic、subscription、Incident Manager escalation planを作成・変更しません。Topic ownerは
 同一account/regionのstandard topicを用意し、managed rosterへのsubscription、暗号化key policy、
 test notificationの受信をdeploy前に確認してください。CloudWatchはalarm遷移時に両topicへ同時に
@@ -723,6 +739,13 @@ aws logs describe-log-groups --log-group-name-prefix /aws/lambda/<StackName>- \
 
 Table を意図して削除する場合は、先に `aws dynamodb update-table --table-name <name> --no-deletion-protection-enabled` で保護を外します。
 
+## IAM policy の大きさ
+
+IAM は1つの role に付く inline policy を合計10,240文字（空白を除く）まで、customer-managed policy を1本6,144文字まで、role あたり10本までに制限します。Floci はこの上限を検査しないため、`cdk/test/iam-policy-quotas.suite.ts` が全 role について、ARN を長めの値に置き換えた見積もりで inline の合計と各 managed policy が上限の80%以下、managed policy が10本以下であることを確かめます。
+
+- API role の DynamoDB と SQS の権限は customer-managed policy（`ApiTableDataPolicy`、`ApiAnalyticsTablePolicy`、`ApiFeatureDataPolicy`、`ApiTransactionConditionPolicy`）に置きます。API Lambda はこれらの policy ができてから作られます。
+- Role の inline が上限に近づいたら、`grants.*` に `ManagedPolicyPrincipal`（`cdk/lib/policies/managed-policy-principal.ts`）を渡して、権限を customer-managed policy へ移します。
+
 ## Fresh deployment
 
 ### 1. Cognito と値を準備する
@@ -738,8 +761,9 @@ Table を意図して削除する場合は、先に `aws dynamodb update-table -
 Cognito の既定 email が初期 owner に仮パスワードを送り、owner は最初のサインインで新しい password に
 変えます。この場合、下の `prepare-workspace-cognito.sh` と group 作成手順は不要です。
 `COGNITO_USER_POOL_ID` と `COGNITO_USER_POOL_CLIENT_ID` は空のまま deploy し、deploy 後の検証では `UserPoolId` /
-`UserPoolClientId` output の値を使います。Cognito の既定 email は1日あたりの送信数が少ないため、
-招待が多い場合は SES の設定を user pool に追加してください。SSO を使う場合は、stack が作った
+`UserPoolClientId` output の値を使います。Cognito の既定 email は1日 50 通までなので、
+全社のメンバーを招待する前に [招待と再設定のメールを SES から送る](#招待と再設定のメールを-ses-から送る)
+を済ませてください。SSO を使う場合は、stack が作った
 user pool に IdP と SSO 専用 client を追加し、その client ID を SSO parameter に渡します。
 
 既存の user pool を使う場合は、以下の条件をそろえてから両 parameter を渡します。password client の
@@ -821,6 +845,47 @@ aws cognito-idp admin-add-user-to-group \
   --username "$MUKUROJI_INITIAL_OWNER_USERNAME" \
   --group-name "$SYSTEM_ADMIN_GROUP"
 ```
+
+#### 招待と再設定のメールを SES から送る
+
+stack が作る user pool は、招待メール（仮パスワード）と確認コードのメール（パスワード再設定と email の確認）を
+日本語と英語の文面で送ります。文面には `WebUrl` の `/login` と `/forgot-password` への link が入ります
+（独自 domain を設定していれば独自 domain）。送信は既定では Cognito の送信機能で、1日 50 通までに限られ、
+送信元も `no-reply@verificationemail.com` になります。全社のメンバーを招待する前に、次の手順で SES から送るように
+切り替えます。通知 Email（`NotificationEmailSender`）と同じアドレスと identity を使えます。
+
+1. stack と同じ region の SES で、送信元アドレスかそのドメインを検証します。ドメインの場合は Easy DKIM の
+   CNAME を DNS に追加し、SPF / DMARC も設定します。user pool は stack と同じ region の identity だけを使います。
+
+   ```sh
+   aws sesv2 create-email-identity --region "$AWS_REGION" --email-identity example.com
+   aws sesv2 get-email-identity --region "$AWS_REGION" --email-identity example.com \
+     --query '{verified: VerifiedForSendingStatus, dkim: DkimAttributes.Status}'
+   ```
+
+2. sandbox の解除と送信上限を確認します。sandbox のあいだは検証済みのアドレスにしか送れず、1日 200 通までです。
+
+   ```sh
+   aws sesv2 get-account --region "$AWS_REGION" \
+     --query '{production: ProductionAccessEnabled, quota: SendQuota}'
+   ```
+
+   `production` が `false` なら、SES console の「本番アクセスをリクエスト」か
+   `aws sesv2 put-account-details --production-access-enabled --mail-type TRANSACTIONAL --website-url <WebUrl> --use-case-description '<用途>'`
+   で解除を申請します。審査には通常 1 日ほどかかります。`quota.Max24HourSend` が一度に招待する人数と
+   通知 Email の合計より少なければ、Service Quotas で SES の送信上限の引き上げも申請します。
+3. `CognitoEmailSender` に送信元アドレスを指定して deploy します。ドメインを検証した場合は
+   `CognitoEmailSesIdentity` にそのドメインを指定します。Cognito は初回に service-linked role
+   `AWSServiceRoleForAmazonCognitoIdpEmailService` を作り、それで SES を呼びます。deploy する role に
+   `iam:CreateServiceLinkedRole` が要ります。
+4. 自分宛てに member を招待して招待メールが指定の送信元から届くこと、login 画面の「パスワードを忘れた場合」で
+   確認コードが届くことを確かめます。届かない場合は SES の送信統計と suppression list を確認します。
+
+Cognito の既定の送信機能に戻すときは、`CognitoEmailSender` と `CognitoEmailSesIdentity` の両方を空にして deploy します
+（例: `--parameters CognitoEmailSender= --parameters CognitoEmailSesIdentity=`）。`CognitoEmailSesIdentity` だけが残っていると
+rule が deploy 前に止めます。文面はどちらでも同じです。
+既存の user pool を渡す場合、stack は user pool のメール設定を変えないため、`CognitoEmailSender` を指定すると
+deploy 前に rule が止めます。既存の user pool では Cognito console の「メッセージング」で SES を設定してください。
 
 ### 2. Build、test、diff、deploy
 

@@ -117,7 +117,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     [
-      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiTableDataPolicy/Resource',
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationScheduleJobPolicy/Resource',
@@ -129,18 +129,18 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<NotificationsTable76DCFC6C.Arn>/index/*]',
     [
-      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiTableDataPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
     'AwsSolutions-IAM5[Resource::<AgentRunsTableB0DA56A7.Arn>/index/*]',
-    ['ApiFunction/ServiceRole/DefaultPolicy/Resource'],
+    ['ApiTableDataPolicy/Resource'],
   ],
   [
     'AwsSolutions-IAM5[Resource::<ProjectDirectoryTable9ED01C01.Arn>/index/*]',
     [
-      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiTableDataPolicy/Resource',
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
@@ -152,7 +152,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<WorkItemsTableD3F1672B.Arn>/index/*]',
     [
-      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiTableDataPolicy/Resource',
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
@@ -165,7 +165,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<RealtimeSessionsTable607096EB.Arn>/index/*]',
     [
-      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiTableDataPolicy/Resource',
       'RealtimeHandlerFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
     ],
@@ -182,14 +182,14 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<AutomationTableE3D67F0D.Arn>/index/*]',
     [
-      'ApiAutomationDataPolicy/Resource',
+      'ApiFeatureDataPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationScheduleJobPolicy/Resource',
     ],
   ],
   [
     'AwsSolutions-IAM5[Resource::<RequestIntakeTable608708D4.Arn>/index/*]',
-    ['ApiRequestIntakeDataPolicy/Resource'],
+    ['ApiFeatureDataPolicy/Resource'],
   ],
   [
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*]',
@@ -237,15 +237,20 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<FileProofingTable81DA272F.Arn>/index/*]',
     [
-      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiTableDataPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationScheduleJobPolicy/Resource',
     ],
   ],
+  // The API reads the Workspace Search title index (ADR 0037) through the table data grant.
+  [
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchTable2575AD6B.Arn>/index/*]',
+    ['ApiTableDataPolicy/Resource'],
+  ],
   [
     'AwsSolutions-IAM5[Resource::<CustomersTableB554B793.Arn>/index/*]',
     [
-      'ApiFunction/ServiceRole/DefaultPolicy/Resource',
+      'ApiTableDataPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationScheduleJobPolicy/Resource',
       'NotificationScheduleJobPolicy/Resource',
@@ -475,6 +480,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<FileProofingTable81DA272F.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<CustomersTableB554B793.Arn>/index/*]',
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchTable2575AD6B.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     'AwsSolutions-IAM5[Resource::*]',
     'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',

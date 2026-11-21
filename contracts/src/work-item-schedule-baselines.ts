@@ -3,7 +3,7 @@ import {
   readWorkItemPlannedEndDate,
   readWorkItemPlannedStartDate,
 } from './work-item-actual-dates'
-import type { WorkItemSchedule } from './work-items'
+import type { CanonicalWorkItem, WorkItemSchedule } from './work-items'
 
 /** Most Work Items one Project schedule baseline may hold. */
 export const PROJECT_SCHEDULE_BASELINE_MAX_ENTRIES = 1000
@@ -95,6 +95,32 @@ export function deriveWorkItemScheduleSlip(
     ...(startSlipDays === undefined ? {} : { startSlipDays }),
     ...(endSlipDays === undefined ? {} : { endSlipDays }),
   }
+}
+
+/** Work Item fields that decide how far it ends behind its baseline. */
+export type WorkItemBaselineDelaySource = Pick<CanonicalWorkItem, 'schedule' | 'statusCategory' | 'actualEndDate'>
+
+/**
+ * Counts how many calendar days a Work Item ends after its baseline end, the "delay" that the
+ * weekly summary, the Gantt baseline overlay, and the Team table share.
+ *
+ * A completed Work Item is measured by its actual end date, an open one by its current planned
+ * end. A canceled Work Item, a completed one without an actual end, and a baseline entry without
+ * an end have no delay.
+ *
+ * @param baseline - Frozen planned dates of the Work Item.
+ * @param workItem - Current schedule, status category, and actual end date.
+ * @returns Signed days; positive means behind the baseline, negative ahead of it.
+ */
+export function deriveWorkItemBaselineEndDelayDays(
+  baseline: ProjectScheduleBaselineEntry,
+  workItem: WorkItemBaselineDelaySource,
+): number | undefined {
+  if (workItem.statusCategory === 'canceled') return undefined
+  const measuredEnd = workItem.statusCategory === 'completed'
+    ? workItem.actualEndDate
+    : readWorkItemPlannedEndDate(workItem.schedule)
+  return countWorkItemCalendarDaysBetween(baseline.endDate, measuredEnd)
 }
 
 /**
