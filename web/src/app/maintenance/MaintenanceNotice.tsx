@@ -4,9 +4,10 @@ import {
   getInitialLocale,
   subscribeToLocalePreference,
   type Locale,
-} from '../shared/i18n/i18n'
-import { useMaintenanceStatus, type MaintenanceNoticeState } from '../shared/api/maintenance'
-import { announce } from '../shared/lib/liveAnnouncements'
+} from '../../shared/i18n/i18n'
+import type { MaintenanceNoticeState } from '../../shared/api/maintenance'
+import { useMaintenanceStatus } from './useMaintenanceStatus'
+import { announce } from '../../shared/lib/liveAnnouncements'
 
 /**
  * Reports the default locale during server rendering.

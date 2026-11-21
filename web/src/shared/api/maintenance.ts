@@ -3,7 +3,6 @@ import {
   MAINTENANCE_STATE_HEADER,
   MAINTENANCE_STATUS_PATH,
 } from '@mukuroji/contracts'
-import useSWR, { mutate as mutateGlobalCache, useSWRConfig } from 'swr'
 import { resolveApiBaseUrl, type ApiBaseUrlScope } from './apiBaseUrl'
 
 /**
@@ -36,17 +35,14 @@ export type MaintenanceObservation = {
   readonly apiBaseUrl: string
 }
 
-/** SWR key of the maintenance status. */
-export const maintenanceStatusKey = 'app/maintenance-status'
-
 /** Status shown before any API answered. */
-const normalStatus: MaintenanceStatus = Object.freeze({ state: 'none' })
+export const normalMaintenanceStatus: MaintenanceStatus = Object.freeze({ state: 'none' })
 
-/** How often to ask for the state while a maintenance is shown, in milliseconds. */
-export const maintenancePollMilliseconds = 30_000
-
-/** API paths that skip the maintenance gate and so never carry its header. */
-const ungatedApiPaths = new Set(['/health', '/ready'])
+/**
+ * API paths whose answers never carry the maintenance header: liveness and readiness skip the
+ * gate, and the status endpoint reports the state in its body instead.
+ */
+const ungatedApiPaths = new Set(['/health', '/ready', MAINTENANCE_STATUS_PATH])
 
 /** API scopes whose base URLs the app's requests use. */
 const apiScopes: readonly ApiBaseUrlScope[] = ['shared', 'projects', 'workspace', 'workspaceWithoutProjects', 'enterpriseIdentity']
@@ -119,7 +115,7 @@ export function applyMaintenanceObservation(
   current: MaintenanceStatus | undefined,
   observation: MaintenanceObservation,
 ): MaintenanceStatus {
-  const status = current ?? normalStatus
+  const status = current ?? normalMaintenanceStatus
   if (observation.kind === 'report') return { state: observation.state, apiBaseUrl: observation.apiBaseUrl }
   return status.apiBaseUrl === observation.apiBaseUrl ? { state: 'none' } : status
 }
@@ -128,7 +124,7 @@ export function applyMaintenanceObservation(
  * Asks an API for its maintenance state.
  *
  * @param apiBaseUrl - Absolute API base URL.
- * @param send - `fetch` to use; it must not be the observed one.
+ * @param send - `fetch` to use.
  * @returns The status to show. An outage counts as `none`.
  * @throws When the request fails or the answer is unreadable, so SWR keeps the cached status.
  */
@@ -146,37 +142,20 @@ export async function fetchMaintenanceStatus(
     : { state: 'none' }
 }
 
-/** `fetch` before {@link installMaintenanceFetchObserver} wrapped it. */
-let statusFetch: typeof fetch = (...args) => globalThis.fetch(...args)
-
 /**
- * Stores an observation in the global SWR cache.
+ * Wraps `fetch` so every API response reports what it says about maintenance.
  *
- * @param observation - What a response said.
- */
-function storeObservation(observation: MaintenanceObservation) {
-  void mutateGlobalCache<MaintenanceStatus>(
-    maintenanceStatusKey,
-    (current) => applyMaintenanceObservation(current, observation),
-    { revalidate: false },
-  )
-}
-
-/**
- * Wraps `fetch` so every API response updates the cached maintenance status.
- *
+ * @param report - Receives each observation.
  * @param target - Global object whose `fetch` is wrapped. Defaults to `globalThis`.
- * @param report - Receives each observation. Defaults to updating the global SWR cache.
  * @returns A function that restores the original `fetch`.
  */
 export function installMaintenanceFetchObserver(
+  report: (observation: MaintenanceObservation) => void,
   target: { fetch: typeof fetch } = globalThis,
-  report: (observation: MaintenanceObservation) => void = storeObservation,
 ): () => void {
   const originalFetch = target.fetch
   const send = originalFetch.bind(target)
   const apiBaseUrls = resolveAppApiBaseUrls()
-  if (report === storeObservation) statusFetch = send
 
   /** Observed replacement of `fetch`. */
   const observedFetch: typeof fetch = async (input, init) => {
@@ -194,47 +173,5 @@ export function installMaintenanceFetchObserver(
   target.fetch = observedFetch
   return () => {
     target.fetch = originalFetch
-    if (report === storeObservation) statusFetch = (...args) => globalThis.fetch(...args)
   }
-}
-
-/**
- * Reads the API base URL that reported the cached maintenance.
- *
- * @param cached - Value in the SWR cache.
- * @returns The reporting API base URL, or `undefined` when none is cached.
- */
-function readReportingApiBaseUrl(cached: unknown): string | undefined {
-  if (typeof cached !== 'object' || cached === null || !('apiBaseUrl' in cached)) return undefined
-  return typeof cached.apiBaseUrl === 'string' ? cached.apiBaseUrl : undefined
-}
-
-/**
- * Reads the maintenance status from SWR.
- *
- * The status starts as `none` and changes when API responses carry the maintenance header. While
- * a maintenance is shown, SWR asks the API that reported it every 30 seconds, because a stopped
- * API rejects every other request and pages may stop sending them.
- *
- * @returns The status to show.
- */
-export function useMaintenanceStatus(): MaintenanceStatus {
-  const { cache } = useSWRConfig()
-  const { data } = useSWR<MaintenanceStatus>(
-    maintenanceStatusKey,
-    async (): Promise<MaintenanceStatus> => {
-      const cached: unknown = cache.get(maintenanceStatusKey)?.data
-      const apiBaseUrl = readReportingApiBaseUrl(cached)
-      return apiBaseUrl === undefined ? normalStatus : fetchMaintenanceStatus(apiBaseUrl, statusFetch)
-    },
-    {
-      fallbackData: normalStatus,
-      refreshInterval: (latest) => (latest && latest.state !== 'none' ? maintenancePollMilliseconds : 0),
-      revalidateIfStale: false,
-      revalidateOnFocus: false,
-      revalidateOnMount: false,
-      revalidateOnReconnect: false,
-    },
-  )
-  return data ?? normalStatus
 }

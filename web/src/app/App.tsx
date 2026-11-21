@@ -1,6 +1,6 @@
 import { RouterProvider } from 'react-router/dom'
 import { LiveAnnouncer } from '../shared/ui/LiveAnnouncer'
-import { MaintenanceNotice } from './MaintenanceNotice'
+import { MaintenanceNotice } from './maintenance/MaintenanceNotice'
 import { ConnectivityNotice } from './pwa/ConnectivityNotice'
 import { ServiceWorkerUpdateNotice } from './pwa/ServiceWorkerUpdateNotice'
 import { createAppRouter } from './router'

@@ -4,7 +4,7 @@ import './index.css'
 import App from './app/App'
 import { startAppServiceWorker } from './app/pwa/appServiceWorker'
 import { installAuthSessionFetch } from './auth/sessionRefresh'
-import { installMaintenanceFetchObserver } from './shared/api/maintenance'
+import { installAppMaintenanceObserver } from './app/maintenance/useMaintenanceStatus'
 import { startAppInstallPrompt } from './shared/lib/pwa/installPrompt'
 import {
   applyFontSizePreference,
@@ -17,7 +17,7 @@ import {
 
 installAuthSessionFetch()
 // Wraps the authenticated fetch, so it sees the responses that pages finally receive.
-installMaintenanceFetchObserver()
+installAppMaintenanceObserver()
 applyFontSizePreference(getInitialFontSizePreference())
 applyThemePreference(getInitialThemePreference())
 startAppServiceWorker()

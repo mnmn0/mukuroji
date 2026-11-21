@@ -29,8 +29,9 @@ AppConfig の runtime control は `enabled` / `disabled` の 2 値で、本番 m
   （`read-only` / `stopped`）を付け、CORS で公開する。
 - `GET /api/maintenance` を middleware の中で認証なしに答え、`none` / `read-only` / `stopped` / `unavailable`
   を返す。Web と operator script が使う。値は `contracts/src/maintenance.ts` が所有する。
-- Web は `fetch` を包んで header から状態を知り、画面上部にバナーを出す。表示中は 30 秒ごとに
-  `/api/maintenance` を読み、終われば消す。保存に失敗した画面は入力を消さずに残すので（session 切れの 503 と同じ扱い）、バナーで
+- Web は `fetch` を包んで header から状態を知り、SWR の cache（`app/maintenance-status`）に置いて画面上部に
+  バナーを出す。表示中は maintenance を報告した API の `/api/maintenance` を 30 秒ごとに読み、終われば消す。
+  別の API の通常応答では消さない。保存に失敗した画面は入力を消さずに残すので（session 切れの 503 と同じ扱い）、バナーで
   「再読み込みせず待つ」よう案内する。
 
 ## 検討した選択肢

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { MaintenanceBanner } from '../src/app/MaintenanceNotice'
+import { MaintenanceBanner } from '../src/app/maintenance/MaintenanceNotice'
 import {
   applyMaintenanceObservation,
   fetchMaintenanceStatus,
@@ -38,6 +38,7 @@ describe('readMaintenanceObservation', () => {
       .toEqual({ kind: 'clear', state: 'none', apiBaseUrl: sharedApi })
     for (const [url, result] of [
       ['/api/health', response(200)],
+      ['/api/maintenance', response(200)],
       ['/api/teams', response(503)],
       ['https://other.example.com/api/teams', response(200)],
       ['/assets/app.js', response(200)],
@@ -77,7 +78,7 @@ describe('installMaintenanceFetchObserver', () => {
     const target: { fetch: typeof fetch } = {
       fetch: async () => response(503, 'read-only'),
     }
-    const restore = installMaintenanceFetchObserver(target, (observation) => observations.push(observation))
+    const restore = installMaintenanceFetchObserver((observation) => observations.push(observation), target)
     const result = await target.fetch('http://localhost/api/teams/a/issues', { method: 'POST' })
     expect(result.status).toBe(503)
     expect(observations).toEqual([{ kind: 'report', state: 'read-only', apiBaseUrl: 'http://localhost/api' }])
