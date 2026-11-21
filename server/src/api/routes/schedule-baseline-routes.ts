@@ -1,6 +1,12 @@
 import type { Context, Hono } from 'hono'
+import {
+  isProjectScheduleBaselineId,
+  normalizeProjectScheduleBaselineName,
+  PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH,
+} from '@mukuroji/contracts'
 import { ProjectDataError } from '../../modules/directory'
 import {
+  activateProjectScheduleBaselineUseCase,
   captureProjectScheduleBaselineUseCase,
   readProjectScheduleBaselineUseCase,
   type TeamIssueResponseItem,
@@ -23,19 +29,21 @@ import { projectAccessAllows, type TeamPermissionContext } from '../shared/works
  * Registers the Project schedule baseline endpoints.
  *
  * Reading needs viewer access to the Project and returns only the entries of Work Items the
- * reader may currently see. Capturing needs manager access to the Project, because a baseline
- * is the approved plan that later slips are measured against, and every capture is written to
- * the audit log in the same transaction.
+ * reader may currently see; `?baselineId=` reads a saved baseline instead of the active one.
+ * Capturing and switching the active baseline need manager access to the Project, because the
+ * active baseline is the approved plan that later slips are measured against, and every write
+ * is recorded in the audit log in the same transaction.
  *
  * @param routeApp - Hono app the routes are added to.
  */
 export function registerScheduleBaselineRoutes(routeApp: Hono): void {
-  /** Returns the latest schedule baseline of one Project. */
+  /** Returns the active, or one saved, schedule baseline of one Project with the saved list. */
   routeApp.get('/api/teams/:teamId/projects/:projectId/schedule-baseline', async (c) => {
     const accessToken = readBearerAccessToken(c)
     if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
     try {
       const { teamId, projectId } = readBaselineRoute(c)
+      const baselineId = readBaselineIdQuery(c)
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessRead(principal)
       const context = await requireTeamPermission(principal, teamId, 'viewer')
@@ -44,18 +52,20 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
         createBaselineDependencies(principal.directoryId, teamId),
         { workspaceId: principal.directoryId, teamId, projectId },
         (issue) => canAccessTeamProject(principal, context, teamId, issue.assignedProjectId, 'viewer'),
+        baselineId,
       ))
     } catch (error) {
       return toScheduleBaselineErrorResponse(c, error)
     }
   })
 
-  /** Captures the current plan of every Work Item in one Project as its new baseline. */
+  /** Captures the current plan of every Work Item in one Project as its new active baseline. */
   routeApp.post('/api/teams/:teamId/projects/:projectId/schedule-baseline', async (c) => {
     const accessToken = readBearerAccessToken(c)
     if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
     try {
       const { teamId, projectId } = readBaselineRoute(c)
+      const name = readCaptureName(await readJsonBody(c))
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       const context = await requireTeamPermission(principal, teamId, 'viewer')
@@ -65,6 +75,7 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
         { workspaceId: principal.directoryId, teamId, projectId },
         {
           capturedAt: new Date().toISOString(),
+          ...(name === undefined ? {} : { name }),
           callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
             principal,
             [],
@@ -78,6 +89,117 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
       return toScheduleBaselineErrorResponse(c, error)
     }
   })
+
+  /** Makes a saved baseline the active one of the Project. */
+  routeApp.put('/api/teams/:teamId/projects/:projectId/schedule-baseline/active', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) return c.json({ message: 'Bearer token is required.' }, 401)
+    try {
+      const { teamId, projectId } = readBaselineRoute(c)
+      const request = readActivateRequest(await readJsonBody(c))
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const context = await requireTeamPermission(principal, teamId, 'viewer')
+      await requireProjectManager(principal, context, teamId, projectId)
+      return c.json(await activateProjectScheduleBaselineUseCase(
+        createBaselineDependencies(principal.directoryId, teamId),
+        { workspaceId: principal.directoryId, teamId, projectId },
+        request,
+        {
+          capturedAt: new Date().toISOString(),
+          callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
+            principal,
+            [],
+            principal.principalKind !== 'service-account',
+          ),
+          auditContext: createApiMutationContext(c, principal, request),
+        },
+      ))
+    } catch (error) {
+      return toScheduleBaselineErrorResponse(c, error)
+    }
+  })
+}
+
+/** Largest request body the baseline writes accept, in UTF-16 code units. */
+const MAX_BASELINE_BODY_LENGTH = 4096
+
+/**
+ * Reads an optional JSON request body.
+ *
+ * @param c - Hono request context.
+ * @returns The parsed body, or undefined when the body is empty.
+ * @throws ProjectDataError 400 when the body is too large or not JSON.
+ */
+async function readJsonBody(c: Context): Promise<unknown> {
+  const text = await c.req.text()
+  if (text.trim().length === 0) return undefined
+  if (text.length > MAX_BASELINE_BODY_LENGTH) throw invalidRequest('The request body is too large.')
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return parsed
+  } catch {
+    throw invalidRequest('The request body must be JSON.')
+  }
+}
+
+/**
+ * Reads the optional name of a capture.
+ *
+ * @param body - Parsed body, or undefined for none.
+ * @returns The trimmed name, or undefined when none was given.
+ * @throws ProjectDataError 400 when the body or the name is invalid.
+ */
+function readCaptureName(body: unknown): string | undefined {
+  if (body === undefined) return undefined
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) throw invalidRequest('The request body must be an object.')
+  const name = normalizeProjectScheduleBaselineName(Reflect.get(body, 'name'))
+  if (name === null) {
+    throw invalidRequest(`The baseline name must be text of at most ${PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH} characters without control characters.`)
+  }
+  return name
+}
+
+/**
+ * Reads the body of a switch request.
+ *
+ * @param body - Parsed body.
+ * @returns The baseline ID and the expected active revision.
+ * @throws ProjectDataError 400 when either is missing or invalid.
+ */
+function readActivateRequest(body: unknown): { baselineId: string; expectedRevision: number } {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) throw invalidRequest('The request body must be an object.')
+  const baselineId: unknown = Reflect.get(body, 'baselineId')
+  const expectedRevision: unknown = Reflect.get(body, 'expectedRevision')
+  if (!isProjectScheduleBaselineId(baselineId)) throw invalidRequest('baselineId is invalid.')
+  if (typeof expectedRevision !== 'number' || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+    throw invalidRequest('expectedRevision must be a positive integer.')
+  }
+  return { baselineId, expectedRevision }
+}
+
+/**
+ * Reads the optional `baselineId` query of a read.
+ *
+ * @param c - Hono request context.
+ * @returns The baseline ID, or undefined for the active baseline.
+ * @throws ProjectDataError 400 when the ID is invalid.
+ */
+function readBaselineIdQuery(c: Context): string | undefined {
+  const value = c.req.query('baselineId')
+  if (value === undefined) return undefined
+  if (!isProjectScheduleBaselineId(value)) throw invalidRequest('baselineId is invalid.')
+  return value
+}
+
+/**
+ * Creates the error for a malformed baseline request.
+ *
+ * @param message - Explanation.
+ * @returns The error.
+ */
+function invalidRequest(message: string) {
+  return new ProjectDataError(400, 'InvalidScheduleBaselineRequest', message)
 }
 
 /** HTTP status of each baseline-specific error code. */
@@ -85,6 +207,7 @@ const scheduleBaselineErrorStatuses = {
   InvalidScheduleBaselineRequest: 400,
   ScheduleBaselineForbidden: 403,
   ProjectNotFound: 404,
+  ScheduleBaselineNotFound: 404,
   ScheduleBaselineConflict: 409,
   ScheduleBaselineTooLarge: 413,
   WorkItemListLimitExceeded: 413,
@@ -209,7 +332,7 @@ async function requireProjectManager(
   const forbidden = new ProjectDataError(
     403,
     'ScheduleBaselineForbidden',
-    'Only a Project manager can capture a schedule baseline.',
+    'Only a Project manager can save or switch a schedule baseline.',
   )
   let managerContext: TeamPermissionContext
   try {

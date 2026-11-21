@@ -32,6 +32,8 @@ export type PlanningUpdateEvidenceView = {
   label: string
   /** Same-origin or HTTPS destination supplied by the update author. */
   url?: string
+  /** Typed evidence the row was made from, when it came from a published update. */
+  source?: PlanningUpdateEvidence
 }
 
 /** Canonical Work Item choice exposed by the structured update composer. */
@@ -121,7 +123,7 @@ export function createPlanningUpdateEvidenceCandidates(
  * @param initiative - Initiative entity resolved for an Initiative target.
  * @returns Whether the record belongs to the exact authorized target envelope.
  */
-function planningEvidenceScopeMatchesTarget(
+export function planningEvidenceScopeMatchesTarget(
   scope: { teamId?: string; projectId?: string },
   target: PlanningUpdateTargetView,
   initiative: PlanningSnapshot['entities'][number] | undefined,
@@ -607,17 +609,19 @@ function createPlanningUpdateEvidenceView(
         id,
         label: evidence.workItemId,
         url: createTeamIssuesPath(evidence.teamId, evidence.workItemId),
+        source: evidence,
       }
     case 'planning-entity':
       return {
         id,
         label: evidence.entityId,
         url: `/planning/roadmap?entityId=${encodeURIComponent(evidence.entityId)}`,
+        source: evidence,
       }
     case 'file':
-      return { id, label: `File · ${evidence.fileId}`, url: evidence.url }
+      return { id, label: `File · ${evidence.fileId}`, url: evidence.url, source: evidence }
     case 'link':
-      return { id, label: evidence.label ?? evidence.url, url: evidence.url }
+      return { id, label: evidence.label ?? evidence.url, url: evidence.url, source: evidence }
   }
 }
 

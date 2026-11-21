@@ -604,6 +604,7 @@ export function PlanningPage() {
           <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={openMobileSidebar} />
         </div>
         <PlanningScreen
+          scheduleBaselineAccessToken={accessToken}
           accessErrorMessage={accessErrorMessage || undefined}
           activeView={activeView}
           aiAssistance={(isAiAssistanceTaskEnabled?.('planning') ?? aiAssistanceUiEnabled) && accessToken
