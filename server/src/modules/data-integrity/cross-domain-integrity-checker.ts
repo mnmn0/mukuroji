@@ -1926,6 +1926,13 @@ function indexItem(
   if (item.kind === 'project') {
     const key = projectKey(item.workspaceId, item.teamId, item.projectId)
     if (indexes.projects.has(key)) failures.add('DUPLICATE_RECORD')
+    // Project member, watch, and notification rows are keyed by the Project ID alone, so one ID
+    // must not belong to two Teams of the same Workspace.
+    if (
+      indexes.projectsById.get(item.projectId)?.some((project) =>
+        project.workspaceId === item.workspaceId && project.teamId !== item.teamId
+      )
+    ) failures.add('DUPLICATE_RECORD')
     indexes.projects.add(key)
     appendGrouped(indexes.projectsById, item.projectId, item)
     return

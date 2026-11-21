@@ -2260,225 +2260,258 @@ export class DynamoDbProjectDirectoryClient {
     }
 
     try {
-      const items = await this.readValidDirectoryItems(directoryId, Boolean(idempotencyResourceId))
-      const team = items.find((item): item is ProjectDirectoryTeamItem =>
-        item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
-      )
-
-      if (!team) {
-        throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
-      }
-
-      if (idempotencyResourceId) {
-        const existingProject = items.find((item): item is ProjectDirectoryProjectItem =>
-          item.entryType === 'project' && item.projectId === idempotencyResourceId,
+      const unavailableProjectIds = new Set<string>()
+      for (let attempt = 1; ; attempt += 1) {
+        const items = await this.readValidDirectoryItems(
+          directoryId,
+          Boolean(idempotencyResourceId) || attempt > 1,
         )
-        if (existingProject) {
-          if (
-            existingProject.teamId !== teamId ||
-            existingProject.nameJa !== names.nameJa ||
-            existingProject.nameEn !== names.nameEn ||
-            (existingProject.tone ?? 'blue') !== tone ||
-            resolveProjectLifecycleState(existingProject) !== lifecycleState ||
-            existingProject.archivedAt
-          ) {
-            throw createProjectDataConflictError()
-          }
-          if (completionTransactItems.length > 0) {
-            try {
-              await this.documentClient.send(new TransactWriteCommand({
-                TransactItems: [
-                  {
-                    ConditionCheck: {
-                      TableName: this.tableName,
-                      Key: { directoryId, entryKey: existingProject.entryKey },
-                      ConditionExpression:
-                        '#entryType = :entryType AND #projectId = :projectId AND #teamId = :teamId AND #nameJa = :nameJa AND #nameEn = :nameEn AND #tone = :tone AND attribute_not_exists(#archivedAt)',
-                      ExpressionAttributeNames: {
-                        '#archivedAt': 'archivedAt',
-                        '#entryType': 'entryType',
-                        '#nameEn': 'nameEn',
-                        '#nameJa': 'nameJa',
-                        '#projectId': 'projectId',
-                        '#teamId': 'teamId',
-                        '#tone': 'tone',
-                      },
-                      ExpressionAttributeValues: {
-                        ':entryType': 'project',
-                        ':nameEn': names.nameEn,
-                        ':nameJa': names.nameJa,
-                        ':projectId': idempotencyResourceId,
-                        ':teamId': teamId,
-                        ':tone': tone,
+        const team = items.find((item): item is ProjectDirectoryTeamItem =>
+          item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
+        )
+
+        if (!team) {
+          throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+        }
+
+        if (idempotencyResourceId) {
+          const existingProject = items.find((item): item is ProjectDirectoryProjectItem =>
+            item.entryType === 'project' && item.projectId === idempotencyResourceId,
+          )
+          if (existingProject) {
+            if (
+              existingProject.teamId !== teamId ||
+              existingProject.nameJa !== names.nameJa ||
+              existingProject.nameEn !== names.nameEn ||
+              (existingProject.tone ?? 'blue') !== tone ||
+              resolveProjectLifecycleState(existingProject) !== lifecycleState ||
+              existingProject.archivedAt
+            ) {
+              throw createProjectDataConflictError()
+            }
+            if (completionTransactItems.length > 0) {
+              try {
+                await this.documentClient.send(new TransactWriteCommand({
+                  TransactItems: [
+                    {
+                      ConditionCheck: {
+                        TableName: this.tableName,
+                        Key: { directoryId, entryKey: existingProject.entryKey },
+                        ConditionExpression:
+                          '#entryType = :entryType AND #projectId = :projectId AND #teamId = :teamId AND #nameJa = :nameJa AND #nameEn = :nameEn AND #tone = :tone AND attribute_not_exists(#archivedAt)',
+                        ExpressionAttributeNames: {
+                          '#archivedAt': 'archivedAt',
+                          '#entryType': 'entryType',
+                          '#nameEn': 'nameEn',
+                          '#nameJa': 'nameJa',
+                          '#projectId': 'projectId',
+                          '#teamId': 'teamId',
+                          '#tone': 'tone',
+                        },
+                        ExpressionAttributeValues: {
+                          ':entryType': 'project',
+                          ':nameEn': names.nameEn,
+                          ':nameJa': names.nameJa,
+                          ':projectId': idempotencyResourceId,
+                          ':teamId': teamId,
+                          ':tone': tone,
+                        },
                       },
                     },
-                  },
-                  ...completionTransactItems,
-                ],
-              }))
-            } catch (error) {
-              if (hasTransactionConditionalFailure(error)) {
-                throw createProjectDataConflictError()
+                    ...completionTransactItems,
+                  ],
+                }))
+              } catch (error) {
+                if (hasTransactionConditionalFailure(error)) {
+                  throw createProjectDataConflictError()
+                }
+                throw error
               }
-              throw error
             }
+            return {
+              project: toProjectDirectoryProjectResponse(existingProject, 'ja'),
+            } satisfies CreateProjectResponse
           }
-          return {
-            project: toProjectDirectoryProjectResponse(existingProject, 'ja'),
-          } satisfies CreateProjectResponse
         }
-      }
 
-      const projectId = idempotencyResourceId ?? createDirectoryResourceId(
-        'project',
-        [names.nameJa, names.nameEn],
-        items
-          .filter((item): item is ProjectDirectoryProjectItem =>
-            item.entryType === 'project'
-          )
-          .flatMap((item) => (item.projectId ? [item.projectId] : [])),
-      )
-      const projectSortOrder =
-        Math.max(
-          0,
-          ...items
+        const projectId = idempotencyResourceId ?? createDirectoryResourceId(
+          'project',
+          [names.nameJa, names.nameEn],
+          items
             .filter((item): item is ProjectDirectoryProjectItem =>
-              item.entryType === 'project' && item.teamId === teamId
+              item.entryType === 'project'
             )
-            .map((item) => item.projectSortOrder ?? 0),
-        ) + 10
-      const item: ProjectDirectoryProjectItem = {
-        directoryId,
-        entryKey: createProjectEntryKey(team.teamSortOrder, projectSortOrder, projectId),
-        entryType: 'project',
-        webhookAuthorizationKey: createWebhookResourceAuthorizationKey(directoryId),
-        webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
-        teamId,
-        teamSortOrder: team.teamSortOrder,
-        nameJa: names.nameJa,
-        nameEn: names.nameEn,
-        projectId,
-        projectSortOrder,
-        tone,
-        ...(lifecycleState === 'active' ? {} : { lifecycleState }),
-        creatorUserId: creator.userKey,
-      }
-      const updatedAt = new Date().toISOString()
-      const creatorMemberItem: ProjectMemberItem = {
-        directoryId,
-        entryKey: createProjectMemberEntryKey(projectId, creatorMemberKey),
-        entryType: 'project-member',
-        webhookAuthorizationKey: createWebhookMemberAuthorizationKey(
+            .flatMap((item) => (item.projectId ? [item.projectId] : []))
+            .concat([...unavailableProjectIds]),
+        )
+        const projectSortOrder =
+          Math.max(
+            0,
+            ...items
+              .filter((item): item is ProjectDirectoryProjectItem =>
+                item.entryType === 'project' && item.teamId === teamId
+              )
+              .map((item) => item.projectSortOrder ?? 0),
+          ) + 10
+        const item: ProjectDirectoryProjectItem = {
           directoryId,
-          creatorMemberKey,
-        ),
-        webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
-        projectId,
-        memberKey: creatorMemberKey,
-        email: creatorMemberKey,
-        role: 'manager',
-        createdAt: updatedAt,
-        updatedAt,
-      }
+          entryKey: createProjectEntryKey(team.teamSortOrder, projectSortOrder, projectId),
+          entryType: 'project',
+          webhookAuthorizationKey: createWebhookResourceAuthorizationKey(directoryId),
+          webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
+          teamId,
+          teamSortOrder: team.teamSortOrder,
+          nameJa: names.nameJa,
+          nameEn: names.nameEn,
+          projectId,
+          projectSortOrder,
+          tone,
+          ...(lifecycleState === 'active' ? {} : { lifecycleState }),
+          creatorUserId: creator.userKey,
+        }
+        const updatedAt = new Date().toISOString()
+        const projectIdReservationItem = createProjectIdReservationItem(
+          directoryId,
+          projectId,
+          updatedAt,
+        )
+        const creatorMemberItem: ProjectMemberItem = {
+          directoryId,
+          entryKey: createProjectMemberEntryKey(projectId, creatorMemberKey),
+          entryType: 'project-member',
+          webhookAuthorizationKey: createWebhookMemberAuthorizationKey(
+            directoryId,
+            creatorMemberKey,
+          ),
+          webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
+          projectId,
+          memberKey: creatorMemberKey,
+          email: creatorMemberKey,
+          role: 'manager',
+          createdAt: updatedAt,
+          updatedAt,
+        }
 
-      try {
-        const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
-          {
-            ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey),
-          },
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: item,
-              ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        let projectIdReservationIndex = -1
+        try {
+          const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+            {
+              ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey),
             },
-          },
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: creatorMemberItem,
-              ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: item,
+                ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+              },
             },
-          },
-          {
-            Update: this.createActiveWorkspaceMemberVersionUpdate(
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: creatorMemberItem,
+                ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+              },
+            },
+            {
+              Update: this.createActiveWorkspaceMemberVersionUpdate(
+                directoryId,
+                creatorMemberKey,
+                creator.workspaceMemberVersion,
+                updatedAt,
+              ),
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: createWebhookTeamGrantItem({
+                  workspaceId: directoryId,
+                  teamId,
+                  projectId,
+                  memberKey: creatorMemberKey,
+                  teamSourceEntryKey: team.entryKey,
+                  projectSourceEntryKey: item.entryKey,
+                }),
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: createWebhookGrantCleanupItem({
+                  workspaceId: directoryId,
+                  teamId,
+                  projectId,
+                  memberKey: creatorMemberKey,
+                }),
+              },
+            },
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: projectIdReservationItem,
+                ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+              },
+            },
+            ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+              directoryId,
+              eventType: 'project.created',
+              entityType: 'project',
+              entityId: projectId,
+              action: 'created',
+              occurredAt: updatedAt,
+              changes: createAuditFieldChanges(undefined, {
+                projectId,
+                teamId,
+                name: names.nameJa,
+                tone,
+                lifecycleState,
+                creatorMemberKey,
+                creatorRole: 'manager',
+              }),
+              metadata: { kind: 'project', projectId, teamId },
+            }),
+            ...completionTransactItems,
+          ]
+          projectIdReservationIndex = transactItems.findIndex((transactItem) =>
+            transactItem.Put?.Item === projectIdReservationItem,
+          )
+          requireDynamoDbTransactionCapacity(transactItems)
+          await this.documentClient.send(
+            new TransactWriteCommand({ TransactItems: transactItems }),
+          )
+        } catch (error) {
+          if (isTransactionConditionalFailureAt(error, 3)) {
+            await this.requireUnchangedActiveWorkspaceMember(
               directoryId,
               creatorMemberKey,
               creator.workspaceMemberVersion,
-              updatedAt,
-            ),
-          },
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: createWebhookTeamGrantItem({
-                workspaceId: directoryId,
-                teamId,
-                projectId,
-                memberKey: creatorMemberKey,
-                teamSourceEntryKey: team.entryKey,
-                projectSourceEntryKey: item.entryKey,
-              }),
-            },
-          },
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: createWebhookGrantCleanupItem({
-                workspaceId: directoryId,
-                teamId,
-                projectId,
-                memberKey: creatorMemberKey,
-              }),
-            },
-          },
-          ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
-            directoryId,
-            eventType: 'project.created',
-            entityType: 'project',
-            entityId: projectId,
-            action: 'created',
-            occurredAt: updatedAt,
-            changes: createAuditFieldChanges(undefined, {
-              projectId,
-              teamId,
-              name: names.nameJa,
-              tone,
-              lifecycleState,
-              creatorMemberKey,
-              creatorRole: 'manager',
-            }),
-            metadata: { kind: 'project', projectId, teamId },
-          }),
-          ...completionTransactItems,
-        ]
-        requireDynamoDbTransactionCapacity(transactItems)
-        await this.documentClient.send(
-          new TransactWriteCommand({ TransactItems: transactItems }),
-        )
-      } catch (error) {
-        if (isTransactionConditionalFailureAt(error, 3)) {
-          await this.requireUnchangedActiveWorkspaceMember(
-            directoryId,
-            creatorMemberKey,
-            creator.workspaceMemberVersion,
-          )
+            )
+          }
+
+          if (isTransactionConditionalFailureAt(error, 0)) {
+            await this.throwCreateProjectTransactionCancellationResult(directoryId, teamId, error)
+          }
+
+          if (
+            isTransactionConditionalFailureAt(error, projectIdReservationIndex) &&
+            idempotencyResourceId === undefined &&
+            attempt < PROJECT_ID_RESERVATION_MAX_ATTEMPTS
+          ) {
+            // Another Team's concurrent creation, or an earlier one, owns this ID; pick another.
+            unavailableProjectIds.add(projectId)
+            continue
+          }
+
+          if (hasTransactionConditionalFailure(error)) {
+            throw createProjectDataConflictError()
+          }
+
+          throw error
         }
 
-        if (isTransactionConditionalFailureAt(error, 0)) {
-          await this.throwCreateProjectTransactionCancellationResult(directoryId, teamId, error)
-        }
-
-        if (hasTransactionConditionalFailure(error)) {
-          throw createProjectDataConflictError()
-        }
-
-        throw error
+        return {
+          project: toProjectDirectoryProjectResponse(item, 'ja'),
+        } satisfies CreateProjectResponse
       }
-
-      return {
-        project: toProjectDirectoryProjectResponse(item, 'ja'),
-      } satisfies CreateProjectResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
@@ -5081,6 +5114,61 @@ function createProjectCodeDirectoryId(workspaceId: string) {
  */
 function createProjectCodeEntryKey(code: string) {
   return `CODE#${code}`
+}
+
+/** Project creations tried with a fresh ID before a reservation conflict is reported. */
+const PROJECT_ID_RESERVATION_MAX_ATTEMPTS = 3
+
+/** Row that reserves one Project ID across every Team of a Workspace. */
+type ProjectIdReservationItem = {
+  /** Sidecar partition of the Workspace's Project ID reservations. */
+  directoryId: string
+  /** Reservation key derived from the Project ID. */
+  entryKey: string
+  /** Row discriminator. */
+  entryType: 'project-id'
+  /** Workspace that owns the Project. */
+  workspaceId: string
+  /** Reserved Project ID. */
+  projectId: string
+  /** Time the reservation was written. */
+  createdAt: string
+}
+
+/**
+ * Creates the sidecar partition that reserves Workspace-unique Project IDs.
+ *
+ * Project rows are keyed by their Team's sort order, so two Teams could otherwise commit the same
+ * Project ID at once; member, watch, and notification rows are keyed by the Project ID alone.
+ *
+ * @param workspaceId - Workspace that owns the Projects.
+ * @returns A partition key that cannot overlap canonical directory rows.
+ */
+function createProjectIdDirectoryId(workspaceId: string) {
+  return `PROJECT_ID#${encodeURIComponent(workspaceId)}`
+}
+
+/**
+ * Creates the reservation row of one Project ID.
+ *
+ * @param workspaceId - Workspace that owns the Project.
+ * @param projectId - Project ID to reserve.
+ * @param createdAt - Creation timestamp.
+ * @returns The row written with `attribute_not_exists` in the creation transaction.
+ */
+function createProjectIdReservationItem(
+  workspaceId: string,
+  projectId: string,
+  createdAt: string,
+): ProjectIdReservationItem {
+  return {
+    directoryId: createProjectIdDirectoryId(workspaceId),
+    entryKey: `PROJECT#${projectId}`,
+    entryType: 'project-id',
+    workspaceId,
+    projectId,
+    createdAt,
+  }
 }
 
 function toProjectMemberResponseItem(item: ProjectMemberItem): ProjectMemberResponseItem {

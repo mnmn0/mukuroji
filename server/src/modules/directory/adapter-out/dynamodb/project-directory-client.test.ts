@@ -840,8 +840,171 @@ test('DynamoDB directory client creates duplicate named projects with a unique i
           },
         },
       },
+      {
+        Put: {
+          TableName: 'DirectoryTable',
+          Item: {
+            directoryId: 'PROJECT_ID#user%23demo%40example.com',
+            entryKey: 'PROJECT#new-project-2',
+            entryType: 'project-id',
+            workspaceId: 'user#demo@example.com',
+            projectId: 'new-project-2',
+          },
+          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        },
+      },
     ],
   })
+})
+
+test('DynamoDB directory client picks another Project ID when another Team reserved the same ID', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const team = {
+    directoryId: 'workspace-1',
+    entryKey: '000020#000000#TEAM#team-b',
+    entryType: 'team',
+    teamId: 'team-b',
+    teamSortOrder: 20,
+    nameJa: 'Team B',
+    nameEn: 'Team B',
+    expanded: true,
+  }
+  const otherTeamProject = {
+    directoryId: 'workspace-1',
+    entryKey: '000010#000010#PROJECT#web',
+    entryType: 'project',
+    teamId: 'team-a',
+    teamSortOrder: 10,
+    projectId: 'web',
+    projectSortOrder: 10,
+    nameJa: 'Web',
+    nameEn: 'Web',
+    tone: 'blue',
+  }
+  let transactions = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if ('KeyConditionExpression' in command.input) {
+        // Team A's creation commits between this request's first read and its write.
+        return { Items: transactions === 0 ? [team] : [team, otherTeamProject] }
+      }
+      if (Array.isArray(command.input.TransactItems)) {
+        transactions += 1
+        if (transactions === 1) {
+          throw Object.assign(new Error('Transaction was canceled.'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [
+              { Code: 'None' },
+              { Code: 'None' },
+              { Code: 'None' },
+              { Code: 'None' },
+              { Code: 'None' },
+              { Code: 'None' },
+              { Code: 'ConditionalCheckFailed' },
+            ],
+          })
+        }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+  )
+
+  await expect(client.createProject(
+    'workspace-1',
+    'team-b',
+    { name: 'Web' },
+    { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
+  )).resolves.toEqual({
+    project: { id: 'web-2', name: 'Web', tone: 'blue', lifecycleState: 'active' },
+  })
+  const queries = sentInputs.filter((input) => 'KeyConditionExpression' in input)
+  const writes = sentInputs.filter((input) => Array.isArray(input.TransactItems))
+  expect(queries).toHaveLength(2)
+  expect(queries[1]?.ConsistentRead).toBe(true)
+  expect(writes).toHaveLength(2)
+  expect(writes[0]).toMatchObject({
+    TransactItems: expect.arrayContaining([{
+      Put: expect.objectContaining({
+        Item: expect.objectContaining({ entryType: 'project-id', entryKey: 'PROJECT#web' }),
+      }),
+    }]),
+  })
+  expect(writes[1]).toMatchObject({
+    TransactItems: expect.arrayContaining([{
+      Put: expect.objectContaining({
+        Item: expect.objectContaining({
+          directoryId: 'PROJECT_ID#workspace-1',
+          entryType: 'project-id',
+          entryKey: 'PROJECT#web-2',
+        }),
+      }),
+    }]),
+  })
+})
+
+test('DynamoDB directory client stops retrying a Project ID after repeated reservation conflicts', async () => {
+  let transactions = 0
+  const team = {
+    directoryId: 'workspace-1',
+    entryKey: '000010#000000#TEAM#core-team',
+    entryType: 'team',
+    teamId: 'core-team',
+    teamSortOrder: 10,
+    nameJa: 'Core',
+    nameEn: 'Core',
+    expanded: true,
+  }
+  const reservationConflict = () => Object.assign(new Error('Transaction was canceled.'), {
+    name: 'TransactionCanceledException',
+    CancellationReasons: [
+      ...Array.from({ length: 6 }, () => ({ Code: 'None' })),
+      { Code: 'ConditionalCheckFailed' },
+    ],
+  })
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if ('KeyConditionExpression' in command.input) return { Items: [team] }
+      if (Array.isArray(command.input.TransactItems)) {
+        transactions += 1
+        throw reservationConflict()
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+  )
+
+  await expect(client.createProject(
+    'workspace-1',
+    'core-team',
+    { name: 'Web' },
+    { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
+  )).rejects.toMatchObject({ status: 409 })
+  expect(transactions).toBe(3)
+
+  transactions = 0
+  await expect(client.createProject(
+    'workspace-1',
+    'core-team',
+    { idempotencyResourceId: 'application_1', name: 'Web' },
+    { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
+  )).rejects.toMatchObject({ status: 409 })
+  expect(transactions).toBe(1)
 })
 
 test('DynamoDB directory client strongly replays a deterministic Project and keeps receipt completion atomic', async () => {
