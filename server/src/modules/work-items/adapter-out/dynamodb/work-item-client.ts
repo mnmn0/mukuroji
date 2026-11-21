@@ -84,14 +84,12 @@ import type {
 } from '@aws-sdk/client-dynamodb'
 import {
   BatchGetCommand,
-  BatchWriteCommand,
   DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb'
 import type {
-  BatchWriteCommandInput,
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
@@ -3624,7 +3622,9 @@ export class DynamoDbTeamIssuesClient {
           ],
         }),
       )
-      if (!memberIndexDeletesInline) await this.deleteMemberIndexRowsAfterCommit(memberIndexDeletes)
+      if (!memberIndexDeletesInline) {
+        await this.deleteMemberIndexRowsAfterCommit(directoryTeamId, issueId, memberIndexDeletes)
+      }
 
       return { issue: toTeamIssueResponseItem(beforeIssue) }
     } catch (error) {
@@ -3684,28 +3684,41 @@ export class DynamoDbTeamIssuesClient {
   /**
    * Deletes member index rows after a Work Item delete committed without them.
    *
-   * Best effort: a row left behind only points Focus at a missing Work Item, which the
-   * reference read leaves out, so a failure here does not fail the committed delete.
+   * One transaction checks that the canonical row is still absent and deletes the index rows, so a
+   * Work Item re-created under the same ID keeps the index rows its create wrote. It is a
+   * `TransactWriteItems` call, which the Planning fence barrier admits. Best effort: a row left
+   * behind only points Focus at a missing Work Item, which the reference read leaves out, so a
+   * failure here does not fail the committed delete.
    *
+   * @param directoryTeamId - Partition key of the deleted canonical row.
+   * @param issueId - Sort key of the deleted canonical row.
    * @param items - Unconditional index Delete actions from the delete transaction.
    */
-  private async deleteMemberIndexRowsAfterCommit(items: readonly WorkItemTransactWriteItem[]) {
-    const keys = items.flatMap((item) => (item.Delete === undefined ? [] : [item.Delete.Key]))
-    try {
-      for (let offset = 0; offset < keys.length; offset += WORK_ITEM_BATCH_WRITE_SIZE) {
-        let requests: NonNullable<BatchWriteCommandInput['RequestItems']>[string] = keys
-          .slice(offset, offset + WORK_ITEM_BATCH_WRITE_SIZE)
-          .map((key) => ({ DeleteRequest: { Key: key } }))
-        for (let attempt = 0; requests.length > 0 && attempt < WORK_ITEM_BATCH_GET_ATTEMPTS; attempt += 1) {
-          if (attempt > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** (attempt - 1))
-          const response = await this.documentClient.send(new BatchWriteCommand({
-            RequestItems: { [this.issueTableName]: requests },
-          }))
-          requests = response.UnprocessedItems?.[this.issueTableName] ?? []
-        }
+  private async deleteMemberIndexRowsAfterCommit(
+    directoryTeamId: string,
+    issueId: string,
+    items: readonly WorkItemTransactWriteItem[],
+  ) {
+    for (let attempt = 0; attempt < WORK_ITEM_BATCH_GET_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** (attempt - 1))
+      try {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [
+            {
+              ConditionCheck: {
+                TableName: this.issueTableName,
+                Key: { directoryTeamId, issueId },
+                ConditionExpression: 'attribute_not_exists(directoryTeamId)',
+              },
+            },
+            ...items,
+          ],
+        }))
+        return
+      } catch (error) {
+        // A re-created Work Item owns the rows now; anything else is retried, then left behind.
+        if (isTransactionConditionalFailureAt(error, 0)) return
       }
-    } catch {
-      // The delete already committed; a stale index row is harmless (see above).
     }
   }
 
@@ -4868,9 +4881,6 @@ const WORK_ITEM_BATCH_GET_RETRY_BASE_MS = 25
 
 /** One action of a Work Item TransactWriteItems call. */
 type WorkItemTransactWriteItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
-
-/** Requests per BatchWriteItem call, the DynamoDB maximum. */
-const WORK_ITEM_BATCH_WRITE_SIZE = 25
 
 /** Actions per TransactWriteItems call, the DynamoDB maximum. */
 const WORK_ITEM_TRANSACT_WRITE_ITEM_LIMIT = 100

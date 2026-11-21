@@ -4820,17 +4820,24 @@ test('DynamoDB Work Item delete moves member index deletes after the commit when
     kind: 'external-links' as const,
     transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { fence: index } } },
   }))
-  for (const [fenceCount, expectInline] of [[2, true], [80, false]] as const) {
+  for (const [fenceCount, expectInline, recreated] of [[2, true, false], [80, false, false], [80, false, true]] as const) {
     const transactions: Array<NonNullable<TransactWriteCommandInput['TransactItems']>> = []
-    const batchWrites: Array<Record<string, Array<{ DeleteRequest: { Key: Record<string, string> } }>>> = []
+    const commandNames: string[] = []
     const documentClient = {
       async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+        commandNames.push(command.constructor.name)
         if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
         if (command.constructor.name === 'TransactWriteCommand') {
-          transactions.push(command.input.TransactItems as NonNullable<TransactWriteCommandInput['TransactItems']>)
-        }
-        if (command.constructor.name === 'BatchWriteCommand') {
-          batchWrites.push(command.input.RequestItems as (typeof batchWrites)[number])
+          const items = command.input.TransactItems as NonNullable<TransactWriteCommandInput['TransactItems']>
+          transactions.push(items)
+          if (recreated && transactions.length === 2) {
+            const error = new Error('Transaction was canceled.')
+            error.name = 'TransactionCanceledException'
+            Object.assign(error, {
+              CancellationReasons: items.map((_, index) => ({ Code: index === 0 ? 'ConditionalCheckFailed' : 'None' })),
+            })
+            throw error
+          }
         }
         return {}
       },
@@ -4848,20 +4855,35 @@ test('DynamoDB Work Item delete moves member index deletes after the commit when
       createFences(fenceCount),
     )
 
-    const transaction = transactions[0] ?? []
-    expect(transaction.length).toBeLessThanOrEqual(100)
-    const inlineIndexDeletes = transaction.filter((item) =>
-      String(item.Delete?.Key?.directoryTeamId ?? '').includes('#member-work-items#'))
-    const deferredKeys = batchWrites.flatMap((requests) => requests.IssuesTable ?? [])
-      .map((request) => request.DeleteRequest.Key.directoryTeamId)
+    // Only TransactWriteItems writes, which the Planning fence barrier admits.
+    expect(commandNames.filter((name) => name !== 'GetCommand').every((name) => name === 'TransactWriteCommand')).toBeTrue()
+    const [deletion = [], cleanup] = transactions
+    expect(deletion.length).toBeLessThanOrEqual(100)
+    /**
+     * Lists the member index partition keys a transaction deletes.
+     *
+     * @param items - Transaction actions.
+     * @returns Partition keys of index row Deletes.
+     */
+    const indexDeleteKeys = (items: NonNullable<TransactWriteCommandInput['TransactItems']>) => items
+      .map((item) => String(item.Delete?.Key?.directoryTeamId ?? ''))
+      .filter((key) => key.includes('#member-work-items#'))
     if (expectInline) {
-      expect(inlineIndexDeletes).toHaveLength(21)
-      expect(batchWrites).toHaveLength(0)
+      expect(indexDeleteKeys(deletion)).toHaveLength(21)
+      expect(cleanup).toBeUndefined()
     } else {
-      expect(inlineIndexDeletes).toHaveLength(0)
-      expect(batchWrites).toHaveLength(1)
-      expect(deferredKeys).toHaveLength(21)
-      expect(deferredKeys).toContain('workspace-1#member-work-items#sato@example.com')
+      expect(indexDeleteKeys(deletion)).toHaveLength(0)
+      expect(cleanup?.[0]).toEqual({
+        ConditionCheck: {
+          TableName: 'IssuesTable',
+          Key: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'full-delete' },
+          ConditionExpression: 'attribute_not_exists(directoryTeamId)',
+        },
+      })
+      expect(indexDeleteKeys(cleanup ?? [])).toHaveLength(21)
+      expect(indexDeleteKeys(cleanup ?? [])).toContain('workspace-1#member-work-items#sato@example.com')
+      // A re-created Work Item keeps its index rows: the cleanup is not retried.
+      expect(transactions).toHaveLength(2)
     }
   }
 })
