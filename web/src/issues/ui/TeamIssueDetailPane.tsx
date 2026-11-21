@@ -102,6 +102,7 @@ import {
  */
 export function IssueDetailPane({
   aiAssistanceEnabled = true,
+  softwareFactoryEnabled = true,
   accessToken,
   assigneeOptions,
   artifacts,
@@ -140,6 +141,8 @@ export function IssueDetailPane({
 }: {
   /** Whether the saved Workspace AI policy permits the Summary workflow. */
   aiAssistanceEnabled?: boolean
+  /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
+  softwareFactoryEnabled?: boolean
   accessToken?: string
   assigneeOptions: ProjectMember[]
   artifacts?: FileArtifactsController
@@ -199,6 +202,7 @@ export function IssueDetailPane({
   return (
     <IssueDetailContent
       aiAssistanceEnabled={aiAssistanceEnabled}
+      softwareFactoryEnabled={softwareFactoryEnabled}
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
@@ -241,6 +245,7 @@ export function IssueDetailPane({
 
 function IssueDetailContent({
   aiAssistanceEnabled = true,
+  softwareFactoryEnabled = true,
   accessToken,
   assigneeOptions,
   artifacts,
@@ -279,6 +284,8 @@ function IssueDetailContent({
 }: {
   /** Whether the saved Workspace AI policy permits the Summary workflow. */
   aiAssistanceEnabled?: boolean
+  /** Whether the deployment serves Software factory: agent handoff, Agent Run history, and report chips. */
+  softwareFactoryEnabled?: boolean
   /** Related Documents を取得する access token です。 */
   accessToken?: string
   /** 担当者 selector の候補です。 */
@@ -359,7 +366,7 @@ function IssueDetailContent({
     onCommentDraftDirtyChange?.(isDirty, issue.id)
   }, [issue.id, onCommentDraftDirtyChange])
   const agentRunReports = useAgentRunReportCommentDetails({
-    accessToken,
+    accessToken: softwareFactoryEnabled ? accessToken : undefined,
     commentCount: collaboration?.comments.length ?? 0,
     locale,
     teamId: issue.teamId,
@@ -1231,7 +1238,9 @@ function IssueDetailContent({
             <IssuePriorityBadge priority={issue.priority} t={t} />
           </div>
         </div>
-        <TaskHandoffPanel accessToken={accessToken} configuration={configuration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+        {softwareFactoryEnabled ? (
+          <TaskHandoffPanel accessToken={accessToken} configuration={configuration} includeDescription={hasDescriptionSection} t={t} task={issue} />
+        ) : null}
         <div className="grid min-w-0 gap-4">
           {!hasOverviewSection ? renderWorkItemTypeControl() : null}
           {renderedDetailSectionOrder.map((section) => (
@@ -1247,7 +1256,7 @@ function IssueDetailContent({
             ? <Fragment>{renderDetailSection('custom-fields')}</Fragment>
             : null}
           {/* Agent claims are operational state, so Work Item types that hide the workflow section still show them. */}
-          {accessToken ? (
+          {accessToken && softwareFactoryEnabled ? (
             <WorkItemAgentRunsPanelContainer
               accessToken={accessToken}
               key={issue.teamId + ':' + issue.id + ':agent-runs'}

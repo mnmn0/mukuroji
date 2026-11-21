@@ -37,7 +37,8 @@ Workspace あたりの Collection は 200 件までです。保存済み row の
 
 - Collection を削除しても、参照していた Work Item は変更されません。
 - URL の `collectionId` が一覧に無い Collection（削除済みや存在しない ID）を指す場合、Web は Item を読み込まず、存在しない旨を表示します。
-- Work Item が削除された場合や閲覧できなくなった場合、Collection に残った参照は一覧で省かれます。参照の掃除は一覧の read 時に行わず、Item 上限の計算には含まれます。削除済み Work Item の参照を掃除する処理は、今後の段階で Work Item 削除時の cleanup として追加します。
+- Work Item を削除すると、その Work Item を参照するすべての Collection から参照を同じ transaction で外します（各 Collection の revision が 1 つ進みます。[Work Items](work-items.md#削除と参照の掃除633)）。削除の準備の後に追加された参照と、削除前から残っていた参照は掃除されず、一覧で省かれますが Item 上限の計算には含まれます。
+- 閲覧できなくなった Work Item の参照は残り、一覧で省かれます。参照の掃除は一覧の read 時に行いません。
 - Tenant closure は Planning table の Workspace partition 全体を削除するため、Collection row と削除 marker も一緒に削除されます。
 
 ## API

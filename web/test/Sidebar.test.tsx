@@ -104,3 +104,23 @@ describe('Sidebar information architecture', () => {
   })
 
 })
+
+describe('Sidebar Software factory entry', () => {
+  test('offers the Team Factory board only when the deployment serves Software factory', () => {
+    const teams = createLargeDirectory()
+    const labels = createSidebarLabels('en')
+    const render = (showFactoryBoard: boolean) => renderToStaticMarkup(
+      <Sidebar
+        defaultActiveTeamId="team-1"
+        labels={labels}
+        showFactoryBoard={showFactoryBoard}
+        teams={teams}
+      />,
+    )
+
+    expect(render(true)).toContain(labels.factoryBoard)
+    const hidden = render(false)
+    expect(hidden).not.toContain(labels.factoryBoard)
+    expect(hidden).toContain(labels.issues)
+  })
+})

@@ -46,4 +46,13 @@ describe('Coding agent connection guide', () => {
     }
     expect(html).toContain('rel="noopener noreferrer"')
   })
+
+  test('leaves the coding-agent guide out without Software factory', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter><HelpWorkspaceView showCodingAgentGuide={false} t={createTranslator('en')} /></MemoryRouter>,
+    )
+    expect(html).not.toContain('id="coding-agent"')
+    expect(html).not.toContain('href="/settings/agent-connection"')
+    expect(html).toContain('id="role-guides"')
+  })
 })

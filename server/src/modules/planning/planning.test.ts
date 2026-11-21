@@ -26,6 +26,7 @@ import {
   createPlanningWorkItemDependencySummary,
   requirePlanningWorkItemHasNoScheduleDependencies,
   type PlanningCallerAuthorizationConditionCheck,
+  type PlanningEntityCreation,
   type PlanningMutationTransaction,
   type PlanningUpdatePublishNotificationContext,
   type PlanningUpdatePublishTransactionResult,
@@ -84,7 +85,7 @@ function createEntityInput(
   type: PlanningEntityType,
   expectedRevision: number,
   overrides: Partial<CreatePlanningEntityInput> = {},
-): CreatePlanningEntityInput {
+): PlanningEntityCreation {
   return {
     id,
     type,
@@ -105,7 +106,7 @@ function createCycleInput(
   id: string,
   expectedRevision: number,
   overrides: Partial<CreatePlanningEntityInput> = {},
-): CreatePlanningEntityInput {
+): PlanningEntityCreation {
   return createEntityInput(id, 'cycle', expectedRevision, {
     teamId: 'team-1',
     cadence: { unit: 'week', count: 2 },

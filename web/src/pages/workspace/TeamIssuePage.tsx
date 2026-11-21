@@ -27,6 +27,7 @@ import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessi
 import { clearAuthSession, getAuthSession } from '../../auth/session'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
+import { readWorkItemArchiveFailureMessageKey } from '../../bulk-operations/model/workItemArchive'
 import { applyWorkItemArchive } from '../../bulk-operations/mutations/workItemArchive'
 import { ArchivedWorkItemsPanelContainer } from '../../issues/ui/ArchivedWorkItemsPanelContainer'
 import { useArchivedWorkItemsRefresh } from '../../issues/queries/useArchivedWorkItems'
@@ -728,6 +729,10 @@ export function TeamIssuePage() {
         accessToken,
         archived,
         fallbackErrorMessage: t(archived ? 'issues.archive.archiveError' : 'issues.archive.restoreError'),
+        localizeFailure: (code) => {
+          const key = readWorkItemArchiveFailureMessageKey(code)
+          return key ? t(key) : undefined
+        },
         runner: mutationRequestRunner,
         target: issue,
         workspaceId: archiveWorkspaceId,
@@ -955,6 +960,7 @@ export function TeamIssuePage() {
   return (
     <TeamIssueScreen
       aiAssistanceEnabled={workspaceRouteContext?.isAiAssistanceTaskEnabled?.('summary') ?? aiAssistanceUiEnabled}
+      softwareFactoryEnabled={workspaceRouteContext?.softwareFactoryEnabled ?? true}
       activeTaskViewId={taskViewController.activeSavedView?.id}
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}

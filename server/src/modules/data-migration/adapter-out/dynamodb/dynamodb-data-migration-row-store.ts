@@ -7,14 +7,12 @@ import {
 import {
   DataMigrationFailure,
   type DataMigrationRow,
+  DATA_MIGRATION_MAX_SEGMENTS,
 } from '../../domain/data-migration'
 import type {
   DataMigrationReplaceOutcome,
   DataMigrationRowStore,
 } from '../../application/ports/data-migration-ports'
-
-/** Largest number of parallel scan segments a plan may use. */
-export const DATA_MIGRATION_MAX_SEGMENTS = 64
 
 /** Pattern of a scan-segment partition identifier. */
 const SEGMENT_PARTITION_PATTERN = /^segment-([0-9]+)-of-([0-9]+)$/u

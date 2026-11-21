@@ -229,6 +229,14 @@ describe('ProjectOverviewView', () => {
     expect(html).toContain('href="/documents"')
   })
 
+  test('hides the Agent Run lanes and the Factory board link without Software factory', () => {
+    const html = renderOverview({ showAgentRuns: false })
+
+    expect(html).toContain('data-testid="project-overview-members"')
+    expect(html).not.toContain('data-testid="project-overview-agent-runs"')
+    expect(html).not.toContain('href="/teams/core-team/factory"')
+  })
+
   test('marks each failed read in its own widget without hiding the others', () => {
     const html = renderOverview({
       membersError: 'load',

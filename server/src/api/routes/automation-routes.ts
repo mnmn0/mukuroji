@@ -57,6 +57,7 @@ import { FileProofingError } from '../../modules/files/file-proofing'
 import {
   WorkItemConfigurationError,
   validateWorkItemConfiguration,
+  type WorkItemConfigurationTransactionItems,
 } from '../../modules/work-items/work-item-configuration'
 import {
   AUTOMATION_TEMPLATE_APPLICATION_LEASE_MS,
@@ -68,6 +69,7 @@ import {
   isAutomationInboundWebhookJsonContentType,
   isAutomationValue,
   normalizeAutomationActionFailure,
+  orderBulkArchiveItems,
   parseAutomationInboundWebhookJson,
   previewBulkOperation,
   readAutomationInboundWebhookBody,
@@ -140,6 +142,10 @@ import {
   toFileProofingErrorResponse,
 } from '../shared/file-approval-access'
 import { createAgentRunReleaseOnRemovalItems } from '../shared/agent-run-access'
+import {
+  prepareWorkItemArchiveHierarchyConditionChecks,
+  WORK_ITEM_HIERARCHY_CHANGED_ERROR_CODE,
+} from '../shared/work-item-archive-hierarchy'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
   readWorkItemActualDateCorrection,
@@ -748,6 +754,79 @@ function isTerminalTemplateApplicationError(
 }
 
 /**
+ * Checks that archiving or restoring one Bulk item keeps the Work Item hierarchy whole.
+ *
+ * A preview passes the other items of the operation, which are left out of the check, so a parent
+ * can be previewed together with its children. Applying passes none: the items are ordered so that
+ * children are archived before their parent and a parent is restored before its children, and each
+ * item checks what the earlier ones committed.
+ *
+ * @param directoryId - Workspace directory ID.
+ * @param target - Work Item being archived or restored.
+ * @param archived - True when the item is archived, false when it is restored.
+ * @param operationItems - Items counted as already changed; empty when applying.
+ * @returns Condition checks to commit with the item's update.
+ * @throws AutomationError retryable `conflict` when a child is still active or the parent is archived.
+ */
+async function prepareBulkArchiveHierarchyConditionChecks(
+  directoryId: string,
+  target: { teamId: string, workItemId: string },
+  archived: boolean,
+  operationItems: readonly { teamId: string, workItemId: string }[],
+): Promise<WorkItemConfigurationTransactionItems> {
+  try {
+    return await prepareWorkItemArchiveHierarchyConditionChecks(
+      {
+        directoryId,
+        teamId: target.teamId,
+        workItemId: target.workItemId,
+        archived,
+        sameOperationWorkItemIds: new Set(operationItems
+          .filter((item) => item.teamId === target.teamId && item.workItemId !== target.workItemId)
+          .map((item) => item.workItemId)),
+      },
+      workItemDependencies,
+    )
+  } catch (error) {
+    if (error instanceof WorkItemConfigurationError && error.status === 409) {
+      // The hierarchy can be fixed without touching this Work Item, and a fixed hierarchy leaves
+      // the request and its operation token unchanged. A retryable failure lets the next explicit
+      // attempt check the hierarchy again instead of returning the stored failure.
+      throw new AutomationError('conflict', error.code, error.message, true)
+    }
+    throw error
+  }
+}
+
+/**
+ * Turns a failed hierarchy fence of a Bulk archive or restore into a failure an explicit retry re-checks.
+ *
+ * The fences of an archive or restore are its only configuration condition checks, so a
+ * configuration conflict means a relation, a parent, or a child restore changed after the check.
+ * That leaves this Work Item and the request unchanged, so a non-retryable failure would be returned
+ * again for every later attempt of the same request.
+ *
+ * @param error - Failure of the Work Item update.
+ * @param hierarchyFenced - True when the update carried hierarchy fences.
+ * @returns A retryable `conflict` for a hierarchy fence failure, otherwise the error unchanged.
+ */
+function toBulkArchiveFenceFailure(error: unknown, hierarchyFenced: boolean): unknown {
+  if (
+    hierarchyFenced &&
+    error instanceof ProjectDataError &&
+    error.code === 'WorkItemConfigurationRevisionConflict'
+  ) {
+    return new AutomationError(
+      'conflict',
+      WORK_ITEM_HIERARCHY_CHANGED_ERROR_CODE,
+      'The Work Item hierarchy changed while it was checked. Try again.',
+      true,
+    )
+  }
+  return error
+}
+
+/**
  * Converts Planning failures into the stable Automation action error contract.
  *
  * @param error - Planning failure raised while preparing one bulk mutation.
@@ -851,6 +930,7 @@ function createApiBulkOperationAdapter(
   const prepareAction = async (
     request: BulkOperationRequest,
     itemIndex: number,
+    previewsOperation: boolean,
   ) => {
     const loaded = await loadItem(request, itemIndex)
     const { action } = request
@@ -886,10 +966,19 @@ function createApiBulkOperationAdapter(
           throw error
         }
       }
+      // A preview runs before any item is written, so it counts the other items of the operation
+      // as already archived or restored. Applying checks what earlier items actually committed.
+      const configurationConditionChecks = await prepareBulkArchiveHierarchyConditionChecks(
+        principal.directoryId,
+        loaded.item,
+        action.archived,
+        previewsOperation ? request.items : [],
+      )
       body = {
         archivedAt: action.archived ? new Date().toISOString() : null,
         archivedBy: action.archived ? principal.userKey : null,
         expectedRevision: loaded.item.expectedRevision,
+        configurationConditionChecks,
         ...(authorizationSnapshot ? { authorizationSnapshot } : {}),
       }
     } else {
@@ -1051,8 +1140,27 @@ function createApiBulkOperationAdapter(
   }
 
   return {
+    async orderItems(request) {
+      return request.action.type === 'archive'
+        ? await orderBulkArchiveItems(
+            request.items,
+            request.action.archived,
+            async (teamId, workItemId) => {
+              const related = await workItemDependencies.workItemConfigurations.listRelations(
+                principal.directoryId,
+                teamId,
+                workItemId,
+                { types: ['parent'] },
+              )
+              return related.relations.find((relation) =>
+                relation.sourceWorkItemId === workItemId && relation.type === 'parent'
+              )?.targetWorkItemId
+            },
+          )
+        : request.items.map((_, index) => index)
+    },
     async preview(request, itemIndex) {
-      const prepared = await prepareAction(request, itemIndex)
+      const prepared = await prepareAction(request, itemIndex, true)
       return {
         allowed: true,
         undoPayload: createBulkUndoPayload(request.action, prepared.detail.issue),
@@ -1061,7 +1169,7 @@ function createApiBulkOperationAdapter(
     async apply(request, itemIndex, checkpoint) {
       let prepared: Awaited<ReturnType<typeof prepareAction>>
       try {
-        prepared = await prepareAction(request, itemIndex)
+        prepared = await prepareAction(request, itemIndex, false)
       } catch (error) {
         const recovered = canAttemptResponseLossRecovery(error)
           ? await recoverAppliedItem(request, itemIndex, checkpoint)
@@ -1104,7 +1212,7 @@ function createApiBulkOperationAdapter(
           ? await recoverAppliedItem(request, itemIndex, checkpoint)
           : undefined
         if (recovered) return recovered
-        throw error
+        throw toBulkArchiveFenceFailure(error, request.action.type === 'archive')
       }
       await projectWorkItemMutationSearchDocumentBestEffort(
         principal.directoryId,
@@ -1195,8 +1303,22 @@ function createApiBulkOperationAdapter(
             actualDateTransitionAt,
           )
         : undefined
+      // Undoing an archive restores the Work Item and undoing a restore archives it again, so the
+      // undo keeps the hierarchy whole the same way the operation itself did. Undo runs the items
+      // in reverse apply order, so it checks what earlier undone items actually committed.
+      const archiveHierarchyConditionChecks = operation.action.type === 'archive'
+        ? await prepareBulkArchiveHierarchyConditionChecks(
+            principal.directoryId,
+            item,
+            restoresArchive,
+            [],
+          )
+        : []
       let mutationBody: UpdateTeamIssueRequestBody = {
         ...configuredBody,
+        ...(archiveHierarchyConditionChecks.length > 0
+          ? { configurationConditionChecks: archiveHierarchyConditionChecks }
+          : {}),
         ...(actualDateRequest.correction ? { actualDateTransitionAt } : {}),
         ...(actualDateCorrection ? { actualDateCorrection } : {}),
       }
@@ -1251,7 +1373,7 @@ function createApiBulkOperationAdapter(
           ? await recoverUndoneItem(operation, itemIndex, request, item)
           : undefined
         if (recovered) return recovered
-        throw error
+        throw toBulkArchiveFenceFailure(error, archiveHierarchyConditionChecks.length > 0)
       }
       await projectWorkItemMutationSearchDocumentBestEffort(
         principal.directoryId,

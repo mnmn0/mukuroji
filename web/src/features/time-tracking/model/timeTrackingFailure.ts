@@ -4,6 +4,8 @@ export type TimeTrackingFailureKind =
   | 'offline'
   /** Someone else changed the record first; the latest state was reloaded. */
   | 'conflict'
+  /** The time falls in a month a manager has closed. */
+  | 'closed'
   /** The member lacks the permission. */
   | 'forbidden'
   /** The API rejected the input. */
@@ -33,6 +35,7 @@ function readErrorFields(error: unknown): { status?: number; code?: string } {
 export function classifyTimeTrackingFailure(error: unknown): TimeTrackingFailureKind {
   const { status, code } = readErrorFields(error)
   if (status === 0) return 'offline'
+  if (status === 409 && code === 'TimePeriodClosed') return 'closed'
   if (status === 409 && code !== 'TimeTrackingMutationInProgress') return 'conflict'
   if (status === 401 || status === 403) return 'forbidden'
   if (status === 400 || status === 404 || status === 422) return 'invalid'
