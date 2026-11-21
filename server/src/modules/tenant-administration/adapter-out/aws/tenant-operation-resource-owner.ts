@@ -175,7 +175,8 @@ type TenantDynamoTarget = {
   readonly selectors: readonly TenantSelector[]
   /**
    * Attribute that must still hold the Workspace ID when a row is deleted. Set for tables whose
-   * keys are global, where another Workspace can take a row over after it was scanned.
+   * keys are global, where another Workspace can take a row over after it was scanned, and for
+   * key prefixes that can overlap another Workspace ID. Filtered scans also require it.
    */
   readonly ownerAttribute?: string
   /**
@@ -460,6 +461,48 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         ownerAttribute: 'workspaceId',
         scanPageSize: SHARED_TABLE_SCAN_PAGE_SIZE,
       },
+      // Project code and Project ID reservations live in one sidecar partition per Workspace.
+      exactSidecarTarget(
+        'project-code-reservations',
+        this.config.projectDirectoryTableName,
+        'directoryId',
+        'entryKey',
+        encodedWorkspaceSelector('directoryId', 'equals', 'PROJECT_CODE#'),
+      ),
+      exactSidecarTarget(
+        'project-id-reservations',
+        this.config.projectDirectoryTableName,
+        'directoryId',
+        'entryKey',
+        encodedWorkspaceSelector('directoryId', 'equals', 'PROJECT_ID#'),
+      ),
+      // Member preferences and Webhook grant projections use one partition per member or Team.
+      // The Webhook partitions embed the raw Workspace ID, whose prefix can overlap another
+      // Workspace ID containing `#`, so rows are also matched and deleted by their owner.
+      {
+        ...attributeTarget(
+          'project-directory-sidecars',
+          this.config.projectDirectoryTableName,
+          'directoryId',
+          'entryKey',
+          [
+            encodedWorkspaceSelector('directoryId', 'prefix', 'PROJECT_QUICK_ACCESS#', '#'),
+            encodedWorkspaceSelector('directoryId', 'prefix', 'MEMBER_PREFERENCES#', '#'),
+            workspaceSelector('directoryId', 'prefix', 'WEBHOOK_TEAM_GRANT#', '#'),
+            workspaceSelector('directoryId', 'prefix', 'WEBHOOK_GRANT_CLEANUP#', '#'),
+          ],
+        ),
+        ownerAttribute: 'workspaceId',
+        scanPageSize: SHARED_TABLE_SCAN_PAGE_SIZE,
+      },
+      // Planning keeps its revision fence in an isolated `FENCE#` partition (ADR 0012).
+      exactSidecarTarget(
+        'planning-revision-fence',
+        this.config.planningTableName,
+        'workspaceId',
+        'recordKey',
+        workspaceSelector('workspaceId', 'equals', 'FENCE#'),
+      ),
     ]
   }
 
@@ -1645,9 +1688,26 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         ? `${path} = ${value}`
         : `begins_with(${path}, ${value})`
     })
+    // A key prefix can also match another Workspace whose ID extends this one, so a target with an
+    // owner attribute keeps only rows the Workspace owns. Tables already located by that attribute
+    // need no second clause.
+    const ownerAttribute = target.ownerAttribute
+    const ownerClause = ownerAttribute !== undefined &&
+        !target.selectors.some((tenantSelector) =>
+          tenantSelector.mode === 'equals' &&
+          tenantSelector.path.length === 1 &&
+          tenantSelector.path[0] === ownerAttribute &&
+          tenantSelector.value(workspaceId) === workspaceId
+        )
+      ? ' AND #tenantOwner = :tenantOwner'
+      : ''
+    if (ownerClause && ownerAttribute !== undefined) {
+      names['#tenantOwner'] = ownerAttribute
+      values[':tenantOwner'] = workspaceId
+    }
     const response = await this.documentClient.send(new ScanCommand({
       TableName: target.tableName,
-      FilterExpression: `(${filters.join(' OR ')})`,
+      FilterExpression: `(${filters.join(' OR ')})${ownerClause}`,
       ExpressionAttributeNames: names,
       ExpressionAttributeValues: values,
       ...(projection ? { ProjectionExpression: projection.expression } : {}),
@@ -1851,6 +1911,27 @@ function exactTarget(
     ...(sortKey ? { sortKey } : {}),
     selectors: [workspaceSelector(partitionKey, 'equals')],
   }
+}
+
+/**
+ * Creates a directly queryable target for one Workspace sidecar partition whose key wraps the
+ * Workspace ID in a literal prefix.
+ *
+ * @param id - Stable resource identifier used in artifacts and evidence.
+ * @param tableName - Deployed DynamoDB table name.
+ * @param partitionKey - Physical partition-key attribute.
+ * @param sortKey - Physical sort-key attribute.
+ * @param selector - Exact partition selector for the sidecar key.
+ * @returns A target read with a partition query.
+ */
+function exactSidecarTarget(
+  id: string,
+  tableName: string,
+  partitionKey: string,
+  sortKey: string,
+  selector: TenantSelector,
+): TenantDynamoTarget {
+  return { id, tableName, partitionKey, sortKey, selectors: [selector] }
 }
 
 /** Creates a delimiter-safe prefix-filtered tenant partition target. */
