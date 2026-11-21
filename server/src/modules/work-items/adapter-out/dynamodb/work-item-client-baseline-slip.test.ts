@@ -251,7 +251,7 @@ test('does not read the baseline for edits that cannot move the end, or for item
   expect(noProject.reads.baseline).toBe(0)
 })
 
-test('keeps the edit when the baseline cannot be read', async () => {
+test('keeps the edit when the baseline storage is temporarily unavailable', async () => {
   const { client, transactions, reads } = createClient(storedIssue(), 'throttled')
 
   const response = await moveDeadline(client, '2026-06-20')
@@ -313,4 +313,14 @@ test('measures a reopened Work Item against the baseline again', async () => {
     previousDelayDays: 1,
     delayDays: 9,
   })
+})
+
+test('fails the edit closed when the stored baseline row is corrupt', async () => {
+  const baselineRow = await storedBaselineRow([{ workItemId: 'wireframe', endDate: '2026-06-01' }])
+  const { client, transactions } = createClient(storedIssue(), { ...baselineRow, schemaVersion: 999 })
+
+  const error: unknown = await moveDeadline(client, '2026-06-20').then(() => undefined, (cause: unknown) => cause)
+
+  expect(error).toMatchObject({ code: 'ScheduleBaselineCorruptState' })
+  expect(transactions).toHaveLength(0)
 })

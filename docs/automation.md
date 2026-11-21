@@ -36,7 +36,7 @@ Condition は event snapshot と現在の Work Item snapshot のどちらを読�
 
 判定は Work Item の書き込み側で行う。日程や所属 Project が変わる更新、完了・中止からの再開、依存関係の連鎖更新では、Work Item の Team と Project の今の baseline を1回読み、変更前後の遅れを比べる。変更後も未完了で、遅れが1日以上かつ変更前より大きいときだけ、`work-item.updated` / `work-item.schedule-cascade-updated` の audit event の `metadata.baselineSlip` に `baselineRevision`、`baselineEndDate`、`previousDelayDays`（変更前に比べられる終了日がなければ省略）、`delayDays` を書く。trigger はこの値だけを見る。
 
-完了・中止にした変更、予定終了日を前に戻した変更、baseline を保存し直したり切り替えたりした操作は対象外。baseline の読み取りに失敗しても Work Item の更新は止めず、その変更には `baselineSlip` を書かない（その変更では通知・trigger が動かない）。
+完了・中止にした変更、予定終了日を前に戻した変更、baseline を保存し直したり切り替えたりした操作は対象外。baseline の読み取りが一時的に失敗した（throttle など）ときは Work Item の更新は止めず、その変更には `baselineSlip` を書かない（その変更では通知・trigger が動かない）。保存された baseline の行が壊れている（未知の schema、scope 不一致など）ときは、取りこぼしを避けるため更新を失敗させる。
 
 同じ判定で、遅れが `WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS`（3日、Focus の既定閾値と同じ）を越えた変更では、担当者に理由 `baseline-slip` の通知を送り、通知の概要を「baseline より N 日遅れ」にする。作成者と watcher には通常の日程変更通知と同じく届く。Team ごとの閾値は Focus の優先ルールだけで、通知の閾値は今は固定。
 

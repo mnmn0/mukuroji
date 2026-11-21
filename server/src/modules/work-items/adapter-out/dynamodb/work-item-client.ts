@@ -1603,8 +1603,9 @@ export class DynamoDbTeamIssuesClient {
    * Measures how much one change moved a Project Work Item further behind its active baseline.
    *
    * The baseline is read only when the change can move the measured end: a new schedule, a move
-   * to another Project, or a reopen. A failed read is logged and leaves the change
-   * unannotated, so a baseline outage never blocks Work Item edits.
+   * to another Project, or a reopen. A temporarily unavailable read is logged and leaves the
+   * change unannotated, so a storage outage never blocks Work Item edits; a corrupt baseline row
+   * is rethrown and fails the edit closed.
    *
    * @param directoryId - Workspace directory ID.
    * @param teamId - Team that owns the Work Item and its Project.
@@ -1645,6 +1646,9 @@ export class DynamoDbTeamIssuesClient {
     try {
       baseline = await read
     } catch (error) {
+      // Only a temporary storage outage is skipped; a corrupt or out-of-scope baseline row fails
+      // the edit closed instead of silently losing the slip.
+      if (!(error instanceof ProjectDataError) || error.code !== 'ScheduleBaselineRetryable') throw error
       console.warn('Work Item baseline slip could not be measured:', error)
       return undefined
     }
