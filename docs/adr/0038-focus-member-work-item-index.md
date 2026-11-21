@@ -134,8 +134,8 @@ relation の端点の読み取りは relation の数に比例する。relation �
   ConditionCheck で確かめるので、同じ ID で作り直された Work Item の index row は消さない。`TransactWriteItems` なので
   Planning fence の barrier も通る。一時的な失敗は backoff して最大 5 回まで試し、それでも失敗したら削除は成功のままにする。
   残った index row は存在しない Work Item を指すだけで、Focus の参照読み取りが除くので表示は変わらない。ただし
-  メンバーごとの読み取り上限（5,000 行）には数えられる。残るのは、fence が約 80 件ある削除で掃除が 5 回とも失敗した
-  ときだけなので、上限に届くほど溜まるとは見込まない。溜まった場合は index row を掃除する移行を足す。
+  メンバーごとの読み取り上限（5,000 行）には数えられる。残るのは、fence が約 80 件ある削除で、掃除が 5 回とも失敗した
+  ときか、掃除の前に同じ ID の Work Item が別のメンバーで作り直されたときだけなので、上限に届くほど溜まるとは見込まない。溜まった場合は index row を掃除する移行を足す。
 - 完了した Work Item の index row が溜まって読み直す件数が増えたら、index row に「完了した時刻」を持たせて Query で除く。
 - `docs/data-migration.md` に `derive` の契約を書き足す。ADR 0013 の「別の row を作る移行は対象外」は、この ADR の
   `derive` の範囲（同じ table に、元の row から決まる row を作るだけ）で緩める。
