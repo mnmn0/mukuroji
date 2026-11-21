@@ -1,8 +1,12 @@
 import {
   createDynamoDbProjectManagerReader,
   createDynamoDbScheduledWorkItemSource,
+  createDynamoDbWeeklyReportRosterReader,
   createNotificationScheduleHandler,
 } from '../../modules/notifications'
+import { DynamoDbTenantAdministrationClient } from '../../modules/tenant-administration'
+import { DynamoDbWeeklyReportStore } from '../../modules/weekly-reports'
+import { createWeeklyReportReader } from './weekly-report-reminders'
 import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
 import { DynamoDbTimeTrackingRepository } from '../../modules/time-tracking'
 import { createTimesheetReader } from './timesheet-reminders'
@@ -63,6 +67,11 @@ export function createProductionNotificationScheduleHandler() {
   if (!analyticsTableName) throw new Error('ANALYTICS_TABLE_NAME is required.')
   const workItemsTableName = environment.WORK_ITEMS_TABLE_NAME?.trim()
   if (!workItemsTableName) throw new Error('WORK_ITEMS_TABLE_NAME is required.')
+  const planningTableName = environment.PLANNING_TABLE_NAME?.trim()
+  if (!planningTableName) throw new Error('PLANNING_TABLE_NAME is required.')
+  const tenantAdministrationTableName = environment.TENANT_ADMINISTRATION_TABLE_NAME?.trim()
+  if (!tenantAdministrationTableName) throw new Error('TENANT_ADMINISTRATION_TABLE_NAME is required.')
+  const tenantAdministration = new DynamoDbTenantAdministrationClient(tenantAdministrationTableName, documentClient)
   const notificationHandler = createNotificationScheduleHandler(
     documentClient,
     createDynamoDbScheduledWorkItemSource({
@@ -84,6 +93,14 @@ export function createProductionNotificationScheduleHandler() {
     }),
     new DynamoDbReminderSettingsStore(documentClient, notificationsTableName),
     createTimesheetReader(new DynamoDbTimeTrackingRepository(analyticsTableName, documentClient)),
+    createWeeklyReportReader({
+      store: new DynamoDbWeeklyReportStore(planningTableName, documentClient),
+      readProfile: async (workspaceId) => await tenantAdministration.getProfile(workspaceId),
+      readTeamRosters: createDynamoDbWeeklyReportRosterReader({
+        documentClient,
+        tableName: projectDirectoryTableName,
+      }),
+    }),
   )
   return createRetentionAwareNotificationScheduleHandler(
     customerClient,

@@ -23,6 +23,7 @@ import {
 } from '../modules/workspace-search/workspace-search'
 import { loadServerConfig } from '../infrastructure/config/server-config'
 import { createConfiguredTimesheetReminderRevalidator } from '../app/composition/timesheet-reminders'
+import { createConfiguredWeeklyReportReminderRevalidator } from '../app/composition/weekly-report-reminders'
 
 const deletedFileCleanup = createDefaultDeletedFileCleanupDependencies()
 const workspaceSearchTableName = readOptionalEnvironment('WORKSPACE_SEARCH_TABLE_NAME')
@@ -40,6 +41,10 @@ const enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'> 
 
 const timesheetReminders = createConfiguredTimesheetReminderRevalidator(
   readOptionalEnvironment('ANALYTICS_TABLE_NAME'),
+)
+
+const weeklyReportReminders = createConfiguredWeeklyReportReminderRevalidator(
+  readOptionalEnvironment('PLANNING_TABLE_NAME'),
 )
 
 const curatedContextSearch = {
@@ -154,6 +159,7 @@ export async function handler(event: DynamoStreamEvent) {
     enterpriseIdentity,
     realtime,
     ...(timesheetReminders ? { timesheetReminders } : {}),
+    ...(weeklyReportReminders ? { weeklyReportReminders } : {}),
   })
 }
 

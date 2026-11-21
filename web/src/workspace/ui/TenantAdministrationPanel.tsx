@@ -3,6 +3,7 @@ import {
   useState,
 } from 'react'
 import {
+  DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   isWorkspaceWeekStartDay,
   type TenantOperation,
@@ -14,6 +15,8 @@ import {
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
 import { WorkspaceWorkingCalendarFields } from './WorkspaceWorkingCalendarFields'
+import { WeeklyReportReminderFields } from './WeeklyReportReminderFields'
+import { hasWeeklyReportReminderConflict } from '../model/weeklyReportReminders'
 import { useTenantAdministrationMutations } from '../mutations/useTenantAdministrationMutations'
 import { useTenantAdministration } from '../queries/useTenantAdministration'
 
@@ -277,6 +280,7 @@ export function TenantAdministrationPanel({
     : 0
   const tenantLifecycleLocked = profile.status !== 'active'
   const calendar = profile.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
+  const weeklyReportReminders = profile.weeklyReportReminders ?? DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS
   const tenantClosed = profile.status === 'closed'
 
   return (
@@ -409,7 +413,18 @@ export function TenantAdministrationPanel({
             onChange={(next) => onChangeProfile({ ...profile, calendar: next })}
             t={t}
           />
-          <button className="workbench-button-primary mt-5" disabled={isSaving || tenantLifecycleLocked} onClick={onSaveProfile} type="button">
+          <WeeklyReportReminderFields
+            disabled={tenantLifecycleLocked}
+            onChange={(next) => onChangeProfile({ ...profile, weeklyReportReminders: next })}
+            settings={weeklyReportReminders}
+            t={t}
+          />
+          <button
+            className="workbench-button-primary mt-5"
+            disabled={isSaving || tenantLifecycleLocked || hasWeeklyReportReminderConflict(weeklyReportReminders)}
+            onClick={onSaveProfile}
+            type="button"
+          >
             {t('workspace.tenantAdministration.saveProfile')}
           </button>
         </section>

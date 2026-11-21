@@ -242,6 +242,11 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'AutomationScheduleJobPolicy/Resource',
     ],
   ],
+  // The API reads the Workspace Search title index (ADR 0037) through the table data grant.
+  [
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchTable2575AD6B.Arn>/index/*]',
+    ['ApiTableDataPolicy/Resource'],
+  ],
   [
     'AwsSolutions-IAM5[Resource::<CustomersTableB554B793.Arn>/index/*]',
     [
@@ -475,6 +480,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<PlanningTable2A0D4CC5.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<FileProofingTable81DA272F.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<CustomersTableB554B793.Arn>/index/*]',
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchTable2575AD6B.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     'AwsSolutions-IAM5[Resource::*]',
     'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',

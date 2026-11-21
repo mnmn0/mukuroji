@@ -19,7 +19,7 @@ import {
   WorkItemCompletionGateError,
   WorkItemConfigurationError,
 } from '../../modules/work-items/work-item-configuration'
-import { authenticationDependencies, workspaceDependencies } from './app-dependencies'
+import { ambientAutomationActionExecutorDependencies, workspaceDependencies } from './app-dependencies'
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import { readRequiredRouteId } from './input-parsing'
 import {
@@ -29,6 +29,10 @@ import {
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
 } from './project-access'
+import {
+  canMemberViewWorkItemScope,
+  createMemberWorkItemVisibilityReads,
+} from './member-work-item-visibility'
 import { canWriteTeamIssue, loadAuthorizedTeamIssue } from './work-item-access'
 import { projectAccessAllows, type TeamPermissionContext } from './workspace-access'
 
@@ -473,8 +477,11 @@ export async function requireValidCommentMentions(
   context: TeamPermissionContext,
   assignedProjectId: string | undefined,
 ) {
-  const activeTeamProjectIds = new Set(context.team.projects.map((project) => project.id))
-
+  const visibilityReads = createMemberWorkItemVisibilityReads(
+    workspaceId,
+    ambientAutomationActionExecutorDependencies,
+    context.directory,
+  )
   await Promise.all(
     memberKeys.map(async (memberKey) => {
       const member = await workspaceDependencies.workspaceAccess.getActiveMember(workspaceId, memberKey)
@@ -487,37 +494,25 @@ export async function requireValidCommentMentions(
         )
       }
 
-      if (assignedProjectId) {
-        const access = await workspaceDependencies.projectDirectory.getProjectAccess(
+      const canView = await canMemberViewWorkItemScope(
+        member,
+        {
           workspaceId,
-          assignedProjectId,
-          memberKey,
-        )
+          teamId: context.team.id,
+          ...(assignedProjectId ? { assignedProjectId } : {}),
+          permissions: ['work-items.read'],
+        },
+        ambientAutomationActionExecutorDependencies,
+        visibilityReads,
+      )
 
-        if (
-          (!access || !projectAccessAllows(access, 'viewer')) &&
-          !(await authenticationDependencies.cognito.isSystemAdmin(memberKey))
-        ) {
-          throw new ProjectDataError(
-            400,
-            'InvalidCommentMention',
-            `Mentioned Workspace member "${memberKey}" cannot view the assigned project.`,
-          )
-        }
-
-        return
-      }
-
-      const canViewOwningTeam = (await workspaceDependencies.projectDirectory.getProjectAccessList(workspaceId, memberKey))
-        .some((access) =>
-          activeTeamProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer'),
-        )
-
-      if (!canViewOwningTeam && !(await authenticationDependencies.cognito.isSystemAdmin(memberKey))) {
+      if (!canView) {
         throw new ProjectDataError(
           400,
           'InvalidCommentMention',
-          `Mentioned Workspace member "${memberKey}" cannot view the owning team.`,
+          assignedProjectId
+            ? `Mentioned Workspace member "${memberKey}" cannot view the assigned project.`
+            : `Mentioned Workspace member "${memberKey}" cannot view the owning team.`,
         )
       }
     }),

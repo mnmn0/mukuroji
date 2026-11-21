@@ -59,6 +59,7 @@ export function buildAutomationWorkers(
     automationTable,
     collaborationTable,
     customersTable,
+    enterpriseIdentityTable,
     planningTable,
     projectDirectoryTable,
     teamIssueEventsTable,
@@ -112,6 +113,7 @@ export function buildAutomationWorkers(
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         CUSTOMERS_TABLE_NAME: customersTable.tableName,
+        ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         COGNITO_CLIENT_ID: cognitoUserPoolClientId,
         COGNITO_USER_POOL_ID: cognitoUserPoolId,
         FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
@@ -172,6 +174,10 @@ export function buildAutomationWorkers(
   automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem'],
     resources: [tenantAdministrationTable.tableArn],
+  }));
+  automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+    resources: [enterpriseIdentityTable.tableArn],
   }));
   if (!automationEventFunction.role) {
     throw new Error('Automation event Lambda execution role was not created.');
@@ -253,6 +259,7 @@ export function defineAutomationScheduleJob(
     automationTable,
     collaborationTable,
     customersTable,
+    enterpriseIdentityTable,
     planningTable,
     projectDirectoryTable,
     teamIssueEventsTable,
@@ -286,6 +293,7 @@ export function defineAutomationScheduleJob(
       AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
       COLLABORATION_TABLE_NAME: collaborationTable.tableName,
       CUSTOMERS_TABLE_NAME: customersTable.tableName,
+      ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
       COGNITO_CLIENT_ID: cognitoUserPoolClientId,
       COGNITO_USER_POOL_ID: cognitoUserPoolId,
       FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
@@ -315,6 +323,10 @@ export function defineAutomationScheduleJob(
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['dynamodb:GetItem'],
         resources: [tenantAdministrationTable.tableArn],
+      }));
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+        resources: [enterpriseIdentityTable.tableArn],
       }));
       role.attachInlinePolicy(new iam.Policy(
         scope,

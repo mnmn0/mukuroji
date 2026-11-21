@@ -12,7 +12,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Request correlation | `/api/*` で client header を信頼せず server が correlation/request ID を生成し、内部 route、response、CORS exposed header へ渡す | 信頼済み service 間で parent correlation を継承する認証済み protocol は未実装 |
 | API log / metric | Secret-safe な JSON completion/error log と CloudWatch EMF `Mukuroji/API` を出力する | Lambda log group は CDK が90日保持で作る（`cdk/README.md` の Lambda log retention）。Dashboard と30日 SLO 集計は environment owner が有効化すること |
 | Health | `/api/health` の liveness と、current-enabled runtime controlを先に確認してからDynamoDBを検証する `/api/ready` を分離し、readiness responseを`no-store`にする | Trusted probe と edge-level throttle を設定し、readiness の `503` を rollout 停止へ接続すること |
-| Trace | CDK が管理する全29個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する。API Lambda は sampled trace ごとに `mukuroji-api-request` subsegment を送り、`correlation_id`、`request_id`、`route_group` を annotation として登録する | API 以外の worker Lambda の annotation、unsampled trace の検索は未実装 |
+| Trace | 既定では X-Ray に trace を記録しない。調査時に stack parameter `LambdaTracingMode=Active` で deploy すると、CDK が管理する全29個の Node.js Lambda で X-Ray active tracing を有効にし、API log に runtime-controlled invocation ID と X-Ray root trace ID を記録する。API Lambda は sampled trace ごとに `mukuroji-api-request` subsegment を送り、`correlation_id`、`request_id`、`route_group` を annotation として登録する | API 以外の worker Lambda の annotation、unsampled trace の検索は未実装 |
 | Alarm | API、queue、DLQ（audit export の `AuditExportDlqAlarm` と `AuditExportQueueAgeAlarm` を含む）、async destination、runtime control、restore drill（任意 module を有効にした場合）の56 metric alarmと1 composite alarmを定義し、同一account/regionの必須primary/secondary SNS topicへ全alarm actionを接続する。Fast-burn component 2件はnotification無効 | SNS subscription、Incident Manager、rosterは環境側の責務。Compositeを含む通知有効な55件のtest evidenceを確認するまで unattended production とみなさないこと |
 | Cost | AWS アカウント全体の月次 Budget（`MonthlyCostBudgetUsd`、既定 $20）が実績 80%・100% と予測 100% で email（`CostBudgetAlertEmail`、空なら初期 owner）を送る。tag を付けられる全 resource に `mukuroji:application=mukuroji` を付ける。構成要素ごとの目安は [`cdk/README.md`](../cdk/README.md#費用の目安と予算-alert) | Mukuroji 専用アカウントに deploy し、cost allocation tag を Billing console で有効にすること。Budgets の通知は最大 1 日遅れるため、急増の自動停止には使えない |
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
@@ -227,7 +227,8 @@ fields @timestamp, event, correlationId, requestId, invocationId, traceId,
 4. Read-only request や integration 前 failure は audit event を作らないため、user/tenant を
    必ず解決できるとは限らない。この場合は「unknown」と記録する。
 
-X-Ray は全 Lambda で active です。API log の `traceId` は sampled trace が保存されている場合の
+X-Ray は既定で `PassThrough`（trace を記録しない）です。費用を抑えるため、調査が必要なときだけ
+stack parameter `LambdaTracingMode=Active` で deploy して有効にします。API log の `traceId` は sampled trace が保存されている場合の
 exact lookup に使い、保存されていない場合は `invocationId` と UTC window から Lambda log を
 起点に調査します。
 
@@ -301,6 +302,9 @@ Provider未呼び出しが確定した失敗はprovider outcomeを持たない�
 `ProviderFailureCount=1`と`ProviderRefusedCount=1`をemitします。Content filterの自由文は保存せず、
 EMFの`refusalReason`はboundedな`content-filter`だけを許可します。Human rejectは別の
 `DecisionRejectedCount`であり、model refusalへ混在させません。
+
+次の表と上の`AiAssistanceObservabilityDlqAlarm`の計10個は、AIを設定したstack（`AiAssistanceConfigured`）にだけ作ります。
+AI未設定のstackにはこれらのalarmがありません。
 
 | Alarm | 条件 | Severity | 解釈 | Content-free evidence |
 | --- | --- | --- | --- | --- |
@@ -581,6 +585,9 @@ deployment 開始から全 runtime 停止までが15秒とは記録しません�
 record として必ず記録します。Current-enabled の allowed 評価はwarm runtime・surface・revision
 ごとに最大60秒間隔のheartbeatとして記録し、定常trafficに比例したlog取り込みを避けます。
 Recordはbounded な `surface`、`outcome`、`mode`、`status`、revision/ageを持ちます。
+Metric の dimension は `Service` と `ControlId` だけです。`surface` は record の field
+として Logs Insights で調べ、metric の dimension にはしません。heartbeat が毎分出るため、
+surface ごとの dimension は warm な surface 1 つにつき custom metric 5 個の固定費になります。
 `ControlId`はruntimeがpollするのと同じ
 AppConfig application IDとconfiguration profile IDから決定的に構成し、alarmも同じdimension
 だけを監視します。これにより別stackや同名stack再作成の直近metricを混在させません。

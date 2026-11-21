@@ -391,7 +391,7 @@ test('waits read-only for a naturally OK actionable alarm before environment cre
       MemorySize: 256,
       Runtime: 'nodejs22.x',
       Timeout: 30,
-      TracingConfig: { Mode: 'Active' },
+      TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
     }));
   }
 

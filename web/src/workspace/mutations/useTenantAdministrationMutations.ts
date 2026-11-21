@@ -89,6 +89,7 @@ export function useTenantAdministrationMutations({
         locale: profile.locale,
         defaultPolicy: profile.defaultPolicy,
         ...(profile.calendar ? { calendar: profile.calendar } : {}),
+        ...(profile.weeklyReportReminders ? { weeklyReportReminders: profile.weeklyReportReminders } : {}),
         expectedRevision: profile.revision,
       }, context),
     )

@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { expect, userEvent, within } from 'storybook/test'
 import type { TeamWorkItemHierarchyNode } from '@mukuroji/contracts'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
+import { createWorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { TaskGanttView } from './TaskGanttView'
@@ -123,6 +124,40 @@ export const PlanAndActual: Story = {
     await expect(canvas.getByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[1].id}`)).toBeInTheDocument()
     // A canceled Work Item keeps its recorded start but is not in progress, so it has no bar.
     await expect(canvas.queryByTestId(`task-gantt-actual-bar-${taskViewStoryTasks[2].id}`)).not.toBeInTheDocument()
+  },
+}
+
+/**
+ * Project baseline under each plan: the wireframe ends two days behind it, the milestone two
+ * days ahead, and the deadline-only item matches it. The unscheduled item has no baseline dates.
+ */
+export const AgainstBaseline: Story = {
+  args: {
+    scheduleBaselineFor: createWorkItemBaselineLookup([{
+      teamId: 'core-team',
+      projectId: 'refero',
+      baseline: {
+        revision: 2,
+        capturedAt: '2026-05-25T00:00:00.000Z',
+        entries: [
+          { workItemId: 'wireframe', startDate: '2026-06-01', endDate: '2026-06-01' },
+          { workItemId: 'brand-guideline', startDate: '2026-06-07', endDate: '2026-06-07' },
+          { workItemId: 'seo-research', endDate: '2026-06-09' },
+          { workItemId: 'competitor-report' },
+        ],
+      },
+    }]),
+    windowStartMonth: '2026-06',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('task-gantt-baseline-bar-wireframe')).toHaveAccessibleName(
+      `${t('tasks.gantt.baselineBar').replace('{start}', '2026-06-01').replace('{end}', '2026-06-01')}, ${
+        t('tasks.gantt.baselineDelay').replace('{delay}', t('tasks.variance.late').replace('{days}', '2'))}`,
+    )
+    await expect(canvas.getByTestId('task-gantt-baseline-delay-brand-guideline')).toHaveTextContent('-2d')
+    await expect(canvas.getByTestId('task-gantt-baseline-delay-seo-research')).toHaveTextContent('±0d')
+    await expect(canvas.queryByTestId('task-gantt-baseline-bar-competitor-report')).not.toBeInTheDocument()
   },
 }
 
