@@ -18,7 +18,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | MCP release | tag `mcp-v*` の push で `mcp.mjs`、ライセンス一覧、checksum を build し、Sigstore 署名の build provenance を付けて GitHub Release に添付する。trust root は main だけで、tag が `origin/main` の祖先でない commit を指すと失敗する。workflow の既定権限は空、job は `contents: write`（Release 作成）、`id-token: write`（署名）、`attestations: write`（provenance 保存）だけを持ち、checkout は credential を残さない。tag と `CODING_AGENT_MCP_VERSION`、`CHANGELOG.md` の section が揃わないと公開しない（[coding agent MCP](coding-agent-mcp.md#releaseの作り方)） | workflow（`.github/workflows/mcp-release.yml`）は maintainer による追加待ち（[付録](coding-agent-mcp.md#付録-release-workflow)）。`mcp-v*` tag の作成を maintainer に限る ruleset と `mcp-release` environment の承認者は環境側で設定すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する。Storybook の主要画面を light/dark で screenshot 比較し、build 後の JS/CSS gzip size を `web/performance-budget.json` と照合する（[web quality gates](web-quality-gates.md)） | Chromium と mock API による回帰 proxy であり、実 screen reader と実ブラウザでの runtime performance（LCP、INP）計測は未実装。screenshot 比較と budget の CI job は maintainer による workflow 追加待ち（[付録](web-quality-gates.md#付録-ci-workflow)） |
-| Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Shared API は revision-bound な Lambda Version と `live` Alias で code/configuration を揃えて切り替える | `read-only` mode、route/effect registry、weighted alias routing、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
+| Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `read-only` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Shared API は revision-bound な Lambda Version と `live` Alias で code/configuration を揃えて切り替える | `read-only` は API の HTTP method と読み取り用 `POST` の一覧で判定し、付随する書き込み（rate limit・監査 event・sign-in 時の membership 照合）は止めない。surface ごとの mode、weighted alias routing、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
 | Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。6表の同一時点PITR restore、同時点exportとのexact aggregate比較、exact S3 version copy、RPO/RTO測定、90日cadence、immutable evidence、承認付きcleanupを隔離workflowで自動化する | Regional replication/failover と AWS Backup plan は未実装。成功したsame-Region drillをregional DR完了扱いにしないこと |
 
 
@@ -464,12 +464,25 @@ code/configurationの揃ったversionへ切り替えます。
 }
 ```
 
-`schemaVersion` は `1`、`mode` は `enabled` または `disabled`、`revision` は1以上の整数です。
+`schemaVersion` は `1`、`mode` は `enabled`、`read-only`、`disabled` のどれか、`revision` は1以上の整数です。
 追加 property は validator が拒否します。Revision はoperator evidenceの監査sequenceであり、
 runtimeのdurable fenceではありません。通常変更ではdeploymentごとに増加させ、同じrevisionの
 異なる内容を再利用しませんが、AppConfigが配布したvalidなrollback documentはrevisionの大小に
-かかわらずauthoritativeです。現行 document は global control であり、surfaceごとの mode、
-maintenance `read-only`、mutation を列挙する route/effect registry は未実装です。
+かかわらずauthoritativeです。現行 document は global control であり、surfaceごとの mode は
+未実装です。
+
+`read-only` は migration や障害対応で閲覧を続けたまま変更を止める maintenance mode です
+（[ADR 0034](adr/0034-read-only-maintenance-mode.md)）。API は `GET` / `HEAD` と
+`server/src/app/middleware/read-only-request-registry.ts` に列挙した読み取り用 `POST`（sign-in、token 更新、
+preview、Analytics query）だけを通し、それ以外を `503`、`Retry-After: 15`、problem `code`
+`maintenance_read_only` で route 処理より前に断ります。通した response と断った response には
+`Mukuroji-Maintenance: read-only` header を付けます。Worker、WebSocket、`/api/ready` は `read-only` を
+`disabled` と同じく扱います。operator が配布した `disabled`（current または bounded-stale）は problem
+`code` `maintenance` と `Mukuroji-Maintenance: stopped` を返し、取得失敗・不正 document の
+`temporarily_unavailable` と区別します。`GET /api/maintenance` は認証なしで `none`、`read-only`、`stopped`、
+`unavailable` のどれかを返し、Web の maintenance 表示と operator script の確認に使います。
+付随する書き込み（sign-in の rate limit、監査 event、sign-in 時の membership 照合）は止めないため、
+書き込みを完全に止める必要がある作業では `disabled` を使います。
 
 Control は API Lambda、WebSocket Lambda と、Audit projection の outer fan-out、Automation
 event/schedule、Connector sync/poll、Enterprise SCIM group/identity maintenance、

@@ -1013,15 +1013,26 @@ AWS_REGION=ap-northeast-1 bun run runtime-control:enable
    誰が（`sts get-caller-identity` の ARN）いつ切り替えたかを version と deployment の description に残す。
 4. stack の canary strategy で deployment を始め、`COMPLETE` まで待つ（rollout 20 分 + bake 10 分で約 30 分）。
    `ROLLED_BACK` になったら失敗として止まる。
-5. `WebUrl` の `/api/ready` が `200` を返すまで最大 3 分確認する。
+5. `WebUrl` の `/api/ready` が `200` を返し、`/api/maintenance` が `{"state":"none"}` を返すまで最大 3 分確認する。
 
-止めるときは `bun run runtime-control:disable` を使います。`/api/ready` が `503` になれば完了です。
+止めるときは `bun run runtime-control:disable` を使います。`/api/ready` が `503`、`/api/maintenance` が
+`stopped` になれば完了です。
 incident commander が即時停止を決めたときだけ、`-- --all-at-once` を付けて `AppConfig.AllAtOnce` で
 配布します（bake の 10 分は待ちます）。省いた理由は change record に残します。stack 名が `Mukuroji`
 でない場合は `MUKUROJI_STACK_NAME` を指定します。local の Floci では `AWS_ENDPOINT_URL=http://localhost:4566`
 を付けて同じように実行できます。change record に残す内容と、deployment 中に確認する
 `runtime-control.evaluated` record は [operational readiness](../docs/operational-readiness.md#dynamic-runtime-control)
-を参照してください。読み取りだけを通す maintenance mode はまだありません。
+を参照してください。
+
+migration など、閲覧は続けて変更だけを止めたいときは `bun run runtime-control:read-only` を使います。
+API は `GET` / `HEAD` と、sign-in・token の更新・preview などの読み取り用 `POST` だけを通し、それ以外の変更を
+`503`（problem の `code` は `maintenance_read_only`）で断ります。worker と WebSocket は `disabled` と同じく
+止まります。`/api/ready` は `503`、`/api/maintenance` は `read-only` になれば完了です。alarm の確認はしません。
+終わったら `bun run runtime-control:enable` で戻します。Web は「メンテナンス中」のバナーを出し、
+`stopped` と `read-only` を障害（`unavailable`）と区別して表示します。sign-in の rate limit や監査 event など
+付随する書き込みは残るので、書き込みを完全に止める必要がある作業は `disable` を使います
+（[ADR 0034](../docs/adr/0034-read-only-maintenance-mode.md)）。local で表示を確かめるときは、API を
+`MUKUROJI_LOCAL_RUNTIME_CONTROL_MODE=read-only`（または `disabled`）で起動します。
 
 ### 3. Bootstrap と API を検証する
 
