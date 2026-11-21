@@ -404,8 +404,8 @@ test('analytics state is retained with a due-delivery index and scoped API acces
 
   const apiAnalyticsPolicy = Object.entries(template.toJSON().Resources)
     .find(([logicalId, resource]) =>
-      logicalId.startsWith('ApiAnalyticsDataPolicy') &&
-      (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+      logicalId.startsWith('ApiAnalyticsTablePolicy') &&
+      (resource as { Type?: string }).Type === 'AWS::IAM::ManagedPolicy'
     )?.[1];
   expect(JSON.stringify(apiAnalyticsPolicy)).toContain(analyticsTableLogicalId);
   // Time entry writes recheck month close rows with a ConditionCheck inside their transaction.
@@ -414,8 +414,8 @@ test('analytics state is retained with a due-delivery index and scoped API acces
 
   const apiTransactionConditionCheckPolicy = Object.entries(template.toJSON().Resources)
     .find(([logicalId, resource]) =>
-      logicalId.startsWith('ApiTransactWritePolicy') &&
-      (resource as { Type?: string }).Type === 'AWS::IAM::Policy'
+      logicalId.startsWith('ApiTransactionConditionPolicy') &&
+      (resource as { Type?: string }).Type === 'AWS::IAM::ManagedPolicy'
     )?.[1];
   const serializedApiTransactionConditionCheckPolicy = JSON.stringify(
     apiTransactionConditionCheckPolicy,
