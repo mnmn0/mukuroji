@@ -930,6 +930,7 @@ test('calls reciprocal relation mutations and preserves their stable conflict re
   configureFakeProjectClients(true)
   const creates: Array<{ input: unknown; teamId: string; workspaceId: string }> = []
   let deletes = 0
+  const deleteNotificationEndpoints: unknown[] = []
   setTestAppDependencies({
     workItemConfigurations: createFakeWorkItemConfigurationClient({
       async createRelation(workspaceId, teamId, input) {
@@ -948,8 +949,9 @@ test('calls reciprocal relation mutations and preserves their stable conflict re
           graphRevision: input.expectedGraphRevision + 1,
         }
       },
-      async deleteRelation() {
+      async deleteRelation(_workspaceId, _teamId, _input, audit) {
         deletes += 1
+        deleteNotificationEndpoints.push(audit?.notificationEndpoints)
         throw new WorkItemConfigurationError(
           409,
           'RelationGraphRevisionConflict',
@@ -1016,6 +1018,19 @@ test('calls reciprocal relation mutations and preserves their stable conflict re
     message: 'Relation graph changed. Reload and try again.',
   })
   expect(deletes).toBe(1)
+  // Both endpoints carry what the blocked side's audit event needs to notify its assignee.
+  expect(deleteNotificationEndpoints).toEqual([new Map([
+    ['onboarding-friction', expect.objectContaining({
+      assigneeMemberKey: expect.any(String),
+      title: expect.any(String),
+      deepLink: '/teams/core-team/issues?issueId=onboarding-friction',
+      assignedProjectId: 'refero',
+    })],
+    ['target-issue', expect.objectContaining({
+      deepLink: '/teams/core-team/issues?issueId=target-issue',
+      assignedProjectId: 'refero',
+    })],
+  ])])
 })
 
 test('replaces a Work Item parent through one atomic store call', async () => {

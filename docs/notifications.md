@@ -16,6 +16,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 - Work Item archive / restore: `archive-change`
 - 上記の変更の作成者: `creator`（責任者と同じ人なら 1 件にまとまる）
 - 上記の変更の item watcher: `watcher`（projection が現在の購読から解決する。Project watcher には送らない。title や説明だけの変更では送らない）
+- blocker の解除（`work-item.blocker-removed`、block されていた側の event）: 責任者に `assignee`、item watcher に `watcher`。責任者がいない Work Item でも watcher には送る。blocker を追加したときと、block していた側の `work-item.blocking-removed` では送らない。relation を消した本人には送らない。Work Item の削除で relation が消えた場合と、blocker が完了しただけの場合は対象外（relation 自体は残る）
 - 定期 due scan: `due` / `due-soon` / `overdue` / `escalation` / `stale`
 - 定期 timesheet scan: `timesheet`（未提出の工数の督促）
 - comment / reply: `mention` / `reply` / `watcher` / `project-watcher`
