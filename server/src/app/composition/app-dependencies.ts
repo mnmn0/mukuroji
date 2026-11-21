@@ -66,6 +66,7 @@ import type {
 import type { WorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
 import type { WorkspaceSearchClient } from '../../modules/workspace-search/workspace-search'
 import type {
+  JapanesePublicHolidayDates,
   TenantAdministrationClient,
   TenantLifecycleEnforcement,
   TenantExportDownloadPort,
@@ -140,6 +141,8 @@ export interface WorkspaceDependencies {
   enterpriseIdentityProviderConnectionTester: EnterpriseIdentityProviderConnectionTester
   /** Provides tenant profile, governance, and lifecycle state. */
   tenantAdministration: TenantAdministrationClient
+  /** Lists the Japanese national holiday dates new Work Items use. */
+  nationalHolidays: JapanesePublicHolidayDates
   /** Provides authorized access to completed tenant export artifacts. */
   tenantExportDownload: TenantExportDownloadPort
   /** Enforces tenant lifecycle state at authenticated route boundaries. */

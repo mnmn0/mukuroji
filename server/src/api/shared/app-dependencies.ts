@@ -57,6 +57,9 @@ export const workspaceDependencies: WorkspaceDependencies = {
   get tenantAdministration() {
     return requireAppDependencies().workspace.tenantAdministration
   },
+  get nationalHolidays() {
+    return requireAppDependencies().workspace.nationalHolidays
+  },
   get tenantExportDownload() {
     return requireAppDependencies().workspace.tenantExportDownload
   },

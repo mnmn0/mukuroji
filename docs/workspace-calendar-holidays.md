@@ -29,20 +29,35 @@ Planning の critical path（Planning entity と Work Item の依存関係）は
 Work Item の稼働日数は policy の休日を除いて数え、日付範囲の始点と終点はすでに休日を避けて置かれているので、
 critical path は休日を数え直さない。
 
-## 祝日データの出典
+## 祝日データの出典と更新
 
-`contracts/src/japanese-public-holidays.ts` の `JAPANESE_PUBLIC_HOLIDAYS_BY_YEAR` に年ごとに持つ。
+祝日は内閣府が公開する「国民の祝日」の CSV（<https://www8.cao.go.jp/chosei/shukujitsu/syukujitsu.csv>、
+出典: 内閣府「国民の祝日」について）を、アプリの更新なしに月に1回取り込む（[ADR 0032](adr/0032-japanese-public-holiday-monthly-sync.md)）。
+
+- scheduled-jobs Lambda の `japanese-public-holiday-sync` job が 6 時間ごとに起動し、今月（日本時間）の一覧が
+  まだ保存されていなければ CSV を取得する。月初の最初の起動で取り込み、失敗したら次の起動でまた試す。
+- CSV は全行を読めた場合だけ使う。2020 年以降を残し、各年に 15〜25 日の休日があり、今年まで載っていることを確かめる。
+  満たさない一覧は保存せず、前回の一覧のまま動く（job は失敗して scheduled-jobs DLQ に残る）。
+- 一覧は tenant administration table の `workspaceId = system#public-holidays`、`recordKey = JAPAN` の row に置く。
+- API は保存済みの一覧を 1 時間 process 内に保持し、新しい Work Item の policy と
+  `GET /api/workspace/calendar-settings` の `nationalHolidayDates` に使う。Web はその日付で policy を作り、Gantt を網掛けする。
+- 一度も取り込んでいないとき、または保存済みの一覧を読めないときは、前に読んだ一覧か同梱の祝日を使う。
+  祝日の取得・読み取りの失敗で Work Item の作成は止まらない。
+- 振替休日と国民の休日は、CSV と同じく名前を `休日` とする。
+
+取り込みを試すときは `JAPANESE_PUBLIC_HOLIDAYS_SOURCE_URL` で CSV の URL を差し替えられる（loopback の HTTP も可）。
+
+### 同梱の祝日（フォールバック）
+
+`contracts/src/japanese-public-holidays.ts` の `JAPANESE_PUBLIC_HOLIDAYS_BY_YEAR` に、取り込み前に使う祝日を年ごとに持つ。
 
 - 祝日・振替休日・国民の休日は「国民の祝日に関する法律」（昭和23年法律第178号）の規定から決まる事実で、
   法令は著作権の対象ではない（著作権法第13条）。
 - 春分の日と秋分の日は、国立天文台が毎年2月に翌年分を公表する暦要項の日付に合わせる。
 - 第三者が配布する祝日データ（ファイルや API）は写していない。そのためデータの利用条件は本リポジトリの
-  Apache-2.0 と衝突しない。
-- 振替休日と国民の休日の名前は法律の呼び方に合わせて `休日` とする。
+  Apache-2.0 と衝突しない。内閣府の CSV はリポジトリに含めず、各環境が実行時に取得する。
 
-## 翌年分の追加手順
-
-毎年2月の暦要項の公表後に、翌年分を足す。
+月1回の取り込みがあるので、同梱の祝日を毎年足す必要はない。足すときは次の手順に従う。
 
 1. 国立天文台の暦要項（翌年）の「国民の祝日」を開き、日付と名前を確認する。表の下に「◯月◯日は休日になる。」と
    書かれた日（振替休日・国民の休日）は名前を `休日` にして入れる。
@@ -50,8 +65,6 @@ critical path は休日を数え直さない。
 3. `bun test contracts/test/japanese-public-holidays.test.ts` を実行する。テストは祝日法の規則と春分・秋分の近似式から
    各年の休日を別に計算して照合する。祝日法が改正されたときや、暦要項の春分・秋分が近似式と違うときはテストが落ちるので、
    法改正や暦要項に合わせてテストの規則も直す。
-4. 古い年は消さない（過去の Gantt の網掛けに使う）。policy の休日が 512 件を超える場合は古い日付から外れる。
 
-保存済みの Work Item の policy には、作成時に同梱されていた年の祝日しか入っていない。翌年分を足しても既存の
-Work Item の policy は変わらない。翌年分を足すのが遅れると、その間に作った翌年にまたがる Work Item は翌年の祝日を
-稼働日として数えるため、2月の公表後は早めに足す。
+保存済みの Work Item の policy には、作成時に使っていた祝日しか入っていない。取り込みで祝日が増えても、既存の
+Work Item の policy は変わらない。

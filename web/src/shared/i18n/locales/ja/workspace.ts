@@ -877,7 +877,7 @@ export const workspaceMessages = {
   'workspace.tenantAdministration.noHolidays': '休日はまだありません。',
   'workspace.tenantAdministration.removeHoliday': '休日 {date} を削除',
   'workspace.tenantAdministration.publicHolidays': '日本の祝日を休日にする',
-  'workspace.tenantAdministration.publicHolidaysHint': '{first}〜{last}年の祝日と振替休日を同梱しています。会社の休日に足す必要はありません。',
+  'workspace.tenantAdministration.publicHolidaysHint': '内閣府が公表する祝日と振替休日を毎月初めに取り込みます。会社の休日に足す必要はありません。',
   'workspace.tenantAdministration.memberRole': 'member',
   'workspace.tenantAdministration.guestRole': 'guest',
   'workspace.tenantAdministration.saveProfile': 'profile を保存',

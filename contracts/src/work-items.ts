@@ -127,18 +127,21 @@ export const DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY: WorkItemScheduleCalenda
  * Creates the calendar policy a new Work Item takes from the Workspace working calendar.
  *
  * The policy uses the Workspace time zone, the Workspace working weekdays, and every Workspace day
- * off: company holidays plus the bundled national holidays when the Workspace uses them.
+ * off: company holidays plus the national holidays when the Workspace uses them.
  *
  * @param settings - Workspace working weekdays, company holidays, and national holiday choice.
+ * @param nationalHolidayDates - National holiday dates synced from the Cabinet Office; the bundled
+ *   national holidays are used when omitted.
  * @returns A new policy that shares no arrays with the settings.
  */
 export function createWorkspaceWorkItemCalendarPolicy(
   settings: Pick<WorkspaceCalendarSettings, 'workingWeekdays' | 'holidays' | 'publicHolidays'>,
+  nationalHolidayDates?: readonly string[],
 ): WorkItemScheduleCalendarPolicy {
   return {
     timeZone: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY.timeZone,
     workingWeekdays: [...settings.workingWeekdays],
-    holidays: listWorkspaceDaysOff(settings),
+    holidays: listWorkspaceDaysOff(settings, nationalHolidayDates),
   }
 }
 

@@ -182,6 +182,40 @@ export function readWorkspaceCalendarSettings(value: unknown): WorkspaceCalendar
 }
 
 /**
+ * Workspace calendar settings as `GET /api/workspace/calendar-settings` returns them, with the
+ * national holiday dates the server uses for new Work Items.
+ */
+export type WorkspaceCalendarSettingsResponse = WorkspaceCalendarSettings & {
+  /**
+   * Japanese national holiday dates the server uses now: the latest list synced from the Cabinet
+   * Office, or the bundled list before the first sync. Older servers leave it out.
+   */
+  nationalHolidayDates?: string[]
+}
+
+/** Most national holiday dates a calendar settings response may carry. */
+export const WORKSPACE_NATIONAL_HOLIDAY_DATES_MAX = 2_000
+
+/**
+ * Reads the national holiday dates of an untrusted calendar settings response.
+ *
+ * @param value - Untrusted response body.
+ * @returns Sorted unique dates, or undefined when the field is missing or invalid.
+ */
+export function readWorkspaceNationalHolidayDates(value: unknown): string[] | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const dates: unknown = Reflect.get(value, 'nationalHolidayDates')
+  if (
+    !Array.isArray(dates) ||
+    dates.length > WORKSPACE_NATIONAL_HOLIDAY_DATES_MAX ||
+    !dates.every(isWorkspaceHolidayDate)
+  ) {
+    return undefined
+  }
+  return [...new Set(dates)].sort()
+}
+
+/**
  * Narrows an untrusted value to a national holiday choice.
  *
  * @param value - Untrusted candidate.
@@ -205,18 +239,21 @@ function readWorkspacePublicHolidayCalendar(value: unknown): WorkspacePublicHoli
 /**
  * Lists every date the Workspace takes off besides its non-working weekdays.
  *
- * Company holidays and, when the Workspace uses them, the bundled national holidays are merged.
+ * Company holidays and, when the Workspace uses them, the national holidays are merged.
  * A Work Item schedule keeps at most {@link WORKSPACE_CALENDAR_MAX_HOLIDAYS} holidays, so when the
  * merged list is longer the oldest dates are left out; they matter least to new schedules.
  *
  * @param settings - Company holidays and national holiday choice of the Workspace.
+ * @param nationalHolidayDates - National holiday dates the server synced from the Cabinet Office;
+ *   the bundled national holidays are used when omitted.
  * @returns Sorted unique local `YYYY-MM-DD` dates.
  */
 export function listWorkspaceDaysOff(
   settings: Pick<WorkspaceCalendarSettings, 'holidays' | 'publicHolidays'>,
+  nationalHolidayDates?: readonly string[],
 ): string[] {
   const nationalHolidays = settings.publicHolidays === 'japan'
-    ? listJapanesePublicHolidays().map((holiday) => holiday.date)
+    ? nationalHolidayDates ?? listJapanesePublicHolidays().map((holiday) => holiday.date)
     : []
   const daysOff = [...new Set([...settings.holidays, ...nationalHolidays])].sort()
   return daysOff.slice(Math.max(0, daysOff.length - WORKSPACE_CALENDAR_MAX_HOLIDAYS))

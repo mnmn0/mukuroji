@@ -9,6 +9,7 @@ import type {
   UpdateTenantGovernanceInput,
   UpdateTenantProfileInput,
   WorkspaceCalendarSettings,
+  WorkspaceCalendarSettingsResponse,
 } from '@mukuroji/contracts'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
@@ -25,6 +26,7 @@ import type {
   TenantAdministrationClient,
   TenantExportDownloadPort,
 } from '../../application/ports/tenant-administration-port'
+import type { JapanesePublicHolidayDates } from '../../application/japanese-public-holiday-sync'
 
 /** Minimal authenticated principal required by tenant administration routes. */
 export type TenantAdministrationPrincipal = {
@@ -68,6 +70,11 @@ export type TenantAdministrationRouterDependencies<
   ): Promise<void>
   /** Provides the tenant administration application port. */
   client: TenantAdministrationClient
+  /**
+   * Lists the Japanese national holiday dates new Work Items use. Without it the calendar
+   * settings response leaves the dates out and clients use their bundled list.
+   */
+  nationalHolidays?: JapanesePublicHolidayDates
   /** Provides authorized access to completed export artifacts. */
   tenantExportDownload: TenantExportDownloadPort
   /** Resolves authoritative owner state for first-time initialization. */
@@ -283,11 +290,14 @@ async function readWorkspaceCalendar<
 >(
   principal: Principal,
   dependencies: TenantAdministrationRouterDependencies<Principal>,
-): Promise<WorkspaceCalendarSettings> {
+): Promise<WorkspaceCalendarSettingsResponse> {
   // Only a missing profile means "not configured"; any other read failure propagates, so a
   // stored week start is never silently replaced by the defaults.
   const profile = await dependencies.client.getProfile(principal.directoryId)
-  return profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
+  const settings = profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
+  // The dates come from the monthly Cabinet Office sync, so clients need no new release for them.
+  const nationalHolidayDates = await dependencies.nationalHolidays?.listDates()
+  return nationalHolidayDates ? { ...settings, nationalHolidayDates } : settings
 }
 
 /**

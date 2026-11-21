@@ -11,7 +11,8 @@ import {
   DynamoDbProjectRaidLogStore,
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
-import { AI_ASSISTANCE_SCHEMA_VERSION } from '@mukuroji/contracts'
+import { AI_ASSISTANCE_SCHEMA_VERSION, listJapanesePublicHolidays } from '@mukuroji/contracts'
+import { createProductionJapanesePublicHolidayDates } from './japanese-public-holidays'
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
 import {
   createCanonicalPublicAgentRunService,
@@ -548,6 +549,7 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
     enterpriseSessionActivity: createEnterpriseSessionActivityClient(),
     enterpriseIdentityProviderConnectionTester: testEnterpriseIdentityProviderConnection,
     tenantAdministration,
+    nationalHolidays: createProductionJapanesePublicHolidayDates(),
     tenantExportDownload: createProductionTenantExportDownloadClient(),
     tenantLifecycleEnforcement: tenantAdministration,
   }
@@ -1653,6 +1655,8 @@ export function createTestAppDependencies(): AppDependencies {
     workspace: {
       ...production.workspace,
       tenantAdministration,
+      // Tests have no synced list, so the bundled national holidays are used.
+      nationalHolidays: { listDates: async () => listJapanesePublicHolidays().map((holiday) => holiday.date) },
       customers: new InMemoryCustomerClient(),
       tenantLifecycleEnforcement: createTestTenantLifecycleEnforcement(),
     },

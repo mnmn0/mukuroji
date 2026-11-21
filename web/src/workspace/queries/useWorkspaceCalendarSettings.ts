@@ -1,5 +1,5 @@
 import useSWR from 'swr'
-import type { WorkspaceCalendarSettings } from '@mukuroji/contracts'
+import type { WorkspaceCalendarSettingsResponse } from '@mukuroji/contracts'
 import { getWorkspaceCalendarSettings } from '../api/tenantAdministration'
 
 /** First element of every Workspace calendar settings cache key. */
@@ -24,8 +24,8 @@ export function isWorkspaceCalendarSettingsKey(key: unknown): boolean {
 
 /** State of the Workspace calendar settings read. */
 export type WorkspaceCalendarSettingsQuery = {
-  /** Settings from the server; undefined until the read succeeds. */
-  settings: WorkspaceCalendarSettings | undefined
+  /** Settings from the server, with its national holiday dates; undefined until the read succeeds. */
+  settings: WorkspaceCalendarSettingsResponse | undefined
   /** Failure of the latest read, if any. */
   error: unknown
   /** Reads the settings again. */

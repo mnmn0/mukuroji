@@ -8,8 +8,10 @@ import { createWorkspaceWorkItemCalendarPolicy } from '../src/work-items'
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   WORKSPACE_CALENDAR_MAX_HOLIDAYS,
+  WORKSPACE_NATIONAL_HOLIDAY_DATES_MAX,
   listWorkspaceDaysOff,
   readWorkspaceCalendarSettings,
+  readWorkspaceNationalHolidayDates,
 } from '../src/workspace-calendar'
 
 /** Milliseconds in one UTC day. */
@@ -143,5 +145,30 @@ describe('Workspace days off', () => {
     expect(policy.workingWeekdays).toContain('saturday')
     expect(policy.holidays).toContain('2026-12-29')
     expect(policy.holidays).toContain('2027-01-01')
+  })
+
+  test('uses the synced national holiday dates instead of the bundled ones when given', () => {
+    const synced = ['2028-01-01', '2028-01-10']
+    expect(listWorkspaceDaysOff({ holidays: ['2027-12-29'], publicHolidays: 'japan' }, synced))
+      .toEqual(['2027-12-29', '2028-01-01', '2028-01-10'])
+    expect(listWorkspaceDaysOff({ holidays: [], publicHolidays: 'none' }, synced)).toEqual([])
+    const policy = createWorkspaceWorkItemCalendarPolicy({
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      holidays: [],
+      publicHolidays: 'japan',
+    }, synced)
+    expect(policy.holidays).toEqual(synced)
+  })
+
+  test('reads the national holiday dates of a calendar settings response strictly', () => {
+    expect(readWorkspaceNationalHolidayDates({ nationalHolidayDates: ['2026-01-12', '2026-01-01', '2026-01-01'] }))
+      .toEqual(['2026-01-01', '2026-01-12'])
+    expect(readWorkspaceNationalHolidayDates({})).toBeUndefined()
+    expect(readWorkspaceNationalHolidayDates(null)).toBeUndefined()
+    expect(readWorkspaceNationalHolidayDates({ nationalHolidayDates: ['2026-02-30'] })).toBeUndefined()
+    expect(readWorkspaceNationalHolidayDates({ nationalHolidayDates: '2026-01-01' })).toBeUndefined()
+    expect(readWorkspaceNationalHolidayDates({
+      nationalHolidayDates: Array.from({ length: WORKSPACE_NATIONAL_HOLIDAY_DATES_MAX + 1 }, () => '2026-01-01'),
+    })).toBeUndefined()
   })
 })

@@ -91,6 +91,17 @@ describe('Workspace calendar settings', () => {
     })
     expect(urls[0]?.endsWith('/workspace/calendar-settings')).toBe(true)
 
+    // The national holiday dates the server synced from the Cabinet Office come with the settings.
+    mockFetch({
+      fiscalYearStartMonth: 4,
+      weekStartDay: 1,
+      nationalHolidayDates: ['2028-01-10', '2028-01-01'],
+    })
+    expect((await getWorkspaceCalendarSettings('token-1')).nationalHolidayDates).toEqual(['2028-01-01', '2028-01-10'])
+    // A malformed list is dropped so the bundled national holidays are used instead.
+    mockFetch({ fiscalYearStartMonth: 4, weekStartDay: 1, nationalHolidayDates: ['2028-02-30'] })
+    expect(await getWorkspaceCalendarSettings('token-1')).not.toHaveProperty('nationalHolidayDates')
+
     mockFetch({ fiscalYearStartMonth: 13, weekStartDay: 1 })
     await expect(getWorkspaceCalendarSettings('token-1')).rejects.toThrow()
 
@@ -185,6 +196,12 @@ describe('Workspace calendar settings', () => {
     expect(withNationalHolidays.holidays).toContain('2026-11-23')
     expect(withNationalHolidays.holidays).toContain('2027-05-03')
     expect(withNationalHolidays.holidays.filter((date) => date === '2027-05-03')).toHaveLength(1)
+    // The synced national holiday dates replace the bundled ones.
+    expect(createWorkspaceTaskScheduleCalendarPolicy({
+      ...snapshot.profile.calendar,
+      publicHolidays: 'japan',
+      nationalHolidayDates: ['2028-01-01'],
+    }).holidays).toEqual(['2027-01-01', '2027-05-03', '2028-01-01'])
     // Before the settings load, new Work Items keep the Monday-to-Friday default.
     expect(createWorkspaceTaskScheduleCalendarPolicy(undefined)).toEqual({
       holidays: [],

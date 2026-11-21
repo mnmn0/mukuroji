@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import {
   WORKSPACE_CALENDAR_WEEKDAYS,
-  japanesePublicHolidayYears,
   type WorkspaceCalendarSettings,
   type WorkspaceCalendarWeekday,
 } from '@mukuroji/contracts'
@@ -54,7 +53,6 @@ export function WorkspaceWorkingCalendarFields({
 }: WorkspaceWorkingCalendarFieldsProps) {
   const [holidayDraft, setHolidayDraft] = useState('')
   const canAddHoliday = !disabled && canAddWorkspaceHoliday(calendar, holidayDraft)
-  const publicHolidayYears = japanesePublicHolidayYears()
 
   /**
    * Turns one weekday on or off, keeping at least one working weekday.
@@ -115,9 +113,7 @@ export function WorkspaceWorkingCalendarFields({
           {t('workspace.tenantAdministration.publicHolidays')}
         </label>
         <p className="text-xs text-[var(--workbench-muted)]">
-          {t('workspace.tenantAdministration.publicHolidaysHint')
-            .replace('{first}', String(publicHolidayYears.first))
-            .replace('{last}', String(publicHolidayYears.last))}
+          {t('workspace.tenantAdministration.publicHolidaysHint')}
         </p>
       </div>
       <div className="grid gap-2">
