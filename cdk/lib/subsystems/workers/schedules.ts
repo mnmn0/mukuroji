@@ -54,7 +54,8 @@ export function defineAnalyticsScheduleJob(input: ScheduleWorkerInput): Schedule
     },
     grant: (grantee) => {
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
-        actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
+        // BatchGetItem reads per-Work-Item history rows for scheduled reports (ADR 0042).
+        actions: ['dynamodb:BatchGetItem', 'dynamodb:GetItem', 'dynamodb:PutItem'],
         resources: [analyticsTable.tableArn],
       }));
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({

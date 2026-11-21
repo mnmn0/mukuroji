@@ -324,6 +324,53 @@ describe('AwsTenantOperationResourceOwner', () => {
           ':tenant0': { S: 'workspace/one' },
         },
       })
+
+      // Project code and Project ID reservations are one encoded sidecar partition each.
+      await owner.execute(createDataJob(23), operation)
+      expect(requests.at(-1)).toMatchObject({
+        TableName: 'project-directory',
+        KeyConditionExpression: '#partitionKey = :tenantValue',
+        ExpressionAttributeValues: {
+          ':tenantValue': { S: 'PROJECT_CODE#workspace%2Fone' },
+        },
+      })
+      await owner.execute(createDataJob(24), operation)
+      expect(requests.at(-1)).toMatchObject({
+        TableName: 'project-directory',
+        KeyConditionExpression: '#partitionKey = :tenantValue',
+        ExpressionAttributeValues: {
+          ':tenantValue': { S: 'PROJECT_ID#workspace%2Fone' },
+        },
+      })
+
+      // Per-member and per-Team sidecars are prefix-matched and must still be owned by the
+      // Workspace, because the raw Webhook prefixes can overlap a Workspace ID containing `#`.
+      await owner.execute(createDataJob(25), operation)
+      expect(requests.at(-1)).toMatchObject({
+        TableName: 'project-directory',
+        FilterExpression: '(begins_with(#tenant0, :tenant0) OR begins_with(#tenant1, :tenant1) OR ' +
+          'begins_with(#tenant2, :tenant2) OR begins_with(#tenant3, :tenant3)) AND ' +
+          '#tenantOwner = :tenantOwner',
+        Limit: 1_000,
+        ExpressionAttributeNames: { '#tenantOwner': 'workspaceId' },
+        ExpressionAttributeValues: {
+          ':tenant0': { S: 'PROJECT_QUICK_ACCESS#workspace%2Fone#' },
+          ':tenant1': { S: 'MEMBER_PREFERENCES#workspace%2Fone#' },
+          ':tenant2': { S: 'WEBHOOK_TEAM_GRANT#workspace/one#' },
+          ':tenant3': { S: 'WEBHOOK_GRANT_CLEANUP#workspace/one#' },
+          ':tenantOwner': { S: 'workspace/one' },
+        },
+      })
+
+      // The Planning revision fence lives outside the Workspace's graph partition.
+      await owner.execute(createDataJob(26), operation)
+      expect(requests.at(-1)).toMatchObject({
+        TableName: 'planning',
+        KeyConditionExpression: '#partitionKey = :tenantValue',
+        ExpressionAttributeValues: {
+          ':tenantValue': { S: 'FENCE#workspace/one' },
+        },
+      })
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -1433,8 +1480,8 @@ describe('AwsTenantOperationResourceOwner', () => {
         operationId: 'operation-1',
         step: 'export',
         cursor: {
-          // 22 tables, 4 file namespaces, and 2 trailing tables precede the completion index.
-          targetIndex: 28,
+          // 22 tables, 4 file namespaces, and 6 trailing tables precede the completion index.
+          targetIndex: 32,
           phase: 'snapshot',
           processedCount: 12,
           snapshotRunId: runId,
@@ -1678,7 +1725,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 21, processedCount: 21 },
+      cursor: { targetIndex: 25, processedCount: 25 },
     }
 
     try {
@@ -1892,7 +1939,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 21, processedCount: 21 },
+      cursor: { targetIndex: 25, processedCount: 25 },
     }
 
     try {
