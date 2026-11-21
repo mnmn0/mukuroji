@@ -61,5 +61,7 @@ Shinji の方針は「なるべく安く」で、常時動く resource は増や
   `TRIM_HORIZON` から読むので、deploy 直後の backlog や rolling deploy 中の旧 API が書いた event も projection に
   届きうる。そこで新しい event には `metadata.projectScopeRecorded=true` を付け、webhook の projection は
   これがない relation event を配信しない（Team だけの権限で配信されるのを防ぐ）。
-- Public API の互換チェックは、`WebhookEventType` への値の追加を一度だけ受け入れる必要がある（扱いは PR で決める）。
+- Public API の互換チェック（`public-api-compatibility`）は `WebhookEventType` への値の追加で落ちる。今回は
+  Shinji の判断（2026-11-21）で、チェックが落ちたまま管理者マージする。次に event type を足すときも同じ扱いに
+  なるので、頻繁になったらチェック側で webhook の event type を追加可能な enum として扱うことを検討する。
 - 更新した文書: `docs/automation.md`、`docs/public-api.md`、`docs/event-audit.md`、`docs/guide/admin.md`。
