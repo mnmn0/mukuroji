@@ -1,17 +1,20 @@
-import type { WorkspaceWeekStartDay } from '@mukuroji/contracts'
+import type { TeamWeeklySummaryResponse, WorkspaceWeekStartDay } from '@mukuroji/contracts'
 import { useMemo } from 'react'
 import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { TimeTrackingApiError } from '../api/timeTrackingRequest'
 import { createWeekPeriod } from '../model/timePeriod'
-import { useTeamWeeklySummary } from '../queries/useWeeklyReports'
 import { TeamWeeklySummary } from './TeamWeeklySummary'
 import { createTimeTrackingFormatters } from './timeTrackingText'
 
 /** Props of the Team weekly summary connected to the API. */
 export type TeamWeeklySummaryContainerProps = {
-  /** Session access token, or undefined while signed out. */
-  accessToken: string | undefined
+  /** Summary read by the page; undefined while loading or after a failure. */
+  summary: TeamWeeklySummaryResponse | undefined
+  /** Read failure; the page also hands it to the session error handling. */
+  error: unknown
+  /** Reads the summary again. */
+  onRetry: () => void
   /** Team summarized. */
   teamId: string
   /** First day of the week as `YYYY-MM-DD`. */
@@ -27,16 +30,19 @@ export type TeamWeeklySummaryContainerProps = {
 }
 
 /**
- * Connects the Team weekly summary to the API.
+ * Lays out the Team weekly summary that the page read, so the page can hand a session failure
+ * of the read to its session error handling.
  *
- * @param props - Team, week, and session.
+ * @param props - Summary, Team, week, and locale.
  * @returns Connected view.
  */
 export function TeamWeeklySummaryContainer({
-  accessToken,
+  error,
   locale,
+  onRetry,
   onMoveWeek,
   projectNames,
+  summary,
   teamId,
   weekStart,
   weekStartDay,
@@ -44,18 +50,17 @@ export function TeamWeeklySummaryContainer({
   const t = useMemo(() => createTranslator(locale), [locale])
   const formatters = useMemo(() => createTimeTrackingFormatters(locale), [locale])
   const week = useMemo(() => createWeekPeriod(weekStart, weekStartDay), [weekStart, weekStartDay])
-  const summary = useTeamWeeklySummary(accessToken, teamId, week.days[0] ?? weekStart)
-  const isTooLarge = summary.error instanceof TimeTrackingApiError && summary.error.status === 413
+  const isTooLarge = error instanceof TimeTrackingApiError && error.status === 413
 
   return (
     <TeamWeeklySummary
       formatters={formatters}
-      hasLoadError={Boolean(summary.error) && !isTooLarge}
+      hasLoadError={Boolean(error) && !isTooLarge}
       isTooLarge={isTooLarge}
       onMoveWeek={onMoveWeek}
-      onRetry={() => { void summary.mutate().catch(() => undefined) }}
+      onRetry={onRetry}
       projectNames={projectNames}
-      summary={summary.data}
+      summary={summary}
       t={t}
       teamId={teamId}
       week={week}

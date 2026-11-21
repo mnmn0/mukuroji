@@ -8,8 +8,8 @@ const {
 } = createApiTestHarness()
 import {
   createDefaultDueDateWorkItemSchedule,
+  parseTeamWeeklySummaryResponse,
   type EnterpriseCustomRole,
-  type TeamWeeklySummaryResponse,
   type TeamWeeklyReportStatusResponse,
   type WeeklyReportHistoryResponse,
   type WeeklyReportResponse,
@@ -430,7 +430,9 @@ test('summarizes the week of each readable Project without Work Items of other P
 
   const response = await request(`/api/teams/core-team/weekly-summary?weekStart=${WEEK}`)
   expect(response.status).toBe(200)
-  const summary = await response.json() as TeamWeeklySummaryResponse
+  // Read through the parser the Web uses, so the server response stays within the shared contract.
+  const summary = parseTeamWeeklySummaryResponse(await response.json())
+  if (!summary) throw new Error('The weekly summary does not match the contract.')
   expect(summary).toMatchObject({ teamId: 'core-team', weekStart: WEEK, weekEnd: '2026-11-22' })
   expect(summary.scopes.map((scope) => scope.projectId)).toEqual(['refero'])
   expect(summary.scopes[0]).toMatchObject({
@@ -440,4 +442,35 @@ test('summarizes the week of each readable Project without Work Items of other P
   })
   expect(JSON.stringify(summary)).not.toContain('Secret title')
   expect((await request('/api/teams/core-team/weekly-summary?weekStart=2099-01-05')).status).toBe(400)
+})
+
+test('summarizes nothing for an Enterprise role that may read the Team but not its Work Items', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:team-only', name: 'Team only',
+    permissions: ['teams.read', 'projects.read'],
+    guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: [{
+      workspaceId, assignmentId: 'team-only',
+      principalKind: 'member', principalId: 'demo@example.com', roleId: customRole.roleId,
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' }, source: 'direct',
+    }],
+    customRoles: [customRole],
+  })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+
+  // An assigned Enterprise role reaches the route (GET /api/teams* needs teams.read) ...
+  const response = await request(`/api/teams/core-team/weekly-summary?weekStart=${WEEK}`)
+  expect(response.status).toBe(200)
+  const summary = parseTeamWeeklySummaryResponse(await response.json())
+  // ... and without work-items.read it lists no Project and counts nothing.
+  expect(summary?.scopes).toEqual([])
+  expect(summary?.totals).toEqual({ completed: 0, delayed: 0, overdue: 0, milestonesReached: 0 })
 })
