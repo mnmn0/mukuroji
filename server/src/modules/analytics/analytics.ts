@@ -47,6 +47,7 @@ import type { AuditFieldChange, AuditValue } from '../audit'
 import {
   ANALYTICS_WORK_ITEM_HISTORY_RECORD_PREFIX,
   createAnalyticsWorkItemHistoryRecordKey,
+  measureAnalyticsWorkItemHistoryRow,
   normalizeAnalyticsFieldPath,
   parseStoredAnalyticsWorkItemHistoryRow,
   type AnalyticsHistoryEvent,
@@ -457,6 +458,14 @@ const ANALYTICS_HISTORY_BATCH_GET_CONCURRENCY = 4
 
 /** Consecutive BatchGetItem calls without progress before failing the read. */
 const ANALYTICS_HISTORY_BATCH_GET_MAX_ATTEMPTS = 5
+
+/**
+ * Serialized bytes of history rows one Analytics read may hold.
+ *
+ * The API Lambda has 512 MiB of memory, and rows are parsed and cloned after they are read, so
+ * the budget stays well below it. Reports past it get the same 413 as the event-count limit.
+ */
+const ANALYTICS_HISTORY_ROW_BYTE_LIMIT = 64 * 1024 * 1024
 
 /** DynamoDB Analytics repository の設定です。 */
 export type DynamoDbAnalyticsRepositoryOptions = {
@@ -3921,6 +3930,7 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
       chunks.push(recordKeys.slice(index, index + ANALYTICS_HISTORY_BATCH_GET_SIZE))
     }
     const rows: AnalyticsWorkItemHistoryRow[] = []
+    const budget = { bytes: 0 }
     let nextChunk = 0
     /** Reads the next unassigned chunk until every chunk has been read. */
     const readChunks = async () => {
@@ -3928,7 +3938,7 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
         const chunk = chunks[nextChunk]
         nextChunk += 1
         if (!chunk) return
-        rows.push(...await this.batchGetWorkItemHistoryRows(normalizedWorkspaceId, chunk))
+        rows.push(...await this.batchGetWorkItemHistoryRows(normalizedWorkspaceId, chunk, budget))
       }
     }
     await Promise.all(Array.from(
@@ -3943,10 +3953,15 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
    *
    * @param workspaceId - Workspace that owns the rows.
    * @param recordKeys - At most 100 history record keys.
+   * @param budget - Serialized bytes of rows kept so far by the whole read, shared by all chunks.
    * @returns The valid rows that exist.
-   * @throws When DynamoDB keeps returning unprocessed keys.
+   * @throws When DynamoDB keeps returning unprocessed keys, or the rows exceed the byte budget.
    */
-  private async batchGetWorkItemHistoryRows(workspaceId: string, recordKeys: readonly string[]) {
+  private async batchGetWorkItemHistoryRows(
+    workspaceId: string,
+    recordKeys: readonly string[],
+    budget: { bytes: number },
+  ) {
     const rows: AnalyticsWorkItemHistoryRow[] = []
     let pending = recordKeys.map((recordKey) => ({ workspaceId, recordKey }))
     // BatchGetItem also returns unprocessed keys when one partition exceeds 1 MB per call, which
@@ -3969,7 +3984,16 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
           !item.recordKey.startsWith(ANALYTICS_WORK_ITEM_HISTORY_RECORD_PREFIX)
         ) continue
         const row = parseStoredAnalyticsWorkItemHistoryRow(item)
-        if (row) rows.push(row)
+        if (!row) continue
+        budget.bytes += measureAnalyticsWorkItemHistoryRow(row)
+        if (budget.bytes > ANALYTICS_HISTORY_ROW_BYTE_LIMIT) {
+          throw new AnalyticsError(
+            413,
+            'AnalyticsHistoryLimitExceeded',
+            'Analytics history for the authorized Work Items exceeds the safe query limit. Narrow the report scope.',
+          )
+        }
+        rows.push(row)
       }
       pending = (response.UnprocessedKeys?.[this.tableName]?.Keys ?? []).flatMap((key) =>
         typeof key.workspaceId === 'string' && typeof key.recordKey === 'string'

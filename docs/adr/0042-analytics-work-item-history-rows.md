@@ -59,7 +59,7 @@ comment・file・context item など Analytics が使わない event も載る�
   4. 今の read barrier（前後 2 回の canonical read の fingerprint 一致と、latest revision の event の到達確認）は
      そのまま使う。history row から来た event も同じ確認を通す。
 - history を読む Work Item の上限は、history row で読める分について、今の「参照可能な Work Item 合計 10,000 件」に揃える。
-  history row から読む entry は 1 query 合計 200,000 件まで（API Lambda の memory に収まる量）とし、超えたら `413`。
+  history row から読む entry は 1 query 合計 200,000 件、読む row は合計 64 MiB まで（API Lambda の memory 512 MiB に収まる量）とし、どちらかを超えたら `413`。
   audit 経路で読む Work Item が 500 件を超えたときも今と同じ `413` を返す。
 - 権限の判定は変えない。history row は、現在の ACL を通った canonical Work Item の分だけ読み、巻き戻した Project が
   現在読めない event は今と同じく engine が除外する。

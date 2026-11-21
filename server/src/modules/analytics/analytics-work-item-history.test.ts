@@ -582,6 +582,46 @@ describe('Analytics work item history rows', () => {
     expect(calls).toBe(12)
   })
 
+  test('rejects reads whose history rows exceed the byte budget', async () => {
+    const padding = 'x'.repeat(300 * 1024)
+    const item = toStoredAnalyticsWorkItemHistoryRow({
+      ...createEmptyAnalyticsWorkItemHistoryRow({ workspaceId, teamId: 'core', workItemId: 'big' }),
+      coveredRevision: 1,
+      entries: [{
+        eventId: 'big-1',
+        eventType: 'work-item.created',
+        action: 'created',
+        occurredAt: '2026-01-01T00:00:00.000Z',
+        changes: [{ field: 'statusCategory', before: null, after: padding }],
+        metadata: { afterRevision: 1 },
+      }],
+    })
+    let calls = 0
+    /** Returns the same large row for every requested key. */
+    const send = async (command: unknown) => {
+      if (!(command instanceof BatchGetCommand)) throw new Error('unexpected command')
+      calls += 1
+      const keys = command.input.RequestItems?.['analytics-table']?.Keys ?? []
+      return {
+        Responses: {
+          'analytics-table': keys.map((key) => {
+            const workItemId = String(key.recordKey).split('#').at(-1) ?? ''
+            return { ...item, recordKey: key.recordKey, workItemId }
+          }),
+        },
+      }
+    }
+    // Same test-double pattern as analytics.test.ts: only `send` is exercised.
+    const client = { send } as unknown as DynamoDBDocumentClient
+    const read = new DynamoDbAnalyticsRepository('analytics-table', client)
+      .getWorkItemHistoryRows(workspaceId, Array.from({ length: 1_000 }, (_, index) => ({
+        teamId: 'core',
+        workItemId: `big-${index}`,
+      })))
+    await expect(read).rejects.toMatchObject({ status: 413, code: 'AnalyticsHistoryLimitExceeded' })
+    expect(calls).toBeLessThan(10)
+  })
+
   test('rejects reads that would restore more history entries than the limit', async () => {
     const item = createWorkItem('large', { revision: 1 })
     const entry = {
@@ -688,6 +728,55 @@ describe('Analytics work item history rows', () => {
     expect(toAnalyticsHistoryEvents(row, '2027-01-01T00:00:00.000Z', 1_700_000_000)).toHaveLength(1)
     expect(toAnalyticsHistoryEvents(row, '2027-01-01T00:00:00.000Z', 1_800_000_000)).toHaveLength(0)
     expect(toAnalyticsHistoryEvents(row, '2025-12-31T00:00:00.000Z', 1_700_000_000)).toHaveLength(0)
+  })
+
+  test('keeps applied retention updates when a later gap rebuilds from a stale index', async () => {
+    const item = createWorkItem('stale-retention')
+    const options = { expiresAt: 2_000_000_000 }
+    const created = createAuditEvent('stale-1', item, '2026-01-01T00:00:00.000Z', [], {
+      ...options,
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+    })
+    const second = createAuditEvent('stale-2', item, '2026-01-02T00:00:00.000Z', [], {
+      ...options,
+      afterRevision: 2,
+    })
+    const third = createAuditEvent('stale-3', item, '2026-01-03T00:00:00.000Z', [], {
+      ...options,
+      afterRevision: 3,
+    })
+    const fourth = createAuditEvent('stale-4', item, '2026-01-04T00:00:00.000Z', [], {
+      ...options,
+      afterRevision: 4,
+    })
+    const store = new MemoryHistoryStore()
+    // The index still returns the expiry from before the retention change.
+    const dependencies = {
+      store,
+      readWorkItemTimeline: createTimeline([created, second, third]).readWorkItemTimeline,
+    }
+    await processAnalyticsWorkItemHistoryProjectionBatch({
+      Records: [streamRecord(created), streamRecord(second)],
+    }, dependencies)
+    await processAnalyticsWorkItemHistoryProjectionBatch({
+      Records: [
+        streamRecord({ ...created, expiresAt: 1_800_000_000 }, 'MODIFY'),
+        streamRecord({ ...second, expiresAt: 1_800_000_000 }, 'MODIFY'),
+      ],
+    }, dependencies)
+    await processAnalyticsWorkItemHistoryProjectionBatch({
+      Records: [streamRecord({ ...fourth, expiresAt: 1_800_000_000 })],
+    }, dependencies)
+    const row = (await store.getRow({ workspaceId, teamId: 'core', workItemId: 'stale-retention' })).row
+    expect(row?.coveredRevision).toBe(4)
+    expect(row?.entries.map((entry) => [entry.eventId, entry.expiresAt])).toEqual([
+      ['stale-1', 1_800_000_000],
+      ['stale-2', 1_800_000_000],
+      ['stale-3', 2_000_000_000],
+      ['stale-4', 1_800_000_000],
+    ])
   })
 
   test('drops expired entries on write and expires the row with its oldest entry', () => {

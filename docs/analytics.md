@@ -63,9 +63,9 @@ metadata、audit の保持期限（`expiresAt`）に絞って持ちます。Row 
 canonical revision）が canonical の `revision` と一致し、`overflow` でない Work Item だけ row を使い、row がない・
 古い・`overflow` の Work Item は下の entity timeline の query で読みます。どちらから読んだ event にも同じ read barrier を
 かけるので、結果は全 Work Item の entity timeline を読んだ場合と同じです。Row から復元する entry は 1 query 合計
-200,000 件まで、保持期限を過ぎた entry は使わず、projection も書き込み時に落とします。Row は最も早い entry の
+200,000 件・row の合計 64 MiB まで（超えたら `413`）、保持期限を過ぎた entry は使わず、projection も書き込み時に落とします。Row は最も早い entry の
 保持期限（`historyExpiresAt`、`AnalyticsTable` の TTL）で消え、次の event で作り直されます。Projection は row がないとき（revision 1 の INSERT を除く）や
-revision が飛んだときに entity timeline から row を作り直し、Work Item の削除で row を消します。更新に失敗した
+revision が飛んだときに entity timeline から row を作り直し（row にある event は stream で受けた保持期限を残し、足りない event だけ timeline から足す）、Work Item の削除で row を消します。更新に失敗した
 row も消します（保持期限の変更は revision を進めないため）。Revision 1 より後から始まる row は、最も古い entry が
 1 時間より前（entity index の遅れではなく保持期間で消えたと言える）のときだけ使います。
 

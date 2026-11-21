@@ -164,6 +164,10 @@ async function buildNextRow(
   if (!timeline.complete) {
     return { ...base, overflow: true, entries: [], rowVersion: base.rowVersion + 1 }
   }
+  // The stored copies came from the stream and may already carry a retention MODIFY that the
+  // eventually consistent index has not caught up with, so the timeline only adds missing events.
+  // The triggering stream entry still replaces its own stored copy below.
+  const storedEventIds = new Set(base.entries.map((stored) => stored.eventId))
   const entries: AnalyticsWorkItemHistoryEntry[] = []
   for (const timelineEvent of timeline.events) {
     const timelineInput = readAnalyticsWorkItemHistoryEvent(timelineEvent)
@@ -173,6 +177,7 @@ async function buildNextRow(
       timelineInput.workItemId !== key.workItemId
     ) continue
     if (timelineInput.deleted) return undefined
+    if (storedEventIds.has(timelineInput.entry.eventId)) continue
     entries.push(timelineInput.entry)
   }
   entries.push(entry)
