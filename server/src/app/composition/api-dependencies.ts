@@ -912,7 +912,7 @@ function createAiAssistancePolicyAudit(
 type ProductionAiAssistanceRuntime = {
   /** Policy, generation, review, and feedback use cases. */
   service: AiAssistanceService
-  /** Workspace provider keys; absent when AI is disabled for the deployment. */
+  /** Workspace provider keys; absent when AI or every external provider is disabled. */
   providerCredentials?: AiProviderCredentialService
   /** Deployment models a Workspace policy may allow. */
   availableModels: readonly AiAssistanceAvailableModel[]
@@ -1051,12 +1051,15 @@ function createProductionAiAssistanceRuntime(
     workspaceAccessTableName,
     enterpriseIdentityTableName,
   )
-  const providerCredentials = createAiProviderCredentialService({
-    store,
-    cipher: createAiProviderCredentialCipher(environment, config.production),
-    enabledProviders: enabledExternalProviders,
-    createAuditEvent: createAiProviderCredentialAuditEvent,
-  })
+  // A Bedrock-only deployment never reads provider keys, so it needs no cipher or KMS key.
+  const providerCredentials = enabledExternalProviders.size === 0
+    ? undefined
+    : createAiProviderCredentialService({
+        store,
+        cipher: createAiProviderCredentialCipher(environment, config.production),
+        enabledProviders: enabledExternalProviders,
+        createAuditEvent: createAiProviderCredentialAuditEvent,
+      })
   const bedrockGateway = configuredDefaultModelId === undefined
     ? undefined
     : createMastraBedrockAiModelGateway({
@@ -1076,15 +1079,15 @@ function createProductionAiAssistanceRuntime(
   const service = createAiAssistanceService({
     gateway: createRoutingAiModelGateway({
       ...(bedrockGateway === undefined ? {} : { bedrock: bedrockGateway }),
-      resolveApiKey: (workspaceId, provider) =>
-        providerCredentials.resolveApiKey(workspaceId, provider),
+      resolveApiKey: async (workspaceId, provider) =>
+        await providerCredentials?.resolveApiKey(workspaceId, provider),
     }),
     resolveModelProvider: (modelId) =>
       findAiAssistanceExternalModel(modelId)?.provider ?? 'bedrock',
     isModelReady: async (workspaceId, modelId) => {
       const externalModel = findAiAssistanceExternalModel(modelId)
-      return externalModel === undefined ||
-        await providerCredentials.isConfigured(workspaceId, externalModel.provider)
+      if (externalModel === undefined) return true
+      return await providerCredentials?.isConfigured(workspaceId, externalModel.provider) ?? false
     },
     store,
     defaultPolicy,
@@ -1102,7 +1105,11 @@ function createProductionAiAssistanceRuntime(
     memberTokenLimitPerMinute,
     worstCaseTokensPerGeneration,
   })
-  return { service, providerCredentials, availableModels }
+  return {
+    service,
+    ...(providerCredentials === undefined ? {} : { providerCredentials }),
+    availableModels,
+  }
 }
 
 /**

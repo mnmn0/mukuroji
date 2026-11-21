@@ -59,7 +59,16 @@ export function createRoutingAiModelGateway(
         }
         return await options.bedrock.generate(input)
       }
-      const apiKey = await options.resolveApiKey(input.workspaceId, externalModel.provider)
+      const nowMilliseconds = options.nowMilliseconds ?? Date.now
+      const resolutionStartedAt = nowMilliseconds()
+      const apiKey = await resolveWithinDeadline(
+        options.resolveApiKey(input.workspaceId, externalModel.provider),
+        input.timeoutMs,
+      )
+      // Key lookup and KMS decryption spend the same generation deadline, so the
+      // provider call only gets what is left and never starts after it expires.
+      const remainingTimeoutMs = input.timeoutMs - (nowMilliseconds() - resolutionStartedAt)
+      if (remainingTimeoutMs <= 0) throw providerDeadlineError()
       if (apiKey === undefined) {
         // The service checks key presence before reserving budget; reaching
         // here means the key was removed mid-request, so fail as a provider error.
@@ -77,7 +86,42 @@ export function createRoutingAiModelGateway(
         ...(options.nowMilliseconds === undefined
           ? {}
           : { nowMilliseconds: options.nowMilliseconds }),
-      }).generate(input)
+      }).generate({ ...input, timeoutMs: remainingTimeoutMs })
     },
   }
+}
+
+/**
+ * Waits for the Workspace key without exceeding the generation deadline.
+ *
+ * @param resolution - Pending key lookup and decryption.
+ * @param timeoutMs - Remaining generation deadline.
+ * @returns The decrypted key, or undefined when none is registered.
+ */
+async function resolveWithinDeadline(
+  resolution: Promise<string | undefined>,
+  timeoutMs: number,
+): Promise<string | undefined> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(providerDeadlineError()), Math.max(0, timeoutMs))
+  })
+  try {
+    return await Promise.race([resolution, deadline])
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
+  }
+}
+
+/**
+ * Creates the same deadline error the shared gateway raises before any provider dispatch.
+ *
+ * @returns Stable provider timeout error.
+ */
+function providerDeadlineError(): AiAssistanceError {
+  return new AiAssistanceError(
+    'timeout',
+    'AiAssistanceProviderTimeout',
+    'The AI provider did not complete within the configured deadline.',
+  )
 }

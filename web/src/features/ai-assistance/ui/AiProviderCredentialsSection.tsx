@@ -1,18 +1,15 @@
 import type {
   AiAssistanceExternalProvider,
   AiAssistanceProviderCredentialStatus,
-  AiAssistanceProviderCredentials,
 } from '@mukuroji/contracts'
 import { useState } from 'react'
-import useSWR from 'swr'
-import { createMutationRequestContext } from '../../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../../shared/i18n/i18n'
-import { AiAssistanceApiError } from '../api/errors'
 import {
-  deleteAiAssistanceProviderCredential,
-  getAiAssistanceProviderCredentials,
-  putAiAssistanceProviderCredential,
-} from '../api/settings'
+  type AiProviderCredentialFeedback,
+  type AiProviderCredentialMutations,
+  useAiProviderCredentialMutations,
+} from '../mutations/useAiProviderCredentialMutations'
+import { useAiProviderCredentials } from '../queries/useAiProviderCredentials'
 
 /** Props for the manager-only external provider key section. */
 export type AiProviderCredentialsSectionProps = {
@@ -27,9 +24,6 @@ export type AiProviderCredentialsSectionProps = {
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
-
-/** Result shown beside one provider row after a save or removal. */
-type ProviderFeedback = 'saved' | 'removed' | 'invalid' | 'conflict' | 'error'
 
 /**
  * Lets a Workspace administrator register, replace, or remove Claude API and OpenAI keys.
@@ -47,15 +41,14 @@ export function AiProviderCredentialsSection({
   t,
   workspaceId,
 }: AiProviderCredentialsSectionProps) {
-  const key = accessToken && cacheScope && workspaceId
-    ? ['ai-assistance-provider-credentials', workspaceId, cacheScope] as const
-    : null
-  const query = useSWR<AiAssistanceProviderCredentials>(key, () => {
-    const request = getAiAssistanceProviderCredentials(accessToken)
-    return guardRequest ? guardRequest(request) : request
-  }, { shouldRetryOnError: false })
+  const query = useAiProviderCredentials(accessToken, guardRequest, cacheScope, workspaceId)
+  const mutations = useAiProviderCredentialMutations({
+    accessToken,
+    mutateCredentials: query.mutate,
+    ...(guardRequest === undefined ? {} : { guardRequest }),
+  })
 
-  if (!key) return null
+  if (!query.enabled) return null
   return (
     <section
       className="workbench-panel mt-4 px-5 py-6 sm:px-7"
@@ -80,12 +73,7 @@ export function AiProviderCredentialsSection({
           {query.data.providers.filter((status) => status.deploymentEnabled).map((status) => (
             <ProviderRow
               key={status.provider}
-              onChange={async (request) => {
-                const result = await (guardRequest ? guardRequest(request) : request)
-                await query.mutate(result, { revalidate: false })
-              }}
-              onConflict={() => void query.mutate()}
-              accessToken={accessToken}
+              mutations={mutations}
               status={status}
               t={t}
             />
@@ -98,14 +86,10 @@ export function AiProviderCredentialsSection({
 
 /** Props for one provider row. */
 type ProviderRowProps = {
-  /** Bearer token for an authorized Workspace administrator. */
-  accessToken: string
+  /** Revision-fenced save and remove actions. */
+  mutations: AiProviderCredentialMutations
   /** Current key-free status. */
   status: AiAssistanceProviderCredentialStatus
-  /** Applies a completed request's response to the cache. */
-  onChange: (request: Promise<AiAssistanceProviderCredentials>) => Promise<void>
-  /** Reloads the latest status after a revision conflict. */
-  onConflict: () => void
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -119,37 +103,23 @@ const PROVIDER_LABELS: Readonly<Record<AiAssistanceExternalProvider, string>> = 
 /**
  * Renders one provider's status, a password-style key input, and save/remove actions.
  *
- * @param props - Status, request callbacks, and translator.
+ * @param props - Status, key actions, and translator.
  * @returns One list item.
  */
-function ProviderRow({ accessToken, onChange, onConflict, status, t }: ProviderRowProps) {
+function ProviderRow({ mutations, status, t }: ProviderRowProps) {
   const [apiKey, setApiKey] = useState('')
   const [pending, setPending] = useState(false)
-  const [feedback, setFeedback] = useState<ProviderFeedback>()
+  const [feedback, setFeedback] = useState<AiProviderCredentialFeedback>()
   const inputId = `ai-provider-key-${status.provider}`
 
-  /** Runs one key request and maps its outcome to row feedback. */
-  async function run(
-    request: () => Promise<AiAssistanceProviderCredentials>,
-    success: ProviderFeedback,
-  ) {
+  /** Runs one key action, clears the typed key, and shows its outcome. */
+  async function run(action: () => Promise<AiProviderCredentialFeedback>) {
     setPending(true)
     setFeedback(undefined)
     try {
-      await onChange(request())
-      setApiKey('')
-      setFeedback(success)
-    } catch (error) {
-      setApiKey('')
-      if (error instanceof AiAssistanceApiError && error.code === 'InvalidAiAssistanceProviderCredential') {
-        setFeedback('invalid')
-      } else if (error instanceof AiAssistanceApiError && error.status === 409) {
-        setFeedback('conflict')
-        onConflict()
-      } else {
-        setFeedback('error')
-      }
+      setFeedback(await action())
     } finally {
+      setApiKey('')
       setPending(false)
     }
   }
@@ -181,16 +151,7 @@ function ProviderRow({ accessToken, onChange, onConflict, status, t }: ProviderR
         <button
           className="workbench-button-primary min-h-[44px] px-4 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={pending || apiKey.length === 0}
-          onClick={() => void run(
-            () => putAiAssistanceProviderCredential(
-              accessToken,
-              status.provider,
-              apiKey,
-              status.revision,
-              createMutationRequestContext(),
-            ),
-            'saved',
-          )}
+          onClick={() => void run(() => mutations.saveKey(status.provider, apiKey, status.revision))}
           type="button"
         >
           {status.configured ? t('ai.settings.providers.replace') : t('ai.settings.providers.save')}
@@ -199,15 +160,7 @@ function ProviderRow({ accessToken, onChange, onConflict, status, t }: ProviderR
           <button
             className="workbench-button-secondary min-h-[44px] px-4 disabled:cursor-not-allowed disabled:opacity-50"
             disabled={pending}
-            onClick={() => void run(
-              () => deleteAiAssistanceProviderCredential(
-                accessToken,
-                status.provider,
-                status.revision,
-                createMutationRequestContext(),
-              ),
-              'removed',
-            )}
+            onClick={() => void run(() => mutations.removeKey(status.provider, status.revision))}
             type="button"
           >
             {t('ai.settings.providers.remove')}

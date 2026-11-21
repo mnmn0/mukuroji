@@ -96,8 +96,11 @@ export const runOpenAiStructuredGeneration: ExternalProviderRunner = async (apiK
     },
     { signal: input.abortSignal },
   )
-  const contentFiltered = response.status === 'incomplete' &&
-    response.incomplete_details?.reason === 'content_filter'
+  // Structured outputs report a refusal as a `refusal` content item, not as filtered output.
+  const refused = response.output.some((item) =>
+    item.type === 'message' && item.content.some((content) => content.type === 'refusal'))
+  const contentFiltered = refused || (response.status === 'incomplete' &&
+    response.incomplete_details?.reason === 'content_filter')
   return {
     object: parseJsonOrUndefined(response.output_text),
     finishReason: contentFiltered ? 'content-filter' : response.status,

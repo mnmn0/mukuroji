@@ -140,6 +140,63 @@ describe('createRoutingAiModelGateway', () => {
     expect(runnerCalled).toBe(false)
   })
 
+  test('gives the provider only the deadline left after key decryption', async () => {
+    let clock = 0
+    const timeouts: number[] = []
+    const gateway = createRoutingAiModelGateway({
+      resolveApiKey: async () => {
+        clock = 30
+        return 'sk-ant-test-key-0000000000'
+      },
+      runners: {
+        anthropic: async (_apiKey, input) => {
+          timeouts.push(input.timeoutMs)
+          return { object: searchOutput, inputTokens: 1, outputTokens: 1 }
+        },
+      },
+      nowMilliseconds: () => clock,
+    })
+
+    await gateway.generate(createInput('claude-sonnet-5-5'))
+
+    expect(timeouts).toEqual([70])
+  })
+
+  test('never calls the provider when key decryption uses up the deadline', async () => {
+    let called = false
+    const gateway = createRoutingAiModelGateway({
+      resolveApiKey: () => new Promise(() => {}),
+      runners: {
+        anthropic: async () => {
+          called = true
+          return { object: searchOutput }
+        },
+      },
+    })
+
+    await expect(gateway.generate({ ...createInput('claude-sonnet-5-5'), timeoutMs: 5 }))
+      .rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
+    expect(called).toBe(false)
+
+    let clock = 0
+    const slowGateway = createRoutingAiModelGateway({
+      resolveApiKey: async () => {
+        clock = 100
+        return 'sk-ant-test-key-0000000000'
+      },
+      runners: {
+        anthropic: async () => {
+          called = true
+          return { object: searchOutput }
+        },
+      },
+      nowMilliseconds: () => clock,
+    })
+    await expect(slowGateway.generate(createInput('claude-sonnet-5-5')))
+      .rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
+    expect(called).toBe(false)
+  })
+
   test('rejects a non-catalog model when Bedrock is not configured', async () => {
     const gateway = createRoutingAiModelGateway({ resolveApiKey: async () => undefined })
 
