@@ -241,3 +241,16 @@ export function isWorkItemMemberIndexRecord(value: unknown): value is WorkItemMe
       createWorkItemMemberIndexPartitionKey(directoryId, memberKey) &&
     Reflect.get(value, 'issueId') === createWorkItemMemberIndexSortKey(teamId, workItemId)
 }
+
+/**
+ * Tells whether a stored Work Items table row is a valid member index row.
+ *
+ * Other modules use this to skip index rows when they scan the table, without depending on the
+ * row's stored shape.
+ *
+ * @param value - Stored row.
+ * @returns Whether the row has the exact member index shape.
+ */
+export function isWorkItemMemberIndexRow(value: unknown): boolean {
+  return isWorkItemMemberIndexRecord(value)
+}

@@ -219,13 +219,9 @@ export {
   type WorkItemNotificationScheduleUpdate,
 } from './work-item-notification-schedule-index'
 export {
-  WORK_ITEM_MEMBER_INDEX_ENTRY_TYPE,
-  WORK_ITEM_MEMBER_INDEX_SCHEMA_VERSION,
-  createWorkItemMemberIndexRecords,
-  isWorkItemMemberIndexRecord,
+  isWorkItemMemberIndexRow,
   listWorkItemMemberIndexKeys,
   normalizeWorkItemMemberIndexKey,
-  type WorkItemMemberIndexRecord,
   type WorkItemMemberIndexReference,
 } from './work-item-member-index'
 export { workItemMemberIndexMigration } from './work-item-member-index-migration'
