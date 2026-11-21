@@ -533,6 +533,25 @@ export function checkDeadLetterQueues(depths: readonly (readonly [string, number
 }
 
 /**
+ * Picks the dead-letter queues out of a stack's resources.
+ *
+ * @param resources - Output of `cloudformation list-stack-resources`.
+ * @returns Logical ID and queue URL of each queue whose logical ID names a DLQ.
+ */
+export function selectDeadLetterQueues(resources: unknown): readonly (readonly [string, string])[] {
+  const queues: (readonly [string, string])[] = []
+  for (const resource of arrayField(resources, 'StackResourceSummaries')) {
+    if (stringField(resource, 'ResourceType') !== 'AWS::SQS::Queue') continue
+    const logicalId = stringField(resource, 'LogicalResourceId')
+    // An SQS queue's physical ID is its URL.
+    const url = stringField(resource, 'PhysicalResourceId')
+    if (logicalId === undefined || url === undefined || !/dlq|deadletter/i.test(logicalId)) continue
+    queues.push([logicalId, url])
+  }
+  return queues
+}
+
+/**
  * Checks alarms that are firing.
  *
  * @param alarms - Output of `cloudwatch describe-alarms --state-value ALARM`.
@@ -826,7 +845,10 @@ async function runAwsChecks(
   }))
 
   checks.push(guarded('dead-letter-queues', async () => {
-    const queues = [...outputs].filter(([key]) => key.endsWith('DlqUrl'))
+    // Not every DLQ has a stack output (for example the audit export DLQ), so list the stack's queues.
+    const queues = selectDeadLetterQueues(await awsJson(dependencies, [
+      'cloudformation', 'list-stack-resources', '--region', region, '--stack-name', environment.stackName,
+    ]))
     const depths = await Promise.all(queues.map(async ([key, url]): Promise<readonly [string, number | undefined]> => {
       try {
         const attributes = await awsJson(dependencies, [

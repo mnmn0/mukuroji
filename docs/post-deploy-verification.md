@@ -62,7 +62,7 @@ MUKUROJI_WEB_URL=https://dxxxx.cloudfront.net bun run deploy:smoke -- --skip-aws
 | `cognito-mfa` / `owner-sign-in` | user pool で TOTP が使え、owner が `CONFIRMED` で TOTP を登録済み | owner のサインインと Settings の MFA 設定を済ませる |
 | `cognito-email` | Cognito の送信方法と SES の sandbox | [SES](#ses-の招待メール635) |
 | `holiday-sync` | 内閣府の祝日一覧が今月（日本時間）分保存されている | 次の実行時刻を表示する。失敗が続くときは [祝日](#内閣府-csv-の祝日取得) |
-| `dead-letter-queues` | stack の全 DLQ が空 | queue の message を見て原因を直す。DLQ は 14 日保持 |
+| `dead-letter-queues` | stack の SQS queue のうち logical ID に `Dlq` か `DeadLetter` を含むもの（output のない DLQ も含む）がすべて空 | queue の message を見て原因を直す。DLQ は 14 日保持 |
 | `alarms` | `Mukuroji-` で始まる alarm に `ALARM` がない | alarm の metric と log を確認 |
 | `alarm-subscriptions` | alarm 用 SNS topic 2 つに確認済みの購読がある | SNS の確認メールで `Confirm subscription` を押す |
 | `authenticated-api` | owner token で `/api/teams/projects`（CloudFront）、`/teams/projects` と `/api/teams/projects`（HTTP API）が同じ応答 | token が新しいか、Workspace の bootstrap を確認 |

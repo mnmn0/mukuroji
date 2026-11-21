@@ -10,6 +10,7 @@ import {
   checkHolidaySync,
   checkRuntimeMode,
   checkWebRoot,
+  selectDeadLetterQueues,
   formatSmokeReport,
   nextHolidaySyncAt,
   parseSmokeArguments,
@@ -177,6 +178,21 @@ describe('AWS checks', () => {
     expect(checkDeadLetterQueues([['ADlqUrl', undefined]]).status).toBe('fail')
   })
 
+  test('finds every DLQ among the stack queues, with or without an output', () => {
+    const resources = {
+      StackResourceSummaries: [
+        { LogicalResourceId: 'AuditExportDlq1A2B', ResourceType: 'AWS::SQS::Queue', PhysicalResourceId: 'https://sqs/audit-dlq' },
+        { LogicalResourceId: 'AuditExportQueue3C4D', ResourceType: 'AWS::SQS::Queue', PhysicalResourceId: 'https://sqs/audit' },
+        { LogicalResourceId: 'ApiFunctionDeadLetterQueue5E', ResourceType: 'AWS::SQS::Queue', PhysicalResourceId: 'https://sqs/api-dlq' },
+        { LogicalResourceId: 'ScheduledJobsDlqAlarm', ResourceType: 'AWS::CloudWatch::Alarm', PhysicalResourceId: 'alarm' },
+      ],
+    }
+    expect(selectDeadLetterQueues(resources)).toEqual([
+      ['AuditExportDlq1A2B', 'https://sqs/audit-dlq'],
+      ['ApiFunctionDeadLetterQueue5E', 'https://sqs/api-dlq'],
+    ])
+  })
+
   test('needs a confirmed subscription on each alarm topic', () => {
     const confirmed = { Subscriptions: [{ SubscriptionArn: 'arn:aws:sns:ap-northeast-1:1:t:1' }] }
     expect(checkAlarmSubscriptions([['p', confirmed], ['s', confirmed]]).status).toBe('pass')
@@ -225,6 +241,13 @@ function fakeDependencies(options: FakeOptions = {}): { readonly dependencies: S
   ].map(([OutputKey, OutputValue]) => ({ OutputKey, OutputValue }))
   const answers: Readonly<Record<string, unknown>> = {
     'cloudformation describe-stacks': { Stacks: [{ StackStatus: 'CREATE_COMPLETE', Outputs: outputs }] },
+    'cloudformation list-stack-resources': {
+      StackResourceSummaries: [
+        { LogicalResourceId: 'ScheduledJobsDlqA1', ResourceType: 'AWS::SQS::Queue', PhysicalResourceId: 'https://sqs/scheduled-dlq' },
+        { LogicalResourceId: 'AuditExportDlqB2', ResourceType: 'AWS::SQS::Queue', PhysicalResourceId: 'https://sqs/audit-dlq' },
+        { LogicalResourceId: 'AuditExportQueueC3', ResourceType: 'AWS::SQS::Queue', PhysicalResourceId: 'https://sqs/audit' },
+      ],
+    },
     's3api head-object': { ContentType: 'text/html' },
     'appconfig list-deployments': { Items: [{ DeploymentNumber: 1, State: 'COMPLETE' }] },
     'cognito-idp get-user-pool-mfa-config': { MfaConfiguration: 'OPTIONAL', SoftwareTokenMfaConfiguration: { Enabled: true } },
@@ -295,7 +318,7 @@ describe('runPostDeploySmoke', () => {
   test('fails on a waiting dead-letter message and a stopped runtime', async () => {
     const fake = fakeDependencies({ scheduledJobsDlqDepth: '2', ready: false })
     const results = await runPostDeploySmoke(parseSmokeArguments([]), environment, fake.dependencies)
-    expect(find(results, 'dead-letter-queues').detail).toContain('ScheduledJobsDlqUrl=2')
+    expect(find(results, 'dead-letter-queues').detail).toContain('ScheduledJobsDlqA1=2')
     expect(find(results, 'runtime-control').status).toBe('fail')
   })
 
