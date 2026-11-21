@@ -978,8 +978,11 @@ test('commits the relation and Collection clean-up with the Public Work Item del
   })
   setTestAppDependencies({
     workItemConfigurations: createFakeWorkItemConfigurationClient({
-      async prepareWorkItemDeletionRelationCleanup(workspaceId, teamId, workItemId) {
+      async prepareWorkItemDeletionRelationCleanup(workspaceId, teamId, workItemId, audit) {
         cleanupRequests.push(`relations:${workspaceId}:${teamId}:${workItemId}`)
+        // The other endpoints record the removed relations under the delete's audit context.
+        expect(audit?.context.workspaceId).toBe(workspaceId)
+        expect(audit?.createDeepLink('peer')).toBe('/teams/core-team/issues?issueId=peer')
         return { childWorkItemIds: [], transactItems: [relationWrite] }
       },
     }),

@@ -1763,6 +1763,12 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           true,
         )
       }
+      const deletionAuditContext = createPublicMutationAuditContext(principal, mutationContext, {
+        method: 'DELETE',
+        path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
+        query: { teamId },
+        body: { expectedRevision },
+      })
       const [externalLinkFence, documentBacklinkFence, relationCleanup, collectionCleanup] = await Promise.all([
         developerPlatformDependencies.transactions.prepareWorkItemDeletionFenceTransactWrite?.({
           workspaceId: principal.directoryId,
@@ -1777,6 +1783,11 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           principal.directoryId,
           teamId,
           workItemId,
+          {
+            context: deletionAuditContext,
+            actorMemberKey: principal.userKey,
+            createDeepLink: (endpointId) => createTeamIssueDeepLink(teamId, endpointId),
+          },
         ),
         workItemDependencies.collections.prepareWorkItemReferenceCleanup?.(
           principal.directoryId,
@@ -1809,12 +1820,6 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           'This Work Item has too many relations and Collection references to delete in one step. Remove some of them first.',
         )
       }
-      const deletionAuditContext = createPublicMutationAuditContext(principal, mutationContext, {
-        method: 'DELETE',
-        path: `/api/v1/work-items/${encodeURIComponent(workItemId)}`,
-        query: { teamId },
-        body: { expectedRevision },
-      })
       const agentRunFences = await createAgentRunDeletionFences(
         principal,
         teamId,
