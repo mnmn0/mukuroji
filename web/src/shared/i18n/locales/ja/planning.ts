@@ -188,6 +188,8 @@ export const planningMessages = {
   'planning.baselineDelays.description': '基準のベースラインより終了が遅れている未完了の Work Item と、ベースラインより予測終了が遅い Milestone です。',
   'planning.baselineDelays.loading': 'ベースラインとの差を読み込み中です…',
   'planning.baselineDelays.none': 'ベースラインより遅れているものはありません。',
+  'planning.baselineDelays.loadError': 'ベースラインを読み込めなかったため、遅れの一覧を出せません。',
+  'planning.baselineDelays.retry': '読み込み直す',
   'planning.baselineDelays.attach': '遅れ {count} 件を根拠に添付',
   'planning.baselineDelays.detach': '添付を外す',
   'planning.baselineDelays.attached': '{count} 件を根拠に添付しています。',

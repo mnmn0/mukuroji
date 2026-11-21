@@ -118,10 +118,13 @@ test('keeps earlier named baselines and switches the active one', async () => {
   const old = await readProjectScheduleBaselineUseCase(dependencies, scope, readable, 'b1')
   expect(old).toMatchObject({ activeBaselineId: 'b2', baseline: { id: 'b1', entries: [{ endDate: '2026-12-10' }] } })
 
-  await expect(activateProjectScheduleBaselineUseCase(dependencies, scope, { baselineId: 'b1', expectedRevision: 1 }, { ...write, capturedAt: '2026-11-21T00:00:00.000Z' }))
+  await expect(activateProjectScheduleBaselineUseCase(dependencies, scope, { baselineId: 'b1', expectedRevision: 1 }, { ...write, capturedAt: '2026-11-21T00:00:00.000Z' }, () => true))
     .rejects.toMatchObject({ status: 409 })
-  const switched = await activateProjectScheduleBaselineUseCase(dependencies, scope, { baselineId: 'b1', expectedRevision: 2 }, { ...write, capturedAt: '2026-11-21T00:00:00.000Z' })
+  const switched = await activateProjectScheduleBaselineUseCase(dependencies, scope, { baselineId: 'b1', expectedRevision: 2 }, { ...write, capturedAt: '2026-11-21T00:00:00.000Z' }, () => true)
   expect(switched).toMatchObject({ activeBaselineId: 'b1', baseline: { id: 'b1', revision: 3, capturedAt: '2026-11-19T00:00:00.000Z' } })
+  // The response hides entries of Work Items the caller can no longer see; the row keeps them.
+  const hidden = await activateProjectScheduleBaselineUseCase(dependencies, scope, { baselineId: 'b1', expectedRevision: 3 }, { ...write, capturedAt: '2026-11-21T00:00:00.000Z' }, () => false)
+  expect(hidden.baseline?.entries).toEqual([])
   // Focus and the views read the active row, which now holds the first plan.
   expect(await store.get('w', 't', 'p')).toMatchObject({ id: 'b1', revision: 3, entries: [{ endDate: '2026-12-10' }] })
   expect(store.auditEvents.map((event) => event.eventType)).toEqual([
@@ -129,7 +132,7 @@ test('keeps earlier named baselines and switches the active one', async () => {
     'project.schedule_baseline_replaced',
     'project.schedule_baseline_activated',
   ])
-  await expect(activateProjectScheduleBaselineUseCase(dependencies, scope, { baselineId: 'missing', expectedRevision: 3 }, { ...write, capturedAt: '2026-11-21T00:00:00.000Z' }))
+  await expect(activateProjectScheduleBaselineUseCase(dependencies, scope, { baselineId: 'missing', expectedRevision: 3 }, { ...write, capturedAt: '2026-11-21T00:00:00.000Z' }, () => true))
     .rejects.toMatchObject({ status: 404 })
   await expect(readProjectScheduleBaselineUseCase(dependencies, scope, readable, 'missing')).rejects.toMatchObject({ status: 404 })
 })
@@ -152,6 +155,7 @@ test('drops the oldest saved baseline beyond the limit', async () => {
     scope,
     { baselineId: 'b2', expectedRevision: PROJECT_SCHEDULE_BASELINE_MAX_SAVED + 1 },
     write,
+    () => true,
   )
   expect(switched.savedBaselines).toEqual(response.savedBaselines)
 })

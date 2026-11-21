@@ -670,6 +670,10 @@ export type PlanningBaselineDelayLabels = {
   loading: string
   /** Shown when nothing is delayed. */
   none: string
+  /** Shown when a baseline could not be read. */
+  loadError: string
+  /** Retry button label. */
+  retry: string
   /** Attach button label for a number of records. */
   attach: (count: number) => string
   /** Button that removes the attached records. */
@@ -1311,6 +1315,14 @@ function PlanningBaselineDelaySection({
       <p className="text-sm font-semibold">{labels.title}</p>
       <p className="text-xs font-medium leading-5">{labels.description}</p>
       {delays.status === 'loading' ? <p className="text-xs" role="status">{labels.loading}</p> : null}
+      {delays.status === 'error' ? (
+        <div className="flex flex-wrap items-center gap-2" role="alert">
+          <p className="text-xs">{labels.loadError}</p>
+          <button className="workbench-button-secondary min-h-[44px] px-3" onClick={delays.retry} type="button">
+            {labels.retry}
+          </button>
+        </div>
+      ) : null}
       {delays.status === 'ready' && candidates.length === 0 ? <p className="text-xs">{labels.none}</p> : null}
       {candidates.length > 0 ? (
         <ul className="grid gap-1 text-xs">

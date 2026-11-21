@@ -36,6 +36,12 @@ export type PlanningBaselineDelaysView =
     status: 'loading'
   }
   | {
+    /** A baseline could not be read, so the list would be incomplete. */
+    status: 'error'
+    /** Reads the baselines again. */
+    retry: () => void
+  }
+  | {
     /** The baselines were read. */
     status: 'ready'
     /** Delayed records, most delayed first. */

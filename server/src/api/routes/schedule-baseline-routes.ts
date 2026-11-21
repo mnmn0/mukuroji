@@ -114,6 +114,7 @@ export function registerScheduleBaselineRoutes(routeApp: Hono): void {
           ),
           auditContext: createApiMutationContext(c, principal, request),
         },
+        (issue) => canAccessTeamProject(principal, context, teamId, issue.assignedProjectId, 'viewer'),
       ))
     } catch (error) {
       return toScheduleBaselineErrorResponse(c, error)

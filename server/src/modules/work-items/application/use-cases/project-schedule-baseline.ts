@@ -217,6 +217,7 @@ export async function activateProjectScheduleBaselineUseCase<
   scope: ProjectScheduleBaselineScope,
   request: { baselineId: string; expectedRevision: number },
   context: ProjectScheduleBaselineWriteContext<TCallerCheck, TAuditContext>,
+  isReadable: (workItem: TWorkItem) => boolean,
 ): Promise<ProjectScheduleBaselineResponse> {
   const previous = await dependencies.store.get(scope.workspaceId, scope.teamId, scope.projectId)
   if (!previous) throw baselineNotFound()
@@ -226,7 +227,12 @@ export async function activateProjectScheduleBaselineUseCase<
   const listed = [...(legacy ? [summarize(legacy)] : []), ...previous.savedBaselines]
   if (!listed.some((item) => item.id === request.baselineId)) throw baselineNotFound()
   if (activeId === request.baselineId) {
-    return { ...responseScope(scope), baseline: withoutList(previous), activeBaselineId: request.baselineId, savedBaselines: listed }
+    return {
+      ...responseScope(scope),
+      baseline: await keepReadableEntries(dependencies, withoutList(previous), isReadable),
+      activeBaselineId: request.baselineId,
+      savedBaselines: listed,
+    }
   }
   const saved = await dependencies.store.getSaved(scope.workspaceId, scope.teamId, scope.projectId, request.baselineId)
   if (!saved) throw baselineNotFound()
@@ -249,7 +255,36 @@ export async function activateProjectScheduleBaselineUseCase<
     callerAuthorization: context.callerAuthorization,
     auditContext: context.auditContext,
   })
-  return { ...responseScope(scope), baseline: stored, activeBaselineId: baseline.id, savedBaselines: kept }
+  return {
+    ...responseScope(scope),
+    // The stored baseline keeps every entry; the response shows only what the caller may see now.
+    baseline: await keepReadableEntries(dependencies, stored, isReadable),
+    activeBaselineId: baseline.id,
+    savedBaselines: kept,
+  }
+}
+
+/**
+ * Keeps only the entries of Work Items the reader may currently see.
+ *
+ * @param dependencies - Work Item reader.
+ * @param baseline - Baseline with every entry.
+ * @param isReadable - Whether the reader may see a Work Item.
+ * @returns A copy of the baseline with the readable entries.
+ */
+async function keepReadableEntries<
+  TCallerCheck,
+  TWorkItem extends ScheduleBaselineWorkItem,
+  TAuditContext,
+>(
+  dependencies: ProjectScheduleBaselineDependencies<TCallerCheck, TWorkItem, TAuditContext>,
+  baseline: ProjectScheduleBaseline,
+  isReadable: (workItem: TWorkItem) => boolean,
+): Promise<ProjectScheduleBaseline> {
+  const readableIds = new Set(
+    (await readBoundedTeamWorkItems(dependencies)).filter(isReadable).map((workItem) => workItem.id),
+  )
+  return { ...baseline, entries: baseline.entries.filter((entry) => readableIds.has(entry.workItemId)) }
 }
 
 /**
@@ -290,12 +325,9 @@ export async function readProjectScheduleBaselineUseCase<
     if (!saved) throw baselineNotFound()
     requested = saved
   }
-  const readableIds = new Set(
-    (await readBoundedTeamWorkItems(dependencies)).filter(isReadable).map((workItem) => workItem.id),
-  )
   return {
     ...responseScope(scope),
-    baseline: { ...requested, entries: requested.entries.filter((entry) => readableIds.has(entry.workItemId)) },
+    baseline: await keepReadableEntries(dependencies, requested, isReadable),
     ...(activeBaselineId === undefined ? {} : { activeBaselineId }),
     savedBaselines,
   }

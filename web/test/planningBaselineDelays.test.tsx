@@ -94,3 +94,20 @@ describe('Planning update baseline delays', () => {
     expect(html).not.toContain('根拠に添付')
   })
 })
+
+describe('Planning update baseline delay failures', () => {
+  test('shows a retry instead of an empty list when a baseline cannot be read', () => {
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        baselineDelays={{ status: 'error', retry: () => undefined }}
+        health="on-track"
+        labels={createPlanningLabels('en')}
+        onPublish={() => undefined}
+        progress={40}
+      />,
+    )
+    expect(html).toContain('The baselines could not be loaded')
+    expect(html).toContain('Load again')
+    expect(html).not.toContain('Nothing is behind the baseline.')
+  })
+})

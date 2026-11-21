@@ -234,6 +234,8 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       description: t('planning.baselineDelays.description'),
       loading: t('planning.baselineDelays.loading'),
       none: t('planning.baselineDelays.none'),
+      loadError: t('planning.baselineDelays.loadError'),
+      retry: t('planning.baselineDelays.retry'),
       attach: (count) => t('planning.baselineDelays.attach').replace('{count}', String(count)),
       detach: t('planning.baselineDelays.detach'),
       attached: (count) => t('planning.baselineDelays.attached').replace('{count}', String(count)),
