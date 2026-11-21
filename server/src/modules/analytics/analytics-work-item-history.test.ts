@@ -1005,10 +1005,25 @@ describe('Analytics work item history rows', () => {
       { Records: [streamRecord(created)] },
       { store, readWorkItemTimeline: createTimeline([]).readWorkItemTimeline, now: () => new Date(now * 1000) },
     )
-    const row = (await store.getRow({ workspaceId, teamId: 'core', workItemId: 'versioned' })).row
-    expect(row?.rowVersion).toBeGreaterThan(now * 1_000_000)
-    expect(row?.rowVersion).toBeLessThanOrEqual(now * 1_000_000 + 1_000)
+    const versionedKey = { workspaceId, teamId: 'core', workItemId: 'versioned' }
+    const staleRead = await store.getRow(versionedKey)
+    const row = staleRead.row
+    expect(row?.rowVersion).toBeGreaterThan(0)
+    expect(row?.rowVersion).toBeLessThan(2 ** 48)
     expect(Number.isSafeInteger(row?.rowVersion)).toBe(true)
+
+    // A writer that read the row before it was deleted and recreated cannot overwrite the new row.
+    await store.deleteRow(versionedKey)
+    await processAnalyticsWorkItemHistoryProjectionBatch(
+      { Records: [streamRecord(created)] },
+      { store, readWorkItemTimeline: createTimeline([]).readWorkItemTimeline, now: () => new Date(now * 1000) },
+    )
+    const recreated = (await store.getRow(versionedKey)).row
+    expect(recreated?.rowVersion).not.toBe(row?.rowVersion)
+    if (!row) throw new Error('row was not written')
+    const staleWrite = { ...row, rowVersion: row.rowVersion + 1, coveredRevision: 99 }
+    expect(await store.putRow(staleWrite, staleRead)).toBe(false)
+    expect((await store.getRow(versionedKey)).row).toEqual(recreated)
   })
 
   test('replaces a malformed row only while it is still the item that was read', async () => {

@@ -21,6 +21,9 @@ import {
 /** Attempts of the read-merge-write cycle before the record is retried by Lambda. */
 const HISTORY_WRITE_MAX_ATTEMPTS = 4
 
+/** Exclusive upper bound of a new row's random starting version (the largest `randomInt` range). */
+const ANALYTICS_HISTORY_ROW_GENERATION_RANGE = 2 ** 48
+
 /** Audit timeline of one Work Item, read to rebuild its history row. */
 export type AnalyticsWorkItemTimeline = {
   /** Audit events of the Work Item entity in occurrence order. */
@@ -156,14 +159,14 @@ async function buildNextRow(
       current.row.overflowExpiresAt <= nowEpochSeconds
     ? undefined
     : current.row
-  // A new row starts its version at the current time in milliseconds times 1,000 plus a random
-  // part, so a row deleted and written again does not repeat a version that a slower writer read
-  // before the delete, even when two workers' clocks show the same millisecond.
+  // A new row starts its version at a random 48-bit value that acts as the row's generation
+  // token, so a row deleted and written again does not repeat a version that a slower writer read
+  // before the delete. Later writes add 1, which stays far below Number.MAX_SAFE_INTEGER.
   const base = currentRow ?? {
     ...createEmptyAnalyticsWorkItemHistoryRow(key),
     rowVersion: current.row?.rowVersion ??
       current.storedRowVersion ??
-      (dependencies.now?.() ?? new Date()).getTime() * 1_000 + randomInt(1_000),
+      randomInt(1, ANALYTICS_HISTORY_ROW_GENERATION_RANGE),
   }
   const startsHistory = inserted && entry.metadata?.afterRevision === 1
   const rebuild = currentRow
