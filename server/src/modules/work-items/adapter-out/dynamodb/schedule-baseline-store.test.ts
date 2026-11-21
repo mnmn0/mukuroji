@@ -1,6 +1,40 @@
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { expect, test } from 'bun:test'
-import { DynamoDbProjectScheduleBaselineStore } from './schedule-baseline-store'
+import { createMutationAuditContext } from '../../../audit'
+import { DynamoDbProjectScheduleBaselineStore, type CaptureProjectScheduleBaselineInput } from './schedule-baseline-store'
+
+/** Audit context of the captures. */
+const auditContext = createMutationAuditContext({
+  workspaceId: 'w',
+  actor: { id: 'manager', kind: 'user', displayName: 'Manager' },
+  idempotencyKey: 'key',
+  request: { method: 'POST', path: '/x', body: {} },
+  source: { kind: 'api' },
+})
+
+/** Caller fence included in every capture. */
+const callerAuthorization = [{ ConditionCheck: { TableName: 'access', Key: { k: 'v' }, ConditionExpression: 'attribute_exists(k)' } }]
+
+/**
+ * Builds a capture input.
+ *
+ * @param overrides - Fields that differ from the first capture of an empty Project.
+ * @returns The input.
+ */
+function captureInput(overrides: Partial<CaptureProjectScheduleBaselineInput> = {}): CaptureProjectScheduleBaselineInput {
+  return {
+    workspaceId: 'w',
+    teamId: 't',
+    projectId: 'p',
+    entries: [],
+    capturedAt: '2026-11-19T00:00:00.000Z',
+    expectedRevision: 0,
+    previous: null,
+    callerAuthorization,
+    auditContext,
+    ...overrides,
+  }
+}
 
 /**
  * Builds a document client whose reads find nothing and whose writes throw the given error.
@@ -26,15 +60,7 @@ function fakeClient(writeError: unknown): DynamoDBDocumentClient {
  */
 async function captureWith(writeError: unknown) {
   const store = new DynamoDbProjectScheduleBaselineStore('planning', fakeClient(writeError))
-  return store.capture({
-    workspaceId: 'w',
-    teamId: 't',
-    projectId: 'p',
-    entries: [],
-    capturedAt: '2026-11-19T00:00:00.000Z',
-    expectedRevision: 0,
-    callerAuthorization: [{ ConditionCheck: { TableName: 'access', Key: { k: 'v' }, ConditionExpression: 'attribute_exists(k)' } }],
-  }).then(() => undefined, (error: unknown) => error)
+  return store.capture(captureInput()).then(() => undefined, (error: unknown) => error)
 }
 
 /**
@@ -87,4 +113,37 @@ test('rejects a stored row whose capture time or dates are not real', async () =
   expect(await readRow(row)).toMatchObject({ revision: 1 })
   expect(await readRow({ ...row, capturedAt: 'broken' })).toMatchObject({ status: 502 })
   expect(await readRow({ ...row, entries: [{ workItemId: 'a', endDate: '2026-02-30' }] })).toMatchObject({ status: 502 })
+})
+
+test('writes the baseline, the caller fence, and the audit event in one transaction', async () => {
+  const sent: { constructor: { name: string }, input: { TransactItems?: unknown[] } }[] = []
+  const client = Object.assign(Object.create(null), {
+    async send(command: { constructor: { name: string }, input: { TransactItems?: unknown[] } }) {
+      sent.push(command)
+      return {}
+    },
+  })
+  const store = new DynamoDbProjectScheduleBaselineStore('planning', client, 'audit')
+  await store.capture(captureInput({ entries: [{ workItemId: 'secret-item', endDate: '2026-12-05' }] }))
+  await store.capture(captureInput({
+    capturedAt: '2026-11-20T00:00:00.000Z',
+    expectedRevision: 1,
+    previous: { revision: 1, capturedAt: '2026-11-19T00:00:00.000Z', entryCount: 1 },
+    entries: [],
+  }))
+  const [first, second] = sent.map((command) => command.input.TransactItems ?? [])
+  expect(first).toHaveLength(3)
+  expect(first?.[2]).toMatchObject({ Put: { TableName: 'audit', Item: { eventType: 'project.schedule_baseline_captured' } } })
+  // The audit event counts the Work Items without naming them or their dates.
+  expect(JSON.stringify(first?.[2])).not.toContain('secret-item')
+  expect(JSON.stringify(first?.[2])).not.toContain('2026-12-05')
+  expect(second?.[2]).toMatchObject({
+    Put: { Item: { eventType: 'project.schedule_baseline_replaced', entity: { type: 'project', id: 'p' } } },
+  })
+  expect(JSON.stringify(second?.[2])).toContain('"entryCount"')
+})
+
+test('counts the audit event when it maps a cancelled transaction', async () => {
+  const store = new DynamoDbProjectScheduleBaselineStore('planning', fakeClient(cancellation(['None', 'None', 'ConditionalCheckFailed'])), 'audit')
+  expect(await store.capture(captureInput()).catch((error: unknown) => error)).toMatchObject({ status: 409 })
 })

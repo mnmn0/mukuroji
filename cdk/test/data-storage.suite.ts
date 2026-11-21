@@ -1036,6 +1036,7 @@ test('workspace search persists documents views and preferences in one retained 
     AttributeDefinitions: [
       { AttributeName: 'workspaceId', AttributeType: 'S' },
       { AttributeName: 'recordKey', AttributeType: 'S' },
+      { AttributeName: 'searchTitleKey', AttributeType: 'S' },
     ],
     BillingMode: 'PAY_PER_REQUEST',
     KeySchema: [
@@ -1063,7 +1064,17 @@ test('workspace search persists documents views and preferences in one retained 
     DeletionPolicy: 'Retain',
     UpdateReplacePolicy: 'Retain',
   }));
-  expect(resource.Properties.GlobalSecondaryIndexes).toBeUndefined();
+  expect(resource.Properties.GlobalSecondaryIndexes).toEqual([{
+    IndexName: 'SearchTitleIndex',
+    KeySchema: [
+      { AttributeName: 'workspaceId', KeyType: 'HASH' },
+      { AttributeName: 'searchTitleKey', KeyType: 'RANGE' },
+    ],
+    Projection: {
+      ProjectionType: 'INCLUDE',
+      NonKeyAttributes: ['entityId', 'title', 'subtitle'],
+    },
+  }]);
 });
 
 test('documents use one retained workspace-partitioned table with expiry support', () => {

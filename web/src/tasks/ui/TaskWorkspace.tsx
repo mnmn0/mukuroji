@@ -79,6 +79,7 @@ import {
 } from './TaskScheduleWindowToolbar'
 import { TaskCalendarView } from './TaskCalendarView'
 import { TaskFileView } from './TaskFileView'
+import type { WorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
 import { TaskGanttView, type TaskGanttOutline } from './TaskGanttView'
 import { createMultiTeamWorkItemOutlineRows } from '../../work-items/model/workItemHierarchy'
 import { TaskPermissionsView } from './TaskPermissionsView'
@@ -278,6 +279,8 @@ export type TaskWorkspaceProps = {
    * not show the outline.
    */
   outline?: TaskGanttOutline
+  /** Finds each Work Item's Project baseline for the Gantt chart's baseline bars. */
+  scheduleBaselineFor?: WorkItemBaselineLookup
   /** Filtered and sorted tasks rendered by the active view. */
   tasks: CanonicalWorkItem[]
   /** Bulk operation snapshots for currently visible tasks. */
@@ -382,6 +385,7 @@ export function TaskWorkspace({
   taskViewToolbar,
   taskViewPresentation,
   outline,
+  scheduleBaselineFor,
   tasks,
   visibleBulkItems,
   currentWorkspaceMemberKey,
@@ -810,6 +814,7 @@ export function TaskWorkspace({
           onUpdateScheduleDependency={onUpdateScheduleDependency}
           outline={outline}
           projectId={projectId}
+          scheduleBaselineFor={scheduleBaselineFor}
           t={t}
           tasks={tasks}
           workingCalendar={workingCalendar}

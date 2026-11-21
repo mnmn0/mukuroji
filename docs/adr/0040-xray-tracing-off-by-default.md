@@ -1,4 +1,4 @@
-# 0035. X-Ray tracing を既定で止め、AI の alarm を AI 設定時だけ作る
+# 0040. X-Ray tracing を既定で止め、AI の alarm を AI 設定時だけ作る
 
 - 状態: 提案
 - 日付: 2026-11-21

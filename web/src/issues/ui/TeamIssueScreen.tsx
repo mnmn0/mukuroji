@@ -108,7 +108,7 @@ import {
   type TeamIssueActionMenuOpenHandler,
   type TeamIssueScreenProps,
 } from './teamIssueScreenShared'
-import { IssueTable } from './TeamIssueTable'
+import { IssueTable, TEAM_ISSUE_BASELINE_DELAY_COLUMN } from './TeamIssueTable'
 import {
   createWorkItemOutlineRows,
   planWorkItemHierarchyMove,
@@ -129,6 +129,7 @@ import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
 import { listTaskGanttRowTasks, type TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
 import { resolveTeamIssueGroupValue } from '../model/teamIssueDisplay'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
+import { useWorkItemScheduleBaselines } from '../../work-items/queries/useWorkItemScheduleBaselines'
 
 /** Message shown when a hierarchy move cannot be made. */
 const outlineMoveBlockMessageKeys = {
@@ -572,6 +573,15 @@ export function TeamIssueScreen({
         onToggleCollapsed: (issue) => toggleOutlineCollapsed(issue.id),
       }
     : undefined, [collapsedOutlineIds, outlineNodes, teamId, toggleOutlineCollapsed, viewMode])
+  // Baselines are read only while the Gantt chart or the table's baseline column shows them.
+  const scheduleBaselineFor = useWorkItemScheduleBaselines(
+    accessToken,
+    visibleIssues,
+    viewMode === 'gantt' || (
+      viewMode === 'table' &&
+      (taskViewPresentation?.columns ?? []).some((column) => column.field === TEAM_ISSUE_BASELINE_DELAY_COLUMN)
+    ),
+  )
   const ganttGroupBy = viewMode === 'gantt' ? taskViewPresentation?.groupBy : undefined
   const ganttGroupDirection = taskViewPresentation?.groupDirection ?? 'asc'
   const ganttGroup = useMemo<TaskGanttGrouping | undefined>(() => ganttGroupBy
@@ -1684,6 +1694,7 @@ export function TeamIssueScreen({
                       locale={locale}
                       onIssueActionMenuOpen={handleTeamIssueActionMenuOpen}
                       onOpenIssue={canOpenIssueAction ? handleOpenIssue : undefined}
+                      scheduleBaselineFor={scheduleBaselineFor}
                       outline={outlineRows
                         ? {
                             rows: outlineRows,
@@ -1714,6 +1725,7 @@ export function TeamIssueScreen({
                       onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
                       outline={ganttOutline}
                       planningSnapshot={planningSnapshot}
+                      scheduleBaselineFor={scheduleBaselineFor}
                       t={t}
                       tasks={visibleIssues}
                       workingCalendar={workingCalendar}
