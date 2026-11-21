@@ -264,7 +264,7 @@ describe('createMastraBedrockAiModelGateway', () => {
     await expect(gateway.generate(createInput())).rejects.toMatchObject({
       category: 'upstream',
       code: 'AiAssistanceModelRefused',
-      message: 'Bedrock Runtime refused generation because its content filter was activated.',
+      message: 'The AI provider refused generation because its content filter was activated.',
       usage: {
         inputTokens: 8,
         outputTokens: 0,
@@ -852,7 +852,7 @@ describe('createMastraBedrockAiModelGateway', () => {
       await expect(gateway.generate(createInput())).rejects.toMatchObject({
         category: 'upstream',
         code: 'AiAssistanceProviderError',
-        message: 'Bedrock Runtime generation failed.',
+        message: 'AI provider generation failed.',
       })
     }
   })
