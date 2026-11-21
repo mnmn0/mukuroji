@@ -60,8 +60,12 @@ fingerprint 一致で変更がないことを確認します）。定期配信�
 合計10,000件、history を読む canonical entity timeline 500件、全timelineを通じた Audit page query
 500回、返却されたAudit event合計10,000件、1 entityあたり100 pageです。
 canonical identity と一致しない event は採用せず、query 数と返却event数の上限は消費します。
+Work Item の entity timeline には context item・comment・file など Work Item に付く record の event も
+載りますが、state の巻き戻しと遷移には target が Work Item 自身の event だけを使います
+（context item の `title` 変更で Work Item の表示名が巻き戻らないようにするため）。
 期間開始以降に更新された Work Item が501件以上ある場合は history read 前に `413` で fail-fast します。
 Web は `413` を受けると、期間を短くするか Team / Project で絞り込むよう表示します。
+Web の新規 ad-hoc query は、上限にかかりにくいよう直近30日と閲覧者が見られる Team を既定の filter にします。
 上限に達した場合は部分集計を成功扱いせず
 `413` で fail-closed に終了します。Partition数と合計Work Item上限は、Team/Project filterで
 読み取るTeam partition数を減らして回避できます。1つのTeam自体が10,000件を超える場合は、
