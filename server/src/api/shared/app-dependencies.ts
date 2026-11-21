@@ -229,6 +229,8 @@ export interface AutomationActionExecutorDependencies {
   projectDirectory: WorkspaceDependencies['projectDirectory']
   /** Provides Workspace membership reads. */
   workspaceAccess: WorkspaceDependencies['workspaceAccess']
+  /** Provides the current Enterprise Identity snapshot for checking other members' access. */
+  enterpriseIdentity: Pick<WorkspaceDependencies['enterpriseIdentity']['read'], 'getSnapshot'>
   /** Provides immutable mutation audit reads. */
   auditEvents: WorkspaceDependencies['auditEvents']
   /** Provides canonical Work Item persistence. */
@@ -261,6 +263,9 @@ export const ambientAutomationActionExecutorDependencies: AutomationActionExecut
   },
   get workspaceAccess() {
     return workspaceDependencies.workspaceAccess
+  },
+  get enterpriseIdentity() {
+    return workspaceDependencies.enterpriseIdentity.read
   },
   get auditEvents() {
     return workspaceDependencies.auditEvents

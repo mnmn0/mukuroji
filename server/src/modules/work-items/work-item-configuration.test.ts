@@ -26,6 +26,7 @@ import {
   resolveWorkItemTypeWorkflow,
   resolveWorkflowStatus,
   validateWorkItemConfiguration,
+  type WorkItemRelationNotificationEndpoint,
 } from './work-item-configuration'
 import { createMutationAuditContext, toAuditEventView } from '../audit'
 
@@ -2085,6 +2086,161 @@ test('records a blocker change on both endpoints in the relation transaction', a
   ])
 })
 
+test('records a reorder among siblings on the moved child with both ranks', async () => {
+  const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
+  store.seedRelation('task', 'phase-a', 'parent')
+  store.seedGraph(5, 2)
+  const client = store.createClient()
+  const reorder = {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    currentParent: { workItemId: 'phase-a', expectedRevision: 1 },
+    nextParent: { workItemId: 'phase-a', expectedRevision: 1 },
+  }
+
+  await client.replaceParent('workspace-1', 'core-team', {
+    ...reorder,
+    expectedGraphRevision: 5,
+    hierarchyRank: 'k',
+  }, [], createRelationAudit('reorder-1'))
+  await client.replaceParent('workspace-1', 'core-team', {
+    ...reorder,
+    expectedGraphRevision: 6,
+    hierarchyRank: 'm',
+  }, [], createRelationAudit('reorder-2'))
+
+  const first = readRelationAuditEvents(store.transactions[0])
+  expect(first).toEqual([{
+    eventId: expect.any(String),
+    eventType: 'work-item.sibling-order-changed',
+    entityId: 'team/core-team/issue/task',
+    changes: [],
+    metadata: {
+      adapter: 'work-item-relation',
+      actorMemberKey: 'member-1',
+      teamId: 'core-team',
+      issueId: 'task',
+      relationType: 'parent',
+      parentWorkItemId: 'phase-a',
+      hierarchyRank: 'k',
+      graphRevision: 6,
+    },
+    publicView: expect.any(String),
+  }])
+  expect(first[0]?.publicView).not.toContain('phase-a')
+  expect(readRelationAuditEvents(store.transactions[1]).map((event) => event.metadata)).toEqual([
+    expect.objectContaining({ previousHierarchyRank: 'k', hierarchyRank: 'm', graphRevision: 7 }),
+  ])
+
+  // A retry that finds the rank already stored writes nothing, so no second event is recorded.
+  await client.replaceParent('workspace-1', 'core-team', {
+    ...reorder,
+    expectedGraphRevision: 6,
+    hierarchyRank: 'm',
+  }, [], createRelationAudit('reorder-2'))
+  expect(store.transactions).toHaveLength(2)
+})
+
+test('records a top-level reorder without a parent', async () => {
+  const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
+  store.seedGraph(2, 0)
+  const client = store.createClient()
+
+  await client.replaceParent('workspace-1', 'core-team', {
+    child: { workItemId: 'task', expectedRevision: 3 },
+    expectedGraphRevision: 2,
+    hierarchyRank: 'k',
+  }, [], createRelationAudit('reorder-top-1'))
+
+  expect(readRelationAuditEvents(store.transactions[0]).map((event) => [event.eventType, event.metadata]))
+    .toEqual([[
+      'work-item.sibling-order-changed',
+      {
+        adapter: 'work-item-relation',
+        actorMemberKey: 'member-1',
+        teamId: 'core-team',
+        issueId: 'task',
+        hierarchyRank: 'k',
+        graphRevision: 3,
+      },
+    ]])
+})
+
+test('stores notification details only on the blocked endpoint when a blocker is removed', async () => {
+  const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
+  const client = store.createClient()
+  await client.createRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'design',
+    targetWorkItemId: 'build',
+    type: 'blocks',
+    expectedGraphRevision: 0,
+    sourceExpectedRevision: 1,
+    targetExpectedRevision: 4,
+  }, [], {
+    ...createRelationAudit('relation-create-2'),
+    notificationEndpoints: createNotificationEndpoints(),
+  })
+  // Adding a blocker notifies nobody.
+  expect(readRelationAuditEvents(store.transactions[0]).map((event) => event.metadata))
+    .toEqual([
+      expect.not.objectContaining({ notificationCandidates: expect.anything() }),
+      expect.not.objectContaining({ notificationCandidates: expect.anything() }),
+    ])
+
+  await client.deleteRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'design',
+    targetWorkItemId: 'build',
+    type: 'blocks',
+    expectedGraphRevision: 1,
+    sourceExpectedRevision: 1,
+    targetExpectedRevision: 4,
+    targetAssignedProjectId: 'project-1',
+  }, {
+    ...createRelationAudit('relation-delete-2'),
+    notificationEndpoints: createNotificationEndpoints(),
+  })
+
+  const removed = readRelationAuditEvents(store.transactions[1])
+  expect(removed.map((event) => [event.eventType, event.metadata])).toEqual([
+    ['work-item.blocking-removed', expect.not.objectContaining({ notificationCandidates: expect.anything() })],
+    ['work-item.blocker-removed', expect.objectContaining({
+      issueId: 'build',
+      projectId: 'project-1',
+      deepLink: '/teams/core-team/issues?issueId=build',
+      notificationTitle: 'Build the release',
+      notificationCandidates: [{ memberKey: 'build-owner', reason: 'assignee' }],
+    })],
+  ])
+  // The blocker stays out of the public view the recipient may see.
+  expect(removed[1]?.publicView).not.toContain('design')
+})
+
+test('stores no assignee candidate when the blocked endpoint has no assignee', async () => {
+  const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
+  store.seedRelation('build', 'design', 'blockedBy')
+  store.seedGraph(1, 2)
+  const client = store.createClient()
+
+  await client.deleteRelation('workspace-1', 'core-team', {
+    sourceWorkItemId: 'build',
+    targetWorkItemId: 'design',
+    type: 'blockedBy',
+    expectedGraphRevision: 1,
+    sourceExpectedRevision: 4,
+    targetExpectedRevision: 1,
+  }, {
+    ...createRelationAudit('relation-delete-3'),
+    notificationEndpoints: new Map([[
+      'build',
+      { assigneeMemberKey: '', title: 'Build the release', deepLink: '/teams/core-team/issues?issueId=build' },
+    ]]),
+  })
+
+  expect(readRelationAuditEvents(store.transactions[0])[0]?.metadata).toMatchObject({
+    notificationTitle: 'Build the release',
+    notificationCandidates: [],
+  })
+})
+
 test('records one parent change on the child and child changes on both parents', async () => {
   const store = createInMemoryRelationStore({ auditTableName: 'audit-table' })
   store.seedRelation('task', 'phase-a', 'parent')
@@ -2777,6 +2933,27 @@ function createRelationAudit(idempotencyKey: string) {
     }),
     actorMemberKey: 'member-1',
   }
+}
+
+/**
+ * Creates the notification details of the `design` blocker and the blocked `build` Work Item.
+ *
+ * @returns Endpoint details keyed by Work Item ID.
+ */
+function createNotificationEndpoints(): ReadonlyMap<string, WorkItemRelationNotificationEndpoint> {
+  return new Map([
+    ['design', {
+      assigneeMemberKey: 'design-owner',
+      title: 'Design the release',
+      deepLink: '/teams/core-team/issues?issueId=design',
+    }],
+    ['build', {
+      assigneeMemberKey: 'build-owner',
+      title: 'Build the release',
+      deepLink: '/teams/core-team/issues?issueId=build',
+      assignedProjectId: 'project-1',
+    }],
+  ])
 }
 
 /**

@@ -67,6 +67,25 @@ export const reportDeliveryNotificationFixture: InboxNotification = {
 }
 
 /**
+ * Storybook と UI test で使う、blocker が解除された Work Item の通知です。
+ * Server が保存する英語の概要を持ち、表示では翻訳した概要に置き換わります。
+ */
+export const blockerClearedNotificationFixture: InboxNotification = {
+  id: 'notification-blocker-cleared-1',
+  eventId: 'event-blocker-removed-1',
+  eventType: 'work-item.blocker-removed',
+  reasons: ['assignee', 'watcher'],
+  actorLabel: '佐藤 花子',
+  title: 'リリース手順を作る',
+  summary: 'A blocker was removed.',
+  teamId: 'core-team',
+  projectId: 'refero',
+  issueId: 'release-steps',
+  occurredAt: '2026-07-12T03:20:00.000Z',
+  state: 'unread',
+}
+
+/**
  * Storybook で NotificationInbox を操作可能にする controller fixture です。
  */
 export const notificationInboxControllerFixture: NotificationInboxController = {
