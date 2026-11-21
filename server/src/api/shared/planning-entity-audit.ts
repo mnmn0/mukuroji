@@ -196,6 +196,8 @@ export function readPlanningEntityAuditScopes(
     ...(teamId === undefined ? {} : { teamId }),
     ...(projectId === undefined ? {} : { projectId }),
   }
+  // Only a move leaves a scope; a created entity's first scope has no `before` and no prior scope.
+  if (event.action !== 'moved') return [current]
   const previous: PlanningEntityAuditScope = { ...current }
   let moved = false
   for (const change of event.changes) {
