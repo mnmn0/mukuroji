@@ -310,7 +310,8 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(workItemPayload).not.toMatch(/"status":\{"S":/);
   expect(workItemPayload).not.toContain('"titleKey"');
   expect(workItemPayload.match(/revision/g)).toHaveLength(10);
-  expect(workItemPayload).not.toContain('"workItemId"');
+  // Only the member index rows name their Work Item in `workItemId`; canonical rows do not.
+  expect(workItemPayload.match(/"workItemId"/g)).toHaveLength(10);
   expect(workItemPayload).not.toContain('migrationSourceKey');
   expect(workItemPayload).not.toMatch(/"source":\{"S":/);
   expect(workItemPayload).not.toMatch(/"migrationSource":\{"S":/);

@@ -75,16 +75,17 @@ Project の付け替えのたびに後続側の counter を直す必要があり
 
 ### 既存 row の backfill
 
-- migration runner に、行を書き換えずに「派生 row」を作る種類（`kind: 'derive'`）を足す。定義は `classify`（`source` /
-  `unrelated` / `unknown`）と `derive(row)`（作る row の一覧、純粋・決定的）を持つ。runner は `source` の row ごとに、
+- migration runner に、行を書き換えずに「派生 row」を作る種類（`kind: 'derive'`）を足す。定義は `classify`（`pending` /
+  `unrelated` / `unknown`）と `derive(row)`（作る row の一覧、純粋・決定的）を持つ。runner は `pending`（派生元）の row ごとに、
   元の row の revision を確かめる ConditionCheck と派生 row の Put を 1 つの TransactWriteItems で書く。revision が
   変わっていたら読み直して作り直す（今の `replaceRow` と同じく 3 回まで）。checkpoint・lease・書き込み budget・
   dry run・Lambda での実行と operator proof は今の runner をそのまま使う。
-- verify は `source` の row ごとに派生 row があることを確かめ、欠けがあれば失敗にする。
-- 最初の定義は `0001-work-item-member-index`（`work-items` table）。Work Item 本体の row を `source`、index row と
+- verify は派生元の row ごとに派生 row があることを確かめ、欠けがあれば失敗にする。
+- 最初の定義は `0001-work-item-member-index`（`work-items` table）。Work Item 本体の row を `pending`、index row と
   key registry の row を `unrelated` にする。
 - Lambda の role に、allowlist の table への `dynamodb:ConditionCheckItem` を足す（Put と同じ table だけ）。
-- 手順: この PR の deploy 後、`bun run data:migrate:aws run 0001-work-item-member-index --apply` → `verify`。
+- 手順: この PR の deploy 後、`bun run data:migrate:aws run --function-name <name> --migration 0001-work-item-member-index --apply` →
+  `verify`（同じ引数）。
   deploy から backfill が終わるまでの間は、index row のない既存の Work Item が「担当・Contributor だから」という理由では
   Focus に出ない（mention・review・blocker では出る）。この時点で本番環境はまだないので、初回 deploy の環境では
   この間は生じない。

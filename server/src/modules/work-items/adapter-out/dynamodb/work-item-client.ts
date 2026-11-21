@@ -1826,6 +1826,8 @@ export class DynamoDbTeamIssuesClient {
           if (attempt >= WORK_ITEM_BATCH_GET_ATTEMPTS) {
             throw new ProjectDataError(503, 'WorkItemBatchReadIncomplete', 'Work Items could not be read.')
           }
+          // Unprocessed keys mean the table is throttling; back off before asking again.
+          if (attempt > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** (attempt - 1))
           const response = await this.documentClient.send(new BatchGetCommand({
             RequestItems: { [this.issueTableName]: { Keys: keys, ConsistentRead: true } },
           }))
@@ -4815,6 +4817,9 @@ const WORK_ITEM_BATCH_GET_SIZE = 100
 
 /** BatchGetItem rounds tried before unprocessed keys fail the read. */
 const WORK_ITEM_BATCH_GET_ATTEMPTS = 5
+
+/** First wait before re-reading unprocessed BatchGet keys; doubles on each retry. */
+const WORK_ITEM_BATCH_GET_RETRY_BASE_MS = 25
 
 /**
  * Creates the error returned when one member has more index rows than a read allows.
