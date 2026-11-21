@@ -16,6 +16,7 @@ import {
 import {
   isCanonicalWorkItemRecord,
   isWorkItemKeyRegistryRecord,
+  isWorkItemMemberIndexRow,
 } from '../../src/modules/work-items'
 
 const MANIFEST_KIND = 'mukuroji-work-items-integrity-manifest'
@@ -25,6 +26,11 @@ const DIGEST_VERSION = 1
 const DIGEST_BYTE_LENGTH = 32
 const MAX_SCAN_PAGES = 100_000
 const MAX_SCAN_ITEMS = 1_000_000
+/**
+ * Member index rows a scan may read on top of MAX_SCAN_ITEMS. Four per Work Item on average (an
+ * owner and three contributors) keeps the in-memory digest list within a few times the old bound.
+ */
+const MAX_SCAN_MEMBER_INDEX_ITEMS = MAX_SCAN_ITEMS * 4
 
 const requiredStringAttributeNames = [
   'assigneeUserId',
@@ -933,6 +939,7 @@ async function scanWorkItemsTable(
   let pageCount = 0
   let invalidCount = 0
   let scannedItemCount = 0
+  let scannedMemberIndexItemCount = 0
 
   do {
     if (pageCount >= MAX_SCAN_PAGES) {
@@ -941,15 +948,22 @@ async function scanWorkItemsTable(
     const page = await reader.scanPage(tableName, cursor)
     pageCount += 1
     for (const item of page.Items ?? []) {
-      if (scannedItemCount >= MAX_SCAN_ITEMS) {
-        throw new WorkItemsIntegrityFailure('INTEGRITY_LIMIT_EXCEEDED')
-      }
-      scannedItemCount += 1
       try {
         const decoded = decodeAttributeMap(item)
-        // Key registry rows share the table and are restored data too, so they are digested.
+        // Index rows have their own budget so they do not crowd out the Work Item rows they mirror.
+        if (isWorkItemMemberIndexRow(decoded)) {
+          if (scannedMemberIndexItemCount >= MAX_SCAN_MEMBER_INDEX_ITEMS) {
+            throw new WorkItemsIntegrityFailure('INTEGRITY_LIMIT_EXCEEDED')
+          }
+          scannedMemberIndexItemCount += 1
+        } else {
+          if (scannedItemCount >= MAX_SCAN_ITEMS) throw new WorkItemsIntegrityFailure('INTEGRITY_LIMIT_EXCEEDED')
+          scannedItemCount += 1
+        }
+        // Key registry and member index rows share the table and are restored data too, so they are digested.
         if (
           !(hasCanonicalRegistryCounterNumber(item) && isWorkItemKeyRegistryRecord(decoded)) &&
+          !isWorkItemMemberIndexRow(decoded) &&
           !(hasCanonicalPhysicalWorkItemShape(item) && isCanonicalWorkItemRecord(decoded))
         ) {
           invalidCount += 1
@@ -968,7 +982,7 @@ async function scanWorkItemsTable(
         digests.push(Buffer.concat([keyDigest, itemDigest]))
         partitionDigests.add(partitionDigest.toString('hex'))
       } catch (error: unknown) {
-        if (error instanceof WorkItemsIntegrityFailure) {
+        if (error instanceof WorkItemsIntegrityFailure && error.code !== 'INTEGRITY_LIMIT_EXCEEDED') {
           invalidCount += 1
           continue
         }

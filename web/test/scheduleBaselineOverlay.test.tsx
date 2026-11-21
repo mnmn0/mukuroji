@@ -80,6 +80,7 @@ describe('schedule baseline overlay', () => {
       assignedProjectId: `p${index}`,
     }))
     expect(collectWorkItemBaselineProjects(many)).toHaveLength(WORK_ITEM_BASELINE_PROJECT_LIMIT)
+    expect(collectWorkItemBaselineProjects(many, Number.POSITIVE_INFINITY)).toHaveLength(WORK_ITEM_BASELINE_PROJECT_LIMIT + 5)
   })
 
   test('finds an entry only in the baseline of the Work Item own Team and Project', () => {

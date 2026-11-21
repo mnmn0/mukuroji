@@ -103,7 +103,7 @@ complete、assign、status、schedule は canonical Work Item API、watch は Co
 
 ## Bounded read
 
-Focus は部分的な queue を正常応答として隠しません。Work Item は server 内部の全件読み取り（`docs/work-items.md` の「Workspace 横断の読み取り」）で読み、最大100 Team、全体10,000 Work Item を上限とし、超過時は Work Item aggregate と同じ `413` で fail closed します。Team partition は cursor で最後まで読むため、partition あたりの件数上限はありません。個人 policy の更新は、Team ごとの policy fence と policy 本体を1つの DynamoDB transaction（最大100 action）に載せるため、従来どおり20 Team を上限とします。blocked 件数（`metrics.blocked`）を Workspace 全体で数えるため Work Item は全件読みますが、承認 summary（Files の approval aggregate）は queue が使う「自分が責任者の未完了 Work Item」の分だけ BatchGet します。その他の source ごとの上限は次のとおりです。
+Focus は部分的な queue を正常応答として隠しません。Team partition は全件読まず、queue と blocked 件数（`metrics.blocked`）に使える Work Item だけを canonical row から強整合の BatchGet（100件ずつ）で読みます（[ADR 0038](adr/0038-focus-member-work-item-index.md)）。読む対象は、自分が責任者か Contributor の Work Item（Work Items table のメンバーごとの index row、`<workspaceId>#member-work-items#<memberKey>` partition、最大5,000件）、mention 通知と reviewer の承認が指す Work Item、閲覧できる Team の relation graph にある `blockedBy` の両端、Planning の Work Item 依存の両端です。読んだ row は全件読み取りと同じ Team・Project の閲覧判定で絞り、archive 済みを除いてから queue と blocked 件数を計算するので、結果は全件読み取りと変わりません。index row は候補でしかなく、責任者・Contributor の判定は canonical row で行います。読む Work Item が10,000件を超える場合と、閲覧できる Team が100を超える場合は Work Item aggregate と同じ `413` で fail closed します。個人 policy の更新は、Team ごとの policy fence と policy 本体を1つの DynamoDB transaction（最大100 action）に載せるため、従来どおり20 Team を上限とします。承認 summary（Files の approval aggregate）は queue が使う「自分が責任者の未完了 Work Item」の分だけ BatchGet します。その他の source ごとの上限は次のとおりです。
 
 - reviewer approval: 100件 × 4 page、全体400件
 - mention notification: state filterごとに50件 × 4 page、過去90日、全体200件、Work Itemごと10件

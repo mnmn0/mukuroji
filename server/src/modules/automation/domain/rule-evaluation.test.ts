@@ -113,4 +113,46 @@ describe('Automation rule domain', () => {
       actions: [{ type: 'comment', body: 'Changed' }],
     })).toThrow('Work Item Type trigger Team ID is required.')
   })
+
+  test('matches relation changes by event type', () => {
+    const blockerRemoved: AutomationEvent = {
+      ...event,
+      eventType: 'work-item.blocker-removed',
+      changes: [],
+      metadata: { teamId: 'team-1', issueId: 'build', relationType: 'blockedBy' },
+    }
+    expect(matchesAutomationTrigger({ type: 'relation' }, blockerRemoved)).toBe(true)
+    expect(matchesAutomationTrigger({
+      type: 'relation',
+      eventTypes: ['work-item.blocker-removed', 'work-item.parent-changed'],
+    }, blockerRemoved)).toBe(true)
+    expect(matchesAutomationTrigger({
+      type: 'relation',
+      eventTypes: ['work-item.blocking-removed'],
+    }, blockerRemoved)).toBe(false)
+    // A Work Item update is not a relation change, even with every relation event type listed.
+    expect(matchesAutomationTrigger({ type: 'relation' }, event)).toBe(false)
+  })
+
+  test('normalizes the relation trigger event types and rejects unknown ones', () => {
+    const rule = (trigger: unknown) => ({
+      name: 'Blocker cleared',
+      enabled: true,
+      trigger,
+      actions: [{ type: 'comment', body: 'Unblocked' }],
+    })
+    expect(validateCreateAutomationRuleInput(rule({ type: 'relation' })).trigger)
+      .toEqual({ type: 'relation' })
+    expect(validateCreateAutomationRuleInput(rule({
+      type: 'relation',
+      eventTypes: ['work-item.blocker-removed', 'work-item.parent-changed', 'work-item.blocker-removed'],
+    })).trigger).toEqual({
+      type: 'relation',
+      eventTypes: ['work-item.parent-changed', 'work-item.blocker-removed'],
+    })
+    for (const eventTypes of [[], ['work-item.updated'], 'work-item.blocker-removed']) {
+      expect(() => validateCreateAutomationRuleInput(rule({ type: 'relation', eventTypes })))
+        .toThrow('Automation relation trigger event types must list 1 to 10 relation event types.')
+    }
+  })
 })

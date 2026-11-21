@@ -54,6 +54,7 @@ import {
   resolvePlanningCycleRolloverTargets,
 } from '../model/selectors'
 import { createPlanningUpdateTargetKey } from '../model/targetKey'
+import type { PlanningTargetBaselineDelays } from '../model/baselineDelayEvidence'
 import type { CrossProjectTimelineDirectoryTeam } from '../model/crossProjectTimeline'
 import {
   CrossProjectTimelineChart,
@@ -438,6 +439,11 @@ export type PlanningScreenProps = {
   onOpenProject?: (project: WorkItemAffectedProject) => void
   /** Dependency summary から影響 Milestone を開く callback です。 */
   onOpenMilestone?: (milestoneId: string) => void
+  /**
+   * Records behind the schedule baseline in the selected update target, which the composer can
+   * attach as evidence. They are shown only while their target is the one shown.
+   */
+  updateBaselineDelays?: PlanningTargetBaselineDelays
 }
 
 /** Authentication and locale used to derive a selected target's AI source. */
@@ -517,6 +523,7 @@ export function PlanningScreen({
   renderCycleBurndown,
   snapshot,
   updateCollaboration,
+  updateBaselineDelays,
   updateHistoryErrorMessage,
   updateTargetDetails = [],
 }: PlanningScreenProps) {
@@ -584,6 +591,11 @@ export function PlanningScreen({
   const canPublishSelectedUpdate = resolvedSelectedUpdateTarget
     ? canPublishUpdate?.(resolvedSelectedUpdateTarget) ?? true
     : false
+  const selectedBaselineDelays = updateBaselineDelays && resolvedSelectedUpdateTarget &&
+    onPublishUpdate && canPublishSelectedUpdate &&
+    planningUpdateTargetsAreEqual(updateBaselineDelays.target, resolvedSelectedUpdateTarget)
+    ? updateBaselineDelays.delays
+    : undefined
   const selectedAiAssistance: PlanningStatusUpdateAiAssistance | undefined =
     aiAssistance && snapshot && resolvedSelectedUpdateTarget && onPublishUpdate && canPublishSelectedUpdate
       ? {
@@ -845,6 +857,7 @@ export function PlanningScreen({
             {selectedUpdateSummary && selectedUpdateView && resolvedSelectedUpdateTarget ? (
               <PlanningUpdateDetailPane
                 aiAssistance={selectedAiAssistance}
+                baselineDelays={selectedBaselineDelays}
                 evidenceCandidates={selectedUpdateEvidenceCandidates}
                 key={createPlanningUpdateTargetKey(resolvedSelectedUpdateTarget)}
                 labels={labels}

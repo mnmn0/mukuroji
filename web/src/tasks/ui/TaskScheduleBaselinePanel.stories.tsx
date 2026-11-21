@@ -107,3 +107,38 @@ export const Failed: Story = {
     await expect(args.onCapture).not.toHaveBeenCalled()
   },
 }
+
+/** A manager views an older named baseline and can make it the active one or save a new one. */
+export const SavedBaselines: Story = {
+  args: {
+    canCapture: true,
+    onActivate: fn(),
+    onSelectBaseline: fn(),
+    activeBaselineId: 'b2',
+    viewedBaselineId: 'b1',
+    savedBaselines: [
+      { id: 'b2', name: '再計画', capturedAt: '2026-11-20T00:00:00.000Z', entryCount: 12 },
+      { id: 'b1', name: '計画承認', capturedAt: '2026-11-19T00:00:00.000Z', entryCount: 10 },
+    ],
+    state: {
+      status: 'ready',
+      baseline: {
+        revision: 2,
+        id: 'b1',
+        name: '計画承認',
+        capturedAt: '2026-11-19T00:00:00.000Z',
+        entries: [{ workItemId: slippedTask.id, startDate: '2026-12-01', endDate: '2026-12-10', plannedEffortMinutes: 480 }],
+      },
+    },
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('task-detail-baseline-picker')).toHaveValue('b1')
+    await expect(canvas.getByText(t('tasks.detail.baselineViewingInactive'))).toBeInTheDocument()
+    await userEvent.click(canvas.getByRole('button', { name: t('tasks.detail.baselineActivate') }))
+    await expect(args.onActivate).toHaveBeenCalled()
+    await userEvent.type(canvas.getByLabelText(t('tasks.detail.baselineName')), ' 第2版 ')
+    await userEvent.click(canvas.getByRole('button', { name: t('tasks.detail.baselineCapture') }))
+    await expect(args.onCapture).toHaveBeenCalledWith('第2版')
+  },
+}

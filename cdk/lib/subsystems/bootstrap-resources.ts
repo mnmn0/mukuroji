@@ -6,6 +6,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import {
+  createCanonicalWorkItemMemberIndexTransactItems,
   createCanonicalWorkItemTransactItems,
   createDemoProjectOwnerAccessTransactItems,
   createIdempotentAwsCustomResourceProps,
@@ -254,10 +255,16 @@ export function buildBootstrapResources(
     service: 'DynamoDB',
     action: 'transactWriteItems',
     parameters: {
-      TransactItems: createCanonicalWorkItemTransactItems(
-        workItemsTable.tableName,
-        workspaceDirectoryId.valueAsString,
-      ),
+      TransactItems: [
+        ...createCanonicalWorkItemTransactItems(
+          workItemsTable.tableName,
+          workspaceDirectoryId.valueAsString,
+        ),
+        ...createCanonicalWorkItemMemberIndexTransactItems(
+          workItemsTable.tableName,
+          workspaceDirectoryId.valueAsString,
+        ),
+      ],
     },
     physicalResourceId: customResources.PhysicalResourceId.of('canonical-work-items-seed'),
   };

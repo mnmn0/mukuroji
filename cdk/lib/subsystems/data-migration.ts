@@ -96,7 +96,7 @@ export function buildDataMigration(
   }));
   if (input.targets.length > 0) {
     role.addToPrincipalPolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:Scan', 'dynamodb:GetItem', 'dynamodb:PutItem'],
+      actions: ['dynamodb:Scan', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:ConditionCheckItem'],
       resources: input.targets.map((target) => target.table.tableArn),
     }));
   }

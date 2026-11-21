@@ -193,11 +193,12 @@ export { deriveWorkItemKeyPrefix } from './domain/work-item-key'
 export {
   DynamoDbProjectScheduleBaselineStore,
   InMemoryProjectScheduleBaselineStore,
-  type CaptureProjectScheduleBaselineInput,
   type ProjectScheduleBaselineStore,
   type ScheduleBaselineCallerAuthorizationCheck,
+  type WriteProjectScheduleBaselineInput,
 } from './adapter-out/dynamodb/schedule-baseline-store'
 export {
+  activateProjectScheduleBaselineUseCase,
   captureProjectScheduleBaselineUseCase,
   readProjectScheduleBaselineUseCase,
 } from './application/use-cases/project-schedule-baseline'
@@ -219,3 +220,10 @@ export {
   type WorkItemNotificationScheduleAttributes,
   type WorkItemNotificationScheduleUpdate,
 } from './work-item-notification-schedule-index'
+export {
+  isWorkItemMemberIndexRow,
+  listWorkItemMemberIndexKeys,
+  normalizeWorkItemMemberIndexKey,
+  type WorkItemMemberIndexReference,
+} from './work-item-member-index'
+export { workItemMemberIndexMigration } from './work-item-member-index-migration'

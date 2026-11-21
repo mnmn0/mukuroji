@@ -67,6 +67,24 @@ export type DataMigrationRowStore = {
     /** Revision value read from the stored row, for `revision-fenced` definitions. */
     readonly expectedRevision?: unknown
   }) => Promise<DataMigrationReplaceOutcome>
+  /**
+   * Writes the derived rows of a source row in one transaction that also
+   * checks the source row still exists with the revision (when fenced) that
+   * the runner read. Derived rows overwrite rows with the same key.
+   *
+   * @param request - Source key, expected revision and derived rows.
+   * @returns Whether the rows were written.
+   */
+  readonly writeDerivedRows: (request: {
+    /** `derive` definition naming the key and revision attributes. */
+    readonly definition: DataMigrationDefinition
+    /** Primary key of the source row. */
+    readonly sourceKey: Readonly<Record<string, string | number>>
+    /** Revision value read from the source row, for `revision-fenced` definitions. */
+    readonly expectedRevision?: unknown
+    /** Complete derived rows. */
+    readonly rows: readonly Readonly<Record<string, unknown>>[]
+  }) => Promise<DataMigrationReplaceOutcome>
 }
 
 /** Durable, compare-and-set store of per-partition checkpoints. */

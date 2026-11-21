@@ -54,6 +54,7 @@ import {
   type WorkItemAcceptanceCriterionInput,
   type WorkItemAcceptanceCriterionMark,
   type UpdateWebhookSubscriptionInput,
+  isWebhookEventType,
   type WorkItemSchedule,
   type WorkItemScheduleCalendarPolicy,
   type WorkItemScheduleWeekday,
@@ -4545,27 +4546,14 @@ function readWebhookEventTypes(
   value: unknown,
 ): CreateWebhookSubscriptionInput['eventTypes'] {
   const eventTypes = readStringArray(value, 'Webhook eventTypes', 20)
-  const allowed = new Set<CreateWebhookSubscriptionInput['eventTypes'][number]>([
-    'work-item.created',
-    'work-item.updated',
-    'work-item.deleted',
-    'external-link.created',
-    'external-link.updated',
-    'sync-conflict.created',
-    'sync-conflict.resolved',
-    'import.completed',
-    'import.failed',
-  ])
-  if (!eventTypes.every((eventType) =>
-    allowed.has(eventType as CreateWebhookSubscriptionInput['eventTypes'][number])
-  )) {
+  if (!eventTypes.every(isWebhookEventType)) {
     throw new PublicApiServiceError(
       400,
       'validation_failed',
       'Webhook eventTypes contains an unsupported event.',
     )
   }
-  return eventTypes as CreateWebhookSubscriptionInput['eventTypes']
+  return eventTypes
 }
 
 function readStringArray(

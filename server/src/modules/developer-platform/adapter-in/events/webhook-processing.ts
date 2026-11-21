@@ -8,11 +8,12 @@ import {
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs'
-import type {
-  WebhookDelivery,
-  WebhookEventEnvelope,
-  WebhookEventType,
-  WebhookSubscription,
+import {
+  isWebhookEventType,
+  isWorkItemRelationEventType,
+  type WebhookDelivery,
+  type WebhookEventEnvelope,
+  type WebhookSubscription,
 } from '@mukuroji/contracts'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
@@ -438,7 +439,7 @@ async function projectAuditRecord(
     return
   }
   if (!await dependencies.featureAvailability.isEnabled(event.workspaceId)) return
-  if (!isWebhookEventType(event.eventType)) return
+  if (!isWebhookEventType(event.eventType) || !hasCompleteWebhookScope(event)) return
   await dependencies.queue.enqueue({
     kind: 'projection',
     workspaceId: event.workspaceId,
@@ -485,7 +486,8 @@ async function processWebhookProjectionMessage(
     event.workspaceId !== message.workspaceId ||
     event.eventId !== message.eventId ||
     event.outboxStatus !== 'pending' ||
-    !isWebhookEventType(event.eventType)
+    !isWebhookEventType(event.eventType) ||
+    !hasCompleteWebhookScope(event)
   ) {
     if (!await dependencies.projections.complete(claimRequest)) {
       throw new Error('Webhook projection lease was lost.')
@@ -1739,22 +1741,25 @@ function readPreparedWebhookEvent(payload: string): WebhookEventEnvelope {
   }
 }
 
+/**
+ * Tests whether an audit event carries every scope field webhook delivery authorizes against.
+ *
+ * Relation events written before `projectId` was recorded on every endpoint lack it even when
+ * the Work Item is assigned to a Project, so treating them as Team-only would skip the Project
+ * check. They can still reach the projection from a stream backlog, so they are not delivered.
+ *
+ * @param event - Normalized audit event.
+ * @returns Whether the event's Team and Project scope is complete.
+ */
+function hasCompleteWebhookScope(event: AuditEventV1) {
+  if (!isWorkItemRelationEventType(event.eventType)) return true
+  return isRecord(event.metadata) && event.metadata.projectScopeRecorded === true
+}
+
 function normalizeQueueDelay(value: number | undefined) {
   if (value === undefined || value <= 0) return 0
   if (!Number.isFinite(value)) throw new TypeError('Webhook queue delay must be finite.')
   return Math.min(WEBHOOK_QUEUE_MAX_DELAY_SECONDS, Math.ceil(value))
-}
-
-function isWebhookEventType(value: string): value is WebhookEventType {
-  return value === 'work-item.created' ||
-    value === 'work-item.updated' ||
-    value === 'work-item.deleted' ||
-    value === 'external-link.created' ||
-    value === 'external-link.updated' ||
-    value === 'sync-conflict.created' ||
-    value === 'sync-conflict.resolved' ||
-    value === 'import.completed' ||
-    value === 'import.failed'
 }
 
 function unmarshalDynamoMap(

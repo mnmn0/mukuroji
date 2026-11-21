@@ -1,5 +1,6 @@
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_RELATION_EVENT_TYPES,
   type AutomationInboundWebhookEndpoint,
   type AutomationProjectTemplatePayload,
   type AutomationProjectTemplateTone,
@@ -15,6 +16,7 @@ import {
   type UpdateAutomationTemplateInput,
   type WorkflowDefinition,
   type WorkItemConfiguration,
+  type WorkItemRelationEventType,
 } from '@mukuroji/contracts'
 import { useId, useMemo, useState, type FormEvent } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
@@ -59,6 +61,7 @@ const automationTriggerTypes = [
   'custom-field',
   'work-item-type',
   'comment',
+  'relation',
   'form',
   'webhook',
   'schedule',
@@ -115,9 +118,23 @@ const triggerLabelKeys: Record<AutomationTriggerType, MessageKey> = {
   'custom-field': 'automation.trigger.customFieldChange',
   'work-item-type': 'automation.trigger.workItemTypeChange',
   comment: 'automation.trigger.comment',
+  relation: 'automation.trigger.relationChange',
   form: 'automation.trigger.formSubmission',
   webhook: 'automation.trigger.webhook',
   schedule: 'automation.trigger.schedule',
+}
+
+const relationEventLabelKeys: Record<WorkItemRelationEventType, MessageKey> = {
+  'work-item.parent-changed': 'automation.relationEvent.parentChanged',
+  'work-item.child-added': 'automation.relationEvent.childAdded',
+  'work-item.child-removed': 'automation.relationEvent.childRemoved',
+  'work-item.blocker-added': 'automation.relationEvent.blockerAdded',
+  'work-item.blocker-removed': 'automation.relationEvent.blockerRemoved',
+  'work-item.blocking-added': 'automation.relationEvent.blockingAdded',
+  'work-item.blocking-removed': 'automation.relationEvent.blockingRemoved',
+  'work-item.relation-added': 'automation.relationEvent.relationAdded',
+  'work-item.relation-removed': 'automation.relationEvent.relationRemoved',
+  'work-item.sibling-order-changed': 'automation.relationEvent.siblingOrderChanged',
 }
 
 const actionLabelKeys: Record<AutomationActionType, MessageKey> = {
@@ -479,6 +496,26 @@ export function AutomationRuleEditor({
               ) : null}
             </div>
           </div>
+        ) : triggerType === 'relation' ? (
+          <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+            {t('automation.rule.relationEvent')}
+            <select
+              className="workbench-input min-h-10 px-3 text-[var(--workbench-text)]"
+              data-testid="automation-rule-relation-event"
+              value={triggerConfiguration}
+              onChange={(event) => setTriggerConfiguration(event.target.value)}
+            >
+              <option value="">{t('automation.rule.relationEventAny')}</option>
+              {WORK_ITEM_RELATION_EVENT_TYPES.map((eventType) => (
+                <option key={eventType} value={eventType}>
+                  {t(relationEventLabelKeys[eventType])}
+                </option>
+              ))}
+            </select>
+            <span className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
+              {t('automation.rule.relationEventHint')}
+            </span>
+          </label>
         ) : triggerType === 'webhook' ? (
           <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('automation.rule.webhookEndpoint')}

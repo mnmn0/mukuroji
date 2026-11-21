@@ -68,3 +68,12 @@ export const WorkItemTypeTrigger: Story = {
     initialTriggerType: 'work-item-type',
   },
 }
+
+/** Relation trigger that starts a rule when a blocker or parent link changes. */
+export const RelationTrigger: Story = {
+  args: {
+    initialSchedule: undefined,
+    initialTriggerType: 'relation',
+    locale: 'ja',
+  },
+}

@@ -430,6 +430,24 @@ describe('Workspace search backfill mapping', () => {
     )
   })
 
+  test('skips Focus member index rows and rejects malformed ones (ADR 0038)', () => {
+    const indexRow = {
+      directoryTeamId: 'mukuroji-local#member-work-items#sato@example.com',
+      issueId: 'core-team#ct-1',
+      entryType: 'work-item-member-index',
+      schemaVersion: 1,
+      directoryId: 'mukuroji-local',
+      memberKey: 'sato@example.com',
+      teamId: 'core-team',
+      workItemId: 'ct-1',
+    }
+
+    expect(mapWorkItem(indexRow)).toBeUndefined()
+    expect(() => mapWorkItem({ ...indexRow, issueId: 'core-team#other' })).toThrow(
+      'Workspace search backfill encountered a non-canonical Work Item row.',
+    )
+  })
+
   test('strictly parses comment scope and deletes soft-deleted projections', () => {
     const entityKey =
       'workspace#mukuroji-local#work-item#team/core-team/issue/release-check'

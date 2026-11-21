@@ -40,8 +40,8 @@ export type DataMigrationRowClass = 'pending' | 'migrated' | 'unrelated' | 'unkn
  */
 export type DataMigrationWriterPolicy = 'pause-writers' | 'revision-fenced'
 
-/** A versioned, idempotent transformation of one table's rows. */
-export type DataMigrationDefinition = {
+/** Fields shared by every migration definition. */
+type DataMigrationDefinitionBase = {
   /** Stable identifier such as `0001-work-item-estimate`; also the checkpoint partition. */
   readonly id: string
   /** One-line purpose shown by the CLI. */
@@ -50,9 +50,12 @@ export type DataMigrationDefinition = {
   readonly table: string
   /** Primary key attribute names of the table; the transform must keep their values. */
   readonly keyAttributes: readonly string[]
-  /** Attribute that stores the schema version of the target entity. */
+  /**
+   * Attribute that stores the schema version of the target entity. For a `derive`
+   * definition it is the version attribute of the derived rows.
+   */
   readonly versionAttribute: string
-  /** Schema version rows are migrated from. */
+  /** Schema version rows are migrated from; `0` for a `derive` definition, whose rows do not exist yet. */
   readonly fromSchemaVersion: number
   /** Schema version rows are migrated to; exactly `fromSchemaVersion + 1`. */
   readonly toSchemaVersion: number
@@ -62,12 +65,19 @@ export type DataMigrationDefinition = {
   readonly revisionAttribute?: string
   /**
    * Classifies a stored row. Must be pure and must not throw for a row of
-   * another entity.
+   * another entity. A `derive` definition returns `pending` for every source
+   * row and `unrelated` for every other row, its derived rows included.
    *
    * @param row - Stored row.
    * @returns How the migration sees the row.
    */
   readonly classify: (row: DataMigrationRow) => DataMigrationRowClass
+}
+
+/** A versioned, idempotent transformation of one table's rows in place. */
+export type DataMigrationTransformDefinition = DataMigrationDefinitionBase & {
+  /** Replaces each pending row; the default kind. */
+  readonly kind?: 'transform'
   /**
    * Transforms a `pending` row into its `toSchemaVersion` form. Must be pure
    * and deterministic so that a retried page writes the same row.
@@ -77,6 +87,29 @@ export type DataMigrationDefinition = {
    */
   readonly transform: (row: DataMigrationRow) => Record<string, unknown>
 }
+
+/**
+ * Creates rows in the same table that are determined by each source row, such
+ * as index rows (ADR 0038). Source rows are never changed.
+ */
+export type DataMigrationDeriveDefinition = DataMigrationDefinitionBase & {
+  /** Writes derived rows next to each pending source row. */
+  readonly kind: 'derive'
+  /**
+   * Lists the rows a source row determines. Must be pure and deterministic, and
+   * every derived row must classify as `unrelated`.
+   *
+   * @param row - Row classified as `pending`.
+   * @returns Complete derived rows, at most {@link DATA_MIGRATION_MAX_DERIVED_ROWS}.
+   */
+  readonly derive: (row: DataMigrationRow) => readonly Record<string, unknown>[]
+}
+
+/** A migration definition. */
+export type DataMigrationDefinition = DataMigrationTransformDefinition | DataMigrationDeriveDefinition
+
+/** Most rows one source row may derive; one transaction also carries the source condition. */
+export const DATA_MIGRATION_MAX_DERIVED_ROWS = 50
 
 /** Stable failure codes reported by the migration runner, verifier and CLI. */
 export type DataMigrationFailureCode =
@@ -243,7 +276,7 @@ export function assertValidDataMigrationDefinition(definition: DataMigrationDefi
     ATTRIBUTE_NAME_PATTERN.test(definition.versionAttribute) &&
     !definition.keyAttributes.includes(definition.versionAttribute) &&
     Number.isSafeInteger(definition.fromSchemaVersion) &&
-    definition.fromSchemaVersion >= 1 &&
+    definition.fromSchemaVersion >= (definition.kind === 'derive' ? 0 : 1) &&
     definition.toSchemaVersion === definition.fromSchemaVersion + 1 &&
     isValidWriterPolicy(definition)
   if (!valid) throw new DataMigrationFailure('DEFINITION_INVALID')
@@ -292,6 +325,7 @@ export function transformDataMigrationRow(
   definition: DataMigrationDefinition,
   row: DataMigrationRow,
 ): Record<string, unknown> {
+  if (definition.kind === 'derive') throw new DataMigrationFailure('DEFINITION_INVALID')
   let next: Record<string, unknown>
   try {
     next = definition.transform(row)
@@ -317,6 +351,53 @@ export function transformDataMigrationRow(
     throw new DataMigrationFailure('TRANSFORM_INVALID')
   }
   return next
+}
+
+/**
+ * Derives the rows of a pending source row and checks them against the
+ * contract: each has every key attribute, a key other than the source's and
+ * the other derived rows, the version `toSchemaVersion`, and classifies as
+ * `unrelated` so that no run treats it as a source.
+ *
+ * @param definition - `derive` migration definition.
+ * @param row - Row classified as `pending`.
+ * @returns The validated derived rows.
+ * @throws DataMigrationFailure with `TRANSFORM_INVALID` when a derived row breaks the contract.
+ */
+export function deriveDataMigrationRows(
+  definition: DataMigrationDefinition,
+  row: DataMigrationRow,
+): Record<string, unknown>[] {
+  if (definition.kind !== 'derive') throw new DataMigrationFailure('DEFINITION_INVALID')
+  let derived: readonly Record<string, unknown>[]
+  try {
+    derived = definition.derive(row)
+  } catch {
+    throw new DataMigrationFailure('TRANSFORM_INVALID')
+  }
+  if (!Array.isArray(derived) || derived.length > DATA_MIGRATION_MAX_DERIVED_ROWS) {
+    throw new DataMigrationFailure('TRANSFORM_INVALID')
+  }
+  const seenKeys = new Set([JSON.stringify(definition.keyAttributes.map((name) => row[name]))])
+  return derived.map((next) => {
+    const keyText = JSON.stringify(definition.keyAttributes.map((name) => next[name]))
+    let resultClass: DataMigrationRowClass
+    try {
+      resultClass = definition.classify(next)
+    } catch {
+      throw new DataMigrationFailure('TRANSFORM_INVALID')
+    }
+    if (
+      !definition.keyAttributes.every((name) => isKeyValue(next[name])) ||
+      seenKeys.has(keyText) ||
+      next[definition.versionAttribute] !== definition.toSchemaVersion ||
+      resultClass !== 'unrelated'
+    ) {
+      throw new DataMigrationFailure('TRANSFORM_INVALID')
+    }
+    seenKeys.add(keyText)
+    return { ...next }
+  })
 }
 
 /**

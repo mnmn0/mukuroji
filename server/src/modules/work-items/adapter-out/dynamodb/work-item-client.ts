@@ -44,6 +44,12 @@ import {
   createWorkItemNotificationScheduleAttributes,
   createWorkItemNotificationScheduleUpdate,
 } from '../../work-item-notification-schedule-index'
+import {
+  createWorkItemMemberIndexPartitionKey,
+  createWorkItemMemberIndexTransactItems,
+  isWorkItemMemberIndexRecord,
+  type WorkItemMemberIndexReference,
+} from '../../work-item-member-index'
 import { createResourceId } from '../../domain/resource-id'
 import {
   WORK_ITEM_ACTUAL_DATE_FIELDS,
@@ -77,6 +83,7 @@ import type {
   TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
+  BatchGetCommand,
   DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
@@ -1281,6 +1288,31 @@ export type TeamIssuesClient = {
     options?: WorkItemListReadOptions,
   ): Promise<TeamIssuesResponse>
   /**
+   * Strongly reads the member index rows of one member (ADR 0038). The rows are candidates:
+   * callers must re-read each Work Item and decide involvement from it.
+   *
+   * @param directoryId - Workspace ID.
+   * @param memberKey - Member key; normalized before use.
+   * @param limit - Most references to return; more fail with 413.
+   * @returns Team-qualified Work Item references in Team, then Work Item order.
+   */
+  listMemberWorkItemReferences?(
+    directoryId: string,
+    memberKey: string,
+    limit: number,
+  ): Promise<WorkItemMemberIndexReference[]>
+  /**
+   * Strongly reads canonical Work Items by Team-qualified reference, archived ones included.
+   *
+   * @param directoryId - Workspace ID.
+   * @param references - Work Items to read; duplicates are read once.
+   * @returns Existing Work Items in Team, then Work Item order; missing ones are left out.
+   */
+  getTeamIssuesByReferences?(
+    directoryId: string,
+    references: readonly WorkItemMemberIndexReference[],
+  ): Promise<TeamIssueResponseItem[]>
+  /**
    * Strongly reads a Team's non-archived Work Items with their effective sibling order ranks for
    * the hierarchy read model.
    *
@@ -1716,6 +1748,114 @@ export class DynamoDbTeamIssuesClient {
 
       throw toProjectDataError(error)
     }
+  }
+
+  /**
+   * Strongly reads the member index rows of one member (ADR 0038).
+   *
+   * @param directoryId - Workspace ID.
+   * @param memberKey - Member key; normalized before use.
+   * @param limit - Most references to return; more fail with 413.
+   * @returns Team-qualified Work Item references in Team, then Work Item order.
+   */
+  async listMemberWorkItemReferences(
+    directoryId: string,
+    memberKey: string,
+    limit: number,
+  ): Promise<WorkItemMemberIndexReference[]> {
+    await this.ensureLocalTables()
+    const partitionKey = createWorkItemMemberIndexPartitionKey(directoryId, memberKey)
+    const references: WorkItemMemberIndexReference[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    try {
+      do {
+        const response = await this.documentClient.send(new QueryCommand({
+          TableName: this.issueTableName,
+          KeyConditionExpression: '#directoryTeamId = :partitionKey',
+          ExpressionAttributeNames: { '#directoryTeamId': 'directoryTeamId' },
+          ExpressionAttributeValues: { ':partitionKey': partitionKey },
+          ConsistentRead: true,
+          Limit: Math.min(limit + 1, WORK_ITEM_MEMBER_INDEX_QUERY_PAGE_SIZE),
+          ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+        }))
+        for (const row of response.Items ?? []) {
+          if (!isWorkItemMemberIndexRecord(row) || row.directoryId !== directoryId) {
+            throw new ProjectDataError(503, 'InvalidWorkItemMemberIndex', 'Work Item member index row is invalid.')
+          }
+          references.push({ teamId: row.teamId, workItemId: row.workItemId })
+          if (references.length > limit) {
+            throw createMemberIndexLimitExceededError(limit)
+          }
+        }
+        exclusiveStartKey = response.LastEvaluatedKey
+      } while (exclusiveStartKey !== undefined)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+    return references.sort(compareWorkItemReferences)
+  }
+
+  /**
+   * Strongly reads canonical Work Items by Team-qualified reference, archived ones included.
+   *
+   * @param directoryId - Workspace ID.
+   * @param references - Work Items to read; duplicates are read once.
+   * @returns Existing Work Items in Team, then Work Item order; missing ones are left out.
+   */
+  async getTeamIssuesByReferences(
+    directoryId: string,
+    references: readonly WorkItemMemberIndexReference[],
+  ): Promise<TeamIssueResponseItem[]> {
+    await this.ensureLocalTables()
+    const unique = new Map<string, WorkItemMemberIndexReference>()
+    for (const reference of references) {
+      unique.set(createDirectoryTeamIssueId(directoryId, reference.teamId, reference.workItemId), reference)
+    }
+    const ordered = [...unique.values()].sort(compareWorkItemReferences)
+    const items: TeamIssueItem[] = []
+    try {
+      for (let offset = 0; offset < ordered.length; offset += WORK_ITEM_BATCH_GET_SIZE) {
+        let keys: Record<string, unknown>[] = ordered
+          .slice(offset, offset + WORK_ITEM_BATCH_GET_SIZE)
+          .map((reference) => ({
+            directoryTeamId: createDirectoryTeamId(directoryId, reference.teamId),
+            issueId: reference.workItemId,
+          }))
+        // Only rounds that make no progress count toward the limit, so a slow but advancing
+        // read is not failed while throttling eases.
+        for (let round = 0, stalledRounds = 0; keys.length > 0; round += 1) {
+          if (stalledRounds >= WORK_ITEM_BATCH_GET_ATTEMPTS) {
+            throw new ProjectDataError(503, 'WorkItemBatchReadIncomplete', 'Work Items could not be read.')
+          }
+          // Unprocessed keys mean the table is throttling; back off before asking again, longer
+          // after each round that made no progress.
+          if (round > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** Math.max(0, stalledRounds - 1))
+          const response = await this.documentClient.send(new BatchGetCommand({
+            RequestItems: { [this.issueTableName]: { Keys: keys, ConsistentRead: true } },
+          }))
+          for (const row of response.Responses?.[this.issueTableName] ?? []) {
+            const item = toTeamIssueItem(row)
+            if (item.directoryId !== directoryId) {
+              throw new ProjectDataError(503, 'InvalidTeamIssue', 'Team issue item is missing or invalid.')
+            }
+            items.push(item)
+          }
+          const unprocessed = response.UnprocessedKeys?.[this.issueTableName]?.Keys ?? []
+          stalledRounds = unprocessed.length < keys.length ? 0 : stalledRounds + 1
+          keys = unprocessed
+        }
+      }
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+    return items
+      .sort((left, right) => compareWorkItemReferences(
+        { teamId: left.teamId, workItemId: left.issueId },
+        { teamId: right.teamId, workItemId: right.issueId },
+      ))
+      .map(toTeamIssueResponseItem)
   }
 
   /**
@@ -2391,6 +2531,15 @@ export class DynamoDbTeamIssuesClient {
                   now,
                 )]
               : []),
+            // Unconditional, so they never shift the cancellation indexes above.
+            ...createWorkItemMemberIndexTransactItems(
+              this.issueTableName,
+              directoryId,
+              teamId,
+              issueId,
+              undefined,
+              item,
+            ),
           ],
         }),
       )
@@ -3268,6 +3417,15 @@ export class DynamoDbTeamIssuesClient {
               : []),
             ...(planningRevisionMutation ? [planningRevisionMutation] : []),
             ...agentRunTransactItems,
+            // Unconditional and last, so they never shift the cancellation indexes above.
+            ...createWorkItemMemberIndexTransactItems(
+              this.issueTableName,
+              directoryId,
+              teamId,
+              issueId,
+              beforeIssue,
+              afterIssue,
+            ),
           ],
         }),
       )
@@ -3422,30 +3580,51 @@ export class DynamoDbTeamIssuesClient {
       ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
     ]
 
+    const deletionItems: WorkItemTransactWriteItem[] = [
+      {
+        Delete: {
+          TableName: this.issueTableName,
+          Key: { directoryTeamId, issueId },
+          ConditionExpression:
+            'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :expectedRevision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+        },
+      },
+      ...deletionFences.map((fence) => fence.transactWriteItem),
+      ...(auditPut ? [auditPut] : []),
+      ...effectiveAuthorizationConditionChecks,
+      ...(idempotencyCompletion
+        ? [idempotencyCompletion.transactWriteItem]
+        : []),
+      ...(planningRevisionMutation ? [planningRevisionMutation] : []),
+    ]
+    const memberIndexDeletes = createWorkItemMemberIndexTransactItems(
+      this.issueTableName,
+      directoryId,
+      teamId,
+      issueId,
+      beforeIssue,
+      undefined,
+    )
+    // The index Deletes ride in the transaction when they fit. Otherwise they run after the commit:
+    // a leftover index row only makes Focus read a Work Item that no longer exists, which it drops.
+    const memberIndexDeletesInline =
+      deletionItems.length + memberIndexDeletes.length <= WORK_ITEM_TRANSACT_WRITE_ITEM_LIMIT
+
     try {
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
-            {
-              Delete: {
-                TableName: this.issueTableName,
-                Key: { directoryTeamId, issueId },
-                ConditionExpression:
-                  'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :expectedRevision',
-                ExpressionAttributeNames: { '#revision': 'revision' },
-                ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
-              },
-            },
-            ...deletionFences.map((fence) => fence.transactWriteItem),
-            ...(auditPut ? [auditPut] : []),
-            ...effectiveAuthorizationConditionChecks,
-            ...(idempotencyCompletion
-              ? [idempotencyCompletion.transactWriteItem]
-              : []),
-            ...(planningRevisionMutation ? [planningRevisionMutation] : []),
+            ...deletionItems,
+            // Unconditional and last, so they never shift the cancellation indexes above.
+            ...(memberIndexDeletesInline ? memberIndexDeletes : []),
           ],
         }),
       )
+      if (!memberIndexDeletesInline) {
+        await this.deleteMemberIndexRowsAfterCommit(directoryTeamId, issueId, memberIndexDeletes)
+      }
 
       return { issue: toTeamIssueResponseItem(beforeIssue) }
     } catch (error) {
@@ -3499,6 +3678,47 @@ export class DynamoDbTeamIssuesClient {
       }
 
       throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Deletes member index rows after a Work Item delete committed without them.
+   *
+   * One transaction checks that the canonical row is still absent and deletes the index rows, so a
+   * Work Item re-created under the same ID keeps the index rows its create wrote. It is a
+   * `TransactWriteItems` call, which the Planning fence barrier admits. Best effort: a row left
+   * behind only points Focus at a missing Work Item, which the reference read leaves out, so a
+   * failure here does not fail the committed delete.
+   *
+   * @param directoryTeamId - Partition key of the deleted canonical row.
+   * @param issueId - Sort key of the deleted canonical row.
+   * @param items - Unconditional index Delete actions from the delete transaction.
+   */
+  private async deleteMemberIndexRowsAfterCommit(
+    directoryTeamId: string,
+    issueId: string,
+    items: readonly WorkItemTransactWriteItem[],
+  ) {
+    for (let attempt = 0; attempt < WORK_ITEM_BATCH_GET_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** (attempt - 1))
+      try {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [
+            {
+              ConditionCheck: {
+                TableName: this.issueTableName,
+                Key: { directoryTeamId, issueId },
+                ConditionExpression: 'attribute_not_exists(directoryTeamId)',
+              },
+            },
+            ...items,
+          ],
+        }))
+        return
+      } catch (error) {
+        // A re-created Work Item owns the rows now; anything else is retried, then left behind.
+        if (isTransactionConditionalFailureAt(error, 0)) return
+      }
     }
   }
 
@@ -4645,6 +4865,54 @@ function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueAc
     summary: value.summary,
     createdAt: value.createdAt,
   }
+}
+
+/** Largest page of member index rows read by one Query. */
+const WORK_ITEM_MEMBER_INDEX_QUERY_PAGE_SIZE = 1_000
+
+/** Keys per BatchGetItem request, the DynamoDB maximum. */
+const WORK_ITEM_BATCH_GET_SIZE = 100
+
+/** BatchGetItem rounds tried before unprocessed keys fail the read. */
+const WORK_ITEM_BATCH_GET_ATTEMPTS = 5
+
+/** First wait before re-reading unprocessed BatchGet keys; doubles on each retry. */
+const WORK_ITEM_BATCH_GET_RETRY_BASE_MS = 25
+
+/** One action of a Work Item TransactWriteItems call. */
+type WorkItemTransactWriteItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+
+/** Actions per TransactWriteItems call, the DynamoDB maximum. */
+const WORK_ITEM_TRANSACT_WRITE_ITEM_LIMIT = 100
+
+/**
+ * Creates the error returned when one member has more index rows than a read allows.
+ *
+ * @param limit - Largest number of rows the caller accepts.
+ * @returns The 413 project data error.
+ */
+function createMemberIndexLimitExceededError(limit: number): ProjectDataError {
+  return new ProjectDataError(
+    413,
+    'WorkItemListLimitExceeded',
+    `The member is involved in more than ${limit} Work Items.`,
+  )
+}
+
+/**
+ * Orders Team-qualified Work Item references by Team ID, then Work Item ID, in code unit order.
+ *
+ * @param left - First reference.
+ * @param right - Second reference.
+ * @returns Negative, zero, or positive like `Array.prototype.sort` expects.
+ */
+function compareWorkItemReferences(
+  left: WorkItemMemberIndexReference,
+  right: WorkItemMemberIndexReference,
+): number {
+  if (left.teamId !== right.teamId) return left.teamId < right.teamId ? -1 : 1
+  if (left.workItemId === right.workItemId) return 0
+  return left.workItemId < right.workItemId ? -1 : 1
 }
 
 function toTeamIssueItem(value: unknown): TeamIssueItem {
