@@ -1,6 +1,9 @@
 /** Realtime module public application and domain surface. */
 export {
+  createDocumentRealtimeScopeKey,
+  REALTIME_DOCUMENT_AUTHORIZATION_TTL_SECONDS,
   RealtimeTicketError,
+  type CreateRealtimeDocumentTicketInput,
   type CreateRealtimeTicketInput,
   type RealtimeTicket,
   type RealtimeTicketsClient,

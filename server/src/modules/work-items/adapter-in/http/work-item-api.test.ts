@@ -2799,6 +2799,9 @@ test('issues a one-time realtime ticket only after Work Item viewer access is co
           expiresAt: '2026-07-12T00:01:00.000Z',
         }
       },
+      async createDocumentTicket() {
+        throw new Error('Document tickets are not used by this test.')
+      },
     },
   })
 

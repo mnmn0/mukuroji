@@ -168,6 +168,7 @@ import {
   type PendingPublicShareCreateRequest,
   type DocumentSaveStatus,
 } from './model/document'
+import { useDocumentRealtime } from './queries/useDocumentRealtime'
 import { WhiteboardCanvas } from './ui/WhiteboardCanvas'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
@@ -178,6 +179,8 @@ const emptyPresence: DocumentPresence[] = []
 const emptyShares: DocumentShare[] = []
 const emptyBacklinks: DocumentBacklink[] = []
 const documentPresenceRefreshInterval = 4_000
+// With change signals, presence is re-read on others' heartbeats; this only drops expired leases.
+const documentPresenceRealtimeFallbackInterval = 60_000
 const documentPresenceHeartbeatInterval = 12_000
 const documentAutosaveDelay = 550
 
@@ -607,6 +610,21 @@ export function DocumentPage() {
       navigate(createDocumentPath(documentId))
     },
   })
+  const { connected: isRealtimeConnected } = useDocumentRealtime({
+    accessToken: user && !currentUserError ? accessToken : undefined,
+    documentId,
+    clientId: presenceClientId,
+    // Runs after render, so the SWR mutators declared below already exist.
+    onChange: (part) => {
+      if (part === 'document') void mutateSelectedDocument()
+      else if (part === 'comments') void mutateComments()
+      else void mutatePresence()
+    },
+  })
+  const realtimeConnectedRef = useRef(isRealtimeConnected)
+  useEffect(() => {
+    realtimeConnectedRef.current = isRealtimeConnected
+  }, [isRealtimeConnected])
   const {
     data: selectedDocument,
     error: detailError,
@@ -616,6 +634,7 @@ export function DocumentPage() {
     accessToken,
     documentId,
     Boolean(user && !currentUserError),
+    isRealtimeConnected,
   )
   const {
     data: latestCommentsPage,
@@ -624,6 +643,8 @@ export function DocumentPage() {
   } = useDocumentComments(
     accessToken,
     selectedDocument?.id,
+    true,
+    isRealtimeConnected,
   )
   const [
     olderComments,
@@ -668,7 +689,9 @@ export function DocumentPage() {
   const { data: presence = emptyPresence, mutate: mutatePresence } = useDocumentPresence(
     accessToken,
     selectedDocument?.id,
-    documentPresenceRefreshInterval,
+    isRealtimeConnected
+      ? documentPresenceRealtimeFallbackInterval
+      : documentPresenceRefreshInterval,
   )
   const {
     data: shares = emptyShares,
@@ -855,6 +878,7 @@ export function DocumentPage() {
       return
     }
 
+    let firstHeartbeat = true
     const heartbeat = () =>
       updateDocumentPresence(
         accessToken,
@@ -877,7 +901,13 @@ export function DocumentPage() {
         },
         createMutationRequestContext(),
       )
-        .then(() => mutatePresence())
+        .then(() => {
+          // With change signals, others' heartbeats refresh presence; read it here only
+          // for this tab's first lease or while polling.
+          const shouldRefresh = firstHeartbeat || !realtimeConnectedRef.current
+          firstHeartbeat = false
+          return shouldRefresh ? mutatePresence() : undefined
+        })
         .catch(() => undefined)
 
     void heartbeat()

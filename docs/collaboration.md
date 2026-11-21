@@ -80,7 +80,7 @@ Context item の作成・更新・差し替え audit は AuditEvents stream cons
 
 ## Realtime と競合更新
 
-Presence と typing は短い TTL を持つ lease です。WebSocket 接続が利用できる環境では scope ごとの invalidation を push し、client は認可済み HTTP API から最新 snapshot を再取得します。接続中の message と fan-out でも active membership、Work Item の現在の assigned project、team/project の archive、現在の project role と書き込み権限を再確認します。system admin の project bypass は Cognito の現在 group membership を毎回再検証し、ticket の古い snapshot だけでは継続できません。認可 snapshot には延長できない有効期限を設け、ローカル環境や接続断では数秒間隔の polling に切り替えます。
+Presence と typing は短い TTL を持つ lease です。WebSocket 接続が利用できる環境では scope ごとの invalidation を push し、client は認可済み HTTP API から最新 snapshot を再取得します。接続中の message と fan-out でも active membership、Work Item の現在の assigned project、team/project の archive、現在の project role と書き込み権限を再確認します。system admin の project bypass は Cognito の現在 group membership を毎回再検証し、ticket の古い snapshot だけでは継続できません。認可 snapshot には延長できない有効期限を設け、ローカル環境や接続断では数秒間隔の polling に切り替えます。Document 画面も同じ WebSocket で Document ごとの変更 signal を受けます（[documents.md](documents.md)、ADR 0041）。
 
 Comment edit/resolve/delete は `expectedVersion` を要求します。読み込み後に別 user が変更した場合は `409 CommentVersionConflict` を返し、client は最新内容を再取得します。push/polling は表示の鮮度を上げる仕組みであり、整合性の最終防衛線は version 条件です。
 

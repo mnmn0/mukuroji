@@ -93,13 +93,17 @@ export type RealtimeSessionItem = {
   connectionId: string
   /** row の用途です。 */
   itemType: 'ticket' | 'connection'
+  /** Document の変更通知を購読する row では `document`、Work Item の row では未設定です。 */
+  scopeType?: 'document'
+  /** `scopeType` が `document` のときの購読対象 Document ID です。 */
+  documentId?: string
   /** canonical Workspace ID です。 */
   workspaceId: string
   /** 認証済み Workspace member key です。 */
   memberKey: string
-  /** 接続 scope を所有する active team ID です。 */
+  /** 接続 scope を所有する active team ID です。Document の row では空文字です。 */
   teamId: string
-  /** 接続 scope の Work Item ID です。 */
+  /** 接続 scope の Work Item ID です。Document の row では空文字です。 */
   issueId: string
   /** Assigned project がある場合の active project ID です。 */
   projectId?: string
@@ -697,6 +701,29 @@ export async function postRealtimeMessage(
 }
 
 /**
+ * Sends a content-free signal to every authorized subscriber of a scope.
+ *
+ * Does nothing when the WebSocket callback endpoint is not configured, such as in local
+ * runtimes, so callers can treat delivery as best effort.
+ *
+ * @param scopeKey - Subscription scope that receives the signal.
+ * @param payload - Signal body. It must not contain content the API protects.
+ * @returns Number of connections the signal reached.
+ */
+export async function publishRealtimeScopeSignal(
+  scopeKey: string,
+  payload: Readonly<Record<string, unknown>>,
+): Promise<number> {
+  const callbackEndpoint = loadServerConfig().environment.WEBSOCKET_CALLBACK_ENDPOINT?.trim()
+  if (!callbackEndpoint) return 0
+  const connections = await listScopeConnections(scopeKey)
+  const results = await Promise.all(connections.map((connection) =>
+    postRealtimeMessage(callbackEndpoint, connection.connectionId, payload)
+  ))
+  return results.filter((result) => result.delivered).length
+}
+
+/**
  * API Gateway WebSocket の connect、disconnect、typing/presence message を処理します。
  */
 export async function handler(event: WebSocketEvent): Promise<WebSocketResponse> {
@@ -789,8 +816,7 @@ async function connect(event: WebSocketEvent, connectionId: string): Promise<Web
                 itemType: 'connection',
                 workspaceId: ticket.workspaceId,
                 memberKey: ticket.memberKey,
-                teamId: ticket.teamId,
-                issueId: ticket.issueId,
+                ...toRealtimeScopeAttributes(ticket),
                 projectId: ticket.projectId,
                 systemAdmin: ticket.systemAdmin,
                 canWrite: ticket.canWrite,
@@ -806,7 +832,7 @@ async function connect(event: WebSocketEvent, connectionId: string): Promise<Web
                 authenticationMethods: ticket.authenticationMethods,
                 clientIp:
                   event.requestContext?.identity?.sourceIp?.trim() || ticket.clientIp,
-              } satisfies RealtimeSessionItem,
+              },
               ConditionExpression: 'attribute_not_exists(connectionId)',
             },
           },
@@ -841,6 +867,11 @@ async function handleMessage(event: WebSocketEvent, connectionId: string): Promi
 
   if (message.action !== 'typing' && message.action !== 'presence') {
     return response(400, 'Realtime action is invalid.')
+  }
+
+  // Document sessions only receive server-published change signals.
+  if (session.scopeType === 'document') {
+    return response(403, 'Document realtime sessions accept only ping.')
   }
 
   if (message.action === 'typing' && !isRealtimeTypingAllowed(session.canWrite, message.isTyping)) {
@@ -986,20 +1017,39 @@ function getCallbackEndpoint(event: WebSocketEvent) {
   return `https://${domainName}/${stage}`
 }
 
-function toRealtimeSessionItem(value: unknown): RealtimeSessionItem | undefined {
+/**
+ * Parses a RealtimeSessionsTable row, rejecting rows whose scope attributes are ambiguous.
+ *
+ * A Document row must carry a Document ID and no team or issue; any other row must carry a
+ * team and issue. An unknown `scopeType` is rejected.
+ *
+ * @param value - Raw DynamoDB item.
+ * @returns The session row, or undefined when the row is malformed.
+ */
+export function toRealtimeSessionItem(value: unknown): RealtimeSessionItem | undefined {
   if (!isRecord(value)) {
     return undefined
   }
 
   const item = value
+  const documentScope = item.scopeType === 'document'
+  if (item.scopeType !== undefined && !documentScope) {
+    return undefined
+  }
+  if (
+    documentScope
+      ? typeof item.documentId !== 'string' || !item.documentId.trim() ||
+        item.teamId !== undefined || item.issueId !== undefined
+      : typeof item.teamId !== 'string' || typeof item.issueId !== 'string'
+  ) {
+    return undefined
+  }
 
   if (
     typeof item.connectionId !== 'string' ||
     (item.itemType !== 'ticket' && item.itemType !== 'connection') ||
     typeof item.workspaceId !== 'string' ||
     typeof item.memberKey !== 'string' ||
-    typeof item.teamId !== 'string' ||
-    typeof item.issueId !== 'string' ||
     typeof item.systemAdmin !== 'boolean' ||
     typeof item.canWrite !== 'boolean' ||
     typeof item.expiresAt !== 'number' ||
@@ -1020,8 +1070,11 @@ function toRealtimeSessionItem(value: unknown): RealtimeSessionItem | undefined 
     itemType: item.itemType,
     workspaceId: item.workspaceId,
     memberKey: item.memberKey,
-    teamId: item.teamId,
-    issueId: item.issueId,
+    teamId: typeof item.teamId === 'string' ? item.teamId : '',
+    issueId: typeof item.issueId === 'string' ? item.issueId : '',
+    ...(documentScope && typeof item.documentId === 'string'
+      ? { scopeType: 'document' as const, documentId: item.documentId }
+      : {}),
     systemAdmin: item.systemAdmin,
     canWrite: item.canWrite,
     expiresAt: item.expiresAt,
@@ -1038,6 +1091,23 @@ function toRealtimeSessionItem(value: unknown): RealtimeSessionItem | undefined 
     ...(typeof item.connectedAt === 'string' ? { connectedAt: item.connectedAt } : {}),
     ...(typeof item.lastSeenAt === 'string' ? { lastSeenAt: item.lastSeenAt } : {}),
   }
+}
+
+/**
+ * Returns the attributes that name a session's subscription target.
+ *
+ * Document rows carry only the Document ID so a Document session can never be read as a
+ * Work Item session with an empty team or issue.
+ *
+ * @param session - Ticket or connection whose scope is copied.
+ * @returns Scope attributes to store on the connection row.
+ */
+export function toRealtimeScopeAttributes(
+  session: Pick<RealtimeSessionItem, 'documentId' | 'issueId' | 'scopeType' | 'teamId'>,
+): Record<string, string> {
+  return session.scopeType === 'document' && session.documentId
+    ? { scopeType: 'document', documentId: session.documentId }
+    : { teamId: session.teamId, issueId: session.issueId }
 }
 
 /**
@@ -1184,6 +1254,13 @@ async function isRealtimeSessionAuthorized(
   enterpriseSnapshotCache = new Map<string, Promise<EnterpriseIdentitySnapshot>>(),
   breakGlassCache = new Map<string, Promise<boolean>>(),
 ) {
+  if (session.scopeType === 'document') {
+    return isRealtimeDocumentSessionAuthorized(
+      session,
+      cognitoGroupCache,
+      enterpriseSnapshotCache,
+    )
+  }
   const memberKey = normalizeMemberKey(session.memberKey)
   const memberResult = await documentClient.send(new GetCommand({
     TableName: requireEnv('WORKSPACE_ACCESS_TABLE_NAME'),
@@ -1315,6 +1392,77 @@ async function isRealtimeSessionAuthorized(
     authorization.external,
     currentSystemAdministrator || breakGlass,
     breakGlass,
+  )
+}
+
+/**
+ * Re-checks a Document subscription before it receives a change signal.
+ *
+ * The API checked the member's Document view permission when it issued the ticket, and the
+ * subscription expires within five minutes. Until then
+ * this check keeps the subscription only while the member is still active, a system-admin
+ * ticket still belongs to a current system administrator, and the Workspace session policy
+ * (lifetime, idle time, re-authentication, and IP allowlist) still accepts the session.
+ * Signals carry no Document content; the client reads changes through the API, which applies
+ * the current Document permission.
+ *
+ * @param session - Document ticket or connection row.
+ * @param cognitoGroupCache - Per-fan-out cache of current Cognito groups by username.
+ * @param enterpriseSnapshotCache - Per-fan-out cache of enterprise snapshots by Workspace.
+ * @returns Whether the subscription may receive signals.
+ */
+async function isRealtimeDocumentSessionAuthorized(
+  session: RealtimeSessionItem,
+  cognitoGroupCache: Map<string, Promise<string[]>>,
+  enterpriseSnapshotCache: Map<string, Promise<EnterpriseIdentitySnapshot>>,
+) {
+  if (!session.documentId) return false
+  const memberKey = normalizeMemberKey(session.memberKey)
+  const memberResult = await documentClient.send(new GetCommand({
+    TableName: requireEnv('WORKSPACE_ACCESS_TABLE_NAME'),
+    Key: {
+      workspaceId: session.workspaceId,
+      recordKey: `MEMBER#${memberKey}`,
+    },
+    ConsistentRead: true,
+  }))
+  const member = memberResult.Item
+  if (
+    !member ||
+    member.entryType !== 'workspace-member' ||
+    member.status !== 'active' ||
+    normalizeMemberKey(String(member.memberKey ?? member.email ?? '')) !== memberKey
+  ) {
+    return false
+  }
+  const workspaceRole = readRealtimeWorkspaceRole(member.role)
+  if (!workspaceRole) return false
+
+  if (session.systemAdmin) {
+    const memberEmail = readOptionalString(member.email) ?? memberKey
+    const username = readOptionalString(member.username) ?? memberEmail
+    let cognitoGroupsPromise = cognitoGroupCache.get(username)
+    if (!cognitoGroupsPromise) {
+      cognitoGroupsPromise = readCurrentRealtimeCognitoGroups(username)
+      cognitoGroupCache.set(username, cognitoGroupsPromise)
+    }
+    if (!hasConfiguredRealtimeSystemAdminGroup(await cognitoGroupsPromise)) {
+      return false
+    }
+  }
+
+  let snapshotPromise = enterpriseSnapshotCache.get(session.workspaceId)
+  if (!snapshotPromise) {
+    snapshotPromise = getEnterpriseIdentityClient().getSnapshot(session.workspaceId)
+    enterpriseSnapshotCache.set(session.workspaceId, snapshotPromise)
+  }
+  const snapshot = await snapshotPromise
+  return isRealtimeEnterpriseSessionFresh(
+    snapshot.policy,
+    session,
+    workspaceRole === 'guest',
+    session.systemAdmin,
+    false,
   )
 }
 
