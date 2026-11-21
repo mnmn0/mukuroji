@@ -1,8 +1,10 @@
 import {
-  DynamoDbAnalyticsWorkItemHistoryStore,
   processAnalyticsWorkItemHistoryProjectionBatch,
   type AnalyticsWorkItemTimeline,
 } from '../../modules/analytics'
+import {
+  DynamoDbAnalyticsWorkItemHistoryStore,
+} from '../../modules/analytics/adapter-out/dynamodb/analytics-work-item-history-store'
 import type {
   AuditProjectionBatchProcessor,
 } from '../../modules/audit/adapter-in/events/audit-projection'

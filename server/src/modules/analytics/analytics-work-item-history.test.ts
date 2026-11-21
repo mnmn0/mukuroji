@@ -6,7 +6,7 @@ import {
   type AnalyticsQueryInput,
   type CanonicalWorkItem,
 } from '@mukuroji/contracts'
-import { BatchGetCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { BatchGetCommand, PutCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
   ANALYTICS_METRIC_DEFINITIONS,
   AnalyticsError,
@@ -34,6 +34,7 @@ import {
   type AnalyticsWorkItemHistoryRowRead,
   type AnalyticsWorkItemHistoryStore,
 } from './analytics-work-item-history'
+import { DynamoDbAnalyticsWorkItemHistoryStore } from './adapter-out/dynamodb/analytics-work-item-history-store'
 import {
   processAnalyticsWorkItemHistoryProjectionBatch,
   type AnalyticsWorkItemTimeline,
@@ -893,6 +894,172 @@ describe('Analytics work item history rows', () => {
     expect((await store.getRow(key)).row?.entries.map((entry) => entry.eventId)).toEqual(['deleted-1'])
     await processAnalyticsWorkItemHistoryProjectionBatch({ Records: [streamRecord(deleted)] }, dependencies)
     expect((await store.getRow(key)).exists).toBe(false)
+  })
+
+  test('rebuilds a Work Item recreated with the same ID from its new history only', async () => {
+    const item = createWorkItem('again')
+    const first = createAuditEvent('again-1', item, '2026-01-01T00:00:00.000Z', [], {
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+    })
+    const deleted = createAuditEvent('again-2', item, '2026-01-02T00:00:00.000Z', [], {
+      eventType: 'work-item.deleted',
+      action: 'deleted',
+    })
+    const recreated = createAuditEvent('again-3', item, '2026-01-03T00:00:00.000Z', [], {
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+    })
+    const second = createAuditEvent('again-4', item, '2026-01-04T00:00:00.000Z', [], { afterRevision: 2 })
+    const third = createAuditEvent('again-5', item, '2026-01-05T00:00:00.000Z', [], { afterRevision: 3 })
+    const store = new MemoryHistoryStore()
+    const timeline = createTimeline([first, deleted, recreated, second, third])
+    await processAnalyticsWorkItemHistoryProjectionBatch(
+      { Records: [streamRecord(third)] },
+      { store, readWorkItemTimeline: timeline.readWorkItemTimeline },
+    )
+    const row = (await store.getRow({ workspaceId, teamId: 'core', workItemId: 'again' })).row
+    expect(row?.coveredRevision).toBe(3)
+    expect(row?.entries.map((entry) => entry.eventId)).toEqual(['again-3', 'again-4', 'again-5'])
+
+    // A delete after the event still means the Work Item is gone.
+    const later = new MemoryHistoryStore()
+    await processAnalyticsWorkItemHistoryProjectionBatch(
+      { Records: [streamRecord(second)] },
+      { store: later, readWorkItemTimeline: createTimeline([recreated, second, { ...deleted, occurredAt: '2026-01-06T00:00:00.000Z' }]).readWorkItemTimeline },
+    )
+    expect((await later.getRow({ workspaceId, teamId: 'core', workItemId: 'again' })).exists).toBe(false)
+  })
+
+  test('expires an overflowed row with its oldest entry and rebuilds it afterwards', async () => {
+    const key = { workspaceId, teamId: 'core', workItemId: 'shrink' }
+    const now = Date.parse('2026-06-01T00:00:00.000Z') / 1000
+    const entries = Array.from({ length: 400 }, (_, index) => ({
+      eventId: `shrink-${index}`,
+      eventType: 'work-item.updated',
+      action: 'updated',
+      occurredAt: new Date(Date.UTC(2026, 0, 1) + index * 1_000).toISOString(),
+      changes: [{ field: 'title', before: 'x'.repeat(500), after: 'y'.repeat(500) }],
+      metadata: { afterRevision: index + 1 },
+      expiresAt: now + 1_000 + index,
+    }))
+    const overflowed = mergeAnalyticsWorkItemHistoryEntries(
+      createEmptyAnalyticsWorkItemHistoryRow(key),
+      entries,
+      now,
+    )
+    expect(overflowed.overflow).toBe(true)
+    expect(overflowed.overflowExpiresAt).toBe(now + 1_000)
+    const stored = toStoredAnalyticsWorkItemHistoryRow(overflowed)
+    expect(stored.historyExpiresAt).toBe(now + 1_000)
+    expect(parseStoredAnalyticsWorkItemHistoryRow(stored)?.overflowExpiresAt).toBe(now + 1_000)
+
+    // After the oldest entry expires, the next event measures the remaining history again.
+    const store = new MemoryHistoryStore()
+    store.rows.set(
+      `${workspaceId}|${createAnalyticsWorkItemHistoryRecordKey('core', 'shrink')}`,
+      { ...overflowed, overflowExpiresAt: now - 1 },
+    )
+    const item = createWorkItem('shrink')
+    const created = createAuditEvent('shrink-a', item, '2026-01-01T00:00:00.000Z', [], {
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+    })
+    const next = createAuditEvent('shrink-b', item, '2026-01-02T00:00:00.000Z', [], { afterRevision: 2 })
+    await processAnalyticsWorkItemHistoryProjectionBatch(
+      { Records: [streamRecord(next)] },
+      { store, readWorkItemTimeline: createTimeline([created, next]).readWorkItemTimeline, now: () => new Date(now * 1000) },
+    )
+    const row = (await store.getRow(key)).row
+    expect(row?.overflow).toBe(false)
+    expect(row?.coveredRevision).toBe(2)
+  })
+
+  test('replaces a malformed row only while it is still the item that was read', async () => {
+    const conditions: unknown[] = []
+    /** Records each conditional put. */
+    const send = async (command: unknown) => {
+      if (!(command instanceof PutCommand)) throw new Error('unexpected command')
+      conditions.push([command.input.ConditionExpression, command.input.ExpressionAttributeValues])
+      return {}
+    }
+    // Same test-double pattern as analytics.test.ts: only `send` is exercised.
+    const client = { send } as unknown as DynamoDBDocumentClient
+    const store = new DynamoDbAnalyticsWorkItemHistoryStore('analytics-table', client)
+    const row = createEmptyAnalyticsWorkItemHistoryRow({ workspaceId, teamId: 'core', workItemId: 'bad' })
+    await store.putRow(row, { row: undefined, exists: true, storedRowVersion: 7 })
+    await store.putRow(row, { row: undefined, exists: true })
+    expect(conditions).toEqual([
+      ['rowVersion = :rowVersion', { ':rowVersion': 7 }],
+      ['attribute_exists(recordKey) AND attribute_not_exists(rowVersion)', undefined],
+    ])
+  })
+
+  test('reads the audit timeline when a row has expired entries or cannot be read', async () => {
+    const item = createWorkItem('fallback', { revision: 1 })
+    const row: AnalyticsWorkItemHistoryRow = {
+      ...createEmptyAnalyticsWorkItemHistoryRow({ workspaceId, teamId: 'core', workItemId: 'fallback' }),
+      coveredRevision: 1,
+      entries: [{
+        eventId: 'fallback-1',
+        eventType: 'work-item.created',
+        action: 'created',
+        occurredAt: '2026-01-01T00:00:00.000Z',
+        changes: [],
+        metadata: { afterRevision: 1 },
+        expiresAt: 1_000,
+      }],
+    }
+    const audit: AnalyticsHistoryEvent[] = []
+    let auditReads = 0
+    const readAuditEvents = async () => {
+      auditReads += 1
+      return audit
+    }
+    const base = { workspaceId, workItems: [item], historyReadAt: '2026-02-01T00:00:00.000Z', readAuditEvents }
+    await readAnalyticsWorkItemHistoryEvents({
+      ...base,
+      historyReader: { getWorkItemHistoryRows: async () => [row] },
+      now: () => new Date(2_000 * 1000),
+    })
+    expect(auditReads).toBe(1)
+    await readAnalyticsWorkItemHistoryEvents({
+      ...base,
+      historyReader: {
+        getWorkItemHistoryRows: async () => {
+          throw Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' })
+        },
+      },
+    })
+    expect(auditReads).toBe(2)
+    const tooLarge = readAnalyticsWorkItemHistoryEvents({
+      ...base,
+      historyReader: {
+        getWorkItemHistoryRows: async () => {
+          throw new AnalyticsError(413, 'AnalyticsHistoryLimitExceeded', 'too large')
+        },
+      },
+    })
+    await expect(tooLarge).rejects.toMatchObject({ status: 413 })
+  })
+
+  test('rejects stored entries whose occurrence time is not a valid timestamp', () => {
+    const row = toStoredAnalyticsWorkItemHistoryRow({
+      ...createEmptyAnalyticsWorkItemHistoryRow({ workspaceId, teamId: 'core', workItemId: 'time' }),
+      coveredRevision: 1,
+      entries: [{
+        eventId: 'time-1',
+        eventType: 'work-item.created',
+        action: 'created',
+        occurredAt: 'invalid',
+        changes: [],
+        metadata: { afterRevision: 1 },
+      }],
+    })
+    expect(parseStoredAnalyticsWorkItemHistoryRow(row)).toBeUndefined()
   })
 
   test('marks a row that does not fit as overflowed', () => {

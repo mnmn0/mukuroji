@@ -83,6 +83,11 @@ export type AnalyticsWorkItemHistoryRow = AnalyticsWorkItemHistoryKey & {
   entries: AnalyticsWorkItemHistoryEntry[]
   /** Optimistic concurrency counter, incremented on every write. */
   rowVersion: number
+  /**
+   * When an overflowed row expires (epoch seconds) so the next event rebuilds it; set from the
+   * oldest dropped entry, or a recheck delay when the timeline was too long to read.
+   */
+  overflowExpiresAt?: number
 }
 
 /** Result of reading one history row for an update. */
@@ -91,6 +96,8 @@ export type AnalyticsWorkItemHistoryRowRead = {
   row: AnalyticsWorkItemHistoryRow | undefined
   /** Whether an item exists under the history key, even if it could not be parsed. */
   exists: boolean
+  /** `rowVersion` of the stored item, read even when the row could not be parsed. */
+  storedRowVersion?: number
 }
 
 /** Write side of the per-Work-Item Analytics history rows. */
@@ -303,15 +310,24 @@ export function mergeAnalyticsWorkItemHistoryEntries(
       entry.expiresAt > nowEpochSeconds
     )
     .sort(compareHistoryEntries)
+  const { overflowExpiresAt: _previousOverflowExpiry, ...base } = row
   const next: AnalyticsWorkItemHistoryRow = {
-    ...row,
+    ...base,
     coveredRevision: calculateCoveredRevision(merged, nowEpochSeconds),
     overflow: false,
     entries: merged,
     rowVersion: row.rowVersion + 1,
   }
   if (measureAnalyticsWorkItemHistoryRow(next) > ANALYTICS_WORK_ITEM_HISTORY_MAX_BYTES) {
-    return { ...next, overflow: true, entries: [] }
+    // The row expires with its oldest entry, so the history is measured again once retention
+    // has dropped that entry.
+    const overflowExpiresAt = readOldestExpiry(merged)
+    return {
+      ...next,
+      overflow: true,
+      entries: [],
+      ...(overflowExpiresAt === undefined ? {} : { overflowExpiresAt }),
+    }
   }
   return next
 }
@@ -449,13 +465,13 @@ export const ANALYTICS_WORK_ITEM_HISTORY_TTL_ATTRIBUTE = 'historyExpiresAt'
  * @returns The DynamoDB item, keyed by `workspaceId` and `recordKey`.
  */
 export function toStoredAnalyticsWorkItemHistoryRow(row: AnalyticsWorkItemHistoryRow) {
-  const expiries = row.entries.flatMap((entry) =>
-    entry.expiresAt === undefined ? [] : [entry.expiresAt]
-  )
+  const historyExpiresAt = row.overflow ? row.overflowExpiresAt : readOldestExpiry(row.entries)
   return {
-    // DynamoDB TTL deletes the row once its oldest entry passes the audit retention, so the row
-    // never keeps audit data longer than the audit table does; the next event rebuilds it.
-    ...(expiries.length === 0 ? {} : { historyExpiresAt: Math.min(...expiries) }),
+    // The row gets the same expiry as its oldest entry, so DynamoDB TTL may delete it once the
+    // audit retention has passed. TTL deletes the audit and history items separately and
+    // without a fixed order; readers ignore expired entries until then. An overflowed row
+    // expires the same way, and the next event rebuilds the row.
+    ...(historyExpiresAt === undefined ? {} : { historyExpiresAt }),
     workspaceId: row.workspaceId,
     recordKey: createAnalyticsWorkItemHistoryRecordKey(row.teamId, row.workItemId),
     entryType: ANALYTICS_WORK_ITEM_HISTORY_ENTRY_TYPE,
@@ -488,6 +504,7 @@ export function parseStoredAnalyticsWorkItemHistoryRow(
     overflow,
     entries,
     rowVersion,
+    historyExpiresAt,
   } = value
   if (
     value.entryType !== ANALYTICS_WORK_ITEM_HISTORY_ENTRY_TYPE ||
@@ -499,7 +516,8 @@ export function parseStoredAnalyticsWorkItemHistoryRow(
     !isNonNegativeInteger(coveredRevision) ||
     typeof overflow !== 'boolean' ||
     !isNonNegativeInteger(rowVersion) ||
-    !Array.isArray(entries)
+    !Array.isArray(entries) ||
+    (historyExpiresAt !== undefined && !isNonNegativeInteger(historyExpiresAt))
   ) {
     return undefined
   }
@@ -517,7 +535,24 @@ export function parseStoredAnalyticsWorkItemHistoryRow(
     overflow,
     entries: parsedEntries,
     rowVersion,
+    ...(overflow && historyExpiresAt !== undefined ? { overflowExpiresAt: historyExpiresAt } : {}),
   }
+}
+
+/**
+ * Returns the earliest audit retention expiry among entries.
+ *
+ * @param entries - History entries.
+ * @returns The smallest `expiresAt`, or undefined when no entry has one.
+ */
+function readOldestExpiry(entries: readonly AnalyticsWorkItemHistoryEntry[]) {
+  let oldest: number | undefined
+  for (const entry of entries) {
+    if (entry.expiresAt !== undefined && (oldest === undefined || entry.expiresAt < oldest)) {
+      oldest = entry.expiresAt
+    }
+  }
+  return oldest
 }
 
 /**
@@ -534,6 +569,7 @@ function parseStoredHistoryEntry(value: unknown): AnalyticsWorkItemHistoryEntry 
     typeof eventType !== 'string' ||
     typeof action !== 'string' ||
     typeof occurredAt !== 'string' ||
+    !Number.isFinite(Date.parse(occurredAt)) ||
     !Array.isArray(changes) ||
     (expiresAt !== undefined && !isNonNegativeInteger(expiresAt))
   ) {

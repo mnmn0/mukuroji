@@ -61,7 +61,9 @@ History は Work Item ごとの history row（`AnalyticsTable` の `WORK_ITEM_HI
 AuditEvents stream から作り、target が Work Item 自身の event だけを、engine が読む field の変更、revision の
 metadata、audit の保持期限（`expiresAt`）に絞って持ちます。Row の `coveredRevision`（途切れずにそろった最大の
 canonical revision）が canonical の `revision` と一致し、`overflow` でない Work Item だけ row を使い、row がない・
-古い・`overflow` の Work Item は下の entity timeline の query で読みます。どちらから読んだ event にも同じ read barrier を
+古い・`overflow` の Work Item と、保持期限を過ぎた entry が残る Work Item は下の entity timeline の query で読みます。
+Row は強整合性の BatchGetItem で読み、読めなかったときはその query の全 Work Item を timeline から読みます。
+`overflow` の row も最も早い entry の保持期限で消え、次の event で測り直します。どちらから読んだ event にも同じ read barrier を
 かけるので、結果は全 Work Item の entity timeline を読んだ場合と同じです。Row から復元する entry は 1 query 合計
 200,000 件・row の合計 64 MiB まで（超えたら `413`）、保持期限を過ぎた entry は使わず、projection も書き込み時に落とします。Row は最も早い entry の
 保持期限（`historyExpiresAt`、`AnalyticsTable` の TTL）で消え、次の event で作り直されます。Projection は row がないとき（revision 1 の INSERT を除く）や

@@ -19,6 +19,9 @@ import {
 /** Attempts of the read-merge-write cycle before the record is retried by Lambda. */
 const HISTORY_WRITE_MAX_ATTEMPTS = 4
 
+/** Delay before a row overflowed by a timeline too long to read is rebuilt (30 days). */
+const HISTORY_OVERFLOW_RECHECK_SECONDS = 30 * 24 * 60 * 60
+
 /** Audit timeline of one Work Item, read to rebuild its history row. */
 export type AnalyticsWorkItemTimeline = {
   /** Audit events of the Work Item entity in occurrence order. */
@@ -83,6 +86,7 @@ export async function processAnalyticsWorkItemHistoryProjectionBatch(
       }
     } catch (error) {
       console.error('Analytics history projection failed.', {
+        correlationId: auditEvent.correlationId,
         code: readErrorText(error, 'code') ?? 'AnalyticsHistoryProjectionFailed',
         name: readErrorText(error, 'name') ?? 'Error',
       })
@@ -146,14 +150,21 @@ async function buildNextRow(
   current: AnalyticsWorkItemHistoryRowRead,
   dependencies: AnalyticsWorkItemHistoryProjectionDependencies,
 ): Promise<AnalyticsWorkItemHistoryRow | undefined> {
-  const base = current.row
-    ? current.row
-    : { ...createEmptyAnalyticsWorkItemHistoryRow(key), rowVersion: current.exists ? 1 : 0 }
-  const startsHistory = inserted && entry.metadata?.afterRevision === 1
-  const rebuild = current.row
-    ? hasAnalyticsWorkItemHistoryGap(current.row, entry)
-    : !startsHistory
   const nowEpochSeconds = Math.floor((dependencies.now?.() ?? new Date()).getTime() / 1000)
+  // An overflowed row past its expiry is measured again, as if TTL had already removed it.
+  const currentRow = current.row?.overflow &&
+      current.row.overflowExpiresAt !== undefined &&
+      current.row.overflowExpiresAt <= nowEpochSeconds
+    ? undefined
+    : current.row
+  const base = currentRow ?? {
+    ...createEmptyAnalyticsWorkItemHistoryRow(key),
+    rowVersion: current.row?.rowVersion ?? current.storedRowVersion ?? 0,
+  }
+  const startsHistory = inserted && entry.metadata?.afterRevision === 1
+  const rebuild = currentRow
+    ? hasAnalyticsWorkItemHistoryGap(currentRow, entry)
+    : !startsHistory
   if (!rebuild) return mergeAnalyticsWorkItemHistoryEntries(base, [entry], nowEpochSeconds)
 
   const timeline = await dependencies.readWorkItemTimeline(
@@ -162,13 +173,21 @@ async function buildNextRow(
     key.workItemId,
   )
   if (!timeline.complete) {
-    return { ...base, overflow: true, entries: [], rowVersion: base.rowVersion + 1 }
+    return {
+      ...base,
+      overflow: true,
+      entries: [],
+      rowVersion: base.rowVersion + 1,
+      overflowExpiresAt: nowEpochSeconds + HISTORY_OVERFLOW_RECHECK_SECONDS,
+    }
   }
   // The stored copies came from the stream and may already carry a retention MODIFY that the
   // eventually consistent index has not caught up with, so the timeline only adds missing events.
   // The triggering stream entry still replaces its own stored copy below.
-  const storedEventIds = new Set(base.entries.map((stored) => stored.eventId))
-  const entries: AnalyticsWorkItemHistoryEntry[] = []
+  let storedEventIds = new Set(base.entries.map((stored) => stored.eventId))
+  let row = base
+  let entries: AnalyticsWorkItemHistoryEntry[] = []
+  const entryAt = Date.parse(entry.occurredAt)
   for (const timelineEvent of timeline.events) {
     const timelineInput = readAnalyticsWorkItemHistoryEvent(timelineEvent)
     if (
@@ -176,12 +195,20 @@ async function buildNextRow(
       timelineInput.teamId !== key.teamId ||
       timelineInput.workItemId !== key.workItemId
     ) continue
-    if (timelineInput.deleted) return undefined
+    if (timelineInput.deleted) {
+      // A delete after this event means the Work Item is gone. An earlier delete ended a
+      // previous Work Item with the same ID, so its history is dropped and the rebuild goes on.
+      if (!(Date.parse(timelineInput.entry.occurredAt) < entryAt)) return undefined
+      row = { ...base, entries: [] }
+      storedEventIds = new Set()
+      entries = []
+      continue
+    }
     if (storedEventIds.has(timelineInput.entry.eventId)) continue
     entries.push(timelineInput.entry)
   }
   entries.push(entry)
-  return mergeAnalyticsWorkItemHistoryEntries(base, entries, nowEpochSeconds)
+  return mergeAnalyticsWorkItemHistoryEntries(row, entries, nowEpochSeconds)
 }
 
 /**

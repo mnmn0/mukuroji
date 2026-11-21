@@ -147,6 +147,7 @@ AuditEventsTable の stream が outbox を兼ねます。業務 table の更新�
 | Tenant*ExecutionQueue ×6（任意） | テナント操作の各 capability Lambda | TenantOperationFunction |
 
 どの queue も専用の DLQ を持ち、最大受信回数は5回です。stream の処理失敗も DLQ に送り、黙って捨てません。
+ただし Analytics の history row の projection は例外です。row の更新に失敗したら row を消してエラーログを出し、その Work Item は audit timeline から読みます。DLQ には送りません。row を消すのにも失敗したときだけ、stream の再試行の対象になります（ADR 0042）。
 
 ### スケジュール
 

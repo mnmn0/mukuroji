@@ -68,17 +68,19 @@ export async function readAnalyticsWorkItemHistoryEvents<T extends AnalyticsHist
   if (!historyReader || workItems.length === 0) {
     return [...await input.readAuditEvents(workItems)]
   }
-  const rows = await historyReader.getWorkItemHistoryRows(
-    input.workspaceId,
-    workItems.map((workItem) => ({ teamId: workItem.teamId, workItemId: workItem.id })),
-  )
+  const rows = await readHistoryRows(historyReader, input.workspaceId, workItems)
   const rowsByKey = new Map(rows.map((row) => [historyKey(row.teamId, row.workItemId), row]))
   const nowEpochSeconds = Math.floor((input.now?.() ?? new Date()).getTime() / 1000)
   const historyEvents: AnalyticsHistoryEvent[] = []
   const fallback: T[] = []
   for (const workItem of workItems) {
     const row = rowsByKey.get(historyKey(workItem.teamId, workItem.id))
-    if (!row || row.overflow || row.coveredRevision !== workItem.revision) {
+    if (
+      !row ||
+      row.overflow ||
+      row.coveredRevision !== workItem.revision ||
+      hasExpiredEntry(row, nowEpochSeconds)
+    ) {
       fallback.push(workItem)
       continue
     }
@@ -93,6 +95,53 @@ export async function readAnalyticsWorkItemHistoryEvents<T extends AnalyticsHist
   }
   if (fallback.length === 0) return historyEvents
   return [...historyEvents, ...await input.readAuditEvents(fallback)]
+}
+
+/**
+ * Reads history rows, treating a failed read as no rows so every Work Item uses the audit path.
+ *
+ * Only the byte budget's 413 is kept, because the audit path would hit its own limit too.
+ *
+ * @param historyReader - History row reader.
+ * @param workspaceId - Workspace whose rows are read.
+ * @param workItems - Work Items to read.
+ * @returns The rows read, or none when the read failed.
+ * @throws AnalyticsError 413 when the rows exceed the byte budget.
+ */
+async function readHistoryRows(
+  historyReader: AnalyticsWorkItemHistoryReader,
+  workspaceId: string,
+  workItems: readonly AnalyticsHistoryWorkItem[],
+) {
+  try {
+    return await historyReader.getWorkItemHistoryRows(
+      workspaceId,
+      workItems.map((workItem) => ({ teamId: workItem.teamId, workItemId: workItem.id })),
+    )
+  } catch (error) {
+    if (error instanceof AnalyticsError && error.status === 413) throw error
+    console.warn('Analytics history rows could not be read; using the audit timeline.', {
+      code: error instanceof AnalyticsError ? error.code : 'AnalyticsHistoryRowReadFailed',
+      name: error instanceof Error ? error.name : 'Error',
+    })
+    return []
+  }
+}
+
+/**
+ * Returns whether a row still holds an entry past its audit retention.
+ *
+ * Such a row waits for TTL or the next projection write, and the audit timeline is read instead
+ * so a dropped entry never removes the latest revision's event from the result.
+ *
+ * @param row - History row.
+ * @param nowEpochSeconds - Current time.
+ * @returns True when any entry has expired.
+ */
+function hasExpiredEntry(row: AnalyticsWorkItemHistoryRow, nowEpochSeconds: number) {
+  return row.entries.some((entry) =>
+    entry.expiresAt !== undefined && entry.expiresAt <= nowEpochSeconds
+  )
 }
 
 /**

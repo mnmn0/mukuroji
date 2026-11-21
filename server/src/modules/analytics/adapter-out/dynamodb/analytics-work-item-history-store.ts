@@ -46,13 +46,19 @@ export class DynamoDbAnalyticsWorkItemHistoryStore implements AnalyticsWorkItemH
       ConsistentRead: true,
     }))
     if (!response.Item) return { row: undefined, exists: false }
-    return { row: parseStoredAnalyticsWorkItemHistoryRow(response.Item), exists: true }
+    const storedRowVersion = response.Item.rowVersion
+    return {
+      row: parseStoredAnalyticsWorkItemHistoryRow(response.Item),
+      exists: true,
+      ...(typeof storedRowVersion === 'number' ? { storedRowVersion } : {}),
+    }
   }
 
   /**
    * Saves a row conditioned on the row that was read.
    *
-   * A malformed stored row is overwritten as long as it still exists, so a rebuild can replace it.
+   * A malformed stored row is overwritten only while it is still the item that was read: its
+   * `rowVersion` must match, or stay absent when it had none.
    *
    * @param row - Row to save.
    * @param previous - Result of the read the row was built from.
@@ -62,13 +68,14 @@ export class DynamoDbAnalyticsWorkItemHistoryStore implements AnalyticsWorkItemH
     row: AnalyticsWorkItemHistoryRow,
     previous: AnalyticsWorkItemHistoryRowRead,
   ): Promise<boolean> {
-    const condition = previous.row
+    const readVersion = previous.row?.rowVersion ?? previous.storedRowVersion
+    const condition = readVersion !== undefined
       ? {
           ConditionExpression: 'rowVersion = :rowVersion',
-          ExpressionAttributeValues: { ':rowVersion': previous.row.rowVersion },
+          ExpressionAttributeValues: { ':rowVersion': readVersion },
         }
       : previous.exists
-        ? { ConditionExpression: 'attribute_exists(recordKey)' }
+        ? { ConditionExpression: 'attribute_exists(recordKey) AND attribute_not_exists(rowVersion)' }
         : { ConditionExpression: 'attribute_not_exists(recordKey)' }
     try {
       await this.documentClient.send(new PutCommand({

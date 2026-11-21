@@ -11,9 +11,6 @@ export {
   processAnalyticsWorkItemHistoryProjectionBatch,
   type AnalyticsWorkItemTimeline,
 } from './adapter-in/events/analytics-work-item-history-projection'
-export {
-  DynamoDbAnalyticsWorkItemHistoryStore,
-} from './adapter-out/dynamodb/analytics-work-item-history-store'
 /** Scheduled delivery notification emitted through the audit outbox. */
 export {
   ANALYTICS_REPORT_DELIVERED_EVENT_TYPE,

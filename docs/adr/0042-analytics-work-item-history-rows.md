@@ -51,7 +51,8 @@ comment・file・context item など Analytics が使わない event も載る�
   - row が 350 KiB を超えるときは `overflow: true` にして `entries` を捨てる。reader はその Work Item だけ audit から読む。
 - 読み取り（API の `readAuthorizedAnalyticsData` と定期配信の runner の両方）は次のようにする。
   1. history が要る Work Item（`selectAnalyticsWorkItemsRequiringHistory` の結果）の history row を BatchGetItem
-     （100 key ずつ、結果整合性の読み取り）で読む。
+     （100 key ずつ、強整合性の読み取り）で読む。保持期限の変更を書いた row を古い期限のまま読まないため。
+     BatchGetItem が失敗したときは、その query の全 Work Item を audit から読む（row の合計サイズ超過の `413` は除く）。
   2. `coveredRevision` が canonical の `revision` と一致し、`overflow` でない row は `entries` を engine 用の
      `AuditEventV1` の形に戻して使う。`eventId` は元の audit event のものなので、evidence は今と同じ event を指す。
   3. row がない、`coveredRevision` が古い（projection の遅れ）、`overflow` の Work Item だけ、今の entity timeline の
@@ -97,7 +98,7 @@ Analytics の query（画面・evidence・定期配信の合計）月 3,000 回�
 
 - 選択肢 A（推奨）: Work Item ごとの圧縮済み history row（上の「決定」）。
   - 費用: history row の平均を 2 KB とすると、書き込みは更新 1 回 2 WRU で月約 $0.14、読み取りは 1 query
-    2,000 row × 0.5 RRU で月約 $0.43、保存と PITR は 20 MB で $0.01 未満。合計 月 $1 未満で、固定費は増えない
+    2,000 row × 1 RRU（強整合性）で月約 $0.86、保存と PITR は 20 MB で $0.01 未満。合計 月 $1 未満で、固定費は増えない
     （table・GSI・Lambda・stream reader を足さない）。
   - 利点: 結果の意味が今と同じで、engine と metric contract を変えない。filter・group-by・evidence・`asOf`・現在の
     ACL での再評価がすべてそのまま動く。history の読み取りが Work Item 1 件 1 Query から 100 件 1 BatchGet になり、
@@ -142,13 +143,16 @@ Analytics の query（画面・evidence・定期配信の合計）月 3,000 回�
    - runner の拡張は PR #671 の上に積むため、この ADR を入れる PR とは別の PR にする。この PR が最初の deploy より前に
      入る環境では、すべての Work Item が作成時から row を持つので backfill は要らない。
 3. backfill の途中でも結果は正しい。row がない Work Item は audit から読むため、backfill が進むほど `413` が出にくくなるだけ。
-4. 戻すとき: reader を今の audit 経路に戻す deploy だけでよい。history row は残しても読まれない。消すときは
-   `WORK_ITEM_HISTORY#` の prefix を消す。
+4. 戻すとき: reader を今の audit 経路に戻す deploy だけでよい。history row は残しても読まれない。
+   row も消すときは、先に audit projection の fan-out から history の projection を外す deploy をしてから
+   `WORK_ITEM_HISTORY#` の prefix を消す。projection が動いたままだと、次の更新で row が作り直される。
 
 ## 結果
 
-- 期間中に更新された Work Item が 501 件以上でも、history row がそろっていれば `413` にならない。上限は今の
-  「参照可能な Work Item 10,000 件」になる。
+- history row から読める Work Item は audit 経路の 500 件に数えないので、期間中に更新された Work Item が
+  501 件以上でも `413` にならない。代わりに、参照可能な Work Item 10,000 件、row から戻す entry 200,000 件、
+  読む row の合計 64 MiB の上限がそれぞれ別にかかり、どれかを超えると `413` になる（平均 24 KiB の row が
+  3,000 件あると 64 MiB を超える）。
 - Analytics の応答時間が短くなり、Analytics が使わない event を読まなくなる。費用は月 $1 未満で、固定費は増えない。
 - 受け入れる欠点: Work Item の変更を audit と history row の 2 か所に持つ。projection の遅れや順序の飛びは、その
   Work Item だけ audit から読むことで吸収する。

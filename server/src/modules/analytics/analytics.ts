@@ -2224,6 +2224,11 @@ function createMetricSeries(
     normalized.query.timeZone,
     granularity,
   )
+  // Facts of a non-state metric do not depend on the bucket, so they are built once; neither
+  // calculateMetric nor createSeriesSegments changes them.
+  const sharedFacts = isAnalyticsStateMetric(widget.metric)
+    ? undefined
+    : createFilteredFacts(workItems, eventsByWorkItem, normalized, authorizedProjectIds)
   return buckets.map((bucket): AnalyticsSeriesPoint => {
     const evaluationAt = Math.min(bucket.to, normalized.asOf)
     const bucketNormalized: NormalizedAnalyticsQuery = {
@@ -2235,19 +2240,12 @@ function createMetricSeries(
       periodTo: normalized.periodTo,
       asOf: evaluationAt,
     }
-    const bucketFacts = isAnalyticsStateMetric(widget.metric)
-      ? createFilteredFacts(
-          workItems,
-          eventsByWorkItem,
-          bucketNormalized,
-          authorizedProjectIds,
-        )
-      : createFilteredFacts(
-          workItems,
-          eventsByWorkItem,
-          normalized,
-          authorizedProjectIds,
-        )
+    const bucketFacts = sharedFacts ?? createFilteredFacts(
+      workItems,
+      eventsByWorkItem,
+      bucketNormalized,
+      authorizedProjectIds,
+    )
     const computation = calculateMetric(
       widget.metric,
       bucketFacts,
@@ -3908,7 +3906,7 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
   }
 
   /**
-   * Reads the history rows of the given Work Items with eventually consistent BatchGetItem.
+   * Reads the history rows of the given Work Items with strongly consistent BatchGetItem.
    *
    * Callers compare each row's covered revision with the canonical revision, so a stale read only
    * sends that Work Item to the audit timeline. Malformed rows are skipped for the same reason.
@@ -3974,7 +3972,9 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
       const requested = pending.length
       const response = await this.documentClient.send(new BatchGetCommand({
         RequestItems: {
-          [this.tableName]: { Keys: pending, ConsistentRead: false },
+          // Strongly consistent so a retention change already written to the row is never read
+          // back with the old expiry; it costs twice the read units of an eventual read.
+          [this.tableName]: { Keys: pending, ConsistentRead: true },
         },
       }))
       for (const item of response.Responses?.[this.tableName] ?? []) {
