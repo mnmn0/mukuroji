@@ -56,7 +56,10 @@ import {
 } from './app-dependencies'
 import { toCognitoDirectoryErrorResponse } from './enterprise-access'
 import { readJson } from './http'
-import { canMemberViewWorkItemScope } from './member-work-item-visibility'
+import {
+  canMemberViewWorkItemScope,
+  createMemberWorkItemVisibilityReads,
+} from './member-work-item-visibility'
 import { toProjectDataErrorResponse, type WorkspacePrincipal } from './project-access'
 import { isRecord } from './value-guards'
 import { readAcceptanceCriteriaChange } from './work-item-acceptance-criteria'
@@ -87,7 +90,7 @@ export async function requireApprovalReviewers(
   dependencies: AutomationActionExecutorDependencies =
     ambientAutomationActionExecutorDependencies,
 ) {
-  const directory = await dependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja', true)
+  const visibilityReads = createMemberWorkItemVisibilityReads(workspaceId, dependencies)
   return await Promise.all(reviewerMemberKeys.map(async (memberKey) => {
     const member = await dependencies.workspaceAccess.getActiveMember(
       workspaceId,
@@ -109,7 +112,7 @@ export async function requireApprovalReviewers(
         permissions: ['work-items.read', 'files.read'],
       },
       dependencies,
-      directory,
+      visibilityReads,
     )
     if (!canView) {
       throw new FileProofingError(

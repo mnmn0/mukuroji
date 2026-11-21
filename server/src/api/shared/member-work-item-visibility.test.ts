@@ -1,10 +1,12 @@
 import { type EnterpriseRoleAssignment, type EnterpriseRoleId } from '@mukuroji/contracts'
 import { expect, test } from 'bun:test'
+import { CognitoServiceError } from '../../modules/authentication'
 import { type ProjectAccessEntry, type ProjectDirectoryResponse } from '../../modules/directory'
 import { InMemoryEnterpriseIdentityClient } from '../../modules/enterprise-identity/enterprise-identity'
 import { type WorkspaceRole } from '../../modules/workspace-access/workspace-access'
 import {
   canMemberViewWorkItemScope,
+  createMemberWorkItemVisibilityReads,
   type MemberWorkItemVisibilityDependencies,
   type MemberWorkItemVisibilityScope,
 } from './member-work-item-visibility'
@@ -195,4 +197,59 @@ test('keeps Workspace-wide read roles away from a guest', async () => {
 
 test('lets a system administrator view without any membership', async () => {
   expect(await check({ teamId: 'core-team', assignedProjectId: 'refero' }, { systemAdmin: true })).toBe(true)
+})
+
+test('reads the directory and Enterprise snapshot once for several members', async () => {
+  const counts = { directory: 0, snapshot: 0 }
+  const base = createDependencies({ roleAssignments: [assignment('workspace:portfolio-viewer')] })
+  const dependencies: MemberWorkItemVisibilityDependencies = {
+    ...base,
+    enterpriseIdentity: {
+      getSnapshot: async (workspaceId) => {
+        counts.snapshot += 1
+        return await base.enterpriseIdentity.getSnapshot(workspaceId)
+      },
+    },
+    projectDirectory: {
+      ...base.projectDirectory,
+      getProjectDirectory: async (...input) => {
+        counts.directory += 1
+        return await base.projectDirectory.getProjectDirectory(...input)
+      },
+    },
+  }
+  const reads = createMemberWorkItemVisibilityReads(WORKSPACE_ID, dependencies)
+  const results = await Promise.all([MEMBER_KEY, 'other@example.com'].map((memberKey) =>
+    canMemberViewWorkItemScope(
+      { memberKey, email: memberKey, role: 'member' },
+      { workspaceId: WORKSPACE_ID, teamId: 'core-team', permissions: ['work-items.read'] },
+      dependencies,
+      reads,
+    )
+  ))
+  expect(results).toEqual([true, false])
+  expect(counts).toEqual({ directory: 1, snapshot: 1 })
+})
+
+test('treats a member without a Cognito user as having no groups', async () => {
+  const base = createDependencies({
+    roleAssignments: [{
+      ...assignment('workspace:portfolio-viewer'),
+      principalKind: 'directory-group',
+      principalId: 'pmo-group',
+    }],
+  })
+  const notFound = new CognitoServiceError(400, 'UserNotFoundException', 'User does not exist.')
+  const dependencies: MemberWorkItemVisibilityDependencies = {
+    ...base,
+    cognito: {
+      isSystemAdmin: async () => false,
+      getUserGroups: async () => { throw notFound },
+    },
+  }
+  expect(await canMemberViewWorkItemScope(
+    { memberKey: MEMBER_KEY, email: MEMBER_KEY, role: 'member' },
+    { workspaceId: WORKSPACE_ID, teamId: 'core-team', permissions: ['work-items.read'] },
+    dependencies,
+  )).toBe(false)
 })

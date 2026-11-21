@@ -29,7 +29,10 @@ import {
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
 } from './project-access'
-import { canMemberViewWorkItemScope } from './member-work-item-visibility'
+import {
+  canMemberViewWorkItemScope,
+  createMemberWorkItemVisibilityReads,
+} from './member-work-item-visibility'
 import { canWriteTeamIssue, loadAuthorizedTeamIssue } from './work-item-access'
 import { projectAccessAllows, type TeamPermissionContext } from './workspace-access'
 
@@ -474,6 +477,11 @@ export async function requireValidCommentMentions(
   context: TeamPermissionContext,
   assignedProjectId: string | undefined,
 ) {
+  const visibilityReads = createMemberWorkItemVisibilityReads(
+    workspaceId,
+    ambientAutomationActionExecutorDependencies,
+    context.directory,
+  )
   await Promise.all(
     memberKeys.map(async (memberKey) => {
       const member = await workspaceDependencies.workspaceAccess.getActiveMember(workspaceId, memberKey)
@@ -495,7 +503,7 @@ export async function requireValidCommentMentions(
           permissions: ['work-items.read'],
         },
         ambientAutomationActionExecutorDependencies,
-        context.directory,
+        visibilityReads,
       )
 
       if (!canView) {

@@ -1,8 +1,9 @@
-import { type EnterprisePermissionId } from '@mukuroji/contracts'
+import { type EnterpriseIdentitySnapshot, type EnterprisePermissionId } from '@mukuroji/contracts'
 import {
   type ProjectDirectoryResponse,
   type ProjectDirectoryTeamResponse,
 } from '../../modules/directory'
+import { isCognitoUserNotFoundError } from '../../modules/authentication'
 import {
   evaluateEnterpriseAccess,
   type EnterpriseAuthorizationResource,
@@ -43,6 +44,37 @@ export type MemberWorkItemVisibilityScope = {
   permissions: readonly EnterprisePermissionId[]
 }
 
+/** Reads shared by every member checked for one request, so each is read at most once. */
+export type MemberWorkItemVisibilityReads = {
+  /** Reads the current active Project Directory. */
+  directory: () => Promise<ProjectDirectoryResponse>
+  /** Reads the current Enterprise Identity snapshot. */
+  snapshot: () => Promise<EnterpriseIdentitySnapshot>
+}
+
+/**
+ * Creates memoized reads for checking several members of one Workspace.
+ *
+ * @param workspaceId - Workspace whose directory and snapshot are read.
+ * @param dependencies - Ports for Enterprise Identity and the Project Directory.
+ * @param directory - Current active Project Directory, when the caller already read it.
+ * @returns Lazily evaluated reads shared by every check.
+ */
+export function createMemberWorkItemVisibilityReads(
+  workspaceId: string,
+  dependencies: Pick<MemberWorkItemVisibilityDependencies, 'enterpriseIdentity' | 'projectDirectory'>,
+  directory?: ProjectDirectoryResponse,
+): MemberWorkItemVisibilityReads {
+  let directoryRead: Promise<ProjectDirectoryResponse> | undefined = directory
+    ? Promise.resolve(directory)
+    : undefined
+  let snapshotRead: Promise<EnterpriseIdentitySnapshot> | undefined
+  return {
+    directory: () => directoryRead ??= dependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja', true),
+    snapshot: () => snapshotRead ??= dependencies.enterpriseIdentity.getSnapshot(workspaceId),
+  }
+}
+
 /**
  * Checks whether another active Workspace member can currently view a Work Item scope.
  *
@@ -52,25 +84,45 @@ export type MemberWorkItemVisibilityScope = {
  * evaluation decides and legacy Project membership is ignored. Otherwise legacy Project
  * membership decides, qualified by Team so that a Project ID shared by several Teams fails
  * closed. A Team-level Work Item is visible through the Team or any of its active Projects,
- * as in `requireTeamPermission`. System administrators can always view.
+ * as in `requireTeamPermission`. A system administrator can always view; Cognito is asked
+ * only after the other checks deny, as before.
  *
  * @param member - Active Workspace member being checked.
  * @param scope - Work Item scope and the permissions the member needs on it.
  * @param dependencies - Ports for Cognito, Enterprise Identity, and the Project Directory.
- * @param directory - Current active Project Directory, when the caller already read it.
+ * @param reads - Memoized reads shared by the members of one request.
  * @returns Whether the member can view the Work Item scope.
  */
 export async function canMemberViewWorkItemScope(
   member: Pick<WorkspaceMember, 'email' | 'memberKey' | 'role'>,
   scope: MemberWorkItemVisibilityScope,
   dependencies: MemberWorkItemVisibilityDependencies,
-  directory?: ProjectDirectoryResponse,
+  reads: MemberWorkItemVisibilityReads =
+    createMemberWorkItemVisibilityReads(scope.workspaceId, dependencies),
 ): Promise<boolean> {
   const memberKey = member.memberKey.trim().toLowerCase()
-  if (await dependencies.cognito.isSystemAdmin(memberKey)) return true
+  if (await hasWorkItemScopeAccess(memberKey, member, scope, dependencies, reads)) return true
+  return await dependencies.cognito.isSystemAdmin(memberKey)
+}
 
-  const activeDirectory = directory ??
-    await dependencies.projectDirectory.getProjectDirectory(scope.workspaceId, 'ja', true)
+/**
+ * Evaluates Enterprise or legacy Project access without the system-administrator override.
+ *
+ * @param memberKey - Normalized member key.
+ * @param member - Active Workspace member being checked.
+ * @param scope - Work Item scope and the permissions the member needs on it.
+ * @param dependencies - Ports for Cognito and the Project Directory.
+ * @param reads - Memoized directory and snapshot reads.
+ * @returns Whether the member's roles or memberships allow viewing the scope.
+ */
+async function hasWorkItemScopeAccess(
+  memberKey: string,
+  member: Pick<WorkspaceMember, 'email' | 'role'>,
+  scope: MemberWorkItemVisibilityScope,
+  dependencies: MemberWorkItemVisibilityDependencies,
+  reads: MemberWorkItemVisibilityReads,
+): Promise<boolean> {
+  const activeDirectory = await reads.directory()
   const team = activeDirectory.teams.find((candidate) => candidate.id === scope.teamId)
   if (!team) return false
   if (
@@ -80,7 +132,7 @@ export async function canMemberViewWorkItemScope(
     return false
   }
 
-  const snapshot = await dependencies.enterpriseIdentity.getSnapshot(scope.workspaceId)
+  const snapshot = await reads.snapshot()
   if (snapshot.workspaceId !== scope.workspaceId) return false
   const boundary = resolveNotificationRecipientBoundary(snapshot, memberKey, member.email, member.role)
   if (!boundary.allowed) return false
@@ -96,7 +148,7 @@ export async function canMemberViewWorkItemScope(
   const cognitoGroupIds = snapshot.roleAssignments.some((assignment) =>
     assignment.principalKind === 'directory-group'
   )
-    ? await dependencies.cognito.getUserGroups(memberKey)
+    ? await readMemberCognitoGroups(memberKey, dependencies)
     : []
   const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(snapshot, memberKey, cognitoGroupIds)
   if (directoryPrincipal.deprovisioned) return false
@@ -154,6 +206,25 @@ export async function canMemberViewWorkItemScope(
       : access.projectId === scope.assignedProjectId) &&
     projectAccessAllows(access, 'viewer')
   )
+}
+
+/**
+ * Reads a member's Cognito groups, treating a member with no Cognito user as having none.
+ *
+ * @param memberKey - Normalized member key.
+ * @param dependencies - Port for Cognito group reads.
+ * @returns Current Cognito group names.
+ */
+async function readMemberCognitoGroups(
+  memberKey: string,
+  dependencies: Pick<MemberWorkItemVisibilityDependencies, 'cognito'>,
+): Promise<string[]> {
+  try {
+    return await dependencies.cognito.getUserGroups(memberKey)
+  } catch (error) {
+    if (isCognitoUserNotFoundError(error)) return []
+    throw error
+  }
 }
 
 /**
