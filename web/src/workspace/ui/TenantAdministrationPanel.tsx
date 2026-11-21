@@ -15,7 +15,8 @@ import {
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
 import { WorkspaceWorkingCalendarFields } from './WorkspaceWorkingCalendarFields'
-import { WeeklyReportReminderFields, hasWeeklyReportReminderConflict } from './WeeklyReportReminderFields'
+import { WeeklyReportReminderFields } from './WeeklyReportReminderFields'
+import { hasWeeklyReportReminderConflict } from '../model/weeklyReportReminders'
 import { useTenantAdministrationMutations } from '../mutations/useTenantAdministrationMutations'
 import { useTenantAdministration } from '../queries/useTenantAdministration'
 

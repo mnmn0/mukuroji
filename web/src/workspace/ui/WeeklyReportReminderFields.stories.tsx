@@ -3,7 +3,8 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
 import { DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS, type WeeklyReportReminderSettings } from '@mukuroji/contracts'
 import { createTranslator } from '../../shared/i18n/i18n'
-import { WeeklyReportReminderFields, hasWeeklyReportReminderConflict } from './WeeklyReportReminderFields'
+import { hasWeeklyReportReminderConflict } from '../model/weeklyReportReminders'
+import { WeeklyReportReminderFields } from './WeeklyReportReminderFields'
 
 const t = createTranslator('ja')
 
