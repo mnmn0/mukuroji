@@ -635,6 +635,8 @@ export function buildApiRuntime(
     statements: [
       new iam.PolicyStatement({
         actions: [
+          // Analytics reads per-Work-Item history rows in batches (ADR 0042).
+          'dynamodb:BatchGetItem',
           'dynamodb:DeleteItem',
           'dynamodb:DescribeTable',
           'dynamodb:GetItem',
