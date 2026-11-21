@@ -10,6 +10,7 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import type {
+  AiAssistanceExternalProvider,
   AiAssistancePolicy,
   AiAssistancePreference,
   DecideAiAssistanceGenerationRequest,
@@ -40,6 +41,10 @@ import {
   type StoredAiAssistanceFeedback,
   type StoredAiAssistanceGeneration,
 } from '../../application/ports/ai-assistance-ports'
+import type {
+  AiProviderCredentialStore,
+  StoredAiProviderCredential,
+} from '../../application/ports/ai-provider-credential-ports'
 import {
   createAuditTransactPut,
   type AuditEventV1,
@@ -59,6 +64,7 @@ import {
 import { AiAssistanceError } from '../../errors'
 
 const POLICY_RECORD_KEY = 'AI_POLICY#WORKSPACE'
+const PROVIDER_CREDENTIAL_RECORD_PREFIX = 'AI_PROVIDER_CREDENTIAL#'
 const PREFERENCE_RECORD_PREFIX = 'AI_PREF#MEMBER#'
 const GENERATION_RECORD_PREFIX = 'AI_GENERATION#'
 const FEEDBACK_RECORD_PREFIX = 'AI_FEEDBACK#'
@@ -370,7 +376,22 @@ const feedbackItemSchema = z.object({
 }).strict()
 
 /** DynamoDB adapter that reuses the WorkspaceSearchTable partition and TTL contract. */
-export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
+
+/** Strict row schema for one encrypted Workspace provider key. */
+const providerCredentialItemSchema = z.object({
+  workspaceId: z.string().min(1),
+  recordKey: z.string().startsWith(PROVIDER_CREDENTIAL_RECORD_PREFIX),
+  recordType: z.literal('ai-assistance-provider-credential'),
+  provider: z.enum(['anthropic', 'openai']),
+  revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+  updatedAt: z.iso.datetime(),
+  ciphertext: z.string().min(1).max(4_096).optional(),
+  keyHint: z.string().regex(/^[\x21-\x7E]{4}$/u).optional(),
+}).strict().refine(
+  (item) => (item.ciphertext === undefined) === (item.keyHint === undefined),
+)
+
+export class DynamoDbAiAssistanceStore implements AiAssistanceStore, AiProviderCredentialStore {
   /** WorkspaceSearchTable document client. */
   readonly #documentClient: DynamoDBDocumentClient
 
@@ -1016,6 +1037,141 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         parsed.data.failureCode === input.failureCode
       ) return
       throw idempotencyConflictError()
+    }
+  }
+
+  /**
+   * Reads one encrypted provider key row with a strongly consistent read.
+   *
+   * @param workspaceId - Owning Workspace.
+   * @param provider - External provider.
+   * @returns The validated row, or undefined when none was ever written.
+   */
+  async getProviderCredential(
+    workspaceId: string,
+    provider: AiAssistanceExternalProvider,
+  ): Promise<StoredAiProviderCredential | undefined> {
+    const response = await this.#readItem(
+      workspaceId,
+      `${PROVIDER_CREDENTIAL_RECORD_PREFIX}${provider}`,
+    )
+    if (!response.Item) return undefined
+    const parsed = providerCredentialItemSchema.safeParse(response.Item)
+    if (
+      !parsed.success ||
+      parsed.data.workspaceId !== workspaceId ||
+      parsed.data.provider !== provider
+    ) {
+      throw invalidRecordError()
+    }
+    const { workspaceId: storedWorkspaceId, provider: storedProvider, revision, updatedAt } =
+      parsed.data
+    return {
+      workspaceId: storedWorkspaceId,
+      provider: storedProvider,
+      revision,
+      updatedAt,
+      ...(parsed.data.ciphertext === undefined ? {} : { ciphertext: parsed.data.ciphertext }),
+      ...(parsed.data.keyHint === undefined ? {} : { keyHint: parsed.data.keyHint }),
+    }
+  }
+
+  /**
+   * Writes one revision-fenced provider key row and its audit event atomically.
+   *
+   * The same transaction checks the manager's Workspace membership version and,
+   * when present, the Enterprise CONTROL revision, so a key cannot be written
+   * after management access was lost.
+   *
+   * @param memberId - Member key bound to the authorization fence.
+   * @param credential - Next row; omitting ciphertext removes the key.
+   * @param expectedRevision - Revision observed by the manager.
+   * @param authorizationFence - Fresh management authorization fence.
+   * @param auditEvent - Key-free audit event.
+   */
+  async putProviderCredentialWithAudit(
+    memberId: string,
+    credential: StoredAiProviderCredential,
+    expectedRevision: number,
+    authorizationFence: AiAssistancePolicyAuthorizationFence,
+    auditEvent: AuditEventV1,
+  ): Promise<void> {
+    const auditTableName = this.#auditTableName
+    if (auditTableName === undefined) {
+      throw new AiAssistanceError(
+        'upstream',
+        'AiAssistancePersistenceError',
+        'AI assistance audit storage is not configured.',
+      )
+    }
+    validatePolicyAuthorizationFence(authorizationFence)
+    const item = providerCredentialItemSchema.parse({
+      workspaceId: credential.workspaceId,
+      recordKey: `${PROVIDER_CREDENTIAL_RECORD_PREFIX}${credential.provider}`,
+      recordType: 'ai-assistance-provider-credential',
+      provider: credential.provider,
+      revision: credential.revision,
+      updatedAt: credential.updatedAt,
+      ...(credential.ciphertext === undefined ? {} : { ciphertext: credential.ciphertext }),
+      ...(credential.keyHint === undefined ? {} : { keyHint: credential.keyHint }),
+    })
+    const credentialPut = {
+      Put: {
+        TableName: this.#tableName,
+        Item: item,
+        ConditionExpression: expectedRevision === 0
+          ? 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)'
+          : '#revision = :expectedRevision',
+        ...(expectedRevision === 0
+          ? {}
+          : {
+              ExpressionAttributeNames: { '#revision': 'revision' },
+              ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+            }),
+      },
+    }
+    const requiresWorkspaceMemberCondition =
+      (authorizationFence.principalKind ?? 'member') !== 'service-account'
+    const workspaceMemberConditionItems = requiresWorkspaceMemberCondition
+      ? [createWorkspaceMemberAuthorizationCondition(
+          this.#workspaceAccessTableName,
+          credential.workspaceId,
+          memberId,
+          authorizationFence,
+        )]
+      : []
+    const enterpriseConditionItems = authorizationFence.enterpriseControlRevision === undefined
+      ? []
+      : [createEnterpriseControlAuthorizationCondition(
+          this.#enterpriseIdentityTableName,
+          credential.workspaceId,
+          authorizationFence.enterpriseControlRevision,
+        )]
+    try {
+      await this.#documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          credentialPut,
+          ...workspaceMemberConditionItems,
+          ...enterpriseConditionItems,
+          createAuditTransactPut(auditTableName, auditEvent),
+        ],
+      }))
+    } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) throw revisionConflictError()
+      for (
+        let index = 1;
+        index <= workspaceMemberConditionItems.length + enterpriseConditionItems.length;
+        index += 1
+      ) {
+        if (isTransactionConditionalFailureAt(error, index)) {
+          throw new AiAssistanceError(
+            'authorization',
+            'AiAssistanceAuthorizationChanged',
+            'AI provider key authorization is no longer current.',
+          )
+        }
+      }
+      throw mapDynamoWriteError(error)
     }
   }
 

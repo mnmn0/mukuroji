@@ -11,6 +11,7 @@ import {
 /** Creates one complete gateway input without sensitive member identifiers. */
 function createInput(): AiModelGenerationInput {
   return {
+    workspaceId: 'workspace-1',
     modelId: 'model-1',
     task: 'search',
     locale: 'ja',

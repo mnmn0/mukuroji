@@ -133,3 +133,34 @@ export {
   type AiAssistanceEmfObservabilityOptions,
   type StructuredAiAssistanceLogSink,
 } from './adapter-out/observability/ai-assistance-observability'
+
+/** Reviewed external provider model catalog. */
+export {
+  AI_ASSISTANCE_EXTERNAL_MODELS,
+  AI_ASSISTANCE_EXTERNAL_PROVIDERS,
+  createAiAssistanceAvailableModels,
+  findAiAssistanceExternalModel,
+  listAiAssistanceExternalModels,
+  parseAiAssistanceExternalProviders,
+  type AiAssistanceExternalModel,
+} from './domain/ai-assistance-model-catalog'
+
+/** Workspace-managed external provider API keys. */
+export type {
+  AiProviderCredentialAuditInput,
+  AiProviderCredentialCipher,
+  AiProviderCredentialService,
+  AiProviderCredentialStore,
+  StoredAiProviderCredential,
+} from './application/ports/ai-provider-credential-ports'
+export { createAiProviderCredentialService } from './application/use-cases/ai-provider-credential-service'
+export {
+  createKmsAiProviderCredentialCipher,
+  createLocalAiProviderCredentialCipher,
+} from './adapter-out/kms/kms-ai-provider-credential-cipher'
+
+/** Provider-routing gateway for Bedrock, Claude API, and OpenAI. */
+export {
+  createRoutingAiModelGateway,
+  type RoutingAiModelGatewayOptions,
+} from './adapter-out/providers/routing-ai-model-gateway'

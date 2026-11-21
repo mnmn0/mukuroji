@@ -238,7 +238,7 @@ export class MukurojiStack extends cdk.Stack {
     const aiAssistanceObservabilityWorker = buildAiAssistanceObservabilityWorker(
       this,
       {
-        aiAssistanceConfigured: parameters.aiAssistanceConfigured,
+        aiAssistanceConfigured: parameters.aiAssistanceAnyProviderConfigured,
         applicationCommitSha: parameters.applicationCommitSha.valueAsString,
         dataStores,
         lambdaBuildPaths,

@@ -1,5 +1,8 @@
 import { Hono, type Context } from 'hono'
 import type { HonoRequest } from 'hono/request'
+import type { AiAssistanceAvailableModel, AiAssistancePolicy } from '@mukuroji/contracts'
+import type { AiProviderCredentialService } from '../../application/ports/ai-provider-credential-ports'
+import { isAiAssistanceExternalProvider } from '../../domain/ai-assistance-model-catalog'
 import type {
   AiAssistanceActor,
   AiAssistanceAuthorizationCondition,
@@ -19,12 +22,17 @@ import {
   parseUpdateAiAssistancePolicyRequest,
   parseUpdateAiAssistancePreferenceRequest,
 } from '../../application/validation/ai-assistance-schema'
+import { parsePutAiAssistanceProviderCredentialRequest } from '../../application/validation/ai-provider-credential-schema'
 import { AiAssistanceError } from '../../errors'
 
 /** Injected HTTP and authorization boundaries required by the AI assistance router. */
 export type AiAssistanceRouterDependencies<Principal> = {
   /** AI assistance application service assembled by composition. */
   service: AiAssistanceService
+  /** Manager-owned external provider keys; absent when AI is disabled for the deployment. */
+  providerCredentials?: AiProviderCredentialService
+  /** Reads the server-owned deployment models returned with the Workspace policy. */
+  getAvailableModels?(): readonly AiAssistanceAvailableModel[]
   /** Reads the bearer token using the application's canonical header rules. */
   readBearerAccessToken(context: Context): string | undefined
   /** Resolves the current authenticated Workspace principal. */
@@ -85,7 +93,10 @@ export function createAiAssistanceRouter<Principal>(
       const { actor } = await authenticateRequest(context, dependencies)
       requireAiAssistancePolicyManager(actor)
       context.header('Cache-Control', 'private, no-store')
-      return context.json(await dependencies.service.getPolicy(actor))
+      return context.json(withAvailableModels(
+        await dependencies.service.getPolicy(actor),
+        dependencies.getAvailableModels?.(),
+      ))
     } catch (error) {
       return mapRouterError(context, error, dependencies.mapError)
     }
@@ -97,9 +108,53 @@ export function createAiAssistanceRouter<Principal>(
       const request = parseUpdateAiAssistancePolicyRequest(
         await dependencies.readJson(context.req),
       )
-      return context.json(await dependencies.service.updatePolicy(
+      return context.json(withAvailableModels(
+        await dependencies.service.updatePolicy(actor, request, policyAuthorization),
+        dependencies.getAvailableModels?.(),
+      ))
+    } catch (error) {
+      return mapRouterError(context, error, dependencies.mapError)
+    }
+  })
+
+  router.get('/api/ai-assistance/provider-credentials', async (context) => {
+    try {
+      const { actor } = await authenticateRequest(context, dependencies)
+      const credentials = requireProviderCredentials(dependencies.providerCredentials)
+      context.header('Cache-Control', 'private, no-store')
+      return context.json(await credentials.list(actor))
+    } catch (error) {
+      return mapRouterError(context, error, dependencies.mapError)
+    }
+  })
+
+  router.put('/api/ai-assistance/provider-credentials/:provider', async (context) => {
+    try {
+      const provider = requireExternalProvider(context.req.param('provider'))
+      const { actor, policyAuthorization } = await authenticateRequest(context, dependencies)
+      const credentials = requireProviderCredentials(dependencies.providerCredentials)
+      const request = parsePutAiAssistanceProviderCredentialRequest(
+        provider,
+        await dependencies.readJson(context.req),
+      )
+      context.header('Cache-Control', 'private, no-store')
+      return context.json(await credentials.put(actor, provider, request, policyAuthorization))
+    } catch (error) {
+      return mapRouterError(context, error, dependencies.mapError)
+    }
+  })
+
+  router.delete('/api/ai-assistance/provider-credentials/:provider', async (context) => {
+    try {
+      const provider = requireExternalProvider(context.req.param('provider'))
+      const { actor, policyAuthorization } = await authenticateRequest(context, dependencies)
+      const credentials = requireProviderCredentials(dependencies.providerCredentials)
+      const expectedRevision = Number(context.req.query('expectedRevision'))
+      context.header('Cache-Control', 'private, no-store')
+      return context.json(await credentials.delete(
         actor,
-        request,
+        provider,
+        { expectedRevision },
         policyAuthorization,
       ))
     } catch (error) {
@@ -354,6 +409,56 @@ function requireAiAssistancePolicyManager(actor: AiAssistanceActor): void {
     'authorization',
     'AiAssistanceDisabled',
     'The current operator cannot read AI assistance policy.',
+  )
+}
+
+/**
+ * Adds the server-owned deployment model list to a policy response.
+ *
+ * @param policy - Stored or default Workspace policy.
+ * @param availableModels - Deployment models, when composition provides them.
+ * @returns Policy response with the model list.
+ */
+function withAvailableModels(
+  policy: AiAssistancePolicy,
+  availableModels: readonly AiAssistanceAvailableModel[] | undefined,
+): AiAssistancePolicy {
+  return availableModels === undefined
+    ? policy
+    : { ...policy, availableModels: [...availableModels] }
+}
+
+/**
+ * Requires the provider key service, which exists only when AI is deployed.
+ *
+ * @param service - Optional service from composition.
+ * @returns The service.
+ * @throws AiAssistanceError when AI is disabled for the deployment.
+ */
+function requireProviderCredentials(
+  service: AiProviderCredentialService | undefined,
+): AiProviderCredentialService {
+  if (service !== undefined) return service
+  throw new AiAssistanceError(
+    'authorization',
+    'AiAssistanceDisabled',
+    'AI assistance is not enabled for this deployment.',
+  )
+}
+
+/**
+ * Validates the provider path segment.
+ *
+ * @param value - Untrusted path segment.
+ * @returns The external provider name.
+ * @throws AiAssistanceError for an unknown provider.
+ */
+function requireExternalProvider(value: string) {
+  if (isAiAssistanceExternalProvider(value)) return value
+  throw new AiAssistanceError(
+    'not-found',
+    'AiAssistanceProviderNotEnabled',
+    'The AI provider is not supported.',
   )
 }
 

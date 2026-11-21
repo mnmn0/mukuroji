@@ -694,6 +694,17 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/ai-assistance/policy',
     permission: 'workspace.manage',
   },
+  // Registering or removing an external AI provider API key is Workspace administration.
+  {
+    method: 'PUT',
+    pathPattern: '/api/ai-assistance/provider-credentials/*',
+    permission: 'workspace.manage',
+  },
+  {
+    method: 'DELETE',
+    pathPattern: '/api/ai-assistance/provider-credentials/*',
+    permission: 'workspace.manage',
+  },
   {
     method: 'PUT',
     pathPattern: '/api/ai-assistance/preferences/me',

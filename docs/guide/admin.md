@@ -175,6 +175,21 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   **再接続** も同じで、押した本人が完了します。
 - **Import / Export**: Work Item の CSV / JSON export と、検証（dry-run）してから確定する import。
 
+## AI assistance の接続先と API キー
+
+**設定** → **個人** の **AI assistance** で、Workspace policy（使える workflow と model）を owner / admin が決めます。
+model は、運用者が設定した Amazon Bedrock の model に加えて、Claude API（`claude-sonnet-5-5`、`claude-opus-5-5`、
+`claude-haiku-5-5`）と OpenAI（`gpt-6.2-sol`）から選べます。この環境で使える model は「許可する model ID」の下に表示されます。
+
+- Claude API と OpenAI を使うには、同じ画面の **外部 AI の API キー** に、提供元の管理画面で発行したキーを
+  provider ごとに1つ **登録** します。キーは Workspace の全員で共有し、token 料金はその提供元のアカウントにかかります。
+- キーは暗号化して保存し、登録後は末尾4文字だけが表示されます。キーをもう一度見ることはできません。
+  変えるときは **差し替え**、使わなくなったら **削除** します。登録・差し替え・削除は監査ログに残ります（キーの中身は残りません）。
+- キーが登録されていない provider の model で生成すると、「API キーが登録されていません」と表示されます。
+- 外部の model を選ぶと、AI に送る内容（メンバー名などは仮名に置き換えた後のもの）は AWS の外の提供元へ送られます。
+  社外に出したくない Workspace では、許可する model を Bedrock の model だけにしてください。
+- この欄が出ないときは、運用者が外部 provider を無効にしています（[`cdk/README.md`](../../cdk/README.md) の `AiExternalProviders`）。
+
 ## エージェント設定（Software factory）
 
 coding agent に任せる作業の範囲を Team ごとに決めます。**設定** → **Team** → **エージェント設定**

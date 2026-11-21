@@ -56,6 +56,7 @@ import {
   type AiAssistancePolicyAuthorization,
   type AiAssistancePlanningDependency,
   type AiAssistanceService,
+  type AiProviderCredentialService,
   type AiAssistanceTextAlias,
   type CheckAiAssistanceAuthorizationInput,
   type ResolveAiAssistanceContextInput,
@@ -110,6 +111,34 @@ import { isRecord } from '../shared/value-guards'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
 import { getWorkItemConfigurationTableName } from '../shared/work-item-configuration'
 import { toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
+
+/** Provider key service resolved from the current application dependencies on each call. */
+const aiProviderCredentialService: AiProviderCredentialService = {
+  list: (actor) => requireAiProviderCredentialService().list(actor),
+  put: (actor, provider, request, authorization) =>
+    requireAiProviderCredentialService().put(actor, provider, request, authorization),
+  delete: (actor, provider, request, authorization) =>
+    requireAiProviderCredentialService().delete(actor, provider, request, authorization),
+  isConfigured: (workspaceId, provider) =>
+    requireAiProviderCredentialService().isConfigured(workspaceId, provider),
+  resolveApiKey: (workspaceId, provider) =>
+    requireAiProviderCredentialService().resolveApiKey(workspaceId, provider),
+}
+
+/**
+ * Reads the provider key service, rejecting with the stable disabled error when absent.
+ *
+ * @returns Configured provider key service.
+ */
+function requireAiProviderCredentialService(): AiProviderCredentialService {
+  const service = requireAppDependencies().aiAssistance.aiProviderCredentialService
+  if (service !== undefined) return service
+  throw new AiAssistanceError(
+    'authorization',
+    'AiAssistanceDisabled',
+    'AI assistance is not configured for this deployment.',
+  )
+}
 
 const aiAssistanceService: AiAssistanceService = {
   getPolicy: (actor) =>
@@ -3382,6 +3411,9 @@ function toAiAssistanceExternalErrorResponse(
 export function registerAiAssistanceRoutes(routeApp: Hono): void {
   routeApp.route('/', createAiAssistanceRouter<WorkspacePrincipal>({
     service: aiAssistanceService,
+    providerCredentials: aiProviderCredentialService,
+    getAvailableModels: () =>
+      requireAppDependencies().aiAssistance.getAiAssistanceAvailableModels?.() ?? [],
     readBearerAccessToken,
     authenticate: async (accessToken, context) =>
       await authenticateWorkspacePrincipal(accessToken, undefined, context),

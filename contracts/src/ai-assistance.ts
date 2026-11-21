@@ -6,8 +6,19 @@ import type { WorkItemPriority } from './work-items'
 /** Current public schema version for AI assistance resources. */
 export const AI_ASSISTANCE_SCHEMA_VERSION = 1
 
-/** Provider selected for the current AI assistance deployment. */
-export type AiAssistanceProvider = 'bedrock'
+/** Provider that served or will serve one AI assistance model. */
+export type AiAssistanceProvider = 'bedrock' | 'anthropic' | 'openai'
+
+/** External provider reached with a Workspace-registered API key. */
+export type AiAssistanceExternalProvider = Exclude<AiAssistanceProvider, 'bedrock'>
+
+/** Deployment-reviewed model that a Workspace policy may allow. */
+export type AiAssistanceAvailableModel = {
+  /** Exact provider model identifier used in policy and generation requests. */
+  modelId: string
+  /** Provider that serves this model. */
+  provider: AiAssistanceProvider
+}
 
 /** Product workflow supported by AI assistance. */
 export type AiAssistanceTask = 'triage' | 'summary' | 'search' | 'planning'
@@ -81,7 +92,7 @@ export type AiAssistanceSource =
 
 /** Common model selection options accepted by every generation request. */
 export type AiAssistanceGenerationOptions = {
-  /** Optional deployment-allowlisted Bedrock model identifier. */
+  /** Optional deployment-allowlisted model identifier. */
   modelId?: string
   /** Locale requested for generated prose. */
   locale: 'ja' | 'en'
@@ -356,9 +367,9 @@ export type AiAssistanceUsage =
 
 /** Technical generation details available in the audit disclosure. */
 export type AiAssistanceGenerationDetails = {
-  /** Configured provider. */
+  /** Provider that served the generation. */
   provider: AiAssistanceProvider
-  /** Bedrock model identifier selected from the deployment allowlist. */
+  /** Model identifier selected from the deployment allowlist. */
   modelId: string
   /** Versioned prompt template identifier. */
   promptVersion: string
@@ -439,9 +450,9 @@ export type AiAssistancePolicy = {
   schemaVersion: typeof AI_ASSISTANCE_SCHEMA_VERSION
   /** Whether AI assistance is enabled for the Workspace. */
   enabled: boolean
-  /** Bedrock model identifiers available to operators. */
+  /** Model identifiers available to operators. */
   allowedModelIds: string[]
-  /** Default Bedrock model identifier. */
+  /** Default model identifier. */
   defaultModelId: string
   /** Workflows enabled by Workspace policy. */
   enabledTasks: AiAssistanceTask[]
@@ -451,13 +462,15 @@ export type AiAssistancePolicy = {
   revision: number
   /** ISO 8601 timestamp of the latest policy mutation. */
   updatedAt: string
+  /** Server-owned deployment models a manager may add to the allowlist. */
+  availableModels?: AiAssistanceAvailableModel[]
 }
 
 /** Revision-fenced Workspace policy update. */
 export type UpdateAiAssistancePolicyRequest = {
   /** Whether AI assistance should be enabled. */
   enabled: boolean
-  /** Bedrock model identifiers made available to operators. */
+  /** Model identifiers made available to operators. */
   allowedModelIds: string[]
   /** Default model chosen from the allowlist. */
   defaultModelId: string
@@ -488,5 +501,43 @@ export type UpdateAiAssistancePreferenceRequest = {
   /** Whether the member allows AI assistance requests. */
   enabled: boolean
   /** Preference revision observed before editing. */
+  expectedRevision: number
+}
+
+/** Write-only status of one Workspace API key for an external provider. */
+export type AiAssistanceProviderCredentialStatus = {
+  /** External provider the key authenticates to. */
+  provider: AiAssistanceExternalProvider
+  /** Whether the deployment allows this provider at all. */
+  deploymentEnabled: boolean
+  /** Whether a key is currently registered. */
+  configured: boolean
+  /** Last four characters of the registered key, shown so managers can tell keys apart. */
+  keyHint?: string
+  /** Optimistic-concurrency revision; 0 when no key was ever registered. */
+  revision: number
+  /** ISO 8601 timestamp of the latest key change. */
+  updatedAt?: string
+}
+
+/** Key status for every external provider, without any key material. */
+export type AiAssistanceProviderCredentials = {
+  /** Public schema version. */
+  schemaVersion: typeof AI_ASSISTANCE_SCHEMA_VERSION
+  /** One entry per external provider in a stable order. */
+  providers: AiAssistanceProviderCredentialStatus[]
+}
+
+/** Revision-fenced registration or replacement of one provider API key. */
+export type PutAiAssistanceProviderCredentialRequest = {
+  /** Plaintext API key; the server encrypts it and never returns it. */
+  apiKey: string
+  /** Credential revision observed before editing. */
+  expectedRevision: number
+}
+
+/** Revision-fenced removal of one provider API key. */
+export type DeleteAiAssistanceProviderCredentialRequest = {
+  /** Credential revision observed before deleting. */
   expectedRevision: number
 }

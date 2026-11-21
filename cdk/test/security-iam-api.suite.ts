@@ -45,6 +45,7 @@ test('shared server handler is bundled as a Lambda asset with production environ
     'AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD',
     'AI_ASSISTANCE_BEDROCK_REGION',
     'AI_ASSISTANCE_DEFAULT_MODEL_ID',
+    'AI_ASSISTANCE_EXTERNAL_PROVIDERS',
     'AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE',
     'AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE',
     'AI_ASSISTANCE_TABLE_NAME',
@@ -659,7 +660,12 @@ test('limits each role to its own purposes on the shared developer platform key'
   expect(keyId).toBeDefined();
   // The only purposes each Lambda role may use the key for directly.
   const allowedPurposesByRolePrefix: Record<string, string[]> = {
-    ApiFunctionServiceRole: ['webhook', 'connector', 'platform-state'],
+    ApiFunctionServiceRole: [
+      'webhook',
+      'connector',
+      'platform-state',
+      'ai-assistance:provider-credential',
+    ],
     ConnectorSyncFunctionServiceRole: ['connector', 'platform-state'],
     WebhookDeliveryFunctionServiceRole: ['webhook'],
   };
@@ -674,10 +680,11 @@ test('limits each role to its own purposes on the shared developer platform key'
       StringEquals?: Record<string, unknown>;
     } | undefined)?.StringEquals;
     const purpose = equals?.['kms:EncryptionContext:mukuroji:purpose'];
-    return typeof purpose === 'string' &&
-      equals?.['kms:EncryptionContext:mukuroji:service'] === 'developer-platform'
-      ? purpose
-      : undefined;
+    const service = equals?.['kms:EncryptionContext:mukuroji:service'];
+    if (typeof purpose !== 'string') return undefined;
+    if (service === 'developer-platform') return purpose;
+    // AI provider API keys share the key under their own service context.
+    return service === 'ai-assistance' ? `ai-assistance:${purpose}` : undefined;
   };
   /**
    * Reports whether a statement only allows use through Secrets Manager.

@@ -9,6 +9,7 @@ import { createTranslator, type Locale, type MessageKey } from '../../../shared/
 import { SectionHeader } from '../../../shared/ui/WorkbenchPrimitives'
 import { ShieldIcon } from '../../../shared/ui/icons'
 import { useAiAssistanceSettingsMutations } from '../mutations/useAiAssistanceSettingsMutations'
+import { AiProviderCredentialsSection } from './AiProviderCredentialsSection'
 import type { AiAssistanceSettingsMutationFeedback } from '../mutations/useAiAssistanceSettingsMutations'
 import {
   useAiAssistancePolicy,
@@ -95,6 +96,7 @@ export function AiAssistanceSettingsPanelContainer({
   const visiblePolicy = policyDraft && policy
     ? {
         ...policyDraft.value,
+        availableModels: policy.availableModels,
         revision: policy.revision,
         updatedAt: policy.updatedAt,
       }
@@ -108,10 +110,13 @@ export function AiAssistanceSettingsPanelContainer({
   const isPreferenceDirty = preferenceEnabled !== undefined && preferenceEnabled !== preference?.enabled
   const isPolicyDirty = Boolean(policy && visiblePolicy && !arePoliciesEqual(policy, visiblePolicy))
 
+  const deploymentEnabled = preference?.deploymentEnabled !== false &&
+    !(policyQuery.error instanceof AiAssistanceApiError && policyQuery.error.code === 'AiAssistanceDisabled')
+
   return (
+    <>
     <AiAssistanceSettingsPanel
-      deploymentEnabled={preference?.deploymentEnabled !== false &&
-        !(policyQuery.error instanceof AiAssistanceApiError && policyQuery.error.code === 'AiAssistanceDisabled')}
+      deploymentEnabled={deploymentEnabled}
       canManagePolicy={canManagePolicy}
       hasPolicyRevisionConflict={hasPolicyRevisionConflict}
       hasPreferenceRevisionConflict={hasPreferenceRevisionConflict}
@@ -184,6 +189,16 @@ export function AiAssistanceSettingsPanelContainer({
       }}
       onPreferenceRetry={() => void preferenceQuery.mutate()}
     />
+    {canManagePolicy && deploymentEnabled ? (
+      <AiProviderCredentialsSection
+        accessToken={accessToken}
+        t={t}
+        {...(cacheScope === undefined ? {} : { cacheScope })}
+        {...(guardRequest === undefined ? {} : { guardRequest })}
+        {...(workspaceId === undefined ? {} : { workspaceId })}
+      />
+    ) : null}
+    </>
   )
 }
 
@@ -466,6 +481,14 @@ export function AiAssistanceSettingsPanel({
                   <span className="text-[11px] font-normal" id="ai-settings-model-hint">
                     {t('ai.settings.policy.allowedModelsHint')}
                   </span>
+                  {policy.availableModels && policy.availableModels.length > 0 ? (
+                    <span className="text-[11px] font-normal">
+                      {t('ai.settings.policy.availableModelsHint').replace(
+                        '{models}',
+                        policy.availableModels.map((model) => model.modelId).join(', '),
+                      )}
+                    </span>
+                  ) : null}
                 </label>
 
                 <div className="grid grid-cols-2 gap-3 max-[640px]:grid-cols-1">

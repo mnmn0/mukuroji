@@ -4,6 +4,7 @@ import {
   type AiAssistanceDraft,
   type AiAssistanceGeneration,
   type AiAssistancePolicy,
+  type AiAssistanceProvider,
   type AiAssistancePreference,
   type AiAssistanceTask,
   type CreateAiAssistanceFeedbackRequest,
@@ -152,6 +153,8 @@ export function createAiAssistanceService(
     DEFAULT_MEMBER_TOKEN_LIMIT_PER_MINUTE
   const worstCaseTokensPerGeneration = options.worstCaseTokensPerGeneration ??
     DEFAULT_WORST_CASE_TOKENS_PER_GENERATION
+  const resolveModelProvider = options.resolveModelProvider ??
+    ((): AiAssistanceProvider => 'bedrock')
   const now = options.now ?? (() => new Date())
   const createId = options.createId ?? (() => crypto.randomUUID())
 
@@ -452,6 +455,13 @@ export function createAiAssistanceService(
     }
     requireGenerationEnabled(policy, preference, request.task)
     const modelId = selectModelId(request.modelId, policy, deploymentAllowedModelIds)
+    if (options.isModelReady && !await options.isModelReady(actor.workspaceId, modelId)) {
+      throw new AiAssistanceError(
+        'validation',
+        'AiAssistanceProviderCredentialMissing',
+        'An administrator must register an API key for the selected AI model provider.',
+      )
+    }
     const createdAt = now()
     const generationRequestStartedAtMs = normalizeGenerationRequestStartedAtMs(
       requestStartedAtMs,
@@ -551,7 +561,7 @@ export function createAiAssistanceService(
             citations: context.citations,
           },
           details: {
-            provider: 'bedrock',
+            provider: resolveModelProvider(modelId),
             modelId,
             promptVersion: options.promptVersion,
             traceId: actor.traceId,
@@ -635,6 +645,7 @@ export function createAiAssistanceService(
         )
       }
       const generatedModelResult = await options.gateway.generate({
+        workspaceId: actor.workspaceId,
         modelId,
         task: request.task,
         locale: request.locale,
@@ -743,7 +754,7 @@ export function createAiAssistanceService(
           uncertainty: safeOutput.uncertainty,
         },
         details: {
-          provider: 'bedrock',
+          provider: resolveModelProvider(modelId),
           modelId,
           promptVersion: options.promptVersion,
           traceId: modelResult.providerTraceId ?? actor.traceId,

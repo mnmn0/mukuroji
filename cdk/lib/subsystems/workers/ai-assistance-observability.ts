@@ -11,7 +11,7 @@ import type { DataStoreResources } from '../data-stores';
 
 /** Inputs required by the durable AI assistance observation worker. */
 export type AiAssistanceObservabilityWorkerInput = {
-  /** Whether this deployment explicitly configured an AI provider. */
+  /** Whether this deployment enabled Bedrock or an external AI provider. */
   readonly aiAssistanceConfigured: cdk.CfnCondition;
   /** Full reviewed application commit SHA attached to projected metrics. */
   readonly applicationCommitSha: string;
