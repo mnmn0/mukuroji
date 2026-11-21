@@ -1004,6 +1004,71 @@ test('DynamoDB directory client skips a Project ID whose concurrent reservation 
   expect(reservationKeys).toEqual(['PROJECT#web', 'PROJECT#web-2'])
 })
 
+test('DynamoDB directory client reports a changed creator even when the Project ID reservation also conflicts', async () => {
+  const team = {
+    directoryId: 'workspace-1',
+    entryKey: '000010#000000#TEAM#core-team',
+    entryType: 'team',
+    teamId: 'core-team',
+    teamSortOrder: 10,
+    nameJa: 'Core',
+    nameEn: 'Core',
+    expanded: true,
+  }
+  let transactions = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if ('KeyConditionExpression' in command.input) return { Items: [team] }
+      if (Array.isArray(command.input.TransactItems)) {
+        transactions += 1
+        throw Object.assign(new Error('Transaction was canceled.'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'TransactionConflict' },
+          ],
+        })
+      }
+      // The creator's Workspace membership changed after authorization.
+      return {
+        Item: {
+          workspaceId: 'workspace-1',
+          recordKey: 'MEMBER#demo@example.com',
+          entryType: 'workspace-member',
+          status: 'active',
+          version: 2,
+        },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+  )
+
+  for (const idempotencyResourceId of [undefined, 'application_1']) {
+    transactions = 0
+    const failure = await client.createProject(
+      'workspace-1',
+      'core-team',
+      { ...(idempotencyResourceId ? { idempotencyResourceId } : {}), name: 'Web' },
+      { userKey: 'demo@example.com', workspaceMemberVersion: 1 },
+    ).catch((error: unknown) => error)
+    expect(failure).toMatchObject({ status: 409 })
+    expect(failure).toMatchObject({ code: 'WorkspaceMemberVersionConflict' })
+    expect(transactions).toBe(1)
+  }
+})
+
 test('DynamoDB directory client stops retrying a Project ID after repeated reservation conflicts', async () => {
   let transactions = 0
   const team = {

@@ -2492,7 +2492,9 @@ export class DynamoDbProjectDirectoryClient {
             new TransactWriteCommand({ TransactItems: transactItems }),
           )
         } catch (error) {
-          if (isTransactionConditionalFailureAt(error, 3)) {
+          // Checked by reason code alone: a concurrent reservation's TransactionConflict must not
+          // hide a changed creator or Team behind an ID retry.
+          if (hasCancellationReasonAt(error, 3, 'ConditionalCheckFailed')) {
             await this.requireUnchangedActiveWorkspaceMember(
               directoryId,
               creatorMemberKey,
@@ -2500,7 +2502,7 @@ export class DynamoDbProjectDirectoryClient {
             )
           }
 
-          if (isTransactionConditionalFailureAt(error, 0)) {
+          if (hasCancellationReasonAt(error, 0, 'ConditionalCheckFailed')) {
             await this.throwCreateProjectTransactionCancellationResult(directoryId, teamId, error)
           }
 
@@ -4730,6 +4732,25 @@ function isTransactionConditionalFailureAt(error: unknown, index: number) {
   return Array.isArray(reasons) &&
     isRecord(reasons[index]) &&
     reasons[index].Code === 'ConditionalCheckFailed'
+}
+
+/**
+ * Checks one item's cancellation reason, whatever the other items report.
+ *
+ * @param error - Error thrown by a transaction.
+ * @param index - Position of the item in the transaction.
+ * @param code - DynamoDB cancellation reason code to look for.
+ * @returns True when the transaction was canceled and that item reported the code.
+ */
+function hasCancellationReasonAt(error: unknown, index: number, code: string) {
+  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+
+  const reasons = error.CancellationReasons
+  const reason = Array.isArray(reasons) ? reasons[index] : undefined
+
+  return isRecord(reason) && reason.Code === code
 }
 
 /** Cancellation reasons that mean another creation holds the same keys, not a failed request. */
