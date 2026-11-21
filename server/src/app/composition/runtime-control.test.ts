@@ -43,6 +43,21 @@ test('uses an enabled static provider outside production', async () => {
   })
 })
 
+test('lets a local runtime pick its static mode and fails an unknown one closed', async () => {
+  for (const [value, mode] of [
+    ['read-only', 'read-only'],
+    [' disabled ', 'disabled'],
+    ['enabled', 'enabled'],
+    ['', 'enabled'],
+    ['paused', 'disabled'],
+  ] as const) {
+    const provider = createProductionRuntimeControlProvider('api', {
+      environment: { NODE_ENV: 'test', MUKUROJI_LOCAL_RUNTIME_CONTROL_MODE: value },
+    })
+    expect((await provider.getSnapshot()).mode).toBe(mode)
+  }
+})
+
 test('fails production startup configuration closed without throwing', async () => {
   let clientCalls = 0
   const client = {

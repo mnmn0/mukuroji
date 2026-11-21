@@ -40,6 +40,10 @@ import {
   parsePlanningUpdateTargetScheduleProjection,
   parseStoredNotificationPreferences,
   TIMESHEET_REMINDER_EVENT_TYPE,
+  WEEKLY_REPORT_ESCALATION_EVENT_TYPE,
+  WEEKLY_REPORT_ESCALATION_REASON,
+  WEEKLY_REPORT_REMINDER_EVENT_TYPE,
+  WEEKLY_REPORT_REMINDER_REASON,
   slackDeliveryShard,
   emailDeliveryShard,
   isEmailNotificationEligible,
@@ -151,6 +155,10 @@ export type AuditProjectionEvent = {
   timeEntryIds?: string[]
   /** Instant at or before which a timesheet reminder's entries had to end to be due. */
   timesheetDueBefore?: string
+  /** First day of the week a weekly report reminder or escalation is about. */
+  weeklyReportWeekStart?: string
+  /** Lower-case member key of the author of an unsubmitted weekly report. */
+  weeklyReportAuthorMemberKey?: string
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
 }
@@ -199,6 +207,8 @@ export interface CollaborationProjectionDependencies {
   enterpriseIdentity?: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'>
   /** Revalidates timesheet reminders; without it every timesheet reminder is dropped. */
   timesheetReminders?: TimesheetReminderRevalidator
+  /** Revalidates weekly report reminders; without it every weekly report reminder is dropped. */
+  weeklyReportReminders?: WeeklyReportReminderRevalidator
 }
 
 /** A `ConditionCheck` transaction item written together with a projected notification. */
@@ -241,6 +251,32 @@ export type TimesheetReminderRevalidator = {
     projectId: string
   }): Promise<ProjectionConditionCheck | undefined>
 }
+
+/** Checks that a weekly report reminder is still about an unsubmitted week. */
+export type WeeklyReportReminderRevalidator = {
+  /**
+   * Reads the author's week and tells whether it is still unsubmitted.
+   *
+   * @param input - Workspace, Team, author, and week.
+   * @returns A condition that holds while the week stays unsubmitted, or undefined once submitted.
+   */
+  findUnsubmittedWeek(input: {
+    /** Canonical Workspace ID. */
+    workspaceId: string
+    /** Team ID. */
+    teamId: string
+    /** Lower-case member key of the author. */
+    memberKey: string
+    /** First day of the week. */
+    weekStart: string
+  }): Promise<ProjectionConditionCheck | undefined>
+}
+
+/** Weekly report event types and the recipient reason each one carries. */
+const weeklyReportReminderReasons = new Map<string, string>([
+  [WEEKLY_REPORT_REMINDER_EVENT_TYPE, WEEKLY_REPORT_REMINDER_REASON],
+  [WEEKLY_REPORT_ESCALATION_EVENT_TYPE, WEEKLY_REPORT_ESCALATION_REASON],
+])
 
 /** Canonical scope passed to the curated context Search projection. */
 export type CuratedContextSearchProjectionInput = {
@@ -442,6 +478,14 @@ const watcherNotificationEventTypes = new Set([
 const workItemChangeWatcherEventTypes = new Set([
   'work-item.updated',
   'work-item.schedule-cascade-updated',
+  'work-item.blocker-removed',
+])
+/**
+ * Work Item change events that notify the item's current watchers even without stored candidates,
+ * so a cleared blocker still reaches watchers of an unassigned Work Item.
+ */
+const workItemWatcherOnlyEventTypes = new Set([
+  'work-item.blocker-removed',
 ])
 /**
  * Planning update events that fan out to the target's watchers and, for a Project target, to
@@ -496,7 +540,8 @@ export function supportsCollaborationWatcherNotifications(eventType: string) {
  * Reports whether a Work Item change event should notify the item's current watchers.
  *
  * Title or description edits carry no notification candidates and stay silent; assignment,
- * status, schedule, and archive changes reach watchers as well as the owner and creator.
+ * status, schedule, and archive changes reach watchers as well as the owner and creator. A
+ * cleared blocker reaches watchers even when the Work Item has no assignee.
  *
  * @param event - Parsed audit event type and stored notification candidates.
  * @returns Whether item watchers must be resolved for the event.
@@ -505,7 +550,7 @@ export function notifiesWorkItemChangeWatchers(
   event: Pick<AuditProjectionEvent, 'eventType' | 'notificationCandidates'>,
 ) {
   return workItemChangeWatcherEventTypes.has(event.eventType) &&
-    event.notificationCandidates.length > 0
+    (event.notificationCandidates.length > 0 || workItemWatcherOnlyEventTypes.has(event.eventType))
 }
 
 /**
@@ -731,7 +776,8 @@ async function processRecord(
     event.projectId,
   )
   const timesheetReminder = await readTimesheetReminderFence(event, dependencies.timesheetReminders)
-  if (!workItemAuthorizationEvent || !timesheetReminder.current) {
+  const weeklyReportReminder = await readWeeklyReportReminderFence(event, dependencies.weeklyReportReminders)
+  if (!workItemAuthorizationEvent || !timesheetReminder.current || !weeklyReportReminder.current) {
     await markProjectionProcessed(event.eventId)
     return
   }
@@ -773,7 +819,7 @@ async function processRecord(
         authorizationEvent,
         currentScope,
       )
-    : undefined) ?? timesheetReminder.condition
+    : undefined) ?? timesheetReminder.condition ?? weeklyReportReminder.condition
   const watcherCandidates = await readSubscribedWatcherCandidates(authorizationEvent)
   const memberDirectory = notifiesPlanningUpdateProjectMembers(authorizationEvent)
     ? await readProjectDirectory(authorizationEvent.workspaceId)
@@ -802,6 +848,7 @@ async function processRecord(
     await Promise.all(
       candidates.map(async (candidate) =>
         isCurrentEscalationManager(authorizationEvent, candidate.memberKey, directoryItems) &&
+        isCurrentWeeklyReportRecipient(authorizationEvent, candidate.memberKey, directoryItems) &&
         await isEligibleRecipient(
           authorizationEvent,
           candidate.memberKey,
@@ -1575,6 +1622,8 @@ export function createNotificationProjectionItem(
     workItemUpdatedAt: event.workItemUpdatedAt,
     daysUntilDue: event.daysUntilDue,
     workItemReopenedAt: event.workItemReopenedAt,
+    // External channels recheck the author's Project membership before they send.
+    weeklyReportAuthorMemberKey: event.weeklyReportAuthorMemberKey,
     expiresAt,
   }
 }
@@ -1656,6 +1705,84 @@ export async function readTimesheetReminderFence(
     projectId: event.projectId,
   })
   return condition ? { current: true, condition } : { current: false }
+}
+
+/**
+ * Revalidates a weekly report reminder or escalation against the author's current week.
+ *
+ * The event must carry its Team, Project, week, author, and exactly one recipient with the reason
+ * of its type; a reminder goes to the author and an escalation to someone else. A week that has
+ * been submitted since the scan drops the event, and so does a projection without a revalidator.
+ * A current event carries a condition on the week, written in the same transaction as the
+ * notification, so a submission that lands before the save cancels it.
+ *
+ * @param event - Parsed audit event.
+ * @param revalidator - Current weekly report reader.
+ * @returns Whether the event should still be projected, and the condition for a weekly report event.
+ */
+export async function readWeeklyReportReminderFence(
+  event: AuditProjectionEvent,
+  revalidator: WeeklyReportReminderRevalidator | undefined,
+): Promise<{ current: boolean; condition?: ProjectionConditionCheck }> {
+  const reason = weeklyReportReminderReasons.get(event.eventType)
+  if (reason === undefined) return { current: true }
+  const [recipient] = event.notificationCandidates
+  const recipientMemberKey = normalizeMemberKey(recipient?.memberKey)
+  const authorMemberKey = normalizeMemberKey(event.weeklyReportAuthorMemberKey)
+  const escalation = event.eventType === WEEKLY_REPORT_ESCALATION_EVENT_TYPE
+  if (
+    !revalidator ||
+    !event.teamId ||
+    !event.projectId ||
+    !event.weeklyReportWeekStart ||
+    !authorMemberKey ||
+    !recipientMemberKey ||
+    event.notificationCandidates.length !== 1 ||
+    recipient?.reason !== reason ||
+    (escalation ? recipientMemberKey === authorMemberKey : recipientMemberKey !== authorMemberKey)
+  ) {
+    return { current: false }
+  }
+  const condition = await revalidator.findUnsubmittedWeek({
+    workspaceId: event.workspaceId,
+    teamId: event.teamId,
+    memberKey: authorMemberKey,
+    weekStart: event.weeklyReportWeekStart,
+  })
+  return condition ? { current: true, condition } : { current: false }
+}
+
+/**
+ * Reports whether a recipient may still receive a weekly report reminder or escalation.
+ *
+ * The author must still write (`manager` or `member`, unarchived) in the event's Project, and an
+ * escalation recipient must still manage it, so a member who left the Project, or a manager who
+ * stepped down, is not told.
+ *
+ * @param event - Event whose Project the notification is authorized against.
+ * @param memberKey - Recipient member key.
+ * @param directoryItems - Current Project directory rows.
+ * @returns True for other events, or when the memberships still hold.
+ */
+export function isCurrentWeeklyReportRecipient(
+  event: Pick<AuditProjectionEvent, 'eventType' | 'projectId' | 'weeklyReportAuthorMemberKey'>,
+  memberKey: string,
+  directoryItems: ProjectDirectoryItem[],
+) {
+  if (!weeklyReportReminderReasons.has(event.eventType)) return true
+  const roleOf = (key: string | undefined) => {
+    const normalized = normalizeMemberKey(key)
+    if (!normalized || !event.projectId) return undefined
+    return directoryItems.find((item) =>
+      item.entryType === 'project-member' &&
+      item.projectId === event.projectId &&
+      item.archivedAt === undefined &&
+      normalizeMemberKey(item.memberKey) === normalized
+    )?.role
+  }
+  const authorRole = roleOf(event.weeklyReportAuthorMemberKey)
+  if (authorRole !== 'manager' && authorRole !== 'member') return false
+  return event.eventType !== WEEKLY_REPORT_ESCALATION_EVENT_TYPE || roleOf(memberKey) === 'manager'
 }
 
 /**
@@ -2350,6 +2477,8 @@ async function isEligibleRecipient(
       planningUpdateActivityEventTypes.has(event.eventType) ||
       // Timesheet access can come from an Enterprise role alone, so it is evaluated here too.
       event.eventType === TIMESHEET_REMINDER_EVENT_TYPE ||
+      // Weekly report reminders are fenced the same way as timesheet reminders.
+      weeklyReportReminderReasons.has(event.eventType) ||
       // A Team report can be readable through an Enterprise Project grant without a project-member row.
       event.eventType === analyticsReportDeliveredEventType ||
       enforceContentAuthorization
@@ -2624,6 +2753,7 @@ export async function authorizeNotificationDelivery(
     directory = await snapshot
   }
   if (!isCurrentEscalationManager(refreshed, memberKey, directory)) return false
+  if (!isCurrentWeeklyReportRecipient(refreshed, memberKey, directory)) return false
   if (
     currentPlanningActivityEvent &&
     !hasSamePlanningScope(refreshed, currentPlanningActivityEvent) &&
@@ -2931,6 +3061,10 @@ export function parseAuditProjectionEvent(
       ? { timeEntryIds: metadata.timeEntryIds.flatMap((entryId) => readString(entryId) ?? []) }
       : {}),
     ...(readString(metadata.timesheetDueBefore) ? { timesheetDueBefore: readString(metadata.timesheetDueBefore) } : {}),
+    ...(readString(metadata.weeklyReportWeekStart) ? { weeklyReportWeekStart: readString(metadata.weeklyReportWeekStart) } : {}),
+    ...(readString(metadata.weeklyReportAuthorMemberKey)
+      ? { weeklyReportAuthorMemberKey: readString(metadata.weeklyReportAuthorMemberKey) }
+      : {}),
     outboxStatus: value.outboxStatus === 'suppressed' ? 'suppressed' : 'pending',
   }
 }

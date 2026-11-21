@@ -243,6 +243,7 @@ describe('IssueCollaborationPanel', () => {
       'work-item.blocking-removed',
       'work-item.relation-added',
       'work-item.relation-removed',
+      'work-item.sibling-order-changed',
     ]
     const html = renderToStaticMarkup(
       <IssueActivityTab
@@ -270,6 +271,7 @@ describe('IssueCollaborationPanel', () => {
       'Demo User がこの Work Item がブロックする項目を解除しました。',
       'Demo User が関連する Work Item を追加しました。',
       'Demo User が関連する Work Item を解除しました。',
+      'Demo User が同じ親の中での並び順を変更しました。',
     ]) {
       expect(html).toContain(message)
     }

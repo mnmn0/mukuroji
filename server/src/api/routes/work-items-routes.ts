@@ -94,6 +94,7 @@ import {
   type WorkItemIdempotencyTransaction,
   type WorkItemAuthorizationSnapshot,
   type WorkItemDependencyScheduleState,
+  type WorkItemRelationNotificationEndpoint,
 } from '../../modules/work-items'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import {
@@ -886,6 +887,25 @@ async function authorizeRelationMutation(
   requireAssignedProjectPermission(principal, context, source.issue.assignedProjectId, 'member')
   requireAssignedProjectPermission(principal, context, target.issue.assignedProjectId, 'member')
   return { source: source.issue, target: target.issue }
+}
+
+/**
+ * Builds the notification details of one authorized relation endpoint.
+ *
+ * @param teamId - Team that owns the endpoint.
+ * @param endpoint - Endpoint Work Item read during authorization.
+ * @returns Details that let the relation audit event notify the endpoint's assignee.
+ */
+function toRelationNotificationEndpoint(
+  teamId: string,
+  endpoint: Pick<TeamIssueResponseItem, 'id' | 'title' | 'assigneeUserId' | 'assignedProjectId'>,
+): WorkItemRelationNotificationEndpoint {
+  return {
+    assigneeMemberKey: endpoint.assigneeUserId,
+    title: endpoint.title,
+    deepLink: createTeamIssueDeepLink(teamId, endpoint.id),
+    ...(endpoint.assignedProjectId ? { assignedProjectId: endpoint.assignedProjectId } : {}),
+  }
 }
 
 /**
@@ -3991,6 +4011,10 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
             ...body,
           }),
           actorMemberKey: principal.userKey,
+          notificationEndpoints: new Map([endpoints.source, endpoints.target].map((endpoint) => [
+            endpoint.id,
+            toRelationNotificationEndpoint(teamId, endpoint),
+          ])),
         },
       )
       await Promise.all([

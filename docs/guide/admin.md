@@ -293,6 +293,9 @@ Project）・ロールを選んで **割り当てを追加** します。SCIM �
   どれから作っても、この稼働曜日と休日で稼働日数を数えます。Project・Team の Issue・My Tasks の Gantt の日単位の列では、
   稼働日でない日を網掛けします。
   すでにある Work Item の日程は変わりません。決めていなければ月〜金が稼働日で、日本の祝日が休日です。
+  「週報のリマインダー」では、週報を出していない本人に知らせる曜日・時刻と、まだ出していないときに
+  その人が参加している Project の manager に知らせる曜日・時刻を決めます（日本時間、1 時間単位。それぞれ止められます）。
+  決めていなければ本人へ金曜 17 時、manager へ月曜 10 時です。2 つを同じ曜日・時刻にはできません。
 - 「データ governance」: 監査ログの保持日数（30日以上）と legal hold。
 - 「Export と閉鎖」: テナント全体の export（成果物は30日で失効）と、テナントの閉鎖
   （`CLOSE` と入力して開始。中断・再開・検証ができます）。
@@ -302,6 +305,14 @@ Project）・ロールを選んで **割り当てを追加** します。SCIM �
 
 監査ログには現在 Web の画面がありません。API（`/api/audit/events`、`/api/audit/exports`）から取得します。
 仕様は [`docs/event-audit.md`](../event-audit.md) を参照してください。
+
+## メンテナンスに切り替える
+
+移行作業や障害対応で変更だけを止めたいときは、運用者が `bun run runtime-control:read-only` で
+読み取り専用のメンテナンスに切り替えます。閲覧とサインインは続けられ、変更は理由付きで断られます。
+すべて止める場合は `bun run runtime-control:disable`、戻すときは `bun run runtime-control:enable` です。
+どの場合もメンバーの画面には「メンテナンス中」のバナーが出ます。手順は
+[cdk/README.md](../../cdk/README.md#application-処理を有効にするruntime-control) を参照してください。
 
 ## まだ提供していない機能
 

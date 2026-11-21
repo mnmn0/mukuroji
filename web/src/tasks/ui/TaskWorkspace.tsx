@@ -279,7 +279,7 @@ export type TaskWorkspaceProps = {
    * not show the outline.
    */
   outline?: TaskGanttOutline
-  /** Finds each Work Item's Project baseline for the Gantt chart's baseline bars. */
+  /** Finds each Work Item's Project baseline for the Gantt bars and the table's baseline column. */
   scheduleBaselineFor?: WorkItemBaselineLookup
   /** Filtered and sorted tasks rendered by the active view. */
   tasks: CanonicalWorkItem[]
@@ -751,6 +751,7 @@ export function TaskWorkspace({
           configurationsByTeam={configurationsByTeam}
           dependencySummaries={dependencySummaries}
           locale={locale}
+          scheduleBaselineFor={scheduleBaselineFor}
           onBulkApply={onBulkApply}
           onBulkOperationComplete={onBulkOperationComplete}
           onBulkTaskActionRequest={onBulkTaskActionRequest}
