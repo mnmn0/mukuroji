@@ -11,7 +11,9 @@ import {
   DescribeTableCommand,
   DescribeTimeToLiveCommand,
   DynamoDBClient,
+  UpdateTableCommand,
   UpdateTimeToLiveCommand,
+  type GlobalSecondaryIndex,
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
@@ -120,6 +122,18 @@ export const WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH = 20_000
 
 /** Current scope を page 内で並列再検証する最大数です。 */
 const WORKSPACE_SEARCH_SCOPE_CONCURRENCY = 10
+
+/** Name of the sparse GSI that holds only the title fields of search documents. */
+export const WORKSPACE_SEARCH_TITLE_INDEX_NAME = 'SearchTitleIndex'
+
+/** Sort key attribute of the title index; search document rows carry their record key in it. */
+export const WORKSPACE_SEARCH_TITLE_INDEX_KEY = 'searchTitleKey'
+
+/** Non-key attributes the title index projects, which are all a title match needs. */
+export const WORKSPACE_SEARCH_TITLE_INDEX_ATTRIBUTES = ['entityId', 'title', 'subtitle'] as const
+
+/** Maximum title index rows one keyword search page reads before it returns a cursor. */
+export const WORKSPACE_SEARCH_TITLE_EVALUATION_LIMIT = 20_000
 
 /** Saved view 一覧が一 page で返す既定件数です。 */
 export const SAVED_VIEW_DEFAULT_LIMIT = 50
@@ -813,6 +827,39 @@ type SearchCursor = {
   queryFingerprint: string
   /** 最後に評価した DynamoDB record key です。 */
   recordKey: string
+  /**
+   * Read phase the cursor resumes. `title` resumes the title index after `recordKey`; an absent
+   * phase resumes the full document scan, and a bare entity type prefix starts that scan.
+   */
+  phase?: 'title'
+}
+
+/** Results and evaluation budget shared by the title phase and the scan phase of one page. */
+type WorkspaceSearchPageState = {
+  /** Authorized results collected so far, in read order. */
+  results: WorkspaceSearchResult[]
+  /** Full search document rows evaluated so far against WORKSPACE_SEARCH_EVALUATION_LIMIT. */
+  evaluated: number
+  /** Maximum number of results the page returns. */
+  limit: number
+}
+
+/** Input of one search read phase. */
+type WorkspaceSearchPhaseInput = {
+  /** Workspace partition being read. */
+  workspaceId: string
+  /** Entity types the query reads, in read order. */
+  entityTypes: readonly SearchEntityType[]
+  /** Normalized keyword terms; empty when the query has no keyword. */
+  keywordTerms: readonly string[]
+  /** Normalized filters of the query. */
+  filters: WorkspaceSearchFilters
+  /** Page state the phase adds results to. */
+  page: WorkspaceSearchPageState
+  /** Position to resume after, or an entity type prefix to start that prefix. */
+  startRecordKey: string | undefined
+  /** Original query input with viewer access and the scope resolver. */
+  input: WorkspaceSearchQueryInput
 }
 
 /** Saved view list cursor の scope-bound payload です。 */
@@ -1587,7 +1634,7 @@ export class DynamoDbWorkspaceSearchClient {
         TransactItems: [{
           Put: {
             TableName: this.tableName,
-            Item: document,
+            Item: toStoredWorkspaceSearchItem(document),
             ...(sourceRevision !== undefined
               ? {
                   ConditionExpression:
@@ -1658,7 +1705,7 @@ export class DynamoDbWorkspaceSearchClient {
           TransactItems: [{
             Put: {
               TableName: this.tableName,
-              Item: completed,
+              Item: toStoredWorkspaceSearchItem(completed),
               ConditionExpression: '#projectionDigest = :projectionDigest AND attribute_not_exists(#creatorUserId)',
               ExpressionAttributeNames: {
                 '#projectionDigest': 'projectionDigest',
@@ -1713,7 +1760,7 @@ export class DynamoDbWorkspaceSearchClient {
           TransactItems: [{
             Put: {
               TableName: this.tableName,
-              Item: document,
+              Item: toStoredWorkspaceSearchItem(document),
               ...(stored
                 ? {
                     ConditionExpression: '#projectionDigest = :projectionDigest',
@@ -1776,7 +1823,16 @@ export class DynamoDbWorkspaceSearchClient {
     return true
   }
 
-  /** Composite filter、current RBAC、cursor pagination を適用して検索します。 */
+  /**
+   * Searches the Workspace index with composite filters, current RBAC and cursor pagination.
+   *
+   * A keyword search first reads the compact title index, so title matches anywhere in the
+   * Workspace come before body-only matches; it then scans the full documents for the matches
+   * that only the body, or rows not yet in the title index, contain.
+   *
+   * @param input - Query, viewer access and the previous page's cursor.
+   * @returns One page of authorized results and the cursor of the next page, if any.
+   */
   async search(input: WorkspaceSearchQueryInput): Promise<WorkspaceSearchResponse> {
     await this.ensureLocalTable()
     const workspaceId = requireText(input.workspaceId, 'Search Workspace ID')
@@ -1792,14 +1848,191 @@ export class DynamoDbWorkspaceSearchClient {
       queryFingerprint,
     )
     const entityTypes = orderWorkspaceSearchEntityTypes(filters.entityTypes)
-    const results: WorkspaceSearchResult[] = []
-    let entityTypeIndex = cursor ? findSearchCursorEntityTypeIndex(entityTypes, cursor.recordKey) : 0
-    let exclusiveStartKey = cursor
-      ? { workspaceId, recordKey: cursor.recordKey }
+    const keywordTerms = filters.keyword ? splitKeyword(filters.keyword) : []
+    const page: WorkspaceSearchPageState = { results: [], evaluated: 0, limit }
+    let next: Pick<SearchCursor, 'recordKey' | 'phase'> | undefined
+
+    const inTitlePhase = keywordTerms.length > 0 && (!cursor || cursor.phase === 'title')
+    if (cursor?.phase === 'title' && keywordTerms.length === 0) {
+      throw new WorkspaceSearchError(400, 'InvalidSearchCursor', 'Search cursor is invalid for this query.')
+    }
+    let scanStartRecordKey = inTitlePhase ? undefined : cursor?.recordKey
+    if (inTitlePhase) {
+      const titleNext = await this.searchTitleIndex({
+        workspaceId,
+        entityTypes,
+        keywordTerms,
+        filters,
+        page,
+        startRecordKey: cursor?.recordKey,
+        input,
+      })
+      if (titleNext) {
+        next = { recordKey: titleNext, phase: 'title' }
+      } else if (page.results.length >= limit || page.evaluated >= WORKSPACE_SEARCH_EVALUATION_LIMIT) {
+        next = { recordKey: createWorkspaceSearchEntityTypePrefix(entityTypes[0] ?? 'work-item') }
+      } else {
+        scanStartRecordKey = undefined
+      }
+    }
+    if (!next) {
+      const scanNext = await this.scanSearchDocuments({
+        workspaceId,
+        entityTypes,
+        keywordTerms,
+        filters,
+        page,
+        startRecordKey: scanStartRecordKey,
+        input,
+      })
+      if (scanNext) next = { recordKey: scanNext }
+    }
+
+    return {
+      schemaVersion: SEARCH_SCHEMA_VERSION,
+      results: rankWorkspaceSearchResultsByTitleMatch(page.results, filters.keyword),
+      ...(next
+        ? {
+            nextCursor: encodeCursor(this.getCursorKey(), {
+              version: 1,
+              kind: 'search',
+              workspaceId,
+              viewerUserId,
+              queryFingerprint,
+              recordKey: next.recordKey,
+              ...(next.phase ? { phase: next.phase } : {}),
+            } satisfies SearchCursor),
+          }
+        : {}),
+    }
+  }
+
+  /**
+   * Reads the title index and evaluates the documents whose title fields match every term.
+   *
+   * @param read - Query state shared with the scan phase.
+   * @returns The title index position to resume from, or undefined when the index is exhausted.
+   */
+  private async searchTitleIndex(read: WorkspaceSearchPhaseInput): Promise<string | undefined> {
+    const { workspaceId, entityTypes, keywordTerms, page } = read
+    let entityTypeIndex = read.startRecordKey
+      ? findSearchCursorEntityTypeIndex(entityTypes, read.startRecordKey)
+      : 0
+    let exclusiveStartKey = read.startRecordKey
+      ? createTitleIndexStartKey(workspaceId, read.startRecordKey)
       : undefined
-    let positionRecordKey = cursor?.recordKey
-    let evaluated = 0
-    let nextRecordKey: string | undefined
+    let positionRecordKey = read.startRecordKey
+    let indexRowsRead = 0
+
+    while (entityTypeIndex < entityTypes.length) {
+      const entityType = entityTypes[entityTypeIndex]
+      if (entityType === undefined) break
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        IndexName: WORKSPACE_SEARCH_TITLE_INDEX_NAME,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(#titleKey, :prefix)',
+        ExpressionAttributeNames: { '#titleKey': WORKSPACE_SEARCH_TITLE_INDEX_KEY },
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':prefix': createWorkspaceSearchEntityTypePrefix(entityType),
+        },
+        ExclusiveStartKey: exclusiveStartKey,
+        ScanIndexForward: true,
+        Limit: Math.min(1_000, WORKSPACE_SEARCH_TITLE_EVALUATION_LIMIT - indexRowsRead),
+      }))
+      const rows = response.Items ?? []
+      indexRowsRead += rows.length
+      const candidateRecordKeys: string[] = []
+      for (const row of rows) {
+        if (
+          typeof row.recordKey === 'string' &&
+          row[WORKSPACE_SEARCH_TITLE_INDEX_KEY] === row.recordKey &&
+          matchesWorkspaceSearchTitleTerms(row, keywordTerms)
+        ) {
+          candidateRecordKeys.push(row.recordKey)
+        }
+      }
+      let processedCandidates = 0
+      let stopped = false
+      for (
+        let offset = 0;
+        offset < candidateRecordKeys.length && !stopped;
+        offset += WORKSPACE_SEARCH_SCOPE_CONCURRENCY
+      ) {
+        const batch = candidateRecordKeys.slice(offset, offset + WORKSPACE_SEARCH_SCOPE_CONCURRENCY)
+        const documents = await mapWithConcurrency(
+          batch,
+          WORKSPACE_SEARCH_SCOPE_CONCURRENCY,
+          async (recordKey) => {
+            const stored = await this.documentClient.send(new GetCommand({
+              TableName: this.tableName,
+              Key: { workspaceId, recordKey },
+            }))
+            // The base row decides which phase owns it, so a stale index row cannot duplicate it.
+            if (!stored.Item || !isTitleIndexedSearchItem(stored.Item, keywordTerms)) return undefined
+            const document = readWorkspaceSearchDocumentSafely(stored.Item)
+            return document ? await this.evaluateSearchDocument(document, read) : undefined
+          },
+        )
+        for (const [index, recordKey] of batch.entries()) {
+          processedCandidates += 1
+          page.evaluated += 1
+          positionRecordKey = recordKey
+          const document = documents[index]
+          if (document) page.results.push(toWorkspaceSearchResult(document, read.filters.keyword))
+          if (
+            page.results.length >= page.limit ||
+            page.evaluated >= WORKSPACE_SEARCH_EVALUATION_LIMIT
+          ) {
+            stopped = true
+            break
+          }
+        }
+      }
+
+      const responseLastRecordKey = typeof response.LastEvaluatedKey?.recordKey === 'string'
+        ? response.LastEvaluatedKey.recordKey
+        : undefined
+      const hasLaterEntityTypes = entityTypeIndex < entityTypes.length - 1
+      if (stopped) {
+        const hasUnreadRows = processedCandidates < candidateRecordKeys.length ||
+          Boolean(responseLastRecordKey) ||
+          hasLaterEntityTypes
+        return hasUnreadRows ? positionRecordKey : undefined
+      }
+      if (responseLastRecordKey) {
+        exclusiveStartKey = createTitleIndexStartKey(workspaceId, responseLastRecordKey)
+        positionRecordKey = responseLastRecordKey
+      } else {
+        entityTypeIndex += 1
+        exclusiveStartKey = undefined
+        // An exhausted prefix resumes from its last key, which the next query skips past.
+        if (entityTypeIndex < entityTypes.length) {
+          positionRecordKey = createWorkspaceSearchEntityTypePrefix(entityTypes[entityTypeIndex] ?? entityType)
+        }
+      }
+      if (indexRowsRead >= WORKSPACE_SEARCH_TITLE_EVALUATION_LIMIT) {
+        return entityTypeIndex < entityTypes.length ? positionRecordKey : undefined
+      }
+    }
+    return undefined
+  }
+
+  /**
+   * Scans full search documents in key order and evaluates the rows the title phase did not own.
+   *
+   * @param read - Query state shared with the title phase.
+   * @returns The record key to resume the scan from, or undefined when every prefix is read.
+   */
+  private async scanSearchDocuments(read: WorkspaceSearchPhaseInput): Promise<string | undefined> {
+    const { workspaceId, entityTypes, keywordTerms, page } = read
+    let entityTypeIndex = read.startRecordKey
+      ? findSearchCursorEntityTypeIndex(entityTypes, read.startRecordKey)
+      : 0
+    let exclusiveStartKey = read.startRecordKey && !isWorkspaceSearchEntityTypePrefix(read.startRecordKey)
+      ? { workspaceId, recordKey: read.startRecordKey }
+      : undefined
+    let positionRecordKey = read.startRecordKey
     let reachedLimit = false
 
     while (entityTypeIndex < entityTypes.length) {
@@ -1814,10 +2047,12 @@ export class DynamoDbWorkspaceSearchClient {
         },
         ExclusiveStartKey: exclusiveStartKey,
         ScanIndexForward: true,
-        Limit: Math.min(100, WORKSPACE_SEARCH_EVALUATION_LIMIT - evaluated),
+        Limit: Math.min(100, WORKSPACE_SEARCH_EVALUATION_LIMIT - page.evaluated),
       }))
       const documentRows = (response.Items ?? []).map((item) => ({
-        document: readWorkspaceSearchDocumentSafely(item),
+        document: keywordTerms.length > 0 && isTitleIndexedSearchItem(item, keywordTerms)
+          ? undefined
+          : readWorkspaceSearchDocumentSafely(item),
         recordKey: typeof item.recordKey === 'string' ? item.recordKey : undefined,
       }))
       let processedDocumentCount = 0
@@ -1834,52 +2069,22 @@ export class DynamoDbWorkspaceSearchClient {
         const currentDocuments = await mapWithConcurrency(
           batch,
           WORKSPACE_SEARCH_SCOPE_CONCURRENCY,
-          async ({ document: storedDocument }) => {
-            if (
-              !storedDocument ||
-              !matchesImmutableWorkspaceSearchFilters(
-                storedDocument,
-                filters,
-              )
-            ) {
-              return undefined
-            }
-            const resolvedScope = input.resolveCurrentScope
-              ? await input.resolveCurrentScope(storedDocument)
-              : {
-                  ...(storedDocument.teamId ? { teamId: storedDocument.teamId } : {}),
-                  ...(storedDocument.projectId ? { projectId: storedDocument.projectId } : {}),
-                }
-            if (!resolvedScope) return undefined
-            const document = applyResolvedWorkspaceSearchScope(
-              resolvedScope.currentDocument ?? storedDocument,
-              resolvedScope,
-            )
-            return canAccessWorkspaceSearchDocument(
-              document,
-              input.access,
-              resolvedScope.permissionVerified === true,
-            ) &&
-                matchesWorkspaceSearchFilters(document, filters)
-              ? document
-              : undefined
-          },
+          // The keyword is matched after resolving, because the current source can hold more
+          // text than the bounded stored body.
+          async ({ document: storedDocument }) => storedDocument
+            ? await this.evaluateSearchDocument(storedDocument, read)
+            : undefined,
         )
         for (let index = 0; index < batch.length; index += 1) {
           const row = batch[index]
           if (!row) continue
           processedDocumentCount += 1
-          evaluated += 1
+          page.evaluated += 1
           if (row.recordKey) positionRecordKey = row.recordKey
           const document = currentDocuments[index]
           if (!document) continue
-          results.push(
-            toWorkspaceSearchResult(
-              document,
-              filters.keyword,
-            ),
-          )
-          if (results.length >= limit) {
+          page.results.push(toWorkspaceSearchResult(document, read.filters.keyword))
+          if (page.results.length >= page.limit) {
             reachedLimit = true
             break
           }
@@ -1894,8 +2099,7 @@ export class DynamoDbWorkspaceSearchClient {
         const hasUnprocessedRows = processedDocumentCount < documentRows.length ||
           Boolean(responseLastRecordKey) ||
           hasLaterEntityTypes
-        nextRecordKey = hasUnprocessedRows ? positionRecordKey : undefined
-        break
+        return hasUnprocessedRows ? positionRecordKey : undefined
       }
       if (responseLastRecordKey) {
         exclusiveStartKey = { workspaceId, recordKey: responseLastRecordKey }
@@ -1904,29 +2108,48 @@ export class DynamoDbWorkspaceSearchClient {
         // An exhausted prefix resumes from its last key, which the next query skips past.
         entityTypeIndex += 1
         exclusiveStartKey = undefined
+        if (positionRecordKey === undefined && entityTypeIndex < entityTypes.length) {
+          positionRecordKey = createWorkspaceSearchEntityTypePrefix(entityTypes[entityTypeIndex] ?? entityType)
+        }
       }
-      if (evaluated >= WORKSPACE_SEARCH_EVALUATION_LIMIT) {
-        nextRecordKey = entityTypeIndex < entityTypes.length ? positionRecordKey : undefined
-        break
+      if (page.evaluated >= WORKSPACE_SEARCH_EVALUATION_LIMIT) {
+        return entityTypeIndex < entityTypes.length ? positionRecordKey : undefined
       }
     }
+    return undefined
+  }
 
-    return {
-      schemaVersion: SEARCH_SCHEMA_VERSION,
-      results: rankWorkspaceSearchResultsByTitleMatch(results, filters.keyword),
-      ...(nextRecordKey
-        ? {
-            nextCursor: encodeCursor(this.getCursorKey(), {
-              version: 1,
-              kind: 'search',
-              workspaceId,
-              viewerUserId,
-              queryFingerprint,
-              recordKey: nextRecordKey,
-            } satisfies SearchCursor),
-          }
-        : {}),
-    }
+  /**
+   * Re-resolves one stored document's current scope and applies RBAC and every filter to it.
+   *
+   * @param storedDocument - Document read from the index.
+   * @param read - Query state with the filters, viewer access and scope resolver.
+   * @returns The authorized current document, or undefined when it must not be returned.
+   */
+  private async evaluateSearchDocument(
+    storedDocument: WorkspaceSearchDocument,
+    read: WorkspaceSearchPhaseInput,
+  ): Promise<WorkspaceSearchDocument | undefined> {
+    const { filters, input } = read
+    if (!matchesImmutableWorkspaceSearchFilters(storedDocument, filters)) return undefined
+    const resolvedScope = input.resolveCurrentScope
+      ? await input.resolveCurrentScope(storedDocument)
+      : {
+          ...(storedDocument.teamId ? { teamId: storedDocument.teamId } : {}),
+          ...(storedDocument.projectId ? { projectId: storedDocument.projectId } : {}),
+        }
+    if (!resolvedScope) return undefined
+    const document = applyResolvedWorkspaceSearchScope(
+      resolvedScope.currentDocument ?? storedDocument,
+      resolvedScope,
+    )
+    return canAccessWorkspaceSearchDocument(
+      document,
+      input.access,
+      resolvedScope.permissionVerified === true,
+    ) && matchesWorkspaceSearchFilters(document, filters)
+      ? document
+      : undefined
   }
 
   /** Current viewer が参照できる saved views を page 取得します。 */
@@ -4063,11 +4286,10 @@ export async function ensureLocalWorkspaceSearchTable(
     if (!isWorkspaceSearchTableDescription(described.Table)) {
       throw new Error(`Local DynamoDB table "${normalizedTableName}" does not match the expected schema.`)
     }
-    if (described.Table?.TableStatus === 'ACTIVE') {
-      await ensureWorkspaceSearchTimeToLive(normalizedTableName, dynamoDbClient)
-      return
+    if (described.Table?.TableStatus !== 'ACTIVE') {
+      await waitForWorkspaceSearchTable(normalizedTableName, dynamoDbClient)
     }
-    await waitForWorkspaceSearchTable(normalizedTableName, dynamoDbClient)
+    await ensureWorkspaceSearchTitleIndex(normalizedTableName, dynamoDbClient)
     await ensureWorkspaceSearchTimeToLive(normalizedTableName, dynamoDbClient)
     return
   } catch (error) {
@@ -4081,11 +4303,13 @@ export async function ensureLocalWorkspaceSearchTable(
       AttributeDefinitions: [
         { AttributeName: 'workspaceId', AttributeType: 'S' },
         { AttributeName: 'recordKey', AttributeType: 'S' },
+        { AttributeName: WORKSPACE_SEARCH_TITLE_INDEX_KEY, AttributeType: 'S' },
       ],
       KeySchema: [
         { AttributeName: 'workspaceId', KeyType: 'HASH' },
         { AttributeName: 'recordKey', KeyType: 'RANGE' },
       ],
+      GlobalSecondaryIndexes: [createWorkspaceSearchTitleIndexDefinition()],
       BillingMode: 'PAY_PER_REQUEST',
     }))
   } catch (error) {
@@ -4094,7 +4318,68 @@ export async function ensureLocalWorkspaceSearchTable(
     }
   }
   await waitForWorkspaceSearchTable(normalizedTableName, dynamoDbClient)
+  await ensureWorkspaceSearchTitleIndex(normalizedTableName, dynamoDbClient)
   await ensureWorkspaceSearchTimeToLive(normalizedTableName, dynamoDbClient)
+}
+
+/**
+ * Describes the title index exactly as the CDK stack defines it.
+ *
+ * @returns The sparse GSI definition keyed by Workspace and the title index key.
+ */
+function createWorkspaceSearchTitleIndexDefinition(): GlobalSecondaryIndex {
+  return {
+    IndexName: WORKSPACE_SEARCH_TITLE_INDEX_NAME,
+    KeySchema: [
+      { AttributeName: 'workspaceId', KeyType: 'HASH' },
+      { AttributeName: WORKSPACE_SEARCH_TITLE_INDEX_KEY, KeyType: 'RANGE' },
+    ],
+    Projection: {
+      ProjectionType: 'INCLUDE',
+      NonKeyAttributes: [...WORKSPACE_SEARCH_TITLE_INDEX_ATTRIBUTES],
+    },
+  }
+}
+
+/**
+ * Adds the title index to a local table created before it existed and waits until it is active.
+ *
+ * @param tableName - Local Workspace Search table name.
+ * @param dynamoDbClient - Low-level client of the local DynamoDB endpoint.
+ */
+async function ensureWorkspaceSearchTitleIndex(
+  tableName: string,
+  dynamoDbClient: DynamoDBClient,
+): Promise<void> {
+  const findIndex = async () => {
+    const described = await dynamoDbClient.send(new DescribeTableCommand({ TableName: tableName }))
+    return described.Table?.GlobalSecondaryIndexes?.find((index) =>
+      index.IndexName === WORKSPACE_SEARCH_TITLE_INDEX_NAME
+    )
+  }
+  let index = await findIndex()
+  if (!index) {
+    try {
+      await dynamoDbClient.send(new UpdateTableCommand({
+        TableName: tableName,
+        AttributeDefinitions: [
+          { AttributeName: 'workspaceId', AttributeType: 'S' },
+          { AttributeName: WORKSPACE_SEARCH_TITLE_INDEX_KEY, AttributeType: 'S' },
+        ],
+        GlobalSecondaryIndexUpdates: [{ Create: createWorkspaceSearchTitleIndexDefinition() }],
+      }))
+    } catch (error) {
+      if (!isResourceInUse(error)) throw error
+    }
+    index = await findIndex()
+  }
+  for (let attempt = 0; attempt < 50 && index?.IndexStatus !== undefined && index.IndexStatus !== 'ACTIVE'; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    index = await findIndex()
+  }
+  if (!index || (index.IndexStatus !== undefined && index.IndexStatus !== 'ACTIVE')) {
+    throw new Error(`Local DynamoDB table "${tableName}" title index did not become active.`)
+  }
 }
 
 /** Ensures local retention-bearing search rows use the production `expiresAt` TTL contract. */
@@ -5750,7 +6035,8 @@ function decodeSearchCursor(
     cursor.viewerUserId !== viewerUserId ||
     cursor.queryFingerprint !== queryFingerprint ||
     typeof cursor.recordKey !== 'string' ||
-    !cursor.recordKey.startsWith(WORKSPACE_SEARCH_DOCUMENT_PREFIX)
+    !cursor.recordKey.startsWith(WORKSPACE_SEARCH_DOCUMENT_PREFIX) ||
+    (cursor.phase !== undefined && cursor.phase !== 'title')
   ) {
     throw new WorkspaceSearchError(400, 'InvalidSearchCursor', 'Search cursor is invalid for this query.')
   }
@@ -5780,6 +6066,83 @@ function orderWorkspaceSearchEntityTypes(
  */
 function createWorkspaceSearchEntityTypePrefix(entityType: SearchEntityType): string {
   return `${WORKSPACE_SEARCH_DOCUMENT_PREFIX}${entityType}#`
+}
+
+/**
+ * Adds the title index key to a search document at the persistence boundary.
+ *
+ * The key is not part of the canonical document, so the projection digest stays unchanged and
+ * reads drop it again.
+ *
+ * @param document - Normalized search document to store.
+ * @returns The DynamoDB item that also appears in the title index.
+ */
+function toStoredWorkspaceSearchItem(
+  document: WorkspaceSearchDocument,
+): WorkspaceSearchDocument & { [WORKSPACE_SEARCH_TITLE_INDEX_KEY]: string } {
+  return { ...document, [WORKSPACE_SEARCH_TITLE_INDEX_KEY]: document.recordKey }
+}
+
+/**
+ * Creates the title index start key that resumes a query after one search document.
+ *
+ * @param workspaceId - Workspace partition being read.
+ * @param recordKey - Last evaluated record key, or an entity type prefix to start that prefix.
+ * @returns The index and table key, or undefined to read the prefix from its start.
+ */
+function createTitleIndexStartKey(workspaceId: string, recordKey: string) {
+  if (isWorkspaceSearchEntityTypePrefix(recordKey)) return undefined
+  return { workspaceId, recordKey, [WORKSPACE_SEARCH_TITLE_INDEX_KEY]: recordKey }
+}
+
+/**
+ * Tells whether a cursor position is a bare entity type prefix rather than a document key.
+ *
+ * @param recordKey - Cursor position.
+ * @returns Whether the position names the start of one entity type prefix.
+ */
+function isWorkspaceSearchEntityTypePrefix(recordKey: string): boolean {
+  return [...searchEntityTypes].some((entityType) =>
+    recordKey === createWorkspaceSearchEntityTypePrefix(entityType)
+  )
+}
+
+/**
+ * Tells whether every keyword term occurs in the title fields of an item.
+ *
+ * The title fields are the entity ID, title and subtitle, which is the keyword haystack without
+ * the body.
+ *
+ * @param item - Title index row or stored search document item.
+ * @param terms - Normalized keyword terms.
+ * @returns Whether the title fields alone match the keyword.
+ */
+function matchesWorkspaceSearchTitleTerms(
+  item: Record<string, unknown>,
+  terms: readonly string[],
+): boolean {
+  if (terms.length === 0) return false
+  const haystack = normalizeSearchText([item.entityId, item.title, item.subtitle]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .join('\n'))
+  return terms.every((term) => haystack.includes(term))
+}
+
+/**
+ * Tells whether the title phase owns a stored row: it is in the title index and its title fields
+ * match. The scan phase skips exactly these rows, so no row is returned by both phases.
+ *
+ * @param item - Stored search document item.
+ * @param terms - Normalized keyword terms.
+ * @returns Whether the title phase evaluates this row.
+ */
+function isTitleIndexedSearchItem(
+  item: Record<string, unknown>,
+  terms: readonly string[],
+): boolean {
+  return typeof item.recordKey === 'string' &&
+    item[WORKSPACE_SEARCH_TITLE_INDEX_KEY] === item.recordKey &&
+    matchesWorkspaceSearchTitleTerms(item, terms)
 }
 
 /**
