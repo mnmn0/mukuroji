@@ -146,6 +146,9 @@ const taskViewBuiltInFields = [
   'team',
 ]
 
+/** Columns that only the table shows, without filters, sorting, or grouping. */
+const taskViewDisplayOnlyColumns = ['baselineEndDelayDays']
+
 /** Resolves the selected Team Issue using the same trimmed membership fallback as the screen. */
 function resolveTeamIssueSelectionId(issues: readonly TeamIssue[], requestedIssueId?: string) {
   const trimmedIssueId = requestedIssueId?.trim()
@@ -438,6 +441,7 @@ export function TeamIssuePage() {
   )
   const taskViewColumns = [
     ...taskViewBuiltInFields,
+    ...taskViewDisplayOnlyColumns,
     ...WORK_ITEM_EFFORT_COLUMN_FIELDS,
     ...(taskViewCustomFields.length > 0 ? ['customFields'] : []),
     ...taskViewCustomFields.map((field) => `custom:${field.id}`),
@@ -891,6 +895,7 @@ export function TeamIssuePage() {
     { id: 'estimate', label: t('tasks.column.estimate') },
     { id: 'remainingEffort', label: t('tasks.column.remainingEffort') },
     { id: 'progress', label: t('tasks.column.progress') },
+    { id: 'baselineEndDelayDays', label: t('tasks.column.baselineEndDelayDays') },
     ...(taskViewCustomFields.length > 0
       ? [{ id: 'customFields', label: t('workItems.fields.title') }]
       : []),
@@ -899,7 +904,8 @@ export function TeamIssuePage() {
       label: field.name,
     })),
   ]
-  const taskViewSortOptions = taskViewFieldOptions.filter((option) => option.id !== 'customFields')
+  const taskViewSortOptions = taskViewFieldOptions.filter((option) =>
+    option.id !== 'customFields' && !taskViewDisplayOnlyColumns.includes(option.id))
   const taskViewGroupOptions = taskViewSortOptions.filter((option) => !isWorkItemEffortColumnField(option.id))
   const taskViewOptions = taskViewController.views.map(createTaskViewOption)
   const selectedTaskView = taskViewController.activeSavedView

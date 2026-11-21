@@ -891,6 +891,50 @@ export const LargeActivity: Story = {
 }
 
 /**
+ * Relation and hierarchy changes, including a reorder among siblings, appear in the activity tab.
+ */
+export const RelationActivity: Story = {
+  args: {
+    defaultTab: 'activity',
+    controller: {
+      ...issueCollaborationControllerFixture,
+      activity: [
+        'work-item.parent-changed',
+        'work-item.sibling-order-changed',
+        'work-item.blocker-added',
+        'work-item.blocker-removed',
+      ].map((eventType, index) => ({
+        actorUserId: 'demo@example.com',
+        eventId: `relation-change-${index + 1}`,
+        eventType,
+        occurredAt: `2026-06-08T02:${String(index).padStart(2, '0')}:00.000Z`,
+      })),
+      hasMoreActivity: false,
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText(/同じ親の中での並び順を変更しました/)).toBeVisible()
+    await expect(canvas.getByText(/この Work Item をブロックする項目を解除しました/)).toBeVisible()
+  },
+}
+
+/**
+ * The same relation activity in English.
+ */
+export const RelationActivityEnglish: Story = {
+  args: {
+    ...RelationActivity.args,
+    locale: 'en',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText(/changed the order among siblings/)).toBeVisible()
+    await expect(canvas.getByText(/removed a blocker/)).toBeVisible()
+  },
+}
+
+/**
  * Narrow detail pane keeps the tab strip horizontally scrollable and actions touch-sized.
  */
 export const Mobile: Story = {

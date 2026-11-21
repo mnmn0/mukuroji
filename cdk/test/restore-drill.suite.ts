@@ -669,7 +669,7 @@ test('restore and cleanup workflows use bounded Standard wait loops without exec
       MemorySize: 2048,
       Runtime: 'nodejs22.x',
       Timeout: 900,
-      TracingConfig: { Mode: 'Active' },
+      TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
     }),
   );
   expect(requiredRecord(cleanupFunction, 'Properties')).toEqual(
@@ -678,7 +678,7 @@ test('restore and cleanup workflows use bounded Standard wait loops without exec
       MemorySize: 512,
       Runtime: 'nodejs22.x',
       Timeout: 900,
-      TracingConfig: { Mode: 'Active' },
+      TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
     }),
   );
 
@@ -688,7 +688,7 @@ test('restore and cleanup workflows use bounded Standard wait loops without exec
       Level: 'ERROR',
     }),
     StateMachineType: 'STANDARD',
-    TracingConfiguration: { Enabled: true },
+    TracingConfiguration: { Enabled: { 'Fn::If': ['LambdaTracingActive', true, false] } },
   }));
   expect(cleanupWorkflowProperties).toEqual(
     expect.objectContaining({
@@ -697,7 +697,7 @@ test('restore and cleanup workflows use bounded Standard wait loops without exec
         Level: 'ERROR',
       }),
       StateMachineType: 'STANDARD',
-      TracingConfiguration: { Enabled: true },
+      TracingConfiguration: { Enabled: { 'Fn::If': ['LambdaTracingActive', true, false] } },
     }),
   );
   expect(requiredRecord(timeoutFinalizerWorkflow, 'Properties')).toEqual(
@@ -707,7 +707,7 @@ test('restore and cleanup workflows use bounded Standard wait loops without exec
         Level: 'ERROR',
       }),
       StateMachineType: 'STANDARD',
-      TracingConfiguration: { Enabled: true },
+      TracingConfiguration: { Enabled: { 'Fn::If': ['LambdaTracingActive', true, false] } },
     }),
   );
 

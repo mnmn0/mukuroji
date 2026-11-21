@@ -478,6 +478,14 @@ const watcherNotificationEventTypes = new Set([
 const workItemChangeWatcherEventTypes = new Set([
   'work-item.updated',
   'work-item.schedule-cascade-updated',
+  'work-item.blocker-removed',
+])
+/**
+ * Work Item change events that notify the item's current watchers even without stored candidates,
+ * so a cleared blocker still reaches watchers of an unassigned Work Item.
+ */
+const workItemWatcherOnlyEventTypes = new Set([
+  'work-item.blocker-removed',
 ])
 /**
  * Planning update events that fan out to the target's watchers and, for a Project target, to
@@ -532,7 +540,8 @@ export function supportsCollaborationWatcherNotifications(eventType: string) {
  * Reports whether a Work Item change event should notify the item's current watchers.
  *
  * Title or description edits carry no notification candidates and stay silent; assignment,
- * status, schedule, and archive changes reach watchers as well as the owner and creator.
+ * status, schedule, and archive changes reach watchers as well as the owner and creator. A
+ * cleared blocker reaches watchers even when the Work Item has no assignee.
  *
  * @param event - Parsed audit event type and stored notification candidates.
  * @returns Whether item watchers must be resolved for the event.
@@ -541,7 +550,7 @@ export function notifiesWorkItemChangeWatchers(
   event: Pick<AuditProjectionEvent, 'eventType' | 'notificationCandidates'>,
 ) {
   return workItemChangeWatcherEventTypes.has(event.eventType) &&
-    event.notificationCandidates.length > 0
+    (event.notificationCandidates.length > 0 || workItemWatcherOnlyEventTypes.has(event.eventType))
 }
 
 /**
