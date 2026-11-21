@@ -11,7 +11,8 @@ import { TrieRouter } from 'hono/router/trie-router'
 /**
  * `POST` routes that change no domain data and stay available during read-only maintenance.
  *
- * The update-feed digest preview is not listed: it records delivery receipts.
+ * The update-feed digest preview and the provisioning preview are not listed: the first records
+ * delivery receipts and the second stores the preview that a later reconcile applies.
  *
  * Sign-in and token refresh keep sessions alive so users do not lose what they are editing.
  * They may still record incidental bookkeeping, such as sign-in rate-limit counters, audit events,
@@ -31,6 +32,8 @@ export const READ_ONLY_POST_ROUTES: readonly string[] = Object.freeze([
   '/api/analytics/evidence',
   '/api/analytics/export',
   '/api/bulk-operations/preview',
+  '/api/document-backlinks/batch',
+  '/api/enterprise/security/policy/preview',
   '/api/teams/:teamId/issues/:issueId/schedule/preview',
   '/api/teams/:teamId/issues/:issueId/work-item-type-preview',
 ])

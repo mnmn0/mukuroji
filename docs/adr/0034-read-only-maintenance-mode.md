@@ -17,8 +17,9 @@ AppConfig の runtime control は `enabled` / `disabled` の 2 値で、本番 m
 - `read-only` のとき API の runtime-control middleware（authentication・route より前）は次だけを通す。
   - `GET` と `HEAD`。
   - `server/src/app/middleware/read-only-request-registry.ts` に列挙した `POST`（sign-in、MFA challenge、
-    token の更新、logout、SSO の開始と交換、Analytics の query・evidence・export、各 preview。Update feed digest の
-    preview は配信 receipt を書くので含めない）。照合には Hono の `TrieRouter` を使い、
+    token の更新、logout、SSO の開始と交換、Analytics の query・evidence・export、変更を保存しない preview、
+    Document の backlink 一括取得。Update feed digest の preview は配信 receipt を書き、provisioning の preview は
+    preview を保存するので含めない）。照合には Hono の `TrieRouter` を使い、
     route と同じ path 規則で一致させる。
 - それ以外の method と列挙していない `POST` は、`503`、`Retry-After: 15`、problem `code`
   `maintenance_read_only` で断る。新しい変更 route は一覧に足さなくても断られる（fail closed）。
