@@ -174,9 +174,11 @@ export function recordRuntimeControlObservation(
       Timestamp: observation.observedAtMilliseconds,
       CloudWatchMetrics: [{
         Namespace: 'Mukuroji/RuntimeControl',
+        // One dimension set only: a per-Surface set would add five billed custom
+        // metrics per warm surface, and no alarm reads it. The Surface field
+        // below stays in the log for Logs Insights investigation.
         Dimensions: [
           ['Service', 'ControlId'],
-          ['Service', 'ControlId', 'Surface'],
         ],
         Metrics: [
           { Name: 'BlockedCount', Unit: 'Count' },
