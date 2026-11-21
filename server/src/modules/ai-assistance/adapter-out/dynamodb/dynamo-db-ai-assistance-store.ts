@@ -375,8 +375,6 @@ const feedbackItemSchema = z.object({
   expiresAt: z.number().int().min(0),
 }).strict()
 
-/** DynamoDB adapter that reuses the WorkspaceSearchTable partition and TTL contract. */
-
 /** Strict row schema for one encrypted Workspace provider key. */
 const providerCredentialItemSchema = z.object({
   workspaceId: z.string().min(1),
@@ -391,6 +389,7 @@ const providerCredentialItemSchema = z.object({
   (item) => (item.ciphertext === undefined) === (item.keyHint === undefined),
 )
 
+/** DynamoDB adapter that reuses the WorkspaceSearchTable partition and TTL contract, including Workspace provider keys. */
 export class DynamoDbAiAssistanceStore implements AiAssistanceStore, AiProviderCredentialStore {
   /** WorkspaceSearchTable document client. */
   readonly #documentClient: DynamoDBDocumentClient
