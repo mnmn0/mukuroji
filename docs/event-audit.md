@@ -96,13 +96,13 @@ Work Item relation の追加・削除と親の付け替えは、relation row と
 | `work-item.relation-added` / `work-item.relation-removed` | `related` / `duplicate` の両端 | `relatedWorkItemId` |
 | `work-item.sibling-order-changed` | 同じ親の中（または最上位）で並べ替えた子 | `parentWorkItemId`（最上位では無し）、`previousHierarchyRank` / `hierarchyRank` |
 
-`metadata` はほかに `adapter=work-item-relation`、`actorMemberKey`、`teamId`、`issueId`、`relationType`（記録する側から見た type）、`graphRevision` を持つ。相手の Work Item は閲覧者が見られない Project に属することがあるので、相手の ID は公開 view に出る `changes` には入れず（`changes` は空）、公開 view が出さない `metadata` にだけ保存する。activity は「誰がいつ何の種類の relation を変えたか」だけを表示し、相手の Work Item を閲覧者の権限で絞って表示するのは後続変更とする。relation 変更は Work Item の `revision` と `updatedAt` を変えないので、event も `work-item.updated` とは別の type にし、Analytics の scope change（`work-item.updated` の field 変更）と区別する。Audit table が構成されている環境で audit context のない relation mutation は `500` で拒否する。
+`metadata` はほかに `adapter=work-item-relation`、`actorMemberKey`、`teamId`、`issueId`、`relationType`（記録する側から見た type）、`graphRevision` を持ち、記録する側の Work Item が Project に割り当てられていれば `projectId` も持つ。`projectId` は同じ transaction の endpoint guard が確かめた値で、webhook の配信と通知はこれで Project の閲覧権限を確かめる。`projectScopeRecorded: true` は Project の記録が揃っていることを示し、これがない古い relation event は webhook に配信しない。相手の Work Item は閲覧者が見られない Project に属することがあるので、相手の ID は公開 view に出る `changes` には入れず（`changes` は空）、公開 view が出さない `metadata` にだけ保存する。activity は「誰がいつ何の種類の relation を変えたか」だけを表示し、相手の Work Item を閲覧者の権限で絞って表示するのは後続変更とする。relation 変更は Work Item の `revision` と `updatedAt` を変えないので、event も `work-item.updated` とは別の type にし、Analytics の scope change（`work-item.updated` の field 変更）と区別する。Audit table が構成されている環境で audit context のない relation mutation は `500` で拒否する。
 
 兄弟の並べ替え（親を変えずに `hierarchyRank` だけを書く `PUT .../parent`）は、rank の書き込みと graph revision の CAS と同じ transaction に、動かした子だけの `work-item.sibling-order-changed` を 1 件書く。親や兄弟の activity には出さない。rank が既に保存済みの retry は何も書かないので event も増えない。rank は公開 view に出さず `metadata` にだけ置く。
 
-`work-item.blocker-removed` は、route が認可時に読んだ block されていた側の責任者・title・deep link・Project を `metadata` の `notificationCandidates`（`assignee`）・`notificationTitle`・`deepLink`・`projectId` に入れ、projection がその Work Item の現在の watcher も加えて通知する（[通知](./notifications.md)）。ほかの relation event は通知しない。
+`work-item.blocker-removed` は、route が認可時に読んだ block されていた側の責任者・title・deep link を `metadata` の `notificationCandidates`（`assignee`）・`notificationTitle`・`deepLink` に入れ、projection がその Work Item の現在の watcher も加えて通知する（[通知](./notifications.md)）。ほかの relation event は通知しない。
 
-Automation trigger と webhook の event type はこれらをまだ扱わない（#377 の残り）。
+これらの event type は Automation の `relation` trigger（[Automation](./automation.md#rule-model)）と webhook の event type（[Public API の Signed webhook](./public-api.md#signed-webhook)）でも使う。判断の経緯は [ADR 0045](./adr/0045-relation-events-for-automation-and-webhooks.md)。
 
 ## DynamoDB key
 
