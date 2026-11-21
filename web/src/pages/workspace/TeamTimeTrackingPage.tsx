@@ -1,7 +1,9 @@
+import { isWeeklyReportDate, isWorkspaceWeekStartDay, type WorkspaceWeekStartDay } from '@mukuroji/contracts'
 import { useMemo } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
 import { PersonalWeeklyReportContainer } from '../../features/time-tracking/ui/PersonalWeeklyReportContainer'
+import { TeamWeeklyReportsContainer } from '../../features/time-tracking/ui/TeamWeeklyReportsContainer'
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
 import { TimeReportContainer } from '../../features/time-tracking/ui/TimeReportContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
@@ -21,8 +23,20 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 const emptyTeamProjects: ProjectDirectoryProject[] = []
 
 /**
- * Renders a Team's time tracking: the member's weekly timesheet and weekly report, the manager's
- * approval queue, and the Team report with its CSV export and budgets.
+ * Reads the weekday of a `YYYY-MM-DD` date.
+ *
+ * @param date - Date from the URL.
+ * @returns The weekday, 0 (Sunday) to 6, or undefined for a missing or invalid date.
+ */
+function readDateWeekday(date: string | undefined): WorkspaceWeekStartDay | undefined {
+  if (!date || !isWeeklyReportDate(date)) return undefined
+  const weekday = new Date(`${date}T00:00:00.000Z`).getUTCDay()
+  return isWorkspaceWeekStartDay(weekday) ? weekday : undefined
+}
+
+/**
+ * Renders a Team's time tracking: the member's weekly timesheet and weekly report, the managers'
+ * weekly report status and approval queue, and the Team report with its CSV export and budgets.
  *
  * The view, week, and report period live in the URL so a reload or shared link opens the same view.
  *
@@ -35,7 +49,10 @@ export function TeamTimeTrackingPage() {
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const viewParam = searchParams.get('view')
-  const view: TimeTrackingView = viewParam === 'approvals' || viewParam === 'report' || viewParam === 'weekly-report'
+  const view: TimeTrackingView = viewParam === 'approvals' ||
+    viewParam === 'report' ||
+    viewParam === 'weekly-report' ||
+    viewParam === 'team-weekly-reports'
     ? viewParam
     : 'timesheet'
   const reportFrom = searchParams.get('from')
@@ -49,6 +66,13 @@ export function TeamTimeTrackingPage() {
   const weekStartDay = calendarSettings.settings?.weekStartDay
   const requestedWeek = searchParams.get('week') ?? undefined
   const weekStart = resolveWeekStart(requestedWeek, undefined, weekStartDay)
+  // A weekly report opened from its history keeps the week it was saved under, even when the
+  // Workspace has since moved its week start to another day.
+  const exactReportWeekDay = view === 'weekly-report' && searchParams.get('exactWeek') === '1'
+    ? readDateWeekday(requestedWeek)
+    : undefined
+  const reportWeekStartDay = exactReportWeekDay ?? weekStartDay
+  const reportWeekStart = exactReportWeekDay === undefined ? weekStart : resolveWeekStart(requestedWeek, undefined, exactReportWeekDay)
   // Until the week start is known, view tabs keep the requested week as is, so a provisional
   // Monday-based date never replaces it in the URL.
   const linkWeek = calendarSettings.settings ? weekStart : requestedWeek
@@ -62,7 +86,7 @@ export function TeamTimeTrackingPage() {
     accessToken,
     activeTeam?.id,
     activeTeam?.projects ?? emptyTeamProjects,
-    enabled && (view === 'approvals' || view === 'report'),
+    enabled && (view === 'approvals' || view === 'report' || view === 'team-weekly-reports'),
   )
   const teamScope = useMemo(() => ({ kind: 'team' as const, teamId: teamId ?? '' }), [teamId])
   // The Team task-view list carries the server's effective write scopes, enterprise grants included.
@@ -117,16 +141,29 @@ export function TeamTimeTrackingPage() {
 
   if (!teamId) return null
 
+  /**
+   * Builds the link of a view tab. While a weekly report opened at its stored week start is shown,
+   * the weekly report tab keeps that week instead of moving to the Workspace week start.
+   *
+   * @param candidate - View the tab opens.
+   * @returns The tab's path.
+   */
+  const tabHref = (candidate: TimeTrackingView) => {
+    if (candidate === 'report') {
+      return createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
+    }
+    if (candidate === 'weekly-report' && exactReportWeekDay !== undefined) {
+      return createTeamTimeTrackingPath(teamId, 'weekly-report', reportWeekStart, undefined, true)
+    }
+    return createTeamTimeTrackingPath(teamId, candidate, linkWeek)
+  }
+
   return (
     <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error]}>
       <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <TimeTrackingViewTabs
-          getHref={(candidate) => candidate === 'report'
-            ? createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
-            : createTeamTimeTrackingPath(teamId, candidate, linkWeek)}
-          onSelect={(candidate) => { void navigate(candidate === 'report'
-            ? createTeamTimeTrackingPath(teamId, 'report', undefined, { ...reportRange, groupBy: reportGroupBy })
-            : createTeamTimeTrackingPath(teamId, candidate, linkWeek), { replace: true }) }}
+          getHref={tabHref}
+          onSelect={(candidate) => { void navigate(tabHref(candidate), { replace: true }) }}
           t={t}
           view={view}
         />
@@ -178,16 +215,30 @@ export function TeamTimeTrackingPage() {
           <PersonalWeeklyReportContainer
             accessToken={accessToken}
             hasWorkItemError={Boolean(myWorkItems.error)}
-            key={`${teamId}:weekly-report:${weekStart}`}
+            key={`${teamId}:weekly-report:${reportWeekStart}`}
             locale={workspace.locale}
             memberKey={workspace.userKey}
             onMoveWeek={moveWeek}
+            onOpenWeek={(nextWeekStart) => {
+              void navigate(createTeamTimeTrackingPath(teamId, 'weekly-report', nextWeekStart, undefined, true), { replace: true })
+            }}
             onRetryWorkItems={() => { void myWorkItems.mutate().catch(() => undefined) }}
+            teamId={teamId}
+            weekStart={reportWeekStart}
+            weekStartDay={reportWeekStartDay ?? calendarSettings.settings.weekStartDay}
+            workItems={myWorkItems.data}
+            workItemTitles={workItemTitles}
+          />
+        ) : view === 'team-weekly-reports' ? (
+          <TeamWeeklyReportsContainer
+            accessToken={accessToken}
+            key={`${teamId}:team-weekly-reports:${weekStart}`}
+            locale={workspace.locale}
+            memberNames={memberNames}
+            onMoveWeek={moveWeek}
             teamId={teamId}
             weekStart={weekStart}
             weekStartDay={calendarSettings.settings.weekStartDay}
-            workItems={myWorkItems.data}
-            workItemTitles={workItemTitles}
           />
         ) : view === 'approvals' ? (
           <TimeApprovalQueueContainer

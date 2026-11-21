@@ -11,6 +11,10 @@ import {
   DynamoDbProjectRaidLogStore,
   InMemoryProjectRaidLogStore,
 } from '../../modules/project-raid-log'
+import {
+  DynamoDbWeeklyReportStore,
+  InMemoryWeeklyReportStore,
+} from '../../modules/weekly-reports'
 import { AI_ASSISTANCE_SCHEMA_VERSION, listJapanesePublicHolidays } from '@mukuroji/contracts'
 import { createProductionJapanesePublicHolidayDates } from './japanese-public-holidays'
 import { fromNodeProviderChain } from '@aws-sdk/credential-providers'
@@ -610,6 +614,12 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       createDynamoDbDocumentClient(),
       getConfiguredAuditTableName(),
+    ),
+    weeklyReports: new DynamoDbWeeklyReportStore(
+      loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+      createDynamoDbDocumentClient(),
+      getConfiguredAuditTableName(),
+      loadServerConfig().environment.MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY || undefined,
     ),
     scheduleBaselines: new DynamoDbProjectScheduleBaselineStore(
       loadServerConfig().environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
@@ -1675,6 +1685,7 @@ export function createTestAppDependencies(): AppDependencies {
       updateFeedReadState: new InMemoryUpdateFeedReadStateStore(),
       savedUpdateFeeds: new InMemorySavedUpdateFeedsStore(),
       projectRaidLogs: new InMemoryProjectRaidLogStore(),
+      weeklyReports: new InMemoryWeeklyReportStore(),
       scheduleBaselines: new InMemoryProjectScheduleBaselineStore(),
       collections: new InMemoryCollectionsStore(),
       updateFeedDigest: new InMemoryUpdateFeedDigestStore(),
@@ -1804,6 +1815,7 @@ export function overrideAppDependencies(
       ...(overrides.updateFeedReadState ? { updateFeedReadState: overrides.updateFeedReadState } : {}),
       ...(overrides.savedUpdateFeeds ? { savedUpdateFeeds: overrides.savedUpdateFeeds } : {}),
       ...(overrides.projectRaidLogs ? { projectRaidLogs: overrides.projectRaidLogs } : {}),
+      ...(overrides.weeklyReports ? { weeklyReports: overrides.weeklyReports } : {}),
       ...(overrides.scheduleBaselines ? { scheduleBaselines: overrides.scheduleBaselines } : {}),
       ...(overrides.collections ? { collections: overrides.collections } : {}),
       ...(overrides.updateFeedDigest ? { updateFeedDigest: overrides.updateFeedDigest } : {}),
