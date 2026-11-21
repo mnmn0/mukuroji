@@ -1178,6 +1178,50 @@ describe('Analytics metric engine', () => {
     ])
   })
 
+  test('rewinds the Work Item title only from events that target the Work Item itself', () => {
+    const item = createWorkItem('renamed-with-context', {
+      title: 'Current title',
+      statusCategory: 'started',
+      workflowStatusId: 'status-started',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-09T00:00:00.000Z',
+    })
+    const rename = createAuditEvent(
+      'rename-work-item',
+      item,
+      '2026-01-09T00:00:00.000Z',
+      [{ field: 'title', before: 'Earlier title', after: 'Current title' }],
+    )
+    const contextItemEvent = createAuditEvent(
+      'update-context-item',
+      item,
+      '2026-01-08T00:00:00.000Z',
+      [{ field: 'title', before: 'Old note', after: 'New note' }],
+    )
+    const contextItemTargetId = `${contextItemEvent.entityId}/context-item/note-1`
+    const contextItemUpdate: AuditEventV1 = {
+      ...contextItemEvent,
+      eventType: 'context-item.updated',
+      target: { type: 'context-item', id: contextItemTargetId },
+      targetType: 'context-item',
+      targetId: contextItemTargetId,
+      targetKey: `workspace-1#context-item#${contextItemTargetId}`,
+    }
+    const evidence = queryTestAnalyticsEvidence({
+      workItems: [item],
+      events: [rename, contextItemUpdate],
+      evidence: {
+        metric: 'wip',
+        filter: { period },
+        asOf: '2026-01-07T00:00:00.000Z',
+        timeZone: 'UTC',
+        limit: 10,
+      },
+    })
+
+    expect(evidence.items.map((evidenceItem) => evidenceItem.title)).toEqual(['Earlier title'])
+  })
+
   test('keeps Work Item Type filters and groups isolated by Team', () => {
     const first = createWorkItem('shared-type-a', {
       teamId: 'team-a',
