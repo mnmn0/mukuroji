@@ -31,8 +31,8 @@ Workspace の監査 event に載せないと決めたが、runtime control の�
   （失敗後の再実行は同じ revision を使い得るため）。
 - 保持期限は書く前に script が Workspace の governance（tenant administration table の `GOVERNANCE` row）を強整合で読み、
   legal hold なら TTL を付けず、そうでなければ `auditRetentionDays` から計算する。governance がない Workspace は
-  stack parameter `AuditRetentionDays` を使う。governance を読めないまま続ける `disable` は、legal hold 中かもしれないので
-  TTL を付けずに書く。通知・自動化の対象ではないので `outboxStatus=suppressed` で書く。
+  stack parameter `AuditRetentionDays` を使う。完了・失敗の event の前には governance を読み直す（rollout の間に legal hold が
+  始まることがあるため）。読めないときは legal hold 中かもしれないので TTL を付けずに書く。通知・自動化の対象ではないので `outboxStatus=suppressed` で書く。
 - 停止・read-only の完了 event は worker が止まっている間に書くので、AuditEvents stream の 2 つの consumer
   （audit projection と automation worker）には届けない。event source mapping の filter で `entityType=runtime-control`
   の record を落とす（`entityType` のない record は従来どおり届ける）。届けると、止まった consumer が retry を使い切って
@@ -73,7 +73,7 @@ Workspace の監査 event に載せないと決めたが、runtime control の�
   強制できないので、key を知っていれば既存 event の上書きもできる（削除・読み取りの権限はない。上書きは stream と
   PITR に残る）。実行者を強く証明する、または改ざんを防ぐ必要が出たら選択肢 C に移る。
 - actor の ID は STS caller ARN なので、AWS account ID と IAM の user / role 名が Workspace の監査ログを読める人に見える。
-- governance を読んでから event を書くまでの間に保持期間や legal hold が変わると、その event だけ古い値になる。
+- 各 event は書く直前に読んだ governance を使うが、読んでから書くまでの短い間に保持期間や legal hold が変わると、その event だけ古い値になる。
   保持設定を変えると動く再計算 job が Workspace の event をまとめて更新するので、job が後から読む event は揃う。
 - 2026-11-21 より前の template で deploy access stack を作った環境は、template を更新するまで切り替えが
   `enable` / `read-only` で止まる（`disable` は警告を出して続く）。

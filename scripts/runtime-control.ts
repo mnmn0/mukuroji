@@ -573,15 +573,36 @@ export async function runRuntimeControl(
   const record = (step: RuntimeControlAuditStep): Promise<void> =>
     recordAuditEvent(audit, change, step, region, dependencies)
 
-  let retentionKnown = false
+  /**
+   * Reads the current Workspace retention for an end event; the rollout can take long enough for it to change.
+   *
+   * @returns The current retention, or no TTL when it cannot be read, since a legal hold may be active.
+   */
+  const currentRetention = async (): Promise<RuntimeControlAuditTarget> => {
+    try {
+      return await readWorkspaceRetention(target, region, dependencies)
+    } catch (error) {
+      if (!(error instanceof RuntimeControlError)) throw error
+      log(`Warning: ${error.message}\nWriting the end event without a TTL.`)
+      return { ...target.audit, legalHold: true }
+    }
+  }
+  /**
+   * Writes an end event with the retention read just before it.
+   *
+   * @param step - Phase and details of the step.
+   * @returns Resolves once the event is stored.
+   */
+  const recordFinal = async (step: RuntimeControlAuditStep): Promise<void> => {
+    audit = await currentRetention()
+    await record(step)
+  }
+
   try {
     audit = await readWorkspaceRetention(target, region, dependencies)
-    retentionKnown = true
     await record({ phase: 'started', occurredAt: dependencies.now() })
   } catch (error) {
     if (!(error instanceof RuntimeControlError)) throw error
-    // Without the Workspace policy a legal hold may be active, so the stop writes its events without a TTL.
-    if (!retentionKnown) audit = { ...target.audit, legalHold: true }
     // A stop must not wait for the audit table: the incident may be the reason to stop.
     if (request.mode !== 'disabled') {
       throw new RuntimeControlError(`${error.message}\nNothing was changed. Fix the audit write and run the command again.`)
@@ -595,10 +616,10 @@ export async function runRuntimeControl(
     result = await applyRuntimeControl(request, target, appconfig, caller, revision, progress, dependencies, timing)
   } catch (error) {
     const failureReason = error instanceof RuntimeControlError ? error.failureReason : 'error'
-    await recordEnd(record, { phase: 'failed', occurredAt: dependencies.now(), ...progress, failureReason }, log)
+    await recordEnd(recordFinal, { phase: 'failed', occurredAt: dependencies.now(), ...progress, failureReason }, log)
     throw error
   }
-  await recordEnd(record, {
+  await recordEnd(recordFinal, {
     phase: 'completed',
     occurredAt: dependencies.now(),
     versionNumber: result.versionNumber,

@@ -52,6 +52,8 @@ interface FakeOptions {
   readonly failingAuditPhases?: readonly string[]
   /** `get-item` output for the Workspace governance record; defaults to no record. */
   readonly governance?: string
+  /** `get-item` outputs for later reads, used in order before falling back to `governance`. */
+  readonly laterGovernance?: readonly string[]
   /** Completed deployments as `[DeploymentNumber, ConfigurationVersion]`. */
   readonly completedDeployments?: readonly (readonly [number, string])[]
   /** GitHub Actions run passed to the script. */
@@ -90,6 +92,7 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
     ['/work/deployed.json', '{"schemaVersion":1,"mode":"disabled","revision":3}'],
   ])
   const deploymentStates = [...(options.deploymentStates ?? ['DEPLOYING', 'BAKING', 'COMPLETE'])]
+  let governanceReads = 0
   const readyStatuses = [...(options.readyStatuses ?? [200])]
   const maintenanceStates = options.maintenanceStates === undefined ? undefined : [...options.maintenanceStates]
   let clock = Date.parse('2026-11-20T06:00:00.000Z')
@@ -116,8 +119,12 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
         return { State: deploymentStates.shift() ?? 'COMPLETE', PercentageComplete: 100 }
       case 'appconfig list-deployments':
         return options.completedDeployments ?? [[5, '1'], [6, '2']]
-      case 'dynamodb get-item':
-        return options.governance === undefined ? {} : JSON.parse(options.governance)
+      case 'dynamodb get-item': {
+        governanceReads += 1
+        const later = governanceReads > 1 ? options.laterGovernance?.[governanceReads - 2] : undefined
+        const governance = later ?? options.governance
+        return governance === undefined ? {} : JSON.parse(governance)
+      }
       case 'dynamodb put-item': {
         const itemArgument = args[args.indexOf('--item') + 1] ?? ''
         const path = itemArgument.replace(/^file:\/\//, '')
@@ -525,6 +532,30 @@ describe('Workspace retention and the served mode', () => {
     expect(fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(true)
     expect(fake.auditItems.map((item) => stringAttribute(item, 'eventType'))).toEqual(['runtime-control.change-completed'])
     for (const item of fake.auditItems) expect(item.expiresAt).toBeUndefined()
+  })
+
+  test('rereads the governance before the completion, so a hold set during the rollout applies', async () => {
+    const fake = fakeDependencies({
+      readyStatuses: [503],
+      governance: governanceRow(90, false),
+      laterGovernance: [governanceRow(90, true)],
+    })
+    await runRuntimeControl({ mode: 'read-only', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(fake.calls.filter((call) => call[1] === 'get-item')).toHaveLength(2)
+    expect(fake.auditItems[0]?.expiresAt).toBeDefined()
+    expect(fake.auditItems[1]?.expiresAt).toBeUndefined()
+  })
+
+  test('writes the completion without a TTL when the governance cannot be reread', async () => {
+    const fake = fakeDependencies({
+      readyStatuses: [503],
+      governance: governanceRow(90, false),
+      laterGovernance: [JSON.stringify({ Item: { payload: { S: '{}' } } })],
+    })
+    await runRuntimeControl({ mode: 'read-only', allAtOnce: false }, 'r', 'Mukuroji', fake.dependencies, timing)
+    expect(fake.auditItems.map((item) => stringAttribute(item, 'eventType')))
+      .toEqual(['runtime-control.change-started', 'runtime-control.change-completed'])
+    expect(fake.auditItems[1]?.expiresAt).toBeUndefined()
   })
 
   test('takes the before-value from the latest completed deployment, not the latest stored version', async () => {
