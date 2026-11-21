@@ -59,8 +59,10 @@ Workspace の監査 event に載せないと決めたが、runtime control の�
 ## 結果
 
 - Workspace の owner と監査担当が、`/api/audit/events` と export で切り替えの開始・完了・失敗と実行者を確かめられる。
-- deploy role は audit table の deployment Workspace partition に任意の event を追加できる（更新・削除はできない）。
-  実行者を強く証明する必要が出たら選択肢 C に移る。
+- deploy role は audit table の deployment Workspace partition に任意の event を書ける。IAM では条件付き書き込みを
+  強制できないので、key を知っていれば既存 event の上書きもできる（削除・読み取りの権限はない。上書きは stream と
+  PITR に残る）。実行者を強く証明する、または改ざんを防ぐ必要が出たら選択肢 C に移る。
+- actor の ID は STS caller ARN なので、AWS account ID と IAM の user / role 名が Workspace の監査ログを読める人に見える。
 - 2026-11-21 より前の template で deploy access stack を作った環境は、template を更新するまで切り替えが
   `enable` / `read-only` で止まる（`disable` は警告を出して続く）。
 - ADR 0034 の「アプリの監査 log への自動保存は未実装のまま」はこの ADR で実装した。
