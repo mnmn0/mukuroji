@@ -237,6 +237,7 @@ export const planningMessages = {
   'planning.cycle.panel': 'Cycle の計画',
   'planning.cycle.select': 'Cycle',
   'planning.cycle.commitment': 'コミット {count} 件 / 容量 {capacity} 件',
+  'planning.cycle.capacityExceeded': 'Cycle のキャパシティを超えるため保存できませんでした。キャパシティを増やすか、Work Item を外してください。',
   'planning.cycle.capacityFull': 'キャパシティがいっぱいです。Work Item を追加するには、この Cycle を選んで「計画を編集」でキャパシティを増やしてください。',
   'planning.cycle.remaining': '残り {count} 件入れられます',
   'planning.cycle.carriedOver': '持ち越し {count} 件',

@@ -237,6 +237,7 @@ export const planningMessages = {
   'planning.cycle.panel': 'Cycle planning',
   'planning.cycle.select': 'Cycle',
   'planning.cycle.commitment': '{count} committed of {capacity} capacity',
+  'planning.cycle.capacityExceeded': 'The change exceeds the Cycle capacity. Raise the capacity or remove Work Items.',
   'planning.cycle.capacityFull': 'This Cycle is full. To add Work Items, select the Cycle and raise its capacity under Edit plan.',
   'planning.cycle.remaining': '{count} more can be added',
   'planning.cycle.carriedOver': '{count} carried over',
