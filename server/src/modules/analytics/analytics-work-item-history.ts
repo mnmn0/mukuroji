@@ -320,8 +320,12 @@ export function mergeAnalyticsWorkItemHistoryEntries(
   }
   if (measureAnalyticsWorkItemHistoryRow(next) > ANALYTICS_WORK_ITEM_HISTORY_MAX_BYTES) {
     // The row expires with its oldest entry, so the history is measured again once retention
-    // has dropped that entry.
-    const overflowExpiresAt = readOldestExpiry(merged)
+    // has dropped that entry. Without any expiry, for example under a legal hold, it is
+    // measured again after a fixed delay so a later retention change is picked up.
+    const overflowExpiresAt = readOldestExpiry(merged) ??
+      (nowEpochSeconds === undefined
+        ? undefined
+        : nowEpochSeconds + ANALYTICS_HISTORY_OVERFLOW_RECHECK_SECONDS)
     return {
       ...next,
       overflow: true,
@@ -454,6 +458,9 @@ export function toAnalyticsHistoryEvents(
       ...(entry.metadata === undefined ? {} : { metadata: { ...entry.metadata } }),
     }))
 }
+
+/** Delay before an overflowed row with no entry expiry is measured again (30 days). */
+export const ANALYTICS_HISTORY_OVERFLOW_RECHECK_SECONDS = 30 * 24 * 60 * 60
 
 /** DynamoDB TTL attribute of the Analytics table, set only on history rows. */
 export const ANALYTICS_WORK_ITEM_HISTORY_TTL_ATTRIBUTE = 'historyExpiresAt'

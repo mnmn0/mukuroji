@@ -5,6 +5,7 @@ import type {
   DynamoStreamEvent,
 } from '../../../../infrastructure/aws/dynamodb-stream'
 import {
+  ANALYTICS_HISTORY_OVERFLOW_RECHECK_SECONDS,
   createEmptyAnalyticsWorkItemHistoryRow,
   hasAnalyticsWorkItemHistoryGap,
   mergeAnalyticsWorkItemHistoryEntries,
@@ -18,9 +19,6 @@ import {
 
 /** Attempts of the read-merge-write cycle before the record is retried by Lambda. */
 const HISTORY_WRITE_MAX_ATTEMPTS = 4
-
-/** Delay before a row overflowed by a timeline too long to read is rebuilt (30 days). */
-const HISTORY_OVERFLOW_RECHECK_SECONDS = 30 * 24 * 60 * 60
 
 /** Audit timeline of one Work Item, read to rebuild its history row. */
 export type AnalyticsWorkItemTimeline = {
@@ -157,9 +155,13 @@ async function buildNextRow(
       current.row.overflowExpiresAt <= nowEpochSeconds
     ? undefined
     : current.row
+  // A new row starts its version at the current time in milliseconds, so a row deleted and
+  // written again never repeats a version that a slower writer read before the delete.
   const base = currentRow ?? {
     ...createEmptyAnalyticsWorkItemHistoryRow(key),
-    rowVersion: current.row?.rowVersion ?? current.storedRowVersion ?? 0,
+    rowVersion: current.row?.rowVersion ??
+      current.storedRowVersion ??
+      (dependencies.now?.() ?? new Date()).getTime(),
   }
   const startsHistory = inserted && entry.metadata?.afterRevision === 1
   const rebuild = currentRow
@@ -178,7 +180,7 @@ async function buildNextRow(
       overflow: true,
       entries: [],
       rowVersion: base.rowVersion + 1,
-      overflowExpiresAt: nowEpochSeconds + HISTORY_OVERFLOW_RECHECK_SECONDS,
+      overflowExpiresAt: nowEpochSeconds + ANALYTICS_HISTORY_OVERFLOW_RECHECK_SECONDS,
     }
   }
   // The stored copies came from the stream and may already carry a retention MODIFY that the

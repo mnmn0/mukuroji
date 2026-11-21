@@ -978,6 +978,37 @@ describe('Analytics work item history rows', () => {
     expect(row?.coveredRevision).toBe(2)
   })
 
+  test('rechecks an overflowed row without expiry and versions new rows by time', async () => {
+    const key = { workspaceId, teamId: 'core', workItemId: 'held' }
+    const now = Date.parse('2026-06-01T00:00:00.000Z') / 1000
+    const entries = Array.from({ length: 400 }, (_, index) => ({
+      eventId: `held-${index}`,
+      eventType: 'work-item.updated',
+      action: 'updated',
+      occurredAt: new Date(Date.UTC(2026, 0, 1) + index * 1_000).toISOString(),
+      changes: [{ field: 'title', before: 'x'.repeat(500), after: 'y'.repeat(500) }],
+      metadata: { afterRevision: index + 1 },
+    }))
+    const overflowed = mergeAnalyticsWorkItemHistoryEntries(createEmptyAnalyticsWorkItemHistoryRow(key), entries, now)
+    expect(overflowed.overflow).toBe(true)
+    expect(overflowed.overflowExpiresAt).toBe(now + 30 * 24 * 60 * 60)
+
+    // A recreated row never reuses the version of a row that was deleted before it.
+    const item = createWorkItem('versioned')
+    const created = createAuditEvent('versioned-1', item, '2026-01-01T00:00:00.000Z', [], {
+      eventType: 'work-item.created',
+      action: 'created',
+      afterRevision: 1,
+    })
+    const store = new MemoryHistoryStore()
+    await processAnalyticsWorkItemHistoryProjectionBatch(
+      { Records: [streamRecord(created)] },
+      { store, readWorkItemTimeline: createTimeline([]).readWorkItemTimeline, now: () => new Date(now * 1000) },
+    )
+    const row = (await store.getRow({ workspaceId, teamId: 'core', workItemId: 'versioned' })).row
+    expect(row?.rowVersion).toBe(now * 1000 + 1)
+  })
+
   test('replaces a malformed row only while it is still the item that was read', async () => {
     const conditions: unknown[] = []
     /** Records each conditional put. */
