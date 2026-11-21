@@ -3,6 +3,7 @@ import {
   MAINTENANCE_STATE_HEADER,
   MAINTENANCE_STATUS_PATH,
 } from '@mukuroji/contracts'
+import useSWR, { mutate as mutateGlobalCache, useSWRConfig } from 'swr'
 import { resolveApiBaseUrl, type ApiBaseUrlScope } from './apiBaseUrl'
 
 /**
@@ -12,199 +13,178 @@ import { resolveApiBaseUrl, type ApiBaseUrlScope } from './apiBaseUrl'
  */
 export type MaintenanceNoticeState = 'none' | 'read-only' | 'stopped'
 
-/** Maintenance state shared by the app shell and the fetch observer. */
-export type MaintenanceStore = {
-  /** Registers a listener for state changes and returns its unsubscribe function. */
-  readonly subscribe: (listener: () => void) => () => void
-  /** Returns the current state. */
-  readonly getSnapshot: () => MaintenanceNoticeState
-  /**
-   * Learns the state from one API response.
-   *
-   * @param url - Absolute or relative request URL.
-   * @param response - Response the API returned.
-   */
-  readonly observe: (url: string, response: Response) => void
-  /**
-   * Asks the API for the current state and stores the answer. Failures leave the state as it is.
-   *
-   * @returns A promise that settles once the answer is stored.
-   */
-  readonly refresh: () => Promise<void>
-}
-
-/** Options of {@link createMaintenanceStore}. */
-export type MaintenanceStoreOptions = {
-  /** API base URLs whose responses count; relative ones resolve against {@link MaintenanceStoreOptions.origin}. */
-  readonly apiBaseUrls: readonly string[]
-  /** Page URL that relative URLs resolve against. */
-  readonly origin: string
-  /**
-   * Requests the maintenance status. It must not pass through the observed `fetch`.
-   *
-   * @param url - Status URL.
-   * @returns The response.
-   */
-  readonly fetchStatus: (url: string) => Promise<Response>
-  /** How often to ask for the state while a maintenance is shown, in milliseconds. */
-  readonly pollMilliseconds?: number
-  /**
-   * Starts a repeating timer. Defaults to `setInterval`.
-   *
-   * @param callback - Function to run on every tick.
-   * @param milliseconds - Interval between ticks.
-   * @returns A function that stops the timer.
-   */
-  readonly startTimer?: (callback: () => void, milliseconds: number) => () => void
+/** Maintenance state of one API, as the SWR cache holds it. */
+export type MaintenanceStatus = {
+  /** State to show. */
+  readonly state: MaintenanceNoticeState
+  /** Absolute API base URL that reported the state; its status endpoint is the one to poll. */
+  readonly apiBaseUrl?: string
 }
 
 /**
- * Starts a repeating browser timer.
+ * What one API response says about maintenance.
  *
- * @param callback - Function to run on every tick.
- * @param milliseconds - Interval between ticks.
- * @returns A function that stops the timer.
+ * - `report`: the response carried the maintenance header for {@link MaintenanceObservation.apiBaseUrl}.
+ * - `clear`: an ordinary answer from that API without the header, so its maintenance has ended.
  */
-function startIntervalTimer(callback: () => void, milliseconds: number): () => void {
-  const timer = globalThis.setInterval(callback, milliseconds)
-  return () => globalThis.clearInterval(timer)
+export type MaintenanceObservation = {
+  /** Kind of observation. */
+  readonly kind: 'report' | 'clear'
+  /** Reported state; `none` for `clear`. */
+  readonly state: MaintenanceNoticeState
+  /** Absolute API base URL that answered. */
+  readonly apiBaseUrl: string
 }
 
-/** Default polling interval while a maintenance is shown. */
-const defaultPollMilliseconds = 30_000
+/** SWR key of the maintenance status. */
+export const maintenanceStatusKey = 'app/maintenance-status'
+
+/** Status shown before any API answered. */
+const normalStatus: MaintenanceStatus = Object.freeze({ state: 'none' })
+
+/** How often to ask for the state while a maintenance is shown, in milliseconds. */
+export const maintenancePollMilliseconds = 30_000
 
 /** API paths that skip the maintenance gate and so never carry its header. */
 const ungatedApiPaths = new Set(['/health', '/ready'])
 
-/**
- * Creates a maintenance store.
- *
- * Every response that the API admitted during read-only maintenance, and every request it
- * rejected for maintenance, carries the maintenance header, so the store follows the header. A
- * later API answer below 500 without the header means the maintenance ended. While a maintenance
- * is shown, the store also asks `GET /api/maintenance` regularly, because a stopped API rejects
- * every other request and pages may stop sending them.
- *
- * @param options - API base URLs, status request, and timer.
- * @returns The store.
- */
-export function createMaintenanceStore(options: MaintenanceStoreOptions): MaintenanceStore {
-  const listeners = new Set<() => void>()
-  const bases = options.apiBaseUrls.map((base) => new URL(base, options.origin).href.replace(/\/+$/u, ''))
-  const statusUrl = `${bases[0] ?? new URL('/api', options.origin).href}${MAINTENANCE_STATUS_PATH}`
-  const pollMilliseconds = options.pollMilliseconds ?? defaultPollMilliseconds
-  const startTimer = options.startTimer ?? startIntervalTimer
-  let state: MaintenanceNoticeState = 'none'
-  let stopTimer: (() => void) | undefined
-
-  /**
-   * Stores a new state, notifies listeners, and starts or stops polling.
-   *
-   * @param next - New state.
-   */
-  function update(next: MaintenanceNoticeState) {
-    if (next === state) return
-    state = next
-    if (state === 'none' && stopTimer) {
-      stopTimer()
-      stopTimer = undefined
-    } else if (state !== 'none' && !stopTimer) {
-      stopTimer = startTimer(() => {
-        void refresh()
-      }, pollMilliseconds)
-    }
-    for (const listener of listeners) listener()
-  }
-
-  /**
-   * Finds the API path of a request URL, when the URL targets one of the API base URLs.
-   *
-   * @param url - Request URL.
-   * @returns The path below the base URL, or `undefined` for other URLs.
-   */
-  function readApiPath(url: string): string | undefined {
-    let href: string
-    try {
-      const parsed = new URL(url, options.origin)
-      href = `${parsed.origin}${parsed.pathname}`
-    } catch {
-      return undefined
-    }
-    const base = bases.find((candidate) => href.startsWith(`${candidate}/`))
-    return base === undefined ? undefined : href.slice(base.length)
-  }
-
-  /** Asks the API for the current state. */
-  async function refresh() {
-    try {
-      const response = await options.fetchStatus(statusUrl)
-      if (!response.ok) return
-      const body: unknown = await response.json()
-      const reported = typeof body === 'object' && body !== null && 'state' in body ? body.state : undefined
-      if (!isMaintenanceState(reported)) return
-      update(reported === 'read-only' || reported === 'stopped' ? reported : 'none')
-    } catch {
-      // Offline or an unreadable answer: keep showing what is known.
-    }
-  }
-
-  return {
-    subscribe(listener) {
-      listeners.add(listener)
-      return () => {
-        listeners.delete(listener)
-      }
-    },
-    getSnapshot: () => state,
-    observe(url, response) {
-      const header = response.headers.get(MAINTENANCE_STATE_HEADER)
-      if (header === 'read-only' || header === 'stopped') {
-        update(header)
-        return
-      }
-      if (state === 'none' || response.status >= 500 || response.type === 'opaque') return
-      const path = readApiPath(url)
-      if (path === undefined || ungatedApiPaths.has(path)) return
-      update('none')
-    },
-    refresh,
-  }
-}
-
 /** API scopes whose base URLs the app's requests use. */
 const apiScopes: readonly ApiBaseUrlScope[] = ['shared', 'projects', 'workspace', 'workspaceWithoutProjects', 'enterpriseIdentity']
+
+/**
+ * Returns the page URL that relative API URLs resolve against.
+ *
+ * @returns The page URL, or a placeholder origin outside the browser.
+ */
+function readPageUrl(): string {
+  return typeof window === 'undefined' ? 'http://localhost/' : window.location.href
+}
+
+/**
+ * Resolves the configured API base URLs to absolute URLs without trailing slashes.
+ *
+ * @param pageUrl - Page URL that relative base URLs resolve against.
+ * @returns The distinct absolute API base URLs.
+ */
+export function resolveAppApiBaseUrls(pageUrl: string = readPageUrl()): string[] {
+  return [...new Set(apiScopes.map((scope) => new URL(resolveApiBaseUrl(scope), pageUrl).href.replace(/\/+$/u, '')))]
+}
+
+/**
+ * Reads what one response says about maintenance.
+ *
+ * Every response that the API admitted during read-only maintenance, and every request it
+ * rejected for maintenance, carries the maintenance header. An answer below 500 without the
+ * header from the same API means its maintenance has ended.
+ *
+ * @param url - Absolute or relative request URL.
+ * @param response - Response the API returned.
+ * @param apiBaseUrls - Absolute API base URLs whose responses count.
+ * @param pageUrl - Page URL that a relative request URL resolves against.
+ * @returns The observation, or `undefined` when the response says nothing about maintenance.
+ */
+export function readMaintenanceObservation(
+  url: string,
+  response: Response,
+  apiBaseUrls: readonly string[],
+  pageUrl: string,
+): MaintenanceObservation | undefined {
+  let href: string
+  try {
+    const parsed = new URL(url, pageUrl)
+    href = `${parsed.origin}${parsed.pathname}`
+  } catch {
+    return undefined
+  }
+  const apiBaseUrl = apiBaseUrls.find((base) => href.startsWith(`${base}/`))
+  if (apiBaseUrl === undefined) return undefined
+  const header = response.headers.get(MAINTENANCE_STATE_HEADER)
+  if (header === 'read-only' || header === 'stopped') return { kind: 'report', state: header, apiBaseUrl }
+  if (response.status >= 500 || response.type === 'opaque') return undefined
+  if (ungatedApiPaths.has(href.slice(apiBaseUrl.length))) return undefined
+  return { kind: 'clear', state: 'none', apiBaseUrl }
+}
+
+/**
+ * Applies an observation to the cached status.
+ *
+ * A `clear` only ends the maintenance that the same API reported, so an unrelated API cannot
+ * hide another API's maintenance.
+ *
+ * @param current - Cached status.
+ * @param observation - What a response said.
+ * @returns The next status.
+ */
+export function applyMaintenanceObservation(
+  current: MaintenanceStatus | undefined,
+  observation: MaintenanceObservation,
+): MaintenanceStatus {
+  const status = current ?? normalStatus
+  if (observation.kind === 'report') return { state: observation.state, apiBaseUrl: observation.apiBaseUrl }
+  return status.apiBaseUrl === observation.apiBaseUrl ? { state: 'none' } : status
+}
+
+/**
+ * Asks an API for its maintenance state.
+ *
+ * @param apiBaseUrl - Absolute API base URL.
+ * @param send - `fetch` to use; it must not be the observed one.
+ * @returns The status to show. An outage counts as `none`.
+ * @throws When the request fails or the answer is unreadable, so SWR keeps the cached status.
+ */
+export async function fetchMaintenanceStatus(
+  apiBaseUrl: string,
+  send: typeof fetch,
+): Promise<MaintenanceStatus> {
+  const response = await send(`${apiBaseUrl}${MAINTENANCE_STATUS_PATH}`, { cache: 'no-store' })
+  if (!response.ok) throw new Error(`Maintenance status answered ${response.status}.`)
+  const body: unknown = await response.json()
+  const reported = typeof body === 'object' && body !== null && 'state' in body ? body.state : undefined
+  if (!isMaintenanceState(reported)) throw new Error('Maintenance status is unreadable.')
+  return reported === 'read-only' || reported === 'stopped'
+    ? { state: reported, apiBaseUrl }
+    : { state: 'none' }
+}
 
 /** `fetch` before {@link installMaintenanceFetchObserver} wrapped it. */
 let statusFetch: typeof fetch = (...args) => globalThis.fetch(...args)
 
-/** Maintenance state of the running app. */
-export const appMaintenance: MaintenanceStore = createMaintenanceStore({
-  apiBaseUrls: [...new Set(apiScopes.map((scope) => resolveApiBaseUrl(scope)))],
-  origin: typeof window === 'undefined' ? 'http://localhost/' : window.location.href,
-  fetchStatus: (url) => statusFetch(url, { cache: 'no-store' }),
-})
+/**
+ * Stores an observation in the global SWR cache.
+ *
+ * @param observation - What a response said.
+ */
+function storeObservation(observation: MaintenanceObservation) {
+  void mutateGlobalCache<MaintenanceStatus>(
+    maintenanceStatusKey,
+    (current) => applyMaintenanceObservation(current, observation),
+    { revalidate: false },
+  )
+}
 
 /**
- * Wraps `fetch` so every response tells the maintenance store whether a maintenance is running.
+ * Wraps `fetch` so every API response updates the cached maintenance status.
  *
  * @param target - Global object whose `fetch` is wrapped. Defaults to `globalThis`.
- * @param store - Store that learns from the responses. Defaults to the app's store.
+ * @param report - Receives each observation. Defaults to updating the global SWR cache.
  * @returns A function that restores the original `fetch`.
  */
 export function installMaintenanceFetchObserver(
   target: { fetch: typeof fetch } = globalThis,
-  store: MaintenanceStore = appMaintenance,
+  report: (observation: MaintenanceObservation) => void = storeObservation,
 ): () => void {
   const originalFetch = target.fetch
   const send = originalFetch.bind(target)
-  if (store === appMaintenance) statusFetch = send
+  const apiBaseUrls = resolveAppApiBaseUrls()
+  if (report === storeObservation) statusFetch = send
 
   /** Observed replacement of `fetch`. */
   const observedFetch: typeof fetch = async (input, init) => {
     const response = await send(input, init)
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     try {
-      store.observe(url, response)
+      const observation = readMaintenanceObservation(url, response, apiBaseUrls, readPageUrl())
+      if (observation) report(observation)
     } catch {
       // The page still receives its response.
     }
@@ -214,6 +194,47 @@ export function installMaintenanceFetchObserver(
   target.fetch = observedFetch
   return () => {
     target.fetch = originalFetch
-    if (store === appMaintenance) statusFetch = (...args) => globalThis.fetch(...args)
+    if (report === storeObservation) statusFetch = (...args) => globalThis.fetch(...args)
   }
+}
+
+/**
+ * Reads the API base URL that reported the cached maintenance.
+ *
+ * @param cached - Value in the SWR cache.
+ * @returns The reporting API base URL, or `undefined` when none is cached.
+ */
+function readReportingApiBaseUrl(cached: unknown): string | undefined {
+  if (typeof cached !== 'object' || cached === null || !('apiBaseUrl' in cached)) return undefined
+  return typeof cached.apiBaseUrl === 'string' ? cached.apiBaseUrl : undefined
+}
+
+/**
+ * Reads the maintenance status from SWR.
+ *
+ * The status starts as `none` and changes when API responses carry the maintenance header. While
+ * a maintenance is shown, SWR asks the API that reported it every 30 seconds, because a stopped
+ * API rejects every other request and pages may stop sending them.
+ *
+ * @returns The status to show.
+ */
+export function useMaintenanceStatus(): MaintenanceStatus {
+  const { cache } = useSWRConfig()
+  const { data } = useSWR<MaintenanceStatus>(
+    maintenanceStatusKey,
+    async (): Promise<MaintenanceStatus> => {
+      const cached: unknown = cache.get(maintenanceStatusKey)?.data
+      const apiBaseUrl = readReportingApiBaseUrl(cached)
+      return apiBaseUrl === undefined ? normalStatus : fetchMaintenanceStatus(apiBaseUrl, statusFetch)
+    },
+    {
+      fallbackData: normalStatus,
+      refreshInterval: (latest) => (latest && latest.state !== 'none' ? maintenancePollMilliseconds : 0),
+      revalidateIfStale: false,
+      revalidateOnFocus: false,
+      revalidateOnMount: false,
+      revalidateOnReconnect: false,
+    },
+  )
+  return data ?? normalStatus
 }

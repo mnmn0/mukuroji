@@ -307,6 +307,10 @@ test('admits reads during read-only maintenance and rejects changes with a reaso
     routeCalls.push('refresh')
     return context.json({ ok: true })
   })
+  app.post('/api/planning/update-feed/digest/preview', (context) => {
+    routeCalls.push('digest-preview')
+    return context.json({ ok: true })
+  })
   app.post('/api/teams/:teamId/issues/:issueId/schedule/preview', (context) => {
     routeCalls.push('preview')
     return context.json({ ok: true })
@@ -345,6 +349,11 @@ test('admits reads during read-only maintenance and rejects changes with a reaso
     '/api/teams/team-1/issues/issue-1',
     { method: 'DELETE' },
   )).status).toBe(503)
+  // The digest preview records delivery receipts, so it is a change.
+  expect((await app.request(
+    '/api/planning/update-feed/digest/preview',
+    { method: 'POST' },
+  )).status).toBe(503)
   // A listed POST route with an extra segment is not the same route.
   expect((await app.request(
     '/api/auth/refresh/extra',
@@ -357,6 +366,7 @@ test('admits reads during read-only maintenance and rejects changes with a reaso
     'allowed',
     'allowed',
     'allowed',
+    'blocked',
     'blocked',
     'blocked',
     'blocked',
@@ -416,6 +426,10 @@ test('keeps the Public API problem code within its published enum during mainten
     recordObservation() {},
   })
   app.post('/api/v1/work-items', (context) => context.json({ ok: true }, 201))
+
+  app.get('/api/developer', (context) => context.json({ ok: true }))
+  const root = await app.request('/api/developer', { method: 'DELETE' })
+  expect(await root.json()).toMatchObject({ code: 'temporarily_unavailable' })
 
   const response = await app.request('/api/v1/work-items', { method: 'POST' })
   expect(response.status).toBe(503)

@@ -1,47 +1,18 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { MaintenanceNotice } from '../src/app/MaintenanceNotice'
+import { MaintenanceBanner } from '../src/app/MaintenanceNotice'
 import {
-  createMaintenanceStore,
+  applyMaintenanceObservation,
+  fetchMaintenanceStatus,
   installMaintenanceFetchObserver,
-  type MaintenanceNoticeState,
-  type MaintenanceStore,
+  readMaintenanceObservation,
+  type MaintenanceObservation,
 } from '../src/shared/api/maintenance'
 
-/** One fake repeating timer. */
-type FakeTimer = {
-  /** Callback run on each tick. */
-  readonly callback: () => void
-  /** Whether the timer was stopped. */
-  stopped: boolean
-}
-
-/**
- * Creates a store against `https://app.example.com/api` with a fake timer and status answers.
- *
- * @param statuses - Bodies returned by successive status requests.
- * @returns The store, the started timers, and the requested status URLs.
- */
-function createTestStore(statuses: unknown[] = []) {
-  const timers: FakeTimer[] = []
-  const statusRequests: string[] = []
-  const store = createMaintenanceStore({
-    apiBaseUrls: ['/api'],
-    origin: 'https://app.example.com/work',
-    fetchStatus: async (url) => {
-      statusRequests.push(url)
-      return Response.json(statuses.shift() ?? { state: 'none' })
-    },
-    startTimer: (callback) => {
-      const timer: FakeTimer = { callback, stopped: false }
-      timers.push(timer)
-      return () => {
-        timer.stopped = true
-      }
-    },
-  })
-  return { store, timers, statusRequests }
-}
+const pageUrl = 'https://app.example.com/work'
+const sharedApi = 'https://app.example.com/api'
+const workspaceApi = 'https://workspace.example.com/api'
+const bases = [sharedApi, workspaceApi]
 
 /**
  * Builds a response with an optional maintenance header.
@@ -54,87 +25,72 @@ function response(status: number, maintenance?: string) {
   return new Response(null, { status, headers: maintenance ? { 'Mukuroji-Maintenance': maintenance } : {} })
 }
 
-/**
- * Creates a store that always reports one state.
- *
- * @param state - Reported state.
- * @returns A fixed store.
- */
-function fixedMaintenance(state: MaintenanceNoticeState): MaintenanceStore {
-  return {
-    subscribe: () => () => undefined,
-    getSnapshot: () => state,
-    observe: () => undefined,
-    refresh: async () => undefined,
-  }
-}
-
-describe('createMaintenanceStore', () => {
-  test('follows the maintenance header and clears on a later ordinary API answer', () => {
-    const { store, timers } = createTestStore()
-    let notified = 0
-    store.subscribe(() => { notified += 1 })
-
-    store.observe('/api/teams/a/issues', response(200, 'read-only'))
-    expect(store.getSnapshot()).toBe('read-only')
-    expect(timers).toHaveLength(1)
-    store.observe('/api/teams/a/issues', response(503, 'read-only'))
-    expect(notified).toBe(1)
-
-    // Ungated paths, failures, and other origins say nothing about the maintenance.
-    store.observe('/api/health', response(200))
-    store.observe('/api/teams/a/issues', response(503))
-    store.observe('https://other.example.com/api/teams', response(200))
-    store.observe('/assets/app.js', response(200))
-    expect(store.getSnapshot()).toBe('read-only')
-
-    store.observe('https://app.example.com/api/teams/a/issues', response(404))
-    expect(store.getSnapshot()).toBe('none')
-    expect(timers[0]?.stopped).toBe(true)
-    expect(notified).toBe(2)
+describe('readMaintenanceObservation', () => {
+  test('reports the header with the API that sent it', () => {
+    expect(readMaintenanceObservation('/api/teams/a/issues', response(200, 'read-only'), bases, pageUrl))
+      .toEqual({ kind: 'report', state: 'read-only', apiBaseUrl: sharedApi })
+    expect(readMaintenanceObservation(`${workspaceApi}/documents`, response(503, 'stopped'), bases, pageUrl))
+      .toEqual({ kind: 'report', state: 'stopped', apiBaseUrl: workspaceApi })
   })
 
-  test('polls the status while a maintenance is shown', async () => {
-    const { store, timers, statusRequests } = createTestStore([{ state: 'stopped' }, { state: 'unavailable' }])
-    store.observe('/api/me', response(503, 'stopped'))
-    expect(store.getSnapshot()).toBe('stopped')
-
-    timers[0]?.callback()
-    await store.refresh()
-    expect(statusRequests).toEqual(['https://app.example.com/api/maintenance', 'https://app.example.com/api/maintenance'])
-    // An outage is not a maintenance.
-    expect(store.getSnapshot()).toBe('none')
+  test('clears only on an ordinary gated answer from an API', () => {
+    expect(readMaintenanceObservation('/api/teams', response(404), bases, pageUrl))
+      .toEqual({ kind: 'clear', state: 'none', apiBaseUrl: sharedApi })
+    for (const [url, result] of [
+      ['/api/health', response(200)],
+      ['/api/teams', response(503)],
+      ['https://other.example.com/api/teams', response(200)],
+      ['/assets/app.js', response(200)],
+    ] as const) {
+      expect(readMaintenanceObservation(url, result, bases, pageUrl)).toBeUndefined()
+    }
   })
+})
 
-  test('keeps the state when the status cannot be read', async () => {
-    const { store } = createTestStore([{ state: 'paused' }])
-    store.observe('/api/me', response(200, 'read-only'))
-    await store.refresh()
-    expect(store.getSnapshot()).toBe('read-only')
+describe('applyMaintenanceObservation', () => {
+  test('lets only the reporting API end its maintenance', () => {
+    const reported = applyMaintenanceObservation(undefined, { kind: 'report', state: 'read-only', apiBaseUrl: workspaceApi })
+    expect(reported).toEqual({ state: 'read-only', apiBaseUrl: workspaceApi })
+    expect(applyMaintenanceObservation(reported, { kind: 'clear', state: 'none', apiBaseUrl: sharedApi })).toBe(reported)
+    expect(applyMaintenanceObservation(reported, { kind: 'clear', state: 'none', apiBaseUrl: workspaceApi })).toEqual({ state: 'none' })
+  })
+})
+
+describe('fetchMaintenanceStatus', () => {
+  test('asks the reporting API and treats an outage as no maintenance', async () => {
+    const requested: string[] = []
+    const answers = [{ state: 'stopped' }, { state: 'unavailable' }, { state: 'paused' }]
+    const send: typeof fetch = async (input) => {
+      requested.push(String(input))
+      return Response.json(answers.shift())
+    }
+    expect(await fetchMaintenanceStatus(workspaceApi, send)).toEqual({ state: 'stopped', apiBaseUrl: workspaceApi })
+    expect(await fetchMaintenanceStatus(workspaceApi, send)).toEqual({ state: 'none' })
+    await expect(fetchMaintenanceStatus(workspaceApi, send)).rejects.toThrow('unreadable')
+    expect(requested[0]).toBe(`${workspaceApi}/maintenance`)
   })
 })
 
 describe('installMaintenanceFetchObserver', () => {
-  test('passes responses through while the store learns from them', async () => {
-    const { store } = createTestStore()
+  test('passes responses through while reporting what they say', async () => {
+    const observations: MaintenanceObservation[] = []
     const target: { fetch: typeof fetch } = {
       fetch: async () => response(503, 'read-only'),
     }
-    const restore = installMaintenanceFetchObserver(target, store)
-    const result = await target.fetch('/api/teams/a/issues', { method: 'POST' })
+    const restore = installMaintenanceFetchObserver(target, (observation) => observations.push(observation))
+    const result = await target.fetch('http://localhost/api/teams/a/issues', { method: 'POST' })
     expect(result.status).toBe(503)
-    expect(store.getSnapshot()).toBe('read-only')
+    expect(observations).toEqual([{ kind: 'report', state: 'read-only', apiBaseUrl: 'http://localhost/api' }])
     restore()
   })
 })
 
-describe('MaintenanceNotice', () => {
+describe('MaintenanceBanner', () => {
   test('explains read-only and stopped maintenance and hides otherwise', () => {
-    const readOnly = renderToStaticMarkup(<MaintenanceNotice maintenance={fixedMaintenance('read-only')} />)
+    const readOnly = renderToStaticMarkup(<MaintenanceBanner state="read-only" />)
     expect(readOnly).toContain('data-maintenance-state="read-only"')
     expect(readOnly).toContain('メンテナンス中のため閲覧だけできます')
-    const stopped = renderToStaticMarkup(<MaintenanceNotice maintenance={fixedMaintenance('stopped')} />)
-    expect(stopped).toContain('障害ではありません')
-    expect(renderToStaticMarkup(<MaintenanceNotice maintenance={fixedMaintenance('none')} />)).toBe('')
+    expect(renderToStaticMarkup(<MaintenanceBanner state="stopped" />)).toContain('障害ではありません')
+    expect(renderToStaticMarkup(<MaintenanceBanner state="none" />)).toBe('')
   })
 })

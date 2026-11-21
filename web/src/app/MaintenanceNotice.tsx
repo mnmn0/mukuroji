@@ -5,7 +5,7 @@ import {
   subscribeToLocalePreference,
   type Locale,
 } from '../shared/i18n/i18n'
-import { appMaintenance, type MaintenanceNoticeState, type MaintenanceStore } from '../shared/api/maintenance'
+import { useMaintenanceStatus, type MaintenanceNoticeState } from '../shared/api/maintenance'
 import { announce } from '../shared/lib/liveAnnouncements'
 
 /**
@@ -17,10 +17,20 @@ function readServerLocale(): Locale {
   return 'ja'
 }
 
-/** Props of the maintenance notice. */
-export type MaintenanceNoticeProps = {
-  /** Maintenance source; defaults to the running app. */
-  readonly maintenance?: MaintenanceStore
+/** Props of the maintenance banner. */
+export type MaintenanceBannerProps = {
+  /** Maintenance state to show. */
+  readonly state: MaintenanceNoticeState
+}
+
+/**
+ * Shows the app's maintenance state, read from the API responses through SWR.
+ *
+ * @returns The maintenance banner, or nothing while the service runs normally.
+ */
+export function MaintenanceNotice() {
+  const { state } = useMaintenanceStatus()
+  return <MaintenanceBanner state={state} />
 }
 
 /**
@@ -30,11 +40,10 @@ export type MaintenanceNoticeProps = {
  * The banner sits at the top of the viewport above every page. It tells the user that what they
  * entered is still on the screen, because pages keep their input when a save fails.
  *
- * @param props - Maintenance source.
+ * @param props - Maintenance state.
  * @returns The maintenance banner, or nothing while the service runs normally.
  */
-export function MaintenanceNotice({ maintenance = appMaintenance }: MaintenanceNoticeProps) {
-  const state = useSyncExternalStore(maintenance.subscribe, maintenance.getSnapshot, maintenance.getSnapshot)
+export function MaintenanceBanner({ state }: MaintenanceBannerProps) {
   const locale = useSyncExternalStore(subscribeToLocalePreference, getInitialLocale, readServerLocale)
   const t = createTranslator(locale)
   const announcedRef = useRef<MaintenanceNoticeState>('none')

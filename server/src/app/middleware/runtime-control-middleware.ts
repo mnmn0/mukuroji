@@ -95,10 +95,11 @@ export function resolveMaintenanceState(
  * Tells whether a path belongs to the versioned Public API, whose problem codes are a closed enum.
  *
  * @param path - Request path.
- * @returns Whether the path is under `/api/v1/` or `/api/developer/`.
+ * @returns Whether the path is `/api/v1` or `/api/developer`, or below either.
  */
 function isPublicApiPath(path: string): boolean {
-  return path.startsWith('/api/v1/') || path.startsWith('/api/developer/')
+  return path === '/api/v1' || path.startsWith('/api/v1/') ||
+    path === '/api/developer' || path.startsWith('/api/developer/')
 }
 
 /**
