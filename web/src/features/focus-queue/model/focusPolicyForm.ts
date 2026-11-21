@@ -45,6 +45,7 @@ export function readFocusPolicyOverrides(
   const mention = readOptionalPolicyNumber(formData, 'weight-mention', 0, 10_000)
   const sla = readOptionalPolicyNumber(formData, 'weight-sla', 0, 10_000)
   const cycle = readOptionalPolicyNumber(formData, 'weight-cycle', 0, 10_000)
+  const slipped = readOptionalPolicyNumber(formData, 'weight-slipped', 0, 10_000)
   const dueSoonDays = readOptionalPolicyNumber(formData, 'dueSoonDays', 0, 365, true)
   const cycleDueSoonDays = readOptionalPolicyNumber(
     formData,
@@ -54,6 +55,13 @@ export function readFocusPolicyOverrides(
     true,
   )
   const slaHours = readOptionalPolicyNumber(formData, 'slaHours', 1, 8_760, true)
+  const slippedThresholdDays = readOptionalPolicyNumber(
+    formData,
+    'slippedThresholdDays',
+    1,
+    365,
+    true,
+  )
   const nowScoreThreshold = readOptionalPolicyNumber(
     formData,
     'nowScoreThreshold',
@@ -77,9 +85,11 @@ export function readFocusPolicyOverrides(
     ['weight-mention', mention],
     ['weight-sla', sla],
     ['weight-cycle', cycle],
+    ['weight-slipped', slipped],
     ['dueSoonDays', dueSoonDays],
     ['cycleDueSoonDays', cycleDueSoonDays],
     ['slaHours', slaHours],
+    ['slippedThresholdDays', slippedThresholdDays],
     ['nowScoreThreshold', nowScoreThreshold],
     ['slaEnabled', slaEnabled],
     ['slaAnchor', slaAnchor],
@@ -95,6 +105,7 @@ export function readFocusPolicyOverrides(
     ...(overdue.value === undefined ? {} : { overdue: overdue.value }),
     ...(reviewRequest.value === undefined ? {} : { reviewRequest: reviewRequest.value }),
     ...(sla.value === undefined ? {} : { sla: sla.value }),
+    ...(slipped.value === undefined ? {} : { slipped: slipped.value }),
     ...(urgent.value === undefined ? {} : { urgent: urgent.value }),
   }
   return {
@@ -109,6 +120,9 @@ export function readFocusPolicyOverrides(
         ? {}
         : { nowScoreThreshold: nowScoreThreshold.value }),
       ...(slaHours.value === undefined ? {} : { slaHours: slaHours.value }),
+      ...(slippedThresholdDays.value === undefined
+        ? {}
+        : { slippedThresholdDays: slippedThresholdDays.value }),
       ...(slaEnabled.value === undefined ? {} : { slaEnabled: slaEnabled.value }),
       ...(slaAnchor.value === undefined ? {} : { slaAnchor: slaAnchor.value }),
       ...(slaWorkItemTypeIds.value === undefined

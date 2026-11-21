@@ -235,6 +235,7 @@ export function getFocusSignalMessageKey(type: FocusSignalType): MessageKey {
     case 'mention': return 'workspace.focus.signal.mention'
     case 'sla': return 'workspace.focus.signal.sla'
     case 'cycle': return 'workspace.focus.signal.cycle'
+    case 'slipped': return 'workspace.focus.signal.slipped'
   }
 }
 
@@ -279,6 +280,7 @@ export function getFocusResolutionMessageKey(
     case 'mention-acknowledged': return 'workspace.focus.resolution.mentionAcknowledged'
     case 'sla-restored': return 'workspace.focus.resolution.slaRestored'
     case 'cycle-changed': return 'workspace.focus.resolution.cycleChanged'
+    case 'baseline-recovered': return 'workspace.focus.resolution.baselineRecovered'
     case 'source-removed': return 'workspace.focus.resolution.sourceRemoved'
   }
 }

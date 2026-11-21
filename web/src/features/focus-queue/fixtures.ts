@@ -23,6 +23,7 @@ const focusSignalWeightByType = {
   overdue: 9,
   'review-request': 6,
   sla: 8,
+  slipped: 6,
   urgent: 8,
 } satisfies Record<FocusSignalType, number>
 
@@ -115,6 +116,7 @@ export const focusQueueResponseFixture = {
       slaEnabled: true,
       slaAnchor: 'planned-start',
       slaWorkItemTypeIds: [],
+      slippedThresholdDays: 3,
       weights: {
         approval: focusSignalWeightByType.approval,
         blocker: focusSignalWeightByType.blocker,
@@ -124,6 +126,7 @@ export const focusQueueResponseFixture = {
         overdue: focusSignalWeightByType.overdue,
         reviewRequest: focusSignalWeightByType['review-request'],
         sla: focusSignalWeightByType.sla,
+        slipped: focusSignalWeightByType.slipped,
         urgent: focusSignalWeightByType.urgent,
       },
     },
@@ -147,6 +150,7 @@ export const focusQueueResponseFixture = {
       slaEnabled: true,
       slaAnchor: 'planned-start',
       slaWorkItemTypeIds: [],
+      slippedThresholdDays: 3,
       weights: {
         approval: focusSignalWeightByType.approval,
         blocker: focusSignalWeightByType.blocker,
@@ -156,6 +160,7 @@ export const focusQueueResponseFixture = {
         overdue: focusSignalWeightByType.overdue,
         reviewRequest: focusSignalWeightByType['review-request'],
         sla: focusSignalWeightByType.sla,
+        slipped: focusSignalWeightByType.slipped,
         urgent: focusSignalWeightByType.urgent,
       },
     },
@@ -167,6 +172,7 @@ export const focusQueueResponseFixture = {
       slaEnabled: true,
       slaAnchor: 'planned-start',
       slaWorkItemTypeIds: [],
+      slippedThresholdDays: 3,
       weights: {
         approval: focusSignalWeightByType.approval,
         blocker: focusSignalWeightByType.blocker,
@@ -176,6 +182,7 @@ export const focusQueueResponseFixture = {
         overdue: focusSignalWeightByType.overdue,
         reviewRequest: focusSignalWeightByType['review-request'],
         sla: focusSignalWeightByType.sla,
+        slipped: focusSignalWeightByType.slipped,
         urgent: focusSignalWeightByType.urgent,
       },
     },
@@ -336,6 +343,7 @@ function getFixtureResolutionCondition(
     case 'mention': return 'mention-acknowledged'
     case 'sla': return 'sla-restored'
     case 'cycle': return 'cycle-changed'
+    case 'slipped': return 'baseline-recovered'
   }
 }
 
