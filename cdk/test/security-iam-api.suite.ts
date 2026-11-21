@@ -220,6 +220,8 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
           { Ref: 'ApiRuntimeConfigurationRevision' },
           'application commit',
           { Ref: 'ApplicationCommitSha' },
+          'tracing',
+          { Ref: 'LambdaTracingMode' },
         ],
       ],
     },

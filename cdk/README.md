@@ -214,6 +214,7 @@ aws ce update-cost-allocation-tags-status \
 既定では X-Ray に trace を記録しません。障害調査で API の流れを trace で追いたいときだけ、
 `--parameters LambdaTracingMode=Active` を付けて deploy します。調査が終わったら `PassThrough` に戻してください。
 切り替えで変わるのは Lambda の tracing mode と state machine の tracing flag だけで、IAM role は変わりません。
+API は alias が指す published version で動き、version の tracing mode は公開後に変えられないため、`LambdaTracingMode` を変えた deploy では API の新しい version を公開して alias を切り替えます（`ApiRuntimeConfigurationRevision` の増分は不要です）。
 `PassThrough` の間は API log の `traceId` に対応する trace が X-Ray にないため、`invocationId` と UTC の時間帯から
 Lambda log を起点に調査します（[`docs/operational-readiness.md`](../docs/operational-readiness.md)）。
 

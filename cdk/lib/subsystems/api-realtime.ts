@@ -501,6 +501,10 @@ export function buildApiRuntime(
           input.parameters.apiRuntimeConfigurationRevision.valueAsString,
           'application commit',
           input.parameters.applicationCommitSha.valueAsString,
+          // Published versions keep the tracing mode they were created with, so a
+          // tracing change must publish a new version for the live alias.
+          'tracing',
+          input.parameters.lambdaTracingMode.valueAsString,
         ]),
       },
       bundling: {
