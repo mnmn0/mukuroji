@@ -163,11 +163,11 @@ aws ce update-cost-allocation-tags-status \
 
 ### 既定構成の固定費
 
-任意 module をすべて無効にした既定構成で、利用がなくてもかかる費用です。合計はおよそ **月 $7〜9** です。
+任意 module をすべて無効にした既定構成で、利用がなくてもかかる費用です。合計はおよそ **月 $6〜8** です。
 
 | 構成要素 | 数 | 月額の目安 | 備考 |
 | --- | --- | --- | --- |
-| CloudWatch metric alarm | 33 個（35 metric） | 約 $2.50 | $0.10 / alarm metric。アカウントの無料枠 10 metric を差し引いた額です。 |
+| CloudWatch metric alarm | 23 個（25 metric） | 約 $1.50 | $0.10 / alarm metric。アカウントの無料枠 10 metric を差し引いた額です。AI の alarm 10 個は AI を設定したときだけ作ります（下の増分の表）。 |
 | CloudWatch composite alarm | 1 個 | $0.50 | |
 | CloudWatch custom metric（EMF） | 約 15 系列 | 約 $1.50 | $0.30 / metric。アカウントの無料枠 10 metric を差し引いた額です。`Mukuroji/RuntimeControl` 5 個（毎分の heartbeat）、`Mukuroji/API` 6 個（API が呼ばれている時間だけ）、`Mukuroji/Notifications` 4 個（Slack と Email の channel ごと）。AI を設定すると `Mukuroji/AIAssistance` が増えます。metric は data が届いた時間単位で課金されるため、dimension を 1 つ足すと系列の数だけ固定費が増えます。 |
 | Secrets Manager secret | 4 個 | $1.60 | $0.40 / secret。inbound automation Webhook を 1 つ作るごとに secret が 1 つ増えます。 |
@@ -175,7 +175,7 @@ aws ce update-cost-allocation-tags-status \
 | DynamoDB table（on-demand、PITR 有効） | 26 個 | $0.1〜0.5 | 保存量 25 GB までは無料枠。PITR は保存量 1 GB あたり約 $0.23 です。 |
 | EventBridge の毎分 rule と `ScheduledJobsFunction` | 1 個 | ほぼ $0 | 月 43,200 回の起動（1,024 MB）は、1 回が平均数秒で終われば Lambda の無料枠（100 万 request、40 万 GB 秒）に収まります。無料枠はほかの Lambda と共有です。job が読む DynamoDB の料金は数十セントです。 |
 | SQS の待機中の polling | 3 queue | $0〜1 | Lambda の event source が空の queue を long polling し続けます。無料枠は月 100 万 request、超えた分は $0.40 / 100 万です。 |
-| X-Ray active tracing | application Lambda | $0〜1 | 月 10 万 trace まで無料、超えた分は $5 / 100 万 trace。毎分の job だけで約 4.3 万 trace を使い、API request も記録されます（下の試算の従量費に含めています）。 |
+| X-Ray | application Lambda | $0 | 既定の `LambdaTracingMode=PassThrough` では trace を記録しません。調査で必要なときだけ `Active` にします（[X-Ray tracing の切り替え](#x-ray-tracing-の切り替え)）。 |
 | CloudWatch Logs | 22 log group（90 日保持、data migration は 365 日） | ほぼ $0 | 月 5 GB まで無料。超えた分は取り込み $0.76 / GB です。 |
 | GuardDuty Malware Protection for S3 | 1 plan | ほぼ $0 | 無料枠は月 1,000 object・1 GB。超えた分は scan した容量（米国東部で $0.09 / GB）と評価した object 数で課金されます。 |
 | Cognito user pool（Essentials） | 1 個 | $0 | 月 10,000 MAU まで無料。SAML / OIDC 連携の利用者は無料枠が小さく、超えると MAU 単位で課金されます。 |
@@ -192,7 +192,8 @@ aws ce update-cost-allocation-tags-status \
 | `mukuroji:requestEmail` | +$1 / 月 | secret 2 個、alarm 2 個。 |
 | `mukuroji:tenantLifecycle` | +$0〜2 / 月 | Lambda 6 個と queue 6 個。待機中の queue polling が SQS の無料枠を超えた分です。 |
 | `mukuroji:softwareFactory` | ほぼ $0 | 毎分の Agent Run triage job。opt-in した Team がなければ AgentRuns table の index を読むだけです。 |
-| AI（Bedrock の parameter 設定） | 利用量に比例 | token 料金。上限は Workspace の AI 設定で決めます。 |
+| AI（Bedrock の parameter 設定） | +$1 / 月と利用量に比例 | AI の alarm 10 個（$1）。token 料金の上限は Workspace の AI 設定で決めます。 |
+| `LambdaTracingMode=Active`（X-Ray） | 利用量に比例 | 月 10 万 trace まで無料、超えた分は $5 / 100 万 trace。sampling は 1 秒あたり 1 request と残りの 5% で、毎分の job だけで月約 4.3 万 trace、50 人で月約 70 万 trace（約 $3）です。 |
 | `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
 | `CognitoEmailSender`（SES） | 利用量に比例 | 招待と再設定のメール。1,000 通あたり約 $0.10。 |
 
@@ -202,16 +203,25 @@ aws ce update-cost-allocation-tags-status \
 
 | 利用者 | API request / 月 | 従量費の目安 | 合計の目安 |
 | --- | --- | --- | --- |
-| 10 人 | 約 40 万 | 約 $2〜3 | 約 $10〜12 |
-| 50 人 | 約 200 万 | 約 $8〜10 | 約 $16〜19 |
-| 200 人 | 約 800 万 | 約 $30〜35 | 約 $38〜44 |
+| 10 人 | 約 40 万 | 約 $2〜3 | 約 $8〜11 |
+| 50 人 | 約 200 万 | 約 $5〜7 | 約 $11〜15 |
+| 200 人 | 約 800 万 | 約 $25〜30 | 約 $31〜38 |
 
-従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、X-Ray（Lambda の既定の sampling は 1 秒あたり 1 request と残りの 5%。50 人で月約 70 万 trace、約 $3）、DynamoDB の読み書き、Lambda（無料枠を超えた request と実行時間）、CloudWatch Logs の取り込み、WebSocket の接続時間です。税（日本の請求では消費税 10%）、独自 domain の Route 53 hosted zone（$0.50 / 月）、AI の token 料金は含みません。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
+従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、DynamoDB の読み書き、Lambda（無料枠を超えた request と実行時間）、CloudWatch Logs の取り込み、WebSocket の接続時間です。税（日本の請求では消費税 10%）、独自 domain の Route 53 hosted zone（$0.50 / 月）、AI の token 料金は含みません。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
+
+### X-Ray tracing の切り替え
+
+既定では X-Ray に trace を記録しません。障害調査で API の流れを trace で追いたいときだけ、
+`--parameters LambdaTracingMode=Active` を付けて deploy します。調査が終わったら `PassThrough` に戻してください。
+切り替えで変わるのは Lambda の tracing mode と state machine の tracing flag だけで、IAM role は変わりません。
+`PassThrough` の間は API log の `traceId` に対応する trace が X-Ray にないため、`invocationId` と UTC の時間帯から
+Lambda log を起点に調査します（[`docs/operational-readiness.md`](../docs/operational-readiness.md)）。
 
 ## API observability
 
-Application Lambda 24個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
-trace/telemetry write action だけを追加します。API Lambda は readiness probe 用に
+Application Lambda と restore drill の state machine は `LambdaTracingMode` parameter に従います。既定の
+`PassThrough` では X-Ray に trace を記録せず、`Active` にすると active tracing になります。各 execution
+role には切り替えても role が変わらないよう、X-Ray が要求する trace/telemetry write action だけを常に追加します。API Lambda は readiness probe 用に
 `AuditEventsTable`、`WorkItemsTable`、`WorkspaceAccessTable` への `dynamodb:DescribeTable` だけを
 持つ独立 policy を使います。
 
@@ -219,6 +229,7 @@ Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HT
 application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。51 metric alarmと
 1 composite alarmのうち、notification無効のfast-burn component 2件を除く50件の
 `AlarmActions` は、必須parameterで指定した既存のprimary/secondary SNS topicへ接続します。
+AI の alarm 10件（`AiAssistance*`）は AI を設定した stack にだけ作ります。
 Stackはtopic、subscription、Incident Manager escalation planを作成・変更しません。Topic ownerは
 同一account/regionのstandard topicを用意し、managed rosterへのsubscription、暗号化key policy、
 test notificationの受信をdeploy前に確認してください。CloudWatchはalarm遷移時に両topicへ同時に

@@ -1209,7 +1209,7 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
   template.hasResourceProperties('AWS::Lambda::Function', {
     Description:
       'Bundled shared Hono handler for the mukuroji Function URL and HTTP API.',
-    TracingConfig: { Mode: 'Active' },
+    TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
   });
   for (const alarm of [
     {

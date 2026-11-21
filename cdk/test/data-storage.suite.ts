@@ -896,7 +896,7 @@ test('file bucket incarnation marker is create-once, immutable, and published ex
       MemorySize: 256,
       Runtime: 'nodejs22.x',
       Timeout: 30,
-      TracingConfig: { Mode: 'Active' },
+      TracingConfig: { Mode: { Ref: 'LambdaTracingMode' } },
     }),
   }));
   const providerPrincipalBoundary =
