@@ -10,6 +10,7 @@ import {
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs'
 import {
   isWebhookEventType,
+  isWorkItemRelationEventType,
   type WebhookDelivery,
   type WebhookEventEnvelope,
   type WebhookSubscription,
@@ -438,7 +439,7 @@ async function projectAuditRecord(
     return
   }
   if (!await dependencies.featureAvailability.isEnabled(event.workspaceId)) return
-  if (!isWebhookEventType(event.eventType)) return
+  if (!isWebhookEventType(event.eventType) || !hasCompleteWebhookScope(event)) return
   await dependencies.queue.enqueue({
     kind: 'projection',
     workspaceId: event.workspaceId,
@@ -485,7 +486,8 @@ async function processWebhookProjectionMessage(
     event.workspaceId !== message.workspaceId ||
     event.eventId !== message.eventId ||
     event.outboxStatus !== 'pending' ||
-    !isWebhookEventType(event.eventType)
+    !isWebhookEventType(event.eventType) ||
+    !hasCompleteWebhookScope(event)
   ) {
     if (!await dependencies.projections.complete(claimRequest)) {
       throw new Error('Webhook projection lease was lost.')
@@ -1737,6 +1739,21 @@ function readPreparedWebhookEvent(payload: string): WebhookEventEnvelope {
     if (error instanceof TypeError) throw error
     throw new TypeError('Webhook event envelope is invalid.')
   }
+}
+
+/**
+ * Tests whether an audit event carries every scope field webhook delivery authorizes against.
+ *
+ * Relation events written before `projectId` was recorded on every endpoint lack it even when
+ * the Work Item is assigned to a Project, so treating them as Team-only would skip the Project
+ * check. They can still reach the projection from a stream backlog, so they are not delivered.
+ *
+ * @param event - Normalized audit event.
+ * @returns Whether the event's Team and Project scope is complete.
+ */
+function hasCompleteWebhookScope(event: AuditEventV1) {
+  if (!isWorkItemRelationEventType(event.eventType)) return true
+  return isRecord(event.metadata) && event.metadata.projectScopeRecorded === true
 }
 
 function normalizeQueueDelay(value: number | undefined) {

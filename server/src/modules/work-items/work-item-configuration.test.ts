@@ -2043,6 +2043,7 @@ test('records a blocker change on both endpoints in the relation transaction', a
         relationType: 'blocks',
         relatedWorkItemId: 'build',
         graphRevision: 1,
+        projectScopeRecorded: true,
       },
       publicView: expect.any(String),
     },
@@ -2154,6 +2155,7 @@ test('records a reorder among siblings on the moved child with both ranks', asyn
       parentWorkItemId: 'phase-a',
       hierarchyRank: 'k',
       graphRevision: 6,
+      projectScopeRecorded: true,
     },
     publicView: expect.any(String),
   }])
@@ -2192,6 +2194,7 @@ test('records a top-level reorder without a parent', async () => {
         issueId: 'task',
         hierarchyRank: 'k',
         graphRevision: 3,
+        projectScopeRecorded: true,
       },
     ]])
 })

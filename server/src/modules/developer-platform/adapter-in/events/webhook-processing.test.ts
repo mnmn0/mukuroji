@@ -266,6 +266,7 @@ test('delivers a relation event scoped to the endpoint Project without the other
       relationType: 'blockedBy',
       relatedWorkItemId: 'secret-design',
       graphRevision: 2,
+      projectScopeRecorded: true,
     },
     outboxStatus: 'pending',
     expiresAt: base.expiresAt,
@@ -304,6 +305,63 @@ test('delivers a relation event scoped to the endpoint Project without the other
     .toBe(false)
   // The other endpoint may be in a Project the subscription creator cannot read.
   expect(JSON.stringify(toPublicWebhookEventData(event))).not.toContain('secret-design')
+})
+
+test('skips a relation event written before its Project scope was recorded', async () => {
+  const now = new Date('2026-07-18T00:00:00.000Z')
+  const base = createWorkItemAuditEvent(now)
+  // An older writer left `projectId` out even for a Project-assigned Work Item.
+  const legacy = createAuditEvent({
+    context: createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'member-1', kind: 'user', displayName: 'Sato' },
+      idempotencyKey: 'relation-legacy-1',
+      request: { method: 'POST', path: '/api/teams/team-1/issues/build/relations', body: {} },
+      source: { kind: 'api', requestId: 'relation-legacy-1' },
+      occurredAt: now.toISOString(),
+    }),
+    eventType: 'work-item.blocker-added',
+    entity: { type: 'work-item', id: 'team/team-1/issue/build' },
+    action: 'blocker-added',
+    summary: 'A blocker was added.',
+    metadata: { adapter: 'work-item-relation', teamId: 'team-1', issueId: 'build', graphRevision: 1 },
+    outboxStatus: 'pending',
+    expiresAt: base.expiresAt,
+  })
+  const queued: WebhookQueueMessage[] = []
+
+  await processWebhookProjectionBatch({
+    Records: [{ eventName: 'INSERT', dynamodb: { SequenceNumber: '301', NewImage: marshallRecord(legacy) } }],
+  }, {
+    featureAvailability: enabledFeatureAvailability,
+    queue: createRecordingQueue(queued),
+  })
+  expect(queued).toEqual([])
+
+  const platform = createPlatform(() => now)
+  await createSubscription(platform, { eventTypes: ['work-item.blocker-added'] })
+  const response = await processWebhookDeliveryBatch({
+    Records: [createProjectionSqsRecord(legacy.eventId)],
+  }, {
+    featureAvailability: enabledFeatureAvailability,
+    auditEvents: { getEvent: async () => legacy },
+    developerPlatform: platform,
+    authorizer: {
+      async canDeliver() {
+        throw new Error('A legacy relation event must not reach authorization.')
+      },
+    },
+    projections: createMemoryProjectionStore(),
+    queue: createRecordingQueue(queued),
+    claims: createMemoryClaimStore(),
+    now: () => now,
+    random: () => 0.5,
+    async deliver() {
+      throw new Error('Projection must not perform HTTP delivery.')
+    },
+  })
+  expect(response).toEqual({ batchItemFailures: [] })
+  expect((await platform.listWebhookDeliveries({ workspaceId: 'workspace-1' })).deliveries).toEqual([])
 })
 
 test('does not expand a projection page chain after duplicate messages and send response loss', async () => {

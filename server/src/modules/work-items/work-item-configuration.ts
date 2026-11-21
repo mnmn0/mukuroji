@@ -3115,6 +3115,9 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
           // Webhook delivery and notifications check the endpoint's Project, which the endpoint
           // guard in the same transaction pins to this value.
           ...(endpoint.assignedProjectId ? { projectId: endpoint.assignedProjectId } : {}),
+          // Marks that the Project scope above is complete: events written before it was recorded
+          // lack `projectId` even for Project-assigned Work Items, so webhooks skip them.
+          projectScopeRecorded: true,
           ...(change.relationType ? { relationType: change.relationType } : {}),
           ...(change.relatedWorkItemId ? { relatedWorkItemId: change.relatedWorkItemId } : {}),
           ...(change.previousParentWorkItemId

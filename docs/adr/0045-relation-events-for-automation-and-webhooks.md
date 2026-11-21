@@ -28,7 +28,8 @@ Shinji の方針は「なるべく安く」で、常時動く resource は増や
 
 - relation の audit event は、記録する側の Work Item が Project に割り当てられていれば `metadata.projectId`
   を持つ。値は同じ transaction の endpoint guard（`assignedProjectId` の条件）が確かめた snapshot から取る。
-  `work-item.blocker-removed` の通知もこの値を使う。
+  `work-item.blocker-removed` の通知もこの値を使う。Project の記録が揃っていることを示す
+  `projectScopeRecorded: true` も一緒に書く。
 - Automation に `relation` trigger を足す。`eventTypes`（1〜10 件）で relation の event type を選び、省略すると
   すべての relation 変更で動く。event は既存の Audit stream reader（Automation 側、ADR 0008）がそのまま読む。
 - Webhook の event type に 10 種の relation event を足す。payload は既存の公開 view で、相手の Work Item を
@@ -56,7 +57,9 @@ Shinji の方針は「なるべく安く」で、常時動く resource は増や
   新しい常時起動の resource なしで作れる。
 - relation の変更が Project に割り当てられた Work Item で起きた場合、その Project を見られない作成者の
   webhook には配信されない。
-- この変更より前に書かれた relation の event は `projectId` を持たない。webhook の projection は Audit stream の
-  新しい INSERT だけを読むので、古い event が配信されることはない。
+- この変更より前に書かれた relation の event は `projectId` を持たない。Audit stream の reader は
+  `TRIM_HORIZON` から読むので、deploy 直後の backlog や rolling deploy 中の旧 API が書いた event も projection に
+  届きうる。そこで新しい event には `metadata.projectScopeRecorded=true` を付け、webhook の projection は
+  これがない relation event を配信しない（Team だけの権限で配信されるのを防ぐ）。
 - Public API の互換チェックは、`WebhookEventType` への値の追加を一度だけ受け入れる必要がある（扱いは PR で決める）。
 - 更新した文書: `docs/automation.md`、`docs/public-api.md`、`docs/event-audit.md`、`docs/guide/admin.md`。
