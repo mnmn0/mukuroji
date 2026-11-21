@@ -12,7 +12,11 @@ import type { MessageKey } from '../../../shared/i18n/i18n'
 import {
   getFocusSignalMessageKey,
 } from '../model/focusQueue'
-import { focusSlaAnchorOptions, readFocusPolicyOverrides } from '../model/focusPolicyForm'
+import {
+  focusSlaAnchorOptions,
+  readFocusPolicyOverrides,
+  readUnparsedNumberFieldNames,
+} from '../model/focusPolicyForm'
 
 /** One editable signal-weight field in stable display order. */
 type FocusPolicyWeightField = {
@@ -103,8 +107,12 @@ export function FocusPolicyPanel({
     if (!onSave) return
     const formData = new FormData(event.currentTarget)
     const result = readFocusPolicyOverrides(formData)
-    setInvalidFieldNames(result.invalidFieldNames)
-    if (result.invalidFieldNames.length > 0) return
+    const unparsedFieldNames = readUnparsedNumberFieldNames(
+      Array.from(event.currentTarget.elements).filter((element) => element instanceof HTMLInputElement),
+    )
+    const nextInvalidFieldNames = [...new Set([...result.invalidFieldNames, ...unparsedFieldNames])]
+    setInvalidFieldNames(nextInvalidFieldNames)
+    if (nextInvalidFieldNames.length > 0) return
     const target: FocusPolicyTarget = editingTeam && policy.teamId !== undefined
       ? { type: 'team', teamId: policy.teamId }
       : { type: 'user' }

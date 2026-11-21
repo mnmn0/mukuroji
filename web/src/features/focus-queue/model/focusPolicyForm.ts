@@ -22,6 +22,37 @@ export type FocusPolicyFormReadResult = {
   overrides: FocusPolicyOverrides
 }
 
+/** The part of a form input that tells whether the browser parsed its typed text. */
+export type FocusPolicyNumberInputState = {
+  /** Form field name read by the policy parser. */
+  readonly name: string
+  /** Browser validity state for the typed text. */
+  readonly validity: {
+    /** True when the browser could not convert the typed text to a value. */
+    readonly badInput: boolean
+  }
+}
+
+/**
+ * Lists inputs whose typed text the browser could not parse as a number.
+ *
+ * A `type="number"` input holding text such as `1e` submits an empty value,
+ * which `readFocusPolicyOverrides` would read as "inherit" and so silently drop
+ * a stored override. Intentionally empty inputs are not reported.
+ *
+ * @param inputs - The policy form's input controls.
+ * @returns Names of inputs whose `validity.badInput` is set.
+ */
+export function readUnparsedNumberFieldNames(
+  inputs: Iterable<FocusPolicyNumberInputState>,
+): string[] {
+  const names: string[] = []
+  for (const input of inputs) {
+    if (input.name !== '' && input.validity.badInput) names.push(input.name)
+  }
+  return names
+}
+
 /**
  * Parses a sparse Focus policy replacement from trusted form controls.
  *
