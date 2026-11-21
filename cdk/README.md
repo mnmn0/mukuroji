@@ -734,6 +734,85 @@ IAM は1つの role に付く inline policy を合計10,240文字（空白を除
 - API role の DynamoDB と SQS の権限は customer-managed policy（`ApiTableDataPolicy`、`ApiAnalyticsTablePolicy`、`ApiFeatureDataPolicy`、`ApiTransactionConditionPolicy`）に置きます。API Lambda はこれらの policy ができてから作られます。
 - Role の inline が上限に近づいたら、`grants.*` に `ManagedPolicyPrincipal`（`cdk/lib/policies/managed-policy-principal.ts`）を渡して、権限を customer-managed policy へ移します。
 
+## GitHub Actions から deploy する
+
+本番環境は 1 つで、`main` の commit を GitHub Actions の `production` Environment から deploy します。
+job は OIDC で `mukuroji-github-deploy` role を引き受けるので、AWS の access key は GitHub に置きません。
+role を引き受けられるのは `mnmn0/mukuroji` の `production` Environment で動く job だけで、Environment は
+`main` に限り、required reviewer の承認を待ちます。判断の理由は [ADR 0036](../docs/adr/0036-github-actions-oidc-deploy.md) を参照してください。
+
+| 置き場所 | 中身 |
+| --- | --- |
+| [`deploy-access/github-deploy-access.template.json`](deploy-access/github-deploy-access.template.json) | 一度だけ作る CloudFormation stack。GitHub の OIDC provider、deploy role、alarm 用 SNS topic 2 つ、deploy の非 secret 値（SSM `/mukuroji/deploy/config/`）。 |
+| [`deploy-access/deploy.workflow.yml`](deploy-access/deploy.workflow.yml) | `.github/workflows/deploy.yml` に置く workflow。`scripts/github-deploy.ts` を呼ぶだけです。 |
+| [`../scripts/github-deploy.ts`](../scripts/github-deploy.ts) | deploy の手順。SSM から値を読み、`cdk deploy`、`scripts/deploy-web.sh`、`/api/health` の commit 確認を行います。 |
+
+deploy role 自身が持つ権限は、CDK bootstrap の deploy / file-publishing / lookup role を引き受けること、
+`Mukuroji` stack の参照、Web bucket への upload と CloudFront の invalidation、runtime control の AppConfig 操作、
+`/mukuroji/deploy/` の SSM parameter の読み取りと新規作成（上書きは Deny）だけです。stack の変更は CDK の標準どおり
+bootstrap の CloudFormation execution role が行います。
+
+stack の secret parameter（`WorkspaceAuditPseudonymKey`、`EnterpriseIdentityTokenHashSecret`、`RequestTokenHashSecret`、
+`EdgeOriginSecret`）は SSM の SecureString（`/mukuroji/deploy/secrets/`）に置きます。stack がまだないときだけ script が
+32 byte の乱数で作り、上書きせずに保存します。stack ができた後に値がなければ、新しい値で audit ID や token hash が
+変わらないよう deploy を止めます。値を消したときは同じ値を戻してください。SSO・AI・任意 module の parameter は
+script が渡さないので、CDK の既定どおり前回の値が残ります。有効にするときは script に足す PR を出します。
+
+`ApiRuntimeConfigurationRevision` は run ごとに `gh-<run id>-<attempt>` になり、再実行でも同じ値を使いません。
+`ApplicationCommitSha` は checkout した `GITHUB_SHA` で、deploy 後に `WebUrl` の `/api/health` が同じ値を返すまで待ちます。
+初回の deploy では `ApiAllowedOrigins` を渡さず、2 回目からは stack の `WebUrl` を渡します。独自 domain など別の
+origin にするときは deploy access stack の `ApiAllowedOrigins` を更新します。
+
+費用: public repository の GitHub Actions は無料です。SNS の email 通知と SSM の standard parameter も無料枠に収まります。
+
+### 最初に一度だけ行うこと
+
+1. AWS console で region を東京（ap-northeast-1）にして CloudShell を開き、次を実行します。`OWNER_EMAIL` は
+   初期 owner の小文字の email です。account に GitHub の OIDC provider が既にある場合は、最後の
+   `--parameter-overrides` に `ExistingGitHubOidcProviderArn=<その ARN>` を足します。
+
+   ```sh
+   export AWS_REGION=ap-northeast-1
+   export OWNER_EMAIL=owner@example.com
+   curl -fsSLo github-deploy-access.json \
+     https://raw.githubusercontent.com/mnmn0/mukuroji/main/cdk/deploy-access/github-deploy-access.template.json
+   npx --yes aws-cdk@2.1132.0 bootstrap "aws://$(aws sts get-caller-identity --query Account --output text)/$AWS_REGION"
+   aws cloudformation deploy --region "$AWS_REGION" --stack-name MukurojiGitHubDeployAccess \
+     --template-file github-deploy-access.json --capabilities CAPABILITY_NAMED_IAM \
+     --parameter-overrides InitialOwnerEmail="$OWNER_EMAIL"
+   aws cloudformation describe-stacks --region "$AWS_REGION" --stack-name MukurojiGitHubDeployAccess \
+     --query "Stacks[0].Outputs[?OutputKey=='DeployRoleArn'].OutputValue" --output text
+   ```
+
+   alarm の送り先を owner 以外にするときは `AlarmPrimaryEmail=` と `AlarmSecondaryEmail=` も渡します（できれば別の人か mailbox）。
+2. SNS から届く 2 通の「Subscription Confirmation」メールで、それぞれ `Confirm subscription` を押します。
+3. GitHub の repository の Settings → Environments で `production` を作り、次を設定します。
+   - Required reviewers: 承認する人（例: `mnmn0`）
+   - Deployment branches and tags: Selected branches and tags で `main` だけ
+   - Environment variables: `AWS_DEPLOY_ROLE_ARN` に手順 1 の最後に表示された ARN。region を変えたときだけ `AWS_REGION` も
+4. `deploy-access/deploy.workflow.yml` の内容を `.github/workflows/deploy.yml` として追加し、`main` に merge します。
+   Claude の GitHub App は workflow file を push できないため、この 1 回は GitHub の画面から追加します。
+5. merge で動いた `Deploy` workflow の `Review deployments` で承認します。初回は 30〜40 分ほどかかります。
+6. 初期 owner に Cognito から仮パスワードのメールが届きます。`WebUrl`（job の summary に出ます）でサインインし、
+   パスワードを変えて MFA を設定します。
+7. Actions → `Deploy` → `Run workflow` で `runtime-control-enable` を選んで実行し、承認します（約 30 分）。
+   ここまで API は `/api/health` 以外に `503` を返します。
+
+### いつもの deploy と手動の操作
+
+`main` に merge するたびに `Deploy` が承認待ちになります。承認するまで待ち、新しい merge があれば古い承認待ちは
+新しいものに置き換わります。動いている deploy は止めません。`Run workflow` の `operation` で次も実行できます。
+
+| operation | すること |
+| --- | --- |
+| `deploy` | 選んだ branch（`main` のみ）の先頭を deploy します。 |
+| `runtime-control-enable` / `runtime-control-disable` | [runtime control](#application-処理を有効にするruntime-control) を切り替えます。 |
+| `web-rollback` | `web_release_commit` に指定した 40 文字の SHA の Web release に戻します（[Web の release を戻す](#web-の-release-を戻す)）。 |
+
+stack を前の commit に戻すときは、`main` で該当の PR を revert して通常どおり deploy します（[Rollback](#rollback) の forward deploy）。
+job の summary には commit、revision、CDK outputs の SHA-256、`WebUrl` が残り、Environment の deployment 履歴と合わせて
+change record にします。PR ごとの read-only な `cdk diff`、post-deploy の smoke e2e はまだありません（#362 の残り）。
+
 ## Fresh deployment
 
 ### 1. Cognito と値を準備する

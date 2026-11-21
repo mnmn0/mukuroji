@@ -1,0 +1,333 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "mukuroji: one-time prerequisites for deploying from GitHub Actions with OIDC (deploy role, alarm topics, deploy configuration). See cdk/README.md, GitHub Actions から deploy する.",
+  "Parameters": {
+    "InitialOwnerEmail": {
+      "Type": "String",
+      "AllowedPattern": "^[^A-Z\\s@]+@[^A-Z\\s@]+$",
+      "ConstraintDescription": "Use a lowercase email address.",
+      "Description": "Lowercase email of the first Workspace owner. Passed to the Mukuroji stack as InitialOwnerEmail and InitialOwnerUsername."
+    },
+    "AlarmPrimaryEmail": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+      "Description": "Email subscribed to the primary alarm topic. Empty uses InitialOwnerEmail."
+    },
+    "AlarmSecondaryEmail": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$",
+      "Description": "Email subscribed to the secondary alarm topic. Use a different person or mailbox from the primary when you can. Empty uses InitialOwnerEmail."
+    },
+    "WorkspaceDirectoryId": {
+      "Type": "String",
+      "Default": "workspace#production",
+      "AllowedPattern": "^\\S+$",
+      "Description": "Canonical Workspace ID. Fixed for the life of the environment."
+    },
+    "ApiAllowedOrigins": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^https?://[^,\\s]+(,https?://[^,\\s]+)*$",
+      "Description": "Optional comma-separated CORS origins. Empty lets the deploy use the stack's WebUrl after the first deploy."
+    },
+    "GitHubRepository": {
+      "Type": "String",
+      "Default": "mnmn0/mukuroji",
+      "AllowedPattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+      "Description": "owner/name of the only repository allowed to assume the deploy role."
+    },
+    "GitHubEnvironment": {
+      "Type": "String",
+      "Default": "production",
+      "AllowedPattern": "^[A-Za-z0-9_.-]{1,255}$",
+      "Description": "GitHub Environment the deploy job runs in. Only jobs in this environment can assume the role; restrict it to main and add a required reviewer in GitHub."
+    },
+    "ExistingGitHubOidcProviderArn": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:oidc-provider/token\\.actions\\.githubusercontent\\.com$",
+      "Description": "ARN of an existing token.actions.githubusercontent.com OIDC provider in this account. Empty creates one (an account can have only one)."
+    },
+    "CdkBootstrapQualifier": {
+      "Type": "String",
+      "Default": "hnb659fds",
+      "AllowedPattern": "^[a-z0-9]{1,10}$",
+      "Description": "Qualifier passed to cdk bootstrap. The deploy role may assume only that bootstrap's roles."
+    },
+    "MukurojiStackName": {
+      "Type": "String",
+      "Default": "Mukuroji",
+      "AllowedPattern": "^[A-Za-z][A-Za-z0-9-]{0,127}$",
+      "Description": "Name of the application stack the role deploys and reads."
+    },
+    "WebBucketNamePrefix": {
+      "Type": "String",
+      "Default": "mukuroji-webbucket",
+      "AllowedPattern": "^[a-z0-9][a-z0-9.-]{2,62}$",
+      "Description": "Prefix of the Web bucket name CloudFormation generates (lowercase stack name, '-', 'webbucket')."
+    }
+  },
+  "Conditions": {
+    "CreateGitHubOidcProvider": {
+      "Fn::Equals": [{ "Ref": "ExistingGitHubOidcProviderArn" }, ""]
+    },
+    "UseOwnerForPrimaryAlarm": {
+      "Fn::Equals": [{ "Ref": "AlarmPrimaryEmail" }, ""]
+    },
+    "UseOwnerForSecondaryAlarm": {
+      "Fn::Equals": [{ "Ref": "AlarmSecondaryEmail" }, ""]
+    },
+    "HasApiAllowedOrigins": {
+      "Fn::Not": [{ "Fn::Equals": [{ "Ref": "ApiAllowedOrigins" }, ""] }]
+    }
+  },
+  "Resources": {
+    "GitHubOidcProvider": {
+      "Type": "AWS::IAM::OIDCProvider",
+      "Condition": "CreateGitHubOidcProvider",
+      "Properties": {
+        "Url": "https://token.actions.githubusercontent.com",
+        "ClientIdList": ["sts.amazonaws.com"],
+        "ThumbprintList": [
+          "6938fd4d98bab03faadb97b34396831e3780aea1",
+          "1c58a3a8518e8759bf075b76b750d4f2df264fcd"
+        ]
+      }
+    },
+    "GitHubDeployRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "RoleName": "mukuroji-github-deploy",
+        "Description": "Assumed by GitHub Actions in one repository and Environment to deploy the Mukuroji stack through the CDK bootstrap roles.",
+        "MaxSessionDuration": 7200,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "GitHubEnvironmentOnly",
+              "Effect": "Allow",
+              "Principal": {
+                "Federated": {
+                  "Fn::If": [
+                    "CreateGitHubOidcProvider",
+                    { "Ref": "GitHubOidcProvider" },
+                    { "Ref": "ExistingGitHubOidcProviderArn" }
+                  ]
+                }
+              },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": {
+                    "Fn::Sub": "repo:${GitHubRepository}:environment:${GitHubEnvironment}"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "deploy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Sid": "AssumeCdkBootstrapRoles",
+                  "Effect": "Allow",
+                  "Action": ["sts:AssumeRole", "sts:TagSession"],
+                  "Resource": [
+                    { "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-${CdkBootstrapQualifier}-deploy-role-${AWS::AccountId}-${AWS::Region}" },
+                    { "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-${CdkBootstrapQualifier}-file-publishing-role-${AWS::AccountId}-${AWS::Region}" },
+                    { "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-${CdkBootstrapQualifier}-lookup-role-${AWS::AccountId}-${AWS::Region}" }
+                  ]
+                },
+                {
+                  "Sid": "ReadApplicationStack",
+                  "Effect": "Allow",
+                  "Action": ["cloudformation:DescribeStacks", "cloudformation:ListStackResources"],
+                  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${MukurojiStackName}/*" }
+                },
+                {
+                  "Sid": "ReadDeployConfiguration",
+                  "Effect": "Allow",
+                  "Action": ["ssm:GetParameters", "ssm:GetParametersByPath"],
+                  "Resource": [
+                    { "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mukuroji/deploy/config" },
+                    { "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mukuroji/deploy/config/*" },
+                    { "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mukuroji/deploy/secrets/*" }
+                  ]
+                },
+                {
+                  "Sid": "CreateMissingDeploySecrets",
+                  "Effect": "Allow",
+                  "Action": "ssm:PutParameter",
+                  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/mukuroji/deploy/secrets/*" }
+                },
+                {
+                  "Sid": "NeverOverwriteDeploySecrets",
+                  "Effect": "Deny",
+                  "Action": "ssm:PutParameter",
+                  "Resource": "*",
+                  "Condition": { "Bool": { "ssm:Overwrite": "true" } }
+                },
+                {
+                  "Sid": "PublishWebRelease",
+                  "Effect": "Allow",
+                  "Action": ["s3:ListBucket", "s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+                  "Resource": [
+                    { "Fn::Sub": "arn:${AWS::Partition}:s3:::${WebBucketNamePrefix}*" },
+                    { "Fn::Sub": "arn:${AWS::Partition}:s3:::${WebBucketNamePrefix}*/*" }
+                  ],
+                  "Condition": { "StringEquals": { "s3:ResourceAccount": { "Ref": "AWS::AccountId" } } }
+                },
+                {
+                  "Sid": "InvalidateWebCache",
+                  "Effect": "Allow",
+                  "Action": ["cloudfront:CreateInvalidation", "cloudfront:GetInvalidation"],
+                  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/*" }
+                },
+                {
+                  "Sid": "SwitchRuntimeControl",
+                  "Effect": "Allow",
+                  "Action": [
+                    "appconfig:GetEnvironment",
+                    "appconfig:ListHostedConfigurationVersions",
+                    "appconfig:GetHostedConfigurationVersion",
+                    "appconfig:CreateHostedConfigurationVersion",
+                    "appconfig:StartDeployment",
+                    "appconfig:GetDeployment",
+                    "appconfig:ListDeployments"
+                  ],
+                  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:appconfig:${AWS::Region}:${AWS::AccountId}:application/*" }
+                },
+                {
+                  "Sid": "ReadRuntimeControlAlarm",
+                  "Effect": "Allow",
+                  "Action": "cloudwatch:DescribeAlarms",
+                  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*" }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "AlarmPrimaryTopic": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "TopicName": "mukuroji-alarms-primary",
+        "Subscription": [
+          {
+            "Protocol": "email",
+            "Endpoint": {
+              "Fn::If": ["UseOwnerForPrimaryAlarm", { "Ref": "InitialOwnerEmail" }, { "Ref": "AlarmPrimaryEmail" }]
+            }
+          }
+        ]
+      }
+    },
+    "AlarmSecondaryTopic": {
+      "Type": "AWS::SNS::Topic",
+      "Properties": {
+        "TopicName": "mukuroji-alarms-secondary",
+        "Subscription": [
+          {
+            "Protocol": "email",
+            "Endpoint": {
+              "Fn::If": ["UseOwnerForSecondaryAlarm", { "Ref": "InitialOwnerEmail" }, { "Ref": "AlarmSecondaryEmail" }]
+            }
+          }
+        ]
+      }
+    },
+    "AlarmTopicPolicy": {
+      "Type": "AWS::SNS::TopicPolicy",
+      "Properties": {
+        "Topics": [{ "Ref": "AlarmPrimaryTopic" }, { "Ref": "AlarmSecondaryTopic" }],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "CloudWatchAlarmsInThisAccount",
+              "Effect": "Allow",
+              "Principal": { "Service": "cloudwatch.amazonaws.com" },
+              "Action": "sns:Publish",
+              "Resource": [{ "Ref": "AlarmPrimaryTopic" }, { "Ref": "AlarmSecondaryTopic" }],
+              "Condition": {
+                "StringEquals": { "aws:SourceAccount": { "Ref": "AWS::AccountId" } },
+                "ArnLike": {
+                  "aws:SourceArn": { "Fn::Sub": "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*" }
+                }
+              }
+            },
+            {
+              "Sid": "RequireTls",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "sns:Publish",
+              "Resource": [{ "Ref": "AlarmPrimaryTopic" }, { "Ref": "AlarmSecondaryTopic" }],
+              "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+            }
+          ]
+        }
+      }
+    },
+    "InitialOwnerEmailParameter": {
+      "Type": "AWS::SSM::Parameter",
+      "Properties": {
+        "Name": "/mukuroji/deploy/config/initial-owner-email",
+        "Type": "String",
+        "Value": { "Ref": "InitialOwnerEmail" }
+      }
+    },
+    "WorkspaceDirectoryIdParameter": {
+      "Type": "AWS::SSM::Parameter",
+      "Properties": {
+        "Name": "/mukuroji/deploy/config/workspace-directory-id",
+        "Type": "String",
+        "Value": { "Ref": "WorkspaceDirectoryId" }
+      }
+    },
+    "AlarmPrimaryTopicNameParameter": {
+      "Type": "AWS::SSM::Parameter",
+      "Properties": {
+        "Name": "/mukuroji/deploy/config/alarm-primary-topic-name",
+        "Type": "String",
+        "Value": { "Fn::GetAtt": ["AlarmPrimaryTopic", "TopicName"] }
+      }
+    },
+    "AlarmSecondaryTopicNameParameter": {
+      "Type": "AWS::SSM::Parameter",
+      "Properties": {
+        "Name": "/mukuroji/deploy/config/alarm-secondary-topic-name",
+        "Type": "String",
+        "Value": { "Fn::GetAtt": ["AlarmSecondaryTopic", "TopicName"] }
+      }
+    },
+    "ApiAllowedOriginsParameter": {
+      "Type": "AWS::SSM::Parameter",
+      "Condition": "HasApiAllowedOrigins",
+      "Properties": {
+        "Name": "/mukuroji/deploy/config/api-allowed-origins",
+        "Type": "String",
+        "Value": { "Ref": "ApiAllowedOrigins" }
+      }
+    }
+  },
+  "Outputs": {
+    "DeployRoleArn": {
+      "Description": "Set this as the AWS_DEPLOY_ROLE_ARN variable of the GitHub Environment.",
+      "Value": { "Fn::GetAtt": ["GitHubDeployRole", "Arn"] }
+    },
+    "AlarmPrimaryTopicArn": {
+      "Value": { "Ref": "AlarmPrimaryTopic" }
+    },
+    "AlarmSecondaryTopicArn": {
+      "Value": { "Ref": "AlarmSecondaryTopic" }
+    }
+  }
+}
