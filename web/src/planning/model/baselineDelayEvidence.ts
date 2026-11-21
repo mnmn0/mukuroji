@@ -29,6 +29,27 @@ export type PlanningBaselineDelayCandidate = {
   evidence: PlanningUpdateEvidence
 }
 
+/** Load state of the records behind the baseline in the selected target. */
+export type PlanningBaselineDelaysView =
+  | {
+    /** The baselines are being read. */
+    status: 'loading'
+  }
+  | {
+    /** The baselines were read. */
+    status: 'ready'
+    /** Delayed records, most delayed first. */
+    candidates: readonly PlanningBaselineDelayCandidate[]
+  }
+
+/** Delays computed for one update target, so a view can tell they belong to its target. */
+export type PlanningTargetBaselineDelays = {
+  /** Target the delays were computed for. */
+  target: PlanningUpdateTargetView
+  /** Delays of the target. */
+  delays: PlanningBaselineDelaysView
+}
+
 /** Work Items in scope that the delay list reads baselines for. */
 export type PlanningBaselineScopeWorkItem = {
   /** Work Item ID. */

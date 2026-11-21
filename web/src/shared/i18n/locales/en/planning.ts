@@ -188,7 +188,6 @@ export const planningMessages = {
   'planning.baselineDelays.description': 'Open Work Items that end later than the active baseline, and Milestones whose forecast ends later than their baseline.',
   'planning.baselineDelays.loading': 'Loading the baseline differences…',
   'planning.baselineDelays.none': 'Nothing is behind the baseline.',
-  'planning.baselineDelays.unavailable': 'The baselines could not be loaded, so delays are not shown.',
   'planning.baselineDelays.attach': 'Attach {count} delays as evidence',
   'planning.baselineDelays.detach': 'Remove attached delays',
   'planning.baselineDelays.attached': '{count} attached as evidence.',

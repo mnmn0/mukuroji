@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, userEvent, within } from 'storybook/test'
 import { createPlanningUpdateWorkItemEvidenceValue } from '../model/statusUpdateView'
 import { PlanningStatusUpdateComposer } from './PlanningUpdatePrimitives'
 import { createPlanningLabels } from './labels'
@@ -55,6 +56,40 @@ export const PlanningEntityEvidence: Story = {
 /** File evidence with a required immutable HTTPS permalink. */
 export const FileEvidence: Story = {
   args: { initialEvidenceType: 'file' },
+}
+
+/** Work Items and a Milestone behind the baseline, attachable as evidence in one action. */
+export const BaselineDelays: Story = {
+  args: {
+    baselineDelays: {
+      status: 'ready',
+      candidates: [
+        {
+          key: 'milestone-beta',
+          kind: 'milestone',
+          title: 'Beta ready',
+          delayDays: 7,
+          reportedBefore: true,
+          evidence: { type: 'planning-entity', entityId: 'milestone-beta' },
+        },
+        {
+          key: 'journey-copy',
+          kind: 'work-item',
+          title: 'Finalize onboarding copy',
+          delayDays: 5,
+          reportedBefore: false,
+          evidence: { type: 'work-item', teamId: 'core-team', workItemId: 'journey-copy' },
+        },
+      ],
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByRole('button', { name: '遅れ 2 件を根拠に添付' }))
+    await expect(canvas.getByRole('status')).toHaveTextContent('2 件を根拠に添付しています。')
+    await userEvent.click(canvas.getByRole('button', { name: '添付を外す' }))
+    await expect(canvas.getByRole('button', { name: '遅れ 2 件を根拠に添付' })).toBeEnabled()
+  },
 }
 
 /** Generic external evidence link and optional label. */

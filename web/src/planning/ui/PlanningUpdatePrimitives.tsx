@@ -19,7 +19,7 @@ import {
   evidenceKey,
   mergePlanningUpdateEvidence,
   PLANNING_UPDATE_EVIDENCE_LIMIT,
-  type PlanningBaselineDelayCandidate,
+  type PlanningBaselineDelaysView,
 } from '../model/baselineDelayEvidence'
 import { isValidPlanningDateTime, readNonNegativeNumber } from '../model/cadenceForm'
 import {
@@ -670,8 +670,6 @@ export type PlanningBaselineDelayLabels = {
   loading: string
   /** Shown when nothing is delayed. */
   none: string
-  /** Shown when the baselines could not be read. */
-  unavailable: string
   /** Attach button label for a number of records. */
   attach: (count: number) => string
   /** Button that removes the attached records. */
@@ -691,23 +689,6 @@ export type PlanningBaselineDelayLabels = {
   /** Kind label of a Work Item. */
   workItem: string
 }
-
-/** Load state of the records behind the baseline in the selected target. */
-export type PlanningBaselineDelaysView =
-  | {
-    /** The baselines are being read. */
-    status: 'loading'
-  }
-  | {
-    /** The baselines could not be read. */
-    status: 'unavailable'
-  }
-  | {
-    /** The baselines were read. */
-    status: 'ready'
-    /** Delayed records, most delayed first. */
-    candidates: readonly PlanningBaselineDelayCandidate[]
-  }
 
 /** Props for the structured manual update composer. */
 export type PlanningStatusUpdateComposerProps = {
@@ -1330,7 +1311,6 @@ function PlanningBaselineDelaySection({
       <p className="text-sm font-semibold">{labels.title}</p>
       <p className="text-xs font-medium leading-5">{labels.description}</p>
       {delays.status === 'loading' ? <p className="text-xs" role="status">{labels.loading}</p> : null}
-      {delays.status === 'unavailable' ? <p className="text-xs">{labels.unavailable}</p> : null}
       {delays.status === 'ready' && candidates.length === 0 ? <p className="text-xs">{labels.none}</p> : null}
       {candidates.length > 0 ? (
         <ul className="grid gap-1 text-xs">

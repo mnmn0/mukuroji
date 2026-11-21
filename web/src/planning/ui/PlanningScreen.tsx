@@ -54,11 +54,7 @@ import {
   resolvePlanningCycleRolloverTargets,
 } from '../model/selectors'
 import { createPlanningUpdateTargetKey } from '../model/targetKey'
-import {
-  createPlanningBaselineDelayCandidates,
-  listPlanningTargetBaselineWorkItems,
-} from '../model/baselineDelayEvidence'
-import { useWorkItemScheduleBaselines } from '../../work-items/queries/useWorkItemScheduleBaselines'
+import type { PlanningTargetBaselineDelays } from '../model/baselineDelayEvidence'
 import type { CrossProjectTimelineDirectoryTeam } from '../model/crossProjectTimeline'
 import {
   CrossProjectTimelineChart,
@@ -83,7 +79,6 @@ import {
   PlanningLatestUpdateSummary,
   PlanningUpdateDetailPane,
   PlanningUpdateFreshnessBadge,
-  type PlanningBaselineDelaysView,
   type PlanningUpdateLabels,
   type PlanningStatusUpdateAiAssistance,
 } from './PlanningUpdatePrimitives'
@@ -445,10 +440,10 @@ export type PlanningScreenProps = {
   /** Dependency summary から影響 Milestone を開く callback です。 */
   onOpenMilestone?: (milestoneId: string) => void
   /**
-   * Bearer token used to read the active schedule baselines of the selected update target, so the
-   * composer can offer the records behind the baseline as evidence. Without it the section is hidden.
+   * Records behind the schedule baseline in the selected update target, which the composer can
+   * attach as evidence. They are shown only while their target is the one shown.
    */
-  scheduleBaselineAccessToken?: string
+  updateBaselineDelays?: PlanningTargetBaselineDelays
 }
 
 /** Authentication and locale used to derive a selected target's AI source. */
@@ -526,9 +521,9 @@ export function PlanningScreen({
   onViewChange,
   onUpdateWorkItemDependency,
   renderCycleBurndown,
-  scheduleBaselineAccessToken,
   snapshot,
   updateCollaboration,
+  updateBaselineDelays,
   updateHistoryErrorMessage,
   updateTargetDetails = [],
 }: PlanningScreenProps) {
@@ -596,13 +591,11 @@ export function PlanningScreen({
   const canPublishSelectedUpdate = resolvedSelectedUpdateTarget
     ? canPublishUpdate?.(resolvedSelectedUpdateTarget) ?? true
     : false
-  const selectedBaselineDelays = usePlanningBaselineDelays(
-    scheduleBaselineAccessToken,
-    snapshot,
-    resolvedSelectedUpdateTarget,
-    selectedUpdateView,
-    Boolean(onPublishUpdate && canPublishSelectedUpdate),
-  )
+  const selectedBaselineDelays = updateBaselineDelays && resolvedSelectedUpdateTarget &&
+    onPublishUpdate && canPublishSelectedUpdate &&
+    planningUpdateTargetsAreEqual(updateBaselineDelays.target, resolvedSelectedUpdateTarget)
+    ? updateBaselineDelays.delays
+    : undefined
   const selectedAiAssistance: PlanningStatusUpdateAiAssistance | undefined =
     aiAssistance && snapshot && resolvedSelectedUpdateTarget && onPublishUpdate && canPublishSelectedUpdate
       ? {
@@ -2323,40 +2316,4 @@ function readPlanningDependencyConstraint(
   return kind && anchor && /^\d{4}-\d{2}-\d{2}$/.test(date)
     ? { anchor, date, kind }
     : undefined
-}
-
-/**
- * Reads the active baselines of the selected update target and lists what is behind them.
- *
- * @param accessToken - Bearer token, or undefined to skip the section.
- * @param snapshot - Authorized Planning snapshot.
- * @param target - Selected Project or Initiative.
- * @param updateView - Published updates of the target, newest first.
- * @param enabled - Whether the viewer can publish an update for the target.
- * @returns The delay view, or undefined when the composer shows no delay section.
- */
-function usePlanningBaselineDelays(
-  accessToken: string | undefined,
-  snapshot: PlanningSnapshot | undefined,
-  target: PlanningUpdateTargetView | undefined,
-  updateView: PlanningTargetUpdateView | undefined,
-  enabled: boolean,
-): PlanningBaselineDelaysView | undefined {
-  const active = Boolean(accessToken && snapshot && target && enabled)
-  const scopeWorkItems = useMemo(
-    () => active && snapshot && target ? listPlanningTargetBaselineWorkItems(snapshot, target) : [],
-    [active, snapshot, target],
-  )
-  const hasProjects = scopeWorkItems.some((workItem) => workItem.assignedProjectId !== undefined)
-  const baselineFor = useWorkItemScheduleBaselines(accessToken, scopeWorkItems, active && hasProjects)
-  return useMemo(() => {
-    if (!active || !snapshot || !target) return undefined
-    if (hasProjects && !baselineFor) return { status: 'loading' }
-    const previousEvidence = (updateView?.updates[0]?.evidence ?? [])
-      .flatMap((evidence) => evidence.source ? [evidence.source] : [])
-    return {
-      status: 'ready',
-      candidates: createPlanningBaselineDelayCandidates(snapshot, target, baselineFor ?? (() => undefined), previousEvidence),
-    }
-  }, [active, baselineFor, hasProjects, snapshot, target, updateView])
 }

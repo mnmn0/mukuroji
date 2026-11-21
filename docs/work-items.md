@@ -113,7 +113,7 @@ Project・Team の Gantt は、表示中の Work Item の Project（Team ごと�
 
 保存・切り替えは baseline の行と同じ transaction で audit event を書く。`project.schedule_baseline_captured`（初回）、`project.schedule_baseline_replaced`（2 回目以降の保存）、`project.schedule_baseline_activated`（切り替え）で、entity は Project、target は `project-schedule-baseline`。changes には baseline ID・revision・保存時刻・Work Item 数の前後だけを残し、名前・Work Item の ID と日付は残さない。metadata には保存済みの件数と、上限で消した baseline の ID を残す。audit の書き込みが失敗すると baseline も保存されない。
 
-Planning の Project / Initiative の近況（Planning update）の作成欄は、対象範囲の Work Item の Project の基準 baseline を読み、基準より終了が遅れている未完了の Work Item と、baseline より予測終了が遅い Milestone を遅れの大きい順に出す。「遅れ n 件を根拠に添付」で、これらを Work Item / Planning entity の evidence として 1 回でまとめて添付できる（手で選んだ根拠の分を 1 件残し、最大 99 件）。前回の近況が根拠にしていないものには「前回から」と出す。Planning の snapshot は実績終了日を持たないので、完了した Work Item は出さない。
+Planning の Project / Initiative の近況（Planning update）の作成欄は、対象範囲の Work Item の Project の基準 baseline を読み、基準より終了が遅れている未完了の Work Item と、baseline より予測終了が遅い Milestone を遅れの大きい順に出す。「遅れ n 件を根拠に添付」で、これらを Work Item / Planning entity の evidence として 1 回でまとめて添付できる（手で選んだ根拠の分を 1 件残し、最大 99 件）。前回の近況が根拠にしていないものには「前回以降に新規」と出す。Planning の snapshot は実績終了日を持たないので、完了した Work Item は出さない。
 
 まだ無いもの: Focus の `slipped` signal の通知・Automation trigger、Cycle 単位の baseline。
 

@@ -32,8 +32,6 @@ export type PlanningUpdateEvidenceView = {
   label: string
   /** Same-origin or HTTPS destination supplied by the update author. */
   url?: string
-  /** Typed evidence the row was made from, when it came from a published update. */
-  source?: PlanningUpdateEvidence
 }
 
 /** Canonical Work Item choice exposed by the structured update composer. */
@@ -609,19 +607,17 @@ function createPlanningUpdateEvidenceView(
         id,
         label: evidence.workItemId,
         url: createTeamIssuesPath(evidence.teamId, evidence.workItemId),
-        source: evidence,
       }
     case 'planning-entity':
       return {
         id,
         label: evidence.entityId,
         url: `/planning/roadmap?entityId=${encodeURIComponent(evidence.entityId)}`,
-        source: evidence,
       }
     case 'file':
-      return { id, label: `File · ${evidence.fileId}`, url: evidence.url, source: evidence }
+      return { id, label: `File · ${evidence.fileId}`, url: evidence.url }
     case 'link':
-      return { id, label: evidence.label ?? evidence.url, url: evidence.url, source: evidence }
+      return { id, label: evidence.label ?? evidence.url, url: evidence.url }
   }
 }
 
