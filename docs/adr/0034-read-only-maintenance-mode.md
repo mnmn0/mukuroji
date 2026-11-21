@@ -46,6 +46,10 @@ AppConfig の runtime control は `enabled` / `disabled` の 2 値で、本番 m
 - 閲覧と sign-in を続けたまま、利用者の変更だけを理由付きで断れる。
 - 付随する書き込み（sign-in の rate limit、監査 event、sign-in 時の idempotent な membership 照合）は止まらない。
   書き込みを完全に止める必要がある作業では `disabled` を使う。
+- `GET` / `HEAD` は HTTP の意味どおり読み取りとみなす。`GET` で付随して書き込む route があれば、その書き込みは
+  read-only 中も行われる。
+- この変更より前の code が動いている環境に `read-only` の document を配布すると、旧 parser は不正 document として
+  扱い、fail closed（`disabled` 相当と configuration failure alarm）になる。API の deploy 後に使う。
 - 読み取り用の `POST` を新しく足したときは、registry に足さない限り read-only 中は断られる。
 - 操作の記録は PR #615 と同じく AppConfig の hosted version と deployment の description に残る。
   アプリの監査 log への自動保存は未実装のまま。
