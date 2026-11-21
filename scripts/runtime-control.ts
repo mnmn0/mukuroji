@@ -163,14 +163,18 @@ export interface RuntimeControlResult {
 
 /** Error for a request the script refuses, printed without a stack trace. */
 export class RuntimeControlError extends Error {
+  /** Reason recorded on the `failed` audit event. */
+  readonly failureReason: RuntimeControlFailureReason
+
   /**
    * Creates the error.
    *
    * @param message - Message printed to the operator.
    * @param failureReason - Reason recorded on the `failed` audit event.
    */
-  constructor(message: string, readonly failureReason: RuntimeControlFailureReason = 'error') {
+  constructor(message: string, failureReason: RuntimeControlFailureReason = 'error') {
     super(message)
+    this.failureReason = failureReason
   }
 }
 
