@@ -144,6 +144,14 @@ describe('Analytics report URL state', () => {
     })
   })
 
+  test('scopes the default filter to the viewer Teams when they are known', () => {
+    const now = new Date('2026-07-18T01:00:00.000Z')
+
+    expect(createDefaultAnalyticsFilter(now, 'UTC', ['team-b', 'team-a', 'team-b']).teamIds)
+      .toEqual(['team-a', 'team-b'])
+    expect('teamIds' in createDefaultAnalyticsFilter(now, 'UTC', [])).toBe(false)
+  })
+
   test('uses the previous local day for a negative-offset timezone near UTC midnight', () => {
     const filter = createDefaultAnalyticsFilter(
       new Date('2026-07-18T01:00:00.000Z'),
