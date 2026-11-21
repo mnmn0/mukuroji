@@ -62,6 +62,14 @@ export interface RuntimeControlTarget {
   readonly canaryDeploymentStrategyId: string
   /** Canonical Web URL; `/api/ready` is reached through it. */
   readonly webUrl: string
+  /** Where the switch's audit events go, or why the stack outputs cannot say. */
+  readonly auditLog: RuntimeControlAuditLog | { readonly problem: string }
+}
+
+/**
+ * Stack outputs that locate the Workspace audit log and its governance.
+ */
+interface RuntimeControlAuditLog {
   /** Workspace audit table, Workspace ID, and the stack's default retention for the switch's audit events. */
   readonly audit: RuntimeControlAuditTarget
   /** Tenant administration table that holds the Workspace governance (retention and legal hold). */
@@ -432,19 +440,25 @@ async function readTarget(
     if (!value) throw new RuntimeControlError(`Stack ${stackName} has no ${key} output. Deploy the stack first.`)
     return value
   }
+  const auditKeys = ['AuditEventsTableName', 'WorkspaceDirectoryId', 'TenantAdministrationTableName']
+  const missingAuditKeys = auditKeys.filter((key) => !outputs.get(key))
   return {
     applicationId: required('RuntimeControlApplicationId'),
     environmentId: required('RuntimeControlEnvironmentId'),
     configurationProfileId: required('RuntimeControlConfigurationProfileId'),
     canaryDeploymentStrategyId: required('RuntimeControlCanaryDeploymentStrategyId'),
     webUrl: required('WebUrl').replace(/\/+$/, ''),
-    audit: {
-      tableName: required('AuditEventsTableName'),
-      workspaceId: required('WorkspaceDirectoryId'),
-      retentionDays: readRetentionDays(parameters.get('AuditRetentionDays')),
-      legalHold: false,
-    },
-    tenantAdministrationTableName: required('TenantAdministrationTableName'),
+    auditLog: missingAuditKeys.length > 0
+      ? { problem: `Stack ${stackName} has no ${missingAuditKeys.join(', ')} output for the audit log. Deploy the stack first.` }
+      : {
+          audit: {
+            tableName: required('AuditEventsTableName'),
+            workspaceId: required('WorkspaceDirectoryId'),
+            retentionDays: readRetentionDays(parameters.get('AuditRetentionDays')),
+            legalHold: false,
+          },
+          tenantAdministrationTableName: required('TenantAdministrationTableName'),
+        },
   }
 }
 
@@ -563,7 +577,16 @@ export async function runRuntimeControl(
     callerArn: caller,
     gitHubRun: dependencies.gitHubRun,
   }
-  let audit = target.audit
+  const auditLog = target.auditLog
+  if (!('audit' in auditLog)) {
+    // A stop must not wait for the audit log: the incident may be the reason to stop.
+    if (request.mode !== 'disabled') {
+      throw new RuntimeControlError(`${auditLog.problem}\nNothing was changed. Fix the audit write and run the command again.`)
+    }
+    log(`Warning: ${auditLog.problem}\nContinuing without audit events because this is a stop; record the switch in the change record.`)
+    return await applyRuntimeControl(request, target, appconfig, caller, revision, {}, dependencies, timing)
+  }
+  let audit = auditLog.audit
   /**
    * Writes one step of this switch to the audit log with the current retention.
    *
@@ -580,11 +603,11 @@ export async function runRuntimeControl(
    */
   const currentRetention = async (): Promise<RuntimeControlAuditTarget> => {
     try {
-      return await readWorkspaceRetention(target, region, dependencies)
+      return await readWorkspaceRetention(auditLog, region, dependencies)
     } catch (error) {
       if (!(error instanceof RuntimeControlError)) throw error
       log(`Warning: ${error.message}\nWriting the end event without a TTL.`)
-      return { ...target.audit, legalHold: true }
+      return { ...auditLog.audit, legalHold: true }
     }
   }
   /**
@@ -599,7 +622,7 @@ export async function runRuntimeControl(
   }
 
   try {
-    audit = await readWorkspaceRetention(target, region, dependencies)
+    audit = await readWorkspaceRetention(auditLog, region, dependencies)
     await record({ phase: 'started', occurredAt: dependencies.now() })
   } catch (error) {
     if (!(error instanceof RuntimeControlError)) throw error
@@ -631,22 +654,22 @@ export async function runRuntimeControl(
 /**
  * Reads the Workspace governance so the events get the tenant retention and legal hold.
  *
- * @param target - Stack outputs.
+ * @param auditLog - Audit table and governance locations from the stack outputs.
  * @param region - AWS region.
  * @param dependencies - Side effects.
  * @returns The audit target with the Workspace retention applied.
  * @throws RuntimeControlError when the governance record cannot be read.
  */
 async function readWorkspaceRetention(
-  target: RuntimeControlTarget,
+  auditLog: RuntimeControlAuditLog,
   region: string,
   dependencies: RuntimeControlDependencies,
 ): Promise<RuntimeControlAuditTarget> {
   try {
     const output = await dependencies.aws(
-      buildGovernanceGetItemArguments(target.tenantAdministrationTableName, region, target.audit.workspaceId),
+      buildGovernanceGetItemArguments(auditLog.tenantAdministrationTableName, region, auditLog.audit.workspaceId),
     )
-    return { ...target.audit, ...readGovernanceRetention(output, target.audit.retentionDays) }
+    return { ...auditLog.audit, ...readGovernanceRetention(output, auditLog.audit.retentionDays) }
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     throw new RuntimeControlError(`Could not read the Workspace audit retention: ${reason}`)

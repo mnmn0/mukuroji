@@ -96,6 +96,12 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
   const readyStatuses = [...(options.readyStatuses ?? [200])]
   const maintenanceStates = options.maintenanceStates === undefined ? undefined : [...options.maintenanceStates]
   let clock = Date.parse('2026-11-20T06:00:00.000Z')
+  /**
+   * Answers one `aws` CLI call like the fake account would.
+   *
+   * @param args - CLI arguments after `aws`.
+   * @returns The parsed JSON the CLI would print.
+   */
   const answer = (args: readonly string[]): unknown => {
     const command = `${args[0]} ${args[1]}`
     switch (command) {
@@ -436,6 +442,19 @@ describe('audit log records', () => {
     expect(readDocumentMode('{"mode":"read-only","revision":3}')).toBe('read-only')
     expect(readDocumentMode('{"mode":"paused"}')).toBeUndefined()
     expect(readDocumentMode('nope')).toBeUndefined()
+  })
+
+  test('still stops without the audit outputs, and warns', async () => {
+    const fake = fakeDependencies({ readyStatuses: [503] })
+    const original = fake.dependencies.aws
+    const aws: RuntimeControlDependencies['aws'] = async (args) =>
+      args[1] === 'describe-stacks'
+        ? JSON.stringify({ Outputs: stackOutputs.filter((output) => output.OutputKey !== 'TenantAdministrationTableName') })
+        : await original(args)
+    await runRuntimeControl({ mode: 'disabled', allAtOnce: true }, 'r', 'Mukuroji', { ...fake.dependencies, aws }, timing)
+    expect(fake.calls.some((call) => call[1] === 'create-hosted-configuration-version')).toBe(true)
+    expect(fake.auditItems).toHaveLength(0)
+    expect(fake.lines.some((line) => line.includes('has no TenantAdministrationTableName output'))).toBe(true)
   })
 
   test('refuses a stack without the audit outputs before changing anything', async () => {

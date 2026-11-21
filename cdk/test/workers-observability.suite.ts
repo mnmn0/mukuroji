@@ -1188,21 +1188,41 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
 });
 
 test('audit stream consumers skip the operator runtime-control switch events', () => {
-  const resources = synthesizedTemplate.toJSON().Resources as Record<string, { Type?: string; Properties?: Record<string, unknown> }>;
-  const auditMappings = Object.values(resources).filter((resource) =>
+  const resources: unknown = synthesizedTemplate.toJSON().Resources;
+  if (!isRecord(resources)) throw new Error('The synthesized template has no Resources object.');
+  const auditMappings = Object.values(resources).filter((resource): resource is Record<string, unknown> =>
+    isRecord(resource) &&
     resource.Type === 'AWS::Lambda::EventSourceMapping' &&
-    JSON.stringify(resource.Properties?.EventSourceArn).includes('AuditEventsTable0723963E')
+    isRecord(resource.Properties) &&
+    JSON.stringify(resource.Properties.EventSourceArn).includes('AuditEventsTable0723963E')
   );
   // The audit projection and the automation worker are the two AuditEvents stream readers.
   expect(auditMappings).toHaveLength(2);
   for (const mapping of auditMappings) {
-    const filters = (mapping.Properties?.FilterCriteria as { Filters?: { Pattern?: string }[] } | undefined)?.Filters ?? [];
-    expect(filters.map((filter) => JSON.parse(filter.Pattern ?? '{}'))).toEqual([
+    const properties = mapping.Properties;
+    const criteria = isRecord(properties) ? properties.FilterCriteria : undefined;
+    const filters = isRecord(criteria) ? criteria.Filters : undefined;
+    if (!Array.isArray(filters)) throw new Error('An AuditEvents mapping has no FilterCriteria.Filters array.');
+    const patterns = filters.map((filter: unknown) => {
+      if (!isRecord(filter) || typeof filter.Pattern !== 'string') throw new Error('A filter has no Pattern string.');
+      return JSON.parse(filter.Pattern);
+    });
+    expect(patterns).toEqual([
       { dynamodb: { NewImage: { entityType: { S: [{ 'anything-but': ['runtime-control'] }] } } } },
-      { dynamodb: { NewImage: { entityType: [{ exists: false }] } } },
+      { dynamodb: { NewImage: { entityType: { S: [{ exists: false }] } } } },
     ]);
   }
 });
+
+/**
+ * Narrows a synthesized template value to a plain object.
+ *
+ * @param value - Any value read from the template JSON.
+ * @returns Whether the value is a non-null, non-array object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 test('audit Webhook projection and SQS delivery are durable encrypted and observable', () => {
   const template = synthesizedTemplate;

@@ -113,12 +113,30 @@ export interface RuntimeControlAuditStep {
 
 /** DynamoDB attribute value in the JSON shape that `aws dynamodb put-item --item` reads. */
 type DynamoDbAttributeValue =
-  | { readonly NULL: true }
-  | { readonly BOOL: boolean }
-  | { readonly N: string }
-  | { readonly S: string }
-  | { readonly L: readonly DynamoDbAttributeValue[] }
-  | { readonly M: Readonly<Record<string, DynamoDbAttributeValue>> }
+  | {
+    /** Null value. */
+    readonly NULL: true
+  }
+  | {
+    /** Boolean value. */
+    readonly BOOL: boolean
+  }
+  | {
+    /** Number, as its decimal string. */
+    readonly N: string
+  }
+  | {
+    /** String value. */
+    readonly S: string
+  }
+  | {
+    /** List of values. */
+    readonly L: readonly DynamoDbAttributeValue[]
+  }
+  | {
+    /** Map of named values. */
+    readonly M: Readonly<Record<string, DynamoDbAttributeValue>>
+  }
 
 /**
  * Reads the GitHub Actions run from the environment.
