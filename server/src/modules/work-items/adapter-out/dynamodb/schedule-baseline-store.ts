@@ -147,6 +147,37 @@ export class DynamoDbProjectScheduleBaselineStore implements ProjectScheduleBase
   }
 
   /**
+   * Builds a transaction check that the active baseline is still the one a caller read, so a
+   * change measured against it cannot commit after the baseline was captured or switched.
+   *
+   * @param workspaceId - Workspace directory ID.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project whose baseline was read.
+   * @param revision - Revision that was read, or `null` when no baseline was stored.
+   * @returns The ConditionCheck item.
+   */
+  createActiveRevisionConditionCheck(
+    workspaceId: string,
+    teamId: string,
+    projectId: string,
+    revision: number | null,
+  ): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+    const Key = { workspaceId, recordKey: recordKey(teamId, projectId) }
+    if (revision === null) {
+      return { ConditionCheck: { TableName: this.tableName, Key, ConditionExpression: 'attribute_not_exists(recordKey)' } }
+    }
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key,
+        ConditionExpression: '#revision = :revision AND #type = :type',
+        ExpressionAttributeNames: { '#revision': 'revision', '#type': 'entryType' },
+        ExpressionAttributeValues: { ':revision': revision, ':type': ENTRY_TYPE },
+      },
+    }
+  }
+
+  /**
    * Replaces the active baseline with a compare-and-set on its revision, and stores, in the same
    * transaction, the new saved rows, the deletions of dropped saved rows, the caller's
    * authorization fences, and the audit event.

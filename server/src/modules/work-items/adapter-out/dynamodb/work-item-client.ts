@@ -200,6 +200,33 @@ export type WorkItemAuthorizationSnapshot = {
   enterpriseControlRevision?: number
 }
 
+/** Result of measuring one Work Item change against its Project's active schedule baseline. */
+type WorkItemBaselineSlipRead = {
+  /** Slip to record on the audit event, when the change moved the item further behind. */
+  slip?: WorkItemBaselineSlipChange
+  /** Check that the active baseline the slip was measured against is unchanged at commit. */
+  fence?: {
+    /** Team and Project the check guards, so one transaction adds it once. */
+    key: string
+    /** ConditionCheck on the active baseline row. */
+    transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+  }
+}
+
+/**
+ * Creates the error reported when a Project's active baseline changed while a Work Item edit was
+ * measured against it.
+ *
+ * @returns Retryable conflict error.
+ */
+function createScheduleBaselineChangedConflictError() {
+  return new ProjectDataError(
+    409,
+    'ScheduleBaselineChanged',
+    'The Project schedule baseline changed during the update. Reload and try again.',
+  )
+}
+
 /** Source-of-truth row converted only inside the DynamoDB adapter. */
 type WorkItemAuthorizationGenerationGuard = {
   /** Stable semantic purpose used to classify transaction cancellations safely. */
@@ -1614,7 +1641,10 @@ export class DynamoDbTeamIssuesClient {
    * @param after - Work Item the change writes.
    * @param baselineReads - Reads shared by the Work Items of one cascade, keyed by Team and Project,
    *   so a cascade reads each Project's baseline once.
-   * @returns The slip to record on the audit event, or `undefined` when there is none.
+   * @returns The slip to record on the audit event, or `undefined` when there is none, and, when
+   *   the baseline was read, a check that keeps the transaction from committing after the active
+   *   baseline was captured or switched. The check is keyed by Team and Project so a cascade adds
+   *   it once per Project.
    */
   private async readWorkItemBaselineSlip(
     directoryId: string,
@@ -1623,9 +1653,9 @@ export class DynamoDbTeamIssuesClient {
     before: TeamIssueItem,
     after: TeamIssueItem,
     baselineReads: Map<string, Promise<ActiveProjectScheduleBaseline | null>> = new Map(),
-  ): Promise<WorkItemBaselineSlipChange | undefined> {
+  ): Promise<WorkItemBaselineSlipRead> {
     const projectId = after.assignedProjectId
-    if (!this.planningTableName || !projectId || after.archivedAt) return undefined
+    if (!this.planningTableName || !projectId || after.archivedAt) return {}
     // Only a reopen changes the measured end among status changes: a completed or canceled item
     // is measured by its actual end, while moves between open statuses keep the planned end.
     const reopened = (before.statusCategory === 'completed' || before.statusCategory === 'canceled') &&
@@ -1634,12 +1664,12 @@ export class DynamoDbTeamIssuesClient {
       workItemSchedulesEqual(before.schedule, after.schedule) &&
       before.assignedProjectId === projectId &&
       !reopened
-    ) return undefined
+    ) return {}
     const readKey = `${teamId}\0${projectId}`
+    const store = new DynamoDbProjectScheduleBaselineStore(this.planningTableName, this.documentClient)
     let read = baselineReads.get(readKey)
     if (!read) {
-      read = new DynamoDbProjectScheduleBaselineStore(this.planningTableName, this.documentClient)
-        .get(directoryId, teamId, projectId)
+      read = store.get(directoryId, teamId, projectId)
       baselineReads.set(readKey, read)
     }
     let baseline
@@ -1650,13 +1680,24 @@ export class DynamoDbTeamIssuesClient {
       // the edit closed instead of silently losing the slip.
       if (!(error instanceof ProjectDataError) || error.code !== 'ScheduleBaselineRetryable') throw error
       console.warn('Work Item baseline slip could not be measured:', error)
-      return undefined
+      return {}
+    }
+    // The check covers a missing baseline and an item outside it too: a baseline captured in the
+    // meantime could include the item and change what this edit should report.
+    const fence = {
+      key: readKey,
+      transactWriteItem: store.createActiveRevisionConditionCheck(
+        directoryId,
+        teamId,
+        projectId,
+        baseline?.revision ?? null,
+      ),
     }
     const entry = baseline?.entries.find((candidate) => candidate.workItemId === issueId)
-    if (!baseline || !entry) return undefined
+    if (!baseline || !entry) return { fence }
     // Moving in from another Project has no comparable "before" against this baseline.
     const comparableBefore = before.assignedProjectId === projectId ? before : undefined
-    return deriveWorkItemBaselineSlipChange(baseline.revision, entry, comparableBefore, after)
+    return { slip: deriveWorkItemBaselineSlipChange(baseline.revision, entry, comparableBefore, after), fence }
   }
 
   /**
@@ -2673,7 +2714,7 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue schedule was updated by a dependency cascade.',
         createdAt: occurredAt,
       })
-      const baselineSlip = await this.readWorkItemBaselineSlip(
+      const { slip: baselineSlip, fence: baselineFence } = await this.readWorkItemBaselineSlip(
         directoryId,
         update.teamId,
         update.workItemId,
@@ -2718,6 +2759,7 @@ export class DynamoDbTeamIssuesClient {
         auditPut,
         dueDateChanged,
         notificationSchedule,
+        baselineFence,
       }
     }))
     const authorizationConditionEntries = createAuthorizationSnapshotConditionEntries(
@@ -2837,6 +2879,12 @@ export class DynamoDbTeamIssuesClient {
     transactItems.push(...relationGraphConditionChecks)
     const authorizationConditionStartIndex = transactItems.length
     transactItems.push(...authorizationConditionChecks)
+    const baselineFenceStartIndex = transactItems.length
+    const baselineFences = new Map<string, NonNullable<TransactWriteCommandInput['TransactItems']>[number]>()
+    for (const entry of prepared) {
+      if (entry.baselineFence) baselineFences.set(entry.baselineFence.key, entry.baselineFence.transactWriteItem)
+    }
+    transactItems.push(...baselineFences.values())
     if (idempotencyCompletion) {
       transactItems.push(idempotencyCompletion.transactWriteItem)
     }
@@ -2879,6 +2927,11 @@ export class DynamoDbTeamIssuesClient {
           'WorkItemRelationGraphConflict',
           'Work Item relations changed. Reload and try again.',
         )
+      }
+      if ([...baselineFences.keys()].some((_, index) =>
+        isTransactionConditionalFailureAt(error, baselineFenceStartIndex + index)
+      )) {
+        throw createScheduleBaselineChangedConflictError()
       }
       if (hasTransactionConditionalFailure(error)) {
         throw new ProjectDataError(
@@ -2927,6 +2980,7 @@ export class DynamoDbTeamIssuesClient {
     const configurationConditionChecks = input.configurationConditionChecks ?? []
     const agentRunTransactItems = input.agentRunTransactItems ?? []
     let agentRunFenceStartIndex: number | undefined
+    let baselineFence: WorkItemBaselineSlipRead['fence']
     const authorizationConditionEntries = mergeAuthorizationConditionEntries(
       createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
       [
@@ -3258,13 +3312,15 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was updated.',
         createdAt: expressionAttributeValues[':updatedAt'] as string,
       })
-      const baselineSlip = await this.readWorkItemBaselineSlip(
+      const baselineRead = await this.readWorkItemBaselineSlip(
         directoryId,
         teamId,
         issueId,
         beforeIssue,
         afterIssue,
       )
+      const baselineSlip = baselineRead.slip
+      baselineFence = baselineRead.fence
       auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.updated',
@@ -3360,6 +3416,7 @@ export class DynamoDbTeamIssuesClient {
               : []),
             ...(planningRevisionMutation ? [planningRevisionMutation] : []),
             ...agentRunTransactItems,
+            ...(baselineFence ? [baselineFence.transactWriteItem] : []),
           ],
         }),
       )
@@ -3379,6 +3436,13 @@ export class DynamoDbTeamIssuesClient {
         )
       ) {
         throw createAgentRunFenceConflictError()
+      }
+      if (
+        baselineFence &&
+        fenceStartIndex !== undefined &&
+        isTransactionConditionalFailureAt(error, fenceStartIndex + agentRunTransactItems.length)
+      ) {
+        throw createScheduleBaselineChangedConflictError()
       }
 
       const cancellationReasonsMissing =

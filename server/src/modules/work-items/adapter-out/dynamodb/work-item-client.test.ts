@@ -3669,9 +3669,16 @@ test('DynamoDB Work Item schedule cascade writes one bounded transaction with un
 
       expect(transactions).toHaveLength(1)
       const transactItems = transactions[0] ?? []
-      expect(transactItems).toHaveLength(auditEnabled ? 13 : 11)
+      // Two Projects without a baseline add one absence check each.
+      expect(transactItems).toHaveLength(auditEnabled ? 15 : 13)
       expect(transactItems.filter((item) => item.Update?.TableName === 'IssuesTable'))
         .toHaveLength(2)
+      expect(transactItems.filter((item) =>
+        String(item.ConditionCheck?.Key?.recordKey).startsWith('PROJECT_SCHEDULE_BASELINE#')
+      ).map((item) => item.ConditionCheck?.ConditionExpression)).toEqual([
+        'attribute_not_exists(recordKey)',
+        'attribute_not_exists(recordKey)',
+      ])
       // The cascade moves each open Work Item to its new deadline in the notification index.
       expect(transactItems.find((item) => item.Update?.Key?.issueId === 'root')?.Update)
         .toMatchObject({

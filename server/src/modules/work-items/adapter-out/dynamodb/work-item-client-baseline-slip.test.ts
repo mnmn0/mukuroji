@@ -94,11 +94,14 @@ async function storedBaselineRow(entries: ProjectScheduleBaselineEntry[]) {
  *
  * @param stored - Work Item row, or rows, returned by Work Item reads with a matching ID.
  * @param baselineRow - Active baseline row, or `'throttled'` to fail its read.
+ * @param failBaselineFence - Cancels each transaction on its active-baseline check, as if the
+ *   baseline changed after it was read.
  * @returns The client, the transactions it sent, and the count of baseline reads.
  */
 function createClient(
   stored: Record<string, unknown> | Array<Record<string, unknown>>,
   baselineRow?: Record<string, unknown> | 'throttled',
+  failBaselineFence = false,
 ) {
   const rows = Array.isArray(stored) ? stored : [stored]
   const transactions: TransactWriteCommand['input'][] = []
@@ -117,7 +120,17 @@ function createClient(
         }
         return { Item: rows.find((row) => row.issueId === command.input.Key?.issueId) }
       }
-      if (command instanceof TransactWriteCommand) transactions.push(command.input)
+      if (command instanceof TransactWriteCommand) {
+        transactions.push(command.input)
+        if (failBaselineFence) {
+          throw Object.assign(new Error('cancelled'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: (command.input.TransactItems ?? []).map((item) => ({
+              Code: readBaselineFence({ TransactItems: [item] }) ? 'ConditionalCheckFailed' : 'None',
+            })),
+          })
+        }
+      }
       return { Items: [] }
     },
   })
@@ -164,6 +177,31 @@ function readAudit(transaction: TransactWriteCommand['input'] | undefined) {
     baselineSlip: Reflect.get(metadata, 'baselineSlip'),
     candidates: Reflect.get(metadata, 'notificationCandidates'),
   }
+}
+
+/**
+ * Lists the active-baseline checks of a transaction.
+ *
+ * @param transaction - Sent transaction input.
+ * @returns The ConditionCheck items on active baseline rows.
+ */
+function readBaselineFences(transaction: TransactWriteCommand['input'] | undefined) {
+  return (transaction?.TransactItems ?? []).flatMap((item) =>
+    item.ConditionCheck?.TableName === PLANNING_TABLE &&
+      String(item.ConditionCheck.Key?.recordKey).startsWith('PROJECT_SCHEDULE_BASELINE#')
+      ? [item.ConditionCheck]
+      : []
+  )
+}
+
+/**
+ * Reads the only active-baseline check of a transaction.
+ *
+ * @param transaction - Sent transaction input.
+ * @returns The check, or undefined when there is none.
+ */
+function readBaselineFence(transaction: TransactWriteCommand['input'] | undefined) {
+  return readBaselineFences(transaction)[0]
 }
 
 /**
@@ -323,4 +361,51 @@ test('fails the edit closed when the stored baseline row is corrupt', async () =
 
   expect(error).toMatchObject({ code: 'ScheduleBaselineCorruptState' })
   expect(transactions).toHaveLength(0)
+})
+
+test('commits the edit only while the active baseline it was measured against is unchanged', async () => {
+  const baselineRow = await storedBaselineRow([{ workItemId: 'wireframe', endDate: '2026-06-01' }])
+  const measured = createClient(storedIssue(), baselineRow)
+  await moveDeadline(measured.client, '2026-06-05')
+  expect(readBaselineFence(measured.transactions[0])).toMatchObject({
+    Key: { workspaceId: 'workspace-1', recordKey: 'PROJECT_SCHEDULE_BASELINE#core-team#launch' },
+    ExpressionAttributeValues: { ':revision': 1 },
+  })
+
+  // A baseline captured after an empty read could include the item, so its absence is checked too.
+  const empty = createClient(storedIssue())
+  await moveDeadline(empty.client, '2026-06-05')
+  expect(readBaselineFence(empty.transactions[0])?.ConditionExpression).toBe('attribute_not_exists(recordKey)')
+
+  const titleOnly = createClient(storedIssue(), baselineRow)
+  await titleOnly.client.updateTeamIssue(
+    'workspace-1', 'core-team', 'wireframe',
+    { title: 'Wireframe v2', expectedRevision: 1 },
+    'demo@example.com', auditContext(),
+  )
+  expect(readBaselineFence(titleOnly.transactions[0])).toBeUndefined()
+
+  const switched = createClient(storedIssue(), baselineRow, true)
+  expect(await moveDeadline(switched.client, '2026-06-05').catch((error: unknown) => error))
+    .toMatchObject({ status: 409, code: 'ScheduleBaselineChanged' })
+})
+
+test('checks each Project baseline once in a cascade and reports a switch as a conflict', async () => {
+  const baselineRow = await storedBaselineRow([{ workItemId: 'wireframe', endDate: '2026-06-01' }])
+  const stored = [
+    storedIssue(),
+    storedIssue({ issueId: 'review', title: 'Review' }),
+  ]
+  const updates = [
+    { teamId: 'core-team', workItemId: 'wireframe', expectedRevision: 1, schedule: createDefaultDueDateWorkItemSchedule('2026-06-05') },
+    { teamId: 'core-team', workItemId: 'review', expectedRevision: 1, schedule: createDefaultDueDateWorkItemSchedule('2026-06-05') },
+  ]
+  const cascade = createClient(stored, baselineRow)
+  await cascade.client.updateTeamIssueSchedules('workspace-1', updates, [], 'demo@example.com', auditContext())
+  expect(readBaselineFences(cascade.transactions[0])).toHaveLength(1)
+
+  const switched = createClient(stored, baselineRow, true)
+  expect(await switched.client.updateTeamIssueSchedules('workspace-1', updates, [], 'demo@example.com', auditContext())
+    .catch((error: unknown) => error))
+    .toMatchObject({ status: 409, code: 'ScheduleBaselineChanged' })
 })
