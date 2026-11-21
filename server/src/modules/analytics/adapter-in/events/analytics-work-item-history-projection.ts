@@ -1,3 +1,4 @@
+import { randomInt } from 'node:crypto'
 import { normalizeAuditEvent, type AuditEventV1 } from '../../../audit'
 import type {
   BatchResponse,
@@ -155,13 +156,14 @@ async function buildNextRow(
       current.row.overflowExpiresAt <= nowEpochSeconds
     ? undefined
     : current.row
-  // A new row starts its version at the current time in milliseconds, so a row deleted and
-  // written again never repeats a version that a slower writer read before the delete.
+  // A new row starts its version at the current time in milliseconds times 1,000 plus a random
+  // part, so a row deleted and written again does not repeat a version that a slower writer read
+  // before the delete, even when two workers' clocks show the same millisecond.
   const base = currentRow ?? {
     ...createEmptyAnalyticsWorkItemHistoryRow(key),
     rowVersion: current.row?.rowVersion ??
       current.storedRowVersion ??
-      (dependencies.now?.() ?? new Date()).getTime(),
+      (dependencies.now?.() ?? new Date()).getTime() * 1_000 + randomInt(1_000),
   }
   const startsHistory = inserted && entry.metadata?.afterRevision === 1
   const rebuild = currentRow

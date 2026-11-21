@@ -1006,7 +1006,9 @@ describe('Analytics work item history rows', () => {
       { store, readWorkItemTimeline: createTimeline([]).readWorkItemTimeline, now: () => new Date(now * 1000) },
     )
     const row = (await store.getRow({ workspaceId, teamId: 'core', workItemId: 'versioned' })).row
-    expect(row?.rowVersion).toBe(now * 1000 + 1)
+    expect(row?.rowVersion).toBeGreaterThan(now * 1_000_000)
+    expect(row?.rowVersion).toBeLessThanOrEqual(now * 1_000_000 + 1_000)
+    expect(Number.isSafeInteger(row?.rowVersion)).toBe(true)
   })
 
   test('replaces a malformed row only while it is still the item that was read', async () => {
