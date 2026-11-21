@@ -1,6 +1,6 @@
 import type {
   DataMigrationCheckpoint,
-  DataMigrationDefinition,
+  DataMigrationTransformDefinition,
   DataMigrationRow,
   DataMigrationRunRecord,
 } from '../domain/data-migration'
@@ -18,8 +18,8 @@ import type {
  * @returns The definition.
  */
 export function createTaskEstimateMigration(
-  overrides: Partial<DataMigrationDefinition> = {},
-): DataMigrationDefinition {
+  overrides: Partial<DataMigrationTransformDefinition> = {},
+): DataMigrationTransformDefinition {
   return {
     id: '0001-task-estimate-points',
     description: 'Store task estimates as points.',
@@ -119,6 +119,19 @@ export function createMemoryRowStore(
         return 'condition-failed'
       }
       rows.set(key, { ...row })
+      return 'replaced'
+    },
+    writeDerivedRows: async ({ definition, sourceKey, expectedRevision, rows: derivedRows }) => {
+      store.replaceCalls += 1
+      const stored = rows.get(`${String(sourceKey.pk)}|${String(sourceKey.sk)}`)
+      if (
+        stored === undefined ||
+        (store.beforeReplace !== undefined && !store.beforeReplace(stored)) ||
+        (definition.revisionAttribute !== undefined && stored[definition.revisionAttribute] !== expectedRevision)
+      ) {
+        return 'condition-failed'
+      }
+      for (const row of derivedRows) rows.set(`${String(row.pk)}|${String(row.sk)}`, { ...row })
       return 'replaced'
     },
   }

@@ -6,8 +6,9 @@
 [ADR 0031](adr/0031-data-migration-lambda-and-operator-proof.md)（AWS 上の実行と実行者の検証）にあります。
 
 この文書が定めるのは「1 つの table の、1 つの entity の row を、schema version `N` から `N + 1` へ
-移す」migration です。table の新設・key 設計の変更・別 table への copy は対象外で、それぞれ ADR を伴う
-個別の変更として扱います。
+移す」migration と、同じ table に「元の row から決まる row（index row など）を作る」`derive` migration
+（[ADR 0038](adr/0038-focus-member-work-item-index.md)）です。table の新設・key 設計の変更・別 table への copy は
+対象外で、それぞれ ADR を伴う個別の変更として扱います。
 
 ## 構成
 
@@ -88,6 +89,31 @@ row は conditional put で置き換えます。条件は「key が存在し、`
 - `migrated` になっていれば `alreadyMigrated` として数える
 - まだ `pending` なら読み直した row から transform し直す（最大 3 回、超えたら `WRITE_CONFLICT`）
 - それ以外なら `UNKNOWN_ROW`
+
+### 派生 row の作成（`kind: 'derive'`）
+
+`derive` の定義は `transform` の代わりに `derive(row)` を持ちます。
+
+- `classify` は元の row（source）を `pending`、それ以外（作った派生 row を含む）を `unrelated` にする。
+  `migrated` は使わない。
+- `derive(row)` は純粋・決定的に派生 row の一覧（最大 50 行）を返す。runner は各派生 row が key attribute を持ち、
+  元の row とも互いとも key が重ならず、`versionAttribute` が `toSchemaVersion` で、`classify` が `unrelated` を
+  返すことを確かめ、崩れたら `TRANSFORM_INVALID` で止まる。`fromSchemaVersion` は `0`（派生 row がまだない）にする。
+- 書き込みは 1 つの TransactWriteItems で、元の row の ConditionCheck（key があり、`revision-fenced` では revision が
+  読んだ値のまま）と派生 row の Put（同じ key の row は上書き）をまとめる。元の row を書き換えないので、元の row の
+  version は変わらない。条件が外れたときは元の row を読み直し、消えていれば `vanished`、まだ `pending` なら作り直す
+  （最大 3 回）。
+- 元の row は毎回 `pending` に見えるので、再開は checkpoint だけに頼る（完了した segment は読み直さない）。同じ
+  migration を最初から流し直しても、派生 row を同じ内容で上書きするだけになる。
+- verify は `pending` の row ごとに派生 row を強整合で読み、すべてが同じ内容で存在すれば `migratedRows`、欠けや
+  違いがあれば `pendingRows` に数える。
+- Lambda の role は allowlist の table に `dynamodb:ConditionCheckItem` も持つ。
+
+登録済みの `derive` migration:
+
+| id | table | 内容 |
+| --- | --- | --- |
+| `0001-work-item-member-index` | `work-items` | Work Item の責任者と Contributor ごとに Focus の index row を作る（ADR 0038）。Work Item の作成・更新・削除は同じ row を transaction で保つので、writer は止めない（`revision-fenced`） |
 
 ## Writer と dual-read
 

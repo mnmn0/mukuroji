@@ -217,8 +217,18 @@ describe('DynamoDB checkpoint store', () => {
     ['a missing counter', { counters: { scanned: 1 } }],
     ['an unknown row version', { schemaVersion: 1 }],
     ['no target table', { targetTable: '' }],
+    ['a negative source version', { fromSchemaVersion: -1, toSchemaVersion: 0 }],
+    ['a version step other than one', { fromSchemaVersion: 1, toSchemaVersion: 3 }],
   ])('rejects a stored checkpoint with %s', (_label, overrides) => {
     expect(() => parseDataMigrationCheckpoint({ ...checkpoint, schemaVersion: 2, ...overrides }, checkpoint.migrationId))
       .toThrow('CHECKPOINT_INVALID')
+  })
+
+  test('accepts the version 0 source of a derive migration', () => {
+    const stored = { ...checkpoint, schemaVersion: 2, fromSchemaVersion: 0, toSchemaVersion: 1 }
+    expect(parseDataMigrationCheckpoint(stored, checkpoint.migrationId)).toMatchObject({
+      fromSchemaVersion: 0,
+      toSchemaVersion: 1,
+    })
   })
 })

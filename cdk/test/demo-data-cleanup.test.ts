@@ -21,7 +21,7 @@ const initialOwnerEmail = 'owner@acme.test';
  */
 function seededItem(row: DemoDataRow): StoredDemoDataItem {
   const key = Object.fromEntries(Object.entries(row.key).map(([name, value]) => [name, { S: value }]));
-  return row.table === 'workItems'
+  return row.table === 'workItems' && row.entryType === undefined
     ? { ...key, revision: { N: '1' }, teamId: { S: 'core-team' }, assignedProjectId: { S: 'refero' } }
     : { ...key, entryType: { S: row.entryType ?? '' }, role: { S: 'member' } };
 }
@@ -42,7 +42,8 @@ describe('demo data cleanup', () => {
   test('lists every seeded member, Team, Project, Work Item, and owner grant once', () => {
     const count = (table: DemoDataRow['table']) => rows.filter((row) => row.table === table).length;
     expect(count('workspaceAccess')).toBe(5);
-    expect(count('workItems')).toBe(10);
+    // 10 canonical Work Items and the owner's member index row of each (ADR 0038).
+    expect(count('workItems')).toBe(20);
     // 7 Team and Project rows, 2 member rows and 4 grant rows, then 4 owner rows and 10 grant rows.
     expect(count('projectDirectory')).toBe(27);
     expect(new Set(rows.map((row) => createDemoDataRowId(row.table, row.key))).size).toBe(rows.length);
@@ -82,6 +83,18 @@ describe('demo data cleanup', () => {
     });
     expect(transactItems).toContainEqual({
       Delete: {
+        TableName: 'items',
+        Key: {
+          directoryTeamId: { S: `${workspaceId}#member-work-items#sato@example.com` },
+          issueId: { S: 'core-team#wireframe' },
+        },
+        ConditionExpression: '#entryType = :entryType',
+        ExpressionAttributeNames: { '#entryType': 'entryType' },
+        ExpressionAttributeValues: { ':entryType': { S: 'work-item-member-index' } },
+      },
+    });
+    expect(transactItems).toContainEqual({
+      Delete: {
         TableName: 'access',
         Key: { workspaceId: { S: workspaceId }, recordKey: { S: 'MEMBER#viewer@example.com' } },
         ConditionExpression: '#entryType = :entryType AND #role <> :owner',
@@ -96,7 +109,7 @@ describe('demo data cleanup', () => {
       entry.row.table === 'workItems' ? { row: entry.row, item: undefined } : entry
     );
     const plan = planDemoDataCleanup(observed, []);
-    expect(plan.missing).toHaveLength(10);
+    expect(plan.missing).toHaveLength(20);
     expect(plan.deletes.some((row) => row.table === 'workItems')).toBe(false);
     expect(plan.blockers).toEqual([]);
   });

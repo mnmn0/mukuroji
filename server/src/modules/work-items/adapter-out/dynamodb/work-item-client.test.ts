@@ -1322,7 +1322,11 @@ test('DynamoDB Work Item creation takes its ID from a new key and sorts after ar
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactionItems = (transaction?.input as TransactWriteCommandInput | undefined)
     ?.TransactItems
-  expect(transactionItems?.at(-1)).toEqual({
+  // The member index rows come last (ADR 0038), after the key reservation.
+  expect(transactionItems?.at(-1)).toMatchObject({
+    Put: { Item: { entryType: 'work-item-member-index', teamId: 'core-team', workItemId: 'ct-1' } },
+  })
+  expect(transactionItems?.at(-2)).toEqual({
     Put: {
       TableName: 'WorkItemsTable',
       Item: {
@@ -1820,10 +1824,13 @@ test('DynamoDB Work Item creation commits a deterministic Triage acceptance cont
       },
     },
   })
-  // The key reservation is appended after the caller's contribution.
-  expect(transactionItems?.at(-2)).toEqual(contribution)
-  expect(transactionItems?.at(-1)).toMatchObject({
+  // The key reservation is appended after the caller's contribution, then the member index rows.
+  expect(transactionItems?.at(-3)).toEqual(contribution)
+  expect(transactionItems?.at(-2)).toMatchObject({
     Put: { Item: { entryType: 'work-item-key', key: 'CT-1' } },
+  })
+  expect(transactionItems?.at(-1)).toMatchObject({
+    Put: { Item: { entryType: 'work-item-member-index' } },
   })
   expect(sentCommands.filter((command) =>
     command.name === 'TransactWriteCommand'
@@ -2657,8 +2664,12 @@ test('DynamoDB Work Item delete atomically stores its replay receipt', async () 
       },
     },
   })
-  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+  expect(Array.isArray(transactItems) ? transactItems.at(-2) : undefined).toMatchObject({
     Put: { TableName: 'DeveloperPlatformTable' },
+  })
+  // The deleted Work Item's member index row goes last (ADR 0038).
+  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+    Delete: { Key: { directoryTeamId: 'workspace-1#member-work-items#demo@example.com' } },
   })
   expect(preparedResponse).toEqual({ status: 204, body: null })
 })
@@ -2836,8 +2847,8 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
       'demo@example.com',
     )
 
-    // The trailing key reservation is covered by the creation tests.
-    expect(transactItems?.slice(2, -1)).toMatchObject([
+    // The trailing key reservation and member index row are covered by the creation tests.
+    expect(transactItems?.slice(2, -2)).toMatchObject([
       {
         ConditionCheck: expect.objectContaining({
           TableName: 'WorkspaceAccessTable',

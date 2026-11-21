@@ -2,6 +2,8 @@ import {
   assertValidDataMigrationDefinition,
   classifyDataMigrationRow,
   DATA_MIGRATION_MAX_PAGE_SIZE,
+  deriveDataMigrationRows,
+  extractDataMigrationRowKey,
   DataMigrationFailure,
   type DataMigrationDefinition,
   type DataMigrationFailureCode,
@@ -58,9 +60,9 @@ export type DataMigrationVerificationReport = {
   readonly completedPartitions: number
   /** Rows read. */
   readonly scanned: number
-  /** Rows still at `fromSchemaVersion`. */
+  /** Rows still at `fromSchemaVersion`; for `derive`, source rows missing a derived row. */
   readonly pendingRows: number
-  /** Rows at `toSchemaVersion`. */
+  /** Rows at `toSchemaVersion`; for `derive`, source rows whose derived rows are all stored. */
   readonly migratedRows: number
   /** Rows of other entities. */
   readonly unrelatedRows: number
@@ -125,7 +127,10 @@ export async function verifyDataMigration(
         for (const row of page.rows) {
           counts.scanned += 1
           const rowClass = classifyDataMigrationRow(input.definition, row)
-          if (rowClass === 'pending') counts.pendingRows += 1
+          if (rowClass === 'pending' && input.definition.kind === 'derive') {
+            if (await hasEveryDerivedRow(input, row)) counts.migratedRows += 1
+            else counts.pendingRows += 1
+          } else if (rowClass === 'pending') counts.pendingRows += 1
           else if (rowClass === 'migrated') counts.migratedRows += 1
           else if (rowClass === 'unrelated') counts.unrelatedRows += 1
           else counts.unknownRows += 1
@@ -155,6 +160,41 @@ export async function verifyDataMigration(
     completedPartitions,
     ...counts,
   }
+}
+
+/**
+ * Tells whether every row a source row derives is stored with the derived content.
+ *
+ * @param input - Verification input with a `derive` definition.
+ * @param row - Source row classified as `pending`.
+ * @returns Whether no derived row is missing or different.
+ */
+async function hasEveryDerivedRow(
+  input: VerifyDataMigrationInput,
+  row: Readonly<Record<string, unknown>>,
+): Promise<boolean> {
+  for (const derived of deriveDataMigrationRows(input.definition, row)) {
+    const stored = await input.rowStore.getRow(extractDataMigrationRowKey(input.definition, derived))
+    if (stored === undefined || !hasSameAttributes(stored, derived)) return false
+  }
+  return true
+}
+
+/**
+ * Compares two rows attribute by attribute through their JSON form.
+ *
+ * @param left - First row.
+ * @param right - Second row.
+ * @returns Whether both rows have the same attributes and values.
+ */
+function hasSameAttributes(
+  left: Readonly<Record<string, unknown>>,
+  right: Readonly<Record<string, unknown>>,
+): boolean {
+  const leftKeys = Object.keys(left).sort()
+  const rightKeys = Object.keys(right).sort()
+  return JSON.stringify(leftKeys) === JSON.stringify(rightKeys) &&
+    leftKeys.every((key) => JSON.stringify(left[key]) === JSON.stringify(right[key]))
 }
 
 /**

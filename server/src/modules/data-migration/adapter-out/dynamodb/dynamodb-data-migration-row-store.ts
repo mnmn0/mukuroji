@@ -2,6 +2,7 @@ import {
   GetCommand,
   PutCommand,
   ScanCommand,
+  TransactWriteCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import {
@@ -112,7 +113,61 @@ export function createDynamoDbDataMigrationRowStore(
         throw new DataMigrationFailure('UPSTREAM_FAILURE', error)
       }
     },
+    writeDerivedRows: async ({ definition, sourceKey, expectedRevision, rows }): Promise<DataMigrationReplaceOutcome> => {
+      const names: Record<string, string> = {}
+      const values: Record<string, unknown> = {}
+      const conditions: string[] = []
+      for (const [index, keyAttribute] of definition.keyAttributes.entries()) {
+        names[`#key${index}`] = keyAttribute
+        conditions.push(`attribute_exists(#key${index})`)
+      }
+      if (definition.revisionAttribute !== undefined) {
+        names['#revision'] = definition.revisionAttribute
+        if (expectedRevision === undefined) {
+          conditions.push('attribute_not_exists(#revision)')
+        } else {
+          values[':expectedRevision'] = expectedRevision
+          conditions.push('#revision = :expectedRevision')
+        }
+      }
+      try {
+        await documentClient.send(new TransactWriteCommand({
+          TransactItems: [
+            {
+              ConditionCheck: {
+                TableName: tableName,
+                Key: { ...sourceKey },
+                ConditionExpression: conditions.join(' AND '),
+                ExpressionAttributeNames: names,
+                ...(Object.keys(values).length === 0 ? {} : { ExpressionAttributeValues: values }),
+              },
+            },
+            ...rows.map((row) => ({ Put: { TableName: tableName, Item: { ...row } } })),
+          ],
+        }))
+        return 'replaced'
+      } catch (error: unknown) {
+        if (isSourceConditionFailure(error)) return 'condition-failed'
+        throw new DataMigrationFailure('UPSTREAM_FAILURE', error)
+      }
+    },
   }
+}
+
+/**
+ * Detects a transaction cancelled because the source row condition failed.
+ *
+ * @param error - Thrown value.
+ * @returns Whether the first action of the transaction failed its condition.
+ */
+function isSourceConditionFailure(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('name' in error)) return false
+  if (error.name !== 'TransactionCanceledException') return false
+  const reasons: unknown = 'CancellationReasons' in error ? error.CancellationReasons : undefined
+  if (!Array.isArray(reasons)) return false
+  const first: unknown = reasons[0]
+  return typeof first === 'object' && first !== null && 'Code' in first &&
+    first.Code === 'ConditionalCheckFailed'
 }
 
 /**

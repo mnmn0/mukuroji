@@ -139,7 +139,7 @@ test('data migration role reads and replaces rows only in allowlisted tables', (
   ]));
   // The row statement names exactly the allowlisted tables, in any order.
   const rowStatements = statements.map(readRecord).filter((statement) =>
-    JSON.stringify(statement?.Action) === JSON.stringify(['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Scan']));
+    JSON.stringify(statement?.Action) === JSON.stringify(['dynamodb:ConditionCheckItem', 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Scan']));
   expect(rowStatements).toHaveLength(1);
   const rowResources = rowStatements[0]?.Resource;
   if (!Array.isArray(rowResources)) throw new Error('Row statement has no resource list.');

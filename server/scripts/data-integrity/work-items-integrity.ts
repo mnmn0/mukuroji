@@ -16,6 +16,7 @@ import {
 import {
   isCanonicalWorkItemRecord,
   isWorkItemKeyRegistryRecord,
+  isWorkItemMemberIndexRecord,
 } from '../../src/modules/work-items'
 
 const MANIFEST_KIND = 'mukuroji-work-items-integrity-manifest'
@@ -947,9 +948,10 @@ async function scanWorkItemsTable(
       scannedItemCount += 1
       try {
         const decoded = decodeAttributeMap(item)
-        // Key registry rows share the table and are restored data too, so they are digested.
+        // Key registry and member index rows share the table and are restored data too, so they are digested.
         if (
           !(hasCanonicalRegistryCounterNumber(item) && isWorkItemKeyRegistryRecord(decoded)) &&
+          !isWorkItemMemberIndexRecord(decoded) &&
           !(hasCanonicalPhysicalWorkItemShape(item) && isCanonicalWorkItemRecord(decoded))
         ) {
           invalidCount += 1
