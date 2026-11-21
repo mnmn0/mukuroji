@@ -19,8 +19,10 @@ import {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
 import {
+  BatchWriteCommand,
   DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
+import { bindPlanningRevisionFenceBarrierDocumentClient } from '../../../../infrastructure/runtime/planning-revision-fence-barrier'
 import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
@@ -4886,4 +4888,90 @@ test('DynamoDB Work Item delete moves member index deletes after the commit when
       expect(transactions).toHaveLength(2)
     }
   }
+})
+
+test('DynamoDB Work Item delete cleans deferred member index rows through the Planning fence barrier', async () => {
+  const contributorAssignments = Array.from({ length: 20 }, (_, index) => ({
+    assignmentId: index.toString(16).padStart(32, '0'),
+    memberUserId: `member-${String(index).padStart(2, '0')}@example.com`,
+    status: 'planned',
+  }))
+  const currentIssue = {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'barrier-delete',
+    sortOrder: 10,
+    title: 'Barrier delete',
+    assigneeUserId: 'sato@example.com',
+    contributorAssignments,
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+    region: 'ap-northeast-1',
+    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+  }))
+  // The production writer binds the barrier; a write it rejects never reaches the interceptor.
+  bindPlanningRevisionFenceBarrierDocumentClient(documentClient, 'PlanningTable')
+  const sent: Array<{ commandName: string; input: Record<string, unknown> }> = []
+  documentClient.middlewareStack.add((_next, context) => async (args) => {
+    const input: Record<string, unknown> = typeof args.input === 'object' && args.input !== null
+      ? Object.fromEntries(Object.entries(args.input))
+      : {}
+    const commandName = String(context.commandName)
+    sent.push({ commandName, input })
+    const output = commandName === 'GetItemCommand' ? { Item: currentIssue } : {}
+    return { output: { $metadata: {}, ...output }, response: {} }
+  }, { step: 'build', name: 'workItemDeleteTestInterceptor' })
+  const fences = Array.from({ length: 80 }, (_, index) => ({
+    kind: 'external-links' as const,
+    transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { fence: index } } },
+  }))
+  const client = new DynamoDbTeamIssuesClient('IssuesTable', 'IssueEventsTable', documentClient, {} as DynamoDBClient, false)
+
+  try {
+    await client.deleteTeamIssue(
+      'workspace-1',
+      'core-team',
+      'barrier-delete',
+      1,
+      'demo@example.com',
+      undefined,
+      undefined,
+      fences,
+    )
+    // The barrier is live on this client: the BatchWriteItem the cleanup used to send is rejected.
+    await expect(documentClient.send(new BatchWriteCommand({
+      RequestItems: { IssuesTable: [{ DeleteRequest: { Key: { directoryTeamId: 'x', issueId: 'y' } } }] },
+    }))).rejects.toThrow('PLANNING_REVISION_FENCE_BARRIER_REQUIRED')
+  } finally {
+    documentClient.destroy()
+  }
+
+  const transactions = sent.filter((call) => call.commandName === 'TransactWriteItemsCommand')
+  expect(transactions).toHaveLength(2)
+  const cleanupItems = transactions[1]?.input.TransactItems
+  if (!Array.isArray(cleanupItems)) throw new Error('Expected the index cleanup transaction.')
+  const deletedPartitions = cleanupItems.flatMap((item: unknown) => {
+    const remove: unknown = typeof item === 'object' && item !== null ? Reflect.get(item, 'Delete') : undefined
+    const key: unknown = typeof remove === 'object' && remove !== null ? Reflect.get(remove, 'Key') : undefined
+    if (typeof key !== 'object' || key === null) return []
+    const partition: unknown = Reflect.get(key, 'directoryTeamId')
+    const value: unknown = typeof partition === 'object' && partition !== null ? Reflect.get(partition, 'S') : undefined
+    return typeof value === 'string' ? [value] : []
+  })
+  expect(deletedPartitions).toHaveLength(21)
+  expect(deletedPartitions).toContain('workspace-1#member-work-items#sato@example.com')
 })
