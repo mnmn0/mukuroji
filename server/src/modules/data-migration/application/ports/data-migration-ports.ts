@@ -113,3 +113,23 @@ export type DataMigrationClock = {
    */
   readonly sleep: (milliseconds: number) => Promise<void>
 }
+
+/** Request to authenticate the operator of an applying invocation. */
+export type DataMigrationOperatorProofRequest = {
+  /** Operator-supplied identity proof; untrusted until verified. */
+  readonly proof: string
+  /** Digest of the invocation parameters the proof must be bound to. */
+  readonly binding: string
+  /** AWS account the operator must belong to. */
+  readonly accountId: string
+}
+
+/**
+ * Authenticates the operator of an applying invocation from an identity
+ * proof, such as a presigned STS `GetCallerIdentity` request.
+ *
+ * @param request - Proof, expected binding and account.
+ * @returns The authenticated principal ARN.
+ * @throws When the proof is malformed, unbound, expired or from another account.
+ */
+export type DataMigrationOperatorVerifier = (request: DataMigrationOperatorProofRequest) => Promise<string>

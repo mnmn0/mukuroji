@@ -33,6 +33,7 @@ test('stateful resources keep pinned logical IDs and enable retain with PITR', (
     'AgentRunsTableB0DA56A7',
     'FocusTable8B0E7E68',
     'RealtimeSessionsTable607096EB',
+    'DataMigrationCheckpointTableD79D4891',
   ];
 
   for (const logicalId of stableResourceIds) {
@@ -41,7 +42,7 @@ test('stateful resources keep pinned logical IDs and enable retain with PITR', (
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(26);
+  expect(Object.keys(tables)).toHaveLength(27);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({

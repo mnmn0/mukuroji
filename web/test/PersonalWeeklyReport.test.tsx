@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
@@ -6,19 +6,33 @@ import {
   createWorkItemFixture,
   timeTrackingFixtureEntries,
   timeTrackingFixtureWeekStart,
+  teamWeeklyReportFixtureMembers,
+  weeklyReportFixtureSaved,
+  weeklyReportFixtureSubmission,
   weeklyReportFixtureWorkItems,
 } from '../src/features/time-tracking/fixtures'
 import {
   buildPersonalWeeklyReport,
   formatPersonalWeeklyReportMarkdown,
+  toSubmitWeeklyReportRequest,
 } from '../src/features/time-tracking/model/personalWeeklyReport'
+import { getTeamWeeklyReportStatus } from '../src/features/time-tracking/api/weeklyReports'
+import {
+  selectWeeklyReportSubmission,
+  weeklyReportSubmissionContent,
+} from '../src/features/time-tracking/mutations/pendingWeeklyReportSubmission'
 import { createWeekPeriod } from '../src/features/time-tracking/model/timePeriod'
+import { reconcileWeeklyReportEditor } from '../src/features/time-tracking/model/weeklyReportNotesEditor'
 import { PersonalWeeklyReport } from '../src/features/time-tracking/ui/PersonalWeeklyReport'
+import { SubmittedWeeklyReport } from '../src/features/time-tracking/ui/SubmittedWeeklyReport'
+import { TeamWeeklyReports } from '../src/features/time-tracking/ui/TeamWeeklyReports'
 import { createTimeTrackingFormatters } from '../src/features/time-tracking/ui/timeTrackingText'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { createTeamTimeTrackingPath } from '../src/shared/routing/paths'
 
 const week = createWeekPeriod(timeTrackingFixtureWeekStart)
+/** Saved report of a week nothing was saved for. */
+const savedReport = { teamId: 'core-team', memberKey: 'demo@example.com', weekStart: timeTrackingFixtureWeekStart, submissionCount: 0 }
 
 /**
  * Returns an ISO instant at a whole local hour of a date.
@@ -233,7 +247,11 @@ describe('PersonalWeeklyReport', () => {
         onCopy={async () => undefined}
         onMoveWeek={() => undefined}
         onRetry={() => undefined}
+        onOpenWeek={() => undefined}
+        onSaveDraft={async () => 'done'}
+        onSubmit={async () => 'done'}
         report={report}
+        savedReport={savedReport}
         t={en}
         week={week}
       />,
@@ -257,7 +275,11 @@ describe('PersonalWeeklyReport', () => {
         onCopy={async () => undefined}
         onMoveWeek={() => undefined}
         onRetry={() => undefined}
+        onOpenWeek={() => undefined}
+        onSaveDraft={async () => 'done'}
+        onSubmit={async () => 'done'}
         report={report}
+        savedReport={savedReport}
         t={en}
         week={week}
       />,
@@ -268,8 +290,282 @@ describe('PersonalWeeklyReport', () => {
     expect(html).not.toContain('weekly-report-markdown')
   })
 
+  test('starts from the saved notes and offers to submit again after a submission', () => {
+    const report = buildPersonalWeeklyReport({ weekDays: week.days, today: '2026-11-13', workItems: [], entries: [] })
+    const html = renderToStaticMarkup(
+      <PersonalWeeklyReport
+        formatters={createTimeTrackingFormatters('en')}
+        hasLoadError={false}
+        history={[{ weekStart: '2026-11-02', submissionCount: 2, lastSubmittedAt: '2026-11-06T09:00:00.000Z' }]}
+        isLoading={false}
+        isPartial={false}
+        onCopy={async () => undefined}
+        onMoveWeek={() => undefined}
+        onOpenWeek={() => undefined}
+        onRetry={() => undefined}
+        onSaveDraft={async () => 'done'}
+        onSubmit={async () => 'done'}
+        report={report}
+        savedReport={weeklyReportFixtureSaved}
+        t={en}
+        week={week}
+      />,
+    )
+
+    expect(html).toContain('Onboarding shipped on time.')
+    expect(html).toContain('Submitted (version 1,')
+    expect(html).toContain('Submit again')
+    expect(html).toContain('Submitted (version 2)')
+  })
+
+  test('explains a failed history read and offers a retry', () => {
+    const report = buildPersonalWeeklyReport({ weekDays: week.days, today: '2026-11-13', workItems: [], entries: [] })
+    const html = renderToStaticMarkup(
+      <PersonalWeeklyReport
+        formatters={createTimeTrackingFormatters('en')}
+        hasHistoryError
+        hasLoadError={false}
+        isLoading={false}
+        isPartial={false}
+        onCopy={async () => undefined}
+        onMoveWeek={() => undefined}
+        onOpenWeek={() => undefined}
+        onRetry={() => undefined}
+        onRetryHistory={() => undefined}
+        onSaveDraft={async () => 'done'}
+        onSubmit={async () => 'done'}
+        report={report}
+        savedReport={savedReport}
+        t={en}
+        week={week}
+      />,
+    )
+
+    expect(html).toContain(en('timeTracking.weeklyReport.historyLoadError'))
+    expect(html).toContain('>Reload<')
+    expect(html).toContain('Save draft')
+  })
+
+  test('waits for the saved report before showing the note fields', () => {
+    const report = buildPersonalWeeklyReport({ weekDays: week.days, today: '2026-11-13', workItems: [], entries: [] })
+    const html = renderToStaticMarkup(
+      <PersonalWeeklyReport
+        formatters={createTimeTrackingFormatters('en')}
+        hasLoadError={false}
+        isLoading={false}
+        isPartial={false}
+        onCopy={async () => undefined}
+        onMoveWeek={() => undefined}
+        onOpenWeek={() => undefined}
+        onRetry={() => undefined}
+        onSaveDraft={async () => 'done'}
+        onSubmit={async () => 'done'}
+        report={report}
+        savedReport={undefined}
+        t={en}
+        week={week}
+      />,
+    )
+
+    expect(html).toContain(en('timeTracking.weeklyReport.loading'))
+    expect(html).not.toContain('Save draft')
+  })
+
   test('has its own time tracking URL', () => {
     expect(createTeamTimeTrackingPath('core-team', 'weekly-report', '2026-11-09'))
       .toBe('/teams/core-team/timesheet?view=weekly-report&week=2026-11-09')
+    expect(createTeamTimeTrackingPath('core-team', 'weekly-report', '2026-11-09', undefined, true))
+      .toBe('/teams/core-team/timesheet?view=weekly-report&week=2026-11-09&exactWeek=1')
+  })
+})
+
+describe('reconcileWeeklyReportEditor', () => {
+  /**
+   * Builds a saved report with notes at a revision.
+   *
+   * @param revision - Saved revision.
+   * @param reflection - Saved reflection.
+   * @returns Saved report.
+   */
+  const saved = (revision: number, reflection: string) => ({
+    ...savedReport,
+    draft: { revision, updatedAt: '2026-11-13T09:00:00.000Z', notes: { issues: '', reflection } },
+  })
+
+  test('follows notes saved elsewhere while nothing is typed', () => {
+    const first = reconcileWeeklyReportEditor(undefined, saved(1, 'Mine'))
+    const next = reconcileWeeklyReportEditor(first, saved(2, 'From another tab'))
+    expect(next.notes.reflection).toBe('From another tab')
+    expect(next.base.revision).toBe(2)
+  })
+
+  test('keeps typed notes tied to the revision they started from when another tab saves', () => {
+    const first = reconcileWeeklyReportEditor(undefined, saved(1, 'Mine'))
+    const typing = { ...first, notes: { issues: '', reflection: 'Mine, edited' } }
+    const next = reconcileWeeklyReportEditor(typing, saved(2, 'From another tab'))
+    expect(next.notes.reflection).toBe('Mine, edited')
+    expect(next.base.revision).toBe(1)
+  })
+
+  test('moves to the revision its own save produced', () => {
+    const first = reconcileWeeklyReportEditor(undefined, saved(1, 'Mine'))
+    const typing = { ...first, notes: { issues: '', reflection: 'Mine, edited ' } }
+    const next = reconcileWeeklyReportEditor(typing, saved(2, 'Mine, edited'))
+    expect(next.notes.reflection).toBe('Mine, edited ')
+    expect(next.base.revision).toBe(2)
+  })
+
+  test('keeps typed notes across a reread of the same revision', () => {
+    const first = reconcileWeeklyReportEditor(undefined, saved(1, 'Mine'))
+    const typing = { ...first, notes: { issues: 'Blocked', reflection: 'Mine' } }
+    const next = reconcileWeeklyReportEditor(typing, saved(1, 'Mine'))
+    expect(next.notes.issues).toBe('Blocked')
+    expect(next.base.revision).toBe(1)
+  })
+})
+
+describe('toSubmitWeeklyReportRequest', () => {
+  test('sends only Work Item IDs and minutes with trimmed notes', () => {
+    const report = buildPersonalWeeklyReport({
+      weekDays: week.days,
+      today: '2026-11-13',
+      workItems: weeklyReportFixtureWorkItems,
+      entries: timeTrackingFixtureEntries,
+    })
+    const request = toSubmitWeeklyReportRequest(report, { issues: ' Blocked ', reflection: '' }, {
+      timeIsPartial: true,
+      expectedSubmissionCount: 1,
+      expectedRevision: 3,
+    })
+
+    expect(request.expectedSubmissionCount).toBe(1)
+    expect(request.expectedRevision).toBe(3)
+    expect(request.timeIsPartial).toBe(true)
+    expect(request.notes).toEqual({ issues: 'Blocked', reflection: '' })
+    expect(request.sections.completed).toEqual(report.completed.map((item) => ({ workItemId: item.id, minutes: item.minutes })))
+    expect(JSON.stringify(request)).not.toContain('Reduce onboarding friction')
+    expect(request.totalMinutes).toBe(report.totalMinutes)
+  })
+})
+
+describe('selectWeeklyReportSubmission', () => {
+  const report = buildPersonalWeeklyReport({
+    weekDays: week.days,
+    today: '2026-11-13',
+    workItems: weeklyReportFixtureWorkItems,
+    entries: timeTrackingFixtureEntries,
+  })
+  const first = toSubmitWeeklyReportRequest(report, { issues: 'Blocked', reflection: '' }, {
+    timeIsPartial: false,
+    expectedSubmissionCount: 0,
+    expectedRevision: 1,
+  })
+  const pending = { scope: 'submit:core-team:2026-11-09', content: weeklyReportSubmissionContent(first), input: first }
+
+  test('retries a submission with a lost response as first sent, even after a refresh read new counts', () => {
+    const refreshed = { ...first, expectedSubmissionCount: 1, expectedRevision: 2 }
+    expect(selectWeeklyReportSubmission(pending, pending.scope, refreshed)).toBe(first)
+  })
+
+  test('sends changed content, or content for another week, as a new submission', () => {
+    const edited = { ...first, expectedSubmissionCount: 1, expectedRevision: 2, notes: { issues: 'Unblocked', reflection: '' } }
+    expect(selectWeeklyReportSubmission(pending, pending.scope, edited)).toBe(edited)
+    expect(selectWeeklyReportSubmission(pending, 'submit:core-team:2026-11-16', first)).toBe(first)
+    expect(selectWeeklyReportSubmission(null, pending.scope, first)).toBe(first)
+  })
+})
+
+describe('SubmittedWeeklyReport', () => {
+  test('shows a task the reader cannot view without its name', () => {
+    const html = renderToStaticMarkup(
+      <SubmittedWeeklyReport formatters={createTimeTrackingFormatters('ja')} submission={weeklyReportFixtureSubmission} t={ja} />,
+    )
+
+    expect(html).toContain('Reduce onboarding friction')
+    expect(html).toContain('閲覧権限のないタスク')
+    expect(html).toContain('Waiting for the pricing review.')
+  })
+})
+
+describe('TeamWeeklyReports', () => {
+  test('counts the submitted members and explains a refusal', () => {
+    const props = {
+      formatters: createTimeTrackingFormatters('en'),
+      week,
+      memberNames: { 'sato@example.com': 'Sato' },
+      hasLoadError: false,
+      selectedMemberKey: 'sato@example.com',
+      selectedReport: { teamId: 'core-team', memberKey: 'sato@example.com', weekStart: timeTrackingFixtureWeekStart, submissionCount: 0 },
+      hasSelectedReportError: false,
+      onSelectMember: () => undefined,
+      onMoveWeek: () => undefined,
+      onRetry: () => undefined,
+      onRetrySelectedReport: () => undefined,
+      t: en,
+    }
+    const listed = renderToStaticMarkup(<TeamWeeklyReports {...props} isForbidden={false} members={teamWeeklyReportFixtureMembers} />)
+    expect(listed).toContain('1 of 2 submitted')
+    expect(listed).toContain('Sato')
+    expect(listed).toContain(en('timeTracking.teamWeeklyReports.notSubmitted'))
+
+    const forbidden = renderToStaticMarkup(<TeamWeeklyReports {...props} isForbidden members={undefined} />)
+    expect(forbidden).toContain('Only Team managers (Project managers)')
+  })
+
+  test('notes a report submitted under an earlier week start', () => {
+    const formatters = createTimeTrackingFormatters('en')
+    const markup = renderToStaticMarkup(
+      <TeamWeeklyReports
+        formatters={formatters}
+        hasLoadError={false}
+        hasSelectedReportError={false}
+        isForbidden={false}
+        memberNames={{}}
+        members={[{ memberKey: 'sato@example.com', submissionCount: 1, lastSubmittedAt: '2026-11-20T09:00:00.000Z', weekStart: '2026-11-10' }]}
+        onMoveWeek={() => undefined}
+        onRetry={() => undefined}
+        onRetrySelectedReport={() => undefined}
+        onSelectMember={() => undefined}
+        selectedMemberKey={undefined}
+        selectedReport={undefined}
+        t={en}
+        week={week}
+      />,
+    )
+    expect(markup).toContain(en('timeTracking.teamWeeklyReports.otherWeekStart').replace('{date}', formatters.day('2026-11-10')))
+  })
+})
+
+describe('getTeamWeeklyReportStatus', () => {
+  /** Fetch before a test replaced it. */
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  /**
+   * Answers every request with one JSON body.
+   *
+   * @param body - Response body.
+   */
+  function respondWith(body: unknown) {
+    const fakeFetch: typeof fetch = async () => Response.json(body)
+    globalThis.fetch = fakeFetch
+  }
+
+  test('keeps the stored week start of a report submitted under an earlier week start', async () => {
+    respondWith({
+      teamId: 'core-team',
+      weekStart: '2026-11-15',
+      members: [{ memberKey: 'sato@example.com', submissionCount: 1, lastSubmittedAt: '2026-11-20T09:00:00.000Z', weekStart: '2026-11-16' }],
+    })
+    const status = await getTeamWeeklyReportStatus('token', 'core-team', '2026-11-15')
+    expect(status.members[0]?.weekStart).toBe('2026-11-16')
+  })
+
+  test('rejects a member status with an invalid stored week start', async () => {
+    respondWith({ teamId: 'core-team', weekStart: '2026-11-15', members: [{ memberKey: 'sato@example.com', submissionCount: 1, weekStart: 'later' }] })
+    await expect(getTeamWeeklyReportStatus('token', 'core-team', '2026-11-15')).rejects.toThrow()
   })
 })
