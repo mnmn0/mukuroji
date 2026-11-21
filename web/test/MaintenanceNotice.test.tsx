@@ -91,6 +91,15 @@ describe('refreshMaintenanceStatus', () => {
     expect(requested.sort()).toEqual([`${sharedApi}/maintenance`, `${workspaceApi}/maintenance`])
   })
 
+  test('gives up on a status answer that never arrives', async () => {
+    const send: typeof fetch = async (_input, init) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal)
+      throw new DOMException('The operation timed out.', 'TimeoutError')
+    }
+    const status = { apis: { [workspaceApi]: 'stopped' } } as const
+    expect(await refreshMaintenanceStatus(status, send)).toBe(status)
+  })
+
   test('reads each reported state', async () => {
     const answers = [{ state: 'stopped' }, { state: 'paused' }]
     const send: typeof fetch = async () => Response.json(answers.shift())
@@ -108,6 +117,23 @@ describe('installMaintenanceFetchObserver', () => {
     const restore = installMaintenanceFetchObserver((observation) => observations.push(observation), target)
     const result = await target.fetch('http://localhost/api/teams/a/issues', { method: 'POST' })
     expect(result.status).toBe(503)
+    expect(observations).toEqual([{ kind: 'report', state: 'read-only', apiBaseUrl: 'http://localhost/api' }])
+    restore()
+  })
+
+  test('ignores a response to a request older than one already reported', async () => {
+    const observations: MaintenanceObservation[] = []
+    const pending: Array<(value: Response) => void> = []
+    const target: { fetch: typeof fetch } = {
+      fetch: () => new Promise<Response>((resolve) => pending.push(resolve)),
+    }
+    const restore = installMaintenanceFetchObserver((observation) => observations.push(observation), target)
+    const older = target.fetch('http://localhost/api/teams')
+    const newer = target.fetch('http://localhost/api/teams')
+    pending[1]?.(response(200, 'read-only'))
+    await newer
+    pending[0]?.(response(200))
+    expect((await older).status).toBe(200)
     expect(observations).toEqual([{ kind: 'report', state: 'read-only', apiBaseUrl: 'http://localhost/api' }])
     restore()
   })

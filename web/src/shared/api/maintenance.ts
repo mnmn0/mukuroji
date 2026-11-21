@@ -36,6 +36,9 @@ export type MaintenanceObservation = {
  */
 const ungatedApiPaths = new Set(['/health', '/ready', MAINTENANCE_STATUS_PATH])
 
+/** How long one maintenance status request, body included, may take, in milliseconds. */
+const maintenanceStatusTimeoutMilliseconds = 10_000
+
 /** API scopes whose base URLs the app's requests use. */
 const apiScopes: readonly ApiBaseUrlScope[] = ['shared', 'projects', 'workspace', 'workspaceWithoutProjects', 'enterpriseIdentity']
 
@@ -102,13 +105,17 @@ export function readMaintenanceObservation(
  * @param apiBaseUrl - Absolute API base URL.
  * @param send - `fetch` to use.
  * @returns The state of that API. An outage counts as `none`.
- * @throws When the request fails or the answer is unreadable, so the cached state stays.
+ * @throws When the request fails, times out, or the answer is unreadable, so the cached state stays.
  */
 export async function fetchMaintenanceState(
   apiBaseUrl: string,
   send: typeof fetch,
 ): Promise<MaintenanceNoticeState> {
-  const response = await send(`${apiBaseUrl}${MAINTENANCE_STATUS_PATH}`, { cache: 'no-store' })
+  // The deadline also covers reading the body, so one silent API cannot hold back the others.
+  const response = await send(`${apiBaseUrl}${MAINTENANCE_STATUS_PATH}`, {
+    cache: 'no-store',
+    signal: AbortSignal.timeout(maintenanceStatusTimeoutMilliseconds),
+  })
   if (!response.ok) throw new Error(`Maintenance status answered ${response.status}.`)
   const body: unknown = await response.json()
   const reported = typeof body === 'object' && body !== null && 'state' in body ? body.state : undefined
@@ -130,14 +137,25 @@ export function installMaintenanceFetchObserver(
   const originalFetch = target.fetch
   const send = originalFetch.bind(target)
   const apiBaseUrls = resolveAppApiBaseUrls()
+  /** Number of the last request sent; later requests get larger numbers. */
+  let lastRequestNumber = 0
+  /** Number of the newest request whose observation was reported, per API base URL. */
+  const reportedRequestNumbers = new Map<string, number>()
 
   /** Observed replacement of `fetch`. */
   const observedFetch: typeof fetch = async (input, init) => {
+    lastRequestNumber += 1
+    const requestNumber = lastRequestNumber
     const response = await send(input, init)
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     try {
       const observation = readMaintenanceObservation(url, response, apiBaseUrls, readPageUrl())
-      if (observation) report(observation)
+      // A response to an older request than one already reported may describe a state that has
+      // since changed, so it is ignored.
+      if (observation && requestNumber > (reportedRequestNumbers.get(observation.apiBaseUrl) ?? 0)) {
+        reportedRequestNumbers.set(observation.apiBaseUrl, requestNumber)
+        report(observation)
+      }
     } catch {
       // The page still receives its response.
     }
