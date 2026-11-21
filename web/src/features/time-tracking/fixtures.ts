@@ -150,6 +150,7 @@ export const timeTrackingFixtureTeamTimesheet: TimeSheet = {
   ],
   weeks: [{ key: '2026-11-09', label: '2026-11-09', minutes: 555, billableMinutes: 120, entryCount: 6 }],
   costsRedacted: false,
+  canManageTeam: true,
 }
 
 /**
