@@ -5,6 +5,7 @@ import type {
   CreateCuratedContextItemRequest,
   CuratedContextItem,
   UpdateCuratedContextItemRequest,
+  WorkItemRelationActivityEndpoints,
 } from '@mukuroji/contracts'
 import { expect, fireEvent, fn, userEvent, waitFor, within } from 'storybook/test'
 import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
@@ -890,6 +891,25 @@ export const LargeActivity: Story = {
   },
 }
 
+/** Relation endpoints of the relation activity stories, in event order. */
+const relationActivityStoryEndpoints: WorkItemRelationActivityEndpoints[] = [
+  {
+    previousParentWorkItem: { id: 'issue-12', teamId: 'core-team', key: 'CT-12', title: '旧オンボーディング改善' },
+    parentWorkItem: { id: 'issue-18', teamId: 'core-team', key: 'CT-18', title: '決済フローの再設計' },
+  },
+  {
+    parentWorkItem: { id: 'issue-18', teamId: 'core-team', key: 'CT-18', title: '決済フローの再設計' },
+  },
+  {},
+  {
+    relatedWorkItem: {
+      id: 'issue-21',
+      teamId: 'core-team',
+      title: 'キーが割り当てられる前に作られた、とても長いタイトルの Work Item で表示の切り詰めを確かめる',
+    },
+  },
+]
+
 /**
  * Relation and hierarchy changes, including a reorder among siblings, appear in the activity tab.
  */
@@ -908,6 +928,8 @@ export const RelationActivity: Story = {
         eventId: `relation-change-${index + 1}`,
         eventType,
         occurredAt: `2026-06-08T02:${String(index).padStart(2, '0')}:00.000Z`,
+        // The blocker added last stays hidden, as the server omits endpoints the viewer cannot read.
+        ...relationActivityStoryEndpoints[index],
       })),
       hasMoreActivity: false,
     },
@@ -916,6 +938,12 @@ export const RelationActivity: Story = {
     const canvas = within(canvasElement)
     await expect(canvas.getByText(/同じ親の中での並び順を変更しました/)).toBeVisible()
     await expect(canvas.getByText(/この Work Item をブロックする項目を解除しました/)).toBeVisible()
+    await expect(canvas.getByText('変更前の親')).toBeVisible()
+    await expect(canvas.getByRole('link', { name: /CT-18 決済フローの再設計/ })).toHaveAttribute(
+      'href',
+      '/browse/CT-18',
+    )
+    await expect(canvas.getAllByTestId('activity-relation-work-items')).toHaveLength(3)
   },
 }
 
@@ -931,6 +959,7 @@ export const RelationActivityEnglish: Story = {
     const canvas = within(canvasElement)
     await expect(canvas.getByText(/changed the order among siblings/)).toBeVisible()
     await expect(canvas.getByText(/removed a blocker/)).toBeVisible()
+    await expect(canvas.getByText('Previous parent')).toBeVisible()
   },
 }
 

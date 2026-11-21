@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import {
   isWorkItemHierarchyRank,
   readSearchWorkItemTypeKey,
+  type WorkItemRelationActivityEndpoint,
+  type WorkItemRelationActivityEndpoints,
   type AcceptCreateTriageAction,
   type ApprovalSummary,
   type ConfirmedWorkItemSchedule,
@@ -436,24 +438,12 @@ async function getAuthorizedProjectQuickAccessKeys(
   ))
 }
 
-/** Other endpoint of a relation activity event that the viewer may read. */
-type RelationActivityCounterpart = {
-  /** Team-local Work Item ID of the other endpoint. */
-  id: string
-  /** Team that owns the other endpoint. */
-  teamId: string
-  /** Short Work Item key, omitted for a Work Item created before keys existed. */
-  key?: string
-  /** Current title of the other endpoint. */
-  title: string
-}
-
 /** Maps a relation audit metadata field naming the other endpoint to the activity view field it fills. */
 type RelationActivityCounterpartField = {
   /** Metadata field the relation audit event stores the other endpoint ID in. */
   metadataField: 'relatedWorkItemId' | 'parentWorkItemId' | 'previousParentWorkItemId'
   /** Activity view field that carries the resolved endpoint. */
-  viewField: 'relatedWorkItem' | 'parentWorkItem' | 'previousParentWorkItem'
+  viewField: keyof WorkItemRelationActivityEndpoints
 }
 
 /** Relation audit metadata fields that name another Work Item, in display order. */
@@ -498,11 +488,11 @@ async function readVisibleRelationActivityCounterparts(
   context: TeamPermissionContext,
   teamId: string,
   events: AuditEventPage['events'],
-): Promise<ReadonlyMap<string, RelationActivityCounterpart>> {
+): Promise<ReadonlyMap<string, WorkItemRelationActivityEndpoint>> {
   const workItemIds = [...new Set(events.flatMap((event) =>
     readRelationActivityCounterpartIds(event).map(({ workItemId }) => workItemId)
   ))]
-  const counterparts = new Map<string, RelationActivityCounterpart>()
+  const counterparts = new Map<string, WorkItemRelationActivityEndpoint>()
 
   for (
     let offset = 0;
@@ -546,7 +536,7 @@ async function readVisibleRelationActivityCounterparts(
  */
 function toWorkItemActivityPageView(
   page: AuditEventPage,
-  counterparts: ReadonlyMap<string, RelationActivityCounterpart>,
+  counterparts: ReadonlyMap<string, WorkItemRelationActivityEndpoint>,
 ) {
   return {
     events: page.events.map((event) => {

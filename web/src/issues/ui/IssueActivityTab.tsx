@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTranslator } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
-import type { TeamIssueActivityEvent, TeamIssueActivityWorkItem } from '../api'
+import type { WorkItemRelationActivityEndpoint } from '@mukuroji/contracts'
+import type { TeamIssueActivityEvent } from '../api'
 import type { IssueCollaborationController } from '../mutations/useIssueCollaboration'
 import { groupIssueActivity } from '../model/activityGroups'
 import {
@@ -337,7 +338,7 @@ type ActivityRelationWorkItem = {
   /** Label naming the endpoint's role; omitted when the event label already names it. */
   labelKey?: MessageKey
   /** Endpoint the viewer may read. */
-  workItem: TeamIssueActivityWorkItem
+  workItem: WorkItemRelationActivityEndpoint
 }
 
 /**
