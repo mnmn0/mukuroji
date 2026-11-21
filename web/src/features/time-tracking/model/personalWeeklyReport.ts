@@ -2,6 +2,7 @@ import {
   readWorkItemPlannedEndDate,
   readWorkItemPlannedStartDate,
   type CanonicalWorkItem,
+  type SubmitWeeklyReportRequest,
   type TimeEntry,
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../../../shared/i18n/i18n'
@@ -269,4 +270,38 @@ export function formatPersonalWeeklyReportMarkdown(
     lines.push('', `## ${t('timeTracking.weeklyReport.reflection')}`, notes.reflection.trim())
   }
   return `${lines.join('\n')}\n`
+}
+
+/**
+ * Builds the submission of a weekly report: only Work Item IDs and minutes are sent, and the
+ * server copies each Work Item's key, title, and Project from the Work Item itself.
+ *
+ * @param report - Generated facts.
+ * @param notes - The member's free text.
+ * @param options - Submission options.
+ * @param options.timeIsPartial - Whether only part of the time entries could be read.
+ * @param options.expectedSubmissionCount - Versions already submitted for the week, as last read.
+ * @param options.expectedRevision - Saved revision the notes were edited from.
+ * @returns The request body.
+ */
+export function toSubmitWeeklyReportRequest(
+  report: PersonalWeeklyReport,
+  notes: PersonalWeeklyReportNotes,
+  options: { timeIsPartial: boolean; expectedSubmissionCount: number; expectedRevision: number },
+): SubmitWeeklyReportRequest {
+  const rows = (items: readonly PersonalWeeklyReportItem[]) => items.map((item) => ({ workItemId: item.id, minutes: item.minutes }))
+  return {
+    expectedSubmissionCount: options.expectedSubmissionCount,
+    expectedRevision: options.expectedRevision,
+    sections: {
+      completed: rows(report.completed),
+      started: rows(report.started),
+      overdue: rows(report.overdue),
+      upcoming: rows(report.upcoming),
+    },
+    time: report.time.map((row) => ({ workItemId: row.workItemId, minutes: row.minutes })),
+    totalMinutes: report.totalMinutes,
+    timeIsPartial: options.timeIsPartial,
+    notes: { issues: notes.issues.trim(), reflection: notes.reflection.trim() },
+  }
 }

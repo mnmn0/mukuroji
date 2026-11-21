@@ -40,8 +40,9 @@ export function createTeamTimeTrackingUrl(teamId: string, path: string): string 
 /**
  * Sends an authenticated request and returns its untrusted JSON body.
  *
- * A request that never reaches the API is reported with status 0 so callers can keep the
- * idempotency key and retry quietly once the connection returns.
+ * A request that never reaches the API, or whose response is cut off while its body is read, is
+ * reported with status 0 so callers can keep the idempotency key and retry quietly once the
+ * connection returns.
  *
  * @param url - Request URL.
  * @param accessToken - Bearer token of the signed-in member.
@@ -80,9 +81,16 @@ export async function requestTimeTrackingJson(
  *
  * @param response - Fetch response.
  * @returns Parsed body, or an empty object for an empty or invalid body.
+ * @throws TimeTrackingApiError with status 0 when the connection breaks while the body is read,
+ *   since the request may have taken effect and a retry must keep its idempotency key.
  */
 async function readJson(response: Response): Promise<unknown> {
-  const text = await response.text()
+  let text: string
+  try {
+    text = await response.text()
+  } catch {
+    throw new TimeTrackingApiError(0, 'The time tracking API response was interrupted.', 'NetworkUnavailable')
+  }
   if (!text) return {}
   try {
     return JSON.parse(text)
