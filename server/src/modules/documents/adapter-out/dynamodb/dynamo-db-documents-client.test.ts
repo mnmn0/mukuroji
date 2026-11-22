@@ -2533,6 +2533,79 @@ test('keeps an edit made after a completion when the same event is retried', asy
     .toEqual({ updatedDocumentIds: [page.id] })
 })
 
+test('remembers an already-done note when the same completion event is retried', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const note = {
+    id: 'note-1',
+    type: 'note' as const,
+    text: 'Fix the flaky test',
+    done: true,
+    bounds: { x: 0, y: 0, width: 200, height: 100 },
+    zIndex: 1,
+  }
+  const whiteboard = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Retro',
+    whiteboard: { objects: [note], connectors: [], frames: [] },
+  })
+  const linked = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: whiteboard.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: whiteboard.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-note',
+        relation: {
+          id: 'whiteboard-note:note-1',
+          source: { kind: 'whiteboard-object', objectId: 'note-1' },
+          target: { kind: 'work-item', workItemId },
+          createdAt: '2026-07-18T00:00:00.000Z',
+          createdByUserId: 'owner@example.com',
+        },
+      }],
+    },
+  })
+  const completion = {
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  }
+  // The note is already done, so the first attempt changes nothing.
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [] })
+  const reopened = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: whiteboard.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: linked.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-object',
+        operationId: 'reopen-note',
+        objectId: 'note-1',
+        object: { ...note, done: false },
+      }],
+    },
+  })
+
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [] })
+  const afterRetry = await client.get({ workspaceId: 'workspace-1', documentId: whiteboard.id, access: ownerAccess })
+  expect(afterRetry.revision).toBe(reopened.revision)
+  expect(await client.reflectWorkItemCompletion({ ...completion, eventId: 'event-2' }))
+    .toEqual({ updatedDocumentIds: [whiteboard.id] })
+})
+
 test('completes more linked notes than one operation batch holds', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)

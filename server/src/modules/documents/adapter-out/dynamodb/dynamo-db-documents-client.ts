@@ -4232,10 +4232,22 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         input.workItemId,
         (elementKey) => workItemCompletionOperationId(input.eventId, elementKey),
       )
+      // The first attempt of an event records which elements it set out to
+      // complete. A redelivered event only works through that scope, so an
+      // element that was already done then, and unchecked since, stays as
+      // the editor left it.
+      const scope = await this.getWorkItemCompletionScope(
+        input.workspaceId,
+        documentId,
+        input.eventId,
+      )
+      const inScope = scope === undefined
+        ? planned
+        : planned.filter((operation) => scope.operationIds.includes(operation.operationId))
       // An element this event already completed keeps its receipt, so a
       // retried event never undoes an edit made after the first attempt.
       const operations: DocumentOperation[] = []
-      for (const operation of planned) {
+      for (const operation of inScope) {
         if (operations.length >= DOCUMENT_MAX_OPERATION_COUNT) break
         const receipt = await this.getOperationReceipt(
           input.workspaceId,
@@ -4244,7 +4256,39 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         )
         if (receipt === undefined) operations.push(operation)
       }
-      if (operations.length === 0) return false
+      const scopeActions = scope === undefined
+        ? [workItemCompletionScopePut(
+            this.tableName,
+            input,
+            documentId,
+            planned.map((operation) => operation.operationId),
+            this.now(),
+          )]
+        : []
+      if (operations.length === 0) {
+        if (scopeActions.length === 0) return false
+        // Nothing to change: record the empty or already-done scope against
+        // the revision it was planned from.
+        try {
+          await this.client.send(new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: {
+                  TableName: this.tableName,
+                  Key: { workspaceId: input.workspaceId, recordKey: row.recordKey },
+                  ConditionExpression: 'revision = :expectedRevision',
+                  ExpressionAttributeValues: { ':expectedRevision': row.revision },
+                },
+              },
+              ...scopeActions,
+            ],
+          }))
+          return false
+        } catch (error) {
+          if (isConditionalFailure(error) || isRetryableTransactionConflict(error)) continue
+          throw normalizeDynamoError(error)
+        }
+      }
       const conflictFloorRevision = row.operationConflictFloorRevision ?? 1
       const nextRevision = row.revision + 1
       const reduced = reduceDocumentOperations({
@@ -4289,6 +4333,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         currentDocumentPut(this.tableName, nextRow, row.revision),
         documentSearchAccessPut(this.tableName, input.workspaceId, reduced.document),
         documentSearchBodyPut(this.tableName, input.workspaceId, reduced.document),
+        ...scopeActions,
         ...operations.map((operation) =>
           workItemCompletionReceiptPut(
             this.tableName,
@@ -4328,6 +4373,32 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       'DocumentConcurrentUpdate',
       'The document changed too frequently; retry the completion.',
     )
+  }
+
+  /**
+   * Reads the elements one completion event set out to complete in a Document.
+   *
+   * @param workspaceId - Workspace partition.
+   * @param documentId - Document the event changes.
+   * @param eventId - Completion event ID.
+   * @returns The recorded scope, or undefined before the event's first attempt.
+   */
+  private async getWorkItemCompletionScope(
+    workspaceId: string,
+    documentId: string,
+    eventId: string,
+  ): Promise<StoredWorkItemCompletionScope | undefined> {
+    const result = await this.client.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: workItemCompletionScopeKey(documentId, eventId) },
+      ConsistentRead: true,
+    }))
+    const item: unknown = result.Item
+    if (!isRecord(item) || !Array.isArray(item.operationIds)) return undefined
+    const operationIds = item.operationIds.filter(
+      (operationId): operationId is string => typeof operationId === 'string',
+    )
+    return { operationIds }
   }
 
   /** Document を安全な text format へ export します。 */
@@ -5989,6 +6060,59 @@ function blockTextLength(block: DocumentBlock): number {
       return (block.title ?? block.url).length
     case 'diagram':
       return block.source.length
+  }
+}
+
+/** Elements one Work Item completion event set out to complete in a Document. */
+type StoredWorkItemCompletionScope = {
+  /** Operation IDs of the elements, as planned on the event's first attempt. */
+  operationIds: string[]
+}
+
+/**
+ * Builds the sort key of a completion event's scope in one Document.
+ *
+ * @param documentId - Document the event changes.
+ * @param eventId - Completion event ID.
+ * @returns Sort key of the scope row.
+ */
+function workItemCompletionScopeKey(documentId: string, eventId: string): string {
+  return `WORK_ITEM_COMPLETION#${encodeKeyPart(documentId)}#${sha256(eventId)}`
+}
+
+/**
+ * Records the scope of a completion event's first attempt in a Document.
+ *
+ * @param tableName - Documents table name.
+ * @param input - Completion request.
+ * @param documentId - Document the event changes.
+ * @param operationIds - Operation IDs planned on the first attempt.
+ * @param now - Write time.
+ * @returns Put that fails if another attempt recorded the scope first.
+ */
+function workItemCompletionScopePut(
+  tableName: string,
+  input: ReflectWorkItemCompletionRequest,
+  documentId: string,
+  operationIds: readonly string[],
+  now: Date,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const nowEpoch = Math.floor(now.getTime() / 1_000)
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        workspaceId: input.workspaceId,
+        recordKey: workItemCompletionScopeKey(documentId, input.eventId),
+        entryType: 'work-item-completion-scope',
+        documentId,
+        workItemId: input.workItemId,
+        operationIds: [...operationIds],
+        createdAt: now.toISOString(),
+        expiresAtEpoch: nowEpoch + DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS * SECONDS_PER_DAY,
+      },
+      ConditionExpression: 'attribute_not_exists(workspaceId)',
+    },
   }
 }
 

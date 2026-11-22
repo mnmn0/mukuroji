@@ -31,7 +31,10 @@ Work Item の更新後に共通で流れるもの（audit outbox の `work-item.
   1 transaction で書く。競合したら読み直して再試行する。すでに完了済みの要素は書かない。
   同じ transaction で、event と要素ごとの operation receipt（既存の `OPERATION#` row、operation ID は
   event ID と要素 ID の hash）を残し、stream が同じ event を再配送したときは receipt のある要素を
-  飛ばす。そのため最初の反映のあとに人がチェックを外しても、再配送で戻らない。同じ Work Item を
+  飛ばす。最初の試行では、その event が完了にしようとした要素の一覧（scope）も Document ごとに
+  `WORK_ITEM_COMPLETION#` row に残し（変える要素がないときは Document の revision を条件に scope だけ書く）、
+  再配送では scope にある要素だけを扱う。そのため最初の反映のあとに人がチェックを外しても、
+  最初から完了済みだった要素を人が戻しても、再配送で戻らない。同じ Work Item を
   もう一度完了にしたときは別の event なので反映される。archive 済みの Document は変えない。
 - Work Item の再オープン（`completionReopened`）ではチェックを外さない。人が自分で付けたチェックを
   消してしまうため。
