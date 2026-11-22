@@ -1221,8 +1221,10 @@ export function normalizeAnalyticsExportLocale(
 export type AnalyticsExportNames = {
   /** Team names keyed by Team ID. */
   teams?: ReadonlyMap<string, string>
-  /** Project names keyed by Project ID. */
+  /** Project names keyed by Project ID; see `createAnalyticsProjectNames` for shared IDs. */
   projects?: ReadonlyMap<string, string>
+  /** Project names keyed by Team-qualified Project key (`teamId\0projectId`). */
+  teamProjects?: ReadonlyMap<string, string>
   /** Member display names keyed by Workspace member key. */
   members?: ReadonlyMap<string, string>
   /** Work Item Type names keyed by Team-qualified key (`teamId\0workItemTypeId`). */
@@ -1257,7 +1259,9 @@ function createAnalyticsExportLabelLookup(
 ): AnalyticsGroupLabelLookup {
   return {
     team: (teamId) => names?.teams?.get(teamId),
-    project: (projectId) => names?.projects?.get(projectId),
+    project: (projectId, teamId) =>
+      (teamId === undefined ? undefined : names?.teamProjects?.get(`${teamId}\0${projectId}`)) ??
+      names?.projects?.get(projectId),
     member: (memberKey) => names?.members?.get(memberKey),
     workItemType: (key) => names?.workItemTypes?.get(key),
     statusCategory: (category) => readAnalyticsStatusLabel(messages, category),
@@ -1417,7 +1421,12 @@ export function createAnalyticsCsv(
         row.values.occurredAt,
         '',
         readExportName(context.names?.teams, row.values.teamId),
-        readExportName(context.names?.projects, row.values.projectId),
+        typeof row.values.projectId === 'string'
+          ? lookup.project?.(
+              row.values.projectId,
+              typeof row.values.teamId === 'string' ? row.values.teamId : undefined,
+            ) ?? ''
+          : '',
       ])
     }
   }
@@ -1626,11 +1635,11 @@ function createAnalyticsPdfLines(
  * Formats the snapshot period as local start and end dates in the snapshot time zone.
  *
  * @param snapshot - Normalized snapshot.
- * @returns `YYYY-MM-DD - YYYY-MM-DD`; the end date is the last day the exclusive end covers.
+ * @returns `YYYY-MM-DD - YYYY-MM-DD` of the inclusive period start and end.
  */
 function formatAnalyticsPdfPeriod(snapshot: AnalyticsSnapshot) {
   const from = Date.parse(snapshot.filter.period.from)
-  const to = Math.max(from, Date.parse(snapshot.filter.period.to) - 1)
+  const to = Math.max(from, Date.parse(snapshot.filter.period.to))
   return `${localDateAt(from, snapshot.timeZone)} - ${localDateAt(to, snapshot.timeZone)}`
 }
 

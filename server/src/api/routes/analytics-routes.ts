@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import {
   DEFAULT_WORK_ITEM_TYPE,
+  createAnalyticsProjectNames,
   createSearchWorkItemTypeKey,
   type AnalyticsExportLocale,
   type AnalyticsQueryInput,
@@ -245,11 +246,11 @@ async function readAnalyticsExportNames(
   const readsConfigurations = dimensions.has('work-item-type') ||
     (query.filter.workItemTypeIds?.length ?? 0) > 0 ||
     (query.filter.customFields?.length ?? 0) > 0
+  const projectNames = createAnalyticsProjectNames(teams)
   return {
     teams: new Map(teams.map((team) => [team.id, team.name])),
-    projects: new Map(teams.flatMap((team) =>
-      team.projects.map((project): [string, string] => [project.id, project.name])
-    )),
+    projects: projectNames.byProject,
+    teamProjects: projectNames.byTeamProject,
     ...(readsMembers
       ? { members: await readAnalyticsExportMemberNames(principal, teams, memberKeys) }
       : {}),

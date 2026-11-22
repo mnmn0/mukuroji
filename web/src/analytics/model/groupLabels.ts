@@ -1,4 +1,8 @@
-import type { AnalyticsGroupLabelLookup } from '@mukuroji/contracts'
+import {
+  createAnalyticsProjectNames,
+  type AnalyticsGroupLabelLookup,
+  type AnalyticsProjectNames,
+} from '@mukuroji/contracts'
 import type { createTranslator, MessageKey } from '../../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 
@@ -6,8 +10,8 @@ import type { ProjectDirectoryTeam } from '../../projects/api'
 export type AnalyticsDisplayNames = {
   /** Team names keyed by Team ID. */
   teams: ReadonlyMap<string, string>
-  /** Project names keyed by Project ID. */
-  projects: ReadonlyMap<string, string>
+  /** Project names by Project ID and by Team-qualified Project key. */
+  projects: AnalyticsProjectNames
   /** Member display names keyed by member key. */
   members: ReadonlyMap<string, string>
   /** `Team · Work Item Type` names keyed by Team-qualified Work Item Type key. */
@@ -39,9 +43,7 @@ export function createAnalyticsDisplayNames(
 ): AnalyticsDisplayNames {
   return {
     teams: new Map(teams.map((team) => [team.id, team.name])),
-    projects: new Map(teams.flatMap((team) =>
-      team.projects.map((project): [string, string] => [project.id, project.name])
-    )),
+    projects: createAnalyticsProjectNames(teams),
     members: new Map(members.map((member) => [member.id, member.name?.trim() || member.email])),
     workItemTypes: new Map(workItemTypes.map((type) => [type.filterValue, type.label])),
   }
@@ -60,7 +62,9 @@ export function createAnalyticsGroupLabelLookup(
 ): AnalyticsGroupLabelLookup {
   return {
     team: (teamId) => names.teams.get(teamId),
-    project: (projectId) => names.projects.get(projectId),
+    project: (projectId, teamId) =>
+      (teamId === undefined ? undefined : names.projects.byTeamProject.get(`${teamId}\0${projectId}`)) ??
+      names.projects.byProject.get(projectId),
     member: (memberKey) => names.members.get(memberKey),
     workItemType: (key) => names.workItemTypes.get(key),
     statusCategory: (category) => {

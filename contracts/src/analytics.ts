@@ -580,8 +580,11 @@ export type AnalyticsExportInput = {
 export type AnalyticsGroupLabelLookup = {
   /** Returns the display name of a Team ID. */
   team?: (teamId: string) => string | undefined
-  /** Returns the display name of a Project ID. */
-  project?: (projectId: string) => string | undefined
+  /**
+   * Returns the display name of a Project ID. Pass the Team when it is known, since a Project ID
+   * can repeat across Teams.
+   */
+  project?: (projectId: string, teamId?: string) => string | undefined
   /** Returns the display name of a Workspace member key. */
   member?: (memberKey: string) => string | undefined
   /** Returns the display name of a Team-qualified Work Item Type key (`teamId\0workItemTypeId`). */
@@ -590,6 +593,47 @@ export type AnalyticsGroupLabelLookup = {
   statusCategory?: (category: string) => string | undefined
   /** Localized label of a group whose dimension value is not set, such as an unassigned Work Item. */
   unset: string
+}
+
+/** Project names of a Team directory, for `AnalyticsGroupLabelLookup.project`. */
+export type AnalyticsProjectNames = {
+  /** Names keyed by Project ID; a Project ID shared by Teams under different names lists each as `name (Team)`. */
+  byProject: ReadonlyMap<string, string>
+  /** Names keyed by Team-qualified Project key (`teamId\0projectId`). */
+  byTeamProject: ReadonlyMap<string, string>
+}
+
+/**
+ * Collects Project names so that a Project ID shared by several Teams never takes an unrelated
+ * Team's Project name: with the Team the name is exact, and without it every candidate is shown.
+ *
+ * @param teams - Teams with their Projects.
+ * @returns Project names by Project ID and by Team-qualified key.
+ */
+export function createAnalyticsProjectNames(
+  teams: readonly { id: string; name: string; projects: readonly { id: string; name: string }[] }[],
+): AnalyticsProjectNames {
+  const byTeamProject = new Map<string, string>()
+  const candidates = new Map<string, Array<{ teamName: string; name: string }>>()
+  for (const team of teams) {
+    for (const project of team.projects) {
+      byTeamProject.set(`${team.id}\0${project.id}`, project.name)
+      const list = candidates.get(project.id) ?? []
+      list.push({ teamName: team.name, name: project.name })
+      candidates.set(project.id, list)
+    }
+  }
+  const byProject = new Map<string, string>()
+  for (const [projectId, list] of candidates) {
+    const names = new Set(list.map((candidate) => candidate.name))
+    byProject.set(
+      projectId,
+      names.size === 1
+        ? [...names][0] ?? projectId
+        : list.map((candidate) => `${candidate.name} (${candidate.teamName})`).join(' / '),
+    )
+  }
+  return { byProject, byTeamProject }
 }
 
 /**

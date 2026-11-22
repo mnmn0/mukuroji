@@ -2146,6 +2146,20 @@ describe('Analytics export', () => {
     expect(text).toContain('end')
     expect(text).toContain('Filters: None')
   })
+
+  test('prints the inclusive period end when the period ends at local midnight', async () => {
+    const base = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query: createQuery([{ id: 'throughput', title: 'Throughput', type: 'metric', metric: 'throughput' }]),
+    })
+    const snapshot = {
+      ...base,
+      timeZone: 'UTC',
+      filter: { ...base.filter, period: { from: '2026-01-01T00:00:00.000Z', to: '2026-01-07T00:00:00.000Z' } },
+    }
+    expect(await readPdfText(createAnalyticsPdf(snapshot, 'en'))).toContain('2026-01-01 - 2026-01-07')
+  })
 })
 
 describe('Analytics scheduling', () => {

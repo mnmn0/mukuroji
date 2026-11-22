@@ -56,4 +56,19 @@ describe('Analytics group labels', () => {
       lookup,
     )).toBe('2026-07-06')
   })
+
+  test('keeps Project names apart when Teams share a Project ID', () => {
+    const shared = createAnalyticsGroupLabelLookup(
+      createAnalyticsDisplayNames(
+        [
+          { id: 'team-a', name: 'Team A', projects: [{ id: 'web', name: 'Storefront' }] },
+          { id: 'team-b', name: 'Team B', projects: [{ id: 'web', name: 'Admin console' }] },
+        ].map((team) => ({ ...projectDirectoryFixtures[0], ...team, projects: team.projects.map((project) => ({ ...projectDirectoryFixtures[0].projects[0], ...project })) })),
+        [],
+      ),
+      createTranslator('en'),
+    )
+    expect(shared.project('web', 'team-b')).toBe('Admin console')
+    expect(shared.project('web')).toBe('Storefront (Team A) / Admin console (Team B)')
+  })
 })

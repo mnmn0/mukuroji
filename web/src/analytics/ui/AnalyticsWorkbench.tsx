@@ -14,6 +14,7 @@ import type {
   AnalyticsSnapshot,
   AnalyticsSnapshotRecord,
   AnalyticsVisualization,
+  AnalyticsTableRow,
   AnalyticsWeighting,
   AnalyticsWidget,
   AnalyticsWidgetResult,
@@ -2383,7 +2384,7 @@ function AnalyticsTable({
               </th>
               {columns.map((column) => (
                 <td className="px-3 py-3 tabular-nums text-[var(--workbench-muted)]" key={column}>
-                  {formatTableValue(resolveTableValueName(column, row.values[column], groupLabelLookup))}
+                  {formatTableValue(resolveTableValueName(column, row.values, groupLabelLookup))}
                 </td>
               ))}
             </tr>
@@ -2917,18 +2918,22 @@ function formatBucketLabel(from: string, to: string, timeZone: string) {
  * Replaces the Team and Project IDs of table rows with their names.
  *
  * @param column - Table column key.
- * @param value - Cell value.
+ * @param values - Row values; the row's Team qualifies its Project ID.
  * @param lookup - Resolves Team and Project names.
  * @returns The name for a known Team or Project ID, otherwise the value.
  */
 function resolveTableValueName(
   column: string,
-  value: string | number | boolean | null | undefined,
+  values: AnalyticsTableRow['values'],
   lookup: AnalyticsGroupLabelLookup,
 ) {
+  const value = values[column]
   if (typeof value !== 'string') return value
   if (column === 'teamId') return lookup.team?.(value) ?? value
-  if (column === 'projectId') return lookup.project?.(value) ?? value
+  if (column === 'projectId') {
+    return lookup.project?.(value, typeof values.teamId === 'string' ? values.teamId : undefined) ??
+      value
+  }
   return value
 }
 
