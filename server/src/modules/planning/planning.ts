@@ -80,6 +80,7 @@ import {
   type WorkItemDependencyCriticalPath,
   type WorkItemDependencyEndpoint,
   type WorkItemSchedule,
+  type WorkspaceCalendarWeekday,
   type WorkItemScheduleDependency,
   type WorkItemScheduleDependencyConflict,
 } from '@mukuroji/contracts'
@@ -246,6 +247,19 @@ export class PlanningError extends Error {
 export type PlanningWorkItemState = {
   /** 現在 user の planning snapshot に含める Work Item 一覧です。 */
   workItems: readonly PlanningWorkItemSummary[]
+  /**
+   * Workspace の稼働カレンダーです（ADR 0058）。指定すると Planning entity の critical path を稼働日で
+   * 数えます。省略時は従来どおり calendar day で数えます。
+   */
+  workingCalendar?: PlanningWorkingCalendar
+}
+
+/** Planning entity の critical path を数える稼働カレンダーです。 */
+export type PlanningWorkingCalendar = {
+  /** 稼働する曜日です。 */
+  workingWeekdays: readonly WorkspaceCalendarWeekday[]
+  /** 稼働しない `YYYY-MM-DD` の日付です。 */
+  holidays: readonly string[]
 }
 
 /** Caller authorization check appended to a Planning DynamoDB mutation transaction. */
@@ -5543,7 +5557,7 @@ function createPlanningSnapshot(
         createPlanningUpdateTargetIdentity(first.target),
         createPlanningUpdateTargetIdentity(second.target),
       )),
-    criticalPath: calculateCriticalPath(state),
+    criticalPath: calculateCriticalPath(state, workItemState.workingCalendar),
     workItemDependencySummary: createPlanningWorkItemDependencySummary(
       visibleWorkItemDependencies,
       visibleWorkItems,
@@ -5957,7 +5971,10 @@ function calculateRollups(
   return rollups
 }
 
-function calculateCriticalPath(state: PlanningWorkspaceState): PlanningCriticalPath {
+function calculateCriticalPath(
+  state: PlanningWorkspaceState,
+  workingCalendar?: PlanningWorkingCalendar,
+): PlanningCriticalPath {
   const activeEntities = state.entities
     .filter((entity) => !entity.archivedAt && entity.status !== 'canceled')
     .sort((first, second) => compareText(first.id, second.id))
@@ -5995,7 +6012,12 @@ function calculateCriticalPath(state: PlanningWorkspaceState): PlanningCriticalP
   if (order.length !== entities.length) {
     throw new PlanningError(503, 'PlanningDependencyCycle', 'Stored planning dependencies contain a cycle.')
   }
-  const durations = new Map(entities.map((entity) => [entity.id, durationDays(entity.forecast ?? entity.baseline)]))
+  const durations = new Map(entities.map((entity) => [
+    entity.id,
+    workingCalendar
+      ? workingDurationDays(entity.forecast ?? entity.baseline, workingCalendar)
+      : durationDays(entity.forecast ?? entity.baseline),
+  ]))
   const earliestStart = new Map(entities.map((entity) => [entity.id, 0]))
   const pathPredecessor = new Map<string, string>()
   const pathDepth = new Map(entities.map((entity) => [entity.id, 0]))
@@ -6529,7 +6551,8 @@ function createWorkItemSlackKey(teamId: string, workItemId: string) {
 function workItemScheduleDurationDays(schedule: WorkItemSchedule) {
   if (schedule.mode === 'unscheduled' || schedule.mode === 'milestone') return 0
   if (schedule.mode === 'due-date') return 1
-  return durationDays({ startDate: schedule.startDate, endDate: schedule.endDate })
+  // Working days under the Work Item's own calendar, the same count its schedule keeps (ADR 0058).
+  return schedule.durationDays
 }
 
 /**
@@ -6541,7 +6564,7 @@ function workItemScheduleDurationDays(schedule: WorkItemSchedule) {
 function workItemScheduleSpanDays(schedule: WorkItemSchedule) {
   if (schedule.mode === 'unscheduled') return 0
   if (schedule.mode === 'due-date' || schedule.mode === 'milestone') return 1
-  return durationDays({ startDate: schedule.startDate, endDate: schedule.endDate })
+  return schedule.durationDays
 }
 
 /**
@@ -9186,6 +9209,48 @@ function durationDays(range: { startDate: string; endDate: string }) {
   const start = Date.parse(`${range.startDate}T00:00:00.000Z`)
   const end = Date.parse(`${range.endDate}T00:00:00.000Z`)
   return Math.floor((end - start) / 86_400_000) + 1
+}
+
+/** Weekday names indexed by `Date#getUTCDay()`. */
+const PLANNING_WEEKDAYS_BY_UTC_DAY: readonly WorkspaceCalendarWeekday[] = [
+  'sunday',
+  'monday',
+  'tuesday',
+  'wednesday',
+  'thursday',
+  'friday',
+  'saturday',
+]
+
+/**
+ * Counts the working days of an inclusive range under the Workspace calendar.
+ *
+ * A range with no working day counts as one day, so an entity on a holiday still takes part in the
+ * path instead of vanishing.
+ *
+ * @param range - Inclusive range.
+ * @param calendar - Workspace working weekdays and holidays.
+ * @returns The working-day count, at least one.
+ */
+function workingDurationDays(
+  range: { startDate: string; endDate: string },
+  calendar: PlanningWorkingCalendar,
+) {
+  const start = Date.parse(`${range.startDate}T00:00:00.000Z`)
+  const end = Date.parse(`${range.endDate}T00:00:00.000Z`)
+  const workingWeekdays = new Set(calendar.workingWeekdays)
+  const holidays = new Set(calendar.holidays)
+  let count = 0
+  for (let day = start; day <= end; day += 86_400_000) {
+    const date = new Date(day)
+    if (
+      workingWeekdays.has(PLANNING_WEEKDAYS_BY_UTC_DAY[date.getUTCDay()] ?? 'sunday') &&
+      !holidays.has(date.toISOString().slice(0, 10))
+    ) {
+      count += 1
+    }
+  }
+  return Math.max(count, 1)
 }
 
 function effectiveEntityHealth(entity: StoredPlanningEntity) {

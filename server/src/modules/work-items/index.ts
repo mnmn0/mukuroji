@@ -39,6 +39,7 @@ export {
   addWorkItemScheduleCalendarDays,
   applyWorkItemScheduleOperation,
   calculateWorkItemScheduleDurationDays,
+  rebaseWorkItemScheduleCalendar,
   calculateWorkItemScheduleDateDeltaDays,
   calculateWorkItemScheduleEndDate,
   deriveWorkItemScheduleDueDate,

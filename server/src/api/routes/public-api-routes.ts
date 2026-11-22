@@ -770,11 +770,18 @@ function rejectInternalPublicCreateWorkItemFields(input: PublicCreateWorkItemInp
  */
 async function completePublicCreateWorkItemSchedule(
   directoryId: string,
+  teamId: string,
   input: PublicCreateWorkItemInput,
 ): Promise<CreateWorkItemInput> {
   const { schedule, dueDate, ...fields } = input
   if (schedule) return { ...fields, schedule }
-  const calendarPolicy = await readWorkspaceWorkItemCalendarPolicy(directoryId)
+  const projectId = typeof input.assignedProjectId === 'string' && input.assignedProjectId.trim()
+    ? input.assignedProjectId.trim()
+    : undefined
+  const calendarPolicy = await readWorkspaceWorkItemCalendarPolicy(
+    directoryId,
+    { teamId, ...(projectId ? { projectId } : {}) },
+  )
   return {
     ...fields,
     schedule: dueDate === undefined
@@ -796,7 +803,7 @@ async function createCanonicalPublicWorkItem(
   requireWorkspaceBusinessWrite(principal)
   const permission = await requireTeamPermission(principal, teamId, 'member')
   const body = normalizeTeamIssueInput(
-    await completePublicCreateWorkItemSchedule(principal.directoryId, input),
+    await completePublicCreateWorkItemSchedule(principal.directoryId, teamId, input),
     permission.team,
   )
   const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
@@ -1931,7 +1938,10 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       }
       await requirePublicImportPermission(principal, input)
       // Read before the job exists, so a failed read leaves nothing to fail and the client can retry.
-      const defaultCalendarPolicy = await readWorkspaceWorkItemCalendarPolicy(principal.directoryId)
+      const defaultCalendarPolicy = await readWorkspaceWorkItemCalendarPolicy(
+        principal.directoryId,
+        { teamId: input.teamId },
+      )
       const jobId = createWorkItemImportJobId(
         principal.directoryId,
         principal.userKey,
@@ -2696,7 +2706,7 @@ async function validatePublicImport(
     input.format,
     input.source.content,
     input.mapping,
-    calendarPolicy ?? await readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
+    calendarPolicy ?? await readWorkspaceWorkItemCalendarPolicy(principal.directoryId, { teamId: input.teamId }),
   )
   const errorsByRow = new Map<number, ImportRowError[]>(
     preview.rows.map((row) => [row.row, [...row.errors]]),

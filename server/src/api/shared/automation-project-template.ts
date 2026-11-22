@@ -31,6 +31,7 @@ import {
   prepareConfiguredCreateWorkItem,
 } from './work-item-configuration'
 import { requireActiveWorkspaceAssignee } from './workspace-access'
+import { applySharedCalendarToNewSchedule } from './workspace-calendar'
 
 /** One Project template Work Item placed on real dates, in parent-before-child order. */
 export type ExpandedProjectTemplateWorkItem = {
@@ -202,7 +203,11 @@ export async function createProjectTemplateWorkItems(
       team,
     )
     const projectFence = await requireAssignedProjectAcceptsNewWorkItems(directoryId, team, projectId)
-    const configuredBody = await prepareConfiguredCreateWorkItem(directoryId, teamId, body, configuration)
+    const configuredBody = await prepareConfiguredCreateWorkItem(directoryId, teamId, {
+      ...body,
+      // A schedule that follows the shared calendar takes the Project calendar (ADR 0058).
+      schedule: await applySharedCalendarToNewSchedule(directoryId, { teamId, projectId }, body.schedule),
+    }, configuration)
     const response = await workItemDependencies.teamIssues.createTeamIssue(
       directoryId,
       teamId,

@@ -19,6 +19,7 @@ import { registerProjectCharterRoutes } from './routes/project-charter-routes'
 import { registerProjectRaidLogRoutes } from './routes/project-raid-log-routes'
 import { registerWeeklyReportRoutes } from './routes/weekly-report-routes'
 import { registerScheduleBaselineRoutes } from './routes/schedule-baseline-routes'
+import { registerWorkCalendarRoutes } from './routes/work-calendar-routes'
 import { registerDirectoryAdministrationRoutes } from './routes/directory-administration-routes'
 import { registerCollaborationRoutes } from './routes/collaboration-routes'
 import { registerRequestIntakeRoutes } from './routes/request-intake-routes'
@@ -176,6 +177,7 @@ registerProjectCharterRoutes(routeApp)
 registerProjectRaidLogRoutes(routeApp)
 registerWeeklyReportRoutes(routeApp)
 registerScheduleBaselineRoutes(routeApp)
+registerWorkCalendarRoutes(routeApp)
 registerDirectoryAdministrationRoutes(routeApp)
 registerCollaborationRoutes(routeApp)
 registerRequestIntakeRoutes(routeApp)

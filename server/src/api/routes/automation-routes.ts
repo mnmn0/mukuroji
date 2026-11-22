@@ -184,7 +184,10 @@ import {
   enforceActiveTenantForWorkspace,
   requireActiveWorkspaceAssignee,
 } from '../shared/workspace-access'
-import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
+import {
+  applySharedCalendarToNewSchedule,
+  readWorkspaceWorkItemCalendarPolicy,
+} from '../shared/workspace-calendar'
 
 async function readAutomationJson(c: Context) {
   const value = await readJson<unknown>(c.req)
@@ -1970,10 +1973,19 @@ async function executeAutomationWorkItemCreate(
     readAssignedProjectId(normalizedBody.assignedProjectId),
     dependencies.projectDirectory,
   )
+  const automationProjectId = readAssignedProjectId(normalizedBody.assignedProjectId)
   const configuredBody = await prepareConfiguredCreateWorkItem(
     context.execution.workspaceId,
     teamId,
-    normalizedBody,
+    {
+      ...normalizedBody,
+      // A schedule that follows the shared calendar takes the Team or Project one (ADR 0058).
+      schedule: await applySharedCalendarToNewSchedule(
+        context.execution.workspaceId,
+        { teamId, ...(automationProjectId ? { projectId: automationProjectId } : {}) },
+        normalizedBody.schedule,
+      ),
+    },
     await dependencies.workItemConfigurations.getTeamConfiguration(
       context.execution.workspaceId,
       teamId,
