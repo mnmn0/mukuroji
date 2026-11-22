@@ -330,5 +330,15 @@ describe('Markdown import', () => {
     )
     expect(markup).toContain('Markdown を取り込む')
     expect(markup).toContain('type="file"')
+    expect(markup).not.toContain('フォルダを取り込む')
+    const withFolder = renderToStaticMarkup(
+      <DocumentHome
+        {...props}
+        onImportMarkdown={async () => undefined}
+        onImportMarkdownFolder={async () => undefined}
+      />,
+    )
+    expect(withFolder).toContain('フォルダごと取り込む')
+    expect(withFolder).toContain('フォルダを取り込む')
   })
 })

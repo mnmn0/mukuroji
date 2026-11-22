@@ -1191,12 +1191,15 @@ function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string
         parts.push(`${'#'.repeat(block.level + 1)} ${escapeMarkdownText(block.text)}`)
         break
       case 'table': {
+        // Rows are joined by single newlines: a blank line ends a GFM table.
         parts.push(
-          `| ${block.columns.map(escapeMarkdownTableCell).join(' | ')} |`,
-          `| ${block.columns.map(() => '---').join(' | ')} |`,
-          ...block.rows.map(
-            (row) => `| ${row.cells.map(({ text }) => escapeMarkdownTableCell(text)).join(' | ')} |`,
-          ),
+          [
+            `| ${block.columns.map(escapeMarkdownTableCell).join(' | ')} |`,
+            `| ${block.columns.map(() => '---').join(' | ')} |`,
+            ...block.rows.map(
+              (row) => `| ${row.cells.map(({ text }) => escapeMarkdownTableCell(text)).join(' | ')} |`,
+            ),
+          ].join('\n'),
         )
         break
       }

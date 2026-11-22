@@ -89,6 +89,24 @@ test('validates, renders, and collects relations without AWS or Hono dependencie
   }])
 })
 
+test('renders a table as one GitHub Flavored Markdown table without blank lines between rows', () => {
+  const page = createPage({
+    blocks: [{
+      id: 'block-table',
+      type: 'table',
+      columns: ['Name', 'Note'],
+      rows: [
+        { id: 'row-1', cells: [{ id: 'cell-1', text: 'A' }, { id: 'cell-2', text: 'x' }] },
+        { id: 'row-2', cells: [{ id: 'cell-3', text: 'B' }, { id: 'cell-4', text: 'y' }] },
+      ],
+    }],
+  })
+
+  expect(renderDocumentExport(page, 'markdown').content).toBe(
+    '# Document\n\n| Name | Note |\n| --- | --- |\n| A | x |\n| B | y |\n',
+  )
+})
+
 test('rejects malformed document payloads with domain errors', () => {
   const missingBlocks = createPage()
   Reflect.deleteProperty(missingBlocks, 'blocks')

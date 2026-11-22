@@ -128,6 +128,10 @@ import type {
   MarkdownDocumentImportRequest,
   MarkdownImportErrorCode,
 } from './model/markdownImport'
+import type {
+  MarkdownFolderImportFailure,
+  MarkdownFolderImportRequest,
+} from './model/markdownFolderImport'
 import {
   createDocumentWorkItemRelation,
   createDocumentWorkItemSourceKey,
@@ -302,6 +306,13 @@ export type DocumentScreenActions = {
   importMarkdown?: (
     request: MarkdownDocumentImportRequest,
   ) => Promise<MarkdownImportErrorCode | undefined>
+  /**
+   * Creates folders and pages from the Markdown files of a folder and
+   * resolves with why the folder cannot be imported, if it cannot.
+   */
+  importMarkdownFolder?: (
+    request: MarkdownFolderImportRequest,
+  ) => Promise<MarkdownFolderImportFailure | undefined>
   /**
    * Creates a Work Item and returns its canonical ID.
    */
@@ -1500,6 +1511,7 @@ export function DocumentPage() {
           ? checklistWorkItemCreation.createWorkItem
           : undefined,
         importMarkdown: markdownImport.importMarkdown,
+        importMarkdownFolder: markdownImport.importMarkdownFolder,
         createShare: handleCreateShare,
         deleteShare: handleDeleteShare,
         exportDocument: handleExport,
@@ -2210,6 +2222,17 @@ export function DocumentScreen({
                             code = await actions.importMarkdown?.(request)
                           })
                           return code
+                        }
+                      : undefined
+                  }
+                  onImportMarkdownFolder={
+                    data.canCreateDocuments && actions.importMarkdownFolder
+                      ? async (request) => {
+                          let failure: MarkdownFolderImportFailure | undefined
+                          await runGuardedAction(async () => {
+                            failure = await actions.importMarkdownFolder?.(request)
+                          })
+                          return failure
                         }
                       : undefined
                   }
