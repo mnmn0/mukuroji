@@ -9,6 +9,7 @@ import {
   type RefObject,
 } from 'react'
 import { useSWRConfig } from 'swr'
+import { WORKSPACE_INVITATION_NAME_MAX_LENGTH } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import {
   acknowledgeWorkspaceInvitationCleanup,
@@ -739,6 +740,7 @@ export function WorkspaceAccessPanel({
                 {t('workspace.access.invite.name')}
                 <input
                   className="workbench-input min-h-10 px-3"
+                  maxLength={WORKSPACE_INVITATION_NAME_MAX_LENGTH}
                   name="name"
                   placeholder={t('workspace.access.invite.namePlaceholder')}
                 />
@@ -1652,6 +1654,14 @@ function resolveWorkspaceAccessErrorMessage(
   if (error instanceof WorkspaceAccessApiError) {
     if (error.code === 'CognitoUserDisabled') {
       return t('workspace.access.error.cognitoUserDisabled')
+    }
+
+    if (error.code === 'InvalidWorkspaceEmail') {
+      return t('workspace.access.bulk.issue.invalid-email')
+    }
+
+    if (error.code === 'InvalidWorkspaceInvitationName') {
+      return t('workspace.access.bulk.issue.name-too-long')
     }
 
     if (error.status === 409) {
