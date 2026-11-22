@@ -428,3 +428,12 @@ for (const frequency of ['daily', 'weekly'] as const) for (const boundary of ['b
   expect(history).toHaveLength(1)
   expect(history[0]).toMatchObject({ id: `${frequency}:${frequency === 'daily' ? '2026-10-04' : '2026-09-28'}`, status: 'completed' })
 })
+
+test('stores the digest archived and on no channel when the member turned its category off for the Inbox', () => {
+  const message = { id: 'update-feed-digest:daily:2026-10-03', occurredAt: '2026-10-03T00:00:00.000Z', deepLink: '/updates' }
+  expect(createInboxDigestNotification(recipient, message)).toMatchObject({ inboxState: 'unread', deliveryChannels: ['inApp'] })
+  const archived = createInboxDigestNotification(recipient, message, 'en', true)
+  expect(archived).toMatchObject({
+    inboxState: 'archived', recipientStatusKey: 'workspace#reader#archived', archivedAt: message.occurredAt, deliveryChannels: [],
+  })
+})

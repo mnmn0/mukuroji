@@ -13,8 +13,8 @@ import {
   NOTIFICATION_BULK_ACTIONS,
   NOTIFICATION_BULK_MAXIMUM,
   type NotificationBulkAction,
-  type NotificationBulkFailure,
 } from '@mukuroji/contracts'
+import { updateNotificationsInBulk } from '../../application/bulk-notification-update'
 import { normalizePersonalReminderDays } from '../../domain/reminder-days'
 import {
   normalizeNotificationCategoryChannels,
@@ -158,21 +158,13 @@ export function createNotificationRouter<
       const principal = await dependencies.authenticate(accessToken, context)
       const value = await dependencies.readJson(context.req)
       const request = readNotificationBulkRequest(isRecord(value) ? value : {})
-      const isVisible = await dependencies.createVisibilityFilter(principal)
-      const notifications = dependencies.getNotifications()
-      const result = await applyNotificationBulkAction(request, (notificationId) => notifications.update({
+      const result = await updateNotificationsInBulk(dependencies.getNotifications(), {
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
-        notificationId,
-        action: request.action,
-        isVisible,
-      }))
-      const unreadCount = await notifications.countUnread({
-        workspaceId: principal.directoryId,
-        memberKey: principal.userKey,
-        isVisible,
+        ...request,
+        isVisible: await dependencies.createVisibilityFilter(principal),
       })
-      return context.json({ ...result, unreadCount })
+      return context.json({ ...result, notifications: result.notifications.map(toPublicNotification) })
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -364,41 +356,6 @@ function readNotificationBulkRequest(value: Record<string, unknown>): Notificati
   return { action, notificationIds: [...new Set(ids.map((id) => id.trim()))] }
 }
 
-/**
- * Applies one action to each notification, a few at a time, and collects per-notification
- * failures instead of failing the whole request, so a client can keep the failed ones selected.
- * Each change runs the same ownership, visibility, and version checks as a single update.
- * @param request - Validated action and IDs.
- * @param update - Applies the action to one notification.
- * @returns Changed notifications and failures, both in request order.
- * @throws The first error that is not a NotificationError, such as a storage outage.
- */
-async function applyNotificationBulkAction(
-  request: NotificationBulkRequest,
-  update: (notificationId: string) => Promise<NotificationItem>,
-) {
-  const results: Array<{ notification?: NotificationItem, failure?: NotificationBulkFailure }> = []
-  for (let start = 0; start < request.notificationIds.length; start += bulkConcurrency) {
-    const chunk = request.notificationIds.slice(start, start + bulkConcurrency)
-    results.push(...await Promise.all(chunk.map(async (id) => {
-      try {
-        return { notification: await update(id) }
-      } catch (error) {
-        if (error instanceof NotificationError) {
-          return { failure: { id, status: error.status, code: error.code } }
-        }
-        throw error
-      }
-    })))
-  }
-  return {
-    notifications: results.flatMap((result) => result.notification ? [toPublicNotification(result.notification)] : []),
-    failures: results.flatMap((result) => result.failure ? [result.failure] : []),
-  }
-}
-
-/** Notifications a bulk request changes at the same time. */
-const bulkConcurrency = 4
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)

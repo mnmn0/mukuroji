@@ -106,6 +106,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
 
 - 投影（`createNotificationProjectionDeliveryState`）: 種類やミュートで in-app に届かない通知は archived row として保存し、unread には入れません（アーカイブの一覧には出ます）。全体の in-app switch が off のときは従来どおり `inAppVisible: false` で一覧にも出しません。届かない channel は `deliveryChannels` と Slack / Email の queue に入れません
 - 外部 channel の送信（`deliverDueChannelNotifications`）: 送る直前に強整合で読んだ preference で同じ判定をやり直し、投影後に種類を切ったりミュートしたりした通知は `suppressed` にします
+- 更新ダイジェスト（`update-feed.digest`、種類は other）: Inbox に書く時点で同じ判定を使い、in-app に届かなければ archived row にします
 - 判定は受信者本人の設定で配信を減らすだけで、受信者の選び方と閲覧権限の確認は変えません
 
 ### Inbox の一括操作
@@ -115,7 +116,7 @@ POST /api/notifications/bulk
 { "action": "mark-read" | "mark-unread" | "archive" | "restore", "notificationIds": ["..."] }
 ```
 
-1 回に 50 件まで受け付け、同じ ID は 1 回だけ処理します。各通知は `PATCH /api/notifications/{notificationId}` と同じ所有者・現在権限・version の確認を通り、4 件ずつ並行して更新します。更新できなかった通知は request 全体を失敗にせず、`failures` に `{ id, status, code }` で返します。response は `{ notifications, failures, unreadCount }` です。storage の障害など NotificationError でない失敗は request 全体を失敗にします。Web は選択を 50 件ずつに分けて送り、失敗した通知を選択に残します。
+1 回に 50 件まで受け付け、同じ ID は 1 回だけ処理します。各通知は `PATCH /api/notifications/{notificationId}` と同じ所有者・現在権限・version の確認を通り、4 件ずつ並行して更新します。更新できなかった通知は request 全体を失敗にせず、`failures` に `{ id, status, code }` で返します。処理は `application/bulk-notification-update.ts` が持ち、route は入力の検証と response の変換だけを行います。response は `{ notifications, failures, unreadCount }` です。storage の障害など NotificationError でない失敗は request 全体を失敗にします。Web は選択を 50 件ずつに分けて送り、失敗した通知を選択に残します。
 
 ## Web Push の購読
 
