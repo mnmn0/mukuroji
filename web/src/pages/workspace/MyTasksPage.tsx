@@ -106,11 +106,8 @@ import {
   WorkspaceTaskLoadNotice,
 } from '../../workspace/ui/WorkspaceDataNotices'
 import { MyTasksWorkspaceView, type MyTasksViewMode } from '../../workspace/ui/MyTasksWorkspaceView'
-import {
-  normalizeHierarchyTeamIds,
-  useTeamWorkItemHierarchies,
-} from '../../work-items/queries/useTeamWorkItemHierarchies'
-import { loadTeamWorkItemHierarchies } from '../../work-items/queries/teamWorkItemHierarchies'
+import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
+import { useTeamWorkItemHierarchiesRefresh } from '../../work-items/mutations/useTeamWorkItemHierarchiesRefresh'
 import { listTaskGanttRowTasks } from '../../tasks/model/taskGanttRows'
 import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
@@ -313,11 +310,14 @@ export function MyTasksPage() {
     isLoading: isMyTasksHierarchiesLoading,
     isValidating: isMyTasksHierarchiesValidating,
     mutate: mutateMyTasksHierarchies,
-    key: myTasksHierarchiesKey,
   } = useTeamWorkItemHierarchies(
     workspace.accessToken,
     myTasksOutlineTeamIds,
     workspace.canLoadWorkspaceData && isMyTasksOutlineShown,
+  )
+  const refreshMyTasksHierarchies = useTeamWorkItemHierarchiesRefresh(
+    workspace.accessToken,
+    myTasksOutlineTeamIds,
   )
   const [collapsedMyTasksOutlineKeys, toggleMyTasksOutlineKey] =
     useCollapsedWorkItemOutlineKeys('my-tasks')
@@ -473,26 +473,13 @@ export function MyTasksPage() {
     readTasks: (token) => loadWorkspaceWorkItems(token, includeArchivedWorkItems, myTasksWorkItemFilter),
     t,
     // The Gantt outline rolls child dates up to summary rows, which only the hierarchy holds.
-    refreshHierarchy: async () => {
-      const accessToken = workspace.accessToken
-      const guardEnterpriseSession = workspace.guardEnterpriseSession
-      if (!myTasksHierarchiesKey || !accessToken) return
-      // The pending read is handed to SWR, which drops it when a later refresh started after it.
-      await mutateCache(
-        myTasksHierarchiesKey,
-        guardEnterpriseSession(
-          loadTeamWorkItemHierarchies(normalizeHierarchyTeamIds(myTasksOutlineTeamIds), accessToken),
-        ),
-        { revalidate: false },
-      )
-    },
+    refreshHierarchy: () => refreshMyTasksHierarchies(workspace.guardEnterpriseSession),
     tasksCacheKey: workItems.workItemsKey,
   }), [
     includeArchivedWorkItems,
     mutateCache,
     mutationRequestRunner,
-    myTasksHierarchiesKey,
-    myTasksOutlineTeamIds,
+    refreshMyTasksHierarchies,
     t,
     workItems.workItemsKey,
     workspace.accessToken,
