@@ -248,12 +248,17 @@ function prepareMilestone(milestone: AnalyticsMilestoneHistory): PreparedMilesto
   }).sort((left, right) => left.at - right.at || left.eventId.localeCompare(right.eventId))
   const prepared: PreparedMilestone = { milestone, createdAt, history }
   // An ancestor move changes the scope without an event of the Milestone; place that change at
-  // the latest write, which is no earlier than the move, so earlier dates stay hidden.
+  // the latest write, which is no earlier than the move, and after the last recorded event, so
+  // earlier dates and the changes recorded in the other scope stay hidden.
   const recordedTeamId = latestRecordedValue(history, 'teamId', milestone.teamId)
   const recordedProjectId = latestRecordedValue(history, 'projectId', milestone.projectId)
   if (recordedTeamId !== milestone.teamId || recordedProjectId !== milestone.projectId) {
     const updatedAt = Date.parse(milestone.updatedAt)
-    const at = Math.max(Number.isNaN(updatedAt) ? 0 : updatedAt, history.at(-1)?.at ?? 0)
+    const lastRecordedAt = history.at(-1)?.at
+    const at = Math.max(
+      Number.isNaN(updatedAt) ? 0 : updatedAt,
+      lastRecordedAt === undefined ? 0 : lastRecordedAt + 1,
+    )
     history.push({
       eventId: '\uffffinferred-scope',
       occurredAt: new Date(at).toISOString(),

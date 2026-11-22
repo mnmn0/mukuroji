@@ -10,7 +10,10 @@ import type { AuditEventV1, AuditValue } from '../../modules/audit/audit'
 import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { filterPlanningSnapshotForPrincipal, withPlanningLegacyReadScope } from './planning-access'
-import { PLANNING_ENTITY_AUDIT_ENTITY_TYPE } from './planning-entity-audit'
+import {
+  PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
+  readPlanningEntityAuditScopes,
+} from './planning-entity-audit'
 import type { WorkspacePrincipal } from './project-access'
 
 /** Maximum number of Milestones one Analytics query reads. */
@@ -34,16 +37,20 @@ const ANALYTICS_MILESTONE_AUDIT_CONCURRENCY = 8
 /** Attempts to read a Milestone history that covers the current Planning graph. */
 const ANALYTICS_MILESTONE_READ_ATTEMPTS = 3
 
+/** Scope recorded for an event whose scope metadata is malformed; it never matches a real scope. */
+const ANALYTICS_MILESTONE_UNKNOWN_SCOPE = '\u0000unknown-scope'
+
 /** Audit event type prefix of Planning entity changes. */
 const PLANNING_ENTITY_AUDIT_EVENT_TYPE_PREFIX = 'planning-entity.'
 
 /**
  * Reads the live Milestones of the Planning graph that the caller can read now.
  *
- * The graph is filtered with the caller's current Planning ACL, the same rule as
+ * A legacy caller's graph is filtered with the current Planning ACL, the same rule as
  * `GET /api/planning`. Analytics routes authorize `work-items.read`, so an Enterprise caller's
- * scopes on the principal belong to that permission; `planning.read` is then evaluated again at
- * each Milestone's own Team, Project, or Workspace resource, and a missing evaluation keeps none.
+ * scopes on the principal belong to that permission and are not used; `planning.read` is
+ * evaluated at each Milestone's own Team, Project, or Workspace resource instead, and a missing
+ * evaluation keeps none.
  *
  * @param principal - Authenticated Workspace principal.
  * @returns The readable live Milestones.
@@ -52,11 +59,14 @@ export async function readReadableAnalyticsMilestones(
   principal: WorkspacePrincipal,
 ): Promise<PlanningEntity[]> {
   // Only the entities are read; the Work Item state feeds progress, which the trend does not use.
-  const snapshot = filterPlanningSnapshotForPrincipal(
-    await withPlanningLegacyReadScope(principal),
-    await workItemDependencies.planning.get(principal.directoryId, { workItems: [] }),
-  )
-  return snapshot.entities.filter((entity) =>
+  const planning = await workItemDependencies.planning.get(principal.directoryId, { workItems: [] })
+  // The Enterprise scopes on the principal belong to `work-items.read`, so filtering with them
+  // would intersect Planning access with unrelated Work Item grants; `planning.read` alone decides.
+  const entities = principal.isSystemAdmin || principal.enterprisePermissions !== undefined
+    ? planning.entities
+    : filterPlanningSnapshotForPrincipal(await withPlanningLegacyReadScope(principal), planning)
+      .entities
+  return entities.filter((entity) =>
     entity.type === 'milestone' &&
     entity.archivedAt === undefined &&
     canReadPlanningScope(principal, entity)
@@ -308,8 +318,8 @@ async function readMilestoneAuditHistories(
  *
  * @param event - Audit event from the entity timeline.
  * @param entityId - Milestone ID the timeline was queried for.
- * @returns The change, or `undefined` when the event is not this entity's Planning change or
- *   changes none of the read fields.
+ * @returns The change with the scope the event recorded, or `undefined` when the event is not
+ *   this entity's Planning change.
  */
 function toMilestoneChange(
   event: AuditEventV1,
@@ -335,9 +345,17 @@ function toMilestoneChange(
       ...(after === undefined ? {} : { after }),
     }]
   })
-  return changes.length === 0
-    ? undefined
-    : { eventId: event.eventId, occurredAt: event.occurredAt, changes }
+  // Each event records the scope the Milestone had when it was written. An ancestor move changes
+  // that scope without an event of the Milestone, so the recorded scope of every event is kept,
+  // and dates written while the Milestone sat in another scope stay hidden after it returns.
+  const scopes = readPlanningEntityAuditScopes(event)
+  const scope = scopes?.[0]
+  for (const field of ['teamId', 'projectId'] as const) {
+    if (changes.some((change) => change.field === field)) continue
+    const value = scope === undefined ? ANALYTICS_MILESTONE_UNKNOWN_SCOPE : scope[field]
+    changes.push(value === undefined ? { field } : { field, before: value, after: value })
+  }
+  return { eventId: event.eventId, occurredAt: event.occurredAt, changes }
 }
 
 /**

@@ -142,10 +142,10 @@ burnup の `scope` で scope 追加を区別できます。これらの metric �
 ### Milestone trend
 
 Milestone trend は Work Item ではなく Planning の Milestone を入力にします。API は `milestone-trend` widget を
-含む query のときだけ Planning graph を読み、`GET /api/planning` と同じ current Planning ACL で絞った live
-（archive されていない）Milestone を使います。Analytics の route は `work-items.read` で認可されるため、Enterprise
-の caller には各 Milestone の Team / Project / Workspace resource で `planning.read` を改めて評価し、許可のない
-Milestone は読みません。Team / Project filter は Milestone の現在の scope に適用し、
+含む query のときだけ Planning graph を読み、live（archive されていない）Milestone を使います。従来の権限の
+caller は `GET /api/planning` と同じ current Planning ACL で絞ります。Analytics の route は `work-items.read` で
+認可され、Enterprise の caller の principal にある scope はその permission のものなので使わず、各 Milestone の
+Team / Project / Workspace resource で `planning.read` を評価し、許可のない Milestone は読みません。Team / Project filter は Milestone の現在の scope に適用し、
 どちらかを指定すると Workspace scope の Milestone は含めません。`asOf` より後に作られた Milestone も含めません。
 1 query で読む Milestone は 100 件まで（超えたら `413`）で、Work Item 用の filter（担当者、status、
 custom field、Work Item 一覧など）は Milestone に効きません。
@@ -155,9 +155,10 @@ custom field、Work Item 一覧など）は Milestone に効きません。
 あたり 20 page、全体で page query 500 回・event 10,000 件です（超えたら `413`）。ある時点の値は、その時点以前の
 最新の変更の `after`、なければそれより後の最初の変更の `before`、変更がなければ現在値です。Milestone は作成後、
 かつ記録された Team / Project scope が現在と同じ間だけ予定日を返すので、閲覧者が今は読めない scope に
-あった間の履歴は返しません。親（Initiative など）の移動で Milestone の scope が変わった場合は Milestone 自身の
-event がないため、記録上の scope が現在と違うときは最後の書き込み時刻（`updatedAt`）で変わったとみなし、それより
-前の予定日は返しません。Audit を書く前に作られた Milestone は作成時から現在の予定日を返し、warning を付けます。
+あった間の履歴は返しません。記録上の scope には、各 event が metadata に残した書き込み時点の Team / Project も
+使います。親（Initiative など）の移動で Milestone の scope が変わった場合は Milestone 自身の event がないため、
+別の Team へ移って戻った間の変更もその event の scope で隠れます。最新の記録上の scope が現在と違うときは最後の
+書き込み時刻（`updatedAt`、最後の event より後）で変わったとみなし、それより前の予定日は返しません。Audit を書く前に作られた Milestone は作成時から現在の予定日を返し、warning を付けます。
 Audit の entity index は結果整合なので、各 Milestone の最新の記録済み予定日が現在の予定日と一致するまで Planning と
 audit を読み直し（3 回まで）、揃わなければ `503`（`AnalyticsReadBarrierUnavailable`）で fail-closed にします。
 

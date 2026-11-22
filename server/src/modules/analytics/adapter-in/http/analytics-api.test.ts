@@ -22,10 +22,13 @@ import {
   createDefaultTenantAdministrationSnapshot,
 } from '../../../tenant-administration'
 import { InMemoryPlanningClient } from '../../../planning/planning'
+import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import type {
   AnalyticsQueryInput,
   AnalyticsSnapshotListResponse,
   AnalyticsSnapshotRecord,
+  EnterpriseCustomRole,
+  EnterpriseRoleAssignment,
 } from '@mukuroji/contracts'
 import {
   afterEach,
@@ -1342,6 +1345,7 @@ test('draws the Milestone trend from the readable Milestones and their Planning 
         return {
           events: [{
             ...event,
+            metadata: { teamId: 'core-team', projectId: 'refero' },
             changes: [{ field: 'forecast.endDate', before: '2026-08-10', after: '2026-08-20' }],
           }],
         }
@@ -1401,6 +1405,7 @@ test('draws the Milestone trend from the readable Milestones and their Planning 
         return {
           events: [{
             ...event,
+            metadata: { teamId: 'core-team', projectId: 'refero' },
             changes: [{ field: 'forecast.endDate', before: '2026-08-10', after: '2026-08-15' }],
           }],
         }
@@ -1414,4 +1419,114 @@ test('draws the Milestone trend from the readable Milestones and their Planning 
   })
   expect(stale.status).toBe(503)
   expect(await stale.json()).toMatchObject({ code: 'AnalyticsReadBarrierUnavailable' })
+
+  // An ancestor moved the Milestone to another Team and back without events of its own. The date
+  // changed while it sat in the other Team stays hidden, and so does the earlier date.
+  setTestAppDependencies({
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        if (input.entityType !== 'planning-entity' || input.entityId !== 'milestone-core') {
+          return { events: [] }
+        }
+        const event = createAnalyticsAuditEvent('planning-entity', 'milestone-core', '2026-07-10T09:00:00.000Z')
+        return {
+          events: [{
+            ...event,
+            metadata: { teamId: 'other-team' },
+            changes: [{ field: 'forecast.endDate', before: '2026-08-10', after: '2026-08-20' }],
+          }],
+        }
+      },
+    },
+  })
+  const roundTrip = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, projectIds: ['refero'] },
+    widgets,
+  })
+  expect(roundTrip.status).toBe(200)
+  const roundTripWidget = (await roundTrip.json()).snapshot.widgets[0]
+  expect(roundTripWidget.groups).toEqual([
+    { key: 'milestone-core', label: 'Milestone milestone-core', value: 0, sampleSize: 0 },
+  ])
+  expect(roundTripWidget.series.flatMap((point: { segments: Array<{ value: number }> }) =>
+    point.segments.map((segment) => segment.value))).not.toContain(20675)
+})
+
+test('reads Enterprise Milestones by planning.read instead of the Work Item scopes', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [], teamProjects: [] })
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date('2026-07-01T00:00:00.000Z'))
+  const parent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
+  await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
+  await planning.create(workspaceId, createMilestoneInput('milestone-core', 2, { teamId: 'core-team' }), {
+    workItems: [],
+  })
+  await planning.create(workspaceId, createMilestoneInput('milestone-planning', 3, {
+    teamId: 'planning-team',
+  }), { workItems: [] })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const assignments: EnterpriseRoleAssignment[] = [
+    {
+      workspaceId, assignmentId: 'core-member', principalKind: 'member', principalId: 'demo@example.com',
+      roleId: 'team:member', scope: { workspaceId, kind: 'team', targetId: 'core-team' }, source: 'direct',
+    },
+    {
+      workspaceId, assignmentId: 'planning-reader', principalKind: 'member', principalId: 'demo@example.com',
+      roleId: 'custom:planning-reader', scope: { workspaceId, kind: 'team', targetId: 'planning-team' },
+      source: 'direct',
+    },
+  ]
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:planning-reader', name: 'Planning reader',
+    permissions: ['planning.read'], guestAssignable: false, revision: 1,
+    createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: assignments,
+    customRoles: [customRole],
+  })
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    enterpriseIdentity: identity,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, teamIds: ['core-team', 'planning-team'] },
+    widgets: [{
+      id: 'trend',
+      type: 'table' as const,
+      title: 'Milestone trend',
+      metric: 'milestone-trend' as const,
+    }],
+  })
+
+  expect(response.status).toBe(200)
+  // The Planning-only Team grant shows its Milestone although it gives no Work Item access.
+  expect((await response.json()).snapshot.widgets[0].rows.map((row: { id: string }) => row.id).sort())
+    .toEqual(['milestone-core', 'milestone-planning'])
 })
