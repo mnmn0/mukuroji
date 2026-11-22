@@ -12442,11 +12442,12 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/reports')
 
+    // Team groups show the directory's Team names, not the API labels.
     await expect(page.getByTestId('analytics-widget-chart-cycle-time')).toContainText(
-      'Core team',
+      'コアチーム',
     )
     await expect(page.getByTestId('analytics-widget-chart-cycle-time')).toContainText(
-      'Design team',
+      'デザインチーム',
     )
     await expect(page.getByTestId('analytics-widget-table-overdue')).toContainText(
       'Harden billing webhook retries',

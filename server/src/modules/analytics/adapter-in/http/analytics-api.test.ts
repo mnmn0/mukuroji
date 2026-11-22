@@ -1196,6 +1196,47 @@ test('returns current-ACL evidence and CSV exports from Analytics endpoints', as
   expect(pdfSource).not.toContain('core-team')
 })
 
+test('prints only the names of Teams the caller reads when a Project ID repeats across Teams', async () => {
+  configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'other-team',
+      name: 'Other Team',
+      projects: [{ id: 'refero', name: 'Other Refero', tone: 'blue' }],
+    }],
+    projectAccesses: [{ projectId: 'refero', teamId: 'core-team', role: 'viewer' }],
+  })
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const exported = await analyticsApiRequest('/api/analytics/export', {
+    query: {
+      ...query,
+      filter: {
+        ...query.filter,
+        teamIds: ['core-team', 'other-team'],
+        workItemTypeIds: ['other-team\u0000work-item'],
+      },
+    },
+    format: 'pdf',
+    locale: 'en',
+  })
+
+  expect(exported.status).toBe(200)
+  const source = Buffer.from(await exported.arrayBuffer()).toString('latin1')
+  expect(source).toContain('Teams: Core Team, other-team')
+  expect(source).not.toContain('Other Team')
+  expect(source).not.toContain('Other Refero')
+})
+
 /**
  * Makes the test Workspace read as having saved Sunday weeks and April fiscal years.
  */

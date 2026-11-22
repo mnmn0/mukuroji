@@ -23,6 +23,33 @@ const customFieldGroupingWidgets = analyticsWidgetFixtures.map((widget) =>
       }
     : widget)
 
+const namedGroupWidgets = analyticsWidgetFixtures.map((widget) =>
+  widget.id === 'chart-cycle-time'
+    ? { ...widget, groupBy: { dimension: 'assignee' as const } }
+    : widget)
+
+/** Assignee groups keyed by member key, with one group of unassigned Work Items. */
+const namedGroupSnapshot = {
+  ...analyticsSnapshotFixture,
+  widgets: analyticsSnapshotFixture.widgets.map((result) =>
+    result.widgetId === 'chart-cycle-time'
+      ? {
+          ...result,
+          groups: [
+            { key: 'sato@example.com', label: 'sato@example.com', sampleSize: 12, value: 24.5 },
+            { key: 'kato@example.com', label: 'kato@example.com', sampleSize: 9, value: 31.2 },
+            { key: '', label: 'Unassigned', sampleSize: 4, value: 40.8 },
+          ],
+        }
+      : result),
+}
+
+/** Members whose names replace member keys; one has no name and shows the email. */
+const namedGroupMembers = [
+  { id: 'sato@example.com', email: 'sato@example.com', name: '佐藤 花子' },
+  { id: 'kato@example.com', email: 'kato@example.com' },
+]
+
 const multipleFilters = {
   ...analyticsFilterFixture,
   assigneeUserIds: ['owner@example.com', 'reviewer@example.com'],
@@ -111,6 +138,23 @@ export const MobileFilters: Story = {
     await expect(canvas.getByTestId('analytics-team-filter')).toBeVisible()
     await userEvent.click(disclosure)
     await expect(canvas.getByTestId('analytics-team-filter')).not.toBeVisible()
+  },
+}
+
+/**
+ * 担当者で分けた chart です。member key の代わりに名前（名前がなければメール）、担当者なしは
+ * 「未設定」で表示します。
+ */
+export const NamedAssigneeGroups: Story = {
+  args: {
+    members: namedGroupMembers,
+    snapshot: namedGroupSnapshot,
+    widgets: namedGroupWidgets,
+  },
+  play: async ({ canvasElement }) => {
+    const widget = within(canvasElement).getByTestId('analytics-widget-chart-cycle-time')
+    await expect(widget).toHaveTextContent('佐藤 花子')
+    await expect(widget).toHaveTextContent('未設定')
   },
 }
 

@@ -60,11 +60,13 @@ import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
   getEffectiveProjectAccessList,
+  getEffectiveProjectScopeAccessList,
   hasEnterpriseWorkspacePermission,
   type ProjectPrincipal,
   requireTeamPermission,
   requireWorkspaceAdministration,
   requireWorkspaceBusinessWrite,
+  resolveProjectAccessTeamId,
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
 } from '../shared/project-access'
@@ -204,23 +206,26 @@ async function readAnalyticsExportNames(
     principal.directoryId,
     locale,
   )
-  const readableProjectIds = principal.isSystemAdmin
+  // Project IDs can repeat across Teams, so readable Projects are matched by Team and Project.
+  const readableProjectKeys = principal.isSystemAdmin
     ? undefined
     : new Set(
-        (await getEffectiveProjectAccessList(principal))
-          .filter((access) => projectAccessAllows(access, 'viewer'))
-          .map((access) => access.projectId),
+        (await getEffectiveProjectScopeAccessList(principal, directory)).flatMap((access) => {
+          if (!projectAccessAllows(access, 'viewer')) return []
+          const teamId = resolveProjectAccessTeamId(access, directory)
+          return teamId === undefined ? [] : [`${teamId}\0${access.projectId}`]
+        }),
       )
   const authorizedTeamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
   const teams = directory.teams
     .map((team) => ({
       ...team,
       projects: team.projects.filter((project) =>
-        readableProjectIds === undefined || readableProjectIds.has(project.id)
+        readableProjectKeys === undefined || readableProjectKeys.has(`${team.id}\0${project.id}`)
       ),
     }))
     .filter((team) =>
-      readableProjectIds === undefined ||
+      readableProjectKeys === undefined ||
       authorizedTeamIds.has(team.id) ||
       team.projects.length > 0
     )
