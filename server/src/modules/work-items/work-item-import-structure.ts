@@ -25,7 +25,7 @@ export const WORK_ITEM_IMPORT_STRUCTURE_TARGET_FIELDS = [
 /** Import target field that fills the contributor assignments of the created Work Item. */
 export const WORK_ITEM_IMPORT_CONTRIBUTORS_TARGET_FIELD = 'contributors'
 
-/** Most schedule dependencies or relations one imported row may declare. */
+/** Most schedule dependencies one imported row may declare. */
 export const WORK_ITEM_IMPORT_ROW_LINK_LIMIT = 50
 
 /** Longest row key, WBS number, or reference accepted in an import. */
@@ -633,8 +633,9 @@ function readRelations(
     }
     references.push({ type: entry.type, key: entry.key.trim() })
   }
-  if (references.length > WORK_ITEM_IMPORT_ROW_LINK_LIMIT) {
-    return fail(`A row can have at most ${WORK_ITEM_IMPORT_ROW_LINK_LIMIT} relations.`)
+  // A Work Item can hold this many relations, so an export of any stored graph re-imports.
+  if (references.length > WORK_ITEM_RELATION_ID_LIMIT) {
+    return fail(`A row can have at most ${WORK_ITEM_RELATION_ID_LIMIT} relations.`)
   }
   return references
 }

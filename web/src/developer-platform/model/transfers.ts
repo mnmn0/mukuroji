@@ -109,6 +109,11 @@ export type DeveloperExportContext = {
 export type DeveloperExportRow = {
   /** Exported Work Item. */
   workItem: CanonicalWorkItem
+  /**
+   * Key that other rows of the export use to refer to this one: the Work Item ID, or
+   * `<teamId>/<id>` when another exported Team has a Work Item with the same ID.
+   */
+  key: string
   /** Outline number across the whole export, such as `2.1`. */
   wbsNumber: string
   /** One-based outline level among the exported Work Items. */
@@ -146,6 +151,7 @@ export type DeveloperExportRow = {
 
 /** Export columns before the custom fields, in file order. */
 const exportColumns = [
+  'key',
   'id',
   'teamId',
   'wbsNumber',
@@ -279,7 +285,14 @@ export function createDeveloperExportRows(
   workItems: readonly CanonicalWorkItem[],
   context: DeveloperExportContext,
 ): DeveloperExportRow[] {
-  const exportedIds = new Set(workItems.map((workItem) => workItem.id))
+  // Work Item IDs are unique only within a Team, so an ID that two exported Teams share is
+  // qualified with its Team wherever the export refers to it.
+  const teamsById = new Map<string, Set<string>>()
+  for (const workItem of workItems) {
+    teamsById.set(workItem.id, (teamsById.get(workItem.id) ?? new Set()).add(workItem.teamId))
+  }
+  const toExportKey = (teamId: string, workItemId: string) =>
+    (teamsById.get(workItemId)?.size ?? 0) > 1 ? `${teamId}/${workItemId}` : workItemId
   const exportedKeys = new Set(workItems.map((workItem) => createWorkItemOutlineKey(workItem.teamId, workItem.id)))
   const dependenciesBySuccessor = new Map<string, DeveloperExportRow['dependencies']>()
   for (const dependency of context.dependencies) {
@@ -289,7 +302,7 @@ export function createDeveloperExportRows(
     dependenciesBySuccessor.set(successorKey, [
       ...(dependenciesBySuccessor.get(successorKey) ?? []),
       {
-        key: dependency.predecessor.workItemId,
+        key: toExportKey(dependency.predecessor.teamId, dependency.predecessor.workItemId),
         type: dependency.type,
         lagDays: dependency.lagDays,
         ...(dependency.constraint ? { constraint: dependency.constraint } : {}),
@@ -311,10 +324,12 @@ export function createDeveloperExportRows(
     previousTeamId = workItem.teamId
     ancestors.length = Math.min(ancestors.length, depth)
     const parentId = depth > 0 ? ancestors[depth - 1] : undefined
-    ancestors[depth] = workItem.id
+    const exportKey = toExportKey(workItem.teamId, workItem.id)
+    ancestors[depth] = exportKey
     const key = createWorkItemOutlineKey(workItem.teamId, workItem.id)
     return {
       workItem,
+      key: exportKey,
       wbsNumber,
       outlineLevel: depth + 1,
       ...(parentId ? { parentId } : {}),
@@ -323,8 +338,10 @@ export function createDeveloperExportRows(
         const separator = relationId.indexOf(':')
         const type = relationId.slice(0, separator)
         const target = relationId.slice(separator + 1)
-        return separator > 0 && type !== 'parent' && type !== 'child' && exportedIds.has(target)
-          ? [{ type, key: target }]
+        // Relations stay within the Team, so the target is in the row's own Team.
+        return separator > 0 && type !== 'parent' && type !== 'child'
+          && exportedKeys.has(createWorkItemOutlineKey(workItem.teamId, target))
+          ? [{ type, key: toExportKey(workItem.teamId, target) }]
           : []
       }),
       contributors: (workItem.contributorAssignments ?? []).map((assignment) => ({
@@ -351,6 +368,8 @@ export function createDeveloperExportRows(
 function readExportCell(row: DeveloperExportRow, column: (typeof exportColumns)[number]) {
   const { workItem } = row
   switch (column) {
+    case 'key':
+      return row.key
     case 'wbsNumber':
       return row.wbsNumber
     case 'outlineLevel':
@@ -394,6 +413,7 @@ function readExportCell(row: DeveloperExportRow, column: (typeof exportColumns)[
 function toExportWorkItem(row: DeveloperExportRow) {
   const { workItem } = row
   return {
+    key: row.key,
     id: workItem.id,
     teamId: workItem.teamId,
     wbsNumber: row.wbsNumber,
@@ -458,7 +478,7 @@ function toMsProjectTask(row: DeveloperExportRow): MsProjectTaskInput {
       ? {}
       : { startDate: schedule.startDate, finishDate: schedule.endDate }
   return {
-    key: workItem.id,
+    key: row.key,
     name: workItem.title,
     ...(workItem.description ? { notes: workItem.description } : {}),
     wbsNumber: row.wbsNumber,

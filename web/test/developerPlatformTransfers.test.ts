@@ -11,7 +11,7 @@ import {
 import { readDeveloperImportSource, suggestDeveloperImportMapping } from '../src/developer-platform/model/importSources'
 import { createMsProjectXml, readMsProjectXml } from '../src/developer-platform/model/msProjectXml'
 import { findSpreadsheetTable, readSpreadsheetWorkbook } from '../src/developer-platform/model/spreadsheet'
-import { createDeveloperExportFile, type DeveloperExportContext } from '../src/developer-platform/model/transfers'
+import { createDeveloperExportFile, createDeveloperExportRows, type DeveloperExportContext } from '../src/developer-platform/model/transfers'
 import { parseXmlDocument } from '../src/developer-platform/model/xmlDocument'
 import { createZipArchive, readZipArchive } from '../src/developer-platform/model/zipArchive'
 
@@ -153,7 +153,7 @@ describe('Developer Platform Work Item export', () => {
     const lines = (await file.blob.text()).replace(/^\ufeff/u, '').split('\r\n')
 
     expect(file.fileName).toBe('mukuroji-work-items-2026-07-10.csv')
-    expect(lines[0]).toBe('id,teamId,wbsNumber,outlineLevel,parentId,title,description,assignedProjectId,assigneeUserId,workItemTypeId,workflowStatusId,statusCategory,dueDate,schedule,priority,dependencies,relations,contributors,acceptanceCriteria,revision,createdAt,updatedAt,customFieldValues.risk')
+    expect(lines[0]).toBe('key,id,teamId,wbsNumber,outlineLevel,parentId,title,description,assignedProjectId,assigneeUserId,workItemTypeId,workflowStatusId,statusCategory,dueDate,schedule,priority,dependencies,relations,contributors,acceptanceCriteria,revision,createdAt,updatedAt,customFieldValues.risk')
     expect(lines.slice(1).map((line) => line.split(',')[0])).toEqual(['plan', 'design', 'build', ''])
     expect(lines.join('\n')).toContain(',blocks:build,member:user-dev effort:120 status:planned; role:designer status:in-progress,"[x] Spec reviewed\n[ ] Tests pass",')
     expect(lines.join('\n')).toContain(',1.2,2,plan,\'=Build,')
@@ -211,7 +211,7 @@ describe('Developer Platform Work Item export', () => {
       expect.objectContaining({ id: 'build', title: '=Build', dependencies: 'design FS +2', 'customFieldValues.risk': 'high' }),
     ])
     expect(suggestDeveloperImportMapping(workbookSource.headers)).toEqual([
-      { sourceField: 'id', targetField: 'importKey' },
+      { sourceField: 'key', targetField: 'importKey' },
       { sourceField: 'parentId', targetField: 'parentKey' },
       { sourceField: 'title', targetField: 'title' },
       { sourceField: 'description', targetField: 'description' },
@@ -262,6 +262,41 @@ describe('Developer Platform Work Item export', () => {
 
     expect(rows.map((row) => [row.Name, row.WBS, row.OutlineLevel])).toEqual([
       ['A1', '1', 1], ['A2', '1.1', 2], ['B1', '2', 1], ['B2', '2.1', 2],
+    ])
+  })
+
+  test('qualifies a Work Item ID that two exported Teams share in every reference', async () => {
+    const teamItems = [
+      workItem({ id: 'x', title: 'A parent' }),
+      workItem({ id: 'y', title: 'A child', relationIds: ['parent:x', 'related:x'] }),
+      workItem({ id: 'x', teamId: 'team-b', title: 'B task' }),
+    ]
+    const rows = createDeveloperExportRows(teamItems, {
+      hierarchies: new Map([
+        ['team-a', [node('x', null, 0, '1'), node('y', 'x', 1, '1.1')]],
+        ['team-b', [node('x', null, 0, '1')]],
+      ]),
+      dependencies: [{
+        ...dependency('x', 'y', 0),
+        predecessor: { teamId: 'team-b', workItemId: 'x' },
+      }],
+    })
+
+    // Both Teams have an `x`, so import would otherwise see a duplicate key and a wrong predecessor.
+    expect(rows.map((row) => [row.key, row.parentId, row.dependencies.map((entry) => entry.key), row.relations])).toEqual([
+      ['team-a/x', undefined, [], []],
+      ['y', 'team-a/x', ['team-b/x'], [{ type: 'related', key: 'team-a/x' }]],
+      ['team-b/x', undefined, [], []],
+    ])
+    const msProjectRows = readMsProjectXml(await createDeveloperExportFile('msproject', teamItems, {
+      hierarchies: new Map([
+        ['team-a', [node('x', null, 0, '1'), node('y', 'x', 1, '1.1')]],
+        ['team-b', [node('x', null, 0, '1')]],
+      ]),
+      dependencies: [{ ...dependency('x', 'y', 0), predecessor: { teamId: 'team-b', workItemId: 'x' } }],
+    }, exportedAt).blob.text())
+    expect(msProjectRows.map((row) => [row.UID, row.Name, row.Predecessors])).toEqual([
+      ['1', 'A parent', ''], ['2', 'A child', '3 FS'], ['3', 'B task', ''],
     ])
   })
 

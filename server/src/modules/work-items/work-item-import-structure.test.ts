@@ -224,6 +224,23 @@ describe('Work Item import structure', () => {
     ])
   })
 
+  test('accepts as many declared relations as a Work Item can hold', () => {
+    const declare = (count: number) => [
+      { Key: 'hub', Relations: Array.from({ length: count }, (_, index) => ({ type: 'related', key: `spoke-${index}` })) },
+      ...Array.from({ length: count }, (_, index) => ({ Key: `spoke-${index}` })),
+    ]
+    const mapping = [
+      ...baseMapping,
+      { sourceField: 'Key', targetField: 'importKey' },
+      { sourceField: 'Relations', targetField: 'relations' },
+    ]
+
+    // An export writes every stored relation of a Work Item on its row, up to the stored limit.
+    expect(previewWorkItemImport('json', source(declare(100)), mapping).errors).toEqual([])
+    expect(previewWorkItemImport('json', source(declare(101)), mapping).errors
+      .map((error) => [error.row, error.field])).toEqual([[1, 'relations']])
+  })
+
   test('rejects a row that other rows would give more relations than a Work Item can hold', () => {
     const relatedRows = (count: number) => Array.from({ length: count }, (_, index) => ({
       Key: `spoke-${index}`,

@@ -309,7 +309,7 @@ Mapping の `targetField` には Work Item の項目に加えて、行どうし�
 | `outlineLevel` | 1〜100 の整数 | アウトラインの深さ（MS Project の OutlineLevel）。`parentKey` と `wbsNumber` がない行は、直前にある 1 段浅い行を親にする。空欄は 1。 |
 | `parentKey` | 他の行のキー | 親の行。`wbsNumber` と `outlineLevel` より優先する。 |
 | `dependencies` | `1.2FS+2d, 3SS-1`、`a1 SS +2` または `[{ "key", "type", "lagDays", "constraint" }]` | この行の先行タスク。JSON の `constraint`（省略可）は後続の日付制約 `{ "anchor": "start" \| "finish", "kind": "on" \| "not-before" \| "not-after", "date": "YYYY-MM-DD" }` で、取り込む日程が満たさないと dry-run の error になる。種類は `FS`・`SS`・`FF`・`SF`（省略は `FS`）、ラグは暦日。1 行 50 件まで。空白を挟まない形では種類を大文字で書き、項目全体が他の行のキーと一致すればそのキーとして読む。キーの末尾が種類やラグに見える場合は空白で区切る。 |
-| `relations` | `blocks:2, related:3` または `[{ "type", "key" }]` | 親子以外の relation。種類は `blocks`・`blockedBy`・`related`・`duplicate`。1 行 50 件まで。両方の行に書いた同じ relation は 1 つにまとめる。 |
+| `relations` | `blocks:2, related:3` または `[{ "type", "key" }]` | 親子以外の relation。種類は `blocks`・`blockedBy`・`related`・`duplicate`。1 行 100 件まで（Work Item が持てる relation の数）。両方の行に書いた同じ relation は 1 つにまとめる。 |
 | `contributors` | `member:<userId> effort:2h; role:<jobRoleId>` または `contributorAssignments` と同じ JSON 配列 | Contributor。`;` か改行で区切り、`member:`・`role:`・`effort:`（分、または `2h`・`30m`）・`status:` を空白で並べる。接頭辞のない値は member。 |
 | `acceptanceCriteria` | 1 行 1 条件、または `[{ "text", "satisfied" }]` | 受け入れ条件。行頭の `[x]` は達成済み、`[ ]` と `- ` は取り除く。20 件まで。 |
 
@@ -335,9 +335,10 @@ Web の export file は CSV・JSON・Excel（`.xlsx`）・MS Project XML から�
 
 | 列 | 内容 |
 | --- | --- |
+| `key` | ほかの行が参照に使うキー。Work Item ID。ただし同じ ID の Work Item が export の別の Team にもあるときは `<teamId>/<id>`。`parentId`・`dependencies`・`relations` と MS Project の Task もこのキーで指す。import の mapping では `importKey` に当てる |
 | `wbsNumber` | export 全体で階層の順に振り直した番号（`1`、`1.1`、`2` など）。Team ごとの WBS 番号ではないので、複数 Team の export でも重ならず、import の参照キーにそのまま使える |
 | `outlineLevel` | export に含まれる Work Item の中での階層の深さ（1 から） |
-| `parentId` | export に含まれる最も近い祖先の ID |
+| `parentId` | export に含まれる最も近い祖先の `key` |
 | `workItemTypeId` | Work Item Type の ID |
 | `dependencies` | 先行 Work Item を `<id> FS +2` の形で `;` 区切り。日付制約のある依存を含む cell は `{ key, type, lagDays, constraint }` の JSON 配列。JSON では同じ形の配列 |
 | `relations` | parent・child 以外の relation を `blocks:<id>` の形で `;` 区切り。JSON では `{ type, key }` の配列 |
