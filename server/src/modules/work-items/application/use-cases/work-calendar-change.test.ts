@@ -1,5 +1,6 @@
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  type WorkCalendar,
   createWorkspaceWorkItemCalendarPolicy,
   type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
@@ -10,6 +11,7 @@ import {
   type WorkCalendarChangeRules,
   type WorkCalendarChangeWorkItem,
   type WorkCalendarScheduleUpdate,
+  type WorkCalendarVersion,
 } from './work-calendar-change'
 
 /** Shared Monday-to-Friday calendar without holidays. */
@@ -47,52 +49,94 @@ const rules: WorkCalendarChangeRules = {
   adoptLegacy: true,
 }
 
+/** Versions before any Team calendar is stored. */
+const unsaved: WorkCalendarVersion = new Map([['workspace', 1]])
+
+/** Versions once this change saved the Team calendar. */
+const savedOnce: WorkCalendarVersion = new Map([['workspace', 1], ['team:team-1', 1]])
+
+/**
+ * Saves the Team calendar of the change.
+ *
+ * @returns The saved calendar.
+ */
+async function saveTeamCalendar(): Promise<WorkCalendar> {
+  return {
+    scope: { kind: 'team', teamId: 'team-1' },
+    additionalHolidays: ['2026-12-09'],
+    revision: 1,
+    updatedAt: '2026-11-22T00:00:00.000Z',
+    updatedBy: 'user#a@example.com',
+  }
+}
+
 test('stops rewriting once a newer calendar change has been saved', async () => {
   const written: WorkCalendarScheduleUpdate[][] = []
-  let version = 'v1'
+  let version = savedOnce
   const applied = await applyWorkCalendarChange(rules, {
     readWorkItems: async () => workItems(30),
     readCalendarVersion: async () => version,
     async writeSchedules(updates) {
       written.push([...updates])
       // Another member saves the calendar again while the first transaction is written.
-      version = 'v2'
+      version = new Map([['workspace', 1], ['team:team-1', 2]])
     },
-  }, async () => ({
-    scope: { kind: 'team', teamId: 'team-1' },
-    additionalHolidays: ['2026-12-09'],
-    revision: 1,
-    updatedAt: '2026-11-22T00:00:00.000Z',
-    updatedBy: 'user#a@example.com',
-  }))
+  }, { plannedVersion: unsaved, save: saveTeamCalendar })
   expect(written.map((batch) => batch.length)).toEqual([24])
   expect(applied).toMatchObject({ updatedCount: 24, conflictCount: 6 })
 })
 
 test('writes nothing when the calendars changed between the plan and the first rewrite', async () => {
-  let reads = 0
   const written: WorkCalendarScheduleUpdate[][] = []
   const applied = await applyWorkCalendarChange(rules, {
     readWorkItems: async () => workItems(3),
-    readCalendarVersion: async () => (reads++ === 0 ? 'planned' : 'newer'),
+    readCalendarVersion: async () => new Map([['workspace', 2]]),
     async writeSchedules(updates) {
       written.push([...updates])
     },
-  })
+  }, { plannedVersion: unsaved })
   expect(written).toEqual([])
   expect(applied).toMatchObject({ updatedCount: 0, conflictCount: 3 })
+})
+
+test('writes nothing when another calendar was saved before this change saved its own', async () => {
+  const written: WorkCalendarScheduleUpdate[][] = []
+  const applied = await applyWorkCalendarChange(rules, {
+    readWorkItems: async () => workItems(3),
+    // The Team calendar the rules inherited from moved on while this Project calendar was saved.
+    readCalendarVersion: async () => new Map([['workspace', 1], ['team:team-1', 2], ['project:team-1:p1', 1]]),
+    async writeSchedules(updates) {
+      written.push([...updates])
+    },
+  }, {
+    plannedVersion: new Map([['workspace', 1], ['team:team-1', 1]]),
+    save: async () => ({ ...await saveTeamCalendar(), scope: { kind: 'project', teamId: 'team-1', projectId: 'p1' } }),
+  })
+  expect(written).toEqual([])
+  expect(applied).toMatchObject({ calendar: { revision: 1 }, updatedCount: 0, conflictCount: 3 })
+})
+
+test('rewrites after its own save, including a resumed one', async () => {
+  for (const plannedVersion of [unsaved, savedOnce]) {
+    const applied = await applyWorkCalendarChange(rules, {
+      readWorkItems: async () => workItems(3),
+      readCalendarVersion: async () => savedOnce,
+      async writeSchedules() {},
+    }, { plannedVersion, save: saveTeamCalendar })
+    expect(applied).toMatchObject({ updatedCount: 3, conflictCount: 0 })
+  }
 })
 
 test('stops the change when the member authorization changed', async () => {
   let batches = 0
   const applying = applyWorkCalendarChange(rules, {
     readWorkItems: async () => workItems(30),
-    readCalendarVersion: async () => 'v1',
+    readCalendarVersion: async () => unsaved,
     async writeSchedules() {
       batches += 1
       throw new ProjectDataError(409, 'WorkItemAuthorizationChanged', 'Work Item authorization changed during the mutation.')
     },
-  })
+  }, { plannedVersion: unsaved })
   await expect(applying).rejects.toMatchObject({ code: 'WorkItemAuthorizationChanged' })
   expect(batches).toBe(1)
 })
@@ -101,33 +145,27 @@ test('splits a transaction that exceeds the DynamoDB item limit', async () => {
   const written: number[] = []
   const applied = await applyWorkCalendarChange(rules, {
     readWorkItems: async () => workItems(24),
-    readCalendarVersion: async () => 'v1',
+    readCalendarVersion: async () => unsaved,
     async writeSchedules(updates) {
       if (updates.length > 12) {
         throw new ProjectDataError(413, 'WorkItemScheduleCascadeLimitExceeded', 'The schedule cascade exceeds the limit.')
       }
       written.push(updates.length)
     },
-  })
+  }, { plannedVersion: unsaved })
   expect(written).toEqual([12, 12])
   expect(applied).toMatchObject({ updatedCount: 24, conflictCount: 0 })
 })
 
 test('counts earlier conflicts when a newer change stops the rewrite', async () => {
-  let version = 'v1'
+  let version = savedOnce
   const applied = await applyWorkCalendarChange(rules, {
     readWorkItems: async () => workItems(30),
     readCalendarVersion: async () => version,
     async writeSchedules() {
-      version = 'v2'
+      version = new Map([['workspace', 1], ['team:team-1', 2]])
       throw new ProjectDataError(409, 'WorkItemScheduleConflict', 'A Work Item changed.')
     },
-  }, async () => ({
-    scope: { kind: 'team', teamId: 'team-1' },
-    additionalHolidays: ['2026-12-09'],
-    revision: 1,
-    updatedAt: '2026-11-22T00:00:00.000Z',
-    updatedBy: 'user#a@example.com',
-  }))
+  }, { plannedVersion: unsaved, save: saveTeamCalendar })
   expect(applied).toMatchObject({ updatedCount: 0, conflictCount: 30 })
 })

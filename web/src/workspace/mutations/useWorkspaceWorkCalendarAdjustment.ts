@@ -23,6 +23,10 @@ export type WorkspaceWorkCalendarAdjustmentController = {
   result: WorkCalendarChangeResult | undefined
   /** Whether the latest preview or apply failed. */
   failed: boolean
+  /** Whether the saved Workspace calendar could not be read, so nothing can be previewed. */
+  loadFailed: boolean
+  /** Reads the saved Workspace calendar again after a failed read. */
+  retryLoad: () => void
   /** Whether a preview or apply is running. */
   isBusy: boolean
   /** Picks another adjustment and drops the outcome. */
@@ -109,6 +113,8 @@ export function useWorkspaceWorkCalendarAdjustment(accessToken: string): Workspa
     impact,
     result,
     failed,
+    loadFailed: !calendar.settings && Boolean(calendar.error),
+    retryLoad: calendar.retry,
     isBusy,
     changeAdjustment,
     requestPreview,

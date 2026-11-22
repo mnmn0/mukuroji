@@ -978,6 +978,7 @@ export const workspaceMessages = {
   'workspace.workCalendar.example.days': '（{count} 日）',
   'workspace.workCalendar.saved': '保存しました。{count} 件の Work Item の日程を合わせました。',
   'workspace.workCalendar.savedWithConflicts': '{count} 件は保存中に別の変更があったため合わせていません。もう一度保存すると合わせます。',
+  'workspace.workCalendar.error.load': '保存済みの Workspace カレンダーを読み込めないため、まだプレビューできません。',
   'workspace.workCalendar.error.conflict': '別のメンバーがこのカレンダーを先に変えました。読み込み直してからもう一度試してください。',
   'workspace.workCalendar.error.tooLarge': '一度に合わせられる Work Item の数を超えています。',
   'workspace.workCalendar.error.forbidden': 'このカレンダーを変える権限がありません。',

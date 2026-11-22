@@ -10,6 +10,7 @@ import {
   type WorkCalendarAdjustment,
   type WorkCalendarOverrides,
   type WorkCalendarResponse,
+  type WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
 import { ProjectDataError } from '../../modules/directory'
 import {
@@ -21,11 +22,14 @@ import {
 import {
   applyWorkCalendarChange,
   previewWorkCalendarChange,
+  WORKSPACE_CALENDAR_VERSION_KEY,
+  workCalendarVersionKey,
   type TeamIssueResponseItem,
   type WorkCalendarChangePorts,
   type WorkCalendarChangeRules,
   type WorkCalendarChangeWorkItem,
   type WorkCalendarScheduleUpdate,
+  type WorkCalendarVersion,
 } from '../../modules/work-items'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { toWorkItemConfigurationErrorResponse } from '../shared/collaboration-access'
@@ -148,11 +152,14 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
       const result = await applyWorkCalendarChange(
         change.rules,
         createWorkCalendarChangePorts(c, principal, change.teamIds, body),
-        () => saveOrResumeWorkCalendar(principal, {
-          scope,
-          overrides: input.overrides,
-          changeAdjustment: input.adjustment,
-        }, input.expectedRevision),
+        {
+          plannedVersion: change.plannedVersion,
+          save: () => saveOrResumeWorkCalendar(principal, {
+            scope,
+            overrides: input.overrides,
+            changeAdjustment: input.adjustment,
+          }, input.expectedRevision),
+        },
       )
       return c.json(result)
     } catch (error) {
@@ -172,10 +179,7 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessRead(principal)
       requireWorkspaceAdministration(principal)
-      const current = await readWorkspaceCalendarInputs(principal.directoryId)
-      // The candidate keeps the synced holidays, which a Team or Project calendar may turn on.
-      const candidate: WorkspaceCalendarInputs = { ...current, settings: calendar }
-      const change = await createWorkspaceCalendarChange(principal, current, candidate, adjustment)
+      const change = await createWorkspaceCalendarChange(principal, calendar, adjustment)
       return c.json(await previewWorkCalendarChange(
         change.rules,
         createWorkCalendarChangePorts(c, principal, change.teamIds, undefined),
@@ -195,11 +199,11 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceBusinessWrite(principal)
       requireWorkspaceAdministration(principal)
-      const current = await readWorkspaceCalendarInputs(principal.directoryId)
-      const change = await createWorkspaceCalendarChange(principal, current, current, adjustment)
+      const change = await createWorkspaceCalendarChange(principal, undefined, adjustment)
       return c.json(await applyWorkCalendarChange(
         change.rules,
         createWorkCalendarChangePorts(c, principal, change.teamIds, body),
+        { plannedVersion: change.plannedVersion },
       ))
     } catch (error) {
       return toWorkCalendarErrorResponse(c, error)
@@ -272,6 +276,8 @@ type CalendarChange = {
   teamIds: readonly string[]
   /** Rules of the change. */
   rules: WorkCalendarChangeRules
+  /** Calendar revisions read before the rules were resolved. */
+  plannedVersion: WorkCalendarVersion
 }
 
 /**
@@ -294,12 +300,15 @@ async function createTeamCalendarChange(
   overrides: WorkCalendarOverrides,
   adjustment: WorkCalendarAdjustment,
 ): Promise<CalendarChange> {
+  // Read first, so a calendar saved while the rules resolve shows up as a newer version.
+  const plannedVersion = await readWorkCalendarVersion(principal.directoryId, [scope.teamId])
   const [inputs, calendars] = await Promise.all([
     readWorkspaceCalendarInputs(principal.directoryId),
     readTeamWorkCalendars(principal.directoryId, scope.teamId),
   ])
   return {
     teamIds: [scope.teamId],
+    plannedVersion,
     rules: {
       before: createWorkCalendarResolver(inputs, calendars),
       after: createWorkCalendarResolver(inputs, withCandidateWorkCalendar(calendars, scope, overrides)),
@@ -319,22 +328,27 @@ async function createTeamCalendarChange(
  * Examples are limited to Work Items the administrator may see in their Team.
  *
  * @param principal - Authenticated Workspace administrator.
- * @param current - Saved Workspace calendar inputs.
- * @param candidate - Workspace calendar inputs after the change.
+ * @param candidateSettings - Workspace calendar settings after the change; omitted to apply the
+ *   saved settings.
  * @param adjustment - How date ranges keep their dates.
  * @returns The change.
  */
 async function createWorkspaceCalendarChange(
   principal: WorkspacePrincipal,
-  current: WorkspaceCalendarInputs,
-  candidate: WorkspaceCalendarInputs,
+  candidateSettings: WorkspaceCalendarSettings | undefined,
   adjustment: WorkCalendarAdjustment,
 ): Promise<CalendarChange> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
-  const teams = await Promise.all(directory.teams.map(async (team) => ({
-    teamId: team.id,
-    calendars: await readTeamWorkCalendars(principal.directoryId, team.id),
-    context: await requireTeamPermission(principal, team.id, 'viewer').catch(() => undefined),
+  const teamIds = directory.teams.map((team) => team.id)
+  // Read first, so a calendar saved while the rules resolve shows up as a newer version.
+  const plannedVersion = await readWorkCalendarVersion(principal.directoryId, teamIds)
+  const current = await readWorkspaceCalendarInputs(principal.directoryId)
+  // The candidate keeps the synced holidays, which a Team or Project calendar may turn on.
+  const candidate: WorkspaceCalendarInputs = candidateSettings ? { ...current, settings: candidateSettings } : current
+  const teams = await Promise.all(teamIds.map(async (teamId) => ({
+    teamId,
+    calendars: await readTeamWorkCalendars(principal.directoryId, teamId),
+    context: await requireTeamPermission(principal, teamId, 'viewer').catch(() => undefined),
   })))
   const calendarsByTeam = new Map(teams.map((team) => [team.teamId, team.calendars]))
   const contextsByTeam = new Map(teams.map((team) => [team.teamId, team.context]))
@@ -344,7 +358,8 @@ async function createWorkspaceCalendarChange(
     return (workItem: WorkCalendarChangeWorkItem) => (resolvers.get(workItem.teamId) ?? fallback)(workItem)
   }
   return {
-    teamIds: teams.map((team) => team.teamId),
+    teamIds,
+    plannedVersion,
     rules: {
       before: resolverFor(current),
       after: resolverFor(candidate),
@@ -358,6 +373,25 @@ async function createWorkspaceCalendarChange(
       adoptLegacy: false,
     },
   }
+}
+
+/**
+ * Reads the revisions of the Workspace calendar settings and every Team and Project calendar of
+ * the given Teams.
+ *
+ * @param directoryId - Workspace directory.
+ * @param teamIds - Teams whose calendars a change resolves from.
+ * @returns The calendar version.
+ */
+async function readWorkCalendarVersion(directoryId: string, teamIds: readonly string[]): Promise<WorkCalendarVersion> {
+  const [profile, calendars] = await Promise.all([
+    workspaceDependencies.tenantAdministration.getProfile(directoryId),
+    Promise.all(teamIds.map((teamId) => workspaceDependencies.workCalendars.listTeam(directoryId, teamId))),
+  ])
+  return new Map([
+    [WORKSPACE_CALENDAR_VERSION_KEY, profile?.revision ?? 0],
+    ...calendars.flat().map((calendar): [string, number] => [workCalendarVersionKey(calendar.scope), calendar.revision]),
+  ])
 }
 
 /**
@@ -404,18 +438,7 @@ function createWorkCalendarChangePorts(
       return teams.flat()
     },
     async readCalendarVersion() {
-      const [profile, calendars] = await Promise.all([
-        workspaceDependencies.tenantAdministration.getProfile(principal.directoryId),
-        Promise.all(teamIds.map((teamId) => workspaceDependencies.workCalendars.listTeam(principal.directoryId, teamId))),
-      ])
-      return JSON.stringify([
-        profile?.revision ?? 0,
-        calendars.flat().map((calendar) => [
-          calendar.scope.teamId,
-          calendar.scope.kind === 'project' ? calendar.scope.projectId : '',
-          calendar.revision,
-        ]),
-      ])
+      return readWorkCalendarVersion(principal.directoryId, teamIds)
     },
     async writeSchedules(updates) {
       const updateSchedules = workItemDependencies.teamIssues.updateTeamIssueSchedules

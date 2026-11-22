@@ -93,11 +93,41 @@ export type WorkCalendarChangePorts = {
    */
   writeSchedules(updates: readonly WorkCalendarScheduleUpdate[], batch: number): Promise<void>
   /**
-   * Reads a value that changes whenever any calendar the change resolved from is saved again.
-   * Rewrites stop once it differs from the value read after this change's own save, so an older
-   * change never overwrites the schedules a newer one wrote.
+   * Reads the revisions of every calendar the change resolves from. Rewrites stop once they differ
+   * from the revisions read after this change's own save, so an older change never overwrites the
+   * schedules a newer one wrote.
    */
-  readCalendarVersion(): Promise<string>
+  readCalendarVersion(): Promise<WorkCalendarVersion>
+}
+
+/**
+ * Revisions of the calendars a change resolves from, keyed by {@link workCalendarVersionKey}. A
+ * calendar without a stored row is absent.
+ */
+export type WorkCalendarVersion = ReadonlyMap<string, number>
+
+/** Version key of the Workspace calendar settings. */
+export const WORKSPACE_CALENDAR_VERSION_KEY = 'workspace'
+
+/**
+ * Names a Team or Project calendar in a {@link WorkCalendarVersion}.
+ *
+ * @param scope - Calendar scope.
+ * @returns The version key.
+ */
+export function workCalendarVersionKey(scope: WorkCalendar['scope']): string {
+  return scope.kind === 'team' ? `team:${scope.teamId}` : `project:${scope.teamId}:${scope.projectId}`
+}
+
+/** How a calendar change is bound to the calendars it was planned from. */
+export type WorkCalendarChangeApplyOptions = {
+  /**
+   * Calendar revisions read before the rules were resolved. When any calendar but the one this
+   * change saves has moved on by the time it saved, the rules are stale and nothing is rewritten.
+   */
+  plannedVersion: WorkCalendarVersion
+  /** Saves the calendar itself, if this change stores one. */
+  save?: () => Promise<WorkCalendar>
 }
 
 /**
@@ -189,24 +219,25 @@ export async function previewWorkCalendarChange(
  * The plan is checked against the write limit before anything is saved. Rewrites go in bounded
  * transactions; a transaction that meets a concurrent Work Item change is retried once per Work
  * Item from a fresh read with the same before and after calendars, so an older Work Item that was
- * being adopted keeps its chance to follow the calendar. Before each further transaction and the
- * retry, the calendar version is read again; once a newer calendar change has been saved, this one
- * stops and counts the rest as conflicts, leaving them to the newer change. Work Items that still
- * conflict are counted.
+ * being adopted keeps its chance to follow the calendar.
+ *
+ * The rules must be resolved from calendars no older than `plannedVersion`. After the save, any
+ * other calendar that moved on since then makes the rules stale, so nothing is rewritten and every
+ * rewrite counts as a conflict. Before each further transaction and the retry, the calendar version
+ * is read again; once a newer calendar change has been saved, this one stops and counts the rest as
+ * conflicts, leaving them to the newer change. Work Items that still conflict are counted.
  *
  * @param rules - Which Work Items the change reaches and how.
  * @param ports - Work Item reads and writes.
- * @param save - Saves the calendar itself, if this change stores one.
+ * @param options - Calendar revisions the rules came from, and the save of the calendar itself.
  * @returns The saved calendar, the impact, and how many Work Items were rewritten or skipped.
  * @throws ProjectDataError 413 when the change would rewrite more Work Items than one save may.
  */
 export async function applyWorkCalendarChange(
   rules: WorkCalendarChangeRules,
   ports: WorkCalendarChangePorts,
-  save?: () => Promise<WorkCalendar>,
+  options: WorkCalendarChangeApplyOptions,
 ): Promise<WorkCalendarChangeResult> {
-  // Without a save of its own, the change is bound to the calendars as they were when it planned.
-  const plannedVersion = save ? undefined : await ports.readCalendarVersion()
   const plan = planWorkCalendarChange({ ...rules, workItems: await ports.readWorkItems() })
   if (plan.updates.length > WORK_CALENDAR_CHANGE_MAX_WORK_ITEMS) {
     throw new ProjectDataError(
@@ -215,17 +246,21 @@ export async function applyWorkCalendarChange(
       `A calendar change can adjust at most ${WORK_CALENDAR_CHANGE_MAX_WORK_ITEMS} Work Items at once.`,
     )
   }
-  const calendar = save ? await save() : undefined
-  const version = plannedVersion ?? await ports.readCalendarVersion()
+  const calendar = options.save ? await options.save() : undefined
+  const version = await ports.readCalendarVersion()
   /** Reports whether a newer calendar change has started since this one saved. */
-  const superseded = async () => await ports.readCalendarVersion() !== version
+  const superseded = async () => !haveSameWorkCalendarVersion(version, await ports.readCalendarVersion())
   const batches: BatchCounter = { next: 0 }
   let updatedCount = 0
   let conflictCount = 0
   const conflicted = new Set<string>()
+  if (!isSavedOver(options.plannedVersion, version, calendar)) {
+    // The rules came from calendars that changed before this save; the newer change owns the rest.
+    return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount: plan.updates.length }
+  }
   for (let index = 0; index < plan.updates.length; index += WORK_ITEM_SCHEDULE_CASCADE_LIMIT) {
     const chunk = plan.updates.slice(index, index + WORK_ITEM_SCHEDULE_CASCADE_LIMIT)
-    if ((index > 0 || !save) && await superseded()) {
+    if (index > 0 && await superseded()) {
       // The newer change plans from the current Work Items and rewrites the rest itself.
       conflictCount += plan.updates.length - index + conflicted.size
       return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount }
@@ -251,6 +286,37 @@ export async function applyWorkCalendarChange(
     }
   }
   return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount }
+}
+
+/**
+ * Compares two calendar versions.
+ *
+ * @param left - One version.
+ * @param right - The other version.
+ * @returns Whether every calendar has the same revision in both.
+ */
+function haveSameWorkCalendarVersion(left: WorkCalendarVersion, right: WorkCalendarVersion): boolean {
+  if (left.size !== right.size) return false
+  for (const [key, revision] of left) {
+    if (right.get(key) !== revision) return false
+  }
+  return true
+}
+
+/**
+ * Checks that only this change's own save happened between the plan and the version read after it.
+ *
+ * @param planned - Version read before the rules were resolved.
+ * @param saved - Version read after the save.
+ * @param calendar - Calendar this change saved, if any.
+ * @returns Whether the rules still describe the calendars as saved.
+ */
+function isSavedOver(planned: WorkCalendarVersion, saved: WorkCalendarVersion, calendar: WorkCalendar | undefined): boolean {
+  const own = calendar ? workCalendarVersionKey(calendar.scope) : undefined
+  if (calendar && own !== undefined && saved.get(own) !== calendar.revision) return false
+  const others = (version: WorkCalendarVersion) =>
+    new Map([...version].filter(([key]) => key !== own))
+  return haveSameWorkCalendarVersion(others(planned), others(saved))
 }
 
 /** Numbers the transactions of one change so each gets its own audit identities. */

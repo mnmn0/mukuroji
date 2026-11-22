@@ -979,6 +979,7 @@ export const workspaceMessages = {
   'workspace.workCalendar.example.days': '({count} days)',
   'workspace.workCalendar.saved': 'Saved. The schedules of {count} Work Items were adjusted.',
   'workspace.workCalendar.savedWithConflicts': '{count} changed while saving and were not adjusted. Save again to adjust them.',
+  'workspace.workCalendar.error.load': "Couldn't load the saved Workspace calendar, so nothing can be previewed yet.",
   'workspace.workCalendar.error.conflict': 'Another member changed this calendar first. Reload and try again.',
   'workspace.workCalendar.error.tooLarge': 'Too many Work Items would be adjusted at once.',
   'workspace.workCalendar.error.forbidden': 'You cannot change this calendar.',

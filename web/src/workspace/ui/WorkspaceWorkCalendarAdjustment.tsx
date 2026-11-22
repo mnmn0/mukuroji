@@ -36,6 +36,18 @@ export function WorkspaceWorkCalendarAdjustment({ accessToken, locale }: Workspa
         </h2>
         <p className="text-sm text-[var(--workbench-muted)]">{t('workspace.workCalendar.workspaceDescription')}</p>
       </header>
+      {controller.loadFailed ? (
+        <div
+          className="flex flex-wrap items-center gap-2 text-sm text-[var(--workbench-danger)]"
+          data-testid="workspace-work-calendar-load-error"
+          role="alert"
+        >
+          <span>{t('workspace.workCalendar.error.load')}</span>
+          <button className="workbench-button-secondary" onClick={controller.retryLoad} type="button">
+            {t('workspace.workCalendar.retry')}
+          </button>
+        </div>
+      ) : null}
       <WorkCalendarAdjustmentFields
         adjustment={controller.adjustment}
         disabled={controller.isBusy}
