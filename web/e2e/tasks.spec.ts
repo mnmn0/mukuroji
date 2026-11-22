@@ -5022,6 +5022,43 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => chartRows.count()).toBeLessThan(210)
   })
 
+  test('Issue #379: Gantt を画面外の行も含めて PNG と SVG の画像に書き出す', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    const fixture = referoTaskFixtures[0]!
+    const tasks = Array.from({ length: 210 }, (_, index) => ({
+      ...fixture,
+      id: `image-${index}`,
+      title: `Image task ${index}`,
+    }))
+    await mockAuthenticatedTaskPage(page, tasks)
+    await page.goto('/projects/refero/issues')
+    await expect(page.getByTestId('task-row-image-0')).toBeVisible()
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    await expect(page.getByTestId('task-gantt-bar-image-0')).toBeVisible()
+    const chartRows = page.getByTestId('task-gantt-scroll').locator('article[role="row"]')
+    expect(await chartRows.count()).toBeLessThan(210)
+
+    const display = page.getByTestId('task-gantt-display')
+    const svgDownload = page.waitForEvent('download')
+    await display.getByRole('button', { name: 'SVG 画像で書き出す', exact: true }).click()
+    const svgFile = await svgDownload
+    expect(svgFile.suggestedFilename()).toMatch(/^gantt-\d{4}-\d{2}-\d{2}\.svg$/u)
+    const svgPath = await svgFile.path()
+    const svg = await readFile(svgPath, 'utf8')
+    expect(svg).toContain('>Image task 0<')
+    expect(svg).toContain('>Image task 209<')
+
+    const pngDownload = page.waitForEvent('download')
+    await display.getByRole('button', { name: 'PNG 画像で書き出す', exact: true }).click()
+    const pngFile = await pngDownload
+    expect(pngFile.suggestedFilename()).toMatch(/^gantt-\d{4}-\d{2}-\d{2}\.png$/u)
+    const png = await readFile(await pngFile.path())
+    expect([...png.subarray(0, 8)]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    // The image uses one-line rows and is at least as tall as every row together.
+    expect(png.readUInt32BE(20)).toBeGreaterThanOrEqual(210 * 48)
+    await expect(page.getByTestId('task-gantt-export-error')).toHaveCount(0)
+  })
+
   test('Issue #379: Gantt は 300 行を 1 つのチャートでスクロールし、見えている付近の行だけを描画する', async ({ page }) => {
     await setScheduleFixtureClock(page)
     const fixture = referoTaskFixtures[0]!
