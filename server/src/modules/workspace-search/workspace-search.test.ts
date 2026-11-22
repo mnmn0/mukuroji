@@ -2493,6 +2493,80 @@ test('reads personal Focus views and rejects Triage until its queue ownership is
   })).rejects.toMatchObject({ code: 'TaskViewNotFound', status: 404 })
 })
 
+test('keeps Gantt display options in a saved view and rejects an unknown Gantt scale', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const ownerAccess = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  /**
+   * Builds a personal Focus Gantt view input with the given display options.
+   *
+   * @param displayOptions - Display options sent to the saved-view boundary.
+   * @returns A create input for the owner.
+   */
+  const createInput = (displayOptions: Record<string, unknown>) => ({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    input: {
+      name: 'Monthly Gantt',
+      visibility: 'personal' as const,
+      definition: {
+        surface: 'focus' as const,
+        scope: { kind: 'viewer' as const },
+        filters: {},
+        layout: {
+          mode: 'gantt' as const,
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact' as const,
+          displayOptions,
+        },
+      },
+    },
+  })
+
+  const created = await client.createTaskView(createInput({
+    ganttCompactRows: true,
+    ganttProgressLine: true,
+    ganttScale: 'month',
+  }))
+  expect(created.definition.layout.displayOptions).toEqual({
+    ganttCompactRows: true,
+    ganttProgressLine: true,
+    ganttScale: 'month',
+  })
+  expect((await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access: ownerAccess,
+  })).definition.layout.displayOptions).toEqual({
+    ganttCompactRows: true,
+    ganttProgressLine: true,
+    ganttScale: 'month',
+  })
+  await expect(client.createTaskView(createInput({ ganttScale: 'year' })))
+    .rejects.toMatchObject({ code: 'InvalidTaskView', status: 400 })
+  await expect(client.createTaskView(createInput({ ganttCompactRows: 'yes' })))
+    .rejects.toMatchObject({ code: 'InvalidTaskView', status: 400 })
+})
+
 test('resolves personal defaults before Team defaults and falls back after clearing personal state', async () => {
   const client = new DynamoDbWorkspaceSearchClient(
     'search-table',

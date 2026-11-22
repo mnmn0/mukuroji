@@ -80,10 +80,8 @@ import {
   type TaskGanttTaskRow,
 } from '../model/taskGanttRows'
 import { ChevronIcon } from '../../shared/ui/icons'
-import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
 import { printTaskView, type TaskViewPrintPaper } from './taskViewPrint'
-import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
-import { formatShowMoreLabel, TASK_TABLE_RENDER_STEP } from '../model/taskListRendering'
+import type { TaskGanttDisplaySettings } from '../model/taskGanttDisplay'
 import { resolveWorkItemEffortColumnValue } from '../../work-items/model/workItemEffort'
 import type { WorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
 import {
@@ -105,6 +103,10 @@ import {
   type TaskGanttTimelineAxis,
   type TaskGanttTimelineColumn as GanttTimelineColumn,
 } from '../model/taskGanttTimeline'
+import {
+  resolveTaskGanttVirtualRowRange,
+  type TaskGanttRowViewport,
+} from '../model/taskGanttVirtualRows'
 
 const GANTT_TABLE_WIDTH = 360
 /** Height of a group heading row. */
@@ -161,6 +163,12 @@ const GANTT_COMPACT_BASELINE_ROW_LAYOUT: GanttRowLayout = {
 }
 
 const MAX_GANTT_TIMELINE_COLUMNS = 180
+/** Extra height of rows rendered above and below the visible part of the chart. */
+const GANTT_VIRTUAL_OVERSCAN = 480
+/** Step the measured scroll offset is rounded to, so small scrolls do not re-render the chart. */
+const GANTT_VIRTUAL_VIEWPORT_STEP = 160
+/** Visible height assumed before the chart is measured, such as during server rendering. */
+const GANTT_INITIAL_VIEWPORT_HEIGHT = 960
 const MILLISECONDS_PER_CALENDAR_DAY = 86_400_000
 /**
  * Theme-aware dependency connector colors. The variables are defined for the light and dark
@@ -245,8 +253,22 @@ type GanttDependencyLayout = {
   externalStubs: GanttExternalEndpointStub[]
 }
 
+/** Display settings a Gantt chart starts with when no saved view supplies them. */
+const DEFAULT_GANTT_DISPLAY_SETTINGS: TaskGanttDisplaySettings = {
+  isCompact: false,
+  scale: 'auto',
+  showsProgressLine: false,
+}
+
 /** Props for the independent project task Gantt view. */
 export type TaskGanttViewProps = {
+  /**
+   * Display settings owned by the active task view. When set, the chart renders them and reports
+   * changes through `onDisplayChange` instead of keeping its own.
+   */
+  display?: TaskGanttDisplaySettings
+  /** Receives the next display settings after the user changes scale, one-line, or progress line. */
+  onDisplayChange?: (display: TaskGanttDisplaySettings) => void
   /** Unfiltered tasks used to distinguish Project membership from the rendered filter result. */
   allProjectTasks?: CanonicalWorkItem[]
   /** Determines whether the current user may manage one canonical dependency endpoint. */
@@ -337,8 +359,10 @@ export function TaskGanttView({
   canManageScheduleDependencyEndpoint,
   configuration,
   configurationsByTeam,
+  display: controlledDisplay,
   group,
   onCreateTaskOpen,
+  onDisplayChange,
   onCreateScheduleDependency,
   onDeleteScheduleDependency,
   onRequestScheduleChange,
@@ -411,9 +435,19 @@ export function TaskGanttView({
       visibleTaskKeys.has(createWorkItemDependencyEndpointKey(row.dependency.successor))
     )
   }, [planningSnapshot, visibleTaskKeys])
-  const [scale, setScale] = useState<TaskGanttScale>('auto')
-  const [isCompact, setIsCompact] = useState(false)
-  const [showsProgressLine, setShowsProgressLine] = useState(false)
+  const [localDisplay, setLocalDisplay] = useState(DEFAULT_GANTT_DISPLAY_SETTINGS)
+  const display = controlledDisplay ?? localDisplay
+  const { isCompact, scale, showsProgressLine } = display
+  /**
+   * Applies one display change locally and reports it to the owning task view.
+   *
+   * @param patch - Changed display settings.
+   */
+  const changeDisplay = (patch: Partial<TaskGanttDisplaySettings>) => {
+    const next = { ...display, ...patch }
+    if (!controlledDisplay) setLocalDisplay(next)
+    onDisplayChange?.(next)
+  }
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   /** Whether a move to today waits for the period containing today to render. */
   const todayScrollPendingRef = useRef(false)
@@ -479,31 +513,46 @@ export function TaskGanttView({
     () => new Set(nonWorkingSpans.map((span) => span.date)),
     [nonWorkingSpans],
   )
-  // Thousands of rows are rendered in steps; connectors are laid out for rendered rows only.
-  const {
-    renderedItems: incrementalRows,
-    hiddenCount: incrementalHiddenRowCount,
-    showMore: showMoreRows,
-  } = useIncrementalRender(displayRows, TASK_TABLE_RENDER_STEP)
+  // Every row has its place in the chart, so connectors, today's line, and the progress line
+  // cover all rows, while only the rows near the visible part are created in the DOM.
+  const chartRowTops = useMemo(
+    () => createGanttRowTops(displayRows, rowLayout.rowHeight),
+    [displayRows, rowLayout.rowHeight],
+  )
+  const chartRowsHeight = chartRowTops.at(-1) ?? 0
+  const rowsRef = useRef<HTMLDivElement>(null)
+  const [rowViewport, setRowViewport] = useState<TaskGanttRowViewport>({
+    height: GANTT_INITIAL_VIEWPORT_HEIGHT,
+    top: 0,
+  })
   // Printing renders every row, because rows left out of the DOM cannot reach the paper.
   const [printsAllRows, setPrintsAllRows] = useState(false)
-  const renderedRows = printsAllRows ? displayRows : incrementalRows
-  const hiddenRowCount = printsAllRows ? 0 : incrementalHiddenRowCount
-  const renderedRowTops = useMemo(
-    () => createGanttRowTops(renderedRows, rowLayout.rowHeight),
-    [renderedRows, rowLayout.rowHeight],
-  )
-  const renderedRowsHeight = renderedRowTops.at(-1) ?? 0
+  const hasRows = displayRows.length > 0
+  /** Re-measures the visible part of the rows after a scroll. */
+  const updateRowViewport = () => {
+    storeGanttRowViewport(scrollContainerRef.current, rowsRef.current, setRowViewport)
+  }
+  useEffect(() => {
+    // The scroll container's size is a browser layout value, so it is followed with an observer.
+    const container = scrollContainerRef.current
+    if (!container) return
+    const measure = () => storeGanttRowViewport(container, rowsRef.current, setRowViewport)
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(container)
+    return () => observer.disconnect()
+  }, [hasRows])
   const dependencyLayout = useMemo(
     () => createGanttDependencyLayout(
       dependencyRows,
-      renderedRows,
-      renderedRowTops,
+      displayRows,
+      chartRowTops,
       timelineAxis,
       projectTaskKeys,
       barCenterOffset,
     ),
-    [barCenterOffset, dependencyRows, projectTaskKeys, renderedRowTops, renderedRows, timelineAxis],
+    [barCenterOffset, dependencyRows, projectTaskKeys, chartRowTops, displayRows, timelineAxis],
   )
   const progressLinePoints = useMemo(
     () => showsProgressLine && todayX !== undefined
@@ -512,8 +561,8 @@ export function TaskGanttView({
           configuration,
           configurationsByTeam,
           rowHeight: rowLayout.rowHeight,
-          rowTops: renderedRowTops,
-          rows: renderedRows,
+          rowTops: chartRowTops,
+          rows: displayRows,
           axis: timelineAxis,
           today,
           todayX,
@@ -525,8 +574,8 @@ export function TaskGanttView({
       configuration,
       configurationsByTeam,
       dependencyLayout.externalLaneHeight,
-      renderedRowTops,
-      renderedRows,
+      chartRowTops,
+      displayRows,
       rowLayout.rowHeight,
       showsProgressLine,
       timelineAxis,
@@ -537,9 +586,9 @@ export function TaskGanttView({
   // The drawn line is hidden from screen readers, so the same standing is also told in words.
   const progressSummary = useMemo(
     () => progressLinePoints
-      ? createGanttProgressSummary(renderedRows, configurationsByTeam, configuration, today)
+      ? createGanttProgressSummary(displayRows, configurationsByTeam, configuration, today)
       : undefined,
-    [configuration, configurationsByTeam, progressLinePoints, renderedRows, today],
+    [configuration, configurationsByTeam, progressLinePoints, displayRows, today],
   )
 
   /** Moves to today, first switching a windowed chart to the period containing today. */
@@ -763,6 +812,25 @@ export function TaskGanttView({
     void previewScheduleChange(row.task, operation)
   }
 
+  // A row being dragged or previewed stays in the DOM while it is scrolled out of view, so the
+  // drag source and its status are not lost.
+  const keptRowKeys = [dragChange?.taskKey, busyTaskKey].filter((key) => key !== undefined)
+  const virtualRowRange = printsAllRows
+    ? { start: 0, end: displayRows.length }
+    : resolveTaskGanttVirtualRowRange({
+        overscan: GANTT_VIRTUAL_OVERSCAN,
+        requiredIndexes: keptRowKeys.length === 0
+          ? []
+          : displayRows.flatMap((row, index) =>
+              row.kind === 'task' && keptRowKeys.includes(createTaskKey(row.task)) ? [index] : []
+            ),
+        rowTops: chartRowTops,
+        viewport: rowViewport,
+      })
+  const virtualRows = displayRows.slice(virtualRowRange.start, virtualRowRange.end)
+  const virtualRowsTop = chartRowTops[virtualRowRange.start] ?? 0
+  const virtualRowsBottom = chartRowsHeight - (chartRowTops[virtualRowRange.end] ?? chartRowsHeight)
+
   return (
     <section
       aria-label={t('tasks.view.gantt')}
@@ -789,11 +857,13 @@ export function TaskGanttView({
         canMoveToToday={todayX !== undefined || onWindowStartMonthChange !== undefined}
         effectiveScale={scaledTimeline?.scale}
         isCompact={isCompact}
-        onCompactChange={setIsCompact}
+        onCompactChange={(nextIsCompact) => changeDisplay({ isCompact: nextIsCompact })}
         onMoveToToday={moveToToday}
         onPrint={printChart}
-        onProgressLineChange={setShowsProgressLine}
-        onScaleChange={setScale}
+        onProgressLineChange={(nextShowsProgressLine) =>
+          changeDisplay({ showsProgressLine: nextShowsProgressLine })
+        }
+        onScaleChange={(nextScale) => changeDisplay({ scale: nextScale })}
         scale={scale}
         showsProgressLine={showsProgressLine}
         t={t}
@@ -905,14 +975,17 @@ export function TaskGanttView({
       ) : null}
       {rows.length > 0 ? (
         <div
-          className="overflow-x-auto"
+          aria-rowcount={displayRows.length + 1}
+          className="max-h-[max(24rem,calc(100dvh-10rem))] overflow-auto"
           data-print-overflow=""
           data-testid="task-gantt-scroll"
+          onScroll={updateRowViewport}
           ref={scrollContainerRef}
           role="grid"
         >
           <div
-            className="grid min-w-max border-b border-tone-d8dde5 bg-tone-f8fafb"
+            aria-rowindex={1}
+            className="sticky top-0 z-30 grid min-w-max border-b border-tone-d8dde5 bg-tone-f8fafb"
             role="row"
             style={{ gridTemplateColumns: `${GANTT_TABLE_WIDTH}px ${timelineWidth}px` }}
           >
@@ -980,10 +1053,17 @@ export function TaskGanttView({
                 </div>
               </div>
             ) : null}
-          {renderedRows.map((row) => {
+            <div data-testid="task-gantt-rows" ref={rowsRef}>
+            {virtualRowsTop > 0 ? (
+              <div aria-hidden="true" style={{ height: `${virtualRowsTop}px` }} />
+            ) : null}
+          {virtualRows.map((row, virtualIndex) => {
+            // Header row is 1, so the first chart row is 2.
+            const rowIndex = virtualRowRange.start + virtualIndex + 2
             if (row.kind === 'group') {
               return (
                 <div
+                  aria-rowindex={rowIndex}
                   className="grid min-w-max border-b border-tone-d8dde5 bg-tone-f8fafb"
                   data-testid={`task-gantt-group-${row.key}`}
                   key={`group:${row.key}`}
@@ -1051,7 +1131,8 @@ export function TaskGanttView({
             )
             return (
               <article
-                className="grid min-w-max border-b border-tone-e4e7ec last:border-b-0"
+                aria-rowindex={rowIndex}
+                className="grid min-w-max border-b border-tone-e4e7ec"
                 key={taskKey}
                 role="row"
                 style={{
@@ -1384,20 +1465,15 @@ export function TaskGanttView({
               </article>
             )
           })}
-            {hiddenRowCount > 0 ? (
-              <div className="sticky left-0 p-3" style={{ width: `${GANTT_TABLE_WIDTH}px` }}>
-                <ShowMoreItemsButton
-                  label={formatShowMoreLabel(t, TASK_TABLE_RENDER_STEP, hiddenRowCount)}
-                  onShowMore={showMoreRows}
-                  testId="task-gantt-show-more"
-                />
-              </div>
+            {virtualRowsBottom > 0 ? (
+              <div aria-hidden="true" style={{ height: `${virtualRowsBottom}px` }} />
             ) : null}
+            </div>
             <svg
               aria-hidden="true"
               className="pointer-events-none absolute top-0 z-[1] overflow-visible"
               data-testid="task-gantt-connector-overlay"
-              height={dependencyLayout.externalLaneHeight + renderedRowsHeight}
+              height={dependencyLayout.externalLaneHeight + chartRowsHeight}
               style={{ left: `${GANTT_TABLE_WIDTH}px` }}
               width={timelineWidth}
             >
@@ -1447,7 +1523,7 @@ export function TaskGanttView({
                 data-testid="task-gantt-non-working-day"
                 key={span.date}
                 style={{
-                  height: `${dependencyLayout.externalLaneHeight + renderedRowsHeight}px`,
+                  height: `${dependencyLayout.externalLaneHeight + chartRowsHeight}px`,
                   left: `${GANTT_TABLE_WIDTH + span.left}px`,
                   width: `${span.right - span.left}px`,
                 }}
@@ -1460,7 +1536,7 @@ export function TaskGanttView({
                 className="pointer-events-none absolute top-0 z-[3] w-0.5 -translate-x-1/2 bg-[var(--workbench-danger)]"
                 data-testid="task-gantt-today-line"
                 style={{
-                  height: `${dependencyLayout.externalLaneHeight + renderedRowsHeight}px`,
+                  height: `${dependencyLayout.externalLaneHeight + chartRowsHeight}px`,
                   left: `${GANTT_TABLE_WIDTH + todayX}px`,
                 }}
               />
@@ -1470,7 +1546,7 @@ export function TaskGanttView({
                 aria-hidden="true"
                 className="pointer-events-none absolute top-0 z-[3] overflow-visible"
                 data-testid="task-gantt-progress-line"
-                height={dependencyLayout.externalLaneHeight + renderedRowsHeight}
+                height={dependencyLayout.externalLaneHeight + chartRowsHeight}
                 style={{ left: `${GANTT_TABLE_WIDTH}px` }}
                 width={timelineWidth}
               >
@@ -1698,6 +1774,47 @@ function GanttSchedulePreview({
       </div>
     </div>
   )
+}
+
+/**
+ * Measures which part of the chart's rows is visible in its scroll container.
+ *
+ * The offset is rounded down and the height up to {@link GANTT_VIRTUAL_VIEWPORT_STEP}, so the
+ * chart re-renders only after a scroll of at least one step.
+ *
+ * @param container - Scroll container of the chart, when it is rendered.
+ * @param rows - Element holding the rows, when it is rendered.
+ * @returns The visible part in row coordinates, or `undefined` before the chart is rendered.
+ */
+function readGanttRowViewport(
+  container: HTMLElement | null,
+  rows: HTMLElement | null,
+): TaskGanttRowViewport | undefined {
+  if (!container || !rows) return undefined
+  const top = container.getBoundingClientRect().top - rows.getBoundingClientRect().top
+  const roundedTop = Math.floor(top / GANTT_VIRTUAL_VIEWPORT_STEP) * GANTT_VIRTUAL_VIEWPORT_STEP
+  return {
+    height: Math.ceil((container.clientHeight + top - roundedTop) / GANTT_VIRTUAL_VIEWPORT_STEP) *
+      GANTT_VIRTUAL_VIEWPORT_STEP,
+    top: roundedTop,
+  }
+}
+
+/**
+ * Stores the measured visible part of the rows, keeping the current state when it is unchanged.
+ *
+ * @param container - Scroll container of the chart, when it is rendered.
+ * @param rows - Element holding the rows, when it is rendered.
+ * @param setViewport - State setter of the visible part.
+ */
+function storeGanttRowViewport(
+  container: HTMLElement | null,
+  rows: HTMLElement | null,
+  setViewport: (update: (current: TaskGanttRowViewport) => TaskGanttRowViewport) => void,
+): void {
+  const next = readGanttRowViewport(container, rows)
+  if (!next) return
+  setViewport((current) => current.top === next.top && current.height === next.height ? current : next)
 }
 
 /**

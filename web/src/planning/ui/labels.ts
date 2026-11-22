@@ -79,6 +79,7 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       commitment: (count, capacity) => t('planning.cycle.commitment')
         .replace('{count}', String(count))
         .replace('{capacity}', String(capacity)),
+      capacityFull: t('planning.cycle.capacityFull'),
       remaining: (count) => t('planning.cycle.remaining').replace('{count}', String(count)),
       carriedOver: (count) => t('planning.cycle.carriedOver').replace('{count}', String(count)),
       carriedOverBadge: t('planning.cycle.carriedOverBadge'),
@@ -374,6 +375,20 @@ function createPlanningEntityEditorLabels(t: (key: MessageKey) => string): Plann
     forecastEnd: t('planning.field.forecastEnd'),
     baselineDate: t('planning.editor.baselineDate'),
     forecastDate: t('planning.editor.forecastDate'),
+    cycleSettings: t('planning.editor.cycleSettings'),
+    cadenceCount: t('planning.editor.cadenceCount'),
+    cadenceUnit: t('planning.editor.cadenceUnit'),
+    capacity: t('planning.editor.capacity'),
+    capacityHint: (committed) => t('planning.editor.capacityHint').replace('{count}', String(committed)),
+    carryOverPolicy: t('planning.field.carryOver'),
+    cadenceUnits: {
+      week: t('planning.cadence.week'),
+      month: t('planning.cadence.month'),
+    },
+    carryOverPolicies: {
+      'move-incomplete': t('planning.carryOver.move-incomplete'),
+      'keep-incomplete': t('planning.carryOver.keep-incomplete'),
+    },
     save: t('planning.action.save'),
     reset: t('planning.editor.reset'),
     unchanged: t('planning.editor.unchanged'),
@@ -384,6 +399,9 @@ function createPlanningEntityEditorLabels(t: (key: MessageKey) => string): Plann
       'date-required': t('planning.editor.problem.dateRequired'),
       'date-range': t('planning.editor.problem.dateRange'),
       'manual-progress': t('planning.editor.problem.manualProgress'),
+      'cadence-count': t('planning.editor.problem.cadenceCount'),
+      capacity: t('planning.editor.problem.capacity'),
+      'capacity-below-committed': t('planning.editor.problem.capacityBelowCommitted'),
     },
     statuses: {
       proposed: t('planning.status.proposed'),

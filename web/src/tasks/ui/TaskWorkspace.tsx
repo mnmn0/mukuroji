@@ -81,6 +81,7 @@ import { TaskCalendarView } from './TaskCalendarView'
 import { TaskFileView } from './TaskFileView'
 import type { WorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
 import { TaskGanttView, type TaskGanttOutline } from './TaskGanttView'
+import { createTaskGanttDisplayBinding } from '../model/taskGanttDisplay'
 import { createMultiTeamWorkItemOutlineRows } from '../../work-items/model/workItemHierarchy'
 import { TaskPermissionsView } from './TaskPermissionsView'
 import { TaskTableView } from './TaskTableView'
@@ -274,6 +275,8 @@ export type TaskWorkspaceProps = {
   taskViewToolbar?: ReactNode
   /** Columns, grouping, density, and text wrapping applied by task layouts. */
   taskViewPresentation?: TaskViewPresentationSettings
+  /** Applies presentation settings changed inside a layout, such as the Gantt scale. */
+  onTaskViewPresentationChange?: (settings: TaskViewPresentationSettings) => void
   /**
    * Hierarchy shown as an outline by the table and the Gantt chart; absent when the view does
    * not show the outline.
@@ -384,6 +387,7 @@ export function TaskWorkspace({
   taskErrorMessage,
   taskViewToolbar,
   taskViewPresentation,
+  onTaskViewPresentationChange,
   outline,
   scheduleBaselineFor,
   tasks,
@@ -819,6 +823,7 @@ export function TaskWorkspace({
           t={t}
           tasks={tasks}
           workingCalendar={workingCalendar}
+          {...createTaskGanttDisplayBinding(taskViewPresentation, onTaskViewPresentationChange)}
           {...(scheduleWindowNavigation
             ? {
                 onWindowStartMonthChange: scheduleWindowNavigation.onGanttStartMonthChange,

@@ -137,6 +137,8 @@ export type TeamIssueScreenProps = {
   taskViewDefinition?: TaskViewDefinition
   /** Presentation settings rendered by Team table and board layouts. */
   taskViewPresentation?: TaskViewPresentationSettings
+  /** Applies presentation settings changed inside a layout, such as the Gantt scale. */
+  onTaskViewPresentationChange?: (settings: TaskViewPresentationSettings) => void
   /** Hierarchy shown as an outline when the table view turns the outline on. */
   issueOutline?: TeamIssueOutlineSource
   /** Optional route-controlled Team Issue view state. */
