@@ -269,6 +269,7 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 - 本人への督促は Team ごとに 1 通で、本人が書いている最初の Project（ID 順）の通知として認可します。manager への通知は作成者 × manager ごとに 1 通で、作成者本人には送りません。重複排除 key は Workspace・Team・週・種類・作成者・宛先です
 - 通知は Inbox の「週報の提出」として届き、本人は `/teams/{teamId}/timesheet?view=weekly-report&week=<週の開始日>`、manager は `view=team-weekly-reports` の同じ週を開きます。概要は週の開始日と、manager 向けには作成者の表示名です
 - projection は配信時に週の行を強整合で読み直し、提出済みなら捨てます。未提出なら「週の行がないか `submissionCount = 0`」の ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で捨てます。読み直す手段がない projection では届けません
-- 宛先の権限は event の Project の通知として確認し、さらに作成者がその Project に `manager` / `member` で残っていること、manager への通知では宛先がその Project の manager であることを、projection と Slack・Email の送信時の両方で確かめます。Slack・Email の送信時は提出状況を読み直しません
+- 宛先の権限は event の Project の通知として確認し、さらに作成者がその Project に `manager` / `member` で残っていること、manager への通知では宛先がその Project の manager であることを、projection と Slack・Email の送信時の両方で確かめます
+- Slack と Email への配信も、送信の直前に同じ週の行を強整合で読み直します。通知行は作成者（`weeklyReportAuthorMemberKey`）と週の開始日（`weeklyReportWeekStart`）を持ち、提出済みなら送らずに `suppressed` で終えます。quiet hours や digest で送信が遅れる間に提出した場合も、古い督促は届きません。manager への通知も、作成者が提出していれば届きません。週の開始日を持たない行と、読み直す手段（`PLANNING_TABLE_NAME`）のない送信 job では督促を送りません。読み直しから送信までの間に提出した場合は、まれに届くことがあります
 
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

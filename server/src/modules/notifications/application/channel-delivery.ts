@@ -32,6 +32,8 @@ export type ChannelDelivery = {
   workItemReopenedAt?: string
   /** Author of the unsubmitted weekly report, when this is a weekly report reminder or escalation. */
   weeklyReportAuthorMemberKey?: string
+  /** First day of the week a weekly report reminder or escalation is about, when this is one. */
+  weeklyReportWeekStart?: string
   /** Unsubmitted time entries a timesheet reminder was scanned for, when this is one. */
   timeEntryIds?: string[]
   /** Instant at or before which a timesheet reminder's entries had to end, when this is one. */
