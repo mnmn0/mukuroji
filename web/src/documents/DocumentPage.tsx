@@ -52,6 +52,8 @@ import {
   createWorkItemSearchPath,
 } from '../shared/routing/paths'
 import { useWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
+import { useWorkspaceAccess } from '../workspace/queries/useWorkspaceAccess'
+import type { MentionableMember } from '../shared/lib/memberMentions'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import {
   applyDocumentOperations,
@@ -458,6 +460,8 @@ export type DocumentScreenActions = {
 export type DocumentScreenProps = {
   /** Workspace API token used to search link targets and show their titles. */
   accessToken?: string
+  /** Members offered by display name after `@` in comment composers. */
+  mentionMembers?: readonly MentionableMember[]
   /** Active Workspace member token used only for explicit AI Brief requests. */
   aiAssistanceAccessToken?: string
   /** Whether the dependent AI API deployment has enabled the route-level controls. */
@@ -594,6 +598,11 @@ export function DocumentPage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useCurrentUser(accessToken)
+  // Offered by display name in comments; without it typed `@member-key` mentions still work.
+  const { data: workspaceAccess } = useWorkspaceAccess(
+    accessToken,
+    Boolean(user && !currentUserError),
+  )
   const {
     data: teams = emptyTeams,
     error: directoryError,
@@ -1495,6 +1504,7 @@ export function DocumentPage() {
 
   return (
     <DocumentScreen
+      mentionMembers={workspaceAccess?.members}
       accessToken={accessToken}
       aiAssistanceAccessToken={(
         workspace.isAiAssistanceTaskEnabled?.('summary') ?? aiAssistanceUiEnabled
@@ -1602,6 +1612,7 @@ export function DocumentPage() {
  */
 export function DocumentScreen({
   accessToken,
+  mentionMembers,
   actions,
   aiAssistanceAccessToken,
   aiAssistanceEnabled = true,
@@ -2303,6 +2314,7 @@ export function DocumentScreen({
               >
                 <DocumentContextPanel
                   linkAccessToken={accessToken}
+                  mentionMembers={mentionMembers}
                   activeTab={contextTab ?? 'brief'}
                   aiAssistanceAccessToken={resolvedAiAssistanceAccessToken}
                   aiAssistantSessionKey={mountedAiSessionKey}

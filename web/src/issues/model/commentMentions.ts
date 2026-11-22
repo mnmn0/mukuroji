@@ -1,4 +1,8 @@
 import type { WorkspaceMember } from '../../workspace/api'
+import {
+  formatMemberMentionLabel,
+  resolveMentionedMemberKeys,
+} from '../../shared/lib/memberMentions'
 
 /**
  * Formats the exact mention token label, including a stable discriminator for duplicate names.
@@ -11,21 +15,7 @@ export function formatIssueMentionLabel(
   member: WorkspaceMember,
   members: readonly WorkspaceMember[],
 ): string {
-  const displayName = formatIssueMentionMemberName(member, member.memberKey)
-  const duplicateCount = members.filter(
-    (candidate) =>
-      candidate.status === 'active' &&
-      formatIssueMentionMemberName(candidate, candidate.memberKey) ===
-        displayName,
-  ).length
-
-  if (duplicateCount < 2) return displayName
-
-  const discriminator =
-    member.email && member.email !== displayName
-      ? member.email
-      : member.memberKey
-  return `${displayName} (${discriminator})`
+  return formatMemberMentionLabel(member, members)
 }
 
 /**
@@ -44,47 +34,5 @@ export function resolveIssueMentionMemberKeys(
   selectedMemberKeys: readonly string[],
   members: readonly WorkspaceMember[],
 ): string[] {
-  return Array.from(new Set(selectedMemberKeys)).filter((memberKey) => {
-    const member = members.find(
-      (candidate) =>
-        candidate.memberKey === memberKey ||
-        candidate.id === memberKey ||
-        candidate.email === memberKey,
-    )
-
-    if (!member || member.status !== 'active') return false
-
-    const escapedName = escapeIssueMentionPattern(
-      formatIssueMentionLabel(member, members),
-    )
-    const mentionPattern = new RegExp(
-      `(^|[^\\p{L}\\p{N}_@])@${escapedName}(?=$|[^\\p{L}\\p{N}_@])`,
-      'u',
-    )
-    return mentionPattern.test(bodyMarkdown)
-  })
-}
-
-/**
- * Formats a member name for mention-token disambiguation.
- *
- * @param member - Workspace member when one can be resolved.
- * @param fallback - Stable key used when display data is absent.
- * @returns Non-empty member label.
- */
-function formatIssueMentionMemberName(
-  member: WorkspaceMember | undefined,
-  fallback: string,
-): string {
-  return member?.name?.trim() || member?.email || fallback
-}
-
-/**
- * Escapes a display label before embedding it into a mention-token regular expression.
- *
- * @param value - Literal display label.
- * @returns Regular-expression-safe label.
- */
-function escapeIssueMentionPattern(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return resolveMentionedMemberKeys(bodyMarkdown, selectedMemberKeys, members)
 }

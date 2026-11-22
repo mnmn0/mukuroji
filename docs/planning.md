@@ -255,7 +255,7 @@ Update の publish とコメントは、Planning の書き込みと同じ transa
 
 - publish（`planning-update.published`）: target の watcher、cadence の escalation 先、Project target なら現在の Project member（viewer / member / manager）
 - health が at-risk / off-track に悪化した publish（`planning-update.health-degraded`）: 上に加えて update 担当（cadence の owner）。悪化は前回の update（初回の Initiative は entity）の health と比べて判定します
-- コメント（`planning-update.commented`）: update の作成者と、`mentionMemberKeys`（最大 20 件、Web では本文の `@member@example.com`）で mention された member
+- コメント（`planning-update.commented`）: update の作成者と、`mentionMemberKeys`（最大 20 件。Web では composer の候補から選んだ `@表示名` と、本文に打った `@member@example.com`）で mention された member
 
 どれも投稿した本人は除き、通知から `/planning/portfolio` の target へ移れます。Event は update が記録した Team / Project scope と `UPDATE_TARGET` の record key を持ちます。Projection、Slack 配信、Inbox 表示のたびに target を強整合で読み直し、target が消えたか archive されていれば通知しません。Recipient は記録時の scope と、Initiative が別 Project へ移った後の現在の scope の両方を閲覧できる必要があります。Watcher だけが理由の通知は、現在も target を watch している場合に限ります。Enterprise の権限は Planning の閲覧（`planning.read` か `work-items.read`）で判定し、Work Item の閲覧権限は求めません。Directory group に割り当てた role も効くよう、snapshot に group への割り当てがあるときは projection でも recipient の現在の Cognito group を読みます。前回の health と悪化の判定、cadence の担当と escalation 先は publish の use case が commit する state から決め、通知 event はその結果だけを使います。Milestone の完了・予定変更の通知はまだありません。
 

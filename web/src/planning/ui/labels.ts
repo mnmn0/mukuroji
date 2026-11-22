@@ -305,6 +305,7 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     exportHistory: t('planning.action.exportHistory'),
     addComment: t('planning.action.addComment'),
     commentPlaceholder: t('planning.field.commentPlaceholder'),
+    mentionSuggestions: t('planning.field.mentionSuggestions'),
     reaction: t('planning.field.reaction'),
     watcherCount: (count) => t('planning.field.watcherCount').replace(
       '{count}',

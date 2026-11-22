@@ -13,6 +13,8 @@ import {
   type AiPlanningStatusUpdateAdoptionContext,
 } from '../../features/ai-assistance/ui/AiPlanningStatusUpdateAssistant'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
+import type { MentionableMember } from '../../shared/lib/memberMentions'
+import { MemberMentionTextarea, type MemberMentionDraft } from '../../shared/ui/MemberMentionTextarea'
 import { isSafeApplicationPath } from '../../shared/routing/applicationPath'
 import { routeAiPlanningDraftAdoption } from '../model/aiDraftAdoption'
 import {
@@ -187,6 +189,8 @@ export type PlanningUpdateLabels = {
   addComment: string
   /** Comment composer placeholder. */
   commentPlaceholder: string
+  /** Accessible name of the comment composer's mention suggestions. */
+  mentionSuggestions: string
   /** Reaction control accessible label. */
   reaction: string
   /** Formats the target watcher count. */
@@ -1658,48 +1662,17 @@ export function PlanningStatusUpdateLedger({
                 </div>
               ) : null}
               {onAddComment ? (
-                <form
-                  className="mt-4 grid gap-2 border-t border-[var(--workbench-border)] pt-3"
-                  onSubmit={(event) => {
-                    event.preventDefault()
-                    const form = event.currentTarget
-                    const bodyMarkdown = readOptionalText(
-                      new FormData(form).get('comment'),
-                    )
-                    if (bodyMarkdown) {
-                      void submitPlanningUpdateCommentAndReset(
-                        onAddComment,
-                        update.id,
-                        bodyMarkdown,
-                        () => form.reset(),
-                      ).catch(() => undefined)
-                    }
-                  }}
-                >
-                  <textarea
-                    aria-label={labels.commentPlaceholder}
-                    className="workbench-input min-h-20 p-3"
-                    disabled={
-                      collaborationIsPending ||
-                      collaborationIsLoading ||
-                      Boolean(collaborationErrorMessage)
-                    }
-                    name="comment"
-                    placeholder={labels.commentPlaceholder}
-                    required
-                  />
-                  <button
-                    className="workbench-button-secondary min-h-9 px-3"
-                    disabled={
-                      collaborationIsPending ||
-                      collaborationIsLoading ||
-                      Boolean(collaborationErrorMessage)
-                    }
-                    type="submit"
-                  >
-                    {labels.addComment}
-                  </button>
-                </form>
+                <PlanningUpdateCommentForm
+                  disabled={
+                    collaborationIsPending ||
+                    collaborationIsLoading ||
+                    Boolean(collaborationErrorMessage)
+                  }
+                  labels={labels}
+                  members={collaboration?.mentionMembers ?? []}
+                  updateId={update.id}
+                  onAddComment={onAddComment}
+                />
               ) : null}
             </article>
             )
@@ -1860,4 +1833,71 @@ function readOptionalNonNegativeNumber(value: FormDataEntryValue | null) {
 function readOptionalText(value: FormDataEntryValue | null) {
   const text = typeof value === 'string' ? value.trim() : ''
   return text || undefined
+}
+
+/** Props of {@link PlanningUpdateCommentForm}. */
+type PlanningUpdateCommentFormProps = {
+  /** Whether the form is disabled while collaboration state loads, saves, or failed. */
+  disabled: boolean
+  /** Localized ledger labels. */
+  labels: Pick<PlanningUpdateLabels, 'addComment' | 'commentPlaceholder' | 'mentionSuggestions'>
+  /** Members offered by display name after `@`. */
+  members: readonly MentionableMember[]
+  /** Immutable update receiving the comment. */
+  updateId: string
+  /** Saves the comment with the members picked in the composer. */
+  onAddComment: NonNullable<PlanningUpdateCollaborationController['onAddComment']>
+}
+
+/**
+ * Comment form of one immutable update, with display-name mention suggestions.
+ *
+ * @param props - Update, candidates, labels, and save callback.
+ * @returns The comment form; its draft is kept when saving fails.
+ */
+function PlanningUpdateCommentForm({
+  disabled,
+  labels,
+  members,
+  onAddComment,
+  updateId,
+}: PlanningUpdateCommentFormProps) {
+  const [draft, setDraft] = useState<MemberMentionDraft>({ body: '', mentionMemberKeys: [] })
+  return (
+    <form
+      className="mt-4 grid gap-2 border-t border-[var(--workbench-border)] pt-3"
+      onSubmit={(event) => {
+        event.preventDefault()
+        const bodyMarkdown = draft.body.trim()
+        if (!bodyMarkdown) return
+        void submitPlanningUpdateCommentAndReset(
+          onAddComment,
+          updateId,
+          bodyMarkdown,
+          () => setDraft({ body: '', mentionMemberKeys: [] }),
+          draft.mentionMemberKeys,
+        ).catch(() => undefined)
+      }}
+    >
+      <MemberMentionTextarea
+        ariaLabel={labels.commentPlaceholder}
+        className="workbench-input min-h-20 w-full p-3"
+        disabled={disabled}
+        draft={draft}
+        members={members}
+        name="comment"
+        placeholder={labels.commentPlaceholder}
+        required
+        suggestionsLabel={labels.mentionSuggestions}
+        onDraftChange={setDraft}
+      />
+      <button
+        className="workbench-button-secondary min-h-9 px-3"
+        disabled={disabled}
+        type="submit"
+      >
+        {labels.addComment}
+      </button>
+    </form>
+  )
 }

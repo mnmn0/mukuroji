@@ -8,6 +8,8 @@ import type {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import type { WorkspaceMember } from '../../workspace/api'
+import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import {
   canMutateWorkspaceContent,
@@ -59,7 +61,7 @@ import {
   createMissingPlanningTargetUpdateView,
   createPlanningTargetUpdateView,
   derivePlanningUpdateAcknowledgement,
-  extractPlanningUpdateCommentMentions,
+  resolvePlanningUpdateCommentMentions,
   planningUpdateTargetsAreEqual,
   type PlanningUpdateAcknowledgementView,
   type PlanningUpdateTargetDetailView,
@@ -124,6 +126,8 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyProjectRoles: Readonly<Record<string, ProjectMemberRole>> = {}
+/** Stable empty list while Workspace members load. */
+const emptyMentionMembers: readonly WorkspaceMember[] = []
 
 /**
  * 認証済み Workspace の Planning workbench です。
@@ -149,6 +153,12 @@ export function PlanningPage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useCurrentUser(accessToken)
+  // Offered by display name in update comments; without it typed `@email` mentions still work.
+  const { data: workspaceAccess } = useWorkspaceAccess(
+    accessToken,
+    Boolean(user && !currentUserError),
+  )
+  const mentionMembers = workspaceAccess?.members ?? emptyMentionMembers
   const {
     data: teams = emptyTeams,
     error: projectDirectoryError,
@@ -474,10 +484,15 @@ export function PlanningPage() {
   const submitPlanningUpdateComment = async (
     updateId: string,
     bodyMarkdown: string,
+    selectedMentionMemberKeys: readonly string[],
   ) => {
     const update = updateHistory.data?.updates.find((candidate) => candidate.id === updateId)
     if (!accessToken || !selectedUpdateTarget || !update) return
-    const mentionMemberKeys = extractPlanningUpdateCommentMentions(bodyMarkdown)
+    const mentionMemberKeys = resolvePlanningUpdateCommentMentions(
+      bodyMarkdown,
+      selectedMentionMemberKeys,
+      mentionMembers,
+    )
     const input = {
       body: bodyMarkdown,
       id: createPlanningClientId('planning-update-comment'),
@@ -597,6 +612,7 @@ export function PlanningPage() {
             updateAnnotations.key && updateAnnotations.isLoading,
           ),
           isPending: isUpdateCollaborationPending,
+          mentionMembers,
           onAddComment: canAnnotateSelectedUpdate
             ? submitPlanningUpdateComment
             : undefined,

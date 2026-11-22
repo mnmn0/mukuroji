@@ -158,7 +158,7 @@ SVG と埋め込み URL は server で検証・escape し、response は `no-sto
 Document 画面は global navigation の内側に Document tree、中央の editor / canvas、右側の
 context panel を置きます。Tree は active / archive を最初の page だけ読み、明示的な「さらに
 読み込む」で継続します。Recent は newest-first index から別に取得します。右 panel では
-comment thread、強調表示した mention、backlink、activity / version を同じ文脈のまま確認でき、
+comment thread、強調表示した mention（composer で `@` に続けて名前を入力し候補から選ぶ。`@member-key` と打っても認識する）、backlink、activity / version を同じ文脈のまま確認でき、
 各長大リストは opaque cursor で追加取得します。Work Item relation と Whiteboard card は
 Team ID と Issue ID から `team/<teamId>/issue/<issueId>` を生成するため、逆リンクと画面遷移が
 同じ canonical ID を使います。Whiteboard は canvas を広く保つため toolbar を floating control
