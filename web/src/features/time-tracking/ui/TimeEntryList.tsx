@@ -14,7 +14,7 @@ import {
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
-import { useTimeEntryCategories } from '../model/timeEntryCategoryContext'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
 /** Props of a member's own time entry list. */
 export type TimeEntryListProps = {

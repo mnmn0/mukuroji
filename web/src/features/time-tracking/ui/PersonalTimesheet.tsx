@@ -20,7 +20,7 @@ import {
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
-import { useTimeEntryCategories } from '../model/timeEntryCategoryContext'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
 /** Props of the member's weekly timesheet. */
 export type PersonalTimesheetProps = {

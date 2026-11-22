@@ -4,10 +4,8 @@ import {
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   type WorkspaceTimeEntryCategorySettings,
 } from '@mukuroji/contracts'
-import {
-  TimeEntryCategoryContext,
-  selectSelectableTimeEntryCategories,
-} from '../src/features/time-tracking/model/timeEntryCategoryContext'
+import { selectSelectableTimeEntryCategories } from '../src/features/time-tracking/model/timeEntryCategories'
+import { TimeEntryCategoryContext } from '../src/features/time-tracking/ui/timeEntryCategoryContext'
 import { IndirectTimeEntryForm } from '../src/features/time-tracking/ui/IndirectTimeEntryForm'
 import { describeTimeEntryCategory, describeTimeEntrySubject } from '../src/features/time-tracking/ui/timeTrackingText'
 import { createTimeEntryFixture } from '../src/features/time-tracking/fixtures'

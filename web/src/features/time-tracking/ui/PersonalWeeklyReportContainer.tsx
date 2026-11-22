@@ -11,7 +11,7 @@ import { useWeeklyReport, useWeeklyReportHistory } from '../queries/useWeeklyRep
 import { PersonalWeeklyReport, type WeeklyReportActionResult } from './PersonalWeeklyReport'
 import { createTimeTrackingFormatters, describeTimeEntrySubject } from './timeTrackingText'
 import { useLocalToday } from './useNow'
-import { useTimeEntryCategories } from '../model/timeEntryCategoryContext'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
 const emptyWorkItems: readonly CanonicalWorkItem[] = []
 

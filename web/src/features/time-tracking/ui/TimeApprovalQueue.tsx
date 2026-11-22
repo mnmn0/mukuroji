@@ -12,7 +12,7 @@ import {
   type TimeTrackingFormatters,
   type TimeTrackingTranslator,
 } from './timeTrackingText'
-import { useTimeEntryCategories } from '../model/timeEntryCategoryContext'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
 
 /** Props of the manager's approval queue. */
 export type TimeApprovalQueueProps = {

@@ -1,7 +1,8 @@
 import type { TimeEntry } from '@mukuroji/contracts'
 import { useId, useState, type FormEvent } from 'react'
 import type { IndirectTimeEntryInput } from '../api/timeEntries'
-import { selectSelectableTimeEntryCategories, useTimeEntryCategories } from '../model/timeEntryCategoryContext'
+import { selectSelectableTimeEntryCategories } from '../model/timeEntryCategories'
+import { useTimeEntryCategories } from './timeEntryCategoryContext'
 import { parseHoursInput, readIndirectMinutes, resolveBrowserTimeZone, toLocalDateKey } from '../model/timePeriod'
 import { describeTimeEntryCategory, describeTimeTrackingFailure, type TimeTrackingTranslator } from './timeTrackingText'
 
