@@ -195,6 +195,8 @@ GET /api/audit/events/export?actorId=...&from=...&to=...
 
 system admin を要求する。target filter がある場合は `TargetOccurredAtIndex`、actor filter がある場合は `ActorOccurredAtIndex`、どちらもない場合は `WorkspaceOccurredAtIndex` を使う。actor と target の両方がある場合は target index を query し、actor を filter する。同期 export は NDJSON を最大 1,000 件まで返す。上限到達時に後続 cursor が残る場合は `X-Audit-Truncated: true` と `X-Audit-Next-Cursor` を返し、呼び出し側が続きの export を取得できるようにする。1,000 件を超える export は次の非同期 S3 job を使う。
 
+Web の **設定 → Workspace 管理 → 監査ログ** はこの API を呼ぶ。`GET /api/auth/me` が返す `canReadAuditLog`（Workspace 自体に `audit.read` がある。検索 route が `audit.read` を要求するため）と `canExportAuditLog`（`audit.export` がある）で検索欄と export 欄の表示を決めるが、これは表示のためだけで、認可は上の route が request ごとに行う。検索は 1 page ごとに `audit.viewed` を書くので、画面は利用者が検索を押したときだけ読み、focus や再接続で自動的に読み直さない。
+
 ### 非同期 audit export job
 
 ```text

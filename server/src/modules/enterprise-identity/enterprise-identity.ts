@@ -46,6 +46,7 @@ import type {
   EnterpriseScimGroupJobReference,
 } from './domain/scim-group-job-reference'
 import { EnterpriseIdentityError } from './errors'
+import { createWorkspaceMemberVersionConditionCheck } from '../workspace-access'
 import type {
   EnterpriseCredentialProtector,
 } from './application/ports/enterprise-credential-protector'
@@ -61,6 +62,7 @@ import type {
   EnterpriseCustomRoleUpdateOptions,
   EnterpriseMemberRoleAssignmentCreateOptions,
   EnterpriseMemberRoleAssignmentDeleteOptions,
+  EnterpriseWorkspaceMemberFence,
 } from './application/ports/enterprise-identity-capabilities'
 import {
   ENTERPRISE_SCIM_ACTIVE_CREDENTIAL_LIMIT_PER_PROVIDER,
@@ -448,6 +450,24 @@ type EnterpriseMutationAudit = {
   metadata?: Readonly<Record<string, unknown>>
 }
 
+/** Conditions outside the enterprise identity state that a mutation commits under. */
+type EnterpriseMutationGuards = {
+  /** Workspace member version that the mutation's decision was made on. */
+  memberFence?: EnterpriseWorkspaceMemberFence
+}
+
+/**
+ * Reads the current version of a Workspace member for the memory client.
+ *
+ * @param workspaceId - Workspace of the member.
+ * @param memberKey - Stable member key.
+ * @returns The member version, or undefined when the member does not exist.
+ */
+type WorkspaceMemberVersionReader = (
+  workspaceId: string,
+  memberKey: string,
+) => Promise<number | undefined>
+
 /** Persistence and credential adapters composed into the DynamoDB client. */
 type DynamoDbEnterpriseIdentityAdapters = {
   /** Plaintext credential generation, digest, and verification adapter. */
@@ -490,6 +510,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
     state: EnterpriseIdentityState,
     expectedState: EnterpriseIdentityState,
     audit: EnterpriseMutationAudit,
+    guards?: EnterpriseMutationGuards,
   ): Promise<void>
   /** Domain claim の global uniqueness pointer を読みます。 */
   protected abstract findDomainWorkspace(domain: string): Promise<string | undefined>
@@ -1075,7 +1096,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
       }
       state.roleAssignments.push(assignment)
       return assignment
-    })
+    }, { memberFence: options.memberFence })
   }
 
   /**
@@ -1145,7 +1166,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
       state.roleAssignments = state.roleAssignments.filter((candidate) =>
         candidate.assignmentId !== assignment.assignmentId
       )
-    })
+    }, { memberFence: options.memberFence })
   }
 
   /** SCIM bearer credential を一度だけ発行します。 */
@@ -3024,11 +3045,20 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
     )
   }
 
-  /** State mutation を optimistic retry と audit 付きで実行します。 */
+  /**
+   * Runs a state mutation with optimistic retry and audit.
+   *
+   * @param workspaceId - Workspace whose state is mutated.
+   * @param audit - Audit event written with the state.
+   * @param mutateState - Applies the change to a copy of the current state.
+   * @param guards - Conditions outside the state that the write commits under.
+   * @returns The value returned by `mutateState`.
+   */
   private async mutate<T>(
     workspaceId: string,
     audit: EnterpriseMutationAudit,
     mutateState: (state: EnterpriseIdentityState) => T,
+    guards?: EnterpriseMutationGuards,
   ): Promise<T> {
     const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -3038,7 +3068,7 @@ abstract class EnterpriseIdentityService implements EnterpriseIdentityApplicatio
       if (JSON.stringify(next) === JSON.stringify(current)) return result
       next.storageRevision = current.storageRevision + 1
       try {
-        await this.saveState(next, current, audit)
+        await this.saveState(next, current, audit, guards)
         return result
       } catch (error) {
         if (
@@ -3093,21 +3123,30 @@ export class InMemoryEnterpriseIdentityClient extends EnterpriseIdentityService 
   private readonly states = new Map<string, EnterpriseIdentityState>()
   /** Global domain claim owner です。 */
   private readonly domainOwners = new Map<string, string>()
+  /** Reads Workspace member versions to check member fences; without it fences are not checked. */
+  private readonly workspaceMemberVersionReader?: WorkspaceMemberVersionReader
 
   /**
-   * Memory-backed enterprise identity client を作成します。
+   * Creates a memory-backed enterprise identity client.
+   *
+   * @param tokenHashSecret - Secret for credential digests.
+   * @param clock - Wall clock.
+   * @param scimResourceLimits - SCIM resource limits.
+   * @param workspaceMemberVersionReader - Reads Workspace member versions for member fences.
    */
   constructor(
     tokenHashSecret = 'test-enterprise-identity-secret-0000000000000000',
     clock: () => Date = () => new Date(),
     scimResourceLimits: EnterpriseScimResourceLimits =
       ENTERPRISE_SCIM_RESOURCE_LIMITS,
+    workspaceMemberVersionReader?: WorkspaceMemberVersionReader,
   ) {
     super(
       new HmacEnterpriseCredentialProtector(tokenHashSecret),
       clock,
       scimResourceLimits,
     )
+    this.workspaceMemberVersionReader = workspaceMemberVersionReader
   }
 
   /** Memory state を clone して読み込みます。 */
@@ -3115,12 +3154,28 @@ export class InMemoryEnterpriseIdentityClient extends EnterpriseIdentityService 
     return structuredClone(this.states.get(workspaceId) ?? createEmptyState(workspaceId))
   }
 
-  /** Revision が一致する場合だけ memory state を保存します。 */
+  /**
+   * Saves the memory state only while its revision and the member fence still match.
+   *
+   * @param state - State to save.
+   * @param expectedState - State the mutation read.
+   * @param _audit - Audit event; the memory client records none.
+   * @param guards - Conditions outside the state that the write commits under.
+   */
   protected async saveState(
     state: EnterpriseIdentityState,
     expectedState: EnterpriseIdentityState,
     _audit: EnterpriseMutationAudit,
+    guards?: EnterpriseMutationGuards,
   ) {
+    const memberFence = guards?.memberFence
+    if (memberFence && this.workspaceMemberVersionReader) {
+      const version = await this.workspaceMemberVersionReader(
+        state.workspaceId,
+        memberFence.memberKey,
+      )
+      if (version !== memberFence.expectedVersion) throw workspaceMemberChangedError()
+    }
     const current = this.states.get(state.workspaceId)
     if ((current?.storageRevision ?? 0) !== expectedState.storageRevision) {
       throw new EnterpriseIdentityError(
@@ -3536,6 +3591,7 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
     state: EnterpriseIdentityState,
     expectedState: EnterpriseIdentityState,
     audit: EnterpriseMutationAudit,
+    guards?: EnterpriseMutationGuards,
   ) {
     if (
       expectedState.storageGeneration &&
@@ -3711,13 +3767,22 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
     const domainClaimOperationStart = 1 + scimGroupJobWrites.length
     const domainClaimOperationEnd =
       domainClaimOperationStart + domainClaimWrites.length
+    const memberFenceCheck = guards?.memberFence
+      ? createWorkspaceMemberVersionConditionCheck({
+          workspaceId: state.workspaceId,
+          memberKey: guards.memberFence.memberKey,
+          expectedVersion: guards.memberFence.expectedVersion,
+        })
+      : undefined
     const transactItems = [
       controlWrite,
       ...scimGroupJobWrites,
       ...domainClaimWrites,
       ...scimProjectionWrites,
       ...(auditPut ? [auditPut] : []),
+      ...(memberFenceCheck ? [memberFenceCheck] : []),
     ]
+    const memberFenceOperationIndex = memberFenceCheck ? transactItems.length - 1 : undefined
     try {
       await this.generationCommitter.commit(stagedItems, transactItems)
     } catch (error) {
@@ -3737,6 +3802,13 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
               )
             }
           }
+        }
+        // A changed member must be decided again, so it wins over a retryable CONTROL conflict.
+        if (
+          memberFenceOperationIndex !== undefined &&
+          conflictIndexes.has(memberFenceOperationIndex)
+        ) {
+          throw workspaceMemberChangedError(error.cause)
         }
         if (conflictIndexes.has(0)) {
           throw new EnterpriseIdentityError(
@@ -6305,6 +6377,22 @@ function requireReadyIdentityProvider(
  * @param right - Second assignment.
  * @returns Whether both describe the same grant.
  */
+/**
+ * Builds the error for a member whose Workspace role or status changed after it was read.
+ *
+ * @param cause - Underlying conditional failure, when there is one.
+ * @returns A non-retryable 409, as the caller must decide again on the current member.
+ */
+function workspaceMemberChangedError(cause?: unknown) {
+  return new EnterpriseIdentityError(
+    409,
+    'EnterpriseRoleAssignmentMemberChanged',
+    'The member changed while the role assignment was being saved. Reload and try again.',
+    false,
+    cause === undefined ? undefined : { cause },
+  )
+}
+
 function isSameRoleAssignment(
   left: EnterpriseRoleAssignment,
   right: EnterpriseRoleAssignment,

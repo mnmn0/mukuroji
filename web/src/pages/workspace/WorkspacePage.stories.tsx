@@ -162,6 +162,8 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   accessToken: 'storybook-access-token',
   canManageAiAssistance: true,
   canReadCustomers: true,
+  canReadAuditLog: true,
+  canExportAuditLog: true,
   canManageCustomerRequests: true,
   canManageCustomerViews: true,
   canViewCustomerSensitiveData: true,
