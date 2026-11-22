@@ -2442,6 +2442,16 @@ function configureFakeProjectClients(
           ],
         }
       },
+      async addProjectMemberIfAbsent(directoryId, _teamId, projectId, memberKey, input) {
+        if (memberKey.trim().toLowerCase() === 'demo@example.com') return { added: false }
+        calls.memberUpdates.push({
+          directoryId,
+          memberKey,
+          projectId,
+          role: String(input.role),
+        })
+        return { added: true }
+      },
       async updateProjectMember(directoryId, projectId, memberKey, input) {
         calls.memberUpdates.push({
           directoryId,

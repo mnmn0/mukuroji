@@ -907,6 +907,29 @@ export type ProjectDirectoryClient = {
     auditContext?: MutationAuditContext,
   ): Promise<UpdateProjectMemberResponse>
   /**
+   * Grants a Project role only when the member has none, so an existing role is never changed.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team that must own the Project.
+   * @param projectId - Project to grant.
+   * @param memberKey - Member to add.
+   * @param input - Role and display details of the member.
+   * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns Whether the role was added; false when the member already belonged to the Project.
+   */
+  addProjectMemberIfAbsent(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberRequestBody,
+    expectedWorkspaceMemberVersion: number,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<{ added: boolean }>
+  /**
    * DynamoDB から project member role を削除します。
    */
   removeProjectMember(
@@ -1995,6 +2018,135 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
+   * Grants a Project role only when the member has none. The member row is written with an
+   * insert-only condition, so a role granted concurrently is kept and reported as existing.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team that must own the Project.
+   * @param projectId - Project to grant.
+   * @param memberKey - Member to add.
+   * @param input - Role and display details of the member.
+   * @param expectedWorkspaceMemberVersion - Workspace member version read before the grant.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns Whether the role was added; false when the member already belonged to the Project.
+   */
+  async addProjectMemberIfAbsent(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    memberKey: string,
+    input: UpdateProjectMemberRequestBody,
+    expectedWorkspaceMemberVersion: number,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<{ added: boolean }> {
+    await this.ensureLocalAuditTable()
+    const normalizedMemberKey = normalizeProjectMemberKey(memberKey)
+    const email = readProjectMemberEmail(input.email, normalizedMemberKey)
+    const name = readOptionalProjectMemberName(input.name)
+    const role = readProjectRole(input.role)
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    this.requireActiveProject(items, projectId, teamId)
+    if (hasActiveProjectMember(items, projectId, normalizedMemberKey)) {
+      return { added: false }
+    }
+
+    const updatedAt = new Date().toISOString()
+    const item: ProjectMemberItem = {
+      directoryId,
+      entryKey: createProjectMemberEntryKey(projectId, normalizedMemberKey),
+      entryType: 'project-member',
+      webhookAuthorizationKey: createWebhookMemberAuthorizationKey(directoryId, normalizedMemberKey),
+      webhookAuthorizationSortKey: createWebhookProjectAuthorizationSortKey(projectId),
+      projectId,
+      memberKey: normalizedMemberKey,
+      email,
+      name,
+      role,
+      createdAt: updatedAt,
+      updatedAt,
+    }
+    const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+      directoryId,
+      eventType: 'member.added',
+      entityType: 'member',
+      entityId: `${projectId}/${normalizedMemberKey}`,
+      action: 'created',
+      occurredAt: updatedAt,
+      changes: createAuditFieldChanges(undefined, item, ['email', 'name', 'role']),
+      metadata: { projectId, memberKey: normalizedMemberKey },
+    })
+    // The target's own row is already guarded active by the version update below, and one
+    // transaction cannot touch a row twice, so a caller adding themselves drops that check.
+    const callerChecks = authorizationConditionChecks.filter((check) =>
+      !isWorkspaceMemberRowCheck(check, this.workspaceAccessTableName, directoryId, normalizedMemberKey)
+    )
+    const stateItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        },
+      },
+      {
+        Update: this.createActiveWorkspaceMemberVersionUpdate(
+          directoryId,
+          normalizedMemberKey,
+          expectedWorkspaceMemberVersion,
+          updatedAt,
+        ),
+      },
+      ...getActiveProjectGrantSources(items, projectId).flatMap((source) =>
+        createWebhookTeamGrantTransactItems(
+          this.tableName,
+          directoryId,
+          projectId,
+          normalizedMemberKey,
+          source,
+        )
+      ),
+      ...(auditPut ? [auditPut] : []),
+    ]
+    const transactItems = [...stateItems, ...callerChecks]
+    requireDynamoDbTransactionCapacity(transactItems)
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+      return { added: true }
+    } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        const latest = await this.readValidDirectoryItems(directoryId, true)
+        this.requireActiveProject(latest, projectId, teamId)
+        if (hasActiveProjectMember(latest, projectId, normalizedMemberKey)) {
+          return { added: false }
+        }
+      }
+      if (callerChecks.some((_, index) =>
+        isTransactionConditionalFailureAt(error, stateItems.length + index)
+      )) {
+        throw new ProjectDataError(
+          403,
+          'DirectoryAuthorizationChanged',
+          'Your permission changed. Reload and try again.',
+        )
+      }
+      if (isTransactionConditionalFailureAt(error, 1)) {
+        await this.requireUnchangedActiveWorkspaceMember(
+          directoryId,
+          normalizedMemberKey,
+          expectedWorkspaceMemberVersion,
+        )
+      }
+      if (hasTransactionConditionalFailure(error)) {
+        throw createProjectDataConflictError()
+      }
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
    * DynamoDB から project member role を削除します。
    */
   async removeProjectMember(
@@ -3036,7 +3188,15 @@ export class DynamoDbProjectDirectoryClient {
           },
         },
       },
-      ...(profile.leaderMemberKey === undefined
+      // A leader who is also the caller is already guarded active by the caller's own check, and
+      // one transaction cannot touch a row twice.
+      ...(profile.leaderMemberKey === undefined ||
+        authorizationConditionChecks.some((check) => isWorkspaceMemberRowCheck(
+          check,
+          this.workspaceAccessTableName,
+          directoryId,
+          profile.leaderMemberKey ?? '',
+        ))
         ? []
         : [{ ConditionCheck: this.createActiveWorkspaceMemberConditionCheck(directoryId, profile.leaderMemberKey) }]),
       ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
@@ -4877,6 +5037,45 @@ function hasTransactionConditionalFailure(error: unknown) {
   }
 
   return reasonCodes.includes('ConditionalCheckFailed')
+}
+
+/**
+ * Tells whether a Project already has an active role for a member.
+ *
+ * @param items - Directory rows read in one snapshot.
+ * @param projectId - Project to look in.
+ * @param memberKey - Normalized member key.
+ * @returns Whether an active member row exists.
+ */
+function hasActiveProjectMember(items: ProjectDirectoryItem[], projectId: string, memberKey: string) {
+  return items.some((item) =>
+    item.entryType === 'project-member' &&
+    item.projectId === projectId &&
+    item.memberKey === memberKey &&
+    isActiveDirectoryItem(item)
+  )
+}
+
+/**
+ * Tells whether a transaction item is a condition check on one Workspace member row.
+ *
+ * @param check - Transaction item to inspect.
+ * @param workspaceAccessTableName - Workspace access table name.
+ * @param workspaceId - Workspace identifier.
+ * @param memberKey - Member key of the row.
+ * @returns Whether the item checks that member's row.
+ */
+function isWorkspaceMemberRowCheck(
+  check: NonNullable<TransactWriteCommandInput['TransactItems']>[number],
+  workspaceAccessTableName: string,
+  workspaceId: string,
+  memberKey: string,
+) {
+  const condition = check.ConditionCheck
+  return condition !== undefined &&
+    condition.TableName === workspaceAccessTableName &&
+    condition.Key?.workspaceId === workspaceId &&
+    condition.Key?.recordKey === `MEMBER#${normalizeProjectMemberKey(memberKey)}`
 }
 
 function isTransactionConditionalFailureAt(error: unknown, index: number) {

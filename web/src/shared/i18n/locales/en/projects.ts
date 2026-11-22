@@ -283,6 +283,8 @@ export const projectsMessages = {
   'projects.teamProfile.addMember': 'Add to every Project',
   'projects.teamProfile.added': 'Added to {added} Projects. {existing} already had this member, and their roles were left unchanged.',
   'projects.teamProfile.error.memberInactive': 'Only active Workspace members can be chosen. Reload the list.',
+  'projects.teamProfile.workspaceMembersLoading': 'Loading the Workspace members…',
+  'projects.teamProfile.workspaceMembersError': 'The Workspace members could not be loaded. Reload them to choose a leader or a member to add.',
 } as const satisfies Record<
   Extract<
     MessageKey,

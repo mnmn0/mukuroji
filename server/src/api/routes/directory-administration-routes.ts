@@ -1,6 +1,10 @@
 import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
-import { ProjectDataError, type TeamSearchSource } from '../../modules/directory'
+import {
+  normalizeProjectMemberKey,
+  ProjectDataError,
+  type TeamSearchSource,
+} from '../../modules/directory'
 import { createTeamWorkspaceSearchDocument } from '../../modules/workspace-search/workspace-search'
 import {
   isDirectoryTeamMemberRole,
@@ -157,34 +161,33 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
         addedProjectIds: [],
         existingProjectIds: [],
       }
+      // An administrator adding themselves keeps the membership version they were authorized
+      // with, advanced only by their own grants, so a role change in between still fails.
+      const addsSelf = principal.principalKind !== 'service-account' &&
+        normalizeProjectMemberKey(principal.workspaceMember.memberKey) === normalizeProjectMemberKey(profile.id)
       for (const project of activeProjects) {
-        const members = await workspaceDependencies.projectDirectory.getProjectMembers(
-          principal.directoryId,
-          project.id,
-          teamId,
-        )
-        // Project member rows store the key normalized, the same as `updateProjectMember`.
-        const storedMemberKey = profile.id.trim().toLowerCase()
-        if (members.members.some((member) => member.id === storedMemberKey)) {
-          response.existingProjectIds.push(project.id)
-          continue
-        }
         // Each grant advances the member's version, so it is read again before every Project.
-        const workspaceMember = await requireActiveWorkspaceMember(principal.directoryId, profile.id)
-        await workspaceDependencies.projectDirectory.updateProjectMember(
+        const expectedVersion = addsSelf
+          ? principal.workspaceMember.version + response.addedProjectIds.length
+          : (await requireActiveWorkspaceMember(principal.directoryId, profile.id)).version
+        // The grant is insert-only and fenced by the caller's authorization, so a role granted
+        // concurrently is kept and a caller who loses access stops the remaining grants.
+        const { added } = await workspaceDependencies.projectDirectory.addProjectMemberIfAbsent(
           principal.directoryId,
+          teamId,
           project.id,
           profile.id,
           { role, email: profile.email, name: profile.name },
-          workspaceMember.version,
+          expectedVersion,
           createApiMutationContext(c, principal, {
             teamId,
             projectId: project.id,
             memberKey: profile.id,
             role,
           }),
+          createDirectoryAuthorizationChecks(principal),
         )
-        response.addedProjectIds.push(project.id)
+        ;(added ? response.addedProjectIds : response.existingProjectIds).push(project.id)
       }
       return response
     })

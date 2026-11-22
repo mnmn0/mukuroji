@@ -281,4 +281,6 @@ export const projectsMessages = {
   'projects.teamProfile.addMember': 'すべてのプロジェクトに追加',
   'projects.teamProfile.added': '{added} 件のプロジェクトに追加しました。{existing} 件は参加済みだったので、ロールは変えていません。',
   'projects.teamProfile.error.memberInactive': '有効な Workspace メンバーだけを選べます。一覧を読み込み直してください。',
+  'projects.teamProfile.workspaceMembersLoading': 'Workspace メンバーの一覧を読み込んでいます…',
+  'projects.teamProfile.workspaceMembersError': 'Workspace メンバーの一覧を読み込めませんでした。リーダーと追加するメンバーを選ぶには、読み込み直してください。',
 } as const

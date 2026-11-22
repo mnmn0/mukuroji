@@ -866,3 +866,156 @@ test('lists the Team description and leader for administration', async () => {
 
   expect(directory.teams[0]).toMatchObject({ id: 'alpha', description: '説明', leaderMemberKey: 'leader' })
 })
+
+/**
+ * Creates a stored Project member row.
+ *
+ * @param projectId - Project identifier.
+ * @param memberKey - Normalized member key.
+ * @returns The stored row.
+ */
+function createProjectMemberRow(projectId: string, memberKey: string) {
+  return {
+    directoryId,
+    entryKey: `PROJECT_MEMBER#${projectId}#${memberKey}`,
+    entryType: 'project-member',
+    projectId,
+    memberKey,
+    email: memberKey,
+    role: 'manager',
+    createdAt: '2026-06-01T00:00:00.000Z',
+    updatedAt: '2026-06-01T00:00:00.000Z',
+  }
+}
+
+/**
+ * Counts the items of a sent transaction.
+ *
+ * @param value - Transaction items as sent.
+ * @returns The number of items, or 0 when none were sent.
+ */
+function lengthOf(value: unknown) {
+  return listItems(value).length
+}
+
+/**
+ * Reads the items of a sent transaction.
+ *
+ * @param value - Transaction items as sent.
+ * @returns The items, or an empty list when none were sent.
+ */
+function listItems(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : []
+}
+
+/** Caller authorization guards: the caller's member row and the Enterprise control row. */
+const callerAuthorization = [
+  {
+    ConditionCheck: {
+      TableName: 'WorkspaceAccessTable',
+      Key: { workspaceId: directoryId, recordKey: 'MEMBER#admin@example.com' },
+      ConditionExpression: '#version = :expectedVersion',
+    },
+  },
+  {
+    ConditionCheck: {
+      TableName: 'EnterpriseTable',
+      Key: { scopeKey: `WORKSPACE#${directoryId}`, recordKey: 'CONTROL' },
+      ConditionExpression: '#controlRevision = :expectedControlRevision',
+    },
+  },
+]
+
+test('adds a Project member insert-only, fenced by the caller authorization', async () => {
+  const rows = [
+    createTeamRow('alpha', 10),
+    createProjectRow('alpha', 10, 'refero', 1),
+    createProjectMemberRow('refero', 'kept@example.com'),
+  ]
+  const { client, transactions } = createClient(rows)
+  const input = { role: 'viewer', email: 'sato@example.com' }
+
+  await expect(client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'Sato@example.com', input, 3, undefined, callerAuthorization,
+  )).resolves.toEqual({ added: true })
+  await expect(client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'kept@example.com', input, 3, undefined, callerAuthorization,
+  )).resolves.toEqual({ added: false })
+  await expect(client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'admin@example.com', input, 7, undefined, callerAuthorization,
+  )).resolves.toEqual({ added: true })
+  await expect(client.addProjectMemberIfAbsent(
+    directoryId, 'beta', 'refero', 'sato@example.com', input, 3, undefined, callerAuthorization,
+  )).rejects.toMatchObject({ status: 404 })
+
+  const [toOther, toSelf] = transactions().map(listItems)
+  expect(transactions()).toHaveLength(2)
+  expect(toOther?.slice(0, 2)).toEqual([
+    {
+      Put: expect.objectContaining({
+        Item: expect.objectContaining({ memberKey: 'sato@example.com', role: 'viewer' }),
+        ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+      }),
+    },
+    {
+      Update: expect.objectContaining({
+        Key: { workspaceId: directoryId, recordKey: 'MEMBER#sato@example.com' },
+        ExpressionAttributeValues: expect.objectContaining({ ':expectedVersion': 3 }),
+      }),
+    },
+  ])
+  expect(toOther?.slice(-2)).toEqual(callerAuthorization)
+  // A caller adding themselves is guarded by the version update of their own row instead.
+  expect(toSelf?.[1]).toEqual({
+    Update: expect.objectContaining({
+      Key: { workspaceId: directoryId, recordKey: 'MEMBER#admin@example.com' },
+    }),
+  })
+  expect(toSelf).not.toContainEqual(callerAuthorization[0])
+  expect(toSelf?.at(-1)).toEqual(callerAuthorization[1])
+  expect(toSelf).toHaveLength(lengthOf(toOther) - 1)
+})
+
+test('keeps a Project role granted concurrently and refuses a revoked caller', async () => {
+  const rows: Array<Record<string, unknown>> = [
+    createTeamRow('alpha', 10),
+    createProjectRow('alpha', 10, 'refero', 1),
+  ]
+  const raced = createClient(rows, false, {}, [], 0)
+  const input = { role: 'viewer', email: 'sato@example.com' }
+  const pending = raced.client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'sato@example.com', input, 3, undefined, callerAuthorization,
+  )
+  // Another administrator's grant lands before the insert-only write commits.
+  rows.push(createProjectMemberRow('refero', 'sato@example.com'))
+  await expect(pending).resolves.toEqual({ added: false })
+
+  const projectRows = [createTeamRow('alpha', 10), createProjectRow('alpha', 10, 'refero', 1)]
+  const probe = createClient(projectRows)
+  await probe.client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'sato@example.com', input, 3, undefined, callerAuthorization,
+  )
+  const lastIndex = lengthOf(probe.transactions()[0]) - 1
+  // The Enterprise control row, the caller's last guard, has changed.
+  const revoked = createClient(projectRows, false, {}, [], lastIndex)
+  await expect(revoked.client.addProjectMemberIfAbsent(
+    directoryId, 'alpha', 'refero', 'sato@example.com', input, 3, undefined, callerAuthorization,
+  )).rejects.toMatchObject({ status: 403, code: 'DirectoryAuthorizationChanged' })
+})
+
+test('does not check the leader twice when the caller leads the Team', async () => {
+  const { client, transactions } = createClient([createTeamRow('alpha', 10)])
+
+  await client.updateTeamProfile(
+    directoryId,
+    'alpha',
+    { description: '', leaderMemberKey: 'Admin@example.com' },
+    undefined,
+    callerAuthorization,
+  )
+
+  expect(transactions()).toEqual([[
+    expect.objectContaining({ Update: expect.anything() }),
+    ...callerAuthorization,
+  ]])
+})

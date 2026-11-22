@@ -60,6 +60,12 @@ export function TeamProfilePanelContainer({ accessToken, locale }: TeamProfilePa
       .sort((left, right) => left.label.localeCompare(right.label)),
     [access.data],
   )
+  // A failed member list is not an empty one: the panel says so and offers a retry.
+  const workspaceMembersStatus: TeamProfileWorkspaceMembersStatus = access.error
+    ? 'error'
+    : access.data
+      ? 'ready'
+      : 'loading'
 
   if (directory.isLoading) {
     return (
@@ -97,7 +103,9 @@ export function TeamProfilePanelContainer({ accessToken, locale }: TeamProfilePa
       team={team}
       teams={teams}
       workspaceMembers={workspaceMembers}
+      workspaceMembersStatus={workspaceMembersStatus}
       onAddMember={actions.addMember}
+      onRetryWorkspaceMembers={() => void access.mutate()}
       onSaveProfile={actions.saveProfile}
       onSelectTeam={setSelectedTeamId}
     />
@@ -111,6 +119,9 @@ export type TeamProfileWorkspaceMember = {
   /** Display name, or the email address when no name is known. */
   label: string
 }
+
+/** Load state of the Workspace member list that leader and member choices come from. */
+export type TeamProfileWorkspaceMembersStatus = 'loading' | 'error' | 'ready'
 
 /** Props of the Team settings panel. */
 export type TeamProfilePanelProps = {
@@ -128,6 +139,10 @@ export type TeamProfilePanelProps = {
   membersPartial: boolean
   /** Active Workspace members offered as leader or as a member to add. */
   workspaceMembers: readonly TeamProfileWorkspaceMember[]
+  /** Whether the Workspace member list is loading, failed, or loaded. */
+  workspaceMembersStatus: TeamProfileWorkspaceMembersStatus
+  /** Loads the Workspace member list again after it failed. */
+  onRetryWorkspaceMembers: () => void
   /** Whether a change is in flight. */
   pending: boolean
   /** Message of the last failed change. */
@@ -162,6 +177,8 @@ export function TeamProfilePanel({
   membersLoading,
   membersPartial,
   workspaceMembers,
+  workspaceMembersStatus,
+  onRetryWorkspaceMembers,
   pending,
   errorMessage,
   locale,
@@ -194,6 +211,26 @@ export function TeamProfilePanel({
               {errorMessage}
             </p>
           ) : null}
+          {workspaceMembersStatus === 'loading' ? (
+            <p className="m-0 text-sm text-[var(--workbench-muted)]" role="status">
+              {t('projects.teamProfile.workspaceMembersLoading')}
+            </p>
+          ) : workspaceMembersStatus === 'error' ? (
+            <div
+              className="flex flex-wrap items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3"
+              data-testid="team-profile-workspace-members-error"
+              role="alert"
+            >
+              <span className="text-sm text-fg-red-700">{t('projects.teamProfile.workspaceMembersError')}</span>
+              <button
+                className="workbench-button-secondary min-h-10 px-4"
+                onClick={onRetryWorkspaceMembers}
+                type="button"
+              >
+                {t('projects.administration.retry')}
+              </button>
+            </div>
+          ) : null}
           <TeamProfileForm
             // A new Team or a saved profile starts the form from the stored values.
             key={`${team.id}\u0000${team.description ?? ''}\u0000${team.leaderMemberKey ?? ''}`}
@@ -201,6 +238,7 @@ export function TeamProfilePanel({
             t={t}
             team={team}
             workspaceMembers={workspaceMembers}
+            workspaceMembersReady={workspaceMembersStatus === 'ready'}
             onSave={(input) => onSaveProfile(team.id, input)}
           />
           <TeamProfileMembers
@@ -212,6 +250,7 @@ export function TeamProfilePanel({
             projectCount={projectCount}
             t={t}
             workspaceMembers={workspaceMembers}
+            workspaceMembersReady={workspaceMembersStatus === 'ready'}
             onAdd={(input) => onAddMember(team.id, input)}
           />
         </>
@@ -228,6 +267,8 @@ type TeamProfileFormProps = {
   team: DirectoryAdministrationTeam
   /** Active Workspace members offered as leader. */
   workspaceMembers: readonly TeamProfileWorkspaceMember[]
+  /** Whether the Workspace member list loaded, so a leader can be chosen. */
+  workspaceMembersReady: boolean
   /** Whether a change is in flight. */
   pending: boolean
   /** Localized message resolver. */
@@ -242,10 +283,18 @@ type TeamProfileFormProps = {
  * @param props - Team, leader candidates, and the save action.
  * @returns The profile form.
  */
-function TeamProfileForm({ team, workspaceMembers, pending, t, onSave }: TeamProfileFormProps) {
+function TeamProfileForm({
+  team,
+  workspaceMembers,
+  workspaceMembersReady,
+  pending,
+  t,
+  onSave,
+}: TeamProfileFormProps) {
   const [description, setDescription] = useState(team.description ?? '')
   const [leaderMemberKey, setLeaderMemberKey] = useState(team.leaderMemberKey ?? '')
   const [saved, setSaved] = useState(false)
+  // Until the list loads, the stored leader is shown as is and cannot be changed.
   const leaderMissing = leaderMemberKey !== '' &&
     !workspaceMembers.some((member) => member.memberKey === leaderMemberKey)
 
@@ -282,6 +331,7 @@ function TeamProfileForm({ team, workspaceMembers, pending, t, onSave }: TeamPro
         {t('projects.teamProfile.leader')}
         <select
           className="workbench-input min-h-10 px-3 text-sm font-normal"
+          disabled={!workspaceMembersReady}
           onChange={(event) => {
             setSaved(false)
             setLeaderMemberKey(event.target.value)
@@ -324,6 +374,8 @@ type TeamProfileMembersProps = {
   projectCount: number
   /** Active Workspace members offered to add. */
   workspaceMembers: readonly TeamProfileWorkspaceMember[]
+  /** Whether the Workspace member list loaded, so a member can be chosen. */
+  workspaceMembersReady: boolean
   /** Whether a change is in flight. */
   pending: boolean
   /** Localized message resolver. */
@@ -346,6 +398,7 @@ function TeamProfileMembers({
   membersPartial,
   projectCount,
   workspaceMembers,
+  workspaceMembersReady,
   pending,
   t,
   onAdd,
@@ -408,6 +461,7 @@ function TeamProfileMembers({
             {t('projects.teamProfile.addMemberLabel')}
             <select
               className="workbench-input min-h-10 px-3 text-sm font-normal"
+              disabled={!workspaceMembersReady}
               onChange={(event) => setMemberKey(event.target.value)}
               required
               value={memberKey}

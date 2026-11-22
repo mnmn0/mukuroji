@@ -99,7 +99,9 @@ describe('TeamProfilePanel', () => {
         team={team}
         teams={[team]}
         workspaceMembers={[{ memberKey: 'sato', label: '佐藤' }, { memberKey: 'tanaka', label: '田中' }]}
+        workspaceMembersStatus="ready"
         onAddMember={async () => undefined}
+        onRetryWorkspaceMembers={() => undefined}
         onSaveProfile={async () => true}
         onSelectTeam={() => undefined}
       />,
@@ -126,7 +128,9 @@ describe('TeamProfilePanel', () => {
         team={{ ...team, leaderMemberKey: 'left' }}
         teams={[team]}
         workspaceMembers={[]}
+        workspaceMembersStatus="ready"
         onAddMember={async () => undefined}
+        onRetryWorkspaceMembers={() => undefined}
         onSaveProfile={async () => true}
         onSelectTeam={() => undefined}
       />,
@@ -136,5 +140,34 @@ describe('TeamProfilePanel', () => {
     expect(markup).toContain('>Core</option>')
     expect(markup).toContain(t('projects.teamProfile.noProjects'))
     expect(markup).not.toContain('data-testid="team-profile-add-member"')
+  })
+
+  test('says the Workspace members failed to load and offers a retry instead of an empty list', () => {
+    const t = createTranslator('ja')
+    const markup = renderToStaticMarkup(
+      <TeamProfilePanel
+        locale="ja"
+        members={[]}
+        membersLoading={false}
+        membersPartial={false}
+        pending={false}
+        projectCount={2}
+        t={t}
+        team={team}
+        teams={[team]}
+        workspaceMembers={[]}
+        workspaceMembersStatus="error"
+        onAddMember={async () => undefined}
+        onRetryWorkspaceMembers={() => undefined}
+        onSaveProfile={async () => true}
+        onSelectTeam={() => undefined}
+      />,
+    )
+
+    expect(markup).toContain('data-testid="team-profile-workspace-members-error"')
+    expect(markup).toContain(t('projects.teamProfile.workspaceMembersError'))
+    expect(markup).toContain(t('projects.administration.retry'))
+    // Leader and member choices stay disabled until the list loads.
+    expect(markup.match(/<select[^>]*disabled=""/g)).toHaveLength(2)
   })
 })
