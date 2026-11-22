@@ -80,8 +80,9 @@ export type WorkCalendar = WorkCalendarOverrides & {
   /** Team or Project that owns the calendar. */
   scope: Extract<WorkCalendarScope, { kind: 'team' | 'project' }>
   /**
-   * Adjustment the settings screen chooses first when this Team's calendars change. Only a Team
-   * calendar keeps one; a Project uses its Team's.
+   * Adjustment of the latest save. A Team calendar's is the one the settings screen chooses first
+   * when this Team's calendars change; a Project keeps its own only so a retried save resumes with
+   * the same adjustment, and the screen still starts from its Team's.
    */
   changeAdjustment?: WorkCalendarAdjustment
   /** Revision that increases on every save, starting at 1. */

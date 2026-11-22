@@ -151,7 +151,7 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
         () => saveOrResumeWorkCalendar(principal, {
           scope,
           overrides: input.overrides,
-          ...(scope.kind === 'team' ? { changeAdjustment: input.adjustment } : {}),
+          changeAdjustment: input.adjustment,
         }, input.expectedRevision),
       )
       return c.json(result)

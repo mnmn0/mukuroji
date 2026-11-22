@@ -16,7 +16,7 @@ export type WorkCalendarWrite = {
   scope: StoredWorkCalendarScope
   /** New rules of the calendar. */
   overrides: WorkCalendarOverrides
-  /** Adjustment a Team calendar keeps for its next change. */
+  /** Adjustment of this save; a Team calendar also offers it first for its next change. */
   changeAdjustment?: WorkCalendarAdjustment
 }
 
@@ -178,9 +178,7 @@ export function createStoredWorkCalendar(
     ...(write.overrides.workingWeekdays ? { workingWeekdays: [...write.overrides.workingWeekdays] } : {}),
     ...(write.overrides.publicHolidays ? { publicHolidays: write.overrides.publicHolidays } : {}),
     additionalHolidays: [...write.overrides.additionalHolidays],
-    ...(write.scope.kind === 'team' && write.changeAdjustment
-      ? { changeAdjustment: write.changeAdjustment }
-      : {}),
+    ...(write.changeAdjustment ? { changeAdjustment: write.changeAdjustment } : {}),
     revision,
     updatedAt: now,
     updatedBy: actorMemberKey,

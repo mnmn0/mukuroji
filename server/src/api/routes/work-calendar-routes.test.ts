@@ -241,6 +241,33 @@ test('changes only the Work Items of a Project when its calendar changes', async
   ])
 })
 
+test('resumes a Project calendar save only with the adjustment it was made with', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  const projectId = base.assignedProjectId
+  if (!projectId) throw new Error('The fake Work Item has no Project.')
+  installWorkItems([{ ...base, id: 'in-project', schedule: weekSchedule(sharedPolicy) }])
+  const save = {
+    projectId,
+    overrides: { additionalHolidays: ['2026-12-09'] },
+    adjustment: 'keep-end-date',
+    expectedRevision: 0,
+  }
+  const saved = await request('/api/teams/core-team/work-calendar', 'PUT', save)
+  expect(saved.status).toBe(200)
+  expect(await saved.json()).toMatchObject({ calendar: { changeAdjustment: 'keep-end-date', revision: 1 } })
+
+  const mismatched = await request('/api/teams/core-team/work-calendar', 'PUT', { ...save, adjustment: 'keep-duration' })
+  expect(mismatched.status).toBe(409)
+  const resumed = await request('/api/teams/core-team/work-calendar', 'PUT', save)
+  expect(resumed.status).toBe(200)
+  expect(await resumed.json()).toMatchObject({ calendar: { revision: 1 } })
+
+  // The settings screen still starts a Project from its Team's adjustment.
+  const read = await request(`/api/teams/core-team/work-calendar?projectId=${projectId}`)
+  expect(await read.json()).toMatchObject({ changeAdjustment: 'keep-duration' })
+})
+
 test('refuses a calendar change from a member who manages neither the Team nor the Project', async () => {
   configureFakeProjectClients(true, { workspaceRole: 'member', role: 'viewer' })
   const response = await request('/api/teams/core-team/work-calendar/preview', 'POST', {
