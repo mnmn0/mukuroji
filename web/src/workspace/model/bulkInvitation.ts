@@ -40,6 +40,11 @@ export type BulkInvitationRow = {
   name?: string
   /** Role the invitation grants: the row's role column, or the role chosen for every row. */
   role: WorkspaceRole
+  /**
+   * The row's role cell as written, when it has one. It is kept so that putting a row back into
+   * the input never turns an unknown role into a valid one.
+   */
+  roleInput?: string
   /** Why the row cannot be sent; absent when it can. */
   issue?: BulkInvitationIssue
 }
@@ -269,9 +274,10 @@ export function planBulkInvitation(text: string, context: BulkInvitationContext)
   const rows = rawRows.slice(0, WORKSPACE_BULK_INVITATION_MAX_ROWS).map((raw): BulkInvitationRow => {
     const email = normalizeWorkspaceInvitationEmail(raw.email)
     const name = raw.name?.trim() || undefined
-    const roleCell = raw.role?.trim().toLowerCase()
-    const role = roleCell ? roleAliases.get(roleCell) : context.defaultRole
-    const row = { line: raw.line, email, name, role: role ?? context.defaultRole }
+    const roleInput = raw.role?.trim() || undefined
+    const role = roleInput ? roleAliases.get(roleInput.toLowerCase()) : context.defaultRole
+    const row: BulkInvitationRow = { line: raw.line, email, name, role: role ?? context.defaultRole }
+    if (roleInput) row.roleInput = roleInput
     const issue: BulkInvitationIssue | undefined = !isWorkspaceInvitationEmail(email)
       ? 'invalid-email'
       : name !== undefined && !isAcceptableName(name)
@@ -294,4 +300,18 @@ export function planBulkInvitation(text: string, context: BulkInvitationContext)
   })
 
   return { rows, truncated }
+}
+
+/**
+ * Builds a CSV of rows, so failed rows can be put back into the input and sent again. Every cell
+ * is quoted, so a name holding a delimiter keeps its column, and the role column holds the role
+ * as the row wrote it, so an unknown role stays unknown until the administrator corrects it.
+ *
+ * @param rows - Rows to write.
+ * @returns CSV text with an `email,name,role` header.
+ */
+export function createBulkInvitationRetryCsv(rows: readonly BulkInvitationRow[]) {
+  const quote = (value: string) => `"${value.replaceAll('"', '""')}"`
+  return ['email,name,role', ...rows.map((row) => [row.email, row.name ?? '', row.roleInput ?? ''].map(quote).join(','))]
+    .join('\n')
 }

@@ -5,9 +5,9 @@ import type { WorkspaceAccess, WorkspaceRole } from '../api/access'
 import { WorkspaceAccessApiError } from '../api/errors'
 import type { CreateWorkspaceInvitationInput } from '../api/invitations'
 import {
+  createBulkInvitationRetryCsv,
   planBulkInvitation,
   type BulkInvitationPlan,
-  type BulkInvitationRow,
 } from '../model/bulkInvitation'
 import type { BulkInvitationOutcome } from '../mutations/bulkWorkspaceInvitations'
 
@@ -65,18 +65,6 @@ function getFailureMessageKey(error: unknown): MessageKey {
     if (error.status === 429) return 'workspace.access.bulk.failure.rateLimited'
   }
   return 'workspace.access.bulk.failure.other'
-}
-
-/**
- * Builds a CSV of rows, so failed rows can be put back into the input and sent again.
- *
- * @param rows - Rows to write.
- * @returns CSV text with an `email,name,role` header.
- */
-function toRetryCsv(rows: readonly BulkInvitationRow[]) {
-  const quote = (value: string) => /[",\r\n\t]/u.test(value) ? `"${value.replaceAll('"', '""')}"` : value
-  return ['email,name,role', ...rows.map((row) => [row.email, row.name ?? '', row.role].map(quote).join(','))]
-    .join('\n')
 }
 
 /**
@@ -161,7 +149,7 @@ export function WorkspaceBulkInvitePanel({
   }
 
   const keepFailedRows = () => {
-    setText(toRetryCsv(failedRows))
+    setText(createBulkInvitationRetryCsv(failedRows))
     resetPlan()
   }
 

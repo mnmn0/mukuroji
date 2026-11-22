@@ -1,7 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import { WORKSPACE_BULK_INVITATION_MAX_ROWS } from '@mukuroji/contracts'
 import type { WorkspaceInvitation, WorkspaceMember } from '../src/workspace/api/access'
-import { planBulkInvitation, type BulkInvitationContext } from '../src/workspace/model/bulkInvitation'
+import {
+  createBulkInvitationRetryCsv,
+  planBulkInvitation,
+  type BulkInvitationContext,
+} from '../src/workspace/model/bulkInvitation'
 import {
   createWorkspaceMemberCsv,
   emptyWorkspaceMemberFilter,
@@ -85,15 +89,15 @@ describe('planBulkInvitation', () => {
     const plan = planBulkInvitation(csv, context)
 
     expect(plan.rows).toEqual([
-      { email: 'sato@example.com', line: 2, name: '佐藤, 花子', role: 'guest' },
-      { email: 'suzuki@example.com', line: 3, name: '鈴木 "Ken"', role: 'guest' },
+      { email: 'sato@example.com', line: 2, name: '佐藤, 花子', role: 'guest', roleInput: 'guest' },
+      { email: 'suzuki@example.com', line: 3, name: '鈴木 "Ken"', role: 'guest', roleInput: 'ゲスト' },
     ])
   })
 
   test('reads positional columns without a header', () => {
     const plan = planBulkInvitation('tanaka@example.com,田中 一郎,guest', context)
 
-    expect(plan.rows).toEqual([{ email: 'tanaka@example.com', line: 1, name: '田中 一郎', role: 'guest' }])
+    expect(plan.rows).toEqual([{ email: 'tanaka@example.com', line: 1, name: '田中 一郎', role: 'guest', roleInput: 'guest' }])
   })
 
   test('marks every kind of row that cannot be sent', () => {
@@ -132,6 +136,21 @@ describe('planBulkInvitation', () => {
     expect(plan.rows.map((row) => [row.line, row.email, row.issue])).toEqual([
       [1, 'a@example.com', 'name-too-long'],
       [3, 'b@example.com', undefined],
+    ])
+  })
+
+  test('puts rows back without moving cells or making an unknown role valid', () => {
+    const plan = planBulkInvitation(
+      'email,name,role\nperson@example.com,"Jane;owner",guest\nrole@example.com,"Ken ""K""",leader\nplain@example.com,,',
+      context,
+    )
+    const retry = createBulkInvitationRetryCsv(plan.rows)
+    const again = planBulkInvitation(retry, context)
+
+    expect(again.rows.map((row) => [row.email, row.name, row.role, row.roleInput, row.issue])).toEqual([
+      ['person@example.com', 'Jane;owner', 'guest', 'guest', undefined],
+      ['role@example.com', 'Ken "K"', 'member', 'leader', 'invalid-role'],
+      ['plain@example.com', undefined, 'member', undefined, undefined],
     ])
   })
 
@@ -234,7 +253,7 @@ describe('createWorkspaceMemberCsv', () => {
     })
 
     expect(planBulkInvitation(csv, { ...context, members: [] }).rows).toEqual([
-      { email: 'sato@example.com', line: 2, name: '佐藤 花子', role: 'guest' },
+      { email: 'sato@example.com', line: 2, name: '佐藤 花子', role: 'guest', roleInput: 'guest' },
     ])
   })
 })
