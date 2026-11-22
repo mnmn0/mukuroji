@@ -627,10 +627,12 @@ export function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkIt
 function projectPublicWorkItemSchedule(
   schedule: CanonicalWorkItem['schedule'],
 ): CanonicalWorkItem['schedule'] {
-  const calendarPolicy = {
+  const calendarPolicy: CanonicalWorkItem['schedule']['calendarPolicy'] = {
     timeZone: schedule.calendarPolicy.timeZone,
     workingWeekdays: [...schedule.calendarPolicy.workingWeekdays],
     holidays: [...schedule.calendarPolicy.holidays],
+    // Kept so a client that sends a schedule back keeps it on the shared calendar (ADR 0058).
+    ...(schedule.calendarPolicy.calendarSource === 'shared' ? { calendarSource: 'shared' } : {}),
   }
   const plannedEffort = schedule.plannedEffortMinutes === undefined
     ? {}

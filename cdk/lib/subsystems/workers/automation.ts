@@ -173,8 +173,9 @@ export function buildAutomationWorkers(
   grantPlanningRevisionFenceAccess(planningTable, automationEventFunction);
   workItemConfigurationTable.grants.readData(automationEventFunction);
   workspaceAccessTable.grants.readData(automationEventFunction);
+  // Query reads the Team and Project calendars a shared schedule takes (ADR 0058).
   automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
-    actions: ['dynamodb:GetItem'],
+    actions: ['dynamodb:GetItem', 'dynamodb:Query'],
     resources: [tenantAdministrationTable.tableArn],
   }));
   automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -322,8 +323,9 @@ export function defineAutomationScheduleJob(
       grantPlanningRevisionFenceAccess(planningTable, grantee);
       workItemConfigurationTable.grants.readData(grantee);
       workspaceAccessTable.grants.readData(grantee);
+      // Query reads the Team and Project calendars a shared schedule takes (ADR 0058).
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
-        actions: ['dynamodb:GetItem'],
+        actions: ['dynamodb:GetItem', 'dynamodb:Query'],
         resources: [tenantAdministrationTable.tableArn],
       }));
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({

@@ -3992,6 +3992,13 @@
       "WorkItemScheduleCalendarPolicy": {
         "additionalProperties": false,
         "properties": {
+          "calendarSource": {
+            "description": "Present when the schedule follows the shared Team or Project calendar. A create request with it takes the calendar the server resolves, and later calendar changes adjust the schedule.",
+            "enum": [
+              "shared"
+            ],
+            "type": "string"
+          },
           "holidays": {
             "items": {
               "$ref": "#/components/schemas/WorkItemScheduleDate"
