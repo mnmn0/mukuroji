@@ -8,6 +8,7 @@ Web の見た目と配信サイズの回帰を CI で検出するための 2 つ
 
 - 対象 story は `web/visual/storybook.visual.spec.ts` の `visualStoryIds` で管理します。
   play function、live data、timer を持たない story だけを追加します。
+  viewport より縦に長く、下の方も比較したい story は `fullPageStoryIds` にも追加すると、ページ全体を撮ります。
 - 時計は `2026-07-18T02:30:00Z` に固定し、timezone は `Asia/Tokyo`、locale は `ja-JP` です。
 - baseline は `web/visual/__screenshots__/` に commit します。
   CI と同じ `mcr.microsoft.com/playwright:v1.60.0-noble` image で描画するため、ローカルの font や renderer の差で失敗しません。

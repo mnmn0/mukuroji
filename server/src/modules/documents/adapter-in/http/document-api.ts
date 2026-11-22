@@ -2581,6 +2581,7 @@ function toDocumentBacklinkResponse(backlink: DocumentBacklink) {
   return {
     documentId: backlink.documentId,
     documentTitle: backlink.documentTitle,
+    documentKind: backlink.documentKind,
     relation: backlink.relation,
   }
 }

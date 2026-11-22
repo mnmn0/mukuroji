@@ -3,16 +3,20 @@ import type { PlanningEntity } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router'
 import { factoryBoardFixture } from '../src/features/factory-board/fixtures'
+import { documentBacklinkFixtures, documentSummaryFixtures } from '../src/documents/fixtures'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
 import type { ProjectMember } from '../src/projects/api'
-import { projectDirectoryFixtures } from '../src/projects/fixtures'
+import { projectDirectoryFixtures, projectRaidLogFixtures } from '../src/projects/fixtures'
 import {
   findProjectOverviewUpdateTarget,
+  selectProjectOverviewDocuments,
   selectProjectOverviewSchedule,
   summarizeProjectOverviewAgentRuns,
   summarizeProjectOverviewMembers,
+  summarizeProjectOverviewRaid,
   summarizeProjectOverviewWorkItems,
 } from '../src/projects/model/projectOverview'
+import { resolveWorkflowStatusCategory } from '../src/work-items/model/workItemDisplay'
 import { ProjectOverviewView, type ProjectOverviewViewProps } from '../src/projects/ui/ProjectOverviewView'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
@@ -86,6 +90,8 @@ function renderOverview(props: Partial<ProjectOverviewViewProps> = {}) {
         locale="en"
         members={summarizeProjectOverviewMembers([createMember('lead', 'manager', 'Lead')])}
         project={referoProject}
+        raid={summarizeProjectOverviewRaid(projectRaidLogFixtures, '2026-06-10')}
+        documents={selectProjectOverviewDocuments('refero', documentBacklinkFixtures, documentSummaryFixtures, false)}
         schedule={selectProjectOverviewSchedule(planningSnapshotFixture.entities, 'core-team', 'refero')}
         t={createTranslator('en')}
         team={coreTeam}
@@ -212,6 +218,143 @@ describe('Project overview Agent Run lanes', () => {
   })
 })
 
+describe('Project overview blocked count', () => {
+  const openItems = referoTaskFixtures.filter((workItem) => {
+    const category = resolveWorkflowStatusCategory(workItem)
+    return category !== 'completed' && category !== 'canceled'
+  })
+  const doneItem = referoTaskFixtures.find((workItem) => resolveWorkflowStatusCategory(workItem) === 'completed')
+
+  test('counts an open Work Item whose blocker is readable and still open', () => {
+    expect(openItems.length).toBeGreaterThanOrEqual(2)
+    expect(doneItem).toBeDefined()
+    const [blocked, blocker] = openItems
+    const workItems = referoTaskFixtures.map((workItem) =>
+      workItem.id === blocked.id ? { ...workItem, relationIds: [`blockedBy:${blocker.id}`] } : workItem
+    )
+
+    expect(summarizeProjectOverviewWorkItems(workItems, 'core-team', referenceDate).blockedCount).toBe(1)
+  })
+
+  test('leaves out completed and unreadable blockers', () => {
+    const [blocked, other] = openItems
+    const workItems = referoTaskFixtures.map((workItem) => {
+      if (workItem.id === blocked.id) return { ...workItem, relationIds: [`blockedBy:${doneItem?.id}`] }
+      if (workItem.id === other.id) return { ...workItem, relationIds: ['blockedBy:hidden-work-item', 'blocks:x'] }
+      return workItem
+    })
+
+    expect(summarizeProjectOverviewWorkItems(workItems, 'core-team', referenceDate).blockedCount).toBe(0)
+  })
+
+  test('resolves a blocker outside the Project from the Planning snapshot of the same Team', () => {
+    const [blocked] = openItems
+    const workItems = referoTaskFixtures.map((workItem) =>
+      workItem.id === blocked.id ? { ...workItem, relationIds: ['blockedBy:outside'] } : workItem
+    )
+    const planningItem = { ...planningSnapshotFixture.workItems[0], id: 'outside', statusCategory: 'started' as const }
+
+    expect(summarizeProjectOverviewWorkItems(
+      workItems, 'core-team', referenceDate, [{ ...planningItem, teamId: 'core-team' }],
+    ).blockedCount).toBe(1)
+    expect(summarizeProjectOverviewWorkItems(
+      workItems, 'core-team', referenceDate, [{ ...planningItem, teamId: 'design-team' }],
+    ).blockedCount).toBe(0)
+    expect(summarizeProjectOverviewWorkItems(
+      workItems, 'core-team', referenceDate, [{ ...planningItem, statusCategory: 'completed', teamId: 'core-team' }],
+    ).blockedCount).toBe(0)
+  })
+})
+
+describe('Project overview log', () => {
+  test('counts open entries and lists the most severe open risks and issues first', () => {
+    const raid = summarizeProjectOverviewRaid(projectRaidLogFixtures, '2026-06-10')
+
+    expect(raid.openRiskCount).toBe(2)
+    expect(raid.openIssueCount).toBe(1)
+    expect(raid.pendingDecisionCount).toBe(1)
+    expect(raid.overdueReviewCount).toBe(1)
+    expect(raid.attention.map((item) => item.id)).toEqual(['risk-vendor', 'issue-staging', 'risk-capacity'])
+    expect(raid.attention[0]).toMatchObject({ isReviewOverdue: true, severity: 'critical' })
+    expect(raid.hiddenAttentionCount).toBe(0)
+  })
+
+  test('lists closed change requests as decisions, latest first, and leaves out other closed entries', () => {
+    const later = {
+      ...projectRaidLogFixtures[4],
+      id: 'cr-later',
+      closedAt: '2026-06-08T00:00:00.000Z',
+    }
+    const raid = summarizeProjectOverviewRaid([...projectRaidLogFixtures, later], '2026-06-10')
+
+    expect(raid.recentDecisions.map((item) => item.id)).toEqual(['cr-later', 'cr-report'])
+    expect(raid.recentDecisions[0]).toMatchObject({
+      decidedAt: '2026-06-08T00:00:00.000Z',
+      response: '次フェーズで対応することで合意。',
+    })
+  })
+
+  test('bounds both lists by the limit and reports the open entries left out', () => {
+    const raid = summarizeProjectOverviewRaid(projectRaidLogFixtures, '2026-06-10', 1)
+
+    expect(raid.attention).toHaveLength(1)
+    expect(raid.hiddenAttentionCount).toBe(2)
+    expect(raid.recentDecisions).toHaveLength(1)
+  })
+})
+
+describe('Project overview Documents', () => {
+  const projectScope = { projectId: 'refero', type: 'project' } as const
+  const scopedDocuments = [
+    ...documentSummaryFixtures.map((document) => ({ ...document, scope: projectScope })),
+    { ...documentSummaryFixtures[1], id: 'project-brief', scope: projectScope, title: 'Duplicate of a linked Document' },
+    { ...documentSummaryFixtures[1], id: 'other-project-page', scope: { projectId: 'other', type: 'project' } as const },
+  ]
+
+  test('lists linked Documents first, then pages in the Project scope, without folders, templates, or archives', () => {
+    const documents = selectProjectOverviewDocuments('refero', documentBacklinkFixtures, scopedDocuments, false)
+    const ids = documents.items.map((item) => item.id)
+
+    expect(ids[0]).toBe('project-brief')
+    expect(documents.items[0].source).toBe('linked')
+    expect(documents.items.filter((item) => item.id === 'project-brief')).toHaveLength(1)
+    expect(ids).not.toContain('product-handbook')
+    expect(ids).not.toContain('weekly-notes-template')
+    expect(ids).not.toContain('research-archive')
+    expect(ids.slice(1)).toEqual(['product-principles', 'launch-workshop', 'decision-log'])
+    expect(documents.items.find((item) => item.id === 'launch-workshop')?.source).toBe('project')
+  })
+
+  test('leaves out linked folders and templates', () => {
+    const projectBacklink = documentBacklinkFixtures[1]
+    const documents = selectProjectOverviewDocuments('refero', [
+      { ...projectBacklink, documentId: 'linked-folder', documentKind: 'folder' },
+      { ...projectBacklink, documentId: 'linked-template', documentKind: 'template' },
+      { ...projectBacklink, documentId: 'linked-page', documentKind: 'page' },
+    ], [], false)
+
+    expect(documents.items.map((item) => item.id)).toEqual(['linked-page'])
+  })
+
+  test('ignores backlinks to other targets and Documents of other scopes', () => {
+    const documents = selectProjectOverviewDocuments('refero', documentBacklinkFixtures, scopedDocuments, false)
+    const ids = documents.items.map((item) => item.id)
+
+    expect(ids).not.toContain('launch-plan')
+    expect(ids).not.toContain('other-project-page')
+    expect(selectProjectOverviewDocuments('other', documentBacklinkFixtures, documentSummaryFixtures, false).items)
+      .toEqual([])
+  })
+
+  test('bounds the list and keeps whether a source has more pages', () => {
+    const documents = selectProjectOverviewDocuments('refero', documentBacklinkFixtures, scopedDocuments, true, 1)
+
+    expect(documents.items).toHaveLength(1)
+    expect(documents.hiddenCount).toBe(3)
+    expect(documents.hasMore).toBe(true)
+  })
+})
+
 describe('ProjectOverviewView', () => {
   test('shows every widget with deep links to the existing views', () => {
     const html = renderOverview()
@@ -226,7 +369,10 @@ describe('ProjectOverviewView', () => {
     expect(html).toContain('href="/projects/refero/issues?teamId=core-team"')
     expect(html).toContain('href="/planning/portfolio?targetType=project&amp;teamId=core-team&amp;projectId=refero"')
     expect(html).toContain('href="/teams/core-team/factory"')
-    expect(html).toContain('href="/documents"')
+    expect(html).toContain('data-testid="project-overview-raid"')
+    expect(html).toContain('data-testid="project-overview-documents"')
+    expect(html).toContain('href="/documents?projectId=refero"')
+    expect(html).toContain('href="/documents/project-brief"')
   })
 
   test('hides the Agent Run lanes and the Factory board link without Software factory', () => {
@@ -250,7 +396,7 @@ describe('ProjectOverviewView', () => {
     expect(html).toContain('more work items than the read limit')
     expect(html).toContain('Planning data could not be loaded')
     expect(html).toContain('Members could not be loaded.')
-    expect(html).toContain('data-testid="project-overview-links"')
+    expect(html).toContain('data-testid="project-overview-documents"')
   })
 
   test('offers a retry for failed reads but not for a list over the read limit', () => {
@@ -299,6 +445,33 @@ describe('ProjectOverviewView', () => {
     expect(denied).toContain('Your Team role cannot view agent runs.')
     expect(denied).not.toContain('>Reload</button>')
     expect(bounded).toContain('reached its read limit')
+  })
+
+  test('shows the log and Document read states in their own widgets', () => {
+    const denied = renderOverview({ documents: undefined, documentsError: 'denied', raid: undefined, raidError: 'denied' })
+    expect(denied).toContain('Your Project role cannot view risks')
+    expect(denied).toContain('Your role cannot view documents.')
+    expect(denied).not.toContain('>Reload<')
+
+    const failed = renderOverview({
+      documentsError: 'load',
+      onRetryDocuments: () => undefined,
+      onRetryRaid: () => undefined,
+      raid: undefined,
+      raidError: 'load',
+    })
+    expect(failed).toContain('Could not load risks, issues, and change requests.')
+    expect(failed).toContain('Some documents could not be loaded.')
+    expect(failed).toContain('href="/documents/project-brief"')
+    expect(failed.match(/>Reload</g)).toHaveLength(2)
+
+    const empty = renderOverview({
+      documents: selectProjectOverviewDocuments('refero', [], [], false),
+      raid: summarizeProjectOverviewRaid([], '2026-06-10'),
+    })
+    expect(empty).toContain('No open risks or issues.')
+    expect(empty).toContain('No change requests have been decided yet.')
+    expect(empty).toContain('No documents relate to this project yet.')
   })
 
   test('asks for the owning Team when the route does not name a readable one', () => {
