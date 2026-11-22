@@ -388,7 +388,8 @@ export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
  *
  * @param teamId - Team identifier.
  * @param view - `timesheet` for the member's week, `weekly-report` for the member's weekly report,
- *   `approvals` for the manager queue, or `report` for totals.
+ *   `team-weekly-reports` for the managers' submission status, `weekly-summary` for the Team and
+ *   Project weekly summary, `approvals` for the manager queue, or `report` for totals.
  * @param weekStart - Monday of the week as `YYYY-MM-DD`; omitted for the current week. Not used by `report`.
  * @param report - Period and grouping of the `report` view; omitted for the current week by day.
  * @param exactWeek - Opens the week starting exactly on `weekStart`, even when the Workspace now
@@ -397,7 +398,7 @@ export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {
  */
 export function createTeamTimeTrackingPath(
   teamId: string,
-  view: 'timesheet' | 'weekly-report' | 'team-weekly-reports' | 'approvals' | 'report' = 'timesheet',
+  view: 'timesheet' | 'weekly-report' | 'team-weekly-reports' | 'weekly-summary' | 'approvals' | 'report' = 'timesheet',
   weekStart?: string,
   report?: { from: string; to: string; groupBy: string },
   exactWeek = false,
