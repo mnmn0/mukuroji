@@ -119,8 +119,8 @@ describe('public Document service', () => {
           if (relation === undefined) throw new Error('Expected a relation fixture.')
           return {
             backlinks: [
-              { documentId: 'document-1', documentTitle: 'Spec', relation },
-              { documentId: 'document-1', documentTitle: 'Spec', relation: { ...relation, id: 'relation-9' } },
+              { documentId: 'document-1', documentTitle: 'Spec', documentKind: 'page', relation },
+              { documentId: 'document-1', documentTitle: 'Spec', documentKind: 'page', relation: { ...relation, id: 'relation-9' } },
             ],
             nextCursor: 'next',
           }
