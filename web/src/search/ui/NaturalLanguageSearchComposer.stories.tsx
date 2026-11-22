@@ -71,6 +71,51 @@ export const ReviewAndApply: Story = {
   },
 }
 
+/**
+ * Keeps the shared fixture reviewable regardless of the current date, because an
+ * expired generation hides the editable filters.
+ */
+const currentAiSearchGeneration = {
+  ...aiSearchGenerationFixture,
+  expiresAt: '2099-12-31T00:00:00.000Z',
+}
+
+/** File is not indexed, so it is not offered as a type filter for a new draft. */
+export const HidesUnindexedFileType: Story = {
+  args: { generation: currentAiSearchGeneration },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('button', { name: 'Work Item' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(canvas.queryByRole('button', { name: 'File' })).toBeNull()
+  },
+}
+
+/** A draft that already selected File keeps the chip until the operator clears it. */
+export const ClearsExistingFileSelection: Story = {
+  args: {
+    generation: {
+      ...currentAiSearchGeneration,
+      content: {
+        ...aiSearchGenerationFixture.content,
+        draft: {
+          ...aiSearchGenerationFixture.content.draft,
+          filters: {
+            ...aiSearchGenerationFixture.content.draft.filters,
+            entityTypes: ['work-item', 'file'],
+          },
+        },
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const file = canvas.getByRole('button', { name: 'File' })
+    await expect(file).toHaveAttribute('aria-pressed', 'true')
+    await userEvent.click(file)
+    await expect(canvas.queryByRole('button', { name: 'File' })).toBeNull()
+  },
+}
+
 /** Generation is issued only after the operator submits a non-empty natural-language request. */
 export const ExplicitGenerate: Story = {
   args: { generation: undefined },
