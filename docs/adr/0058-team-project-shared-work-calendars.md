@@ -53,6 +53,8 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
   選んだ調整はカレンダーの行に保存し、次の画面の既定にする。
 - 従う Work Item は `calendarSource: 'shared'` のものと、Team・Project の変更では変更前の解決済み policy と同じ規則を持つ旧来の Work Item。
   後者は書き換えるときに `shared` にする（旧来の Workspace 既定から作った Work Item を取り込む）。
+  書き換えるのは新しいカレンダーと規則が違う Work Item だけで、印を付けるためだけには書き換えない
+  （既存の Work Item が多い Team で、最初の変更が件数の上限に当たらないようにする）。
 - 書き換えは既存の schedule cascade の書き込み（24 件ずつの transaction、Work Item の revision による fence、
   audit の `schedule-cascade-updated`）を使う。1回の変更で書き換えるのは 480 件まで、超えると 413。
   保存後に他の更新と衝突した Work Item は数だけ返し、もう一度適用すれば揃う。

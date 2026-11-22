@@ -188,6 +188,12 @@ export type WorkCalendarChangePlanInput = {
   adjustment: WorkCalendarAdjustment
   /** Whether the caller may see a Work Item as an example. */
   canShowExample(workItem: TeamIssueResponseItem): boolean
+  /**
+   * Whether an older Work Item without a calendar source follows the calendar when its rules
+   * equal the calendar before the change. Team and Project changes adopt them; a Workspace change
+   * does not, because it is applied after the new settings are saved.
+   */
+  adoptLegacy: boolean
 }
 
 /** A calendar change plan: what it does and the schedule rewrites it needs. */
@@ -203,8 +209,8 @@ export type WorkCalendarChangePlan = {
  *
  * A Work Item follows the calendar when its policy is marked `shared`, or when it is an older row
  * with its own policy that equals the calendar before the change; such a row is marked `shared`
- * when the change is applied. Every following Work Item whose rules differ from the new calendar
- * is rewritten; the impact counts those whose dates or working days change.
+ * when the change rewrites it. Only following Work Items whose rules differ from the new calendar
+ * are rewritten; the impact counts those whose dates or working days change.
  *
  * @param input - Work Items, calendars before and after, and the adjustment.
  * @returns The impact and the rewrites.
@@ -220,10 +226,14 @@ export function planWorkCalendarChange(input: WorkCalendarChangePlanInput): Work
   for (const workItem of ordered) {
     const current = workItem.schedule.calendarPolicy
     const before = input.before(workItem)
-    if (current.calendarSource !== 'shared' && !haveSameWorkCalendarRules(current, before)) continue
+    if (current.calendarSource !== 'shared' && (!input.adoptLegacy || !haveSameWorkCalendarRules(current, before))) {
+      continue
+    }
     followingCount += 1
     const after = input.after(workItem)
-    if (current.calendarSource === 'shared' && haveSameWorkCalendarRules(current, after)) continue
+    // A row whose rules already match the new calendar needs no write; an older row stays as it is
+    // until a change moves its dates, so a first change never rewrites every Work Item of a Team.
+    if (haveSameWorkCalendarRules(current, after)) continue
     const rebased = rebaseWorkItemScheduleCalendar(workItem.schedule, after, input.adjustment)
     updates.push({
       teamId: workItem.teamId,

@@ -28,7 +28,8 @@ Team と Project は Workspace の稼働カレンダーへの上書きを持て�
 - 調整は `keep-duration`（開始日と稼働日数を保ち、終了日を動かす）と `keep-end-date`（開始日と終了日を保ち、稼働日数を数え直す。
   0 日になるものは `keep-duration`）から選ぶ。選んだ調整はカレンダーの行に保存し、次の既定にする。
 - 従う Work Item は `shared` のものと、Team・Project の変更では変更前の解決済み policy と同じ規則を持つ旧来の Work Item。
-  旧来の Work Item は書き換えるときに `shared` にする。Workspace の apply は旧来の Work Item を取り込まない。
+  旧来の Work Item は書き換えるときに `shared` にする。書き換えるのは新しいカレンダーと規則が違う Work Item だけ。
+  Workspace の apply は旧来の Work Item を取り込まない。
 - 書き換えは schedule cascade の書き込み（24 件ずつ、Work Item の revision で fence、audit は `schedule-cascade-updated`）を使う。
   1回に書き換えるのは 480 件まで、1 Team の Work Item が 1000 件を超えるときも 413。衝突した Work Item は件数だけ返す。
 - preview の例は開始日順に最大 10 件で、読む人が見られる Work Item だけを出す。

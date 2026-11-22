@@ -268,3 +268,33 @@ test('gives a new Work Item that follows the shared calendar the Team calendar t
   expect(await runWithAppDependencies(getTestAppDependencies(), () =>
     applySharedCalendarToNewSchedule('user#demo@example.com', { teamId: 'core-team' }, custom))).toBe(custom)
 })
+
+test('applies the saved Workspace calendar only to Work Items whose rules differ from it', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  const batches = installWorkItems([
+    { ...base, id: 'legacy', revision: 2, schedule: weekSchedule(legacyPolicy) },
+    { ...base, id: 'current', revision: 3, schedule: weekSchedule(sharedPolicy) },
+    {
+      ...base,
+      id: 'stale',
+      revision: 4,
+      schedule: {
+        mode: 'date-range',
+        calendarPolicy: { ...sharedPolicy, holidays: [...sharedPolicy.holidays, '2026-12-09'] },
+        startDate: '2026-12-07',
+        endDate: '2026-12-11',
+        durationDays: 4,
+      },
+    },
+  ])
+  const response = await request('/api/workspace/work-calendar/apply', 'POST', { adjustment: 'keep-duration' })
+  expect(response.status).toBe(200)
+  const result = await response.json() as WorkCalendarChangeResult
+  // A Workspace change leaves rows without a calendar source alone.
+  expect(result).toMatchObject({ impact: { followingCount: 2, changedCount: 1 }, updatedCount: 1, conflictCount: 0 })
+  const updates = batches.flat()
+  expect(updates.map((update) => [update.workItemId, update.expectedRevision])).toEqual([['stale', 4]])
+  expect(updates[0]?.schedule).toMatchObject({ endDate: '2026-12-10', durationDays: 4 })
+  expect(updates[0]?.schedule.calendarPolicy.holidays).not.toContain('2026-12-09')
+})

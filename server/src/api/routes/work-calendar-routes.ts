@@ -232,6 +232,7 @@ async function planTeamCalendarChange(
     adjustment,
     canShowExample: (workItem) =>
       canAccessAssignedProject(principal, context, workItem.assignedProjectId, 'viewer'),
+    adoptLegacy: true,
   })
 }
 
@@ -273,6 +274,7 @@ async function planWorkspaceCalendarChange(
       return context !== undefined &&
         canAccessAssignedProject(principal, context, workItem.assignedProjectId, 'viewer')
     },
+    adoptLegacy: false,
   })
 }
 
