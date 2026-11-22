@@ -3281,6 +3281,8 @@ function useDebouncedDraft(
   const valueRef = useRef(sourceValue)
   const editedFromRef = useRef(sourceValue)
   const isDirtyRef = useRef(false)
+  // Bumped after each commit so the draft resyncs even when the source string did not change.
+  const [commitCount, setCommitCount] = useState(0)
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const commitRef = useRef(onCommit)
 
@@ -3294,7 +3296,7 @@ function useDebouncedDraft(
       editedFromRef.current = sourceValue
       setValue(sourceValue)
     }
-  }, [sourceValue])
+  }, [sourceValue, commitCount])
 
   useEffect(() => () => {
     if (timeoutRef.current !== undefined) {
@@ -3310,6 +3312,7 @@ function useDebouncedDraft(
     }
     isDirtyRef.current = false
     commitRef.current(valueRef.current, editedFromRef.current)
+    setCommitCount((count) => count + 1)
   }, [])
 
   const update = useCallback((nextValue: string) => {
@@ -3323,6 +3326,7 @@ function useDebouncedDraft(
       timeoutRef.current = undefined
       isDirtyRef.current = false
       commitRef.current(nextValue, editedFromRef.current)
+      setCommitCount((count) => count + 1)
     }, delayMilliseconds)
   }, [delayMilliseconds])
 
