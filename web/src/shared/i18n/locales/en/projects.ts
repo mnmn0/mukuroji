@@ -266,6 +266,23 @@ export const projectsMessages = {
   'projects.administration.error.action': 'The change could not be saved. Try again later.',
   'projects.administration.error.conflict': 'Another change got there first. The list was reloaded; try again.',
   'projects.administration.error.cleanupPending': 'The archive is still being cleaned up. Try restoring again in a few minutes.',
+  'projects.teamProfile.title': 'Team settings',
+  'projects.teamProfile.description': 'Set the Team description and leader, and see who belongs to it. You can add a member to every Project of the Team at once.',
+  'projects.teamProfile.team': 'Team',
+  'projects.teamProfile.teamDescription': 'Description',
+  'projects.teamProfile.leader': 'Leader',
+  'projects.teamProfile.noLeader': 'None',
+  'projects.teamProfile.saved': 'Saved.',
+  'projects.teamProfile.members': 'Members (people in any of its Projects)',
+  'projects.teamProfile.membersLoading': 'Loading members…',
+  'projects.teamProfile.membersEmpty': 'No Project of this Team has members yet.',
+  'projects.teamProfile.membersPartial': 'The members of some Projects could not be loaded, so this list may be incomplete.',
+  'projects.teamProfile.noProjects': 'This Team has no active Project, so no member can be added.',
+  'projects.teamProfile.addMemberLabel': 'Member to add to every Project',
+  'projects.teamProfile.chooseMember': 'Choose a member',
+  'projects.teamProfile.addMember': 'Add to every Project',
+  'projects.teamProfile.added': 'Added to {added} Projects. {existing} already had this member, and their roles were left unchanged.',
+  'projects.teamProfile.error.memberInactive': 'Only active Workspace members can be chosen. Reload the list.',
 } as const satisfies Record<
   Extract<
     MessageKey,
@@ -276,6 +293,7 @@ export const projectsMessages = {
     | `projects.raidLog.${string}`
     | `projects.overview.${string}`
     | `projects.administration.${string}`
+    | `projects.teamProfile.${string}`
   >,
   string
 >

@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
 import { createApiTestHarness } from '../../../../api/test-support/api-test-harness'
+import { CognitoServiceError } from '../../../authentication'
 
 const {
   app,
@@ -153,4 +154,102 @@ test('denies the archive impact to a Workspace member', async () => {
 
   expect(responses.map((response) => response.status)).toEqual([403, 403])
   expect(calls.directoryAdministration).toEqual([])
+})
+
+test('sets a Team profile with the leader resolved to an active Workspace member', async () => {
+  const calls = configureFakeProjectClients(true, { inactiveWorkspaceMemberKeys: ['gone@example.com'] })
+  const send = (body: unknown) => app.request('/api/teams/core-team/profile', {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify(body),
+  })
+
+  const updated = await send({ description: '説明', leaderMemberKey: 'Sato@Example.com' })
+  const inactive = await send({ description: '説明', leaderMemberKey: 'gone@example.com' })
+
+  expect(updated.status).toBe(200)
+  expect(calls.directoryAdministration).toContainEqual({
+    method: 'updateTeamProfile',
+    directoryId: 'user#demo@example.com',
+    teamId: 'core-team',
+    input: { description: '説明', leaderMemberKey: 'sato@example.com' },
+  })
+  expect(inactive.status).toBe(409)
+  expect(await inactive.json()).toMatchObject({ code: 'WorkspaceMemberInactive' })
+})
+
+test('adds a member to every active Project of a Team, keeping existing roles', async () => {
+  const calls = configureFakeProjectClients(true)
+  const send = (body: unknown) => app.request('/api/teams/core-team/members', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  })
+
+  const added = await send({ memberKey: 'sato@example.com', role: 'member' })
+  const existing = await send({ memberKey: 'demo@example.com', role: 'viewer' })
+  const invalid = await send({ memberKey: 'sato@example.com', role: 'owner' })
+  const missingTeam = await app.request('/api/teams/missing-team/members', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ memberKey: 'sato@example.com', role: 'member' }),
+  })
+
+  expect(added.status).toBe(200)
+  expect(await added.json()).toEqual({
+    teamId: 'core-team',
+    memberKey: 'sato@example.com',
+    addedProjectIds: ['refero'],
+    existingProjectIds: [],
+  })
+  expect(await existing.json()).toMatchObject({ addedProjectIds: [], existingProjectIds: ['refero'] })
+  expect(calls.memberUpdates).toEqual([{
+    directoryId: 'user#demo@example.com',
+    memberKey: 'sato@example.com',
+    projectId: 'refero',
+    role: 'member',
+  }])
+  expect(invalid.status).toBe(400)
+  expect(missingTeam.status).toBe(404)
+})
+
+test('denies the Team profile and Team member routes to a Workspace member', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member' })
+
+  const responses = await Promise.all([
+    app.request('/api/teams/core-team/profile', {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ description: '', leaderMemberKey: null }),
+    }),
+    app.request('/api/teams/core-team/members', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ memberKey: 'sato@example.com', role: 'member' }),
+    }),
+  ])
+
+  expect(responses.map((response) => response.status)).toEqual([403, 403])
+})
+
+test('refuses an unknown member as inactive instead of a failed sign-in', async () => {
+  configureFakeProjectClients(true, {
+    profileError: new CognitoServiceError(400, 'UserNotFoundException', 'User does not exist.'),
+  })
+
+  const responses = await Promise.all([
+    app.request('/api/teams/core-team/profile', {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ description: '', leaderMemberKey: 'nobody' }),
+    }),
+    app.request('/api/teams/core-team/members', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ memberKey: 'nobody', role: 'member' }),
+    }),
+  ])
+
+  expect(responses.map((response) => response.status)).toEqual([409, 409])
+  expect(await responses[1]?.json()).toMatchObject({ code: 'WorkspaceMemberInactive' })
 })

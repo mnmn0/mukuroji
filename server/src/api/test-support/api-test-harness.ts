@@ -2545,6 +2545,11 @@ function configureFakeProjectClients(
 
         return { teamId, nameJa: 'リネーム', nameEn: 'Renamed' }
       },
+      async updateTeamProfile(directoryId, teamId, input) {
+        calls.directoryAdministration.push({ method: 'updateTeamProfile', directoryId, teamId, input })
+
+        return { teamId, description: '説明', leaderMemberKey: 'leader-user' }
+      },
       async renameProject(directoryId, teamId, projectId, input) {
         calls.directoryAdministration.push({
           method: 'renameProject',

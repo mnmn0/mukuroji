@@ -2,7 +2,12 @@ import type { Context, Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import { ProjectDataError, type TeamSearchSource } from '../../modules/directory'
 import { createTeamWorkspaceSearchDocument } from '../../modules/workspace-search/workspace-search'
-import { workspaceDependencies } from '../shared/app-dependencies'
+import {
+  isDirectoryTeamMemberRole,
+  type AddDirectoryTeamMemberResponse,
+} from '@mukuroji/contracts'
+import { authenticationDependencies, workspaceDependencies } from '../shared/app-dependencies'
+import { isRecord } from '../shared/value-guards'
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import {
   createApiMutationContext,
@@ -80,6 +85,88 @@ export function registerDirectoryAdministrationRoutes(routeApp: Hono): void {
       )
       await projectTeamSearchDocumentBestEffort(principal.directoryId, teamId, 'team rename')
       return renamed
+    })
+  })
+
+  /** Replaces the description and leader of an active Team. */
+  routeApp.patch('/api/teams/:teamId/profile', async (c) => {
+    return await handleDirectoryAdministration(c, async (principal) => {
+      const teamId = readRouteIdentifier(c, 'teamId')
+      const body = await readJson<unknown>(c.req)
+      const leaderMemberKey = isRecord(body) && typeof body.leaderMemberKey === 'string'
+        ? await readActiveWorkspaceMemberKey(principal.directoryId, body.leaderMemberKey)
+        : undefined
+      const input = isRecord(body) && leaderMemberKey !== undefined ? { ...body, leaderMemberKey } : body
+      return await workspaceDependencies.projectDirectory.updateTeamProfile(
+        principal.directoryId,
+        teamId,
+        input,
+        createApiMutationContext(c, principal, { teamId, body: input }),
+        createDirectoryAuthorizationChecks(principal),
+      )
+    })
+  })
+
+  /**
+   * Adds one Workspace member to every active Project of an active Team. Projects the member
+   * already belongs to keep their role, so a retry after a partial failure adds only the rest.
+   */
+  routeApp.post('/api/teams/:teamId/members', async (c) => {
+    return await handleDirectoryAdministration(c, async (principal) => {
+      const teamId = readRouteIdentifier(c, 'teamId')
+      const body = await readJson<unknown>(c.req)
+      if (!isRecord(body) || typeof body.memberKey !== 'string' || !isDirectoryTeamMemberRole(body.role)) {
+        throw new ProjectDataError(400, 'InvalidProjectWrite', 'memberKey and role are required.')
+      }
+      const role = body.role
+      const profile = await readMemberProfile(body.memberKey)
+      const directory = await workspaceDependencies.projectDirectory.getDirectoryAdministration(
+        principal.directoryId,
+      )
+      const team = directory.teams.find((candidate) =>
+        candidate.id === teamId && candidate.archivedAt === undefined
+      )
+      if (!team) {
+        throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+      }
+
+      const response: AddDirectoryTeamMemberResponse = {
+        teamId,
+        memberKey: profile.id,
+        addedProjectIds: [],
+        existingProjectIds: [],
+      }
+      for (const project of team.projects) {
+        if (project.archivedAt !== undefined) continue
+        const members = await workspaceDependencies.projectDirectory.getProjectMembers(
+          principal.directoryId,
+          project.id,
+          teamId,
+        )
+        // Project member rows store the key normalized, the same as `updateProjectMember`.
+        const storedMemberKey = profile.id.trim().toLowerCase()
+        if (members.members.some((member) => member.id === storedMemberKey)) {
+          response.existingProjectIds.push(project.id)
+          continue
+        }
+        // Each grant advances the member's version, so it is read again before every Project.
+        const workspaceMember = await requireActiveWorkspaceMember(principal.directoryId, profile.id)
+        await workspaceDependencies.projectDirectory.updateProjectMember(
+          principal.directoryId,
+          project.id,
+          profile.id,
+          { role, email: profile.email, name: profile.name },
+          workspaceMember.version,
+          createApiMutationContext(c, principal, {
+            teamId,
+            projectId: project.id,
+            memberKey: profile.id,
+            role,
+          }),
+        )
+        response.addedProjectIds.push(project.id)
+      }
+      return response
     })
   })
 
@@ -211,6 +298,8 @@ async function handleDirectoryAdministration(
 const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 403 | 409 | 413 | 503>> = {
   InvalidDirectoryOrder: 400,
   InvalidProjectWrite: 400,
+  WorkspaceMemberInactive: 409,
+  WorkspaceMemberVersionConflict: 409,
   DirectoryAuthorizationChanged: 403,
   DirectoryOrderConflict: 409,
   TeamNotArchived: 409,
@@ -236,6 +325,63 @@ function createDirectoryAuthorizationChecks(principal: DirectoryAdministrationPr
     [],
     principal.principalKind !== 'service-account',
   )
+}
+
+/**
+ * Resolves a member key to the identity of an active Workspace member.
+ *
+ * @param directoryId - Workspace identifier.
+ * @param memberKey - Untrusted member key from the request.
+ * @returns The stored member key of the active member.
+ */
+async function readActiveWorkspaceMemberKey(directoryId: string, memberKey: string) {
+  const profile = await readMemberProfile(memberKey)
+  await requireActiveWorkspaceMember(directoryId, profile.id)
+  return profile.id
+}
+
+/**
+ * Reads the Cognito profile of a member chosen by an administrator. An unknown or malformed
+ * member is refused like an inactive one, so it is never answered as a failed sign-in.
+ *
+ * @param memberKey - Untrusted member key from the request.
+ * @returns The member profile.
+ */
+async function readMemberProfile(memberKey: string) {
+  try {
+    return await authenticationDependencies.cognito.getUserProfile(memberKey)
+  } catch (error) {
+    if (
+      error instanceof CognitoServiceError &&
+      (error.code === 'UserNotFoundException' || error.code === 'InvalidParameterException')
+    ) {
+      throw new ProjectDataError(
+        409,
+        'WorkspaceMemberInactive',
+        'Only active Workspace members can lead a Team or be added to its Projects.',
+      )
+    }
+    throw error
+  }
+}
+
+/**
+ * Reads an active Workspace member, refusing a deactivated or missing one.
+ *
+ * @param directoryId - Workspace identifier.
+ * @param memberKey - Stored member key.
+ * @returns The active member.
+ */
+async function requireActiveWorkspaceMember(directoryId: string, memberKey: string) {
+  const member = await workspaceDependencies.workspaceAccess.getActiveMember(directoryId, memberKey)
+  if (!member) {
+    throw new ProjectDataError(
+      409,
+      'WorkspaceMemberInactive',
+      'Only active Workspace members can lead a Team or be added to its Projects.',
+    )
+  }
+  return member
 }
 
 /**

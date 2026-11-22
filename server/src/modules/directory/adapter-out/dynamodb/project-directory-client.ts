@@ -64,6 +64,7 @@ import type {
 import {
   DIRECTORY_DISPLAY_NAME_MAX_LENGTH,
   DIRECTORY_REORDER_MAX_ITEMS,
+  DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH,
   isProjectLifecycleState,
   PROJECT_LIFECYCLE_STATES_REJECTING_NEW_WORK_ITEMS,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
@@ -82,6 +83,7 @@ import {
   type ReorderDirectoryTeamsInput,
   type RestoreDirectoryProjectResponse,
   type RestoreDirectoryTeamResponse,
+  type UpdateDirectoryTeamProfileResponse,
   type UpdateMemberPreferencesInput,
   type UpdateProjectQuickAccessPreferencesInput,
 } from '@mukuroji/contracts'
@@ -231,6 +233,15 @@ type ProjectDirectoryTeamItem = {
   lifecycleRevision?: number
   /** Receipt of the last restore, so a retry of it after a lost response is recognized. */
   restoreReceipt?: DirectoryRestoreReceipt
+  /** Free-text description set on the Team settings screen. */
+  description?: string
+  /** Member key of the Team leader set on the Team settings screen. */
+  leaderMemberKey?: string
+  /**
+   * Counts profile updates, so a stale update cannot overwrite a newer description or leader.
+   * Rows without it were never updated.
+   */
+  profileRevision?: number
   /**
    * アーカイブ済みの場合に設定する ISO 8601 timestamp です。
    */
@@ -969,6 +980,23 @@ export type ProjectDirectoryClient = {
     auditContext?: MutationAuditContext,
     authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
   ): Promise<RenameDirectoryTeamResponse>
+  /**
+   * Replaces the description and leader of an active Team.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team to update.
+   * @param input - Untrusted request body with the description and leader.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Team identifier and its stored profile.
+   */
+  updateTeamProfile(
+    directoryId: string,
+    teamId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks?: DirectoryAuthorizationConditionChecks,
+  ): Promise<UpdateDirectoryTeamProfileResponse>
   /**
    * Renames an active Project or changes its color without changing its ID.
    *
@@ -2842,6 +2870,8 @@ export class DynamoDbProjectDirectoryClient {
         nameJa: team.nameJa,
         nameEn: team.nameEn,
         ...(team.archivedAt === undefined ? {} : { archivedAt: team.archivedAt }),
+        ...(team.description === undefined ? {} : { description: team.description }),
+        ...(team.leaderMemberKey === undefined ? {} : { leaderMemberKey: team.leaderMemberKey }),
         projects: projectItems
           .filter((project) => project.teamId === team.teamId)
           .map((project) => ({
@@ -2919,6 +2949,112 @@ export class DynamoDbProjectDirectoryClient {
     ])
 
     return { teamId, nameJa: names.nameJa, nameEn: names.nameEn }
+  }
+
+  /**
+   * Replaces the description and leader of an active Team. The leader must be an active
+   * Workspace member when the update commits.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Team to update.
+   * @param input - Untrusted request body with the description and leader.
+   * @param auditContext - Audit context of the mutation.
+   * @param authorizationConditionChecks - Guards that the caller is still authorized when it commits.
+   * @returns The Team identifier and its stored profile.
+   */
+  async updateTeamProfile(
+    directoryId: string,
+    teamId: string,
+    input: unknown,
+    auditContext?: MutationAuditContext,
+    authorizationConditionChecks: DirectoryAuthorizationConditionChecks = [],
+  ): Promise<UpdateDirectoryTeamProfileResponse> {
+    await this.ensureLocalAuditTable()
+    const profile = readDirectoryTeamProfile(input)
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = items.find((item): item is ProjectDirectoryTeamItem =>
+      item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item),
+    )
+
+    if (!team) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+
+    const response: UpdateDirectoryTeamProfileResponse = {
+      teamId,
+      ...(profile.description === undefined ? {} : { description: profile.description }),
+      ...(profile.leaderMemberKey === undefined ? {} : { leaderMemberKey: profile.leaderMemberKey }),
+    }
+    if (
+      team.description === profile.description &&
+      team.leaderMemberKey === profile.leaderMemberKey
+    ) {
+      return response
+    }
+
+    const setClauses = ['#profileRevision = :profileRevision']
+    const removeClauses: string[] = []
+    const values: Record<string, unknown> = { ':profileRevision': (team.profileRevision ?? 0) + 1 }
+    if (profile.description === undefined) {
+      removeClauses.push('#description')
+    } else {
+      setClauses.push('#description = :description')
+      values[':description'] = profile.description
+    }
+    if (profile.leaderMemberKey === undefined) {
+      removeClauses.push('#leaderMemberKey')
+    } else {
+      setClauses.push('#leaderMemberKey = :leaderMemberKey')
+      values[':leaderMemberKey'] = profile.leaderMemberKey
+    }
+
+    // The revision read above must still be stored, so a stale update cannot overwrite a newer one.
+    const condition = createActiveTeamRowCondition(teamId)
+    const revisionClause = team.profileRevision === undefined
+      ? 'attribute_not_exists(#profileRevision)'
+      : '#profileRevision = :readProfileRevision'
+    await this.sendDirectoryAdministrationTransaction(authorizationConditionChecks, [
+      {
+        Update: {
+          TableName: this.tableName,
+          Key: { directoryId, entryKey: team.entryKey },
+          UpdateExpression: `SET ${setClauses.join(', ')}` +
+            (removeClauses.length > 0 ? ` REMOVE ${removeClauses.join(', ')}` : ''),
+          ConditionExpression: `${condition.ConditionExpression} AND ${revisionClause}`,
+          ExpressionAttributeNames: {
+            ...condition.ExpressionAttributeNames,
+            '#description': 'description',
+            '#leaderMemberKey': 'leaderMemberKey',
+            '#profileRevision': 'profileRevision',
+          },
+          ExpressionAttributeValues: {
+            ...condition.ExpressionAttributeValues,
+            ...values,
+            ...(team.profileRevision === undefined
+              ? {}
+              : { ':readProfileRevision': team.profileRevision }),
+          },
+        },
+      },
+      ...(profile.leaderMemberKey === undefined
+        ? []
+        : [{ ConditionCheck: this.createActiveWorkspaceMemberConditionCheck(directoryId, profile.leaderMemberKey) }]),
+      ...createOptionalAuditTransactItems(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'project.updated',
+        entityType: 'project',
+        entityId: `team/${teamId}`,
+        action: 'updated',
+        changes: createAuditFieldChanges(
+          team,
+          { ...team, description: profile.description, leaderMemberKey: profile.leaderMemberKey },
+          ['description', 'leaderMemberKey'],
+        ),
+        metadata: { kind: 'team', teamId },
+      }),
+    ])
+
+    return response
   }
 
   /**
@@ -4321,7 +4457,27 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * project member 書き込みと同時に active Workspace member の version を進めます。
    */
-  private createActiveWorkspaceMemberVersionUpdate(
+  /**
+   * Builds the guard that a member is still an active Workspace member when a write commits.
+   *
+   * @param workspaceId - Workspace identifier.
+   * @param memberKey - Member key to check.
+   * @returns ConditionCheck input for the Workspace access table.
+   */
+  private createActiveWorkspaceMemberConditionCheck(workspaceId: string, memberKey: string) {
+    return {
+      TableName: this.workspaceAccessTableName,
+      Key: {
+        workspaceId,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(memberKey)}`,
+      },
+      ConditionExpression: '#entryType = :memberEntryType AND #status = :active',
+      ExpressionAttributeNames: { '#entryType': 'entryType', '#status': 'status' },
+      ExpressionAttributeValues: { ':memberEntryType': 'workspace-member', ':active': 'active' },
+    }
+  }
+
+    private createActiveWorkspaceMemberVersionUpdate(
     workspaceId: string,
     memberKey: string,
     expectedVersion: number,
@@ -5501,7 +5657,11 @@ function isProjectDirectoryItem(value: unknown, directoryId: string): value is P
   }
 
   if (value.entryType === 'team') {
-    return value.expanded === undefined || typeof value.expanded === 'boolean'
+    return (value.expanded === undefined || typeof value.expanded === 'boolean') &&
+      (value.description === undefined || typeof value.description === 'string') &&
+      (value.leaderMemberKey === undefined || typeof value.leaderMemberKey === 'string') &&
+      (value.profileRevision === undefined ||
+        (Number.isSafeInteger(value.profileRevision) && Number(value.profileRevision) >= 0))
   }
 
   return (
@@ -5529,6 +5689,43 @@ function isProjectRole(value: unknown): value is ProjectRole {
 
 function isProjectTone(value: unknown): value is ProjectTone {
   return value === 'blue' || value === 'purple' || value === 'green' || value === 'yellow'
+}
+
+/** Control characters a Team description may not contain; line breaks and tabs are allowed. */
+const DIRECTORY_TEAM_DESCRIPTION_CONTROL_CHARACTER = /[^\P{Cc}\n\t]/u
+
+/**
+ * Reads and validates the body of a Team profile update.
+ *
+ * @param input - Untrusted request body.
+ * @returns The trimmed description and leader, each undefined when cleared.
+ */
+function readDirectoryTeamProfile(input: unknown) {
+  if (!isRecord(input) || typeof input.description !== 'string') {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'description must be a string.')
+  }
+  const description = input.description.replace(/\r\n?/g, '\n').trim()
+  if (
+    description.length > DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH ||
+    DIRECTORY_TEAM_DESCRIPTION_CONTROL_CHARACTER.test(description)
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      `description must be ${DIRECTORY_TEAM_DESCRIPTION_MAX_LENGTH} characters or fewer without control characters other than line breaks and tabs.`,
+    )
+  }
+  if (input.leaderMemberKey !== null && typeof input.leaderMemberKey !== 'string') {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'leaderMemberKey must be a string or null.')
+  }
+  const leaderMemberKey = input.leaderMemberKey === null
+    ? undefined
+    : normalizeProjectMemberKey(input.leaderMemberKey)
+
+  return {
+    description: description === '' ? undefined : description,
+    leaderMemberKey,
+  }
 }
 
 /** Control characters a Team or Project name may not contain, such as line breaks and NUL. */

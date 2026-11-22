@@ -784,3 +784,85 @@ test('binds a restore to the archive it read and fences every change by the call
   await expect(revoked.client.renameTeam(directoryId, 'alpha', { nameJa: '改名' }, undefined, authorization))
     .rejects.toMatchObject({ status: 403, code: 'DirectoryAuthorizationChanged' })
 })
+
+test('sets a Team description and leader, guarding the revision and the active leader', async () => {
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10),
+    createTeamRow('beta', 20, { description: '古い説明', leaderMemberKey: 'old', profileRevision: 2 }),
+  ])
+
+  await expect(client.updateTeamProfile(directoryId, 'alpha', {
+    description: ' 1行目\r\n\t2行目 ',
+    leaderMemberKey: 'Leader-User',
+  })).resolves.toEqual({ teamId: 'alpha', description: '1行目\n\t2行目', leaderMemberKey: 'leader-user' })
+  await expect(client.updateTeamProfile(directoryId, 'beta', { description: '', leaderMemberKey: null }))
+    .resolves.toEqual({ teamId: 'beta' })
+
+  expect(transactions()).toEqual([
+    [
+      {
+        Update: expect.objectContaining({
+          Key: { directoryId, entryKey: '000010#000000#TEAM#alpha' },
+          UpdateExpression:
+            'SET #profileRevision = :profileRevision, #description = :description, #leaderMemberKey = :leaderMemberKey',
+          ConditionExpression: expect.stringContaining('attribute_not_exists(#profileRevision)'),
+          ExpressionAttributeValues: expect.objectContaining({
+            ':description': '1行目\n\t2行目',
+            ':leaderMemberKey': 'leader-user',
+            ':profileRevision': 1,
+          }),
+        }),
+      },
+      {
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkspaceAccessTable',
+          Key: { workspaceId: directoryId, recordKey: 'MEMBER#leader-user' },
+          ConditionExpression: '#entryType = :memberEntryType AND #status = :active',
+        }),
+      },
+    ],
+    [{
+      Update: expect.objectContaining({
+        UpdateExpression: 'SET #profileRevision = :profileRevision REMOVE #description, #leaderMemberKey',
+        ConditionExpression: expect.stringContaining('#profileRevision = :readProfileRevision'),
+        ExpressionAttributeValues: expect.objectContaining({
+          ':readProfileRevision': 2,
+          ':profileRevision': 3,
+        }),
+      }),
+    }],
+  ])
+})
+
+test('skips an unchanged Team profile and rejects an invalid one', async () => {
+  const { client, transactions } = createClient([
+    createTeamRow('alpha', 10, { description: '説明' }),
+    createTeamRow('gone', 20, { archivedAt: '2026-01-01T00:00:00.000Z' }),
+  ])
+
+  await expect(client.updateTeamProfile(directoryId, 'alpha', { description: '説明', leaderMemberKey: null }))
+    .resolves.toEqual({ teamId: 'alpha', description: '説明' })
+  expect(transactions()).toEqual([])
+
+  await expect(client.updateTeamProfile(directoryId, 'gone', { description: '', leaderMemberKey: null }))
+    .rejects.toMatchObject({ status: 404, code: 'TeamNotFound' })
+  for (const input of [
+    { description: 'x'.repeat(2001), leaderMemberKey: null },
+    { description: 'nul\u0000', leaderMemberKey: null },
+    { description: '', leaderMemberKey: 7 },
+    { leaderMemberKey: null },
+  ]) {
+    await expect(client.updateTeamProfile(directoryId, 'alpha', input))
+      .rejects.toMatchObject({ status: 400, code: 'InvalidProjectWrite' })
+  }
+})
+
+test('lists the Team description and leader for administration', async () => {
+  const { client } = createClient([
+    createTeamRow('alpha', 10, { description: '説明', leaderMemberKey: 'leader', profileRevision: 1 }),
+  ])
+
+  const directory = await client.getDirectoryAdministration(directoryId)
+
+  expect(directory.teams[0]).toMatchObject({ id: 'alpha', description: '説明', leaderMemberKey: 'leader' })
+})
