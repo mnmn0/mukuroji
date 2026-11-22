@@ -10,6 +10,7 @@ import {
 import {
   ANALYTICS_SCHEMA_VERSION,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  analyticsEpochDayToDate,
   createSearchWorkItemTypeKey,
   deriveWorkItemRemainingEffortMinutes,
   isWorkItemEffortMinutes,
@@ -61,6 +62,12 @@ import {
   type AnalyticsWorkItemHistoryRow,
 } from './analytics-work-item-history'
 import { analyticsPdfFont } from './analytics-pdf-font'
+import {
+  ANALYTICS_MILESTONE_HISTORY_UNAVAILABLE_WARNING,
+  createAnalyticsMilestoneScopeKey,
+  createAnalyticsMilestoneTrend,
+  type AnalyticsMilestoneHistory,
+} from './analytics-milestone-trend'
 
 const REPORT_RECORD_PREFIX = 'REPORT#'
 const SNAPSHOT_RECORD_PREFIX = 'SNAPSHOT#'
@@ -144,6 +151,7 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       sla: 'SLA attainment',
       'remaining-scope': 'Remaining scope',
       'cumulative-flow': 'Cumulative flow',
+      'milestone-trend': 'Milestone trend',
     }),
     unitLabels: Object.freeze({
       count: 'items',
@@ -202,6 +210,7 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       // labels stay in Latin script to keep Japanese PDF exports renderable.
       'remaining-scope': 'Remaining scope',
       'cumulative-flow': 'Cumulative flow',
+      'milestone-trend': 'Milestone trend',
     }),
     unitLabels: Object.freeze({
       count: '件',
@@ -297,6 +306,11 @@ export type AnalyticsEngineInput = {
   events: readonly AnalyticsHistoryEvent[]
   /** Current viewer が参照できる Project ID の server-side allowlist です。 */
   authorizedProjectIds: ReadonlySet<string>
+  /**
+   * Current viewer の Planning ACL で見える live Milestone と、その予定日の記録です。
+   * `milestone-trend` widget を含む query で渡します。省略時、その widget は warning だけを返します。
+   */
+  milestones?: readonly AnalyticsMilestoneHistory[]
   /** Snapshot を再現する query です。 */
   query: AnalyticsQueryInput
 }
@@ -564,6 +578,14 @@ export const ANALYTICS_METRIC_DEFINITIONS: Readonly<Record<
     unit: 'count',
     description:
       'Counts non-archived Work Items at the evaluated instant. Chart points split the count by status category.',
+  }),
+  'milestone-trend': Object.freeze({
+    key: 'milestone-trend',
+    version: 1,
+    label: 'Milestone trend',
+    unit: 'count',
+    description:
+      'Counts Milestones whose forecast end date changed in the period. Chart points report each Milestone\'s forecast end date at the bucket end as days since 1970-01-01, from its recorded Planning history.',
   }),
 })
 
@@ -976,14 +998,16 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
     authorizedProjectIds,
   )
   const widgets = normalized.query.widgets.map((widget) =>
-    createWidgetResult(
-      widget,
-      facts,
-      input.workItems,
-      eventsByWorkItem,
-      normalized,
-      authorizedProjectIds,
-    )
+    widget.metric === 'milestone-trend'
+      ? createMilestoneTrendWidgetResult(widget, input.milestones, normalized)
+      : createWidgetResult(
+          widget,
+          facts,
+          input.workItems,
+          eventsByWorkItem,
+          normalized,
+          authorizedProjectIds,
+        )
   )
   const evidenceCount = dedupeEvidence(
     normalized.query.widgets.flatMap((widget) =>
@@ -1004,6 +1028,9 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
     input.workItems,
     normalized.asOf,
     authorizedProjectIds,
+    input.milestones !== undefined && analyticsQueryReadsMilestones(normalized.query)
+      ? input.milestones.map(createAnalyticsMilestoneScopeKey)
+      : undefined,
   )
 
   const snapshot: AnalyticsSnapshot = {
@@ -1188,7 +1215,10 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
           widget.widgetId,
           widget.metric,
           metricLabel,
-          segment.value,
+          // Milestone trend segments carry a date as a day number; export the date itself.
+          widget.metric === 'milestone-trend'
+            ? analyticsEpochDayToDate(segment.value) ?? segment.value
+            : segment.value,
           '',
           messages.recordTypes.seriesSegment,
           segment.key,
@@ -1204,14 +1234,16 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
       }
     }
     for (const row of widget.rows) {
+      // Milestone rows carry dates, not Work Item fields; keep them in the dimension column.
+      const milestoneRow = widget.metric === 'milestone-trend'
       rows.push([
         widget.widgetId,
         widget.metric,
         metricLabel,
-        row.values.value,
-        '',
+        milestoneRow ? row.values.shiftDays : row.values.value,
+        milestoneRow ? row.values.changeCount : '',
         messages.recordTypes.tableRow,
-        '',
+        milestoneRow ? formatMilestoneCsvDates(row) : '',
         normalized.filter.period.from,
         normalized.filter.period.to,
         row.id,
@@ -1224,6 +1256,22 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
     }
   }
   return rows.map((row) => row.map(escapeCsvValue).join(',')).join('\r\n')
+}
+
+/**
+ * Formats the dates of a Milestone trend table row for the CSV dimension column.
+ *
+ * @param row - Milestone trend table row.
+ * @returns `baseline=…; shiftFrom=…; forecast=…`, with an empty value for an unknown date.
+ */
+function formatMilestoneCsvDates(row: AnalyticsTableRow) {
+  const text = (value: AnalyticsTableRow['values'][string] | undefined) =>
+    typeof value === 'string' ? value : ''
+  return [
+    `baseline=${text(row.values.baselineEndDate)}`,
+    `shiftFrom=${text(row.values.periodStartForecastEndDate)}`,
+    `forecast=${text(row.values.forecastEndDate)}`,
+  ].join('; ')
 }
 
 /**
@@ -1768,6 +1816,18 @@ function normalizeWidgets(value: unknown): AnalyticsWidget[] {
     const groupBy = candidate.groupBy === undefined
       ? undefined
       : normalizeGroupBy(candidate.groupBy)
+    if (
+      metric === 'milestone-trend' &&
+      groupBy !== undefined &&
+      groupBy.dimension !== 'day' &&
+      groupBy.dimension !== 'week' &&
+      groupBy.dimension !== 'month'
+    ) {
+      throw invalid(
+        'AnalyticsGroupByInvalid',
+        'Milestone trend widgets group by Milestone and accept only a day, week, or month bucket.',
+      )
+    }
     const slaTargetHours = candidate.slaTargetHours === undefined
       ? undefined
       : readPositiveNumber(candidate.slaTargetHours, 'Analytics SLA target hours')
@@ -2248,6 +2308,82 @@ function customValuesEqual(
   return actual === expected
 }
 
+/**
+ * Returns whether a query has a widget that reads Milestones.
+ *
+ * Only such queries read the Planning graph and fix the readable Milestones in the permission
+ * scope hash, so the hash of every other snapshot stays as it was.
+ *
+ * @param query - Analytics query.
+ * @returns Whether a `milestone-trend` widget is present.
+ */
+export function analyticsQueryReadsMilestones(query: Pick<AnalyticsQueryInput, 'widgets'>) {
+  return query.widgets.some((widget) => widget.metric === 'milestone-trend')
+}
+
+/**
+ * Returns whether a snapshot was computed from the viewer's Milestones.
+ *
+ * Such a snapshot fixed the readable Milestone IDs in its permission scope hash. A scheduled
+ * delivery cannot read Milestones, so its Milestone trend widgets carry only the unavailable
+ * warning and its hash leaves the Milestones out.
+ *
+ * @param snapshot - Stored snapshot.
+ * @returns Whether the permission scope check must include the readable Milestones.
+ */
+export function analyticsSnapshotReadMilestones(snapshot: Pick<AnalyticsSnapshot, 'widgets'>) {
+  return snapshot.widgets.some((widget) =>
+    widget.metric === 'milestone-trend' &&
+    !widget.warnings.includes(ANALYTICS_MILESTONE_HISTORY_UNAVAILABLE_WARNING)
+  )
+}
+
+/**
+ * Computes a `milestone-trend` widget from the authorized Milestones.
+ *
+ * @param widget - Milestone trend widget.
+ * @param milestones - Authorized Milestones, or `undefined` when the run cannot read them.
+ * @param normalized - Normalized query.
+ * @returns The widget result.
+ */
+function createMilestoneTrendWidgetResult(
+  widget: AnalyticsWidget,
+  milestones: readonly AnalyticsMilestoneHistory[] | undefined,
+  normalized: NormalizedAnalyticsQuery,
+): AnalyticsWidgetResult {
+  const granularity = widget.groupBy?.dimension === 'week' ||
+      widget.groupBy?.dimension === 'month'
+    ? widget.groupBy.dimension
+    : 'day'
+  const trend = createAnalyticsMilestoneTrend({
+    milestones,
+    buckets: widget.type === 'chart'
+      ? createCalendarBuckets(
+          normalized.periodFrom,
+          normalized.periodTo,
+          normalized.query.timeZone,
+          granularity,
+          normalized.query.weekStartDay,
+        )
+      : [],
+    periodFrom: normalized.periodFrom,
+    periodTo: normalized.periodTo,
+    asOf: normalized.asOf,
+    maxRows: MAX_ANALYTICS_TABLE_PREVIEW_ROWS,
+  })
+  return {
+    widgetId: widget.id,
+    metric: widget.metric,
+    definition: resolveAnalyticsMetricDefinition(widget.metric, widget.weighting),
+    value: trend.value,
+    sampleSize: trend.sampleSize,
+    series: trend.series,
+    groups: trend.groups,
+    rows: widget.type === 'table' ? trend.rows : [],
+    warnings: trend.warnings,
+  }
+}
+
 function createWidgetResult(
   widget: AnalyticsWidget,
   facts: readonly AnalyticsWorkItemFact[],
@@ -2652,6 +2788,10 @@ function calculateMetric(
   slaTargetHours = DEFAULT_SLA_TARGET_HOURS,
   weighting: AnalyticsWeighting = 'count',
 ): MetricComputation {
+  if (metric === 'milestone-trend') {
+    // Milestones are Planning entities, not Work Items, so they add no Work Item evidence.
+    return { value: null, sampleSize: 0, evidence: [], warnings: [] }
+  }
   if (metric === 'throughput' || metric === 'velocity') {
     const completed = facts.filter((fact) =>
       fact.completionAt !== undefined &&
@@ -4556,7 +4696,8 @@ function validateSnapshotQueryAlignment(
       !Array.isArray(result.warnings) ||
       result.warnings.some((warning) => typeof warning !== 'string') ||
       (!expectsSeries && result.series.length > 0) ||
-      (widget.groupBy === undefined && result.groups.length > 0) ||
+      // A Milestone trend groups by Milestone whatever its group-by is.
+      (widget.groupBy === undefined && widget.metric !== 'milestone-trend' && result.groups.length > 0) ||
       (widget.type !== 'table' && result.rows.length > 0)
     ) {
       throw invalid(
@@ -5234,7 +5375,8 @@ function readMetricKey(value: unknown): AnalyticsMetricKey {
     value === 'velocity' ||
     value === 'sla' ||
     value === 'remaining-scope' ||
-    value === 'cumulative-flow'
+    value === 'cumulative-flow' ||
+    value === 'milestone-trend'
   ) return value
   throw invalid('AnalyticsMetricInvalid', 'Analytics metric key is invalid.')
 }
@@ -5304,12 +5446,16 @@ function workItemKey(teamId: string, workItemId: string) {
  * @param workItems - Current ACL reader が返した canonical Work Item です。
  * @param asOf - Scope に含める Work Item の作成時刻上限です。
  * @param authorizedProjectIds - Current viewer が参照できる Project ID です。
+ * @param milestoneIds - Milestone を読んだ snapshot で current viewer が読める Milestone の
+ *   ID と現在の scope の key（`createAnalyticsMilestoneScopeKey`）です。
+ *   それ以外の snapshot では省略し、既存 snapshot と同じ hash にします。
  * @returns Snapshot/evidence cursor の認可 scope hash です。
  */
 export function createAnalyticsPermissionScopeHash(
   workItems: readonly CanonicalWorkItem[],
   asOf: number,
   authorizedProjectIds: ReadonlySet<string>,
+  milestoneIds?: readonly string[],
 ) {
   if (!Number.isFinite(asOf)) {
     throw invalid('AnalyticsPermissionScopeInvalid', 'Analytics permission scope as-of time is invalid.')
@@ -5326,6 +5472,7 @@ export function createAnalyticsPermissionScopeHash(
           })
           .map((item) => workItemKey(item.teamId, item.id)),
       )].sort(),
+      ...(milestoneIds === undefined ? {} : { milestoneIds: [...new Set(milestoneIds)].sort() }),
     },
   )
 }

@@ -21,10 +21,14 @@ import {
 import {
   createDefaultTenantAdministrationSnapshot,
 } from '../../../tenant-administration'
+import { InMemoryPlanningClient } from '../../../planning/planning'
+import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import type {
   AnalyticsQueryInput,
   AnalyticsSnapshotListResponse,
   AnalyticsSnapshotRecord,
+  EnterpriseCustomRole,
+  EnterpriseRoleAssignment,
 } from '@mukuroji/contracts'
 import {
   afterEach,
@@ -1264,4 +1268,541 @@ test('starts Analytics weeks on the Workspace week start and re-resolves saved r
       },
     },
   })
+})
+
+/**
+ * Creates a Milestone input for the in-memory Planning client.
+ *
+ * @param id - Milestone ID.
+ * @param expectedRevision - Planning revision before the create.
+ * @param scope - Team and Project scope; both undefined for a Workspace Milestone.
+ * @returns Planning entity creation input.
+ */
+function createMilestoneInput(
+  id: string,
+  expectedRevision: number,
+  scope: { teamId?: string, projectId?: string },
+) {
+  return {
+    id,
+    type: 'milestone' as const,
+    title: `Milestone ${id}`,
+    parentId: 'trend-roadmap',
+    ...scope,
+    ownerMemberKey: 'demo@example.com',
+    status: 'active' as const,
+    health: 'on-track' as const,
+    risk: 'low' as const,
+    progressMode: 'automatic' as const,
+    baseline: { startDate: '2026-08-10', endDate: '2026-08-10' },
+    forecast: { startDate: '2026-08-20', endDate: '2026-08-20' },
+    expectedRevision,
+  }
+}
+
+test('draws the Milestone trend from the readable Milestones and their Planning audit history', async () => {
+  configureFakeProjectClients(true)
+  const planning = new InMemoryPlanningClient(() => new Date('2026-07-01T00:00:00.000Z'))
+  const workspaceParent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create('user#demo@example.com', workspaceParent('trend-portfolio', 'portfolio', 0), {
+    workItems: [],
+  })
+  await planning.create('user#demo@example.com', workspaceParent('trend-roadmap', 'roadmap', 1), {
+    workItems: [],
+  })
+  await planning.create('user#demo@example.com', createMilestoneInput('milestone-core', 2, {
+    teamId: 'core-team',
+    projectId: 'refero',
+  }), { workItems: [] })
+  await planning.create('user#demo@example.com', createMilestoneInput('milestone-workspace', 3, {}), {
+    workItems: [],
+  })
+  const auditQueries: Array<Record<string, unknown>> = []
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        auditQueries.push({ ...input })
+        if (input.entityType !== 'planning-entity' || input.entityId !== 'milestone-core') {
+          return { events: [] }
+        }
+        const event = createAnalyticsAuditEvent(
+          'planning-entity',
+          'milestone-core',
+          '2026-07-10T09:00:00.000Z',
+        )
+        return {
+          events: [{
+            ...event,
+            metadata: { teamId: 'core-team', projectId: 'refero' },
+            changes: [{ field: 'forecast.endDate', before: '2026-08-10', after: '2026-08-20' }],
+          }],
+        }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const widgets = [{
+    id: 'trend',
+    type: 'chart' as const,
+    title: 'Milestone trend',
+    metric: 'milestone-trend' as const,
+    visualization: 'line' as const,
+    groupBy: { dimension: 'week' as const },
+  }]
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, projectIds: ['refero'] },
+    widgets,
+  })
+
+  expect(response.status).toBe(200)
+  const { snapshot } = await response.json()
+  expect(snapshot.widgets[0].groups).toEqual([
+    { key: 'milestone-core', label: 'Milestone milestone-core', value: 10, sampleSize: 1 },
+  ])
+  expect(snapshot.widgets[0].series[0].segments).toEqual([{ key: 'milestone-core', value: 20675 }])
+  expect(snapshot.widgets[0].series.at(-1).segments).toEqual([{ key: 'milestone-core', value: 20685 }])
+  // The Project filter leaves out the Workspace Milestone, so only one timeline is read.
+  expect(auditQueries.filter((input) => input.entityType === 'planning-entity')).toEqual([
+    expect.objectContaining({ entityId: 'milestone-core', direction: 'ascending' }),
+  ])
+
+  // A guest who can read only the Project never sees the Workspace Milestone.
+  configureFakeProjectClients(false, {
+    workspaceRole: 'guest',
+    role: 'viewer',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+  })
+  const guest = await analyticsApiRequest('/api/analytics/query', { ...query, widgets })
+  expect(guest.status).toBe(200)
+  expect((await guest.json()).snapshot.widgets[0].groups.map((group: { key: string }) => group.key))
+    .toEqual(['milestone-core'])
+
+  // An audit index that has not caught up with the latest forecast fails closed.
+  setTestAppDependencies({
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        if (input.entityType !== 'planning-entity' || input.entityId !== 'milestone-core') {
+          return { events: [] }
+        }
+        const event = createAnalyticsAuditEvent('planning-entity', 'milestone-core', '2026-07-10T09:00:00.000Z')
+        return {
+          events: [{
+            ...event,
+            metadata: { teamId: 'core-team', projectId: 'refero' },
+            changes: [{ field: 'forecast.endDate', before: '2026-08-10', after: '2026-08-15' }],
+          }],
+        }
+      },
+    },
+  })
+  const stale = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, projectIds: ['refero'] },
+    widgets,
+  })
+  expect(stale.status).toBe(503)
+  expect(await stale.json()).toMatchObject({ code: 'AnalyticsReadBarrierUnavailable' })
+
+  // An ancestor moved the Milestone to another Team and back without events of its own. The date
+  // changed while it sat in the other Team stays hidden, and so does the earlier date.
+  setTestAppDependencies({
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        if (input.entityType !== 'planning-entity' || input.entityId !== 'milestone-core') {
+          return { events: [] }
+        }
+        const event = createAnalyticsAuditEvent('planning-entity', 'milestone-core', '2026-07-10T09:00:00.000Z')
+        return {
+          events: [{
+            ...event,
+            metadata: { teamId: 'other-team' },
+            changes: [{ field: 'forecast.endDate', before: '2026-08-10', after: '2026-08-20' }],
+          }],
+        }
+      },
+    },
+  })
+  const roundTrip = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, projectIds: ['refero'] },
+    widgets,
+  })
+  expect(roundTrip.status).toBe(200)
+  const roundTripWidget = (await roundTrip.json()).snapshot.widgets[0]
+  expect(roundTripWidget.groups).toEqual([
+    { key: 'milestone-core', label: 'Milestone milestone-core', value: 0, sampleSize: 0 },
+  ])
+  expect(roundTripWidget.series.flatMap((point: { segments: Array<{ value: number }> }) =>
+    point.segments.map((segment) => segment.value))).not.toContain(20675)
+})
+
+test('reads Enterprise Milestones by planning.read instead of the Work Item scopes', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [], teamProjects: [] })
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date('2026-07-01T00:00:00.000Z'))
+  const parent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
+  await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
+  await planning.create(workspaceId, createMilestoneInput('milestone-core', 2, { teamId: 'core-team' }), {
+    workItems: [],
+  })
+  await planning.create(workspaceId, createMilestoneInput('milestone-planning', 3, {
+    teamId: 'planning-team',
+  }), { workItems: [] })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const assignments: EnterpriseRoleAssignment[] = [
+    {
+      workspaceId, assignmentId: 'core-member', principalKind: 'member', principalId: 'demo@example.com',
+      roleId: 'team:member', scope: { workspaceId, kind: 'team', targetId: 'core-team' }, source: 'direct',
+    },
+    {
+      workspaceId, assignmentId: 'planning-reader', principalKind: 'member', principalId: 'demo@example.com',
+      roleId: 'custom:planning-reader', scope: { workspaceId, kind: 'team', targetId: 'planning-team' },
+      source: 'direct',
+    },
+  ]
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:planning-reader', name: 'Planning reader',
+    permissions: ['planning.read'], guestAssignable: false, revision: 1,
+    createdAt: '2026-07-01T00:00:00.000Z', updatedAt: '2026-07-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: assignments,
+    customRoles: [customRole],
+  })
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    enterpriseIdentity: identity,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, teamIds: ['core-team', 'planning-team'] },
+    widgets: [{
+      id: 'trend',
+      type: 'table' as const,
+      title: 'Milestone trend',
+      metric: 'milestone-trend' as const,
+    }],
+  })
+
+  expect(response.status).toBe(200)
+  // The Planning-only Team grant shows its Milestone although it gives no Work Item access.
+  expect((await response.json()).snapshot.widgets[0].rows.map((row: { id: string }) => row.id).sort())
+    .toEqual(['milestone-core', 'milestone-planning'])
+})
+
+test('retries and fails closed while a new Milestone has no visible audit event', async () => {
+  configureFakeProjectClients(true)
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date())
+  const parent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
+  await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
+  await planning.create(workspaceId, createMilestoneInput('milestone-new', 2, {
+    teamId: 'core-team',
+    projectId: 'refero',
+  }), { workItems: [] })
+  let milestoneQueries = 0
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        if (input.entityType === 'planning-entity') milestoneQueries += 1
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const now = new Date()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    asOf: now.toISOString(),
+    filter: {
+      ...query.filter,
+      period: { from: new Date(now.getTime() - 86_400_000).toISOString(), to: now.toISOString() },
+      projectIds: ['refero'],
+    },
+    widgets: [{
+      id: 'trend',
+      type: 'table' as const,
+      title: 'Milestone trend',
+      metric: 'milestone-trend' as const,
+    }],
+  })
+
+  // The creation event is not visible yet, so the empty history is not taken as pre-audit.
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({ code: 'AnalyticsReadBarrierUnavailable' })
+  expect(milestoneQueries).toBe(3)
+})
+
+test('waits for pending Milestone audit reads before failing at the event limit', async () => {
+  configureFakeProjectClients(true)
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date('2026-07-01T00:00:00.000Z'))
+  const parent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
+  await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
+  // Six long timelines and one slow short one: 9,953 events, under the 10,000-event limit.
+  const eventCounts = new Map([
+    ['milestone-slow', 5],
+    ...['a', 'b', 'c', 'd', 'e', 'f'].map((suffix): [string, number] => [`milestone-${suffix}`, 1_658]),
+  ])
+  let revision = 2
+  for (const id of eventCounts.keys()) {
+    await planning.create(workspaceId, createMilestoneInput(id, revision, {
+      teamId: 'core-team',
+      projectId: 'refero',
+    }), { workItems: [] })
+    revision += 1
+  }
+  const base = createAnalyticsAuditEvent('planning-entity', 'milestone-template', '2026-06-01T00:00:00.000Z')
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        const total = input.entityType === 'planning-entity' && input.entityId !== undefined
+          ? eventCounts.get(input.entityId) ?? 0
+          : 0
+        // The slow timeline holds its reservation while the long timelines reach the limit.
+        if (input.entityId === 'milestone-slow') await new Promise((resolve) => setTimeout(resolve, 50))
+        const offset = Number(input.cursor ?? '0')
+        const end = Math.min(total, offset + (input.limit ?? 100))
+        return {
+          events: Array.from({ length: end - offset }, (_, index) => ({
+            ...base,
+            eventId: `${input.entityId}-${offset + index}`,
+            entityId: input.entityId ?? '',
+            metadata: { teamId: 'core-team', projectId: 'refero' },
+            changes: [],
+          })),
+          ...(end < total ? { nextCursor: String(end) } : {}),
+        }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, projectIds: ['refero'] },
+    widgets: [{
+      id: 'trend',
+      type: 'table' as const,
+      title: 'Milestone trend',
+      metric: 'milestone-trend' as const,
+    }],
+  })
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).snapshot.widgets[0].rows).toHaveLength(7)
+})
+
+test('never lets parallel Milestone audit reads reserve past the event limit', async () => {
+  configureFakeProjectClients(true)
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date('2026-07-01T00:00:00.000Z'))
+  const parent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
+  await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
+  // Eight timelines of 1,290 events: 10,320 events, over the limit, all read in parallel.
+  const ids = Array.from({ length: 8 }, (_, index) => `milestone-${index}`)
+  for (const [index, id] of ids.entries()) {
+    await planning.create(workspaceId, createMilestoneInput(id, index + 2, {
+      teamId: 'core-team',
+      projectId: 'refero',
+    }), { workItems: [] })
+  }
+  const base = createAnalyticsAuditEvent('planning-entity', 'milestone-template', '2026-06-01T00:00:00.000Z')
+  let delivered = 0
+  let outstanding = 0
+  let maxCommitted = 0
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        const limit = input.limit ?? 100
+        outstanding += limit
+        maxCommitted = Math.max(maxCommitted, delivered + outstanding)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        const offset = Number(input.cursor ?? '0')
+        const end = Math.min(1_290, offset + limit)
+        outstanding -= limit
+        delivered += end - offset
+        return {
+          events: Array.from({ length: end - offset }, (_, index) => ({
+            ...base,
+            eventId: `${input.entityId}-${offset + index}`,
+            entityId: input.entityId ?? '',
+            metadata: { teamId: 'core-team', projectId: 'refero' },
+            changes: [],
+          })),
+          ...(end < 1_290 ? { nextCursor: String(end) } : {}),
+        }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, projectIds: ['refero'] },
+    widgets: [{
+      id: 'trend',
+      type: 'table' as const,
+      title: 'Milestone trend',
+      metric: 'milestone-trend' as const,
+    }],
+  })
+
+  expect(response.status).toBe(413)
+  expect(maxCommitted).toBeLessThanOrEqual(10_000)
+  expect(delivered).toBeLessThanOrEqual(10_000)
+})
+
+test('shares the Milestone audit event budget across history retries', async () => {
+  configureFakeProjectClients(true)
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date())
+  const parent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
+  await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
+  // Three timelines of 1,500 events: 4,500 per attempt, so the third attempt passes 10,000.
+  const ids = ['milestone-a', 'milestone-b', 'milestone-c']
+  for (const [index, id] of ids.entries()) {
+    await planning.create(workspaceId, createMilestoneInput(id, index + 2, {
+      teamId: 'core-team',
+      projectId: 'refero',
+    }), { workItems: [] })
+  }
+  const base = createAnalyticsAuditEvent('planning-entity', 'milestone-template', '2026-06-01T00:00:00.000Z')
+  let delivered = 0
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        const offset = Number(input.cursor ?? '0')
+        const end = Math.min(1_500, offset + (input.limit ?? 100))
+        delivered += end - offset
+        // Every event predates the Milestone's latest write, so each attempt retries.
+        return {
+          events: Array.from({ length: end - offset }, (_, index) => ({
+            ...base,
+            eventId: `${input.entityId}-${offset + index}`,
+            entityId: input.entityId ?? '',
+            metadata: { teamId: 'core-team', projectId: 'refero' },
+            changes: [],
+          })),
+          ...(end < 1_500 ? { nextCursor: String(end) } : {}),
+        }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const now = new Date()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    asOf: now.toISOString(),
+    filter: {
+      ...query.filter,
+      period: { from: new Date(now.getTime() - 86_400_000).toISOString(), to: now.toISOString() },
+      projectIds: ['refero'],
+    },
+    widgets: [{
+      id: 'trend',
+      type: 'table' as const,
+      title: 'Milestone trend',
+      metric: 'milestone-trend' as const,
+    }],
+  })
+
+  // A per-attempt budget would read 13,500 events and answer 503 instead.
+  expect(response.status).toBe(413)
+  expect(delivered).toBeLessThanOrEqual(10_000)
 })

@@ -1186,14 +1186,18 @@ describe('PlanningScreen cross-Project timeline', () => {
           projects: [{ id: 'refero', name: 'Refero app' }],
         }]}
         labels={labels}
-        onOpenProject={() => undefined}
+        onOpenProjectGantt={() => undefined}
+        onOpenProjectOverview={() => undefined}
         snapshot={planningSnapshotFixture}
       />,
     )
 
     expect(html).toContain('data-testid="planning-cross-project-timeline"')
+    expect(html).toContain('data-print-root="planning-timeline"')
+    expect(html).toContain('data-testid="cross-project-timeline-print-a3"')
+    expect(html).toContain('data-testid="cross-project-timeline-open-overview-core-team-refero"')
     expect(html).toContain('Refero app')
-    expect(html).toContain('data-testid="cross-project-timeline-open-project-refero"')
+    expect(html).toContain('data-testid="cross-project-timeline-open-gantt-core-team-refero"')
     expect(html).toContain('data-testid="cross-project-timeline-bar-phase-build"')
     expect(html).toContain('data-testid="cross-project-timeline-bar-milestone-beta"')
     expect(html).toContain('data-testid="cross-project-timeline-link-dependency-build-beta"')

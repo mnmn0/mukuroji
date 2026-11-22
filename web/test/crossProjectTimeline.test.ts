@@ -213,5 +213,10 @@ describe('createCrossProjectTimelineChart scope labels', () => {
       'Launch · Core',
       'Launch · Design',
     ])
+    expect(byPortfolio?.rows.flatMap((row) => row.kind === 'entity' ? [row.project] : [])).toEqual([
+      { teamId: 'core-team', projectId: 'launch' },
+      { teamId: 'design-team', projectId: 'launch' },
+    ])
+    expect(byProject?.rows.some((row) => row.kind === 'entity' && row.project !== undefined)).toBe(false)
   })
 })
