@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import type { CycleScheduleBaseline, CycleScheduleBaselineResponse, PlanningSnapshot } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
+import { PlanningApiError } from '../src/planning/api/errors'
 import { compareCycleBaseline } from '../src/planning/model/cycleBaselines'
+import { isEvictedBaselineSelection } from '../src/planning/mutations/useCycleScheduleBaselines'
 import { CycleScheduleBaselinePanel } from '../src/planning/ui/CycleScheduleBaselinePanel'
 import { createPlanningLabels } from '../src/planning/ui/labels'
 
@@ -122,5 +124,12 @@ describe('Cycle schedule baselines', () => {
     )
     expect(html).toContain('No baseline has been saved for this Cycle yet.')
     expect(html).not.toContain('cycle-baseline-capture')
+  })
+
+  test('falls back to the newest baseline only when the selected one is no longer saved', () => {
+    const notFound = new PlanningApiError(404, 'gone', 'CycleScheduleBaselineNotFound')
+    expect(isEvictedBaselineSelection('cb-1', notFound)).toBe(true)
+    expect(isEvictedBaselineSelection(undefined, notFound)).toBe(false)
+    expect(isEvictedBaselineSelection('cb-1', new PlanningApiError(503, 'busy', 'CycleScheduleBaselineRetryable'))).toBe(false)
   })
 })

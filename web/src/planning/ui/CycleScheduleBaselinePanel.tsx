@@ -234,7 +234,7 @@ export function CycleScheduleBaselineContainer({
   labels,
   snapshot,
 }: CycleScheduleBaselineContainerProps) {
-  const { query, select, capture, isCapturing, captureFailed } = useCycleScheduleBaselines(accessToken, cycle.id)
+  const { query, select, retry, capture, isCapturing, captureFailed } = useCycleScheduleBaselines(accessToken, cycle.id)
   return (
     <CycleScheduleBaselinePanel
       canCapture={canCapture}
@@ -247,7 +247,7 @@ export function CycleScheduleBaselineContainer({
       response={query.data}
       snapshot={snapshot}
       onCapture={(name) => void capture(name)}
-      onRetry={() => void query.mutate()}
+      onRetry={retry}
       onSelect={select}
     />
   )
