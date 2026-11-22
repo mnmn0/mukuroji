@@ -73,9 +73,10 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 
 ### Workspace profile
 
-`MUKUROJI_MCP_PROFILE=workspace` で起動すると、Team と担当者を固定しない読み取り専用のツールを公開します。
+`MUKUROJI_MCP_PROFILE=workspace` で起動すると、Team と担当者を固定しないツールを公開します。
 Linear の MCP のように、Workspace の Team・Project・メンバー・Work Item を一覧し、`ABC-123` 形式の key で
-Work Item を読む用途向けです。必要な環境変数は `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけで、
+Work Item を読み、作成・更新・コメントする用途向けです。必要な環境変数は `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけで、
+`MUKUROJI_MCP_READ_ONLY=true` にすると書き込みのツールを外します。
 `MUKUROJI_MCP_TEAM_ID` などの tasks profile 用の値は読みません。既定の profile は `tasks` で、上の表のツールと設定は変わりません。
 Software factory が無効な環境でも使えます（Agent Run の API を呼びません）。
 
@@ -89,8 +90,12 @@ Software factory が無効な環境でも使えます（Agent Run の API を呼
 | `list_issues` | Team の Work Item を Project・担当者（メンバー ID か `me`）・status・Type・更新時刻で絞ってページ取得 |
 | `get_issue` | key（`ABC-123`）だけ、または ID と `teamId` で Work Item を読む。key も返す。`teamId` を渡すと値は常に ID として読む（`task-1` のような古い ID を key と取り違えないため） |
 | `list_comments` | Work Item のコメントを新しい順にページ取得。key だけでも指せる |
+| `save_issue` | `id` なしで Work Item を作成（`teamId` と `title` が必須、担当者の既定は `me`）。`id`（key か ID と `teamId`）ありで更新し、渡した項目だけを変える。更新には `get_issue` で読んだ `expectedRevision` が要る。`dueDate` は作成時だけ |
+| `save_comment` | Work Item にコメントを追加。key だけでも指せる |
 
-作成・更新のツール（`save_issue`、`save_comment` など）は #705 の続きで追加します。
+書き込みのツールは、毎回新しい UUID の `idempotencyKey` を要求します。応答が不確かなときは、同じ引数と key で再試行します。
+更新が revision の競合で失敗したら、`get_issue` で読み直してから改めて判断します。権限の判定は Web と同じで、
+token の持ち主が編集できない Work Item は変えられません。
 同じ MCP クライアントに tasks profile と並べて登録する場合は、サーバー名を分けます（例: `mukuroji` と `mukuroji-tasks`）。
 
 ### 自分用token

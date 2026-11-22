@@ -427,16 +427,31 @@ test('configuration failures never echo supplied secrets', () => {
  */
 function startFakeWorkspaceApi() {
   const requests: string[] = []
+  const writes: { method: string, path: string, key: string | null, body: unknown }[] = []
   const issue = { id: 'task', teamId: 'team', revision: 2, title: 'Import GitHub issue', assigneeUserId: 'owner',
     workflowStatusId: 'todo', statusCategory: 'unstarted', priority: 'medium', dueDate: '',
     schedule: { mode: 'unscheduled', calendarPolicy: { timeZone: 'UTC', workingWeekdays: ['monday'], holidays: [] } },
     createdAt: '2026-09-01T00:00:00.000Z', updatedAt: '2026-09-01T00:00:00.000Z', relationIds: [], customFieldValues: {} }
-  const api = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
+  const api = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
     const url = new URL(request.url)
     if (url.pathname === '/api/health') return Response.json({ ok: true, codingAgentMcp: { apiRevision: 4, minimumApiRevision: 1 } })
     if (request.headers.get('Authorization') !== 'Bearer isolated-test-token') return Response.json({}, { status: 401 })
     requests.push(`${url.pathname}${url.search}`)
     const teamId = url.searchParams.get('teamId')
+    if (request.method !== 'GET') {
+      const body: unknown = await request.json()
+      writes.push({ method: request.method, path: `${url.pathname}${url.search}`, key: request.headers.get('Idempotency-Key'), body })
+      if (request.method === 'POST' && url.pathname === '/api/v1/work-items') {
+        return Response.json({ ...issue, id: 'created', title: 'Track imports', revision: 1 }, { status: 201 })
+      }
+      if (request.method === 'PATCH' && url.pathname === '/api/v1/work-items/task' && teamId === 'team') {
+        return Response.json({ ...issue, revision: 3, priority: 'high' })
+      }
+      if (request.method === 'POST' && url.pathname === '/api/v1/work-items/task/comments' && teamId === 'team') {
+        return Response.json({ id: 'new-comment', actorUserId: 'owner', body: 'Linked to PR', createdAt: issue.createdAt }, { status: 201 })
+      }
+      return Response.json({}, { status: 404 })
+    }
     switch (url.pathname) {
       case '/api/v1/me':
         return Response.json({ schemaVersion: 1, workspaceId: 'workspace', memberId: 'owner', email: 'owner@example.com' })
@@ -467,7 +482,7 @@ function startFakeWorkspaceApi() {
         return Response.json({}, { status: 404 })
     }
   } })
-  return { api, requests }
+  return { api, requests, writes }
 }
 
 test('the workspace profile reads Teams, members, statuses, and Work Items by key without a fixed Team', async () => {
@@ -481,7 +496,7 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
       stderr: 'pipe',
     }))
     const tools = (await client.listTools()).tools.map((tool) => tool.name).sort()
-    expect(tools).toEqual(['get_issue', 'list_comments', 'list_issue_statuses', 'list_issues', 'list_projects', 'list_teams', 'list_users', 'whoami'])
+    expect(tools).toEqual(['get_issue', 'list_comments', 'list_issue_statuses', 'list_issues', 'list_projects', 'list_teams', 'list_users', 'save_comment', 'save_issue', 'whoami'])
 
     expect((await call(client, 'list_projects', { teamId: 'team' })).content).toEqual({
       data: [{ id: 'project', name: 'WBS', lifecycleState: 'active', code: 'WBS', teamId: 'team', teamName: 'Platform' }],
@@ -508,6 +523,74 @@ test('the workspace profile reads Teams, members, statuses, and Work Items by ke
 
     expect(fake.requests).toContain('/api/v1/work-items?teamId=team&assigneeUserId=owner&limit=50')
     expect(fake.requests.some((path) => path.startsWith('/api/v1/agent-'))).toBe(false)
+  } finally {
+    await client.close()
+    await fake.api.stop(true)
+  }
+})
+
+test('the workspace profile creates and updates Work Items and adds comments by key', async () => {
+  const fake = startFakeWorkspaceApi()
+  const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' })
+  const keys = ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002', '00000000-0000-4000-8000-000000000003']
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [handlerPath],
+      env: { MUKUROJI_MCP_URL: `http://127.0.0.1:${fake.api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token', MUKUROJI_MCP_PROFILE: 'workspace' },
+      stderr: 'pipe',
+    }))
+
+    expect((await call(client, 'save_issue', {
+      teamId: 'team', title: 'Track imports', projectId: 'project', idempotencyKey: keys[0],
+    })).content).toMatchObject({ data: { id: 'created', revision: 1 } })
+    expect((await call(client, 'save_issue', {
+      id: 'ABC-7', priority: 'high', assigneeId: 'me', expectedRevision: 2, idempotencyKey: keys[1],
+    })).content).toMatchObject({ data: { id: 'task', revision: 3, key: 'ABC-7' } })
+    expect((await call(client, 'save_comment', { issueId: 'ABC-7', body: 'Linked to PR', idempotencyKey: keys[2] })).content)
+      .toMatchObject({ data: { teamId: 'team', workItemId: 'task', comment: { id: 'new-comment' } } })
+
+    expect(fake.writes).toEqual([
+      { method: 'POST', path: '/api/v1/work-items', key: keys[0], body: {
+        teamId: 'team', title: 'Track imports', assigneeUserId: 'owner', priority: 'medium', assignedProjectId: 'project',
+      } },
+      { method: 'PATCH', path: '/api/v1/work-items/task?teamId=team', key: keys[1], body: {
+        expectedRevision: 2, assigneeUserId: 'owner', priority: 'high',
+      } },
+      { method: 'POST', path: '/api/v1/work-items/task/comments?teamId=team', key: keys[2], body: { body: 'Linked to PR' } },
+    ])
+
+    const withoutRevision = await call(client, 'save_issue', { id: 'ABC-7', title: 'Renamed', idempotencyKey: keys[1] })
+    expect(withoutRevision.isError).toBe(true)
+    expect(withoutRevision.content).toMatchObject({ error: { code: 'invalid_request' } })
+    const withoutTitle = await call(client, 'save_issue', { teamId: 'team', idempotencyKey: keys[0] })
+    expect(withoutTitle.content).toMatchObject({ error: { code: 'invalid_request' } })
+    const nothingToChange = await call(client, 'save_issue', { id: 'ABC-7', expectedRevision: 3, idempotencyKey: keys[1] })
+    expect(nothingToChange.content).toMatchObject({ error: { code: 'invalid_request' } })
+    expect(fake.writes).toHaveLength(3)
+  } finally {
+    await client.close()
+    await fake.api.stop(true)
+  }
+})
+
+test('the read-only workspace profile leaves out the write tools', async () => {
+  const fake = startFakeWorkspaceApi()
+  const client = new Client({ name: 'mukuroji-integration-test', version: '1.0.0' })
+  try {
+    await client.connect(new StdioClientTransport({
+      command: process.execPath,
+      args: [handlerPath],
+      env: {
+        MUKUROJI_MCP_URL: `http://127.0.0.1:${fake.api.port}`, MUKUROJI_MCP_TOKEN: 'isolated-test-token',
+        MUKUROJI_MCP_PROFILE: 'workspace', MUKUROJI_MCP_READ_ONLY: 'true',
+      },
+      stderr: 'pipe',
+    }))
+    const tools = (await client.listTools()).tools.map((tool) => tool.name)
+    expect(tools).not.toContain('save_issue')
+    expect(tools).not.toContain('save_comment')
+    expect(tools).toContain('get_issue')
   } finally {
     await client.close()
     await fake.api.stop(true)

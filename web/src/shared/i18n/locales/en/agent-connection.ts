@@ -63,7 +63,7 @@ export const agentConnectionMessages = {
   'agents.connect.clientNote.kiro': 'Kiro IDE asks before using MUKUROJI_MCP_TOKEN the first time. Allow it, or add it to the "Mcp Approved Env Vars" setting.',
   'agents.connect.verifyTitle': 'Check the connection',
   'agents.connect.verifyDescription': 'Restart the client and check that mukuroji-tasks appears in its MCP list (claude mcp get mukuroji-tasks, codex mcp list, or the Kiro MCP list). Then have the agent call get_configuration; when the assignee is you, it can pick up your tasks with get_next_task.',
-  'agents.connect.workspaceProfileNote': 'Software factory is off in this deployment, so the configuration uses the Workspace profile only. It reads Teams, Projects, Work Items, and comments, but cannot start tasks or Agent Runs.',
+  'agents.connect.workspaceProfileNote': 'Software factory is off in this deployment, so the configuration uses the Workspace profile only. It reads Teams, Projects, Work Items, and comments, and creates and updates Work Items and comments, but cannot start tasks or Agent Runs.',
   'agents.connect.verifyWorkspaceDescription': 'Restart the client and check that mukuroji appears in its MCP list (claude mcp get mukuroji, codex mcp list, or the Kiro MCP list). Then have the agent call whoami; when it returns your email, list_teams and list_issues read the Workspace.',
   'agents.connect.windowsNote': 'On Windows, make sure node is on your PATH. Keep the \\ path separators as shown in the configuration.',
 } as const

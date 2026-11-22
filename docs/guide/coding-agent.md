@@ -10,7 +10,7 @@ Software factory は deploy 時に選ぶ任意の機能です（CDK context `muk
 off の環境では Factory board とヘルプの coding agent ガイドが表示されず、agent にタスクを着手させることは
 できません。使いたい場合は環境の管理者に有効化を依頼してください（[`cdk/README.md`](../../cdk/README.md#optional-modules)）。
 
-off の環境でも **agent を接続** から自分用 token を発行できます。このとき設定例は、Workspace を読むだけの
+off の環境でも **agent を接続** から自分用 token を発行できます。このとき設定例は、Team を固定しない
 Workspace profile（下の「Workspace 全体を読む」）になります。on の環境で発行した token も、off に切り替えた後に
 失効するまで Work Item の読み書きに使えます。不要になった token は **agent を接続** の「発行済みの token」から
 **失効** します。
@@ -65,8 +65,9 @@ Workspace profile は `1.0.0` より後に公開される `mcp.mjs` から使え
 `MUKUROJI_MCP_PROFILE` を知らず、Team ID と member ID がないため起動しません。対応版が GitHub Release に
 出るまでは、リポジトリを手元に置いて `bun server/src/handlers/coding-agent-mcp.ts` で起動してください。必要なのは
 `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけです。agent に「`ABC-123` を読んで」「自分の担当を一覧して」の
-ように頼むと、`get_issue` や `list_issues` で読みます。今は読み取りだけで、タスクの作成・更新は後続の変更で追加します。
-読める範囲は token の持ち主が Web で見られる範囲と同じです。Software factory が off の環境では、
+ように頼むと、`get_issue` や `list_issues` で読みます。「タスクを作って」「`ABC-123` の優先度を上げて」「コメントを書いて」と頼むと、
+`save_issue` と `save_comment` で書き込みます。読むだけにしたい場合は `MUKUROJI_MCP_READ_ONLY=true` を足します。
+読み書きできる範囲は token の持ち主が Web で扱える範囲と同じです。Software factory が off の環境では、
 **agent を接続** の設定例がはじめからこの profile になります。
 
 ## agent に作業させる

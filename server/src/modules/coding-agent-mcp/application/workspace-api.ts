@@ -1,10 +1,12 @@
 import {
   parseWorkItemKey,
+  type CreatePublicWorkItemRequest,
   type PublicCredentialOwner,
   type PublicProjectMemberList,
   type PublicTeamList,
   type PublicWorkItemKeyLookup,
   type TeamIssueCommentResponseItem,
+  type UpdatePublicWorkItemRequest,
   type WorkflowStatusCategory,
 } from '@mukuroji/contracts'
 import { AgentTaskError, type AgentCatalog, type AgentPage, type AgentTask } from './work-item-api'
@@ -90,6 +92,59 @@ export interface WorkspaceApi {
    * @returns One page of comments.
    */
   comments(teamId: string, workItemId: string, cursor?: string, limit?: number): Promise<AgentPage<TeamIssueCommentResponseItem>>
+  /**
+   * Creates a Work Item in the Team named by the input.
+   * @param input - Work Item fields, including its Team.
+   * @param key - Idempotency key of the logical write.
+   * @returns The created Work Item.
+   */
+  createIssue(input: CreatePublicWorkItemRequest, key: string): Promise<AgentTask>
+  /**
+   * Updates a Work Item with revision conflict protection.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param input - Changed fields and the expected revision.
+   * @param key - Idempotency key of the logical write.
+   * @returns The updated Work Item.
+   */
+  updateIssue(teamId: string, workItemId: string, input: UpdatePublicWorkItemRequest, key: string): Promise<AgentTask>
+  /**
+   * Adds a comment to a Work Item.
+   * @param teamId - Team that owns the Work Item.
+   * @param workItemId - Work Item ID.
+   * @param body - Comment text.
+   * @param key - Idempotency key of the logical write.
+   * @returns The saved comment.
+   */
+  addComment(teamId: string, workItemId: string, body: string, key: string): Promise<TeamIssueCommentResponseItem>
+}
+
+/** Fields of `save_issue`; an `id` updates that Work Item, no `id` creates one. */
+export type WorkspaceIssueSaveInput = {
+  /** Key such as `ABC-123`, or Work Item ID with `teamId`; omitted creates a Work Item. */
+  id?: string
+  /** Team of a new Work Item, or of a Work Item ID. */
+  teamId?: string
+  /** Title; required when creating. */
+  title?: string
+  /** Full description text, replacing the current one. */
+  description?: string
+  /** Project of the Work Item; null removes it from its Project when updating. */
+  projectId?: string | null
+  /** Assignee member ID, or `me`; a new Work Item defaults to `me`. */
+  assigneeId?: string
+  /** Workflow status ID. */
+  statusId?: string
+  /** Work Item Type ID. */
+  typeId?: string
+  /** Priority. */
+  priority?: 'high' | 'medium' | 'low'
+  /** Due date of a new Work Item, as `YYYY-MM-DD`. */
+  dueDate?: string
+  /** Revision read before the update; required when updating. */
+  expectedRevision?: number
+  /** Idempotency key of the logical write. */
+  idempotencyKey: string
 }
 
 /** Work Item reference resolved to its Team and ID. */
@@ -229,6 +284,76 @@ export function createWorkspaceIssues(api: WorkspaceApi) {
     async listComments(reference: string, teamId?: string, cursor?: string, limit?: number) {
       const resolved = await resolveIssue(reference, teamId)
       return { ...resolved, ...await api.comments(resolved.teamId, resolved.workItemId, cursor, limit) }
+    },
+    /**
+     * Creates a Work Item when no `id` is given, otherwise updates the named one.
+     * @param input - Fields to save.
+     * @returns The saved Work Item and its key.
+     */
+    async saveIssue(input: WorkspaceIssueSaveInput) {
+      const assigneeUserId = input.assigneeId === undefined ? undefined : await resolveMember(input.assigneeId)
+      if (input.id === undefined) {
+        if (input.teamId === undefined || input.title === undefined) {
+          throw new AgentTaskError('invalid_request', 'Creating a Work Item needs teamId and title. Pass id to update one instead.')
+        }
+        if (input.expectedRevision !== undefined) {
+          throw new AgentTaskError('invalid_request', 'expectedRevision applies only to updates. Pass id to update a Work Item.')
+        }
+        if (input.projectId === null) {
+          throw new AgentTaskError('invalid_request', 'Omit projectId to create a Work Item without a Project.')
+        }
+        const created = await api.createIssue({
+          teamId: input.teamId,
+          title: input.title,
+          assigneeUserId: assigneeUserId ?? (await api.me()).memberId,
+          priority: input.priority ?? 'medium',
+          ...(input.description === undefined ? {} : { description: input.description }),
+          ...(input.projectId === undefined ? {} : { assignedProjectId: input.projectId }),
+          ...(input.statusId === undefined ? {} : { workflowStatusId: input.statusId }),
+          ...(input.typeId === undefined ? {} : { workItemTypeId: input.typeId }),
+          // Without a schedule the server uses the Workspace working calendar, as the Web does.
+          ...(input.dueDate === undefined ? {} : { dueDate: input.dueDate }),
+        }, input.idempotencyKey)
+        const key = await api.getKey(created.teamId, created.id)
+        return { ...created, ...(key === undefined ? {} : { key }) }
+      }
+      if (input.expectedRevision === undefined) {
+        throw new AgentTaskError('invalid_request', 'Updating needs expectedRevision. Read it with get_issue first.')
+      }
+      if (input.dueDate !== undefined) {
+        throw new AgentTaskError('invalid_request', 'dueDate can be set only when creating a Work Item.')
+      }
+      const resolved = await resolveIssue(input.id, input.teamId)
+      const patch: UpdatePublicWorkItemRequest = {
+        expectedRevision: input.expectedRevision,
+        ...(input.title === undefined ? {} : { title: input.title }),
+        ...(input.description === undefined ? {} : { description: input.description }),
+        ...(input.projectId === undefined ? {} : { assignedProjectId: input.projectId }),
+        ...(assigneeUserId === undefined ? {} : { assigneeUserId }),
+        ...(input.statusId === undefined ? {} : { workflowStatusId: input.statusId }),
+        ...(input.typeId === undefined ? {} : { workItemTypeId: input.typeId }),
+        ...(input.priority === undefined ? {} : { priority: input.priority }),
+      }
+      if (Object.keys(patch).length === 1) {
+        throw new AgentTaskError('invalid_request', 'Pass at least one field to change.')
+      }
+      const [updated, key] = await Promise.all([
+        api.updateIssue(resolved.teamId, resolved.workItemId, patch, input.idempotencyKey),
+        api.getKey(resolved.teamId, resolved.workItemId),
+      ])
+      return { ...updated, ...(key === undefined ? {} : { key }) }
+    },
+    /**
+     * Adds a comment to a Work Item by key or ID.
+     * @param reference - Key or Work Item ID.
+     * @param teamId - Team of a Work Item ID.
+     * @param body - Comment text.
+     * @param idempotencyKey - Idempotency key of the logical write.
+     * @returns The Work Item reference and the saved comment.
+     */
+    async saveComment(reference: string, teamId: string | undefined, body: string, idempotencyKey: string) {
+      const resolved = await resolveIssue(reference, teamId)
+      return { ...resolved, comment: await api.addComment(resolved.teamId, resolved.workItemId, body, idempotencyKey) }
     },
   }
 }
