@@ -49,7 +49,6 @@ export const auditLogMessages = {
   'auditLog.event.entity': 'まとめ先',
   'auditLog.event.actorId': '実行者 ID',
   'auditLog.event.source': '経路',
-  'auditLog.event.ipAddress': 'IP アドレス',
   'auditLog.event.correlationId': '相関 ID',
   'auditLog.event.eventId': 'イベント ID',
   'auditLog.export.title': 'export',

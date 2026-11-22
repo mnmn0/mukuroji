@@ -15,7 +15,7 @@ export const auditEventsFixture: AuditEventView[] = [
     ],
     action: 'role-changed',
     correlationId: 'corr_role',
-    source: { kind: 'api', method: 'PATCH', route: '/api/workspace/members/:memberKey', ipAddress: '192.0.2.10' },
+    source: 'api',
   },
   {
     eventId: 'evt_milestone_moved',
@@ -27,7 +27,7 @@ export const auditEventsFixture: AuditEventView[] = [
     changes: [{ field: 'dueDate', before: '2026-12-01', after: '2026-12-15' }],
     action: 'updated',
     correlationId: 'corr_due',
-    source: { kind: 'api', method: 'PATCH', route: '/api/teams/:teamId/issues/:issueId' },
+    source: 'api',
     summary: '顧客との調整で納期を延長',
   },
   {
@@ -40,7 +40,7 @@ export const auditEventsFixture: AuditEventView[] = [
     changes: [],
     action: 'viewed',
     correlationId: 'corr_view',
-    source: { kind: 'system' },
+    source: 'system',
   },
 ]
 

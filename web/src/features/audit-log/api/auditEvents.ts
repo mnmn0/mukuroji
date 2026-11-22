@@ -4,9 +4,9 @@ import {
   type AuditEventFilters,
   type AuditEventPageView,
   type AuditEventResourceView,
-  type AuditEventSourceView,
   type AuditEventView,
   type AuditFieldChangeView,
+  type AuditSourceKind,
   type AuditValue,
 } from '@mukuroji/contracts'
 import { isRecord } from '../../../shared/api/jsonValidation'
@@ -16,7 +16,7 @@ import { invalidAuditLogResponse, sendAuditLogRequest } from './auditLogRequest'
 export const AUDIT_EVENT_PAGE_SIZE = 50
 
 /** Source kinds an audit event may report. */
-const auditSourceKinds: ReadonlyArray<AuditEventSourceView['kind']> = ['api', 'backfill', 'migration', 'system']
+const auditSourceKinds: readonly AuditSourceKind[] = ['api', 'backfill', 'migration', 'system']
 
 /**
  * Searches the Workspace audit log, newest first.
@@ -161,23 +161,15 @@ function readChange(value: unknown): AuditFieldChangeView {
 }
 
 /**
- * Validates the source of an event.
+ * Validates the source kind of an event.
  *
- * @param value - Candidate source.
- * @returns The validated source with its optional string fields.
+ * @param value - Candidate source kind.
+ * @returns The validated source kind.
  */
-function readSource(value: unknown): AuditEventSourceView {
-  if (!isRecord(value)) throw invalidAuditLogResponse()
-  const kind = auditSourceKinds.find((candidate) => candidate === value.kind)
+function readSource(value: unknown): AuditSourceKind {
+  const kind = auditSourceKinds.find((candidate) => candidate === value)
   if (!kind) throw invalidAuditLogResponse()
-  const source: AuditEventSourceView = { kind }
-  for (const field of ['requestId', 'method', 'route', 'ipAddress', 'userAgent'] as const) {
-    const fieldValue = value[field]
-    if (fieldValue === undefined) continue
-    if (typeof fieldValue !== 'string') throw invalidAuditLogResponse()
-    source[field] = fieldValue
-  }
-  return source
+  return kind
 }
 
 /**

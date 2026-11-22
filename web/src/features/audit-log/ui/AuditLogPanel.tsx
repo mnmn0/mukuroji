@@ -458,15 +458,7 @@ function AuditEventRow({ event, locale, onFilterByActor, onFilterByTarget, t, ti
             <dt className="font-semibold text-[var(--workbench-muted)]">{t('auditLog.event.actorId')}</dt>
             <dd className="break-all font-mono">{event.actor.id}</dd>
             <dt className="font-semibold text-[var(--workbench-muted)]">{t('auditLog.event.source')}</dt>
-            <dd className="break-all font-mono">
-              {[event.source.kind, event.source.method, event.source.route].filter(Boolean).join(' ')}
-            </dd>
-            {event.source.ipAddress ? (
-              <>
-                <dt className="font-semibold text-[var(--workbench-muted)]">{t('auditLog.event.ipAddress')}</dt>
-                <dd className="break-all font-mono">{event.source.ipAddress}</dd>
-              </>
-            ) : null}
+            <dd className="break-all font-mono">{event.source}</dd>
             <dt className="font-semibold text-[var(--workbench-muted)]">{t('auditLog.event.correlationId')}</dt>
             <dd className="break-all font-mono">{event.correlationId}</dd>
             <dt className="font-semibold text-[var(--workbench-muted)]">{t('auditLog.event.eventId')}</dt>

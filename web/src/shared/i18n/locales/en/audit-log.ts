@@ -49,7 +49,6 @@ export const auditLogMessages = {
   'auditLog.event.entity': 'Grouped under',
   'auditLog.event.actorId': 'Actor ID',
   'auditLog.event.source': 'Source',
-  'auditLog.event.ipAddress': 'IP address',
   'auditLog.event.correlationId': 'Correlation ID',
   'auditLog.event.eventId': 'Event ID',
   'auditLog.export.title': 'Export',

@@ -50,22 +50,9 @@ export type AuditFieldChangeView = {
 }
 
 /**
- * Origin of an audited mutation.
+ * Path that produced an audited mutation. Request details such as the route and IP address are not public.
  */
-export type AuditEventSourceView = {
-  /** Path that produced the mutation. */
-  kind: 'api' | 'backfill' | 'migration' | 'system'
-  /** API gateway or application request ID. */
-  requestId?: string
-  /** HTTP method that accepted the mutation. */
-  method?: string
-  /** Route that accepted the mutation. */
-  route?: string
-  /** Client IP address of the request. */
-  ipAddress?: string
-  /** User agent of the request. */
-  userAgent?: string
-}
+export type AuditSourceKind = 'api' | 'backfill' | 'migration' | 'system'
 
 /**
  * Public view of one audit event returned by `GET /api/audit/events`.
@@ -89,8 +76,8 @@ export type AuditEventView = {
   action: string
   /** ID shared by the events of one request. */
   correlationId: string
-  /** Origin of the mutation. */
-  source: AuditEventSourceView
+  /** Path that produced the mutation. */
+  source: AuditSourceKind
   /** Short description or reason recorded with the event. */
   summary?: string
   /** Allowlisted diagnostic metadata. */

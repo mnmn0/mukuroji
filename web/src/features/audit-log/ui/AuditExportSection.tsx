@@ -65,7 +65,7 @@ export function AuditExportSection(props: AuditExportSectionProps) {
         </div>
         <button
           className="workbench-button-primary min-h-10 px-4 disabled:opacity-50"
-          disabled={props.isRequestingExport}
+          disabled={props.isRequestingExport || props.issuingExportId !== undefined}
           onClick={props.onRequestExport}
           type="button"
         >
@@ -130,7 +130,7 @@ function AuditExportList(props: AuditExportSectionProps) {
               {job.status === 'completed' && job.partCount > 0 ? (
                 <button
                   className="workbench-button-secondary min-h-10 px-4 disabled:opacity-50"
-                  disabled={props.issuingExportId !== undefined}
+                  disabled={props.isRequestingExport || props.issuingExportId !== undefined}
                   onClick={() => props.onIssueExportLinks(job.exportId)}
                   type="button"
                 >
@@ -164,7 +164,7 @@ function AuditExportList(props: AuditExportSectionProps) {
                 {issued.download.nextPart !== undefined ? (
                   <button
                     className="workbench-button-secondary min-h-10 justify-self-start px-4 disabled:opacity-50"
-                    disabled={props.issuingExportId !== undefined}
+                    disabled={props.isRequestingExport || props.issuingExportId !== undefined}
                     onClick={() => props.onIssueExportLinks(job.exportId, issued.download.nextPart)}
                     type="button"
                   >

@@ -136,6 +136,23 @@ describe('audit API responses', () => {
     expect(() => readAuditEventPage({ events: [{ eventId: 'x' }] })).toThrow(AuditLogApiError)
   })
 
+  test('reads the source as the kind string the server returns', () => {
+    const serverEvent = {
+      eventId: 'evt_1',
+      eventType: 'work-item.updated',
+      occurredAt: '2026-11-20T01:00:00.000Z',
+      actor: { id: 'sub-1', kind: 'user', displayName: 'Aoi' },
+      entity: { type: 'work-item', id: 'wi_1' },
+      target: { type: 'work-item', id: 'wi_1' },
+      changes: [{ field: 'title', before: 'Old', after: 'New' }],
+      action: 'updated',
+      correlationId: 'corr_1',
+      source: 'api',
+    }
+    expect(readAuditEventPage({ events: [serverEvent] }).events[0]?.source).toBe('api')
+    expect(() => readAuditEventPage({ events: [{ ...serverEvent, source: { kind: 'api' } }] })).toThrow(AuditLogApiError)
+  })
+
   test('validates exports and refuses download links that are not web URLs', async () => {
     expect(readAuditExport(auditExportsFixture[2])).toEqual(auditExportsFixture[2]!)
     globalThis.fetch = Object.assign(async () => new Response(JSON.stringify({
@@ -175,6 +192,14 @@ describe('AuditLogPanel', () => {
     expect(html).toContain('監査ログを見る権限がありません。')
     expect(html).not.toContain('再読み込み')
     expect(html).not.toContain('data-testid="audit-export-section"')
+  })
+
+  test('disables every export action while one of them is running', () => {
+    const issuing = renderToStaticMarkup(<AuditLogPanel {...panelProps({ issuingExportId: 'exp_completed' })} />)
+    expect(issuing).toMatch(/<button[^>]*disabled=""[^>]*>この条件で export を依頼<\/button>/u)
+
+    const requesting = renderToStaticMarkup(<AuditLogPanel {...panelProps({ isRequestingExport: true })} />)
+    expect(requesting).toMatch(/<button[^>]*disabled=""[^>]*>ダウンロードリンクを発行<\/button>/u)
   })
 
   test('offers download links only for completed exports and lists issued links', () => {
