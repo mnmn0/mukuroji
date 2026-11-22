@@ -6,7 +6,7 @@ Issue #33 の capacity planning は、Team の member profile、resource request
 
 `WorkloadMemberProfile` は IANA `timeZone`、曜日ごとの working minutes、holiday、time off、skills、role を保持します。`fromDate` / `toDate` は member の local calendar date です。
 
-`calendarSource: "workspace"` の profile は Workspace カレンダー（#337）を継承します。計算の前に、`timeZone` を Workspace の time zone に、Workspace が稼働しない曜日を disabled に置き換え、Workspace の休日（会社の休日と、使う設定なら日本の祝日）を profile の holiday に足します。profile 側の曜日 schedule は個人の勤務時間と勤務しない曜日、holiday は個人の休みとして残ります。Workspace カレンダーは新しい Work Item の calendar policy と同じもの（`readWorkspaceWorkItemCalendarPolicy`）を使います。`calendarSource` が無い profile（継承の導入前に保存したもの）と `"custom"` は、profile 自身の time zone・schedule・holiday だけを使います。snapshot の member summary は編集用に保存値（継承前の time zone・schedule・holiday）と `calendarSource` を返し、cell の capacity は継承後の値です。
+`calendarSource: "workspace"` の profile は Workspace カレンダー（#337）を継承します。計算の前に、`timeZone` を Workspace の time zone に、Workspace が稼働しない曜日を disabled に置き換え、Workspace の休日（会社の休日と、使う設定なら日本の祝日）を profile の holiday に足します。profile 側の曜日 schedule は個人の勤務時間と勤務しない曜日、holiday は個人の休みとして残ります。Workspace カレンダーは新しい Work Item の calendar policy と同じもの（`readWorkspaceWorkItemCalendarPolicy`）を使います。`calendarSource` が無い profile（継承の導入前に保存したもの）と `"custom"` は、profile 自身の time zone・schedule・holiday だけを使います。`PUT .../profiles/:memberId` で `calendarSource` を省くと、今の設定を保ちます（新しい profile は `"custom"`）。Web の稼働プロファイルは新しい profile を `"workspace"` で作ります。snapshot の member summary は編集用に保存値（継承前の time zone・schedule・holiday）と `calendarSource` を返し、cell の capacity は継承後の値です。
 
 1. 曜日の schedule が disabled なら capacity は 0 です。
 2. holiday はその日の capacity を 0 にします。

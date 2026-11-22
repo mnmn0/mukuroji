@@ -307,7 +307,10 @@ export type SaveWorkloadMemberProfileInput = {
   role?: string
   /** Skills used for matching. */
   skills: string[]
-  /** Calendar the profile follows; `custom` when omitted, as clients from before inheritance send. */
+  /**
+   * Calendar the profile follows. When omitted, as clients from before inheritance send it, the
+   * profile keeps its current calendar, and a new profile keeps its own (`custom`).
+   */
   calendarSource?: WorkloadCalendarSource
   /** IANA timezone. */
   timeZone: string

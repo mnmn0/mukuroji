@@ -376,9 +376,11 @@ function ProfileForm({
       skills: splitList(skills),
       calendarSource: inheritsWorkspace ? 'workspace' : 'custom',
       timeZone: timeZone.trim() || 'UTC',
-      schedule: profile && Number(hours) === profile.schedule.monday.minutes / 60
+      // The stored schedule is kept only while the hours and the calendar stay the same.
+      schedule: profile && Number(hours) === profile.schedule.monday.minutes / 60 &&
+        (profile.calendarSource === 'workspace') === inheritsWorkspace
         ? profile.schedule
-        : createSchedule(hours),
+        : createSchedule(hours, inheritsWorkspace),
       holidays: createHolidays(holidayDates, profile?.holidays ?? []),
       expectedRevision: profileRevision,
       expectedTeamRevision: teamRevision,
@@ -430,12 +432,32 @@ function PreviewSummary({ memberId, memberLabel, snapshot, t }: { memberId: stri
   return <p className="border border-tone-c9d8f0 bg-tone-f5f8ff px-3 py-2 text-xs font-semibold leading-5 text-fg-526381">{t('workload.controls.assignment.previewResult').replace('{member}', memberLabel).replace('{allocated}', formatHours(member.allocatedMinutes)).replace('{capacity}', formatHours(member.capacityMinutes))}</p>
 }
 
-/** Creates a weekday schedule from the submitted daily hours. */
-function createSchedule(hoursValue: string): WorkingSchedule {
+/**
+ * Creates a working schedule from the submitted daily hours.
+ *
+ * @param hoursValue - Daily hours typed in the form.
+ * @param inheritsWorkspace - Whether the profile follows the Workspace calendar. Every weekday then
+ *   has the hours, and the server keeps only the Workspace working weekdays; otherwise only Monday
+ *   to Friday do.
+ * @returns The schedule to save.
+ */
+function createSchedule(hoursValue: string, inheritsWorkspace: boolean): WorkingSchedule {
   const hours = Number(hoursValue)
   const minutes = Number.isFinite(hours)
     ? Math.max(0, Math.min(1_440, Math.round(hours * 60)))
     : 0
+  if (inheritsWorkspace) {
+    const day = { enabled: minutes > 0, minutes }
+    return {
+      monday: { ...day },
+      tuesday: { ...day },
+      wednesday: { ...day },
+      thursday: { ...day },
+      friday: { ...day },
+      saturday: { ...day },
+      sunday: { ...day },
+    }
+  }
   return {
     monday: { ...defaultWorkingSchedule.monday, minutes },
     tuesday: { ...defaultWorkingSchedule.tuesday, minutes },

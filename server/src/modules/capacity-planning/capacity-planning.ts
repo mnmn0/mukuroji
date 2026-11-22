@@ -380,7 +380,11 @@ export class CapacityPlanningService {
         ...(input.displayName?.trim() ? { displayName: input.displayName.trim() } : {}),
         ...(input.role?.trim() ? { role: input.role.trim() } : {}),
         skills,
-        ...(input.calendarSource === 'workspace' ? { calendarSource: 'workspace' as const } : {}),
+        // A client that leaves the field out, such as one from before inheritance, keeps the
+        // profile's current calendar; a new profile then keeps its own.
+        ...((input.calendarSource ?? current?.calendarSource) === 'workspace'
+          ? { calendarSource: 'workspace' as const }
+          : {}),
         timeZone: input.timeZone,
         schedule: clone(input.schedule),
         holidays,

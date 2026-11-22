@@ -338,6 +338,42 @@ describe('capacity planning mutations', () => {
     })
   })
 
+  test('keeps the calendar source when a client leaves it out', async () => {
+    const service = new CapacityPlanningService(
+      new InMemoryCapacityPlanningRepository(),
+      { listTimeEntries: async () => [], listEstimates: async () => [] },
+      { now: () => new Date('2026-08-01T00:00:00.000Z') },
+    )
+    const base = {
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      memberId: 'member-1',
+      skills: [],
+      timeZone: 'UTC',
+      schedule: createDefaultWorkingSchedule(),
+      holidays: [],
+      actorMemberId: 'member-1',
+    }
+    // A new profile saved without the field keeps its own calendar.
+    expect((await service.saveMemberProfile({ ...base, expectedRevision: 0, expectedTeamRevision: 0 })).calendarSource)
+      .toBeUndefined()
+    expect((await service.saveMemberProfile({
+      ...base,
+      calendarSource: 'workspace',
+      expectedRevision: 1,
+      expectedTeamRevision: 1,
+    })).calendarSource).toBe('workspace')
+    // An older client that leaves the field out does not turn inheritance off.
+    expect((await service.saveMemberProfile({ ...base, expectedRevision: 2, expectedTeamRevision: 2 })).calendarSource)
+      .toBe('workspace')
+    expect((await service.saveMemberProfile({
+      ...base,
+      calendarSource: 'custom',
+      expectedRevision: 3,
+      expectedTeamRevision: 3,
+    })).calendarSource).toBeUndefined()
+  })
+
   test('updates a request timestamp only when its fill status changes', async () => {
     const repository = new InMemoryCapacityPlanningRepository()
     let now = new Date('2026-08-01T00:00:00.000Z')
