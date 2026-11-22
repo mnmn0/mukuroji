@@ -796,6 +796,7 @@ export function toProjectDataErrorResponse(c: Context, error: unknown) {
     error.code === 'WorkItemRelationGraphConflict' ||
     error.code === 'WorkItemScheduleDependencyConflict' ||
     error.code === 'WorkItemScheduleCascadeConflict' ||
+    error.code === 'ScheduleBaselineChanged' ||
     error.code === 'PlanningWorkItemArchived' ||
     error.code === 'WorkItemAuthorizationChanged'
   ) {

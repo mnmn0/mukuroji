@@ -154,6 +154,12 @@ export type TaskViewColumn = {
 /** Visual density applied by a task view. */
 export type TaskViewDensity = 'compact' | 'comfortable' | 'spacious'
 
+/** Timeline scales a Gantt layout offers. `auto` fits the planning horizon into bounded columns. */
+export const TASK_VIEW_GANTT_SCALES = ['auto', 'day', 'week', 'month', 'quarter'] as const
+
+/** One Gantt timeline scale persisted by a task view. */
+export type TaskViewGanttScale = typeof TASK_VIEW_GANTT_SCALES[number]
+
 /** Optional presentation choices that do not change the underlying filter result. */
 export type TaskViewDisplayOptions = {
   /** Whether completed Work Items remain visible. */
@@ -173,6 +179,12 @@ export type TaskViewDisplayOptions = {
    * order with WBS numbers, instead of the view's sort order.
    */
   showOutline?: boolean
+  /** Timeline scale of a Gantt layout; `auto` applies when omitted. */
+  ganttScale?: TaskViewGanttScale
+  /** Whether a Gantt layout renders each Work Item on one compact line. */
+  ganttCompactRows?: boolean
+  /** Whether a Gantt layout draws the progress line through today. */
+  ganttProgressLine?: boolean
 }
 
 /** Reproducible layout shared by every task view surface. */

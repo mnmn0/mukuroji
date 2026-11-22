@@ -1,6 +1,7 @@
 import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  TASK_VIEW_GANTT_SCALES,
   type CreateSavedTaskViewInput,
   type CreateSavedWorkspaceViewInput,
   type SearchCustomFieldFilter,
@@ -13,6 +14,7 @@ import {
   type TaskViewDefinition,
   type TaskViewDisplayOptions,
   type TaskViewFilters,
+  type TaskViewGanttScale,
   type TaskViewGrouping,
   type TaskViewLayout,
   type TaskViewScope,
@@ -1236,7 +1238,40 @@ function readTaskViewDisplayOptions(value: unknown): TaskViewDisplayOptions {
     ...(value.showOutline === undefined
       ? {}
       : { showOutline: readTaskViewBoolean(value.showOutline, 'Task view showOutline') }),
+    ...(value.ganttScale === undefined
+      ? {}
+      : { ganttScale: readTaskViewGanttScale(value.ganttScale) }),
+    ...(value.ganttCompactRows === undefined
+      ? {}
+      : {
+          ganttCompactRows: readTaskViewBoolean(
+            value.ganttCompactRows,
+            'Task view ganttCompactRows',
+          ),
+        }),
+    ...(value.ganttProgressLine === undefined
+      ? {}
+      : {
+          ganttProgressLine: readTaskViewBoolean(
+            value.ganttProgressLine,
+            'Task view ganttProgressLine',
+          ),
+        }),
   }
+}
+
+/**
+ * Reads one supported Gantt timeline scale.
+ *
+ * @param value - Untrusted scale value.
+ * @returns Supported Gantt scale.
+ */
+function readTaskViewGanttScale(value: unknown): TaskViewGanttScale {
+  const scale = TASK_VIEW_GANTT_SCALES.find((candidate) => candidate === value)
+  if (scale === undefined) {
+    return invalidTaskViewApiInput('Task view ganttScale is invalid.')
+  }
+  return scale
 }
 
 /**

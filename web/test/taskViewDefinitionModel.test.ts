@@ -179,6 +179,33 @@ describe('task view definition migration and sanitization', () => {
     expect(result.warnings.every((warning) => warning.referenceId === undefined)).toBe(true)
   })
 
+  test('keeps saved Gantt display options and resets an unknown Gantt scale', () => {
+    const kept = sanitizeTaskViewDefinition({
+      ...builtInDefinition,
+      layout: {
+        ...builtInDefinition.layout,
+        displayOptions: { ganttCompactRows: true, ganttProgressLine: false, ganttScale: 'quarter' },
+      },
+    }, options)
+    expect(kept.definition.layout.displayOptions).toEqual({
+      ganttCompactRows: true,
+      ganttProgressLine: false,
+      ganttScale: 'quarter',
+    })
+    expect(kept.warnings).toEqual([])
+
+    const reset = sanitizeTaskViewDefinition({
+      ...builtInDefinition,
+      layout: {
+        ...builtInDefinition.layout,
+        displayOptions: { ganttCompactRows: 'yes', ganttScale: 'year' },
+      },
+    }, options)
+    expect(reset.definition.layout.displayOptions).toEqual({})
+    expect(reset.warnings.map((warning) => [warning.code, warning.section, warning.fallback]))
+      .toContainEqual(['invalid-layout', 'display-option', 'reset-to-default'])
+  })
+
   test('keeps sort-only fields in sorting while grouping still uses the shared field list', () => {
     const result = sanitizeTaskViewDefinition({
       ...builtInDefinition,
