@@ -3,12 +3,16 @@ import {
   createDefaultDueDateWorkItemSchedule,
   createDefaultUnscheduledWorkItemSchedule,
   createProjectScheduleBaselineEntry,
+  crossesWorkItemBaselineSlipThreshold,
   deriveWorkItemBaselineEndDelayDays,
+  deriveWorkItemBaselineSlipChange,
+  parseWorkItemBaselineSlipChange,
   deriveWorkItemScheduleSlip,
   normalizeProjectScheduleBaselineName,
   parseProjectScheduleBaselineResponse,
   parseSavedProjectScheduleBaselines,
   PROJECT_SCHEDULE_BASELINE_MAX_SAVED,
+  type WorkItemBaselineDelaySource,
   type WorkItemSchedule,
 } from '../src/index'
 
@@ -150,5 +154,63 @@ describe('schedule baseline', () => {
     expect(normalizeProjectScheduleBaselineName('a'.repeat(81))).toBeNull()
     expect(normalizeProjectScheduleBaselineName('line\nbreak')).toBeNull()
     expect(normalizeProjectScheduleBaselineName(3)).toBeNull()
+  })
+})
+
+describe('baseline slip changes', () => {
+  const entry = { workItemId: 'a', endDate: '2026-12-10' }
+  /**
+   * Builds an open Work Item due on the given date.
+   *
+   * @param dueDate - Planned end.
+   * @returns The delay source.
+   */
+  const open = (dueDate: string): WorkItemBaselineDelaySource => ({
+    schedule: createDefaultDueDateWorkItemSchedule(dueDate),
+    statusCategory: 'started',
+  })
+
+  test('records a change that leaves an open Work Item later behind its baseline', () => {
+    expect(deriveWorkItemBaselineSlipChange(2, entry, open('2026-12-11'), open('2026-12-14'))).toEqual({
+      baselineRevision: 2,
+      baselineEndDate: '2026-12-10',
+      previousDelayDays: 1,
+      delayDays: 4,
+    })
+    expect(deriveWorkItemBaselineSlipChange(2, entry, undefined, open('2026-12-12'))).toEqual({
+      baselineRevision: 2,
+      baselineEndDate: '2026-12-10',
+      delayDays: 2,
+    })
+  })
+
+  test('ignores changes that do not make the Work Item later behind its baseline', () => {
+    expect(deriveWorkItemBaselineSlipChange(2, entry, open('2026-12-14'), open('2026-12-12'))).toBeUndefined()
+    expect(deriveWorkItemBaselineSlipChange(2, entry, open('2026-12-01'), open('2026-12-10'))).toBeUndefined()
+    expect(deriveWorkItemBaselineSlipChange(2, { workItemId: 'a' }, open('2026-12-01'), open('2026-12-20'))).toBeUndefined()
+    expect(deriveWorkItemBaselineSlipChange(2, entry, open('2026-12-01'), {
+      schedule: createDefaultDueDateWorkItemSchedule('2026-12-20'),
+      statusCategory: 'completed',
+      actualEndDate: '2026-12-20',
+    })).toBeUndefined()
+  })
+
+  test('crosses a threshold only from below', () => {
+    expect(crossesWorkItemBaselineSlipThreshold({ previousDelayDays: 2, delayDays: 3 }, 3)).toBe(true)
+    expect(crossesWorkItemBaselineSlipThreshold({ delayDays: 3 }, 3)).toBe(true)
+    expect(crossesWorkItemBaselineSlipThreshold({ previousDelayDays: 3, delayDays: 5 }, 3)).toBe(false)
+    expect(crossesWorkItemBaselineSlipThreshold({ previousDelayDays: 0, delayDays: 2 }, 3)).toBe(false)
+  })
+
+  test('parses only well-formed recorded slips', () => {
+    const slip = { baselineRevision: 2, baselineEndDate: '2026-12-10', previousDelayDays: 1, delayDays: 4 }
+    expect(parseWorkItemBaselineSlipChange(slip)).toEqual(slip)
+    expect(parseWorkItemBaselineSlipChange({ ...slip, delayDays: 0 })).toBeUndefined()
+    expect(parseWorkItemBaselineSlipChange({ ...slip, previousDelayDays: 4 })).toBeUndefined()
+    expect(parseWorkItemBaselineSlipChange({ ...slip, baselineEndDate: '12/10' })).toBeUndefined()
+    expect(parseWorkItemBaselineSlipChange({ ...slip, baselineEndDate: '2026-02-30' })).toBeUndefined()
+    expect(parseWorkItemBaselineSlipChange({ ...slip, baselineEndDate: '2026-13-01' })).toBeUndefined()
+    expect(parseWorkItemBaselineSlipChange({ ...slip, baselineRevision: 0 })).toBeUndefined()
+    expect(parseWorkItemBaselineSlipChange('slip')).toBeUndefined()
   })
 })
