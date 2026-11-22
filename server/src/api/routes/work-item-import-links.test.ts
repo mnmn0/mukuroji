@@ -39,6 +39,13 @@ test('rejects a parent link that the Work Item Types do not allow', () => {
 })
 
 test('finds the schedule conflicts that would reject an imported dependency', () => {
+  /**
+   * Builds a Planning summary with a due date.
+   *
+   * @param id - Work Item ID.
+   * @param dueDate - Due date.
+   * @returns The summary.
+   */
   const summary = (id: string, dueDate: string): PlanningWorkItemSummary => ({
     id,
     revision: 0,

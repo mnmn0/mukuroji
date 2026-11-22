@@ -291,6 +291,13 @@ export function createDeveloperExportRows(
   for (const workItem of workItems) {
     teamsById.set(workItem.id, (teamsById.get(workItem.id) ?? new Set()).add(workItem.teamId))
   }
+  /**
+   * Builds the key other rows use to refer to one exported Work Item.
+   *
+   * @param teamId - Team of the Work Item.
+   * @param workItemId - Work Item ID.
+   * @returns The ID, or `<teamId>/<id>` when another exported Team has the same ID.
+   */
   const toExportKey = (teamId: string, workItemId: string) =>
     (teamsById.get(workItemId)?.size ?? 0) > 1 ? `${teamId}/${workItemId}` : workItemId
   const exportedKeys = new Set(workItems.map((workItem) => createWorkItemOutlineKey(workItem.teamId, workItem.id)))
