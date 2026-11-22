@@ -1602,10 +1602,10 @@ test('waits for pending Milestone audit reads before failing at the event limit'
   })
   await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
   await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
-  // Five long timelines and one slow short one: 9,955 events, under the 10,000-event limit.
+  // Six long timelines and one slow short one: 9,953 events, under the 10,000-event limit.
   const eventCounts = new Map([
     ['milestone-slow', 5],
-    ...['a', 'b', 'c', 'd', 'e'].map((suffix): [string, number] => [`milestone-${suffix}`, 1_990]),
+    ...['a', 'b', 'c', 'd', 'e', 'f'].map((suffix): [string, number] => [`milestone-${suffix}`, 1_658]),
   ])
   let revision = 2
   for (const id of eventCounts.keys()) {
@@ -1658,5 +1658,78 @@ test('waits for pending Milestone audit reads before failing at the event limit'
   })
 
   expect(response.status).toBe(200)
-  expect((await response.json()).snapshot.widgets[0].rows).toHaveLength(6)
+  expect((await response.json()).snapshot.widgets[0].rows).toHaveLength(7)
+})
+
+test('never lets parallel Milestone audit reads reserve past the event limit', async () => {
+  configureFakeProjectClients(true)
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date('2026-07-01T00:00:00.000Z'))
+  const parent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
+  await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
+  // Eight timelines of 1,290 events: 10,320 events, over the limit, all read in parallel.
+  const ids = Array.from({ length: 8 }, (_, index) => `milestone-${index}`)
+  for (const [index, id] of ids.entries()) {
+    await planning.create(workspaceId, createMilestoneInput(id, index + 2, {
+      teamId: 'core-team',
+      projectId: 'refero',
+    }), { workItems: [] })
+  }
+  const base = createAnalyticsAuditEvent('planning-entity', 'milestone-template', '2026-06-01T00:00:00.000Z')
+  let delivered = 0
+  let outstanding = 0
+  let maxCommitted = 0
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        const limit = input.limit ?? 100
+        outstanding += limit
+        maxCommitted = Math.max(maxCommitted, delivered + outstanding)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        const offset = Number(input.cursor ?? '0')
+        const end = Math.min(1_290, offset + limit)
+        outstanding -= limit
+        delivered += end - offset
+        return {
+          events: Array.from({ length: end - offset }, (_, index) => ({
+            ...base,
+            eventId: `${input.entityId}-${offset + index}`,
+            entityId: input.entityId ?? '',
+            metadata: { teamId: 'core-team', projectId: 'refero' },
+            changes: [],
+          })),
+          ...(end < 1_290 ? { nextCursor: String(end) } : {}),
+        }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, projectIds: ['refero'] },
+    widgets: [{
+      id: 'trend',
+      type: 'table' as const,
+      title: 'Milestone trend',
+      metric: 'milestone-trend' as const,
+    }],
+  })
+
+  expect(response.status).toBe(413)
+  expect(maxCommitted).toBeLessThanOrEqual(10_000)
+  expect(delivered).toBeLessThanOrEqual(10_000)
 })

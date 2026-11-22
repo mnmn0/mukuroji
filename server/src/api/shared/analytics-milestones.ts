@@ -297,17 +297,30 @@ async function readMilestoneAuditHistories(
   }
 
   /**
-   * Reserves the events of the next page, waiting for pending reads before deciding the limit.
+   * Reserves the next page query and its events, waiting for pending reads before deciding the
+   * event limit. The check and the reservation run without an `await` between them, so parallel
+   * reads never reserve the same remaining budget.
    *
-   * @returns Events reserved, or 0 when the limit is reached or another read failed.
+   * @returns Events reserved, or 0 when another read failed.
+   * @throws AnalyticsError 413 when the page query or event limit is reached.
    */
   const reservePage = async () => {
     for (;;) {
+      if (failure !== undefined) return 0
       const reserved = Math.min(
         ANALYTICS_MILESTONE_AUDIT_PAGE_SIZE,
         ANALYTICS_MILESTONE_AUDIT_EVENT_LIMIT - budget.events,
       )
-      if (reserved > 0 || pendingReads === 0 || failure !== undefined) return Math.max(reserved, 0)
+      if (reserved > 0) {
+        if (budget.pageQueries >= ANALYTICS_MILESTONE_AUDIT_PAGE_QUERY_LIMIT) {
+          throw createMilestoneHistoryLimitError()
+        }
+        budget.pageQueries += 1
+        budget.events += reserved
+        pendingReads += 1
+        return reserved
+      }
+      if (pendingReads === 0) throw createMilestoneHistoryLimitError()
       // Other reads may still return part of their reservation, so wait before failing.
       await new Promise<void>((resolve) => settledWaiters.push(resolve))
     }
@@ -324,20 +337,11 @@ async function readMilestoneAuditHistories(
         let cursor: string | undefined
         let pageCount = 0
         do {
+          if (pageCount >= ANALYTICS_MILESTONE_AUDIT_MAX_PAGES) throw createMilestoneHistoryLimitError()
           // Reserve the page's events before the read, so parallel reads never pass the limit.
           const reserved = await reservePage()
-          if (failure !== undefined) return
-          if (
-            reserved <= 0 ||
-            pageCount >= ANALYTICS_MILESTONE_AUDIT_MAX_PAGES ||
-            budget.pageQueries >= ANALYTICS_MILESTONE_AUDIT_PAGE_QUERY_LIMIT
-          ) {
-            throw createMilestoneHistoryLimitError()
-          }
-          budget.pageQueries += 1
-          budget.events += reserved
+          if (reserved === 0) return
           pageCount += 1
-          pendingReads += 1
           let page: Awaited<ReturnType<typeof workspaceDependencies.auditEvents.query>>
           try {
             page = await workspaceDependencies.auditEvents.query({
