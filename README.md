@@ -215,6 +215,16 @@ WebSocket APIの接続、Enterprise SCIM専用stream worker、tenant operation /
 このrunnerの対象外です。S3のGuardDuty malware scanはエミュレートしないため、scan前の
 ファイルを自動的に安全扱いにはしません。
 
+添付の upload から download までを local で確かめるときは、upload 後に次を実行して
+GuardDuty の scan 結果 tag を手で付けます。scan 結果のない object version だけに付け、
+既存の tag は残します。Floci の endpoint と `-local` で終わる bucket 以外では実行を拒否します。
+
+```sh
+bun run local:files:scan                          # NO_THREATS_FOUND（download 可能）
+bun run local:files:scan -- --result THREATS_FOUND  # blocked の表示を確かめる
+bun run local:files:scan -- --result FAILED --prefix <object key の先頭>  # 対象を絞る
+```
+
 既存volumeに旧schemaのWork Itemがあると、通知workerはfail-closedで停止します。
 ready hookは既存行を上書きしません。データ移行または既存volumeを保存した新環境への切替が必要です。
 
