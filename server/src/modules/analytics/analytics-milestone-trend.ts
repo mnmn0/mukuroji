@@ -246,50 +246,99 @@ function prepareMilestone(milestone: AnalyticsMilestoneHistory): PreparedMilesto
     const at = Date.parse(change.occurredAt)
     return Number.isNaN(at) ? [] : [{ ...change, at }]
   }).sort((left, right) => left.at - right.at || left.eventId.localeCompare(right.eventId))
-  const prepared: PreparedMilestone = { milestone, createdAt, history }
-  // An ancestor move changes the scope without an event of the Milestone; place that change at
-  // the latest write, which is no earlier than the move, and after the last recorded event, so
-  // earlier dates and the changes recorded in the other scope stay hidden.
-  const recordedTeamId = latestRecordedValue(history, 'teamId', milestone.teamId)
-  const recordedProjectId = latestRecordedValue(history, 'projectId', milestone.projectId)
-  if (recordedTeamId !== milestone.teamId || recordedProjectId !== milestone.projectId) {
-    const updatedAt = Date.parse(milestone.updatedAt)
-    const lastRecordedAt = history.at(-1)?.at
-    const at = Math.max(
-      Number.isNaN(updatedAt) ? 0 : updatedAt,
-      lastRecordedAt === undefined ? 0 : lastRecordedAt + 1,
-    )
-    history.push({
-      eventId: '\uffffinferred-scope',
-      occurredAt: new Date(at).toISOString(),
-      at,
-      changes: [
-        { field: 'teamId', ...withValue('before', recordedTeamId), ...withValue('after', milestone.teamId) },
-        { field: 'projectId', ...withValue('before', recordedProjectId), ...withValue('after', milestone.projectId) },
-      ],
-    })
+  const prepared: PreparedMilestone = {
+    milestone,
+    createdAt,
+    history: withUnknownScopeIntervals(history, milestone),
   }
   return prepared
 }
 
+/** Scope value of an interval whose Team / Project is unknown; it never matches a real scope. */
+const UNKNOWN_SCOPE = '\u0000unknown-scope'
+
 /**
- * Returns the value a field has after the last recorded change of it.
+ * Adds the scope changes that ancestor moves made without events of the Milestone.
  *
- * @param history - Sorted changes.
- * @param field - Field to read.
- * @param current - Current value, used when the field was never recorded.
- * @returns The latest recorded value.
+ * A change whose `before` equals its `after` records the scope the Milestone had at that event
+ * without changing it. When such a recorded scope differs from the scope after the previous
+ * event, an ancestor move happened at an unknown instant in between, so that interval gets an
+ * unknown scope. A write later than the last event (`updatedAt`) is an ancestor write that
+ * carried the Milestone, so the interval up to it is unknown too and the current scope starts
+ * there. Dates are therefore hidden wherever the scope cannot be known.
+ *
+ * @param history - Changes sorted by time.
+ * @param milestone - Milestone with its current scope and latest write.
+ * @returns The changes with the inferred scope changes.
  */
-function latestRecordedValue(
-  history: readonly AnalyticsMilestoneChange[],
-  field: AnalyticsMilestoneTrendField,
-  current: string | undefined,
-) {
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    const fieldChange = history[index]?.changes.find((candidate) => candidate.field === field)
-    if (fieldChange) return fieldChange.after
+function withUnknownScopeIntervals(
+  history: PreparedMilestone['history'],
+  milestone: AnalyticsMilestoneHistory,
+): PreparedMilestone['history'] {
+  const result: PreparedMilestone['history'] = []
+  const scope: Partial<Record<'teamId' | 'projectId', string | undefined>> = {}
+  let previousAt: number | undefined
+  let index = 0
+  for (const change of history) {
+    const moved = previousAt !== undefined && (['teamId', 'projectId'] as const).some((field) => {
+      const fieldChange = change.changes.find((candidate) => candidate.field === field)
+      return fieldChange !== undefined &&
+        fieldChange.before === fieldChange.after &&
+        field in scope &&
+        scope[field] !== fieldChange.after
+    })
+    if (moved && previousAt !== undefined && previousAt + 1 < change.at) {
+      result.push(createInferredScopeChange(previousAt + 1, index, UNKNOWN_SCOPE, UNKNOWN_SCOPE))
+      index += 1
+    }
+    result.push(change)
+    for (const field of ['teamId', 'projectId'] as const) {
+      const fieldChange = change.changes.find((candidate) => candidate.field === field)
+      if (fieldChange) scope[field] = fieldChange.after
+    }
+    previousAt = change.at
   }
-  return current
+  if (previousAt === undefined) return result
+  const updatedAt = Date.parse(milestone.updatedAt)
+  if (!Number.isNaN(updatedAt) && updatedAt > previousAt + 1) {
+    result.push(createInferredScopeChange(previousAt + 1, index, UNKNOWN_SCOPE, UNKNOWN_SCOPE))
+    index += 1
+    result.push(createInferredScopeChange(updatedAt, index, milestone.teamId, milestone.projectId))
+  } else if (scope.teamId !== milestone.teamId || scope.projectId !== milestone.projectId) {
+    result.push(createInferredScopeChange(
+      Math.max(previousAt + 1, Number.isNaN(updatedAt) ? 0 : updatedAt),
+      index,
+      milestone.teamId,
+      milestone.projectId,
+    ))
+  }
+  return result
+}
+
+/**
+ * Builds a scope change that no event recorded.
+ *
+ * @param at - Epoch milliseconds the scope starts at.
+ * @param index - Sequence of the inferred change, which keeps its ID unique.
+ * @param teamId - Team scope from that instant.
+ * @param projectId - Project scope from that instant.
+ * @returns The inferred change.
+ */
+function createInferredScopeChange(
+  at: number,
+  index: number,
+  teamId: string | undefined,
+  projectId: string | undefined,
+): PreparedMilestone['history'][number] {
+  return {
+    eventId: `\uffffinferred-scope-${index}`,
+    occurredAt: new Date(at).toISOString(),
+    at,
+    changes: [
+      { field: 'teamId', ...withValue('after', teamId) },
+      { field: 'projectId', ...withValue('after', projectId) },
+    ],
+  }
 }
 
 /**

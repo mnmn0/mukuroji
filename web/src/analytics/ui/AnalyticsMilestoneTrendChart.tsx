@@ -40,8 +40,9 @@ function lineColor(line: AnalyticsMilestoneTrendLine) {
 
 /**
  * Draws a Milestone trend: each Milestone's forecast end date (vertical) at every report date
- * (horizontal), with a legend that gives the shift in the period, per-date hover titles, and a
- * table view.
+ * (horizontal), with a legend that gives the shift in the period, per-date hover titles, and
+ * table views of the summary and of every report date. With no date to draw it shows an empty
+ * state instead of a date axis.
  *
  * @param props - Chart props.
  * @returns The chart.
@@ -69,6 +70,18 @@ export function AnalyticsMilestoneTrendChart({
   const yAt = (value: number) => PADDING + chartHeight - (value - bottom) / span * chartHeight
   const slotWidth = chartWidth / Math.max(slotCount, 1)
   const ticks = [bottom + span, bottom + span / 2, bottom].map(Math.round)
+  const hasDrawnValue = model.lines.some((line) => line.values.some((value) => value !== null))
+
+  if (!hasDrawnValue) {
+    return (
+      <p
+        className="py-6 text-center text-sm text-[var(--workbench-muted)]"
+        data-testid="analytics-milestone-trend-chart"
+      >
+        {t('analytics.milestoneTrend.empty')}
+      </p>
+    )
+  }
 
   return (
     <div data-testid="analytics-milestone-trend-chart">
@@ -194,6 +207,31 @@ export function AnalyticsMilestoneTrendChart({
                     {formatAnalyticsMilestoneShift(line.shiftDays)}
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">{line.changeCount}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <table className="mt-4 w-full min-w-[420px] border-collapse text-left text-sm">
+            <caption className="mb-2 text-left text-xs font-semibold text-[var(--workbench-muted)]">
+              {t('analytics.milestoneTrend.byDate')}
+            </caption>
+            <thead>
+              <tr className="workbench-table-head">
+                <th className="px-3 py-2" scope="col">{t('analytics.milestoneTrend.reportDate')}</th>
+                {model.lines.map((line) => (
+                  <th className="px-3 py-2" key={line.key} scope="col">{line.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {model.dates.map((date, index) => (
+                <tr className="border-b border-[var(--workbench-border)]" key={`${date}-${index}`}>
+                  <th className="px-3 py-2 font-semibold tabular-nums" scope="row">{date}</th>
+                  {model.lines.map((line) => (
+                    <td className="px-3 py-2 tabular-nums" key={line.key}>
+                      {formatAnalyticsMilestoneTrendDate(line.values[index])}
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>

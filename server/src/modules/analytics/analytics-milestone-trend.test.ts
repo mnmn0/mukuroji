@@ -173,6 +173,59 @@ describe('milestone-trend metric', () => {
     ])
   })
 
+  test('hides the interval in which an ancestor moved the Milestone away and back', () => {
+    // Created in team-1, carried to team-2 at an unknown instant, changed there on March 3, and
+    // carried back to team-1 at noon without events of its own.
+    const roundTrip: AnalyticsMilestoneHistory = {
+      id: 'milestone-r',
+      title: 'Round trip',
+      teamId: 'team-1',
+      forecastEndDate: '2026-04-20',
+      baselineEndDate: '2026-04-10',
+      createdAt: '2026-03-01T00:00:00.000Z',
+      updatedAt: '2026-03-03T12:00:00.000Z',
+      history: [
+        {
+          eventId: 'r1',
+          occurredAt: '2026-03-01T00:00:00.000Z',
+          changes: [
+            { field: 'forecast.endDate', after: '2026-04-10' },
+            { field: 'teamId', after: 'team-1' },
+            { field: 'projectId' },
+          ],
+        },
+        {
+          eventId: 'r2',
+          occurredAt: '2026-03-03T09:00:00.000Z',
+          changes: [
+            { field: 'forecast.endDate', before: '2026-04-10', after: '2026-04-20' },
+            { field: 'teamId', before: 'team-2', after: 'team-2' },
+            { field: 'projectId' },
+          ],
+        },
+      ],
+    }
+    const snapshot = createAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      authorizedProjectIds: new Set(),
+      milestones: [roundTrip],
+      query: createQuery(),
+    })
+    const [widget] = snapshot.widgets
+
+    expect(widget?.series.map((point) => point.segments)).toEqual([
+      [],
+      [],
+      [{ key: 'milestone-r', value: day('2026-04-20') }],
+      [{ key: 'milestone-r', value: day('2026-04-20') }],
+    ])
+    // Both ends were dates in team-1. The change itself was recorded in team-2, so it is not counted.
+    expect(widget?.groups).toEqual([
+      { key: 'milestone-r', label: 'Round trip', value: 10, sampleSize: 0 },
+    ])
+  })
+
   test('shows the current date since creation when no history was recorded', () => {
     const snapshot = createAnalyticsSnapshot({
       workItems: [],

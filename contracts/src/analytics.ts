@@ -314,12 +314,16 @@ export type AnalyticsSeriesSegment = {
  * Converts a `milestone-trend` segment value back to its calendar date.
  *
  * @param epochDay - Days since 1970-01-01.
- * @returns The `YYYY-MM-DD` date, or `undefined` when the value is not a whole day number.
+ * @returns The `YYYY-MM-DD` date, or `undefined` when the value is not a whole day number or its
+ *   year has more than four digits.
  */
 export function analyticsEpochDayToDate(epochDay: number): string | undefined {
   if (!Number.isSafeInteger(epochDay)) return undefined
   const date = new Date(epochDay * 86_400_000)
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString().slice(0, 10)
+  if (Number.isNaN(date.getTime())) return undefined
+  // Years outside 0000-9999 have a signed six-digit form that is not a `YYYY-MM-DD` date.
+  const text = date.toISOString().slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/u.test(text) ? text : undefined
 }
 
 /**
@@ -339,8 +343,10 @@ export function analyticsDateToEpochDay(date: string): number | undefined {
  * Dimension ごとに分割した metric value です。
  *
  * `milestone-trend` では Milestone ごとに一つ返し、key は Planning entity ID、label は title、
- * value は期間中に予定日が動いた日数（期間末の予定日 − 期間開始の予定日、遅れは正）、
- * sampleSize は期間中の予定日の変更回数です。
+ * value は期間中に予定日が動いた日数（期間末の予定日 − 期間開始の予定日、遅れは正）です。
+ * 期間開始の時点で予定日を返せない（作成前、または別の scope にあった）場合は、期間内で最初に
+ * 返せた予定日を基準にします。期間末の予定日を返せない場合は null です。sampleSize は期間中の
+ * 予定日の変更回数です。
  */
 export type AnalyticsGroup = {
   /** Stable dimension key です。 */

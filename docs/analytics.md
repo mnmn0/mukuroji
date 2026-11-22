@@ -157,16 +157,20 @@ custom field、Work Item 一覧など）は Milestone に効きません。
 かつ記録された Team / Project scope が現在と同じ間だけ予定日を返すので、閲覧者が今は読めない scope に
 あった間の履歴は返しません。記録上の scope には、各 event が metadata に残した書き込み時点の Team / Project も
 使います。親（Initiative など）の移動で Milestone の scope が変わった場合は Milestone 自身の event がないため、
-別の Team へ移って戻った間の変更もその event の scope で隠れます。最新の記録上の scope が現在と違うときは最後の
-書き込み時刻（`updatedAt`、最後の event より後）で変わったとみなし、それより前の予定日は返しません。Audit を書く前に作られた Milestone は作成時から現在の予定日を返し、warning を付けます。
-Audit の entity index は結果整合なので、各 Milestone の最新の記録済み予定日が現在の予定日と一致するまで Planning と
-audit を読み直し（3 回まで）、揃わなければ `503`（`AnalyticsReadBarrierUnavailable`）で fail-closed にします。
+別の Team へ移って戻った間の変更もその event の scope で隠れます。ある event の scope が直前の event の後の scope と
+違えば、その間のどこかで親が動かしたので、その区間は scope 不明として予定日を返しません。`updatedAt` が最後の event
+より後なら親の書き込みで運ばれたとみなし、最後の event からそれまでも scope 不明、それ以降を現在の scope とします。Audit を書く前に作られた Milestone は作成時から現在の予定日を返し、warning を付けます。
+Audit の entity index は結果整合なので、各 Milestone の履歴が最新の書き込み（`updatedAt` 以降の event、または5分より
+前の親による移動）と現在の予定日に追いつくまで Planning と audit を読み直し（3 回まで、上限は再試行全体で共有）、
+揃わなければ `503`（`AnalyticsReadBarrierUnavailable`）で fail-closed にします。作成直後で作成 event がまだ見えない
+Milestone も、audit 前の Milestone とはみなさず読み直します。
 
 Snapshot の permission scope hash には、Milestone を読んだ query のときだけ読めた Milestone の ID と現在の
 Team / Project scope を加え（移動した Milestone の snapshot は再検証で見えなくなります）、
-一覧・export の再検証でも同じ規則で現在読める Milestone と比べます。Milestone trend のない report の hash は
+一覧・export の再検証でも同じ規則で現在読める Milestone と比べます（現在読める Milestone が上限の 100 件を超える場合、
+その snapshot だけを scope 不一致として扱います）。Milestone trend のない report の hash は
 変わりません。定期配信の runner は閲覧者の Planning ACL を評価できないため Milestone を読まず、その widget は
-warning だけを返します（hash にも Milestone を加えません）。CSV では segment の値を `YYYY-MM-DD` で出力し、table の行は値に変化日数、サンプル数に変更回数、ディメンション値に
+warning だけを返します（hash にも Milestone を加えません）。変化日数は期間末と期間開始の予定日の差で、期間開始の時点で予定日を返せない場合は期間内で最初に返せた予定日を基準にします（`periodStart` もその日付です）。CSV では segment の値を `YYYY-MM-DD` で出力し、table の行は値に変化日数、サンプル数に変更回数、ディメンション値に
 `baseline=…; periodStart=…; forecast=…` を出力します。
 Segment は bucket 数 × Milestone 数だけ増えるため、長い期間を日次で多数の Milestone について描くと
 response の 256 KiB 上限で `413` になります。Web の builder は週次 bucket で widget を追加します。

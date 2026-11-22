@@ -31,6 +31,9 @@ const ANALYTICS_MILESTONE_AUDIT_PAGE_QUERY_LIMIT = 500
 /** Maximum audit events read across all Milestone timelines of one query. */
 const ANALYTICS_MILESTONE_AUDIT_EVENT_LIMIT = 10_000
 
+/** Time the audit entity index may lag behind a Planning write. */
+const ANALYTICS_MILESTONE_AUDIT_LAG_MS = 5 * 60_000
+
 /** Milestone timelines read at once. */
 const ANALYTICS_MILESTONE_AUDIT_CONCURRENCY = 8
 
@@ -158,9 +161,9 @@ export async function readVisibleAnalyticsMilestones(
  *
  * The history is the Milestone's own `planning-entity` audit timeline up to the later of the read
  * time and `asOf`, read after the Planning graph so the current state is never newer than it.
- * The audit entity index is eventually consistent, so the latest recorded forecast end date of
- * each Milestone must equal its current one; otherwise both reads are retried a bounded number of
- * times and the request fails closed with `503`.
+ * The audit entity index is eventually consistent, so each history must cover the Milestone's
+ * latest write and current forecast end date; otherwise both reads are retried a bounded number
+ * of times within one shared read budget, and the request fails closed with `503`.
  *
  * @param principal - Authenticated Workspace principal.
  * @param filter - Normalized report filter.
@@ -174,16 +177,20 @@ export async function readAuthorizedAnalyticsMilestones(
   filter: AnalyticsFilter,
   asOf: string,
 ): Promise<AnalyticsMilestoneHistory[]> {
+  // Retries share one read budget, so a query never reads more than the declared limits.
+  const budget: MilestoneAuditReadBudget = { pageQueries: 0, events: 0 }
   for (let attempt = 0; attempt < ANALYTICS_MILESTONE_READ_ATTEMPTS; attempt += 1) {
     const milestones = await readVisibleAnalyticsMilestones(principal, filter, asOf)
-    const historyReadAt = new Date(Math.max(Date.now(), Date.parse(asOf))).toISOString()
+    const readAt = Date.now()
+    const historyReadAt = new Date(Math.max(readAt, Date.parse(asOf))).toISOString()
     const histories = await readMilestoneAuditHistories(
       principal.directoryId,
       milestones.map((milestone) => milestone.id),
       historyReadAt,
+      budget,
     )
     const result = toMilestoneHistories(milestones, histories)
-    if (result.every(hasLatestForecastCoverage)) return result
+    if (result.every((milestone) => hasHistoryCoverage(milestone, readAt))) return result
   }
   throw new AnalyticsError(
     503,
@@ -193,27 +200,46 @@ export async function readAuthorizedAnalyticsMilestones(
 }
 
 /**
- * Returns whether a Milestone's recorded history reaches its current forecast end date.
+ * Returns whether a Milestone's recorded history has caught up with its current state.
  *
- * A Milestone without any recorded forecast change (created before Planning audit) cannot be
- * checked and is accepted; the engine reports it with a warning.
+ * Every own write of a Milestone records an event at its `updatedAt`, so a history whose latest
+ * event is older than `updatedAt` is still behind, unless the write was an ancestor move, which
+ * records no event of the Milestone. The audit index catches up within seconds, so a gap older
+ * than {@link ANALYTICS_MILESTONE_AUDIT_LAG_MS} is taken as such a move. The latest recorded
+ * forecast end date must also be the current one. A Milestone created before Planning audit has
+ * no events and an old `updatedAt`; it is accepted, and the engine reports it with a warning.
  *
  * @param milestone - Milestone with its history.
- * @returns Whether the latest recorded forecast end date is the current one.
+ * @param readAt - Epoch milliseconds the history was read at.
+ * @returns Whether the history covers the current state.
  */
-function hasLatestForecastCoverage(milestone: AnalyticsMilestoneHistory) {
-  const forecastChanges = milestone.history
-    .map((change) => ({
-      change,
-      forecast: change.changes.find((fieldChange) => fieldChange.field === 'forecast.endDate'),
-    }))
-    .filter((entry) => entry.forecast !== undefined)
+function hasHistoryCoverage(milestone: AnalyticsMilestoneHistory, readAt: number) {
+  const ordered = milestone.history
+    .map((change) => ({ change, at: Date.parse(change.occurredAt) }))
     .sort((left, right) =>
-      Date.parse(left.change.occurredAt) - Date.parse(right.change.occurredAt) ||
-      left.change.eventId.localeCompare(right.change.eventId)
+      left.at - right.at || left.change.eventId.localeCompare(right.change.eventId)
     )
-  const latest = forecastChanges.at(-1)
-  return latest === undefined || latest.forecast?.after === milestone.forecastEndDate
+  const updatedAt = Date.parse(milestone.updatedAt)
+  const latestAt = ordered.at(-1)?.at
+  if (
+    !Number.isNaN(updatedAt) &&
+    (latestAt === undefined || latestAt < updatedAt) &&
+    readAt - updatedAt < ANALYTICS_MILESTONE_AUDIT_LAG_MS
+  ) {
+    return false
+  }
+  const latestForecast = ordered.findLast((entry) =>
+    entry.change.changes.some((fieldChange) => fieldChange.field === 'forecast.endDate')
+  )?.change.changes.find((fieldChange) => fieldChange.field === 'forecast.endDate')
+  return latestForecast === undefined || latestForecast.after === milestone.forecastEndDate
+}
+
+/** Audit reads one Milestone trend query has spent, shared across its retries. */
+type MilestoneAuditReadBudget = {
+  /** Audit page queries issued. */
+  pageQueries: number
+  /** Audit events read. */
+  events: number
 }
 
 /**
@@ -246,6 +272,7 @@ function toMilestoneHistories(
  * @param workspaceId - Workspace whose audit history is read.
  * @param entityIds - Milestone IDs.
  * @param historyReadAt - Inclusive upper bound of the history.
+ * @param budget - Reads already spent by the query, updated in place.
  * @returns Changes of each Milestone, keyed by ID.
  * @throws AnalyticsError 413 when the page or event limits are exceeded.
  */
@@ -253,11 +280,10 @@ async function readMilestoneAuditHistories(
   workspaceId: string,
   entityIds: readonly string[],
   historyReadAt: string,
+  budget: MilestoneAuditReadBudget,
 ) {
   const histories = new Map<string, AnalyticsMilestoneChange[]>()
   let nextIndex = 0
-  let pageQueryCount = 0
-  let eventCount = 0
   let failure: unknown
 
   /** Reads the next assigned Milestone timeline. */
@@ -273,11 +299,11 @@ async function readMilestoneAuditHistories(
         do {
           if (
             pageCount >= ANALYTICS_MILESTONE_AUDIT_MAX_PAGES ||
-            pageQueryCount >= ANALYTICS_MILESTONE_AUDIT_PAGE_QUERY_LIMIT
+            budget.pageQueries >= ANALYTICS_MILESTONE_AUDIT_PAGE_QUERY_LIMIT
           ) {
             throw createMilestoneHistoryLimitError()
           }
-          pageQueryCount += 1
+          budget.pageQueries += 1
           pageCount += 1
           const page = await workspaceDependencies.auditEvents.query({
             workspaceId,
@@ -288,8 +314,8 @@ async function readMilestoneAuditHistories(
             cursor,
             direction: 'ascending',
           })
-          eventCount += page.events.length
-          if (eventCount > ANALYTICS_MILESTONE_AUDIT_EVENT_LIMIT) {
+          budget.events += page.events.length
+          if (budget.events > ANALYTICS_MILESTONE_AUDIT_EVENT_LIMIT) {
             throw createMilestoneHistoryLimitError()
           }
           for (const event of page.events) {

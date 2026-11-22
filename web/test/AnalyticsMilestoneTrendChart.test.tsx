@@ -90,7 +90,26 @@ describe('Analytics Milestone trend chart', () => {
     expect(markup).toContain('data-testid="analytics-milestone-trend-line-beta"')
     expect(markup).toContain('+7 日')
     expect(markup).toContain('2026-04-17')
-    expect(markup).toContain('期間開始時の予定日')
+    expect(markup).toContain('期間開始時（または最初に表示できた時点）の予定日')
+    // The per-date table lists the middle dates that only the hover titles show in the chart.
+    expect(markup).toContain('報告日ごとの予定日')
+    expect(markup).toContain('<th class="px-3 py-2 font-semibold tabular-nums" scope="row">2026-03-08</th>')
     expect(markup).toContain('var(--workbench-chart-category-2)')
+  })
+
+  test('shows an empty state instead of a date axis when no date is known', () => {
+    const markup = renderToStaticMarkup(
+      <AnalyticsMilestoneTrendChart
+        groups={groups}
+        label="Milestone trend"
+        series={series.map((point) => ({ ...point, segments: [] }))}
+        t={createTranslator('en')}
+        timeZone="UTC"
+      />,
+    )
+
+    expect(markup).toContain('No Milestone date to draw in this period.')
+    expect(markup).not.toContain('1970-01-01')
+    expect(markup).not.toContain('<svg')
   })
 })

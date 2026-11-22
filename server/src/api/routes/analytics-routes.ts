@@ -885,14 +885,24 @@ async function readCurrentAnalyticsPermissionScopeHash(
   if (readsMilestones && !cache.milestones) {
     cache.milestones = readReadableAnalyticsMilestones(principal)
   }
-  const milestones = readsMilestones
-    ? await readVisibleAnalyticsMilestones(
+  let milestones: PlanningEntity[] | undefined
+  if (readsMilestones) {
+    try {
+      milestones = await readVisibleAnalyticsMilestones(
         principal,
         normalized.filter,
         normalized.asOf,
         cache.milestones,
       )
-    : undefined
+    } catch (error) {
+      // More Milestones than one query reads can no longer match the saved scope; only this
+      // snapshot fails its check, and the list keeps the others.
+      if (error instanceof AnalyticsError && error.code === 'AnalyticsMilestoneLimitExceeded') {
+        return ANALYTICS_UNMATCHED_PERMISSION_SCOPE_HASH
+      }
+      throw error
+    }
+  }
   return createAnalyticsPermissionScopeHash(
     current.workItems,
     Date.parse(normalized.asOf),
@@ -900,6 +910,9 @@ async function readCurrentAnalyticsPermissionScopeHash(
     milestones?.map(createAnalyticsMilestoneScopeKey),
   )
 }
+
+/** Permission scope hash that no saved snapshot has. */
+const ANALYTICS_UNMATCHED_PERMISSION_SCOPE_HASH = 'unmatched-milestone-scope'
 
 /** Reads shared by the permission checks of the snapshots in one response. */
 type AnalyticsPermissionScopeReadCache = {

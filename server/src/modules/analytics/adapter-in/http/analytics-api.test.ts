@@ -1530,3 +1530,60 @@ test('reads Enterprise Milestones by planning.read instead of the Work Item scop
   expect((await response.json()).snapshot.widgets[0].rows.map((row: { id: string }) => row.id).sort())
     .toEqual(['milestone-core', 'milestone-planning'])
 })
+
+test('retries and fails closed while a new Milestone has no visible audit event', async () => {
+  configureFakeProjectClients(true)
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date())
+  const parent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
+  await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
+  await planning.create(workspaceId, createMilestoneInput('milestone-new', 2, {
+    teamId: 'core-team',
+    projectId: 'refero',
+  }), { workItems: [] })
+  let milestoneQueries = 0
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        if (input.entityType === 'planning-entity') milestoneQueries += 1
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const now = new Date()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    asOf: now.toISOString(),
+    filter: {
+      ...query.filter,
+      period: { from: new Date(now.getTime() - 86_400_000).toISOString(), to: now.toISOString() },
+      projectIds: ['refero'],
+    },
+    widgets: [{
+      id: 'trend',
+      type: 'table' as const,
+      title: 'Milestone trend',
+      metric: 'milestone-trend' as const,
+    }],
+  })
+
+  // The creation event is not visible yet, so the empty history is not taken as pre-audit.
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({ code: 'AnalyticsReadBarrierUnavailable' })
+  expect(milestoneQueries).toBe(3)
+})
