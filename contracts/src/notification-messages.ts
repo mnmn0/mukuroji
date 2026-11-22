@@ -133,8 +133,12 @@ export type NotificationMessage = {
 /** Largest number of parameters accepted in one stored message. */
 const NOTIFICATION_MESSAGE_PARAMS_MAXIMUM = 8
 
-/** Longest parameter value accepted in one stored message. */
-const NOTIFICATION_MESSAGE_PARAM_MAX_LENGTH = 500
+/**
+ * Longest parameter value accepted in one stored message, in UTF-16 code units. It holds every
+ * value producers copy in, such as a 256-code-point Work Item title or a 500-code-point display
+ * name, even when each code point needs two code units.
+ */
+const NOTIFICATION_MESSAGE_PARAM_MAX_LENGTH = 1_024
 
 /**
  * Builds a notification message.

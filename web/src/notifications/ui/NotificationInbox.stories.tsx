@@ -4,6 +4,7 @@ import {
   blockerClearedNotificationFixture,
   notificationFixtures,
   notificationInboxControllerFixture,
+  overdueMessageNotificationFixture,
 } from '../fixtures'
 import { NotificationInbox } from './NotificationInbox'
 
@@ -52,5 +53,39 @@ export const BlockerClearedEnglish: Story = {
     const canvas = within(canvasElement)
     await expect(canvas.getAllByText('Blocker cleared')[0]).toBeVisible()
     await expect(canvas.getByText('A blocker of this work item was removed.')).toBeVisible()
+  },
+}
+
+/** The stored English summary of the coded notification, as an older row without a code has it. */
+const { message: _overdueMessage, ...legacyOverdueNotification } = overdueMessageNotificationFixture
+
+/** Inbox controller that lists a coded overdue notification and the same notification without its code. */
+const messageSummaryController = {
+  ...notificationInboxControllerFixture,
+  notifications: [
+    overdueMessageNotificationFixture,
+    { ...legacyOverdueNotification, id: 'notification-overdue-legacy', eventId: 'event-overdue-legacy' },
+  ],
+  availableEventTypes: [overdueMessageNotificationFixture.eventType],
+  unreadCount: 2,
+}
+
+/** A coded summary is written in Japanese; a row without a code keeps its stored English text. */
+export const MessageSummary: Story = {
+  args: { controller: messageSummaryController },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('「リリース手順を作る」は期限を過ぎています。')).toBeVisible()
+    await expect(canvas.getByText('Work Item "リリース手順を作る" is overdue.')).toBeVisible()
+  },
+}
+
+/** The coded summary in English. */
+export const MessageSummaryEnglish: Story = {
+  args: { controller: messageSummaryController, locale: 'en' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getAllByText('Work Item "リリース手順を作る" is overdue.')).toHaveLength(2)
+    await expect(canvas.queryByText('「リリース手順を作る」は期限を過ぎています。')).toBeNull()
   },
 }

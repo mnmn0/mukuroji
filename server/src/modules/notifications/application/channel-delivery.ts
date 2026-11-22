@@ -50,6 +50,7 @@ export type ChannelDelivery = {
 /**
  * Reads the language a recipient chose for system-written text.
  * Transient failures reject, so the delivery is retried instead of sent in the wrong language.
+ * It must reject once `signal` aborts, so a sender never goes on after its delivery lease ends.
  */
 export type NotificationLocaleReader = (
   recipient: Pick<ChannelDelivery, 'workspaceId' | 'memberKey'>,

@@ -5,6 +5,8 @@ import {
   formatNotificationMessage,
   parseNotificationMessage,
 } from '../src/notification-messages'
+import { DIRECTORY_DISPLAY_NAME_MAX_LENGTH } from '../src/directory-administration'
+import { WORK_ITEM_TITLE_MAX_LENGTH } from '../src/work-items'
 
 describe('notification messages', () => {
   test('every code has the same placeholders in Japanese and English', () => {
@@ -48,7 +50,14 @@ describe('notification messages', () => {
     expect(parseNotificationMessage({ code: 'work-item.overdue', params: { 'bad-name': 'x' } })).toBeUndefined()
     expect(parseNotificationMessage({ code: 'work-item.overdue', params: { title: Number.NaN } })).toBeUndefined()
     expect(parseNotificationMessage({ code: 'work-item.overdue', params: { title: true } })).toBeUndefined()
-    expect(parseNotificationMessage({ code: 'work-item.overdue', params: { title: 'x'.repeat(501) } })).toBeUndefined()
+    expect(parseNotificationMessage({ code: 'work-item.overdue', params: { title: 'x'.repeat(1_025) } })).toBeUndefined()
+    // The longest Work Item title, made of characters outside the Basic Multilingual Plane.
+    const longestTitle = '🚀'.repeat(WORK_ITEM_TITLE_MAX_LENGTH)
+    expect(parseNotificationMessage({ code: 'work-item.overdue', params: { title: longestTitle } }))
+      .toEqual({ code: 'work-item.overdue', params: { title: longestTitle } })
+    const longestName = '𠮷'.repeat(DIRECTORY_DISPLAY_NAME_MAX_LENGTH)
+    expect(parseNotificationMessage({ code: 'weekly-report.author-unsubmitted', params: { author: longestName, weekStart: '2026-11-16' } }))
+      .toBeDefined()
     const tooMany = Object.fromEntries(Array.from({ length: 9 }, (_, index) => [`p${String.fromCharCode(97 + index)}`, 'x']))
     expect(parseNotificationMessage({ code: 'work-item.overdue', params: tooMany })).toBeUndefined()
   })

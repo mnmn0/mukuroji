@@ -26,3 +26,14 @@ test('uses Japanese for an unreadable preference row and rethrows other failures
   await expect(failing(new ProjectDataError(503, 'ProjectDataUnavailable', 'down'))(recipient)).rejects.toThrow('down')
   await expect(failing(new Error('network'))(recipient)).rejects.toThrow('network')
 })
+
+test('rejects a read still pending when the caller deadline passes', async () => {
+  const reader = createMemberNotificationLocaleReader({
+    getMemberPreferences: () => new Promise(() => undefined),
+  })
+  const deadline = new AbortController()
+  const pending = reader(recipient, deadline.signal)
+  deadline.abort(new Error('deadline'))
+  await expect(pending).rejects.toThrow('deadline')
+  await expect(reader(recipient, deadline.signal)).rejects.toThrow('deadline')
+})

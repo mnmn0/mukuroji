@@ -47,11 +47,14 @@ export function createSlackNotificationSender(
     ) return { succeeded: false, retryable: false, code: 'SlackDestinationInvalid' }
 
     let locale: NotificationMessageLocale
+    const localeDeadline = AbortSignal.timeout(5_000)
     try {
-      locale = await readLocale(delivery, AbortSignal.timeout(5_000))
+      locale = await readLocale(delivery, localeDeadline)
     } catch {
       return { succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' }
     }
+    // A reader that outlived its deadline never posts; the lease may already belong to a newer claim.
+    if (localeDeadline.aborted) return { succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' }
     const notification = delivery.notification
     const summary = resolveNotificationSummaryText(notification, locale)
     const text = [notification.title ?? 'Mukuroji', summary, notification.reasons.join(', ')]

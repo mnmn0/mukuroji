@@ -1,22 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import type { InboxNotification } from '../src/notifications/api'
-import { notificationInboxControllerFixture } from '../src/notifications/fixtures'
+import { notificationInboxControllerFixture, overdueMessageNotificationFixture } from '../src/notifications/fixtures'
 import { NotificationInbox } from '../src/notifications/ui/NotificationInbox'
 import type { Locale } from '../src/shared/i18n/i18n'
 
 /** Overdue Work Item notification that carries its summary as a message code. */
-const overdueNotification: InboxNotification = {
-  id: 'notification-overdue-1',
-  eventId: 'event-overdue-1',
-  eventType: 'work-item.overdue',
-  reasons: ['assignee'],
-  title: 'リリース手順を作る',
-  summary: 'Work Item "リリース手順を作る" is overdue.',
-  message: { code: 'work-item.overdue', params: { title: 'リリース手順を作る' } },
-  occurredAt: '2026-07-12T03:20:00.000Z',
-  state: 'unread',
-}
+const overdueNotification = overdueMessageNotificationFixture
 
 /**
  * Renders the Inbox with one notification.
@@ -45,12 +35,8 @@ describe('notification summary from a message code', () => {
     expect(render(overdueNotification, 'en')).toContain('Work Item &quot;リリース手順を作る&quot; is overdue.')
   })
 
-  test('falls back to the stored text for rows without a code or with a code the client does not know', () => {
+  test('falls back to the stored text for rows without a code', () => {
     const { message: _message, ...withoutCode } = overdueNotification
     expect(render(withoutCode, 'ja')).toContain('Work Item &quot;リリース手順を作る&quot; is overdue.')
-    // A newer server can send a code this client has no text for.
-    const unknownCode: InboxNotification = { ...overdueNotification }
-    Reflect.set(unknownCode, 'message', { code: 'work-item.future' })
-    expect(render(unknownCode, 'ja')).toContain('Work Item &quot;リリース手順を作る&quot; is overdue.')
   })
 })

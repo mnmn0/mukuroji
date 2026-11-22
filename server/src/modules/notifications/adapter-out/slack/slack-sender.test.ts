@@ -138,5 +138,12 @@ describe('Slack transport', () => {
     const result = await createSlackNotificationSender(secretSpy, async () => { throw new Error('Must not send') },
       async () => { throw new Error('directory unavailable') })(delivery)
     expect(result).toEqual({ succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' })
-  })
+    // A reader that ignores its deadline and answers late still never posts.
+    const late = await createSlackNotificationSender(secretSpy, async () => { throw new Error('Must not send') },
+      async (_recipient, signal) => {
+        await new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve(), { once: true }))
+        return 'ja'
+      })(delivery)
+    expect(late).toEqual({ succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' })
+  }, 10_000)
 })

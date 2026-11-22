@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { formatNotificationMessage, parseNotificationMessage } from '@mukuroji/contracts'
+import { formatNotificationMessage } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { createFocusPath } from '../../shared/routing/paths'
 import type { InboxNotification, NotificationFilter } from '../api'
@@ -765,9 +765,8 @@ function resolveNotificationSummary(
   if (notification.eventType === 'work-item.blocker-removed') {
     return t('workspace.inbox.summary.blockerCleared')
   }
-  // The response is not validated field by field, so an unknown or malformed code falls back to the text.
-  const message = parseNotificationMessage(notification.message)
-  if (message) return formatNotificationMessage(message, locale)
+  // The API layer keeps only messages this client can read; others fall back to the stored text.
+  if (notification.message) return formatNotificationMessage(notification.message, locale)
   return notification.summary?.trim() || createNotificationFallbackSummary(notification, eventLabel, t)
 }
 
