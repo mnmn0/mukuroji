@@ -244,10 +244,11 @@ function renderBar(bar: TaskGanttImageBar, x0: number, rowTop: number): string {
       ].join('')
     }
     case 'milestone': {
-      const size = Math.min(bar.height, 18)
+      // The diamond spans the bar's width, so dependency connectors anchored at the bar's edges
+      // meet its tips as they do on screen.
       const cx = x + bar.width / 2
       const cy = y + bar.height / 2
-      return `<path d="M${n(cx)} ${n(cy - size / 2)} L${n(cx + size / 2)} ${n(cy)} L${n(cx)} ${n(cy + size / 2)} L${n(cx - size / 2)} ${n(cy)} Z" fill="${colors.milestoneFill}" stroke="${colors.milestoneStroke}"/>`
+      return `<path d="M${n(x)} ${n(cy)} L${n(cx)} ${n(y)} L${n(x + bar.width)} ${n(cy)} L${n(cx)} ${n(y + bar.height)} Z" fill="${colors.milestoneFill}" stroke="${colors.milestoneStroke}"/>`
     }
     case 'due-date':
       return `<rect x="${n(x)}" y="${n(y)}" width="${n(bar.width)}" height="${n(bar.height)}" rx="${n(bar.height / 2)}" fill="${colors.dueFill}" stroke="${colors.dueStroke}" stroke-width="2" stroke-dasharray="4 3"/>`

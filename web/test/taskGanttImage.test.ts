@@ -75,6 +75,15 @@ describe('Gantt image export', () => {
     expect(image.svg).toContain('x1="100" y1="0" x2="100" y2="88"')
   })
 
+  test('draws a milestone diamond across the bar so connectors meet its tips', () => {
+    const image = createTaskGanttImage({
+      ...createInput(1),
+      rows: [{ bars: [{ height: 22, kind: 'milestone', left: 4, top: 12, width: 34 }], indent: 0, kind: 'task', label: 'M' }],
+    })
+    // x0 360 + left 4 = 364 to 398, centered at row top 72 + 12 + 11.
+    expect(image.svg).toContain('d="M364 95 L381 84 L398 95 L381 106 Z"')
+  })
+
   test('shortens long labels to the column width with an ellipsis', () => {
     expect(truncateTaskGanttImageLabel('short', 100)).toBe('short')
     const shortened = truncateTaskGanttImageLabel('とても長いタスクの名前がここに入ります', 60)
