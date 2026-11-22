@@ -32,6 +32,9 @@ const MAX_TABLE_COLUMNS = 50
 /** Most table rows the server accepts. */
 const MAX_TABLE_ROWS = 200
 
+/** Longest embed URL the server accepts. */
+const MAX_EMBED_URL_LENGTH = 4_096
+
 /**
  * Reason a Markdown source cannot become one page.
  */
@@ -81,7 +84,18 @@ export type MarkdownImportOptions = {
   fallbackTitle: string
   /** Returns a fresh ID with the given prefix. */
   createId: (prefix: string) => string
+  /**
+   * Returns the URL that replaces a link target, or undefined to keep the
+   * target as written. A folder import uses it to point relative links at the
+   * pages it creates.
+   */
+  resolveLink?: (href: string) => string | undefined
 }
+
+/**
+ * Rewrites the targets of inline links in raw Markdown text.
+ */
+type LinkRewriter = (raw: string) => string
 
 /**
  * Heading found while scanning, before levels are normalized.
@@ -147,7 +161,7 @@ export function convertMarkdownToDocument(
   if (lines.every((line) => line.trim() === '')) {
     return { ok: false, code: 'empty' }
   }
-  const scanned = scanBlocks(lines, options.createId)
+  const scanned = scanBlocks(lines, options.createId, options.resolveLink)
   if (!scanned.ok) return scanned
 
   let title = options.fallbackTitle
@@ -204,27 +218,52 @@ export function titleFromMarkdownFileName(fileName: string): string {
 /**
  * Splits Markdown lines into blocks, keeping heading levels raw.
  *
+ * A paragraph that is only one link to an HTTPS URL, an application path, or
+ * a target the resolver rewrites becomes an embed block, which is how the
+ * page Markdown export writes embeds. Other links stay in the text, with
+ * their targets rewritten when the resolver returns a URL.
+ *
  * @param lines - Source lines without line terminators.
  * @param createId - ID factory.
+ * @param resolveLink - Optional rewriter of link targets.
  * @returns Scanned blocks, or a table that exceeds the server limits.
  */
 function scanBlocks(
   lines: readonly string[],
   createId: (prefix: string) => string,
+  resolveLink?: (href: string) => string | undefined,
 ):
   | { ok: true; blocks: ScannedBlock[] }
   | { ok: false; code: 'table-too-large' } {
   const blocks: ScannedBlock[] = []
+  /** Rewrites link targets with the resolver, or keeps the text as written. */
+  const rewrite: LinkRewriter = resolveLink
+    ? (raw) => rewriteLinkTargets(raw, resolveLink)
+    : (raw) => raw
   let paragraph: string[] = []
   const flushParagraph = () => {
-    if (paragraph.length > 0) {
+    if (paragraph.length === 0) return
+    const raw = paragraph.join('\n')
+    paragraph = []
+    const link = readStandaloneLink(raw)
+    const url = link
+      ? (resolveLink?.(link.href) ?? (isEmbeddableUrl(link.href) ? link.href : undefined))
+      : undefined
+    if (link && url) {
+      const title = unescapeMarkdown(link.label).trim()
       blocks.push({
         id: createId('block'),
-        type: 'paragraph',
-        text: unescapeMarkdown(paragraph.join('\n')),
+        type: 'embed',
+        url,
+        ...(title ? { title: title.slice(0, MAX_TITLE_LENGTH) } : {}),
       })
-      paragraph = []
+      return
     }
+    blocks.push({
+      id: createId('block'),
+      type: 'paragraph',
+      text: unescapeMarkdown(rewrite(raw)),
+    })
   }
 
   let index = 0
@@ -270,7 +309,7 @@ function scanBlocks(
       while (task) {
         items.push({
           id: createId('item'),
-          text: unescapeMarkdown((task[2] ?? '').trim()),
+          text: unescapeMarkdown(rewrite((task[2] ?? '').trim())),
           checked: task[1] !== ' ',
         })
         index += 1
@@ -283,7 +322,7 @@ function scanBlocks(
     const table = readTableStart(lines, index)
     if (table) {
       flushParagraph()
-      const columns = splitTableRow(line)
+      const columns = splitTableRow(line, rewrite)
       if (columns.length > MAX_TABLE_COLUMNS) {
         return { ok: false, code: 'table-too-large' }
       }
@@ -293,7 +332,7 @@ function scanBlocks(
         if (rows.length === MAX_TABLE_ROWS) {
           return { ok: false, code: 'table-too-large' }
         }
-        const cells = splitTableRow(lines[rowIndex] ?? '')
+        const cells = splitTableRow(lines[rowIndex] ?? '', rewrite)
         rows.push({
           id: createId('row'),
           cells: columns.map((_, column) => ({
@@ -547,9 +586,10 @@ function createHeading(
  * Splits one pipe-table row into unescaped cell texts.
  *
  * @param line - Table row line.
+ * @param rewrite - Rewriter of link targets in each cell; omission keeps them.
  * @returns Cell texts in column order.
  */
-function splitTableRow(line: string): string[] {
+function splitTableRow(line: string, rewrite: LinkRewriter = (raw) => raw): string[] {
   const trimmed = line.trim()
   const cells: string[] = []
   let current = ''
@@ -571,8 +611,109 @@ function splitTableRow(line: string): string[] {
   if (!endsWithPipe) cells.push(current)
   if (trimmed.startsWith('|')) cells.shift()
   return cells.map((cell) =>
-    unescapeMarkdown(cell.trim().replace(/<br\s*\/?>/giu, '\n')),
+    unescapeMarkdown(rewrite(cell.trim()).replace(/<br\s*\/?>/giu, '\n')),
   )
+}
+
+/**
+ * Reads a paragraph that consists of exactly one inline link, `[label](href)`.
+ *
+ * @param raw - Raw paragraph text, before escapes are removed.
+ * @returns The raw label and target, or undefined when the paragraph holds
+ *   anything else, spans lines, or the link has a title.
+ */
+function readStandaloneLink(
+  raw: string,
+): { label: string; href: string } | undefined {
+  const text = raw.trim()
+  if (!text.startsWith('[') || !text.endsWith(')') || text.includes('\n')) {
+    return undefined
+  }
+  let position = 1
+  while (position < text.length) {
+    const character = text[position]
+    if (character === '\\') {
+      position += 2
+      continue
+    }
+    if (character === '[') return undefined
+    if (character === ']') break
+    position += 1
+  }
+  if (text[position] !== ']' || text[position + 1] !== '(') return undefined
+  const href = text.slice(position + 2, -1)
+  if (href === '' || /[\s()]/u.test(href)) return undefined
+  return { label: text.slice(1, position), href }
+}
+
+/**
+ * Checks whether a link target can become an embed block that opens on click:
+ * an HTTPS URL or a single-slash application path, which the server accepts
+ * and the page view renders.
+ *
+ * @param href - Link target as written.
+ * @returns Whether the target is embeddable.
+ */
+function isEmbeddableUrl(href: string): boolean {
+  if (href.length > MAX_EMBED_URL_LENGTH) return false
+  if (href.startsWith('/')) return !href.startsWith('//') && !href.startsWith('/\\')
+  try {
+    return new URL(href).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Rewrites the targets of inline links, `[label](href)`, in raw Markdown text.
+ * Escaped brackets and code spans are left alone. The scan is linear, so long
+ * text cannot make it backtrack.
+ *
+ * @param raw - Raw text, before escapes are removed.
+ * @param resolveLink - Returns the new target, or undefined to keep it.
+ * @returns The text with resolved link targets replaced.
+ */
+function rewriteLinkTargets(
+  raw: string,
+  resolveLink: (href: string) => string | undefined,
+): string {
+  let result = ''
+  let position = 0
+  let labelOpen = false
+  let codeFence = 0
+  while (position < raw.length) {
+    const character = raw[position] ?? ''
+    if (character === '\\') {
+      result += raw.slice(position, position + 2)
+      position += 2
+      continue
+    }
+    if (character === '`') {
+      let end = position
+      while (raw[end] === '`') end += 1
+      const run = end - position
+      if (codeFence === 0) codeFence = run
+      else if (codeFence === run) codeFence = 0
+      result += raw.slice(position, end)
+      position = end
+      continue
+    }
+    if (codeFence === 0 && character === '[') labelOpen = true
+    if (codeFence === 0 && labelOpen && character === ']' && raw[position + 1] === '(') {
+      labelOpen = false
+      let end = position + 2
+      while (end < raw.length && !/[\s()]/u.test(raw[end] ?? '')) end += 1
+      if (raw[end] === ')' && end > position + 2) {
+        const href = raw.slice(position + 2, end)
+        result += `](${resolveLink(href) ?? href})`
+        position = end + 1
+        continue
+      }
+    }
+    result += character
+    position += 1
+  }
+  return result
 }
 
 /**

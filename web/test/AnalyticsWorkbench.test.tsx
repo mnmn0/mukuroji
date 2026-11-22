@@ -618,4 +618,117 @@ describe('AnalyticsWorkbench', () => {
     expect(loadingHtml).toContain('disabled=""')
     expect(loadingHtml).toContain('Loading…')
   })
+
+  test('shows Team, member, and status names and a localized unset group instead of IDs', () => {
+    const widgets = analyticsWidgetFixtures.map((widget) =>
+      widget.id === 'chart-cycle-time'
+        ? { ...widget, groupBy: { dimension: 'assignee' as const } }
+        : widget.id === 'chart-throughput'
+          ? { ...widget, groupBy: { dimension: 'status' as const } }
+          : widget)
+    const snapshot = {
+      ...analyticsSnapshotFixture,
+      widgets: analyticsSnapshotFixture.widgets.map((result) =>
+        result.widgetId === 'chart-cycle-time'
+          ? {
+              ...result,
+              groups: [
+                { key: 'sato@example.com', label: 'sato@example.com', sampleSize: 3, value: 20 },
+                { key: '', label: 'Unassigned', sampleSize: 1, value: 8 },
+              ],
+            }
+          : result.widgetId === 'chart-throughput'
+            ? {
+                ...result,
+                series: [],
+                groups: [{ key: 'started', label: 'started', sampleSize: 2, value: 2 }],
+              }
+            : result),
+    }
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        locale="ja"
+        members={[{ id: 'sato@example.com', email: 'sato@example.com', name: '佐藤 花子' }]}
+        snapshot={snapshot}
+        widgets={widgets}
+      />,
+    )
+
+    expect(html).toContain('佐藤 花子')
+    expect(html).toContain('未設定')
+    expect(html).toContain('進行中')
+    expect(html).not.toContain('>sato@example.com<')
+  })
+
+  test('keeps an empty assignee selection apart from all assignees', () => {
+    const members = [{ id: 'sato@example.com', email: 'sato@example.com', name: '佐藤 花子' }]
+    const render = (assigneeUserIds: string[] | undefined) => renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        filter={{ ...analyticsFilterFixture, assigneeUserIds }}
+        members={members}
+        onFilterChange={() => undefined}
+      />,
+    )
+    expect(render([])).toContain('No assignees')
+    expect(render(undefined)).toContain('All assignees')
+  })
+
+  test('picks assignees, custom fields, and schedule recipients by name', () => {
+    const members = [
+      { id: 'sato@example.com', email: 'sato@example.com', name: '佐藤 花子' },
+      { id: 'kato@example.com', email: 'kato@example.com' },
+    ]
+    const customFields = [{ id: 'impact', label: '影響度' }]
+    const widgets = analyticsWidgetFixtures.map((widget) =>
+      widget.id === 'chart-cycle-time'
+        ? { ...widget, groupBy: { dimension: 'custom-field' as const, customFieldId: 'impact' } }
+        : widget)
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        builder
+        customFields={customFields}
+        filter={{
+          ...analyticsFilterFixture,
+          assigneeUserIds: ['sato@example.com', 'former@example.com'],
+          customFields: [{ fieldId: 'impact', operator: 'is-not-empty' }],
+        }}
+        initialScheduleOpen
+        members={members}
+        widgets={widgets}
+        onFilterChange={() => undefined}
+        onSaveSchedule={() => undefined}
+        onWidgetsChange={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('data-testid="analytics-assignee-filter"')
+    expect(html).toContain('佐藤 花子')
+    expect(html).toContain('>kato@example.com<')
+    // An assignee outside the member list, such as a former member, stays in the email field.
+    expect(html).toContain('Other assignees')
+    expect(html).toMatch(/value="former@example.com"/u)
+    expect(html).not.toMatch(/checked=""[^>]*value="former@example.com"/u)
+    expect(html).toContain('<option value="impact" selected="">影響度</option>')
+    expect(html).not.toContain('Example: impact')
+    expect(html).toContain('data-testid="analytics-recipient-picker"')
+    expect(html).not.toContain('Comma-separated member keys')
+  })
+
+  test('keeps typed IDs while member and custom field lists are unavailable', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        initialScheduleOpen
+        onFilterChange={() => undefined}
+        onSaveSchedule={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('Comma-separated emails')
+    expect(html).toContain('Example: impact')
+    expect(html).toContain('Comma-separated member keys')
+  })
 })

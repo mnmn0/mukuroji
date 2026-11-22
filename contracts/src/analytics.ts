@@ -1,3 +1,4 @@
+import { readSearchWorkItemTypeKey } from './search'
 import type { WorkspaceCalendarPeriodPreset, WorkspaceWeekStartDay } from './workspace-calendar'
 
 /** Analytics report、snapshot、metric response の現行 schema version です。 */
@@ -15,6 +16,7 @@ export type AnalyticsMetricKey =
   | 'sla'
   | 'remaining-scope'
   | 'cumulative-flow'
+  | 'milestone-trend'
 
 /**
  * How throughput, velocity, and forecast count completed and remaining work.
@@ -294,6 +296,9 @@ export type AnalyticsSeriesPoint = {
   /**
    * Bucket 末時点の内訳です。`cumulative-flow` では status category ごとの件数、
    * `remaining-scope` では burnup 用の `scope`（total scope）と `completed` を返します。
+   * `milestone-trend` では key が Milestone の Planning entity ID、value がその時点の予定日
+   * （forecast の終了日）を 1970-01-01 からの日数で表した値です（{@link analyticsEpochDayToDate}）。
+   * 予定日が分からない、または記録時の scope が現在と違う Milestone は含めません。
    */
   segments?: AnalyticsSeriesSegment[]
 }
@@ -306,7 +311,44 @@ export type AnalyticsSeriesSegment = {
   value: number
 }
 
-/** Dimension ごとに分割した metric value です。 */
+/**
+ * Converts a `milestone-trend` segment value back to its calendar date.
+ *
+ * @param epochDay - Days since 1970-01-01.
+ * @returns The `YYYY-MM-DD` date, or `undefined` when the value is not a whole day number or its
+ *   year has more than four digits.
+ */
+export function analyticsEpochDayToDate(epochDay: number): string | undefined {
+  if (!Number.isSafeInteger(epochDay)) return undefined
+  const date = new Date(epochDay * 86_400_000)
+  if (Number.isNaN(date.getTime())) return undefined
+  // Years outside 0000-9999 have a signed six-digit form that is not a `YYYY-MM-DD` date.
+  const text = date.toISOString().slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/u.test(text) ? text : undefined
+}
+
+/**
+ * Converts a `YYYY-MM-DD` calendar date to the day number used by `milestone-trend` segments.
+ *
+ * @param date - Calendar date.
+ * @returns Days since 1970-01-01, or `undefined` when the date is invalid.
+ */
+export function analyticsDateToEpochDay(date: string): number | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(date)) return undefined
+  const time = Date.parse(`${date}T00:00:00.000Z`)
+  if (Number.isNaN(time) || new Date(time).toISOString().slice(0, 10) !== date) return undefined
+  return Math.round(time / 86_400_000)
+}
+
+/**
+ * Dimension ごとに分割した metric value です。
+ *
+ * `milestone-trend` では Milestone ごとに一つ返し、key は Planning entity ID、label は title、
+ * value は期間中に予定日が動いた日数（期間末の予定日 − 期間開始の予定日、遅れは正）です。
+ * 期間開始の時点で予定日を返せない（作成前、または別の scope にあった）場合は、期間内で最初に
+ * 返せた予定日を基準にします。期間末の予定日を返せない場合は null です。sampleSize は期間中の
+ * 予定日の変更回数です。
+ */
 export type AnalyticsGroup = {
   /** Stable dimension key です。 */
   key: string
@@ -520,6 +562,11 @@ export type AnalyticsExportInput = {
   reportId?: string
   /** Ad-hoc query を出力する場合の入力です。 */
   query?: AnalyticsQueryInput
+  /**
+   * `query` と一緒に送る、PDF の見出しに名前を使う保存済み report の ID です。
+   * 出力内容は `query` が決め、report は名前だけに使います。
+   */
+  titleReportId?: string
   /** Artifact の形式です。 */
   format: 'csv' | 'pdf'
   /**
@@ -527,4 +574,125 @@ export type AnalyticsExportInput = {
    * `ja` / `ja-*` は日本語、`en` / `en-*` は英語へ正規化し、省略時と未対応値は英語へfallbackします。
    */
   locale?: string
+}
+
+/**
+ * Display names that replace the internal IDs of Analytics group keys.
+ *
+ * Each lookup returns undefined when the name is unknown, for example after the Team, Project, or
+ * member was removed, and the resolver then falls back to the next readable value.
+ */
+export type AnalyticsGroupLabelLookup = {
+  /** Returns the display name of a Team ID. */
+  team?: (teamId: string) => string | undefined
+  /**
+   * Returns the display name of a Project ID. Pass the Team when it is known, since a Project ID
+   * can repeat across Teams.
+   */
+  project?: (projectId: string, teamId?: string) => string | undefined
+  /** Returns the display name of a Workspace member key. */
+  member?: (memberKey: string) => string | undefined
+  /** Returns the display name of a Team-qualified Work Item Type key (`teamId\0workItemTypeId`). */
+  workItemType?: (key: string) => string | undefined
+  /** Returns the localized label of a workflow status category. */
+  statusCategory?: (category: string) => string | undefined
+  /** Localized label of a group whose dimension value is not set, such as an unassigned Work Item. */
+  unset: string
+}
+
+/** Project names of a Team directory, for `AnalyticsGroupLabelLookup.project`. */
+export type AnalyticsProjectNames = {
+  /** Names keyed by Project ID; a Project ID shared by Teams under different names lists each as `name (Team)`. */
+  byProject: ReadonlyMap<string, string>
+  /** Names keyed by Team-qualified Project key (`teamId\0projectId`). */
+  byTeamProject: ReadonlyMap<string, string>
+}
+
+/**
+ * Collects Project names so that a Project ID shared by several Teams never takes an unrelated
+ * Team's Project name: with the Team the name is exact, and without it every candidate is shown.
+ *
+ * @param teams - Teams with their Projects.
+ * @returns Project names by Project ID and by Team-qualified key.
+ */
+export function createAnalyticsProjectNames(
+  teams: readonly { id: string; name: string; projects: readonly { id: string; name: string }[] }[],
+): AnalyticsProjectNames {
+  const byTeamProject = new Map<string, string>()
+  const candidates = new Map<string, Array<{ teamName: string; name: string }>>()
+  for (const team of teams) {
+    for (const project of team.projects) {
+      byTeamProject.set(`${team.id}\0${project.id}`, project.name)
+      const list = candidates.get(project.id) ?? []
+      list.push({ teamName: team.name, name: project.name })
+      candidates.set(project.id, list)
+    }
+  }
+  const byProject = new Map<string, string>()
+  for (const [projectId, list] of candidates) {
+    const names = new Set(list.map((candidate) => candidate.name))
+    byProject.set(
+      projectId,
+      names.size === 1
+        ? [...names][0] ?? projectId
+        : list.map((candidate) => `${candidate.name} (${candidate.teamName})`).join(' / '),
+    )
+  }
+  return { byProject, byTeamProject }
+}
+
+/**
+ * Tells whether an Analytics group collects the Work Items whose dimension value is not set.
+ *
+ * @param groupBy - Dimension the widget groups by.
+ * @param key - Group key returned by the API.
+ * @returns True for the group of Work Items without a Project, an assignee, or a custom field value.
+ */
+export function isAnalyticsUnsetGroup(groupBy: AnalyticsGroupBy | undefined, key: string): boolean {
+  if (groupBy === undefined) return false
+  if (groupBy.dimension === 'custom-field') return key === 'unset'
+  return key === '' && (
+    groupBy.dimension === 'team' ||
+    groupBy.dimension === 'project' ||
+    groupBy.dimension === 'assignee'
+  )
+}
+
+/**
+ * Resolves the label people read for an Analytics group, replacing internal IDs with names.
+ *
+ * Calendar buckets, Milestones, and custom field values keep the API label. A Team, Project, or
+ * member whose name is unknown keeps the API label so that nothing is hidden.
+ *
+ * @param groupBy - Dimension the widget groups by; undefined for widgets without one.
+ * @param group - Group key and API label.
+ * @param lookup - Display names and localized labels.
+ * @returns The label to show.
+ */
+export function resolveAnalyticsGroupLabel(
+  groupBy: AnalyticsGroupBy | undefined,
+  group: Pick<AnalyticsGroup, 'key' | 'label'>,
+  lookup: AnalyticsGroupLabelLookup,
+): string {
+  if (isAnalyticsUnsetGroup(groupBy, group.key)) return lookup.unset
+  switch (groupBy?.dimension) {
+    case 'team':
+      return lookup.team?.(group.key) ?? group.label
+    case 'project':
+      return lookup.project?.(group.key) ?? group.label
+    case 'assignee':
+      return lookup.member?.(group.key) ?? group.label
+    case 'status':
+      return lookup.statusCategory?.(group.key) ?? group.label
+    case 'work-item-type': {
+      const name = lookup.workItemType?.(group.key)
+      if (name !== undefined) return name
+      const parts = readSearchWorkItemTypeKey(group.key)
+      if (parts === undefined) return group.label
+      const teamName = lookup.team?.(parts.teamId)
+      return teamName === undefined ? group.label : `${teamName} · ${parts.workItemTypeId}`
+    }
+    default:
+      return group.label
+  }
 }

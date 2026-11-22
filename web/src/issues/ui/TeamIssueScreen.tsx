@@ -4,6 +4,7 @@ import type {
   WorkItemActionId,
   WorkItemActionResult,
   WorkItemActionSelection,
+  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { createSearchWorkItemTypeKey, DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
 import {
@@ -125,6 +126,7 @@ import { IssueToolbar } from './TeamIssueToolbar'
 import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
 import { createTaskGanttDisplayBinding } from '../../tasks/model/taskGanttDisplay'
 import { TaskCalendarView } from '../../tasks/ui/TaskCalendarView'
+import { startWorkItemListScheduleChange } from '../../task-views/model/workItemListScheduleChange'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
 import { listTaskGanttRowTasks, type TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
@@ -202,9 +204,11 @@ export function TeamIssueScreen({
   onAddRelation,
   onArchiveIssue,
   onCreateIssue,
+  onConfirmScheduleChange,
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
+  onPreviewScheduleChange,
   onRetryPlanning,
   onSelectIssue,
   onUpdateIssue,
@@ -212,6 +216,7 @@ export function TeamIssueScreen({
   planningErrorMessage,
   planningSnapshot,
   workingCalendar,
+  calendarPeriods,
   workingCalendarErrorMessage,
   onRetryWorkingCalendar,
   createIssueProjects,
@@ -724,6 +729,25 @@ export function TeamIssueScreen({
     singleSelectionRequired: t('taskViews.action.singleSelectionRequired'),
     unavailable: t('taskViews.action.unavailable'),
   }), [t])
+
+  /** Starts a Calendar or Gantt schedule change; the view shows its preview for confirmation. */
+  const handleRequestScheduleChange = useMemo(() => onPreviewScheduleChange && onConfirmScheduleChange && canEditIssueAction
+    ? (issue: TeamIssue, operation: WorkItemScheduleOperation) => startWorkItemListScheduleChange(
+        teamId,
+        issue,
+        operation,
+        { confirm: onConfirmScheduleChange, preview: onPreviewScheduleChange },
+        !isAiSummaryOperationPendingRef.current && canMutateTeamIssueAction(issue),
+        teamActionDisabledReasons.unavailable,
+      )
+    : undefined, [
+    canEditIssueAction,
+    canMutateTeamIssueAction,
+    onConfirmScheduleChange,
+    onPreviewScheduleChange,
+    teamActionDisabledReasons.unavailable,
+    teamId,
+  ])
 
   /** Opens one Team Issue detail and focuses an existing mutation control when requested. */
   const executeTeamIssueDetailAction = useCallback((
@@ -1712,11 +1736,13 @@ export function TeamIssueScreen({
                     />
                   ) : viewMode === 'calendar' ? (
                     <TaskCalendarView
+                      calendarPeriods={calendarPeriods}
                       configuration={configuration}
                       configurationsByTeam={ganttConfigurationsByTeam}
                       month={calendarMonth}
                       monthNote="shown-month"
                       onMonthChange={setCalendarMonth}
+                      onRequestScheduleChange={handleRequestScheduleChange}
                       onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
                       t={t}
                       tasks={visibleIssues}
@@ -1726,6 +1752,7 @@ export function TeamIssueScreen({
                       configuration={configuration}
                       configurationsByTeam={ganttConfigurationsByTeam}
                       group={ganttGroup}
+                      onRequestScheduleChange={handleRequestScheduleChange}
                       onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
                       outline={ganttOutline}
                       planningSnapshot={planningSnapshot}
@@ -1733,6 +1760,7 @@ export function TeamIssueScreen({
                       t={t}
                       tasks={visibleIssues}
                       workingCalendar={workingCalendar}
+                      calendarPeriods={calendarPeriods}
                       {...createTaskGanttDisplayBinding(
                         taskViewPresentation,
                         onTaskViewPresentationChange,

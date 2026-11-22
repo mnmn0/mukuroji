@@ -4042,6 +4042,60 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #341: サイドバーで Project を開くと概要を既定表示し、Agent Run のレーン件数を表示する', async ({ page }) => {
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({
+        json: {
+          teamId: 'core-team',
+          projectId: 'refero',
+          entries: [
+            {
+              id: 'risk-vendor',
+              kind: 'risk',
+              title: '主要部品のベンダー納期遅延',
+              probability: 4,
+              impact: 5,
+              status: 'open',
+              revision: 1,
+              createdAt: '2026-06-01T00:00:00.000Z',
+              updatedAt: '2026-06-01T00:00:00.000Z',
+            },
+            {
+              id: 'cr-export',
+              kind: 'change-request',
+              title: 'CSV 出力を範囲に追加',
+              impact: 3,
+              status: 'open',
+              revision: 1,
+              createdAt: '2026-06-02T00:00:00.000Z',
+              updatedAt: '2026-06-02T00:00:00.000Z',
+            },
+          ],
+          viewer: { canEdit: true },
+        },
+      })
+    })
+    await page.route(/.*\/api\/document-backlinks\?.*targetType=project.*$/, async (route) => {
+      await route.fulfill({
+        json: {
+          backlinks: [
+            {
+              documentId: 'refero-brief',
+              documentTitle: 'Refero プロジェクト概要書',
+              relation: {
+                id: 'relation-refero-brief',
+                source: { kind: 'document' },
+                target: { kind: 'project', projectId: 'refero' },
+                createdByUserId: 'demo@example.com',
+                createdAt: '2026-06-01T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      })
+    })
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
     await page.goto('/home')
 
     await page.getByLabel('メインサイドバー').getByRole('button', { name: 'Refero', exact: true }).click()
@@ -4054,6 +4108,13 @@ test.describe('authenticated task page', () => {
     await expect(agentRuns.getByTestId('project-overview-agent-lane-failed')).toContainText('1')
     await expect(agentRuns.getByRole('link', { name: 'Factory board を開く' }))
       .toHaveAttribute('href', '/teams/core-team/factory')
+
+    const raid = page.getByTestId('project-overview-raid')
+    await expect(raid.getByTestId('project-overview-raid-count-risks')).toContainText('1')
+    await expect(raid.getByTestId('project-overview-raid-count-pending-decisions')).toContainText('1')
+    await expect(raid.getByTestId('project-overview-raid-risk-vendor')).toContainText('重大')
+    await expect(page.getByTestId('project-overview-documents').getByRole('link', { name: 'Refero プロジェクト概要書' }))
+      .toHaveAttribute('href', '/documents/refero-brief')
 
     await page.getByRole('link', { name: 'Work Item 一覧を開く' }).click()
     await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
@@ -5126,6 +5187,24 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-row-print-209')).toBeVisible()
     await expect(printButtons).toBeHidden()
     await expect(page.getByRole('tab', { name: '期限順', exact: true })).toBeHidden()
+    // The row action column is left off the paper, so the last printed column ends at the
+    // table's right edge instead of leaving the action column's width blank.
+    const printedEdges = await page.evaluate(() => {
+      const table = document.querySelector('[data-print-root="task-table"] table')
+      const headers = Array.from(table?.querySelectorAll('thead th') ?? [])
+      const printedHeaders = headers.filter((header) => header.getClientRects().length > 0)
+      return {
+        lastPrintedHeaderRight: printedHeaders.at(-1)?.getBoundingClientRect().right ?? 0,
+        printedHeaderCount: printedHeaders.length,
+        renderedColumnCount: Array.from(table?.querySelectorAll('col') ?? [])
+          .filter((column) => getComputedStyle(column).display !== 'none').length,
+        tableRight: table?.getBoundingClientRect().right ?? 0,
+        totalHeaderCount: headers.length,
+      }
+    })
+    expect(printedEdges.printedHeaderCount).toBe(printedEdges.totalHeaderCount - 1)
+    expect(printedEdges.renderedColumnCount).toBe(printedEdges.printedHeaderCount)
+    expect(Math.abs(printedEdges.tableRight - printedEdges.lastPrintedHeaderRight)).toBeLessThan(2)
 
     await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
     await expect(page.locator('html')).not.toHaveAttribute('data-print-target', /.*/)
@@ -10303,6 +10382,79 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL(/wireframe/)
   })
 
+  test('マイタスクのテーブルで期限を事前確認してから変え、優先度をその場で変える', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({ id: 'my-due-task', title: '期限を変える担当タスク' }),
+        ],
+      },
+    })
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+    await page.goto('/my-tasks')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByTestId('my-tasks-view-table').click()
+
+    const dueDateField = page.getByTestId('my-tasks-table-due-edit-refero-my-due-task')
+    await expect(dueDateField).toHaveText('2026-06-22')
+    await dueDateField.click()
+    const dueDateInput = page.getByTestId('my-tasks-table-due-edit-refero-my-due-task-input')
+    await dueDateInput.fill('2026-06-25')
+    await dueDateInput.press('Enter')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(preview).toContainText('期限を変える担当タスク')
+    await expect(preview).toContainText('2026-06-25')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    expect(requestCounts.scheduleConfirms).toBe(0)
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(preview).toHaveCount(0)
+    await expect(dueDateField).toHaveText('2026-06-25')
+    await expect(dueDateField).toBeFocused()
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+
+    // Cancelling a preview leaves the due date as it was.
+    await dueDateField.click()
+    await dueDateInput.fill('2026-06-30')
+    await dueDateInput.press('Enter')
+    await preview.getByRole('button', { name: 'キャンセル', exact: true }).click()
+    await expect(preview).toHaveCount(0)
+    await expect(dueDateField).toHaveText('2026-06-25')
+    expect(requestCounts.scheduleConfirms).toBe(1)
+
+    const updatesBefore = requestCounts.issueUpdates
+    const priorityField = page.getByTestId('my-tasks-table-priority-edit-refero-my-due-task')
+    await expect(priorityField).toHaveText('中')
+    await priorityField.click()
+    await page.getByTestId('my-tasks-table-priority-edit-refero-my-due-task-input').selectOption('high')
+    await expect(priorityField).toHaveText('高')
+    await expect.poll(() => requestCounts.issueUpdates).toBe(updatesBefore + 1)
+  })
+
+  test('Team の Work Item をカレンダーのキーボード操作で日程変更できる', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    await page.goto('/teams/core-team/issues')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('button', { name: 'カレンダー', exact: true }).click()
+
+    const card = page.getByTestId('task-calendar-item-wireframe')
+    await expect(page.getByTestId('task-calendar-day-2026-06-01').getByTestId('task-calendar-item-wireframe'))
+      .toBeVisible()
+    await card.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(preview).toContainText('2026-06-02')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(page.getByTestId('task-calendar-day-2026-06-02').getByTestId('task-calendar-item-wireframe'))
+      .toBeVisible()
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
+  })
+
   test('Team configuration 取得失敗中も canonical My Task を明示的な列へ保持する', async ({
     page,
   }) => {
@@ -12381,11 +12533,12 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/reports')
 
+    // Team groups show the directory's Team names, not the API labels.
     await expect(page.getByTestId('analytics-widget-chart-cycle-time')).toContainText(
-      'Core team',
+      'コアチーム',
     )
     await expect(page.getByTestId('analytics-widget-chart-cycle-time')).toContainText(
-      'Design team',
+      'デザインチーム',
     )
     await expect(page.getByTestId('analytics-widget-table-overdue')).toContainText(
       'Harden billing webhook retries',
@@ -12641,6 +12794,47 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByTestId('workspace-member-mfa-summary')).toContainText('1 人')
     await expect(page.getByTestId('workspace-member-mfa-sato-example-com')).toContainText('MFA未登録')
+  })
+
+  test('Issue #432: 一括招待で読込中のファイルより後に選んだ大きすぎるファイルの結果を残す', async ({ page }) => {
+    // Holds the read of slow.csv until the test releases it, so a second file can be chosen first.
+    await page.addInitScript(() => {
+      const read = File.prototype.text
+      const holder: { release?: () => void } = {}
+      Object.assign(window, { releaseSlowFile: () => holder.release?.() })
+      File.prototype.text = function (this: File) {
+        if (this.name !== 'slow.csv') return read.call(this)
+        return new Promise<void>((resolve) => {
+          holder.release = resolve
+        }).then(() => read.call(this)).finally(() => {
+          // Lets the test wait until the stale read has finished.
+          setTimeout(() => Object.assign(window, { slowFileDone: true }), 0)
+        })
+      }
+    })
+    await page.goto('/settings/workspace')
+
+    const input = page.getByTestId('workspace-bulk-invite-input')
+    await input.fill('kept@example.com')
+    const file = page.getByTestId('workspace-bulk-invite-file')
+    await file.setInputFiles({ buffer: Buffer.from('slow@example.com'), mimeType: 'text/csv', name: 'slow.csv' })
+    await expect(page.getByTestId('workspace-bulk-invite-check')).toBeDisabled()
+
+    await file.setInputFiles({
+      buffer: Buffer.alloc(1024 * 1024 + 1, 'a'),
+      mimeType: 'text/csv',
+      name: 'large.csv',
+    })
+    await expect(page.getByTestId('workspace-bulk-invite-check')).toBeEnabled()
+    await page.evaluate(() => {
+      const release: unknown = Reflect.get(window, 'releaseSlowFile')
+      if (typeof release === 'function') release()
+    })
+
+    await page.waitForFunction(() => Reflect.get(window, 'slowFileDone') === true)
+    await expect(page.getByText('CSV ファイルが大きすぎます（1 MB まで）。')).toBeVisible()
+    await expect(input).toHaveValue('kept@example.com')
+    await expect(page.getByTestId('workspace-bulk-invite-check')).toBeEnabled()
   })
 
   test('設定画面で管理者がメンバーにパスワード再設定を送ると監査付きで実行する', async ({ page }) => {

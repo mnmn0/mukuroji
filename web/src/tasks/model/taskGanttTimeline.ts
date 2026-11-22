@@ -1,4 +1,11 @@
-import { TASK_VIEW_GANTT_SCALES, type TaskViewGanttScale } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
+  TASK_VIEW_GANTT_SCALES,
+  workspaceFiscalQuarterContaining,
+  workspaceWeekContaining,
+  type TaskViewGanttScale,
+  type WorkspaceCalendarSettings,
+} from '@mukuroji/contracts'
 
 /** Timeline scales the Gantt chart offers. `auto` fits the planning horizon into bounded columns. */
 export const taskGanttScales = TASK_VIEW_GANTT_SCALES
@@ -33,6 +40,20 @@ export type TaskGanttScaledColumns = {
   columns: TaskGanttTimelineColumn[]
   /** Scale used, coarser than requested when the range needs too many columns. */
   scale: TaskGanttCalendarScale
+}
+
+/**
+ * Workspace settings that decide where Gantt and Calendar weeks and quarters start.
+ *
+ * Weeks start on the Workspace week start day, and quarters are counted from the first month of
+ * the Workspace fiscal year.
+ */
+export type TaskCalendarPeriods = Pick<WorkspaceCalendarSettings, 'fiscalYearStartMonth' | 'weekStartDay'>
+
+/** Periods used before the Workspace settings load: Monday weeks and calendar-year quarters. */
+export const DEFAULT_TASK_CALENDAR_PERIODS: TaskCalendarPeriods = {
+  fiscalYearStartMonth: DEFAULT_WORKSPACE_CALENDAR_SETTINGS.fiscalYearStartMonth,
+  weekStartDay: DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
 }
 
 /** Ordered timeline columns and the pixel width of each column. */
@@ -71,8 +92,8 @@ export type TaskGanttProgressPointInput = {
 const TASK_GANTT_DAY_COLUMN_WIDTH = 42
 /** Column width of the month scale, wide enough for a `YYYY-MM` label. */
 const TASK_GANTT_MONTH_COLUMN_WIDTH = 56
-/** Column width of the quarter scale, wide enough for a `YYYY Q1` label. */
-const TASK_GANTT_QUARTER_COLUMN_WIDTH = 64
+/** Column width of the quarter scale, wide enough for a `FY2026 Q1` label. */
+const TASK_GANTT_QUARTER_COLUMN_WIDTH = 72
 /** Most columns a calendar scale renders before falling back to a coarser scale. */
 const MAX_TASK_GANTT_SCALED_COLUMNS = 1_200
 const MILLISECONDS_PER_DAY = 86_400_000
@@ -102,7 +123,7 @@ export function resolveTaskGanttColumnWidth(scale: TaskGanttScale): number {
 }
 
 /**
- * Builds columns aligned to calendar days, Monday-start weeks, months, or quarters.
+ * Builds columns aligned to calendar days, Workspace weeks, months, or fiscal quarters.
  *
  * The first column starts at the unit containing the range start, and the last column ends at
  * the unit containing the range end. A range that needs more than a bounded number of columns
@@ -110,20 +131,39 @@ export function resolveTaskGanttColumnWidth(scale: TaskGanttScale): number {
  *
  * @param range - Inclusive range the columns must cover.
  * @param scale - Requested calendar scale.
+ * @param periods - Week start day and fiscal year start month; Monday weeks and calendar-year
+ *   quarters when omitted.
  * @returns The columns and the scale that was used.
  */
 export function createTaskGanttScaledColumns(
   range: TaskGanttDateRange,
   scale: TaskGanttCalendarScale,
+  periods: TaskCalendarPeriods = DEFAULT_TASK_CALENDAR_PERIODS,
 ): TaskGanttScaledColumns {
   const startIndex = taskGanttCalendarScales.indexOf(scale)
   for (const candidate of taskGanttCalendarScales.slice(startIndex)) {
-    const columns = createCalendarColumns(range, candidate)
+    const columns = createCalendarColumns(range, candidate, periods)
     if (columns.length <= MAX_TASK_GANTT_SCALED_COLUMNS || candidate === 'quarter') {
       return { columns, scale: candidate }
     }
   }
-  return { columns: createCalendarColumns(range, 'quarter'), scale: 'quarter' }
+  return { columns: createCalendarColumns(range, 'quarter', periods), scale: 'quarter' }
+}
+
+/**
+ * Tells whether a single-day column starts a Workspace week, so the header can mark the week
+ * boundary.
+ *
+ * @param column - Timeline column.
+ * @param weekStartDay - Day the Workspace week starts on.
+ * @returns Whether the column covers exactly one date and that date is the week start day.
+ */
+export function isTaskGanttWeekStartColumn(
+  column: Pick<TaskGanttTimelineColumn, 'endDate' | 'startDate'>,
+  weekStartDay: TaskCalendarPeriods['weekStartDay'],
+): boolean {
+  return column.startDate === column.endDate &&
+    new Date(`${column.startDate}T00:00:00.000Z`).getUTCDay() === weekStartDay
 }
 
 /**
@@ -241,17 +281,19 @@ export function resolveTaskGanttProgressVarianceDays(
  *
  * @param range - Inclusive range the columns must cover.
  * @param scale - Calendar scale of every column.
+ * @param periods - Week start day and fiscal year start month.
  * @returns Ordered columns covering the range.
  */
 function createCalendarColumns(
   range: TaskGanttDateRange,
   scale: TaskGanttCalendarScale,
+  periods: TaskCalendarPeriods,
 ): TaskGanttTimelineColumn[] {
   const columns: TaskGanttTimelineColumn[] = []
-  let startDate = startOfCalendarUnit(range.startDate, scale)
+  let startDate = startOfCalendarUnit(range.startDate, scale, periods)
   while (startDate <= range.endDate) {
-    const endDate = endOfCalendarUnit(startDate, scale)
-    columns.push({ endDate, label: formatCalendarColumnLabel(startDate, scale), startDate })
+    const endDate = endOfCalendarUnit(startDate, scale, periods)
+    columns.push({ endDate, label: formatCalendarColumnLabel(startDate, scale, periods), startDate })
     startDate = addTaskGanttDays(endDate, 1)
   }
   return columns
@@ -262,18 +304,20 @@ function createCalendarColumns(
  *
  * @param date - Date in `YYYY-MM-DD` form.
  * @param scale - Calendar unit.
+ * @param periods - Week start day and fiscal year start month.
  * @returns The unit's first date.
  */
-function startOfCalendarUnit(date: string, scale: TaskGanttCalendarScale): string {
+function startOfCalendarUnit(
+  date: string,
+  scale: TaskGanttCalendarScale,
+  periods: TaskCalendarPeriods,
+): string {
   if (scale === 'day') return date
-  if (scale === 'week') {
-    const dayOfWeek = new Date(`${date}T00:00:00.000Z`).getUTCDay()
-    return addTaskGanttDays(date, -((dayOfWeek + 6) % 7))
+  if (scale === 'week') return workspaceWeekContaining(date, periods.weekStartDay).from
+  if (scale === 'quarter') {
+    return workspaceFiscalQuarterContaining(date, periods.fiscalYearStartMonth).range.from
   }
-  const year = Number(date.slice(0, 4))
-  const monthIndex = Number(date.slice(5, 7)) - 1
-  const firstMonthIndex = scale === 'quarter' ? monthIndex - (monthIndex % 3) : monthIndex
-  return formatUtcDate(Date.UTC(year, firstMonthIndex, 1))
+  return `${date.slice(0, 7)}-01`
 }
 
 /**
@@ -281,28 +325,45 @@ function startOfCalendarUnit(date: string, scale: TaskGanttCalendarScale): strin
  *
  * @param startDate - First date of the unit.
  * @param scale - Calendar unit.
+ * @param periods - Week start day and fiscal year start month.
  * @returns The unit's last date.
  */
-function endOfCalendarUnit(startDate: string, scale: TaskGanttCalendarScale): string {
+function endOfCalendarUnit(
+  startDate: string,
+  scale: TaskGanttCalendarScale,
+  periods: TaskCalendarPeriods,
+): string {
   if (scale === 'day') return startDate
   if (scale === 'week') return addTaskGanttDays(startDate, 6)
+  if (scale === 'quarter') {
+    return workspaceFiscalQuarterContaining(startDate, periods.fiscalYearStartMonth).range.to
+  }
   const year = Number(startDate.slice(0, 4))
   const monthIndex = Number(startDate.slice(5, 7)) - 1
-  const monthCount = scale === 'quarter' ? 3 : 1
-  return formatUtcDate(Date.UTC(year, monthIndex + monthCount, 0))
+  return formatUtcDate(Date.UTC(year, monthIndex + 1, 0))
 }
 
 /**
  * Formats a column header label for a calendar scale.
  *
+ * Quarters of a fiscal year that starts in January keep the calendar-year `YYYY Qn` label; other
+ * fiscal years are named `FYYYYY Qn` by the calendar year they start in, so an April start shows
+ * January to March 2027 as `FY2026 Q4`.
+ *
  * @param startDate - First date of the column.
  * @param scale - Calendar scale of the column.
- * @returns `MM-DD` for days and weeks, `YYYY-MM` for months, and `YYYY Qn` for quarters.
+ * @param periods - Week start day and fiscal year start month.
+ * @returns `MM-DD` for days and weeks, `YYYY-MM` for months, and the quarter label for quarters.
  */
-function formatCalendarColumnLabel(startDate: string, scale: TaskGanttCalendarScale): string {
+function formatCalendarColumnLabel(
+  startDate: string,
+  scale: TaskGanttCalendarScale,
+  periods: TaskCalendarPeriods,
+): string {
   if (scale === 'day' || scale === 'week') return startDate.slice(5)
   if (scale === 'month') return startDate.slice(0, 7)
-  return `${startDate.slice(0, 4)} Q${Math.floor((Number(startDate.slice(5, 7)) - 1) / 3) + 1}`
+  const { fiscalYear, quarter } = workspaceFiscalQuarterContaining(startDate, periods.fiscalYearStartMonth)
+  return periods.fiscalYearStartMonth === 1 ? `${fiscalYear} Q${quarter}` : `FY${fiscalYear} Q${quarter}`
 }
 
 /**

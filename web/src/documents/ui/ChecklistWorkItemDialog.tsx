@@ -26,6 +26,13 @@ export type ChecklistWorkItemDialogProps = {
   defaultProjectId?: string
   /** Normalized member key of the current user, selected first as owner. */
   currentUserKey?: string
+  /**
+   * Owner saved on the checklist item; selected first when that member can
+   * own Work Items in the chosen Project.
+   */
+  defaultAssigneeKey?: string
+  /** Deadline saved on the checklist item, used as the initial due date. */
+  defaultDueDate?: string
   /** Resolves display text. */
   t: (key: MessageKey) => string
   /** Creates the Work Item and links it to the checklist item. */
@@ -87,6 +94,8 @@ type ProjectOption = {
 export function ChecklistWorkItemDialog({
   accessToken,
   currentUserKey,
+  defaultAssigneeKey,
+  defaultDueDate,
   defaultProjectId,
   itemText,
   linkOnly = false,
@@ -111,7 +120,7 @@ export function ChecklistWorkItemDialog({
   )
   const [optionIndex, setOptionIndex] = useState(defaultOptionIndex)
   const [title, setTitle] = useState(itemText.trim())
-  const [dueDate, setDueDate] = useState('')
+  const [dueDate, setDueDate] = useState(defaultDueDate ?? '')
   const [selectedAssignee, setSelectedAssignee] = useState<string>()
   const [errorMessage, setErrorMessage] = useState<string>()
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -141,7 +150,8 @@ export function ChecklistWorkItemDialog({
     selectedAssignee !== undefined &&
     members.some((member) => member.id === selectedAssignee)
       ? selectedAssignee
-      : members.find((member) => member.id === currentUserKey)?.id ?? ''
+      : members.find((member) => member.id === defaultAssigneeKey)?.id ??
+        members.find((member) => member.id === currentUserKey)?.id ?? ''
 
   useEffect(() => {
     const previousFocus = globalThis.document.activeElement

@@ -266,6 +266,12 @@
   --workbench-chart-series: #0f766e;
   --workbench-chart-missing: #78837f;
   --workbench-chart-point-fill: #ffffff;
+  --workbench-chart-category-1: #0f766e;
+  --workbench-chart-category-2: #2563eb;
+  --workbench-chart-category-3: #c2410c;
+  --workbench-chart-category-4: #7c3aed;
+  --workbench-chart-category-5: #a16207;
+  --workbench-chart-category-6: #be185d;
   color-scheme: light;
   --surface: var(--workbench-canvas);
   --ink: var(--workbench-text);
@@ -326,6 +332,12 @@
   --workbench-chart-series: #5fd0c2;
   --workbench-chart-missing: #8c9a95;
   --workbench-chart-point-fill: #151d1a;
+  --workbench-chart-category-1: #5fd0c2;
+  --workbench-chart-category-2: #7aa7ff;
+  --workbench-chart-category-3: #fb923c;
+  --workbench-chart-category-4: #b794f6;
+  --workbench-chart-category-5: #facc15;
+  --workbench-chart-category-6: #f472b6;
   --color-fg-amber-200: oklch(92.4% 0.108 95.7);
   --color-fg-amber-500: oklch(76.9% 0.169 70.1);
   --color-fg-amber-600: oklch(74.0% 0.161 58.3);
@@ -573,6 +585,12 @@
     --workbench-chart-series: #5fd0c2;
     --workbench-chart-missing: #8c9a95;
     --workbench-chart-point-fill: #151d1a;
+    --workbench-chart-category-1: #5fd0c2;
+    --workbench-chart-category-2: #7aa7ff;
+    --workbench-chart-category-3: #fb923c;
+    --workbench-chart-category-4: #b794f6;
+    --workbench-chart-category-5: #facc15;
+    --workbench-chart-category-6: #f472b6;
     --color-fg-amber-200: oklch(92.4% 0.108 95.7);
     --color-fg-amber-500: oklch(76.9% 0.169 70.1);
     --color-fg-amber-600: oklch(74.0% 0.161 58.3);
@@ -1278,10 +1296,13 @@ textarea {
     display: none !important;
   }
 
-  /* A table column without content on paper, such as the row action menu. */
-  html[data-print-target] [data-print-root][data-print-paper] col[data-print-hidden] {
-    display: table-column !important;
-    visibility: collapse;
+  /*
+   * The WBS table leaves its row action column (the last column) off the paper: its cells and
+   * `col` are not rendered, and the on-screen minimum width that counts that column is dropped,
+   * so the remaining columns reach the right edge of the paper.
+   */
+  html[data-print-target='task-table'] [data-print-root='task-table'][data-print-paper] table {
+    min-width: 0 !important;
   }
 
   html[data-print-target] [data-print-root][data-print-paper] [data-print-overflow] {

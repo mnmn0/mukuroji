@@ -26,7 +26,10 @@ export const planningMessages = {
   'planning.crossProject.forecast': '予測',
   'planning.crossProject.baseline': 'ベースライン',
   'planning.crossProject.dependency': '依存関係',
-  'planning.crossProject.openProject': 'Project を開く',
+  'planning.crossProject.openOverview': '概要',
+  'planning.crossProject.openGantt': 'ガント',
+  'planning.crossProject.openOverviewFor': '{name} の Project 概要を開く',
+  'planning.crossProject.openGanttFor': '{name} の Project のガントを開く',
   'planning.crossProject.late': 'ベースラインより{days}日遅れ',
   'planning.crossProject.early': 'ベースラインより{days}日早い',
   'planning.crossProject.projectCount': '{count} Project',
@@ -308,4 +311,6 @@ export const planningMessages = {
   'planning.activity.value.off': 'オフ',
   'planning.activity.before': '変更前:',
   'planning.activity.after': '変更後:',
+  'planning.cycleWeekStart.error': 'Workspace の週の開始曜日を取得できませんでした。新しい Cycle の日付は月曜始まりで提案しています。',
+  'planning.cycleWeekStart.staleError': 'Workspace の週の開始曜日を読み直せませんでした。新しい Cycle の日付は前回読み込んだ設定で提案しています。',
 } as const

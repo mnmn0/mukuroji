@@ -932,6 +932,20 @@ test('strongly reads a Workspace-bound Audit event for projection', async () => 
   })
 })
 
+test('reads an Audit event in a Workspace whose documented ID contains #', async () => {
+  // `workspace#production` is the deploy default (#417).
+  const event = createWorkItemAuditEvent(new Date('2026-07-18T00:00:00.000Z'), 'workspace#production')
+  const documentClient = {
+    async send() {
+      return { Item: event }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const reader = new DynamoDbWebhookAuditEventReader(documentClient, 'audit-events-test')
+
+  await expect(reader.getEvent('workspace#production', event.eventId)).resolves.toEqual(event)
+  await expect(reader.getEvent('#workspace', event.eventId)).rejects.toThrow('Workspace ID is invalid.')
+})
+
 test('blocks a queued replay after the subscription creator loses access', async () => {
   const now = new Date('2026-07-18T00:00:00.000Z')
   const fixture = await createDeliveryFixture(() => now)
@@ -1124,9 +1138,9 @@ test('keeps contributor assignments out of public webhook event data', () => {
   expect(JSON.stringify(data)).not.toContain('sato@example.com')
 })
 
-function createWorkItemAuditEvent(now: Date) {
+function createWorkItemAuditEvent(now: Date, workspaceId = 'workspace-1') {
   const context = createMutationAuditContext({
-    workspaceId: 'workspace-1',
+    workspaceId,
     actor: { id: 'service-1', kind: 'service', displayName: 'Public API' },
     idempotencyKey: 'request-1',
     request: { method: 'POST', path: '/api/v1/work-items', body: { title: 'Ship API' } },

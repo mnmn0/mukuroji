@@ -1,3 +1,7 @@
+import {
+  WORKSPACE_INVITATION_NAME_MAX_LENGTH,
+  isWorkspaceInvitationEmail,
+} from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
 import { TenantAdministrationError } from '../../modules/tenant-administration'
@@ -62,6 +66,45 @@ type AcknowledgeWorkspaceInvitationCleanupRequestBody = {
 
 function readOptionalWorkspaceName(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/**
+ * Reads the email address of a new invitation and rejects one that cannot receive an email.
+ *
+ * Existing invitations keep the looser {@link readWorkspaceEmail} check so that they can still
+ * be resent or revoked.
+ *
+ * @param value - Raw `email` of the request body.
+ * @returns The normalized email address.
+ */
+function readNewWorkspaceInvitationEmail(value: unknown) {
+  const email = readWorkspaceEmail(value)
+  if (!isWorkspaceInvitationEmail(email)) {
+    throw new WorkspaceAccessError(400, 'InvalidWorkspaceEmail', 'A valid email address is required.')
+  }
+  return email
+}
+
+/**
+ * Reads the optional display name of a new invitation.
+ *
+ * @param value - Raw `name` of the request body.
+ * @returns The trimmed name, or `undefined` when it is missing or blank.
+ */
+function readNewWorkspaceInvitationName(value: unknown) {
+  if (value !== undefined && value !== null && typeof value !== 'string') {
+    throw new WorkspaceAccessError(400, 'InvalidWorkspaceInvitationName', 'Invitation name must be a string.')
+  }
+  const name = readOptionalWorkspaceName(value)
+  // Control characters would break the invitation email and the member CSV export.
+  if (name !== undefined && (name.length > WORKSPACE_INVITATION_NAME_MAX_LENGTH || /\p{Cc}/u.test(name))) {
+    throw new WorkspaceAccessError(
+      400,
+      'InvalidWorkspaceInvitationName',
+      `Invitation name must be at most ${WORKSPACE_INVITATION_NAME_MAX_LENGTH} characters without control characters.`,
+    )
+  }
+  return name
 }
 
 /**
@@ -430,11 +473,11 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
       requireWorkspaceAdministration(principal)
       const body = await readJson<CreateWorkspaceInvitationRequestBody>(c.req)
-      const email = readWorkspaceEmail(body?.email)
+      const email = readNewWorkspaceInvitationEmail(body?.email)
+      const name = readNewWorkspaceInvitationName(body?.name)
       const role = body?.role === undefined
         ? await resolveTenantDefaultInvitationRole(principal)
         : readWorkspaceRole(body.role)
-      const name = readOptionalWorkspaceName(body?.name)
       const enterpriseSnapshot = await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
       requireEnterpriseExternalAccessAllowed(enterpriseSnapshot, email, role)
       const auditContext = createWorkspaceMutationContext(c, principal, { email, name, role })

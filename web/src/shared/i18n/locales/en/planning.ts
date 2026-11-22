@@ -26,7 +26,10 @@ export const planningMessages = {
   'planning.crossProject.forecast': 'Forecast',
   'planning.crossProject.baseline': 'Baseline',
   'planning.crossProject.dependency': 'Dependency',
-  'planning.crossProject.openProject': 'Open project',
+  'planning.crossProject.openOverview': 'Overview',
+  'planning.crossProject.openGantt': 'Gantt',
+  'planning.crossProject.openOverviewFor': 'Open the project overview of {name}',
+  'planning.crossProject.openGanttFor': 'Open the project Gantt chart of {name}',
   'planning.crossProject.late': '{days}d later than baseline',
   'planning.crossProject.early': '{days}d earlier than baseline',
   'planning.crossProject.projectCount': '{count} projects',
@@ -308,4 +311,6 @@ export const planningMessages = {
   'planning.activity.value.off': 'Off',
   'planning.activity.before': 'Before:',
   'planning.activity.after': 'After:',
+  'planning.cycleWeekStart.error': 'Could not load the Workspace week start. New Cycle dates are proposed from Monday.',
+  'planning.cycleWeekStart.staleError': 'Could not reload the Workspace week start. New Cycle dates are proposed from the settings loaded earlier.',
 } as const

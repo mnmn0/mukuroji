@@ -9,11 +9,13 @@ import { useNavigate, useParams, useSearchParams } from 'react-router'
 import { PersonalTimesheetContainer } from '../../features/time-tracking/ui/PersonalTimesheetContainer'
 import { PersonalWeeklyReportContainer } from '../../features/time-tracking/ui/PersonalWeeklyReportContainer'
 import { TeamWeeklyReportsContainer } from '../../features/time-tracking/ui/TeamWeeklyReportsContainer'
+import { TeamWeeklySummaryContainer } from '../../features/time-tracking/ui/TeamWeeklySummaryContainer'
 import { TimeApprovalQueueContainer } from '../../features/time-tracking/ui/TimeApprovalQueueContainer'
 import { TimeReportContainer } from '../../features/time-tracking/ui/TimeReportContainer'
 import { TimeTrackingViewTabs, type TimeTrackingView } from '../../features/time-tracking/ui/TimeTrackingViewTabs'
 import { selectIndirectTimeEntryTargets, selectTimeEntryWorkItemChoices } from '../../features/time-tracking/model/timeEntryWorkItemOptions'
 import { resolveWeekStart, shiftWeek } from '../../features/time-tracking/model/timePeriod'
+import { useTeamWeeklySummary } from '../../features/time-tracking/queries/useWeeklyReports'
 import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { useWorkspaceTimeEntryCategories } from '../../workspace/queries/useWorkspaceTimeEntryCategories'
 import { TimeEntryCategoryContext } from '../../features/time-tracking/ui/timeEntryCategoryContext'
@@ -59,7 +61,8 @@ export function TeamTimeTrackingPage() {
   const view: TimeTrackingView = viewParam === 'approvals' ||
     viewParam === 'report' ||
     viewParam === 'weekly-report' ||
-    viewParam === 'team-weekly-reports'
+    viewParam === 'team-weekly-reports' ||
+    viewParam === 'weekly-summary'
     ? viewParam
     : 'timesheet'
   const reportFrom = searchParams.get('from')
@@ -89,7 +92,8 @@ export function TeamTimeTrackingPage() {
   const linkWeek = calendarSettings.settings ? weekStart : requestedWeek
   // Filtered on the server, so other Teams' Work Items cannot push the read past its size limit.
   const teamWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '' }), [teamId])
-  const workItems = useWorkspaceWorkItems(accessToken, enabled, false, teamWorkItemFilter)
+  // The weekly summary is counted on the server, so it does not read the Team's Work Items here.
+  const workItems = useWorkspaceWorkItems(accessToken, enabled && view !== 'weekly-summary', false, teamWorkItemFilter)
   // The weekly report lists only the member's own Work Items, filtered by the server.
   const myWorkItemFilter = useMemo(() => ({ teamId: teamId ?? '', involvement: 'mine' as const }), [teamId])
   const myWorkItems = useWorkspaceWorkItems(accessToken, enabled && view === 'weekly-report', false, myWorkItemFilter)
@@ -122,6 +126,12 @@ export function TeamTimeTrackingPage() {
     [teamId, workItems.data],
   )
   // Without Work Items the entry form has nothing to pick, so a failed lookup is shown, not treated as empty.
+  // Read here, not in its view, so a session failure reaches the page's session error handling.
+  const weeklySummary = useTeamWeeklySummary(
+    view === 'weekly-summary' && calendarSettings.settings ? accessToken : undefined,
+    teamId ?? '',
+    weekStart,
+  )
   const lookupError = workItems.error ?? writeAccess.error ?? projectMembers.error ?? projectMembers.data?.errors[0]
   const memberNames = useMemo(() => {
     const names: Record<string, string> = {}
@@ -131,11 +141,15 @@ export function TeamTimeTrackingPage() {
     return names
   }, [projectMembers.data?.members])
   const teamProjects = activeTeam?.projects ?? emptyTeamProjects
+  const projectNames = useMemo(
+    () => Object.fromEntries(teamProjects.map((project) => [project.id, project.name])),
+    [teamProjects],
+  )
   const reportLabels = useMemo(() => ({
     members: memberNames,
-    projects: Object.fromEntries(teamProjects.map((project) => [project.id, project.name])),
+    projects: projectNames,
     workItems: workItemTitles,
-  }), [memberNames, teamProjects, workItemTitles])
+  }), [memberNames, projectNames, workItemTitles])
 
   /**
    * Opens a view and week through the URL.
@@ -176,7 +190,7 @@ export function TeamTimeTrackingPage() {
   }
 
   return (
-    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error, categories.error]}>
+    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error, weeklySummary.error, categories.error]}>
       <TimeEntryCategoryContext value={categorySettings}>
         <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
           <TimeTrackingViewTabs
@@ -262,6 +276,19 @@ export function TeamTimeTrackingPage() {
               locale={workspace.locale}
               memberNames={memberNames}
               onMoveWeek={moveWeek}
+              teamId={teamId}
+              weekStart={weekStart}
+              weekStartDay={calendarSettings.settings.weekStartDay}
+            />
+          ) : view === 'weekly-summary' ? (
+            <TeamWeeklySummaryContainer
+              error={weeklySummary.error}
+              key={`${teamId}:weekly-summary:${weekStart}`}
+              locale={workspace.locale}
+              onMoveWeek={moveWeek}
+              onRetry={() => { void weeklySummary.mutate().catch(() => undefined) }}
+              projectNames={projectNames}
+              summary={weeklySummary.data}
               teamId={teamId}
               weekStart={weekStart}
               weekStartDay={calendarSettings.settings.weekStartDay}
