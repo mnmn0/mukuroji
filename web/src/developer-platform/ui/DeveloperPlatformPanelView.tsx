@@ -297,6 +297,8 @@ export function DeveloperPlatformPanel({
   const [validatedImportInput, setValidatedImportInput] =
     useState<DryRunDeveloperImportInput>()
   const importValidationGeneration = useRef(0)
+  // Each file or format choice starts a new generation, so a suggestion for an earlier file is dropped.
+  const importSuggestionGeneration = useRef(0)
   const availableImportProjectOptions = filterImportProjectOptions(
     importProjectOptions,
     importTeamId,
@@ -584,18 +586,21 @@ export function DeveloperPlatformPanel({
   /**
    * Fills an empty mapping from the known columns of a chosen file.
    *
-   * A file that cannot be read leaves the mapping empty; the dry-run reports the problem.
+   * A file that cannot be read leaves the mapping empty; the dry-run reports the problem. A
+   * suggestion that finishes after another file or format was chosen is dropped.
    *
    * @param format - Chosen import format.
    * @param file - Chosen file.
    */
   const suggestImportMapping = async (format: DeveloperImportFileFormat, file: File) => {
+    const suggestionGeneration = importSuggestionGeneration.current
     let mapping: DeveloperImportFieldMapping[]
     try {
       mapping = suggestDeveloperImportMapping((await readDeveloperImportSource(format, file)).headers)
     } catch {
       return
     }
+    if (importSuggestionGeneration.current !== suggestionGeneration) return
     setImportMappings((current) => current.length === 0 ? mapping : current)
   }
 
@@ -1004,6 +1009,7 @@ export function DeveloperPlatformPanel({
               onFileChange={(file) => {
                 setImportFile(file)
                 invalidateImportValidation()
+                importSuggestionGeneration.current += 1
                 if (file && importMappings.length === 0) {
                   void suggestImportMapping(importFormat, file)
                 }
@@ -1011,6 +1017,7 @@ export function DeveloperPlatformPanel({
               onFormatChange={(format) => {
                 setImportFormat(format)
                 invalidateImportValidation()
+                importSuggestionGeneration.current += 1
               }}
               onMappingChange={(mappings) => {
                 setImportMappings(mappings)

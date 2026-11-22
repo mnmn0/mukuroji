@@ -224,6 +224,23 @@ describe('Work Item import structure', () => {
     ])
   })
 
+  test('rejects a row that other rows would give more relations than a Work Item can hold', () => {
+    const relatedRows = (count: number) => Array.from({ length: count }, (_, index) => ({
+      Key: `spoke-${index}`,
+      Relations: 'related:hub',
+    }))
+    const mapping = [
+      ...baseMapping,
+      { sourceField: 'Key', targetField: 'importKey' },
+      { sourceField: 'Relations', targetField: 'relations' },
+    ]
+
+    // The reciprocal entries are written on the hub, so 100 fit and 101 would fail after every row exists.
+    expect(previewWorkItemImport('json', source([{ Key: 'hub' }, ...relatedRows(100)]), mapping).errors).toEqual([])
+    expect(previewWorkItemImport('json', source([{ Key: 'hub' }, ...relatedRows(101)]), mapping).errors
+      .map((error) => [error.row, error.field, error.code])).toEqual([[1, 'relations', 'ImportRelationLimitExceeded']])
+  })
+
   test('limits acceptance criterion text by its UTF-16 length, as stored criteria are checked', () => {
     const preview = previewWorkItemImport('json', source([
       { Criteria: [{ text: '😀'.repeat(512) }] },

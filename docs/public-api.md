@@ -316,6 +316,7 @@ Mapping の `targetField` には Work Item の項目に加えて、行どうし�
 参照は同じ file の行だけを指し、`importKey` を先に、見つからなければ `wbsNumber` を探す。Dry-run は次を row error として返し、1 行でも error があれば import を開始できない。
 
 - 参照先がない、自分自身を指す、キーが重複する、親の参照が循環する、依存が循環する、`blocks` の relation が循環する、同じ先行タスクを 2 回書いた（`ImportReferenceInvalid`、`ImportKeyDuplicate`、`ImportHierarchyCycle`、`ImportDependencyCycle`、`ImportRelationCycle`、`ImportDependencyDuplicate`）
+- 他の行が書いた relation の相手側と親（`parent:<id>`）を合わせて、1 行の relation が 100 件を超える（`ImportRelationLimitExceeded`。relation は両端に書かれるため）
 - 親の Work Item Type が子の Type を許可しない（`WorkItemChildTypeDenied`）
 - 依存の両端に Team と Project の manager 権限がない（Enterprise のロールでは、各行の Team か Project で `planning.manage`。worker が依存を作るときと同じ確認）、どちらかの行に日程がない、取り込む日程が依存を満たさない（`ImportDependencyScheduleConflict`。依存は作成時に日程を満たす必要があるため）
 - Contributor の member が有効な Workspace member でない、ジョブロールがない・archive 済み

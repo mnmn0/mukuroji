@@ -2,6 +2,7 @@ import {
   WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT,
   WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
   WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
+  WORK_ITEM_RELATION_ID_LIMIT,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type ScheduleDependencyConstraint,
@@ -357,6 +358,29 @@ export function resolveWorkItemImportStructure(
       field: 'relations',
       code: 'ImportRelationCycle',
       message: 'The blocking relations of this row form a cycle.',
+    })
+  }
+
+  // Each relation is also written on its other endpoint, and a parent adds `parent:<id>` on the
+  // child, so a row can exceed the stored limit through links that other rows declare.
+  const projectedRelationCounts = new Map<number, number>()
+  for (const link of links) {
+    const endpoints = link.kind === 'relation'
+      ? [link.sourceRow, link.targetRow]
+      : link.kind === 'parent'
+        ? [link.childRow]
+        : []
+    for (const endpoint of endpoints) {
+      projectedRelationCounts.set(endpoint, (projectedRelationCounts.get(endpoint) ?? 0) + 1)
+    }
+  }
+  for (const [row, count] of projectedRelationCounts) {
+    if (count <= WORK_ITEM_RELATION_ID_LIMIT) continue
+    errors.push({
+      row,
+      field: 'relations',
+      code: 'ImportRelationLimitExceeded',
+      message: `This row would have ${count} relations, including those other rows declare; a Work Item can have at most ${WORK_ITEM_RELATION_ID_LIMIT}.`,
     })
   }
 
