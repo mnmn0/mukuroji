@@ -190,13 +190,13 @@ function readHeaderLayout(cells: readonly string[]): ColumnLayout | undefined {
 
 /**
  * Removes the `'` that the member CSV export puts before a cell starting with `=`, `+`, `-`, `@`,
- * a tab or a carriage return, so an exported file reads back with its original values.
+ * a tab, a carriage return or `'`, so an exported file reads back with its original values.
  *
  * @param cell - Trimmed cell text.
  * @returns The cell without the spreadsheet escape.
  */
 function unescapeSpreadsheetCell(cell: string) {
-  return /^'[=+\-@\t\r]/u.test(cell) ? cell.slice(1) : cell
+  return /^'[=+\-@\t\r']/u.test(cell) ? cell.slice(1) : cell
 }
 
 /** Layout of a record without a header: email, then name, then role. */

@@ -243,7 +243,10 @@ describe('createWorkspaceMemberCsv', () => {
   })
 
   test('reads escaped cells back with their original values', () => {
-    const csv = createWorkspaceMemberCsv([member({ email: '+person@example.com', name: '-Jane' })], {
+    const csv = createWorkspaceMemberCsv([
+      member({ email: '+person@example.com', name: '-Jane' }),
+      member({ email: "'+quoted@example.com", name: "'Kei" }),
+    ], {
       createdAt: 'joined at',
       deactivatedAt: 'deactivated at',
       email: 'email',
@@ -252,8 +255,11 @@ describe('createWorkspaceMemberCsv', () => {
       status: 'status',
     })
 
-    expect(planBulkInvitation(csv, { ...context, members: [member({ email: '+person@example.com' })] }).rows)
-      .toEqual([{ email: '+person@example.com', issue: 'already-member', line: 2, name: '-Jane', role: 'member', roleInput: 'member' }])
+    const members = [member({ email: '+person@example.com' }), member({ email: "'+quoted@example.com" })]
+    expect(planBulkInvitation(csv, { ...context, members }).rows).toEqual([
+      { email: '+person@example.com', issue: 'already-member', line: 2, name: '-Jane', role: 'member', roleInput: 'member' },
+      { email: "'+quoted@example.com", issue: 'already-member', line: 3, name: "'Kei", role: 'member', roleInput: 'member' },
+    ])
   })
 
   test('can be read back by the bulk invitation', () => {
