@@ -32,6 +32,7 @@ services:
     volumes:
       - floci-data:/app/data
       - ./floci/init/ready.d:/etc/floci/init/ready.d:ro
+      - ./floci/init/dynamodb:/etc/floci/init/dynamodb:ro
       - ./.floci/generated:/app/generated
 
 volumes:

@@ -1,3 +1,5 @@
+import type { WorkspaceCalendarPeriodPreset, WorkspaceWeekStartDay } from './workspace-calendar'
+
 /** Analytics report、snapshot、metric response の現行 schema version です。 */
 export const ANALYTICS_SCHEMA_VERSION = 1 as const
 
@@ -61,6 +63,14 @@ export type AnalyticsCustomFieldFilter = {
 export type AnalyticsFilter = {
   /** Event metric を評価する期間です。 */
   period: AnalyticsDateRange
+  /**
+   * `period` を選んだ Workspace calendar の相対期間です（今週、前四半期など）。
+   *
+   * 保存済み report では、API が実行のたびに report の timezone と Workspace の週の開始曜日・
+   * 年度開始月でこの期間を解き直し、`period` を置き換えます。Ad-hoc query では `period` が
+   * そのまま使われ、この値は選び方の記録だけです。省略時は `period` の固定日付です。
+   */
+  periodPreset?: WorkspaceCalendarPeriodPreset
   /** 対象 Team ID の許可一覧です。省略時は入力済みの全 Team を扱います。 */
   teamIds?: string[]
   /** 対象 Project ID の許可一覧です。省略時は入力済みの全 Project を扱います。 */
@@ -465,6 +475,14 @@ export type AnalyticsQueryInput = {
   asOf: string
   /** Calendar bucket を解釈する IANA timezone です。 */
   timeZone: string
+  /**
+   * 週単位の bucket（`groupBy` の `week`）が始まる曜日です。0 は日曜日、1 は月曜日です。
+   *
+   * API は実行時に Workspace の calendar 設定の週の開始曜日で上書きし、snapshot の query に
+   * 残します。省略時は月曜日です。月曜日は正規化で省くので、この項目ができる前に保存された
+   * snapshot と同じ query hash になります。
+   */
+  weekStartDay?: WorkspaceWeekStartDay
   /** Forecast risk と比較する baseline です。 */
   forecastBaseline?: AnalyticsDateRange
   /** Forecast の重み付けです。省略時は `count` です。 */

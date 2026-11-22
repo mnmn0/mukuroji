@@ -2451,7 +2451,7 @@ test('reads personal Focus views and rejects Triage until its queue ownership is
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -2471,7 +2471,7 @@ test('reads personal Focus views and rejects Triage until its queue ownership is
         scope: { kind: 'viewer' },
         filters: { priorities: ['high'] },
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [{ field: 'priority', direction: 'desc' }],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -2491,6 +2491,143 @@ test('reads personal Focus views and rejects Triage until its queue ownership is
     viewId: created.id,
     access: { ...ownerAccess, viewerUserId: 'other@example.com' },
   })).rejects.toMatchObject({ code: 'TaskViewNotFound', status: 404 })
+})
+
+test('reads a view saved with a retired list or timeline layout as a table', async () => {
+  let retiredMode: string | undefined
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], {
+      beforeGet: (items) => {
+        if (!retiredMode) return
+        for (const item of items.values()) {
+          const definition = item.definition
+          if (item.entryType !== 'task-view' || !isTestRecord(definition)) continue
+          const layout = definition.layout
+          if (isTestRecord(layout)) layout.mode = retiredMode
+        }
+      },
+    }),
+    {} as DynamoDBClient,
+  )
+  const ownerAccess = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    input: {
+      name: 'My tasks',
+      visibility: 'personal',
+      definition: {
+        surface: 'my-tasks',
+        scope: { kind: 'viewer' },
+        filters: {},
+        layout: {
+          mode: 'board',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+
+  for (const mode of ['list', 'timeline']) {
+    retiredMode = mode
+    expect(await client.getTaskView({
+      workspaceId: 'workspace-1',
+      viewId: created.id,
+      access: ownerAccess,
+    })).toMatchObject({ definition: { layout: { mode: 'table' } } })
+  }
+})
+
+test('keeps Gantt display options in a saved view and rejects an unknown Gantt scale', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const ownerAccess = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  /**
+   * Builds a personal Focus Gantt view input with the given display options.
+   *
+   * @param displayOptions - Display options sent to the saved-view boundary.
+   * @returns A create input for the owner.
+   */
+  const createInput = (displayOptions: Record<string, unknown>) => ({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    input: {
+      name: 'Monthly Gantt',
+      visibility: 'personal' as const,
+      definition: {
+        surface: 'focus' as const,
+        scope: { kind: 'viewer' as const },
+        filters: {},
+        layout: {
+          mode: 'gantt' as const,
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact' as const,
+          displayOptions,
+        },
+      },
+    },
+  })
+
+  const created = await client.createTaskView(createInput({
+    ganttCompactRows: true,
+    ganttProgressLine: true,
+    ganttScale: 'month',
+  }))
+  expect(created.definition.layout.displayOptions).toEqual({
+    ganttCompactRows: true,
+    ganttProgressLine: true,
+    ganttScale: 'month',
+  })
+  expect((await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access: ownerAccess,
+  })).definition.layout.displayOptions).toEqual({
+    ganttCompactRows: true,
+    ganttProgressLine: true,
+    ganttScale: 'month',
+  })
+  await expect(client.createTaskView(createInput({ ganttScale: 'year' })))
+    .rejects.toMatchObject({ code: 'InvalidTaskView', status: 400 })
+  await expect(client.createTaskView(createInput({ ganttCompactRows: 'yes' })))
+    .rejects.toMatchObject({ code: 'InvalidTaskView', status: 400 })
 })
 
 test('resolves personal defaults before Team defaults and falls back after clearing personal state', async () => {
@@ -3509,7 +3646,7 @@ test('replays task view updates without reverting newer preference, default, or 
     scope: { kind: 'viewer' as const },
     filters: {},
     layout: {
-      mode: 'list' as const,
+      mode: 'table' as const,
       sort: [],
       columns: [{ field: 'title' }],
       density: 'compact' as const,
@@ -3680,7 +3817,7 @@ test('replays a same-key concurrent task view update after the receipt wins its 
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -3761,7 +3898,7 @@ test('replays task view deletion from a durable actor-bound receipt', async () =
     scope: { kind: 'viewer' as const },
     filters: {},
     layout: {
-      mode: 'list' as const,
+      mode: 'table' as const,
       sort: [],
       columns: [{ field: 'title' }],
       density: 'compact' as const,
@@ -3847,7 +3984,7 @@ test('keeps a committed task view deletion successful when preference cleanup is
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -3906,7 +4043,7 @@ test('rejects task view updates when a concurrent delete removes the live row', 
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -3996,7 +4133,7 @@ test('returns a stable conflict when deletion commits between create replay read
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',
@@ -4899,3 +5036,13 @@ test('rejects a title phase cursor for a query without a keyword', async () => {
     ...(first.nextCursor ? { cursor: first.nextCursor } : {}),
   })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
 })
+
+/**
+ * Checks whether a stored test value is a plain record.
+ *
+ * @param value - Stored value.
+ * @returns Whether the value is a record.
+ */
+function isTestRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}

@@ -14,7 +14,12 @@ import {
 } from '../../features/cross-project-work-items/model/crossProjectWorkItems'
 import { CrossProjectWorkItemList } from '../../features/cross-project-work-items/ui/CrossProjectWorkItemList'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { createWorkspaceTaskScheduleCalendarPolicy } from '../../tasks/model/taskSchedule'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
+import {
+  useWorkspaceCalendarSettings,
+  workspaceCalendarErrorMessageKey,
+} from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import {
   WorkspaceConfigurationLoadNotice,
@@ -45,6 +50,19 @@ export function WorkItemsPage() {
     workspace.teams,
     false,
     serverFilter,
+  )
+  // Only the Gantt chart shades the Workspace days off, so the calendar is read for that layout.
+  const workspaceCalendar = useWorkspaceCalendarSettings(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData && state.layout === 'gantt',
+  )
+  const workspaceCalendarErrorKey = workspaceCalendarErrorMessageKey(workspaceCalendar)
+  const workingCalendar = useMemo(
+    // A failed read falls back to the default calendar, as on My Tasks.
+    () => workspaceCalendar.settings || workspaceCalendar.error
+      ? createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings)
+      : undefined,
+    [workspaceCalendar.settings, workspaceCalendar.error],
   )
   const workspaceAccess = useWorkspaceAccess(workspace.accessToken, workspace.canLoadWorkspaceData)
   const members = workspaceAccess.data?.members ?? emptyWorkspaceMembers
@@ -111,6 +129,20 @@ export function WorkItemsPage() {
           t={t}
           testId="work-items-configuration-error"
         />
+        {workspaceCalendarErrorKey ? (
+          // The Gantt chart falls back to the default calendar, so the notice says why the days off
+          // may differ and offers a retry, as on My Tasks.
+          <div
+            className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-warning-border)] bg-[var(--workbench-warning-surface)] px-4 py-3"
+            data-testid="work-items-workspace-calendar-error"
+            role="alert"
+          >
+            <p className="text-sm font-semibold text-[var(--workbench-warning)]">{t(workspaceCalendarErrorKey)}</p>
+            <button className="workbench-button-secondary min-h-9 px-3" onClick={workspaceCalendar.retry} type="button">
+              {t('tasks.workspaceCalendar.retry')}
+            </button>
+          </div>
+        ) : null}
         <CrossProjectWorkItemList
           configurationsByTeam={workItems.configurationsByTeam}
           groups={groups}
@@ -126,7 +158,9 @@ export function WorkItemsPage() {
           projectOptions={projectOptions}
           state={state}
           t={t}
+          teams={workspace.teams}
           totalCount={filteredWorkItems.length}
+          workingCalendar={workingCalendar}
         />
       </div>
     </WorkspaceRouteContent>

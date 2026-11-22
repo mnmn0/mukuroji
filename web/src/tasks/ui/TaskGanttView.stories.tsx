@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import type { TeamWorkItemHierarchyNode } from '@mukuroji/contracts'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { createWorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
@@ -315,5 +315,56 @@ export const ThreeHundredRows: Story = {
     chart.dispatchEvent(new Event('scroll'))
     await expect(await canvas.findByTestId(`task-gantt-baseline-bar-long-${LONG_GANTT_ROW_COUNT - 1}`)).toBeVisible()
     await expect(canvas.queryByTestId('task-gantt-bar-long-0')).not.toBeInTheDocument()
+  },
+}
+
+/**
+ * Display settings owned by a saved task view: the chart opens on the month scale with one-line
+ * rows and the progress line, and reports each change instead of keeping its own state.
+ */
+export const SavedViewDisplaySettings: Story = {
+  args: {
+    display: { isCompact: true, scale: 'month', showsProgressLine: true },
+  },
+  render: function SavedViewDisplaySettingsStory(args) {
+    const [display, setDisplay] = useState(args.display)
+    return <TaskGanttView {...args} display={display} onDisplayChange={setDisplay} />
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByTestId('task-gantt-scale')).toHaveValue('month')
+    await expect(canvas.getByTestId('task-gantt-compact')).toHaveAttribute('aria-pressed', 'true')
+    await userEvent.selectOptions(canvas.getByTestId('task-gantt-scale'), 'week')
+    await expect(canvas.getByTestId('task-gantt-scale')).toHaveValue('week')
+  },
+}
+
+/**
+ * Image export of the whole chart. The play function captures the download link instead of
+ * saving a file, and checks that no error alert appears.
+ */
+export const ImageExport: Story = {
+  args: {
+    allProjectTasks: longGanttTasks,
+    planningSnapshot: undefined,
+    tasks: longGanttTasks,
+    windowStartMonth: '2026-06',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const downloads: string[] = []
+    const originalClick = HTMLAnchorElement.prototype.click
+    HTMLAnchorElement.prototype.click = function captureDownload(this: HTMLAnchorElement) {
+      downloads.push(this.download)
+    }
+    try {
+      await userEvent.click(canvas.getByRole('button', { name: t('tasks.gantt.exportSvg') }))
+      await waitFor(() => expect(downloads).toHaveLength(1))
+      await expect(downloads[0]).toMatch(/^gantt-\d{4}-\d{2}-\d{2}\.svg$/u)
+      await expect(canvas.getByRole('button', { name: t('tasks.gantt.exportPng') })).toBeEnabled()
+      await expect(canvas.queryByTestId('task-gantt-export-error')).not.toBeInTheDocument()
+    } finally {
+      HTMLAnchorElement.prototype.click = originalClick
+    }
   },
 }

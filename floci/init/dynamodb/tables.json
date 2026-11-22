@@ -1,0 +1,800 @@
+[
+  {
+    "constructId": "WorkItemsTable",
+    "tableName": "mukuroji-team-issues-local",
+    "tableNameVariable": "WORK_ITEMS_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "directoryTeamId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "issueId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "sortOrder",
+        "AttributeType": "N"
+      },
+      {
+        "AttributeName": "updatedAt",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "directoryProjectId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "notificationScheduleShard",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "notificationDueKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "customerCompletionPreparationAt",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "directoryTeamId",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "issueId",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [
+      {
+        "IndexName": "TeamIssueSortOrderIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "directoryTeamId",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "sortOrder",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      },
+      {
+        "IndexName": "TeamIssueUpdatedAtIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "directoryTeamId",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "updatedAt",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      },
+      {
+        "IndexName": "AssignedProjectIssueIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "directoryProjectId",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "sortOrder",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      },
+      {
+        "IndexName": "WorkItemNotificationDueIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "notificationScheduleShard",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "notificationDueKey",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      },
+      {
+        "IndexName": "WorkItemCustomerCompletionPreparationIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "notificationScheduleShard",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "customerCompletionPreparationAt",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "KEYS_ONLY"
+        }
+      }
+    ],
+    "timeToLiveAttribute": null
+  },
+  {
+    "constructId": "ProjectDirectoryTable",
+    "tableName": "mukuroji-project-directory-local",
+    "tableNameVariable": "PROJECT_DIRECTORY_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "directoryId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "entryKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "webhookAuthorizationKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "webhookAuthorizationSortKey",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "directoryId",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "entryKey",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [
+      {
+        "IndexName": "WebhookAuthorizationIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "webhookAuthorizationKey",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "webhookAuthorizationSortKey",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "KEYS_ONLY"
+        }
+      }
+    ],
+    "timeToLiveAttribute": null
+  },
+  {
+    "constructId": "WorkspaceAccessTable",
+    "tableName": "mukuroji-workspace-access-local",
+    "tableNameVariable": "WORKSPACE_ACCESS_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "workspaceId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "recordKey",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "workspaceId",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "recordKey",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [],
+    "timeToLiveAttribute": null
+  },
+  {
+    "constructId": "EnterpriseIdentityTable",
+    "tableName": "mukuroji-enterprise-identity-local",
+    "tableNameVariable": "ENTERPRISE_IDENTITY_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "scopeKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "recordKey",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "scopeKey",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "recordKey",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [],
+    "timeToLiveAttribute": "expiresAt"
+  },
+  {
+    "constructId": "RealtimeSessionsTable",
+    "tableName": "mukuroji-realtime-sessions-local",
+    "tableNameVariable": "REALTIME_SESSIONS_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "connectionId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "scopeKey",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "connectionId",
+        "KeyType": "HASH"
+      }
+    ],
+    "globalSecondaryIndexes": [
+      {
+        "IndexName": "ScopeConnectionsIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "scopeKey",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "connectionId",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      }
+    ],
+    "timeToLiveAttribute": "expiresAt"
+  },
+  {
+    "constructId": "WorkspaceSearchTable",
+    "tableName": "mukuroji-workspace-search-local",
+    "tableNameVariable": "WORKSPACE_SEARCH_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "workspaceId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "recordKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "searchTitleKey",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "workspaceId",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "recordKey",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [
+      {
+        "IndexName": "SearchTitleIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "workspaceId",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "searchTitleKey",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "INCLUDE",
+          "NonKeyAttributes": [
+            "entityId",
+            "title",
+            "subtitle"
+          ]
+        }
+      }
+    ],
+    "timeToLiveAttribute": "expiresAt"
+  },
+  {
+    "constructId": "AnalyticsTable",
+    "tableName": "mukuroji-analytics-local",
+    "tableNameVariable": "ANALYTICS_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "workspaceId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "recordKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "scheduleShard",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "nextDeliveryAtRecordKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "teamId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "startAt",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "workspaceId",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "recordKey",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [
+      {
+        "IndexName": "ScheduleDueIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "scheduleShard",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "nextDeliveryAtRecordKey",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "KEYS_ONLY"
+        }
+      },
+      {
+        "IndexName": "TimeEntryTeamDateIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "teamId",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "startAt",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      }
+    ],
+    "timeToLiveAttribute": "historyExpiresAt"
+  },
+  {
+    "constructId": "TenantAdministrationTable",
+    "tableName": "mukuroji-tenant-administration-local",
+    "tableNameVariable": "TENANT_ADMINISTRATION_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "workspaceId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "recordKey",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "workspaceId",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "recordKey",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [],
+    "timeToLiveAttribute": "expiresAt"
+  },
+  {
+    "constructId": "WorkItemCollaborationTable",
+    "tableName": "mukuroji-collaboration-local",
+    "tableNameVariable": "COLLABORATION_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "entityKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "recordKey",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "entityKey",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "recordKey",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [],
+    "timeToLiveAttribute": "expiresAt"
+  },
+  {
+    "constructId": "NotificationsTable",
+    "tableName": "mukuroji-notifications-local",
+    "tableNameVariable": "NOTIFICATIONS_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "recipientKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "notificationKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "recipientStatusKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "slackQueueShard",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "slackNextAttemptAt",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "emailQueueShard",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "emailNextAttemptAt",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "recipientKey",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "notificationKey",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [
+      {
+        "IndexName": "RecipientStatusIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "recipientStatusKey",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "notificationKey",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      },
+      {
+        "IndexName": "SlackDeliveryIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "slackQueueShard",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "slackNextAttemptAt",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "KEYS_ONLY"
+        }
+      },
+      {
+        "IndexName": "EmailDeliveryIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "emailQueueShard",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "emailNextAttemptAt",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "KEYS_ONLY"
+        }
+      }
+    ],
+    "timeToLiveAttribute": "expiresAt"
+  },
+  {
+    "constructId": "ProcessedAuditEventsTable",
+    "tableName": "mukuroji-processed-audit-events-local",
+    "tableNameVariable": "PROCESSED_AUDIT_EVENTS_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "consumerName",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "eventId",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "consumerName",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "eventId",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [],
+    "timeToLiveAttribute": "expiresAt"
+  },
+  {
+    "constructId": "DeveloperPlatformTable",
+    "tableName": "mukuroji-developer-platform-local",
+    "tableNameVariable": "DEVELOPER_PLATFORM_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "workspaceId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "recordKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "lookupKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "lookupSortKey",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "workspaceId",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "recordKey",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [
+      {
+        "IndexName": "LookupKeyIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "lookupKey",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "lookupSortKey",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "KEYS_ONLY"
+        }
+      }
+    ],
+    "timeToLiveAttribute": "expiresAt"
+  },
+  {
+    "constructId": "PushSubscriptionsTable",
+    "tableName": "mukuroji-push-subscriptions-local",
+    "tableNameVariable": "PUSH_SUBSCRIPTIONS_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "pk",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "sk",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "pk",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "sk",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [],
+    "timeToLiveAttribute": "expiresAt"
+  },
+  {
+    "constructId": "AgentRunsTable",
+    "tableName": "mukuroji-agent-runs-local",
+    "tableNameVariable": "AGENT_RUNS_TABLE_NAME",
+    "attributeDefinitions": [
+      {
+        "AttributeName": "directoryTeamId",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "recordKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "workItemRunKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "workItemRunSortKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "activeRunPartition",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "activeRunSortKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "finishedRunPartition",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "finishedRunSortKey",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "triageIndexPartition",
+        "AttributeType": "S"
+      },
+      {
+        "AttributeName": "triageIndexSortKey",
+        "AttributeType": "S"
+      }
+    ],
+    "keySchema": [
+      {
+        "AttributeName": "directoryTeamId",
+        "KeyType": "HASH"
+      },
+      {
+        "AttributeName": "recordKey",
+        "KeyType": "RANGE"
+      }
+    ],
+    "globalSecondaryIndexes": [
+      {
+        "IndexName": "WorkItemRunIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "workItemRunKey",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "workItemRunSortKey",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      },
+      {
+        "IndexName": "ActiveRunIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "activeRunPartition",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "activeRunSortKey",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "ALL"
+        }
+      },
+      {
+        "IndexName": "FinishedRunIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "finishedRunPartition",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "finishedRunSortKey",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "INCLUDE",
+          "NonKeyAttributes": [
+            "runId",
+            "workItemId",
+            "outcome",
+            "finishedAt"
+          ]
+        }
+      },
+      {
+        "IndexName": "AgentRunTriageIndex",
+        "KeySchema": [
+          {
+            "AttributeName": "triageIndexPartition",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "triageIndexSortKey",
+            "KeyType": "RANGE"
+          }
+        ],
+        "Projection": {
+          "ProjectionType": "INCLUDE",
+          "NonKeyAttributes": [
+            "workspaceId",
+            "teamId",
+            "runId"
+          ]
+        }
+      }
+    ],
+    "timeToLiveAttribute": null
+  }
+]

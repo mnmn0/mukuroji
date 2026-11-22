@@ -1961,7 +1961,7 @@ test('Project-scoped Enterprise readers see Project and viewer task views withou
       scope,
       filters: {},
       layout: {
-        mode: 'list',
+        mode: 'table',
         sort: [],
         columns: [{ field: 'title' }],
         density: 'comfortable',
@@ -2063,7 +2063,7 @@ test('Project-scoped Enterprise writers can mutate Project Work Item views but c
       scope: { kind: 'project', teamId: 'core-team', projectId: 'refero' },
       filters: {},
       layout: {
-        mode: 'list',
+        mode: 'table',
         sort: [],
         columns: [{ field: 'title' }],
         density: 'comfortable',
@@ -2238,7 +2238,7 @@ test('Enterprise task view mutations stay inside each authoritative writable Pro
       scope,
       filters: {},
       layout: {
-        mode: 'list',
+        mode: 'table',
         sort: [],
         columns: [{ field: 'title' }],
         density: 'comfortable',
@@ -2352,7 +2352,7 @@ test('task view endpoints reject malformed query and JSON contracts before invok
         scope: { kind: 'viewer' },
         filters: {},
         layout: {
-          mode: 'list',
+          mode: 'table',
           sort: [],
           columns: [{ field: 'title' }],
           density: 'compact',

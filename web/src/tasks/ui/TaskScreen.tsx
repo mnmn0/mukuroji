@@ -384,6 +384,8 @@ export type TaskScreenProps = {
   taskViewDefinition?: TaskViewDefinition
   /** Presentation settings rendered by table and board layouts. */
   taskViewPresentation?: TaskViewPresentationSettings
+  /** Applies presentation settings changed inside a layout, such as the Gantt scale. */
+  onTaskViewPresentationChange?: (settings: TaskViewPresentationSettings) => void
   /** Hierarchy shown as an outline by the table and the Gantt chart. */
   outline?: TaskGanttOutline
   /** Optional route-controlled task view state. */
@@ -692,6 +694,7 @@ export function TaskScreen({
   taskViewToolbar,
   taskViewDefinition,
   taskViewPresentation,
+  onTaskViewPresentationChange,
   outline,
   planningErrorMessage,
   planningSnapshot,
@@ -3917,6 +3920,7 @@ export function TaskScreen({
                 taskErrorMessage={taskErrorMessage}
                 taskViewToolbar={taskViewToolbar}
                 taskViewPresentation={taskViewPresentation}
+                onTaskViewPresentationChange={onTaskViewPresentationChange}
                 outline={outline}
                 scheduleBaselineFor={scheduleBaselineFor}
                 tasks={visibleTasks}

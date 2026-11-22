@@ -81,6 +81,17 @@ import {
 } from '../model/taskGanttRows'
 import { ChevronIcon } from '../../shared/ui/icons'
 import { printTaskView, type TaskViewPrintPaper } from './taskViewPrint'
+import type { TaskGanttDisplaySettings } from '../model/taskGanttDisplay'
+import {
+  createTaskGanttImage,
+  type TaskGanttImageBar,
+  type TaskGanttImageRow,
+} from '../model/taskGanttImage'
+import {
+  downloadTaskGanttImage,
+  TaskGanttImageTooLargeError,
+  type TaskGanttImageFormat,
+} from './taskGanttImageExport'
 import { resolveWorkItemEffortColumnValue } from '../../work-items/model/workItemEffort'
 import type { WorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
 import {
@@ -252,8 +263,22 @@ type GanttDependencyLayout = {
   externalStubs: GanttExternalEndpointStub[]
 }
 
+/** Display settings a Gantt chart starts with when no saved view supplies them. */
+const DEFAULT_GANTT_DISPLAY_SETTINGS: TaskGanttDisplaySettings = {
+  isCompact: false,
+  scale: 'auto',
+  showsProgressLine: false,
+}
+
 /** Props for the independent project task Gantt view. */
 export type TaskGanttViewProps = {
+  /**
+   * Display settings owned by the active task view. When set, the chart renders them and reports
+   * changes through `onDisplayChange` instead of keeping its own.
+   */
+  display?: TaskGanttDisplaySettings
+  /** Receives the next display settings after the user changes scale, one-line, or progress line. */
+  onDisplayChange?: (display: TaskGanttDisplaySettings) => void
   /** Unfiltered tasks used to distinguish Project membership from the rendered filter result. */
   allProjectTasks?: CanonicalWorkItem[]
   /** Determines whether the current user may manage one canonical dependency endpoint. */
@@ -344,8 +369,10 @@ export function TaskGanttView({
   canManageScheduleDependencyEndpoint,
   configuration,
   configurationsByTeam,
+  display: controlledDisplay,
   group,
   onCreateTaskOpen,
+  onDisplayChange,
   onCreateScheduleDependency,
   onDeleteScheduleDependency,
   onRequestScheduleChange,
@@ -418,9 +445,19 @@ export function TaskGanttView({
       visibleTaskKeys.has(createWorkItemDependencyEndpointKey(row.dependency.successor))
     )
   }, [planningSnapshot, visibleTaskKeys])
-  const [scale, setScale] = useState<TaskGanttScale>('auto')
-  const [isCompact, setIsCompact] = useState(false)
-  const [showsProgressLine, setShowsProgressLine] = useState(false)
+  const [localDisplay, setLocalDisplay] = useState(DEFAULT_GANTT_DISPLAY_SETTINGS)
+  const display = controlledDisplay ?? localDisplay
+  const { isCompact, scale, showsProgressLine } = display
+  /**
+   * Applies one display change locally and reports it to the owning task view.
+   *
+   * @param patch - Changed display settings.
+   */
+  const changeDisplay = (patch: Partial<TaskGanttDisplaySettings>) => {
+    const next = { ...display, ...patch }
+    if (!controlledDisplay) setLocalDisplay(next)
+    onDisplayChange?.(next)
+  }
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   /** Whether a move to today waits for the period containing today to render. */
   const todayScrollPendingRef = useRef(false)
@@ -606,6 +643,96 @@ export function TaskGanttView({
       root,
       target: 'task-gantt',
     })
+  }
+  const [isExportingImage, setIsExportingImage] = useState(false)
+  const [imageExportError, setImageExportError] = useState<string>()
+  /**
+   * Saves the whole chart, including rows outside the visible part, as a PNG or SVG file.
+   *
+   * The image is drawn from the chart's layout values, so rows that are not in the DOM are
+   * included too.
+   *
+   * @param format - File format to save.
+   */
+  const exportChartImage = async (format: TaskGanttImageFormat) => {
+    setIsExportingImage(true)
+    setImageExportError(undefined)
+    try {
+      // The image has no schedule editors, so it always uses the one-line rows: a standard
+      // 124px row would make a few hundred rows taller than a browser can rasterize.
+      const imageRowLayout = scheduleBaselineFor
+        ? GANTT_COMPACT_BASELINE_ROW_LAYOUT
+        : GANTT_COMPACT_ROW_LAYOUT
+      const imageBarCenterOffset = imageRowLayout.barTop + imageRowLayout.barHeight / 2
+      const imageRowTops = createGanttRowTops(displayRows, imageRowLayout.rowHeight)
+      const imageDependencyLayout = createGanttDependencyLayout(
+        dependencyRows,
+        displayRows,
+        imageRowTops,
+        timelineAxis,
+        projectTaskKeys,
+        imageBarCenterOffset,
+      )
+      const imageProgressLinePoints = showsProgressLine && todayX !== undefined
+        ? createGanttProgressLinePoints({
+            axis: timelineAxis,
+            barCenterOffset: imageBarCenterOffset,
+            configuration,
+            configurationsByTeam,
+            rowHeight: imageRowLayout.rowHeight,
+            rowTops: imageRowTops,
+            rows: displayRows,
+            today,
+            todayX,
+            topOffset: imageDependencyLayout.externalLaneHeight,
+          })
+        : undefined
+      const image = createTaskGanttImage({
+        columnWidth,
+        columns: timelineColumns.map((column) => ({
+          isNonWorking: nonWorkingDates.has(column.startDate) && column.startDate === column.endDate,
+          isToday: column.startDate <= today && today <= column.endDate,
+          label: column.label,
+        })),
+        connectors: imageDependencyLayout.connectors.map((connector) => ({
+          conflict: connector.conflictCount > 0,
+          critical: connector.critical,
+          path: connector.path,
+        })),
+        externalLaneHeight: imageDependencyLayout.externalLaneHeight,
+        externalLaneLabel: t('workItems.dependencies.externalLane'),
+        externalStubs: imageDependencyLayout.externalStubs.map((stub) => ({
+          label: t('workItems.dependencies.externalEndpoint').replace('{title}', stub.label),
+          x: stub.x,
+          y: stub.y,
+        })),
+        labelHeader: t('tasks.gantt.owner'),
+        labelWidth: GANTT_TABLE_WIDTH,
+        nonWorkingSpans,
+        ...(imageProgressLinePoints ? { progressLinePoints: imageProgressLinePoints } : {}),
+        rowTops: imageRowTops,
+        rows: displayRows.map((row) => row.kind === 'group'
+          ? { kind: 'group', label: `${row.label} (${row.count})` }
+          : createGanttImageTaskRow(row, {
+              axis: timelineAxis,
+              configuration,
+              configurationsByTeam,
+              rowLayout: imageRowLayout,
+              scheduleBaselineFor,
+            })),
+        title: t('tasks.gantt.imageTitle').replace('{date}', today),
+        ...(todayX === undefined ? {} : { todayX }),
+      })
+      await downloadTaskGanttImage(image, format, `gantt-${today}`)
+    } catch (error) {
+      if (isMountedRef.current) {
+        setImageExportError(t(error instanceof TaskGanttImageTooLargeError
+          ? 'tasks.gantt.exportImageTooLarge'
+          : 'tasks.gantt.exportImageFailed'))
+      }
+    } finally {
+      if (isMountedRef.current) setIsExportingImage(false)
+    }
   }
   const [dragChange, setDragChange] = useState<GanttDragChange>()
   const dragChangeRef = useRef<GanttDragChange | undefined>(undefined)
@@ -830,15 +957,29 @@ export function TaskGanttView({
         canMoveToToday={todayX !== undefined || onWindowStartMonthChange !== undefined}
         effectiveScale={scaledTimeline?.scale}
         isCompact={isCompact}
-        onCompactChange={setIsCompact}
+        onCompactChange={(nextIsCompact) => changeDisplay({ isCompact: nextIsCompact })}
         onMoveToToday={moveToToday}
+        isExportingImage={isExportingImage}
+        onExportImage={(format) => void exportChartImage(format)}
         onPrint={printChart}
-        onProgressLineChange={setShowsProgressLine}
-        onScaleChange={setScale}
+        onProgressLineChange={(nextShowsProgressLine) =>
+          changeDisplay({ showsProgressLine: nextShowsProgressLine })
+        }
+        onScaleChange={(nextScale) => changeDisplay({ scale: nextScale })}
         scale={scale}
         showsProgressLine={showsProgressLine}
         t={t}
       />
+      {imageExportError ? (
+        <p
+          className="border-b border-tone-fecaca bg-tone-fef2f2 px-4 py-2 text-sm font-medium text-fg-b42318"
+          data-print-hidden=""
+          data-testid="task-gantt-export-error"
+          role="alert"
+        >
+          {imageExportError}
+        </p>
+      ) : null}
       {progressSummary ? <GanttProgressSummary entries={progressSummary} t={t} /> : null}
       {dependencyRows.length > 0 ? (
         <ul
@@ -2015,8 +2156,12 @@ type GanttDisplayToolbarProps = {
   effectiveScale?: TaskGanttScale
   /** Whether rows use the one-line layout. */
   isCompact: boolean
+  /** Whether an image export is being prepared. */
+  isExportingImage: boolean
   /** Turns the one-line layout on or off. */
   onCompactChange: (isCompact: boolean) => void
+  /** Saves the whole chart as an image file. */
+  onExportImage: (format: TaskGanttImageFormat) => void
   /** Brings today's line into view. */
   onMoveToToday: () => void
   /** Prints the chart on landscape paper. */
@@ -2043,7 +2188,9 @@ function GanttDisplayToolbar({
   canMoveToToday,
   effectiveScale,
   isCompact,
+  isExportingImage,
   onCompactChange,
+  onExportImage,
   onMoveToToday,
   onPrint,
   onProgressLineChange,
@@ -2125,8 +2272,95 @@ function GanttDisplayToolbar({
       >
         {t('tasks.gantt.printA4')}
       </button>
+      <button
+        className={buttonClassName}
+        data-testid="task-gantt-export-png"
+        disabled={isExportingImage}
+        onClick={() => onExportImage('png')}
+        type="button"
+      >
+        {t('tasks.gantt.exportPng')}
+      </button>
+      <button
+        className={buttonClassName}
+        data-testid="task-gantt-export-svg"
+        disabled={isExportingImage}
+        onClick={() => onExportImage('svg')}
+        type="button"
+      >
+        {t('tasks.gantt.exportSvg')}
+      </button>
     </div>
   )
+}
+
+/** Values a Gantt task row needs to place its bars in an exported image. */
+type GanttImageRowContext = {
+  /** Timeline axis of the chart. */
+  axis: TaskGanttTimelineAxis
+  /** Fallback configuration used for progress of a single-team view. */
+  configuration?: WorkItemConfiguration
+  /** Team-scoped configurations used for progress. */
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>
+  /** Row geometry of the current layout. */
+  rowLayout: GanttRowLayout
+  /** Finds each Work Item's Project baseline. */
+  scheduleBaselineFor?: WorkItemBaselineLookup
+}
+
+/**
+ * Builds the exported-image row of one Work Item with the same bars the chart draws.
+ *
+ * @param row - Task row of the chart.
+ * @param context - Axis, layout, and lookups shared by every row.
+ * @returns The image row with its label and bars.
+ */
+function createGanttImageTaskRow(row: GanttTaskRow, context: GanttImageRowContext): TaskGanttImageRow {
+  const { axis, rowLayout } = context
+  const bars: TaskGanttImageBar[] = []
+  const rollup = row.outline?.node?.rollup
+  const summaryBar = rollup?.startDate && rollup.endDate
+    ? createGanttDateRangeBar(rollup.startDate, rollup.endDate, axis)
+    : undefined
+  if (summaryBar) {
+    bars.push({ height: 8, kind: 'summary', left: summaryBar.left, top: rowLayout.summaryBarTop, width: summaryBar.width })
+  }
+  const plannedBar = row.schedule.mode === 'unscheduled' ? undefined : createGanttBar(row.schedule, axis)
+  if (plannedBar && row.schedule.mode !== 'unscheduled') {
+    const progressPercent = resolveWorkItemEffortColumnValue(
+      row.task,
+      'progress',
+      resolveProjectTaskConfiguration(row.task, context.configurationsByTeam, context.configuration),
+    )
+    bars.push({
+      height: rowLayout.barHeight,
+      kind: row.schedule.mode,
+      left: plannedBar.left,
+      top: rowLayout.barTop,
+      width: plannedBar.width,
+      ...(progressPercent === undefined ? {} : { progressPercent }),
+    })
+  }
+  const actualBar = createGanttActualBar(row.task, row.schedule, axis)
+  if (actualBar) {
+    bars.push({ height: 10, kind: 'actual', left: actualBar.left, top: rowLayout.actualBarTop, width: actualBar.width })
+  }
+  const baselineRange = resolveGanttBaselineDateRange(context.scheduleBaselineFor?.(row.task))
+  const baselineBar = baselineRange
+    ? createGanttDateRangeBar(baselineRange.startDate, baselineRange.endDate, axis)
+    : undefined
+  if (baselineBar) {
+    bars.push({ height: 6, kind: 'baseline', left: baselineBar.left, top: rowLayout.baselineBarTop, width: baselineBar.width })
+  }
+  const wbsNumber = row.outline?.node?.wbsNumber
+  return {
+    bars,
+    indent: row.outline
+      ? Math.min(row.outline.depth, GANTT_OUTLINE_MAX_INDENT_LEVELS) * GANTT_OUTLINE_INDENT
+      : 0,
+    kind: 'task',
+    label: `${wbsNumber ? `${wbsNumber} ` : ''}${resolveWorkItemTitle(row.task)}`,
+  }
 }
 
 /**

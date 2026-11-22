@@ -104,12 +104,17 @@ import { listTaskGanttRowTasks } from '../../tasks/model/taskGanttRows'
 import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import { createMyTasksGanttGrouping } from '../../workspace/model/myTaskGrouping'
+import {
+  createMyTasksTableSections,
+  listMyTasksTableRowTasks,
+} from '../../workspace/model/myTaskTable'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { useCollapsedWorkItemOutlineKeys } from '../../shared/lib/preferences/useCollapsedWorkItemOutlineKeys'
 import { WorkItemOutlineNotice } from '../../work-items/ui/WorkItemOutlineNotice'
 import type { TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
+import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 
 /**
  * Server-side filter for My Tasks: only Work Items the viewer owns or contributes to are read,
@@ -245,7 +250,7 @@ export function MyTasksPage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
-      layoutModes: ['board', 'gantt', 'calendar'],
+      layoutModes: ['board', 'table', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
@@ -281,7 +286,9 @@ export function MyTasksPage() {
   )
   const myTasksLayoutMode = taskViewController.effectiveDefinition.layout.mode
   const myTasksViewMode: MyTasksViewMode =
-    myTasksLayoutMode === 'gantt' || myTasksLayoutMode === 'calendar' ? myTasksLayoutMode : 'board'
+    myTasksLayoutMode === 'table' || myTasksLayoutMode === 'gantt' || myTasksLayoutMode === 'calendar'
+      ? myTasksLayoutMode
+      : 'board'
   const isMyTasksOutlineShown = myTasksViewMode === 'gantt' &&
     (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false)
   const myTasksOutlineTeamIds = useMemo(
@@ -314,11 +321,26 @@ export function MyTasksPage() {
   )
   // In the Gantt chart, keyboard moves and selection follow its rows: its groups and outline
   // order, without the rows under a collapsed parent. The calendar keeps only the cards of the
-  // shown month and the unscheduled bucket.
+  // shown month and the unscheduled bucket, and the table follows its groups.
   const myTasksGanttGroupBy = taskViewController.effectiveDefinition.layout.group?.field
   const myTasksGanttGroupDirection = taskViewController.effectiveDefinition.layout.group?.direction
+  const myTasksTablePresentation = useMemo(
+    () => myTasksViewMode === 'table'
+      ? taskViewDefinitionToPresentationSettings(taskViewController.effectiveDefinition)
+      : undefined,
+    [myTasksViewMode, taskViewController.effectiveDefinition],
+  )
   const navigableMyTasks = useMemo(() => {
     if (myTasksViewMode === 'calendar') return listTaskCalendarMonthTasks(visibleMyTasks, myTasksCalendarMonth)
+    if (myTasksViewMode === 'table') {
+      return listMyTasksTableRowTasks(createMyTasksTableSections(
+        visibleMyTasks,
+        myTasksTablePresentation,
+        workItems.configurationsByTeam,
+        workspace.teams,
+        t,
+      ))
+    }
     if (myTasksViewMode !== 'gantt') return visibleMyTasks
     const group = createMyTasksGanttGrouping(
       myTasksGanttGroupBy,
@@ -336,6 +358,7 @@ export function MyTasksPage() {
     myTasksGanttGroupBy,
     myTasksGanttGroupDirection,
     myTasksGanttOutline,
+    myTasksTablePresentation,
     myTasksViewMode,
     t,
     visibleMyTasks,
@@ -876,6 +899,19 @@ export function MyTasksPage() {
   const taskViewPresentation = taskViewDefinitionToPresentationSettings(
     taskViewController.effectiveDefinition,
   )
+  /**
+   * Applies presentation settings from the toolbar or a layout to the effective task view.
+   *
+   * @param settings - Next presentation settings.
+   */
+  const changeTaskViewPresentation = (settings: TaskViewPresentationSettings) => {
+    taskViewController.setEffectiveDefinition(
+      presentationSettingsToTaskViewDefinition(
+        taskViewController.effectiveDefinition,
+        settings,
+      ),
+    )
+  }
   const taskViewToolbar = (
     <TaskViewToolbar
       builtInName={t('workspace.myTasks.title')}
@@ -897,14 +933,7 @@ export function MyTasksPage() {
       onReset={taskViewController.resetOverrides}
       onSaveAs={taskViewController.saveAs}
       onSelectView={taskViewController.selectView}
-      onSettingsChange={(settings) => {
-        taskViewController.setEffectiveDefinition(
-          presentationSettingsToTaskViewDefinition(
-            taskViewController.effectiveDefinition,
-            settings,
-          ),
-        )
-      }}
+      onSettingsChange={changeTaskViewPresentation}
       onUpdate={taskViewController.updateActiveView}
       selectedView={selectedTaskView}
       settings={taskViewPresentation}
@@ -991,6 +1020,7 @@ export function MyTasksPage() {
           t={t}
           taskMoveErrorMessage={statusMutation.errorMessage}
           taskViewToolbar={taskViewToolbar}
+          onPresentationChange={changeTaskViewPresentation}
           presentation={taskViewPresentation}
           viewMode={myTasksViewMode}
           onViewModeChange={(mode) => {
