@@ -118,6 +118,14 @@ export async function readAuthorizedAnalyticsPlanningGroups(
     if (!canReadPlanningScope(principal, entity)) continue
     readable.set(entity.id, entity)
   }
+  /**
+   * Resolves a linked Cycle or Milestone to its group entity.
+   *
+   * @param id - Linked entity ID, if the Work Item has one.
+   * @param type - Entity type the link must point to.
+   * @returns The entity's ID and title, or undefined when the link is missing, the caller cannot
+   * read the entity, or the entity is of another type; the Work Item then joins the unset group.
+   */
   const toGroupEntity = (
     id: string | undefined,
     type: 'cycle' | 'milestone',
