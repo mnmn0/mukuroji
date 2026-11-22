@@ -20,8 +20,8 @@ export function normalizeWorkspaceInvitationEmail(value: string): string {
 /**
  * Tells whether a normalized email address can receive a Workspace invitation.
  *
- * It accepts one `@` between a non-empty local part and a domain with at least one dot, no
- * whitespace or control characters, and no more than
+ * It accepts one `@` between a non-empty local part and a domain of at least two labels made of
+ * letters, digits and inner hyphens, with no whitespace or control characters and no more than
  * {@link WORKSPACE_INVITATION_EMAIL_MAX_LENGTH} characters. It does not try to accept every
  * address RFC 5322 allows; it rejects what is clearly not a deliverable address.
  *
@@ -50,6 +50,8 @@ export function isWorkspaceInvitationEmail(email: string): boolean {
   return labels.length >= 2 && labels.every((label) =>
     label.length > 0 &&
     label.length <= 63 &&
+    // Letters (including internationalized ones), digits and hyphens only.
+    /^[\p{L}\p{N}-]+$/u.test(label) &&
     !label.startsWith('-') &&
     !label.endsWith('-')
   )

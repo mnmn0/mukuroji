@@ -1115,7 +1115,7 @@ test('forwards one mutation audit context through every invitation resend stage'
 test('rejects a new invitation whose email cannot receive mail before touching Cognito', async () => {
   const calls = configureFakeProjectClients(true, { workspaceUserMissing: true })
 
-  for (const email of ['invitee@example', 'a@b@example.com', 'Invitee <invitee@example.com>']) {
+  for (const email of ['invitee@example', 'a@b@example.com', 'Invitee <invitee@example.com>', 'person@example/com.org', 'person@exa_mple.com']) {
     const response = await app.request('/api/workspace/invitations', {
       method: 'POST',
       headers: {
