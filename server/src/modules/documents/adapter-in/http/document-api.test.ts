@@ -726,6 +726,7 @@ test('batches backlink targets behind one bounded source-read budget', async () 
         backlinks: [{
           documentId: `source-${input.targetId}`,
           documentTitle: `Source ${input.targetId}`,
+          documentKind: 'page',
           relation: {
             id: `relation-${input.targetId}`,
             source: { kind: 'document' },
