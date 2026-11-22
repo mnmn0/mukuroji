@@ -121,7 +121,10 @@ export function WorkspaceBulkInvitePanel({
   }
 
   const sendableIndexes = plan
-    ? plan.rows.flatMap((row, index) => row.issue || outcomes.get(index)?.status === 'sent' ? [] : [index])
+    // A row is sent once. A failed create may already have reserved the invitation (a delivery
+    // failure), so sending it again would only conflict. Failed rows go back into the input and
+    // are checked against the reloaded ledger, which points them at Resend or Reinvite.
+    ? plan.rows.flatMap((row, index) => row.issue || outcomes.has(index) ? [] : [index])
     : []
   const sentCount = [...outcomes.values()].filter((outcome) => outcome.status === 'sent').length
   const failedRows = plan
@@ -283,17 +286,19 @@ export function WorkspaceBulkInvitePanel({
             </div>
           )}
           <div className="flex flex-wrap gap-3">
-            <button
-              className="workbench-button-primary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-60"
-              data-testid="workspace-bulk-invite-send"
-              disabled={isSending || sendableIndexes.length === 0}
-              type="button"
-              onClick={() => void send()}
-            >
-              {isSending
-                ? t('workspace.access.bulk.sending')
-                : t('workspace.access.bulk.send').replace('{count}', String(sendableIndexes.length))}
-            </button>
+            {isSending || !hasSent ? (
+              <button
+                className="workbench-button-primary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-60"
+                data-testid="workspace-bulk-invite-send"
+                disabled={isSending || sendableIndexes.length === 0}
+                type="button"
+                onClick={() => void send()}
+              >
+                {isSending
+                  ? t('workspace.access.bulk.sending')
+                  : t('workspace.access.bulk.send').replace('{count}', String(sendableIndexes.length))}
+              </button>
+            ) : null}
             {hasSent && !isSending && failedRows.length > 0 ? (
               <button
                 className="workbench-button-secondary min-h-10 px-4"

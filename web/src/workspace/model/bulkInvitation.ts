@@ -188,6 +188,17 @@ function readHeaderLayout(cells: readonly string[]): ColumnLayout | undefined {
   }
 }
 
+/**
+ * Removes the `'` that the member CSV export puts before a cell starting with `=`, `+`, `-`, `@`,
+ * a tab or a carriage return, so an exported file reads back with its original values.
+ *
+ * @param cell - Trimmed cell text.
+ * @returns The cell without the spreadsheet escape.
+ */
+function unescapeSpreadsheetCell(cell: string) {
+  return /^'[=+\-@\t\r]/u.test(cell) ? cell.slice(1) : cell
+}
+
 /** Layout of a record without a header: email, then name, then role. */
 const positionalLayout: ColumnLayout = { email: 0, name: 1, role: 2 }
 
@@ -212,7 +223,7 @@ type RawInvitationRow = {
  * @returns The rows of the record.
  */
 function readRecordRows(record: CsvRecord, layout: ColumnLayout | undefined): RawInvitationRow[] {
-  const cells = record.cells.map((cell) => cell.trim())
+  const cells = record.cells.map((cell) => unescapeSpreadsheetCell(cell.trim()))
   if (!layout) {
     const filled = cells.filter((cell) => cell !== '')
     if (filled.length > 1 && filled.every((cell) => cell.includes('@'))) {
