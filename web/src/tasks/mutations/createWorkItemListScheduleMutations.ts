@@ -4,7 +4,7 @@ import type {
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
-import type { KeyedMutator } from 'swr'
+import type { Key, ScopedMutator } from 'swr'
 import {
   confirmTeamIssueSchedule,
   previewTeamIssueSchedule,
@@ -29,19 +29,26 @@ export type WorkItemListScheduleMutationOptions = {
   guardEnterpriseSession: <Result>(request: Promise<Result>) => Promise<Result>
   /** Retains idempotency context for retryable logical mutations. */
   mutationRequestRunner: MutationRequestRunner
-  /** Revalidates or updates the Work Item list shown by the route. */
-  mutateTasks: KeyedMutator<CanonicalWorkItem[]>
+  /**
+   * SWR cache mutator, used with the cache keys below. The keys are those of the render that
+   * started the change, so a later Team or selection change cannot redirect a background write.
+   */
+  mutateCache: ScopedMutator
+  /** Cache key of the Work Item list shown by the route; nothing is published without one. */
+  tasksCacheKey: Key
   /**
    * Reads the route's Work Item list from its backing endpoint. The read rejects on failure, unlike
    * SWR's no-argument `mutate()`, so a failed refresh after a confirmation is retried and reported.
    */
   readTasks: (accessToken: string) => Promise<CanonicalWorkItem[]>
-  /** Revalidates or updates the selected Work Item detail, when the route shows one. */
-  mutateSelectedDetail?: KeyedMutator<TeamIssueDetail>
-  /** Reads the selected Work Item detail from its endpoint; resolves nothing without a selection. */
+  /** Cache key of the selected Work Item detail, when the route shows one. */
+  selectedDetailCacheKey?: Key
+  /** Reads the detail stored under `selectedDetailCacheKey` from its endpoint. */
   readSelectedDetail?: (accessToken: string) => Promise<TeamIssueDetail | undefined>
-  /** Updates the Planning snapshot, when the route reads one. */
-  mutatePlanning?: KeyedMutator<PlanningSnapshot>
+  /** Cache key of the Planning snapshot, when the route reads one. */
+  planningCacheKey?: Key
+  /** Reads the Work Item hierarchy again, whose summary rows roll up the changed dates. */
+  refreshHierarchy?: () => Promise<unknown>
   /** Observes background refresh errors. */
   onBackgroundRefreshError: (error: unknown) => void
   /** Resolves localized fallback messages. */
@@ -77,14 +84,16 @@ export type WorkItemListScheduleMutations = {
 export function createWorkItemListScheduleMutations({
   accessToken,
   guardEnterpriseSession,
-  mutatePlanning,
-  mutateSelectedDetail,
-  mutateTasks,
+  mutateCache,
   mutationRequestRunner,
   onBackgroundRefreshError,
+  planningCacheKey,
   readSelectedDetail,
   readTasks,
+  refreshHierarchy,
+  selectedDetailCacheKey,
   t,
+  tasksCacheKey,
 }: WorkItemListScheduleMutationOptions): WorkItemListScheduleMutations {
   /** Throws the localized task mutation fallback when no session token is available. */
   const requireAccessToken = (): string => {
@@ -94,9 +103,9 @@ export function createWorkItemListScheduleMutations({
 
   /** Revalidates every cache that shows schedules after a stale preview or confirmation. */
   const revalidateAll = () => Promise.all([
-    mutateTasks(),
-    mutateSelectedDetail?.(),
-    mutatePlanning?.(),
+    tasksCacheKey ? mutateCache(tasksCacheKey) : undefined,
+    selectedDetailCacheKey ? mutateCache(selectedDetailCacheKey) : undefined,
+    planningCacheKey ? mutateCache(planningCacheKey) : undefined,
   ])
 
   /** Validates one schedule operation against the observed revision. */
@@ -172,16 +181,22 @@ export function createWorkItemListScheduleMutations({
     if (!confirmedTask) throw new Error(t('tasks.action.updateError'))
 
     /** Reapplies every committed cascade result to the list cache. */
-    const preserveConfirmedTasks = () => mutateTasks(
-      (currentTasks = []) => applyConfirmedSchedulesToTasks(currentTasks, response.workItems),
-      { revalidate: false },
-    )
+    const preserveConfirmedTasks = async () => {
+      if (!tasksCacheKey) return
+      await mutateCache<CanonicalWorkItem[]>(
+        tasksCacheKey,
+        (currentTasks = []) => applyConfirmedSchedulesToTasks(currentTasks, response.workItems),
+        { revalidate: false },
+      )
+    }
     /**
      * Reapplies a matching committed result to the selected detail, which the Team screen shows
      * in place of the list row; an older detail must not bring back the previous schedule.
      */
     const preserveConfirmedSelectedDetail = async () => {
-      await mutateSelectedDetail?.(
+      if (!selectedDetailCacheKey) return
+      await mutateCache<TeamIssueDetail>(
+        selectedDetailCacheKey,
         (currentDetail) => {
           if (!currentDetail) return currentDetail
           const [updatedIssue] = applyConfirmedSchedulesToTasks(
@@ -194,21 +209,28 @@ export function createWorkItemListScheduleMutations({
       )
     }
     /** Fetches and publishes the list only after it observes the committed revisions it lists. */
-    const refreshTasks = () => refreshScheduleConfirmationCache(
-      () => guardEnterpriseSession(readTasks(token)),
-      (tasks) => assertConfirmedScheduleRevisionsObserved(
-        tasks,
-        // A cascade can reach Work Items this list does not show, such as another person's.
-        response.workItems.filter((item) => tasks.some((listed) =>
-          listed.teamId === item.teamId && listed.id === item.id
-        )),
-        'Work Item list',
-      ),
-      (tasks) => mutateTasks(tasks, { revalidate: false }),
-    )
+    const refreshTasks = async () => {
+      if (!tasksCacheKey) return
+      await refreshScheduleConfirmationCache(
+        () => guardEnterpriseSession(readTasks(token)),
+        (tasks) => assertConfirmedScheduleRevisionsObserved(
+          tasks,
+          // A cascade can reach Work Items this list does not show, such as another person's.
+          response.workItems.filter((item) => tasks.some((listed) =>
+            listed.teamId === item.teamId && listed.id === item.id
+          )),
+          'Work Item list',
+        ),
+        (tasks) => mutateCache<CanonicalWorkItem[]>(
+          tasksCacheKey,
+          (currentTasks) => keepNewerCachedWorkItems(tasks, currentTasks),
+          { revalidate: false },
+        ),
+      )
+    }
     /** Fetches and publishes the selected detail only after it observes a matching commit. */
     const refreshSelectedDetail = async () => {
-      if (!readSelectedDetail || !mutateSelectedDetail) return
+      if (!readSelectedDetail || !selectedDetailCacheKey) return
       await refreshScheduleConfirmationCache(
         () => guardEnterpriseSession(readSelectedDetail(token)),
         (detail) => {
@@ -221,12 +243,23 @@ export function createWorkItemListScheduleMutations({
             'selected Work Item detail',
           )
         },
-        (detail) => detail ? mutateSelectedDetail(detail, { revalidate: false }) : Promise.resolve(),
+        (detail) => detail
+          ? mutateCache<TeamIssueDetail>(
+              selectedDetailCacheKey,
+              (currentDetail) => currentDetail &&
+                currentDetail.issue.teamId === detail.issue.teamId &&
+                currentDetail.issue.id === detail.issue.id &&
+                currentDetail.issue.revision > detail.issue.revision
+                ? currentDetail
+                : detail,
+              { revalidate: false },
+            )
+          : Promise.resolve(),
       )
     }
     /** Fetches and publishes a complete, internally consistent Planning snapshot. */
     const refreshPlanning = async () => {
-      if (!mutatePlanning) return
+      if (!planningCacheKey) return
       await refreshScheduleConfirmationCache(
         () => guardEnterpriseSession(getPlanningSnapshot(token)),
         (planning) => assertConfirmedScheduleRevisionsObserved(
@@ -234,7 +267,15 @@ export function createWorkItemListScheduleMutations({
           response.workItems,
           'Planning snapshot',
         ),
-        (planning) => mutatePlanning(planning, { revalidate: false }),
+        (planning) => mutateCache<PlanningSnapshot>(
+          planningCacheKey,
+          // A snapshot is published whole, so one that misses a newer cached revision is dropped.
+          (currentPlanning) => currentPlanning &&
+            hasNewerCachedWorkItem(planning.workItems, currentPlanning.workItems)
+            ? currentPlanning
+            : planning,
+          { revalidate: false },
+        ),
       )
     }
     void revalidateScheduleConfirmationCachesBestEffort([
@@ -250,6 +291,13 @@ export function createWorkItemListScheduleMutations({
         // A partial Planning patch would mix new Work Items with stale summaries.
         preserveConfirmedState: async () => undefined,
         refresh: refreshPlanning,
+      },
+      {
+        // Summary rows are derived on the server, so the hierarchy is only read again.
+        preserveConfirmedState: async () => undefined,
+        refresh: async () => {
+          await refreshHierarchy?.()
+        },
       },
     ], onBackgroundRefreshError)
 
@@ -281,4 +329,53 @@ function isSchedulePreviewStaleError(error: unknown): boolean {
     error.code === 'WorkItemAuthorizationChanged' ||
     error.code === 'WorkItemScheduleDependencyConflict' ||
     error.code === 'WorkItemScheduleCascadeConflict'
+}
+
+/** Identity and revision of one Work Item, as list rows and Planning entries carry it. */
+type RevisionedWorkItem = {
+  /** Owning Team. */
+  teamId: string
+  /** Work Item ID within the Team. */
+  id: string
+  /** Revision the row was read at. */
+  revision: number
+}
+
+/**
+ * Returns a refreshed list in which rows the cache already holds at a newer revision are kept.
+ *
+ * Two confirmations can refresh at once; the first read must not roll back the second commit.
+ *
+ * @param refreshed - Rows read from the endpoint.
+ * @param cached - Rows currently in the cache.
+ * @returns The refreshed rows, each replaced by its cached row when that one is newer.
+ */
+function keepNewerCachedWorkItems(
+  refreshed: CanonicalWorkItem[],
+  cached: CanonicalWorkItem[] | undefined,
+): CanonicalWorkItem[] {
+  if (!cached) return refreshed
+  const cachedByKey = new Map(cached.map((item) => [`${item.teamId}\0${item.id}`, item]))
+  return refreshed.map((item) => {
+    const cachedItem = cachedByKey.get(`${item.teamId}\0${item.id}`)
+    return cachedItem && cachedItem.revision > item.revision ? cachedItem : item
+  })
+}
+
+/**
+ * Returns whether the cache holds any Work Item at a newer revision than a refreshed read.
+ *
+ * @param refreshed - Work Items read from the endpoint.
+ * @param cached - Work Items currently in the cache.
+ * @returns Whether publishing the read would roll a cached Work Item back.
+ */
+function hasNewerCachedWorkItem(
+  refreshed: readonly RevisionedWorkItem[],
+  cached: readonly RevisionedWorkItem[],
+): boolean {
+  const refreshedRevisions = new Map(refreshed.map((item) => [`${item.teamId}\0${item.id}`, item.revision]))
+  return cached.some((item) => {
+    const refreshedRevision = refreshedRevisions.get(`${item.teamId}\0${item.id}`)
+    return refreshedRevision !== undefined && item.revision > refreshedRevision
+  })
 }

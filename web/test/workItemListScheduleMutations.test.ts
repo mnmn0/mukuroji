@@ -60,7 +60,7 @@ describe('Work Item list schedule confirmation', () => {
     const mutations = createWorkItemListScheduleMutations({
       accessToken: 'token',
       guardEnterpriseSession: (request) => request,
-      mutateTasks: (data, options) => mutate<CanonicalWorkItem[]>(cacheKey, data, options),
+      mutateCache: mutate,
       mutationRequestRunner: createMutationRequestRunner(),
       onBackgroundRefreshError: (error) => {
         observedErrors.push(error)
@@ -73,6 +73,7 @@ describe('Work Item list schedule confirmation', () => {
         return [{ ...task, revision: confirmedSchedule.revision, dueDate: '2026-06-05', title: 'Read' }]
       },
       t: createTranslator('en'),
+      tasksCacheKey: cacheKey,
     })
 
     const confirmed = await mutations.confirmScheduleChange(
@@ -91,6 +92,43 @@ describe('Work Item list schedule confirmation', () => {
     expect(published?.[0]?.revision).toBe(confirmedSchedule.revision)
   })
 
+  test('keeps a newer cached revision that a slower refresh would roll back', async () => {
+    globalThis.fetch = Object.assign(
+      async () => Response.json({ workItems: [confirmedSchedule] }),
+      { preconnect: originalFetch.preconnect },
+    )
+    const cacheKey = `work-item-list-schedule:${crypto.randomUUID()}`
+    await mutate(cacheKey, [task], { revalidate: false })
+    const newer = { ...task, revision: confirmedSchedule.revision + 1, title: 'Second commit' }
+    let resolveRead: () => void = () => undefined
+    const readDone = new Promise<void>((resolve) => {
+      resolveRead = resolve
+    })
+
+    const mutations = createWorkItemListScheduleMutations({
+      accessToken: 'token',
+      guardEnterpriseSession: (request) => request,
+      mutateCache: mutate,
+      mutationRequestRunner: createMutationRequestRunner(),
+      onBackgroundRefreshError: () => undefined,
+      readTasks: async () => {
+        // A second confirmation commits while this read is in flight.
+        await mutate(cacheKey, [newer], { revalidate: false })
+        resolveRead()
+        return [{ ...task, revision: confirmedSchedule.revision }]
+      },
+      t: createTranslator('en'),
+      tasksCacheKey: cacheKey,
+    })
+
+    await mutations.confirmScheduleChange(task, createMoveTaskScheduleOperation('2026-06-05'), preview)
+    await readDone
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const published = await mutate<CanonicalWorkItem[]>(cacheKey)
+    expect(published?.[0]?.revision).toBe(newer.revision)
+    expect(published?.[0]?.title).toBe('Second commit')
+  })
+
   test('reports a list read that keeps failing', async () => {
     globalThis.fetch = Object.assign(
       async () => Response.json({ workItems: [confirmedSchedule] }),
@@ -107,13 +145,14 @@ describe('Work Item list schedule confirmation', () => {
     const mutations = createWorkItemListScheduleMutations({
       accessToken: 'token',
       guardEnterpriseSession: (request) => request,
-      mutateTasks: (data, options) => mutate<CanonicalWorkItem[]>(cacheKey, data, options),
+      mutateCache: mutate,
       mutationRequestRunner: createMutationRequestRunner(),
       onBackgroundRefreshError: (error) => resolveReported(error),
       readTasks: async () => {
         throw failure
       },
       t: createTranslator('en'),
+      tasksCacheKey: cacheKey,
     })
 
     await mutations.confirmScheduleChange(task, createMoveTaskScheduleOperation('2026-06-05'), preview)

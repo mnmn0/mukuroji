@@ -1,3 +1,4 @@
+import { useSWRConfig } from 'swr'
 import {
   type TaskViewScope,
   type WorkItemRelation,
@@ -414,21 +415,6 @@ export function TeamIssuePage() {
     t,
     user,
   })
-  const scheduleMutations = createWorkItemListScheduleMutations({
-    accessToken,
-    guardEnterpriseSession,
-    mutatePlanning,
-    mutateSelectedDetail: mutateIssueDetail,
-    mutateTasks: mutateIssues,
-    mutationRequestRunner,
-    onBackgroundRefreshError: (error) => setAuthenticatedApiError(() => error),
-    // Archived Work Items are read too, as the route's list query does.
-    readTasks: (token) => loadTeamIssues(teamId, token, true),
-    readSelectedDetail: async (token) => resolvedSelectedIssueId
-      ? getTeamIssueDetail(teamId, resolvedSelectedIssueId, token)
-      : undefined,
-    t,
-  })
   const detailErrorMessage = detailError
     ? t('issues.error.detail')
     : undefined
@@ -530,6 +516,24 @@ export function TeamIssuePage() {
   } = useTeamWorkItemHierarchy(accessToken, teamId, Boolean(user && !currentUserError) && isOutlineShown)
   // Refreshes the hierarchy of the Team a write went to, even after the person left it.
   const refreshTeamHierarchy = useTeamWorkItemHierarchyRefresh(accessToken, teamId)
+  const { mutate: mutateCache } = useSWRConfig()
+  const scheduleMutations = createWorkItemListScheduleMutations({
+    accessToken,
+    guardEnterpriseSession,
+    mutateCache,
+    mutationRequestRunner,
+    onBackgroundRefreshError: (error) => setAuthenticatedApiError(() => error),
+    planningCacheKey: planningKey,
+    // Archived Work Items are read too, as the route's list query does.
+    readTasks: (token) => loadTeamIssues(teamId, token, true),
+    readSelectedDetail: async (token) => resolvedSelectedIssueId
+      ? getTeamIssueDetail(teamId, resolvedSelectedIssueId, token)
+      : undefined,
+    refreshHierarchy: refreshTeamHierarchy,
+    selectedDetailCacheKey: detailKey,
+    t,
+    tasksCacheKey: issuesKey,
+  })
   const moveIssueInHierarchy = useTeamWorkItemHierarchyMove({
     accessToken,
     teamId,

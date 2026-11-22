@@ -1,3 +1,4 @@
+import { useSWRConfig } from 'swr'
 import type {
   TaskViewScope,
   WorkItemActionContext,
@@ -456,20 +457,23 @@ export function MyTasksPage() {
   const moveTaskStatus = statusMutation.moveTaskStatus
   const updateTaskPriority = statusMutation.updateTaskPriority
   const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
+  const { mutate: mutateCache } = useSWRConfig()
   const scheduleMutations = useMemo(() => createWorkItemListScheduleMutations({
     accessToken: workspace.accessToken,
     guardEnterpriseSession: workspace.guardEnterpriseSession,
-    mutateTasks: workItems.mutateWorkItems,
+    mutateCache,
     mutationRequestRunner,
     // A failed background read leaves the confirmed schedules in place; the next read retries.
     onBackgroundRefreshError: () => undefined,
     readTasks: (token) => loadWorkspaceWorkItems(token, includeArchivedWorkItems, myTasksWorkItemFilter),
     t,
+    tasksCacheKey: workItems.workItemsKey,
   }), [
     includeArchivedWorkItems,
+    mutateCache,
     mutationRequestRunner,
     t,
-    workItems.mutateWorkItems,
+    workItems.workItemsKey,
     workspace.accessToken,
     workspace.guardEnterpriseSession,
   ])
