@@ -32,6 +32,7 @@ import type {
   EnterpriseCustomRole,
   EnterpriseRoleAssignment,
 } from '@mukuroji/contracts'
+import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import {
   afterEach,
   expect,
@@ -1486,6 +1487,87 @@ function createMilestoneInput(
     expectedRevision,
   }
 }
+
+test('groups Work Items by the Milestones the caller can read in Planning', async () => {
+  configureFakeProjectClients(true)
+  const planning = new InMemoryPlanningClient(() => new Date('2026-07-01T00:00:00.000Z'))
+  const workspaceParent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  const workItemState = {
+    workItems: [{
+      id: 'onboarding-friction',
+      revision: 1,
+      teamId: 'core-team',
+      title: 'Onboarding friction',
+      projectId: 'refero',
+      statusCategory: 'started' as const,
+      dueDate: '2026-07-31',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
+    }],
+  }
+  await planning.create('user#demo@example.com', workspaceParent('trend-portfolio', 'portfolio', 0), {
+    workItems: [],
+  })
+  await planning.create('user#demo@example.com', workspaceParent('trend-roadmap', 'roadmap', 1), {
+    workItems: [],
+  })
+  await planning.create('user#demo@example.com', createMilestoneInput('milestone-workspace', 2, {}), {
+    workItems: [],
+  })
+  await planning.putWorkItemLink('user#demo@example.com', {
+    teamId: 'core-team',
+    workItemId: 'onboarding-friction',
+    milestoneId: 'milestone-workspace',
+    goalIds: [],
+    expectedRevision: 3,
+  }, workItemState)
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const widgets = [{
+    id: 'wip-by-milestone',
+    type: 'chart' as const,
+    title: 'WIP',
+    metric: 'wip' as const,
+    groupBy: { dimension: 'milestone' as const },
+  }]
+
+  const response = await analyticsApiRequest('/api/analytics/query', { ...query, widgets })
+  expect(response.status).toBe(200)
+  expect((await response.json()).snapshot.widgets[0].groups).toEqual([
+    expect.objectContaining({ key: 'milestone-workspace', label: 'Milestone milestone-workspace' }),
+  ])
+
+  // A guest who reads the Work Item but not the Workspace Milestone sees it as unset.
+  configureFakeProjectClients(false, {
+    workspaceRole: 'guest',
+    role: 'viewer',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+  })
+  const guest = await analyticsApiRequest('/api/analytics/query', { ...query, widgets })
+  expect(guest.status).toBe(200)
+  const guestBody = await guest.json()
+  expect(guestBody.snapshot.widgets[0].groups).toEqual([
+    expect.objectContaining({ key: '', label: 'Unassigned' }),
+  ])
+  expect(JSON.stringify(guestBody)).not.toContain('milestone-workspace')
+})
 
 test('draws the Milestone trend from the readable Milestones and their Planning audit history', async () => {
   configureFakeProjectClients(true)
