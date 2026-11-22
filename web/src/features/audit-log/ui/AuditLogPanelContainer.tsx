@@ -13,6 +13,20 @@ import { useAuditEvents, type AuditLogRequestGuard } from '../queries/useAuditEv
 import { useAuditExports } from '../queries/useAuditExports'
 import { AuditLogPanel, type AuditLogLoadFailure } from './AuditLogPanel'
 
+/** Number of the last explicit search in this page load, shared by every mount of the panel. */
+let lastAuditSearchRun = 0
+
+/**
+ * Numbers a new explicit search, so its SWR key differs from every earlier search even after
+ * the panel unmounts and mounts again.
+ *
+ * @returns The new search number.
+ */
+function nextAuditSearchRun(): number {
+  lastAuditSearchRun += 1
+  return lastAuditSearchRun
+}
+
 /** Props of the audit log container. */
 type AuditLogPanelContainerProps = {
   /** Bearer token of the signed-in member. */
@@ -67,7 +81,7 @@ export function AuditLogPanelContainer({
     }
     setFilterProblem(undefined)
     setAppliedFilters(result.filters)
-    setSearchRun((run) => run + 1)
+    setSearchRun(nextAuditSearchRun())
   }
 
   /**
