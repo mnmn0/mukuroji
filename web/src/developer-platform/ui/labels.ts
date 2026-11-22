@@ -158,73 +158,53 @@ export function createDeveloperPlatformLabels(
       },
       {
         value: 'work-item.parent-changed',
-        label: ja ? '親の変更' : 'Parent changed',
-        description: ja
-          ? 'Work Item の親が設定・変更・解除されたとき（子の側）。'
-          : 'The parent of a Work Item was set, changed, or removed (sent for the child).',
+        label: t('developerPlatform.webhookEvents.parentChanged.label'),
+        description: t('developerPlatform.webhookEvents.parentChanged.description'),
       },
       {
         value: 'work-item.child-added',
-        label: ja ? '子の追加' : 'Child added',
-        description: ja
-          ? 'Work Item に子が加わったとき（親の側）。'
-          : 'A child was added to a Work Item (sent for the parent).',
+        label: t('developerPlatform.webhookEvents.childAdded.label'),
+        description: t('developerPlatform.webhookEvents.childAdded.description'),
       },
       {
         value: 'work-item.child-removed',
-        label: ja ? '子の削除' : 'Child removed',
-        description: ja
-          ? 'Work Item から子が外れたとき（親の側）。'
-          : 'A child left a Work Item (sent for the parent).',
+        label: t('developerPlatform.webhookEvents.childRemoved.label'),
+        description: t('developerPlatform.webhookEvents.childRemoved.description'),
       },
       {
         value: 'work-item.blocker-added',
-        label: ja ? 'blocker の追加' : 'Blocker added',
-        description: ja
-          ? 'Work Item を block する Work Item が加わったとき。'
-          : 'A Work Item that blocks this one was added.',
+        label: t('developerPlatform.webhookEvents.blockerAdded.label'),
+        description: t('developerPlatform.webhookEvents.blockerAdded.description'),
       },
       {
         value: 'work-item.blocker-removed',
-        label: ja ? 'blocker の解除' : 'Blocker removed',
-        description: ja
-          ? 'Work Item を block していた Work Item が外れたとき。'
-          : 'A Work Item that blocked this one was removed.',
+        label: t('developerPlatform.webhookEvents.blockerRemoved.label'),
+        description: t('developerPlatform.webhookEvents.blockerRemoved.description'),
       },
       {
         value: 'work-item.blocking-added',
-        label: ja ? 'block 先の追加' : 'Now blocking',
-        description: ja
-          ? 'Work Item が別の Work Item を block し始めたとき。'
-          : 'This Work Item started blocking another Work Item.',
+        label: t('developerPlatform.webhookEvents.blockingAdded.label'),
+        description: t('developerPlatform.webhookEvents.blockingAdded.description'),
       },
       {
         value: 'work-item.blocking-removed',
-        label: ja ? 'block 先の解除' : 'No longer blocking',
-        description: ja
-          ? 'Work Item が別の Work Item を block しなくなったとき。'
-          : 'This Work Item stopped blocking another Work Item.',
+        label: t('developerPlatform.webhookEvents.blockingRemoved.label'),
+        description: t('developerPlatform.webhookEvents.blockingRemoved.description'),
       },
       {
         value: 'work-item.relation-added',
-        label: ja ? '関連の追加' : 'Related item linked',
-        description: ja
-          ? '関連または重複の link が加わったとき。'
-          : 'A related or duplicate link was added.',
+        label: t('developerPlatform.webhookEvents.relationAdded.label'),
+        description: t('developerPlatform.webhookEvents.relationAdded.description'),
       },
       {
         value: 'work-item.relation-removed',
-        label: ja ? '関連の削除' : 'Related item unlinked',
-        description: ja
-          ? '関連または重複の link が外れたとき。'
-          : 'A related or duplicate link was removed.',
+        label: t('developerPlatform.webhookEvents.relationRemoved.label'),
+        description: t('developerPlatform.webhookEvents.relationRemoved.description'),
       },
       {
         value: 'work-item.sibling-order-changed',
-        label: ja ? '並び順の変更' : 'Sibling order changed',
-        description: ja
-          ? '同じ親の中で Work Item の並び順が変わったとき。'
-          : 'A Work Item moved among its siblings.',
+        label: t('developerPlatform.webhookEvents.siblingOrderChanged.label'),
+        description: t('developerPlatform.webhookEvents.siblingOrderChanged.description'),
       },
       {
         value: 'external-link.created',
