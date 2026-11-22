@@ -2068,7 +2068,7 @@ describe('collaboration projection pure helpers', () => {
     const muted = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, {
       eventType: 'work-item.updated', reasons: ['assignment'], projectId: 'noisy',
     })
-    expect(muted).toMatchObject({ inAppVisible: false, inboxState: 'archived', archivedAt: occurredAt, deliveryChannels: [] })
+    expect(muted).toMatchObject({ inAppVisible: true, inboxState: 'archived', archivedAt: occurredAt, deliveryChannels: [] })
     const mention = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, {
       eventType: 'comment.created', reasons: ['mention'], projectId: 'noisy',
     })

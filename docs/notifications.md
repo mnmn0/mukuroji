@@ -104,7 +104,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
 
 あるチャネルに届くのは、チャネル全体の switch が on、その種類でチャネルが切られていない、ミュートされていない、のすべてを満たすときです。ミュートは notification の `projectId` または `teamId` が mutes に含まれるときで、種類が mention か approval で対応する切り替えが on なら除きます。
 
-- 投影（`createNotificationProjectionDeliveryState`）: in-app に届かない通知は `inAppVisible: false` の archived row として保存し、unread には入れません。届かない channel は `deliveryChannels` と Slack / Email の queue に入れません
+- 投影（`createNotificationProjectionDeliveryState`）: 種類やミュートで in-app に届かない通知は archived row として保存し、unread には入れません（アーカイブの一覧には出ます）。全体の in-app switch が off のときは従来どおり `inAppVisible: false` で一覧にも出しません。届かない channel は `deliveryChannels` と Slack / Email の queue に入れません
 - 外部 channel の送信（`deliverDueChannelNotifications`）: 送る直前に強整合で読んだ preference で同じ判定をやり直し、投影後に種類を切ったりミュートしたりした通知は `suppressed` にします
 - 判定は受信者本人の設定で配信を減らすだけで、受信者の選び方と閲覧権限の確認は変えません
 

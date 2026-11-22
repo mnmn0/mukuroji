@@ -1531,7 +1531,8 @@ export function createNotificationProjectionKeys(
 /**
  * Applies the in-app channel, category channels, mutes, digest frequency, and quiet hours to a
  * notification row. A notification the member's category or mute settings keep out of the
- * Inbox is stored archived, so it stays findable without raising the unread count.
+ * Inbox is stored archived, so it stays findable in the archived list without raising the
+ * unread count; turning the in-app channel off still hides the row entirely.
  * @param recipientKey - Server-derived Workspace/member partition key.
  * @param occurredAt - Original event time.
  * @param preferences - Recipient's current stored preferences.
@@ -1547,11 +1548,11 @@ export function createNotificationProjectionDeliveryState(
   const deliveryPlan = createNotificationDeliveryPlan(preferences, occurredAt)
   const routed = (channel: keyof NotificationPreferences['channels']) =>
     isNotificationRoutedToChannel(preferences, subject, channel)
-  const inAppVisible = routed('inApp')
-  const inboxState = inAppVisible ? 'unread' : 'archived'
+  const inboxState = routed('inApp') ? 'unread' : 'archived'
 
   return {
-    inAppVisible,
+    // Only the channel switch hides a row; a category or mute only archives it.
+    inAppVisible: preferences.channels.inApp,
     inboxState,
     recipientStatusKey: `${recipientKey}#${inboxState}`,
     ...(inboxState === 'archived' ? { archivedAt: occurredAt } : {}),
