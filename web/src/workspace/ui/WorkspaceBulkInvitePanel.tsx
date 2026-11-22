@@ -1,4 +1,4 @@
-import { useId, useState, type ChangeEvent } from 'react'
+import { useId, useRef, useState, type ChangeEvent } from 'react'
 import { WORKSPACE_BULK_INVITATION_MAX_ROWS } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceAccess, WorkspaceRole } from '../api/access'
@@ -87,6 +87,9 @@ export function WorkspaceBulkInvitePanel({
   const [outcomes, setOutcomes] = useState<SentOutcomes>(new Map())
   const [isSending, setIsSending] = useState(false)
   const [fileError, setFileError] = useState<string | undefined>()
+  const [isReadingFile, setIsReadingFile] = useState(false)
+  // Counts file reads, so that only the latest selected file replaces the input.
+  const fileReadRef = useRef(0)
 
   const resetPlan = () => {
     setPlan(undefined)
@@ -101,12 +104,20 @@ export function WorkspaceBulkInvitePanel({
       setFileError(t('workspace.access.bulk.fileTooLarge'))
       return
     }
+    const read = fileReadRef.current + 1
+    fileReadRef.current = read
+    setIsReadingFile(true)
     try {
-      setText(await file.text())
+      const content = await file.text()
+      if (fileReadRef.current !== read) return
+      setText(content)
       setFileError(undefined)
       resetPlan()
     } catch {
+      if (fileReadRef.current !== read) return
       setFileError(t('workspace.access.bulk.fileUnreadable'))
+    } finally {
+      if (fileReadRef.current === read) setIsReadingFile(false)
     }
   }
 
@@ -131,9 +142,12 @@ export function WorkspaceBulkInvitePanel({
     ? plan.rows.filter((row, index) => row.issue || outcomes.get(index)?.status === 'failed')
     : []
   const hasSent = outcomes.size > 0
+  // With nothing sendable among the checked rows, the rows past the limit can still be checked.
+  const canKeepRows = !isSending && !isReadingFile && (failedRows.length + (plan?.overflowRows.length ?? 0) > 0) &&
+    (hasSent || (sendableIndexes.length === 0 && (plan?.overflowRows.length ?? 0) > 0))
 
   const send = async () => {
-    if (!plan || isSending || sendableIndexes.length === 0) return
+    if (!plan || isSending || isReadingFile || sendableIndexes.length === 0) return
     const indexes = sendableIndexes
     setIsSending(true)
     try {
@@ -152,8 +166,9 @@ export function WorkspaceBulkInvitePanel({
   }
 
   const keepFailedRows = () => {
-    // Rows past the bulk limit were never sent, so they stay in the input after the failed rows.
-    setText(createBulkInvitationRetryCsv([...failedRows, ...(plan?.overflowRows ?? [])]))
+    // Rows past the bulk limit were never checked, so they go first: the next check reaches them
+    // even when more than the limit of blocked rows is kept for correction.
+    setText(createBulkInvitationRetryCsv([...(plan?.overflowRows ?? []), ...failedRows]))
     resetPlan()
   }
 
@@ -172,7 +187,7 @@ export function WorkspaceBulkInvitePanel({
       <textarea
         className="workbench-input min-h-32 px-3 py-2 font-mono text-sm"
         data-testid="workspace-bulk-invite-input"
-        disabled={isSending}
+        disabled={isSending || isReadingFile}
         id={`${fieldId}-text`}
         placeholder={t('workspace.access.bulk.placeholder')}
         spellCheck={false}
@@ -199,7 +214,7 @@ export function WorkspaceBulkInvitePanel({
           <select
             className="workbench-input min-h-10 px-3"
             data-testid="workspace-bulk-invite-role"
-            disabled={isSending}
+            disabled={isSending || isReadingFile}
             value={defaultRole}
             onChange={(event) => {
               const role = availableRoles.find((candidate) => candidate === event.target.value)
@@ -217,7 +232,7 @@ export function WorkspaceBulkInvitePanel({
         <button
           className="workbench-button-secondary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-60"
           data-testid="workspace-bulk-invite-check"
-          disabled={isSending || text.trim() === ''}
+          disabled={isSending || isReadingFile || text.trim() === ''}
           type="button"
           onClick={check}
         >
@@ -291,7 +306,7 @@ export function WorkspaceBulkInvitePanel({
               <button
                 className="workbench-button-primary min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-60"
                 data-testid="workspace-bulk-invite-send"
-                disabled={isSending || sendableIndexes.length === 0}
+                disabled={isSending || isReadingFile || sendableIndexes.length === 0}
                 type="button"
                 onClick={() => void send()}
               >
@@ -300,7 +315,7 @@ export function WorkspaceBulkInvitePanel({
                   : t('workspace.access.bulk.send').replace('{count}', String(sendableIndexes.length))}
               </button>
             ) : null}
-            {hasSent && !isSending && failedRows.length + plan.overflowRows.length > 0 ? (
+            {canKeepRows ? (
               <button
                 className="workbench-button-secondary min-h-10 px-4"
                 data-testid="workspace-bulk-invite-keep-failed"

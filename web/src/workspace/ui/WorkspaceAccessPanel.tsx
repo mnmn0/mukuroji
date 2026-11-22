@@ -325,7 +325,10 @@ export function WorkspaceAccessPanelContainer({
     revalidateSignInSecurity: mutateSignInSecurity,
   })
 
-  const refresh = async () => {
+  /**
+   * Reloads the access ledger into the cache without touching retained mutation contexts.
+   */
+  const reloadLedger = async () => {
     if (!accessKey) {
       return
     }
@@ -337,6 +340,13 @@ export function WorkspaceAccessPanelContainer({
       () => getWorkspaceAccess(mutationSession.accessToken),
       { revalidate: false },
     )
+  }
+
+  const refresh = async () => {
+    if (!accessKey) {
+      return
+    }
+    await reloadLedger()
     mutationRequestRunner.discardRetainedContexts()
   }
 
@@ -404,7 +414,14 @@ export function WorkspaceAccessPanelContainer({
             onOutcome,
           )
         } finally {
-          await retryLoad()
+          // A failed row keeps its retained context: a reloaded ledger does not show whether an
+          // earlier POST that lost its response is still running, so a retry of the same row must
+          // reuse its idempotency key.
+          try {
+            await reloadLedger()
+          } catch {
+            // The row outcomes stay on screen; the ledger keeps its last snapshot.
+          }
         }
       }}
       onReinviteInvitation={async (invitationId) => {
