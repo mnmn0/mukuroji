@@ -1,19 +1,34 @@
 import type { WorkspaceMember } from '../../workspace/api/access'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import { useSearchParams } from 'react-router'
 import {
   createCrossProjectWorkItemJobRoleOptions,
-  createCrossProjectWorkItemListSearchParams,
   createCrossProjectWorkItemMemberOptions,
   createCrossProjectWorkItemProjectOptions,
   createCrossProjectWorkItemServerFilter,
   filterCrossProjectWorkItems,
   groupCrossProjectWorkItems,
-  parseCrossProjectWorkItemListState,
   type CrossProjectWorkItemListState,
 } from '../../features/cross-project-work-items/model/crossProjectWorkItems'
+import {
+  createCrossProjectWorkItemBuiltInDefinition,
+  crossProjectWorkItemStateToTaskViewDefinition,
+  crossProjectWorkItemTaskViewFields,
+  crossProjectWorkItemTaskViewLayoutModes,
+  crossProjectWorkItemTaskViewScope,
+  readLegacyCrossProjectWorkItemState,
+  removeLegacyCrossProjectWorkItemParams,
+  taskViewDefinitionToCrossProjectWorkItemState,
+} from '../../features/cross-project-work-items/model/crossProjectWorkItemTaskView'
 import { CrossProjectWorkItemList } from '../../features/cross-project-work-items/ui/CrossProjectWorkItemList'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { useTaskViewController } from '../../task-views/mutations/useTaskViewController'
+import { taskViewDefinitionToPresentationSettings } from '../../task-views/model/taskViewSurfaceState'
+import { TaskViewToolbar } from '../../task-views/ui/TaskViewToolbar'
+import {
+  createTaskViewOption,
+  formatTaskViewMigrationWarning,
+} from '../../task-views/ui/taskViewToolbarAdapter'
 import { createWorkspaceTaskScheduleCalendarPolicy } from '../../tasks/model/taskSchedule'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import {
@@ -29,12 +44,22 @@ import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
 const emptyWorkspaceMembers: WorkspaceMember[] = []
+const builtInTaskViewDefinition = createCrossProjectWorkItemBuiltInDefinition()
+const taskViewCapabilities = {
+  columns: ['title'],
+  fields: crossProjectWorkItemTaskViewFields,
+  layoutModes: crossProjectWorkItemTaskViewLayoutModes,
+  requiredColumns: ['title'],
+  workflowStatuses: [],
+}
 
 /**
  * Renders the Workspace-wide Work Item list across every Project the viewer can read.
  *
- * Work Items come from the permission-filtered `GET /api/work-items`, so a shared URL only shows
- * what each viewer may read. Filters and grouping live in the URL.
+ * Work Items come from the permission-filtered `GET /api/work-items`, so a shared URL or saved
+ * view only shows what each viewer may read. Filters, grouping, and layout form a task view of the
+ * `work-items` surface: it can be saved on the server, shared with a Team or the Workspace, and
+ * temporary changes live in the URL.
  *
  * @returns The cross-Project Work Item list inside the shared Workspace shell.
  */
@@ -42,7 +67,34 @@ export function WorkItemsPage() {
   const workspace = useWorkspaceRouteContext()
   const [searchParams, setSearchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
-  const state = useMemo(() => parseCrossProjectWorkItemListState(searchParams), [searchParams])
+  const taskViewController = useTaskViewController({
+    accessToken: workspace.accessToken,
+    builtInDefinition: builtInTaskViewDefinition,
+    capabilities: taskViewCapabilities,
+    enabled: workspace.canLoadWorkspaceData,
+    onSearchParamsChange: (nextSearchParams) => {
+      setSearchParams(removeLegacyCrossProjectWorkItemParams(nextSearchParams), { replace: true })
+    },
+    scope: crossProjectWorkItemTaskViewScope,
+    searchParams,
+    surface: 'work-items',
+  })
+  const { effectiveDefinition, setEffectiveDefinition } = taskViewController
+  const state = useMemo(
+    () => taskViewDefinitionToCrossProjectWorkItemState(effectiveDefinition),
+    [effectiveDefinition],
+  )
+  // A link from before saved views carries the list state in its own parameters. It becomes a
+  // temporary change of the current view once, and those parameters leave the URL.
+  const legacyState = useMemo(() => readLegacyCrossProjectWorkItemState(searchParams), [searchParams])
+  const convertedLegacyParams = useRef(false)
+  useEffect(() => {
+    if (!legacyState || convertedLegacyParams.current) return
+    convertedLegacyParams.current = true
+    setEffectiveDefinition(
+      crossProjectWorkItemStateToTaskViewDefinition(legacyState, effectiveDefinition),
+    )
+  }, [effectiveDefinition, legacyState, setEffectiveDefinition])
   const serverFilter = useMemo(() => createCrossProjectWorkItemServerFilter(state), [state])
   const workItems = useWorkspaceWorkItemData(
     workspace.accessToken,
@@ -96,16 +148,14 @@ export function WorkItemsPage() {
     [state.contributorJobRole, workItems.configurationsByTeam, workItems.tasks, workspace.teams],
   )
   const changeState = useCallback((next: CrossProjectWorkItemListState) => {
-    setSearchParams(createCrossProjectWorkItemListSearchParams(next), { replace: true })
-  }, [setSearchParams])
-  const copyLink = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(window.location.href)
-      return true
-    } catch {
-      return false
-    }
-  }, [])
+    setEffectiveDefinition(crossProjectWorkItemStateToTaskViewDefinition(next, effectiveDefinition))
+  }, [effectiveDefinition, setEffectiveDefinition])
+  const taskViewTeams = useMemo(() => {
+    const writableTeamIds = new Set(taskViewController.writableTeamIds)
+    return workspace.teams
+      .filter((team) => writableTeamIds.has(team.id))
+      .map((team) => ({ id: team.id, name: team.name }))
+  }, [taskViewController.writableTeamIds, workspace.teams])
 
   return (
     // The list shows its own loading state, so changing a filter keeps the toolbar mounted.
@@ -143,6 +193,34 @@ export function WorkItemsPage() {
             </button>
           </div>
         ) : null}
+        <TaskViewToolbar
+          builtInName={t('workItems.crossProject.builtInView')}
+          canManageShared={taskViewController.canManageShared}
+          canWrite={taskViewController.canWrite}
+          columnOptions={[]}
+          errorMessage={taskViewController.errorMessage}
+          groupOptions={[]}
+          isDirty={taskViewController.isDirty}
+          isSaving={taskViewController.isSaving}
+          migrationWarnings={taskViewController.migrationWarnings.map(formatTaskViewMigrationWarning)}
+          onCopyLink={taskViewController.copyPermalink}
+          onDelete={taskViewController.deleteView}
+          onDuplicate={taskViewController.duplicateView}
+          onPatchPreference={taskViewController.patchPreference}
+          onReset={taskViewController.resetOverrides}
+          onSaveAs={taskViewController.saveAs}
+          onSelectView={taskViewController.selectView}
+          onSettingsChange={() => undefined}
+          onUpdate={taskViewController.updateActiveView}
+          selectedView={taskViewController.activeSavedView
+            ? createTaskViewOption(taskViewController.activeSavedView)
+            : undefined}
+          settings={taskViewDefinitionToPresentationSettings(effectiveDefinition)}
+          supportsSettings={false}
+          t={t}
+          teams={taskViewTeams}
+          views={taskViewController.views.map(createTaskViewOption)}
+        />
         <CrossProjectWorkItemList
           configurationsByTeam={workItems.configurationsByTeam}
           groups={groups}
@@ -152,7 +230,6 @@ export function WorkItemsPage() {
           memberLabels={memberLabels}
           memberOptions={memberOptions}
           onChangeState={changeState}
-          onCopyLink={copyLink}
           onOpenWorkItem={workspace.onOpenTask}
           onRetry={() => void workItems.mutateWorkItems()}
           projectOptions={projectOptions}

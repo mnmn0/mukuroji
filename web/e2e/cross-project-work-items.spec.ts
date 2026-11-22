@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import type { CanonicalWorkItem } from '@mukuroji/contracts'
+import type { CanonicalWorkItem, CreateSavedTaskViewInput, SavedTaskView } from '@mukuroji/contracts'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { taskViewStorySelectedTask } from '../src/tasks/ui/TaskView.stories.fixtures'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
@@ -36,10 +36,52 @@ const workItems: CanonicalWorkItem[] = [
  * Installs the session and the permission-filtered Workspace Work Item list API.
  *
  * @param page - Browser page whose API requests are intercepted.
- * @returns Query strings of every `GET /api/work-items` request.
+ * @param savedViews - Saved task views the server returns; a created view is appended.
+ * @returns Query strings of every `GET /api/work-items` request and every created view input.
  */
-async function mockWorkspace(page: Page) {
+async function mockWorkspace(page: Page, savedViews: SavedTaskView[] = []) {
   const listQueries: URLSearchParams[] = []
+  const createdViews: CreateSavedTaskViewInput[] = []
+  await page.route((url) => url.pathname === '/api/task-views', async (route) => {
+    if (route.request().method() === 'POST') {
+      const input: CreateSavedTaskViewInput = route.request().postDataJSON()
+      createdViews.push(input)
+      const view: SavedTaskView = {
+        schemaVersion: 1,
+        id: `view-${createdViews.length}`,
+        name: input.name,
+        visibility: input.visibility,
+        ownerUserId: 'demo@example.com',
+        ...(input.teamId ? { teamId: input.teamId } : {}),
+        definition: input.definition,
+        revision: 1,
+        canEdit: true,
+        preference: {
+          favorite: false,
+          pinned: false,
+          isDefault: false,
+          isPersonalDefault: false,
+          isTeamDefault: false,
+          isProjectDefault: false,
+        },
+        createdAt: '2026-11-22T00:00:00.000Z',
+        updatedAt: '2026-11-22T00:00:00.000Z',
+      }
+      savedViews.push(view)
+      return route.fulfill({ status: 201, json: view })
+    }
+    return route.fulfill({ json: {
+      views: savedViews,
+      capabilities: {
+        canWrite: true,
+        canManageSharedViews: false,
+        canSetTeamDefault: false,
+        canSetProjectDefault: false,
+        writableTeamIds: ['core-team'],
+        writableProjectScopes: [],
+      },
+    } })
+  })
   await page.addInitScript(() => {
     localStorage.setItem('mukuroji.auth', JSON.stringify({ accessToken: 'cross-project-test', expiresAt: Date.now() + 3600000, remember: true, tokenType: 'Bearer' }))
     localStorage.setItem('mukuroji.locale', 'en')
@@ -75,7 +117,7 @@ async function mockWorkspace(page: Page) {
       },
     })
   })
-  return listQueries
+  return Object.assign(listQueries, { createdViews })
 }
 
 test('Issue #381: lists Work Items across Projects, filters by contributor, and keeps the view in the URL', async ({ page }) => {
@@ -100,7 +142,9 @@ test('Issue #381: lists Work Items across Projects, filters by contributor, and 
   await list.getByRole('checkbox', { name: /^プロダクトロードマップ/ }).click()
   await expect(list.getByRole('checkbox', { name: /^プロダクトロードマップ/ })).toBeChecked()
   await expect(groups).toHaveCount(2)
-  await expect(page).toHaveURL(/project=core-team%3Arefero/)
+  // The change is a temporary change of the built-in view, kept in the URL.
+  await expect(page).toHaveURL(/view\.override=/)
+  await expect(page.getByTestId('task-view-dirty-state')).toHaveText('Temporary changes')
   expect(listQueries.at(-1)?.get('teamId')).toBe('core-team')
 
   await list.getByLabel('Job role').selectOption({ label: 'Designer (コアチーム)' })
@@ -119,7 +163,102 @@ test('Issue #381: lists Work Items across Projects, filters by contributor, and 
   await page.getByLabel('Group by').selectOption('assignee')
   await expect(groups).toHaveCount(2)
   expect(listQueries.at(-1)?.get('involvement')).toBe('mine')
-  await expect(page).toHaveURL(/group=assignee/)
+  await page.reload()
+  await expect(page.getByLabel('Group by')).toHaveValue('assignee')
+})
+
+test('Issue #381: saves the cross-Project view on the server and shares it with a Team', async ({ page }) => {
+  const listQueries = await mockWorkspace(page)
+
+  await page.goto('/work-items')
+  const list = page.getByTestId('cross-project-work-items')
+  const groups = page.getByTestId('cross-project-work-item-group')
+  await expect(groups).toHaveCount(3)
+  await list.getByText('Projects: All').click()
+  await list.getByRole('checkbox', { name: /^Refero/ }).click()
+  await expect(list.getByRole('checkbox', { name: /^Refero/ })).toBeChecked()
+  await page.getByLabel('I own or contribute').click()
+  await expect(page.getByLabel('I own or contribute')).toBeChecked()
+
+  await page.getByRole('button', { name: 'Save as new view' }).click()
+  await page.getByLabel('View name').fill('My Refero work')
+  await page.getByLabel('Visibility').selectOption('team')
+  await page.getByLabel('Team ID').selectOption('core-team')
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+
+  await expect.poll(() => listQueries.createdViews.length).toBe(1)
+  expect(listQueries.createdViews[0]).toMatchObject({
+    name: 'My Refero work',
+    visibility: 'team',
+    teamId: 'core-team',
+    definition: {
+      surface: 'work-items',
+      scope: { kind: 'workspace' },
+      filters: {
+        projectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
+        involvement: 'mine',
+      },
+      layout: { mode: 'table', group: { field: 'project', direction: 'asc' } },
+    },
+  })
+  const toolbar = page.getByTestId('task-view-toolbar')
+  await expect(toolbar.getByRole('button', { name: 'My Refero work' })).toBeVisible()
+  await expect(page.getByTestId('task-view-dirty-state')).not.toHaveText('Temporary changes')
+  await expect(groups).toHaveCount(1)
+})
+
+test('Issue #381: opens a shared view with only the Projects the viewer can read', async ({ page }) => {
+  // The server already removed the Project the viewer cannot read from the shared definition.
+  await mockWorkspace(page, [{
+    schemaVersion: 1,
+    id: 'shared-view',
+    name: 'PM portfolio',
+    visibility: 'shared',
+    ownerUserId: 'pm@example.com',
+    definition: {
+      surface: 'work-items',
+      scope: { kind: 'workspace' },
+      filters: { projectScopes: [{ teamId: 'design-team', projectId: 'brand-refresh' }] },
+      layout: {
+        mode: 'board',
+        group: { field: 'project', direction: 'asc' },
+        sort: [],
+        columns: [{ field: 'title' }],
+        density: 'comfortable',
+        displayOptions: { showCompleted: false },
+      },
+    },
+    revision: 1,
+    canEdit: false,
+    preference: {
+      favorite: false,
+      pinned: false,
+      isDefault: true,
+      isPersonalDefault: true,
+      isTeamDefault: false,
+      isProjectDefault: false,
+      defaultSource: 'personal',
+    },
+    createdAt: '2026-11-22T00:00:00.000Z',
+    updatedAt: '2026-11-22T00:00:00.000Z',
+    migrationWarnings: [{ code: 'permission-redacted', section: 'filter', fallback: 'removed' }],
+  }])
+
+  await page.goto('/work-items')
+  await expect(page.getByTestId('task-view-toolbar').getByRole('button', { name: 'PM portfolio' })).toBeVisible()
+  await expect(page.getByTestId('cross-project-work-items-layout-board')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByTestId('cross-project-work-item-lane')).toHaveCount(1)
+  await expect(page.getByRole('button', { name: 'Brand refresh task' })).toBeVisible()
+})
+
+test('Issue #381: an older link with list parameters opens as a temporary change', async ({ page }) => {
+  await mockWorkspace(page)
+
+  await page.goto('/work-items?layout=board&group=assignee')
+  await expect(page.getByTestId('cross-project-work-items-layout-board')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByLabel('Group by')).toHaveValue('assignee')
+  await expect(page).toHaveURL(/view\.override=/)
+  await expect(page).not.toHaveURL(/layout=board/)
 })
 
 test('Issue #381: a failed Work Item read shows the load notice instead of an empty list', async ({ page }) => {
@@ -161,7 +300,7 @@ test('Issue #381: shows the same Work Items on a read-only board and Gantt chart
   await expect(page.getByTestId('cross-project-work-item-group')).toHaveCount(3)
 
   await page.getByTestId('cross-project-work-items-layout-board').click()
-  await expect(page).toHaveURL(/layout=board/)
+  await expect(page.getByTestId('cross-project-work-items-layout-board')).toHaveAttribute('aria-pressed', 'true')
   const lanes = page.getByTestId('cross-project-work-item-lane')
   await expect(lanes).toHaveCount(3)
   const referoLane = lanes.filter({ has: page.getByRole('heading', { name: /^Refero/ }) })
@@ -172,7 +311,7 @@ test('Issue #381: shows the same Work Items on a read-only board and Gantt chart
   await expect(page.locator('[data-testid="cross-project-work-item-card"][draggable="true"]')).toHaveCount(0)
 
   await page.getByTestId('cross-project-work-items-layout-gantt').click()
-  await expect(page).toHaveURL(/layout=gantt/)
+  await expect(page.getByTestId('cross-project-work-items-layout-gantt')).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByTestId('task-gantt-group-project:core-team:refero')).toBeVisible()
   await expect(page.getByTestId('task-gantt-group-project:design-team:brand-refresh')).toBeVisible()
   await expect(page.getByTestId('task-gantt-bar-refero-1')).not.toHaveAttribute('draggable', 'true')

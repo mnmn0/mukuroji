@@ -70,7 +70,7 @@ async function mockTimeReport(page: Page, isManager: boolean): Promise<TimeRepor
     ] } })
   })
   await page.route((url) => url.pathname === '/api/task-views', (route) => route.fulfill({ json: { views: [], capabilities: {
-    canWrite: false, canManageSharedViews: false, canSetTeamDefault: false, writableTeamIds: [], writableProjectScopes: [],
+    canWrite: false, canManageSharedViews: false, canSetTeamDefault: false, canSetProjectDefault: false, writableTeamIds: [], writableProjectScopes: [],
   } } }))
   await page.route((url) => url.pathname === '/api/time-tracking/timers/active', (route) => route.fulfill({ json: { timer: null } }))
   await page.route((url) => url.pathname === '/api/teams/core-team/time-tracking/summary', (route) => {
