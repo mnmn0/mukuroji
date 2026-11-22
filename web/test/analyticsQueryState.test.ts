@@ -163,4 +163,15 @@ describe('Analytics report URL state', () => {
       to: '2026-07-18T06:59:59.999Z',
     })
   })
+
+  test('round-trips a relative period and drops an unknown one', () => {
+    const parsed = parseAnalyticsRouteState(new URLSearchParams(
+      'v=1&from=2026-11-22T00%3A00%3A00.000Z&to=2026-11-28T23%3A59%3A59.999Z&period=this-week&timezone=UTC',
+    ))
+    expect(parsed.filter.periodPreset).toBe('this-week')
+    expect(serializeAnalyticsRouteState(parsed).get('period')).toBe('this-week')
+    expect(parseAnalyticsRouteState(new URLSearchParams(
+      'v=1&from=2026-11-22T00%3A00%3A00.000Z&to=2026-11-28T23%3A59%3A59.999Z&period=next-week',
+    )).filter).not.toHaveProperty('periodPreset')
+  })
 })

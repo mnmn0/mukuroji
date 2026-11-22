@@ -33,6 +33,7 @@ import {
   toggleAiSearchEntityType,
   updateAiSearchCustomField,
 } from '../model/aiSearchDraft'
+import { listOfferedSearchEntityTypes } from '../model/searchEntityTypeOptions'
 import {
   isSearchRouteSignatureCurrent,
   isAiSearchPromptCurrent,
@@ -525,7 +526,7 @@ export function AiSearchDraftEditor({
             {t('search.filters.types')}
           </legend>
           <div className="flex flex-wrap gap-2">
-            {aiSearchEntityTypes.map((entityType) => {
+            {listOfferedSearchEntityTypes(aiSearchEntityTypes, filters.entityTypes).map((entityType) => {
               const active = filters.entityTypes?.includes(entityType) ?? false
               return (
                 <button

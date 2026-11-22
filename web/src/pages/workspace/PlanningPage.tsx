@@ -8,6 +8,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import {
   canMutateWorkspaceContent,
   type CurrentUser,
@@ -97,6 +98,7 @@ import {
   PlanningScreen,
 } from '../../planning/ui/PlanningScreen'
 import { createPlanningLabels } from '../../planning/ui/labels'
+import { PlanningEntityActivityContainer } from '../../planning/ui/PlanningEntityActivityPanel'
 import {
   type ProjectDirectoryTeam,
   type ProjectMemberRole,
@@ -111,9 +113,11 @@ import { createWorkItemDependencyMutationId } from '../../work-items/model/workI
 import {
   createPlanningPath,
   createProjectIssuesPath,
+  createProjectOverviewPath,
   createTeamIssuesPath,
   type PlanningViewId,
 } from '../../shared/routing/paths'
+import { createProjectGanttTaskViewPath } from '../../task-views/model/taskViewUrlState'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -161,6 +165,8 @@ export function PlanningPage() {
     mutate: mutatePlanning,
     key: planningKey,
   } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
+  // New Cycles start on the Workspace week start; Monday is proposed until the settings load.
+  const workspaceCalendar = useWorkspaceCalendarSettings(accessToken, Boolean(user && !currentUserError))
   const browserTimeZone = useMemo(
     () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
     [],
@@ -623,6 +629,11 @@ export function PlanningPage() {
           <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={openMobileSidebar} />
         </div>
         <PlanningScreen
+          weekStartDay={workspaceCalendar.settings?.weekStartDay}
+          weekStartErrorMessage={workspaceCalendar.error
+            ? t(workspaceCalendar.settings ? 'planning.cycleWeekStart.staleError' : 'planning.cycleWeekStart.error')
+            : undefined}
+          onRetryWeekStart={workspaceCalendar.retry}
           updateBaselineDelays={selectedUpdateTarget && updateBaselineDelays
             ? { target: selectedUpdateTarget, delays: updateBaselineDelays }
             : undefined}
@@ -664,6 +675,19 @@ export function PlanningPage() {
                   locale={locale}
                   t={t}
                   timeZone={browserTimeZone}
+                />
+              )
+            : undefined}
+          renderEntityActivity={accessToken && snapshot
+            ? (entity) => (
+                <PlanningEntityActivityContainer
+                  accessToken={accessToken}
+                  entities={snapshot.entities}
+                  entityId={entity.id}
+                  key={entity.id}
+                  labels={labels.entityActivity}
+                  ownerOptions={ownerOptions}
+                  revision={snapshot.revision}
                 />
               )
             : undefined}
@@ -740,6 +764,12 @@ export function PlanningPage() {
           onOpenMilestone={(milestoneId) => navigate(createPlanningPath('timeline', milestoneId))}
           onOpenProject={(project) => navigate(
             createProjectIssuesPath(project.projectId, project.teamId),
+          )}
+          onOpenProjectOverview={(project) => navigate(
+            createProjectOverviewPath(project.projectId, project.teamId),
+          )}
+          onOpenProjectGantt={(project) => navigate(
+            createProjectGanttTaskViewPath(project.projectId, project.teamId),
           )}
           onCreateEntity={canManagePlanning && snapshot && accessToken
             ? (input) => {

@@ -851,6 +851,9 @@ function validateBlock(block: DocumentBlock): void {
         if (item.assigneeMemberKey !== undefined) {
           assertIdentifier(item.assigneeMemberKey, 'block.items[].assigneeMemberKey')
         }
+        if (item.dueDate !== undefined) {
+          assertCalendarDate(item.dueDate, 'block.items[].dueDate')
+        }
       }
       return
     }
@@ -1191,12 +1194,15 @@ function renderMarkdown(title: string, blocks: readonly DocumentBlock[]): string
         parts.push(`${'#'.repeat(block.level + 1)} ${escapeMarkdownText(block.text)}`)
         break
       case 'table': {
+        // Rows are joined by single newlines: a blank line ends a GFM table.
         parts.push(
-          `| ${block.columns.map(escapeMarkdownTableCell).join(' | ')} |`,
-          `| ${block.columns.map(() => '---').join(' | ')} |`,
-          ...block.rows.map(
-            (row) => `| ${row.cells.map(({ text }) => escapeMarkdownTableCell(text)).join(' | ')} |`,
-          ),
+          [
+            `| ${block.columns.map(escapeMarkdownTableCell).join(' | ')} |`,
+            `| ${block.columns.map(() => '---').join(' | ')} |`,
+            ...block.rows.map(
+              (row) => `| ${row.cells.map(({ text }) => escapeMarkdownTableCell(text)).join(' | ')} |`,
+            ),
+          ].join('\n'),
         )
         break
       }
@@ -1406,6 +1412,23 @@ function assertIsoTimestamp(value: string, field: string): void {
     new Date(value).toISOString() !== value
   ) {
     throw new DocumentError(400, 'InvalidDocumentTimestamp', `${field} must be an ISO-8601 timestamp.`)
+  }
+}
+
+/**
+ * Asserts that a value is a real calendar date in `YYYY-MM-DD` form.
+ *
+ * @param value - Date candidate.
+ * @param field - Field name used in validation errors.
+ */
+function assertCalendarDate(value: unknown, field: string): void {
+  const isCalendarDate =
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value) &&
+    Number.isFinite(Date.parse(`${value}T00:00:00.000Z`)) &&
+    new Date(`${value}T00:00:00.000Z`).toISOString().slice(0, 10) === value
+  if (!isCalendarDate) {
+    throw new DocumentError(400, 'InvalidDocumentBlock', `${field} must be a YYYY-MM-DD date.`)
   }
 }
 

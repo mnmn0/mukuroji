@@ -58,6 +58,30 @@ http://localhost:5173 を開き、初期 owner の `demo@example.com` / `Passwor
 どれか1つが終了したときも、残りを止めて同じ終了コードで終わります。Floci は次回の起動を速くするため
 動かしたままにするので、止めるときは `bun run dev:down` を使います。
 
+#### デモデータを入れる
+
+`bun run dev` を動かしたまま、別の端末で次を実行すると、画面を試すためのデモデータが入ります。
+
+```sh
+bun run demo-data:seed
+```
+
+Floci の ready hook が作る Workspace・チーム・プロジェクト・Work Item に加えて、次を追加します。
+
+- 「開発チーム」と、その下のプロジェクト「WBS 基盤」「モバイルアプリ」
+- 「WBS 基盤」の WBS（要件定義・設計・実装・テストの親子と、リリース判定のマイルストーン）。
+  日付は初回実行日の週を基準に、過去の作業は完了、今週は進行中、先の作業は未着手で入ります
+- 既存の「プロダクトロードマップ」「ブランド刷新」の Work Item
+- Planning のポートフォリオ・ロードマップ・イニシアチブ・目標と主要な成果・マイルストーン（β と GA）、
+  2週間の Cycle 3つ（完了・進行中・予定）、Work Item との紐付けと依存関係
+
+投入は server の API を `demo@example.com` で呼ぶので、画面から作ったときと同じ検証・監査・検索
+projection が通ります。何度実行しても、チームとプロジェクトは名前、Work Item はプロジェクト内の
+タイトル、Planning は固定 ID で既存を見つけ、足りない分だけを作ります。手で変えたデータは
+上書きも削除もしません。Work Item の親子・Planning への紐付け・依存関係は、その Work Item を作った
+実行でだけ設定するので、手で外した関係が再実行で戻ることもありません。接続先は `MUKUROJI_DEMO_API_URL`（既定 `http://localhost:3000`）で変えられますが、
+`localhost`・`127.0.0.1`・`[::1]` の http 以外には接続しません。
+
 ### `.env` の secret
 
 `.env` には次の2つの secret が必要です。`bun run local:setup` または `bun run dev` が生成します。
@@ -163,6 +187,12 @@ bun run web:dev
 - Floci: http://localhost:4566 （`FLOCI_PORT` で変更可）。認証のない AWS emulator のため
   host の loopback だけに公開し、image は digest で固定します。Docker socket は
   Lambda を実行する `floci:up:lambda` のときだけ渡します。
+- DynamoDB: ready hook が作る table の key・GSI・TTL は、CDK の
+  `cdk/lib/subsystems/data-stores.ts` から生成した `floci/init/dynamodb/tables.json` を使います。
+  table 定義を変えたら `bun run floci:tables` で再生成して commit してください（`bun run cdk:test`
+  が古い生成物を検出します）。既存の local table に足りない GSI と TTL は再起動時に追加し、
+  key や projection が違う table は消さずに初期化を止めます。そのときは
+  `docker compose down --volumes` で local data を作り直してください。
 - S3: versioning と local Web origin 向け CORS を設定した `mukuroji-files-local` と
   `mukuroji-work-item-import-local`。ready hook の再実行で既存objectを削除しません。
 - SQS: import、Webhook配送、connector同期の3 queue。それぞれ専用DLQ、
@@ -184,6 +214,16 @@ workerは1プロセスで起動してください。Streamのcheckpointはプロ
 WebSocket APIの接続、Enterprise SCIM専用stream worker、tenant operation / restore drillは
 このrunnerの対象外です。S3のGuardDuty malware scanはエミュレートしないため、scan前の
 ファイルを自動的に安全扱いにはしません。
+
+添付の upload から download までを local で確かめるときは、upload 後に次を実行して
+GuardDuty の scan 結果 tag を手で付けます。scan 結果のない object version だけに付け、
+既存の tag は残します。Floci の endpoint と `-local` で終わる bucket 以外では実行を拒否します。
+
+```sh
+bun run local:files:scan                          # NO_THREATS_FOUND（download 可能）
+bun run local:files:scan -- --result THREATS_FOUND  # blocked の表示を確かめる
+bun run local:files:scan -- --result FAILED --prefix <object key の先頭>  # 対象を絞る
+```
 
 既存volumeに旧schemaのWork Itemがあると、通知workerはfail-closedで停止します。
 ready hookは既存行を上書きしません。データ移行または既存volumeを保存した新環境への切替が必要です。

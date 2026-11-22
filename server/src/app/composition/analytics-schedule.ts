@@ -1,3 +1,4 @@
+import { DEFAULT_WORKSPACE_CALENDAR_SETTINGS } from '@mukuroji/contracts'
 import {
   AwsCognitoClient,
   CognitoServiceError,
@@ -29,7 +30,10 @@ import {
 import {
   loadServerDynamoDbResourceConfig,
 } from '../../infrastructure/config/server-resource-config'
-import { createProductionTenantFeatureGate } from './tenant-administration'
+import {
+  createProductionTenantAdministrationClient,
+  createProductionTenantFeatureGate,
+} from './tenant-administration'
 
 /**
  * Creates the production Analytics schedule processor.
@@ -49,6 +53,7 @@ export function createProductionAnalyticsScheduleHandler() {
   )
   const cognito = new AwsCognitoClient()
   const tenantFeatureGate = createProductionTenantFeatureGate()
+  const tenantAdministration = createProductionTenantAdministrationClient()
   const render = createAnalyticsScheduleRenderer({
     directory: new DynamoDbProjectDirectoryClient(),
     workItems: new DynamoDbTeamIssuesClient(),
@@ -83,6 +88,18 @@ export function createProductionAnalyticsScheduleHandler() {
       shouldBootstrapLocalDynamoDb(),
     ),
     workItemHistory: repository,
+    workspaceCalendar: {
+      /**
+       * Reads the report Workspace's calendar settings from its tenant profile.
+       *
+       * @param workspaceId - Workspace that owns the report.
+       * @returns The saved settings, or the defaults when none are saved.
+       */
+      async readCalendarSettings(workspaceId) {
+        const profile = await tenantAdministration.getProfile(workspaceId)
+        return profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
+      },
+    },
   })
 
   const notifyDelivery = createAnalyticsDeliveryAuditNotifier({

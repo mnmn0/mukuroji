@@ -13,6 +13,7 @@ import {
 import {
   DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,
+  createWorkspaceMemberVersionConditionCheck,
   isWorkspaceIdentitySafeToDelete,
   type WorkspaceMember,
   type WorkspaceMembershipGuard,
@@ -3297,5 +3298,81 @@ test('records a sign-out of every session on the member, keeping a later cutoff 
     ConditionExpression:
       'attribute_exists(recordKey) AND (attribute_not_exists(signInsRevokedAt) OR signInsRevokedAt < :now)',
     ExpressionAttributeValues: { ':now': now.toISOString() },
+  })
+})
+
+test('commits a member update together with the authorization conditions it was checked against', async () => {
+  const actor = createWorkspaceMember('demo@example.com')
+  const target = createWorkspaceMember('member@example.com', 'member')
+  const enterpriseCheck = {
+    ConditionCheck: {
+      TableName: 'EnterpriseIdentityTable',
+      Key: { scopeKey: `WORKSPACE#${workspaceId}`, recordKey: 'CONTROL' },
+      ConditionExpression: '#controlRevision = :expectedControlRevision',
+      ExpressionAttributeNames: { '#controlRevision': 'controlRevision' },
+      ExpressionAttributeValues: { ':expectedControlRevision': 5 },
+    },
+  }
+  const transactions: Array<Record<string, unknown>> = []
+  let cancelNext = false
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return { Item: toMemberItem(key.recordKey?.includes('member@example.com') ? target : actor) }
+      }
+      transactions.push(command.input)
+      if (cancelNext) throw createConditionalTransactionError(4, 3)
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+  )
+  const input = {
+    role: 'admin' as const,
+    expectedVersion: target.version,
+    expectedPlanningRevision: 7,
+    authorizationConditionChecks: [enterpriseCheck],
+  }
+
+  await expect(client.updateMember(workspaceId, actor.memberKey, target.memberKey, input))
+    .resolves.toMatchObject({ role: 'admin' })
+  expect(transactions[0]?.TransactItems).toContainEqual(enterpriseCheck)
+
+  // An assignment created after the route read the Enterprise state cancels the promotion.
+  cancelNext = true
+  await expect(client.updateMember(workspaceId, actor.memberKey, target.memberKey, input))
+    .rejects.toMatchObject({ status: 409, code: 'WorkspaceMemberAuthorizationChanged' })
+})
+
+test('pins a member record to the version read, or to its absence', () => {
+  expect(createWorkspaceMemberVersionConditionCheck({
+    workspaceId,
+    memberKey: 'Member@Example.com',
+    expectedVersion: 3,
+    tableName: 'WorkspaceAccessTable',
+  })).toEqual({
+    ConditionCheck: {
+      TableName: 'WorkspaceAccessTable',
+      Key: { workspaceId, recordKey: 'MEMBER#member@example.com' },
+      ConditionExpression: '#entryType = :entryType AND #version = :version',
+      ExpressionAttributeNames: { '#entryType': 'entryType', '#version': 'version' },
+      ExpressionAttributeValues: { ':entryType': 'workspace-member', ':version': 3 },
+    },
+  })
+  expect(createWorkspaceMemberVersionConditionCheck({
+    workspaceId,
+    memberKey: 'gone@example.com',
+    tableName: 'WorkspaceAccessTable',
+  })).toEqual({
+    ConditionCheck: {
+      TableName: 'WorkspaceAccessTable',
+      Key: { workspaceId, recordKey: 'MEMBER#gone@example.com' },
+      ConditionExpression: 'attribute_not_exists(#recordKey)',
+      ExpressionAttributeNames: { '#recordKey': 'recordKey' },
+    },
   })
 })

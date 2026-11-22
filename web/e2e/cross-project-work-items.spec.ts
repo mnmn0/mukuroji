@@ -153,3 +153,56 @@ test('Issue #381: a failed Team configuration read shows the configuration notic
   await expect(notice).toBeVisible()
   await expect(notice.getByRole('button')).toBeVisible()
 })
+
+test('Issue #381: shows the same Work Items on a read-only board and Gantt chart', async ({ page }) => {
+  await mockWorkspace(page)
+
+  await page.goto('/work-items')
+  await expect(page.getByTestId('cross-project-work-item-group')).toHaveCount(3)
+
+  await page.getByTestId('cross-project-work-items-layout-board').click()
+  await expect(page).toHaveURL(/layout=board/)
+  const lanes = page.getByTestId('cross-project-work-item-lane')
+  await expect(lanes).toHaveCount(3)
+  const referoLane = lanes.filter({ has: page.getByRole('heading', { name: /^Refero/ }) })
+  await expect(referoLane.getByRole('region', { name: /In progress$/ })
+    .getByRole('button', { name: 'Refero owned by me' })).toBeVisible()
+  // The board only opens Work Items; it has no status selector or drag handle.
+  await expect(page.getByTestId('cross-project-work-item-card-status-select')).toHaveCount(0)
+  await expect(page.locator('[data-testid="cross-project-work-item-card"][draggable="true"]')).toHaveCount(0)
+
+  await page.getByTestId('cross-project-work-items-layout-gantt').click()
+  await expect(page).toHaveURL(/layout=gantt/)
+  await expect(page.getByTestId('task-gantt-group-project:core-team:refero')).toBeVisible()
+  await expect(page.getByTestId('task-gantt-group-project:design-team:brand-refresh')).toBeVisible()
+  await expect(page.getByTestId('task-gantt-bar-refero-1')).not.toHaveAttribute('draggable', 'true')
+
+  // Reloading the URL restores the layout.
+  await page.reload()
+  await expect(page.getByTestId('cross-project-work-items-layout-gantt')).toHaveAttribute('aria-pressed', 'true')
+
+  await page.getByTestId('task-gantt-bar-refero-1').click()
+  await expect(page).toHaveURL(/refero-1/)
+})
+
+test('Issue #381: a failed Workspace calendar read in the Gantt chart shows a notice with retry', async ({ page }) => {
+  await mockWorkspace(page)
+  let calendarReads = 0
+  await page.route('**/api/workspace/calendar-settings', (route) => {
+    calendarReads += 1
+    return route.fulfill({ status: 500, json: { message: 'Unavailable' } })
+  })
+
+  await page.goto('/work-items')
+  await expect(page.getByTestId('cross-project-work-item-group')).toHaveCount(3)
+  expect(calendarReads).toBe(0)
+
+  await page.getByTestId('cross-project-work-items-layout-gantt').click()
+  const notice = page.getByTestId('work-items-workspace-calendar-error')
+  await expect(notice).toBeVisible()
+  // The chart still shows, shading the default calendar.
+  await expect(page.getByTestId('task-gantt-bar-refero-1')).toBeVisible()
+  const readsBeforeRetry = calendarReads
+  await notice.getByRole('button').click()
+  await expect.poll(() => calendarReads).toBeGreaterThan(readsBeforeRetry)
+})

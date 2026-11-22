@@ -104,6 +104,10 @@ import { listTaskGanttRowTasks } from '../../tasks/model/taskGanttRows'
 import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import { createMyTasksGanttGrouping } from '../../workspace/model/myTaskGrouping'
+import {
+  createMyTasksTableSections,
+  listMyTasksTableRowTasks,
+} from '../../workspace/model/myTaskTable'
 import { createWorkItemOutlineKey } from '../../work-items/model/workItemHierarchy'
 import { useCollapsedWorkItemOutlineKeys } from '../../shared/lib/preferences/useCollapsedWorkItemOutlineKeys'
 import { WorkItemOutlineNotice } from '../../work-items/ui/WorkItemOutlineNotice'
@@ -246,7 +250,7 @@ export function MyTasksPage() {
     capabilities: {
       columns: taskViewColumns,
       fields: taskViewFields,
-      layoutModes: ['board', 'gantt', 'calendar'],
+      layoutModes: ['board', 'table', 'gantt', 'calendar'],
       requiredColumns: ['title'],
       workflowStatuses: taskViewWorkflowStatuses,
     },
@@ -282,7 +286,9 @@ export function MyTasksPage() {
   )
   const myTasksLayoutMode = taskViewController.effectiveDefinition.layout.mode
   const myTasksViewMode: MyTasksViewMode =
-    myTasksLayoutMode === 'gantt' || myTasksLayoutMode === 'calendar' ? myTasksLayoutMode : 'board'
+    myTasksLayoutMode === 'table' || myTasksLayoutMode === 'gantt' || myTasksLayoutMode === 'calendar'
+      ? myTasksLayoutMode
+      : 'board'
   const isMyTasksOutlineShown = myTasksViewMode === 'gantt' &&
     (taskViewController.effectiveDefinition.layout.displayOptions.showOutline ?? false)
   const myTasksOutlineTeamIds = useMemo(
@@ -315,11 +321,26 @@ export function MyTasksPage() {
   )
   // In the Gantt chart, keyboard moves and selection follow its rows: its groups and outline
   // order, without the rows under a collapsed parent. The calendar keeps only the cards of the
-  // shown month and the unscheduled bucket.
+  // shown month and the unscheduled bucket, and the table follows its groups.
   const myTasksGanttGroupBy = taskViewController.effectiveDefinition.layout.group?.field
   const myTasksGanttGroupDirection = taskViewController.effectiveDefinition.layout.group?.direction
+  const myTasksTablePresentation = useMemo(
+    () => myTasksViewMode === 'table'
+      ? taskViewDefinitionToPresentationSettings(taskViewController.effectiveDefinition)
+      : undefined,
+    [myTasksViewMode, taskViewController.effectiveDefinition],
+  )
   const navigableMyTasks = useMemo(() => {
     if (myTasksViewMode === 'calendar') return listTaskCalendarMonthTasks(visibleMyTasks, myTasksCalendarMonth)
+    if (myTasksViewMode === 'table') {
+      return listMyTasksTableRowTasks(createMyTasksTableSections(
+        visibleMyTasks,
+        myTasksTablePresentation,
+        workItems.configurationsByTeam,
+        workspace.teams,
+        t,
+      ))
+    }
     if (myTasksViewMode !== 'gantt') return visibleMyTasks
     const group = createMyTasksGanttGrouping(
       myTasksGanttGroupBy,
@@ -337,6 +358,7 @@ export function MyTasksPage() {
     myTasksGanttGroupBy,
     myTasksGanttGroupDirection,
     myTasksGanttOutline,
+    myTasksTablePresentation,
     myTasksViewMode,
     t,
     visibleMyTasks,
@@ -1010,6 +1032,7 @@ export function MyTasksPage() {
           }}
           ganttOutline={myTasksGanttOutline}
           workingCalendar={workspaceCalendarPolicy}
+          calendarPeriods={workspaceCalendar.settings}
           calendarMonth={myTasksCalendarMonth}
           onCalendarMonthChange={setMyTasksCalendarMonth}
           outlineNotice={isMyTasksOutlineShown ? (

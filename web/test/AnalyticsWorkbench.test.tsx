@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { AnalyticsWorkbench } from '../src/analytics/ui/AnalyticsWorkbench'
 import { parseAnalyticsCustomFieldDraftValue } from '../src/analytics/model/filterDraft'
+import { applyAnalyticsPeriodPreset } from '../src/analytics/model/periodPresets'
 import {
   analyticsEvidenceFixture,
   analyticsFilterFixture,
@@ -51,6 +52,36 @@ describe('AnalyticsWorkbench', () => {
     expect(withSettings).toContain('This fiscal year')
     expect(withSettings).toContain('Last week')
     expect(withSettings).toMatch(/<option value="custom" selected/u)
+  })
+
+  test('shows the relative period a saved report remembers while its dates are current', () => {
+    const calendarSettings = { fiscalYearStartMonth: 4, weekStartDay: 1 as const }
+    const current = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        calendarSettings={calendarSettings}
+        filter={applyAnalyticsPeriodPreset(
+          baseProps.filter,
+          'last-fiscal-year',
+          new Date(),
+          baseProps.timeZone,
+          calendarSettings,
+        )}
+        onFilterChange={() => undefined}
+      />,
+    )
+    // An old snapshot keeps the dates it was taken with.
+    const stale = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        calendarSettings={calendarSettings}
+        filter={{ ...baseProps.filter, periodPreset: 'last-fiscal-year' }}
+        onFilterChange={() => undefined}
+      />,
+    )
+
+    expect(current).toMatch(/<option value="last-fiscal-year" selected/u)
+    expect(stale).not.toMatch(/<option value="last-fiscal-year" selected/u)
   })
 
   test('explains a failed calendar settings read and offers a retry while presets stay disabled', () => {
@@ -586,5 +617,47 @@ describe('AnalyticsWorkbench', () => {
     expect(availableHtml).toContain('Load older snapshots')
     expect(loadingHtml).toContain('disabled=""')
     expect(loadingHtml).toContain('Loading…')
+  })
+
+  test('shows Team, member, and status names and a localized unset group instead of IDs', () => {
+    const widgets = analyticsWidgetFixtures.map((widget) =>
+      widget.id === 'chart-cycle-time'
+        ? { ...widget, groupBy: { dimension: 'assignee' as const } }
+        : widget.id === 'chart-throughput'
+          ? { ...widget, groupBy: { dimension: 'status' as const } }
+          : widget)
+    const snapshot = {
+      ...analyticsSnapshotFixture,
+      widgets: analyticsSnapshotFixture.widgets.map((result) =>
+        result.widgetId === 'chart-cycle-time'
+          ? {
+              ...result,
+              groups: [
+                { key: 'sato@example.com', label: 'sato@example.com', sampleSize: 3, value: 20 },
+                { key: '', label: 'Unassigned', sampleSize: 1, value: 8 },
+              ],
+            }
+          : result.widgetId === 'chart-throughput'
+            ? {
+                ...result,
+                series: [],
+                groups: [{ key: 'started', label: 'started', sampleSize: 2, value: 2 }],
+              }
+            : result),
+    }
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        locale="ja"
+        members={[{ id: 'sato@example.com', email: 'sato@example.com', name: '佐藤 花子' }]}
+        snapshot={snapshot}
+        widgets={widgets}
+      />,
+    )
+
+    expect(html).toContain('佐藤 花子')
+    expect(html).toContain('未設定')
+    expect(html).toContain('進行中')
+    expect(html).not.toContain('sato@example.com')
   })
 })

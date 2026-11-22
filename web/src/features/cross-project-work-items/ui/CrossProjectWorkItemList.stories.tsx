@@ -4,6 +4,7 @@ import { expect, fn, userEvent, within } from 'storybook/test'
 import { projectDirectoryFixtures } from '../../../projects/fixtures'
 import { createTranslator } from '../../../shared/i18n/i18n'
 import { taskViewStorySelectedTask } from '../../../tasks/ui/TaskView.stories.fixtures'
+import { teamWorkItemConfigurationFixture } from '../../../work-items/fixtures'
 import {
   createCrossProjectWorkItemProjectOptions,
   defaultCrossProjectWorkItemListState,
@@ -34,7 +35,10 @@ const changeState = fn()
 /** Storybook metadata for the Workspace-wide Work Item list. */
 const meta = {
   args: {
-    configurationsByTeam: {},
+    configurationsByTeam: {
+      'core-team': { configuration: { ...teamWorkItemConfigurationFixture, scopeId: 'core-team' } },
+      'design-team': { configuration: { ...teamWorkItemConfigurationFixture, scopeId: 'design-team' } },
+    },
     groups: groupCrossProjectWorkItems(storyWorkItems, 'project', projectDirectoryFixtures),
     isLoading: false,
     jobRoleOptions: [
@@ -50,6 +54,7 @@ const meta = {
     projectOptions: createCrossProjectWorkItemProjectOptions(projectDirectoryFixtures),
     state: defaultCrossProjectWorkItemListState,
     t: createTranslator('en'),
+    teams: projectDirectoryFixtures,
     totalCount: storyWorkItems.length,
   },
   component: CrossProjectWorkItemList,
@@ -86,6 +91,22 @@ export const GroupedByOwner: Story = {
     groups: groupCrossProjectWorkItems(storyWorkItems, 'assignee', projectDirectoryFixtures),
     state: { ...defaultCrossProjectWorkItemListState, grouping: 'assignee' },
   },
+}
+
+/** The same Work Items as a read-only board, one swimlane per Project. */
+export const Board: Story = {
+  args: { state: { ...defaultCrossProjectWorkItemListState, layout: 'board' } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getAllByTestId('cross-project-work-item-lane')).toHaveLength(3)
+    await expect(canvas.getByRole('button', { name: 'Board' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(canvas.queryByRole('combobox', { name: /Review the wireframe/ })).toBeNull()
+  },
+}
+
+/** The same Work Items on a read-only Gantt chart, with a heading row per Project. */
+export const Gantt: Story = {
+  args: { state: { ...defaultCrossProjectWorkItemListState, layout: 'gantt' } },
 }
 
 /** Work Items are still loading. */

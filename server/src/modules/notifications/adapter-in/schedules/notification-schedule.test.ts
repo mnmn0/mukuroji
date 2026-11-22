@@ -9,6 +9,7 @@ import {
   createNotificationScheduleHandler,
   createPlanningScheduledNotificationCandidates,
   parsePlanningUpdateTargetScheduleRow,
+  readReminderPolicyDefaultsFromEnvironment,
   runNotificationSchedule,
   type NotificationScheduleDocumentClient,
   type NotificationScheduleRunOptions,
@@ -1630,6 +1631,51 @@ test('notification schedule handler treats blank numeric environment values as u
   }
 })
 
+describe('deployment default reminder days', () => {
+  /** Reads the defaults with the variable set to a value, then restores it. */
+  function readWith(value: string | undefined) {
+    const previous = process.env.NOTIFICATION_REMINDER_DEFAULT_DAYS
+    if (value === undefined) delete process.env.NOTIFICATION_REMINDER_DEFAULT_DAYS
+    else process.env.NOTIFICATION_REMINDER_DEFAULT_DAYS = value
+    try {
+      return readReminderPolicyDefaultsFromEnvironment()
+    } finally {
+      if (previous === undefined) delete process.env.NOTIFICATION_REMINDER_DEFAULT_DAYS
+      else process.env.NOTIFICATION_REMINDER_DEFAULT_DAYS = previous
+    }
+  }
+
+  test('uses the built-in days when the one variable is unset or blank', () => {
+    const builtIn = {
+      dueSoonDays: 3,
+      overdueReminderIntervalDays: 7,
+      overdueEscalationDays: 7,
+      staleStartedDays: 7,
+      timesheetReminderDays: 7,
+    }
+    expect(readWith(undefined)).toEqual(builtIn)
+    expect(readWith('  ')).toEqual(builtIn)
+  })
+
+  test('overrides only the fields the JSON object sets', () => {
+    expect(readWith('{"dueSoonDays":5,"timesheetReminderDays":14}')).toEqual({
+      dueSoonDays: 5,
+      overdueReminderIntervalDays: 7,
+      overdueEscalationDays: 7,
+      staleStartedDays: 7,
+      timesheetReminderDays: 14,
+    })
+  })
+
+  test('rejects text that is not an object of valid day counts', () => {
+    expect(() => readWith('5')).toThrow(RangeError)
+    expect(() => readWith('{"dueSoonDays":')).toThrow(RangeError)
+    expect(() => readWith('{"dueSoonDays":0}')).toThrow(RangeError)
+    expect(() => readWith('{"timesheetReminderDays":32}')).toThrow(RangeError)
+    expect(() => readWith('{"unknownDays":3}')).toThrow(RangeError)
+  })
+})
+
 describe('configurable reminder days and timesheet reminders', () => {
   /** Reminder reader that returns fixed Team and per-member overrides. */
   function createReminderReader(
@@ -1736,7 +1782,7 @@ describe('configurable reminder days and timesheet reminders', () => {
         return entries
       },
     }
-    const run = async (now: string, timesheetReminderHourUtc = 0) => {
+    const run = async (now: string, timesheetReminderHour?: number) => {
       const recording = createRecordingDocumentClient((name, input) => {
         if (name !== 'ScanCommand') return {}
         // Teams come from the Project directory, not from Work Items, so a Team whose Work
@@ -1754,13 +1800,17 @@ describe('configurable reminder days and timesheet reminders', () => {
         now: new Date(now),
         projectDirectoryTableName: 'ProjectDirectoryTable',
         timesheetReader,
-        timesheetReminderHourUtc,
+        ...(timesheetReminderHour === undefined ? {} : { timesheetReminderHour }),
       }))
       return readEvents(recording.commands).filter((event) => event.eventType === 'timesheet.submission-reminder')
     }
 
+    // The hour is read on the Workspace clock (Asia/Tokyo): 09:00 UTC is 18:00 there.
     expect(await run('2026-07-12T09:00:00.000Z')).toEqual([])
+    // 00:00 local is 15:00 UTC the day before, not 00:00 UTC.
+    expect(await run('2026-07-12T00:00:00.000Z', 0)).toEqual([])
     expect(reads).toEqual([])
+    // The default is 09:00 local, which is 00:00 UTC.
     const [reminder, ...rest] = await run('2026-07-12T00:00:00.000Z')
     expect(rest).toEqual([])
     expect(reads).toEqual([['workspace-1', 'core-team', '2026-04-11T00:00:00.000Z', '2026-07-12T00:00:00.000Z']])
@@ -1776,7 +1826,7 @@ describe('configurable reminder days and timesheet reminders', () => {
         notificationCandidates: [{ memberKey: 'member@example.com', reason: 'timesheet' }],
       },
     })
-    const sameDay = await run('2026-07-12T09:00:00.000Z', 9)
+    const sameDay = await run('2026-07-12T09:00:00.000Z', 18)
     const nextDay = await run('2026-07-13T00:00:00.000Z')
     expect(sameDay[0]?.eventId).toBe(reminder?.eventId)
     expect(nextDay[0]?.eventId).toBe(reminder?.eventId)

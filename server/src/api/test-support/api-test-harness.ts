@@ -1862,6 +1862,7 @@ function configureFakeProjectClients(
     workspaceInvitationResends: [] as string[],
     workspaceMutationAuditContexts: [] as ObservedWorkspaceMutationAuditContext[],
     workspaceMemberUpdates: [] as Array<{
+      authorizationConditionChecks?: readonly unknown[]
       expectedDocumentAuthorizationRevision?: number
       expectedPlanningRevision: number
       memberKey: string
@@ -2965,6 +2966,9 @@ function configureFakeProjectClients(
       async updateMember(_workspaceId, _actorMemberKey, memberKey, input, auditContext) {
         calls.workspaceMutationAuditContexts.push({ stage: 'updateMember', context: auditContext })
         calls.workspaceMemberUpdates.push({
+          ...(input.authorizationConditionChecks === undefined
+            ? {}
+            : { authorizationConditionChecks: input.authorizationConditionChecks }),
           ...(input.expectedDocumentAuthorizationRevision === undefined
             ? {}
             : {

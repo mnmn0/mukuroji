@@ -73,11 +73,13 @@ import {
   serializeAnalyticsRouteState,
   type AnalyticsRouteState,
 } from '../../analytics/model/queryState'
+import { refreshAnalyticsPresetPeriod } from '../../analytics/model/periodPresets'
 import { resolveAnalyticsSnapshotAutoPagination } from '../../analytics/model/snapshotPagination'
 import {
   type ProjectDirectoryTeam,
 } from '../../projects/api'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
+import { useActiveDirectoryMembers } from '../../projects/queries/useProjectMembers'
 import {
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
@@ -199,16 +201,30 @@ export function ReportsPage() {
     [selectedReport?.widgets, widgetDraft, widgetSourceKey],
   )
   const routeState = useMemo<AnalyticsRouteState>(
-    () => parsedRouteState ?? {
-      builder: false,
-      filter: selectedReport?.filter ?? initialFilter,
-      forecastBaseline: selectedReport?.forecastBaseline,
-      forecastWeighting: selectedReport?.forecastWeighting,
-      reportId: selectedReport?.id,
-      snapshotId: undefined,
-      timezone: selectedReport?.timeZone ?? initialTimeZone,
+    () => {
+      const state: AnalyticsRouteState = parsedRouteState ?? {
+        builder: false,
+        filter: selectedReport?.filter ?? initialFilter,
+        forecastBaseline: selectedReport?.forecastBaseline,
+        forecastWeighting: selectedReport?.forecastWeighting,
+        reportId: selectedReport?.id,
+        snapshotId: undefined,
+        timezone: selectedReport?.timeZone ?? initialTimeZone,
+      }
+      const readAt = new Date(state.asOf ?? queryAsOf)
+      if (!calendarSettings || Number.isNaN(readAt.getTime())) return state
+      // A saved "this week" report shows the week around the time it is read, not the saved dates.
+      const filter = refreshAnalyticsPresetPeriod(
+        state.filter,
+        readAt,
+        state.timezone,
+        calendarSettings,
+      )
+      return filter === state.filter ? state : { ...state, filter }
     },
     [
+      calendarSettings,
+      queryAsOf,
       initialFilter,
       initialTimeZone,
       parsedRouteState,
@@ -273,6 +289,12 @@ export function ReportsPage() {
   const displayedTimeZone = selectedSnapshotRecord?.query.timeZone ??
     routeState.timezone
   const displayedWidgets = selectedSnapshotRecord?.query.widgets ?? widgets
+  // Member names are read only when a widget groups by assignee, since that reads every Project.
+  const { data: directoryMembers } = useActiveDirectoryMembers(
+    accessToken,
+    teams,
+    displayedWidgets.some((widget) => widget.groupBy?.dimension === 'assignee'),
+  )
   const queryInput = useMemo(() => createAnalyticsQueryInput(
     routeState,
     queryAsOf,
@@ -763,6 +785,7 @@ export function ReportsPage() {
           locale,
           queryInput,
           routeState.snapshotId,
+          selectedReport?.id,
         ),
       })
       downloadArtifact(artifact.blob, artifact.filename)
@@ -811,6 +834,7 @@ export function ReportsPage() {
           teams={teams}
           timeZone={displayedTimeZone}
           workItemTypes={workItemTypes}
+          {...(directoryMembers ? { members: directoryMembers.members } : {})}
           widgets={displayedWidgets}
           onBuilderChange={(builder) => {
             if (selectedSnapshotRecord) {

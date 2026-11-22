@@ -6,19 +6,24 @@ import type {
   AnalyticsEvidenceItem,
   AnalyticsEvidenceResponse,
   AnalyticsFilter,
+  AnalyticsGroupBy,
+  AnalyticsGroupLabelLookup,
   AnalyticsMetricKey,
   AnalyticsReport,
   AnalyticsSchedule,
   AnalyticsSnapshot,
   AnalyticsSnapshotRecord,
   AnalyticsVisualization,
+  AnalyticsTableRow,
   AnalyticsWeighting,
   AnalyticsWidget,
   AnalyticsWidgetResult,
   CreateAnalyticsReportInput,
 } from '@mukuroji/contracts'
 import {
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   WORKSPACE_CALENDAR_PERIOD_PRESETS,
+  resolveAnalyticsGroupLabel,
   type WorkspaceCalendarPeriodPreset,
 } from '@mukuroji/contracts'
 import {
@@ -34,6 +39,10 @@ import {
   type MessageKey,
 } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
+import {
+  createAnalyticsDisplayNames,
+  createAnalyticsGroupLabelLookup,
+} from '../model/groupLabels'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { AnalyticsExportFormat } from '../api'
 import {
@@ -46,14 +55,17 @@ import {
   formatAnalyticsCalendarDate,
 } from '../model/timeZone'
 import {
-  createAnalyticsPresetPeriod,
-  findAnalyticsPeriodPreset,
+  applyAnalyticsFixedPeriod,
+  applyAnalyticsPeriodPreset,
   isAnalyticsPeriodPreset,
+  selectAnalyticsPeriodPreset,
   type AnalyticsPeriodCalendar,
 } from '../model/periodPresets'
+import { listAnalyticsScheduleWeekdays } from '../model/scheduleWeekdays'
 import { readRecord } from '../../shared/api/jsonValidation'
 import { isAnalyticsFlowVisualization, type AnalyticsFlowVisualization } from '../model/flowChart'
 import { AnalyticsFlowChart } from './AnalyticsFlowChart'
+import { AnalyticsMilestoneTrendChart } from './AnalyticsMilestoneTrendChart'
 
 /**
  * Analytics workbench の表示と操作に必要な props です。
@@ -139,6 +151,8 @@ export type AnalyticsWorkbenchProps = {
   teams: ProjectDirectoryTeam[]
   /** Team-qualified Work Item Type options available across the visible Teams. */
   workItemTypes?: AnalyticsWorkItemTypeOption[]
+  /** Members whose names replace member keys in assignee groups. */
+  members?: readonly AnalyticsMemberOption[]
   /**
    * Report 一覧または snapshot の初回読み込み中表示です。
    */
@@ -259,6 +273,19 @@ export type AnalyticsWorkbenchProps = {
   onRetry?: () => void
 }
 
+/** Stable empty member list, so the default does not change the group label lookup each render. */
+const emptyMembers: readonly AnalyticsMemberOption[] = []
+
+/** One member whose name Analytics shows in place of the member key. */
+export type AnalyticsMemberOption = {
+  /** Normalized member key, which Work Items store as the assignee. */
+  id: string
+  /** Email address, shown when the member has no name. */
+  email: string
+  /** Display name. */
+  name?: string
+}
+
 /** One Team-qualified Work Item Type option shown by Analytics filters. */
 export type AnalyticsWorkItemTypeOption = {
   /** Canonical filter value containing the Team and Work Item Type IDs. */
@@ -289,6 +316,7 @@ const metricKeys = [
   'sla',
   'remaining-scope',
   'cumulative-flow',
+  'milestone-trend',
 ] as const satisfies readonly AnalyticsMetricKey[]
 
 const statusCategories = [
@@ -322,6 +350,7 @@ const metricLabelKeys: Record<AnalyticsMetricKey, MessageKey> = {
   sla: 'analytics.metric.sla',
   'remaining-scope': 'analytics.metric.remainingScope',
   'cumulative-flow': 'analytics.metric.cumulativeFlow',
+  'milestone-trend': 'analytics.metric.milestoneTrend',
 }
 
 const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
@@ -335,9 +364,29 @@ const metricDescriptionKeys: Record<AnalyticsMetricKey, MessageKey> = {
   sla: 'analytics.metricDescription.sla',
   'remaining-scope': 'analytics.metricDescription.remainingScope',
   'cumulative-flow': 'analytics.metricDescription.cumulativeFlow',
+  'milestone-trend': 'analytics.metricDescription.milestoneTrend',
+}
+
+/** Calendar bucket dimensions, the only group-by a Milestone trend accepts. */
+const calendarGroupDimensions = ['day', 'week', 'month'] as const
+
+/**
+ * Returns whether a group-by is absent or a calendar bucket.
+ *
+ * @param groupBy - Widget group-by.
+ * @returns Whether a Milestone trend accepts it.
+ */
+function isCalendarGroup(groupBy: AnalyticsWidget['groupBy']) {
+  return groupBy === undefined || calendarGroupDimensions.some((dimension) => dimension === groupBy.dimension)
 }
 
 const tableColumnLabelKeys: Readonly<Record<string, MessageKey>> = {
+  baselineEndDate: 'analytics.milestoneTrend.baseline',
+  changeCount: 'analytics.milestoneTrend.changes',
+  forecastEndDate: 'analytics.milestoneTrend.latest',
+  milestoneId: 'analytics.milestoneTrend.milestoneId',
+  periodStartForecastEndDate: 'analytics.milestoneTrend.periodStart',
+  shiftDays: 'analytics.milestoneTrend.shift',
   occurredAt: 'analytics.table.occurredAt',
   projectId: 'analytics.table.projectId',
   teamId: 'analytics.table.teamId',
@@ -374,6 +423,7 @@ export function AnalyticsWorkbench({
   evidenceMetric,
   teams,
   workItemTypes = [],
+  members = emptyMembers,
   isLoading = false,
   isLoadingMoreSnapshots = false,
   isEvidenceLoading = false,
@@ -406,9 +456,12 @@ export function AnalyticsWorkbench({
   onRetry,
 }: AnalyticsWorkbenchProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const workItemTypeLabels = useMemo(
-    () => new Map(workItemTypes.map((type) => [type.filterValue, type.label])),
-    [workItemTypes],
+  const groupLabelLookup = useMemo(
+    () => createAnalyticsGroupLabelLookup(
+      createAnalyticsDisplayNames(teams, workItemTypes, members),
+      t,
+    ),
+    [members, t, teams, workItemTypes],
   )
   const selectedReport = reports.find((report) => report.id === selectedReportId)
   const [draftId] = useState(
@@ -724,7 +777,7 @@ export function AnalyticsWorkbench({
                         snapshot={snapshot}
                         t={t}
                         widget={widgets.find((widget) => widget.id === result.widgetId)}
-                        workItemTypeLabels={workItemTypeLabels}
+                        groupLabelLookup={groupLabelLookup}
                         onOpenEvidence={onOpenEvidence}
                       />
                     ))}
@@ -759,6 +812,9 @@ export function AnalyticsWorkbench({
 
       {isScheduleOpen ? (
         <AnalyticsScheduleDialog
+          // A new weekly delivery goes out on the first day of the Workspace week, as a weekly
+          // report covers the week just ended.
+          defaultDayOfWeek={calendarSettings?.weekStartDay ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay}
           initialSchedule={reportSchedule}
           isTeamVisibilityValid={isTeamVisibilityValid}
           reportName={selectedReport?.name ?? draftName}
@@ -960,17 +1016,14 @@ function AnalyticsFilterToolbar({
               value={formatAnalyticsCalendarDate(filter.period.from, timeZone)}
               onChange={(event) => {
                 if (!event.target.value) return
-                onFilterChange?.({
-                  ...filter,
-                  period: {
-                    ...filter.period,
-                    from: analyticsCalendarDateBoundaryToInstant(
-                      event.target.value,
-                      timeZone,
-                      'start',
-                    ),
-                  },
-                })
+                onFilterChange?.(applyAnalyticsFixedPeriod(filter, {
+                  ...filter.period,
+                  from: analyticsCalendarDateBoundaryToInstant(
+                    event.target.value,
+                    timeZone,
+                    'start',
+                  ),
+                }))
               }}
             />
           </label>
@@ -982,17 +1035,14 @@ function AnalyticsFilterToolbar({
               value={formatAnalyticsCalendarDate(filter.period.to, timeZone)}
               onChange={(event) => {
                 if (!event.target.value) return
-                onFilterChange?.({
-                  ...filter,
-                  period: {
-                    ...filter.period,
-                    to: analyticsCalendarDateBoundaryToInstant(
-                      event.target.value,
-                      timeZone,
-                      'end',
-                    ),
-                  },
-                })
+                onFilterChange?.(applyAnalyticsFixedPeriod(filter, {
+                  ...filter.period,
+                  to: analyticsCalendarDateBoundaryToInstant(
+                    event.target.value,
+                    timeZone,
+                    'end',
+                  ),
+                }))
               }}
             />
           </label>
@@ -1204,8 +1254,8 @@ function AnalyticsPeriodPresetPicker({
   timeZone: string
 }) {
   const selectedPreset = calendarSettings
-    ? findAnalyticsPeriodPreset(filter.period, new Date(), timeZone, calendarSettings)
-    : undefined
+    ? selectAnalyticsPeriodPreset(filter, new Date(), timeZone, calendarSettings)
+    : filter.periodPreset
   return (
     <div className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
       <label className="grid gap-1.5">
@@ -1217,11 +1267,15 @@ function AnalyticsPeriodPresetPicker({
           value={selectedPreset ?? 'custom'}
           onChange={(event) => {
             const preset = event.target.value
+            if (preset === 'custom') {
+              // Keep the dates shown but stop moving them with the calendar.
+              onFilterChange?.(applyAnalyticsFixedPeriod(filter, filter.period))
+              return
+            }
             if (!calendarSettings || !isAnalyticsPeriodPreset(preset)) return
-            onFilterChange?.({
-              ...filter,
-              period: createAnalyticsPresetPeriod(preset, new Date(), timeZone, calendarSettings),
-            })
+            onFilterChange?.(
+              applyAnalyticsPeriodPreset(filter, preset, new Date(), timeZone, calendarSettings),
+            )
           }}
         >
           <option value="custom">{t('analytics.filter.period.custom')}</option>
@@ -1597,8 +1651,12 @@ function AnalyticsBuilderPanel({
   visibility: AnalyticsReport['visibility']
   widgets: AnalyticsWidget[]
 }) {
-  const addWidget = (type: AnalyticsWidget['type'], visualization?: AnalyticsVisualization) => {
-    const metric: AnalyticsMetricKey = type === 'metric'
+  const addWidget = (
+    type: AnalyticsWidget['type'],
+    visualization?: AnalyticsVisualization,
+    chartMetric?: AnalyticsMetricKey,
+  ) => {
+    const metric: AnalyticsMetricKey = chartMetric ?? (type === 'metric'
       ? metricKeys[Math.min(widgets.filter((widget) => widget.type === 'metric').length, 3)]
       : type === 'table'
         ? 'overdue'
@@ -1606,7 +1664,7 @@ function AnalyticsBuilderPanel({
           ? 'cumulative-flow'
           : visualization === 'burndown' || visualization === 'burnup'
             ? 'remaining-scope'
-            : 'throughput'
+            : 'throughput')
     const nextWidget = {
       id: createAnalyticsClientId('widget'),
       metric,
@@ -1684,6 +1742,9 @@ function AnalyticsBuilderPanel({
           </button>
           <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('chart', 'area')}>
             {t('analytics.builder.type.area')}
+          </button>
+          <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('chart', 'line', 'milestone-trend')}>
+            {t('analytics.builder.type.milestoneTrend')}
           </button>
           <button className="workbench-button-secondary min-h-10 px-3" type="button" onClick={() => addWidget('table')}>
             {t('analytics.builder.type.table')}
@@ -1801,7 +1862,11 @@ function AnalyticsWidgetEditor({
           onChange={(event) => {
             const metric = event.target.value as AnalyticsMetricKey
             // Only throughput, velocity, and remaining scope accept effort weighting, so other metrics drop it.
-            onChange(isEffortWeightableMetric(metric) ? { ...widget, metric } : { ...withoutWidgetWeighting(widget), metric })
+            const next = isEffortWeightableMetric(metric) ? { ...widget, metric } : { ...withoutWidgetWeighting(widget), metric }
+            // A Milestone trend groups by Milestone, so it keeps only a calendar bucket.
+            onChange(metric === 'milestone-trend' && !isCalendarGroup(next.groupBy)
+              ? { ...next, groupBy: next.type === 'chart' ? { dimension: 'week' } : undefined }
+              : next)
           }}
         >
           {metricKeys.map((metric) => <option key={metric} value={metric}>{t(metricLabelKeys[metric])}</option>)}
@@ -1828,17 +1893,15 @@ function AnalyticsWidgetEditor({
             })}
           >
             <option value="">{t('analytics.builder.groupNone')}</option>
-            {[
-              'day',
-              'week',
-              'month',
+            {(widget.metric === 'milestone-trend' ? calendarGroupDimensions : [
+              ...calendarGroupDimensions,
               'team',
               'project',
               'assignee',
               'status',
               'work-item-type',
               'custom-field',
-            ].map((dimension) => (
+            ]).map((dimension) => (
               <option key={dimension} value={dimension}>
                 {t(dimension === 'custom-field'
                   ? 'analytics.group.customField'
@@ -1962,6 +2025,7 @@ function AnalyticsMetricCard({
 }
 
 function AnalyticsResultWidget({
+  groupLabelLookup,
   locale,
   onOpenEvidence,
   periodEnd,
@@ -1969,8 +2033,9 @@ function AnalyticsResultWidget({
   snapshot,
   t,
   widget,
-  workItemTypeLabels,
 }: {
+  /** Resolves group labels to names in the current locale. */
+  groupLabelLookup: AnalyticsGroupLabelLookup
   locale: Locale
   onOpenEvidence?: (input: AnalyticsEvidenceInput) => void
   /** Requested period end (before the API clips it to `asOf`), where a burndown ideal reaches zero. */
@@ -1979,7 +2044,6 @@ function AnalyticsResultWidget({
   snapshot: AnalyticsSnapshot
   t: ReturnType<typeof createTranslator>
   widget?: AnalyticsWidget
-  workItemTypeLabels: ReadonlyMap<string, string>
 }) {
   const widgetType = widget?.type ?? (result.rows.length > 0 ? 'table' : 'chart')
   const size = readWidgetSize(widget)
@@ -1991,7 +2055,8 @@ function AnalyticsResultWidget({
   const points = normalizeWidgetPoints(
     result,
     snapshot.timeZone,
-    widget?.groupBy?.dimension === 'work-item-type' ? workItemTypeLabels : undefined,
+    widget?.groupBy,
+    groupLabelLookup,
   )
 
   return (
@@ -2024,13 +2089,18 @@ function AnalyticsResultWidget({
         ) : null}
         {widgetType === 'table' ? (
           <AnalyticsTable
+            groupBy={widget?.groupBy}
+            groupLabelLookup={groupLabelLookup}
             result={result}
             t={t}
-            workItemTypeLabels={
-              widget?.groupBy?.dimension === 'work-item-type'
-                ? workItemTypeLabels
-                : undefined
-            }
+          />
+        ) : result.metric === 'milestone-trend' && result.series.length > 0 ? (
+          <AnalyticsMilestoneTrendChart
+            groups={result.groups}
+            label={widget?.title ?? result.definition.label}
+            series={result.series}
+            t={t}
+            timeZone={snapshot.timeZone}
           />
         ) : isAnalyticsFlowVisualization(widget?.visualization) && result.series.length > 0 &&
           isFlowVisualizationCompatible(widget.visualization, result.metric) ? (
@@ -2272,13 +2342,17 @@ function isDrawableChartValue(value: number | null): value is number {
 }
 
 function AnalyticsTable({
+  groupBy,
+  groupLabelLookup,
   result,
   t,
-  workItemTypeLabels,
 }: {
+  /** Dimension the widget groups by. */
+  groupBy: AnalyticsGroupBy | undefined
+  /** Resolves Team, Project, and Work Item Type names. */
+  groupLabelLookup: AnalyticsGroupLabelLookup
   result: AnalyticsWidgetResult
   t: ReturnType<typeof createTranslator>
-  workItemTypeLabels?: ReadonlyMap<string, string>
 }) {
   const columns = [...new Set(result.rows.flatMap((row) => Object.keys(row.values)))].slice(0, 6)
 
@@ -2309,11 +2383,13 @@ function AnalyticsTable({
           {result.rows.map((row) => (
             <tr className="border-b border-[var(--workbench-border)]" key={row.id}>
               <th className="px-3 py-3 font-semibold" scope="row">
-                {workItemTypeLabels?.get(row.label) ?? row.label}
+                {groupBy?.dimension === 'work-item-type'
+                  ? groupLabelLookup.workItemType?.(row.label) ?? row.label
+                  : row.label}
               </th>
               {columns.map((column) => (
                 <td className="px-3 py-3 tabular-nums text-[var(--workbench-muted)]" key={column}>
-                  {formatTableValue(row.values[column])}
+                  {formatTableValue(resolveTableValueName(column, row.values, groupLabelLookup))}
                 </td>
               ))}
             </tr>
@@ -2494,6 +2570,7 @@ function AnalyticsEvidenceDrawer({
 }
 
 function AnalyticsScheduleDialog({
+  defaultDayOfWeek,
   initialSchedule,
   isTeamVisibilityValid,
   onClose,
@@ -2502,6 +2579,8 @@ function AnalyticsScheduleDialog({
   t,
   timeZone,
 }: {
+  /** Weekday a new weekly delivery is sent on, as `Date#getDay()` numbers it. */
+  defaultDayOfWeek: number
   initialSchedule?: AnalyticsSchedule
   isTeamVisibilityValid: boolean
   onClose: () => void
@@ -2597,16 +2676,10 @@ function AnalyticsScheduleDialog({
             {frequency === 'weekly' ? (
               <label className="grid gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
                 {t('analytics.schedule.dayOfWeek')}
-                <select className="workbench-input min-h-10 px-3" defaultValue={initialSchedule?.dayOfWeek ?? 1} name="dayOfWeek">
-                  {[
-                    'analytics.schedule.sunday',
-                    'analytics.schedule.monday',
-                    'analytics.schedule.tuesday',
-                    'analytics.schedule.wednesday',
-                    'analytics.schedule.thursday',
-                    'analytics.schedule.friday',
-                    'analytics.schedule.saturday',
-                  ].map((key, index) => <option key={key} value={index}>{t(key as MessageKey)}</option>)}
+                <select className="workbench-input min-h-10 px-3" defaultValue={initialSchedule?.dayOfWeek ?? defaultDayOfWeek} name="dayOfWeek">
+                  {listAnalyticsScheduleWeekdays(defaultDayOfWeek).map(({ dayOfWeek, key }) => (
+                    <option key={key} value={dayOfWeek}>{t(key)}</option>
+                  ))}
                 </select>
               </label>
             ) : null}
@@ -2713,10 +2786,20 @@ function createEvidenceInput(
   } satisfies AnalyticsEvidenceInput
 }
 
+/**
+ * Converts a widget result into chart points, with group labels resolved to names.
+ *
+ * @param result - Widget result.
+ * @param timeZone - Time zone of calendar buckets.
+ * @param groupBy - Dimension the widget groups by.
+ * @param groupLabelLookup - Resolves group keys to names.
+ * @returns Chart points.
+ */
 function normalizeWidgetPoints(
   result: AnalyticsWidgetResult,
   timeZone: string,
-  workItemTypeLabels?: ReadonlyMap<string, string>,
+  groupBy: AnalyticsGroupBy | undefined,
+  groupLabelLookup: AnalyticsGroupLabelLookup,
 ) {
   if (result.series.length > 0) {
     return result.series.map((point, index) => ({
@@ -2729,7 +2812,7 @@ function normalizeWidgetPoints(
 
   return result.groups.map((group) => ({
     key: group.key,
-    label: workItemTypeLabels?.get(group.key) ?? group.label,
+    label: resolveAnalyticsGroupLabel(groupBy, group, groupLabelLookup),
     sampleSize: group.sampleSize,
     value: group.value,
   }))
@@ -2833,6 +2916,29 @@ function formatBucketLabel(from: string, to: string, timeZone: string) {
   return fromDate === toDate ? fromDate : `${fromDate} – ${toDate}`
 }
 
+/**
+ * Replaces the Team and Project IDs of table rows with their names.
+ *
+ * @param column - Table column key.
+ * @param values - Row values; the row's Team qualifies its Project ID.
+ * @param lookup - Resolves Team and Project names.
+ * @returns The name for a known Team or Project ID, otherwise the value.
+ */
+function resolveTableValueName(
+  column: string,
+  values: AnalyticsTableRow['values'],
+  lookup: AnalyticsGroupLabelLookup,
+) {
+  const value = values[column]
+  if (typeof value !== 'string') return value
+  if (column === 'teamId') return lookup.team?.(value) ?? value
+  if (column === 'projectId') {
+    return lookup.project?.(value, typeof values.teamId === 'string' ? values.teamId : undefined) ??
+      value
+  }
+  return value
+}
+
 function formatTableValue(value: string | number | boolean | null | undefined) {
   if (value === null || value === undefined || value === '') return '—'
   if (typeof value === 'boolean') return value ? '✓' : '—'
@@ -2857,6 +2963,17 @@ function formatAnalyticsWarning(
   }
   if (warning === 'No SLA samples are available.') {
     return t('analytics.warning.noSlaSamples')
+  }
+  if (warning === 'No Milestones match this report scope.') {
+    return t('analytics.warning.noMilestones')
+  }
+  if (warning === 'Milestone history is not available for this run.') {
+    return t('analytics.warning.milestoneHistoryUnavailable')
+  }
+  const milestonesWithoutHistory = /^(\d+) Milestone\(s\) have no recorded date history; their current date is shown since creation\.$/u
+    .exec(warning)
+  if (milestonesWithoutHistory?.[1]) {
+    return t('analytics.warning.milestonesWithoutHistory').replace('{count}', milestonesWithoutHistory[1])
   }
   const unestimatedCompletions = /^(\d+) completed Work Item\(s\) had no estimate and counted as zero effort\.$/u
     .exec(warning)

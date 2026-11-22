@@ -3,6 +3,7 @@ import {
   buildRuntimeConfigurationRevision,
   buildStackParameters,
   DEPLOY_SECRETS_PATH,
+  describeDeployedChanges,
   ensureDeploySecrets,
   GitHubDeployError,
   parseGitHubDeployOperation,
@@ -42,8 +43,10 @@ interface FakeOptions {
   readonly storedSecrets?: ReadonlyMap<string, string>
   /** Config parameters in SSM. */
   readonly config?: readonly { Name: string; Value: string }[]
-  /** `applicationCommitSha` values returned by successive health checks. */
+  /** `applicationCommitSha` values returned by successive health checks after the Web upload. */
   readonly healthCommits?: readonly (string | undefined)[]
+  /** `applicationCommitSha` the running stack reports before the deploy; a throw when `'unreachable'`. */
+  readonly previousCommit?: string | 'unreachable'
   /** Exit code of `cdk deploy`. */
   readonly cdkExitCode?: number
   /** Commit at the tip of main on origin. */
@@ -80,6 +83,7 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
   let stackExists = options.stackExists ?? false
   let generated = 0
   const healthCommits = [...(options.healthCommits ?? [commitSha])]
+  let webUploaded = false
   /**
    * Builds a successful command result.
    *
@@ -99,6 +103,7 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
   const run = async (command: readonly string[], commandOptions?: CommandOptions): Promise<CommandResult> => {
     calls.push({ command, ...(commandOptions === undefined ? {} : { options: commandOptions }) })
     const joined = command.join(' ')
+    if (joined === 'bash scripts/deploy-web.sh') webUploaded = true
     if (joined === 'git rev-parse HEAD') return ok(`${commitSha}\n`)
     if (joined.startsWith('git ls-remote')) return ok(`${options.mainSha ?? commitSha}\trefs/heads/main\n`)
     if (joined.startsWith('aws ssm get-parameters-by-path')) {
@@ -144,7 +149,11 @@ function fakeDependencies(options: FakeOptions = {}): Fake {
         return generated.toString(16).padStart(64, 'a')
       },
       mask: (value) => masked.push(value),
-      fetchJson: async () => ({ ok: true, applicationCommitSha: healthCommits.shift() }),
+      fetchJson: async () => {
+        if (webUploaded) return { ok: true, applicationCommitSha: healthCommits.shift() }
+        if (options.previousCommit === 'unreachable') throw new Error('connect ECONNREFUSED')
+        return { ok: true, applicationCommitSha: options.previousCommit }
+      },
       readText: async () => '{"Mukuroji":{}}',
       workDirectory: '/tmp/work',
       sleep: async () => {},
@@ -327,6 +336,21 @@ describe('runGitHubDeploy', () => {
     expect(fake.calls.some((call) => call.command.includes('put-parameter'))).toBe(false)
   })
 
+  test('records the previous commit and the compare link of the deployed changes', async () => {
+    const previous = 'f'.repeat(40)
+    const fake = fakeDependencies({ stackExists: true, storedSecrets: storedSecrets(), previousCommit: previous })
+    await runGitHubDeploy('deploy', { ...context, repositoryUrl: 'https://github.com/mnmn0/mukuroji' }, fake.dependencies, fastTiming)
+    const summary = fake.summaries.join('')
+    expect(summary).toContain(`| Previous commit | \`${previous}\` |`)
+    expect(summary).toContain(`https://github.com/mnmn0/mukuroji/compare/${previous}...${commitSha}`)
+  })
+
+  test('deploys even when the running stack does not report its commit', async () => {
+    const fake = fakeDependencies({ stackExists: true, storedSecrets: storedSecrets(), previousCommit: 'unreachable' })
+    await runGitHubDeploy('deploy', context, fake.dependencies, fastTiming)
+    expect(fake.summaries.join('')).toContain('| Previous commit | unknown')
+  })
+
   test('stops before the Web upload when cdk deploy fails', async () => {
     const fake = fakeDependencies({ stackExists: true, storedSecrets: storedSecrets(), cdkExitCode: 1 })
     await expect(runGitHubDeploy('deploy', context, fake.dependencies, fastTiming)).rejects.toThrow('cdk deploy failed')
@@ -379,5 +403,20 @@ describe('runGitHubDeploy', () => {
       runGitHubDeploy('web-rollback', { ...context, webReleaseCommit: 'main' }, fake.dependencies, fastTiming),
     ).rejects.toThrow('full 40-character commit SHA')
     expect(fake.calls).toHaveLength(0)
+  })
+})
+
+describe('describeDeployedChanges', () => {
+  test('describes an unknown, an unchanged, and a changed previous commit', () => {
+    const previous = 'f'.repeat(40)
+    expect(describeDeployedChanges(undefined, commitSha, '')[0]).toContain('unknown')
+    expect(describeDeployedChanges(commitSha, commitSha, '')).toEqual([
+      `| Previous commit | \`${commitSha}\` (same commit, no changes) |`,
+    ])
+    expect(describeDeployedChanges(previous, commitSha, 'https://github.com/o/r/')).toEqual([
+      `| Previous commit | \`${previous}\` |`,
+      `| Changes | https://github.com/o/r/compare/${previous}...${commitSha} |`,
+    ])
+    expect(describeDeployedChanges(previous, commitSha, '')[1]).toBe('| Changes | `ffffffffffff...0123456789ab` |')
   })
 })

@@ -28,6 +28,7 @@ import { agentSettingsMessages } from './agent-settings'
 import { factoryBoardMessages } from './factory-board'
 import { timeTrackingMessages } from './time-tracking'
 import { accountSecurityMessages } from './account-security'
+import { auditLogMessages } from './audit-log'
 
 /**
  * Complete Japanese message dictionary assembled from domain modules.
@@ -64,6 +65,7 @@ export const jaMessages = {
   ...factoryBoardMessages,
   ...timeTrackingMessages,
   ...accountSecurityMessages,
+  ...auditLogMessages,
 } as const
 
 /**

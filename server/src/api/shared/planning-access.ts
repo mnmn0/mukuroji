@@ -82,11 +82,17 @@ export function readPlanningIdentifier(value: unknown, label: string) {
   return value
 }
 
-/** Returns whether Planning history reads must authorize every captured Project scope. */
+/**
+ * Returns whether Planning history reads must authorize every captured Project scope.
+ *
+ * @param context - Hono request context, when available.
+ * @returns True for update history, its export, and Planning entity activity.
+ */
 export function shouldEvaluateAllPlanningHistoryScopes(context?: Context): boolean {
   return context?.req.method === 'GET' && (
     context.req.path === '/api/planning/updates' ||
-    context.req.path === '/api/planning/updates/export'
+    context.req.path === '/api/planning/updates/export' ||
+    /^\/api\/planning\/entities\/[^/]+\/activity$/u.test(context.req.path)
   )
 }
 

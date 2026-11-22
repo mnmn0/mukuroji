@@ -29,6 +29,40 @@ Report snapshot の作成時も保存済み definition を必ず使い、request
 Evidence、snapshot、export でも現在の認可を読み直し、以前は見えていた
 Work Item が権限変更や削除で見えなくなった場合、その値や件数を返しません。
 
+### Export の名前表示
+
+Snapshot の group は Team ID・Project ID・member key・status category をそのまま key と label に
+持ちます。名前は保存せず、表示と export のたびに引き直します（名前を変えると古い snapshot も新しい
+名前で出ます）。共通の解決規則は contracts の `resolveAnalyticsGroupLabel` で、Web と export が
+同じものを使います。Project・担当者・custom field の値がない group は locale に合わせた
+「未設定」/「Unassigned」になります。名前が分からない ID（削除された Team など）は元の値のままです。
+
+Export が引く名前は caller が見られる範囲に限ります。Team と Project は caller の Project
+directory（`GET /api/teams/projects` と同じ絞り込み）から、member 名は読める Project の member
+一覧から、Work Item Type と custom field の名前は見える Team の configuration から読みます。
+member と configuration は query が担当者・Work Item Type・custom field を使うときだけ読み、
+読み取りに失敗した分は元の値で出力します。
+Project ID と custom field ID は Team の中でしか一意でないので、Project 名は行の Team と組で引き、
+custom field 名は query が絞った Team の configuration から引きます。Team が決まらず名前が食い違う
+ときは「名前 (Team) / 名前 (Team)」と併記します。
+
+PDF の見出しは保存済み report の名前です。保存済み report を開いて live query のまま出力するときは、
+Web が `titleReportId` を添え、server が caller の権限で report を読んで名前だけを使います（出力内容は
+`query` のまま）。
+
+CSV は既存の列の後ろに「Dimension key」「Team」「Project」を足しました。Group 行の
+「Dimension value」は名前、「Dimension key」は元の key です。Table 行の「Team」「Project」は
+「Team ID」「Project ID」の名前です。
+
+PDF は report 名（ad-hoc query では `mukuroji analytics`）、期間（report の timezone の日付）、
+基準日時、timezone、絞り込み、widget ごとの値と group 別の内訳（widget あたり 100 件まで）、
+forecast を書き、余白に収まらない行は折り返します。埋め込みの日本語 font は固定ラベル用の
+subset なので、それ以外の文字（Team 名の漢字など）は非埋め込みの CID font
+（`HeiseiKakuGo-W5`、Adobe-Japan1、`UniJIS-UCS2-H`）で書き、PDF viewer が持つ日本語 font で
+表示します。この font を使う文字には ToUnicode を付け、コピーと検索で元の文字を返します。
+ASCII に分解できる文字（`é` など）は `e` として書き、どちらの font でも書けない文字（絵文字など）は
+`?` にします。
+
 Analytics 用の canonical reader は Team partition を archived row も含めて読み、現在の
 Team/Project ACL を適用します。Project filter がある場合も、その Project が属する Team
 partition から読みます。現在状態が `asOf` より後に project 移動、archive、status 変更されていても
@@ -133,10 +167,48 @@ Metric contract の version は snapshot に固定します。同じ入力、met
 | SLA | Widget の `slaTargetHours` 以下で完了した eligible Work Item の割合。 |
 | Remaining scope | 評価時点で archive されておらず、`completed` / `canceled` ではない Work Item 数。Chart の各 point は burnup 用に `scope`（`canceled` を除く total scope）と `completed` を `segments` で返します。`weighting: "effort"` では残工数（記録された残工数、なければ見積）の合計時間で、burnup の `scope` と `completed` は見積の合計時間です（残工数の消化が scope の減少に見えないようにするため）。 |
 | Cumulative flow | 評価時点で archive されていない Work Item 数。Chart の各 point は status category（`completed` / `started` / `unstarted` / `backlog` / `canceled`）ごとの件数を `segments` で返します。 |
+| Milestone trend | 期間中に予定日（forecast の終了日）が変わった Milestone 数。Chart の各 point は bucket 末時点の各 Milestone の予定日を、key が Milestone ID、value が 1970-01-01 からの日数の `segments` で返します。Group は Milestone ごとに、期間中に予定日が動いた日数（遅れは正）と変更回数（`sampleSize`）を返します。 |
 
 Remaining scope と cumulative flow は WIP と同じく、chart の bucket ごとに bucket 末（`asOf` を超えない）時点へ
 state を巻き戻して評価する state metric です。期間の途中で作成された Work Item は作成後の bucket から scope に入るため、
 burnup の `scope` で scope 追加を区別できます。これらの metric の追加で既存 metric の値と version は変わりません。
+
+### Milestone trend
+
+Milestone trend は Work Item ではなく Planning の Milestone を入力にします。API は `milestone-trend` widget を
+含む query のときだけ Planning graph を読み、live（archive されていない）Milestone を使います。従来の権限の
+caller は `GET /api/planning` と同じ current Planning ACL で絞ります。Analytics の route は `work-items.read` で
+認可され、Enterprise の caller の principal にある scope はその permission のものなので使わず、各 Milestone の
+Team / Project / Workspace resource で `planning.read` を評価し、許可のない Milestone は読みません。Team / Project filter は Milestone の現在の scope に適用し、
+どちらかを指定すると Workspace scope の Milestone は含めません。`asOf` より後に作られた Milestone も含めません。
+1 query で読む Milestone は 100 件まで（超えたら `413`）で、Work Item 用の filter（担当者、status、
+custom field、Work Item 一覧など）は Milestone に効きません。
+
+予定日の履歴は各 Milestone の `planning-entity` audit timeline（[#639](https://github.com/mnmn0/mukuroji/issues/639)
+の作成・変更・移動の event）から `forecast.endDate`、`teamId`、`projectId` の変更を読みます。上限は Milestone
+あたり 20 page、全体で page query 500 回・event 10,000 件です（超えたら `413`）。ある時点の値は、その時点以前の
+最新の変更の `after`、なければそれより後の最初の変更の `before`、変更がなければ現在値です。Milestone は作成後、
+かつ記録された Team / Project scope が現在と同じ間だけ予定日を返すので、閲覧者が今は読めない scope に
+あった間の履歴は返しません。記録上の scope には、各 event が metadata に残した書き込み時点の Team / Project も
+使います。親（Initiative など）の移動で Milestone の scope が変わった場合は Milestone 自身の event がないため、
+別の Team へ移って戻った間の変更もその event の scope で隠れます。ある event の scope が直前の event の後の scope と
+違えば、その間のどこかで親が動かしたので、その区間は scope 不明として予定日を返しません。`updatedAt` が最後の event
+より後なら親の書き込みで運ばれたとみなし、最後の event からそれまでも scope 不明、それ以降を現在の scope とします。Audit を書く前に作られた Milestone は作成時から現在の予定日を返し、warning を付けます。
+Audit の entity index は結果整合なので、各 Milestone の履歴が最新の書き込み（`updatedAt` 以降の event、または5分より
+前の親による移動）と現在の予定日に追いつくまで Planning と audit を読み直し（3 回まで、上限は再試行全体で共有）、
+揃わなければ `503`（`AnalyticsReadBarrierUnavailable`）で fail-closed にします。作成直後で作成 event がまだ見えない
+Milestone も、audit 前の Milestone とはみなさず読み直します。
+
+Snapshot の permission scope hash には、Milestone を読んだ query のときだけ読めた Milestone の ID と現在の
+Team / Project scope を加え（移動した Milestone の snapshot は再検証で見えなくなります）、
+一覧・export の再検証でも同じ規則で現在読める Milestone と比べます（現在読める Milestone が上限の 100 件を超える場合、
+その snapshot だけを scope 不一致として扱います）。Milestone trend のない report の hash は
+変わりません。定期配信の runner は閲覧者の Planning ACL を評価できないため Milestone を読まず、その widget は
+warning だけを返します（hash にも Milestone を加えません）。変化日数は期間末と期間開始の予定日の差で、期間開始の時点で予定日を返せない場合は期間内で最初に返せた予定日を基準にします（CSV の `shiftFrom` と table の `periodStartForecastEndDate` もその日付です）。CSV では segment の値を `YYYY-MM-DD` で出力し、table の行は値に変化日数、サンプル数に変更回数、ディメンション値に
+`baseline=…; shiftFrom=…; forecast=…` を出力します。
+Segment は bucket 数 × Milestone 数だけ増えるため、長い期間を日次で多数の Milestone について描くと
+response の 256 KiB 上限で `413` になります。Web の builder は週次 bucket で widget を追加します。
+
 
 Chart widget の `visualization` は `line` / `bar` に加え、`area`（`segments` の積み上げ面、CFD 用）、`burndown`
 （残量と、最初の point の残量から期間末に 0 へ向かう ideal line）、`burnup`（`scope` と `completed` の 2 本線）を

@@ -212,6 +212,7 @@ export function TeamIssueScreen({
   planningErrorMessage,
   planningSnapshot,
   workingCalendar,
+  calendarPeriods,
   workingCalendarErrorMessage,
   onRetryWorkingCalendar,
   createIssueProjects,
@@ -1712,9 +1713,11 @@ export function TeamIssueScreen({
                     />
                   ) : viewMode === 'calendar' ? (
                     <TaskCalendarView
+                      calendarPeriods={calendarPeriods}
                       configuration={configuration}
                       configurationsByTeam={ganttConfigurationsByTeam}
                       month={calendarMonth}
+                      monthNote="shown-month"
                       onMonthChange={setCalendarMonth}
                       onSelectTask={canOpenIssueAction ? handleOpenIssue : undefined}
                       t={t}
@@ -1732,6 +1735,7 @@ export function TeamIssueScreen({
                       t={t}
                       tasks={visibleIssues}
                       workingCalendar={workingCalendar}
+                      calendarPeriods={calendarPeriods}
                       {...createTaskGanttDisplayBinding(
                         taskViewPresentation,
                         onTaskViewPresentationChange,

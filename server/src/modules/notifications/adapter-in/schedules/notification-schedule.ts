@@ -23,6 +23,7 @@ import {
 import { createPlanningUpdatePublicTargetKey } from '../../../collaboration'
 import { isCanonicalWorkItemRecord, isWorkItemKeyRegistryRecord } from '../../../work-items'
 import { NOTIFICATION_REMINDER_DAYS_MAXIMUM } from '@mukuroji/contracts'
+import { normalizeTeamReminderDays } from '../../domain/reminder-days'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 import type { ScheduledProjectManagerReader } from '../../application/ports/project-manager-reader'
 import type { ScheduledReminderSettingsReader } from '../../application/ports/reminder-settings-reader'
@@ -32,8 +33,10 @@ import type {
 } from '../../application/ports/scheduled-work-item-source'
 import type { ScheduledTimesheetReader } from '../../application/ports/timesheet-reminder-reader'
 import {
+  DEFAULT_TIMESHEET_REMINDER_HOUR,
   TIMESHEET_REMINDER_LOOKBACK_DAYS,
   evaluateTimesheetReminders,
+  isTimesheetReminderHour,
   type TimesheetReminderCandidate,
 } from '../../application/timesheet-reminders'
 import type { ScheduledWeeklyReportReader } from '../../application/ports/weekly-report-reminder-reader'
@@ -128,10 +131,10 @@ export type NotificationScheduleRunOptions = {
   /** Reads unsubmitted time entries; without it no timesheet reminder is emitted. */
   timesheetReader?: ScheduledTimesheetReader
   /**
-   * UTC hour (0-23) of the one hourly run per day that sends timesheet reminders. Defaults to
-   * {@link defaultTimesheetReminderHourUtc}.
+   * Local hour (0-23) in the Workspace time zone of the one hourly run per day that sends
+   * timesheet reminders. Defaults to {@link DEFAULT_TIMESHEET_REMINDER_HOUR}.
    */
-  timesheetReminderHourUtc?: number
+  timesheetReminderHour?: number
   /**
    * Reads Workspace reminder settings, rosters, and submissions; without it no weekly report
    * reminder is emitted.
@@ -268,8 +271,6 @@ const defaultScanPageSize = 100
 const defaultMaxScanPages = 1_000
 const defaultAuditRetentionDays = 2_555
 const maximumPlanningNotificationOffsetHours = 24 * 365
-/** 00:00 UTC, which is 09:00 in Japan, where the first customers work. */
-const defaultTimesheetReminderHourUtc = 0
 
 /**
  * Creates an EventBridge schedule adapter bound to an injected DocumentClient.
@@ -324,64 +325,73 @@ export function createNotificationScheduleHandler(
       ...(projectManagerReader ? { projectManagerReader } : {}),
       ...(reminderSettingsReader ? { reminderSettingsReader } : {}),
       ...(timesheetReader ? { timesheetReader } : {}),
-      timesheetReminderHourUtc: readTimesheetReminderHourUtc(),
+      timesheetReminderHour: readTimesheetReminderHour(),
       ...(weeklyReportReader ? { weeklyReportReader } : {}),
       reminderPolicy: readReminderPolicyDefaultsFromEnvironment(),
     })
 }
 
+/** Environment variable that holds the deployment default reminder days for every Lambda. */
+export const NOTIFICATION_REMINDER_DEFAULT_DAYS_ENVIRONMENT = 'NOTIFICATION_REMINDER_DEFAULT_DAYS'
+
 /**
- * Reads the deployment default reminder thresholds from the environment. Unset variables use
- * {@link DEFAULT_WORK_ITEM_REMINDER_POLICY}; Teams and members override the result.
+ * Reads the deployment default reminder thresholds. They come from one stack parameter that the
+ * schedule and API Lambdas both receive as {@link NOTIFICATION_REMINDER_DEFAULT_DAYS_ENVIRONMENT},
+ * a JSON object with the same fields as a Team's settings (`{"dueSoonDays":5}`). Omitted fields,
+ * or a blank value, use {@link DEFAULT_WORK_ITEM_REMINDER_POLICY}; Teams and members override the
+ * result.
  *
  * @returns Validated default thresholds.
- * @throws RangeError when a configured value is not a valid day count.
+ * @throws RangeError when the value is not such an object or a day count is out of range.
  */
 export function readReminderPolicyDefaultsFromEnvironment(): WorkItemReminderPolicy {
-  return normalizeWorkItemReminderPolicy({
-    dueSoonDays: readPositiveIntegerEnvironment(
-      'NOTIFICATION_DUE_SOON_DAYS',
-      DEFAULT_WORK_ITEM_REMINDER_POLICY.dueSoonDays,
-    ),
-    overdueReminderIntervalDays: readPositiveIntegerEnvironment(
-      'NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS',
-      DEFAULT_WORK_ITEM_REMINDER_POLICY.overdueReminderIntervalDays,
-    ),
-    overdueEscalationDays: readPositiveIntegerEnvironment(
-      'NOTIFICATION_OVERDUE_ESCALATION_DAYS',
-      DEFAULT_WORK_ITEM_REMINDER_POLICY.overdueEscalationDays,
-    ),
-    staleStartedDays: readPositiveIntegerEnvironment(
-      'NOTIFICATION_STALE_STARTED_DAYS',
-      DEFAULT_WORK_ITEM_REMINDER_POLICY.staleStartedDays,
-    ),
-    timesheetReminderDays: readPositiveIntegerEnvironment(
-      'NOTIFICATION_TIMESHEET_REMINDER_DAYS',
-      DEFAULT_WORK_ITEM_REMINDER_POLICY.timesheetReminderDays,
-    ),
-  })
+  const configured = loadServerConfig().environment[NOTIFICATION_REMINDER_DEFAULT_DAYS_ENVIRONMENT]?.trim()
+  return normalizeWorkItemReminderPolicy(configured ? parseReminderDefaultDays(configured) : undefined)
 }
 
 /**
- * Reads the UTC hour of the daily timesheet reminder run.
+ * Parses the deployment default reminder days.
+ *
+ * @param value - Non-blank JSON text.
+ * @returns The fields it sets.
+ * @throws RangeError when the text is not a JSON object of valid reminder day fields.
+ */
+function parseReminderDefaultDays(value: string): Partial<WorkItemReminderPolicy> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new RangeError(`${NOTIFICATION_REMINDER_DEFAULT_DAYS_ENVIRONMENT} must be a JSON object.`)
+  }
+  try {
+    return normalizeTeamReminderDays(parsed)
+  } catch {
+    throw new RangeError(
+      `${NOTIFICATION_REMINDER_DEFAULT_DAYS_ENVIRONMENT} must set only reminder day fields to valid day counts.`,
+    )
+  }
+}
+
+/**
+ * Reads the local hour, in the Workspace time zone, of the daily timesheet reminder run.
  *
  * @returns Hour from 0 to 23.
  * @throws RangeError when the configured value is not an hour.
  */
-function readTimesheetReminderHourUtc() {
-  const configured = loadServerConfig().environment.NOTIFICATION_TIMESHEET_REMINDER_HOUR_UTC?.trim()
-  if (!configured) return defaultTimesheetReminderHourUtc
-  return readHourUtc(Number(configured))
+function readTimesheetReminderHour() {
+  const configured = loadServerConfig().environment.NOTIFICATION_TIMESHEET_REMINDER_HOUR?.trim()
+  if (!configured) return DEFAULT_TIMESHEET_REMINDER_HOUR
+  return readHour(Number(configured))
 }
 
 /**
- * Validates a UTC hour.
+ * Validates an hour of the day.
  *
  * @param value - Candidate hour.
  * @returns The hour.
  * @throws RangeError when the value is not an integer from 0 to 23.
  */
-function readHourUtc(value: number) {
+function readHour(value: number) {
   if (!Number.isSafeInteger(value) || value < 0 || value > 23) {
     throw new RangeError('Timesheet reminder hour must be an integer between 0 and 23.')
   }
@@ -416,8 +426,8 @@ export async function runNotificationSchedule(
     reminderPolicy,
     options.reminderSettingsReader,
   )
-  const timesheetReminderHourUtc = readHourUtc(
-    options.timesheetReminderHourUtc ?? defaultTimesheetReminderHourUtc,
+  const timesheetReminderHour = readHour(
+    options.timesheetReminderHour ?? DEFAULT_TIMESHEET_REMINDER_HOUR,
   )
   const projectManagersByWorkspace = new Map<
     string,
@@ -545,7 +555,9 @@ export async function runNotificationSchedule(
     return teamList
   }
 
-  if (options.timesheetReader && now.getUTCHours() === timesheetReminderHourUtc) {
+  // Every Workspace keeps its wall clock in the Workspace time zone (DEFAULT_WORKSPACE_TIME_ZONE),
+  // so one local-hour check covers all of them and the directory is read only in that run.
+  if (options.timesheetReader && isTimesheetReminderHour(now, timesheetReminderHour)) {
     const from = new Date(now.getTime() - TIMESHEET_REMINDER_LOOKBACK_DAYS * 86_400_000)
     for (const { workspaceId, teamId } of await listTeams()) {
       const entries = await options.timesheetReader.listUnsubmittedEntries(

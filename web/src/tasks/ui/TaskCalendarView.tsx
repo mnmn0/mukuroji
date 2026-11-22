@@ -38,12 +38,23 @@ import {
 } from '../model/taskView'
 import { TaskViewHeading, TaskWorkItemTypeBadge } from './TaskViewPrimitives'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
-import { TaskCalendarMonthNavigation } from './TaskScheduleWindowToolbar'
+import {
+  TaskCalendarMonthNavigation,
+  type TaskCalendarMonthNote,
+} from './TaskScheduleWindowToolbar'
 import {
   createTaskCalendarMonthWindow,
   getCurrentTaskDate,
   listTaskScheduleWindowDates,
 } from '../model/taskScheduleWindow'
+import {
+  groupTaskCalendarDaysByWeek,
+  resolveTaskCalendarWeekdayKey,
+} from '../model/taskCalendarMonth'
+import {
+  DEFAULT_TASK_CALENDAR_PERIODS,
+  type TaskCalendarPeriods,
+} from '../model/taskGanttTimeline'
 
 /** Resolves a localized task-calendar message. */
 type TaskCalendarTranslator = (key: MessageKey) => string
@@ -107,6 +118,11 @@ export type TaskCalendarViewProps = {
   month?: string
   /** Moves the calendar to another month. Shown as period navigation together with `month`. */
   onMonthChange?: (month: string) => void
+  /**
+   * Note under the month navigation: `loaded-period` when the screen loads only the shown
+   * period, `shown-month` when it loads every Work Item. `loaded-period` when omitted.
+   */
+  monthNote?: TaskCalendarMonthNote
   /** Opens the create panel with a date or date-range context. */
   onCreateTaskOpen?: (context?: CalendarTaskCreateContext) => void
   /** Selects a task in the shared detail pane. */
@@ -116,6 +132,11 @@ export type TaskCalendarViewProps = {
     task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
   ) => ProjectTaskDirectScheduleHandle
+  /**
+   * Workspace week start day and fiscal year start month. Dates are grouped under week headings
+   * that start on the week start day; Monday weeks when omitted.
+   */
+  calendarPeriods?: TaskCalendarPeriods
 }
 
 /** Props for the Calendar schedule-preview dialog. */
@@ -142,9 +163,11 @@ type CalendarSchedulePreviewProps = {
  * @returns The independent project task calendar view.
  */
 export function TaskCalendarView({
+  calendarPeriods = DEFAULT_TASK_CALENDAR_PERIODS,
   configuration,
   configurationsByTeam = {},
   month,
+  monthNote,
   onCreateTaskOpen,
   onMonthChange,
   onRequestScheduleChange,
@@ -154,6 +177,11 @@ export function TaskCalendarView({
   tasks,
 }: TaskCalendarViewProps) {
   const calendar = useMemo(() => createCanonicalCalendarModel(tasks, month), [month, tasks])
+  const weekStartDay = calendarPeriods.weekStartDay
+  const calendarWeeks = useMemo(
+    () => groupTaskCalendarDaysByWeek(calendar.days, weekStartDay),
+    [calendar.days, weekStartDay],
+  )
   const [draggedTaskKey, setDraggedTaskKey] = useState<string>()
   const [rangeStartDate, setRangeStartDate] = useState<string>()
   const [busyTaskKey, setBusyTaskKey] = useState<string>()
@@ -365,7 +393,12 @@ export function TaskCalendarView({
         titleKey="tasks.view.calendar"
       />
       {month && onMonthChange ? (
-        <TaskCalendarMonthNavigation month={month} onMonthChange={onMonthChange} t={t} />
+        <TaskCalendarMonthNavigation
+          month={month}
+          note={monthNote}
+          onMonthChange={onMonthChange}
+          t={t}
+        />
       ) : null}
       {errorMessage ? (
         <p className="border-b border-tone-fecaca bg-tone-fef2f2 px-4 py-2 text-sm font-medium text-fg-b42318" role="alert">
@@ -380,85 +413,113 @@ export function TaskCalendarView({
           </button>
         </div>
       ) : null}
+      {calendarWeeks.map((week) => (
+        <div
+          aria-labelledby={`task-calendar-week-${week.weekStartDate}`}
+          data-testid={`task-calendar-week-${week.weekStartDate}`}
+          key={week.weekStartDate}
+          role="group"
+        >
+          <h3
+            className="border-b border-r border-tone-e4e7ec bg-[var(--workbench-surface-muted)] px-3 py-1.5 text-xs font-semibold text-fg-667085"
+            id={`task-calendar-week-${week.weekStartDate}`}
+          >
+            {t('tasks.calendar.week')
+              .replace('{from}', week.weekStartDate)
+              .replace('{to}', week.weekEndDate)}
+          </h3>
+          <div
+            className="grid"
+            // Every week keeps the same tracks, so the dates of a short week line up with full ones.
+            style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 230px), 1fr))' }}
+          >
+            {week.days.map((day) => (
+              <div
+                // A month shows every date, so empty dates stay short and the month stays scannable.
+                className={`${month && day.entries.length === 0 ? 'min-h-[72px]' : 'min-h-[210px]'} border-b border-r border-tone-e4e7ec p-3 transition-colors`}
+                data-testid={`task-calendar-day-${day.date}`}
+                key={day.date}
+                onDragOver={(event) => {
+                  if (draggedTaskKey) {
+                    event.preventDefault()
+                    event.dataTransfer.dropEffect = 'move'
+                  }
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  dropTaskOnDate(day.date)
+                }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <time className="text-sm font-semibold text-fg-1c1d1f" dateTime={day.date}>
+                    {day.date}
+                    <span className="ml-1 text-xs font-medium text-fg-667085">
+                      {t(resolveTaskCalendarWeekdayKey(day.date))}
+                    </span>
+                  </time>
+                  {onCreateTaskOpen ? (
+                    <span className="flex items-center gap-1">
+                      <button
+                        aria-label={`${t('tasks.calendar.addOnDate')}: ${day.date}`}
+                        className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary-text)] hover:bg-tone-e5f7f4"
+                        onClick={() => openCreateForDate(day.date, false)}
+                        type="button"
+                      >
+                        +
+                      </button>
+                      <button
+                        aria-label={t('tasks.schedule.rangeCreate').replace('{date}', day.date)}
+                        aria-pressed={rangeStartDate === day.date}
+                        className="rounded px-1.5 py-1 text-xs font-bold text-[var(--workbench-primary-text)] hover:bg-tone-e5f7f4 aria-pressed:bg-tone-ccfbea"
+                        onClick={() => openCreateForDate(day.date, true)}
+                        type="button"
+                      >
+                        ↔
+                      </button>
+                    </span>
+                  ) : null}
+                </div>
+                <div className="mt-3 grid gap-2">
+                  {day.entries.map((entry) => (
+                    <CalendarTaskCard
+                      busy={busyTaskKey === createTaskKey(entry.task)}
+                      canEditSchedule={canEditSchedule}
+                      entry={entry}
+                      configuration={resolveProjectTaskConfiguration(
+                        entry.task,
+                        configurationsByTeam,
+                        configuration,
+                      )}
+                      key={createTaskKey(entry.task)}
+                      onDragEnd={() => setDraggedTaskKey(undefined)}
+                      onDragStart={(event) => {
+                        const taskKey = createTaskKey(entry.task)
+                        setDraggedTaskKey(taskKey)
+                        event.dataTransfer.effectAllowed = 'move'
+                        event.dataTransfer.setData('text/plain', taskKey)
+                      }}
+                      onMove={(date) => void previewScheduleChange(
+                        entry.task,
+                        createMoveTaskScheduleOperation(date),
+                      )}
+                      onSelectTask={onSelectTask}
+                      onUnschedule={() => void previewScheduleChange(
+                        entry.task,
+                        createReplaceTaskScheduleOperation(unscheduleTaskSchedule(entry.schedule)),
+                      )}
+                      t={t}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
       <div
         className="grid"
         style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 230px), 1fr))' }}
       >
-        {calendar.days.map((day) => (
-          <div
-            // A month shows every date, so empty dates stay short and the month stays scannable.
-            className={`${month && day.entries.length === 0 ? 'min-h-[72px]' : 'min-h-[210px]'} border-b border-r border-tone-e4e7ec p-3 transition-colors`}
-            data-testid={`task-calendar-day-${day.date}`}
-            key={day.date}
-            onDragOver={(event) => {
-              if (draggedTaskKey) {
-                event.preventDefault()
-                event.dataTransfer.dropEffect = 'move'
-              }
-            }}
-            onDrop={(event) => {
-              event.preventDefault()
-              dropTaskOnDate(day.date)
-            }}
-          >
-            <div className="flex items-center justify-between gap-2">
-              <time className="text-sm font-semibold text-fg-1c1d1f" dateTime={day.date}>{day.date}</time>
-              {onCreateTaskOpen ? (
-                <span className="flex items-center gap-1">
-                  <button
-                    aria-label={`${t('tasks.calendar.addOnDate')}: ${day.date}`}
-                    className="rounded px-1.5 text-lg font-semibold text-[var(--workbench-primary-text)] hover:bg-tone-e5f7f4"
-                    onClick={() => openCreateForDate(day.date, false)}
-                    type="button"
-                  >
-                    +
-                  </button>
-                  <button
-                    aria-label={t('tasks.schedule.rangeCreate').replace('{date}', day.date)}
-                    aria-pressed={rangeStartDate === day.date}
-                    className="rounded px-1.5 py-1 text-xs font-bold text-[var(--workbench-primary-text)] hover:bg-tone-e5f7f4 aria-pressed:bg-tone-ccfbea"
-                    onClick={() => openCreateForDate(day.date, true)}
-                    type="button"
-                  >
-                    ↔
-                  </button>
-                </span>
-              ) : null}
-            </div>
-            <div className="mt-3 grid gap-2">
-              {day.entries.map((entry) => (
-                <CalendarTaskCard
-                  busy={busyTaskKey === createTaskKey(entry.task)}
-                  canEditSchedule={canEditSchedule}
-                  entry={entry}
-                  configuration={resolveProjectTaskConfiguration(
-                    entry.task,
-                    configurationsByTeam,
-                    configuration,
-                  )}
-                  key={createTaskKey(entry.task)}
-                  onDragEnd={() => setDraggedTaskKey(undefined)}
-                  onDragStart={(event) => {
-                    const taskKey = createTaskKey(entry.task)
-                    setDraggedTaskKey(taskKey)
-                    event.dataTransfer.effectAllowed = 'move'
-                    event.dataTransfer.setData('text/plain', taskKey)
-                  }}
-                  onMove={(date) => void previewScheduleChange(
-                    entry.task,
-                    createMoveTaskScheduleOperation(date),
-                  )}
-                  onSelectTask={onSelectTask}
-                  onUnschedule={() => void previewScheduleChange(
-                    entry.task,
-                    createReplaceTaskScheduleOperation(unscheduleTaskSchedule(entry.schedule)),
-                  )}
-                  t={t}
-                />
-              ))}
-            </div>
-          </div>
-        ))}
         <div
           className="min-h-[210px] border-b border-r border-tone-e4e7ec bg-tone-f8fafb p-3"
           data-testid="task-calendar-unscheduled"

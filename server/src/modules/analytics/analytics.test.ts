@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test'
+import { dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import {
   DeleteCommand,
@@ -40,6 +42,7 @@ import {
   normalizeAnalyticsExportLocale,
   normalizeAnalyticsQueryInput,
   queryAnalyticsEvidence,
+  resolveAnalyticsReportFilterPeriod,
   selectAnalyticsWorkItemsRequiringHistory,
   validateAnalyticsSnapshotRecordSize,
 } from './analytics'
@@ -62,6 +65,29 @@ const defaultAuthorizedProjectIds = new Set([
   'project-a',
   'project-b',
 ])
+
+/** Directory of the predefined CMaps pdf.js needs to read the `UniJIS-UCS2-H` fallback font. */
+const pdfCMapDirectory = `${dirname(fileURLToPath(import.meta.resolve('pdfjs-dist/package.json')))}/cmaps/`
+
+/**
+ * Extracts the text of every page of a PDF with pdf.js.
+ *
+ * @param bytes - PDF bytes.
+ * @returns Page texts joined without separators, since pdf.js splits text items at font changes.
+ */
+async function readPdfText(bytes: Uint8Array) {
+  const loadingTask = getDocument({ data: bytes, cMapUrl: pdfCMapDirectory, cMapPacked: true })
+  const document = await loadingTask.promise
+  const pages = await Promise.all(
+    Array.from({ length: document.numPages }, async (_, index) => {
+      const page = await document.getPage(index + 1)
+      const content = await page.getTextContent()
+      return content.items.flatMap((item) => 'str' in item ? [item.str] : []).join('')
+    }),
+  )
+  await loadingTask.destroy()
+  return pages.join('')
+}
 
 function createTestAnalyticsSnapshot(
   input: Omit<Parameters<typeof createAnalyticsSnapshot>[0], 'authorizedProjectIds'>,
@@ -546,6 +572,7 @@ describe('Analytics metric engine', () => {
       sla: 100,
       'remaining-scope': 1,
       'cumulative-flow': 2,
+      'milestone-trend': null,
     })
     expect(snapshot.generatedAt).toBe(period.to)
     expect(snapshot.queryHash).toHaveLength(64)
@@ -1875,11 +1902,13 @@ describe('Analytics export', () => {
     expect(csv).toContain('Table row')
     expect(csv.split('\r\n')[0]).toBe(
       'Widget ID,Metric key,Metric,Value,Sample size,Record type,Dimension value,' +
-      'Period from,Period to,Row ID,Row label,Team ID,Work Item ID,Project ID,Occurred at',
+      'Period from,Period to,Row ID,Row label,Team ID,Work Item ID,Project ID,Occurred at,' +
+      'Dimension key,Team,Project',
     )
     expect(japaneseCsv.split('\r\n')[0]).toBe(
       'ウィジェットID,指標キー,指標,値,サンプル数,レコード種別,ディメンション値,' +
-      '期間開始,期間終了,行ID,行ラベル,チームID,作業項目ID,プロジェクトID,発生日時',
+      '期間開始,期間終了,行ID,行ラベル,チームID,作業項目ID,プロジェクトID,発生日時,' +
+      'ディメンションキー,チーム,プロジェクト',
     )
     expect(japaneseCsv).toContain('スループット')
     expect(japaneseCsv).toContain('テーブル行')
@@ -1942,6 +1971,8 @@ describe('Analytics export', () => {
 
     const japaneseLoadingTask = getDocument({
       data: japanesePdfBytes,
+      cMapUrl: pdfCMapDirectory,
+      cMapPacked: true,
     })
     const japaneseDocument = await japaneseLoadingTask.promise
     const extractedPages = await Promise.all(
@@ -1993,6 +2024,141 @@ describe('Analytics export', () => {
       expect(analyticsPdfFont.japaneseGlyphs).toContain(character)
     }
     await japaneseLoadingTask.destroy()
+  })
+
+  test('prints names, the report context, and group breakdowns instead of internal IDs', async () => {
+    const assigned = createWorkItem('named', {
+      assignedProjectId: 'project-a',
+      assigneeUserId: 'sato@example.com',
+    })
+    const unassigned = createWorkItem('unassigned', { assigneeUserId: '' })
+    const events = [assigned, unassigned].map((item) => createAuditEvent(
+      `${item.id}-completed`,
+      item,
+      '2026-01-05T00:00:00.000Z',
+      [{ field: 'statusCategory', before: 'started', after: 'completed' }],
+    ))
+    const widgets: AnalyticsQueryInput['widgets'] = [
+      {
+        id: 'by-project',
+        title: '週次の完了',
+        type: 'chart',
+        metric: 'throughput',
+        groupBy: { dimension: 'project' },
+      },
+      {
+        id: 'by-assignee',
+        title: 'Throughput',
+        type: 'chart',
+        metric: 'throughput',
+        groupBy: { dimension: 'assignee' },
+      },
+      {
+        id: 'by-status',
+        title: 'Throughput',
+        type: 'chart',
+        metric: 'throughput',
+        groupBy: { dimension: 'status' },
+      },
+    ]
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [assigned, unassigned],
+      events,
+      query: createQuery(widgets, {
+        filter: { period, teamIds: ['core'] },
+        timeZone: 'Asia/Tokyo',
+      }),
+    })
+    const context = {
+      title: '開発チーム週次レポート',
+      widgets,
+      names: {
+        teams: new Map([['core', '開発基盤チーム']]),
+        projects: new Map([['project-a', '会計システム刷新']]),
+        members: new Map([['sato@example.com', '佐藤 花子']]),
+        customFields: new Map([['field-risk', 'Risk level']]),
+      },
+    }
+
+    const csv = createAnalyticsCsv(snapshot, 'ja', context)
+    expect(csv).toContain('グループ,会計システム刷新,')
+    expect(csv).toContain(',project-a,,')
+    expect(csv).toContain('グループ,未設定,')
+    expect(csv).toContain('グループ,佐藤 花子,')
+    expect(csv).toContain('グループ,完了,')
+    expect(createAnalyticsCsv(snapshot, 'en', context)).toContain('Group,Unassigned,')
+
+    const japaneseText = await readPdfText(createAnalyticsPdf(snapshot, 'ja', context))
+    for (const expected of [
+      '開発チーム週次レポート',
+      '期間: 2026-01-01 - 2026-01-07',
+      'タイムゾーン: Asia/Tokyo',
+      'チーム: 開発基盤チーム',
+      '週次の完了 (スループット): 2 件',
+      '会計システム刷新: 1 件 (n=1)',
+      '未設定: 1 件 (n=1)',
+      '佐藤 花子: 1 件 (n=1)',
+      '完了: 2 件 (n=2)',
+    ]) {
+      expect(japaneseText).toContain(expected)
+    }
+    expect(japaneseText).not.toContain('project-a')
+    expect(japaneseText).not.toContain('sato@example.com')
+
+    const englishPdf = createAnalyticsPdf(snapshot, 'en', context)
+    expect(Buffer.from(englishPdf).toString('latin1')).toContain('/Encoding /UniJIS-UCS2-H')
+    const englishText = await readPdfText(englishPdf)
+    expect(englishText).toContain('Teams: 開発基盤チーム')
+    expect(englishText).toContain('Unassigned: 1 items (n=1)')
+    expect(englishText).toContain('Completed: 2 items (n=2)')
+
+    const filtered = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query: createQuery(widgets, {
+        filter: {
+          period,
+          projectIds: ['project-a'],
+          customFields: [{ fieldId: 'field-risk', operator: 'equals', value: 'high' }],
+          includeArchived: true,
+        },
+      }),
+    })
+    const filterText = await readPdfText(createAnalyticsPdf(filtered, 'ja', context))
+    expect(filterText).toContain('プロジェクト: 会計システム刷新')
+    expect(filterText).toContain('カスタム項目: Risk level = high')
+    expect(filterText).toContain('アーカイブ済みを含む')
+  })
+
+  test('wraps long PDF lines and omits the fallback font when every character is embedded', async () => {
+    const longTitle = `${'Quarterly delivery review '.repeat(6)}end`
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query: createQuery([{ id: 'throughput', title: 'Throughput', type: 'metric', metric: 'throughput' }]),
+    })
+    const pdf = createAnalyticsPdf(snapshot, 'en', { title: longTitle })
+    const source = Buffer.from(pdf).toString('latin1')
+
+    expect(source).not.toContain('UniJIS-UCS2-H')
+    expect(source).toContain('(Quarterly delivery review Quarterly')
+    const text = await readPdfText(pdf)
+    expect(text).toContain('end')
+    expect(text).toContain('Filters: None')
+  })
+
+  test('prints the inclusive period end when the period ends at local midnight', async () => {
+    const base = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query: createQuery([{ id: 'throughput', title: 'Throughput', type: 'metric', metric: 'throughput' }]),
+    })
+    const snapshot = {
+      ...base,
+      timeZone: 'UTC',
+      filter: { ...base.filter, period: { from: '2026-01-01T00:00:00.000Z', to: '2026-01-07T00:00:00.000Z' } },
+    }
+    expect(await readPdfText(createAnalyticsPdf(snapshot, 'en'))).toContain('2026-01-01 - 2026-01-07')
   })
 })
 
@@ -2885,5 +3051,110 @@ describe('Analytics repository', () => {
     expect([...fake.rows.values()].filter(
       (row) => row.entryType === 'analytics-snapshot-id',
     )).toHaveLength(1)
+  })
+})
+
+describe('Analytics Workspace calendar', () => {
+  const weeklyChart = createQuery([{
+    id: 'weekly',
+    title: 'Weekly throughput',
+    type: 'chart',
+    metric: 'throughput',
+    groupBy: { dimension: 'week' },
+  }])
+
+  test('starts week buckets on Monday when the query names no week start', () => {
+    const snapshot = createTestAnalyticsSnapshot({ workItems: [], events: [], query: weeklyChart })
+    expect(snapshot.widgets[0]?.series?.map((point) => point.from)).toEqual([
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-05T00:00:00.000Z',
+    ])
+  })
+
+  test('starts week buckets on the query week start day', () => {
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query: { ...weeklyChart, weekStartDay: 0 },
+    })
+    expect(snapshot.widgets[0]?.series?.map((point) => [point.from, point.to])).toEqual([
+      ['2026-01-01T00:00:00.000Z', '2026-01-03T23:59:59.999Z'],
+      ['2026-01-04T00:00:00.000Z', '2026-01-07T00:00:00.000Z'],
+    ])
+    expect(normalizeAnalyticsQueryInput({ ...weeklyChart, weekStartDay: 0 }).weekStartDay).toBe(0)
+    expect(normalizeAnalyticsQueryInput({ ...weeklyChart, weekStartDay: 1 })).not.toHaveProperty('weekStartDay')
+  })
+
+  test('starts week group rows on the query week start day in the report time zone', () => {
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query: {
+        ...weeklyChart,
+        timeZone: 'Asia/Tokyo',
+        weekStartDay: 6,
+        widgets: [{
+          id: 'weekly-table',
+          title: 'Weekly remaining',
+          type: 'table',
+          metric: 'remaining-scope',
+          groupBy: { dimension: 'week' },
+        }],
+      },
+    })
+    // The period starts on Thursday 2026-01-01 in Tokyo; the second week starts on Saturday.
+    expect(snapshot.widgets[0]?.groups?.map((group) => group.key)).toEqual(['2026-01-01', '2026-01-03'])
+  })
+
+  test('rejects an unknown week start day and period preset', () => {
+    expect(() => normalizeAnalyticsQueryInput({ ...weeklyChart, weekStartDay: 7 }))
+      .toThrow('week start day')
+    expect(() => normalizeAnalyticsQueryInput({
+      ...weeklyChart,
+      filter: { period, periodPreset: 'next-week' },
+    })).toThrow('period preset')
+  })
+
+  test('keeps a period preset on the normalized filter and report', async () => {
+    expect(normalizeAnalyticsQueryInput({
+      ...weeklyChart,
+      filter: { period, periodPreset: 'this-week' },
+    }).filter.periodPreset).toBe('this-week')
+    const repository = new InMemoryAnalyticsRepository()
+    const report = await repository.createReport('workspace-1', 'member-1', createReportInput({
+      filter: { period, periodPreset: 'last-fiscal-quarter' },
+    }))
+    expect(report.filter.periodPreset).toBe('last-fiscal-quarter')
+  })
+
+  test('re-resolves a saved relative period around the run time', () => {
+    const calendar = { fiscalYearStartMonth: 4, weekStartDay: 0 } as const
+    // Wednesday 2026-11-25 09:00 Tokyo.
+    expect(resolveAnalyticsReportFilterPeriod(
+      { period, periodPreset: 'this-week', teamIds: ['core'] },
+      '2026-11-25T00:00:00.000Z',
+      'Asia/Tokyo',
+      calendar,
+    )).toEqual({
+      period: { from: '2026-11-21T15:00:00.000Z', to: '2026-11-28T14:59:59.999Z' },
+      periodPreset: 'this-week',
+      teamIds: ['core'],
+    })
+    expect(resolveAnalyticsReportFilterPeriod(
+      { period, periodPreset: 'last-fiscal-year' },
+      '2026-11-25T00:00:00.000Z',
+      'UTC',
+      calendar,
+    ).period).toEqual({ from: '2025-04-01T00:00:00.000Z', to: '2026-03-31T23:59:59.999Z' })
+    const fixed = { period }
+    expect(resolveAnalyticsReportFilterPeriod(fixed, '2026-11-25T00:00:00.000Z', 'UTC', calendar))
+      .toEqual(fixed)
+    // Beirut skips 00:00-01:00 on Sunday 2026-03-29, so that week starts at 01:00 local time.
+    expect(resolveAnalyticsReportFilterPeriod(
+      { period, periodPreset: 'this-week' },
+      '2026-03-31T09:00:00.000Z',
+      'Asia/Beirut',
+      calendar,
+    ).period.from).toBe('2026-03-28T22:00:00.000Z')
   })
 })
