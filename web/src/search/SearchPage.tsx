@@ -89,6 +89,7 @@ import {
   createSearchTeamFilterOptions,
 } from './model/filterOptions'
 import { createSearchStatusOptions, type SearchStatusOption } from './model/statusOptions'
+import { listOfferedSearchEntityTypes } from './model/searchEntityTypeOptions'
 import { useOptionalWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 import { readRecord } from '../shared/api/jsonValidation'
 
@@ -979,7 +980,7 @@ function SearchToolbar({
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label={t('search.filters.types')}>
-        {searchEntityTypes.map((type) => (
+        {listOfferedSearchEntityTypes(searchEntityTypes, entityTypes).map((type) => (
           <ToggleChip
             active={entityTypes.includes(type)}
             key={type}

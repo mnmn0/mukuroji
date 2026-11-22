@@ -199,6 +199,19 @@ aws ce update-cost-allocation-tags-status \
 | `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
 | `CognitoEmailSender`（SES） | 利用量に比例 | 招待と再設定のメール。1,000 通あたり約 $0.10。 |
 
+### 任意化しない構成要素と毎分 job の費用
+
+次の構成要素は、無効にしても下がる固定費がほとんどないため、任意 module にしていません（2026 年 11 月に確認）。費用を下げたいときは、上の任意 module と AI の設定から見直してください。
+
+| 構成要素 | 無効にして下がる固定費 | 任意化しない理由 |
+| --- | --- | --- |
+| SCIM group job と enterprise identity maintenance の worker | 約 $0.20 / 月（DLQ の alarm 2 個） | DynamoDB stream で起動する Lambda なので、待機中は stream の読み取りも含めて課金されません。event filter で SCIM の group job と identity maintenance の記録だけを受けるため、SCIM を使わない Workspace では起動しません。 |
+| AI assistance の observability worker | $0 | DynamoDB stream で起動し、alarm 5 個は AI を設定したときだけ作ります（上の増分の表の「AI」）。 |
+| X-Ray | $0 | 既定の `LambdaTracingMode=PassThrough` で記録しません。 |
+| GuardDuty Malware Protection for S3 | $0 | 料金は scan した容量と object 数だけです。無効にすると upload した file を scan できず、download を許す条件（scan 済みの tag）が成り立たないため、必須にしています。 |
+
+`ScheduledJobsFunction` は毎分 1 回起動し、その分に実行する job だけを動かします（毎分: Automation、Triage、Agent Run triage、Slack 通知、Email 通知。5 分: Analytics。60 分: 通知の予定、Cycle。6 時間: 祝日の取り込み）。毎分の job は、対象を期限の sparse index（Automation の `ScheduleDueIndex`、Triage の `triage-wake-index` の 8 partition、通知の配信待ち index）から query して読むため、対象がない分は空の query だけで終わります。Software factory を deploy しない環境では Agent Run triage を動かしません。月 43,200 回の起動は Lambda の無料枠に収まる見込みで、DynamoDB の読み取りは月数十セントです。間隔を延ばすと期限の通知や Automation の実行が最大でその分遅れるため、毎分のままにしています。
+
 ### 利用規模ごとの試算
 
 1 人が 1 営業日に API を約 1,500 回呼ぶと仮定した試算です。Document 画面は WebSocket の変更通知を受けている間、本文・comment・presence の再取得を 60 秒ごとに落とすため、1 時間開いても約 500 回です（WebSocket がない環境や接続断では従来の 3.5〜4 秒ごとの polling に戻り、1 時間で約 3,400 回になります。ADR 0041）。月 20 営業日、既定構成、AI なしで計算しています。

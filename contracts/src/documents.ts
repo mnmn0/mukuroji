@@ -270,6 +270,10 @@ export type DocumentChecklistItem = {
    * Item に割り当てた Workspace member key です。
    */
   assigneeMemberKey?: string
+  /**
+   * Item の期限を表す `YYYY-MM-DD` の暦日です。
+   */
+  dueDate?: string
 }
 
 /**

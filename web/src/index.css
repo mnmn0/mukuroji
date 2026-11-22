@@ -1296,10 +1296,13 @@ textarea {
     display: none !important;
   }
 
-  /* A table column without content on paper, such as the row action menu. */
-  html[data-print-target] [data-print-root][data-print-paper] col[data-print-hidden] {
-    display: table-column !important;
-    visibility: collapse;
+  /*
+   * The WBS table leaves its row action column (the last column) off the paper: its cells and
+   * `col` are not rendered, and the on-screen minimum width that counts that column is dropped,
+   * so the remaining columns reach the right edge of the paper.
+   */
+  html[data-print-target='task-table'] [data-print-root='task-table'][data-print-paper] table {
+    min-width: 0 !important;
   }
 
   html[data-print-target] [data-print-root][data-print-paper] [data-print-overflow] {

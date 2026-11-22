@@ -152,6 +152,38 @@ test('rejects slash and backslash protocol-relative embed URLs', () => {
   }
 })
 
+test('accepts checklist item due dates that are real calendar dates', () => {
+  const page = createPage({
+    blocks: [{
+      id: 'checklist-1',
+      type: 'checklist',
+      items: [{
+        id: 'item-1',
+        text: 'Send the minutes',
+        checked: false,
+        assigneeMemberKey: 'owner@example.com',
+        dueDate: '2028-02-29',
+      }],
+    }],
+  })
+
+  expect(() => validateDocumentPayload(page)).not.toThrow()
+})
+
+test('rejects checklist item due dates that are not YYYY-MM-DD calendar dates', () => {
+  for (const dueDate of ['2027-02-29', '2027-1-05', '2027-01-05T00:00:00.000Z', '']) {
+    const page = createPage({
+      blocks: [{
+        id: 'checklist-1',
+        type: 'checklist',
+        items: [{ id: 'item-1', text: 'Send the minutes', checked: false, dueDate }],
+      }],
+    })
+
+    expect(() => validateDocumentPayload(page)).toThrow(DocumentError)
+  }
+})
+
 /**
  * Creates a valid relation for payload validation tests.
  *
