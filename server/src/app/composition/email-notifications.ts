@@ -15,6 +15,7 @@ import {
 import { parseNotificationAppOrigin } from './notification-app-origin'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
 import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
+import { createConfiguredWeeklyReportReminderRevalidator } from './weekly-report-reminders'
 
 /**
  * Validates the deploy-time application origin used for Email deep links.
@@ -89,6 +90,7 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
     identityTableName,
     fileTableName,
     timesheetReminders: createConfiguredTimesheetReminderRevalidator(environment.ANALYTICS_TABLE_NAME?.trim()),
+    weeklyReportReminders: createConfiguredWeeklyReportReminderRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
   })
   const ses = new SESv2Client({ region })
   const send = createEmailNotificationSender({

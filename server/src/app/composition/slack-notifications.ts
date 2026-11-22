@@ -8,6 +8,7 @@ import { loadServerConfig } from '../../infrastructure/config/server-config'
 import { parseNotificationAppOrigin } from './notification-app-origin'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
 import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
+import { createConfiguredWeeklyReportReminderRevalidator } from './weekly-report-reminders'
 
 /**
  * Creates a scheduled sender for opted-in recipients' durable Inbox notifications.
@@ -25,6 +26,7 @@ export function createProductionSlackNotificationHandler() {
     identityTableName,
     fileTableName,
     timesheetReminders: createConfiguredTimesheetReminderRevalidator(environment.ANALYTICS_TABLE_NAME?.trim()),
+    weeklyReportReminders: createConfiguredWeeklyReportReminderRevalidator(environment.PLANNING_TABLE_NAME?.trim(), documentClient),
   })
   // Without an origin (local runs), messages keep their text and omit links.
   const appOrigin = environment.NOTIFICATION_SLACK_APP_ORIGIN?.trim()
