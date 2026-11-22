@@ -37,7 +37,7 @@
 | [0008](0008-audit-stream-two-readers-and-worker-secrets.md) | AuditEvents stream の reader を 2 つに保ち、worker の secret を Secrets Manager から読む | 提案 |
 | [0009](0009-directory-display-order.md) | Team と Project の表示順を sort key から切り離し、名称変更で ID を変えない | 提案 |
 | [0010](0010-cycle-schedule-due-index.md) | Cycle の自動作成・自動繰り越しを既存の due index と scheduled-jobs で動かす | 提案 |
-| [0011](0011-web-custom-domain-parameters.md) | 独自 domain を CloudFormation parameter で受け、正規 URL を stack が決める | 提案 |
+| [0011](0011-web-custom-domain-parameters.md) | 独自 domain を CloudFormation parameter で受け、正規 URL を stack が決める | 置き換え済み（0056） |
 | [0012](0012-planning-revision-work-item-counter.md) | Planning の revision を Work Item の更新と Planning の変更で数え分ける | 提案 |
 | [0013](0013-data-migration-runner.md) | 保存済み row の schema 移行を、checkpoint 付きの共通 runner と専用の checkpoint table で行う | 提案 |
 | [0014](0014-bind-connector-oauth-callback-to-initiator.md) | Connector の OAuth callback を、flow を開始した本人の認証済み session で完了する | 採用 |
@@ -71,3 +71,4 @@
 | [0044](0044-runtime-control-switch-audit-events.md) | Runtime control の切り替えを operator script が Workspace の監査ログに開始・完了・失敗の 3 種類で書く | 提案 |
 | [0045](0045-relation-events-for-automation-and-webhooks.md) | Work Item relation の event を Automation trigger と webhook の event type に使い、webhook の event type は追加していく | 提案 |
 | [0049](0049-member-role-assignment-cross-table-fences.md) | メンバーへの role 割り当てと Workspace role の変更を、相手側 table の条件付き書き込みで直列化する | 提案 |
+| [0056](0056-web-custom-domain-cdk-context.md) | 独自 domain を `cdk.json` の CDK context で受け、synth 時に distribution・DNS・正規 URL を決める | 提案 |

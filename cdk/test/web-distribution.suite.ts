@@ -1,13 +1,22 @@
 /** Registers tests for the CloudFront distribution that serves the Web app and API. */
 import { expect, test } from '@jest/globals';
-import { Match } from 'aws-cdk-lib/assertions';
+import * as cdk from 'aws-cdk-lib';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
   API_CONTENT_SECURITY_POLICY,
   buildWebContentSecurityPolicy,
 } from '../lib/subsystems/web-response-headers';
-import { synthesizedTemplate } from './test-support';
+import { ALL_STACK_MODULE_PROPS, readWebCustomDomainSettings } from '../bin/stack-modules';
+import {
+  resolveWebCustomDomain,
+  WEB_CERTIFICATE_ARN_CONTEXT_KEY,
+  WEB_DOMAIN_NAME_CONTEXT_KEY,
+  WEB_HOSTED_ZONE_ID_CONTEXT_KEY,
+  WEB_SSO_CALLBACK_PATH,
+} from '../lib/subsystems/web-distribution';
+import { createTemplate, synthesizedTemplate } from './test-support';
 
 /**
  * Returns the only synthesized CloudFront distribution configuration.
@@ -202,128 +211,37 @@ const distributionOrigin = {
   ]],
 };
 
-/** `https://` origin of the optional custom domain parameter. */
-const customDomainOrigin = {
-  'Fn::Join': ['', ['https://', { Ref: 'WebDomainName' }]],
-};
-
-test('accepts presigned browser file uploads from the Web origins', () => {
+test('serves only the CloudFront domain without a custom domain', () => {
   synthesizedTemplate.hasResourceProperties('AWS::S3::Bucket', {
     CorsConfiguration: {
       CorsRules: Match.arrayWith([
         Match.objectLike({
-          // Only the CloudFront origin without a custom domain, both origins with one.
-          AllowedOrigins: {
-            'Fn::If': [
-              'WebCustomDomainConfigured',
-              [customDomainOrigin, distributionOrigin],
-              [distributionOrigin],
-            ],
-          },
+          AllowedOrigins: [distributionOrigin],
           AllowedMethods: ['GET', 'HEAD', 'PUT'],
         }),
       ]),
     },
   });
-  synthesizedTemplate.hasOutput('WebUrl', {
-    Value: {
-      'Fn::If': ['WebCustomDomainConfigured', customDomainOrigin, distributionOrigin],
-    },
-  });
+  synthesizedTemplate.hasOutput('WebUrl', { Value: distributionOrigin });
   synthesizedTemplate.hasOutput('WebBucketName', {});
   synthesizedTemplate.hasOutput('WebDistributionId', {});
   synthesizedTemplate.hasOutput('WebDistributionDomainName', {
     Value: { 'Fn::GetAtt': [Match.stringLikeRegexp('^WebDistribution'), 'DomainName'] },
   });
-});
 
-test('declares the custom domain parameters as optional and paired', () => {
-  const parameters = synthesizedTemplate.findParameters('*');
-  for (const name of ['WebDomainName', 'WebCertificateArn', 'WebHostedZoneId']) {
-    expect(parameters[name]).toEqual(expect.objectContaining({
-      Type: 'String',
-      Default: '',
-    }));
-  }
-  const domainPattern = new RegExp(parameters.WebDomainName.AllowedPattern);
-  expect(domainPattern.test('')).toBe(true);
-  expect(domainPattern.test('wbs.example.co.jp')).toBe(true);
-  expect(domainPattern.test('localhost')).toBe(false);
-  expect(domainPattern.test('WBS.example.com')).toBe(false);
-  expect(domainPattern.test('https://wbs.example.com')).toBe(false);
-  const certificatePattern = new RegExp(parameters.WebCertificateArn.AllowedPattern);
-  expect(certificatePattern.test('')).toBe(true);
-  expect(certificatePattern.test(
-    'arn:aws:acm:us-east-1:123456789012:certificate/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
-  )).toBe(true);
-  // CloudFront reads certificates only from us-east-1.
-  expect(certificatePattern.test(
-    'arn:aws:acm:ap-northeast-1:123456789012:certificate/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b',
-  )).toBe(false);
-
-  const rule = synthesizedTemplate.toJSON().Rules.WebCustomDomainParametersComplete;
-  expect(rule.Assertions).toEqual([expect.objectContaining({
-    Assert: {
-      'Fn::Or': [
-        {
-          'Fn::And': [
-            { 'Fn::Equals': [{ Ref: 'WebDomainName' }, ''] },
-            { 'Fn::Equals': [{ Ref: 'WebCertificateArn' }, ''] },
-            { 'Fn::Equals': [{ Ref: 'WebHostedZoneId' }, ''] },
-          ],
-        },
-        {
-          'Fn::And': [
-            { 'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'WebDomainName' }, ''] }] },
-            { 'Fn::Not': [{ 'Fn::Equals': [{ Ref: 'WebCertificateArn' }, ''] }] },
-          ],
-        },
-      ],
-    },
-  })]);
-});
-
-test('serves the custom domain with its certificate only when configured', () => {
   const config = requireDistributionConfig();
-
-  expect(config.Aliases).toEqual({
-    'Fn::If': [
-      'WebCustomDomainConfigured',
-      [{ Ref: 'WebDomainName' }],
-      { Ref: 'AWS::NoValue' },
-    ],
-  });
-  expect(config.ViewerCertificate).toEqual({
-    'Fn::If': [
-      'WebCustomDomainConfigured',
-      {
-        AcmCertificateArn: { Ref: 'WebCertificateArn' },
-        MinimumProtocolVersion: 'TLSv1.2_2021',
-        SslSupportMethod: 'sni-only',
-      },
-      { Ref: 'AWS::NoValue' },
-    ],
-  });
+  expect(config.Aliases).toBeUndefined();
+  expect(config.ViewerCertificate).toBeUndefined();
+  expect(synthesizedTemplate.findResources('AWS::Route53::RecordSet')).toEqual({});
+  const template = synthesizedTemplate.toJSON();
+  expect(Object.keys(template.Parameters)).not.toEqual(
+    expect.arrayContaining([expect.stringMatching(/^Web(DomainName|CertificateArn|HostedZoneId)$/)]),
+  );
+  expect(template.Rules.WebSsoCallbackOnCustomDomain).toBeUndefined();
+  expect(template.Conditions?.WebCustomDomainConfigured).toBeUndefined();
 });
 
-test('creates Route 53 aliases only when a hosted zone is configured', () => {
-  const records = synthesizedTemplate.findResources('AWS::Route53::RecordSet');
-  expect(Object.values(records).map((record) => record.Properties.Type).sort())
-    .toEqual(['A', 'AAAA']);
-  for (const record of Object.values(records)) {
-    expect(record.Condition).toBe('WebHostedZoneConfigured');
-    expect(record.Properties).toEqual(expect.objectContaining({
-      HostedZoneId: { Ref: 'WebHostedZoneId' },
-      Name: { Ref: 'WebDomainName' },
-      AliasTarget: {
-        DNSName: { 'Fn::GetAtt': [expect.stringMatching(/^WebDistribution/), 'DomainName'] },
-        HostedZoneId: expect.anything(),
-      },
-    }));
-  }
-});
-
-test('links notification Email to the canonical app origin', () => {
+test('links notification Email to the CloudFront origin without a custom domain', () => {
   const scheduledJobs = Object.values(
     synthesizedTemplate.findResources('AWS::Lambda::Function'),
   ).filter((resource) =>
@@ -332,17 +250,186 @@ test('links notification Email to the canonical app origin', () => {
   expect(
     scheduledJobs[0].Properties.Environment.Variables.NOTIFICATION_EMAIL_APP_ORIGIN,
   ).toEqual({
-    'Fn::If': [
-      'WebCustomDomainConfigured',
-      { 'Fn::Join': ['', ['https://', { Ref: 'WebDomainName' }]] },
-      {
-        'Fn::Join': ['', [
-          'https://',
-          { 'Fn::GetAtt': [expect.stringMatching(/^WebDistribution/), 'DomainName'] },
-        ]],
-      },
-    ],
+    'Fn::Join': ['', [
+      'https://',
+      { 'Fn::GetAtt': [expect.stringMatching(/^WebDistribution/), 'DomainName'] },
+    ]],
   });
+});
+
+/** Custom domain used by the configured-domain assertions. */
+const customDomainName = 'wbs.example.co.jp';
+
+/** us-east-1 certificate ARN used by the configured-domain assertions. */
+const customCertificateArn =
+  'arn:aws:acm:us-east-1:123456789012:certificate/0f1e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b';
+
+/** Template synthesized once with a custom domain and a Route 53 hosted zone. */
+let customDomainTemplate: Template | undefined;
+
+/**
+ * Synthesizes the stack with a custom domain on first use and reuses it afterwards.
+ *
+ * @returns Template of a stack whose CDK context sets every `mukuroji:web*` key.
+ */
+function requireCustomDomainTemplate(): Template {
+  if (customDomainTemplate === undefined) {
+    const app = new cdk.App({
+      context: {
+        [WEB_DOMAIN_NAME_CONTEXT_KEY]: customDomainName,
+        [WEB_CERTIFICATE_ARN_CONTEXT_KEY]: customCertificateArn,
+        [WEB_HOSTED_ZONE_ID_CONTEXT_KEY]: 'Z0123456789ABCDEFGHIJ',
+      },
+    });
+    customDomainTemplate = createTemplate({
+      ...ALL_STACK_MODULE_PROPS,
+      webCustomDomain: readWebCustomDomainSettings(app),
+    });
+  }
+  return customDomainTemplate;
+}
+
+test('reads the custom domain from CDK context', () => {
+  const app = new cdk.App({
+    context: {
+      [WEB_DOMAIN_NAME_CONTEXT_KEY]: customDomainName,
+      [WEB_CERTIFICATE_ARN_CONTEXT_KEY]: customCertificateArn,
+    },
+  });
+  expect(readWebCustomDomainSettings(app)).toEqual({
+    domainName: customDomainName,
+    certificateArn: customCertificateArn,
+    hostedZoneId: '',
+  });
+  expect(readWebCustomDomainSettings(new cdk.App())).toEqual({
+    domainName: '',
+    certificateArn: '',
+    hostedZoneId: '',
+  });
+  expect(() => readWebCustomDomainSettings(
+    new cdk.App({ context: { [WEB_DOMAIN_NAME_CONTEXT_KEY]: 1 } }),
+  )).toThrow(`CDK context ${WEB_DOMAIN_NAME_CONTEXT_KEY} must be a string.`);
+});
+
+test('the committed cdk.json leaves the custom domain unset', () => {
+  const cdkJson: unknown = JSON.parse(
+    readFileSync(path.join(__dirname, '..', 'cdk.json'), 'utf8'),
+  );
+  expect(cdkJson).toEqual(expect.objectContaining({
+    context: expect.objectContaining({
+      [WEB_DOMAIN_NAME_CONTEXT_KEY]: '',
+      [WEB_CERTIFICATE_ARN_CONTEXT_KEY]: '',
+      [WEB_HOSTED_ZONE_ID_CONTEXT_KEY]: '',
+    }),
+  }));
+});
+
+test('accepts only a complete, well-formed custom domain', () => {
+  expect(resolveWebCustomDomain()).toBeUndefined();
+  expect(resolveWebCustomDomain({ domainName: ' ', certificateArn: '', hostedZoneId: '' }))
+    .toBeUndefined();
+  expect(resolveWebCustomDomain({
+    domainName: customDomainName,
+    certificateArn: customCertificateArn,
+    hostedZoneId: '',
+  })).toEqual({ domainName: customDomainName, certificateArn: customCertificateArn });
+  expect(resolveWebCustomDomain({
+    domainName: customDomainName,
+    certificateArn: customCertificateArn,
+    hostedZoneId: 'Z0123456789',
+  })).toEqual({
+    domainName: customDomainName,
+    certificateArn: customCertificateArn,
+    hostedZoneId: 'Z0123456789',
+  });
+
+  const incomplete = /together/;
+  expect(() => resolveWebCustomDomain({ domainName: customDomainName })).toThrow(incomplete);
+  expect(() => resolveWebCustomDomain({ certificateArn: customCertificateArn })).toThrow(incomplete);
+  expect(() => resolveWebCustomDomain({ hostedZoneId: 'Z0123456789' })).toThrow(incomplete);
+  for (const domainName of ['localhost', 'WBS.example.com', 'https://wbs.example.com', 'wbs.example.com.']) {
+    expect(() => resolveWebCustomDomain({ domainName, certificateArn: customCertificateArn }))
+      .toThrow(`${WEB_DOMAIN_NAME_CONTEXT_KEY} must be a lowercase DNS name`);
+  }
+  // CloudFront reads certificates only from us-east-1.
+  expect(() => resolveWebCustomDomain({
+    domainName: customDomainName,
+    certificateArn: customCertificateArn.replace('us-east-1', 'ap-northeast-1'),
+  })).toThrow(`${WEB_CERTIFICATE_ARN_CONTEXT_KEY} must be an ACM certificate ARN in us-east-1.`);
+  expect(() => resolveWebCustomDomain({
+    domainName: customDomainName,
+    certificateArn: customCertificateArn,
+    hostedZoneId: 'not-a-zone',
+  })).toThrow(`${WEB_HOSTED_ZONE_ID_CONTEXT_KEY} must be a Route 53 hosted zone ID.`);
+});
+
+test('serves the custom domain with its certificate and Route 53 aliases', () => {
+  const template = requireCustomDomainTemplate();
+  const distributions = Object.values(template.findResources('AWS::CloudFront::Distribution'));
+  expect(distributions).toHaveLength(1);
+  const config = distributions[0].Properties.DistributionConfig;
+  expect(config.Aliases).toEqual([customDomainName]);
+  expect(config.ViewerCertificate).toEqual({
+    AcmCertificateArn: customCertificateArn,
+    MinimumProtocolVersion: 'TLSv1.2_2021',
+    SslSupportMethod: 'sni-only',
+  });
+
+  const records = Object.values(template.findResources('AWS::Route53::RecordSet'));
+  expect(records.map((record) => record.Properties.Type).sort()).toEqual(['A', 'AAAA']);
+  for (const record of records) {
+    expect(record.Condition).toBeUndefined();
+    expect(record.Properties).toEqual(expect.objectContaining({
+      HostedZoneId: 'Z0123456789ABCDEFGHIJ',
+      Name: customDomainName,
+      AliasTarget: {
+        DNSName: { 'Fn::GetAtt': [expect.stringMatching(/^WebDistribution/), 'DomainName'] },
+        HostedZoneId: expect.anything(),
+      },
+    }));
+  }
+});
+
+test('makes the custom domain the canonical app URL', () => {
+  const template = requireCustomDomainTemplate();
+  const customOrigin = `https://${customDomainName}`;
+  template.hasOutput('WebUrl', { Value: customOrigin });
+  template.hasResourceProperties('AWS::S3::Bucket', {
+    CorsConfiguration: {
+      CorsRules: Match.arrayWith([
+        Match.objectLike({
+          AllowedOrigins: [customOrigin, distributionOrigin],
+          AllowedMethods: ['GET', 'HEAD', 'PUT'],
+        }),
+      ]),
+    },
+  });
+  const emailJobs = Object.values(template.findResources('AWS::Lambda::Function'))
+    .filter((resource) =>
+      resource.Properties.Environment?.Variables?.NOTIFICATION_EMAIL_APP_ORIGIN !== undefined);
+  expect(emailJobs).toHaveLength(1);
+  expect(emailJobs[0].Properties.Environment.Variables.NOTIFICATION_EMAIL_APP_ORIGIN)
+    .toBe(customOrigin);
+  const userPools = Object.values(template.findResources('AWS::Cognito::UserPool'));
+  expect(JSON.stringify(userPools)).toContain(`${customOrigin}/login`);
+  expect(JSON.stringify(userPools)).toContain(`${customOrigin}/forgot-password`);
+});
+
+test('requires the SSO callback on the custom domain', () => {
+  const rule = requireCustomDomainTemplate().toJSON().Rules.WebSsoCallbackOnCustomDomain;
+  expect(rule.Assertions).toEqual([expect.objectContaining({
+    Assert: {
+      'Fn::Or': [
+        { 'Fn::Equals': [{ Ref: 'CognitoSsoRedirectUri' }, ''] },
+        {
+          'Fn::Equals': [
+            { Ref: 'CognitoSsoRedirectUri' },
+            `https://${customDomainName}${WEB_SSO_CALLBACK_PATH}`,
+          ],
+        },
+      ],
+    },
+  })]);
 });
 
 /** Security headers both CloudFront behaviors send, overriding the origin. */

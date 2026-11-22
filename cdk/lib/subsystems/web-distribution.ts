@@ -1,4 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
@@ -53,173 +54,159 @@ const SPA_ROUTING_FUNCTION_CODE = `function handler(event) {
   return request;
 }`;
 
-/** Lowercase DNS name with at least two labels, or empty for the CloudFront domain. */
+/** CDK context key holding the optional custom domain that serves the Web app and `/api`. */
+export const WEB_DOMAIN_NAME_CONTEXT_KEY = 'mukuroji:webDomainName';
+
+/** CDK context key holding the us-east-1 ACM certificate ARN for the custom domain. */
+export const WEB_CERTIFICATE_ARN_CONTEXT_KEY = 'mukuroji:webCertificateArn';
+
+/** CDK context key holding the optional Route 53 hosted zone that receives the alias records. */
+export const WEB_HOSTED_ZONE_ID_CONTEXT_KEY = 'mukuroji:webHostedZoneId';
+
+/** Path of the SPA route that completes an enterprise SSO login. */
+export const WEB_SSO_CALLBACK_PATH = '/auth/sso/callback';
+
+/** Lowercase DNS name with at least two labels. */
 const WEB_DOMAIN_NAME_PATTERN =
-  '^(|([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?)$';
+  /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
-/** ACM certificate ARN in us-east-1, the only Region CloudFront reads, or empty. */
+/** Longest DNS name Route 53 and CloudFront accept. */
+const WEB_DOMAIN_NAME_MAX_LENGTH = 253;
+
+/** ACM certificate ARN in us-east-1, the only Region CloudFront reads. */
 const WEB_CERTIFICATE_ARN_PATTERN =
-  '^(|arn:aws:acm:us-east-1:[0-9]{12}:certificate/[A-Za-z0-9-]{1,128})$';
+  /^arn:aws:acm:us-east-1:[0-9]{12}:certificate\/[A-Za-z0-9-]{1,128}$/;
 
-/** Route 53 public hosted zone ID, or empty to manage DNS outside the stack. */
-const WEB_HOSTED_ZONE_ID_PATTERN = '^(|[A-Z0-9]{1,32})$';
+/** Route 53 public hosted zone ID. */
+const WEB_HOSTED_ZONE_ID_PATTERN = /^[A-Z0-9]{1,32}$/;
 
-/** Viewer TLS policy used once the distribution serves a custom certificate. */
-const WEB_CUSTOM_DOMAIN_TLS_POLICY = 'TLSv1.2_2021';
+/** Custom domain settings as read from CDK context; empty values mean not set. */
+export type WebCustomDomainSettings = Readonly<{
+  /** Custom domain such as `wbs.example.com`, or empty to keep the CloudFront domain. */
+  readonly domainName?: string;
+  /** Issued us-east-1 ACM certificate ARN covering the domain, or empty. */
+  readonly certificateArn?: string;
+  /** Route 53 public hosted zone where the stack creates the aliases, or empty. */
+  readonly hostedZoneId?: string;
+}>;
 
-/** Optional custom domain parameters and the conditions derived from them. */
-type WebCustomDomain = Readonly<{
-  /** Custom domain name, empty when the CloudFront domain is used. */
+/** Validated custom domain that the distribution serves. */
+export type WebCustomDomain = Readonly<{
+  /** Lowercase custom domain name. */
   readonly domainName: string;
-  /** us-east-1 ACM certificate ARN covering the custom domain. */
+  /** us-east-1 ACM certificate ARN covering the domain. */
   readonly certificateArn: string;
-  /** Route 53 hosted zone that receives the alias records. */
-  readonly hostedZoneId: string;
-  /** True when a custom domain and its certificate are configured. */
-  readonly configured: cdk.CfnCondition;
-  /** True when the stack also manages the Route 53 alias records. */
-  readonly hostedZoneConfigured: cdk.CfnCondition;
+  /** Route 53 hosted zone for the alias records, absent when DNS is managed outside the stack. */
+  readonly hostedZoneId?: string;
 }>;
 
 /**
- * Declares the optional custom domain parameters for the Web distribution.
+ * Validates the custom domain settings read from CDK context.
  *
- * All three parameters default to empty, which keeps the CloudFront domain and
- * leaves the synthesized resources unchanged. A domain needs a certificate,
- * and a hosted zone needs a domain.
+ * Every value empty keeps the CloudFront domain. A domain needs its certificate,
+ * and a hosted zone needs a domain, so a half-set configuration fails at synth
+ * time instead of during the deployment.
  *
- * @param scope Stack that directly owns the parameters, rule, and conditions.
- * @returns Parameter values and the conditions that gate the custom domain.
+ * @param settings Values of the `mukuroji:web*` context keys.
+ * @returns The custom domain, or `undefined` when none is configured.
+ * @throws Error when a value is malformed or the values are incomplete.
  */
-function declareWebCustomDomain(scope: cdk.Stack): WebCustomDomain {
-  const domainName = new cdk.CfnParameter(scope, 'WebDomainName', {
-    type: 'String',
-    default: '',
-    maxLength: 253,
-    allowedPattern: WEB_DOMAIN_NAME_PATTERN,
-    constraintDescription:
-      'WebDomainName must be empty or a lowercase DNS name such as wbs.example.com.',
-    description:
-      'Optional custom domain that serves the Web app and /api. Empty keeps the CloudFront domain.',
-  });
-  const certificateArn = new cdk.CfnParameter(scope, 'WebCertificateArn', {
-    type: 'String',
-    default: '',
-    allowedPattern: WEB_CERTIFICATE_ARN_PATTERN,
-    constraintDescription:
-      'WebCertificateArn must be empty or an ACM certificate ARN in us-east-1.',
-    description:
-      'Issued us-east-1 ACM certificate covering WebDomainName. Required with WebDomainName.',
-  });
-  const hostedZoneId = new cdk.CfnParameter(scope, 'WebHostedZoneId', {
-    type: 'String',
-    default: '',
-    allowedPattern: WEB_HOSTED_ZONE_ID_PATTERN,
-    constraintDescription: 'WebHostedZoneId must be empty or a Route 53 hosted zone ID.',
-    description:
-      'Optional Route 53 public hosted zone where the stack creates A and AAAA aliases for WebDomainName.',
-  });
-  const domainEmpty = cdk.Fn.conditionEquals(domainName.valueAsString, '');
-  const certificateEmpty = cdk.Fn.conditionEquals(certificateArn.valueAsString, '');
-  const hostedZoneEmpty = cdk.Fn.conditionEquals(hostedZoneId.valueAsString, '');
-  new cdk.CfnRule(scope, 'WebCustomDomainParametersComplete', {
-    assertions: [{
-      assert: cdk.Fn.conditionOr(
-        cdk.Fn.conditionAnd(domainEmpty, certificateEmpty, hostedZoneEmpty),
-        cdk.Fn.conditionAnd(
-          cdk.Fn.conditionNot(domainEmpty),
-          cdk.Fn.conditionNot(certificateEmpty),
-        ),
-      ),
-      assertDescription:
-        'Set WebDomainName and WebCertificateArn together; WebHostedZoneId also needs WebDomainName.',
-    }],
-  });
-  const configured = new cdk.CfnCondition(scope, 'WebCustomDomainConfigured', {
-    expression: cdk.Fn.conditionNot(domainEmpty),
-  });
-  const hostedZoneConfigured = new cdk.CfnCondition(
-    scope,
-    'WebHostedZoneConfigured',
-    { expression: cdk.Fn.conditionNot(hostedZoneEmpty) },
-  );
-  return {
-    domainName: domainName.valueAsString,
-    certificateArn: certificateArn.valueAsString,
-    hostedZoneId: hostedZoneId.valueAsString,
-    configured,
-    hostedZoneConfigured,
-  };
-}
-
-/**
- * Serves the distribution on the custom domain when one is configured.
- *
- * The L2 distribution cannot take a certificate that exists only under a
- * condition, so the alias and certificate are set on the L1 resource and
- * resolve to `AWS::NoValue` without a custom domain.
- *
- * @param distribution Distribution serving the Web app and `/api/*`.
- * @param domain Custom domain parameters and conditions.
- */
-function applyWebCustomDomain(
-  distribution: cloudfront.Distribution,
-  domain: WebCustomDomain,
-): void {
-  const resource = distribution.node.defaultChild;
-  if (!(resource instanceof cloudfront.CfnDistribution)) {
-    throw new Error('The Web distribution has no CloudFront distribution resource.');
+export function resolveWebCustomDomain(
+  settings: WebCustomDomainSettings = {},
+): WebCustomDomain | undefined {
+  const domainName = settings.domainName?.trim() ?? '';
+  const certificateArn = settings.certificateArn?.trim() ?? '';
+  const hostedZoneId = settings.hostedZoneId?.trim() ?? '';
+  if (domainName === '' && certificateArn === '' && hostedZoneId === '') {
+    return undefined;
   }
-  resource.addPropertyOverride(
-    'DistributionConfig.Aliases',
-    cdk.Fn.conditionIf(
-      domain.configured.logicalId,
-      [domain.domainName],
-      cdk.Aws.NO_VALUE,
-    ),
-  );
-  resource.addPropertyOverride(
-    'DistributionConfig.ViewerCertificate',
-    cdk.Fn.conditionIf(
-      domain.configured.logicalId,
-      {
-        AcmCertificateArn: domain.certificateArn,
-        MinimumProtocolVersion: WEB_CUSTOM_DOMAIN_TLS_POLICY,
-        SslSupportMethod: 'sni-only',
-      },
-      cdk.Aws.NO_VALUE,
-    ),
-  );
+  if (domainName === '' || certificateArn === '') {
+    throw new Error(
+      `Set ${WEB_DOMAIN_NAME_CONTEXT_KEY} and ${WEB_CERTIFICATE_ARN_CONTEXT_KEY} together; `
+        + `${WEB_HOSTED_ZONE_ID_CONTEXT_KEY} also needs ${WEB_DOMAIN_NAME_CONTEXT_KEY}.`,
+    );
+  }
+  if (
+    domainName.length > WEB_DOMAIN_NAME_MAX_LENGTH
+    || !WEB_DOMAIN_NAME_PATTERN.test(domainName)
+  ) {
+    throw new Error(
+      `${WEB_DOMAIN_NAME_CONTEXT_KEY} must be a lowercase DNS name such as wbs.example.com.`,
+    );
+  }
+  if (!WEB_CERTIFICATE_ARN_PATTERN.test(certificateArn)) {
+    throw new Error(
+      `${WEB_CERTIFICATE_ARN_CONTEXT_KEY} must be an ACM certificate ARN in us-east-1.`,
+    );
+  }
+  if (hostedZoneId !== '' && !WEB_HOSTED_ZONE_ID_PATTERN.test(hostedZoneId)) {
+    throw new Error(`${WEB_HOSTED_ZONE_ID_CONTEXT_KEY} must be a Route 53 hosted zone ID.`);
+  }
+  return {
+    domainName,
+    certificateArn,
+    ...(hostedZoneId === '' ? {} : { hostedZoneId }),
+  };
 }
 
 /**
  * Creates Route 53 A and AAAA aliases from the custom domain to the distribution.
  *
- * The records exist only when a hosted zone is configured. Without one the
- * operator points the custom domain at the distribution domain outside the stack.
+ * Without a hosted zone the operator points the custom domain at the
+ * distribution domain outside the stack.
  *
  * @param scope Stack scope used directly to keep construct paths flat.
  * @param distribution Distribution the aliases target.
- * @param domain Custom domain parameters and conditions.
+ * @param domainName Custom domain the records answer for.
+ * @param hostedZoneId Route 53 hosted zone that receives the records.
  */
 function buildWebAliasRecords(
   scope: cdk.Stack,
   distribution: cloudfront.Distribution,
-  domain: WebCustomDomain,
+  domainName: string,
+  hostedZoneId: string,
 ): void {
   const aliasTarget = {
     dnsName: distribution.distributionDomainName,
     hostedZoneId: route53Targets.CloudFrontTarget.getHostedZoneId(scope),
   };
   for (const type of ['A', 'AAAA']) {
-    const record = new route53.CfnRecordSet(scope, `WebAlias${type}Record`, {
+    new route53.CfnRecordSet(scope, `WebAlias${type}Record`, {
       aliasTarget,
-      hostedZoneId: domain.hostedZoneId,
-      name: domain.domainName,
+      hostedZoneId,
+      name: domainName,
       type,
     });
-    record.cfnOptions.condition = domain.hostedZoneConfigured;
   }
+}
+
+/**
+ * Stops a deployment whose SSO callback is not on the custom domain.
+ *
+ * The SSO app client allows one callback URL. Once the app moves to the custom
+ * domain, a callback left on the CloudFront domain would send users back to an
+ * origin whose session storage does not hold the login state.
+ *
+ * @param scope Stack that directly owns the rule.
+ * @param domainName Custom domain the app is served on.
+ * @param ssoRedirectUri Value of the `CognitoSsoRedirectUri` parameter.
+ */
+function requireSsoCallbackOnCustomDomain(
+  scope: cdk.Stack,
+  domainName: string,
+  ssoRedirectUri: string,
+): void {
+  const expected = `https://${domainName}${WEB_SSO_CALLBACK_PATH}`;
+  new cdk.CfnRule(scope, 'WebSsoCallbackOnCustomDomain', {
+    assertions: [{
+      assert: cdk.Fn.conditionOr(
+        cdk.Fn.conditionEquals(ssoRedirectUri, ''),
+        cdk.Fn.conditionEquals(ssoRedirectUri, expected),
+      ),
+      assertDescription:
+        `CognitoSsoRedirectUri must be empty or ${expected} while ${WEB_DOMAIN_NAME_CONTEXT_KEY} is set.`,
+    }],
+  });
 }
 
 /** Inputs required to serve the Web app and the API from one origin. */
@@ -232,6 +219,10 @@ export type WebDistributionInput = Readonly<{
   readonly realtimeWebSocketApi: apigatewayv2.IWebSocketApi;
   /** Secret CloudFront sends to the API with every `/api/*` request. */
   readonly edgeOriginSecret: string;
+  /** Value of the `CognitoSsoRedirectUri` parameter, checked against the custom domain. */
+  readonly ssoRedirectUri: string;
+  /** Custom domain from CDK context, or `undefined` to serve only the CloudFront domain. */
+  readonly customDomain?: WebCustomDomain;
 }>;
 
 /** Resources that host the built Web app. */
@@ -263,9 +254,9 @@ export type WebDistributionResources = Readonly<{
  * Both behaviors send security headers; the Web app's CSP limits connections
  * to this origin, the realtime WebSocket API, and the file bucket.
  *
- * The optional `WebDomainName` and `WebCertificateArn` parameters serve the
- * same distribution on a custom domain, which then becomes the canonical
- * origin used in notification links. The CloudFront domain keeps working.
+ * An optional custom domain from CDK context (`cdk.json`) serves the same
+ * distribution, and then becomes the canonical origin used in Email links.
+ * The CloudFront domain keeps working.
  *
  * @param scope Stack scope used directly to keep construct paths flat.
  * @param input HTTP API, realtime API, and file bucket shared with the rest of the stack.
@@ -275,6 +266,7 @@ export function buildWebDistribution(
   scope: cdk.Stack,
   input: WebDistributionInput,
 ): WebDistributionResources {
+  const { customDomain } = input;
   const webBucket = new s3.Bucket(scope, 'WebBucket', {
     blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
     encryption: s3.BucketEncryption.S3_MANAGED,
@@ -355,24 +347,35 @@ export function buildWebDistribution(
       },
     },
     defaultRootObject: 'index.html',
+    ...(customDomain === undefined ? {} : {
+      certificate: acm.Certificate.fromCertificateArn(
+        scope,
+        'WebCertificate',
+        customDomain.certificateArn,
+      ),
+      domainNames: [customDomain.domainName],
+      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+      sslSupportMethod: cloudfront.SSLMethod.SNI,
+    }),
     httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
     priceClass: cloudfront.PriceClass.PRICE_CLASS_200,
   });
-  const customDomain = declareWebCustomDomain(scope);
-  applyWebCustomDomain(webDistribution, customDomain);
-  buildWebAliasRecords(scope, webDistribution, customDomain);
   const distributionOrigin = `https://${webDistribution.distributionDomainName}`;
-  const customOrigin = `https://${customDomain.domainName}`;
-  const webOrigin = cdk.Token.asString(cdk.Fn.conditionIf(
-    customDomain.configured.logicalId,
-    customOrigin,
-    distributionOrigin,
-  ));
-  const browserOrigins = cdk.Token.asList(cdk.Fn.conditionIf(
-    customDomain.configured.logicalId,
-    [customOrigin, distributionOrigin],
-    [distributionOrigin],
-  ));
+  let webOrigin = distributionOrigin;
+  const browserOrigins = [distributionOrigin];
+  if (customDomain !== undefined) {
+    webOrigin = `https://${customDomain.domainName}`;
+    browserOrigins.unshift(webOrigin);
+    if (customDomain.hostedZoneId !== undefined) {
+      buildWebAliasRecords(
+        scope,
+        webDistribution,
+        customDomain.domainName,
+        customDomain.hostedZoneId,
+      );
+    }
+    requireSsoCallbackOnCustomDomain(scope, customDomain.domainName, input.ssoRedirectUri);
+  }
 
   input.fileBucket.addCorsRule(createFileBucketBrowserCorsRule(browserOrigins));
 

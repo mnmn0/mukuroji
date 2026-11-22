@@ -24,7 +24,11 @@ import { buildStackOutputs } from '../subsystems/outputs';
 import { buildRestoreDrill } from '../subsystems/restore-drill';
 import { buildRuntimeControls } from '../subsystems/runtime-controls';
 import { buildUserIdentity } from '../subsystems/user-identity';
-import { buildWebDistribution } from '../subsystems/web-distribution';
+import {
+  buildWebDistribution,
+  resolveWebCustomDomain,
+  type WebCustomDomainSettings,
+} from '../subsystems/web-distribution';
 import {
   buildAiAssistanceObservabilityWorker,
 } from '../subsystems/workers/ai-assistance-observability';
@@ -92,6 +96,12 @@ export type MukurojiStackProps = cdk.StackProps & Readonly<{
    * composition root turns it on.
    */
   readonly demoDataEnabled?: boolean;
+  /**
+   * Optional custom domain that serves the Web app and `/api`, from the `mukuroji:web*` context
+   * keys in `cdk.json`. Unset keeps the CloudFront domain. The domain becomes the canonical app
+   * URL used in Cognito and notification Email links.
+   */
+  readonly webCustomDomain?: WebCustomDomainSettings;
 }>;
 
 /**
@@ -113,6 +123,7 @@ export class MukurojiStack extends cdk.Stack {
     const tenantLifecycleEnabled = props?.tenantLifecycleEnabled ?? false;
     const softwareFactoryEnabled = props?.softwareFactoryEnabled ?? false;
     const demoDataEnabled = props?.demoDataEnabled ?? false;
+    const webCustomDomain = resolveWebCustomDomain(props?.webCustomDomain);
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
     const parameterInputs = buildStackParameters(this, {
@@ -233,6 +244,8 @@ export class MukurojiStack extends cdk.Stack {
       workerChannels,
     });
     const webDistribution = buildWebDistribution(this, {
+      customDomain: webCustomDomain,
+      ssoRedirectUri: parameters.cognitoSsoRedirectUri.valueAsString,
       edgeOriginSecret: parameters.edgeOriginSecret.valueAsString,
       fileBucket: fileStorage.fileBucket,
       httpApi: apiTransports.httpApi,
