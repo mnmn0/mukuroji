@@ -51,6 +51,11 @@ export type ChecklistWorkItemControls = {
    * hides the owner and deadline fields in the editor.
    */
   assignees?: readonly ChecklistAssigneeOption[]
+  /**
+   * Reads the owner candidates again; present only after a member read
+   * failed, so some owners may be missing from the list.
+   */
+  onRetryAssignees?: () => void
 }
 
 /**
@@ -692,8 +697,24 @@ function ChecklistBlockEditor({
 }) {
   const assignees = checklistWorkItems?.assignees
   const today = formatLocalCalendarDate(new Date())
+  const onRetryAssignees = checklistWorkItems?.onRetryAssignees
   return (
     <div className="grid gap-2">
+      {assignees && onRetryAssignees ? (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-fg-red-800"
+          role="alert"
+        >
+          <span>{t('documents.checklistWorkItem.assigneesError')}</span>
+          <button
+            className="workbench-button-secondary min-h-8 px-3 text-xs"
+            onClick={onRetryAssignees}
+            type="button"
+          >
+            {t('documents.checklistWorkItem.retryAssignees')}
+          </button>
+        </div>
+      ) : null}
       {block.items.map((item, index) => (
         <div
           className="grid gap-1 rounded-md px-2 py-1.5 hover:bg-[var(--workbench-surface-muted)]"

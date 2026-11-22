@@ -355,6 +355,27 @@ describe('checklist item owners and deadlines', () => {
     expect(html).toContain('value="2026-11-20"')
   })
 
+  test('reports a failed owner read with a reload action', () => {
+    if (documentRecordFixture.kind !== 'page') {
+      throw new Error('Expected a page fixture.')
+    }
+    const html = renderToStaticMarkup(
+      <DocumentEditor
+        checklistWorkItems={{ assignees, onRetryAssignees: () => undefined, relations: [] }}
+        document={{ ...documentRecordFixture, blocks: [block], relations: [] }}
+        editable
+        saveStatus="idle"
+        t={createTranslator('en')}
+        onDeleteBlock={() => undefined}
+        onMoveBlock={() => undefined}
+        onUpsertBlock={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('role="alert"')
+    expect(html).toContain('Reload')
+  })
+
   test('shows the owner and deadline to read-only viewers', () => {
     if (documentRecordFixture.kind !== 'page') {
       throw new Error('Expected a page fixture.')

@@ -40,15 +40,28 @@ const actionItemsBlock: DocumentBlock = {
 /**
  * Renders the editor with local state so owner and deadline changes show up.
  *
- * @param props - Whether the viewer can edit.
+ * @param props - Whether the viewer can edit and whether the owner read failed.
  * @returns The editor with the action items block.
  */
-function ActionItemsEditor({ editable }: { editable: boolean }) {
+function ActionItemsEditor({
+  assigneesFailed = false,
+  editable,
+}: {
+  /** Whether reading the owner candidates failed. */
+  assigneesFailed?: boolean
+  /** Whether the viewer can edit. */
+  editable: boolean
+}) {
   const [blocks, setBlocks] = useState<DocumentBlock[]>([actionItemsBlock])
   if (documentRecordFixture.kind !== 'page') return null
   return (
     <DocumentEditor
-      checklistWorkItems={{ assignees, onCreate: () => undefined, relations: [] }}
+      checklistWorkItems={{
+        assignees,
+        onCreate: () => undefined,
+        onRetryAssignees: assigneesFailed ? () => undefined : undefined,
+        relations: [],
+      }}
       document={{ ...documentRecordFixture, blocks, relations: [] }}
       editable={editable}
       saveStatus="idle"
@@ -97,4 +110,14 @@ export const ActionItemOwnersReadOnly: Story = {
 /** The owner and deadline fields wrap under the item on a phone. */
 export const ActionItemOwnersMobile: Story = {
   globals: { viewport: { value: 'mobile1', isRotated: false } },
+}
+
+/** A failed owner read is reported with a reload action instead of a short list. */
+export const ActionItemOwnersLoadFailed: Story = {
+  args: { assigneesFailed: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('alert')).toHaveTextContent('担当者の候補を読み込めませんでした。')
+    await expect(canvas.getByRole('button', { name: '再読み込み' })).toBeVisible()
+  },
 }

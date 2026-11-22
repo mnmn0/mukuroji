@@ -10,6 +10,18 @@ import {
 import type { ChecklistAssigneeOption } from '../model/checklistItems'
 
 /**
+ * Owner options of one Document and the state of the member reads behind them.
+ */
+export type ChecklistAssigneeOptionsState = {
+  /** Members offered as owners, sorted by label. */
+  options: readonly ChecklistAssigneeOption[]
+  /** Whether a member read failed, so some owners may be missing. */
+  hasError: boolean
+  /** Reads the members again after a failure. */
+  retry: () => void
+}
+
+/**
  * Loads the members offered as checklist item owners in one Document.
  *
  * A Project Document offers that Project's members. A Workspace Document
@@ -21,14 +33,14 @@ import type { ChecklistAssigneeOption } from '../model/checklistItems'
  * @param teams - Teams and Projects visible to the viewer.
  * @param scope - Scope of the open Document.
  * @param enabled - Whether the Document has checklist items to assign.
- * @returns Owner options sorted by label, empty while loading or disabled.
+ * @returns Owner options sorted by label, and whether some member reads failed.
  */
 export function useChecklistAssigneeOptions(
   accessToken: string | undefined,
   teams: readonly ProjectDirectoryTeam[],
   scope: DocumentScope | undefined,
   enabled: boolean,
-): readonly ChecklistAssigneeOption[] {
+): ChecklistAssigneeOptionsState {
   const projectId = scope?.type === 'project' ? scope.projectId : undefined
   // The same Project ID can exist in several Teams; the first Team that lists
   // it qualifies the member lookup, like the Work Item dialog's default.
@@ -56,6 +68,17 @@ export function useChecklistAssigneeOptions(
   for (const member of members) {
     options.set(member.id, { id: member.id, label: member.name ?? member.email })
   }
-  return [...options.values()].sort((left, right) =>
-    left.label.localeCompare(right.label))
+  // Both loaders resolve with per-Project errors instead of rejecting, so a
+  // partial failure is reported like a failed query rather than as fewer owners.
+  const activeQuery = projectId === undefined ? directoryMembers : projectMembers
+  const hasError =
+    activeQuery.error !== undefined || (activeQuery.data?.errors.length ?? 0) > 0
+  return {
+    hasError,
+    options: [...options.values()].sort((left, right) =>
+      left.label.localeCompare(right.label)),
+    retry: () => {
+      void activeQuery.mutate()
+    },
+  }
 }

@@ -117,8 +117,10 @@ import {
 } from './ui/DocumentEditor'
 import { DocumentHome } from './ui/DocumentHome'
 import { ChecklistWorkItemDialog } from './ui/ChecklistWorkItemDialog'
-import type { ChecklistAssigneeOption } from './model/checklistItems'
-import { useChecklistAssigneeOptions } from './queries/useChecklistAssigneeOptions'
+import {
+  useChecklistAssigneeOptions,
+  type ChecklistAssigneeOptionsState,
+} from './queries/useChecklistAssigneeOptions'
 import { useChecklistWorkItemCreation } from './mutations/useChecklistWorkItemCreation'
 import type {
   BuiltInDocumentTemplateKey,
@@ -1647,7 +1649,7 @@ export function DocumentScreen({
   const [unlinkedChecklistWorkItems, setUnlinkedChecklistWorkItems] =
     useState<Readonly<Record<string, string>>>({})
   const selectedDocument = data.selectedDocument
-  const checklistAssignees = useChecklistAssigneeOptions(
+  const checklistAssigneeState = useChecklistAssigneeOptions(
     accessToken,
     data.teams,
     selectedDocument?.scope,
@@ -2170,7 +2172,7 @@ export function DocumentScreen({
             ) : selectedDocument ? (
               <DocumentWorkspace
                 accessToken={accessToken}
-                checklistAssignees={checklistAssignees}
+                checklistAssignees={checklistAssigneeState}
                 key={selectedDocument.id}
                 isAiOperationPending={isAiOperationPending}
                 selectedDocument={selectedDocument}
@@ -2541,7 +2543,7 @@ type DocumentWorkspaceProps = {
   /**
    * Members offered as checklist item owners and used to show owner names.
    */
-  checklistAssignees?: readonly ChecklistAssigneeOption[]
+  checklistAssignees?: ChecklistAssigneeOptionsState
   /**
    * API から取得した選択中 Document です。
    */
@@ -3159,7 +3161,10 @@ function DocumentWorkspace({
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <DocumentEditor
             checklistWorkItems={{
-              assignees: checklistAssignees,
+              assignees: checklistAssignees?.options,
+              onRetryAssignees: checklistAssignees?.hasError
+                ? checklistAssignees.retry
+                : undefined,
               onCreate: editable ? onCreateChecklistWorkItem : undefined,
               onOpen: onNavigate
                 ? (workItemId) =>
