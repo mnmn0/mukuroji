@@ -768,18 +768,23 @@ function rejectInternalPublicCreateWorkItemFields(input: PublicCreateWorkItemInp
  * stored as sent. The new schedule is due on `dueDate`, or unscheduled without one.
  *
  * @param directoryId - Workspace directory that owns the new Work Item.
+ * @param teamId - Team of the new Work Item.
  * @param input - Create input from the client.
+ * @param keepScheduleCalendar - Whether a given schedule keeps its calendar as it is, for import rows
+ *   whose calendar was pinned when the job was staged.
  * @returns The input with a complete canonical schedule and no `dueDate`.
  */
 async function completePublicCreateWorkItemSchedule(
   directoryId: string,
   teamId: string,
   input: PublicCreateWorkItemInput,
+  keepScheduleCalendar = false,
 ): Promise<CreateWorkItemInput> {
   const { schedule, dueDate, ...fields } = input
   const projectId = typeof input.assignedProjectId === 'string' && input.assignedProjectId.trim()
     ? input.assignedProjectId.trim()
     : undefined
+  if (schedule && keepScheduleCalendar) return { ...fields, schedule }
   if (schedule) {
     return {
       ...fields,
@@ -798,6 +803,20 @@ async function completePublicCreateWorkItemSchedule(
   }
 }
 
+/**
+ * Creates a Work Item through the canonical Public API create path.
+ *
+ * @param principal - Member who creates the Work Item.
+ * @param teamId - Team of the new Work Item.
+ * @param input - Create input.
+ * @param context - Request identity of the mutation.
+ * @param requestPath - Path recorded in the audit context.
+ * @param idempotentCreate - Deterministic identity of a replayable create.
+ * @param authorizationSnapshot - Authorization the create is fenced on.
+ * @param keepScheduleCalendar - Whether a given schedule keeps its calendar instead of taking the
+ *   target's shared calendar.
+ * @returns The created Work Item.
+ */
 async function createCanonicalPublicWorkItem(
   principal: WorkspacePrincipal,
   teamId: string,
@@ -806,12 +825,13 @@ async function createCanonicalPublicWorkItem(
   requestPath: string,
   idempotentCreate?: IdempotentWorkItemCreate,
   authorizationSnapshot?: WorkItemAuthorizationSnapshot,
+  keepScheduleCalendar = false,
 ) {
   rejectInternalPublicCreateWorkItemFields(input)
   requireWorkspaceBusinessWrite(principal)
   const permission = await requireTeamPermission(principal, teamId, 'member')
   const body = normalizeTeamIssueInput(
-    await completePublicCreateWorkItemSchedule(principal.directoryId, teamId, input),
+    await completePublicCreateWorkItemSchedule(principal.directoryId, teamId, input, keepScheduleCalendar),
     permission.team,
   )
   const newWorkItemProjectFence = await requireAssignedProjectAcceptsNewWorkItems(
@@ -3108,6 +3128,8 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
             requestDigest: request.requestDigest,
           },
           authorization.authorizationSnapshot,
+          // Rows keep the Team calendar pinned when the job was staged (ADR 0058).
+          true,
         )
       } catch (error) {
         throw toWorkItemImportWorkerError(error)
