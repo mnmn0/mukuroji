@@ -1,16 +1,19 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { MemoryRouter } from 'react-router'
 import { expect, within } from 'storybook/test'
+import { documentBacklinkFixtures, documentSummaryFixtures } from '../../documents/fixtures'
 import { factoryBoardFixture } from '../../features/factory-board/fixtures'
 import { planningSnapshotFixture } from '../../planning/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { referoTaskFixtures } from '../../tasks/fixtures'
-import { projectDirectoryFixtures } from '../fixtures'
+import { projectDirectoryFixtures, projectRaidLogFixtures } from '../fixtures'
 import {
   findProjectOverviewUpdateTarget,
+  selectProjectOverviewDocuments,
   selectProjectOverviewSchedule,
   summarizeProjectOverviewAgentRuns,
   summarizeProjectOverviewMembers,
+  summarizeProjectOverviewRaid,
   summarizeProjectOverviewWorkItems,
 } from '../model/projectOverview'
 import { ProjectOverviewView } from './ProjectOverviewView'
@@ -22,6 +25,7 @@ const meta = {
   component: ProjectOverviewView,
   args: {
     agentRuns: summarizeProjectOverviewAgentRuns(factoryBoardFixture, 'refero'),
+    documents: selectProjectOverviewDocuments('refero', documentBacklinkFixtures, documentSummaryFixtures, false),
     isMembersLoading: false,
     isPlanningError: false,
     isPlanningLoading: false,
@@ -42,6 +46,7 @@ const meta = {
         plannedEndDate: '2026-09-30',
       },
     },
+    raid: summarizeProjectOverviewRaid(projectRaidLogFixtures, '2026-06-10'),
     schedule: selectProjectOverviewSchedule(planningSnapshotFixture.entities, 'core-team', 'refero'),
     t: createTranslator('ja'),
     team: coreTeam,
@@ -73,8 +78,15 @@ export const Desktop: Story = {
       .toHaveAttribute('href', '/planning/portfolio?targetType=project&teamId=core-team&projectId=refero')
     await expect(canvas.getByRole('link', { name: 'Factory board を開く' }))
       .toHaveAttribute('href', '/teams/core-team/factory')
+    await expect(canvas.getByRole('link', { name: 'ドキュメントを開く' }))
+      .toHaveAttribute('href', '/documents?projectId=refero')
+    await expect(canvas.getByText('主要部品のベンダー納期遅延')).toBeVisible()
+    await expect(canvas.getByText('次フェーズで対応することで合意。')).toBeVisible()
   },
 }
+
+/** Every widget loaded on a desktop width, without interaction checks, for the visual regression suite. */
+export const AllWidgets: Story = {}
 
 /** Every widget loaded on a 390px phone width. */
 export const Phone: Story = {
@@ -86,7 +98,10 @@ export const PartialFailure: Story = {
   args: {
     agentRuns: undefined,
     agentRunsError: 'load',
+    documentsError: 'load',
     membersError: 'load',
+    raid: undefined,
+    raidError: 'load',
     isPlanningError: true,
     members: undefined,
     schedule: undefined,
