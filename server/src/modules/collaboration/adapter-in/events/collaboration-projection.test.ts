@@ -2747,6 +2747,11 @@ describe('collaboration projection pure helpers', () => {
         .toEqual({ batchItemFailures: [] })
       expect(notifications.map((item) => [item.eventId, item.recipientMemberKey]))
         .toEqual([['enterprise-reader', 'member@example.com']])
+      // Slack and Email reread the same entries before they send.
+      expect(notifications[0]).toMatchObject({
+        timeEntryIds: ['entry-1'],
+        timesheetDueBefore: '2026-07-05T00:00:00.000Z',
+      })
       // The entry revision fence commits first, in the same transaction as the notification.
       expect(notificationTransactions).toHaveLength(1)
       expect(notificationTransactions[0]?.[0]).toEqual(entryRevisionCheck)

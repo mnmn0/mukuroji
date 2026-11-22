@@ -11,6 +11,7 @@ import type {
   DocumentRelation,
   DocumentTableBlock,
 } from '@mukuroji/contracts'
+import { DocumentLinkedText } from './DocumentLinkedText'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { DocumentRecord } from '../api'
 import { findChecklistItemWorkItemId } from '../model/checklistWorkItems'
@@ -949,7 +950,7 @@ function ReadOnlyBlock({
                   className="border-b border-r border-[var(--workbench-border)] px-3 py-2.5 text-xs font-bold text-[var(--workbench-muted)] last:border-r-0"
                   key={`${block.id}-readonly-column-${index}`}
                 >
-                  {column}
+                  <DocumentLinkedText text={column} />
                 </th>
               ))}
             </tr>
@@ -962,7 +963,7 @@ function ReadOnlyBlock({
                     className="border-b border-r border-[var(--workbench-border)] px-3 py-3 text-sm font-medium last:border-r-0"
                     key={cell.id}
                   >
-                    {cell.text}
+                    <DocumentLinkedText text={cell.text} />
                   </td>
                 ))}
               </tr>
@@ -988,7 +989,7 @@ function ReadOnlyBlock({
           <li className="flex items-start gap-3 text-sm font-medium" key={item.id}>
             <span aria-hidden="true">{item.checked ? '☑' : '☐'}</span>
             <span className={item.checked ? 'text-[var(--workbench-muted)] line-through' : ''}>
-              {item.text}
+              <DocumentLinkedText text={item.text} />
             </span>
             <ChecklistItemWorkItemAction
               blockId={block.id}
@@ -1026,7 +1027,7 @@ function ReadOnlyBlock({
 
   return (
     <p className="m-0 whitespace-pre-wrap text-[1rem] font-medium leading-8 text-[var(--workbench-text)]">
-      {block.text}
+      <DocumentLinkedText text={block.text} />
     </p>
   )
 }

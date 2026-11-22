@@ -452,6 +452,10 @@ export type PlanningScreenProps = {
   onOpenProject?: (project: WorkItemAffectedProject) => void
   /** Dependency summary から影響 Milestone を開く callback です。 */
   onOpenMilestone?: (milestoneId: string) => void
+  /** Opens a Project overview from the cross-Project timeline. */
+  onOpenProjectOverview?: (project: WorkItemAffectedProject) => void
+  /** Opens a Project's Work Item Gantt chart from the cross-Project timeline. */
+  onOpenProjectGantt?: (project: WorkItemAffectedProject) => void
   /**
    * Records behind the schedule baseline in the selected update target, which the composer can
    * attach as evidence. They are shown only while their target is the one shown.
@@ -519,6 +523,8 @@ export function PlanningScreen({
   onLoadMoreUpdateHistory,
   onOpenMilestone,
   onOpenProject,
+  onOpenProjectGantt,
+  onOpenProjectOverview,
   onOpenWorkItem,
   onPublishUpdate,
   onSaveUpdateCadence,
@@ -788,6 +794,8 @@ export function PlanningScreen({
                   onMoveEntity={onMoveEntity}
                   onOpenMilestone={onOpenMilestone}
                   onOpenProject={onOpenProject}
+                  onOpenProjectGantt={onOpenProjectGantt}
+                  onOpenProjectOverview={onOpenProjectOverview}
                   onOpenWorkItem={onOpenWorkItem}
                   onRolloverCycle={onRolloverCycle}
                   onSelectEntity={handleSelectEntity}
@@ -926,6 +934,8 @@ function TimelineView({
   onMoveEntity,
   onOpenMilestone,
   onOpenProject,
+  onOpenProjectGantt,
+  onOpenProjectOverview,
   onOpenWorkItem,
   onRolloverCycle,
   onUpdateWorkItemDependency,
@@ -954,6 +964,8 @@ function TimelineView({
   onMoveEntity?: PlanningScreenProps['onMoveEntity']
   onOpenMilestone?: PlanningScreenProps['onOpenMilestone']
   onOpenProject?: PlanningScreenProps['onOpenProject']
+  onOpenProjectGantt?: PlanningScreenProps['onOpenProjectGantt']
+  onOpenProjectOverview?: PlanningScreenProps['onOpenProjectOverview']
   onOpenWorkItem?: PlanningScreenProps['onOpenWorkItem']
   onRolloverCycle?: PlanningScreenProps['onRolloverCycle']
   onUpdateWorkItemDependency?: PlanningScreenProps['onUpdateWorkItemDependency']
@@ -987,7 +999,8 @@ function TimelineView({
         entities={snapshot.entities}
         entityTypes={labels.entityTypes}
         labels={labels.crossProjectTimeline}
-        onOpenProject={onOpenProject}
+        onOpenProjectGantt={onOpenProjectGantt}
+        onOpenProjectOverview={onOpenProjectOverview}
         onSelectEntity={onSelectEntity}
       />
       <section className="workbench-panel overflow-hidden">

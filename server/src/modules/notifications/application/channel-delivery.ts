@@ -32,6 +32,10 @@ export type ChannelDelivery = {
   workItemReopenedAt?: string
   /** Author of the unsubmitted weekly report, when this is a weekly report reminder or escalation. */
   weeklyReportAuthorMemberKey?: string
+  /** Unsubmitted time entries a timesheet reminder was scanned for, when this is one. */
+  timeEntryIds?: string[]
+  /** Instant at or before which a timesheet reminder's entries had to end, when this is one. */
+  timesheetDueBefore?: string
   /** Original approval target, retained independently from its parent Work Item. */
   targetId?: string
   /** Original file subject, when the source is file-backed. */

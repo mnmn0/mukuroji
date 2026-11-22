@@ -3,6 +3,8 @@
 Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う server API の変更を記録します。
 形式は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に、MCP の version は
 [Semantic Versioning](https://semver.org/lang/ja/) に従います。
+アプリ（Web・API）全体には version 番号を付けず、deploy した commit SHA を version とします。
+アプリの変更履歴は deploy ごとの job summary にある比較 link で辿ります（[ADR 0057](docs/adr/0057-app-version-is-deployed-commit.md)）。
 
 ## 記録のしかた
 

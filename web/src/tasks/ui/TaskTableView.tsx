@@ -22,7 +22,7 @@ import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import { TaskViewPrintButtons } from './TaskViewPrintButtons'
-import { useTaskViewTablePrint } from './taskViewPrint'
+import { useTaskViewTablePrint } from '../../shared/ui/viewPrint'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 import {
