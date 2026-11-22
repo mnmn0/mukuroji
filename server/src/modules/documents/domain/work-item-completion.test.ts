@@ -8,6 +8,14 @@ import {
 const workItemId = 'team/team-a/issue/work-item-1'
 
 /**
+ * Builds test operation IDs the way a completion event would.
+ *
+ * @param elementKey - Element key passed by the planner.
+ * @returns Operation ID that names the event and the element.
+ */
+const operationIdFor = (elementKey: string) => `completion:event-1:${elementKey}`
+
+/**
  * Builds a relation to the completed Work Item for the planning tests.
  *
  * @param id - Relation ID.
@@ -79,7 +87,7 @@ test('checks only the checklist items turned into the completed Work Item', () =
     ],
   }
 
-  expect(planWorkItemCompletionOperations(page, workItemId, 'completion:event-1')).toEqual([{
+  expect(planWorkItemCompletionOperations(page, workItemId, operationIdFor)).toEqual([{
     type: 'update-block',
     operationId: 'completion:event-1:block:actions',
     blockId: 'actions',
@@ -110,7 +118,7 @@ test('changes nothing when the linked item is already checked or was deleted', (
     ],
   }
 
-  expect(planWorkItemCompletionOperations(page, workItemId, 'completion:event-1')).toEqual([])
+  expect(planWorkItemCompletionOperations(page, workItemId, operationIdFor)).toEqual([])
 })
 
 test('marks the linked Whiteboard note done and ignores Work Item cards', () => {
@@ -131,7 +139,7 @@ test('marks the linked Whiteboard note done and ignores Work Item cards', () => 
     ],
   }
 
-  expect(planWorkItemCompletionOperations(whiteboard, workItemId, 'completion:event-1')).toEqual([{
+  expect(planWorkItemCompletionOperations(whiteboard, workItemId, operationIdFor)).toEqual([{
     type: 'update-object',
     operationId: 'completion:event-1:object:note-1',
     objectId: 'note-1',

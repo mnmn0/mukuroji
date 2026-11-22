@@ -28,8 +28,11 @@ Work Item の更新後に共通で流れるもの（audit outbox の `work-item.
   version history には system actor の編集として残る。
 - Work Item の backlink row を権限で絞らずに読み（Document の table の `BACKLINK#work-item#…`）、
   Document ごとに最新 row を読んで差分を作り、`revision` の条件付き Put で本文・検索用 row・version を
-  1 transaction で書く。競合したら読み直して再試行する。すでに完了済みなら書かないので、stream の
-  再配送や同じ Work Item の再完了でも結果は変わらない。archive 済みの Document は変えない。
+  1 transaction で書く。競合したら読み直して再試行する。すでに完了済みの要素は書かない。
+  同じ transaction で、event と要素ごとの operation receipt（既存の `OPERATION#` row、operation ID は
+  event ID と要素 ID の hash）を残し、stream が同じ event を再配送したときは receipt のある要素を
+  飛ばす。そのため最初の反映のあとに人がチェックを外しても、再配送で戻らない。同じ Work Item を
+  もう一度完了にしたときは別の event なので反映される。archive 済みの Document は変えない。
 - Work Item の再オープン（`completionReopened`）ではチェックを外さない。人が自分で付けたチェックを
   消してしまうため。
 - automation event worker の role には、Documents table への `dynamodb:GetItem`・`Query`・`PutItem`

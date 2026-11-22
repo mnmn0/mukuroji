@@ -4227,11 +4227,23 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
       if (ancestorRows.some((ancestor) => ancestor.document.archivedAt !== undefined)) {
         return false
       }
-      const operations = planWorkItemCompletionOperations(
+      const planned = planWorkItemCompletionOperations(
         row.document,
         input.workItemId,
-        `work-item-completion:${input.eventId}`,
-      ).slice(0, DOCUMENT_MAX_OPERATION_COUNT)
+        (elementKey) => workItemCompletionOperationId(input.eventId, elementKey),
+      )
+      // An element this event already completed keeps its receipt, so a
+      // retried event never undoes an edit made after the first attempt.
+      const operations: DocumentOperation[] = []
+      for (const operation of planned) {
+        if (operations.length >= DOCUMENT_MAX_OPERATION_COUNT) break
+        const receipt = await this.getOperationReceipt(
+          input.workspaceId,
+          documentId,
+          operation.operationId,
+        )
+        if (receipt === undefined) operations.push(operation)
+      }
       if (operations.length === 0) return false
       const conflictFloorRevision = row.operationConflictFloorRevision ?? 1
       const nextRevision = row.revision + 1
@@ -4277,6 +4289,15 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         currentDocumentPut(this.tableName, nextRow, row.revision),
         documentSearchAccessPut(this.tableName, input.workspaceId, reduced.document),
         documentSearchBodyPut(this.tableName, input.workspaceId, reduced.document),
+        ...operations.map((operation) =>
+          workItemCompletionReceiptPut(
+            this.tableName,
+            input,
+            documentId,
+            operation,
+            nextRevision,
+            this.now(),
+          )),
         ...versionPutActions(
           this.tableName,
           createVersionItems(
@@ -5968,6 +5989,65 @@ function blockTextLength(block: DocumentBlock): number {
       return (block.title ?? block.url).length
     case 'diagram':
       return block.source.length
+  }
+}
+
+/**
+ * Builds a bounded operation ID for one element completed by one event.
+ *
+ * Event and element IDs are each valid on their own but can exceed the
+ * identifier limit together, so the pair is hashed.
+ *
+ * @param eventId - Completion event ID.
+ * @param elementKey - `block:<blockId>` or `object:<objectId>`.
+ * @returns Operation ID of at most 85 characters.
+ */
+function workItemCompletionOperationId(eventId: string, elementKey: string): string {
+  return `work-item-completion:${sha256(`${eventId}\n${elementKey}`)}`
+}
+
+/**
+ * Records that one completion event completed one element.
+ *
+ * The receipt uses the operation receipt row of the Document, so the same
+ * retention and expiry apply.
+ *
+ * @param tableName - Documents table name.
+ * @param input - Completion request.
+ * @param documentId - Changed Document.
+ * @param operation - Completion operation written in the same transaction.
+ * @param revision - Revision the transaction writes.
+ * @param now - Write time.
+ * @returns Conditional put of the receipt.
+ */
+function workItemCompletionReceiptPut(
+  tableName: string,
+  input: ReflectWorkItemCompletionRequest,
+  documentId: string,
+  operation: DocumentOperation,
+  revision: number,
+  now: Date,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const nowEpoch = Math.floor(now.getTime() / 1_000)
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        workspaceId: input.workspaceId,
+        recordKey: operationKey(documentId, operation.operationId),
+        entryType: 'document-operation',
+        documentId,
+        clientId: input.actorId,
+        operationId: operation.operationId,
+        fingerprint: fingerprint(operation),
+        revision,
+        createdAt: now.toISOString(),
+        expiresAtEpoch: nowEpoch + DOCUMENT_OPERATION_RECEIPT_RETENTION_DAYS * SECONDS_PER_DAY,
+      } satisfies StoredOperationReceipt,
+      ConditionExpression:
+        'attribute_not_exists(workspaceId) OR expiresAtEpoch <= :operationReceiptNowEpoch',
+      ExpressionAttributeValues: { ':operationReceiptNowEpoch': nowEpoch },
+    },
   }
 }
 

@@ -2458,6 +2458,81 @@ test('checks the checklist items and notes turned into a completed Work Item', a
   })).toEqual({ updatedDocumentIds: [] })
 })
 
+test('keeps an edit made after a completion when the same event is retried', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const page = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Minutes',
+    blocks: [{
+      id: 'actions',
+      type: 'checklist',
+      items: [{ id: 'linked', text: 'Send the estimate', checked: false }],
+    }],
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: page.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-item',
+        relation: {
+          id: 'checklist-item:actions:linked',
+          source: { kind: 'block', blockId: 'actions' },
+          target: { kind: 'work-item', workItemId },
+          createdAt: '2026-07-18T00:00:00.000Z',
+          createdByUserId: 'owner@example.com',
+        },
+      }],
+    },
+  })
+  const completion = {
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: `event-${'e'.repeat(48)}`,
+    actorId: 'system:work-item-completion',
+  }
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [page.id] })
+  const completed = await client.get({ workspaceId: 'workspace-1', documentId: page.id, access: ownerAccess })
+  if (completed.kind !== 'page') throw new Error('Expected a page.')
+  const checklist = completed.blocks[0]
+  if (checklist?.type !== 'checklist') throw new Error('Expected a checklist.')
+  const reopened = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: completed.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'update-block',
+        operationId: 'uncheck-item',
+        blockId: 'actions',
+        block: { ...checklist, items: checklist.items.map((item) => ({ ...item, checked: false })) },
+      }],
+    },
+  })
+
+  // The stream retries the same event: the editor's uncheck stays.
+  expect(await client.reflectWorkItemCompletion(completion))
+    .toEqual({ updatedDocumentIds: [] })
+  const afterRetry = await client.get({ workspaceId: 'workspace-1', documentId: page.id, access: ownerAccess })
+  expect(afterRetry.revision).toBe(reopened.revision)
+
+  // A later completion of the same Work Item is a new event and applies.
+  expect(await client.reflectWorkItemCompletion({ ...completion, eventId: 'event-2' }))
+    .toEqual({ updatedDocumentIds: [page.id] })
+})
+
 test('completes more linked notes than one operation batch holds', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)

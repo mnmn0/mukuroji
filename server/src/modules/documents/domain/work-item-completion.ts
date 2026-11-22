@@ -11,6 +11,14 @@ const CHECKLIST_ITEM_RELATION_PREFIX = 'checklist-item:'
 const WHITEBOARD_NOTE_RELATION_PREFIX = 'whiteboard-note:'
 
 /**
+ * Builds the operation ID of one completed element.
+ *
+ * @param elementKey - `block:<blockId>` or `object:<objectId>`.
+ * @returns Operation ID unique to the completion event and the element.
+ */
+export type WorkItemCompletionOperationId = (elementKey: string) => string
+
+/**
  * Tells whether a relation ID is one that completion reflects: a checklist
  * item or Whiteboard note turned into a Work Item.
  *
@@ -31,27 +39,28 @@ export function isWorkItemCompletionRelationId(relationId: string): boolean {
  * relation and Whiteboard notes linked by a `whiteboard-note:<objectId>`
  * relation. Other relations to the Work Item, such as plain links, embedded
  * Work Item cards, or relations a viewer typed by hand with another ID, are
- * left alone. Elements that are already done produce no operation, so a
- * replayed completion event changes nothing.
+ * left alone. Elements that are already done produce no operation. The
+ * caller derives operation IDs from the completion event so it can record
+ * which elements one event already completed.
  *
  * @param document - Current Document.
  * @param workItemId - Canonical ID of the completed Work Item.
- * @param operationIdPrefix - Prefix that makes operation IDs unique to one completion event.
+ * @param operationIdFor - Builds the operation ID of one element for this completion event.
  * @returns Operations to apply; empty when nothing needs to change.
  */
 export function planWorkItemCompletionOperations(
   document: DocumentDetail,
   workItemId: string,
-  operationIdPrefix: string,
+  operationIdFor: WorkItemCompletionOperationId,
 ): DocumentOperation[] {
   const relations = document.relations.filter((relation) =>
     relation.target.kind === 'work-item' && relation.target.workItemId === workItemId)
   if (relations.length === 0) return []
   if (document.kind === 'page' || document.kind === 'template') {
-    return planChecklistOperations(document, relations, operationIdPrefix)
+    return planChecklistOperations(document, relations, operationIdFor)
   }
   if (document.kind === 'whiteboard') {
-    return planNoteOperations(document, relations, operationIdPrefix)
+    return planNoteOperations(document, relations, operationIdFor)
   }
   return []
 }
@@ -61,13 +70,13 @@ export function planWorkItemCompletionOperations(
  *
  * @param document - Page or template.
  * @param relations - Relations of the Document that target the Work Item.
- * @param operationIdPrefix - Operation ID prefix of the completion event.
+ * @param operationIdFor - Builds the operation ID of one element.
  * @returns Block update operations.
  */
 function planChecklistOperations(
   document: Extract<DocumentDetail, { kind: 'page' | 'template' }>,
   relations: readonly DocumentRelation[],
-  operationIdPrefix: string,
+  operationIdFor: WorkItemCompletionOperationId,
 ): DocumentOperation[] {
   const itemIdsByBlock = new Map<string, Set<string>>()
   for (const relation of relations) {
@@ -93,7 +102,7 @@ function planChecklistOperations(
           itemIds.has(item.id) ? { ...item, checked: true } : item),
       },
       blockId: block.id,
-      operationId: `${operationIdPrefix}:block:${block.id}`,
+      operationId: operationIdFor(`block:${block.id}`),
       type: 'update-block',
     })
   }
@@ -105,13 +114,13 @@ function planChecklistOperations(
  *
  * @param document - Whiteboard.
  * @param relations - Relations of the Document that target the Work Item.
- * @param operationIdPrefix - Operation ID prefix of the completion event.
+ * @param operationIdFor - Builds the operation ID of one element.
  * @returns Object update operations.
  */
 function planNoteOperations(
   document: Extract<DocumentDetail, { kind: 'whiteboard' }>,
   relations: readonly DocumentRelation[],
-  operationIdPrefix: string,
+  operationIdFor: WorkItemCompletionOperationId,
 ): DocumentOperation[] {
   const objectIds = new Set<string>()
   for (const relation of relations) {
@@ -125,7 +134,7 @@ function planNoteOperations(
     operations.push({
       object: { ...object, done: true },
       objectId: object.id,
-      operationId: `${operationIdPrefix}:object:${object.id}`,
+      operationId: operationIdFor(`object:${object.id}`),
       type: 'update-object',
     })
   }
