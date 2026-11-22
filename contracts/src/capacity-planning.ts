@@ -241,6 +241,11 @@ export type WorkloadMemberSummary = {
   calendarSource?: WorkloadCalendarSource
   /** Time zone stored on the profile; the Workspace time zone applies while inheriting it. */
   timeZone: string
+  /**
+   * Time zone the cells are counted in: the Workspace time zone while inheriting it, otherwise
+   * {@link timeZone}. Older servers leave it out.
+   */
+  effectiveTimeZone?: string
   /** Recurring local working schedule. */
   schedule: WorkingSchedule
   /** Local dates that are not available. */

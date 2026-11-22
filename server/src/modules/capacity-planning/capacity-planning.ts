@@ -903,6 +903,7 @@ function calculateMemberSummary(
     skills: [...profile.skills],
     calendarSource: stored.calendarSource ?? 'custom',
     timeZone: stored.timeZone,
+    effectiveTimeZone: profile.timeZone,
     schedule: clone(stored.schedule),
     holidays: stored.holidays.map(({ date, label }) => ({ date, ...(label ? { label } : {}) })),
     profileRevision: profile.revision,

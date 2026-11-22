@@ -108,6 +108,7 @@ describe('capacity planning calculations', () => {
     expect(member).toMatchObject({
       calendarSource: 'workspace',
       timeZone: 'UTC',
+      effectiveTimeZone: 'Asia/Tokyo',
       holidays: [{ date: '2026-08-06', label: 'Personal day' }],
     })
     expect(member?.schedule).toEqual(schedule)

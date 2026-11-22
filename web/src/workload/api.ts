@@ -419,6 +419,7 @@ function isWorkloadSnapshot(value: unknown): value is WorkloadSnapshot {
   return value.members.every((member): member is WorkloadMemberSummary => isRecord(member) &&
     typeof member.memberId === 'string' &&
     typeof member.timeZone === 'string' &&
+    (member.effectiveTimeZone === undefined || typeof member.effectiveTimeZone === 'string') &&
     (member.calendarSource === undefined || isWorkloadCalendarSource(member.calendarSource)) &&
     Array.isArray(member.skills) && member.skills.every((skill) => typeof skill === 'string') &&
     isWorkingSchedule(member.schedule) &&
