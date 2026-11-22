@@ -1,4 +1,7 @@
 import type {
+  BulkOperation,
+  BulkOperationPreview,
+  BulkOperationRequest,
   PlanningSnapshot,
   WorkItemScheduleCalendarPolicy,
   ResolvedWorkItemConfiguration,
@@ -331,6 +334,20 @@ export type TeamIssueScreenProps = {
     issue: TeamIssue,
     operation: WorkItemScheduleOperation,
   ) => Promise<WorkItemScheduleChangePreview>
+  /** Workspace ID that bulk operations are requested in; the table offers them only with it. */
+  bulkWorkspaceId?: string
+  /** Validates a bulk edit, move, or archive of the selected rows before it is applied. */
+  onBulkPreview?: (request: BulkOperationRequest) => Promise<BulkOperationPreview>
+  /** Applies a previewed bulk operation. */
+  onBulkApply?: (
+    request: BulkOperationRequest,
+    preview: BulkOperationPreview,
+    resumedOperation?: BulkOperation,
+  ) => Promise<BulkOperation>
+  /** Retries the failed items of a bulk operation. */
+  onBulkRetry?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
+  /** Undoes the succeeded items of a bulk operation. */
+  onBulkUndo?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** Persists a previewed schedule change and every dependency ripple it showed. */
   onConfirmScheduleChange?: (
     issue: TeamIssue,

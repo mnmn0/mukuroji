@@ -70,6 +70,7 @@ export const workItemsMessages = {
   'tasks.schedule.conflict.constraint-violation': '明示的な日付制約を満たせません。',
   'tasks.schedule.confirmBlocked': '日程変更を確定する前に競合を解消してください。',
   'bulk.selectVisible': '表示中をすべて選択',
+  'bulk.selectItem': '一括操作の対象にする',
   'bulk.selectedCount': '{count}件を選択中',
   'bulk.action.edit': '一括編集',
   'bulk.action.move': '一括移動',

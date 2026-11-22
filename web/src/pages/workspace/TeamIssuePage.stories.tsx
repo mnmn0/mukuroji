@@ -346,6 +346,34 @@ export const Board: Story = {
   },
 }
 
+/** Selecting Team table rows offers bulk edit, move, and archive for the selected Work Items. */
+export const BulkSelection: Story = {
+  args: {
+    bulkWorkspaceId: 'workspace-1',
+    onBulkApply: fn(),
+    onBulkPreview: fn(),
+    selectedIssueId: undefined,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(canvas.getByTestId('issue-row-select-onboarding-friction'))
+    await expect(canvas.getByTestId('issue-row-select-onboarding-friction')).toBeChecked()
+    await expect(canvas.getByTestId('bulk-operation-toolbar')).toBeVisible()
+    await expect(canvas.getByTestId('bulk-selected-count')).toHaveTextContent('1')
+  },
+}
+
+/** Team table bulk selection on a 390px-wide viewport. */
+export const BulkSelectionMobile: Story = {
+  args: {
+    bulkWorkspaceId: 'workspace-1',
+    onBulkApply: fn(),
+    onBulkPreview: fn(),
+    selectedIssueId: undefined,
+  },
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+}
+
 /** Compact grouped Team table using an explicit saved-view presentation. */
 export const SavedViewPresentation: Story = {
   args: {

@@ -70,6 +70,7 @@ export const workItemsMessages = {
   'tasks.schedule.conflict.constraint-violation': 'The explicit date constraint cannot be satisfied.',
   'tasks.schedule.confirmBlocked': 'Resolve these conflicts before confirming the schedule change.',
   'bulk.selectVisible': 'Select all visible',
+  'bulk.selectItem': 'Select for bulk actions',
   'bulk.selectedCount': '{count} selected',
   'bulk.action.edit': 'Bulk edit',
   'bulk.action.move': 'Bulk move',
