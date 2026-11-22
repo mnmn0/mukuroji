@@ -14,7 +14,9 @@
  * audit and search projections, and never needs table-level knowledge here. The script is
  * idempotent: Teams and Projects are matched by name, Work Items by title inside their Project,
  * and Planning records use fixed IDs, so a rerun only fills in what is missing and never edits or
- * deletes what a person changed. Dates are relative to the week of the first run.
+ * deletes what a person changed. A Work Item's parent, Planning links and dependencies are set only
+ * in the run that creates it, so a relationship a person removed is not put back. Dates are
+ * relative to the week of the first run.
  *
  * It only talks to a local HTTP server (`localhost`, `127.0.0.1`, `[::1]`), so it cannot write
  * demo data into a deployed environment.
@@ -675,6 +677,8 @@ export async function seedDemoData(
   }
 
   const workItemIds = new Map<string, { teamId: string, workItemId: string, projectId: string }>()
+  /** Work Items created by this run; only they get their parent, so a parent a person removed stays removed. */
+  const createdWorkItemKeys = new Set<string>()
   for (const workItem of plan.workItems) {
     const teamId = requireKey(projectTeamIds, workItem.projectKey, 'Project')
     const projectId = requireKey(projectIds, workItem.projectKey, 'Project')
@@ -700,12 +704,17 @@ export async function seedDemoData(
     const id = readString(isRecord(created) ? created.issue : undefined, 'id')
     if (!id) throw new DemoDataApiError('POST /api/teams/:teamId/issues did not return a Work Item ID.', 201)
     workItemIds.set(workItem.key, { teamId, workItemId: id, projectId })
+    createdWorkItemKeys.add(workItem.key)
     summary.created += 1
     log(`created Work Item ${workItem.title} (${teamId}/${id})`)
   }
 
   for (const workItem of plan.workItems) {
     if (!workItem.parentKey) continue
+    if (!createdWorkItemKeys.has(workItem.key)) {
+      summary.kept += 1
+      continue
+    }
     const child = requireKey(workItemIds, workItem.key, 'Work Item')
     const parent = requireKey(workItemIds, workItem.parentKey, 'Work Item')
     const hierarchyPath = `/api/teams/${encodeURIComponent(child.teamId)}/work-item-hierarchy`
@@ -795,7 +804,7 @@ export async function seedDemoData(
   for (const workItem of plan.workItems) {
     if (!workItem.milestoneKey && workItem.goalKeys.length === 0) continue
     const target = requireKey(workItemIds, workItem.key, 'Work Item')
-    if (linkedWorkItems.has(`${target.teamId}\0${target.workItemId}`)) {
+    if (!createdWorkItemKeys.has(workItem.key) || linkedWorkItems.has(`${target.teamId}\0${target.workItemId}`)) {
       summary.kept += 1
       continue
     }
@@ -820,6 +829,7 @@ export async function seedDemoData(
   for (const cycle of plan.planningEntities.filter((entity) => entity.type === 'cycle')) {
     const members = plan.workItems.filter((workItem) => workItem.cycleKey === cycle.id)
     const missing = members
+      .filter((workItem) => createdWorkItemKeys.has(workItem.key))
       .map((workItem) => requireKey(workItemIds, workItem.key, 'Work Item'))
       .filter((target) => readString(linkedWorkItems.get(`${target.teamId}\0${target.workItemId}`), 'cycleId') === undefined)
     summary.kept += members.length - missing.length
@@ -843,7 +853,11 @@ export async function seedDemoData(
     readArray(planning, 'workItemDependencies').map((dependency) => readString(dependency, 'id')),
   )
   for (const dependency of plan.workItemDependencies) {
-    if (workItemDependencyIds.has(dependency.id)) {
+    if (
+      workItemDependencyIds.has(dependency.id) ||
+      !createdWorkItemKeys.has(dependency.predecessorKey) ||
+      !createdWorkItemKeys.has(dependency.successorKey)
+    ) {
       summary.kept += 1
       continue
     }

@@ -153,7 +153,7 @@ function createFakeServer(options: { readyHookSeeded: boolean }) {
     return { status: 404, body: { message: `unexpected ${method} ${path}` } }
   }
 
-  return { transport, calls, planning }
+  return { transport, calls, planning, issues }
 }
 
 describe('buildDemoDataPlan', () => {
@@ -262,6 +262,23 @@ describe('seedDemoData', () => {
     const second = await seedDemoData(plan, server.transport, () => {})
     expect(second.created).toBe(0)
     expect(second.kept).toBe(first.created + first.kept)
+    expect(server.calls.slice(firstCallCount).every((call) => call.method === 'GET')).toBe(true)
+  })
+
+  test('does not put back a parent or Cycle that a person removed', async () => {
+    const plan = buildDemoDataPlan('2026-11-25')
+    const server = createFakeServer({ readyHookSeeded: true })
+    await seedDemoData(plan, server.transport, () => {})
+    const linked = server.planning.workItemLinks.find((link) => link.cycleId !== undefined)
+    expect(linked).toBeDefined()
+    if (linked) delete linked.cycleId
+    const firstCallCount = server.calls.length
+    server.issues.get('platform-team')?.forEach((issue) => {
+      issue.parent = null
+    })
+
+    const rerun = await seedDemoData(plan, server.transport, () => {})
+    expect(rerun.created).toBe(0)
     expect(server.calls.slice(firstCallCount).every((call) => call.method === 'GET')).toBe(true)
   })
 

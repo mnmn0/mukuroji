@@ -78,7 +78,8 @@ Floci の ready hook が作る Workspace・チーム・プロジェクト・Work
 投入は server の API を `demo@example.com` で呼ぶので、画面から作ったときと同じ検証・監査・検索
 projection が通ります。何度実行しても、チームとプロジェクトは名前、Work Item はプロジェクト内の
 タイトル、Planning は固定 ID で既存を見つけ、足りない分だけを作ります。手で変えたデータは
-上書きも削除もしません。接続先は `MUKUROJI_DEMO_API_URL`（既定 `http://localhost:3000`）で変えられますが、
+上書きも削除もしません。Work Item の親子・Planning への紐付け・依存関係は、その Work Item を作った
+実行でだけ設定するので、手で外した関係が再実行で戻ることもありません。接続先は `MUKUROJI_DEMO_API_URL`（既定 `http://localhost:3000`）で変えられますが、
 `localhost`・`127.0.0.1`・`[::1]` の http 以外には接続しません。
 
 ### `.env` の secret
