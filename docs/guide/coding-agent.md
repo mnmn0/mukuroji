@@ -53,6 +53,15 @@ token の期限が近づいたら「発行済みの token」から **期限を�
 | `MUKUROJI_MCP_PROJECT_ID` | | 特定の Project に絞る |
 | `MUKUROJI_MCP_READ_ONLY` | | 読み取り用の6ツールだけを公開する |
 | `MUKUROJI_MCP_RUNTIME` | | `claude-code` / `codex` / `kiro` / `other` |
+| `MUKUROJI_MCP_PROFILE` | | `tasks`（既定）か `workspace`。`workspace` では URL と token だけを読む |
+
+### Workspace 全体を読む（Workspace profile）
+
+担当タスクを進めるのではなく、Linear の MCP のように Team・Project・メンバー・タスクを調べて整理したいときは、
+`MUKUROJI_MCP_PROFILE=workspace` を足して別のサーバー名（例: `mukuroji`）で登録します。必要なのは
+`MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけです。agent に「`ABC-123` を読んで」「自分の担当を一覧して」の
+ように頼むと、`get_issue` や `list_issues` で読みます。今は読み取りだけで、タスクの作成・更新は後続の変更で追加します。
+読める範囲は token の持ち主が Web で見られる範囲と同じです。
 
 ## agent に作業させる
 

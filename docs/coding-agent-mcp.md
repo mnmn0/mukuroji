@@ -65,10 +65,33 @@ stdioで要求を待つため、正常起動時に通常の画面出力はあり
 | `MUKUROJI_MCP_AGENT_NAME` | 任意 | コメントに付ける表示名。既定 `coding-agent`、最大64文字 |
 | `MUKUROJI_MCP_READ_ONLY` | 任意 | `true` で読み取り6ツールのみ公開。既定 `false` |
 | `MUKUROJI_MCP_RUNTIME` | 任意 | Agent Runに記録するクライアント種別。`claude-code`、`codex`、`kiro`、`other`。既定 `other` |
+| `MUKUROJI_MCP_PROFILE` | 任意 | `tasks`（既定、この表の値を使う）か `workspace`（下の「Workspace profile」。URL と token だけを読む） |
 | `MUKUROJI_MCP_INSTANCE_ID` | 任意 | このエージェントインスタンスを区別する安定ID。最大256文字。未指定時はホスト名・OSユーザー名・runtime・担当者から導出したSHA-256だけを送ります。サーバーはさらにハッシュ化して保存し、元の値を返しません |
 
 同じメンバーが複数のエージェントを同時に使う場合も、`INSTANCE_ID` が異なれば別のインスタンスとして扱います。
 同じマシン・同じOSユーザーで同じruntimeを複数起動する場合は、プロセスごとに異なる `INSTANCE_ID` を指定してください。
+
+### Workspace profile
+
+`MUKUROJI_MCP_PROFILE=workspace` で起動すると、Team と担当者を固定しない読み取り専用のツールを公開します。
+Linear の MCP のように、Workspace の Team・Project・メンバー・Work Item を一覧し、`ABC-123` 形式の key で
+Work Item を読む用途向けです。必要な環境変数は `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけで、
+`MUKUROJI_MCP_TEAM_ID` などの tasks profile 用の値は読みません。既定の profile は `tasks` で、上の表のツールと設定は変わりません。
+Software factory が無効な環境でも使えます（Agent Run の API を呼びません）。
+
+| ツール | 用途 |
+| --- | --- |
+| `whoami` | credential 所有者のメンバー ID・名前・メール |
+| `list_teams` | 閲覧できる Team と、その中の閲覧できる Project（lifecycle state と charter の要約） |
+| `list_projects` | 閲覧できる Project を Team 付きで一覧。`teamId` で 1 Team に絞れる |
+| `list_users` | Project の active なメンバーと role。担当者を選ぶため。Project の member 以上の権限が要る |
+| `list_issue_statuses` | Team の Work Item Type ごとの workflow status（ID・名前・カテゴリー・初期 status） |
+| `list_issues` | Team の Work Item を Project・担当者（メンバー ID か `me`）・status・Type・更新時刻で絞ってページ取得 |
+| `get_issue` | key（`ABC-123`）だけ、または ID と `teamId` で Work Item を読む。key も返す |
+| `list_comments` | Work Item のコメントを新しい順にページ取得。key だけでも指せる |
+
+作成・更新のツール（`save_issue`、`save_comment` など）は #705 の続きで追加します。
+同じ MCP クライアントに tasks profile と並べて登録する場合は、サーバー名を分けます（例: `mukuroji` と `mukuroji-tasks`）。
 
 ### 自分用token
 

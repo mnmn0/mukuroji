@@ -46,6 +46,7 @@ import {
   type PublicImportSourceInput,
   type PublicAgentRunService,
   type PublicDocumentService,
+  type PublicDirectoryService,
   type PublicWorkItemService,
 } from './public-api'
 import { AgentRunError, createAgentRunConflictError, hashAgentInstanceId } from '../agent-runs'
@@ -236,6 +237,8 @@ function createTestRouter(input: {
   agentRuns?: PublicAgentRunService
   /** Document service used by Document route tests. */
   documents?: PublicDocumentService
+  /** Directory service used by Team, Project member, and key route tests. */
+  directory?: PublicDirectoryService
   connectorAuthorization?: ConnectorAuthorizationService
   /** Lists the providers configured in the test runtime. */
   listConfiguredConnectorProviders?: PublicApiDependencies['listConfiguredConnectorProviders']
@@ -267,6 +270,7 @@ function createTestRouter(input: {
     workItems: input.workItems ?? createDefaultWorkItemService(),
     ...(input.agentRuns ? { agentRuns: input.agentRuns } : {}),
     ...(input.documents ? { documents: input.documents } : {}),
+    ...(input.directory ? { directory: input.directory } : {}),
     openApiDocument: { openapi: '3.1.0' },
     cursorSecret: 'public-api-test-cursor-secret-at-least-32-bytes',
     createRequestId: () => 'request-public-api-test',
@@ -793,6 +797,83 @@ describe('public API router', () => {
     expect(response.status).toBe(503)
   })
 
+  test('reads the credential owner, Teams, Project members, and Work Item keys with the read scope', async () => {
+    const calls: string[] = []
+    const { platform, router } = createTestRouter({
+      directory: {
+        async getCredentialOwner(credential) {
+          calls.push(`me:${credential.subjectUserId}`)
+          return { schemaVersion: 1, workspaceId: credential.workspaceId, memberId: credential.subjectUserId, email: 'owner@example.com' }
+        },
+        async listTeams(_credential, locale) {
+          calls.push(`teams:${locale}`)
+          return {
+            schemaVersion: 1,
+            items: [{ id: 'team-1', name: 'Platform', projects: [{ id: 'project-1', name: 'WBS', lifecycleState: 'active', code: 'WBS' }] }],
+          }
+        },
+        async listProjectMembers(_credential, teamId, projectId) {
+          calls.push(`members:${teamId}/${projectId}`)
+          return { schemaVersion: 1, teamId, projectId, items: [{ id: 'member-1', email: 'member@example.com', role: 'member' }] }
+        },
+        async lookupWorkItemKey(_credential, key) {
+          calls.push(`key:${key}`)
+          if (key !== 'ABC-1') throw new PublicApiServiceError(404, 'not_found', 'No readable Work Item has this key.')
+          return { schemaVersion: 1, key, teamId: 'team-1', workItemId: 'work-item-1' }
+        },
+      },
+    })
+    const reader = await createApiKey(platform, ['work-items:read'])
+    const writer = await createApiKey(platform, ['work-items:write'])
+    const headers = { Authorization: `Bearer ${reader.secret}` }
+
+    const me = await router.request('http://localhost/v1/me', { headers })
+    const teams = await router.request('http://localhost/v1/teams?locale=en', { headers })
+    const badLocale = await router.request('http://localhost/v1/teams?locale=fr', { headers })
+    const members = await router.request('http://localhost/v1/projects/project-1/members?teamId=team-1', { headers })
+    const membersWithoutTeam = await router.request('http://localhost/v1/projects/project-1/members', { headers })
+    const key = await router.request('http://localhost/v1/work-item-keys/ABC-1', { headers })
+    const hiddenKey = await router.request('http://localhost/v1/work-item-keys/ABC-2', { headers })
+    const denied = await router.request('http://localhost/v1/teams', {
+      headers: { Authorization: `Bearer ${writer.secret}` },
+    })
+
+    expect(me.status).toBe(200)
+    expect(me.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await me.json()).toMatchObject({ schemaVersion: 1, workspaceId: 'workspace-1', email: 'owner@example.com' })
+    expect(teams.status).toBe(200)
+    expect(await teams.json()).toEqual({
+      schemaVersion: 1,
+      items: [{ id: 'team-1', name: 'Platform', projects: [{ id: 'project-1', name: 'WBS', lifecycleState: 'active', code: 'WBS' }] }],
+    })
+    expect(badLocale.status).toBe(400)
+    expect(members.status).toBe(200)
+    expect(members.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(await members.json()).toEqual({
+      schemaVersion: 1, teamId: 'team-1', projectId: 'project-1',
+      items: [{ id: 'member-1', email: 'member@example.com', role: 'member' }],
+    })
+    expect(membersWithoutTeam.status).toBe(400)
+    expect(key.status).toBe(200)
+    expect(await key.json()).toEqual({ schemaVersion: 1, key: 'ABC-1', teamId: 'team-1', workItemId: 'work-item-1' })
+    expect(hiddenKey.status).toBe(404)
+    expect(denied.status).toBe(403)
+    expect(calls.filter((call) => !call.startsWith('me:'))).toEqual([
+      'teams:en', 'members:team-1/project-1', 'key:ABC-1', 'key:ABC-2',
+    ])
+  })
+
+  test('reports directory routes as unavailable when no directory service is configured', async () => {
+    const { platform, router } = createTestRouter()
+    const reader = await createApiKey(platform, ['work-items:read'])
+
+    const response = await router.request('http://localhost/v1/teams', {
+      headers: { Authorization: `Bearer ${reader.secret}` },
+    })
+
+    expect(response.status).toBe(503)
+  })
+
   test('exposes the authorized Work Item Type creation schema', async () => {
     let requestedTeamId: string | undefined
     let requestedProjectId: string | undefined
@@ -1057,6 +1138,10 @@ describe('public API router', () => {
     expect(paths['/api/v1/work-items/{workItemId}/actual-dates']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/documents']).toHaveProperty('get')
     expect(paths['/api/v1/work-items/{workItemId}/documents/{documentId}']).toHaveProperty('get')
+    expect(paths['/api/v1/me']).toHaveProperty('get')
+    expect(paths['/api/v1/teams']).toHaveProperty('get')
+    expect(paths['/api/v1/projects/{projectId}/members']).toHaveProperty('get')
+    expect(paths['/api/v1/work-item-keys/{key}']).toHaveProperty('get')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('actualStartDate')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('actualEndDate')
     expect(components.schemas.WorkItem.properties).not.toHaveProperty('acceptanceCriteria')

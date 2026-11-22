@@ -31,6 +31,13 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   Document の閲覧権限は request ごとに credential 所有者の権限で評価します。
 - server API: `POST /api/v1/work-items` の `schedule` を省略できるようにし、`dueDate` を追加しました。`schedule` を
   省略すると server が Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の祝日）を付けます。
+- Workspace profile（`MUKUROJI_MCP_PROFILE=workspace`）を追加しました。`MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけで起動し、
+  Team を固定せずに `whoami`、`list_teams`、`list_projects`、`list_users`、`list_issue_statuses`、`list_issues`、
+  `get_issue`、`list_comments` の読み取りツールを公開します。`get_issue` と `list_comments` は `ABC-123` 形式の key だけで
+  Work Item を指せます。既定の profile（`tasks`）のツールと設定は変わりません。
+- server API: `GET /api/v1/me`、`GET /api/v1/teams`、`GET /api/v1/projects/{projectId}/members`、
+  `GET /api/v1/work-item-keys/{key}` を追加しました。scope は `work-items:read` で、request ごとに credential 所有者の
+  現在の権限で評価します。読めない Work Item の key は、存在しない key と同じ 404 です。
 
 ### Changed
 
@@ -39,6 +46,8 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 - `create_task` が `schedule` を送らず、Workspace の稼働カレンダーで Work Item を作るようにしました。
   MCP API revision を 3 に上げ、server は revision 1〜3 を受け付けます。revision 2 以前の server に接続した新しい MCP は
   server が古いと警告し、`create_task` は失敗します。
+- MCP API revision を 4 に上げました。server は revision 1〜4 を受け付けます。revision 3 以前の server に接続した新しい MCP は
+  server が古いと警告し、Workspace profile のツールは使えません。
 
 ## [1.0.0]
 

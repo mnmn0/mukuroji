@@ -48,6 +48,16 @@ Credential の scope は作成後に変更しない。権限を変える場合�
 
 `GET /api/v1/work-items/{workItemId}/key?teamId={teamId}` は Work Item の `ABC-123` 形式の `key` を `{ schemaVersion, teamId, workItemId, createdAt, key }` で返します。`createdAt` は Work Item の作成時刻で、削除後に同じ ID で作り直された Work Item とを区別するのに使えます。key は Workspace 内で一意で、作成後は変わりません。key を持つ前に作られた Work Item では `key` を省きます。権限は `GET /api/v1/work-items/{workItemId}` と同じで、`work-items:read` scope が要ります。既存の `WorkItem` は closed schema なので `key` を含めません。操作の path には従来どおり `id` を使います。Work Item の `title` は 1〜256 文字（Unicode code point）で、超えると `400 validation_failed` を返します。
 
+`GET /api/v1/work-item-keys/{key}` は `ABC-123` 形式の key から `{ schemaVersion, key, teamId, workItemId }` を返します。小文字の key も受け付け、`key` は大文字に正規化した値です。key ではない文字列、使われていない key、削除された Work Item、credential 所有者が読めない Work Item は、どれも同じ `404 not_found` です。Web の `GET /api/work-items/keys/{key}` と同じ判定で、`work-items:read` scope が要ります。
+
+## 参照用の directory
+
+API キーだけで、接続先の Team・Project・メンバーを調べられます。どれも `work-items:read` scope で、request ごとに credential 所有者の現在の権限で評価します。
+
+- `GET /api/v1/me` は credential 所有者を `{ schemaVersion, workspaceId, memberId, name?, email }` で返します。`memberId` は Work Item の `assigneeUserId` に使う値です。
+- `GET /api/v1/teams?locale=ja|en` は、所有者が閲覧できる Project と、その Project を持つ Team（Enterprise RBAC で Team を直接与えられた場合はその Team も）を Web の Project directory と同じ規則で返します。Project には `lifecycleState` と charter の要約（`code`、責任者の `ownerMemberId`、`plannedStartDate`、`plannedEndDate`）を含めます。
+- `GET /api/v1/projects/{projectId}/members?teamId={teamId}` は Project の active なメンバーと Project 内の role を返します。Web の担当者選択と同じく、所有者にその Project の member 以上の権限が要ります。Workspace から外れたメンバーは含めません。
+
 ## Work Item の作成と稼働カレンダー
 
 `POST /api/v1/work-items` の `schedule` は省略できます。省略すると server が Workspace の稼働カレンダー（稼働曜日・会社の休日・

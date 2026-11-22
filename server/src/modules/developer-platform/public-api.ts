@@ -13,6 +13,10 @@ import {
   type PublicWorkItemKey,
   type PublicWorkItemHierarchy,
   type PublicDocumentContent,
+  type PublicCredentialOwner,
+  type PublicProjectMemberList,
+  type PublicTeamList,
+  type PublicWorkItemKeyLookup,
   type PublicWorkItemDocument,
   PUBLIC_WORK_ITEM_DOCUMENT_PAGE_MAX_LIMIT,
   type ApiProblem,
@@ -469,6 +473,46 @@ export type PublicAgentRunListFilters = {
  * Read-only access to Documents linked to Work Items, for coding agents. Every read evaluates the
  * credential owner's current Work Item, Project, and Document permissions.
  */
+/**
+ * Read-only directory port for the credential owner, Teams, Projects, Project members, and Work
+ * Item keys. Every call evaluates the credential owner's current permissions.
+ */
+export interface PublicDirectoryService {
+  /**
+   * Reads the credential owner.
+   * @param credential - Authenticated developer credential.
+   * @returns The owner's Workspace, member ID, name, and email.
+   */
+  getCredentialOwner(credential: AuthenticatedDeveloperCredential): Promise<PublicCredentialOwner>
+  /**
+   * Lists the Teams and the Projects in them that the credential owner can view.
+   * @param credential - Authenticated developer credential.
+   * @param locale - Locale of the Team and Project names.
+   * @returns Readable Teams in directory order.
+   */
+  listTeams(credential: AuthenticatedDeveloperCredential, locale: 'ja' | 'en'): Promise<PublicTeamList>
+  /**
+   * Lists the active members of a Project, when the owner has member access to it.
+   * @param credential - Authenticated developer credential.
+   * @param teamId - Team that owns the Project.
+   * @param projectId - Project ID.
+   * @returns Active Project members with their roles.
+   */
+  listProjectMembers(
+    credential: AuthenticatedDeveloperCredential,
+    teamId: string,
+    projectId: string,
+  ): Promise<PublicProjectMemberList>
+  /**
+   * Resolves a Work Item key to the Work Item it names; answers 404 alike for every key that names
+   * no Work Item the owner can read.
+   * @param credential - Authenticated developer credential.
+   * @param key - Key text such as `ABC-123`.
+   * @returns The key's Team and Work Item.
+   */
+  lookupWorkItemKey(credential: AuthenticatedDeveloperCredential, key: string): Promise<PublicWorkItemKeyLookup>
+}
+
 export interface PublicDocumentService {
   /**
    * Lists one page of Documents linked to a Work Item that the credential owner can view.
@@ -838,6 +882,8 @@ export type PublicApiDependencies = {
   agentRuns?: PublicAgentRunService
   /** Read-only Document adapter; Document routes report unavailable when it is not configured. */
   documents?: PublicDocumentService
+  /** Read-only directory adapter; directory routes report unavailable when it is not configured. */
+  directory?: PublicDirectoryService
   /** Public OpenAPI 3.1 document です。 */
   openApiDocument: Record<string, unknown>
   /** Scope-bound cursor を署名する secret です。 */
@@ -1082,6 +1128,39 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
       expires_in: token.expiresIn,
       scope: token.scopes.join(' '),
     })
+  })
+
+  router.get('/v1/me', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(await requireDirectoryService(dependencies).getCredentialOwner(credential))
+  })
+
+  router.get('/v1/teams', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    const locale = c.req.query('locale')
+    if (locale !== undefined && locale !== 'ja' && locale !== 'en') {
+      throw new PublicApiServiceError(400, 'invalid_request', 'locale must be ja or en.')
+    }
+    return c.json(await requireDirectoryService(dependencies).listTeams(credential, locale ?? 'ja'))
+  })
+
+  router.get('/v1/projects/:projectId/members', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    c.header('Cache-Control', 'private, no-store')
+    return c.json(await requireDirectoryService(dependencies).listProjectMembers(
+      credential,
+      readRequiredQuery(c.req.query('teamId'), 'teamId'),
+      readRouteId(c.req.param('projectId'), 'Project ID'),
+    ))
+  })
+
+  router.get('/v1/work-item-keys/:key', async (c) => {
+    const credential = await authenticatePublicRequest(c, dependencies, ['work-items:read'])
+    return c.json(await requireDirectoryService(dependencies).lookupWorkItemKey(
+      credential,
+      readRouteId(c.req.param('key'), 'Work Item key'),
+    ))
   })
 
   router.get('/v1/work-items', async (c) => {
@@ -5067,6 +5146,19 @@ function requireStoredResponse(value: unknown) {
     )
   }
   return response as { status: 200 | 201 | 202 | 204; body: unknown }
+}
+
+/**
+ * Returns the configured directory service or reports that the directory is unavailable.
+ *
+ * @param dependencies - Router dependencies.
+ * @returns Directory service.
+ */
+function requireDirectoryService(dependencies: PublicApiDependencies): PublicDirectoryService {
+  if (!dependencies.directory) {
+    throw new PublicApiServiceError(503, 'temporarily_unavailable', 'The directory is not configured.', true)
+  }
+  return dependencies.directory
 }
 
 /**

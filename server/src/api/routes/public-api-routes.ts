@@ -179,6 +179,7 @@ import {
   requireAssignedProjectAcceptsNewWorkItems,
 } from '../shared/work-item-access'
 import { createCanonicalPublicDocumentService } from '../shared/public-document-access'
+import { createCanonicalPublicDirectoryService } from '../shared/public-directory-access'
 import { readTeamWorkItemHierarchy, readWorkItemHierarchyLinks } from '../shared/work-item-hierarchy'
 import { readAcceptanceCriteriaChange } from '../shared/work-item-acceptance-criteria'
 import {
@@ -3337,6 +3338,7 @@ export function registerPublicApiRoutes(routeApp: Hono): void {
       workItems: createForwardingClient(() => developerPlatformDependencies.publicWorkItems),
       agentRuns: createForwardingClient(() => developerPlatformDependencies.publicAgentRuns),
       documents: createCanonicalPublicDocumentService(),
+      directory: createCanonicalPublicDirectoryService(),
       openApiDocument: PUBLIC_API_OPENAPI_DOCUMENT,
       get cursorSecret() {
         return getPublicApiCursorSecret()
