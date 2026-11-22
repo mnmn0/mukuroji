@@ -50,6 +50,7 @@ import {
   updateAnalyticsReport,
 } from '../../analytics/api'
 import {
+  useAnalyticsDeliveries,
   useAnalyticsQuery,
   useAnalyticsReports,
 } from '../../analytics/queries/useAnalyticsQueries'
@@ -195,6 +196,11 @@ export function ReportsPage() {
     key: reportsKey,
   } = useAnalyticsReports(accessToken, Boolean(user && !currentUserError))
   const reports = reportResponse?.reports ?? emptyReports
+  // A failed delivery read only hides the list; the reports stay usable.
+  const { data: deliveryResponse } = useAnalyticsDeliveries(
+    accessToken,
+    Boolean(user && !currentUserError),
+  )
   const searchParamString = searchParams.toString()
   const parsedRouteState = useMemo<AnalyticsRouteState | null | undefined>(() => {
     if (searchParamString.length === 0) return undefined
@@ -840,6 +846,22 @@ export function ReportsPage() {
           locale={locale}
           noticeMessage={noticeMessage}
           reports={reports}
+          {...(deliveryResponse ? { deliveries: deliveryResponse.deliveries } : {})}
+          onOpenDelivery={(delivery) => {
+            const report = reports.find((item) => item.id === delivery.reportId)
+            if (!report) return
+            setHasStartedAdHoc(false)
+            commitRouteState({
+              asOf: undefined,
+              builder: false,
+              filter: report.filter,
+              forecastBaseline: report.forecastBaseline,
+              forecastWeighting: report.forecastWeighting,
+              reportId: report.id,
+              snapshotId: delivery.snapshotId,
+              timezone: report.timeZone,
+            }, false)
+          }}
           selectedReportId={selectedReport?.id}
           selectedSnapshotId={routeState.snapshotId}
           snapshot={snapshot}

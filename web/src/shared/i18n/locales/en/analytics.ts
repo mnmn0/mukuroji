@@ -140,6 +140,8 @@ export const analyticsMessages = {
   'analytics.group.milestone': 'Milestone',
   'analytics.group.customField': 'Custom field',
   'analytics.group.unset': 'Unassigned',
+  'analytics.deliveries.label': 'Delivered to me',
+  'analytics.deliveries.choose': 'Open a delivery',
   'analytics.size.small': 'Small',
   'analytics.size.medium': 'Medium',
   'analytics.size.large': 'Large',

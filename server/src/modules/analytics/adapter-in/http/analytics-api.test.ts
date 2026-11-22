@@ -282,6 +282,55 @@ test('bounds shared Analytics page reads for paginated canonical events', async 
   expect(auditReads).toBe(500)
 })
 
+test('lists the caller\'s deliveries only for reports the caller can read now', async () => {
+  const repository = new InMemoryAnalyticsRepository()
+  await repository.createReport('user#demo@example.com', 'owner@example.com', {
+    id: 'team-report',
+    name: 'Team report',
+    visibility: 'team',
+    teamId: 'core-team',
+    timeZone: 'UTC',
+    filter: createAnalyticsQueryInput().filter,
+    widgets: createAnalyticsQueryInput().widgets,
+  })
+  const delivery = (reportId: string, deliveredAt: string, recipientMemberKey = 'demo@example.com') => ({
+    workspaceId: 'user#demo@example.com',
+    recipientMemberKey,
+    reportId,
+    snapshotId: `snapshot-${reportId}`,
+    format: 'pdf' as const,
+    deliveredAt,
+  })
+  await repository.putRecipientDelivery(delivery('team-report', '2026-07-13T00:00:00.000Z'))
+  await repository.putRecipientDelivery(delivery('deleted-report', '2026-07-14T00:00:00.000Z'))
+  await repository.putRecipientDelivery(delivery('team-report', '2026-07-15T00:00:00.000Z', 'kato@example.com'))
+  setTestAppDependencies({ analytics: repository })
+  const listDeliveries = async (query = '') => {
+    const response = await app.request(`/api/analytics/deliveries${query}`, {
+      headers: { Authorization: 'Bearer test-token' },
+    })
+    return { status: response.status, body: await response.json() }
+  }
+
+  configureFakeProjectClients(false, { workspaceRole: 'member' })
+  expect(await listDeliveries()).toEqual({ status: 200, body: { deliveries: [] } })
+
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  expect(await listDeliveries()).toEqual({
+    status: 200,
+    body: {
+      deliveries: [{
+        reportId: 'team-report',
+        reportName: 'Team report',
+        snapshotId: 'snapshot-team-report',
+        format: 'pdf',
+        deliveredAt: '2026-07-13T00:00:00.000Z',
+      }],
+    },
+  })
+  expect((await listDeliveries('?limit=0')).status).toBe(400)
+})
+
 test('requires authentication and enforces Team report viewer/manager ACLs', async () => {
   const unauthenticated = await app.request('/api/analytics/query', {
     method: 'POST',

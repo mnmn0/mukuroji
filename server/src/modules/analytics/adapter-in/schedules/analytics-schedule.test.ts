@@ -1355,6 +1355,19 @@ test('retries a failed notification for the committed snapshot without re-render
   expect(renders).toBe(1)
   expect(notifications).toHaveLength(1)
   expect(notifications[0]?.snapshotId).toBe(receipt?.snapshotId)
+  // The recipient's delivery list holds the committed snapshot once, though it was written twice.
+  expect((await repository.listRecipientDeliveries(
+    report.workspaceId,
+    'recipient@example.com',
+    10,
+  )).deliveries).toEqual([{
+    workspaceId: report.workspaceId,
+    recipientMemberKey: 'recipient@example.com',
+    reportId: report.id,
+    snapshotId: receipt?.snapshotId ?? '',
+    format: report.schedule?.format ?? 'pdf',
+    deliveredAt: SCHEDULED_FOR,
+  }])
   expect((await repository.getReport(report.workspaceId, report.id))?.schedule?.nextRunAt)
     .not.toBe(SCHEDULED_FOR)
 })

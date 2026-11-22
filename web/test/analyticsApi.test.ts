@@ -6,6 +6,7 @@ import {
   createAnalyticsExportInput,
   deleteAnalyticsReport,
   exportAnalytics,
+  getAnalyticsDeliveries,
   getAnalyticsEvidence,
   getAnalyticsReports,
   getAnalyticsSnapshots,
@@ -325,6 +326,35 @@ describe('Analytics API', () => {
       locale: 'en',
       snapshotId: 'snapshot-1',
     })
+  })
+})
+
+describe('Analytics deliveries API', () => {
+  test('reads the caller\'s deliveries and leaves out malformed entries', async () => {
+    const requests = installFetchRecorder(() => ({
+      deliveries: [
+        {
+          reportId: 'weekly',
+          reportName: 'Weekly delivery',
+          snapshotId: 'snapshot-1',
+          format: 'pdf',
+          deliveredAt: '2026-07-13T00:00:00.000Z',
+        },
+        { reportId: 'broken' },
+      ],
+      nextCursor: 'next-page',
+    }))
+    expect(await getAnalyticsDeliveries('token-1', 'cursor-1')).toEqual({
+      deliveries: [{
+        reportId: 'weekly',
+        reportName: 'Weekly delivery',
+        snapshotId: 'snapshot-1',
+        format: 'pdf',
+        deliveredAt: '2026-07-13T00:00:00.000Z',
+      }],
+      nextCursor: 'next-page',
+    })
+    expect(requests[0]?.url).toContain('/analytics/deliveries?limit=20&cursor=cursor-1')
   })
 })
 

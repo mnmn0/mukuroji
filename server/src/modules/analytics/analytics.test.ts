@@ -2614,6 +2614,55 @@ describe('Analytics repository', () => {
     })).rejects.toMatchObject({ code: 'AnalyticsDeliveryConflict' })
   })
 
+  test('lists a recipient\'s deliveries newest first and binds the cursor to the recipient', async () => {
+    const fake = createDynamoDocumentClient()
+    for (const repository of [
+      new InMemoryAnalyticsRepository(),
+      new DynamoDbAnalyticsRepository('analytics-table', fake.client),
+    ]) {
+      const delivery = (reportId: string, deliveredAt: string, recipientMemberKey = 'sato@example.com') => ({
+        workspaceId: 'workspace-1',
+        recipientMemberKey,
+        reportId,
+        snapshotId: `snapshot-${reportId}-${deliveredAt}`,
+        format: 'pdf' as const,
+        deliveredAt,
+      })
+      await repository.putRecipientDelivery(delivery('weekly', '2026-01-05T00:00:00.000Z'))
+      await repository.putRecipientDelivery(delivery('weekly', '2026-01-12T00:00:00.000Z'))
+      // A retry writes the same row again.
+      await repository.putRecipientDelivery(delivery('weekly', '2026-01-12T00:00:00.000Z'))
+      await repository.putRecipientDelivery(delivery('monthly', '2026-01-01T00:00:00.000Z'))
+      await repository.putRecipientDelivery(delivery('weekly', '2026-01-12T00:00:00.000Z', 'kato@example.com'))
+
+      const first = await repository.listRecipientDeliveries('workspace-1', 'sato@example.com', 2)
+      expect(first.deliveries.map((item) => item.deliveredAt)).toEqual([
+        '2026-01-12T00:00:00.000Z',
+        '2026-01-05T00:00:00.000Z',
+      ])
+      expect(first.nextCursor).toBeString()
+      const second = await repository.listRecipientDeliveries(
+        'workspace-1',
+        'sato@example.com',
+        2,
+        first.nextCursor,
+      )
+      expect(second.deliveries).toEqual([delivery('monthly', '2026-01-01T00:00:00.000Z')])
+      expect(second.nextCursor).toBeUndefined()
+      expect((await repository.listRecipientDeliveries('workspace-1', 'kato@example.com', 10)).deliveries)
+        .toHaveLength(1)
+      // Another member cannot continue the recipient's list with its cursor.
+      await expect(repository.listRecipientDeliveries(
+        'workspace-1',
+        'kato@example.com',
+        2,
+        first.nextCursor,
+      )).rejects.toMatchObject({ code: 'AnalyticsCursorInvalid' })
+    }
+    // The member key never appears in the record key.
+    expect([...fake.rows.values()].every((row) => !String(row.recordKey).includes('@'))).toBeTrue()
+  })
+
   test('continues due pages by key when processed reports leave the due set', async () => {
     const repository = new InMemoryAnalyticsRepository(
       () => new Date('2026-01-08T00:00:00.000Z'),

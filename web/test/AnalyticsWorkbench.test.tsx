@@ -35,6 +35,26 @@ describe('AnalyticsWorkbench', () => {
     ).toEqual(['urgent', 'blocked'])
   })
 
+  test('lists the deliveries to the user and marks the open one', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        deliveries={[{
+          reportId: 'weekly',
+          reportName: 'Weekly delivery',
+          snapshotId: 'snapshot-1',
+          format: 'pdf',
+          deliveredAt: '2026-07-13T00:00:00.000Z',
+        }]}
+        selectedReportId="weekly"
+        selectedSnapshotId="snapshot-1"
+      />,
+    )
+    expect(html).toContain('Delivered to me')
+    expect(html).toMatch(/<option value="snapshot-1" selected="">Weekly delivery · /u)
+    expect(renderToStaticMarkup(<AnalyticsWorkbench {...baseProps} />)).not.toContain('Delivered to me')
+  })
+
   test('enables the period presets only once the Workspace calendar settings are loaded', () => {
     const withoutSettings = renderToStaticMarkup(
       <AnalyticsWorkbench {...baseProps} onFilterChange={() => undefined} />,

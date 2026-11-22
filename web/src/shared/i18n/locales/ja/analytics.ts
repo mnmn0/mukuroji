@@ -140,6 +140,8 @@ export const analyticsMessages = {
   'analytics.group.milestone': 'Milestone',
   'analytics.group.customField': 'カスタムフィールド',
   'analytics.group.unset': '未設定',
+  'analytics.deliveries.label': '自分への配信',
+  'analytics.deliveries.choose': '配信を選んで開く',
   'analytics.size.small': '小',
   'analytics.size.medium': '中',
   'analytics.size.large': '大',

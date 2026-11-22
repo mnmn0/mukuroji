@@ -1,6 +1,7 @@
 import { ResponsiveDisclosure } from '../../shared/ui/ResponsiveDisclosure'
 import type {
   AnalyticsCustomFieldFilter,
+  AnalyticsDelivery,
   AnalyticsDateRange,
   AnalyticsEvidenceInput,
   AnalyticsEvidenceItem,
@@ -80,6 +81,10 @@ export type AnalyticsWorkbenchProps = {
    * 現在 user が参照できる saved report です。
    */
   reports: AnalyticsReport[]
+  /** Recent scheduled deliveries to the current user, newest first. */
+  deliveries?: readonly AnalyticsDelivery[]
+  /** Opens the snapshot of a delivery to the current user. */
+  onOpenDelivery?: (delivery: AnalyticsDelivery) => void
   /**
    * URL で選択された report ID です。
    */
@@ -278,6 +283,8 @@ export type AnalyticsWorkbenchProps = {
 
 /** Stable empty member list, so the default does not change the group label lookup each render. */
 const emptyMembers: readonly AnalyticsMemberOption[] = []
+/** Stable empty delivery list for the default prop. */
+const emptyDeliveries: readonly AnalyticsDelivery[] = []
 
 /** Stable empty custom field list for the default prop value. */
 const emptyCustomFields: readonly AnalyticsCustomFieldOption[] = []
@@ -420,6 +427,8 @@ const widgetTypeLabelKeys: Record<AnalyticsWidget['type'], MessageKey> = {
 export function AnalyticsWorkbench({
   locale,
   reports,
+  deliveries = emptyDeliveries,
+  onOpenDelivery,
   selectedReportId,
   filter,
   calendarSettings,
@@ -590,6 +599,31 @@ export function AnalyticsWorkbench({
               ))}
             </select>
           </label>
+          {deliveries.length > 0 ? (
+            <label className="grid min-w-[260px] gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
+              {t('analytics.deliveries.label')}
+              <select
+                className="workbench-input min-h-11 px-3 normal-case tracking-normal"
+                data-testid="analytics-delivery-selector"
+                value={deliveries.find((delivery) =>
+                  delivery.reportId === selectedReportId && delivery.snapshotId === selectedSnapshotId
+                )?.snapshotId ?? ''}
+                onChange={(event) => {
+                  const delivery = deliveries.find((item) => item.snapshotId === event.target.value)
+                  if (delivery) onOpenDelivery?.(delivery)
+                }}
+              >
+                <option value="">{t('analytics.deliveries.choose')}</option>
+                {deliveries.map((delivery) => (
+                  <option key={delivery.snapshotId} value={delivery.snapshotId}>
+                    {delivery.reportName}
+                    {' · '}
+                    {formatDateTime(delivery.deliveredAt, locale, timeZone)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
         </div>
 
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
