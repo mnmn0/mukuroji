@@ -1,8 +1,10 @@
+import { TASK_VIEW_GANTT_SCALES, type TaskViewGanttScale } from '@mukuroji/contracts'
+
 /** Timeline scales the Gantt chart offers. `auto` fits the planning horizon into bounded columns. */
-export const taskGanttScales = ['auto', 'day', 'week', 'month', 'quarter'] as const
+export const taskGanttScales = TASK_VIEW_GANTT_SCALES
 
 /** One Gantt timeline scale. */
-export type TaskGanttScale = typeof taskGanttScales[number]
+export type TaskGanttScale = TaskViewGanttScale
 
 /** Scales that always align their columns to calendar units. */
 type TaskGanttCalendarScale = Exclude<TaskGanttScale, 'auto'>
