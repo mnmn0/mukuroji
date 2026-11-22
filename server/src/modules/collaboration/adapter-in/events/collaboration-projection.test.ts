@@ -747,6 +747,21 @@ describe('collaboration projection pure helpers', () => {
       { ...preferences, slackEnabledAt: undefined })
     expect(state.deliveryChannels).toEqual(['inApp'])
   })
+  test('keeps a weekly report reminder\'s author and week on the row for the Slack and Email recheck', () => {
+    const candidate = { memberKey: 'member@example.com', reasons: ['weekly-report'] }
+    const preferences = { ...DEFAULT_NOTIFICATION_PREFERENCES,
+      channels: { inApp: true, email: false, push: false, slack: true }, slackEnabledAt: '2026-07-12T12:00:00.000Z' }
+    const event = createProjectionEvent({
+      occurredAt: '2026-07-12T12:00:00.000Z',
+      weeklyReportAuthorMemberKey: 'member@example.com',
+      weeklyReportWeekStart: '2026-07-06',
+    })
+    const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', event.occurredAt, preferences)
+    expect(createNotificationProjectionItem(event, candidate, state)).toMatchObject({
+      weeklyReportAuthorMemberKey: 'member@example.com',
+      weeklyReportWeekStart: '2026-07-06',
+    })
+  })
   test('queues Email only when the deployment configured a sender and the event is inside the opt-in period', () => {
     const previous = process.env.NOTIFICATION_EMAIL_SENDER
     const candidate = { memberKey: 'member@example.com', reasons: ['mention'] }
