@@ -1974,6 +1974,7 @@ test('filters task views by surface and scope and binds cursors to that context'
     projectIds: new Set(['project-1', 'project-2']),
     writableProjectIds: new Set(['project-1', 'project-2']),
     projectScopeKeys: new Set(['core\0project-1', 'core\0project-2']),
+    manageableProjectScopeKeys: new Set(['core\0project-1']),
     writableProjectScopeKeys: new Set(['core\0project-1', 'core\0project-2']),
   }
   const createProjectView = (projectId: string, name: string, idempotencyKey: string) =>
@@ -2037,7 +2038,8 @@ test('filters task views by surface and scope and binds cursors to that context'
   expect(projectPage.capabilities).toEqual({
     canWrite: true,
     canManageSharedViews: false,
-    canSetTeamDefault: true,
+    canSetTeamDefault: false,
+    canSetProjectDefault: true,
     writableTeamIds: ['core'],
     writableProjectScopes: [{ teamId: 'core', projectId: 'project-1' }],
   })
@@ -2090,6 +2092,7 @@ test('reports mutation capabilities only for the exact task view list scope', as
       'secondary\0project-b',
       'read-only\0project-read-only',
     ]),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set([
       'writable\0project-a',
       'secondary\0project-b',
@@ -2148,6 +2151,7 @@ test('reports mutation capabilities only for the exact task view list scope', as
     canWrite: false,
     canManageSharedViews: false,
     canSetTeamDefault: false,
+    canSetProjectDefault: false,
     writableTeamIds: [],
     writableProjectScopes: [],
   })
@@ -2155,6 +2159,7 @@ test('reports mutation capabilities only for the exact task view list scope', as
     canWrite: true,
     canManageSharedViews: true,
     canSetTeamDefault: true,
+    canSetProjectDefault: false,
     writableTeamIds: ['writable'],
     writableProjectScopes: [{ teamId: 'writable', projectId: 'project-a' }],
   })
@@ -2162,6 +2167,7 @@ test('reports mutation capabilities only for the exact task view list scope', as
     canWrite: false,
     canManageSharedViews: false,
     canSetTeamDefault: false,
+    canSetProjectDefault: false,
     writableTeamIds: [],
     writableProjectScopes: [{
       teamId: 'read-only',
@@ -2172,6 +2178,7 @@ test('reports mutation capabilities only for the exact task view list scope', as
     canWrite: true,
     canManageSharedViews: true,
     canSetTeamDefault: false,
+    canSetProjectDefault: false,
     writableTeamIds: ['secondary', 'writable'],
     writableProjectScopes: [
       { teamId: 'read-only', projectId: 'project-read-only' },
@@ -2183,6 +2190,7 @@ test('reports mutation capabilities only for the exact task view list scope', as
     canWrite: false,
     canManageSharedViews: false,
     canSetTeamDefault: false,
+    canSetProjectDefault: false,
     writableTeamIds: ['secondary', 'writable'],
     writableProjectScopes: [
       { teamId: 'read-only', projectId: 'project-read-only' },
@@ -2194,6 +2202,7 @@ test('reports mutation capabilities only for the exact task view list scope', as
     canWrite: true,
     canManageSharedViews: true,
     canSetTeamDefault: false,
+    canSetProjectDefault: false,
     writableTeamIds: [],
     writableProjectScopes: [{
       teamId: 'read-only',
@@ -2204,6 +2213,7 @@ test('reports mutation capabilities only for the exact task view list scope', as
     canWrite: false,
     canManageSharedViews: false,
     canSetTeamDefault: false,
+    canSetProjectDefault: false,
     writableTeamIds: ['writable'],
     writableProjectScopes: [{ teamId: 'writable', projectId: 'project-a' }],
   })
@@ -2229,6 +2239,7 @@ test('keeps Project scope authorization Team-qualified and rejects mismatched Te
     projectIds: new Set(['duplicate-project']),
     writableProjectIds: new Set(['duplicate-project']),
     projectScopeKeys: new Set(['team-a\0duplicate-project']),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set(['team-a\0duplicate-project']),
   }
   const layout = {
@@ -2281,6 +2292,7 @@ test('keeps Project scope authorization Team-qualified and rejects mismatched Te
       projectIds: new Set<string>(),
       writableProjectIds: new Set<string>(),
       projectScopeKeys: new Set<string>(),
+      manageableProjectScopeKeys: new Set<string>(),
       writableProjectScopeKeys: new Set<string>(),
     },
     input: {
@@ -2329,6 +2341,7 @@ test('binds every task view mutation to its authoritative writable resource scop
     projectIds: new Set(['project-a', 'project-b']),
     writableProjectIds: new Set(['project-a', 'project-b']),
     projectScopeKeys: new Set(['team-a\0project-a', 'team-b\0project-b']),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set(['team-a\0project-a', 'team-b\0project-b']),
   }
   const projectBView = await client.createTaskView({
@@ -2344,6 +2357,7 @@ test('binds every task view mutation to its authoritative writable resource scop
     ...broadAccess,
     writableTeamIds: new Set<string>(),
     writableProjectIds: new Set(['project-a']),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set(['team-a\0project-a']),
   }
 
@@ -2438,6 +2452,7 @@ test('reads personal Focus views and rejects Triage until its queue ownership is
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   await expect(client.createTaskView({
@@ -2523,6 +2538,7 @@ test('reads a view saved with a retired list or timeline layout as a table', asy
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const created = await client.createTaskView({
@@ -2576,6 +2592,7 @@ test('keeps Gantt display options in a saved view and rejects an unknown Gantt s
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   /**
@@ -2650,6 +2667,7 @@ test('resolves personal defaults before Team defaults and falls back after clear
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const definition = {
@@ -2710,6 +2728,7 @@ test('resolves personal defaults before Team defaults and falls back after clear
       isDefault: true,
       isPersonalDefault: true,
       isTeamDefault: false,
+      isProjectDefault: false,
       defaultSource: 'personal',
     })
   expect(withPersonal.views.find((view) => view.id === teamDefault.id)?.preference)
@@ -2742,6 +2761,7 @@ test('resolves personal defaults before Team defaults and falls back after clear
       isDefault: true,
       isPersonalDefault: true,
       isTeamDefault: true,
+      isProjectDefault: false,
       defaultSource: 'personal',
     },
   })
@@ -2783,6 +2803,7 @@ test('resolves personal defaults before Team defaults and falls back after clear
       isDefault: false,
       isPersonalDefault: false,
       isTeamDefault: false,
+      isProjectDefault: false,
     },
   })
 })
@@ -2807,6 +2828,7 @@ test('invalidates a Team default when its target stops being a Team-visible view
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const created = await client.createTaskView({
@@ -2875,6 +2897,7 @@ test('does not resurrect a personal default after its view leaves and returns to
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const layout = {
@@ -2952,6 +2975,7 @@ test('keeps a recreated default marker when stale cleanup observes an older gene
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const layout = {
@@ -3077,6 +3101,7 @@ test('duplicates a sanitized task view into an independent idempotent lifecycle'
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
     activeCustomFieldIds: new Set(['kept']),
     readableCustomFieldIds: new Set(['kept']),
@@ -3164,6 +3189,7 @@ test('sanitizes deleted and permission-restricted task view references with stab
     projectIds: new Set(['project-1']),
     writableProjectIds: new Set(['project-1']),
     projectScopeKeys: new Set(['core\0project-1']),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set(['core\0project-1']),
     activeCustomFieldIds: new Set(['kept', 'private']),
     activeWorkItemTypeIds: new Set([createSearchWorkItemTypeKey('core', 'bug')]),
@@ -3395,6 +3421,7 @@ function createQualifiedStatusTaskViewAccess(): TaskViewAccessScope {
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
     activeWorkflowStatusIds: new Set(['core\0bug\0todo']),
   }
@@ -3448,6 +3475,7 @@ test('retains a currently authorized relation target with no source edge and red
     projectIds: new Set(['project-1']),
     writableProjectIds: new Set(['project-1']),
     projectScopeKeys: new Set(['core\0project-1']),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set(['core\0project-1']),
     async resolveReadableRelationIds(input: {
       relationIds: readonly string[]
@@ -3536,6 +3564,7 @@ test('retains a duplicate Project ID when the task view scope safely qualifies i
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set(['team-a\0roadmap']),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set(['team-a\0roadmap']),
   }
 
@@ -3585,6 +3614,7 @@ test('rejects a normalized task view definition that exceeds the DynamoDB item b
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
     activeCustomFieldIds: new Set(fieldIds),
     readableCustomFieldIds: new Set(fieldIds),
@@ -3639,6 +3669,7 @@ test('replays task view updates without reverting newer preference, default, or 
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const definition = {
@@ -3804,6 +3835,7 @@ test('replays a same-key concurrent task view update after the receipt wins its 
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const created = await client.createTaskView({
@@ -3891,6 +3923,7 @@ test('replays task view deletion from a durable actor-bound receipt', async () =
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const definition = {
@@ -3971,6 +4004,7 @@ test('keeps a committed task view deletion successful when preference cleanup is
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const created = await client.createTaskView({
@@ -4029,6 +4063,7 @@ test('rejects task view updates when a concurrent delete removes the live row', 
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   /** Creates one personal task view used as a target for the concurrent-delete race. */
@@ -4119,6 +4154,7 @@ test('returns a stable conflict when deletion commits between create replay read
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const createRequest: CreateTaskViewRequest = {
@@ -4207,6 +4243,7 @@ test('prevents idempotent recreation from reviving another viewer preference lif
     projectIds: new Set<string>(),
     writableProjectIds: new Set<string>(),
     projectScopeKeys: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
   const createRequest = {
@@ -4321,6 +4358,7 @@ test('prevents idempotent recreation from reviving another viewer preference lif
       canWrite: false,
       canManageSharedViews: false,
       canSetTeamDefault: false,
+      canSetProjectDefault: false,
       writableTeamIds: [],
       writableProjectScopes: [],
     },
@@ -5046,3 +5084,236 @@ test('rejects a title phase cursor for a query without a keyword', async () => {
 function isTestRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
+
+test('saves cross-Project work-items views and narrows shared filters to each viewer', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const ownerAccess = {
+    viewerUserId: 'pm@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: true,
+    canWrite: true,
+    teamIds: new Set(['team-a', 'team-b']),
+    writableTeamIds: new Set(['team-a', 'team-b']),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set(['alpha', 'beta']),
+    writableProjectIds: new Set(['alpha', 'beta']),
+    projectScopeKeys: new Set(['team-a\0alpha', 'team-b\0beta']),
+    manageableProjectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set(['team-a\0alpha', 'team-b\0beta']),
+    readableActorIds: new Set(['pm@example.com', 'dev@example.com']),
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    input: {
+      name: 'My three Projects',
+      visibility: 'shared',
+      definition: {
+        surface: 'work-items',
+        scope: { kind: 'workspace' },
+        filters: {
+          projectScopes: [
+            { teamId: 'team-a', projectId: 'alpha' },
+            { teamId: 'team-b', projectId: 'beta' },
+            { teamId: 'team-a', projectId: 'alpha' },
+          ],
+          involvement: 'mine',
+          contributorUserIds: ['dev@example.com'],
+          contributorJobRoles: [{ teamId: 'team-b', jobRoleId: 'designer' }],
+        },
+        layout: {
+          mode: 'table',
+          group: { field: 'project', direction: 'asc' },
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: { showCompleted: false },
+        },
+      },
+    },
+  })
+  expect(created.definition.filters).toEqual({
+    projectScopes: [
+      { teamId: 'team-a', projectId: 'alpha' },
+      { teamId: 'team-b', projectId: 'beta' },
+    ],
+    involvement: 'mine',
+    contributorUserIds: ['dev@example.com'],
+    contributorJobRoles: [{ teamId: 'team-b', jobRoleId: 'designer' }],
+  })
+  expect(created.preference.isProjectDefault).toBe(false)
+
+  // A viewer of Team A only sees the Team A Project and none of the hidden references.
+  const viewerAccess = {
+    ...ownerAccess,
+    viewerUserId: 'member@example.com',
+    canManageSharedViews: false,
+    teamIds: new Set(['team-a']),
+    writableTeamIds: new Set(['team-a']),
+    projectIds: new Set(['alpha']),
+    writableProjectIds: new Set(['alpha']),
+    projectScopeKeys: new Set(['team-a\0alpha']),
+    writableProjectScopeKeys: new Set(['team-a\0alpha']),
+    readableActorIds: new Set(['member@example.com']),
+  }
+  const page = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'work-items',
+    scope: { kind: 'workspace' },
+    access: viewerAccess,
+  })
+  expect(page.views).toHaveLength(1)
+  expect(page.views[0]?.definition.filters).toEqual({
+    projectScopes: [{ teamId: 'team-a', projectId: 'alpha' }],
+    involvement: 'mine',
+    contributorUserIds: [],
+    contributorJobRoles: [],
+  })
+  expect(page.views[0]?.migrationWarnings).toEqual([
+    { code: 'permission-redacted', section: 'filter', fallback: 'removed' },
+  ])
+  expect(page.capabilities).toMatchObject({
+    canWrite: true,
+    canSetTeamDefault: false,
+    canSetProjectDefault: false,
+  })
+
+  // Cross-Project filters belong to the work-items surface only.
+  await expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    input: {
+      name: 'Wrong surface',
+      visibility: 'personal',
+      definition: {
+        surface: 'workspace-search',
+        scope: { kind: 'workspace' },
+        filters: { involvement: 'mine' },
+        layout: {
+          mode: 'table',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })).rejects.toMatchObject({ status: 400 })
+})
+
+test('lets only managers of that exact Project set its Project default', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const managerAccess = {
+    viewerUserId: 'alpha-manager@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['core']),
+    writableTeamIds: new Set(['core']),
+    // Managing one Project of the Team still lists the Team as manageable.
+    manageableTeamIds: new Set(['core']),
+    projectIds: new Set(['alpha', 'beta']),
+    writableProjectIds: new Set(['alpha', 'beta']),
+    projectScopeKeys: new Set(['core\0alpha', 'core\0beta']),
+    manageableProjectScopeKeys: new Set(['core\0alpha']),
+    writableProjectScopeKeys: new Set(['core\0alpha', 'core\0beta']),
+  }
+  /** Builds a Team-visible view definition on one Project scope. */
+  const projectViewInput = (projectId: string, defaultSource?: 'team' | 'project') => ({
+    name: `${projectId} board`,
+    visibility: 'team' as const,
+    teamId: 'core',
+    ...(defaultSource ? { defaultSource } : {}),
+    definition: {
+      surface: 'project' as const,
+      scope: { kind: 'project' as const, projectId, teamId: 'core' },
+      filters: {},
+      layout: {
+        mode: 'board' as const,
+        sort: [],
+        columns: [{ field: 'title' }],
+        density: 'compact' as const,
+        displayOptions: {},
+      },
+    },
+  })
+
+  const alphaDefault = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: managerAccess,
+    input: projectViewInput('alpha', 'project'),
+  })
+  expect(alphaDefault.preference).toMatchObject({
+    isDefault: true,
+    isTeamDefault: false,
+    isProjectDefault: true,
+    defaultSource: 'project',
+  })
+
+  // Another member of the Project gets the Project default as the effective default.
+  const memberAccess = {
+    ...managerAccess,
+    viewerUserId: 'member@example.com',
+    manageableTeamIds: new Set<string>(),
+    manageableProjectScopeKeys: new Set<string>(),
+  }
+  const memberPage = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'project',
+    scope: { kind: 'project', projectId: 'alpha', teamId: 'core' },
+    access: memberAccess,
+  })
+  expect(memberPage.views[0]?.preference).toMatchObject({
+    isDefault: true,
+    defaultSource: 'project',
+  })
+  expect(memberPage.capabilities.canSetProjectDefault).toBe(false)
+
+  // Managing Project alpha does not reach Project beta of the same Team.
+  await expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: managerAccess,
+    input: projectViewInput('beta', 'project'),
+  })).rejects.toMatchObject({ status: 403 })
+  const betaView = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: managerAccess,
+    input: projectViewInput('beta'),
+  })
+  await expect(client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: betaView.id,
+    access: managerAccess,
+    input: { expectedRevision: betaView.revision, defaultSource: 'project' },
+  })).rejects.toMatchObject({ status: 403 })
+
+  // A Project scope takes a Project default, not a Team default.
+  await expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: managerAccess,
+    input: projectViewInput('alpha', 'team'),
+  })).rejects.toMatchObject({ status: 400 })
+
+  // The Project manager can clear the default again.
+  const cleared = await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: alphaDefault.id,
+    access: managerAccess,
+    input: { expectedRevision: alphaDefault.revision, clearDefaultSource: 'project' },
+  })
+  expect(cleared.preference).toMatchObject({ isDefault: false, isProjectDefault: false })
+})
