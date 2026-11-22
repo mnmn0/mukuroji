@@ -4,6 +4,7 @@ import {
   type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import { expect, test } from 'bun:test'
+import { ProjectDataError } from '../../../directory'
 import {
   applyWorkCalendarChange,
   type WorkCalendarChangeRules,
@@ -80,4 +81,18 @@ test('writes nothing when the calendars changed between the plan and the first r
   })
   expect(written).toEqual([])
   expect(applied).toMatchObject({ updatedCount: 0, conflictCount: 3 })
+})
+
+test('stops the change when the member authorization changed', async () => {
+  let batches = 0
+  const applying = applyWorkCalendarChange(rules, {
+    readWorkItems: async () => workItems(30),
+    readCalendarVersion: async () => 'v1',
+    async writeSchedules() {
+      batches += 1
+      throw new ProjectDataError(409, 'WorkItemAuthorizationChanged', 'Work Item authorization changed during the mutation.')
+    },
+  })
+  await expect(applying).rejects.toMatchObject({ code: 'WorkItemAuthorizationChanged' })
+  expect(batches).toBe(1)
 })

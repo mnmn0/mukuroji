@@ -1128,9 +1128,9 @@ export function rebaseWorkItemScheduleCalendar(
     current.durationDays,
     calendarPolicy,
   )
-  const startDate = calculateWorkItemScheduleStartDate(endDate, current.durationDays, calendarPolicy)
+  // Keep the start date the member chose; only the end date moves.
   return {
-    schedule: { ...current, calendarPolicy, startDate, endDate },
+    schedule: { ...current, calendarPolicy, endDate },
     fellBackToKeepDuration: adjustment === 'keep-end-date',
   }
 }

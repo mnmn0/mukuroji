@@ -88,7 +88,8 @@ export type WorkCalendarChangePorts = {
   /**
    * Rewrites schedules in one transaction.
    *
-   * @throws ProjectDataError 409 when a Work Item changed since it was read.
+   * @throws ProjectDataError 409 when a Work Item changed since it was read, or
+   *   `WorkItemAuthorizationChanged` when the member's authorization changed.
    */
   writeSchedules(updates: readonly WorkCalendarScheduleUpdate[], batch: number): Promise<void>
   /**
@@ -268,7 +269,10 @@ async function writeOrConflict(
     await ports.writeSchedules(updates, batch)
     return true
   } catch (error) {
-    if (error instanceof ProjectDataError && error.status === 409) return false
+    // A changed authorization is not a Work Item conflict: stop the change instead of retrying.
+    if (error instanceof ProjectDataError && error.status === 409 && error.code !== 'WorkItemAuthorizationChanged') {
+      return false
+    }
     throw error
   }
 }

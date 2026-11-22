@@ -38,24 +38,29 @@ export function WorkspaceWorkCalendarAdjustment({ accessToken, locale }: Workspa
   const t = useMemo(() => createTranslator(locale), [locale])
   const calendar = useWorkspaceCalendarSettings(accessToken)
   const [adjustment, setAdjustment] = useState<WorkCalendarAdjustment>(DEFAULT_WORK_CALENDAR_ADJUSTMENT)
-  const [impact, setImpact] = useState<WorkCalendarChangeImpact>()
+  const [preview, setPreview] = useState<PreviewedImpact>()
   const [result, setResult] = useState<WorkCalendarChangeResult>()
   const [failed, setFailed] = useState(false)
   const [isBusy, setIsBusy] = useState(false)
   const applyContext = useRef<MutationRequestContext | undefined>(undefined)
+  const currentKey = calendar.settings ? previewKey(calendar.settings, adjustment) : undefined
+  // A preview only stands for the settings and adjustment it was made with.
+  const impact = preview && preview.key === currentKey ? preview.impact : undefined
 
   /** Previews the adjustment against the saved Workspace calendar. */
-  async function preview() {
+  async function requestPreview() {
     const settings = calendar.settings
     if (!settings) return
+    const key = previewKey(settings, adjustment)
     setIsBusy(true)
     setFailed(false)
     setResult(undefined)
     try {
-      setImpact(await previewWorkspaceWorkCalendarChange(accessToken, {
+      const previewed = await previewWorkspaceWorkCalendarChange(accessToken, {
         calendar: toWorkspaceCalendarSettings(settings),
         adjustment,
-      }))
+      })
+      setPreview({ key, impact: previewed })
     } catch {
       setFailed(true)
     } finally {
@@ -71,7 +76,7 @@ export function WorkspaceWorkCalendarAdjustment({ accessToken, locale }: Workspa
     try {
       setResult(await applyWorkspaceWorkCalendar(accessToken, { adjustment }, applyContext.current))
       applyContext.current = undefined
-      setImpact(undefined)
+      setPreview(undefined)
     } catch {
       setFailed(true)
     } finally {
@@ -92,7 +97,7 @@ export function WorkspaceWorkCalendarAdjustment({ accessToken, locale }: Workspa
         disabled={isBusy}
         onChange={(next) => {
           setAdjustment(next)
-          setImpact(undefined)
+          setPreview(undefined)
           setResult(undefined)
           applyContext.current = undefined
         }}
@@ -103,7 +108,7 @@ export function WorkspaceWorkCalendarAdjustment({ accessToken, locale }: Workspa
           className="workbench-button-secondary"
           data-testid="workspace-work-calendar-preview"
           disabled={isBusy || !calendar.settings}
-          onClick={() => void preview()}
+          onClick={() => void requestPreview()}
           type="button"
         >
           {t('workspace.workCalendar.preview')}
@@ -125,6 +130,25 @@ export function WorkspaceWorkCalendarAdjustment({ accessToken, locale }: Workspa
       {result ? <WorkCalendarResultSummary result={result} t={t} /> : null}
     </section>
   )
+}
+
+/** Preview of a Workspace calendar adjustment, bound to what it previewed. */
+type PreviewedImpact = {
+  /** Key of the settings and adjustment the preview was made with. */
+  key: string
+  /** Previewed impact. */
+  impact: WorkCalendarChangeImpact
+}
+
+/**
+ * Builds the key that binds a preview to the saved settings and the chosen adjustment.
+ *
+ * @param settings - Saved Workspace calendar settings.
+ * @param adjustment - Chosen adjustment.
+ * @returns The key.
+ */
+function previewKey(settings: WorkspaceCalendarSettingsResponse, adjustment: WorkCalendarAdjustment): string {
+  return JSON.stringify([toWorkspaceCalendarSettings(settings), adjustment])
 }
 
 /**

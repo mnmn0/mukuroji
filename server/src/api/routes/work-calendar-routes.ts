@@ -37,7 +37,9 @@ import {
   requireWorkspaceBusinessWrite,
   type WorkspacePrincipal,
 } from '../shared/project-access'
+import { createPlanningFencedWorkItemAuthorizationSnapshot } from '../shared/planning-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
+import { projectWorkItemMutationSearchDocumentBestEffort } from '../shared/search-access'
 import type { TeamPermissionContext } from '../shared/workspace-access'
 import {
   createWorkCalendarResolver,
@@ -335,14 +337,20 @@ function createWorkCalendarChangePorts(
       if (!updateSchedules) {
         throw new ProjectDataError(503, 'WorkCalendarUnavailable', 'Work Item schedules cannot be rewritten.')
       }
-      await updateSchedules.call(
+      // Fence every batch on the member's authorization so a revoked member stops rewriting.
+      const result = await updateSchedules.call(
         workItemDependencies.teamIssues,
         principal.directoryId,
         updates,
         [],
         principal.userKey,
         createApiMutationContext(c, principal, { body, batch }),
+        undefined,
+        await createPlanningFencedWorkItemAuthorizationSnapshot(principal),
       )
+      await Promise.all(result.issues.map((issue) =>
+        projectWorkItemMutationSearchDocumentBestEffort(principal.directoryId, issue, 'Work calendar change')
+      ))
     },
   }
 }
