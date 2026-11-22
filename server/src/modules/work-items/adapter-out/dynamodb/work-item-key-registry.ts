@@ -1,5 +1,6 @@
 import {
   GetCommand,
+  QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
@@ -107,6 +108,14 @@ export type WorkItemKeyLocation = {
   teamId: string
   /** Work Item ID within the Team. */
   workItemId: string
+}
+
+/** A key prefix reserved in the Workspace and the Team it belongs to. */
+export type WorkItemKeyPrefixAssignment = {
+  /** Reserved key prefix, such as `ABC`. */
+  keyPrefix: string
+  /** Team that owns the prefix. */
+  teamId: string
 }
 
 /**
@@ -443,6 +452,46 @@ export async function readWorkItemKeyLocation(
     teamId: response.Item.teamId,
     workItemId: response.Item.workItemId,
   }
+}
+
+/**
+ * Lists every key prefix reserved in a Workspace with the Team that owns it.
+ *
+ * The caller must filter the Teams it may reveal before returning the prefixes.
+ *
+ * @param documentClient - DynamoDB document client.
+ * @param tableName - Work Items table name.
+ * @param directoryId - Workspace ID.
+ * @returns Prefix reservations in prefix order.
+ * @throws ProjectDataError when a stored prefix row is malformed.
+ */
+export async function listWorkItemKeyPrefixes(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  directoryId: string,
+): Promise<WorkItemKeyPrefixAssignment[]> {
+  const assignments: WorkItemKeyPrefixAssignment[] = []
+  let exclusiveStartKey: Record<string, unknown> | undefined
+  do {
+    const response = await documentClient.send(new QueryCommand({
+      TableName: tableName,
+      KeyConditionExpression: '#partition = :partition AND begins_with(#sort, :prefix)',
+      ExpressionAttributeNames: { '#partition': 'directoryTeamId', '#sort': 'issueId' },
+      ExpressionAttributeValues: {
+        ':partition': createRegistryPartitionKey(directoryId),
+        ':prefix': PREFIX_RECORD_PREFIX,
+      },
+      ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+    }))
+    for (const item of response.Items ?? []) {
+      if (!isWorkItemKeyPrefixRecord(item) || item.directoryId !== directoryId) {
+        throw createRegistryInvalidError()
+      }
+      assignments.push({ keyPrefix: item.keyPrefix, teamId: item.teamId })
+    }
+    exclusiveStartKey = response.LastEvaluatedKey
+  } while (exclusiveStartKey)
+  return assignments
 }
 
 /**

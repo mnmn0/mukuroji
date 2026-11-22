@@ -193,6 +193,7 @@ describe('collaboration projection pure helpers', () => {
         if (table === 'WORK_ITEMS_TABLE_NAME') {
           return { Item: createRealtimeWorkItem({
             assigneeUserId: 'owner@example.com',
+            key: 'CORE-7',
             dueDate: '2026-07-05',
             schedule: createDefaultDueDateWorkItemSchedule('2026-07-05'),
           }), $metadata: {} }
@@ -322,6 +323,11 @@ describe('collaboration projection pure helpers', () => {
         .map((item) => [item.recipientMemberKey, item.teamId, item.projectId]))
         .toEqual([['creator@example.com', 'core', 'platform']])
       expect(notifications.some((item) => item.eventId === 'missing-target-comment')).toBe(false)
+      // The key comes from the current Work Item row; Planning targets have none.
+      expect(new Set(notifications.filter((item) => item.eventId === 'completed').map((item) => item.workItemKey)))
+        .toEqual(new Set(['CORE-7']))
+      expect(notifications.filter((item) => item.eventId === 'published').every((item) => item.workItemKey === undefined))
+        .toBe(true)
       expect(notifications.filter((item) => item.eventId === 'completed').map((item) => [item.recipientMemberKey, item.reasons]).sort())
         .toEqual([
           ['creator@example.com', ['creator']],
@@ -2327,6 +2333,23 @@ describe('collaboration projection pure helpers', () => {
       checked: true,
       exists: true,
     })).not.toHaveProperty('projectId')
+  })
+
+  test('takes the Work Item key from the current row and never from audit metadata', () => {
+    const parsed = parseAuditProjectionEvent({
+      eventId: 'evt-key',
+      eventType: 'comment.created',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-12T12:00:00.000Z',
+      metadata: { teamId: 'core-team', issueId: 'context-issue', workItemKey: 'FAKE-1' },
+    })
+    expect(parsed).not.toHaveProperty('workItemKey')
+    if (!parsed) throw new Error('Expected a parsed event')
+    expect(overlayCurrentWorkItemNotificationScope(parsed, {
+      checked: true,
+      exists: true,
+      workItemKey: 'CORE-12',
+    })).toMatchObject({ workItemKey: 'CORE-12' })
   })
 
   test('accepts only canonical ISO Work Item due dates from audit metadata', () => {

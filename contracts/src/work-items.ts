@@ -950,6 +950,15 @@ export type WorkItemKeyLookupResponse = {
 }
 
 /**
+ * Response of `GET /api/work-items/key-prefixes`, which lists the Work Item key prefixes of the
+ * Teams the caller can read, so a client links only text whose prefix exists.
+ */
+export type WorkItemKeyPrefixesResponse = {
+  /** Distinct key prefixes, such as `ABC`, in ascending order. */
+  prefixes: string[]
+}
+
+/**
  * Response of `GET /api/v1/work-items/{workItemId}/key`, which tells a Public API client the
  * Work Item key without adding a property to the stable `WorkItem` schema.
  */

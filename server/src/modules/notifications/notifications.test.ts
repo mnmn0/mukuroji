@@ -10,6 +10,7 @@ import {
   createNotificationRecipientKey,
   parseStoredNotificationPreferences,
   requiresCurrentWorkItemAssignee,
+  toNotificationItem,
   type NotificationAction,
   type NotificationState,
 } from './notifications'
@@ -1018,5 +1019,30 @@ describe('notification store', () => {
       notificationId: notification.id,
       action: 'mark-read',
     })).rejects.toMatchObject({ code: 'InvalidNotificationId', status: 400 })
+  })
+})
+
+describe('Notification row Work Item key', () => {
+  /** Builds a minimal stored notification row for one recipient. */
+  const row = (workItemKey: unknown) => ({
+    recipientKey: 'workspace-1#member@example.com',
+    notificationKey: '2026-07-12T12:00:00.000Z#event-1',
+    recipientStatusKey: 'workspace-1#member@example.com#unread',
+    itemType: 'notification',
+    version: 1,
+    eventId: 'event-1',
+    eventType: 'comment.created',
+    occurredAt: '2026-07-12T12:00:00.000Z',
+    reasons: ['mention'],
+    title: 'Review',
+    workItemKey,
+  })
+
+  test('returns only a canonical stored key', () => {
+    const now = new Date('2026-07-12T13:00:00.000Z')
+    expect(toNotificationItem(row('CORE-12'), 'workspace-1#member@example.com', now)?.workItemKey).toBe('CORE-12')
+    for (const value of ['core-12', 'CORE-0', 12, undefined]) {
+      expect(toNotificationItem(row(value), 'workspace-1#member@example.com', now)).not.toHaveProperty('workItemKey')
+    }
   })
 })

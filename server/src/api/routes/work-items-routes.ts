@@ -34,6 +34,7 @@ import {
   type ProjectWorkItemListPage,
   type TeamWorkItemListPage,
   type WorkItemKeyLookupResponse,
+  type WorkItemKeyPrefixesResponse,
   type WorkItemOpenChildCountResponse,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
@@ -4298,6 +4299,36 @@ export function registerWorkItemsRoutes(routeApp: Hono): void {
         maxItems: WORK_ITEMS_RESPONSE_LIMIT,
       })
       return c.json(await hydrateWorkItemsResponse({ workItems }, principal.directoryId))
+    } catch (error) {
+      return toWorkItemConfigurationErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Lists the Work Item key prefixes of the Teams whose Work Items the caller can read.
+   *
+   * Clients link only key-shaped text with one of these prefixes, so words such as `UTF-8` stay
+   * text. A Team the caller cannot read is left out, as a key lookup would reveal nothing either.
+   */
+  routeApp.get('/api/work-items/key-prefixes', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const [contexts, assignments] = await Promise.all([
+        resolveAccessibleWorkItemTeamContexts(principal),
+        workItemDependencies.teamIssues.listWorkItemKeyPrefixes(principal.directoryId),
+      ])
+      const readableTeamIds = new Set(contexts.map((context) => context.team.id))
+      const prefixes = [...new Set(assignments
+        .filter((assignment) => readableTeamIds.has(assignment.teamId))
+        .map((assignment) => assignment.keyPrefix))]
+        .sort()
+      return c.json({ prefixes } satisfies WorkItemKeyPrefixesResponse)
     } catch (error) {
       return toWorkItemConfigurationErrorResponse(c, error)
     }

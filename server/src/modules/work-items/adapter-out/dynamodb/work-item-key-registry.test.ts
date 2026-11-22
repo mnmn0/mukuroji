@@ -4,6 +4,7 @@ import {
   allocateWorkItemKey,
   createWorkItemKeyReservationPut,
   isWorkItemKeyRegistryRecord,
+  listWorkItemKeyPrefixes,
   readWorkItemKeyLocation,
 } from './work-item-key-registry'
 
@@ -60,6 +61,21 @@ function createRegistryTable() {
         }
         for (const { Put } of items) rows.set(id(Put.Item), structuredClone(Put.Item))
         return {}
+      }
+      if (command.constructor.name === 'QueryCommand') {
+        // Pages of one row exercise the continuation loop.
+        const values = Object(input.ExpressionAttributeValues)
+        const matches = [...rows.values()]
+          .filter((row) => row.directoryTeamId === values[':partition'] &&
+            String(row.issueId).startsWith(String(values[':prefix'])))
+          .sort((left, right) => String(left.issueId).localeCompare(String(right.issueId)))
+        const after = input.ExclusiveStartKey === undefined ? undefined : String(Object(input.ExclusiveStartKey).issueId)
+        const remaining = matches.filter((row) => after === undefined || String(row.issueId) > after)
+        const page = remaining.slice(0, 1)
+        return {
+          Items: page.map((row) => structuredClone(row)),
+          ...(remaining.length > 1 ? { LastEvaluatedKey: { directoryTeamId: page[0]?.directoryTeamId, issueId: page[0]?.issueId } } : {}),
+        }
       }
       throw new Error(`Unexpected command: ${command.constructor.name}`)
     },
@@ -184,6 +200,33 @@ describe('Work Item key allocation', () => {
 
     await expect(allocateWorkItemKey(table.client, TABLE, 'ws', 'backend', NOW))
       .rejects.toMatchObject({ status: 503, code: 'InvalidWorkItemKeyRegistry' })
+  })
+})
+
+describe('Work Item key prefix listing', () => {
+  test('lists every reserved prefix of the Workspace with its Team', async () => {
+    const table = createRegistryTable()
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'platform-team', NOW)
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'product-team', NOW)
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'backend', NOW)
+    await allocateWorkItemKey(table.client, TABLE, 'other-ws', 'design', NOW)
+
+    expect(await listWorkItemKeyPrefixes(table.client, TABLE, 'ws')).toEqual([
+      { keyPrefix: 'BACK', teamId: 'backend' },
+      { keyPrefix: 'PT', teamId: 'platform-team' },
+      { keyPrefix: 'PT2', teamId: 'product-team' },
+    ])
+  })
+
+  test('fails closed on a malformed prefix row', async () => {
+    const table = createRegistryTable()
+    await allocateWorkItemKey(table.client, TABLE, 'ws', 'platform-team', NOW)
+    const row = table.rows.get('ws#work-item-key-registry\0prefix#PT')
+    if (row) row.keyPrefix = 'pt'
+
+    await expect(listWorkItemKeyPrefixes(table.client, TABLE, 'ws')).rejects.toMatchObject({
+      code: 'InvalidWorkItemKeyRegistry',
+    })
   })
 })
 

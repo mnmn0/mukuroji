@@ -4,16 +4,22 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import type { ScheduledJobGrant } from './scheduled-jobs';
 import type { ScheduleWorkerInput } from './schedules';
 
+/** Inputs for the Slack notification job. */
+export interface SlackNotificationJobInput extends ScheduleWorkerInput {
+  /** Web application origin that resolves Work Item key and Inbox links in the message. */
+  readonly webOrigin: string;
+}
+
 /**
  * Defines the every-minute job that drains the sparse Slack delivery queue.
  *
  * @param scope - Stack scope used to preserve stable construct identities.
- * @param input - Shared storage, configuration, and runtime controls.
+ * @param input - Shared storage, configuration, runtime controls, and the web origin.
  * @returns Environment and grants the job adds to the scheduled-jobs Lambda.
  */
 export function defineSlackNotificationJob(
   scope: cdk.Stack,
-  input: ScheduleWorkerInput,
+  input: SlackNotificationJobInput,
 ): ScheduledJobGrant {
   const stores = input.dataStores;
   const parameters = input.parameters;
@@ -32,6 +38,7 @@ export function defineSlackNotificationJob(
     id: 'SlackNotification',
     runtimeScope: 'notification-schedule',
     environment: {
+      NOTIFICATION_SLACK_APP_ORIGIN: input.webOrigin,
       NOTIFICATIONS_TABLE_NAME: stores.notificationsTable.tableName,
       ENTERPRISE_IDENTITY_TABLE_NAME: stores.enterpriseIdentityTable.tableName,
       TENANT_ADMINISTRATION_TABLE_NAME: stores.tenantAdministrationTable.tableName,

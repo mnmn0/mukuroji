@@ -2,8 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import { matchRoutes, MemoryRouter } from 'react-router'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { appRoutes } from '../src/app/router'
-import { getWorkItemByKey, TeamIssuesApiError, type TeamIssue } from '../src/issues/api'
+import { getWorkItemByKey, getWorkItemKeyPrefixes, TeamIssuesApiError, type TeamIssue } from '../src/issues/api'
 import { loadWorkItemKeyLocation } from '../src/issues/queries/useWorkItemKeyLocation'
+import { WorkItemKeyPrefixesContext } from '../src/issues/queries/WorkItemKeyPrefixesContext'
 import { findWorkItemKeys, readWorkItemKeyInput } from '../src/work-items/model/workItemKeys'
 import { SafeCommentBody } from '../src/issues/ui/SafeCommentBody'
 import { WorkItemKeyActions } from '../src/issues/ui/WorkItemKeyActions'
@@ -38,6 +39,45 @@ describe('Work Item keys in text', () => {
     expect(html).not.toContain('/browse/PT-14')
     expect(html).not.toContain('/browse/PT-15')
     expect(html).toContain('href="https://example.com"')
+  })
+})
+
+describe('Work Item key prefixes', () => {
+  test('finds only keys whose prefix exists when prefixes are known', () => {
+    const prefixes = new Set(['PT', 'BACK'])
+    expect(findWorkItemKeys('UTF-8, PT-12, ISO-8601 and BACK-3', prefixes).map((match) => match.key))
+      .toEqual(['PT-12', 'BACK-3'])
+    expect(findWorkItemKeys('UTF-8 PT-12', new Set())).toEqual([])
+  })
+
+  test('links only known prefixes in comment text', () => {
+    const html = renderToStaticMarkup(
+      <WorkItemKeyPrefixesContext.Provider value={new Set(['PT'])}>
+        <SafeCommentBody bodyMarkdown="Encode UTF-8 before PT-12." />
+      </WorkItemKeyPrefixesContext.Provider>,
+    )
+
+    expect(html).toContain('href="/browse/PT-12"')
+    expect(html).not.toContain('/browse/UTF-8')
+    expect(html).toContain('UTF-8')
+  })
+
+  test('loads prefixes from the Work Item API and rejects a malformed answer', async () => {
+    const originalFetch = globalThis.fetch
+    const requests: string[] = []
+    let body: unknown = { prefixes: ['PT', 'BACK'] }
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(typeof input === 'string' ? input : input.toString())
+      return new Response(JSON.stringify(body), { headers: { 'Content-Type': 'application/json' }, status: 200 })
+    }) as typeof fetch
+    try {
+      expect(await getWorkItemKeyPrefixes('token')).toEqual(['PT', 'BACK'])
+      expect(requests[0]).toEndWith('/work-items/key-prefixes')
+      body = { prefixes: [1] }
+      await expect(getWorkItemKeyPrefixes('token')).rejects.toBeInstanceOf(TeamIssuesApiError)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })
 

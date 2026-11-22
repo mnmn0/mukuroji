@@ -188,6 +188,7 @@ export {
 export {
   isWorkItemKeyRegistryRecord,
   type WorkItemKeyLocation,
+  type WorkItemKeyPrefixAssignment,
 } from './adapter-out/dynamodb/work-item-key-registry'
 export { deriveWorkItemKeyPrefix } from './domain/work-item-key'
 export {

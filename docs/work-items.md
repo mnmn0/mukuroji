@@ -66,6 +66,8 @@ Canonical row と API response は旧固定 `status`、`titleKey`、`assignee`�
 - `GET /api/work-items/keys/{key}` は key を `{ key, teamId, workItemId }` に解決する。存在しない key、key でない文字列、削除済みの Work Item、閲覧できない Team / Project の Work Item は、どれも同じ `404 WorkItemKeyNotFound` を返す。削除しても key の row は残り、固定 ID の作成では同じ ID が新しい key で作られ得るため、その ID の Work Item が今もその key を持つときだけ解決する。
 - key は内部 API の Work Item、Public API の `GET /api/v1/work-items/{workItemId}/key`、coding-agent MCP の `get_task` に出る。Public API の `WorkItem` は closed schema で、既存操作の応答に property を足すと後方互換を壊すため、key は別 endpoint で返す。作成時の audit event の変更内容にも含める。
 - title の上限 256 文字は Public API v1 の request（`title` の `maxLength`）を狭める変更で、互換チェックは失敗する。利用者がまだいないため、判断のうえで入れた（2026-11-16）。
+- `GET /api/work-items/key-prefixes` は、呼び出した人が Work Item を閲覧できる Team の key prefix を `{ prefixes }` で返す。Web はこの一覧にある prefix の語だけをコメント本文と説明の key link にし、`UTF-8` のような語は link にしない。一覧を読めないとき（読み込み中・失敗）は従来どおり key の形の語をすべて link にする。
+- 通知（Inbox・Slack・Email）は対象 Work Item の key を表示する（[通知](notifications.md#work-item-key-の表示)）。
 - key を持たない既存 Work Item への付与は #365 の migration 契約で行う。
 
 Strict reader は必須 workflow field がない row、未知の schema version、型が不正な status/custom field、不正または欠落した `relationIds`、不正な `schedule`、`dueDate` と schedule の不一致を canonical Work Item として返さない。field-specific timestamp がある場合は canonical UTC で `createdAt` 以上 `updatedAt` 以下であることも検証する。現在の configuration との整合は configuration 更新時の usage 検証と mutation 時の再検証で保証し、read 時に configuration は取得しない。

@@ -18,13 +18,15 @@ export type WorkItemKeyMatch = {
  * Finds the Work Item keys written in plain text.
  *
  * @param text - Text such as a comment or a description.
+ * @param prefixes - Key prefixes that exist in the Workspace. When given, key-shaped words with
+ *   another prefix, such as `UTF-8`, are not keys. When omitted, every key-shaped word counts.
  * @returns Each key in the order it appears, without duplicates removed.
  */
-export function findWorkItemKeys(text: string): WorkItemKeyMatch[] {
+export function findWorkItemKeys(text: string, prefixes?: ReadonlySet<string>): WorkItemKeyMatch[] {
   return Array.from(text.matchAll(workItemKeyInTextPattern), (match) => ({
     key: match[0],
     index: match.index,
-  }))
+  })).filter(({ key }) => !prefixes || prefixes.has(key.slice(0, key.lastIndexOf('-'))))
 }
 
 /**

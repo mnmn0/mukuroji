@@ -14,6 +14,7 @@ import type {
   WorkItemRelation,
   WorkItemTriageContextSnapshot,
   WorkItemKeyLookupResponse,
+  WorkItemKeyPrefixesResponse,
   WorkItemTypeChangePreview,
   WorkItemSummaryResponse,
   WorkspaceWorkItemListFilter,
@@ -283,6 +284,32 @@ export async function getWorkItemByKey(key: string, accessToken?: string) {
     throw new TeamIssuesApiError(502, defaultIssuesApiErrorMessage)
   }
   return location
+}
+
+/**
+ * Lists the Work Item key prefixes of the Teams the caller can read.
+ *
+ * @param accessToken - Bearer token for the Work Item API.
+ * @returns The distinct prefixes, such as `PT`.
+ */
+export async function getWorkItemKeyPrefixes(accessToken: string) {
+  const response = await requestJson<unknown>(`${issuesApiBaseUrl}/work-items/key-prefixes`, accessToken)
+  if (!isWorkItemKeyPrefixesResponse(response)) {
+    throw new TeamIssuesApiError(502, defaultIssuesApiErrorMessage)
+  }
+  return response.prefixes
+}
+
+/**
+ * Checks the key prefix listing before the client links text with it.
+ *
+ * @param value - Parsed response body.
+ * @returns Whether the body holds a list of strings under `prefixes`.
+ */
+function isWorkItemKeyPrefixesResponse(value: unknown): value is WorkItemKeyPrefixesResponse {
+  if (typeof value !== 'object' || value === null) return false
+  const prefixes: unknown = Reflect.get(value, 'prefixes')
+  return Array.isArray(prefixes) && prefixes.every((prefix) => typeof prefix === 'string')
 }
 
 /**

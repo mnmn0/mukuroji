@@ -17,7 +17,7 @@ import {
   S3Client,
   type Tag,
 } from '@aws-sdk/client-s3'
-import type { EnterpriseIdentitySnapshot, EnterprisePermissionId, TriageEntry } from '@mukuroji/contracts'
+import { isCanonicalWorkItemKey, type EnterpriseIdentitySnapshot, type EnterprisePermissionId, type TriageEntry } from '@mukuroji/contracts'
 import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
 import { TriageError } from '../../../triage'
 import { isCanonicalWorkItemRecord, workItemScheduleInstantToLocalDate } from '../../../work-items'
@@ -131,6 +131,11 @@ export type AuditProjectionEvent = {
   rootCommentId?: string
   /** Inbox 行に表示する対象タイトルです。 */
   notificationTitle?: string
+  /**
+   * Short key such as `ABC-123` of the target Work Item, read from the current Work Item row by
+   * the projection. Audit metadata never supplies it.
+   */
+  workItemKey?: string
   /** Audit event の安全な短い概要です。 */
   summary?: string
   /** Scheduled due/overdue event が対象にした date-only 期限です。 */
@@ -399,6 +404,8 @@ export type CurrentWorkItemNotificationScope = {
   revision?: number
   /** When the Work Item last reopened, if it ever did. */
   reopenedAt?: string
+  /** Current canonical Work Item key, absent for a Work Item created before keys existed. */
+  workItemKey?: string
 }
 
 /** Projection 時に強整合 read した Planning update target scope です。 */
@@ -1598,6 +1605,7 @@ export function createNotificationProjectionItem(
     planningNotificationKind: event.planningNotificationKind,
     deepLink: event.deepLink,
     title: event.notificationTitle,
+    workItemKey: event.workItemKey,
     summary: event.summary,
     reasons: candidate.reasons,
     deliveryChannels: deliveryState.deliveryChannels,
@@ -2034,10 +2042,11 @@ export function overlayCurrentWorkItemNotificationScope(
   event: AuditProjectionEvent,
   scope: CurrentWorkItemNotificationScope,
 ): AuditProjectionEvent {
+  const keyedEvent = scope.workItemKey === undefined ? event : { ...event, workItemKey: scope.workItemKey }
   if (scope.projectId !== undefined) {
-    return { ...event, projectId: scope.projectId }
+    return { ...keyedEvent, projectId: scope.projectId }
   }
-  const { projectId: _staleProjectId, ...eventWithoutProject } = event
+  const { projectId: _staleProjectId, ...eventWithoutProject } = keyedEvent
   return eventWithoutProject
 }
 
@@ -2892,6 +2901,7 @@ async function readCurrentWorkItemScope(
     archived: item.archivedAt !== undefined,
     revision: item.revision,
     ...(item.reopenedAt === undefined ? {} : { reopenedAt: item.reopenedAt }),
+    ...(isCanonicalWorkItemKey(item.key) ? { workItemKey: item.key } : {}),
   }
 }
 

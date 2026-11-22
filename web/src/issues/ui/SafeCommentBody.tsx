@@ -2,6 +2,7 @@ import Markdown from 'react-markdown'
 import rehypeSanitize from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
 import { remarkWorkItemKeyLinks } from '../model/workItemKeyLinks'
+import { useWorkItemKeyPrefixes } from '../queries/WorkItemKeyPrefixesContext'
 
 /**
  * SafeCommentBody の props です。
@@ -19,9 +20,10 @@ export type SafeCommentBodyProps = {
 
 /**
  * raw HTML を無効にし、GFM と sanitize を通した comment 本文を描画します。
- * 本文中の Work Item key（`PT-12`）は key のページへの link にします。
+ * 本文中の Work Item key（`PT-12`）は、Workspace に存在する prefix のものだけ key のページへの link にします。
  */
 export function SafeCommentBody({ bodyMarkdown, className = '' }: SafeCommentBodyProps) {
+  const prefixes = useWorkItemKeyPrefixes()
   return (
     <div
       className={`min-w-0 break-words text-sm font-medium leading-6 text-[var(--workbench-text)]
@@ -44,7 +46,7 @@ export function SafeCommentBody({ bodyMarkdown, className = '' }: SafeCommentBod
           img: () => null,
         }}
         rehypePlugins={[rehypeSanitize]}
-        remarkPlugins={[remarkGfm, remarkWorkItemKeyLinks]}
+        remarkPlugins={[remarkGfm, [remarkWorkItemKeyLinks, { prefixes }]]}
         skipHtml
         urlTransform={sanitizeCommentUrl}
       >

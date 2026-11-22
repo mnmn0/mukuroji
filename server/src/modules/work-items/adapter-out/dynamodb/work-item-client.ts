@@ -62,8 +62,10 @@ import {
 import {
   allocateWorkItemKey,
   createWorkItemKeyReservationPut,
+  listWorkItemKeyPrefixes,
   readWorkItemKeyLocation,
   type WorkItemKeyLocation,
+  type WorkItemKeyPrefixAssignment,
 } from './work-item-key-registry'
 import {
   deriveWorkItemScheduleDueDate,
@@ -1370,6 +1372,13 @@ export type TeamIssuesClient = {
     directoryId: string,
     key: string,
   ): Promise<WorkItemKeyLocation | undefined>
+  /**
+   * Lists the key prefixes reserved in a Workspace with their Teams, without authorizing them.
+   *
+   * @param directoryId - Workspace ID.
+   * @returns Every prefix reservation of the Workspace.
+   */
+  listWorkItemKeyPrefixes(directoryId: string): Promise<WorkItemKeyPrefixAssignment[]>
   /** Public API 用の bounded canonical Work Item page を取得します。 */
   getPublicWorkItemPage(
     directoryId: string,
@@ -3920,6 +3929,24 @@ export class DynamoDbTeamIssuesClient {
         directoryId,
         parsed.key,
       )
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Lists the key prefixes reserved in a Workspace with their Teams.
+   *
+   * The caller must keep only the Teams it may reveal before returning the prefixes.
+   *
+   * @param directoryId - Workspace ID.
+   * @returns Every prefix reservation of the Workspace.
+   */
+  async listWorkItemKeyPrefixes(directoryId: string): Promise<WorkItemKeyPrefixAssignment[]> {
+    await this.ensureLocalTables()
+    try {
+      return await listWorkItemKeyPrefixes(this.documentClient, this.issueTableName, directoryId)
     } catch (error) {
       if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)

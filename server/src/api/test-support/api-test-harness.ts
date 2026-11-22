@@ -95,6 +95,7 @@ import {
   type UpdateTeamIssueResponse,
   type WorkItemAuthorizationSnapshot,
   type WorkItemKeyLocation,
+  type WorkItemKeyPrefixAssignment,
   listWorkItemMemberIndexKeys,
   normalizeWorkItemMemberIndexKey,
 } from '../../modules/work-items'
@@ -872,6 +873,7 @@ function createTeamIssuesFake(
     getTeamHierarchyEntries: unsupported,
     getPublicWorkItemPage: unsupported,
     getWorkItemKeyLocation: unsupported,
+    listWorkItemKeyPrefixes: unsupported,
     getProjectIssues: unsupported,
     getTeamIssuePage: unsupported,
     getProjectIssuePage: unsupported,
@@ -1566,6 +1568,8 @@ function configureFakeProjectClients(
     }) => Promise<void> | void
     /** Work Item key registry rows, by canonical key, returned by key lookups. */
     workItemKeyLocations?: Readonly<Record<string, WorkItemKeyLocation>>
+    /** Work Item key prefix reservations returned by the prefix listing. */
+    workItemKeyPrefixes?: readonly WorkItemKeyPrefixAssignment[]
     /** Canonical Work Item create transaction 直前の競合を再現する hook です。 */
     issueCreateHook?: (input: CreateTeamIssueRequestBody) => Promise<void> | void
     /** Canonical Work Item update transaction 直前の認可競合を再現する hook です。 */
@@ -3107,6 +3111,9 @@ function configureFakeProjectClients(
       async getWorkItemKeyLocation(_directoryId, key) {
         const parsed = parseWorkItemKey(key)
         return parsed ? options.workItemKeyLocations?.[parsed.key] : undefined
+      },
+      async listWorkItemKeyPrefixes() {
+        return [...(options.workItemKeyPrefixes ?? [])]
       },
       async getProjectIssues(directoryId, projectId, readOptions) {
         calls.projectIssueReads.push({
