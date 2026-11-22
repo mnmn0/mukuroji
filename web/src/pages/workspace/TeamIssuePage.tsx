@@ -1061,6 +1061,7 @@ export function TeamIssuePage() {
       planningErrorMessage={planningErrorMessage}
       planningSnapshot={planningSnapshot}
       workingCalendar={workspaceCalendarPolicy}
+      calendarPeriods={workspaceCalendar.settings}
       workingCalendarErrorMessage={workspaceCalendarErrorKey ? t(workspaceCalendarErrorKey) : undefined}
       onRetryWorkingCalendar={workspaceCalendar.retry}
       selectedIssueId={resolvedSelectedIssueId}

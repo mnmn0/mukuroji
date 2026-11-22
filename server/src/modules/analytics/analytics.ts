@@ -17,6 +17,7 @@ import {
   isWorkspaceCalendarPeriodPreset,
   isWorkspaceWeekStartDay,
   readSearchWorkItemTypeKey,
+  resolveAnalyticsGroupLabel,
   resolveWorkspaceCalendarPeriod,
   toWorkspaceLocalDate,
   type AnalyticsCustomFieldFilter,
@@ -29,6 +30,7 @@ import {
   type AnalyticsForecast,
   type AnalyticsGroup,
   type AnalyticsGroupBy,
+  type AnalyticsGroupLabelLookup,
   type AnalyticsMetricDefinition,
   type AnalyticsMetricKey,
   type AnalyticsQueryInput,
@@ -132,6 +134,9 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       'Work Item ID',
       'Project ID',
       'Occurred at',
+      'Dimension key',
+      'Team',
+      'Project',
     ]),
     recordTypes: Object.freeze({
       total: 'Total',
@@ -171,6 +176,42 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
     forecastP85: 'Forecast P85',
     risk: 'Risk',
     unavailable: 'N/A',
+    unset: 'Unassigned',
+    statusLabels: Object.freeze({
+      backlog: 'Backlog',
+      unstarted: 'Not started',
+      started: 'In progress',
+      completed: 'Completed',
+      canceled: 'Canceled',
+    }),
+    defaultTitle: 'mukuroji analytics',
+    period: 'Period',
+    filters: 'Filters',
+    noFilters: 'None',
+    filterLabels: Object.freeze({
+      teams: 'Teams',
+      projects: 'Projects',
+      assignees: 'Assignees',
+      statuses: 'Status',
+      workItemTypes: 'Work item types',
+      customFields: 'Custom fields',
+      workItems: 'Work items',
+      includeArchived: 'Includes archived items',
+    }),
+    customFieldOperators: Object.freeze({
+      equals: '=',
+      'not-equals': '!=',
+      contains: 'contains',
+      'greater-than': '>',
+      'greater-than-or-equal': '>=',
+      'less-than': '<',
+      'less-than-or-equal': '<=',
+      'is-empty': 'is empty',
+      'is-not-empty': 'is not empty',
+    }),
+    moreGroups: (count: number) => `... and ${count} more`,
+    dayShift: (days: number) => `${days > 0 ? '+' : ''}${days} days`,
+    workItemCount: (count: number) => `${count} items`,
   }),
   ja: Object.freeze({
     csvHeaders: Object.freeze([
@@ -189,6 +230,9 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       '作業項目ID',
       'プロジェクトID',
       '発生日時',
+      'ディメンションキー',
+      'チーム',
+      'プロジェクト',
     ]),
     recordTypes: Object.freeze({
       total: '合計',
@@ -230,6 +274,42 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
     forecastP85: '予測 P85',
     risk: 'リスク',
     unavailable: '利用不可',
+    unset: '未設定',
+    statusLabels: Object.freeze({
+      backlog: 'バックログ',
+      unstarted: '未着手',
+      started: '進行中',
+      completed: '完了',
+      canceled: 'キャンセル',
+    }),
+    defaultTitle: 'mukuroji analytics',
+    period: '期間',
+    filters: '絞り込み',
+    noFilters: 'なし',
+    filterLabels: Object.freeze({
+      teams: 'チーム',
+      projects: 'プロジェクト',
+      assignees: '担当者',
+      statuses: '状態',
+      workItemTypes: '種類',
+      customFields: 'カスタム項目',
+      workItems: '作業項目',
+      includeArchived: 'アーカイブ済みを含む',
+    }),
+    customFieldOperators: Object.freeze({
+      equals: '=',
+      'not-equals': '!=',
+      contains: 'を含む',
+      'greater-than': '>',
+      'greater-than-or-equal': '>=',
+      'less-than': '<',
+      'less-than-or-equal': '<=',
+      'is-empty': 'が空',
+      'is-not-empty': 'が空でない',
+    }),
+    moreGroups: (count: number) => `...ほか ${count} 件`,
+    dayShift: (days: number) => `${days > 0 ? '+' : ''}${days} 日`,
+    workItemCount: (count: number) => `${count} 件`,
   }),
 })
 
@@ -1137,16 +1217,90 @@ export function normalizeAnalyticsExportLocale(
   return primaryLanguage === 'ja' ? 'ja' : 'en'
 }
 
+/** Display names keyed by the internal IDs an Analytics export would otherwise print. */
+export type AnalyticsExportNames = {
+  /** Team names keyed by Team ID. */
+  teams?: ReadonlyMap<string, string>
+  /** Project names keyed by Project ID; see `createAnalyticsProjectNames` for shared IDs. */
+  projects?: ReadonlyMap<string, string>
+  /** Project names keyed by Team-qualified Project key (`teamId\0projectId`). */
+  teamProjects?: ReadonlyMap<string, string>
+  /** Member display names keyed by Workspace member key. */
+  members?: ReadonlyMap<string, string>
+  /** Work Item Type names keyed by Team-qualified key (`teamId\0workItemTypeId`). */
+  workItemTypes?: ReadonlyMap<string, string>
+  /** Custom field names keyed by custom field definition ID. */
+  customFields?: ReadonlyMap<string, string>
+}
+
+/** Report context that an Analytics export prints next to the snapshot values. */
+export type AnalyticsExportContext = {
+  /** Report name printed as the PDF title; omitted for ad-hoc queries. */
+  title?: string
+  /** Widgets of the query that produced the snapshot, for widget titles and group dimensions. */
+  widgets?: readonly AnalyticsWidget[]
+  /** Display names that replace internal IDs. */
+  names?: AnalyticsExportNames
+}
+
+/** Localized export messages of one locale. */
+type AnalyticsExportMessages = (typeof ANALYTICS_EXPORT_MESSAGES)[AnalyticsExportLocale]
+
+/**
+ * Creates the group label lookup an export uses, backed by the export's display names.
+ *
+ * @param messages - Localized export messages.
+ * @param names - Display names keyed by internal ID.
+ * @returns The lookup for `resolveAnalyticsGroupLabel`.
+ */
+function createAnalyticsExportLabelLookup(
+  messages: AnalyticsExportMessages,
+  names: AnalyticsExportNames | undefined,
+): AnalyticsGroupLabelLookup {
+  return {
+    team: (teamId) => names?.teams?.get(teamId),
+    project: (projectId, teamId) =>
+      (teamId === undefined ? undefined : names?.teamProjects?.get(`${teamId}\0${projectId}`)) ??
+      names?.projects?.get(projectId),
+    member: (memberKey) => names?.members?.get(memberKey),
+    workItemType: (key) => names?.workItemTypes?.get(key),
+    statusCategory: (category) => readAnalyticsStatusLabel(messages, category),
+    unset: messages.unset,
+  }
+}
+
+/**
+ * Returns the localized label of a workflow status category.
+ *
+ * @param messages - Localized export messages.
+ * @param category - Status category key.
+ * @returns The label, or undefined for an unknown category.
+ */
+function readAnalyticsStatusLabel(messages: AnalyticsExportMessages, category: string) {
+  const labels: Readonly<Record<string, string>> = messages.statusLabels
+  return Object.hasOwn(labels, category) ? labels[category] : undefined
+}
+
 /**
  * Snapshot を fixed-column、formula-safe UTF-8 CSV text へ変換します。
  *
+ * Group 行の「Dimension value」は Team・Project・member などの名前で書き、元の key は
+ * 「Dimension key」列に残します。Table 行は Team と Project の名前も書きます。
+ *
  * @param snapshot - Export 対象 snapshot です。
  * @param locale - Header と label に利用する locale tag です。未対応時は英語へfallbackします。
+ * @param context - Widget の dimension と、内部 ID の代わりに書く表示名です。
  * @returns CRLF 区切りの CSV text です。
  */
-export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string) {
+export function createAnalyticsCsv(
+  snapshot: AnalyticsSnapshot,
+  locale?: string,
+  context: AnalyticsExportContext = {},
+) {
   const normalized = normalizeSnapshot(snapshot)
   const messages = ANALYTICS_EXPORT_MESSAGES[normalizeAnalyticsExportLocale(locale)]
+  const lookup = createAnalyticsExportLabelLookup(messages, context.names)
+  const widgetsById = new Map((context.widgets ?? []).map((widget) => [widget.id, widget]))
   const rows: Array<Array<string | number | boolean | null | undefined>> = [
     [...messages.csvHeaders],
   ]
@@ -1172,7 +1326,11 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
       '',
       '',
       '',
+      '',
+      '',
+      '',
     ])
+    const groupBy = widgetsById.get(widget.widgetId)?.groupBy
     for (const group of widget.groups) {
       rows.push([
         widget.widgetId,
@@ -1181,13 +1339,16 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
         group.value,
         group.sampleSize,
         messages.recordTypes.group,
-        group.label,
+        resolveAnalyticsGroupLabel(groupBy, group, lookup),
         normalized.filter.period.from,
         normalized.filter.period.to,
         '',
         '',
         '',
         '',
+        '',
+        '',
+        group.key,
         '',
         '',
       ])
@@ -1209,6 +1370,9 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
         '',
         '',
         '',
+        '',
+        '',
+        '',
       ])
       for (const segment of point.segments ?? []) {
         rows.push([
@@ -1224,6 +1388,9 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
           segment.key,
           point.from,
           point.to,
+          '',
+          '',
+          '',
           '',
           '',
           '',
@@ -1252,10 +1419,32 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
         row.values.workItemId,
         row.values.projectId,
         row.values.occurredAt,
+        '',
+        readExportName(context.names?.teams, row.values.teamId),
+        typeof row.values.projectId === 'string'
+          ? lookup.project?.(
+              row.values.projectId,
+              typeof row.values.teamId === 'string' ? row.values.teamId : undefined,
+            ) ?? ''
+          : '',
       ])
     }
   }
   return rows.map((row) => row.map(escapeCsvValue).join(',')).join('\r\n')
+}
+
+/**
+ * Reads the display name of a table row ID value.
+ *
+ * @param names - Display names keyed by ID.
+ * @param value - Table row value that holds the ID.
+ * @returns The name, or an empty string when the value is not a known ID.
+ */
+function readExportName(
+  names: ReadonlyMap<string, string> | undefined,
+  value: AnalyticsTableRow['values'][string] | undefined,
+) {
+  return typeof value === 'string' ? names?.get(value) ?? '' : ''
 }
 
 /**
@@ -1277,26 +1466,24 @@ function formatMilestoneCsvDates(row: AnalyticsTableRow) {
 /**
  * Snapshot summary を localized、multi-page PDF document へ変換します。
  *
+ * Report の title・期間・基準日時・絞り込み・widget ごとの値と group 別の内訳・forecast を、
+ * 内部 ID の代わりに名前で書きます。埋め込み font にない文字（Team 名の漢字など）は
+ * viewer の日本語 font で表示する非埋め込み CID font で書きます。
+ *
  * @param snapshot - Export 対象 snapshot です。
  * @param locale - Label に利用する locale tag です。未対応時は英語へfallbackします。
+ * @param context - Report の title、widget 定義、内部 ID の代わりに書く表示名です。
  * @returns `%PDF-1.4` から始まる PDF bytes です。
  */
-export function createAnalyticsPdf(snapshot: AnalyticsSnapshot, locale?: string) {
+export function createAnalyticsPdf(
+  snapshot: AnalyticsSnapshot,
+  locale?: string,
+  context: AnalyticsExportContext = {},
+) {
   const normalized = normalizeSnapshot(snapshot)
   const exportLocale = normalizeAnalyticsExportLocale(locale)
-  const messages = ANALYTICS_EXPORT_MESSAGES[exportLocale]
-  const lines = [
-    'mukuroji analytics',
-    `${messages.asOf}: ${normalized.asOf}`,
-    `${messages.timeZone}: ${normalized.timeZone}`,
-    ...normalized.widgets.map((widget) => {
-      const value = widget.value === null ? messages.unavailable : String(widget.value)
-      const unit = messages.unitLabels[widget.definition.unit]
-      return `${messages.metricLabels[widget.metric]}: ${value} ${unit}`
-    }),
-    `${messages.forecastP85}: ${normalized.forecast.p85 ?? messages.unavailable}`,
-    `${messages.risk}: ${messages.riskLabels[normalized.forecast.risk]}`,
-  ]
+  const lines = createAnalyticsPdfLines(normalized, exportLocale, context)
+    .flatMap((line) => wrapAnalyticsPdfLine(line, exportLocale))
   const pageLines = Array.from(
     { length: Math.ceil(lines.length / PDF_LINES_PER_PAGE) },
     (_, index) => lines.slice(
@@ -1340,6 +1527,14 @@ export function createAnalyticsPdf(snapshot: AnalyticsSnapshot, locale?: string)
       '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
     )
   }
+  const fallbackCharacters = new Set(lines.flatMap((runs) =>
+    runs.flatMap((run) => run.font === 'fallback' ? [...run.text] : [])
+  ))
+  const fallbackFontObjectId = fallbackCharacters.size === 0
+    ? undefined
+    : pushAnalyticsPdfFallbackFont(objects, fallbackCharacters)
+  const fontResources = `/F1 ${fontObjectId} 0 R` +
+    (fallbackFontObjectId === undefined ? '' : ` /F2 ${fallbackFontObjectId} 0 R`)
   const pageObjectIds: number[] = []
   for (const page of pageLines) {
     const content = createPdfPageContent(page, exportLocale)
@@ -1348,7 +1543,7 @@ export function createAnalyticsPdf(snapshot: AnalyticsSnapshot, locale?: string)
     )
     const pageObjectId = objects.push(
       '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ' +
-      `/Resources << /Font << /F1 ${fontObjectId} 0 R >> >> ` +
+      `/Resources << /Font << ${fontResources} >> >> ` +
       `/Contents ${contentObjectId} 0 R >>`,
     )
     pageObjectIds.push(pageObjectId)
@@ -1373,6 +1568,146 @@ export function createAnalyticsPdf(snapshot: AnalyticsSnapshot, locale?: string)
   source += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`
   source += `startxref\n${xrefOffset}\n%%EOF\n`
   return new Uint8Array(Buffer.from(source, 'latin1'))
+}
+
+/** Most groups of one widget that an Analytics PDF lists before summarizing the rest. */
+const PDF_MAX_GROUPS_PER_WIDGET = 100
+
+/** Indentation of the PDF lines that belong to the line above them. */
+const PDF_INDENT = '    '
+
+/**
+ * Builds the text lines of an Analytics PDF: title, period, filters, widget values with their
+ * group breakdown, and the forecast.
+ *
+ * @param snapshot - Normalized snapshot.
+ * @param locale - Export locale.
+ * @param context - Report title, widget definitions, and display names.
+ * @returns Unwrapped text lines in reading order.
+ */
+function createAnalyticsPdfLines(
+  snapshot: AnalyticsSnapshot,
+  locale: AnalyticsExportLocale,
+  context: AnalyticsExportContext,
+) {
+  const messages = ANALYTICS_EXPORT_MESSAGES[locale]
+  const lookup = createAnalyticsExportLabelLookup(messages, context.names)
+  const widgetsById = new Map((context.widgets ?? []).map((widget) => [widget.id, widget]))
+  const lines = [
+    context.title?.trim() || messages.defaultTitle,
+    `${messages.period}: ${formatAnalyticsPdfPeriod(snapshot)}`,
+    `${messages.asOf}: ${snapshot.asOf}`,
+    `${messages.timeZone}: ${snapshot.timeZone}`,
+    ...createAnalyticsPdfFilterLines(snapshot.filter, messages, lookup, context.names),
+    '',
+  ]
+  for (const widget of snapshot.widgets) {
+    const definition = widgetsById.get(widget.widgetId)
+    const unit = messages.unitLabels[widget.definition.unit]
+    const metricLabel = messages.metricLabels[widget.metric]
+    const title = definition?.title.trim()
+    const name = title && title !== metricLabel ? `${title} (${metricLabel})` : metricLabel
+    const value = widget.value === null ? messages.unavailable : String(widget.value)
+    lines.push(`${name}: ${value} ${unit}`)
+    const groups = widget.groups.slice(0, PDF_MAX_GROUPS_PER_WIDGET)
+    for (const group of groups) {
+      const label = resolveAnalyticsGroupLabel(definition?.groupBy, group, lookup)
+      const groupValue = group.value === null
+        ? messages.unavailable
+        : widget.metric === 'milestone-trend'
+          ? messages.dayShift(group.value)
+          : `${group.value} ${unit}`
+      lines.push(`${PDF_INDENT}${label}: ${groupValue} (n=${group.sampleSize})`)
+    }
+    if (widget.groups.length > groups.length) {
+      lines.push(`${PDF_INDENT}${messages.moreGroups(widget.groups.length - groups.length)}`)
+    }
+  }
+  lines.push(
+    '',
+    `${messages.forecastP85}: ${snapshot.forecast.p85 ?? messages.unavailable}`,
+    `${messages.risk}: ${messages.riskLabels[snapshot.forecast.risk]}`,
+  )
+  return lines
+}
+
+/**
+ * Formats the snapshot period as local start and end dates in the snapshot time zone.
+ *
+ * @param snapshot - Normalized snapshot.
+ * @returns `YYYY-MM-DD - YYYY-MM-DD` of the inclusive period start and end.
+ */
+function formatAnalyticsPdfPeriod(snapshot: AnalyticsSnapshot) {
+  const from = Date.parse(snapshot.filter.period.from)
+  const to = Math.max(from, Date.parse(snapshot.filter.period.to))
+  return `${localDateAt(from, snapshot.timeZone)} - ${localDateAt(to, snapshot.timeZone)}`
+}
+
+/**
+ * Describes the applied filter with names instead of internal IDs.
+ *
+ * @param filter - Applied snapshot filter.
+ * @param messages - Localized export messages.
+ * @param lookup - Group label lookup that holds Team, Project, member, and status names.
+ * @param names - Display names, for custom field names.
+ * @returns A heading line followed by one indented line per filter, or one line when none is set.
+ */
+function createAnalyticsPdfFilterLines(
+  filter: AnalyticsFilter,
+  messages: AnalyticsExportMessages,
+  lookup: AnalyticsGroupLabelLookup,
+  names: AnalyticsExportNames | undefined,
+) {
+  const labels = messages.filterLabels
+  const describe = (values: readonly string[] | undefined, name: (value: string) => string) =>
+    values === undefined || values.length === 0 ? undefined : values.map(name).join(', ')
+  const workItemTypeName = (key: string) => {
+    const parts = readSearchWorkItemTypeKey(key)
+    return resolveAnalyticsGroupLabel(
+      { dimension: 'work-item-type' },
+      { key, label: parts ? `${parts.teamId} · ${parts.workItemTypeId}` : key },
+      lookup,
+    )
+  }
+  const entries: Array<[string, string | undefined]> = [
+    [labels.teams, describe(filter.teamIds, (id) => lookup.team?.(id) ?? id)],
+    [labels.projects, describe(filter.projectIds, (id) => lookup.project?.(id) ?? id)],
+    [labels.assignees, describe(filter.assigneeUserIds, (key) =>
+      key === '' ? messages.unset : lookup.member?.(key) ?? key)],
+    [labels.statuses, describe(filter.statusCategories, (category) =>
+      lookup.statusCategory?.(category) ?? category)],
+    [labels.workItemTypes, describe(filter.workItemTypeIds, workItemTypeName)],
+    [labels.customFields, describe(
+      filter.customFields?.map((condition) => {
+        const field = names?.customFields?.get(condition.fieldId) ?? condition.fieldId
+        const operator = messages.customFieldOperators[condition.operator]
+        return condition.value === undefined
+          ? `${field} ${operator}`
+          : `${field} ${operator} ${formatAnalyticsFilterValue(condition.value)}`
+      }),
+      (text) => text,
+    )],
+    [labels.workItems, filter.workItems === undefined || filter.workItems.length === 0
+      ? undefined
+      : messages.workItemCount(filter.workItems.length)],
+  ]
+  const lines = entries.flatMap(([label, value]) =>
+    value === undefined ? [] : [`${PDF_INDENT}${label}: ${value}`]
+  )
+  if (filter.includeArchived) lines.push(`${PDF_INDENT}${labels.includeArchived}`)
+  return lines.length === 0
+    ? [`${messages.filters}: ${messages.noFilters}`]
+    : [`${messages.filters}:`, ...lines]
+}
+
+/**
+ * Formats a custom field filter value for the PDF.
+ *
+ * @param value - Filter comparison value.
+ * @returns The value, with list values joined by commas.
+ */
+function formatAnalyticsFilterValue(value: string | number | boolean | readonly string[]) {
+  return Array.isArray(value) ? value.join(', ') : String(value)
 }
 
 function normalizeAnalyticsQuery(query: unknown): NormalizedAnalyticsQuery {
@@ -3415,20 +3750,173 @@ function escapeCsvValue(value: string | number | boolean | null | undefined) {
   return text
 }
 
+/**
+ * Writes the content stream of one PDF page, switching to the fallback font (`/F2`) for runs the
+ * primary font (`/F1`) cannot draw.
+ *
+ * @param lines - Wrapped lines of the page.
+ * @param locale - Export locale, which selects the primary font.
+ * @returns The content stream source.
+ */
 function createPdfPageContent(
-  lines: readonly string[],
+  lines: readonly (readonly AnalyticsPdfTextRun[])[],
   locale: AnalyticsExportLocale,
 ) {
   return [
     'BT',
-    '/F1 12 Tf',
     '50 760 Td',
-    ...lines.flatMap((line, index) => [
+    ...lines.flatMap((runs, index) => [
       ...(index === 0 ? [] : ['0 -18 Td']),
-      `${createPdfTextOperand(line, locale)} Tj`,
+      ...runs.flatMap((run) => [
+        `/${run.font === 'fallback' ? 'F2' : 'F1'} 12 Tf`,
+        `${createPdfTextOperand(run, locale)} Tj`,
+      ]),
     ]),
     'ET',
   ].join('\n')
+}
+
+/** A run of PDF text drawn with one font. */
+type AnalyticsPdfTextRun = {
+  /** `primary` is the embedded Japanese subset or Helvetica; `fallback` is the CID font. */
+  font: 'primary' | 'fallback'
+  /** Characters of the run, already mapped to ones the font can draw. */
+  text: string
+}
+
+/** Widest text a PDF line holds, in 1/1000 em at the 12 pt body size (512 pt between margins). */
+const PDF_LINE_WIDTH_UNITS = Math.floor((512 / 12) * 1_000)
+
+/** Width that Helvetica text is measured with; wider than most glyphs so lines stay inside. */
+const PDF_HELVETICA_MEASURE_WIDTH = 600
+
+/**
+ * Splits a line into runs by the font that can draw each character.
+ *
+ * Characters outside the primary font use the fallback CID font, which covers Japanese text such
+ * as Team and member names. A character that decomposes to ASCII (`é` to `e`) stays in the primary
+ * font, and one that neither font encodes, such as an emoji, becomes `?`.
+ *
+ * @param line - Line text.
+ * @param locale - Export locale, which selects the primary font.
+ * @returns Runs in reading order.
+ */
+function splitAnalyticsPdfTextRuns(line: string, locale: AnalyticsExportLocale) {
+  const runs: AnalyticsPdfTextRun[] = []
+  const append = (font: AnalyticsPdfTextRun['font'], text: string) => {
+    const last = runs.at(-1)
+    if (last?.font === font) last.text += text
+    else runs.push({ font, text })
+  }
+  for (const character of line) {
+    if (canDrawWithPrimaryPdfFont(character, locale)) {
+      append('primary', character)
+      continue
+    }
+    const ascii = character.normalize('NFKD').replace(/\p{M}/gu, '')
+    if (/^[\x20-\x7E]+$/u.test(ascii)) {
+      append('primary', ascii)
+      continue
+    }
+    const codePoint = character.codePointAt(0)!
+    if (codePoint >= 0xA0 && codePoint <= 0xFFFF && !(codePoint >= 0xD800 && codePoint <= 0xDFFF)) {
+      append('fallback', character)
+    } else {
+      append('primary', '?')
+    }
+  }
+  return runs
+}
+
+/**
+ * Tells whether the primary font of a locale draws a character.
+ *
+ * @param character - One character.
+ * @param locale - Export locale.
+ * @returns True for printable ASCII, and for the embedded Japanese glyphs in Japanese exports.
+ */
+function canDrawWithPrimaryPdfFont(character: string, locale: AnalyticsExportLocale) {
+  const codePoint = character.codePointAt(0)!
+  if (codePoint >= 0x20 && codePoint <= 0x7E) return true
+  return locale === 'ja' && analyticsPdfFont.japaneseGlyphs.includes(character)
+}
+
+/**
+ * Measures a run in 1/1000 em.
+ *
+ * @param character - One character of a run.
+ * @param font - Font the character is drawn with.
+ * @param locale - Export locale.
+ * @returns The advance width.
+ */
+function measureAnalyticsPdfCharacter(
+  character: string,
+  font: AnalyticsPdfTextRun['font'],
+  locale: AnalyticsExportLocale,
+) {
+  if (font === 'fallback') return 1_000
+  const codePoint = character.codePointAt(0)!
+  if (codePoint < 0x20 || codePoint > 0x7E) return 1_000
+  if (locale === 'en') return PDF_HELVETICA_MEASURE_WIDTH
+  return analyticsPdfFont.asciiWidths[codePoint - 0x20] ?? 1_000
+}
+
+/**
+ * Wraps a line into PDF lines that fit between the margins, breaking at the last space when the
+ * line has one and indenting the continuation lines.
+ *
+ * @param line - Unwrapped line text.
+ * @param locale - Export locale.
+ * @returns One or more lines of runs; an empty line stays one empty line.
+ */
+function wrapAnalyticsPdfLine(line: string, locale: AnalyticsExportLocale) {
+  const characters = splitAnalyticsPdfTextRuns(line, locale).flatMap((run) =>
+    [...run.text].map((character) => ({ character, font: run.font }))
+  )
+  const indentation = /^ */u.exec(line)?.[0] ?? ''
+  const continuation = `${indentation}${PDF_INDENT}`
+  const wrapped: AnalyticsPdfTextRun[][] = []
+  let current: typeof characters = []
+  let width = 0
+  for (const entry of characters) {
+    const advance = measureAnalyticsPdfCharacter(entry.character, entry.font, locale)
+    if (current.length > 0 && width + advance > PDF_LINE_WIDTH_UNITS) {
+      const breakIndex = current.findLastIndex((item, index) =>
+        index > continuation.length && item.character === ' '
+      )
+      const head = breakIndex > 0 ? current.slice(0, breakIndex) : current
+      const tail = breakIndex > 0 ? current.slice(breakIndex + 1) : []
+      wrapped.push(joinAnalyticsPdfRuns(head))
+      current = [
+        ...[...continuation].map((character) => ({ character, font: 'primary' as const })),
+        ...tail,
+      ]
+      width = current.reduce((total, item) =>
+        total + measureAnalyticsPdfCharacter(item.character, item.font, locale), 0)
+    }
+    current.push(entry)
+    width += advance
+  }
+  wrapped.push(joinAnalyticsPdfRuns(current))
+  return wrapped
+}
+
+/**
+ * Joins measured characters back into runs.
+ *
+ * @param characters - Characters with their fonts.
+ * @returns Runs of consecutive characters that share a font.
+ */
+function joinAnalyticsPdfRuns(
+  characters: readonly { character: string; font: AnalyticsPdfTextRun['font'] }[],
+) {
+  const runs: AnalyticsPdfTextRun[] = []
+  for (const { character, font } of characters) {
+    const last = runs.at(-1)
+    if (last?.font === font) last.text += character
+    else runs.push({ font, text: character })
+  }
+  return runs
 }
 
 function createPdfFontSubsetTag(fontBytes: Uint8Array) {
@@ -3445,10 +3933,87 @@ function createPdfFontSubsetTag(fontBytes: Uint8Array) {
   return tag
 }
 
-function createPdfTextOperand(value: string, locale: AnalyticsExportLocale) {
+/**
+ * Encodes a run as a PDF string operand of its font.
+ *
+ * @param run - Text run.
+ * @param locale - Export locale, which selects the primary font encoding.
+ * @returns A hex string for the CID fonts, or a literal string for Helvetica.
+ */
+function createPdfTextOperand(run: AnalyticsPdfTextRun, locale: AnalyticsExportLocale) {
+  if (run.font === 'fallback') return `<${toPdfUcs2Hex(run.text)}>`
   return locale === 'ja'
-    ? `<${toAnalyticsPdfGlyphHex(value)}>`
-    : `(${escapePdfText(toPdfAscii(value))})`
+    ? `<${toAnalyticsPdfGlyphHex(run.text)}>`
+    : `(${escapePdfText(toPdfAscii(run.text))})`
+}
+
+/**
+ * Encodes BMP text as big-endian UCS-2 hex for the `UniJIS-UCS2-H` fallback font.
+ *
+ * @param value - Text of BMP characters.
+ * @returns Upper-case hex digits, four per character.
+ */
+function toPdfUcs2Hex(value: string) {
+  return [...value].map((character) => toPdfHexCode(character.codePointAt(0)!)).join('')
+}
+
+/** Name of the non-embedded Japanese CID font that viewers substitute with a system font. */
+const PDF_FALLBACK_FONT_NAME = 'HeiseiKakuGo-W5'
+
+/**
+ * Adds the fallback font objects: a non-embedded Adobe-Japan1 CID font with the predefined
+ * `UniJIS-UCS2-H` CMap, which PDF viewers draw with their own Japanese font, and a ToUnicode CMap
+ * for the characters the document uses so that copying and search return the original text.
+ *
+ * @param objects - PDF objects; the new ones are appended.
+ * @param characters - Characters the document draws with the fallback font.
+ * @returns The object ID of the Type0 font.
+ */
+function pushAnalyticsPdfFallbackFont(objects: string[], characters: ReadonlySet<string>) {
+  const descriptorObjectId = objects.push(
+    `<< /Type /FontDescriptor /FontName /${PDF_FALLBACK_FONT_NAME} ` +
+    '/Flags 4 /FontBBox [-92 -250 1010 922] /ItalicAngle 0 ' +
+    '/Ascent 752 /Descent -221 /CapHeight 737 /StemV 114 >>',
+  )
+  const descendantObjectId = objects.push(
+    `<< /Type /Font /Subtype /CIDFontType0 /BaseFont /${PDF_FALLBACK_FONT_NAME} ` +
+    '/CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 2 >> ' +
+    `/FontDescriptor ${descriptorObjectId} 0 R /DW 1000 >>`,
+  )
+  const codePoints = [...characters].map((character) => character.codePointAt(0)!).sort((a, b) => a - b)
+  const blocks: string[] = []
+  for (let offset = 0; offset < codePoints.length; offset += 100) {
+    const block = codePoints.slice(offset, offset + 100)
+    blocks.push(
+      `${block.length} beginbfchar\n` +
+      block.map((codePoint) => `<${toPdfHexCode(codePoint)}> <${toPdfHexCode(codePoint)}>`).join('\n') +
+      '\nendbfchar',
+    )
+  }
+  const toUnicode = [
+    '/CIDInit /ProcSet findresource begin',
+    '12 dict begin',
+    'begincmap',
+    '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def',
+    '/CMapName /Analytics-Fallback-UCS def',
+    '/CMapType 2 def',
+    '1 begincodespacerange',
+    '<0000> <FFFF>',
+    'endcodespacerange',
+    ...blocks,
+    'endcmap',
+    'CMapName currentdict /CMap defineresource pop',
+    'end',
+    'end',
+  ].join('\n')
+  const toUnicodeObjectId = objects.push(
+    `<< /Length ${Buffer.byteLength(toUnicode, 'latin1')} >>\nstream\n${toUnicode}\nendstream`,
+  )
+  return objects.push(
+    `<< /Type /Font /Subtype /Type0 /BaseFont /${PDF_FALLBACK_FONT_NAME}-UniJIS-UCS2-H ` +
+    `/Encoding /UniJIS-UCS2-H /DescendantFonts [${descendantObjectId} 0 R] ` +
+    `/ToUnicode ${toUnicodeObjectId} 0 R >>`,
+  )
 }
 
 function toAnalyticsPdfGlyphHex(value: string) {

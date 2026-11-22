@@ -69,6 +69,16 @@ describe('Slack DynamoDB delivery queue', () => {
         .toEqual({ deliveries: [], invalidCount: 1 })
     }
   })
+  test('keeps a weekly report reminder\'s week for the delivery-time recheck', async () => {
+    const weekly = { ...row, weeklyReportAuthorMemberKey: 'member@example.test', weeklyReportWeekStart: '2026-09-21' }
+    expect((await fixture(weekly).store.listDue(shard, now, 2)).deliveries[0])
+      .toMatchObject({ weeklyReportAuthorMemberKey: 'member@example.test', weeklyReportWeekStart: '2026-09-21' })
+    expect((await fixture().store.listDue(shard, now, 2)).deliveries[0]?.weeklyReportWeekStart).toBeUndefined()
+    for (const weeklyReportWeekStart of ['', 'last week', '2026-09-21T00:00:00.000Z', 20260921, null]) {
+      expect(await fixture({ ...weekly, weeklyReportWeekStart }).store.listDue(shard, now, 2))
+        .toEqual({ deliveries: [], invalidCount: 1 })
+    }
+  })
   test('distinguishes absent legacy preferences from malformed persisted preferences', async () => {
     const delivery = (await fixture().store.listDue(shard, now, 2)).deliveries[0]
     if (!delivery) throw new Error('Expected delivery')
