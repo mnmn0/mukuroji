@@ -11,6 +11,11 @@ import {
   parseTemplateParticipants,
 } from '../src/documents/model/builtInTemplates'
 import {
+  isChecklistItemOverdue,
+  resolveChecklistAssigneeLabel,
+  updateChecklistItemOwnership,
+} from '../src/documents/model/checklistItems'
+import {
   createChecklistItemWorkItemRelation,
   createDocumentWorkItemRelation,
   createDocumentWorkItemSourceKey,
@@ -270,5 +275,105 @@ describe('Whiteboard notes as Work Items', () => {
     )
 
     expect(html).toBe('')
+  })
+})
+
+describe('checklist item owners and deadlines', () => {
+  const block: DocumentChecklistBlock = {
+    id: 'block-actions',
+    items: [
+      {
+        assigneeMemberKey: 'sato@example.com',
+        checked: false,
+        dueDate: '2026-11-20',
+        id: 'item-owned',
+        text: 'Send the estimate',
+      },
+      { checked: false, id: 'item-open', text: 'Book the review' },
+    ],
+    type: 'checklist',
+  }
+  const assignees = [{ id: 'sato@example.com', label: 'Ichiro Sato' }]
+
+  test('sets and clears the owner and deadline without empty values', () => {
+    const assigned = updateChecklistItemOwnership(block, 'item-open', {
+      assigneeMemberKey: 'yamada@example.com',
+      dueDate: '2026-12-01',
+    })
+    expect(assigned.items[1]).toEqual({
+      assigneeMemberKey: 'yamada@example.com',
+      checked: false,
+      dueDate: '2026-12-01',
+      id: 'item-open',
+      text: 'Book the review',
+    })
+    expect(assigned.items[0]).toBe(block.items[0])
+
+    const cleared = updateChecklistItemOwnership(block, 'item-owned', { dueDate: '' })
+    expect(cleared.items[0]).toEqual({
+      assigneeMemberKey: 'sato@example.com',
+      checked: false,
+      id: 'item-owned',
+      text: 'Send the estimate',
+    })
+    expect(updateChecklistItemOwnership(block, 'item-owned', { assigneeMemberKey: '' }).items[0])
+      .not.toHaveProperty('assigneeMemberKey')
+  })
+
+  test('marks only open items whose deadline has passed as overdue', () => {
+    expect(isChecklistItemOverdue({ checked: false, dueDate: '2026-11-20' }, '2026-11-21')).toBe(true)
+    expect(isChecklistItemOverdue({ checked: false, dueDate: '2026-11-21' }, '2026-11-21')).toBe(false)
+    expect(isChecklistItemOverdue({ checked: true, dueDate: '2026-11-20' }, '2026-11-21')).toBe(false)
+    expect(isChecklistItemOverdue({ checked: false }, '2026-11-21')).toBe(false)
+  })
+
+  test('shows an owner who is no longer offered by the saved member key', () => {
+    expect(resolveChecklistAssigneeLabel(assignees, 'sato@example.com')).toBe('Ichiro Sato')
+    expect(resolveChecklistAssigneeLabel(assignees, 'left@example.com')).toBe('left@example.com')
+    expect(resolveChecklistAssigneeLabel(assignees, undefined)).toBeUndefined()
+  })
+
+  test('offers owner and deadline fields to editors', () => {
+    if (documentRecordFixture.kind !== 'page') {
+      throw new Error('Expected a page fixture.')
+    }
+    const html = renderToStaticMarkup(
+      <DocumentEditor
+        checklistWorkItems={{ assignees, relations: [] }}
+        document={{ ...documentRecordFixture, blocks: [block], relations: [] }}
+        editable
+        saveStatus="idle"
+        t={createTranslator('en')}
+        onDeleteBlock={() => undefined}
+        onMoveBlock={() => undefined}
+        onUpsertBlock={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('aria-label="Owner of checklist item 1"')
+    expect(html).toContain('aria-label="Due date of checklist item 2"')
+    expect(html).toContain('value="2026-11-20"')
+  })
+
+  test('shows the owner and deadline to read-only viewers', () => {
+    if (documentRecordFixture.kind !== 'page') {
+      throw new Error('Expected a page fixture.')
+    }
+    const html = renderToStaticMarkup(
+      <DocumentEditor
+        checklistWorkItems={{ assignees, relations: [] }}
+        document={{ ...documentRecordFixture, blocks: [block], relations: [] }}
+        editable={false}
+        saveStatus="idle"
+        t={createTranslator('en')}
+        onDeleteBlock={() => undefined}
+        onMoveBlock={() => undefined}
+        onUpsertBlock={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('Owner: Ichiro Sato')
+    expect(html).toContain('Due 2026-11-20')
+    expect(html).not.toContain('Owner of checklist item')
   })
 })
