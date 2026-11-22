@@ -39,6 +39,7 @@ import {
 } from '../mutations/useWorkspaceMemberCredentialReset'
 import {
   createWorkspaceAccessMutationSession,
+  getBulkInvitationRunner,
   getCredentialResetRunner,
 } from '../mutations/workspaceAccessMutationSession'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
@@ -319,16 +320,19 @@ export function WorkspaceAccessPanelContainer({
       : getCredentialResetRunner(administratorKey),
     [administratorKey],
   )
+  const bulkInvitationRunner = useMemo(
+    () => administratorKey === undefined
+      ? createMutationRequestRunner()
+      : getBulkInvitationRunner(administratorKey),
+    [administratorKey],
+  )
   const resetMemberCredential = useWorkspaceMemberCredentialReset({
     accessToken: mutationSession.accessToken,
     requestRunner: credentialResetRunner,
     revalidateSignInSecurity: mutateSignInSecurity,
   })
 
-  /**
-   * Reloads the access ledger into the cache without touching retained mutation contexts.
-   */
-  const reloadLedger = async () => {
+  const refresh = async () => {
     if (!accessKey) {
       return
     }
@@ -340,13 +344,6 @@ export function WorkspaceAccessPanelContainer({
       () => getWorkspaceAccess(mutationSession.accessToken),
       { revalidate: false },
     )
-  }
-
-  const refresh = async () => {
-    if (!accessKey) {
-      return
-    }
-    await reloadLedger()
     mutationRequestRunner.discardRetainedContexts()
   }
 
@@ -405,7 +402,7 @@ export function WorkspaceAccessPanelContainer({
           // own idempotency key and a retry of a failed row reuses that row's key.
           return await sendBulkWorkspaceInvitations(
             inputs,
-            (input) => mutationRequestRunner.run(
+            (input) => bulkInvitationRunner.run(
               `workspace-invitation:create:${input.email}`,
               JSON.stringify(input),
               (context) => createWorkspaceInvitation(accessToken, input, context),
@@ -414,14 +411,8 @@ export function WorkspaceAccessPanelContainer({
             onOutcome,
           )
         } finally {
-          // A failed row keeps its retained context: a reloaded ledger does not show whether an
-          // earlier POST that lost its response is still running, so a retry of the same row must
-          // reuse its idempotency key.
-          try {
-            await reloadLedger()
-          } catch {
-            // The row outcomes stay on screen; the ledger keeps its last snapshot.
-          }
+          // Rows run on their own runner, so this refresh keeps their retained contexts.
+          await retryLoad()
         }
       }}
       onReinviteInvitation={async (invitationId) => {

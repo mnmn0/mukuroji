@@ -46,3 +46,26 @@ export function getCredentialResetRunner(administratorKey: string) {
   credentialResetRunners.set(administratorKey, runner)
   return runner
 }
+
+/** Bulk invitation runners of this page, by the administrator's member key. */
+const bulkInvitationRunners = new Map<string, MutationRequestRunner>()
+
+/**
+ * Returns the runner of an administrator's bulk invitations.
+ *
+ * Unlike the session runner, a snapshot refresh after another mutation does not discard its
+ * retained contexts: a row whose response was lost may still be running on the server, so a
+ * retry of that row must reuse its idempotency key even after other changes on the page. Each
+ * administrator gets their own runner, so another account signed in on the same page never
+ * reuses their keys.
+ *
+ * @param administratorKey - Member key of the signed-in administrator.
+ * @returns The administrator's runner.
+ */
+export function getBulkInvitationRunner(administratorKey: string) {
+  const existing = bulkInvitationRunners.get(administratorKey)
+  if (existing) return existing
+  const runner = createMutationRequestRunner()
+  bulkInvitationRunners.set(administratorKey, runner)
+  return runner
+}
