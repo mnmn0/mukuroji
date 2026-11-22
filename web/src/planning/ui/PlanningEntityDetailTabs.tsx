@@ -64,7 +64,7 @@ export function PlanningEntityDetailTabs({
       <div aria-label={labels.tabs} className="flex gap-1 border-b border-[var(--workbench-border)]" role="tablist">
         {detailTabs.map((value) => (
           <button
-            aria-controls={tab === value ? `${baseId}-${value}-panel` : undefined}
+            aria-controls={`${baseId}-${value}-panel`}
             aria-selected={tab === value}
             className={`-mb-px min-h-9 border-b-2 px-3 text-sm font-semibold ${tab === value
               ? 'border-tone-6fbfb4 text-[var(--workbench-text)]'
@@ -85,16 +85,26 @@ export function PlanningEntityDetailTabs({
           </button>
         ))}
       </div>
+      {/* The details panel stays mounted while hidden so the editor keeps unsaved changes. */}
       <div
-        aria-labelledby={`${baseId}-${tab}-tab`}
-        id={`${baseId}-${tab}-panel`}
+        aria-labelledby={`${baseId}-details-tab`}
+        hidden={tab !== 'details'}
+        id={`${baseId}-details-panel`}
         role="tabpanel"
       >
-        {tab === 'details' ? details : (
+        {details}
+      </div>
+      <div
+        aria-labelledby={`${baseId}-activity-tab`}
+        hidden={tab !== 'activity'}
+        id={`${baseId}-activity-panel`}
+        role="tabpanel"
+      >
+        {tab === 'activity' ? (
           <section className="workbench-panel grid gap-4 p-5">
             {renderActivity()}
           </section>
-        )}
+        ) : null}
       </div>
     </div>
   )

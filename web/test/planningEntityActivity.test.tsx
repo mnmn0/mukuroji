@@ -210,6 +210,21 @@ describe('Planning entity activity tab', () => {
     expect(activityRenders).toBe(0)
   })
 
+  test('keeps the details mounted while the activity tab is open, so unsaved edits survive', () => {
+    const html = renderToStaticMarkup(
+      <PlanningEntityDetailTabs
+        defaultTab="activity"
+        details={<input defaultValue="unsaved" name="draft" />}
+        labels={labels.entityDetailTabs}
+        renderActivity={() => <p>activity</p>}
+      />,
+    )
+
+    expect(html).toContain('name="draft"')
+    expect(html).toMatch(/hidden=""[^>]*role="tabpanel"><input/)
+    expect(html).toContain('<p>activity</p>')
+  })
+
   test('adds the activity tab to the selected entity only when the page supplies it', () => {
     /** Renders the Planning screen with a selected Milestone. */
     const render = (withActivity: boolean) => renderToStaticMarkup(
