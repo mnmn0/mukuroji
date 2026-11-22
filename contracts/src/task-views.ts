@@ -110,14 +110,12 @@ export type TaskViewFilters = Omit<WorkspaceSearchFilters, 'statuses'> & {
   workItemTypeIds?: string[]
 }
 
-/** Layout modes supported by Search and task-oriented product surfaces. */
+/** Layout modes supported by task-oriented product surfaces. */
 export type TaskViewLayoutMode =
   | 'table'
   | 'board'
-  | 'list'
   | 'gantt'
   | 'calendar'
-  | 'timeline'
 
 /** Sort direction used by task view sorting and grouping. */
 export type TaskViewSortDirection = 'asc' | 'desc'

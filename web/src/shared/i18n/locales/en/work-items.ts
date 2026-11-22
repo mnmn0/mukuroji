@@ -282,6 +282,7 @@ export const workItemsMessages = {
   'tasks.calendar.currentMonth': 'This month',
   'tasks.calendar.nextMonth': 'Next month',
   'tasks.calendar.monthNavigation': 'Calendar month',
+  'tasks.calendar.shownMonthNote': 'Shows Work Items scheduled in this month and Work Items without a schedule.',
   'tasks.gantt.previousPeriod': 'Previous month',
   'tasks.gantt.currentPeriod': 'From this month',
   'tasks.gantt.nextPeriod': 'Next month',

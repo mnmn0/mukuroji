@@ -38,7 +38,10 @@ import {
 } from '../model/taskView'
 import { TaskViewHeading, TaskWorkItemTypeBadge } from './TaskViewPrimitives'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
-import { TaskCalendarMonthNavigation } from './TaskScheduleWindowToolbar'
+import {
+  TaskCalendarMonthNavigation,
+  type TaskCalendarMonthNote,
+} from './TaskScheduleWindowToolbar'
 import {
   createTaskCalendarMonthWindow,
   getCurrentTaskDate,
@@ -107,6 +110,11 @@ export type TaskCalendarViewProps = {
   month?: string
   /** Moves the calendar to another month. Shown as period navigation together with `month`. */
   onMonthChange?: (month: string) => void
+  /**
+   * Note under the month navigation: `loaded-period` when the screen loads only the shown
+   * period, `shown-month` when it loads every Work Item. `loaded-period` when omitted.
+   */
+  monthNote?: TaskCalendarMonthNote
   /** Opens the create panel with a date or date-range context. */
   onCreateTaskOpen?: (context?: CalendarTaskCreateContext) => void
   /** Selects a task in the shared detail pane. */
@@ -145,6 +153,7 @@ export function TaskCalendarView({
   configuration,
   configurationsByTeam = {},
   month,
+  monthNote,
   onCreateTaskOpen,
   onMonthChange,
   onRequestScheduleChange,
@@ -365,7 +374,12 @@ export function TaskCalendarView({
         titleKey="tasks.view.calendar"
       />
       {month && onMonthChange ? (
-        <TaskCalendarMonthNavigation month={month} onMonthChange={onMonthChange} t={t} />
+        <TaskCalendarMonthNavigation
+          month={month}
+          note={monthNote}
+          onMonthChange={onMonthChange}
+          t={t}
+        />
       ) : null}
       {errorMessage ? (
         <p className="border-b border-tone-fecaca bg-tone-fef2f2 px-4 py-2 text-sm font-medium text-fg-b42318" role="alert">
