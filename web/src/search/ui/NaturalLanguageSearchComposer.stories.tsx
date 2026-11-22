@@ -67,22 +67,12 @@ export const ReviewAndApply: Story = {
     await expect(applyFilters).toHaveBeenCalledWith({
       filters: expect.objectContaining({ statuses: ['todo', 'in-progress'] }),
       report: { groupBy: 'team', metric: 'count' },
-    })
+    }, expect.any(String))
   },
-}
-
-/**
- * Keeps the shared fixture reviewable regardless of the current date, because an
- * expired generation hides the editable filters.
- */
-const currentAiSearchGeneration = {
-  ...aiSearchGenerationFixture,
-  expiresAt: '2099-12-31T00:00:00.000Z',
 }
 
 /** File is not indexed, so it is not offered as a type filter for a new draft. */
 export const HidesUnindexedFileType: Story = {
-  args: { generation: currentAiSearchGeneration },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.getByRole('button', { name: 'Work Item' })).toHaveAttribute('aria-pressed', 'true')
@@ -94,7 +84,7 @@ export const HidesUnindexedFileType: Story = {
 export const ClearsExistingFileSelection: Story = {
   args: {
     generation: {
-      ...currentAiSearchGeneration,
+      ...aiSearchGenerationFixture,
       content: {
         ...aiSearchGenerationFixture.content,
         draft: {
