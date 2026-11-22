@@ -14,6 +14,7 @@ import {
 } from '../../modules/notifications'
 import { parseNotificationAppOrigin } from './notification-app-origin'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
+import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
 
 /**
  * Validates the deploy-time application origin used for Email deep links.
@@ -84,7 +85,11 @@ export function createProductionEmailNotificationHandler(): () => Promise<number
   const region = loadServerConfig().awsRegion
   const documentClient = createDynamoDbDocumentClient(createDynamoDbClient())
   const store = new DynamoDbChannelDeliveryStore(documentClient, tableName, 'email')
-  const isAuthorized = createProductionNotificationDeliveryAuthorizer(documentClient, { identityTableName, fileTableName })
+  const isAuthorized = createProductionNotificationDeliveryAuthorizer(documentClient, {
+    identityTableName,
+    fileTableName,
+    timesheetReminders: createConfiguredTimesheetReminderRevalidator(environment.ANALYTICS_TABLE_NAME?.trim()),
+  })
   const ses = new SESv2Client({ region })
   const send = createEmailNotificationSender({
     sender, appOrigin,

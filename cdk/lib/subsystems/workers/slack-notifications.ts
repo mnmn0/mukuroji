@@ -39,6 +39,8 @@ export function defineSlackNotificationJob(
     runtimeScope: 'notification-schedule',
     environment: {
       NOTIFICATION_SLACK_APP_ORIGIN: input.webOrigin,
+      // Timesheet reminders reread their time entries before they are sent.
+      ANALYTICS_TABLE_NAME: stores.analyticsTable.tableName,
       NOTIFICATIONS_TABLE_NAME: stores.notificationsTable.tableName,
       ENTERPRISE_IDENTITY_TABLE_NAME: stores.enterpriseIdentityTable.tableName,
       TENANT_ADMINISTRATION_TABLE_NAME: stores.tenantAdministrationTable.tableName,
@@ -67,6 +69,8 @@ export function defineSlackNotificationJob(
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({ actions: ['dynamodb:GetItem'], resources: [stores.requestIntakeTable.tableArn] }));
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({ actions: ['dynamodb:GetItem'], resources: [stores.collaborationTable.tableArn] }));
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({ actions: ['dynamodb:GetItem'], resources: [stores.fileProofingTable.tableArn] }));
+      // A timesheet reminder is sent only while one of its time entries is still unsubmitted.
+      grantee.addToPrincipalPolicy(new iam.PolicyStatement({ actions: ['dynamodb:GetItem'], resources: [stores.analyticsTable.tableArn] }));
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({ actions: ['cognito-idp:AdminListGroupsForUser'], resources: [parameters.cognitoUserPoolArn] }));
       grantee.addToPrincipalPolicy(new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue'],
