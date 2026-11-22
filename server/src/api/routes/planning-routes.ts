@@ -34,6 +34,7 @@ import {
   type WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
+import type { AuditEventV1 } from '../../modules/audit/audit'
 import type { Context } from 'hono'
 import { type Locale, ProjectDataError, type ProjectAccessEntry, type ProjectRole } from '../../modules/directory'
 import {
@@ -102,7 +103,14 @@ import {
   qualifyEnterpriseProjectScopes,
 } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
-import { readLocale } from '../shared/input-parsing'
+import { readAuditEventQuery, readLocale } from '../shared/input-parsing'
+import {
+  createPlanningEntityAuditTransaction,
+  PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
+  readPlanningEntityAuditScopes,
+  redactPlanningEntityAuditReferences,
+  toPlanningEntityActivityPageView,
+} from '../shared/planning-entity-audit'
 import {
   createPlanningUpdateCommentAuditEvent,
   createPlanningUpdatePublishAuditEvent,
@@ -133,6 +141,7 @@ import {
   requireProjectPermission,
   requireTeamPermission,
   requireWorkspaceAdministration,
+  requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
   resolveProjectAccessTeamId,
   type WorkspacePrincipal,
@@ -781,6 +790,26 @@ async function requirePlanningScopePermission(
   }
 }
 
+/**
+ * Creates the audit transaction committed with one Planning entity change from this request.
+ *
+ * @param c - Hono request context.
+ * @param principal - Authenticated Workspace principal making the change.
+ * @param body - Validated request values recorded in the audit request fingerprint.
+ * @returns The audit transaction, or `undefined` when audit is not configured.
+ */
+function createPlanningEntityRouteAuditTransaction(
+  c: Context,
+  principal: WorkspacePrincipal,
+  body: unknown,
+) {
+  return createPlanningEntityAuditTransaction(
+    principal.directoryId,
+    createApiMutationContext(c, principal, body),
+    principal.userKey,
+  )
+}
+
 async function requirePlanningEntityPermission(
   principal: WorkspacePrincipal,
   entities: readonly PlanningEntity[],
@@ -987,6 +1016,84 @@ async function filterPlanningUpdatesByCapturedScope(
     }
   }
   return visible
+}
+
+/**
+ * Checks whether the caller may read one Planning entity audit event.
+ *
+ * Every scope the event shows is authorized like an immutable update's captured scope, so history
+ * recorded while the entity was in another Team or Project stays hidden after a move.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param event - Stored audit event of the entity.
+ * @param authorizationCache - Request-local scope authorizations keyed by Team and Project.
+ * @returns Whether the event may be returned.
+ */
+async function canReadPlanningEntityAuditEvent(
+  principal: WorkspacePrincipal,
+  event: AuditEventV1,
+  authorizationCache: Map<string, Promise<void>>,
+): Promise<boolean> {
+  const scopes = readPlanningEntityAuditScopes(event)
+  if (!scopes) return false
+  for (const scope of scopes) {
+    const scopeKey = JSON.stringify([scope.teamId ?? null, scope.projectId ?? null])
+    let authorization = authorizationCache.get(scopeKey)
+    if (!authorization) {
+      authorization = requirePlanningEntityAuditScopeRead(principal, scope)
+      authorizationCache.set(scopeKey, authorization)
+    }
+    try {
+      await authorization
+    } catch (error) {
+      if (isPlanningVisibilityAuthorizationError(error)) return false
+      throw error
+    }
+  }
+  return true
+}
+
+/**
+ * Requires read access to one scope shown by a Planning entity audit event.
+ *
+ * The activity route is authorized at the entity's current resource, so an Enterprise caller's
+ * Workspace grant is evaluated again at the Workspace resource for history recorded while the
+ * entity was Workspace-scoped. Team and Project scopes use the captured-scope rule.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param scope - Scope recorded by the event.
+ * @throws PlanningError when the caller cannot read the scope.
+ */
+async function requirePlanningEntityAuditScopeRead(
+  principal: WorkspacePrincipal,
+  scope: { teamId?: string; projectId?: string },
+): Promise<void> {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (
+    scope.teamId !== undefined ||
+    scope.projectId !== undefined ||
+    principal.enterprisePermissions === undefined ||
+    evaluation === undefined
+  ) {
+    await requirePlanningUpdateCapturedScopePermission(principal, scope)
+    return
+  }
+  requireWorkspaceBusinessRead(principal)
+  const allowed = evaluateEnterpriseAccess({
+    permission: 'planning.read',
+    principal: evaluation.principal,
+    assignments: evaluation.assignments,
+    customRoles: evaluation.snapshot.customRoles,
+    groupMappings: evaluation.groupMappings,
+    resource: { workspaceId: principal.directoryId, kind: 'workspace' },
+  }).allowed
+  if (!allowed) {
+    throw new PlanningError(
+      403,
+      'PlanningUpdateScopeAccessDenied',
+      'Workspace-scoped Planning access requires Workspace permission.',
+    )
+  }
 }
 
 /** Returns whether an authorization failure should hide one historical row. */
@@ -3974,7 +4081,12 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         }
         await requirePlanningActiveOwner(principal, input.ownerMemberKey)
         const creation: PlanningEntityCreation = { ...input, id: entityId }
-        return workItemDependencies.planning.create(principal.directoryId, creation, workItemState)
+        return workItemDependencies.planning.create(
+          principal.directoryId,
+          creation,
+          workItemState,
+          createPlanningEntityRouteAuditTransaction(c, principal, creation),
+        )
       }
       if (input.id !== undefined) {
         const response = await create(input.id)
@@ -4018,7 +4130,13 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       if (isRecord(input.patch) && input.patch.ownerMemberKey !== undefined) {
         await requirePlanningActiveOwner(principal, input.patch.ownerMemberKey)
       }
-      const response = await workItemDependencies.planning.update(principal.directoryId, entityId, input, workItemState)
+      const response = await workItemDependencies.planning.update(
+        principal.directoryId,
+        entityId,
+        input,
+        workItemState,
+        createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...input }),
+      )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
     } catch (error) {
       return toPlanningErrorResponse(c, error)
@@ -4041,8 +4159,68 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
       requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
       await requirePlanningEntityPermission(principal, snapshot.entities, entityId, 'manager')
-      const response = await workItemDependencies.planning.archive(principal.directoryId, entityId, input, workItemState)
+      const response = await workItemDependencies.planning.archive(
+        principal.directoryId,
+        entityId,
+        input,
+        workItemState,
+        createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...input }),
+      )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+
+  /**
+   * Planning entity の作成・変更・archive などの活動を新しい順の cursor page で返します。
+   * Live graph で見える entity は閲覧者、退避済み entity は復元できる manager だけが読めます。
+   */
+  routeApp.get('/api/planning/entities/:entityId/activity', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      const entityId = readPlanningRouteId(c.req.param('entityId'), 'Planning entity ID')
+      const snapshot = await workItemDependencies.planning.get(
+        principal.directoryId,
+        await readPlanningWorkItemState(principal),
+      )
+      const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
+      const visible = visibleSnapshot.entities.some((entity) => entity.id === entityId)
+      if (!visible) {
+        const archived = snapshot.entities.some((entity) => entity.id === entityId)
+          ? undefined
+          : await workItemDependencies.planning.getArchivedEntity(principal.directoryId, entityId)
+        if (!archived || !await canManagePlanningEntityScope(principal, archived)) {
+          throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
+        }
+      }
+      try {
+        const page = await workspaceDependencies.auditEvents.query(
+          readAuditEventQuery(c, principal.directoryId, {
+            type: PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
+            id: entityId,
+          }),
+        )
+        const scopeAuthorizations = new Map<string, Promise<void>>()
+        const visibleEntityIds = new Set(visibleSnapshot.entities.map((entity) => entity.id))
+        const events = []
+        for (const event of page.events) {
+          if (await canReadPlanningEntityAuditEvent(principal, event, scopeAuthorizations)) {
+            events.push(redactPlanningEntityAuditReferences(event, visibleEntityIds))
+          }
+        }
+        return c.json(toPlanningEntityActivityPageView({ ...page, events }))
+      } catch (error) {
+        if (error instanceof TypeError || error instanceof RangeError) {
+          return c.json({ code: 'InvalidAuditQuery', message: error.message }, 400)
+        }
+        throw error
+      }
     } catch (error) {
       return toPlanningErrorResponse(c, error)
     }
@@ -4112,6 +4290,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
               return false
             }
           },
+          transaction: createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...input }),
         },
       )
       return c.json({
@@ -4192,7 +4371,13 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           )
         }
         const duplication: PlanningEntityDuplication = { ...input, targetId }
-        return workItemDependencies.planning.duplicate(principal.directoryId, entityId, duplication, workItemState)
+        return workItemDependencies.planning.duplicate(
+          principal.directoryId,
+          entityId,
+          duplication,
+          workItemState,
+          createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...duplication }),
+        )
       }
       if (input.targetId !== undefined) {
         const response = await duplicate(input.targetId)
@@ -4246,7 +4431,13 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         )
       }
       requirePlanningMoveDoesNotInvalidateUpdateCadence(snapshot, entityId, input)
-      const response = await workItemDependencies.planning.move(principal.directoryId, entityId, input, workItemState)
+      const response = await workItemDependencies.planning.move(
+        principal.directoryId,
+        entityId,
+        input,
+        workItemState,
+        createPlanningEntityRouteAuditTransaction(c, principal, { entityId, ...input }),
+      )
       return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
     } catch (error) {
       return toPlanningErrorResponse(c, error)
@@ -4770,6 +4961,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         cycleId,
         input,
         workItemState,
+        createPlanningEntityRouteAuditTransaction(c, principal, { cycleId, ...input }),
       )
       return c.json({
         cycleId: response.cycleId,
@@ -4873,6 +5065,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         cycleId,
         input,
         workItemState,
+        createPlanningEntityRouteAuditTransaction(c, principal, { cycleId, ...input }),
       )
       return c.json({
         ...response,

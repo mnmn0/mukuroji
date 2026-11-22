@@ -827,7 +827,7 @@ export const workItemsMessages = {
   'workItems.crossProject.eyebrow': 'Project 横断',
   'workItems.crossProject.title': 'Work Item 一覧',
   'workItems.crossProject.description':
-    '閲覧できる Project の Work Item を 1 つの表にまとめ、Project や Contributor で絞り込みます。',
+    '閲覧できる Project の Work Item を表・ボード・ガントにまとめ、Project や Contributor で絞り込みます。',
   'workItems.crossProject.filters': 'Work Item 一覧の絞り込み',
   'workItems.crossProject.projects.label': 'Project',
   'workItems.crossProject.projects.all': 'すべて',
@@ -837,6 +837,8 @@ export const workItemsMessages = {
   'workItems.crossProject.member': '参加メンバー',
   'workItems.crossProject.jobRole': 'ジョブロール',
   'workItems.crossProject.any': '指定なし',
+  'workItems.crossProject.layout': '表示形式',
+  'workItems.crossProject.board.unplaced': 'その他の状態',
   'workItems.crossProject.groupBy': 'グループ',
   'workItems.crossProject.groupBy.project': 'Project',
   'workItems.crossProject.groupBy.assignee': '担当者',
