@@ -376,10 +376,12 @@ function ProfileForm({
       skills: splitList(skills),
       calendarSource: inheritsWorkspace ? 'workspace' : 'custom',
       timeZone: timeZone.trim() || 'UTC',
-      // The stored schedule is kept only while the hours and the calendar stay the same.
-      schedule: profile && Number(hours) === profile.schedule.monday.minutes / 60 &&
-        (profile.calendarSource === 'workspace') === inheritsWorkspace
-        ? profile.schedule
+      // A saved profile keeps its weekdays, so a member's own days off survive a change of hours
+      // or of calendar; only a new profile gets a fresh schedule.
+      schedule: profile
+        ? Number(hours) === profile.schedule.monday.minutes / 60
+          ? profile.schedule
+          : applyScheduleHours(profile.schedule, hours)
         : createSchedule(hours, inheritsWorkspace),
       holidays: createHolidays(holidayDates, profile?.holidays ?? []),
       expectedRevision: profileRevision,
@@ -433,6 +435,38 @@ function PreviewSummary({ memberId, memberLabel, snapshot, t }: { memberId: stri
 }
 
 /**
+ * Reads the daily minutes typed in the form.
+ *
+ * @param hoursValue - Daily hours typed in the form.
+ * @returns Minutes from 0 to 1440; 0 when the text is not a number.
+ */
+function readScheduleMinutes(hoursValue: string): number {
+  const hours = Number(hoursValue)
+  return Number.isFinite(hours) ? Math.max(0, Math.min(1_440, Math.round(hours * 60))) : 0
+}
+
+/**
+ * Sets new daily hours on the weekdays a saved schedule works, keeping its days off.
+ *
+ * @param schedule - Saved schedule.
+ * @param hoursValue - Daily hours typed in the form.
+ * @returns A schedule with the same working weekdays and the new hours.
+ */
+function applyScheduleHours(schedule: WorkingSchedule, hoursValue: string): WorkingSchedule {
+  const minutes = readScheduleMinutes(hoursValue)
+  const apply = (day: WorkingSchedule['monday']) => day.enabled ? { enabled: true, minutes } : { ...day }
+  return {
+    monday: apply(schedule.monday),
+    tuesday: apply(schedule.tuesday),
+    wednesday: apply(schedule.wednesday),
+    thursday: apply(schedule.thursday),
+    friday: apply(schedule.friday),
+    saturday: apply(schedule.saturday),
+    sunday: apply(schedule.sunday),
+  }
+}
+
+/**
  * Creates a working schedule from the submitted daily hours.
  *
  * @param hoursValue - Daily hours typed in the form.
@@ -442,10 +476,7 @@ function PreviewSummary({ memberId, memberLabel, snapshot, t }: { memberId: stri
  * @returns The schedule to save.
  */
 function createSchedule(hoursValue: string, inheritsWorkspace: boolean): WorkingSchedule {
-  const hours = Number(hoursValue)
-  const minutes = Number.isFinite(hours)
-    ? Math.max(0, Math.min(1_440, Math.round(hours * 60)))
-    : 0
+  const minutes = readScheduleMinutes(hoursValue)
   if (inheritsWorkspace) {
     const day = { enabled: minutes > 0, minutes }
     return {

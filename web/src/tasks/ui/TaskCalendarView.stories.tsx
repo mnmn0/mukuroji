@@ -44,3 +44,15 @@ export const MonthWindow: Story = {
     return <TaskCalendarView {...args} month={month} onMonthChange={setMonth} />
   },
 }
+
+/** Month whose weekends and a company holiday (2026-06-03) are shaded as Workspace days off. */
+export const WorkspaceDaysOff: Story = {
+  args: {
+    month: '2026-06',
+    workingCalendar: {
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      holidays: ['2026-06-03'],
+    },
+  },
+}
