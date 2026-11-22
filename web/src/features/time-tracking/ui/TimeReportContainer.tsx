@@ -1,4 +1,4 @@
-import type { TimeTrackingGroupBy } from '@mukuroji/contracts'
+import { DEFAULT_WORKSPACE_CURRENCY, type TimeTrackingGroupBy } from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
 import type { Locale } from '../../../shared/i18n/i18n'
 import { createTranslator } from '../../../shared/i18n/i18n'
@@ -7,8 +7,11 @@ import { TimeTrackingApiError } from '../api/timeTrackingRequest'
 import { createTimeReportFileName, isTimeReportRangeOrdered, type TimeReportRange } from '../model/timeReport'
 import { resolveBrowserTimeZone } from '../model/timePeriod'
 import { useSaveTimeBudget } from '../mutations/useSaveTimeBudget'
+import { useSaveTimeRateCard } from '../mutations/useSaveTimeRateCard'
+import { useTimeRateCard, useTimeTrackingTeamSettings } from '../queries/useTimeRateCard'
 import { useTimeTrackingSummary } from '../queries/useTimeTrackingSummary'
 import { TimeBudgetPanel, type TimeBudgetProjectOption } from './TimeBudgetPanel'
+import { TimeRateCardPanel, type TimeRateCardJobRoleOption } from './TimeRateCardPanel'
 import { TimeReport, type TimeReportLabels } from './TimeReport'
 import { createTimeTrackingFormatters } from './timeTrackingText'
 
@@ -28,6 +31,8 @@ export type TimeReportContainerProps = {
   labels: TimeReportLabels
   /** Projects of the Team, offered as budget scopes. */
   projects: readonly TimeBudgetProjectOption[]
+  /** Job roles of the Team's Work Item configuration, offered in the rate card. */
+  jobRoles: readonly TimeRateCardJobRoleOption[]
   /** Opens another period or grouping. */
   onChange: (range: TimeReportRange, groupBy: TimeTrackingGroupBy) => void
 }
@@ -59,6 +64,7 @@ function triggerCsvDownload(blob: Blob, fileName: string): void {
 export function TimeReportContainer({
   accessToken,
   groupBy,
+  jobRoles,
   labels,
   locale,
   onChange,
@@ -80,6 +86,16 @@ export function TimeReportContainer({
   )
   const budgetReport = useTimeTrackingSummary(accessToken, teamId, budgetInput, ordered && canSeeCosts)
   const saveBudget = useSaveTimeBudget(accessToken, teamId)
+  const settings = useTimeTrackingTeamSettings(accessToken, teamId)
+  const canManageRateCard = settings.data?.canManageRateCard === true
+  const rateCard = useTimeRateCard(accessToken, teamId, canManageRateCard)
+  const saveRateCard = useSaveTimeRateCard(accessToken, teamId)
+  const members = useMemo(
+    () => Object.entries(labels.members)
+      .map(([id, name]) => ({ id, name }))
+      .sort((left, right) => left.name.localeCompare(right.name, locale)),
+    [labels.members, locale],
+  )
 
   return (
     <div className="grid min-w-0 gap-6">
@@ -104,7 +120,7 @@ export function TimeReportContainer({
       />
       {canSeeCosts ? (
         <TimeBudgetPanel
-          defaultCurrency={locale === 'ja' ? 'JPY' : 'USD'}
+          defaultCurrency={settings.data?.defaultCurrency ?? DEFAULT_WORKSPACE_CURRENCY}
           hasLoadError={Boolean(budgetReport.error)}
           isLoading={budgetReport.isLoading}
           locale={locale}
@@ -116,6 +132,18 @@ export function TimeReportContainer({
           scope={budgetScope}
           t={t}
           {...(budgetReport.data ? { summary: budgetReport.data } : {})}
+        />
+      ) : null}
+      {canManageRateCard ? (
+        <TimeRateCardPanel
+          hasLoadError={Boolean(rateCard.error)}
+          isLoading={rateCard.isLoading}
+          jobRoles={jobRoles}
+          members={members}
+          onRetry={() => { void rateCard.mutate().catch(() => undefined) }}
+          onSave={saveRateCard}
+          t={t}
+          {...(rateCard.data ? { rateCard: rateCard.data } : {})}
         />
       ) : null}
     </div>

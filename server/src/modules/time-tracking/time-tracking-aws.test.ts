@@ -320,7 +320,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
     const service = new TimeTrackingService(
       new DynamoDbTimeTrackingRepository(
         'analytics-table',
-        createDocumentClient([{ Items: [] }, {}], commands),
+        createDocumentClient([{ Items: [] }, {}, {}], commands),
       ),
       {
         now: () => new Date('2026-08-02T12:00:00.000Z'),
@@ -342,8 +342,10 @@ describe('DynamoDbTimeTrackingRepository', () => {
       idempotencyKey: 'entry-1',
     }, false)
 
-    expect(commands[1]?.input.TransactItems).toHaveLength(4)
-    expect(JSON.stringify(commands[1]?.input.TransactItems)).toContain('developer-platform-table')
+    // An entry saved without a rate reads the Team rate card before it is written.
+    expect(commands[1]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_RATE_CARD#team-1' })
+    expect(commands[2]?.input.TransactItems).toHaveLength(4)
+    expect(JSON.stringify(commands[2]?.input.TransactItems)).toContain('developer-platform-table')
     expect(completed).toBe(0)
   })
 
@@ -481,7 +483,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
       recordKey: 'TIME_CLOSE#team-1#2026-07',
     }
     const service = new TimeTrackingService(
-      new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{ Items: [julyClose] }, {}], commands)),
+      new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{ Items: [julyClose] }, {}, {}], commands)),
       { now: () => new Date('2026-08-02T12:00:00.000Z'), createId: () => 'entry-1' },
     )
 
@@ -499,7 +501,7 @@ describe('DynamoDbTimeTrackingRepository', () => {
       source: 'manual',
     }, false)
 
-    const items = commands[1]?.input.TransactItems
+    const items = commands[2]?.input.TransactItems
     if (!Array.isArray(items)) throw new Error('Expected transaction items.')
     expect(items.slice(0, 2)).toEqual([
       {
@@ -528,6 +530,8 @@ describe('DynamoDbTimeTrackingRepository', () => {
       value: async (): Promise<unknown> => {
         calls += 1
         if (calls === 1) return { Items: [] }
+        // The second read finds no rate card.
+        if (calls === 2) return {}
         throw Object.assign(new Error('Transaction cancelled'), {
           name: 'TransactionCanceledException',
           CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }, { Code: 'None' }],
@@ -568,5 +572,43 @@ describe('DynamoDbTimeTrackingRepository', () => {
 
     await expect(repository.listPeriodCloses('workspace-1', 'team-1'))
       .rejects.toMatchObject({ status: 500, code: 'InvalidStoredTimeTrackingRecord' })
+  })
+
+  test('saves a rate card with a revision condition and an audit event whose rates are redacted', async () => {
+    const commands: CommandWithInput[] = []
+    const service = new TimeTrackingService(
+      new DynamoDbTimeTrackingRepository('analytics-table', createDocumentClient([{}, {}], commands)),
+      {
+        now: () => new Date('2026-08-02T12:00:00.000Z'),
+        createId: () => 'id-1',
+        audit: { tableName: 'audit-table', retentionDays: 30 },
+      },
+    )
+
+    const saved = await service.saveRateCard({
+      workspaceId: 'workspace-1',
+      teamId: 'team-1',
+      currency: 'jpy',
+      memberRates: [{ userId: 'member-2', hourlyRateMinor: 8_000 }, { userId: 'member-1', jobRoleId: 'role-1' }],
+      jobRoleRates: [{ jobRoleId: 'role-1', hourlyRateMinor: 6_000 }],
+      expectedRevision: 0,
+      updatedBy: 'manager-1',
+    })
+
+    expect(saved).toMatchObject({ currency: 'JPY', revision: 1, memberRates: [{ userId: 'member-1' }, { userId: 'member-2' }] })
+    expect(commands[0]?.input.Key).toEqual({ workspaceId: 'workspace-1', recordKey: 'TIME_RATE_CARD#team-1' })
+    const items = commands[1]?.input.TransactItems
+    if (!Array.isArray(items)) throw new Error('Expected transaction items.')
+    expect(items[0]).toMatchObject({
+      Put: {
+        TableName: 'analytics-table',
+        Item: { recordKey: 'TIME_RATE_CARD#team-1', teamId: 'team-1' },
+        ConditionExpression: 'attribute_not_exists(recordKey)',
+      },
+    })
+    const audit = JSON.stringify(items[1])
+    expect(audit).toContain('time-rate-card.updated')
+    expect(audit).not.toContain('8000')
+    expect(audit).not.toContain('6000')
   })
 })

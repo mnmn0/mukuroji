@@ -68,6 +68,12 @@ The entry list, the week-wide timesheet actions, and the summary, timesheet, and
 
 Members can record billable status and duration but cannot set or read `hourlyRateMinor` or `actualCostMinor`. The API resolves the caller's Work Item Project assignment before persisting an entry and filters reports by the caller's Project allowlist. Confidential money fields are evaluated against the Projects the caller manages for each entry; only authorized managers receive them in entry, summary, and export responses. Mixed-currency reports expose currency-keyed totals rather than combining minor units.
 
+## Rate cards and the Workspace currency
+
+Each Team has one rate card (`TIME_RATE_CARD#<teamId>`, [ADR 0054](adr/0054-team-time-rate-card.md)): a currency, member rows (an own hourly rate, a job role, or both), and job role rows (a job role ID from the Work Item configuration and its hourly rate). An entry created, or a timer stopped, without `hourlyRateMinor` takes the member's own rate, else the rate of the member's job role, and then the card's currency. A rate a manager types wins over the card, and saved entries keep the rate they were created with. `GET` / `PUT /api/teams/:teamId/time-rate-card` (whole-card replace with `expectedRevision`, audit `time-rate-card.updated` with the rows redacted) are limited to managers of the whole Team (`403 TimeRateCardDenied` otherwise). `GET /api/teams/:teamId/time-tracking/settings` tells any Team viewer the Workspace currency and whether they may manage the card.
+
+The tenant profile's `defaultCurrency` (owner / admin, `PATCH /api/tenant/profile`) is used when an entry, timer stop, or budget request names no currency; a Workspace that has not saved one uses `JPY`. Amounts stay in minor units of their currency, which for JPY is whole yen.
+
 Production time-entry persistence uses the existing analytics DynamoDB table with distinct `TIME_*` sort-key prefixes, while lifecycle audit events use the shared audit events table. The API role grants item-level transaction access to both tables, while existing Analytics rows remain unchanged. Money fields may exist in internal audit snapshots for redaction, but `amountMinor` is excluded from the audit diff and confidential entry cost fields are not copied into entry snapshots.
 
 ## Web screens

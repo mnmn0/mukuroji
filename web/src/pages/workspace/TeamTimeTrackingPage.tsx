@@ -17,6 +17,7 @@ import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import type { ProjectDirectoryProject } from '../../projects/api'
 import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
 import { useSavedTaskViews } from '../../task-views/queries/useSavedTaskViews'
+import { useWorkItemConfiguration } from '../../work-items/queries/useWorkItemConfigurations'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createTeamTimeTrackingPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -134,6 +135,14 @@ export function TeamTimeTrackingPage() {
     () => Object.fromEntries(teamProjects.map((project) => [project.id, project.name])),
     [teamProjects],
   )
+  // The rate card offers the Team's job roles; archived ones stay readable only on rows that use them.
+  const workItemConfiguration = useWorkItemConfiguration(accessToken, teamId, enabled && view === 'report')
+  const jobRoles = useMemo(
+    () => (workItemConfiguration.data?.configuration.jobRoles ?? [])
+      .filter((jobRole) => !jobRole.archived)
+      .map((jobRole) => ({ id: jobRole.id, name: jobRole.name })),
+    [workItemConfiguration.data],
+  )
   const reportLabels = useMemo(() => ({
     members: memberNames,
     projects: projectNames,
@@ -203,6 +212,7 @@ export function TeamTimeTrackingPage() {
           <TimeReportContainer
             accessToken={accessToken}
             groupBy={reportGroupBy}
+            jobRoles={jobRoles}
             key={`${teamId}:report`}
             labels={reportLabels}
             locale={workspace.locale}
