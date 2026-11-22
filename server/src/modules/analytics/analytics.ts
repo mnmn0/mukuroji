@@ -184,6 +184,11 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       completed: 'Completed',
       canceled: 'Canceled',
     }),
+    priorityLabels: Object.freeze({
+      high: 'High',
+      medium: 'Medium',
+      low: 'Low',
+    }),
     defaultTitle: 'mukuroji analytics',
     period: 'Period',
     filters: 'Filters',
@@ -281,6 +286,11 @@ const ANALYTICS_EXPORT_MESSAGES = Object.freeze({
       started: '進行中',
       completed: '完了',
       canceled: 'キャンセル',
+    }),
+    priorityLabels: Object.freeze({
+      high: '高',
+      medium: '中',
+      low: '低',
     }),
     defaultTitle: 'mukuroji analytics',
     period: '期間',
@@ -391,9 +401,43 @@ export type AnalyticsEngineInput = {
    * `milestone-trend` widget を含む query で渡します。省略時、その widget は warning だけを返します。
    */
   milestones?: readonly AnalyticsMilestoneHistory[]
+  /**
+   * Current viewer が読める Cycle / Milestone への Work Item の所属です。
+   * `cycle` / `milestone` で分ける widget を含む query で渡します。省略時、その widget は warning
+   * だけを返します。
+   */
+  planningGroups?: AnalyticsPlanningGroups
   /** Snapshot を再現する query です。 */
   query: AnalyticsQueryInput
 }
+
+/** A Cycle or Milestone that a Work Item belongs to, as the viewer may read it. */
+export type AnalyticsPlanningGroupEntity = {
+  /** Planning entity ID. */
+  id: string
+  /** Planning entity title, used as the group label. */
+  title: string
+}
+
+/** Current Cycle and Milestone membership of the authorized Work Items. */
+export type AnalyticsPlanningGroups = {
+  /** Membership keyed by Team-qualified Work Item key (`teamId\0workItemId`). */
+  links: ReadonlyMap<string, {
+    /** Readable Cycle the Work Item belongs to. */
+    cycle?: AnalyticsPlanningGroupEntity
+    /** Readable Milestone the Work Item contributes to. */
+    milestone?: AnalyticsPlanningGroupEntity
+  }>
+  /**
+   * Scope keys (`createAnalyticsMilestoneScopeKey`) of every Cycle and Milestone the viewer may
+   * read, fixed in the snapshot permission scope.
+   */
+  entityScopeKeys: readonly string[]
+}
+
+/** Warning of a Cycle or Milestone grouped widget computed by a run that cannot read Planning. */
+export const ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING =
+  'Cycle and Milestone membership is not available for this run.'
 
 /** Evidence engine へ渡す認可済み data と drill-down 条件です。 */
 export type AnalyticsEvidenceEngineInput = {
@@ -697,6 +741,12 @@ type AnalyticsWorkItemState = {
   workItemTypeId: string
   /** Workflow status category です。 */
   statusCategory: string
+  /** Work Item priority です。 */
+  priority: string
+  /** Readable Cycle of the current Planning link. */
+  cycle?: AnalyticsPlanningGroupEntity
+  /** Readable Milestone of the current Planning link. */
+  milestone?: AnalyticsPlanningGroupEntity
   /** Custom field values です。 */
   customFieldValues: Record<string, string | number | boolean | string[]>
   /** Date-only due date です。 */
@@ -1077,17 +1127,26 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
     normalized,
     authorizedProjectIds,
   )
+  if (input.planningGroups !== undefined) {
+    for (const fact of facts) {
+      const link = input.planningGroups.links.get(workItemKey(fact.state.teamId, fact.state.id))
+      if (link?.cycle !== undefined) fact.state.cycle = link.cycle
+      if (link?.milestone !== undefined) fact.state.milestone = link.milestone
+    }
+  }
   const widgets = normalized.query.widgets.map((widget) =>
     widget.metric === 'milestone-trend'
       ? createMilestoneTrendWidgetResult(widget, input.milestones, normalized)
-      : createWidgetResult(
-          widget,
-          facts,
-          input.workItems,
-          eventsByWorkItem,
-          normalized,
-          authorizedProjectIds,
-        )
+      : input.planningGroups === undefined && analyticsWidgetReadsPlanningGroups(widget)
+        ? createPlanningGroupsUnavailableWidgetResult(widget)
+        : createWidgetResult(
+            widget,
+            facts,
+            input.workItems,
+            eventsByWorkItem,
+            normalized,
+            authorizedProjectIds,
+          )
   )
   const evidenceCount = dedupeEvidence(
     normalized.query.widgets.flatMap((widget) =>
@@ -1110,6 +1169,9 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
     authorizedProjectIds,
     input.milestones !== undefined && analyticsQueryReadsMilestones(normalized.query)
       ? input.milestones.map(createAnalyticsMilestoneScopeKey)
+      : undefined,
+    input.planningGroups !== undefined && analyticsQueryReadsPlanningGroups(normalized.query)
+      ? input.planningGroups.entityScopeKeys
       : undefined,
   )
 
@@ -1265,6 +1327,10 @@ function createAnalyticsExportLabelLookup(
     member: (memberKey) => names?.members?.get(memberKey),
     workItemType: (key) => names?.workItemTypes?.get(key),
     statusCategory: (category) => readAnalyticsStatusLabel(messages, category),
+    priority: (priority) => {
+      const labels: Readonly<Record<string, string>> = messages.priorityLabels
+      return Object.hasOwn(labels, priority) ? labels[priority] : undefined
+    },
     unset: messages.unset,
   }
 }
@@ -2222,6 +2288,9 @@ function normalizeGroupBy(value: unknown): AnalyticsGroupBy {
     dimension !== 'assignee' &&
     dimension !== 'status' &&
     dimension !== 'work-item-type' &&
+    dimension !== 'priority' &&
+    dimension !== 'cycle' &&
+    dimension !== 'milestone' &&
     dimension !== 'custom-field'
   ) {
     throw invalid('AnalyticsGroupByInvalid', 'Analytics group-by dimension is invalid.')
@@ -2419,6 +2488,7 @@ function createCurrentAnalyticsState(item: CanonicalWorkItem): AnalyticsWorkItem
     assigneeUserId: item.assigneeUserId,
     workItemTypeId: item.workItemTypeId ?? DEFAULT_WORK_ITEM_TYPE_ID,
     statusCategory: item.statusCategory,
+    priority: item.priority,
     customFieldValues: structuredClone(item.customFieldValues),
     dueDate: item.dueDate,
     ...(item.schedule.plannedEffortMinutes === undefined
@@ -2533,6 +2603,7 @@ function setAnalyticsStateField(
     field === 'title' ||
     field === 'assigneeUserId' ||
     field === 'statusCategory' ||
+    field === 'priority' ||
     field === 'dueDate' ||
     field === 'createdAt' ||
     field === 'updatedAt'
@@ -2671,6 +2742,71 @@ export function analyticsSnapshotReadMilestones(snapshot: Pick<AnalyticsSnapshot
     widget.metric === 'milestone-trend' &&
     !widget.warnings.includes(ANALYTICS_MILESTONE_HISTORY_UNAVAILABLE_WARNING)
   )
+}
+
+/**
+ * Returns whether a widget groups Work Items by their Cycle or Milestone.
+ *
+ * @param widget - Report widget.
+ * @returns Whether the widget needs the Planning membership.
+ */
+function analyticsWidgetReadsPlanningGroups(widget: Pick<AnalyticsWidget, 'groupBy' | 'metric'>) {
+  return widget.metric !== 'milestone-trend' &&
+    (widget.groupBy?.dimension === 'cycle' || widget.groupBy?.dimension === 'milestone')
+}
+
+/**
+ * Returns whether a query has a widget that groups by Cycle or Milestone.
+ *
+ * Only such queries read the Planning graph and fix the readable Cycles and Milestones in the
+ * permission scope.
+ *
+ * @param query - Analytics query.
+ * @returns Whether the query needs the Planning membership.
+ */
+export function analyticsQueryReadsPlanningGroups(query: Pick<AnalyticsQueryInput, 'widgets'>) {
+  return query.widgets.some(analyticsWidgetReadsPlanningGroups)
+}
+
+/**
+ * Returns whether a stored snapshot fixed the readable Cycles and Milestones in its permission
+ * scope, so its permission check must read them again.
+ *
+ * @param query - Stored snapshot query.
+ * @param snapshot - Stored snapshot.
+ * @returns Whether a Cycle or Milestone grouped widget was computed from the Planning membership.
+ */
+export function analyticsSnapshotReadPlanningGroups(
+  query: Pick<AnalyticsQueryInput, 'widgets'>,
+  snapshot: Pick<AnalyticsSnapshot, 'widgets'>,
+) {
+  const groupedWidgetIds = new Set(
+    query.widgets.filter(analyticsWidgetReadsPlanningGroups).map((widget) => widget.id),
+  )
+  return snapshot.widgets.some((result) =>
+    groupedWidgetIds.has(result.widgetId) &&
+    !result.warnings.includes(ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING)
+  )
+}
+
+/**
+ * Creates the result of a Cycle or Milestone grouped widget for a run that cannot read Planning.
+ *
+ * @param widget - Widget that groups by Cycle or Milestone.
+ * @returns A result with no value or groups and the unavailable warning.
+ */
+function createPlanningGroupsUnavailableWidgetResult(widget: AnalyticsWidget): AnalyticsWidgetResult {
+  return {
+    widgetId: widget.id,
+    metric: widget.metric,
+    definition: resolveAnalyticsMetricDefinition(widget.metric, widget.weighting),
+    value: null,
+    sampleSize: 0,
+    series: [],
+    groups: [],
+    rows: [],
+    warnings: [ANALYTICS_PLANNING_GROUPS_UNAVAILABLE_WARNING],
+  }
 }
 
 /**
@@ -2987,6 +3123,15 @@ function analyticsGroupIdentity(state: AnalyticsWorkItemState, groupBy: Analytic
   }
   if (groupBy.dimension === 'status') {
     return { key: state.statusCategory, label: state.statusCategory }
+  }
+  if (groupBy.dimension === 'priority') {
+    return { key: state.priority, label: state.priority }
+  }
+  if (groupBy.dimension === 'cycle' || groupBy.dimension === 'milestone') {
+    const entity = groupBy.dimension === 'cycle' ? state.cycle : state.milestone
+    return entity === undefined
+      ? { key: '', label: 'Unassigned' }
+      : { key: entity.id, label: entity.title }
   }
   if (groupBy.dimension === 'work-item-type') {
     return {
@@ -6014,6 +6159,8 @@ function workItemKey(teamId: string, workItemId: string) {
  * @param milestoneIds - Milestone を読んだ snapshot で current viewer が読める Milestone の
  *   ID と現在の scope の key（`createAnalyticsMilestoneScopeKey`）です。
  *   それ以外の snapshot では省略し、既存 snapshot と同じ hash にします。
+ * @param planningEntityKeys - Cycle / Milestone で分けた snapshot で current viewer が読める
+ *   Cycle と Milestone の scope key です。それ以外の snapshot では省略します。
  * @returns Snapshot/evidence cursor の認可 scope hash です。
  */
 export function createAnalyticsPermissionScopeHash(
@@ -6021,6 +6168,7 @@ export function createAnalyticsPermissionScopeHash(
   asOf: number,
   authorizedProjectIds: ReadonlySet<string>,
   milestoneIds?: readonly string[],
+  planningEntityKeys?: readonly string[],
 ) {
   if (!Number.isFinite(asOf)) {
     throw invalid('AnalyticsPermissionScopeInvalid', 'Analytics permission scope as-of time is invalid.')
@@ -6038,6 +6186,9 @@ export function createAnalyticsPermissionScopeHash(
           .map((item) => workItemKey(item.teamId, item.id)),
       )].sort(),
       ...(milestoneIds === undefined ? {} : { milestoneIds: [...new Set(milestoneIds)].sort() }),
+      ...(planningEntityKeys === undefined
+        ? {}
+        : { planningEntityKeys: [...new Set(planningEntityKeys)].sort() }),
     },
   )
 }

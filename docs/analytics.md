@@ -146,8 +146,17 @@ Table widgetのsnapshot previewは先頭50行までに制限し、全明細は�
 取得します。live responseのJSONは256 KiB、DynamoDBへ保存するsnapshot recordは350 KiBを上限とし、
 超過時は部分データを保存せず`413`で拒否します。
 
-Filterとgroup-byのTeam、Project、assignee、status、custom field、archive状態は、いずれも
-`asOf`へ復元したstate dimensionで評価します。Throughput、cycle/lead time、scope changeなどの
+Filterとgroup-byのTeam、Project、assignee、status、priority、custom field、archive状態は、いずれも
+`asOf`へ復元したstate dimensionで評価します。
+
+Group-byの`cycle`と`milestone`はPlanningのWork Item linkの現在の所属で分け、`asOf`へは
+復元しません。CycleとMilestoneはcallerがPlanning ACL（`GET /api/planning`と同じ規則、Enterpriseは
+各entityのscopeでの`planning.read`）で読めるものだけを使い、読めないentityに属するWork Itemは
+未設定（key `''`）に入れます。Group labelはentityのtitleで、callerが読めるCycleとMilestoneの
+scope keyをsnapshotのpermission scope hashへ含めるので、その権限が変わったsnapshotは
+非表示または`403`になります。定期配信はPlanningを読まないため、この widget は
+`Cycle and Milestone membership is not available for this run.` の warning だけを返します。
+Work Item history row（ADR 0042）は`priority`の変更も保持します。Throughput、cycle/lead time、scope changeなどの
 event metricは`asOf`以前かつ指定期間内の有効なeventだけを使います。
 
 ## Metric definitions

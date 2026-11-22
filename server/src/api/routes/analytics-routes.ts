@@ -36,6 +36,8 @@ import {
   analyticsFilterIncludesWorkItem,
   analyticsQueryReadsMilestones,
   analyticsSnapshotReadMilestones,
+  analyticsQueryReadsPlanningGroups,
+  analyticsSnapshotReadPlanningGroups,
   createAnalyticsCsv,
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
@@ -75,6 +77,7 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { canReadAnalyticsReport } from '../shared/analytics-access'
 import {
   readAuthorizedAnalyticsMilestones,
+  readAuthorizedAnalyticsPlanningGroups,
   readReadableAnalyticsMilestones,
   readVisibleAnalyticsMilestones,
 } from '../shared/analytics-milestones'
@@ -466,8 +469,13 @@ async function listAnalyticsHttpSnapshots(
     for (const [recordIndex, record] of page.snapshots.entries()) {
       inspectedCount += 1
       const readsMilestones = analyticsSnapshotReadMilestones(record.snapshot)
-      // A scheduled snapshot of the same query leaves the Milestones out of its hash.
-      const queryCacheKey = `${record.snapshot.queryHash}\0${readsMilestones ? 'milestones' : ''}`
+      const readsPlanningGroups = analyticsSnapshotReadPlanningGroups(record.query, record.snapshot)
+      // A scheduled snapshot of the same query leaves the Milestones and Cycles out of its hash.
+      const queryCacheKey = [
+        record.snapshot.queryHash,
+        readsMilestones ? 'milestones' : '',
+        readsPlanningGroups ? 'planning-groups' : '',
+      ].join('\0')
       let pendingPermissionScopeHash = permissionScopeHashCache.get(queryCacheKey)
       if (!pendingPermissionScopeHash) {
         pendingPermissionScopeHash = readCurrentAnalyticsPermissionScopeHash(
@@ -475,6 +483,7 @@ async function listAnalyticsHttpSnapshots(
           record.query,
           readsMilestones,
           scopeCache,
+          readsPlanningGroups,
         )
         permissionScopeHashCache.set(queryCacheKey, pendingPermissionScopeHash)
       }
@@ -705,10 +714,14 @@ async function executeNormalizedAnalyticsQuery(
   const milestones = analyticsQueryReadsMilestones(normalizedQuery)
     ? await readAuthorizedAnalyticsMilestones(principal, normalizedQuery.filter, normalizedQuery.asOf)
     : undefined
+  const planningGroups = analyticsQueryReadsPlanningGroups(normalizedQuery)
+    ? await readAuthorizedAnalyticsPlanningGroups(principal, authorized.workItems)
+    : undefined
   return {
     snapshot: createAnalyticsSnapshot({
       ...authorized,
       ...(milestones === undefined ? {} : { milestones }),
+      ...(planningGroups === undefined ? {} : { planningGroups }),
       query: normalizedQuery,
     }),
     query: normalizedQuery,
@@ -1071,6 +1084,8 @@ function createAnalyticsHistoryLimitExceededError() {
  * @param query - Stored snapshot query.
  * @param readsMilestones - Whether the stored snapshot fixed the readable Milestones.
  * @param cache - Accessible Work Item and Milestone reads shared by the snapshots of one response.
+ * @param readsPlanningGroups - Whether the stored snapshot fixed the readable Cycles and Milestones
+ *   of its Cycle or Milestone grouped widgets.
  * @returns The current permission scope hash.
  */
 async function readCurrentAnalyticsPermissionScopeHash(
@@ -1078,6 +1093,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
   query: AnalyticsQueryInput,
   readsMilestones: boolean,
   cache: AnalyticsPermissionScopeReadCache = createAnalyticsPermissionScopeReadCache(),
+  readsPlanningGroups = false,
 ) {
   const normalized = normalizeAnalyticsQueryInput(query)
   const cacheKey = JSON.stringify({
@@ -1118,6 +1134,9 @@ async function readCurrentAnalyticsPermissionScopeHash(
     Date.parse(normalized.asOf),
     current.authorizedProjectIds,
     milestones?.map(createAnalyticsMilestoneScopeKey),
+    readsPlanningGroups
+      ? (await readAuthorizedAnalyticsPlanningGroups(principal, current.workItems)).entityScopeKeys
+      : undefined,
   )
 }
 
@@ -1211,6 +1230,8 @@ async function resolveAnalyticsExportSnapshot(
     principal,
     stored.query,
     analyticsSnapshotReadMilestones(stored.snapshot),
+    undefined,
+    analyticsSnapshotReadPlanningGroups(stored.query, stored.snapshot),
   )
   if (currentPermissionScopeHash !== stored.snapshot.permissionScopeHash) {
     throw new AnalyticsError(
