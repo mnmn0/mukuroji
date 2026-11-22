@@ -9,6 +9,7 @@ import {
   planBulkInvitation,
   type BulkInvitationPlan,
 } from '../model/bulkInvitation'
+import { createLatestRequestTracker } from '../model/latestRequest'
 import type { BulkInvitationOutcome } from '../mutations/bulkWorkspaceInvitations'
 
 /** Largest CSV file the bulk invitation reads, in bytes. */
@@ -88,8 +89,8 @@ export function WorkspaceBulkInvitePanel({
   const [isSending, setIsSending] = useState(false)
   const [fileError, setFileError] = useState<string | undefined>()
   const [isReadingFile, setIsReadingFile] = useState(false)
-  // Counts file reads, so that only the latest selected file replaces the input.
-  const fileReadRef = useRef(0)
+  // Only the latest selected file may replace the input or show an error.
+  const fileReads = useRef(createLatestRequestTracker())
 
   const resetPlan = () => {
     setPlan(undefined)
@@ -100,24 +101,25 @@ export function WorkspaceBulkInvitePanel({
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) return
+    // A new choice makes any earlier read stale, including when this file is rejected below.
+    const read = fileReads.current.begin()
     if (file.size > maxCsvFileBytes) {
+      setIsReadingFile(false)
       setFileError(t('workspace.access.bulk.fileTooLarge'))
       return
     }
-    const read = fileReadRef.current + 1
-    fileReadRef.current = read
     setIsReadingFile(true)
     try {
       const content = await file.text()
-      if (fileReadRef.current !== read) return
+      if (!read.isCurrent()) return
       setText(content)
       setFileError(undefined)
       resetPlan()
     } catch {
-      if (fileReadRef.current !== read) return
+      if (!read.isCurrent()) return
       setFileError(t('workspace.access.bulk.fileUnreadable'))
     } finally {
-      if (fileReadRef.current === read) setIsReadingFile(false)
+      if (read.isCurrent()) setIsReadingFile(false)
     }
   }
 
