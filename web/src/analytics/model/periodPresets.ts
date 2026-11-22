@@ -110,9 +110,9 @@ export function refreshAnalyticsPresetPeriod(
 /**
  * Picks the preset the period picker shows for a filter.
  *
- * A remembered preset is shown while its dates are the current ones. An immutable snapshot
- * taken last week keeps last week's dates, so its "this week" preset is not shown as current.
- * Otherwise the first preset covering the same local days is shown.
+ * Only a remembered `periodPreset` is shown, so fixed dates that happen to cover "this week"
+ * read as custom and save as fixed dates. The preset is shown while its dates are the current
+ * ones; an immutable snapshot taken last week keeps last week's dates and reads as custom.
  *
  * @param filter - Current Analytics filter.
  * @param now - Current instant.
@@ -126,42 +126,14 @@ export function selectAnalyticsPeriodPreset(
   timeZone: string,
   calendar: AnalyticsPeriodCalendar,
 ): WorkspaceCalendarPeriodPreset | undefined {
-  const matched = findAnalyticsPeriodPreset(filter.period, now, timeZone, calendar)
-  if (!filter.periodPreset) return matched
+  if (!filter.periodPreset) return undefined
   const remembered = createAnalyticsPresetPeriod(filter.periodPreset, now, timeZone, calendar)
   const current =
     formatAnalyticsCalendarDate(remembered.from, timeZone) ===
       formatAnalyticsCalendarDate(filter.period.from, timeZone) &&
     formatAnalyticsCalendarDate(remembered.to, timeZone) ===
       formatAnalyticsCalendarDate(filter.period.to, timeZone)
-  return current ? filter.periodPreset : matched
-}
-
-/**
- * Finds the preset whose local dates match a filter period, so the picker can show it.
- *
- * Only calendar dates are compared, which keeps a period chosen through the date inputs
- * matching the preset that covers the same days.
- *
- * @param period - Current Analytics filter period.
- * @param now - Current instant.
- * @param timeZone - IANA time zone the report reads calendar dates in.
- * @param calendar - Workspace fiscal year start month and week start day.
- * @returns The first matching preset, or undefined for a custom period.
- */
-export function findAnalyticsPeriodPreset(
-  period: AnalyticsDateRange,
-  now: Date,
-  timeZone: string,
-  calendar: AnalyticsPeriodCalendar,
-): WorkspaceCalendarPeriodPreset | undefined {
-  const from = formatAnalyticsCalendarDate(period.from, timeZone)
-  const to = formatAnalyticsCalendarDate(period.to, timeZone)
-  const today = formatAnalyticsCalendarDate(now.toISOString(), timeZone)
-  return WORKSPACE_CALENDAR_PERIOD_PRESETS.find((preset) => {
-    const range = resolveWorkspaceCalendarPeriod(preset, today, calendar)
-    return range.from === from && range.to === to
-  })
+  return current ? filter.periodPreset : undefined
 }
 
 /**

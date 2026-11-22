@@ -2984,5 +2984,12 @@ describe('Analytics Workspace calendar', () => {
     const fixed = { period }
     expect(resolveAnalyticsReportFilterPeriod(fixed, '2026-11-25T00:00:00.000Z', 'UTC', calendar))
       .toEqual(fixed)
+    // Beirut skips 00:00-01:00 on Sunday 2026-03-29, so that week starts at 01:00 local time.
+    expect(resolveAnalyticsReportFilterPeriod(
+      { period, periodPreset: 'this-week' },
+      '2026-03-31T09:00:00.000Z',
+      'Asia/Beirut',
+      calendar,
+    ).period.from).toBe('2026-03-28T22:00:00.000Z')
   })
 })

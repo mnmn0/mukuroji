@@ -1527,16 +1527,28 @@ export function resolveAnalyticsReportFilterPeriod(
 /**
  * Finds the first instant of a local calendar date, or of a day some days after it.
  *
+ * The day can start after midnight where clocks jump forward at midnight, so the first instant
+ * whose local date is the target is searched for, the same boundary the Web presets use.
+ *
  * @param date - Local `YYYY-MM-DD` date.
  * @param timeZone - IANA time zone the date is read in.
  * @param dayOffset - Days to move from the date before taking its start.
- * @returns Epoch milliseconds of that local midnight.
+ * @returns Epoch milliseconds of the first instant of that local date.
  */
 function localCalendarDateStartAt(date: string, timeZone: string, dayOffset: number) {
   const [year, month, day] = date.split('-').map(Number)
   const localDate = toPseudoUtcDate(year!, month!, day!)
   localDate.setUTCDate(localDate.getUTCDate() + dayOffset)
-  return zonedDateTimeToUtc(localDate, timeZone)
+  const target = localDate.toISOString().slice(0, 10)
+  // UTC offsets stay within ±18 hours, so the day starts inside this window.
+  let before = localDate.getTime() - 18 * MILLISECONDS_PER_HOUR
+  let atOrAfter = localDate.getTime() + 18 * MILLISECONDS_PER_HOUR
+  while (atOrAfter - before > 1) {
+    const middle = Math.floor((before + atOrAfter) / 2)
+    if (localDateAt(middle, timeZone) < target) before = middle
+    else atOrAfter = middle
+  }
+  return atOrAfter
 }
 
 /**

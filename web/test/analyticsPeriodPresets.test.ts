@@ -3,9 +3,9 @@ import {
   applyAnalyticsFixedPeriod,
   applyAnalyticsPeriodPreset,
   createAnalyticsPresetPeriod,
-  findAnalyticsPeriodPreset,
   isAnalyticsPeriodPreset,
   refreshAnalyticsPresetPeriod,
+  selectAnalyticsPeriodPreset,
   type AnalyticsPeriodCalendar,
 } from '../src/analytics/model/periodPresets'
 
@@ -43,12 +43,20 @@ describe('Analytics period presets', () => {
     })
   })
 
-  test('recognizes the preset that covers the same local dates and reports custom otherwise', () => {
+  test('shows only a remembered preset whose dates are current, and custom otherwise', () => {
     const now = new Date('2026-11-20T05:00:00.000Z')
     const quarter = createAnalyticsPresetPeriod('last-fiscal-quarter', now, 'Asia/Tokyo', aprilSundayCalendar)
-    expect(findAnalyticsPeriodPreset(quarter, now, 'Asia/Tokyo', aprilSundayCalendar)).toBe('last-fiscal-quarter')
-    expect(findAnalyticsPeriodPreset(
-      { from: '2026-10-31T15:00:00.000Z', to: '2026-11-20T14:59:59.999Z' },
+    expect(selectAnalyticsPeriodPreset(
+      { period: quarter, periodPreset: 'last-fiscal-quarter' },
+      now,
+      'Asia/Tokyo',
+      aprilSundayCalendar,
+    )).toBe('last-fiscal-quarter')
+    // The same dates picked as "Custom" stay custom.
+    expect(selectAnalyticsPeriodPreset({ period: quarter }, now, 'Asia/Tokyo', aprilSundayCalendar))
+      .toBeUndefined()
+    expect(selectAnalyticsPeriodPreset(
+      { period: { from: '2026-10-31T15:00:00.000Z', to: '2026-11-20T14:59:59.999Z' }, periodPreset: 'this-week' },
       now,
       'Asia/Tokyo',
       aprilSundayCalendar,
