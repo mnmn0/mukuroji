@@ -6,11 +6,13 @@ const {
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
-import type {
-  EnterpriseCustomRole,
-  TeamWeeklyReportStatusResponse,
-  WeeklyReportHistoryResponse,
-  WeeklyReportResponse,
+import {
+  createDefaultDueDateWorkItemSchedule,
+  parseTeamWeeklySummaryResponse,
+  type EnterpriseCustomRole,
+  type TeamWeeklyReportStatusResponse,
+  type WeeklyReportHistoryResponse,
+  type WeeklyReportResponse,
 } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
 import { createMutationAuditContext } from '../../../audit'
@@ -395,4 +397,85 @@ test('hides other members\' reports and the Team status from a member who manage
 test('requires a bearer token', async () => {
   const response = await app.request(OWN_PATH)
   expect(response.status).toBe(401)
+})
+
+test('summarizes the week of each readable Project without Work Items of other Projects', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [{ projectId: 'refero', role: 'viewer' }] })
+  const dependencies = getTestAppDependencies().workItems
+  const [template] = (await dependencies.teamIssues.getTeamIssues('user#demo@example.com', 'core-team')).issues
+  if (!template) throw new Error('The fake Team has no Work Item.')
+  const issues = [
+    { ...template, id: 'done', title: 'Done in refero', statusCategory: 'completed' as const, actualEndDate: '2026-11-18' },
+    { ...template, id: 'late', title: 'Late in refero', schedule: createDefaultDueDateWorkItemSchedule('2026-11-25') },
+    { ...template, id: 'hidden', title: 'Secret title', assignedProjectId: 'secret', statusCategory: 'completed' as const, actualEndDate: '2026-11-18' },
+  ]
+  dependencies.teamIssues.getTeamIssues = async (_directoryId, teamId) => ({ teamId, issues, evaluatedCount: issues.length })
+  const baseline = { revision: 1, id: 'b1', capturedAt: '2026-11-01T00:00:00.000Z', entries: [{ workItemId: 'late', endDate: '2026-11-20' }] }
+  await dependencies.scheduleBaselines.write({
+    workspaceId: 'user#demo@example.com',
+    teamId: 'core-team',
+    projectId: 'refero',
+    kind: 'capture',
+    writtenAt: baseline.capturedAt,
+    baseline,
+    expectedRevision: 0,
+    savedBaselines: [{ id: 'b1', capturedAt: baseline.capturedAt, entryCount: 1 }],
+    savedRowsToPut: [baseline],
+    savedIdsToDelete: [],
+    previous: null,
+    callerAuthorization: [],
+    auditContext: createMutationAuditContext({
+      workspaceId: 'user#demo@example.com',
+      actor: { id: 'demo@example.com', kind: 'user', displayName: 'Manager' },
+      idempotencyKey: 'baseline',
+      request: { method: 'POST', path: '/baseline', body: {} },
+      source: { kind: 'api' },
+    }),
+  })
+
+  const response = await request(`/api/teams/core-team/weekly-summary?weekStart=${WEEK}`)
+  expect(response.status).toBe(200)
+  // Read through the parser the Web uses, so the server response stays within the shared contract.
+  const summary = parseTeamWeeklySummaryResponse(await response.json())
+  if (!summary) throw new Error('The weekly summary does not match the contract.')
+  expect(summary).toMatchObject({ teamId: 'core-team', weekStart: WEEK, weekEnd: '2026-11-22' })
+  expect(summary.scopes.map((scope) => scope.projectId)).toEqual(['refero'])
+  expect(summary.scopes[0]).toMatchObject({
+    baseline: { revision: 1, capturedAt: '2026-11-01T00:00:00.000Z' },
+    completed: { count: 1, items: [{ workItemId: 'done', title: 'Done in refero' }] },
+    delayed: { count: 1, items: [{ workItemId: 'late', delayDays: 5, baselineEndDate: '2026-11-20' }] },
+  })
+  expect(JSON.stringify(summary)).not.toContain('Secret title')
+  expect((await request('/api/teams/core-team/weekly-summary?weekStart=2099-01-05')).status).toBe(400)
+})
+
+test('summarizes nothing for an Enterprise role that may read the Team but not its Work Items', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:team-only', name: 'Team only',
+    permissions: ['teams.read', 'projects.read'],
+    guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: [{
+      workspaceId, assignmentId: 'team-only',
+      principalKind: 'member', principalId: 'demo@example.com', roleId: customRole.roleId,
+      scope: { workspaceId, kind: 'team', targetId: 'core-team' }, source: 'direct',
+    }],
+    customRoles: [customRole],
+  })
+  setTestAppDependencies({ enterpriseIdentity: identity })
+
+  // An assigned Enterprise role reaches the route (GET /api/teams* needs teams.read) ...
+  const response = await request(`/api/teams/core-team/weekly-summary?weekStart=${WEEK}`)
+  expect(response.status).toBe(200)
+  const summary = parseTeamWeeklySummaryResponse(await response.json())
+  // ... and without work-items.read it lists no Project and counts nothing.
+  expect(summary?.scopes).toEqual([])
+  expect(summary?.totals).toEqual({ completed: 0, delayed: 0, overdue: 0, milestonesReached: 0 })
 })
