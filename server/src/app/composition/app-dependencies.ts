@@ -53,7 +53,7 @@ import type { FileProofingClient } from '../../modules/files/file-proofing'
 import type { FocusStateClient } from '../../modules/focus'
 import type { PushSubscriptionStore } from '../../modules/notifications/application/push-subscriptions'
 import type { TeamReminderSettingsStore } from '../../modules/notifications/application/ports/reminder-settings-reader'
-import type { AgentRunStore } from '../../modules/agent-runs'
+import type { AgentRunStore, AgentRunUsageStore } from '../../modules/agent-runs'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
 import type { CollectionsPersistence } from '../../modules/collections'
@@ -191,6 +191,8 @@ export interface WorkItemDependencies {
   teamReminderSettings: TeamReminderSettingsStore
   /** Provides Agent Run, claim, and Team Agent settings persistence. */
   agentRuns: AgentRunStore
+  /** Provides agent telemetry usage persistence, attributed to Agent Runs when read. */
+  agentRunUsage: AgentRunUsageStore
   /** Provides Focus policy and recipient snooze persistence. */
   focusState: FocusStateClient
   /** Provides Workspace search persistence. */

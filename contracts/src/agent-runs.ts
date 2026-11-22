@@ -126,6 +126,47 @@ export type AgentRunView = AgentRun & {
    * `AgentRun` schema is closed, so only the Web view and the resume response carry the link.
    */
   resumedFromRunId?: string
+  /**
+   * Tokens and estimated cost that agent telemetry attributed to this run. Absent when no telemetry
+   * arrived for the run's member and instance while it was active.
+   */
+  usage?: AgentRunUsage
+}
+
+/** Event name of the Claude Code OpenTelemetry log record that carries one model request's usage. */
+export const AGENT_TELEMETRY_API_REQUEST_EVENT = 'claude_code.api_request'
+
+/** Resource attribute that names the MCP agent instance in OpenTelemetry exports. */
+export const AGENT_TELEMETRY_INSTANCE_ATTRIBUTE = 'mukuroji.agent_instance'
+
+/** Largest number of usage buckets one run's usage read returns before it reports `hasMore`. */
+export const AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN = 2_000
+
+/**
+ * Token and estimated cost totals that agent telemetry attributed to one Agent Run, or to the runs
+ * of one Work Item. Telemetry is attributed by time: a minute of usage belongs to the run that the
+ * same member and agent instance had active at the start of that minute.
+ */
+export type AgentRunUsage = {
+  /** Uncached input tokens. */
+  inputTokens: number
+  /** Output tokens. */
+  outputTokens: number
+  /** Input tokens read from the prompt cache. */
+  cacheReadTokens: number
+  /** Input tokens written to the prompt cache. */
+  cacheCreationTokens: number
+  /** Model requests the totals cover. */
+  requestCount: number
+  /**
+   * Estimated cost in millionths of US dollars, as the agent runtime estimated it. Only Team managers
+   * receive it.
+   */
+  estimatedCostMicroUsd?: number
+  /** Models that served the requests, sorted. */
+  models: string[]
+  /** True when more usage existed than one read returns, so the totals are a lower bound. */
+  hasMore: boolean
 }
 
 /** Request body that claims a Work Item and moves it to a started status. */
@@ -498,6 +539,8 @@ export type WorkItemAgentRunsResponse = {
   items: AgentRunView[]
   /** Whether older runs exist beyond the returned ones. */
   hasMore: boolean
+  /** Usage of the returned runs added together; absent when none of them has usage. */
+  usageTotal?: AgentRunUsage
 }
 
 /** Hours a run that finished as `completed` stays in the Factory board's completed lane. */

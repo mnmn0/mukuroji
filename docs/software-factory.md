@@ -28,7 +28,7 @@ Phase 1 の範囲は次の 5 つである。
 - lease 切れを理由にした自動再配車、自動完了、自動 cancel。停滞は人が判断する。
 - agent の成果物（PR、CI、レビュー結果）を mukuroji 自身が外部 provider から検証する Gate。
   Phase 1 は agent の自己申告を保存し、GitHub adapter 実装後に検証を重ねる。
-- Run の token / 費用の集計と stage 別 lead time。
+- stage 別 lead time（token / 費用の集計は後に [ADR 0061](adr/0061-agent-token-usage-over-otlp.md) で OpenTelemetry から受け取る形で追加した）。
 
 ## 前提
 
@@ -385,8 +385,9 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
   （`workItemsHasMore`）、Work Item ごとの Run は最大 100 件、report は最大 300 件。直前の Run や report が
   読めなかった Run は件数と成功率には入れ、手戻りと滞在時間からは外す。Run が 100 件を超える
   Work Item で読めなかった古い Run が期間内に終わっている可能性があるときも知らせる（`historyHasMore`）。
-- token / 費用の報告（`finish_run` / `report_progress` の `usage`）、Analytics engine の metric・widget・snapshot
-  への統合、Work Item / Project 別の集計は後続とする。
+- token / 費用は agent の自己申告ではなく OpenTelemetry で受け取る（[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)、
+  #729）。Run と Work Item の合計は Web の Run 一覧で返す。期間サマリーへの token / 費用の追加、Analytics engine の
+  metric・widget・snapshot への統合、Project 別の集計は後続とする。
 
 ## Triage への自動起票
 
@@ -556,8 +557,9 @@ tool は次のとおり変更・追加する。
   mutation transaction と outbox で記録する。heartbeat は audit event を作らず
   `lastHeartbeatAt` だけを更新する。actor は credential owner の member とし、`metadata` に
   `runtime` と `agentName` を持つ。
-- Run と report に prompt、生成内容、model 名、token 数を保存しない。これらは後続 Phase の
-  費用集計で別 entity として扱う。
+- Run と report に prompt、生成内容、model 名、token 数を保存しない。token 数・推定費用・model 名は
+  OpenTelemetry で受け取った usage の行として member ごとに別に持ち、読み取り時に時刻で Run に割り当てる
+  （[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)）。prompt と生成内容は引き続き保存しない。
 - 外部 chat sync や Update Feed への Run event の配信は Phase 1 では行わない。comment は
   従来どおり既存経路で配信される。
 

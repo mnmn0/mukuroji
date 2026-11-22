@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN,
   FACTORY_BOARD_COMPLETED_WINDOW_HOURS,
   FACTORY_BOARD_MAX_ACTIVE_RUNS,
   FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS,
@@ -7,6 +8,7 @@ import {
   FACTORY_BOARD_REPORT_EXCERPT_MAX_LENGTH,
   classifyFactoryBoardItem,
   type AgentRunReport,
+  type AgentRunUsage,
   type AgentRunView,
   type AgentSettings,
   type FactoryBoardItem,
@@ -17,7 +19,11 @@ import {
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
+  agentUsageRunBucketRange,
+  combineAgentRunUsage,
   createAgentRunIntegrityError,
+  isAgentUsageBucketInRun,
+  summarizeAgentUsage,
   createAgentRunNotActiveError,
   createAgentRunReportCommentBody,
   finishAgentRun,
@@ -139,12 +145,34 @@ function mayRelease(run: StoredAgentRun, principal: WorkspacePrincipal, manager:
  * @param now - Read time.
  * @returns Run view.
  */
-function toAgentRunView(run: StoredAgentRun, canRelease: boolean, now: Date): AgentRunView {
+function toAgentRunView(run: StoredAgentRun, canRelease: boolean, now: Date, usage?: AgentRunUsage): AgentRunView {
   return {
     ...toAgentRun(run, now),
     canRelease: run.state === 'active' && canRelease,
     ...(run.resumedFromRunId === undefined ? {} : { resumedFromRunId: run.resumedFromRunId }),
+    ...(usage === undefined ? {} : { usage }),
   }
+}
+
+/**
+ * Reads the telemetry usage attributed to a run: the buckets of the run's member and instance that
+ * start between the run's start and finish.
+ *
+ * @param directoryId - Workspace ID.
+ * @param run - Run.
+ * @param includeCost - Whether the viewer may see the estimated cost.
+ * @returns The run's usage, or undefined when none arrived.
+ */
+async function readAgentRunUsage(directoryId: string, run: StoredAgentRun, includeCost: boolean): Promise<AgentRunUsage | undefined> {
+  const range = agentUsageRunBucketRange(run)
+  const page = await workItemDependencies.agentRunUsage.listMemberBuckets(
+    directoryId,
+    run.assigneeUserId,
+    range.from,
+    range.until,
+    AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN,
+  )
+  return summarizeAgentUsage(page.buckets.filter((bucket) => isAgentUsageBucketInRun(bucket, run)), includeCost, page.hasMore)
 }
 
 /**
@@ -170,13 +198,18 @@ export async function listWebWorkItemAgentRuns(
     canWriteForRelease(principal, teamId, detail.issue.assignedProjectId),
   ])
   const now = new Date()
+  // Tokens are visible to every viewer of the Work Item; the estimated cost only to Team managers.
+  const usages = await Promise.all(page.runs.map((run) => readAgentRunUsage(principal.directoryId, run, manager)))
+  const usageTotal = combineAgentRunUsage(usages)
   return {
-    items: page.runs.map((run) => toAgentRunView(
+    items: page.runs.map((run, index) => toAgentRunView(
       run,
       writable && mayRelease(run, principal, manager, detail.issue.assigneeUserId),
       now,
+      usages[index],
     )),
     hasMore: page.nextCursor !== undefined,
+    ...(usageTotal === undefined ? {} : { usageTotal }),
   }
 }
 

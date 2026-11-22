@@ -131,7 +131,12 @@ import {
 import { DynamoDbPushSubscriptionStore } from '../../modules/notifications/adapter-out/dynamodb/push-subscription-store'
 import { DynamoDbReminderSettingsStore } from '../../modules/notifications/adapter-out/dynamodb/reminder-settings-store'
 import { getConfiguredNotificationsTableName } from '../../modules/notifications/notifications'
-import { DynamoDbAgentRunStore, InMemoryAgentRunStore } from '../../modules/agent-runs'
+import {
+  DynamoDbAgentRunStore,
+  DynamoDbAgentRunUsageStore,
+  InMemoryAgentRunStore,
+  InMemoryAgentRunUsageStore,
+} from '../../modules/agent-runs'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
   DynamoDbPlanningClient,
@@ -612,6 +617,10 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
       getConfiguredNotificationsTableName(),
     ),
     agentRuns: new DynamoDbAgentRunStore(
+      createDynamoDbDocumentClient(),
+      loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
+    ),
+    agentRunUsage: new DynamoDbAgentRunUsageStore(
       createDynamoDbDocumentClient(),
       loadServerConfig().environment.AGENT_RUNS_TABLE_NAME ?? 'mukuroji-agent-runs-local',
     ),
@@ -1911,6 +1920,7 @@ export function createTestAppDependencies(): AppDependencies {
       focusState: new InMemoryFocusStateClient(),
       analytics: new InMemoryAnalyticsRepository(),
       agentRuns: new InMemoryAgentRunStore(),
+      agentRunUsage: new InMemoryAgentRunUsageStore(),
       requestIntake,
     },
     automation,
@@ -2015,6 +2025,7 @@ export function overrideAppDependencies(
       ...(overrides.fileProofing ? { fileProofing: overrides.fileProofing } : {}),
       ...(overrides.notifications ? { notifications: overrides.notifications } : {}),
       ...(overrides.agentRuns ? { agentRuns: overrides.agentRuns } : {}),
+      ...(overrides.agentRunUsage ? { agentRunUsage: overrides.agentRunUsage } : {}),
       ...(overrides.focusState ? { focusState: overrides.focusState } : {}),
       ...(overrides.workspaceSearch
         ? { workspaceSearch: overrides.workspaceSearch }

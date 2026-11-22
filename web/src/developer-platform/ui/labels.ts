@@ -124,6 +124,13 @@ export function createDeveloperPlatformLabels(
           ? 'Work Item import の dry-run と確定を実行します。'
           : 'Dry-run and commit Work Item imports.',
       },
+      {
+        value: 'agent-telemetry:write',
+        label: ja ? 'エージェントの利用量の送信' : 'Send agent usage',
+        description: ja
+          ? 'Coding agent が OpenTelemetry でトークン数と推定費用を送ります。'
+          : 'Let a coding agent send token counts and estimated cost over OpenTelemetry.',
+      },
     ],
     grantTypeOptions: [
       {

@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(543)
-  expect(new Set(inventory).size).toBe(539)
+  expect(inventory).toHaveLength(545)
+  expect(new Set(inventory).size).toBe(541)
   expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
   expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
@@ -87,6 +87,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/v1/work-items/:workItemId/agent-runs/resume')
   expect(inventory).toContain('GET /api/v1/agent-settings')
   expect(inventory).toContain('GET /api/v1/agent-context')
+  expect(inventory).toContain('POST /api/v1/agent-telemetry/v1/logs')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/acceptance-criteria')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/effort')
   expect(inventory).toContain('GET /api/v1/work-items/:workItemId/actual-dates')
@@ -135,9 +136,10 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   // The Software factory deployment gate runs ahead of the Agent Run and agent setting routes
   // (#632). Personal credentials stay outside it for the Workspace MCP profile (ADR 0052).
   expect(inventory).toContain('ALL /api/v1/agent-runs/*')
+  expect(inventory).toContain('ALL /api/v1/agent-telemetry/*')
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).not.toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    'd258a1bc6137f5fed6afacffe832688b369093e7e555a412f418d747963e408a',
+    'a44fece67f7d9de1caeb6b89a1114e4f9c47539b23b80b3822f3edfd2c5a47de',
   )
 })

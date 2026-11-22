@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { classifyFactoryBoardItem, type AgentRunReportKind, type TeamAgentRunBoardResponse, type TeamFactoryAnalyticsResponse } from '@mukuroji/contracts'
 import { createApiTestHarness } from './test-support/api-test-harness'
+import { createCanonicalPublicAgentTelemetryService } from './routes/public-agent-telemetry-service'
 import { createCanonicalPublicAgentRunService, createCanonicalPublicWorkItemService } from './api-router'
 import {
   InMemoryAgentRunStore,
+  InMemoryAgentRunUsageStore,
   InMemoryTransactionCanceledError,
   createActiveAgentRun,
   createAgentRunCommitConflictError,
@@ -2747,5 +2749,75 @@ describe('Public Work Item key', () => {
     // A Work Item created before keys existed has none.
     expect(await runWithTestAppDependencies(() => workItems.getKey(credential, 'core-team', 'task-2')))
       .toEqual({ schemaVersion: 1, teamId: 'core-team', workItemId: 'task-2', createdAt: expect.any(String) })
+  })
+})
+
+describe('Agent telemetry usage', () => {
+  const headers = { Authorization: 'Bearer test-token' }
+
+  /**
+   * Builds a Claude Code logs export with one `api_request` record.
+   *
+   * @param at - Request time.
+   * @param instanceId - Raw agent instance ID.
+   * @returns OTLP JSON export.
+   */
+  function usageExport(at: Date, instanceId: string): Record<string, unknown> {
+    return {
+      resourceLogs: [{
+        resource: { attributes: [{ key: 'mukuroji.agent_instance', value: { stringValue: instanceId } }] },
+        scopeLogs: [{
+          logRecords: [{
+            timeUnixNano: `${BigInt(at.getTime()) * 1_000_000n}`,
+            body: { stringValue: 'claude_code.api_request' },
+            attributes: [
+              { key: 'model', value: { stringValue: 'claude-sonnet-5-5' } },
+              { key: 'input_tokens', value: { intValue: '100' } },
+              { key: 'output_tokens', value: { intValue: '20' } },
+              { key: 'cost_usd', value: { doubleValue: 0.01 } },
+            ],
+          }],
+        }],
+      }],
+    }
+  }
+
+  test('attributes received usage to the run of the same member and instance, with cost only for managers', async () => {
+    const { store } = configureUnstartedAssignedWorkItem({ statusCategory: 'started' })
+    const held = createHeldRun('task-1', 'laptop')
+    store.seed(held)
+    const usage = new InMemoryAgentRunUsageStore()
+    setTestAppDependencies({ agentRunUsage: usage })
+    const telemetry = createCanonicalPublicAgentTelemetryService()
+    const body = usageExport(new Date(Date.now() - 20_000), 'laptop')
+    const telemetryCredential = { ...credential, scopes: [...credential.scopes, 'agent-telemetry:write' as const] }
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(telemetryCredential, body))).toEqual({ rejectedRecords: 0, duplicate: false })
+    // A retried export adds nothing.
+    expect(await runWithTestAppDependencies(() => telemetry.ingestLogs(telemetryCredential, body))).toEqual({ rejectedRecords: 0, duplicate: true })
+    // Usage of another instance of the same member is not this run's.
+    await runWithTestAppDependencies(() => telemetry.ingestLogs(telemetryCredential, usageExport(new Date(Date.now() - 20_000), 'desktop')))
+
+    const history = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    expect(history.status).toBe(200)
+    const listed: unknown = await history.json()
+    expect(listed).toMatchObject({
+      items: [{ runId: held.runId, usage: { inputTokens: 100, outputTokens: 20, requestCount: 1, models: ['claude-sonnet-5-5'] } }],
+      usageTotal: { inputTokens: 100, requestCount: 1 },
+    })
+    expect(JSON.stringify(listed)).not.toContain('estimatedCostMicroUsd')
+
+    configureUnstartedAssignedWorkItem({ statusCategory: 'started', role: 'manager' })
+    const managerStore = getTestAppDependencies().workItems.agentRuns
+    if (!(managerStore instanceof InMemoryAgentRunStore)) throw new Error('Expected the in-memory store.')
+    managerStore.seed(held)
+    setTestAppDependencies({ agentRunUsage: usage })
+    const managed = await app.request('http://localhost/api/teams/core-team/work-items/task-1/agent-runs', { headers })
+    expect(await managed.json()).toMatchObject({ items: [{ usage: { estimatedCostMicroUsd: 10_000 } }], usageTotal: { estimatedCostMicroUsd: 10_000 } })
+  })
+
+  test('refuses an export that is not an OTLP logs request', async () => {
+    configureUnstartedAssignedWorkItem()
+    const telemetry = createCanonicalPublicAgentTelemetryService()
+    await expect(runWithTestAppDependencies(() => telemetry.ingestLogs(credential, { resourceLogs: 'x' }))).rejects.toMatchObject({ status: 400 })
   })
 })

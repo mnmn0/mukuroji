@@ -9,6 +9,7 @@ import {
   type AgentRunOutcome,
   type AgentRunReport,
   type AgentRunRuntime,
+  type AgentRunUsage,
   type AgentRunVerification,
   type AgentRunView,
   type FactoryAnalyticsOutcomeCounts,
@@ -51,12 +52,47 @@ export async function listWorkItemAgentRuns(
     accessToken,
   )
   const items = isRecord(data) && Array.isArray(data.items) ? data.items.map(readAgentRunView) : undefined
-  if (!isRecord(data) || !items || items.some((item) => item === undefined) || typeof data.hasMore !== 'boolean') {
+  const usageTotal = isRecord(data) && data.usageTotal !== undefined ? readAgentRunUsage(data.usageTotal) : undefined
+  if (
+    !isRecord(data) || !items || items.some((item) => item === undefined) || typeof data.hasMore !== 'boolean' ||
+    (data.usageTotal !== undefined && usageTotal === undefined)
+  ) {
     throw new WorkItemConfigurationApiError(502, 'Agent Run history returned an unexpected response.')
   }
   return {
     items: items.filter((item): item is AgentRunView => item !== undefined),
     hasMore: data.hasMore,
+    ...(usageTotal === undefined ? {} : { usageTotal }),
+  }
+}
+
+/**
+ * Reads token usage attributed to a run or a Work Item.
+ *
+ * @param value - Untrusted value.
+ * @returns The usage, or undefined when it is malformed.
+ */
+function readAgentRunUsage(value: unknown): AgentRunUsage | undefined {
+  if (!isRecord(value)) return undefined
+  const { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, requestCount, estimatedCostMicroUsd, models, hasMore } = value
+  if (
+    !isNonnegativeSafeInteger(inputTokens) || !isNonnegativeSafeInteger(outputTokens) ||
+    !isNonnegativeSafeInteger(cacheReadTokens) || !isNonnegativeSafeInteger(cacheCreationTokens) ||
+    !isNonnegativeSafeInteger(requestCount) || typeof hasMore !== 'boolean' ||
+    (estimatedCostMicroUsd !== undefined && !isNonnegativeSafeInteger(estimatedCostMicroUsd)) ||
+    !Array.isArray(models) || !models.every((model): model is string => typeof model === 'string')
+  ) {
+    return undefined
+  }
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    requestCount,
+    ...(estimatedCostMicroUsd === undefined ? {} : { estimatedCostMicroUsd }),
+    models,
+    hasMore,
   }
 }
 
@@ -413,6 +449,8 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
   const finishedAt = value.finishedAt === undefined ? undefined : time('finishedAt')
   const finishedBy = value.finishedBy === undefined ? undefined : text('finishedBy')
   const resumedFromRunId = value.resumedFromRunId === undefined ? undefined : text('resumedFromRunId')
+  const usage = value.usage === undefined ? undefined : readAgentRunUsage(value.usage)
+  if (value.usage !== undefined && usage === undefined) return undefined
   if (
     value.schemaVersion !== 1 || !runId || !teamId || !workItemId || !assigneeUserId || !agentName ||
     !runtime || !runtimes.has(runtime) || !state || (outcome !== undefined && !outcomes.has(outcome)) ||
@@ -445,6 +483,7 @@ function readAgentRunView(value: unknown): AgentRunView | undefined {
     reportCount: value.reportCount,
     canRelease: value.canRelease,
     ...(resumedFromRunId === undefined ? {} : { resumedFromRunId }),
+    ...(usage === undefined ? {} : { usage }),
   }
 }
 
