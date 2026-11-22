@@ -62,6 +62,18 @@ describe('ArchiveImpactNotice', () => {
     expect(isArchiveImpactConfirmDisabled(undefined)).toBe(false)
   })
 
+  test('explains a refusal from the dependency limit when every count is zero', () => {
+    const labels = createArchiveImpactLabels(createTranslator('ja'))
+    const impact: DirectoryArchiveImpactResponse = { ...emptyImpact, archiveBlocked: true }
+
+    const markup = renderToStaticMarkup(
+      <ArchiveImpactNotice labels={labels} state={{ status: 'ready', impact }} />,
+    )
+
+    expect(markup).toContain(labels.blockedByDependencyLimit)
+    expect(markup).not.toContain(labels.none)
+  })
+
   test('says nothing is affected when every count is zero', () => {
     const labels = createArchiveImpactLabels(createTranslator('en'))
 

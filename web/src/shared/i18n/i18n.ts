@@ -232,6 +232,7 @@ export function createArchiveImpactLabels(t: (key: MessageKey) => string): Archi
     title: t('archiveImpact.title'),
     none: t('archiveImpact.none'),
     blocked: t('archiveImpact.blocked'),
+    blockedByDependencyLimit: t('archiveImpact.blockedByDependencyLimit'),
     warning: t('archiveImpact.warning'),
     count: ({ count, hasMore }) =>
       t(hasMore ? 'archiveImpact.countAtLeast' : 'archiveImpact.count')

@@ -880,6 +880,7 @@ export const workspaceMessages = {
   'archiveImpact.title': 'アーカイブの影響',
   'archiveImpact.none': '未完了の Work Item、進行中の Agent Run、Planning の参照、Webhook はありません。',
   'archiveImpact.blocked': 'Planning から参照されているため、アーカイブできません。計画を移動またはアーカイブし、リンクと依存関係を外してください。',
+  'archiveImpact.blockedByDependencyLimit': 'この Team の Work Item にかかる Planning の依存関係が多すぎるため、Project を一度にアーカイブできません。依存関係を減らしてから再度お試しください。',
   'archiveImpact.warning': 'Work Item と Agent Run の記録はアーカイブ中も残り、復元すると元に戻ります。Webhook の Team / Project 単位の許可は復元しても自動では戻りません。',
   'archiveImpact.count': '{count} 件',
   'archiveImpact.countAtLeast': '{count} 件以上',

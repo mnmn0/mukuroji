@@ -17,6 +17,8 @@ export type ArchiveImpactLabels = {
   none: string
   /** Explains why the archive is refused. */
   blocked: string
+  /** Explains a refusal caused only by the Team's dependency endpoint limit. */
+  blockedByDependencyLimit: string
   /** Explains what stays and what a restore brings back. */
   warning: string
   /** Formats a count that may be a floor, such as "1,000+". */

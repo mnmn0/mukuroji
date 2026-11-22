@@ -1714,7 +1714,7 @@ function SidebarArchiveConfirmationModal({
         aria-describedby={dialogDescriptionId}
         aria-labelledby={dialogTitleId}
         aria-modal="true"
-        className="workbench-panel w-full max-w-[440px] overflow-hidden shadow-[0_24px_72px_rgba(23,32,29,0.28)]"
+        className="workbench-panel max-h-[calc(100svh-3rem)] w-full max-w-[440px] overflow-y-auto overscroll-contain shadow-[0_24px_72px_rgba(23,32,29,0.28)]"
         ref={dialogRef}
         role="dialog"
         tabIndex={-1}

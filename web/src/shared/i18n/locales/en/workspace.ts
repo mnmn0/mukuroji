@@ -881,6 +881,7 @@ export const workspaceMessages = {
   'archiveImpact.title': 'What archiving affects',
   'archiveImpact.none': 'No open work items, active agent runs, Planning references, or webhooks are affected.',
   'archiveImpact.blocked': 'Planning still references this, so it cannot be archived. Move or archive the plans and remove the links and dependencies first.',
+  'archiveImpact.blockedByDependencyLimit': "This team's work items have too many Planning dependencies to archive the project in one step. Remove some dependencies and try again.",
   'archiveImpact.warning': 'Work items and agent run records stay while archived and come back on restore. Team and project webhook permissions do not come back on restore.',
   'archiveImpact.count': '{count}',
   'archiveImpact.countAtLeast': '{count}+',
