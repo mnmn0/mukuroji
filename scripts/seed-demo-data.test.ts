@@ -25,6 +25,8 @@ type FakePlanning = {
   revision: number
   /** Created entities with their current status. */
   entities: { id: string, status: string }[]
+  /** Entities a person archived; the live graph leaves them out. */
+  archived: { id: string }[]
   /** Created entity dependencies. */
   dependencies: { id: string }[]
   /** Created Work Item dependencies. */
@@ -73,6 +75,7 @@ function createFakeServer(options: { readyHookSeeded: boolean }) {
   const planning: FakePlanning = {
     revision: 0,
     entities: [],
+    archived: [],
     dependencies: [],
     workItemDependencies: [],
     workItemLinks: [],
@@ -116,6 +119,9 @@ function createFakeServer(options: { readyHookSeeded: boolean }) {
       return { status: 200, body: {} }
     }
     if (method === 'GET' && url.pathname === '/api/planning') return snapshot()
+    if (method === 'GET' && url.pathname === '/api/planning/archived-entities') {
+      return { status: 200, body: { entities: structuredClone(planning.archived) } }
+    }
     planning.revision += 1
     if (url.pathname === '/api/planning/entities') {
       planning.entities.push({ id: field(body, 'id'), status: field(body, 'status') })
@@ -276,6 +282,20 @@ describe('seedDemoData', () => {
     server.issues.get('platform-team')?.forEach((issue) => {
       issue.parent = null
     })
+
+    const rerun = await seedDemoData(plan, server.transport, () => {})
+    expect(rerun.created).toBe(0)
+    expect(server.calls.slice(firstCallCount).every((call) => call.method === 'GET')).toBe(true)
+  })
+
+  test('keeps archived entities archived and does not put back a removed Planning dependency', async () => {
+    const plan = buildDemoDataPlan('2026-11-25')
+    const server = createFakeServer({ readyHookSeeded: true })
+    await seedDemoData(plan, server.transport, () => {})
+    server.planning.entities = server.planning.entities.filter((entity) => entity.id !== 'demo-cycle-previous')
+    server.planning.archived.push({ id: 'demo-cycle-previous' })
+    server.planning.dependencies = []
+    const firstCallCount = server.calls.length
 
     const rerun = await seedDemoData(plan, server.transport, () => {})
     expect(rerun.created).toBe(0)

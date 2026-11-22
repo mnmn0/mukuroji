@@ -15,7 +15,8 @@
  * idempotent: Teams and Projects are matched by name, Work Items by title inside their Project,
  * and Planning records use fixed IDs, so a rerun only fills in what is missing and never edits or
  * deletes what a person changed. A Work Item's parent, Planning links and dependencies are set only
- * in the run that creates it, so a relationship a person removed is not put back. Dates are
+ * in the run that creates it, and a Planning dependency only in the run that creates both ends, so
+ * a relationship a person removed is not put back. Archived Planning entities are left archived. Dates are
  * relative to the week of the first run.
  *
  * It only talks to a local HTTP server (`localhost`, `127.0.0.1`, `[::1]`), so it cannot write
@@ -742,8 +743,24 @@ export async function seedDemoData(
   /** Entities created open so Work Items can join them, then closed at the end of this run. */
   const pendingClosures: DemoPlanningEntity[] = []
   const entityIds = new Set(readArray(planning, 'entities').map((entity) => readString(entity, 'id')))
+  // Archived IDs stay reserved, and the live graph leaves them out, so read them separately.
+  const archivedEntityIds = new Set<string | undefined>()
+  let archivedCursor: string | undefined
+  do {
+    const query = archivedCursor === undefined ? '' : `?cursor=${encodeURIComponent(archivedCursor)}`
+    const page = await call('GET', `/api/planning/archived-entities${query}`, [200])
+    for (const entity of readArray(page, 'entities')) archivedEntityIds.add(readString(entity, 'id'))
+    archivedCursor = readString(page, 'nextCursor')
+  } while (archivedCursor !== undefined)
+  /** Planning entities created by this run; only they get the seeded dependencies. */
+  const createdEntityIds = new Set<string>()
   for (const entity of plan.planningEntities) {
-    if (entityIds.has(entity.id)) {
+    if (
+      entityIds.has(entity.id) ||
+      archivedEntityIds.has(entity.id) ||
+      (entity.parentId !== undefined && !entityIds.has(entity.parentId))
+    ) {
+      // Present, archived by a person, or under a parent that is no longer live.
       summary.kept += 1
       continue
     }
@@ -770,6 +787,7 @@ export async function seedDemoData(
     }
     planning = await call('POST', '/api/planning/entities', [201], input)
     entityIds.add(entity.id)
+    createdEntityIds.add(entity.id)
     if (closedStatuses.has(entity.status)) pendingClosures.push(entity)
     summary.created += 1
     log(`created Planning ${entity.type} ${entity.title} (${entity.id})`)
@@ -777,7 +795,11 @@ export async function seedDemoData(
 
   const dependencyIds = new Set(readArray(planning, 'dependencies').map((dependency) => readString(dependency, 'id')))
   for (const dependency of plan.planningDependencies) {
-    if (dependencyIds.has(dependency.id)) {
+    if (
+      dependencyIds.has(dependency.id) ||
+      !createdEntityIds.has(dependency.predecessorId) ||
+      !createdEntityIds.has(dependency.successorId)
+    ) {
       summary.kept += 1
       continue
     }
@@ -802,7 +824,11 @@ export async function seedDemoData(
   // Milestones and Goals are linked one Work Item at a time; Cycles take a batch below, because
   // the Cycle route is the one that authorizes a Team-scoped Cycle.
   for (const workItem of plan.workItems) {
-    if (!workItem.milestoneKey && workItem.goalKeys.length === 0) continue
+    const milestoneId = workItem.milestoneKey !== undefined && entityIds.has(workItem.milestoneKey)
+      ? workItem.milestoneKey
+      : undefined
+    const goalIds = workItem.goalKeys.filter((goalKey) => entityIds.has(goalKey))
+    if (milestoneId === undefined && goalIds.length === 0) continue
     const target = requireKey(workItemIds, workItem.key, 'Work Item')
     if (!createdWorkItemKeys.has(workItem.key) || linkedWorkItems.has(`${target.teamId}\0${target.workItemId}`)) {
       summary.kept += 1
@@ -816,8 +842,8 @@ export async function seedDemoData(
         teamId: target.teamId,
         workItemId: target.workItemId,
         projectId: target.projectId,
-        ...(workItem.milestoneKey === undefined ? {} : { milestoneId: workItem.milestoneKey }),
-        goalIds: [...workItem.goalKeys],
+        ...(milestoneId === undefined ? {} : { milestoneId }),
+        goalIds,
         expectedRevision: readRevision(planning, 'revision', 'Planning snapshot'),
       },
     )
@@ -826,7 +852,7 @@ export async function seedDemoData(
   }
 
   const entities = readArray(planning, 'entities')
-  for (const cycle of plan.planningEntities.filter((entity) => entity.type === 'cycle')) {
+  for (const cycle of plan.planningEntities.filter((entity) => entity.type === 'cycle' && entityIds.has(entity.id))) {
     const members = plan.workItems.filter((workItem) => workItem.cycleKey === cycle.id)
     const missing = members
       .filter((workItem) => createdWorkItemKeys.has(workItem.key))
