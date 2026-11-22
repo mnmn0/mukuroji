@@ -1,12 +1,7 @@
 import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
-  WORK_CALENDAR_CHANGE_EXAMPLE_LIMIT,
-  haveSameWorkCalendarRules,
   resolveSharedWorkItemCalendarPolicy,
   type WorkCalendar,
-  type WorkCalendarAdjustment,
-  type WorkCalendarChangeExample,
-  type WorkCalendarChangeImpact,
   type WorkCalendarOverrides,
   type WorkItemSchedule,
   type WorkItemScheduleCalendarPolicy,
@@ -15,8 +10,6 @@ import {
 import {
   normalizeWorkItemSchedule,
   rebaseWorkItemScheduleCalendar,
-  type TeamIssueResponseItem,
-  type WorkItemScheduleCascadeUpdate,
 } from '../../modules/work-items'
 import { workspaceDependencies } from './app-dependencies'
 
@@ -24,7 +17,7 @@ import { workspaceDependencies } from './app-dependencies'
 export type WorkspaceCalendarInputs = {
   /** Stored Workspace calendar settings, or the defaults. */
   settings: WorkspaceCalendarSettings
-  /** Synced national holiday dates when the Workspace uses them. */
+  /** Synced national holiday dates, used where a calendar turns the national holidays on. */
   nationalHolidayDates?: readonly string[]
 }
 
@@ -45,7 +38,7 @@ export type WorkCalendarTarget = {
 }
 
 /**
- * Reads the Workspace calendar settings and, when used, the national holidays.
+ * Reads the Workspace calendar settings and the synced national holidays.
  *
  * A Workspace that has not saved calendar settings gets the defaults; any other read failure
  * propagates so a stored calendar is never silently replaced.
@@ -54,10 +47,13 @@ export type WorkCalendarTarget = {
  * @returns The settings and national holiday dates.
  */
 export async function readWorkspaceCalendarInputs(directoryId: string): Promise<WorkspaceCalendarInputs> {
-  const settings = await readWorkspaceCalendarSettingsOf(directoryId)
-  return settings.publicHolidays === 'japan'
-    ? { settings, nationalHolidayDates: await workspaceDependencies.nationalHolidays.listDates() }
-    : { settings }
+  // The synced dates are read even when the Workspace does not use them, because a Team or Project
+  // calendar can turn the national holidays on.
+  const [settings, nationalHolidayDates] = await Promise.all([
+    readWorkspaceCalendarSettingsOf(directoryId),
+    workspaceDependencies.nationalHolidays.listDates(),
+  ])
+  return { settings, nationalHolidayDates }
 }
 
 /**
@@ -149,6 +145,24 @@ export async function applySharedCalendarToNewSchedule(
 }
 
 /**
+ * Applies the resolved shared calendar to a validated schedule that follows it.
+ *
+ * @param directoryId - Workspace directory that owns the Work Item.
+ * @param target - Team and Project of the Work Item.
+ * @param schedule - Validated schedule.
+ * @returns The schedule on the resolved calendar, or the schedule unchanged when it has its own rules.
+ */
+export async function applySharedCalendarToSchedule(
+  directoryId: string,
+  target: WorkCalendarTarget,
+  schedule: WorkItemSchedule,
+): Promise<WorkItemSchedule> {
+  if (schedule.calendarPolicy.calendarSource !== 'shared') return schedule
+  const policy = await readWorkspaceWorkItemCalendarPolicy(directoryId, target)
+  return rebaseWorkItemScheduleCalendar(schedule, policy, 'keep-end-date').schedule
+}
+
+/**
  * Reports whether an untrusted schedule asks to follow the shared calendar.
  *
  * @param value - Untrusted schedule.
@@ -176,139 +190,55 @@ export async function readWorkspaceCalendarSettingsOf(
   return profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
 }
 
-/** Inputs of a calendar change plan. */
-export type WorkCalendarChangePlanInput = {
-  /** Work Items of every Team the change can reach. */
-  workItems: readonly TeamIssueResponseItem[]
-  /** Shared calendar each Work Item follows before the change. */
-  before(workItem: TeamIssueResponseItem): WorkItemScheduleCalendarPolicy
-  /** Shared calendar each Work Item follows after the change. */
-  after(workItem: TeamIssueResponseItem): WorkItemScheduleCalendarPolicy
-  /** How date ranges keep their dates. */
-  adjustment: WorkCalendarAdjustment
-  /** Whether the caller may see a Work Item as an example. */
-  canShowExample(workItem: TeamIssueResponseItem): boolean
-  /**
-   * Whether an older Work Item without a calendar source follows the calendar when its rules
-   * equal the calendar before the change. Team and Project changes adopt them; a Workspace change
-   * does not, because it is applied after the new settings are saved.
-   */
-  adoptLegacy: boolean
-}
-
-/** A calendar change plan: what it does and the schedule rewrites it needs. */
-export type WorkCalendarChangePlan = {
-  /** Impact shown in the preview. */
-  impact: WorkCalendarChangeImpact
-  /** Schedule rewrites, in Team then Work Item order. */
-  updates: WorkItemScheduleCascadeUpdate[]
+/**
+ * Creates the resolver of the shared calendar each Work Item of a Team follows.
+ *
+ * @param inputs - Workspace calendar inputs.
+ * @param calendars - Team and Project calendars.
+ * @returns A resolver keyed by the Work Item's Project.
+ */
+export function createWorkCalendarResolver(
+  inputs: WorkspaceCalendarInputs,
+  calendars: TeamWorkCalendars,
+): (workItem: { assignedProjectId?: string }) => WorkItemScheduleCalendarPolicy {
+  const cache = new Map<string, WorkItemScheduleCalendarPolicy>()
+  return (workItem) => {
+    const projectKey = workItem.assignedProjectId ?? ''
+    const cached = cache.get(projectKey)
+    if (cached) return cached
+    const policy = resolveWorkCalendarPolicyFrom(
+      inputs,
+      calendars.team,
+      workItem.assignedProjectId === undefined ? undefined : calendars.projects.get(workItem.assignedProjectId),
+    )
+    cache.set(projectKey, policy)
+    return policy
+  }
 }
 
 /**
- * Plans what a shared calendar change does to the Work Items that follow it (ADR 0058).
+ * Builds the Team calendars as they would be after one calendar takes new rules.
  *
- * A Work Item follows the calendar when its policy is marked `shared`, or when it is an older row
- * with its own policy that equals the calendar before the change; such a row is marked `shared`
- * when the change rewrites it. Only following Work Items whose rules differ from the new calendar
- * are rewritten; the impact counts those whose dates or working days change.
- *
- * @param input - Work Items, calendars before and after, and the adjustment.
- * @returns The impact and the rewrites.
+ * @param calendars - Stored Team and Project calendars.
+ * @param scope - Calendar that changes.
+ * @param overrides - New rules of that calendar.
+ * @returns The Team calendars with the candidate rules.
  */
-export function planWorkCalendarChange(input: WorkCalendarChangePlanInput): WorkCalendarChangePlan {
-  const updates: WorkItemScheduleCascadeUpdate[] = []
-  const examples: { example: WorkCalendarChangeExample, sortKey: string }[] = []
-  let followingCount = 0
-  let changedCount = 0
-  let fallbackToKeepDurationCount = 0
-  const ordered = [...input.workItems].sort((left, right) =>
-    left.teamId === right.teamId ? compareText(left.id, right.id) : compareText(left.teamId, right.teamId))
-  for (const workItem of ordered) {
-    const current = workItem.schedule.calendarPolicy
-    const before = input.before(workItem)
-    if (current.calendarSource !== 'shared' && (!input.adoptLegacy || !haveSameWorkCalendarRules(current, before))) {
-      continue
-    }
-    followingCount += 1
-    const after = input.after(workItem)
-    // A row whose rules already match the new calendar needs no write; an older row stays as it is
-    // until a change moves its dates, so a first change never rewrites every Work Item of a Team.
-    if (haveSameWorkCalendarRules(current, after)) continue
-    const rebased = rebaseWorkItemScheduleCalendar(workItem.schedule, after, input.adjustment)
-    updates.push({
-      teamId: workItem.teamId,
-      workItemId: workItem.id,
-      expectedRevision: workItem.revision,
-      schedule: rebased.schedule,
-    })
-    const beforeDates = readScheduleDates(workItem.schedule)
-    const afterDates = readScheduleDates(rebased.schedule)
-    if (!beforeDates || !afterDates || sameDates(beforeDates, afterDates)) continue
-    changedCount += 1
-    if (rebased.fellBackToKeepDuration) fallbackToKeepDurationCount += 1
-    if (!input.canShowExample(workItem)) continue
-    examples.push({
-      sortKey: `${beforeDates.startDate}\0${workItem.teamId}\0${workItem.id}`,
-      example: {
-        teamId: workItem.teamId,
-        workItemId: workItem.id,
-        ...(workItem.key ? { key: workItem.key } : {}),
-        title: workItem.title,
-        before: beforeDates,
-        after: afterDates,
-      },
-    })
-  }
+export function withCandidateWorkCalendar(
+  calendars: TeamWorkCalendars,
+  scope: WorkCalendar['scope'],
+  overrides: WorkCalendarOverrides,
+): TeamWorkCalendars {
+  const candidate = (current: WorkCalendar | undefined): WorkCalendar => ({
+    ...overrides,
+    scope,
+    revision: (current?.revision ?? 0) + 1,
+    updatedAt: current?.updatedAt ?? new Date(0).toISOString(),
+    updatedBy: current?.updatedBy ?? 'preview',
+  })
+  if (scope.kind === 'team') return { team: candidate(calendars.team), projects: calendars.projects }
   return {
-    impact: {
-      adjustment: input.adjustment,
-      followingCount,
-      changedCount,
-      examples: examples
-        .sort((left, right) => compareText(left.sortKey, right.sortKey))
-        .slice(0, WORK_CALENDAR_CHANGE_EXAMPLE_LIMIT)
-        .map((entry) => entry.example),
-      fallbackToKeepDurationCount,
-    },
-    updates,
+    ...(calendars.team ? { team: calendars.team } : {}),
+    projects: new Map([...calendars.projects, [scope.projectId, candidate(calendars.projects.get(scope.projectId))]]),
   }
-}
-
-/**
- * Reads the dates of a date-range schedule.
- *
- * @param schedule - Canonical schedule.
- * @returns The dates, or undefined for a schedule without a date range.
- */
-function readScheduleDates(schedule: WorkItemSchedule) {
-  return schedule.mode === 'date-range'
-    ? { startDate: schedule.startDate, endDate: schedule.endDate, durationDays: schedule.durationDays }
-    : undefined
-}
-
-/**
- * Compares the dates of two date ranges.
- *
- * @param left - First dates.
- * @param right - Second dates.
- * @returns Whether start, end, and working days are equal.
- */
-function sameDates(
-  left: { startDate: string, endDate: string, durationDays: number },
-  right: { startDate: string, endDate: string, durationDays: number },
-): boolean {
-  return left.startDate === right.startDate &&
-    left.endDate === right.endDate &&
-    left.durationDays === right.durationDays
-}
-
-/**
- * Compares text by UTF-16 code units, as the other deterministic orders do.
- *
- * @param left - First text.
- * @param right - Second text.
- * @returns A negative, zero, or positive number.
- */
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0
 }

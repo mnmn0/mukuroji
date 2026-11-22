@@ -3007,14 +3007,19 @@ export function registerAutomationRoutes(routeApp: Hono): void {
         await requireTeamConfigurationAdministration(principal, input.target.scopeId)
       }
       // A Project template's WBS keeps the calendar of the first request on every retry; a retry
-      // returns its receipt without reading the calendar again.
+      // returns its receipt without reading the calendar again. The WBS counts its working days on
+      // the target Team's calendar, which the new Project starts from (ADR 0058).
+      const target = input.target
       const application = await automationDependencies.ruleTemplates.reserveTemplateApplication(
         principal.directoryId,
         principal.actorId,
         c.req.param('templateId'),
-        input.target,
+        target,
         idempotencyKey,
-        () => readWorkspaceWorkItemCalendarPolicy(principal.directoryId),
+        () => readWorkspaceWorkItemCalendarPolicy(
+          principal.directoryId,
+          target.kind === 'project' ? { teamId: target.teamId } : undefined,
+        ),
       )
       return c.json(await executeAutomationTemplateApplication(c, principal, application))
     } catch (error) {

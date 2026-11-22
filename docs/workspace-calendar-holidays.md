@@ -31,7 +31,8 @@ Team と Project は Workspace の稼働カレンダーへの上書きを持て�
   旧来の Work Item は書き換えるときに `shared` にする。書き換えるのは新しいカレンダーと規則が違う Work Item だけ。
   Workspace の apply は旧来の Work Item を取り込まない。
 - 書き換えは schedule cascade の書き込み（24 件ずつ、Work Item の revision で fence、audit は `schedule-cascade-updated`）を使う。
-  1回に書き換えるのは 480 件まで、1 Team の Work Item が 1000 件を超えるときも 413。衝突した Work Item は件数だけ返す。
+  1回に書き換えるのは 480 件まで、1 Team の Work Item が 1000 件を超えるときも 413。衝突した transaction は読み直して1件ずつ再試行し、それでも衝突した Work Item は件数だけ返す。
+- Project のカレンダーの変更は、その Project に割り当てられた Work Item だけを書き換える。
 - preview の例は開始日順に最大 10 件で、読む人が見られる Work Item だけを出す。
 
 ## 休日の決まり方
@@ -50,7 +51,7 @@ Team と Project は Workspace の稼働カレンダーへの上書きを持て�
 | Web の task 画面、Team の Issue 画面 | 選んだ Team・Project のカレンダー（読み込み前は Workspace の稼働カレンダー、それも読めなければ月〜金・休日なし）。server が作成先のカレンダーで写し直す |
 | Public API `POST /api/v1/work-items` | `schedule` を省いたとき server が Workspace の稼働カレンダーを付ける（`dueDate` があれば期限付き、なければ未スケジュール）。`schedule` を送ったときはその policy のまま |
 | MCP `create_task` | `schedule` を省いて Public API に送るので、Public API と同じ |
-| Project template の WBS 適用 | Workspace の稼働カレンダーで開始日からの稼働日を数え、その policy を各 Work Item に付ける。適用の受付時に稼働カレンダーを固定し、再試行でも同じものを使う |
+| Project template の WBS 適用 | 対象 Team のカレンダーで開始日からの稼働日を数え、その policy を各 Work Item に付ける。適用の受付時に稼働カレンダーを固定し、再試行でも同じものを使う |
 | 依頼フォーム・Triage からの作成 | 作成先の Team・Project のカレンダー |
 | Automation の作成 action | 作成先の Team のカレンダー |
 | CSV / JSON import | 行の `schedule` に `calendarPolicy` がないとき Workspace の稼働カレンダー。日付範囲で `durationDays` もないときは、その policy で数える。commit した job は作成時の稼働カレンダーを保存し、worker の再試行でも同じものを使う |

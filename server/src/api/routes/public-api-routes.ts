@@ -187,7 +187,7 @@ import {
   withWorkItemPlannedEffort,
 } from '../shared/work-item-effort'
 import { prepareConfiguredCreateWorkItem } from '../shared/work-item-configuration'
-import { readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
+import { applySharedCalendarToSchedule, readWorkspaceWorkItemCalendarPolicy } from '../shared/workspace-calendar'
 import {
   createDependencyFencedWorkItemAuthorizationSnapshot,
   rejectInternalWorkItemCreateFields,
@@ -774,10 +774,15 @@ async function completePublicCreateWorkItemSchedule(
   input: PublicCreateWorkItemInput,
 ): Promise<CreateWorkItemInput> {
   const { schedule, dueDate, ...fields } = input
-  if (schedule) return { ...fields, schedule }
   const projectId = typeof input.assignedProjectId === 'string' && input.assignedProjectId.trim()
     ? input.assignedProjectId.trim()
     : undefined
+  if (schedule) {
+    return {
+      ...fields,
+      schedule: await applySharedCalendarToSchedule(directoryId, { teamId, ...(projectId ? { projectId } : {}) }, schedule),
+    }
+  }
   const calendarPolicy = await readWorkspaceWorkItemCalendarPolicy(
     directoryId,
     { teamId, ...(projectId ? { projectId } : {}) },

@@ -19,6 +19,7 @@ import {
   type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import { afterEach, expect, test } from 'bun:test'
+import { ProjectDataError } from '../../modules/directory'
 import type {
   TeamIssueResponseItem,
   TeamWorkItemHierarchyEntry,
@@ -208,6 +209,13 @@ test('changes only the Work Items of a Project when its calendar changes', async
   installWorkItems([
     { ...base, id: 'in-project', schedule: weekSchedule(sharedPolicy) },
     { ...base, id: 'no-project', assignedProjectId: undefined, schedule: weekSchedule(sharedPolicy) },
+    // A shared Work Item of another Project with outdated rules is not this Project's to rewrite.
+    {
+      ...base,
+      id: 'other-project',
+      assignedProjectId: `${projectId}-other`,
+      schedule: weekSchedule({ ...sharedPolicy, workingWeekdays: ['monday', 'tuesday', 'wednesday'] }),
+    },
   ])
   const response = await request('/api/teams/core-team/work-calendar/preview', 'POST', {
     projectId,
@@ -297,4 +305,37 @@ test('applies the saved Workspace calendar only to Work Items whose rules differ
   expect(updates.map((update) => [update.workItemId, update.expectedRevision])).toEqual([['stale', 4]])
   expect(updates[0]?.schedule).toMatchObject({ endDate: '2026-12-10', durationDays: 4 })
   expect(updates[0]?.schedule.calendarPolicy.holidays).not.toContain('2026-12-09')
+})
+
+test('retries a conflicting rewrite from a fresh read so an adopted older Work Item still follows', async () => {
+  configureFakeProjectClients(true)
+  const base = await readBaseIssue()
+  let revision = 4
+  const writes: WorkItemScheduleCascadeUpdate[][] = []
+  setTestAppDependencies({
+    teamIssues: createTeamIssuesFake({
+      async getTeamHierarchyEntries() {
+        const issue: TeamIssueResponseItem = { ...base, id: 'legacy', revision, schedule: weekSchedule(legacyPolicy) }
+        return [{ issue, hierarchyRank: issue.id }]
+      },
+      async updateTeamIssueSchedules(_directoryId, updates) {
+        writes.push([...updates])
+        // Someone else edits the Work Item between the plan and the first write.
+        if (writes.length === 1) {
+          revision = 5
+          throw new ProjectDataError(409, 'WorkItemRevisionConflict', 'The Work Item changed.')
+        }
+        return { issues: [], confirmedSchedules: [] }
+      },
+    }),
+  })
+  const saved = await request('/api/teams/core-team/work-calendar', 'PUT', {
+    overrides: { additionalHolidays: ['2026-12-09'] },
+    adjustment: 'keep-end-date',
+    expectedRevision: 0,
+  })
+  expect(saved.status).toBe(200)
+  expect(await saved.json()).toMatchObject({ updatedCount: 1, conflictCount: 0 })
+  expect(writes.map((batch) => batch.map((update) => update.expectedRevision))).toEqual([[4], [5]])
+  expect(writes[1]?.[0]?.schedule.calendarPolicy.calendarSource).toBe('shared')
 })

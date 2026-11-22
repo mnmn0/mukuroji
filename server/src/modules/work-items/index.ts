@@ -14,6 +14,17 @@ export {
   type TeamWorkItemHierarchySourceEntry,
 } from './application/use-cases/read-team-work-item-hierarchy'
 export {
+  applyWorkCalendarChange,
+  planWorkCalendarChange,
+  previewWorkCalendarChange,
+  type WorkCalendarChangePlan,
+  type WorkCalendarChangePlanInput,
+  type WorkCalendarChangePorts,
+  type WorkCalendarChangeRules,
+  type WorkCalendarChangeWorkItem,
+  type WorkCalendarScheduleUpdate,
+} from './application/use-cases/work-calendar-change'
+export {
   WorkItemContributorAssignmentError,
   listAddedContributorMembers,
   normalizeContributorAssignments,

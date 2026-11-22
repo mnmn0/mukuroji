@@ -40,6 +40,7 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
 - 新しい Work Item は、作成経路（Web、Public API、MCP、依頼フォーム・Triage、Automation、Project template、import）で
   policy が `shared` なら、server が作成先の Team・Project のカレンダーを解決し直し、終了日を保つ調整で写す。
   利用者が自分で決めた policy（`shared` でない）はそのまま保存する。
+  Project template の WBS は、適用の受付時に対象 Team のカレンダーを固定し、その上で稼働日の offset と日数を数える（作成時に写し直さない）。
 
 ### 変更の preview と適用
 
@@ -57,7 +58,12 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
   （既存の Work Item が多い Team で、最初の変更が件数の上限に当たらないようにする）。
 - 書き換えは既存の schedule cascade の書き込み（24 件ずつの transaction、Work Item の revision による fence、
   audit の `schedule-cascade-updated`）を使う。1回の変更で書き換えるのは 480 件まで、超えると 413。
-  保存後に他の更新と衝突した Work Item は数だけ返し、もう一度適用すれば揃う。
+  他の更新と衝突した transaction は、読み直した Work Item で同じ変更前・変更後のカレンダーから1件ずつ計画し直して再試行する
+  （取り込み中の旧来の Work Item も対象から外れない）。それでも衝突した Work Item は数だけ返す。
+- Project のカレンダーの変更が書き換えるのは、その Project に割り当てられた Work Item だけ（Project manager が他の Project の日程を変えない）。
+- 計画と書き換えの手順は work-items module の use case（`application/use-cases/work-calendar-change.ts`）が持ち、
+  route は入力の検証・認可・port の接続だけを行う。
+- 日本の祝日の同期済みの一覧は、Workspace が祝日を使わない設定でも読む（Team・Project が祝日を使う上書きを持てるため）。
 - preview の例は最大 10 件で、読む人が見られる Work Item だけを出す。
 
 ### 権限

@@ -116,6 +116,7 @@ export function WorkCalendarPanel(props: WorkCalendarPanelProps) {
         <select
           className="workbench-input h-10 px-3"
           data-testid="work-calendar-scope"
+          disabled={isBusy}
           onChange={(event) => props.onScopeChange(event.target.value)}
           value={props.selectedScope ?? ''}
         >

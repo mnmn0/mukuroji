@@ -69,6 +69,8 @@ export function WorkCalendarPanelContainer({ accessToken, locale, teams }: WorkC
   const [errorMessage, setErrorMessage] = useState<string>()
   const [isBusy, setIsBusy] = useState(false)
   const saveContext = useRef<MutationRequestContext | undefined>(undefined)
+  /** Changes whenever the outcome is cleared, so a reply to an earlier request is dropped. */
+  const requestGeneration = useRef(0)
   const calendar = query.data
   const ownDraft = draftState && draftState.scope === scope?.value ? draftState : undefined
   const draft = calendar ? ownDraft?.value ?? createWorkCalendarDraft(calendar) : undefined
@@ -76,6 +78,7 @@ export function WorkCalendarPanelContainer({ accessToken, locale, teams }: WorkC
 
   /** Clears the preview, result, and error after any change. */
   function resetOutcome() {
+    requestGeneration.current += 1
     setImpact(undefined)
     setResult(undefined)
     setErrorMessage(undefined)
@@ -85,16 +88,18 @@ export function WorkCalendarPanelContainer({ accessToken, locale, teams }: WorkC
   /** Previews the drafted change. */
   async function preview() {
     if (!teamId || !draft) return
+    const generation = requestGeneration.current
     setIsBusy(true)
     setErrorMessage(undefined)
     try {
-      setImpact(await previewWorkCalendarChange(accessToken, teamId, {
+      const previewed = await previewWorkCalendarChange(accessToken, teamId, {
         ...(projectId ? { projectId } : {}),
         overrides: toWorkCalendarOverrides(draft),
         adjustment: draft.adjustment,
-      }))
+      })
+      if (generation === requestGeneration.current) setImpact(previewed)
     } catch (error) {
-      setErrorMessage(readErrorMessage(error, t))
+      if (generation === requestGeneration.current) setErrorMessage(readErrorMessage(error, t))
     } finally {
       setIsBusy(false)
     }

@@ -31,7 +31,6 @@ import {
   prepareConfiguredCreateWorkItem,
 } from './work-item-configuration'
 import { requireActiveWorkspaceAssignee } from './workspace-access'
-import { applySharedCalendarToNewSchedule } from './workspace-calendar'
 
 /** One Project template Work Item placed on real dates, in parent-before-child order. */
 export type ExpandedProjectTemplateWorkItem = {
@@ -50,7 +49,7 @@ export type ExpandedProjectTemplateWorkItem = {
  *
  * A start offset of `n` puts the Work Item on the `(n + 1)`th working day on or after the Project
  * start date, and its end is the last of `durationWorkingDays` working days from there. Working
- * days follow the given calendar, which is the Workspace working calendar when a template is
+ * days follow the given calendar, which is the target Team's calendar when a template is
  * applied, and every Work Item keeps a copy of it.
  *
  * @param workItems - Top-level template Work Items with their children.
@@ -203,11 +202,9 @@ export async function createProjectTemplateWorkItems(
       team,
     )
     const projectFence = await requireAssignedProjectAcceptsNewWorkItems(directoryId, team, projectId)
-    const configuredBody = await prepareConfiguredCreateWorkItem(directoryId, teamId, {
-      ...body,
-      // A schedule that follows the shared calendar takes the Project calendar (ADR 0058).
-      schedule: await applySharedCalendarToNewSchedule(directoryId, { teamId, projectId }, body.schedule),
-    }, configuration)
+    // The schedule keeps the Team calendar pinned when the application was reserved, so its
+    // working-day offsets and durations keep their template meaning on every retry (ADR 0058).
+    const configuredBody = await prepareConfiguredCreateWorkItem(directoryId, teamId, body, configuration)
     const response = await workItemDependencies.teamIssues.createTeamIssue(
       directoryId,
       teamId,

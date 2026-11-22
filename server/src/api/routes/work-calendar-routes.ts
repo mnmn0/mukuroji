@@ -1,17 +1,13 @@
 import type { Context, Hono } from 'hono'
 import {
   DEFAULT_WORK_CALENDAR_ADJUSTMENT,
-  WORK_CALENDAR_CHANGE_MAX_WORK_ITEMS,
   WORK_ITEM_HIERARCHY_MAX_ITEMS,
   isWorkCalendarAdjustment,
   readWorkCalendarOverrides,
   readWorkspaceCalendarSettings,
-  type WorkCalendar,
   type WorkCalendarAdjustment,
-  type WorkCalendarChangeResult,
   type WorkCalendarOverrides,
   type WorkCalendarResponse,
-  type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import { ProjectDataError } from '../../modules/directory'
 import {
@@ -19,7 +15,14 @@ import {
   WorkCalendarRevisionConflictError,
   type StoredWorkCalendarScope,
 } from '../../modules/tenant-administration'
-import { WORK_ITEM_SCHEDULE_CASCADE_LIMIT, type TeamIssueResponseItem } from '../../modules/work-items'
+import {
+  applyWorkCalendarChange,
+  previewWorkCalendarChange,
+  type TeamIssueResponseItem,
+  type WorkCalendarChangePorts,
+  type WorkCalendarChangeRules,
+  type WorkCalendarChangeWorkItem,
+} from '../../modules/work-items'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { toWorkItemConfigurationErrorResponse } from '../shared/collaboration-access'
 import { readBearerAccessToken } from '../shared/http'
@@ -37,12 +40,11 @@ import {
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import type { TeamPermissionContext } from '../shared/workspace-access'
 import {
-  planWorkCalendarChange,
+  createWorkCalendarResolver,
   readTeamWorkCalendars,
   readWorkspaceCalendarInputs,
   resolveWorkCalendarPolicyFrom,
-  type TeamWorkCalendars,
-  type WorkCalendarChangePlan,
+  withCandidateWorkCalendar,
   type WorkspaceCalendarInputs,
 } from '../shared/workspace-calendar'
 
@@ -108,8 +110,11 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       const scope = createScope(context, teamId, input.projectId)
       await requireCalendarManager(principal, context, scope)
-      const plan = await planTeamCalendarChange(principal, context, scope, input.overrides, input.adjustment)
-      return c.json(plan.impact)
+      const change = await createTeamCalendarChange(principal, context, scope, input.overrides, input.adjustment)
+      return c.json(await previewWorkCalendarChange(
+        change.rules,
+        createWorkCalendarChangePorts(c, principal, change.teamIds, undefined),
+      ))
     } catch (error) {
       return toWorkCalendarErrorResponse(c, error)
     }
@@ -128,21 +133,22 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
       const context = await requireTeamPermission(principal, teamId, 'viewer')
       const scope = createScope(context, teamId, input.projectId)
       await requireCalendarManager(principal, context, scope)
-      const plan = await planTeamCalendarChange(principal, context, scope, input.overrides, input.adjustment)
-      requireApplicablePlan(plan)
-      const calendar = await workspaceDependencies.workCalendars.save(
-        principal.directoryId,
-        {
-          scope,
-          overrides: input.overrides,
-          ...(scope.kind === 'team' ? { changeAdjustment: input.adjustment } : {}),
-        },
-        input.expectedRevision,
-        principal.userKey,
-        new Date().toISOString(),
+      const change = await createTeamCalendarChange(principal, context, scope, input.overrides, input.adjustment)
+      const result = await applyWorkCalendarChange(
+        change.rules,
+        createWorkCalendarChangePorts(c, principal, change.teamIds, body),
+        () => workspaceDependencies.workCalendars.save(
+          principal.directoryId,
+          {
+            scope,
+            overrides: input.overrides,
+            ...(scope.kind === 'team' ? { changeAdjustment: input.adjustment } : {}),
+          },
+          input.expectedRevision,
+          principal.userKey,
+          new Date().toISOString(),
+        ),
       )
-      const applied = await applyPlan(c, principal, plan, body)
-      const result: WorkCalendarChangeResult = { calendar, impact: plan.impact, ...applied }
       return c.json(result)
     } catch (error) {
       return toWorkCalendarErrorResponse(c, error)
@@ -165,8 +171,11 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
       const candidate: WorkspaceCalendarInputs = calendar.publicHolidays === 'japan'
         ? { settings: calendar, nationalHolidayDates: await workspaceDependencies.nationalHolidays.listDates() }
         : { settings: calendar }
-      const plan = await planWorkspaceCalendarChange(principal, current, candidate, adjustment)
-      return c.json(plan.impact)
+      const change = await createWorkspaceCalendarChange(principal, current, candidate, adjustment)
+      return c.json(await previewWorkCalendarChange(
+        change.rules,
+        createWorkCalendarChangePorts(c, principal, change.teamIds, undefined),
+      ))
     } catch (error) {
       return toWorkCalendarErrorResponse(c, error)
     }
@@ -183,61 +192,66 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
       requireWorkspaceBusinessWrite(principal)
       requireWorkspaceAdministration(principal)
       const current = await readWorkspaceCalendarInputs(principal.directoryId)
-      const plan = await planWorkspaceCalendarChange(principal, current, current, adjustment)
-      requireApplicablePlan(plan)
-      const applied = await applyPlan(c, principal, plan, body)
-      const result: WorkCalendarChangeResult = { impact: plan.impact, ...applied }
-      return c.json(result)
+      const change = await createWorkspaceCalendarChange(principal, current, current, adjustment)
+      return c.json(await applyWorkCalendarChange(
+        change.rules,
+        createWorkCalendarChangePorts(c, principal, change.teamIds, body),
+      ))
     } catch (error) {
       return toWorkCalendarErrorResponse(c, error)
     }
   })
 }
 
+/** Which Teams a calendar change reads and the rules it follows. */
+type CalendarChange = {
+  /** Teams whose Work Items the change reads. */
+  teamIds: readonly string[]
+  /** Rules of the change. */
+  rules: WorkCalendarChangeRules
+}
+
 /**
- * Plans a Team or Project calendar change over the Team's Work Items.
+ * Builds a Team or Project calendar change.
+ *
+ * A Project change reaches only the Work Items of that Project, so a Project manager never
+ * rewrites Work Items elsewhere in the Team.
  *
  * @param principal - Authenticated principal, for the examples it may see.
  * @param context - Team permission context.
  * @param scope - Calendar that changes.
  * @param overrides - New rules of the calendar.
  * @param adjustment - How date ranges keep their dates.
- * @returns The plan.
+ * @returns The change.
  */
-async function planTeamCalendarChange(
+async function createTeamCalendarChange(
   principal: WorkspacePrincipal,
   context: TeamPermissionContext,
   scope: StoredWorkCalendarScope,
   overrides: WorkCalendarOverrides,
   adjustment: WorkCalendarAdjustment,
-): Promise<WorkCalendarChangePlan> {
-  const [inputs, calendars, workItems] = await Promise.all([
+): Promise<CalendarChange> {
+  const [inputs, calendars] = await Promise.all([
     readWorkspaceCalendarInputs(principal.directoryId),
     readTeamWorkCalendars(principal.directoryId, scope.teamId),
-    readTeamWorkItems(principal.directoryId, scope.teamId),
   ])
-  const changed: TeamWorkCalendars = scope.kind === 'team'
-    ? { team: toCandidateCalendar(calendars.team, scope, overrides), projects: calendars.projects }
-    : {
-        ...(calendars.team ? { team: calendars.team } : {}),
-        projects: new Map([
-          ...calendars.projects,
-          [scope.projectId, toCandidateCalendar(calendars.projects.get(scope.projectId), scope, overrides)],
-        ]),
-      }
-  return planWorkCalendarChange({
-    workItems,
-    before: createResolver(inputs, calendars),
-    after: createResolver(inputs, changed),
-    adjustment,
-    canShowExample: (workItem) =>
-      canAccessAssignedProject(principal, context, workItem.assignedProjectId, 'viewer'),
-    adoptLegacy: true,
-  })
+  return {
+    teamIds: [scope.teamId],
+    rules: {
+      before: createWorkCalendarResolver(inputs, calendars),
+      after: createWorkCalendarResolver(inputs, withCandidateWorkCalendar(calendars, scope, overrides)),
+      adjustment,
+      includes: (workItem) => workItem.teamId === scope.teamId &&
+        (scope.kind === 'team' || workItem.assignedProjectId === scope.projectId),
+      canShowExample: (workItem) =>
+        canAccessAssignedProject(principal, context, workItem.assignedProjectId, 'viewer'),
+      adoptLegacy: true,
+    },
+  }
 }
 
 /**
- * Plans a Workspace calendar change over every Team's Work Items.
+ * Builds a Workspace calendar change over every Team.
  *
  * Examples are limited to Work Items the administrator may see in their Team.
  *
@@ -245,84 +259,78 @@ async function planTeamCalendarChange(
  * @param current - Saved Workspace calendar inputs.
  * @param candidate - Workspace calendar inputs after the change.
  * @param adjustment - How date ranges keep their dates.
- * @returns The plan.
+ * @returns The change.
  */
-async function planWorkspaceCalendarChange(
+async function createWorkspaceCalendarChange(
   principal: WorkspacePrincipal,
   current: WorkspaceCalendarInputs,
   candidate: WorkspaceCalendarInputs,
   adjustment: WorkCalendarAdjustment,
-): Promise<WorkCalendarChangePlan> {
+): Promise<CalendarChange> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const teams = await Promise.all(directory.teams.map(async (team) => ({
     teamId: team.id,
     calendars: await readTeamWorkCalendars(principal.directoryId, team.id),
-    workItems: await readTeamWorkItems(principal.directoryId, team.id),
     context: await requireTeamPermission(principal, team.id, 'viewer').catch(() => undefined),
   })))
   const calendarsByTeam = new Map(teams.map((team) => [team.teamId, team.calendars]))
   const contextsByTeam = new Map(teams.map((team) => [team.teamId, team.context]))
-  const resolverFor = (inputs: WorkspaceCalendarInputs) => (workItem: TeamIssueResponseItem) =>
-    createResolver(inputs, calendarsByTeam.get(workItem.teamId) ?? { projects: new Map() })(workItem)
-  return planWorkCalendarChange({
-    workItems: teams.flatMap((team) => team.workItems),
-    before: resolverFor(current),
-    after: resolverFor(candidate),
-    adjustment,
-    canShowExample: (workItem) => {
-      const context = contextsByTeam.get(workItem.teamId)
-      return context !== undefined &&
-        canAccessAssignedProject(principal, context, workItem.assignedProjectId, 'viewer')
+  const resolverFor = (inputs: WorkspaceCalendarInputs) => {
+    const resolvers = new Map(teams.map((team) => [team.teamId, createWorkCalendarResolver(inputs, team.calendars)]))
+    const fallback = createWorkCalendarResolver(inputs, { projects: new Map() })
+    return (workItem: WorkCalendarChangeWorkItem) => (resolvers.get(workItem.teamId) ?? fallback)(workItem)
+  }
+  return {
+    teamIds: teams.map((team) => team.teamId),
+    rules: {
+      before: resolverFor(current),
+      after: resolverFor(candidate),
+      adjustment,
+      includes: (workItem) => calendarsByTeam.has(workItem.teamId),
+      canShowExample: (workItem) => {
+        const context = contextsByTeam.get(workItem.teamId)
+        return context !== undefined &&
+          canAccessAssignedProject(principal, context, workItem.assignedProjectId, 'viewer')
+      },
+      adoptLegacy: false,
     },
-    adoptLegacy: false,
-  })
-}
-
-/**
- * Creates the resolver of the shared calendar each Work Item of a Team follows.
- *
- * @param inputs - Workspace calendar inputs.
- * @param calendars - Team and Project calendars.
- * @returns A resolver keyed by the Work Item's Project.
- */
-function createResolver(
-  inputs: WorkspaceCalendarInputs,
-  calendars: TeamWorkCalendars,
-): (workItem: TeamIssueResponseItem) => WorkItemScheduleCalendarPolicy {
-  const cache = new Map<string, WorkItemScheduleCalendarPolicy>()
-  return (workItem) => {
-    const projectKey = workItem.assignedProjectId ?? ''
-    const cached = cache.get(projectKey)
-    if (cached) return cached
-    const policy = resolveWorkCalendarPolicyFrom(
-      inputs,
-      calendars.team,
-      workItem.assignedProjectId === undefined ? undefined : calendars.projects.get(workItem.assignedProjectId),
-    )
-    cache.set(projectKey, policy)
-    return policy
   }
 }
 
 /**
- * Builds the calendar a change would store, for planning before the save.
+ * Connects a calendar change to the Work Item reads and the schedule cascade writes.
  *
- * @param current - Stored calendar, if any.
- * @param scope - Calendar scope.
- * @param overrides - New rules.
- * @returns A calendar carrying the new rules.
+ * @param c - Hono request context, for the audit context.
+ * @param principal - Member who changes the calendar.
+ * @param teamIds - Teams whose Work Items the change reads.
+ * @param body - Request body recorded in the audit context.
+ * @returns The ports.
  */
-function toCandidateCalendar(
-  current: WorkCalendar | undefined,
-  scope: StoredWorkCalendarScope,
-  overrides: WorkCalendarOverrides,
-): WorkCalendar {
+function createWorkCalendarChangePorts(
+  c: Context,
+  principal: WorkspacePrincipal,
+  teamIds: readonly string[],
+  body: unknown,
+): WorkCalendarChangePorts {
   return {
-    ...overrides,
-    scope,
-    revision: (current?.revision ?? 0) + 1,
-    updatedAt: current?.updatedAt ?? new Date(0).toISOString(),
-    updatedBy: current?.updatedBy ?? 'preview',
+    async readWorkItems() {
+      const teams = await Promise.all(teamIds.map((teamId) => readTeamWorkItems(principal.directoryId, teamId)))
+      return teams.flat()
+    },
+    async writeSchedules(updates, batch) {
+      const updateSchedules = workItemDependencies.teamIssues.updateTeamIssueSchedules
+      if (!updateSchedules) {
+        throw new ProjectDataError(503, 'WorkCalendarUnavailable', 'Work Item schedules cannot be rewritten.')
+      }
+      await updateSchedules.call(
+        workItemDependencies.teamIssues,
+        principal.directoryId,
+        updates,
+        [],
+        principal.userKey,
+        createApiMutationContext(c, principal, { body, batch }),
+      )
+    },
   }
 }
 
@@ -348,70 +356,6 @@ async function readTeamWorkItems(directoryId: string, teamId: string): Promise<T
     )
   }
   return entries.map((entry) => entry.issue)
-}
-
-/**
- * Refuses a change that would rewrite more Work Items than one save may.
- *
- * @param plan - Planned change.
- * @throws ProjectDataError 413 when the plan is too large.
- */
-function requireApplicablePlan(plan: WorkCalendarChangePlan): void {
-  if (plan.updates.length > WORK_CALENDAR_CHANGE_MAX_WORK_ITEMS) {
-    throw new ProjectDataError(
-      413,
-      'WorkCalendarChangeTooLarge',
-      `A calendar change can adjust at most ${WORK_CALENDAR_CHANGE_MAX_WORK_ITEMS} Work Items at once.`,
-    )
-  }
-}
-
-/**
- * Rewrites the planned schedules in bounded transactions.
- *
- * A transaction whose Work Item changed meanwhile is skipped and counted, so saving the same
- * calendar again adjusts the rest.
- *
- * @param c - Hono request context, for the audit context.
- * @param principal - Member who changed the calendar.
- * @param plan - Planned change.
- * @param body - Request body recorded in the audit context.
- * @returns How many Work Items were rewritten or skipped.
- */
-async function applyPlan(
-  c: Context,
-  principal: WorkspacePrincipal,
-  plan: WorkCalendarChangePlan,
-  body: unknown,
-): Promise<{ updatedCount: number, conflictCount: number }> {
-  const updateSchedules = workItemDependencies.teamIssues.updateTeamIssueSchedules
-  if (plan.updates.length === 0) return { updatedCount: 0, conflictCount: 0 }
-  if (!updateSchedules) {
-    throw new ProjectDataError(503, 'WorkCalendarUnavailable', 'Work Item schedules cannot be rewritten.')
-  }
-  let updatedCount = 0
-  let conflictCount = 0
-  for (let index = 0; index < plan.updates.length; index += WORK_ITEM_SCHEDULE_CASCADE_LIMIT) {
-    const chunk = plan.updates.slice(index, index + WORK_ITEM_SCHEDULE_CASCADE_LIMIT)
-    try {
-      await updateSchedules.call(
-        workItemDependencies.teamIssues,
-        principal.directoryId,
-        chunk,
-        [],
-        principal.userKey,
-        createApiMutationContext(c, principal, { body, chunk: index / WORK_ITEM_SCHEDULE_CASCADE_LIMIT }),
-      )
-      updatedCount += chunk.length
-    } catch (error) {
-      if (error instanceof ProjectDataError && error.status === 409) {
-        conflictCount += chunk.length
-        continue
-      }
-      throw error
-    }
-  }
-  return { updatedCount, conflictCount }
 }
 
 /**

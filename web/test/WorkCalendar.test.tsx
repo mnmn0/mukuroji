@@ -11,6 +11,7 @@ import {
 } from '../src/workspace/model/workCalendarDraft'
 import { WorkCalendarPanel } from '../src/workspace/ui/WorkCalendarPanel'
 import { createTranslator } from '../src/shared/i18n/i18n'
+import { replaceTaskDeadlineSchedule, unscheduleTaskSchedule } from '../src/tasks/model/taskSchedule'
 
 const originalFetch = globalThis.fetch
 
@@ -120,5 +121,15 @@ describe('Team and Project calendars', () => {
       <WorkCalendarPanel {...props} calendar={{ ...teamResponse, canManage: false }} impact={undefined} />,
     )
     expect(readOnly).toContain(t('workspace.workCalendar.readOnly'))
+  })
+
+  test('keeps a Work Item on the shared calendar through ordinary schedule edits', () => {
+    const schedule = {
+      mode: 'due-date' as const,
+      dueDate: '2026-12-11',
+      calendarPolicy: teamResponse.resolvedPolicy,
+    }
+    expect(unscheduleTaskSchedule(schedule).calendarPolicy.calendarSource).toBe('shared')
+    expect(replaceTaskDeadlineSchedule(schedule, '2026-12-14').calendarPolicy.calendarSource).toBe('shared')
   })
 })

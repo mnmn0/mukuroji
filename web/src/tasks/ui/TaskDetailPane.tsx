@@ -96,6 +96,7 @@ import {
   createDefaultUnscheduledTaskSchedule,
   resolveTaskScheduleEndDate,
   resolveTaskScheduleStartDate,
+  cloneTaskScheduleCalendarPolicy,
 } from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
@@ -1870,11 +1871,7 @@ function readDetailPlannedEffort(value: FormDataEntryValue | null): number | und
 function cloneScheduleCalendarPolicy(
   policy: WorkItemScheduleCalendarPolicy,
 ): WorkItemScheduleCalendarPolicy {
-  return {
-    holidays: [...policy.holidays],
-    timeZone: policy.timeZone,
-    workingWeekdays: [...policy.workingWeekdays],
-  }
+  return cloneTaskScheduleCalendarPolicy(policy)
 }
 
 /** Formats a project member for an assignee select option. */
