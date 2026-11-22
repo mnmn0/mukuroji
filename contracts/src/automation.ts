@@ -111,11 +111,30 @@ export type AutomationScheduleTrigger = {
   schedule: RecurringSchedule
 }
 
-/** Automation rule が扱える10種類の trigger です。 */
+/** Longest delay, in days, a baseline-slip trigger can wait for. */
+export const AUTOMATION_BASELINE_SLIP_MAX_DAYS = 365
+
+/**
+ * Detects a schedule change that moves an open Work Item at least the given number of days behind
+ * its Project's active schedule baseline.
+ */
+export type AutomationBaselineSlipTrigger = {
+  /** Trigger discriminator. */
+  type: 'baseline-slip'
+  /**
+   * Days behind the baseline that fire the rule, from 1 to
+   * {@link AUTOMATION_BASELINE_SLIP_MAX_DAYS}. The rule fires once, on the change that crosses
+   * it. Omitted means 1.
+   */
+  minDelayDays?: number
+}
+
+/** Automation rule が扱える11種類の trigger です。 */
 export type AutomationTrigger =
   | AutomationStatusTrigger
   | AutomationAssigneeTrigger
   | AutomationDueTrigger
+  | AutomationBaselineSlipTrigger
   | AutomationCustomFieldTrigger
   | AutomationWorkItemTypeTrigger
   | AutomationCommentTrigger

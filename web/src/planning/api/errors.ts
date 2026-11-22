@@ -33,13 +33,14 @@ export class PlanningApiError extends Error {
  *
  * @param error - Planning の load または mutation で発生した error です。
  * @param operation - Error が発生した操作です。
- * @returns Revision conflict は競合用、復元の前提条件の失敗はその理由、それ以外は汎用 error の翻訳 key です。
+ * @returns Revision conflict は競合用、Cycle のキャパシティ超過と復元の前提条件の失敗はその理由、それ以外は汎用 error の翻訳 key です。
  */
 export function resolvePlanningErrorMessageKey(
   error: unknown,
   operation: 'load' | 'mutation' | 'restore' = 'load',
 ):
   | 'planning.conflict'
+  | 'planning.cycle.capacityExceeded'
   | 'planning.error'
   | 'planning.mutationError'
   | 'planning.restore.ownerInactive'
@@ -49,6 +50,9 @@ export function resolvePlanningErrorMessageKey(
 
   if (isPlanningSnapshotConflict(error)) return 'planning.conflict'
   const code = 'code' in error && typeof error.code === 'string' ? error.code : undefined
+  if (operation === 'mutation' && code === 'PlanningCycleCapacityExceeded') {
+    return 'planning.cycle.capacityExceeded'
+  }
   if (operation === 'restore' && code === 'PlanningRestoreParentUnavailable') {
     return 'planning.restore.parentUnavailable'
   }

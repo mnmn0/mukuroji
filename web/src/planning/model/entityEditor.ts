@@ -1,4 +1,6 @@
 import type {
+  CycleCarryOverPolicy,
+  PlanningCadence,
   PlanningEntity,
   PlanningEntityPatch,
   PlanningEntityStatus,
@@ -40,6 +42,23 @@ export const planningProgressModeOptions: readonly PlanningProgressMode[] = [
   'manual',
 ]
 
+/** Cadence units the Cycle settings offer, in display order. */
+export const planningCadenceUnitOptions: readonly PlanningCadence['unit'][] = ['week', 'month']
+
+/** Carry-over policies the Cycle settings offer, in display order. */
+export const cycleCarryOverPolicyOptions: readonly CycleCarryOverPolicy[] = [
+  'move-incomplete',
+  'keep-incomplete',
+]
+
+/**
+ * Work Item capacity the create form proposes for a new Cycle.
+ *
+ * A Cycle refuses links beyond its capacity, so a default of 0 would create a Cycle that cannot
+ * hold any Work Item.
+ */
+export const DEFAULT_CYCLE_CAPACITY = 20
+
 /** Editable form values for one Planning entity, kept as strings the way inputs report them. */
 export type PlanningEntityEditorDraft = {
   /** Entity title before trimming. */
@@ -66,6 +85,14 @@ export type PlanningEntityEditorDraft = {
   forecastStart: string
   /** Forecast end date (`YYYY-MM-DD`). */
   forecastEnd: string
+  /** Cycle cadence unit. Ignored for entities other than Cycles. */
+  cadenceUnit: PlanningCadence['unit']
+  /** Cycle cadence length in units, as typed. Ignored for entities other than Cycles. */
+  cadenceCount: string
+  /** Cycle Work Item capacity, as typed. Ignored for entities other than Cycles. */
+  capacity: string
+  /** What happens to incomplete Work Items at rollover. Ignored for entities other than Cycles. */
+  carryOverPolicy: CycleCarryOverPolicy
 }
 
 /** Why a draft cannot be saved. */
@@ -75,6 +102,9 @@ export type PlanningEntityEditorProblem =
   | 'date-required'
   | 'date-range'
   | 'manual-progress'
+  | 'cadence-count'
+  | 'capacity'
+  | 'capacity-below-committed'
 
 /** Result of comparing a draft with the stored entity. */
 export type PlanningEntityEditResult =
@@ -115,6 +145,10 @@ export function createPlanningEntityEditorDraft(entity: PlanningEntity): Plannin
     baselineEnd: entity.baseline.endDate,
     forecastStart: entity.forecast.startDate,
     forecastEnd: entity.forecast.endDate,
+    cadenceUnit: entity.cadence?.unit ?? 'week',
+    cadenceCount: entity.cadence === undefined ? '' : String(entity.cadence.count),
+    capacity: entity.capacity === undefined ? '' : String(entity.capacity),
+    carryOverPolicy: entity.carryOverPolicy ?? 'move-incomplete',
   }
 }
 
@@ -137,6 +171,10 @@ const draftNormalizers: {
   baselineEnd: (value) => value,
   forecastStart: (value) => value,
   forecastEnd: (value) => value,
+  cadenceUnit: (value) => value,
+  cadenceCount: (value) => (value.trim() ? String(Number(value)) : ''),
+  capacity: (value) => (value.trim() ? String(Number(value)) : ''),
+  carryOverPolicy: (value) => value,
 }
 
 /**
@@ -183,21 +221,30 @@ export function rebasePlanningEntityEditorDraft(
     baselineEnd: pick('baselineEnd'),
     forecastStart: pick('forecastStart'),
     forecastEnd: pick('forecastEnd'),
+    cadenceUnit: pick('cadenceUnit'),
+    cadenceCount: pick('cadenceCount'),
+    capacity: pick('capacity'),
+    carryOverPolicy: pick('carryOverPolicy'),
   }
 }
 
 /**
  * Validates a draft and returns a patch holding only the fields that changed.
  *
- * Milestones are single-day entities, so their start dates follow their end dates.
+ * Milestones are single-day entities, so their start dates follow their end dates. Cycles also
+ * send their cadence, capacity and carry-over policy. A changed capacity must hold at least one
+ * Work Item and every Work Item already in the Cycle, because the server refuses links beyond
+ * the capacity; an unchanged capacity is kept as stored so other fields stay editable.
  *
  * @param entity - Stored entity the draft started from.
  * @param draft - Current form values.
+ * @param cycleWorkItemCount - Work Items currently linked to the Cycle; ignored for other entities.
  * @returns The patch to send, `unchanged`, or the first validation problem.
  */
 export function resolvePlanningEntityEdit(
   entity: PlanningEntity,
   draft: PlanningEntityEditorDraft,
+  cycleWorkItemCount = 0,
 ): PlanningEntityEditResult {
   const title = draft.title.trim()
   if (!title) return { kind: 'invalid', problem: 'title-required' }
@@ -225,6 +272,9 @@ export function resolvePlanningEntityEdit(
     return { kind: 'invalid', problem: 'manual-progress' }
   }
 
+  const cycle = entity.type === 'cycle' ? resolveCycleSettingsEdit(entity, draft, cycleWorkItemCount) : {}
+  if ('problem' in cycle) return { kind: 'invalid', problem: cycle.problem }
+
   const description = draft.description.trim()
   const patch: PlanningEntityPatch = {
     ...(title === entity.title ? {} : { title }),
@@ -241,8 +291,52 @@ export function resolvePlanningEntityEdit(
       : {}),
     ...(sameRange(baseline, entity.baseline) ? {} : { baseline }),
     ...(sameRange(forecast, entity.forecast) ? {} : { forecast }),
+    ...cycle,
   }
   return Object.keys(patch).length === 0 ? { kind: 'unchanged' } : { kind: 'patch', patch }
+}
+
+/**
+ * Validates the Cycle-only fields of a draft and returns the ones that changed.
+ *
+ * @param entity - Stored Cycle the draft started from.
+ * @param draft - Current form values.
+ * @param committed - Work Items currently linked to the Cycle.
+ * @returns The changed Cycle fields, or the first validation problem.
+ */
+function resolveCycleSettingsEdit(
+  entity: PlanningEntity,
+  draft: PlanningEntityEditorDraft,
+  committed: number,
+): Pick<PlanningEntityPatch, 'cadence' | 'capacity' | 'carryOverPolicy'> | { problem: PlanningEntityEditorProblem } {
+  const cadenceCount = readPositiveInteger(draft.cadenceCount)
+  if (cadenceCount === undefined) return { problem: 'cadence-count' }
+  const cadence: PlanningCadence = { unit: draft.cadenceUnit, count: cadenceCount }
+  const capacity = readNonNegativeInteger(draft.capacity)
+  const capacityChanged = capacity !== entity.capacity
+  if (capacityChanged) {
+    if (capacity === undefined || capacity < 1) return { problem: 'capacity' }
+    if (capacity < committed) return { problem: 'capacity-below-committed' }
+  }
+  return {
+    ...(entity.cadence?.unit === cadence.unit && entity.cadence.count === cadence.count ? {} : { cadence }),
+    ...(capacityChanged && capacity !== undefined ? { capacity } : {}),
+    ...(draft.carryOverPolicy === entity.carryOverPolicy ? {} : { carryOverPolicy: draft.carryOverPolicy }),
+  }
+}
+
+/**
+ * Counts the Work Items linked directly to a Cycle, the number its capacity limits.
+ *
+ * @param cycleId - Cycle entity ID.
+ * @param links - Work Item links of the Planning snapshot.
+ * @returns How many links name the Cycle.
+ */
+export function countCycleWorkItems(
+  cycleId: string,
+  links: readonly { cycleId?: string }[],
+): number {
+  return links.filter((link) => link.cycleId === cycleId).length
 }
 
 /**
@@ -316,6 +410,28 @@ export function readPlanningOption<T extends string>(
 function readManualProgress(value: string): number | undefined {
   const parsed = value.trim() ? Number(value) : Number.NaN
   return Number.isFinite(parsed) && parsed >= 0 && parsed <= 100 ? parsed : undefined
+}
+
+/**
+ * Parses a whole number of at least 1.
+ *
+ * @param value - Number as typed.
+ * @returns The number, or undefined for empty, fractional or smaller input.
+ */
+function readPositiveInteger(value: string): number | undefined {
+  const parsed = readNonNegativeInteger(value)
+  return parsed !== undefined && parsed >= 1 ? parsed : undefined
+}
+
+/**
+ * Parses a whole number of at least 0.
+ *
+ * @param value - Number as typed.
+ * @returns The number, or undefined for empty, fractional or negative input.
+ */
+function readNonNegativeInteger(value: string): number | undefined {
+  const parsed = value.trim() ? Number(value) : Number.NaN
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined
 }
 
 /**

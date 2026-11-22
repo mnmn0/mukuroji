@@ -350,12 +350,48 @@ export type PlanningUpdateCadenceTransactionResult = {
   updateTarget: PlanningUpdateTargetSummary
 }
 
+/** Stored fields of one Planning entity, without values derived from linked Work Items. */
+export type PlanningEntityTransactionSnapshot = Omit<
+  PlanningEntity,
+  'linkedWorkItemCount' | 'progress' | 'rollupHealth'
+>
+
+/** Lifecycle change of one Planning entity recorded by its audit event. */
+export type PlanningEntityChangeAction =
+  | 'created'
+  | 'duplicated'
+  | 'updated'
+  | 'moved'
+  | 'archived'
+  | 'restored'
+
+/** Minimal result exposed while preparing the audit event of one Planning entity change. */
+export type PlanningEntityTransactionResult = {
+  /** Identifies a Planning entity lifecycle change. */
+  kind: 'entity'
+  /** Planning revision produced by the change. */
+  revision: number
+  /** Lifecycle change committed by the mutation. */
+  action: PlanningEntityChangeAction
+  /** Entity value committed by the mutation. */
+  entity: PlanningEntityTransactionSnapshot
+  /** Entity value before the mutation; absent for a created or duplicated entity. */
+  previous?: PlanningEntityTransactionSnapshot
+  /** Entity copied by a duplication. */
+  sourceEntityId?: string
+  /** Cycle whose cadence created this Cycle as its next Cycle. */
+  previousCycleId?: string
+  /** Active descendants whose Team / Project scope followed a move. */
+  movedDescendantCount?: number
+}
+
 /** Minimal Planning mutation result accepted by a durable receipt contribution. */
 export type PlanningMutationTransactionResult =
   | PlanningWorkItemDependencyTransactionResult
   | PlanningUpdateAnnotationTransactionResult
   | PlanningUpdateCadenceTransactionResult
   | PlanningUpdatePublishTransactionResult
+  | PlanningEntityTransactionResult
 
 /** One external DynamoDB action prepared for the Planning mutation transaction. */
 type PlanningMutationTransactionContribution = {
@@ -378,6 +414,13 @@ export type PlanningMutationTransaction<
   prepare(
     result: TResult,
   ): Promise<unknown>
+  /**
+   * Whether `prepare` builds an independent contribution for each commit attempt, so the mutation
+   * may still be rebased over canonical Work Item writes. Only an append-only audit write without a
+   * durable receipt qualifies: a receipt is prepared for one exact revision. Such a transaction is
+   * also skipped by a step that changes no entity, such as an intermediate Cycle rollover batch.
+   */
+  rebaseSafe?: boolean
 }
 
 /** Directory 破壊操作の認可に使う Planning entity 参照です。 */
@@ -469,6 +512,7 @@ export type PlanningClient = {
     workspaceId: string,
     input: PlanningEntityCreation,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** Planning entity の editable fields を更新します。 */
   update(
@@ -476,6 +520,7 @@ export type PlanningClient = {
     entityId: string,
     input: UpdatePlanningEntityInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /**
    * Planning entity を archive し、archive 済み entity とその link 参照・dependency を live graph から
@@ -486,6 +531,7 @@ export type PlanningClient = {
     entityId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** 退避済み entity を active に戻し、戻せる link 参照と dependency を live graph へ戻します。 */
   restore(
@@ -511,6 +557,7 @@ export type PlanningClient = {
     entityId: string,
     input: PlanningEntityDuplication,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** Planning entity の hierarchy / Team / Project scope を移動します。 */
   move(
@@ -518,6 +565,7 @@ export type PlanningClient = {
     entityId: string,
     input: MovePlanningEntityInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** Project / Initiative update cadence を設定または解除します。 */
   configureUpdateCadence(
@@ -690,6 +738,7 @@ export type PlanningClient = {
     sourceCycleId: string,
     input: CycleRolloverInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** Cadence に従って次の Cycle を作ります。 */
   createNextCycle(
@@ -697,6 +746,7 @@ export type PlanningClient = {
     sourceCycleId: string,
     input: CreateNextCycleInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ): Promise<PlanningMutationResponse & { cycleId: string }>
   /** 複数の Work Item を Cycle に入れる、または Cycle から外します。 */
   setCycleWorkItems(
@@ -827,6 +877,8 @@ type PlanningMutationResult = {
   planningUpdateCadenceTransactionTarget?: PlanningUpdateTarget
   /** Archive rows written or removed in the same transaction as the live graph change. */
   archiveChanges?: PlanningArchiveChange[]
+  /** Entity lifecycle change exposed to an audit contribution. */
+  entityTransactionSource?: Omit<PlanningEntityTransactionResult, 'kind' | 'revision'>
 }
 
 /** One archive row write that commits with a Planning revision. */
@@ -901,6 +953,8 @@ export type PlanningRestoreOptions = {
    * control change during the restore stops it instead of letting later steps use the old grant.
    */
   authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[]
+  /** Optional audit write committed with the revision that makes the entity active again. */
+  transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>
 }
 
 /** One archive or restore revision planned against a fresh live graph. */
@@ -1132,6 +1186,7 @@ abstract class BasePlanningClient implements PlanningClient {
     workspaceId: string,
     input: PlanningEntityCreation,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ) {
     await this.requireIdNotArchived(workspaceId, input.id)
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
@@ -1142,8 +1197,11 @@ abstract class BasePlanningClient implements PlanningClient {
       if (entity.parentId) requireActiveEntity(state, entity.parentId)
       const next = { ...state, entities: [...state.entities, entity] }
       validatePlanningState(next)
-      return { state: next }
-    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+      return {
+        state: next,
+        entityTransactionSource: { action: 'created', entity: structuredClone(entity) },
+      }
+    }, [], transaction, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning entity の editable fields を更新します。 */
@@ -1152,6 +1210,7 @@ abstract class BasePlanningClient implements PlanningClient {
     entityId: string,
     input: UpdatePlanningEntityInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ) {
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const current = requireActiveEntity(state, entityId)
@@ -1202,8 +1261,15 @@ abstract class BasePlanningClient implements PlanningClient {
       const next = replaceEntity(state, updated)
       validatePlanningState(next)
       requireCycleChainCompatible(next, updated)
-      return { state: next }
-    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+      return {
+        state: next,
+        entityTransactionSource: {
+          action: 'updated',
+          entity: structuredClone(updated),
+          previous: structuredClone(current),
+        },
+      }
+    }, [], transaction, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /**
@@ -1217,13 +1283,20 @@ abstract class BasePlanningClient implements PlanningClient {
     entityId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ) {
     const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
     const current = await this.readState(normalizedWorkspaceId)
     const live = findEntity(current, entityId)
     let response: PlanningMutationResponse | undefined
     if (live?.archivedAt === undefined) {
-      response = await this.archiveInLiveGraph(normalizedWorkspaceId, entityId, input, workItemState)
+      response = await this.archiveInLiveGraph(
+        normalizedWorkspaceId,
+        entityId,
+        input,
+        workItemState,
+        transaction,
+      )
     } else if (current.revision !== readRevision(input.expectedRevision)) {
       throw conflict('PlanningRevisionConflict', 'Planning changed. Reload and try again.')
     }
@@ -1276,14 +1349,22 @@ abstract class BasePlanningClient implements PlanningClient {
     const bundle = await this.readArchivedEntityBundle(workspaceId, entityId)
     const archivedEntity = bundle.entity
     if (archivedEntity) {
-      await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => ({
-        state: restoreArchivedEntity(state, archivedEntity, now),
-        archiveChanges: [{
-          kind: 'delete',
-          recordKey: createArchivedEntityRecordKey(entityId),
-          requireExisting: true,
-        }],
-      }), authorizationChecks)
+      await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
+        const next = restoreArchivedEntity(state, archivedEntity, now)
+        return {
+          state: next,
+          archiveChanges: [{
+            kind: 'delete',
+            recordKey: createArchivedEntityRecordKey(entityId),
+            requireExisting: true,
+          }],
+          entityTransactionSource: createRestoredEntityTransactionSource(
+            next,
+            entityId,
+            archivedEntity,
+          ),
+        }
+      }, authorizationChecks, options.transaction)
     } else {
       const live = findEntity(await this.readState(workspaceId), entityId)
       if (!live) {
@@ -1292,9 +1373,17 @@ abstract class BasePlanningClient implements PlanningClient {
       if (live.archivedAt) {
         // Archived but still live: kept for its update target, kept for a live child, or not yet
         // moved out. Clearing the archive state restores it in place.
-        await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => ({
-          state: unarchiveLiveEntity(state, entityId, now),
-        }), authorizationChecks)
+        await this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
+          const next = unarchiveLiveEntity(state, entityId, now)
+          return {
+            state: next,
+            entityTransactionSource: createRestoredEntityTransactionSource(
+              next,
+              entityId,
+              findEntity(state, entityId),
+            ),
+          }
+        }, authorizationChecks, options.transaction)
       }
     }
     const summary: PlanningRestoreSummary = {
@@ -1575,6 +1664,7 @@ abstract class BasePlanningClient implements PlanningClient {
     entityId: string,
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ) {
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const current = requireActiveEntity(state, entityId)
@@ -1612,7 +1702,8 @@ abstract class BasePlanningClient implements PlanningClient {
           }
         }
       }
-      let next = replaceEntity(state, { ...current, archivedAt: now, updatedAt: now })
+      const archived: StoredPlanningEntity = { ...current, archivedAt: now, updatedAt: now }
+      let next = replaceEntity(state, archived)
       if (current.type === 'initiative') {
         const updateTarget = findStoredPlanningUpdateTarget(next, {
           type: 'initiative',
@@ -1626,8 +1717,16 @@ abstract class BasePlanningClient implements PlanningClient {
           })
         }
       }
-      return { state: next, workItemConditions }
-    })
+      return {
+        state: next,
+        workItemConditions,
+        entityTransactionSource: {
+          action: 'archived',
+          entity: structuredClone(archived),
+          previous: structuredClone(current),
+        },
+      }
+    }, [], transaction)
   }
 
   /** Planning entity を履歴・link・edge なしで複製します。 */
@@ -1636,6 +1735,7 @@ abstract class BasePlanningClient implements PlanningClient {
     entityId: string,
     input: PlanningEntityDuplication,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ) {
     await this.requireIdNotArchived(workspaceId, input.targetId)
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
@@ -1659,8 +1759,15 @@ abstract class BasePlanningClient implements PlanningClient {
       if (copy.parentId) requireActiveEntity(state, copy.parentId)
       const next = { ...state, entities: [...state.entities, copy] }
       validatePlanningState(next)
-      return { state: next }
-    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+      return {
+        state: next,
+        entityTransactionSource: {
+          action: 'duplicated',
+          entity: structuredClone(copy),
+          sourceEntityId: source.id,
+        },
+      }
+    }, [], transaction, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Planning entity の hierarchy / Team / Project scope を移動します。 */
@@ -1669,6 +1776,7 @@ abstract class BasePlanningClient implements PlanningClient {
     entityId: string,
     input: MovePlanningEntityInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ) {
     return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
       const current = requireActiveEntity(state, entityId)
@@ -1698,8 +1806,16 @@ abstract class BasePlanningClient implements PlanningClient {
       for (const entity of next.entities) {
         if (entity.id === current.id || descendantIds.has(entity.id)) requireCycleChainCompatible(next, entity)
       }
-      return { state: next }
-    }, [], undefined, REBASE_OVER_WORK_ITEM_CHANGES)
+      return {
+        state: next,
+        entityTransactionSource: {
+          action: 'moved',
+          entity: structuredClone(moved),
+          previous: structuredClone(current),
+          movedDescendantCount: descendantIds.size,
+        },
+      }
+    }, [], transaction, REBASE_OVER_WORK_ITEM_CHANGES)
   }
 
   /** Project / Initiative update cadence を設定または解除します。 */
@@ -2377,6 +2493,7 @@ abstract class BasePlanningClient implements PlanningClient {
     sourceCycleId: string,
     input: CycleRolloverInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ) {
     // Where every canonical Work Item write advances META, the caller's expectedRevision CAS already
     // fails if a linked Work Item changed after the caller's snapshot. Elsewhere each Work Item the
@@ -2487,8 +2604,17 @@ abstract class BasePlanningClient implements PlanningClient {
         retainedWorkItemIds: retainedWorkItemIds.sort(),
         remainingWorkItemCount,
         workItemConditions,
+        ...(completesSource
+          ? {
+              entityTransactionSource: {
+                action: 'updated' as const,
+                entity: structuredClone(nextSource),
+                previous: structuredClone(source),
+              },
+            }
+          : {}),
       }
-    })
+    }, [], transaction)
   }
 
   /** Cadence に従って次の Cycle を作り、元の Cycle に `nextCycleId` を記録します。 */
@@ -2497,6 +2623,7 @@ abstract class BasePlanningClient implements PlanningClient {
     sourceCycleId: string,
     input: CreateNextCycleInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ) {
     const normalizedSourceId = readIdentifier(sourceCycleId, 'Cycle ID')
     const nextCycleId = createNextCycleId(normalizedSourceId)
@@ -2542,8 +2669,15 @@ abstract class BasePlanningClient implements PlanningClient {
       }
       next.entities = [...next.entities, created]
       validatePlanningState(next)
-      return { state: next }
-    })
+      return {
+        state: next,
+        entityTransactionSource: {
+          action: 'created',
+          entity: structuredClone(created),
+          previousCycleId: source.id,
+        },
+      }
+    }, [], transaction)
     return { ...response, cycleId: nextCycleId }
   }
 
@@ -2708,7 +2842,8 @@ abstract class BasePlanningClient implements PlanningClient {
     const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
     const expectedRevision = readRevision(expectedRevisionValue)
     // A durable receipt is prepared once for one exact revision, so it is never rebased.
-    const rebase = options.rebaseOverWorkItemChanges === true && transaction === undefined
+    const rebase = options.rebaseOverWorkItemChanges === true &&
+      (transaction === undefined || transaction.rebaseSafe === true)
     for (let attempt = 1; ; attempt += 1) {
       const before = await this.readState(workspaceId)
       if (
@@ -2798,7 +2933,9 @@ abstract class BasePlanningClient implements PlanningClient {
       )
     }
     const transactionResult: PlanningMutationTransactionResult | undefined =
-      result.publishedUpdate === undefined
+      result.entityTransactionSource !== undefined
+        ? { ...result.entityTransactionSource, kind: 'entity', revision: after.revision }
+        : result.publishedUpdate === undefined
         ? cadenceTarget === undefined
           ? result.workItemDependencyTransactionSource === undefined
             ? undefined
@@ -2818,7 +2955,9 @@ abstract class BasePlanningClient implements PlanningClient {
             update: structuredClone(result.publishedUpdate),
             notification: requirePublishedUpdateNotification(result.publishedUpdateNotification),
           }
-    const transactionContribution = transaction
+    // An audit-only transaction has nothing to record for a step that changes no entity.
+    const transactionContribution = transaction &&
+        !(transactionResult === undefined && transaction.rebaseSafe === true)
       ? await preparePlanningMutationTransactionContribution(
           transaction,
           transactionResult,
@@ -7504,6 +7643,31 @@ function planArchiveCompactionStep(
     archiveChanges.push({ kind: 'put', row: entityRow })
   }
   return { state: { ...state, entities, dependencies, workItemLinks }, archiveChanges }
+}
+
+/**
+ * Describes a restore for the entity audit event.
+ *
+ * @param state - Live graph after the restore.
+ * @param entityId - Restored entity.
+ * @param previous - Archived entity value before the restore, when it was read.
+ * @returns The restored entity change without its committed revision.
+ * @throws PlanningError when the restored entity is missing from the graph.
+ */
+function createRestoredEntityTransactionSource(
+  state: PlanningWorkspaceState,
+  entityId: string,
+  previous: StoredPlanningEntity | undefined,
+): Omit<PlanningEntityTransactionResult, 'kind' | 'revision'> {
+  const entity = findEntity(state, entityId)
+  if (!entity) {
+    throw new PlanningError(503, 'PlanningUnavailable', 'Restored Planning entity is unavailable.')
+  }
+  return {
+    action: 'restored',
+    entity: structuredClone(entity),
+    ...(previous === undefined ? {} : { previous: structuredClone(previous) }),
+  }
 }
 
 /**

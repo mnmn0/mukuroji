@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import type { CanonicalWorkItem, ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
 import {
+  createCrossProjectWorkItemBoardLane,
+  createCrossProjectWorkItemGanttGrouping,
   createCrossProjectWorkItemJobRoleOptions,
   createCrossProjectWorkItemListSearchParams,
   createCrossProjectWorkItemMemberOptions,
@@ -14,6 +16,7 @@ import {
 } from '../src/features/cross-project-work-items/model/crossProjectWorkItems'
 import type { ProjectDirectoryTeam } from '../src/projects/api/directory'
 import { taskViewStorySelectedTask } from '../src/tasks/ui/TaskView.stories.fixtures'
+import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 
 const teams: ProjectDirectoryTeam[] = [
   {
@@ -78,6 +81,7 @@ describe('cross-Project Work Item list state', () => {
       contributorMemberId: 'me@example.com',
       contributorJobRole: { teamId: 'core:x', jobRoleId: 'design/er' },
       grouping: 'assignee',
+      layout: 'gantt',
     }
     const params = createCrossProjectWorkItemListSearchParams(state)
     expect(parseCrossProjectWorkItemListState(new URLSearchParams(params.toString()))).toEqual(state)
@@ -94,6 +98,11 @@ describe('cross-Project Work Item list state', () => {
     )
     expect(state.projects).toEqual([{ teamId: 'core', projectId: 'alpha' }])
     expect(state.grouping).toBe('project')
+  })
+
+  test('reads the board and Gantt layouts and falls back to the table', () => {
+    expect(parseCrossProjectWorkItemListState(new URLSearchParams('layout=board')).layout).toBe('board')
+    expect(parseCrossProjectWorkItemListState(new URLSearchParams('layout=calendar')).layout).toBe('table')
   })
 })
 
@@ -213,5 +222,43 @@ describe('filter options', () => {
       ['ops:qa', 'qa', 'Ops'],
       ['ops:designer', 'UX designer', 'Ops'],
     ])
+  })
+})
+
+describe('createCrossProjectWorkItemBoardLane', () => {
+  test('shows every status of the Team and keeps Work Items without a column apart', () => {
+    const configurationsByTeam: Record<string, ResolvedWorkItemConfiguration> = {
+      core: { configuration: { ...teamWorkItemConfigurationFixture, scopeId: 'core' } },
+    }
+    const lane = createCrossProjectWorkItemBoardLane(
+      [
+        createWorkItem({ id: 'x1', teamId: 'core', workflowStatusId: 'active' }),
+        createWorkItem({ id: 'x2', teamId: 'core', workflowStatusId: 'retired' }),
+        createWorkItem({ id: 'x3', teamId: 'ops', workflowStatusId: 'active' }),
+      ],
+      configurationsByTeam,
+      teams,
+    )
+    const active = lane.columns.find((column) => column.workItems.length > 0)
+    expect(lane.columns.map((column) => column.label)).toContain('Core · Done')
+    expect(active?.label).toBe('Core · In progress')
+    expect(active?.workItems.map((workItem) => workItem.id)).toEqual(['x1'])
+    expect(lane.unplacedWorkItems.map((workItem) => workItem.id)).toEqual(['x2', 'x3'])
+  })
+})
+
+describe('createCrossProjectWorkItemGanttGrouping', () => {
+  const labels = { noAssignee: 'No owner', noProject: 'No Project' }
+
+  test('names Project groups with their Team and labels the unassigned group', () => {
+    const grouping = createCrossProjectWorkItemGanttGrouping('project', teams, labels)
+    expect(grouping.resolve(workItems[3]!)).toEqual({ key: 'project:ops:alpha', label: 'Ops Alpha · Ops' })
+    expect(grouping.resolve(workItems[4]!)).toEqual({ key: 'project:', label: 'No Project' })
+  })
+
+  test('groups by owner', () => {
+    const grouping = createCrossProjectWorkItemGanttGrouping('assignee', teams, labels)
+    expect(grouping.resolve(createWorkItem({ assigneeUserId: undefined })).label).toBe('No owner')
+    expect(grouping.resolve(workItems[0]!).key).toBe('assignee:me@example.com')
   })
 })

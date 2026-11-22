@@ -840,7 +840,7 @@ export function getConfiguredNotificationsTableName(
 
 /** Reasons whose sole recipient must still be the current Work Item assignee. */
 const currentAssigneeNotificationReasons = new Set([
-  'assignee', 'assignment', 'due', 'due-date-change', 'due-soon', 'overdue', 'schedule-change',
+  'assignee', 'assignment', 'baseline-slip', 'due', 'due-date-change', 'due-soon', 'overdue', 'schedule-change',
   'stale', 'status-change',
 ])
 

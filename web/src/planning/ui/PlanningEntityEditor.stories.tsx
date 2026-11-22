@@ -46,3 +46,8 @@ export const Milestone: Story = {
 export const ReadOnlyGoal: Story = {
   args: { entity: fixtureEntity('goal-activation'), onSave: undefined },
 }
+
+/** A Cycle, which also edits its cadence, capacity and carry-over policy. */
+export const Cycle: Story = {
+  args: { entity: fixtureEntity('cycle-14'), cycleWorkItemCount: 2 },
+}

@@ -126,6 +126,7 @@ import {
   type TeamIssueHierarchyPlacement,
 } from '../../issues/ui/teamIssueScreenShared'
 import { WORK_ITEM_EFFORT_COLUMN_FIELDS, isWorkItemEffortColumnField } from '../../work-items/model/workItemEffort'
+import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 
@@ -911,6 +912,19 @@ export function TeamIssuePage() {
   const selectedTaskView = taskViewController.activeSavedView
     ? createTaskViewOption(taskViewController.activeSavedView)
     : undefined
+  /**
+   * Applies presentation settings from the toolbar or a layout to the effective task view.
+   *
+   * @param settings - Next presentation settings.
+   */
+  const changeTaskViewPresentation = (settings: TaskViewPresentationSettings) => {
+    taskViewController.setEffectiveDefinition(
+      presentationSettingsToTaskViewDefinition(
+        taskViewController.effectiveDefinition,
+        settings,
+      ),
+    )
+  }
   const taskViewToolbar = (
     <>
     <TaskViewToolbar
@@ -934,14 +948,7 @@ export function TeamIssuePage() {
       onReset={taskViewController.resetOverrides}
       onSaveAs={taskViewController.saveAs}
       onSelectView={taskViewController.selectView}
-      onSettingsChange={(settings) => {
-        taskViewController.setEffectiveDefinition(
-          presentationSettingsToTaskViewDefinition(
-            taskViewController.effectiveDefinition,
-            settings,
-          ),
-        )
-      }}
+      onSettingsChange={changeTaskViewPresentation}
       onUpdate={taskViewController.updateActiveView}
       selectedView={selectedTaskView}
       settings={taskViewDefinitionToPresentationSettings(
@@ -1063,6 +1070,7 @@ export function TeamIssuePage() {
       resolvedConfiguration={resolvedConfiguration ?? issueDetail?.resolvedConfiguration}
       taskViewToolbar={taskViewToolbar}
       taskViewDefinition={taskViewController.effectiveDefinition}
+      onTaskViewPresentationChange={changeTaskViewPresentation}
       taskViewPresentation={taskViewDefinitionToPresentationSettings(
         taskViewController.effectiveDefinition,
       )}

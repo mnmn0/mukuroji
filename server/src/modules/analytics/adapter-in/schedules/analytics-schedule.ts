@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto'
 import {
+  DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   type AnalyticsQueryInput,
   type AnalyticsReport,
   type AnalyticsSnapshotRecord,
   type CanonicalWorkItem,
+  type WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
 import {
   type AuditEventPage,
@@ -23,6 +25,7 @@ import {
   createAnalyticsCsv,
   createAnalyticsPdf,
   createAnalyticsSnapshot,
+  resolveAnalyticsReportFilterPeriod,
   selectAnalyticsWorkItemsRequiringHistory,
 } from '../../analytics'
 import type { WorkspaceMember } from '../../../workspace-access'
@@ -169,6 +172,24 @@ export type AnalyticsScheduleRendererDependencies = {
   auditEvents: AnalyticsScheduleAuditClient
   /** Per-Work-Item history rows read before the audit timeline; optional. */
   workItemHistory?: AnalyticsWorkItemHistoryReader
+  /**
+   * Workspace calendar settings that start the report's weeks and re-resolve its relative period.
+   * Without it reports use the default calendar (Monday weeks, January fiscal years).
+   */
+  workspaceCalendar?: AnalyticsScheduleWorkspaceCalendarClient
+}
+
+/** Reads the calendar settings of the Workspace that owns a scheduled report. */
+export type AnalyticsScheduleWorkspaceCalendarClient = {
+  /**
+   * Reads a Workspace's calendar settings.
+   *
+   * @param workspaceId - Workspace that owns the report.
+   * @returns The stored settings, or the defaults when the Workspace has saved none.
+   */
+  readCalendarSettings(workspaceId: string): Promise<
+    Pick<WorkspaceCalendarSettings, 'fiscalYearStartMonth' | 'weekStartDay'>
+  >
 }
 
 /** 一つの recipient snapshot を描画する入力です。 */
@@ -600,8 +621,18 @@ export function createAnalyticsScheduleRenderer(
     )
     if (!initialAuthorization) return undefined
 
+    const calendar = dependencies.workspaceCalendar
+      ? await dependencies.workspaceCalendar.readCalendarSettings(report.workspaceId)
+      : DEFAULT_WORKSPACE_CALENDAR_SETTINGS
+    // A relative period ("this week") is the one around the scheduled time, not the saved dates.
+    const filter = resolveAnalyticsReportFilterPeriod(
+      report.filter,
+      scheduledFor,
+      report.timeZone,
+      calendar,
+    )
     const authorized = await readRecipientAuthorizedData(
-      report,
+      { ...report, filter },
       initialAuthorization.directory,
       initialAuthorization.readableProjectIds,
       dependencies.workItems,
@@ -624,10 +655,11 @@ export function createAnalyticsScheduleRenderer(
       )
     }
     const query: AnalyticsQueryInput = {
-      filter: structuredClone(report.filter),
+      filter,
       widgets: structuredClone(report.widgets),
       asOf: scheduledFor,
       timeZone: report.timeZone,
+      weekStartDay: calendar.weekStartDay,
       ...(report.forecastBaseline === undefined
         ? {}
         : { forecastBaseline: structuredClone(report.forecastBaseline) }),

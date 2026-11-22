@@ -2,6 +2,7 @@ import {
   DEFAULT_WORKSPACE_CALENDAR_SETTINGS,
   createWorkspaceWorkItemCalendarPolicy,
   type WorkItemScheduleCalendarPolicy,
+  type WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
 import { workspaceDependencies } from './app-dependencies'
 
@@ -28,4 +29,20 @@ export async function readWorkspaceWorkItemCalendarPolicy(
       ? await workspaceDependencies.nationalHolidays.listDates()
       : undefined,
   )
+}
+
+/**
+ * Reads a Workspace's calendar settings, which decide its week start and fiscal year start.
+ *
+ * A Workspace that has not saved calendar settings gets the defaults; any other read failure
+ * propagates so a stored week start is never silently replaced.
+ *
+ * @param directoryId - Workspace directory to read.
+ * @returns The stored settings, or the defaults.
+ */
+export async function readWorkspaceCalendarSettingsOf(
+  directoryId: string,
+): Promise<WorkspaceCalendarSettings> {
+  const profile = await workspaceDependencies.tenantAdministration.getProfile(directoryId)
+  return profile?.calendar ?? DEFAULT_WORKSPACE_CALENDAR_SETTINGS
 }

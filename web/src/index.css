@@ -1285,6 +1285,7 @@ textarea {
   }
 
   html[data-print-target] [data-print-root][data-print-paper] [data-print-overflow] {
+    max-height: none !important;
     overflow: visible !important;
   }
 

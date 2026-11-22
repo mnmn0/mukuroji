@@ -4,6 +4,8 @@ import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import {
   InMemoryPlanningClient,
   type PlanningEntityCreation,
+  type PlanningEntityTransactionResult,
+  type PlanningMutationTransaction,
   type PlanningWorkItemState,
 } from './planning'
 
@@ -235,5 +237,75 @@ describe('Planning edits while Work Items change', () => {
     }, WORK_ITEMS)).rejects.toMatchObject({ status: 409, code: 'PlanningRevisionConflict' })
     // The overtaken commit and the concurrent rename; no third attempt.
     expect(client.commitCount).toBe(2)
+  })
+
+  test('rebases an audited edit and prepares its audit write again for each attempt', async () => {
+    const client = new RacingClient(() => NOW)
+    await seedPlanning(client)
+    client.recordWorkItemRevision(WORKSPACE_ID)
+    client.commitCount = 0
+    client.racesAtCommit.set(1, () => client.recordWorkItemRevision(WORKSPACE_ID))
+    const prepared: PlanningEntityTransactionResult[] = []
+    const transaction: PlanningMutationTransaction<PlanningEntityTransactionResult> = {
+      rebaseSafe: true,
+      async prepare(result) {
+        prepared.push(result)
+        return { transactWriteItem: { Put: { TableName: 'AuditEventsTable', Item: { revision: result.revision } } } }
+      },
+    }
+
+    const updated = await client.update(WORKSPACE_ID, 'milestone-1', {
+      expectedRevision: 4,
+      patch: { title: 'Audited' },
+    }, WORK_ITEMS, transaction)
+
+    expect(updated.planning.revision).toBe(7)
+    expect(client.commitCount).toBe(2)
+    expect(prepared.map((result) => result.revision)).toEqual([6, 7])
+    expect(prepared[1]).toMatchObject({
+      kind: 'entity',
+      action: 'updated',
+      entity: { id: 'milestone-1', title: 'Audited' },
+      previous: { id: 'milestone-1', title: 'milestone-1' },
+    })
+  })
+
+  test('keeps an exact revision for a transaction that is not rebase safe', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await seedPlanning(client)
+    client.recordWorkItemRevision(WORKSPACE_ID)
+
+    await expect(client.update(WORKSPACE_ID, 'milestone-1', {
+      expectedRevision: 4,
+      patch: { title: 'Receipt bound' },
+    }, WORK_ITEMS, {
+      async prepare() {
+        return { transactWriteItem: { Put: { TableName: 'Receipts', Item: {} } } }
+      },
+    })).rejects.toMatchObject({ status: 409, code: 'PlanningRevisionConflict' })
+  })
+
+  test('records the next Cycle and a completing rollover through an audit transaction', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await seedPlanning(client)
+    const prepared: PlanningEntityTransactionResult[] = []
+    const transaction: PlanningMutationTransaction<PlanningEntityTransactionResult> = {
+      rebaseSafe: true,
+      async prepare(result) {
+        prepared.push(result)
+        return { transactWriteItem: { Put: { TableName: 'AuditEventsTable', Item: { revision: result.revision } } } }
+      },
+    }
+
+    const created = await client.createNextCycle(WORKSPACE_ID, 'cycle-1', { expectedRevision: 4 }, WORK_ITEMS, transaction)
+    await client.rolloverCycle(WORKSPACE_ID, 'cycle-1', {
+      expectedRevision: created.planning.revision,
+      targetCycleId: created.cycleId,
+    }, WORK_ITEMS, transaction)
+
+    expect(prepared).toMatchObject([
+      { action: 'created', entity: { id: created.cycleId, type: 'cycle' }, previousCycleId: 'cycle-1' },
+      { action: 'updated', entity: { id: 'cycle-1', status: 'completed' }, previous: { status: 'planned' } },
+    ])
   })
 })

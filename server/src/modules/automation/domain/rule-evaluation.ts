@@ -1,4 +1,6 @@
 import {
+  crossesWorkItemBaselineSlipThreshold,
+  parseWorkItemBaselineSlipChange,
   isWorkItemRelationEventType,
   type AutomationCondition,
   type AutomationTrigger,
@@ -79,6 +81,11 @@ export function matchesAutomationTrigger(
           ? 'overdue'
           : findChange(event, 'dueDate') ? 'changed' : undefined
       return reason !== undefined && (trigger.reason === undefined || trigger.reason === reason)
+    }
+    case 'baseline-slip': {
+      const slip = parseWorkItemBaselineSlipChange(metadata.baselineSlip)
+      return slip !== undefined &&
+        crossesWorkItemBaselineSlipThreshold(slip, trigger.minDelayDays ?? 1)
     }
     case 'custom-field':
       return event.changes.some((change) =>
