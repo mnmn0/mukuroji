@@ -1,20 +1,40 @@
 import type {
   CanonicalWorkItem,
   ResolvedWorkItemConfiguration,
+  WorkItemPriority,
+  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
-import { Fragment, useMemo, type MouseEvent } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { TeamIssuesApiError } from '../../issues/api'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
+import {
+  isProjectTaskDirectScheduleCancelled,
+  type ProjectTaskDirectScheduleHandle,
+} from '../../task-views/model/projectTaskDirectActionRequest'
 import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
 import {
+  createReplaceTaskScheduleOperation,
   formatTaskScheduleRange,
+  replaceTaskDeadlineSchedule,
   resolveTaskSchedule,
   taskScheduleModeLabelKeys,
 } from '../../tasks/model/taskSchedule'
-import { isTaskOverdue, resolveTaskCustomFieldEntries } from '../../tasks/model/taskView'
+import {
+  isTaskOverdue,
+  resolveTaskCustomFieldEntries,
+  resolveTaskPriority,
+  taskPriorities,
+} from '../../tasks/model/taskView'
+import {
+  CalendarSchedulePreview,
+  type PendingCalendarScheduleChange,
+} from '../../tasks/ui/TaskCalendarView'
+import { resolveCalendarScheduleError } from '../../tasks/model/taskScheduleChangeError'
+import { TaskInlineField } from '../../tasks/ui/TaskInlineField'
 import {
   TaskCustomFieldSummary,
   TaskPriorityBadge,
@@ -34,8 +54,10 @@ import {
   resolveMyTasksTableColumns,
 } from '../model/myTaskTable'
 
-/** Props for the read-only My Tasks table. */
+/** Props for the My Tasks table. */
 export type MyTasksTaskTableProps = {
+  /** Checks whether the person may edit one row's due date and priority in place. */
+  canEditTask?: (task: CanonicalWorkItem) => boolean
   /** Resolved Work Item configurations indexed by Team ID. */
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>
   /** Workspace task keys of Work Items the user contributes to without owning them. */
@@ -46,6 +68,16 @@ export type MyTasksTaskTableProps = {
   locale: Locale
   /** Opens a Work Item. */
   onOpenTask?: (task: CanonicalWorkItem) => void
+  /**
+   * Starts a due-date change; the table shows its preview and confirms it. The due date is
+   * edited in place only with this callback.
+   */
+  onRequestScheduleChange?: (
+    task: CanonicalWorkItem,
+    operation: WorkItemScheduleOperation,
+  ) => ProjectTaskDirectScheduleHandle
+  /** Saves a new priority; the priority is edited in place only with this callback. */
+  onUpdatePriority?: (task: CanonicalWorkItem, priority: WorkItemPriority) => Promise<void>
   /** Opens the canonical action menu for one row. */
   onTaskActionMenuOpen?: (
     task: CanonicalWorkItem,
@@ -67,21 +99,26 @@ export type MyTasksTaskTableProps = {
 }
 
 /**
- * Renders the current user's Work Items as a read-only table across Teams and Projects.
+ * Renders the current user's Work Items as a table across Teams and Projects.
  *
  * Rows follow the effective view's sort, which is the due date for the built-in view, and its
- * grouping. Selecting a title opens the Work Item; the row menu offers the shared actions.
+ * grouping. Selecting a title opens the Work Item; the row menu offers the shared actions. The
+ * due date and the priority of a writable row can be changed in place; a due-date change is
+ * confirmed in the same schedule preview as the calendar, with any dependency ripple.
  *
  * @param props - Work Items, configurations, presentation, and open callbacks.
  * @returns The My Tasks table.
  */
 export function MyTasksTaskTable({
+  canEditTask,
   configurationsByTeam,
   contributorTaskKeys,
   focusedTaskKey,
   locale,
   onOpenTask,
+  onRequestScheduleChange,
   onTaskActionMenuOpen,
+  onUpdatePriority,
   personLabels,
   presentation,
   selectedTaskKeys,
@@ -102,6 +139,112 @@ export function MyTasksTaskTable({
       : 'px-3 py-2.5'
   const wrapText = presentation?.display.wrapTitles ?? false
   const textOverflow = wrapText ? 'whitespace-normal break-words' : 'truncate'
+  const [pendingScheduleChange, setPendingScheduleChange] = useState<PendingCalendarScheduleChange>()
+  const [isApplyingSchedule, setIsApplyingSchedule] = useState(false)
+  const [editErrorMessage, setEditErrorMessage] = useState<string>()
+  const activeScheduleHandleRef = useRef<ProjectTaskDirectScheduleHandle | undefined>(undefined)
+  const sectionRef = useRef<HTMLElement>(null)
+  useEffect(() => () => {
+    activeScheduleHandleRef.current?.cancel()
+  }, [])
+
+  /**
+   * Previews a new due date and opens the confirmation dialog.
+   *
+   * @param task - Work Item of the row.
+   * @param dueDate - New due date, or an empty string to remove it.
+   * @returns Nothing once the preview is shown; rejects when it cannot be shown.
+   */
+  const commitDueDate = async (task: CanonicalWorkItem, dueDate: string) => {
+    if (!onRequestScheduleChange) throw new Error('Due date editing is unavailable.')
+    setEditErrorMessage(undefined)
+    activeScheduleHandleRef.current?.cancel()
+    let handle: ProjectTaskDirectScheduleHandle
+    try {
+      handle = onRequestScheduleChange(
+        task,
+        createReplaceTaskScheduleOperation(
+          replaceTaskDeadlineSchedule(resolveTaskSchedule(task), dueDate),
+        ),
+      )
+    } catch (error) {
+      setEditErrorMessage(t('tasks.schedule.invalid'))
+      throw error
+    }
+    activeScheduleHandleRef.current = handle
+    try {
+      const controller = await handle.preview
+      if (activeScheduleHandleRef.current?.token !== handle.token) {
+        handle.cancel()
+        return
+      }
+      setPendingScheduleChange({ controller, task })
+    } catch (error) {
+      if (activeScheduleHandleRef.current?.token === handle.token) {
+        activeScheduleHandleRef.current = undefined
+      }
+      if (!isProjectTaskDirectScheduleCancelled(error)) {
+        setEditErrorMessage(resolveCalendarScheduleError(error, t))
+      }
+      throw error
+    }
+  }
+
+  /** Persists the previewed due date and returns focus to the row's due-date control. */
+  const confirmScheduleChange = async () => {
+    const pending = pendingScheduleChange
+    if (!pending) return
+    setIsApplyingSchedule(true)
+    setEditErrorMessage(undefined)
+    try {
+      await pending.controller.confirm()
+    } catch (error) {
+      if (!isProjectTaskDirectScheduleCancelled(error)) {
+        setEditErrorMessage(resolveCalendarScheduleError(error, t))
+      }
+    } finally {
+      if (activeScheduleHandleRef.current?.token === pending.controller.token) {
+        activeScheduleHandleRef.current = undefined
+      }
+      setPendingScheduleChange(undefined)
+      setIsApplyingSchedule(false)
+      focusDueDateControl(sectionRef.current, pending.task)
+    }
+  }
+
+  /** Discards the previewed due date. */
+  const cancelScheduleChange = () => {
+    const pending = pendingScheduleChange
+    if (!pending || isApplyingSchedule) return
+    pending.controller.cancel()
+    if (activeScheduleHandleRef.current?.token === pending.controller.token) {
+      activeScheduleHandleRef.current = undefined
+    }
+    setPendingScheduleChange(undefined)
+    focusDueDateControl(sectionRef.current, pending.task)
+  }
+
+  /**
+   * Saves a new priority for one row.
+   *
+   * @param task - Work Item of the row.
+   * @param value - Selected priority.
+   * @returns Nothing once saved; rejects so the editor stays open on failure.
+   */
+  const commitPriority = async (task: CanonicalWorkItem, value: string) => {
+    if (!onUpdatePriority) throw new Error('Priority editing is unavailable.')
+    setEditErrorMessage(undefined)
+    try {
+      await onUpdatePriority(task, resolveTaskPriority(value))
+    } catch (error) {
+      setEditErrorMessage(
+        error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict'
+          ? t('tasks.action.conflict')
+          : t('workspace.myTasks.updateError'),
+      )
+      throw error
+    }
+  }
 
   /**
    * Opens the action menu of one row from its overflow button.
@@ -165,22 +308,53 @@ export function MyTasksTaskTable({
       case 'dueDate': {
         const schedule = resolveTaskSchedule(task)
         const range = formatTaskScheduleRange(schedule)
+        const display = range ?? t(taskScheduleModeLabelKeys[schedule.mode])
         const tone = resolveWorkflowStatusCategory(task) === 'completed'
           ? 'text-fg-8f99a8 line-through'
           : isTaskOverdue(task) ? 'text-fg-red-700' : 'text-fg-505967'
+        // Ranges and milestones keep their own editors in the detail and the Gantt chart.
+        const canEditDueDate = onRequestScheduleChange !== undefined &&
+          (canEditTask?.(task) ?? false) &&
+          (schedule.mode === 'due-date' || schedule.mode === 'unscheduled')
         return (
           <td
             className={`${cellPadding} whitespace-nowrap ${tone}`}
             data-testid={`my-tasks-table-due-${createWorkspaceTaskTestId(task)}`}
             key={field}
           >
-            {range ?? t(taskScheduleModeLabelKeys[schedule.mode])}
+            {canEditDueDate ? (
+              <TaskInlineField
+                ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.dueDate')} (${resolveWorkItemTitle(task)})`}
+                displayValue={display}
+                fieldKey="dueDate"
+                kind="date"
+                testId={`my-tasks-table-due-edit-${createWorkspaceTaskTestId(task)}`}
+                value={schedule.mode === 'due-date' ? schedule.dueDate : ''}
+                onCommit={(value) => commitDueDate(task, value)}
+              />
+            ) : display}
           </td>
         )
       }
       case 'priority': return (
         <td className={`${cellPadding} whitespace-nowrap`} key={field}>
-          <TaskPriorityBadge priority={task.priority} t={t} />
+          {onUpdatePriority && (canEditTask?.(task) ?? false) ? (
+            <TaskInlineField
+              ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.priority')} (${resolveWorkItemTitle(task)})`}
+              displayValue={t(`tasks.priority.${task.priority}`)}
+              fieldKey="priority"
+              kind="select"
+              options={taskPriorities.map((priority) => ({
+                label: t(`tasks.priority.${priority}`),
+                value: priority,
+              }))}
+              testId={`my-tasks-table-priority-edit-${createWorkspaceTaskTestId(task)}`}
+              value={task.priority}
+              onCommit={(value) => commitPriority(task, value)}
+            />
+          ) : (
+            <TaskPriorityBadge priority={task.priority} t={t} />
+          )}
         </td>
       )
       case 'workItemType': return (
@@ -227,7 +401,17 @@ export function MyTasksTaskTable({
       aria-label={t('workspace.myTasks.title')}
       className="workbench-table relative min-w-0 overflow-hidden"
       data-testid="my-tasks-table"
+      ref={sectionRef}
     >
+      {editErrorMessage ? (
+        <p
+          className="border-b border-red-200 bg-red-50 px-5 py-3 text-sm font-semibold text-fg-red-700"
+          data-testid="my-tasks-table-edit-error"
+          role="alert"
+        >
+          {editErrorMessage}
+        </p>
+      ) : null}
       <div className="overflow-x-auto">
         <table className="w-full min-w-[720px] border-collapse text-sm">
           <thead>
@@ -327,8 +511,31 @@ export function MyTasksTaskTable({
       >
         {t('tasks.count').replace('{count}', String(tasks.length))}
       </p>
+      {pendingScheduleChange ? (
+        <CalendarSchedulePreview
+          isApplying={isApplyingSchedule}
+          onCancel={cancelScheduleChange}
+          onConfirm={() => void confirmScheduleChange()}
+          pending={pendingScheduleChange}
+          t={t}
+        />
+      ) : null}
     </section>
   )
+}
+
+/**
+ * Returns focus to a row's due-date control after its preview dialog closes.
+ *
+ * @param container - Table section that holds the rows.
+ * @param task - Work Item whose due date was previewed.
+ */
+function focusDueDateControl(container: HTMLElement | null, task: CanonicalWorkItem): void {
+  requestAnimationFrame(() => {
+    const row = [...container?.querySelectorAll<HTMLElement>('[data-task-view-item-key]') ?? []]
+      .find((candidate) => candidate.dataset.taskViewItemKey === createTaskViewItemKey(task.teamId, task.id))
+    row?.querySelector<HTMLElement>('[data-task-field="dueDate"]')?.focus()
+  })
 }
 
 /**

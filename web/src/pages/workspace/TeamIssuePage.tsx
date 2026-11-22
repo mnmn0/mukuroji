@@ -1,3 +1,4 @@
+import { useSWRConfig } from 'swr'
 import {
   type TaskViewScope,
   type WorkItemRelation,
@@ -121,6 +122,7 @@ import {
   formatTaskViewMigrationWarning,
 } from '../../task-views/ui/taskViewToolbarAdapter'
 import { TeamIssueScreen } from '../../issues/ui/TeamIssueScreen'
+import { createWorkItemListScheduleMutations } from '../../tasks/mutations/createWorkItemListScheduleMutations'
 import {
   emptyWorkspaceMembers,
   type TeamIssueHierarchyPlacement,
@@ -512,6 +514,26 @@ export function TeamIssuePage() {
   } = useTeamWorkItemHierarchy(accessToken, teamId, Boolean(user && !currentUserError) && isOutlineShown)
   // Refreshes the hierarchy of the Team a write went to, even after the person left it.
   const refreshTeamHierarchy = useTeamWorkItemHierarchyRefresh(accessToken, teamId)
+  const { mutate: mutateCache } = useSWRConfig()
+  const scheduleMutations = createWorkItemListScheduleMutations({
+    accessToken,
+    guardEnterpriseSession,
+    mutateCache,
+    mutationRequestRunner,
+    onBackgroundRefreshError: (error) => setAuthenticatedApiError(() => error),
+    planningCacheKey: planningKey,
+    // Archived Work Items are listed too, as the route's list query reads them.
+    listScope: {
+      includeArchived: true,
+      kind: 'team',
+      selectedIssueId: resolvedSelectedIssueId,
+      teamId,
+    },
+    refreshHierarchy: refreshTeamHierarchy,
+    selectedDetailCacheKey: detailKey,
+    t,
+    tasksCacheKey: issuesKey,
+  })
   const moveIssueInHierarchy = useTeamWorkItemHierarchyMove({
     accessToken,
     teamId,
@@ -1041,6 +1063,12 @@ export function TeamIssuePage() {
         ? dependencyMutations.create
         : undefined}
       onDeleteRelation={hasWritableWorkItemScope ? handleDeleteRelation : undefined}
+      onPreviewScheduleChange={hasWritableWorkItemScope && !workItemConfigurationError
+        ? scheduleMutations.previewScheduleChange
+        : undefined}
+      onConfirmScheduleChange={hasWritableWorkItemScope && !workItemConfigurationError
+        ? scheduleMutations.confirmScheduleChange
+        : undefined}
       onDeleteScheduleDependency={accessToken && planningSnapshot
         ? dependencyMutations.delete
         : undefined}
