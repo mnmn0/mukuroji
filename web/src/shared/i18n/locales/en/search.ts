@@ -106,6 +106,8 @@ export const searchMessages = {
   'command.section.results': 'Search results',
   'command.loading': 'Searching',
   'command.error': 'Search could not be completed.',
+  'command.projectSearchError': 'Project matches could not be loaded. The results shown come from the Workspace-wide search.',
+  'command.retry': 'Retry',
   'command.empty': 'No matching commands or items.',
   'command.quick.search': 'Open advanced workspace search',
   'command.quick.create': 'Create a Work Item in this view',
