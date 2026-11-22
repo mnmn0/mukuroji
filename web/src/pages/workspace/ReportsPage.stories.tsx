@@ -159,6 +159,24 @@ export const NamedAssigneeGroups: Story = {
 }
 
 /**
+ * 担当者・カスタムフィールド・配信先を名前の一覧から選ぶ状態です。一覧にいない選択済みの担当者も
+ * 選択されたまま残ります。
+ */
+export const NamePickers: Story = {
+  args: {
+    builder: true,
+    customFields: [
+      { id: 'impact', label: '影響度' },
+      { id: 'launch-date', label: 'リリース日' },
+    ],
+    filter: multipleFilters,
+    initialScheduleOpen: true,
+    members: namedGroupMembers,
+    widgets: customFieldGroupingWidgets,
+  },
+}
+
+/**
  * Widget palette と構成 editor を開いた report builder です。
  */
 export const Builder: Story = {
