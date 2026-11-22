@@ -4089,6 +4089,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         return {
           documentId: row.document.id,
           documentTitle: row.document.title,
+          documentKind: row.document.kind,
           relation: item.relation,
         }
       },

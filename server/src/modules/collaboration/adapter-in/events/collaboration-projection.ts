@@ -1647,8 +1647,12 @@ export function createNotificationProjectionItem(
     workItemUpdatedAt: event.workItemUpdatedAt,
     daysUntilDue: event.daysUntilDue,
     workItemReopenedAt: event.workItemReopenedAt,
-    // External channels recheck the author's Project membership before they send.
+    // External channels recheck the author's Project membership and reread the week before they send.
     weeklyReportAuthorMemberKey: event.weeklyReportAuthorMemberKey,
+    weeklyReportWeekStart: event.weeklyReportWeekStart,
+    // External channels reread these entries before they send, so a submitted timesheet is not reminded.
+    timeEntryIds: event.timeEntryIds,
+    timesheetDueBefore: event.timesheetDueBefore,
     expiresAt,
   }
 }

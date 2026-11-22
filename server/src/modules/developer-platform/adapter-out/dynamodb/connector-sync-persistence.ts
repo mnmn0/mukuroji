@@ -233,7 +233,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
 
   /** Link の current sync state を強整合取得します。 */
   async getLinkState(workspaceIdValue: string, linkIdValue: string) {
-    const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = requireWorkspaceId(workspaceIdValue)
     const linkId = requireIdentifier(linkIdValue, 'External link ID')
     const item = await this.getRow(workspaceId, syncStateRecordKey(linkId))
     if (!item) return undefined
@@ -242,7 +242,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
 
   /** Expected storage revision と一致する場合だけ sync checkpoint を保存します。 */
   async commitLinkState(input: CommitConnectorSyncStateInput) {
-    const workspaceId = requireIdentifier(input.workspaceId, 'Workspace ID')
+    const workspaceId = requireWorkspaceId(input.workspaceId)
     const linkId = requireIdentifier(input.link.id, 'External link ID')
     const installationId = requireIdentifier(
       input.link.installationId,
@@ -393,7 +393,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     status: ExternalWorkItemLink['syncStatus'],
     updatedAtValue: string,
   ) {
-    const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = requireWorkspaceId(workspaceIdValue)
     const linkId = requireIdentifier(linkIdValue, 'External link ID')
     const updatedAt = requireTimestamp(updatedAtValue, 'External link update timestamp')
     const rowValue = await this.getRow(workspaceId, externalLinkRecordKey(linkId))
@@ -486,7 +486,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     expectedStateRevisionValue: number,
     syncedAtValue: string,
   ) {
-    const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = requireWorkspaceId(workspaceIdValue)
     const linkId = requireIdentifier(linkIdValue, 'External link ID')
     const expectedUpdatedAt = requireTimestamp(
       expectedUpdatedAtValue,
@@ -726,7 +726,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       limit: number
     },
   ): Promise<ConnectorSyncConflictPage> {
-    const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = requireWorkspaceId(workspaceIdValue)
     const limit = requirePageSize(input.limit)
     const status = input.status === undefined
       ? undefined
@@ -798,7 +798,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
 
   /** Workspace-bound conflict private snapshot を取得します。 */
   async getConflict(workspaceIdValue: string, conflictIdValue: string) {
-    const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = requireWorkspaceId(workspaceIdValue)
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
     const value = await this.getRow(workspaceId, conflictRecordKey(conflictId))
     return value ? structuredClone(readConflictRow(value).value) : undefined
@@ -815,7 +815,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       startedAt: string
     },
   ): Promise<'claimed' | 'same-operation' | 'busy' | undefined> {
-    const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = requireWorkspaceId(workspaceIdValue)
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
     const operationId = requireIdentifier(input.operationId, 'Resolution operation ID')
     const startedAt = requireTimestamp(input.startedAt, 'Resolution claim timestamp')
@@ -892,7 +892,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
     conflictIdValue: string,
     operationIdValue: string,
   ) {
-    const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = requireWorkspaceId(workspaceIdValue)
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
     const operationId = requireIdentifier(
       operationIdValue,
@@ -950,7 +950,7 @@ export class DynamoDbConnectorSyncPersistence implements ConnectorSyncPersistenc
       operationId: string
     },
   ) {
-    const workspaceId = requireIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = requireWorkspaceId(workspaceIdValue)
     const conflictId = requireIdentifier(conflictIdValue, 'Conflict ID')
     const value = await this.getRow(workspaceId, conflictRecordKey(conflictId))
     if (!value) return undefined
@@ -1272,7 +1272,7 @@ function createExternalLinkReplacementRow(
 }
 
 function normalizeConflictRecord(value: StoredConnectorSyncConflict) {
-  const workspaceId = requireIdentifier(value.workspaceId, 'Workspace ID')
+  const workspaceId = requireWorkspaceId(value.workspaceId)
   const conflict = structuredClone(value.conflict)
   requireIdentifier(conflict.id, 'Conflict ID')
   requireIdentifier(conflict.externalLinkId, 'External link ID')
@@ -1513,6 +1513,23 @@ function requireTimestamp(value: string, label: string) {
     throw new ConnectorRuntimeError('ConnectorSyncInputInvalid', `${label} is invalid.`)
   }
   return new Date(milliseconds).toISOString()
+}
+
+/**
+ * Reads the canonical Workspace ID, whose documented form contains `#` (for example `workspace#production`).
+ *
+ * Matches `readDeveloperWorkspaceId` in the developer-platform store; other identifiers keep {@link requireIdentifier}.
+ *
+ * @param value - Untrusted Workspace ID.
+ * @returns The trimmed Workspace ID.
+ * @throws ConnectorRuntimeError when the ID is empty, too long, or has characters outside the allowed set.
+ */
+function requireWorkspaceId(value: unknown) {
+  const text = requireText(value, 'Workspace ID')
+  if (text.length > 200 || !/^[A-Za-z0-9][A-Za-z0-9._:@/#-]*$/u.test(text)) {
+    throw new ConnectorRuntimeError('ConnectorSyncInputInvalid', 'Workspace ID is invalid.')
+  }
+  return text
 }
 
 function requireIdentifier(value: unknown, label: string) {

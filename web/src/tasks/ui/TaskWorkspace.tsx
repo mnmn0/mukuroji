@@ -82,6 +82,7 @@ import { TaskFileView } from './TaskFileView'
 import type { WorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
 import { TaskGanttView, type TaskGanttOutline } from './TaskGanttView'
 import { createTaskGanttDisplayBinding } from '../model/taskGanttDisplay'
+import type { TaskCalendarPeriods } from '../model/taskGanttTimeline'
 import { createMultiTeamWorkItemOutlineRows } from '../../work-items/model/workItemHierarchy'
 import { TaskPermissionsView } from './TaskPermissionsView'
 import { TaskTableView } from './TaskTableView'
@@ -296,6 +297,8 @@ export type TaskWorkspaceProps = {
   statusColumns: ProjectTaskStatusColumn[]
   /** Workspace working calendar whose non-working days the Gantt chart shades. */
   workingCalendar?: WorkItemScheduleCalendarPolicy
+  /** Workspace week start and fiscal year start that the Gantt and Calendar headings follow. */
+  calendarPeriods?: TaskCalendarPeriods
 }
 
 /**
@@ -307,6 +310,7 @@ export type TaskWorkspaceProps = {
 export function TaskWorkspace({
   activeTab,
   workingCalendar,
+  calendarPeriods,
   scheduleWindowNavigation,
   allTasks,
   bulkProjectOptions,
@@ -823,6 +827,7 @@ export function TaskWorkspace({
           t={t}
           tasks={tasks}
           workingCalendar={workingCalendar}
+          calendarPeriods={calendarPeriods}
           {...createTaskGanttDisplayBinding(taskViewPresentation, onTaskViewPresentationChange)}
           {...(scheduleWindowNavigation
             ? {
@@ -834,6 +839,7 @@ export function TaskWorkspace({
       ) : null}
       {activeTab === 'calendar' && !taskErrorMessage ? (
         <TaskCalendarView
+          calendarPeriods={calendarPeriods}
           configuration={configuration}
           configurationsByTeam={configurationsByTeam}
           onCreateTaskOpen={onCreateTaskOpen}

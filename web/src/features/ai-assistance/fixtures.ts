@@ -5,6 +5,13 @@ import type {
   AiAssistanceProviderCredentials,
 } from '@mukuroji/contracts'
 
+/**
+ * Retention deadline one year after the fixtures load. Stories run at the real
+ * current time, so a fixed date would expire and hide every generated draft.
+ * Tests that pin the clock to the fixture dates still see an unexpired window.
+ */
+const fixtureRetentionExpiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1_000).toISOString()
+
 /** Available intake triage generation used by Request and Team adoption stories. */
 export const aiTriageGenerationFixture = {
   schemaVersion: 1,
@@ -79,7 +86,7 @@ export const aiTriageGenerationFixture = {
     },
   },
   createdAt: '2026-08-25T01:15:00.000Z',
-  expiresAt: '2026-09-24T01:15:00.000Z',
+  expiresAt: fixtureRetentionExpiresAt,
 } satisfies AiAssistanceGeneration
 
 /** Available grounded summary generation used by focused review stories and tests. */
@@ -138,7 +145,7 @@ export const aiSummaryGenerationFixture = {
     },
   },
   createdAt: '2026-08-25T01:30:00.000Z',
-  expiresAt: '2026-09-24T01:30:00.000Z',
+  expiresAt: fixtureRetentionExpiresAt,
 } satisfies AiAssistanceGeneration
 
 /** Available low-confidence Search generation used by the plain-language preview. */
@@ -184,7 +191,7 @@ export const aiSearchGenerationFixture = {
     },
   },
   createdAt: '2026-08-25T02:00:00.000Z',
-  expiresAt: '2026-09-24T02:00:00.000Z',
+  expiresAt: fixtureRetentionExpiresAt,
 } satisfies AiAssistanceGeneration
 
 /** Available planning generation with fields, a child item, dependency, and status update. */
@@ -286,7 +293,7 @@ export const aiPlanningGenerationFixture = {
     },
   },
   createdAt: '2026-08-25T02:30:00.000Z',
-  expiresAt: '2026-09-24T02:30:00.000Z',
+  expiresAt: fixtureRetentionExpiresAt,
 } satisfies AiAssistanceGeneration
 
 /** Withheld generation that deliberately contains no previously authorized draft or citation. */

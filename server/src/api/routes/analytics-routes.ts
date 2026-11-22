@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto'
 import {
+  DEFAULT_WORK_ITEM_TYPE,
+  createAnalyticsProjectNames,
+  createSearchWorkItemTypeKey,
+  type AnalyticsExportLocale,
   type AnalyticsQueryInput,
   type AnalyticsReport,
   type AnalyticsSnapshot,
@@ -32,6 +36,8 @@ import {
   analyticsFilterIncludesWorkItem,
   analyticsQueryReadsMilestones,
   analyticsSnapshotReadMilestones,
+  analyticsQueryReadsPlanningGroups,
+  analyticsSnapshotReadPlanningGroups,
   createAnalyticsCsv,
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
@@ -43,6 +49,8 @@ import {
   queryAnalyticsEvidence,
   resolveAnalyticsReportFilterPeriod,
   selectAnalyticsWorkItemsRequiringHistory,
+  type AnalyticsExportContext,
+  type AnalyticsExportNames,
 } from '../../modules/analytics/analytics'
 import { createAnalyticsMilestoneScopeKey } from '../../modules/analytics/analytics-milestone-trend'
 import {
@@ -55,11 +63,13 @@ import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import {
   getEffectiveProjectAccessList,
+  getEffectiveProjectScopeAccessList,
   hasEnterpriseWorkspacePermission,
   type ProjectPrincipal,
   requireTeamPermission,
   requireWorkspaceAdministration,
   requireWorkspaceBusinessWrite,
+  resolveProjectAccessTeamId,
   toProjectDataErrorResponse,
   type WorkspacePrincipal,
 } from '../shared/project-access'
@@ -67,6 +77,7 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { canReadAnalyticsReport } from '../shared/analytics-access'
 import {
   readAuthorizedAnalyticsMilestones,
+  readAuthorizedAnalyticsPlanningGroups,
   readReadableAnalyticsMilestones,
   readVisibleAnalyticsMilestones,
 } from '../shared/analytics-milestones'
@@ -154,18 +165,200 @@ async function createAnalyticsHttpExport(
   const locale = normalizeAnalyticsExportLocale(
     typeof input.locale === 'string' ? input.locale : undefined,
   )
-  const snapshot = await resolveAnalyticsExportSnapshot(principal, input)
+  const resolved = await resolveAnalyticsExportSnapshot(principal, input)
+  const context: AnalyticsExportContext = {
+    ...(resolved.title === undefined ? {} : { title: resolved.title }),
+    widgets: resolved.query.widgets,
+    names: await readAnalyticsExportNames(principal, resolved.query, resolved.snapshot, locale),
+  }
   return format === 'csv'
     ? {
-        body: createAnalyticsCsv(snapshot, locale),
+        body: createAnalyticsCsv(resolved.snapshot, locale, context),
         extension: format,
         contentType: 'text/csv; charset=utf-8',
       }
     : {
-        body: createAnalyticsPdf(snapshot, locale),
+        body: createAnalyticsPdf(resolved.snapshot, locale, context),
         extension: format,
         contentType: 'application/pdf',
       }
+}
+
+/** Project member and Team configuration reads an export runs at once. */
+const ANALYTICS_EXPORT_NAME_READ_CONCURRENCY = 10
+
+/**
+ * Reads the names an Analytics export prints in place of internal IDs, limited to what the
+ * principal may see: Teams and Projects of the principal's Project directory, members of the
+ * principal's readable Projects, and the Work Item Types and custom fields of the visible Teams.
+ * Members and configurations are read only when the query uses them; a failed read leaves those
+ * names out, and the export then prints the stored value.
+ *
+ * @param principal - Authenticated principal.
+ * @param query - Query that produced the exported snapshot.
+ * @param snapshot - Exported snapshot, whose assignee groups name the members to look up.
+ * @param locale - Export locale, which picks the localized Team and Project names.
+ * @returns Display names keyed by internal ID.
+ */
+async function readAnalyticsExportNames(
+  principal: WorkspacePrincipal,
+  query: AnalyticsQueryInput,
+  snapshot: AnalyticsSnapshot,
+  locale: AnalyticsExportLocale,
+): Promise<AnalyticsExportNames> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    locale,
+  )
+  // Project IDs can repeat across Teams, so readable Projects are matched by Team and Project.
+  const readableProjectKeys = principal.isSystemAdmin
+    ? undefined
+    : new Set(
+        (await getEffectiveProjectScopeAccessList(principal, directory)).flatMap((access) => {
+          if (!projectAccessAllows(access, 'viewer')) return []
+          const teamId = resolveProjectAccessTeamId(access, directory)
+          return teamId === undefined ? [] : [`${teamId}\0${access.projectId}`]
+        }),
+      )
+  const authorizedTeamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
+  const teams = directory.teams
+    .map((team) => ({
+      ...team,
+      projects: team.projects.filter((project) =>
+        readableProjectKeys === undefined || readableProjectKeys.has(`${team.id}\0${project.id}`)
+      ),
+    }))
+    .filter((team) =>
+      readableProjectKeys === undefined ||
+      authorizedTeamIds.has(team.id) ||
+      team.projects.length > 0
+    )
+  const dimensions = new Set(query.widgets.flatMap((widget) =>
+    widget.groupBy === undefined ? [] : [widget.groupBy.dimension]
+  ))
+  const assigneeWidgetIds = new Set(query.widgets.flatMap((widget) =>
+    widget.groupBy?.dimension === 'assignee' ? [widget.id] : []
+  ))
+  const memberKeys = new Set([
+    ...(query.filter.assigneeUserIds ?? []),
+    ...snapshot.widgets.flatMap((result) =>
+      assigneeWidgetIds.has(result.widgetId) ? result.groups.map((group) => group.key) : []
+    ),
+  ].filter((key) => key !== ''))
+  const readsMembers = memberKeys.size > 0
+  const readsConfigurations = dimensions.has('work-item-type') ||
+    (query.filter.workItemTypeIds?.length ?? 0) > 0 ||
+    (query.filter.customFields?.length ?? 0) > 0
+  const projectNames = createAnalyticsProjectNames(teams)
+  return {
+    teams: new Map(teams.map((team) => [team.id, team.name])),
+    projects: projectNames.byProject,
+    teamProjects: projectNames.byTeamProject,
+    ...(readsMembers
+      ? { members: await readAnalyticsExportMemberNames(principal, teams, memberKeys) }
+      : {}),
+    ...(readsConfigurations
+      ? await readAnalyticsExportConfigurationNames(principal, teams, query.filter.teamIds)
+      : {}),
+  }
+}
+
+/**
+ * Reads the display names of the members of the given Projects.
+ *
+ * Stops reading Projects once every wanted member has a name.
+ *
+ * @param principal - Authenticated principal.
+ * @param teams - Visible Teams with their readable Projects.
+ * @param memberKeys - Member keys the export prints.
+ * @returns Member names keyed by member key; members without a name are left out.
+ */
+async function readAnalyticsExportMemberNames(
+  principal: WorkspacePrincipal,
+  teams: readonly { id: string; projects: readonly { id: string }[] }[],
+  memberKeys: ReadonlySet<string>,
+) {
+  const projects = teams.flatMap((team) =>
+    team.projects.map((project) => ({ teamId: team.id, projectId: project.id }))
+  )
+  const names = new Map<string, string>()
+  for (let offset = 0; offset < projects.length; offset += ANALYTICS_EXPORT_NAME_READ_CONCURRENCY) {
+    if ([...memberKeys].every((key) => names.has(key))) break
+    const batch = projects.slice(offset, offset + ANALYTICS_EXPORT_NAME_READ_CONCURRENCY)
+    const responses = await Promise.allSettled(batch.map(({ teamId, projectId }) =>
+      workspaceDependencies.projectDirectory.getProjectMembers(
+        principal.directoryId,
+        projectId,
+        teamId,
+      )
+    ))
+    for (const response of responses) {
+      if (response.status !== 'fulfilled') continue
+      for (const member of response.value.members) {
+        const name = member.name?.trim()
+        if (name && memberKeys.has(member.id) && !names.has(member.id)) names.set(member.id, name)
+      }
+    }
+  }
+  return names
+}
+
+/**
+ * Reads the Work Item Type and custom field names of the given Teams.
+ *
+ * Custom field IDs are unique only within a Team, so a field name comes from the Teams the query
+ * reads; when those Teams name the same field differently, every name is listed with its Team.
+ *
+ * @param principal - Authenticated principal.
+ * @param teams - Visible Teams.
+ * @param queryTeamIds - Teams the query filters to; all visible Teams when unset or empty.
+ * @returns Work Item Type names (`Team · Type`) keyed by Team-qualified key, and custom field names.
+ */
+async function readAnalyticsExportConfigurationNames(
+  principal: WorkspacePrincipal,
+  teams: readonly { id: string; name: string }[],
+  queryTeamIds: readonly string[] | undefined,
+) {
+  const scopeTeamIds = queryTeamIds === undefined || queryTeamIds.length === 0
+    ? undefined
+    : new Set(queryTeamIds)
+  const workItemTypes = new Map<string, string>()
+  const fieldCandidates = new Map<string, Array<{ teamName: string; name: string }>>()
+  for (let offset = 0; offset < teams.length; offset += ANALYTICS_EXPORT_NAME_READ_CONCURRENCY) {
+    const batch = teams.slice(offset, offset + ANALYTICS_EXPORT_NAME_READ_CONCURRENCY)
+    const responses = await Promise.allSettled(batch.map((team) =>
+      workItemDependencies.workItemConfigurations.getTeamConfiguration(
+        principal.directoryId,
+        team.id,
+      )
+    ))
+    for (const [index, response] of responses.entries()) {
+      const team = batch[index]
+      if (team === undefined || response.status !== 'fulfilled') continue
+      const configuration = response.value.configuration
+      const types = configuration.workItemTypes ?? []
+      for (const type of [DEFAULT_WORK_ITEM_TYPE, ...types]) {
+        workItemTypes.set(createSearchWorkItemTypeKey(team.id, type.id), `${team.name} · ${type.name}`)
+      }
+      if (scopeTeamIds !== undefined && !scopeTeamIds.has(team.id)) continue
+      for (const field of configuration.customFields) {
+        const candidates = fieldCandidates.get(field.id) ?? []
+        candidates.push({ teamName: team.name, name: field.name })
+        fieldCandidates.set(field.id, candidates)
+      }
+    }
+  }
+  const customFields = new Map<string, string>()
+  for (const [fieldId, candidates] of fieldCandidates) {
+    const names = new Set(candidates.map((candidate) => candidate.name))
+    customFields.set(
+      fieldId,
+      names.size === 1
+        ? candidates[0]?.name ?? fieldId
+        : candidates.map((candidate) => `${candidate.name} (${candidate.teamName})`).join(' / '),
+    )
+  }
+  return { workItemTypes, customFields }
 }
 
 /** Lists Analytics reports visible to the authenticated principal. */
@@ -276,8 +469,13 @@ async function listAnalyticsHttpSnapshots(
     for (const [recordIndex, record] of page.snapshots.entries()) {
       inspectedCount += 1
       const readsMilestones = analyticsSnapshotReadMilestones(record.snapshot)
-      // A scheduled snapshot of the same query leaves the Milestones out of its hash.
-      const queryCacheKey = `${record.snapshot.queryHash}\0${readsMilestones ? 'milestones' : ''}`
+      const readsPlanningGroups = analyticsSnapshotReadPlanningGroups(record.query, record.snapshot)
+      // A scheduled snapshot of the same query leaves the Milestones and Cycles out of its hash.
+      const queryCacheKey = [
+        record.snapshot.queryHash,
+        readsMilestones ? 'milestones' : '',
+        readsPlanningGroups ? 'planning-groups' : '',
+      ].join('\0')
       let pendingPermissionScopeHash = permissionScopeHashCache.get(queryCacheKey)
       if (!pendingPermissionScopeHash) {
         pendingPermissionScopeHash = readCurrentAnalyticsPermissionScopeHash(
@@ -285,6 +483,7 @@ async function listAnalyticsHttpSnapshots(
           record.query,
           readsMilestones,
           scopeCache,
+          readsPlanningGroups,
         )
         permissionScopeHashCache.set(queryCacheKey, pendingPermissionScopeHash)
       }
@@ -486,6 +685,23 @@ async function executeAnalyticsQuery(
   query: unknown,
   workspaceCalendar?: WorkspaceCalendarSettings,
 ): Promise<AnalyticsSnapshot> {
+  return (await executeNormalizedAnalyticsQuery(principal, query, workspaceCalendar)).snapshot
+}
+
+/**
+ * Runs an Analytics query like `executeAnalyticsQuery` and also returns the normalized query, for
+ * callers that describe the snapshot with its widgets and filter.
+ *
+ * @param principal - Authenticated principal whose current access bounds the query.
+ * @param query - Untrusted query input.
+ * @param workspaceCalendar - Calendar settings already read for this request; read when omitted.
+ * @returns The snapshot and the normalized query that produced it.
+ */
+async function executeNormalizedAnalyticsQuery(
+  principal: WorkspacePrincipal,
+  query: unknown,
+  workspaceCalendar?: WorkspaceCalendarSettings,
+): Promise<{ snapshot: AnalyticsSnapshot; query: AnalyticsQueryInput }> {
   const calendar = workspaceCalendar ?? await readWorkspaceCalendarSettingsOf(principal.directoryId)
   const normalizedQuery = normalizeAnalyticsQueryInput(
     isRecord(query) ? { ...query, weekStartDay: calendar.weekStartDay } : query,
@@ -498,11 +714,18 @@ async function executeAnalyticsQuery(
   const milestones = analyticsQueryReadsMilestones(normalizedQuery)
     ? await readAuthorizedAnalyticsMilestones(principal, normalizedQuery.filter, normalizedQuery.asOf)
     : undefined
-  return createAnalyticsSnapshot({
-    ...authorized,
-    ...(milestones === undefined ? {} : { milestones }),
+  const planningGroups = analyticsQueryReadsPlanningGroups(normalizedQuery)
+    ? await readAuthorizedAnalyticsPlanningGroups(principal, authorized.workItems)
+    : undefined
+  return {
+    snapshot: createAnalyticsSnapshot({
+      ...authorized,
+      ...(milestones === undefined ? {} : { milestones }),
+      ...(planningGroups === undefined ? {} : { planningGroups }),
+      query: normalizedQuery,
+    }),
     query: normalizedQuery,
-  })
+  }
 }
 
 /** Evidence query を事前検証し、current ACL の Work Item/event だけで再実行します。 */
@@ -861,6 +1084,8 @@ function createAnalyticsHistoryLimitExceededError() {
  * @param query - Stored snapshot query.
  * @param readsMilestones - Whether the stored snapshot fixed the readable Milestones.
  * @param cache - Accessible Work Item and Milestone reads shared by the snapshots of one response.
+ * @param readsPlanningGroups - Whether the stored snapshot fixed the readable Cycles and Milestones
+ *   of its Cycle or Milestone grouped widgets.
  * @returns The current permission scope hash.
  */
 async function readCurrentAnalyticsPermissionScopeHash(
@@ -868,6 +1093,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
   query: AnalyticsQueryInput,
   readsMilestones: boolean,
   cache: AnalyticsPermissionScopeReadCache = createAnalyticsPermissionScopeReadCache(),
+  readsPlanningGroups = false,
 ) {
   const normalized = normalizeAnalyticsQueryInput(query)
   const cacheKey = JSON.stringify({
@@ -908,6 +1134,9 @@ async function readCurrentAnalyticsPermissionScopeHash(
     Date.parse(normalized.asOf),
     current.authorizedProjectIds,
     milestones?.map(createAnalyticsMilestoneScopeKey),
+    readsPlanningGroups
+      ? (await readAuthorizedAnalyticsPlanningGroups(principal, current.workItems)).entityScopeKeys
+      : undefined,
   )
 }
 
@@ -931,11 +1160,15 @@ function createAnalyticsPermissionScopeReadCache(): AnalyticsPermissionScopeRead
   return { workItems: new Map() }
 }
 
-/** Export selector を current ACL で再実行できる snapshot へ解決します。 */
+/**
+ * Export selector を current ACL で再実行できる snapshot へ解決します。
+ *
+ * @returns Snapshot、それを作った query、report から作った場合は report 名です。
+ */
 async function resolveAnalyticsExportSnapshot(
   principal: WorkspacePrincipal,
   input: Record<string, unknown>,
-) {
+): Promise<{ snapshot: AnalyticsSnapshot; query: AnalyticsQueryInput; title?: string }> {
   const selectorCount = Number(input.query !== undefined) +
     Number(input.reportId !== undefined) +
     Number(input.snapshotId !== undefined)
@@ -947,7 +1180,20 @@ async function resolveAnalyticsExportSnapshot(
     )
   }
   if (input.query !== undefined) {
-    return await executeAnalyticsQuery(principal, input.query)
+    const executed = await executeNormalizedAnalyticsQuery(principal, input.query)
+    if (input.titleReportId === undefined) return executed
+    const report = await requireAnalyticsReport(
+      principal,
+      readAnalyticsIdentifier(input.titleReportId, 'Analytics report ID'),
+    )
+    return { ...executed, title: report.name }
+  }
+  if (input.titleReportId !== undefined) {
+    throw new AnalyticsError(
+      400,
+      'InvalidAnalyticsExport',
+      'Analytics export accepts titleReportId only with query.',
+    )
   }
   if (input.reportId !== undefined) {
     const report = await requireAnalyticsReport(
@@ -955,11 +1201,14 @@ async function resolveAnalyticsExportSnapshot(
       readAnalyticsIdentifier(input.reportId, 'Analytics report ID'),
     )
     const calendar = await readWorkspaceCalendarSettingsOf(principal.directoryId)
-    return await executeAnalyticsQuery(
-      principal,
-      createAnalyticsReportQuery(report, {}, calendar),
-      calendar,
-    )
+    return {
+      ...await executeNormalizedAnalyticsQuery(
+        principal,
+        createAnalyticsReportQuery(report, {}, calendar),
+        calendar,
+      ),
+      title: report.name,
+    }
   }
 
   const snapshotId = readAnalyticsIdentifier(input.snapshotId, 'Analytics snapshot ID')
@@ -967,8 +1216,9 @@ async function resolveAnalyticsExportSnapshot(
   if (!stored) {
     throw new AnalyticsError(404, 'AnalyticsSnapshotNotFound', 'Analytics snapshot was not found.')
   }
+  let title: string | undefined
   if (stored.reportId) {
-    await requireAnalyticsReport(principal, stored.reportId)
+    title = (await requireAnalyticsReport(principal, stored.reportId)).name
   } else if (stored.createdByMemberKey !== principal.userKey) {
     throw new AnalyticsError(
       403,
@@ -980,6 +1230,8 @@ async function resolveAnalyticsExportSnapshot(
     principal,
     stored.query,
     analyticsSnapshotReadMilestones(stored.snapshot),
+    undefined,
+    analyticsSnapshotReadPlanningGroups(stored.query, stored.snapshot),
   )
   if (currentPermissionScopeHash !== stored.snapshot.permissionScopeHash) {
     throw new AnalyticsError(
@@ -988,7 +1240,11 @@ async function resolveAnalyticsExportSnapshot(
       'Analytics snapshot authorization scope has changed.',
     )
   }
-  return stored.snapshot
+  return {
+    snapshot: stored.snapshot,
+    query: stored.query,
+    ...(title === undefined ? {} : { title }),
+  }
 }
 
 /** Analytics export format を検証します。 */

@@ -3,6 +3,8 @@
 Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う server API の変更を記録します。
 形式は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に、MCP の version は
 [Semantic Versioning](https://semver.org/lang/ja/) に従います。
+アプリ（Web・API）全体には version 番号を付けず、deploy した commit SHA を version とします。
+アプリの変更履歴は deploy ごとの job summary にある比較 link で辿ります（[ADR 0057](docs/adr/0057-app-version-is-deployed-commit.md)）。
 
 ## 記録のしかた
 
@@ -39,6 +41,11 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 - `create_task` が `schedule` を送らず、Workspace の稼働カレンダーで Work Item を作るようにしました。
   MCP API revision を 3 に上げ、server は revision 1〜3 を受け付けます。revision 2 以前の server に接続した新しい MCP は
   server が古いと警告し、`create_task` は失敗します。
+
+### Fixed
+
+- server API: Workspace ID に `#` を含む環境（deploy の既定値 `workspace#production`、Floci の
+  `workspace#mukuroji-local`）で、**agent を接続** の表示と自分用 token の発行・認証が 400 で失敗していました。
 
 ## [1.0.0]
 

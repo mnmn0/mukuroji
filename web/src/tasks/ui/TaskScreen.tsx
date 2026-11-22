@@ -216,6 +216,7 @@ import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { createTaskTabId, taskTabPanelId } from './taskTabAccessibility'
 import { createMultiTeamWorkItemOutlineRows } from '../../work-items/model/workItemHierarchy'
 import { listTaskGanttRowTasks } from '../model/taskGanttRows'
+import type { TaskCalendarPeriods } from '../model/taskGanttTimeline'
 
 const emptyProjectMembers: ProjectMember[] = []
 const emptyProjectUsers: ProjectUser[] = []
@@ -450,6 +451,8 @@ export type TaskScreenProps = {
   canManageProjectMembers?: boolean
   /** Checks whether the current user may correct one Work Item's recorded actual dates. */
   canCorrectActualDates?: (task: CanonicalWorkItem) => boolean
+  /** Whether the current user may add and remove external links of Work Items. */
+  canManageExternalLinks?: boolean
   /** Project charter section rendered on the permissions tab. */
   projectCharterPanel?: ReactNode
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
@@ -488,6 +491,8 @@ export type TaskScreenProps = {
    * shades its non-working days.
    */
   workspaceCalendarPolicy?: WorkItemScheduleCalendarPolicy
+  /** Workspace week start and fiscal year start that the Gantt and Calendar headings follow. */
+  workspaceCalendarPeriods?: TaskCalendarPeriods
   /** Work Item ID selected by the route when the screen first renders. */
   initialSelectedTaskId?: string
   /** Work Item ID explicitly selected by the current route, including unresolved selections. */
@@ -648,6 +653,7 @@ export function TaskScreen({
   canAccessTriage = false,
   canManageProjectMembers = false,
   canCorrectActualDates,
+  canManageExternalLinks = false,
   projectCharterPanel,
   canMutateTask,
   canManageScheduleDependencyEndpoint,
@@ -658,6 +664,7 @@ export function TaskScreen({
   currentWorkspaceMemberKey,
   defaultCreateTaskOpen = false,
   workspaceCalendarPolicy,
+  workspaceCalendarPeriods,
   detailErrorMessage,
   focusedCommentId,
   focusedRootCommentId,
@@ -3804,6 +3811,7 @@ export function TaskScreen({
               <TaskWorkspace
                 activeTab={activeTab}
                 workingCalendar={workspaceCalendarPolicy}
+                calendarPeriods={workspaceCalendarPeriods}
                 scheduleWindowNavigation={scheduleWindowNavigation}
                 allTasks={tasks}
                 assigneeOptions={assigneeOptions}
@@ -3937,6 +3945,7 @@ export function TaskScreen({
                   onAuthenticatedApiError={onAuthenticatedApiError}
                   artifacts={isRetainedDetail ? undefined : artifacts}
                   canAccessTriage={isRetainedDetail ? false : canAccessTriage}
+                  canManageExternalLinks={canManageExternalLinks}
                   canCorrectActualDates={!isRetainedDetail &&
                     renderedDetailTask !== undefined &&
                     (canCorrectActualDates?.(renderedDetailTask) ?? false)}

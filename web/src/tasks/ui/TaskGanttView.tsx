@@ -100,14 +100,17 @@ import {
   taskScheduleVarianceToneClasses,
 } from '../model/taskActualDates'
 import {
+  DEFAULT_TASK_CALENDAR_PERIODS,
   createTaskGanttScaledColumns,
   isTaskGanttScale,
+  isTaskGanttWeekStartColumn,
   listTaskGanttNonWorkingSpans,
   resolveTaskGanttColumnWidth,
   resolveTaskGanttDateSpan,
   resolveTaskGanttProgressPointX,
   resolveTaskGanttProgressVarianceDays,
   taskGanttScales,
+  type TaskCalendarPeriods,
   type TaskGanttDateRange,
   type TaskGanttScale,
   type TaskGanttTimelineAxis,
@@ -300,6 +303,12 @@ export type TaskGanttViewProps = {
    * without it no column is shaded.
    */
   workingCalendar?: WorkItemScheduleCalendarPolicy
+  /**
+   * Workspace week start day and fiscal year start month. Week columns start on the week start
+   * day, quarter columns follow the fiscal year, and day columns mark where each week starts.
+   * Monday weeks and calendar-year quarters when omitted.
+   */
+  calendarPeriods?: TaskCalendarPeriods
   /** Opens the create panel with a planning-date context. */
   onCreateTaskOpen?: (context?: TaskScheduleCreateContext) => void
   /** Creates a canonical Work Item schedule dependency. */
@@ -387,6 +396,7 @@ export function TaskGanttView({
   tasks,
   windowStartMonth,
   workingCalendar,
+  calendarPeriods = DEFAULT_TASK_CALENDAR_PERIODS,
 }: TaskGanttViewProps) {
   const timelineWindow = useMemo(
     () => windowStartMonth ? createTaskGanttWindow(windowStartMonth) : undefined,
@@ -491,9 +501,12 @@ export function TaskGanttView({
         ),
     [dependencyRows, rows, scheduleBaselineFor, timelineWindow],
   )
+  const { fiscalYearStartMonth, weekStartDay } = calendarPeriods
   const scaledTimeline = useMemo(
-    () => scale === 'auto' ? undefined : createTaskGanttScaledColumns(timelineRange, scale),
-    [scale, timelineRange],
+    () => scale === 'auto'
+      ? undefined
+      : createTaskGanttScaledColumns(timelineRange, scale, { fiscalYearStartMonth, weekStartDay }),
+    [fiscalYearStartMonth, scale, timelineRange, weekStartDay],
   )
   const timelineColumns = useMemo(
     () => scaledTimeline?.columns ?? (timelineWindow
@@ -1108,22 +1121,27 @@ export function TaskGanttView({
               className="grid"
               style={{ gridTemplateColumns: `repeat(${timelineColumns.length}, ${columnWidth}px)` }}
             >
-              {timelineColumns.map((column) => {
+              {timelineColumns.map((column, columnIndex) => {
                 const isTodayColumn = column.startDate <= today && today <= column.endDate
                 const isNonWorkingColumn = nonWorkingDates.has(column.startDate) &&
                   column.startDate === column.endDate
+                // A darker left edge marks where each Workspace week starts in the day columns.
+                const isWeekStartColumn = columnIndex > 0 && isTaskGanttWeekStartColumn(column, weekStartDay)
                 return (
                   <div
                     aria-current={isTodayColumn ? 'date' : undefined}
                     aria-label={column.startDate === column.endDate
                       ? column.startDate
                       : `${column.startDate} – ${column.endDate}`}
-                    className={`border-r border-tone-e4e7ec px-1 py-2 text-center text-[10px] font-semibold ${isTodayColumn
+                    className={`border-r border-tone-e4e7ec px-1 py-2 text-center text-[10px] font-semibold ${isWeekStartColumn
+                      ? 'shadow-[inset_1px_0_0_var(--workbench-border-strong)] '
+                      : ''}${isTodayColumn
                       ? 'bg-[var(--workbench-danger-surface)] text-[var(--workbench-danger)]'
                       : isNonWorkingColumn
                         ? 'bg-[var(--workbench-surface-muted)] text-fg-667085'
                         : 'text-fg-667085'}`}
                     data-non-working={isNonWorkingColumn ? '' : undefined}
+                    data-week-start={isWeekStartColumn ? '' : undefined}
                     data-testid={isTodayColumn ? 'task-gantt-today-column' : undefined}
                     key={column.startDate}
                     role="columnheader"

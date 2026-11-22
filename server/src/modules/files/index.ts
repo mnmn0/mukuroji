@@ -17,6 +17,7 @@ export {
 } from './file-integrity'
 export {
   FileProofingError,
+  GUARDDUTY_SCAN_STATUS_TAG,
   S3FileObjectClient,
   createApprovalSummary,
   createFileProofingScopeKey,
