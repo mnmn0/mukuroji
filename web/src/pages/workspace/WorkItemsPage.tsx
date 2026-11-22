@@ -14,7 +14,9 @@ import {
 } from '../../features/cross-project-work-items/model/crossProjectWorkItems'
 import { CrossProjectWorkItemList } from '../../features/cross-project-work-items/ui/CrossProjectWorkItemList'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { createWorkspaceTaskScheduleCalendarPolicy } from '../../tasks/model/taskSchedule'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
+import { useWorkspaceCalendarSettings } from '../../workspace/queries/useWorkspaceCalendarSettings'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import {
   WorkspaceConfigurationLoadNotice,
@@ -45,6 +47,18 @@ export function WorkItemsPage() {
     workspace.teams,
     false,
     serverFilter,
+  )
+  // Only the Gantt chart shades the Workspace days off, so the calendar is read for that layout.
+  const workspaceCalendar = useWorkspaceCalendarSettings(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData && state.layout === 'gantt',
+  )
+  const workingCalendar = useMemo(
+    // A failed read falls back to the default calendar, as on My Tasks.
+    () => workspaceCalendar.settings || workspaceCalendar.error
+      ? createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings)
+      : undefined,
+    [workspaceCalendar.settings, workspaceCalendar.error],
   )
   const workspaceAccess = useWorkspaceAccess(workspace.accessToken, workspace.canLoadWorkspaceData)
   const members = workspaceAccess.data?.members ?? emptyWorkspaceMembers
@@ -126,7 +140,9 @@ export function WorkItemsPage() {
           projectOptions={projectOptions}
           state={state}
           t={t}
+          teams={workspace.teams}
           totalCount={filteredWorkItems.length}
+          workingCalendar={workingCalendar}
         />
       </div>
     </WorkspaceRouteContent>

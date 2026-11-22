@@ -1,19 +1,28 @@
-import type { CanonicalWorkItem, ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
-import { useState } from 'react'
+import type {
+  CanonicalWorkItem,
+  ResolvedWorkItemConfiguration,
+  WorkItemScheduleCalendarPolicy,
+} from '@mukuroji/contracts'
+import { useMemo, useState } from 'react'
+import type { ProjectDirectoryTeam } from '../../../projects/api/directory'
 import type { MessageKey } from '../../../shared/i18n/i18n'
+import { TaskGanttView } from '../../../tasks/ui/TaskGanttView'
 import {
   resolveWorkItemAssignee,
   resolveWorkItemWorkflowStatusLabel,
 } from '../../../work-items/model/workItemDisplay'
 import {
+  createCrossProjectWorkItemGanttGrouping,
   createCrossProjectWorkItemJobRoleKey,
   createCrossProjectWorkItemProjectKey,
+  crossProjectWorkItemLayouts,
   type CrossProjectWorkItemFilterOption,
   type CrossProjectWorkItemJobRoleOption,
   type CrossProjectWorkItemGroup,
   type CrossProjectWorkItemListState,
   type CrossProjectWorkItemProjectOption,
 } from '../model/crossProjectWorkItems'
+import { CrossProjectWorkItemBoard } from './CrossProjectWorkItemBoard'
 
 /** Translation function used by the cross-Project Work Item list. */
 type CrossProjectWorkItemTranslator = (key: MessageKey) => string
@@ -36,6 +45,10 @@ export type CrossProjectWorkItemListProps = {
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>
   /** Display labels of Workspace members, keyed by member key. */
   memberLabels: ReadonlyMap<string, string>
+  /** Workspace directory used for Team and Project names on the board and the Gantt chart. */
+  teams: readonly ProjectDirectoryTeam[]
+  /** Workspace working calendar whose days off the Gantt chart shades; nothing is shaded when omitted. */
+  workingCalendar?: WorkItemScheduleCalendarPolicy
   /** Whether the Work Items are still loading. */
   isLoading: boolean
   /** Whether the Work Items could not be loaded; the page shows the error notice instead of a count. */
@@ -70,6 +83,8 @@ export function CrossProjectWorkItemList({
   totalCount,
   configurationsByTeam,
   memberLabels,
+  teams,
+  workingCalendar,
   isLoading,
   loadFailed,
   t,
@@ -92,6 +107,14 @@ export function CrossProjectWorkItemList({
         : [...state.projects, { teamId: option.teamId, projectId: option.projectId }],
     })
   }
+  const ganttGroup = useMemo(
+    () => createCrossProjectWorkItemGanttGrouping(state.grouping, teams, {
+      noAssignee: t('workItems.crossProject.group.noAssignee'),
+      noProject: t('workItems.crossProject.group.noProject'),
+    }),
+    [state.grouping, t, teams],
+  )
+  const ganttWorkItems = useMemo(() => groups.flatMap((group) => group.workItems), [groups])
   const projectSummary = state.projects.length === 0
     ? t('workItems.crossProject.projects.all')
     : t('workItems.crossProject.projects.selected').replace('{count}', String(state.projects.length))
@@ -192,6 +215,28 @@ export function CrossProjectWorkItemList({
           />
           {t('workItems.crossProject.includeClosed')}
         </label>
+        <div
+          aria-label={t('workItems.crossProject.layout')}
+          className="inline-flex h-9 w-fit overflow-hidden rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface"
+          role="group"
+        >
+          {crossProjectWorkItemLayouts.map((layout) => (
+            <button
+              aria-pressed={state.layout === layout}
+              className={`px-3.5 text-sm font-semibold transition ${
+                state.layout === layout
+                  ? 'bg-[var(--workbench-primary)] text-white'
+                  : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
+              }`}
+              data-testid={`cross-project-work-items-layout-${layout}`}
+              key={layout}
+              onClick={() => update({ layout })}
+              type="button"
+            >
+              {t(`issues.view.${layout}`)}
+            </button>
+          ))}
+        </div>
         <div className="ml-auto flex items-center gap-2">
           <span aria-live="polite" className="text-xs text-[var(--workbench-muted)]">
             {copyLinkStatus === 'copied'
@@ -234,71 +279,95 @@ export function CrossProjectWorkItemList({
           {t('workItems.crossProject.empty')}
         </p>
       ) : null}
-      {groups.map((group) => {
-        const heading = group.isUnassigned
-          ? t(state.grouping === 'assignee'
-            ? 'workItems.crossProject.group.noAssignee'
-            : 'workItems.crossProject.group.noProject')
-          : group.label
-        return (
-          <section
-            aria-label={heading}
-            className="workbench-panel overflow-x-auto"
-            data-testid="cross-project-work-item-group"
-            key={group.key}
-          >
-            <h2 className="flex items-baseline gap-2 px-4 pt-3 text-sm font-semibold text-[var(--workbench-text)]">
-              <span>{heading}</span>
-              {group.detail ? (
-                <span className="text-xs font-normal text-[var(--workbench-muted)]">{group.detail}</span>
-              ) : null}
-              <span className="workbench-badge px-2 text-xs">{group.workItems.length}</span>
-            </h2>
-            <table className="mt-2 w-full border-collapse text-left text-sm">
-              <thead>
-                <tr className="workbench-table-head">
-                  <th className="px-4 py-2" scope="col">{t('workItems.crossProject.column.workItem')}</th>
-                  <th className="px-4 py-2" scope="col">{t('workItems.crossProject.column.status')}</th>
-                  <th className="px-4 py-2 max-[760px]:hidden" scope="col">{t('workItems.crossProject.column.assignee')}</th>
-                  <th className="px-4 py-2 max-[760px]:hidden" scope="col">{t('workItems.crossProject.column.contributors')}</th>
-                  <th className="px-4 py-2 max-[760px]:hidden" scope="col">{t('workItems.crossProject.column.dueDate')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {group.workItems.map((workItem) => (
-                  <tr
-                    className="border-b border-[var(--workbench-border)] text-[var(--workbench-text)]"
-                    key={`${workItem.teamId}:${workItem.id}`}
-                  >
-                    <td className="px-4 py-2">
-                      <button
-                        className="text-left font-medium hover:underline"
-                        onClick={() => onOpenWorkItem(workItem)}
-                        type="button"
-                      >
-                        {workItem.key ? (
-                          <span className="mr-2 text-xs text-[var(--workbench-muted)]">{workItem.key}</span>
-                        ) : null}
-                        {workItem.title}
-                      </button>
-                    </td>
-                    <td className="px-4 py-2">
-                      {resolveWorkItemWorkflowStatusLabel(workItem, configurationsByTeam[workItem.teamId])}
-                    </td>
-                    <td className="px-4 py-2 max-[760px]:hidden">
-                      {workItem.assigneeUserId ? resolveWorkItemAssignee(workItem) : '-'}
-                    </td>
-                    <td className="px-4 py-2 max-[760px]:hidden">
-                      {formatContributors(workItem, memberLabels, roleNames)}
-                    </td>
-                    <td className="px-4 py-2 max-[760px]:hidden">{workItem.dueDate || '-'}</td>
+      {state.layout === 'board' && !loadFailed ? (
+        <CrossProjectWorkItemBoard
+          configurationsByTeam={configurationsByTeam}
+          grouping={state.grouping}
+          groups={groups}
+          onOpenWorkItem={onOpenWorkItem}
+          t={t}
+          teams={teams}
+        />
+      ) : null}
+      {state.layout === 'gantt' && !loadFailed && !isLoading && ganttWorkItems.length > 0 ? (
+        <TaskGanttView
+          configurationsByTeam={configurationsByTeam}
+          group={ganttGroup}
+          onSelectTask={onOpenWorkItem}
+          t={t}
+          tasks={ganttWorkItems}
+          workingCalendar={workingCalendar}
+        />
+      ) : null}
+      {state.layout === 'table' ? (
+        <>
+        {groups.map((group) => {
+          const heading = group.isUnassigned
+            ? t(state.grouping === 'assignee'
+              ? 'workItems.crossProject.group.noAssignee'
+              : 'workItems.crossProject.group.noProject')
+            : group.label
+          return (
+            <section
+              aria-label={heading}
+              className="workbench-panel overflow-x-auto"
+              data-testid="cross-project-work-item-group"
+              key={group.key}
+            >
+              <h2 className="flex items-baseline gap-2 px-4 pt-3 text-sm font-semibold text-[var(--workbench-text)]">
+                <span>{heading}</span>
+                {group.detail ? (
+                  <span className="text-xs font-normal text-[var(--workbench-muted)]">{group.detail}</span>
+                ) : null}
+                <span className="workbench-badge px-2 text-xs">{group.workItems.length}</span>
+              </h2>
+              <table className="mt-2 w-full border-collapse text-left text-sm">
+                <thead>
+                  <tr className="workbench-table-head">
+                    <th className="px-4 py-2" scope="col">{t('workItems.crossProject.column.workItem')}</th>
+                    <th className="px-4 py-2" scope="col">{t('workItems.crossProject.column.status')}</th>
+                    <th className="px-4 py-2 max-[760px]:hidden" scope="col">{t('workItems.crossProject.column.assignee')}</th>
+                    <th className="px-4 py-2 max-[760px]:hidden" scope="col">{t('workItems.crossProject.column.contributors')}</th>
+                    <th className="px-4 py-2 max-[760px]:hidden" scope="col">{t('workItems.crossProject.column.dueDate')}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
-        )
-      })}
+                </thead>
+                <tbody>
+                  {group.workItems.map((workItem) => (
+                    <tr
+                      className="border-b border-[var(--workbench-border)] text-[var(--workbench-text)]"
+                      key={`${workItem.teamId}:${workItem.id}`}
+                    >
+                      <td className="px-4 py-2">
+                        <button
+                          className="text-left font-medium hover:underline"
+                          onClick={() => onOpenWorkItem(workItem)}
+                          type="button"
+                        >
+                          {workItem.key ? (
+                            <span className="mr-2 text-xs text-[var(--workbench-muted)]">{workItem.key}</span>
+                          ) : null}
+                          {workItem.title}
+                        </button>
+                      </td>
+                      <td className="px-4 py-2">
+                        {resolveWorkItemWorkflowStatusLabel(workItem, configurationsByTeam[workItem.teamId])}
+                      </td>
+                      <td className="px-4 py-2 max-[760px]:hidden">
+                        {workItem.assigneeUserId ? resolveWorkItemAssignee(workItem) : '-'}
+                      </td>
+                      <td className="px-4 py-2 max-[760px]:hidden">
+                        {formatContributors(workItem, memberLabels, roleNames)}
+                      </td>
+                      <td className="px-4 py-2 max-[760px]:hidden">{workItem.dueDate || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )
+        })}
+        </>
+      ) : null}
     </div>
   )
 }
