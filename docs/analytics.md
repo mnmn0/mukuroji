@@ -159,6 +159,8 @@ Snapshot の permission scope hash には、Milestone を読んだ query のと�
 一覧・export の再検証でも同じ規則で現在読める Milestone と比べます。Milestone trend のない report の hash は
 変わりません。定期配信の runner は閲覧者の Planning ACL を評価できないため Milestone を読まず、その widget は
 warning だけを返します（hash にも Milestone を加えません）。CSV では segment の値を `YYYY-MM-DD` で出力します。
+Segment は bucket 数 × Milestone 数だけ増えるため、長い期間を日次で多数の Milestone について描くと
+response の 256 KiB 上限で `413` になります。Web の builder は週次 bucket で widget を追加します。
 
 
 Chart widget の `visualization` は `line` / `bar` に加え、`area`（`segments` の積み上げ面、CFD 用）、`burndown`
