@@ -1587,3 +1587,76 @@ test('retries and fails closed while a new Milestone has no visible audit event'
   expect(await response.json()).toMatchObject({ code: 'AnalyticsReadBarrierUnavailable' })
   expect(milestoneQueries).toBe(3)
 })
+
+test('waits for pending Milestone audit reads before failing at the event limit', async () => {
+  configureFakeProjectClients(true)
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date('2026-07-01T00:00:00.000Z'))
+  const parent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
+  await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
+  // Five long timelines and one slow short one: 9,955 events, under the 10,000-event limit.
+  const eventCounts = new Map([
+    ['milestone-slow', 5],
+    ...['a', 'b', 'c', 'd', 'e'].map((suffix): [string, number] => [`milestone-${suffix}`, 1_990]),
+  ])
+  let revision = 2
+  for (const id of eventCounts.keys()) {
+    await planning.create(workspaceId, createMilestoneInput(id, revision, {
+      teamId: 'core-team',
+      projectId: 'refero',
+    }), { workItems: [] })
+    revision += 1
+  }
+  const base = createAnalyticsAuditEvent('planning-entity', 'milestone-template', '2026-06-01T00:00:00.000Z')
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        const total = input.entityType === 'planning-entity' && input.entityId !== undefined
+          ? eventCounts.get(input.entityId) ?? 0
+          : 0
+        // The slow timeline holds its reservation while the long timelines reach the limit.
+        if (input.entityId === 'milestone-slow') await new Promise((resolve) => setTimeout(resolve, 50))
+        const offset = Number(input.cursor ?? '0')
+        const end = Math.min(total, offset + (input.limit ?? 100))
+        return {
+          events: Array.from({ length: end - offset }, (_, index) => ({
+            ...base,
+            eventId: `${input.entityId}-${offset + index}`,
+            entityId: input.entityId ?? '',
+            metadata: { teamId: 'core-team', projectId: 'refero' },
+            changes: [],
+          })),
+          ...(end < total ? { nextCursor: String(end) } : {}),
+        }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, projectIds: ['refero'] },
+    widgets: [{
+      id: 'trend',
+      type: 'table' as const,
+      title: 'Milestone trend',
+      metric: 'milestone-trend' as const,
+    }],
+  })
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).snapshot.widgets[0].rows).toHaveLength(6)
+})
