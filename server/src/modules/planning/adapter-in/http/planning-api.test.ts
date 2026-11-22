@@ -22,7 +22,13 @@ import {
 } from '../../planning'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { CognitoServiceError } from '../../../authentication'
-import { type AuditEventV1, normalizeAuditEvent } from '../../../audit/audit'
+import {
+  type AuditEventV1,
+  type AuditFieldChange,
+  createAuditEvent,
+  createMutationAuditContext,
+  normalizeAuditEvent,
+} from '../../../audit/audit'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { DynamoDbInboxDigestStore } from '../../../update-feed'
@@ -1204,6 +1210,80 @@ test('records Planning entity changes in audit and returns them as entity activi
       ? teamBody.events.map((event) => isRecord(event) ? event.eventType : undefined)
       : undefined).toEqual(['planning-entity.restored', 'planning-entity.archived'])
   })
+})
+
+test('shows Workspace-scoped entity history to an Enterprise Workspace grant after a move into a Project', async () => {
+  configureFakeProjectClients(true, { workspaceRole: 'member', projectAccesses: [] })
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  await seedPlanningUpdateInitiative(planning, 'moved-entity', 'core-team', 'refero')
+  /** Builds one stored audit event of the entity. */
+  const event = (action: string, changes: AuditFieldChange[], metadata: Record<string, string>) =>
+    createAuditEvent({
+      context: createMutationAuditContext({
+        workspaceId,
+        actor: { id: 'actor-1', kind: 'user' },
+        idempotencyKey: `history-${action}`,
+        request: { method: 'POST', path: '/api/planning/entities' },
+        source: { kind: 'api' },
+      }),
+      eventType: `planning-entity.${action}`,
+      entity: { type: 'planning-entity', id: 'moved-entity' },
+      action,
+      changes,
+      metadata,
+      expiresAt: 2_000_000_000,
+    })
+  const projectScope = { teamId: 'core-team', projectId: 'refero' }
+  const events = [
+    event('updated', [{ field: 'title', before: 'Old', after: 'New' }], projectScope),
+    event('moved', [{ field: 'projectId', after: 'refero' }, { field: 'teamId', after: 'core-team' }], projectScope),
+    event('created', [{ field: 'title', after: 'Old' }], {}),
+  ]
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const readIdentity = identity.getSnapshot.bind(identity)
+  const customRole: EnterpriseCustomRole = {
+    workspaceId, roleId: 'custom:planning-reader', name: 'Planning reader',
+    permissions: ['planning.read'], guestAssignable: false, revision: 1,
+    createdAt: '2026-08-01T00:00:00.000Z', updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+  let scope: EnterpriseRoleAssignment['scope'] = { workspaceId, kind: 'workspace' }
+  identity.getSnapshot = async (id) => ({
+    ...await readIdentity(id),
+    roleAssignments: [{
+      workspaceId, assignmentId: 'planning-reader',
+      principalKind: 'member', principalId: 'demo@example.com', roleId: customRole.roleId,
+      scope, source: 'direct',
+    }],
+    customRoles: [customRole],
+  })
+  setTestAppDependencies({
+    planning,
+    enterpriseIdentity: identity,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events }
+      },
+    },
+  })
+  /** Reads the returned event actions. */
+  const readActions = async () => {
+    const response = await planningApiRequest('/api/planning/entities/moved-entity/activity')
+    expect(response.status).toBe(200)
+    const body: unknown = await response.json()
+    return isRecord(body) && Array.isArray(body.events)
+      ? body.events.map((item) => isRecord(item) ? item.action : undefined)
+      : undefined
+  }
+
+  expect(await readActions()).toEqual(['updated', 'moved', 'created'])
+
+  // A Project-only grant reads the entity but not the history from its Workspace-scoped past.
+  scope = { workspaceId, kind: 'project', targetId: 'refero' }
+  expect(await readActions()).toEqual(['updated'])
 })
 
 test('hides Planning entity activity from members who cannot see the entity', async () => {

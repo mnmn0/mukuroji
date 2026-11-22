@@ -140,6 +140,7 @@ import {
   requireProjectPermission,
   requireTeamPermission,
   requireWorkspaceAdministration,
+  requireWorkspaceBusinessRead,
   requireWorkspaceBusinessWrite,
   resolveProjectAccessTeamId,
   type WorkspacePrincipal,
@@ -1038,7 +1039,7 @@ async function canReadPlanningEntityAuditEvent(
     const scopeKey = JSON.stringify([scope.teamId ?? null, scope.projectId ?? null])
     let authorization = authorizationCache.get(scopeKey)
     if (!authorization) {
-      authorization = requirePlanningUpdateCapturedScopePermission(principal, scope)
+      authorization = requirePlanningEntityAuditScopeRead(principal, scope)
       authorizationCache.set(scopeKey, authorization)
     }
     try {
@@ -1049,6 +1050,49 @@ async function canReadPlanningEntityAuditEvent(
     }
   }
   return true
+}
+
+/**
+ * Requires read access to one scope shown by a Planning entity audit event.
+ *
+ * The activity route is authorized at the entity's current resource, so an Enterprise caller's
+ * Workspace grant is evaluated again at the Workspace resource for history recorded while the
+ * entity was Workspace-scoped. Team and Project scopes use the captured-scope rule.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param scope - Scope recorded by the event.
+ * @throws PlanningError when the caller cannot read the scope.
+ */
+async function requirePlanningEntityAuditScopeRead(
+  principal: WorkspacePrincipal,
+  scope: { teamId?: string; projectId?: string },
+): Promise<void> {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (
+    scope.teamId !== undefined ||
+    scope.projectId !== undefined ||
+    principal.enterprisePermissions === undefined ||
+    evaluation === undefined
+  ) {
+    await requirePlanningUpdateCapturedScopePermission(principal, scope)
+    return
+  }
+  requireWorkspaceBusinessRead(principal)
+  const allowed = evaluateEnterpriseAccess({
+    permission: 'planning.read',
+    principal: evaluation.principal,
+    assignments: evaluation.assignments,
+    customRoles: evaluation.snapshot.customRoles,
+    groupMappings: evaluation.groupMappings,
+    resource: { workspaceId: principal.directoryId, kind: 'workspace' },
+  }).allowed
+  if (!allowed) {
+    throw new PlanningError(
+      403,
+      'PlanningUpdateScopeAccessDenied',
+      'Workspace-scoped Planning access requires Workspace permission.',
+    )
+  }
 }
 
 /** Returns whether an authorization failure should hide one historical row. */
