@@ -783,8 +783,25 @@ export function createEnterpriseIdentityCapabilities(
   })
 }
 
+/**
+ * Workspace member version that a direct assignment write is conditioned on.
+ *
+ * @remarks
+ * The caller decided on the member's Workspace role and status as read at this version. The write
+ * commits only while the member record still has it, so a concurrent role or status change
+ * cancels the write instead of applying a decision made on the old role.
+ */
+export type EnterpriseWorkspaceMemberFence = {
+  /** Stable member key of the assignment's member. */
+  readonly memberKey: string
+  /** Member version that was read, or undefined when the member record did not exist. */
+  readonly expectedVersion?: number
+}
+
 /** Conditions checked atomically when a direct member assignment is removed. */
 export type EnterpriseMemberRoleAssignmentDeleteOptions = {
+  /** Workspace member version the restore decision was made on. */
+  memberFence?: EnterpriseWorkspaceMemberFence
   /**
    * Requires the member to keep another direct assignment, so the removal cannot hand back the
    * member's Workspace role and Project memberships.
@@ -796,6 +813,8 @@ export type EnterpriseMemberRoleAssignmentDeleteOptions = {
 
 /** Conditions checked atomically when a direct member assignment is created. */
 export type EnterpriseMemberRoleAssignmentCreateOptions = {
+  /** Workspace member version the target checks were made on. */
+  memberFence?: EnterpriseWorkspaceMemberFence
   /**
    * Effective permissions of the caller. The assigned role, read from the state being written,
    * must not hold any permission outside them.

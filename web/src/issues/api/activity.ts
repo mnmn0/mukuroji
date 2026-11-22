@@ -1,3 +1,7 @@
+import type {
+  WorkItemRelationActivityEndpoint,
+  WorkItemRelationActivityEndpoints,
+} from '@mukuroji/contracts'
 import { TeamIssuesApiError } from './errors'
 import {
   createTeamIssuePath,
@@ -45,7 +49,7 @@ export type TeamIssueActivity = {
 /**
  * append-only audit 基盤から取得する Work Item activity です。
  */
-export type TeamIssueActivityEvent = {
+export type TeamIssueActivityEvent = WorkItemRelationActivityEndpoints & {
   /**
    * audit event ID です。
    */
@@ -164,7 +168,28 @@ function isTeamIssueActivityEvent(
     typeof value.occurredAt === 'string' &&
     typeof value.actorUserId === 'string' &&
     (value.summary === undefined || typeof value.summary === 'string') &&
-    (value.metadata === undefined || isRecord(value.metadata))
+    (value.metadata === undefined || isRecord(value.metadata)) &&
+    isOptionalWorkItemRelationActivityEndpoint(value.relatedWorkItem) &&
+    isOptionalWorkItemRelationActivityEndpoint(value.parentWorkItem) &&
+    isOptionalWorkItemRelationActivityEndpoint(value.previousParentWorkItem)
+  )
+}
+
+/**
+ * Validates an optional relation endpoint of an activity event.
+ *
+ * @param value - Untrusted endpoint candidate.
+ * @returns Whether the value is absent or a complete endpoint.
+ */
+function isOptionalWorkItemRelationActivityEndpoint(
+  value: unknown,
+): value is WorkItemRelationActivityEndpoint | undefined {
+  return value === undefined || (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.teamId === 'string' &&
+    (value.key === undefined || typeof value.key === 'string') &&
+    typeof value.title === 'string'
   )
 }
 
