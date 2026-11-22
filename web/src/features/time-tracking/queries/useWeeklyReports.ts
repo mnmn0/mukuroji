@@ -1,5 +1,5 @@
 import useSWR from 'swr'
-import { getTeamWeeklyReportStatus, getWeeklyReport, listWeeklyReportHistory } from '../api/weeklyReports'
+import { getTeamWeeklyReportStatus, getTeamWeeklySummary, getWeeklyReport, listWeeklyReportHistory } from '../api/weeklyReports'
 import { timeTrackingQueryConfig, timeTrackingQueryKeyRoot } from './timeTrackingQueryKeys'
 
 /**
@@ -49,4 +49,17 @@ export function useWeeklyReportHistory(accessToken: string | undefined, teamId: 
 export function useTeamWeeklyReportStatus(accessToken: string | undefined, teamId: string, weekStart: string) {
   const key = accessToken ? [timeTrackingQueryKeyRoot, 'team-weekly-reports', accessToken, teamId, weekStart] as const : null
   return useSWR(key, ([, , token, team, week]) => getTeamWeeklyReportStatus(token, team, week), timeTrackingQueryConfig)
+}
+
+/**
+ * Loads the week of the Team and of each Project the signed-in member may read.
+ *
+ * @param accessToken - Bearer token, or undefined while signed out.
+ * @param teamId - Team ID.
+ * @param weekStart - First day of the week.
+ * @returns SWR state of the summary.
+ */
+export function useTeamWeeklySummary(accessToken: string | undefined, teamId: string, weekStart: string) {
+  const key = accessToken ? [timeTrackingQueryKeyRoot, 'team-weekly-summary', accessToken, teamId, weekStart] as const : null
+  return useSWR(key, ([, , token, team, week]) => getTeamWeeklySummary(token, team, week), timeTrackingQueryConfig)
 }

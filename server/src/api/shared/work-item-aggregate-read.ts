@@ -334,7 +334,7 @@ function matchesWorkItemAggregateFilter(
  * @param includeArchived - Whether archived Work Items are included.
  * @param visit - Receives each page's accessible Work Items and the number of rows read.
  */
-async function forEachTeamPartitionPage(
+export async function forEachTeamPartitionPage(
   principal: ProjectPrincipal,
   context: TeamPermissionContext,
   includeArchived: boolean,
