@@ -12,6 +12,12 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { TeamIssuesApiError } from '../../issues/api'
+import { MyTasksQuickCreate } from '../../workspace/ui/MyTasksQuickCreate'
+import type {
+  MyTasksQuickCreateDestination,
+  MyTasksQuickCreateInput,
+} from '../../workspace/model/myTasksQuickCreate'
+import { createMyTasksQuickCreateWorkItem } from '../../workspace/mutations/createMyTasksQuickCreateWorkItem'
 import { isCancelledTeamIssueUpdate } from '../../issues/model/teamIssueUpdateOutcome'
 import { createTranslator } from '../../shared/i18n/i18n'
 import {
@@ -520,6 +526,53 @@ export function MyTasksPage() {
     canEditMyTask(task),
     t('tasks.action.permission'),
   ), [canEditMyTask, scheduleMutations, t])
+
+  const quickCreateDestinations = useMemo<MyTasksQuickCreateDestination[]>(() => {
+    if (!workspace.userKey) return []
+    // Destinations come from the write capabilities, not from the Teams of the listed tasks, so a
+    // person with no task yet can still add one anywhere they may write.
+    return workspace.teams.flatMap((team) => {
+      const teamDestination = taskViewController.writableTeamIds.includes(team.id)
+        ? [{ key: team.id, label: team.name, teamId: team.id }]
+        : []
+      const projectDestinations = team.projects
+        .filter((project) => taskViewController.writableProjectScopes.some((scope) =>
+          scope.teamId === team.id && scope.projectId === project.id
+        ))
+        .map((project) => ({
+          key: `${team.id}/${project.id}`,
+          label: `${team.name} / ${project.name}`,
+          projectId: project.id,
+          teamId: team.id,
+        }))
+      return [...teamDestination, ...projectDestinations]
+    })
+  }, [
+    taskViewController.writableProjectScopes,
+    taskViewController.writableTeamIds,
+    workspace.teams,
+    workspace.userKey,
+  ])
+
+  /**
+   * Creates a Work Item assigned to the current person and reads the list again.
+   *
+   * @param input - Title, destination, and optional due date from the quick create form.
+   */
+  const handleQuickCreate = useCallback(async (input: MyTasksQuickCreateInput) => {
+    const accessToken = workspace.accessToken
+    const assigneeUserId = workspace.userKey
+    if (!accessToken || !assigneeUserId) throw new Error(t('workspace.myTasks.quickCreate.error'))
+    await createMyTasksQuickCreateWorkItem({
+      accessToken,
+      assigneeUserId,
+      ...(workspaceCalendarPolicy ? { calendarPolicy: workspaceCalendarPolicy } : {}),
+      guardRequest: workspace.guardEnterpriseSession,
+      input,
+      mutationRequestRunner,
+      refreshWorkItems: workItems.mutateWorkItems,
+    })
+  }, [mutationRequestRunner, t, workItems.mutateWorkItems, workspace, workspaceCalendarPolicy])
 
   /** Saves a priority chosen in the table. */
   const handleUpdateMyTaskPriority = useCallback(async (
@@ -1069,6 +1122,11 @@ export function MyTasksPage() {
             {taskActionErrorMessage}
           </p>
         ) : null}
+        <MyTasksQuickCreate
+          destinations={quickCreateDestinations}
+          onCreate={handleQuickCreate}
+          t={t}
+        />
         <MyTasksWorkspaceView
           canEditTask={canEditMyTask}
           canMoveTaskStatus={canMoveMyTaskStatus}

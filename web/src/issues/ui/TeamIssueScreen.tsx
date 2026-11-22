@@ -5,6 +5,7 @@ import type {
   WorkItemActionResult,
   WorkItemActionSelection,
   WorkItemScheduleOperation,
+  BulkOperation,
 } from '@mukuroji/contracts'
 import { createSearchWorkItemTypeKey, DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
 import {
@@ -127,6 +128,14 @@ import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttVi
 import { createTaskGanttDisplayBinding } from '../../tasks/model/taskGanttDisplay'
 import { TaskCalendarView } from '../../tasks/ui/TaskCalendarView'
 import { startWorkItemListScheduleChange } from '../../task-views/model/workItemListScheduleChange'
+import {
+  BulkOperationToolbar,
+  type BulkOperationMutationContext,
+} from '../../bulk-operations/ui/BulkOperationToolbar'
+import {
+  clearSucceededBulkSelection,
+  type BulkOperationSelection,
+} from '../../bulk-operations/model/bulkOperation'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
 import { listTaskGanttRowTasks, type TaskGanttGrouping } from '../../tasks/model/taskGanttRows'
@@ -177,6 +186,7 @@ export function TeamIssueScreen({
   accessToken,
   assigneeOptions = [],
   artifacts,
+  bulkWorkspaceId,
   canCreateUnassignedIssue = true,
   canMutateIssue,
   canManageDependencyEndpoint,
@@ -203,6 +213,10 @@ export function TeamIssueScreen({
   locale,
   onAddRelation,
   onArchiveIssue,
+  onBulkApply,
+  onBulkPreview,
+  onBulkRetry,
+  onBulkUndo,
   onCreateIssue,
   onConfirmScheduleChange,
   onCreateScheduleDependency,
@@ -729,6 +743,81 @@ export function TeamIssueScreen({
     singleSelectionRequired: t('taskViews.action.singleSelectionRequired'),
     unavailable: t('taskViews.action.unavailable'),
   }), [t])
+
+  const canUseBulkOperations = viewMode === 'table' && bulkWorkspaceId !== undefined &&
+    onBulkPreview !== undefined && onBulkApply !== undefined
+  const bulkProjectOptions = useMemo(
+    () => (activeTeam?.projects ?? []).map((project) => ({ id: project.id, label: project.name })),
+    [activeTeam],
+  )
+  const selectedIssueKeySet = useMemo(
+    () => new Set(taskViewSelection.selectedKeys),
+    [taskViewSelection.selectedKeys],
+  )
+  // Like keyboard selection, "select all shown" leaves out the rows under a collapsed parent.
+  const visibleBulkItems = useMemo(
+    () => navigableIssues.map(createTeamIssueBulkSelection),
+    [navigableIssues],
+  )
+  const selectedBulkItems = useMemo(
+    () => visibleBulkItems.filter((item) => selectedIssueKeySet.has(item.selectionKey)),
+    [selectedIssueKeySet, visibleBulkItems],
+  )
+
+  /** Selects or clears one table row for a bulk operation. */
+  const changeIssueBulkSelection = useCallback((issue: TeamIssue, selected: boolean) => {
+    const key = createTaskViewItemKey(issue.teamId, issue.id)
+    setTaskViewSelection((current) => {
+      if (current.selectedKeys.includes(key) === selected) return current
+      return reduceTaskViewSelection(current, {
+        key,
+        mode: 'toggle',
+        orderedKeys: visibleIssueKeys,
+        type: 'select',
+      })
+    })
+  }, [visibleIssueKeys])
+
+  /** Selects or clears every listed row from the bulk toolbar. */
+  const changeVisibleBulkSelection = useCallback((selectionKeys: string[], selected: boolean) => {
+    setTaskViewSelection((current) => {
+      const changedKeys = new Set(selectionKeys)
+      const selectedKeys = selected
+        ? [...current.selectedKeys, ...selectionKeys.filter((key) => !current.selectedKeys.includes(key))]
+        : current.selectedKeys.filter((key) => !changedKeys.has(key))
+      return { ...current, selectedKeys }
+    })
+  }, [])
+
+  /** Clears the rows a finished bulk operation changed, keeping the failed ones selected. */
+  const handleBulkOperationComplete = useCallback((operation: BulkOperation) => {
+    setTaskViewSelection((current) => ({
+      ...current,
+      selectedKeys: clearSucceededBulkSelection(
+        [...current.selectedKeys],
+        selectedBulkItems,
+        operation,
+      ),
+    }))
+  }, [selectedBulkItems])
+
+  /**
+   * Confirms discarding an unsaved comment before a bulk archive removes its Work Item from view.
+   *
+   * @param context - Request or operation about to be dispatched.
+   * @returns Whether the mutation may run.
+   */
+  const handleBeforeBulkMutation = useCallback((context: BulkOperationMutationContext) => {
+    const action = context.request?.action ?? context.operation?.action
+    if (context.kind === 'undo' || action?.type !== 'archive' || !action.archived) return true
+    const ownerIssueId = commentDraftDirtyRef.current ? commentDraftOwnerRef.current : undefined
+    if (!ownerIssueId) return true
+    const items = context.request?.items ?? context.operation?.items ?? []
+    if (!items.some((item) => item.teamId === teamId && item.workItemId === ownerIssueId)) return true
+    if (!globalThis.window.confirm(t('collaboration.composer.discardConfirm'))) return false
+    handleCommentDraftDirtyChange(false, ownerIssueId)
+    return true
+  }, [handleCommentDraftDirtyChange, t, teamId])
 
   /** Starts a Calendar or Gantt schedule change; the view shows its preview for confirmation. */
   const handleRequestScheduleChange = useMemo(() => onPreviewScheduleChange && onConfirmScheduleChange && canEditIssueAction
@@ -1709,6 +1798,24 @@ export function TeamIssueScreen({
                   role="region"
                   tabIndex={-1}
                 >
+                  {canUseBulkOperations ? (
+                    <BulkOperationToolbar
+                      key={teamId}
+                      onApply={onBulkApply}
+                      onBeforeMutation={handleBeforeBulkMutation}
+                      onOperationComplete={handleBulkOperationComplete}
+                      onPreview={onBulkPreview}
+                      onRetry={onBulkRetry}
+                      onUndo={onBulkUndo}
+                      onVisibleSelectionChange={changeVisibleBulkSelection}
+                      projectOptions={bulkProjectOptions}
+                      readOnly={isAiSummaryOperationPending}
+                      selectedItems={selectedBulkItems}
+                      t={t}
+                      visibleItems={visibleBulkItems}
+                      workspaceId={bulkWorkspaceId}
+                    />
+                  ) : null}
                   {viewMode === 'table' ? (
                     <IssueTable
                       activeTeam={activeTeam}
@@ -1720,6 +1827,7 @@ export function TeamIssueScreen({
                       presentation={taskViewPresentation}
                       locale={locale}
                       onIssueActionMenuOpen={handleTeamIssueActionMenuOpen}
+                      onIssueSelectionChange={canUseBulkOperations ? changeIssueBulkSelection : undefined}
                       onOpenIssue={canOpenIssueAction ? handleOpenIssue : undefined}
                       scheduleBaselineFor={scheduleBaselineFor}
                       outline={outlineRows
@@ -1885,4 +1993,20 @@ function focusTeamIssueDetailControl(selector: string): void {
     control?.focus()
     control?.scrollIntoView({ block: 'nearest' })
   })
+}
+
+/**
+ * Builds the bulk-operation snapshot of one Team Work Item, keyed like the table selection.
+ *
+ * @param issue - Work Item at the revision the table shows.
+ * @returns Revision-bound selection item.
+ */
+function createTeamIssueBulkSelection(issue: TeamIssue): BulkOperationSelection {
+  return {
+    expectedRevision: issue.revision,
+    label: issue.title,
+    selectionKey: createTaskViewItemKey(issue.teamId, issue.id),
+    teamId: issue.teamId,
+    workItemId: issue.id,
+  }
 }
