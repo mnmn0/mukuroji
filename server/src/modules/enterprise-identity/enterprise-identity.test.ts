@@ -3370,3 +3370,95 @@ test('treats the same Project role under two owning Teams as separate assignment
   await expect(client.putMemberRoleAssignment(assignmentIn('assignment-core-again', 'core-team')))
     .rejects.toMatchObject({ status: 409, code: 'EnterpriseRoleAssignmentDuplicate' })
 })
+
+/** Direct member assignment used by the member fence tests. */
+const fencedAssignment = {
+  workspaceId,
+  assignmentId: 'assignment-fenced',
+  principalKind: 'member' as const,
+  principalId: 'sato@example.com',
+  roleId: 'workspace:portfolio-viewer' as const,
+  scope: { workspaceId, kind: 'workspace' as const },
+  source: 'direct' as const,
+}
+
+test('pins the member version read by the route into the assignment checkpoint', async () => {
+  const harness = createDynamoHarness()
+  const client = new DynamoDbEnterpriseIdentityClient(
+    'enterprise-identity',
+    tokenSecret,
+    harness.documentClient as never,
+    undefined,
+    () => now,
+  )
+  await client.putMemberRoleAssignment(fencedAssignment, undefined, {
+    memberFence: { memberKey: 'sato@example.com', expectedVersion: 4 },
+  })
+  const createItems = harness.transactions.at(-1)?.TransactItems as Array<Record<string, unknown>>
+  expect(createItems.at(-1)).toMatchObject({
+    ConditionCheck: {
+      Key: { workspaceId, recordKey: 'MEMBER#sato@example.com' },
+      ExpressionAttributeValues: { ':version': 4 },
+    },
+  })
+
+  // The member's role changed after the route decided the removal could restore it.
+  harness.cancelLastTransactionOperation()
+  await expect(client.deleteMemberRoleAssignment(fencedAssignment, undefined, {
+    memberFence: { memberKey: 'sato@example.com', expectedVersion: 4 },
+  })).rejects.toMatchObject({ status: 409, code: 'EnterpriseRoleAssignmentMemberChanged' })
+  expect((await client.getSnapshot(workspaceId)).roleAssignments).toHaveLength(1)
+
+  await client.deleteMemberRoleAssignment(fencedAssignment, undefined, {
+    memberFence: { memberKey: 'sato@example.com', expectedVersion: 4 },
+  })
+  expect((await client.getSnapshot(workspaceId)).roleAssignments).toEqual([])
+})
+
+test('refuses memory assignment writes once the member changed since it was read', async () => {
+  let memberVersion: number | undefined = 2
+  const client = new InMemoryEnterpriseIdentityClient(
+    undefined,
+    undefined,
+    undefined,
+    async () => memberVersion,
+  )
+  await client.putMemberRoleAssignment(fencedAssignment, undefined, {
+    memberFence: { memberKey: 'sato@example.com', expectedVersion: 2 },
+  })
+  memberVersion = 3
+  await expect(client.deleteMemberRoleAssignment(fencedAssignment, undefined, {
+    memberFence: { memberKey: 'sato@example.com', expectedVersion: 2 },
+  })).rejects.toMatchObject({ status: 409, code: 'EnterpriseRoleAssignmentMemberChanged' })
+  await expect(client.putMemberRoleAssignment({
+    ...fencedAssignment,
+    assignmentId: 'assignment-fenced-2',
+    roleId: 'workspace:auditor',
+  }, undefined, {
+    memberFence: { memberKey: 'sato@example.com', expectedVersion: 2 },
+  })).rejects.toMatchObject({ status: 409, code: 'EnterpriseRoleAssignmentMemberChanged' })
+  expect((await client.getSnapshot(workspaceId)).roleAssignments).toHaveLength(1)
+
+  memberVersion = undefined
+  await client.deleteMemberRoleAssignment(fencedAssignment, undefined, {
+    memberFence: { memberKey: 'sato@example.com' },
+  })
+  expect((await client.getSnapshot(workspaceId)).roleAssignments).toEqual([])
+})
+
+test('reports a changed member even when CONTROL conflicted in the same checkpoint', async () => {
+  const harness = createDynamoHarness()
+  const client = new DynamoDbEnterpriseIdentityClient(
+    'enterprise-identity',
+    tokenSecret,
+    harness.documentClient as never,
+    undefined,
+    () => now,
+  )
+  await client.putMemberRoleAssignment(fencedAssignment)
+  // CONTROL, then the member fence as the last operation; the audit table is not configured.
+  harness.cancelNextTransaction(['ConditionalCheckFailed', 'ConditionalCheckFailed'])
+  await expect(client.deleteMemberRoleAssignment(fencedAssignment, undefined, {
+    memberFence: { memberKey: 'sato@example.com', expectedVersion: 4 },
+  })).rejects.toMatchObject({ status: 409, code: 'EnterpriseRoleAssignmentMemberChanged' })
+})

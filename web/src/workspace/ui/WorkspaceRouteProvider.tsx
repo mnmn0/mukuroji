@@ -159,6 +159,10 @@ export type WorkspaceRouteContextValue = {
   canViewCustomerSensitiveData: boolean
   /** Whether the current user may read Customer records and relationship identifiers. */
   canReadCustomers: boolean
+  /** Whether the current user may search the Workspace audit log. */
+  canReadAuditLog: boolean
+  /** Whether the current user may request and download audit log exports. */
+  canExportAuditLog: boolean
   /** Whether the current user may create Customer Requests. */
   canManageCustomerRequests: boolean
   /** Whether the current user may create or update Customer saved views. */
@@ -380,6 +384,9 @@ export function WorkspaceRouteProvider() {
   const canManageAiAssistance = user?.canManageAiAssistance ?? canManageWorkspaceConfiguration
   const canViewCustomerSensitiveData = user?.canViewCustomerSensitiveData ?? false
   const canReadCustomers = user?.canReadCustomers ?? false
+  // A server that predates these fields still lets owners and admins read, and only owners export.
+  const canReadAuditLog = user?.canReadAuditLog ?? canManageWorkspaceConfiguration
+  const canExportAuditLog = user?.canExportAuditLog ?? user?.workspaceRole === 'owner'
   const canManageCustomerRequests = user?.canManageCustomerRequests ?? false
   const canManageCustomerViews = user?.canManageCustomerViews ?? false
   // Hidden until the server says the deployment serves it, so the default deploy never flashes it.
@@ -878,6 +885,8 @@ export function WorkspaceRouteProvider() {
     accessToken,
     canLoadWorkspaceData,
     canReadCustomers,
+    canReadAuditLog,
+    canExportAuditLog,
     canManageCustomerRequests,
     canManageAiAssistance,
     canManageCustomerViews,
@@ -945,6 +954,8 @@ export function WorkspaceRouteProvider() {
     accessToken,
     canLoadWorkspaceData,
     canReadCustomers,
+    canReadAuditLog,
+    canExportAuditLog,
     canManageCustomerRequests,
     canManageAiAssistance,
     canManageCustomerViews,

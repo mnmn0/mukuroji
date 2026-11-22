@@ -4,6 +4,7 @@ import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssi
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
 import { AccountSecurityPanelContainer } from '../../features/account-security/ui/AccountSecurityPanel'
+import { AuditLogPanelContainer } from '../../features/audit-log/ui/AuditLogPanelContainer'
 import { AgentSettingsPanelContainer } from '../../features/agent-settings/ui/AgentSettingsPanelContainer'
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
@@ -157,6 +158,16 @@ export function SettingsPage() {
                   locale={workspace.locale}
                   teams={[...workspace.teams]}
                 />
+                {workspace.canReadAuditLog || workspace.canExportAuditLog ? (
+                  <AuditLogPanelContainer
+                    accessToken={workspace.accessToken}
+                    canExport={workspace.canExportAuditLog}
+                    canSearch={workspace.canReadAuditLog}
+                    guardRequest={workspace.guardEnterpriseSession}
+                    locale={workspace.locale}
+                    timeZone={workspace.timeZone}
+                  />
+                ) : null}
               </>
             ) : null}
           </>

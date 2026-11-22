@@ -7,6 +7,7 @@ export {
 export {
   DynamoDbWorkspaceAccessClient,
   WorkspaceAccessError,
+  createWorkspaceMemberVersionConditionCheck,
   isWorkspaceIdentitySafeToDelete,
   type CreateWorkspaceInvitationInput,
   type DeprovisionDirectoryWorkspaceMemberInput,
@@ -30,6 +31,7 @@ export {
   type WorkspaceMemberCredentialRecord,
   type WorkspaceMemberProvisioningSource,
   type WorkspaceMemberResponse,
+  type WorkspaceMemberVersionConditionInput,
   type WorkspaceMemberStatus,
   type WorkspaceAccessTransactWriteItem,
 } from './workspace-access'

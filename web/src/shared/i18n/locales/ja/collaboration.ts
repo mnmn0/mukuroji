@@ -221,6 +221,8 @@ export const collaborationMessages = {
   'collaboration.activity.relationAdded': '{actor} が関連する Work Item を追加しました。',
   'collaboration.activity.relationRemoved': '{actor} が関連する Work Item を解除しました。',
   'collaboration.activity.siblingOrderChanged': '{actor} が同じ親の中での並び順を変更しました。',
+  'collaboration.activity.previousParentWorkItem': '変更前の親',
+  'collaboration.activity.parentWorkItem': '親',
   'collaboration.activity.contextItemCreated': '{actor} が整理済みの判断を作成しました。',
   'collaboration.activity.contextItemUpdated': '{actor} が整理済みの判断を更新しました。',
   'collaboration.activity.contextItemSuperseded': '{actor} が整理済みの判断を差し替えました。',
