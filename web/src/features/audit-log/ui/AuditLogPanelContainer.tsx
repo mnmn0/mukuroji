@@ -80,6 +80,7 @@ export function AuditLogPanelContainer({
     runSearch(nextDraft)
   }
 
+  /** Requests an export of the form's current filters, the same ones a search would use. */
   const requestExport = () => {
     const result = buildAuditLogFilters(draft, timeZone)
     if (!result.ok) {
