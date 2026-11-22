@@ -381,6 +381,16 @@ export const WORKSPACE_CALENDAR_PERIOD_PRESETS: readonly WorkspaceCalendarPeriod
   'last-fiscal-year',
 ]
 
+/**
+ * Narrows an untrusted value to a calendar period preset.
+ *
+ * @param value - Untrusted candidate, such as a stored report filter field.
+ * @returns Whether the value names a period preset.
+ */
+export function isWorkspaceCalendarPeriodPreset(value: unknown): value is WorkspaceCalendarPeriodPreset {
+  return WORKSPACE_CALENDAR_PERIOD_PRESETS.some((preset) => preset === value)
+}
+
 /** Milliseconds in one UTC day, used to step through calendar dates. */
 const WORKSPACE_CALENDAR_DAY_MILLISECONDS = 86_400_000
 

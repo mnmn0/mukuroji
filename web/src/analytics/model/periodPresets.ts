@@ -2,6 +2,7 @@ import {
   resolveWorkspaceCalendarPeriod,
   WORKSPACE_CALENDAR_PERIOD_PRESETS,
   type AnalyticsDateRange,
+  type AnalyticsFilter,
   type WorkspaceCalendarPeriodPreset,
   type WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
@@ -38,6 +39,72 @@ export function createAnalyticsPresetPeriod(
     from: analyticsCalendarDateBoundaryToInstant(range.from, timeZone, 'start'),
     to: analyticsCalendarDateBoundaryToInstant(range.to, timeZone, 'end'),
   }
+}
+
+/**
+ * Applies a preset to a filter and remembers it, so a saved report keeps the relative period.
+ *
+ * @param filter - Current Analytics filter.
+ * @param preset - Period preset the viewer picked.
+ * @param now - Current instant.
+ * @param timeZone - IANA time zone the report reads calendar dates in.
+ * @param calendar - Workspace fiscal year start month and week start day.
+ * @returns The filter with the preset's period and `periodPreset`.
+ */
+export function applyAnalyticsPeriodPreset(
+  filter: AnalyticsFilter,
+  preset: WorkspaceCalendarPeriodPreset,
+  now: Date,
+  timeZone: string,
+  calendar: AnalyticsPeriodCalendar,
+): AnalyticsFilter {
+  return {
+    ...filter,
+    period: createAnalyticsPresetPeriod(preset, now, timeZone, calendar),
+    periodPreset: preset,
+  }
+}
+
+/**
+ * Sets fixed dates on a filter, dropping any relative period it was chosen with.
+ *
+ * @param filter - Current Analytics filter.
+ * @param period - Dates the viewer entered.
+ * @returns The filter with the fixed period and no `periodPreset`.
+ */
+export function applyAnalyticsFixedPeriod(
+  filter: AnalyticsFilter,
+  period: AnalyticsDateRange,
+): AnalyticsFilter {
+  const fixed: AnalyticsFilter = { ...filter, period }
+  delete fixed.periodPreset
+  return fixed
+}
+
+/**
+ * Re-resolves the relative period of a filter for the given day.
+ *
+ * A saved "this week" report opened next week shows next week's dates, the same as the API
+ * resolves when it runs the saved report.
+ *
+ * @param filter - Filter from a saved report or the URL.
+ * @param now - Instant the report is read at.
+ * @param timeZone - IANA time zone the report reads calendar dates in.
+ * @param calendar - Workspace fiscal year start month and week start day.
+ * @returns The same filter when it has fixed dates or its period is already current, otherwise
+ *   a copy with the period for that day.
+ */
+export function refreshAnalyticsPresetPeriod(
+  filter: AnalyticsFilter,
+  now: Date,
+  timeZone: string,
+  calendar: AnalyticsPeriodCalendar,
+): AnalyticsFilter {
+  if (!filter.periodPreset) return filter
+  const period = createAnalyticsPresetPeriod(filter.periodPreset, now, timeZone, calendar)
+  return period.from === filter.period.from && period.to === filter.period.to
+    ? filter
+    : { ...filter, period }
 }
 
 /**

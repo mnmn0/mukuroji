@@ -46,7 +46,8 @@ import {
   formatAnalyticsCalendarDate,
 } from '../model/timeZone'
 import {
-  createAnalyticsPresetPeriod,
+  applyAnalyticsFixedPeriod,
+  applyAnalyticsPeriodPreset,
   findAnalyticsPeriodPreset,
   isAnalyticsPeriodPreset,
   type AnalyticsPeriodCalendar,
@@ -960,17 +961,14 @@ function AnalyticsFilterToolbar({
               value={formatAnalyticsCalendarDate(filter.period.from, timeZone)}
               onChange={(event) => {
                 if (!event.target.value) return
-                onFilterChange?.({
-                  ...filter,
-                  period: {
-                    ...filter.period,
-                    from: analyticsCalendarDateBoundaryToInstant(
-                      event.target.value,
-                      timeZone,
-                      'start',
-                    ),
-                  },
-                })
+                onFilterChange?.(applyAnalyticsFixedPeriod(filter, {
+                  ...filter.period,
+                  from: analyticsCalendarDateBoundaryToInstant(
+                    event.target.value,
+                    timeZone,
+                    'start',
+                  ),
+                }))
               }}
             />
           </label>
@@ -982,17 +980,14 @@ function AnalyticsFilterToolbar({
               value={formatAnalyticsCalendarDate(filter.period.to, timeZone)}
               onChange={(event) => {
                 if (!event.target.value) return
-                onFilterChange?.({
-                  ...filter,
-                  period: {
-                    ...filter.period,
-                    to: analyticsCalendarDateBoundaryToInstant(
-                      event.target.value,
-                      timeZone,
-                      'end',
-                    ),
-                  },
-                })
+                onFilterChange?.(applyAnalyticsFixedPeriod(filter, {
+                  ...filter.period,
+                  to: analyticsCalendarDateBoundaryToInstant(
+                    event.target.value,
+                    timeZone,
+                    'end',
+                  ),
+                }))
               }}
             />
           </label>
@@ -1203,9 +1198,9 @@ function AnalyticsPeriodPresetPicker({
   t: ReturnType<typeof createTranslator>
   timeZone: string
 }) {
-  const selectedPreset = calendarSettings
+  const selectedPreset = filter.periodPreset ?? (calendarSettings
     ? findAnalyticsPeriodPreset(filter.period, new Date(), timeZone, calendarSettings)
-    : undefined
+    : undefined)
   return (
     <div className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
       <label className="grid gap-1.5">
@@ -1217,11 +1212,15 @@ function AnalyticsPeriodPresetPicker({
           value={selectedPreset ?? 'custom'}
           onChange={(event) => {
             const preset = event.target.value
+            if (preset === 'custom') {
+              // Keep the dates shown but stop moving them with the calendar.
+              onFilterChange?.(applyAnalyticsFixedPeriod(filter, filter.period))
+              return
+            }
             if (!calendarSettings || !isAnalyticsPeriodPreset(preset)) return
-            onFilterChange?.({
-              ...filter,
-              period: createAnalyticsPresetPeriod(preset, new Date(), timeZone, calendarSettings),
-            })
+            onFilterChange?.(
+              applyAnalyticsPeriodPreset(filter, preset, new Date(), timeZone, calendarSettings),
+            )
           }}
         >
           <option value="custom">{t('analytics.filter.period.custom')}</option>

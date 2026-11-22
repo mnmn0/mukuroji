@@ -53,6 +53,19 @@ describe('AnalyticsWorkbench', () => {
     expect(withSettings).toMatch(/<option value="custom" selected/u)
   })
 
+  test('shows the relative period a saved report remembers', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        calendarSettings={{ fiscalYearStartMonth: 4, weekStartDay: 1 }}
+        filter={{ ...baseProps.filter, periodPreset: 'last-fiscal-year' }}
+        onFilterChange={() => undefined}
+      />,
+    )
+
+    expect(html).toMatch(/<option value="last-fiscal-year" selected/u)
+  })
+
   test('explains a failed calendar settings read and offers a retry while presets stay disabled', () => {
     const html = renderToStaticMarkup(
       <AnalyticsWorkbench

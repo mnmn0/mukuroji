@@ -40,6 +40,7 @@ import {
   normalizeAnalyticsExportLocale,
   normalizeAnalyticsQueryInput,
   queryAnalyticsEvidence,
+  resolveAnalyticsReportFilterPeriod,
   selectAnalyticsWorkItemsRequiringHistory,
   validateAnalyticsSnapshotRecordSize,
 } from './analytics'
@@ -2885,5 +2886,103 @@ describe('Analytics repository', () => {
     expect([...fake.rows.values()].filter(
       (row) => row.entryType === 'analytics-snapshot-id',
     )).toHaveLength(1)
+  })
+})
+
+describe('Analytics Workspace calendar', () => {
+  const weeklyChart = createQuery([{
+    id: 'weekly',
+    title: 'Weekly throughput',
+    type: 'chart',
+    metric: 'throughput',
+    groupBy: { dimension: 'week' },
+  }])
+
+  test('starts week buckets on Monday when the query names no week start', () => {
+    const snapshot = createTestAnalyticsSnapshot({ workItems: [], events: [], query: weeklyChart })
+    expect(snapshot.widgets[0]?.series?.map((point) => point.from)).toEqual([
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-05T00:00:00.000Z',
+    ])
+  })
+
+  test('starts week buckets on the query week start day', () => {
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query: { ...weeklyChart, weekStartDay: 0 },
+    })
+    expect(snapshot.widgets[0]?.series?.map((point) => [point.from, point.to])).toEqual([
+      ['2026-01-01T00:00:00.000Z', '2026-01-03T23:59:59.999Z'],
+      ['2026-01-04T00:00:00.000Z', '2026-01-07T00:00:00.000Z'],
+    ])
+    expect(normalizeAnalyticsQueryInput({ ...weeklyChart, weekStartDay: 0 }).weekStartDay).toBe(0)
+    expect(normalizeAnalyticsQueryInput({ ...weeklyChart, weekStartDay: 1 })).not.toHaveProperty('weekStartDay')
+  })
+
+  test('starts week group rows on the query week start day in the report time zone', () => {
+    const snapshot = createTestAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      query: {
+        ...weeklyChart,
+        timeZone: 'Asia/Tokyo',
+        weekStartDay: 6,
+        widgets: [{
+          id: 'weekly-table',
+          title: 'Weekly remaining',
+          type: 'table',
+          metric: 'remaining-scope',
+          groupBy: { dimension: 'week' },
+        }],
+      },
+    })
+    // The period starts on Thursday 2026-01-01 in Tokyo; the second week starts on Saturday.
+    expect(snapshot.widgets[0]?.groups?.map((group) => group.key)).toEqual(['2026-01-01', '2026-01-03'])
+  })
+
+  test('rejects an unknown week start day and period preset', () => {
+    expect(() => normalizeAnalyticsQueryInput({ ...weeklyChart, weekStartDay: 7 }))
+      .toThrow('week start day')
+    expect(() => normalizeAnalyticsQueryInput({
+      ...weeklyChart,
+      filter: { period, periodPreset: 'next-week' },
+    })).toThrow('period preset')
+  })
+
+  test('keeps a period preset on the normalized filter and report', async () => {
+    expect(normalizeAnalyticsQueryInput({
+      ...weeklyChart,
+      filter: { period, periodPreset: 'this-week' },
+    }).filter.periodPreset).toBe('this-week')
+    const repository = new InMemoryAnalyticsRepository()
+    const report = await repository.createReport('workspace-1', 'member-1', createReportInput({
+      filter: { period, periodPreset: 'last-fiscal-quarter' },
+    }))
+    expect(report.filter.periodPreset).toBe('last-fiscal-quarter')
+  })
+
+  test('re-resolves a saved relative period around the run time', () => {
+    const calendar = { fiscalYearStartMonth: 4, weekStartDay: 0 } as const
+    // Wednesday 2026-11-25 09:00 Tokyo.
+    expect(resolveAnalyticsReportFilterPeriod(
+      { period, periodPreset: 'this-week', teamIds: ['core'] },
+      '2026-11-25T00:00:00.000Z',
+      'Asia/Tokyo',
+      calendar,
+    )).toEqual({
+      period: { from: '2026-11-21T15:00:00.000Z', to: '2026-11-28T14:59:59.999Z' },
+      periodPreset: 'this-week',
+      teamIds: ['core'],
+    })
+    expect(resolveAnalyticsReportFilterPeriod(
+      { period, periodPreset: 'last-fiscal-year' },
+      '2026-11-25T00:00:00.000Z',
+      'UTC',
+      calendar,
+    ).period).toEqual({ from: '2025-04-01T00:00:00.000Z', to: '2026-03-31T23:59:59.999Z' })
+    const fixed = { period }
+    expect(resolveAnalyticsReportFilterPeriod(fixed, '2026-11-25T00:00:00.000Z', 'UTC', calendar))
+      .toEqual(fixed)
   })
 })

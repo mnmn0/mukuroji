@@ -5,6 +5,7 @@ const {
   analyticsApiRequest,
   app,
   configureFakeProjectClients,
+  getTestAppDependencies,
   createAnalyticsAuditEvent,
   createAnalyticsQueryInput,
   createHistoricalAnalyticsWorkItem,
@@ -17,6 +18,9 @@ import {
   createAnalyticsSnapshotListCursor,
   InMemoryAnalyticsRepository,
 } from '../../analytics'
+import {
+  createDefaultTenantAdministrationSnapshot,
+} from '../../../tenant-administration'
 import type {
   AnalyticsQueryInput,
   AnalyticsSnapshotListResponse,
@@ -1157,4 +1161,107 @@ test('returns current-ACL evidence and CSV exports from Analytics endpoints', as
   expect(exported.status).toBe(200)
   expect(exported.headers.get('Content-Type')).toBe('text/csv; charset=utf-8')
   expect(await exported.text()).toContain('ウィジェットID,指標キー,指標,値')
+})
+
+/**
+ * Makes the test Workspace read as having saved Sunday weeks and April fiscal years.
+ */
+function useSundayWeekWorkspaceCalendar() {
+  const profile = {
+    ...createDefaultTenantAdministrationSnapshot(
+      'user#demo@example.com',
+      'demo@example.com',
+      '2026-11-01T00:00:00.000Z',
+    ).profile,
+    calendar: {
+      fiscalYearStartMonth: 4,
+      weekStartDay: 0 as const,
+      workingWeekdays: ['monday' as const],
+      holidays: [],
+      publicHolidays: 'none' as const,
+    },
+  }
+  return new Proxy(getTestAppDependencies().workspace.tenantAdministration, {
+    get(target, property, receiver) {
+      if (property === 'getProfile') return async () => profile
+      return Reflect.get(target, property, receiver)
+    },
+  })
+}
+
+test('starts Analytics weeks on the Workspace week start and re-resolves saved relative periods', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 0 })
+  const repository = new InMemoryAnalyticsRepository()
+  const weekly = [{
+    id: 'weekly',
+    type: 'chart' as const,
+    title: 'Weekly throughput',
+    metric: 'throughput' as const,
+    groupBy: { dimension: 'week' as const },
+  }]
+  await repository.createReport('user#demo@example.com', 'demo@example.com', {
+    id: 'this-week',
+    name: 'This week',
+    visibility: 'personal',
+    timeZone: 'UTC',
+    filter: {
+      period: { from: '2026-01-04T00:00:00.000Z', to: '2026-01-10T23:59:59.999Z' },
+      periodPreset: 'this-week',
+    },
+    widgets: weekly,
+  })
+  setTestAppDependencies({
+    analytics: repository,
+    tenantAdministration: useSundayWeekWorkspaceCalendar(),
+    tenantLifecycleEnforcement: { async assertActive() {} },
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+
+  // A client asking for Monday weeks still gets the Workspace's Sunday weeks.
+  const adHoc = await analyticsApiRequest('/api/analytics/query', {
+    ...createAnalyticsQueryInput(),
+    weekStartDay: 1,
+    widgets: weekly,
+  })
+  expect(adHoc.status).toBe(200)
+  const adHocBody = await adHoc.json() as {
+    snapshot: { widgets: Array<{ series: Array<{ from: string }> }> }
+  }
+  // 2026-07-01 is a Wednesday, so the second week starts on Sunday 2026-07-05.
+  expect(adHocBody.snapshot.widgets[0]?.series[1]?.from).toBe('2026-07-05T00:00:00.000Z')
+
+  // Thursday 2026-11-26: the saved "this week" report covers Sunday 11-22 up to the run time.
+  const saved = await analyticsApiRequest('/api/analytics/query', {
+    reportId: 'this-week',
+    asOf: '2026-11-26T12:00:00.000Z',
+  })
+  expect(saved.status).toBe(200)
+  expect(await saved.json()).toMatchObject({
+    snapshot: {
+      filter: {
+        period: { from: '2026-11-22T00:00:00.000Z', to: '2026-11-26T12:00:00.000Z' },
+        periodPreset: 'this-week',
+      },
+    },
+  })
+
+  const snapshot = await analyticsApiRequest('/api/analytics/reports/this-week/snapshots', {
+    asOf: '2026-11-26T12:00:00.000Z',
+  })
+  expect(snapshot.status).toBe(201)
+  expect(await snapshot.json()).toMatchObject({
+    snapshotRecord: {
+      query: {
+        filter: { period: { from: '2026-11-22T00:00:00.000Z' }, periodPreset: 'this-week' },
+        weekStartDay: 0,
+      },
+    },
+  })
 })
