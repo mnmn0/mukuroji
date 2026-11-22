@@ -1423,6 +1423,15 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ json: notificationPreferences })
   })
 
+  // Detail panes list a Work Item's external links; no Work Item in these fixtures has one.
+  await page.route(/.*\/api\/developer\/work-items\/[^/]+\/external-links(?:\?.*)?$/, async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback()
+      return
+    }
+    await route.fulfill({ json: { hasMore: false, items: [] } })
+  })
+
   await page.route(/.*\/api\/teams\/[^/]+\/issues(?:\?.*)?$/, async (route) => {
     const teamId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
     const projects = projectDirectory.find((team) => team.id === teamId)?.projects ?? []
@@ -10458,6 +10467,19 @@ test.describe('authenticated task page', () => {
     await page.keyboard.press('Enter')
     await expect.poll(() => requestCounts.issueCreates).toBe(2)
     await expect(page.getByTestId('my-tasks-table')).toContainText('続けて追加したタスク')
+  })
+
+  test('Team と Project の詳細 pane に同じ予定と実績の欄と外部リンクが並ぶ', async ({ page }) => {
+    await page.goto('/teams/core-team/issues?issueId=wireframe')
+    const teamPane = page.getByTestId('team-issue-detail-pane')
+    await expect(teamPane.getByTestId('task-detail-actual-dates')).toBeVisible()
+    // Correcting actual dates needs Project management, so the Team screen shows them read-only.
+    await expect(teamPane.getByTestId('task-detail-actual-dates').getByRole('button')).toHaveCount(0)
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const projectPane = page.getByTestId('task-detail-pane')
+    await expect(projectPane.getByTestId('task-detail-actual-dates')).toBeVisible()
+    await expect(projectPane.getByTestId('work-item-external-links-panel')).toBeVisible()
   })
 
   test('Team の Work Item をカレンダーのキーボード操作で日程変更できる', async ({ page }) => {
