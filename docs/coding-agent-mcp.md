@@ -218,6 +218,7 @@ Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token
 2. MCP の設定に `MUKUROJI_MCP_INSTANCE_ID` を明示し（例: `laptop-claude-1`）、同じ値を OpenTelemetry の resource
    attribute `mukuroji.agent_instance` に入れます。Mukuroji は usage をこの値と時刻で Run に割り当てます。
    既定の instance ID は MCP の中で作るため、指定しないと Run と結び付けられません。
+   Web の **agent を接続** で Claude Code を選び instance ID を入力すると、この手順 2・3 の設定がそのまま作られます。
 3. Claude Code の設定（`~/.claude/settings.json` など）に次を追加します。token は書かず、header は
    `otelHeadersHelper` が `MUKUROJI_MCP_TOKEN` から作ります。
 
@@ -243,6 +244,9 @@ Run とそのタスクに積み上がります（[ADR 0061](adr/0061-agent-token
   数えられます。同時に動かす session には別の instance ID を指定します（プロジェクトの
   `.claude/settings.local.json` と `.mcp.json` で分けるなど）。
 - 推定費用は Claude Code の見積もりで、請求額とは一致しません。Web では Team manager にだけ表示されます。
+- Codex と Kiro には対応していません。Codex の OpenTelemetry は token 数を出しますが、resource attribute の指定方法、
+  header での環境変数の展開、event の attribute 名が公開資料の間で食い違っており、Run への割り当てと token を
+  設定ファイルに書かない運用を確かめられないためです（#729 に残します）。
 - 受け口は 1 回に 2,000 record まで、7 日より古い event と 5 分より先の event は断ります（`partialSuccess` で件数を返します）。
   Software factory が off の deploy では `503` を返します。
 

@@ -103,6 +103,11 @@ Claude Code の OpenTelemetry を Mukuroji に送るよう設定すると、タ�
   終えた後の会話の分は、どのタスクにも入りません。
 - 送られるのはトークン数・推定費用・model 名・時刻だけで、prompt や会話の内容は保存されません。
 - 2026-11-22 より前に発行した自分用 token では送れません。**agent を接続** で発行し直してください。
+- **agent を接続** で Claude Code を選び、「トークン使用量を送る instance ID」を入力すると、MCP の登録コマンドと
+  `~/.claude/settings.json` に足す設定が作られます。
+- Factory board の期間サマリーにも、期間内に終わった Run のトークンの合計、Project 別の合計、トークンの多い
+  タスクが表示されます。
+- 今のところ送れるのは Claude Code だけです。Codex と Kiro には対応していません。
 
 ### 止まったタスクを再開する
 

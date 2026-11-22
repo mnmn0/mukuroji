@@ -13,6 +13,7 @@ import {
   createAgentRunNotActiveError,
   createDefaultAgentSettings,
   finishAgentRun,
+  formatUsageBucketStart,
   hashAgentInstanceId,
   readReportAgentRunRequest,
   readStartAgentRunRequest,
@@ -2664,6 +2665,52 @@ describe('Factory board route', () => {
     ])
     expect(JSON.stringify(body)).not.toContain('task-hidden')
     expect(JSON.stringify(body)).not.toContain('cursor')
+  })
+
+  test('adds up the telemetry usage of the period\'s runs per Project and Work Item, without the cost for non-managers', async () => {
+    const now = Date.now()
+    const { store } = configureBoard([
+      { id: 'task-refero', statusCategory: 'completed', assignedProjectId: 'refero' },
+      { id: 'task-loose', statusCategory: 'completed' },
+      { id: 'task-hidden', statusCategory: 'completed', assignedProjectId: 'secret' },
+    ])
+    const usage = new InMemoryAgentRunUsageStore()
+    setTestAppDependencies({ agentRunUsage: usage })
+    store.seed(finishAgentRun(createRunAt('task-refero', new Date(now - 3 * hourMs)), 'completed', 'agent', new Date(now - 2 * hourMs)))
+    store.seed(finishAgentRun(createRunAt('task-loose', new Date(now - 5 * hourMs)), 'completed', 'agent', new Date(now - 4 * hourMs)))
+    store.seed(finishAgentRun(createRunAt('task-hidden', new Date(now - 7 * hourMs)), 'completed', 'agent', new Date(now - 6 * hourMs)))
+    /**
+     * Records one bucket of the fixture member's laptop instance.
+     *
+     * @param at - Bucket time.
+     * @param inputTokens - Input tokens.
+     * @param batchId - Export ID.
+     */
+    const record = (at: number, inputTokens: number, batchId: string) => usage.recordBatch(workspaceId, 'demo@example.com', batchId, [{
+      bucketStart: formatUsageBucketStart(at), instanceIdHash: hashAgentInstanceId('laptop-1'), model: 'claude-sonnet-5-5',
+      inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicroUsd: inputTokens * 10, requestCount: 1,
+    }])
+    await record(now - 2.5 * hourMs, 500, 'refero')
+    await record(now - 4.5 * hourMs, 200, 'loose')
+    await record(now - 6.5 * hourMs, 900, 'hidden')
+    // Usage outside every run is not part of the period's runs.
+    await record(now - 3.5 * hourMs, 50, 'between')
+
+    const body = await readAnalytics(now)
+    expect(body.usage).toEqual({
+      total: { inputTokens: 700, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 2, models: ['claude-sonnet-5-5'], hasMore: false },
+      projects: [
+        { projectId: 'refero', usage: expect.objectContaining({ inputTokens: 500 }) },
+        { usage: expect.objectContaining({ inputTokens: 200 }) },
+      ],
+      workItems: [
+        { workItemId: 'task-refero', title: 'Title of task-refero', projectId: 'refero', usage: expect.objectContaining({ inputTokens: 500 }) },
+        { workItemId: 'task-loose', title: 'Title of task-loose', usage: expect.objectContaining({ inputTokens: 200 }) },
+      ],
+      runsHasMore: false,
+    })
+    expect(JSON.stringify(body)).not.toContain('estimatedCostMicroUsd')
+    expect(JSON.stringify(body)).not.toContain('task-hidden')
   })
 
   test('reads a past period without spending its budget on runs that finished after it', async () => {

@@ -10,6 +10,7 @@ import {
   isAgentUsageBucketInRun,
   parseAgentTelemetryLogs,
   summarizeAgentUsage,
+  summarizeFactoryUsage,
   UNKNOWN_AGENT_INSTANCE_HASH,
 } from './domain/agent-run-usage'
 import { DynamoDbAgentRunUsageStore, type AgentRunUsageDocumentClient } from './adapter-out/dynamodb/agent-run-usage-store'
@@ -282,5 +283,32 @@ describe('agent usage stores', () => {
       ExpressionAttributeValues: { ':partition': 'ws#agent-usage#member#member', ':from': '2026-11-22T17:05:00Z', ':until': '2026-11-22T17:06:00Z' },
     })
     expect(await store.listMemberBuckets('ws', 'member', '2026-11-22T17:05:00Z', '2026-11-22T17:05:00Z', 1)).toEqual({ buckets: [], hasMore: false })
+  })
+})
+
+describe('period usage summary', () => {
+  /**
+   * Builds a usage summary with input tokens only.
+   *
+   * @param inputTokens - Input tokens.
+   * @returns Usage with the cost included.
+   */
+  const usage = (inputTokens: number) => ({
+    inputTokens, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, requestCount: 1,
+    estimatedCostMicroUsd: inputTokens, models: ['m'], hasMore: false,
+  })
+
+  test('ranks Projects and Work Items by tokens and keeps only the top Work Items', () => {
+    const summary = summarizeFactoryUsage([
+      { workItemId: 'a', title: 'A', projectId: 'p1', usage: usage(100) },
+      { workItemId: 'a', title: 'A', projectId: 'p1', usage: usage(50) },
+      { workItemId: 'b', title: 'B', usage: usage(400) },
+      { workItemId: 'c', title: 'C', projectId: 'p1', usage: usage(10) },
+    ], 2, true)
+    expect(summary?.total).toMatchObject({ inputTokens: 560, estimatedCostMicroUsd: 560, requestCount: 4 })
+    expect(summary?.projects.map((project) => [project.projectId, project.usage.inputTokens])).toEqual([[undefined, 400], ['p1', 160]])
+    expect(summary?.workItems.map((workItem) => [workItem.workItemId, workItem.usage.inputTokens])).toEqual([['b', 400], ['a', 150]])
+    expect(summary?.runsHasMore).toBe(true)
+    expect(summarizeFactoryUsage([], 2, false)).toBeUndefined()
   })
 })

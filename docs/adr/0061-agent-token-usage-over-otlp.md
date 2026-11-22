@@ -74,7 +74,12 @@ Shinji の方針は「なるべく安く」。
   ごく短い Run には usage が付かない。
 - 推定費用は Claude Code の見積もりで、請求額とは一致しない（subscription の利用でも値は出る）。
 - 費用は、同時 10 session・60 秒間隔の export で月 $1 未満の見込み（Lambda の起動と DynamoDB の書き込みが主）。
-- 期間サマリー（Factory analytics）と Project 別の集計、Codex / Kiro の telemetry、Web の接続画面への設定例の
-  追加は後続とする（#729）。
+- Factory analytics の期間サマリーも、期間内に終わった Run（新しい順に最大 300 件）の usage を同じ割り当てで足し、
+  合計・Project 別・トークンの多い Work Item 上位 10 件を返す。Run ごとに usage を読むため、1 回の analytics で
+  usage の Query が最大 300 回増える。
+- Web の接続画面は、Claude Code に instance ID を入力すると MCP の `MUKUROJI_MCP_INSTANCE_ID` と Claude Code の
+  OpenTelemetry 設定を同じ値で作る。instance ID を変えると、着手中の Run は別 instance の Run として扱われる。
+- Codex / Kiro の telemetry は後続とする（#729）。Codex は token 数を出すが、resource attribute の指定、header の
+  環境変数展開、attribute 名が公開資料の間で一致せず、割り当てと token の扱いを確かめられない。
 - 更新した文書：`docs/coding-agent-mcp.md`、`docs/guide/coding-agent.md`、`docs/software-factory.md`、
   `docs/public-api.md`、`CHANGELOG.md`。

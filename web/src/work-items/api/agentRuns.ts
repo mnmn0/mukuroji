@@ -16,6 +16,7 @@ import {
   type FactoryAnalyticsRunSummary,
   type FactoryAnalyticsRuntimeSummary,
   type FactoryAnalyticsStageLeadTime,
+  type FactoryAnalyticsUsage,
   type FactoryBoardItem,
   type FactoryBoardReportSummary,
   type FactoryBoardWorkItem,
@@ -262,6 +263,8 @@ function readTeamFactoryAnalytics(value: unknown): TeamFactoryAnalyticsResponse 
   const validStages = stageLeadTimes.filter((stage): stage is FactoryAnalyticsStageLeadTime => stage !== undefined)
   const validRuntimes = runtimes.filter((runtime): runtime is FactoryAnalyticsRuntimeSummary => runtime !== undefined)
   if (validStages.length !== stageLeadTimes.length || validRuntimes.length !== runtimes.length) return undefined
+  const usage = value.usage === undefined ? undefined : readFactoryAnalyticsUsage(value.usage)
+  if (value.usage !== undefined && usage === undefined) return undefined
   return {
     generatedAt,
     from,
@@ -272,7 +275,47 @@ function readTeamFactoryAnalytics(value: unknown): TeamFactoryAnalyticsResponse 
     finishedRunsHasMore,
     workItemsHasMore,
     historyHasMore,
+    ...(usage === undefined ? {} : { usage }),
   }
+}
+
+/**
+ * Validates the telemetry usage part of a Factory analytics response.
+ *
+ * @param value - Unknown JSON value.
+ * @returns The usage, or undefined when any part is malformed.
+ */
+function readFactoryAnalyticsUsage(value: unknown): FactoryAnalyticsUsage | undefined {
+  if (!isRecord(value) || !Array.isArray(value.projects) || !Array.isArray(value.workItems) || typeof value.runsHasMore !== 'boolean') {
+    return undefined
+  }
+  const total = readAgentRunUsage(value.total)
+  if (!total) return undefined
+  const projects: FactoryAnalyticsUsage['projects'] = []
+  for (const project of value.projects) {
+    if (!isRecord(project) || (project.projectId !== undefined && typeof project.projectId !== 'string')) return undefined
+    const usage = readAgentRunUsage(project.usage)
+    if (!usage) return undefined
+    projects.push({ ...(project.projectId === undefined ? {} : { projectId: project.projectId }), usage })
+  }
+  const workItems: FactoryAnalyticsUsage['workItems'] = []
+  for (const item of value.workItems) {
+    if (
+      !isRecord(item) || typeof item.workItemId !== 'string' || typeof item.title !== 'string' ||
+      (item.projectId !== undefined && typeof item.projectId !== 'string')
+    ) {
+      return undefined
+    }
+    const usage = readAgentRunUsage(item.usage)
+    if (!usage) return undefined
+    workItems.push({
+      workItemId: item.workItemId,
+      title: item.title,
+      ...(item.projectId === undefined ? {} : { projectId: item.projectId }),
+      usage,
+    })
+  }
+  return { total, projects, workItems, runsHasMore: value.runsHasMore }
 }
 
 /**

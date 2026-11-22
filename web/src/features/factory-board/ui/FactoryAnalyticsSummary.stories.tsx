@@ -1,7 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
 import { expect, fn, userEvent, within } from 'storybook/test'
-import { factoryAnalyticsFixture } from '../fixtures'
+import { factoryAnalyticsFixture, factoryAnalyticsWithUsageFixture } from '../fixtures'
 import type { FactoryAnalyticsPeriodDays } from '../model/factoryAnalytics'
 import { FactoryAnalyticsSummary, type FactoryAnalyticsSummaryProps } from './FactoryAnalyticsSummary'
 import { createFactoryAnalyticsLabels } from './factoryBoardLabels'
@@ -64,6 +64,17 @@ export const Default: Story = {
 /** English text. */
 export const English: Story = {
   args: { labels: createFactoryAnalyticsLabels('en'), formatNumber: (value) => new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 }).format(value) },
+}
+
+/** Runs sent telemetry, so the summary adds up their tokens per Project and Work Item; a manager also sees the cost. */
+export const WithUsage: Story = {
+  args: { analytics: factoryAnalyticsWithUsageFixture, projectNames: { refero: 'Refero' } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByText('トークン使用量')).toBeVisible()
+    await expect(canvas.getByText('Refero')).toBeVisible()
+    await expect(canvas.getByText('Project なし')).toBeVisible()
+  },
 }
 
 /** A read bound was reached, so the counts leave runs out. */

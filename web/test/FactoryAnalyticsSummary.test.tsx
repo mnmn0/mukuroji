@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { getTeamFactoryAnalytics } from '../src/work-items/api/agentRuns'
-import { factoryAnalyticsFixture } from '../src/features/factory-board/fixtures'
+import { factoryAnalyticsFixture, factoryAnalyticsWithUsageFixture } from '../src/features/factory-board/fixtures'
 import {
   createFactoryAnalyticsPeriod,
   isFactoryAnalyticsIncomplete,
@@ -41,6 +41,7 @@ function render(analytics = factoryAnalyticsFixture): string {
   return renderToStaticMarkup(
     <FactoryAnalyticsSummary
       analytics={analytics}
+      projectNames={{ refero: 'Refero' }}
       formatNumber={(value) => String(value)}
       isLoading={false}
       labels={createFactoryAnalyticsLabels('ja')}
@@ -59,12 +60,20 @@ describe('Factory analytics API', () => {
     expect(urls[0]).toContain('/teams/core%20team/agent-runs/analytics?from=2026-10-01T00%3A00%3A00.000Z&to=2026-10-31T00%3A00%3A00.000Z')
   })
 
+  test('returns the telemetry usage of the period', async () => {
+    respondWith(factoryAnalyticsWithUsageFixture)
+    const analytics = await getTeamFactoryAnalytics('token', 'core', { from: '2026-10-01T00:00:00.000Z', to: '2026-10-31T00:00:00.000Z' })
+    expect(analytics).toEqual(factoryAnalyticsWithUsageFixture)
+  })
+
   test('rejects a response with an unknown station, runtime, or rate', async () => {
     for (const body of [
       { ...factoryAnalyticsFixture, stageLeadTimes: [{ stage: 'intake', medianHours: 1, sampleSize: 1 }] },
       { ...factoryAnalyticsFixture, runtimes: [{ ...factoryAnalyticsFixture.runtimes[0], runtime: 'cursor' }] },
       { ...factoryAnalyticsFixture, successRate: 120 },
       { ...factoryAnalyticsFixture, historyHasMore: undefined },
+      { ...factoryAnalyticsWithUsageFixture, usage: { ...factoryAnalyticsWithUsageFixture.usage, runsHasMore: 'no' } },
+      { ...factoryAnalyticsWithUsageFixture, usage: { ...factoryAnalyticsWithUsageFixture.usage, workItems: [{ workItemId: 'a', title: 'A', usage: { inputTokens: -1 } }] } },
     ]) {
       respondWith(body)
       await expect(getTeamFactoryAnalytics('token', 'core', { from: '2026-10-01T00:00:00.000Z', to: '2026-10-31T00:00:00.000Z' })).rejects.toMatchObject({ status: 502 })
@@ -102,5 +111,19 @@ describe('Factory analytics summary', () => {
     expect(markup).toContain('—')
     expect(markup).toContain('role="note"')
     expect(render({ ...factoryAnalyticsFixture, finishedRuns: 0, runtimes: [] })).toContain('期間内に終了した Run はありません。')
+  })
+
+  test('shows the token usage per Project and Work Item, and leaves the part out without usage', () => {
+    const markup = render(factoryAnalyticsWithUsageFixture)
+    expect(markup).toContain('data-testid="factory-analytics-usage"')
+    expect(markup).toContain('2,776,500 トークン')
+    expect(markup).toContain('Refero')
+    expect(markup).toContain('Project なし')
+    expect(markup).toContain('API の認証フローを整理する')
+    expect(markup).toContain('$18.42')
+    expect(render()).not.toContain('factory-analytics-usage')
+    const { usage } = factoryAnalyticsWithUsageFixture
+    if (!usage) throw new Error('The fixture has usage.')
+    expect(render({ ...factoryAnalyticsWithUsageFixture, usage: { ...usage, runsHasMore: true } })).toContain('新しい Run から一部だけ')
   })
 })

@@ -386,8 +386,9 @@ Factory board の上部に、期間内に終わった Run の集計を出す。d
   読めなかった Run は件数と成功率には入れ、手戻りと滞在時間からは外す。Run が 100 件を超える
   Work Item で読めなかった古い Run が期間内に終わっている可能性があるときも知らせる（`historyHasMore`）。
 - token / 費用は agent の自己申告ではなく OpenTelemetry で受け取る（[ADR 0061](adr/0061-agent-token-usage-over-otlp.md)、
-  #729）。Run と Work Item の合計は Web の Run 一覧で返す。期間サマリーへの token / 費用の追加、Analytics engine の
-  metric・widget・snapshot への統合、Project 別の集計は後続とする。
+  #729）。Run と Work Item の合計は Web の Run 一覧で返す。期間サマリーは `usage` に、期間内に終わった Run
+  （新しい順に最大 300 件、超えたら `runsHasMore`）の合計、Project 別の合計、トークンの多い Work Item 上位 10 件を
+  返す。推定費用は Team manager にだけ入れる。Analytics engine の metric・widget・snapshot への統合は後続とする。
 
 ## Triage への自動起票
 

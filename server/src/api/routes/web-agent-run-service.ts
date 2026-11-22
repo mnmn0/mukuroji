@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto'
 import {
-  AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN,
   FACTORY_BOARD_COMPLETED_WINDOW_HOURS,
   FACTORY_BOARD_MAX_ACTIVE_RUNS,
   FACTORY_BOARD_MAX_EVALUATED_FINISHED_RUNS,
@@ -19,11 +18,8 @@ import {
 } from '@mukuroji/contracts'
 import {
   AgentRunError,
-  agentUsageRunBucketRange,
   combineAgentRunUsage,
   createAgentRunIntegrityError,
-  isAgentUsageBucketInRun,
-  summarizeAgentUsage,
   createAgentRunNotActiveError,
   createAgentRunReportCommentBody,
   finishAgentRun,
@@ -61,6 +57,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { getTeamIssuesTableName, loadAuthorizedTeamIssue } from '../shared/work-item-access'
+import { readAgentRunUsage } from '../shared/agent-run-usage-access'
 import type { TeamPermissionContext } from '../shared/workspace-access'
 
 /**
@@ -70,7 +67,7 @@ import type { TeamPermissionContext } from '../shared/workspace-access'
  * @param teamId - Team ID.
  * @returns True for Team managers and system administrators.
  */
-async function isTeamManager(principal: WorkspacePrincipal, teamId: string): Promise<boolean> {
+export async function isTeamManager(principal: WorkspacePrincipal, teamId: string): Promise<boolean> {
   try {
     await requireTeamPermission(principal, teamId, 'manager')
     return true
@@ -152,27 +149,6 @@ function toAgentRunView(run: StoredAgentRun, canRelease: boolean, now: Date, usa
     ...(run.resumedFromRunId === undefined ? {} : { resumedFromRunId: run.resumedFromRunId }),
     ...(usage === undefined ? {} : { usage }),
   }
-}
-
-/**
- * Reads the telemetry usage attributed to a run: the buckets of the run's member and instance that
- * start between the run's start and finish.
- *
- * @param directoryId - Workspace ID.
- * @param run - Run.
- * @param includeCost - Whether the viewer may see the estimated cost.
- * @returns The run's usage, or undefined when none arrived.
- */
-async function readAgentRunUsage(directoryId: string, run: StoredAgentRun, includeCost: boolean): Promise<AgentRunUsage | undefined> {
-  const range = agentUsageRunBucketRange(run)
-  const page = await workItemDependencies.agentRunUsage.listMemberBuckets(
-    directoryId,
-    run.assigneeUserId,
-    range.from,
-    range.until,
-    AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN,
-  )
-  return summarizeAgentUsage(page.buckets.filter((bucket) => isAgentUsageBucketInRun(bucket, run)), includeCost, page.hasMore)
 }
 
 /**

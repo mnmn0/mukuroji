@@ -3,6 +3,7 @@ import {
   AGENT_TELEMETRY_API_REQUEST_EVENT,
   AGENT_TELEMETRY_INSTANCE_ATTRIBUTE,
   type AgentRunUsage,
+  type FactoryAnalyticsUsage,
 } from '@mukuroji/contracts'
 import { hashAgentInstanceId } from './agent-run'
 
@@ -489,5 +490,84 @@ export function combineAgentRunUsage(usages: readonly (AgentRunUsage | undefined
     ...(includeCost ? { estimatedCostMicroUsd: present.reduce((sum, usage) => sum + (usage.estimatedCostMicroUsd ?? 0), 0) } : {}),
     models: [...models].sort(),
     hasMore: present.some((usage) => usage.hasMore),
+  }
+}
+
+/** Usage of one run with the Work Item it belongs to. */
+export type AgentRunUsageEntry = {
+  /** Work Item ID. */
+  workItemId: string
+  /** Work Item title. */
+  title: string
+  /** Project of the Work Item, when it has one. */
+  projectId?: string
+  /** Usage of the run. */
+  usage: AgentRunUsage
+}
+
+/**
+ * Total tokens of a usage summary, used to rank Projects and Work Items.
+ *
+ * @param usage - Usage.
+ * @returns Input, output, and cache tokens added together.
+ */
+function totalTokens(usage: AgentRunUsage): number {
+  return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheCreationTokens
+}
+
+/**
+ * Orders entries with the most tokens first, then by key for a stable response.
+ *
+ * @param left - First entry.
+ * @param right - Second entry.
+ * @returns Sort order.
+ */
+function byTokensThenKey(left: { key: string; usage: AgentRunUsage }, right: { key: string; usage: AgentRunUsage }): number {
+  const difference = totalTokens(right.usage) - totalTokens(left.usage)
+  if (difference !== 0) return difference
+  return left.key < right.key ? -1 : left.key > right.key ? 1 : 0
+}
+
+/**
+ * Adds run usage together for a period: in total, per Project, and for the Work Items with the most
+ * tokens.
+ *
+ * @param entries - Usage of each evaluated run.
+ * @param topWorkItems - Number of Work Items to list.
+ * @param runsHasMore - Whether runs were left out of the entries.
+ * @returns The period's usage, or undefined when no run has usage.
+ */
+export function summarizeFactoryUsage(entries: readonly AgentRunUsageEntry[], topWorkItems: number, runsHasMore: boolean): FactoryAnalyticsUsage | undefined {
+  const total = combineAgentRunUsage(entries.map((entry) => entry.usage))
+  if (!total) return undefined
+  const projects = new Map<string, { projectId?: string; usages: AgentRunUsage[] }>()
+  const workItems = new Map<string, { entry: AgentRunUsageEntry; usages: AgentRunUsage[] }>()
+  for (const entry of entries) {
+    const projectKey = entry.projectId ?? ''
+    const project = projects.get(projectKey) ?? { ...(entry.projectId === undefined ? {} : { projectId: entry.projectId }), usages: [] }
+    project.usages.push(entry.usage)
+    projects.set(projectKey, project)
+    const workItem = workItems.get(entry.workItemId) ?? { entry, usages: [] }
+    workItem.usages.push(entry.usage)
+    workItems.set(entry.workItemId, workItem)
+  }
+  const projectUsage = [...projects.entries()].flatMap(([key, project]) => {
+    const usage = combineAgentRunUsage(project.usages)
+    return usage ? [{ key, usage, projectId: project.projectId }] : []
+  }).sort(byTokensThenKey)
+  const workItemUsage = [...workItems.entries()].flatMap(([key, workItem]) => {
+    const usage = combineAgentRunUsage(workItem.usages)
+    return usage ? [{ key, usage, entry: workItem.entry }] : []
+  }).sort(byTokensThenKey)
+  return {
+    total,
+    projects: projectUsage.map(({ projectId, usage }) => ({ ...(projectId === undefined ? {} : { projectId }), usage })),
+    workItems: workItemUsage.slice(0, topWorkItems).map(({ entry, usage }) => ({
+      workItemId: entry.workItemId,
+      title: entry.title,
+      ...(entry.projectId === undefined ? {} : { projectId: entry.projectId }),
+      usage,
+    })),
+    runsHasMore,
   }
 }

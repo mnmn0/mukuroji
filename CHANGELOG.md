@@ -27,6 +27,9 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
 - server API: `POST /api/v1/agent-telemetry/v1/logs` を追加しました。Claude Code の OpenTelemetry logs
   （OTLP/HTTP JSON）からトークン数と推定費用を受け取り、同じ instance の Run に時刻で割り当てます。scope は新しい
   `agent-telemetry:write` で、本人用 token の既定の scope に含まれます（ADR 0061）。MCP の変更はありません。
+- Web: Factory board の期間サマリーに、期間内に終わった Run のトークン使用量（合計・Project 別・上位のタスク）を
+  表示します。推定費用は Team manager にだけ表示します。agent を接続の画面で Claude Code に instance ID を入力すると、
+  トークン使用量を送る設定も作ります。
 - `get_task` が、タスクに link された Document のうち credential 所有者が閲覧できるものの最初の 1 ページを
   `relatedDocuments` で返します。古い server と、所有者が Document を読めない場合は `null` です。
 - 読み取りツール `list_task_documents`（link された Document の一覧）と `read_document`（ページ・テンプレートの
