@@ -55,6 +55,8 @@ Work Item の更新後に共通で流れるもの（audit outbox の `work-item.
   element 単位の競合として扱われる。
 - 権限のない人が Work Item を完了にしても Document が変わる。反映先は編集者がリンクした要素に限り、
   変わるのは完了状態だけなので受け入れる。
-- 1 つの Work Item に紐づく backlink は最大 1,000 行（50 行 × 20 page）まで読む。これを超える
-  リンクは想定しない。
+- 1 つの Work Item に紐づく backlink は page の続きがなくなるまですべて読む。1 つの Document で
+  完了にする要素が 1 回の operation 上限（4）を超えるときは、4 件ずつ Document を読み直して保存する。
+- archive 済みの Document と、archive 済みの folder の下にある Document は変えない。祖先の folder の
+  revision を同じ transaction で確かめ、途中で archive されたら読み直す。
 - 更新した文書：`docs/documents.md`、`docs/guide/member.md`。

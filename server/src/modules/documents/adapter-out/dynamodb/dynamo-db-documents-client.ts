@@ -142,8 +142,6 @@ import {
 } from '../../../workspace-search'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
 
-/** Most backlink pages read for one Work Item completion. */
-const DOCUMENT_WORK_ITEM_COMPLETION_MAX_BACKLINK_PAGES = 20
 
 /** Work Item backlink target fence の schema version です。 */
 const DOCUMENT_BACKLINK_TARGET_FENCE_SCHEMA_VERSION = 1
@@ -4146,11 +4144,9 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     assertIdentifier(input.actorId, 'actorId')
     const documentIds = new Set<string>()
     let exclusiveStartKey: Record<string, unknown> | undefined
-    for (
-      let page = 0;
-      page < DOCUMENT_WORK_ITEM_COMPLETION_MAX_BACKLINK_PAGES;
-      page += 1
-    ) {
+    // Every backlink page is read: stopping at a page budget would acknowledge
+    // the event while later Documents were never visited.
+    do {
       const result = await this.client.send(new QueryCommand({
         TableName: this.tableName,
         KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
@@ -4174,8 +4170,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
         }
       }
       exclusiveStartKey = result.LastEvaluatedKey
-      if (exclusiveStartKey === undefined) break
-    }
+    } while (exclusiveStartKey !== undefined)
     const updatedDocumentIds: string[] = []
     for (const documentId of documentIds) {
       if (await this.reflectWorkItemCompletionInDocument(input, documentId)) {
@@ -4186,7 +4181,12 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
   }
 
   /**
-   * Applies the completion to one Document, retrying on concurrent edits.
+   * Applies the completion to one Document in operation batches the reducer
+   * accepts, rereading the Document between commits.
+   *
+   * Each commit completes up to {@link DOCUMENT_MAX_OPERATION_COUNT} elements,
+   * and the next plan leaves them out because they are already done, so the
+   * loop ends once nothing is left to complete.
    *
    * @param input - Completion request.
    * @param documentId - Document that links to the Work Item.
@@ -4196,14 +4196,42 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     input: ReflectWorkItemCompletionRequest,
     documentId: string,
   ): Promise<boolean> {
+    let changed = false
+    while (await this.reflectWorkItemCompletionBatch(input, documentId)) {
+      changed = true
+    }
+    return changed
+  }
+
+  /**
+   * Commits one batch of completion operations to a Document, retrying on
+   * concurrent edits.
+   *
+   * Documents that are archived, or that sit beneath an archived folder, are
+   * left alone. The ancestors' revisions are checked in the same transaction,
+   * so archiving a folder while the batch is written fails the write and the
+   * retry sees the archive.
+   *
+   * @param input - Completion request.
+   * @param documentId - Document that links to the Work Item.
+   * @returns Whether a batch was committed.
+   */
+  private async reflectWorkItemCompletionBatch(
+    input: ReflectWorkItemCompletionRequest,
+    documentId: string,
+  ): Promise<boolean> {
     for (let attempt = 0; attempt < DOCUMENT_CONDITIONAL_RETRY_LIMIT; attempt += 1) {
       const row = await this.getDocumentRow(input.workspaceId, documentId)
       if (row === undefined || row.document.archivedAt !== undefined) return false
+      const ancestorRows = await this.loadAncestorRows(input.workspaceId, row.document)
+      if (ancestorRows.some((ancestor) => ancestor.document.archivedAt !== undefined)) {
+        return false
+      }
       const operations = planWorkItemCompletionOperations(
         row.document,
         input.workItemId,
         `work-item-completion:${input.eventId}`,
-      )
+      ).slice(0, DOCUMENT_MAX_OPERATION_COUNT)
       if (operations.length === 0) return false
       const conflictFloorRevision = row.operationConflictFloorRevision ?? 1
       const nextRevision = row.revision + 1
@@ -4237,7 +4265,15 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
             }
           : {}),
       }
-      const actions = [
+      const actions: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+        ...ancestorRows.map((ancestor) => ({
+          ConditionCheck: {
+            TableName: this.tableName,
+            Key: { workspaceId: input.workspaceId, recordKey: ancestor.recordKey },
+            ConditionExpression: 'revision = :expectedRevision',
+            ExpressionAttributeValues: { ':expectedRevision': ancestor.revision },
+          },
+        })),
         currentDocumentPut(this.tableName, nextRow, row.revision),
         documentSearchAccessPut(this.tableName, input.workspaceId, reduced.document),
         documentSearchBodyPut(this.tableName, input.workspaceId, reduced.document),

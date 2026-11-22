@@ -2458,6 +2458,145 @@ test('checks the checklist items and notes turned into a completed Work Item', a
   })).toEqual({ updatedDocumentIds: [] })
 })
 
+test('completes more linked notes than one operation batch holds', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const noteIds = ['n1', 'n2', 'n3', 'n4', 'n5', 'n6']
+  const whiteboard = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Retro',
+    whiteboard: {
+      objects: noteIds.map((id, index) => ({
+        id,
+        type: 'note' as const,
+        text: `Note ${id}`,
+        bounds: { x: index * 220, y: 0, width: 200, height: 100 },
+        zIndex: index + 1,
+      })),
+      connectors: [],
+      frames: [],
+    },
+  })
+  let linkedRevision = whiteboard.revision
+  for (const batch of [noteIds.slice(0, 4), noteIds.slice(4)]) {
+    const applied = await client.applyOperations({
+      workspaceId: 'workspace-1',
+      documentId: whiteboard.id,
+      access: ownerAccess,
+      input: {
+        baseRevision: linkedRevision,
+        clientId: 'editor-1',
+        operations: batch.map((objectId) => ({
+          type: 'upsert-relation' as const,
+          operationId: `link-${objectId}`,
+          relation: {
+            id: `whiteboard-note:${objectId}`,
+            source: { kind: 'whiteboard-object' as const, objectId },
+            target: { kind: 'work-item' as const, workItemId },
+            createdAt: '2026-07-18T00:00:00.000Z',
+            createdByUserId: 'owner@example.com',
+          },
+        })),
+      },
+    })
+    linkedRevision = applied.revision
+  }
+
+  const reflected = await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  })
+
+  expect(reflected.updatedDocumentIds).toEqual([whiteboard.id])
+  const updated = await client.get({ workspaceId: 'workspace-1', documentId: whiteboard.id, access: ownerAccess })
+  expect(updated.revision).toBe(linkedRevision + 2)
+  if (updated.kind !== 'whiteboard') throw new Error('Expected a Whiteboard.')
+  expect(updated.whiteboard.objects.map((object) => object.type === 'note' && object.done === true))
+    .toEqual(noteIds.map(() => true))
+})
+
+test('leaves Documents beneath an archived folder unchanged on completion', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const folder = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'folder',
+    scope: { type: 'workspace' },
+    title: 'Old meetings',
+  })
+  const page = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    parentId: folder.id,
+    title: 'Minutes',
+    blocks: [{
+      id: 'actions',
+      type: 'checklist',
+      items: [{ id: 'linked', text: 'Send the estimate', checked: false }],
+    }],
+  })
+  const linked = await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: page.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-item',
+        relation: {
+          id: 'checklist-item:actions:linked',
+          source: { kind: 'block', blockId: 'actions' },
+          target: { kind: 'work-item', workItemId },
+          createdAt: '2026-07-18T00:00:00.000Z',
+          createdByUserId: 'owner@example.com',
+        },
+      }],
+    },
+  })
+  await client.archive({
+    workspaceId: 'workspace-1',
+    documentId: folder.id,
+    expectedRevision: folder.revision,
+    access: ownerAccess,
+  })
+
+  expect(await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  })).toEqual({ updatedDocumentIds: [] })
+  await client.restoreArchived({
+    workspaceId: 'workspace-1',
+    documentId: folder.id,
+    expectedRevision: folder.revision + 1,
+    access: ownerAccess,
+  })
+  const restored = await client.get({ workspaceId: 'workspace-1', documentId: page.id, access: ownerAccess })
+  expect(restored.revision).toBe(linked.revision)
+
+  // Once the folder is back, the same completion goes through with the
+  // folder's revision checked in the transaction.
+  expect(await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  })).toEqual({ updatedDocumentIds: [page.id] })
+})
+
 test('indexes Whiteboard work-item cards as transactional backlinks', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)
