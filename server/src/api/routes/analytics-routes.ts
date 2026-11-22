@@ -255,7 +255,7 @@ async function readAnalyticsExportNames(
       ? { members: await readAnalyticsExportMemberNames(principal, teams, memberKeys) }
       : {}),
     ...(readsConfigurations
-      ? await readAnalyticsExportConfigurationNames(principal, teams)
+      ? await readAnalyticsExportConfigurationNames(principal, teams, query.filter.teamIds)
       : {}),
   }
 }
@@ -303,16 +303,24 @@ async function readAnalyticsExportMemberNames(
 /**
  * Reads the Work Item Type and custom field names of the given Teams.
  *
+ * Custom field IDs are unique only within a Team, so a field name comes from the Teams the query
+ * reads; when those Teams name the same field differently, every name is listed with its Team.
+ *
  * @param principal - Authenticated principal.
  * @param teams - Visible Teams.
+ * @param queryTeamIds - Teams the query filters to; all visible Teams when unset or empty.
  * @returns Work Item Type names (`Team · Type`) keyed by Team-qualified key, and custom field names.
  */
 async function readAnalyticsExportConfigurationNames(
   principal: WorkspacePrincipal,
   teams: readonly { id: string; name: string }[],
+  queryTeamIds: readonly string[] | undefined,
 ) {
+  const scopeTeamIds = queryTeamIds === undefined || queryTeamIds.length === 0
+    ? undefined
+    : new Set(queryTeamIds)
   const workItemTypes = new Map<string, string>()
-  const customFields = new Map<string, string>()
+  const fieldCandidates = new Map<string, Array<{ teamName: string; name: string }>>()
   for (let offset = 0; offset < teams.length; offset += ANALYTICS_EXPORT_NAME_READ_CONCURRENCY) {
     const batch = teams.slice(offset, offset + ANALYTICS_EXPORT_NAME_READ_CONCURRENCY)
     const responses = await Promise.allSettled(batch.map((team) =>
@@ -329,10 +337,23 @@ async function readAnalyticsExportConfigurationNames(
       for (const type of [DEFAULT_WORK_ITEM_TYPE, ...types]) {
         workItemTypes.set(createSearchWorkItemTypeKey(team.id, type.id), `${team.name} · ${type.name}`)
       }
+      if (scopeTeamIds !== undefined && !scopeTeamIds.has(team.id)) continue
       for (const field of configuration.customFields) {
-        if (!customFields.has(field.id)) customFields.set(field.id, field.name)
+        const candidates = fieldCandidates.get(field.id) ?? []
+        candidates.push({ teamName: team.name, name: field.name })
+        fieldCandidates.set(field.id, candidates)
       }
     }
+  }
+  const customFields = new Map<string, string>()
+  for (const [fieldId, candidates] of fieldCandidates) {
+    const names = new Set(candidates.map((candidate) => candidate.name))
+    customFields.set(
+      fieldId,
+      names.size === 1
+        ? candidates[0]?.name ?? fieldId
+        : candidates.map((candidate) => `${candidate.name} (${candidate.teamName})`).join(' / '),
+    )
   }
   return { workItemTypes, customFields }
 }
@@ -1140,7 +1161,20 @@ async function resolveAnalyticsExportSnapshot(
     )
   }
   if (input.query !== undefined) {
-    return await executeNormalizedAnalyticsQuery(principal, input.query)
+    const executed = await executeNormalizedAnalyticsQuery(principal, input.query)
+    if (input.titleReportId === undefined) return executed
+    const report = await requireAnalyticsReport(
+      principal,
+      readAnalyticsIdentifier(input.titleReportId, 'Analytics report ID'),
+    )
+    return { ...executed, title: report.name }
+  }
+  if (input.titleReportId !== undefined) {
+    throw new AnalyticsError(
+      400,
+      'InvalidAnalyticsExport',
+      'Analytics export accepts titleReportId only with query.',
+    )
   }
   if (input.reportId !== undefined) {
     const report = await requireAnalyticsReport(

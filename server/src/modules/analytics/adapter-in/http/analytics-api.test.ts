@@ -8,10 +8,12 @@ const {
   getTestAppDependencies,
   createAnalyticsAuditEvent,
   createAnalyticsQueryInput,
+  createFakeWorkItemConfigurationClient,
   createHistoricalAnalyticsWorkItem,
   createHistoricalAnalyticsWorkItemEvent,
   createTeamIssuesFake,
   resetTestApp,
+  createTestWorkItemConfiguration,
   setTestAppDependencies,
 } = createApiTestHarness()
 import {
@@ -1235,6 +1237,121 @@ test('prints only the names of Teams the caller reads when a Project ID repeats 
   expect(source).toContain('Teams: Core Team, other-team')
   expect(source).not.toContain('Other Team')
   expect(source).not.toContain('Other Refero')
+})
+
+test('heads a live-query PDF with the open saved report name', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const created = await analyticsApiRequest('/api/analytics/reports', {
+    id: 'titled-report',
+    name: 'Delivery review',
+    visibility: 'personal',
+    timeZone: 'UTC',
+    filter: query.filter,
+    widgets: query.widgets,
+  })
+  expect(created.status).toBe(201)
+
+  const exported = await analyticsApiRequest('/api/analytics/export', {
+    query,
+    titleReportId: 'titled-report',
+    format: 'pdf',
+    locale: 'en',
+  })
+  expect(exported.status).toBe(200)
+  const source = Buffer.from(await exported.arrayBuffer()).toString('latin1')
+  expect(source).toContain('(Delivery review)')
+  expect(source).not.toContain('mukuroji analytics')
+
+  const missing = await analyticsApiRequest('/api/analytics/export', {
+    query,
+    titleReportId: 'missing-report',
+    format: 'pdf',
+  })
+  expect(missing.status).toBe(404)
+  const withoutQuery = await analyticsApiRequest('/api/analytics/export', {
+    reportId: 'titled-report',
+    titleReportId: 'titled-report',
+    format: 'pdf',
+  })
+  expect(withoutQuery.status).toBe(400)
+})
+
+test('names a custom field from the Teams the query reads', async () => {
+  configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'other-team',
+      name: 'Other Team',
+      projects: [{ id: 'other-project', name: 'Other Project', tone: 'blue' }],
+    }],
+    projectAccesses: [
+      { projectId: 'refero', teamId: 'core-team', role: 'viewer' },
+      { projectId: 'other-project', teamId: 'other-team', role: 'viewer' },
+    ],
+  })
+  const fieldNames: Record<string, string> = { 'core-team': 'Impact', 'other-team': 'Severity' }
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration(_workspaceId, teamId) {
+        return {
+          configuration: {
+            ...createTestWorkItemConfiguration('team', teamId),
+            customFields: [{
+              id: 'impact',
+              name: fieldNames[teamId] ?? 'impact',
+              type: 'text',
+              sortOrder: 1,
+              required: false,
+            }],
+          },
+          inheritedFrom: 'default',
+        }
+      },
+    }),
+  })
+  const query = createAnalyticsQueryInput()
+  const exportFor = async (teamIds: string[]) => {
+    const response = await analyticsApiRequest('/api/analytics/export', {
+      query: {
+        ...query,
+        filter: {
+          ...query.filter,
+          teamIds,
+          customFields: [{ fieldId: 'impact', operator: 'equals', value: 'high' }],
+        },
+      },
+      format: 'pdf',
+      locale: 'en',
+    })
+    expect(response.status).toBe(200)
+    return Buffer.from(await response.arrayBuffer()).toString('latin1')
+  }
+
+  const otherTeamOnly = await exportFor(['other-team'])
+  expect(otherTeamOnly).toContain('Custom fields: Severity')
+  expect(otherTeamOnly).not.toContain('Impact')
+  expect(await exportFor(['core-team', 'other-team']))
+    .toContain('Impact \\(Core Team\\) / Severity \\(Other Team\\)')
 })
 
 /**

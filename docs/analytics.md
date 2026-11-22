@@ -42,6 +42,13 @@ directory（`GET /api/teams/projects` と同じ絞り込み）から、member �
 一覧から、Work Item Type と custom field の名前は見える Team の configuration から読みます。
 member と configuration は query が担当者・Work Item Type・custom field を使うときだけ読み、
 読み取りに失敗した分は元の値で出力します。
+Project ID と custom field ID は Team の中でしか一意でないので、Project 名は行の Team と組で引き、
+custom field 名は query が絞った Team の configuration から引きます。Team が決まらず名前が食い違う
+ときは「名前 (Team) / 名前 (Team)」と併記します。
+
+PDF の見出しは保存済み report の名前です。保存済み report を開いて live query のまま出力するときは、
+Web が `titleReportId` を添え、server が caller の権限で report を読んで名前だけを使います（出力内容は
+`query` のまま）。
 
 CSV は既存の列の後ろに「Dimension key」「Team」「Project」を足しました。Group 行の
 「Dimension value」は名前、「Dimension key」は元の key です。Table 行の「Team」「Project」は

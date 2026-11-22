@@ -785,6 +785,7 @@ export function ReportsPage() {
           locale,
           queryInput,
           routeState.snapshotId,
+          selectedReport?.id,
         ),
       })
       downloadArtifact(artifact.blob, artifact.filename)

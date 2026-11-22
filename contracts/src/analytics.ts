@@ -562,6 +562,11 @@ export type AnalyticsExportInput = {
   reportId?: string
   /** Ad-hoc query を出力する場合の入力です。 */
   query?: AnalyticsQueryInput
+  /**
+   * `query` と一緒に送る、PDF の見出しに名前を使う保存済み report の ID です。
+   * 出力内容は `query` が決め、report は名前だけに使います。
+   */
+  titleReportId?: string
   /** Artifact の形式です。 */
   format: 'csv' | 'pdf'
   /**
