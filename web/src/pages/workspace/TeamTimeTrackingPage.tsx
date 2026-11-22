@@ -71,10 +71,10 @@ export function TeamTimeTrackingPage() {
   const accessToken = enabled ? workspace.accessToken : undefined
   const calendarSettings = useWorkspaceCalendarSettings(accessToken, enabled)
   const weekStartDay = calendarSettings.settings?.weekStartDay
-  // Until the Workspace categories load, or when they fail to, the built-in categories are shown;
-  // the server still refuses a category the Workspace does not offer.
-  const categorySettings = useWorkspaceTimeEntryCategories(accessToken, enabled).settings ??
-    DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
+  const categories = useWorkspaceTimeEntryCategories(accessToken, enabled)
+  // Until the Workspace categories load, saved entries are labelled with the built-in names, but no
+  // category is offered for new indirect work, since the Workspace may have retired them.
+  const categorySettings = categories.settings ?? DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS
   const requestedWeek = searchParams.get('week') ?? undefined
   const weekStart = resolveWeekStart(requestedWeek, undefined, weekStartDay)
   // A weekly report opened from its history keeps the week it was saved under, even when the
@@ -110,9 +110,9 @@ export function TeamTimeTrackingPage() {
   // Indirect work goes on a Project the member may write, or on the Team when it allows time without one.
   const indirectTargets = useMemo(() => {
     const capabilities = writeAccess.data?.capabilities
-    if (!capabilities || !teamId) return undefined
+    if (!capabilities || !teamId || !categories.settings) return undefined
     return selectIndirectTimeEntryTargets(activeTeam?.projects ?? emptyTeamProjects, teamId, capabilities)
-  }, [activeTeam?.projects, teamId, writeAccess.data?.capabilities])
+  }, [activeTeam?.projects, categories.settings, teamId, writeAccess.data?.capabilities])
   // Until both reads land, an empty list means unknown, not "nothing writable".
   const isLoadingWorkItemOptions = !workItems.data || !writeAccess.data
   const workItemTitles = useMemo(
@@ -176,7 +176,7 @@ export function TeamTimeTrackingPage() {
   }
 
   return (
-    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error]}>
+    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error, categories.error]}>
       <TimeEntryCategoryContext value={categorySettings}>
         <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
           <TimeTrackingViewTabs
@@ -194,6 +194,14 @@ export function TeamTimeTrackingPage() {
                 type="button"
               >
                 {t('timeTracking.page.lookupRetry')}
+              </button>
+            </div>
+          ) : null}
+          {categories.error && !categories.settings ? (
+            <div className="flex flex-wrap items-center gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-semibold text-fg-red-700" role="alert">
+              <span>{t('timeTracking.page.categoriesError')}</span>
+              <button className="workbench-button-secondary min-h-8 px-3" onClick={categories.retry} type="button">
+                {t('timeTracking.page.calendarSettingsRetry')}
               </button>
             </div>
           ) : null}

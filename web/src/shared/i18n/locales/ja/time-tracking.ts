@@ -7,6 +7,7 @@ export const timeTrackingMessages = {
   'timeTracking.page.lookupRetry': 'タスクを再読み込み',
   'timeTracking.page.calendarSettingsError': '週の開始曜日の設定を読み込めませんでした。週を正しく表示するには再読み込みしてください。',
   'timeTracking.page.calendarSettingsRetry': '設定を再読み込み',
+  'timeTracking.page.categoriesError': 'Workspace の作業区分を読み込めませんでした。間接作業を記録するには再読み込みしてください。',
   'timeTracking.page.calendarSettingsLoading': '週の設定を読み込んでいます…',
   'timeTracking.view.navigation': '工数の表示',
   'timeTracking.view.timesheet': '自分のタイムシート',
