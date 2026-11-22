@@ -15,6 +15,7 @@ export type AnalyticsMetricKey =
   | 'sla'
   | 'remaining-scope'
   | 'cumulative-flow'
+  | 'milestone-trend'
 
 /**
  * How throughput, velocity, and forecast count completed and remaining work.
@@ -294,6 +295,9 @@ export type AnalyticsSeriesPoint = {
   /**
    * Bucket 末時点の内訳です。`cumulative-flow` では status category ごとの件数、
    * `remaining-scope` では burnup 用の `scope`（total scope）と `completed` を返します。
+   * `milestone-trend` では key が Milestone の Planning entity ID、value がその時点の予定日
+   * （forecast の終了日）を 1970-01-01 からの日数で表した値です（{@link analyticsEpochDayToDate}）。
+   * 予定日が分からない、または記録時の scope が現在と違う Milestone は含めません。
    */
   segments?: AnalyticsSeriesSegment[]
 }
@@ -306,7 +310,44 @@ export type AnalyticsSeriesSegment = {
   value: number
 }
 
-/** Dimension ごとに分割した metric value です。 */
+/**
+ * Converts a `milestone-trend` segment value back to its calendar date.
+ *
+ * @param epochDay - Days since 1970-01-01.
+ * @returns The `YYYY-MM-DD` date, or `undefined` when the value is not a whole day number or its
+ *   year has more than four digits.
+ */
+export function analyticsEpochDayToDate(epochDay: number): string | undefined {
+  if (!Number.isSafeInteger(epochDay)) return undefined
+  const date = new Date(epochDay * 86_400_000)
+  if (Number.isNaN(date.getTime())) return undefined
+  // Years outside 0000-9999 have a signed six-digit form that is not a `YYYY-MM-DD` date.
+  const text = date.toISOString().slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/u.test(text) ? text : undefined
+}
+
+/**
+ * Converts a `YYYY-MM-DD` calendar date to the day number used by `milestone-trend` segments.
+ *
+ * @param date - Calendar date.
+ * @returns Days since 1970-01-01, or `undefined` when the date is invalid.
+ */
+export function analyticsDateToEpochDay(date: string): number | undefined {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(date)) return undefined
+  const time = Date.parse(`${date}T00:00:00.000Z`)
+  if (Number.isNaN(time) || new Date(time).toISOString().slice(0, 10) !== date) return undefined
+  return Math.round(time / 86_400_000)
+}
+
+/**
+ * Dimension ごとに分割した metric value です。
+ *
+ * `milestone-trend` では Milestone ごとに一つ返し、key は Planning entity ID、label は title、
+ * value は期間中に予定日が動いた日数（期間末の予定日 − 期間開始の予定日、遅れは正）です。
+ * 期間開始の時点で予定日を返せない（作成前、または別の scope にあった）場合は、期間内で最初に
+ * 返せた予定日を基準にします。期間末の予定日を返せない場合は null です。sampleSize は期間中の
+ * 予定日の変更回数です。
+ */
 export type AnalyticsGroup = {
   /** Stable dimension key です。 */
   key: string

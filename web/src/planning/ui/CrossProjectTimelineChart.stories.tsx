@@ -45,7 +45,8 @@ const meta = {
     entities: planningSnapshotFixture.entities,
     entityTypes: labels.entityTypes,
     labels: labels.crossProjectTimeline,
-    onOpenProject: () => undefined,
+    onOpenProjectGantt: () => undefined,
+    onOpenProjectOverview: () => undefined,
     onSelectEntity: () => undefined,
     today: '2026-08-20',
   },
@@ -62,6 +63,15 @@ export const Default: Story = {}
 /** Ten Projects compared on one axis. */
 export const TenProjects: Story = {
   args: { entities: tenProjectEntities },
+}
+
+/** Rows grouped by Portfolio name their Project and open its overview or Gantt chart. */
+export const GroupedByPortfolio: Story = {
+  args: { entities: tenProjectEntities },
+  beforeEach: () => {
+    window.sessionStorage.setItem('mukuroji.planning.crossProjectTimeline.grouping', 'portfolio')
+    return () => window.sessionStorage.removeItem('mukuroji.planning.crossProjectTimeline.grouping')
+  },
 }
 
 /** No timeline entity has dates yet. */

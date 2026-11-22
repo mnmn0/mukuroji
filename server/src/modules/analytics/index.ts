@@ -16,9 +16,19 @@ export {
   ANALYTICS_REPORT_DELIVERED_EVENT_TYPE,
   createAnalyticsDeliveryAuditNotifier,
 } from './adapter-out/dynamodb/analytics-delivery-notifier'
+/** Milestone date history read by the `milestone-trend` metric. */
+export {
+  ANALYTICS_MILESTONE_TREND_FIELDS,
+  createAnalyticsMilestoneScopeKey,
+  type AnalyticsMilestoneChange,
+  type AnalyticsMilestoneFieldChange,
+  type AnalyticsMilestoneHistory,
+} from './analytics-milestone-trend'
 export {
   AnalyticsError,
   analyticsFilterIncludesWorkItem,
+  analyticsQueryReadsMilestones,
+  analyticsSnapshotReadMilestones,
   calculateAnalyticsNextRunAt,
   compareDynamoDbStringSortKeys,
   createAnalyticsCsv,
