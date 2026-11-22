@@ -220,6 +220,28 @@
                   "Effect": "Allow",
                   "Action": "cloudwatch:DescribeAlarms",
                   "Resource": { "Fn::Sub": "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*" }
+                },
+                {
+                  "Sid": "ReadWorkspaceAuditRetention",
+                  "Effect": "Allow",
+                  "Action": "dynamodb:GetItem",
+                  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MukurojiStackName}-TenantAdministrationTable*" },
+                  "Condition": {
+                    "ForAllValues:StringEquals": {
+                      "dynamodb:LeadingKeys": [{ "Ref": "WorkspaceDirectoryId" }],
+                      "dynamodb:Attributes": ["workspaceId", "recordKey", "payload"]
+                    },
+                    "StringEqualsIfExists": { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }
+                  }
+                },
+                {
+                  "Sid": "RecordRuntimeControlAudit",
+                  "Effect": "Allow",
+                  "Action": "dynamodb:PutItem",
+                  "Resource": { "Fn::Sub": "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${MukurojiStackName}-AuditEventsTable*" },
+                  "Condition": {
+                    "ForAllValues:StringEquals": { "dynamodb:LeadingKeys": [{ "Ref": "WorkspaceDirectoryId" }] }
+                  }
                 }
               ]
             }

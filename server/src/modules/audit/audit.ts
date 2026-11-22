@@ -1262,7 +1262,6 @@ export class DynamoDbAuditEventsClient {
       : undefined
     const expressionAttributeNames: Record<string, string> = {
       '#partitionKey': plan.partitionName,
-      '#timelineKey': plan.sortName,
       '#directoryId': 'directoryId',
     }
     const expressionAttributeValues: Record<string, unknown> = {
@@ -1273,7 +1272,9 @@ export class DynamoDbAuditEventsClient {
 
     addTimeKeyCondition(
       keyConditions,
+      expressionAttributeNames,
       expressionAttributeValues,
+      plan.sortName,
       normalizedInput.from,
       normalizedInput.to,
     )
@@ -1342,7 +1343,6 @@ export class DynamoDbAuditEventsClient {
     const names: Record<string, string> = {
       '#directoryId': 'directoryId',
       '#partitionKey': plan.partitionName,
-      '#timelineKey': plan.sortName,
       '#expiresAt': 'expiresAt',
     }
     const values: Record<string, unknown> = {
@@ -1351,7 +1351,7 @@ export class DynamoDbAuditEventsClient {
       ':durableAfter': durableAfter,
     }
     const filters = ['#partitionKey = :partitionValue']
-    addTimeKeyCondition(filters, values, normalizedInput.from, normalizedInput.to)
+    addTimeKeyCondition(filters, names, values, plan.sortName, normalizedInput.from, normalizedInput.to)
     addAuditQueryFilters(filters, names, values, normalizedInput, plan)
     filters.push('(attribute_not_exists(#expiresAt) OR #expiresAt > :durableAfter)')
     const response = await this.documentClient.send(new QueryCommand({
@@ -1598,6 +1598,8 @@ const publicAuditMetadataFields = new Set([
   'projectId',
   'roleId',
   'rootCommentId',
+  // Operator runtime-control switches (scripts/runtime-control.ts); holds no secret or tenant data.
+  'runtimeControl',
   'scopeKind',
   'teamId',
 ])
@@ -1883,12 +1885,28 @@ function createAuditQueryPlan(
   }
 }
 
+/**
+ * Adds the timeline range condition of an audit query.
+ *
+ * The timeline attribute name is added only with a condition that uses it, because DynamoDB
+ * rejects a request whose `ExpressionAttributeNames` holds an unused name.
+ *
+ * @param keyConditions - Conditions receiving the range condition.
+ * @param names - Expression attribute names of the request.
+ * @param values - Expression attribute values of the request.
+ * @param sortName - Timeline attribute of the queried index.
+ * @param from - Inclusive lower bound, when given.
+ * @param to - Inclusive upper bound, when given.
+ */
 function addTimeKeyCondition(
   keyConditions: string[],
+  names: Record<string, string>,
   values: Record<string, unknown>,
+  sortName: string,
   from: string | undefined,
   to: string | undefined,
 ) {
+  if (from || to) names['#timelineKey'] = sortName
   if (from && to) {
     keyConditions.push('#timelineKey BETWEEN :fromKey AND :toKey')
     values[':fromKey'] = `${from}#`

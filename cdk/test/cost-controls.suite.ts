@@ -155,12 +155,12 @@ test('records no X-Ray traces unless LambdaTracingMode turns active tracing back
   }
 });
 
-test('creates the AI alarms only when AI assistance is configured', () => {
+test('creates the AI alarms only when Bedrock or an external AI provider is enabled', () => {
   const aiAlarms = Object.entries(synthesizedTemplate.findResources('AWS::CloudWatch::Alarm'))
     .filter(([logicalId]) => logicalId.startsWith('AiAssistance'));
 
   expect(aiAlarms).toHaveLength(10);
   for (const [, alarm] of aiAlarms) {
-    expect(alarm.Condition).toBe('AiAssistanceConfigured');
+    expect(alarm.Condition).toBe('AiAssistanceAnyProviderConfigured');
   }
 });

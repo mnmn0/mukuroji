@@ -123,7 +123,7 @@ export function createMastraBedrockAiModelGateway(
         const deadlineError = new AiAssistanceError(
           'timeout',
           'AiAssistanceProviderTimeout',
-          'Bedrock Runtime did not complete within the configured deadline.',
+          'The AI provider did not complete within the configured deadline.',
         )
         timeout = setTimeout(() => {
           deadlineExpired = true
@@ -186,7 +186,7 @@ export function createMastraBedrockAiModelGateway(
           throw new AiAssistanceError(
             'upstream',
             'AiAssistanceModelRefused',
-            'Bedrock Runtime refused generation because its content filter was activated.',
+            'The AI provider refused generation because its content filter was activated.',
             undefined,
             usage,
             providerTraceId,
@@ -219,7 +219,7 @@ export function createMastraBedrockAiModelGateway(
           throw new AiAssistanceError(
             'timeout',
             'AiAssistanceProviderTimeout',
-            'Bedrock Runtime did not complete within the configured deadline.',
+            'The AI provider did not complete within the configured deadline.',
           )
         }
         if (error instanceof AiAssistanceError) throw error
@@ -233,7 +233,7 @@ export function createMastraBedrockAiModelGateway(
           throw new AiAssistanceError(
             'upstream',
             'AiAssistanceModelRefused',
-            'Bedrock Runtime refused generation because its content filter was activated.',
+            'The AI provider refused generation because its content filter was activated.',
             { cause: error },
             refusalUsage,
           )
@@ -242,14 +242,14 @@ export function createMastraBedrockAiModelGateway(
           throw new AiAssistanceError(
             'rate-limit',
             'AiAssistanceProviderRateLimited',
-            'Bedrock Runtime rate limit was exceeded.',
+            'The AI provider rate limit was exceeded.',
             { cause: error },
           )
         }
         throw new AiAssistanceError(
           'upstream',
           'AiAssistanceProviderError',
-          'Bedrock Runtime generation failed.',
+          'AI provider generation failed.',
           { cause: error },
         )
       } finally {

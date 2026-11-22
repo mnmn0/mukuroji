@@ -532,7 +532,11 @@ test('analytics scheduled delivery reauthorizes source data and notifies through
       })
       .filter((action): action is string => typeof action === 'string');
 
+  // Work Item history rows expire with their oldest audit event (ADR 0042).
+  expect(template.toJSON().Resources[analyticsTableLogicalId].Properties.TimeToLiveSpecification)
+    .toEqual({ AttributeName: 'historyExpiresAt', Enabled: true });
   expect(new Set(actionsForResource(analyticsTableLogicalId))).toEqual(new Set([
+    'dynamodb:BatchGetItem',
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
@@ -563,8 +567,14 @@ test('analytics scheduled delivery reauthorizes source data and notifies through
     .filter((action): action is string =>
       typeof action === 'string' && action.startsWith('dynamodb:')
     );
+  // BatchGetItem is allowed only on the Analytics table above, for history rows (ADR 0042).
+  expect(scheduleStatements.filter((statement) => {
+    const action = (statement as { Action?: unknown }).Action;
+    return Array.isArray(action) && action.includes('dynamodb:BatchGetItem');
+  }).map((statement) => (statement as { Resource?: unknown }).Resource)).toEqual([
+    { 'Fn::GetAtt': [analyticsTableLogicalId, 'Arn'] },
+  ]);
   for (const forbiddenAction of [
-    'dynamodb:BatchGetItem',
     'dynamodb:BatchWriteItem',
     'dynamodb:DeleteItem',
     'dynamodb:Scan',
@@ -962,7 +972,7 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
       S3Key: Match.stringLikeRegexp('\\.zip$'),
     },
     Description:
-      'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.',
+      'Projects audit outbox events into collaboration, Webhook, connector deliveries, tenant retention, and Analytics history.',
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
     Environment: {
@@ -1176,6 +1186,43 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
     });
   }
 });
+
+test('audit stream consumers skip the operator runtime-control switch events', () => {
+  const resources: unknown = synthesizedTemplate.toJSON().Resources;
+  if (!isRecord(resources)) throw new Error('The synthesized template has no Resources object.');
+  const auditMappings = Object.values(resources).filter((resource): resource is Record<string, unknown> =>
+    isRecord(resource) &&
+    resource.Type === 'AWS::Lambda::EventSourceMapping' &&
+    isRecord(resource.Properties) &&
+    JSON.stringify(resource.Properties.EventSourceArn).includes('AuditEventsTable0723963E')
+  );
+  // The audit projection and the automation worker are the two AuditEvents stream readers.
+  expect(auditMappings).toHaveLength(2);
+  for (const mapping of auditMappings) {
+    const properties = mapping.Properties;
+    const criteria = isRecord(properties) ? properties.FilterCriteria : undefined;
+    const filters = isRecord(criteria) ? criteria.Filters : undefined;
+    if (!Array.isArray(filters)) throw new Error('An AuditEvents mapping has no FilterCriteria.Filters array.');
+    const patterns = filters.map((filter: unknown) => {
+      if (!isRecord(filter) || typeof filter.Pattern !== 'string') throw new Error('A filter has no Pattern string.');
+      return JSON.parse(filter.Pattern);
+    });
+    expect(patterns).toEqual([
+      { dynamodb: { NewImage: { entityType: { S: [{ 'anything-but': ['runtime-control'] }] } } } },
+      { dynamodb: { NewImage: { entityType: { S: [{ exists: false }] } } } },
+    ]);
+  }
+});
+
+/**
+ * Narrows a synthesized template value to a plain object.
+ *
+ * @param value - Any value read from the template JSON.
+ * @returns Whether the value is a non-null, non-array object.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 test('audit Webhook projection and SQS delivery are durable encrypted and observable', () => {
   const template = synthesizedTemplate;
@@ -1436,7 +1483,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
   expect(deliveryPolicies).toContain('sqs:SendMessage');
   const projectionFunction = Object.values(resources).find((resource) =>
     (resource as { Properties?: { Description?: string } }).Properties?.Description ===
-      'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.'
+      'Projects audit outbox events into collaboration, Webhook, connector deliveries, tenant retention, and Analytics history.'
   ) as { Properties: { Environment: { Variables: Record<string, unknown> } } };
   const deliveryFunction = Object.values(resources).find((resource) =>
     (resource as { Properties?: { Description?: string } }).Properties?.Description ===
@@ -1642,7 +1689,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
   }
   template.hasResourceProperties('AWS::Lambda::Function', {
     Description:
-      'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.',
+      'Projects audit outbox events into collaboration, Webhook, connector deliveries, tenant retention, and Analytics history.',
     Handler: 'index.handler',
     Environment: {
       Variables: Match.objectLike({
@@ -2183,7 +2230,7 @@ test('AI observability consumes only terminal AI rows with bounded stream retrie
   expect(eventSource?.Properties).toEqual(expect.objectContaining({
     BatchSize: 10,
     BisectBatchOnFunctionError: true,
-    Enabled: { 'Fn::If': ['AiAssistanceConfigured', true, false] },
+    Enabled: { 'Fn::If': ['AiAssistanceAnyProviderConfigured', true, false] },
     FunctionResponseTypes: ['ReportBatchItemFailures'],
     MaximumRetryAttempts: 3,
     ParallelizationFactor: 1,

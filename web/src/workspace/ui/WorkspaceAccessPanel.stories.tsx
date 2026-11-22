@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import type { WorkspaceAccess } from '../api'
+import { WorkspaceAccessApiError } from '../api/errors'
 import { WorkspaceAccessPanel } from './WorkspaceAccessPanel'
 
 const ownerMember = {
@@ -159,6 +160,16 @@ const meta = {
     locale: 'ja',
     onAcknowledgeInvitationCleanup: async () => undefined,
     onInvite: async () => undefined,
+    onInviteMany: async (inputs, onOutcome) => {
+      inputs.forEach((input, index) => {
+        onOutcome(index, input.email.startsWith('blocked')
+          ? {
+              error: new WorkspaceAccessApiError(403, 'Denied', 'EnterpriseExternalAccessDenied'),
+              status: 'failed',
+            }
+          : { status: 'sent' })
+      })
+    },
     onReinviteInvitation: async () => undefined,
     onResendInvitation: async () => undefined,
     onRetry: async () => undefined,
@@ -286,5 +297,41 @@ export const SignInSecurityLoadError: Story = {
     const canvas = within(canvasElement)
     await userEvent.click(canvas.getByTestId('workspace-member-mfa-retry'))
     await expect(args.onRetrySignInSecurity).toHaveBeenCalledTimes(1)
+  },
+}
+
+/**
+ * An owner pastes a CSV, checks it, and sends the rows that can be sent; one row fails.
+ */
+export const BulkInvite: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const input = canvas.getByTestId('workspace-bulk-invite-input')
+    await userEvent.type(
+      input,
+      'email,name,role{enter}sato@example.com,佐藤 花子,member{enter}blocked@partner.example,,guest{enter}' +
+        'not-an-address,,{enter}member@example.com,,{enter}sato@example.com,,',
+    )
+    await userEvent.click(canvas.getByTestId('workspace-bulk-invite-check'))
+    await expect(canvas.getByTestId('workspace-bulk-invite-plan')).toHaveTextContent('2 件を招待できます。3 件は送れません。')
+    await userEvent.click(canvas.getByTestId('workspace-bulk-invite-send'))
+    await expect(canvas.getByTestId('workspace-bulk-invite-row-0')).toHaveTextContent('招待しました')
+    await expect(canvas.getByTestId('workspace-bulk-invite-row-1')).toHaveTextContent('ドメイン制限')
+    await expect(canvas.getByTestId('workspace-bulk-invite-keep-failed')).toBeVisible()
+  },
+}
+
+/**
+ * An administrator finds a member by part of the name and narrows the list by role.
+ */
+export const MemberSearch: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.type(canvas.getByTestId('workspace-member-search'), 'admin')
+    await expect(canvas.getByTestId('workspace-member-count')).toHaveTextContent('4 人中 1 人を表示')
+    await expect(canvas.getByTestId('workspace-member-admin-example-com')).toBeVisible()
+    await expect(canvas.queryByTestId('workspace-member-member-example-com')).toBeNull()
+    await userEvent.selectOptions(canvas.getByTestId('workspace-member-role-filter'), 'guest')
+    await expect(canvas.getByTestId('workspace-member-filter-empty')).toBeVisible()
   },
 }

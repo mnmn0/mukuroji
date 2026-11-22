@@ -30,6 +30,7 @@ import {
   readSearchWorkItemTypeKey,
   SAVED_VIEW_SCHEMA_VERSION,
   SEARCH_SCHEMA_VERSION,
+  TASK_VIEW_GANTT_SCALES,
   TASK_VIEW_SCHEMA_VERSION,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type CreateSavedWorkspaceViewInput,
@@ -986,6 +987,8 @@ const taskViewDisplayOptionKeys = [
   'wrapText',
   'showAssigneeAvatars',
   'showOutline',
+  'ganttCompactRows',
+  'ganttProgressLine',
 ] as const
 
 /**
@@ -5556,6 +5559,11 @@ function normalizeTaskViewDisplayOptions(options: unknown) {
   for (const key of taskViewDisplayOptionKeys) {
     if (options[key] !== undefined) normalized[key] = requireBoolean(options[key], `Task view ${key}`)
   }
+  if (options.ganttScale !== undefined) {
+    const scale = TASK_VIEW_GANTT_SCALES.find((candidate) => candidate === options.ganttScale)
+    if (scale === undefined) return invalidTaskView('Task view ganttScale is invalid.')
+    normalized.ganttScale = scale
+  }
   return normalized
 }
 
@@ -5572,15 +5580,19 @@ function requireTaskViewSurface(value: unknown): TaskViewSurface {
   return invalidTaskView('Task view surface is invalid.')
 }
 
-/** Reads one supported task view layout mode. */
+/**
+ * Reads one supported task view layout mode.
+ *
+ * `list` and `timeline` were accepted before no screen offered them; a view saved with either
+ * is read as a table, so it stays readable instead of failing the whole view list.
+ */
 function requireTaskViewLayoutMode(value: unknown): TaskViewLayout['mode'] {
+  if (value === 'list' || value === 'timeline') return 'table'
   if (
     value === 'table' ||
     value === 'board' ||
-    value === 'list' ||
     value === 'gantt' ||
-    value === 'calendar' ||
-    value === 'timeline'
+    value === 'calendar'
   ) return value
   return invalidTaskView('Task view layout mode is invalid.')
 }

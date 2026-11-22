@@ -273,6 +273,13 @@ const enterpriseRoutePermissionRules = [
     permission: 'documents.manage',
     alternativePermissions: ['documents.write', 'documents.read'],
   },
+  // A change-signal subscription only lets a reader refetch what it can already read.
+  {
+    method: 'POST',
+    pathPattern: '/api/documents/:documentId/realtime/tickets',
+    permission: 'documents.manage',
+    alternativePermissions: ['documents.write', 'documents.read'],
+  },
   {
     method: '*',
     pathPattern: '/api/documents/:documentId/shares',
@@ -618,7 +625,7 @@ const enterpriseRoutePermissionRules = [
   },
   {
     method: '*',
-    pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline',
+    pathPattern: '/api/teams/:teamId/projects/:projectId/schedule-baseline*',
     permission: 'projects.manage',
   },
   {
@@ -692,6 +699,17 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'PUT',
     pathPattern: '/api/ai-assistance/policy',
+    permission: 'workspace.manage',
+  },
+  // Registering or removing an external AI provider API key is Workspace administration.
+  {
+    method: 'PUT',
+    pathPattern: '/api/ai-assistance/provider-credentials/*',
+    permission: 'workspace.manage',
+  },
+  {
+    method: 'DELETE',
+    pathPattern: '/api/ai-assistance/provider-credentials/*',
     permission: 'workspace.manage',
   },
   {
@@ -1763,9 +1781,10 @@ async function resolveEnterpriseAuthorizationResource(
       const entity = authorizationState.entities.find((candidate) =>
         candidate.id === decodePathSegment(entityId)
       ) ?? (
-        // A restore targets an entity that left the live graph; its archived scope is the resource.
-        // A failed lookup falls back to the Workspace resource, which only narrows access.
-        /\/planning\/entities\/[^/]+\/restore$/u.test(path)
+        // A restore, or an activity read, targets an entity that may have left the live graph; its
+        // archived scope is the resource. A failed lookup falls back to the Workspace resource,
+        // which only narrows access.
+        /\/planning\/entities\/[^/]+\/(?:restore|activity)$/u.test(path)
           ? await workItemDependencies.planning.getArchivedEntity(
               workspaceId,
               decodePathSegment(entityId),

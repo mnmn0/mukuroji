@@ -1,5 +1,9 @@
 import type { WorkflowDefinition } from './work-item-configuration'
-import type { WorkItemSchedule, WorkItemScheduleCalendarPolicy } from './work-items'
+import type {
+  WorkItemRelationEventType,
+  WorkItemSchedule,
+  WorkItemScheduleCalendarPolicy,
+} from './work-items'
 
 /** Automation domain の現在の schema version です。 */
 export const AUTOMATION_SCHEMA_VERSION = 1 as const
@@ -83,6 +87,22 @@ export type AutomationWebhookTrigger = {
   webhookId: string
 }
 
+/** Most relation event types one relation trigger can list. */
+export const AUTOMATION_RELATION_TRIGGER_MAX_EVENT_TYPES = 10
+
+/**
+ * Detects a Work Item relation change, such as a parent change or a removed blocker.
+ *
+ * The event is recorded on each endpoint, so the rule runs once for every endpoint whose
+ * event type matches, and `workItem` conditions read that endpoint.
+ */
+export type AutomationRelationTrigger = {
+  /** Trigger discriminator. */
+  type: 'relation'
+  /** Relation event types that start the rule; omitted matches every relation change. */
+  eventTypes?: WorkItemRelationEventType[]
+}
+
 /** Scheduled occurrence を検出する trigger です。 */
 export type AutomationScheduleTrigger = {
   /** Trigger discriminator です。 */
@@ -91,14 +111,34 @@ export type AutomationScheduleTrigger = {
   schedule: RecurringSchedule
 }
 
-/** Automation rule が扱える9種類の trigger です。 */
+/** Longest delay, in days, a baseline-slip trigger can wait for. */
+export const AUTOMATION_BASELINE_SLIP_MAX_DAYS = 365
+
+/**
+ * Detects a schedule change that moves an open Work Item at least the given number of days behind
+ * its Project's active schedule baseline.
+ */
+export type AutomationBaselineSlipTrigger = {
+  /** Trigger discriminator. */
+  type: 'baseline-slip'
+  /**
+   * Days behind the baseline that fire the rule, from 1 to
+   * {@link AUTOMATION_BASELINE_SLIP_MAX_DAYS}. The rule fires once, on the change that crosses
+   * it. Omitted means 1.
+   */
+  minDelayDays?: number
+}
+
+/** Automation rule が扱える11種類の trigger です。 */
 export type AutomationTrigger =
   | AutomationStatusTrigger
   | AutomationAssigneeTrigger
   | AutomationDueTrigger
+  | AutomationBaselineSlipTrigger
   | AutomationCustomFieldTrigger
   | AutomationWorkItemTypeTrigger
   | AutomationCommentTrigger
+  | AutomationRelationTrigger
   | AutomationFormTrigger
   | AutomationWebhookTrigger
   | AutomationScheduleTrigger

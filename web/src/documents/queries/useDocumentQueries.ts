@@ -23,6 +23,22 @@ const documentQueryConfig = {
 } as const
 
 /**
+ * Document detail の再取得間隔です。変更通知を受けている間は取りこぼし対策の間隔だけにします。
+ */
+export const documentDetailRefreshIntervals = {
+  polling: 3_500,
+  realtime: 60_000,
+} as const
+
+/**
+ * Document comment の再取得間隔です。変更通知を受けている間は取りこぼし対策の間隔だけにします。
+ */
+export const documentCommentsRefreshIntervals = {
+  polling: 4_000,
+  realtime: 60_000,
+} as const
+
+/**
  * Document tree と archive collection を取得します。
  *
  * @param accessToken - Documents API の access token です。
@@ -47,12 +63,14 @@ export function useDocumentCollection(accessToken?: string, enabled = true) {
  * @param accessToken - Documents API の access token です。
  * @param documentId - 取得対象の Document ID です。
  * @param enabled - Query を実行するかどうかです。
+ * @param realtime - WebSocket の変更通知を受けているかどうかです。
  * @returns Document detail の SWR state です。
  */
 export function useDocument(
   accessToken: string | undefined,
   documentId: string | undefined,
   enabled = true,
+  realtime = false,
 ) {
   const key = accessToken && documentId && enabled
     ? ['document', accessToken, documentId] as const
@@ -63,7 +81,9 @@ export function useDocument(
     ([, token, selectedId]) => getDocument(token, selectedId),
     {
       ...documentQueryConfig,
-      refreshInterval: 3_500,
+      refreshInterval: realtime
+        ? documentDetailRefreshIntervals.realtime
+        : documentDetailRefreshIntervals.polling,
       refreshWhenHidden: false,
     },
   )
@@ -75,12 +95,14 @@ export function useDocument(
  * @param accessToken - Documents API の access token です。
  * @param documentId - 取得対象の Document ID です。
  * @param enabled - Query を実行するかどうかです。
+ * @param realtime - WebSocket の変更通知を受けているかどうかです。
  * @returns Document comment page の SWR state です。
  */
 export function useDocumentComments(
   accessToken: string | undefined,
   documentId: string | undefined,
   enabled = true,
+  realtime = false,
 ) {
   const key = accessToken && documentId && enabled
     ? ['document-comments', accessToken, documentId] as const
@@ -91,7 +113,9 @@ export function useDocumentComments(
     ([, token, selectedId]) => getDocumentComments(token, selectedId),
     {
       ...documentQueryConfig,
-      refreshInterval: 4_000,
+      refreshInterval: realtime
+        ? documentCommentsRefreshIntervals.realtime
+        : documentCommentsRefreshIntervals.polling,
       refreshWhenHidden: false,
     },
   )

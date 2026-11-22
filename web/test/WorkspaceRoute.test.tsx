@@ -11,6 +11,8 @@ const routeContext: WorkspaceRouteContextValue = {
   canLoadWorkspaceData: true,
   canManageWorkspaceConfiguration: false,
   canReadCustomers: true,
+  canReadAuditLog: true,
+  canExportAuditLog: true,
   canManageCustomerRequests: true,
   canViewCustomerSensitiveData: true,
   canManageCustomerViews: true,

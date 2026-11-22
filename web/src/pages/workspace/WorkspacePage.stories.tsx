@@ -38,6 +38,7 @@ import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceVie
 import { HelpWorkspaceView } from '../../workspace/ui/HelpWorkspaceView'
 import { HomeWorkspaceView } from '../../workspace/ui/HomeWorkspaceView'
 import { MyTasksWorkspaceView } from '../../workspace/ui/MyTasksWorkspaceView'
+import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 import {
   WorkspaceRoute,
   WorkspaceRouteContent,
@@ -161,6 +162,8 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   accessToken: 'storybook-access-token',
   canManageAiAssistance: true,
   canReadCustomers: true,
+  canReadAuditLog: true,
+  canExportAuditLog: true,
   canManageCustomerRequests: true,
   canManageCustomerViews: true,
   canViewCustomerSensitiveData: true,
@@ -564,6 +567,76 @@ export const MyTasksCalendar: Story = {
     await expect(canvas.getByTestId('my-tasks-view-calendar')).toHaveAttribute('aria-pressed', 'true')
     await expect(canvas.getByTestId('task-calendar-month-navigation')).toBeVisible()
   },
+}
+
+/** Presentation of the My Tasks table stories: due-date order with Project and Team columns. */
+const myTasksTablePresentation = {
+  columns: [
+    { field: 'title' },
+    { field: 'status' },
+    { field: 'dueDate' },
+    { field: 'priority' },
+    { field: 'project' },
+    { field: 'team' },
+  ],
+  density: 'comfortable',
+  display: {
+    showArchived: false,
+    showAssigneeAvatars: true,
+    showCompleted: true,
+    showEmptyGroups: true,
+    showSubtasks: true,
+    wrapTitles: false,
+  },
+} satisfies TaskViewPresentationSettings
+
+/**
+ * Renders the My Tasks table with Work Items due in the current month, in due-date order.
+ *
+ * @returns The My Tasks table story content.
+ */
+function MyTasksTableStory() {
+  const month = getCurrentTaskMonth()
+  const tasks = storyTasks.map((task, index) => {
+    const dueDate = `${month}-${String(3 + index * 4).padStart(2, '0')}`
+    return { ...task, dueDate, schedule: createDefaultDueDateWorkItemSchedule(dueDate) }
+  })
+  return (
+    <MyTasksWorkspaceView
+      configurationFailedTeamIds={[]}
+      configurationsByTeam={storyWorkItemConfigurations}
+      onOpenTask={onOpenMyTaskAction}
+      onTaskActionMenuOpen={onOpenMyTaskActionMenu}
+      onViewModeChange={() => undefined}
+      presentation={myTasksTablePresentation}
+      t={t}
+      tasks={tasks}
+      teams={projectDirectoryFixtures}
+      viewMode="table"
+    />
+  )
+}
+
+/** The `/my-tasks` route as a due-date ordered table across Teams and Projects. */
+export const MyTasksTable: Story = {
+  render: () => <MyTasksTableStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onOpenMyTaskAction.mockClear()
+    onOpenMyTaskActionMenu.mockClear()
+
+    await expect(canvas.getByTestId('my-tasks-view-table')).toHaveAttribute('aria-pressed', 'true')
+    await userEvent.click(canvas.getByTestId('my-tasks-table-open-refero-wireframe'))
+    await expect(onOpenMyTaskAction).toHaveBeenCalledTimes(1)
+    await userEvent.click(canvas.getByTestId('my-tasks-table-actions-refero-wireframe'))
+    await expect(onOpenMyTaskActionMenu).toHaveBeenCalledTimes(1)
+  },
+}
+
+/** The My Tasks table on a 390px-wide viewport, scrolling sideways inside the table. */
+export const MyTasksTableMobile: Story = {
+  render: () => <MyTasksTableStory />,
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
 }
 
 /** The `/inbox` route with attention Work Items and durable notifications. */

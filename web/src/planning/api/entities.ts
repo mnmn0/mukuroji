@@ -158,6 +158,99 @@ export async function listArchivedPlanningEntities(
 }
 
 /**
+ * Planning entity の活動として表示する変更 1 件です。
+ */
+export type PlanningEntityActivityChange = {
+  /** Root からの dot 区切り field path です（例: `forecast.end`）。 */
+  field: string
+  /** 変更前の値です。Field が新しく設定された場合は省略されます。 */
+  before?: unknown
+  /** 変更後の値です。Field が消された場合は省略されます。 */
+  after?: unknown
+  /** 閲覧者に見せられない値が伏せられているかどうかです。 */
+  redacted?: boolean
+}
+
+/**
+ * Planning entity の活動 event です（audit event の公開 projection）。
+ */
+export type PlanningEntityActivityEvent = {
+  /** Audit event ID です。 */
+  eventId: string
+  /** `planning-entity.updated` などの event 種別です。 */
+  eventType: string
+  /** `updated` などの操作名です。 */
+  action: string
+  /** Event が起きた ISO 8601 timestamp です。 */
+  occurredAt: string
+  /** 操作した主体です。 */
+  actor: {
+    /** 主体の種別です（`user`・`system` など）。 */
+    kind: string
+    /** 操作時の Workspace member key などの表示用識別子です。 */
+    displayName?: string
+  }
+  /** Field ごとの変更です。 */
+  changes: PlanningEntityActivityChange[]
+  /** Server が組み立てた英語の概要です。 */
+  summary?: string
+}
+
+/**
+ * Planning entity 活動 API の cursor page です。
+ */
+export type PlanningEntityActivityPage = {
+  /** 新しい順の活動 event です。 */
+  events: PlanningEntityActivityEvent[]
+  /** 次 page の opaque cursor です。 */
+  nextCursor?: string
+}
+
+/**
+ * Planning entity の作成・変更・移動・archive などの活動を新しい順の cursor page で返します。
+ *
+ * Server は閲覧者が見られない scope の event を page から除くため、`nextCursor` があっても page が空のことがあります。
+ *
+ * @param accessToken - Authorization header に使う access token です。
+ * @param entityId - 活動を読む entity ID です。
+ * @param input - 1 page の件数と、前の page が返した cursor です。
+ * @returns 検証済みの活動 page です。
+ */
+export async function getPlanningEntityActivity(
+  accessToken: string,
+  entityId: string,
+  input: { limit?: number; cursor?: string } = {},
+): Promise<PlanningEntityActivityPage> {
+  const query = new URLSearchParams()
+  if (input.limit !== undefined) query.set('limit', String(input.limit))
+  if (input.cursor !== undefined) query.set('cursor', input.cursor)
+  const search = query.toString()
+  const response = await requestJson<unknown>(
+    `${createEntityPath(entityId)}/activity${search ? `?${search}` : ''}`,
+    accessToken,
+  )
+  if (
+    !isRecord(response) ||
+    !Array.isArray(response.events) ||
+    (response.nextCursor !== undefined && typeof response.nextCursor !== 'string')
+  ) {
+    throw new PlanningApiError(502, defaultPlanningApiErrorMessage, 'InvalidPlanningActivityResponse')
+  }
+  const events: PlanningEntityActivityEvent[] = []
+  for (const value of response.events) {
+    const event = readPlanningEntityActivityEvent(value)
+    if (!event) {
+      throw new PlanningApiError(502, defaultPlanningApiErrorMessage, 'InvalidPlanningActivityResponse')
+    }
+    events.push(event)
+  }
+  return {
+    events,
+    ...(typeof response.nextCursor === 'string' ? { nextCursor: response.nextCursor } : {}),
+  }
+}
+
+/**
  * Planning entity を複製します。
  *
  * @param accessToken - Authorization header に使う access token です。
@@ -325,7 +418,7 @@ const planningEntityTypes = new Set<string>([
  * @param value - Parsed response field.
  * @returns True when the field is undefined or a string.
  */
-function isOptionalString(value: unknown) {
+function isOptionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === 'string'
 }
 
@@ -365,4 +458,50 @@ function isPlanningRestoreSummary(value: unknown): value is PlanningRestoreSumma
     value.pendingReferenceCount,
   ]
   return counts.every((count) => typeof count === 'number' && Number.isSafeInteger(count) && count >= 0)
+}
+
+/**
+ * Reads one activity event, keeping only the fields the activity tab shows.
+ *
+ * @param value - One element of the response `events` array.
+ * @returns The event, or `undefined` when a required field is missing or mistyped.
+ */
+function readPlanningEntityActivityEvent(value: unknown): PlanningEntityActivityEvent | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.eventId !== 'string' ||
+    typeof value.eventType !== 'string' ||
+    typeof value.occurredAt !== 'string' ||
+    !isRecord(value.actor) ||
+    typeof value.actor.kind !== 'string' ||
+    !isOptionalString(value.actor.displayName) ||
+    !isOptionalString(value.action) ||
+    !isOptionalString(value.summary) ||
+    !Array.isArray(value.changes)
+  ) {
+    return undefined
+  }
+  const changes: PlanningEntityActivityChange[] = []
+  for (const change of value.changes) {
+    if (!isRecord(change) || typeof change.field !== 'string') return undefined
+    if (change.redacted !== undefined && typeof change.redacted !== 'boolean') return undefined
+    changes.push({
+      field: change.field,
+      ...('before' in change ? { before: change.before } : {}),
+      ...('after' in change ? { after: change.after } : {}),
+      ...(change.redacted ? { redacted: true } : {}),
+    })
+  }
+  return {
+    eventId: value.eventId,
+    eventType: value.eventType,
+    action: value.action ?? value.eventType.split('.').at(-1) ?? value.eventType,
+    occurredAt: value.occurredAt,
+    actor: {
+      kind: value.actor.kind,
+      ...(value.actor.displayName === undefined ? {} : { displayName: value.actor.displayName }),
+    },
+    changes,
+    ...(value.summary === undefined ? {} : { summary: value.summary }),
+  }
 }

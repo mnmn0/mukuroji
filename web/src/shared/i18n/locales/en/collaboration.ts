@@ -221,6 +221,8 @@ export const collaborationMessages = {
   'collaboration.activity.relationAdded': '{actor} linked a related work item.',
   'collaboration.activity.relationRemoved': '{actor} unlinked a related work item.',
   'collaboration.activity.siblingOrderChanged': '{actor} changed the order among siblings.',
+  'collaboration.activity.previousParentWorkItem': 'Previous parent',
+  'collaboration.activity.parentWorkItem': 'Parent',
   'collaboration.activity.contextItemCreated': '{actor} created a curated context item.',
   'collaboration.activity.contextItemUpdated': '{actor} updated a curated context item.',
   'collaboration.activity.contextItemSuperseded': '{actor} superseded a curated context item.',

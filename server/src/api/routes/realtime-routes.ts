@@ -2,14 +2,8 @@ import type { Hono } from 'hono'
 import { CognitoServiceError } from '../../modules/authentication'
 import { createRealtimeTicketRouter } from '../../modules/realtime'
 import { createWorkItemCollaborationEntityKey } from '../../modules/collaboration/collaboration'
-import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
-import {
-  type CognitoAccessTokenClaims,
-  createEnterpriseAuthenticationSessionId,
-  readCognitoAuthenticationMethods,
-  resolveEnterpriseClientIp,
-  toCognitoDirectoryErrorResponse,
-} from '../shared/enterprise-access'
+import { workItemDependencies } from '../shared/app-dependencies'
+import { toCognitoDirectoryErrorResponse } from '../shared/enterprise-access'
 import { readJson } from '../shared/http'
 import {
   requireAssignedProjectPermission,
@@ -18,7 +12,7 @@ import {
   type WorkspacePrincipal,
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
-import { decodeJwtPayload, readNumericClaim } from '../shared/token-claims'
+import { readRealtimeAuthenticationContext } from '../shared/realtime-authentication'
 import { canWriteTeamIssue } from '../shared/work-item-access'
 
 /**
@@ -39,16 +33,11 @@ export function registerRealtimeRoutes(routeApp: Hono): void {
         detail.issue.assignedProjectId,
         'viewer',
       )
-      const tokenClaims = decodeJwtPayload<CognitoAccessTokenClaims>(accessToken)
-      const issuedAt = readNumericClaim(tokenClaims?.iat) ?? Math.floor(Date.now() / 1_000)
-      const authenticatedAt = readNumericClaim(tokenClaims?.auth_time) ?? issuedAt
-      const tokenExpiresAt = readNumericClaim(tokenClaims?.exp) ?? issuedAt + 60 * 60
-      const authenticationSessionId = createEnterpriseAuthenticationSessionId(accessToken)
-      const verifiedAuthenticationMethods =
-        await workspaceDependencies.enterpriseSessionActivity.getAuthenticationMethods(
-          principal.directoryId,
-          authenticationSessionId,
-        )
+      const authentication = await readRealtimeAuthenticationContext(
+        accessToken,
+        principal.directoryId,
+        context,
+      )
 
       return await workItemDependencies.realtimeTickets.createTicket({
         workspaceId: principal.directoryId,
@@ -67,16 +56,7 @@ export function registerRealtimeRoutes(routeApp: Hono): void {
           teamId,
           issueId,
         ),
-        authenticatedAt,
-        tokenExpiresAt,
-        authenticationSessionId,
-        authenticationMethods: [
-          ...new Set([
-            ...readCognitoAuthenticationMethods(tokenClaims),
-            ...verifiedAuthenticationMethods,
-          ]),
-        ],
-        clientIp: resolveEnterpriseClientIp(context),
+        ...authentication,
       })
     },
     mapError: (context, error) => {

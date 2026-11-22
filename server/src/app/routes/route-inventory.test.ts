@@ -9,10 +9,15 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(537)
-  expect(new Set(inventory).size).toBe(533)
+  expect(inventory).toHaveLength(543)
+  expect(new Set(inventory).size).toBe(539)
+  expect(inventory).toContain('GET /api/planning/entities/:entityId/activity')
+  expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
+  expect(inventory).toContain('GET /api/ai-assistance/provider-credentials')
+  expect(inventory).toContain('PUT /api/ai-assistance/provider-credentials/:provider')
+  expect(inventory).toContain('DELETE /api/ai-assistance/provider-credentials/:provider')
   expect(inventory).toContain('GET /api/workspace/calendar-settings')
   expect(inventory).toContain('PATCH /api/teams/:teamId/workload/requests/:requestId')
   expect(inventory).not.toContain('GET /api/dashboard/summary')
@@ -28,6 +33,7 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('GET /api/teams/:teamId/weekly-summary')
   expect(inventory).toContain('GET /api/teams/:teamId/projects/:projectId/schedule-baseline')
   expect(inventory).toContain('POST /api/teams/:teamId/projects/:projectId/schedule-baseline')
+  expect(inventory).toContain('PUT /api/teams/:teamId/projects/:projectId/schedule-baseline/active')
   // A Work Item may be named `hierarchy`, so the Team hierarchy must not sit under `/issues/`.
   expect(inventory).not.toContain('GET /api/teams/:teamId/issues/hierarchy')
   expect(inventory).toContain('GET /api/teams/:teamId/issues/:issueId/children/open-count')
@@ -128,6 +134,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '4297f49011eea614aeae82145f0d7fdbc7e72c81fae72ff191268d7ced0ae852',
+    '6482b45bfb25c2ce76bd69792541c83ac421a0f81c57cbf0e30e6d94a3fcbb8f',
   )
 })

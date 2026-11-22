@@ -118,12 +118,13 @@ IAM grant も用途ごとの condition で絞っているため、key を分け�
 
 ### Optional SSO and AI
 
-SSO と AI は独立したオプションです。新規 stack では、それぞれの関連 parameter をすべて省略すると無効になります。一部だけの指定は CloudFormation rule が拒否します。SSOはruntimeでも不完全な設定を拒否し、password loginへ暗黙に切り替えません。
+SSO と AI は独立したオプションです。新規 stack では、SSO は関連 parameter をすべて省略すると無効になります。AI は `AiExternalProviders` が既定で有効なため、無効にするには Bedrock の parameter を省略したうえで `AiExternalProviders=` を空にします。一部だけの指定は CloudFormation rule が拒否します。SSOはruntimeでも不完全な設定を拒否し、password loginへ暗黙に切り替えません。
 
 - SSO: `CognitoSsoUserPoolClientId`、`CognitoHostedUiDomain`、`CognitoSsoRedirectUri`、`CognitoEnterpriseIdpName`、`EnterpriseSsoStateSecret` の5項目をまとめて設定します。未設定時はSSO discovery/redirectと保存済みdomainのSSO強制を使わず、通常のpassword/MFA loginを使います。
-- AI: `AiBedrockModelId`、`AiBedrockModelArn`、input/outputの両token単価をまとめて設定します。現在サポートするJP profileには `AiBedrockDestinationModelArns` も必要です。未設定時は保存済みWorkspace policyにかかわらずAI操作を拒否し、Bedrock呼び出しIAM policyを作らず、AI observabilityのstream mappingを無効にします。データ保持のため既存table、queue、log、worker定義は維持します。Webの別途opt-in buildは不要です。
+- AI: `AiBedrockModelId`、`AiBedrockModelArn`、input/outputの両token単価をまとめて設定します。現在サポートするJP profileには `AiBedrockDestinationModelArns` も必要です。Bedrock が未設定で `AiExternalProviders` も空のときは保存済みWorkspace policyにかかわらずAI操作を拒否し、Bedrock呼び出しIAM policyを作らず、AI observabilityのstream mappingを無効にします。データ保持のため既存table、queue、log、worker定義は維持します。Webの別途opt-in buildは不要です。
+- 外部 AI provider: `AiExternalProviders`（既定 `anthropic,openai`）で、Workspace 管理者が API キーを登録して使える provider を決めます。空にすると Bedrock だけになります。Bedrock が未設定でもこの値が空でなければ AI は有効になり、AI observability の stream mapping も有効です。API キーは Secrets Manager ではなく既存の `DeveloperPlatformKey` で暗号化して Workspace Search table に保存するため、固定費は増えません（[ADR 0036](../docs/adr/0036-ai-external-provider-workspace-keys.md)）。
 
-既存stackの更新ではCloudFormationが前回のparameter値を保持するため、省略だけでは無効化されません。無効にするサービスの上記全parameterへ明示的に空文字を渡し、`ApiRuntimeConfigurationRevision` を更新してください。たとえばAIなら `--parameters AiBedrockModelId=` に加え、ARN、単価2項目、destination ARNも空にします。SSOなら5項目をすべて空にします。API version/aliasの切り替えで新しい設定が適用されます。既に開始した呼び出しの即時取り消しは行いません。
+既存stackの更新ではCloudFormationが前回のparameter値を保持するため、省略だけでは無効化されません。無効にするサービスの上記全parameterへ明示的に空文字を渡し、`ApiRuntimeConfigurationRevision` を更新してください。たとえばAIを止めるなら `--parameters AiBedrockModelId=` に加え、ARN、単価2項目、destination ARN、`AiExternalProviders=` も空にします。Bedrock だけを止めて外部 provider を残す場合は `AiExternalProviders` を空にしません。SSOなら5項目をすべて空にします。API version/aliasの切り替えで新しい設定が適用されます。既に開始した呼び出しの即時取り消しは行いません。
 
 Workspace、複数Project/Team、権限、監査、backup、export/closureは引き続き利用できます。商用plan、seat quota、月次課金集計はありません。
 
@@ -167,7 +168,7 @@ aws ce update-cost-allocation-tags-status \
 
 | 構成要素 | 数 | 月額の目安 | 備考 |
 | --- | --- | --- | --- |
-| CloudWatch metric alarm | 23 個（25 metric） | 約 $1.50 | $0.10 / alarm metric。アカウントの無料枠 10 metric を差し引いた額です。AI の alarm 10 個は AI を設定したときだけ作ります（下の増分の表）。 |
+| CloudWatch metric alarm | 23 個（25 metric） | 約 $1.50 | $0.10 / alarm metric。アカウントの無料枠 10 metric を差し引いた額です。AI の alarm 10 個は AI を有効にしたときだけ作ります（下の増分の表）。`AiExternalProviders` は既定で有効なので、既定の deploy ではこの 10 個（約 $1）も加わります。Bedrock を設定せず `AiExternalProviders=` を空にすると作りません。 |
 | CloudWatch composite alarm | 1 個 | $0.50 | |
 | CloudWatch custom metric（EMF） | 約 15 系列 | 約 $1.50 | $0.30 / metric。アカウントの無料枠 10 metric を差し引いた額です。`Mukuroji/RuntimeControl` 5 個（毎分の heartbeat）、`Mukuroji/API` 6 個（API が呼ばれている時間だけ）、`Mukuroji/Notifications` 4 個（Slack と Email の channel ごと）。AI を設定すると `Mukuroji/AIAssistance` が増えます。metric は data が届いた時間単位で課金されるため、dimension を 1 つ足すと系列の数だけ固定費が増えます。 |
 | Secrets Manager secret | 4 個 | $1.60 | $0.40 / secret。inbound automation Webhook を 1 つ作るごとに secret が 1 つ増えます。 |
@@ -192,22 +193,23 @@ aws ce update-cost-allocation-tags-status \
 | `mukuroji:requestEmail` | +$1 / 月 | secret 2 個、alarm 2 個。 |
 | `mukuroji:tenantLifecycle` | +$0〜2 / 月 | Lambda 6 個と queue 6 個。待機中の queue polling が SQS の無料枠を超えた分です。 |
 | `mukuroji:softwareFactory` | ほぼ $0 | 毎分の Agent Run triage job。opt-in した Team がなければ AgentRuns table の index を読むだけです。 |
-| AI（Bedrock の parameter 設定） | +$1 / 月と利用量に比例 | AI の alarm 10 個（$1）。token 料金の上限は Workspace の AI 設定で決めます。 |
+| AI（Bedrock の parameter 設定、または `AiExternalProviders` が空でない。既定は有効） | +$1 / 月と利用量に比例 | AI の alarm 10 個（$1）。Bedrock と外部 provider で共有し、両方を使っても増えません。token 料金の上限は Workspace の AI 設定で決めます。 |
+| AI（Claude API・OpenAI のキー登録） | 利用量に比例 | token 料金は各提供元へ直接かかります。AWS 側はキー復号の KMS request（1万回あたり約 $0.03）だけです。 |
 | `LambdaTracingMode=Active`（X-Ray） | 利用量に比例 | 月 10 万 trace まで無料、超えた分は $5 / 100 万 trace。sampling は 1 秒あたり 1 request と残りの 5% で、毎分の job だけで月約 4.3 万 trace、50 人で月約 70 万 trace（約 $3）です。 |
 | `NotificationEmailSender`（SES） | 利用量に比例 | 1,000 通あたり約 $0.10。 |
 | `CognitoEmailSender`（SES） | 利用量に比例 | 招待と再設定のメール。1,000 通あたり約 $0.10。 |
 
 ### 利用規模ごとの試算
 
-1 人が 1 営業日に API を約 2,000 回呼ぶと仮定した試算です（Document を 1 時間開くと 3.5 秒ごとの再取得だけで約 1,000 回になります）。月 20 営業日、既定構成、AI なしで計算しています。
+1 人が 1 営業日に API を約 1,500 回呼ぶと仮定した試算です。Document 画面は WebSocket の変更通知を受けている間、本文・comment・presence の再取得を 60 秒ごとに落とすため、1 時間開いても約 500 回です（WebSocket がない環境や接続断では従来の 3.5〜4 秒ごとの polling に戻り、1 時間で約 3,400 回になります。ADR 0041）。月 20 営業日、既定構成、AI なしで計算しています。
 
 | 利用者 | API request / 月 | 従量費の目安 | 合計の目安 |
 | --- | --- | --- | --- |
-| 10 人 | 約 40 万 | 約 $2〜3 | 約 $8〜11 |
-| 50 人 | 約 200 万 | 約 $5〜7 | 約 $11〜15 |
-| 200 人 | 約 800 万 | 約 $25〜30 | 約 $31〜38 |
+| 10 人 | 約 30 万 | 約 $2〜3 | 約 $8〜11 |
+| 50 人 | 約 150 万 | 約 $4〜5 | 約 $10〜13 |
+| 200 人 | 約 600 万 | 約 $19〜23 | 約 $25〜31 |
 
-従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、DynamoDB の読み書き、Lambda（無料枠を超えた request と実行時間）、CloudWatch Logs の取り込み、WebSocket の接続時間です。税（日本の請求では消費税 10%）、独自 domain の Route 53 hosted zone（$0.50 / 月）、AI の token 料金は含みません。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
+従量費の主な内訳は HTTP API（$1.29 / 100 万 request）、DynamoDB の読み書き、Lambda（無料枠を超えた request と実行時間）、CloudWatch Logs の取り込み、WebSocket の接続時間と message（Document の変更通知は 100 万件あたり $1.14）です。税（日本の請求では消費税 10%）、独自 domain の Route 53 hosted zone（$0.50 / 月）、AI の token 料金は含みません。利用者が増えたら、まず Cost Explorer の service 別の内訳で HTTP API と Lambda の伸びを確認してください。
 
 ### X-Ray tracing の切り替え
 
@@ -761,7 +763,11 @@ role を引き受けられるのは `mnmn0/mukuroji` の `production` Environmen
 
 deploy role 自身が持つ権限は、CDK bootstrap の deploy / file-publishing / lookup role を引き受けること、
 `Mukuroji` stack の参照、Web bucket への upload と CloudFront の invalidation、runtime control の AppConfig 操作、
-`/mukuroji/deploy/` の SSM parameter の読み取りと新規作成（上書きは Deny）だけです。stack の変更は CDK の標準どおり
+`/mukuroji/deploy/` の SSM parameter の読み取りと新規作成（上書きは Deny）、runtime control の切り替えを監査ログに残す
+audit table への `dynamodb:PutItem` と tenant administration table の保持設定の `dynamodb:GetItem`
+（どちらも `WorkspaceDirectoryId` の partition だけ）だけです。
+2026-11-21 より前の template で deploy access stack を作った場合は、手順 1 の `curl` と `aws cloudformation deploy` を
+もう一度実行して、この権限を足してください。stack の変更は CDK の標準どおり
 bootstrap の CloudFormation execution role が行います。
 
 stack の secret parameter（`WorkspaceAuditPseudonymKey`、`EnterpriseIdentityTokenHashSecret`、`RequestTokenHashSecret`、
@@ -814,7 +820,23 @@ origin にするときは deploy access stack の `ApiAllowedOrigins` を更新�
    ここまで API は `/api/health` と `/api/ready` 以外（サインインの `/api/auth/*` を含む）に `503` を返すので、
    owner のサインインはこの後に行います。
 7. 初期 owner に Cognito から仮パスワードのメールが届いています。`WebUrl`（job の summary に出ます）でサインインし、
-   パスワードを変えて MFA を設定します。
+   パスワードを変えます。続けて Settings で認証アプリ（TOTP）の MFA を設定します。仮パスワードの期限は 7 日です。
+   期限が切れたら CloudShell で `aws cognito-idp admin-create-user --user-pool-id <UserPoolId> --username <owner の email>
+   --message-action RESEND` を実行して送り直します。
+8. 初期 owner は stack が `mukuroji-system-admins` group に入れているので、サイドバーの「チームを追加」から最初の Team を
+   作れます。Team と Project は stack が作らないため、ここから画面で作ります。
+
+#### 初回 deploy の後に確かめること
+
+- 祝日: `ScheduledJobs` Lambda が runtime control を有効にした後、6 時間ごとに内閣府の CSV を取りに行き、月に 1 回保存します
+  （[ADR 0032](../docs/adr/0032-japanese-public-holiday-monthly-sync.md)）。手で取り込む手順はありません。
+  取得に失敗しても同梱の祝日を使うので Work Item の作成は止まりません。CloudWatch Logs の名前に `ScheduledJobsLogGroup` を含む log group で
+  `japanese-public-holiday-sync` が失敗し続けていないかだけ確認します。
+- Data migration: `bun run data:migrate:aws list --function-name <DataMigrationFunctionName>` で登録済みの移行を確認します。
+  新しく作った stack には移す既存 row がないので、初回 deploy の後に実行する移行はありません。既存データの backfill
+  （例: Focus の担当者索引）は、その移行を含む commit を既存環境へ deploy したときだけ [Data migration](#data-migration) の手順で実行します。
+- CORS: 初回の job summary では `ApiAllowedOrigins` が `stack default`（localhost）と表示されます。Web は CloudFront の
+  同じ origin から `/api` を呼ぶので影響はなく、次の deploy から `WebUrl` が自動で入ります。
 
 ### いつもの deploy と手動の操作
 
@@ -837,7 +859,9 @@ deploy します（[Rollback](#rollback) の forward deploy）。
 直してから再実行します。`cdk deploy` が失敗した stack を消して作り直し、SSM の secret はそのまま使います。
 `Retain` の table・bucket・user pool は失敗した stack から外れて残るので、作り直しが成功した後に不要なものを手で削除します。
 job の summary には commit、revision、CDK outputs の SHA-256、`WebUrl` が残り、Environment の deployment 履歴と合わせて
-change record にします。PR ごとの read-only な `cdk diff`、post-deploy の smoke e2e はまだありません（#362 の残り）。
+change record にします。deploy の後は [本番 deploy 後の確認](../docs/post-deploy-verification.md) の
+`bun run deploy:smoke` で CloudFront・runtime control・Cognito・alarm・DLQ などを読み取りだけで確かめ、結果も change record に残します。
+PR ごとの read-only な `cdk diff` はまだありません（#362 の残り）。
 
 ## Fresh deployment
 
@@ -1169,6 +1193,12 @@ AWS_REGION=ap-northeast-1 bun run runtime-control:enable
    が `OK` かつ actions 有効であることを確かめる（alarm の確認は有効化のときだけ）。
 3. 最新の hosted version の `revision` に 1 を足した document を hosted version として作る。
    誰が（`sts get-caller-identity` の ARN）いつ切り替えたかを version と deployment の description に残す。
+   その前に、Workspace の監査ログ（stack output `AuditEventsTableName`）へ `runtime-control.change-started` を書き、
+   終わったら `runtime-control.change-completed` か `runtime-control.change-failed` を書く。実行する credential には
+   この table への `dynamodb:PutItem` と、保持期間・legal hold を読む tenant administration table
+   （`TenantAdministrationTableName`）への `dynamodb:GetItem` が要る（どちらも `WorkspaceDirectoryId` の partition だけに
+   絞れる。GitHub Actions の deploy role は持っている）。開始を記録できないと `enable` と `read-only` は何も変えずに止まり、`disable` は警告を出して
+   止める操作を続ける（[ADR 0044](../docs/adr/0044-runtime-control-switch-audit-events.md)）。
 4. stack の canary strategy で deployment を始め、`COMPLETE` まで待つ（rollout 20 分 + bake 10 分で約 30 分）。
    `ROLLED_BACK` になったら失敗として止まる。
 5. `WebUrl` の `/api/ready` が `200` を返し、`/api/maintenance` が `{"state":"none"}` を返すまで最大 3 分確認する。
@@ -1340,7 +1370,7 @@ Deploy 時は `cdk diff` で canonical table の意図しない replacement/dele
 - `DataMigrationFunction` は schedule も event source も持たず、起動されたときだけ動きます（timeout 15 分、
   非同期起動の retry 0）。待機中の費用はかかりません。
 - function の role は allowlist の table（今は `work-items` = `WorkItemsTable` と `project-directory` =
-  `ProjectDirectoryTable`）に `Scan` / `GetItem` / `PutItem`、`DataMigrationCheckpointTable` に `Query` /
+  `ProjectDirectoryTable`）に `Scan` / `GetItem` / `PutItem` / `ConditionCheckItem`（`derive` migration の元 row の確認、ADR 0038）、`DataMigrationCheckpointTable` に `Query` /
   `PutItem` だけを持ちます。別の table を移行する migration は、`cdk/lib/stacks/mukuroji-stack.ts` の
   `buildDataMigration` の `targets` に同じ PR で table を足します。
 - `DataMigrationCheckpointTable` は `Retain`、PITR、deletion protection 付きです。checkpoint と run record

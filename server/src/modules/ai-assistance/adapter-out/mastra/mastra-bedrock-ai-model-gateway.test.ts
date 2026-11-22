@@ -11,6 +11,7 @@ import {
 /** Creates one complete gateway input without sensitive member identifiers. */
 function createInput(): AiModelGenerationInput {
   return {
+    workspaceId: 'workspace-1',
     modelId: 'model-1',
     task: 'search',
     locale: 'ja',
@@ -263,7 +264,7 @@ describe('createMastraBedrockAiModelGateway', () => {
     await expect(gateway.generate(createInput())).rejects.toMatchObject({
       category: 'upstream',
       code: 'AiAssistanceModelRefused',
-      message: 'Bedrock Runtime refused generation because its content filter was activated.',
+      message: 'The AI provider refused generation because its content filter was activated.',
       usage: {
         inputTokens: 8,
         outputTokens: 0,
@@ -851,7 +852,7 @@ describe('createMastraBedrockAiModelGateway', () => {
       await expect(gateway.generate(createInput())).rejects.toMatchObject({
         category: 'upstream',
         code: 'AiAssistanceProviderError',
-        message: 'Bedrock Runtime generation failed.',
+        message: 'AI provider generation failed.',
       })
     }
   })

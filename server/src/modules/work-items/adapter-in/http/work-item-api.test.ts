@@ -40,6 +40,7 @@ import { createWorkItemAuthorizationChangedError } from '../../adapter-out/dynam
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { AuthenticatedDeveloperCredential } from '../../../developer-platform/application/ports'
 import { InMemoryCollectionsStore } from '../../../collections'
+import { createAuditEvent, createMutationAuditContext } from '../../../audit/audit'
 import {
   afterEach,
   expect,
@@ -2905,6 +2906,9 @@ test('issues a one-time realtime ticket only after Work Item viewer access is co
           expiresAt: '2026-07-12T00:01:00.000Z',
         }
       },
+      async createDocumentTicket() {
+        throw new Error('Document tickets are not used by this test.')
+      },
     },
   })
 
@@ -3002,4 +3006,99 @@ test('requires a bearer token to resolve a Work Item key', async () => {
   const response = await app.request('/api/work-items/keys/CT-12')
 
   expect(response.status).toBe(401)
+})
+
+/**
+ * Creates a relation audit event of `work-item-1` with the given private endpoint metadata.
+ *
+ * @param eventType - Relation audit event type.
+ * @param metadata - Endpoint fields the relation adapter records.
+ * @returns A normalized audit event.
+ */
+function createRelationActivityEvent(eventType: string, metadata: Record<string, string>) {
+  return createAuditEvent({
+    context: createMutationAuditContext({
+      workspaceId: 'user#demo@example.com',
+      actor: { id: 'demo@example.com', kind: 'user', displayName: 'Demo User' },
+      idempotencyKey: `relation-activity-${eventType}-${Object.values(metadata).join('-')}`,
+      occurredAt: '2026-07-14T00:00:00.000Z',
+      request: { method: 'POST', path: '/api/teams/core-team/issues/work-item-1/relations', body: {} },
+      source: { kind: 'api' },
+    }),
+    eventType,
+    entity: { type: 'work-item', id: 'team/core-team/issue/work-item-1' },
+    target: { type: 'work-item', id: 'team/core-team/issue/work-item-1' },
+    action: eventType.slice('work-item.'.length),
+    summary: 'A related Work Item was linked.',
+    metadata: {
+      adapter: 'work-item-relation',
+      actorMemberKey: 'demo@example.com',
+      teamId: 'core-team',
+      issueId: 'work-item-1',
+      ...metadata,
+    },
+    expiresAt: 2_000_000_000,
+  })
+}
+
+test('shows relation activity endpoints only when the viewer can read their Project', async () => {
+  const calls = configureFakeProjectClients(true, {
+    detailAssignedProjectIds: { 'hidden-item': 'private-project' },
+    detailKeys: { 'visible-item': 'CT-7' },
+    detailMissingIssueIds: ['deleted-item'],
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+  })
+  const events = [
+    createRelationActivityEvent('work-item.relation-added', {
+      relationType: 'related',
+      relatedWorkItemId: 'visible-item',
+    }),
+    createRelationActivityEvent('work-item.blocker-added', {
+      relationType: 'blockedBy',
+      relatedWorkItemId: 'hidden-item',
+    }),
+    createRelationActivityEvent('work-item.parent-changed', {
+      relationType: 'parent',
+      parentWorkItemId: 'visible-item',
+      previousParentWorkItemId: 'deleted-item',
+    }),
+  ]
+  setTestAppDependencies({
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events }
+      },
+    },
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/work-item-1/activity', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  const body = await response.json() as { events: Array<Record<string, unknown>> }
+
+  expect(response.status).toBe(200)
+  const visible = {
+    id: 'visible-item',
+    teamId: 'core-team',
+    key: 'CT-7',
+    title: '初回オンボーディングの離脱要因を減らす',
+  }
+  expect(body.events[0]?.relatedWorkItem).toEqual(visible)
+  expect(body.events[1]).not.toHaveProperty('relatedWorkItem')
+  expect(body.events[2]?.parentWorkItem).toEqual(visible)
+  expect(body.events[2]).not.toHaveProperty('previousParentWorkItem')
+  for (const event of body.events) {
+    expect(event.metadata).not.toHaveProperty('relatedWorkItemId')
+    expect(event.metadata).not.toHaveProperty('parentWorkItemId')
+    expect(event.metadata).not.toHaveProperty('previousParentWorkItemId')
+  }
+  expect(calls.issueDetails.map(({ issueId }) => issueId)).toEqual([
+    'work-item-1',
+    'visible-item',
+    'hidden-item',
+    'deleted-item',
+  ])
 })

@@ -1,3 +1,7 @@
+import {
+  isWorkspaceCalendarPeriodPreset,
+  type WorkspaceCalendarPeriodPreset,
+} from '@mukuroji/contracts'
 import type {
   AnalyticsDateRange,
   AnalyticsWeighting,
@@ -70,6 +74,7 @@ export function parseAnalyticsRouteState(
       from: readValue(searchParams, 'from') ?? '',
       to: readValue(searchParams, 'to') ?? '',
     },
+    periodPreset: readPeriodPreset(searchParams),
     teamIds: readOptionalRepeated(searchParams, 'team'),
     projectIds: readOptionalRepeated(searchParams, 'project'),
     assigneeUserIds: readOptionalRepeated(searchParams, 'assignee'),
@@ -148,6 +153,7 @@ export function serializeAnalyticsRouteState(state: AnalyticsRouteState) {
   if (state.forecastWeighting === 'effort') searchParams.set('forecast', 'effort')
   setValue(searchParams, 'from', readString(period.from))
   setValue(searchParams, 'to', readString(period.to))
+  setValue(searchParams, 'period', readString(filter.periodPreset))
   appendFilterValues(searchParams, 'team', filter.teamIds)
   appendFilterValues(searchParams, 'project', filter.projectIds)
   appendFilterValues(searchParams, 'assignee', filter.assigneeUserIds)
@@ -340,6 +346,17 @@ function setValue(
   if (value) {
     searchParams.set(key, value)
   }
+}
+
+/**
+ * Reads the relative period a shared URL was chosen with.
+ *
+ * @param searchParams - `/reports` URL query.
+ * @returns The preset, or undefined when the URL has fixed dates or an unknown value.
+ */
+function readPeriodPreset(searchParams: URLSearchParams): WorkspaceCalendarPeriodPreset | undefined {
+  const value = readValue(searchParams, 'period')
+  return isWorkspaceCalendarPeriodPreset(value) ? value : undefined
 }
 
 function readValue(searchParams: URLSearchParams, key: string) {

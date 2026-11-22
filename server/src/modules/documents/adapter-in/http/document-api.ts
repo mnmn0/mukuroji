@@ -196,6 +196,45 @@ export type DocumentApiDependencies = {
     workspaceId: string,
     documentId: string,
   ) => Promise<void>
+  /**
+   * 閲覧権限を確認済みの Document について、変更通知を購読する短命 ticket を発行します。
+   * 未設定、または WebSocket のない runtime（undefined を返す）では ticket route が
+   * 503 `RealtimeUnavailable` を返し、画面は polling を続けます。
+   */
+  issueRealtimeTicket?: (
+    principal: DocumentApiPrincipal,
+    documentId: string,
+    context: Context,
+  ) => Promise<DocumentRealtimeTicket | undefined>
+  /**
+   * Document の購読者へ内容を含まない変更通知を best-effort で送ります。
+   */
+  publishChange?: (
+    workspaceId: string,
+    change: DocumentRealtimeChange,
+  ) => Promise<void>
+}
+
+/** Document の変更通知を購読するために browser へ一度だけ返す ticket です。 */
+export type DocumentRealtimeTicket = {
+  /** WebSocket `$connect` query に渡す一回限りの ticket です。 */
+  ticket: string
+  /** 接続先 WebSocket URL です。 */
+  websocketUrl: string
+  /** Ticket の有効期限（ISO 8601）です。 */
+  expiresAt: string
+  /** 購読が失効する時刻（ISO 8601）です。Client はこの前に ticket を取り直します。 */
+  sessionExpiresAt?: string
+}
+
+/** Document の購読者へ送る、内容を含まない変更通知です。 */
+export type DocumentRealtimeChange = {
+  /** 変更された Document ID です。 */
+  documentId: string
+  /** 変わった部分です。Client は対応する API を読み直します。 */
+  part: 'document' | 'comments' | 'presence'
+  /** 変更を送った editor の client ID です。自分の変更を読み直さないために使います。 */
+  originClientId?: string
 }
 
 /**
@@ -327,6 +366,28 @@ export function registerDocumentApiRoutes(
     })
   })
 
+  app.post('/api/documents/:documentId/realtime/tickets', async (c) => {
+    return withDocumentPrincipal(c, dependencies, async (principal, access) => {
+      const documentId = readRequiredDocumentId(c)
+      const realtimeUnavailable = () => c.json({
+        code: 'RealtimeUnavailable',
+        message: 'Realtime WebSocket is not configured; use the polling fallback.',
+      }, 503)
+      if (!dependencies.issueRealtimeTicket) return realtimeUnavailable()
+      // Reading the Document applies the caller's current view permission before a ticket
+      // for its change signals exists.
+      const document = await dependencies.getClient().get({
+        workspaceId: principal.workspaceId,
+        documentId,
+        access,
+        includeArchived: true,
+      })
+      requireDocumentCapability(document.capabilities.canView, 'DocumentViewDenied')
+      const ticket = await dependencies.issueRealtimeTicket(principal, document.id, c)
+      return ticket ? c.json(ticket, 201) : realtimeUnavailable()
+    })
+  })
+
   app.patch('/api/documents/:documentId', async (c) => {
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const input = parseUpdateDocumentInput(await readJson<unknown>(c))
@@ -370,6 +431,10 @@ export function registerDocumentApiRoutes(
             }),
       })
       await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, document)
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'document',
+      })
       return c.json({ document })
     })
   })
@@ -443,6 +508,11 @@ export function registerDocumentApiRoutes(
         includeArchived: true,
       })
       await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, document)
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'document',
+        originClientId: input.clientId,
+      })
       return c.json(result)
     })
   })
@@ -458,6 +528,10 @@ export function registerDocumentApiRoutes(
         expectedRevision: readExpectedRevision(input?.expectedRevision),
       })
       await deleteSearchDocumentBestEffort(dependencies, principal.workspaceId, documentId)
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'document',
+      })
       return c.json({ document: toDocumentNode(document) })
     })
   })
@@ -497,6 +571,10 @@ export function registerDocumentApiRoutes(
             }),
       })
       await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, document)
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'document',
+      })
       return c.json({ document: toDocumentNode(document) })
     })
   })
@@ -603,6 +681,10 @@ export function registerDocumentApiRoutes(
           ),
       })
       await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, document)
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId: document.id,
+        part: 'document',
+      })
       return c.json({ document, restoredFromVersionId: versionId })
     })
   })
@@ -662,6 +744,10 @@ export function registerDocumentApiRoutes(
             commentId,
           ),
         })
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'comments',
+      })
       return c.json({ comment }, 201)
     })
   })
@@ -678,12 +764,17 @@ export function registerDocumentApiRoutes(
       if (!commentId) {
         throw new DocumentError(400, 'InvalidDocumentComment', 'Comment ID is required.')
       }
+      const documentId = readRequiredDocumentId(c)
       const comment = await dependencies.getClient().resolveComment({
         workspaceId: principal.workspaceId,
-        documentId: readRequiredDocumentId(c),
+        documentId,
         commentId,
         access,
         resolved: body?.resolved !== false,
+      })
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'comments',
       })
       return c.json({ comment })
     })
@@ -705,15 +796,25 @@ export function registerDocumentApiRoutes(
     return withDocumentPrincipal(c, dependencies, async (principal, access) => {
       const input = parseDocumentPresenceInput(await readJson<unknown>(c))
       const selection = input.selection
+      const documentId = readRequiredDocumentId(c)
       await dependencies.getClient().heartbeatPresence({
         workspaceId: principal.workspaceId,
-        documentId: readRequiredDocumentId(c),
+        documentId,
         access,
         clientId: input.clientId,
         displayName: principal.displayName,
         color: createPresenceColor(principal.memberKey),
         ...(selection !== undefined ? { selection } : {}),
       })
+      // A heartbeat that only extends the lease is not signalled: with N viewers every
+      // heartbeat would make the other N - 1 re-read presence.
+      if (input.announce !== false) {
+        await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+          documentId,
+          part: 'presence',
+          originClientId: input.clientId,
+        })
+      }
       return c.json({})
     })
   })
@@ -724,11 +825,17 @@ export function registerDocumentApiRoutes(
       if (!clientId) {
         throw new DocumentError(400, 'InvalidDocumentPresence', 'Presence client ID is required.')
       }
+      const documentId = readRequiredDocumentId(c)
       await dependencies.getClient().leavePresence({
         workspaceId: principal.workspaceId,
-        documentId: readRequiredDocumentId(c),
+        documentId,
         access,
         clientId,
+      })
+      await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+        documentId,
+        part: 'presence',
+        originClientId: clientId,
       })
       return c.json({})
     })
@@ -843,6 +950,10 @@ export function registerDocumentApiRoutes(
           expectedAuthorizationRevision,
         })
         await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, updated)
+        await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+          documentId,
+          part: 'document',
+        })
         return c.json({
           type: 'member',
           share: {
@@ -904,6 +1015,10 @@ export function registerDocumentApiRoutes(
           expectedAuthorizationRevision,
         })
         await upsertSearchDocumentBestEffort(dependencies, principal.workspaceId, updated)
+        await publishDocumentChangeBestEffort(dependencies, principal.workspaceId, {
+          documentId,
+          part: 'document',
+        })
       } else {
         await dependencies.getClient().revokePublicShare({
           workspaceId: principal.workspaceId,
@@ -1641,6 +1756,9 @@ function parseDocumentPresenceInput(value: unknown): UpdateDocumentPresenceInput
     'InvalidDocumentPresence',
     'Presence client ID is required.',
   )
+  if (input.announce !== undefined && typeof input.announce !== 'boolean') {
+    throw new DocumentError(400, 'InvalidDocumentPresence', 'Presence announce flag is invalid.')
+  }
   if (input.selection !== undefined && input.selection !== null) {
     if (!isRecord(input.selection)) {
       throw new DocumentError(400, 'InvalidDocumentPresence', 'Presence selection is invalid.')
@@ -2466,6 +2584,42 @@ function toDocumentBacklinkResponse(backlink: DocumentBacklink) {
     relation: backlink.relation,
   }
 }
+
+/**
+ * Sends a change signal to the Document's subscribers without failing the request.
+ *
+ * @param dependencies - Route dependencies that may provide the publisher.
+ * @param workspaceId - Workspace that owns the Document.
+ * @param change - Content-free description of what changed.
+ */
+async function publishDocumentChangeBestEffort(
+  dependencies: DocumentApiDependencies,
+  workspaceId: string,
+  change: DocumentRealtimeChange,
+) {
+  if (!dependencies.publishChange) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    // The change is already saved: a slow notification must not hold the response.
+    const deadline = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), DOCUMENT_CHANGE_NOTIFICATION_TIMEOUT_MILLISECONDS)
+    })
+    const outcome = await Promise.race([
+      dependencies.publishChange(workspaceId, change).then((): 'sent' => 'sent'),
+      deadline,
+    ])
+    if (outcome === 'timeout') {
+      console.error('Document change notification timed out.')
+    }
+  } catch (error) {
+    console.error('Document change notification failed:', error)
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Longest wait for a change notification before the write responds without it. */
+const DOCUMENT_CHANGE_NOTIFICATION_TIMEOUT_MILLISECONDS = 2_000
 
 async function upsertSearchDocumentBestEffort(
   dependencies: DocumentApiDependencies,

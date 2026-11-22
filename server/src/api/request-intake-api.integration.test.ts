@@ -1531,7 +1531,17 @@ test('commits a Request conversion pointer in the same transaction as its canoni
   expect(response.issue.sourceRequestId).toBe('req_20260716_atomic')
   expect(response.issue.id).toBe('request-req-20260716-atomic')
   expect(response.issue.key).toBe('CT-1')
-  expect(transactionItems).toHaveLength(5)
+  expect(transactionItems).toHaveLength(6)
+  expect(transactionItems[5]).toMatchObject({
+    Put: {
+      TableName: 'work-items-table',
+      Item: {
+        entryType: 'work-item-member-index',
+        memberKey: 'member@example.com',
+        workItemId: 'request-req-20260716-atomic',
+      },
+    },
+  })
   expect(transactionItems[0]).toMatchObject({
     Put: {
       TableName: 'work-items-table',

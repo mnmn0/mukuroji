@@ -1,5 +1,6 @@
 import {
   readSearchWorkItemTypeKey,
+  TASK_VIEW_GANTT_SCALES,
   TASK_VIEW_SURFACES,
   type SearchCustomFieldFilter,
   type SearchCustomFieldOperator,
@@ -31,10 +32,8 @@ import { isRecord } from '../../shared/api/jsonValidation'
 const taskViewLayoutModes: readonly TaskViewLayoutMode[] = [
   'table',
   'board',
-  'list',
   'gantt',
   'calendar',
-  'timeline',
 ]
 const taskViewDensities: readonly TaskViewDensity[] = [
   'compact',
@@ -76,7 +75,9 @@ const taskViewDueDatePresets: readonly TaskViewDueDatePreset[] = [
   'completed-late',
   'started-late',
 ]
-const taskViewDisplayOptionIds: readonly (keyof TaskViewDisplayOptions)[] = [
+/** Display options whose persisted value is a boolean. */
+type TaskViewBooleanDisplayOptionId = Exclude<keyof TaskViewDisplayOptions, 'ganttScale'>
+const taskViewBooleanDisplayOptionIds: readonly TaskViewBooleanDisplayOptionId[] = [
   'showCompleted',
   'showArchived',
   'showSubItems',
@@ -84,6 +85,12 @@ const taskViewDisplayOptionIds: readonly (keyof TaskViewDisplayOptions)[] = [
   'wrapText',
   'showAssigneeAvatars',
   'showOutline',
+  'ganttCompactRows',
+  'ganttProgressLine',
+]
+const taskViewDisplayOptionIds: readonly (keyof TaskViewDisplayOptions)[] = [
+  ...taskViewBooleanDisplayOptionIds,
+  'ganttScale',
 ]
 const taskViewFilterIds: readonly string[] = [
   'keyword',
@@ -907,7 +914,7 @@ function readTaskViewColumn(value: unknown): TaskViewColumn | undefined {
 }
 
 /**
- * Reads recognized boolean display options.
+ * Reads recognized boolean display options and the Gantt scale.
  *
  * @param value - Unknown display-options value.
  * @returns Safe options or undefined for a non-object value.
@@ -915,9 +922,11 @@ function readTaskViewColumn(value: unknown): TaskViewColumn | undefined {
 function readTaskViewDisplayOptions(value: unknown): TaskViewDisplayOptions | undefined {
   if (!isRecord(value)) return undefined
   const options: TaskViewDisplayOptions = {}
-  for (const key of taskViewDisplayOptionIds) {
+  for (const key of taskViewBooleanDisplayOptionIds) {
     if (typeof value[key] === 'boolean') options[key] = value[key]
   }
+  const ganttScale = TASK_VIEW_GANTT_SCALES.find((scale) => scale === value.ganttScale)
+  if (ganttScale) options.ganttScale = ganttScale
   return options
 }
 
@@ -939,6 +948,9 @@ function sanitizeTaskViewDisplayOptions(
     return { ...fallback }
   }
   const options = readTaskViewDisplayOptions(value) ?? {}
+  if (value.ganttScale !== undefined && options.ganttScale === undefined) {
+    warnings.push(createMigrationWarning('invalid-layout', 'display-option', 'reset-to-default'))
+  }
   for (const key of Object.keys(value).sort()) {
     if (!taskViewDisplayOptionIds.some((optionId) => optionId === key)) {
       warnings.push(createMigrationWarning('invalid-layout', 'display-option', 'ignored'))

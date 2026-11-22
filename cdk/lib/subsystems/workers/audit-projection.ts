@@ -16,6 +16,7 @@ import {
   type RuntimeControlResources,
 } from '../runtime-controls';
 import type { WorkerChannels } from './channels';
+import { skipRuntimeControlAuditEvents } from './audit-stream-filters';
 
 /**
  * Inputs required by the audit outbox projection worker.
@@ -99,7 +100,7 @@ export function buildAuditProjectionWorker(
       timeout: cdk.Duration.seconds(30),
       memorySize: 512,
       description:
-        'Projects audit outbox events into collaboration, Webhook, connector deliveries, and tenant retention.',
+        'Projects audit outbox events into collaboration, Webhook, connector deliveries, tenant retention, and Analytics history.',
       bundling: {
         bundleAwsSDK: true,
         minify: true,
@@ -165,6 +166,7 @@ export function buildAuditProjectionWorker(
       retryAttempts: 3,
       reportBatchItemFailures: true,
       onFailure: new lambdaEventSources.SqsDlq(collaborationProjectionDlq),
+      filters: skipRuntimeControlAuditEvents(),
     }),
   );
   new cloudwatch.Alarm(scope, 'CollaborationProjectionDlqAlarm', {
@@ -213,6 +215,45 @@ export function buildAuditProjectionWorker(
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem', 'dynamodb:ConditionCheckItem'],
       resources: [analyticsTable.tableArn],
+    }),
+  );
+  // Analytics history rows (ADR 0042): read-merge-write of one row per Work Item, rebuilt from the
+  // Work Item's audit entity timeline when the row is missing or has a revision gap.
+  // PutItem may only write items made of history-row attributes, so the projection cannot
+  // replace a report, snapshot, or time entry with its own content.
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:PutItem'],
+      resources: [analyticsTable.tableArn],
+      conditions: {
+        'ForAllValues:StringEquals': {
+          'dynamodb:Attributes': [
+            'workspaceId',
+            'recordKey',
+            'entryType',
+            'schemaVersion',
+            'teamId',
+            'workItemId',
+            'coveredRevision',
+            'overflow',
+            'entries',
+            'rowVersion',
+            'historyExpiresAt',
+          ],
+        },
+      },
+    }),
+  );
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:DeleteItem'],
+      resources: [analyticsTable.tableArn],
+    }),
+  );
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:Query'],
+      resources: [`${auditEventsTable.tableArn}/index/EntityOccurredAtIndex`],
     }),
   );
   collaborationProjectionFunction.addToRolePolicy(

@@ -432,6 +432,28 @@ test('sanitizes direct changes and metadata before persistence', () => {
   expect(view.metadata).toEqual({ adapter: 'team-issue' })
 })
 
+test('publishes the runtime-control switch metadata in the audit view', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'arn:aws:sts::123456789012:assumed-role/deploy/run-1', kind: 'service' },
+    idempotencyKey: 'runtime-control-v1:switch-1:started',
+    occurredAt: '2026-11-21T12:00:00.000Z',
+    request: { method: 'OPERATOR', path: 'scripts/runtime-control.ts' },
+    source: { kind: 'system', method: 'OPERATOR', route: 'scripts/runtime-control.ts' },
+  })
+  const event = createAuditEvent({
+    context,
+    expiresAt: auditExpiresAt,
+    eventType: 'runtime-control.change-started',
+    entity: { type: 'runtime-control', id: 'appconfig:app:profile' },
+    changes: [{ field: 'mode', before: 'enabled', after: 'read-only' }],
+    metadata: { runtimeControl: { mode: 'read-only', revision: 3 }, internal: 'hidden' },
+    outboxStatus: 'suppressed',
+  })
+
+  expect(toAuditEventView(event).metadata).toEqual({ runtimeControl: { mode: 'read-only', revision: 3 } })
+})
+
 test('creates a conditional audit transaction Put', () => {
   const context = createMutationAuditContext({
     workspaceId: 'workspace-1',
@@ -809,4 +831,30 @@ test('bootstraps a local table with the CDK-compatible base key and GSIs', async
       StreamViewType: 'NEW_IMAGE',
     },
   })
+})
+
+test('leaves the timeline name out of a query without a time range', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+    region: 'us-east-1',
+    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+  }))
+  Object.assign(documentClient, {
+    async send(command: { input: Record<string, unknown> }) {
+      commands.push(command.input)
+      return { Items: [], Count: 0 }
+    },
+  })
+  const client = new DynamoDbAuditEventsClient(documentClient, 'AuditTable')
+
+  await client.query({ workspaceId: 'workspace-1', entityType: 'planning-entity', entityId: 'p1' })
+  await client.countEventsConsistently({ workspaceId: 'workspace-1', actorId: 'actor-1', durableAfter: 1 })
+
+  // DynamoDB rejects a request whose ExpressionAttributeNames holds a name no expression uses.
+  for (const command of commands) {
+    expect(command.ExpressionAttributeNames).not.toHaveProperty('#timelineKey')
+    expect(JSON.stringify([command.KeyConditionExpression, command.FilterExpression]))
+      .not.toContain('#timelineKey')
+  }
+  expect(commands).toHaveLength(2)
 })

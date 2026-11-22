@@ -11,9 +11,15 @@ import {
   registerDocumentApiRoutes,
   type DocumentApiPrincipal,
 } from '../../modules/documents/adapter-in/http/document-api'
+import {
+  createDocumentRealtimeScopeKey,
+  publishRealtimeScopeSignal,
+  RealtimeTicketError,
+} from '../../modules/realtime'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { readDocumentAuthorizationSnapshot } from '../shared/document-access'
 import { createDocumentEnterpriseScopeBoundary } from '../shared/project-access'
+import { readRealtimeAuthenticationContext } from '../shared/realtime-authentication'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import {
   isWorkspaceSearchProjectionEnabled,
@@ -272,5 +278,53 @@ export function registerDocumentsRoutes(routeApp: Hono): void {
       if (!isWorkspaceSearchProjectionEnabled()) return
       await workItemDependencies.workspaceSearch.deleteDocument(workspaceId, 'document', documentId)
     },
+    issueRealtimeTicket: async (principal, documentId, context) => {
+      const accessToken = readBearerToken(context)
+      if (!accessToken) {
+        throw new DocumentError(401, 'DocumentAuthenticationRequired', 'Bearer token is required.')
+      }
+      try {
+        return await workItemDependencies.realtimeTickets.createDocumentTicket({
+          workspaceId: principal.workspaceId,
+          memberKey: principal.memberKey,
+          documentId,
+          systemAdmin: principal.isSystemAdmin,
+          ...await readRealtimeAuthenticationContext(
+            accessToken,
+            principal.workspaceId,
+            context,
+          ),
+        })
+      } catch (error) {
+        // A runtime without the WebSocket API is expected; the page keeps polling.
+        if (error instanceof RealtimeTicketError && error.code === 'RealtimeUnavailable') {
+          return undefined
+        }
+        throw error
+      }
+    },
+    publishChange: async (workspaceId, change) => {
+      await publishRealtimeScopeSignal(
+        createDocumentRealtimeScopeKey(workspaceId, change.documentId),
+        {
+          type: 'document.changed',
+          documentId: change.documentId,
+          part: change.part,
+          ...(change.originClientId ? { originClientId: change.originClientId } : {}),
+          occurredAt: new Date().toISOString(),
+        },
+      )
+    },
   })
+}
+
+/**
+ * Reads the bearer access token that the Document route already verified.
+ *
+ * @param context - Hono request context.
+ * @returns The access token, or undefined when the header is missing.
+ */
+function readBearerToken(context: Context): string | undefined {
+  const authorization = context.req.header('Authorization') ?? ''
+  return authorization.match(/^Bearer\s+(.+)$/i)?.[1]
 }

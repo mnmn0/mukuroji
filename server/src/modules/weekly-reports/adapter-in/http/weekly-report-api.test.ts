@@ -410,13 +410,18 @@ test('summarizes the week of each readable Project without Work Items of other P
     { ...template, id: 'hidden', title: 'Secret title', assignedProjectId: 'secret', statusCategory: 'completed' as const, actualEndDate: '2026-11-18' },
   ]
   dependencies.teamIssues.getTeamIssues = async (_directoryId, teamId) => ({ teamId, issues, evaluatedCount: issues.length })
-  await dependencies.scheduleBaselines.capture({
+  const baseline = { revision: 1, id: 'b1', capturedAt: '2026-11-01T00:00:00.000Z', entries: [{ workItemId: 'late', endDate: '2026-11-20' }] }
+  await dependencies.scheduleBaselines.write({
     workspaceId: 'user#demo@example.com',
     teamId: 'core-team',
     projectId: 'refero',
-    entries: [{ workItemId: 'late', endDate: '2026-11-20' }],
-    capturedAt: '2026-11-01T00:00:00.000Z',
+    kind: 'capture',
+    writtenAt: baseline.capturedAt,
+    baseline,
     expectedRevision: 0,
+    savedBaselines: [{ id: 'b1', capturedAt: baseline.capturedAt, entryCount: 1 }],
+    savedRowsToPut: [baseline],
+    savedIdsToDelete: [],
     previous: null,
     callerAuthorization: [],
     auditContext: createMutationAuditContext({

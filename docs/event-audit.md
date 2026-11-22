@@ -96,13 +96,35 @@ Work Item relation の追加・削除と親の付け替えは、relation row と
 | `work-item.relation-added` / `work-item.relation-removed` | `related` / `duplicate` の両端 | `relatedWorkItemId` |
 | `work-item.sibling-order-changed` | 同じ親の中（または最上位）で並べ替えた子 | `parentWorkItemId`（最上位では無し）、`previousHierarchyRank` / `hierarchyRank` |
 
-`metadata` はほかに `adapter=work-item-relation`、`actorMemberKey`、`teamId`、`issueId`、`relationType`（記録する側から見た type）、`graphRevision` を持つ。相手の Work Item は閲覧者が見られない Project に属することがあるので、相手の ID は公開 view に出る `changes` には入れず（`changes` は空）、公開 view が出さない `metadata` にだけ保存する。activity は「誰がいつ何の種類の relation を変えたか」だけを表示し、相手の Work Item を閲覧者の権限で絞って表示するのは後続変更とする。relation 変更は Work Item の `revision` と `updatedAt` を変えないので、event も `work-item.updated` とは別の type にし、Analytics の scope change（`work-item.updated` の field 変更）と区別する。Audit table が構成されている環境で audit context のない relation mutation は `500` で拒否する。
+`metadata` はほかに `adapter=work-item-relation`、`actorMemberKey`、`teamId`、`issueId`、`relationType`（記録する側から見た type）、`graphRevision` を持ち、記録する側の Work Item が Project に割り当てられていれば `projectId` も持つ。`projectId` は同じ transaction の endpoint guard が確かめた値で、webhook の配信と通知はこれで Project の閲覧権限を確かめる。`projectScopeRecorded: true` は Project の記録が揃っていることを示し、これがない古い relation event は webhook に配信しない。相手の Work Item は閲覧者が見られない Project に属することがあるので、相手の ID は公開 view に出る `changes` には入れず（`changes` は空）、公開 view が出さない `metadata` にだけ保存する。activity は「誰がいつ何の種類の relation を変えたか」だけを表示し、相手の Work Item を閲覧者の権限で絞って表示するのは後続変更とする。relation 変更は Work Item の `revision` と `updatedAt` を変えないので、event も `work-item.updated` とは別の type にし、Analytics の scope change（`work-item.updated` の field 変更）と区別する。Audit table が構成されている環境で audit context のない relation mutation は `500` で拒否する。
 
 兄弟の並べ替え（親を変えずに `hierarchyRank` だけを書く `PUT .../parent`）は、rank の書き込みと graph revision の CAS と同じ transaction に、動かした子だけの `work-item.sibling-order-changed` を 1 件書く。親や兄弟の activity には出さない。rank が既に保存済みの retry は何も書かないので event も増えない。rank は公開 view に出さず `metadata` にだけ置く。
 
-`work-item.blocker-removed` は、route が認可時に読んだ block されていた側の責任者・title・deep link・Project を `metadata` の `notificationCandidates`（`assignee`）・`notificationTitle`・`deepLink`・`projectId` に入れ、projection がその Work Item の現在の watcher も加えて通知する（[通知](./notifications.md)）。ほかの relation event は通知しない。
+`work-item.blocker-removed` は、route が認可時に読んだ block されていた側の責任者・title・deep link を `metadata` の `notificationCandidates`（`assignee`）・`notificationTitle`・`deepLink` に入れ、projection がその Work Item の現在の watcher も加えて通知する（[通知](./notifications.md)）。ほかの relation event は通知しない。
 
-Automation trigger と webhook の event type はこれらをまだ扱わない（#377 の残り）。
+これらの event type は Automation の `relation` trigger（[Automation](./automation.md#rule-model)）と webhook の event type（[Public API の Signed webhook](./public-api.md#signed-webhook)）でも使う。判断の経緯は [ADR 0045](./adr/0045-relation-events-for-automation-and-webhooks.md)。
+
+### Runtime control の切り替え event
+
+operator が `bun run runtime-control:*`（GitHub Actions の deploy workflow を含む）で runtime control を切り替えると、
+`scripts/runtime-control.ts` が deployment の Workspace（`WorkspaceDirectoryId`）に次を記録する（[ADR 0044](adr/0044-runtime-control-switch-audit-events.md)）。
+
+| event type | 書く時点 | 主な `metadata.runtimeControl` |
+| --- | --- | --- |
+| `runtime-control.change-started` | hosted version を作る前 | `mode`、`previousMode`、`revision`、`strategy`（`canary` / `all-at-once`）、`switchId` |
+| `runtime-control.change-completed` | deployment が `COMPLETE` になり、`/api/ready` と `/api/maintenance` が新しい mode を示した後 | 上記と `hostedVersionNumber`、`deploymentNumber` |
+| `runtime-control.change-failed` | rollback、待ち時間切れ、その他の失敗の後 | 上記と `failureReason`（`deployment-rolled-back` / `deployment-timeout` / `readiness-timeout` / `error`） |
+
+`entity` は `runtime-control` / `appconfig:<application ID>:<profile ID>`、`changes` は `mode` の before / after、actor は
+`kind=service` で `id` が STS caller ARN。GitHub Actions では `displayName` が `GitHub Actions (<起動した login>)` になり、
+`metadata.runtimeControl.gitHub` に repository、run ID、attempt、run URL が入る。audit の公開 view は metadata を allowlist で
+絞っており、`runtimeControl` はその対象（secret や tenant の data を含まない）。同じ実行の event は `correlationId`
+`runtime-control:<switchId>` を共有する。operator の通知・自動化の対象ではないので `outboxStatus=suppressed` で書き、AuditEvents stream の consumer
+（audit projection、automation worker）は event source の filter でこの `entityType` を受け取らない。保持期限は書く前に
+script が Workspace の governance（保持日数・legal hold）を読んで付ける。完了・失敗の event の前には governance を読み直し、読めないときは TTL を付けない。`changes` の before は最新の `COMPLETE`
+deployment の mode で、分からないときは省く。
+開始の記録に失敗した場合、`enable` と `read-only` は何も変えずに止まり、`disable` は止める操作を優先して警告だけ出す。
+完了・失敗の記録に失敗した場合は警告だけ出す（切り替え自体は済んでいるため）。
 
 ## DynamoDB key
 
@@ -172,6 +194,8 @@ GET /api/audit/events/export?actorId=...&from=...&to=...
 ```
 
 system admin を要求する。target filter がある場合は `TargetOccurredAtIndex`、actor filter がある場合は `ActorOccurredAtIndex`、どちらもない場合は `WorkspaceOccurredAtIndex` を使う。actor と target の両方がある場合は target index を query し、actor を filter する。同期 export は NDJSON を最大 1,000 件まで返す。上限到達時に後続 cursor が残る場合は `X-Audit-Truncated: true` と `X-Audit-Next-Cursor` を返し、呼び出し側が続きの export を取得できるようにする。1,000 件を超える export は次の非同期 S3 job を使う。
+
+Web の **設定 → Workspace 管理 → 監査ログ** はこの API を呼ぶ。`GET /api/auth/me` が返す `canReadAuditLog`（Workspace 自体に `audit.read` がある。検索 route が `audit.read` を要求するため）と `canExportAuditLog`（`audit.export` がある）で検索欄と export 欄の表示を決めるが、これは表示のためだけで、認可は上の route が request ごとに行う。検索は 1 page ごとに `audit.viewed` を書くので、画面は利用者が検索を押したときだけ読み、focus や再接続で自動的に読み直さない。
 
 ### 非同期 audit export job
 

@@ -1,6 +1,7 @@
 import {
   createSearchWorkItemTypeKey,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  TASK_VIEW_GANTT_SCALES,
   type CreateSavedTaskViewInput,
   type CreateSavedWorkspaceViewInput,
   type SearchCustomFieldFilter,
@@ -13,6 +14,7 @@ import {
   type TaskViewDefinition,
   type TaskViewDisplayOptions,
   type TaskViewFilters,
+  type TaskViewGanttScale,
   type TaskViewGrouping,
   type TaskViewLayout,
   type TaskViewScope,
@@ -1236,23 +1238,58 @@ function readTaskViewDisplayOptions(value: unknown): TaskViewDisplayOptions {
     ...(value.showOutline === undefined
       ? {}
       : { showOutline: readTaskViewBoolean(value.showOutline, 'Task view showOutline') }),
+    ...(value.ganttScale === undefined
+      ? {}
+      : { ganttScale: readTaskViewGanttScale(value.ganttScale) }),
+    ...(value.ganttCompactRows === undefined
+      ? {}
+      : {
+          ganttCompactRows: readTaskViewBoolean(
+            value.ganttCompactRows,
+            'Task view ganttCompactRows',
+          ),
+        }),
+    ...(value.ganttProgressLine === undefined
+      ? {}
+      : {
+          ganttProgressLine: readTaskViewBoolean(
+            value.ganttProgressLine,
+            'Task view ganttProgressLine',
+          ),
+        }),
   }
+}
+
+/**
+ * Reads one supported Gantt timeline scale.
+ *
+ * @param value - Untrusted scale value.
+ * @returns Supported Gantt scale.
+ */
+function readTaskViewGanttScale(value: unknown): TaskViewGanttScale {
+  const scale = TASK_VIEW_GANTT_SCALES.find((candidate) => candidate === value)
+  if (scale === undefined) {
+    return invalidTaskViewApiInput('Task view ganttScale is invalid.')
+  }
+  return scale
 }
 
 /**
  * Reads one supported task-view layout mode.
  *
+ * `list` and `timeline` were accepted before no screen offered them; a client that still sends
+ * either gets a table instead of an error.
+ *
  * @param value - Untrusted layout mode.
  * @returns Supported layout mode.
  */
 function readTaskViewLayoutMode(value: unknown): TaskViewLayout['mode'] {
+  if (value === 'list' || value === 'timeline') return 'table'
   if (
     value === 'table' ||
     value === 'board' ||
-    value === 'list' ||
     value === 'gantt' ||
-    value === 'calendar' ||
-    value === 'timeline'
+    value === 'calendar'
   ) {
     return value
   }

@@ -5,11 +5,23 @@ export {
   createFocusQueue,
   createFocusWorkItemStateKey,
   focusQueueUsesApprovalSummary,
+  focusQueueUsesScheduleBaseline,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
   type FocusRelationGraphSource,
+  type FocusScheduleBaselineSource,
   type ResolveFocusEffectivePoliciesInput,
 } from './focus-queue'
+
+export {
+  FOCUS_MEMBER_INDEX_LIMIT,
+  FOCUS_WORK_ITEM_REFERENCE_LIMIT,
+  readFocusWorkItemWindow,
+  type FocusPlanningDependencyReference,
+  type FocusWorkItemSourceReference,
+  type FocusWorkItemWindow,
+  type FocusWorkItemWindowPorts,
+} from './focus-work-item-window'
 
 export {
   isFocusSlaAnchor,

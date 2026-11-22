@@ -13,6 +13,19 @@ export const REALTIME_TICKET_TTL_SECONDS = 60
 /** Ticket 発行時の権限 snapshot を realtime session が利用できる最大秒数です。 */
 export const REALTIME_AUTHORIZATION_TTL_SECONDS = 60 * 60
 
+/**
+ * Document 購読の権限 snapshot を利用できる最大秒数です。
+ *
+ * Document の閲覧権限は realtime Lambda では再評価しないため、短い期限で client に
+ * ticket を取り直させ、API が毎回 Document の閲覧権限を確認します。
+ */
+export const REALTIME_DOCUMENT_AUTHORIZATION_TTL_SECONDS = 5 * 60
+
+/** Document 購読の scope key を作ります。 */
+export function createDocumentRealtimeScopeKey(workspaceId: string, documentId: string) {
+  return `${workspaceId}#document#${documentId}`
+}
+
 /** Realtime ticket 作成入力です。 */
 export type CreateRealtimeTicketInput = {
   /** Ticket を発行する canonical Workspace ID です。 */
@@ -43,6 +56,28 @@ export type CreateRealtimeTicketInput = {
   clientIp: string
 }
 
+/** Document の変更通知を購読する ticket の作成入力です。 */
+export type CreateRealtimeDocumentTicketInput = {
+  /** Ticket を発行する canonical Workspace ID です。 */
+  workspaceId: string
+  /** 認証済み Workspace member key です。 */
+  memberKey: string
+  /** API が閲覧権限を確認済みの Document ID です。 */
+  documentId: string
+  /** Ticket 発行時に current Cognito groups で確認した system admin かどうかです。 */
+  systemAdmin: boolean
+  /** Cognito `auth_time` または `iat` の epoch seconds です。 */
+  authenticatedAt: number
+  /** Cognito access token の `exp` epoch seconds です。 */
+  tokenExpiresAt: number
+  /** Access token を plaintext 保存せず session-bound policy に使う SHA-256 digest です。 */
+  authenticationSessionId: string
+  /** Access token で確認した authentication method 一覧です。 */
+  authenticationMethods: string[]
+  /** Ticket 発行 request の trusted client IP です。 */
+  clientIp: string
+}
+
 /** Browser に一度だけ返す Realtime ticket です。 */
 export type RealtimeTicket = {
   /** WebSocket `$connect` query に渡す高 entropy ticket です。 */
@@ -51,12 +86,16 @@ export type RealtimeTicket = {
   websocketUrl: string
   /** Ticket の有効期限を表す ISO 8601 timestamp です。 */
   expiresAt: string
+  /** 接続後の購読が失効する ISO 8601 timestamp です。Client はこの前に ticket を取り直します。 */
+  sessionExpiresAt?: string
 }
 
 /** API handler から利用する Realtime ticket store の契約です。 */
 export interface RealtimeTicketsClient {
   /** 認証済み scope 用の一回限り ticket を保存します。 */
   createTicket(input: CreateRealtimeTicketInput): Promise<RealtimeTicket>
+  /** 閲覧権限を確認済みの Document 用に、短命な一回限り ticket を保存します。 */
+  createDocumentTicket(input: CreateRealtimeDocumentTicketInput): Promise<RealtimeTicket>
 }
 
 /** Realtime ticket 作成時の安定した API error です。 */
@@ -201,6 +240,105 @@ export class DynamoDbRealtimeTicketsClient implements RealtimeTicketsClient {
       ticket: rawTicket,
       websocketUrl: this.websocketUrl,
       expiresAt,
+    } satisfies RealtimeTicket
+  }
+
+  /**
+   * 閲覧権限を確認済みの Document 用に、短命な一回限り ticket を保存します。
+   *
+   * @param input - API が認証と Document の閲覧権限を確認した後の購読入力です。
+   * @returns Browser に一度だけ返す ticket と購読の期限です。
+   */
+  async createDocumentTicket(input: CreateRealtimeDocumentTicketInput) {
+    if (!this.websocketUrl) {
+      throw new RealtimeTicketError(
+        503,
+        'RealtimeUnavailable',
+        'Realtime WebSocket is not configured; use the polling fallback.',
+      )
+    }
+
+    const workspaceId = requireText(input.workspaceId, 'Realtime workspace ID')
+    const memberKey = requireText(input.memberKey, 'Realtime member key')
+    const documentId = requireText(input.documentId, 'Realtime document ID')
+    const authenticationSessionId = requireText(
+      input.authenticationSessionId,
+      'Realtime authentication session ID',
+    )
+    if (
+      typeof input.systemAdmin !== 'boolean' ||
+      !Number.isSafeInteger(input.authenticatedAt) ||
+      !Number.isSafeInteger(input.tokenExpiresAt) ||
+      input.authenticatedAt > input.tokenExpiresAt ||
+      !Array.isArray(input.authenticationMethods) ||
+      input.authenticationMethods.some((method) => typeof method !== 'string') ||
+      !input.clientIp.trim()
+    ) {
+      throw new RealtimeTicketError(
+        400,
+        'InvalidRealtimeTicket',
+        'Realtime authentication context is invalid.',
+      )
+    }
+    const rawTicket = randomBytes(32).toString('base64url')
+    const ticketDigest = createHash('sha256').update(rawTicket).digest('hex')
+    const createdAt = this.clock()
+    const createdAtEpoch = Math.floor(createdAt.getTime() / 1000)
+    const expiresAtEpoch = createdAtEpoch + REALTIME_TICKET_TTL_SECONDS
+    const authorizationExpiresAt = Math.min(
+      createdAtEpoch + REALTIME_DOCUMENT_AUTHORIZATION_TTL_SECONDS,
+      input.tokenExpiresAt,
+    )
+    if (authorizationExpiresAt <= createdAtEpoch) {
+      throw new RealtimeTicketError(
+        400,
+        'InvalidRealtimeTicket',
+        'Realtime authentication context is invalid.',
+      )
+    }
+
+    try {
+      await this.documentClient.send(
+        new PutCommand({
+          TableName: this.tableName,
+          Item: {
+            connectionId: `TICKET#${ticketDigest}`,
+            itemType: 'ticket',
+            scopeType: 'document',
+            workspaceId,
+            memberKey,
+            documentId,
+            systemAdmin: input.systemAdmin,
+            // Document subscribers only receive content-free change signals and
+            // never broadcast typing or presence through the socket.
+            canWrite: false,
+            ticketScopeKey: createDocumentRealtimeScopeKey(workspaceId, documentId),
+            createdAt: createdAt.toISOString(),
+            expiresAt: expiresAtEpoch,
+            authorizationExpiresAt,
+            authenticatedAt: input.authenticatedAt,
+            tokenExpiresAt: input.tokenExpiresAt,
+            authenticationSessionId,
+            authenticationMethods: [...input.authenticationMethods],
+            clientIp: input.clientIp.trim(),
+          },
+          ConditionExpression: 'attribute_not_exists(connectionId)',
+        }),
+      )
+    } catch (error) {
+      throw new RealtimeTicketError(
+        503,
+        'RealtimeTicketUnavailable',
+        'Realtime ticket could not be created.',
+        { cause: error },
+      )
+    }
+
+    return {
+      ticket: rawTicket,
+      websocketUrl: this.websocketUrl,
+      expiresAt: new Date(expiresAtEpoch * 1000).toISOString(),
+      sessionExpiresAt: new Date(authorizationExpiresAt * 1000).toISOString(),
     } satisfies RealtimeTicket
   }
 }

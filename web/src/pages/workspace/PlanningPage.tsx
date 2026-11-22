@@ -78,6 +78,7 @@ import {
   usePlanningUpdates,
   usePlanningUpdateWatch,
 } from '../../planning/queries/usePlanningUpdates'
+import { usePlanningBaselineDelays } from '../../planning/queries/usePlanningBaselineDelays'
 import {
   canAnnotatePlanningUpdateTarget,
   canLinkPlanningEntity,
@@ -96,6 +97,7 @@ import {
   PlanningScreen,
 } from '../../planning/ui/PlanningScreen'
 import { createPlanningLabels } from '../../planning/ui/labels'
+import { PlanningEntityActivityContainer } from '../../planning/ui/PlanningEntityActivityPanel'
 import {
   type ProjectDirectoryTeam,
   type ProjectMemberRole,
@@ -243,6 +245,24 @@ export function PlanningPage() {
       currentUserProjectKey,
       selectedUpdateReviewerMemberKey,
     ],
+  )
+  const canPublishSelectedUpdate = Boolean(
+    selectedUpdateTarget &&
+    !planningUpdateTargetIsArchived(snapshot, selectedUpdateTarget) &&
+    canPublishPlanningUpdateTarget(
+      user,
+      selectedUpdateTarget,
+      snapshot?.entities ?? [],
+      snapshot?.updateTargets ?? [],
+      planningAccess,
+    ),
+  )
+  const updateBaselineDelays = usePlanningBaselineDelays(
+    accessToken,
+    snapshot,
+    selectedUpdateTarget,
+    updateHistory.data?.updates,
+    Boolean(user && !currentUserError && canPublishSelectedUpdate),
   )
   const updateTargetDetails = useMemo(
     () => createPlanningUpdateTargetDetails(
@@ -604,6 +624,9 @@ export function PlanningPage() {
           <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={openMobileSidebar} />
         </div>
         <PlanningScreen
+          updateBaselineDelays={selectedUpdateTarget && updateBaselineDelays
+            ? { target: selectedUpdateTarget, delays: updateBaselineDelays }
+            : undefined}
           accessErrorMessage={accessErrorMessage || undefined}
           activeView={activeView}
           aiAssistance={(isAiAssistanceTaskEnabled?.('planning') ?? aiAssistanceUiEnabled) && accessToken
@@ -642,6 +665,19 @@ export function PlanningPage() {
                   locale={locale}
                   t={t}
                   timeZone={browserTimeZone}
+                />
+              )
+            : undefined}
+          renderEntityActivity={accessToken && snapshot
+            ? (entity) => (
+                <PlanningEntityActivityContainer
+                  accessToken={accessToken}
+                  entities={snapshot.entities}
+                  entityId={entity.id}
+                  key={entity.id}
+                  labels={labels.entityActivity}
+                  ownerOptions={ownerOptions}
+                  revision={snapshot.revision}
                 />
               )
             : undefined}

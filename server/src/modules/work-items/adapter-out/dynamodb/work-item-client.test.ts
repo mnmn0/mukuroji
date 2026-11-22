@@ -19,8 +19,10 @@ import {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
 import {
+  BatchWriteCommand,
   DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
+import { bindPlanningRevisionFenceBarrierDocumentClient } from '../../../../infrastructure/runtime/planning-revision-fence-barrier'
 import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
@@ -1322,7 +1324,11 @@ test('DynamoDB Work Item creation takes its ID from a new key and sorts after ar
   const transaction = sentCommands.find((command) => command.name === 'TransactWriteCommand')
   const transactionItems = (transaction?.input as TransactWriteCommandInput | undefined)
     ?.TransactItems
-  expect(transactionItems?.at(-1)).toEqual({
+  // The member index rows come last (ADR 0038), after the key reservation.
+  expect(transactionItems?.at(-1)).toMatchObject({
+    Put: { Item: { entryType: 'work-item-member-index', teamId: 'core-team', workItemId: 'ct-1' } },
+  })
+  expect(transactionItems?.at(-2)).toEqual({
     Put: {
       TableName: 'WorkItemsTable',
       Item: {
@@ -1820,10 +1826,13 @@ test('DynamoDB Work Item creation commits a deterministic Triage acceptance cont
       },
     },
   })
-  // The key reservation is appended after the caller's contribution.
-  expect(transactionItems?.at(-2)).toEqual(contribution)
-  expect(transactionItems?.at(-1)).toMatchObject({
+  // The key reservation is appended after the caller's contribution, then the member index rows.
+  expect(transactionItems?.at(-3)).toEqual(contribution)
+  expect(transactionItems?.at(-2)).toMatchObject({
     Put: { Item: { entryType: 'work-item-key', key: 'CT-1' } },
+  })
+  expect(transactionItems?.at(-1)).toMatchObject({
+    Put: { Item: { entryType: 'work-item-member-index' } },
   })
   expect(sentCommands.filter((command) =>
     command.name === 'TransactWriteCommand'
@@ -2657,8 +2666,12 @@ test('DynamoDB Work Item delete atomically stores its replay receipt', async () 
       },
     },
   })
-  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+  expect(Array.isArray(transactItems) ? transactItems.at(-2) : undefined).toMatchObject({
     Put: { TableName: 'DeveloperPlatformTable' },
+  })
+  // The deleted Work Item's member index row goes last (ADR 0038).
+  expect(Array.isArray(transactItems) ? transactItems.at(-1) : undefined).toMatchObject({
+    Delete: { Key: { directoryTeamId: 'workspace-1#member-work-items#demo@example.com' } },
   })
   expect(preparedResponse).toEqual({ status: 204, body: null })
 })
@@ -2836,8 +2849,8 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
       'demo@example.com',
     )
 
-    // The trailing key reservation is covered by the creation tests.
-    expect(transactItems?.slice(2, -1)).toMatchObject([
+    // The trailing key reservation and member index row are covered by the creation tests.
+    expect(transactItems?.slice(2, -2)).toMatchObject([
       {
         ConditionCheck: expect.objectContaining({
           TableName: 'WorkspaceAccessTable',
@@ -2982,7 +2995,10 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
       let planningCondition: unknown
       const documentClient = {
         async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
-          if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+          // The Project has no schedule baseline row in the Planning table.
+          if (command.constructor.name === 'GetCommand') {
+            return command.input.TableName === 'PlanningTable' ? {} : { Item: currentIssue }
+          }
           if (command.constructor.name === 'TransactWriteCommand') {
             const transactItems = command.input.TransactItems as Array<{
               ConditionCheck?: { TableName?: string }
@@ -3666,9 +3682,16 @@ test('DynamoDB Work Item schedule cascade writes one bounded transaction with un
 
       expect(transactions).toHaveLength(1)
       const transactItems = transactions[0] ?? []
-      expect(transactItems).toHaveLength(auditEnabled ? 13 : 11)
+      // Two Projects without a baseline add one absence check each.
+      expect(transactItems).toHaveLength(auditEnabled ? 15 : 13)
       expect(transactItems.filter((item) => item.Update?.TableName === 'IssuesTable'))
         .toHaveLength(2)
+      expect(transactItems.filter((item) =>
+        String(item.ConditionCheck?.Key?.recordKey).startsWith('PROJECT_SCHEDULE_BASELINE#')
+      ).map((item) => item.ConditionCheck?.ConditionExpression)).toEqual([
+        'attribute_not_exists(recordKey)',
+        'attribute_not_exists(recordKey)',
+      ])
       // The cascade moves each open Work Item to its new deadline in the notification index.
       expect(transactItems.find((item) => item.Update?.Key?.issueId === 'root')?.Update)
         .toMatchObject({
@@ -4614,4 +4637,351 @@ test('DynamoDB Work Item creation replays a committed deterministic create after
   const replay = await client.createTeamIssue('workspace-1', 'core-team', input, 'demo@example.com')
 
   expect(replay).toEqual(created)
+})
+
+/**
+ * Creates a stored canonical Work Item row for the reference-read tests.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Team-local Work Item ID.
+ * @returns Stored row.
+ */
+function createReferenceReadItem(teamId: string, issueId: string): Record<string, unknown> {
+  return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: `workspace-1#team#${teamId}`,
+    teamId,
+    issueId,
+    sortOrder: 10,
+    title: `Work Item ${issueId}`,
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'sato@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+}
+
+test('DynamoDB member index read pages one consistent partition and rejects a larger one (ADR 0038)', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const indexRow = (teamId: string, workItemId: string) => ({
+    directoryTeamId: 'workspace-1#member-work-items#sato@example.com',
+    issueId: `${teamId}#${workItemId}`,
+    entryType: 'work-item-member-index',
+    schemaVersion: 1,
+    directoryId: 'workspace-1',
+    memberKey: 'sato@example.com',
+    teamId,
+    workItemId,
+  })
+  const pages = [
+    { Items: [indexRow('platform', 'b')], LastEvaluatedKey: { directoryTeamId: 'x', issueId: 'y' } },
+    { Items: [indexRow('core-team', 'a')] },
+  ]
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return pages[sentInputs.length - 1] ?? { Items: [] }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable', documentClient, {} as DynamoDBClient, false)
+
+  expect(await client.listMemberWorkItemReferences('workspace-1', ' Sato@Example.com', 10)).toEqual([
+    { teamId: 'core-team', workItemId: 'a' },
+    { teamId: 'platform', workItemId: 'b' },
+  ])
+  expect(sentInputs[0]).toMatchObject({
+    TableName: 'WorkItemsTable',
+    ConsistentRead: true,
+    ExpressionAttributeValues: { ':partitionKey': 'workspace-1#member-work-items#sato@example.com' },
+  })
+  expect(sentInputs[1]?.ExclusiveStartKey).toEqual({ directoryTeamId: 'x', issueId: 'y' })
+
+  sentInputs.length = 0
+  await expect(client.listMemberWorkItemReferences('workspace-1', 'sato@example.com', 1))
+    .rejects.toMatchObject({ status: 413, code: 'WorkItemListLimitExceeded' })
+
+  sentInputs.length = 0
+  pages.splice(0, pages.length, { Items: [{ ...indexRow('core-team', 'a'), directoryId: 'workspace-2' }] })
+  await expect(client.listMemberWorkItemReferences('workspace-1', 'sato@example.com', 10))
+    .rejects.toMatchObject({ status: 503, code: 'InvalidWorkItemMemberIndex' })
+})
+
+test('DynamoDB reference read batches consistent gets, retries unprocessed keys, and skips missing rows', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if (sentInputs.length === 1) {
+        return {
+          Responses: { WorkItemsTable: [createReferenceReadItem('platform', 'b')] },
+          UnprocessedKeys: {
+            WorkItemsTable: { Keys: [{ directoryTeamId: 'workspace-1#team#core-team', issueId: 'a' }] },
+          },
+        }
+      }
+      return { Responses: { WorkItemsTable: [createReferenceReadItem('core-team', 'a')] } }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable', documentClient, {} as DynamoDBClient, false)
+
+  const items = await client.getTeamIssuesByReferences('workspace-1', [
+    { teamId: 'platform', workItemId: 'b' },
+    { teamId: 'core-team', workItemId: 'a' },
+    { teamId: 'core-team', workItemId: 'a' },
+    { teamId: 'core-team', workItemId: 'missing' },
+  ])
+
+  expect(items.map((item) => `${item.teamId}/${item.id}`)).toEqual(['core-team/a', 'platform/b'])
+  expect(sentInputs).toHaveLength(2)
+  expect(sentInputs[0]).toEqual({
+    RequestItems: {
+      WorkItemsTable: {
+        ConsistentRead: true,
+        Keys: [
+          { directoryTeamId: 'workspace-1#team#core-team', issueId: 'a' },
+          { directoryTeamId: 'workspace-1#team#core-team', issueId: 'missing' },
+          { directoryTeamId: 'workspace-1#team#platform', issueId: 'b' },
+        ],
+      },
+    },
+  })
+})
+
+test('DynamoDB reference read fails closed when unprocessed keys never drain', async () => {
+  let calls = 0
+  const documentClient = {
+    async send(command: { input: { RequestItems: Record<string, { Keys: unknown[] }> } }) {
+      calls += 1
+      return { Responses: {}, UnprocessedKeys: command.input.RequestItems }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable', documentClient, {} as DynamoDBClient, false)
+
+  await expect(client.getTeamIssuesByReferences('workspace-1', [{ teamId: 'core-team', workItemId: 'a' }]))
+    .rejects.toMatchObject({ status: 503, code: 'WorkItemBatchReadIncomplete' })
+  expect(calls).toBe(5)
+})
+
+test('DynamoDB reference read keeps retrying while each round makes progress', async () => {
+  const references = Array.from({ length: 7 }, (_, index) => ({ teamId: 'core-team', workItemId: `w${index}` }))
+  let calls = 0
+  const documentClient = {
+    async send(command: { input: { RequestItems: Record<string, { Keys: Array<{ issueId: string }> }> } }) {
+      calls += 1
+      const [first, ...rest] = command.input.RequestItems.WorkItemsTable?.Keys ?? []
+      return {
+        Responses: { WorkItemsTable: first === undefined ? [] : [createReferenceReadItem('core-team', first.issueId)] },
+        ...(rest.length > 0 ? { UnprocessedKeys: { WorkItemsTable: { Keys: rest } } } : {}),
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable', documentClient, {} as DynamoDBClient, false)
+
+  const items = await client.getTeamIssuesByReferences('workspace-1', references)
+
+  expect(items).toHaveLength(7)
+  expect(calls).toBe(7)
+})
+
+test('DynamoDB Work Item delete moves member index deletes after the commit when the transaction is full', async () => {
+  const contributorAssignments = Array.from({ length: 20 }, (_, index) => ({
+    assignmentId: index.toString(16).padStart(32, '0'),
+    memberUserId: `member-${String(index).padStart(2, '0')}@example.com`,
+    status: 'planned',
+  }))
+  const currentIssue = {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'full-delete',
+    sortOrder: 10,
+    title: 'Full delete',
+    assigneeUserId: 'sato@example.com',
+    contributorAssignments,
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  /**
+   * Builds the given number of deletion fences.
+   *
+   * @param count - Fences to build.
+   * @returns External-link fences.
+   */
+  const createFences = (count: number) => Array.from({ length: count }, (_, index) => ({
+    kind: 'external-links' as const,
+    transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { fence: index } } },
+  }))
+  for (const [fenceCount, expectInline, recreated] of [[2, true, false], [80, false, false], [80, false, true]] as const) {
+    const transactions: Array<NonNullable<TransactWriteCommandInput['TransactItems']>> = []
+    const commandNames: string[] = []
+    const documentClient = {
+      async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+        commandNames.push(command.constructor.name)
+        if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          const items = command.input.TransactItems as NonNullable<TransactWriteCommandInput['TransactItems']>
+          transactions.push(items)
+          if (recreated && transactions.length === 2) {
+            const error = new Error('Transaction was canceled.')
+            error.name = 'TransactionCanceledException'
+            Object.assign(error, {
+              CancellationReasons: items.map((_, index) => ({ Code: index === 0 ? 'ConditionalCheckFailed' : 'None' })),
+            })
+            throw error
+          }
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient('IssuesTable', 'IssueEventsTable', documentClient, {} as DynamoDBClient, false)
+
+    await client.deleteTeamIssue(
+      'workspace-1',
+      'core-team',
+      'full-delete',
+      1,
+      'demo@example.com',
+      undefined,
+      undefined,
+      createFences(fenceCount),
+    )
+
+    // Only TransactWriteItems writes, which the Planning fence barrier admits.
+    expect(commandNames.filter((name) => name !== 'GetCommand').every((name) => name === 'TransactWriteCommand')).toBeTrue()
+    const [deletion = [], cleanup] = transactions
+    expect(deletion.length).toBeLessThanOrEqual(100)
+    /**
+     * Lists the member index partition keys a transaction deletes.
+     *
+     * @param items - Transaction actions.
+     * @returns Partition keys of index row Deletes.
+     */
+    const indexDeleteKeys = (items: NonNullable<TransactWriteCommandInput['TransactItems']>) => items
+      .map((item) => String(item.Delete?.Key?.directoryTeamId ?? ''))
+      .filter((key) => key.includes('#member-work-items#'))
+    if (expectInline) {
+      expect(indexDeleteKeys(deletion)).toHaveLength(21)
+      expect(cleanup).toBeUndefined()
+    } else {
+      expect(indexDeleteKeys(deletion)).toHaveLength(0)
+      expect(cleanup?.[0]).toEqual({
+        ConditionCheck: {
+          TableName: 'IssuesTable',
+          Key: { directoryTeamId: 'workspace-1#team#core-team', issueId: 'full-delete' },
+          ConditionExpression: 'attribute_not_exists(directoryTeamId)',
+        },
+      })
+      expect(indexDeleteKeys(cleanup ?? [])).toHaveLength(21)
+      expect(indexDeleteKeys(cleanup ?? [])).toContain('workspace-1#member-work-items#sato@example.com')
+      // A re-created Work Item keeps its index rows: the cleanup is not retried.
+      expect(transactions).toHaveLength(2)
+    }
+  }
+})
+
+test('DynamoDB Work Item delete cleans deferred member index rows through the Planning fence barrier', async () => {
+  const contributorAssignments = Array.from({ length: 20 }, (_, index) => ({
+    assignmentId: index.toString(16).padStart(32, '0'),
+    memberUserId: `member-${String(index).padStart(2, '0')}@example.com`,
+    status: 'planned',
+  }))
+  const currentIssue = {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'barrier-delete',
+    sortOrder: 10,
+    title: 'Barrier delete',
+    assigneeUserId: 'sato@example.com',
+    contributorAssignments,
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient({
+    region: 'ap-northeast-1',
+    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+  }))
+  // The production writer binds the barrier; a write it rejects never reaches the interceptor.
+  bindPlanningRevisionFenceBarrierDocumentClient(documentClient, 'PlanningTable')
+  const sent: Array<{ commandName: string; input: Record<string, unknown> }> = []
+  documentClient.middlewareStack.add((_next, context) => async (args) => {
+    const input: Record<string, unknown> = typeof args.input === 'object' && args.input !== null
+      ? Object.fromEntries(Object.entries(args.input))
+      : {}
+    const commandName = String(context.commandName)
+    sent.push({ commandName, input })
+    const output = commandName === 'GetItemCommand' ? { Item: currentIssue } : {}
+    return { output: { $metadata: {}, ...output }, response: {} }
+  }, { step: 'build', name: 'workItemDeleteTestInterceptor' })
+  const fences = Array.from({ length: 80 }, (_, index) => ({
+    kind: 'external-links' as const,
+    transactWriteItem: { Put: { TableName: 'DeveloperPlatformTable', Item: { fence: index } } },
+  }))
+  const client = new DynamoDbTeamIssuesClient('IssuesTable', 'IssueEventsTable', documentClient, {} as DynamoDBClient, false)
+
+  try {
+    await client.deleteTeamIssue(
+      'workspace-1',
+      'core-team',
+      'barrier-delete',
+      1,
+      'demo@example.com',
+      undefined,
+      undefined,
+      fences,
+    )
+    // The barrier is live on this client: the BatchWriteItem the cleanup used to send is rejected.
+    await expect(documentClient.send(new BatchWriteCommand({
+      RequestItems: { IssuesTable: [{ DeleteRequest: { Key: { directoryTeamId: 'x', issueId: 'y' } } }] },
+    }))).rejects.toThrow('PLANNING_REVISION_FENCE_BARRIER_REQUIRED')
+  } finally {
+    documentClient.destroy()
+  }
+
+  const transactions = sent.filter((call) => call.commandName === 'TransactWriteItemsCommand')
+  expect(transactions).toHaveLength(2)
+  const cleanupItems = transactions[1]?.input.TransactItems
+  if (!Array.isArray(cleanupItems)) throw new Error('Expected the index cleanup transaction.')
+  const deletedPartitions = cleanupItems.flatMap((item: unknown) => {
+    const remove: unknown = typeof item === 'object' && item !== null ? Reflect.get(item, 'Delete') : undefined
+    const key: unknown = typeof remove === 'object' && remove !== null ? Reflect.get(remove, 'Key') : undefined
+    if (typeof key !== 'object' || key === null) return []
+    const partition: unknown = Reflect.get(key, 'directoryTeamId')
+    const value: unknown = typeof partition === 'object' && partition !== null ? Reflect.get(partition, 'S') : undefined
+    return typeof value === 'string' ? [value] : []
+  })
+  expect(deletedPartitions).toHaveLength(21)
+  expect(deletedPartitions).toContain('workspace-1#member-work-items#sato@example.com')
 })

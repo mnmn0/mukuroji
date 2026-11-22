@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import {
+  BatchGetCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -12,7 +13,11 @@ import {
   createSearchWorkItemTypeKey,
   deriveWorkItemRemainingEffortMinutes,
   isWorkItemEffortMinutes,
+  isWorkspaceCalendarPeriodPreset,
+  isWorkspaceWeekStartDay,
   readSearchWorkItemTypeKey,
+  resolveWorkspaceCalendarPeriod,
+  toWorkspaceLocalDate,
   type AnalyticsCustomFieldFilter,
   type AnalyticsDateRange,
   type AnalyticsEvidenceInput,
@@ -41,8 +46,20 @@ import {
   type CanonicalWorkItem,
   type CreateAnalyticsReportInput,
   type UpdateAnalyticsReportInput,
+  type WorkspaceCalendarSettings,
+  type WorkspaceWeekStartDay,
 } from '@mukuroji/contracts'
-import type { AuditEventV1, AuditFieldChange, AuditValue } from '../audit'
+import type { AuditFieldChange, AuditValue } from '../audit'
+import {
+  ANALYTICS_WORK_ITEM_HISTORY_RECORD_PREFIX,
+  createAnalyticsWorkItemHistoryRecordKey,
+  measureAnalyticsWorkItemHistoryRow,
+  normalizeAnalyticsFieldPath,
+  parseStoredAnalyticsWorkItemHistoryRow,
+  type AnalyticsHistoryEvent,
+  type AnalyticsWorkItemHistoryKey,
+  type AnalyticsWorkItemHistoryRow,
+} from './analytics-work-item-history'
 import { analyticsPdfFont } from './analytics-pdf-font'
 
 const REPORT_RECORD_PREFIX = 'REPORT#'
@@ -66,6 +83,8 @@ const ISO_INSTANT_PATTERN = /T.*(?:Z|[+-]\d{2}:\d{2})$/u
 const LOCAL_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/u
 const ROUTE_SAFE_REPORT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u
 const localDateFormatterCache = new Map<string, Intl.DateTimeFormat>()
+/** Day week buckets start on when a query does not say: Monday, as before week starts existed. */
+const DEFAULT_ANALYTICS_WEEK_START_DAY: WorkspaceWeekStartDay = 1
 const PDF_LINES_PER_PAGE = 36
 const PDF_JAPANESE_FONT_NAME =
   `${createPdfFontSubsetTag(analyticsPdfFont.bytes)}+NotoSansJP-Thin`
@@ -275,7 +294,7 @@ export type AnalyticsEngineInput = {
   /** Current viewer の認可を通過した canonical Work Item だけを渡します。 */
   workItems: readonly CanonicalWorkItem[]
   /** `workItems` と同じ認可 scope に絞った immutable event だけを渡します。 */
-  events: readonly AuditEventV1[]
+  events: readonly AnalyticsHistoryEvent[]
   /** Current viewer が参照できる Project ID の server-side allowlist です。 */
   authorizedProjectIds: ReadonlySet<string>
   /** Snapshot を再現する query です。 */
@@ -287,7 +306,7 @@ export type AnalyticsEvidenceEngineInput = {
   /** Current viewer の認可を通過した canonical Work Item だけを渡します。 */
   workItems: readonly CanonicalWorkItem[]
   /** `workItems` と同じ認可 scope に絞った immutable event だけを渡します。 */
-  events: readonly AuditEventV1[]
+  events: readonly AnalyticsHistoryEvent[]
   /** Current viewer が参照できる Project ID の server-side allowlist です。 */
   authorizedProjectIds: ReadonlySet<string>
   /** Scope-bound cursor を含む evidence query です。 */
@@ -428,7 +447,33 @@ export type AnalyticsRepository = {
     reportId: string,
     occurrenceKey: string,
   ): Promise<AnalyticsDeliveryReceipt | undefined>
+  /**
+   * Reads the per-Work-Item Analytics history rows that exist for the given Work Items.
+   *
+   * Optional: repositories without history rows make readers fall back to the audit timeline.
+   */
+  getWorkItemHistoryRows?(
+    workspaceId: string,
+    workItems: readonly Pick<AnalyticsWorkItemHistoryKey, 'teamId' | 'workItemId'>[],
+  ): Promise<AnalyticsWorkItemHistoryRow[]>
 }
+
+/** Number of keys DynamoDB accepts in one BatchGetItem request. */
+const ANALYTICS_HISTORY_BATCH_GET_SIZE = 100
+
+/** BatchGetItem requests issued at the same time when reading history rows. */
+const ANALYTICS_HISTORY_BATCH_GET_CONCURRENCY = 4
+
+/** Consecutive BatchGetItem calls without progress before failing the read. */
+const ANALYTICS_HISTORY_BATCH_GET_MAX_ATTEMPTS = 5
+
+/**
+ * Serialized bytes of history rows one Analytics read may hold.
+ *
+ * The API Lambda has 512 MiB of memory, and rows are parsed and cloned after they are read, so
+ * the budget stays well below it. Reports past it get the same 413 as the event-count limit.
+ */
+const ANALYTICS_HISTORY_ROW_BYTE_LIMIT = 64 * 1024 * 1024
 
 /** DynamoDB Analytics repository の設定です。 */
 export type DynamoDbAnalyticsRepositoryOptions = {
@@ -569,7 +614,7 @@ type AnalyticsWorkItemState = {
 /** Status category の一つの immutable transition です。 */
 type AnalyticsStatusTransition = {
   /** Transition event です。 */
-  event: AuditEventV1
+  event: AnalyticsHistoryEvent
   /** Transition 前の category です。 */
   before?: string
   /** Transition 後の category です。 */
@@ -581,7 +626,7 @@ type AnalyticsStatusTransition = {
 /** Assigned Project の一つの immutable change です。 */
 type AnalyticsScopeChange = {
   /** Change event です。 */
-  event: AuditEventV1
+  event: AnalyticsHistoryEvent
   /** Change instant の epoch milliseconds です。 */
   occurredAt: number
   /** Change 前の Project ID です。 */
@@ -595,7 +640,7 @@ type AnalyticsWorkItemFact = {
   /** `asOf` 時点の state です。 */
   state: AnalyticsWorkItemState
   /** Work Item に対応する event です。 */
-  events: AuditEventV1[]
+  events: AnalyticsHistoryEvent[]
   /** Creation instant の epoch milliseconds です。 */
   createdAt: number
   /** 有効な最終 completion instant です。 */
@@ -1304,12 +1349,17 @@ function normalizeAnalyticsQuery(query: unknown): NormalizedAnalyticsQuery {
     ? undefined
     : normalizeDateRange(query.forecastBaseline, 'Analytics forecast baseline')
   const forecastWeighting = readForecastWeighting(query.forecastWeighting)
+  // Monday is left out so a Monday query hashes the same as one saved before week starts existed.
+  const weekStartDay = readAnalyticsWeekStartDay(query.weekStartDay)
   const normalized: NormalizedAnalyticsQuery = {
     query: {
       filter,
       widgets,
       asOf,
       timeZone,
+      ...(weekStartDay === undefined || weekStartDay === DEFAULT_ANALYTICS_WEEK_START_DAY
+        ? {}
+        : { weekStartDay }),
       ...(forecastBaseline === undefined ? {} : { forecastBaseline }),
       ...(forecastWeighting === undefined ? {} : { forecastWeighting }),
     },
@@ -1344,6 +1394,7 @@ function validateAnalyticsQueryComplexity(normalized: NormalizedAnalyticsQuery) 
       normalized.periodTo,
       normalized.query.timeZone,
       granularity,
+      normalized.query.weekStartDay,
     ).length
     bucketCounts.set(granularity, count)
     return count
@@ -1382,6 +1433,7 @@ function normalizeFilter(filter: unknown): AnalyticsFilter {
   }
   return {
     period: normalizeDateRange(filter.period, 'Analytics period'),
+    ...normalizeAnalyticsPeriodPreset(filter.periodPreset),
     ...normalizeIdentifierListProperty(filter.teamIds, 'Analytics Team IDs', 'teamIds'),
     ...normalizeIdentifierListProperty(filter.projectIds, 'Analytics Project IDs', 'projectIds'),
     ...normalizeIdentifierListProperty(
@@ -1403,6 +1455,100 @@ function normalizeFilter(filter: unknown): AnalyticsFilter {
       : { includeArchived: readBoolean(filter.includeArchived, 'Analytics includeArchived') }),
     ...normalizeAnalyticsFilterWorkItems(filter.workItems),
   }
+}
+
+/**
+ * Validates the relative period an Analytics filter was chosen with.
+ *
+ * @param value - Untrusted `periodPreset` filter value.
+ * @returns The property, or an empty object when omitted.
+ * @throws AnalyticsError When the value names no period preset.
+ */
+function normalizeAnalyticsPeriodPreset(value: unknown): Pick<AnalyticsFilter, 'periodPreset'> {
+  if (value === undefined) return {}
+  if (!isWorkspaceCalendarPeriodPreset(value)) {
+    throw invalid('AnalyticsPeriodPresetInvalid', 'Analytics period preset is not supported.')
+  }
+  return { periodPreset: value }
+}
+
+/**
+ * Validates the day an Analytics query starts its week buckets on.
+ *
+ * @param value - Untrusted `weekStartDay` query value.
+ * @returns The day, or undefined when omitted (Monday).
+ * @throws AnalyticsError When the value is not an integer from 0 to 6.
+ */
+function readAnalyticsWeekStartDay(value: unknown): WorkspaceWeekStartDay | undefined {
+  if (value === undefined) return undefined
+  if (!isWorkspaceWeekStartDay(value)) {
+    throw invalid('AnalyticsWeekStartDayInvalid', 'Analytics week start day must be an integer from 0 to 6.')
+  }
+  return value
+}
+
+/**
+ * Re-resolves a saved report's relative period for one run.
+ *
+ * A filter without `periodPreset` keeps its fixed dates. Otherwise "today" is the `asOf` date in
+ * the report time zone, the period follows the Workspace week start and fiscal year start, and it
+ * covers whole local days from the first day's start to the last day's end. The query later clips
+ * the end to `asOf`.
+ *
+ * @param filter - Saved report filter.
+ * @param asOf - ISO instant the report runs at.
+ * @param timeZone - IANA time zone of the report.
+ * @param calendar - Workspace fiscal year start month and week start day.
+ * @returns A copy of the filter whose `period` covers the preset on that day.
+ * @throws AnalyticsError When `asOf` or the time zone is invalid.
+ */
+export function resolveAnalyticsReportFilterPeriod(
+  filter: AnalyticsFilter,
+  asOf: string,
+  timeZone: string,
+  calendar: Pick<WorkspaceCalendarSettings, 'fiscalYearStartMonth' | 'weekStartDay'>,
+): AnalyticsFilter {
+  const resolved = structuredClone(filter)
+  if (resolved.periodPreset === undefined) return resolved
+  const asOfInstant = normalizeIsoTimestamp(asOf, 'Analytics as-of time')
+  const zone = normalizeTimeZone(timeZone, 'Analytics time zone')
+  const range = resolveWorkspaceCalendarPeriod(
+    resolved.periodPreset,
+    toWorkspaceLocalDate(asOfInstant, zone),
+    calendar,
+  )
+  resolved.period = {
+    from: new Date(localCalendarDateStartAt(range.from, zone, 0)).toISOString(),
+    to: new Date(localCalendarDateStartAt(range.to, zone, 1) - 1).toISOString(),
+  }
+  return resolved
+}
+
+/**
+ * Finds the first instant of a local calendar date, or of a day some days after it.
+ *
+ * The day can start after midnight where clocks jump forward at midnight, so the first instant
+ * whose local date is the target is searched for, the same boundary the Web presets use.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param timeZone - IANA time zone the date is read in.
+ * @param dayOffset - Days to move from the date before taking its start.
+ * @returns Epoch milliseconds of the first instant of that local date.
+ */
+function localCalendarDateStartAt(date: string, timeZone: string, dayOffset: number) {
+  const [year, month, day] = date.split('-').map(Number)
+  const localDate = toPseudoUtcDate(year!, month!, day!)
+  localDate.setUTCDate(localDate.getUTCDate() + dayOffset)
+  const target = localDate.toISOString().slice(0, 10)
+  // UTC offsets stay within ±18 hours, so the day starts inside this window.
+  let before = localDate.getTime() - 18 * MILLISECONDS_PER_HOUR
+  let atOrAfter = localDate.getTime() + 18 * MILLISECONDS_PER_HOUR
+  while (atOrAfter - before > 1) {
+    const middle = Math.floor((before + atOrAfter) / 2)
+    if (localDateAt(middle, timeZone) < target) before = middle
+    else atOrAfter = middle
+  }
+  return atOrAfter
 }
 
 /**
@@ -1716,10 +1862,10 @@ function normalizeDateRange(value: unknown, label: string): AnalyticsDateRange {
  */
 function indexAuthorizedEvents(
   workItems: readonly CanonicalWorkItem[],
-  events: readonly AuditEventV1[],
+  events: readonly AnalyticsHistoryEvent[],
 ) {
   const byCanonicalEntityId = new Map<string, string>()
-  const result = new Map<string, AuditEventV1[]>()
+  const result = new Map<string, AnalyticsHistoryEvent[]>()
   for (const item of workItems) {
     const key = workItemKey(item.teamId, item.id)
     const entityId = `team/${item.teamId}/issue/${item.id}`
@@ -1740,7 +1886,7 @@ function indexAuthorizedEvents(
 
   for (const itemEvents of result.values()) {
     itemEvents.sort(compareAuditEvents)
-    const unique = new Map<string, AuditEventV1>()
+    const unique = new Map<string, AnalyticsHistoryEvent>()
     for (const event of itemEvents) {
       const current = unique.get(event.eventId)
       if (current && canonicalJson(current) !== canonicalJson(event)) {
@@ -1765,7 +1911,7 @@ function indexAuthorizedEvents(
  * @param event Audit event on a Work Item entity timeline.
  * @returns True when the event targets the same Work Item as its entity.
  */
-function isWorkItemSelfTargetedEvent(event: AuditEventV1) {
+function isWorkItemSelfTargetedEvent(event: AnalyticsHistoryEvent) {
   return event.targetType === 'work-item' &&
     event.target.type === 'work-item' &&
     event.targetId === event.target.id &&
@@ -1774,7 +1920,7 @@ function isWorkItemSelfTargetedEvent(event: AuditEventV1) {
 
 function createFilteredFacts(
   workItems: readonly CanonicalWorkItem[],
-  eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
+  eventsByWorkItem: ReadonlyMap<string, readonly AnalyticsHistoryEvent[]>,
   normalized: NormalizedAnalyticsQuery,
   authorizedProjectIds: ReadonlySet<string>,
 ) {
@@ -1801,7 +1947,7 @@ function createFilteredFacts(
 
 function createFact(
   item: CanonicalWorkItem,
-  events: readonly AuditEventV1[],
+  events: readonly AnalyticsHistoryEvent[],
   asOf: number,
 ): AnalyticsWorkItemFact | undefined {
   const createdAt = Date.parse(item.createdAt)
@@ -1937,30 +2083,6 @@ function rewindStateChange(state: AnalyticsWorkItemState, change: AuditFieldChan
   setAnalyticsStateField(state, field, change.before)
 }
 
-function normalizeAnalyticsFieldPath(field: string) {
-  if (field === 'workflowStatusCategory' || field === 'workflow.category') {
-    return 'statusCategory'
-  }
-  if (
-    field === 'title' ||
-    field === 'assignedProjectId' ||
-    field === 'assigneeUserId' ||
-    field === 'workItemTypeId' ||
-    field === 'statusCategory' ||
-    field === 'dueDate' ||
-    field === 'createdAt' ||
-    field === 'updatedAt' ||
-    field === 'archivedAt' ||
-    field === 'customFieldValues' ||
-    field.startsWith('customFieldValues.') ||
-    field === 'schedule' ||
-    field === 'remainingEffortMinutes'
-  ) {
-    return field
-  }
-  return undefined
-}
-
 function setAnalyticsStateField(
   state: AnalyticsWorkItemState,
   field: string,
@@ -2024,7 +2146,7 @@ function setAnalyticsStateField(
   }
 }
 
-function createStatusTransitions(event: AuditEventV1): AnalyticsStatusTransition[] {
+function createStatusTransitions(event: AnalyticsHistoryEvent): AnalyticsStatusTransition[] {
   const occurredAt = Date.parse(event.occurredAt)
   if (!Number.isFinite(occurredAt)) return []
   return event.changes.flatMap((change) => {
@@ -2042,7 +2164,7 @@ function createStatusTransitions(event: AuditEventV1): AnalyticsStatusTransition
   })
 }
 
-function createScopeChanges(event: AuditEventV1): AnalyticsScopeChange[] {
+function createScopeChanges(event: AnalyticsHistoryEvent): AnalyticsScopeChange[] {
   const occurredAt = Date.parse(event.occurredAt)
   if (!Number.isFinite(occurredAt)) return []
   return event.changes.flatMap((change) => {
@@ -2130,7 +2252,7 @@ function createWidgetResult(
   widget: AnalyticsWidget,
   facts: readonly AnalyticsWorkItemFact[],
   workItems: readonly CanonicalWorkItem[],
-  eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
+  eventsByWorkItem: ReadonlyMap<string, readonly AnalyticsHistoryEvent[]>,
   normalized: NormalizedAnalyticsQuery,
   authorizedProjectIds: ReadonlySet<string>,
 ): AnalyticsWidgetResult {
@@ -2197,7 +2319,7 @@ function createWidgetResult(
 function createMetricSeries(
   widget: AnalyticsWidget,
   workItems: readonly CanonicalWorkItem[],
-  eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
+  eventsByWorkItem: ReadonlyMap<string, readonly AnalyticsHistoryEvent[]>,
   normalized: NormalizedAnalyticsQuery,
   authorizedProjectIds: ReadonlySet<string>,
 ) {
@@ -2210,7 +2332,13 @@ function createMetricSeries(
     normalized.periodTo,
     normalized.query.timeZone,
     granularity,
+    normalized.query.weekStartDay,
   )
+  // Facts of a non-state metric do not depend on the bucket, so they are built once; neither
+  // calculateMetric nor createSeriesSegments changes them.
+  const sharedFacts = isAnalyticsStateMetric(widget.metric)
+    ? undefined
+    : createFilteredFacts(workItems, eventsByWorkItem, normalized, authorizedProjectIds)
   return buckets.map((bucket): AnalyticsSeriesPoint => {
     const evaluationAt = Math.min(bucket.to, normalized.asOf)
     const bucketNormalized: NormalizedAnalyticsQuery = {
@@ -2222,19 +2350,12 @@ function createMetricSeries(
       periodTo: normalized.periodTo,
       asOf: evaluationAt,
     }
-    const bucketFacts = isAnalyticsStateMetric(widget.metric)
-      ? createFilteredFacts(
-          workItems,
-          eventsByWorkItem,
-          bucketNormalized,
-          authorizedProjectIds,
-        )
-      : createFilteredFacts(
-          workItems,
-          eventsByWorkItem,
-          normalized,
-          authorizedProjectIds,
-        )
+    const bucketFacts = sharedFacts ?? createFilteredFacts(
+      workItems,
+      eventsByWorkItem,
+      bucketNormalized,
+      authorizedProjectIds,
+    )
     const computation = calculateMetric(
       widget.metric,
       bucketFacts,
@@ -2296,7 +2417,7 @@ function createMetricGroups(
   widget: AnalyticsWidget,
   facts: readonly AnalyticsWorkItemFact[],
   workItems: readonly CanonicalWorkItem[],
-  eventsByWorkItem: ReadonlyMap<string, readonly AuditEventV1[]>,
+  eventsByWorkItem: ReadonlyMap<string, readonly AnalyticsHistoryEvent[]>,
   normalized: NormalizedAnalyticsQuery,
   authorizedProjectIds: ReadonlySet<string>,
 ) {
@@ -2311,6 +2432,7 @@ function createMetricGroups(
       normalized.periodTo,
       normalized.query.timeZone,
       groupBy.dimension,
+      normalized.query.weekStartDay,
     ).map((bucket): AnalyticsGroup => {
       const evaluationAt = Math.min(bucket.to, normalized.asOf)
       const bucketNormalized: NormalizedAnalyticsQuery = {
@@ -2711,7 +2833,7 @@ function createFactEvidence(
   metric: AnalyticsMetricKey,
   occurredAt: number,
   value?: number,
-  explicitEvent?: AuditEventV1,
+  explicitEvent?: AnalyticsHistoryEvent,
 ): AnalyticsEvidenceItem {
   const event = explicitEvent ?? fact.events.find((candidate) =>
     Date.parse(candidate.occurredAt) === occurredAt &&
@@ -2887,17 +3009,28 @@ function addLocalCalendarDays(timestamp: number, days: number, timeZone: string)
     new Date(timestamp).getUTCMilliseconds()
 }
 
+/**
+ * Splits a period into local calendar buckets, clipped to the period.
+ *
+ * @param from - Period start epoch milliseconds.
+ * @param to - Period end epoch milliseconds, inclusive.
+ * @param timeZone - IANA time zone the local dates are read in.
+ * @param granularity - Bucket size.
+ * @param weekStartDay - Day a week bucket starts on, 0 for Sunday; Monday when omitted.
+ * @returns The buckets in order.
+ */
 function createCalendarBuckets(
   from: number,
   to: number,
   timeZone: string,
   granularity: 'day' | 'week' | 'month',
+  weekStartDay: WorkspaceWeekStartDay = DEFAULT_ANALYTICS_WEEK_START_DAY,
 ) {
   const firstLocal = localDatePartsAt(from, timeZone)
   let cursor = toPseudoUtcDate(firstLocal.year, firstLocal.month, firstLocal.day)
   if (granularity === 'week') {
     const weekday = cursor.getUTCDay()
-    cursor.setUTCDate(cursor.getUTCDate() - ((weekday + 6) % 7))
+    cursor.setUTCDate(cursor.getUTCDate() - ((weekday - weekStartDay + 7) % 7))
   } else if (granularity === 'month') {
     cursor.setUTCDate(1)
   }
@@ -3892,6 +4025,113 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
             ),
           }),
     }
+  }
+
+  /**
+   * Reads the history rows of the given Work Items with strongly consistent BatchGetItem.
+   *
+   * Callers compare each row's covered revision with the canonical revision, so a stale read only
+   * sends that Work Item to the audit timeline. Malformed rows are skipped for the same reason.
+   *
+   * @param workspaceId - Workspace that owns the rows.
+   * @param workItems - Team and Work Item IDs to read.
+   * @returns The valid rows that exist, in no particular order.
+   */
+  async getWorkItemHistoryRows(
+    workspaceId: string,
+    workItems: readonly Pick<AnalyticsWorkItemHistoryKey, 'teamId' | 'workItemId'>[],
+  ): Promise<AnalyticsWorkItemHistoryRow[]> {
+    const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
+    const recordKeys = [...new Set(workItems.map((workItem) =>
+      createAnalyticsWorkItemHistoryRecordKey(workItem.teamId, workItem.workItemId)
+    ))]
+    const chunks: string[][] = []
+    for (let index = 0; index < recordKeys.length; index += ANALYTICS_HISTORY_BATCH_GET_SIZE) {
+      chunks.push(recordKeys.slice(index, index + ANALYTICS_HISTORY_BATCH_GET_SIZE))
+    }
+    const rows: AnalyticsWorkItemHistoryRow[] = []
+    const budget = { bytes: 0 }
+    let nextChunk = 0
+    /** Reads the next unassigned chunk until every chunk has been read. */
+    const readChunks = async () => {
+      while (nextChunk < chunks.length) {
+        const chunk = chunks[nextChunk]
+        nextChunk += 1
+        if (!chunk) return
+        rows.push(...await this.batchGetWorkItemHistoryRows(normalizedWorkspaceId, chunk, budget))
+      }
+    }
+    await Promise.all(Array.from(
+      { length: Math.min(ANALYTICS_HISTORY_BATCH_GET_CONCURRENCY, chunks.length) },
+      readChunks,
+    ))
+    return rows
+  }
+
+  /**
+   * Reads one BatchGetItem chunk of history rows, retrying unprocessed keys.
+   *
+   * @param workspaceId - Workspace that owns the rows.
+   * @param recordKeys - At most 100 history record keys.
+   * @param budget - Serialized bytes of rows kept so far by the whole read, shared by all chunks.
+   * @returns The valid rows that exist.
+   * @throws When DynamoDB keeps returning unprocessed keys, or the rows exceed the byte budget.
+   */
+  private async batchGetWorkItemHistoryRows(
+    workspaceId: string,
+    recordKeys: readonly string[],
+    budget: { bytes: number },
+  ) {
+    const rows: AnalyticsWorkItemHistoryRow[] = []
+    let pending = recordKeys.map((recordKey) => ({ workspaceId, recordKey }))
+    // BatchGetItem also returns unprocessed keys when one partition exceeds 1 MB per call, which
+    // is normal for large history rows. Only calls that make no progress count as failed attempts.
+    let stalledAttempts = 0
+    while (pending.length > 0 && stalledAttempts < ANALYTICS_HISTORY_BATCH_GET_MAX_ATTEMPTS) {
+      if (stalledAttempts > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 2 ** stalledAttempts * 25))
+      }
+      const requested = pending.length
+      const response = await this.documentClient.send(new BatchGetCommand({
+        RequestItems: {
+          // Strongly consistent so a retention change already written to the row is never read
+          // back with the old expiry; it costs twice the read units of an eventual read.
+          [this.tableName]: { Keys: pending, ConsistentRead: true },
+        },
+      }))
+      for (const item of response.Responses?.[this.tableName] ?? []) {
+        if (item.workspaceId !== workspaceId) continue
+        if (
+          typeof item.recordKey !== 'string' ||
+          !item.recordKey.startsWith(ANALYTICS_WORK_ITEM_HISTORY_RECORD_PREFIX)
+        ) continue
+        const row = parseStoredAnalyticsWorkItemHistoryRow(item)
+        if (!row) continue
+        budget.bytes += measureAnalyticsWorkItemHistoryRow(row)
+        if (budget.bytes > ANALYTICS_HISTORY_ROW_BYTE_LIMIT) {
+          throw new AnalyticsError(
+            413,
+            'AnalyticsHistoryLimitExceeded',
+            'Analytics history for the authorized Work Items exceeds the safe query limit. Narrow the report scope.',
+          )
+        }
+        rows.push(row)
+      }
+      pending = (response.UnprocessedKeys?.[this.tableName]?.Keys ?? []).flatMap((key) =>
+        typeof key.workspaceId === 'string' && typeof key.recordKey === 'string'
+          ? [{ workspaceId: key.workspaceId, recordKey: key.recordKey }]
+          : []
+      )
+      stalledAttempts = pending.length < requested ? 0 : stalledAttempts + 1
+    }
+    if (pending.length > 0) {
+      throw new AnalyticsError(
+        503,
+        'AnalyticsHistoryReadUnavailable',
+        'Analytics history could not be read. Retry the request.',
+      )
+    }
+    return rows
   }
 
   /** 指定 shard で実行期限を迎えた schedule 付き report を keyset page で返します。 */
@@ -5129,7 +5369,7 @@ function deliveryMapKey(workspaceId: string, reportId: string, occurrenceKey: st
   )}`
 }
 
-function compareAuditEvents(left: AuditEventV1, right: AuditEventV1) {
+function compareAuditEvents(left: AnalyticsHistoryEvent, right: AnalyticsHistoryEvent) {
   return left.occurredAt.localeCompare(right.occurredAt) ||
     left.eventId.localeCompare(right.eventId)
 }

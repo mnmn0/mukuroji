@@ -798,6 +798,67 @@ export type WorkItemRelationType =
   | 'duplicate'
 
 /**
+ * Audit event types recorded on each endpoint Work Item when a relation changes.
+ *
+ * Each name describes the change from the endpoint's point of view, so one link records two
+ * events (for example `work-item.blocker-added` on the blocked item and
+ * `work-item.blocking-added` on the blocker). Automation relation triggers and Webhook
+ * subscriptions use the same names.
+ */
+export const WORK_ITEM_RELATION_EVENT_TYPES = [
+  'work-item.parent-changed',
+  'work-item.child-added',
+  'work-item.child-removed',
+  'work-item.blocker-added',
+  'work-item.blocker-removed',
+  'work-item.blocking-added',
+  'work-item.blocking-removed',
+  'work-item.relation-added',
+  'work-item.relation-removed',
+  'work-item.sibling-order-changed',
+] as const
+
+/** One audit event type recorded when a Work Item relation changes. */
+export type WorkItemRelationEventType = typeof WORK_ITEM_RELATION_EVENT_TYPES[number]
+
+/**
+ * Tests whether an event type names a Work Item relation change.
+ *
+ * @param value - Event type to test.
+ * @returns Whether the value is one of {@link WORK_ITEM_RELATION_EVENT_TYPES}.
+ */
+export function isWorkItemRelationEventType(value: unknown): value is WorkItemRelationEventType {
+  return WORK_ITEM_RELATION_EVENT_TYPES.some((eventType) => eventType === value)
+}
+
+/**
+ * Other endpoint of a relation activity event, returned only when the viewer may read it.
+ */
+export type WorkItemRelationActivityEndpoint = {
+  /** Team-local Work Item ID. */
+  id: string
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Short Work Item key, omitted for a Work Item created before keys existed. */
+  key?: string
+  /** Current title of the Work Item. */
+  title: string
+}
+
+/**
+ * Relation endpoints a Work Item activity event carries; each is omitted when absent, hidden from
+ * the viewer, or deleted.
+ */
+export type WorkItemRelationActivityEndpoints = {
+  /** Work Item linked or unlinked by the event. */
+  relatedWorkItem?: WorkItemRelationActivityEndpoint
+  /** Parent after a parent change, or of a reorder. */
+  parentWorkItem?: WorkItemRelationActivityEndpoint
+  /** Parent before a parent change. */
+  previousParentWorkItem?: WorkItemRelationActivityEndpoint
+}
+
+/**
  * Work Item から別の Work Item への relation です。
  */
 export type WorkItemRelation = {

@@ -1,5 +1,6 @@
 import {
   DEMO_DIRECTORY_SCOPE,
+  createCanonicalWorkItemMemberIndexTransactItems,
   createCanonicalWorkItemTransactItems,
   createDemoProjectOwnerAccessTransactItems,
   createProjectDirectoryTransactItems,
@@ -33,7 +34,7 @@ export interface DemoDataRow {
   readonly table: DemoDataTable;
   /** Partition and sort key values, by attribute name. */
   readonly key: Readonly<Record<string, string>>;
-  /** `entryType` the seed wrote, or undefined for Work Items, which have none. */
+  /** `entryType` the seed wrote, or undefined for canonical Work Items, which have none. */
   readonly entryType: string | undefined;
 }
 
@@ -111,6 +112,7 @@ export function listDemoDataRows(input: {
       createDemoProjectOwnerAccessTransactItems('projectDirectory', workspaceId, initialOwnerEmail),
     ],
     ['workItems', createCanonicalWorkItemTransactItems('workItems', workspaceId)],
+    ['workItems', createCanonicalWorkItemMemberIndexTransactItems('workItems', workspaceId)],
   ];
   const rows = new Map<string, DemoDataRow>();
   for (const [table, transactItems] of sources) {
@@ -253,7 +255,7 @@ export function createDemoDataCleanupTransactItems(
     const key = Object.fromEntries(
       Object.entries(row.key).map(([name, value]) => [name, { S: value }]),
     );
-    if (row.table === 'workItems') {
+    if (row.table === 'workItems' && row.entryType === undefined) {
       return {
         Delete: {
           TableName: tableNames.workItems,
@@ -280,7 +282,7 @@ export function createDemoDataCleanupTransactItems(
     }
     return {
       Delete: {
-        TableName: tableNames.projectDirectory,
+        TableName: tableNames[row.table],
         Key: key,
         ConditionExpression: '#entryType = :entryType',
         ExpressionAttributeNames: { '#entryType': 'entryType' },
@@ -309,7 +311,7 @@ export function formatKey(key: Readonly<Record<string, string>>): string {
  */
 function findRowBlocker(row: DemoDataRow, item: StoredDemoDataItem): string | undefined {
   const label = `${row.table} ${formatKey(row.key)}`;
-  if (row.table === 'workItems') {
+  if (row.table === 'workItems' && row.entryType === undefined) {
     const revision = readNumberAttribute(item, 'revision');
     return revision === seededWorkItemRevision
       ? undefined

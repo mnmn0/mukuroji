@@ -1,0 +1,86 @@
+import type { AuditEventView, AuditExportView } from '@mukuroji/contracts'
+
+/** Audit events covering a field change, a redacted value, and an event without changes. */
+export const auditEventsFixture: AuditEventView[] = [
+  {
+    eventId: 'evt_role_changed',
+    eventType: 'member.role-changed',
+    occurredAt: '2026-11-17T01:15:30.000Z',
+    actor: { id: 'sub-sato', kind: 'user', displayName: '佐藤 花子' },
+    entity: { type: 'member', id: 'workspace/wsp_v2_a/member/mbr_v2_b' },
+    target: { type: 'member', id: 'workspace/wsp_v2_a/member/mbr_v2_b' },
+    changes: [
+      { field: 'role', before: 'member', after: 'admin' },
+      { field: 'inviteToken', before: 'old', after: 'new', redacted: true },
+    ],
+    action: 'role-changed',
+    correlationId: 'corr_role',
+    source: 'api',
+  },
+  {
+    eventId: 'evt_milestone_moved',
+    eventType: 'work-item.updated',
+    occurredAt: '2026-11-16T08:02:00.000Z',
+    actor: { id: 'sub-suzuki', kind: 'user', displayName: '鈴木 一郎' },
+    entity: { type: 'work-item', id: 'team/core/issue/MUK-42' },
+    target: { type: 'work-item', id: 'team/core/issue/MUK-42' },
+    changes: [{ field: 'dueDate', before: '2026-12-01', after: '2026-12-15' }],
+    action: 'updated',
+    correlationId: 'corr_due',
+    source: 'api',
+    summary: '顧客との調整で納期を延長',
+  },
+  {
+    eventId: 'evt_audit_viewed',
+    eventType: 'audit.viewed',
+    occurredAt: '2026-11-16T07:00:00.000Z',
+    actor: { id: 'arn:aws:sts::123456789012:assumed-role/deploy', kind: 'service', displayName: 'GitHub Actions' },
+    entity: { type: 'audit-log', id: 'workspace' },
+    target: { type: 'audit-log', id: 'workspace' },
+    changes: [],
+    action: 'viewed',
+    correlationId: 'corr_view',
+    source: 'system',
+  },
+]
+
+/** Exports in each state the list shows differently. */
+export const auditExportsFixture: AuditExportView[] = [
+  {
+    exportId: 'exp_completed',
+    status: 'completed',
+    filters: { actorId: 'sub-sato', from: '2026-11-09T15:00:00.000Z', to: '2026-11-16T14:59:59.999Z' },
+    snapshotAt: '2026-11-17T02:00:00.000Z',
+    requestedBy: { displayName: '佐藤 花子' },
+    createdAt: '2026-11-17T02:00:00.000Z',
+    updatedAt: '2026-11-17T02:03:00.000Z',
+    expiresAt: '2026-11-24T02:00:00.000Z',
+    eventCount: 128,
+    partCount: 1,
+  },
+  {
+    exportId: 'exp_running',
+    status: 'running',
+    filters: {},
+    snapshotAt: '2026-11-17T03:00:00.000Z',
+    requestedBy: { displayName: '佐藤 花子' },
+    createdAt: '2026-11-17T03:00:00.000Z',
+    updatedAt: '2026-11-17T03:01:00.000Z',
+    expiresAt: '2026-11-24T03:00:00.000Z',
+    eventCount: 5000,
+    partCount: 1,
+  },
+  {
+    exportId: 'exp_failed',
+    status: 'failed',
+    filters: { eventTypes: ['work-item.updated'] },
+    snapshotAt: '2026-11-15T03:00:00.000Z',
+    requestedBy: { displayName: '鈴木 一郎' },
+    createdAt: '2026-11-15T03:00:00.000Z',
+    updatedAt: '2026-11-15T04:00:00.000Z',
+    expiresAt: '2026-11-22T03:00:00.000Z',
+    eventCount: 0,
+    partCount: 0,
+    failure: { code: 'AuditExportIncomplete', message: 'The export could not be verified as complete.' },
+  },
+]

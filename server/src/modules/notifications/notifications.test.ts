@@ -9,6 +9,7 @@ import {
   createNotificationDeliveryPlan,
   createNotificationRecipientKey,
   parseStoredNotificationPreferences,
+  requiresCurrentWorkItemAssignee,
   type NotificationAction,
   type NotificationState,
 } from './notifications'
@@ -24,6 +25,12 @@ test('Slack preferences preserve legacy opt-out and join the existing frequency 
   expect(createNotificationDeliveryPlan(preferences, '2026-09-26T12:00:00.000Z')).toMatchObject({
     channels: ['inApp', 'slack'], deliveryAfter: '2026-09-26T13:00:00.000Z',
   })
+})
+
+test('sends baseline slip notifications only while the recipient is still the assignee', () => {
+  expect(requiresCurrentWorkItemAssignee({ reasons: ['baseline-slip'] })).toBe(true)
+  expect(requiresCurrentWorkItemAssignee({ reasons: ['baseline-slip', 'schedule-change'] })).toBe(true)
+  expect(requiresCurrentWorkItemAssignee({ reasons: ['baseline-slip', 'creator'] })).toBe(false)
 })
 
 test('rejects stored preferences without a version or a Slack activation time', () => {

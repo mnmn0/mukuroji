@@ -61,6 +61,13 @@
 | [0033](0033-project-id-workspace-reservation-row.md) | Project ID を Workspace ごとの予約 row で一意にし、衝突したら別の ID で作り直す | 提案 |
 | [0034](0034-read-only-maintenance-mode.md) | Runtime control に `read-only` mode を足し、API の入口で HTTP method と読み取り用 POST の一覧で変更を断る | 提案 |
 | [0035](0035-weekly-report-submission-reminders.md) | 週報の未提出を、工数の督促と同じ通知 schedule と projection の fence で知らせる | 提案 |
+| [0036](0036-ai-external-provider-workspace-keys.md) | AI の接続先に Claude API と OpenAI を加え、API キーを Workspace ごとに KMS で暗号化して AI 用 table に置く | 提案 |
 | [0037](0037-workspace-search-title-index.md) | Keyword 検索はタイトルだけを持つ sparse GSI を先に読み、本文だけの一致は従来の scan で探す | 提案 |
 | [0039](0039-github-actions-oidc-deploy.md) | 本番への deploy を GitHub Actions から OIDC の role で行い、deploy の値を SSM に置く | 提案 |
 | [0040](0040-xray-tracing-off-by-default.md) | X-Ray tracing を既定で止め、AI の alarm を AI 設定時だけ作る | 提案 |
+| [0041](0041-document-change-signals-over-websocket.md) | Document の変更を既存の WebSocket で通知し、画面の polling を間引く | 提案 |
+| [0042](0042-analytics-work-item-history-rows.md) | Analytics の履歴を Work Item ごとの圧縮済み history row で持ち、audit の entity timeline は不足分だけ読む | 提案 |
+| [0043](0043-named-schedule-baselines.md) | 名前付きの複数 schedule baseline を、基準の行と baseline ごとの行に分けて Planning table に置く | 提案 |
+| [0044](0044-runtime-control-switch-audit-events.md) | Runtime control の切り替えを operator script が Workspace の監査ログに開始・完了・失敗の 3 種類で書く | 提案 |
+| [0045](0045-relation-events-for-automation-and-webhooks.md) | Work Item relation の event を Automation trigger と webhook の event type に使い、webhook の event type は追加していく | 提案 |
+| [0049](0049-member-role-assignment-cross-table-fences.md) | メンバーへの role 割り当てと Workspace role の変更を、相手側 table の条件付き書き込みで直列化する | 提案 |

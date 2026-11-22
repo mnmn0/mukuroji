@@ -44,6 +44,12 @@ import {
   createWorkItemNotificationScheduleAttributes,
   createWorkItemNotificationScheduleUpdate,
 } from '../../work-item-notification-schedule-index'
+import {
+  createWorkItemMemberIndexPartitionKey,
+  createWorkItemMemberIndexTransactItems,
+  isWorkItemMemberIndexRecord,
+  type WorkItemMemberIndexReference,
+} from '../../work-item-member-index'
 import { createResourceId } from '../../domain/resource-id'
 import {
   WORK_ITEM_ACTUAL_DATE_FIELDS,
@@ -77,6 +83,7 @@ import type {
   TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
+  BatchGetCommand,
   DynamoDBDocumentClient,
   GetCommand,
   QueryCommand,
@@ -87,7 +94,10 @@ import type {
 } from '@aws-sdk/lib-dynamodb'
 import {
   createSearchWorkItemTypeKey,
+  crossesWorkItemBaselineSlipThreshold,
   DEFAULT_WORK_ITEM_TYPE_ID,
+  deriveWorkItemBaselineSlipChange,
+  WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS,
   createDefaultWorkItemHierarchyRank,
   isWorkItemEffortMinutes,
   isWorkItemProgressPercent,
@@ -115,8 +125,11 @@ import type {
   WorkItemRelation,
   WorkItemSchedule,
   WorkItemTriageContextEventSnapshot,
+  WorkItemBaselineSlipChange,
   WorkItemTriageContextSnapshot,
 } from '@mukuroji/contracts'
+import type { ActiveProjectScheduleBaseline } from '../../application/use-cases/project-schedule-baseline'
+import { DynamoDbProjectScheduleBaselineStore } from './schedule-baseline-store'
 
 /** Physical Planning META key that serializes canonical Work Item projections. */
 const PLANNING_META_RECORD_KEY = 'META'
@@ -192,6 +205,33 @@ export type WorkItemAuthorizationSnapshot = {
   planningRevision: number
   /** Enterprise Identity control revision observed during authorization. */
   enterpriseControlRevision?: number
+}
+
+/** Result of measuring one Work Item change against its Project's active schedule baseline. */
+type WorkItemBaselineSlipRead = {
+  /** Slip to record on the audit event, when the change moved the item further behind. */
+  slip?: WorkItemBaselineSlipChange
+  /** Check that the active baseline the slip was measured against is unchanged at commit. */
+  fence?: {
+    /** Team and Project the check guards, so one transaction adds it once. */
+    key: string
+    /** ConditionCheck on the active baseline row. */
+    transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+  }
+}
+
+/**
+ * Creates the error reported when a Project's active baseline changed while a Work Item edit was
+ * measured against it.
+ *
+ * @returns Retryable conflict error.
+ */
+function createScheduleBaselineChangedConflictError() {
+  return new ProjectDataError(
+    409,
+    'ScheduleBaselineChanged',
+    'The Project schedule baseline changed during the update. Reload and try again.',
+  )
 }
 
 /** Source-of-truth row converted only inside the DynamoDB adapter. */
@@ -1281,6 +1321,31 @@ export type TeamIssuesClient = {
     options?: WorkItemListReadOptions,
   ): Promise<TeamIssuesResponse>
   /**
+   * Strongly reads the member index rows of one member (ADR 0038). The rows are candidates:
+   * callers must re-read each Work Item and decide involvement from it.
+   *
+   * @param directoryId - Workspace ID.
+   * @param memberKey - Member key; normalized before use.
+   * @param limit - Most references to return; more fail with 413.
+   * @returns Team-qualified Work Item references in Team, then Work Item order.
+   */
+  listMemberWorkItemReferences?(
+    directoryId: string,
+    memberKey: string,
+    limit: number,
+  ): Promise<WorkItemMemberIndexReference[]>
+  /**
+   * Strongly reads canonical Work Items by Team-qualified reference, archived ones included.
+   *
+   * @param directoryId - Workspace ID.
+   * @param references - Work Items to read; duplicates are read once.
+   * @returns Existing Work Items in Team, then Work Item order; missing ones are left out.
+   */
+  getTeamIssuesByReferences?(
+    directoryId: string,
+    references: readonly WorkItemMemberIndexReference[],
+  ): Promise<TeamIssueResponseItem[]>
+  /**
    * Strongly reads a Team's non-archived Work Items with their effective sibling order ranks for
    * the hierarchy read model.
    *
@@ -1594,6 +1659,80 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
+   * Measures how much one change moved a Project Work Item further behind its active baseline.
+   *
+   * The baseline is read only when the change can move the measured end: a new schedule, a move
+   * to another Project, or a reopen. A temporarily unavailable read is logged and leaves the
+   * change unannotated, so a storage outage never blocks Work Item edits; a corrupt baseline row
+   * is rethrown and fails the edit closed.
+   *
+   * @param directoryId - Workspace directory ID.
+   * @param teamId - Team that owns the Work Item and its Project.
+   * @param issueId - Work Item ID.
+   * @param before - Stored Work Item before the change.
+   * @param after - Work Item the change writes.
+   * @param baselineReads - Reads shared by the Work Items of one cascade, keyed by Team and Project,
+   *   so a cascade reads each Project's baseline once.
+   * @returns The slip to record on the audit event, or `undefined` when there is none, and, when
+   *   the baseline was read, a check that keeps the transaction from committing after the active
+   *   baseline was captured or switched. The check is keyed by Team and Project so a cascade adds
+   *   it once per Project.
+   */
+  private async readWorkItemBaselineSlip(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    before: TeamIssueItem,
+    after: TeamIssueItem,
+    baselineReads: Map<string, Promise<ActiveProjectScheduleBaseline | null>> = new Map(),
+  ): Promise<WorkItemBaselineSlipRead> {
+    const projectId = after.assignedProjectId
+    if (!this.planningTableName || !projectId || after.archivedAt) return {}
+    // Only a reopen changes the measured end among status changes: a completed or canceled item
+    // is measured by its actual end, while moves between open statuses keep the planned end.
+    const reopened = (before.statusCategory === 'completed' || before.statusCategory === 'canceled') &&
+      before.statusCategory !== after.statusCategory
+    if (
+      workItemSchedulesEqual(before.schedule, after.schedule) &&
+      before.assignedProjectId === projectId &&
+      !reopened
+    ) return {}
+    const readKey = `${teamId}\0${projectId}`
+    const store = new DynamoDbProjectScheduleBaselineStore(this.planningTableName, this.documentClient)
+    let read = baselineReads.get(readKey)
+    if (!read) {
+      read = store.get(directoryId, teamId, projectId)
+      baselineReads.set(readKey, read)
+    }
+    let baseline
+    try {
+      baseline = await read
+    } catch (error) {
+      // Only a temporary storage outage is skipped; a corrupt or out-of-scope baseline row fails
+      // the edit closed instead of silently losing the slip.
+      if (!(error instanceof ProjectDataError) || error.code !== 'ScheduleBaselineRetryable') throw error
+      console.warn('Work Item baseline slip could not be measured:', error)
+      return {}
+    }
+    // The check covers a missing baseline and an item outside it too: a baseline captured in the
+    // meantime could include the item and change what this edit should report.
+    const fence = {
+      key: readKey,
+      transactWriteItem: store.createActiveRevisionConditionCheck(
+        directoryId,
+        teamId,
+        projectId,
+        baseline?.revision ?? null,
+      ),
+    }
+    const entry = baseline?.entries.find((candidate) => candidate.workItemId === issueId)
+    if (!baseline || !entry) return { fence }
+    // Moving in from another Project has no comparable "before" against this baseline.
+    const comparableBefore = before.assignedProjectId === projectId ? before : undefined
+    return { slip: deriveWorkItemBaselineSlipChange(baseline.revision, entry, comparableBefore, after), fence }
+  }
+
+  /**
    * Prepares permission-safe duplicate-source provenance for a combined Triage transaction.
    *
    * The immutable event lives in the canonical Work Item event partition and deliberately omits
@@ -1716,6 +1855,114 @@ export class DynamoDbTeamIssuesClient {
 
       throw toProjectDataError(error)
     }
+  }
+
+  /**
+   * Strongly reads the member index rows of one member (ADR 0038).
+   *
+   * @param directoryId - Workspace ID.
+   * @param memberKey - Member key; normalized before use.
+   * @param limit - Most references to return; more fail with 413.
+   * @returns Team-qualified Work Item references in Team, then Work Item order.
+   */
+  async listMemberWorkItemReferences(
+    directoryId: string,
+    memberKey: string,
+    limit: number,
+  ): Promise<WorkItemMemberIndexReference[]> {
+    await this.ensureLocalTables()
+    const partitionKey = createWorkItemMemberIndexPartitionKey(directoryId, memberKey)
+    const references: WorkItemMemberIndexReference[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    try {
+      do {
+        const response = await this.documentClient.send(new QueryCommand({
+          TableName: this.issueTableName,
+          KeyConditionExpression: '#directoryTeamId = :partitionKey',
+          ExpressionAttributeNames: { '#directoryTeamId': 'directoryTeamId' },
+          ExpressionAttributeValues: { ':partitionKey': partitionKey },
+          ConsistentRead: true,
+          Limit: Math.min(limit + 1, WORK_ITEM_MEMBER_INDEX_QUERY_PAGE_SIZE),
+          ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
+        }))
+        for (const row of response.Items ?? []) {
+          if (!isWorkItemMemberIndexRecord(row) || row.directoryId !== directoryId) {
+            throw new ProjectDataError(503, 'InvalidWorkItemMemberIndex', 'Work Item member index row is invalid.')
+          }
+          references.push({ teamId: row.teamId, workItemId: row.workItemId })
+          if (references.length > limit) {
+            throw createMemberIndexLimitExceededError(limit)
+          }
+        }
+        exclusiveStartKey = response.LastEvaluatedKey
+      } while (exclusiveStartKey !== undefined)
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+    return references.sort(compareWorkItemReferences)
+  }
+
+  /**
+   * Strongly reads canonical Work Items by Team-qualified reference, archived ones included.
+   *
+   * @param directoryId - Workspace ID.
+   * @param references - Work Items to read; duplicates are read once.
+   * @returns Existing Work Items in Team, then Work Item order; missing ones are left out.
+   */
+  async getTeamIssuesByReferences(
+    directoryId: string,
+    references: readonly WorkItemMemberIndexReference[],
+  ): Promise<TeamIssueResponseItem[]> {
+    await this.ensureLocalTables()
+    const unique = new Map<string, WorkItemMemberIndexReference>()
+    for (const reference of references) {
+      unique.set(createDirectoryTeamIssueId(directoryId, reference.teamId, reference.workItemId), reference)
+    }
+    const ordered = [...unique.values()].sort(compareWorkItemReferences)
+    const items: TeamIssueItem[] = []
+    try {
+      for (let offset = 0; offset < ordered.length; offset += WORK_ITEM_BATCH_GET_SIZE) {
+        let keys: Record<string, unknown>[] = ordered
+          .slice(offset, offset + WORK_ITEM_BATCH_GET_SIZE)
+          .map((reference) => ({
+            directoryTeamId: createDirectoryTeamId(directoryId, reference.teamId),
+            issueId: reference.workItemId,
+          }))
+        // Only rounds that make no progress count toward the limit, so a slow but advancing
+        // read is not failed while throttling eases.
+        for (let round = 0, stalledRounds = 0; keys.length > 0; round += 1) {
+          if (stalledRounds >= WORK_ITEM_BATCH_GET_ATTEMPTS) {
+            throw new ProjectDataError(503, 'WorkItemBatchReadIncomplete', 'Work Items could not be read.')
+          }
+          // Unprocessed keys mean the table is throttling; back off before asking again, longer
+          // after each round that made no progress.
+          if (round > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** Math.max(0, stalledRounds - 1))
+          const response = await this.documentClient.send(new BatchGetCommand({
+            RequestItems: { [this.issueTableName]: { Keys: keys, ConsistentRead: true } },
+          }))
+          for (const row of response.Responses?.[this.issueTableName] ?? []) {
+            const item = toTeamIssueItem(row)
+            if (item.directoryId !== directoryId) {
+              throw new ProjectDataError(503, 'InvalidTeamIssue', 'Team issue item is missing or invalid.')
+            }
+            items.push(item)
+          }
+          const unprocessed = response.UnprocessedKeys?.[this.issueTableName]?.Keys ?? []
+          stalledRounds = unprocessed.length < keys.length ? 0 : stalledRounds + 1
+          keys = unprocessed
+        }
+      }
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+    return items
+      .sort((left, right) => compareWorkItemReferences(
+        { teamId: left.teamId, workItemId: left.issueId },
+        { teamId: right.teamId, workItemId: right.issueId },
+      ))
+      .map(toTeamIssueResponseItem)
   }
 
   /**
@@ -2391,6 +2638,15 @@ export class DynamoDbTeamIssuesClient {
                   now,
                 )]
               : []),
+            // Unconditional, so they never shift the cancellation indexes above.
+            ...createWorkItemMemberIndexTransactItems(
+              this.issueTableName,
+              directoryId,
+              teamId,
+              issueId,
+              undefined,
+              item,
+            ),
           ],
         }),
       )
@@ -2568,6 +2824,7 @@ export class DynamoDbTeamIssuesClient {
     }
 
     const occurredAt = new Date().toISOString()
+    const baselineReads = new Map<string, Promise<ActiveProjectScheduleBaseline | null>>()
     const prepared = await Promise.all(updates.map(async (update, sequence) => {
       const expectedRevision = readWorkItemExpectedRevision(update.expectedRevision)
       const beforeIssue = await this.getRequiredTeamIssueItem(
@@ -2606,6 +2863,14 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue schedule was updated by a dependency cascade.',
         createdAt: occurredAt,
       })
+      const { slip: baselineSlip, fence: baselineFence } = await this.readWorkItemBaselineSlip(
+        directoryId,
+        update.teamId,
+        update.workItemId,
+        beforeIssue,
+        afterIssue,
+        baselineReads,
+      )
       const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.schedule-cascade-updated',
@@ -2614,7 +2879,8 @@ export class DynamoDbTeamIssuesClient {
         action: 'schedule-cascade-updated',
         sequence,
         occurredAt,
-        summary: createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        summary: createWorkItemBaselineSlipSummary(baselineSlip) ??
+          createWorkItemNotificationSummary(beforeIssue, afterIssue),
         changes: createAuditFieldChanges(beforeIssue, afterIssue, ['dueDate', 'schedule']),
         metadata: {
           adapter: 'canonical-work-item',
@@ -2624,7 +2890,11 @@ export class DynamoDbTeamIssuesClient {
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(update.teamId, update.workItemId),
           notificationTitle: afterIssue.title,
-          notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
+          notificationCandidates: [
+            ...createWorkItemNotificationCandidates(beforeIssue, afterIssue),
+            ...createWorkItemBaselineSlipCandidates(afterIssue, baselineSlip),
+          ],
+          ...(baselineSlip ? { baselineSlip } : {}),
           beforeRevision: expectedRevision,
           afterRevision: expectedRevision + 1,
           cascadeSize: updates.length,
@@ -2638,6 +2908,7 @@ export class DynamoDbTeamIssuesClient {
         auditPut,
         dueDateChanged,
         notificationSchedule,
+        baselineFence,
       }
     }))
     const authorizationConditionEntries = createAuthorizationSnapshotConditionEntries(
@@ -2757,6 +3028,12 @@ export class DynamoDbTeamIssuesClient {
     transactItems.push(...relationGraphConditionChecks)
     const authorizationConditionStartIndex = transactItems.length
     transactItems.push(...authorizationConditionChecks)
+    const baselineFenceStartIndex = transactItems.length
+    const baselineFences = new Map<string, NonNullable<TransactWriteCommandInput['TransactItems']>[number]>()
+    for (const entry of prepared) {
+      if (entry.baselineFence) baselineFences.set(entry.baselineFence.key, entry.baselineFence.transactWriteItem)
+    }
+    transactItems.push(...baselineFences.values())
     if (idempotencyCompletion) {
       transactItems.push(idempotencyCompletion.transactWriteItem)
     }
@@ -2799,6 +3076,11 @@ export class DynamoDbTeamIssuesClient {
           'WorkItemRelationGraphConflict',
           'Work Item relations changed. Reload and try again.',
         )
+      }
+      if ([...baselineFences.keys()].some((_, index) =>
+        isTransactionConditionalFailureAt(error, baselineFenceStartIndex + index)
+      )) {
+        throw createScheduleBaselineChangedConflictError()
       }
       if (hasTransactionConditionalFailure(error)) {
         throw new ProjectDataError(
@@ -2847,6 +3129,7 @@ export class DynamoDbTeamIssuesClient {
     const configurationConditionChecks = input.configurationConditionChecks ?? []
     const agentRunTransactItems = input.agentRunTransactItems ?? []
     let agentRunFenceStartIndex: number | undefined
+    let baselineFence: WorkItemBaselineSlipRead['fence']
     const authorizationConditionEntries = mergeAuthorizationConditionEntries(
       createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
       [
@@ -3178,6 +3461,15 @@ export class DynamoDbTeamIssuesClient {
         summary: 'Issue was updated.',
         createdAt: expressionAttributeValues[':updatedAt'] as string,
       })
+      const baselineRead = await this.readWorkItemBaselineSlip(
+        directoryId,
+        teamId,
+        issueId,
+        beforeIssue,
+        afterIssue,
+      )
+      const baselineSlip = baselineRead.slip
+      baselineFence = baselineRead.fence
       auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
         directoryId,
         eventType: 'work-item.updated',
@@ -3185,7 +3477,8 @@ export class DynamoDbTeamIssuesClient {
         entityId: createTeamIssueAuditEntityId(teamId, issueId),
         action: 'updated',
         occurredAt: expressionAttributeValues[':updatedAt'] as string,
-        summary: createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        summary: createWorkItemBaselineSlipSummary(baselineSlip) ??
+          createWorkItemNotificationSummary(beforeIssue, afterIssue),
         changes: createAuditFieldChanges(auditBeforeIssue, auditAfterIssue, [
           'title',
           'description',
@@ -3215,7 +3508,11 @@ export class DynamoDbTeamIssuesClient {
           projectId: afterIssue.assignedProjectId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: afterIssue.title,
-          notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
+          notificationCandidates: [
+            ...createWorkItemNotificationCandidates(beforeIssue, afterIssue),
+            ...createWorkItemBaselineSlipCandidates(afterIssue, baselineSlip),
+          ],
+          ...(baselineSlip ? { baselineSlip } : {}),
           beforeRevision: expectedRevision,
           afterRevision: nextRevision,
           ...(completionTransition ? { completionTransition: true } : {}),
@@ -3268,6 +3565,16 @@ export class DynamoDbTeamIssuesClient {
               : []),
             ...(planningRevisionMutation ? [planningRevisionMutation] : []),
             ...agentRunTransactItems,
+            ...(baselineFence ? [baselineFence.transactWriteItem] : []),
+            // Unconditional and last, so they never shift the cancellation indexes above.
+            ...createWorkItemMemberIndexTransactItems(
+              this.issueTableName,
+              directoryId,
+              teamId,
+              issueId,
+              beforeIssue,
+              afterIssue,
+            ),
           ],
         }),
       )
@@ -3287,6 +3594,13 @@ export class DynamoDbTeamIssuesClient {
         )
       ) {
         throw createAgentRunFenceConflictError()
+      }
+      if (
+        baselineFence &&
+        fenceStartIndex !== undefined &&
+        isTransactionConditionalFailureAt(error, fenceStartIndex + agentRunTransactItems.length)
+      ) {
+        throw createScheduleBaselineChangedConflictError()
       }
 
       const cancellationReasonsMissing =
@@ -3422,30 +3736,51 @@ export class DynamoDbTeamIssuesClient {
       ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
     ]
 
+    const deletionItems: WorkItemTransactWriteItem[] = [
+      {
+        Delete: {
+          TableName: this.issueTableName,
+          Key: { directoryTeamId, issueId },
+          ConditionExpression:
+            'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :expectedRevision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+        },
+      },
+      ...deletionFences.map((fence) => fence.transactWriteItem),
+      ...(auditPut ? [auditPut] : []),
+      ...effectiveAuthorizationConditionChecks,
+      ...(idempotencyCompletion
+        ? [idempotencyCompletion.transactWriteItem]
+        : []),
+      ...(planningRevisionMutation ? [planningRevisionMutation] : []),
+    ]
+    const memberIndexDeletes = createWorkItemMemberIndexTransactItems(
+      this.issueTableName,
+      directoryId,
+      teamId,
+      issueId,
+      beforeIssue,
+      undefined,
+    )
+    // The index Deletes ride in the transaction when they fit. Otherwise they run after the commit:
+    // a leftover index row only makes Focus read a Work Item that no longer exists, which it drops.
+    const memberIndexDeletesInline =
+      deletionItems.length + memberIndexDeletes.length <= WORK_ITEM_TRANSACT_WRITE_ITEM_LIMIT
+
     try {
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
-            {
-              Delete: {
-                TableName: this.issueTableName,
-                Key: { directoryTeamId, issueId },
-                ConditionExpression:
-                  'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :expectedRevision',
-                ExpressionAttributeNames: { '#revision': 'revision' },
-                ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
-              },
-            },
-            ...deletionFences.map((fence) => fence.transactWriteItem),
-            ...(auditPut ? [auditPut] : []),
-            ...effectiveAuthorizationConditionChecks,
-            ...(idempotencyCompletion
-              ? [idempotencyCompletion.transactWriteItem]
-              : []),
-            ...(planningRevisionMutation ? [planningRevisionMutation] : []),
+            ...deletionItems,
+            // Unconditional and last, so they never shift the cancellation indexes above.
+            ...(memberIndexDeletesInline ? memberIndexDeletes : []),
           ],
         }),
       )
+      if (!memberIndexDeletesInline) {
+        await this.deleteMemberIndexRowsAfterCommit(directoryTeamId, issueId, memberIndexDeletes)
+      }
 
       return { issue: toTeamIssueResponseItem(beforeIssue) }
     } catch (error) {
@@ -3499,6 +3834,47 @@ export class DynamoDbTeamIssuesClient {
       }
 
       throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Deletes member index rows after a Work Item delete committed without them.
+   *
+   * One transaction checks that the canonical row is still absent and deletes the index rows, so a
+   * Work Item re-created under the same ID keeps the index rows its create wrote. It is a
+   * `TransactWriteItems` call, which the Planning fence barrier admits. Best effort: a row left
+   * behind only points Focus at a missing Work Item, which the reference read leaves out, so a
+   * failure here does not fail the committed delete.
+   *
+   * @param directoryTeamId - Partition key of the deleted canonical row.
+   * @param issueId - Sort key of the deleted canonical row.
+   * @param items - Unconditional index Delete actions from the delete transaction.
+   */
+  private async deleteMemberIndexRowsAfterCommit(
+    directoryTeamId: string,
+    issueId: string,
+    items: readonly WorkItemTransactWriteItem[],
+  ) {
+    for (let attempt = 0; attempt < WORK_ITEM_BATCH_GET_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) await sleep(WORK_ITEM_BATCH_GET_RETRY_BASE_MS * 2 ** (attempt - 1))
+      try {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [
+            {
+              ConditionCheck: {
+                TableName: this.issueTableName,
+                Key: { directoryTeamId, issueId },
+                ConditionExpression: 'attribute_not_exists(directoryTeamId)',
+              },
+            },
+            ...items,
+          ],
+        }))
+        return
+      } catch (error) {
+        // A re-created Work Item owns the rows now; anything else is retried, then left behind.
+        if (isTransactionConditionalFailureAt(error, 0)) return
+      }
     }
   }
 
@@ -4647,6 +5023,54 @@ function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueAc
   }
 }
 
+/** Largest page of member index rows read by one Query. */
+const WORK_ITEM_MEMBER_INDEX_QUERY_PAGE_SIZE = 1_000
+
+/** Keys per BatchGetItem request, the DynamoDB maximum. */
+const WORK_ITEM_BATCH_GET_SIZE = 100
+
+/** BatchGetItem rounds tried before unprocessed keys fail the read. */
+const WORK_ITEM_BATCH_GET_ATTEMPTS = 5
+
+/** First wait before re-reading unprocessed BatchGet keys; doubles on each retry. */
+const WORK_ITEM_BATCH_GET_RETRY_BASE_MS = 25
+
+/** One action of a Work Item TransactWriteItems call. */
+type WorkItemTransactWriteItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+
+/** Actions per TransactWriteItems call, the DynamoDB maximum. */
+const WORK_ITEM_TRANSACT_WRITE_ITEM_LIMIT = 100
+
+/**
+ * Creates the error returned when one member has more index rows than a read allows.
+ *
+ * @param limit - Largest number of rows the caller accepts.
+ * @returns The 413 project data error.
+ */
+function createMemberIndexLimitExceededError(limit: number): ProjectDataError {
+  return new ProjectDataError(
+    413,
+    'WorkItemListLimitExceeded',
+    `The member is involved in more than ${limit} Work Items.`,
+  )
+}
+
+/**
+ * Orders Team-qualified Work Item references by Team ID, then Work Item ID, in code unit order.
+ *
+ * @param left - First reference.
+ * @param right - Second reference.
+ * @returns Negative, zero, or positive like `Array.prototype.sort` expects.
+ */
+function compareWorkItemReferences(
+  left: WorkItemMemberIndexReference,
+  right: WorkItemMemberIndexReference,
+): number {
+  if (left.teamId !== right.teamId) return left.teamId < right.teamId ? -1 : 1
+  if (left.workItemId === right.workItemId) return 0
+  return left.workItemId < right.workItemId ? -1 : 1
+}
+
 function toTeamIssueItem(value: unknown): TeamIssueItem {
   if (!isCanonicalWorkItemRecord(value)) {
     throw new ProjectDataError(
@@ -5556,6 +5980,36 @@ export function createWorkItemNotificationCandidates(
   }
 
   return candidates
+}
+
+/**
+ * Notifies the assignee when a change is the one that put the Work Item
+ * {@link WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS} or more days behind its baseline.
+ *
+ * @param after - Work Item after the change.
+ * @param slip - Slip recorded for the change, if any.
+ * @returns The `baseline-slip` candidate, or none.
+ */
+function createWorkItemBaselineSlipCandidates(
+  after: Pick<TeamIssueItem, 'assigneeUserId'>,
+  slip: WorkItemBaselineSlipChange | undefined,
+): Array<{ memberKey: string; reason: string }> {
+  if (!slip || !after.assigneeUserId) return []
+  if (!crossesWorkItemBaselineSlipThreshold(slip, WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS)) return []
+  return [{ memberKey: after.assigneeUserId, reason: 'baseline-slip' }]
+}
+
+/**
+ * Describes a change that crossed the notification threshold, so the notification says why.
+ *
+ * @param slip - Slip recorded for the change, if any.
+ * @returns The summary, or `undefined` when the change did not cross the threshold.
+ */
+function createWorkItemBaselineSlipSummary(slip: WorkItemBaselineSlipChange | undefined): string | undefined {
+  if (!slip || !crossesWorkItemBaselineSlipThreshold(slip, WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS)) {
+    return undefined
+  }
+  return `Work Item now ends ${slip.delayDays} days after its schedule baseline.`
 }
 
 /**
