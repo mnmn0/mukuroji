@@ -21,14 +21,21 @@ Rejected entries return to `rejected` and can be edited and submitted again. A m
 - `GET /api/teams/:teamId/time-tracking/summary` groups actual minutes by day, week, user, Project, Work Item, or work category (`groupBy=category`).
 - `GET /api/teams/:teamId/time-tracking/export` exports the same ACL-filtered summary as CSV.
 - `PUT /api/teams/:teamId/time-budget` and `PUT /api/teams/:teamId/projects/:projectId/time-budget` store optimistic-concurrency-protected budgets.
+- `GET /api/teams/:teamId/time-entry-policy` returns the Team's overlap and daily total checks with `canEdit`; `PUT` saves them. See [Overlap and daily total checks](#overlap-and-daily-total-checks).
 
 All period endpoints require `from`, `to`, and accept `timeZone` plus `groupBy`. Date-only ranges are interpreted as local dates and converted to UTC before querying. Intervals crossing midnight are split at timezone-aware local boundaries, including daylight-saving transitions.
 
 ## Work categories and date-and-minutes entries
 
-An entry may carry a `category`: `design`, `implementation`, `review`, `meeting`, `management`, `training`, or `leave`. Create and `PATCH` accept it, and `PATCH` with `category: null` removes it. Entries without one, including every entry saved before categories existed, are reported in the `uncategorized` group (label `Uncategorized`) of a `groupBy=category` summary or CSV export. The list is fixed for now; Workspace-defined categories are still open in #397.
+An entry may carry a `category`: `design`, `implementation`, `review`, `meeting`, `management`, `training`, or `leave`. Create and `PATCH` accept it, and `PATCH` with `category: null` removes it. Entries without one, including every entry saved before categories existed, are reported in the `uncategorized` group (label `Uncategorized`) of a `groupBy=category` summary or CSV export. Workspace owners and admins can rename these, add their own, and retire categories (ADR 0047); `GET /api/workspace/time-entry-categories` returns the list.
 
 Instead of `startAt` and `endAt`, a create or `PATCH` request may send `date` (`YYYY-MM-DD`), `minutes` (a whole number from 1 to 1440), and optionally `timeZone` (IANA, default `UTC`). The server stores the entry from local midnight of that date for that many minutes and marks it `durationOnly: true`, so clients know its times of day carry no meaning. The minutes must end within the local date, so a 23-hour daylight-saving day accepts at most 1380. Sending both forms is rejected. A `PATCH` that sends `startAt` and `endAt` keeps a date-and-minutes entry as one when they repeat the stored interval, so a client that always sends the times does not change it; different times turn it into a timed entry. Timers still record times of day.
+
+## Overlap and daily total checks
+
+Each Team chooses, for overlapping time and for a daily total limit, whether a save is not checked (`off`), saved with a warning (`warn`), or refused (`reject`); see ADR 0048. A Team that has saved nothing uses `off` for both with a limit of 600 minutes. `GET /api/teams/:teamId/time-entry-policy` returns `{ policy: { overlap, dailyLimit, dailyLimitMinutes, teamId, revision, updatedAt? }, canEdit }` to Team viewers. `PUT` takes `{ overlap, dailyLimit, dailyLimitMinutes, expectedRevision }` (`dailyLimitMinutes` 1 to 1440), is limited to managers of the whole Team (`403 TimeEntryPolicyDenied`), returns `409 TimeEntryPolicyRevisionConflict` for a stale revision, and records the `time-entry-policy.updated` audit event.
+
+Create and `PATCH` of an entry apply the checks; `PATCH` only when `startAt` or `endAt` changes. The entry is compared with every other entry of the same member in the Team, whatever its state. Days are local days in the Workspace time zone (`Asia/Tokyo` for now), and an entry crossing midnight counts toward each day it covers. Date-and-minutes entries count toward daily totals but never overlap. A `reject` check returns `409 TimeEntryOverlap` or `409 TimeEntryDailyLimitExceeded`. A `warn` check saves the entry and adds `warnings` to the response, such as `{ code: 'TimeEntryOverlap', entryIds }` or `{ code: 'TimeEntryDailyLimitExceeded', date, minutes, limitMinutes }`; the field is absent when nothing was broken. Entries a timer creates are not checked. The check reads the date index, so two entries saved at the same moment may both pass.
 
 ## Indirect work without a Work Item
 

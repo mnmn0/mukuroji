@@ -13,6 +13,7 @@ import { TimeEntryForm, type TimeEntryWorkItemOption } from './TimeEntryForm'
 import { TimeEntryList } from './TimeEntryList'
 import { TimeWeekNavigator } from './TimeWeekNavigator'
 import {
+  describeSavedTimeEntry,
   describeTimeEntrySubject,
   describeTimeTrackingFailure,
   interpolate,
@@ -114,6 +115,16 @@ export function PersonalTimesheet({
   const weekTotal = sumTimeEntryMinutesInDays(entries, week.days)
   const defaultDate = week.days.includes(today) ? today : week.days[0] ?? today
 
+  /**
+   * Announces a saved entry together with the Team checks it broke.
+   *
+   * @param successText - Text announcing the save.
+   * @param saved - Save result that may carry warnings.
+   */
+  const announceSaved = (successText: string, saved: unknown) => {
+    setMessage({ tone: 'status', text: describeSavedTimeEntry(t, formatters, successText, saved) })
+  }
+
   /** Submits the whole week and reports entries that still need a retry. */
   const submitWeek = async () => {
     if (isSubmittingWeek) return
@@ -196,9 +207,9 @@ export function PersonalTimesheet({
           defaultDate={defaultDate}
           onCancel={() => setCreating(undefined)}
           onSave={async (input) => {
-            await onCreateEntry(input)
+            const saved = await onCreateEntry(input)
             setCreating(undefined)
-            setMessage({ tone: 'status', text: t('timeTracking.entry.created') })
+            announceSaved(t('timeTracking.entry.created'), saved)
           }}
           t={t}
           workItemOptions={workItemOptions}
@@ -209,9 +220,9 @@ export function PersonalTimesheet({
           defaultDate={defaultDate}
           onCancel={() => setCreating(undefined)}
           onSave={async (input) => {
-            await onCreateIndirectEntry(input)
+            const saved = await onCreateIndirectEntry(input)
             setCreating(undefined)
-            setMessage({ tone: 'status', text: t('timeTracking.entry.created') })
+            announceSaved(t('timeTracking.entry.created'), saved)
           }}
           t={t}
           targets={indirectTargets}
@@ -285,8 +296,12 @@ export function PersonalTimesheet({
               setMessage({ tone: 'status', text: t('timeTracking.entry.deleted') })
             }}
             onSubmit={onSubmitEntry}
-            onUpdate={onUpdateEntry}
-            onUpdateIndirect={onUpdateIndirectEntry}
+            onUpdate={async (entry, input) => {
+              announceSaved(t('timeTracking.entry.updated'), await onUpdateEntry(entry, input))
+            }}
+            onUpdateIndirect={async (entry, input) => {
+              announceSaved(t('timeTracking.entry.updated'), await onUpdateIndirectEntry(entry, input))
+            }}
             {...(rejectionReasons ? { rejectionReasons } : {})}
             t={t}
             workItemOptions={workItemOptions}

@@ -1,6 +1,8 @@
 import { Hono, type Context } from 'hono'
 import {
+  readTeamTimeEntryPolicy,
   readTimeEntryCategoryKey,
+  type TimeEntryPolicyWarning,
   type TimeEntry,
   type TimeEntryCategory,
   type TimeEntryStatus,
@@ -89,7 +91,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
           body.hourlyRateMinor === undefined ? 'member' : 'manager',
         )
       }
-      const entry = await dependencies.getTimeTracking().createEntry({
+      const { entry, warnings } = await dependencies.getTimeTracking().createEntryWithWarnings({
         workspaceId: principal.directoryId,
         teamId,
         ...(workItemId ? { workItemId } : {}),
@@ -105,7 +107,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       }, canManage)
       const managedProjectIds = await dependencies.getManagedProjectIds(principal, teamId)
-      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) }, 201)
+      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds), ...withWarnings(warnings) }, 201)
     })
   })
 
@@ -179,7 +181,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       const canManageEntry = canManage &&
         canManageProject(managedProjectIds, current.projectId) &&
         canManageProject(managedProjectIds, nextProjectId)
-      const entry = await dependencies.getTimeTracking().updateEntry({
+      const { entry, warnings } = await dependencies.getTimeTracking().updateEntryWithWarnings({
         workspaceId: principal.directoryId,
         teamId,
         entryId: readRequiredString(context.req.param('entryId'), 'Time entry ID'),
@@ -197,7 +199,7 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.hourlyRateMinor === null ? { hourlyRateMinor: null } : body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
-      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds) })
+      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds), ...withWarnings(warnings) })
     })
   })
 
@@ -313,6 +315,37 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
       })
     })
   }
+
+  router.get('/api/teams/:teamId/time-entry-policy', async (context) => {
+    return await withTeam(context, dependencies, 'viewer', async (principal, teamId, canManage) => {
+      const policy = await dependencies.getTimeTracking().getEntryPolicy(principal.directoryId, teamId)
+      const canEdit = canManage && await dependencies.canManageWholeTeam(principal, teamId)
+      return context.json({ policy, canEdit })
+    })
+  })
+
+  router.put('/api/teams/:teamId/time-entry-policy', async (context) => {
+    return await withTeam(context, dependencies, 'manager', async (principal, teamId, canManage) => {
+      // The policy applies to every Project of the Team, so a manager of only some Projects cannot change it.
+      if (!canManage || !await dependencies.canManageWholeTeam(principal, teamId)) {
+        throw new TimeTrackingError(403, 'TimeEntryPolicyDenied', 'Only a manager of the whole Team may change its time entry checks.')
+      }
+      const body = asRecord(await dependencies.readJson(context.req))
+      const policy = readTeamTimeEntryPolicy(body)
+      if (!policy) {
+        throw new TimeTrackingError(400, 'InvalidTimeEntryPolicy', 'overlap and dailyLimit must be off, warn, or reject, and dailyLimitMinutes 1 to 1440.')
+      }
+      const saved = await dependencies.getTimeTracking().saveEntryPolicy({
+        workspaceId: principal.directoryId,
+        teamId,
+        policy,
+        expectedRevision: readRequiredNumber(body.expectedRevision, 'Expected revision'),
+        actorUserId: principal.userKey,
+        ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
+      })
+      return context.json({ policy: saved, canEdit: true })
+    })
+  })
 
   router.get('/api/teams/:teamId/time-periods', async (context) => {
     return await withTeam(context, dependencies, 'viewer', async (principal, teamId) => {
@@ -566,6 +599,17 @@ async function withTeam<Principal extends TimeTrackingPrincipal>(
     const canManage = await dependencies.canManageRates(principal, teamId)
     return await operation(principal, teamId, canManage)
   })
+}
+
+/**
+ * Adds the warnings of a saved entry to its response only when there are any, so responses of
+ * Teams without checks keep their shape.
+ *
+ * @param warnings - Checks the entry broke in a Team that only warns.
+ * @returns `{ warnings }` or an empty object.
+ */
+function withWarnings(warnings: readonly TimeEntryPolicyWarning[]): { warnings?: readonly TimeEntryPolicyWarning[] } {
+  return warnings.length > 0 ? { warnings } : {}
 }
 
 /**

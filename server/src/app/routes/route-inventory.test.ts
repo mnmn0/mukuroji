@@ -9,8 +9,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
     .map(({ method, path }) => `${method} ${path}`)
     .sort()
 
-  expect(inventory).toHaveLength(542)
-  expect(new Set(inventory).size).toBe(538)
+  expect(inventory).toHaveLength(544)
+  expect(new Set(inventory).size).toBe(540)
   expect(inventory).toContain('POST /api/documents/:documentId/realtime/tickets')
   expect(inventory).toContain('PUT /api/teams/:teamId/issues/:issueId/parent')
   expect(inventory).toContain('GET /api/work-items/summary')
@@ -112,6 +112,8 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('POST /api/teams/:teamId/time-entries/:entryId/return')
   expect(inventory).toContain('GET /api/teams/:teamId/notification-reminders')
   expect(inventory).toContain('PUT /api/teams/:teamId/notification-reminders')
+  expect(inventory).toContain('GET /api/teams/:teamId/time-entry-policy')
+  expect(inventory).toContain('PUT /api/teams/:teamId/time-entry-policy')
   expect(inventory).toContain('POST /api/developer/connector-oauth/complete')
   // Team and Project IDs never change, so renaming is a PATCH on the stable resource.
   expect(inventory).toContain('GET /api/teams/directory')
@@ -133,6 +135,6 @@ test('preserves the complete HTTP method and canonical path inventory', () => {
   expect(inventory).toContain('ALL /api/teams/:teamId/agent-settings')
   expect(inventory).toContain('ALL /api/developer/me/api-keys/:apiKeyId/rotate')
   expect(createHash('sha256').update(inventory.join('\n')).digest('hex')).toBe(
-    '7e8f26aa462fef9e305b532303436758edafea3ffd45d964aa62583da0e828fd',
+    'e177fb624adbaba1711870a14a4012d88359f87610144ca94410804557d80e65',
   )
 })

@@ -1,6 +1,7 @@
 import {
   DEFAULT_WORKSPACE_TIME_ENTRY_CATEGORY_SETTINGS,
   isBuiltInTimeEntryCategory,
+  readTimeEntryPolicyWarning,
   type BuiltInTimeEntryCategory,
   type TimeEntry,
   type TimeEntryCategory,
@@ -9,6 +10,7 @@ import {
 } from '@mukuroji/contracts'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
 import { classifyTimeTrackingFailure } from '../model/timeTrackingFailure'
+import { formatMinutes } from '../model/timePeriod'
 
 /** Translator used by the time tracking views. */
 export type TimeTrackingTranslator = (key: MessageKey) => string
@@ -133,6 +135,10 @@ export function describeTimeTrackingFailure(t: TimeTrackingTranslator, error: un
       return t('timeTracking.error.conflict')
     case 'closed':
       return t('timeTracking.error.closed')
+    case 'overlap':
+      return t('timeTracking.error.overlap')
+    case 'dailyLimit':
+      return t('timeTracking.error.dailyLimit')
     case 'forbidden':
       return t('timeTracking.error.forbidden')
     case 'invalid':
@@ -140,6 +146,33 @@ export function describeTimeTrackingFailure(t: TimeTrackingTranslator, error: un
     default:
       return t('timeTracking.error.failed')
   }
+}
+
+/**
+ * Explains the Team checks a saved entry broke, for a Team that only warns about them.
+ *
+ * @param t - Translator.
+ * @param formatters - Date formatters.
+ * @param saved - Result of a save; anything without warnings yields an empty string.
+ * @returns One sentence per warning, joined with spaces, or an empty string.
+ */
+export function describeTimeEntryWarnings(
+  t: TimeTrackingTranslator,
+  formatters: Pick<TimeTrackingFormatters, 'day'>,
+  saved: unknown,
+): string {
+  const rawWarnings: unknown = typeof saved === 'object' && saved !== null ? Reflect.get(saved, 'warnings') : undefined
+  if (!Array.isArray(rawWarnings)) return ''
+  return rawWarnings.flatMap((rawWarning) => {
+    const warning = readTimeEntryPolicyWarning(rawWarning)
+    if (!warning) return []
+    if (warning.code === 'TimeEntryOverlap') return [t('timeTracking.warning.overlap')]
+    return [interpolate(t('timeTracking.warning.dailyLimit'), {
+      date: formatters.day(warning.date),
+      minutes: formatMinutes(warning.minutes),
+      limit: formatMinutes(warning.limitMinutes),
+    })]
+  }).join(' ')
 }
 
 /**
@@ -181,4 +214,23 @@ export function formatWeeklyReportSubmittedStatus(
   return t('timeTracking.weeklyReport.statusSubmitted')
     .replace('{version}', String(version))
     .replace('{time}', `${formatters.date(submittedAt)} ${formatters.time(submittedAt)}`)
+}
+
+/**
+ * Announces a saved entry, followed by any check it broke in a Team that only warns.
+ *
+ * @param t - Translator.
+ * @param formatters - Day formatter for daily-limit warnings.
+ * @param successText - Text announcing the save.
+ * @param saved - Untrusted save result that may carry `warnings`.
+ * @returns The announcement.
+ */
+export function describeSavedTimeEntry(
+  t: TimeTrackingTranslator,
+  formatters: Pick<TimeTrackingFormatters, 'day'>,
+  successText: string,
+  saved: unknown,
+): string {
+  const warnings = describeTimeEntryWarnings(t, formatters, saved)
+  return warnings ? `${successText} ${warnings}` : successText
 }

@@ -6,9 +6,12 @@ import { downloadTimeTrackingCsv, type TimeReportBudgetScope } from '../api/time
 import { TimeTrackingApiError } from '../api/timeTrackingRequest'
 import { createTimeReportFileName, isTimeReportRangeOrdered, type TimeReportRange } from '../model/timeReport'
 import { resolveBrowserTimeZone } from '../model/timePeriod'
+import { useSaveTeamTimeEntryPolicy } from '../mutations/useSaveTeamTimeEntryPolicy'
 import { useSaveTimeBudget } from '../mutations/useSaveTimeBudget'
+import { useTeamTimeEntryPolicy } from '../queries/useTeamTimeEntryPolicy'
 import { useTimeTrackingSummary } from '../queries/useTimeTrackingSummary'
 import { TimeBudgetPanel, type TimeBudgetProjectOption } from './TimeBudgetPanel'
+import { TimeEntryPolicyPanel } from './TimeEntryPolicyPanel'
 import { TimeReport, type TimeReportLabels } from './TimeReport'
 import { createTimeTrackingFormatters } from './timeTrackingText'
 
@@ -48,7 +51,7 @@ function triggerCsvDownload(blob: Blob, fileName: string): void {
 }
 
 /**
- * Connects the Team report, its CSV export, and the budget panel to the API.
+ * Connects the Team report, its CSV export, the budget panel, and the Team's time entry checks to the API.
  *
  * The budget panel appears only when the server returns costs (`costsRedacted` is false), so
  * members who may not see confidential money never see budgets either.
@@ -80,6 +83,8 @@ export function TimeReportContainer({
   )
   const budgetReport = useTimeTrackingSummary(accessToken, teamId, budgetInput, ordered && canSeeCosts)
   const saveBudget = useSaveTimeBudget(accessToken, teamId)
+  const entryPolicy = useTeamTimeEntryPolicy(accessToken, teamId)
+  const saveEntryPolicy = useSaveTeamTimeEntryPolicy(accessToken, teamId)
 
   return (
     <div className="grid min-w-0 gap-6">
@@ -118,6 +123,14 @@ export function TimeReportContainer({
           {...(budgetReport.data ? { summary: budgetReport.data } : {})}
         />
       ) : null}
+      <TimeEntryPolicyPanel
+        hasLoadError={Boolean(entryPolicy.error)}
+        isLoading={entryPolicy.isLoading}
+        onRetry={() => { void entryPolicy.mutate().catch(() => undefined) }}
+        onSave={saveEntryPolicy}
+        t={t}
+        {...(entryPolicy.data ? { view: entryPolicy.data } : {})}
+      />
     </div>
   )
 }
