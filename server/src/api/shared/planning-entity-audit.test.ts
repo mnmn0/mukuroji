@@ -2,7 +2,10 @@ import { expect, test } from 'bun:test'
 import { Hono } from 'hono'
 import { createAuditEvent, createMutationAuditContext } from '../../modules/audit/audit'
 import { shouldEvaluateAllPlanningHistoryScopes } from './planning-access'
-import { readPlanningEntityAuditScopes } from './planning-entity-audit'
+import {
+  readPlanningEntityAuditScopes,
+  redactPlanningEntityAuditReferences,
+} from './planning-entity-audit'
 
 /**
  * Creates one stored Planning entity audit event.
@@ -66,4 +69,21 @@ test('loads every Enterprise Project scope for Planning entity activity reads', 
   expect(await decide('/api/planning/entities/entity-1/activity')).toBe(true)
   expect(await decide('/api/planning/updates')).toBe(true)
   expect(await decide('/api/planning/entities/entity-1')).toBe(false)
+})
+
+test('hides references to Planning entities the reader cannot see', () => {
+  const event = createEntityEvent('moved', [
+    { field: 'parentId', before: 'hidden-portfolio', after: 'visible-roadmap' },
+    { field: 'title', before: 'Old', after: 'New' },
+  ], { teamId: 'team-1', sourceEntityId: 'hidden-source' })
+
+  const redacted = redactPlanningEntityAuditReferences(event, new Set(['visible-roadmap']))
+
+  expect(redacted.changes).toEqual([
+    { field: 'parentId', before: '[REDACTED]', after: 'visible-roadmap', redacted: true },
+    { field: 'title', before: 'Old', after: 'New' },
+  ])
+  expect(redacted.metadata).toEqual({ teamId: 'team-1' })
+  // The stored event is not changed.
+  expect(event.metadata).toEqual({ teamId: 'team-1', sourceEntityId: 'hidden-source' })
 })

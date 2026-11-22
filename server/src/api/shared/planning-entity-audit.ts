@@ -1,4 +1,5 @@
 import {
+  AUDIT_REDACTED_VALUE,
   type AuditEventPage,
   type AuditEventV1,
   createAuditFieldChanges,
@@ -110,6 +111,7 @@ export function createPlanningEntityAuditEvent(
       ...(entity.teamId === undefined ? {} : { teamId: entity.teamId }),
       ...(entity.projectId === undefined ? {} : { projectId: entity.projectId }),
       ...(result.sourceEntityId === undefined ? {} : { sourceEntityId: result.sourceEntityId }),
+      ...(result.previousCycleId === undefined ? {} : { previousCycleId: result.previousCycleId }),
       ...(result.movedDescendantCount === undefined
         ? {}
         : { movedDescendantCount: result.movedDescendantCount }),
@@ -208,4 +210,46 @@ export function readPlanningEntityAuditScopes(
     else previous[change.field] = change.before
   }
   return moved ? [current, previous] : [current]
+}
+
+/** Change fields whose values name another Planning entity. */
+const PLANNING_ENTITY_AUDIT_REFERENCE_FIELDS = new Set(['parentId', 'nextCycleId'])
+
+/** Metadata fields whose values name another Planning entity. */
+const PLANNING_ENTITY_AUDIT_REFERENCE_METADATA = ['sourceEntityId', 'previousCycleId'] as const
+
+/**
+ * Hides references to Planning entities the reader cannot see, as the Planning snapshot does.
+ *
+ * A reference change keeps its value only when the named entity is visible to the reader; any
+ * other value is replaced by the audit redaction marker. Reference metadata naming a hidden
+ * entity is removed.
+ *
+ * @param event - Stored Planning entity audit event the reader may read.
+ * @param visibleEntityIds - Entities in the reader's filtered Planning snapshot.
+ * @returns A copy of the event without hidden entity references.
+ */
+export function redactPlanningEntityAuditReferences(
+  event: AuditEventV1,
+  visibleEntityIds: ReadonlySet<string>,
+): AuditEventV1 {
+  /** Reports whether a reference value may be shown. */
+  const visible = (value: unknown) => typeof value === 'string' && visibleEntityIds.has(value)
+  const changes = event.changes.map((change) => {
+    if (!PLANNING_ENTITY_AUDIT_REFERENCE_FIELDS.has(change.field)) return change
+    const hideBefore = change.before !== undefined && !visible(change.before)
+    const hideAfter = change.after !== undefined && !visible(change.after)
+    if (!hideBefore && !hideAfter) return change
+    return {
+      ...change,
+      ...(hideBefore ? { before: AUDIT_REDACTED_VALUE } : {}),
+      ...(hideAfter ? { after: AUDIT_REDACTED_VALUE } : {}),
+      redacted: true,
+    }
+  })
+  const metadata = event.metadata === undefined ? undefined : { ...event.metadata }
+  for (const field of PLANNING_ENTITY_AUDIT_REFERENCE_METADATA) {
+    if (metadata && metadata[field] !== undefined && !visible(metadata[field])) delete metadata[field]
+  }
+  return { ...event, changes, ...(metadata === undefined ? {} : { metadata }) }
 }

@@ -284,4 +284,28 @@ describe('Planning edits while Work Items change', () => {
       },
     })).rejects.toMatchObject({ status: 409, code: 'PlanningRevisionConflict' })
   })
+
+  test('records the next Cycle and a completing rollover through an audit transaction', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await seedPlanning(client)
+    const prepared: PlanningEntityTransactionResult[] = []
+    const transaction: PlanningMutationTransaction<PlanningEntityTransactionResult> = {
+      rebaseSafe: true,
+      async prepare(result) {
+        prepared.push(result)
+        return { transactWriteItem: { Put: { TableName: 'AuditEventsTable', Item: { revision: result.revision } } } }
+      },
+    }
+
+    const created = await client.createNextCycle(WORKSPACE_ID, 'cycle-1', { expectedRevision: 4 }, WORK_ITEMS, transaction)
+    await client.rolloverCycle(WORKSPACE_ID, 'cycle-1', {
+      expectedRevision: created.planning.revision,
+      targetCycleId: created.cycleId,
+    }, WORK_ITEMS, transaction)
+
+    expect(prepared).toMatchObject([
+      { action: 'created', entity: { id: created.cycleId, type: 'cycle' }, previousCycleId: 'cycle-1' },
+      { action: 'updated', entity: { id: 'cycle-1', status: 'completed' }, previous: { status: 'planned' } },
+    ])
+  })
 })

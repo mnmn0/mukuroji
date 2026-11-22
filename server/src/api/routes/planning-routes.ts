@@ -108,6 +108,7 @@ import {
   createPlanningEntityAuditTransaction,
   PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
   readPlanningEntityAuditScopes,
+  redactPlanningEntityAuditReferences,
   toPlanningEntityActivityPageView,
 } from '../shared/planning-entity-audit'
 import {
@@ -4188,8 +4189,8 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         principal.directoryId,
         await readPlanningWorkItemState(principal),
       )
-      const visible = filterPlanningSnapshotForPrincipal(principal, snapshot).entities
-        .some((entity) => entity.id === entityId)
+      const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
+      const visible = visibleSnapshot.entities.some((entity) => entity.id === entityId)
       if (!visible) {
         const archived = snapshot.entities.some((entity) => entity.id === entityId)
           ? undefined
@@ -4206,10 +4207,11 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           }),
         )
         const scopeAuthorizations = new Map<string, Promise<void>>()
+        const visibleEntityIds = new Set(visibleSnapshot.entities.map((entity) => entity.id))
         const events = []
         for (const event of page.events) {
           if (await canReadPlanningEntityAuditEvent(principal, event, scopeAuthorizations)) {
-            events.push(event)
+            events.push(redactPlanningEntityAuditReferences(event, visibleEntityIds))
           }
         }
         return c.json(toPlanningEntityActivityPageView({ ...page, events }))
@@ -4959,6 +4961,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         cycleId,
         input,
         workItemState,
+        createPlanningEntityRouteAuditTransaction(c, principal, { cycleId, ...input }),
       )
       return c.json({
         cycleId: response.cycleId,
@@ -5062,6 +5065,7 @@ export function registerPlanningRoutes(routeApp: Hono): void {
         cycleId,
         input,
         workItemState,
+        createPlanningEntityRouteAuditTransaction(c, principal, { cycleId, ...input }),
       )
       return c.json({
         ...response,

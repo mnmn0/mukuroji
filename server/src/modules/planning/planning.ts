@@ -379,6 +379,8 @@ export type PlanningEntityTransactionResult = {
   previous?: PlanningEntityTransactionSnapshot
   /** Entity copied by a duplication. */
   sourceEntityId?: string
+  /** Cycle whose cadence created this Cycle as its next Cycle. */
+  previousCycleId?: string
   /** Active descendants whose Team / Project scope followed a move. */
   movedDescendantCount?: number
 }
@@ -415,7 +417,8 @@ export type PlanningMutationTransaction<
   /**
    * Whether `prepare` builds an independent contribution for each commit attempt, so the mutation
    * may still be rebased over canonical Work Item writes. Only an append-only audit write without a
-   * durable receipt qualifies: a receipt is prepared for one exact revision.
+   * durable receipt qualifies: a receipt is prepared for one exact revision. Such a transaction is
+   * also skipped by a step that changes no entity, such as an intermediate Cycle rollover batch.
    */
   rebaseSafe?: boolean
 }
@@ -735,6 +738,7 @@ export type PlanningClient = {
     sourceCycleId: string,
     input: CycleRolloverInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** Cadence に従って次の Cycle を作ります。 */
   createNextCycle(
@@ -742,6 +746,7 @@ export type PlanningClient = {
     sourceCycleId: string,
     input: CreateNextCycleInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ): Promise<PlanningMutationResponse & { cycleId: string }>
   /** 複数の Work Item を Cycle に入れる、または Cycle から外します。 */
   setCycleWorkItems(
@@ -2488,6 +2493,7 @@ abstract class BasePlanningClient implements PlanningClient {
     sourceCycleId: string,
     input: CycleRolloverInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ) {
     // Where every canonical Work Item write advances META, the caller's expectedRevision CAS already
     // fails if a linked Work Item changed after the caller's snapshot. Elsewhere each Work Item the
@@ -2598,8 +2604,17 @@ abstract class BasePlanningClient implements PlanningClient {
         retainedWorkItemIds: retainedWorkItemIds.sort(),
         remainingWorkItemCount,
         workItemConditions,
+        ...(completesSource
+          ? {
+              entityTransactionSource: {
+                action: 'updated' as const,
+                entity: structuredClone(nextSource),
+                previous: structuredClone(source),
+              },
+            }
+          : {}),
       }
-    })
+    }, [], transaction)
   }
 
   /** Cadence に従って次の Cycle を作り、元の Cycle に `nextCycleId` を記録します。 */
@@ -2608,6 +2623,7 @@ abstract class BasePlanningClient implements PlanningClient {
     sourceCycleId: string,
     input: CreateNextCycleInput,
     workItemState: PlanningWorkItemState,
+    transaction?: PlanningMutationTransaction<PlanningEntityTransactionResult>,
   ) {
     const normalizedSourceId = readIdentifier(sourceCycleId, 'Cycle ID')
     const nextCycleId = createNextCycleId(normalizedSourceId)
@@ -2653,8 +2669,15 @@ abstract class BasePlanningClient implements PlanningClient {
       }
       next.entities = [...next.entities, created]
       validatePlanningState(next)
-      return { state: next }
-    })
+      return {
+        state: next,
+        entityTransactionSource: {
+          action: 'created',
+          entity: structuredClone(created),
+          previousCycleId: source.id,
+        },
+      }
+    }, [], transaction)
     return { ...response, cycleId: nextCycleId }
   }
 
@@ -2932,7 +2955,9 @@ abstract class BasePlanningClient implements PlanningClient {
             update: structuredClone(result.publishedUpdate),
             notification: requirePublishedUpdateNotification(result.publishedUpdateNotification),
           }
-    const transactionContribution = transaction
+    // An audit-only transaction has nothing to record for a step that changes no entity.
+    const transactionContribution = transaction &&
+        !(transactionResult === undefined && transaction.rebaseSafe === true)
       ? await preparePlanningMutationTransactionContribution(
           transaction,
           transactionResult,
