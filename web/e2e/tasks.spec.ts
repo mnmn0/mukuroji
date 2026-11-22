@@ -1075,6 +1075,13 @@ async function mockAuthenticatedTaskPage(
   })
 
   await page.route('**/api/work-items**', async (route) => {
+    if (new URL(route.request().url()).pathname.endsWith('/work-items/key-prefixes')) {
+      const keys = [...Object.values(taskResponsesByProject).flat(), ...Object.values(teamIssuesByTeam).flat()]
+        .map((issue) => issue.key)
+        .filter((key): key is string => typeof key === 'string')
+      await route.fulfill({ json: { prefixes: [...new Set(keys.map((key) => key.replace(/-\d+$/u, '')))].sort() } })
+      return
+    }
     requestCounts.workspaceWorkItems += 1
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
