@@ -116,7 +116,7 @@ import {
   createTeamIssuesPath,
   type PlanningViewId,
 } from '../../shared/routing/paths'
-import { createPlanningProjectGanttPath } from '../../planning/model/navigation'
+import { createProjectGanttTaskViewPath } from '../../task-views/model/taskViewUrlState'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -761,7 +761,7 @@ export function PlanningPage() {
             createProjectOverviewPath(project.projectId, project.teamId),
           )}
           onOpenProjectGantt={(project) => navigate(
-            createPlanningProjectGanttPath(project.projectId, project.teamId),
+            createProjectGanttTaskViewPath(project.projectId, project.teamId),
           )}
           onCreateEntity={canManagePlanning && snapshot && accessToken
             ? (input) => {

@@ -6,7 +6,7 @@ import { type TeamIssue } from '../api'
 import { type ProjectDirectoryTeam } from '../../projects/api'
 import { TaskWorkItemTypeBadge } from '../../tasks/ui/TaskViewPrimitives'
 import { TaskViewPrintButtons } from '../../tasks/ui/TaskViewPrintButtons'
-import { useTaskViewTablePrint } from '../../tasks/ui/taskViewPrint'
+import { useTaskViewTablePrint } from '../../shared/ui/viewPrint'
 import { ShowMoreItemsButton } from '../../shared/ui/ShowMoreItemsButton'
 import { useIncrementalRender } from '../../shared/ui/useIncrementalRender'
 import {

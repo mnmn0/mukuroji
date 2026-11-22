@@ -10,11 +10,11 @@ import { FocusPage } from '../src/pages/workspace/FocusPage'
 import { InboxPage } from '../src/pages/workspace/InboxPage'
 import { MyTasksPage } from '../src/pages/workspace/MyTasksPage'
 import { PlanningPage } from '../src/pages/workspace/PlanningPage'
+import { resolvePlanningProjectNavigationPath } from '../src/planning/model/navigation'
 import {
-  createPlanningProjectGanttPath,
-  resolvePlanningProjectNavigationPath,
-} from '../src/planning/model/navigation'
-import { parseTaskViewUrlState } from '../src/task-views/model/taskViewUrlState'
+  createProjectGanttTaskViewPath,
+  parseTaskViewUrlState,
+} from '../src/task-views/model/taskViewUrlState'
 import { ProjectsPage } from '../src/pages/workspace/ProjectsPage'
 import { ReportsPage } from '../src/pages/workspace/ReportsPage'
 import { SettingsPage } from '../src/pages/workspace/SettingsPage'
@@ -353,7 +353,7 @@ describe('Analytics report path', () => {
 
 describe('Planning Project Gantt path', () => {
   test('opens a Project Gantt chart through a temporary task-view layout override', () => {
-    const path = createPlanningProjectGanttPath('unique/project', 'core/team')
+    const path = createProjectGanttTaskViewPath('unique/project', 'core/team')
     const [pathname, query] = path.split('?')
     expect(pathname).toBe('/projects/unique%2Fproject/issues')
     const searchParams = new URLSearchParams(query)

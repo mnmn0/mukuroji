@@ -1,5 +1,5 @@
 import type { MessageKey } from '../../shared/i18n/i18n'
-import { taskViewPrintPapers, type TaskViewPrintPaper } from './taskViewPrint'
+import { taskViewPrintPapers, type TaskViewPrintPaper } from '../../shared/ui/viewPrint'
 
 /** Props for the print buttons of a table view. */
 type TaskViewPrintButtonsProps = {

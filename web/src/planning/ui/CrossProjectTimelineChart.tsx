@@ -10,7 +10,7 @@ import {
   taskViewPrintableWidth,
   taskViewPrintPapers,
   type TaskViewPrintPaper,
-} from '../../tasks/ui/taskViewPrint'
+} from '../../shared/ui/viewPrint'
 import {
   CROSS_PROJECT_TIMELINE_ENTITY_ROW_HEIGHT,
   CROSS_PROJECT_TIMELINE_GROUP_ROW_HEIGHT,
