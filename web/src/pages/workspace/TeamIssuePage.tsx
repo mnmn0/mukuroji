@@ -27,6 +27,7 @@ import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessi
 import { clearAuthSession, getAuthSession } from '../../auth/session'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
+import { loadTeamIssues } from '../../issues/queries/scopedWorkItemLoader'
 import { readWorkItemArchiveFailureMessageKey } from '../../bulk-operations/model/workItemArchive'
 import { applyWorkItemArchive } from '../../bulk-operations/mutations/workItemArchive'
 import { ArchivedWorkItemsPanelContainer } from '../../issues/ui/ArchivedWorkItemsPanelContainer'
@@ -35,6 +36,7 @@ import { type FileArtifactScope, useFileArtifacts } from '../../files/mutations/
 import { createTranslator, getInitialLocale, type Locale } from '../../shared/i18n/i18n'
 import {
   createTeamIssue,
+  getTeamIssueDetail,
   TeamIssuesApiError,
   type CreateTeamIssueInput,
   type TeamIssue,
@@ -415,11 +417,16 @@ export function TeamIssuePage() {
   const scheduleMutations = createWorkItemListScheduleMutations({
     accessToken,
     guardEnterpriseSession,
+    mutatePlanning,
+    mutateSelectedDetail: mutateIssueDetail,
     mutateTasks: mutateIssues,
     mutationRequestRunner,
     onBackgroundRefreshError: (error) => setAuthenticatedApiError(() => error),
-    revalidatePlanning: () => mutatePlanning(),
-    mutateSelectedDetail: mutateIssueDetail,
+    // Archived Work Items are read too, as the route's list query does.
+    readTasks: (token) => loadTeamIssues(teamId, token, true),
+    readSelectedDetail: async (token) => resolvedSelectedIssueId
+      ? getTeamIssueDetail(teamId, resolvedSelectedIssueId, token)
+      : undefined,
     t,
   })
   const detailErrorMessage = detailError

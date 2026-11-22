@@ -1,5 +1,6 @@
 import type {
   CanonicalWorkItem,
+  PlanningSnapshot,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
@@ -10,10 +11,15 @@ import {
   TeamIssuesApiError,
   type TeamIssueDetail,
 } from '../../issues/api'
+import { getPlanningSnapshot } from '../../planning/api/snapshot'
 import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { applyConfirmedSchedulesToTasks } from '../model/scheduleConfirmation'
-import { revalidateScheduleConfirmationCachesBestEffort } from './scheduleConfirmationCache'
+import { assertConfirmedScheduleRevisionsObserved } from './createTaskScheduleMutationController'
+import {
+  refreshScheduleConfirmationCache,
+  revalidateScheduleConfirmationCachesBestEffort,
+} from './scheduleConfirmationCache'
 
 /** Dependencies of the schedule mutations used by the Team Work Item screen and My Tasks. */
 export type WorkItemListScheduleMutationOptions = {
@@ -25,10 +31,17 @@ export type WorkItemListScheduleMutationOptions = {
   mutationRequestRunner: MutationRequestRunner
   /** Revalidates or updates the Work Item list shown by the route. */
   mutateTasks: KeyedMutator<CanonicalWorkItem[]>
+  /**
+   * Reads the route's Work Item list from its backing endpoint. The read rejects on failure, unlike
+   * SWR's no-argument `mutate()`, so a failed refresh after a confirmation is retried and reported.
+   */
+  readTasks: (accessToken: string) => Promise<CanonicalWorkItem[]>
   /** Revalidates or updates the selected Work Item detail, when the route shows one. */
   mutateSelectedDetail?: KeyedMutator<TeamIssueDetail>
-  /** Revalidates the Planning snapshot, when the route reads one. */
-  revalidatePlanning?: () => Promise<unknown>
+  /** Reads the selected Work Item detail from its endpoint; resolves nothing without a selection. */
+  readSelectedDetail?: (accessToken: string) => Promise<TeamIssueDetail | undefined>
+  /** Updates the Planning snapshot, when the route reads one. */
+  mutatePlanning?: KeyedMutator<PlanningSnapshot>
   /** Observes background refresh errors. */
   onBackgroundRefreshError: (error: unknown) => void
   /** Resolves localized fallback messages. */
@@ -64,11 +77,13 @@ export type WorkItemListScheduleMutations = {
 export function createWorkItemListScheduleMutations({
   accessToken,
   guardEnterpriseSession,
+  mutatePlanning,
+  mutateSelectedDetail,
   mutateTasks,
   mutationRequestRunner,
   onBackgroundRefreshError,
-  mutateSelectedDetail,
-  revalidatePlanning,
+  readSelectedDetail,
+  readTasks,
   t,
 }: WorkItemListScheduleMutationOptions): WorkItemListScheduleMutations {
   /** Throws the localized task mutation fallback when no session token is available. */
@@ -81,7 +96,7 @@ export function createWorkItemListScheduleMutations({
   const revalidateAll = () => Promise.all([
     mutateTasks(),
     mutateSelectedDetail?.(),
-    revalidatePlanning?.(),
+    mutatePlanning?.(),
   ])
 
   /** Validates one schedule operation against the observed revision. */
@@ -178,22 +193,63 @@ export function createWorkItemListScheduleMutations({
         { revalidate: false },
       )
     }
+    /** Fetches and publishes the list only after it observes the committed revisions it lists. */
+    const refreshTasks = () => refreshScheduleConfirmationCache(
+      () => guardEnterpriseSession(readTasks(token)),
+      (tasks) => assertConfirmedScheduleRevisionsObserved(
+        tasks,
+        // A cascade can reach Work Items this list does not show, such as another person's.
+        response.workItems.filter((item) => tasks.some((listed) =>
+          listed.teamId === item.teamId && listed.id === item.id
+        )),
+        'Work Item list',
+      ),
+      (tasks) => mutateTasks(tasks, { revalidate: false }),
+    )
+    /** Fetches and publishes the selected detail only after it observes a matching commit. */
+    const refreshSelectedDetail = async () => {
+      if (!readSelectedDetail || !mutateSelectedDetail) return
+      await refreshScheduleConfirmationCache(
+        () => guardEnterpriseSession(readSelectedDetail(token)),
+        (detail) => {
+          if (!detail) return
+          assertConfirmedScheduleRevisionsObserved(
+            [detail.issue],
+            response.workItems.filter((item) =>
+              item.teamId === detail.issue.teamId && item.id === detail.issue.id
+            ),
+            'selected Work Item detail',
+          )
+        },
+        (detail) => detail ? mutateSelectedDetail(detail, { revalidate: false }) : Promise.resolve(),
+      )
+    }
+    /** Fetches and publishes a complete, internally consistent Planning snapshot. */
+    const refreshPlanning = async () => {
+      if (!mutatePlanning) return
+      await refreshScheduleConfirmationCache(
+        () => guardEnterpriseSession(getPlanningSnapshot(token)),
+        (planning) => assertConfirmedScheduleRevisionsObserved(
+          planning.workItems,
+          response.workItems,
+          'Planning snapshot',
+        ),
+        (planning) => mutatePlanning(planning, { revalidate: false }),
+      )
+    }
     void revalidateScheduleConfirmationCachesBestEffort([
       {
         preserveConfirmedState: preserveConfirmedTasks,
-        refresh: () => mutateTasks(),
+        refresh: refreshTasks,
       },
       {
         preserveConfirmedState: preserveConfirmedSelectedDetail,
-        refresh: async () => {
-          await mutateSelectedDetail?.()
-        },
+        refresh: refreshSelectedDetail,
       },
       {
+        // A partial Planning patch would mix new Work Items with stale summaries.
         preserveConfirmedState: async () => undefined,
-        refresh: async () => {
-          await revalidatePlanning?.()
-        },
+        refresh: refreshPlanning,
       },
     ], onBackgroundRefreshError)
 
