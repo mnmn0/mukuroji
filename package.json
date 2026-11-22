@@ -16,6 +16,7 @@
     "dev:down": "docker compose down",
     "local:setup": "bun scripts/local-env.ts",
     "local:setup:test": "bun test scripts/local-env.test.ts",
+    "local:files:scan": "bun --env-file=.floci/generated/services.env server/scripts/local-files/simulate-malware-scan.ts",
     "floci:up": "sh floci/up.sh",
     "floci:up:lambda": "FLOCI_ENABLE_LAMBDA=1 sh floci/up.sh",
     "floci:tables": "bun --filter cdk floci:tables",
