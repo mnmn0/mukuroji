@@ -61,6 +61,7 @@ import {
   selectAnalyticsPeriodPreset,
   type AnalyticsPeriodCalendar,
 } from '../model/periodPresets'
+import { mergeAnalyticsAssigneeDraft } from '../model/assigneeFilter'
 import { listAnalyticsScheduleWeekdays } from '../model/scheduleWeekdays'
 import { readRecord } from '../../shared/api/jsonValidation'
 import { isAnalyticsFlowVisualization, type AnalyticsFlowVisualization } from '../model/flowChart'
@@ -1010,16 +1011,12 @@ function AnalyticsFilterToolbar({
   const otherAssigneeIds = members.length > 0
     ? filter.assigneeUserIds?.filter((id) => !memberIds.has(id)) ?? []
     : filter.assigneeUserIds ?? []
-  // `undefined` keeps every assignee and `[]` keeps none, as in the other multi-select filters.
   const assigneeDraft = useDebouncedDraft(
     otherAssigneeIds.join(', '),
-    (value) => {
-      const typed = splitValues(value) ?? []
+    (value, editedFrom) => {
       onFilterChange?.({
         ...filter,
-        assigneeUserIds: filter.assigneeUserIds === undefined && typed.length === 0
-          ? undefined
-          : [...new Set([...pickedAssigneeIds, ...typed])],
+        assigneeUserIds: mergeAnalyticsAssigneeDraft(filter.assigneeUserIds, pickedAssigneeIds, value, editedFrom),
       })
     },
   )
@@ -3261,13 +3258,22 @@ function formatCustomFieldFilterValue(
   return Array.isArray(value) ? value.join(', ') : String(value ?? '')
 }
 
+/**
+ * Keeps a text input's draft and commits it after the user pauses typing.
+ *
+ * @param sourceValue - Value shown while the user is not editing.
+ * @param onCommit - Receives the draft and the source value the user started editing from.
+ * @param delayMilliseconds - Pause before the draft is committed.
+ * @returns The draft value with update and flush handlers.
+ */
 function useDebouncedDraft(
   sourceValue: string,
-  onCommit: (value: string) => void,
+  onCommit: (value: string, editedFrom: string) => void,
   delayMilliseconds = 400,
 ) {
   const [value, setValue] = useState(sourceValue)
   const valueRef = useRef(sourceValue)
+  const editedFromRef = useRef(sourceValue)
   const isDirtyRef = useRef(false)
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const commitRef = useRef(onCommit)
@@ -3279,6 +3285,7 @@ function useDebouncedDraft(
   useEffect(() => {
     if (!isDirtyRef.current) {
       valueRef.current = sourceValue
+      editedFromRef.current = sourceValue
       setValue(sourceValue)
     }
   }, [sourceValue])
@@ -3296,7 +3303,7 @@ function useDebouncedDraft(
       timeoutRef.current = undefined
     }
     isDirtyRef.current = false
-    commitRef.current(valueRef.current)
+    commitRef.current(valueRef.current, editedFromRef.current)
   }, [])
 
   const update = useCallback((nextValue: string) => {
@@ -3309,7 +3316,7 @@ function useDebouncedDraft(
     timeoutRef.current = setTimeout(() => {
       timeoutRef.current = undefined
       isDirtyRef.current = false
-      commitRef.current(nextValue)
+      commitRef.current(nextValue, editedFromRef.current)
     }, delayMilliseconds)
   }, [delayMilliseconds])
 
