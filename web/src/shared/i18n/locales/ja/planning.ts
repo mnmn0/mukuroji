@@ -311,4 +311,6 @@ export const planningMessages = {
   'planning.activity.value.off': 'オフ',
   'planning.activity.before': '変更前:',
   'planning.activity.after': '変更後:',
+  'planning.cycleWeekStart.error': 'Workspace の週の開始曜日を取得できませんでした。新しい Cycle の日付は月曜始まりで提案しています。',
+  'planning.cycleWeekStart.staleError': 'Workspace の週の開始曜日を読み直せませんでした。新しい Cycle の日付は前回読み込んだ設定で提案しています。',
 } as const

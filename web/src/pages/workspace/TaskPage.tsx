@@ -2084,6 +2084,7 @@ export function TaskPage() {
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}
       workspaceCalendarPolicy={workspaceCalendarPolicy}
+      workspaceCalendarPeriods={workspaceCalendar.settings}
       workspaceCalendarErrorMessage={workspaceCalendarErrorKey ? t(workspaceCalendarErrorKey) : undefined}
       onRetryWorkspaceCalendar={workspaceCalendar.retry}
       onAuthenticatedApiError={(error) => {

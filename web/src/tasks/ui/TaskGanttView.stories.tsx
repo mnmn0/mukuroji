@@ -104,6 +104,30 @@ export const WorkingCalendar: Story = {
   },
 }
 
+/**
+ * Workspace whose week starts on Sunday and whose fiscal year starts in April: day columns mark
+ * each Sunday as a week start, and the quarter scale counts quarters from April.
+ */
+export const FiscalYearAndWeekStart: Story = {
+  args: {
+    calendarPeriods: { fiscalYearStartMonth: 4, weekStartDay: 0 },
+    display: { isCompact: false, scale: 'day', showsProgressLine: false },
+  },
+  render: function FiscalYearAndWeekStartStory(args) {
+    const [display, setDisplay] = useState(args.display)
+    return <TaskGanttView {...args} display={display} onDisplayChange={setDisplay} />
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const header = (date: string) =>
+      canvasElement.querySelector(`[role="columnheader"][aria-label="${date}"]`)
+    await expect(header('2026-06-07')).toHaveAttribute('data-week-start')
+    await expect(header('2026-06-08')).not.toHaveAttribute('data-week-start')
+    await userEvent.selectOptions(canvas.getByTestId('task-gantt-scale'), 'quarter')
+    await expect(canvas.getByText('FY2026 Q1')).toBeVisible()
+  },
+}
+
 /** Planned bars with the recorded actual bars below them, one completed late and one in progress. */
 export const PlanAndActual: Story = {
   args: {
