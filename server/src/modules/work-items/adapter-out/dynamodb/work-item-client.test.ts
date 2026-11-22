@@ -2849,6 +2849,12 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
       'demo@example.com',
     )
 
+    // DynamoDB rejects a transaction with two operations on one item.
+    const itemKeys = (transactItems ?? []).map((item) => {
+      const keyed = item.ConditionCheck ?? item.Update ?? item.Delete
+      return JSON.stringify(keyed ? [keyed.TableName, keyed.Key] : [item.Put?.TableName, item.Put?.Item])
+    })
+    expect(new Set(itemKeys).size).toBe(itemKeys.length)
     // The trailing key reservation and member index row are covered by the creation tests.
     expect(transactItems?.slice(2, -2)).toMatchObject([
       {
@@ -2860,19 +2866,6 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
           },
           ExpressionAttributeValues: expect.objectContaining({
             ':authorization2': 7,
-          }),
-        }),
-      },
-      {
-        ConditionCheck: expect.objectContaining({
-          TableName: 'PlanningTable',
-          Key: {
-            workspaceId: 'FENCE#workspace-1',
-            recordKey: 'META',
-          },
-          ConditionExpression: expect.stringContaining('attribute_not_exists'),
-          ExpressionAttributeValues: expect.objectContaining({
-            ':authorization1': 0,
           }),
         }),
       },
@@ -2899,8 +2892,15 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
           UpdateExpression: expect.stringContaining(
             'ADD #revision :increment, #sourceRevisionCount :increment',
           ),
+          // The Planning fence is part of the increment, because DynamoDB rejects a second
+          // operation on the same row in one transaction.
+          ConditionExpression: expect.stringMatching(/\) AND \(.*attribute_not_exists/u),
           ExpressionAttributeNames: expect.objectContaining({
             '#sourceRevisionCount': 'sourceRevisionCount',
+          }),
+          ExpressionAttributeValues: expect.objectContaining({
+            ':increment': 1,
+            ':authorization1': 0,
           }),
         }),
       },
@@ -3088,9 +3088,11 @@ test('DynamoDB Work Item create and update classify snapshot Planning races', as
           if (command.constructor.name === 'TransactWriteCommand') {
             const transactItems = command.input.TransactItems as Array<{
               ConditionCheck?: { TableName?: string }
+              Update?: { TableName?: string }
             }>
+            // Creation checks the fence inside its Planning revision increment.
             planningConditionIndex = transactItems.findIndex((item) =>
-              item.ConditionCheck?.TableName === 'PlanningTable'
+              (item.ConditionCheck ?? item.Update)?.TableName === 'PlanningTable'
             )
             const error = new Error('Transaction was canceled.')
             error.name = 'TransactionCanceledException'

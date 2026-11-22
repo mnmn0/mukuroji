@@ -403,8 +403,9 @@ function toExportWorkItem(row: DeveloperExportRow) {
 function toMsProjectTask(row: DeveloperExportRow): MsProjectTaskInput {
   const { workItem } = row
   const schedule = workItem.schedule
+  // A due date is written as a finish without a start, so it re-imports as a due date.
   const dates = schedule.mode === 'due-date'
-    ? { startDate: schedule.dueDate, finishDate: schedule.dueDate }
+    ? { finishDate: schedule.dueDate }
     : schedule.mode === 'unscheduled'
       ? {}
       : { startDate: schedule.startDate, finishDate: schedule.endDate }
@@ -415,6 +416,7 @@ function toMsProjectTask(row: DeveloperExportRow): MsProjectTaskInput {
     ...(row.wbsNumber ? { wbsNumber: row.wbsNumber } : {}),
     outlineLevel: row.outlineLevel,
     ...dates,
+    ...(schedule.mode === 'milestone' ? { milestone: true } : {}),
     completed: workItem.statusCategory === 'completed',
     ownerUserId: workItem.assigneeUserId,
     contributors: row.contributors.flatMap((contributor) => contributor.memberUserId

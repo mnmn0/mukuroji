@@ -16,10 +16,11 @@ const members = [
 describe('Work Item import member matching', () => {
   test('reads members only when a row names a person by display name', () => {
     expect(namesImportMemberByDisplayName({ assigneeUserId: 'a@example.com' })).toBe(false)
-    expect(namesImportMemberByDisplayName({
+    const people = {
       assigneeUserId: 'a@example.com',
       contributorAssignments: [{ jobRoleId: 'designer' }, { memberUserId: 'Hanako' }],
-    })).toBe(true)
+    }
+    expect(namesImportMemberByDisplayName(people)).toBe(true)
   })
 
   test('matches e-mail addresses in lower case and unique display names without case or width', () => {

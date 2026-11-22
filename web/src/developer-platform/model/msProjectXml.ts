@@ -26,6 +26,8 @@ export type MsProjectTaskInput = {
   startDate?: string
   /** Last day, `YYYY-MM-DD`. */
   finishDate?: string
+  /** Whether the task is a milestone on its finish date. */
+  milestone?: boolean
   /** Whether the task is completed. */
   completed: boolean
   /** Accountable owner, written as the first assignment. */
@@ -189,7 +191,7 @@ export function createMsProjectXml(projectName: string, tasks: readonly MsProjec
       `<OutlineLevel>${task.outlineLevel}</OutlineLevel>`,
       task.startDate ? `<Start>${task.startDate}T08:00:00</Start>` : '',
       task.finishDate ? `<Finish>${task.finishDate}T17:00:00</Finish>` : '',
-      `<Milestone>0</Milestone>`,
+      `<Milestone>${task.milestone ? 1 : 0}</Milestone>`,
       `<PercentComplete>${task.completed ? 100 : 0}</PercentComplete>`,
       task.notes ? `<Notes>${escapeXml(task.notes)}</Notes>` : '',
       ...links,
@@ -217,11 +219,14 @@ export function createMsProjectXml(projectName: string, tasks: readonly MsProjec
  * @param startDate - First day, if any.
  * @param finishDate - Last day, if any.
  * @param milestone - Whether the task is a milestone.
- * @returns A due-date or date-range schedule, or an unscheduled one without dates.
+ * @returns A milestone, date-range, or (without a start) due-date schedule, or an unscheduled one
+ *   without dates.
  */
 function readSchedule(startDate: string, finishDate: string, milestone: boolean) {
   if (!isIsoDate(finishDate)) return { mode: 'unscheduled' }
-  if (milestone || !isIsoDate(startDate) || startDate === finishDate) return { mode: 'due-date', dueDate: finishDate }
+  if (milestone) return { mode: 'milestone', startDate: finishDate, endDate: finishDate, durationDays: 0 }
+  // A dependency needs both dates, so a task with a start keeps it as a range.
+  if (!isIsoDate(startDate)) return { mode: 'due-date', dueDate: finishDate }
   return { mode: 'date-range', startDate, endDate: finishDate }
 }
 

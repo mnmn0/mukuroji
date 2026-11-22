@@ -193,6 +193,33 @@ function createPlanningRevisionIncrementTransactionItem(
   }
 }
 
+/**
+ * Adds a Planning authorization fence to the Planning revision increment of the same transaction.
+ *
+ * DynamoDB allows one operation per item in a transaction, so the fence cannot stay a separate
+ * ConditionCheck on the row that the increment updates. Both conditions must hold for the write.
+ *
+ * @param increment - Planning revision increment, when Planning is configured.
+ * @param fence - Planning fence observed during authorization, if any.
+ * @returns The increment, guarded by the fence when one is given.
+ */
+function withPlanningFenceCondition(
+  increment: NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined,
+  fence: WorkItemAuthorizationConditionEntry | undefined,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined {
+  const update = increment?.Update
+  const check = fence?.transactWriteItem.ConditionCheck
+  if (!update || !check) return increment
+  return {
+    Update: {
+      ...update,
+      ConditionExpression: `(${update.ConditionExpression}) AND (${check.ConditionExpression})`,
+      ExpressionAttributeNames: { ...update.ExpressionAttributeNames, ...check.ExpressionAttributeNames },
+      ExpressionAttributeValues: { ...update.ExpressionAttributeValues, ...check.ExpressionAttributeValues },
+    },
+  }
+}
+
 /** Authorization generations observed before a canonical Work Item mutation. */
 export type WorkItemAuthorizationSnapshot = {
   /** Owning Workspace identifier. */
@@ -2445,15 +2472,27 @@ export class DynamoDbTeamIssuesClient {
     const newWorkItemProjectRowKey = newWorkItemProjectConditionCheck
       ? readConditionCheckRowKey({ kind: 'workspace-member', transactWriteItem: newWorkItemProjectConditionCheck })
       : undefined
-    const authorizationConditionEntries = mergeAuthorizationConditionEntries(
+    const fencedAuthorizationConditionEntries = mergeAuthorizationConditionEntries(
       createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
       createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
     ).filter((entry) =>
       newWorkItemProjectRowKey === undefined || readConditionCheckRowKey(entry) !== newWorkItemProjectRowKey
     )
+    // Creation increments the Planning revision row, and DynamoDB rejects a second operation on
+    // that row, so a Planning fence moves into the increment's condition instead.
+    const planningFenceEntry = this.planningTableName
+      ? fencedAuthorizationConditionEntries.find((entry) =>
+        entry.kind === 'planning' &&
+        entry.transactWriteItem.ConditionCheck?.TableName === this.planningTableName
+      )
+      : undefined
+    const authorizationConditionEntries = fencedAuthorizationConditionEntries.filter((entry) =>
+      entry !== planningFenceEntry
+    )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
+    let requestConversionItemCount = 0
 
     try {
       const sourceRequestIssueId = sourceRequestId
@@ -2595,10 +2634,14 @@ export class DynamoDbTeamIssuesClient {
             now,
           )
         : []
-      const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
-        this.planningTableName,
-        directoryId,
-        now,
+      requestConversionItemCount = requestConversionItems.length
+      const planningRevisionMutation = withPlanningFenceCondition(
+        createPlanningRevisionIncrementTransactionItem(
+          this.planningTableName,
+          directoryId,
+          now,
+        ),
+        planningFenceEntry,
       )
       await this.documentClient.send(
         new TransactWriteCommand({
@@ -2666,6 +2709,14 @@ export class DynamoDbTeamIssuesClient {
         authorizationConditionStartIndex,
         authorizationConditionEntries,
       )
+      const planningRevisionMutationIndex =
+        authorizationConditionStartIndex +
+        authorizationConditionEntries.length +
+        (newWorkItemProjectConditionCheck ? 1 : 0) +
+        requestConversionItemCount
+      if (planningFenceEntry && isTransactionConditionalFailureAt(error, planningRevisionMutationIndex)) {
+        throwAuthorizationConditionFailureIfPresent(error, planningRevisionMutationIndex, [planningFenceEntry])
+      }
       if (
         newWorkItemProjectConditionCheck &&
         !isTransactionConditionalFailureAt(error, 0) &&

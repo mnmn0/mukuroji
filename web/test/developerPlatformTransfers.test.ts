@@ -246,10 +246,15 @@ describe('Developer Platform Work Item export', () => {
   test('reads working-day lag and date ranges from a MS Project file', () => {
     const rows = readMsProjectXml(createMsProjectXml('Plan', [
       { key: 'a', name: 'A', outlineLevel: 1, startDate: '2026-08-03', finishDate: '2026-08-07', completed: false, ownerUserId: 'u', contributors: [], dependencies: [] },
+      { key: 'b', name: 'One day', outlineLevel: 1, startDate: '2026-08-10', finishDate: '2026-08-10', completed: false, ownerUserId: 'u', contributors: [], dependencies: [] },
+      { key: 'c', name: 'Gate', outlineLevel: 1, startDate: '2026-08-11', finishDate: '2026-08-11', milestone: true, completed: false, ownerUserId: 'u', contributors: [], dependencies: [] },
     ]).replace('</Tasks>', '<Task><UID>9</UID><Name>B</Name><OutlineLevel>1</OutlineLevel><PredecessorLink><PredecessorUID>1</PredecessorUID><Type>3</Type><LinkLag>-4800</LinkLag><LagFormat>7</LagFormat></PredecessorLink></Task></Tasks>'))
 
     expect(rows.map((row) => [row.UID, row.Predecessors, row.Schedule])).toEqual([
       ['1', '', { mode: 'date-range', startDate: '2026-08-03', endDate: '2026-08-07' }],
+      // A one-day task with a start stays a range, so it can take part in a dependency.
+      ['2', '', { mode: 'date-range', startDate: '2026-08-10', endDate: '2026-08-10' }],
+      ['3', '', { mode: 'milestone', startDate: '2026-08-11', endDate: '2026-08-11', durationDays: 0 }],
       ['9', '1 SS -1', { mode: 'unscheduled' }],
     ])
     expect(() => readMsProjectXml('<Workbook/>')).toThrow('not MS Project XML')
