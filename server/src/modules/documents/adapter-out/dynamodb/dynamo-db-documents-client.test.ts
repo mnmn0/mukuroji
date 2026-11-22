@@ -2328,6 +2328,136 @@ test('hides an archived folder subtree from active and includeArchived detail re
   })).toMatchObject({ id: child.id, title: 'Child' })
 })
 
+test('checks the checklist items and notes turned into a completed Work Item', async () => {
+  const memory = createMemoryDocumentClient()
+  const client = createClient(memory)
+  const workItemId = 'team/team-a/issue/work-item-1'
+  const page = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'page',
+    scope: { type: 'workspace' },
+    title: 'Minutes',
+    blocks: [{
+      id: 'actions',
+      type: 'checklist',
+      items: [
+        { id: 'linked', text: 'Send the estimate', checked: false },
+        { id: 'other', text: 'Book the room', checked: false },
+      ],
+    }],
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: page.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: page.revision,
+      clientId: 'editor-1',
+      operations: [
+        {
+          type: 'upsert-relation',
+          operationId: 'link-item',
+          relation: {
+            id: 'checklist-item:actions:linked',
+            source: { kind: 'block', blockId: 'actions' },
+            target: { kind: 'work-item', workItemId },
+            createdAt: '2026-07-18T00:00:00.000Z',
+            createdByUserId: 'owner@example.com',
+          },
+        },
+        {
+          type: 'upsert-relation',
+          operationId: 'plain-link',
+          relation: {
+            id: 'plain-link',
+            source: { kind: 'block', blockId: 'actions' },
+            target: { kind: 'work-item', workItemId: 'team/team-a/issue/work-item-2' },
+            createdAt: '2026-07-18T00:00:00.000Z',
+            createdByUserId: 'owner@example.com',
+          },
+        },
+      ],
+    },
+  })
+  const whiteboard = await client.create({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    kind: 'whiteboard',
+    scope: { type: 'workspace' },
+    title: 'Retro',
+    whiteboard: {
+      objects: [{
+        id: 'note-1',
+        type: 'note',
+        text: 'Fix the flaky test',
+        bounds: { x: 0, y: 0, width: 200, height: 100 },
+        zIndex: 1,
+      }],
+      connectors: [],
+      frames: [],
+    },
+  })
+  await client.applyOperations({
+    workspaceId: 'workspace-1',
+    documentId: whiteboard.id,
+    access: ownerAccess,
+    input: {
+      baseRevision: whiteboard.revision,
+      clientId: 'editor-1',
+      operations: [{
+        type: 'upsert-relation',
+        operationId: 'link-note',
+        relation: {
+          id: 'whiteboard-note:note-1',
+          source: { kind: 'whiteboard-object', objectId: 'note-1' },
+          target: { kind: 'work-item', workItemId },
+          createdAt: '2026-07-18T00:00:00.000Z',
+          createdByUserId: 'owner@example.com',
+        },
+      }],
+    },
+  })
+
+  const reflected = await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  })
+
+  expect(reflected.updatedDocumentIds.toSorted()).toEqual([page.id, whiteboard.id].toSorted())
+  const updatedPage = await client.get({ workspaceId: 'workspace-1', documentId: page.id, access: ownerAccess })
+  expect(updatedPage).toMatchObject({
+    revision: page.revision + 2,
+    updatedByUserId: 'system:work-item-completion',
+    blocks: [{
+      id: 'actions',
+      items: [
+        { id: 'linked', checked: true },
+        { id: 'other', checked: false },
+      ],
+    }],
+  })
+  const updatedWhiteboard = await client.get({ workspaceId: 'workspace-1', documentId: whiteboard.id, access: ownerAccess })
+  expect(updatedWhiteboard).toMatchObject({
+    whiteboard: { objects: [{ id: 'note-1', done: true }] },
+  })
+
+  expect(await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId,
+    eventId: 'event-1',
+    actorId: 'system:work-item-completion',
+  })).toEqual({ updatedDocumentIds: [] })
+  expect(await client.reflectWorkItemCompletion({
+    workspaceId: 'workspace-1',
+    workItemId: 'team/team-a/issue/work-item-2',
+    eventId: 'event-2',
+    actorId: 'system:work-item-completion',
+  })).toEqual({ updatedDocumentIds: [] })
+})
+
 test('indexes Whiteboard work-item cards as transactional backlinks', async () => {
   const memory = createMemoryDocumentClient()
   const client = createClient(memory)

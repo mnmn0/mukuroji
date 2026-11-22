@@ -48,6 +48,8 @@ import {
 } from '../../../../infrastructure/aws/dynamodb-client'
 import type {
   ApplyDocumentOperationsRequest,
+  ReflectWorkItemCompletionRequest,
+  ReflectWorkItemCompletionResult,
   ChangeDocumentArchiveStateRequest,
   CreatedDocumentPublicShare,
   CreateDocumentCommentRequest,
@@ -118,6 +120,10 @@ import {
 } from '../../domain/document-limits'
 import { DocumentError } from '../../errors'
 import {
+  isWorkItemCompletionRelationId,
+  planWorkItemCompletionOperations,
+} from '../../domain/work-item-completion'
+import {
   resolveDocumentCapabilities,
   type DocumentAccessSubject,
 } from '../../domain/document-access'
@@ -135,6 +141,9 @@ import {
   createDocumentWorkspaceSearchBody,
 } from '../../../workspace-search'
 import { loadServerConfig } from '../../../../infrastructure/config/server-config'
+
+/** Most backlink pages read for one Work Item completion. */
+const DOCUMENT_WORK_ITEM_COMPLETION_MAX_BACKLINK_PAGES = 20
 
 /** Work Item backlink target fence の schema version です。 */
 const DOCUMENT_BACKLINK_TARGET_FENCE_SCHEMA_VERSION = 1
@@ -4111,6 +4120,157 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
           } satisfies DocumentBacklinkCursor)
         : undefined,
     }
+  }
+
+  /**
+   * Marks the checklist items and Whiteboard notes linked to a completed Work
+   * Item as done in every Document that turned them into that Work Item.
+   *
+   * This runs for the completion event, not for a viewer, so it reads the
+   * Work Item backlink rows without permission filtering. It only checks
+   * items and notes that a Document editor explicitly linked to the Work Item
+   * and never changes text, relations, or permissions. Archived Documents are
+   * left as they are. Each Document is updated in its own transaction with an
+   * optimistic revision check, so a concurrent edit is retried against the
+   * latest content.
+   *
+   * @param input - Workspace, completed Work Item, completion event, and actor.
+   * @returns IDs of the Documents that changed.
+   */
+  async reflectWorkItemCompletion(
+    input: ReflectWorkItemCompletionRequest,
+  ): Promise<ReflectWorkItemCompletionResult> {
+    await this.ensureTable()
+    validateCanonicalDocumentWorkItemId(input.workItemId, 'workItemId')
+    assertIdentifier(input.eventId, 'eventId')
+    assertIdentifier(input.actorId, 'actorId')
+    const documentIds = new Set<string>()
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    for (
+      let page = 0;
+      page < DOCUMENT_WORK_ITEM_COMPLETION_MAX_BACKLINK_PAGES;
+      page += 1
+    ) {
+      const result = await this.client.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': input.workspaceId,
+          ':prefix': backlinkPrefix('work-item', input.workItemId),
+        },
+        ExclusiveStartKey: exclusiveStartKey,
+        Limit: DOCUMENT_BACKLINK_MAX_PAGE_LIMIT,
+        ConsistentRead: true,
+      }))
+      for (const raw of result.Items ?? []) {
+        const relation: unknown = raw.relation
+        if (
+          typeof raw.documentId === 'string' &&
+          isRecord(relation) &&
+          typeof relation.id === 'string' &&
+          isWorkItemCompletionRelationId(relation.id)
+        ) {
+          documentIds.add(raw.documentId)
+        }
+      }
+      exclusiveStartKey = result.LastEvaluatedKey
+      if (exclusiveStartKey === undefined) break
+    }
+    const updatedDocumentIds: string[] = []
+    for (const documentId of documentIds) {
+      if (await this.reflectWorkItemCompletionInDocument(input, documentId)) {
+        updatedDocumentIds.push(documentId)
+      }
+    }
+    return { updatedDocumentIds }
+  }
+
+  /**
+   * Applies the completion to one Document, retrying on concurrent edits.
+   *
+   * @param input - Completion request.
+   * @param documentId - Document that links to the Work Item.
+   * @returns Whether the Document changed.
+   */
+  private async reflectWorkItemCompletionInDocument(
+    input: ReflectWorkItemCompletionRequest,
+    documentId: string,
+  ): Promise<boolean> {
+    for (let attempt = 0; attempt < DOCUMENT_CONDITIONAL_RETRY_LIMIT; attempt += 1) {
+      const row = await this.getDocumentRow(input.workspaceId, documentId)
+      if (row === undefined || row.document.archivedAt !== undefined) return false
+      const operations = planWorkItemCompletionOperations(
+        row.document,
+        input.workItemId,
+        `work-item-completion:${input.eventId}`,
+      )
+      if (operations.length === 0) return false
+      const conflictFloorRevision = row.operationConflictFloorRevision ?? 1
+      const nextRevision = row.revision + 1
+      const reduced = reduceDocumentOperations({
+        document: row.document,
+        elementRevisions: row.elementRevisions,
+        conflictFloorRevision,
+        baseRevision: row.revision,
+        nextRevision,
+        operations,
+      })
+      reduced.document.updatedAt = this.now().toISOString()
+      reduced.document.updatedByUserId = input.actorId
+      validateDocumentPayload(reduced.document)
+      const compactedHistory = compactElementRevisionHistory(
+        reduced.document,
+        reduced.elementRevisions,
+        conflictFloorRevision,
+      )
+      const createsVersionSnapshot = shouldCreateVersionSnapshot(row, reduced.document)
+      const nextRow: StoredDocumentItem = {
+        ...row,
+        revision: nextRevision,
+        document: reduced.document,
+        elementRevisions: compactedHistory.elementRevisions,
+        operationConflictFloorRevision: compactedHistory.operationConflictFloorRevision,
+        ...(createsVersionSnapshot
+          ? {
+              lastVersionSnapshotRevision: nextRevision,
+              lastVersionSnapshotAt: reduced.document.updatedAt,
+            }
+          : {}),
+      }
+      const actions = [
+        currentDocumentPut(this.tableName, nextRow, row.revision),
+        documentSearchAccessPut(this.tableName, input.workspaceId, reduced.document),
+        documentSearchBodyPut(this.tableName, input.workspaceId, reduced.document),
+        ...versionPutActions(
+          this.tableName,
+          createVersionItems(
+            input.workspaceId,
+            reduced.document,
+            compactedHistory.elementRevisions,
+            'edit',
+            undefined,
+            {
+              previousDocument: row.document,
+              operations,
+              forceSnapshot: createsVersionSnapshot,
+            },
+          ),
+        ),
+      ]
+      assertTransactionSize(actions)
+      try {
+        await this.client.send(new TransactWriteCommand({ TransactItems: actions }))
+        return true
+      } catch (error) {
+        if (isConditionalFailure(error) || isRetryableTransactionConflict(error)) continue
+        throw normalizeDynamoError(error)
+      }
+    }
+    throw new DocumentError(
+      409,
+      'DocumentConcurrentUpdate',
+      'The document changed too frequently; retry the completion.',
+    )
   }
 
   /** Document を安全な text format へ export します。 */

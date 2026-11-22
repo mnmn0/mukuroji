@@ -1000,7 +1000,16 @@ function WhiteboardObjectNode({
                 {t('documents.whiteboard.work-item')}
               </span>
             ) : null}
-            <span className="whitespace-pre-wrap text-sm font-semibold leading-6 text-paper-ink">
+            {object.type === 'note' && object.done ? (
+              <span className="mb-1 text-[11px] font-bold text-paper-accent">
+                ✓ {t('documents.whiteboard.noteDone')}
+              </span>
+            ) : null}
+            <span
+              className={`whitespace-pre-wrap text-sm font-semibold leading-6 text-paper-ink ${
+                object.type === 'note' && object.done ? 'line-through opacity-60' : ''
+              }`}
+            >
               {text}
             </span>
             {object.type === 'work-item' ? (
@@ -1180,6 +1189,17 @@ function WhiteboardInspector({
             >
               {t('documents.whiteboard.openWorkItem')}
             </button>
+          ) : null}
+          {object.type === 'note' ? (
+            <label className="flex items-center gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+              <input
+                checked={object.done === true}
+                className="h-4 w-4 accent-[var(--workbench-primary)]"
+                onChange={(event) => onObjectChange({ ...object, done: event.target.checked })}
+                type="checkbox"
+              />
+              {t('documents.whiteboard.noteDone')}
+            </label>
           ) : null}
           {object.type === 'note' ? (
             <NoteWorkItemAction
