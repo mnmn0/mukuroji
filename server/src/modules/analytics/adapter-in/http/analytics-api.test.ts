@@ -8,10 +8,12 @@ const {
   getTestAppDependencies,
   createAnalyticsAuditEvent,
   createAnalyticsQueryInput,
+  createFakeWorkItemConfigurationClient,
   createHistoricalAnalyticsWorkItem,
   createHistoricalAnalyticsWorkItemEvent,
   createTeamIssuesFake,
   resetTestApp,
+  createTestWorkItemConfiguration,
   setTestAppDependencies,
 } = createApiTestHarness()
 import {
@@ -1165,6 +1167,191 @@ test('returns current-ACL evidence and CSV exports from Analytics endpoints', as
   expect(exported.status).toBe(200)
   expect(exported.headers.get('Content-Type')).toBe('text/csv; charset=utf-8')
   expect(await exported.text()).toContain('ウィジェットID,指標キー,指標,値')
+
+  const grouped = {
+    ...query,
+    widgets: [{
+      id: 'wip-by-team',
+      type: 'chart' as const,
+      title: 'WIP',
+      metric: 'wip' as const,
+      groupBy: { dimension: 'team' as const },
+    }],
+  }
+  const englishCsv = await analyticsApiRequest('/api/analytics/export', {
+    query: grouped,
+    format: 'csv',
+    locale: 'en',
+  })
+  expect(englishCsv.status).toBe(200)
+  const englishText = await englishCsv.text()
+  expect(englishText).toContain('Group,Core Team,')
+  expect(englishText).toContain(',core-team,,')
+  const englishPdf = await analyticsApiRequest('/api/analytics/export', {
+    query: grouped,
+    format: 'pdf',
+    locale: 'en',
+  })
+  expect(englishPdf.status).toBe(200)
+  const pdfSource = Buffer.from(await englishPdf.arrayBuffer()).toString('latin1')
+  expect(pdfSource).toContain('(    Core Team: ')
+  expect(pdfSource).not.toContain('core-team')
+})
+
+test('prints only the names of Teams the caller reads when a Project ID repeats across Teams', async () => {
+  configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'other-team',
+      name: 'Other Team',
+      projects: [{ id: 'refero', name: 'Other Refero', tone: 'blue' }],
+    }],
+    projectAccesses: [{ projectId: 'refero', teamId: 'core-team', role: 'viewer' }],
+  })
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const exported = await analyticsApiRequest('/api/analytics/export', {
+    query: {
+      ...query,
+      filter: {
+        ...query.filter,
+        teamIds: ['core-team', 'other-team'],
+        workItemTypeIds: ['other-team\u0000work-item'],
+      },
+    },
+    format: 'pdf',
+    locale: 'en',
+  })
+
+  expect(exported.status).toBe(200)
+  const source = Buffer.from(await exported.arrayBuffer()).toString('latin1')
+  expect(source).toContain('Teams: Core Team, other-team')
+  expect(source).not.toContain('Other Team')
+  expect(source).not.toContain('Other Refero')
+})
+
+test('heads a live-query PDF with the open saved report name', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const created = await analyticsApiRequest('/api/analytics/reports', {
+    id: 'titled-report',
+    name: 'Delivery review',
+    visibility: 'personal',
+    timeZone: 'UTC',
+    filter: query.filter,
+    widgets: query.widgets,
+  })
+  expect(created.status).toBe(201)
+
+  const exported = await analyticsApiRequest('/api/analytics/export', {
+    query,
+    titleReportId: 'titled-report',
+    format: 'pdf',
+    locale: 'en',
+  })
+  expect(exported.status).toBe(200)
+  const source = Buffer.from(await exported.arrayBuffer()).toString('latin1')
+  expect(source).toContain('(Delivery review)')
+  expect(source).not.toContain('mukuroji analytics')
+
+  const missing = await analyticsApiRequest('/api/analytics/export', {
+    query,
+    titleReportId: 'missing-report',
+    format: 'pdf',
+  })
+  expect(missing.status).toBe(404)
+  const withoutQuery = await analyticsApiRequest('/api/analytics/export', {
+    reportId: 'titled-report',
+    titleReportId: 'titled-report',
+    format: 'pdf',
+  })
+  expect(withoutQuery.status).toBe(400)
+})
+
+test('names a custom field from the Teams the query reads', async () => {
+  configureFakeProjectClients(true, {
+    additionalTeams: [{
+      id: 'other-team',
+      name: 'Other Team',
+      projects: [{ id: 'other-project', name: 'Other Project', tone: 'blue' }],
+    }],
+    projectAccesses: [
+      { projectId: 'refero', teamId: 'core-team', role: 'viewer' },
+      { projectId: 'other-project', teamId: 'other-team', role: 'viewer' },
+    ],
+  })
+  const fieldNames: Record<string, string> = { 'core-team': 'Impact', 'other-team': 'Severity' }
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query() {
+        return { events: [] }
+      },
+    },
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration(_workspaceId, teamId) {
+        return {
+          configuration: {
+            ...createTestWorkItemConfiguration('team', teamId),
+            customFields: [{
+              id: 'impact',
+              name: fieldNames[teamId] ?? 'impact',
+              type: 'text',
+              sortOrder: 1,
+              required: false,
+            }],
+          },
+          inheritedFrom: 'default',
+        }
+      },
+    }),
+  })
+  const query = createAnalyticsQueryInput()
+  const exportFor = async (teamIds: string[]) => {
+    const response = await analyticsApiRequest('/api/analytics/export', {
+      query: {
+        ...query,
+        filter: {
+          ...query.filter,
+          teamIds,
+          customFields: [{ fieldId: 'impact', operator: 'equals', value: 'high' }],
+        },
+      },
+      format: 'pdf',
+      locale: 'en',
+    })
+    expect(response.status).toBe(200)
+    return Buffer.from(await response.arrayBuffer()).toString('latin1')
+  }
+
+  const otherTeamOnly = await exportFor(['other-team'])
+  expect(otherTeamOnly).toContain('Custom fields: Severity')
+  expect(otherTeamOnly).not.toContain('Impact')
+  expect(await exportFor(['core-team', 'other-team']))
+    .toContain('Impact \\(Core Team\\) / Severity \\(Other Team\\)')
 })
 
 /**

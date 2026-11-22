@@ -618,4 +618,46 @@ describe('AnalyticsWorkbench', () => {
     expect(loadingHtml).toContain('disabled=""')
     expect(loadingHtml).toContain('Loading…')
   })
+
+  test('shows Team, member, and status names and a localized unset group instead of IDs', () => {
+    const widgets = analyticsWidgetFixtures.map((widget) =>
+      widget.id === 'chart-cycle-time'
+        ? { ...widget, groupBy: { dimension: 'assignee' as const } }
+        : widget.id === 'chart-throughput'
+          ? { ...widget, groupBy: { dimension: 'status' as const } }
+          : widget)
+    const snapshot = {
+      ...analyticsSnapshotFixture,
+      widgets: analyticsSnapshotFixture.widgets.map((result) =>
+        result.widgetId === 'chart-cycle-time'
+          ? {
+              ...result,
+              groups: [
+                { key: 'sato@example.com', label: 'sato@example.com', sampleSize: 3, value: 20 },
+                { key: '', label: 'Unassigned', sampleSize: 1, value: 8 },
+              ],
+            }
+          : result.widgetId === 'chart-throughput'
+            ? {
+                ...result,
+                series: [],
+                groups: [{ key: 'started', label: 'started', sampleSize: 2, value: 2 }],
+              }
+            : result),
+    }
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        locale="ja"
+        members={[{ id: 'sato@example.com', email: 'sato@example.com', name: '佐藤 花子' }]}
+        snapshot={snapshot}
+        widgets={widgets}
+      />,
+    )
+
+    expect(html).toContain('佐藤 花子')
+    expect(html).toContain('未設定')
+    expect(html).toContain('進行中')
+    expect(html).not.toContain('sato@example.com')
+  })
 })
