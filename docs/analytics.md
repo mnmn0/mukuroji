@@ -133,10 +133,33 @@ Metric contract の version は snapshot に固定します。同じ入力、met
 | SLA | Widget の `slaTargetHours` 以下で完了した eligible Work Item の割合。 |
 | Remaining scope | 評価時点で archive されておらず、`completed` / `canceled` ではない Work Item 数。Chart の各 point は burnup 用に `scope`（`canceled` を除く total scope）と `completed` を `segments` で返します。`weighting: "effort"` では残工数（記録された残工数、なければ見積）の合計時間で、burnup の `scope` と `completed` は見積の合計時間です（残工数の消化が scope の減少に見えないようにするため）。 |
 | Cumulative flow | 評価時点で archive されていない Work Item 数。Chart の各 point は status category（`completed` / `started` / `unstarted` / `backlog` / `canceled`）ごとの件数を `segments` で返します。 |
+| Milestone trend | 期間中に予定日（forecast の終了日）が変わった Milestone 数。Chart の各 point は bucket 末時点の各 Milestone の予定日を、key が Milestone ID、value が 1970-01-01 からの日数の `segments` で返します。Group は Milestone ごとに、期間中に予定日が動いた日数（遅れは正）と変更回数（`sampleSize`）を返します。 |
 
 Remaining scope と cumulative flow は WIP と同じく、chart の bucket ごとに bucket 末（`asOf` を超えない）時点へ
 state を巻き戻して評価する state metric です。期間の途中で作成された Work Item は作成後の bucket から scope に入るため、
 burnup の `scope` で scope 追加を区別できます。これらの metric の追加で既存 metric の値と version は変わりません。
+
+### Milestone trend
+
+Milestone trend は Work Item ではなく Planning の Milestone を入力にします。API は `milestone-trend` widget を
+含む query のときだけ Planning graph を読み、`GET /api/planning` と同じ current Planning ACL で絞った live
+（archive されていない）Milestone を使います。Team / Project filter は Milestone の現在の scope に適用し、
+どちらかを指定すると Workspace scope の Milestone は含めません。`asOf` より後に作られた Milestone も含めません。
+1 query で読む Milestone は 100 件まで（超えたら `413`）で、Work Item 用の filter（担当者、status、
+custom field、Work Item 一覧など）は Milestone に効きません。
+
+予定日の履歴は各 Milestone の `planning-entity` audit timeline（[#639](https://github.com/mnmn0/mukuroji/issues/639)
+の作成・変更・移動の event）から `forecast.endDate`、`teamId`、`projectId` の変更を読みます。上限は Milestone
+あたり 20 page、全体で page query 500 回・event 10,000 件です（超えたら `413`）。ある時点の値は、その時点以前の
+最新の変更の `after`、なければそれより後の最初の変更の `before`、変更がなければ現在値です。Milestone は作成後、
+かつ記録された Team / Project scope が現在と同じ間だけ予定日を返すので、閲覧者が今は読めない scope に
+あった間の履歴は返しません。Audit を書く前に作られた Milestone は作成時から現在の予定日を返し、warning を付けます。
+
+Snapshot の permission scope hash には、Milestone を読んだ query のときだけ読めた Milestone ID を加え、
+一覧・export の再検証でも同じ規則で現在読める Milestone と比べます。Milestone trend のない report の hash は
+変わりません。定期配信の runner は閲覧者の Planning ACL を評価できないため Milestone を読まず、その widget は
+warning だけを返します（hash にも Milestone を加えません）。CSV では segment の値を `YYYY-MM-DD` で出力します。
+
 
 Chart widget の `visualization` は `line` / `bar` に加え、`area`（`segments` の積み上げ面、CFD 用）、`burndown`
 （残量と、最初の point の残量から期間末に 0 へ向かう ideal line）、`burnup`（`scope` と `completed` の 2 本線）を

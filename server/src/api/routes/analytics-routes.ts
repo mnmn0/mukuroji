@@ -7,6 +7,7 @@ import {
   type AnalyticsSnapshotRecord,
   type CreateAnalyticsReportInput,
   type CanonicalWorkItem,
+  type PlanningEntity,
   type UpdateAnalyticsReportInput,
   type WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
@@ -29,6 +30,8 @@ import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-a
 import {
   AnalyticsError,
   analyticsFilterIncludesWorkItem,
+  analyticsQueryReadsMilestones,
+  analyticsSnapshotReadMilestones,
   createAnalyticsCsv,
   createAnalyticsPermissionScopeHash,
   createAnalyticsPdf,
@@ -61,6 +64,11 @@ import {
 } from '../shared/project-access'
 import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { canReadAnalyticsReport } from '../shared/analytics-access'
+import {
+  readAuthorizedAnalyticsMilestones,
+  readReadableAnalyticsMilestones,
+  readVisibleAnalyticsMilestones,
+} from '../shared/analytics-milestones'
 import { createWorkspaceSearchContext } from '../shared/search-access'
 import { isRecord } from '../shared/value-guards'
 import { readWorkspaceCalendarSettingsOf } from '../shared/workspace-calendar'
@@ -244,10 +252,7 @@ async function listAnalyticsHttpSnapshots(
   const reportId = readAnalyticsIdentifier(reportIdValue, 'Analytics report ID')
   const report = await requireAnalyticsReport(principal, reportId)
   const visibleSnapshots: AnalyticsSnapshotRecord[] = []
-  const scopeCache = new Map<
-    string,
-    ReturnType<typeof readAccessibleAnalyticsWorkItems>
-  >()
+  const scopeCache = createAnalyticsPermissionScopeReadCache()
   const permissionScopeHashCache = new Map<string, Promise<string>>()
   const seenCursors = new Set<string>()
   let inspectedCount = 0
@@ -269,12 +274,15 @@ async function listAnalyticsHttpSnapshots(
     let resumeCursor = page.nextCursor
     for (const [recordIndex, record] of page.snapshots.entries()) {
       inspectedCount += 1
-      const queryCacheKey = record.snapshot.queryHash
+      const readsMilestones = analyticsSnapshotReadMilestones(record.snapshot)
+      // A scheduled snapshot of the same query leaves the Milestones out of its hash.
+      const queryCacheKey = `${record.snapshot.queryHash}\0${readsMilestones ? 'milestones' : ''}`
       let pendingPermissionScopeHash = permissionScopeHashCache.get(queryCacheKey)
       if (!pendingPermissionScopeHash) {
         pendingPermissionScopeHash = readCurrentAnalyticsPermissionScopeHash(
           principal,
           record.query,
+          readsMilestones,
           scopeCache,
         )
         permissionScopeHashCache.set(queryCacheKey, pendingPermissionScopeHash)
@@ -486,7 +494,14 @@ async function executeAnalyticsQuery(
     normalizedQuery.filter,
     normalizedQuery.asOf,
   )
-  return createAnalyticsSnapshot({ ...authorized, query: normalizedQuery })
+  const milestones = analyticsQueryReadsMilestones(normalizedQuery)
+    ? await readAuthorizedAnalyticsMilestones(principal, normalizedQuery.filter, normalizedQuery.asOf)
+    : undefined
+  return createAnalyticsSnapshot({
+    ...authorized,
+    ...(milestones === undefined ? {} : { milestones }),
+    query: normalizedQuery,
+  })
 }
 
 /** Evidence query を事前検証し、current ACL の Work Item/event だけで再実行します。 */
@@ -839,12 +854,19 @@ function createAnalyticsHistoryLimitExceededError() {
 /**
  * Snapshot ACL 再検証では audit history/metric を再計算せず、current accessible Work Item
  * key、active readable Project allowlist、snapshot `asOf` から同じ permission scope hash
- * を作ります。
+ * を作ります。Milestone を読んだ snapshot では、現在読める Milestone ID も同じ規則で加えます。
+ *
+ * @param principal - Authenticated Workspace member.
+ * @param query - Stored snapshot query.
+ * @param readsMilestones - Whether the stored snapshot fixed the readable Milestones.
+ * @param cache - Accessible Work Item and Milestone reads shared by the snapshots of one response.
+ * @returns The current permission scope hash.
  */
 async function readCurrentAnalyticsPermissionScopeHash(
   principal: WorkspacePrincipal,
   query: AnalyticsQueryInput,
-  cache = new Map<string, ReturnType<typeof readAccessibleAnalyticsWorkItems>>(),
+  readsMilestones: boolean,
+  cache: AnalyticsPermissionScopeReadCache = createAnalyticsPermissionScopeReadCache(),
 ) {
   const normalized = normalizeAnalyticsQueryInput(query)
   const cacheKey = JSON.stringify({
@@ -853,17 +875,46 @@ async function readCurrentAnalyticsPermissionScopeHash(
     includeArchived: normalized.filter.includeArchived === true,
     workItems: normalized.filter.workItems ?? null,
   })
-  let accessible = cache.get(cacheKey)
+  let accessible = cache.workItems.get(cacheKey)
   if (!accessible) {
     accessible = readAccessibleAnalyticsWorkItems(principal, normalized.filter)
-    cache.set(cacheKey, accessible)
+    cache.workItems.set(cacheKey, accessible)
   }
   const current = await accessible
+  if (readsMilestones && !cache.milestones) {
+    cache.milestones = readReadableAnalyticsMilestones(principal)
+  }
+  const milestones = readsMilestones
+    ? await readVisibleAnalyticsMilestones(
+        principal,
+        normalized.filter,
+        normalized.asOf,
+        cache.milestones,
+      )
+    : undefined
   return createAnalyticsPermissionScopeHash(
     current.workItems,
     Date.parse(normalized.asOf),
     current.authorizedProjectIds,
+    milestones?.map((milestone) => milestone.id),
   )
+}
+
+/** Reads shared by the permission checks of the snapshots in one response. */
+type AnalyticsPermissionScopeReadCache = {
+  /** Accessible Work Item reads keyed by their scope filter. */
+  workItems: Map<string, ReturnType<typeof readAccessibleAnalyticsWorkItems>>
+  /** Readable Milestones, read once when a snapshot needs them. */
+  milestones?: Promise<PlanningEntity[]>
+}
+
+/**
+ * Creates an empty permission check read cache.
+ *
+ * @returns The cache.
+ */
+function createAnalyticsPermissionScopeReadCache(): AnalyticsPermissionScopeReadCache {
+  return { workItems: new Map() }
 }
 
 /** Export selector を current ACL で再実行できる snapshot へ解決します。 */
@@ -914,6 +965,7 @@ async function resolveAnalyticsExportSnapshot(
   const currentPermissionScopeHash = await readCurrentAnalyticsPermissionScopeHash(
     principal,
     stored.query,
+    analyticsSnapshotReadMilestones(stored.snapshot),
   )
   if (currentPermissionScopeHash !== stored.snapshot.permissionScopeHash) {
     throw new AnalyticsError(
