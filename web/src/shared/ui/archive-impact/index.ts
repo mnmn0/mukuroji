@@ -1,9 +1,8 @@
 export { ArchiveImpactNotice } from './ArchiveImpactNotice'
 export type { ArchiveImpactNoticeProps } from './ArchiveImpactNotice'
-export { isArchiveImpactConfirmDisabled, useArchiveImpact } from './archiveImpact'
+export { isArchiveImpactConfirmDisabled } from './archiveImpact'
 export type {
-  ArchiveImpactCount,
+  ArchiveImpactGateProps,
   ArchiveImpactLabels,
   ArchiveImpactState,
-  ArchiveImpactSummary,
 } from './archiveImpact'

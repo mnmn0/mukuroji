@@ -1,12 +1,15 @@
 import { expect, test } from 'bun:test'
-import type { DirectoryAdministrationResponse, WebhookSubscription } from '@mukuroji/contracts'
+import type {
+  DirectoryAdministrationResponse,
+  DirectoryArchiveImpactTarget,
+  WebhookSubscription,
+} from '@mukuroji/contracts'
 import type { AgentRunPage, StoredAgentRun } from '../../modules/agent-runs'
 import type { PlanningAuthorizationState } from '../../modules/planning'
 import type { SortedWorkItemPage, TeamIssueResponseItem } from '../../modules/work-items'
 import {
   readDirectoryArchiveImpact,
   type DirectoryArchiveImpactSources,
-  type DirectoryArchiveImpactTarget,
 } from './directory-archive-impact'
 
 const directoryId = 'workspace-1'
@@ -168,7 +171,7 @@ test('reports the Planning references that block a Team archive', async () => {
   })
 })
 
-test('counts a Project archive by the Project and leaves dependencies out of the block', async () => {
+test('counts a Project archive by the Project, including dependencies on its Work Items', async () => {
   const { sources, workItemReads } = createSources({
     workItemPages: [{
       issues: [
@@ -195,8 +198,8 @@ test('counts a Project archive by the Project and leaves dependencies out of the
     openWorkItems: { count: 1, hasMore: false },
     activeAgentRuns: { count: 2, hasMore: false },
     planningEntities: 0,
-    planningDependencies: 0,
-    archiveBlocked: false,
+    planningDependencies: 1,
+    archiveBlocked: true,
   })
   expect(workItemReads).toEqual([target])
 })
@@ -227,4 +230,54 @@ test('refuses a missing or archived Team or Project', async () => {
     { kind: 'project', teamId: 'core', projectId: 'old' },
     sources,
   )).rejects.toMatchObject({ status: 404, code: 'ProjectNotFound' })
+})
+
+test('ignores dependencies off the Project but blocks a Team with too many endpoints', async () => {
+  const dependency = (workItemId: string) => Object.assign(Object.create(null), {
+    predecessor: { teamId: 'core', workItemId },
+    successor: { teamId: 'other', workItemId: 'x' },
+  })
+  const target: DirectoryArchiveImpactTarget = { kind: 'project', teamId: 'core', projectId: 'alpha' }
+  const few = createSources({
+    workItemPages: [{ issues: [workItem('1', 'started')] }],
+    planning: { workItemDependencies: [dependency('elsewhere')] },
+  })
+  const many = createSources({
+    workItemPages: [{ issues: [workItem('1', 'started')] }],
+    planning: {
+      workItemDependencies: Array.from({ length: 97 }, (_, index) => dependency(`d${index}`)),
+    },
+  })
+
+  expect(await readDirectoryArchiveImpact(directoryId, target, few.sources)).toMatchObject({
+    planningDependencies: 0,
+    archiveBlocked: false,
+  })
+  expect(await readDirectoryArchiveImpact(directoryId, target, many.sources)).toMatchObject({
+    planningDependencies: 0,
+    archiveBlocked: true,
+  })
+})
+
+test('counts archived Work Items for dependencies but not as open', async () => {
+  const { sources } = createSources({
+    workItemPages: [{
+      issues: [workItem('1', 'started', { archivedAt: '2026-01-01T00:00:00.000Z' })],
+    }],
+    planning: {
+      workItemDependencies: [{
+        predecessor: { teamId: 'core', workItemId: '1' },
+        successor: { teamId: 'other', workItemId: 'x' },
+      }].map((dependency) => Object.assign(Object.create(null), dependency)),
+    },
+  })
+
+  const impact = await readDirectoryArchiveImpact(
+    directoryId,
+    { kind: 'project', teamId: 'core', projectId: 'alpha' },
+    sources,
+  )
+
+  expect(impact.openWorkItems).toEqual({ count: 0, hasMore: false })
+  expect(impact).toMatchObject({ planningDependencies: 1, archiveBlocked: true })
 })

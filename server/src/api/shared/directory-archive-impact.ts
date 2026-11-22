@@ -2,6 +2,7 @@ import type {
   DirectoryAdministrationResponse,
   DirectoryArchiveImpactCount,
   DirectoryArchiveImpactResponse,
+  DirectoryArchiveImpactTarget,
   WebhookSubscription,
 } from '@mukuroji/contracts'
 import type { AgentRunPage } from '../../modules/agent-runs'
@@ -17,22 +18,11 @@ import {
   workspaceDependencies,
 } from './app-dependencies'
 
-/** Team or Project whose archive impact is counted. */
-export type DirectoryArchiveImpactTarget =
-  | {
-      /** A Team and every Project in it. */
-      kind: 'team'
-      /** Team identifier. */
-      teamId: string
-    }
-  | {
-      /** One Project of a Team. */
-      kind: 'project'
-      /** Team that owns the Project. */
-      teamId: string
-      /** Project identifier. */
-      projectId: string
-    }
+/**
+ * Most distinct dependency endpoints of a Team that one Project archive can guard; more are
+ * refused with 413 because their Work Item revisions would not fit in the archive transaction.
+ */
+export const PROJECT_ARCHIVE_DEPENDENCY_ENDPOINT_LIMIT = 96
 
 /** Reads the archive impact counts from, replaceable in tests. */
 export type DirectoryArchiveImpactSources = {
@@ -40,7 +30,7 @@ export type DirectoryArchiveImpactSources = {
   readDirectory(directoryId: string): Promise<DirectoryAdministrationResponse>
   /** Reads the Planning entities, Work Item links, and dependencies of the Workspace. */
   readPlanning(directoryId: string): Promise<PlanningAuthorizationState>
-  /** Reads one bounded page of the Team's or Project's unarchived Work Items in sort order. */
+  /** Reads one bounded page of the Team's or Project's Work Items, archived ones included. */
   readWorkItemPage(
     directoryId: string,
     target: DirectoryArchiveImpactTarget,
@@ -80,7 +70,8 @@ const defaultSources: DirectoryArchiveImpactSources = {
     const options = {
       limit: WORK_ITEM_PAGE_LIMIT,
       maxEvaluatedRows: WORK_ITEM_PAGE_MAX_EVALUATED_ROWS,
-      includeArchived: false,
+      // Archived Work Items still hold dependencies that block a Project archive.
+      includeArchived: true,
       ...(startAfter === undefined ? {} : { startAfter }),
     }
     return target.kind === 'team'
@@ -126,12 +117,22 @@ export async function readDirectoryArchiveImpact(
     !entity.archivedAt && inScope(entity)
   ).length
   const planningWorkItemLinks = planning.workItemLinks.filter(inScope).length
-  const planningDependencies = target.kind === 'team'
-    ? planning.workItemDependencies.filter((dependency) =>
-        dependency.predecessor.teamId === target.teamId ||
-        dependency.successor.teamId === target.teamId
-      ).length
-    : 0
+  // Mirrors the archive guards: a Team archive refuses every dependency on the Team, and a
+  // Project archive refuses dependencies on Work Items assigned to the Project.
+  const isBlockingEndpoint = (endpoint: { teamId: string; workItemId: string }) =>
+    endpoint.teamId === target.teamId &&
+    (target.kind === 'team' || workItems.workItemIds.has(endpoint.workItemId))
+  const planningDependencies = planning.workItemDependencies.filter((dependency) =>
+    isBlockingEndpoint(dependency.predecessor) || isBlockingEndpoint(dependency.successor)
+  ).length
+  const teamEndpointKeys = new Set(
+    planning.workItemDependencies
+      .flatMap((dependency) => [dependency.predecessor, dependency.successor])
+      .filter((endpoint) => endpoint.teamId === target.teamId)
+      .map((endpoint) => endpoint.workItemId),
+  )
+  const endpointLimitExceeded = target.kind === 'project' &&
+    teamEndpointKeys.size > PROJECT_ARCHIVE_DEPENDENCY_ENDPOINT_LIMIT
 
   return {
     openWorkItems: { count: workItems.openCount, hasMore: workItems.hasMore },
@@ -142,7 +143,8 @@ export async function readDirectoryArchiveImpact(
     webhookSubscriptions: subscriptions.filter((subscription) =>
       subscription.status === 'active' && subscription.teamIds.includes(target.teamId)
     ).length,
-    archiveBlocked: planningEntities + planningWorkItemLinks + planningDependencies > 0,
+    archiveBlocked: endpointLimitExceeded ||
+      planningEntities + planningWorkItemLinks + planningDependencies > 0,
   }
 }
 
@@ -183,7 +185,7 @@ async function requireActiveTarget(
 type CountedWorkItems = {
   /** Work Items that are neither completed nor canceled. */
   openCount: number
-  /** Team-local IDs of every counted Work Item of the Team, open or closed. */
+  /** Team-local IDs of every Work Item read, open, closed, or archived. */
   workItemIds: Set<string>
   /** Whether reading stopped before the last page. */
   hasMore: boolean
@@ -209,9 +211,13 @@ async function readWorkItems(
     const result = await sources.readWorkItemPage(directoryId, target, startAfter)
     for (const issue of result.issues) {
       // A Project's index is keyed by the Project alone, so another Team's row is skipped.
-      if (issue.teamId !== target.teamId || issue.archivedAt !== undefined) continue
+      if (issue.teamId !== target.teamId) continue
       counted.workItemIds.add(issue.id)
-      if (issue.statusCategory !== 'completed' && issue.statusCategory !== 'canceled') {
+      if (
+        issue.archivedAt === undefined &&
+        issue.statusCategory !== 'completed' &&
+        issue.statusCategory !== 'canceled'
+      ) {
         counted.openCount += 1
       }
     }

@@ -19,12 +19,12 @@ import {
   type ProjectDirectoryStatusFilter,
 } from '../model/projectDirectoryView'
 import { createArchiveImpactLabels, type MessageKey } from '../../shared/i18n/i18n'
+import type { ComponentType } from 'react'
 import {
   ArchiveImpactNotice,
   isArchiveImpactConfirmDisabled,
-  useArchiveImpact,
+  type ArchiveImpactGateProps,
   type ArchiveImpactState,
-  type ArchiveImpactSummary,
 } from '../../shared/ui/archive-impact'
 import { ProgressBar } from '../../shared/ui/WorkbenchPrimitives'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
@@ -81,8 +81,8 @@ export type ProjectDirectoryViewProps = {
   onToggleQuickAccess: (project: ProjectDirectoryRow) => void | Promise<void>
   /** Archives a Project after explicit confirmation when authorized. */
   onArchiveProject?: (project: ProjectDirectoryRow) => Promise<void>
-  /** Reads what archiving a Project affects, shown in the archive confirmation. */
-  onLoadArchiveImpact?: (project: ProjectDirectoryRow) => Promise<ArchiveImpactSummary>
+  /** Reads what archiving a Project affects while its confirmation is open. */
+  ArchiveImpactGate?: ComponentType<ArchiveImpactGateProps>
   /** Project update projections keyed by Team and Project identity. */
   planningUpdateTargets?: readonly PlanningUpdateTargetSummary[]
   /** Opens the selected Project's Planning update detail. */
@@ -171,7 +171,7 @@ export function ProjectDirectoryView({
   teams,
   totalCount,
   onArchiveProject,
-  onLoadArchiveImpact,
+  ArchiveImpactGate,
   onOpenPlanningUpdate,
   onAssigneeChange,
   onClearFilters,
@@ -188,10 +188,6 @@ export function ProjectDirectoryView({
   const [archiveTarget, setArchiveTarget] = useState<ProjectDirectoryRow>()
   const [isArchiving, setIsArchiving] = useState(false)
   const [archiveError, setArchiveError] = useState(false)
-  const archiveImpact = useArchiveImpact(
-    archiveTarget ? JSON.stringify([archiveTarget.teamId, archiveTarget.projectId]) : undefined,
-    archiveTarget && onLoadArchiveImpact ? () => onLoadArchiveImpact(archiveTarget) : undefined,
-  )
   const resultsRef = useRef<HTMLDivElement>(null)
   const hasActiveFilters = Boolean(
     filters.query ||
@@ -459,7 +455,7 @@ export function ProjectDirectoryView({
       {archiveTarget && onArchiveProject ? (
         <ProjectArchiveDialog
           error={archiveError}
-          impact={archiveImpact}
+          ArchiveImpactGate={ArchiveImpactGate}
           isBusy={isArchiving}
           project={archiveTarget}
           t={t}
@@ -803,8 +799,8 @@ function ProjectDirectoryEmptyState({
 type ProjectArchiveDialogProps = {
   /** Whether the previous archive request failed. */
   error: boolean
-  /** Archive impact counts, when the viewer may read them. */
-  impact?: ArchiveImpactState
+  /** Reads the archive impact of the Project, when the viewer may read it. */
+  ArchiveImpactGate?: ComponentType<ArchiveImpactGateProps>
   /** Whether the archive request is currently running. */
   isBusy: boolean
   /** Project that will be archived after confirmation. */
@@ -824,8 +820,8 @@ type ProjectArchiveDialogProps = {
  * @returns A modal confirmation dialog.
  */
 function ProjectArchiveDialog({
+  ArchiveImpactGate,
   error,
-  impact,
   isBusy,
   project,
   t,
@@ -836,6 +832,46 @@ function ProjectArchiveDialog({
   const dialogId = useId()
   const titleId = `${dialogId}-title`
   const descriptionId = `${dialogId}-description`
+
+  /**
+   * Renders the counts, the archive error, and the actions for one impact state.
+   *
+   * @param impact - Impact loading state, or undefined when no impact is read.
+   * @returns The dialog body below the description.
+   */
+  const renderBody = (impact?: ArchiveImpactState) => (
+    <>
+      {impact ? (
+        <ArchiveImpactNotice labels={createArchiveImpactLabels(t)} state={impact} />
+      ) : null}
+      {error ? (
+        <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
+          {t('projects.directory.archive.error')}
+        </p>
+      ) : null}
+      <div className="mt-6 flex justify-end gap-3">
+        <button
+          className="workbench-button-secondary min-h-10 px-4"
+          data-modal-initial-focus
+          disabled={isBusy}
+          type="button"
+          onClick={onClose}
+        >
+          {t('projects.directory.archive.cancel')}
+        </button>
+        <button
+          className="min-h-10 rounded-lg bg-red-700 px-4 text-sm font-semibold text-white transition-colors hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={isBusy || isArchiveImpactConfirmDisabled(impact)}
+          type="button"
+          onClick={onConfirm}
+        >
+          {isBusy
+            ? t('projects.directory.archive.saving')
+            : t('projects.directory.archive.confirm')}
+        </button>
+      </div>
+    </>
+  )
 
   return (
     <div
@@ -869,35 +905,13 @@ function ProjectArchiveDialog({
               { name: project.projectName },
             )}
           </p>
-          {impact ? (
-            <ArchiveImpactNotice labels={createArchiveImpactLabels(t)} state={impact} />
-          ) : null}
-          {error ? (
-            <p className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
-              {t('projects.directory.archive.error')}
-            </p>
-          ) : null}
-          <div className="mt-6 flex justify-end gap-3">
-            <button
-              className="workbench-button-secondary min-h-10 px-4"
-              data-modal-initial-focus
-              disabled={isBusy}
-              type="button"
-              onClick={onClose}
+          {ArchiveImpactGate ? (
+            <ArchiveImpactGate
+              target={{ kind: 'project', teamId: project.teamId, projectId: project.projectId }}
             >
-              {t('projects.directory.archive.cancel')}
-            </button>
-            <button
-              className="min-h-10 rounded-lg bg-red-700 px-4 text-sm font-semibold text-white transition-colors hover:bg-red-800 focus:outline-none focus:ring-2 focus:ring-red-700 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={isBusy || isArchiveImpactConfirmDisabled(impact)}
-              type="button"
-              onClick={onConfirm}
-            >
-              {isBusy
-                ? t('projects.directory.archive.saving')
-                : t('projects.directory.archive.confirm')}
-            </button>
-          </div>
+              {renderBody}
+            </ArchiveImpactGate>
+          ) : renderBody()}
         </div>
       </section>
     </div>

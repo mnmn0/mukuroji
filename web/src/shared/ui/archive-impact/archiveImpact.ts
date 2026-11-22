@@ -1,30 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
-
-/** One counted archive impact; a count that stopped early is a floor. */
-export type ArchiveImpactCount = {
-  /** Number of matching records counted. */
-  count: number
-  /** Whether the real number may be larger than `count`. */
-  hasMore: boolean
-}
-
-/** What archiving a Team or Project affects, as the archive confirmation shows it. */
-export type ArchiveImpactSummary = {
-  /** Work Items that are neither completed nor canceled. */
-  openWorkItems: ArchiveImpactCount
-  /** Agent Runs still active on the affected Work Items. */
-  activeAgentRuns: ArchiveImpactCount
-  /** Active Planning entities scoped to the target. */
-  planningEntities: number
-  /** Planning links to the target's Work Items. */
-  planningWorkItemLinks: number
-  /** Planning dependencies on the Team's Work Items. */
-  planningDependencies: number
-  /** Active Webhook subscriptions that deliver events for the Team. */
-  webhookSubscriptions: number
-  /** Whether the server refuses the archive until the Planning references are removed. */
-  archiveBlocked: boolean
-}
+import type {
+  DirectoryArchiveImpactCount,
+  DirectoryArchiveImpactResponse,
+  DirectoryArchiveImpactTarget,
+} from '@mukuroji/contracts'
+import type { ReactNode } from 'react'
 
 /** Labels of the archive impact notice. */
 export type ArchiveImpactLabels = {
@@ -41,7 +20,7 @@ export type ArchiveImpactLabels = {
   /** Explains what stays and what a restore brings back. */
   warning: string
   /** Formats a count that may be a floor, such as "1,000+". */
-  count: (count: ArchiveImpactCount) => string
+  count: (count: DirectoryArchiveImpactCount) => string
   /** Line for open Work Items. */
   openWorkItems: (count: string) => string
   /** Line for active Agent Runs. */
@@ -59,7 +38,7 @@ export type ArchiveImpactLabels = {
 /** Loading state of the archive impact of one target. */
 export type ArchiveImpactState =
   | {
-      /** The counts are loading. */
+      /** The counts are loading or being refreshed. */
       status: 'loading'
     }
   | {
@@ -70,55 +49,25 @@ export type ArchiveImpactState =
       /** The counts are ready. */
       status: 'ready'
       /** Counts read for the target. */
-      impact: ArchiveImpactSummary
+      impact: DirectoryArchiveImpactResponse
     }
 
 /**
- * Loads the archive impact of the target named by `targetKey`, again whenever the key changes.
- *
- * @param targetKey - Identity of the target, or undefined when no confirmation is open.
- * @param load - Reads the impact of the current target, or undefined when the viewer cannot.
- * @returns The loading state, or undefined when nothing is loaded.
+ * Props of a component that reads the archive impact of one target and renders its children
+ * with the loading state. The app supplies it so shared confirmation dialogs stay free of
+ * data fetching; it is mounted only while a confirmation is open.
  */
-export function useArchiveImpact(
-  targetKey: string | undefined,
-  load: (() => Promise<ArchiveImpactSummary>) | undefined,
-): ArchiveImpactState | undefined {
-  const loadRef = useRef(load)
-  const [loaded, setLoaded] = useState<{ key: string; state: ArchiveImpactState }>()
-  const canLoad = load !== undefined
-
-  useEffect(() => {
-    loadRef.current = load
-  })
-
-  useEffect(() => {
-    const currentLoad = loadRef.current
-    if (targetKey === undefined || !canLoad || currentLoad === undefined) return
-    let active = true
-    currentLoad().then(
-      (impact) => {
-        if (active) setLoaded({ key: targetKey, state: { status: 'ready', impact } })
-      },
-      () => {
-        if (active) setLoaded({ key: targetKey, state: { status: 'error' } })
-      },
-    )
-    return () => {
-      active = false
-      // Reopening the same target must show fresh counts, never the ones read last time.
-      setLoaded(undefined)
-    }
-  }, [canLoad, targetKey])
-
-  if (targetKey === undefined || !canLoad) return undefined
-  return loaded?.key === targetKey ? loaded.state : { status: 'loading' }
+export type ArchiveImpactGateProps = {
+  /** Team or Project about to be archived. */
+  target: DirectoryArchiveImpactTarget
+  /** Renders the confirmation body for the current loading state. */
+  children: (state: ArchiveImpactState) => ReactNode
 }
 
 /**
  * Tells whether the confirmation must keep its archive button disabled.
  *
- * @param state - Loading state, or undefined when no impact is loaded.
+ * @param state - Loading state, or undefined when no impact is read.
  * @returns Whether the counts are still loading or say the server will refuse the archive.
  */
 export function isArchiveImpactConfirmDisabled(state: ArchiveImpactState | undefined) {

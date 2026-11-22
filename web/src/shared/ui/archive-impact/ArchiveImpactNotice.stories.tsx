@@ -2,10 +2,10 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, within } from 'storybook/test'
 import { createArchiveImpactLabels, createTranslator } from '../../i18n/i18n'
 import { ArchiveImpactNotice } from './ArchiveImpactNotice'
-import type { ArchiveImpactSummary } from './archiveImpact'
+import type { DirectoryArchiveImpactResponse } from '@mukuroji/contracts'
 
 /** Impact with nothing affected, overridden per story. */
-const emptyImpact: ArchiveImpactSummary = {
+const emptyImpact: DirectoryArchiveImpactResponse = {
   openWorkItems: { count: 0, hasMore: false },
   activeAgentRuns: { count: 0, hasMore: false },
   planningEntities: 0,

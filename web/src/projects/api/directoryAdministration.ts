@@ -3,6 +3,7 @@ import {
   isDirectoryArchiveImpactResponse,
   type DirectoryAdministrationTeam,
   type DirectoryArchiveImpactResponse,
+  type DirectoryArchiveImpactTarget,
   type RenameDirectoryProjectInput,
   type RenameDirectoryTeamInput,
 } from '@mukuroji/contracts'
@@ -33,23 +34,6 @@ export async function getDirectoryAdministration(
 
   return data.teams
 }
-
-/** Team or Project whose archive impact is read. */
-export type DirectoryArchiveImpactTarget =
-  | {
-      /** A Team and every Project in it. */
-      kind: 'team'
-      /** Team identifier. */
-      teamId: string
-    }
-  | {
-      /** One Project of a Team. */
-      kind: 'project'
-      /** Team that owns the Project. */
-      teamId: string
-      /** Project identifier. */
-      projectId: string
-    }
 
 /**
  * Reads what archiving a Team or Project affects, for the archive confirmation.

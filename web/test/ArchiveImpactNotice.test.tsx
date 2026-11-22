@@ -1,14 +1,14 @@
 import { describe, expect, test } from 'bun:test'
+import type { DirectoryArchiveImpactResponse } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createArchiveImpactLabels, createTranslator, type Locale } from '../src/shared/i18n/i18n'
 import {
   ArchiveImpactNotice,
   isArchiveImpactConfirmDisabled,
-  type ArchiveImpactSummary,
 } from '../src/shared/ui/archive-impact'
 
 /** Impact with nothing affected, overridden per test. */
-const emptyImpact: ArchiveImpactSummary = {
+const emptyImpact: DirectoryArchiveImpactResponse = {
   openWorkItems: { count: 0, hasMore: false },
   activeAgentRuns: { count: 0, hasMore: false },
   planningEntities: 0,
@@ -25,7 +25,7 @@ describe('ArchiveImpactNotice', () => {
     for (const locale of locales) {
       const t = createTranslator(locale)
       const labels = createArchiveImpactLabels(t)
-      const impact: ArchiveImpactSummary = {
+      const impact: DirectoryArchiveImpactResponse = {
         ...emptyImpact,
         openWorkItems: { count: 2000, hasMore: true },
         activeAgentRuns: { count: 1, hasMore: false },
@@ -47,7 +47,7 @@ describe('ArchiveImpactNotice', () => {
   test('explains a Planning block and disables the archive until the counts load', () => {
     const t = createTranslator('ja')
     const labels = createArchiveImpactLabels(t)
-    const impact: ArchiveImpactSummary = { ...emptyImpact, planningEntities: 1, archiveBlocked: true }
+    const impact: DirectoryArchiveImpactResponse = { ...emptyImpact, planningEntities: 1, archiveBlocked: true }
 
     const markup = renderToStaticMarkup(
       <ArchiveImpactNotice labels={labels} state={{ status: 'ready', impact }} />,

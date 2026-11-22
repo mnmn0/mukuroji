@@ -73,14 +73,10 @@ import {
   type ProjectQuickAccessFeedback,
   type ResolvedProjectQuickAccessItem,
 } from '../../projects/model/projectQuickAccess'
-import {
-  getDirectoryArchiveImpact,
-  type DirectoryArchiveImpactTarget,
-} from '../../projects/api/directoryAdministration'
 import { isDirectoryAdministrationKey } from '../../projects/queries/useDirectoryAdministration'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
 import { useProjectQuickAccess } from '../../projects/queries/useProjectQuickAccess'
-import type { DirectoryArchiveImpactResponse, MemberPreferenceValues } from '@mukuroji/contracts'
+import type { MemberPreferenceValues } from '@mukuroji/contracts'
 import { useMemberPreferencesSync } from '../mutations/useMemberPreferencesSync'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import {
@@ -254,8 +250,6 @@ export type WorkspaceRouteContextValue = {
   onArchiveTeam?: (teamId: string) => Promise<void>
   /** Archives a project when the current user may manage workspace structure. */
   onArchiveProject?: (teamId: string, projectId: string) => Promise<void>
-  /** Reads what archiving a Team or Project affects, when the user may archive them. */
-  onLoadArchiveImpact?: (target: DirectoryArchiveImpactTarget) => Promise<DirectoryArchiveImpactResponse>
 }
 
 const emptyProjectDirectory: ProjectDirectoryTeam[] = []
@@ -806,15 +800,6 @@ export function WorkspaceRouteProvider() {
     navigate,
   ])
 
-  /** Reads the archive impact shown before a Team or Project archive is confirmed. */
-  const handleLoadArchiveImpact = useCallback(async (target: DirectoryArchiveImpactTarget) => {
-    if (!accessToken) {
-      throw new Error('An access token is required to read the archive impact.')
-    }
-
-    return await guardEnterpriseSession(getDirectoryArchiveImpact(accessToken, target))
-  }, [accessToken, guardEnterpriseSession])
-
   /** Archives a project and refreshes the shared project directory cache. */
   const handleArchiveProject = useCallback(async (
     teamId: string,
@@ -929,9 +914,6 @@ export function WorkspaceRouteProvider() {
     onArchiveTeam: canManageWorkspaceConfiguration
       ? handleArchiveTeam
       : undefined,
-    onLoadArchiveImpact: canManageWorkspaceConfiguration
-      ? handleLoadArchiveImpact
-      : undefined,
     onCreateProject: canManageWorkspaceConfiguration
       ? handleCreateProject
       : undefined,
@@ -990,7 +972,6 @@ export function WorkspaceRouteProvider() {
     guardEnterpriseSession,
     handleArchiveProject,
     handleArchiveTeam,
-    handleLoadArchiveImpact,
     handleCreateProject,
     handleCreateTeam,
     handleDismissProjectQuickAccessFeedback,

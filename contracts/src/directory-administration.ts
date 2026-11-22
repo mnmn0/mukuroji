@@ -130,13 +130,36 @@ export type DirectoryArchiveImpactResponse = {
   planningEntities: number
   /** Planning links to the Team's or Project's Work Items. Any of them blocks the archive. */
   planningWorkItemLinks: number
-  /** Planning dependencies on the Team's Work Items. They block only a Team archive. */
+  /**
+   * Planning dependencies that block the archive: for a Team, every dependency on its Work
+   * Items; for a Project, every dependency on a Work Item assigned to the Project.
+   */
   planningDependencies: number
   /** Active Webhook subscriptions that deliver events for the Team. */
   webhookSubscriptions: number
-  /** Whether the archive is refused until the Planning references are removed. */
+  /**
+   * Whether the archive is refused until the Planning references are removed. A Project archive
+   * is also refused when its Team has more dependency endpoints than one archive can guard.
+   */
   archiveBlocked: boolean
 }
+
+/** Team or Project whose archive impact is read. */
+export type DirectoryArchiveImpactTarget =
+  | {
+      /** A Team and every Project in it. */
+      kind: 'team'
+      /** Team identifier. */
+      teamId: string
+    }
+  | {
+      /** One Project of a Team. */
+      kind: 'project'
+      /** Team that owns the Project. */
+      teamId: string
+      /** Project identifier. */
+      projectId: string
+    }
 
 /**
  * Returns whether a value is a Project sidebar color.

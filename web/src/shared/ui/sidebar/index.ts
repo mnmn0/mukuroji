@@ -15,7 +15,6 @@ export type {
   MobileSidebarDrawerProps,
 } from './MobileSidebarDrawer'
 export type {
-  SidebarArchiveImpactTarget,
   SidebarArchiveLabels,
   SidebarCreateLabels,
   SidebarNavId,
