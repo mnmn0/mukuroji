@@ -1,6 +1,20 @@
+import { useState } from 'react'
 import type { ArchiveImpactGateProps, ArchiveImpactState } from '../../shared/ui/archive-impact'
 import { useDirectoryArchiveImpact } from '../../projects/queries/useDirectoryArchiveImpact'
 import { useWorkspaceRouteContext } from './WorkspaceRouteProvider'
+
+/** Number of archive confirmations opened so far, so each opening reads its own counts. */
+let openedConfirmations = 0
+
+/**
+ * Takes the identifier of a newly opened archive confirmation.
+ *
+ * @returns An identifier no earlier opening used.
+ */
+function nextConfirmationOpening() {
+  openedConfirmations += 1
+  return openedConfirmations
+}
 
 /**
  * Reads the archive impact of a Team or Project for an open archive confirmation and renders
@@ -12,9 +26,11 @@ import { useWorkspaceRouteContext } from './WorkspaceRouteProvider'
  */
 export function DirectoryArchiveImpactGate({ target, children }: ArchiveImpactGateProps) {
   const workspace = useWorkspaceRouteContext()
+  const [opening] = useState(nextConfirmationOpening)
   const { data, error, isValidating } = useDirectoryArchiveImpact(
     workspace.accessToken,
     target,
+    opening,
     workspace.guardEnterpriseSession,
   )
   const state: ArchiveImpactState = isValidating
