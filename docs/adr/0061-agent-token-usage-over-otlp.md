@@ -69,6 +69,9 @@ Shinji の方針は「なるべく安く」。
   Run にトークン数と推定費用が積み上がる。手順は `docs/coding-agent-mcp.md` に書く。
 - 同じ instance ID で同時に 2 つの session を動かし、それぞれ別のタスクの Run を持つと、その間の usage は両方の
   Run に数えられる。同時に動かすときは session ごとに instance ID を分ける。
+- 割り当ては agent の端末の時計で記録された event 時刻と、server の時計の Run の開始・終了を比べる。時計がずれると、
+  境目の数秒から数十秒ぶんが前後の Run に入るか、どの Run にも入らない。開始と終了が同じ 10 秒の bucket に入る
+  ごく短い Run には usage が付かない。
 - 推定費用は Claude Code の見積もりで、請求額とは一致しない（subscription の利用でも値は出る）。
 - 費用は、同時 10 session・60 秒間隔の export で月 $1 未満の見込み（Lambda の起動と DynamoDB の書き込みが主）。
 - 期間サマリー（Factory analytics）と Project 別の集計、Codex / Kiro の telemetry、Web の接続画面への設定例の
