@@ -64,6 +64,18 @@ describe('Analytics Milestone trend chart', () => {
     expect(formatAnalyticsMilestoneShift(null)).toBe('—')
   })
 
+  test('keeps the period-end date unknown when the last slot hides the Milestone', () => {
+    const hidden: AnalyticsGroup[] = [{ key: 'gone', label: 'Gone', value: null, sampleSize: 0 }]
+    const model = createAnalyticsMilestoneTrendModel([
+      { ...series[0]!, segments: [{ key: 'gone', value: day('2026-04-10') }] },
+      { ...series[1]!, segments: [] },
+    ], hidden, 'UTC')
+
+    expect(model.lines[0]?.values).toEqual([day('2026-04-10'), null])
+    expect(model.lines[0]?.latest).toBeNull()
+    expect(model.lines[0]?.periodStart).toBeNull()
+  })
+
   test('renders the legend with the shift and a table of dates', () => {
     const markup = renderToStaticMarkup(
       <AnalyticsMilestoneTrendChart

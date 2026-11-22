@@ -20,7 +20,7 @@ export type AnalyticsMilestoneTrendLine = {
   shiftDays: number | null
   /** Number of date changes in the period. */
   changeCount: number
-  /** Latest drawn date, which is the date at the period end. */
+  /** Date at the period end (the last slot); `null` when it is unknown or hidden there. */
   latest: number | null
   /**
    * Date at the period start. The server's shift is measured from it, so it is derived from the
@@ -64,7 +64,8 @@ export function createAnalyticsMilestoneTrendModel(
     const values = series.map((point) =>
       point.segments?.find((segment) => segment.key === group.key)?.value ?? null
     )
-    const latest = values.findLast((value) => value !== null) ?? null
+    // The period-end slot decides; an earlier date is not the date at the period end.
+    const latest = values.at(-1) ?? null
     return {
       key: group.key,
       label: group.label,
