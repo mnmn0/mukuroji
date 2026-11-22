@@ -1262,14 +1262,14 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
  * Formats the dates of a Milestone trend table row for the CSV dimension column.
  *
  * @param row - Milestone trend table row.
- * @returns `baseline=…; periodStart=…; forecast=…`, with an empty value for an unknown date.
+ * @returns `baseline=…; shiftFrom=…; forecast=…`, with an empty value for an unknown date.
  */
 function formatMilestoneCsvDates(row: AnalyticsTableRow) {
   const text = (value: AnalyticsTableRow['values'][string] | undefined) =>
     typeof value === 'string' ? value : ''
   return [
     `baseline=${text(row.values.baselineEndDate)}`,
-    `periodStart=${text(row.values.periodStartForecastEndDate)}`,
+    `shiftFrom=${text(row.values.periodStartForecastEndDate)}`,
     `forecast=${text(row.values.forecastEndDate)}`,
   ].join('; ')
 }

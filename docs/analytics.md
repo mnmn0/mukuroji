@@ -170,8 +170,8 @@ Team / Project scope を加え（移動した Milestone の snapshot は再検�
 一覧・export の再検証でも同じ規則で現在読める Milestone と比べます（現在読める Milestone が上限の 100 件を超える場合、
 その snapshot だけを scope 不一致として扱います）。Milestone trend のない report の hash は
 変わりません。定期配信の runner は閲覧者の Planning ACL を評価できないため Milestone を読まず、その widget は
-warning だけを返します（hash にも Milestone を加えません）。変化日数は期間末と期間開始の予定日の差で、期間開始の時点で予定日を返せない場合は期間内で最初に返せた予定日を基準にします（`periodStart` もその日付です）。CSV では segment の値を `YYYY-MM-DD` で出力し、table の行は値に変化日数、サンプル数に変更回数、ディメンション値に
-`baseline=…; periodStart=…; forecast=…` を出力します。
+warning だけを返します（hash にも Milestone を加えません）。変化日数は期間末と期間開始の予定日の差で、期間開始の時点で予定日を返せない場合は期間内で最初に返せた予定日を基準にします（CSV の `shiftFrom` と table の `periodStartForecastEndDate` もその日付です）。CSV では segment の値を `YYYY-MM-DD` で出力し、table の行は値に変化日数、サンプル数に変更回数、ディメンション値に
+`baseline=…; shiftFrom=…; forecast=…` を出力します。
 Segment は bucket 数 × Milestone 数だけ増えるため、長い期間を日次で多数の Milestone について描くと
 response の 256 KiB 上限で `413` になります。Web の builder は週次 bucket で widget を追加します。
 

@@ -261,7 +261,7 @@ describe('milestone-trend metric', () => {
       '1 Milestone(s) have no recorded date history; their current date is shown since creation.',
     ])
     expect(createAnalyticsCsv(snapshot)).toContain(
-      'Milestone trend,0,0,Table row,baseline=2026-05-01; periodStart=2026-05-01; forecast=2026-05-01,',
+      'Milestone trend,0,0,Table row,baseline=2026-05-01; shiftFrom=2026-05-01; forecast=2026-05-01,',
     )
   })
 
