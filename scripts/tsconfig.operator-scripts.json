@@ -5,6 +5,8 @@
     "runtime-control.test.ts",
     "runtime-control-audit.ts",
     "github-deploy.ts",
-    "github-deploy.test.ts"
+    "github-deploy.test.ts",
+    "seed-demo-data.ts",
+    "seed-demo-data.test.ts"
   ]
 }
