@@ -115,8 +115,22 @@ export type AnalyticsVisualization = 'line' | 'bar' | 'area' | 'burndown' | 'bur
 /** Widget result を分割する dimension です。 */
 export type AnalyticsGroupBy =
   | {
-      /** Calendar bucket または Work Item dimension です。 */
-      dimension: 'day' | 'week' | 'month' | 'team' | 'project' | 'assignee' | 'status' | 'work-item-type'
+      /**
+       * Calendar bucket または Work Item dimension です。`cycle` と `milestone` は Planning の
+       * Work Item link の現在の所属で分け、caller が読めない Cycle / Milestone は未設定に入れます。
+       */
+      dimension:
+        | 'day'
+        | 'week'
+        | 'month'
+        | 'team'
+        | 'project'
+        | 'assignee'
+        | 'status'
+        | 'work-item-type'
+        | 'priority'
+        | 'cycle'
+        | 'milestone'
       /** Built-in dimension では custom field ID を指定しません。 */
       customFieldId?: never
     }
@@ -596,6 +610,8 @@ export type AnalyticsGroupLabelLookup = {
   workItemType?: (key: string) => string | undefined
   /** Returns the localized label of a workflow status category. */
   statusCategory?: (category: string) => string | undefined
+  /** Returns the localized label of a Work Item priority. */
+  priority?: (priority: string) => string | undefined
   /** Localized label of a group whose dimension value is not set, such as an unassigned Work Item. */
   unset: string
 }
@@ -646,7 +662,8 @@ export function createAnalyticsProjectNames(
  *
  * @param groupBy - Dimension the widget groups by.
  * @param key - Group key returned by the API.
- * @returns True for the group of Work Items without a Project, an assignee, or a custom field value.
+ * @returns True for the group of Work Items without a Project, an assignee, a Cycle, a Milestone, or
+ *   a custom field value.
  */
 export function isAnalyticsUnsetGroup(groupBy: AnalyticsGroupBy | undefined, key: string): boolean {
   if (groupBy === undefined) return false
@@ -654,14 +671,17 @@ export function isAnalyticsUnsetGroup(groupBy: AnalyticsGroupBy | undefined, key
   return key === '' && (
     groupBy.dimension === 'team' ||
     groupBy.dimension === 'project' ||
-    groupBy.dimension === 'assignee'
+    groupBy.dimension === 'assignee' ||
+    groupBy.dimension === 'cycle' ||
+    groupBy.dimension === 'milestone'
   )
 }
 
 /**
  * Resolves the label people read for an Analytics group, replacing internal IDs with names.
  *
- * Calendar buckets, Milestones, and custom field values keep the API label. A Team, Project, or
+ * Calendar buckets, Cycles, Milestones, and custom field values keep the API label; the API labels
+ * Cycle and Milestone groups with the titles the caller may read. A Team, Project, or
  * member whose name is unknown keeps the API label so that nothing is hidden.
  *
  * @param groupBy - Dimension the widget groups by; undefined for widgets without one.
@@ -684,6 +704,8 @@ export function resolveAnalyticsGroupLabel(
       return lookup.member?.(group.key) ?? group.label
     case 'status':
       return lookup.statusCategory?.(group.key) ?? group.label
+    case 'priority':
+      return lookup.priority?.(group.key) ?? group.label
     case 'work-item-type': {
       const name = lookup.workItemType?.(group.key)
       if (name !== undefined) return name
