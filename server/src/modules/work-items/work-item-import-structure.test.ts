@@ -61,6 +61,24 @@ describe('Work Item import structure', () => {
     expect(preview.errors).toEqual([expect.objectContaining({ row: 6, code: 'ImportOutlineLevelInvalid' })])
   })
 
+  test('keeps the outline when some rows take their parent from a WBS number', () => {
+    const preview = previewWorkItemImport('json', source([
+      { WBS: '1', Level: 1 },
+      { WBS: '1.1', Level: 2 },
+      { Level: 3 },
+    ]), [
+      ...baseMapping,
+      { sourceField: 'WBS', targetField: 'wbsNumber' },
+      { sourceField: 'Level', targetField: 'outlineLevel' },
+    ])
+
+    expect(preview.errors).toEqual([])
+    expect(preview.links).toEqual([
+      { kind: 'parent', childRow: 2, parentRow: 1 },
+      { kind: 'parent', childRow: 3, parentRow: 2 },
+    ])
+  })
+
   test('resolves parent keys by import key and reports unknown, duplicate, and cyclic keys', () => {
     const preview = previewWorkItemImport('json', source([
       { Key: 'a', Parent: 'c' },

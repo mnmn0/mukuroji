@@ -201,6 +201,21 @@ export function resolveWorkItemImportStructure(
   const outlineStack: Array<{ level: number; row: number }> = []
   for (const row of rows) {
     let parentRow: number | undefined
+    // Every row with a level updates the outline, so a row whose parent comes from another field
+    // still anchors the rows below it.
+    let outlineParentRow: number | undefined
+    let outlineError = false
+    if (row.outlineLevel !== undefined) {
+      while (outlineStack.length > 0 && outlineStack[outlineStack.length - 1]!.level >= row.outlineLevel) {
+        outlineStack.pop()
+      }
+      const parent = outlineStack[outlineStack.length - 1]
+      if (row.outlineLevel > 1) {
+        if (parent?.level === row.outlineLevel - 1) outlineParentRow = parent.row
+        else outlineError = true
+      }
+      outlineStack.push({ level: row.outlineLevel, row: row.row })
+    }
     if (row.parentKey !== undefined) {
       parentRow = resolve(row.parentKey)
       if (parentRow === undefined) {
@@ -212,24 +227,16 @@ export function resolveWorkItemImportStructure(
       if (parentRow === undefined) {
         errors.push(referenceError(row.row, 'wbsNumber', `No row has the parent WBS number "${parentWbsNumber}".`))
       }
-    } else if (row.outlineLevel !== undefined) {
-      while (outlineStack.length > 0 && outlineStack[outlineStack.length - 1]!.level >= row.outlineLevel) {
-        outlineStack.pop()
+    } else if (row.outlineLevel !== undefined && (row.wbsNumber === undefined || row.outlineLevel > 1)) {
+      parentRow = outlineParentRow
+      if (outlineError) {
+        errors.push({
+          row: row.row,
+          field: 'outlineLevel',
+          code: 'ImportOutlineLevelInvalid',
+          message: `outlineLevel ${row.outlineLevel} needs an earlier row at level ${row.outlineLevel - 1}.`,
+        })
       }
-      const parent = outlineStack[outlineStack.length - 1]
-      if (row.outlineLevel > 1) {
-        if (parent?.level === row.outlineLevel - 1) {
-          parentRow = parent.row
-        } else {
-          errors.push({
-            row: row.row,
-            field: 'outlineLevel',
-            code: 'ImportOutlineLevelInvalid',
-            message: `outlineLevel ${row.outlineLevel} needs an earlier row at level ${row.outlineLevel - 1}.`,
-          })
-        }
-      }
-      outlineStack.push({ level: row.outlineLevel, row: row.row })
     }
     if (parentRow === row.row) {
       errors.push(referenceError(row.row, 'parentKey', 'A row cannot be its own parent.'))

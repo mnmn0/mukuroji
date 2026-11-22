@@ -625,6 +625,8 @@ async function processQueueRecord(
   let validation: WorkItemImportValidationResult | undefined
   let checkpointRow = execution.checkpointRow
   let processingRow: number | undefined
+  // A link step reports the source row it belongs to, not its receipt number.
+  let processingReportRow: number | undefined
   try {
     await dependencies.assertTenantEnabled(execution)
     await dependencies.jobs.markRunning(execution)
@@ -674,11 +676,13 @@ async function processQueueRecord(
       )
       checkpointRow = row
       processingRow = undefined
+      processingReportRow = undefined
     }
 
     for (const item of validation.rows) {
       if (item.row <= checkpointRow) continue
       processingRow = item.row
+      processingReportRow = item.row
       const current = await readRunnableExecution(execution, dependencies)
       if (!current) return
       const rowIdentity = createRowIdentity(current, item.row, item.input)
@@ -699,6 +703,7 @@ async function processQueueRecord(
       const step = validation.report.totalRows + index + 1
       if (step <= checkpointRow) continue
       processingRow = step
+      processingReportRow = readLinkRow(link)
       const current = await readRunnableExecution(execution, dependencies)
       if (!current) return
       const linkIdentity = createLinkIdentity(current, index, link)
@@ -737,7 +742,7 @@ async function processQueueRecord(
         createRuntimeFailureReport(
           validation,
           checkpointRow,
-          processingRow,
+          processingRow === undefined ? undefined : processingReportRow ?? processingRow,
           error.code,
         ),
       )
@@ -867,6 +872,19 @@ async function readRunnableExecution(
   await dependencies.assertTenantEnabled(current)
   await dependencies.authorize(current)
   return current
+}
+
+/**
+ * Returns the source row a link is reported on.
+ *
+ * @param link - Link being applied.
+ * @returns The child, successor, source, or criteria row.
+ */
+function readLinkRow(link: WorkItemImportLink) {
+  if (link.kind === 'parent') return link.childRow
+  if (link.kind === 'dependency') return link.successorRow
+  if (link.kind === 'relation') return link.sourceRow
+  return link.row
 }
 
 function assertValidationRows(validation: WorkItemImportValidationResult) {

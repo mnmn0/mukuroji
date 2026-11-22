@@ -90,25 +90,9 @@ export async function validateWorkItemImportLinks(
   links: readonly WorkItemImportLink[],
   rows: ReadonlyMap<number, WorkItemImportLinkRow>,
 ): Promise<WorkItemImportLinkError[]> {
-  const errors: WorkItemImportLinkError[] = []
+  const errors = validateWorkItemImportParentLinks(configuration, links, rows)
   let managerAccess: Awaited<ReturnType<typeof requireTeamPermission>> | Error | undefined
   for (const link of links) {
-    if (link.kind === 'parent') {
-      const child = rows.get(link.childRow)
-      const parent = rows.get(link.parentRow)
-      if (!child || !parent) continue
-      try {
-        assertWorkItemChildTypeAllowed(configuration.configuration, parent.workItemTypeId, child.workItemTypeId)
-      } catch (error) {
-        errors.push({
-          row: link.childRow,
-          field: 'parentKey',
-          code: readErrorCode(error, 'WorkItemChildTypeDenied'),
-          message: error instanceof Error ? error.message : 'The parent Work Item Type does not allow this child.',
-        })
-      }
-      continue
-    }
     if (link.kind !== 'dependency') continue
     const predecessor = rows.get(link.predecessorRow)
     const successor = rows.get(link.successorRow)
@@ -163,6 +147,39 @@ export async function validateWorkItemImportLinks(
         message: conflict.code === 'missing-schedule'
           ? 'Both Work Items of a schedule dependency need a schedule.'
           : `The schedule must start or finish on or after ${conflict.requiredDate ?? 'the date the dependency requires'}.`,
+      })
+    }
+  }
+  return errors
+}
+
+/**
+ * Checks that the Work Item Types of every parent link allow the child.
+ *
+ * @param configuration - Team Work Item configuration.
+ * @param links - Links resolved from the source.
+ * @param rows - Valid rows by row number.
+ * @returns Errors to report on the child rows.
+ */
+export function validateWorkItemImportParentLinks(
+  configuration: ResolvedWorkItemConfiguration,
+  links: readonly WorkItemImportLink[],
+  rows: ReadonlyMap<number, WorkItemImportLinkRow>,
+): WorkItemImportLinkError[] {
+  const errors: WorkItemImportLinkError[] = []
+  for (const link of links) {
+    if (link.kind !== 'parent') continue
+    const child = rows.get(link.childRow)
+    const parent = rows.get(link.parentRow)
+    if (!child || !parent) continue
+    try {
+      assertWorkItemChildTypeAllowed(configuration.configuration, parent.workItemTypeId, child.workItemTypeId)
+    } catch (error) {
+      errors.push({
+        row: link.childRow,
+        field: 'parentKey',
+        code: readErrorCode(error, 'WorkItemChildTypeDenied'),
+        message: error instanceof Error ? error.message : 'The parent Work Item Type does not allow this child.',
       })
     }
   }

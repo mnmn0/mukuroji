@@ -150,6 +150,29 @@ describe('durable Work Item import', () => {
     expect(fixture.execution?.terminalReport?.validRows).toBe(2)
   })
 
+  test('reports a rejected link on the row it belongs to', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-link-reject')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    const base = createWorkerDependencies(fixture)
+    const dependencies = createWorkerDependencies(fixture, {
+      async validate(execution, source) {
+        return {
+          ...await base.validate(execution, source),
+          links: [{ kind: 'parent', childRow: 2, parentRow: 1 }],
+        }
+      },
+      async applyLink() {
+        throw new WorkItemImportError('ImportValidationRejected', 'Import source no longer passes current validation.')
+      },
+    })
+
+    await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(fixture.execution?.status).toBe('failed')
+    expect(fixture.jobReports.at(-1)?.errors.at(-1)).toMatchObject({ row: 2, code: 'ImportValidationRejected' })
+  })
+
   test('stops applying links once cancellation is requested', async () => {
     const fixture = createFixture()
     const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-link-cancel')
