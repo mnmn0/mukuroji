@@ -3445,3 +3445,20 @@ test('refuses memory assignment writes once the member changed since it was read
   })
   expect((await client.getSnapshot(workspaceId)).roleAssignments).toEqual([])
 })
+
+test('reports a changed member even when CONTROL conflicted in the same checkpoint', async () => {
+  const harness = createDynamoHarness()
+  const client = new DynamoDbEnterpriseIdentityClient(
+    'enterprise-identity',
+    tokenSecret,
+    harness.documentClient as never,
+    undefined,
+    () => now,
+  )
+  await client.putMemberRoleAssignment(fencedAssignment)
+  // CONTROL, then the member fence as the last operation; the audit table is not configured.
+  harness.cancelNextTransaction(['ConditionalCheckFailed', 'ConditionalCheckFailed'])
+  await expect(client.deleteMemberRoleAssignment(fencedAssignment, undefined, {
+    memberFence: { memberKey: 'sato@example.com', expectedVersion: 4 },
+  })).rejects.toMatchObject({ status: 409, code: 'EnterpriseRoleAssignmentMemberChanged' })
+})

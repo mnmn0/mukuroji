@@ -3803,6 +3803,13 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
             }
           }
         }
+        // A changed member must be decided again, so it wins over a retryable CONTROL conflict.
+        if (
+          memberFenceOperationIndex !== undefined &&
+          conflictIndexes.has(memberFenceOperationIndex)
+        ) {
+          throw workspaceMemberChangedError(error.cause)
+        }
         if (conflictIndexes.has(0)) {
           throw new EnterpriseIdentityError(
             409,
@@ -3811,12 +3818,6 @@ export class DynamoDbEnterpriseIdentityClient extends EnterpriseIdentityService 
             true,
             { cause: error.cause },
           )
-        }
-        if (
-          memberFenceOperationIndex !== undefined &&
-          conflictIndexes.has(memberFenceOperationIndex)
-        ) {
-          throw workspaceMemberChangedError(error.cause)
         }
         throw toEnterprisePersistenceError(error)
       }

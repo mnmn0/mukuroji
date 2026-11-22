@@ -744,3 +744,35 @@ test('pins the Enterprise state that showed no assignments when promoting a memb
       ])
   })
 })
+
+test('refuses a promotion with 503 when the Enterprise revision cannot be fenced', async () => {
+  await withTestEnvironment({
+    ...enterpriseEnvironment,
+    ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable',
+  }, async () => {
+    const calls = configureFakeProjectClients(true, { workspaceRole: 'owner' })
+    /** Memory client whose snapshots carry no CONTROL revision. */
+    class RevisionlessIdentityClient extends InMemoryEnterpriseIdentityClient {
+      /**
+       * Returns the snapshot without its CONTROL revision.
+       *
+       * @param id - Workspace ID.
+       * @returns The snapshot.
+       */
+      override async getSnapshot(id: string) {
+        const { controlRevision: _controlRevision, ...snapshot } = await super.getSnapshot(id)
+        return snapshot
+      }
+    }
+    setTestAppDependencies({ enterpriseIdentity: new RevisionlessIdentityClient() })
+
+    const promotion = await sendAssignmentRequest(
+      '/api/workspace/members/sato@example.com',
+      'PATCH',
+      { role: 'admin', expectedVersion: 1 },
+    )
+    expect(promotion.status).toBe(503)
+    expect(await promotion.json()).toMatchObject({ code: 'EnterpriseAuthorizationUnavailable' })
+    expect(calls.workspaceMemberUpdates).toEqual([])
+  })
+})

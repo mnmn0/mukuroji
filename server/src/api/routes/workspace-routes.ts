@@ -65,6 +65,28 @@ function readOptionalWorkspaceName(value: unknown) {
 }
 
 /**
+ * Builds the Enterprise CONTROL fence for an owner or admin promotion, as a Workspace error.
+ *
+ * @param workspaceId - Workspace whose Enterprise state was read.
+ * @param controlRevision - CONTROL revision of the snapshot that showed no assignments.
+ * @returns The condition check, or undefined without an Enterprise identity table.
+ * @throws WorkspaceAccessError 503 `EnterpriseAuthorizationUnavailable` when no revision was read.
+ */
+function createWorkspacePromotionEnterpriseCheck(
+  workspaceId: string,
+  controlRevision: number | undefined,
+): WorkspaceAccessTransactWriteItem | undefined {
+  try {
+    return createEnterpriseControlRevisionConditionCheck(workspaceId, controlRevision)
+  } catch (error) {
+    if (error instanceof ProjectDataError) {
+      throw new WorkspaceAccessError(error.status, error.code, error.message, { cause: error })
+    }
+    throw error
+  }
+}
+
+/**
  * Resolves the tenant-owned invitation default from authoritative Workspace state.
  *
  * @param principal - Current active Workspace administrator.
@@ -679,7 +701,7 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
         if (role === 'owner' || role === 'admin') {
           // Pin the Enterprise state that showed no assignments, so an assignment created
           // concurrently cancels the promotion.
-          const enterpriseControlCheck = createEnterpriseControlRevisionConditionCheck(
+          const enterpriseControlCheck = createWorkspacePromotionEnterpriseCheck(
             principal.directoryId,
             enterpriseSnapshot.controlRevision,
           )
