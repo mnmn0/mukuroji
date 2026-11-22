@@ -30,7 +30,7 @@
       ]
     },
     "cdk": {
-      "entry": ["bin/cdk.ts", "scripts/cdk-nag.ts", "scripts/remove-demo-data.ts", "test/**/*.test.ts", "lib/stacks/mukuroji-stack.ts"],
+      "entry": ["bin/cdk.ts", "scripts/cdk-nag.ts", "scripts/remove-demo-data.ts", "scripts/generate-local-dynamodb-tables.ts", "test/**/*.test.ts", "lib/stacks/mukuroji-stack.ts"],
       "ignoreDependencies": ["esbuild"]
     }
   }
