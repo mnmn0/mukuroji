@@ -23,6 +23,7 @@ const meta = {
 
 export default meta
 
+/** Story object of this component's stories. */
 type Story = StoryObj<typeof meta>
 
 /** The viewer does not watch the Milestone yet. */

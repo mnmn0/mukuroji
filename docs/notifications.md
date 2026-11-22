@@ -281,6 +281,6 @@ Milestone の watcher は（[ADR 0063](adr/0063-planning-milestone-watcher-key.m
 - event は `notificationCandidates` を空で持ち、projection が現在の watcher を `watcher` として加えます。変更した本人には送りません。Project watcher には送りません
 - projection（と Slack・Email の送信直前の再確認）は、composition root が注入する reader で Planning table の Milestone の行を強整合で読み直し、消えた・archive された・event の Team / Project から移った Milestone では届けません。宛先は Planning の読み取り（Enterprise では `planning.read`）が要ります
 - Inbox は表示のたびに、Milestone が同じ scope に archive されずに残っていること、読めること、今も watch していることを確かめます。Slack・Email の送信直前にも Milestone の行と watch を読み直します
-- 通知は「Milestone の完了」「Milestone の予定変更」として届き、`/planning?entityId=<id>` を開きます。title は Milestone 名です
+- 通知は「Milestone の完了」「Milestone の予定変更」として届き、`/planning/timeline?entityId=<id>` を開きます。title は Milestone 名です
 
 期限境界の authoritative time zone は各 Work Item の canonical schedule が所有します。Notification scan と Web の due/overdue 表示は同じ `schedule.calendarPolicy.timeZone` を使用し、実行環境や viewer の local timezone から期限状態を推測しません。

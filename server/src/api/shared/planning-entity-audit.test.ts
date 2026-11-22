@@ -140,7 +140,7 @@ test('tells the Milestone watchers when it is completed or its day changes', () 
     actorMemberKey: 'editor@example.com',
     teamId: 'team-1',
     projectId: 'project-1',
-    deepLink: '/planning?entityId=milestone-1',
+    deepLink: '/planning/timeline?entityId=milestone-1',
     notificationTitle: 'Beta launch',
     notificationCandidates: [],
   })

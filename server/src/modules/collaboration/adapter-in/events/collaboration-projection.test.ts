@@ -2771,7 +2771,7 @@ describe('collaboration projection pure helpers', () => {
         occurredAt: { S: '2026-07-12T12:00:00.000Z' }, outboxStatus: { S: 'pending' },
         metadata: { M: {
           actorMemberKey: { S: 'editor@example.com' }, teamId: { S: 'core' }, projectId: { S: 'platform' },
-          deepLink: { S: '/planning?entityId=beta-launch' }, notificationTitle: { S: 'Beta launch' },
+          deepLink: { S: '/planning/timeline?entityId=beta-launch' }, notificationTitle: { S: 'Beta launch' },
           notificationCandidates: { L: [] },
         } },
       } },
@@ -2783,7 +2783,7 @@ describe('collaboration projection pure helpers', () => {
       // The editor is not told about their own change, and a watcher without Project access is skipped.
       expect(projected('completed')).toEqual(['watcher@example.com'])
       expect(notifications[0]).toMatchObject({
-        entityId: 'beta-launch', reasons: ['watcher'], deepLink: '/planning?entityId=beta-launch', title: 'Beta launch',
+        entityId: 'beta-launch', reasons: ['watcher'], deepLink: '/planning/timeline?entityId=beta-launch', title: 'Beta launch',
       })
 
       // A Milestone moved to another Project, or archived, since the change is not reported.

@@ -44,6 +44,7 @@ const meta = {
 
 export default meta
 
+/** Story object of this component's stories. */
 type Story = StoryObj<typeof meta>
 
 /** Typing `@` and part of a name offers members; Enter inserts the name token. */

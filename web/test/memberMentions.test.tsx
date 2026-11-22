@@ -39,6 +39,20 @@ describe('display-name mentions', () => {
       .toEqual(['kai-1@example.com'])
   })
 
+  test('keeps the longest of overlapping name tokens', () => {
+    const named: MentionableMember[] = [
+      { memberKey: 'ann@example.com', name: 'Ann', status: 'active' },
+      { memberKey: 'ann-smith@example.com', name: 'Ann Smith', status: 'active' },
+    ]
+    expect(findMemberMentionRanges('@Ann @Ann Smith', ['ann@example.com', 'ann-smith@example.com'], named))
+      .toEqual([
+        { memberKey: 'ann@example.com', offset: 0, length: 4 },
+        { memberKey: 'ann-smith@example.com', offset: 5, length: 10 },
+      ])
+    expect(resolveDocumentMentions('@Ann Smith', ['ann@example.com', 'ann-smith@example.com'], named))
+      .toEqual([{ userId: 'ann-smith@example.com', offset: 0, length: 10 }])
+  })
+
   test('drops a picked member whose token was edited away', () => {
     expect(resolveMentionedMemberKeys('@An', ['ann@example.com'], members)).toEqual([])
   })

@@ -104,7 +104,8 @@ export function MemberMentionTextarea({
 
   /** Moves through and picks suggestions from the keyboard. */
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (!isOpen) return
+    // While an IME composes a name, Enter and the arrow keys belong to the IME.
+    if (!isOpen || event.nativeEvent.isComposing) return
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
       const step = event.key === 'ArrowDown' ? 1 : -1

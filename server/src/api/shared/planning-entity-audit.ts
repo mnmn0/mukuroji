@@ -185,7 +185,7 @@ export function readPlanningMilestoneNotificationKind(
  * @returns Relative Web path.
  */
 export function createPlanningEntityDeepLink(entityId: string) {
-  return `/planning?${new URLSearchParams({ entityId }).toString()}`
+  return `/planning/timeline?${new URLSearchParams({ entityId }).toString()}`
 }
 
 /**

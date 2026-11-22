@@ -66,7 +66,7 @@ export function formatMemberMentionLabel(
  * @param body - Comment body that may contain mention tokens.
  * @param selectedMemberKeys - Member keys picked in the composer.
  * @param members - Members used to validate status and labels.
- * @returns Token ranges ordered by offset.
+ * @returns Non-overlapping token ranges ordered by offset; the longer of two overlapping tokens wins.
  */
 export function findMemberMentionRanges(
   body: string,
@@ -97,7 +97,12 @@ export function findMemberMentionRanges(
       })
     }
   }
-  return ranges.sort((left, right) => left.offset - right.offset)
+  // `@Ann Smith` also matches `@Ann`; the longest token at a position wins so ranges never overlap.
+  const kept: MemberMentionRange[] = []
+  for (const range of ranges.sort((left, right) => right.length - left.length || left.offset - right.offset)) {
+    if (!overlapsMentionRanges(range, kept)) kept.push(range)
+  }
+  return kept.sort((left, right) => left.offset - right.offset)
 }
 
 /**
