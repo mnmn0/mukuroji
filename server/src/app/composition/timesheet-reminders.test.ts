@@ -5,6 +5,8 @@ import {
   parseAuditProjectionEvent,
 } from '../../modules/collaboration/adapter-in/events/collaboration-projection'
 import { TIMESHEET_REMINDER_EVENT_TYPE } from '../../modules/notifications'
+import type { ChannelDelivery } from '../../modules/notifications'
+import { toDeliveryProjectionEvent } from './notification-delivery-authorization'
 import {
   createTimesheetReader,
   createTimesheetReminderRevalidator,
@@ -125,5 +127,52 @@ describe('timesheet reminder adapters', () => {
       notificationCandidates: [...event.notificationCandidates, { memberKey: 'other@example.com', reason: 'watcher' }],
     }, revalidator)).current).toBe(false)
     expect(await readTimesheetReminderFence({ ...event, eventType: 'comment.created' }, undefined)).toEqual({ current: true })
+  })
+
+  test('rechecks a queued Slack or Email reminder against the entries right before it is sent', async () => {
+    const stored = new Map<string, TimeEntry>([['entry-1', createEntry()]])
+    const revalidator = createTimesheetReminderRevalidator({
+      getEntry: async (_workspaceId, _teamId, entryId) => stored.get(entryId),
+    }, 'AnalyticsTable')
+    const delivery: ChannelDelivery = {
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      recipientKey: 'workspace-1#member@example.com',
+      notificationKey: '2026-07-12T00:00:00.000Z#event-1',
+      attempts: 0,
+      version: 1,
+      nextAttemptAt: '2026-07-12T00:00:00.000Z',
+      expiresAt: 2_000_000_000,
+      timeEntryIds: ['entry-1'],
+      timesheetDueBefore: '2026-07-05T00:00:00.000Z',
+      notification: {
+        id: 'notification-1',
+        eventId: 'event-1',
+        eventType: TIMESHEET_REMINDER_EVENT_TYPE,
+        reasons: ['timesheet'],
+        teamId: 'core',
+        projectId: 'project-1',
+        occurredAt: '2026-07-12T00:00:00.000Z',
+        state: 'unread',
+      },
+    }
+    const event = toDeliveryProjectionEvent(delivery)
+    expect(event).toMatchObject({
+      workspaceId: 'workspace-1',
+      teamId: 'core',
+      projectId: 'project-1',
+      timeEntryIds: ['entry-1'],
+      timesheetDueBefore: '2026-07-05T00:00:00.000Z',
+      notificationCandidates: [{ memberKey: 'member@example.com', reason: 'timesheet' }],
+    })
+    expect((await readTimesheetReminderFence(event, revalidator)).current).toBe(true)
+    // Submitted while quiet hours held the message: it is not sent.
+    stored.set('entry-1', createEntry({ status: 'submitted' }))
+    expect((await readTimesheetReminderFence(event, revalidator)).current).toBe(false)
+    stored.set('entry-1', createEntry())
+    // A row saved before the entries were kept on it, or a job that cannot reread them, never sends.
+    const { timeEntryIds: _ids, ...legacy } = delivery
+    expect((await readTimesheetReminderFence(toDeliveryProjectionEvent(legacy), revalidator)).current).toBe(false)
+    expect((await readTimesheetReminderFence(event, undefined)).current).toBe(false)
   })
 })
