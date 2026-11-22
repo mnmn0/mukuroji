@@ -38,6 +38,7 @@ import { createWorkspaceTaskTestId } from '../../work-items/ui/WorkspaceWorkItem
 import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
 import { HelpWorkspaceView } from '../../workspace/ui/HelpWorkspaceView'
 import { HomeWorkspaceView } from '../../workspace/ui/HomeWorkspaceView'
+import { MyTasksQuickCreate } from '../../workspace/ui/MyTasksQuickCreate'
 import { MyTasksWorkspaceView } from '../../workspace/ui/MyTasksWorkspaceView'
 import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 import {
@@ -744,6 +745,40 @@ export const MyTasksTableEditable: Story = {
 /** The editable My Tasks table on a 390px-wide viewport. */
 export const MyTasksTableEditableMobile: Story = {
   render: () => <MyTasksEditableTableStory />,
+  globals: { viewport: { value: 'mobile1', isRotated: false } },
+}
+
+const onQuickCreateMyTask = fn(async () => undefined)
+const quickCreateStoryDestinations = projectDirectoryFixtures.slice(0, 1).flatMap((team) => [
+  { key: team.id, label: team.name, teamId: team.id },
+  ...team.projects.slice(0, 2).map((project) => ({
+    key: `${team.id}/${project.id}`,
+    label: `${team.name} / ${project.name}`,
+    projectId: project.id,
+    teamId: team.id,
+  })),
+])
+
+/** The My Tasks quick create form, which adds a Work Item assigned to the person. */
+export const MyTasksQuickCreateForm: Story = {
+  render: () => (
+    <MyTasksQuickCreate destinations={quickCreateStoryDestinations} onCreate={onQuickCreateMyTask} t={t} />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onQuickCreateMyTask.mockClear()
+    const title = canvas.getByRole('textbox', { name: t('workspace.myTasks.quickCreate.title') })
+    await userEvent.type(title, 'Story task{Enter}')
+    await expect(onQuickCreateMyTask).toHaveBeenCalledTimes(1)
+    await expect(title).toHaveValue('')
+  },
+}
+
+/** The My Tasks quick create form on a 390px-wide viewport. */
+export const MyTasksQuickCreateFormMobile: Story = {
+  render: () => (
+    <MyTasksQuickCreate destinations={quickCreateStoryDestinations} onCreate={onQuickCreateMyTask} t={t} />
+  ),
   globals: { viewport: { value: 'mobile1', isRotated: false } },
 }
 

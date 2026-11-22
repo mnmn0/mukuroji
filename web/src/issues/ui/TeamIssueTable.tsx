@@ -83,6 +83,7 @@ export function IssueTable({
   isAiOperationPending,
   locale,
   onIssueActionMenuOpen,
+  onIssueSelectionChange,
   onOpenIssue,
   outline,
   presentation,
@@ -103,6 +104,8 @@ export function IssueTable({
   /** Opens the canonical action menu for one Team Issue row. */
   onIssueActionMenuOpen?: TeamIssueActionMenuOpenHandler
   onOpenIssue?: (issue: TeamIssue) => void
+  /** Selects or clears one row for a bulk operation; rows show no checkbox without it. */
+  onIssueSelectionChange?: (issue: TeamIssue, selected: boolean) => void
   /** Hierarchy outline; when present, rows nest by hierarchy and grouping is not applied. */
   outline?: IssueTableOutline
   presentation?: TaskViewPresentationSettings
@@ -268,6 +271,18 @@ export function IssueTable({
                         <ChevronIcon className={`h-4 w-4 fill-none stroke-current stroke-2 transition-transform ${outlineRow.collapsed ? '-rotate-90' : ''}`} />
                       </button>
                     ) : <span aria-hidden="true" className="w-6 flex-none max-[640px]:w-11" />
+                  ) : null}
+                  {onIssueSelectionChange ? (
+                    <input
+                      aria-label={`${t('bulk.selectItem')}: ${issueTitle}`}
+                      checked={selectedForAction}
+                      className="mt-0.5 h-4 w-4 flex-none rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary-text)] max-[640px]:mt-3.5"
+                      data-print-hidden=""
+                      data-testid={`issue-row-select-${issue.id}`}
+                      disabled={isAiOperationPending}
+                      onChange={(event) => onIssueSelectionChange(issue, event.target.checked)}
+                      type="checkbox"
+                    />
                   ) : null}
                   <button
                     aria-keyshortcuts={outlineRow && onMove ? WORK_ITEM_HIERARCHY_MOVE_KEY_SHORTCUTS : undefined}

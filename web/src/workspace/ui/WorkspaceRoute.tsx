@@ -1,3 +1,4 @@
+import { DirectoryArchiveImpactGate } from './DirectoryArchiveImpactGate'
 import {
   useCallback,
   useEffect,
@@ -489,6 +490,7 @@ function WorkspaceRouteShell({
           mobileDialogLabel={t('sidebar.mobileDialog')}
           onArchiveProject={onArchiveProject ? handleArchiveProject : undefined}
           onArchiveTeam={onArchiveTeam ? handleArchiveTeam : undefined}
+          ArchiveImpactGate={onArchiveTeam || onArchiveProject ? DirectoryArchiveImpactGate : undefined}
           onCreateProject={workspace.onCreateProject}
           onCreateTeam={workspace.onCreateTeam}
           onMobileClose={closeMobileSidebar}

@@ -31,6 +31,13 @@ describe('Analytics group labels', () => {
     )).toBe('未設定')
     expect(resolveAnalyticsGroupLabel({ dimension: 'status' }, { key: 'completed', label: 'completed' }, lookup))
       .toBe('完了')
+    expect(resolveAnalyticsGroupLabel({ dimension: 'priority' }, { key: 'high', label: 'high' }, lookup))
+      .toBe('高')
+    // Cycle and Milestone groups carry the title the caller may read.
+    expect(resolveAnalyticsGroupLabel({ dimension: 'cycle' }, { key: 'cycle-1', label: 'Sprint 1' }, lookup))
+      .toBe('Sprint 1')
+    expect(resolveAnalyticsGroupLabel({ dimension: 'milestone' }, { key: '', label: 'Unassigned' }, lookup))
+      .toBe('未設定')
     // A member without a name shows the email address.
     expect(resolveAnalyticsGroupLabel(
       { dimension: 'assignee' },

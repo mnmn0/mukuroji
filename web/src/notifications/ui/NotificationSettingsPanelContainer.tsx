@@ -5,6 +5,7 @@ import type {
   NotificationPreferencesSessionErrorReporter,
 } from '../queries/useNotificationPreferences'
 import type { PushRequestGuard } from '../queries/usePushDeviceStatus'
+import type { NotificationMuteTeam } from './NotificationRoutingFields'
 import { NotificationSettingsPanel } from './NotificationSettingsPanel'
 import { PushDeviceSettings } from './PushDeviceSettings'
 
@@ -20,6 +21,8 @@ export type NotificationSettingsPanelContainerProps = {
   onSessionError?: NotificationPreferencesSessionErrorReporter
   /** Optional session guard that reports push request session failures to the Workspace shell. */
   guardRequest?: PushRequestGuard
+  /** Teams and Projects the member can mute; omitted while unknown. */
+  muteTargets?: readonly NotificationMuteTeam[]
 }
 
 /**
@@ -34,6 +37,7 @@ export function NotificationSettingsPanelContainer({
   locale,
   onSessionError,
   guardRequest,
+  muteTargets,
 }: NotificationSettingsPanelContainerProps) {
   const controller = useNotificationPreferences(
     accessToken,
@@ -48,6 +52,7 @@ export function NotificationSettingsPanelContainer({
         controller={controller}
         key={controller.preferences?.version ?? 'notification-settings-loading'}
         locale={locale}
+        muteTargets={muteTargets}
       />
       <PushDeviceSettings controller={pushDevice} locale={locale} />
     </div>

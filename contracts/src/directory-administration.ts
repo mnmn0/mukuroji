@@ -7,6 +7,9 @@ export type DirectoryProjectTone = typeof DIRECTORY_PROJECT_TONES[number]
 /** Largest number of Teams, or Projects in one Team, that one reorder request may name. */
 export const DIRECTORY_REORDER_MAX_ITEMS = 90
 
+/** Longest Japanese or English Team or Project name that creating or renaming stores. */
+export const DIRECTORY_DISPLAY_NAME_MAX_LENGTH = 500
+
 /** Project row shown to Workspace administrators, including an archived Project. */
 export type DirectoryAdministrationProject = {
   /** Stable Project identifier. It never changes when the Project is renamed. */
@@ -109,6 +112,55 @@ export type RestoreDirectoryProjectResponse = {
   projectId: string
 }
 
+/** One counted archive impact. Counting stops early on large Teams, so a count can be a floor. */
+export type DirectoryArchiveImpactCount = {
+  /** Number of matching records counted. */
+  count: number
+  /** Whether counting stopped before reading every record, so the real number may be larger. */
+  hasMore: boolean
+}
+
+/** What archiving a Team or Project affects, shown before the archive is confirmed. */
+export type DirectoryArchiveImpactResponse = {
+  /** Work Items that are neither completed nor canceled, archived Work Items excluded. */
+  openWorkItems: DirectoryArchiveImpactCount
+  /** Agent Runs that are still active on the Team's or Project's Work Items. */
+  activeAgentRuns: DirectoryArchiveImpactCount
+  /** Active Planning entities scoped to the Team or Project. Any of them blocks the archive. */
+  planningEntities: number
+  /** Planning links to the Team's or Project's Work Items. Any of them blocks the archive. */
+  planningWorkItemLinks: number
+  /**
+   * Planning dependencies that block the archive: for a Team, every dependency on its Work
+   * Items; for a Project, every dependency on a Work Item assigned to the Project.
+   */
+  planningDependencies: number
+  /** Active Webhook subscriptions that deliver events for the Team. */
+  webhookSubscriptions: number
+  /**
+   * Whether the archive is refused until the Planning references are removed. A Project archive
+   * is also refused when its Team has more dependency endpoints than one archive can guard.
+   */
+  archiveBlocked: boolean
+}
+
+/** Team or Project whose archive impact is read. */
+export type DirectoryArchiveImpactTarget =
+  | {
+      /** A Team and every Project in it. */
+      kind: 'team'
+      /** Team identifier. */
+      teamId: string
+    }
+  | {
+      /** One Project of a Team. */
+      kind: 'project'
+      /** Team that owns the Project. */
+      teamId: string
+      /** Project identifier. */
+      projectId: string
+    }
+
 /**
  * Returns whether a value is a Project sidebar color.
  *
@@ -162,6 +214,45 @@ function isDirectoryAdministrationProject(value: unknown): value is DirectoryAdm
     typeof value.nameEn === 'string' &&
     isDirectoryProjectTone(value.tone) &&
     (value.archivedAt === undefined || typeof value.archivedAt === 'string')
+}
+
+/**
+ * Returns whether a value is an archive impact response.
+ *
+ * @param value - Untrusted response body.
+ * @returns Whether every count has the expected shape.
+ */
+export function isDirectoryArchiveImpactResponse(
+  value: unknown,
+): value is DirectoryArchiveImpactResponse {
+  return isObject(value) &&
+    isDirectoryArchiveImpactCount(value.openWorkItems) &&
+    isDirectoryArchiveImpactCount(value.activeAgentRuns) &&
+    isCount(value.planningEntities) &&
+    isCount(value.planningWorkItemLinks) &&
+    isCount(value.planningDependencies) &&
+    isCount(value.webhookSubscriptions) &&
+    typeof value.archiveBlocked === 'boolean'
+}
+
+/**
+ * Returns whether a value is one counted archive impact.
+ *
+ * @param value - Untrusted value.
+ * @returns Whether the value has a count and a completeness flag.
+ */
+function isDirectoryArchiveImpactCount(value: unknown): value is DirectoryArchiveImpactCount {
+  return isObject(value) && isCount(value.count) && typeof value.hasMore === 'boolean'
+}
+
+/**
+ * Returns whether a value is a non-negative integer count.
+ *
+ * @param value - Untrusted value.
+ * @returns Whether the value can be shown as a count.
+ */
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 /**
