@@ -358,6 +358,9 @@ function ProfileForm({
   teamId,
   teamRevision,
 }: ProfileFormProps) {
+  // A new profile inherits the Workspace calendar; one saved before inheritance keeps its own.
+  const [inheritsWorkspace, setInheritsWorkspace] = useState(() =>
+    profile ? profile.calendarSource === 'workspace' : true)
   const [timeZone, setTimeZone] = useState(() => profile?.timeZone ?? 'UTC')
   const [role, setRole] = useState(() => profile?.role ?? '')
   const [skills, setSkills] = useState(() => profile?.skills.join(', ') ?? '')
@@ -371,6 +374,7 @@ function ProfileForm({
       displayName: memberLabel,
       ...(role.trim() ? { role: role.trim() } : {}),
       skills: splitList(skills),
+      calendarSource: inheritsWorkspace ? 'workspace' : 'custom',
       timeZone: timeZone.trim() || 'UTC',
       schedule: profile && Number(hours) === profile.schedule.monday.minutes / 60
         ? profile.schedule
@@ -385,11 +389,24 @@ function ProfileForm({
   return (
     <ControlCard title={t('workload.controls.profile.title')} description={t('workload.controls.profile.description')}>
       <div className="grid gap-3">
-        <Field label={t('workload.controls.profile.timezone')} value={timeZone} onChange={setTimeZone} placeholder="Asia/Tokyo" />
+        <label className="flex items-start gap-2 text-xs font-semibold text-[var(--workbench-text)]">
+          <input
+            checked={inheritsWorkspace}
+            className="mt-0.5"
+            data-testid="workload-profile-inherit-workspace"
+            type="checkbox"
+            onChange={(event) => setInheritsWorkspace(event.target.checked)}
+          />
+          <span className="grid gap-1">
+            {t('workload.controls.profile.inheritWorkspace')}
+            <span className="font-normal leading-5 text-[var(--workbench-muted)]">{t('workload.controls.profile.inheritWorkspaceHint')}</span>
+          </span>
+        </label>
+        {inheritsWorkspace ? null : <Field label={t('workload.controls.profile.timezone')} value={timeZone} onChange={setTimeZone} placeholder="Asia/Tokyo" />}
         <Field label={t('workload.controls.profile.hours')} value={hours} onChange={setHours} type="number" min="0" max="24" step="0.5" />
         <Field label={t('workload.controls.profile.role')} value={role} onChange={setRole} />
         <Field label={t('workload.controls.profile.skills')} value={skills} onChange={setSkills} placeholder={t('workload.controls.profile.skillsPlaceholder')} />
-        <Field label={t('workload.controls.profile.holidays')} value={holidayDates} onChange={setHolidayDates} placeholder={t('workload.controls.profile.holidaysPlaceholder')} />
+        <Field label={t(inheritsWorkspace ? 'workload.controls.profile.personalHolidays' : 'workload.controls.profile.holidays')} value={holidayDates} onChange={setHolidayDates} placeholder={t('workload.controls.profile.holidaysPlaceholder')} />
         <button className={buttonClass} disabled={isSaving} type="button" onClick={saveProfile}>{t('workload.controls.profile.save')}</button>
       </div>
     </ControlCard>

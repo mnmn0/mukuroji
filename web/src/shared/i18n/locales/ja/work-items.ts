@@ -278,6 +278,7 @@ export const workItemsMessages = {
   'tasks.calendar.day.thu': '木',
   'tasks.calendar.day.fri': '金',
   'tasks.calendar.empty': '予定なし',
+  'tasks.calendar.nonWorking': '休み',
   'tasks.calendar.previousMonth': '前の月',
   'tasks.calendar.currentMonth': '今月',
   'tasks.calendar.nextMonth': '次の月',

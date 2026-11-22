@@ -171,6 +171,7 @@ describe('DynamoDbTenantAdministrationClient', () => {
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
       holidays: [],
       publicHolidays: 'japan',
+      timeZone: 'Asia/Tokyo',
     })
     const reminders = {
       enabled: true,

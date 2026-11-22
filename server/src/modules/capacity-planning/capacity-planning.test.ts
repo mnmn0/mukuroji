@@ -70,6 +70,64 @@ describe('capacity planning calculations', () => {
     expect(memberSummary.cells.map((cell) => cell.status)).toEqual(['over', 'unavailable', 'unavailable', 'over'])
   })
 
+  test('applies the Workspace calendar to a profile that inherits it, keeping personal days off', () => {
+    const schedule = createDefaultWorkingSchedule()
+    // A part-time member who does not work on Wednesdays.
+    schedule.wednesday = { enabled: false, minutes: 0 }
+    schedule.saturday = { enabled: true, minutes: 240 }
+    const inheriting: WorkloadMemberProfile = {
+      ...createProfile('member-1', 'UTC'),
+      calendarSource: 'workspace',
+      schedule,
+      holidays: [{ date: '2026-08-06', label: 'Personal day' }],
+    }
+    const custom = createProfile('member-2', 'UTC')
+    const workspaceCalendar = {
+      timeZone: 'Asia/Tokyo',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'] as const,
+      holidays: ['2026-08-04'],
+    }
+    const snapshot = buildWorkloadSnapshot(
+      createState([inheriting, custom]),
+      // 2026-08-07T16:00Z is Friday in UTC but already Saturday 2026-08-08 in Tokyo.
+      [{ memberId: 'member-1', startAt: '2026-08-07T16:00:00.000Z', endAt: '2026-08-07T17:00:00.000Z', durationMinutes: 60, status: 'approved' }],
+      [],
+      createInput({
+        fromDate: '2026-08-03',
+        toDate: '2026-08-08',
+        workspaceCalendar: { ...workspaceCalendar, workingWeekdays: [...workspaceCalendar.workingWeekdays] },
+      }),
+    )
+
+    const [member, other] = snapshot.members
+    // Monday works; the Workspace holiday on Tuesday, the member's own Wednesday off, the personal
+    // day on Thursday; Friday works; Saturday is not a Workspace working day.
+    expect(member?.cells.map((cell) => cell.capacityMinutes)).toEqual([480, 0, 0, 0, 480, 0])
+    expect(member?.cells.map((cell) => cell.actualMinutes)).toEqual([0, 0, 0, 0, 0, 60])
+    // The summary returns the stored profile for editing, not the inherited days off.
+    expect(member).toMatchObject({
+      calendarSource: 'workspace',
+      timeZone: 'UTC',
+      holidays: [{ date: '2026-08-06', label: 'Personal day' }],
+    })
+    expect(member?.schedule).toEqual(schedule)
+    // A profile with its own calendar ignores the Workspace holiday.
+    expect(other?.calendarSource).toBe('custom')
+    expect(other?.cells.map((cell) => cell.capacityMinutes)).toEqual([480, 480, 480, 480, 480, 0])
+  })
+
+  test('uses the default Workspace calendar for an inheriting profile when none is given', () => {
+    const snapshot = buildWorkloadSnapshot(
+      createState([{ ...createProfile('member-1', 'UTC'), calendarSource: 'workspace' }]),
+      [],
+      [],
+      // 2027-01-01 is a bundled Japanese national holiday.
+      createInput({ fromDate: '2026-12-31', toDate: '2027-01-01' }),
+    )
+
+    expect(snapshot.members[0]?.cells.map((cell) => cell.capacityMinutes)).toEqual([480, 0])
+  })
+
   test('splits actual submitted time at a DST-aware local midnight', () => {
     const member = createProfile('member-1', 'America/New_York')
     const entries: WorkloadTimeEntry[] = [{

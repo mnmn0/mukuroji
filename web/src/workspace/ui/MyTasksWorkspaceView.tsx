@@ -358,6 +358,7 @@ export function MyTasksWorkspaceView({
           onSelectTask={onOpenTask}
           t={t}
           tasks={ganttTasks}
+          workingCalendar={workingCalendar}
         />
       </div>
     )

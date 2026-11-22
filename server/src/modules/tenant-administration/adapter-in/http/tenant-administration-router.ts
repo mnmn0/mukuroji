@@ -373,7 +373,7 @@ function readTenantCalendarInput(value: unknown): WorkspaceCalendarSettings {
     throw new TenantAdministrationError(
       400,
       'InvalidTenantCalendarSettings',
-      'Fiscal year start month, week start day, working weekdays, or holidays are invalid.',
+      'Fiscal year start month, week start day, working weekdays, holidays, or time zone are invalid.',
     )
   }
   return calendar

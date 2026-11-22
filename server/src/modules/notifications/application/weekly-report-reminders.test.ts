@@ -44,6 +44,9 @@ describe('weekly report reminder timing', () => {
       reminder: { weekday: 5, hour: 17 },
     })
     expect(toWeeklyReportReminderTiming({ ...DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS, enabled: false })).toBeUndefined()
+    // A Workspace that chose another time zone is reminded in its own hours.
+    expect(toWeeklyReportReminderTiming(DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS, 'America/New_York')?.timeZone)
+      .toBe('America/New_York')
   })
 
   test('acts only in the configured local hours and points the escalation at the reminded week', () => {

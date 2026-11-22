@@ -85,6 +85,7 @@ const workspaceCalendar: WorkspaceCalendarSettings = {
   workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
   holidays: ['2026-12-29'],
   publicHolidays: 'japan',
+  timeZone: 'Asia/Tokyo',
 }
 
 test('gives a Public API Work Item without a schedule the Workspace working calendar', async () => {

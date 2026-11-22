@@ -56,6 +56,29 @@ export type WorkloadTimeOff = {
   revision: number
 }
 
+/**
+ * Where a member profile takes its working weekdays, days off, and time zone from.
+ *
+ * `workspace` inherits the Workspace calendar: the member works only on the Workspace working
+ * weekdays, takes every Workspace day off (company and national holidays), and uses the Workspace
+ * time zone; the profile keeps only the member's own hours, personal days off, and time off.
+ * `custom` uses the profile's own time zone, schedule, and holidays alone.
+ */
+export type WorkloadCalendarSource = 'workspace' | 'custom'
+
+/** Every calendar source, in the order the profile editor lists them. */
+export const WORKLOAD_CALENDAR_SOURCES: readonly WorkloadCalendarSource[] = ['workspace', 'custom']
+
+/**
+ * Narrows an untrusted value to a calendar source.
+ *
+ * @param value - Untrusted candidate, such as a request body field or a stored record.
+ * @returns Whether the value names a calendar source.
+ */
+export function isWorkloadCalendarSource(value: unknown): value is WorkloadCalendarSource {
+  return WORKLOAD_CALENDAR_SOURCES.some((source) => source === value)
+}
+
 /** Working availability and skills for one Team member. */
 export type WorkloadMemberProfile = {
   /** Contract schema version. */
@@ -72,11 +95,19 @@ export type WorkloadMemberProfile = {
   role?: string
   /** Skills used for request matching. */
   skills: string[]
-  /** IANA timezone used for schedule and time-off dates. */
+  /**
+   * Calendar the profile follows. Profiles saved before the Workspace calendar could be inherited
+   * leave it out and read as `custom`.
+   */
+  calendarSource?: WorkloadCalendarSource
+  /** IANA timezone used for schedule and time-off dates; ignored while inheriting the Workspace. */
   timeZone: string
-  /** Recurring local working schedule. */
+  /**
+   * Recurring local working schedule. While inheriting the Workspace, a weekday counts only when
+   * the Workspace also works on it.
+   */
   schedule: WorkingSchedule
-  /** Local dates that are not available. */
+  /** Local dates that are not available; personal days off on top of the Workspace's when inheriting. */
   holidays: WorkloadHoliday[]
   /** Planned absences. */
   timeOff: WorkloadTimeOff[]
@@ -206,7 +237,9 @@ export type WorkloadMemberSummary = {
   role?: string
   /** Skills used by resource matching. */
   skills: string[]
-  /** Member's schedule timezone. */
+  /** Calendar the stored profile follows; older servers leave it out, which reads as `custom`. */
+  calendarSource?: WorkloadCalendarSource
+  /** Time zone stored on the profile; the Workspace time zone applies while inheriting it. */
   timeZone: string
   /** Recurring local working schedule. */
   schedule: WorkingSchedule
@@ -274,6 +307,8 @@ export type SaveWorkloadMemberProfileInput = {
   role?: string
   /** Skills used for matching. */
   skills: string[]
+  /** Calendar the profile follows; `custom` when omitted, as clients from before inheritance send. */
+  calendarSource?: WorkloadCalendarSource
   /** IANA timezone. */
   timeZone: string
   /** Recurring schedule. */

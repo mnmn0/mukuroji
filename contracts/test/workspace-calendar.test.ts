@@ -1,7 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import { DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY } from '../src/work-items'
+import {
+  DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+  createWorkspaceWorkItemCalendarPolicy,
+} from '../src/work-items'
 import {
   DEFAULT_WORKSPACE_TIME_ZONE,
+  isWorkspaceTimeZone,
+  readWorkspaceCalendarSettings,
   resolveWorkspaceCalendarPeriod,
   toWorkspaceLocalDate,
   workspaceFiscalQuarterContaining,
@@ -21,6 +26,25 @@ describe('Workspace calendar contracts', () => {
     expect(toWorkspaceLocalDate('2026-11-17T15:00:00.000Z')).toBe('2026-11-18')
     expect(toWorkspaceLocalDate(Date.parse('2026-11-18T08:59:00.000Z'))).toBe('2026-11-18')
     expect(toWorkspaceLocalDate(new Date('2026-11-17T15:00:00.000Z'), 'UTC')).toBe('2026-11-17')
+  })
+
+  test('reads the Workspace time zone, Japan time when settings predate it', () => {
+    const settings = { fiscalYearStartMonth: 4, weekStartDay: 1 }
+    expect(readWorkspaceCalendarSettings(settings)?.timeZone).toBe('Asia/Tokyo')
+    expect(readWorkspaceCalendarSettings({ ...settings, timeZone: 'America/New_York' })?.timeZone)
+      .toBe('America/New_York')
+    expect(readWorkspaceCalendarSettings({ ...settings, timeZone: 'Mars/Olympus' })).toBeUndefined()
+    expect(readWorkspaceCalendarSettings({ ...settings, timeZone: '' })).toBeUndefined()
+    expect(isWorkspaceTimeZone('UTC')).toBe(true)
+    expect(isWorkspaceTimeZone(`Asia/${'x'.repeat(80)}`)).toBe(false)
+    expect(isWorkspaceTimeZone(9)).toBe(false)
+    // New Work Items take the Workspace time zone.
+    expect(createWorkspaceWorkItemCalendarPolicy({
+      workingWeekdays: ['monday'],
+      holidays: [],
+      publicHolidays: 'none',
+      timeZone: 'Europe/London',
+    }).timeZone).toBe('Europe/London')
   })
 
   test('rejects an invalid instant or time zone', () => {

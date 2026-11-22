@@ -599,7 +599,7 @@ export async function runNotificationSchedule(
     const workspaceIds = [...new Set((await listTeams()).map((team) => team.workspaceId))].sort()
     for (const workspaceId of workspaceIds) {
       const settings = await weeklyReportReader.readWorkspaceSettings(workspaceId)
-      const timing = toWeeklyReportReminderTiming(settings.reminders)
+      const timing = toWeeklyReportReminderTiming(settings.reminders, settings.timeZone)
       const run = timing ? resolveWeeklyReportReminderRun(now, timing) : undefined
       if (!run) continue
       const weekStart = weeklyReportWeekStart(run.date, settings.weekStartDay)

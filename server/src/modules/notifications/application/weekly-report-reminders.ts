@@ -32,14 +32,16 @@ export type WeeklyReportReminderTiming = {
  * Turns a Workspace's reminder settings into the schedule timing, in the Workspace time zone.
  *
  * @param settings - Stored settings; the defaults when the Workspace has not chosen its own.
+ * @param timeZone - Workspace time zone the hours are read in; Japan time by default.
  * @returns The timing, or undefined when reminders are off. Escalation needs the reminder.
  */
 export function toWeeklyReportReminderTiming(
   settings: WeeklyReportReminderSettings = DEFAULT_WEEKLY_REPORT_REMINDER_SETTINGS,
+  timeZone: string = DEFAULT_WORKSPACE_TIME_ZONE,
 ): WeeklyReportReminderTiming | undefined {
   if (!settings.enabled) return undefined
   return {
-    timeZone: DEFAULT_WORKSPACE_TIME_ZONE,
+    timeZone,
     reminder: settings.reminder,
     ...(settings.escalationEnabled ? { escalation: settings.escalation } : {}),
   }
