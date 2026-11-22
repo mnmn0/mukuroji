@@ -126,6 +126,79 @@ test('renders recipient-specific current ACL data and filters audit events by ex
   }
 })
 
+test('runs a relative period around the scheduled time on the Workspace week start', async () => {
+  const repository = new InMemoryAnalyticsRepository(() => NOW)
+  const report = await createScheduledReport(repository, ['recipient@example.com'])
+  report.filter.periodPreset = 'last-week'
+  report.widgets = [{
+    id: 'weekly',
+    type: 'chart',
+    title: 'Weekly throughput',
+    metric: 'throughput',
+    groupBy: { dimension: 'week' },
+  }]
+  const calendarReads: string[] = []
+  const renderer = createAnalyticsScheduleRenderer({
+    workspaceAccess: {
+      async getActiveMember(workspaceId, memberKey) {
+        return createActiveMember(workspaceId, memberKey)
+      },
+    },
+    systemAdmin: {
+      async isSystemAdmin() {
+        return false
+      },
+    },
+    directory: {
+      async getProjectDirectory() {
+        return { teams: [{ id: 'team-1', projects: [{ id: 'open-project' }] }] }
+      },
+      async getProjectAccessList() {
+        return [{ projectId: 'open-project', role: 'viewer' }]
+      },
+    },
+    workItems: {
+      async getTeamIssues() {
+        return { teamId: 'team-1', issues: [] }
+      },
+      async getProjectIssues() {
+        return { teamId: 'team-1', projectId: 'open-project', issues: [] }
+      },
+    },
+    auditEvents: {
+      async query() {
+        return { events: [] }
+      },
+    },
+    workspaceCalendar: {
+      async readCalendarSettings(workspaceId) {
+        calendarReads.push(workspaceId)
+        return { fiscalYearStartMonth: 4, weekStartDay: 0 }
+      },
+    },
+  })
+
+  const rendered = await renderer({
+    report,
+    recipientMemberKey: 'recipient@example.com',
+    scheduledFor: SCHEDULED_FOR,
+    historyReadAt: NOW.toISOString(),
+  })
+
+  // Saturday 2026-07-18: last week ran from Sunday 07-05 to Saturday 07-11.
+  expect(calendarReads).toEqual(['workspace-1'])
+  expect(rendered?.query).toMatchObject({
+    filter: {
+      period: { from: '2026-07-05T00:00:00.000Z', to: '2026-07-11T23:59:59.999Z' },
+      periodPreset: 'last-week',
+    },
+    weekStartDay: 0,
+  })
+  expect(rendered?.snapshot.widgets[0]?.series?.map((point) => point.from)).toEqual([
+    '2026-07-05T00:00:00.000Z',
+  ])
+})
+
 test('scheduled snapshots rewind later project, archive, and status changes', async () => {
   const repository = new InMemoryAnalyticsRepository(() => NOW)
   const report = await createScheduledReport(repository, ['recipient@example.com'])

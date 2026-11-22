@@ -8,6 +8,7 @@ import {
   type CreateAnalyticsReportInput,
   type CanonicalWorkItem,
   type UpdateAnalyticsReportInput,
+  type WorkspaceCalendarSettings,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -37,6 +38,7 @@ import {
   normalizeAnalyticsExportLocale,
   normalizeAnalyticsQueryInput,
   queryAnalyticsEvidence,
+  resolveAnalyticsReportFilterPeriod,
   selectAnalyticsWorkItemsRequiringHistory,
 } from '../../modules/analytics/analytics'
 import {
@@ -61,6 +63,7 @@ import { authenticateWorkspacePrincipal } from '../shared/request-authorization'
 import { canReadAnalyticsReport } from '../shared/analytics-access'
 import { createWorkspaceSearchContext } from '../shared/search-access'
 import { isRecord } from '../shared/value-guards'
+import { readWorkspaceCalendarSettingsOf } from '../shared/workspace-calendar'
 import { projectAccessAllows, toWorkspaceAccessErrorResponse } from '../shared/workspace-access'
 
 /** Analytics が一つの entity query で読む audit event page size です。 */
@@ -331,8 +334,9 @@ async function createAnalyticsHttpSnapshot(
   const reportId = readAnalyticsIdentifier(reportIdValue, 'Analytics report ID')
   const report = await requireAnalyticsReport(principal, reportId)
   await requireAnalyticsReportWrite(principal, report)
-  const query = createAnalyticsReportQuery(report, input)
-  const snapshot = await executeAnalyticsQuery(principal, query)
+  const calendar = await readWorkspaceCalendarSettingsOf(principal.directoryId)
+  const query = createAnalyticsReportQuery(report, input, calendar)
+  const snapshot = await executeAnalyticsQuery(principal, query, calendar)
   const createdAt = new Date().toISOString()
   return await workItemDependencies.analytics.putSnapshot({
     id: createAnalyticsSnapshotId(
@@ -422,22 +426,35 @@ async function resolveAnalyticsQuery(
   }
   const reportId = readAnalyticsIdentifier(body.reportId, 'Analytics report ID')
   const report = await requireAnalyticsReport(principal, reportId)
-  return createAnalyticsReportQuery(report, body)
+  return createAnalyticsReportQuery(
+    report,
+    body,
+    await readWorkspaceCalendarSettingsOf(principal.directoryId),
+  )
 }
 
-/** Saved report の definition を client override から保護して query にします。 */
+/**
+ * Saved report の definition を client override から保護して query にします。
+ *
+ * @param report - Saved report to run.
+ * @param overrides - Request body; only `asOf` is read from it.
+ * @param calendar - Workspace calendar that re-resolves a relative period and starts the weeks.
+ * @returns The query the report runs as.
+ */
 function createAnalyticsReportQuery(
   report: AnalyticsReport,
   overrides: Record<string, unknown>,
+  calendar: WorkspaceCalendarSettings,
 ): AnalyticsQueryInput {
   const asOf = typeof overrides.asOf === 'string' && overrides.asOf.trim()
     ? overrides.asOf
     : new Date().toISOString()
   return {
-    filter: structuredClone(report.filter),
+    filter: resolveAnalyticsReportFilterPeriod(report.filter, asOf, report.timeZone, calendar),
     widgets: structuredClone(report.widgets),
     asOf,
     timeZone: report.timeZone,
+    weekStartDay: calendar.weekStartDay,
     ...(report.forecastBaseline === undefined
       ? {}
       : { forecastBaseline: structuredClone(report.forecastBaseline) }),
@@ -445,12 +462,25 @@ function createAnalyticsReportQuery(
   }
 }
 
-/** Query を事前検証し、current ACL の Work Item/event だけで snapshot を作ります。 */
+/**
+ * Query を事前検証し、current ACL の Work Item/event だけで snapshot を作ります。
+ *
+ * Week buckets always start on the Workspace's week start day, whatever the client sent.
+ *
+ * @param principal - Authenticated Workspace member.
+ * @param query - Untrusted ad-hoc query or a saved report's query.
+ * @param workspaceCalendar - Calendar settings already read for this request; read when omitted.
+ * @returns The snapshot.
+ */
 async function executeAnalyticsQuery(
   principal: WorkspacePrincipal,
   query: unknown,
+  workspaceCalendar?: WorkspaceCalendarSettings,
 ): Promise<AnalyticsSnapshot> {
-  const normalizedQuery = normalizeAnalyticsQueryInput(query)
+  const calendar = workspaceCalendar ?? await readWorkspaceCalendarSettingsOf(principal.directoryId)
+  const normalizedQuery = normalizeAnalyticsQueryInput(
+    isRecord(query) ? { ...query, weekStartDay: calendar.weekStartDay } : query,
+  )
   const authorized = await readAuthorizedAnalyticsData(
     principal,
     normalizedQuery.filter,
@@ -859,9 +889,11 @@ async function resolveAnalyticsExportSnapshot(
       principal,
       readAnalyticsIdentifier(input.reportId, 'Analytics report ID'),
     )
+    const calendar = await readWorkspaceCalendarSettingsOf(principal.directoryId)
     return await executeAnalyticsQuery(
       principal,
-      createAnalyticsReportQuery(report, {}),
+      createAnalyticsReportQuery(report, {}, calendar),
+      calendar,
     )
   }
 
