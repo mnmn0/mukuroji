@@ -64,6 +64,7 @@ import {
 import { analyticsPdfFont } from './analytics-pdf-font'
 import {
   ANALYTICS_MILESTONE_HISTORY_UNAVAILABLE_WARNING,
+  createAnalyticsMilestoneScopeKey,
   createAnalyticsMilestoneTrend,
   type AnalyticsMilestoneHistory,
 } from './analytics-milestone-trend'
@@ -1028,7 +1029,7 @@ export function createAnalyticsSnapshot(input: AnalyticsEngineInput): AnalyticsS
     normalized.asOf,
     authorizedProjectIds,
     input.milestones !== undefined && analyticsQueryReadsMilestones(normalized.query)
-      ? input.milestones.map((milestone) => milestone.id)
+      ? input.milestones.map(createAnalyticsMilestoneScopeKey)
       : undefined,
   )
 
@@ -1233,14 +1234,16 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
       }
     }
     for (const row of widget.rows) {
+      // Milestone rows carry dates, not Work Item fields; keep them in the dimension column.
+      const milestoneRow = widget.metric === 'milestone-trend'
       rows.push([
         widget.widgetId,
         widget.metric,
         metricLabel,
-        row.values.value,
-        '',
+        milestoneRow ? row.values.shiftDays : row.values.value,
+        milestoneRow ? row.values.changeCount : '',
         messages.recordTypes.tableRow,
-        '',
+        milestoneRow ? formatMilestoneCsvDates(row) : '',
         normalized.filter.period.from,
         normalized.filter.period.to,
         row.id,
@@ -1253,6 +1256,22 @@ export function createAnalyticsCsv(snapshot: AnalyticsSnapshot, locale?: string)
     }
   }
   return rows.map((row) => row.map(escapeCsvValue).join(',')).join('\r\n')
+}
+
+/**
+ * Formats the dates of a Milestone trend table row for the CSV dimension column.
+ *
+ * @param row - Milestone trend table row.
+ * @returns `baseline=…; periodStart=…; forecast=…`, with an empty value for an unknown date.
+ */
+function formatMilestoneCsvDates(row: AnalyticsTableRow) {
+  const text = (value: AnalyticsTableRow['values'][string] | undefined) =>
+    typeof value === 'string' ? value : ''
+  return [
+    `baseline=${text(row.values.baselineEndDate)}`,
+    `periodStart=${text(row.values.periodStartForecastEndDate)}`,
+    `forecast=${text(row.values.forecastEndDate)}`,
+  ].join('; ')
 }
 
 /**
@@ -5426,8 +5445,9 @@ function workItemKey(teamId: string, workItemId: string) {
  * @param workItems - Current ACL reader が返した canonical Work Item です。
  * @param asOf - Scope に含める Work Item の作成時刻上限です。
  * @param authorizedProjectIds - Current viewer が参照できる Project ID です。
- * @param milestoneIds - `milestone-trend` を含む query で current viewer が読める Milestone ID です。
- *   それ以外の query では省略し、既存 snapshot と同じ hash にします。
+ * @param milestoneIds - Milestone を読んだ snapshot で current viewer が読める Milestone の
+ *   ID と現在の scope の key（`createAnalyticsMilestoneScopeKey`）です。
+ *   それ以外の snapshot では省略し、既存 snapshot と同じ hash にします。
  * @returns Snapshot/evidence cursor の認可 scope hash です。
  */
 export function createAnalyticsPermissionScopeHash(

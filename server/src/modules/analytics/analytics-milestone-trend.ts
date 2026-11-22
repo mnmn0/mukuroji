@@ -61,8 +61,29 @@ export type AnalyticsMilestoneHistory = {
   baselineEndDate: string
   /** ISO 8601 creation instant. */
   createdAt: string
+  /**
+   * ISO 8601 instant of the latest write. A move of an ancestor changes the Milestone's scope
+   * without an event of its own, so the engine treats a scope that differs from the recorded one
+   * as changed at this instant.
+   */
+  updatedAt: string
   /** Recorded changes in any order; the engine sorts them. */
   history: AnalyticsMilestoneChange[]
+}
+
+/**
+ * Returns the key that fixes a Milestone and its current scope in a snapshot's permission scope.
+ *
+ * The dates of a Milestone are shown only while its scope equals the current one, so a saved
+ * snapshot stays readable only while the Milestone keeps that scope.
+ *
+ * @param milestone - Milestone ID and current Team / Project scope.
+ * @returns The scope key.
+ */
+export function createAnalyticsMilestoneScopeKey(
+  milestone: Pick<AnalyticsMilestoneHistory, 'id' | 'teamId' | 'projectId'>,
+) {
+  return [milestone.id, milestone.teamId ?? '', milestone.projectId ?? ''].join('\0')
 }
 
 /** Calendar bucket the trend is evaluated at. */
@@ -225,7 +246,56 @@ function prepareMilestone(milestone: AnalyticsMilestoneHistory): PreparedMilesto
     const at = Date.parse(change.occurredAt)
     return Number.isNaN(at) ? [] : [{ ...change, at }]
   }).sort((left, right) => left.at - right.at || left.eventId.localeCompare(right.eventId))
-  return { milestone, createdAt, history }
+  const prepared: PreparedMilestone = { milestone, createdAt, history }
+  // An ancestor move changes the scope without an event of the Milestone; place that change at
+  // the latest write, which is no earlier than the move, so earlier dates stay hidden.
+  const recordedTeamId = latestRecordedValue(history, 'teamId', milestone.teamId)
+  const recordedProjectId = latestRecordedValue(history, 'projectId', milestone.projectId)
+  if (recordedTeamId !== milestone.teamId || recordedProjectId !== milestone.projectId) {
+    const updatedAt = Date.parse(milestone.updatedAt)
+    const at = Math.max(Number.isNaN(updatedAt) ? 0 : updatedAt, history.at(-1)?.at ?? 0)
+    history.push({
+      eventId: '\uffffinferred-scope',
+      occurredAt: new Date(at).toISOString(),
+      at,
+      changes: [
+        { field: 'teamId', ...withValue('before', recordedTeamId), ...withValue('after', milestone.teamId) },
+        { field: 'projectId', ...withValue('before', recordedProjectId), ...withValue('after', milestone.projectId) },
+      ],
+    })
+  }
+  return prepared
+}
+
+/**
+ * Returns the value a field has after the last recorded change of it.
+ *
+ * @param history - Sorted changes.
+ * @param field - Field to read.
+ * @param current - Current value, used when the field was never recorded.
+ * @returns The latest recorded value.
+ */
+function latestRecordedValue(
+  history: readonly AnalyticsMilestoneChange[],
+  field: AnalyticsMilestoneTrendField,
+  current: string | undefined,
+) {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const fieldChange = history[index]?.changes.find((candidate) => candidate.field === field)
+    if (fieldChange) return fieldChange.after
+  }
+  return current
+}
+
+/**
+ * Builds an optional `before` / `after` property.
+ *
+ * @param key - Property name.
+ * @param value - Value, or `undefined` for an absent field.
+ * @returns The property, or an empty object.
+ */
+function withValue(key: 'before' | 'after', value: string | undefined) {
+  return value === undefined ? {} : { [key]: value }
 }
 
 /**

@@ -19,6 +19,7 @@ export {
 /** Milestone date history read by the `milestone-trend` metric. */
 export {
   ANALYTICS_MILESTONE_TREND_FIELDS,
+  createAnalyticsMilestoneScopeKey,
   type AnalyticsMilestoneChange,
   type AnalyticsMilestoneFieldChange,
   type AnalyticsMilestoneHistory,

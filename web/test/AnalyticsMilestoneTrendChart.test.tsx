@@ -55,6 +55,9 @@ describe('Analytics Milestone trend chart', () => {
       ['beta', [day('2026-04-10'), day('2026-04-17')], 1],
       ['launch', [null, day('2026-05-01')], 2],
     ])
+    // The first week already moved Beta, so the period start comes from the shift: April 10.
+    expect(model.lines[0]?.periodStart).toBe(day('2026-04-10'))
+    expect(model.lines[1]?.periodStart).toBe(day('2026-05-01'))
     expect(model.minimum).toBe(day('2026-04-10'))
     expect(model.maximum).toBe(day('2026-05-01'))
     expect(formatAnalyticsMilestoneShift(7)).toBe('+7')

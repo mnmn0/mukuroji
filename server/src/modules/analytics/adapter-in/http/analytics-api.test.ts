@@ -1386,4 +1386,32 @@ test('draws the Milestone trend from the readable Milestones and their Planning 
   expect(guest.status).toBe(200)
   expect((await guest.json()).snapshot.widgets[0].groups.map((group: { key: string }) => group.key))
     .toEqual(['milestone-core'])
+
+  // An audit index that has not caught up with the latest forecast fails closed.
+  setTestAppDependencies({
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        if (input.entityType !== 'planning-entity' || input.entityId !== 'milestone-core') {
+          return { events: [] }
+        }
+        const event = createAnalyticsAuditEvent('planning-entity', 'milestone-core', '2026-07-10T09:00:00.000Z')
+        return {
+          events: [{
+            ...event,
+            changes: [{ field: 'forecast.endDate', before: '2026-08-10', after: '2026-08-15' }],
+          }],
+        }
+      },
+    },
+  })
+  const stale = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    filter: { ...query.filter, projectIds: ['refero'] },
+    widgets,
+  })
+  expect(stale.status).toBe(503)
+  expect(await stale.json()).toMatchObject({ code: 'AnalyticsReadBarrierUnavailable' })
 })

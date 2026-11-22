@@ -10,6 +10,7 @@ import {
 } from './analytics'
 import {
   ANALYTICS_MILESTONE_HISTORY_UNAVAILABLE_WARNING,
+  createAnalyticsMilestoneScopeKey,
   type AnalyticsMilestoneHistory,
 } from './analytics-milestone-trend'
 
@@ -45,6 +46,7 @@ const slipping: AnalyticsMilestoneHistory = {
   forecastEndDate: '2026-04-20',
   baselineEndDate: '2026-04-10',
   createdAt: '2026-02-01T00:00:00.000Z',
+  updatedAt: '2026-03-03T09:00:00.000Z',
   history: [
     {
       eventId: 'e3',
@@ -147,6 +149,29 @@ describe('milestone-trend metric', () => {
     ])
   })
 
+  test('treats a scope changed by an ancestor move as changed at the latest write', () => {
+    // An Initiative moved on March 3 and carried the Milestone to project-2 without its own event.
+    const carried: AnalyticsMilestoneHistory = {
+      ...slipping,
+      projectId: 'project-2',
+      updatedAt: '2026-03-03T12:00:00.000Z',
+    }
+    const snapshot = createAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      authorizedProjectIds: new Set(['project-2']),
+      milestones: [carried],
+      query: createQuery(),
+    })
+
+    expect(snapshot.widgets[0]?.series.map((point) => point.segments)).toEqual([
+      [],
+      [],
+      [{ key: 'milestone-a', value: day('2026-04-20') }],
+      [{ key: 'milestone-a', value: day('2026-04-20') }],
+    ])
+  })
+
   test('shows the current date since creation when no history was recorded', () => {
     const snapshot = createAnalyticsSnapshot({
       workItems: [],
@@ -158,6 +183,7 @@ describe('milestone-trend metric', () => {
         forecastEndDate: '2026-05-01',
         baselineEndDate: '2026-05-01',
         createdAt: '2026-03-02T10:00:00.000Z',
+        updatedAt: '2026-03-02T10:00:00.000Z',
         history: [],
       }],
       query: createQuery('table'),
@@ -180,6 +206,9 @@ describe('milestone-trend metric', () => {
     expect(widget?.warnings).toEqual([
       '1 Milestone(s) have no recorded date history; their current date is shown since creation.',
     ])
+    expect(createAnalyticsCsv(snapshot)).toContain(
+      'Milestone trend,0,0,Table row,baseline=2026-05-01; periodStart=2026-05-01; forecast=2026-05-01,',
+    )
   })
 
   test('leaves Milestones out of runs that cannot read them and keeps their hash', () => {
@@ -210,10 +239,15 @@ describe('milestone-trend metric', () => {
     })
 
     expect(snapshot.permissionScopeHash).toBe(
-      createAnalyticsPermissionScopeHash([], Date.parse(query.asOf), new Set(), ['milestone-a']),
+      createAnalyticsPermissionScopeHash([], Date.parse(query.asOf), new Set(), [
+        createAnalyticsMilestoneScopeKey(slipping),
+      ]),
     )
+    // A Milestone that moved to another Team no longer matches the saved scope.
     expect(snapshot.permissionScopeHash).not.toBe(
-      createAnalyticsPermissionScopeHash([], Date.parse(query.asOf), new Set(), []),
+      createAnalyticsPermissionScopeHash([], Date.parse(query.asOf), new Set(), [
+        createAnalyticsMilestoneScopeKey({ ...slipping, teamId: 'team-2' }),
+      ]),
     )
   })
 

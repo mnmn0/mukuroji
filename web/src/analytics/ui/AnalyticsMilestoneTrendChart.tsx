@@ -185,10 +185,10 @@ export function AnalyticsMilestoneTrendChart({
                 <tr className="border-b border-[var(--workbench-border)]" key={line.key}>
                   <td className="px-3 py-2">{line.label}</td>
                   <td className="px-3 py-2 tabular-nums">
-                    {formatAnalyticsMilestoneTrendDate(line.values.find((value) => value !== null))}
+                    {formatAnalyticsMilestoneTrendDate(line.periodStart)}
                   </td>
                   <td className="px-3 py-2 tabular-nums">
-                    {formatAnalyticsMilestoneTrendDate(line.values.findLast((value) => value !== null))}
+                    {formatAnalyticsMilestoneTrendDate(line.latest)}
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">
                     {formatAnalyticsMilestoneShift(line.shiftDays)}

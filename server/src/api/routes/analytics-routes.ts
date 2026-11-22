@@ -44,6 +44,7 @@ import {
   resolveAnalyticsReportFilterPeriod,
   selectAnalyticsWorkItemsRequiringHistory,
 } from '../../modules/analytics/analytics'
+import { createAnalyticsMilestoneScopeKey } from '../../modules/analytics/analytics-milestone-trend'
 import {
   readAnalyticsWorkItemHistoryEvents,
   type AnalyticsWorkItemHistoryReader,
@@ -896,7 +897,7 @@ async function readCurrentAnalyticsPermissionScopeHash(
     current.workItems,
     Date.parse(normalized.asOf),
     current.authorizedProjectIds,
-    milestones?.map((milestone) => milestone.id),
+    milestones?.map(createAnalyticsMilestoneScopeKey),
   )
 }
 

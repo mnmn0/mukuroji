@@ -7,6 +7,7 @@ import {
   type AnalyticsMilestoneHistory,
 } from '../../modules/analytics'
 import type { AuditEventV1, AuditValue } from '../../modules/audit/audit'
+import { evaluateEnterpriseAccess } from '../../modules/enterprise-identity'
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { filterPlanningSnapshotForPrincipal, withPlanningLegacyReadScope } from './planning-access'
 import { PLANNING_ENTITY_AUDIT_ENTITY_TYPE } from './planning-entity-audit'
@@ -30,6 +31,9 @@ const ANALYTICS_MILESTONE_AUDIT_EVENT_LIMIT = 10_000
 /** Milestone timelines read at once. */
 const ANALYTICS_MILESTONE_AUDIT_CONCURRENCY = 8
 
+/** Attempts to read a Milestone history that covers the current Planning graph. */
+const ANALYTICS_MILESTONE_READ_ATTEMPTS = 3
+
 /** Audit event type prefix of Planning entity changes. */
 const PLANNING_ENTITY_AUDIT_EVENT_TYPE_PREFIX = 'planning-entity.'
 
@@ -37,7 +41,9 @@ const PLANNING_ENTITY_AUDIT_EVENT_TYPE_PREFIX = 'planning-entity.'
  * Reads the live Milestones of the Planning graph that the caller can read now.
  *
  * The graph is filtered with the caller's current Planning ACL, the same rule as
- * `GET /api/planning`.
+ * `GET /api/planning`. Analytics routes authorize `work-items.read`, so an Enterprise caller's
+ * scopes on the principal belong to that permission; `planning.read` is then evaluated again at
+ * each Milestone's own Team, Project, or Workspace resource, and a missing evaluation keeps none.
  *
  * @param principal - Authenticated Workspace principal.
  * @returns The readable live Milestones.
@@ -51,8 +57,47 @@ export async function readReadableAnalyticsMilestones(
     await workItemDependencies.planning.get(principal.directoryId, { workItems: [] }),
   )
   return snapshot.entities.filter((entity) =>
-    entity.type === 'milestone' && entity.archivedAt === undefined
+    entity.type === 'milestone' &&
+    entity.archivedAt === undefined &&
+    canReadPlanningScope(principal, entity)
   )
+}
+
+/**
+ * Returns whether an Enterprise caller holds `planning.read` at a Planning entity's scope.
+ *
+ * Legacy callers are already bounded by their Project viewer access in the Planning filter.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param entity - Planning entity whose scope is checked.
+ * @returns Whether the caller may read Planning records at the entity's scope.
+ */
+function canReadPlanningScope(
+  principal: WorkspacePrincipal,
+  entity: Pick<PlanningEntity, 'teamId' | 'projectId'>,
+) {
+  if (principal.isSystemAdmin || principal.enterprisePermissions === undefined) return true
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation === undefined) return false
+  if (entity.projectId !== undefined && entity.teamId === undefined) return false
+  const resource = entity.projectId !== undefined && entity.teamId !== undefined
+    ? {
+        workspaceId: principal.directoryId,
+        kind: 'project' as const,
+        targetId: entity.projectId,
+        parentTeamId: entity.teamId,
+      }
+    : entity.teamId !== undefined
+      ? { workspaceId: principal.directoryId, kind: 'team' as const, targetId: entity.teamId }
+      : { workspaceId: principal.directoryId, kind: 'workspace' as const }
+  return evaluateEnterpriseAccess({
+    permission: 'planning.read',
+    principal: evaluation.principal,
+    assignments: evaluation.assignments,
+    customRoles: evaluation.snapshot.customRoles,
+    groupMappings: evaluation.groupMappings,
+    resource,
+  }).allowed
 }
 
 /**
@@ -103,25 +148,75 @@ export async function readVisibleAnalyticsMilestones(
  *
  * The history is the Milestone's own `planning-entity` audit timeline up to the later of the read
  * time and `asOf`, read after the Planning graph so the current state is never newer than it.
+ * The audit entity index is eventually consistent, so the latest recorded forecast end date of
+ * each Milestone must equal its current one; otherwise both reads are retried a bounded number of
+ * times and the request fails closed with `503`.
  *
  * @param principal - Authenticated Workspace principal.
  * @param filter - Normalized report filter.
  * @param asOf - Query `asOf` instant.
  * @returns Milestone histories for the Analytics engine.
- * @throws AnalyticsError 413 when the Milestones or their history exceed the query limits.
+ * @throws AnalyticsError 413 when the Milestones or their history exceed the query limits, or
+ *   503 when the history does not catch up with the Planning graph.
  */
 export async function readAuthorizedAnalyticsMilestones(
   principal: WorkspacePrincipal,
   filter: AnalyticsFilter,
   asOf: string,
 ): Promise<AnalyticsMilestoneHistory[]> {
-  const milestones = await readVisibleAnalyticsMilestones(principal, filter, asOf)
-  const historyReadAt = new Date(Math.max(Date.now(), Date.parse(asOf))).toISOString()
-  const histories = await readMilestoneAuditHistories(
-    principal.directoryId,
-    milestones.map((milestone) => milestone.id),
-    historyReadAt,
+  for (let attempt = 0; attempt < ANALYTICS_MILESTONE_READ_ATTEMPTS; attempt += 1) {
+    const milestones = await readVisibleAnalyticsMilestones(principal, filter, asOf)
+    const historyReadAt = new Date(Math.max(Date.now(), Date.parse(asOf))).toISOString()
+    const histories = await readMilestoneAuditHistories(
+      principal.directoryId,
+      milestones.map((milestone) => milestone.id),
+      historyReadAt,
+    )
+    const result = toMilestoneHistories(milestones, histories)
+    if (result.every(hasLatestForecastCoverage)) return result
+  }
+  throw new AnalyticsError(
+    503,
+    'AnalyticsReadBarrierUnavailable',
+    'Milestone history changed while it was being read. Retry the request.',
   )
+}
+
+/**
+ * Returns whether a Milestone's recorded history reaches its current forecast end date.
+ *
+ * A Milestone without any recorded forecast change (created before Planning audit) cannot be
+ * checked and is accepted; the engine reports it with a warning.
+ *
+ * @param milestone - Milestone with its history.
+ * @returns Whether the latest recorded forecast end date is the current one.
+ */
+function hasLatestForecastCoverage(milestone: AnalyticsMilestoneHistory) {
+  const forecastChanges = milestone.history
+    .map((change) => ({
+      change,
+      forecast: change.changes.find((fieldChange) => fieldChange.field === 'forecast.endDate'),
+    }))
+    .filter((entry) => entry.forecast !== undefined)
+    .sort((left, right) =>
+      Date.parse(left.change.occurredAt) - Date.parse(right.change.occurredAt) ||
+      left.change.eventId.localeCompare(right.change.eventId)
+    )
+  const latest = forecastChanges.at(-1)
+  return latest === undefined || latest.forecast?.after === milestone.forecastEndDate
+}
+
+/**
+ * Builds the engine input of each Milestone.
+ *
+ * @param milestones - Readable Milestones.
+ * @param histories - Recorded changes keyed by Milestone ID.
+ * @returns Milestone histories.
+ */
+function toMilestoneHistories(
+  milestones: readonly PlanningEntity[],
+  histories: ReadonlyMap<string, AnalyticsMilestoneChange[]>,
+): AnalyticsMilestoneHistory[] {
   return milestones.map((milestone) => ({
     id: milestone.id,
     title: milestone.title,
@@ -130,6 +225,7 @@ export async function readAuthorizedAnalyticsMilestones(
     forecastEndDate: milestone.forecast.endDate,
     baselineEndDate: milestone.baseline.endDate,
     createdAt: milestone.createdAt,
+    updatedAt: milestone.updatedAt,
     history: histories.get(milestone.id) ?? [],
   }))
 }

@@ -20,6 +20,13 @@ export type AnalyticsMilestoneTrendLine = {
   shiftDays: number | null
   /** Number of date changes in the period. */
   changeCount: number
+  /** Latest drawn date, which is the date at the period end. */
+  latest: number | null
+  /**
+   * Date at the period start. The server's shift is measured from it, so it is derived from the
+   * latest date and the shift instead of the first bucket end, which may already include a change.
+   */
+  periodStart: number | null
   /** 1-based categorical color of the line. */
   colorIndex: number
 }
@@ -53,16 +60,22 @@ export function createAnalyticsMilestoneTrendModel(
   timeZone: string,
 ): AnalyticsMilestoneTrendModel {
   const dates = series.map((point) => formatAnalyticsCalendarDate(point.to, timeZone))
-  const lines = groups.map((group, index): AnalyticsMilestoneTrendLine => ({
-    key: group.key,
-    label: group.label,
-    values: series.map((point) =>
+  const lines = groups.map((group, index): AnalyticsMilestoneTrendLine => {
+    const values = series.map((point) =>
       point.segments?.find((segment) => segment.key === group.key)?.value ?? null
-    ),
-    shiftDays: group.value,
-    changeCount: group.sampleSize,
-    colorIndex: index % ANALYTICS_MILESTONE_TREND_COLOR_COUNT + 1,
-  }))
+    )
+    const latest = values.findLast((value) => value !== null) ?? null
+    return {
+      key: group.key,
+      label: group.label,
+      values,
+      shiftDays: group.value,
+      changeCount: group.sampleSize,
+      latest,
+      periodStart: latest === null || group.value === null ? null : latest - group.value,
+      colorIndex: index % ANALYTICS_MILESTONE_TREND_COLOR_COUNT + 1,
+    }
+  })
   const drawn = lines.flatMap((line) => line.values.filter((value): value is number => value !== null))
   const minimum = drawn.length === 0 ? 0 : Math.min(...drawn)
   const maximum = drawn.length === 0 ? 0 : Math.max(...drawn)
