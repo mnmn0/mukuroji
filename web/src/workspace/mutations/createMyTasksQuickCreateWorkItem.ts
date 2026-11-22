@@ -22,12 +22,14 @@ export type CreateMyTasksQuickCreateWorkItemOptions = {
   input: MyTasksQuickCreateInput
   /** Runner that keeps one idempotency key per repeated submit. */
   mutationRequestRunner: MutationRequestRunner
-  /** Reads the My Tasks list again after the Work Item is created. */
+  /** Reads the My Tasks list again after the Work Item is created; a failed read is ignored. */
   refreshWorkItems: () => Promise<unknown>
 }
 
 /**
  * Creates a Work Item assigned to the current person and reads the My Tasks list again.
+ *
+ * Rejects only when the create itself fails.
  *
  * @param options - Request inputs, the submitted form values, and the list refresh.
  * @returns A promise that resolves once the Work Item is created and the list is read again.
@@ -60,5 +62,7 @@ export async function createMyTasksQuickCreateWorkItem({
     JSON.stringify(request),
     (context) => createTeamIssue(destination.teamId, accessToken, request, context),
   ))
-  await refreshWorkItems()
+  // The Work Item exists once the create succeeds; a failed read must not invite a duplicate
+  // submit, so the list is left to its next revalidation.
+  await refreshWorkItems().catch(() => undefined)
 }
