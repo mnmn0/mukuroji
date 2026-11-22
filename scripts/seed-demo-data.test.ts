@@ -192,6 +192,16 @@ describe('buildDemoDataPlan', () => {
     }
   })
 
+  test('schedules every Cycle member inside its Cycle', () => {
+    for (const workItem of plan.workItems) {
+      if (!workItem.cycleKey || workItem.schedule.mode !== 'date-range') continue
+      const cycle = plan.planningEntities.find((entity) => entity.id === workItem.cycleKey)
+      expect(cycle).toBeDefined()
+      expect(workItem.schedule.startDate >= (cycle?.baseline.startDate ?? '')).toBe(true)
+      expect(workItem.schedule.endDate <= (cycle?.baseline.endDate ?? '')).toBe(true)
+    }
+  })
+
   test('lays the three Cycles back to back around the base week', () => {
     const cycles = plan.planningEntities.filter((entity) => entity.type === 'cycle')
     expect(cycles.map((cycle) => cycle.status)).toEqual(['completed', 'active', 'planned'])
