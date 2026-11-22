@@ -243,6 +243,7 @@ describe('Developer Platform Work Item export', () => {
     ])
   })
 
+  // A role-only contributor and the statuses come back from the task text field mukuroji writes.
   test('round-trips tasks, outline, predecessors, and assignments through MS Project XML', async () => {
     const file = createDeveloperExportFile('msproject', items, context, exportedAt)
     const source = await readDeveloperImportSource('msproject', fileFrom('plan.xml', new TextEncoder().encode(await file.blob.text())))
@@ -250,7 +251,7 @@ describe('Developer Platform Work Item export', () => {
 
     expect(rows).toEqual([
       { UID: '1', Name: 'Plan', WBS: '1', OutlineLevel: 1, Owner: 'user-owner', Contributors: [], Predecessors: '', Schedule: { mode: 'due-date', dueDate: '2026-08-03' }, Notes: 'Line 1\nLine 2' },
-      { UID: '2', Name: 'Design', WBS: '1.1', OutlineLevel: 2, Owner: 'user-owner', Contributors: [{ memberUserId: 'user-dev', plannedEffortMinutes: 120 }], Predecessors: '', Schedule: { mode: 'due-date', dueDate: '2026-08-03' }, Notes: '' },
+      { UID: '2', Name: 'Design', WBS: '1.1', OutlineLevel: 2, Owner: 'user-owner', Contributors: [{ memberUserId: 'user-dev', plannedEffortMinutes: 120, status: 'planned' }, { jobRoleId: 'designer', status: 'in-progress' }], Predecessors: '', Schedule: { mode: 'due-date', dueDate: '2026-08-03' }, Notes: '' },
       { UID: '3', Name: '=Build', WBS: '1.2', OutlineLevel: 2, Owner: 'user-owner', Contributors: [], Predecessors: '2 FS +2', Schedule: { mode: 'due-date', dueDate: '2026-08-03' }, Notes: '' },
     ])
     expect(suggestDeveloperImportMapping(source.headers).map((entry) => entry.targetField)).toEqual([

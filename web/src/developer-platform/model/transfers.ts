@@ -494,12 +494,7 @@ function toMsProjectTask(row: DeveloperExportRow): MsProjectTaskInput {
     ...(schedule.mode === 'milestone' ? { milestone: true } : {}),
     completed: workItem.statusCategory === 'completed',
     ownerUserId: workItem.assigneeUserId,
-    contributors: row.contributors.flatMap((contributor) => contributor.memberUserId
-      ? [{
-          memberUserId: contributor.memberUserId,
-          ...(contributor.plannedEffortMinutes === undefined ? {} : { plannedEffortMinutes: contributor.plannedEffortMinutes }),
-        }]
-      : []),
+    contributors: row.contributors.map((contributor) => ({ ...contributor })),
     dependencies: row.dependencies.map((dependency) => ({
       predecessorKey: dependency.key,
       type: dependency.type,

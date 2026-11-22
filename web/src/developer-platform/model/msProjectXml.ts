@@ -32,12 +32,19 @@ export type MsProjectTaskInput = {
   completed: boolean
   /** Accountable owner, written as the first assignment. */
   ownerUserId: string
-  /** Contributors with their planned effort in minutes. */
+  /**
+   * Contributors. A member is also written as an assignment; every contributor, including a
+   * role without a member, is kept in a task text field that import reads back.
+   */
   contributors: Array<{
     /** User ID written as the Resource. */
-    memberUserId: string
+    memberUserId?: string
+    /** Job role of the contribution. */
+    jobRoleId?: string
     /** Planned effort in minutes, written as the assignment work. */
     plannedEffortMinutes?: number
+    /** Contribution status. */
+    status?: string
   }>
   /** Predecessors. */
   dependencies: MsProjectDependency[]
@@ -75,6 +82,12 @@ const lagUnitsPerWorkingDay = 4_800
 /** Tenths of a minute in one elapsed day. */
 const lagUnitsPerElapsedDay = 14_400
 
+/** Field ID of the task field Text1, which keeps the contributors as JSON. */
+const contributorsFieldId = '188743731'
+
+/** Alias of the contributors field, so a file saved again by MS Project still names it. */
+const contributorsFieldAlias = 'mukuroji contributors'
+
 /** Lag formats that count elapsed rather than working time. */
 const elapsedLagFormats = new Set([4, 6, 8, 10, 12, 36, 38, 40, 42, 44])
 
@@ -110,6 +123,10 @@ export function readMsProjectXml(text: string): Array<Record<string, unknown>> {
       readText(resource, 'UID'),
       readText(resource, 'EmailAddress') || readText(resource, 'Name'),
     ]))
+  // Contributors written by mukuroji keep roles and statuses that assignments cannot hold.
+  const contributorsField = childElements(childElement(project, 'ExtendedAttributes') ?? emptyElement(), 'ExtendedAttribute')
+    .find((attribute) => readText(attribute, 'Alias') === contributorsFieldAlias)
+  const contributorsFieldIdInFile = contributorsField ? readText(contributorsField, 'FieldID') : undefined
   const assignmentsByTask = new Map<string, Array<{ resource: string; workMinutes?: number }>>()
   for (const assignment of childElements(childElement(project, 'Assignments') ?? emptyElement(), 'Assignment')) {
     const resource = resources.get(readText(assignment, 'ResourceUID'))
@@ -144,7 +161,7 @@ export function readMsProjectXml(text: string): Array<Record<string, unknown>> {
       OutlineLevel: Number.isSafeInteger(outlineLevel) ? outlineLevel : 1,
       Owner: assignments[0]?.resource ?? '',
       // An array keeps a resource name with spaces as one member.
-      Contributors: assignments.slice(1).map((assignment) => ({
+      Contributors: readStoredContributors(task, contributorsFieldIdInFile) ?? assignments.slice(1).map((assignment) => ({
         memberUserId: assignment.resource,
         ...(assignment.workMinutes ? { plannedEffortMinutes: assignment.workMinutes } : {}),
       })),
@@ -199,6 +216,9 @@ export function createMsProjectXml(projectName: string, tasks: readonly MsProjec
       `<Milestone>${task.milestone ? 1 : 0}</Milestone>`,
       `<PercentComplete>${task.completed ? 100 : 0}</PercentComplete>`,
       task.notes ? `<Notes>${escapeXml(task.notes)}</Notes>` : '',
+      task.contributors.length > 0
+        ? `<ExtendedAttribute><FieldID>${contributorsFieldId}</FieldID><Value>${escapeXml(JSON.stringify(task.contributors))}</Value></ExtendedAttribute>`
+        : '',
       ...links,
       '</Task>',
     ].join('')
@@ -210,12 +230,33 @@ export function createMsProjectXml(projectName: string, tasks: readonly MsProjec
     '<Project xmlns="http://schemas.microsoft.com/project">',
     `<Name>${escapeXml(projectName)}</Name>`,
     '<SaveVersion>14</SaveVersion>',
+    `<ExtendedAttributes><ExtendedAttribute><FieldID>${contributorsFieldId}</FieldID><FieldName>Text1</FieldName><Alias>${contributorsFieldAlias}</Alias></ExtendedAttribute></ExtendedAttributes>`,
     `<Tasks>${taskXml.join('')}</Tasks>`,
     `<Resources>${resourceXml.join('')}</Resources>`,
     `<Assignments>${assignments.join('')}</Assignments>`,
     '</Project>',
     '',
   ].join('\n')
+}
+
+/**
+ * Reads the contributors that mukuroji kept in a task text field.
+ *
+ * @param task - Task XML.
+ * @param fieldId - Field ID that the file names as the contributors field, if any.
+ * @returns The contributors as written, or undefined when the task has none or the value is not
+ *   a JSON array; import validates each entry.
+ */
+function readStoredContributors(task: XmlElement, fieldId: string | undefined): unknown[] | undefined {
+  if (!fieldId) return undefined
+  const attribute = childElements(task, 'ExtendedAttribute').find((entry) => readText(entry, 'FieldID') === fieldId)
+  if (!attribute) return undefined
+  try {
+    const value: unknown = JSON.parse(readText(attribute, 'Value'))
+    return Array.isArray(value) ? value : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /**
