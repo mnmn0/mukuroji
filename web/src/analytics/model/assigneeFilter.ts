@@ -9,6 +9,8 @@
  * @param pickedIds - Assignee IDs the picker currently shows as selected.
  * @param typedText - The comma-separated text the user typed.
  * @param editedFromText - The text the input showed when the user started editing.
+ * @param textOnly - Whether the text is the only assignee control, as when no member list is
+ * available. Clearing it then lifts the restriction, because there is no "All assignees" action.
  * @returns The assignee IDs to store in the filter.
  */
 export function mergeAnalyticsAssigneeDraft(
@@ -16,9 +18,10 @@ export function mergeAnalyticsAssigneeDraft(
   pickedIds: readonly string[],
   typedText: string,
   editedFromText: string,
+  textOnly = false,
 ): string[] | undefined {
   const typed = splitAssigneeText(typedText)
-  if (current === undefined && typed.length === 0) return undefined
+  if ((textOnly || current === undefined) && typed.length === 0) return undefined
   const editedIds = new Set(splitAssigneeText(editedFromText))
   const picked = pickedIds.filter((id) => !editedIds.has(id))
   return [...new Set([...picked, ...typed])]

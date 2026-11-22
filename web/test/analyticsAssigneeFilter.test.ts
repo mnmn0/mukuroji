@@ -19,4 +19,9 @@ describe('mergeAnalyticsAssigneeDraft', () => {
     // Alice was in the text before members loaded; the user replaced her with Bob.
     expect(mergeAnalyticsAssigneeDraft(['alice'], ['alice'], 'bob', 'alice')).toEqual(['bob'])
   })
+
+  test('lifts the restriction when the text is cleared without a member list', () => {
+    expect(mergeAnalyticsAssigneeDraft(['former'], [], '', 'former', true)).toBeUndefined()
+    expect(mergeAnalyticsAssigneeDraft(['former'], [], '', 'former')).toEqual([])
+  })
 })

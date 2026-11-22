@@ -1016,7 +1016,13 @@ function AnalyticsFilterToolbar({
     (value, editedFrom) => {
       onFilterChange?.({
         ...filter,
-        assigneeUserIds: mergeAnalyticsAssigneeDraft(filter.assigneeUserIds, pickedAssigneeIds, value, editedFrom),
+        assigneeUserIds: mergeAnalyticsAssigneeDraft(
+          filter.assigneeUserIds,
+          pickedAssigneeIds,
+          value,
+          editedFrom,
+          members.length === 0,
+        ),
       })
     },
   )
