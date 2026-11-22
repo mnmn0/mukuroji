@@ -28,6 +28,7 @@ afterEach(() => {
  * @returns Complete panel props.
  */
 function panelProps(overrides: Partial<AuditLogPanelProps> = {}): AuditLogPanelProps {
+  /** Callback that ignores its call, for props a test does not exercise. */
   const noop = () => undefined
   return {
     locale: 'ja',

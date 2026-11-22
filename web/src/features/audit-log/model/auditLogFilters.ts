@@ -189,6 +189,12 @@ function offsetAt(instant: number, timeZone: string | undefined): number {
     minute: '2-digit',
     second: '2-digit',
   }).formatToParts(new Date(instant))
+  /**
+   * Reads one numeric part of the formatted instant.
+   *
+   * @param type - Part to read.
+   * @returns Numeric value of the part, or 0 when it is missing.
+   */
   const read = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((part) => part.type === type)?.value ?? 0)
   const asUtc = Date.UTC(read('year'), read('month') - 1, read('day'), read('hour'), read('minute'), read('second'))
   return asUtc - Math.floor(instant / 1000) * 1000

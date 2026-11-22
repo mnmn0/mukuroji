@@ -379,6 +379,11 @@ test('tells the Web that an auditor may read the audit log but not export it', a
     const identity = new InMemoryEnterpriseIdentityClient()
     setTestAppDependencies({ enterpriseIdentity: identity })
 
+    /**
+     * Reads `/api/auth/me` as the auditor.
+     *
+     * @returns Parsed response body.
+     */
     const readMe = async () => {
       const response = await app.request('/api/auth/me', {
         headers: { Authorization: createAuthorization() },
