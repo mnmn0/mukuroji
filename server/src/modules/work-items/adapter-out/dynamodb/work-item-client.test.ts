@@ -2995,7 +2995,10 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
       let planningCondition: unknown
       const documentClient = {
         async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
-          if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+          // The Project has no schedule baseline row in the Planning table.
+          if (command.constructor.name === 'GetCommand') {
+            return command.input.TableName === 'PlanningTable' ? {} : { Item: currentIssue }
+          }
           if (command.constructor.name === 'TransactWriteCommand') {
             const transactItems = command.input.TransactItems as Array<{
               ConditionCheck?: { TableName?: string }
@@ -3679,9 +3682,16 @@ test('DynamoDB Work Item schedule cascade writes one bounded transaction with un
 
       expect(transactions).toHaveLength(1)
       const transactItems = transactions[0] ?? []
-      expect(transactItems).toHaveLength(auditEnabled ? 13 : 11)
+      // Two Projects without a baseline add one absence check each.
+      expect(transactItems).toHaveLength(auditEnabled ? 15 : 13)
       expect(transactItems.filter((item) => item.Update?.TableName === 'IssuesTable'))
         .toHaveLength(2)
+      expect(transactItems.filter((item) =>
+        String(item.ConditionCheck?.Key?.recordKey).startsWith('PROJECT_SCHEDULE_BASELINE#')
+      ).map((item) => item.ConditionCheck?.ConditionExpression)).toEqual([
+        'attribute_not_exists(recordKey)',
+        'attribute_not_exists(recordKey)',
+      ])
       // The cascade moves each open Work Item to its new deadline in the notification index.
       expect(transactItems.find((item) => item.Update?.Key?.issueId === 'root')?.Update)
         .toMatchObject({
