@@ -306,4 +306,6 @@ export const planningMessages = {
   'planning.activity.value.redacted': '非公開',
   'planning.activity.value.on': 'オン',
   'planning.activity.value.off': 'オフ',
+  'planning.activity.before': '変更前:',
+  'planning.activity.after': '変更後:',
 } as const

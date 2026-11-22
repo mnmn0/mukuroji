@@ -37,6 +37,10 @@ export type PlanningEntityActivityLabels = {
   emptyValue: string
   /** Shown for a value the caller may not see. */
   redactedValue: string
+  /** Screen reader text before the old value. */
+  before: string
+  /** Screen reader text before the new value. */
+  after: string
 }
 
 /** Props of {@link PlanningEntityActivityPanel}. */
@@ -146,10 +150,12 @@ export function PlanningEntityActivityPanel({
                     >
                       <dt className="font-semibold text-[var(--workbench-muted)]">{labels.field(change.field)}</dt>
                       <dd className="min-w-0 break-words font-medium text-[var(--workbench-text)]">
+                        <span className="sr-only">{labels.before} </span>
                         <span className="text-[var(--workbench-muted)] line-through decoration-1">
                           {formatValue(change.field, change.before)}
                         </span>
                         <span aria-hidden="true"> → </span>
+                        <span className="sr-only">{labels.after} </span>
                         <span>{formatValue(change.field, change.after)}</span>
                       </dd>
                     </div>

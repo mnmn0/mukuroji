@@ -122,9 +122,11 @@ describe('Planning entity activity rows', () => {
     const rows = createPlanningEntityActivityRows([
       { ...first, eventId: 'rolled-over', action: 'rolled-over', actor: { kind: 'system' }, summary: 'Rolled over' },
       { ...first, eventId: 'rolled-over', action: 'rolled-over', actor: { kind: 'system' } },
+      { ...first, eventId: 'break-glass', actor: { kind: 'break-glass', displayName: 'admin@example.com' } },
     ])
 
-    expect(rows).toEqual([{
+    expect(rows[1]?.actor).toEqual({ kind: 'member', memberKey: 'admin@example.com' })
+    expect(rows.slice(0, 1)).toEqual([{
       eventId: 'rolled-over',
       kind: 'other',
       occurredAt: first.occurredAt,
@@ -164,6 +166,7 @@ describe('Planning entity activity tab', () => {
     expect(html).toContain(`>${labels.entityActivity.redactedValue}</span>`)
     expect(html).toContain('>Onboarding</span>')
     expect(html).not.toContain('>Progress</dt>')
+    expect(html).toContain(`>${labels.entityActivity.before} </span>`)
     expect(html).toContain(labels.entityActivity.loadMore)
   })
 

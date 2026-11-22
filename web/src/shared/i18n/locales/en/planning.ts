@@ -306,4 +306,6 @@ export const planningMessages = {
   'planning.activity.value.redacted': 'Hidden',
   'planning.activity.value.on': 'On',
   'planning.activity.value.off': 'Off',
+  'planning.activity.before': 'Before:',
+  'planning.activity.after': 'After:',
 } as const

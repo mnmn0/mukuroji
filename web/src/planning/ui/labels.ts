@@ -566,5 +566,7 @@ function createPlanningEntityActivityLabels(
     },
     emptyValue: t('planning.activity.value.empty'),
     redactedValue: t('planning.activity.value.redacted'),
+    before: t('planning.activity.before'),
+    after: t('planning.activity.after'),
   }
 }

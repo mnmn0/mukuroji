@@ -46,7 +46,7 @@ export type PlanningEntityActivityActor =
     memberKey: string
   }
   | {
-    /** A system process, service, or a change with no recorded member. */
+    /** A system process or service that recorded no member key. */
     kind: 'system'
   }
 
@@ -132,7 +132,8 @@ export function createPlanningEntityActivityRows(
       eventId: event.eventId,
       kind,
       occurredAt: event.occurredAt,
-      actor: event.actor.kind === 'user' && event.actor.displayName
+      // Break-glass and other member-driven actors still record the member key; only keyless actors are the system.
+      actor: event.actor.displayName
         ? { kind: 'member', memberKey: event.actor.displayName }
         : { kind: 'system' },
       ...(event.summary === undefined ? {} : { summary: event.summary }),
