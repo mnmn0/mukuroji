@@ -53,11 +53,20 @@ function createRegistryTable() {
       if (command.constructor.name === 'TransactWriteCommand') {
         /** One transaction item in the shapes the registry sends. */
         type Item = {
+          /** Row to create only when its key is free. */
           Put?: { Item: Row }
+          /** Counter update guarded by its expected prefix. */
           Update?: { Key: Row; ExpressionAttributeValues: Record<string, unknown> }
+          /** Check that a row still belongs to the expected Team. */
           ConditionCheck?: { Key: Row; ExpressionAttributeValues: Record<string, unknown> }
         }
         const items: Item[] = Object(input).TransactItems
+        /**
+         * Reports whether one transaction item's condition holds.
+         *
+         * @param item - Transaction item.
+         * @returns Whether the condition holds.
+         */
         const passes = (item: Item) => {
           if (item.Put) return !rows.has(id(item.Put.Item))
           if (item.Update) {
