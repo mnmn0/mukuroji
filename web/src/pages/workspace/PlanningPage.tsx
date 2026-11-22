@@ -112,9 +112,11 @@ import { createWorkItemDependencyMutationId } from '../../work-items/model/workI
 import {
   createPlanningPath,
   createProjectIssuesPath,
+  createProjectOverviewPath,
   createTeamIssuesPath,
   type PlanningViewId,
 } from '../../shared/routing/paths'
+import { createPlanningProjectGanttPath } from '../../planning/model/navigation'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -754,6 +756,12 @@ export function PlanningPage() {
           onOpenMilestone={(milestoneId) => navigate(createPlanningPath('timeline', milestoneId))}
           onOpenProject={(project) => navigate(
             createProjectIssuesPath(project.projectId, project.teamId),
+          )}
+          onOpenProjectOverview={(project) => navigate(
+            createProjectOverviewPath(project.projectId, project.teamId),
+          )}
+          onOpenProjectGantt={(project) => navigate(
+            createPlanningProjectGanttPath(project.projectId, project.teamId),
           )}
           onCreateEntity={canManagePlanning && snapshot && accessToken
             ? (input) => {

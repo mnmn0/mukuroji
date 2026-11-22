@@ -61,6 +61,16 @@ export type CrossProjectTimelineEntityRow = {
   endVarianceDays: number
   /** Project or Team name shown on the row when the group does not already name it. */
   scopeLabel?: string
+  /** Project the row opens when the group does not already open it, as in Portfolio grouping. */
+  project?: CrossProjectTimelineProjectScope
+}
+
+/** Team-qualified Project that a timeline row opens. */
+export type CrossProjectTimelineProjectScope = {
+  /** Team that owns the Project. */
+  teamId: string
+  /** Team-local Project identifier. */
+  projectId: string
 }
 
 /** One group header row that names the Project or Portfolio below it. */
@@ -74,12 +84,7 @@ export type CrossProjectTimelineGroupRow = {
   /** Pixel offset of the row top inside the chart body. */
   top: number
   /** Project scope that the header opens, when the group is one Project. */
-  project?: {
-    /** Team that owns the Project. */
-    teamId: string
-    /** Team-local Project identifier. */
-    projectId: string
-  }
+  project?: CrossProjectTimelineProjectScope
   /** Number of entities in the group. */
   entityCount: number
 }
@@ -241,6 +246,7 @@ export function createCrossProjectTimelineChart(
       const baseline = readRangeDays(entity.baseline)
       if (!forecast || !baseline) continue
       const isMilestone = entity.type === 'milestone'
+      const scope = input.grouping === 'portfolio' ? resolveScopeGroup(entity, input) : undefined
       rows.push({
         kind: 'entity',
         entity,
@@ -248,9 +254,8 @@ export function createCrossProjectTimelineChart(
         forecast: isMilestone ? toPoint(forecast.end) : toSpan(forecast.start, forecast.end),
         baseline: isMilestone ? toPoint(baseline.end) : toSpan(baseline.start, baseline.end),
         endVarianceDays: forecast.end - baseline.end,
-        ...(input.grouping === 'portfolio'
-          ? { scopeLabel: resolveScopeGroup(entity, input).label }
-          : {}),
+        ...(scope ? { scopeLabel: scope.label } : {}),
+        ...(scope?.project ? { project: scope.project } : {}),
       })
       entityRowCenters.set(entity.id, top + CROSS_PROJECT_TIMELINE_ENTITY_ROW_HEIGHT / 2)
       entityDays.set(entity.id, { ...forecast, milestone: isMilestone })

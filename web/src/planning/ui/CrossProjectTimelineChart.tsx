@@ -2,9 +2,15 @@ import type {
   PlanningDependency,
   PlanningEntity,
   PlanningEntityType,
-  WorkItemAffectedProject,
 } from '@mukuroji/contracts'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
+import {
+  printTaskView,
+  taskViewPrintableWidth,
+  taskViewPrintPapers,
+  type TaskViewPrintPaper,
+} from '../../tasks/ui/taskViewPrint'
 import {
   CROSS_PROJECT_TIMELINE_ENTITY_ROW_HEIGHT,
   CROSS_PROJECT_TIMELINE_GROUP_ROW_HEIGHT,
@@ -13,6 +19,7 @@ import {
   type CrossProjectTimelineDirectoryTeam,
   type CrossProjectTimelineEntityRow,
   type CrossProjectTimelineGrouping,
+  type CrossProjectTimelineProjectScope,
 } from '../model/crossProjectTimeline'
 
 /** Localized labels used by the cross-Project timeline chart. */
@@ -39,8 +46,16 @@ export type CrossProjectTimelineLabels = {
   baselineLegend: string
   /** Legend label for dependency lines. */
   dependencyLegend: string
-  /** Action that opens a Project from its group header. */
-  openProject: string
+  /** Action that opens the overview of a Project from its row. */
+  openProjectOverview: string
+  /** Action that opens the Work Item Gantt chart of a Project from its row. */
+  openProjectGantt: string
+  /** Accessible name of the overview action, naming the Project or entity it opens from. */
+  openProjectOverviewFor: (name: string) => string
+  /** Accessible name of the Gantt action, naming the Project or entity it opens from. */
+  openProjectGanttFor: (name: string) => string
+  /** Print action for each landscape paper size. */
+  print: Record<TaskViewPrintPaper, string>
   /** Text for a non-zero forecast drift against the baseline end. */
   variance: (days: number) => string
   /** Summary of how many Projects the chart compares. */
@@ -69,15 +84,18 @@ export type CrossProjectTimelineChartProps = {
   disabled?: boolean
   /** Selects an entity in the Planning screen. */
   onSelectEntity: (entityId: string) => void
-  /** Opens a Project overview from its group header. */
-  onOpenProject?: (project: WorkItemAffectedProject) => void
+  /** Opens a Project overview from a group header or a Portfolio-grouped row. */
+  onOpenProjectOverview?: (project: CrossProjectTimelineProjectScope) => void
+  /** Opens a Project's Work Item Gantt chart from a group header or a Portfolio-grouped row. */
+  onOpenProjectGantt?: (project: CrossProjectTimelineProjectScope) => void
 }
 
 /**
  * Draws Phase, Milestone, Cycle, and Release entities of every visible Project on one time axis.
  *
  * The chart is read-only: it shows forecast bars over baseline bars, dependency lines,
- * and a today line, and lets the viewer open a Project or select an entity.
+ * and a today line, and lets the viewer open a Project overview or Gantt chart, select an
+ * entity, or print the chart on landscape A3 / A4.
  *
  * @param props - Visible entities, dependencies, labels, and navigation callbacks.
  * @returns The chart section.
@@ -90,10 +108,13 @@ export function CrossProjectTimelineChart({
   entities,
   entityTypes,
   labels,
-  onOpenProject,
+  onOpenProjectGantt,
+  onOpenProjectOverview,
   onSelectEntity,
   today,
 }: CrossProjectTimelineChartProps) {
+  const printRootRef = useRef<HTMLElement>(null)
+  const [printPaper, setPrintPaper] = useState<TaskViewPrintPaper>()
   const [grouping, setGrouping] = useState<CrossProjectTimelineGrouping>(readStoredGrouping)
   /** Changes the grouping and keeps it for this tab, because selecting a row can remount the screen. */
   const changeGrouping = (next: CrossProjectTimelineGrouping) => {
@@ -114,9 +135,60 @@ export function CrossProjectTimelineChart({
     today: resolvedToday,
     workspaceLabel: labels.workspaceGroup,
   }), [dependencies, directory, entities, grouping, labels, resolvedToday])
+  /**
+   * Lays the chart out to the paper width, then prints only the chart.
+   *
+   * The bars are placed in percentages, so the chart fills the paper instead of being zoomed.
+   *
+   * @param paper - Paper size to print on.
+   */
+  const printChart = (paper: TaskViewPrintPaper) => {
+    const root = printRootRef.current
+    if (!root) return
+    flushSync(() => setPrintPaper(paper))
+    printTaskView({
+      contentWidth: taskViewPrintableWidth(paper),
+      onAfterPrint: () => setPrintPaper(undefined),
+      paper,
+      root,
+      target: 'planning-timeline',
+    })
+  }
+  /** Renders the overview and Gantt actions for one Project. */
+  const renderProjectActions = (project: CrossProjectTimelineProjectScope, name: string, testIdSuffix: string) => (
+    <span className="flex shrink-0 items-center gap-2" data-print-hidden="">
+      {onOpenProjectOverview ? (
+        <button
+          aria-label={labels.openProjectOverviewFor(name)}
+          className="text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
+          data-testid={`cross-project-timeline-open-overview-${testIdSuffix}`}
+          type="button"
+          onClick={() => onOpenProjectOverview(project)}
+        >
+          {labels.openProjectOverview}
+        </button>
+      ) : null}
+      {onOpenProjectGantt ? (
+        <button
+          aria-label={labels.openProjectGanttFor(name)}
+          className="text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
+          data-testid={`cross-project-timeline-open-gantt-${testIdSuffix}`}
+          type="button"
+          onClick={() => onOpenProjectGantt(project)}
+        >
+          {labels.openProjectGantt}
+        </button>
+      ) : null}
+    </span>
+  )
 
   return (
-    <section className="workbench-panel overflow-hidden" data-testid="planning-cross-project-timeline">
+    <section
+      className="workbench-panel overflow-hidden"
+      data-print-root="planning-timeline"
+      data-testid="planning-cross-project-timeline"
+      ref={printRootRef}
+    >
       <div className="flex flex-wrap items-start justify-between gap-3 px-5 py-4">
         <div className="min-w-0">
           <h2 className="text-base font-semibold text-[var(--workbench-text)]">{labels.title}</h2>
@@ -127,6 +199,18 @@ export function CrossProjectTimelineChart({
             </p>
           ) : null}
         </div>
+        <div className="flex flex-wrap items-center gap-2" data-print-hidden="">
+        {chart ? taskViewPrintPapers.map((paper) => (
+          <button
+            className="h-9 rounded-md border border-[var(--workbench-border)] bg-surface px-3 text-xs font-semibold text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]"
+            data-testid={`cross-project-timeline-print-${paper}`}
+            key={paper}
+            type="button"
+            onClick={() => printChart(paper)}
+          >
+            {labels.print[paper]}
+          </button>
+        )) : null}
         <label className="flex items-center gap-2 text-sm font-semibold text-[var(--workbench-text)]">
           {labels.groupBy}
           <select
@@ -139,11 +223,15 @@ export function CrossProjectTimelineChart({
             <option value="portfolio">{labels.groupByPortfolio}</option>
           </select>
         </label>
+        </div>
       </div>
       {chart ? (
         <>
-          <div className="overflow-x-auto border-t border-[var(--workbench-border)]">
-            <div className="grid min-w-[960px] grid-cols-[240px_minmax(0,1fr)]">
+          <div className="overflow-x-auto border-t border-[var(--workbench-border)]" data-print-overflow="">
+            <div
+              className={`grid grid-cols-[240px_minmax(0,1fr)] ${printPaper ? '' : 'min-w-[960px]'}`}
+              style={printPaper ? { width: taskViewPrintableWidth(printPaper) } : undefined}
+            >
               <div className="h-8 border-b border-r border-[var(--workbench-border)]" />
               <div aria-hidden="true" className="relative h-8 border-b border-[var(--workbench-border)]">
                 {chart.ticks.map((tick) => (
@@ -167,34 +255,34 @@ export function CrossProjectTimelineChart({
                     <span className="min-w-0 truncate text-xs font-bold text-[var(--workbench-text)]">
                       {row.label} <span className="font-semibold text-[var(--workbench-muted)]">({row.entityCount})</span>
                     </span>
-                    {row.project && onOpenProject ? (
-                      <button
-                        className="shrink-0 text-xs font-semibold text-[var(--workbench-primary-text)] hover:underline"
-                        data-testid={`cross-project-timeline-open-project-${row.project.projectId}`}
-                        type="button"
-                        onClick={() => row.project && onOpenProject(row.project)}
-                      >
-                        {labels.openProject}
-                      </button>
-                    ) : null}
+                    {row.project
+                      ? renderProjectActions(row.project, row.label, `${row.project.teamId}-${row.project.projectId}`)
+                      : null}
                   </div>
                 ) : (
-                  <button
-                    className="flex w-full min-w-0 flex-col justify-center px-3 text-left hover:bg-[var(--workbench-row-selected)] disabled:cursor-not-allowed disabled:opacity-50"
-                    data-testid={`cross-project-timeline-entity-${row.entity.id}`}
-                    disabled={disabled}
+                  <div
+                    className="flex min-w-0 items-center gap-2 pr-3"
                     key={row.entity.id}
                     style={{ height: CROSS_PROJECT_TIMELINE_ENTITY_ROW_HEIGHT }}
-                    type="button"
-                    onClick={() => onSelectEntity(row.entity.id)}
                   >
-                    <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">{row.entity.title}</span>
-                    <span className="block truncate text-[11px] font-semibold text-[var(--workbench-muted)]">
-                      {row.scopeLabel ? `${row.scopeLabel} · ` : ''}
-                      {entityTypes[row.entity.type]}
-                      {row.endVarianceDays !== 0 ? ` · ${labels.variance(row.endVarianceDays)}` : ''}
-                    </span>
-                  </button>
+                    <button
+                      className="flex h-full min-w-0 flex-1 flex-col justify-center pl-3 text-left hover:bg-[var(--workbench-row-selected)] disabled:cursor-not-allowed disabled:opacity-50"
+                      data-testid={`cross-project-timeline-entity-${row.entity.id}`}
+                      disabled={disabled}
+                      type="button"
+                      onClick={() => onSelectEntity(row.entity.id)}
+                    >
+                      <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">{row.entity.title}</span>
+                      <span className="block truncate text-[11px] font-semibold text-[var(--workbench-muted)]">
+                        {row.scopeLabel ? `${row.scopeLabel} · ` : ''}
+                        {entityTypes[row.entity.type]}
+                        {row.endVarianceDays !== 0 ? ` · ${labels.variance(row.endVarianceDays)}` : ''}
+                      </span>
+                    </button>
+                    {row.project
+                      ? renderProjectActions(row.project, row.entity.title, row.entity.id)
+                      : null}
+                  </div>
                 ))}
               </div>
               <div className="relative" style={{ height: chart.height }}>

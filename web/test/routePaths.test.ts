@@ -10,7 +10,11 @@ import { FocusPage } from '../src/pages/workspace/FocusPage'
 import { InboxPage } from '../src/pages/workspace/InboxPage'
 import { MyTasksPage } from '../src/pages/workspace/MyTasksPage'
 import { PlanningPage } from '../src/pages/workspace/PlanningPage'
-import { resolvePlanningProjectNavigationPath } from '../src/planning/model/navigation'
+import {
+  createPlanningProjectGanttPath,
+  resolvePlanningProjectNavigationPath,
+} from '../src/planning/model/navigation'
+import { parseTaskViewUrlState } from '../src/task-views/model/taskViewUrlState'
 import { ProjectsPage } from '../src/pages/workspace/ProjectsPage'
 import { ReportsPage } from '../src/pages/workspace/ReportsPage'
 import { SettingsPage } from '../src/pages/workspace/SettingsPage'
@@ -344,5 +348,21 @@ describe('Enterprise security path', () => {
 describe('Analytics report path', () => {
   test('registers the dedicated reports route', () => {
     expect(matchRoutes(appRoutes, '/reports')?.at(-1)?.route.path).toBe('/reports')
+  })
+})
+
+describe('Planning Project Gantt path', () => {
+  test('opens a Project Gantt chart through a temporary task-view layout override', () => {
+    const path = createPlanningProjectGanttPath('unique/project', 'core/team')
+    const [pathname, query] = path.split('?')
+    expect(pathname).toBe('/projects/unique%2Fproject/issues')
+    const searchParams = new URLSearchParams(query)
+    expect(searchParams.get('teamId')).toBe('core/team')
+    const parsed = parseTaskViewUrlState(searchParams, {
+      surface: 'project',
+      scope: { kind: 'project', projectId: 'unique/project', teamId: 'core/team' },
+    })
+    expect(parsed.warnings).toEqual([])
+    expect(parsed.state.override?.layout?.mode).toBe('gantt')
   })
 })
