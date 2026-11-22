@@ -4,8 +4,8 @@ import { useWorkspaceRouteContext } from './WorkspaceRouteProvider'
 
 /**
  * Reads the archive impact of a Team or Project for an open archive confirmation and renders
- * the confirmation body with it. Counts being refreshed count as loading, so the archive button
- * never acts on counts from an earlier opening.
+ * the confirmation body with it. A request in flight counts as loading, even after an earlier
+ * failure, so the archive button never acts on counts or errors from an earlier opening.
  *
  * @param props - Target and the body renderer.
  * @returns The confirmation body for the current loading state.
@@ -17,11 +17,13 @@ export function DirectoryArchiveImpactGate({ target, children }: ArchiveImpactGa
     target,
     workspace.guardEnterpriseSession,
   )
-  const state: ArchiveImpactState = error
-    ? { status: 'error' }
-    : data && !isValidating
-      ? { status: 'ready', impact: data }
-      : { status: 'loading' }
+  const state: ArchiveImpactState = isValidating
+    ? { status: 'loading' }
+    : error
+      ? { status: 'error' }
+      : data
+        ? { status: 'ready', impact: data }
+        : { status: 'loading' }
 
   return <>{children(state)}</>
 }

@@ -81,6 +81,8 @@ type SourceOptions = {
  */
 function createSources(options: SourceOptions = {}) {
   const workItemReads: DirectoryArchiveImpactTarget[] = []
+  const workItemPositions: Array<SortedWorkItemPage['nextPosition']> = []
+  const runCursors: Array<string | undefined> = []
   let workItemPage = 0
   let runPage = 0
   const sources: DirectoryArchiveImpactSources = {
@@ -93,14 +95,16 @@ function createSources(options: SourceOptions = {}) {
       updateTargets: [],
       ...options.planning,
     }),
-    readWorkItemPage: async (_directoryId, target) => {
+    readWorkItemPage: async (_directoryId, target, startAfter) => {
       workItemReads.push(target)
+      workItemPositions.push(startAfter)
       const pages = options.workItemPages ?? [{ issues: [] }]
       const page = pages[workItemPage] ?? { issues: [] }
       workItemPage += 1
       return page
     },
-    readActiveRunPage: async () => {
+    readActiveRunPage: async (_directoryId, _teamId, cursor) => {
+      runCursors.push(cursor)
       const pages = options.runPages ?? [{ runs: [] }]
       const page = pages[runPage] ?? { runs: [] }
       runPage += 1
@@ -116,7 +120,7 @@ function createSources(options: SourceOptions = {}) {
         Object.assign(Object.create(null), subscription)
       ),
   }
-  return { sources, workItemReads }
+  return { sources, workItemReads, workItemPositions, runCursors }
 }
 
 test('counts open Work Items, active runs, and active Webhooks of a Team as warnings', async () => {
@@ -313,4 +317,27 @@ test('finds Project dependency blockers beyond the counted Work Items and missin
   )
 
   expect(impact).toMatchObject({ planningDependencies: 2, archiveBlocked: true })
+})
+
+test('continues each page from the previous position, past an empty page', async () => {
+  const position = (sortOrder: number) => ({ kind: 'after-sort-order' as const, sortOrder })
+  const { sources, workItemPositions, runCursors } = createSources({
+    workItemPages: [
+      { issues: [workItem('1', 'started')], nextPosition: position(1) },
+      { issues: [], nextPosition: position(2) },
+      { issues: [workItem('3', 'started')] },
+    ],
+    runPages: [
+      { runs: [activeRun('1')], nextCursor: 'c1' },
+      { runs: [], nextCursor: 'c2' },
+      { runs: [activeRun('3')] },
+    ],
+  })
+
+  const impact = await readDirectoryArchiveImpact(directoryId, { kind: 'team', teamId: 'core' }, sources)
+
+  expect(impact.openWorkItems).toEqual({ count: 2, hasMore: false })
+  expect(impact.activeAgentRuns).toEqual({ count: 2, hasMore: false })
+  expect(workItemPositions).toEqual([undefined, position(1), position(2)])
+  expect(runCursors).toEqual([undefined, 'c1', 'c2'])
 })

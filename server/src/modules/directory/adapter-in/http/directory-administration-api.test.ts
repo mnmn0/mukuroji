@@ -140,6 +140,7 @@ test('reads the archive impact only for an active Team or Project of a Workspace
   expect(missingTeam.status).toBe(404)
   expect(archivedProject.status).toBe(404)
   expect(oversizedId.status).toBe(400)
+  expect(await oversizedId.json()).toMatchObject({ code: 'InvalidProjectWrite' })
 })
 
 test('denies the archive impact to a Workspace member', async () => {

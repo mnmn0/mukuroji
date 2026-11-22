@@ -11,8 +11,9 @@ const directoryArchiveImpactKeyPrefix = 'directory-archive-impact'
 /**
  * Loads what archiving a Team or Project affects, for its archive confirmation.
  *
- * Each mount revalidates, so reopening a confirmation never relies on counts read earlier; the
- * caller treats a revalidation as loading.
+ * Each mount sends a new request, with deduplication off so a confirmation reopened within the
+ * default deduplication window does not reuse the earlier counts; the caller treats a
+ * revalidation as loading.
  *
  * @param accessToken - Bearer token of the Workspace administrator, or undefined before sign-in.
  * @param target - Team or Project about to be archived.
@@ -35,6 +36,11 @@ export function useDirectoryArchiveImpact(
         ] as const
       : null,
     () => guard(getDirectoryArchiveImpact(accessToken ?? '', target)),
-    { revalidateOnMount: true, revalidateOnFocus: false, shouldRetryOnError: false },
+    {
+      revalidateOnMount: true,
+      dedupingInterval: 0,
+      revalidateOnFocus: false,
+      shouldRetryOnError: false,
+    },
   )
 }

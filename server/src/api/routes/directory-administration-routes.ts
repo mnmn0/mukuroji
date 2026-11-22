@@ -210,6 +210,7 @@ async function handleDirectoryAdministration(
  */
 const directoryAdministrationErrorStatuses: Partial<Record<string, 400 | 403 | 409 | 413 | 503>> = {
   InvalidDirectoryOrder: 400,
+  InvalidProjectWrite: 400,
   DirectoryAuthorizationChanged: 403,
   DirectoryOrderConflict: 409,
   TeamNotArchived: 409,
