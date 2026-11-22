@@ -106,6 +106,8 @@ export function useArchiveImpact(
     )
     return () => {
       active = false
+      // Reopening the same target must show fresh counts, never the ones read last time.
+      setLoaded(undefined)
     }
   }, [canLoad, targetKey])
 
