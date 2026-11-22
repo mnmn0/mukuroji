@@ -193,6 +193,103 @@ export function deriveWorkItemBaselineEndDelayDays(
 }
 
 /**
+ * Days a Work Item must end behind its Project baseline before its assignee is notified. It
+ * matches the default Focus `slipped` threshold.
+ */
+export const WORK_ITEM_BASELINE_SLIP_NOTIFICATION_DAYS = 3
+
+/** How one change moved an open Work Item further behind its Project's active baseline. */
+export type WorkItemBaselineSlipChange = {
+  /** Revision of the active baseline the delay was measured against. */
+  baselineRevision: number
+  /** Planned end the baseline froze for the Work Item. */
+  baselineEndDate: string
+  /** Days behind the baseline before the change; absent when it had no comparable end. */
+  previousDelayDays?: number
+  /** Days behind the baseline after the change; always at least one. */
+  delayDays: number
+}
+
+/**
+ * Detects a change that leaves an open Work Item later behind its baseline than before.
+ *
+ * A change only counts when the Work Item is still open afterwards and now ends at least one day
+ * after the baseline end, later than it did before. Completing, canceling, or pulling the end in
+ * never counts, so the weekly summary's completed delays do not raise new alerts.
+ *
+ * @param baselineRevision - Revision of the active baseline holding the entry.
+ * @param baseline - Frozen planned dates of the Work Item.
+ * @param before - Work Item before the change; `undefined` when it had no place in this baseline,
+ *   such as a Work Item that just moved into the Project.
+ * @param after - Work Item after the change.
+ * @returns The slip, or `undefined` when the change did not make the Work Item later.
+ */
+export function deriveWorkItemBaselineSlipChange(
+  baselineRevision: number,
+  baseline: ProjectScheduleBaselineEntry,
+  before: WorkItemBaselineDelaySource | undefined,
+  after: WorkItemBaselineDelaySource,
+): WorkItemBaselineSlipChange | undefined {
+  if (baseline.endDate === undefined) return undefined
+  if (after.statusCategory === 'completed' || after.statusCategory === 'canceled') return undefined
+  const delayDays = deriveWorkItemBaselineEndDelayDays(baseline, after)
+  if (delayDays === undefined || delayDays < 1) return undefined
+  const previousDelayDays = before === undefined
+    ? undefined
+    : deriveWorkItemBaselineEndDelayDays(baseline, before)
+  if (previousDelayDays !== undefined && previousDelayDays >= delayDays) return undefined
+  return {
+    baselineRevision,
+    baselineEndDate: baseline.endDate,
+    ...(previousDelayDays === undefined ? {} : { previousDelayDays }),
+    delayDays,
+  }
+}
+
+/**
+ * Tells whether a slip moved the Work Item from under a threshold to at or over it.
+ *
+ * @param slip - Slip recorded for one change.
+ * @param thresholdDays - Days behind the baseline that count as slipped.
+ * @returns Whether this change is the one that crossed the threshold.
+ */
+export function crossesWorkItemBaselineSlipThreshold(
+  slip: Pick<WorkItemBaselineSlipChange, 'previousDelayDays' | 'delayDays'>,
+  thresholdDays: number,
+): boolean {
+  return slip.delayDays >= thresholdDays &&
+    (slip.previousDelayDays === undefined || slip.previousDelayDays < thresholdDays)
+}
+
+/**
+ * Validates a slip read back from stored or streamed event metadata.
+ *
+ * @param value - Untrusted metadata value.
+ * @returns The slip, or `undefined` when any part is malformed.
+ */
+export function parseWorkItemBaselineSlipChange(value: unknown): WorkItemBaselineSlipChange | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const baselineRevision: unknown = Reflect.get(value, 'baselineRevision')
+  const baselineEndDate: unknown = Reflect.get(value, 'baselineEndDate')
+  const previousDelayDays: unknown = Reflect.get(value, 'previousDelayDays')
+  const delayDays: unknown = Reflect.get(value, 'delayDays')
+  if (typeof baselineRevision !== 'number' || !Number.isSafeInteger(baselineRevision) || baselineRevision < 1) return undefined
+  if (!isCalendarDate(baselineEndDate)) return undefined
+  if (typeof delayDays !== 'number' || !Number.isSafeInteger(delayDays) || delayDays < 1) return undefined
+  if (previousDelayDays !== undefined && (
+    typeof previousDelayDays !== 'number' ||
+    !Number.isSafeInteger(previousDelayDays) ||
+    previousDelayDays >= delayDays
+  )) return undefined
+  return {
+    baselineRevision,
+    baselineEndDate,
+    ...(typeof previousDelayDays === 'number' ? { previousDelayDays } : {}),
+    delayDays,
+  }
+}
+
+/**
  * Validates an untrusted Project schedule baseline response.
  *
  * @param value - Parsed response body.

@@ -1,4 +1,5 @@
 import {
+  AUTOMATION_BASELINE_SLIP_MAX_DAYS,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_RELATION_EVENT_TYPES,
   type AutomationInboundWebhookEndpoint,
@@ -58,6 +59,7 @@ const automationTriggerTypes = [
   'status',
   'assignee',
   'due',
+  'baseline-slip',
   'custom-field',
   'work-item-type',
   'comment',
@@ -115,6 +117,7 @@ const triggerLabelKeys: Record<AutomationTriggerType, MessageKey> = {
   status: 'automation.trigger.statusChange',
   assignee: 'automation.trigger.assigneeChange',
   due: 'automation.trigger.dueDate',
+  'baseline-slip': 'automation.trigger.baselineSlip',
   'custom-field': 'automation.trigger.customFieldChange',
   'work-item-type': 'automation.trigger.workItemTypeChange',
   comment: 'automation.trigger.comment',
@@ -226,6 +229,59 @@ export type AutomationRuleEditorProps = {
   teams?: RecurringTeamOption[]
   /** Rule 作成 callback です。 */
   onCreate: (input: CreateAutomationRuleInput) => Promise<unknown> | unknown
+}
+
+/** Props of the baseline-slip day field. */
+type BaselineSlipDaysFieldProps = {
+  /** Translator of the editor locale. */
+  t: ReturnType<typeof createTranslator>
+  /** Day count as typed; blank means 1 day. */
+  value: string
+  /** Called with the typed value. */
+  onChange: (value: string) => void
+}
+
+/**
+ * Day count field of a baseline-slip trigger that explains an out-of-range value next to it.
+ *
+ * @param props - Field props.
+ * @returns The field.
+ */
+export function BaselineSlipDaysField({ t, value, onChange }: BaselineSlipDaysFieldProps) {
+  const invalid = !isAutomationTriggerConfigurationValid('baseline-slip', value.trim())
+  return (
+    <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
+      {t('automation.rule.baselineSlipDays')}
+      <input
+        aria-describedby={invalid
+          ? 'automation-rule-baseline-slip-days-error automation-rule-baseline-slip-days-hint'
+          : 'automation-rule-baseline-slip-days-hint'}
+        aria-invalid={invalid ? true : undefined}
+        className="workbench-input min-h-10 px-3 tabular-nums text-[var(--workbench-text)]"
+        data-testid="automation-rule-trigger-configuration"
+        inputMode="numeric"
+        maxLength={String(AUTOMATION_BASELINE_SLIP_MAX_DAYS).length}
+        pattern="[0-9]*"
+        placeholder="1"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {invalid ? (
+        <span
+          className="text-xs font-semibold leading-5 text-[var(--workbench-danger)]"
+          id="automation-rule-baseline-slip-days-error"
+        >
+          {t('automation.rule.baselineSlipDaysInvalid')}
+        </span>
+      ) : null}
+      <span
+        className="text-xs font-medium leading-5 text-[var(--workbench-muted)]"
+        id="automation-rule-baseline-slip-days-hint"
+      >
+        {t('automation.rule.baselineSlipDaysHint')}
+      </span>
+    </label>
+  )
 }
 
 /** Trigger、condition、action、実行制御を入力する rule editor です。 */
@@ -541,6 +597,12 @@ export function AutomationRuleEditor({
                 : t('automation.rule.webhookEndpointHint')}
             </span>
           </label>
+        ) : triggerType === 'baseline-slip' ? (
+          <BaselineSlipDaysField
+            t={t}
+            value={triggerConfiguration}
+            onChange={setTriggerConfiguration}
+          />
         ) : triggerType !== 'schedule' ? (
           <label className="grid gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
             {t('automation.rule.triggerConfiguration')}
