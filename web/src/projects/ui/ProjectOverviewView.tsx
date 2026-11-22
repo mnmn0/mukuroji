@@ -340,7 +340,6 @@ export function ProjectOverviewView({
           </OverviewSection>
         ) : null}
       </div>
-
     </div>
   )
 }

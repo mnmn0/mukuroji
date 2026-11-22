@@ -1,8 +1,8 @@
 import { useMemo } from 'react'
+import { useParams, useSearchParams } from 'react-router'
 import { DocumentsApiError } from '../../documents/api/errors'
 import { useDocumentBacklinks } from '../../documents/queries/useDocumentQueries'
 import { useProjectDocuments } from '../../documents/queries/useProjectDocuments'
-import { useParams, useSearchParams } from 'react-router'
 import { useTeamAgentRunBoard } from '../../features/factory-board/queries/useFactoryBoard'
 import { TeamIssuesApiError } from '../../issues/api'
 import { useProjectIssues } from '../../issues/queries/useWorkItems'
@@ -36,8 +36,8 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
  * Renders the Team-qualified Project overview route.
  *
  * The overview reads the Project's Work Items, the Planning snapshot, the Project members, the
- * Project log, and the related Documents in parallel through the existing read APIs, so each widget shows its own loading or failure
- * state and a failed read never hides the others.
+ * Project log, and the related Documents in parallel through the existing read APIs, so each
+ * widget shows its own loading or failure state and a failed read never hides the others.
  *
  * @returns Project overview content rendered inside the shared Workspace shell.
  */
