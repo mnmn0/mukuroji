@@ -286,6 +286,8 @@ export function MyTasksTaskTable({
                       data-task-view-selected={selected ? 'true' : 'false'}
                       data-testid={`my-tasks-table-row-${createWorkspaceTaskTestId(task)}`}
                       key={taskViewKey}
+                      // Focusable from script only, so a menu opened by right-click returns focus here.
+                      tabIndex={-1}
                       onContextMenu={onTaskActionMenuOpen
                         ? (event) => {
                             event.preventDefault()

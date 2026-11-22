@@ -79,6 +79,8 @@ describe('My Tasks table', () => {
     expect(html).toContain('2026-03-02')
     expect(html).toContain('data-testid="my-tasks-table-open-refero-early"')
     expect(html).toContain('data-testid="my-tasks-table-actions-refero-early"')
+    // A right-click menu returns focus to its row, so the row must be focusable from script.
+    expect(html).toMatch(/<tr[^>]*data-testid="my-tasks-table-row-refero-early"[^>]*tabindex="-1"|<tr[^>]*tabindex="-1"[^>]*data-testid="my-tasks-table-row-refero-early"/)
     expect(html).toContain('data-testid="my-tasks-table-due-refero-early"')
   })
 
