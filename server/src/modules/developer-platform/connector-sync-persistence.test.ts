@@ -531,6 +531,19 @@ describe('DynamoDbConnectorSyncPersistence', () => {
     })
   })
 
+  test('accepts the documented Workspace ID form with # and keeps other identifiers strict', async () => {
+    // `workspace#production` is the deploy default (#417).
+    const memory = createMemoryDocumentClient()
+    const persistence = new DynamoDbConnectorSyncPersistence({
+      tableName: 'DeveloperPlatformTable',
+      auditTableName: 'AuditEventsTable',
+      documentClient: memory.documentClient,
+    })
+    await expect(persistence.getLinkState('workspace#production', 'link-1')).resolves.toBeUndefined()
+    await expect(persistence.getLinkState('#workspace', 'link-1')).rejects.toThrow('Workspace ID is invalid.')
+    await expect(persistence.getLinkState('workspace#production', 'link#1')).rejects.toThrow('is invalid.')
+  })
+
   test('atomically updates public link status and emits an external-link event', async () => {
     const memory = createMemoryDocumentClient()
     const link = createLink()

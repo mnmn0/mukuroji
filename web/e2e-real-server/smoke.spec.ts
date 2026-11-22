@@ -89,6 +89,48 @@ async function readJson(response: Awaited<ReturnType<APIRequestContext['get']>>,
   return body
 }
 
+/**
+ * Reads a non-empty string at a path of an API response, failing the test with the path when it is missing.
+ *
+ * @param body - Parsed API response.
+ * @param path - Property names from the root to the value.
+ * @returns The string value.
+ */
+function readString(body: unknown, path: readonly string[]): string {
+  const value = readPath(body, path)
+  if (typeof value !== 'string' || value === '') throw new Error(`Response ${path.join('.')} is not a non-empty string.`)
+  return value
+}
+
+/**
+ * Reads a safe integer at a path of an API response, failing the test with the path when it is missing.
+ *
+ * @param body - Parsed API response.
+ * @param path - Property names from the root to the value.
+ * @returns The integer value.
+ */
+function readInteger(body: unknown, path: readonly string[]): number {
+  const value = readPath(body, path)
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) throw new Error(`Response ${path.join('.')} is not an integer.`)
+  return value
+}
+
+/**
+ * Walks object properties without trusting the response shape.
+ *
+ * @param body - Parsed API response.
+ * @param path - Property names from the root to the value.
+ * @returns The value at the path, or undefined when a step is missing.
+ */
+function readPath(body: unknown, path: readonly string[]): unknown {
+  let current = body
+  for (const key of path) {
+    if (!current || typeof current !== 'object' || !(key in current)) return undefined
+    current = Reflect.get(current, key)
+  }
+  return current
+}
+
 test('logs in through the API and returns an access token', async ({ request }) => {
   const body = await readJson(
     await request.post('/api/auth/login', { data: { email: demoEmail, password: demoPassword } }),
@@ -261,7 +303,7 @@ test('publishes a health update for the Project', async ({ request }) => {
           nextDueAt: new Date(Date.now() + 7 * 86_400_000).toISOString(),
           reminderHoursBefore: 24,
         },
-        expectedRevision: (planning as { revision: number }).revision,
+        expectedRevision: readInteger(planning, ['revision']),
       },
     }),
     200,
@@ -282,7 +324,7 @@ test('publishes a health update for the Project', async ({ request }) => {
         helpNeeded: '',
         nextAction: 'Finish the agent task.',
         evidence: [{ type: 'work-item', teamId: requireState('teamId'), workItemId: requireState('workItemId') }],
-        expectedRevision: (configured as { planning: { revision: number } }).planning.revision,
+        expectedRevision: readInteger(configured, ['planning', 'revision']),
       },
     }),
     201,
@@ -309,7 +351,7 @@ test('starts and reports on a Work Item through the MCP server', async ({ reques
   const auth = { Authorization: `Bearer ${requireState('accessToken')}` }
   const connection = await readJson(await request.get('/api/developer/me/agent-connection', { headers: auth }), 200)
   expect(connection).toMatchObject({ memberId: expect.any(String), canIssue: true })
-  const memberId = (connection as { memberId: string }).memberId
+  const memberId = readString(connection, ['memberId'])
 
   // The agent only starts Work Items assigned to its member in a ready status (`todo`, saved above).
   const createBody = await readJson(
@@ -325,7 +367,10 @@ test('starts and reports on a Work Item through the MCP server', async ({ reques
     }),
     201,
   )
-  const agentWorkItem = (createBody as { issue: { id: string, revision: number } }).issue
+  const agentWorkItem = {
+    id: readString(createBody, ['issue', 'id']),
+    revision: readInteger(createBody, ['issue', 'revision']),
+  }
   state.agentWorkItemId = agentWorkItem.id
 
   const issued = await readJson(
@@ -336,7 +381,8 @@ test('starts and reports on a Work Item through the MCP server', async ({ reques
     201,
   )
   expect(issued).toMatchObject({ secret: expect.any(String), apiKey: { id: expect.any(String) } })
-  const { secret, apiKey } = issued as { secret: string, apiKey: { id: string } }
+  const secret = readString(issued, ['secret'])
+  const apiKeyId = readString(issued, ['apiKey', 'id'])
 
   const baseURL = testInfo.project.use.baseURL
   if (!baseURL) throw new Error('The real-server config must set use.baseURL.')
@@ -378,7 +424,7 @@ test('starts and reports on a Work Item through the MCP server', async ({ reques
         },
       },
     })
-    state.agentRunId = (started.structuredContent as { data: { run: { runId: string } } }).data.run.runId
+    state.agentRunId = readString(started.structuredContent, ['data', 'run', 'runId'])
 
     const reported = await mcp.callTool('report_progress', {
       taskId: agentWorkItem.id,
@@ -393,7 +439,8 @@ test('starts and reports on a Work Item through the MCP server', async ({ reques
     })
   } finally {
     await mcp?.close()
-    await request.delete(`/api/developer/me/api-keys/${encodeURIComponent(apiKey.id)}`, { headers: mutationHeaders() })
+    const revoked = await request.delete(`/api/developer/me/api-keys/${encodeURIComponent(apiKeyId)}`, { headers: mutationHeaders() })
+    expect(revoked.ok(), `Revoking the smoke token returned ${revoked.status()}.`).toBe(true)
   }
 })
 
@@ -434,7 +481,14 @@ test('shows the started Work Items and the agent run on the Factory board API', 
 })
 
 test('logs in through the Web and shows the agent run on the Factory board', async ({ page }, testInfo) => {
-  await page.coverage.startJSCoverage({ resetOnNavigation: false })
+  // Coverage is a reference value only, so neither starting nor writing it may fail the smoke suite.
+  let coverageStarted = false
+  try {
+    await page.coverage.startJSCoverage({ resetOnNavigation: false })
+    coverageStarted = true
+  } catch (error) {
+    console.warn(`Reference coverage was not started: ${error instanceof Error ? error.message : String(error)}`)
+  }
   await page.goto('/')
   await page.getByLabel('メールアドレス').fill(demoEmail)
   await page.getByRole('button', { name: '続行', exact: true }).click()
@@ -447,9 +501,8 @@ test('logs in through the Web and shows the agent run on the Factory board', asy
   await expect(page.getByText(agentWorkItemTitle).first()).toBeVisible()
   await expect(page.getByText(agentName).first()).toBeVisible()
 
-  // Coverage is a reference value only, so a failure to write it never fails the smoke suite.
   try {
-    await publishCoverageSummary(summarizeJsCoverage(await page.coverage.stopJSCoverage()), testInfo)
+    if (coverageStarted) await publishCoverageSummary(summarizeJsCoverage(await page.coverage.stopJSCoverage()), testInfo)
   } catch (error) {
     console.warn(`Reference coverage was not written: ${error instanceof Error ? error.message : String(error)}`)
   }
