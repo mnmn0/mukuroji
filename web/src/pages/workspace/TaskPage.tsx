@@ -13,7 +13,7 @@ import type {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { BlockerFunction } from 'react-router'
 import { useBlocker, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
-import { canMutateWorkspaceContent } from '../../auth/api'
+import { canManageWorkspaceStructure, canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
 import { withHierarchyRevalidation } from '../../work-items/mutations/hierarchyRevalidation'
@@ -2124,6 +2124,7 @@ export function TaskPage() {
         : undefined}
       onCommentDraftDirtyChange={reportCommentDraftDirty}
       canCorrectActualDates={canCorrectTaskActualDates}
+      canManageExternalLinks={canManageWorkspaceStructure(user)}
       canMutateTask={canMutateProjectTaskTarget}
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}

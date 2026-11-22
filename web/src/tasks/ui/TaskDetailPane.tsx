@@ -14,7 +14,12 @@ import type {
   WorkItemScheduleDependencyPatch,
   CanonicalWorkItem,
 } from '@mukuroji/contracts'
-import { DEFAULT_WORK_ITEM_TYPE, DEFAULT_WORK_ITEM_TYPE_ID } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORK_ITEM_TYPE,
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  hasWorkItemDetailPanel,
+  WORK_ITEM_DETAIL_SURFACE_CAPABILITIES,
+} from '@mukuroji/contracts'
 import { Fragment, useId, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
@@ -100,6 +105,8 @@ import {
 } from '../model/taskSchedule'
 import { TaskPriorityBadge } from './TaskViewPrimitives'
 import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
+import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
+import { WorkItemKeyActions } from '../../issues/ui/WorkItemKeyActions'
 import { TaskActualDatesPanel } from './TaskActualDatesPanel'
 import { TaskScheduleBaselinePanel } from './TaskScheduleBaselinePanel'
 import { WorkItemArchiveButton } from '../../issues/ui/WorkItemArchiveButton'
@@ -169,8 +176,10 @@ export type TaskDetailPaneProps = {
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Whether the current Workspace member may read Team Triage source links. */
   canAccessTriage?: boolean
-  /** Access token used by the related-document panel. */
+  /** Access token used by the related-document and external link panels. */
   accessToken?: string
+  /** Whether the person may add and remove external links of the Work Item. */
+  canManageExternalLinks?: boolean
   /** Active project members available as assignees. */
   assigneeOptions: ProjectMember[]
   /** File controller scoped to the selected Work Item. */
@@ -303,6 +312,7 @@ export function TaskDetailPane({
   aiSummaryAssistanceEnabled = false,
   assigneeOptions,
   canAccessTriage = false,
+  canManageExternalLinks = false,
   artifacts,
   canManageScheduleDependencyEndpoint,
   collaboration,
@@ -1160,7 +1170,7 @@ export function TaskDetailPane({
                 </label>
               </div>
               {renderContributorsEditor()}
-              {customerImpact ? <CustomerImpactPanel signal={customerImpact} t={t} /> : null}
+              {customerImpact && hasWorkItemDetailPanel('project', 'customer-impact') ? <CustomerImpactPanel signal={customerImpact} t={t} /> : null}
             </section>
           </fieldset>
         )
@@ -1334,7 +1344,8 @@ export function TaskDetailPane({
             </div>
           </fieldset>
           <TaskActualDatesPanel
-            canCorrect={Boolean(canCorrectActualDates && onUpdateIssue) && !isReadOnly}
+            canCorrect={WORK_ITEM_DETAIL_SURFACE_CAPABILITIES.project.correctsActualDates &&
+              Boolean(canCorrectActualDates && onUpdateIssue) && !isReadOnly}
             disabled={isReadOnly || isWorkItemMutationPending}
             onCorrect={(patch) => {
               void submitIssueUpdate(patch)
@@ -1343,7 +1354,7 @@ export function TaskDetailPane({
             // The loaded detail is newer than the list row, so the panel shows its dates.
             task={issue ?? task}
           />
-          {accessToken && (issue ?? task).assignedProjectId ? (
+          {accessToken && (issue ?? task).assignedProjectId && hasWorkItemDetailPanel('project', 'schedule-baseline') ? (
             <TaskScheduleBaselinePanel
               accessToken={accessToken}
               // Capturing needs Project management, not Work Item write access, so it does not
@@ -1407,6 +1418,15 @@ export function TaskDetailPane({
                 currentMemberKey={currentWorkspaceMemberKey}
                 locale={locale}
                 members={workspaceMembers}
+              />
+            ) : null}
+            {accessToken && hasWorkItemDetailPanel('project', 'external-links') ? (
+              <WorkItemExternalLinksPanelContainer
+                accessToken={accessToken}
+                canManage={canManageExternalLinks && !isReadOnly && !isWorkItemMutationPending}
+                locale={locale}
+                teamId={task.teamId}
+                workItemId={task.id}
               />
             ) : null}
             <RelatedDocuments
@@ -1493,6 +1513,15 @@ export function TaskDetailPane({
             >
               {title}
             </h2>
+            {(issue ?? task).key && hasWorkItemDetailPanel('project', 'key-actions') ? (
+              <div className="mt-2">
+                <WorkItemKeyActions
+                  key={(issue ?? task).key}
+                  t={t}
+                  workItemKey={(issue ?? task).key ?? ''}
+                />
+              </div>
+            ) : null}
             {isRetainedDetail && readOnlyMessage ? (
               <p
                 className="mt-2 text-sm font-medium text-[var(--workbench-muted)]"
