@@ -106,6 +106,8 @@ export const searchMessages = {
   'command.section.results': '検索結果',
   'command.loading': '検索中',
   'command.error': '検索できませんでした。',
+  'command.projectSearchError': 'Project の候補を読み込めませんでした。表示中の結果は Work Item などの検索結果です。',
+  'command.retry': '再試行',
   'command.empty': '一致する command や項目はありません。',
   'command.quick.search': '高度な Workspace search を開く',
   'command.quick.create': 'この一覧で Work Item を作成',

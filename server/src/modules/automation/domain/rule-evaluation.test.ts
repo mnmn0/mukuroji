@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import type { AutomationTrigger } from '@mukuroji/contracts'
 import {
   evaluateAutomationCondition,
   matchesAutomationTrigger,
@@ -112,6 +113,59 @@ describe('Automation rule domain', () => {
       trigger: { type: 'work-item-type', toWorkItemTypeId: 'incident' },
       actions: [{ type: 'comment', body: 'Changed' }],
     })).toThrow('Work Item Type trigger Team ID is required.')
+  })
+
+  test('fires a baseline-slip trigger once, on the change that crosses its day count', () => {
+    /**
+     * Builds an update event carrying one recorded slip.
+     *
+     * @param previousDelayDays - Delay before the change, or undefined when there was none.
+     * @param delayDays - Delay after the change.
+     * @returns The event.
+     */
+    const slipEvent = (previousDelayDays: number | undefined, delayDays: number): AutomationEvent => ({
+      ...event,
+      metadata: {
+        baselineSlip: {
+          baselineRevision: 2,
+          baselineEndDate: '2026-07-01',
+          ...(previousDelayDays === undefined ? {} : { previousDelayDays }),
+          delayDays,
+        },
+      },
+    })
+    const trigger: AutomationTrigger = { type: 'baseline-slip', minDelayDays: 3 }
+    expect(matchesAutomationTrigger(trigger, slipEvent(1, 3))).toBe(true)
+    expect(matchesAutomationTrigger(trigger, slipEvent(undefined, 5))).toBe(true)
+    expect(matchesAutomationTrigger(trigger, slipEvent(3, 6))).toBe(false)
+    expect(matchesAutomationTrigger(trigger, slipEvent(0, 2))).toBe(false)
+    expect(matchesAutomationTrigger({ type: 'baseline-slip' }, slipEvent(0, 1))).toBe(true)
+    expect(matchesAutomationTrigger({ type: 'baseline-slip' }, event)).toBe(false)
+    expect(matchesAutomationTrigger({ type: 'baseline-slip' }, {
+      ...event,
+      metadata: { baselineSlip: { baselineRevision: 2, baselineEndDate: '2026-07-01', delayDays: 0 } },
+    })).toBe(false)
+  })
+
+  test('validates the baseline-slip day count', () => {
+    /**
+     * Validates a rule with the given baseline-slip trigger.
+     *
+     * @param trigger - Untrusted trigger.
+     * @returns The normalized trigger.
+     */
+    const validate = (trigger: unknown) => validateCreateAutomationRuleInput({
+      name: 'Behind baseline',
+      enabled: true,
+      trigger,
+      actions: [{ type: 'comment', body: 'Slipped' }],
+    }).trigger
+    expect(validate({ type: 'baseline-slip' })).toEqual({ type: 'baseline-slip' })
+    expect(validate({ type: 'baseline-slip', minDelayDays: 5 })).toEqual({ type: 'baseline-slip', minDelayDays: 5 })
+    for (const minDelayDays of [0, 366, 1.5, '3']) {
+      expect(() => validate({ type: 'baseline-slip', minDelayDays }))
+        .toThrow('Automation baseline slip trigger days are invalid.')
+    }
   })
 
   test('matches relation changes by event type', () => {

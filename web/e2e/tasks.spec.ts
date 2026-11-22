@@ -4968,6 +4968,28 @@ test.describe('authenticated task page', () => {
     await page.emulateMedia({ media: 'screen' })
   })
 
+  test('Issue #379: Gantt の倍率・1 行表示・進捗線は表示中のビューに入り、再読み込み後も残る', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures)
+    await page.goto('/projects/refero/issues')
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const display = page.getByTestId('task-gantt-display')
+    await display.getByLabel('表示倍率').selectOption('month')
+    await display.getByRole('button', { name: '1 行表示', exact: true }).click()
+    await display.getByRole('button', { name: '進捗線', exact: true }).click()
+    await expect(page.getByTestId('task-gantt-progress-line')).toBeVisible()
+
+    await page.reload()
+    const reloadedDisplay = page.getByTestId('task-gantt-display')
+    await expect(reloadedDisplay.getByLabel('表示倍率')).toHaveValue('month')
+    await expect(reloadedDisplay.getByRole('button', { name: '1 行表示', exact: true }))
+      .toHaveAttribute('aria-pressed', 'true')
+    await expect(reloadedDisplay.getByRole('button', { name: '進捗線', exact: true }))
+      .toHaveAttribute('aria-pressed', 'true')
+    await expect(page.getByTestId('task-gantt-progress-line')).toBeVisible()
+  })
+
   test('Issue #379: Gantt の印刷は画面外で描画していない行も含める', async ({ page }) => {
     await setScheduleFixtureClock(page)
     const fixture = referoTaskFixtures[0]!
