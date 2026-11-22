@@ -1,7 +1,9 @@
+import { useSWRConfig } from 'swr'
 import {
   type TaskViewScope,
   type WorkItemRelation,
   type WorkItemDependencyEndpoint,
+  type BulkOperationRequest,
 } from '@mukuroji/contracts'
 import {
   useCallback,
@@ -27,6 +29,7 @@ import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessi
 import { clearAuthSession, getAuthSession } from '../../auth/session'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
+import { createBulkOperationHandlers } from '../../bulk-operations/mutations/createBulkOperationHandlers'
 import { readWorkItemArchiveFailureMessageKey } from '../../bulk-operations/model/workItemArchive'
 import { applyWorkItemArchive } from '../../bulk-operations/mutations/workItemArchive'
 import { ArchivedWorkItemsPanelContainer } from '../../issues/ui/ArchivedWorkItemsPanelContainer'
@@ -50,6 +53,7 @@ import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaborat
 import {
   confirmParentCompletion,
   confirmParentCompletionInBrowser,
+  confirmParentsCompletion,
 } from '../../issues/mutations/confirmParentCompletion'
 import { CANCELLED_TEAM_ISSUE_UPDATE } from '../../issues/model/teamIssueUpdateOutcome'
 import { useTeamWorkItemHierarchyMove } from '../../issues/mutations/useTeamWorkItemHierarchyMove'
@@ -121,6 +125,7 @@ import {
   formatTaskViewMigrationWarning,
 } from '../../task-views/ui/taskViewToolbarAdapter'
 import { TeamIssueScreen } from '../../issues/ui/TeamIssueScreen'
+import { createWorkItemListScheduleMutations } from '../../tasks/mutations/createWorkItemListScheduleMutations'
 import {
   emptyWorkspaceMembers,
   type TeamIssueHierarchyPlacement,
@@ -512,6 +517,26 @@ export function TeamIssuePage() {
   } = useTeamWorkItemHierarchy(accessToken, teamId, Boolean(user && !currentUserError) && isOutlineShown)
   // Refreshes the hierarchy of the Team a write went to, even after the person left it.
   const refreshTeamHierarchy = useTeamWorkItemHierarchyRefresh(accessToken, teamId)
+  const { mutate: mutateCache } = useSWRConfig()
+  const scheduleMutations = createWorkItemListScheduleMutations({
+    accessToken,
+    guardEnterpriseSession,
+    mutateCache,
+    mutationRequestRunner,
+    onBackgroundRefreshError: (error) => setAuthenticatedApiError(() => error),
+    planningCacheKey: planningKey,
+    // Archived Work Items are listed too, as the route's list query reads them.
+    listScope: {
+      includeArchived: true,
+      kind: 'team',
+      selectedIssueId: resolvedSelectedIssueId,
+      teamId,
+    },
+    refreshHierarchy: refreshTeamHierarchy,
+    selectedDetailCacheKey: detailKey,
+    t,
+    tasksCacheKey: issuesKey,
+  })
   const moveIssueInHierarchy = useTeamWorkItemHierarchyMove({
     accessToken,
     teamId,
@@ -719,6 +744,80 @@ export function TeamIssuePage() {
       throw error
     }
   }
+
+  /**
+   * Requires every bulk target, and the Project a move or edit assigns, to be writable.
+   *
+   * @param items - Work Items of the bulk request or operation.
+   * @param action - Bulk action applied to every item.
+   */
+  const requireBulkOperationWriteScopes = (
+    items: readonly { teamId: string; workItemId: string }[],
+    action: BulkOperationRequest['action'],
+  ) => {
+    const allowed = items.every((item) => {
+      const issue = issues.find((candidate) =>
+        candidate.teamId === item.teamId && candidate.id === item.workItemId
+      )
+      if (!issue || !canMutateTeamIssue(issue)) return false
+      const assignedProjectId = action.type === 'move'
+        ? action.targetProjectId
+        : action.type === 'edit'
+          ? action.patch.assignedProjectId
+          : undefined
+      if (assignedProjectId === undefined) return true
+      if (assignedProjectId !== null && typeof assignedProjectId !== 'string') return false
+      return canMutateTeamIssue({ ...issue, assignedProjectId: assignedProjectId ?? undefined })
+    })
+    if (allowed) return
+    throw new TeamIssuesApiError(403, t('taskViews.action.unavailable'), 'TeamTaskActionAccessDenied')
+  }
+
+  /**
+   * Asks once before a bulk status edit completes parents whose children are still open.
+   *
+   * @param request - Bulk request about to be applied.
+   * @returns Whether the apply may go ahead.
+   */
+  const confirmBulkParentCompletion = (request: BulkOperationRequest) => {
+    const workflowStatusId = request.action.type === 'edit'
+      ? request.action.patch.workflowStatusId
+      : undefined
+    if (!accessToken || typeof workflowStatusId !== 'string') return Promise.resolve(true)
+    const targets = request.items.flatMap((item) => {
+      const issue = issues.find((candidate) =>
+        candidate.teamId === item.teamId && candidate.id === item.workItemId
+      )
+      if (!issue) return []
+      return [{
+        nextStatusCategory: resolveWorkflowStatusDefinition(
+          { ...issue, workflowStatusId },
+          taskViewConfiguration,
+        )?.category,
+        workItem: issue,
+      }]
+    })
+    return confirmParentsCompletion({
+      accessToken,
+      configuration: taskViewConfiguration,
+      confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+      targets,
+    })
+  }
+
+  const bulkOperationHandlers = createBulkOperationHandlers({
+    accessToken,
+    confirmApply: confirmBulkParentCompletion,
+    guardRequest: guardEnterpriseSession,
+    mutationRequestRunner,
+    requireWriteScopes: requireBulkOperationWriteScopes,
+    // Archived or moved Work Items change the outline and its roll-ups as well.
+    revalidate: async () => {
+      await Promise.all([mutateIssues(), mutateIssueDetail(), refreshArchivedWorkItems()])
+      await refreshTeamHierarchy()
+    },
+    t,
+  })
 
   /**
    * Archives or restores one Work Item through a one-item bulk archive operation.
@@ -1030,6 +1129,11 @@ export function TeamIssuePage() {
       key={JSON.stringify([teamId, commentDraftPrincipalKey, commentDraftWorkspaceKey])}
       locale={locale}
       onAddRelation={hasWritableWorkItemScope ? handleAddRelation : undefined}
+      bulkWorkspaceId={hasWritableWorkItemScope && archiveWorkspaceId ? archiveWorkspaceId : undefined}
+      onBulkApply={hasWritableWorkItemScope ? bulkOperationHandlers.apply : undefined}
+      onBulkPreview={hasWritableWorkItemScope ? bulkOperationHandlers.preview : undefined}
+      onBulkRetry={hasWritableWorkItemScope ? bulkOperationHandlers.retry : undefined}
+      onBulkUndo={hasWritableWorkItemScope ? bulkOperationHandlers.undo : undefined}
       onArchiveIssue={hasWritableWorkItemScope && archiveWorkspaceId
         ? handleArchiveIssue
         : undefined}
@@ -1041,6 +1145,12 @@ export function TeamIssuePage() {
         ? dependencyMutations.create
         : undefined}
       onDeleteRelation={hasWritableWorkItemScope ? handleDeleteRelation : undefined}
+      onPreviewScheduleChange={hasWritableWorkItemScope && !workItemConfigurationError
+        ? scheduleMutations.previewScheduleChange
+        : undefined}
+      onConfirmScheduleChange={hasWritableWorkItemScope && !workItemConfigurationError
+        ? scheduleMutations.confirmScheduleChange
+        : undefined}
       onDeleteScheduleDependency={accessToken && planningSnapshot
         ? dependencyMutations.delete
         : undefined}

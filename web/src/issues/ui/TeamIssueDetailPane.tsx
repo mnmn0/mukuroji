@@ -5,7 +5,12 @@ import type {
   WorkItemDetailSectionId,
   WorkItemRelation,
 } from '@mukuroji/contracts'
-import { DEFAULT_WORK_ITEM_TYPE_ID, DEFAULT_WORK_ITEM_TYPE } from '@mukuroji/contracts'
+import {
+  DEFAULT_WORK_ITEM_TYPE_ID,
+  DEFAULT_WORK_ITEM_TYPE,
+  hasWorkItemDetailPanel,
+  WORK_ITEM_DETAIL_SURFACE_CAPABILITIES,
+} from '@mukuroji/contracts'
 import {
   Fragment,
   type FormEvent,
@@ -33,6 +38,7 @@ import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkIte
 import { useAgentRunReportCommentDetails } from '../../work-items/ui/useAgentRunReportCommentDetails'
 import { WorkItemAgentRunsPanelContainer } from '../../work-items/ui/WorkItemAgentRunsPanel'
 import { TaskHandoffPanel } from '../../work-items/ui/TaskHandoffPanel'
+import { TaskActualDatesPanel } from '../../tasks/ui/TaskActualDatesPanel'
 import { WorkItemTimePanelContainer } from '../../features/time-tracking/ui/WorkItemTimePanel'
 import {
   resolveRecordedRemainingEffortMinutes,
@@ -1071,6 +1077,16 @@ function IssueDetailContent({
                 readOnly={isIssueReadOnly}
               />
             </div>
+            {hasWorkItemDetailPanel('team', 'actual-dates') ? (
+              <TaskActualDatesPanel
+                // Correcting needs Project management, which the Project screen resolves.
+                canCorrect={WORK_ITEM_DETAIL_SURFACE_CAPABILITIES.team.correctsActualDates}
+                disabled
+                onCorrect={() => undefined}
+                t={t}
+                task={issue}
+              />
+            ) : null}
           </div>
         )
       case 'relations':
@@ -1124,7 +1140,7 @@ function IssueDetailContent({
                 members={workspaceMembers}
               />
             ) : null}
-            {externalLinksAccessToken ? (
+            {externalLinksAccessToken && hasWorkItemDetailPanel('team', 'external-links') ? (
               <WorkItemExternalLinksPanelContainer
                 accessToken={externalLinksAccessToken}
                 canManage={canManageExternalLinks && !isAiSummaryOperationPending}
@@ -1210,7 +1226,7 @@ function IssueDetailContent({
             <p className="mt-1 truncate text-lg font-semibold leading-6 text-[var(--workbench-text)]">
               {resolveIssueTitle(issue, t)}
             </p>
-            {issue.key ? (
+            {issue.key && hasWorkItemDetailPanel('team', 'key-actions') ? (
               <div className="mt-2">
                 <WorkItemKeyActions key={issue.key} t={t} workItemKey={issue.key} />
               </div>

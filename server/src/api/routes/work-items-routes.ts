@@ -175,6 +175,7 @@ import {
   toWorkItemConfigurationErrorResponse,
 } from '../shared/collaboration-access'
 import { mapInOrderWithConcurrency } from '../shared/agent-run-access'
+import { PROJECT_ARCHIVE_DEPENDENCY_ENDPOINT_LIMIT } from '../shared/directory-archive-impact'
 import {
   ASSIGNEE_PROFILE_READ_CONCURRENCY,
   WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY,
@@ -1142,8 +1143,6 @@ async function filterVisibleWorkItemRelations(
   })
 }
 
-/** Maximum dependency endpoints that leave room for archive, audit, and Planning actions. */
-const PROJECT_ARCHIVE_DEPENDENCY_ENDPOINT_LIMIT = 96
 
 /**
  * Verifies that a Team owns no active Planning scope or dependency endpoint.

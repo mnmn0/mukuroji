@@ -104,7 +104,11 @@ Enterprise ロールは Directory group mapping のほか、メンバー個人�
   **チームを登録** を押します（owner / admin のみ）。
 - 同じ画面の **プロジェクト** で「登録先チーム」を選ぶと Project を作れます。Project の進め方は
   [PM ガイド](pm.md) を参照してください。
-- アーカイブは「{名前} をアーカイブ」から行います。
+- アーカイブは「{名前} をアーカイブ」から行います。確認画面には、未完了の Work Item、進行中の Agent Run、
+  この Team に配信している Webhook の件数が出ます（件数が多いときは「◯件以上」）。これらは警告で、
+  そのままアーカイブできます。Planning の計画・Work Item のリンク・依存関係（Project は Project の Work Item にかかるもの）が残っている間は
+  アーカイブできないので、確認画面に出る件数を見て先に移動・アーカイブ・解除してください。
+- チームとプロジェクトの名前は日本語名・英語名とも 500 文字までで、改行などの制御文字は使えません。
 - **設定** → **Workspace 管理** → **チームとプロジェクトの管理**（owner / admin のみ）で、次の操作ができます。
   - **名前を変更**: 日本語名と英語名（Project は色も）を変えます。英語名を空にすると日本語名を使います。
     ID と URL は変わらないので、ブックマーク・Work Item・リンクはそのまま使えます。
@@ -207,6 +211,7 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
 - **Webhook**: 外部への通知。**Webhook を追加** で送信先と「配信を許可する Team」を決めます。配信 log から再送できます。
   Work Item の作成・更新・削除に加えて、親の変更、子の追加・削除、blocker の追加・解除、関連の追加・削除、
   並び順の変更も選べます。これらは相手の Work Item を含まず、変更された側の Work Item だけを送ります。
+  Work Item を削除して消えた関係は、残った相手の Work Item の解除・削除として送ります。
 - **Connector**: GitHub、Slack、Gmail、Google Calendar、Google Drive との連携。
   一覧には、運用者がこの環境で設定した provider だけが出ます（設定は [`cdk/README.md`](../../cdk/README.md) の
   connector secret）。設定がなければ「利用できる connector はありません」と表示されます。

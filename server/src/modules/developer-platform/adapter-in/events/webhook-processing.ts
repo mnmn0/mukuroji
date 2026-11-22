@@ -853,7 +853,7 @@ implements WebhookAuditEventReader {
    * @returns The matching event, or undefined when it is missing or crosses workspace boundaries.
    */
   async getEvent(workspaceIdValue: string, eventIdValue: string) {
-    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = readWorkspaceId(workspaceIdValue)
     const eventId = readIdentifier(eventIdValue, 'Audit event ID')
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
@@ -1188,7 +1188,7 @@ implements WebhookGrantCleanupStore {
 
   /** Locatorをstrong queryし、grantとのpairをtransactionalに削除します。 */
   async deletePage(request: WebhookGrantCleanupPageRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readWorkspaceId(request.workspaceId)
     const teamId = readIdentifier(request.teamId, 'Webhook Team ID')
     const projectId = request.projectId === undefined
       ? undefined
@@ -1388,7 +1388,7 @@ function readWebhookDeliveryClaimRequest(
     throw new TypeError('Webhook claim expiry must be after its claim time.')
   }
   return {
-    workspaceId: readIdentifier(request.workspaceId, 'Workspace ID'),
+    workspaceId: readWorkspaceId(request.workspaceId),
     deliveryId: readIdentifier(request.deliveryId, 'Webhook delivery ID'),
     leaseOwner: readIdentifier(request.leaseOwner, 'Webhook claim owner'),
     now,
@@ -1410,7 +1410,7 @@ function readWebhookProjectionClaimRequest(
     )
   }
   return {
-    workspaceId: readIdentifier(request.workspaceId, 'Workspace ID'),
+    workspaceId: readWorkspaceId(request.workspaceId),
     eventId: readIdentifier(request.eventId, 'Audit event ID'),
     ...(request.cursor === undefined
       ? {}
@@ -1512,7 +1512,7 @@ function readWebhookQueueMessage(body: string | undefined): WebhookQueueMessage 
     throw new TypeError('Webhook queue body must be valid JSON.')
   }
   if (!isRecord(value)) throw new TypeError('Webhook queue body must be an object.')
-  const workspaceId = readIdentifier(value.workspaceId, 'Workspace ID')
+  const workspaceId = readWorkspaceId(value.workspaceId)
   if (value.kind === 'delivery') {
     return {
       kind: 'delivery',
@@ -1548,7 +1548,7 @@ function readWebhookQueueMessage(body: string | undefined): WebhookQueueMessage 
 }
 
 function createSerializedWebhookQueueMessage(message: WebhookQueueMessage) {
-  const workspaceId = readIdentifier(message.workspaceId, 'Workspace ID')
+  const workspaceId = readWorkspaceId(message.workspaceId)
   if (message.kind === 'delivery') {
     return {
       kind: message.kind,
@@ -1811,6 +1811,27 @@ function readSafeErrorMessage(error: unknown) {
   return error instanceof TypeError
     ? 'WebhookInputInvalid'
     : 'UnexpectedWebhookWorkerError'
+}
+
+/**
+ * Reads the canonical Workspace ID, whose documented form contains `#` (for example `workspace#production`).
+ *
+ * Matches `readDeveloperWorkspaceId` in the developer-platform store; other identifiers keep {@link readIdentifier}.
+ *
+ * @param value - Untrusted Workspace ID.
+ * @returns The Workspace ID.
+ * @throws TypeError when the ID is empty, too long, or has characters outside the allowed set.
+ */
+function readWorkspaceId(value: unknown) {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > 200 ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:@/#-]*$/u.test(value)
+  ) {
+    throw new TypeError('Workspace ID is invalid.')
+  }
+  return value
 }
 
 function readIdentifier(value: unknown, label: string) {

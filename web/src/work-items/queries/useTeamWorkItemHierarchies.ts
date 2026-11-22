@@ -19,6 +19,23 @@ export function normalizeHierarchyTeamIds(teamIds: Iterable<string>): string[] {
 }
 
 /**
+ * Builds the cache key of the hierarchies of several Teams.
+ *
+ * @param accessToken - Access token for the Work Item API.
+ * @param teamIds - Teams whose hierarchies are read; repeats and order do not matter.
+ * @returns The key, or `null` without a token or Team.
+ */
+export function createTeamWorkItemHierarchiesKey(
+  accessToken: string | undefined,
+  teamIds: Iterable<string>,
+) {
+  const normalizedTeamIds = normalizeHierarchyTeamIds(teamIds)
+  return accessToken && normalizedTeamIds.length > 0
+    ? ['team-work-item-hierarchies', accessToken, ...normalizedTeamIds] as const
+    : null
+}
+
+/**
  * Reads the hierarchies of every Team a cross-Team view shows.
  *
  * @param accessToken - Access token for the Work Item API.
@@ -31,10 +48,7 @@ export function useTeamWorkItemHierarchies(
   teamIds: Iterable<string>,
   enabled = true,
 ) {
-  const normalizedTeamIds = normalizeHierarchyTeamIds(teamIds)
-  const key = accessToken && enabled && normalizedTeamIds.length > 0
-    ? ['team-work-item-hierarchies', accessToken, ...normalizedTeamIds] as const
-    : null
+  const key = enabled ? createTeamWorkItemHierarchiesKey(accessToken, teamIds) : null
   return useSWR(
     key,
     ([, token, ...currentTeamIds]) => loadTeamWorkItemHierarchies(currentTeamIds, token),
