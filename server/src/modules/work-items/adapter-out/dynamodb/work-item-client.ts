@@ -193,29 +193,194 @@ function createPlanningRevisionIncrementTransactionItem(
   }
 }
 
+/** One DynamoDB transaction item in a canonical Work Item write. */
+type WorkItemTransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+
 /**
- * Adds a Planning authorization fence to the Planning revision increment of the same transaction.
+ * Builds a stable identity for one DynamoDB row, independent of key attribute order.
  *
- * DynamoDB allows one operation per item in a transaction, so the fence cannot stay a separate
- * ConditionCheck on the row that the increment updates. Both conditions must hold for the write.
+ * @param tableName - Physical table name.
+ * @param key - Complete primary key.
+ * @returns A string that is equal for two references to the same row.
+ */
+function createTransactionRowKey(tableName: string, key: Readonly<Record<string, unknown>>): string {
+  return JSON.stringify([tableName, Object.entries(key).sort(([left], [right]) => left.localeCompare(right))])
+}
+
+/**
+ * Renames the expression placeholders of a condition so it can join another expression.
+ *
+ * @param expression - Condition expression that uses the placeholders.
+ * @param names - Expression attribute names of the condition.
+ * @param values - Expression attribute values of the condition.
+ * @param prefix - Prefix that makes the placeholders unique within the combined expression.
+ * @returns The expression and placeholder maps with every placeholder renamed.
+ */
+function prefixConditionPlaceholders(
+  expression: string,
+  names: Readonly<Record<string, string>> | undefined,
+  values: Readonly<Record<string, unknown>> | undefined,
+  prefix: string,
+): { expression: string, names: Record<string, string>, values: Record<string, unknown> } {
+  const renamed = new Map<string, string>()
+  for (const placeholder of [...Object.keys(names ?? {}), ...Object.keys(values ?? {})]) {
+    renamed.set(placeholder, `${placeholder.charAt(0)}${prefix}${placeholder.slice(1)}`)
+  }
+  return {
+    expression: expression.replace(/[#:][A-Za-z0-9_]+/g, (placeholder) => renamed.get(placeholder) ?? placeholder),
+    names: Object.fromEntries(Object.entries(names ?? {}).map(([placeholder, name]) =>
+      [renamed.get(placeholder) ?? placeholder, name])),
+    values: Object.fromEntries(Object.entries(values ?? {}).map(([placeholder, value]) =>
+      [renamed.get(placeholder) ?? placeholder, value])),
+  }
+}
+
+/**
+ * Joins ConditionCheck conditions on one row into a single condition.
+ *
+ * DynamoDB allows one operation per item in a transaction, so checks that guard the same row
+ * must be one check, or must become part of the write to that row.
+ *
+ * @param baseExpression - Condition the joined checks are added to, if any.
+ * @param baseNames - Expression attribute names of the base condition.
+ * @param baseValues - Expression attribute values of the base condition.
+ * @param checks - ConditionChecks that guard the same row.
+ * @returns The joined expression and placeholder maps; every condition must hold.
+ */
+function joinRowConditions(
+  baseExpression: string | undefined,
+  baseNames: Readonly<Record<string, string>> | undefined,
+  baseValues: Readonly<Record<string, unknown>> | undefined,
+  checks: readonly NonNullable<WorkItemTransactItem['ConditionCheck']>[],
+): { expression: string, names: Record<string, string>, values: Record<string, unknown> } {
+  const parts = baseExpression ? [`(${baseExpression})`] : []
+  const names: Record<string, string> = { ...baseNames }
+  const values: Record<string, unknown> = { ...baseValues }
+  checks.forEach((check, index) => {
+    const prefixed = prefixConditionPlaceholders(
+      check.ConditionExpression ?? '',
+      check.ExpressionAttributeNames,
+      check.ExpressionAttributeValues,
+      `rowCheck${index}_`,
+    )
+    parts.push(`(${prefixed.expression})`)
+    Object.assign(names, prefixed.names)
+    Object.assign(values, prefixed.values)
+  })
+  return { expression: parts.join(' AND '), names, values }
+}
+
+/** Authorization checks of one Work Item write, split by the row they guard. */
+type PlanningMetaSplitConditionEntries = {
+  /** Checks on the Planning META row, which must ride on its revision increment. */
+  planningMetaEntries: WorkItemAuthorizationConditionEntry[]
+  /** Checks that stay separate transaction items, one per row. */
+  otherEntries: WorkItemAuthorizationConditionEntry[]
+}
+
+/**
+ * Prepares authorization checks so the write names every row at most once.
+ *
+ * Checks on the Planning META row that the write also increments are set aside for
+ * {@link withPlanningMetaConditions}. Remaining checks that guard the same row are joined
+ * into one check, which keeps the kind of the first.
+ *
+ * @param planningTableName - Planning table whose META row the write increments, if configured.
+ * @param workspaceId - Workspace whose Planning META row the write increments.
+ * @param entries - Named authorization checks in transaction order.
+ * @returns The checks for the increment and the separate checks.
+ */
+function splitPlanningMetaConditionEntries(
+  planningTableName: string | undefined,
+  workspaceId: string,
+  entries: readonly WorkItemAuthorizationConditionEntry[],
+): PlanningMetaSplitConditionEntries {
+  const planningMetaRowKey = planningTableName
+    ? createTransactionRowKey(planningTableName, {
+        workspaceId: `FENCE#${workspaceId}`,
+        recordKey: PLANNING_META_RECORD_KEY,
+      })
+    : undefined
+  const planningMetaEntries: WorkItemAuthorizationConditionEntry[] = []
+  const rows = new Map<string, WorkItemAuthorizationConditionEntry[]>()
+  const otherEntries: WorkItemAuthorizationConditionEntry[] = []
+  for (const entry of entries) {
+    const rowKey = readConditionCheckRowKey(entry)
+    if (rowKey === undefined) {
+      otherEntries.push(entry)
+      continue
+    }
+    if (rowKey === planningMetaRowKey) {
+      planningMetaEntries.push(entry)
+      continue
+    }
+    const sameRow = rows.get(rowKey)
+    if (sameRow) {
+      sameRow.push(entry)
+      continue
+    }
+    const group = [entry]
+    rows.set(rowKey, group)
+    otherEntries.push(entry)
+  }
+  return {
+    planningMetaEntries,
+    otherEntries: otherEntries.map((entry) => {
+      const rowKey = readConditionCheckRowKey(entry)
+      const group = rowKey === undefined ? undefined : rows.get(rowKey)
+      const check = entry.transactWriteItem.ConditionCheck
+      if (!group || group.length < 2 || !check) return entry
+      const joined = joinRowConditions(
+        undefined,
+        undefined,
+        undefined,
+        group.flatMap((member) => member.transactWriteItem.ConditionCheck ?? []),
+      )
+      return {
+        kind: entry.kind,
+        transactWriteItem: {
+          ConditionCheck: {
+            TableName: check.TableName,
+            Key: check.Key,
+            ConditionExpression: joined.expression,
+            ExpressionAttributeNames: joined.names,
+            ExpressionAttributeValues: joined.values,
+          },
+        },
+      }
+    }),
+  }
+}
+
+/**
+ * Adds Planning META authorization checks to the Planning revision increment of the same write.
+ *
+ * DynamoDB allows one operation per item in a transaction, so a check on the row that the
+ * increment updates cannot stay a separate ConditionCheck. Every condition must hold.
  *
  * @param increment - Planning revision increment, when Planning is configured.
- * @param fence - Planning fence observed during authorization, if any.
- * @returns The increment, guarded by the fence when one is given.
+ * @param entries - Checks on the same Planning META row.
+ * @returns The increment, guarded by the checks when there are any.
  */
-function withPlanningFenceCondition(
-  increment: NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined,
-  fence: WorkItemAuthorizationConditionEntry | undefined,
-): NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined {
+function withPlanningMetaConditions(
+  increment: WorkItemTransactItem | undefined,
+  entries: readonly WorkItemAuthorizationConditionEntry[],
+): WorkItemTransactItem | undefined {
   const update = increment?.Update
-  const check = fence?.transactWriteItem.ConditionCheck
-  if (!update || !check) return increment
+  const checks = entries.flatMap((entry) => entry.transactWriteItem.ConditionCheck ?? [])
+  if (!update || checks.length === 0) return increment
+  const joined = joinRowConditions(
+    update.ConditionExpression,
+    update.ExpressionAttributeNames,
+    update.ExpressionAttributeValues,
+    checks,
+  )
   return {
     Update: {
       ...update,
-      ConditionExpression: `(${update.ConditionExpression}) AND (${check.ConditionExpression})`,
-      ExpressionAttributeNames: { ...update.ExpressionAttributeNames, ...check.ExpressionAttributeNames },
-      ExpressionAttributeValues: { ...update.ExpressionAttributeValues, ...check.ExpressionAttributeValues },
+      ConditionExpression: joined.expression,
+      ExpressionAttributeNames: joined.names,
+      ExpressionAttributeValues: joined.values,
     },
   }
 }
@@ -519,7 +684,7 @@ function mergeAuthorizationConditionEntries(
 function readConditionCheckRowKey(entry: WorkItemAuthorizationConditionEntry): string | undefined {
   const condition = entry.transactWriteItem.ConditionCheck
   if (!condition?.TableName || !condition.Key) return undefined
-  return JSON.stringify([condition.TableName, condition.Key])
+  return createTransactionRowKey(condition.TableName, condition.Key)
 }
 
 /**
@@ -552,6 +717,23 @@ function throwAuthorizationConditionFailureIfPresent(
       'Planning changed. Reload and try again.',
     )
   }
+}
+
+/**
+ * Raises the domain error for a failed Planning revision increment that carries folded checks.
+ *
+ * @param error - DynamoDB transaction failure candidate.
+ * @param incrementIndex - Index of the Planning revision increment in the transaction.
+ * @param entries - Authorization checks folded into the increment's condition.
+ */
+function throwPlanningMetaConditionFailureIfPresent(
+  error: unknown,
+  incrementIndex: number,
+  entries: readonly WorkItemAuthorizationConditionEntry[],
+): void {
+  const [entry] = entries
+  if (!entry || !isTransactionConditionalFailureAt(error, incrementIndex)) return
+  throwAuthorizationConditionFailureIfPresent(error, incrementIndex, [entry])
 }
 
 /**
@@ -2480,14 +2662,13 @@ export class DynamoDbTeamIssuesClient {
     )
     // Creation increments the Planning revision row, and DynamoDB rejects a second operation on
     // that row, so a Planning fence moves into the increment's condition instead.
-    const planningFenceEntry = this.planningTableName
-      ? fencedAuthorizationConditionEntries.find((entry) =>
-        entry.kind === 'planning' &&
-        entry.transactWriteItem.ConditionCheck?.TableName === this.planningTableName
-      )
-      : undefined
-    const authorizationConditionEntries = fencedAuthorizationConditionEntries.filter((entry) =>
-      entry !== planningFenceEntry
+    const {
+      planningMetaEntries: planningFenceEntries,
+      otherEntries: authorizationConditionEntries,
+    } = splitPlanningMetaConditionEntries(
+      this.planningTableName,
+      directoryId,
+      fencedAuthorizationConditionEntries,
     )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
@@ -2635,13 +2816,13 @@ export class DynamoDbTeamIssuesClient {
           )
         : []
       requestConversionItemCount = requestConversionItems.length
-      const planningRevisionMutation = withPlanningFenceCondition(
+      const planningRevisionMutation = withPlanningMetaConditions(
         createPlanningRevisionIncrementTransactionItem(
           this.planningTableName,
           directoryId,
           now,
         ),
-        planningFenceEntry,
+        planningFenceEntries,
       )
       await this.documentClient.send(
         new TransactWriteCommand({
@@ -2714,9 +2895,7 @@ export class DynamoDbTeamIssuesClient {
         authorizationConditionEntries.length +
         (newWorkItemProjectConditionCheck ? 1 : 0) +
         requestConversionItemCount
-      if (planningFenceEntry && isTransactionConditionalFailureAt(error, planningRevisionMutationIndex)) {
-        throwAuthorizationConditionFailureIfPresent(error, planningRevisionMutationIndex, [planningFenceEntry])
-      }
+      throwPlanningMetaConditionFailureIfPresent(error, planningRevisionMutationIndex, planningFenceEntries)
       if (
         newWorkItemProjectConditionCheck &&
         !isTransactionConditionalFailureAt(error, 0) &&
@@ -2962,8 +3141,15 @@ export class DynamoDbTeamIssuesClient {
         baselineFence,
       }
     }))
-    const authorizationConditionEntries = createAuthorizationSnapshotConditionEntries(
-      authorizationSnapshot,
+    // The cascade increments the Planning revision row, so the snapshot's Planning fence rides on
+    // that increment: DynamoDB rejects a transaction that names one row twice.
+    const {
+      planningMetaEntries: planningFenceEntries,
+      otherEntries: authorizationConditionEntries,
+    } = splitPlanningMetaConditionEntries(
+      this.planningTableName,
+      directoryId,
+      createAuthorizationSnapshotConditionEntries(authorizationSnapshot),
     )
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
@@ -3088,11 +3274,15 @@ export class DynamoDbTeamIssuesClient {
     if (idempotencyCompletion) {
       transactItems.push(idempotencyCompletion.transactWriteItem)
     }
-    const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
-      this.planningTableName,
-      directoryId,
-      occurredAt,
+    const planningRevisionMutation = withPlanningMetaConditions(
+      createPlanningRevisionIncrementTransactionItem(
+        this.planningTableName,
+        directoryId,
+        occurredAt,
+      ),
+      planningFenceEntries,
     )
+    const planningRevisionMutationIndex = transactItems.length
     if (planningRevisionMutation) transactItems.push(planningRevisionMutation)
     const planningRevisionFenceBarrierItems = planningRevisionMutation === undefined ? 0 : 1
     if (transactItems.length + planningRevisionFenceBarrierItems > 100) {
@@ -3111,6 +3301,7 @@ export class DynamoDbTeamIssuesClient {
         authorizationConditionStartIndex,
         authorizationConditionEntries,
       )
+      throwPlanningMetaConditionFailureIfPresent(error, planningRevisionMutationIndex, planningFenceEntries)
       if (updateConditionIndexes.some((index) => isTransactionConditionalFailureAt(error, index))) {
         throw createWorkItemRevisionConflictError()
       }
@@ -3181,13 +3372,24 @@ export class DynamoDbTeamIssuesClient {
     const agentRunTransactItems = input.agentRunTransactItems ?? []
     let agentRunFenceStartIndex: number | undefined
     let baselineFence: WorkItemBaselineSlipRead['fence']
-    const authorizationConditionEntries = mergeAuthorizationConditionEntries(
-      createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
-      [
-        ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
-        ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
-      ],
+    // The update increments the Planning revision row, so the snapshot's Planning fence and the
+    // caller's Planning revision fence ride on that increment: DynamoDB rejects a transaction
+    // that names one row twice.
+    const {
+      planningMetaEntries: planningFenceEntries,
+      otherEntries: authorizationConditionEntries,
+    } = splitPlanningMetaConditionEntries(
+      this.planningTableName,
+      directoryId,
+      mergeAuthorizationConditionEntries(
+        createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+        [
+          ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+          ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
+        ],
+      ),
     )
+    let planningRevisionMutationIndex: number | undefined
     const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
       entry.transactWriteItem
     )
@@ -3575,14 +3777,17 @@ export class DynamoDbTeamIssuesClient {
         status: 200,
         body: toTeamIssueResponseItem(afterIssue),
       })
-      const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
-        this.planningTableName,
-        directoryId,
-        updatedAt,
+      const planningRevisionMutation = withPlanningMetaConditions(
+        createPlanningRevisionIncrementTransactionItem(
+          this.planningTableName,
+          directoryId,
+          updatedAt,
+        ),
+        planningFenceEntries,
       )
-      agentRunFenceStartIndex = 2 + (auditPut ? 1 : 0) + configurationConditionChecks.length +
-        authorizationConditionChecks.length + (idempotencyCompletion ? 1 : 0) +
-        (planningRevisionMutation ? 1 : 0)
+      planningRevisionMutationIndex = 2 + (auditPut ? 1 : 0) + configurationConditionChecks.length +
+        authorizationConditionChecks.length + (idempotencyCompletion ? 1 : 0)
+      agentRunFenceStartIndex = planningRevisionMutationIndex + (planningRevisionMutation ? 1 : 0)
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -3673,6 +3878,9 @@ export class DynamoDbTeamIssuesClient {
         authorizationConditionStartIndex,
         authorizationConditionEntries,
       )
+      if (planningRevisionMutationIndex !== undefined) {
+        throwPlanningMetaConditionFailureIfPresent(error, planningRevisionMutationIndex, planningFenceEntries)
+      }
       if (configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {
@@ -3777,15 +3985,30 @@ export class DynamoDbTeamIssuesClient {
       status: 204,
       body: null,
     })
-    const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
+    // The delete increments the Planning revision row, so a Planning fence among the checks rides
+    // on that increment: DynamoDB rejects a transaction that names one row twice.
+    const {
+      planningMetaEntries: planningFenceEntries,
+      otherEntries: effectiveAuthorizationConditionEntries,
+    } = splitPlanningMetaConditionEntries(
       this.planningTableName,
       directoryId,
-      occurredAt,
+      mergeAuthorizationConditionEntries(
+        createCallerAuthorizationConditionEntries(authorizationConditionChecks),
+        createAuthorizationSnapshotConditionEntries(authorizationSnapshot),
+      ),
     )
-    const effectiveAuthorizationConditionChecks = [
-      ...authorizationConditionChecks,
-      ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
-    ]
+    const effectiveAuthorizationConditionChecks = effectiveAuthorizationConditionEntries.map((entry) =>
+      entry.transactWriteItem
+    )
+    const planningRevisionMutation = withPlanningMetaConditions(
+      createPlanningRevisionIncrementTransactionItem(
+        this.planningTableName,
+        directoryId,
+        occurredAt,
+      ),
+      planningFenceEntries,
+    )
 
     const deletionItems: WorkItemTransactWriteItem[] = [
       {
@@ -3840,6 +4063,14 @@ export class DynamoDbTeamIssuesClient {
       if (effectiveAuthorizationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
       )) {
+        throw createWorkItemAuthorizationChangedError()
+      }
+      const planningRevisionMutationIndex = authorizationConditionStartIndex +
+        effectiveAuthorizationConditionChecks.length + (idempotencyCompletion ? 1 : 0)
+      if (
+        planningFenceEntries.length > 0 &&
+        isTransactionConditionalFailureAt(error, planningRevisionMutationIndex)
+      ) {
         throw createWorkItemAuthorizationChangedError()
       }
 

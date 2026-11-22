@@ -2900,7 +2900,8 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
           }),
           ExpressionAttributeValues: expect.objectContaining({
             ':increment': 1,
-            ':authorization1': 0,
+            // The fence keeps its own placeholders inside the increment's condition.
+            ':rowCheck0_authorization1': 0,
           }),
         }),
       },
@@ -3001,10 +3002,17 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
           }
           if (command.constructor.name === 'TransactWriteCommand') {
             const transactItems = command.input.TransactItems as Array<{
-              ConditionCheck?: { TableName?: string }
+              ConditionCheck?: { TableName?: string, Key?: Record<string, string> }
+              Update?: { TableName?: string, Key?: Record<string, string> }
             }>
+            // DynamoDB rejects a transaction with two operations on one item, so the fence must
+            // ride on the Planning revision increment instead of a separate check.
+            expect(transactItems.filter((item) =>
+              (item.ConditionCheck ?? item.Update)?.Key?.workspaceId === 'FENCE#workspace-1'
+            )).toHaveLength(1)
             planningConditionIndex = transactItems.findIndex((item) =>
-              item.ConditionCheck?.TableName === 'PlanningTable'
+              item.Update?.TableName === 'PlanningTable' &&
+              item.Update.Key?.workspaceId === 'FENCE#workspace-1'
             )
             planningCondition = transactItems[planningConditionIndex]
             if (shouldFail) {
@@ -3054,11 +3062,12 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
       }
       expect(planningConditionIndex).toBe(2)
       expect(planningCondition).toEqual({
-        ConditionCheck: expect.objectContaining({
+        Update: expect.objectContaining({
           TableName: 'PlanningTable',
           Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
           ExpressionAttributeValues: expect.objectContaining({
-            ':authorization1': 4,
+            ':increment': 1,
+            ':rowCheck0_authorization1': 4,
           }),
         }),
       })
@@ -3149,6 +3158,119 @@ test('DynamoDB Work Item create and update classify snapshot Planning races', as
         status: 409,
       })
       expect(planningConditionIndex).toBeGreaterThan(0)
+    }
+  })
+})
+
+test('DynamoDB Work Item update and delete name the Planning META row once', async () => {
+  await withTestEnvironment({
+    WORKSPACE_ACCESS_TABLE_NAME: 'WorkspaceAccessTable',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+  }, async () => {
+    const currentIssue = createScheduleCascadeIssue('core-team', 'planning-meta-once')
+    const authorizationSnapshot = {
+      workspaceId: 'workspace-1',
+      memberKey: 'demo@example.com',
+      workspaceMemberVersion: 3,
+      planningRevision: 8,
+    }
+
+    for (const operation of ['update', 'delete'] as const) {
+      for (const shouldFail of [false, true]) {
+        let planningMetaItems: Array<Record<string, unknown>> = []
+        let itemKeys: string[] = []
+        const documentClient = {
+          async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+            if (command.constructor.name === 'QueryCommand') return { Items: [] }
+            if (command.constructor.name === 'GetCommand') {
+              return command.input.TableName === 'PlanningTable' ? {} : { Item: currentIssue }
+            }
+            if (command.constructor.name === 'TransactWriteCommand') {
+              const transactItems = command.input.TransactItems as Array<{
+                ConditionCheck?: { TableName?: string, Key?: Record<string, string> }
+                Update?: { TableName?: string, Key?: Record<string, string> }
+                Delete?: { TableName?: string, Key?: Record<string, string> }
+                Put?: { TableName?: string, Item?: Record<string, unknown> }
+              }>
+              itemKeys = transactItems.map((item) => {
+                const keyed = item.ConditionCheck ?? item.Update ?? item.Delete
+                return JSON.stringify(keyed ? [keyed.TableName, keyed.Key] : [item.Put?.TableName, item.Put?.Item])
+              })
+              const planningMetaIndex = transactItems.findIndex((item) =>
+                (item.ConditionCheck ?? item.Update)?.Key?.workspaceId === 'FENCE#workspace-1'
+              )
+              planningMetaItems = transactItems.filter((item) =>
+                (item.ConditionCheck ?? item.Update)?.Key?.workspaceId === 'FENCE#workspace-1'
+              )
+              if (shouldFail) {
+                const error = new Error('Transaction was canceled.')
+                error.name = 'TransactionCanceledException'
+                Object.assign(error, {
+                  CancellationReasons: transactItems.map((_, index) => ({
+                    Code: index === planningMetaIndex ? 'ConditionalCheckFailed' : 'None',
+                  })),
+                })
+                throw error
+              }
+            }
+            return {}
+          },
+        } as unknown as DynamoDBDocumentClient
+        const client = new DynamoDbTeamIssuesClient(
+          'IssuesTable',
+          'IssueEventsTable',
+          documentClient,
+          {} as DynamoDBClient,
+          false,
+        )
+        const mutation = operation === 'update'
+          ? client.updateTeamIssue(
+              'workspace-1',
+              'core-team',
+              'planning-meta-once',
+              {
+                expectedRevision: 1,
+                schedule: createDueDateSchedule('2026-07-21'),
+                authorizationSnapshot,
+              },
+              'demo@example.com',
+            )
+          : client.deleteTeamIssue(
+              'workspace-1',
+              'core-team',
+              'planning-meta-once',
+              1,
+              'demo@example.com',
+              undefined,
+              undefined,
+              [],
+              [],
+              authorizationSnapshot,
+            )
+
+        if (shouldFail) {
+          await expect(mutation).rejects.toMatchObject({
+            code: operation === 'update' ? 'PlanningRevisionConflict' : 'WorkItemAuthorizationChanged',
+            status: 409,
+          })
+        } else {
+          await expect(mutation).resolves.toBeDefined()
+        }
+        // DynamoDB rejects a transaction with two operations on one item.
+        expect(new Set(itemKeys).size).toBe(itemKeys.length)
+        expect(planningMetaItems).toEqual([{
+          Update: expect.objectContaining({
+            TableName: 'PlanningTable',
+            Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
+            UpdateExpression: expect.stringContaining('ADD #revision :increment'),
+            // The snapshot's expected Planning revision guards the increment.
+            ExpressionAttributeValues: expect.objectContaining({
+              ':increment': 1,
+              ':rowCheck0_authorization1': 8,
+            }),
+          }),
+        }])
+      }
     }
   })
 })
@@ -3684,8 +3806,15 @@ test('DynamoDB Work Item schedule cascade writes one bounded transaction with un
 
       expect(transactions).toHaveLength(1)
       const transactItems = transactions[0] ?? []
-      // Two Projects without a baseline add one absence check each.
-      expect(transactItems).toHaveLength(auditEnabled ? 15 : 13)
+      // Two Projects without a baseline add one absence check each. The Planning fence rides on
+      // the Planning revision increment, so it adds no item of its own.
+      expect(transactItems).toHaveLength(auditEnabled ? 14 : 12)
+      // DynamoDB rejects a transaction with two operations on one item.
+      const itemKeys = transactItems.map((item) => {
+        const keyed = item.ConditionCheck ?? item.Update ?? item.Delete
+        return JSON.stringify(keyed ? [keyed.TableName, keyed.Key] : [item.Put?.TableName, item.Put?.Item])
+      })
+      expect(new Set(itemKeys).size).toBe(itemKeys.length)
       expect(transactItems.filter((item) => item.Update?.TableName === 'IssuesTable'))
         .toHaveLength(2)
       expect(transactItems.filter((item) =>
@@ -3741,7 +3870,14 @@ test('DynamoDB Work Item schedule cascade writes one bounded transaction with un
         Put: { TableName: 'DeveloperPlatformTable' },
       })
       expect(transactItems.at(-1)).toMatchObject({
-        Update: { TableName: 'PlanningTable' },
+        Update: {
+          TableName: 'PlanningTable',
+          Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
+          ExpressionAttributeValues: expect.objectContaining({
+            ':increment': 1,
+            ':rowCheck0_authorization1': 8,
+          }),
+        },
       })
       expect(preparedResponse).toMatchObject({
         status: 200,
@@ -3918,6 +4054,8 @@ test('DynamoDB Work Item schedule cascade classifies cancellation indexes by saf
               : []
             const labels = transactItems.map((item) => {
               if (!isUnknownRecord(item)) return 'unknown'
+              // The Planning fence rides on the Planning revision increment.
+              if (isUnknownRecord(item.Update) && item.Update.TableName === 'PlanningTable') return 'planning'
               if (isUnknownRecord(item.Update)) return 'update'
               if (isUnknownRecord(item.Put)) return 'event'
               if (!isUnknownRecord(item.ConditionCheck)) return 'unknown'
