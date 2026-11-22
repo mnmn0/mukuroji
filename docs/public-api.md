@@ -328,4 +328,25 @@ Worker retry を使い切った job は `failed` として source を削除し�
 
 Worker が retry 上限に達した message は原因調査用 DLQ に保持する。DLQ の redrive で terminal job を再開せず、原因を修正した後に新しい idempotency key と source で import を作成し直す。
 
-Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。Web の export file は、各 Work Item の Team の階層（`GET /api/teams/{teamId}/work-item-hierarchy`）から `wbsNumber` を足す（CSV では `teamId` の次の列、JSON では値があるときだけ）。階層を読めない Team と archive 済みの Work Item では空になる。API の export page 自体は `wbsNumber` を持たない。
+Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。export は Workspace 管理者（`canExport`）に限るため、export page の Work Item は Contributor（`contributorAssignments`）と受け入れ条件（`acceptanceCriteria`）を含む。残工数（`remainingEffortMinutes`）と手入力の進捗（`progressPercent`）は含めない。
+
+Web の export file は CSV・JSON・Excel（`.xlsx`）・MS Project XML から選べる。Excel と MS Project XML は JSON の export page から browser で作る。各 Work Item の Team の階層（`GET /api/teams/{teamId}/work-item-hierarchy`）と Planning の依存（`GET /api/planning`）を読み、次の列を足して WBS の順に並べる。
+
+| 列 | 内容 |
+| --- | --- |
+| `wbsNumber` | WBS 番号。階層を読めない Team と archive 済みの Work Item では空 |
+| `outlineLevel` | export に含まれる Work Item の中での階層の深さ（1 から） |
+| `parentId` | export に含まれる最も近い祖先の ID |
+| `workItemTypeId` | Work Item Type の ID |
+| `dependencies` | 先行 Work Item を `<id> FS +2` の形で `;` 区切り。JSON では `{ key, type, lagDays }` の配列 |
+| `relations` | parent・child 以外の relation を `blocks:<id>` の形で `;` 区切り。JSON では `{ type, key }` の配列 |
+| `contributors` | `member:<id> role:<id> effort:<分> status:<状態>` を `;` 区切り。JSON では配列 |
+| `acceptanceCriteria` | 1 行に 1 条件、達成済みは `[x]`、未達成は `[ ]` で始まる。JSON では `{ text, satisfied }` の配列 |
+
+依存と relation は、相手も同じ export に含まれるものだけを書く。Planning を読めない場合は依存の列が空になる。どの形式も上の import の書き方に合わせているため、export した file をそのまま import すると同じ階層・依存・relation・Contributor・受け入れ条件で作り直せる（ID は新しくなる）。Excel の `dueDate` は日付 cell、ほかは文字列 cell で書く。MS Project XML は Task の `UID`・`OutlineNumber`・`OutlineLevel`・`PredecessorLink`（lag は暦日）と、責任者と Contributor の Assignment を書き、Resource の名前は user ID にする。API の export page 自体は追加の列を持たない。
+
+Web の import は CSV・JSON に加えて Excel（`.xlsx`）と MS Project XML を選べる。どちらも browser で JSON の row に変換してから同じ dry-run と import に送るため、Public API の format は CSV・JSON のままである。
+
+- Excel は最初の 20 行から header 行を探し、その sheet の表を読む。cell は文字列にして送り、日付の書式の cell は `YYYY-MM-DD` にする。file は 10 MB まで、ZIP64・暗号化した file は読まない。
+- MS Project XML は Task ごとに `UID`、`Name`、`WBS`、`OutlineLevel`、`Owner`（最初の Assignment の Resource の e-mail か名前）、`Contributors`（ほかの Assignment と作業時間）、`Predecessors`（`<UID> SS -1` の形、lag は作業日 8 時間か暦日で日数に直す）、`Schedule`、`Notes` の列を作る。`Owner` は user ID として検証するため、Resource が user ID でない file では mapping で別の列か既定値を使う。document type 宣言のある XML は読まない。
+- file を選んだときに mapping が空なら、mukuroji の export の列名と MS Project の列名から mapping を提案する。親の列があるときは WBS 番号と階層の深さは提案しない。

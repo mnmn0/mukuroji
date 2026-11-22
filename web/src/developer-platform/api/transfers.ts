@@ -7,7 +7,6 @@ import type {
   ImportJob,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import type { DeveloperExportFormat } from '../model/transfers'
 import { DeveloperPlatformApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
 
@@ -65,7 +64,7 @@ export function createDeveloperImport(
  */
 export async function listDeveloperExportWorkItems(
   accessToken: string,
-  format: DeveloperExportFormat,
+  format: 'csv' | 'json',
 ) {
   const workItems: CanonicalWorkItem[] = []
   const cursors = new Set<string>()

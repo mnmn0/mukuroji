@@ -203,9 +203,10 @@ Project と一緒に WBS の Work Item（担当者は適用した人）が開始
   Mukuroji に戻ると完了します。許可の URL を別の人に送ったり、ログインが切れた状態で戻ったり、
   期限（約10分）が切れたりした場合は完了できないので、この画面からもう一度接続してください。
   **再接続** も同じで、押した本人が完了します。
-- **Import / Export**: Work Item の CSV / JSON export と、検証（dry-run）してから確定する import。
+- **Import / Export**: Work Item の CSV / JSON / Excel / MS Project XML の export と、検証（dry-run）してから確定する import。
+  export には親子・WBS 番号・依存・relation・Contributor・受け入れ条件が入り、そのまま import し直せます。
   import の mapping では、WBS 番号・アウトラインの深さ・親のキーから親子を、先行タスク（`1.2FS+2d` など）から依存を、
-  Contributor と受け入れ条件もあわせて取り込めます。書き方と dry-run で見つかる error は
+  Contributor と受け入れ条件もあわせて取り込めます。Excel と MS Project XML の file も選べ、file を選ぶと mapping を提案します。書き方と dry-run で見つかる error は
   [Public API の説明](../public-api.md#階層依存contributor受け入れ条件の-import) にあります。
 
 ## AI assistance の接続先と API キー

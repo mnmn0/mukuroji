@@ -569,9 +569,11 @@ describe('Developer Platform API', () => {
       '/api/developer/exports?format=csv&limit=100',
       '/api/developer/exports?format=csv&limit=100&cursor=signed%2Fcursor%2B2',
       '/api/teams/team-product/work-item-hierarchy',
+      '/api/planning',
       '/api/developer/exports?format=json&limit=100',
       '/api/developer/exports?format=json&limit=100&cursor=signed%2Fcursor%2B2',
       '/api/teams/team-product/work-item-hierarchy',
+      '/api/planning',
     ])
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual(
       importInput,
@@ -588,12 +590,12 @@ describe('Developer Platform API', () => {
     expect(new Uint8Array(await csvExport.blob.arrayBuffer()).slice(0, 3))
       .toEqual(new Uint8Array([0xef, 0xbb, 0xbf]))
     expect(await csvExport.blob.text()).toContain(
-      'id,teamId,wbsNumber,title,description,assignedProjectId,assigneeUserId,workflowStatusId,statusCategory,dueDate,schedule,priority,revision,createdAt,updatedAt,customFieldValues.labels,customFieldValues.risk\r\n',
+      'id,teamId,wbsNumber,outlineLevel,parentId,title,description,assignedProjectId,assigneeUserId,workItemTypeId,workflowStatusId,statusCategory,dueDate,schedule,priority,dependencies,relations,contributors,acceptanceCriteria,revision,createdAt,updatedAt,customFieldValues.labels,customFieldValues.risk\r\n',
     )
     expect(await csvExport.blob.text()).toContain(
-      'work-item-1,team-product,2.1,"\'=HYPERLINK(""https://example.com"")"',
+      'work-item-1,team-product,2.1,1,,"\'=HYPERLINK(""https://example.com"")"',
     )
-    expect(await csvExport.blob.text()).toContain('work-item-2,team-product,,Ship API,')
+    expect(await csvExport.blob.text()).toContain('work-item-2,team-product,,1,,Ship API,')
     expect(jsonExport.fileName).toMatch(
       /^mukuroji-work-items-\d{4}-\d{2}-\d{2}\.json$/u,
     )
@@ -647,12 +649,13 @@ describe('Developer Platform API', () => {
 
     await expect(exportDeveloperWorkItems('access-token', 'json'))
       .resolves.toMatchObject({ fileName: expect.stringMatching(/\.json$/u) })
-    // The hierarchy read gets an export page back, which is not a hierarchy; the export still
-    // succeeds without WBS numbers.
+    // The hierarchy and Planning reads get an export page back, which is neither; the export still
+    // succeeds without WBS numbers or dependencies.
     expect(urls).toEqual([
       '/api/developer/exports?format=json&limit=100',
       '/api/developer/exports?format=json&limit=100',
       '/api/teams/team-product/work-item-hierarchy',
+      '/api/planning',
     ])
   })
 
