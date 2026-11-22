@@ -699,76 +699,76 @@ function ChecklistBlockEditor({
           className="grid gap-1 rounded-md px-2 py-1.5 hover:bg-[var(--workbench-surface-muted)]"
           key={item.id}
         >
-        <label className="flex min-h-6 items-start gap-3">
-          <input
-            checked={item.checked}
-            className="mt-1 h-4 w-4 accent-[var(--workbench-primary)]"
-            onChange={(event) =>
-              onChange({
-                ...block,
-                items: block.items.map((candidate) =>
-                  candidate.id === item.id
-                    ? { ...candidate, checked: event.target.checked }
-                    : candidate,
-                ),
-              })
-            }
-            type="checkbox"
-          />
-          <input
-            aria-label={`${t('documents.block.checklist')} ${index + 1}`}
-            className={`min-w-0 flex-1 border-0 bg-transparent text-sm font-medium outline-none ${
-              item.checked
-                ? 'text-[var(--workbench-muted)] line-through'
-                : 'text-[var(--workbench-text)]'
-            }`}
-            onChange={(event) =>
-              onChange({
-                ...block,
-                items: block.items.map((candidate) =>
-                  candidate.id === item.id
-                    ? { ...candidate, text: event.target.value }
-                    : candidate,
-                ),
-              })
-            }
-            placeholder={t('documents.editor.checklistPlaceholder')}
-            value={item.text}
-          />
-          <ChecklistItemWorkItemAction
-            blockId={block.id}
-            controls={checklistWorkItems}
-            item={item}
-            t={t}
-          />
-          <button
-            aria-label={t('documents.editor.deleteChecklistItem')}
-            className="grid h-7 w-7 place-items-center rounded text-[var(--workbench-muted)] hover:bg-surface hover:text-[var(--workbench-danger)]"
-            onClick={() =>
-              onChange({
-                ...block,
-                items: block.items.filter(
-                  (candidate) => candidate.id !== item.id,
-                ),
-              })
-            }
-            type="button"
-          >
-            ×
-          </button>
-        </label>
-        {assignees ? (
-          <ChecklistItemOwnershipFields
-            assignees={assignees}
-            index={index}
-            item={item}
-            overdue={isChecklistItemOverdue(item, today)}
-            t={t}
-            onChange={(change) =>
-              onChange(updateChecklistItemOwnership(block, item.id, change))
-            }
-          />
-        ) : null}
+          <label className="flex min-h-6 items-start gap-3">
+            <input
+              checked={item.checked}
+              className="mt-1 h-4 w-4 accent-[var(--workbench-primary)]"
+              onChange={(event) =>
+                onChange({
+                  ...block,
+                  items: block.items.map((candidate) =>
+                    candidate.id === item.id
+                      ? { ...candidate, checked: event.target.checked }
+                      : candidate,
+                  ),
+                })
+              }
+              type="checkbox"
+            />
+            <input
+              aria-label={`${t('documents.block.checklist')} ${index + 1}`}
+              className={`min-w-0 flex-1 border-0 bg-transparent text-sm font-medium outline-none ${
+                item.checked
+                  ? 'text-[var(--workbench-muted)] line-through'
+                  : 'text-[var(--workbench-text)]'
+              }`}
+              onChange={(event) =>
+                onChange({
+                  ...block,
+                  items: block.items.map((candidate) =>
+                    candidate.id === item.id
+                      ? { ...candidate, text: event.target.value }
+                      : candidate,
+                  ),
+                })
+              }
+              placeholder={t('documents.editor.checklistPlaceholder')}
+              value={item.text}
+            />
+            <ChecklistItemWorkItemAction
+              blockId={block.id}
+              controls={checklistWorkItems}
+              item={item}
+              t={t}
+            />
+            <button
+              aria-label={t('documents.editor.deleteChecklistItem')}
+              className="grid h-7 w-7 place-items-center rounded text-[var(--workbench-muted)] hover:bg-surface hover:text-[var(--workbench-danger)]"
+              onClick={() =>
+                onChange({
+                  ...block,
+                  items: block.items.filter(
+                    (candidate) => candidate.id !== item.id,
+                  ),
+                })
+              }
+              type="button"
+            >
+              ×
+            </button>
+          </label>
+          {assignees ? (
+            <ChecklistItemOwnershipFields
+              assignees={assignees}
+              index={index}
+              item={item}
+              overdue={isChecklistItemOverdue(item, today)}
+              t={t}
+              onChange={(change) =>
+                onChange(updateChecklistItemOwnership(block, item.id, change))
+              }
+            />
+          ) : null}
         </div>
       ))}
       <button
@@ -848,7 +848,15 @@ function ChecklistItemOwnershipFields({
         className={`${fieldClassName} ${
           overdue ? 'border-[var(--workbench-danger)] text-[var(--workbench-danger)]' : ''
         }`}
-        onChange={(event) => onChange({ dueDate: event.target.value })}
+        max="9999-12-31"
+        onChange={(event) => {
+          // Browsers accept years past 9999 in date inputs; such a value
+          // would make the whole save fail, so only calendar dates are kept.
+          const { value } = event.target
+          if (value === '' || /^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+            onChange({ dueDate: value })
+          }
+        }}
         type="date"
         value={item.dueDate ?? ''}
       />
