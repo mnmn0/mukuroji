@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import {
+  bulkUpdateNotifications,
   getNotificationPreferences,
   getNotifications,
   getNotificationUnreadCount,
@@ -70,6 +71,18 @@ describe('notifications API', () => {
       action: 'snooze',
       snoozedUntil: '2026-07-13T00:00:00.000Z',
     })
+  })
+
+  test('sends a bulk action as one request with stable mutation headers', async () => {
+    const requests = installFetchRecorder({ notifications: [], failures: [], unreadCount: 2 })
+
+    await expect(bulkUpdateNotifications('access-token', 'archive', ['a', 'b'], mutationContext)).resolves.toEqual({
+      notifications: [], failures: [], unreadCount: 2,
+    })
+    expect(requests[0]?.url).toBe('/api/notifications/bulk')
+    expect(requests[0]?.init.method).toBe('POST')
+    expect(requests[0]?.init.headers).toMatchObject({ 'Idempotency-Key': 'idempotency-1' })
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({ action: 'archive', notificationIds: ['a', 'b'] })
   })
 
   test('gets and saves channel, frequency, and quiet-hours preferences', async () => {

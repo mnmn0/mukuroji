@@ -1,3 +1,4 @@
+import type { NotificationBulkAction, NotificationBulkFailure } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -238,6 +239,46 @@ export function updateNotification(
         ...createMutationHeaders(mutationContext),
       },
       method: 'PATCH',
+    },
+  )
+}
+
+/** Result of one bulk Inbox request. */
+export type BulkUpdateNotificationsResponse = {
+  /** Notifications that now have the requested state, in request order. */
+  notifications: InboxNotification[]
+  /** Notifications the server could not change. */
+  failures: NotificationBulkFailure[]
+  /** Unread count after the change. */
+  unreadCount: number
+}
+
+/**
+ * Applies one action to several notifications in one request. The server checks each
+ * notification as a single update would and reports the ones it could not change.
+ *
+ * @param accessToken - API 認証に使う access token です。
+ * @param action - Action applied to every notification.
+ * @param notificationIds - Up to `NOTIFICATION_BULK_MAXIMUM` opaque notification IDs.
+ * @param mutationContext - retry 間で共有する mutation context です。
+ * @returns Changed notifications, failures, and the unread count.
+ */
+export function bulkUpdateNotifications(
+  accessToken: string,
+  action: NotificationBulkAction,
+  notificationIds: readonly string[],
+  mutationContext: MutationRequestContext,
+) {
+  return requestJson<BulkUpdateNotificationsResponse>(
+    `${notificationsApiBaseUrl}/notifications/bulk`,
+    accessToken,
+    {
+      body: JSON.stringify({ action, notificationIds }),
+      headers: {
+        'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
+      },
+      method: 'POST',
     },
   )
 }

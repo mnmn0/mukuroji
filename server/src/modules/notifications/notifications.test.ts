@@ -851,6 +851,39 @@ describe('notification store', () => {
       },
     })).rejects.toBeInstanceOf(NotificationError)
   })
+  test('saves category channels and mutes, keeps them when a client omits them, and rejects corrupt stored values', async () => {
+    let stored: Record<string, unknown> | undefined
+    const recording = createClient(({ constructor, input }) => {
+      if (constructor.name === 'GetCommand') return { Item: stored }
+      if (constructor.name === 'PutCommand') {
+        if (typeof input.Item !== 'object' || input.Item === null || Array.isArray(input.Item)) throw new Error('Missing preference row')
+        stored = { ...input.Item }
+      }
+      return {}
+    })
+    const recipient = { workspaceId: 'workspace-1', memberKey: 'member@example.com' }
+    const saved = await recording.client.savePreferences({ ...recipient, preferences: {
+      ...DEFAULT_NOTIFICATION_PREFERENCES,
+      categoryChannels: { status: { slack: false } },
+      mutes: { projectIds: ['noisy'], teamIds: [], keepMentions: true, keepApprovals: false },
+    } })
+    expect(stored).toMatchObject({
+      categoryChannels: { status: { slack: false } },
+      mutes: { projectIds: ['noisy'], teamIds: [], keepMentions: true, keepApprovals: false },
+    })
+    const { categoryChannels: _categoryChannels, mutes: _mutes, ...legacyClientFields } = saved
+    const kept = await recording.client.savePreferences({ ...recipient, preferences: { ...legacyClientFields, frequency: 'daily' } })
+    expect(kept.categoryChannels).toEqual({ status: { slack: false } })
+    expect(kept.mutes?.projectIds).toEqual(['noisy'])
+    const cleared = await recording.client.savePreferences({ ...recipient, preferences: {
+      ...kept, categoryChannels: {}, mutes: { projectIds: [], teamIds: [], keepMentions: true, keepApprovals: true },
+    } })
+    expect(cleared.categoryChannels).toBeUndefined()
+    expect(cleared.mutes).toBeUndefined()
+    expect(stored).not.toHaveProperty('mutes')
+    stored = { ...stored, mutes: { projectIds: 'noisy' } }
+    await expect(recording.client.getPreferences(recipient)).rejects.toThrow('Invalid stored notification preferences.')
+  })
   test('keeps the Email opt-in boundary, using the last save of preferences stored before Email transport', async () => {
     let stored: Record<string, unknown> | undefined = {
       recipientKey: 'workspace-1#member@example.com', notificationKey: NOTIFICATION_PREFERENCES_KEY, itemType: 'preferences',

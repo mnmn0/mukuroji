@@ -11,8 +11,21 @@ import {
   QueryCommand,
 } from '@aws-sdk/lib-dynamodb'
 import { getConfiguredDynamoDbEndpoint } from '../audit'
-import type { PersonalNotificationReminderDays } from '@mukuroji/contracts'
+import type {
+  NotificationCategoryChannels,
+  NotificationMutes,
+  PersonalNotificationReminderDays,
+} from '@mukuroji/contracts'
 import { NotificationError } from './domain/notification-error'
+import {
+  categoryChannelsEqual,
+  hasNotificationMutes,
+  normalizeNotificationCategoryChannels,
+  normalizeNotificationMutes,
+  notificationMutesEqual,
+  resolveNotificationRouting,
+  type NotificationRoutingSubject,
+} from './domain/notification-routing'
 import { normalizePersonalReminderDays, reminderDaysEqual } from './domain/reminder-days'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
 
@@ -71,6 +84,10 @@ export type NotificationPreferences = {
   quietHours: NotificationQuietHours
   /** The member's own reminder day overrides; omitted when they set none. */
   reminderDays?: PersonalNotificationReminderDays
+  /** Channels the member turned off per notification category; omitted when none. */
+  categoryChannels?: NotificationCategoryChannels
+  /** Projects and Teams the member muted; omitted when they muted none. */
+  mutes?: NotificationMutes
   /** 最終保存時刻です。未保存の default では省略します。 */
   updatedAt?: string
   /** Server-owned start of the current Slack opt-in period; omitted from HTTP preferences. */
@@ -94,6 +111,13 @@ export type UpdateNotificationPreferencesInput = {
    * not know the field cannot clear them; an empty object clears them.
    */
   reminderDays?: PersonalNotificationReminderDays
+  /**
+   * Replacement category channel settings. Omitted keeps the saved settings, and an empty
+   * object clears them.
+   */
+  categoryChannels?: NotificationCategoryChannels
+  /** Replacement mutes. Omitted keeps the saved mutes. */
+  mutes?: NotificationMutes
 }
 
 /** Inbox API が返す render-ready notification です。 */
@@ -600,7 +624,8 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     const now = normalizeDate(input.now ?? new Date(), 'Notification preference update time')
     // Slack keeps its strict read; an Email-only save over a corrupt row starts a new Email period.
     const current = preferences.version > 0 &&
-      (preferences.channels.slack || preferences.channels.email || preferences.reminderDays === undefined)
+      (preferences.channels.slack || preferences.channels.email || preferences.reminderDays === undefined ||
+        preferences.categoryChannels === undefined || preferences.mutes === undefined)
       ? parseStoredNotificationPreferences((await this.documentClient.send(new GetCommand({
           TableName: this.tableName, Key: { recipientKey, notificationKey: NOTIFICATION_PREFERENCES_KEY }, ConsistentRead: true,
         }))).Item, preferences.channels.slack === true)
@@ -617,14 +642,23 @@ export class DynamoDbNotificationsClient implements NotificationClient {
         : now.toISOString()
     }
     // A client that does not send the field keeps the saved overrides of the version it read.
-    const reminderDays = preferences.reminderDays ??
-      (current?.version === preferences.version ? current.reminderDays : undefined)
-    const { reminderDays: _requestedReminderDays, ...preferenceFields } = preferences
+    const inherited = current?.version === preferences.version ? current : undefined
+    const reminderDays = preferences.reminderDays ?? inherited?.reminderDays
+    const categoryChannels = preferences.categoryChannels ?? inherited?.categoryChannels
+    const mutes = preferences.mutes ?? inherited?.mutes
+    const {
+      reminderDays: _requestedReminderDays,
+      categoryChannels: _requestedCategoryChannels,
+      mutes: _requestedMutes,
+      ...preferenceFields
+    } = preferences
     const next: NotificationPreferences = {
       ...preferenceFields,
       version: preferences.version + 1,
       updatedAt: now.toISOString(),
       ...(reminderDays && Object.keys(reminderDays).length > 0 ? { reminderDays } : {}),
+      ...(categoryChannels && Object.keys(categoryChannels).length > 0 ? { categoryChannels } : {}),
+      ...(hasNotificationMutes(mutes) ? { mutes } : {}),
       ...(slackEnabledAt ? { slackEnabledAt } : {}),
       ...(emailEnabledAt ? { emailEnabledAt } : {}),
     }
@@ -882,6 +916,14 @@ export function parseStoredNotificationPreferences(
       throw new Error('Invalid stored notification preferences.')
     }
   }
+  // Routing settings follow the same rule: a corrupt value must not be replaced by defaults,
+  // which would deliver notifications the member muted.
+  try {
+    if (value.categoryChannels !== undefined) normalizeNotificationCategoryChannels(value.categoryChannels)
+    if (value.mutes !== undefined) normalizeNotificationMutes(value.mutes)
+  } catch {
+    throw new Error('Invalid stored notification preferences.')
+  }
   try {
     if (value.itemType !== 'preferences') {
       throw new Error('Invalid stored notification preferences.')
@@ -892,6 +934,8 @@ export function parseStoredNotificationPreferences(
       frequency: value.frequency,
       quietHours: value.quietHours,
       reminderDays: value.reminderDays,
+      categoryChannels: value.categoryChannels,
+      mutes: value.mutes,
     })
     if (value.slackEnabledAt !== undefined && !readTimestamp(value.slackEnabledAt)) throw new Error('Invalid Slack activation time.')
     const slackEnabledAt = normalized.channels.slack
@@ -935,6 +979,22 @@ export function isSlackNotificationEligible(preferences: NotificationPreferences
 export function isEmailNotificationEligible(preferences: NotificationPreferences, occurredAt: string): boolean {
   const enabledAt = Date.parse(preferences.emailEnabledAt ?? preferences.updatedAt ?? '')
   return preferences.channels.email && Number.isFinite(enabledAt) && Date.parse(occurredAt) >= enabledAt
+}
+
+/**
+ * Applies the member's category channels and mutes to one notification and channel. The
+ * channel switch itself is part of the decision, so a category never turns a channel on.
+ * @param preferences - Current stored preferences.
+ * @param notification - Event type, recipient reasons, Project, and Team of the notification.
+ * @param channel - Channel about to receive the notification.
+ * @returns Whether that channel should receive the notification.
+ */
+export function isNotificationRoutedToChannel(
+  preferences: NotificationPreferences,
+  notification: NotificationRoutingSubject,
+  channel: keyof NotificationChannels,
+): boolean {
+  return resolveNotificationRouting(preferences, notification).channels[channel]
 }
 
 /** Frequency と quiet hours から channel delivery plan を作成します。 */
@@ -1220,6 +1280,10 @@ type NotificationPreferenceFields = {
   version: unknown
   /** The member's own reminder day overrides; absent when not supplied. */
   reminderDays?: unknown
+  /** Channels turned off per category; absent when not supplied. */
+  categoryChannels?: unknown
+  /** Muted Projects and Teams; absent when not supplied. */
+  mutes?: unknown
   /** Channel values. */
   channels: unknown
   /** Delivery frequency. */
@@ -1269,6 +1333,10 @@ function normalizeNotificationPreferencesInput(
     ...(value.reminderDays === undefined
       ? {}
       : { reminderDays: normalizePersonalReminderDays(value.reminderDays) }),
+    ...(value.categoryChannels === undefined
+      ? {}
+      : { categoryChannels: normalizeNotificationCategoryChannels(value.categoryChannels) }),
+    ...(value.mutes === undefined ? {} : { mutes: normalizeNotificationMutes(value.mutes) }),
   }
 }
 
@@ -1285,7 +1353,9 @@ function notificationPreferencesMatchUpdate(
     current.quietHours.start === expected.quietHours.start &&
     current.quietHours.end === expected.quietHours.end &&
     current.quietHours.timeZone === expected.quietHours.timeZone &&
-    (expected.reminderDays === undefined || reminderDaysEqual(current.reminderDays, expected.reminderDays))
+    (expected.reminderDays === undefined || reminderDaysEqual(current.reminderDays, expected.reminderDays)) &&
+    (expected.categoryChannels === undefined || categoryChannelsEqual(current.categoryChannels, expected.categoryChannels)) &&
+    (expected.mutes === undefined || notificationMutesEqual(current.mutes, expected.mutes))
 }
 
 function isInsideQuietHours(date: Date, quietHours: NotificationQuietHours) {
