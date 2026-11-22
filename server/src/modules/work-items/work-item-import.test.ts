@@ -101,6 +101,83 @@ describe('durable Work Item import', () => {
     expect(fixture.deletedSources).toBe(1)
   })
 
+  test('applies links after every row and resumes them from the same checkpoint', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-links')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    const base = createWorkerDependencies(fixture)
+    const steps: string[] = []
+    const linkIdentities: string[] = []
+    const createdIds = new Map<number, string>()
+    let failDependency = true
+    const dependencies = createWorkerDependencies(fixture, {
+      async validate(execution, source) {
+        return {
+          ...await base.validate(execution, source),
+          links: [
+            { kind: 'parent', childRow: 2, parentRow: 1 },
+            { kind: 'dependency', predecessorRow: 1, successorRow: 2, type: 'finish-to-start', lagDays: 0 },
+          ],
+        }
+      },
+      async createWorkItem(request) {
+        steps.push(`row:${request.row}`)
+        createdIds.set(request.row, request.workItemId)
+      },
+      async applyLink(request) {
+        if (request.link.kind === 'dependency' && failDependency) {
+          failDependency = false
+          throw new Error('temporary planning outage')
+        }
+        steps.push(`link:${request.link.kind}`)
+        linkIdentities.push(request.linkIdentity)
+        if (request.link.kind === 'parent') {
+          expect(request.workItemIdForRow(1)).toBe(createdIds.get(1)!)
+          expect(request.workItemIdForRow(2)).toBe(createdIds.get(2)!)
+        }
+      },
+    })
+
+    const first = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+    const second = await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: 'message-1' }])
+    expect(second).toEqual({ batchItemFailures: [] })
+    expect(steps).toEqual(['row:1', 'row:2', 'link:parent', 'link:dependency'])
+    expect(new Set(linkIdentities).size).toBe(2)
+    expect(fixture.execution?.checkpointRow).toBe(4)
+    expect(fixture.execution?.status).toBe('completed')
+    expect(fixture.execution?.terminalReport?.validRows).toBe(2)
+  })
+
+  test('stops applying links once cancellation is requested', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-link-cancel')
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    const base = createWorkerDependencies(fixture)
+    const applied: string[] = []
+    const dependencies = createWorkerDependencies(fixture, {
+      async validate(execution, source) {
+        return {
+          ...await base.validate(execution, source),
+          links: [
+            { kind: 'parent', childRow: 2, parentRow: 1 },
+            { kind: 'relation', sourceRow: 1, targetRow: 2, type: 'related' },
+          ],
+        }
+      },
+      async applyLink(request) {
+        applied.push(request.link.kind)
+        await fixture.executions.requestCancellation()
+      },
+    })
+
+    await processWorkItemImportBatch(createSqsEvent(jobId), dependencies)
+
+    expect(applied).toEqual(['parent'])
+    expect(fixture.execution?.status).toBe('cancelled')
+  })
+
   test('revalidates creator/team/project access before every row', async () => {
     const fixture = createFixture()
     const jobId = createWorkItemImportJobId('workspace-1', 'member@example.com', 'request-rbac')
@@ -831,6 +908,7 @@ function createWorkerDependencies(
       }
     },
     async createWorkItem() {},
+    async applyLink() {},
     now: fixture.now,
     createLeaseOwner() {
       lease += 1

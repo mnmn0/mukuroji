@@ -12,6 +12,15 @@ import {
   normalizeWorkItemSchedule,
   WorkItemScheduleError,
 } from './domain/work-item-schedule'
+import {
+  WORK_ITEM_IMPORT_CONTRIBUTORS_TARGET_FIELD,
+  WORK_ITEM_IMPORT_STRUCTURE_TARGET_FIELDS,
+  readWorkItemImportContributors,
+  readWorkItemImportRowStructure,
+  resolveWorkItemImportStructure,
+  type WorkItemImportLink,
+  type WorkItemImportRowStructure,
+} from './work-item-import-structure'
 
 /** Import/export で扱う file format です。 */
 export type WorkItemTransferFormat = 'csv' | 'json'
@@ -60,6 +69,8 @@ export type WorkItemTransferPreviewRow = {
   input?: CreateWorkItemInput
   /** Row に含まれる validation errors です。 */
   errors: WorkItemTransferRowError[]
+  /** 他の row を参照する構造の値です。構造の target field を mapping したときだけ持ちます。 */
+  structure?: WorkItemImportRowStructure
 }
 
 /** Import dry-run の集計と row-level report です。 */
@@ -74,6 +85,8 @@ export type WorkItemTransferPreview = {
   rows: WorkItemTransferPreviewRow[]
   /** 全 row の validation errors です。 */
   errors: WorkItemTransferRowError[]
+  /** 全 row の作成後に適用する親子・依存・relation・受け入れ条件です。 */
+  links: WorkItemImportLink[]
 }
 
 /** Work Item export の download payload です。 */
@@ -116,6 +129,8 @@ const supportedTargetFields = new Set([
   'workflowStatusId',
   'workItemTypeId',
   'priority',
+  WORK_ITEM_IMPORT_CONTRIBUTORS_TARGET_FIELD,
+  ...WORK_ITEM_IMPORT_STRUCTURE_TARGET_FIELDS,
 ])
 
 /**
@@ -148,6 +163,11 @@ export function previewWorkItemImport(
 
   const rows = sourceRows.map((source, index) =>
     mapImportRow(source, index + 1, normalizedMapping, defaultCalendarPolicy))
+  const structures = rows.flatMap((row) => row.structure ? [row.structure] : [])
+  const resolution = structures.length > 0
+    ? resolveWorkItemImportStructure(structures)
+    : { links: [], errors: [] }
+  for (const error of resolution.errors) rows[error.row - 1]?.errors.push(error)
   const errors = rows.flatMap((row) => row.errors)
   return {
     totalRows: rows.length,
@@ -155,6 +175,7 @@ export function previewWorkItemImport(
     invalidRows: rows.filter((row) => row.errors.length > 0).length,
     rows,
     errors,
+    links: resolution.links,
   }
 }
 
@@ -386,6 +407,15 @@ function mapImportRow(
     'workItemTypeId',
     errors,
   )
+  const contributorAssignments = mapping.has(WORK_ITEM_IMPORT_CONTRIBUTORS_TARGET_FIELD)
+    ? readWorkItemImportContributors(read(WORK_ITEM_IMPORT_CONTRIBUTORS_TARGET_FIELD), row, errors)
+    : undefined
+  const structureFields = new Set<string>(
+    WORK_ITEM_IMPORT_STRUCTURE_TARGET_FIELDS.filter((field) => mapping.has(field)),
+  )
+  const structure = structureFields.size > 0
+    ? readWorkItemImportRowStructure(row, read, structureFields, errors)
+    : undefined
   const customFieldValues: Record<string, CustomFieldValue> = {}
 
   for (const [targetField] of mapping) {
@@ -396,12 +426,13 @@ function mapImportRow(
   }
 
   if (errors.length > 0 || !title || !assigneeUserId || !schedule || !priority) {
-    return { row, errors }
+    return { row, errors, ...(structure ? { structure } : {}) }
   }
 
   return {
     row,
     errors,
+    ...(structure ? { structure } : {}),
     input: {
       title,
       assigneeUserId,
@@ -411,6 +442,7 @@ function mapImportRow(
       ...(assignedProjectId ? { assignedProjectId } : {}),
       ...(workflowStatusId ? { workflowStatusId } : {}),
       ...(workItemTypeId ? { workItemTypeId } : {}),
+      ...(contributorAssignments ? { contributorAssignments } : {}),
       ...(Object.keys(customFieldValues).length > 0 ? { customFieldValues } : {}),
     },
   }

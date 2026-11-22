@@ -130,6 +130,16 @@ import {
   type WorkItemImportWorkerDependencies,
 } from '../../modules/work-items/work-item-import'
 import { DocumentError } from '../../modules/documents'
+import type { WorkItemImportLink } from '../../modules/work-items/work-item-import-structure'
+import {
+  applyWorkItemImportLink,
+  validateWorkItemImportLinks,
+  type WorkItemImportLinkRow,
+} from './work-item-import-links'
+import {
+  readContributorAssignmentChange,
+  withContributorAssignmentChange,
+} from '../shared/work-item-contributors'
 import {
   developerPlatformDependencies,
   initializeLegacyTenantAdministration,
@@ -822,12 +832,20 @@ async function createCanonicalPublicWorkItem(
   )
   const assigneeUserId = readTeamIssueAssigneeUserId(configuredBody)
   await requireActiveWorkspaceAssignee(principal.directoryId, assigneeUserId)
+  // Only an import supplies contributors: the Public API create body does not accept them.
+  const contributorChange = await readContributorAssignmentChange(
+    principal.directoryId,
+    configuredBody,
+    resolvedConfiguration,
+    [],
+  )
   const response = await workItemDependencies.teamIssues.createTeamIssue(
     principal.directoryId,
     teamId,
     {
       ...configuredBody,
       assigneeUserId,
+      ...withContributorAssignmentChange(configuredBody, contributorChange),
       ...(idempotentCreate
         ? {
             idempotentIssueId: idempotentCreate.issueId,
@@ -2703,6 +2721,7 @@ async function validatePublicImport(
   )
   const mappedByRow = new Map<number, Record<string, unknown>>()
   const validInputs: Array<{ row: number; input: CreateWorkItemInput }> = []
+  const linkRows = new Map<number, WorkItemImportLinkRow>()
   const assigneeValidations = new Map<
     string,
     ReturnType<typeof requireActiveWorkspaceAssignee>
@@ -2740,12 +2759,30 @@ async function validatePublicImport(
         assigneeValidations.set(assigneeUserId, assigneeValidation)
       }
       await assigneeValidation
+      await readContributorAssignmentChange(principal.directoryId, configured, configuration, [])
+      linkRows.set(row.row, {
+        row: row.row,
+        workItemTypeId: typeof configured.workItemTypeId === 'string' ? configured.workItemTypeId : '',
+        ...(typeof configured.assignedProjectId === 'string' && configured.assignedProjectId
+          ? { assignedProjectId: configured.assignedProjectId }
+          : {}),
+        schedule: candidate.schedule,
+      })
       validInputs.push({ row: row.row, input: candidate })
     } catch (error) {
       const rowError = toImportRowError(error, row.row)
       if (!rowError) throw error
       errorsByRow.get(row.row)?.push(rowError)
     }
+  }
+  for (const error of await validateWorkItemImportLinks(
+    principal,
+    input.teamId,
+    configuration,
+    preview.links,
+    linkRows,
+  )) {
+    errorsByRow.get(error.row)?.push(error)
   }
   const errors = [...errorsByRow.values()].flat()
   const invalidRowIds = new Set(errors.map((error) => error.row))
@@ -2769,6 +2806,7 @@ async function validatePublicImport(
   return {
     report,
     validInputs: validInputs.filter((row) => !invalidRowIds.has(row.row)),
+    links: preview.links satisfies WorkItemImportLink[],
   }
 }
 
@@ -2943,6 +2981,9 @@ export function toWorkItemImportWorkerError(error: unknown): unknown {
     mapped.status === 409 &&
     (errorCode === 'WorkItemConfigurationRevisionConflict' ||
       errorCode === 'WorkItemAuthorizationChanged' ||
+      errorCode === 'WorkItemRevisionConflict' ||
+      errorCode === 'WorkItemRelationGraphConflict' ||
+      errorCode === 'PlanningRevisionConflict' ||
       errorCode === 'ConditionalCheckFailedException')
   ) {
     return new WorkItemImportError(
@@ -3048,7 +3089,7 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
             : {}),
           mapping: execution.mapping,
         }, execution.defaultCalendarPolicy ?? DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY)
-        return { report: validation.report, rows: validation.validInputs }
+        return { report: validation.report, rows: validation.validInputs, links: validation.links }
       } catch (error) {
         throw toWorkItemImportWorkerError(error)
       }
@@ -3084,6 +3125,39 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
           },
           authorization.authorizationSnapshot,
         )
+      } catch (error) {
+        throw toWorkItemImportWorkerError(error)
+      }
+    },
+    async applyLink(request) {
+      try {
+        const authorization = await resolveStableWorkItemAuthorization(
+          request.execution.workspaceId,
+          async () => await resolveWorkItemImportPrincipal(request.execution),
+          async (principal) => {
+            await requireWorkItemImportExecutionAuthorization(principal, request.execution)
+          },
+        )
+        const idempotencyKey = `import-link-${request.linkIdentity.slice(0, 48)}`
+        await applyWorkItemImportLink({
+          principal: authorization.principal,
+          teamId: request.execution.teamId,
+          link: request.link,
+          workItemIdForRow: request.workItemIdForRow,
+          linkIdentity: request.linkIdentity,
+          audit: createPublicMutationAuditContext(authorization.principal, {
+            requestId: `import-worker-${createHash('sha256')
+              .update(request.execution.jobId)
+              .digest('hex')
+              .slice(0, 20)}`,
+            idempotencyKey,
+            correlationId: request.execution.jobId,
+          }, {
+            method: 'POST',
+            path: '/api/developer/imports',
+            body: { teamId: request.execution.teamId, link: request.link },
+          }),
+        })
       } catch (error) {
         throw toWorkItemImportWorkerError(error)
       }

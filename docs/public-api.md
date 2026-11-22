@@ -298,6 +298,30 @@ Import は mapping の作成、dry-run、source の再送、report 確認の順�
 4. 成功時は `202 Accepted` と `queued` の import record を返す。Worker は durable queue から job を取得し、現在の Team/Project access、workflow、assignee、custom field 設定を再検証してから `running`、`completed` または `failed` へ遷移させる。実行中も row ごとに current RBAC を確認し、終了後は validation failure の場合も集計と bounded row error report を取得できる。
 5. `DELETE /api/developer/imports/{importJobId}` は未完了 job に cancellation を要求する。実行中の Worker は永続化した cancellation 状態を確認し、安全な区切りで停止する。
 
+### 階層・依存・Contributor・受け入れ条件の import
+
+Mapping の `targetField` には Work Item の項目に加えて、行どうしの関係を表す次の項目を指定できる（#339）。どれも省略でき、省略した import の動作と report の形はこれまでと変わらない。
+
+| `targetField` | 値 | 意味 |
+| --- | --- | --- |
+| `importKey` | 256 文字以内の文字列 | 他の行がこの行を参照するキー。export の `id` を割り当てると再 import で同じ構造になる。 |
+| `wbsNumber` | `1.2.3` など | WBS 番号。`parentKey` がない行は、最後の `.` より前（`1.2`）を WBS 番号に持つ行を親にする。`importKey` がない行の参照キーにもなる。 |
+| `outlineLevel` | 1〜100 の整数 | アウトラインの深さ（MS Project の OutlineLevel）。`parentKey` と `wbsNumber` がない行は、直前にある 1 段浅い行を親にする。空欄は 1。 |
+| `parentKey` | 他の行のキー | 親の行。`wbsNumber` と `outlineLevel` より優先する。 |
+| `dependencies` | `1.2FS+2d, 3SS-1` または `[{ "key", "type", "lagDays" }]` | この行の先行タスク。種類は `FS`・`SS`・`FF`・`SF`（省略は `FS`）、ラグは暦日。1 行 50 件まで。キーの末尾が種類やラグに見える場合は JSON の形で書く。 |
+| `relations` | `blocks:2, related:3` または `[{ "type", "key" }]` | 親子以外の relation。種類は `blocks`・`blockedBy`・`related`・`duplicate`。1 行 50 件まで。両方の行に書いた同じ relation は 1 つにまとめる。 |
+| `contributors` | `member:<userId> effort:2h; role:<jobRoleId>` または `contributorAssignments` と同じ JSON 配列 | Contributor。`;` か改行で区切り、`member:`・`role:`・`effort:`（分、または `2h`・`30m`）・`status:` を空白で並べる。接頭辞のない値は member。 |
+| `acceptanceCriteria` | 1 行 1 条件、または `[{ "text", "satisfied" }]` | 受け入れ条件。行頭の `[x]` は達成済み、`[ ]` と `- ` は取り除く。20 件まで。 |
+
+参照は同じ file の行だけを指し、`importKey` を先に、見つからなければ `wbsNumber` を探す。Dry-run は次を row error として返し、1 行でも error があれば import を開始できない。
+
+- 参照先がない、自分自身を指す、キーが重複する、親の参照が循環する、依存が循環する、同じ先行タスクを 2 回書いた（`ImportReferenceInvalid`、`ImportKeyDuplicate`、`ImportHierarchyCycle`、`ImportDependencyCycle`、`ImportDependencyDuplicate`）
+- 親の Work Item Type が子の Type を許可しない（`WorkItemChildTypeDenied`）
+- 依存の両端に Team と Project の manager 権限がない、どちらかの行に日程がない、取り込む日程が依存を満たさない（`ImportDependencyScheduleConflict`。依存は作成時に日程を満たす必要があるため）
+- Contributor の member が有効な Workspace member でない、ジョブロールがない・archive 済み
+
+Worker は全行を作成した後に、親子、依存、relation、受け入れ条件の順で 1 件ずつ付ける。各 link の完了も row と同じ durable receipt に記録するため（番号は `totalRows` の次から続く）、retry や lease takeover では残りの link から再開し、既にある link は作り直さない。Link の前にも cancellation、tenant 状態、現在の権限を確認する。依存の ID は job と link の位置から決まる。
+
 Worker retry を使い切った job は `failed` として source を削除し、DLQ の locator は運用診断専用に保持する。再実行は修正済み source と新しい idempotency key で新規 job を作成する。
 
 同じ request の再送は idempotency record で job の二重作成を防ぎ、修正した source の再実行には新しい idempotency key を使う。各 row の Work Item ID は Workspace、actor、idempotency key、Team、row から決まるため、Worker の retry や lease takeover でも同じ row を二重作成しない。

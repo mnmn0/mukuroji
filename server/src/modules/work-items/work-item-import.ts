@@ -8,6 +8,7 @@ import type {
   WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import { WORK_ITEM_IMPORT_MAX_BYTES } from './work-item-transfer'
+import type { WorkItemImportLink } from './work-item-import-structure'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
 
 /** Import source object を自動削除するまでの既定日数です。 */
@@ -284,6 +285,20 @@ export type WorkItemImportValidationResult = {
     /** Current configuration で検証済み create input です。 */
     input: CreateWorkItemInput
   }>
+  /** 全 row の作成後に適用順に付ける親子・依存・relation・受け入れ条件です。 */
+  links?: WorkItemImportLink[]
+}
+
+/** Worker が全 row の作成後に1つの link を付ける入力です。 */
+export type ApplyImportedWorkItemLinkRequest = {
+  /** Durable execution です。 */
+  execution: WorkItemImportExecution
+  /** 付ける link です。 */
+  link: WorkItemImportLink
+  /** Retry でも同じになる link の identity です。 */
+  linkIdentity: string
+  /** Source row に対して作成した Work Item ID を返します。 */
+  workItemIdForRow: (row: number) => string
 }
 
 /** Worker が1 row を作成する入力です。 */
@@ -340,6 +355,8 @@ export type WorkItemImportWorkerDependencies = {
   ): Promise<WorkItemImportValidationResult>
   /** Deterministic identity で canonical Work Item を作成します。 */
   createWorkItem(request: CreateImportedWorkItemRequest): Promise<void>
+  /** 作成済みの Work Item 間に link を付けます。既にある link はそのままにします。 */
+  applyLink(request: ApplyImportedWorkItemLinkRequest): Promise<void>
   /** Lease/receipt timestamp を決める clock です。 */
   now(): Date
   /** Invocation ごとに一意な lease owner を作ります。 */
@@ -631,43 +648,13 @@ async function processQueueRecord(
     }
     assertValidationRows(validation)
 
-    for (const item of validation.rows) {
-      if (item.row <= checkpointRow) continue
-      processingRow = item.row
-      const current = await dependencies.executions.get(execution.workspaceId, execution.jobId)
-      if (!current) {
-        throw new WorkItemImportError(
-          'ImportExecutionUnavailable',
-          'Import execution is temporarily unavailable.',
-          true,
-        )
-      }
-      if (isTerminal(current.status)) {
-        await reconcileTerminalExecution(current, dependencies.jobs)
-        await deleteSourceBestEffort(current, dependencies.sources)
-        return
-      }
-      if (current.cancelRequested) {
-        const cancelled = await dependencies.executions.requestCancellation(
-          current.workspaceId,
-          current.jobId,
-          dependencies.now().toISOString(),
-        )
-        await reconcileTerminalExecution(cancelled, dependencies.jobs)
-        await deleteSourceBestEffort(cancelled, dependencies.sources)
-        return
-      }
-      await dependencies.assertTenantEnabled(current)
-      await dependencies.authorize(current)
-      const rowIdentity = createRowIdentity(current, item.row, item.input)
-      await dependencies.createWorkItem({
-        execution: current,
-        row: item.row,
-        input: item.input,
-        idempotencyKey: rowIdentity.idempotencyKey,
-        workItemId: rowIdentity.workItemId,
-        requestDigest: rowIdentity.requestDigest,
-      })
+    /** Records one finished step and renews the lease. */
+    const recordStep = async (
+      current: WorkItemImportExecution,
+      row: number,
+      requestDigest: string,
+      idempotencyKey: string,
+    ) => {
       const renewedLease = addSeconds(
         dependencies.now(),
         WORK_ITEM_IMPORT_LEASE_SECONDS,
@@ -678,15 +665,50 @@ async function processQueueRecord(
         leaseOwner,
         {
           jobId: current.jobId,
-          row: item.row,
-          requestDigest: rowIdentity.requestDigest,
-          idempotencyKey: rowIdentity.idempotencyKey,
+          row,
+          requestDigest,
+          idempotencyKey,
           completedAt: dependencies.now().toISOString(),
         },
         renewedLease,
       )
-      checkpointRow = item.row
+      checkpointRow = row
       processingRow = undefined
+    }
+
+    for (const item of validation.rows) {
+      if (item.row <= checkpointRow) continue
+      processingRow = item.row
+      const current = await readRunnableExecution(execution, dependencies)
+      if (!current) return
+      const rowIdentity = createRowIdentity(current, item.row, item.input)
+      await dependencies.createWorkItem({
+        execution: current,
+        row: item.row,
+        input: item.input,
+        idempotencyKey: rowIdentity.idempotencyKey,
+        workItemId: rowIdentity.workItemId,
+        requestDigest: rowIdentity.requestDigest,
+      })
+      await recordStep(current, item.row, rowIdentity.requestDigest, rowIdentity.idempotencyKey)
+    }
+    // Links are applied after every row exists. Their receipts continue the row numbering so the
+    // same monotonic checkpoint resumes them after a retry.
+    const links = validation.links ?? []
+    for (const [index, link] of links.entries()) {
+      const step = validation.report.totalRows + index + 1
+      if (step <= checkpointRow) continue
+      processingRow = step
+      const current = await readRunnableExecution(execution, dependencies)
+      if (!current) return
+      const linkIdentity = createLinkIdentity(current, index, link)
+      await dependencies.applyLink({
+        execution: current,
+        link,
+        linkIdentity: linkIdentity.identity,
+        workItemIdForRow: (row) => createRowWorkItemId(current, row),
+      })
+      await recordStep(current, step, linkIdentity.requestDigest, linkIdentity.idempotencyKey)
     }
     const completed = await dependencies.executions.markCompletedIfClaimed(
       execution.workspaceId,
@@ -754,9 +776,7 @@ function createRowIdentity(
   row: number,
   input: CreateWorkItemInput,
 ) {
-  const identity = createHash('sha256')
-    .update(`work-item-import-row-v1\n${execution.workspaceId}\n${execution.jobId}\n${row}`)
-    .digest('hex')
+  const identity = createRowIdentityDigest(execution, row)
   const requestDigest = createHash('sha256')
     .update(`${identity}\n${stableStringify(input)}`)
     .digest('hex')
@@ -765,6 +785,88 @@ function createRowIdentity(
     workItemId: `import-${identity.slice(0, 48)}`,
     requestDigest,
   }
+}
+
+/**
+ * Hashes the retry-stable identity of one source row.
+ *
+ * @param execution - Durable execution.
+ * @param row - One-based source row.
+ * @returns The hex digest.
+ */
+function createRowIdentityDigest(execution: WorkItemImportExecution, row: number) {
+  return createHash('sha256')
+    .update(`work-item-import-row-v1\n${execution.workspaceId}\n${execution.jobId}\n${row}`)
+    .digest('hex')
+}
+
+/**
+ * Returns the Work Item ID that the import creates for one source row.
+ *
+ * @param execution - Durable execution.
+ * @param row - One-based source row.
+ * @returns The deterministic Work Item ID.
+ */
+function createRowWorkItemId(execution: WorkItemImportExecution, row: number) {
+  return `import-${createRowIdentityDigest(execution, row).slice(0, 48)}`
+}
+
+/**
+ * Creates the retry-stable identity of one link.
+ *
+ * @param execution - Durable execution.
+ * @param index - Zero-based position of the link.
+ * @param link - Link to apply.
+ * @returns The identity, its receipt digest, and its idempotency key.
+ */
+function createLinkIdentity(execution: WorkItemImportExecution, index: number, link: WorkItemImportLink) {
+  const identity = createHash('sha256')
+    .update(`work-item-import-link-v1\n${execution.workspaceId}\n${execution.jobId}\n${index}`)
+    .digest('hex')
+  return {
+    identity,
+    idempotencyKey: `import-link-${identity.slice(0, 48)}`,
+    requestDigest: createHash('sha256').update(`${identity}\n${stableStringify(link)}`).digest('hex'),
+  }
+}
+
+/**
+ * Re-reads the execution before the next step and stops on a terminal state or cancellation.
+ *
+ * @param execution - Claimed execution.
+ * @param dependencies - Worker dependencies.
+ * @returns The current execution, or undefined when processing must stop.
+ */
+async function readRunnableExecution(
+  execution: WorkItemImportExecution,
+  dependencies: WorkItemImportWorkerDependencies,
+) {
+  const current = await dependencies.executions.get(execution.workspaceId, execution.jobId)
+  if (!current) {
+    throw new WorkItemImportError(
+      'ImportExecutionUnavailable',
+      'Import execution is temporarily unavailable.',
+      true,
+    )
+  }
+  if (isTerminal(current.status)) {
+    await reconcileTerminalExecution(current, dependencies.jobs)
+    await deleteSourceBestEffort(current, dependencies.sources)
+    return undefined
+  }
+  if (current.cancelRequested) {
+    const cancelled = await dependencies.executions.requestCancellation(
+      current.workspaceId,
+      current.jobId,
+      dependencies.now().toISOString(),
+    )
+    await reconcileTerminalExecution(cancelled, dependencies.jobs)
+    await deleteSourceBestEffort(cancelled, dependencies.sources)
+    return undefined
+  }
+  await dependencies.assertTenantEnabled(current)
+  await dependencies.authorize(current)
+  return current
 }
 
 function assertValidationRows(validation: WorkItemImportValidationResult) {
