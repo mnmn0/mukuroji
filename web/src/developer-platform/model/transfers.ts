@@ -442,7 +442,6 @@ function writeAcceptanceCriteriaCell(criteria: DeveloperExportRow['acceptanceCri
   return criteria.map((criterion) => `${criterion.satisfied ? '[x]' : '[ ]'} ${criterion.text}`).join('\n')
 }
 
-
 /**
  * Builds the MS Project task of one Work Item.
  *
