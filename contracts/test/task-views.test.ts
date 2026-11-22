@@ -166,7 +166,7 @@ describe('task view contracts', () => {
           dueDatePreset: 'overdue',
         },
         layout: {
-          mode: 'list',
+          mode: 'table',
           group: null,
           density: 'comfortable',
           displayOptions: { showCompleted: false },

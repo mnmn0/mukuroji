@@ -73,6 +73,7 @@ import {
   serializeAnalyticsRouteState,
   type AnalyticsRouteState,
 } from '../../analytics/model/queryState'
+import { refreshAnalyticsPresetPeriod } from '../../analytics/model/periodPresets'
 import { resolveAnalyticsSnapshotAutoPagination } from '../../analytics/model/snapshotPagination'
 import {
   type ProjectDirectoryTeam,
@@ -199,16 +200,30 @@ export function ReportsPage() {
     [selectedReport?.widgets, widgetDraft, widgetSourceKey],
   )
   const routeState = useMemo<AnalyticsRouteState>(
-    () => parsedRouteState ?? {
-      builder: false,
-      filter: selectedReport?.filter ?? initialFilter,
-      forecastBaseline: selectedReport?.forecastBaseline,
-      forecastWeighting: selectedReport?.forecastWeighting,
-      reportId: selectedReport?.id,
-      snapshotId: undefined,
-      timezone: selectedReport?.timeZone ?? initialTimeZone,
+    () => {
+      const state: AnalyticsRouteState = parsedRouteState ?? {
+        builder: false,
+        filter: selectedReport?.filter ?? initialFilter,
+        forecastBaseline: selectedReport?.forecastBaseline,
+        forecastWeighting: selectedReport?.forecastWeighting,
+        reportId: selectedReport?.id,
+        snapshotId: undefined,
+        timezone: selectedReport?.timeZone ?? initialTimeZone,
+      }
+      const readAt = new Date(state.asOf ?? queryAsOf)
+      if (!calendarSettings || Number.isNaN(readAt.getTime())) return state
+      // A saved "this week" report shows the week around the time it is read, not the saved dates.
+      const filter = refreshAnalyticsPresetPeriod(
+        state.filter,
+        readAt,
+        state.timezone,
+        calendarSettings,
+      )
+      return filter === state.filter ? state : { ...state, filter }
     },
     [
+      calendarSettings,
+      queryAsOf,
       initialFilter,
       initialTimeZone,
       parsedRouteState,

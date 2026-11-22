@@ -5580,15 +5580,19 @@ function requireTaskViewSurface(value: unknown): TaskViewSurface {
   return invalidTaskView('Task view surface is invalid.')
 }
 
-/** Reads one supported task view layout mode. */
+/**
+ * Reads one supported task view layout mode.
+ *
+ * `list` and `timeline` were accepted before no screen offered them; a view saved with either
+ * is read as a table, so it stays readable instead of failing the whole view list.
+ */
 function requireTaskViewLayoutMode(value: unknown): TaskViewLayout['mode'] {
+  if (value === 'list' || value === 'timeline') return 'table'
   if (
     value === 'table' ||
     value === 'board' ||
-    value === 'list' ||
     value === 'gantt' ||
-    value === 'calendar' ||
-    value === 'timeline'
+    value === 'calendar'
   ) return value
   return invalidTaskView('Task view layout mode is invalid.')
 }

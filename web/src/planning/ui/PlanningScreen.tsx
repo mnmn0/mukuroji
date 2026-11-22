@@ -71,6 +71,11 @@ import {
   type PlanningEntityEditorLabels,
 } from './PlanningEntityEditor'
 import {
+  PlanningEntityDetailTabs,
+  type PlanningEntityDetailTabsLabels,
+} from './PlanningEntityDetailTabs'
+import type { PlanningEntityActivityLabels } from './PlanningEntityActivityPanel'
+import {
   collectPlanningOwnerCandidates,
   countCycleWorkItems,
   DEFAULT_CYCLE_CAPACITY,
@@ -215,6 +220,10 @@ export type PlanningLabels = PlanningUpdateLabels & {
   archivedPlans: PlanningArchiveLabels
   /** 選択中の entity を編集する form の文言です。 */
   entityEditor: PlanningEntityEditorLabels
+  /** Selected entity の詳細 tab の文言です。 */
+  entityDetailTabs: PlanningEntityDetailTabsLabels
+  /** Selected entity の活動 tab の文言です。 */
+  entityActivity: PlanningEntityActivityLabels
   /** Portfolio section の見出しです。 */
   portfolioTitle: string
   /** Portfolio section の説明です。 */
@@ -400,6 +409,8 @@ export type PlanningScreenProps = {
   onSetCycleWorkItems?: CyclePlanningPanelProps['onSetCycleWorkItems']
   /** Timeline で Cycle を選んだときに表示する burndown を描きます。省略すると表示しません。 */
   renderCycleBurndown?: (cycle: PlanningEntity) => ReactNode
+  /** 選択中の entity の活動 tab を描きます。省略すると tab を出さず編集欄だけを表示します。 */
+  renderEntityActivity?: (entity: PlanningEntity) => ReactNode
   /** Entity archive callback です。 */
   onArchiveEntity?: (entity: PlanningEntity) => void | Promise<void>
   /** Archive 済みの計画の一覧と復元です。省略すると一覧を表示しません。 */
@@ -523,6 +534,7 @@ export function PlanningScreen({
   onViewChange,
   onUpdateWorkItemDependency,
   renderCycleBurndown,
+  renderEntityActivity,
   snapshot,
   updateCollaboration,
   updateBaselineDelays,
@@ -823,21 +835,30 @@ export function PlanningScreen({
                   updateTargetDetails={updateTargetDetails}
                 />
               ) : null}
-              {selectedEntity ? (
-                <PlanningEntityEditor
-                  cycleWorkItemCount={countCycleWorkItems(selectedEntity.id, snapshot.workItemLinks)}
-                  disabled={isAiOperationPending}
-                  entity={selectedEntity}
-                  key={`planning-entity-editor:${selectedEntity.id}`}
-                  labels={labels.entityEditor}
-                  ownerCandidates={collectPlanningOwnerCandidates(activeEntities)}
-                  ownerNotice={ownerNotice}
-                  ownerOptions={ownerOptions}
-                  onSave={onUpdateEntity && (canManageEntity?.(selectedEntity) ?? true)
-                    ? onUpdateEntity
-                    : undefined}
-                />
-              ) : null}
+              {selectedEntity ? (() => {
+                const editor = (
+                  <PlanningEntityEditor
+                    cycleWorkItemCount={countCycleWorkItems(selectedEntity.id, snapshot.workItemLinks)}
+                    disabled={isAiOperationPending}
+                    entity={selectedEntity}
+                    key={`planning-entity-editor:${selectedEntity.id}`}
+                    labels={labels.entityEditor}
+                    ownerCandidates={collectPlanningOwnerCandidates(activeEntities)}
+                    ownerNotice={ownerNotice}
+                    ownerOptions={ownerOptions}
+                    onSave={onUpdateEntity && (canManageEntity?.(selectedEntity) ?? true)
+                      ? onUpdateEntity
+                      : undefined}
+                  />
+                )
+                return renderEntityActivity ? (
+                  <PlanningEntityDetailTabs
+                    details={editor}
+                    labels={labels.entityDetailTabs}
+                    renderActivity={() => renderEntityActivity(selectedEntity)}
+                  />
+                ) : editor
+              })() : null}
               <CreateEntityPanel
                 canCreateInScope={canCreateInScope}
                 canManageEntity={canManageEntity}

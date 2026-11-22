@@ -832,6 +832,33 @@ export function isWorkItemRelationEventType(value: unknown): value is WorkItemRe
 }
 
 /**
+ * Other endpoint of a relation activity event, returned only when the viewer may read it.
+ */
+export type WorkItemRelationActivityEndpoint = {
+  /** Team-local Work Item ID. */
+  id: string
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Short Work Item key, omitted for a Work Item created before keys existed. */
+  key?: string
+  /** Current title of the Work Item. */
+  title: string
+}
+
+/**
+ * Relation endpoints a Work Item activity event carries; each is omitted when absent, hidden from
+ * the viewer, or deleted.
+ */
+export type WorkItemRelationActivityEndpoints = {
+  /** Work Item linked or unlinked by the event. */
+  relatedWorkItem?: WorkItemRelationActivityEndpoint
+  /** Parent after a parent change, or of a reorder. */
+  parentWorkItem?: WorkItemRelationActivityEndpoint
+  /** Parent before a parent change. */
+  previousParentWorkItem?: WorkItemRelationActivityEndpoint
+}
+
+/**
  * Work Item から別の Work Item への relation です。
  */
 export type WorkItemRelation = {

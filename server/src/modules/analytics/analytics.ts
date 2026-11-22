@@ -13,7 +13,11 @@ import {
   createSearchWorkItemTypeKey,
   deriveWorkItemRemainingEffortMinutes,
   isWorkItemEffortMinutes,
+  isWorkspaceCalendarPeriodPreset,
+  isWorkspaceWeekStartDay,
   readSearchWorkItemTypeKey,
+  resolveWorkspaceCalendarPeriod,
+  toWorkspaceLocalDate,
   type AnalyticsCustomFieldFilter,
   type AnalyticsDateRange,
   type AnalyticsEvidenceInput,
@@ -42,6 +46,8 @@ import {
   type CanonicalWorkItem,
   type CreateAnalyticsReportInput,
   type UpdateAnalyticsReportInput,
+  type WorkspaceCalendarSettings,
+  type WorkspaceWeekStartDay,
 } from '@mukuroji/contracts'
 import type { AuditFieldChange, AuditValue } from '../audit'
 import {
@@ -77,6 +83,8 @@ const ISO_INSTANT_PATTERN = /T.*(?:Z|[+-]\d{2}:\d{2})$/u
 const LOCAL_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/u
 const ROUTE_SAFE_REPORT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u
 const localDateFormatterCache = new Map<string, Intl.DateTimeFormat>()
+/** Day week buckets start on when a query does not say: Monday, as before week starts existed. */
+const DEFAULT_ANALYTICS_WEEK_START_DAY: WorkspaceWeekStartDay = 1
 const PDF_LINES_PER_PAGE = 36
 const PDF_JAPANESE_FONT_NAME =
   `${createPdfFontSubsetTag(analyticsPdfFont.bytes)}+NotoSansJP-Thin`
@@ -1341,12 +1349,17 @@ function normalizeAnalyticsQuery(query: unknown): NormalizedAnalyticsQuery {
     ? undefined
     : normalizeDateRange(query.forecastBaseline, 'Analytics forecast baseline')
   const forecastWeighting = readForecastWeighting(query.forecastWeighting)
+  // Monday is left out so a Monday query hashes the same as one saved before week starts existed.
+  const weekStartDay = readAnalyticsWeekStartDay(query.weekStartDay)
   const normalized: NormalizedAnalyticsQuery = {
     query: {
       filter,
       widgets,
       asOf,
       timeZone,
+      ...(weekStartDay === undefined || weekStartDay === DEFAULT_ANALYTICS_WEEK_START_DAY
+        ? {}
+        : { weekStartDay }),
       ...(forecastBaseline === undefined ? {} : { forecastBaseline }),
       ...(forecastWeighting === undefined ? {} : { forecastWeighting }),
     },
@@ -1381,6 +1394,7 @@ function validateAnalyticsQueryComplexity(normalized: NormalizedAnalyticsQuery) 
       normalized.periodTo,
       normalized.query.timeZone,
       granularity,
+      normalized.query.weekStartDay,
     ).length
     bucketCounts.set(granularity, count)
     return count
@@ -1419,6 +1433,7 @@ function normalizeFilter(filter: unknown): AnalyticsFilter {
   }
   return {
     period: normalizeDateRange(filter.period, 'Analytics period'),
+    ...normalizeAnalyticsPeriodPreset(filter.periodPreset),
     ...normalizeIdentifierListProperty(filter.teamIds, 'Analytics Team IDs', 'teamIds'),
     ...normalizeIdentifierListProperty(filter.projectIds, 'Analytics Project IDs', 'projectIds'),
     ...normalizeIdentifierListProperty(
@@ -1440,6 +1455,100 @@ function normalizeFilter(filter: unknown): AnalyticsFilter {
       : { includeArchived: readBoolean(filter.includeArchived, 'Analytics includeArchived') }),
     ...normalizeAnalyticsFilterWorkItems(filter.workItems),
   }
+}
+
+/**
+ * Validates the relative period an Analytics filter was chosen with.
+ *
+ * @param value - Untrusted `periodPreset` filter value.
+ * @returns The property, or an empty object when omitted.
+ * @throws AnalyticsError When the value names no period preset.
+ */
+function normalizeAnalyticsPeriodPreset(value: unknown): Pick<AnalyticsFilter, 'periodPreset'> {
+  if (value === undefined) return {}
+  if (!isWorkspaceCalendarPeriodPreset(value)) {
+    throw invalid('AnalyticsPeriodPresetInvalid', 'Analytics period preset is not supported.')
+  }
+  return { periodPreset: value }
+}
+
+/**
+ * Validates the day an Analytics query starts its week buckets on.
+ *
+ * @param value - Untrusted `weekStartDay` query value.
+ * @returns The day, or undefined when omitted (Monday).
+ * @throws AnalyticsError When the value is not an integer from 0 to 6.
+ */
+function readAnalyticsWeekStartDay(value: unknown): WorkspaceWeekStartDay | undefined {
+  if (value === undefined) return undefined
+  if (!isWorkspaceWeekStartDay(value)) {
+    throw invalid('AnalyticsWeekStartDayInvalid', 'Analytics week start day must be an integer from 0 to 6.')
+  }
+  return value
+}
+
+/**
+ * Re-resolves a saved report's relative period for one run.
+ *
+ * A filter without `periodPreset` keeps its fixed dates. Otherwise "today" is the `asOf` date in
+ * the report time zone, the period follows the Workspace week start and fiscal year start, and it
+ * covers whole local days from the first day's start to the last day's end. The query later clips
+ * the end to `asOf`.
+ *
+ * @param filter - Saved report filter.
+ * @param asOf - ISO instant the report runs at.
+ * @param timeZone - IANA time zone of the report.
+ * @param calendar - Workspace fiscal year start month and week start day.
+ * @returns A copy of the filter whose `period` covers the preset on that day.
+ * @throws AnalyticsError When `asOf` or the time zone is invalid.
+ */
+export function resolveAnalyticsReportFilterPeriod(
+  filter: AnalyticsFilter,
+  asOf: string,
+  timeZone: string,
+  calendar: Pick<WorkspaceCalendarSettings, 'fiscalYearStartMonth' | 'weekStartDay'>,
+): AnalyticsFilter {
+  const resolved = structuredClone(filter)
+  if (resolved.periodPreset === undefined) return resolved
+  const asOfInstant = normalizeIsoTimestamp(asOf, 'Analytics as-of time')
+  const zone = normalizeTimeZone(timeZone, 'Analytics time zone')
+  const range = resolveWorkspaceCalendarPeriod(
+    resolved.periodPreset,
+    toWorkspaceLocalDate(asOfInstant, zone),
+    calendar,
+  )
+  resolved.period = {
+    from: new Date(localCalendarDateStartAt(range.from, zone, 0)).toISOString(),
+    to: new Date(localCalendarDateStartAt(range.to, zone, 1) - 1).toISOString(),
+  }
+  return resolved
+}
+
+/**
+ * Finds the first instant of a local calendar date, or of a day some days after it.
+ *
+ * The day can start after midnight where clocks jump forward at midnight, so the first instant
+ * whose local date is the target is searched for, the same boundary the Web presets use.
+ *
+ * @param date - Local `YYYY-MM-DD` date.
+ * @param timeZone - IANA time zone the date is read in.
+ * @param dayOffset - Days to move from the date before taking its start.
+ * @returns Epoch milliseconds of the first instant of that local date.
+ */
+function localCalendarDateStartAt(date: string, timeZone: string, dayOffset: number) {
+  const [year, month, day] = date.split('-').map(Number)
+  const localDate = toPseudoUtcDate(year!, month!, day!)
+  localDate.setUTCDate(localDate.getUTCDate() + dayOffset)
+  const target = localDate.toISOString().slice(0, 10)
+  // UTC offsets stay within ±18 hours, so the day starts inside this window.
+  let before = localDate.getTime() - 18 * MILLISECONDS_PER_HOUR
+  let atOrAfter = localDate.getTime() + 18 * MILLISECONDS_PER_HOUR
+  while (atOrAfter - before > 1) {
+    const middle = Math.floor((before + atOrAfter) / 2)
+    if (localDateAt(middle, timeZone) < target) before = middle
+    else atOrAfter = middle
+  }
+  return atOrAfter
 }
 
 /**
@@ -2223,6 +2332,7 @@ function createMetricSeries(
     normalized.periodTo,
     normalized.query.timeZone,
     granularity,
+    normalized.query.weekStartDay,
   )
   // Facts of a non-state metric do not depend on the bucket, so they are built once; neither
   // calculateMetric nor createSeriesSegments changes them.
@@ -2322,6 +2432,7 @@ function createMetricGroups(
       normalized.periodTo,
       normalized.query.timeZone,
       groupBy.dimension,
+      normalized.query.weekStartDay,
     ).map((bucket): AnalyticsGroup => {
       const evaluationAt = Math.min(bucket.to, normalized.asOf)
       const bucketNormalized: NormalizedAnalyticsQuery = {
@@ -2898,17 +3009,28 @@ function addLocalCalendarDays(timestamp: number, days: number, timeZone: string)
     new Date(timestamp).getUTCMilliseconds()
 }
 
+/**
+ * Splits a period into local calendar buckets, clipped to the period.
+ *
+ * @param from - Period start epoch milliseconds.
+ * @param to - Period end epoch milliseconds, inclusive.
+ * @param timeZone - IANA time zone the local dates are read in.
+ * @param granularity - Bucket size.
+ * @param weekStartDay - Day a week bucket starts on, 0 for Sunday; Monday when omitted.
+ * @returns The buckets in order.
+ */
 function createCalendarBuckets(
   from: number,
   to: number,
   timeZone: string,
   granularity: 'day' | 'week' | 'month',
+  weekStartDay: WorkspaceWeekStartDay = DEFAULT_ANALYTICS_WEEK_START_DAY,
 ) {
   const firstLocal = localDatePartsAt(from, timeZone)
   let cursor = toPseudoUtcDate(firstLocal.year, firstLocal.month, firstLocal.day)
   if (granularity === 'week') {
     const weekday = cursor.getUTCDay()
-    cursor.setUTCDate(cursor.getUTCDate() - ((weekday + 6) % 7))
+    cursor.setUTCDate(cursor.getUTCDate() - ((weekday - weekStartDay + 7) % 7))
   } else if (granularity === 'month') {
     cursor.setUTCDate(1)
   }

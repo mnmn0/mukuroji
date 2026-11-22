@@ -32,10 +32,8 @@ import { isRecord } from '../../shared/api/jsonValidation'
 const taskViewLayoutModes: readonly TaskViewLayoutMode[] = [
   'table',
   'board',
-  'list',
   'gantt',
   'calendar',
-  'timeline',
 ]
 const taskViewDensities: readonly TaskViewDensity[] = [
   'compact',
