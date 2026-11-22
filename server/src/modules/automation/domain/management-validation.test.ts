@@ -293,6 +293,10 @@ describe('Automation management validation domain', () => {
     expect(() => create({ milestones: [{ title: '改行\nあり', offsetWorkingDays: 0 }] })).toThrow('line breaks')
     expect(() => create({ phases: [{ title: '◆ 準備', startOffsetWorkingDays: 0, durationWorkingDays: 1 }] }))
       .toThrow('must not start with')
+    // 251 supplementary characters fit the character limit but not Planning's UTF-16 limit.
+    expect(() => create({ milestones: [{ title: '𠮷'.repeat(251), offsetWorkingDays: 0 }] }))
+      .toThrow('500 characters or fewer')
+    expect(() => create({ milestones: [{ title: 'a\uD800b', offsetWorkingDays: 0 }] })).toThrow('well-formed')
     expect(() => create({
       milestones: Array.from(
         { length: AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT + 1 },

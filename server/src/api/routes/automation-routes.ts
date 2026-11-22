@@ -591,7 +591,6 @@ async function executeAutomationTemplateApplication(
           principal,
           application,
           target.teamId,
-          response.project.id,
           templateDependencies,
           expandedWorkItems,
           workItemIds,

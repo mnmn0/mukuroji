@@ -46,6 +46,7 @@ describe('Project template Phase / Milestone outline', () => {
     expect(parseProjectTemplatePlanningOutline('準備 | 0 | 5\n  設計 | 1 | 2')).toEqual({ error: 'indent', line: 2 })
     expect(parseProjectTemplatePlanningOutline('準備 | 0 | 0')).toEqual({ error: 'days', line: 1 })
     expect(parseProjectTemplatePlanningOutline('◆ | 4')).toEqual({ error: 'title', line: 1 })
+    expect(parseProjectTemplatePlanningOutline(`◆ ${'𠮷'.repeat(251)} | 4`)).toEqual({ error: 'title', line: 1 })
     expect(parseProjectTemplatePlanningOutline(Array.from({ length: 31 }, (_, index) => `◆ M${index} | 0`).join('\n')))
       .toEqual({ error: 'limit', line: 31 })
   })

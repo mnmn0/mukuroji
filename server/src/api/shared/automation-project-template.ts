@@ -43,7 +43,11 @@ import {
   requirePlanningEntityPermission,
   requirePlanningScopePermission,
 } from './planning-scope-access'
-import { createApiMutationContext, type WorkspacePrincipal } from './project-access'
+import {
+  createApiMutationContext,
+  getEffectiveProjectScopeAccessList,
+  type WorkspacePrincipal,
+} from './project-access'
 import {
   normalizeTeamIssueInput,
   requireAssignedProjectAcceptsNewWorkItems,
@@ -773,7 +777,14 @@ export async function createProjectTemplatePlanningEntities(
   }
   const scope = { teamId: target.teamId, projectId }
   try {
-    await requirePlanningScopePermission(principal, scope, 'member')
+    // The Project was just created, so read the directory consistently to see it.
+    const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(directoryId, 'ja', true)
+    await requirePlanningScopePermission(principal, scope, 'member', false, {
+      directory,
+      readProjectAccesses: () => principal.legacyProjectScopeAccesses
+        ? Promise.resolve(principal.legacyProjectScopeAccesses)
+        : getEffectiveProjectScopeAccessList(principal, directory),
+    })
     await requirePlanningActiveOwner(principal, principal.userKey)
     const workItemState = await readPlanningWorkItemState(principal, scope)
     let snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
@@ -838,7 +849,6 @@ export async function createProjectTemplatePlanningEntities(
  * @param principal - Workspace administrator applying the template.
  * @param application - Running template application.
  * @param teamId - Team that owns the Work Items.
- * @param projectId - Project that holds the Work Items.
  * @param dependencies - Template dependencies.
  * @param workItems - Expanded template Work Items.
  * @param workItemIds - Created Work Item IDs in expansion order.
@@ -847,7 +857,6 @@ export async function createProjectTemplateDependencies(
   principal: WorkspacePrincipal,
   application: AutomationTemplateApplication,
   teamId: string,
-  projectId: string,
   dependencies: readonly AutomationProjectTemplateDependency[],
   workItems: readonly ExpandedProjectTemplateWorkItem[],
   workItemIds: readonly string[],
@@ -868,7 +877,9 @@ export async function createProjectTemplateDependencies(
       [currentMember],
       false,
     )
-    const workItemState = await readPlanningWorkItemState(principal, { teamId, projectId })
+    // Read the whole Team: a reused Work Item may have moved to another Project since an earlier
+    // attempt, and the endpoint checks below authorize it where it is now.
+    const workItemState = await readPlanningWorkItemState(principal, { teamId })
     let snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
     for (const [position, dependency] of dependencies.entries()) {
       const id = `${application.id}_dep_${position}`

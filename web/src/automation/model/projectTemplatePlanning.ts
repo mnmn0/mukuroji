@@ -3,6 +3,7 @@ import {
   AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_MAX_LAG_DAYS,
   AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER,
   AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT,
+  AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_MAX_DAYS,
   WORK_ITEM_TITLE_MAX_LENGTH,
   type AutomationProjectTemplateDependency,
@@ -115,7 +116,13 @@ export function parseProjectTemplatePlanningOutline(text: string): ProjectTempla
     if (segments.length < (isMilestone ? 2 : 3)) return { error: 'format', line }
     const fieldCount = isMilestone ? 1 : 2
     const title = segments.slice(0, -fieldCount).join('|').trim()
-    if (!title || [...title].length > WORK_ITEM_TITLE_MAX_LENGTH) return { error: 'title', line }
+    if (
+      !title ||
+      [...title].length > WORK_ITEM_TITLE_MAX_LENGTH ||
+      title.length > AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH
+    ) {
+      return { error: 'title', line }
+    }
     count += 1
     if (count > AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT) return { error: 'limit', line }
     if (!isMilestone) {

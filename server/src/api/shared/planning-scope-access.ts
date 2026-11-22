@@ -3,6 +3,7 @@ import type { ProjectRole } from '../../modules/directory'
 import { PlanningError } from '../../modules/planning'
 import { workspaceDependencies } from './app-dependencies'
 import { readPlanningIdentifier } from './planning-access'
+import type { TeamPermissionReadContext } from './workspace-access'
 import {
   requireProjectPermission,
   requireTeamPermission,
@@ -43,12 +44,14 @@ export async function requirePlanningActiveOwner(
  * @param scope - Team / Project scope of the entity.
  * @param minimumRole - Least role required at that scope.
  * @param allowWorkspaceScopeMember - Whether a Workspace-scope entity is open to members.
+ * @param readContext - Directory and ACL reads to reuse, such as a consistent read right after a write.
  */
 export async function requirePlanningScopePermission(
   principal: WorkspacePrincipal,
   scope: Pick<PlanningEntity, 'teamId' | 'projectId'>,
   minimumRole: Extract<ProjectRole, 'member' | 'manager'>,
   allowWorkspaceScopeMember = false,
+  readContext?: TeamPermissionReadContext,
 ) {
   requireWorkspaceBusinessWrite(principal)
   const teamId = scope.teamId === undefined
@@ -73,14 +76,15 @@ export async function requirePlanningScopePermission(
         'Enterprise Team permission is required for this Planning scope.',
       )
     }
-    const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
+    const directory = readContext?.directory ??
+      await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
     if (!directory.teams.some((team) => team.id === teamId)) {
       throw new PlanningError(404, 'TeamNotFound', 'Planning Team was not found.')
     }
     return
   }
   const teamContext = teamId
-    ? await requireTeamPermission(principal, teamId, minimumRole)
+    ? await requireTeamPermission(principal, teamId, minimumRole, readContext)
     : undefined
   if (projectId) {
     await requireProjectPermission(principal, projectId, minimumRole, teamId)

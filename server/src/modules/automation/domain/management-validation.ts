@@ -2,6 +2,7 @@ import {
   AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_DEPENDENCY_MAX_LAG_DAYS,
   AUTOMATION_PROJECT_TEMPLATE_MILESTONE_MARKER,
+  AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH,
   AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_DEPTH_LIMIT,
   AUTOMATION_PROJECT_TEMPLATE_WORK_ITEM_LIMIT,
@@ -511,10 +512,12 @@ function countProjectTemplatePlanningEntity(counter: { count: number }) {
  * @returns The trimmed title.
  */
 function readProjectTemplateLineTitle(value: unknown, label: string) {
-  const title = requireBoundedText(value, label, WORK_ITEM_TITLE_MAX_LENGTH * 2)
+  // Planning stores the title, so its UTF-16 limit applies as well as the editor's character limit.
+  const title = requireBoundedText(value, label, AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH)
   if ([...title].length > WORK_ITEM_TITLE_MAX_LENGTH) {
     throw invalidInput(`${label} must be ${WORK_ITEM_TITLE_MAX_LENGTH} characters or fewer.`)
   }
+  if (/\p{Cs}/u.test(title)) throw invalidInput(`${label} must be well-formed text.`)
   if (/[\r\n\u2028\u2029]/u.test(title)) throw invalidInput(`${label} must not contain line breaks.`)
   return title
 }

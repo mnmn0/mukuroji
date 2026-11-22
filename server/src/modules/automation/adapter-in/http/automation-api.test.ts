@@ -3479,7 +3479,10 @@ test('applies a Project template with Phases, Milestones, and WBS dependencies, 
   configureFakeProjectClients(true, {
     teamProjects,
     // The applier manages the Project the application creates.
-    projectAccesses: [{ projectId: 'application_project_planning', role: 'manager', teamId: 'core-team' }],
+    projectAccesses: [
+      { projectId: 'application_project_planning', role: 'manager', teamId: 'core-team' },
+      { projectId: 'other-project', role: 'manager', teamId: 'core-team' },
+    ],
     async projectCreateHook(_input, completionTransactItems) {
       expect(completionTransactItems).toHaveLength(0)
       teamProjects.push({ id: application.id, name: '計画付きプロジェクト', tone: 'blue' })
@@ -3550,6 +3553,11 @@ test('applies a Project template with Phases, Milestones, and WBS dependencies, 
   expect(await conflicted.json()).toMatchObject({ code: 'AutomationTemplatePlanningConflict' })
   expect(conflicted.status).toBe(409)
   expect(application.status).toBe('pending')
+  // Someone moves a created dependency endpoint to another Project of the Team before the retry.
+  teamProjects.push({ id: 'other-project', name: '別プロジェクト', tone: 'blue' })
+  const moved = createdIssues.get('application_project_planning_wbs_2')
+  if (!moved) throw new Error('The first attempt must create the Work Items.')
+  createdIssues.set(moved.id, { ...moved, assignedProjectId: 'other-project' })
   // Someone archives a created Milestone before the retry; the retry keeps it archived.
   const beforeArchive = await planning.get('user#demo@example.com', { workItems: [] })
   await planning.archive(

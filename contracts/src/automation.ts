@@ -437,6 +437,9 @@ export type AutomationProjectTemplateWorkItem = {
 /** Most Phases and Milestones one Project template can create together. */
 export const AUTOMATION_PROJECT_TEMPLATE_PLANNING_ENTITY_LIMIT = 30
 
+/** Longest Phase or Milestone title in UTF-16 code units, the limit Planning itself enforces. */
+export const AUTOMATION_PROJECT_TEMPLATE_PLANNING_TITLE_MAX_UTF16_LENGTH = 500
+
 /**
  * Marks a Milestone line in the template editor's Phase / Milestone outline.
  * A Phase title cannot start with it, so the editor text always reads back the same way.

@@ -113,7 +113,7 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 
 `dependencies`（最大 100 件）は WBS の Work Item 間の schedule dependency で、`predecessor` と `successor` に WBS 番号（outline の表示順に 1 から数えた `1`、`2.3` など）、`type`（`finish-to-start` など 4 種）、`lagDays`（暦日、±365 日まで）を持つ。保存時に、存在しない WBS 番号、自分自身・親子の間の依存、同じ 2 件をつなぐ重複、循環を拒否する。日付が依存を満たすか（後続の境界日が先行の境界日 + lag 以降、finish-to-start はさらに 1 日後）は開始日と稼働カレンダーで変わるので、preview と適用時に確かめる。
 
-`phases` は Planning の Phase（`title`、`startOffsetWorkingDays`、`durationWorkingDays`）で、それぞれ子の Milestone（`milestones`、`title` と `offsetWorkingDays`）を持てる。最上位の `milestones` は Phase の外の Milestone。Phase と Milestone は合わせて最大 30 件で、日付は WBS と同じく開始日からの稼働日で数え、Milestone は開始日と終了日が同じ日になる。Phase のタイトルは `◆` で始められない（Web の編集欄が `◆` で Milestone の行を見分けるため）。Planning の階層規則で Phase は roadmap・initiative・goal の下にしか置けないため、Phase / Milestone を持つ template の適用は target に `planningParentId` を必須とする。親は active な roadmap・initiative・goal で、Project に属さず、別の Team に属さないものに限る。親の確認は Planning API で子 entity を作るときと同じ scope 権限（`member`）で行う。
+`phases` は Planning の Phase（`title`、`startOffsetWorkingDays`、`durationWorkingDays`）で、それぞれ子の Milestone（`milestones`、`title` と `offsetWorkingDays`）を持てる。最上位の `milestones` は Phase の外の Milestone。Phase と Milestone は合わせて最大 30 件で、日付は WBS と同じく開始日からの稼働日で数え、Milestone は開始日と終了日が同じ日になる。タイトルは Planning と同じく UTF-16 で 500 単位以内でもある必要がある。Phase のタイトルは `◆` で始められない（Web の編集欄が `◆` で Milestone の行を見分けるため）。Planning の階層規則で Phase は roadmap・initiative・goal の下にしか置けないため、Phase / Milestone を持つ template の適用は target に `planningParentId` を必須とする。親は active な roadmap・initiative・goal で、Project に属さず、別の Team に属さないものに限る。親の確認は Planning API で子 entity を作るときと同じ scope 権限（`member`）で行う。
 
 ### 適用前の dry-run preview
 
@@ -125,8 +125,8 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 2. Project を作る。このときは application 成功 receipt を Project transaction に含めない。前回の試行で作った Project（ID が application ID のもの）があれば、名前や色が変わっていてもそのまま使う。
 3. 親から順に Work Item を作る。担当者は適用した管理者、優先度は中で、ID は `<application ID>_wbs_<展開順>` に固定する。その ID の Work Item が既にあれば、前回の試行の後で編集されていてもそのまま使う。
 4. 展開順に、子を親へ `parent` relation でつなぎ、兄弟の並び（hierarchy rank）を outline の順に保存する。連続して作った Work Item は sort order が同じになりうるため、作成順には頼らない。最上位の item は、それらの現在の rank のうち最小の位置から並べる。前回の試行の後で別の親へ移された item は動かさない。
-5. Phase と Milestone を Planning に作る。scope は新しい Project（Team と Project）、owner は適用した管理者、状態は planned、baseline と forecast は展開した日付で、ID は `<application ID>_plan_<作成順>` に固定する。新しい Project の scope での `member` 権限を Planning API と同じく確かめる。その ID の entity が既にあれば（archive 済みでも）そのまま残し、archive 済みの Phase の下の Milestone は作らない。
-6. WBS の依存を Work Item schedule dependency として作る。ID は `<application ID>_dep_<template の順>` に固定し、両端の Work Item に Planning API と同じ `manager` 権限を確かめる。書き込みは Planning API と同じく、確かめた時点から適用者の権限が変わっていないことを条件にする。既にある ID は飛ばす。
+5. Phase と Milestone を Planning に作る。scope は新しい Project（Team と Project）、owner は適用した管理者、状態は planned、baseline と forecast は展開した日付で、ID は `<application ID>_plan_<作成順>` に固定する。新しい Project の scope での `member` 権限を Planning API と同じく、作ったばかりの Project が見えるよう directory を強い整合性で読んで確かめる。その ID の entity が既にあれば（archive 済みでも）そのまま残し、archive 済みの Phase の下の Milestone は作らない。
+6. WBS の依存を Work Item schedule dependency として作る。ID は `<application ID>_dep_<template の順>` に固定し、両端の Work Item は Team 全体から読み（前の試行の後に別の Project へ移されていてもよい）、今の所属で Planning API と同じ `manager` 権限を確かめる。書き込みは Planning API と同じく、確かめた時点から適用者の権限が変わっていないことを条件にする。既にある ID は飛ばす。
 7. 最後に application receipt を成功（`result.workItemCount`、`planningEntityCount`、`dependencyCount` 付き）で保存する。
 
 途中の一時的な失敗、子をつなぐ間に Team の relation graph が別の変更で進んだ場合（`AutomationTemplateWorkItemLinkConflict`、409。server 内では自動 retry しない）、Planning が別の変更で進んだ場合（`AutomationTemplatePlanningConflict`、409）は receipt を pending に戻し、同じ `Idempotency-Key` の再送が既存 Project と既存 Work Item の再利用、宣言的な親と rank の設定で残りだけを進める。確定的な 4xx で失敗した場合は、それまでに作った Project、Work Item、Phase / Milestone が残る（全体を 1 transaction にはしていない）。
