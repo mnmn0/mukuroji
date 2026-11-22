@@ -1,4 +1,4 @@
-import type { WorkspaceSearchResponse } from '@mukuroji/contracts'
+import type { WorkspaceSearchResult } from '@mukuroji/contracts'
 import { searchWorkspaceAcrossCursors } from '../api/search'
 import {
   COMMAND_MENU_PROJECT_SLOTS,
@@ -6,18 +6,29 @@ import {
   mergeCommandMenuSearchResults,
 } from '../model/commandMenuResults'
 
+/** Results of one command menu search. */
+export type CommandMenuSearchResult = {
+  /** Permitted results in command menu order. */
+  results: WorkspaceSearchResult[]
+  /** Whether the Project-only search failed, so Projects the page did not reach may be missing. */
+  projectSearchFailed: boolean
+}
+
 /**
  * Searches the Workspace for the command menu so one query can open both Work Items and Projects.
  *
  * The Workspace-wide search reads Work Items before Projects, so a short keyword that matches
  * many Work Item titles would fill every slot before any Project. A second Project-only search
  * runs in parallel and up to four of its matches are kept at the end of the list. When only the
- * Project search fails, the Workspace-wide results are still returned.
+ * Project search fails, the Workspace-wide results are still returned and the failure is reported
+ * in `projectSearchFailed` so the menu can say so and offer a retry.
  *
  * @param accessToken - Access token of the signed-in user.
  * @param keyword - Trimmed keyword typed into the command menu.
  * @param options - Optional AbortSignal that cancels both searches.
- * @returns Up to 12 permitted results in API order, followed by Projects the page did not reach.
+ * @returns Up to 12 permitted results in API order, followed by Projects the page did not reach,
+ *   and whether the Project-only search failed.
+ * @throws The Workspace-wide search error when that search fails.
  */
 export async function searchWorkspaceForCommandMenu(
   accessToken: string,
@@ -28,7 +39,7 @@ export async function searchWorkspaceForCommandMenu(
      */
     signal?: AbortSignal
   } = {},
-): Promise<WorkspaceSearchResponse> {
+): Promise<CommandMenuSearchResult> {
   const [workspaceSearch, projectSearch] = await Promise.allSettled([
     searchWorkspaceAcrossCursors(accessToken, { keyword }, {
       pageLimit: 5,
@@ -46,7 +57,7 @@ export async function searchWorkspaceForCommandMenu(
   }
 
   return {
-    ...workspaceSearch.value,
+    projectSearchFailed: projectSearch.status === 'rejected',
     results: mergeCommandMenuSearchResults(
       workspaceSearch.value.results,
       projectSearch.status === 'fulfilled' ? projectSearch.value.results : [],

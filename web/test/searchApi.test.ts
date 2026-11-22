@@ -116,9 +116,10 @@ describe('Command menu search', () => {
     expect(response.results).toHaveLength(12)
     expect(response.results.slice(0, 11).every((result) => result.entityType === 'work-item')).toBe(true)
     expect(response.results.at(-1)).toMatchObject({ entityType: 'project', id: 'login-platform' })
+    expect(response.projectSearchFailed).toBe(false)
   })
 
-  test('falls back to Workspace-wide results when the Project-only search fails', async () => {
+  test('keeps Workspace-wide results and reports the failure when the Project-only search fails', async () => {
     globalThis.fetch = (async (input: string | URL | Request) => {
       const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url, 'https://example.test')
       if ((url.searchParams.get('filters') ?? '').includes('entityTypes')) {
@@ -130,6 +131,7 @@ describe('Command menu search', () => {
     const response = await searchWorkspaceForCommandMenu('access-token', 'only')
 
     expect(response.results.map((result) => result.id)).toEqual(['only-task'])
+    expect(response.projectSearchFailed).toBe(true)
   })
 
   test('keeps API order, deduplicates and appends only the Projects the page did not reach', () => {

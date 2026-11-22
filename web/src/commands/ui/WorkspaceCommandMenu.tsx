@@ -221,6 +221,8 @@ export function WorkspaceCommandMenu({
   const [loadingQuery, setLoadingQuery] = useState('')
   const [errorMessage, setErrorMessage] = useState<string | undefined>()
   const [errorQuery, setErrorQuery] = useState('')
+  const [projectSearchFailedQuery, setProjectSearchFailedQuery] = useState('')
+  const [searchAttempt, setSearchAttempt] = useState(0)
   const dialogRef = useRef<HTMLElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
@@ -350,12 +352,14 @@ export function WorkspaceCommandMenu({
         .then((response) => {
           setResults(response.results)
           setResultsQuery(normalizedQuery)
+          setProjectSearchFailedQuery(response.projectSearchFailed ? normalizedQuery : '')
           setActiveIndex(0)
         })
         .catch((error: unknown) => {
           if (!abortController.signal.aborted) {
             setResults([])
             setResultsQuery(normalizedQuery)
+            setProjectSearchFailedQuery('')
             setErrorMessage(error instanceof Error ? error.message : t('command.error'))
             setErrorQuery(normalizedQuery)
           }
@@ -371,7 +375,7 @@ export function WorkspaceCommandMenu({
       window.clearTimeout(timeoutId)
       abortController.abort()
     }
-  }, [accessToken, isOpen, normalizedQuery, query, t])
+  }, [accessToken, isOpen, normalizedQuery, query, searchAttempt, t])
 
   useEffect(() => {
     if (!isOpen) {
@@ -521,6 +525,18 @@ export function WorkspaceCommandMenu({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-2" id={commandListId} role="listbox">
+          {projectSearchFailedQuery !== '' && projectSearchFailedQuery === normalizedQuery && resultsQuery === normalizedQuery ? (
+            <div className="m-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-fg-amber-800" role="status">
+              <span>{t('command.projectSearchError')}</span>
+              <button
+                className="rounded-md border border-amber-300 bg-white px-3 py-1 text-xs font-semibold"
+                onClick={() => setSearchAttempt((attempt) => attempt + 1)}
+                type="button"
+              >
+                {t('command.retry')}
+              </button>
+            </div>
+          ) : null}
           {itemSections.map((section) => section.items.length > 0 ? (
             <section aria-labelledby={`command-section-${section.id}`} className="py-1" key={section.id}>
               <h2
@@ -606,9 +622,16 @@ export function WorkspaceCommandMenu({
             </p>
           ) : null}
           {errorMessage && errorQuery === normalizedQuery ? (
-            <p className="m-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
-              {t('command.error')}
-            </p>
+            <div className="m-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-fg-red-700" role="alert">
+              <span>{t('command.error')}</span>
+              <button
+                className="rounded-md border border-red-300 bg-white px-3 py-1 text-xs font-semibold"
+                onClick={() => setSearchAttempt((attempt) => attempt + 1)}
+                type="button"
+              >
+                {t('command.retry')}
+              </button>
+            </div>
           ) : null}
           {(!isLoading || loadingQuery !== normalizedQuery) && (!errorMessage || errorQuery !== normalizedQuery) && normalizedQuery && commandItems.length === 0 ? (
             <p className="px-4 py-8 text-center text-sm font-semibold text-[var(--workbench-muted)]">
