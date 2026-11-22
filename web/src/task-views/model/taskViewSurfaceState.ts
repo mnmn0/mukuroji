@@ -438,6 +438,15 @@ export function taskViewDefinitionToPresentationSettings(
       ...(definition.layout.displayOptions.showOutline === undefined
         ? {}
         : { showOutline: definition.layout.displayOptions.showOutline }),
+      ...(definition.layout.displayOptions.ganttScale === undefined
+        ? {}
+        : { ganttScale: definition.layout.displayOptions.ganttScale }),
+      ...(definition.layout.displayOptions.ganttCompactRows === undefined
+        ? {}
+        : { ganttCompactRows: definition.layout.displayOptions.ganttCompactRows }),
+      ...(definition.layout.displayOptions.ganttProgressLine === undefined
+        ? {}
+        : { ganttProgressLine: definition.layout.displayOptions.ganttProgressLine }),
     },
     ...(definition.layout.group ? { groupBy: definition.layout.group.field } : {}),
     ...(definition.layout.group
@@ -494,6 +503,15 @@ export function presentationSettingsToTaskViewDefinition(
         ...(settings.display.showOutline === undefined
           ? {}
           : { showOutline: settings.display.showOutline }),
+        ...(settings.display.ganttScale === undefined
+          ? {}
+          : { ganttScale: settings.display.ganttScale }),
+        ...(settings.display.ganttCompactRows === undefined
+          ? {}
+          : { ganttCompactRows: settings.display.ganttCompactRows }),
+        ...(settings.display.ganttProgressLine === undefined
+          ? {}
+          : { ganttProgressLine: settings.display.ganttProgressLine }),
       },
       ...(settings.groupBy
         ? { group: { direction: settings.groupDirection ?? 'asc', field: settings.groupBy } }

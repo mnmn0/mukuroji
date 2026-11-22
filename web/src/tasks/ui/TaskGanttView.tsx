@@ -81,6 +81,7 @@ import {
 } from '../model/taskGanttRows'
 import { ChevronIcon } from '../../shared/ui/icons'
 import { printTaskView, type TaskViewPrintPaper } from './taskViewPrint'
+import type { TaskGanttDisplaySettings } from '../model/taskGanttDisplay'
 import { resolveWorkItemEffortColumnValue } from '../../work-items/model/workItemEffort'
 import type { WorkItemBaselineLookup } from '../../work-items/model/workItemScheduleBaselines'
 import {
@@ -252,8 +253,22 @@ type GanttDependencyLayout = {
   externalStubs: GanttExternalEndpointStub[]
 }
 
+/** Display settings a Gantt chart starts with when no saved view supplies them. */
+const DEFAULT_GANTT_DISPLAY_SETTINGS: TaskGanttDisplaySettings = {
+  isCompact: false,
+  scale: 'auto',
+  showsProgressLine: false,
+}
+
 /** Props for the independent project task Gantt view. */
 export type TaskGanttViewProps = {
+  /**
+   * Display settings owned by the active task view. When set, the chart renders them and reports
+   * changes through `onDisplayChange` instead of keeping its own.
+   */
+  display?: TaskGanttDisplaySettings
+  /** Receives the next display settings after the user changes scale, one-line, or progress line. */
+  onDisplayChange?: (display: TaskGanttDisplaySettings) => void
   /** Unfiltered tasks used to distinguish Project membership from the rendered filter result. */
   allProjectTasks?: CanonicalWorkItem[]
   /** Determines whether the current user may manage one canonical dependency endpoint. */
@@ -344,8 +359,10 @@ export function TaskGanttView({
   canManageScheduleDependencyEndpoint,
   configuration,
   configurationsByTeam,
+  display: controlledDisplay,
   group,
   onCreateTaskOpen,
+  onDisplayChange,
   onCreateScheduleDependency,
   onDeleteScheduleDependency,
   onRequestScheduleChange,
@@ -418,9 +435,19 @@ export function TaskGanttView({
       visibleTaskKeys.has(createWorkItemDependencyEndpointKey(row.dependency.successor))
     )
   }, [planningSnapshot, visibleTaskKeys])
-  const [scale, setScale] = useState<TaskGanttScale>('auto')
-  const [isCompact, setIsCompact] = useState(false)
-  const [showsProgressLine, setShowsProgressLine] = useState(false)
+  const [localDisplay, setLocalDisplay] = useState(DEFAULT_GANTT_DISPLAY_SETTINGS)
+  const display = controlledDisplay ?? localDisplay
+  const { isCompact, scale, showsProgressLine } = display
+  /**
+   * Applies one display change locally and reports it to the owning task view.
+   *
+   * @param patch - Changed display settings.
+   */
+  const changeDisplay = (patch: Partial<TaskGanttDisplaySettings>) => {
+    const next = { ...display, ...patch }
+    if (!controlledDisplay) setLocalDisplay(next)
+    onDisplayChange?.(next)
+  }
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   /** Whether a move to today waits for the period containing today to render. */
   const todayScrollPendingRef = useRef(false)
@@ -830,11 +857,13 @@ export function TaskGanttView({
         canMoveToToday={todayX !== undefined || onWindowStartMonthChange !== undefined}
         effectiveScale={scaledTimeline?.scale}
         isCompact={isCompact}
-        onCompactChange={setIsCompact}
+        onCompactChange={(nextIsCompact) => changeDisplay({ isCompact: nextIsCompact })}
         onMoveToToday={moveToToday}
         onPrint={printChart}
-        onProgressLineChange={setShowsProgressLine}
-        onScaleChange={setScale}
+        onProgressLineChange={(nextShowsProgressLine) =>
+          changeDisplay({ showsProgressLine: nextShowsProgressLine })
+        }
+        onScaleChange={(nextScale) => changeDisplay({ scale: nextScale })}
         scale={scale}
         showsProgressLine={showsProgressLine}
         t={t}

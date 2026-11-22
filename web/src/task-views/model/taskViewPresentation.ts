@@ -1,6 +1,7 @@
 import type {
   TaskViewColumn,
   TaskViewDensity,
+  TaskViewGanttScale,
   TaskViewSort,
   TaskViewSortDirection,
 } from '@mukuroji/contracts'
@@ -21,6 +22,12 @@ export type TaskViewDisplayOptions = {
   wrapTitles: boolean
   /** Whether a table shows Work Items as a collapsible outline in hierarchy order. */
   showOutline?: boolean
+  /** Timeline scale of the Gantt layout; `auto` applies when omitted. */
+  ganttScale?: TaskViewGanttScale
+  /** Whether the Gantt layout renders each Work Item on one compact line. */
+  ganttCompactRows?: boolean
+  /** Whether the Gantt layout draws the progress line through today. */
+  ganttProgressLine?: boolean
 }
 
 /** Presentation settings edited by the shared task-view toolbar. */

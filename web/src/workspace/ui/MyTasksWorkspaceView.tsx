@@ -30,6 +30,7 @@ import {
   createWorkspaceTaskTestToken,
 } from '../../work-items/ui/WorkspaceWorkItemPrimitives'
 import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
+import { createTaskGanttDisplayBinding } from '../../tasks/model/taskGanttDisplay'
 import { TaskCalendarView } from '../../tasks/ui/TaskCalendarView'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import {
@@ -73,6 +74,8 @@ export type MyTasksWorkspaceViewProps = {
   onStatusActionCancelled?: (task: CanonicalWorkItem) => void
   /** Visible card fields, density, wrapping, and grouping selected by the effective view. */
   presentation?: TaskViewPresentationSettings
+  /** Applies presentation settings changed inside a layout, such as the Gantt scale. */
+  onPresentationChange?: (settings: TaskViewPresentationSettings) => void
   /** Team-qualified key whose status selector was revealed by the canonical Move action. */
   revealedStatusTaskKey?: string
   /** Person identities mapped to labels for person custom fields. */
@@ -125,6 +128,7 @@ export function MyTasksWorkspaceView({
   onStatusActionCancelled,
   personLabels = {},
   presentation,
+  onPresentationChange,
   revealedStatusTaskKey,
   t,
   taskMoveErrorMessage,
@@ -371,6 +375,7 @@ export function MyTasksWorkspaceView({
           t={t}
           tasks={ganttTasks}
           workingCalendar={workingCalendar}
+          {...createTaskGanttDisplayBinding(presentation, onPresentationChange)}
         />
       </div>
     )
