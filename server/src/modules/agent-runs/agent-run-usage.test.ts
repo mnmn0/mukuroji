@@ -210,13 +210,15 @@ describe('agent usage stores', () => {
     expect(await store.recordBatch('ws', 'member', 'batch', buckets)).toBe('recorded')
     expect(await store.recordBatch('ws', 'member', 'batch', buckets)).toBe('duplicate')
     expect(await store.recordBatch('ws', 'member', 'batch-2', buckets.slice(0, 1))).toBe('recorded')
-    const page = await store.listMemberBuckets('ws', 'member', '2026-11-22T17:05:00Z', '2026-11-22T17:05:20Z', 10)
+    const laptop = hashAgentInstanceId('laptop')
+    const page = await store.listMemberBuckets('ws', 'member', laptop, '2026-11-22T17:05:00Z', '2026-11-22T17:05:20Z', 10)
     expect(page.buckets.map((bucket) => [bucket.bucketStart, bucket.requestCount])).toEqual([
       ['2026-11-22T17:05:00Z', 2],
       ['2026-11-22T17:05:10Z', 1],
     ])
-    expect((await store.listMemberBuckets('ws', 'member', '2026-11-22T17:05:00Z', undefined, 2)).hasMore).toBe(true)
-    expect((await store.listMemberBuckets('ws', 'other', '2026-11-22T17:05:00Z', undefined, 2)).buckets).toEqual([])
+    expect((await store.listMemberBuckets('ws', 'member', laptop, '2026-11-22T17:05:00Z', undefined, 2)).hasMore).toBe(true)
+    expect((await store.listMemberBuckets('ws', 'other', laptop, '2026-11-22T17:05:00Z', undefined, 2)).buckets).toEqual([])
+    expect((await store.listMemberBuckets('ws', 'member', hashAgentInstanceId('desktop'), '2026-11-22T17:05:00Z', undefined, 2)).buckets).toEqual([])
   })
 
   test('the DynamoDB store writes a receipt with ADD updates and treats a receipt conflict as a duplicate', async () => {
@@ -263,10 +265,10 @@ describe('agent usage stores', () => {
 
   test('the DynamoDB store reads a member range and stops at the limit', async () => {
     const instanceIdHash = hashAgentInstanceId('laptop')
-    const item = (bucketStart: string) => ({
+    const item = (bucketStart: string, instance = instanceIdHash) => ({
       directoryTeamId: 'ws#agent-usage#member#member',
-      recordKey: `${bucketStart}#${instanceIdHash}#m`,
-      bucketStart, instanceIdHash, model: 'm',
+      recordKey: `${bucketStart}#${instance}#m`,
+      bucketStart, instanceIdHash: instance, model: 'm',
       inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheCreationTokens: 4, costMicroUsd: 5, requestCount: 1,
     })
     const queries: unknown[] = []
@@ -277,12 +279,36 @@ describe('agent usage stores', () => {
       },
     }
     const store = new DynamoDbAgentRunUsageStore(client, 'runs')
-    const page = await store.listMemberBuckets('ws', 'member', '2026-11-22T17:05:00Z', '2026-11-22T17:06:00Z', 1)
+    const page = await store.listMemberBuckets('ws', 'member', instanceIdHash, '2026-11-22T17:05:00Z', '2026-11-22T17:06:00Z', 1)
     expect(page).toMatchObject({ hasMore: true, buckets: [{ bucketStart: '2026-11-22T17:05:00Z', costMicroUsd: 5 }] })
     expect(queries[0]).toMatchObject({
       ExpressionAttributeValues: { ':partition': 'ws#agent-usage#member#member', ':from': '2026-11-22T17:05:00Z', ':until': '2026-11-22T17:06:00Z' },
     })
-    expect(await store.listMemberBuckets('ws', 'member', '2026-11-22T17:05:00Z', '2026-11-22T17:05:00Z', 1)).toEqual({ buckets: [], hasMore: false })
+    expect(await store.listMemberBuckets('ws', 'member', instanceIdHash, '2026-11-22T17:05:00Z', '2026-11-22T17:05:00Z', 1)).toEqual({ buckets: [], hasMore: false })
+  })
+
+  test('the DynamoDB store skips other instances and reports a partial read when they fill the scan bound', async () => {
+    const own = hashAgentInstanceId('laptop')
+    const other = hashAgentInstanceId('desktop')
+    const item = (second: number, instance: string) => {
+      const bucketStart = `2026-11-22T17:${String(5 + Math.floor(second / 60)).padStart(2, '0')}:${String(second % 60).padStart(2, '0')}Z`
+      return {
+        directoryTeamId: 'ws#agent-usage#member#member',
+        recordKey: `${bucketStart}#${instance}#m`,
+        bucketStart, instanceIdHash: instance, model: 'm',
+        inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costMicroUsd: 0, requestCount: 1,
+      }
+    }
+    let items = [item(0, other), item(10, own), item(20, other)]
+    const client: AgentRunUsageDocumentClient = { async send() { return { Items: items } } }
+    const store = new DynamoDbAgentRunUsageStore(client, 'runs')
+    expect(await store.listMemberBuckets('ws', 'member', own, '2026-11-22T17:05:00Z', undefined, 2)).toMatchObject({
+      hasMore: false,
+      buckets: [{ bucketStart: '2026-11-22T17:05:10Z', instanceIdHash: own }],
+    })
+    // With a limit of 1 the read passes over at most 5 rows; 6 rows of another instance stop it as partial.
+    items = [0, 10, 20, 30, 40, 50].map((second) => item(second, other))
+    expect(await store.listMemberBuckets('ws', 'member', own, '2026-11-22T17:05:00Z', undefined, 1)).toEqual({ buckets: [], hasMore: true })
   })
 })
 

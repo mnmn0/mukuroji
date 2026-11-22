@@ -5,7 +5,7 @@ export const codingAgentGuideMessages = {
   'agents.guide.description': 'Use an MCP-compatible client to work with the same tasks, statuses, and progress comments as mukuroji.',
   'agents.guide.setupTitle': 'Set up the connection',
   'agents.guide.credentialsTitle': 'Issue your own token',
-  'agents.guide.credentialsDescription': 'On the Connect an agent page, issue a token limited to work-items:read and work-items:write and copy a configuration with your origin, Team, and member ID filled in. The token acts as you, so you need read and edit access to the target Team and Project.',
+  'agents.guide.credentialsDescription': 'On the Connect an agent page, issue a token limited to work-items:read, work-items:write, and agent-telemetry:write (token usage) and copy a configuration with your origin, Team, and member ID filled in. The token acts as you, so you need read and edit access to the target Team and Project.',
   'agents.guide.openSettings': 'Open Connect an agent',
   'agents.guide.scopeTitle': 'Choose the Team and assigned member',
   'agents.guide.scopeDescription': 'ASSIGNEE_ID must be an existing Workspace member ID. AGENT_NAME is the display name. Set MUKUROJI_MCP_RUNTIME to claude-code, codex, kiro, or other to match the agent that runs the server. Changes are limited to tasks assigned to the configured member.',

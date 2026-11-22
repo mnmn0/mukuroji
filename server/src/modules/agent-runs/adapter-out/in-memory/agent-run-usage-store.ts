@@ -37,10 +37,11 @@ export class InMemoryAgentRunUsageStore implements AgentRunUsageStore {
   }
 
   /** @inheritdoc */
-  async listMemberBuckets(directoryId: string, memberKey: string, from: string, until: string | undefined, limit: number): Promise<AgentUsageBucketPage> {
+  async listMemberBuckets(directoryId: string, memberKey: string, instanceIdHash: string, from: string, until: string | undefined, limit: number): Promise<AgentUsageBucketPage> {
     const prefix = `${agentUsagePartition(directoryId, memberKey)}|`
     const matching = [...this.buckets.entries()]
-      .filter(([key, bucket]) => key.startsWith(prefix) && bucket.bucketStart >= from && (until === undefined || bucket.bucketStart < until))
+      .filter(([key, bucket]) => key.startsWith(prefix) && bucket.instanceIdHash === instanceIdHash &&
+        bucket.bucketStart >= from && (until === undefined || bucket.bucketStart < until))
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([, bucket]) => ({ ...bucket }))
     return { buckets: matching.slice(0, limit), hasMore: matching.length > limit }

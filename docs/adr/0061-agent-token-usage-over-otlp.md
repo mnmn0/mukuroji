@@ -45,8 +45,9 @@ Shinji の方針は「なるべく安く」。
   attribute `usageExpiresAt` を追加し、usage の行は 400 日、受領行は 2 日で消す。どの行も `workspaceId` を
   持つので、Workspace の削除・export の既存の対象に入る。
 - **見せ方**：Web の Work Item の Run 一覧 API が、Run ごとの `usage` と、返した Run の合計 `usageTotal` を返す。
-  トークン数は Work Item を見られる人に、推定費用は Team manager にだけ返す。1 Run あたり 2,000 bucket まで
-  読み、超えたら `hasMore` で知らせる。
+  トークン数は Work Item を見られる人に、推定費用は Team manager にだけ返す。1 Run あたり、その instance の
+  2,000 bucket まで読む。同じ member の別 instance の行も同じ partition にあるため、読む行は 10,000 行までとし、
+  どちらかで止まったら `hasMore` で知らせる。
 
 ## 検討した選択肢
 

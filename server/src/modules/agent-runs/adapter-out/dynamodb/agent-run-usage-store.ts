@@ -48,17 +48,23 @@ export interface AgentRunUsageStore {
    */
   recordBatch(directoryId: string, memberKey: string, batchId: string, buckets: readonly AgentUsageBucket[], now: Date): Promise<'recorded' | 'duplicate'>
   /**
-   * Reads a member's buckets that start in a range.
+   * Reads a member's buckets of one agent instance that start in a range. The member's other
+   * instances share the partition, so at most {@link AGENT_USAGE_MAX_SCANNED_BUCKETS_FACTOR} times
+   * `limit` rows are read; `hasMore` is set when that bound or `limit` stopped the read.
    *
    * @param directoryId - Workspace ID.
    * @param memberKey - Member whose usage is read.
+   * @param instanceIdHash - Agent instance whose buckets are returned.
    * @param from - First bucket start, inclusive.
    * @param until - Bucket start where the range ends, exclusive; open when undefined.
    * @param limit - Largest number of buckets to return.
    * @returns Buckets in start order.
    */
-  listMemberBuckets(directoryId: string, memberKey: string, from: string, until: string | undefined, limit: number): Promise<AgentUsageBucketPage>
+  listMemberBuckets(directoryId: string, memberKey: string, instanceIdHash: string, from: string, until: string | undefined, limit: number): Promise<AgentUsageBucketPage>
 }
+
+/** Rows of other instances one usage read may pass over, as a multiple of its bucket limit. */
+export const AGENT_USAGE_MAX_SCANNED_BUCKETS_FACTOR = 5
 
 /**
  * Builds the partition of a member's usage buckets.
@@ -254,8 +260,10 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
   }
 
   /** @inheritdoc */
-  async listMemberBuckets(directoryId: string, memberKey: string, from: string, until: string | undefined, limit: number): Promise<AgentUsageBucketPage> {
+  async listMemberBuckets(directoryId: string, memberKey: string, instanceIdHash: string, from: string, until: string | undefined, limit: number): Promise<AgentUsageBucketPage> {
     const buckets: AgentUsageBucket[] = []
+    const maxScanned = limit * AGENT_USAGE_MAX_SCANNED_BUCKETS_FACTOR
+    let scanned = 0
     let exclusiveStartKey: Record<string, unknown> | undefined
     // `<until>` sorts before every key of its own bucket, so BETWEEN stops before that bucket. An
     // open range ends after every possible bucket start.
@@ -267,12 +275,15 @@ export class DynamoDbAgentRunUsageStore implements AgentRunUsageStore {
         KeyConditionExpression: '#partition = :partition AND #recordKey BETWEEN :from AND :until',
         ExpressionAttributeNames: { '#partition': 'directoryTeamId', '#recordKey': 'recordKey' },
         ExpressionAttributeValues: { ':partition': agentUsagePartition(directoryId, memberKey), ':from': from, ':until': upper },
-        Limit: Math.min(1_000, limit + 1 - buckets.length),
+        Limit: Math.min(1_000, maxScanned + 1 - scanned),
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
       for (const item of page.Items ?? []) {
+        if (scanned === maxScanned) return { buckets, hasMore: true }
+        scanned += 1
         const bucket = parseAgentUsageBucket(item)
         if (until !== undefined && bucket.bucketStart >= until) continue
+        if (bucket.instanceIdHash !== instanceIdHash) continue
         if (buckets.length === limit) return { buckets, hasMore: true }
         buckets.push(bucket)
       }

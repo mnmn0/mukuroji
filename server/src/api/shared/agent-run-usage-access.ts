@@ -22,6 +22,7 @@ export async function readAgentRunUsage(directoryId: string, run: StoredAgentRun
   const page = await workItemDependencies.agentRunUsage.listMemberBuckets(
     directoryId,
     run.assigneeUserId,
+    run.instanceIdHash,
     range.from,
     range.until,
     AGENT_RUN_USAGE_MAX_BUCKETS_PER_RUN,
