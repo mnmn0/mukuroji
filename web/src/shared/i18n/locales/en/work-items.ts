@@ -412,6 +412,7 @@ export const workItemsMessages = {
   'tasks.addTask': 'Add task',
   'tasks.create.title': 'Task name',
   'tasks.workspaceCalendar.error': "Couldn't load the Workspace working calendar. New Work Items and the Gantt chart use Monday to Friday with no holidays for now.",
+  'tasks.workspaceCalendar.scopedError': "Couldn't load the Team or Project working calendar. Dates are counted with the Workspace calendar until it loads, so reload it before scheduling.",
   'tasks.workspaceCalendar.staleError': "Couldn't reload the Workspace working calendar. New Work Items and the Gantt chart use the calendar loaded earlier.",
   'tasks.workspaceCalendar.retry': 'Load again',
   'tasks.create.titlePlaceholder': 'Ex: Pre-release checklist',

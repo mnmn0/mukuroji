@@ -408,7 +408,11 @@ export function TaskPage() {
   const workspaceCalendar = useWorkspaceCalendarSettings(accessToken, Boolean(user && !currentUserError))
   const workspaceCalendarErrorKey = workspaceCalendarErrorMessageKey(workspaceCalendar)
   // A Project with its own calendar, or a Team calendar, replaces the Workspace one (ADR 0058).
-  const { data: projectWorkCalendar } = useWorkCalendar(
+  const {
+    data: projectWorkCalendar,
+    error: projectWorkCalendarError,
+    mutate: mutateProjectWorkCalendar,
+  } = useWorkCalendar(
     accessToken,
     selectedTeamId,
     projectId,
@@ -2085,8 +2089,13 @@ export function TaskPage() {
       accessToken={accessToken}
       workspaceCalendarPolicy={workspaceCalendarPolicy}
       workspaceCalendarPeriods={workspaceCalendar.settings}
-      workspaceCalendarErrorMessage={workspaceCalendarErrorKey ? t(workspaceCalendarErrorKey) : undefined}
-      onRetryWorkspaceCalendar={workspaceCalendar.retry}
+      workspaceCalendarErrorMessage={
+        // A failed Team or Project calendar read is shown, not hidden behind the Workspace calendar.
+        projectWorkCalendarError
+          ? t('tasks.workspaceCalendar.scopedError')
+          : workspaceCalendarErrorKey ? t(workspaceCalendarErrorKey) : undefined
+      }
+      onRetryWorkspaceCalendar={projectWorkCalendarError ? () => void mutateProjectWorkCalendar() : workspaceCalendar.retry}
       onAuthenticatedApiError={(error) => {
         redirectEnterpriseSessionError(error)
       }}
