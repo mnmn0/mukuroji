@@ -136,6 +136,29 @@ test('rewrites only extensionless routes to the SPA shell', () => {
     .toBe('/manifest.webmanifest');
 });
 
+test('answers 404 for release copies instead of serving them', () => {
+  const code = requireFunctionCode('WebSpaRoutingFunction');
+  const handler = new Function(`${code}; return handler;`)() as (
+    event: { request: { uri: string } },
+  ) => { uri?: string; statusCode?: number; headers?: Record<string, { value: string }> };
+
+  for (const uri of [
+    '/releases',
+    '/releases/',
+    '/releases/0123456789abcdef0123456789abcdef01234567/index.html',
+    '/releases/0123456789abcdef0123456789abcdef01234567/release-assets.txt',
+    '/%72eleases/0123456789abcdef0123456789abcdef01234567/index.html',
+    '/release-assets.txt',
+  ]) {
+    const response = handler({ request: { uri } });
+    expect(response.statusCode).toBe(404);
+    expect(response.headers).toEqual({ 'cache-control': { value: 'no-store' } });
+  }
+  // Names that only start like the release prefix stay ordinary paths.
+  expect(handler({ request: { uri: '/releases-notes' } }).uri).toBe('/index.html');
+  expect(handler({ request: { uri: '/%E0%A4%A' } }).uri).toBe('/index.html');
+});
+
 test('forwards /api/* to the HTTP API without caching', () => {
   const config = requireDistributionConfig();
   const behaviors = config.CacheBehaviors as Record<string, unknown>[];

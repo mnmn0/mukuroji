@@ -41,12 +41,29 @@ const API_VIEWER_ADDRESS_FUNCTION_CODE = `function handler(event) {
 /**
  * Viewer-request function that serves the SPA shell for client-side routes.
  *
+ * Release copies under `releases/` and the `release-assets.txt` list exist
+ * only for `web:deploy` and `web:rollback`, which read the bucket directly,
+ * so the function answers 404 for them instead of serving old entry files.
  * Requests whose last path segment has no file extension are rewritten to
  * `/index.html`. Only the default (S3) behavior runs it, so `/api/*`
  * responses, including API 404s, reach the browser unchanged.
  */
 const SPA_ROUTING_FUNCTION_CODE = `function handler(event) {
   var request = event.request;
+  var uri = request.uri;
+  try {
+    // S3 decodes the key, so an encoded name such as /%72eleases/ must not slip past.
+    uri = decodeURIComponent(uri);
+  } catch (error) {
+    // A malformed escape cannot name a release copy; S3 answers it as usual.
+  }
+  if (uri === '/releases' || uri.indexOf('/releases/') === 0 || uri === '/release-assets.txt') {
+    return {
+      statusCode: 404,
+      statusDescription: 'Not Found',
+      headers: { 'cache-control': { value: 'no-store' } },
+    };
+  }
   var lastSegment = request.uri.split('/').pop();
   if (lastSegment === '' || lastSegment.indexOf('.') === -1) {
     request.uri = '/index.html';
