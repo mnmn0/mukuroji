@@ -43,8 +43,9 @@ import {
 } from '../../../work-items/work-item-configuration'
 import {
   createWorkItemAuthorizationChangedError,
+  normalizeWorkItemSchedule,
 } from '../../../work-items'
-import { InMemoryPlanningClient } from '../../../planning/planning'
+import { InMemoryPlanningClient, PlanningError } from '../../../planning/planning'
 import {
   createActiveAgentRun,
   InMemoryAgentRunStore,
@@ -3252,6 +3253,358 @@ test('applies a Project template WBS as Work Items with parent links, resumes af
       child: expect.objectContaining({ workItemId: 'application_project_wbs_wbs_2' }),
       expectedGraphRevision: 2,
       hierarchyRank: createWorkItemHierarchyRankBetween(topLevelStart),
+    },
+  ])
+})
+
+/**
+ * Builds the in-memory Work Item and Planning fakes a Project template with Planning content uses.
+ *
+ * @param planning - Planning client the application writes to.
+ * @returns Created Work Items keyed by ID.
+ */
+function configureProjectTemplatePlanningFakes(planning: InMemoryPlanningClient) {
+  const createdIssues = new Map<string, ReturnType<typeof createBulkRecoveryIssue>>()
+  setTestAppDependencies({
+    planning,
+    teamIssues: createTeamIssuesFake({
+      async createTeamIssue(_directoryId, teamId, input) {
+        const id = String(input.idempotencyResourceId)
+        const schedule = normalizeWorkItemSchedule(input.schedule)
+        if (schedule.mode !== 'date-range') throw new Error('Template Work Items carry a date range.')
+        const issue = {
+          ...createBulkRecoveryIssue(),
+          id,
+          teamId,
+          title: String(input.title),
+          assigneeUserId: 'demo@example.com',
+          assignedProjectId: String(input.assignedProjectId),
+          schedule,
+          dueDate: schedule.endDate,
+        }
+        createdIssues.set(id, issue)
+        return { issue }
+      },
+      async getTeamIssueDetail(_directoryId, _teamId, issueId) {
+        const issue = createdIssues.get(issueId)
+        if (!issue) throw Object.assign(new Error('Work Item not found.'), { status: 404, code: 'TeamIssueNotFound' })
+        return { issue, activity: [], comments: [] }
+      },
+      async getTeamIssues(_directoryId, teamId) {
+        return { teamId, issues: [...createdIssues.values()] }
+      },
+      async getTeamHierarchyEntries() {
+        return [...createdIssues.values()].map((issue) => ({ issue, hierarchyRank: 'm' }))
+      },
+    }),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelationGraph() {
+        return { relations: [], graphRevision: 0 }
+      },
+      async replaceParent(_workspaceId, _teamId, input) {
+        return {
+          previousParentWorkItemId: null,
+          parentWorkItemId: input.nextParent?.workItemId ?? null,
+          graphRevision: input.expectedGraphRevision + 1,
+        }
+      },
+    }),
+  })
+  return createdIssues
+}
+
+/**
+ * Seeds a Workspace roadmap that template Phases can be placed under.
+ *
+ * @param planning - Planning client to seed.
+ */
+async function seedProjectTemplatePlanningRoadmap(planning: InMemoryPlanningClient) {
+  const workspaceId = 'user#demo@example.com'
+  const base = {
+    ownerMemberKey: 'demo@example.com',
+    status: 'active' as const,
+    health: 'unknown' as const,
+    risk: 'none' as const,
+    progressMode: 'automatic' as const,
+    baseline: { startDate: '2026-12-01', endDate: '2027-03-31' },
+    forecast: { startDate: '2026-12-01', endDate: '2027-03-31' },
+  }
+  await planning.create(workspaceId, { ...base, id: 'portfolio-1', type: 'portfolio', title: 'Portfolio', expectedRevision: 0 }, { workItems: [] })
+  await planning.create(workspaceId, {
+    ...base,
+    id: 'roadmap-1',
+    type: 'roadmap',
+    title: 'Roadmap',
+    parentId: 'portfolio-1',
+    expectedRevision: 1,
+  }, { workItems: [] })
+}
+
+/** Project template with a WBS, two dependencies, a Phase with a Milestone, and a top-level Milestone. */
+function createProjectTemplateWithPlanning(): AutomationTemplate {
+  const now = '2026-07-16T00:00:00.000Z'
+  return {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'template-project-planning',
+    workspaceId: 'user#demo@example.com',
+    kind: 'project',
+    name: 'Planned Project',
+    enabled: true,
+    version: 2,
+    revision: 1,
+    payload: {
+      nameJa: '計画付きプロジェクト',
+      tone: 'blue',
+      workItems: [
+        {
+          title: '要件定義',
+          startOffsetWorkingDays: 0,
+          durationWorkingDays: 5,
+          children: [{ title: 'ヒアリング', startOffsetWorkingDays: 0, durationWorkingDays: 2 }],
+        },
+        { title: '設計', startOffsetWorkingDays: 5, durationWorkingDays: 3 },
+      ],
+      dependencies: [
+        { predecessor: '1', successor: '2', type: 'finish-to-start', lagDays: 0 },
+        { predecessor: '1.1', successor: '2', type: 'start-to-start', lagDays: 1 },
+      ],
+      phases: [{
+        title: '準備',
+        startOffsetWorkingDays: 0,
+        durationWorkingDays: 5,
+        milestones: [{ title: '要件確定', offsetWorkingDays: 4 }],
+      }],
+      milestones: [{ title: '設計完了', offsetWorkingDays: 7 }],
+    },
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+test('previews a Project template application with dates, counts, and validation errors without writing', async () => {
+  const template = createProjectTemplateWithPlanning()
+  const planning = new InMemoryPlanningClient()
+  await seedProjectTemplatePlanningRoadmap(planning)
+  configureFakeProjectClients(true, { teamProjects: [] })
+  const createdIssues = configureProjectTemplatePlanningFakes(planning)
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async getTemplate() {
+        return structuredClone(template)
+      },
+    }),
+  })
+  const preview = (target: Record<string, unknown>) => app.request(
+    `/api/automation/templates/${template.id}/application-previews`,
+    {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: { kind: 'project', teamId: 'core-team', ...target } }),
+    },
+  )
+
+  const valid = await preview({ startDate: '2026-12-05', planningParentId: 'roadmap-1' })
+  expect(valid.status).toBe(200)
+  expect(await valid.json()).toEqual({
+    kind: 'project',
+    teamId: 'core-team',
+    name: '計画付きプロジェクト',
+    templateVersion: 2,
+    startDate: '2026-12-05',
+    endDate: '2026-12-16',
+    workItems: [
+      { wbsNumber: '1', title: '要件定義', startDate: '2026-12-07', endDate: '2026-12-11' },
+      { wbsNumber: '1.1', title: 'ヒアリング', startDate: '2026-12-07', endDate: '2026-12-08' },
+      { wbsNumber: '2', title: '設計', startDate: '2026-12-14', endDate: '2026-12-16' },
+    ],
+    planningEntities: [
+      { type: 'phase', title: '準備', startDate: '2026-12-07', endDate: '2026-12-11' },
+      { type: 'milestone', title: '要件確定', phaseTitle: '準備', startDate: '2026-12-11', endDate: '2026-12-11' },
+      { type: 'milestone', title: '設計完了', startDate: '2026-12-16', endDate: '2026-12-16' },
+    ],
+    dependencyCount: 2,
+    errors: [],
+  })
+
+  const missingParent = await preview({ startDate: '2026-12-05' })
+  expect((await missingParent.json()).errors).toEqual([
+    expect.objectContaining({ code: 'AutomationProjectTemplatePlanningParentRequired' }),
+  ])
+  const wrongParent = await preview({ startDate: '2026-12-05', planningParentId: 'portfolio-1' })
+  expect((await wrongParent.json()).errors).toEqual([
+    expect.objectContaining({ code: 'AutomationProjectTemplatePlanningParentInvalid' }),
+  ])
+  const missingStart = await preview({ planningParentId: 'roadmap-1' })
+  expect((await missingStart.json()).errors).toEqual([
+    expect.objectContaining({ code: 'AutomationProjectTemplateStartDateRequired' }),
+  ])
+
+  // A lag that the WBS dates cannot meet is reported against the dependency.
+  template.payload = {
+    ...template.payload,
+    dependencies: [{ predecessor: '1', successor: '2', type: 'finish-to-start', lagDays: 5 }],
+  }
+  const conflicted = await preview({ startDate: '2026-12-05', planningParentId: 'roadmap-1' })
+  expect((await conflicted.json()).errors).toEqual([
+    expect.objectContaining({
+      code: 'AutomationProjectTemplateDependencyConflict',
+      dependencyNumber: 1,
+    }),
+  ])
+  expect(createdIssues.size).toBe(0)
+  expect((await planning.get('user#demo@example.com', { workItems: [] })).entities).toHaveLength(2)
+})
+
+test('applies a Project template with Phases, Milestones, and WBS dependencies, and a retry creates nothing twice', async () => {
+  const template = createProjectTemplateWithPlanning()
+  const now = '2026-07-16T00:00:00.000Z'
+  let application: AutomationTemplateApplication = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'application_project_planning',
+    workspaceId: template.workspaceId,
+    actorId: 'demo@example.com',
+    templateId: template.id,
+    templateVersion: template.version,
+    kind: 'project',
+    target: { kind: 'project', teamId: 'core-team', startDate: '2026-12-05', planningParentId: 'roadmap-1' },
+    status: 'pending',
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const planning = new InMemoryPlanningClient()
+  await seedProjectTemplatePlanningRoadmap(planning)
+  const teamProjects: Array<{ id: string; name: string; tone: 'blue' }> = []
+  configureFakeProjectClients(true, {
+    teamProjects,
+    // The applier manages the Project the application creates.
+    projectAccesses: [{ projectId: 'application_project_planning', role: 'manager', teamId: 'core-team' }],
+    async projectCreateHook(_input, completionTransactItems) {
+      expect(completionTransactItems).toHaveLength(0)
+      teamProjects.push({ id: application.id, name: '計画付きプロジェクト', tone: 'blue' })
+    },
+  })
+  const createdIssues = configureProjectTemplatePlanningFakes(planning)
+  let failNextDependency = true
+  const createWorkItemDependency = planning.createWorkItemDependency.bind(planning)
+  planning.createWorkItemDependency = async (...args) => {
+    if (failNextDependency) {
+      failNextDependency = false
+      throw new PlanningError(409, 'PlanningRevisionConflict', 'Planning changed. Reload and try again.')
+    }
+    return createWorkItemDependency(...args)
+  }
+  setTestAppDependencies({
+    ruleTemplates: createAutomationRuleTemplatePort({
+      async reserveTemplateApplication() {
+        return structuredClone(application)
+      },
+      async claimTemplateApplication(candidate, _claimNow, leaseExpiresAt) {
+        if (candidate.status !== 'pending' || candidate.revision !== application.revision) return undefined
+        application = { ...candidate, status: 'running', revision: candidate.revision + 1, runnerLeaseExpiresAt: leaseExpiresAt }
+        return structuredClone(application)
+      },
+      async getTemplateApplication() {
+        return structuredClone(application)
+      },
+      async getTemplateVersion() {
+        return structuredClone(template)
+      },
+      async saveTemplateApplication(candidate) {
+        application = structuredClone(candidate)
+      },
+    }),
+  })
+  const request = () => app.request(`/api/automation/templates/${template.id}/applications`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+      'Idempotency-Key': 'apply-project-planning',
+    },
+    body: JSON.stringify({ target: application.target }),
+  })
+
+  const conflicted = await request()
+  expect(await conflicted.json()).toMatchObject({ code: 'AutomationTemplatePlanningConflict' })
+  expect(conflicted.status).toBe(409)
+  expect(application.status).toBe('pending')
+
+  const response = await request()
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    status: 'succeeded',
+    result: { workItemCount: 3, planningEntityCount: 3, dependencyCount: 2 },
+  })
+  expect(createdIssues.size).toBe(3)
+  const snapshot = await planning.get('user#demo@example.com', { workItems: [] })
+  expect(snapshot.entities
+    .filter((entity) => entity.projectId === application.id)
+    .map((entity) => ({
+      id: entity.id,
+      type: entity.type,
+      title: entity.title,
+      parentId: entity.parentId,
+      teamId: entity.teamId,
+      baseline: entity.baseline,
+    }))).toEqual([
+    {
+      id: 'application_project_planning_plan_0',
+      type: 'phase',
+      title: '準備',
+      parentId: 'roadmap-1',
+      teamId: 'core-team',
+      baseline: { startDate: '2026-12-07', endDate: '2026-12-11' },
+    },
+    {
+      id: 'application_project_planning_plan_1',
+      type: 'milestone',
+      title: '要件確定',
+      parentId: 'application_project_planning_plan_0',
+      teamId: 'core-team',
+      baseline: { startDate: '2026-12-11', endDate: '2026-12-11' },
+    },
+    {
+      id: 'application_project_planning_plan_2',
+      type: 'milestone',
+      title: '設計完了',
+      parentId: 'roadmap-1',
+      teamId: 'core-team',
+      baseline: { startDate: '2026-12-16', endDate: '2026-12-16' },
+    },
+  ])
+  const withWorkItems = await planning.get('user#demo@example.com', {
+    workItems: [...createdIssues.values()].map((issue) => ({
+      id: issue.id,
+      revision: issue.revision,
+      teamId: issue.teamId,
+      title: issue.title,
+      projectId: application.id,
+      statusCategory: issue.statusCategory,
+      dueDate: issue.dueDate,
+      schedule: issue.schedule,
+    })),
+  })
+  expect(withWorkItems.workItemDependencies.map((dependency) => ({
+    id: dependency.id,
+    predecessor: dependency.predecessor.workItemId,
+    successor: dependency.successor.workItemId,
+    type: dependency.type,
+    lagDays: dependency.lagDays,
+  }))).toEqual([
+    {
+      id: 'application_project_planning_dep_0',
+      predecessor: 'application_project_planning_wbs_0',
+      successor: 'application_project_planning_wbs_2',
+      type: 'finish-to-start',
+      lagDays: 0,
+    },
+    {
+      id: 'application_project_planning_dep_1',
+      predecessor: 'application_project_planning_wbs_1',
+      successor: 'application_project_planning_wbs_2',
+      type: 'start-to-start',
+      lagDays: 1,
     },
   ])
 })

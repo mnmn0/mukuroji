@@ -4,6 +4,7 @@ import {
   type AutomationExecution,
   type AutomationInboundWebhookEndpoint,
   type AutomationInboundWebhookSecretResponse,
+  type AutomationProjectTemplateApplicationPreview,
   type AutomationRule,
   type AutomationTemplate,
   type AutomationTemplateApplication,
@@ -200,6 +201,65 @@ export const projectWbsAutomationTemplateFixture: Extract<
       { title: 'Design', startOffsetWorkingDays: 5, durationWorkingDays: 3 },
     ],
   },
+}
+
+/** Project template fixture with a WBS, a dependency, and Planning Phases and Milestones. */
+export const projectPlannedAutomationTemplateFixture: Extract<
+  AutomationTemplate,
+  { kind: 'project' }
+> = {
+  ...projectWbsAutomationTemplateFixture,
+  id: 'template-project-planned',
+  name: 'Planned project',
+  payload: {
+    ...projectWbsAutomationTemplateFixture.payload,
+    dependencies: [{ predecessor: '1', successor: '2', type: 'finish-to-start', lagDays: 0 }],
+    phases: [{
+      title: 'Preparation',
+      startOffsetWorkingDays: 0,
+      durationWorkingDays: 5,
+      milestones: [{ title: 'Scope fixed', offsetWorkingDays: 4 }],
+    }],
+    milestones: [{ title: 'Design done', offsetWorkingDays: 7 }],
+  },
+}
+
+/** Clean dry-run preview of {@link projectPlannedAutomationTemplateFixture}. */
+export const projectPlannedTemplatePreviewFixture: AutomationProjectTemplateApplicationPreview = {
+  kind: 'project',
+  teamId: 'core-team',
+  name: '標準プロジェクト',
+  templateVersion: 2,
+  startDate: '2026-12-07',
+  endDate: '2026-12-16',
+  workItems: [
+    { wbsNumber: '1', title: 'Requirements', startDate: '2026-12-07', endDate: '2026-12-11' },
+    { wbsNumber: '1.1', title: 'Interviews', startDate: '2026-12-07', endDate: '2026-12-08' },
+    { wbsNumber: '2', title: 'Design', startDate: '2026-12-14', endDate: '2026-12-16' },
+  ],
+  planningEntities: [
+    { type: 'phase', title: 'Preparation', startDate: '2026-12-07', endDate: '2026-12-11' },
+    { type: 'milestone', title: 'Scope fixed', phaseTitle: 'Preparation', startDate: '2026-12-11', endDate: '2026-12-11' },
+    { type: 'milestone', title: 'Design done', startDate: '2026-12-16', endDate: '2026-12-16' },
+  ],
+  dependencyCount: 1,
+  errors: [],
+}
+
+/** Dry-run preview of {@link projectPlannedAutomationTemplateFixture} that finds problems. */
+export const projectPlannedTemplatePreviewWithErrorsFixture: AutomationProjectTemplateApplicationPreview = {
+  ...projectPlannedTemplatePreviewFixture,
+  errors: [
+    {
+      code: 'AutomationProjectTemplatePlanningParentRequired',
+      message: 'Choose a Planning roadmap, initiative, or goal to hold the template Phases and Milestones.',
+    },
+    {
+      code: 'WorkItemCustomFieldRequired',
+      message: 'Custom field "Customer" is required.',
+      wbsNumber: '1.1',
+    },
+  ],
 }
 
 /** Status/transition matrix を含む Workflow template fixture です。 */

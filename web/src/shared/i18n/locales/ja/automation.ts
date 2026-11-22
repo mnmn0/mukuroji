@@ -173,6 +173,40 @@ export const automationMessages = {
   'automation.template.project.workItemsError.limit':
     '{line} 行目: テンプレートに書ける Work Item は 50 件までです。',
   'automation.template.project.workItemsError.depth': '{line} 行目: WBS は 4 階層までです。',
+  'automation.template.project.planning':
+    'Phase / Milestone',
+  'automation.template.project.planningPlaceholder':
+    '準備 | 0 | 5\n  要件確定 | 4\n設計完了 | 7',
+  'automation.template.project.planningHint':
+    'Phase は「タイトル | 開始 | 日数」、Milestone は「タイトル | 日付」で、どちらも Project 開始からの稼働日です。Phase の下に半角スペース 2 つ字下げした Milestone はその Phase に入ります。合わせて 30 件までです。',
+  'automation.template.project.planningError.format':
+    '{line} 行目: Phase は「タイトル | 開始 | 日数」、Milestone は「タイトル | 日付」の形で書いてください。',
+  'automation.template.project.planningError.indent':
+    '{line} 行目: 字下げできるのは Phase の下の Milestone だけで、半角スペース 2 つです。',
+  'automation.template.project.planningError.title':
+    '{line} 行目: タイトルを 256 文字以内で入力してください。',
+  'automation.template.project.planningError.days':
+    '{line} 行目: 開始と日付は 0 以上、日数は 1 以上で、どれも 3650 稼働日までです。',
+  'automation.template.project.planningError.limit':
+    '{line} 行目: Phase と Milestone は合わせて 30 件までです。',
+  'automation.template.project.dependencies':
+    'WBS 内の依存',
+  'automation.template.project.dependenciesPlaceholder':
+    '1 -> 2\n1.1 -> 2 SS +1',
+  'automation.template.project.dependenciesHint':
+    '1 行に 1 つ「先行の WBS 番号 -> 後続の WBS 番号」で書きます。種類（FS・SS・FF・SF、既定は FS）と暦日のずれ（+2、-1 など）を続けて書けます。最大 100 件です。',
+  'automation.template.project.dependenciesError.format':
+    '{line} 行目: 「1.1 -> 2 FS +2」の形で書いてください。ずれは ±365 日までです。',
+  'automation.template.project.dependenciesError.reference':
+    '{line} 行目: WBS にない番号です。',
+  'automation.template.project.dependenciesError.self':
+    '{line} 行目: 同じ Work Item どうしはつなげません。',
+  'automation.template.project.dependenciesError.hierarchy':
+    '{line} 行目: 親と子はつなげません。',
+  'automation.template.project.dependenciesError.duplicate':
+    '{line} 行目: 同じ 2 つの Work Item をつなぐ依存がすでにあります。',
+  'automation.template.project.dependenciesError.limit':
+    '{line} 行目: 依存は 100 件までです。',
   'automation.template.apply': '適用',
   'automation.template.application.title': 'テンプレートを適用',
   'automation.template.application.projectDescription':
@@ -202,6 +236,46 @@ export const automationMessages = {
   'automation.template.application.status.running': '実行中',
   'automation.template.application.status.succeeded': '成功',
   'automation.template.application.status.failed': '失敗',
+  'automation.template.application.planningParent':
+    'Phase / Milestone を置く Planning の親',
+  'automation.template.application.planningParentNone':
+    '選択してください',
+  'automation.template.application.planningParentHint':
+    'Phase は roadmap・initiative・goal の下に作ります。Project に属さず、ほかの Team に属さないものから選べます。',
+  'automation.template.application.planningParentUnavailable':
+    'Planning の親の候補を読み込めませんでした。',
+  'automation.template.application.preview':
+    'プレビュー',
+  'automation.template.application.previewing':
+    '確認中...',
+  'automation.template.application.previewRequired':
+    '適用する前にプレビューで作成内容と問題がないことを確認してください。',
+  'automation.template.application.previewError':
+    'プレビューを取得できませんでした。もう一度試してください。',
+  'automation.template.application.previewTitle':
+    '適用内容のプレビュー（まだ何も作成していません）',
+  'automation.template.application.previewSummary':
+    'Project「{name}」と、Work Item {workItems} 件、Phase / Milestone {planning} 件、依存 {dependencies} 件を作成します。',
+  'automation.template.application.previewPeriod':
+    '期間: {start} 〜 {end}',
+  'automation.template.application.previewErrors':
+    '次の問題を直すまで適用できません。',
+  'automation.template.application.previewErrorWbs':
+    'WBS {wbs}: {message}',
+  'automation.template.application.previewErrorDependency':
+    '依存 {number}: {message}',
+  'automation.template.application.previewWorkItems':
+    'Work Item',
+  'automation.template.application.previewPlanning':
+    'Phase / Milestone',
+  'automation.template.application.previewPhase':
+    'Phase',
+  'automation.template.application.previewMilestone':
+    'Milestone',
+  'automation.template.application.planningResult':
+    'Phase / Milestone を {count} 件作成しました。',
+  'automation.template.application.dependencyResult':
+    '依存を {count} 件作成しました。',
   'automation.recurring.createTitle': '新しい繰り返し作業',
   'automation.recurring.createDescription':
     'テンプレートと Team、ローカル時刻、再実行方針を指定します。作成直後は停止状態です。',

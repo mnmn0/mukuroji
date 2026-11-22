@@ -1,12 +1,14 @@
 import type {
   AutomationTemplateApplication,
+  PlanningSnapshot,
   UpdateAutomationTemplateInput,
 } from '@mukuroji/contracts'
-import { useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { createMutationRequestRunner, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import { AutomationManagementPanel } from './AutomationManagementPanel'
+import { getPlanningSnapshot } from '../../planning/api/snapshot'
+import { AutomationManagementPanel, type AutomationPlanningParentOption } from './AutomationManagementPanel'
 import { readAutomationManagementTab } from '../model/tabs'
 import {
   applyAutomationTemplate,
@@ -17,6 +19,7 @@ import {
   duplicateAutomationTemplate,
   getAutomationTemplateApplication,
   pauseAutomationInboundWebhookEndpoint,
+  previewAutomationTemplateApplication,
   resumeAutomationInboundWebhookEndpoint,
   revokeAutomationInboundWebhookEndpoint,
   retryAutomationExecution,
@@ -82,6 +85,10 @@ export function AutomationManagementPanelContainer({
   }
 
   const initialTab = readInitialTab()
+  const loadPlanningParents = useCallback(
+    async () => listAutomationPlanningParents(await getPlanningSnapshot(accessToken)),
+    [accessToken],
+  )
 
   return (
     <AutomationManagementPanel
@@ -213,6 +220,10 @@ export function AutomationManagementPanelContainer({
       onRefreshTemplateApplication={canManage
         ? (applicationId) => getAutomationTemplateApplication(accessToken, applicationId)
         : undefined}
+      onPreviewTemplateApplication={canManage
+        ? (template, input) => previewAutomationTemplateApplication(accessToken, template.id, input)
+        : undefined}
+      onLoadPlanningParents={canManage ? loadPlanningParents : undefined}
       onCreateRecurringWork={canManage ? (input) => runMutation(
         'recurring:create',
         input,
@@ -237,6 +248,28 @@ export function AutomationManagementPanelContainer({
       ) : undefined}
     />
   )
+}
+
+/**
+ * Lists the Planning entities a Project template's Phases and Milestones can be placed under:
+ * active roadmaps, initiatives, and goals outside any Project.
+ *
+ * @param snapshot - Planning snapshot the viewer can read.
+ * @returns Candidates sorted by title.
+ */
+function listAutomationPlanningParents(snapshot: PlanningSnapshot): AutomationPlanningParentOption[] {
+  const options: AutomationPlanningParentOption[] = []
+  for (const entity of snapshot.entities) {
+    if (entity.archivedAt !== undefined || entity.projectId !== undefined) continue
+    if (entity.type !== 'roadmap' && entity.type !== 'initiative' && entity.type !== 'goal') continue
+    options.push({
+      id: entity.id,
+      title: entity.title,
+      type: entity.type,
+      ...(entity.teamId === undefined ? {} : { teamId: entity.teamId }),
+    })
+  }
+  return options.sort((first, second) => first.title.localeCompare(second.title))
 }
 
 function readInitialTab() {

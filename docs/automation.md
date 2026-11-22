@@ -99,7 +99,7 @@ Delivery receipt は endpoint と `Idempotency-Key` に束縛し、endpoint guar
 
 ## Template と複製
 
-Template は Work Item、Project、Workflow の 3 種類を持つ。論理 template ID と immutable version を分離し、作成後の kind 変更は許可しない。複製は current version の payload を新しい論理 template として保存する。Server は kind ごとの top-level field と payload field を allowlist で厳格に検証する。Work Item は `title` と通常の create field、Project は localized name、tone、任意の WBS（`workItems`）、Workflow は status、transition、initial status の完全な definition を受け付ける。Template を無効化しても既存の recurring definition、固定済み application、実行履歴は削除しない。
+Template は Work Item、Project、Workflow の 3 種類を持つ。論理 template ID と immutable version を分離し、作成後の kind 変更は許可しない。複製は current version の payload を新しい論理 template として保存する。Server は kind ごとの top-level field と payload field を allowlist で厳格に検証する。Work Item は `title` と通常の create field、Project は localized name、tone、任意の WBS（`workItems`）、WBS 内の依存（`dependencies`）、Planning の Phase / Milestone（`phases`、`milestones`）、Workflow は status、transition、initial status の完全な definition を受け付ける。Template を無効化しても既存の recurring definition、固定済み application、実行履歴は削除しない。
 
 Rule/recurring execution は current template ではなく保存済み `templateId` / `templateVersion` から immutable payload を読む。後から template を編集・停止しても、既に固定済みの実行や retry の payload は変わらない。
 
@@ -111,15 +111,25 @@ Project 適用は application ID を Project ID として使い、Team、localiz
 
 Project template の `workItems` は Project 内に作る Work Item の木（最大 50 件、4 階層）で、各 item は `title`（改行を含めない）、Project 開始日からの `startOffsetWorkingDays`（0 は開始日以降の最初の稼働日）、`durationWorkingDays`（1 以上）、`children` を持つ。稼働日は適用時点の Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の祝日）で数え、各 Work Item はその calendar policy を持つ（[稼働カレンダーと日本の祝日](workspace-calendar-holidays.md)）。WBS を持つ template の適用は target に `startDate`（`YYYY-MM-DD`）を必須とし、無い場合は何も作らずに `AutomationProjectTemplateStartDateRequired` で失敗する。
 
+`dependencies`（最大 100 件）は WBS の Work Item 間の schedule dependency で、`predecessor` と `successor` に WBS 番号（outline の表示順に 1 から数えた `1`、`2.3` など）、`type`（`finish-to-start` など 4 種）、`lagDays`（暦日、±365 日まで）を持つ。保存時に、存在しない WBS 番号、自分自身・親子の間の依存、同じ 2 件をつなぐ重複、循環を拒否する。日付が依存を満たすか（後続の境界日が先行の境界日 + lag 以降、finish-to-start はさらに 1 日後）は開始日と稼働カレンダーで変わるので、preview と適用時に確かめる。
+
+`phases` は Planning の Phase（`title`、`startOffsetWorkingDays`、`durationWorkingDays`）で、それぞれ子の Milestone（`milestones`、`title` と `offsetWorkingDays`）を持てる。最上位の `milestones` は Phase の外の Milestone。Phase と Milestone は合わせて最大 30 件で、日付は WBS と同じく開始日からの稼働日で数え、Milestone は開始日と終了日が同じ日になる。Planning の階層規則で Phase は roadmap・initiative・goal の下にしか置けないため、Phase / Milestone を持つ template の適用は target に `planningParentId` を必須とする。親は active な roadmap・initiative・goal で、Project に属さず、別の Team に属さないものに限る。親の確認は Planning API で子 entity を作るときと同じ scope 権限（`member`）で行う。
+
+### 適用前の dry-run preview
+
+`POST /api/automation/templates/{templateId}/application-previews` は、適用 API と同じ body（Project target のみ）を受け取り、何も書き込まずに作成内容を返す（Workspace 管理者のみ）。応答の `workItems`（WBS 番号・開始日・終了日）、`planningEntities`（Phase / Milestone と日付）、`dependencyCount`、全体の `endDate` と、適用を止める問題の一覧 `errors`（`code`、`message`、該当する `wbsNumber` または `dependencyNumber`）を持つ。検査は適用時と同じで、開始日、Team の Work Item configuration による各 item の検証、依存の日付、Planning の親を確かめる。preview は template の現在の version で計算し、適用は予約時の version に固定される。Web の適用 form は、Project template では preview に問題がないことを確かめてからでないと適用できない。
+
 適用は次の順に進む。
 
-1. 全 item を Team の現在の Work Item configuration で検証する（既定 Type、必須 custom field など）。ここで失敗すれば Project も作らない。
+1. 全 item を Team の現在の Work Item configuration で検証し、依存の日付と Planning の親を確かめる。ここで失敗すれば Project も作らない。
 2. Project を作る。このときは application 成功 receipt を Project transaction に含めない。前回の試行で作った Project（ID が application ID のもの）があれば、名前や色が変わっていてもそのまま使う。
 3. 親から順に Work Item を作る。担当者は適用した管理者、優先度は中で、ID は `<application ID>_wbs_<展開順>` に固定する。その ID の Work Item が既にあれば、前回の試行の後で編集されていてもそのまま使う。
 4. 展開順に、子を親へ `parent` relation でつなぎ、兄弟の並び（hierarchy rank）を outline の順に保存する。連続して作った Work Item は sort order が同じになりうるため、作成順には頼らない。最上位の item は、それらの現在の rank のうち最小の位置から並べる。前回の試行の後で別の親へ移された item は動かさない。
-5. 最後に application receipt を成功（`result.workItemCount` 付き）で保存する。
+5. Phase と Milestone を Planning に作る。scope は新しい Project（Team と Project）、owner は適用した管理者、状態は planned、baseline と forecast は展開した日付で、ID は `<application ID>_plan_<作成順>` に固定する。新しい Project の scope での `member` 権限を Planning API と同じく確かめる。その ID の entity が既にあれば（archive 済みでも）そのまま残す。
+6. WBS の依存を Work Item schedule dependency として作る。ID は `<application ID>_dep_<template の順>` に固定し、両端の Work Item に Planning API と同じ `manager` 権限を確かめる。既にある ID は飛ばす。
+7. 最後に application receipt を成功（`result.workItemCount`、`planningEntityCount`、`dependencyCount` 付き）で保存する。
 
-途中の一時的な失敗と、子をつなぐ間に Team の relation graph が別の変更で進んだ場合（`AutomationTemplateWorkItemLinkConflict`、409。server 内では自動 retry しない）は receipt を pending に戻し、同じ `Idempotency-Key` の再送が既存 Project と既存 Work Item の再利用、宣言的な親と rank の設定で残りだけを進める。確定的な 4xx で失敗した場合は、それまでに作った Project と Work Item が残る（全体を 1 transaction にはしていない）。
+途中の一時的な失敗、子をつなぐ間に Team の relation graph が別の変更で進んだ場合（`AutomationTemplateWorkItemLinkConflict`、409。server 内では自動 retry しない）、Planning が別の変更で進んだ場合（`AutomationTemplatePlanningConflict`、409）は receipt を pending に戻し、同じ `Idempotency-Key` の再送が既存 Project と既存 Work Item の再利用、宣言的な親と rank の設定で残りだけを進める。確定的な 4xx で失敗した場合は、それまでに作った Project、Work Item、Phase / Milestone が残る（全体を 1 transaction にはしていない）。
 
 ## Recurring work
 

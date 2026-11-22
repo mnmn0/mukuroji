@@ -2,6 +2,9 @@ import type { Meta, StoryObj } from '@storybook/react-vite'
 import { AutomationTemplateApplicationEditor } from './AutomationManagementPanel'
 import {
   projectAutomationTemplateFixture,
+  projectPlannedAutomationTemplateFixture,
+  projectPlannedTemplatePreviewFixture,
+  projectPlannedTemplatePreviewWithErrorsFixture,
   projectTemplateApplicationFixture,
   projectWbsAutomationTemplateFixture,
   projectWbsTemplateApplicationFixture,
@@ -53,6 +56,28 @@ export const ProjectWithWbsSucceeded: Story = {
     template: projectWbsAutomationTemplateFixture,
     onApply: async () => projectWbsTemplateApplicationFixture,
     onRefresh: async () => projectWbsTemplateApplicationFixture,
+  },
+}
+
+/** Phase / Milestone と依存を持つ template の適用前 preview で、作成内容と日付を表示します。 */
+export const ProjectWithPlanningPreview: Story = {
+  args: {
+    initialApplication: undefined,
+    initialPreview: projectPlannedTemplatePreviewFixture,
+    template: projectPlannedAutomationTemplateFixture,
+    onLoadPlanningParents: async () => [{ id: 'roadmap-2027', title: 'Roadmap 2027', type: 'roadmap' }],
+    onPreview: async () => projectPlannedTemplatePreviewFixture,
+  },
+}
+
+/** Preview が検証エラーを返し、適用できない状態です。 */
+export const ProjectWithPlanningPreviewErrors: Story = {
+  args: {
+    initialApplication: undefined,
+    initialPreview: projectPlannedTemplatePreviewWithErrorsFixture,
+    template: projectPlannedAutomationTemplateFixture,
+    onLoadPlanningParents: async () => [{ id: 'roadmap-2027', title: 'Roadmap 2027', type: 'roadmap' }],
+    onPreview: async () => projectPlannedTemplatePreviewWithErrorsFixture,
   },
 }
 

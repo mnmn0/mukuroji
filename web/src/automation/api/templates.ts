@@ -1,6 +1,7 @@
 import {
   AUTOMATION_SCHEMA_VERSION,
   type ApplyAutomationTemplateInput,
+  type AutomationProjectTemplateApplicationPreview,
   type AutomationTemplate,
   type AutomationTemplateApplication,
   type AutomationTemplateKind,
@@ -122,6 +123,31 @@ export function applyAutomationTemplate(
     'POST',
     input,
     mutationContext,
+  )
+}
+
+/**
+ * Dry-runs a Project template application: returns what would be created, on which dates, and
+ * every problem that would stop it, without writing anything.
+ *
+ * @param accessToken - Access token used for the Authorization header.
+ * @param templateId - Project template to preview.
+ * @param input - Application target, as it would be sent to apply.
+ * @returns The preview.
+ */
+export function previewAutomationTemplateApplication(
+  accessToken: string,
+  templateId: string,
+  input: ApplyAutomationTemplateInput,
+) {
+  return requestJson<AutomationProjectTemplateApplicationPreview>(
+    `${automationApiBaseUrl}/automation/templates/${encodeURIComponent(templateId)}/application-previews`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+    },
   )
 }
 
