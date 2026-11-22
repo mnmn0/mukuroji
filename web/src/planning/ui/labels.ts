@@ -5,6 +5,7 @@ import {
 } from '../../shared/i18n/i18n'
 import type { PlanningLabels } from './PlanningScreen'
 import type { PlanningEntityEditorLabels } from './PlanningEntityEditor'
+import type { PlanningEntityActivityLabels } from './PlanningEntityActivityPanel'
 import { formatPlanningUpdateDate } from '../model/date'
 
 /**
@@ -164,6 +165,12 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       },
     },
     entityEditor: createPlanningEntityEditorLabels(t),
+    entityDetailTabs: {
+      tabs: t('planning.detail.tabs'),
+      details: t('planning.detail.details'),
+      activity: t('planning.detail.activity'),
+    },
+    entityActivity: createPlanningEntityActivityLabels(t, locale),
     portfolioTitle: t('planning.view.portfolio'),
     portfolioDescription: t('planning.description'),
     entity: t('planning.field.title'),
@@ -428,5 +435,136 @@ function createPlanningEntityEditorLabels(t: (key: MessageKey) => string): Plann
       automatic: t('planning.editor.progressMode.automatic'),
       manual: t('planning.editor.progressMode.manual'),
     },
+  }
+}
+
+/** Message keys naming the fields an activity row lists. */
+const planningActivityFieldKeys: Readonly<Record<string, MessageKey>> = {
+  title: 'planning.field.title',
+  description: 'planning.editor.description',
+  ownerMemberKey: 'planning.field.owner',
+  status: 'planning.field.status',
+  health: 'planning.field.health',
+  risk: 'planning.field.risk',
+  progressMode: 'planning.editor.progressMode',
+  manualProgress: 'planning.editor.manualProgress',
+  'baseline.startDate': 'planning.field.baselineStart',
+  'baseline.endDate': 'planning.field.baselineEnd',
+  'forecast.startDate': 'planning.field.forecastStart',
+  'forecast.endDate': 'planning.field.forecastEnd',
+  parentId: 'planning.field.parent',
+  teamId: 'planning.field.team',
+  projectId: 'planning.field.project',
+  'cadence.count': 'planning.editor.cadenceCount',
+  'cadence.unit': 'planning.editor.cadenceUnit',
+  capacity: 'planning.editor.capacity',
+  carryOverPolicy: 'planning.field.carryOver',
+  'automation.createNext': 'planning.cycle.automation.createNext',
+  'automation.rolloverAtEnd': 'planning.cycle.automation.rolloverAtEnd',
+  nextCycleId: 'planning.activity.field.nextCycle',
+  goalFramework: 'planning.field.goalFramework',
+}
+
+/** Message keys of the enumerated values an activity row may show, by field. */
+const planningActivityValueKeys: Readonly<Record<string, Readonly<Record<string, MessageKey>>>> = {
+  status: {
+    proposed: 'planning.status.proposed',
+    planned: 'planning.status.planned',
+    active: 'planning.status.active',
+    paused: 'planning.status.paused',
+    completed: 'planning.status.completed',
+    canceled: 'planning.status.canceled',
+  },
+  health: {
+    unknown: 'planning.health.unknown',
+    'on-track': 'planning.health.on-track',
+    'at-risk': 'planning.health.at-risk',
+    'off-track': 'planning.health.off-track',
+  },
+  risk: {
+    none: 'planning.risk.none',
+    low: 'planning.risk.low',
+    medium: 'planning.risk.medium',
+    high: 'planning.risk.high',
+    critical: 'planning.risk.critical',
+  },
+  progressMode: {
+    automatic: 'planning.editor.progressMode.automatic',
+    manual: 'planning.editor.progressMode.manual',
+  },
+  'cadence.unit': {
+    week: 'planning.cadence.week',
+    month: 'planning.cadence.month',
+  },
+  carryOverPolicy: {
+    'move-incomplete': 'planning.carryOver.move-incomplete',
+    'keep-incomplete': 'planning.carryOver.keep-incomplete',
+  },
+  goalFramework: {
+    goal: 'planning.goalFramework.goal',
+    objective: 'planning.goalFramework.objective',
+    'key-result': 'planning.goalFramework.key-result',
+  },
+}
+
+/** Longest value text an activity row shows before cutting it. */
+const planningActivityValueLength = 120
+
+/**
+ * Creates the localized labels of the Planning entity activity tab.
+ *
+ * @param t - Translator for the display locale.
+ * @param locale - Display locale, used for dates and numbers.
+ * @returns Labels and value formatters of the activity tab.
+ */
+function createPlanningEntityActivityLabels(
+  t: (key: MessageKey) => string,
+  locale: Locale,
+): PlanningEntityActivityLabels {
+  return {
+    title: t('planning.activity.title'),
+    loading: t('planning.activity.loading'),
+    error: t('planning.activity.error'),
+    empty: t('planning.activity.empty'),
+    loadMore: t('planning.activity.loadMore'),
+    retry: t('planning.action.retry'),
+    kinds: {
+      created: t('planning.activity.kind.created'),
+      duplicated: t('planning.activity.kind.duplicated'),
+      updated: t('planning.activity.kind.updated'),
+      moved: t('planning.activity.kind.moved'),
+      archived: t('planning.activity.kind.archived'),
+      restored: t('planning.activity.kind.restored'),
+      other: t('planning.activity.kind.other'),
+    },
+    system: t('planning.activity.system'),
+    occurredAt: (occurredAt) => formatPlanningUpdateDate(occurredAt, undefined, locale),
+    field: (field) => {
+      const key = planningActivityFieldKeys[field]
+      return key ? t(key) : field
+    },
+    value: (field, value) => {
+      if (typeof value === 'string') {
+        const key = planningActivityValueKeys[field]?.[value]
+        if (key) return t(key)
+        const line = value.replace(/\s+/g, ' ').trim()
+        return line.length > planningActivityValueLength
+          ? `${line.slice(0, planningActivityValueLength - 1)}…`
+          : line
+      }
+      if (typeof value === 'boolean') {
+        return t(value ? 'planning.activity.value.on' : 'planning.activity.value.off')
+      }
+      if (typeof value === 'number') {
+        const text = value.toLocaleString(locale)
+        return field === 'manualProgress' ? `${text}%` : text
+      }
+      const text = JSON.stringify(value) ?? ''
+      return text.length > planningActivityValueLength
+        ? `${text.slice(0, planningActivityValueLength - 1)}…`
+        : text
+    },
+    emptyValue: t('planning.activity.value.empty'),
+    redactedValue: t('planning.activity.value.redacted'),
   }
 }

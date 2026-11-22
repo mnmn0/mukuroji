@@ -5,6 +5,7 @@ import {
   type PlanningSnapshot,
   type PlanningUpdate,
 } from '@mukuroji/contracts'
+import type { PlanningEntityActivityEvent } from './api/entities'
 
 /**
  * Planning 画面の Story と test で共有する整合した snapshot です。
@@ -487,3 +488,45 @@ export const emptyPlanningSnapshotFixture = {
     affectedMilestoneIds: [],
   },
 } satisfies PlanningSnapshot
+
+/**
+ * `milestone-beta` の活動 tab の Story と test で共有する、新しい順の活動 event です。
+ */
+export const planningEntityActivityFixture: PlanningEntityActivityEvent[] = [
+  {
+    eventId: 'activity-moved',
+    eventType: 'planning-entity.moved',
+    action: 'moved',
+    occurredAt: '2026-08-06T09:30:00.000Z',
+    actor: { kind: 'user', displayName: 'lead@example.com' },
+    changes: [
+      { field: 'parentId', before: '[REDACTED]', after: 'initiative-onboarding', redacted: true },
+    ],
+    summary: 'Moved milestone: Beta ready',
+  },
+  {
+    eventId: 'activity-updated',
+    eventType: 'planning-entity.updated',
+    action: 'updated',
+    occurredAt: '2026-08-05T02:15:00.000Z',
+    actor: { kind: 'user', displayName: 'owner@example.com' },
+    changes: [
+      { field: 'progress', before: 40, after: 50 },
+      { field: 'forecast.endDate', before: '2026-08-14', after: '2026-08-21' },
+      { field: 'forecast.startDate', before: '2026-08-14', after: '2026-08-21' },
+      { field: 'risk', before: 'medium', after: 'high' },
+      { field: 'health', before: 'on-track', after: 'at-risk' },
+      { field: 'description', after: 'API の安定化を待って延期' },
+    ],
+    summary: 'Updated milestone: Beta ready',
+  },
+  {
+    eventId: 'activity-created',
+    eventType: 'planning-entity.created',
+    action: 'created',
+    occurredAt: '2026-08-01T00:00:00.000Z',
+    actor: { kind: 'user', displayName: 'lead@example.com' },
+    changes: [{ field: 'title', after: 'Beta ready' }],
+    summary: 'Created milestone: Beta ready',
+  },
+]
