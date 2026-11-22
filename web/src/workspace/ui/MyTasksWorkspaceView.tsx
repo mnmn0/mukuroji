@@ -34,6 +34,7 @@ import {
 } from '../../work-items/ui/WorkspaceWorkItemPrimitives'
 import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
 import { createTaskGanttDisplayBinding } from '../../tasks/model/taskGanttDisplay'
+import type { TaskCalendarPeriods } from '../../tasks/model/taskGanttTimeline'
 import { TaskCalendarView } from '../../tasks/ui/TaskCalendarView'
 import { MyTasksTaskTable } from './MyTasksTaskTable'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
@@ -112,6 +113,8 @@ export type MyTasksWorkspaceViewProps = {
   ganttOutline?: TaskGanttOutline
   /** Workspace working calendar whose days off the Gantt shades; nothing is shaded when omitted. */
   workingCalendar?: WorkItemScheduleCalendarPolicy
+  /** Workspace week start and fiscal year start that the Gantt and Calendar headings follow. */
+  calendarPeriods?: TaskCalendarPeriods
   /** Month the calendar shows, in `YYYY-MM` form; the view keeps its own month when omitted. */
   calendarMonth?: string
   /** Moves the calendar to another month, together with `calendarMonth`. */
@@ -160,6 +163,7 @@ export function MyTasksWorkspaceView({
   onViewModeChange,
   ganttOutline,
   workingCalendar,
+  calendarPeriods,
   calendarMonth: controlledCalendarMonth,
   onCalendarMonthChange,
   outlineNotice,
@@ -369,6 +373,7 @@ export function MyTasksWorkspaceView({
         {taskViewToolbar}
         {viewModeSwitch}
         <TaskCalendarView
+          calendarPeriods={calendarPeriods}
           configurationsByTeam={configurationsByTeam}
           month={calendarMonth}
           monthNote="shown-month"
@@ -423,6 +428,7 @@ export function MyTasksWorkspaceView({
           t={t}
           tasks={ganttTasks}
           workingCalendar={workingCalendar}
+          calendarPeriods={calendarPeriods}
           {...createTaskGanttDisplayBinding(presentation, onPresentationChange)}
         />
       </div>

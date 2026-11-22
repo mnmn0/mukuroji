@@ -1102,6 +1102,7 @@ export function MyTasksPage() {
           }}
           ganttOutline={myTasksGanttOutline}
           workingCalendar={workspaceCalendarPolicy}
+          calendarPeriods={workspaceCalendar.settings}
           calendarMonth={myTasksCalendarMonth}
           onCalendarMonthChange={setMyTasksCalendarMonth}
           outlineNotice={isMyTasksOutlineShown ? (

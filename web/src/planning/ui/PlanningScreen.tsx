@@ -18,7 +18,9 @@ import type {
   PlanningWorkItemLink,
   PlanningWorkItemSummary,
   WorkItemAffectedProject,
+  WorkspaceWeekStartDay,
 } from '@mukuroji/contracts'
+import { DEFAULT_WORKSPACE_CALENDAR_SETTINGS, toWorkspaceLocalDate } from '@mukuroji/contracts'
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
@@ -54,6 +56,7 @@ import {
   resolvePlanningCycleRolloverTargets,
 } from '../model/selectors'
 import { createPlanningUpdateTargetKey } from '../model/targetKey'
+import { proposeCycleDateRange } from '../model/cycles'
 import type { PlanningTargetBaselineDelays } from '../model/baselineDelayEvidence'
 import type { CrossProjectTimelineDirectoryTeam } from '../model/crossProjectTimeline'
 import {
@@ -302,6 +305,17 @@ export type PlanningScreenProps = {
   aiAssistance?: PlanningScreenAiAssistance
   /** 現在表示している Planning view です。 */
   activeView: PlanningViewId
+  /**
+   * New Cycles start on this Workspace week start day by default; Monday when omitted.
+   */
+  weekStartDay?: WorkspaceWeekStartDay
+  /**
+   * Shown in the Cycle settings of the create form when the Workspace week start could not be
+   * read, so the proposed dates are not taken for the configured calendar.
+   */
+  weekStartErrorMessage?: string
+  /** Reads the Workspace week start again after a failure. */
+  onRetryWeekStart?: () => void
   /** 画面で使う locale 済み文言です。 */
   labels: PlanningLabels
   /** API から取得した planning snapshot です。 */
@@ -546,6 +560,9 @@ export function PlanningScreen({
   updateBaselineDelays,
   updateHistoryErrorMessage,
   updateTargetDetails = [],
+  weekStartDay,
+  weekStartErrorMessage,
+  onRetryWeekStart,
 }: PlanningScreenProps) {
   const activeEntities = useMemo(
     () => snapshot?.entities.filter((entity) => !entity.archivedAt) ?? [],
@@ -564,6 +581,20 @@ export function PlanningScreen({
       {ownerOptionsErrorMessage}
       {onRetryOwnerOptions ? (
         <button className="workbench-button-secondary min-h-8 px-3" type="button" onClick={onRetryOwnerOptions}>
+          {labels.retry}
+        </button>
+      ) : null}
+    </p>
+  ) : undefined
+  const weekStartNotice = weekStartErrorMessage ? (
+    <p
+      className="col-span-full flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--workbench-warning)]"
+      data-testid="planning-cycle-week-start-error"
+      role="alert"
+    >
+      {weekStartErrorMessage}
+      {onRetryWeekStart ? (
+        <button className="workbench-button-secondary min-h-8 px-3" type="button" onClick={onRetryWeekStart}>
           {labels.retry}
         </button>
       ) : null}
@@ -876,6 +907,8 @@ export function PlanningScreen({
                 onCreate={onCreateEntity}
                 ownerNotice={ownerNotice}
                 ownerOptions={resolvedOwnerOptions}
+                weekStartDay={weekStartDay}
+                weekStartNotice={weekStartNotice}
               />
               {archive ? (
                 <PlanningArchivePanel
@@ -1633,6 +1666,8 @@ function CreateEntityPanel({
   onCreate,
   ownerNotice,
   ownerOptions,
+  weekStartDay = DEFAULT_WORKSPACE_CALENDAR_SETTINGS.weekStartDay,
+  weekStartNotice,
 }: {
   canCreateInScope?: PlanningScreenProps['canCreateInScope']
   canManageEntity?: PlanningScreenProps['canManageEntity']
@@ -1644,12 +1679,27 @@ function CreateEntityPanel({
   ownerNotice?: ReactNode
   /** Members suggested by the owner field; the owner can still be typed. */
   ownerOptions: readonly PlanningOwnerOption[]
+  /** Workspace week start day that a new weekly Cycle starts on. */
+  weekStartDay?: WorkspaceWeekStartDay
+  /** Notice in the Cycle settings when the Workspace week start could not be read. */
+  weekStartNotice?: ReactNode
 }) {
   const ownerListId = useId()
   const [entityType, setEntityType] = useState<PlanningEntityType>(() =>
     resolveInitialEntityType(entities),
   )
   const [goalFramework, setGoalFramework] = useState<PlanningGoalFramework>('goal')
+  const [cadenceUnit, setCadenceUnit] = useState<'week' | 'month'>('week')
+  const [cadenceCount, setCadenceCount] = useState('2')
+  const cycleDates = entityType === 'cycle'
+    ? proposeCycleDateRange(
+        toWorkspaceLocalDate(new Date()),
+        { unit: cadenceUnit, count: Math.trunc(Number(cadenceCount)) || 1 },
+        weekStartDay,
+      )
+    : undefined
+  // The proposed Cycle dates follow the cadence, so changing it puts in the dates it proposes.
+  const dateFieldKey = cycleDates ? `cycle:${cycleDates.startDate}:${cycleDates.endDate}` : 'entity'
   const canCreateInWorkspace = canCreateInScope?.({}) ?? true
   const manageableScopeTeams = filterPlanningScopeTeams(createScopeTeams, canCreateInScope)
   const [selectedTeamId, setSelectedTeamId] = useState(
@@ -1795,15 +1845,16 @@ function CreateEntityPanel({
             </label>
           </>
         )}
-        <PlanningInput label={labels.startDate} name="startDate" required type="date" />
+        <PlanningInput defaultValue={cycleDates?.startDate} key={`start:${dateFieldKey}`} label={labels.startDate} name="startDate" required type="date" />
         {entityType === 'milestone' ? null : (
-          <PlanningInput label={labels.endDate} name="endDate" required type="date" />
+          <PlanningInput defaultValue={cycleDates?.endDate} key={`end:${dateFieldKey}`} label={labels.endDate} name="endDate" required type="date" />
         )}
       </div>
       {entityType === 'cycle' ? (
         <div className="workbench-panel-muted grid grid-cols-4 gap-3 p-4 max-[800px]:grid-cols-2 max-[520px]:grid-cols-1">
-          <PlanningInput label={labels.entityEditor.cadenceCount} min={1} name="cadenceCount" required type="number" defaultValue="2" />
-          <label className="grid gap-2 text-sm font-semibold">{labels.entityEditor.cadenceUnit}<select className="workbench-input h-10 px-3" name="cadenceUnit"><option value="week">{labels.cadenceWeek}</option><option value="month">{labels.cadenceMonth}</option></select></label>
+          {weekStartNotice}
+          <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">{labels.entityEditor.cadenceCount}<input className="workbench-input h-10 px-3" min={1} name="cadenceCount" required step={1} type="number" value={cadenceCount} onChange={(event) => setCadenceCount(event.target.value)} /></label>
+          <label className="grid gap-2 text-sm font-semibold">{labels.entityEditor.cadenceUnit}<select className="workbench-input h-10 px-3" name="cadenceUnit" value={cadenceUnit} onChange={(event) => setCadenceUnit(event.target.value === 'month' ? 'month' : 'week')}><option value="week">{labels.cadenceWeek}</option><option value="month">{labels.cadenceMonth}</option></select></label>
           <PlanningInput label={labels.entityEditor.capacity} min={1} name="capacity" required type="number" defaultValue={String(DEFAULT_CYCLE_CAPACITY)} />
           <label className="grid gap-2 text-sm font-semibold">{labels.entityEditor.carryOverPolicy}<select className="workbench-input h-10 px-3" name="carryOverPolicy"><option value="move-incomplete">{labels.carryOverMove}</option><option value="keep-incomplete">{labels.carryOverKeep}</option></select></label>
         </div>
