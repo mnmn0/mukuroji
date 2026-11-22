@@ -211,6 +211,31 @@ describe('milestone-trend metric', () => {
     )
   })
 
+  test('leaves both dates unknown for a Milestone created after the period end', () => {
+    const query = createQuery('table')
+    const snapshot = createAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      authorizedProjectIds: new Set(),
+      milestones: [{
+        id: 'milestone-c',
+        title: 'Later',
+        forecastEndDate: '2026-06-01',
+        baselineEndDate: '2026-06-01',
+        createdAt: '2026-03-10T00:00:00.000Z',
+        updatedAt: '2026-03-10T00:00:00.000Z',
+        history: [],
+      }],
+      query: { ...query, asOf: '2026-03-12T00:00:00.000Z' },
+    })
+
+    expect(snapshot.widgets[0]?.rows[0]?.values).toMatchObject({
+      periodStartForecastEndDate: null,
+      forecastEndDate: null,
+      shiftDays: null,
+    })
+  })
+
   test('leaves Milestones out of runs that cannot read them and keeps their hash', () => {
     const query = createQuery('metric')
     const snapshot = createAnalyticsSnapshot({

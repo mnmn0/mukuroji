@@ -359,9 +359,11 @@ function dateAt(entry: PreparedMilestone, at: number) {
  * @param entry - Prepared Milestone.
  * @param from - Range start epoch milliseconds.
  * @param to - Range end epoch milliseconds.
- * @returns Days since 1970-01-01, or `undefined` when no date is visible in the range.
+ * @returns Days since 1970-01-01, or `undefined` when the range is empty or no date is visible.
  */
 function firstVisibleDate(entry: PreparedMilestone, from: number, to: number) {
+  // A Milestone created after the period end has no date anywhere in the period.
+  if (from > to) return undefined
   const atStart = dateAt(entry, from)
   if (atStart !== undefined) return atStart
   for (const change of entry.history) {
