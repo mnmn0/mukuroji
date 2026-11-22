@@ -112,6 +112,7 @@ test('reads the Workspace calendar as the Team default until the Team saves its 
     scope: { kind: 'team', teamId: 'core-team' },
     changeAdjustment: 'keep-duration',
     resolvedPolicy: sharedPolicy,
+    inheritedPolicy: sharedPolicy,
     canManage: true,
   })
 })

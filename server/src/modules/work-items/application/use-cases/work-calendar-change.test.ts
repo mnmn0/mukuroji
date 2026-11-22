@@ -96,3 +96,19 @@ test('stops the change when the member authorization changed', async () => {
   await expect(applying).rejects.toMatchObject({ code: 'WorkItemAuthorizationChanged' })
   expect(batches).toBe(1)
 })
+
+test('splits a transaction that exceeds the DynamoDB item limit', async () => {
+  const written: number[] = []
+  const applied = await applyWorkCalendarChange(rules, {
+    readWorkItems: async () => workItems(24),
+    readCalendarVersion: async () => 'v1',
+    async writeSchedules(updates) {
+      if (updates.length > 12) {
+        throw new ProjectDataError(413, 'WorkItemScheduleCascadeLimitExceeded', 'The schedule cascade exceeds the limit.')
+      }
+      written.push(updates.length)
+    },
+  })
+  expect(written).toEqual([12, 12])
+  expect(applied).toMatchObject({ updatedCount: 24, conflictCount: 0 })
+})

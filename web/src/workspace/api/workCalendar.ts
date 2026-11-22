@@ -149,12 +149,14 @@ export function readWorkCalendarResponse(value: unknown): WorkCalendarResponse |
   const calendar = value.calendar === undefined ? undefined : readWorkCalendar(value.calendar)
   const teamCalendar = value.teamCalendar === undefined ? undefined : readWorkCalendar(value.teamCalendar)
   const resolvedPolicy = readPolicy(value.resolvedPolicy)
+  const inheritedPolicy = readPolicy(value.inheritedPolicy)
   if (
     !scope ||
     (value.calendar !== undefined && !calendar) ||
     (value.teamCalendar !== undefined && !teamCalendar) ||
     !isWorkCalendarAdjustment(value.changeAdjustment) ||
     !resolvedPolicy ||
+    !inheritedPolicy ||
     typeof value.canManage !== 'boolean'
   ) {
     return undefined
@@ -165,6 +167,7 @@ export function readWorkCalendarResponse(value: unknown): WorkCalendarResponse |
     ...(teamCalendar ? { teamCalendar } : {}),
     changeAdjustment: value.changeAdjustment,
     resolvedPolicy,
+    inheritedPolicy,
     canManage: value.canManage,
   }
 }

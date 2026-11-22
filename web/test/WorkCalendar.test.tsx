@@ -37,6 +37,12 @@ const teamResponse: WorkCalendarResponse = {
     timeZone: 'Asia/Tokyo',
     calendarSource: 'shared',
   },
+  inheritedPolicy: {
+    workingWeekdays: ['saturday'],
+    holidays: [],
+    timeZone: 'Asia/Tokyo',
+    calendarSource: 'shared',
+  },
   canManage: true,
 }
 
@@ -116,6 +122,9 @@ describe('Team and Project calendars', () => {
     const markup = renderToStaticMarkup(<WorkCalendarPanel {...props} />)
     expect(markup).toContain('Design review')
     expect(markup).toContain('2026-12-09')
+    // Inherited weekdays show the parent calendar, not the scope's own override.
+    expect(markup).toMatch(/data-testid="work-calendar-weekday-saturday"[^>]*checked=""/)
+    expect(markup).not.toMatch(/data-testid="work-calendar-weekday-monday"[^>]*checked=""/)
 
     const readOnly = renderToStaticMarkup(
       <WorkCalendarPanel {...props} calendar={{ ...teamResponse, canManage: false }} impact={undefined} />,

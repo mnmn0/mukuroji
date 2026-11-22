@@ -159,7 +159,7 @@ export function WorkCalendarPanel(props: WorkCalendarPanelProps) {
             <div className="flex flex-wrap gap-x-4 gap-y-2">
               {WORKSPACE_CALENDAR_WEEKDAYS.map((weekday) => {
                 const checked = draft.inheritWorkingWeekdays
-                  ? calendar.resolvedPolicy.workingWeekdays.includes(weekday)
+                  ? calendar.inheritedPolicy.workingWeekdays.includes(weekday)
                   : draft.workingWeekdays.includes(weekday)
                 return (
                   <label className="inline-flex items-center gap-1.5 text-sm text-[var(--workbench-text)]" key={weekday}>

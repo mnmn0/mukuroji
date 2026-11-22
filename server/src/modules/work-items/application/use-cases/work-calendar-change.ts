@@ -219,7 +219,7 @@ export async function applyWorkCalendarChange(
   const version = plannedVersion ?? await ports.readCalendarVersion()
   /** Reports whether a newer calendar change has started since this one saved. */
   const superseded = async () => await ports.readCalendarVersion() !== version
-  let batch = 0
+  const batches: BatchCounter = { next: 0 }
   let updatedCount = 0
   let conflictCount = 0
   const conflicted = new Set<string>()
@@ -230,8 +230,9 @@ export async function applyWorkCalendarChange(
       conflictCount += plan.updates.length - index
       return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount }
     }
-    if (await writeOrConflict(ports, chunk, batch++)) updatedCount += chunk.length
-    else for (const update of chunk) conflicted.add(workItemKey(update.teamId, update.workItemId))
+    const outcome = await writeWithinTransactionLimit(ports, chunk, batches)
+    updatedCount += outcome.writtenCount
+    for (const update of outcome.conflicted) conflicted.add(workItemKey(update.teamId, update.workItemId))
   }
   if (conflicted.size > 0) {
     if (await superseded()) {
@@ -244,12 +245,64 @@ export async function applyWorkCalendarChange(
       })
       // Work Items that no longer need a rewrite were settled by the concurrent change.
       for (const update of retry.updates) {
-        if (await writeOrConflict(ports, [update], batch++)) updatedCount += 1
+        if (await writeOrConflict(ports, [update], batches.next++)) updatedCount += 1
         else conflictCount += 1
       }
     }
   }
   return { ...(calendar ? { calendar } : {}), impact: plan.impact, updatedCount, conflictCount }
+}
+
+/** Numbers the transactions of one change so each gets its own audit identities. */
+type BatchCounter = {
+  /** Number of the next transaction. */
+  next: number
+}
+
+/** Outcome of writing one planned chunk. */
+type ChunkOutcome = {
+  /** How many rewrites were written. */
+  writtenCount: number
+  /** Rewrites whose transaction conflicted with another update. */
+  conflicted: WorkCalendarScheduleUpdate[]
+}
+
+/**
+ * Writes a chunk, splitting it when its transaction exceeds the DynamoDB item limit.
+ *
+ * A chunk spanning many Projects adds a baseline fence per Project, so the item count
+ * alone does not bound the transaction size.
+ *
+ * @param ports - Work Item writes.
+ * @param updates - Rewrites of the chunk.
+ * @param batches - Transaction numbering of the change.
+ * @returns The written count and the conflicted rewrites.
+ */
+async function writeWithinTransactionLimit(
+  ports: WorkCalendarChangePorts,
+  updates: readonly WorkCalendarScheduleUpdate[],
+  batches: BatchCounter,
+): Promise<ChunkOutcome> {
+  try {
+    return await writeOrConflict(ports, updates, batches.next++)
+      ? { writtenCount: updates.length, conflicted: [] }
+      : { writtenCount: 0, conflicted: [...updates] }
+  } catch (error) {
+    if (
+      !(error instanceof ProjectDataError) ||
+      error.code !== 'WorkItemScheduleCascadeLimitExceeded' ||
+      updates.length < 2
+    ) {
+      throw error
+    }
+    const middle = Math.ceil(updates.length / 2)
+    const first = await writeWithinTransactionLimit(ports, updates.slice(0, middle), batches)
+    const second = await writeWithinTransactionLimit(ports, updates.slice(middle), batches)
+    return {
+      writtenCount: first.writtenCount + second.writtenCount,
+      conflicted: [...first.conflicted, ...second.conflicted],
+    }
+  }
 }
 
 /**

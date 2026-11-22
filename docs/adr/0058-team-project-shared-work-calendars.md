@@ -57,7 +57,10 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
   書き換えるのは新しいカレンダーと規則が違う Work Item だけで、印を付けるためだけには書き換えない
   （既存の Work Item が多い Team で、最初の変更が件数の上限に当たらないようにする）。
 - 書き換えは既存の schedule cascade の書き込み（24 件ずつの transaction、Work Item の revision による fence、
-  audit の `schedule-cascade-updated`）を使う。1回の変更で書き換えるのは 480 件まで、超えると 413。
+  audit の `schedule-cascade-updated`）を使う。transaction ごとに audit の idempotency key を分け、correlation ID は変更全体で共有する。
+  Project ごとの baseline fence で DynamoDB の transaction 上限を超えた transaction は半分に分けて書く。
+  書き込みのたびに変更者の認可（Workspace member の version など）を fence し、変わっていたら変更を止める。
+  1回の変更で書き換えるのは 480 件まで、超えると 413。
   他の更新と衝突した transaction は、読み直した Work Item で同じ変更前・変更後のカレンダーから1件ずつ計画し直して再試行する
   （取り込み中の旧来の Work Item も対象から外れない）。それでも衝突した Work Item は数だけ返す。
 - Project のカレンダーの変更が書き換えるのは、その Project に割り当てられた Work Item だけ（Project manager が他の Project の日程を変えない）。

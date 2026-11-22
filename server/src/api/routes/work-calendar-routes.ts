@@ -92,6 +92,11 @@ export function registerWorkCalendarRoutes(routeApp: Hono): void {
           calendars.team,
           scope.kind === 'project' ? calendars.projects.get(scope.projectId) : undefined,
         ),
+        inheritedPolicy: resolveWorkCalendarPolicyFrom(
+          inputs,
+          scope.kind === 'project' ? calendars.team : undefined,
+          undefined,
+        ),
         canManage: await canManageCalendar(principal, context, scope),
       }
       return c.json(response)
@@ -313,6 +318,21 @@ function createWorkCalendarChangePorts(
   teamIds: readonly string[],
   body: unknown,
 ): WorkCalendarChangePorts {
+  const operation = createApiMutationContext(c, principal, body)
+  // Leaves room for the batch suffix within the 256-character idempotency key limit.
+  const operationKey = (c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()).slice(0, 200)
+  /**
+   * Gives each transaction its own audit identities while keeping the change's correlation ID.
+   *
+   * @param batch - Transaction number within the change.
+   * @returns The audit context of the transaction.
+   */
+  function createBatchMutationContext(batch: number) {
+    return {
+      ...createApiMutationContext(c, principal, { body, batch }, `${operationKey}#work-calendar-batch-${batch}`),
+      correlationId: operation.correlationId,
+    }
+  }
   return {
     async readWorkItems() {
       const teams = await Promise.all(teamIds.map((teamId) => readTeamWorkItems(principal.directoryId, teamId)))
@@ -344,7 +364,7 @@ function createWorkCalendarChangePorts(
         updates,
         [],
         principal.userKey,
-        createApiMutationContext(c, principal, { body, batch }),
+        createBatchMutationContext(batch),
         undefined,
         await createPlanningFencedWorkItemAuthorizationSnapshot(principal),
       )

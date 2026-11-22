@@ -104,6 +104,8 @@ export type WorkCalendarResponse = {
   changeAdjustment: WorkCalendarAdjustment
   /** Calendar new Work Items in this scope take, with every inherited rule applied. */
   resolvedPolicy: WorkItemScheduleCalendarPolicy
+  /** Calendar the scope inherits from its parent, without the scope's own overrides. */
+  inheritedPolicy: WorkItemScheduleCalendarPolicy
   /** Whether the current member may change this calendar. */
   canManage: boolean
 }
