@@ -94,7 +94,7 @@ Comment notification は `commentId` と `rootCommentId` を追加します。We
 - category channels（`categoryChannels`）: 通知の種類ごとに切ったチャネル（下の [種類ごとの配信先とミュート](#種類ごとの配信先とミュート)）。保存するのは `false` だけです
 - mutes（`mutes`）: ミュートした Project（`projectKeys`、Project ID は Team の中でだけ一意なので `<teamId>#<projectId>` で持つ）・Team（`teamIds`）を各 100 件までと、ミュート中も届ける mention・承認の切り替え（既定はどちらも届ける）
 
-`categoryChannels` と `mutes` も `reminderDays` と同じく、PUT で省略すると読み込んだ version の保存値を残します。保存済みの値が壊れている row は、既定値で読み替えずにエラーにします（読み替えると、ミュートした通知が届いてしまうため）。
+`categoryChannels` と `mutes` も `reminderDays` と同じく、PUT で省略すると読み込んだ version の保存値を残します。保存済みの値が壊れている row は、既定値で読み替えずにエラーにします。`categoryChannels` か `mutes` を持つ row は、ほかの項目が壊れている場合も同じです（読み替えると、ミュートした通知が届いてしまうため）。
 
 in-app を無効にした状態で投影された notification は Inbox unread に入りません。email/push は delivery plan と配信予定時刻を notification に記録します。Email は送信元を設定した環境で [Email 配信](#email-配信) がこの予定を使います。push transport（VAPID 署名と payload 暗号化による配信 worker）は後続で接続します。
 

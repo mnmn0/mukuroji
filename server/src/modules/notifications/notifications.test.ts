@@ -883,6 +883,9 @@ describe('notification store', () => {
     expect(stored).not.toHaveProperty('mutes')
     stored = { ...stored, mutes: { projectKeys: 'dev#noisy' } }
     await expect(recording.client.getPreferences(recipient)).rejects.toThrow('Invalid stored notification preferences.')
+    // Valid mutes on a row whose other fields are corrupt are not replaced by defaults either.
+    stored = { ...stored, channels: 'corrupt', mutes: { projectKeys: ['dev#noisy'], teamIds: [], keepMentions: true, keepApprovals: true } }
+    await expect(recording.client.getPreferences(recipient)).rejects.toThrow('Invalid stored notification preferences.')
   })
   test('keeps the Email opt-in boundary, using the last save of preferences stored before Email transport', async () => {
     let stored: Record<string, unknown> | undefined = {

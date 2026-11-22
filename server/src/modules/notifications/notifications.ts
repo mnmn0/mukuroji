@@ -900,7 +900,8 @@ export function createNotificationRecipientKey(workspaceId: string, memberKey: s
  * @param value - Stored row; an absent row uses the default preferences.
  * @param strict - Rejects corrupt existing rows so external delivery can retry and alert.
  * @returns Validated notification preferences.
- * @throws Error for a corrupt row in strict mode, or for invalid stored reminder days.
+ * @throws Error for a corrupt row in strict mode, for invalid stored reminder days, or for a
+ *   corrupt row that holds routing settings.
  */
 export function parseStoredNotificationPreferences(
   value: Record<string, unknown> | undefined,
@@ -952,7 +953,10 @@ export function parseStoredNotificationPreferences(
       ...(readTimestamp(value.updatedAt) ? { updatedAt: readTimestamp(value.updatedAt) } : {}),
     }
   } catch {
-    if (strict) throw new Error('Invalid stored notification preferences.')
+    // A row that holds routing settings never falls back to defaults, which would drop its mutes.
+    if (strict || value.categoryChannels !== undefined || value.mutes !== undefined) {
+      throw new Error('Invalid stored notification preferences.')
+    }
     return cloneDefaultPreferences()
   }
 }
