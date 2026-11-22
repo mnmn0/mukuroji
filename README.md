@@ -58,6 +58,29 @@ http://localhost:5173 を開き、初期 owner の `demo@example.com` / `Passwor
 どれか1つが終了したときも、残りを止めて同じ終了コードで終わります。Floci は次回の起動を速くするため
 動かしたままにするので、止めるときは `bun run dev:down` を使います。
 
+#### デモデータを入れる
+
+`bun run dev` を動かしたまま、別の端末で次を実行すると、画面を試すためのデモデータが入ります。
+
+```sh
+bun run demo-data:seed
+```
+
+Floci の ready hook が作る Workspace・チーム・プロジェクト・Work Item に加えて、次を追加します。
+
+- 「開発チーム」と、その下のプロジェクト「WBS 基盤」「モバイルアプリ」
+- 「WBS 基盤」の WBS（要件定義・設計・実装・テストの親子と、リリース判定のマイルストーン）。
+  日付は初回実行日の週を基準に、過去の作業は完了、今週は進行中、先の作業は未着手で入ります
+- 既存の「プロダクトロードマップ」「ブランド刷新」の Work Item
+- Planning のポートフォリオ・ロードマップ・イニシアチブ・目標と主要な成果・マイルストーン（β と GA）、
+  2週間の Cycle 3つ（完了・進行中・予定）、Work Item との紐付けと依存関係
+
+投入は server の API を `demo@example.com` で呼ぶので、画面から作ったときと同じ検証・監査・検索
+projection が通ります。何度実行しても、チームとプロジェクトは名前、Work Item はプロジェクト内の
+タイトル、Planning は固定 ID で既存を見つけ、足りない分だけを作ります。手で変えたデータは
+上書きも削除もしません。接続先は `MUKUROJI_DEMO_API_URL`（既定 `http://localhost:3000`）で変えられますが、
+`localhost`・`127.0.0.1`・`[::1]` の http 以外には接続しません。
+
 ### `.env` の secret
 
 `.env` には次の2つの secret が必要です。`bun run local:setup` または `bun run dev` が生成します。
