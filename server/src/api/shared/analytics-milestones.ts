@@ -303,21 +303,26 @@ async function readMilestoneAuditHistories(
           ) {
             throw createMilestoneHistoryLimitError()
           }
+          // Reserve the page's events before the read, so parallel reads never pass the limit.
+          const reserved = Math.min(
+            ANALYTICS_MILESTONE_AUDIT_PAGE_SIZE,
+            ANALYTICS_MILESTONE_AUDIT_EVENT_LIMIT - budget.events,
+          )
+          if (reserved <= 0) throw createMilestoneHistoryLimitError()
           budget.pageQueries += 1
+          budget.events += reserved
           pageCount += 1
           const page = await workspaceDependencies.auditEvents.query({
             workspaceId,
             entityType: PLANNING_ENTITY_AUDIT_ENTITY_TYPE,
             entityId,
             to: historyReadAt,
-            limit: ANALYTICS_MILESTONE_AUDIT_PAGE_SIZE,
+            limit: reserved,
             cursor,
             direction: 'ascending',
           })
-          budget.events += page.events.length
-          if (budget.events > ANALYTICS_MILESTONE_AUDIT_EVENT_LIMIT) {
-            throw createMilestoneHistoryLimitError()
-          }
+          if (page.events.length > reserved) throw createMilestoneHistoryLimitError()
+          budget.events -= reserved - page.events.length
           for (const event of page.events) {
             const change = toMilestoneChange(event, entityId)
             if (change) changes.push(change)
