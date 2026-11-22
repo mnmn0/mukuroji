@@ -126,7 +126,7 @@ Project template の `workItems` は Project 内に作る Work Item の木（最
 3. 親から順に Work Item を作る。担当者は適用した管理者、優先度は中で、ID は `<application ID>_wbs_<展開順>` に固定する。その ID の Work Item が既にあれば、前回の試行の後で編集されていてもそのまま使う。
 4. 展開順に、子を親へ `parent` relation でつなぎ、兄弟の並び（hierarchy rank）を outline の順に保存する。連続して作った Work Item は sort order が同じになりうるため、作成順には頼らない。最上位の item は、それらの現在の rank のうち最小の位置から並べる。前回の試行の後で別の親へ移された item は動かさない。
 5. Phase と Milestone を Planning に作る。scope は新しい Project（Team と Project）、owner は適用した管理者、状態は planned、baseline と forecast は展開した日付で、ID は `<application ID>_plan_<作成順>` に固定する。新しい Project の scope での `member` 権限を Planning API と同じく、作ったばかりの Project が見えるよう directory を強い整合性で読んで確かめる。その ID の entity が既にあれば（archive 済みでも）そのまま残し、archive 済みの Phase の下の Milestone は作らない。
-6. WBS の依存を Work Item schedule dependency として作る。ID は `<application ID>_dep_<template の順>` に固定し、両端の Work Item は Team 全体から読み（前の試行の後に別の Project へ移されていてもよい）、今の所属で Planning API と同じ `manager` 権限を確かめる。書き込みは Planning API と同じく、確かめた時点から適用者の権限が変わっていないことを条件にする。既にある ID は飛ばす。
+6. WBS の依存を Work Item schedule dependency として作る。ID は `<application ID>_dep_<template の順>` に固定し、両端の Work Item だけを ID で読み（Team の大きさに左右されず、前の試行の後に別の Project へ移されていてもよい）、今の所属で Planning API と同じ `manager` 権限を確かめる。書き込みは Planning API と同じく、確かめた時点から適用者の権限が変わっていないことを条件にする。既にある ID は飛ばす。
 7. 最後に application receipt を成功（`result.workItemCount`、`planningEntityCount`、`dependencyCount` 付き）で保存する。
 
 途中の一時的な失敗、子をつなぐ間に Team の relation graph が別の変更で進んだ場合（`AutomationTemplateWorkItemLinkConflict`、409。server 内では自動 retry しない）、Planning が別の変更で進んだ場合（`AutomationTemplatePlanningConflict`、409）は receipt を pending に戻し、同じ `Idempotency-Key` の再送が既存 Project と既存 Work Item の再利用、宣言的な親と rank の設定で残りだけを進める。確定的な 4xx で失敗した場合は、それまでに作った Project、Work Item、Phase / Milestone が残る（全体を 1 transaction にはしていない）。

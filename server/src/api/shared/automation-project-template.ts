@@ -12,6 +12,7 @@ import {
   type AutomationTemplateApplicationTarget,
   type DateRangeWorkItemSchedule,
   type PlanningDateRange,
+  type PlanningWorkItemSummary,
   type WorkItemScheduleCalendarPolicy,
 } from '@mukuroji/contracts'
 import type { Context } from 'hono'
@@ -28,7 +29,11 @@ import {
   WorkItemConfigurationError,
 } from '../../modules/work-items/work-item-configuration'
 import { AutomationError } from '../../modules/automation'
-import { PlanningError, type PlanningEntityCreation } from '../../modules/planning'
+import {
+  PlanningError,
+  type PlanningEntityCreation,
+  type PlanningWorkItemState,
+} from '../../modules/planning'
 import { WorkspaceAccessError } from '../../modules/workspace-access/workspace-access'
 import { workItemDependencies, workspaceDependencies } from './app-dependencies'
 import { projectWorkItemSearchDocumentBestEffort } from './document-access'
@@ -792,7 +797,12 @@ export async function createProjectTemplatePlanningEntities(
     const archivedIndexes = new Set<number>()
     for (const entity of planningEntities) {
       const id = createProjectTemplatePlanningEntityId(application, entity.index)
-      if (snapshot.entities.some((candidate) => candidate.id === id)) continue
+      const existing = snapshot.entities.find((candidate) => candidate.id === id)
+      if (existing) {
+        // An archive whose compaction failed stays in the live graph with archivedAt set.
+        if (existing.archivedAt !== undefined) archivedIndexes.add(entity.index)
+        continue
+      }
       if (entity.parentIndex !== undefined && archivedIndexes.has(entity.parentIndex)) {
         archivedIndexes.add(entity.index)
         continue
@@ -831,7 +841,8 @@ export async function createProjectTemplatePlanningEntities(
         // An entity that is live after all was created meanwhile and keeps its Milestones.
         if (!(error instanceof PlanningError) || error.code !== 'PlanningEntityExists') throw error
         snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
-        if (!snapshot.entities.some((candidate) => candidate.id === id)) archivedIndexes.add(entity.index)
+        const reread = snapshot.entities.find((candidate) => candidate.id === id)
+        if (reread === undefined || reread.archivedAt !== undefined) archivedIndexes.add(entity.index)
       }
     }
   } catch (error) {
@@ -877,9 +888,16 @@ export async function createProjectTemplateDependencies(
       [currentMember],
       false,
     )
-    // Read the whole Team: a reused Work Item may have moved to another Project since an earlier
-    // attempt, and the endpoint checks below authorize it where it is now.
-    const workItemState = await readPlanningWorkItemState(principal, { teamId })
+    // Read only the template's endpoints, wherever they are now: a reused Work Item may have moved
+    // to another Project since an earlier attempt, and the endpoint checks below authorize it there.
+    const workItemState = await readProjectTemplateDependencyEndpoints(
+      directoryId,
+      teamId,
+      dependencies.flatMap((dependency) => [
+        idByWbsNumber.get(dependency.predecessor),
+        idByWbsNumber.get(dependency.successor),
+      ]),
+    )
     let snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
     for (const [position, dependency] of dependencies.entries()) {
       const id = `${application.id}_dep_${position}`
@@ -922,6 +940,40 @@ export async function createProjectTemplateDependencies(
     }
   } catch (error) {
     throw toProjectTemplatePlanningError(error)
+  }
+}
+
+/**
+ * Reads the Work Items at the ends of a template's dependencies as Planning input.
+ *
+ * Only these Work Items are read, so the size of the rest of the Team does not matter. Missing
+ * and archived Work Items are left out, and the caller reports them as unavailable.
+ *
+ * @param directoryId - Workspace directory identifier.
+ * @param teamId - Team that owns the Work Items.
+ * @param workItemIds - Endpoint IDs; undefined entries and repeats are ignored.
+ * @returns Planning Work Item state holding the endpoints that exist.
+ */
+async function readProjectTemplateDependencyEndpoints(
+  directoryId: string,
+  teamId: string,
+  workItemIds: readonly (string | undefined)[],
+): Promise<PlanningWorkItemState> {
+  const ids = [...new Set(workItemIds.filter((id): id is string => id !== undefined))]
+  const issues = await Promise.all(ids.map((id) => readTemplateWorkItem(directoryId, teamId, id)))
+  return {
+    workItems: issues.flatMap((issue) => issue === undefined || issue.archivedAt !== undefined
+      ? []
+      : [{
+          id: issue.id,
+          revision: issue.revision,
+          teamId: issue.teamId,
+          title: issue.title,
+          ...(issue.assignedProjectId ? { projectId: issue.assignedProjectId } : {}),
+          statusCategory: issue.statusCategory,
+          dueDate: issue.dueDate,
+          schedule: issue.schedule,
+        } satisfies PlanningWorkItemSummary]),
   }
 }
 
