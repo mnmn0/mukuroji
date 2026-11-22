@@ -932,6 +932,7 @@ function cloneCreateScheduleCalendarPolicy(schedule: WorkItemSchedule) {
     holidays: [...schedule.calendarPolicy.holidays],
     timeZone: schedule.calendarPolicy.timeZone,
     workingWeekdays: [...schedule.calendarPolicy.workingWeekdays],
+    ...(schedule.calendarPolicy.calendarSource === 'shared' ? { calendarSource: 'shared' as const } : {}),
   }
 }
 

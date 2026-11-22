@@ -124,6 +124,7 @@ import {
   type TaskScheduleWindowLayout,
 } from '../../tasks/model/taskScheduleWindow'
 import { createWorkspaceTaskScheduleCalendarPolicy } from '../../tasks/model/taskSchedule'
+import { useWorkCalendar } from '../../workspace/queries/useWorkCalendar'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import {
   createBuiltInTaskViewDefinition,
@@ -406,9 +407,17 @@ export function TaskPage() {
   // New Work Items and the Gantt chart use the Workspace calendar; a failed read keeps the default.
   const workspaceCalendar = useWorkspaceCalendarSettings(accessToken, Boolean(user && !currentUserError))
   const workspaceCalendarErrorKey = workspaceCalendarErrorMessageKey(workspaceCalendar)
+  // A Project with its own calendar, or a Team calendar, replaces the Workspace one (ADR 0058).
+  const { data: projectWorkCalendar } = useWorkCalendar(
+    accessToken,
+    selectedTeamId,
+    projectId,
+    Boolean(user && !currentUserError),
+  )
   const workspaceCalendarPolicy = useMemo(
-    () => createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings),
-    [workspaceCalendar.settings],
+    () => projectWorkCalendar?.resolvedPolicy ??
+      createWorkspaceTaskScheduleCalendarPolicy(workspaceCalendar.settings),
+    [projectWorkCalendar?.resolvedPolicy, workspaceCalendar.settings],
   )
   const {
     data: teams = [],

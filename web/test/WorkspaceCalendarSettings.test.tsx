@@ -183,7 +183,9 @@ describe('Workspace calendar settings', () => {
   })
 
   test('maps the Workspace calendar to the policy new Work Items use', () => {
+    // A policy from the loaded settings follows the shared calendar (ADR 0058).
     expect(createWorkspaceTaskScheduleCalendarPolicy(snapshot.profile.calendar)).toEqual({
+      calendarSource: 'shared',
       holidays: ['2027-01-01', '2027-05-03'],
       timeZone: 'Asia/Tokyo',
       workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'],

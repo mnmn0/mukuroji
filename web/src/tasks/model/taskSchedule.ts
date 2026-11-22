@@ -92,7 +92,11 @@ export function createWorkspaceTaskScheduleCalendarPolicy(
   settings: WorkspaceCalendarSettingsResponse | undefined,
 ): WorkItemScheduleCalendarPolicy {
   if (!settings) return createDefaultTaskScheduleCalendarPolicy()
-  return createWorkspaceWorkItemCalendarPolicy(settings, settings.nationalHolidayDates)
+  // The Work Item follows the shared calendar; the server applies its Team and Project calendars.
+  return {
+    ...createWorkspaceWorkItemCalendarPolicy(settings, settings.nationalHolidayDates),
+    calendarSource: 'shared',
+  }
 }
 
 /**
