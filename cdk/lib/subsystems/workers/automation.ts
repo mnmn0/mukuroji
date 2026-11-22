@@ -204,6 +204,8 @@ export function buildAutomationWorkers(
           automationTable.tableArn,
           collaborationTable.tableArn,
           customersTable.tableArn,
+          // Completion reflection checks the Document's ancestor folders.
+          documentsTable.tableArn,
           fileProofingTable.tableArn,
           projectDirectoryTable.tableArn,
           workItemConfigurationTable.tableArn,

@@ -33,7 +33,8 @@ Work Item の更新後に共通で流れるもの（audit outbox の `work-item.
 - Work Item の再オープン（`completionReopened`）ではチェックを外さない。人が自分で付けたチェックを
   消してしまうため。
 - automation event worker の role には、Documents table への `dynamodb:GetItem`・`Query`・`PutItem`
-  だけを足す（Update・Delete・Scan は付けない）。
+  と、祖先 folder の確認に使う `ConditionCheckItem`（`TransactWriteItems` の中だけ）を足す
+  （Update・Delete・Scan は付けない）。schedule job には付けない。
 
 ## 検討した選択肢
 
