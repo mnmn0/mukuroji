@@ -143,23 +143,14 @@ function excerpt(value: string) {
 }
 
 /**
- * Creates the Planning entity activity response with a stable actor identifier.
+ * Creates the Planning entity activity response with the public audit event projection.
  *
  * @param page - Audit event page of one Planning entity.
- * @returns Activity page with each event's actor member key as `actorUserId`.
+ * @returns Activity page whose events carry only the public audit event fields.
  */
 export function toPlanningEntityActivityPageView(page: AuditEventPage) {
   return {
-    events: page.events.map((event) => {
-      const view = toAuditEventView(event)
-      const actorMemberKey = event.metadata?.actorMemberKey
-      return {
-        ...view,
-        actorUserId: typeof actorMemberKey === 'string' && actorMemberKey.trim()
-          ? actorMemberKey
-          : view.actor.id,
-      }
-    }),
+    events: page.events.map((event) => toAuditEventView(event)),
     ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
   }
 }

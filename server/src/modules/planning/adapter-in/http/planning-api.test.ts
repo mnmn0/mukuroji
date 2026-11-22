@@ -1191,10 +1191,11 @@ test('records Planning entity changes in audit and returns them as entity activi
     const body: unknown = await activity.json()
     expect(body).toMatchObject({
       events: [
-        { eventType: 'planning-entity.updated', actorUserId: 'demo@example.com' },
-        { eventType: 'planning-entity.created', actorUserId: 'demo@example.com' },
+        { eventType: 'planning-entity.updated' },
+        { eventType: 'planning-entity.created' },
       ],
     })
+    expect(JSON.stringify(body)).not.toContain('actorUserId')
     expect((await planningApiRequest('/api/planning/entities/missing-entity/activity')).status).toBe(404)
 
     // A reader of the Team the copy moved into sees no history from its Workspace-scoped past.
