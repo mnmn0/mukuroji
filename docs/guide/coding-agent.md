@@ -7,14 +7,13 @@ agent に取得・着手・報告・完了させるための手順です。接�
 にも設定のテンプレートがあります。
 
 Software factory は deploy 時に選ぶ任意の機能です（CDK context `mukuroji:softwareFactory`、既定は off）。
-off の環境では **agent を接続**、Factory board、ヘルプの coding agent ガイドが表示されず、agent 用 token も
-発行できません。使いたい場合は環境の管理者に有効化を依頼してください（[`cdk/README.md`](../../cdk/README.md#optional-modules)）。
+off の環境では Factory board とヘルプの coding agent ガイドが表示されず、agent にタスクを着手させることは
+できません。使いたい場合は環境の管理者に有効化を依頼してください（[`cdk/README.md`](../../cdk/README.md#optional-modules)）。
 
-on の環境で発行した本人用 token は、off に切り替えた後も失効するまで Work Item の読み書きに使えます。
-off にする前に **agent を接続** の「発行済みの token」から **失効** しておくと確実です。off にした後は
-**agent を接続** が表示されないため、Workspace の owner / admin が **設定** → **Workspace 管理** →
-**API と外部連携** の「認証情報」（「個人用」と表示される token）から失効します
-（[管理者ガイド](admin.md#api-と外部連携)）。
+off の環境でも **agent を接続** から自分用 token を発行できます。このとき設定例は、Workspace を読むだけの
+Workspace profile（下の「Workspace 全体を読む」）になります。on の環境で発行した token も、off に切り替えた後に
+失効するまで Work Item の読み書きに使えます。不要になった token は **agent を接続** の「発行済みの token」から
+**失効** します。
 
 ## 使う前に
 
@@ -61,7 +60,8 @@ token の期限が近づいたら「発行済みの token」から **期限を�
 `MUKUROJI_MCP_PROFILE=workspace` を足して別のサーバー名（例: `mukuroji`）で登録します。必要なのは
 `MUKUROJI_MCP_URL` と `MUKUROJI_MCP_TOKEN` だけです。agent に「`ABC-123` を読んで」「自分の担当を一覧して」の
 ように頼むと、`get_issue` や `list_issues` で読みます。今は読み取りだけで、タスクの作成・更新は後続の変更で追加します。
-読める範囲は token の持ち主が Web で見られる範囲と同じです。
+読める範囲は token の持ち主が Web で見られる範囲と同じです。Software factory が off の環境では、
+**agent を接続** の設定例がはじめからこの profile になります。
 
 ## agent に作業させる
 

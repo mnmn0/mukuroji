@@ -95,7 +95,7 @@ Software factory が無効な環境でも使えます（Agent Run の API を呼
 
 ### 自分用token
 
-- Guest以外のactiveなメンバーは、`work-items:read` / `work-items:write` に限ったtokenを自分で発行・再発行（rotate）・失効できます。有効期限は必須で、発行・再発行から最長90日です。
+- Guest以外のactiveなメンバーは、`work-items:read` / `work-items:write` に限ったtokenを自分で発行・再発行（rotate）・失効できます。有効期限は必須で、発行・再発行から最長90日です。Software factoryがoffのdeployでも発行・再発行でき、そのとき「agent を接続」はWorkspace profileの設定例を出します。
 - tokenは発行・再発行の応答で1回だけ表示されます。再発行と失効は即時に効き、古いtokenは次のrequestから `401` になります。期限切れも同様です。メンバーがWorkspaceから外れると、失効しなくてもそのtokenは `403` で使えなくなります。
 - 管理者はDeveloper設定のAPIキー一覧で全メンバーのtoken（「個人用」と表示）を確認・失効でき、「メンバーによる agent 用キーの発行」でメンバーの発行・再発行を止められます。止めても発行済みのtokenは残るため、必要なら一覧から失効します。メンバー自身の失効は止めている間もできます。発行・再発行の途中でpolicyが変わった場合は、その発行・再発行を `409` で失敗させます。
 - Enterprise Identityでroleを割り当てているWorkspaceでは、自分のtokenの確認と失効に `workspace.read`、発行と再発行に `work-items.write` のpermissionが要ります（標準のmember roleはどちらも持ちます）。

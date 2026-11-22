@@ -48,6 +48,9 @@ Mukuroji が配布する coding agent MCP（`mcp.mjs`）と、MCP が使う serv
   server が古いと警告し、`create_task` は失敗します。
 - MCP API revision を 4 に上げました。server は revision 1〜4 を受け付けます。revision 3 以前の server に接続した新しい MCP は
   server が古いと警告し、Workspace profile のツールは使えません。
+- server API: Software factory が off の deploy でも、本人用 token の確認・発行・再発行
+  （`/api/developer/me/agent-connection`、`POST /api/developer/me/api-keys`、`.../rotate`）と、管理者による本人用 token の
+  rotate を `503` で断らないようにしました。Web の「agent を接続」は off では Workspace profile の設定例を出します。
 
 ## [1.0.0]
 

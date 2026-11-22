@@ -254,8 +254,6 @@ function createTestRouter(input: {
   platform?: InMemoryDeveloperPlatformStorage
   now?: () => Date
   queueWebhookDelivery?: (workspaceId: string, deliveryId: string) => Promise<void>
-  /** Deployment switch for Software factory; the router reads the environment when omitted. */
-  softwareFactoryDeployed?: () => boolean
 } = {}) {
   const platform = input.platform ?? new InMemoryDeveloperPlatformStorage(
     new LocalAesGcmSecretProtector(new Uint8Array(32).fill(9)),
@@ -286,9 +284,6 @@ function createTestRouter(input: {
       : {}),
     ...(input.listConfiguredConnectorProviders
       ? { listConfiguredConnectorProviders: input.listConfiguredConnectorProviders }
-      : {}),
-    ...(input.softwareFactoryDeployed
-      ? { softwareFactoryDeployed: input.softwareFactoryDeployed }
       : {}),
   })
   return { platform, router }
@@ -3893,17 +3888,15 @@ describe('personal agent credentials', () => {
   /**
    * Creates a router that resolves the test sessions.
    *
-   * @param softwareFactoryDeployed - Deployment switch for Software factory.
    * @returns The router and its in-memory platform.
    */
-  function createPersonalCredentialRouter(softwareFactoryDeployed?: () => boolean) {
+  function createPersonalCredentialRouter() {
     return createTestRouter({
       authenticateManagement: async (authorization) => {
         const principal = principals[authorization]
         if (!principal) throw new PublicApiServiceError(401, 'invalid_credentials', 'Unknown session.')
         return principal
       },
-      ...(softwareFactoryDeployed ? { softwareFactoryDeployed } : {}),
     })
   }
 
@@ -4096,34 +4089,22 @@ describe('personal agent credentials', () => {
       .rejects.toMatchObject({ status: 401 })
   })
 
-  test('refuses rotating a personal key through the management route while Software factory is off', async () => {
-    let deployed = true
-    const { platform, router } = createPersonalCredentialRouter(() => deployed)
-    const personal = await (await send(router, 'admin-session', 'POST', '/developer/me/api-keys', {
-      name: 'Admin agent',
+  test('issues and rotates personal keys without Software factory, for the Workspace MCP profile', async () => {
+    const { platform, router } = createPersonalCredentialRouter()
+    const personal = await send(router, 'member-session', 'POST', '/developer/me/api-keys', {
+      name: 'Workspace MCP',
       expiresAt: expiresInDays(30),
-    })).json() as { apiKey: { id: string }; secret: string }
-    const workspaceKey = await createApiKey(platform, ['work-items:read'])
+    })
+    expect(personal.status).toBe(201)
+    const issued = await personal.json() as { apiKey: { id: string }; secret: string }
+    await expect(platform.authenticateApiKey({ credential: issued.secret }))
+      .resolves.toMatchObject({ subjectUserId: 'member-1', scopes: ['work-items:read', 'work-items:write'] })
 
-    deployed = false
-    const refused = await send(router, 'admin-session', 'POST', `/developer/api-keys/${personal.apiKey.id}/rotate`)
-    expect(refused.status).toBe(503)
-    expect(refused.headers.get('Cache-Control')).toBe('no-store')
-    expect(refused.headers.get('Content-Type')).toContain('application/problem+json')
-    expect(await refused.json()).toMatchObject({ code: 'SoftwareFactoryNotDeployed', retryable: false })
-    await expect(platform.authenticateApiKey({ credential: personal.secret }))
-      .resolves.toMatchObject({ subjectUserId: 'user-1' })
-    expect((await send(router, 'admin-session', 'POST', `/developer/api-keys/${workspaceKey.apiKey.id}/rotate`)).status)
-      .toBe(200)
-    expect((await send(router, 'admin-session', 'DELETE', `/developer/api-keys/${personal.apiKey.id}`)).status)
-      .toBe(200)
-
-    deployed = true
-    const reissued = await (await send(router, 'admin-session', 'POST', '/developer/me/api-keys', {
+    const admin = await (await send(router, 'admin-session', 'POST', '/developer/me/api-keys', {
       name: 'Admin agent',
       expiresAt: expiresInDays(30),
     })).json() as { apiKey: { id: string } }
-    expect((await send(router, 'admin-session', 'POST', `/developer/api-keys/${reissued.apiKey.id}/rotate`)).status)
+    expect((await send(router, 'admin-session', 'POST', `/developer/api-keys/${admin.apiKey.id}/rotate`)).status)
       .toBe(200)
   })
 })

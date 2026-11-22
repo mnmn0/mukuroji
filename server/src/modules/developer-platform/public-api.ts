@@ -115,8 +115,6 @@ import {
 } from './domain/personal-credential-policy'
 import { assertSafeWebhookUrl, UnsafeWebhookUrlError } from './webhook-delivery'
 import { projectPublicWorkItemTypeChangePreview } from './public-work-item-type-projection'
-import { isSoftwareFactoryDeployed } from '../../infrastructure/config/software-factory'
-import { softwareFactoryNotDeployedResponse } from '../../infrastructure/http/software-factory-not-deployed'
 import { resolveTrustedRequestSource } from '../../infrastructure/http/trusted-request-source'
 import { isRecord } from '../../infrastructure/runtime/value-guards'
 
@@ -908,11 +906,6 @@ export type PublicApiDependencies = {
   createRequestId?: () => string
   /** Cursor expiry と rate-limit header の計算に使う clock です。 */
   now?: () => Date
-  /**
-   * Reads whether this deployment serves Software factory; defaults to the
-   * `SOFTWARE_FACTORY` runtime switch. Personal agent keys cannot be rotated while it is off.
-   */
-  softwareFactoryDeployed?: () => boolean
 }
 
 const connectorCatalog = [
@@ -1749,15 +1742,6 @@ export function createPublicApiRouter(dependencies: PublicApiDependencies) {
     const apiKey = (await dependencies.apiKeys.listApiKeys(principal.workspaceId))
       .find((candidate) => candidate.id === apiKeyId)
     requireResourceCreator(apiKey, principal.userId, 'API key')
-    // A personal agent key is a Software factory credential: rotating it here would issue a new
-    // secret that the /developer/me routes refuse while the module is off.
-    if (
-      !(dependencies.softwareFactoryDeployed ?? isSoftwareFactoryDeployed)() &&
-      (await dependencies.apiKeys.listPersonalApiKeys(principal.workspaceId))
-        .some((candidate) => candidate.id === apiKeyId)
-    ) {
-      return softwareFactoryNotDeployedResponse(c, 'problem')
-    }
     return executeManagementIdempotentJson(
       c,
       dependencies,
