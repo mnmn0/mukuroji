@@ -137,8 +137,9 @@ export function TeamTimeTrackingPage() {
   )
   // The rate card offers the Team's job roles; archived ones stay readable only on rows that use them.
   const workItemConfiguration = useWorkItemConfiguration(accessToken, teamId, enabled && view === 'report')
+  // Absent until read, so a failed or pending read is not shown as a Team without job roles.
   const jobRoles = useMemo(
-    () => (workItemConfiguration.data?.configuration.jobRoles ?? [])
+    () => workItemConfiguration.data && (workItemConfiguration.data.configuration.jobRoles ?? [])
       .filter((jobRole) => !jobRole.archived)
       .map((jobRole) => ({ id: jobRole.id, name: jobRole.name })),
     [workItemConfiguration.data],
@@ -188,7 +189,7 @@ export function TeamTimeTrackingPage() {
   }
 
   return (
-    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error, weeklySummary.error]}>
+    <WorkspaceRouteContent sessionErrors={[workItems.error, myWorkItems.error, writeAccess.error, projectMembers.error, calendarSettings.error, weeklySummary.error, workItemConfiguration.error]}>
       <div className="grid min-w-0 gap-4 px-[clamp(16px,3vw,34px)] py-5">
         <TimeTrackingViewTabs
           getHref={tabHref}
@@ -212,13 +213,15 @@ export function TeamTimeTrackingPage() {
           <TimeReportContainer
             accessToken={accessToken}
             groupBy={reportGroupBy}
-            jobRoles={jobRoles}
+            hasJobRoleError={Boolean(workItemConfiguration.error)}
+            {...(jobRoles ? { jobRoles } : {})}
             key={`${teamId}:report`}
             labels={reportLabels}
             locale={workspace.locale}
             onChange={(range, groupBy) => {
               void navigate(createTeamTimeTrackingPath(teamId, 'report', undefined, { ...range, groupBy }), { replace: true })
             }}
+            onRetryJobRoles={() => { void workItemConfiguration.mutate().catch(() => undefined) }}
             projects={teamProjects}
             range={reportRange}
             teamId={teamId}

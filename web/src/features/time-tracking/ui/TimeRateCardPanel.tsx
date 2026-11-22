@@ -138,7 +138,7 @@ export function TimeRateCardPanel({
       ) : null}
       {isLoading ? <p className="text-sm font-medium text-[var(--workbench-muted)]" role="status">{t('timeTracking.loading')}</p> : null}
 
-      {current && !isLoading ? (
+      {current && !isLoading && !hasLoadError ? (
         <form className="grid min-w-0 gap-4" onSubmit={(event) => { void submit(event) }}>
           <label className="grid w-fit gap-1 text-sm font-semibold text-[var(--workbench-text)]">
             {t('timeTracking.rateCard.currency')}

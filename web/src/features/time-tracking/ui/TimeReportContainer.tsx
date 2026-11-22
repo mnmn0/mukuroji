@@ -31,8 +31,12 @@ export type TimeReportContainerProps = {
   labels: TimeReportLabels
   /** Projects of the Team, offered as budget scopes. */
   projects: readonly TimeBudgetProjectOption[]
-  /** Job roles of the Team's Work Item configuration, offered in the rate card. */
-  jobRoles: readonly TimeRateCardJobRoleOption[]
+  /** Job roles of the Team's Work Item configuration, offered in the rate card; absent until read. */
+  jobRoles?: readonly TimeRateCardJobRoleOption[]
+  /** Whether reading the job roles failed. */
+  hasJobRoleError?: boolean
+  /** Reads the job roles again. */
+  onRetryJobRoles?: () => void
   /** Opens another period or grouping. */
   onChange: (range: TimeReportRange, groupBy: TimeTrackingGroupBy) => void
 }
@@ -64,10 +68,12 @@ function triggerCsvDownload(blob: Blob, fileName: string): void {
 export function TimeReportContainer({
   accessToken,
   groupBy,
+  hasJobRoleError = false,
   jobRoles,
   labels,
   locale,
   onChange,
+  onRetryJobRoles,
   projects,
   range,
   teamId,
@@ -139,11 +145,15 @@ export function TimeReportContainer({
       ) : null}
       {canManageRateCard ? (
         <TimeRateCardPanel
-          hasLoadError={Boolean(rateCard.error)}
-          isLoading={rateCard.isLoading}
-          jobRoles={jobRoles}
+          // A failed job role read is shown, not taken as a Team without job roles.
+          hasLoadError={Boolean(rateCard.error) || hasJobRoleError}
+          isLoading={rateCard.isLoading || (!jobRoles && !hasJobRoleError)}
+          jobRoles={jobRoles ?? []}
           members={members}
-          onRetry={() => { void rateCard.mutate().catch(() => undefined) }}
+          onRetry={() => {
+            void rateCard.mutate().catch(() => undefined)
+            onRetryJobRoles?.()
+          }}
           onSave={saveRateCard}
           t={t}
           {...(rateCard.data ? { rateCard: rateCard.data } : {})}

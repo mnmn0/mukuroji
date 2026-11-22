@@ -143,4 +143,20 @@ describe('time rate card panel', () => {
     expect(markup).toContain('member-2')
     expect(markup).toContain('value="9000"')
   })
+
+  test('shows a failed read instead of an editable card without job roles', () => {
+    const markup = renderToStaticMarkup(
+      <TimeRateCardPanel
+        hasLoadError
+        jobRoles={[]}
+        members={[{ id: 'member-1', name: 'Aoi' }]}
+        onRetry={() => undefined}
+        onSave={async () => undefined}
+        rateCard={storedCard}
+        t={t}
+      />,
+    )
+    expect(markup).toContain('role="alert"')
+    expect(markup).not.toContain('<form')
+  })
 })
