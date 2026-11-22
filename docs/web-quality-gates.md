@@ -1,6 +1,6 @@
 # Web quality gates
 
-Web の見た目と配信サイズの回帰を CI で検出するための 2 つの gate を説明します。
+Web の見た目と配信サイズの回帰を CI で検出するための 2 つの gate と、実 server に対する smoke test を説明します。
 
 ## Visual regression
 
@@ -47,6 +47,38 @@ page を分けたぶん、全体の合計は gzip の file ごとの overhead �
 deploy で chunk が置き換わった後に、開いたままの tab が古い page chunk を読めなかった場合は、`lazyPage` が `web/src/app/staleChunkReload.ts` の `loadPageWithReload` で page を 1 回だけ再読み込みします。
 再読み込みを試したことは、page を読めるまで sessionStorage に残します。再読み込みしても読めない場合は、時間がかかっても再読み込みを繰り返さず、root route の `RouteErrorPage` が再読み込みの操作を表示します。
 PDF runtime など route 以外の dynamic import は対象外で、それぞれの画面が失敗を扱います。
+
+## Real-server smoke
+
+`bun run web:e2e:real-server` は API を mock せず、Floci 上の server と Web の dev server に対して主要な流れを1回ずつ通します（#417）。
+spec は `web/e2e-real-server/smoke.spec.ts`、config は `playwright.real-server.config.ts` です。CI では `real-server-smoke.yml` が実行します。
+
+通す流れは次の順です。各 test は前の test が作った Team や Work Item を使うため、1 worker で順に実行します。
+
+1. API で login する
+2. Team と Project を作る
+3. Work Item を作り、着手中へ動かす
+4. エージェント設定を保存して読み直す
+5. Project に update の周期を設定し、health update を公開して履歴から読む
+6. 自分用の agent token を発行し、`bun run mcp:start` を stdio で起動して `get_next_task` → `start_task` → `report_progress` を呼ぶ。終わったら token を失効する
+7. Factory board の API に、着手中の Work Item と agent の run・最新の報告が出る
+8. Web で login し、Factory board に Work Item と agent 名が表示される
+
+MCP は SDK を使わず、`web/e2e-real-server/mcpStdioClient.ts` が改行区切りの JSON-RPC で話します。
+MCP の process には `PATH`、`HOME` と `MUKUROJI_MCP_*` だけを渡します。
+
+最後の test は Chromium の JS coverage を集め、`web/src` の module ごとの実行済みの割合を参考値として出力します。閾値はなく、test の成否に影響しません。
+
+- 集計は `coverage/real-server-smoke/web-js-coverage.json` に書き、Playwright の report にも添付します。
+- GitHub Actions では job summary に全体の割合と、割合の低い 10 module を表に出します。
+- Vite が変換した後の JS を数えるので、TypeScript の行 coverage とは一致しません。inline の source map は数えません。
+
+ローカルでは Floci を起動してから実行します。
+
+```sh
+bun run floci:up
+bun run web:e2e:real-server
+```
 
 ## 付録: CI workflow
 

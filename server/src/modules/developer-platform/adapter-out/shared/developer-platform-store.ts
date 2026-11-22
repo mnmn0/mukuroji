@@ -124,6 +124,7 @@ import { createWebhookSignature } from '../../domain/webhook-signature'
 import {
   containsControlCharacter,
   readDeveloperIdentifier as readIdentifier,
+  readDeveloperWorkspaceId,
   readPositiveInteger,
   readRequiredText as requireText,
 } from '../../domain/validation'
@@ -1143,7 +1144,7 @@ abstract class DeveloperPlatformStorageKernel {
     token: IdempotencyMutationToken,
     responseValue: unknown,
   ): Promise<PreparedIdempotencyCompletionRecord> {
-    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(workspaceIdValue)
     const credentialId = readIdentifier(token.credentialId, 'Credential ID')
     const idempotencyKey = readIdempotencyKey(token.idempotencyKey)
     const requestFingerprint = requireText(
@@ -1489,7 +1490,7 @@ abstract class DeveloperPlatformStorageKernel {
 abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
   /** API key を作成し、secret を一度だけ返します。 */
   async createApiKey(request: CreateApiKeyRequest): Promise<ApiKeySecretResult> {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const createdByUserId = readIdentifier(request.createdByUserId, 'Creator user ID')
     const name = readName(request.input.name, 'API key name')
     const scopes = readScopes(request.input.scopes)
@@ -1586,7 +1587,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
 
   /** Workspace の secret を含まない API key summary を返します。 */
   async listApiKeys(workspaceIdValue: string) {
-    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(workspaceIdValue)
     const now = this.clock()
     const records = await this.listRecords(workspaceId, 'APIKEY#')
     const apiKeys: ApiKeySummary[] = []
@@ -1618,7 +1619,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
 
   /** Returns member-issued personal API keys, limited to one member when an owner is given. */
   async listPersonalApiKeys(workspaceIdValue: string, ownerUserId?: string) {
-    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(workspaceIdValue)
     const personalIds = new Set(
       (await this.listRecords(workspaceId, 'APIKEY#'))
         .filter((record) => record.apiKeyIssuance === 'personal')
@@ -1632,7 +1633,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
 
   /** API key secret を置換し、新 secret を一度だけ返します。 */
   async rotateApiKey(request: RotateApiKeyRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const apiKeyId = readIdentifier(request.apiKeyId, 'API key ID')
     const record = await this.requireRecord(
       workspaceId,
@@ -1751,7 +1752,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
   private async tryRevokeApiKey(
     request: RevokeApiKeyRequest,
   ): Promise<ApiKeySummary | undefined> {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const apiKeyId = readIdentifier(request.apiKeyId, 'API key ID')
     const record = await this.requireRecord(
       workspaceId,
@@ -1818,7 +1819,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
 
   /** Returns the Workspace personal API key policy; self-issuance is allowed when none is stored. */
   async getPersonalCredentialPolicy(workspaceIdValue: string): Promise<PersonalCredentialPolicy> {
-    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(workspaceIdValue)
     const record = await this.getRecord(workspaceId, PERSONAL_CREDENTIAL_POLICY_RECORD_KEY)
     if (!record) return { selfIssuanceEnabled: true }
     const policy = readRecordValue<PersonalCredentialPolicy>(record, 'credential-policy')
@@ -1832,7 +1833,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
   async updatePersonalCredentialPolicy(
     request: UpdatePersonalCredentialPolicyRequest,
   ): Promise<PersonalCredentialPolicy> {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const updatedByUserId = readIdentifier(request.updatedByUserId, 'Policy actor user ID')
     if (typeof request.input.selfIssuanceEnabled !== 'boolean') {
       throw invalid('DeveloperPolicyInvalid', 'selfIssuanceEnabled must be a boolean.')
@@ -1973,7 +1974,7 @@ abstract class ApiKeyCapabilityStorage extends DeveloperPlatformStorageKernel {
 abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage {
   /** OAuth app を作成し、client secret を一度だけ返します。 */
   async createOAuthApp(request: CreateOAuthAppRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const createdByUserId = readIdentifier(request.createdByUserId, 'Creator user ID')
     const name = readName(request.input.name, 'OAuth app name')
     const grantTypes = readOAuthGrantTypes(request.input.grantTypes)
@@ -2032,7 +2033,7 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
 
   /** Workspace の secret を含まない OAuth app summary を返します。 */
   async listOAuthApps(workspaceIdValue: string) {
-    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(workspaceIdValue)
     const records = await this.listRecords(workspaceId, 'OAUTHAPP#')
     const now = this.clock()
     const oauthApps: OAuthAppSummary[] = []
@@ -2051,7 +2052,7 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
 
   /** OAuth client secret を置換し、新 secret を一度だけ返します。 */
   async rotateOAuthClientSecret(request: RotateOAuthClientSecretRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const oauthAppId = readIdentifier(request.oauthAppId, 'OAuth app ID')
     const record = await this.requireRecord(
       workspaceId,
@@ -2124,7 +2125,7 @@ abstract class OAuthCredentialCapabilityStorage extends ApiKeyCapabilityStorage 
 
   /** OAuth app と配下 token を revoke します。 */
   async revokeOAuthApp(request: RevokeOAuthAppRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const oauthAppId = readIdentifier(request.oauthAppId, 'OAuth app ID')
     const record = await this.requireRecord(
       workspaceId,
@@ -2333,7 +2334,7 @@ abstract class WebhookSubscriptionCapabilityStorage
 extends OAuthCredentialCapabilityStorage {
   /** Webhook subscription を作成し、signing secret を一度だけ返します。 */
   async createWebhookSubscription(request: CreateWebhookSubscriptionRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const createdByUserId = readIdentifier(
       request.createdByUserId,
       'Webhook creator user ID',
@@ -2399,7 +2400,7 @@ extends OAuthCredentialCapabilityStorage {
 
   /** Workspace の secret を含まない Webhook subscription を返します。 */
   async listWebhookSubscriptions(workspaceIdValue: string) {
-    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(workspaceIdValue)
     const records = await this.listRecords(workspaceId, 'WEBHOOK#')
     return sortByCreatedAt(
       records
@@ -2417,7 +2418,7 @@ extends OAuthCredentialCapabilityStorage {
   async listActiveWebhookSubscriptionsPage(
     request: ListActiveWebhookSubscriptionsPageRequest,
   ): Promise<ActiveWebhookSubscriptionsPage> {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const limit = readBoundedLimit(
       request.limit,
       WEBHOOK_PROJECTION_PAGE_MAX_LIMIT,
@@ -2476,7 +2477,7 @@ extends OAuthCredentialCapabilityStorage {
 
   /** Webhook signing secret を置換し、新 secret を一度だけ返します。 */
   async rotateWebhookSecret(request: RotateWebhookSecretRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const subscriptionId = readIdentifier(request.subscriptionId, 'Webhook subscription ID')
     const record = await this.requireRecord(
       workspaceId,
@@ -2529,7 +2530,7 @@ extends OAuthCredentialCapabilityStorage {
 
   /** Webhook subscription metadata と status を原子的に更新します。 */
   async updateWebhookSubscription(request: UpdateWebhookSubscriptionRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const subscriptionId = readIdentifier(request.subscriptionId, 'Webhook subscription ID')
     const record = await this.requireRecord(
       workspaceId,
@@ -2627,7 +2628,7 @@ abstract class WebhookDeliveryCapabilityStorage
 extends WebhookSubscriptionCapabilityStorage {
   /** Event に一致する subscription へ delivery を冪等に enqueue します。 */
   async enqueueWebhookEvent(request: EnqueueWebhookEventRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const event = readWebhookEvent(request.event, workspaceId)
     const teamId = readWebhookEventTeamId(event)
     const authorizedSubscriptionIds = new Set(readIdentifierArray(
@@ -2721,7 +2722,7 @@ extends WebhookSubscriptionCapabilityStorage {
 
   /** Webhook delivery log を cursor pagination します。 */
   async listWebhookDeliveries(request: ListWebhookDeliveriesRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const subscriptionId = request.subscriptionId === undefined
       ? undefined
       : readIdentifier(request.subscriptionId, 'Webhook subscription ID')
@@ -2781,7 +2782,7 @@ extends WebhookSubscriptionCapabilityStorage {
 
   /** Webhook delivery を tenant-bound ID lookup で取得します。 */
   async getWebhookDelivery(request: GetWebhookDeliveryRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const deliveryId = readIdentifier(request.deliveryId, 'Webhook delivery ID')
     const record = await this.requireWebhookDeliveryRecordById(workspaceId, deliveryId)
     return clone(
@@ -2791,7 +2792,7 @@ extends WebhookSubscriptionCapabilityStorage {
 
   /** Worker 用 payload と signing secret を安全な内部境界で解決します。 */
   async prepareWebhookDelivery(request: PrepareWebhookDeliveryRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const deliveryId = readIdentifier(request.deliveryId, 'Webhook delivery ID')
     const deliveryRecord = await this.requireWebhookDeliveryRecordById(
       workspaceId,
@@ -2835,7 +2836,7 @@ extends WebhookSubscriptionCapabilityStorage {
 
   /** Webhook attempt 結果を保存します。 */
   async recordWebhookDeliveryAttempt(request: RecordWebhookDeliveryAttemptRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const deliveryId = readIdentifier(request.deliveryId, 'Webhook delivery ID')
     const status = readWebhookDeliveryStatus(request.status)
     const responseStatus = request.responseStatus === undefined
@@ -2916,7 +2917,7 @@ extends WebhookSubscriptionCapabilityStorage {
 
   /** Original delivery を保存したまま新しい pending replay を作成します。 */
   async replayWebhookDelivery(request: ReplayWebhookDeliveryRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const deliveryId = readIdentifier(request.deliveryId, 'Webhook delivery ID')
     const operationId = request.operationId === undefined
       ? undefined
@@ -3066,7 +3067,7 @@ extends WebhookSubscriptionCapabilityStorage {
 
   /** Incoming webhook signature を timing-safe に検証します。 */
   async verifyWebhookSignature(request: VerifyWebhookSignatureRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const subscriptionId = readIdentifier(request.subscriptionId, 'Webhook subscription ID')
     const payload = request.payload
     if (typeof payload !== 'string') {
@@ -3113,7 +3114,7 @@ extends WebhookSubscriptionCapabilityStorage {
 abstract class ConnectorCapabilityStorage extends WebhookDeliveryCapabilityStorage {
   /** Connector credential を暗号化して installation を作成します。 */
   async installConnector(request: InstallConnectorRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const installedByUserId = readIdentifier(request.installedByUserId, 'Installer user ID')
     const input = request.input
     const category = readConnectorCategory(input.category)
@@ -3200,7 +3201,7 @@ abstract class ConnectorCapabilityStorage extends WebhookDeliveryCapabilityStora
 
   /** Workspace の credential を含まない connector summary を返します。 */
   async listConnectors(workspaceIdValue: string) {
-    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(workspaceIdValue)
     const records = await this.listRecords(workspaceId, 'CONNECTOR#')
     return records
       .map((record) =>
@@ -3216,7 +3217,7 @@ abstract class ConnectorCapabilityStorage extends WebhookDeliveryCapabilityStora
   async readConnectorLifecycleSnapshot(
     request: ReadConnectorLifecycleSnapshotRequest,
   ) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const installationId = readIdentifier(
       request.installationId,
       'Connector installation ID',
@@ -3245,7 +3246,7 @@ abstract class ConnectorCapabilityStorage extends WebhookDeliveryCapabilityStora
 
   /** Connector の current health status を保存します。 */
   async updateConnectorStatus(request: UpdateConnectorStatusRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const installationId = readIdentifier(request.installationId, 'Connector installation ID')
     const status = readConnectorStatus(request.status)
     const updatedByUserId = request.updatedByUserId === undefined
@@ -3488,7 +3489,7 @@ abstract class ConnectorCapabilityStorage extends WebhookDeliveryCapabilityStora
   async assertConnectorReauthorizationState(
     request: AssertConnectorReauthorizationStateRequest,
   ) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const installationId = readIdentifier(
       request.installationId,
       'Connector installation ID',
@@ -3520,7 +3521,7 @@ abstract class ConnectorCapabilityStorage extends WebhookDeliveryCapabilityStora
     request: ClaimConnectorCredentialRefreshRequest,
     concurrentMutationRetries = 0,
   ): Promise<ConnectorCredentialRefreshClaimResult> {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const installationId = readIdentifier(
       request.installationId,
       'Connector installation ID',
@@ -3602,7 +3603,7 @@ abstract class ConnectorCapabilityStorage extends WebhookDeliveryCapabilityStora
     request: ReleaseConnectorCredentialRefreshRequest,
     concurrentMutationRetries = 0,
   ): Promise<boolean> {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const installationId = readIdentifier(
       request.installationId,
       'Connector installation ID',
@@ -3646,7 +3647,7 @@ abstract class ConnectorCapabilityStorage extends WebhookDeliveryCapabilityStora
     request: RecoverConnectorRequest,
     concurrentMutationRetries = 0,
   ): Promise<ConnectorInstallation> {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const installationId = readIdentifier(request.installationId, 'Connector installation ID')
     const credential = requireText(request.credential, 'Connector credential')
     const expectedReauthorizationStateId =
@@ -3897,7 +3898,7 @@ abstract class ConnectorCapabilityStorage extends WebhookDeliveryCapabilityStora
 
   /** Connector worker 内でのみ使う credential を復号します。 */
   async readConnectorCredential(request: ReadConnectorCredentialRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const installationId = readIdentifier(request.installationId, 'Connector installation ID')
     const record = await this.requireRecord(
       workspaceId,
@@ -3936,7 +3937,7 @@ abstract class ExternalLinkCapabilityStorage extends ConnectorCapabilityStorage 
   async pauseConnectorExternalLinksPage(
     request: PauseConnectorExternalLinksPageRequest,
   ): Promise<PauseConnectorExternalLinksPageResult> {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const installationId = readIdentifier(
       request.installationId,
       'Connector installation ID',
@@ -4115,7 +4116,7 @@ abstract class ExternalLinkCapabilityStorage extends ConnectorCapabilityStorage 
 
   /** External resource と canonical Work Item の一意な link を作成します。 */
   async createExternalWorkItemLink(request: CreateExternalWorkItemLinkRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const input = request.input
     const teamId = readIdentifier(input.teamId, 'Team ID')
     const workItemId = readIdentifier(input.workItemId, 'Work Item ID')
@@ -4275,7 +4276,7 @@ abstract class ExternalLinkCapabilityStorage extends ConnectorCapabilityStorage 
 
   /** Workspace 内の external link を取得します。 */
   async listExternalWorkItemLinks(request: ListExternalWorkItemLinksRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const linkId = request.linkId === undefined
       ? undefined
       : readIdentifier(request.linkId, 'External Work Item link ID')
@@ -4421,7 +4422,7 @@ abstract class ExternalLinkCapabilityStorage extends ConnectorCapabilityStorage 
 
   /** External link の同期方向を更新し、再同期または一時停止状態へ遷移します。 */
   async updateExternalWorkItemLink(request: UpdateExternalWorkItemLinkRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const teamId = readIdentifier(request.teamId, 'Team ID')
     const workItemId = readIdentifier(request.workItemId, 'Work Item ID')
     const linkId = readIdentifier(request.linkId, 'External Work Item link ID')
@@ -4538,7 +4539,7 @@ abstract class ExternalLinkCapabilityStorage extends ConnectorCapabilityStorage 
 
   /** External link と uniqueness claim を削除します。 */
   async deleteExternalWorkItemLink(request: DeleteExternalWorkItemLinkRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const teamId = readIdentifier(request.teamId, 'Team ID')
     const workItemId = readIdentifier(request.workItemId, 'Work Item ID')
     const linkId = readIdentifier(request.linkId, 'External Work Item link ID')
@@ -4625,7 +4626,7 @@ abstract class ExternalLinkCapabilityStorage extends ConnectorCapabilityStorage 
 abstract class ImportCapabilityStorage extends ExternalLinkCapabilityStorage {
   /** Import job を queued 状態で作成します。 */
   async createImportJob(request: CreateImportJobRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const createdByUserId = readIdentifier(request.createdByUserId, 'Creator user ID')
     const jobId = request.jobId === undefined
       ? createId('import')
@@ -4688,7 +4689,7 @@ abstract class ImportCapabilityStorage extends ExternalLinkCapabilityStorage {
 
   /** Workspace の Import job を作成日時降順で返します。 */
   async listImportJobs(workspaceIdValue: string) {
-    const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(workspaceIdValue)
     const records = await this.listRecords(workspaceId, 'IMPORT#')
     return records
       .map((record) => clone(readRecordValue<ImportJob>(record, 'import-job')))
@@ -4697,7 +4698,7 @@ abstract class ImportCapabilityStorage extends ExternalLinkCapabilityStorage {
 
   /** Import job state と report を保存します。 */
   async updateImportJob(request: UpdateImportJobRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const jobId = readIdentifier(request.jobId, 'Import job ID')
     const status = readImportJobStatus(request.status)
     const record = await this.requireRecord(
@@ -4807,7 +4808,7 @@ abstract class IdempotencyCapabilityStorage extends ImportCapabilityStorage {
     request: ReserveIdempotencyRequest,
     retryCount: number,
   ): Promise<IdempotencyDecision> {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const credentialId = readIdentifier(request.credentialId, 'Credential ID')
     const idempotencyKey = readIdempotencyKey(request.idempotencyKey)
     const requestFingerprint = requireText(
@@ -4893,7 +4894,7 @@ abstract class IdempotencyCapabilityStorage extends ImportCapabilityStorage {
 
   /** Reserve owner だけが response を保存できます。 */
   async completeIdempotency(request: CompleteIdempotencyRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const credentialId = readIdentifier(request.credentialId, 'Credential ID')
     const idempotencyKey = readIdempotencyKey(request.idempotencyKey)
     const keyDigest = digestText(
@@ -4971,7 +4972,7 @@ abstract class IdempotencyCapabilityStorage extends ImportCapabilityStorage {
 
   /** 失敗した処理の Reserve owner だけが未完了 reservation を解放できます。 */
   async releaseIdempotency(request: ReleaseIdempotencyRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const credentialId = readIdentifier(request.credentialId, 'Credential ID')
     const idempotencyKey = readIdempotencyKey(request.idempotencyKey)
     const keyDigest = digestText(
@@ -5014,7 +5015,7 @@ abstract class IdempotencyCapabilityStorage extends ImportCapabilityStorage {
 abstract class RateLimitCapabilityStorage extends IdempotencyCapabilityStorage {
   /** Credential ごとの fixed-window rate limit を原子的に消費します。 */
   async consumeRateLimit(request: ConsumeRateLimitRequest) {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const credentialId = readIdentifier(request.credentialId, 'Credential ID')
     const limit = readPositiveInteger(request.limit, 'Rate limit')
     const windowSeconds = readPositiveInteger(
@@ -6622,7 +6623,7 @@ export class DynamoDbDeveloperPlatformStorage extends RateLimitCapabilityStorage
   async prepareWorkItemDeletionFenceTransactWrite(
     request: PrepareWorkItemDeletionFenceRequest,
   ): Promise<WorkItemDeletionFenceTransactWrite> {
-    const workspaceId = readIdentifier(request.workspaceId, 'Workspace ID')
+    const workspaceId = readDeveloperWorkspaceId(request.workspaceId)
     const teamId = readIdentifier(request.teamId, 'Team ID')
     const workItemId = readIdentifier(request.workItemId, 'Work Item ID')
     const deletedAt = this.clock().toISOString()

@@ -1,4 +1,6 @@
 import { expect, test, type APIRequestContext } from '@playwright/test'
+import { publishCoverageSummary, summarizeJsCoverage } from './coverageSummary'
+import { McpStdioClient } from './mcpStdioClient'
 
 /**
  * Minimal smoke suite against the real server running on Floci (#417).
@@ -13,6 +15,8 @@ const runSuffix = Date.now().toString(36)
 const teamName = `Smoke Team ${runSuffix}`
 const projectName = `Smoke Project ${runSuffix}`
 const workItemTitle = `Smoke Work Item ${runSuffix}`
+const agentWorkItemTitle = `Smoke Agent Task ${runSuffix}`
+const agentName = `smoke-agent-${runSuffix}`
 const calendarPolicy = {
   timeZone: 'UTC',
   workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
@@ -33,6 +37,10 @@ type SmokeState = {
   workItemId: string
   /** Revision of the Work Item right after creation; set by the Work Item test. */
   workItemRevision: number
+  /** ID of the Work Item the coding agent starts; set by the MCP test. */
+  agentWorkItemId: string
+  /** ID of the Agent Run the MCP server started; set by the MCP test. */
+  agentRunId: string
 }
 
 /** Smoke state shared between tests. */
@@ -233,7 +241,162 @@ test('saves Agent settings and reads them back', async ({ request }) => {
   expect(reread).toMatchObject({ revision: current.revision + 1, leaseMinutes: 45 })
 })
 
-test('shows the started Work Item on the Factory board API', async ({ request }) => {
+test('publishes a health update for the Project', async ({ request }) => {
+  const auth = { Authorization: `Bearer ${requireState('accessToken')}` }
+  const planning = await readJson(await request.get('/api/planning', { headers: auth }), 200)
+  expect(planning).toMatchObject({ revision: expect.any(Number) })
+  const target = { type: 'project', teamId: requireState('teamId'), projectId: requireState('projectId') }
+  const updateId = `update-smoke-${runSuffix}`
+
+  // Publishing requires a cadence on the target, as in the Web composer.
+  const configured = await readJson(
+    await request.put('/api/planning/updates/cadence', {
+      headers: mutationHeaders(),
+      data: {
+        target,
+        cadence: {
+          updateOwnerMemberKey: demoEmail,
+          cadence: { unit: 'week', count: 1 },
+          timeZone: 'Asia/Tokyo',
+          nextDueAt: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+          reminderHoursBefore: 24,
+        },
+        expectedRevision: (planning as { revision: number }).revision,
+      },
+    }),
+    200,
+  )
+  expect(configured).toMatchObject({ planning: { revision: expect.any(Number) } })
+
+  const published = await readJson(
+    await request.post('/api/planning/updates', {
+      headers: mutationHeaders(),
+      data: {
+        target,
+        id: updateId,
+        health: 'at-risk',
+        risk: 'medium',
+        summary: 'Smoke health update',
+        riskSummary: 'Agent work is still in review.',
+        decisionSummary: 'Keep the release date.',
+        helpNeeded: '',
+        nextAction: 'Finish the agent task.',
+        evidence: [{ type: 'work-item', teamId: requireState('teamId'), workItemId: requireState('workItemId') }],
+        expectedRevision: (configured as { planning: { revision: number } }).planning.revision,
+      },
+    }),
+    201,
+  )
+  expect(published).toMatchObject({
+    planning: { revision: expect.any(Number) },
+    update: { id: updateId, target, health: 'at-risk', risk: 'medium', summary: 'Smoke health update' },
+  })
+
+  const history = await readJson(
+    await request.get('/api/planning/updates', {
+      headers: auth,
+      params: { targetType: 'project', teamId: target.teamId, projectId: target.projectId },
+    }),
+    200,
+  )
+  expect(history).toMatchObject({
+    updates: [expect.objectContaining({ id: updateId, health: 'at-risk' })],
+  })
+})
+
+test('starts and reports on a Work Item through the MCP server', async ({ request }, testInfo) => {
+  const teamId = requireState('teamId')
+  const auth = { Authorization: `Bearer ${requireState('accessToken')}` }
+  const connection = await readJson(await request.get('/api/developer/me/agent-connection', { headers: auth }), 200)
+  expect(connection).toMatchObject({ memberId: expect.any(String), canIssue: true })
+  const memberId = (connection as { memberId: string }).memberId
+
+  // The agent only starts Work Items assigned to its member in a ready status (`todo`, saved above).
+  const createBody = await readJson(
+    await request.post(`/api/teams/${encodeURIComponent(teamId)}/issues`, {
+      headers: mutationHeaders(),
+      data: {
+        title: agentWorkItemTitle,
+        assignedProjectId: requireState('projectId'),
+        assigneeUserId: memberId,
+        priority: 'medium',
+        schedule: { mode: 'unscheduled', calendarPolicy },
+      },
+    }),
+    201,
+  )
+  const agentWorkItem = (createBody as { issue: { id: string, revision: number } }).issue
+  state.agentWorkItemId = agentWorkItem.id
+
+  const issued = await readJson(
+    await request.post('/api/developer/me/api-keys', {
+      headers: mutationHeaders(),
+      data: { name: `Smoke MCP ${runSuffix}`, expiresAt: new Date(Date.now() + 86_400_000).toISOString() },
+    }),
+    201,
+  )
+  expect(issued).toMatchObject({ secret: expect.any(String), apiKey: { id: expect.any(String) } })
+  const { secret, apiKey } = issued as { secret: string, apiKey: { id: string } }
+
+  const baseURL = testInfo.project.use.baseURL
+  if (!baseURL) throw new Error('The real-server config must set use.baseURL.')
+  const mcp = await McpStdioClient.connect({
+    MUKUROJI_MCP_URL: new URL(baseURL).origin,
+    MUKUROJI_MCP_TOKEN: secret,
+    MUKUROJI_MCP_TEAM_ID: teamId,
+    MUKUROJI_MCP_ASSIGNEE_ID: memberId,
+    MUKUROJI_MCP_PROJECT_ID: requireState('projectId'),
+    MUKUROJI_MCP_AGENT_NAME: agentName,
+    MUKUROJI_MCP_RUNTIME: 'claude-code',
+  })
+  try {
+    const configuration = await mcp.callTool('get_configuration')
+    expect(configuration).toMatchObject({
+      isError: false,
+      structuredContent: { data: { mcp: { serverCompatibility: { status: 'compatible' } } } },
+    })
+
+    const next = await mcp.callTool('get_next_task')
+    expect(next).toMatchObject({
+      isError: false,
+      structuredContent: { data: { action: 'start', task: { id: agentWorkItem.id, title: agentWorkItemTitle } } },
+    })
+
+    const started = await mcp.callTool('start_task', {
+      taskId: agentWorkItem.id,
+      expectedRevision: agentWorkItem.revision,
+      workflowStatusId: 'in-progress',
+      idempotencyKey: crypto.randomUUID(),
+    })
+    expect(started).toMatchObject({
+      isError: false,
+      structuredContent: {
+        data: {
+          task: { id: agentWorkItem.id, statusCategory: 'started' },
+          run: { runId: expect.any(String), state: 'active', runtime: 'claude-code', agentName },
+        },
+      },
+    })
+    state.agentRunId = (started.structuredContent as { data: { run: { runId: string } } }).data.run.runId
+
+    const reported = await mcp.callTool('report_progress', {
+      taskId: agentWorkItem.id,
+      message: 'Smoke tests passed.',
+      kind: 'verification',
+      verifications: [{ command: 'bun run web:e2e:real-server', status: 'passed' }],
+      idempotencyKey: crypto.randomUUID(),
+    })
+    expect(reported).toMatchObject({
+      isError: false,
+      structuredContent: { data: { report: { kind: 'verification', sequence: 1 } } },
+    })
+  } finally {
+    await mcp.close()
+    await request.delete(`/api/developer/me/api-keys/${encodeURIComponent(apiKey.id)}`, { headers: mutationHeaders() })
+  }
+})
+
+test('shows the started Work Items and the agent run on the Factory board API', async ({ request }) => {
   const teamId = requireState('teamId')
   const board = await readJson(
     await request.get(`/api/teams/${encodeURIComponent(teamId)}/agent-runs`, {
@@ -251,11 +414,26 @@ test('shows the started Work Item on the Factory board API', async ({ request })
           statusCategory: 'started',
         }),
       }),
+      expect.objectContaining({
+        workItem: expect.objectContaining({ id: requireState('agentWorkItemId'), statusCategory: 'started' }),
+        run: expect.objectContaining({
+          runId: requireState('agentRunId'),
+          state: 'active',
+          agentName,
+          reportCount: 1,
+        }),
+        latestReport: expect.objectContaining({
+          runId: requireState('agentRunId'),
+          kind: 'verification',
+          verificationCounts: { passed: 1, failed: 0, skipped: 0 },
+        }),
+      }),
     ]),
   })
 })
 
-test('logs in through the Web and shows the Work Item on the Factory board', async ({ page }) => {
+test('logs in through the Web and shows the agent run on the Factory board', async ({ page }, testInfo) => {
+  await page.coverage.startJSCoverage({ resetOnNavigation: false })
   await page.goto('/')
   await page.getByLabel('メールアドレス').fill(demoEmail)
   await page.getByRole('button', { name: '続行', exact: true }).click()
@@ -265,4 +443,8 @@ test('logs in through the Web and shows the Work Item on the Factory board', asy
 
   await page.goto(`/teams/${encodeURIComponent(requireState('teamId'))}/factory`)
   await expect(page.getByText(workItemTitle).first()).toBeVisible()
+  await expect(page.getByText(agentWorkItemTitle).first()).toBeVisible()
+  await expect(page.getByText(agentName).first()).toBeVisible()
+
+  await publishCoverageSummary(summarizeJsCoverage(await page.coverage.stopJSCoverage()), testInfo)
 })

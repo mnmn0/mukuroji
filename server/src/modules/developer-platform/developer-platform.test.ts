@@ -566,6 +566,32 @@ function createMemoryDocumentClient(conditionalPutFailures = 0) {
 }
 
 describe('developer credential lifecycle', () => {
+  test('accepts the documented Workspace ID form with # for personal agent keys', async () => {
+    // `workspace#production` is the deploy default and `workspace#mukuroji-local` the Floci default (#417).
+    const { client } = createClient()
+    const workspaceId = 'workspace#production'
+    await expect(client.getPersonalCredentialPolicy(workspaceId)).resolves.toMatchObject({ selfIssuanceEnabled: true })
+    const created = await client.createApiKey({
+      workspaceId,
+      createdByUserId: 'member@example.com',
+      input: {
+        name: 'Laptop agent',
+        scopes: ['work-items:read'],
+        expiresAt: new Date(START.getTime() + 3_600_000).toISOString(),
+      },
+      issuance: 'personal',
+    })
+    expect((await client.listPersonalApiKeys(workspaceId, 'member@example.com')).map((key) => key.id))
+      .toEqual([created.apiKey.id])
+    await expect(client.authenticateApiKey({ credential: created.secret })).resolves.toMatchObject({
+      workspaceId,
+      subjectUserId: 'member@example.com',
+    })
+    // The ID must still start with a letter or digit and stay free of whitespace.
+    await expect(client.listApiKeys('#workspace')).rejects.toThrow('Workspace ID is invalid.')
+    await expect(client.listApiKeys('workspace #production')).rejects.toThrow('Workspace ID is invalid.')
+  })
+
   test('stores API key digest only and enforces expiry, last-used, rotation, and revoke', async () => {
     const { client, clock } = createClient()
     const created = await client.createApiKey({
