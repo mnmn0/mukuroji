@@ -303,16 +303,29 @@ function parseBulkUpdateNotificationsResponse(body: unknown): BulkUpdateNotifica
   throw new NotificationsApiError(502, 'The bulk notification response was not understood.', 'InvalidBulkNotificationResponse')
 }
 
+/** Notification states the Inbox can show. */
+const notificationStates: ReadonlySet<unknown> = new Set<NotificationState>(['unread', 'read', 'archived', 'snoozed'])
+
+/** Optional notification fields, all strings when present. */
+const optionalNotificationStringFields = [
+  'eventId', 'actorLabel', 'title', 'summary', 'deepLink', 'teamId', 'projectId', 'issueId',
+  'triageEntryId', 'commentId', 'rootCommentId', 'readAt', 'archivedAt', 'snoozedUntil',
+] as const
+
 /**
- * Reports whether a value is a notification from a bulk response, checking the fields the
- * Inbox relies on to place it.
+ * Reports whether a value is a notification from a bulk response.
  *
  * @param value - One entry of `notifications`.
- * @returns Whether the entry has the notification's ID, event type, and state.
+ * @returns Whether the entry has every required field, a known state, and string optional fields.
  */
 function isBulkNotification(value: unknown): value is InboxNotification {
-  return isRecord(value) && typeof value.id === 'string' && typeof value.eventType === 'string' &&
-    typeof value.state === 'string'
+  return isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.eventType === 'string' &&
+    typeof value.occurredAt === 'string' &&
+    Array.isArray(value.reasons) && value.reasons.every((reason) => typeof reason === 'string') &&
+    notificationStates.has(value.state) &&
+    optionalNotificationStringFields.every((field) => value[field] === undefined || typeof value[field] === 'string')
 }
 
 /**

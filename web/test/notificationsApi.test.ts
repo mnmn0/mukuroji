@@ -87,13 +87,25 @@ describe('notifications API', () => {
 
   test('keeps a partial bulk failure and rejects a bulk response of the wrong shape', async () => {
     const partial = {
-      notifications: [{ id: 'a', eventType: 'comment.created', state: 'archived' }],
+      notifications: [{
+        id: 'a', eventType: 'comment.created', reasons: ['mention'], occurredAt: '2026-11-22T00:00:00.000Z',
+        state: 'archived', archivedAt: '2026-11-22T01:00:00.000Z',
+      }],
       failures: [{ id: 'b', status: 404, code: 'NotificationNotFound' }],
       unreadCount: 1,
     }
     installFetchRecorder(partial)
     await expect(bulkUpdateNotifications('access-token', 'archive', ['a', 'b'], mutationContext)).resolves.toEqual(partial)
-    for (const body of [{}, { notifications: [], failures: [{ id: 'b' }], unreadCount: 0 }, { notifications: [{}], failures: [], unreadCount: 0 }]) {
+    const valid = partial.notifications[0]
+    for (const body of [
+      {},
+      { notifications: [], failures: [{ id: 'b' }], unreadCount: 0 },
+      { notifications: [{}], failures: [], unreadCount: 0 },
+      { notifications: [{ ...valid, state: 'deleted' }], failures: [], unreadCount: 0 },
+      { notifications: [{ ...valid, reasons: undefined }], failures: [], unreadCount: 0 },
+      { notifications: [{ ...valid, occurredAt: 1 }], failures: [], unreadCount: 0 },
+      { notifications: [{ ...valid, title: 3 }], failures: [], unreadCount: 0 },
+    ]) {
       installFetchRecorder(body)
       await expect(bulkUpdateNotifications('access-token', 'archive', ['a'], mutationContext)).rejects.toMatchObject({
         status: 502, code: 'InvalidBulkNotificationResponse',
