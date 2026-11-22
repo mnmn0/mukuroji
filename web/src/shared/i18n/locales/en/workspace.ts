@@ -664,6 +664,7 @@ export const workspaceMessages = {
   'workspace.access.bulk.issue.duplicate': 'Same email address as a row above',
   'workspace.access.bulk.issue.already-member': 'Already a member',
   'workspace.access.bulk.issue.already-invited': 'Already invited',
+  'workspace.access.bulk.issue.reinvite-required': 'There is an earlier invitation. Use Reinvite in the invitation list below',
   'workspace.access.bulk.failure.policy': 'The Workspace domain policy does not allow this account',
   'workspace.access.bulk.failure.conflict': 'Already invited, or another change happened at the same time',
   'workspace.access.bulk.failure.rateLimited': 'Too many invitations at once. Wait a moment and send again',

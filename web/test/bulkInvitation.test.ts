@@ -122,7 +122,7 @@ describe('planBulkInvitation', () => {
       [8, 'duplicate'],
       [9, 'already-member'],
       [10, 'already-invited'],
-      [11, undefined],
+      [11, 'reinvite-required'],
     ])
   })
 

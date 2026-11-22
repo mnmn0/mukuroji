@@ -664,6 +664,7 @@ export const workspaceMessages = {
   'workspace.access.bulk.issue.duplicate': '上の行と同じメールアドレスです',
   'workspace.access.bulk.issue.already-member': 'すでにメンバーです',
   'workspace.access.bulk.issue.already-invited': 'すでに招待中です',
+  'workspace.access.bulk.issue.reinvite-required': '以前の招待があります。下の招待一覧の「再招待」を使ってください',
   'workspace.access.bulk.failure.policy': 'Workspace のドメイン制限で招待できません',
   'workspace.access.bulk.failure.conflict': 'すでに招待中か、ほかの操作と重なりました',
   'workspace.access.bulk.failure.rateLimited': '送信が混み合っています。少し待って再送してください',

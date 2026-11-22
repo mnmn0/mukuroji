@@ -16,6 +16,9 @@ import type { WorkspaceInvitation, WorkspaceMember, WorkspaceRole } from '../api
  * - `duplicate`: an earlier row of the same input has the same address.
  * - `already-member`: the address is already a Workspace member.
  * - `already-invited`: the address already has an open invitation.
+ * - `reinvite-required`: the address has an expired, revoked or accepted invitation. The API keeps
+ *   one invitation record per address, so a new one cannot be created; the ledger's reinvite
+ *   action renews it instead.
  */
 export type BulkInvitationIssue =
   | 'invalid-email'
@@ -25,6 +28,7 @@ export type BulkInvitationIssue =
   | 'duplicate'
   | 'already-member'
   | 'already-invited'
+  | 'reinvite-required'
 
 /** One row of a bulk invitation after the check. */
 export type BulkInvitationRow = {
@@ -255,6 +259,11 @@ export function planBulkInvitation(text: string, context: BulkInvitationContext)
       .filter((invitation) => openInvitationStatuses.has(invitation.status))
       .map((invitation) => normalizeWorkspaceInvitationEmail(invitation.email)),
   )
+  const closedInvitationEmails = new Set(
+    context.invitations
+      .filter((invitation) => !openInvitationStatuses.has(invitation.status))
+      .map((invitation) => normalizeWorkspaceInvitationEmail(invitation.email)),
+  )
   const seen = new Set<string>()
 
   const rows = rawRows.slice(0, WORKSPACE_BULK_INVITATION_MAX_ROWS).map((raw): BulkInvitationRow => {
@@ -277,7 +286,9 @@ export function planBulkInvitation(text: string, context: BulkInvitationContext)
                 ? 'already-member'
                 : invitedEmails.has(email)
                   ? 'already-invited'
-                  : undefined
+                  : closedInvitationEmails.has(email)
+                    ? 'reinvite-required'
+                    : undefined
     if (isWorkspaceInvitationEmail(email)) seen.add(email)
     return issue ? { ...row, issue } : row
   })
