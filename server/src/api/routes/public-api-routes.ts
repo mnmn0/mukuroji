@@ -350,9 +350,9 @@ async function readAccessibleWorkItemExportPage(
       })
     : undefined
   return {
-    // Contributors are internal planning data, and acceptance criteria, remaining effort, and
-    // progress have their own endpoints because the public Work Item schema is closed, so all of
-    // them are excluded from export rows.
+    // The export is read by Workspace administrators in the Web and lists only Work Items they can
+    // view, so it keeps contributors and acceptance criteria for a re-import. Remaining effort and
+    // progress have their own endpoints and stay out of export rows.
     items: page.issues.map(omitWorkItemExportExcludedFields),
     hasMore: nextContinuation !== undefined,
     ...(nextContinuation ? { nextContinuation } : {}),
@@ -361,14 +361,11 @@ async function readAccessibleWorkItemExportPage(
 
 /** Work Item fields that export rows leave out. */
 type WorkItemExportExcludedField =
-  | 'contributorAssignments'
-  | 'acceptanceCriteria'
   | 'remainingEffortMinutes'
   | 'progressPercent'
 
 /**
- * Removes contributor assignments, acceptance criteria, remaining effort, and progress from a
- * Work Item export row.
+ * Removes remaining effort and progress from a Work Item export row.
  *
  * @param workItem - Work Item read for the export page.
  * @returns The Work Item without the fields excluded from exports.
@@ -377,14 +374,10 @@ function omitWorkItemExportExcludedFields<
   T extends { readonly [Field in WorkItemExportExcludedField]?: unknown },
 >(workItem: T): Omit<T, WorkItemExportExcludedField> {
   const {
-    contributorAssignments: _contributorAssignments,
-    acceptanceCriteria: _acceptanceCriteria,
     remainingEffortMinutes: _remainingEffortMinutes,
     progressPercent: _progressPercent,
     ...exported
   } = workItem
-  void _contributorAssignments
-  void _acceptanceCriteria
   void _remainingEffortMinutes
   void _progressPercent
   return exported

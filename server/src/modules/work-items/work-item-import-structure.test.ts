@@ -107,7 +107,7 @@ describe('Work Item import structure', () => {
   test('reads dependencies with type and lag and rejects dependency cycles', () => {
     const preview = previewWorkItemImport('json', source([
       { WBS: '1' },
-      { WBS: '2', Predecessors: '1FS+2d, 1' },
+      { WBS: '2', Predecessors: '1FS+2d, 1 ff' },
       { WBS: '3', Predecessors: '2SS-1; 4' },
       { WBS: '4', Predecessors: [{ key: '3', type: 'finish-to-finish', lagDays: 0 }] },
     ]), [
@@ -126,6 +126,24 @@ describe('Work Item import structure', () => {
       [2, 'ImportDependencyDuplicate'],
       [3, 'ImportDependencyCycle'],
       [4, 'ImportDependencyCycle'],
+    ])
+  })
+
+  test('reads a spaced dependency whose key ends like a type or lag', () => {
+    const preview = previewWorkItemImport('json', source([
+      { Key: 'task-ff' },
+      { Key: 'task-12' },
+      { Key: 'c', Predecessors: 'task-ff SS +3; task-12' },
+    ]), [
+      ...baseMapping,
+      { sourceField: 'Key', targetField: 'importKey' },
+      { sourceField: 'Predecessors', targetField: 'dependencies' },
+    ])
+
+    expect(preview.errors).toEqual([])
+    expect(preview.links).toEqual([
+      { kind: 'dependency', predecessorRow: 1, successorRow: 3, type: 'start-to-start', lagDays: 3 },
+      { kind: 'dependency', predecessorRow: 2, successorRow: 3, type: 'finish-to-start', lagDays: 0 },
     ])
   })
 

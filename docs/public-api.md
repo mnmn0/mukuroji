@@ -308,7 +308,7 @@ Mapping の `targetField` には Work Item の項目に加えて、行どうし�
 | `wbsNumber` | `1.2.3` など | WBS 番号。`parentKey` がない行は、最後の `.` より前（`1.2`）を WBS 番号に持つ行を親にする。`importKey` がない行の参照キーにもなる。 |
 | `outlineLevel` | 1〜100 の整数 | アウトラインの深さ（MS Project の OutlineLevel）。`parentKey` と `wbsNumber` がない行は、直前にある 1 段浅い行を親にする。空欄は 1。 |
 | `parentKey` | 他の行のキー | 親の行。`wbsNumber` と `outlineLevel` より優先する。 |
-| `dependencies` | `1.2FS+2d, 3SS-1` または `[{ "key", "type", "lagDays" }]` | この行の先行タスク。種類は `FS`・`SS`・`FF`・`SF`（省略は `FS`）、ラグは暦日。1 行 50 件まで。キーの末尾が種類やラグに見える場合は JSON の形で書く。 |
+| `dependencies` | `1.2FS+2d, 3SS-1`、`a1 SS +2` または `[{ "key", "type", "lagDays" }]` | この行の先行タスク。種類は `FS`・`SS`・`FF`・`SF`（省略は `FS`）、ラグは暦日。1 行 50 件まで。空白を挟まない形では種類を大文字で書き、項目全体が他の行のキーと一致すればそのキーとして読む。キーの末尾が種類やラグに見える場合は空白で区切る。 |
 | `relations` | `blocks:2, related:3` または `[{ "type", "key" }]` | 親子以外の relation。種類は `blocks`・`blockedBy`・`related`・`duplicate`。1 行 50 件まで。両方の行に書いた同じ relation は 1 つにまとめる。 |
 | `contributors` | `member:<userId> effort:2h; role:<jobRoleId>` または `contributorAssignments` と同じ JSON 配列 | Contributor。`;` か改行で区切り、`member:`・`role:`・`effort:`（分、または `2h`・`30m`）・`status:` を空白で並べる。接頭辞のない値は member。 |
 | `acceptanceCriteria` | 1 行 1 条件、または `[{ "text", "satisfied" }]` | 受け入れ条件。行頭の `[x]` は達成済み、`[ ]` と `- ` は取り除く。20 件まで。 |

@@ -77,6 +77,11 @@ export type WorkItemImportDependencyReference = {
   type: ScheduleDependencyType
   /** Signed lag in calendar days. */
   lagDays: number
+  /**
+   * Whole compact entry; when it names a row, it is that row with `FS` and no lag, so a key such
+   * as `task-12` is not read as `task` with a lag.
+   */
+  entry?: string
 }
 
 /** One relation reference read from a row. */
@@ -263,8 +268,12 @@ export function resolveWorkItemImportStructure(
   const dependencyKeys = new Set<string>()
   const dependencyEdges = new Map<number, number[]>()
   for (const row of rows) {
-    for (const dependency of row.dependencies) {
-      const predecessorRow = resolve(dependency.key)
+    for (const written of row.dependencies) {
+      const entryRow = written.entry === undefined ? undefined : resolve(written.entry)
+      const dependency: WorkItemImportDependencyReference = entryRow === undefined || written.entry === undefined
+        ? written
+        : { key: written.entry, type: 'finish-to-start', lagDays: 0 }
+      const predecessorRow = entryRow ?? resolve(dependency.key)
       if (predecessorRow === undefined) {
         errors.push(referenceError(row.row, 'dependencies', `Predecessor "${dependency.key}" does not name a row in this import.`))
         continue
@@ -310,9 +319,10 @@ export function resolveWorkItemImportStructure(
         errors.push(referenceError(row.row, 'relations', 'A row cannot relate to itself.'))
         continue
       }
-      const link = relation.type === 'blockedBy'
-        ? { sourceRow: otherRow, targetRow: row.row, type: 'blocks' as const }
-        : { sourceRow: row.row, targetRow: otherRow, type: relation.type }
+      const link: { sourceRow: number; targetRow: number; type: 'blocks' | 'related' | 'duplicate' } =
+        relation.type === 'blockedBy'
+          ? { sourceRow: otherRow, targetRow: row.row, type: 'blocks' }
+          : { sourceRow: row.row, targetRow: otherRow, type: relation.type }
       // A symmetric relation listed on both rows is one link.
       const [first, second] = link.type === 'blocks'
         ? [link.sourceRow, link.targetRow]
@@ -424,8 +434,8 @@ export function readWorkItemImportContributors(
  * Reads the schedule dependency text of one row.
  *
  * Entries are separated by `,`, `;`, or new lines, and each is a row key followed by an optional
- * type (`FS`, `SS`, `FF`, `SF`; `FS` when left out) and lag (`+2`, `-1d`), as in `1.2FS+2d`. A JSON
- * array of `{ key, type, lagDays }` objects is also accepted.
+ * type (`FS`, `SS`, `FF`, `SF`; `FS` when left out) and lag (`+2`, `-1d`), as in `1.2FS+2d` or
+ * `a1 SS -1`. A JSON array of `{ key, type, lagDays }` objects is also accepted.
  *
  * @param value - Transformed source value.
  * @param row - One-based data row number.
@@ -464,14 +474,9 @@ function readDependencies(
     }
   } else if (typeof value === 'string' || typeof value === 'number') {
     for (const entry of splitEntries(String(value), /[,;\n\r]+/u)) {
-      const match = /^(.+?)\s*(FS|SS|FF|SF)?\s*(?:([+-])\s*(\d+)\s*(?:d|days?|日|edays?)?)?$/iu.exec(entry)
-      if (!match) return fail(`Dependency "${entry}" is invalid.`)
-      const key = match[1]!.trim()
-      const lagDays = match[4] === undefined ? 0 : Number(match[4]) * (match[3] === '-' ? -1 : 1)
-      if (!key || [...key].length > importKeyMaxLength || !isLagDays(lagDays)) {
-        return fail(`Dependency "${entry}" is invalid.`)
-      }
-      references.push({ key, type: readDependencyType(match[2] ?? 'FS')!, lagDays })
+      const reference = readDependencyText(entry)
+      if (!reference) return fail(`Dependency "${entry}" is invalid.`)
+      references.push(reference)
     }
   } else {
     return fail('dependencies must be text or a JSON array.')
@@ -480,6 +485,46 @@ function readDependencies(
     return fail(`A row can have at most ${WORK_ITEM_IMPORT_ROW_LINK_LIMIT} dependencies.`)
   }
   return references
+}
+
+/**
+ * Reads one dependency written as text.
+ *
+ * With whitespace, the first word is the key and the rest is the type and lag (`a1 FS +2`), so a
+ * key may end in letters or digits that look like a type or lag. Without whitespace the entry is
+ * the compact MS Project form (`3FS+2d`), whose type must be upper case.
+ *
+ * @param entry - One trimmed entry.
+ * @returns The reference, or undefined when the entry is invalid.
+ */
+function readDependencyText(entry: string): WorkItemImportDependencyReference | undefined {
+  const lagUnit = '(?:d|days?|日|edays?)?'
+  let key: string | undefined
+  let type: string | undefined
+  let sign: string | undefined
+  let amount: string | undefined
+  const spaced = /^(\S+)\s+(.*)$/u.exec(entry)
+  if (spaced) {
+    const rule = new RegExp(`^(FS|SS|FF|SF)?\\s*(?:([+-])\\s*(\\d+)\\s*${lagUnit})?$`, 'iu').exec(spaced[2]!.trim())
+    if (!rule) return undefined
+    ;[key, type, sign, amount] = [spaced[1], rule[1], rule[2], rule[3]]
+  } else {
+    const compact = new RegExp(`^(.+?)(FS|SS|FF|SF)?(?:([+-])(\\d+)${lagUnit})?$`, 'u').exec(entry)
+    if (!compact) return undefined
+    ;[key, type, sign, amount] = [compact[1], compact[2], compact[3], compact[4]]
+  }
+  const lagDays = amount === undefined ? 0 : Number(amount) * (sign === '-' ? -1 : 1)
+  if (!key || [...key].length > importKeyMaxLength || !isLagDays(lagDays)) {
+    return spaced || [...entry].length > importKeyMaxLength
+      ? undefined
+      : { key: entry, type: 'finish-to-start', lagDays: 0 }
+  }
+  return {
+    key,
+    type: readDependencyType(type ?? 'FS')!,
+    lagDays,
+    ...(spaced || (type === undefined && amount === undefined) ? {} : { entry }),
+  }
 }
 
 /**
