@@ -111,10 +111,8 @@ export function MarkdownImportSection({
     const generation = folderGenerationRef.current
     setFolder(undefined)
     setFolderError(undefined)
-    if (chosen.length === 0) {
-      setIsReadingFolder(false)
-      return
-    }
+    setIsReadingFolder(false)
+    if (chosen.length === 0) return
     const markdown = chosen
       .map((file) => ({ file, path: file.webkitRelativePath || file.name }))
       .filter(({ path }) => isImportableMarkdownPath(path))

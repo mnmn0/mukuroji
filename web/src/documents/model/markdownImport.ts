@@ -236,6 +236,7 @@ function scanBlocks(
   | { ok: true; blocks: ScannedBlock[] }
   | { ok: false; code: 'table-too-large' } {
   const blocks: ScannedBlock[] = []
+  /** Rewrites link targets with the resolver, or keeps the text as written. */
   const rewrite: LinkRewriter = resolveLink
     ? (raw) => rewriteLinkTargets(raw, resolveLink)
     : (raw) => raw

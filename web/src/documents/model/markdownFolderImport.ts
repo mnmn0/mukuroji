@@ -292,6 +292,12 @@ export function resolveImportedPageLinks(
       replacements.push([placeholder, `/documents/${encodeURIComponent(id)}`])
     }
   }
+  /**
+   * Replaces every resolvable placeholder in one text.
+   *
+   * @param text - Stored text or URL.
+   * @returns The text with page paths in place of placeholders.
+   */
   const replace = (text: string) => {
     if (!text.includes('/documents/__import-')) return text
     let result = text
