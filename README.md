@@ -163,6 +163,12 @@ bun run web:dev
 - Floci: http://localhost:4566 （`FLOCI_PORT` で変更可）。認証のない AWS emulator のため
   host の loopback だけに公開し、image は digest で固定します。Docker socket は
   Lambda を実行する `floci:up:lambda` のときだけ渡します。
+- DynamoDB: ready hook が作る table の key・GSI・TTL は、CDK の
+  `cdk/lib/subsystems/data-stores.ts` から生成した `floci/init/dynamodb/tables.json` を使います。
+  table 定義を変えたら `bun run floci:tables` で再生成して commit してください（`bun run cdk:test`
+  が古い生成物を検出します）。既存の local table に足りない GSI と TTL は再起動時に追加し、
+  key や projection が違う table は消さずに初期化を止めます。そのときは
+  `docker compose down --volumes` で local data を作り直してください。
 - S3: versioning と local Web origin 向け CORS を設定した `mukuroji-files-local` と
   `mukuroji-work-item-import-local`。ready hook の再実行で既存objectを削除しません。
 - SQS: import、Webhook配送、connector同期の3 queue。それぞれ専用DLQ、

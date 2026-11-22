@@ -32,6 +32,7 @@ import {
 import { TaskGanttView, type TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
 import { createTaskGanttDisplayBinding } from '../../tasks/model/taskGanttDisplay'
 import { TaskCalendarView } from '../../tasks/ui/TaskCalendarView'
+import { MyTasksTaskTable } from './MyTasksTaskTable'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
 import {
   createMyTasksGanttGrouping,
@@ -40,7 +41,7 @@ import {
 } from '../model/myTaskGrouping'
 
 /** Layouts of the My Tasks view. */
-export type MyTasksViewMode = 'board' | 'gantt' | 'calendar'
+export type MyTasksViewMode = 'board' | 'table' | 'gantt' | 'calendar'
 
 /**
  * Props for the Workspace personal task board.
@@ -110,7 +111,7 @@ export type MyTasksWorkspaceViewProps = {
 
 /**
  * Renders the current user's Team-scoped kanban board with drag-and-drop status changes, or
- * the same Work Items as a Gantt chart or a monthly calendar.
+ * the same Work Items as a table, a Gantt chart, or a monthly calendar.
  *
  * @param props - Owned and contributed Work Items, Team configurations, and board actions.
  * @returns The personal Workspace task board.
@@ -327,7 +328,7 @@ export function MyTasksWorkspaceView({
       className="inline-flex h-9 w-fit overflow-hidden rounded-[7px] border border-[var(--workbench-border-strong)] bg-surface"
       role="group"
     >
-      {(['board', 'gantt', 'calendar'] as const).map((mode) => (
+      {(['board', 'table', 'gantt', 'calendar'] as const).map((mode) => (
         <button
           aria-pressed={viewMode === mode}
           className={`px-3.5 text-sm font-semibold transition ${
@@ -352,10 +353,34 @@ export function MyTasksWorkspaceView({
         <TaskCalendarView
           configurationsByTeam={configurationsByTeam}
           month={calendarMonth}
+          monthNote="shown-month"
           onMonthChange={changeCalendarMonth}
           onSelectTask={onOpenTask}
           t={t}
           tasks={ganttTasks}
+        />
+      </div>
+    )
+  }
+
+  if (viewMode === 'table') {
+    return (
+      <div className="grid min-w-0 gap-4">
+        {taskViewToolbar}
+        {viewModeSwitch}
+        <MyTasksTaskTable
+          configurationsByTeam={configurationsByTeam}
+          contributorTaskKeys={contributorTaskKeys}
+          focusedTaskKey={focusedTaskKey}
+          locale={locale}
+          onOpenTask={onOpenTask}
+          onTaskActionMenuOpen={onTaskActionMenuOpen}
+          personLabels={personLabels}
+          presentation={presentation}
+          selectedTaskKeys={selectedTaskKeys}
+          t={t}
+          tasks={tasks}
+          teams={teams}
         />
       </div>
     )

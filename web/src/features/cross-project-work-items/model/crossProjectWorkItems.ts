@@ -4,11 +4,22 @@ import type {
   WorkspaceWorkItemListFilter,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../../projects/api/directory'
+import type { TaskGanttGrouping } from '../../../tasks/model/taskGanttRows'
 import { isOpenWorkItem, resolveWorkItemAssignee } from '../../../work-items/model/workItemDisplay'
-import { resolveWorkspaceTaskInvolvement } from '../../../work-items/model/workspaceWorkItems'
+import {
+  createWorkspaceTaskStatusColumns,
+  isTaskInWorkspaceStatusColumn,
+  resolveWorkspaceTaskInvolvement,
+} from '../../../work-items/model/workspaceWorkItems'
 
 /** How the cross-Project Work Item table groups its rows. */
 export type CrossProjectWorkItemGrouping = 'project' | 'assignee'
+
+/** Read-only layouts of the cross-Project Work Item list. */
+export type CrossProjectWorkItemLayout = 'table' | 'board' | 'gantt'
+
+/** Every layout of the cross-Project Work Item list, in switcher order. */
+export const crossProjectWorkItemLayouts: readonly CrossProjectWorkItemLayout[] = ['table', 'board', 'gantt']
 
 /**
  * Filters and grouping of the cross-Project Work Item list, kept in the URL so a view can be
@@ -31,8 +42,10 @@ export type CrossProjectWorkItemListState = {
    * Job role IDs are unique only within one Team configuration, so the role carries its Team.
    */
   contributorJobRole?: CrossProjectWorkItemJobRoleRef
-  /** Row grouping of the table. */
+  /** Row grouping of the table, board swimlanes, and Gantt heading rows. */
   grouping: CrossProjectWorkItemGrouping
+  /** Layout that shows the filtered Work Items. */
+  layout: CrossProjectWorkItemLayout
 }
 
 /** Team-qualified Project reference, because a Project ID can appear in several Teams. */
@@ -93,6 +106,35 @@ export type CrossProjectWorkItemGroup = {
   workItems: CanonicalWorkItem[]
 }
 
+/** One workflow status column of a board swimlane. */
+export type CrossProjectWorkItemBoardColumn = {
+  /** Team, Work Item Type, and status identity used as the React key. */
+  key: string
+  /** Column heading, prefixed with the Team and Type names when the swimlane mixes them. */
+  label: string
+  /** Work Items in this status, in the swimlane order. */
+  workItems: CanonicalWorkItem[]
+}
+
+/** Status columns of one board swimlane. */
+export type CrossProjectWorkItemBoardLane = {
+  /** Workflow status columns of the Teams whose Work Items are in the swimlane. */
+  columns: CrossProjectWorkItemBoardColumn[]
+  /**
+   * Work Items that fit no column, because their Team configuration did not load or their status
+   * is not in the configured workflow.
+   */
+  unplacedWorkItems: CanonicalWorkItem[]
+}
+
+/** Labels the Gantt group headings need for groups without a Project or owner. */
+export type CrossProjectWorkItemGanttGroupLabels = {
+  /** Heading of Work Items without a Project. */
+  noProject: string
+  /** Heading of Work Items without an owner. */
+  noAssignee: string
+}
+
 /** URL query parameter names owned by the cross-Project Work Item list. */
 const queryParameter = {
   project: 'project',
@@ -101,6 +143,7 @@ const queryParameter = {
   member: 'member',
   role: 'role',
   group: 'group',
+  layout: 'layout',
 } as const
 
 /** Separator between the encoded Team ID and the Team-local ID of one query value. */
@@ -112,6 +155,7 @@ export const defaultCrossProjectWorkItemListState: CrossProjectWorkItemListState
   openOnly: true,
   mine: false,
   grouping: 'project',
+  layout: 'table',
 }
 
 /**
@@ -190,7 +234,18 @@ export function parseCrossProjectWorkItemListState(
     ...(contributorMemberId ? { contributorMemberId } : {}),
     ...(roleParts ? { contributorJobRole: { teamId: roleParts[0], jobRoleId: roleParts[1] } } : {}),
     grouping: searchParams.get(queryParameter.group) === 'assignee' ? 'assignee' : 'project',
+    layout: parseCrossProjectWorkItemLayout(searchParams.get(queryParameter.layout)),
   }
+}
+
+/**
+ * Reads a layout query value, falling back to the table for missing or unknown values.
+ *
+ * @param value - Raw `layout` query value.
+ * @returns A supported layout.
+ */
+function parseCrossProjectWorkItemLayout(value: string | null): CrossProjectWorkItemLayout {
+  return crossProjectWorkItemLayouts.find((layout) => layout === value) ?? 'table'
 }
 
 /**
@@ -213,6 +268,7 @@ export function createCrossProjectWorkItemListSearchParams(
     searchParams.set(queryParameter.role, createCrossProjectWorkItemJobRoleKey(state.contributorJobRole))
   }
   if (state.grouping !== 'project') searchParams.set(queryParameter.group, state.grouping)
+  if (state.layout !== 'table') searchParams.set(queryParameter.layout, state.layout)
   return searchParams
 }
 
@@ -446,4 +502,57 @@ function compareWorkItems(left: CanonicalWorkItem, right: CanonicalWorkItem) {
   const leftDue = left.dueDate || '￿'
   const rightDue = right.dueDate || '￿'
   return leftDue.localeCompare(rightDue) || left.title.localeCompare(right.title)
+}
+
+/**
+ * Places the Work Items of one group into the workflow status columns of their Teams.
+ *
+ * Every status of each Team present in the group gets a column, so a Project swimlane shows its
+ * whole workflow even when some statuses are empty.
+ *
+ * @param workItems - Work Items of one group, already ordered.
+ * @param configurationsByTeam - Resolved Team configurations keyed by Team ID.
+ * @param teams - Workspace directory used for Team names in column headings.
+ * @returns The swimlane columns and the Work Items no column can hold.
+ */
+export function createCrossProjectWorkItemBoardLane(
+  workItems: readonly CanonicalWorkItem[],
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  teams: readonly ProjectDirectoryTeam[],
+): CrossProjectWorkItemBoardLane {
+  const statusColumns = createWorkspaceTaskStatusColumns(workItems, configurationsByTeam, teams)
+  const placed = new Set<CanonicalWorkItem>()
+  const columns = statusColumns.map((column) => {
+    const columnWorkItems = workItems.filter((workItem) => isTaskInWorkspaceStatusColumn(workItem, column))
+    for (const workItem of columnWorkItems) placed.add(workItem)
+    return { key: column.key, label: column.label, workItems: columnWorkItems }
+  })
+  return { columns, unplacedWorkItems: workItems.filter((workItem) => !placed.has(workItem)) }
+}
+
+/**
+ * Creates the Gantt heading-row grouping that matches the list grouping.
+ *
+ * Project headings carry the Team name, because Project names can repeat across Teams.
+ *
+ * @param grouping - Grouping selected in the list.
+ * @param teams - Workspace directory used for Project and Team names.
+ * @param labels - Headings of the groups without a Project or owner.
+ * @returns Grouping passed to the Gantt chart.
+ */
+export function createCrossProjectWorkItemGanttGrouping(
+  grouping: CrossProjectWorkItemGrouping,
+  teams: readonly ProjectDirectoryTeam[],
+  labels: CrossProjectWorkItemGanttGroupLabels,
+): TaskGanttGrouping {
+  return {
+    direction: 'asc',
+    resolve: (workItem) => {
+      const group = resolveGroupIdentity(workItem, grouping, teams)
+      if (group.isUnassigned) {
+        return { key: group.key, label: grouping === 'assignee' ? labels.noAssignee : labels.noProject }
+      }
+      return { key: group.key, label: group.detail ? `${group.label} · ${group.detail}` : group.label }
+    },
+  }
 }
