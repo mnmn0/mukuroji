@@ -85,6 +85,22 @@ describe('notifications API', () => {
     expect(JSON.parse(String(requests[0]?.init.body))).toEqual({ action: 'archive', notificationIds: ['a', 'b'] })
   })
 
+  test('keeps a partial bulk failure and rejects a bulk response of the wrong shape', async () => {
+    const partial = {
+      notifications: [{ id: 'a', eventType: 'comment.created', state: 'archived' }],
+      failures: [{ id: 'b', status: 404, code: 'NotificationNotFound' }],
+      unreadCount: 1,
+    }
+    installFetchRecorder(partial)
+    await expect(bulkUpdateNotifications('access-token', 'archive', ['a', 'b'], mutationContext)).resolves.toEqual(partial)
+    for (const body of [{}, { notifications: [], failures: [{ id: 'b' }], unreadCount: 0 }, { notifications: [{}], failures: [], unreadCount: 0 }]) {
+      installFetchRecorder(body)
+      await expect(bulkUpdateNotifications('access-token', 'archive', ['a'], mutationContext)).rejects.toMatchObject({
+        status: 502, code: 'InvalidBulkNotificationResponse',
+      })
+    }
+  })
+
   test('gets and saves channel, frequency, and quiet-hours preferences', async () => {
     const preferences = {
       channels: { email: true, inApp: true, push: false },

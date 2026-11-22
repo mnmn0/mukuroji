@@ -49,7 +49,11 @@ describe('notification routing settings', () => {
       locale="ja"
       muteTargets={[{ id: 'core', name: 'Core', projects: [{ id: 'roadmap', name: 'Roadmap' }] }]}
     />)
-    const input = (testId: string) => html.match(new RegExp(`<input[^>]*data-testid="${testId}"[^>]*>`))?.[0] ?? ''
+    const input = (testId: string) => {
+      const match = html.match(new RegExp(`<input[^>]*data-testid="${testId}"[^>]*>`))?.[0]
+      if (!match) throw new Error(`input not found: ${testId}`)
+      return match
+    }
     expect(input('notification-category-status-inApp')).not.toContain('checked')
     expect(input('notification-category-due-inApp')).toContain('checked')
     expect(input('notification-category-due-email')).toContain('disabled')
