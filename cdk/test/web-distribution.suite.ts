@@ -334,17 +334,25 @@ test('reads the custom domain from CDK context', () => {
   )).toThrow(`CDK context ${WEB_DOMAIN_NAME_CONTEXT_KEY} must be a string.`);
 });
 
-test('the committed cdk.json leaves the custom domain unset', () => {
+test('the committed cdk.json declares a valid custom domain setting', () => {
   const cdkJson: unknown = JSON.parse(
     readFileSync(path.join(__dirname, '..', 'cdk.json'), 'utf8'),
   );
-  expect(cdkJson).toEqual(expect.objectContaining({
-    context: expect.objectContaining({
-      [WEB_DOMAIN_NAME_CONTEXT_KEY]: '',
-      [WEB_CERTIFICATE_ARN_CONTEXT_KEY]: '',
-      [WEB_HOSTED_ZONE_ID_CONTEXT_KEY]: '',
-    }),
-  }));
+  const app = new cdk.App({
+    context: typeof cdkJson === 'object' && cdkJson !== null && 'context' in cdkJson
+      && typeof cdkJson.context === 'object' && cdkJson.context !== null
+      ? { ...cdkJson.context }
+      : {},
+  });
+  // The keys stay in cdk.json so the domain is changed there; empty keeps the CloudFront domain.
+  for (const key of [
+    WEB_DOMAIN_NAME_CONTEXT_KEY,
+    WEB_CERTIFICATE_ARN_CONTEXT_KEY,
+    WEB_HOSTED_ZONE_ID_CONTEXT_KEY,
+  ]) {
+    expect(typeof app.node.tryGetContext(key)).toBe('string');
+  }
+  expect(() => resolveWebCustomDomain(readWebCustomDomainSettings(app))).not.toThrow();
 });
 
 test('accepts only a complete, well-formed custom domain', () => {
