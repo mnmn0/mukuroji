@@ -760,7 +760,7 @@ describe('collaboration projection pure helpers', () => {
       weeklyReportAuthorMemberKey: 'member@example.com',
       weeklyReportWeekStart: '2026-07-06',
     })
-    const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', event.occurredAt, preferences)
+    const state = createNotificationProjectionDeliveryState('workspace-1#member@example.com', event.occurredAt, preferences, unscopedRoutingSubject)
     expect(createNotificationProjectionItem(event, candidate, state)).toMatchObject({
       weeklyReportAuthorMemberKey: 'member@example.com',
       weeklyReportWeekStart: '2026-07-06',
