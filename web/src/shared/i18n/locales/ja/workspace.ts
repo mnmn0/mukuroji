@@ -190,6 +190,7 @@ export const workspaceMessages = {
     '自分が次に進めるタスク、レビュー待ち、完了済みの作業をひとつの流れで扱えます。',
   'workspace.myTasks.involvement.contributor': '参加',
   'workspace.myTasks.moveError': 'タスクの状態を更新できませんでした。',
+  'workspace.myTasks.updateError': '変更を保存できませんでした。再読み込みしてからもう一度お試しください。',
   'workspace.myTasks.conflict': '別のメンバーが先に更新しました。最新の状態へ更新しました。',
   'workspace.myTasks.moveStatusLabel': '{title} の状態を変更',
   'workspace.myTasks.group.today': '今日処理する',

@@ -10364,6 +10364,79 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL(/wireframe/)
   })
 
+  test('マイタスクのテーブルで期限を事前確認してから変え、優先度をその場で変える', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({ id: 'my-due-task', title: '期限を変える担当タスク' }),
+        ],
+      },
+    })
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+    await page.goto('/my-tasks')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByTestId('my-tasks-view-table').click()
+
+    const dueDateField = page.getByTestId('my-tasks-table-due-edit-refero-my-due-task')
+    await expect(dueDateField).toHaveText('2026-06-22')
+    await dueDateField.click()
+    const dueDateInput = page.getByTestId('my-tasks-table-due-edit-refero-my-due-task-input')
+    await dueDateInput.fill('2026-06-25')
+    await dueDateInput.press('Enter')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(preview).toContainText('期限を変える担当タスク')
+    await expect(preview).toContainText('2026-06-25')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    expect(requestCounts.scheduleConfirms).toBe(0)
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(preview).toHaveCount(0)
+    await expect(dueDateField).toHaveText('2026-06-25')
+    await expect(dueDateField).toBeFocused()
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+
+    // Cancelling a preview leaves the due date as it was.
+    await dueDateField.click()
+    await dueDateInput.fill('2026-06-30')
+    await dueDateInput.press('Enter')
+    await preview.getByRole('button', { name: 'キャンセル', exact: true }).click()
+    await expect(preview).toHaveCount(0)
+    await expect(dueDateField).toHaveText('2026-06-25')
+    expect(requestCounts.scheduleConfirms).toBe(1)
+
+    const updatesBefore = requestCounts.issueUpdates
+    const priorityField = page.getByTestId('my-tasks-table-priority-edit-refero-my-due-task')
+    await expect(priorityField).toHaveText('中')
+    await priorityField.click()
+    await page.getByTestId('my-tasks-table-priority-edit-refero-my-due-task-input').selectOption('high')
+    await expect(priorityField).toHaveText('高')
+    await expect.poll(() => requestCounts.issueUpdates).toBe(updatesBefore + 1)
+  })
+
+  test('Team の Work Item をカレンダーのキーボード操作で日程変更できる', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    await page.goto('/teams/core-team/issues')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('button', { name: 'カレンダー', exact: true }).click()
+
+    const card = page.getByTestId('task-calendar-item-wireframe')
+    await expect(page.getByTestId('task-calendar-day-2026-06-01').getByTestId('task-calendar-item-wireframe'))
+      .toBeVisible()
+    await card.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(preview).toContainText('2026-06-02')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(page.getByTestId('task-calendar-day-2026-06-02').getByTestId('task-calendar-item-wireframe'))
+      .toBeVisible()
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
+  })
+
   test('Team configuration 取得失敗中も canonical My Task を明示的な列へ保持する', async ({
     page,
   }) => {

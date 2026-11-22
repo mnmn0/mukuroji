@@ -9,6 +9,8 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
   WorkItemTypeChangePreview,
+  WorkItemScheduleChangePreview,
+  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { type ReactNode } from 'react'
 import { type FileArtifactsController } from '../../files/mutations/useFileArtifacts'
@@ -318,4 +320,18 @@ export type TeamIssueScreenProps = {
    * Archives (true) or restores (false) one Work Item from the detail pane.
    */
   onArchiveIssue?: (issue: TeamIssue, archived: boolean) => Promise<void>
+  /**
+   * Previews one schedule change from the Calendar or Gantt chart against the current revision.
+   * With `onConfirmScheduleChange`, cards and bars of writable Work Items can be moved.
+   */
+  onPreviewScheduleChange?: (
+    issue: TeamIssue,
+    operation: WorkItemScheduleOperation,
+  ) => Promise<WorkItemScheduleChangePreview>
+  /** Persists a previewed schedule change and every dependency ripple it showed. */
+  onConfirmScheduleChange?: (
+    issue: TeamIssue,
+    operation: WorkItemScheduleOperation,
+    preview: WorkItemScheduleChangePreview,
+  ) => Promise<TeamIssue>
 }

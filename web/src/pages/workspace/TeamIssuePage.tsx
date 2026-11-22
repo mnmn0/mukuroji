@@ -121,6 +121,7 @@ import {
   formatTaskViewMigrationWarning,
 } from '../../task-views/ui/taskViewToolbarAdapter'
 import { TeamIssueScreen } from '../../issues/ui/TeamIssueScreen'
+import { createWorkItemListScheduleMutations } from '../../tasks/mutations/createWorkItemListScheduleMutations'
 import {
   emptyWorkspaceMembers,
   type TeamIssueHierarchyPlacement,
@@ -410,6 +411,16 @@ export function TeamIssuePage() {
     planningSnapshot,
     t,
     user,
+  })
+  const scheduleMutations = createWorkItemListScheduleMutations({
+    accessToken,
+    guardEnterpriseSession,
+    mutateTasks: mutateIssues,
+    mutationRequestRunner,
+    onBackgroundRefreshError: (error) => setAuthenticatedApiError(() => error),
+    revalidatePlanning: () => mutatePlanning(),
+    revalidateSelectedDetail: () => mutateIssueDetail(),
+    t,
   })
   const detailErrorMessage = detailError
     ? t('issues.error.detail')
@@ -1041,6 +1052,12 @@ export function TeamIssuePage() {
         ? dependencyMutations.create
         : undefined}
       onDeleteRelation={hasWritableWorkItemScope ? handleDeleteRelation : undefined}
+      onPreviewScheduleChange={hasWritableWorkItemScope && !workItemConfigurationError
+        ? scheduleMutations.previewScheduleChange
+        : undefined}
+      onConfirmScheduleChange={hasWritableWorkItemScope && !workItemConfigurationError
+        ? scheduleMutations.confirmScheduleChange
+        : undefined}
       onDeleteScheduleDependency={accessToken && planningSnapshot
         ? dependencyMutations.delete
         : undefined}

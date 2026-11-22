@@ -5,6 +5,8 @@ import type {
   WorkItemActionResult,
   WorkItemActionSelection,
   WorkspaceWorkItemListFilter,
+  WorkItemPriority,
+  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
@@ -88,6 +90,9 @@ import {
   resolveWorkItemTypeWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import { useWorkspaceTaskStatusMutation } from '../../workspace/mutations/useWorkspaceTaskStatusMutation'
+import { createWorkItemListScheduleMutations } from '../../tasks/mutations/createWorkItemListScheduleMutations'
+import { startWorkItemListScheduleChange } from '../../task-views/model/workItemListScheduleChange'
+import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import {
   useWorkspaceCalendarSettings,
@@ -448,6 +453,66 @@ export function MyTasksPage() {
     tasks: workItems.tasks,
   })
   const moveTaskStatus = statusMutation.moveTaskStatus
+  const updateTaskPriority = statusMutation.updateTaskPriority
+  const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
+  const scheduleMutations = useMemo(() => createWorkItemListScheduleMutations({
+    accessToken: workspace.accessToken,
+    guardEnterpriseSession: workspace.guardEnterpriseSession,
+    mutateTasks: workItems.mutateWorkItems,
+    mutationRequestRunner,
+    // A failed background read leaves the confirmed schedules in place; the next read retries.
+    onBackgroundRefreshError: () => undefined,
+    t,
+  }), [
+    mutationRequestRunner,
+    t,
+    workItems.mutateWorkItems,
+    workspace.accessToken,
+    workspace.guardEnterpriseSession,
+  ])
+
+  /** Checks whether the table, calendar, and Gantt chart may change one Work Item in place. */
+  const canEditMyTask = useCallback((task: (typeof visibleMyTasks)[number]) =>
+    task.archivedAt === undefined &&
+      canWriteTaskViewWorkItem({
+        writableProjectScopes: taskViewController.writableProjectScopes,
+        writableTeamIds: taskViewController.writableTeamIds,
+      }, task) &&
+      workItems.configurationsByTeam[task.teamId] !== undefined &&
+      !workItems.configurationFailedTeamIds.includes(task.teamId),
+  [
+    taskViewController.writableProjectScopes,
+    taskViewController.writableTeamIds,
+    workItems.configurationFailedTeamIds,
+    workItems.configurationsByTeam,
+  ])
+
+  /** Starts a schedule change; the layout shows its preview and confirms it. */
+  const handleRequestMyTaskScheduleChange = useCallback((
+    task: (typeof visibleMyTasks)[number],
+    operation: WorkItemScheduleOperation,
+  ) => startWorkItemListScheduleChange(
+    'my-tasks',
+    task,
+    operation,
+    {
+      confirm: scheduleMutations.confirmScheduleChange,
+      preview: scheduleMutations.previewScheduleChange,
+    },
+    canEditMyTask(task),
+    t('tasks.action.permission'),
+  ), [canEditMyTask, scheduleMutations, t])
+
+  /** Saves a priority chosen in the table. */
+  const handleUpdateMyTaskPriority = useCallback(async (
+    task: (typeof visibleMyTasks)[number],
+    priority: WorkItemPriority,
+  ) => {
+    if (!updateTaskPriority || !canEditMyTask(task)) {
+      throw new Error(t('tasks.action.permission'))
+    }
+    await updateTaskPriority(task, priority)
+  }, [canEditMyTask, t, updateTaskPriority])
 
   /** Opens one personal Work Item through the existing route action. */
   const executeMyTaskOpenAction = useCallback((
@@ -987,7 +1052,12 @@ export function MyTasksPage() {
           </p>
         ) : null}
         <MyTasksWorkspaceView
+          canEditTask={canEditMyTask}
           canMoveTaskStatus={canMoveMyTaskStatus}
+          onRequestScheduleChange={hasWritableWorkItemScope && workspace.accessToken
+            ? handleRequestMyTaskScheduleChange
+            : undefined}
+          onUpdatePriority={updateTaskPriority ? handleUpdateMyTaskPriority : undefined}
           configurationFailedTeamIds={workItems.configurationFailedTeamIds}
           configurationsByTeam={workItems.configurationsByTeam}
           locale={workspace.locale}

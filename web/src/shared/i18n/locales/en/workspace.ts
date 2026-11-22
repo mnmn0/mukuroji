@@ -190,6 +190,7 @@ export const workspaceMessages = {
     'Handle next actions, review work, and completed tasks in one flow.',
   'workspace.myTasks.involvement.contributor': 'Contributor',
   'workspace.myTasks.moveError': 'Could not update the task status.',
+  'workspace.myTasks.updateError': 'Could not save the change. Reload and try again.',
   'workspace.myTasks.conflict': 'Another member updated this first. The latest status has been loaded.',
   'workspace.myTasks.moveStatusLabel': 'Change status for {title}',
   'workspace.myTasks.group.today': 'Handle today',
