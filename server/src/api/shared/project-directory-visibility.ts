@@ -3,9 +3,10 @@ import { ProjectDataError, type ProjectDirectoryResponse } from '../../modules/d
 import { isTeamIssueNotFoundError } from '../../modules/work-items'
 import { workItemDependencies } from './app-dependencies'
 import {
-  getEffectiveProjectAccessList,
+  getEffectiveProjectScopeAccessList,
   requireAssignedProjectPermission,
   requireTeamPermission,
+  selectTeamProjectScopeAccesses,
   type WorkspacePrincipal,
 } from './project-access'
 import { projectAccessAllows } from './workspace-access'
@@ -13,7 +14,9 @@ import { projectAccessAllows } from './workspace-access'
 /**
  * Narrows the Project directory to what a principal may see: every Project they can view, and
  * the Teams that hold one or that Enterprise RBAC grants directly. A system administrator sees
- * the whole directory.
+ * the whole directory. Access is matched by Team and Project together, so a grant on one Team's
+ * Project never reveals another Team's Project with the same ID; a legacy grant that cannot be
+ * tied to one Team opens none of them.
  *
  * @param principal - Current Workspace principal.
  * @param directory - Whole Project directory of the Workspace.
@@ -24,19 +27,16 @@ export async function filterReadableProjectDirectory(
   directory: ProjectDirectoryResponse,
 ): Promise<ProjectDirectoryResponse> {
   if (principal.isSystemAdmin) return directory
-  const readableProjectIds = new Set(
-    (await getEffectiveProjectAccessList(principal))
-      .filter((access) => projectAccessAllows(access, 'viewer'))
-      .map((access) => access.projectId),
-  )
+  const accesses = (await getEffectiveProjectScopeAccessList(principal))
+    .filter((access) => projectAccessAllows(access, 'viewer'))
   const authorizedTeamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
   return {
     ...directory,
     teams: directory.teams
-      .map((team) => ({
-        ...team,
-        projects: team.projects.filter((project) => readableProjectIds.has(project.id)),
-      }))
+      .map((team) => {
+        const readableProjectIds = new Set(selectTeamProjectScopeAccesses(accesses, team).map((access) => access.projectId))
+        return { ...team, projects: team.projects.filter((project) => readableProjectIds.has(project.id)) }
+      })
       .filter((team) => authorizedTeamIds.has(team.id) || team.projects.length > 0),
   }
 }

@@ -58,6 +58,36 @@ describe('Public API directory', () => {
     })
   })
 
+  test('matches access by Team, so a Project ID shared with another Team stays hidden', async () => {
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'viewer', teamId: 'core-team' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+      additionalTeams: [{ id: 'other-team', name: 'Other', projects: [{ id: 'refero', name: 'Other Refero', tone: 'blue' }] }],
+    })
+
+    const teams = await runWithTestAppDependencies(() => createCanonicalPublicDirectoryService()
+      .listTeams(credential, 'en'))
+
+    expect(teams.items.map((team) => ({ id: team.id, projects: team.projects.map((project) => project.name) })))
+      .toEqual([{ id: 'core-team', projects: ['Refero'] }])
+
+    resetTestApp()
+    configureFakeProjectClients(true, {
+      directoryId: workspaceId,
+      projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+      role: 'viewer',
+      workspaceRole: 'member',
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+      additionalTeams: [{ id: 'other-team', name: 'Other', projects: [{ id: 'refero', name: 'Other Refero', tone: 'blue' }] }],
+    })
+    const legacy = await runWithTestAppDependencies(() => createCanonicalPublicDirectoryService()
+      .listTeams(credential, 'en'))
+    expect(legacy.items.flatMap((team) => team.projects)).toEqual([])
+  })
+
   test('lists active Project members for a member of the Project and refuses a viewer', async () => {
     configureFakeProjectClients(true, {
       directoryId: workspaceId,
