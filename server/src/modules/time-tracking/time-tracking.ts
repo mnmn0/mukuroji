@@ -3716,17 +3716,16 @@ function toAuditEntryPolicySnapshot(policy: TeamTimeEntryPolicy & { revision: nu
 }
 
 /**
- * Counts the minutes of an entry inside a time window.
+ * Counts the minutes of an entry inside a time window, rounded the way reports count them, so a
+ * daily total matches the time the report shows for that day.
  *
  * @param entry - Entry to count.
  * @param windowStart - Window start in epoch milliseconds.
  * @param windowEnd - Window end in epoch milliseconds.
- * @returns Whole minutes of overlap.
+ * @returns Whole minutes of overlap, with a started minute counted as a whole one.
  */
 function overlapMinutes(entry: TimeEntry, windowStart: number, windowEnd: number): number {
-  const start = Math.max(Date.parse(entry.startAt), windowStart)
-  const end = Math.min(Date.parse(entry.endAt), windowEnd)
-  return end > start ? Math.round((end - start) / 60_000) : 0
+  return clippedEntryMinutes(entry, new Date(windowStart).toISOString(), new Date(windowEnd).toISOString())
 }
 
 function readStoredBudget(value: unknown): TimeBudget {

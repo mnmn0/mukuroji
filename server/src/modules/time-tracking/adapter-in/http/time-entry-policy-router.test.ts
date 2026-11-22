@@ -182,4 +182,14 @@ describe('time entry policy routes', () => {
     expect(growing.status).toBe(409)
     expect((await service.getEntry('workspace-1', 'team-1', nightEntry.id)).revision).toBe(3)
   })
+
+  test('counts a started minute toward the daily total, as the report does', async () => {
+    const { router } = createFixture({ canManage: true, wholeTeam: true })
+    // 60 minutes and 20 seconds is recorded and reported as 61 minutes.
+    expect((await record(router, '2026-08-03T00:00:00.000Z', '2026-08-03T01:00:20.000Z')).status).toBe(201)
+    await savePolicy(router, { overlap: 'off', dailyLimit: 'reject', dailyLimitMinutes: 120, expectedRevision: 0 })
+    const rejected = await record(router, '2026-08-03T02:00:00.000Z', '2026-08-03T03:00:00.000Z')
+    expect(rejected.status).toBe(409)
+    expect(await rejected.json()).toMatchObject({ code: 'TimeEntryDailyLimitExceeded' })
+  })
 })
