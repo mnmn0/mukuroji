@@ -179,6 +179,37 @@ export const BaselineDelay: Story = {
   },
 }
 
+/**
+ * The table as its print buttons prepare it for A3 landscape paper. Turn on print media emulation
+ * (for example DevTools "Emulate CSS media type: print") to inspect the paper layout: the row
+ * action column is not rendered, so the last data column ends at the table's right edge.
+ */
+export const PrintLayout: Story = {
+  beforeEach: () => {
+    document.documentElement.dataset.printTarget = 'task-table'
+    return () => {
+      delete document.documentElement.dataset.printTarget
+      document.querySelector<HTMLElement>('[data-print-root="task-table"]')?.removeAttribute('data-print-paper')
+    }
+  },
+  play: async ({ canvasElement }) => {
+    const root = canvasElement.querySelector<HTMLElement>('[data-print-root="task-table"]')
+    await expect(root).not.toBeNull()
+    root?.setAttribute('data-print-paper', 'a3')
+    const table = within(canvasElement).getByRole('table')
+    const headers = Array.from(table.querySelectorAll('thead th'))
+    const columns = Array.from(table.querySelectorAll('colgroup col'))
+    // Only the row action column, the last one, is left off the paper.
+    await expect(headers.at(-1)).toHaveAttribute('data-print-hidden')
+    await expect(columns.at(-1)).toHaveAttribute('data-print-hidden')
+    await expect(headers.filter((header) => header.hasAttribute('data-print-hidden'))).toHaveLength(1)
+    await expect(columns.filter((column) => column.hasAttribute('data-print-hidden'))).toHaveLength(1)
+    for (const row of Array.from(table.querySelectorAll('tbody tr[data-testid^="task-row-"]'))) {
+      await expect(row.lastElementChild).toHaveAttribute('data-print-hidden')
+    }
+  },
+}
+
 /** The baseline delay column while the baselines are still loading. */
 export const BaselineDelayLoading: Story = {
   args: {
