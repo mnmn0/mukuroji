@@ -117,6 +117,10 @@ import {
 } from './ui/DocumentEditor'
 import { DocumentHome } from './ui/DocumentHome'
 import { ChecklistWorkItemDialog } from './ui/ChecklistWorkItemDialog'
+import {
+  useChecklistAssigneeOptions,
+  type ChecklistAssigneeOptionsState,
+} from './queries/useChecklistAssigneeOptions'
 import { useChecklistWorkItemCreation } from './mutations/useChecklistWorkItemCreation'
 import type {
   BuiltInDocumentTemplateKey,
@@ -1645,6 +1649,13 @@ export function DocumentScreen({
   const [unlinkedChecklistWorkItems, setUnlinkedChecklistWorkItems] =
     useState<Readonly<Record<string, string>>>({})
   const selectedDocument = data.selectedDocument
+  const checklistAssigneeState = useChecklistAssigneeOptions(
+    accessToken,
+    data.teams,
+    selectedDocument?.scope,
+    (selectedDocument?.kind === 'page' || selectedDocument?.kind === 'template') &&
+      selectedDocument.blocks.some((block) => block.type === 'checklist'),
+  )
   const printableDocument =
     selectedDocument?.kind === 'page' || selectedDocument?.kind === 'template'
       ? selectedDocument
@@ -2161,6 +2172,7 @@ export function DocumentScreen({
             ) : selectedDocument ? (
               <DocumentWorkspace
                 accessToken={accessToken}
+                checklistAssignees={checklistAssigneeState}
                 key={selectedDocument.id}
                 isAiOperationPending={isAiOperationPending}
                 selectedDocument={selectedDocument}
@@ -2176,6 +2188,10 @@ export function DocumentScreen({
                           itemId: item.id,
                           kind: 'checklist-item',
                           text: item.text,
+                          ...(item.assigneeMemberKey
+                            ? { assigneeMemberKey: item.assigneeMemberKey }
+                            : {}),
+                          ...(item.dueDate ? { dueDate: item.dueDate } : {}),
                         })
                     : undefined
                 }
@@ -2430,6 +2446,8 @@ export function DocumentScreen({
         <ChecklistWorkItemDialog
           accessToken={accessToken}
           currentUserKey={data.currentUserKey}
+          defaultAssigneeKey={checklistWorkItemTarget.assigneeMemberKey}
+          defaultDueDate={checklistWorkItemTarget.dueDate}
           defaultProjectId={
             selectedDocument.scope.type === 'project'
               ? selectedDocument.scope.projectId
@@ -2491,6 +2509,10 @@ export function DocumentScreen({
 type ChecklistWorkItemTarget = DocumentWorkItemSource & {
   /** Element text used as the initial Work Item title. */
   text: string
+  /** Owner saved on the checklist item, offered first as the Work Item owner. */
+  assigneeMemberKey?: string
+  /** Deadline saved on the checklist item, used as the initial due date. */
+  dueDate?: string
 }
 
 /**
@@ -2518,6 +2540,10 @@ type DocumentWorkspaceProps = {
    * Whiteboard の Work Item 検索と title 表示に使う Workspace API token です。
    */
   accessToken?: string
+  /**
+   * Members offered as checklist item owners and used to show owner names.
+   */
+  checklistAssignees?: ChecklistAssigneeOptionsState
   /**
    * API から取得した選択中 Document です。
    */
@@ -2605,6 +2631,7 @@ type DocumentWorkspaceProps = {
  */
 function DocumentWorkspace({
   accessToken,
+  checklistAssignees,
   isAiOperationPending = false,
   onActiveAnchorChange,
   onApplyOperations,
@@ -3134,6 +3161,10 @@ function DocumentWorkspace({
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           <DocumentEditor
             checklistWorkItems={{
+              assignees: checklistAssignees?.options,
+              onRetryAssignees: checklistAssignees?.hasError
+                ? checklistAssignees.retry
+                : undefined,
               onCreate: editable ? onCreateChecklistWorkItem : undefined,
               onOpen: onNavigate
                 ? (workItemId) =>
