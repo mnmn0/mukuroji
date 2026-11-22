@@ -855,6 +855,11 @@ origin にするときは deploy access stack の `ApiAllowedOrigins` を更新�
 前の commit に戻すことはできません。stack を前の commit に戻すときは、`main` で該当の PR を revert して通常どおり
 deploy します（[Rollback](#rollback) の forward deploy）。
 
+アプリ全体の version は deploy した commit SHA です（[ADR 0057](../docs/adr/0057-app-version-is-deployed-commit.md)）。
+`deploy` の job summary には、deploy 前に `/api/health` が返していた前の commit と、GitHub の比較 link
+（前の commit から今回の commit まで）が出ます。この link の commit 一覧が、その deploy で入った変更の履歴です。
+前の commit が読めない初回などは「不明」と出ます。
+
 初回の stack 作成が失敗して `ROLLBACK_COMPLETE` になった場合は、job の log と CloudFormation の stack event で原因を
 直してから再実行します。`cdk deploy` が失敗した stack を消して作り直し、SSM の secret はそのまま使います。
 `Retain` の table・bucket・user pool は失敗した stack から外れて残るので、作り直しが成功した後に不要なものを手で削除します。
