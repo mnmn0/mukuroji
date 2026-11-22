@@ -5209,13 +5209,15 @@ export class DynamoDbAnalyticsRepository implements AnalyticsRepository {
 
 /**
  * Creates the record key of a recipient delivery row: the recipient's hashed member key, then the
- * delivery instant and report, so one query lists a recipient's deliveries newest first.
+ * delivery instant, report, and snapshot, so one query lists a recipient's deliveries newest first.
  *
  * @param delivery - Normalized delivery.
  * @returns The record key.
  */
 function createRecipientDeliveryRecordKey(delivery: AnalyticsRecipientDelivery) {
-  return `${createRecipientDeliveryPrefix(delivery.recipientMemberKey)}${delivery.deliveredAt}#${delivery.reportId}`
+  // The snapshot ID tells apart two deliveries of one occurrence after a report edit re-runs it;
+  // a retry of the same receipt keeps its snapshot ID and so rewrites the same row.
+  return `${createRecipientDeliveryPrefix(delivery.recipientMemberKey)}${delivery.deliveredAt}#${delivery.reportId}#${delivery.snapshotId}`
 }
 
 /**

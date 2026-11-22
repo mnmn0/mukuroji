@@ -26,11 +26,13 @@ Inbox の通知は受信者ごとに残るが、既読や archive で一覧か�
 ## 決定
 
 - Analytics table の Workspace partition に、受信者ごとの索引行を足す。record key は
-  `DELIVERY_RECIPIENT#<sha256(memberKey) の先頭 32 桁>#<deliveredAt>#<reportId>` で、`entryType` は
+  `DELIVERY_RECIPIENT#<sha256(memberKey) の先頭 32 桁>#<deliveredAt>#<reportId>#<snapshotId>` で、`entryType` は
   `analytics-delivery-recipient`。行は report ID・snapshot ID・形式・配信時刻・受信者 member key を持つ。
   member key は key に入れず hash にする。
 - 定期配信は receipt を確定した後、通知の直前に索引行を条件なしの Put で書く。同じ配信の再試行でも同じ内容に
-  なるので、通知に失敗した再試行でも行は 1 つだけ残る。
+  なるので、通知に失敗した再試行でも行は 1 つだけ残る。report の編集で同じ回をもう一度配信したときは snapshot ID が
+  変わるので、行は別になり、先の配信も残る。
+- Enterprise の route 権限は、ほかの Analytics の読み取りと同じ `work-items.read` にする。
 - `GET /api/analytics/deliveries?limit&cursor` は caller 本人の prefix を `begins_with` と
   `ScanIndexForward: false` で新しい順に Query する（1 page 最大 50 件、既定 20 件）。cursor は Workspace と
   受信者 prefix に結び付け、境界の record key が本人の prefix の中にあることも確かめる。

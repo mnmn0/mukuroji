@@ -142,6 +142,7 @@ export const analyticsMessages = {
   'analytics.group.unset': '未設定',
   'analytics.deliveries.label': '自分への配信',
   'analytics.deliveries.choose': '配信を選んで開く',
+  'analytics.deliveries.error': '自分への配信を読み込めませんでした。',
   'analytics.size.small': '小',
   'analytics.size.medium': '中',
   'analytics.size.large': '大',

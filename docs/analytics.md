@@ -340,7 +340,7 @@ CloudWatch alarmで検出します。同じ occurrence を手動再実行して�
 
 受信者は自分への配信を `GET /api/analytics/deliveries?limit&cursor`（limit は 1〜50、既定 20）で新しい順に
 読めます（ADR 0064）。Runner は receipt の確定後、通知の直前に受信者ごとの索引行
-（`DELIVERY_RECIPIENT#<member key の hash>#<deliveredAt>#<reportId>`）を冪等に書きます。API は caller 本人の
+（`DELIVERY_RECIPIENT#<member key の hash>#<deliveredAt>#<reportId>#<snapshotId>`）を冪等に書きます。API は caller 本人の
 索引だけを Query し、今その report を読めるもの（report 一覧と同じ判定）だけを今の report 名で返します。
 cursor は Workspace と受信者に結び付き、他のメンバーの索引は辿れません。返した snapshot を開くときは通常どおり
 permission scope hash を再確認します。

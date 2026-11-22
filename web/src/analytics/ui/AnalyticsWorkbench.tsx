@@ -85,6 +85,10 @@ export type AnalyticsWorkbenchProps = {
   deliveries?: readonly AnalyticsDelivery[]
   /** Opens the snapshot of a delivery to the current user. */
   onOpenDelivery?: (delivery: AnalyticsDelivery) => void
+  /** Whether the delivery list failed to load; the reports stay usable. */
+  deliveriesFailed?: boolean
+  /** Reloads the delivery list after a failure. */
+  onRetryDeliveries?: () => void
   /**
    * URL で選択された report ID です。
    */
@@ -429,6 +433,8 @@ export function AnalyticsWorkbench({
   reports,
   deliveries = emptyDeliveries,
   onOpenDelivery,
+  deliveriesFailed = false,
+  onRetryDeliveries,
   selectedReportId,
   filter,
   calendarSettings,
@@ -623,6 +629,16 @@ export function AnalyticsWorkbench({
                 ))}
               </select>
             </label>
+          ) : null}
+          {deliveriesFailed && deliveries.length === 0 ? (
+            <span className="flex flex-wrap items-center gap-2 self-end pb-2 text-xs font-medium text-fg-red-800" data-testid="analytics-deliveries-error" role="alert">
+              {t('analytics.deliveries.error')}
+              {onRetryDeliveries ? (
+                <button className="underline underline-offset-2" type="button" onClick={onRetryDeliveries}>
+                  {t('analytics.action.retry')}
+                </button>
+              ) : null}
+            </span>
           ) : null}
         </div>
 

@@ -267,6 +267,21 @@ export const MyDeliveries: Story = {
 }
 
 /**
+ * 自分への配信を読み込めなかった状態です。report はそのまま使え、再試行できます。
+ */
+export const MyDeliveriesFailed: Story = {
+  args: {
+    deliveriesFailed: true,
+    onRetryDeliveries: fn(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const error = within(canvasElement).getByTestId('analytics-deliveries-error')
+    await userEvent.click(within(error).getByRole('button'))
+    await expect(args.onRetryDeliveries).toHaveBeenCalled()
+  },
+}
+
+/**
  * 担当者・カスタムフィールド・配信先を名前の一覧から選ぶ状態です。一覧にいない選択済みの担当者も
  * 選択されたまま残ります。
  */

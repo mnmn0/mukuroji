@@ -142,6 +142,7 @@ export const analyticsMessages = {
   'analytics.group.unset': 'Unassigned',
   'analytics.deliveries.label': 'Delivered to me',
   'analytics.deliveries.choose': 'Open a delivery',
+  'analytics.deliveries.error': 'Your deliveries could not be loaded.',
   'analytics.size.small': 'Small',
   'analytics.size.medium': 'Medium',
   'analytics.size.large': 'Large',

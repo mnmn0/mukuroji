@@ -196,8 +196,12 @@ export function ReportsPage() {
     key: reportsKey,
   } = useAnalyticsReports(accessToken, Boolean(user && !currentUserError))
   const reports = reportResponse?.reports ?? emptyReports
-  // A failed delivery read only hides the list; the reports stay usable.
-  const { data: deliveryResponse } = useAnalyticsDeliveries(
+  // A failed delivery read shows an error with a retry next to the reports, which stay usable.
+  const {
+    data: deliveryResponse,
+    error: deliveriesError,
+    mutate: retryDeliveries,
+  } = useAnalyticsDeliveries(
     accessToken,
     Boolean(user && !currentUserError),
   )
@@ -847,6 +851,10 @@ export function ReportsPage() {
           noticeMessage={noticeMessage}
           reports={reports}
           {...(deliveryResponse ? { deliveries: deliveryResponse.deliveries } : {})}
+          deliveriesFailed={Boolean(deliveriesError)}
+          onRetryDeliveries={() => {
+            void retryDeliveries()
+          }}
           onOpenDelivery={(delivery) => {
             const report = reports.find((item) => item.id === delivery.reportId)
             if (!report) return

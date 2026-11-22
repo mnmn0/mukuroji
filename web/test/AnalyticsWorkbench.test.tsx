@@ -681,6 +681,15 @@ describe('AnalyticsWorkbench', () => {
     expect(html).not.toContain('>sato@example.com<')
   })
 
+  test('shows a delivery-list failure with a retry instead of an empty list', () => {
+    const html = renderToStaticMarkup(
+      <AnalyticsWorkbench {...baseProps} deliveriesFailed onRetryDeliveries={() => undefined} />,
+    )
+    expect(html).toContain('data-testid="analytics-deliveries-error"')
+    expect(html).toContain('Your deliveries could not be loaded.')
+    expect(html).toContain('Retry')
+  })
+
   test('keeps an empty assignee selection apart from all assignees', () => {
     const members = [{ id: 'sato@example.com', email: 'sato@example.com', name: '佐藤 花子' }]
     const render = (assigneeUserIds: string[] | undefined) => renderToStaticMarkup(
