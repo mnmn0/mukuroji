@@ -199,7 +199,12 @@ export function createTimeTrackingRouter<Principal extends TimeTrackingPrincipal
         ...(body.hourlyRateMinor === null ? { hourlyRateMinor: null } : body.hourlyRateMinor === undefined ? {} : { hourlyRateMinor: readRequiredNumber(body.hourlyRateMinor, 'Hourly rate') }),
         ...(readOptionalIdempotencyKey(context) ? { idempotencyKey: readOptionalIdempotencyKey(context) } : {}),
       })
-      return context.json({ entry: redactEntry(entry, canManage, managedProjectIds), ...withWarnings(warnings) })
+      // Warnings compare the entry with all of its owner's time in the Team, which a manager of only
+      // some Projects may not see, so only the owner editing their own time receives them.
+      return context.json({
+        entry: redactEntry(entry, canManage, managedProjectIds),
+        ...(current.userId === principal.userKey ? withWarnings(warnings) : {}),
+      })
     })
   })
 

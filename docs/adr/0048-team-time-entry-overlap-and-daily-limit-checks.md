@@ -30,6 +30,8 @@
 - `reject` は `409 TimeEntryOverlap` / `409 TimeEntryDailyLimitExceeded` で保存しない。`warn` は保存したうえで
   応答に `warnings`（`TimeEntryOverlap { entryIds }`、`TimeEntryDailyLimitExceeded { date, minutes, limitMinutes }`）を付ける。
   警告がないときは `warnings` を付けないので、既存の client はそのまま動く。
+  警告は記録の持ち主が自分の記録を保存したときだけ返す。管理者がほかのメンバーの記録を直したときは返さない
+  （警告は持ち主の Team 全体の記録と比べるので、一部の Project の管理者には見えない記録の ID や合計が混じる）。
 - タイマーの停止で作る記録は確かめない。実際に計った時間なので、拒否すると記録が失われる。
 
 ## 検討した選択肢

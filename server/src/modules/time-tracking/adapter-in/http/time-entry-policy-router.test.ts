@@ -192,4 +192,19 @@ describe('time entry policy routes', () => {
     expect(rejected.status).toBe(409)
     expect(await rejected.json()).toMatchObject({ code: 'TimeEntryDailyLimitExceeded' })
   })
+
+  test("gives no warnings to a manager editing another member's time", async () => {
+    const { router, service } = createFixture({ canManage: true, wholeTeam: true })
+    const base = { workspaceId: 'workspace-1', teamId: 'team-1', userId: 'member-2', workItemId: 'work-item-1', billable: false, currency: 'JPY', source: 'manual' as const }
+    await service.createEntry({ ...base, startAt: '2026-08-03T00:00:00.000Z', endAt: '2026-08-03T02:00:00.000Z' }, true)
+    const other = await service.createEntry({ ...base, startAt: '2026-08-03T05:00:00.000Z', endAt: '2026-08-03T06:00:00.000Z' }, true)
+    await savePolicy(router, { overlap: 'warn', dailyLimit: 'warn', dailyLimitMinutes: 60, expectedRevision: 0 })
+    const moved = await router.request(`/api/teams/team-1/time-entries/${other.id}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ expectedRevision: other.revision, startAt: '2026-08-03T01:00:00.000Z', endAt: '2026-08-03T03:00:00.000Z' }),
+    })
+    expect(moved.status).toBe(200)
+    expect(await moved.json()).not.toHaveProperty('warnings')
+  })
 })
