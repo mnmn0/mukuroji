@@ -4696,7 +4696,8 @@ function validateSnapshotQueryAlignment(
       !Array.isArray(result.warnings) ||
       result.warnings.some((warning) => typeof warning !== 'string') ||
       (!expectsSeries && result.series.length > 0) ||
-      (widget.groupBy === undefined && result.groups.length > 0) ||
+      // A Milestone trend groups by Milestone whatever its group-by is.
+      (widget.groupBy === undefined && widget.metric !== 'milestone-trend' && result.groups.length > 0) ||
       (widget.type !== 'table' && result.rows.length > 0)
     ) {
       throw invalid(

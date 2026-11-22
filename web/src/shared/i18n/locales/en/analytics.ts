@@ -153,6 +153,8 @@ export const analyticsMessages = {
   'analytics.milestoneTrend.latest': 'Latest date',
   'analytics.milestoneTrend.shift': 'Shift (days)',
   'analytics.milestoneTrend.changes': 'Changes',
+  'analytics.milestoneTrend.baseline': 'Baseline date',
+  'analytics.milestoneTrend.milestoneId': 'Milestone ID',
   'analytics.warning.noMilestones': 'No Milestones match this report scope.',
   'analytics.warning.milestoneHistoryUnavailable': 'Milestone history is not included in scheduled deliveries.',
   'analytics.warning.milestonesWithoutHistory': '{count} Milestone(s) have no recorded date history, so their current date is shown since creation.',

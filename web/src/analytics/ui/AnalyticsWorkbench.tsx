@@ -356,6 +356,12 @@ function isCalendarGroup(groupBy: AnalyticsWidget['groupBy']) {
 }
 
 const tableColumnLabelKeys: Readonly<Record<string, MessageKey>> = {
+  baselineEndDate: 'analytics.milestoneTrend.baseline',
+  changeCount: 'analytics.milestoneTrend.changes',
+  forecastEndDate: 'analytics.milestoneTrend.latest',
+  milestoneId: 'analytics.milestoneTrend.milestoneId',
+  periodStartForecastEndDate: 'analytics.milestoneTrend.periodStart',
+  shiftDays: 'analytics.milestoneTrend.shift',
   occurredAt: 'analytics.table.occurredAt',
   projectId: 'analytics.table.projectId',
   teamId: 'analytics.table.teamId',

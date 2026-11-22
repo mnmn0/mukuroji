@@ -153,6 +153,8 @@ export const analyticsMessages = {
   'analytics.milestoneTrend.latest': '最新の予定日',
   'analytics.milestoneTrend.shift': '変化（日）',
   'analytics.milestoneTrend.changes': '変更回数',
+  'analytics.milestoneTrend.baseline': 'ベースラインの予定日',
+  'analytics.milestoneTrend.milestoneId': 'Milestone ID',
   'analytics.warning.noMilestones': 'このレポートの範囲に Milestone はありません。',
   'analytics.warning.milestoneHistoryUnavailable': '定期配信には Milestone の予定日推移を含められません。',
   'analytics.warning.milestonesWithoutHistory': '{count} 件の Milestone は予定日の変更記録がないため、作成時から現在の予定日を表示しています。',

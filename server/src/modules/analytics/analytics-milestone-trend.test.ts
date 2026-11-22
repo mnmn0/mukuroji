@@ -6,6 +6,7 @@ import {
   createAnalyticsCsv,
   createAnalyticsPermissionScopeHash,
   createAnalyticsSnapshot,
+  InMemoryAnalyticsRepository,
   normalizeAnalyticsQueryInput,
 } from './analytics'
 import {
@@ -287,6 +288,29 @@ describe('milestone-trend metric', () => {
 
     expect(createAnalyticsCsv(snapshot)).toContain('Series segment,milestone-a,2026-03-01T00:00:00.000Z')
     expect(createAnalyticsCsv(snapshot)).toContain('Milestone trend,2026-04-20,')
+  })
+
+  test('saves a snapshot whose Milestone widget has no explicit group-by', async () => {
+    const query = createQuery('table')
+    const snapshot = createAnalyticsSnapshot({
+      workItems: [],
+      events: [],
+      authorizedProjectIds: new Set(['project-1']),
+      milestones: [slipping],
+      query,
+    })
+    expect(snapshot.widgets[0]?.groups).toHaveLength(1)
+    const record = {
+      id: 'snapshot-trend',
+      workspaceId: 'workspace-1',
+      createdByMemberKey: 'member-1',
+      createdAt: query.asOf,
+      query,
+      snapshot,
+    }
+
+    const saved = await new InMemoryAnalyticsRepository().putSnapshot(record)
+    expect(saved.snapshot.widgets[0]?.groups).toEqual(snapshot.widgets[0]?.groups)
   })
 
   test('rejects Work Item dimensions as the group-by', () => {
