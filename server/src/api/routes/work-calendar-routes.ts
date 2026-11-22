@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Context, Hono } from 'hono'
 import {
   DEFAULT_WORK_CALENDAR_ADJUSTMENT,
@@ -24,6 +25,7 @@ import {
   type WorkCalendarChangePorts,
   type WorkCalendarChangeRules,
   type WorkCalendarChangeWorkItem,
+  type WorkCalendarScheduleUpdate,
 } from '../../modules/work-items'
 import { workItemDependencies, workspaceDependencies } from '../shared/app-dependencies'
 import { toWorkItemConfigurationErrorResponse } from '../shared/collaboration-access'
@@ -374,17 +376,25 @@ function createWorkCalendarChangePorts(
   body: unknown,
 ): WorkCalendarChangePorts {
   const operation = createApiMutationContext(c, principal, body)
-  // Leaves room for the batch suffix within the 256-character idempotency key limit.
+  // Leaves room for the transaction suffix within the 256-character idempotency key limit.
   const operationKey = (c.req.header('Idempotency-Key')?.trim() || crypto.randomUUID()).slice(0, 200)
   /**
    * Gives each transaction its own audit identities while keeping the change's correlation ID.
    *
-   * @param batch - Transaction number within the change.
+   * The key is derived from the Work Items and revisions the transaction writes, not from its
+   * position, so a retried request never reuses the identity of a transaction that committed:
+   * a committed rewrite moved its Work Item to a new revision.
+   *
+   * @param updates - Rewrites of the transaction.
    * @returns The audit context of the transaction.
    */
-  function createBatchMutationContext(batch: number) {
+  function createBatchMutationContext(updates: readonly WorkCalendarScheduleUpdate[]) {
+    const digest = createHash('sha256')
+      .update(JSON.stringify(updates.map((update) => [update.teamId, update.workItemId, update.expectedRevision])))
+      .digest('hex')
+      .slice(0, 32)
     return {
-      ...createApiMutationContext(c, principal, { body, batch }, `${operationKey}#work-calendar-batch-${batch}`),
+      ...createApiMutationContext(c, principal, { body, transaction: digest }, `${operationKey}#work-calendar-${digest}`),
       correlationId: operation.correlationId,
     }
   }
@@ -407,7 +417,7 @@ function createWorkCalendarChangePorts(
         ]),
       ])
     },
-    async writeSchedules(updates, batch) {
+    async writeSchedules(updates) {
       const updateSchedules = workItemDependencies.teamIssues.updateTeamIssueSchedules
       if (!updateSchedules) {
         throw new ProjectDataError(503, 'WorkCalendarUnavailable', 'Work Item schedules cannot be rewritten.')
@@ -419,7 +429,7 @@ function createWorkCalendarChangePorts(
         updates,
         [],
         principal.userKey,
-        createBatchMutationContext(batch),
+        createBatchMutationContext(updates),
         undefined,
         await createPlanningFencedWorkItemAuthorizationSnapshot(principal),
       )
