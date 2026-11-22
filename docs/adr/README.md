@@ -72,3 +72,4 @@
 | [0045](0045-relation-events-for-automation-and-webhooks.md) | Work Item relation の event を Automation trigger と webhook の event type に使い、webhook の event type は追加していく | 提案 |
 | [0049](0049-member-role-assignment-cross-table-fences.md) | メンバーへの role 割り当てと Workspace role の変更を、相手側 table の条件付き書き込みで直列化する | 提案 |
 | [0056](0056-web-custom-domain-cdk-context.md) | 独自 domain を `cdk.json` の CDK context で受け、synth 時に distribution・DNS・正規 URL を決める | 提案 |
+| [0057](0057-app-version-is-deployed-commit.md) | アプリ全体の version は deploy した commit とし、変更履歴は deploy ごとの比較 link で残す | 提案 |
