@@ -73,7 +73,11 @@ export function useBuildDrift(webCommitSha: string | undefined = readWebBuildInf
       refreshInterval: apiCommitPollMilliseconds,
       focusThrottleInterval: apiCommitFocusThrottleMilliseconds,
       revalidateOnReconnect: true,
-      shouldRetryOnError: false,
+      // SWR skips interval polling while an error is cached, so a failed check retries on the
+      // polling schedule instead, without SWR's growing backoff.
+      onErrorRetry: (_error, _key, _config, revalidate) => {
+        setTimeout(() => void revalidate(), apiCommitPollMilliseconds)
+      },
       dedupingInterval: apiCommitFocusThrottleMilliseconds,
     },
   )

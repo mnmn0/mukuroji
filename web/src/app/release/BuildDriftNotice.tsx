@@ -5,6 +5,7 @@ import {
   subscribeToLocalePreference,
   type Locale,
 } from '../../shared/i18n/i18n'
+import { appConnectivity } from '../../shared/lib/pwa/connectivity'
 import type { BuildDriftState } from '../../shared/release/buildDrift'
 import { AppUpdateNotice } from '../../shared/ui/AppUpdateNotice'
 import { useServiceWorkerUpdateReady } from '../pwa/useServiceWorkerUpdateReady'
@@ -23,7 +24,8 @@ function readServerLocale(): Locale {
  * Offers a reload when the API runs another commit than the Web build in this tab.
  *
  * The service worker's update notice already offers the same reload, so this notice stays hidden
- * while that one shows. "Later" hides it for the current pair of builds; a later API commit shows it
+ * while that one shows. It also steps aside while offline, where a reload cannot load the new
+ * build and the offline notice uses the same bottom-right slot. "Later" hides it for the current pair of builds; a later API commit shows it
  * again.
  *
  * @returns The notice, or nothing while the builds match.
@@ -31,8 +33,9 @@ function readServerLocale(): Locale {
 export function BuildDriftNotice() {
   const drift = useBuildDrift()
   const serviceWorkerUpdateReady = useServiceWorkerUpdateReady()
+  const online = useSyncExternalStore(appConnectivity.subscribe, appConnectivity.getSnapshot, appConnectivity.getSnapshot)
   const [dismissedPair, setDismissedPair] = useState<string | undefined>(undefined)
-  if (serviceWorkerUpdateReady || drift.pair === undefined || drift.pair === dismissedPair) return null
+  if (!online || serviceWorkerUpdateReady || drift.pair === undefined || drift.pair === dismissedPair) return null
   const { pair } = drift
   return <BuildDriftBanner state={drift.state} onReload={drift.reload} onDismiss={() => setDismissedPair(pair)} />
 }
