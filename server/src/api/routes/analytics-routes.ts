@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto'
 import {
+  DEFAULT_WORK_ITEM_TYPE,
+  createSearchWorkItemTypeKey,
+  type AnalyticsExportLocale,
   type AnalyticsQueryInput,
   type AnalyticsReport,
   type AnalyticsSnapshot,
@@ -43,6 +46,8 @@ import {
   queryAnalyticsEvidence,
   resolveAnalyticsReportFilterPeriod,
   selectAnalyticsWorkItemsRequiringHistory,
+  type AnalyticsExportContext,
+  type AnalyticsExportNames,
 } from '../../modules/analytics/analytics'
 import { createAnalyticsMilestoneScopeKey } from '../../modules/analytics/analytics-milestone-trend'
 import {
@@ -154,18 +159,159 @@ async function createAnalyticsHttpExport(
   const locale = normalizeAnalyticsExportLocale(
     typeof input.locale === 'string' ? input.locale : undefined,
   )
-  const snapshot = await resolveAnalyticsExportSnapshot(principal, input)
+  const resolved = await resolveAnalyticsExportSnapshot(principal, input)
+  const context: AnalyticsExportContext = {
+    ...(resolved.title === undefined ? {} : { title: resolved.title }),
+    widgets: resolved.query.widgets,
+    names: await readAnalyticsExportNames(principal, resolved.query, locale),
+  }
   return format === 'csv'
     ? {
-        body: createAnalyticsCsv(snapshot, locale),
+        body: createAnalyticsCsv(resolved.snapshot, locale, context),
         extension: format,
         contentType: 'text/csv; charset=utf-8',
       }
     : {
-        body: createAnalyticsPdf(snapshot, locale),
+        body: createAnalyticsPdf(resolved.snapshot, locale, context),
         extension: format,
         contentType: 'application/pdf',
       }
+}
+
+/** Project member and Team configuration reads an export runs at once. */
+const ANALYTICS_EXPORT_NAME_READ_CONCURRENCY = 10
+
+/**
+ * Reads the names an Analytics export prints in place of internal IDs, limited to what the
+ * principal may see: Teams and Projects of the principal's Project directory, members of the
+ * principal's readable Projects, and the Work Item Types and custom fields of the visible Teams.
+ * Members and configurations are read only when the query uses them; a failed read leaves those
+ * names out, and the export then prints the stored value.
+ *
+ * @param principal - Authenticated principal.
+ * @param query - Query that produced the exported snapshot.
+ * @param locale - Export locale, which picks the localized Team and Project names.
+ * @returns Display names keyed by internal ID.
+ */
+async function readAnalyticsExportNames(
+  principal: WorkspacePrincipal,
+  query: AnalyticsQueryInput,
+  locale: AnalyticsExportLocale,
+): Promise<AnalyticsExportNames> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    locale,
+  )
+  const readableProjectIds = principal.isSystemAdmin
+    ? undefined
+    : new Set(
+        (await getEffectiveProjectAccessList(principal))
+          .filter((access) => projectAccessAllows(access, 'viewer'))
+          .map((access) => access.projectId),
+      )
+  const authorizedTeamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
+  const teams = directory.teams
+    .map((team) => ({
+      ...team,
+      projects: team.projects.filter((project) =>
+        readableProjectIds === undefined || readableProjectIds.has(project.id)
+      ),
+    }))
+    .filter((team) =>
+      readableProjectIds === undefined ||
+      authorizedTeamIds.has(team.id) ||
+      team.projects.length > 0
+    )
+  const dimensions = new Set(query.widgets.flatMap((widget) =>
+    widget.groupBy === undefined ? [] : [widget.groupBy.dimension]
+  ))
+  const readsMembers = dimensions.has('assignee') ||
+    (query.filter.assigneeUserIds?.length ?? 0) > 0
+  const readsConfigurations = dimensions.has('work-item-type') ||
+    (query.filter.workItemTypeIds?.length ?? 0) > 0 ||
+    (query.filter.customFields?.length ?? 0) > 0
+  return {
+    teams: new Map(teams.map((team) => [team.id, team.name])),
+    projects: new Map(teams.flatMap((team) =>
+      team.projects.map((project): [string, string] => [project.id, project.name])
+    )),
+    ...(readsMembers ? { members: await readAnalyticsExportMemberNames(principal, teams) } : {}),
+    ...(readsConfigurations
+      ? await readAnalyticsExportConfigurationNames(principal, teams)
+      : {}),
+  }
+}
+
+/**
+ * Reads the display names of the members of the given Projects.
+ *
+ * @param principal - Authenticated principal.
+ * @param teams - Visible Teams with their readable Projects.
+ * @returns Member names keyed by member key; members without a name are left out.
+ */
+async function readAnalyticsExportMemberNames(
+  principal: WorkspacePrincipal,
+  teams: readonly { id: string; projects: readonly { id: string }[] }[],
+) {
+  const projects = teams.flatMap((team) =>
+    team.projects.map((project) => ({ teamId: team.id, projectId: project.id }))
+  )
+  const names = new Map<string, string>()
+  for (let offset = 0; offset < projects.length; offset += ANALYTICS_EXPORT_NAME_READ_CONCURRENCY) {
+    const batch = projects.slice(offset, offset + ANALYTICS_EXPORT_NAME_READ_CONCURRENCY)
+    const responses = await Promise.allSettled(batch.map(({ teamId, projectId }) =>
+      workspaceDependencies.projectDirectory.getProjectMembers(
+        principal.directoryId,
+        projectId,
+        teamId,
+      )
+    ))
+    for (const response of responses) {
+      if (response.status !== 'fulfilled') continue
+      for (const member of response.value.members) {
+        const name = member.name?.trim()
+        if (name && !names.has(member.id)) names.set(member.id, name)
+      }
+    }
+  }
+  return names
+}
+
+/**
+ * Reads the Work Item Type and custom field names of the given Teams.
+ *
+ * @param principal - Authenticated principal.
+ * @param teams - Visible Teams.
+ * @returns Work Item Type names (`Team · Type`) keyed by Team-qualified key, and custom field names.
+ */
+async function readAnalyticsExportConfigurationNames(
+  principal: WorkspacePrincipal,
+  teams: readonly { id: string; name: string }[],
+) {
+  const workItemTypes = new Map<string, string>()
+  const customFields = new Map<string, string>()
+  for (let offset = 0; offset < teams.length; offset += ANALYTICS_EXPORT_NAME_READ_CONCURRENCY) {
+    const batch = teams.slice(offset, offset + ANALYTICS_EXPORT_NAME_READ_CONCURRENCY)
+    const responses = await Promise.allSettled(batch.map((team) =>
+      workItemDependencies.workItemConfigurations.getTeamConfiguration(
+        principal.directoryId,
+        team.id,
+      )
+    ))
+    for (const [index, response] of responses.entries()) {
+      const team = batch[index]
+      if (team === undefined || response.status !== 'fulfilled') continue
+      const configuration = response.value.configuration
+      const types = configuration.workItemTypes ?? []
+      for (const type of [DEFAULT_WORK_ITEM_TYPE, ...types]) {
+        workItemTypes.set(createSearchWorkItemTypeKey(team.id, type.id), `${team.name} · ${type.name}`)
+      }
+      for (const field of configuration.customFields) {
+        if (!customFields.has(field.id)) customFields.set(field.id, field.name)
+      }
+    }
+  }
+  return { workItemTypes, customFields }
 }
 
 /** Lists Analytics reports visible to the authenticated principal. */
@@ -931,7 +1077,11 @@ function createAnalyticsPermissionScopeReadCache(): AnalyticsPermissionScopeRead
   return { workItems: new Map() }
 }
 
-/** Export selector を current ACL で再実行できる snapshot へ解決します。 */
+/**
+ * Export selector を current ACL で再実行できる snapshot へ解決します。
+ *
+ * @returns Snapshot、それを作った query、report から作った場合は report 名です。
+ */
 async function resolveAnalyticsExportSnapshot(
   principal: WorkspacePrincipal,
   input: Record<string, unknown>,
@@ -947,7 +1097,8 @@ async function resolveAnalyticsExportSnapshot(
     )
   }
   if (input.query !== undefined) {
-    return await executeAnalyticsQuery(principal, input.query)
+    const query = normalizeAnalyticsQueryInput(input.query)
+    return { snapshot: await executeAnalyticsQuery(principal, input.query), query }
   }
   if (input.reportId !== undefined) {
     const report = await requireAnalyticsReport(
@@ -955,11 +1106,12 @@ async function resolveAnalyticsExportSnapshot(
       readAnalyticsIdentifier(input.reportId, 'Analytics report ID'),
     )
     const calendar = await readWorkspaceCalendarSettingsOf(principal.directoryId)
-    return await executeAnalyticsQuery(
-      principal,
-      createAnalyticsReportQuery(report, {}, calendar),
-      calendar,
-    )
+    const query = createAnalyticsReportQuery(report, {}, calendar)
+    return {
+      snapshot: await executeAnalyticsQuery(principal, query, calendar),
+      query: normalizeAnalyticsQueryInput(query),
+      title: report.name,
+    }
   }
 
   const snapshotId = readAnalyticsIdentifier(input.snapshotId, 'Analytics snapshot ID')
@@ -967,8 +1119,9 @@ async function resolveAnalyticsExportSnapshot(
   if (!stored) {
     throw new AnalyticsError(404, 'AnalyticsSnapshotNotFound', 'Analytics snapshot was not found.')
   }
+  let title: string | undefined
   if (stored.reportId) {
-    await requireAnalyticsReport(principal, stored.reportId)
+    title = (await requireAnalyticsReport(principal, stored.reportId)).name
   } else if (stored.createdByMemberKey !== principal.userKey) {
     throw new AnalyticsError(
       403,
@@ -988,7 +1141,11 @@ async function resolveAnalyticsExportSnapshot(
       'Analytics snapshot authorization scope has changed.',
     )
   }
-  return stored.snapshot
+  return {
+    snapshot: stored.snapshot,
+    query: stored.query,
+    ...(title === undefined ? {} : { title }),
+  }
 }
 
 /** Analytics export format を検証します。 */

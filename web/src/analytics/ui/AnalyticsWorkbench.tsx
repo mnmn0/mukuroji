@@ -6,6 +6,8 @@ import type {
   AnalyticsEvidenceItem,
   AnalyticsEvidenceResponse,
   AnalyticsFilter,
+  AnalyticsGroupBy,
+  AnalyticsGroupLabelLookup,
   AnalyticsMetricKey,
   AnalyticsReport,
   AnalyticsSchedule,
@@ -19,6 +21,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   WORKSPACE_CALENDAR_PERIOD_PRESETS,
+  resolveAnalyticsGroupLabel,
   type WorkspaceCalendarPeriodPreset,
 } from '@mukuroji/contracts'
 import {
@@ -34,6 +37,10 @@ import {
   type MessageKey,
 } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
+import {
+  createAnalyticsDisplayNames,
+  createAnalyticsGroupLabelLookup,
+} from '../model/groupLabels'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { AnalyticsExportFormat } from '../api'
 import {
@@ -141,6 +148,8 @@ export type AnalyticsWorkbenchProps = {
   teams: ProjectDirectoryTeam[]
   /** Team-qualified Work Item Type options available across the visible Teams. */
   workItemTypes?: AnalyticsWorkItemTypeOption[]
+  /** Members whose names replace member keys in assignee groups. */
+  members?: readonly AnalyticsMemberOption[]
   /**
    * Report 一覧または snapshot の初回読み込み中表示です。
    */
@@ -259,6 +268,19 @@ export type AnalyticsWorkbenchProps = {
    * Load error を再試行する callback です。
    */
   onRetry?: () => void
+}
+
+/** Stable empty member list, so the default does not change the group label lookup each render. */
+const emptyMembers: readonly AnalyticsMemberOption[] = []
+
+/** One member whose name Analytics shows in place of the member key. */
+export type AnalyticsMemberOption = {
+  /** Normalized member key, which Work Items store as the assignee. */
+  id: string
+  /** Email address, shown when the member has no name. */
+  email: string
+  /** Display name. */
+  name?: string
 }
 
 /** One Team-qualified Work Item Type option shown by Analytics filters. */
@@ -398,6 +420,7 @@ export function AnalyticsWorkbench({
   evidenceMetric,
   teams,
   workItemTypes = [],
+  members = emptyMembers,
   isLoading = false,
   isLoadingMoreSnapshots = false,
   isEvidenceLoading = false,
@@ -430,9 +453,12 @@ export function AnalyticsWorkbench({
   onRetry,
 }: AnalyticsWorkbenchProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const workItemTypeLabels = useMemo(
-    () => new Map(workItemTypes.map((type) => [type.filterValue, type.label])),
-    [workItemTypes],
+  const groupLabelLookup = useMemo(
+    () => createAnalyticsGroupLabelLookup(
+      createAnalyticsDisplayNames(teams, workItemTypes, members),
+      t,
+    ),
+    [members, t, teams, workItemTypes],
   )
   const selectedReport = reports.find((report) => report.id === selectedReportId)
   const [draftId] = useState(
@@ -748,7 +774,7 @@ export function AnalyticsWorkbench({
                         snapshot={snapshot}
                         t={t}
                         widget={widgets.find((widget) => widget.id === result.widgetId)}
-                        workItemTypeLabels={workItemTypeLabels}
+                        groupLabelLookup={groupLabelLookup}
                         onOpenEvidence={onOpenEvidence}
                       />
                     ))}
@@ -1993,6 +2019,7 @@ function AnalyticsMetricCard({
 }
 
 function AnalyticsResultWidget({
+  groupLabelLookup,
   locale,
   onOpenEvidence,
   periodEnd,
@@ -2000,8 +2027,9 @@ function AnalyticsResultWidget({
   snapshot,
   t,
   widget,
-  workItemTypeLabels,
 }: {
+  /** Resolves group labels to names in the current locale. */
+  groupLabelLookup: AnalyticsGroupLabelLookup
   locale: Locale
   onOpenEvidence?: (input: AnalyticsEvidenceInput) => void
   /** Requested period end (before the API clips it to `asOf`), where a burndown ideal reaches zero. */
@@ -2010,7 +2038,6 @@ function AnalyticsResultWidget({
   snapshot: AnalyticsSnapshot
   t: ReturnType<typeof createTranslator>
   widget?: AnalyticsWidget
-  workItemTypeLabels: ReadonlyMap<string, string>
 }) {
   const widgetType = widget?.type ?? (result.rows.length > 0 ? 'table' : 'chart')
   const size = readWidgetSize(widget)
@@ -2022,7 +2049,8 @@ function AnalyticsResultWidget({
   const points = normalizeWidgetPoints(
     result,
     snapshot.timeZone,
-    widget?.groupBy?.dimension === 'work-item-type' ? workItemTypeLabels : undefined,
+    widget?.groupBy,
+    groupLabelLookup,
   )
 
   return (
@@ -2055,13 +2083,10 @@ function AnalyticsResultWidget({
         ) : null}
         {widgetType === 'table' ? (
           <AnalyticsTable
+            groupBy={widget?.groupBy}
+            groupLabelLookup={groupLabelLookup}
             result={result}
             t={t}
-            workItemTypeLabels={
-              widget?.groupBy?.dimension === 'work-item-type'
-                ? workItemTypeLabels
-                : undefined
-            }
           />
         ) : result.metric === 'milestone-trend' && result.series.length > 0 ? (
           <AnalyticsMilestoneTrendChart
@@ -2311,13 +2336,17 @@ function isDrawableChartValue(value: number | null): value is number {
 }
 
 function AnalyticsTable({
+  groupBy,
+  groupLabelLookup,
   result,
   t,
-  workItemTypeLabels,
 }: {
+  /** Dimension the widget groups by. */
+  groupBy: AnalyticsGroupBy | undefined
+  /** Resolves Team, Project, and Work Item Type names. */
+  groupLabelLookup: AnalyticsGroupLabelLookup
   result: AnalyticsWidgetResult
   t: ReturnType<typeof createTranslator>
-  workItemTypeLabels?: ReadonlyMap<string, string>
 }) {
   const columns = [...new Set(result.rows.flatMap((row) => Object.keys(row.values)))].slice(0, 6)
 
@@ -2348,11 +2377,13 @@ function AnalyticsTable({
           {result.rows.map((row) => (
             <tr className="border-b border-[var(--workbench-border)]" key={row.id}>
               <th className="px-3 py-3 font-semibold" scope="row">
-                {workItemTypeLabels?.get(row.label) ?? row.label}
+                {groupBy?.dimension === 'work-item-type'
+                  ? groupLabelLookup.workItemType?.(row.label) ?? row.label
+                  : row.label}
               </th>
               {columns.map((column) => (
                 <td className="px-3 py-3 tabular-nums text-[var(--workbench-muted)]" key={column}>
-                  {formatTableValue(row.values[column])}
+                  {formatTableValue(resolveTableValueName(column, row.values[column], groupLabelLookup))}
                 </td>
               ))}
             </tr>
@@ -2752,10 +2783,20 @@ function createEvidenceInput(
   } satisfies AnalyticsEvidenceInput
 }
 
+/**
+ * Converts a widget result into chart points, with group labels resolved to names.
+ *
+ * @param result - Widget result.
+ * @param timeZone - Time zone of calendar buckets.
+ * @param groupBy - Dimension the widget groups by.
+ * @param groupLabelLookup - Resolves group keys to names.
+ * @returns Chart points.
+ */
 function normalizeWidgetPoints(
   result: AnalyticsWidgetResult,
   timeZone: string,
-  workItemTypeLabels?: ReadonlyMap<string, string>,
+  groupBy: AnalyticsGroupBy | undefined,
+  groupLabelLookup: AnalyticsGroupLabelLookup,
 ) {
   if (result.series.length > 0) {
     return result.series.map((point, index) => ({
@@ -2768,7 +2809,7 @@ function normalizeWidgetPoints(
 
   return result.groups.map((group) => ({
     key: group.key,
-    label: workItemTypeLabels?.get(group.key) ?? group.label,
+    label: resolveAnalyticsGroupLabel(groupBy, group, groupLabelLookup),
     sampleSize: group.sampleSize,
     value: group.value,
   }))
@@ -2870,6 +2911,25 @@ function formatBucketLabel(from: string, to: string, timeZone: string) {
   const fromDate = formatAnalyticsCalendarDate(from, timeZone)
   const toDate = formatAnalyticsCalendarDate(to, timeZone)
   return fromDate === toDate ? fromDate : `${fromDate} – ${toDate}`
+}
+
+/**
+ * Replaces the Team and Project IDs of table rows with their names.
+ *
+ * @param column - Table column key.
+ * @param value - Cell value.
+ * @param lookup - Resolves Team and Project names.
+ * @returns The name for a known Team or Project ID, otherwise the value.
+ */
+function resolveTableValueName(
+  column: string,
+  value: string | number | boolean | null | undefined,
+  lookup: AnalyticsGroupLabelLookup,
+) {
+  if (typeof value !== 'string') return value
+  if (column === 'teamId') return lookup.team?.(value) ?? value
+  if (column === 'projectId') return lookup.project?.(value) ?? value
+  return value
 }
 
 function formatTableValue(value: string | number | boolean | null | undefined) {

@@ -1165,6 +1165,35 @@ test('returns current-ACL evidence and CSV exports from Analytics endpoints', as
   expect(exported.status).toBe(200)
   expect(exported.headers.get('Content-Type')).toBe('text/csv; charset=utf-8')
   expect(await exported.text()).toContain('ウィジェットID,指標キー,指標,値')
+
+  const grouped = {
+    ...query,
+    widgets: [{
+      id: 'wip-by-team',
+      type: 'chart' as const,
+      title: 'WIP',
+      metric: 'wip' as const,
+      groupBy: { dimension: 'team' as const },
+    }],
+  }
+  const englishCsv = await analyticsApiRequest('/api/analytics/export', {
+    query: grouped,
+    format: 'csv',
+    locale: 'en',
+  })
+  expect(englishCsv.status).toBe(200)
+  const englishText = await englishCsv.text()
+  expect(englishText).toContain('Group,Core Team,')
+  expect(englishText).toContain(',core-team,,')
+  const englishPdf = await analyticsApiRequest('/api/analytics/export', {
+    query: grouped,
+    format: 'pdf',
+    locale: 'en',
+  })
+  expect(englishPdf.status).toBe(200)
+  const pdfSource = Buffer.from(await englishPdf.arrayBuffer()).toString('latin1')
+  expect(pdfSource).toContain('(    Core Team: ')
+  expect(pdfSource).not.toContain('core-team')
 })
 
 /**

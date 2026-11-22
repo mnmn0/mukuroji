@@ -1,3 +1,4 @@
+import { readSearchWorkItemTypeKey } from './search'
 import type { WorkspaceCalendarPeriodPreset, WorkspaceWeekStartDay } from './workspace-calendar'
 
 /** Analytics report、snapshot、metric response の現行 schema version です。 */
@@ -568,4 +569,81 @@ export type AnalyticsExportInput = {
    * `ja` / `ja-*` は日本語、`en` / `en-*` は英語へ正規化し、省略時と未対応値は英語へfallbackします。
    */
   locale?: string
+}
+
+/**
+ * Display names that replace the internal IDs of Analytics group keys.
+ *
+ * Each lookup returns undefined when the name is unknown, for example after the Team, Project, or
+ * member was removed, and the resolver then falls back to the next readable value.
+ */
+export type AnalyticsGroupLabelLookup = {
+  /** Returns the display name of a Team ID. */
+  team?: (teamId: string) => string | undefined
+  /** Returns the display name of a Project ID. */
+  project?: (projectId: string) => string | undefined
+  /** Returns the display name of a Workspace member key. */
+  member?: (memberKey: string) => string | undefined
+  /** Returns the display name of a Team-qualified Work Item Type key (`teamId\0workItemTypeId`). */
+  workItemType?: (key: string) => string | undefined
+  /** Returns the localized label of a workflow status category. */
+  statusCategory?: (category: string) => string | undefined
+  /** Localized label of a group whose dimension value is not set, such as an unassigned Work Item. */
+  unset: string
+}
+
+/**
+ * Tells whether an Analytics group collects the Work Items whose dimension value is not set.
+ *
+ * @param groupBy - Dimension the widget groups by.
+ * @param key - Group key returned by the API.
+ * @returns True for the group of Work Items without a Project, an assignee, or a custom field value.
+ */
+export function isAnalyticsUnsetGroup(groupBy: AnalyticsGroupBy | undefined, key: string): boolean {
+  if (groupBy === undefined) return false
+  if (groupBy.dimension === 'custom-field') return key === 'unset'
+  return key === '' && (
+    groupBy.dimension === 'team' ||
+    groupBy.dimension === 'project' ||
+    groupBy.dimension === 'assignee'
+  )
+}
+
+/**
+ * Resolves the label people read for an Analytics group, replacing internal IDs with names.
+ *
+ * Calendar buckets, Milestones, and custom field values keep the API label. A Team, Project, or
+ * member whose name is unknown keeps the API label so that nothing is hidden.
+ *
+ * @param groupBy - Dimension the widget groups by; undefined for widgets without one.
+ * @param group - Group key and API label.
+ * @param lookup - Display names and localized labels.
+ * @returns The label to show.
+ */
+export function resolveAnalyticsGroupLabel(
+  groupBy: AnalyticsGroupBy | undefined,
+  group: Pick<AnalyticsGroup, 'key' | 'label'>,
+  lookup: AnalyticsGroupLabelLookup,
+): string {
+  if (isAnalyticsUnsetGroup(groupBy, group.key)) return lookup.unset
+  switch (groupBy?.dimension) {
+    case 'team':
+      return lookup.team?.(group.key) ?? group.label
+    case 'project':
+      return lookup.project?.(group.key) ?? group.label
+    case 'assignee':
+      return lookup.member?.(group.key) ?? group.label
+    case 'status':
+      return lookup.statusCategory?.(group.key) ?? group.label
+    case 'work-item-type': {
+      const name = lookup.workItemType?.(group.key)
+      if (name !== undefined) return name
+      const parts = readSearchWorkItemTypeKey(group.key)
+      if (parts === undefined) return group.label
+      const teamName = lookup.team?.(parts.teamId)
+      return teamName === undefined ? group.label : `${teamName} · ${parts.workItemTypeId}`
+    }
+    default:
+      return group.label
+  }
 }

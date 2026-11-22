@@ -79,6 +79,7 @@ import {
   type ProjectDirectoryTeam,
 } from '../../projects/api'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
+import { useActiveDirectoryMembers } from '../../projects/queries/useProjectMembers'
 import {
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
@@ -288,6 +289,12 @@ export function ReportsPage() {
   const displayedTimeZone = selectedSnapshotRecord?.query.timeZone ??
     routeState.timezone
   const displayedWidgets = selectedSnapshotRecord?.query.widgets ?? widgets
+  // Member names are read only when a widget groups by assignee, since that reads every Project.
+  const { data: directoryMembers } = useActiveDirectoryMembers(
+    accessToken,
+    teams,
+    displayedWidgets.some((widget) => widget.groupBy?.dimension === 'assignee'),
+  )
   const queryInput = useMemo(() => createAnalyticsQueryInput(
     routeState,
     queryAsOf,
@@ -826,6 +833,7 @@ export function ReportsPage() {
           teams={teams}
           timeZone={displayedTimeZone}
           workItemTypes={workItemTypes}
+          {...(directoryMembers ? { members: directoryMembers.members } : {})}
           widgets={displayedWidgets}
           onBuilderChange={(builder) => {
             if (selectedSnapshotRecord) {

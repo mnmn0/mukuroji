@@ -131,6 +131,7 @@ export const analyticsMessages = {
   'analytics.group.status': 'Status',
   'analytics.group.work-item-type': 'Work Item Type',
   'analytics.group.customField': 'Custom field',
+  'analytics.group.unset': 'Unassigned',
   'analytics.size.small': 'Small',
   'analytics.size.medium': 'Medium',
   'analytics.size.large': 'Large',

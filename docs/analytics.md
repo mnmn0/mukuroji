@@ -29,6 +29,33 @@ Report snapshot の作成時も保存済み definition を必ず使い、request
 Evidence、snapshot、export でも現在の認可を読み直し、以前は見えていた
 Work Item が権限変更や削除で見えなくなった場合、その値や件数を返しません。
 
+### Export の名前表示
+
+Snapshot の group は Team ID・Project ID・member key・status category をそのまま key と label に
+持ちます。名前は保存せず、表示と export のたびに引き直します（名前を変えると古い snapshot も新しい
+名前で出ます）。共通の解決規則は contracts の `resolveAnalyticsGroupLabel` で、Web と export が
+同じものを使います。Project・担当者・custom field の値がない group は locale に合わせた
+「未設定」/「Unassigned」になります。名前が分からない ID（削除された Team など）は元の値のままです。
+
+Export が引く名前は caller が見られる範囲に限ります。Team と Project は caller の Project
+directory（`GET /api/teams/projects` と同じ絞り込み）から、member 名は読める Project の member
+一覧から、Work Item Type と custom field の名前は見える Team の configuration から読みます。
+member と configuration は query が担当者・Work Item Type・custom field を使うときだけ読み、
+読み取りに失敗した分は元の値で出力します。
+
+CSV は既存の列の後ろに「Dimension key」「Team」「Project」を足しました。Group 行の
+「Dimension value」は名前、「Dimension key」は元の key です。Table 行の「Team」「Project」は
+「Team ID」「Project ID」の名前です。
+
+PDF は report 名（ad-hoc query では `mukuroji analytics`）、期間（report の timezone の日付）、
+基準日時、timezone、絞り込み、widget ごとの値と group 別の内訳（widget あたり 100 件まで）、
+forecast を書き、余白に収まらない行は折り返します。埋め込みの日本語 font は固定ラベル用の
+subset なので、それ以外の文字（Team 名の漢字など）は非埋め込みの CID font
+（`HeiseiKakuGo-W5`、Adobe-Japan1、`UniJIS-UCS2-H`）で書き、PDF viewer が持つ日本語 font で
+表示します。この font を使う文字には ToUnicode を付け、コピーと検索で元の文字を返します。
+ASCII に分解できる文字（`é` など）は `e` として書き、どちらの font でも書けない文字（絵文字など）は
+`?` にします。
+
 Analytics 用の canonical reader は Team partition を archived row も含めて読み、現在の
 Team/Project ACL を適用します。Project filter がある場合も、その Project が属する Team
 partition から読みます。現在状態が `asOf` より後に project 移動、archive、status 変更されていても
