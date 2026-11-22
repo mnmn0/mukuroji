@@ -1,6 +1,7 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, userEvent, within } from 'storybook/test'
 import { createPlanningUpdateWorkItemEvidenceValue } from '../model/statusUpdateView'
+import { evidenceKey } from '../model/baselineDelayEvidence'
 import { PlanningStatusUpdateComposer } from './PlanningUpdatePrimitives'
 import { createPlanningLabels } from './labels'
 import { aiPlanningGenerationFixture } from '../../features/ai-assistance/fixtures'
@@ -65,7 +66,7 @@ export const BaselineDelays: Story = {
       status: 'ready',
       candidates: [
         {
-          key: 'milestone-beta',
+          key: evidenceKey({ type: 'planning-entity', entityId: 'milestone-beta' }),
           kind: 'milestone',
           title: 'Beta ready',
           delayDays: 7,
@@ -73,7 +74,7 @@ export const BaselineDelays: Story = {
           evidence: { type: 'planning-entity', entityId: 'milestone-beta' },
         },
         {
-          key: 'journey-copy',
+          key: evidenceKey({ type: 'work-item', teamId: 'core-team', workItemId: 'journey-copy' }),
           kind: 'work-item',
           title: 'Finalize onboarding copy',
           delayDays: 5,
