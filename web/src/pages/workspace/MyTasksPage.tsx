@@ -12,7 +12,6 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { TeamIssuesApiError } from '../../issues/api'
-import { loadWorkspaceWorkItems } from '../../issues/queries/workspaceWorkItemLoader'
 import { isCancelledTeamIssueUpdate } from '../../issues/model/teamIssueUpdateOutcome'
 import { createTranslator } from '../../shared/i18n/i18n'
 import {
@@ -470,7 +469,11 @@ export function MyTasksPage() {
     mutationRequestRunner,
     // A failed background read leaves the confirmed schedules in place; the next read retries.
     onBackgroundRefreshError: () => undefined,
-    readTasks: (token) => loadWorkspaceWorkItems(token, includeArchivedWorkItems, myTasksWorkItemFilter),
+    listScope: {
+      filter: myTasksWorkItemFilter,
+      includeArchived: includeArchivedWorkItems,
+      kind: 'workspace',
+    },
     t,
     // The Gantt outline rolls child dates up to summary rows, which only the hierarchy holds.
     refreshHierarchy: () => refreshMyTasksHierarchies(workspace.guardEnterpriseSession),

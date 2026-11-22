@@ -1,16 +1,20 @@
 import type {
   CanonicalWorkItem,
   PlanningSnapshot,
+  WorkspaceWorkItemListFilter,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import type { Key, ScopedMutator } from 'swr'
 import {
   confirmTeamIssueSchedule,
+  getTeamIssueDetail,
   previewTeamIssueSchedule,
   TeamIssuesApiError,
   type TeamIssueDetail,
 } from '../../issues/api'
+import { loadTeamIssues } from '../../issues/queries/scopedWorkItemLoader'
+import { loadWorkspaceWorkItems } from '../../issues/queries/workspaceWorkItemLoader'
 import { getPlanningSnapshot } from '../../planning/api/snapshot'
 import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
@@ -36,15 +40,10 @@ export type WorkItemListScheduleMutationOptions = {
   mutateCache: ScopedMutator
   /** Cache key of the Work Item list shown by the route; nothing is published without one. */
   tasksCacheKey: Key
-  /**
-   * Reads the route's Work Item list from its backing endpoint. The read rejects on failure, unlike
-   * SWR's no-argument `mutate()`, so a failed refresh after a confirmation is retried and reported.
-   */
-  readTasks: (accessToken: string) => Promise<CanonicalWorkItem[]>
+  /** Which list the route reads, so a refresh after a confirmation reads the same rows. */
+  listScope: WorkItemListScheduleScope
   /** Cache key of the selected Work Item detail, when the route shows one. */
   selectedDetailCacheKey?: Key
-  /** Reads the detail stored under `selectedDetailCacheKey` from its endpoint. */
-  readSelectedDetail?: (accessToken: string) => Promise<TeamIssueDetail | undefined>
   /** Cache key of the Planning snapshot, when the route reads one. */
   planningCacheKey?: Key
   /** Reads the Work Item hierarchy again, whose summary rows roll up the changed dates. */
@@ -54,6 +53,27 @@ export type WorkItemListScheduleMutationOptions = {
   /** Resolves localized fallback messages. */
   t: (key: MessageKey) => string
 }
+
+/** List a schedule route reads, and the Work Item whose detail it shows. */
+export type WorkItemListScheduleScope =
+  | {
+      /** One Team's Work Item list. */
+      kind: 'team'
+      /** Team whose Work Items are listed. */
+      teamId: string
+      /** Whether archived Work Items are listed. */
+      includeArchived: boolean
+      /** Work Item whose detail the route shows, read with the list. */
+      selectedIssueId?: string
+    }
+  | {
+      /** A Workspace-wide list such as My Tasks. */
+      kind: 'workspace'
+      /** Whether archived Work Items are listed. */
+      includeArchived: boolean
+      /** Server-side filter of the list. */
+      filter: WorkspaceWorkItemListFilter
+    }
 
 /** Preview and confirmation callbacks for one Work Item list route. */
 export type WorkItemListScheduleMutations = {
@@ -88,8 +108,7 @@ export function createWorkItemListScheduleMutations({
   mutationRequestRunner,
   onBackgroundRefreshError,
   planningCacheKey,
-  readSelectedDetail,
-  readTasks,
+  listScope,
   refreshHierarchy,
   selectedDetailCacheKey,
   t,
@@ -100,6 +119,16 @@ export function createWorkItemListScheduleMutations({
     if (!accessToken) throw new Error(t('tasks.action.updateError'))
     return accessToken
   }
+
+  /** Reads the route's list from its endpoint; unlike SWR's `mutate()`, a failure rejects. */
+  const readTasks = (token: string): Promise<CanonicalWorkItem[]> => listScope.kind === 'team'
+    ? loadTeamIssues(listScope.teamId, token, listScope.includeArchived)
+    : loadWorkspaceWorkItems(token, listScope.includeArchived, listScope.filter)
+  /** Reads the detail the route shows, when it shows one. */
+  const readSelectedDetail = async (token: string): Promise<TeamIssueDetail | undefined> =>
+    listScope.kind === 'team' && listScope.selectedIssueId
+      ? getTeamIssueDetail(listScope.teamId, listScope.selectedIssueId, token)
+      : undefined
 
   /** Revalidates every cache that shows schedules after a stale preview or confirmation. */
   const revalidateAll = () => Promise.all([
@@ -230,7 +259,7 @@ export function createWorkItemListScheduleMutations({
     }
     /** Fetches and publishes the selected detail only after it observes a matching commit. */
     const refreshSelectedDetail = async () => {
-      if (!readSelectedDetail || !selectedDetailCacheKey) return
+      if (!selectedDetailCacheKey) return
       await refreshScheduleConfirmationCache(
         () => guardEnterpriseSession(readSelectedDetail(token)),
         (detail) => {
