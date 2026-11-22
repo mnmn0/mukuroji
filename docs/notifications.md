@@ -275,11 +275,11 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 
 ### Milestone の watch
 
-Milestone の watcher は collaboration entity key `<workspaceId>#planning-entity#<encodeURIComponent(entityId)>` に保存し、`GET|PUT|DELETE /api/planning/entities/:entityId/watch` で読み書きします。呼び出した人が見られる、archive されていない Milestone だけが対象で、見えない entity は `404`、Milestone 以外は `400`、archive 済みは `409` です。Enterprise では `planning.read` で watch できます（`PUT` / `DELETE` も同じ）。
+Milestone の watcher は（[ADR 0063](adr/0063-planning-milestone-watcher-key.md)）collaboration entity key `<workspaceId>#planning-entity#<encodeURIComponent(entityId)>` に保存し、`GET|PUT|DELETE /api/planning/entities/:entityId/watch` で読み書きします。呼び出した人が見られる、archive されていない Milestone だけが対象で、見えない entity は `404`、Milestone 以外は `400`、archive 済みは `409` です。Enterprise では Milestone を読むのに `planning.read` が要ります。watch の変更（`PUT` / `DELETE`）は Planning 更新や Work Item の watch と同じく業務データを書き込める member に限り、guest と読み取りの permission だけを持つ Enterprise member は `403` です。
 
 - Planning entity の更新 audit のうち、Milestone の `status` が `completed` になった更新は `planning-entity.milestone-completed`、ベースラインか予測の日付が変わった更新は `planning-entity.milestone-rescheduled` になります。同じ更新で両方が変わった場合は完了です。どちらも `planning-entity.` の prefix のままなので、活動と Milestone の予定日推移はほかの更新と同じように読みます
 - event は `notificationCandidates` を空で持ち、projection が現在の watcher を `watcher` として加えます。変更した本人には送りません。Project watcher には送りません
-- projection は Planning table の Milestone の行を強整合で読み直し、消えた・archive された・event の Team / Project から移った Milestone では届けません。宛先は Planning の読み取り（Enterprise では `planning.read`）が要ります
+- projection（と Slack・Email の送信直前の再確認）は、composition root が注入する reader で Planning table の Milestone の行を強整合で読み直し、消えた・archive された・event の Team / Project から移った Milestone では届けません。宛先は Planning の読み取り（Enterprise では `planning.read`）が要ります
 - Inbox は表示のたびに、Milestone が同じ scope に archive されずに残っていること、読めること、今も watch していることを確かめます。Slack・Email の送信直前にも Milestone の行と watch を読み直します
 - 通知は「Milestone の完了」「Milestone の予定変更」として届き、`/planning?entityId=<id>` を開きます。title は Milestone 名です
 

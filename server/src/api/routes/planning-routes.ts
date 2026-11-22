@@ -103,6 +103,7 @@ import {
   hasUnqualifiedEnterpriseProjectScope,
   qualifyEnterpriseProjectScopes,
 } from '../shared/enterprise-access'
+import { toCollaborationErrorResponse } from '../shared/collaboration-access'
 import { readBearerAccessToken, readJson } from '../shared/http'
 import { readAuditEventQuery, readLocale } from '../shared/input-parsing'
 import {
@@ -4071,6 +4072,8 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           : await workItemDependencies.collaboration.unsubscribe(mutationInput)
         return c.json({ watch })
       } catch (error) {
+        // A watcher write reports its own conflicts, such as a changed authorization fence.
+        if (error instanceof CollaborationError) return toCollaborationErrorResponse(c, error)
         return toPlanningErrorResponse(c, error)
       }
     })
@@ -4143,6 +4146,8 @@ export function registerPlanningRoutes(routeApp: Hono): void {
           : await workItemDependencies.collaboration.unsubscribe(mutationInput)
         return c.json({ watch })
       } catch (error) {
+        // A watcher write reports its own conflicts, such as a changed authorization fence.
+        if (error instanceof CollaborationError) return toCollaborationErrorResponse(c, error)
         return toPlanningErrorResponse(c, error)
       }
     })

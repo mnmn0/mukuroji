@@ -955,6 +955,29 @@ test('lets a reader watch a visible Milestone and nothing else', async () => {
   expect(calls).toHaveLength(3)
 })
 
+test('reports a changed authorization fence on a Milestone watch as a conflict', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const planning = new InMemoryPlanningClient()
+  await seedLegacyPlanningScopeGraph(planning)
+  const conflict = () => {
+    throw new CollaborationError(409, 'CollaborationAuthorizationChanged', 'Authorization changed.')
+  }
+  setTestAppDependencies({
+    planning,
+    collaboration: createCollaborationStub({ subscribe: async () => conflict(), unsubscribe: async () => conflict() }),
+  })
+
+  for (const method of ['PUT', 'DELETE'] as const) {
+    const response = await planningApiRequest('/api/planning/entities/refero-milestone/watch', method)
+    expect(response.status).toBe(409)
+    expect(await response.json()).toMatchObject({ code: 'CollaborationAuthorizationChanged' })
+  }
+})
+
 test('hides Workspace-scoped and other Project Planning entities from a legacy guest', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'guest',

@@ -210,6 +210,34 @@ export interface CollaborationProjectionDependencies {
   timesheetReminders?: TimesheetReminderRevalidator
   /** Revalidates weekly report reminders; without it every weekly report reminder is dropped. */
   weeklyReportReminders?: WeeklyReportReminderRevalidator
+  /** Rereads Milestones and their watches; without it every Milestone notification is dropped. */
+  planningMilestones?: PlanningMilestoneNotificationRevalidator
+}
+
+/** Reads the current state a Milestone notification depends on. */
+export type PlanningMilestoneNotificationRevalidator = {
+  /**
+   * Strongly reads a Milestone's current scope.
+   *
+   * @param workspaceId - Canonical Workspace ID.
+   * @param entityId - Milestone ID.
+   * @returns The Team and Project, or undefined when it is gone, archived, or not a Milestone.
+   */
+  readCurrentMilestoneScope(workspaceId: string, entityId: string): Promise<{
+    /** Team of the Milestone. */
+    teamId?: string
+    /** Project of the Milestone. */
+    projectId?: string
+  } | undefined>
+  /**
+   * Strongly reads whether a member still watches a Milestone.
+   *
+   * @param workspaceId - Canonical Workspace ID.
+   * @param entityId - Milestone ID.
+   * @param memberKey - Normalized member key.
+   * @returns Whether the member's watch is subscribed.
+   */
+  isWatching(workspaceId: string, entityId: string, memberKey: string): Promise<boolean>
 }
 
 /** A `ConditionCheck` transaction item written together with a projected notification. */
@@ -838,7 +866,7 @@ async function processRecord(
     await markProjectionProcessed(event.eventId)
     return
   }
-  if (!(await isCurrentPlanningMilestoneNotification(authorizationEvent))) {
+  if (!(await isCurrentPlanningMilestoneNotification(authorizationEvent, dependencies.planningMilestones))) {
     await markProjectionProcessed(event.eventId)
     return
   }
@@ -2754,9 +2782,7 @@ export async function authorizeNotificationDelivery(
     ? createCurrentPlanningUpdateActivityScopeEvent(scoped, planningScope)
     : undefined
   if (planningActivity && !currentPlanningActivityEvent) return false
-  if (!(await isCurrentPlanningMilestoneNotification(scoped))) return false
-  if (planningMilestoneNotificationEventTypes.has(scoped.eventType) &&
-    !(await isCurrentWatcher(scoped, memberKey))) return false
+  // Milestone notifications are rechecked by the caller, which owns the Milestone and watch reader.
   const current = planningScope.checked && !planningActivity
     ? { ...scoped, teamId: planningScope.teamId, projectId: planningScope.projectId }
     : scoped
@@ -2943,60 +2969,30 @@ async function readCurrentWorkItemScope(
 }
 
 /**
- * Rechecks a Milestone notification against the Milestone it was written for.
+ * Rechecks a Milestone notification against the Milestone it was written for and, for one
+ * recipient, against that recipient's current watch.
  *
  * The Milestone must still exist, be a Milestone, be unarchived, and sit in the Team / Project the
  * event captured; a Milestone moved since then is not reported, so its title never reaches readers
  * of only one of the two scopes. Other events pass.
  *
  * @param event - Notification source event.
+ * @param revalidator - Milestone and watch reader; without it every Milestone notification is dropped.
+ * @param memberKey - Recipient whose watch is rechecked, when one is known.
  * @returns Whether the event may still be delivered.
  */
-async function isCurrentPlanningMilestoneNotification(event: AuditProjectionEvent): Promise<boolean> {
+export async function isCurrentPlanningMilestoneNotification(
+  event: Pick<AuditProjectionEvent, 'eventType' | 'workspaceId' | 'entityId' | 'teamId' | 'projectId'>,
+  revalidator: PlanningMilestoneNotificationRevalidator | undefined,
+  memberKey?: string,
+): Promise<boolean> {
   if (!planningMilestoneNotificationEventTypes.has(event.eventType)) return true
-  if (!event.entityId) return false
-  const recordKey = `ENTITY#${encodeURIComponent(event.entityId)}`
-  const { Item: milestone } = await documentClient.send(new GetCommand({
-    TableName: requireEnv('PLANNING_TABLE_NAME'),
-    Key: { workspaceId: event.workspaceId, recordKey },
-    ConsistentRead: true,
-  }))
-  if (!milestone) return false
-  if (
-    milestone.workspaceId !== event.workspaceId ||
-    milestone.recordKey !== recordKey ||
-    milestone.entryType !== 'planning-entity' ||
-    milestone.id !== event.entityId
-  ) {
-    throw new Error('Planning Milestone notification source row is invalid.')
-  }
-  if (milestone.type !== 'milestone' || milestone.archivedAt !== undefined) return false
-  const teamId = readOptionalPlanningScopeId(milestone.teamId, 'Planning Milestone Team scope')
-  const projectId = readOptionalPlanningScopeId(milestone.projectId, 'Planning Milestone Project scope')
-  if (projectId && !teamId) return false
-  return teamId === event.teamId && projectId === event.projectId
-}
-
-/**
- * Strongly reads whether a member still watches the subject of a watcher-only notification.
- *
- * @param event - Notification source event whose watcher scopes are rebuilt.
- * @param memberKey - Normalized recipient member key.
- * @returns Whether one of the event's watcher scopes holds a current subscription of the member.
- */
-async function isCurrentWatcher(event: AuditProjectionEvent, memberKey: string): Promise<boolean> {
-  for (const { entityKey } of createSubscribedWatcherScopes(event)) {
-    const recordKey = `WATCHER#${memberKey}`
-    const watcher = await documentClient.send(new GetCommand({
-      TableName: requireEnv('COLLABORATION_TABLE_NAME'), Key: { entityKey, recordKey }, ConsistentRead: true,
-    }))
-    if (watcher.Item?.entityKey === entityKey && watcher.Item.recordKey === recordKey &&
-      toSubscribedWatcherCandidates([watcher.Item], 'watcher').some((candidate) =>
-        normalizeMemberKey(candidate.memberKey) === memberKey)) {
-      return true
-    }
-  }
-  return false
+  const { entityId, workspaceId } = event
+  if (!revalidator || !entityId) return false
+  const scope = await revalidator.readCurrentMilestoneScope(workspaceId, entityId)
+  if (!scope || scope.teamId !== event.teamId || scope.projectId !== event.projectId) return false
+  return memberKey === undefined ||
+    await revalidator.isWatching(workspaceId, entityId, memberKey.trim().toLowerCase())
 }
 
 /**

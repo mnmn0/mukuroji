@@ -17,6 +17,8 @@ import {
 import {
   cleanupDeletedFileProjection,
   authorizeNotificationDelivery,
+  isCurrentPlanningMilestoneNotification,
+  type PlanningMilestoneNotificationRevalidator,
   createNotificationDeliveryAuthorizationCache,
   createCuratedContextSearchParentCondition,
   createDynamoBatchItemFailure,
@@ -2722,7 +2724,7 @@ describe('collaboration projection pure helpers', () => {
         if (table === 'COLLABORATION_TABLE_NAME') {
           const memberKey = recordKey.slice('WATCHER#'.length)
           return command.input.Key?.entityKey === entityKey && watching.has(memberKey)
-            ? { Item: { entityKey, recordKey, entryType: 'watcher', memberKey, state: 'subscribed' }, $metadata: {} }
+            ? { Item: { entityKey, recordKey, entryType: 'watcher', memberKey, state: 'subscribed', updatedAt: '2026-07-12T11:00:00.000Z' }, $metadata: {} }
             : { $metadata: {} }
         }
         return { $metadata: {} }
@@ -2747,10 +2749,20 @@ describe('collaboration projection pure helpers', () => {
       if (command instanceof PutCommand) return { $metadata: {} }
       throw new Error('Unexpected projection command')
     })
+    const planningMilestones: PlanningMilestoneNotificationRevalidator = {
+      async readCurrentMilestoneScope(workspaceId, entityId) {
+        if (workspaceId !== 'workspace-1' || entityId !== 'beta-launch' || !milestone) return undefined
+        if (milestone.archivedAt !== undefined) return undefined
+        return { teamId: String(milestone.teamId), projectId: String(milestone.projectId) }
+      },
+      isWatching: async (workspaceId, entityId, memberKey) =>
+        workspaceId === 'workspace-1' && entityId === 'beta-launch' && watching.has(memberKey),
+    }
     const dependencies = {
       deletedFileCleanup: { readFile: async () => undefined, queryRows: async () => [], tagDeletedObjectVersion: async () => {}, expireMetadata: async () => {} },
       curatedContextSearch: { upsertCurrent: async () => {}, deleteCurrent: async () => {} }, realtime: { publish: async () => {} },
       enterpriseIdentity: { getSnapshot: async () => createRealtimeEnterpriseSnapshot() },
+      planningMilestones,
     }
     const record = (eventId: string) => ({
       eventName: 'INSERT', dynamodb: { SequenceNumber: eventId, NewImage: {
@@ -2793,12 +2805,20 @@ describe('collaboration projection pure helpers', () => {
         notificationCandidates: [{ memberKey: 'watcher@example.com', reason: 'watcher' }],
       })
       const identity = dependencies.enterpriseIdentity
-      expect(await authorizeNotificationDelivery(queued, 'watcher@example.com', identity, cache)).toBe(true)
+      /** Runs the Milestone recheck and the shared recipient authorization, as the senders do. */
+      const deliverable = async () =>
+        await isCurrentPlanningMilestoneNotification(queued, planningMilestones, 'watcher@example.com') &&
+        await authorizeNotificationDelivery(queued, 'watcher@example.com', identity, cache)
+      expect(await deliverable()).toBe(true)
       watching = new Set(['editor@example.com'])
-      expect(await authorizeNotificationDelivery(queued, 'watcher@example.com', identity, cache)).toBe(false)
+      expect(await deliverable()).toBe(false)
       watching = new Set(watcherKeys)
       milestone = { ...currentMilestone, projectId: 'other' }
-      expect(await authorizeNotificationDelivery(queued, 'watcher@example.com', identity, cache)).toBe(false)
+      expect(await deliverable()).toBe(false)
+      milestone = currentMilestone
+      // Without the reader, Milestone notifications fail closed; other events are untouched.
+      expect(await isCurrentPlanningMilestoneNotification(queued, undefined, 'watcher@example.com')).toBe(false)
+      expect(await isCurrentPlanningMilestoneNotification({ ...queued, eventType: 'comment.created' }, undefined)).toBe(true)
     } finally {
       send.mockRestore()
       groups.mockRestore()

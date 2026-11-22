@@ -5662,6 +5662,13 @@ function curatedContextActivitySourceConditions(
   }]
 }
 
+/**
+ * Builds the parent Work Item condition of a watcher write, when the watch is on a Work Item.
+ *
+ * @param tableName - Work Items table name.
+ * @param input - Watcher write input.
+ * @returns At most one parent condition, without the caller authorization checks.
+ */
 function watcherParentIssueConditions(tableName: string, input: UpdateWatcherInput) {
   const parentConditions = input.issueId === undefined
     ? []
@@ -5673,7 +5680,9 @@ function watcherParentIssueConditions(tableName: string, input: UpdateWatcherInp
         projectId: input.projectId,
         projectEntityKey: input.projectEntityKey,
       })]
-  return [...(input.authorizationConditionChecks ?? []), ...parentConditions]
+  // Caller authorization checks are appended by the transaction itself, right after these, so
+  // their indexes stay known; including them here too would name one item twice.
+  return parentConditions
 }
 
 function commentCondition(tableName: string, entityKey: string, commentId: string) {
