@@ -1,5 +1,6 @@
 import {
   readSearchWorkItemTypeKey,
+  TASK_VIEW_GANTT_SCALES,
   TASK_VIEW_SCHEMA_VERSION,
   TASK_VIEW_SURFACES,
   type CreateSavedTaskViewInput,
@@ -537,7 +538,7 @@ function isTaskViewGrouping(value: unknown): value is TaskViewGrouping {
     includesString(sortDirections, value.direction)
 }
 
-/** Returns whether display options contain only optional booleans. */
+/** Returns whether display options contain only optional booleans and a supported Gantt scale. */
 function isTaskViewDisplayOptions(value: unknown): value is TaskViewDisplayOptions {
   if (!isRecord(value)) return false
   return [
@@ -548,7 +549,10 @@ function isTaskViewDisplayOptions(value: unknown): value is TaskViewDisplayOptio
     value.wrapText,
     value.showAssigneeAvatars,
     value.showOutline,
-  ].every((option) => option === undefined || typeof option === 'boolean')
+    value.ganttCompactRows,
+    value.ganttProgressLine,
+  ].every((option) => option === undefined || typeof option === 'boolean') &&
+    (value.ganttScale === undefined || includesString(TASK_VIEW_GANTT_SCALES, value.ganttScale))
 }
 
 /** Returns whether an unknown preference object is complete and internally consistent. */

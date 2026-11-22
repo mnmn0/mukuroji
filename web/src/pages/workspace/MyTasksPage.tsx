@@ -110,6 +110,7 @@ import { WorkItemOutlineNotice } from '../../work-items/ui/WorkItemOutlineNotice
 import type { TaskGanttOutline } from '../../tasks/ui/TaskGanttView'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
+import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 
 /**
  * Server-side filter for My Tasks: only Work Items the viewer owns or contributes to are read,
@@ -876,6 +877,19 @@ export function MyTasksPage() {
   const taskViewPresentation = taskViewDefinitionToPresentationSettings(
     taskViewController.effectiveDefinition,
   )
+  /**
+   * Applies presentation settings from the toolbar or a layout to the effective task view.
+   *
+   * @param settings - Next presentation settings.
+   */
+  const changeTaskViewPresentation = (settings: TaskViewPresentationSettings) => {
+    taskViewController.setEffectiveDefinition(
+      presentationSettingsToTaskViewDefinition(
+        taskViewController.effectiveDefinition,
+        settings,
+      ),
+    )
+  }
   const taskViewToolbar = (
     <TaskViewToolbar
       builtInName={t('workspace.myTasks.title')}
@@ -897,14 +911,7 @@ export function MyTasksPage() {
       onReset={taskViewController.resetOverrides}
       onSaveAs={taskViewController.saveAs}
       onSelectView={taskViewController.selectView}
-      onSettingsChange={(settings) => {
-        taskViewController.setEffectiveDefinition(
-          presentationSettingsToTaskViewDefinition(
-            taskViewController.effectiveDefinition,
-            settings,
-          ),
-        )
-      }}
+      onSettingsChange={changeTaskViewPresentation}
       onUpdate={taskViewController.updateActiveView}
       selectedView={selectedTaskView}
       settings={taskViewPresentation}
@@ -991,6 +998,7 @@ export function MyTasksPage() {
           t={t}
           taskMoveErrorMessage={statusMutation.errorMessage}
           taskViewToolbar={taskViewToolbar}
+          onPresentationChange={changeTaskViewPresentation}
           presentation={taskViewPresentation}
           viewMode={myTasksViewMode}
           onViewModeChange={(mode) => {

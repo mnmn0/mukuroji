@@ -7,6 +7,7 @@ export const timeTrackingMessages = {
   'timeTracking.page.lookupRetry': 'Reload tasks',
   'timeTracking.page.calendarSettingsError': 'The Workspace week start could not be loaded. Reload it to show the right week.',
   'timeTracking.page.calendarSettingsRetry': 'Reload settings',
+  'timeTracking.page.categoriesError': 'The Workspace work categories could not be loaded. Reload them to record indirect work.',
   'timeTracking.page.calendarSettingsLoading': 'Loading the Workspace week settings…',
   'timeTracking.view.navigation': 'Time tracking views',
   'timeTracking.view.timesheet': 'My timesheet',

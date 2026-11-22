@@ -28,6 +28,8 @@ export type WorkspaceTimeEntryCategoriesQuery = {
   settings: WorkspaceTimeEntryCategorySettings | undefined
   /** Failure of the latest read, if any. */
   error: unknown
+  /** Reads the categories again. */
+  retry: () => void
 }
 
 /**
@@ -35,7 +37,7 @@ export type WorkspaceTimeEntryCategoriesQuery = {
  *
  * @param accessToken - Bearer token used for the read.
  * @param enabled - Whether the query may run.
- * @returns The categories once loaded and the latest error.
+ * @returns The categories once loaded, the latest error, and a retry action.
  */
 export function useWorkspaceTimeEntryCategories(
   accessToken?: string,
@@ -49,5 +51,5 @@ export function useWorkspaceTimeEntryCategories(
     ([, token]) => getWorkspaceTimeEntryCategories(token),
     workspaceTimeEntryCategoriesQueryConfig,
   )
-  return { settings: query.data, error: query.error }
+  return { settings: query.data, error: query.error, retry: () => { void query.mutate().catch(() => undefined) } }
 }
