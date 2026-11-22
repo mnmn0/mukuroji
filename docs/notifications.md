@@ -39,6 +39,12 @@ recipientStatusKey    = <recipientKey>#<unread|read|archived|snoozed>
 
 Notification row は `recipientStatusKey`、`itemType: notification`、正の `version` を必須とする current schema で保存します。current schema でない row は request path で補完せず、`InvalidNotificationData`（503）の fail-closed エラーとして扱います。
 
+### 概要の文言
+
+システムが書く概要は、文ではなく code と値（`message: { code, params }`）でも保存します。code ごとの日本語と英語の文言は `contracts/src/notification-messages.ts` の `NOTIFICATION_MESSAGE_TEMPLATES` にあり、`{name}` を同じ名前の値で置き換えます（値の中の `{name}` は置き換えません）。producer は audit metadata の `notificationMessage` に code と値を入れ、`summary` には同じ code の英語の文を入れます。projection は読めた code だけを通知 row の `message` に写します。
+
+Web の Inbox は表示言語で、Slack と Email は受信者の表示設定の言語（未設定は日本語）で文にします。`message` のない row、知らない code、壊れた値は保存済みの `summary` をそのまま出すため、code を入れる前の通知と古い client も読めます。ブロック解除と定期配信のレポートは、以前から Web が event type で翻訳しているので、その文言を優先します。人が書いた文（コメントの本文や Health update の抜粋など）は値として入れるだけで翻訳しません。
+
 read、archive、snooze は notification row に version 付きで保存します。snooze 期限を過ぎた row は次の Inbox/count read で read/unread state に戻ります。この解除処理は250件 × 4 page（最大1,000行）で正常に打ち切り、残りは次回の read へ持ち越します。cursor が進まない場合だけ `503` で fail closed します。`mark-all-read` は active unread row のみを更新し、archive や有効な snooze は解除しません。
 
 ## API
@@ -180,7 +186,7 @@ CDKで追加される `SlackDeliveryIndex` と、Slack job を毎分実行する
 
 通知を投影する際にも保存済み設定を検証します。設定が破損している場合は通知と処理済みreceiptを確定せず、そのstream recordを失敗として返します。他のrecordは処理を続け、設定の修復後にstreamの再試行または失敗イベントの再処理で配信予定を作成できます。設定が未保存の受信者には従来のdefaultを使用します。
 
-60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
+60秒のleaseとversion条件で並行workerを排他し、成功した通知はdue indexから除外します。Slackの429と一時障害は最大5試行、指数backoffと `Retry-After`（最大24時間）の長い方で再試行します。本文は最大3,000文字のプレーンテキストで、Slackのメンション展開やリンクプレビューは無効です。概要は受信者の表示設定の言語で書き（[概要の文言](#概要の文言)）、言語を読めないときは送らずに再試行します。Webhookの応答喪失や成功直後の永続化障害では重複投稿の可能性があります。Incoming Webhook自体にはexactly-once保証がないためです。
 
 HTTPエラーの再試行可否と待機時間は、受信済みのstatusと `Retry-After` で判定します。エラー本文は読み取らず破棄し、本文の接続切断や破棄処理の失敗で429の待機時間を失ったり、403などの恒久的な拒否を再試行へ変えたりしません。HTTP 200は引き続き本文の `ok` を確認してから成功扱いにし、その確認前の通信障害は再試行します。
 
@@ -232,7 +238,7 @@ Lambda の IAM policy は `ses:SendEmail` を `ses:FromAddress` がこの送信�
 
 再認可・quiet hours と snooze の再確認・lease・version 条件・最大5試行の再試行は Slack と同じです。宛先の読み取りから SES への送信までは合計30秒の期限で打ち切り、送信直前に延長した60秒の lease が切れた後に送ることはありません。frequency は既存の delivery plan の遅延として扱い、通知ごとに 1 通送ります（複数通知を 1 通にまとめる digest ではありません）。SES の throttling（`TooManyRequestsException` など）と一時障害は再試行し、`MessageRejected`・未検証の送信元などは再試行せず失敗にします。応答を失った送信を再試行するため、まれに同じ通知が2通届くことがあります。
 
-本文は ja / en 併記のプレーンテキストです。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
+本文は ja / en 併記のプレーンテキストです。ただし概要は受信者の言語で 1 回だけ書きます（[概要の文言](#概要の文言)）。言語の読み取りに失敗した通知は送らずに再試行します。件名は `[mukuroji] <タイトル>` で、改行などの制御文字は空白にします。本文には Inbox と同じ deep link を入れ、Web の origin 以外を指す link は使わず Web の top を入れます。
 
 ### 失敗の調査
 

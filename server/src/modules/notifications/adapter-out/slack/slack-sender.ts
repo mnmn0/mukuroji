@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto'
+import type { NotificationMessageLocale } from '@mukuroji/contracts'
+import type { NotificationLocaleReader } from '../../application/channel-delivery'
 import type { SlackDelivery, SlackSendResult } from '../../application/slack-delivery'
+import { DEFAULT_NOTIFICATION_LOCALE, resolveNotificationSummaryText } from '../../domain/notification-summary'
 
 /**
  * Resolves the recipient-bound destination within the tenant's existing secret-cleanup namespace.
@@ -23,9 +26,14 @@ export type SlackSecretReader = (secretId: string) => Promise<string | undefined
  * Creates a sender that only accepts Slack Incoming Webhook URLs from Secrets Manager.
  * @param readSecret - Secret loader configured by the composition root.
  * @param send - Timeout-aware HTTP boundary, replaceable in offline tests.
+ * @param readLocale - Recipient language reader; without one the summary is written in Japanese.
  * @returns Recipient-bound notification sender.
  */
-export function createSlackNotificationSender(readSecret: SlackSecretReader, send: SlackFetch = fetch) {
+export function createSlackNotificationSender(
+  readSecret: SlackSecretReader,
+  send: SlackFetch = fetch,
+  readLocale: NotificationLocaleReader = async () => DEFAULT_NOTIFICATION_LOCALE,
+) {
   return async (delivery: SlackDelivery): Promise<SlackSendResult> => {
     let secret: string | undefined
     try {
@@ -38,8 +46,15 @@ export function createSlackNotificationSender(readSecret: SlackSecretReader, sen
       !/^https:\/\/hooks\.slack(?:-gov)?\.com\/services\/[A-Za-z0-9]+\/[A-Za-z0-9]+\/[A-Za-z0-9]+$/.test(secret.trim())
     ) return { succeeded: false, retryable: false, code: 'SlackDestinationInvalid' }
 
+    let locale: NotificationMessageLocale
+    try {
+      locale = await readLocale(delivery, AbortSignal.timeout(5_000))
+    } catch {
+      return { succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' }
+    }
     const notification = delivery.notification
-    const text = [notification.title ?? 'Mukuroji', notification.summary, notification.reasons.join(', ')]
+    const summary = resolveNotificationSummaryText(notification, locale)
+    const text = [notification.title ?? 'Mukuroji', summary, notification.reasons.join(', ')]
       .filter(Boolean).join('\n').slice(0, 3_000)
     try {
       const response = await send(new URL(secret.trim()), {

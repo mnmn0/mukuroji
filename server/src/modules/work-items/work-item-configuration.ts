@@ -48,6 +48,7 @@ import {
   type WorkItemRelationsResponse,
   type WorkItemRelationEventType,
   type WorkItemRelationType,
+  createNotificationMessage,
 } from '@mukuroji/contracts'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
@@ -204,6 +205,7 @@ function createRelationNotificationMetadata(
   return {
     deepLink: endpoint.deepLink,
     notificationTitle: endpoint.title,
+    notificationMessage: createNotificationMessage('work-item.blocker-removed'),
     notificationCandidates: endpoint.assigneeMemberKey.trim() === ''
       ? []
       : [{ memberKey: endpoint.assigneeMemberKey, reason: 'assignee' }],

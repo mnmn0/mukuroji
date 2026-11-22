@@ -1,4 +1,6 @@
-import type { ChannelDelivery, ChannelSendResult } from '../../application/channel-delivery'
+import type { NotificationMessageLocale } from '@mukuroji/contracts'
+import type { ChannelDelivery, ChannelSendResult, NotificationLocaleReader } from '../../application/channel-delivery'
+import { DEFAULT_NOTIFICATION_LOCALE, resolveNotificationSummaryText } from '../../domain/notification-summary'
 
 /** Current Cognito Email address of a recipient, or why none can be used. */
 export type EmailRecipientLookup =
@@ -41,6 +43,8 @@ export type EmailNotificationSenderOptions = {
   readRecipient: EmailRecipientReader
   /** Provider send operation. */
   sendEmail: EmailTransport
+  /** Recipient language reader; without one the summary is written in Japanese. */
+  readLocale?: NotificationLocaleReader
   /**
    * Deadline for the whole lookup and send, in milliseconds. It stays well inside the 60-second
    * lease renewed just before sending, so a slow lookup can never send after another worker
@@ -85,10 +89,17 @@ export function createEmailNotificationSender(options: EmailNotificationSenderOp
     if (!isDeliverableAddress(address)) {
       return { succeeded: false, retryable: false, suppressed: true, code: 'EmailRecipientUnverified' }
     }
+    let locale: NotificationMessageLocale
+    try {
+      locale = options.readLocale ? await options.readLocale(delivery, signal) : DEFAULT_NOTIFICATION_LOCALE
+    } catch {
+      return { succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' }
+    }
+    if (signal.aborted) return { succeeded: false, retryable: true, code: 'NotificationLocaleUnavailable' }
     try {
       await options.sendEmail({
         from: options.sender, to: address,
-        ...renderEmailNotification(delivery, options.appOrigin),
+        ...renderEmailNotification(delivery, options.appOrigin, locale),
       }, signal)
       return { succeeded: true, retryable: false }
     } catch (error) {
@@ -106,16 +117,22 @@ export function createEmailNotificationSender(options: EmailNotificationSenderOp
  * Plain text only, so stored titles and summaries cannot inject markup.
  * @param delivery - Delivery with validated notification contents.
  * @param appOrigin - Web application origin for the deep link.
+ * @param locale - Recipient language for the system-written summary.
  * @returns Subject and body.
  */
-export function renderEmailNotification(delivery: ChannelDelivery, appOrigin: string): Pick<EmailMessage, 'subject' | 'text'> {
+export function renderEmailNotification(
+  delivery: ChannelDelivery,
+  appOrigin: string,
+  locale: NotificationMessageLocale = DEFAULT_NOTIFICATION_LOCALE,
+): Pick<EmailMessage, 'subject' | 'text'> {
   const notification = delivery.notification
-  const heading = singleLine(notification.title) || singleLine(notification.summary) || 'mukuroji'
+  const summary = resolveNotificationSummaryText(notification, locale)
+  const heading = singleLine(notification.title) || singleLine(summary) || 'mukuroji'
   const subject = `[mukuroji] ${heading}`.slice(0, 200)
   const link = resolveDeepLink(notification.deepLink, appOrigin)
   const text = [
     singleLine(notification.title),
-    notification.summary?.replace(/\r\n?/g, '\n').trim().slice(0, 2_000),
+    summary?.replace(/\r\n?/g, '\n').trim().slice(0, 2_000),
     notification.reasons.length > 0 ? `通知の理由 / Reason: ${notification.reasons.join(', ')}` : undefined,
     '',
     `mukuroji で開く / Open in mukuroji: ${link}`,

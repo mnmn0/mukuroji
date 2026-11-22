@@ -109,6 +109,31 @@ describe('notification store', () => {
     expect(parseStoredNotificationPreferences(undefined).channels.inApp).toBe(true)
   })
 
+  test('returns a stored summary message code and drops one it cannot read', async () => {
+    const rows = [
+      createNotificationRow({ message: { code: 'work-item.due-today', params: { title: 'Release' } } }),
+      createNotificationRow({ notificationKey: '2026-07-12T11:00:00.000Z#evt-2', notificationId: 'evt-2', eventId: 'evt-2',
+        occurredAt: '2026-07-12T11:00:00.000Z', message: { code: 'work-item.unknown' } }),
+    ]
+    let queryCount = 0
+    const recording = createClient(({ constructor }) => {
+      if (constructor.name !== 'QueryCommand') return {}
+      queryCount += 1
+      return queryCount === 1 ? { Items: [] } : { Items: rows }
+    })
+
+    const page = await recording.client.list({
+      workspaceId: 'workspace-1', memberKey: 'member@example.com', limit: 2, now: new Date('2026-07-12T13:00:00.000Z'),
+    })
+
+    expect(page.notifications[0]).toMatchObject({
+      summary: 'A reply mentioned you.',
+      message: { code: 'work-item.due-today', params: { title: 'Release' } },
+    })
+    expect(page.notifications[1]).toMatchObject({ summary: 'A reply mentioned you.' })
+    expect(page.notifications[1]).not.toHaveProperty('message')
+  })
+
   test('preserves Planning target metadata for current-visibility checks', async () => {
     let queryCount = 0
     const recording = createClient(({ constructor }) => {

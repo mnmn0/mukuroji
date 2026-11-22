@@ -5,6 +5,8 @@ import { createDynamoDbClient, createDynamoDbDocumentClient } from '../../infras
 import { createSlackDeliveryTelemetry, createSlackNotificationSender, deliverDueSlackNotifications } from '../../modules/notifications'
 import { DynamoDbSlackDeliveryStore } from '../../modules/notifications/adapter-out/dynamodb/slack-delivery-store'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
+import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
+import { createMemberNotificationLocaleReader } from './notification-locale'
 import { createProductionNotificationDeliveryAuthorizer } from './notification-delivery-authorization'
 import { createConfiguredTimesheetReminderRevalidator } from './timesheet-reminders'
 import { createConfiguredWeeklyReportReminderRevalidator } from './weekly-report-reminders'
@@ -33,7 +35,7 @@ export function createProductionSlackNotificationHandler() {
       abortSignal: AbortSignal.timeout(5_000),
     })
     return response.SecretString
-  })
+  }, fetch, createMemberNotificationLocaleReader(new DynamoDbProjectDirectoryClient(undefined, documentClient)))
   return () => {
     return deliverDueSlackNotifications({
       store, send, telemetry: createSlackDeliveryTelemetry(), createToken: randomUUID, now: () => new Date(), isAuthorized,

@@ -1,4 +1,4 @@
-import type { NotificationBulkAction, NotificationBulkFailure } from '@mukuroji/contracts'
+import type { NotificationBulkAction, NotificationBulkFailure, NotificationMessage } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { NotificationsApiError } from './errors'
 import { resolveApiBaseUrl } from '../../shared/api/apiBaseUrl'
@@ -53,6 +53,10 @@ export type InboxNotification = {
    * 通知内容を補足する安全な要約です。
    */
   summary?: string
+  /**
+   * System が書いた要約の code と値です。表示言語で文にし、読めない場合は `summary` を使います。
+   */
+  message?: NotificationMessage
   /**
    * 通知対象へ遷移するアプリ内 path です。
    */

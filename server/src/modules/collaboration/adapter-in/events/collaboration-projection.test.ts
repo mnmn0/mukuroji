@@ -1773,6 +1773,7 @@ describe('collaboration projection pure helpers', () => {
         commentId: 'reply-1',
         rootCommentId: 'root-1',
         notificationTitle: 'Inbox foundations',
+        notificationMessage: { code: 'work-item.overdue', params: { title: 'Inbox foundations' } },
         notificationCandidates: [
           { memberKey: 'member@example.com', reason: 'mention' },
           { memberKey: 42, reason: 'invalid' },
@@ -1788,6 +1789,7 @@ describe('collaboration projection pure helpers', () => {
       commentId: 'reply-1',
       rootCommentId: 'root-1',
       notificationTitle: 'Inbox foundations',
+      notificationMessage: { code: 'work-item.overdue', params: { title: 'Inbox foundations' } },
       summary: 'A reply mentioned you.',
       outboxStatus: 'suppressed',
       notificationCandidates: [
@@ -2177,6 +2179,41 @@ describe('collaboration projection pure helpers', () => {
       teamId: 'core-team',
       triageEntryId: 'triage_20260809_sla',
     })
+  })
+
+  test('copies the summary message code onto the notification row and drops a malformed one', () => {
+    const project = (notificationMessage: unknown) => {
+      const event = parseAuditProjectionEvent({
+        eventId: 'work-item-completed-1',
+        eventType: 'work-item.status-changed',
+        workspaceId: 'workspace-1',
+        occurredAt: '2026-08-09T12:00:00.000Z',
+        actorUserId: 'cognito-sub-1',
+        entityId: 'team/core/issue/example',
+        summary: 'Work Item was completed.',
+        metadata: {
+          actorMemberKey: 'author@example.com',
+          notificationCandidates: [{ memberKey: 'member@example.com', reason: 'assignee' }],
+          notificationMessage,
+        },
+      })
+      if (!event) throw new Error('Work Item audit event was not parsed.')
+      const deliveryState = createNotificationProjectionDeliveryState('workspace-1#member@example.com', event.occurredAt, {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: { enabled: false, start: '22:00', end: '07:00', timeZone: 'UTC' },
+      }, unscopedRoutingSubject)
+      return createNotificationProjectionItem(event, { memberKey: 'member@example.com', reasons: ['assignee'] }, deliveryState, 1_800_000_000)
+    }
+
+    expect(project({ code: 'work-item.completed' })).toMatchObject({
+      summary: 'Work Item was completed.',
+      message: { code: 'work-item.completed' },
+    })
+    const malformed = project({ code: 'work-item.unknown' })
+    expect(malformed).toMatchObject({ summary: 'Work Item was completed.' })
+    expect(malformed).not.toHaveProperty('message')
   })
 
   test('refreshes scheduled candidates from the current assignee and suppresses stale due state', () => {

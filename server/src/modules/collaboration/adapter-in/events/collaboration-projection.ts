@@ -17,7 +17,13 @@ import {
   S3Client,
   type Tag,
 } from '@aws-sdk/client-s3'
-import type { EnterpriseIdentitySnapshot, EnterprisePermissionId, TriageEntry } from '@mukuroji/contracts'
+import {
+  parseNotificationMessage,
+  type EnterpriseIdentitySnapshot,
+  type EnterprisePermissionId,
+  type NotificationMessage,
+  type TriageEntry,
+} from '@mukuroji/contracts'
 import type { DocumentProjectRole, GetDocumentRequest } from '../../../documents'
 import { TriageError } from '../../../triage'
 import { isCanonicalWorkItemRecord, workItemScheduleInstantToLocalDate } from '../../../work-items'
@@ -135,6 +141,8 @@ export type AuditProjectionEvent = {
   notificationTitle?: string
   /** Audit event の安全な短い概要です。 */
   summary?: string
+  /** Code and values of the system-written summary, so readers can show it in their language. */
+  notificationMessage?: NotificationMessage
   /** Scheduled due/overdue event が対象にした date-only 期限です。 */
   dueDate?: string
   /** Work Item `updatedAt` that a scheduled stale reminder was computed from. */
@@ -1624,6 +1632,7 @@ export function createNotificationProjectionItem(
     deepLink: event.deepLink,
     title: event.notificationTitle,
     summary: event.summary,
+    ...(event.notificationMessage ? { message: event.notificationMessage } : {}),
     reasons: candidate.reasons,
     deliveryChannels: deliveryState.deliveryChannels,
     deliveryAfter: deliveryState.deliveryAfter,
@@ -3075,6 +3084,7 @@ export function parseAuditProjectionEvent(
     rootCommentId: readString(metadata.rootCommentId),
     notificationTitle: readString(metadata.notificationTitle) ?? readString(metadata.title),
     summary: readString(value.summary),
+    notificationMessage: parseNotificationMessage(metadata.notificationMessage),
     dueDate: normalizeStoredDateOnly(readString(metadata.dueDate)),
     workItemUpdatedAt: readTimestamp(metadata.workItemUpdatedAt),
     daysUntilDue: readOptionalDaysUntilDue(metadata.daysUntilDue),

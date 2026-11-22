@@ -1,3 +1,4 @@
+import type { NotificationMessageLocale } from '@mukuroji/contracts'
 import type { NotificationItem, NotificationPreferences } from '../notifications'
 import { createNotificationDeliveryPlan, isNotificationRoutedToChannel } from '../notifications'
 import { CHANNEL_DELIVERY_SHARDS, channelFailedDeliveryShard, type ExternalDeliveryChannel } from '../domain/channel-delivery'
@@ -45,6 +46,15 @@ export type ChannelDelivery = {
   /** Validated notification contents and authorization scope. */
   notification: NotificationItem
 }
+
+/**
+ * Reads the language a recipient chose for system-written text.
+ * Transient failures reject, so the delivery is retried instead of sent in the wrong language.
+ */
+export type NotificationLocaleReader = (
+  recipient: Pick<ChannelDelivery, 'workspaceId' | 'memberKey'>,
+  signal?: AbortSignal,
+) => Promise<NotificationMessageLocale>
 
 /** Safe outcome from one transport attempt. */
 export type ChannelSendResult = {

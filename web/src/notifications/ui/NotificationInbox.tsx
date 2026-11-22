@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { formatNotificationMessage, parseNotificationMessage } from '@mukuroji/contracts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { createFocusPath } from '../../shared/routing/paths'
 import type { InboxNotification, NotificationFilter } from '../api'
@@ -418,7 +419,7 @@ function NotificationRow({
   const isPending = controller.pendingNotificationId === notification.id || controller.isBulkPending
   const eventLabel = formatNotificationEventType(notification.eventType, t)
   const title = notification.title?.trim() || eventLabel
-  const summary = resolveNotificationSummary(notification, eventLabel, t)
+  const summary = resolveNotificationSummary(notification, eventLabel, t, locale)
 
   useEffect(() => {
     if (!selected) return
@@ -743,17 +744,20 @@ function formatNotificationReason(reason: string, t: (key: MessageKey) => string
 }
 
 /**
- * Resolves the row summary, localizing the fixed text of scheduled report deliveries and cleared blockers.
+ * Resolves the row summary in the reader's language: the fixed text of scheduled report deliveries
+ * and cleared blockers, then the message code when the row has one, then the stored text.
  *
  * @param notification - Notification shown in the row.
  * @param eventLabel - Localized event label used by the fallback summary.
  * @param t - Message translator for the current locale.
+ * @param locale - Reader's language.
  * @returns The summary text shown under the title.
  */
 function resolveNotificationSummary(
   notification: InboxNotification,
   eventLabel: string,
   t: (key: MessageKey) => string,
+  locale: Locale,
 ) {
   if (notification.eventType === analyticsReportDeliveredEventType) {
     return t('workspace.inbox.summary.reportDelivered')
@@ -761,6 +765,9 @@ function resolveNotificationSummary(
   if (notification.eventType === 'work-item.blocker-removed') {
     return t('workspace.inbox.summary.blockerCleared')
   }
+  // The response is not validated field by field, so an unknown or malformed code falls back to the text.
+  const message = parseNotificationMessage(notification.message)
+  if (message) return formatNotificationMessage(message, locale)
   return notification.summary?.trim() || createNotificationFallbackSummary(notification, eventLabel, t)
 }
 
