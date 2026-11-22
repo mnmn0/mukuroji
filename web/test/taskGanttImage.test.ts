@@ -84,6 +84,16 @@ describe('Gantt image export', () => {
     expect(image.svg).toContain('d="M364 95 L381 84 L398 95 L381 106 Z"')
   })
 
+  test('keeps a cross-Project endpoint label inside the timeline near its right edge', () => {
+    const image = createTaskGanttImage({
+      ...createInput(1),
+      externalLaneHeight: 52,
+      externalStubs: [{ label: 'Other', x: 108, y: 26 }],
+    })
+    // Timeline is 120px wide; the 49px label is moved left so its right edge stays at 118.
+    expect(image.svg).toContain('<rect x="69" y="14" width="49" height="24"')
+  })
+
   test('shortens long labels to the column width with an ellipsis', () => {
     expect(truncateTaskGanttImageLabel('short', 100)).toBe('short')
     const shortened = truncateTaskGanttImageLabel('とても長いタスクの名前がここに入ります', 60)

@@ -338,8 +338,10 @@ export function createTaskGanttImage(input: TaskGanttImageInput): TaskGanttImage
   for (const stub of input.externalStubs ?? []) {
     const label = truncateTaskGanttImageLabel(stub.label, 200, 11)
     const stubWidth = Math.min(220, Array.from(label).reduce((sum, character) => sum + estimateCharacterWidth(character, 11), 0) + 16)
-    overlays.push(`<rect x="${n(stub.x - stubWidth / 2)}" y="${n(stub.y - 12)}" width="${n(stubWidth)}" height="24" rx="12" fill="${colors.background}" stroke="${colors.baseline}"/>`)
-    overlays.push(`<text x="${n(stub.x)}" y="${n(stub.y + 4)}" font-size="11" font-weight="700" text-anchor="middle" fill="${colors.summary}">${escapeXml(label)}</text>`)
+    // The label stays inside the timeline even when its connector anchor is near an edge.
+    const stubLeft = Math.max(2, Math.min(stub.x - stubWidth / 2, timelineWidth - stubWidth - 2))
+    overlays.push(`<rect x="${n(stubLeft)}" y="${n(stub.y - 12)}" width="${n(stubWidth)}" height="24" rx="12" fill="${colors.background}" stroke="${colors.baseline}"/>`)
+    overlays.push(`<text x="${n(stubLeft + stubWidth / 2)}" y="${n(stub.y + 4)}" font-size="11" font-weight="700" text-anchor="middle" fill="${colors.summary}">${escapeXml(label)}</text>`)
   }
   for (const connector of input.connectors ?? []) {
     const stroke = connector.conflict ? colors.conflict : connector.critical ? colors.critical : colors.link
