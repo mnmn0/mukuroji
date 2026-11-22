@@ -1,4 +1,4 @@
-import type { DocumentRelation } from '@mukuroji/contracts'
+import type { DocumentKind, DocumentRelation } from '@mukuroji/contracts'
 import { DocumentsApiError, resolveDocumentsApiBaseUrl } from './errors'
 import { readRecord } from '../../shared/api/jsonValidation'
 
@@ -14,6 +14,10 @@ export type DocumentBacklink = {
    * Backlink source Document title です。
    */
   documentTitle: string
+  /**
+   * Backlink source Document の種類です。古い server の応答では省略されます。
+   */
+  documentKind?: DocumentKind
   /**
    * Backlink を作成した canonical relation です。
    */

@@ -325,6 +325,17 @@ describe('Project overview Documents', () => {
     expect(documents.items.find((item) => item.id === 'launch-workshop')?.source).toBe('project')
   })
 
+  test('leaves out linked folders and templates', () => {
+    const projectBacklink = documentBacklinkFixtures[1]
+    const documents = selectProjectOverviewDocuments('refero', [
+      { ...projectBacklink, documentId: 'linked-folder', documentKind: 'folder' },
+      { ...projectBacklink, documentId: 'linked-template', documentKind: 'template' },
+      { ...projectBacklink, documentId: 'linked-page', documentKind: 'page' },
+    ], [], false)
+
+    expect(documents.items.map((item) => item.id)).toEqual(['linked-page'])
+  })
+
   test('ignores backlinks to other targets and Documents of other scopes', () => {
     const documents = selectProjectOverviewDocuments('refero', documentBacklinkFixtures, scopedDocuments, false)
     const ids = documents.items.map((item) => item.id)

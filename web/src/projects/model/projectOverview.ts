@@ -5,6 +5,7 @@ import {
   PROJECT_RAID_SEVERITIES,
   summarizeProjectRaidLog,
   type CanonicalWorkItem,
+  type DocumentKind,
   type FactoryBoardLane,
   type PlanningEntity,
   type PlanningEntityType,
@@ -462,6 +463,16 @@ function compareOptionalDates(left: string | undefined, right: string | undefine
   return left.localeCompare(right)
 }
 
+/**
+ * Tells whether a Document kind holds content listed on the Project overview.
+ *
+ * @param kind - Document kind.
+ * @returns Whether the kind is a page or a whiteboard, not a folder or a template.
+ */
+function isListedDocumentKind(kind: DocumentKind) {
+  return kind === 'page' || kind === 'whiteboard'
+}
+
 /** One Document listed on the Project overview. */
 export type ProjectOverviewDocument = {
   /** Document ID. */
@@ -509,6 +520,7 @@ export function selectProjectOverviewDocuments(
   for (const backlink of backlinks) {
     const target = backlink.relation.target
     if (target.kind !== 'project' || target.projectId !== projectId) continue
+    if (backlink.documentKind !== undefined && !isListedDocumentKind(backlink.documentKind)) continue
     if (seen.has(backlink.documentId)) continue
     seen.add(backlink.documentId)
     rows.push({ id: backlink.documentId, source: 'linked', title: backlink.documentTitle })
@@ -517,7 +529,7 @@ export function selectProjectOverviewDocuments(
     .filter((document) =>
       document.scope.type === 'project' &&
       document.scope.projectId === projectId &&
-      (document.kind === 'page' || document.kind === 'whiteboard') &&
+      isListedDocumentKind(document.kind) &&
       document.archivedAt === undefined
     )
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id))
