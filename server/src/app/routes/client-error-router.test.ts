@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import type { ClientErrorReport } from '@mukuroji/contracts'
 import type { ClientErrorObservation } from '../../infrastructure/observability/api-observability'
 import { recordClientError } from '../../infrastructure/observability/api-observability'
 import { createTestAppDependencies, overrideAppDependencies } from '../composition/api-dependencies'
@@ -7,7 +8,7 @@ import { CLIENT_ERROR_REPORTS_PER_CLIENT } from './client-error-admission'
 import { createClientErrorRouter, parseClientErrorReport, type ClientErrorReportAdmission } from './client-error-router'
 
 const origin = 'http://localhost:5173'
-const report = {
+const report: ClientErrorReport = {
   reportId: '3f2a7c1e-9b4d-4e8a-8c5f-0123456789ab',
   kind: 'route-error',
   route: '/teams/:teamId/issues/:issueId',
@@ -122,12 +123,13 @@ describe('POST /api/client-errors', () => {
         controller.close()
       },
     })
-    const request = new Request('http://localhost/api/client-errors', {
+    const init: RequestInit & { duplex: 'half' } = {
       method: 'POST',
       headers: { Origin: origin, 'Content-Type': 'application/json' },
       body: large,
       duplex: 'half',
-    })
+    }
+    const request = new Request('http://localhost/api/client-errors', init)
     expect((await router.request(request)).status).toBe(413)
     expect(recorded).toEqual([])
   })
