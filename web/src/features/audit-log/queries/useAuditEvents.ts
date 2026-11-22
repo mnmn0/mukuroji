@@ -14,22 +14,25 @@ export type AuditLogRequestGuard = <Result>(request: Promise<Result>) => Promise
  *
  * @param accessToken - Bearer token; omission disables the query.
  * @param filters - Filters of the search that was run; undefined until the first search.
+ * @param searchRun - Number of the explicit search; a new number reads again even for filters
+ *   whose results are already cached.
  * @param guardRequest - Session-policy guard of the Workspace shell.
  * @returns Events read so far, loading and error state, and pagination and retry entry points.
  */
 export function useAuditEvents(
   accessToken: string | undefined,
   filters: AuditEventFilters | undefined,
+  searchRun: number,
   guardRequest: AuditLogRequestGuard,
 ) {
   const query = useSWRInfinite(
     (pageIndex, previousPage: AuditEventPageView | null) => {
       if (!accessToken || !filters) return null
       if (pageIndex > 0 && !previousPage?.nextCursor) return null
-      // SWR hashes the filter object by value, so the same search shares one cache entry.
-      return ['audit-events', accessToken, filters, pageIndex === 0 ? '' : previousPage?.nextCursor ?? ''] as const
+      // SWR hashes the filter object by value; the search number keeps each explicit search apart.
+      return ['audit-events', accessToken, filters, searchRun, pageIndex === 0 ? '' : previousPage?.nextCursor ?? ''] as const
     },
-    ([, token, currentFilters, cursor]) =>
+    ([, token, currentFilters, , cursor]) =>
       guardRequest(listAuditEvents(token, currentFilters, cursor || undefined)),
     {
       revalidateFirstPage: false,

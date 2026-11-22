@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import type { AuditEventFilters, AuditExportDownloadView } from '@mukuroji/contracts'
-import { createMutationRequestContext } from '../../../shared/api/mutationHeaders'
+import { createMutationRequestRunner } from '../../../shared/api/mutationHeaders'
+import { AuditLogApiError } from '../api/auditLogRequest'
 import { getAuditExportDownload, requestAuditExport } from '../api/auditExports'
 import type { AuditLogRequestGuard } from '../queries/useAuditEvents'
 
@@ -34,6 +35,9 @@ export function useAuditExportActions({ accessToken, guardRequest, refreshExport
   const [error, setError] = useState<unknown>()
   const [links, setLinks] = useState<Readonly<Record<string, IssuedAuditExportLinks>>>({})
   const busy = useRef(false)
+  // Keeps the idempotency key of a request whose outcome is unknown, so pressing the button
+  // again with the same filters recovers that export instead of starting another.
+  const [requestRunner] = useState(createMutationRequestRunner)
 
   /**
    * Requests an export of the events that match the filters.
@@ -47,7 +51,12 @@ export function useAuditExportActions({ accessToken, guardRequest, refreshExport
     setIsRequesting(true)
     setError(undefined)
     try {
-      await guardRequest(requestAuditExport(accessToken, filters, createMutationRequestContext()))
+      await requestRunner.run(
+        'audit-export',
+        JSON.stringify(filters),
+        (context) => guardRequest(requestAuditExport(accessToken, filters, context)),
+        isUncertainExportFailure,
+      )
       await refreshExports()
       return true
     } catch (requestError) {
@@ -82,4 +91,14 @@ export function useAuditExportActions({ accessToken, guardRequest, refreshExport
   }
 
   return { error, isRequesting, issuingExportId, issueLinks, links, requestExport }
+}
+
+/**
+ * Tells whether an export request may have reached the server, so a retry must reuse its key.
+ *
+ * @param error - Error thrown by the request.
+ * @returns True for network failures and server errors, false for a definite rejection.
+ */
+function isUncertainExportFailure(error: unknown): boolean {
+  return !(error instanceof AuditLogApiError) || error.status >= 500
 }

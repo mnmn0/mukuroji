@@ -1,9 +1,10 @@
-import type {
-  AuditEventFilters,
-  AuditExportDownloadPartView,
-  AuditExportDownloadView,
-  AuditExportStatus,
-  AuditExportView,
+import {
+  AUDIT_ACTOR_KINDS,
+  type AuditEventFilters,
+  type AuditExportDownloadPartView,
+  type AuditExportDownloadView,
+  type AuditExportStatus,
+  type AuditExportView,
 } from '@mukuroji/contracts'
 import { isNonnegativeSafeInteger, isRecord, isStringArray } from '../../../shared/api/jsonValidation'
 import { createMutationHeaders, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
@@ -13,7 +14,7 @@ import { invalidAuditLogResponse, sendAuditLogRequest } from './auditLogRequest'
 const auditExportStatuses: readonly AuditExportStatus[] = ['queued', 'running', 'completed', 'failed']
 
 /** String filters an export may echo back. */
-const auditExportStringFilterFields = ['actorId', 'targetType', 'targetId', 'from', 'to'] as const
+const auditExportStringFilterFields = ['actorId', 'entityType', 'entityId', 'targetType', 'targetId', 'from', 'to'] as const
 
 /**
  * Requests an asynchronous export of the audit events that match the filters.
@@ -127,7 +128,7 @@ export function readAuditExport(value: unknown): AuditExportView {
 }
 
 /**
- * Reads the filters an export echoes back, keeping only the fields the Web shows.
+ * Reads the filters an export echoes back, so the list can describe each export exactly.
  *
  * @param value - Candidate filters.
  * @returns The known filters.
@@ -140,6 +141,8 @@ function readExportFilters(value: unknown): AuditEventFilters {
     if (typeof fieldValue === 'string') filters[field] = fieldValue
   }
   if (isStringArray(value.eventTypes)) filters.eventTypes = value.eventTypes
+  const actorKind = AUDIT_ACTOR_KINDS.find((kind) => kind === value.actorKind)
+  if (actorKind) filters.actorKind = actorKind
   return filters
 }
 

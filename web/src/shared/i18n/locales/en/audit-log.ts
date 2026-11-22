@@ -79,4 +79,7 @@ export const auditLogMessages = {
   'auditLog.export.forbidden': 'You cannot export, or you need to sign in again or use multi-factor authentication.',
   'auditLog.export.unavailable': 'Exports are not available in this environment.',
   'auditLog.export.invalidFilters': 'These filters cannot be used for an export. Check them and try again.',
+  'auditLog.filter.exportOnly': 'You cannot search, but you can export with the filters above.',
+  'auditLog.list.noMatchYet': 'No matching events in what has been read so far. You can look through older events.',
+  'auditLog.export.actorKind': 'Actor kind',
 } as const

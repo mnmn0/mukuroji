@@ -158,10 +158,11 @@ export function SettingsPage() {
                   locale={workspace.locale}
                   teams={[...workspace.teams]}
                 />
-                {workspace.canReadAuditLog ? (
+                {workspace.canReadAuditLog || workspace.canExportAuditLog ? (
                   <AuditLogPanelContainer
                     accessToken={workspace.accessToken}
                     canExport={workspace.canExportAuditLog}
+                    canSearch={workspace.canReadAuditLog}
                     guardRequest={workspace.guardEnterpriseSession}
                     locale={workspace.locale}
                     timeZone={workspace.timeZone}

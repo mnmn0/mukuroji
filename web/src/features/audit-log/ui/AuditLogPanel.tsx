@@ -55,6 +55,8 @@ export type AuditLogPanelProps = {
   readonly hasMore: boolean
   /** Whether a further page is loading. */
   readonly isLoadingMore: boolean
+  /** Whether the member may search; otherwise only the export section works. */
+  readonly canSearch: boolean
   /** Whether the member may export; hides the export section otherwise. */
   readonly canExport: boolean
   /** Recent exports, undefined while loading. */
@@ -101,11 +103,28 @@ export function AuditLogPanel(props: AuditLogPanelProps) {
   const { draft, onChangeDraft, t } = props
   const formId = useId()
   const eventTypeListId = `${formId}-event-types`
+  /**
+   * Builds the element ID of one form field.
+   *
+   * @param name - Form field.
+   * @returns ID unique to this panel.
+   */
   const field = (name: keyof AuditLogFilterDraft) => `${formId}-${name}`
+  /**
+   * Replaces one form value.
+   *
+   * @param name - Form field.
+   * @param value - New value.
+   */
   const update = (name: keyof AuditLogFilterDraft, value: string) => onChangeDraft({ ...draft, [name]: value })
+  /**
+   * Runs the search instead of submitting the page, when the member may search.
+   *
+   * @param event - Form submit event.
+   */
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    props.onSearch()
+    if (props.canSearch) props.onSearch()
   }
 
   return (
@@ -209,15 +228,21 @@ export function AuditLogPanel(props: AuditLogPanelProps) {
           <p className="text-sm font-semibold text-fg-9e3d27" role="alert">{t(filterProblemKeys[props.filterProblem])}</p>
         ) : null}
         <div className="flex flex-wrap gap-2">
-          <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" type="submit">{t('auditLog.filter.search')}</button>
+          {props.canSearch ? (
+            <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" type="submit">{t('auditLog.filter.search')}</button>
+          ) : null}
           <button className="workbench-button-secondary min-h-10 px-4 disabled:opacity-50" onClick={props.onReset} type="button">{t('auditLog.filter.reset')}</button>
         </div>
-        <p className="text-xs font-medium text-[var(--workbench-muted)]">{t('auditLog.filter.viewRecorded')}</p>
+        <p className="text-xs font-medium text-[var(--workbench-muted)]">
+          {t(props.canSearch ? 'auditLog.filter.viewRecorded' : 'auditLog.filter.exportOnly')}
+        </p>
       </form>
 
-      <div className="border-t border-[var(--workbench-border)] px-5 py-5 sm:px-7">
-        <AuditEventList {...props} />
-      </div>
+      {props.canSearch ? (
+        <div className="border-t border-[var(--workbench-border)] px-5 py-5 sm:px-7">
+          <AuditEventList {...props} />
+        </div>
+      ) : null}
 
       {props.canExport ? (
         <AuditExportSection
@@ -265,8 +290,17 @@ function AuditEventList(props: AuditLogPanelProps) {
       </div>
     )
   }
-  if (props.events.length === 0) {
+  if (props.events.length === 0 && !props.hasMore) {
     return <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('auditLog.list.empty')}</p>
+  }
+  if (props.events.length === 0) {
+    // The server filters after reading a page, so a page can hold no match while older ones do.
+    return (
+      <div className="grid justify-items-start gap-3">
+        <p className="text-sm font-medium text-[var(--workbench-muted)]">{t('auditLog.list.noMatchYet')}</p>
+        <LoadMoreButton {...props} />
+      </div>
+    )
   }
   return (
     <div className="grid gap-3">
@@ -287,18 +321,30 @@ function AuditEventList(props: AuditLogPanelProps) {
         ))}
       </ol>
       {props.hasMore ? (
-        <button
-          className="workbench-button-secondary min-h-10 justify-self-start px-4 disabled:opacity-50"
-          disabled={props.isLoadingMore}
-          onClick={props.onLoadMore}
-          type="button"
-        >
-          {t(props.isLoadingMore ? 'auditLog.list.loadingMore' : 'auditLog.list.loadMore')}
-        </button>
+        <LoadMoreButton {...props} />
       ) : (
         <p className="text-xs font-medium text-[var(--workbench-muted)]">{t('auditLog.list.end')}</p>
       )}
     </div>
+  )
+}
+
+/**
+ * Renders the button that reads the next, older page.
+ *
+ * @param props - Panel props.
+ * @returns Load more button.
+ */
+function LoadMoreButton({ isLoadingMore, onLoadMore, t }: AuditLogPanelProps) {
+  return (
+    <button
+      className="workbench-button-secondary min-h-10 justify-self-start px-4 disabled:opacity-50"
+      disabled={isLoadingMore}
+      onClick={onLoadMore}
+      type="button"
+    >
+      {t(isLoadingMore ? 'auditLog.list.loadingMore' : 'auditLog.list.loadMore')}
+    </button>
   )
 }
 

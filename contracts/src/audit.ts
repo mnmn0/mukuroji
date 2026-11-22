@@ -115,6 +115,10 @@ export type AuditEventFilters = {
   actorId?: string
   /** Actor kind to match; asynchronous exports only. */
   actorKind?: AuditActorKind
+  /** Activity entity type; asynchronous exports only. */
+  entityType?: string
+  /** Activity entity ID; asynchronous exports only, requires `entityType`. */
+  entityId?: string
   /** Direct mutation target type; may be given alone. */
   targetType?: string
   /** Direct mutation target ID; requires `targetType`. */

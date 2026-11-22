@@ -79,4 +79,7 @@ export const auditLogMessages = {
   'auditLog.export.forbidden': 'export する権限がないか、再ログインや多要素認証が必要です。',
   'auditLog.export.unavailable': 'この環境では export を使えません。',
   'auditLog.export.invalidFilters': '条件を export に使えません。条件を確認してください。',
+  'auditLog.filter.exportOnly': '検索する権限はありません。上の条件で export だけできます。',
+  'auditLog.list.noMatchYet': '読み込んだ範囲には条件に合う操作がありません。さらに古い記録を探せます。',
+  'auditLog.export.actorKind': '実行者の種別',
 } as const

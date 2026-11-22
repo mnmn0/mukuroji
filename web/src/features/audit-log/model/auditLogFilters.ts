@@ -119,27 +119,44 @@ export function zonedDayBoundary(
   if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return null
   const nextMidnight = Date.UTC(year, month - 1, day + 1)
   try {
-    const start = localMidnight - zoneOffset(localMidnight, timeZone)
-    const end = nextMidnight - zoneOffset(nextMidnight, timeZone) - 1
+    const start = firstInstantOfDay(localMidnight, timeZone)
+    const end = firstInstantOfDay(nextMidnight, timeZone) - 1
     return new Date(boundary === 'start' ? start : end).toISOString()
   } catch {
     return null
   }
 }
 
+/** Half a day in milliseconds, wider than any daylight-saving shift. */
+const halfDayMs = 12 * 60 * 60 * 1000
+
 /**
- * Measures how far a time zone's wall clock is ahead of UTC around a wall-clock time.
+ * Finds the first instant whose wall clock in a time zone falls on a given calendar day.
  *
- * The offset is read at the wall-clock time taken as UTC and then again at the corrected
- * instant, which settles on the right offset on either side of a daylight-saving change.
+ * The answer uses the zone's offset either just before or just after the day starts. Each
+ * offset gives one candidate; a candidate counts only when its own wall clock is on the
+ * day, and the earliest such one wins. This handles a midnight skipped by a clock change
+ * (the day starts at 01:00) and a midnight that happens twice (the first one counts).
  *
- * @param wallClock - Wall-clock time expressed as if it were UTC, in milliseconds.
+ * @param dayStart - Midnight of the day expressed as if it were UTC, in milliseconds.
  * @param timeZone - IANA time zone; undefined uses the browser's.
- * @returns Offset in milliseconds.
+ * @returns UTC instant in milliseconds.
  */
-function zoneOffset(wallClock: number, timeZone: string | undefined): number {
-  const first = offsetAt(wallClock, timeZone)
-  return offsetAt(wallClock - first, timeZone)
+function firstInstantOfDay(dayStart: number, timeZone: string | undefined): number {
+  const nextDayStart = dayStart + 2 * halfDayMs
+  const offsets = new Set([
+    offsetAt(dayStart - halfDayMs, timeZone),
+    offsetAt(dayStart + halfDayMs, timeZone),
+  ])
+  const onDay = [...offsets].flatMap((offset) => {
+    const candidate = dayStart - offset
+    const wallClock = candidate + offsetAt(candidate, timeZone)
+    if (wallClock >= nextDayStart) return []
+    // A skipped midnight leaves the day's first wall-clock time after 00:00; move the
+    // candidate forward by that gap so it lands on the first instant of the day.
+    return wallClock >= dayStart ? [candidate] : [candidate + (dayStart - wallClock)]
+  })
+  return Math.min(...onDay)
 }
 
 /**

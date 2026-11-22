@@ -20,6 +20,7 @@ const meta = {
     isLoading: false,
     hasMore: true,
     isLoadingMore: false,
+    canSearch: true,
     canExport: true,
     exports: auditExportsFixture,
     exportsFailed: false,
@@ -72,6 +73,11 @@ export const ReadOnlyAuditor: Story = {
     const canvas = within(canvasElement)
     await expect(canvas.queryByTestId('audit-export-section')).toBeNull()
   },
+}
+
+/** A custom role with export but no search permission. */
+export const ExportOnly: Story = {
+  args: { canSearch: false },
 }
 
 /** A search the server refused. */

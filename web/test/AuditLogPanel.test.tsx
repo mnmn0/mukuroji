@@ -37,6 +37,7 @@ function panelProps(overrides: Partial<AuditLogPanelProps> = {}): AuditLogPanelP
     isLoading: false,
     hasMore: false,
     isLoadingMore: false,
+    canSearch: true,
     canExport: true,
     exports: auditExportsFixture,
     exportsFailed: false,
@@ -81,6 +82,11 @@ describe('audit log filters', () => {
     expect(zonedDayBoundary('2026-03-08', 'America/New_York', 'start')).toBe('2026-03-08T05:00:00.000Z')
     expect(zonedDayBoundary('2026-03-08', 'America/New_York', 'end')).toBe('2026-03-09T03:59:59.999Z')
     expect(zonedDayBoundary('2026-02-30', 'Asia/Tokyo', 'start')).toBeNull()
+  })
+
+  test('starts a day whose midnight is skipped at its first real instant', () => {
+    expect(zonedDayBoundary('2026-09-06', 'America/Santiago', 'start')).toBe('2026-09-06T04:00:00.000Z')
+    expect(zonedDayBoundary('2026-09-05', 'America/Santiago', 'end')).toBe('2026-09-06T03:59:59.999Z')
   })
 
   test('rejects a target ID without its type, too many event types, and a reversed period', () => {
@@ -181,6 +187,32 @@ describe('AuditLogPanel', () => {
     expect(html).toContain('続きのファイルのリンクを発行')
     expect(html).toContain('The export could not be verified as complete.')
     expect(html).toContain('条件なし（すべての記録）')
+  })
+
+  test('keeps paging when a filtered page holds no match but older pages remain', () => {
+    const html = renderToStaticMarkup(<AuditLogPanel {...panelProps({ events: [], hasMore: true })} />)
+
+    expect(html).toContain('読み込んだ範囲には条件に合う操作がありません')
+    expect(html).toContain('さらに読み込む')
+    expect(html).not.toContain('条件に合う操作はありません。')
+  })
+
+  test('offers only the export to a member who may export but not search', () => {
+    const html = renderToStaticMarkup(<AuditLogPanel {...panelProps({ canSearch: false, hasSearched: false, events: [] })} />)
+
+    expect(html).not.toContain('>検索<')
+    expect(html).toContain('検索する権限はありません')
+    expect(html).toContain('data-testid="audit-export-section"')
+  })
+
+  test('describes every filter an export was requested with', () => {
+    const html = renderToStaticMarkup(<AuditLogPanel {...panelProps({
+      exports: [{ ...auditExportsFixture[1]!, filters: { actorKind: 'service', entityType: 'work-item', entityId: 'team/core/issue/MUK-1' } }],
+    })} />)
+
+    expect(html).toContain('実行者の種別: service')
+    expect(html).toContain('まとめ先: work-item / team/core/issue/MUK-1')
+    expect(html).not.toContain('条件なし（すべての記録）')
   })
 
   test('renders the English panel', () => {

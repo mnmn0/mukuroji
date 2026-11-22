@@ -191,6 +191,10 @@ function describeExportFilters(job: AuditExportView, { locale, t, timeZone }: Au
   const parts: string[] = []
   const { filters } = job
   if (filters.actorId) parts.push(`${t('auditLog.filter.actor')}: ${filters.actorId}`)
+  if (filters.actorKind) parts.push(`${t('auditLog.export.actorKind')}: ${filters.actorKind}`)
+  if (filters.entityType) {
+    parts.push(`${t('auditLog.event.entity')}: ${filters.entityType}${filters.entityId ? ` / ${filters.entityId}` : ''}`)
+  }
   if (filters.eventTypes?.length) {
     parts.push(`${t('auditLog.filter.eventType')}: ${filters.eventTypes.map((type) => formatAuditEventType(type, locale)).join(', ')}`)
   }

@@ -34,14 +34,15 @@ function hasWorkspaceAuditPermission(
 }
 
 /**
- * Tells the Web whether to show the audit log; the audit routes still authorize every request.
+ * Tells the Web whether to offer the audit search; the audit routes still authorize every request.
+ *
+ * The search route requires `audit.read` itself, so `audit.export` alone does not count.
  *
  * @param principal - Freshly authenticated Workspace principal.
  * @returns Whether the principal may search audit events.
  */
 export function canReadWorkspaceAuditLog(principal: WorkspacePrincipal): boolean {
-  return hasWorkspaceAuditPermission(principal, 'audit.read') ||
-    hasWorkspaceAuditPermission(principal, 'audit.export')
+  return hasWorkspaceAuditPermission(principal, 'audit.read')
 }
 
 /**

@@ -21,6 +21,8 @@ type AuditLogPanelContainerProps = {
   readonly locale: Locale
   /** IANA time zone of the member; undefined uses the browser's. */
   readonly timeZone?: string
+  /** Whether the member may search the audit log. */
+  readonly canSearch: boolean
   /** Whether the member may request and download exports. */
   readonly canExport: boolean
   /** Session-policy guard of the Workspace shell. */
@@ -38,6 +40,7 @@ type AuditLogPanelContainerProps = {
 export function AuditLogPanelContainer({
   accessToken,
   canExport,
+  canSearch,
   guardRequest,
   locale,
   timeZone,
@@ -46,12 +49,13 @@ export function AuditLogPanelContainer({
   const [draft, setDraft] = useState<AuditLogFilterDraft>(emptyAuditLogFilterDraft)
   const [filterProblem, setFilterProblem] = useState<AuditLogFilterProblem>()
   const [appliedFilters, setAppliedFilters] = useState<AuditEventFilters>()
-  const search = useAuditEvents(accessToken, appliedFilters, guardRequest)
+  const [searchRun, setSearchRun] = useState(0)
+  const search = useAuditEvents(accessToken, canSearch ? appliedFilters : undefined, searchRun, guardRequest)
   const exports = useAuditExports(accessToken, canExport, guardRequest)
   const exportActions = useAuditExportActions({ accessToken, guardRequest, refreshExports: () => exports.mutate() })
 
   /**
-   * Validates a draft and searches it; a search identical to the shown one reads again.
+   * Validates a draft and searches it; every search reads again, even for filters searched before.
    *
    * @param nextDraft - Form values to search.
    */
@@ -62,11 +66,8 @@ export function AuditLogPanelContainer({
       return
     }
     setFilterProblem(undefined)
-    if (appliedFilters && JSON.stringify(appliedFilters) === JSON.stringify(result.filters)) {
-      void search.refresh()
-      return
-    }
     setAppliedFilters(result.filters)
+    setSearchRun((run) => run + 1)
   }
 
   /**
@@ -94,6 +95,7 @@ export function AuditLogPanelContainer({
   return (
     <AuditLogPanel
       canExport={canExport}
+      canSearch={canSearch}
       draft={draft}
       events={search.events}
       exportActionError={exportActions.error === undefined ? undefined : t(describeExportActionError(exportActions.error))}
