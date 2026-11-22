@@ -163,7 +163,7 @@ async function createAnalyticsHttpExport(
   const context: AnalyticsExportContext = {
     ...(resolved.title === undefined ? {} : { title: resolved.title }),
     widgets: resolved.query.widgets,
-    names: await readAnalyticsExportNames(principal, resolved.query, locale),
+    names: await readAnalyticsExportNames(principal, resolved.query, resolved.snapshot, locale),
   }
   return format === 'csv'
     ? {
@@ -190,12 +190,14 @@ const ANALYTICS_EXPORT_NAME_READ_CONCURRENCY = 10
  *
  * @param principal - Authenticated principal.
  * @param query - Query that produced the exported snapshot.
+ * @param snapshot - Exported snapshot, whose assignee groups name the members to look up.
  * @param locale - Export locale, which picks the localized Team and Project names.
  * @returns Display names keyed by internal ID.
  */
 async function readAnalyticsExportNames(
   principal: WorkspacePrincipal,
   query: AnalyticsQueryInput,
+  snapshot: AnalyticsSnapshot,
   locale: AnalyticsExportLocale,
 ): Promise<AnalyticsExportNames> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
@@ -225,8 +227,16 @@ async function readAnalyticsExportNames(
   const dimensions = new Set(query.widgets.flatMap((widget) =>
     widget.groupBy === undefined ? [] : [widget.groupBy.dimension]
   ))
-  const readsMembers = dimensions.has('assignee') ||
-    (query.filter.assigneeUserIds?.length ?? 0) > 0
+  const assigneeWidgetIds = new Set(query.widgets.flatMap((widget) =>
+    widget.groupBy?.dimension === 'assignee' ? [widget.id] : []
+  ))
+  const memberKeys = new Set([
+    ...(query.filter.assigneeUserIds ?? []),
+    ...snapshot.widgets.flatMap((result) =>
+      assigneeWidgetIds.has(result.widgetId) ? result.groups.map((group) => group.key) : []
+    ),
+  ].filter((key) => key !== ''))
+  const readsMembers = memberKeys.size > 0
   const readsConfigurations = dimensions.has('work-item-type') ||
     (query.filter.workItemTypeIds?.length ?? 0) > 0 ||
     (query.filter.customFields?.length ?? 0) > 0
@@ -235,7 +245,9 @@ async function readAnalyticsExportNames(
     projects: new Map(teams.flatMap((team) =>
       team.projects.map((project): [string, string] => [project.id, project.name])
     )),
-    ...(readsMembers ? { members: await readAnalyticsExportMemberNames(principal, teams) } : {}),
+    ...(readsMembers
+      ? { members: await readAnalyticsExportMemberNames(principal, teams, memberKeys) }
+      : {}),
     ...(readsConfigurations
       ? await readAnalyticsExportConfigurationNames(principal, teams)
       : {}),
@@ -245,19 +257,24 @@ async function readAnalyticsExportNames(
 /**
  * Reads the display names of the members of the given Projects.
  *
+ * Stops reading Projects once every wanted member has a name.
+ *
  * @param principal - Authenticated principal.
  * @param teams - Visible Teams with their readable Projects.
+ * @param memberKeys - Member keys the export prints.
  * @returns Member names keyed by member key; members without a name are left out.
  */
 async function readAnalyticsExportMemberNames(
   principal: WorkspacePrincipal,
   teams: readonly { id: string; projects: readonly { id: string }[] }[],
+  memberKeys: ReadonlySet<string>,
 ) {
   const projects = teams.flatMap((team) =>
     team.projects.map((project) => ({ teamId: team.id, projectId: project.id }))
   )
   const names = new Map<string, string>()
   for (let offset = 0; offset < projects.length; offset += ANALYTICS_EXPORT_NAME_READ_CONCURRENCY) {
+    if ([...memberKeys].every((key) => names.has(key))) break
     const batch = projects.slice(offset, offset + ANALYTICS_EXPORT_NAME_READ_CONCURRENCY)
     const responses = await Promise.allSettled(batch.map(({ teamId, projectId }) =>
       workspaceDependencies.projectDirectory.getProjectMembers(
@@ -270,7 +287,7 @@ async function readAnalyticsExportMemberNames(
       if (response.status !== 'fulfilled') continue
       for (const member of response.value.members) {
         const name = member.name?.trim()
-        if (name && !names.has(member.id)) names.set(member.id, name)
+        if (name && memberKeys.has(member.id) && !names.has(member.id)) names.set(member.id, name)
       }
     }
   }
@@ -632,6 +649,23 @@ async function executeAnalyticsQuery(
   query: unknown,
   workspaceCalendar?: WorkspaceCalendarSettings,
 ): Promise<AnalyticsSnapshot> {
+  return (await executeNormalizedAnalyticsQuery(principal, query, workspaceCalendar)).snapshot
+}
+
+/**
+ * Runs an Analytics query like `executeAnalyticsQuery` and also returns the normalized query, for
+ * callers that describe the snapshot with its widgets and filter.
+ *
+ * @param principal - Authenticated principal whose current access bounds the query.
+ * @param query - Untrusted query input.
+ * @param workspaceCalendar - Calendar settings already read for this request; read when omitted.
+ * @returns The snapshot and the normalized query that produced it.
+ */
+async function executeNormalizedAnalyticsQuery(
+  principal: WorkspacePrincipal,
+  query: unknown,
+  workspaceCalendar?: WorkspaceCalendarSettings,
+): Promise<{ snapshot: AnalyticsSnapshot; query: AnalyticsQueryInput }> {
   const calendar = workspaceCalendar ?? await readWorkspaceCalendarSettingsOf(principal.directoryId)
   const normalizedQuery = normalizeAnalyticsQueryInput(
     isRecord(query) ? { ...query, weekStartDay: calendar.weekStartDay } : query,
@@ -644,11 +678,14 @@ async function executeAnalyticsQuery(
   const milestones = analyticsQueryReadsMilestones(normalizedQuery)
     ? await readAuthorizedAnalyticsMilestones(principal, normalizedQuery.filter, normalizedQuery.asOf)
     : undefined
-  return createAnalyticsSnapshot({
-    ...authorized,
-    ...(milestones === undefined ? {} : { milestones }),
+  return {
+    snapshot: createAnalyticsSnapshot({
+      ...authorized,
+      ...(milestones === undefined ? {} : { milestones }),
+      query: normalizedQuery,
+    }),
     query: normalizedQuery,
-  })
+  }
 }
 
 /** Evidence query を事前検証し、current ACL の Work Item/event だけで再実行します。 */
@@ -1085,7 +1122,7 @@ function createAnalyticsPermissionScopeReadCache(): AnalyticsPermissionScopeRead
 async function resolveAnalyticsExportSnapshot(
   principal: WorkspacePrincipal,
   input: Record<string, unknown>,
-) {
+): Promise<{ snapshot: AnalyticsSnapshot; query: AnalyticsQueryInput; title?: string }> {
   const selectorCount = Number(input.query !== undefined) +
     Number(input.reportId !== undefined) +
     Number(input.snapshotId !== undefined)
@@ -1097,8 +1134,7 @@ async function resolveAnalyticsExportSnapshot(
     )
   }
   if (input.query !== undefined) {
-    const query = normalizeAnalyticsQueryInput(input.query)
-    return { snapshot: await executeAnalyticsQuery(principal, input.query), query }
+    return await executeNormalizedAnalyticsQuery(principal, input.query)
   }
   if (input.reportId !== undefined) {
     const report = await requireAnalyticsReport(
@@ -1106,10 +1142,12 @@ async function resolveAnalyticsExportSnapshot(
       readAnalyticsIdentifier(input.reportId, 'Analytics report ID'),
     )
     const calendar = await readWorkspaceCalendarSettingsOf(principal.directoryId)
-    const query = createAnalyticsReportQuery(report, {}, calendar)
     return {
-      snapshot: await executeAnalyticsQuery(principal, query, calendar),
-      query: normalizeAnalyticsQueryInput(query),
+      ...await executeNormalizedAnalyticsQuery(
+        principal,
+        createAnalyticsReportQuery(report, {}, calendar),
+        calendar,
+      ),
       title: report.name,
     }
   }
