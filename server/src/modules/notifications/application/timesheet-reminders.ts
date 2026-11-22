@@ -1,3 +1,6 @@
+import { DEFAULT_WORKSPACE_TIME_ZONE } from '@mukuroji/contracts'
+import { readLocalHour } from './weekly-report-reminders'
+
 /** Milliseconds in one day. */
 const dayMilliseconds = 86_400_000
 
@@ -9,6 +12,28 @@ export const TIMESHEET_REMINDER_LOOKBACK_DAYS = 92
 
 /** Most entry IDs one reminder carries for delivery-time revalidation. */
 export const TIMESHEET_REMINDER_MAX_ENTRY_IDS = 20
+
+/** Local hour of the Workspace day at which timesheet reminders go out: 09:00, the start of work. */
+export const DEFAULT_TIMESHEET_REMINDER_HOUR = 9
+
+/**
+ * Tells whether an hourly run is the one run of the Workspace day that sends timesheet reminders.
+ *
+ * The hour is read on the Workspace's wall clock, so the reminder keeps arriving at the same local
+ * time whatever the offset from UTC (including across daylight saving changes).
+ *
+ * @param now - Schedule execution instant.
+ * @param hour - Local hour, 0 to 23.
+ * @param timeZone - IANA time zone of the Workspace.
+ * @returns Whether `now` falls in that local hour.
+ */
+export function isTimesheetReminderHour(
+  now: Date,
+  hour: number,
+  timeZone: string = DEFAULT_WORKSPACE_TIME_ZONE,
+): boolean {
+  return readLocalHour(now, timeZone) === hour
+}
 
 /** A draft or rejected time entry that its owner has not submitted. */
 export type UnsubmittedTimeEntry = {

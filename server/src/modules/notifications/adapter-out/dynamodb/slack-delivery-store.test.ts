@@ -53,6 +53,22 @@ describe('Slack DynamoDB delivery queue', () => {
         .toEqual({ deliveries: [], invalidCount: 1 })
     }
   })
+  test('keeps a timesheet reminder\'s entries and due instant for the delivery-time recheck', async () => {
+    const timesheet = { ...row, timeEntryIds: ['entry-1', 'entry-2'], timesheetDueBefore: '2026-09-19T12:00:00.000Z' }
+    expect((await fixture(timesheet).store.listDue(shard, now, 2)).deliveries[0])
+      .toMatchObject({ timeEntryIds: ['entry-1', 'entry-2'], timesheetDueBefore: '2026-09-19T12:00:00.000Z' })
+    const plain = (await fixture().store.listDue(shard, now, 2)).deliveries[0]
+    expect(plain?.timeEntryIds).toBeUndefined()
+    expect(plain?.timesheetDueBefore).toBeUndefined()
+    for (const timeEntryIds of [[], 'entry-1', [''], [1], null]) {
+      expect(await fixture({ ...timesheet, timeEntryIds }).store.listDue(shard, now, 2))
+        .toEqual({ deliveries: [], invalidCount: 1 })
+    }
+    for (const timesheetDueBefore of ['last week', 1, null]) {
+      expect(await fixture({ ...timesheet, timesheetDueBefore }).store.listDue(shard, now, 2))
+        .toEqual({ deliveries: [], invalidCount: 1 })
+    }
+  })
   test('distinguishes absent legacy preferences from malformed persisted preferences', async () => {
     const delivery = (await fixture().store.listDue(shard, now, 2)).deliveries[0]
     if (!delivery) throw new Error('Expected delivery')
