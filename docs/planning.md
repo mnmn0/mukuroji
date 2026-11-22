@@ -279,7 +279,7 @@ Comment / reaction mutation は caller ごとの durable `Idempotency-Key` を�
 
 Dependency は predecessor / successor の directed edge で、self edge、重複 edge、循環を拒否する。Scheduling type は `finish-to-start`、`start-to-start`、`finish-to-finish`、`start-to-finish` の4種である。`lagDays` は signed calendar day とし、正数を lag、負数を lead として扱う。必要な場合は successor の `start` または `finish` に `on`、`not-before`、`not-after` の明示 constraint を設定できる。
 
-Planning entity の critical path は dependency に参加する archive されていない entity の forecast（無い場合は baseline）の inclusive calendar day 数、dependency、lead / lag から DAG の最長経路を算出する。Dependency に参加しない長期 Portfolio 等が scheduling path を隠すことはない。Timeline 上の日付や dependency の変更後は、mutation response に再計算した critical path を含める。
+Planning entity の critical path は dependency に参加する archive されていない entity の forecast（無い場合は baseline）を Workspace の稼働カレンダーで数えた稼働日数（最小 1）、dependency、lead / lag から DAG の最長経路を算出する（ADR 0058）。Dependency に参加しない長期 Portfolio 等が scheduling path を隠すことはない。Timeline 上の日付や dependency の変更後は、mutation response に再計算した critical path を含める。
 
 ## Work Item schedule dependency
 
