@@ -8,6 +8,7 @@ import {
   confirmTeamIssueSchedule,
   previewTeamIssueSchedule,
   TeamIssuesApiError,
+  type TeamIssueDetail,
 } from '../../issues/api'
 import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
@@ -24,8 +25,8 @@ export type WorkItemListScheduleMutationOptions = {
   mutationRequestRunner: MutationRequestRunner
   /** Revalidates or updates the Work Item list shown by the route. */
   mutateTasks: KeyedMutator<CanonicalWorkItem[]>
-  /** Revalidates the selected Work Item detail, when the route shows one. */
-  revalidateSelectedDetail?: () => Promise<unknown>
+  /** Revalidates or updates the selected Work Item detail, when the route shows one. */
+  mutateSelectedDetail?: KeyedMutator<TeamIssueDetail>
   /** Revalidates the Planning snapshot, when the route reads one. */
   revalidatePlanning?: () => Promise<unknown>
   /** Observes background refresh errors. */
@@ -66,8 +67,8 @@ export function createWorkItemListScheduleMutations({
   mutateTasks,
   mutationRequestRunner,
   onBackgroundRefreshError,
+  mutateSelectedDetail,
   revalidatePlanning,
-  revalidateSelectedDetail,
   t,
 }: WorkItemListScheduleMutationOptions): WorkItemListScheduleMutations {
   /** Throws the localized task mutation fallback when no session token is available. */
@@ -79,7 +80,7 @@ export function createWorkItemListScheduleMutations({
   /** Revalidates every cache that shows schedules after a stale preview or confirmation. */
   const revalidateAll = () => Promise.all([
     mutateTasks(),
-    revalidateSelectedDetail?.(),
+    mutateSelectedDetail?.(),
     revalidatePlanning?.(),
   ])
 
@@ -160,15 +161,38 @@ export function createWorkItemListScheduleMutations({
       (currentTasks = []) => applyConfirmedSchedulesToTasks(currentTasks, response.workItems),
       { revalidate: false },
     )
+    /**
+     * Reapplies a matching committed result to the selected detail, which the Team screen shows
+     * in place of the list row; an older detail must not bring back the previous schedule.
+     */
+    const preserveConfirmedSelectedDetail = async () => {
+      await mutateSelectedDetail?.(
+        (currentDetail) => {
+          if (!currentDetail) return currentDetail
+          const [updatedIssue] = applyConfirmedSchedulesToTasks(
+            [currentDetail.issue],
+            response.workItems,
+          )
+          return updatedIssue ? { ...currentDetail, issue: updatedIssue } : currentDetail
+        },
+        { revalidate: false },
+      )
+    }
     void revalidateScheduleConfirmationCachesBestEffort([
       {
         preserveConfirmedState: preserveConfirmedTasks,
         refresh: () => mutateTasks(),
       },
       {
+        preserveConfirmedState: preserveConfirmedSelectedDetail,
+        refresh: async () => {
+          await mutateSelectedDetail?.()
+        },
+      },
+      {
         preserveConfirmedState: async () => undefined,
         refresh: async () => {
-          await Promise.all([revalidateSelectedDetail?.(), revalidatePlanning?.()])
+          await revalidatePlanning?.()
         },
       },
     ], onBackgroundRefreshError)

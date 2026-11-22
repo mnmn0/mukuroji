@@ -419,7 +419,7 @@ export function TeamIssuePage() {
     mutationRequestRunner,
     onBackgroundRefreshError: (error) => setAuthenticatedApiError(() => error),
     revalidatePlanning: () => mutatePlanning(),
-    revalidateSelectedDetail: () => mutateIssueDetail(),
+    mutateSelectedDetail: mutateIssueDetail,
     t,
   })
   const detailErrorMessage = detailError
