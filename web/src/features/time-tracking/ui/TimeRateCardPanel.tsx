@@ -33,7 +33,7 @@ export type TimeRateCardPanelProps = {
   isLoading?: boolean
   /** Whether the read failed. */
   hasLoadError?: boolean
-  /** Saves the whole card. */
+  /** Saves the whole card; the fields stay locked until it settles, so no edit is lost. */
   onSave: (request: SaveTimeRateCardRequest) => Promise<unknown>
   /** Reloads the card. */
   onRetry: () => void
@@ -145,6 +145,7 @@ export function TimeRateCardPanel({
             <input
               autoCapitalize="characters"
               className="workbench-input min-h-9 w-20 px-2 uppercase"
+              disabled={isSaving}
               maxLength={3}
               onChange={(event) => edit((value) => ({ ...value, currency: event.target.value }))}
               value={current.currency}
@@ -164,6 +165,7 @@ export function TimeRateCardPanel({
                       <input
                         aria-label={`${row.name} ${t('timeTracking.rateCard.hourlyRate')}`}
                         className="workbench-input min-h-9 w-32 px-2"
+                        disabled={isSaving}
                         inputMode="decimal"
                         onChange={(event) => edit((value) => ({ ...value, jobRoleRates: { ...value.jobRoleRates, [row.id]: event.target.value } }))}
                         placeholder={t('timeTracking.rateCard.hourlyRate')}
@@ -190,6 +192,7 @@ export function TimeRateCardPanel({
                       <select
                         aria-label={`${row.name} ${t('timeTracking.rateCard.jobRole')}`}
                         className="workbench-input min-h-9 px-2"
+                        disabled={isSaving}
                         onChange={(event) => edit((value) => ({
                           ...value,
                           memberRates: { ...value.memberRates, [row.id]: { ...memberDraft, jobRoleId: event.target.value } },
@@ -205,6 +208,7 @@ export function TimeRateCardPanel({
                       <input
                         aria-label={`${row.name} ${t('timeTracking.rateCard.ownRate')}`}
                         className="workbench-input min-h-9 w-32 px-2"
+                        disabled={isSaving}
                         inputMode="decimal"
                         onChange={(event) => edit((value) => ({
                           ...value,
