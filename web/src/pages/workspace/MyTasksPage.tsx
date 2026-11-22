@@ -106,7 +106,11 @@ import {
   WorkspaceTaskLoadNotice,
 } from '../../workspace/ui/WorkspaceDataNotices'
 import { MyTasksWorkspaceView, type MyTasksViewMode } from '../../workspace/ui/MyTasksWorkspaceView'
-import { useTeamWorkItemHierarchies } from '../../work-items/queries/useTeamWorkItemHierarchies'
+import {
+  normalizeHierarchyTeamIds,
+  useTeamWorkItemHierarchies,
+} from '../../work-items/queries/useTeamWorkItemHierarchies'
+import { loadTeamWorkItemHierarchies } from '../../work-items/queries/teamWorkItemHierarchies'
 import { listTaskGanttRowTasks } from '../../tasks/model/taskGanttRows'
 import { listTaskCalendarMonthTasks } from '../../tasks/model/taskCalendarMonth'
 import { getCurrentTaskMonth } from '../../tasks/model/taskScheduleWindow'
@@ -309,6 +313,7 @@ export function MyTasksPage() {
     isLoading: isMyTasksHierarchiesLoading,
     isValidating: isMyTasksHierarchiesValidating,
     mutate: mutateMyTasksHierarchies,
+    key: myTasksHierarchiesKey,
   } = useTeamWorkItemHierarchies(
     workspace.accessToken,
     myTasksOutlineTeamIds,
@@ -467,11 +472,23 @@ export function MyTasksPage() {
     onBackgroundRefreshError: () => undefined,
     readTasks: (token) => loadWorkspaceWorkItems(token, includeArchivedWorkItems, myTasksWorkItemFilter),
     t,
+    // The Gantt outline rolls child dates up to summary rows, which only the hierarchy holds.
+    refreshHierarchy: async () => {
+      const accessToken = workspace.accessToken
+      const guardEnterpriseSession = workspace.guardEnterpriseSession
+      if (!myTasksHierarchiesKey || !accessToken) return
+      const hierarchies = await guardEnterpriseSession(
+        loadTeamWorkItemHierarchies(normalizeHierarchyTeamIds(myTasksOutlineTeamIds), accessToken),
+      )
+      await mutateCache(myTasksHierarchiesKey, hierarchies, { revalidate: false })
+    },
     tasksCacheKey: workItems.workItemsKey,
   }), [
     includeArchivedWorkItems,
     mutateCache,
     mutationRequestRunner,
+    myTasksHierarchiesKey,
+    myTasksOutlineTeamIds,
     t,
     workItems.workItemsKey,
     workspace.accessToken,

@@ -35,9 +35,10 @@ export function useTeamWorkItemHierarchies(
   const key = accessToken && enabled && normalizedTeamIds.length > 0
     ? ['team-work-item-hierarchies', accessToken, ...normalizedTeamIds] as const
     : null
-  return useSWR(
+  const query = useSWR(
     key,
     ([, token, ...currentTeamIds]) => loadTeamWorkItemHierarchies(currentTeamIds, token),
     hierarchiesQueryConfig,
   )
+  return { ...query, key }
 }

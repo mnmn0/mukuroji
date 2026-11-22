@@ -258,7 +258,12 @@ export function useWorkspaceTaskStatusMutation({
         ),
       ))
       await mutateWorkItems(
-        (currentTasks = [...tasks]) => replaceWorkspaceTask(currentTasks, updatedTask),
+        // A row read or confirmed meanwhile at a newer revision already includes this change.
+        (currentTasks = [...tasks]) => currentTasks.some((candidate) =>
+          createWorkspaceTaskKey(candidate) === taskKey && candidate.revision > updatedTask.revision
+        )
+          ? currentTasks
+          : replaceWorkspaceTask(currentTasks, updatedTask),
         { revalidate: false },
       )
       return updatedTask
