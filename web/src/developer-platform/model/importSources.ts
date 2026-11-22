@@ -202,7 +202,8 @@ function readJsonHeaders(text: string) {
     : typeof parsed === 'object' && parsed !== null ? Reflect.get(parsed, 'workItems') : undefined
   if (!Array.isArray(rows)) return []
   const headers = new Set<string>()
-  for (const row of rows.slice(0, 100)) {
+  // Every row is read, because an export leaves out empty optional fields such as dependencies.
+  for (const row of rows) {
     if (typeof row !== 'object' || row === null || Array.isArray(row)) continue
     for (const key of Object.keys(row)) headers.add(key)
   }

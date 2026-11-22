@@ -53,15 +53,14 @@ async function readDeveloperExportContext(
 }
 
 /**
- * Reads the Workspace's schedule dependencies, or none when Planning cannot be read.
+ * Reads the Workspace's schedule dependencies.
+ *
+ * A failed read fails the export, because a file with empty dependency cells would lose the
+ * dependencies when it is imported again.
  *
  * @param accessToken - Authorization header に使う access token です。
  * @returns Dependencies.
  */
 async function readDeveloperExportDependencies(accessToken: string): Promise<readonly WorkItemScheduleDependency[]> {
-  try {
-    return (await getPlanningSnapshot(accessToken)).workItemDependencies
-  } catch {
-    return []
-  }
+  return (await getPlanningSnapshot(accessToken)).workItemDependencies
 }

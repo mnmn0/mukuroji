@@ -3156,6 +3156,7 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
           link: request.link,
           workItemIdForRow: request.workItemIdForRow,
           linkIdentity: request.linkIdentity,
+          authorizationSnapshot: authorization.authorizationSnapshot,
           audit: createPublicMutationAuditContext(authorization.principal, {
             requestId: `import-worker-${createHash('sha256')
               .update(request.execution.jobId)

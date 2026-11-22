@@ -33,7 +33,12 @@ export type MsProjectTaskInput = {
   /** Accountable owner, written as the first assignment. */
   ownerUserId: string
   /** Contributors with their planned effort in minutes. */
-  contributors: Array<{ memberUserId: string; plannedEffortMinutes?: number }>
+  contributors: Array<{
+    /** User ID written as the Resource. */
+    memberUserId: string
+    /** Planned effort in minutes, written as the assignment work. */
+    plannedEffortMinutes?: number
+  }>
   /** Predecessors. */
   dependencies: MsProjectDependency[]
 }

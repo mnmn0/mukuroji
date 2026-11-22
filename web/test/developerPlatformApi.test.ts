@@ -36,6 +36,7 @@ import {
   updateDeveloperExternalLink,
 } from '../src/developer-platform/api'
 import { exportDeveloperWorkItems } from '../src/developer-platform/queries/developerExport'
+import { planningSnapshotFixture } from '../src/planning/fixtures'
 import {
   createMutationRequestRunner,
   type MutationRequestContext,
@@ -526,6 +527,9 @@ describe('Developer Platform API', () => {
         init,
       })
 
+      if (url.endsWith('/api/planning')) {
+        return new Response(JSON.stringify(planningSnapshotFixture), { headers: { 'Content-Type': 'application/json' } })
+      }
       if (url.endsWith('/work-item-hierarchy')) {
         // Only the first Work Item is in the read tree; the second keeps an empty WBS cell.
         return new Response(JSON.stringify({
@@ -626,6 +630,9 @@ describe('Developer Platform API', () => {
           ? input.toString()
           : input.url
       urls.push(url)
+      if (url.endsWith('/api/planning')) {
+        return new Response(JSON.stringify(planningSnapshotFixture), { headers: { 'Content-Type': 'application/json' } })
+      }
       if (urls.length === 1) {
         return new Response(JSON.stringify({
           code: 'rate_limited',
@@ -649,14 +656,28 @@ describe('Developer Platform API', () => {
 
     await expect(exportDeveloperWorkItems('access-token', 'json'))
       .resolves.toMatchObject({ fileName: expect.stringMatching(/\.json$/u) })
-    // The hierarchy and Planning reads get an export page back, which is neither; the export still
-    // succeeds without WBS numbers or dependencies.
+    // The hierarchy read gets an export page back, so the export has no WBS numbers.
     expect(urls).toEqual([
       '/api/developer/exports?format=json&limit=100',
       '/api/developer/exports?format=json&limit=100',
       '/api/teams/team-product/work-item-hierarchy',
       '/api/planning',
     ])
+  })
+
+  test('fails the export when the dependencies cannot be read', async () => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.endsWith('/api/planning')) {
+        return new Response(JSON.stringify({ code: 'unavailable' }), { status: 503, headers: { 'Content-Type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ items: [createExportWorkItem({ id: 'work-item-1' })], hasMore: false }), {
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }) as typeof fetch
+
+    // A file with empty dependency cells would drop the dependencies when it is imported again.
+    await expect(exportDeveloperWorkItems('access-token', 'csv')).rejects.toThrow()
   })
 
   test('preserves stable API status and error code', async () => {

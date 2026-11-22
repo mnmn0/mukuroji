@@ -116,13 +116,30 @@ export type DeveloperExportRow = {
   /** Nearest exported ancestor. */
   parentId?: string
   /** Predecessors among the exported Work Items. */
-  dependencies: Array<{ key: string; type: ScheduleDependencyType; lagDays: number }>
+  dependencies: Array<{
+    /** Predecessor Work Item ID. */
+    key: string
+    /** Dependency type. */
+    type: ScheduleDependencyType
+    /** Lag in working days. */
+    lagDays: number
+  }>
   /** Relations to other exported Work Items, without parent and child. */
-  relations: Array<{ type: string; key: string }>
+  relations: Array<{
+    /** Relation type as stored, such as `blocks`. */
+    type: string
+    /** Related Work Item ID. */
+    key: string
+  }>
   /** Contributor assignments without their server-assigned IDs. */
   contributors: Array<Omit<WorkItemContributorAssignment, 'assignmentId'>>
   /** Acceptance criteria without their server-assigned IDs. */
-  acceptanceCriteria: Array<{ text: string; satisfied: boolean }>
+  acceptanceCriteria: Array<{
+    /** Criterion text. */
+    text: string
+    /** Whether the criterion is met. */
+    satisfied: boolean
+  }>
 }
 
 /** Export columns before the custom fields, in file order. */
@@ -195,7 +212,7 @@ export function createDeveloperExportFile(
   }
   if (format === 'msproject') {
     return {
-      blob: new Blob([createMsProjectXml('mukuroji Work Items', rows.map(toMsProjectTask))], {
+      blob: new Blob([createMsProjectXml('mukuroji Work Items', toMsProjectTasks(rows))], {
         type: 'application/xml; charset=utf-8',
       }),
       fileName: `mukuroji-work-items-${suffix}.xml`,
@@ -342,7 +359,7 @@ function readExportCell(row: DeveloperExportRow, column: (typeof exportColumns)[
         `status:${contributor.status}`,
       ].filter(Boolean).join(' ')).join('; ')
     case 'acceptanceCriteria':
-      return row.acceptanceCriteria.map((criterion) => `${criterion.satisfied ? '[x]' : '[ ]'} ${criterion.text}`).join('\n')
+      return writeAcceptanceCriteriaCell(row.acceptanceCriteria)
     case 'workItemTypeId':
       return workItem.workItemTypeId ?? ''
     case 'description':
@@ -395,12 +412,49 @@ function toExportWorkItem(row: DeveloperExportRow) {
 }
 
 /**
+ * Writes acceptance criteria as one text cell.
+ *
+ * Criteria are written one per line with `[x]` or `[ ]`. When a criterion has a line break, or
+ * starts with a mark that the line format drops, the cell is a JSON array instead, which import
+ * also reads, so the criteria keep their boundaries and states.
+ *
+ * @param criteria - Criteria of the Work Item.
+ * @returns Cell text, empty without criteria.
+ */
+function writeAcceptanceCriteriaCell(criteria: DeveloperExportRow['acceptanceCriteria']) {
+  if (criteria.some((criterion) => /[\r\n]/u.test(criterion.text) || /^(?:\[|[-*・])/u.test(criterion.text))) {
+    return JSON.stringify(criteria.map((criterion) => ({ text: criterion.text, satisfied: criterion.satisfied })))
+  }
+  return criteria.map((criterion) => `${criterion.satisfied ? '[x]' : '[ ]'} ${criterion.text}`).join('\n')
+}
+
+/**
+ * Builds the MS Project tasks of an export.
+ *
+ * Each Team numbers its own WBS from 1, so the tasks get outline numbers counted over the whole
+ * export from the outline levels; a file with several Teams then has no duplicate numbers.
+ *
+ * @param rows - Export rows in outline order.
+ * @returns The tasks.
+ */
+function toMsProjectTasks(rows: readonly DeveloperExportRow[]): MsProjectTaskInput[] {
+  const counters: number[] = []
+  return rows.map((row) => {
+    counters.length = Math.min(counters.length, row.outlineLevel)
+    const index = Math.min(row.outlineLevel, counters.length + 1) - 1
+    counters[index] = (counters[index] ?? 0) + 1
+    return toMsProjectTask(row, counters.join('.'))
+  })
+}
+
+/**
  * Builds the MS Project task of one Work Item.
  *
  * @param row - Export row.
+ * @param outlineNumber - Outline number of the task in the export.
  * @returns The task, with its dates from the schedule.
  */
-function toMsProjectTask(row: DeveloperExportRow): MsProjectTaskInput {
+function toMsProjectTask(row: DeveloperExportRow, outlineNumber: string): MsProjectTaskInput {
   const { workItem } = row
   const schedule = workItem.schedule
   // A due date is written as a finish without a start, so it re-imports as a due date.
@@ -413,7 +467,7 @@ function toMsProjectTask(row: DeveloperExportRow): MsProjectTaskInput {
     key: workItem.id,
     name: workItem.title,
     ...(workItem.description ? { notes: workItem.description } : {}),
-    ...(row.wbsNumber ? { wbsNumber: row.wbsNumber } : {}),
+    wbsNumber: outlineNumber,
     outlineLevel: row.outlineLevel,
     ...dates,
     ...(schedule.mode === 'milestone' ? { milestone: true } : {}),

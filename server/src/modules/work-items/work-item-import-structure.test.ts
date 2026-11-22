@@ -184,6 +184,36 @@ describe('Work Item import structure', () => {
     ])
   })
 
+  test('rejects blocking relations that form a cycle', () => {
+    const preview = previewWorkItemImport('json', source([
+      { Key: 'a', Relations: 'blocks:b; related:c' },
+      { Key: 'b', Relations: 'blocks:a' },
+      { Key: 'c', Relations: 'blockedBy:a' },
+    ]), [
+      ...baseMapping,
+      { sourceField: 'Key', targetField: 'importKey' },
+      { sourceField: 'Relations', targetField: 'relations' },
+    ])
+
+    // Creating these after every row exists would stop at the relation that closes the cycle.
+    expect(preview.errors.map((error) => [error.row, error.field, error.code])).toEqual([
+      [1, 'relations', 'ImportRelationCycle'],
+      [2, 'relations', 'ImportRelationCycle'],
+    ])
+  })
+
+  test('limits acceptance criterion text by its UTF-16 length, as stored criteria are checked', () => {
+    const preview = previewWorkItemImport('json', source([
+      { Criteria: [{ text: '😀'.repeat(512) }] },
+      { Criteria: [{ text: '😀'.repeat(513) }] },
+    ]), [
+      ...baseMapping,
+      { sourceField: 'Criteria', targetField: 'acceptanceCriteria' },
+    ])
+
+    expect(preview.errors.map((error) => [error.row, error.field])).toEqual([[2, 'acceptanceCriteria']])
+  })
+
   test('reports invalid structure cells on their rows', () => {
     const preview = previewWorkItemImport('json', source([
       { Key: 'a', Level: 0, Relations: 'parent:b', Contributors: 'team:x', Predecessors: { key: 'b' } },

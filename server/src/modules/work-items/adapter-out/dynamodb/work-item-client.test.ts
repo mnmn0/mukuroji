@@ -3001,10 +3001,11 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
           }
           if (command.constructor.name === 'TransactWriteCommand') {
             const transactItems = command.input.TransactItems as Array<{
-              ConditionCheck?: { TableName?: string }
+              Update?: { TableName?: string }
             }>
+            // The fence is part of the Planning revision increment, the only Planning Update.
             planningConditionIndex = transactItems.findIndex((item) =>
-              item.ConditionCheck?.TableName === 'PlanningTable'
+              item.Update?.TableName === 'PlanningTable'
             )
             planningCondition = transactItems[planningConditionIndex]
             if (shouldFail) {
@@ -3054,7 +3055,7 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
       }
       expect(planningConditionIndex).toBe(2)
       expect(planningCondition).toEqual({
-        ConditionCheck: expect.objectContaining({
+        Update: expect.objectContaining({
           TableName: 'PlanningTable',
           Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
           ExpressionAttributeValues: expect.objectContaining({
@@ -3496,6 +3497,66 @@ test('DynamoDB Work Item delete maps unclassified transaction cancellations to a
   }
 })
 
+test('DynamoDB Work Item delete checks the Planning fence inside the Planning revision increment', async () => {
+  await withTestEnvironment({
+    WORKSPACE_ACCESS_TABLE_NAME: 'WorkspaceAccessTable',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+  }, async () => {
+    const currentIssue = createScheduleCascadeIssue('core-team', 'fenced-delete')
+    for (const shouldFail of [false, true]) {
+      let transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+      const documentClient = {
+        async send(command: { input: TransactWriteCommandInput; constructor: { name: string } }) {
+          if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+          if (command.constructor.name === 'TransactWriteCommand') {
+            transactItems = command.input.TransactItems ?? []
+            if (shouldFail) {
+              throw Object.assign(new Error('Transaction was canceled.'), {
+                name: 'TransactionCanceledException',
+                CancellationReasons: transactItems.map((item) => ({
+                  Code: item.Update?.TableName === 'PlanningTable' ? 'ConditionalCheckFailed' : 'None',
+                })),
+              })
+            }
+          }
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+      const client = new DynamoDbTeamIssuesClient(
+        'IssuesTable',
+        'IssueEventsTable',
+        documentClient,
+        {} as DynamoDBClient,
+        false,
+      )
+      const deletion = client.deleteTeamIssue(
+        'workspace-1',
+        'core-team',
+        'fenced-delete',
+        1,
+        'demo@example.com',
+        undefined,
+        undefined,
+        [],
+        [],
+        { workspaceId: 'workspace-1', memberKey: 'demo@example.com', workspaceMemberVersion: 3, planningRevision: 8 },
+      )
+
+      if (shouldFail) {
+        await expect(deletion).rejects.toMatchObject({ code: 'WorkItemAuthorizationChanged', status: 409 })
+      } else {
+        await deletion
+      }
+      // DynamoDB rejects a second operation on the Planning revision row.
+      const fenceRowOperations = transactItems.filter((item) =>
+        (item.ConditionCheck ?? item.Update)?.Key?.workspaceId === 'FENCE#workspace-1')
+      expect(fenceRowOperations).toHaveLength(1)
+      expect(fenceRowOperations[0]?.Update?.ExpressionAttributeValues).toMatchObject({ ':increment': 1 })
+      expect(Object.values(fenceRowOperations[0]?.Update?.ExpressionAttributeValues ?? {})).toContain(8)
+    }
+  })
+})
+
 test('DynamoDB Work Item delete prioritizes authorization failure over deletion fences', async () => {
   const currentIssue = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -3684,8 +3745,9 @@ test('DynamoDB Work Item schedule cascade writes one bounded transaction with un
 
       expect(transactions).toHaveLength(1)
       const transactItems = transactions[0] ?? []
-      // Two Projects without a baseline add one absence check each.
-      expect(transactItems).toHaveLength(auditEnabled ? 15 : 13)
+      // Two Projects without a baseline add one absence check each; the Planning fence is part of
+      // the Planning revision increment.
+      expect(transactItems).toHaveLength(auditEnabled ? 14 : 12)
       expect(transactItems.filter((item) => item.Update?.TableName === 'IssuesTable'))
         .toHaveLength(2)
       expect(transactItems.filter((item) =>
@@ -3716,13 +3778,16 @@ test('DynamoDB Work Item schedule cascade writes one bounded transaction with un
       for (const tableName of [
         'ConfigurationTable',
         'WorkspaceAccessTable',
-        'PlanningTable',
         'EnterpriseIdentityTable',
       ]) {
         expect(transactItems).toContainEqual(expect.objectContaining({
           ConditionCheck: expect.objectContaining({ TableName: tableName }),
         }))
       }
+      expect(transactItems.filter((item) =>
+        item.ConditionCheck?.Key?.workspaceId === 'FENCE#workspace-1')).toEqual([])
+      expect(transactItems.find((item) => item.Update?.TableName === 'PlanningTable')?.Update?.ConditionExpression)
+        .toMatch(/\) AND \(/u)
       const eventItems = transactItems.flatMap((item) =>
         item.Put?.TableName === 'IssueEventsTable' && item.Put.Item
           ? [item.Put.Item]
@@ -3918,7 +3983,8 @@ test('DynamoDB Work Item schedule cascade classifies cancellation indexes by saf
               : []
             const labels = transactItems.map((item) => {
               if (!isUnknownRecord(item)) return 'unknown'
-              if (isUnknownRecord(item.Update)) return 'update'
+              // The Planning revision increment carries the Planning fence.
+              if (isUnknownRecord(item.Update)) return item.Update.TableName === 'PlanningTable' ? 'planning' : 'update'
               if (isUnknownRecord(item.Put)) return 'event'
               if (!isUnknownRecord(item.ConditionCheck)) return 'unknown'
               const tableName = item.ConditionCheck.TableName

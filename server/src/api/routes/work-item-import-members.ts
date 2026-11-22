@@ -13,7 +13,10 @@ export type WorkItemImportPeople = {
   /** Accountable owner as written. */
   assigneeUserId: string
   /** Contributors as written. */
-  contributorAssignments?: ReadonlyArray<{ memberUserId?: string }>
+  contributorAssignments?: ReadonlyArray<{
+    /** Contributor as written; left out for an assignment to a job role. */
+    memberUserId?: string
+  }>
 }
 
 /** Field and person that could not be matched to one member. */

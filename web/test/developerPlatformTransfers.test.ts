@@ -243,6 +243,48 @@ describe('Developer Platform Work Item export', () => {
     ])
   })
 
+  test('numbers MS Project tasks over the whole export when several Teams start at WBS 1', async () => {
+    const teamItems = [
+      workItem({ id: 'a1', title: 'A1' }),
+      workItem({ id: 'a2', title: 'A2' }),
+      workItem({ id: 'b1', teamId: 'team-b', title: 'B1' }),
+      workItem({ id: 'b2', teamId: 'team-b', title: 'B2' }),
+    ]
+    const file = createDeveloperExportFile('msproject', teamItems, {
+      hierarchies: new Map([
+        ['team-a', [node('a1', null, 0, '1'), node('a2', 'a1', 1, '1.1')]],
+        ['team-b', [node('b1', null, 0, '1'), node('b2', 'b1', 1, '1.1')]],
+      ]),
+      dependencies: [],
+    }, exportedAt)
+    const rows = readMsProjectXml(await file.blob.text())
+
+    expect(rows.map((row) => [row.Name, row.WBS, row.OutlineLevel])).toEqual([
+      ['A1', '1', 1], ['A2', '1.1', 2], ['B1', '2', 1], ['B2', '2.1', 2],
+    ])
+  })
+
+  test('writes acceptance criteria with line breaks or leading marks as a JSON array', async () => {
+    const criteria = [
+      { id: '1'.repeat(32), text: 'First line\nSecond line', satisfied: true },
+      { id: '2'.repeat(32), text: '- dash kept', satisfied: false },
+    ]
+    const file = createDeveloperExportFile('csv', [workItem({ acceptanceCriteria: criteria })], { hierarchies: new Map(), dependencies: [] }, exportedAt)
+    const text = (await file.blob.text()).replace(/^\ufeff/u, '')
+
+    expect(text).toContain(`"${JSON.stringify([
+      { text: 'First line\nSecond line', satisfied: true },
+      { text: '- dash kept', satisfied: false },
+    ]).replaceAll('"', '""')}"`)
+  })
+
+  test('suggests a mapping for JSON fields that first appear after many rows', async () => {
+    const rows = [...Array.from({ length: 150 }, (_, index) => ({ id: `w${index}`, title: `W${index}` })), { id: 'late', title: 'Late', dependencies: [{ key: 'w1' }] }]
+    const source = await readDeveloperImportSource('json', fileFrom('items.json', new TextEncoder().encode(JSON.stringify(rows))))
+
+    expect(source.headers).toEqual(['id', 'title', 'dependencies'])
+  })
+
   test('reads working-day lag and date ranges from a MS Project file', () => {
     const rows = readMsProjectXml(createMsProjectXml('Plan', [
       { key: 'a', name: 'A', outlineLevel: 1, startDate: '2026-08-03', finishDate: '2026-08-07', completed: false, ownerUserId: 'u', contributors: [], dependencies: [] },

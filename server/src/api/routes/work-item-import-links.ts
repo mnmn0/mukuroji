@@ -12,6 +12,11 @@ import {
   assertWorkItemChildTypeAllowed,
   createWorkItemConfigurationGuardConditionChecks,
 } from '../../modules/work-items/work-item-configuration'
+import {
+  createAuthorizationSnapshotConditionChecks,
+  type WorkItemAuthorizationSnapshot,
+} from '../../modules/work-items/adapter-out/dynamodb/work-item-client'
+import { WorkItemImportError } from '../../modules/work-items/work-item-import'
 import type { WorkItemImportLink } from '../../modules/work-items/work-item-import-structure'
 import type { MutationAuditContext } from '../../modules/audit/audit'
 import { workItemDependencies } from '../shared/app-dependencies'
@@ -20,6 +25,7 @@ import { prepareConfiguredUpdateWorkItem } from '../shared/file-approval-access'
 import {
   createPlanningCallerAuthorizationConditionChecks,
   readPlanningWorkItemState,
+  requirePlanningEndpointScopePermission,
   requirePlanningWorkItemEndpointPermission,
 } from '../shared/planning-access'
 import {
@@ -68,6 +74,8 @@ export type ApplyWorkItemImportLinkRequest = {
   linkIdentity: string
   /** Audit context recorded with the change. */
   audit: MutationAuditContext
+  /** Authorization generations observed for this link, committed with the change. */
+  authorizationSnapshot: WorkItemAuthorizationSnapshot
 }
 
 /**
@@ -91,31 +99,32 @@ export async function validateWorkItemImportLinks(
   rows: ReadonlyMap<number, WorkItemImportLinkRow>,
 ): Promise<WorkItemImportLinkError[]> {
   const errors = validateWorkItemImportParentLinks(configuration, links, rows)
-  let managerAccess: Awaited<ReturnType<typeof requireTeamPermission>> | Error | undefined
+  // The worker checks each endpoint as creating a dependency does, so the dry run applies the same
+  // rule to the Team and Project each row will have.
+  const accessByProject = new Map<string, Promise<Error | undefined>>()
+  /** Checks manager dependency access for one endpoint scope, once per Project. */
+  const readEndpointAccessError = (assignedProjectId: string | undefined) => {
+    const key = assignedProjectId ?? ''
+    let access = accessByProject.get(key)
+    if (!access) {
+      access = requirePlanningEndpointScopePermission(principal, teamId, assignedProjectId, 'manager').then(
+        () => undefined,
+        (error: unknown) => {
+          if (!(error instanceof Error) || readStatus(error) >= 500) throw error
+          return error
+        },
+      )
+      accessByProject.set(key, access)
+    }
+    return access
+  }
   for (const link of links) {
     if (link.kind !== 'dependency') continue
     const predecessor = rows.get(link.predecessorRow)
     const successor = rows.get(link.successorRow)
     if (!predecessor || !successor) continue
-    if (managerAccess === undefined) {
-      try {
-        managerAccess = await requireTeamPermission(principal, teamId, 'manager')
-      } catch (error) {
-        if (!(error instanceof Error) || readStatus(error) >= 500) throw error
-        managerAccess = error
-      }
-    }
-    const access = managerAccess
-    let accessError: Error | undefined = access instanceof Error ? access : undefined
-    if (!accessError && !(access instanceof Error)) {
-      try {
-        requireAssignedProjectPermission(principal, access, predecessor.assignedProjectId, 'manager')
-        requireAssignedProjectPermission(principal, access, successor.assignedProjectId, 'manager')
-      } catch (error) {
-        if (!(error instanceof Error) || readStatus(error) >= 500) throw error
-        accessError = error
-      }
-    }
+    const accessError = await readEndpointAccessError(predecessor.assignedProjectId) ??
+      await readEndpointAccessError(successor.assignedProjectId)
     if (accessError) {
       errors.push({
         row: link.successorRow,
@@ -272,14 +281,18 @@ async function createImportRelation(
       ...(source.issue.assignedProjectId ? { sourceAssignedProjectId: source.issue.assignedProjectId } : {}),
       ...(target.issue.assignedProjectId ? { targetAssignedProjectId: target.issue.assignedProjectId } : {}),
     },
-    resolvedConfiguration
-      ? createWorkItemConfigurationGuardConditionChecks(
-          getWorkItemConfigurationTableName(),
-          directoryId,
-          teamId,
-          resolvedConfiguration,
-        )
-      : undefined,
+    [
+      ...(resolvedConfiguration
+        ? createWorkItemConfigurationGuardConditionChecks(
+            getWorkItemConfigurationTableName(),
+            directoryId,
+            teamId,
+            resolvedConfiguration,
+          )
+        : []),
+      // The access checked before the link must still hold when the relation commits.
+      ...createAuthorizationSnapshotConditionChecks(request.authorizationSnapshot),
+    ],
     { context: request.audit, actorMemberKey: principal.userKey },
   )
   await Promise.all([source.issue, target.issue].map((issue) =>
@@ -325,8 +338,12 @@ async function createImportDependency(
 /**
  * Stores the acceptance criteria of one imported Work Item unless it already has them.
  *
+ * The import creates the Work Item without criteria. Criteria that someone added in the meantime
+ * are never replaced, so a retry after a revision conflict cannot overwrite that edit.
+ *
  * @param request - Link request.
  * @param link - Acceptance criteria link.
+ * @throws WorkItemImportError `ImportAcceptanceCriteriaChanged` when the Work Item has other criteria.
  */
 async function replaceImportAcceptanceCriteria(
   request: ApplyWorkItemImportLinkRequest,
@@ -347,6 +364,12 @@ async function replaceImportAcceptanceCriteria(
     existing.every((criterion, index) =>
       criterion.text === link.criteria[index]?.text && criterion.satisfied === link.criteria[index]?.satisfied)
   ) return
+  if (existing.length > 0) {
+    throw new WorkItemImportError(
+      'ImportAcceptanceCriteriaChanged',
+      'The acceptance criteria of an imported Work Item were changed during the import, so they were not replaced.',
+    )
+  }
   const body = {
     acceptanceCriteria: link.criteria.map((criterion) => ({ text: criterion.text, satisfied: criterion.satisfied })),
     expectedRevision: detail.issue.revision,
@@ -362,6 +385,7 @@ async function replaceImportAcceptanceCriteria(
       ...configuredBody,
       ...(acceptanceCriteria === undefined ? {} : { acceptanceCriteria }),
       expectedRevision: detail.issue.revision,
+      authorizationSnapshot: request.authorizationSnapshot,
     },
     principal.userKey,
     request.audit,

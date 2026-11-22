@@ -308,6 +308,7 @@ export function resolveWorkItemImportStructure(
   }
 
   const relationKeys = new Set<string>()
+  const blockingEdges = new Map<number, number[]>()
   for (const row of rows) {
     for (const relation of row.relations) {
       const otherRow = resolve(relation.key)
@@ -330,8 +331,20 @@ export function resolveWorkItemImportStructure(
       const key = `${link.type}\u0000${first}\u0000${second}`
       if (relationKeys.has(key)) continue
       relationKeys.add(key)
+      if (link.type === 'blocks') {
+        blockingEdges.set(link.sourceRow, [...(blockingEdges.get(link.sourceRow) ?? []), link.targetRow])
+      }
       links.push({ kind: 'relation', ...link })
     }
+  }
+  // Creating the relations would stop at the first one that closes a cycle, after every row exists.
+  for (const row of findRowsOnCycle(blockingEdges)) {
+    errors.push({
+      row,
+      field: 'relations',
+      code: 'ImportRelationCycle',
+      message: 'The blocking relations of this row form a cycle.',
+    })
   }
 
   for (const row of rows) {
@@ -636,7 +649,8 @@ function readAcceptanceCriteria(
     return fail(`A Work Item can have at most ${WORK_ITEM_ACCEPTANCE_CRITERIA_LIMIT} acceptance criteria.`)
   }
   if (criteria.some((criterion) =>
-    !criterion.text || [...criterion.text].length > WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH)) {
+    // UTF-16 length, as the stored criteria are checked.
+    !criterion.text || criterion.text.length > WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH)) {
     return fail(`Each acceptance criterion needs 1 to ${WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH} characters.`)
   }
   return criteria
@@ -723,6 +737,26 @@ function findDependencyCycleRows(edges: ReadonlyMap<number, readonly number[]>) 
     }
   }
   return [...incoming.keys()].sort((left, right) => left - right)
+}
+
+/**
+ * Finds the rows that lie on a cycle, leaving out rows that only lead into or out of one.
+ *
+ * @param edges - Target rows by source row.
+ * @returns Rows on a cycle, ascending.
+ */
+function findRowsOnCycle(edges: ReadonlyMap<number, readonly number[]>) {
+  const remaining = new Set(findDependencyCycleRows(edges))
+  let removed = true
+  while (removed) {
+    removed = false
+    for (const row of remaining) {
+      if ((edges.get(row) ?? []).some((target) => remaining.has(target))) continue
+      remaining.delete(row)
+      removed = true
+    }
+  }
+  return [...remaining].sort((left, right) => left - right)
 }
 
 /**

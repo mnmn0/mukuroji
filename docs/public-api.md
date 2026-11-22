@@ -315,12 +315,12 @@ Mapping の `targetField` には Work Item の項目に加えて、行どうし�
 
 参照は同じ file の行だけを指し、`importKey` を先に、見つからなければ `wbsNumber` を探す。Dry-run は次を row error として返し、1 行でも error があれば import を開始できない。
 
-- 参照先がない、自分自身を指す、キーが重複する、親の参照が循環する、依存が循環する、同じ先行タスクを 2 回書いた（`ImportReferenceInvalid`、`ImportKeyDuplicate`、`ImportHierarchyCycle`、`ImportDependencyCycle`、`ImportDependencyDuplicate`）
+- 参照先がない、自分自身を指す、キーが重複する、親の参照が循環する、依存が循環する、`blocks` の relation が循環する、同じ先行タスクを 2 回書いた（`ImportReferenceInvalid`、`ImportKeyDuplicate`、`ImportHierarchyCycle`、`ImportDependencyCycle`、`ImportRelationCycle`、`ImportDependencyDuplicate`）
 - 親の Work Item Type が子の Type を許可しない（`WorkItemChildTypeDenied`）
-- 依存の両端に Team と Project の manager 権限がない、どちらかの行に日程がない、取り込む日程が依存を満たさない（`ImportDependencyScheduleConflict`。依存は作成時に日程を満たす必要があるため）
+- 依存の両端に Team と Project の manager 権限がない（Enterprise のロールでは、各行の Team か Project で `planning.manage`。worker が依存を作るときと同じ確認）、どちらかの行に日程がない、取り込む日程が依存を満たさない（`ImportDependencyScheduleConflict`。依存は作成時に日程を満たす必要があるため）
 - Contributor の member が有効な Workspace member でない、ジョブロールがない・archive 済み
 
-Worker は全行を作成した後に、親子、依存、relation、受け入れ条件の順で 1 件ずつ付ける。各 link の完了も row と同じ durable receipt に記録するため（番号は `totalRows` の次から続く）、retry や lease takeover では残りの link から再開し、既にある link は作り直さない。Link の前にも cancellation、tenant 状態、現在の権限を確認する。依存の ID は job と link の位置から決まる。
+Worker は全行を作成した後に、親子、依存、relation、受け入れ条件の順で 1 件ずつ付ける。各 link の完了も row と同じ durable receipt に記録するため（番号は `totalRows` の次から続く）、retry や lease takeover では残りの link から再開し、既にある link は作り直さない。Link の前にも cancellation、tenant 状態、現在の権限を確認し、そのとき読んだ Workspace member と Planning の版を link の書き込みと同じ transaction で確かめる。依存の ID は job と link の位置から決まる。Import の途中で誰かが受け入れ条件を付けた Work Item は上書きせず、job を `ImportAcceptanceCriteriaChanged` で止める。
 
 Worker retry を使い切った job は `failed` として source を削除し、DLQ の locator は運用診断専用に保持する。再実行は修正済み source と新しい idempotency key で新規 job を作成する。
 
@@ -341,9 +341,9 @@ Web の export file は CSV・JSON・Excel（`.xlsx`）・MS Project XML から�
 | `dependencies` | 先行 Work Item を `<id> FS +2` の形で `;` 区切り。JSON では `{ key, type, lagDays }` の配列 |
 | `relations` | parent・child 以外の relation を `blocks:<id>` の形で `;` 区切り。JSON では `{ type, key }` の配列 |
 | `contributors` | `member:<id> role:<id> effort:<分> status:<状態>` を `;` 区切り。JSON では配列 |
-| `acceptanceCriteria` | 1 行に 1 条件、達成済みは `[x]`、未達成は `[ ]` で始まる。JSON では `{ text, satisfied }` の配列 |
+| `acceptanceCriteria` | 1 行に 1 条件、達成済みは `[x]`、未達成は `[ ]` で始まる。改行を含む条件や `[`・`-`・`*`・`・` で始まる条件があるときは `[{ "text", "satisfied" }]` の JSON 配列。JSON では `{ text, satisfied }` の配列 |
 
-依存と relation は、相手も同じ export に含まれるものだけを書く。Planning を読めない場合は依存の列が空になる。どの形式も上の import の書き方に合わせているため、export した file をそのまま import すると同じ階層・依存・relation・Contributor・受け入れ条件で作り直せる（ID は新しくなる）。Excel の `dueDate` は日付 cell、ほかは文字列 cell で書く。MS Project XML は Task の `UID`・`OutlineNumber`・`OutlineLevel`・`PredecessorLink`（lag は暦日）と、責任者と Contributor の Assignment を書き、Resource の名前は user ID にする。API の export page 自体は追加の列を持たない。
+依存と relation は、相手も同じ export に含まれるものだけを書く。Planning を読めない場合は export が失敗する（依存の列が空の file を import し直すと依存が失われるため）。どの形式も上の import の書き方に合わせているため、export した file をそのまま import すると同じ階層・依存・relation・Contributor・受け入れ条件で作り直せる（ID は新しくなる）。Excel の `dueDate` は日付 cell、ほかは文字列 cell で書く。MS Project XML は Task の `UID`・`OutlineNumber`（Team ごとの WBS ではなく、export 全体で階層から振り直した番号）・`OutlineLevel`・`PredecessorLink`（lag は暦日）と、責任者と Contributor の Assignment を書き、Resource の名前は user ID にする。API の export page 自体は追加の列を持たない。
 
 Web の import は CSV・JSON に加えて Excel（`.xlsx`）と MS Project XML を選べる。どちらも browser で JSON の row に変換してから同じ dry-run と import に送るため、Public API の format は CSV・JSON のままである。
 
