@@ -141,6 +141,7 @@ export async function validateWorkItemImportLinks(
         successor: { teamId, workItemId: `row-${link.successorRow}` },
         type: link.type,
         lagDays: link.lagDays,
+        ...(link.constraint ? { constraint: link.constraint } : {}),
         createdAt: '',
         updatedAt: '',
       },
@@ -155,7 +156,9 @@ export async function validateWorkItemImportLinks(
         code: 'ImportDependencyScheduleConflict',
         message: conflict.code === 'missing-schedule'
           ? 'Both Work Items of a schedule dependency need a schedule.'
-          : `The schedule must start or finish on or after ${conflict.requiredDate ?? 'the date the dependency requires'}.`,
+          : conflict.code === 'constraint-violation'
+            ? `The schedule does not meet the date constraint of the dependency${conflict.requiredDate ? ` (${conflict.requiredDate})` : ''}.`
+            : `The schedule must start or finish on or after ${conflict.requiredDate ?? 'the date the dependency requires'}.`,
       })
     }
   }
@@ -328,6 +331,7 @@ async function createImportDependency(
       successor,
       type: link.type,
       lagDays: link.lagDays,
+      ...(link.constraint ? { constraint: link.constraint } : {}),
       expectedRevision: snapshot.revision,
     },
     workItemState,

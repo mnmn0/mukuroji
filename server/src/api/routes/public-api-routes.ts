@@ -3140,6 +3140,12 @@ export function createWorkItemImportWorkerDependencies(): WorkItemImportWorkerDe
         throw toWorkItemImportWorkerError(error)
       }
     },
+    /**
+     * Applies one link of an import after every row exists, as the importer currently may.
+     *
+     * @param request - Link, the execution it belongs to, and the Work Item ID of each row.
+     * @returns Nothing; a failure is mapped to retryable or terminal worker semantics.
+     */
     async applyLink(request) {
       try {
         const authorization = await resolveStableWorkItemAuthorization(

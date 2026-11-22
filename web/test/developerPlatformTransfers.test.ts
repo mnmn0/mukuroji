@@ -4,6 +4,7 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type CanonicalWorkItem,
+  type ScheduleDependencyConstraint,
   type TeamWorkItemHierarchyNode,
   type WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
@@ -276,6 +277,26 @@ describe('Developer Platform Work Item export', () => {
       { text: 'First line\nSecond line', satisfied: true },
       { text: '- dash kept', satisfied: false },
     ]).replaceAll('"', '""')}"`)
+  })
+
+  test('keeps the date constraint of a dependency by writing the cell as JSON', async () => {
+    const constraint: ScheduleDependencyConstraint = { anchor: 'finish', kind: 'not-after', date: '2026-12-01' }
+    const file = createDeveloperExportFile('csv', [workItem({ id: 'a' }), workItem({ id: 'b' })], {
+      hierarchies: new Map(),
+      dependencies: [{ ...dependency('a', 'b', 1), constraint }],
+    }, exportedAt)
+    const text = (await file.blob.text()).replace(/^\ufeff/u, '')
+
+    expect(text).toContain(`"${JSON.stringify([{ key: 'a', type: 'finish-to-start', lagDays: 1, constraint }]).replaceAll('"', '""')}"`)
+  })
+
+  test('suggests a mapping for each custom field of a JSON export', async () => {
+    const rows = [{ id: 'w1', title: 'W1', customFieldValues: { risk: 'high', labels: ['a'] } }]
+    const source = await readDeveloperImportSource('json', fileFrom('items.json', new TextEncoder().encode(JSON.stringify(rows))))
+
+    expect(source.headers).toEqual(['id', 'title', 'customFieldValues.risk', 'customFieldValues.labels'])
+    expect(suggestDeveloperImportMapping(source.headers).map((entry) => entry.targetField))
+      .toEqual(['importKey', 'title', 'customFieldValues.risk', 'customFieldValues.labels'])
   })
 
   test('suggests a mapping for JSON fields that first appear after many rows', async () => {

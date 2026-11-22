@@ -129,6 +129,28 @@ describe('Work Item import structure', () => {
     ])
   })
 
+  test('keeps the date constraint of a JSON dependency and rejects an invalid one', () => {
+    const preview = previewWorkItemImport('json', source([
+      { WBS: '1' },
+      { WBS: '2', Predecessors: [{ key: '1', type: 'FS', lagDays: 0, constraint: { anchor: 'finish', kind: 'not-after', date: '2026-12-01' } }] },
+      { WBS: '3', Predecessors: [{ key: '1', constraint: { anchor: 'finish', kind: 'before', date: '2026-12-01' } }] },
+    ]), [
+      ...baseMapping,
+      { sourceField: 'WBS', targetField: 'wbsNumber' },
+      { sourceField: 'Predecessors', targetField: 'dependencies' },
+    ])
+
+    expect(preview.links.filter((link) => link.kind === 'dependency')).toEqual([{
+      kind: 'dependency',
+      predecessorRow: 1,
+      successorRow: 2,
+      type: 'finish-to-start',
+      lagDays: 0,
+      constraint: { anchor: 'finish', kind: 'not-after', date: '2026-12-01' },
+    }])
+    expect(preview.errors.map((error) => [error.row, error.code])).toEqual([[3, 'ImportDependenciesInvalid']])
+  })
+
   test('reads a spaced dependency whose key ends like a type or lag', () => {
     const preview = previewWorkItemImport('json', source([
       { Key: 'task-ff' },

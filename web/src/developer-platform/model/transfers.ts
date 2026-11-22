@@ -2,6 +2,7 @@ import type {
   CanonicalWorkItem,
   CreateImportDryRunInput,
   ImportJob,
+  ScheduleDependencyConstraint,
   ScheduleDependencyType,
   TeamWorkItemHierarchyNode,
   WorkItemContributorAssignment,
@@ -121,8 +122,10 @@ export type DeveloperExportRow = {
     key: string
     /** Dependency type. */
     type: ScheduleDependencyType
-    /** Lag in working days. */
+    /** Signed lag in calendar days. */
     lagDays: number
+    /** Explicit date constraint on the successor, if any. */
+    constraint?: ScheduleDependencyConstraint
   }>
   /** Relations to other exported Work Items, without parent and child. */
   relations: Array<{
@@ -287,7 +290,12 @@ export function createDeveloperExportRows(
     if (!exportedKeys.has(predecessorKey) || !exportedKeys.has(successorKey)) continue
     dependenciesBySuccessor.set(successorKey, [
       ...(dependenciesBySuccessor.get(successorKey) ?? []),
-      { key: dependency.predecessor.workItemId, type: dependency.type, lagDays: dependency.lagDays },
+      {
+        key: dependency.predecessor.workItemId,
+        type: dependency.type,
+        lagDays: dependency.lagDays,
+        ...(dependency.constraint ? { constraint: dependency.constraint } : {}),
+      },
     ])
   }
   const outline = createMultiTeamWorkItemOutlineRows(workItems, context.hierarchies, new Set())
@@ -346,6 +354,8 @@ function readExportCell(row: DeveloperExportRow, column: (typeof exportColumns)[
     case 'parentId':
       return row.parentId ?? ''
     case 'dependencies':
+      // The compact form has no place for a date constraint, so such a cell is a JSON array.
+      if (row.dependencies.some((dependency) => dependency.constraint)) return JSON.stringify(row.dependencies)
       return row.dependencies.map((dependency) =>
         `${dependency.key} ${dependencyTypeAbbreviations[dependency.type]}${
           dependency.lagDays ? ` ${dependency.lagDays > 0 ? '+' : ''}${dependency.lagDays}` : ''}`).join('; ')

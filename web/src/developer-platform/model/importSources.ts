@@ -205,7 +205,14 @@ function readJsonHeaders(text: string) {
   // Every row is read, because an export leaves out empty optional fields such as dependencies.
   for (const row of rows) {
     if (typeof row !== 'object' || row === null || Array.isArray(row)) continue
-    for (const key of Object.keys(row)) headers.add(key)
+    for (const [key, value] of Object.entries(row)) {
+      // Custom field values are mapped one field at a time, as the CSV columns are.
+      if (key === 'customFieldValues' && typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        for (const fieldId of Object.keys(value)) headers.add(`customFieldValues.${fieldId}`)
+        continue
+      }
+      headers.add(key)
+    }
   }
   return [...headers]
 }

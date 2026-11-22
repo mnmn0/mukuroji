@@ -308,7 +308,7 @@ Mapping の `targetField` には Work Item の項目に加えて、行どうし�
 | `wbsNumber` | `1.2.3` など | WBS 番号。`parentKey` がない行は、最後の `.` より前（`1.2`）を WBS 番号に持つ行を親にする。`importKey` がない行の参照キーにもなる。 |
 | `outlineLevel` | 1〜100 の整数 | アウトラインの深さ（MS Project の OutlineLevel）。`parentKey` と `wbsNumber` がない行は、直前にある 1 段浅い行を親にする。空欄は 1。 |
 | `parentKey` | 他の行のキー | 親の行。`wbsNumber` と `outlineLevel` より優先する。 |
-| `dependencies` | `1.2FS+2d, 3SS-1`、`a1 SS +2` または `[{ "key", "type", "lagDays" }]` | この行の先行タスク。種類は `FS`・`SS`・`FF`・`SF`（省略は `FS`）、ラグは暦日。1 行 50 件まで。空白を挟まない形では種類を大文字で書き、項目全体が他の行のキーと一致すればそのキーとして読む。キーの末尾が種類やラグに見える場合は空白で区切る。 |
+| `dependencies` | `1.2FS+2d, 3SS-1`、`a1 SS +2` または `[{ "key", "type", "lagDays", "constraint" }]` | この行の先行タスク。JSON の `constraint`（省略可）は後続の日付制約 `{ "anchor": "start" \| "finish", "kind": "on" \| "not-before" \| "not-after", "date": "YYYY-MM-DD" }` で、取り込む日程が満たさないと dry-run の error になる。種類は `FS`・`SS`・`FF`・`SF`（省略は `FS`）、ラグは暦日。1 行 50 件まで。空白を挟まない形では種類を大文字で書き、項目全体が他の行のキーと一致すればそのキーとして読む。キーの末尾が種類やラグに見える場合は空白で区切る。 |
 | `relations` | `blocks:2, related:3` または `[{ "type", "key" }]` | 親子以外の relation。種類は `blocks`・`blockedBy`・`related`・`duplicate`。1 行 50 件まで。両方の行に書いた同じ relation は 1 つにまとめる。 |
 | `contributors` | `member:<userId> effort:2h; role:<jobRoleId>` または `contributorAssignments` と同じ JSON 配列 | Contributor。`;` か改行で区切り、`member:`・`role:`・`effort:`（分、または `2h`・`30m`）・`status:` を空白で並べる。接頭辞のない値は member。 |
 | `acceptanceCriteria` | 1 行 1 条件、または `[{ "text", "satisfied" }]` | 受け入れ条件。行頭の `[x]` は達成済み、`[ ]` と `- ` は取り除く。20 件まで。 |
@@ -338,17 +338,18 @@ Web の export file は CSV・JSON・Excel（`.xlsx`）・MS Project XML から�
 | `outlineLevel` | export に含まれる Work Item の中での階層の深さ（1 から） |
 | `parentId` | export に含まれる最も近い祖先の ID |
 | `workItemTypeId` | Work Item Type の ID |
-| `dependencies` | 先行 Work Item を `<id> FS +2` の形で `;` 区切り。JSON では `{ key, type, lagDays }` の配列 |
+| `dependencies` | 先行 Work Item を `<id> FS +2` の形で `;` 区切り。日付制約のある依存を含む cell は `{ key, type, lagDays, constraint }` の JSON 配列。JSON では同じ形の配列 |
 | `relations` | parent・child 以外の relation を `blocks:<id>` の形で `;` 区切り。JSON では `{ type, key }` の配列 |
 | `contributors` | `member:<id> role:<id> effort:<分> status:<状態>` を `;` 区切り。JSON では配列 |
 | `acceptanceCriteria` | 1 行に 1 条件、達成済みは `[x]`、未達成は `[ ]` で始まる。改行を含む条件や `[`・`-`・`*`・`・` で始まる条件があるときは `[{ "text", "satisfied" }]` の JSON 配列。JSON では `{ text, satisfied }` の配列 |
 
-依存と relation は、相手も同じ export に含まれるものだけを書く。Planning を読めない場合は export が失敗する（依存の列が空の file を import し直すと依存が失われるため）。どの形式も上の import の書き方に合わせているため、export した file をそのまま import すると同じ階層・依存・relation・Contributor・受け入れ条件で作り直せる（ID は新しくなる）。Excel の `dueDate` は日付 cell、ほかは文字列 cell で書く。MS Project XML は Task の `UID`・`OutlineNumber`（Team ごとの WBS ではなく、export 全体で階層から振り直した番号）・`OutlineLevel`・`PredecessorLink`（lag は暦日）と、責任者と Contributor の Assignment を書き、Resource の名前は user ID にする。API の export page 自体は追加の列を持たない。
+依存と relation は、相手も同じ export に含まれるものだけを書く。Planning を読めない場合は export が失敗する（依存の列が空の file を import し直すと依存が失われるため）。どの形式も上の import の書き方に合わせているため、export した file をそのまま import すると同じ階層・依存・relation・Contributor・受け入れ条件で作り直せる（ID は新しくなる）。Excel の `dueDate` は日付 cell、ほかは文字列 cell で書く。MS Project XML は Task の `UID`・`OutlineNumber`（Team ごとの WBS ではなく、export 全体で階層から振り直した番号）・`OutlineLevel`・`PredecessorLink`（lag は暦日）と、責任者と Contributor の Assignment を書き、Resource の名前は user ID にする。依存の日付制約は MS Project の link に対応する項目がないため、MS Project XML には書かない（CSV・JSON・Excel には残る）。API の export page 自体は追加の列を持たない。
 
 Web の import は CSV・JSON に加えて Excel（`.xlsx`）と MS Project XML を選べる。どちらも browser で JSON の row に変換してから同じ dry-run と import に送るため、Public API の format は CSV・JSON のままである。
 
 - Excel は最初の 20 行から header 行を探し、その sheet の表を読む。cell は文字列にして送り、日付の書式の cell は `YYYY-MM-DD` にする。file は 10 MB まで、ZIP64・暗号化した file は読まない。
 - MS Project XML は Task ごとに `UID`、`Name`、`WBS`、`OutlineLevel`、`Owner`（最初の Assignment の Resource の e-mail か名前）、`Contributors`（ほかの Assignment と作業時間）、`Predecessors`（`<UID> SS -1` の形、lag は作業日 8 時間か暦日で日数に直す）、`Schedule`、`Notes` の列を作る。`Schedule` は、マイルストーンの Task を終了日の milestone、開始日と終了日のある Task を期間（1 日の Task も含む）、終了日だけの Task を期日にする。依存には両側の開始日と終了日が要るため、期日だけの Task は依存に使えない。export は期日の Work Item を終了日だけで、milestone をマイルストーンとして書く。Resource はメールアドレスか表示名で Workspace member に照合する（下の「責任者と Contributor の書き方」）。document type 宣言のある XML は読まない。
+- JSON の file は全行から列を集め、`customFieldValues` の中は `customFieldValues.<fieldId>` の列として扱う。
 - file を選んだときに mapping が空なら、mukuroji の export の列名と MS Project の列名から mapping を提案する。親の列があるときは WBS 番号と階層の深さは提案しない。
 
 責任者と Contributor の書き方: import の `assigneeUserId` と Contributor の member は、user ID（member のメールアドレス）か Workspace member の表示名で書ける。メールアドレスは小文字にして user ID として扱う。`@` を含まない値は表示名として、大文字小文字・前後の空白・全角半角の違いを無視して active な member と照合し、1 人だけに一致したときにその user ID にする。一致しない場合は `ImportMemberUnknown`、2 人以上に一致する場合は `ImportMemberAmbiguous` を row error で返す。表示名を使う row があるときだけ Workspace の member 一覧を読む。

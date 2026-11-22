@@ -3,6 +3,8 @@ import {
   WORK_ITEM_ACCEPTANCE_CRITERION_TEXT_MAX_LENGTH,
   WORK_ITEM_CONTRIBUTOR_ASSIGNMENT_LIMIT,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
+  WORK_ITEM_SCHEDULE_MIN_YEAR,
+  type ScheduleDependencyConstraint,
   type ScheduleDependencyType,
   type WorkItemContributionStatus,
   type WorkItemContributorAssignmentCreateInput,
@@ -77,6 +79,8 @@ export type WorkItemImportDependencyReference = {
   type: ScheduleDependencyType
   /** Signed lag in calendar days. */
   lagDays: number
+  /** Explicit date constraint on the successor, from a JSON entry. */
+  constraint?: ScheduleDependencyConstraint
   /**
    * Whole compact entry; when it names a row, it is that row with `FS` and no lag, so a key such
    * as `task-12` is not read as `task` with a lag.
@@ -121,6 +125,8 @@ export type WorkItemImportLink =
     type: ScheduleDependencyType
     /** Signed lag in calendar days. */
     lagDays: number
+    /** Explicit date constraint on the successor, if any. */
+    constraint?: ScheduleDependencyConstraint
   }
   | {
     /** Adds one non-hierarchy relation between imported rows. */
@@ -294,7 +300,14 @@ export function resolveWorkItemImportStructure(
       }
       dependencyKeys.add(key)
       dependencyEdges.set(predecessorRow, [...(dependencyEdges.get(predecessorRow) ?? []), row.row])
-      links.push({ kind: 'dependency', predecessorRow, successorRow: row.row, type: dependency.type, lagDays: dependency.lagDays })
+      links.push({
+        kind: 'dependency',
+        predecessorRow,
+        successorRow: row.row,
+        type: dependency.type,
+        lagDays: dependency.lagDays,
+        ...(dependency.constraint ? { constraint: dependency.constraint } : {}),
+      })
     }
   }
   const dependencyCycleRows = findDependencyCycleRows(dependencyEdges)
@@ -448,7 +461,8 @@ export function readWorkItemImportContributors(
  *
  * Entries are separated by `,`, `;`, or new lines, and each is a row key followed by an optional
  * type (`FS`, `SS`, `FF`, `SF`; `FS` when left out) and lag (`+2`, `-1d`), as in `1.2FS+2d` or
- * `a1 SS -1`. A JSON array of `{ key, type, lagDays }` objects is also accepted.
+ * `a1 SS -1`. A JSON array of `{ key, type, lagDays, constraint? }` objects is also accepted;
+ * `constraint` is `{ anchor, kind, date }` as stored on a dependency.
  *
  * @param value - Transformed source value.
  * @param row - One-based data row number.
@@ -483,7 +497,12 @@ function readDependencies(
       }
       if (type === undefined) return fail('A dependency type is invalid.')
       if (!isLagDays(lagDays)) return fail('A dependency lag is invalid.')
-      references.push({ key: key.trim(), type, lagDays })
+      const writtenConstraint: unknown = Reflect.get(entry, 'constraint')
+      const constraint = writtenConstraint === undefined || writtenConstraint === null
+        ? undefined
+        : readDependencyConstraint(writtenConstraint)
+      if (constraint === null) return fail('A dependency constraint needs anchor start or finish, kind on, not-before, or not-after, and a date.')
+      references.push({ key: key.trim(), type, lagDays, ...(constraint ? { constraint } : {}) })
     }
   } else if (typeof value === 'string' || typeof value === 'number') {
     for (const entry of splitEntries(String(value), /[,;\n\r]+/u)) {
@@ -888,6 +907,26 @@ function readJsonArray(value: unknown): unknown[] | undefined {
  */
 function splitEntries(value: string, separator: RegExp) {
   return value.split(separator).map((entry) => entry.trim()).filter(Boolean)
+}
+
+/**
+ * Reads the explicit date constraint of a dependency entry.
+ *
+ * @param value - Candidate constraint.
+ * @returns The constraint, or null when it is not one the Planning store accepts.
+ */
+function readDependencyConstraint(value: unknown): ScheduleDependencyConstraint | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  const anchor: unknown = Reflect.get(value, 'anchor')
+  const kind: unknown = Reflect.get(value, 'kind')
+  const date: unknown = Reflect.get(value, 'date')
+  if (anchor !== 'start' && anchor !== 'finish') return null
+  if (kind !== 'on' && kind !== 'not-before' && kind !== 'not-after') return null
+  if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(date)) return null
+  const parsed = new Date(`${date}T00:00:00.000Z`)
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) return null
+  if (Number(date.slice(0, 4)) < WORK_ITEM_SCHEDULE_MIN_YEAR) return null
+  return { anchor, kind, date }
 }
 
 /**

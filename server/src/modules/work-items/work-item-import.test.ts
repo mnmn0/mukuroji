@@ -111,6 +111,7 @@ describe('durable Work Item import', () => {
     const createdIds = new Map<number, string>()
     let failDependency = true
     const dependencies = createWorkerDependencies(fixture, {
+      /** Returns the fixture validation with the links under test. */
       async validate(execution, source) {
         return {
           ...await base.validate(execution, source),
@@ -120,10 +121,12 @@ describe('durable Work Item import', () => {
           ],
         }
       },
+      /** Records each created row. */
       async createWorkItem(request) {
         steps.push(`row:${request.row}`)
         createdIds.set(request.row, request.workItemId)
       },
+      /** Records each applied link. */
       async applyLink(request) {
         if (request.link.kind === 'dependency' && failDependency) {
           failDependency = false
@@ -156,12 +159,14 @@ describe('durable Work Item import', () => {
     await stageWorkItemImport(createStageRequest(jobId), fixture)
     const base = createWorkerDependencies(fixture)
     const dependencies = createWorkerDependencies(fixture, {
+      /** Returns the fixture validation with the links under test. */
       async validate(execution, source) {
         return {
           ...await base.validate(execution, source),
           links: [{ kind: 'parent', childRow: 2, parentRow: 1 }],
         }
       },
+      /** Fails the link under test. */
       async applyLink() {
         throw new WorkItemImportError('ImportValidationRejected', 'Import source no longer passes current validation.')
       },
@@ -180,6 +185,7 @@ describe('durable Work Item import', () => {
     const base = createWorkerDependencies(fixture)
     const applied: string[] = []
     const dependencies = createWorkerDependencies(fixture, {
+      /** Returns the fixture validation with the links under test. */
       async validate(execution, source) {
         return {
           ...await base.validate(execution, source),
@@ -189,6 +195,7 @@ describe('durable Work Item import', () => {
           ],
         }
       },
+      /** Records each applied link. */
       async applyLink(request) {
         applied.push(request.link.kind)
         await fixture.executions.requestCancellation()
@@ -930,7 +937,9 @@ function createWorkerDependencies(
         ],
       }
     },
+    /** Accepts every row. */
     async createWorkItem() {},
+    /** Accepts every link. */
     async applyLink() {},
     now: fixture.now,
     createLeaseOwner() {
