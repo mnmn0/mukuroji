@@ -11,6 +11,7 @@ import {
   findProjectOverviewUpdateTarget,
   selectProjectOverviewDocuments,
   selectProjectOverviewSchedule,
+  summarizeProjectOverviewActionItems,
   summarizeProjectOverviewAgentRuns,
   summarizeProjectOverviewMembers,
   summarizeProjectOverviewRaid,
@@ -24,6 +25,42 @@ const meta = {
   title: 'Application/Projects/Project Overview',
   component: ProjectOverviewView,
   args: {
+    actionItems: summarizeProjectOverviewActionItems(
+      [
+        {
+          assigneeMemberKey: 'dev',
+          blockId: 'actions',
+          documentId: 'doc-roadmap',
+          documentTitle: '定例 2026-06-05',
+          dueDate: '2026-06-08',
+          itemId: 'item-1',
+          text: 'ベンダーに納期を再確認する',
+        },
+        {
+          assigneeMemberKey: 'lead',
+          blockId: 'actions',
+          documentId: 'doc-roadmap',
+          documentTitle: '定例 2026-06-05',
+          dueDate: '2026-06-12',
+          itemId: 'item-2',
+          text: '次フェーズの見積もりを共有する',
+          workItemId: 'team/core-team/issue/REF-12',
+        },
+        {
+          blockId: 'actions',
+          documentId: 'doc-design',
+          documentTitle: '設計レビュー',
+          itemId: 'item-3',
+          text: 'API の命名を決める',
+        },
+      ],
+      1,
+      [
+        { id: 'lead', email: 'lead@example.com', name: '佐藤 リード', role: 'manager', updatedAt: '2026-06-01T00:00:00.000Z', workspaceStatus: 'active' },
+        { id: 'dev', email: 'dev@example.com', name: '鈴木 開発', role: 'member', updatedAt: '2026-06-01T00:00:00.000Z', workspaceStatus: 'active' },
+      ],
+      '2026-06-10',
+    ),
     agentRuns: summarizeProjectOverviewAgentRuns(factoryBoardFixture, 'refero'),
     documents: selectProjectOverviewDocuments('refero', documentBacklinkFixtures, documentSummaryFixtures, false),
     isMembersLoading: false,
@@ -82,6 +119,8 @@ export const Desktop: Story = {
       .toHaveAttribute('href', '/documents?projectId=refero')
     await expect(canvas.getByText('主要部品のベンダー納期遅延')).toBeVisible()
     await expect(canvas.getByText('次フェーズで対応することで合意。')).toBeVisible()
+    await expect(canvas.getByText('ベンダーに納期を再確認する')).toBeVisible()
+    await expect(canvas.getByText('期限: 2026-06-08（期限切れ）')).toBeVisible()
   },
 }
 
@@ -96,6 +135,8 @@ export const Phone: Story = {
 /** Each failed read is shown in its own widget. */
 export const PartialFailure: Story = {
   args: {
+    actionItems: undefined,
+    actionItemsError: 'load',
     agentRuns: undefined,
     agentRunsError: 'load',
     documentsError: 'load',

@@ -22,6 +22,7 @@ import { ProgressBar } from '../../shared/ui/WorkbenchPrimitives'
 import type { ProjectDirectoryProject, ProjectDirectoryTeam } from '../api/directory'
 import {
   resolveProjectOverviewMemberName,
+  type ProjectOverviewActionItems,
   type ProjectOverviewAgentRuns,
   type ProjectOverviewDocuments,
   type ProjectOverviewMembers,
@@ -102,6 +103,14 @@ export type ProjectOverviewViewProps = {
   onRetryRaid?: () => void
   /** Reads the related Documents again after a failure. */
   onRetryDocuments?: () => void
+  /** Open checklist items in the Project's pages, absent while loading or after a failure. */
+  actionItems?: ProjectOverviewActionItems
+  /** Why the open action items could not be shown, absent when they loaded or are loading. */
+  actionItemsError?: ProjectOverviewDocumentsError
+  /** Whether the open action items are still loading. */
+  isActionItemsLoading?: boolean
+  /** Reads the open action items again after a failure. */
+  onRetryActionItems?: () => void
   /** Reads the Planning snapshot again after a failure. */
   onRetryPlanning?: () => void
   /** Reads the Project members again after a failure. */
@@ -152,10 +161,13 @@ const linkClassName =
  * @returns The pure Project overview.
  */
 export function ProjectOverviewView({
+  actionItems,
+  actionItemsError,
   agentRuns,
   agentRunsError,
   documents,
   documentsError,
+  isActionItemsLoading = false,
   isAgentRunsLoading = false,
   isDocumentsLoading = false,
   isRaidLoading = false,
@@ -166,6 +178,7 @@ export function ProjectOverviewView({
   locale,
   members,
   membersError,
+  onRetryActionItems,
   onRetryAgentRuns,
   onRetryDocuments,
   onRetryMembers,
@@ -317,6 +330,23 @@ export function ProjectOverviewView({
           <Link className={linkClassName} to={createDocumentPath(undefined, project.id)}>
             {t('projects.overview.documents.openDocuments')}
           </Link>
+        </OverviewSection>
+
+        <OverviewSection
+          meta={actionItems && actionItems.items.length > 0
+            ? t('projects.overview.actionItems.total')
+              .replace('{count}', String(actionItems.items.length + actionItems.hiddenCount))
+            : undefined}
+          testId="project-overview-action-items"
+          title={t('projects.overview.actionItems.title')}
+        >
+          <ActionItemsContent
+            actionItems={actionItems}
+            error={actionItemsError}
+            isLoading={isActionItemsLoading}
+            onRetry={onRetryActionItems}
+            t={t}
+          />
         </OverviewSection>
 
         {showAgentRuns ? (
@@ -978,6 +1008,83 @@ function DocumentsContent({ documents, error, isLoading, onRetry, t }: Documents
       {isLoading ? <StatusText>{t('projects.overview.loading')}</StatusText> : null}
       {documents.hiddenCount > 0 || documents.hasMore ? (
         <StatusText>{t('projects.overview.documents.more')}</StatusText>
+      ) : null}
+    </div>
+  )
+}
+
+/** Props for the open action items widget content. */
+type ActionItemsContentProps = {
+  /** Open action items, absent while loading or after a failure. */
+  actionItems?: ProjectOverviewActionItems
+  /** Why the action items could not be shown. */
+  error?: ProjectOverviewDocumentsError
+  /** Whether the action items are loading. */
+  isLoading: boolean
+  /** Reads the action items again after a failure. */
+  onRetry?: () => void
+  /** Resolves localized labels. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders the unchecked checklist items of the Project's pages with their
+ * owner, deadline, and the page they come from.
+ *
+ * @param props - Action items and load state.
+ * @returns Open action items widget content.
+ */
+function ActionItemsContent({ actionItems, error, isLoading, onRetry, t }: ActionItemsContentProps) {
+  if (error === 'denied') {
+    return <StatusText>{t('projects.overview.error.documentsDenied')}</StatusText>
+  }
+  if (error) {
+    return <StatusText isError onRetry={onRetry} t={t}>{t('projects.overview.error.actionItems')}</StatusText>
+  }
+  if (!actionItems) {
+    return isLoading ? <StatusText>{t('projects.overview.loading')}</StatusText> : null
+  }
+  return (
+    <div className="grid gap-2">
+      {actionItems.items.length === 0
+        ? <StatusText>{t('projects.overview.actionItems.empty')}</StatusText>
+        : (
+            <ul className="grid gap-2">
+              {actionItems.items.map((item) => (
+                <li className="grid min-w-0 gap-0.5 text-sm" key={`${item.documentId}/${item.blockId}/${item.itemId}`}>
+                  <span className="min-w-0 break-words font-semibold text-[var(--workbench-text)]">{item.text}</span>
+                  <span className="flex min-w-0 flex-wrap gap-x-3 gap-y-0.5 text-xs font-medium text-[var(--workbench-muted)]">
+                    <span>
+                      {item.ownerLabel
+                        ? t('projects.overview.actionItems.owner').replace('{name}', item.ownerLabel)
+                        : t('projects.overview.actionItems.noOwner')}
+                    </span>
+                    {item.dueDate ? (
+                      <span className={item.overdue ? 'font-semibold text-[var(--workbench-danger)]' : undefined}>
+                        {t(item.overdue ? 'projects.overview.actionItems.dueOverdue' : 'projects.overview.actionItems.due')
+                          .replace('{date}', item.dueDate)}
+                      </span>
+                    ) : null}
+                    <Link
+                      className="min-w-0 truncate underline-offset-4 hover:underline focus-visible:underline"
+                      to={createDocumentPath(item.documentId)}
+                    >
+                      {item.documentTitle}
+                    </Link>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+      {actionItems.hiddenCount > 0 ? (
+        <StatusText>
+          {t('projects.overview.actionItems.more').replace('{count}', String(actionItems.hiddenCount))}
+        </StatusText>
+      ) : null}
+      {actionItems.unreadDocumentCount > 0 ? (
+        <StatusText>
+          {t('projects.overview.actionItems.partial').replace('{count}', String(actionItems.unreadDocumentCount))}
+        </StatusText>
       ) : null}
     </div>
   )
