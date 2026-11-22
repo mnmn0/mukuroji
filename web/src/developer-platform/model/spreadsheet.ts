@@ -233,7 +233,9 @@ function readWorksheetRows(
   uses1904: boolean,
 ) {
   const rows: SpreadsheetCell[][] = []
-  let cellCount = 0
+  // Counts every slot the rows allocate, including the empty ones before a far-right cell or a
+  // far-down row, so a small sparse sheet cannot make the browser allocate millions of entries.
+  let allocatedSlots = 0
   let nextRow = 1
   for (const row of childElements(childElement(worksheet, 'sheetData') ?? emptyElement(), 'row')) {
     const rowNumber = readPositiveInteger(row.attributes.r) ?? nextRow
@@ -244,11 +246,14 @@ function readWorksheetRows(
     for (const cell of childElements(row, 'c')) {
       const column = readColumnIndex(cell.attributes.r) ?? nextColumn
       nextColumn = column + 1
-      cellCount += 1
-      if (cellCount > maxCells || column > 16_383) throw new SpreadsheetError('The worksheet has too many cells.')
+      if (column > 16_383) throw new SpreadsheetError('The worksheet has too many cells.')
+      allocatedSlots += Math.max(1, column + 1 - cells.length)
+      if (allocatedSlots > maxCells) throw new SpreadsheetError('The worksheet has too many cells.')
       while (cells.length < column) cells.push(null)
       cells[column] = readCellValue(cell, sharedStrings, dateStyles, uses1904)
     }
+    allocatedSlots += Math.max(0, rowNumber - 1 - rows.length)
+    if (allocatedSlots > maxCells) throw new SpreadsheetError('The worksheet has too many cells.')
     while (rows.length < rowNumber - 1) rows.push([])
     rows[rowNumber - 1] = cells
   }

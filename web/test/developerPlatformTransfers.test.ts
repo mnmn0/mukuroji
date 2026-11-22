@@ -135,6 +135,20 @@ describe('Developer Platform ZIP and XML readers', () => {
 })
 
 describe('Developer Platform workbook import', () => {
+  test('rejects a sparse worksheet whose padded rows would exceed the cell limit', async () => {
+    const encoder = new TextEncoder()
+    // One far-right cell per row is few cells, but every row would be padded to 16,384 entries.
+    const sheetRows = Array.from({ length: 200 }, (_, index) =>
+      `<row r="${index + 1}"><c r="XFD${index + 1}" t="inlineStr"><is><t>x</t></is></c></row>`).join('')
+    const workbook = createZipArchive([
+      { name: 'xl/workbook.xml', data: encoder.encode('<workbook><sheets><sheet name="S" r:id="rId1"/></sheets></workbook>') },
+      { name: 'xl/_rels/workbook.xml.rels', data: encoder.encode('<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>') },
+      { name: 'xl/worksheets/sheet1.xml', data: encoder.encode(`<worksheet><sheetData>${sheetRows}</sheetData></worksheet>`) },
+    ])
+
+    await expect(readSpreadsheetWorkbook(workbook)).rejects.toThrow('too many cells')
+  })
+
   test('finds the header row and reads shared strings, numbers, booleans, and dates of a saved workbook', async () => {
     const table = findSpreadsheetTable(await readSpreadsheetWorkbook(Uint8Array.from(atob(openpyxlWorkbook), (character) => character.charCodeAt(0))))
 

@@ -250,6 +250,11 @@ export function ImportExportSection({
                           {option.label}
                         </option>
                       ))}
+                      {/* A custom field target such as one suggested from a file is not a fixed option. */}
+                      {mapping.targetField &&
+                      !labels.importFieldOptions.some((option) => option.value === mapping.targetField) ? (
+                        <option value={mapping.targetField}>{mapping.targetField}</option>
+                      ) : null}
                     </select>
                   </label>
                   <button
