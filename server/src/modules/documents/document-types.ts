@@ -603,6 +603,8 @@ export type DocumentBacklink = {
   documentId: string
   /** Backlink source Document title です。 */
   documentTitle: string
+  /** Backlink source Document の種類です。 */
+  documentKind: DocumentKind
   /** Backlink を作成した relation です。 */
   relation: DocumentRelation
 }

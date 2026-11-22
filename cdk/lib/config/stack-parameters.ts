@@ -139,6 +139,11 @@ export interface StackParameters {
   readonly aiAssistanceAnyProviderConfigured: cdk.CfnCondition;
   /** Anonymous request submission limit per capability and hour. */
   readonly requestRateLimitPerHour: cdk.CfnParameter;
+  /**
+   * Deployment default notification reminder days, as one JSON object that the notification
+   * schedule and the API both read; blank keeps the built-in days.
+   */
+  readonly notificationReminderDefaultDays: cdk.CfnParameter;
   /** Web Push VAPID public key; empty disables push subscriptions. */
   readonly webPushVapidPublicKey: cdk.CfnParameter;
   /** Verified SES sender address for notification Email; empty disables Email delivery. */
@@ -580,6 +585,16 @@ export function buildStackParameters(
     maxValue: 10_000,
     description: 'Maximum anonymous request submissions accepted per capability and hour.',
   });
+  const notificationReminderDefaultDays = new cdk.CfnParameter(stack, 'NotificationReminderDefaultDays', {
+    type: 'String',
+    default: '',
+    maxLength: 512,
+    // Blank, or one flat JSON object; the server checks the fields and day counts at startup.
+    allowedPattern: '^(?:|\\{[^{}]*\\})$',
+    description:
+      'Default notification reminder days as a JSON object, e.g. {"dueSoonDays":5,"timesheetReminderDays":14}; '
+      + 'blank keeps 3 / 7 / 7 / 7 / 7 days. Teams and members override it.',
+  });
   const webPushVapidPublicKey = new cdk.CfnParameter(stack, 'WebPushVapidPublicKey', {
     type: 'String',
     default: '',
@@ -882,6 +897,7 @@ export function buildStackParameters(
     aiExternalProviders,
     aiAssistanceAnyProviderConfigured,
     requestRateLimitPerHour,
+    notificationReminderDefaultDays,
     webPushVapidPublicKey,
     notificationEmailSender,
     monthlyCostBudgetUsd,

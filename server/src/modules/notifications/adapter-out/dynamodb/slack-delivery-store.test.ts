@@ -53,6 +53,32 @@ describe('Slack DynamoDB delivery queue', () => {
         .toEqual({ deliveries: [], invalidCount: 1 })
     }
   })
+  test('keeps a timesheet reminder\'s entries and due instant for the delivery-time recheck', async () => {
+    const timesheet = { ...row, timeEntryIds: ['entry-1', 'entry-2'], timesheetDueBefore: '2026-09-19T12:00:00.000Z' }
+    expect((await fixture(timesheet).store.listDue(shard, now, 2)).deliveries[0])
+      .toMatchObject({ timeEntryIds: ['entry-1', 'entry-2'], timesheetDueBefore: '2026-09-19T12:00:00.000Z' })
+    const plain = (await fixture().store.listDue(shard, now, 2)).deliveries[0]
+    expect(plain?.timeEntryIds).toBeUndefined()
+    expect(plain?.timesheetDueBefore).toBeUndefined()
+    for (const timeEntryIds of [[], 'entry-1', [''], [1], null]) {
+      expect(await fixture({ ...timesheet, timeEntryIds }).store.listDue(shard, now, 2))
+        .toEqual({ deliveries: [], invalidCount: 1 })
+    }
+    for (const timesheetDueBefore of ['last week', 1, null]) {
+      expect(await fixture({ ...timesheet, timesheetDueBefore }).store.listDue(shard, now, 2))
+        .toEqual({ deliveries: [], invalidCount: 1 })
+    }
+  })
+  test('keeps a weekly report reminder\'s week for the delivery-time recheck', async () => {
+    const weekly = { ...row, weeklyReportAuthorMemberKey: 'member@example.test', weeklyReportWeekStart: '2026-09-21' }
+    expect((await fixture(weekly).store.listDue(shard, now, 2)).deliveries[0])
+      .toMatchObject({ weeklyReportAuthorMemberKey: 'member@example.test', weeklyReportWeekStart: '2026-09-21' })
+    expect((await fixture().store.listDue(shard, now, 2)).deliveries[0]?.weeklyReportWeekStart).toBeUndefined()
+    for (const weeklyReportWeekStart of ['', 'last week', '2026-09-21T00:00:00.000Z', 20260921, null]) {
+      expect(await fixture({ ...weekly, weeklyReportWeekStart }).store.listDue(shard, now, 2))
+        .toEqual({ deliveries: [], invalidCount: 1 })
+    }
+  })
   test('distinguishes absent legacy preferences from malformed persisted preferences', async () => {
     const delivery = (await fixture().store.listDue(shard, now, 2)).deliveries[0]
     if (!delivery) throw new Error('Expected delivery')

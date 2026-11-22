@@ -119,6 +119,12 @@ test('fresh deployment requires explicit workspace and runtime secrets parameter
     MinValue: 1,
     MaxValue: 10000,
   }));
+  expect(parameters.NotificationReminderDefaultDays).toEqual(expect.objectContaining({
+    Type: 'String',
+    Default: '',
+    MaxLength: 512,
+    AllowedPattern: '^(?:|\\{[^{}]*\\})$',
+  }));
   for (const secretParameterName of [
     'EnterpriseIdentityTokenHashSecret',
     'RequestEmailWebhookSecret',

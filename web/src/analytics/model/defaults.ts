@@ -21,6 +21,7 @@ const metricLabelKeys: Readonly<Record<AnalyticsMetricKey, MessageKey>> = {
   sla: 'analytics.metric.sla',
   'remaining-scope': 'analytics.metric.remainingScope',
   'cumulative-flow': 'analytics.metric.cumulativeFlow',
+  'milestone-trend': 'analytics.metric.milestoneTrend',
 }
 
 /**

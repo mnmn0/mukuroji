@@ -4042,6 +4042,60 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #341: サイドバーで Project を開くと概要を既定表示し、Agent Run のレーン件数を表示する', async ({ page }) => {
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({
+        json: {
+          teamId: 'core-team',
+          projectId: 'refero',
+          entries: [
+            {
+              id: 'risk-vendor',
+              kind: 'risk',
+              title: '主要部品のベンダー納期遅延',
+              probability: 4,
+              impact: 5,
+              status: 'open',
+              revision: 1,
+              createdAt: '2026-06-01T00:00:00.000Z',
+              updatedAt: '2026-06-01T00:00:00.000Z',
+            },
+            {
+              id: 'cr-export',
+              kind: 'change-request',
+              title: 'CSV 出力を範囲に追加',
+              impact: 3,
+              status: 'open',
+              revision: 1,
+              createdAt: '2026-06-02T00:00:00.000Z',
+              updatedAt: '2026-06-02T00:00:00.000Z',
+            },
+          ],
+          viewer: { canEdit: true },
+        },
+      })
+    })
+    await page.route(/.*\/api\/document-backlinks\?.*targetType=project.*$/, async (route) => {
+      await route.fulfill({
+        json: {
+          backlinks: [
+            {
+              documentId: 'refero-brief',
+              documentTitle: 'Refero プロジェクト概要書',
+              relation: {
+                id: 'relation-refero-brief',
+                source: { kind: 'document' },
+                target: { kind: 'project', projectId: 'refero' },
+                createdByUserId: 'demo@example.com',
+                createdAt: '2026-06-01T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      })
+    })
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
     await page.goto('/home')
 
     await page.getByLabel('メインサイドバー').getByRole('button', { name: 'Refero', exact: true }).click()
@@ -4054,6 +4108,13 @@ test.describe('authenticated task page', () => {
     await expect(agentRuns.getByTestId('project-overview-agent-lane-failed')).toContainText('1')
     await expect(agentRuns.getByRole('link', { name: 'Factory board を開く' }))
       .toHaveAttribute('href', '/teams/core-team/factory')
+
+    const raid = page.getByTestId('project-overview-raid')
+    await expect(raid.getByTestId('project-overview-raid-count-risks')).toContainText('1')
+    await expect(raid.getByTestId('project-overview-raid-count-pending-decisions')).toContainText('1')
+    await expect(raid.getByTestId('project-overview-raid-risk-vendor')).toContainText('重大')
+    await expect(page.getByTestId('project-overview-documents').getByRole('link', { name: 'Refero プロジェクト概要書' }))
+      .toHaveAttribute('href', '/documents/refero-brief')
 
     await page.getByRole('link', { name: 'Work Item 一覧を開く' }).click()
     await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
@@ -5126,6 +5187,24 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-row-print-209')).toBeVisible()
     await expect(printButtons).toBeHidden()
     await expect(page.getByRole('tab', { name: '期限順', exact: true })).toBeHidden()
+    // The row action column is left off the paper, so the last printed column ends at the
+    // table's right edge instead of leaving the action column's width blank.
+    const printedEdges = await page.evaluate(() => {
+      const table = document.querySelector('[data-print-root="task-table"] table')
+      const headers = Array.from(table?.querySelectorAll('thead th') ?? [])
+      const printedHeaders = headers.filter((header) => header.getClientRects().length > 0)
+      return {
+        lastPrintedHeaderRight: printedHeaders.at(-1)?.getBoundingClientRect().right ?? 0,
+        printedHeaderCount: printedHeaders.length,
+        renderedColumnCount: Array.from(table?.querySelectorAll('col') ?? [])
+          .filter((column) => getComputedStyle(column).display !== 'none').length,
+        tableRight: table?.getBoundingClientRect().right ?? 0,
+        totalHeaderCount: headers.length,
+      }
+    })
+    expect(printedEdges.printedHeaderCount).toBe(printedEdges.totalHeaderCount - 1)
+    expect(printedEdges.renderedColumnCount).toBe(printedEdges.printedHeaderCount)
+    expect(Math.abs(printedEdges.tableRight - printedEdges.lastPrintedHeaderRight)).toBeLessThan(2)
 
     await page.evaluate(() => window.dispatchEvent(new Event('afterprint')))
     await expect(page.locator('html')).not.toHaveAttribute('data-print-target', /.*/)
@@ -10303,6 +10382,197 @@ test.describe('authenticated task page', () => {
     await expect(page).toHaveURL(/wireframe/)
   })
 
+  test('マイタスクのテーブルで期限を事前確認してから変え、優先度をその場で変える', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: {
+        'core-team': [
+          createStoredTeamIssue({ id: 'my-due-task', title: '期限を変える担当タスク' }),
+        ],
+      },
+    })
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+    await page.goto('/my-tasks')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByTestId('my-tasks-view-table').click()
+
+    const dueDateField = page.getByTestId('my-tasks-table-due-edit-refero-my-due-task')
+    await expect(dueDateField).toHaveText('2026-06-22')
+    await dueDateField.click()
+    const dueDateInput = page.getByTestId('my-tasks-table-due-edit-refero-my-due-task-input')
+    await dueDateInput.fill('2026-06-25')
+    await dueDateInput.press('Enter')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(preview).toContainText('期限を変える担当タスク')
+    await expect(preview).toContainText('2026-06-25')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    expect(requestCounts.scheduleConfirms).toBe(0)
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(preview).toHaveCount(0)
+    await expect(dueDateField).toHaveText('2026-06-25')
+    await expect(dueDateField).toBeFocused()
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+
+    // Cancelling a preview leaves the due date as it was.
+    await dueDateField.click()
+    await dueDateInput.fill('2026-06-30')
+    await dueDateInput.press('Enter')
+    await preview.getByRole('button', { name: 'キャンセル', exact: true }).click()
+    await expect(preview).toHaveCount(0)
+    await expect(dueDateField).toHaveText('2026-06-25')
+    expect(requestCounts.scheduleConfirms).toBe(1)
+
+    const updatesBefore = requestCounts.issueUpdates
+    const priorityField = page.getByTestId('my-tasks-table-priority-edit-refero-my-due-task')
+    await expect(priorityField).toHaveText('中')
+    await priorityField.click()
+    await page.getByTestId('my-tasks-table-priority-edit-refero-my-due-task-input').selectOption('high')
+    await expect(priorityField).toHaveText('高')
+    await expect.poll(() => requestCounts.issueUpdates).toBe(updatesBefore + 1)
+  })
+
+  test('マイタスクから自分が担当する Work Item を続けて追加できる', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [] },
+    })
+    await mockCurrentUser(page, 'sato@example.com', '佐藤 花子')
+    await page.goto('/my-tasks')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByTestId('my-tasks-view-table').click()
+
+    const form = page.getByTestId('my-tasks-quick-create')
+    const title = form.getByRole('textbox', { name: 'タスク名' })
+    await title.fill('クイック追加したタスク')
+    await form.getByLabel('期限').fill('2026-06-26')
+    await title.press('Enter')
+
+    await expect.poll(() => requestCounts.issueCreates).toBe(1)
+    await expect(page.getByTestId('my-tasks-quick-create-feedback')).toContainText('クイック追加したタスク')
+    await expect(page.getByTestId('my-tasks-table')).toContainText('クイック追加したタスク')
+    await expect(title).toHaveValue('')
+    await expect(title).toBeFocused()
+
+    // The title keeps focus, so the next Work Item can be typed straight away.
+    await page.keyboard.type('続けて追加したタスク')
+    await page.keyboard.press('Enter')
+    await expect.poll(() => requestCounts.issueCreates).toBe(2)
+    await expect(page.getByTestId('my-tasks-table')).toContainText('続けて追加したタスク')
+  })
+
+  test('Team の Work Item をカレンダーのキーボード操作で日程変更できる', async ({ page }) => {
+    await setScheduleFixtureClock(page)
+    await page.goto('/teams/core-team/issues')
+    const requestCounts = getMockRequestCounts(page)
+    await page.getByRole('button', { name: 'カレンダー', exact: true }).click()
+
+    const card = page.getByTestId('task-calendar-item-wireframe')
+    await expect(page.getByTestId('task-calendar-day-2026-06-01').getByTestId('task-calendar-item-wireframe'))
+      .toBeVisible()
+    await card.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(preview).toContainText('2026-06-02')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(page.getByTestId('task-calendar-day-2026-06-02').getByTestId('task-calendar-item-wireframe'))
+      .toBeVisible()
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
+  })
+
+  test('Team の Work Item をテーブルで複数選んで一括アーカイブする', async ({ page }) => {
+    const requestedActions: unknown[] = []
+    const requestedItemIds: string[][] = []
+    /** Reads the Work Item IDs and action of one bulk request body. */
+    const readBulkRequest = (body: unknown) => {
+      if (typeof body !== 'object' || body === null || !('items' in body) || !Array.isArray(body.items) ||
+          !('action' in body)) {
+        throw new Error('Bulk request did not contain items and an action.')
+      }
+      const ids = body.items.flatMap((item: unknown) =>
+        typeof item === 'object' && item !== null && 'workItemId' in item && typeof item.workItemId === 'string'
+          ? [item.workItemId]
+          : []
+      )
+      return { action: body.action, ids }
+    }
+    await page.route(/\/api\/bulk-operations\/preview$/u, async (route) => {
+      const { action, ids } = readBulkRequest(route.request().postDataJSON())
+      requestedActions.push(action)
+      requestedItemIds.push(ids)
+      await route.fulfill({
+        json: {
+          action,
+          canApply: true,
+          items: ids.map((workItemId) => ({
+            expectedRevision: 1,
+            retryable: false,
+            status: 'ready',
+            teamId: 'core-team',
+            undoable: false,
+            workItemId,
+          })),
+          operationToken: 'team-bulk-preview',
+        },
+      })
+    })
+    await page.route(/\/api\/bulk-operations$/u, async (route) => {
+      const { action, ids } = readBulkRequest(route.request().postDataJSON())
+      requestedActions.push(action)
+      requestedItemIds.push(ids)
+      await route.fulfill({
+        json: {
+          action,
+          actorMemberKey: 'demo@example.com',
+          createdAt: '2026-06-08T00:00:00.000Z',
+          id: 'team-bulk-operation',
+          items: ids.map((workItemId) => ({
+            expectedRevision: 1,
+            resultingRevision: 2,
+            retryable: false,
+            status: 'succeeded',
+            teamId: 'core-team',
+            undoable: true,
+            workItemId,
+          })),
+          revision: 1,
+          schemaVersion: AUTOMATION_SCHEMA_VERSION,
+          status: 'succeeded',
+          updatedAt: '2026-06-08T00:00:01.000Z',
+          workspaceId: 'workspace-demo',
+        },
+      })
+    })
+
+    await page.goto('/teams/core-team/issues')
+    const wireframe = page.getByTestId('issue-row-select-wireframe')
+    const brand = page.getByTestId('issue-row-select-brand-guideline')
+    await wireframe.check()
+    await brand.check()
+    await expect(page.getByText('2件を選択中')).toBeVisible()
+
+    await page.getByRole('button', { name: '一括アーカイブ', exact: true }).click()
+    await page.getByRole('button', { name: '変更内容を確認', exact: true }).click()
+    const preview = page.getByRole('region', { name: '一括操作の事前確認' })
+    await expect(preview).toBeVisible()
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect.poll(() => requestedItemIds.length).toBe(2)
+    expect(requestedItemIds.map((ids) => [...ids].sort())).toEqual([
+      ['brand-guideline', 'wireframe'],
+      ['brand-guideline', 'wireframe'],
+    ])
+    expect(requestedActions).toEqual([
+      { archived: true, type: 'archive' },
+      { archived: true, type: 'archive' },
+    ])
+    await expect(page.getByRole('region', { name: '一括操作の実行結果' })).toBeVisible()
+    await expect(page.getByText('2件を選択中')).toHaveCount(0)
+  })
+
   test('Team configuration 取得失敗中も canonical My Task を明示的な列へ保持する', async ({
     page,
   }) => {
@@ -12381,11 +12651,12 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/reports')
 
+    // Team groups show the directory's Team names, not the API labels.
     await expect(page.getByTestId('analytics-widget-chart-cycle-time')).toContainText(
-      'Core team',
+      'コアチーム',
     )
     await expect(page.getByTestId('analytics-widget-chart-cycle-time')).toContainText(
-      'Design team',
+      'デザインチーム',
     )
     await expect(page.getByTestId('analytics-widget-table-overdue')).toContainText(
       'Harden billing webhook retries',

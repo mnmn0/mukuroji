@@ -11,9 +11,17 @@ import type {
   DocumentRelation,
   DocumentTableBlock,
 } from '@mukuroji/contracts'
+import { DocumentLinkedText } from './DocumentLinkedText'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { DocumentRecord } from '../api'
+import {
+  isChecklistItemOverdue,
+  resolveChecklistAssigneeLabel,
+  updateChecklistItemOwnership,
+  type ChecklistAssigneeOption,
+} from '../model/checklistItems'
 import { findChecklistItemWorkItemId } from '../model/checklistWorkItems'
+import { formatLocalCalendarDate } from '../model/builtInTemplates'
 import {
   createDocumentBlock,
   resolveSafeEmbedUrl,
@@ -38,6 +46,16 @@ export type ChecklistWorkItemControls = {
   onCreate?: (blockId: string, item: DocumentChecklistItem) => void
   /** Opens the Work Item linked to an item; omission hides the link. */
   onOpen?: (workItemId: string) => void
+  /**
+   * Members offered as item owners, also used to show owner names; omission
+   * hides the owner and deadline fields in the editor.
+   */
+  assignees?: readonly ChecklistAssigneeOption[]
+  /**
+   * Reads the owner candidates again; present only after a member read
+   * failed, so some owners may be missing from the list.
+   */
+  onRetryAssignees?: () => void
 }
 
 /**
@@ -413,7 +431,11 @@ function BlockBody({
         block={block}
         checklistWorkItems={
           checklistWorkItems
-            ? { onOpen: checklistWorkItems.onOpen, relations: checklistWorkItems.relations }
+            ? {
+                assignees: checklistWorkItems.assignees,
+                onOpen: checklistWorkItems.onOpen,
+                relations: checklistWorkItems.relations,
+              }
             : undefined
         }
         t={t}
@@ -673,70 +695,102 @@ function ChecklistBlockEditor({
   onChange: (block: DocumentBlock) => void
   t: (key: MessageKey) => string
 }) {
+  const assignees = checklistWorkItems?.assignees
+  const today = formatLocalCalendarDate(new Date())
+  const onRetryAssignees = checklistWorkItems?.onRetryAssignees
   return (
     <div className="grid gap-2">
-      {block.items.map((item, index) => (
-        <label
-          className="flex min-h-9 items-start gap-3 rounded-md px-2 py-1.5 hover:bg-[var(--workbench-surface-muted)]"
-          key={item.id}
+      {assignees && onRetryAssignees ? (
+        <div
+          className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs font-semibold text-fg-red-800"
+          role="alert"
         >
-          <input
-            checked={item.checked}
-            className="mt-1 h-4 w-4 accent-[var(--workbench-primary)]"
-            onChange={(event) =>
-              onChange({
-                ...block,
-                items: block.items.map((candidate) =>
-                  candidate.id === item.id
-                    ? { ...candidate, checked: event.target.checked }
-                    : candidate,
-                ),
-              })
-            }
-            type="checkbox"
-          />
-          <input
-            aria-label={`${t('documents.block.checklist')} ${index + 1}`}
-            className={`min-w-0 flex-1 border-0 bg-transparent text-sm font-medium outline-none ${
-              item.checked
-                ? 'text-[var(--workbench-muted)] line-through'
-                : 'text-[var(--workbench-text)]'
-            }`}
-            onChange={(event) =>
-              onChange({
-                ...block,
-                items: block.items.map((candidate) =>
-                  candidate.id === item.id
-                    ? { ...candidate, text: event.target.value }
-                    : candidate,
-                ),
-              })
-            }
-            placeholder={t('documents.editor.checklistPlaceholder')}
-            value={item.text}
-          />
-          <ChecklistItemWorkItemAction
-            blockId={block.id}
-            controls={checklistWorkItems}
-            item={item}
-            t={t}
-          />
+          <span>{t('documents.checklistWorkItem.assigneesError')}</span>
           <button
-            aria-label={t('documents.editor.deleteChecklistItem')}
-            className="grid h-7 w-7 place-items-center rounded text-[var(--workbench-muted)] hover:bg-surface hover:text-[var(--workbench-danger)]"
-            onClick={() =>
-              onChange({
-                ...block,
-                items: block.items.filter(
-                  (candidate) => candidate.id !== item.id,
-                ),
-              })
-            }
+            className="workbench-button-secondary min-h-8 px-3 text-xs"
+            onClick={onRetryAssignees}
             type="button"
           >
-            ×
+            {t('documents.checklistWorkItem.retryAssignees')}
           </button>
-        </label>
+        </div>
+      ) : null}
+      {block.items.map((item, index) => (
+        <div
+          className="grid gap-1 rounded-md px-2 py-1.5 hover:bg-[var(--workbench-surface-muted)]"
+          key={item.id}
+        >
+          <label className="flex min-h-6 items-start gap-3">
+            <input
+              checked={item.checked}
+              className="mt-1 h-4 w-4 accent-[var(--workbench-primary)]"
+              onChange={(event) =>
+                onChange({
+                  ...block,
+                  items: block.items.map((candidate) =>
+                    candidate.id === item.id
+                      ? { ...candidate, checked: event.target.checked }
+                      : candidate,
+                  ),
+                })
+              }
+              type="checkbox"
+            />
+            <input
+              aria-label={`${t('documents.block.checklist')} ${index + 1}`}
+              className={`min-w-0 flex-1 border-0 bg-transparent text-sm font-medium outline-none ${
+                item.checked
+                  ? 'text-[var(--workbench-muted)] line-through'
+                  : 'text-[var(--workbench-text)]'
+              }`}
+              onChange={(event) =>
+                onChange({
+                  ...block,
+                  items: block.items.map((candidate) =>
+                    candidate.id === item.id
+                      ? { ...candidate, text: event.target.value }
+                      : candidate,
+                  ),
+                })
+              }
+              placeholder={t('documents.editor.checklistPlaceholder')}
+              value={item.text}
+            />
+            <ChecklistItemWorkItemAction
+              blockId={block.id}
+              controls={checklistWorkItems}
+              item={item}
+              t={t}
+            />
+            <button
+              aria-label={t('documents.editor.deleteChecklistItem')}
+              className="grid h-7 w-7 place-items-center rounded text-[var(--workbench-muted)] hover:bg-surface hover:text-[var(--workbench-danger)]"
+              onClick={() =>
+                onChange({
+                  ...block,
+                  items: block.items.filter(
+                    (candidate) => candidate.id !== item.id,
+                  ),
+                })
+              }
+              type="button"
+            >
+              ×
+            </button>
+          </label>
+          {assignees ? (
+            <ChecklistItemOwnershipFields
+              assignees={assignees}
+              index={index}
+              item={item}
+              overdue={isChecklistItemOverdue(item, today)}
+              t={t}
+              onChange={(change) =>
+                onChange(updateChecklistItemOwnership(block, item.id, change))
+              }
+            />
+          ) : null}
+        </div>
       ))}
       <button
         className="justify-self-start rounded-md px-2 py-1.5 text-xs font-semibold text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary-text)]"
@@ -754,6 +808,124 @@ function ChecklistBlockEditor({
         + {t('documents.editor.addChecklistItem')}
       </button>
     </div>
+  )
+}
+
+/**
+ * Owner and deadline pickers shown under one editable checklist item.
+ *
+ * @param props - Offered owners, item, position, overdue state, and change callback.
+ * @returns The two compact fields.
+ */
+function ChecklistItemOwnershipFields({
+  assignees,
+  index,
+  item,
+  onChange,
+  overdue,
+  t,
+}: {
+  /** Members offered as owners. */
+  assignees: readonly ChecklistAssigneeOption[]
+  /** Zero-based item position, used in the accessible names. */
+  index: number
+  /** Item whose owner and deadline are edited. */
+  item: DocumentChecklistItem
+  /** Saves an owner or deadline change. */
+  onChange: (change: { assigneeMemberKey?: string, dueDate?: string }) => void
+  /** Whether the open item is past its deadline. */
+  overdue: boolean
+  /** Resolves display text. */
+  t: (key: MessageKey) => string
+}) {
+  const position = String(index + 1)
+  // A saved owner who is no longer offered stays selectable, so editing the
+  // deadline never clears the owner as a side effect.
+  const hasUnlistedAssignee =
+    item.assigneeMemberKey !== undefined &&
+    !assignees.some((option) => option.id === item.assigneeMemberKey)
+  const fieldClassName =
+    'min-h-7 rounded border border-[var(--workbench-border)] bg-surface px-2 text-xs font-medium text-[var(--workbench-text)]'
+  return (
+    <div className="flex flex-wrap items-center gap-2 pl-7">
+      <select
+        aria-label={t('documents.checklistItem.assigneeLabel').replace('{position}', position)}
+        className={`${fieldClassName} max-w-[220px]`}
+        onChange={(event) => onChange({ assigneeMemberKey: event.target.value })}
+        value={item.assigneeMemberKey ?? ''}
+      >
+        <option value="">{t('documents.checklistItem.noAssignee')}</option>
+        {hasUnlistedAssignee ? (
+          <option value={item.assigneeMemberKey}>{item.assigneeMemberKey}</option>
+        ) : null}
+        {assignees.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+      <input
+        aria-label={t('documents.checklistItem.dueDateLabel').replace('{position}', position)}
+        className={`${fieldClassName} ${
+          overdue ? 'border-[var(--workbench-danger)] text-[var(--workbench-danger)]' : ''
+        }`}
+        max="9999-12-31"
+        onChange={(event) => {
+          // Browsers accept years past 9999 in date inputs; such a value
+          // would make the whole save fail, so only calendar dates are kept.
+          const { value } = event.target
+          if (value === '' || /^\d{4}-\d{2}-\d{2}$/u.test(value)) {
+            onChange({ dueDate: value })
+          }
+        }}
+        type="date"
+        value={item.dueDate ?? ''}
+      />
+      {overdue ? (
+        <span className="text-xs font-semibold text-[var(--workbench-danger)]">
+          {t('documents.checklistItem.overdue')}
+        </span>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * Shows the owner and deadline saved on a checklist item to read-only viewers.
+ *
+ * @param props - Item, offered owners, today's date, and translator.
+ * @returns The owner and deadline text, or nothing when neither is set.
+ */
+function ChecklistItemOwnershipSummary({
+  assignees,
+  item,
+  t,
+  today,
+}: {
+  /** Members used to resolve the owner name. */
+  assignees: readonly ChecklistAssigneeOption[]
+  /** Item whose owner and deadline are shown. */
+  item: DocumentChecklistItem
+  /** Resolves display text. */
+  t: (key: MessageKey) => string
+  /** Viewer's local `YYYY-MM-DD` date. */
+  today: string
+}) {
+  const assigneeLabel = resolveChecklistAssigneeLabel(assignees, item.assigneeMemberKey)
+  if (!assigneeLabel && !item.dueDate) return null
+  const overdue = isChecklistItemOverdue(item, today)
+  return (
+    <span className="flex flex-wrap gap-2 text-xs font-medium text-[var(--workbench-muted)]">
+      {assigneeLabel ? (
+        <span>{t('documents.checklistItem.assignee').replace('{name}', assigneeLabel)}</span>
+      ) : null}
+      {item.dueDate ? (
+        <span className={overdue ? 'font-semibold text-[var(--workbench-danger)]' : ''}>
+          {t(overdue ? 'documents.checklistItem.dueOverdue' : 'documents.checklistItem.due')
+            .replace('{date}', item.dueDate)}
+        </span>
+      ) : null}
+    </span>
   )
 }
 
@@ -949,7 +1121,7 @@ function ReadOnlyBlock({
                   className="border-b border-r border-[var(--workbench-border)] px-3 py-2.5 text-xs font-bold text-[var(--workbench-muted)] last:border-r-0"
                   key={`${block.id}-readonly-column-${index}`}
                 >
-                  {column}
+                  <DocumentLinkedText text={column} />
                 </th>
               ))}
             </tr>
@@ -962,7 +1134,7 @@ function ReadOnlyBlock({
                     className="border-b border-r border-[var(--workbench-border)] px-3 py-3 text-sm font-medium last:border-r-0"
                     key={cell.id}
                   >
-                    {cell.text}
+                    <DocumentLinkedText text={cell.text} />
                   </td>
                 ))}
               </tr>
@@ -982,13 +1154,24 @@ function ReadOnlyBlock({
   }
 
   if (block.type === 'checklist') {
+    const today = formatLocalCalendarDate(new Date())
     return (
       <ul className="m-0 grid list-none gap-2 p-0">
         {block.items.map((item) => (
           <li className="flex items-start gap-3 text-sm font-medium" key={item.id}>
             <span aria-hidden="true">{item.checked ? '☑' : '☐'}</span>
-            <span className={item.checked ? 'text-[var(--workbench-muted)] line-through' : ''}>
-              {item.text}
+            <span className="grid min-w-0 gap-0.5">
+              <span className={item.checked ? 'text-[var(--workbench-muted)] line-through' : ''}>
+                <DocumentLinkedText text={item.text} />
+              </span>
+              {checklistWorkItems?.assignees ? (
+                <ChecklistItemOwnershipSummary
+                  assignees={checklistWorkItems.assignees}
+                  item={item}
+                  t={t}
+                  today={today}
+                />
+              ) : null}
             </span>
             <ChecklistItemWorkItemAction
               blockId={block.id}
@@ -1026,7 +1209,7 @@ function ReadOnlyBlock({
 
   return (
     <p className="m-0 whitespace-pre-wrap text-[1rem] font-medium leading-8 text-[var(--workbench-text)]">
-      {block.text}
+      <DocumentLinkedText text={block.text} />
     </p>
   )
 }

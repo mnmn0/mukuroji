@@ -13,6 +13,10 @@ import type {
   MarkdownDocumentImportRequest,
   MarkdownImportErrorCode,
 } from '../model/markdownImport'
+import type {
+  MarkdownFolderImportFailure,
+  MarkdownFolderImportRequest,
+} from '../model/markdownFolderImport'
 import { MarkdownImportSection } from './MarkdownImportSection'
 
 /**
@@ -62,6 +66,13 @@ export type DocumentHomeProps = {
     request: MarkdownDocumentImportRequest,
   ) => Promise<MarkdownImportErrorCode | undefined>
   /**
+   * Creates folders and pages from the Markdown files of a folder and
+   * resolves with why the folder cannot be imported, if it cannot.
+   */
+  onImportMarkdownFolder?: (
+    request: MarkdownFolderImportRequest,
+  ) => Promise<MarkdownFolderImportFailure | undefined>
+  /**
    * Whether a page is being created from Markdown.
    */
   isImportingMarkdown?: boolean
@@ -77,6 +88,7 @@ export function DocumentHome({
   onCreateDocument,
   onCreateFromBuiltInTemplate,
   onImportMarkdown,
+  onImportMarkdownFolder,
   onInstantiateTemplate,
   onSelectDocument,
   t,
@@ -169,6 +181,7 @@ export function DocumentHome({
           projects={projectSpaces}
           t={t}
           onImport={onImportMarkdown}
+          {...(onImportMarkdownFolder ? { onImportFolder: onImportMarkdownFolder } : {})}
         />
       ) : null}
 
