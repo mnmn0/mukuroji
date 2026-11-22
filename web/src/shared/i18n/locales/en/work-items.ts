@@ -827,7 +827,7 @@ export const workItemsMessages = {
   'workItems.crossProject.eyebrow': 'Across Projects',
   'workItems.crossProject.title': 'Work items',
   'workItems.crossProject.description':
-    'See the Work Items of every Project you can read in one table, filtered by Project or contributor.',
+    'See the Work Items of every Project you can read as a table, board, or Gantt chart, filtered by Project or contributor.',
   'workItems.crossProject.filters': 'Work item list filters',
   'workItems.crossProject.projects.label': 'Projects',
   'workItems.crossProject.projects.all': 'All',
@@ -837,6 +837,8 @@ export const workItemsMessages = {
   'workItems.crossProject.member': 'Contributor',
   'workItems.crossProject.jobRole': 'Job role',
   'workItems.crossProject.any': 'Any',
+  'workItems.crossProject.layout': 'Layout',
+  'workItems.crossProject.board.unplaced': 'Other statuses',
   'workItems.crossProject.groupBy': 'Group by',
   'workItems.crossProject.groupBy.project': 'Project',
   'workItems.crossProject.groupBy.assignee': 'Owner',
