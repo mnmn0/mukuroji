@@ -1327,14 +1327,6 @@ describe('public API router', () => {
     expect(await both.json()).toMatchObject({ code: 'validation_failed' })
     expect((await request('bad-date', { dueDate: '2026-02-30' })).status).toBe(400)
     expect(received).toHaveLength(2)
-
-    // A schedule may ask to follow the shared Team or Project calendar (ADR 0058).
-    const dueDateSchedule = createDueDateSchedule('2026-12-01')
-    const shared = { ...dueDateSchedule, calendarPolicy: { ...dueDateSchedule.calendarPolicy, calendarSource: 'shared' } }
-    expect((await request('shared', { schedule: shared })).status).toBe(201)
-    expect(received[2]).toMatchObject({ schedule: { calendarPolicy: { calendarSource: 'shared' } } })
-    const other = { ...dueDateSchedule, calendarPolicy: { ...dueDateSchedule.calendarPolicy, calendarSource: 'team' } }
-    expect((await request('other-source', { schedule: other })).status).toBe(400)
   })
 
   test('passes estimate, remaining effort, and manual progress updates, including clears, and rejects invalid amounts', async () => {

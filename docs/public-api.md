@@ -53,8 +53,9 @@ Credential の scope は作成後に変更しない。権限を変える場合�
 `POST /api/v1/work-items` の `schedule` は省略できます。省略すると server が作成先の Team・Project の稼働カレンダー（Workspace の
 稼働曜日・会社の休日・日本の祝日に Team・Project の上書きを重ねたもの、`calendarSource: 'shared'` 付き）を `calendarPolicy` に付け、`dueDate`（`YYYY-MM-DD`）があればその日が期限の `due-date`、なければ `unscheduled` の
 Work Item を作ります。Web で作る Work Item と同じ日で稼働日数を数えるには、こちらを使います。`schedule` を送った場合は、その
-`calendarPolicy` をそのまま保存します。ただし `calendarPolicy.calendarSource` が `'shared'` なら、server が作成先のカレンダーで
-規則を置き換え（開始日と終了日を保ち、稼働日数を数え直す）、以後の Team・Project のカレンダー変更でも日程を揃えます。`schedule` と `dueDate` は同時に送れず、`400 validation_failed` になります。
+`calendarPolicy` をそのまま保存し、その Work Item は個別のカレンダーを持つものとして扱います（Team・Project のカレンダー変更で書き換えない）。
+v1 の schema は `calendarSource` を持たないので、応答の `calendarPolicy` にも出しません。更新で送った `calendarPolicy` の規則が
+保存済みの共有カレンダーと同じなら、共有カレンダーに従うまま保存します。`schedule` と `dueDate` は同時に送れず、`400 validation_failed` になります。
 詳しくは [稼働カレンダーと日本の祝日](workspace-calendar-holidays.md) を参照してください。
 
 ## Work Item の階層

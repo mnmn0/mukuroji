@@ -15,7 +15,9 @@ import {
   type ImportReport,
   type ImportRowError,
   type UpdatePublicWorkItemRequest,
+  type WorkItemSchedule,
   type WorkItemScheduleCalendarPolicy,
+  haveSameWorkCalendarRules,
 } from '@mukuroji/contracts'
 import type { Hono } from 'hono'
 import type { Context } from 'hono'
@@ -628,12 +630,11 @@ export function projectPublicWorkItem(workItem: CanonicalWorkItem): PublicWorkIt
 function projectPublicWorkItemSchedule(
   schedule: CanonicalWorkItem['schedule'],
 ): CanonicalWorkItem['schedule'] {
-  const calendarPolicy: CanonicalWorkItem['schedule']['calendarPolicy'] = {
+  // The v1 schema has no calendar source; an update with the same rules keeps it (ADR 0058).
+  const calendarPolicy = {
     timeZone: schedule.calendarPolicy.timeZone,
     workingWeekdays: [...schedule.calendarPolicy.workingWeekdays],
     holidays: [...schedule.calendarPolicy.holidays],
-    // Kept so a client that sends a schedule back keeps it on the shared calendar (ADR 0058).
-    ...(schedule.calendarPolicy.calendarSource === 'shared' ? { calendarSource: 'shared' } : {}),
   }
   const plannedEffort = schedule.plannedEffortMinutes === undefined
     ? {}
@@ -801,6 +802,30 @@ async function completePublicCreateWorkItemSchedule(
       ? { mode: 'unscheduled', calendarPolicy }
       : { mode: 'due-date', dueDate, calendarPolicy },
   }
+}
+
+/**
+ * Keeps a Work Item on the shared calendar when a Public API update sends the same calendar rules.
+ *
+ * The v1 schema cannot carry `calendarSource`, so a client that sends back the schedule it read
+ * would otherwise turn the Work Item into one with its own calendar (ADR 0058).
+ *
+ * @param schedule - Schedule the update writes.
+ * @param stored - Schedule stored before the update.
+ * @returns The schedule, marked as shared when the stored one was shared with the same rules.
+ */
+function keepSharedCalendarSource<TSchedule extends { calendarPolicy: WorkItemScheduleCalendarPolicy }>(
+  schedule: TSchedule,
+  stored: WorkItemSchedule,
+): TSchedule {
+  if (
+    stored.calendarPolicy.calendarSource !== 'shared' ||
+    schedule.calendarPolicy.calendarSource === 'shared' ||
+    !haveSameWorkCalendarRules(schedule.calendarPolicy, stored.calendarPolicy)
+  ) {
+    return schedule
+  }
+  return { ...schedule, calendarPolicy: { ...schedule.calendarPolicy, calendarSource: 'shared' } }
 }
 
 /**
@@ -1009,9 +1034,12 @@ export async function updateCanonicalPublicWorkItem(
         workItemId,
         { consistentIssueRead: true, includeEvents: false },
       )
-      const body = plannedEffortMinutes === undefined
+      const updated = plannedEffortMinutes === undefined
         ? normalized
         : { ...normalized, schedule: withWorkItemPlannedEffort(detail.issue.schedule, plannedEffortMinutes) }
+      const body = updated.schedule === undefined
+        ? updated
+        : { ...updated, schedule: keepSharedCalendarSource(updated.schedule, detail.issue.schedule) }
       requireAssignedProjectPermission(
         principal,
         permission,

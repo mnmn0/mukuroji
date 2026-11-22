@@ -4326,16 +4326,9 @@ function readPublicWorkItemScheduleCalendarPolicy(
   const policy = requireRecord(value, 'schedule.calendarPolicy must be an object.')
   assertAllowedFields(
     policy,
-    ['timeZone', 'workingWeekdays', 'holidays', 'calendarSource'],
+    ['timeZone', 'workingWeekdays', 'holidays'],
     'schedule.calendarPolicy',
   )
-  if (policy.calendarSource !== undefined && policy.calendarSource !== 'shared') {
-    throw new PublicApiServiceError(
-      400,
-      'validation_failed',
-      'schedule.calendarPolicy.calendarSource must be "shared" when present.',
-    )
-  }
   const timeZone = readRequiredString(policy.timeZone, 'schedule.calendarPolicy.timeZone')
   try {
     new Intl.DateTimeFormat('en-US', { timeZone }).format(0)
@@ -4388,12 +4381,7 @@ function readPublicWorkItemScheduleCalendarPolicy(
       'schedule.calendarPolicy.holidays must not contain duplicates.',
     )
   }
-  return {
-    holidays,
-    timeZone,
-    workingWeekdays,
-    ...(policy.calendarSource === 'shared' ? { calendarSource: 'shared' } : {}),
-  }
+  return { holidays, timeZone, workingWeekdays }
 }
 
 /** Reads one supported schedule weekday. */

@@ -36,6 +36,8 @@ Workspace の稼働カレンダー（稼働曜日・会社の休日・日本の�
   「共有カレンダーの写し」で、Team・Project・Workspace のカレンダーが変わったときに書き換えてよい。
   ない policy は個別の上書き（custom）で、カレンダーの変更では変えない。
 - 既存の row は `calendarSource` を持たないので custom として読める。#365 の migration は不要。
+- Public API v1 の schema には `calendarSource` を足さない（`oneOf` の schedule を変えると互換性を確かめられないため）。
+  v1 で `schedule` を送った作成は custom、`schedule` を省いた作成は `shared`。更新で規則が保存済みの `shared` と同じなら `shared` を保つ。
 - 写しを持ち続けるのは、日程の稼働日数を読むたびにカレンダーを解決しないため（一覧・Gantt・Analytics・Public API の読み取りを変えない）。
 - 新しい Work Item は、作成経路（Web、Public API、MCP、依頼フォーム・Triage、Automation、Project template、import）で
   policy が `shared` なら、server が作成先の Team・Project のカレンダーを解決し直し、終了日を保つ調整で写す。

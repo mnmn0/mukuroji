@@ -37,7 +37,7 @@ const publicHolidayLabelKeys: Record<WorkCalendarPublicHolidayChoice, MessageKey
 }
 
 /** Label keys of each adjustment. */
-export const workCalendarAdjustmentLabelKeys: Record<WorkCalendarAdjustment, MessageKey> = {
+const workCalendarAdjustmentLabelKeys: Record<WorkCalendarAdjustment, MessageKey> = {
   'keep-duration': 'workspace.workCalendar.adjustment.keepDuration',
   'keep-end-date': 'workspace.workCalendar.adjustment.keepEndDate',
 }
