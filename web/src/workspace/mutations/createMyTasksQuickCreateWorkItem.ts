@@ -6,7 +6,7 @@ import {
 } from '@mukuroji/contracts'
 import { createTeamIssue } from '../../issues/api'
 import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
-import type { MyTasksQuickCreateInput } from '../ui/MyTasksQuickCreate'
+import type { MyTasksQuickCreateInput } from '../model/myTasksQuickCreate'
 
 /** Inputs for creating one Work Item from the My Tasks quick create form. */
 export type CreateMyTasksQuickCreateWorkItemOptions = {

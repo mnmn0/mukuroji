@@ -123,6 +123,7 @@ export const workItemsMessages = {
   'bulk.noSelection': '一括操作するタスクを選択してください。',
   'bulk.readOnly': 'このプロジェクトでは一括操作を実行する権限がありません。',
   'bulk.error': '一括操作を完了できませんでした。',
+  'bulk.apply.cancelled': '適用を取りやめました。変更は保存していません。',
   'tasks.userAvatar': 'ユーザーアバター',
   'tasks.loading': 'タスク一覧を確認しています。',
   'tasks.tabs.aria': 'タスクビュー',

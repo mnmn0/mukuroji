@@ -3,8 +3,6 @@ import {
   type TaskViewScope,
   type WorkItemRelation,
   type WorkItemDependencyEndpoint,
-  type BulkOperation,
-  type BulkOperationPreview,
   type BulkOperationRequest,
 } from '@mukuroji/contracts'
 import {
@@ -31,12 +29,7 @@ import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessi
 import { clearAuthSession, getAuthSession } from '../../auth/session'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
-import {
-  applyBulkOperation,
-  previewBulkOperation,
-  retryBulkOperation,
-  undoBulkOperation,
-} from '../../bulk-operations/api'
+import { createBulkOperationHandlers } from '../../bulk-operations/mutations/createBulkOperationHandlers'
 import { readWorkItemArchiveFailureMessageKey } from '../../bulk-operations/model/workItemArchive'
 import { applyWorkItemArchive } from '../../bulk-operations/mutations/workItemArchive'
 import { ArchivedWorkItemsPanelContainer } from '../../issues/ui/ArchivedWorkItemsPanelContainer'
@@ -60,6 +53,7 @@ import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaborat
 import {
   confirmParentCompletion,
   confirmParentCompletionInBrowser,
+  confirmParentsCompletion,
 } from '../../issues/mutations/confirmParentCompletion'
 import { CANCELLED_TEAM_ISSUE_UPDATE } from '../../issues/model/teamIssueUpdateOutcome'
 import { useTeamWorkItemHierarchyMove } from '../../issues/mutations/useTeamWorkItemHierarchyMove'
@@ -779,89 +773,51 @@ export function TeamIssuePage() {
     throw new TeamIssuesApiError(403, t('taskViews.action.unavailable'), 'TeamTaskActionAccessDenied')
   }
 
-  /** Reads the list, detail, archived list, and outline again after a bulk operation. */
-  const revalidateAfterBulkOperation = async () => {
-    await Promise.all([mutateIssues(), mutateIssueDetail(), refreshArchivedWorkItems()])
-    // Archived or moved Work Items change the outline and its roll-ups.
-    await refreshTeamHierarchy()
+  /**
+   * Asks once before a bulk status edit completes parents whose children are still open.
+   *
+   * @param request - Bulk request about to be applied.
+   * @returns Whether the apply may go ahead.
+   */
+  const confirmBulkParentCompletion = (request: BulkOperationRequest) => {
+    const workflowStatusId = request.action.type === 'edit'
+      ? request.action.patch.workflowStatusId
+      : undefined
+    if (!accessToken || typeof workflowStatusId !== 'string') return Promise.resolve(true)
+    const targets = request.items.flatMap((item) => {
+      const issue = issues.find((candidate) =>
+        candidate.teamId === item.teamId && candidate.id === item.workItemId
+      )
+      if (!issue) return []
+      return [{
+        nextStatusCategory: resolveWorkflowStatusDefinition(
+          { ...issue, workflowStatusId },
+          taskViewConfiguration,
+        )?.category,
+        workItem: issue,
+      }]
+    })
+    return confirmParentsCompletion({
+      accessToken,
+      configuration: taskViewConfiguration,
+      confirm: (openChildCount) => confirmParentCompletionInBrowser(t, openChildCount),
+      targets,
+    })
   }
 
-  /**
-   * Validates a bulk operation on the selected Team Work Items.
-   *
-   * @param request - Bulk request built by the toolbar.
-   * @returns Server preview of every item.
-   */
-  const handleBulkPreview = async (request: BulkOperationRequest) => {
-    if (!accessToken) throw new Error(t('bulk.error'))
-    requireBulkOperationWriteScopes(request.items, request.action)
-    return guardEnterpriseSession(mutationRequestRunner.run(
-      'bulk:preview',
-      JSON.stringify(request),
-      (context) => previewBulkOperation(accessToken, request, context),
-    ))
-  }
-
-  /**
-   * Applies a previewed bulk operation and reads the changed Work Items again.
-   *
-   * @param request - Previewed bulk request.
-   * @param preview - Preview whose token binds the apply.
-   * @returns Durable operation with per-item results.
-   */
-  const handleBulkApply = async (request: BulkOperationRequest, preview: BulkOperationPreview) => {
-    if (!accessToken) throw new Error(t('bulk.error'))
-    requireBulkOperationWriteScopes(request.items, request.action)
-    const operation = await guardEnterpriseSession(mutationRequestRunner.run(
-      'bulk:apply',
-      JSON.stringify([request, preview.operationToken]),
-      (context) => applyBulkOperation(
-        accessToken,
-        { ...request, operationToken: preview.operationToken },
-        context,
-      ),
-    ))
-    await revalidateAfterBulkOperation().catch(() => undefined)
-    return operation
-  }
-
-  /**
-   * Retries the failed items of a bulk operation.
-   *
-   * @param operationId - Durable operation ID.
-   * @param operation - Operation the toolbar shows.
-   * @returns Updated operation.
-   */
-  const handleBulkRetry = async (operationId: string, operation?: BulkOperation) => {
-    if (!accessToken || !operation) throw new Error(t('bulk.error'))
-    requireBulkOperationWriteScopes(operation.items, operation.action)
-    const nextOperation = await guardEnterpriseSession(mutationRequestRunner.run(
-      `bulk:retry:${operationId}`,
-      operationId,
-      (context) => retryBulkOperation(accessToken, operationId, context),
-    ))
-    await revalidateAfterBulkOperation().catch(() => undefined)
-    return nextOperation
-  }
-
-  /**
-   * Undoes the succeeded items of a bulk operation.
-   *
-   * @param operationId - Durable operation ID.
-   * @param operation - Operation the toolbar shows.
-   * @returns Updated operation.
-   */
-  const handleBulkUndo = async (operationId: string, operation?: BulkOperation) => {
-    if (!accessToken || !operation) throw new Error(t('bulk.error'))
-    requireBulkOperationWriteScopes(operation.items, operation.action)
-    const nextOperation = await guardEnterpriseSession(mutationRequestRunner.run(
-      `bulk:undo:${operationId}`,
-      operationId,
-      (context) => undoBulkOperation(accessToken, operationId, context),
-    ))
-    await revalidateAfterBulkOperation().catch(() => undefined)
-    return nextOperation
-  }
+  const bulkOperationHandlers = createBulkOperationHandlers({
+    accessToken,
+    confirmApply: confirmBulkParentCompletion,
+    guardRequest: guardEnterpriseSession,
+    mutationRequestRunner,
+    requireWriteScopes: requireBulkOperationWriteScopes,
+    // Archived or moved Work Items change the outline and its roll-ups as well.
+    revalidate: async () => {
+      await Promise.all([mutateIssues(), mutateIssueDetail(), refreshArchivedWorkItems()])
+      await refreshTeamHierarchy()
+    },
+    t,
+  })
 
   /**
    * Archives or restores one Work Item through a one-item bulk archive operation.
@@ -1174,10 +1130,10 @@ export function TeamIssuePage() {
       locale={locale}
       onAddRelation={hasWritableWorkItemScope ? handleAddRelation : undefined}
       bulkWorkspaceId={hasWritableWorkItemScope && archiveWorkspaceId ? archiveWorkspaceId : undefined}
-      onBulkApply={hasWritableWorkItemScope ? handleBulkApply : undefined}
-      onBulkPreview={hasWritableWorkItemScope ? handleBulkPreview : undefined}
-      onBulkRetry={hasWritableWorkItemScope ? handleBulkRetry : undefined}
-      onBulkUndo={hasWritableWorkItemScope ? handleBulkUndo : undefined}
+      onBulkApply={hasWritableWorkItemScope ? bulkOperationHandlers.apply : undefined}
+      onBulkPreview={hasWritableWorkItemScope ? bulkOperationHandlers.preview : undefined}
+      onBulkRetry={hasWritableWorkItemScope ? bulkOperationHandlers.retry : undefined}
+      onBulkUndo={hasWritableWorkItemScope ? bulkOperationHandlers.undo : undefined}
       onArchiveIssue={hasWritableWorkItemScope && archiveWorkspaceId
         ? handleArchiveIssue
         : undefined}

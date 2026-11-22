@@ -123,6 +123,7 @@ export const workItemsMessages = {
   'bulk.noSelection': 'Select tasks to run a bulk operation.',
   'bulk.readOnly': 'You do not have permission to run bulk operations in this project.',
   'bulk.error': 'Unable to complete the bulk operation.',
+  'bulk.apply.cancelled': 'Not applied. The change was cancelled before it was saved.',
   'tasks.userAvatar': 'User avatar',
   'tasks.loading': 'Checking the task list.',
   'tasks.tabs.aria': 'Task views',

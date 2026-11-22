@@ -12,11 +12,11 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { TeamIssuesApiError } from '../../issues/api'
-import {
-  MyTasksQuickCreate,
-  type MyTasksQuickCreateDestination,
-  type MyTasksQuickCreateInput,
-} from '../../workspace/ui/MyTasksQuickCreate'
+import { MyTasksQuickCreate } from '../../workspace/ui/MyTasksQuickCreate'
+import type {
+  MyTasksQuickCreateDestination,
+  MyTasksQuickCreateInput,
+} from '../../workspace/model/myTasksQuickCreate'
 import { createMyTasksQuickCreateWorkItem } from '../../workspace/mutations/createMyTasksQuickCreateWorkItem'
 import { isCancelledTeamIssueUpdate } from '../../issues/model/teamIssueUpdateOutcome'
 import { createTranslator } from '../../shared/i18n/i18n'
@@ -529,11 +529,9 @@ export function MyTasksPage() {
 
   const quickCreateDestinations = useMemo<MyTasksQuickCreateDestination[]>(() => {
     if (!workspace.userKey) return []
+    // Destinations come from the write capabilities, not from the Teams of the listed tasks, so a
+    // person with no task yet can still add one anywhere they may write.
     return workspace.teams.flatMap((team) => {
-      if (
-        workItems.configurationsByTeam[team.id] === undefined ||
-        workItems.configurationFailedTeamIds.includes(team.id)
-      ) return []
       const teamDestination = taskViewController.writableTeamIds.includes(team.id)
         ? [{ key: team.id, label: team.name, teamId: team.id }]
         : []
@@ -552,8 +550,6 @@ export function MyTasksPage() {
   }, [
     taskViewController.writableProjectScopes,
     taskViewController.writableTeamIds,
-    workItems.configurationFailedTeamIds,
-    workItems.configurationsByTeam,
     workspace.teams,
     workspace.userKey,
   ])

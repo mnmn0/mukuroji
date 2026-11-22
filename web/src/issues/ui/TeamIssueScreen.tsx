@@ -754,9 +754,10 @@ export function TeamIssueScreen({
     () => new Set(taskViewSelection.selectedKeys),
     [taskViewSelection.selectedKeys],
   )
+  // Like keyboard selection, "select all shown" leaves out the rows under a collapsed parent.
   const visibleBulkItems = useMemo(
-    () => visibleIssues.map(createTeamIssueBulkSelection),
-    [visibleIssues],
+    () => navigableIssues.map(createTeamIssueBulkSelection),
+    [navigableIssues],
   )
   const selectedBulkItems = useMemo(
     () => visibleBulkItems.filter((item) => selectedIssueKeySet.has(item.selectionKey)),
