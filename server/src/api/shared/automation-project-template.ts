@@ -61,7 +61,7 @@ import {
   getWorkItemConfigurationTableName,
   prepareConfiguredCreateWorkItem,
 } from './work-item-configuration'
-import { requireActiveWorkspaceAssignee } from './workspace-access'
+import { requireActiveWorkspaceAssignee, type TeamPermissionReadContext } from './workspace-access'
 
 /** One Project template Work Item placed on real dates, in parent-before-child order. */
 export type ExpandedProjectTemplateWorkItem = {
@@ -782,14 +782,13 @@ export async function createProjectTemplatePlanningEntities(
   }
   const scope = { teamId: target.teamId, projectId }
   try {
-    // The Project was just created, so read the directory consistently to see it.
-    const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(directoryId, 'ja', true)
-    await requirePlanningScopePermission(principal, scope, 'member', false, {
-      directory,
-      readProjectAccesses: () => principal.legacyProjectScopeAccesses
-        ? Promise.resolve(principal.legacyProjectScopeAccesses)
-        : getEffectiveProjectScopeAccessList(principal, directory),
-    })
+    await requirePlanningScopePermission(
+      principal,
+      scope,
+      'member',
+      false,
+      await createConsistentProjectTemplateReadContext(principal),
+    )
     await requirePlanningActiveOwner(principal, principal.userKey)
     const workItemState = await readPlanningWorkItemState(principal, scope)
     let snapshot = await workItemDependencies.planning.get(directoryId, workItemState)
@@ -883,6 +882,7 @@ export async function createProjectTemplateDependencies(
       // The request was authorized for the old role; a retry authorizes it again.
       throw new PlanningError(409, 'PlanningAuthorizationChanged', 'Planning authorization changed. Reload and try again.')
     }
+    const readContext = await createConsistentProjectTemplateReadContext(principal)
     const authorizationConditionChecks = createPlanningCallerAuthorizationConditionChecks(
       principal,
       [currentMember],
@@ -920,8 +920,8 @@ export async function createProjectTemplateDependencies(
       const predecessor = { teamId, workItemId: predecessorId }
       const successor = { teamId, workItemId: successorId }
       await Promise.all([
-        requirePlanningWorkItemEndpointPermission(principal, predecessor, 'manager'),
-        requirePlanningWorkItemEndpointPermission(principal, successor, 'manager'),
+        requirePlanningWorkItemEndpointPermission(principal, predecessor, 'manager', readContext),
+        requirePlanningWorkItemEndpointPermission(principal, successor, 'manager', readContext),
       ])
       const response = await workItemDependencies.planning.createWorkItemDependency(
         directoryId,
@@ -940,6 +940,27 @@ export async function createProjectTemplateDependencies(
     }
   } catch (error) {
     throw toProjectTemplatePlanningError(error)
+  }
+}
+
+/**
+ * Builds permission reads that see the Project the application just created.
+ *
+ * The directory is read with strong consistency, and the effective ACL is read at most once.
+ *
+ * @param principal - Workspace administrator applying the template.
+ * @returns Read context for Team, Project, and Work Item permission checks.
+ */
+async function createConsistentProjectTemplateReadContext(
+  principal: WorkspacePrincipal,
+): Promise<TeamPermissionReadContext> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
+  let projectAccesses: ReturnType<TeamPermissionReadContext['readProjectAccesses']> | undefined
+  return {
+    directory,
+    readProjectAccesses: () => projectAccesses ??= principal.legacyProjectScopeAccesses
+      ? Promise.resolve(principal.legacyProjectScopeAccesses)
+      : getEffectiveProjectScopeAccessList(principal, directory),
   }
 }
 

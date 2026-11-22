@@ -165,16 +165,18 @@ export function requirePlanningWorkspaceScopeRead(principal: WorkspacePrincipal)
  * @param principal - Authenticated Workspace principal.
  * @param endpoint - Qualified Work Item endpoint.
  * @param minimumRole - Required role at both Team and assigned Project scopes.
+ * @param readContext - Directory and ACL reads to reuse, such as a consistent read right after a write.
  * @returns Strongly read authorized Work Item detail.
  */
 export async function requirePlanningWorkItemEndpointPermission(
   principal: WorkspacePrincipal,
   endpoint: WorkItemDependencyEndpoint,
   minimumRole: Extract<ProjectRole, 'viewer' | 'member' | 'manager'>,
+  readContext?: TeamPermissionReadContext,
 ) {
   const evaluation = principal.enterpriseAuthorizationEvaluation
   if (evaluation && !principal.isSystemAdmin) {
-    const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    const directory = readContext?.directory ?? await workspaceDependencies.projectDirectory.getProjectDirectory(
       principal.directoryId,
       'ja',
     )
@@ -247,6 +249,8 @@ export async function requirePlanningWorkItemEndpointPermission(
     endpoint.teamId,
     endpoint.workItemId,
     minimumRole,
+    undefined,
+    readContext,
   )
 }
 
