@@ -6,6 +6,7 @@ import type {
 import { useMemo, useState } from 'react'
 import type { ProjectDirectoryTeam } from '../../../projects/api/directory'
 import type { MessageKey } from '../../../shared/i18n/i18n'
+import type { TaskGanttDisplaySettings } from '../../../tasks/model/taskGanttDisplay'
 import { TaskGanttView } from '../../../tasks/ui/TaskGanttView'
 import {
   resolveWorkItemAssignee,
@@ -65,6 +66,13 @@ export type CrossProjectWorkItemListProps = {
   onCopyLink: () => Promise<boolean>
 }
 
+/** Gantt settings the list starts with; they stay while filters change and the chart reloads. */
+const initialGanttDisplay: TaskGanttDisplaySettings = {
+  isCompact: false,
+  scale: 'auto',
+  showsProgressLine: false,
+}
+
 /** Result of the latest copy-link attempt shown next to the button. */
 type CopyLinkStatus = 'idle' | 'copied' | 'failed'
 
@@ -94,6 +102,8 @@ export function CrossProjectWorkItemList({
   onCopyLink,
 }: CrossProjectWorkItemListProps) {
   const [copyLinkStatus, setCopyLinkStatus] = useState<CopyLinkStatus>('idle')
+  // The chart unmounts while a changed filter reloads, so the list keeps its display settings.
+  const [ganttDisplay, setGanttDisplay] = useState(initialGanttDisplay)
   const selectedProjectKeys = new Set(state.projects.map(createCrossProjectWorkItemProjectKey))
   const roleNames = new Map(jobRoleOptions.map((option) => [option.key, option.name]))
   const update = (patch: Partial<CrossProjectWorkItemListState>) => {
@@ -292,7 +302,9 @@ export function CrossProjectWorkItemList({
       {state.layout === 'gantt' && !loadFailed && !isLoading && ganttWorkItems.length > 0 ? (
         <TaskGanttView
           configurationsByTeam={configurationsByTeam}
+          display={ganttDisplay}
           group={ganttGroup}
+          onDisplayChange={setGanttDisplay}
           onSelectTask={onOpenWorkItem}
           t={t}
           tasks={ganttWorkItems}
