@@ -4042,6 +4042,60 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #341: サイドバーで Project を開くと概要を既定表示し、Agent Run のレーン件数を表示する', async ({ page }) => {
+    await page.route(/.*\/api\/teams\/core-team\/projects\/refero\/raid-log$/, async (route) => {
+      await route.fulfill({
+        json: {
+          teamId: 'core-team',
+          projectId: 'refero',
+          entries: [
+            {
+              id: 'risk-vendor',
+              kind: 'risk',
+              title: '主要部品のベンダー納期遅延',
+              probability: 4,
+              impact: 5,
+              status: 'open',
+              revision: 1,
+              createdAt: '2026-06-01T00:00:00.000Z',
+              updatedAt: '2026-06-01T00:00:00.000Z',
+            },
+            {
+              id: 'cr-export',
+              kind: 'change-request',
+              title: 'CSV 出力を範囲に追加',
+              impact: 3,
+              status: 'open',
+              revision: 1,
+              createdAt: '2026-06-02T00:00:00.000Z',
+              updatedAt: '2026-06-02T00:00:00.000Z',
+            },
+          ],
+          viewer: { canEdit: true },
+        },
+      })
+    })
+    await page.route(/.*\/api\/document-backlinks\?.*targetType=project.*$/, async (route) => {
+      await route.fulfill({
+        json: {
+          backlinks: [
+            {
+              documentId: 'refero-brief',
+              documentTitle: 'Refero プロジェクト概要書',
+              relation: {
+                id: 'relation-refero-brief',
+                source: { kind: 'document' },
+                target: { kind: 'project', projectId: 'refero' },
+                createdByUserId: 'demo@example.com',
+                createdAt: '2026-06-01T00:00:00.000Z',
+              },
+            },
+          ],
+        },
+      })
+    })
+    await page.route(/.*\/api\/documents\?.*projectId=refero.*$/, async (route) => {
+      await route.fulfill({ json: { nodes: [] } })
+    })
     await page.goto('/home')
 
     await page.getByLabel('メインサイドバー').getByRole('button', { name: 'Refero', exact: true }).click()
@@ -4054,6 +4108,13 @@ test.describe('authenticated task page', () => {
     await expect(agentRuns.getByTestId('project-overview-agent-lane-failed')).toContainText('1')
     await expect(agentRuns.getByRole('link', { name: 'Factory board を開く' }))
       .toHaveAttribute('href', '/teams/core-team/factory')
+
+    const raid = page.getByTestId('project-overview-raid')
+    await expect(raid.getByTestId('project-overview-raid-count-risks')).toContainText('1')
+    await expect(raid.getByTestId('project-overview-raid-count-pending-decisions')).toContainText('1')
+    await expect(raid.getByTestId('project-overview-raid-risk-vendor')).toContainText('重大')
+    await expect(page.getByTestId('project-overview-documents').getByRole('link', { name: 'Refero プロジェクト概要書' }))
+      .toHaveAttribute('href', '/documents/refero-brief')
 
     await page.getByRole('link', { name: 'Work Item 一覧を開く' }).click()
     await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
