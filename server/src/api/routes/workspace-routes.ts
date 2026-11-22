@@ -7,6 +7,7 @@ import { type MutationAuditContext } from '../../modules/audit/audit'
 import {
   WorkspaceAccessError,
   isWorkspaceIdentitySafeToDelete,
+  type WorkspaceAccessTransactWriteItem,
   type WorkspaceInvitation,
   type WorkspaceMemberStatus,
   type WorkspaceRole,
@@ -23,6 +24,7 @@ import { requireEnterpriseExternalAccessAllowed } from '../shared/enterprise-acc
 import { readBearerAccessToken, readJson, toAuthErrorResponse } from '../shared/http'
 import { requireWorkspaceMemberHasNoOwnedPlanningEntities } from '../shared/planning-access'
 import {
+  createEnterpriseControlRevisionConditionCheck,
   createWorkspaceMutationContext,
   requireWorkspaceAdministration,
   requireWorkspaceMemberHasNoManagedProjects,
@@ -60,6 +62,28 @@ type AcknowledgeWorkspaceInvitationCleanupRequestBody = {
 
 function readOptionalWorkspaceName(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/**
+ * Builds the Enterprise CONTROL fence for an owner or admin promotion, as a Workspace error.
+ *
+ * @param workspaceId - Workspace whose Enterprise state was read.
+ * @param controlRevision - CONTROL revision of the snapshot that showed no assignments.
+ * @returns The condition check, or undefined without an Enterprise identity table.
+ * @throws WorkspaceAccessError 503 `EnterpriseAuthorizationUnavailable` when no revision was read.
+ */
+function createWorkspacePromotionEnterpriseCheck(
+  workspaceId: string,
+  controlRevision: number | undefined,
+): WorkspaceAccessTransactWriteItem | undefined {
+  try {
+    return createEnterpriseControlRevisionConditionCheck(workspaceId, controlRevision)
+  } catch (error) {
+    if (error instanceof ProjectDataError) {
+      throw new WorkspaceAccessError(error.status, error.code, error.message, { cause: error })
+    }
+    throw error
+  }
 }
 
 /**
@@ -638,6 +662,7 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
       const role = body?.role === undefined ? undefined : readWorkspaceRole(body.role)
       const status = body?.status === undefined ? undefined : readWorkspaceMemberStatus(body.status)
       const expectedVersion = readWorkspaceVersion(body?.expectedVersion)
+      let authorizationConditionChecks: WorkspaceAccessTransactWriteItem[] = []
       if (role) {
         const existingMember = await workspaceDependencies.workspaceAccess.getMember(
           principal.directoryId,
@@ -672,6 +697,15 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
             'WorkspaceMemberRoleAssignmentsPresent',
             'Remove the member role assignments before making this member an owner or admin.',
           )
+        }
+        if (role === 'owner' || role === 'admin') {
+          // Pin the Enterprise state that showed no assignments, so an assignment created
+          // concurrently cancels the promotion.
+          const enterpriseControlCheck = createWorkspacePromotionEnterpriseCheck(
+            principal.directoryId,
+            enterpriseSnapshot.controlRevision,
+          )
+          if (enterpriseControlCheck) authorizationConditionChecks = [enterpriseControlCheck]
         }
       }
       const auditContext = createWorkspaceMutationContext(
@@ -711,6 +745,7 @@ export function registerWorkspaceRoutes(routeApp: Hono): void {
           status,
           expectedVersion,
           expectedPlanningRevision,
+          ...(authorizationConditionChecks.length === 0 ? {} : { authorizationConditionChecks }),
           ...(expectedDocumentAuthorizationRevision === undefined
             ? {}
             : {
