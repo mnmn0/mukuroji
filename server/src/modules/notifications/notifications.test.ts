@@ -865,23 +865,23 @@ describe('notification store', () => {
     const saved = await recording.client.savePreferences({ ...recipient, preferences: {
       ...DEFAULT_NOTIFICATION_PREFERENCES,
       categoryChannels: { status: { slack: false } },
-      mutes: { projectIds: ['noisy'], teamIds: [], keepMentions: true, keepApprovals: false },
+      mutes: { projectKeys: ['dev#noisy'], teamIds: [], keepMentions: true, keepApprovals: false },
     } })
     expect(stored).toMatchObject({
       categoryChannels: { status: { slack: false } },
-      mutes: { projectIds: ['noisy'], teamIds: [], keepMentions: true, keepApprovals: false },
+      mutes: { projectKeys: ['dev#noisy'], teamIds: [], keepMentions: true, keepApprovals: false },
     })
     const { categoryChannels: _categoryChannels, mutes: _mutes, ...legacyClientFields } = saved
     const kept = await recording.client.savePreferences({ ...recipient, preferences: { ...legacyClientFields, frequency: 'daily' } })
     expect(kept.categoryChannels).toEqual({ status: { slack: false } })
-    expect(kept.mutes?.projectIds).toEqual(['noisy'])
+    expect(kept.mutes?.projectKeys).toEqual(['dev#noisy'])
     const cleared = await recording.client.savePreferences({ ...recipient, preferences: {
-      ...kept, categoryChannels: {}, mutes: { projectIds: [], teamIds: [], keepMentions: true, keepApprovals: true },
+      ...kept, categoryChannels: {}, mutes: { projectKeys: [], teamIds: [], keepMentions: true, keepApprovals: true },
     } })
     expect(cleared.categoryChannels).toBeUndefined()
     expect(cleared.mutes).toBeUndefined()
     expect(stored).not.toHaveProperty('mutes')
-    stored = { ...stored, mutes: { projectIds: 'noisy' } }
+    stored = { ...stored, mutes: { projectKeys: 'dev#noisy' } }
     await expect(recording.client.getPreferences(recipient)).rejects.toThrow('Invalid stored notification preferences.')
   })
   test('keeps the Email opt-in boundary, using the last save of preferences stored before Email transport', async () => {

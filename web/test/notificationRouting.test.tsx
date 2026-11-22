@@ -21,11 +21,11 @@ describe('notification routing model', () => {
 
   test('mutes and unmutes IDs as a sorted, unique list', () => {
     const mutes = resolveNotificationMutes(undefined)
-    expect(mutes).toEqual({ projectIds: [], teamIds: [], keepMentions: true, keepApprovals: true })
-    const muted = setNotificationMuted(setNotificationMuted(mutes, 'projectIds', 'b', true), 'projectIds', 'a', true)
-    expect(muted.projectIds).toEqual(['a', 'b'])
-    expect(setNotificationMuted(muted, 'projectIds', 'b', false).projectIds).toEqual(['a'])
-    expect(mutes.projectIds).toEqual([])
+    expect(mutes).toEqual({ projectKeys: [], teamIds: [], keepMentions: true, keepApprovals: true })
+    const muted = setNotificationMuted(setNotificationMuted(mutes, 'projectKeys', 't#b', true), 'projectKeys', 't#a', true)
+    expect(muted.projectKeys).toEqual(['t#a', 't#b'])
+    expect(setNotificationMuted(muted, 'projectKeys', 't#b', false).projectKeys).toEqual(['t#a'])
+    expect(mutes.projectKeys).toEqual([])
   })
 
   test('splits bulk IDs into server-sized chunks in order', () => {
@@ -43,7 +43,7 @@ describe('notification routing settings', () => {
           ...notificationPreferencesFixture,
           channels: { inApp: true, email: false, push: false },
           categoryChannels: { status: { inApp: false } },
-          mutes: { projectIds: ['roadmap', 'gone'], teamIds: [], keepMentions: true, keepApprovals: false },
+          mutes: { projectKeys: ['core#roadmap', 'other#roadmap', 'core#gone'], teamIds: [], keepMentions: true, keepApprovals: false },
         },
       }}
       locale="ja"
@@ -53,10 +53,12 @@ describe('notification routing settings', () => {
     expect(input('notification-category-status-inApp')).not.toContain('checked')
     expect(input('notification-category-due-inApp')).toContain('checked')
     expect(input('notification-category-due-email')).toContain('disabled')
-    expect(input('notification-mute-project-roadmap')).toContain('checked')
+    expect(input('notification-mute-project-core-roadmap')).toContain('checked')
     expect(input('notification-mute-team-core')).not.toContain('checked')
     expect(input('notification-mutes-keepApprovals')).not.toContain('checked')
     expect(html).toContain('Core（Team 全体）')
-    expect(html).toContain('gone のミュートを解除')
+    expect(html).toContain('core#gone のミュートを解除')
+    // The same Project ID muted under another Team stays a separate mute.
+    expect(html).toContain('other#roadmap のミュートを解除')
   })
 })

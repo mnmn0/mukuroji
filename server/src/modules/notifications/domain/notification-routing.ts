@@ -3,6 +3,7 @@ import {
   NOTIFICATION_CATEGORIES,
   NOTIFICATION_MUTES_MAXIMUM,
   NOTIFICATION_MUTE_ID_MAX_LENGTH,
+  toNotificationMuteProjectKey,
   NOTIFICATION_ROUTING_CHANNELS,
   type NotificationCategory,
   type NotificationCategoryChannels,
@@ -102,7 +103,9 @@ export function isNotificationMuted(
   category: NotificationCategory,
 ): boolean {
   if (!mutes) return false
-  const inMutedScope = (subject.projectId !== undefined && mutes.projectIds.includes(subject.projectId)) ||
+  // A Project ID is unique only inside its Team, so a Project mute needs both IDs to match.
+  const inMutedScope = (subject.teamId !== undefined && subject.projectId !== undefined &&
+    mutes.projectKeys.includes(toNotificationMuteProjectKey(subject.teamId, subject.projectId))) ||
     (subject.teamId !== undefined && mutes.teamIds.includes(subject.teamId))
   if (!inMutedScope) return false
   if (category === 'mention' && mutes.keepMentions) return false
@@ -176,7 +179,7 @@ export function normalizeNotificationCategoryChannels(value: unknown): Notificat
 export function normalizeNotificationMutes(value: unknown): NotificationMutes {
   if (!isPlainRecord(value)) throw invalidRouting('Notification mutes must be an object.')
   for (const key of Object.keys(value)) {
-    if (key !== 'projectIds' && key !== 'teamIds' && key !== 'keepMentions' && key !== 'keepApprovals') {
+    if (key !== 'projectKeys' && key !== 'teamIds' && key !== 'keepMentions' && key !== 'keepApprovals') {
       throw invalidRouting('Notification mute field is unknown.')
     }
   }
@@ -186,8 +189,8 @@ export function normalizeNotificationMutes(value: unknown): NotificationMutes {
     throw invalidRouting('Notification mute switches must be boolean.')
   }
   return {
-    projectIds: normalizeMuteIds(value.projectIds),
-    teamIds: normalizeMuteIds(value.teamIds),
+    projectKeys: normalizeMuteIds(value.projectKeys, isValidMuteProjectKey),
+    teamIds: normalizeMuteIds(value.teamIds, isValidMuteId),
     keepMentions,
     keepApprovals,
   }
@@ -224,7 +227,7 @@ export function notificationMutesEqual(
   const b = right ?? DEFAULT_NOTIFICATION_MUTES
   return a.keepMentions === b.keepMentions &&
     a.keepApprovals === b.keepApprovals &&
-    a.projectIds.join('\0') === b.projectIds.join('\0') &&
+    a.projectKeys.join('\0') === b.projectKeys.join('\0') &&
     a.teamIds.join('\0') === b.teamIds.join('\0')
 }
 
@@ -239,26 +242,48 @@ export function hasNotificationMutes(mutes: NotificationMutes | undefined): mute
 }
 
 /**
- * Validates one list of muted IDs.
+ * Validates one list of muted IDs or Project keys.
  *
  * @param value - Untrusted list; absent means empty.
- * @returns Unique, sorted IDs.
- * @throws NotificationError (400) for a non-array, a bad ID, or too many IDs.
+ * @param isValid - Checks one trimmed entry.
+ * @returns Unique, sorted entries.
+ * @throws NotificationError (400) for a non-array, a bad entry, or too many entries.
  */
-function normalizeMuteIds(value: unknown): string[] {
+function normalizeMuteIds(value: unknown, isValid: (id: string) => boolean): string[] {
   if (value === undefined || value === null) return []
   if (!Array.isArray(value)) throw invalidRouting('Muted IDs must be an array.')
   const ids = new Set<string>()
   for (const item of value) {
     if (typeof item !== 'string') throw invalidRouting('Muted ID must be a string.')
     const id = item.trim()
-    if (!id || id.length > NOTIFICATION_MUTE_ID_MAX_LENGTH || id.includes('#')) {
+    if (!isValid(id)) {
       throw invalidRouting('Muted ID is invalid.')
     }
     ids.add(id)
   }
   if (ids.size > NOTIFICATION_MUTES_MAXIMUM) throw invalidRouting('Too many muted IDs.')
   return [...ids].sort()
+}
+
+/**
+ * Reports whether a string is a usable Project or Team ID in a mute list.
+ *
+ * @param id - Trimmed ID.
+ * @returns Whether the ID is non-empty, short enough, and has no `#`.
+ */
+function isValidMuteId(id: string): boolean {
+  return id.length > 0 && id.length <= NOTIFICATION_MUTE_ID_MAX_LENGTH && !id.includes('#')
+}
+
+/**
+ * Reports whether a string is a `<teamId>#<projectId>` mute key with two valid IDs.
+ *
+ * @param key - Trimmed key.
+ * @returns Whether the key has exactly one `#` between two valid IDs.
+ */
+function isValidMuteProjectKey(key: string): boolean {
+  const parts = key.split('#')
+  return parts.length === 2 && parts.every(isValidMuteId)
 }
 
 /**

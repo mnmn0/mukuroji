@@ -1,4 +1,9 @@
-import { NOTIFICATION_CATEGORIES, NOTIFICATION_ROUTING_CHANNELS, type NotificationMutes } from '@mukuroji/contracts'
+import {
+  NOTIFICATION_CATEGORIES,
+  NOTIFICATION_ROUTING_CHANNELS,
+  toNotificationMuteProjectKey,
+  type NotificationMutes,
+} from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { NotificationPreferences } from '../api'
 import {
@@ -44,12 +49,14 @@ export type NotificationRoutingFieldsProps = {
  */
 export function NotificationRoutingFields({ draft, onChange, muteTargets = [], t }: NotificationRoutingFieldsProps) {
   const mutes = resolveNotificationMutes(draft.mutes)
-  const knownProjectIds = new Set(muteTargets.flatMap((team) => team.projects.map((project) => project.id)))
+  const knownProjectKeys = new Set(muteTargets.flatMap(
+    (team) => team.projects.map((project) => toNotificationMuteProjectKey(team.id, project.id)),
+  ))
   const knownTeamIds = new Set(muteTargets.map((team) => team.id))
   // Mutes for Teams or Projects no longer listed stay removable.
   const unknownMutes = [
     ...mutes.teamIds.filter((id) => !knownTeamIds.has(id)).map((id) => createMuteEntry('teamIds', id)),
-    ...mutes.projectIds.filter((id) => !knownProjectIds.has(id)).map((id) => createMuteEntry('projectIds', id)),
+    ...mutes.projectKeys.filter((key) => !knownProjectKeys.has(key)).map((key) => createMuteEntry('projectKeys', key)),
   ]
   const updateMutes = (update: (current: NotificationMutes) => NotificationMutes) => onChange((current) => ({
     ...current,
@@ -161,22 +168,25 @@ export function NotificationRoutingFields({ draft, onChange, muteTargets = [], t
                 </label>
                 {team.projects.length > 0 ? (
                   <ul className="mt-2 grid gap-1 border-l border-[var(--workbench-border)] pl-3">
-                    {team.projects.map((project) => (
+                    {team.projects.map((project) => {
+                      const projectKey = toNotificationMuteProjectKey(team.id, project.id)
+                      return (
                       <li key={project.id}>
                         <label className="flex min-w-0 items-center justify-between gap-4">
                           <span className="min-w-0 truncate text-sm font-medium text-[var(--workbench-text)]">
                             {project.name}
                           </span>
                           <input
-                            checked={mutes.projectIds.includes(project.id)}
+                            checked={mutes.projectKeys.includes(projectKey)}
                             className="h-4 w-4 flex-none accent-[var(--workbench-primary)]"
-                            data-testid={`notification-mute-project-${project.id}`}
+                            data-testid={`notification-mute-project-${team.id}-${project.id}`}
                             type="checkbox"
-                            onChange={(event) => setMuted('projectIds', project.id, event.target.checked)}
+                            onChange={(event) => setMuted('projectKeys', projectKey, event.target.checked)}
                           />
                         </label>
                       </li>
-                    ))}
+                      )
+                    })}
                   </ul>
                 ) : null}
               </li>
@@ -211,8 +221,8 @@ export function NotificationRoutingFields({ draft, onChange, muteTargets = [], t
 /**
  * Pairs a muted ID with the list it belongs to.
  *
- * @param kind - Whether the ID is a Project or a Team.
- * @param id - Muted ID.
+ * @param kind - Whether the entry is a Project key or a Team ID.
+ * @param id - Muted Project key or Team ID.
  * @returns The entry shown in the list of mutes no longer listed.
  */
 function createMuteEntry(kind: NotificationMuteKind, id: string) {

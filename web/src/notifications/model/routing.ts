@@ -7,7 +7,7 @@ import {
 } from '@mukuroji/contracts'
 
 /** Which list of a mute setting an ID belongs to. */
-export type NotificationMuteKind = 'projectIds' | 'teamIds'
+export type NotificationMuteKind = 'projectKeys' | 'teamIds'
 
 /**
  * Reports whether a category still receives a channel, before the channel switch is applied.
@@ -64,7 +64,7 @@ export function setCategoryChannel(
 export function resolveNotificationMutes(mutes: NotificationMutes | undefined): NotificationMutes {
   return mutes ?? {
     ...DEFAULT_NOTIFICATION_MUTES,
-    projectIds: [],
+    projectKeys: [],
     teamIds: [],
   }
 }

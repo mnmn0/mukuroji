@@ -52,10 +52,10 @@ describe('resolveNotificationRouting', () => {
   })
 
   test('mutes a Project or Team but keeps mentions and approval requests when the member chose to', () => {
-    const mutes = { projectIds: ['noisy'], teamIds: ['ops'], keepMentions: true, keepApprovals: false }
+    const mutes = { projectKeys: ['dev#noisy'], teamIds: ['ops'], keepMentions: true, keepApprovals: false }
     const preferences = { channels: allChannels, mutes }
     const muted = resolveNotificationRouting(preferences, {
-      eventType: 'work-item.updated', reasons: ['status-change'], projectId: 'noisy',
+      eventType: 'work-item.updated', reasons: ['status-change'], projectId: 'noisy', teamId: 'dev',
     })
     expect(muted.muted).toBe(true)
     expect(Object.values(muted.channels).some(Boolean)).toBe(false)
@@ -67,6 +67,13 @@ describe('resolveNotificationRouting', () => {
     }).muted).toBe(true)
     expect(resolveNotificationRouting(preferences, {
       eventType: 'work-item.updated', reasons: ['status-change'], projectId: 'quiet', teamId: 'dev',
+    }).muted).toBe(false)
+    // Project IDs are unique only inside a Team, so another Team's `noisy` is not muted.
+    expect(resolveNotificationRouting(preferences, {
+      eventType: 'work-item.updated', reasons: ['status-change'], projectId: 'noisy', teamId: 'qa',
+    }).muted).toBe(false)
+    expect(resolveNotificationRouting(preferences, {
+      eventType: 'work-item.updated', reasons: ['status-change'], projectId: 'noisy',
     }).muted).toBe(false)
   })
 })
@@ -82,13 +89,14 @@ describe('routing setting validation', () => {
   })
 
   test('sorts and de-duplicates muted IDs and rejects malformed mutes', () => {
-    expect(normalizeNotificationMutes({ projectIds: [' b ', 'a', 'b'] })).toEqual({
-      projectIds: ['a', 'b'], teamIds: [], keepMentions: true, keepApprovals: true,
+    expect(normalizeNotificationMutes({ projectKeys: [' t#b ', 't#a', 't#b'] })).toEqual({
+      projectKeys: ['t#a', 't#b'], teamIds: [], keepMentions: true, keepApprovals: true,
     })
-    const tooMany = Array.from({ length: 101 }, (_, index) => `project-${index}`)
+    const tooMany = Array.from({ length: 101 }, (_, index) => `team#project-${index}`)
     for (const value of [
-      null, { projectIds: 'a' }, { teamIds: [1] }, { teamIds: [''] }, { teamIds: ['a#b'] },
-      { projectIds: tooMany }, { keepMentions: 'yes' }, { other: true },
+      null, { projectKeys: 't#a' }, { teamIds: [1] }, { teamIds: [''] }, { teamIds: ['a#b'] },
+      { projectKeys: ['a'] }, { projectKeys: ['t#'] }, { projectKeys: ['#a'] }, { projectKeys: ['t#a#b'] },
+      { projectIds: ['a'] }, { projectKeys: tooMany }, { keepMentions: 'yes' }, { other: true },
     ]) {
       expect(() => normalizeNotificationMutes(value)).toThrow(NotificationError)
     }

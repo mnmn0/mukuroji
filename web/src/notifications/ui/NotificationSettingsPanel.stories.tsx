@@ -40,7 +40,7 @@ export const RoutingAndMutes: Story = {
         ...notificationPreferencesControllerFixture.preferences!,
         channels: { inApp: true, email: false, push: false, slack: true },
         categoryChannels: { status: { slack: false }, comment: { inApp: false } },
-        mutes: { projectIds: ['brand-guideline', 'archived-project'], teamIds: [], keepMentions: true, keepApprovals: false },
+        mutes: { projectKeys: ['core-team#brand-guideline', 'core-team#archived-project'], teamIds: [], keepMentions: true, keepApprovals: false },
       },
     },
     muteTargets: [

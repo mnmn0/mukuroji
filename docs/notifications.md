@@ -92,7 +92,7 @@ Comment notification は `commentId` と `rootCommentId` を追加します。We
 - reminder days（`reminderDays`）: 自分あての期限前通知・超過の再通知・未更新の督促・工数の督促の日数（下の [リマインドの日数](#リマインドの日数)）。PUT で `reminderDays` を省略すると保存済みの値を残し、空 object を送ると消します。項目を知らない古い client が保存しても消えないようにするためです
 
 - category channels（`categoryChannels`）: 通知の種類ごとに切ったチャネル（下の [種類ごとの配信先とミュート](#種類ごとの配信先とミュート)）。保存するのは `false` だけです
-- mutes（`mutes`）: ミュートした Project ID・Team ID（各 100 件まで）と、ミュート中も届ける mention・承認の切り替え（既定はどちらも届ける）
+- mutes（`mutes`）: ミュートした Project（`projectKeys`、Project ID は Team の中でだけ一意なので `<teamId>#<projectId>` で持つ）・Team（`teamIds`）を各 100 件までと、ミュート中も届ける mention・承認の切り替え（既定はどちらも届ける）
 
 `categoryChannels` と `mutes` も `reminderDays` と同じく、PUT で省略すると読み込んだ version の保存値を残します。保存済みの値が壊れている row は、既定値で読み替えずにエラーにします（読み替えると、ミュートした通知が届いてしまうため）。
 
@@ -102,7 +102,7 @@ in-app を無効にした状態で投影された notification は Inbox unread 
 
 通知は受信者ごとに 1 つの種類（category）に入ります。分類は `server/src/modules/notifications/domain/notification-routing.ts` の `classifyNotificationCategory` が持ち、受信者の reasons を `mention`、`approval`、`assignment`、`due`、`status`、`comment`、`reminder` の順に見て、どれにも当たらなければ event type で決めます（`approval.*` は reasons より先に承認とします）。種類は `mention`・`approval`・`assignment`・`status`・`due`・`comment`・`planning`・`reminder`・`other` です。
 
-あるチャネルに届くのは、チャネル全体の switch が on、その種類でチャネルが切られていない、ミュートされていない、のすべてを満たすときです。ミュートは notification の `projectId` または `teamId` が mutes に含まれるときで、種類が mention か approval で対応する切り替えが on なら除きます。
+あるチャネルに届くのは、チャネル全体の switch が on、その種類でチャネルが切られていない、ミュートされていない、のすべてを満たすときです。ミュートは notification の `teamId` と `projectId` の組が `projectKeys` に、または `teamId` が `teamIds` に含まれるときで、種類が mention か approval で対応する切り替えが on なら除きます。
 
 - 投影（`createNotificationProjectionDeliveryState`）: 種類やミュートで in-app に届かない通知は archived row として保存し、unread には入れません（アーカイブの一覧には出ます）。全体の in-app switch が off のときは従来どおり `inAppVisible: false` で一覧にも出しません。届かない channel は `deliveryChannels` と Slack / Email の queue に入れません
 - 外部 channel の送信（`deliverDueChannelNotifications`）: 送る直前に強整合で読んだ preference で同じ判定をやり直し、投影後に種類を切ったりミュートしたりした通知は `suppressed` にします

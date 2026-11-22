@@ -12879,7 +12879,7 @@ test.describe('authenticated task page', () => {
     await page.getByTestId('notification-quiet-hours-end').fill('07:30')
     await page.getByTestId('notification-time-zone').fill('Asia/Tokyo')
     await page.getByTestId('notification-category-status-email').uncheck()
-    await page.getByTestId('notification-mute-project-product-roadmap').check()
+    await page.getByTestId('notification-mute-project-core-team-product-roadmap').check()
     await page.getByTestId('notification-mutes-keepApprovals').uncheck()
     await page.getByTestId('notification-settings-save').click()
 
@@ -12893,7 +12893,7 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('notification-quiet-hours-end')).toHaveValue('07:30')
     await expect(page.getByTestId('notification-category-status-email')).not.toBeChecked()
     await expect(page.getByTestId('notification-category-due-email')).toBeChecked()
-    await expect(page.getByTestId('notification-mute-project-product-roadmap')).toBeChecked()
+    await expect(page.getByTestId('notification-mute-project-core-team-product-roadmap')).toBeChecked()
     await expect(page.getByTestId('notification-mutes-keepMentions')).toBeChecked()
     await expect(page.getByTestId('notification-mutes-keepApprovals')).not.toBeChecked()
   })

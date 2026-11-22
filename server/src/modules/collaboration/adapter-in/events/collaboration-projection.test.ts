@@ -2073,7 +2073,7 @@ describe('collaboration projection pure helpers', () => {
       ...DEFAULT_NOTIFICATION_PREFERENCES,
       channels: { inApp: true, email: false, push: true },
       categoryChannels: { status: { push: false as const } },
-      mutes: { projectIds: ['noisy'], teamIds: [], keepMentions: true, keepApprovals: true },
+      mutes: { projectKeys: ['dev#noisy'], teamIds: [], keepMentions: true, keepApprovals: true },
     }
     const occurredAt = '2026-07-12T12:00:00.000Z'
     const status = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, {
@@ -2081,11 +2081,11 @@ describe('collaboration projection pure helpers', () => {
     })
     expect(status).toMatchObject({ inAppVisible: true, inboxState: 'unread', deliveryChannels: ['inApp'] })
     const muted = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, {
-      eventType: 'work-item.updated', reasons: ['assignment'], projectId: 'noisy',
+      eventType: 'work-item.updated', reasons: ['assignment'], projectId: 'noisy', teamId: 'dev',
     })
     expect(muted).toMatchObject({ inAppVisible: true, inboxState: 'archived', archivedAt: occurredAt, deliveryChannels: [] })
     const mention = createNotificationProjectionDeliveryState('workspace-1#member@example.com', occurredAt, preferences, {
-      eventType: 'comment.created', reasons: ['mention'], projectId: 'noisy',
+      eventType: 'comment.created', reasons: ['mention'], projectId: 'noisy', teamId: 'dev',
     })
     expect(mention).toMatchObject({ inAppVisible: true, inboxState: 'unread', deliveryChannels: ['inApp', 'push'] })
   })

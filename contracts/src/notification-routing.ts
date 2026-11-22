@@ -39,12 +39,27 @@ export const NOTIFICATION_MUTES_MAXIMUM = 100
 export const NOTIFICATION_MUTE_ID_MAX_LENGTH = 128
 
 /**
+ * Builds the key that names one muted Project. A Project ID is unique only inside its Team, so
+ * the key carries the Team ID too.
+ *
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project ID inside that Team.
+ * @returns The key stored in `NotificationMutes.projectKeys`.
+ */
+export function toNotificationMuteProjectKey(teamId: string, projectId: string): string {
+  return `${teamId}#${projectId}`
+}
+
+/**
  * Projects and Teams whose notifications a member does not want delivered. A muted
  * notification is kept in the archived Inbox and goes to no channel.
  */
 export type NotificationMutes = {
-  /** Muted Project IDs, sorted and unique. */
-  projectIds: string[]
+  /**
+   * Muted Projects as `<teamId>#<projectId>` keys (see `toNotificationMuteProjectKey`), sorted
+   * and unique. A Project ID alone is not enough, because two Teams can use the same one.
+   */
+  projectKeys: string[]
   /** Muted Team IDs, sorted and unique. */
   teamIds: string[]
   /** Whether mentions are still delivered from a muted Project or Team. */
@@ -55,7 +70,7 @@ export type NotificationMutes = {
 
 /** Mutes used when a member has saved none. */
 export const DEFAULT_NOTIFICATION_MUTES: Readonly<NotificationMutes> = Object.freeze({
-  projectIds: [],
+  projectKeys: [],
   teamIds: [],
   keepMentions: true,
   keepApprovals: true,
