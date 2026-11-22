@@ -237,7 +237,7 @@ escalation は Work Item が完了・中止・archive で配信時に捨てら�
 
 1. 本人の通知設定（`reminderDays`）。escalation（`overdueEscalationDays`）は Project manager に届くため、本人は変えられません
 2. Work Item（工数の督促では工数）の Team の設定（`GET` / `PUT /api/teams/{teamId}/notification-reminders`）
-3. 既定値。schedule Lambda の環境変数 `NOTIFICATION_DUE_SOON_DAYS`、`NOTIFICATION_OVERDUE_REMINDER_INTERVAL_DAYS`、`NOTIFICATION_OVERDUE_ESCALATION_DAYS`、`NOTIFICATION_STALE_STARTED_DAYS`、`NOTIFICATION_TIMESHEET_REMINDER_DAYS` で上書きでき、未設定なら 3 / 7 / 7 / 7 / 7 日です。Team 設定の API も同じ環境変数を読んで `defaults` として返すため、上書きするときは schedule と API の両方の Lambda に同じ値を設定します（今の CDK はどちらにも設定しません）
+3. 既定値。stack parameter `NotificationReminderDefaultDays` の 1 か所で上書きでき、空（既定）なら 3 / 7 / 7 / 7 / 7 日です。値は Team の設定と同じ field の JSON object で、書いた field だけを上書きします（例: `{"dueSoonDays":5,"timesheetReminderDays":14}`）。CDK はこの parameter を環境変数 `NOTIFICATION_REMINDER_DEFAULT_DAYS` として schedule と API の両方の Lambda に渡すため、Team 設定の API が `defaults` として返す値と schedule が使う値は常に同じです。知らない field や範囲外の日数は schedule と API の起動時にエラーにします
 
 日数は 1〜365 の整数です。ただし `timesheetReminderDays` は 1〜31 です（督促は過去 92 日の工数しか見ないため、それより長い日数では督促が届かなくなります）。Team の設定は Team を読める member なら誰でも読め（`canManage` で変更できるかを返します）、変更は Team manager かつ Workspace の業務データを書ける人だけができます。route の `teams.manage` と handler の `requireTeamPermission(..., 'manager')` の両方で確認し、body は認可の後に検証します。保存は `expectedRevision` を条件にした transaction で、変更前後の日数を `notification-reminders.updated` の audit event に同じ transaction で残します。`Idempotency-Key` 付きの保存は、key ごとの receipt 行（sort key `TEAM#<teamId>#MUTATION#<key の sha256>`）に request の fingerprint と保存した設定を同じ transaction で残します。応答が失われた後に同じ key・同じ body で再送されたときは、間に別の保存があっても revision の競合にせず、その key で保存した設定を返します。同じ key で別の body を送ると 409 `IdempotencyKeyReused` です。保存の transaction には呼び出し元の Workspace member 行の `version` と Enterprise の CONTROL revision の ConditionCheck も入れ、認可の確認から保存までに権限が変わった場合は 409 `TeamReminderSettingsAuthorizationChanged` で取り消します。保存済みの行は要求した Workspace と Team の ID を持つことも確かめ、壊れた行や別の scope の行は既定値に戻さずエラーにします。個人の `reminderDays` が壊れている場合も、通常の設定の読み取りと継承する保存を含めてエラーにします。Team の設定は NotificationsTable の `<workspaceId>#!team-reminder-settings` partition に Team ごとの行として保存します。member key は必ず `@` を含むので member の partition と衝突せず、`<workspaceId>#` で始まるので Workspace の削除・export の範囲に入ります。
 
@@ -249,14 +249,14 @@ Team と本人の設定は schedule の 1 回の実行の中で Team・member �
 
 `timesheet.submission-reminder` は、工数 entry が終わってから n 日（`timesheetReminderDays`、7）たっても `draft` または `rejected` のままの人に、Team の Project ごとに 1 通届きます。未提出の entry が残る間は n 日ごとに届きます。
 
-- schedule は 1 時間ごとに動きますが、工数の督促を作るのは 1 日 1 回、UTC の `NOTIFICATION_TIMESHEET_REMINDER_HOUR_UTC` 時（既定 0 時、日本時間 9 時）の実行だけです。その回が失敗した日は送らず、翌日の実行で送ります
+- schedule は 1 時間ごとに動きますが、工数の督促を作るのは 1 日 1 回、Workspace の time zone（今はすべての Workspace が `Asia/Tokyo`）で `NOTIFICATION_TIMESHEET_REMINDER_HOUR` 時（既定 9 時）の実行だけです。時刻は Workspace の時計で判定するため、夏時間のある time zone でも同じ現地時刻に届きます。その回が失敗した日は送らず、翌日の実行で送ります
 - 対象は Project directory にある全 Team です（その回だけ directory を読みます。読む量は Work Item の数ではなく Team・Project・member の数に比例します）。Team ごとに `TimeEntryTeamDateIndex` を直近 92 日分だけ読みます。それより前に始まった未提出の entry は督促しません
 - 重複排除 key は Workspace・Team・member・Project・n・「Unix epoch から数えて何番目の n 日か」です。同じ期間の再実行や retry は同じ event になります
 - 通知は Inbox の「工数の提出」として届き、最も古い未提出 entry の週の工数画面（`/teams/{teamId}/timesheet?week=<entry の開始時刻>`。ブラウザが閲覧者の timezone でその時刻を含む週（Workspace の週の始まりの曜日に合わせる）に直します）を開きます。title は持たず、概要は件数と最も古い日付です
 - 対象は Project に紐づく entry だけです。Project のない entry は一般の member の工数画面に出ず、そこから提出できないため督促しません
 - event は古い順に最大 20 件の entry ID を持ちます。projection は配信時にその entry を強整合で読み直し、本人の `draft` / `rejected` で、同じ Project に属し、scan 時の期限（その時点から n 日前）までに終わっている entry が 1 件も残っていなければ捨てます。日付を直して期限より後に終わる entry になった場合も数えません。残っていれば、その entry の revision を条件にした ConditionCheck を通知の保存と同じ transaction に入れるため、読み直しと保存の間に提出されると保存は取り消され、retry で読み直して捨てます。読み直す手段がない projection では督促を届けません
 - 宛先の権限は、その Project の通知として確認します（その Project を読めること）。Inbox・Slack・Email のどれでも同じで、Team の全 Project を読める必要はありません。読めなくなった Project の entry は、ほかの Project の督促を止めません
-- Slack への配信は送信時に宛先の権限を確認しますが、提出状況は読み直しません。quiet hours や digest で Slack 送信が遅れる間に提出した場合は、Slack に古い督促が届くことがあります
+- Slack と Email への配信も、送信の直前に同じ entry を強整合で読み直します。通知行は event の entry ID（`timeEntryIds`）と期限（`timesheetDueBefore`）を持ち、projection と同じ条件で未提出の entry が 1 件も残っていなければ送らずに `suppressed` で終えます。quiet hours や digest で送信が遅れる間に提出した場合も、古い督促は届きません。entry ID を持たない行と、読み直す手段（`ANALYTICS_TABLE_NAME`）のない送信 job では督促を送りません。読み直しから送信までの間に提出した場合は、まれに届くことがあります
 
 ### 週報の督促
 
