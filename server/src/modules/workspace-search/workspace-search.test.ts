@@ -2493,6 +2493,69 @@ test('reads personal Focus views and rejects Triage until its queue ownership is
   })).rejects.toMatchObject({ code: 'TaskViewNotFound', status: 404 })
 })
 
+test('reads a view saved with a retired list or timeline layout as a table', async () => {
+  let retiredMode: string | undefined
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], {
+      beforeGet: (items) => {
+        if (!retiredMode) return
+        for (const item of items.values()) {
+          const definition = item.definition
+          if (item.entryType !== 'task-view' || !isTestRecord(definition)) continue
+          const layout = definition.layout
+          if (isTestRecord(layout)) layout.mode = retiredMode
+        }
+      },
+    }),
+    {} as DynamoDBClient,
+  )
+  const ownerAccess = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    input: {
+      name: 'My tasks',
+      visibility: 'personal',
+      definition: {
+        surface: 'my-tasks',
+        scope: { kind: 'viewer' },
+        filters: {},
+        layout: {
+          mode: 'board',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+
+  for (const mode of ['list', 'timeline']) {
+    retiredMode = mode
+    expect(await client.getTaskView({
+      workspaceId: 'workspace-1',
+      viewId: created.id,
+      access: ownerAccess,
+    })).toMatchObject({ definition: { layout: { mode: 'table' } } })
+  }
+})
+
 test('keeps Gantt display options in a saved view and rejects an unknown Gantt scale', async () => {
   const client = new DynamoDbWorkspaceSearchClient(
     'search-table',
@@ -4973,3 +5036,13 @@ test('rejects a title phase cursor for a query without a keyword', async () => {
     ...(first.nextCursor ? { cursor: first.nextCursor } : {}),
   })).rejects.toMatchObject({ code: 'InvalidSearchCursor', status: 400 })
 })
+
+/**
+ * Checks whether a stored test value is a plain record.
+ *
+ * @param value - Stored value.
+ * @returns Whether the value is a record.
+ */
+function isTestRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}

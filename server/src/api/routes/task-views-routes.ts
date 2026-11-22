@@ -1277,10 +1277,14 @@ function readTaskViewGanttScale(value: unknown): TaskViewGanttScale {
 /**
  * Reads one supported task-view layout mode.
  *
+ * `list` and `timeline` were accepted before no screen offered them; a client that still sends
+ * either gets a table instead of an error.
+ *
  * @param value - Untrusted layout mode.
  * @returns Supported layout mode.
  */
 function readTaskViewLayoutMode(value: unknown): TaskViewLayout['mode'] {
+  if (value === 'list' || value === 'timeline') return 'table'
   if (
     value === 'table' ||
     value === 'board' ||
