@@ -26,9 +26,6 @@ export const WORK_ITEM_IMPORT_STRUCTURE_TARGET_FIELDS = [
 /** Import target field that fills the contributor assignments of the created Work Item. */
 export const WORK_ITEM_IMPORT_CONTRIBUTORS_TARGET_FIELD = 'contributors'
 
-/** Most schedule dependencies one imported row may declare. */
-export const WORK_ITEM_IMPORT_ROW_LINK_LIMIT = 50
-
 /** Longest row key, WBS number, or reference accepted in an import. */
 const importKeyMaxLength = 256
 
@@ -555,9 +552,7 @@ function readDependencies(
   } else {
     return fail('dependencies must be text or a JSON array.')
   }
-  if (references.length > WORK_ITEM_IMPORT_ROW_LINK_LIMIT) {
-    return fail(`A row can have at most ${WORK_ITEM_IMPORT_ROW_LINK_LIMIT} dependencies.`)
-  }
+  // Planning stores any number of predecessors, so a row is limited only by the rows of the file.
   return references
 }
 

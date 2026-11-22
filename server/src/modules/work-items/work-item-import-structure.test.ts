@@ -240,6 +240,21 @@ describe('Work Item import structure', () => {
     expect(preview.errors.map((error) => [error.field, error.code])).toEqual([['relations', 'ImportRelationLimitExceeded']])
   })
 
+  test('accepts a row with more predecessors than relations a row may declare', () => {
+    // Planning stores any number of predecessors, so an export of such a graph re-imports.
+    const preview = previewWorkItemImport('json', source([
+      ...Array.from({ length: 120 }, (_, index) => ({ Key: `p${index}` })),
+      { Key: 'last', Predecessors: Array.from({ length: 120 }, (_, index) => ({ key: `p${index}` })) },
+    ]), [
+      ...baseMapping,
+      { sourceField: 'Key', targetField: 'importKey' },
+      { sourceField: 'Predecessors', targetField: 'dependencies' },
+    ])
+
+    expect(preview.errors).toEqual([])
+    expect(preview.links.filter((link) => link.kind === 'dependency')).toHaveLength(120)
+  })
+
   test('accepts as many declared relations as a Work Item can hold', () => {
     const declare = (count: number) => [
       { Key: 'hub', Relations: Array.from({ length: count }, (_, index) => ({ type: 'related', key: `spoke-${index}` })) },
