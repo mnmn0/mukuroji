@@ -72,6 +72,8 @@ test('Slack notifications use the sparse due queue with bounded execution and re
     {
       Effect: 'Allow', Action: 'dynamodb:GetItem',
       Resource: [
+        // Timesheet reminders reread their time entries before they are sent.
+        { 'Fn::GetAtt': ['AnalyticsTable3F84C304', 'Arn'] },
         { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
         { 'Fn::GetAtt': ['RequestIntakeTable608708D4', 'Arn'] },
         { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
@@ -105,6 +107,11 @@ test('Email notifications drain their own sparse queue and send only as the conf
   expect(serialized).not.toContain('secretsmanager:');
   expect(serialized).not.toContain('dynamodb:Scan');
   expect(statements).toEqual(expect.arrayContaining([
+    // Timesheet reminders reread their time entries before they are sent.
+    expect.objectContaining({
+      Effect: 'Allow', Action: 'dynamodb:GetItem',
+      Resource: expect.arrayContaining([{ 'Fn::GetAtt': ['AnalyticsTable3F84C304', 'Arn'] }]),
+    }),
     expect.objectContaining({
       Effect: 'Allow', Action: 'ses:SendEmail',
       Condition: { StringEquals: { 'ses:FromAddress': { Ref: 'NotificationEmailSender' } } },
@@ -2004,6 +2011,8 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
         AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
         AUDIT_RETENTION_DAYS: { Ref: 'AuditRetentionDays' },
         CUSTOMERS_TABLE_NAME: { Ref: 'CustomersTableB554B793' },
+        // One parameter gives the schedule and the API the same default reminder days.
+        NOTIFICATION_REMINDER_DEFAULT_DAYS: { Ref: 'NotificationReminderDefaultDays' },
         NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
         NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
         PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
