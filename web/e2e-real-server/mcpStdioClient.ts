@@ -61,6 +61,9 @@ export class McpStdioClient {
     this.child.stdout.on('data', (chunk: string) => { this.readStdout(chunk) })
     this.child.stderr.setEncoding('utf8')
     this.child.stderr.on('data', (chunk: string) => { this.stderr = `${this.stderr}${chunk}`.slice(-4_000) })
+    this.child.on('error', (error) => {
+      this.rejectAll(new Error(`MCP server could not start: ${error.message}`))
+    })
     this.child.on('exit', (code) => {
       this.rejectAll(new Error(`MCP server exited with code ${String(code)}. stderr: ${this.stderr}`))
     })
@@ -160,12 +163,19 @@ export class McpStdioClient {
   }
 
   /**
-   * Settles the request a response line answers. Server-initiated messages are ignored.
+   * Settles the request a response line answers. Server-initiated messages and non-JSON lines are ignored.
    *
    * @param line - One JSON-RPC message.
    */
   private settle(line: string): void {
-    const message: unknown = JSON.parse(line)
+    let message: unknown
+    try {
+      message = JSON.parse(line)
+    } catch {
+      // stdout carries only the protocol; a stray line must not crash the test worker.
+      this.stderr = `${this.stderr}\nnon-JSON stdout line ignored`.slice(-4_000)
+      return
+    }
     if (!message || typeof message !== 'object' || !('id' in message) || typeof message.id !== 'number') return
     const pending = this.pending.get(message.id)
     if (!pending) return

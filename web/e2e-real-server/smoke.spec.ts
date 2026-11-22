@@ -340,16 +340,17 @@ test('starts and reports on a Work Item through the MCP server', async ({ reques
 
   const baseURL = testInfo.project.use.baseURL
   if (!baseURL) throw new Error('The real-server config must set use.baseURL.')
-  const mcp = await McpStdioClient.connect({
-    MUKUROJI_MCP_URL: new URL(baseURL).origin,
-    MUKUROJI_MCP_TOKEN: secret,
-    MUKUROJI_MCP_TEAM_ID: teamId,
-    MUKUROJI_MCP_ASSIGNEE_ID: memberId,
-    MUKUROJI_MCP_PROJECT_ID: requireState('projectId'),
-    MUKUROJI_MCP_AGENT_NAME: agentName,
-    MUKUROJI_MCP_RUNTIME: 'claude-code',
-  })
+  let mcp: McpStdioClient | undefined
   try {
+    mcp = await McpStdioClient.connect({
+      MUKUROJI_MCP_URL: new URL(baseURL).origin,
+      MUKUROJI_MCP_TOKEN: secret,
+      MUKUROJI_MCP_TEAM_ID: teamId,
+      MUKUROJI_MCP_ASSIGNEE_ID: memberId,
+      MUKUROJI_MCP_PROJECT_ID: requireState('projectId'),
+      MUKUROJI_MCP_AGENT_NAME: agentName,
+      MUKUROJI_MCP_RUNTIME: 'claude-code',
+    })
     const configuration = await mcp.callTool('get_configuration')
     expect(configuration).toMatchObject({
       isError: false,
@@ -391,7 +392,7 @@ test('starts and reports on a Work Item through the MCP server', async ({ reques
       structuredContent: { data: { report: { kind: 'verification', sequence: 1 } } },
     })
   } finally {
-    await mcp.close()
+    await mcp?.close()
     await request.delete(`/api/developer/me/api-keys/${encodeURIComponent(apiKey.id)}`, { headers: mutationHeaders() })
   }
 })
@@ -446,5 +447,10 @@ test('logs in through the Web and shows the agent run on the Factory board', asy
   await expect(page.getByText(agentWorkItemTitle).first()).toBeVisible()
   await expect(page.getByText(agentName).first()).toBeVisible()
 
-  await publishCoverageSummary(summarizeJsCoverage(await page.coverage.stopJSCoverage()), testInfo)
+  // Coverage is a reference value only, so a failure to write it never fails the smoke suite.
+  try {
+    await publishCoverageSummary(summarizeJsCoverage(await page.coverage.stopJSCoverage()), testInfo)
+  } catch (error) {
+    console.warn(`Reference coverage was not written: ${error instanceof Error ? error.message : String(error)}`)
+  }
 })

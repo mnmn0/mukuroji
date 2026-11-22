@@ -105,7 +105,7 @@ export function summarizeJsCoverage(entries: JsCoverageEntry[]): CoverageSummary
 
 /**
  * Writes the summary to `coverage/`, attaches it to the Playwright report, and prints one line.
- * In GitHub Actions it also appends a table to the job summary. Nothing here fails the test.
+ * In GitHub Actions it also appends a table to the job summary. The smoke test ignores a failure here.
  *
  * @param summary - Reference coverage summary.
  * @param testInfo - Test that collected the coverage.

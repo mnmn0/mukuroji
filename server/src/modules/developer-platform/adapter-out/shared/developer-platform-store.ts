@@ -8500,7 +8500,7 @@ function readWebhookEvent(
   }
   const apiVersion = event.apiVersion
   const occurredAt = readTimestamp(event.occurredAt, 'Webhook event occurrence')
-  const workspaceId = readIdentifier(event.workspaceId, 'Webhook event Workspace ID')
+  const workspaceId = readDeveloperWorkspaceId(event.workspaceId, 'Webhook event Workspace ID')
   if (workspaceId !== expectedWorkspaceId) {
     throw forbidden(
       'WebhookWorkspaceMismatch',
