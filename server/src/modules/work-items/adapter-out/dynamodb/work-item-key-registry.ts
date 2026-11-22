@@ -481,6 +481,8 @@ export async function listWorkItemKeyPrefixes(
         ':partition': createRegistryPartitionKey(directoryId),
         ':prefix': PREFIX_RECORD_PREFIX,
       },
+      // A prefix change decides between reusing and reserving a prefix from this read.
+      ConsistentRead: true,
       ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
     }))
     for (const item of response.Items ?? []) {
