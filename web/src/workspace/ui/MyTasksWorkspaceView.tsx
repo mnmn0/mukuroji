@@ -2,7 +2,9 @@ import {
   type CanonicalWorkItem,
   DEFAULT_WORK_ITEM_TYPE_ID,
   type ResolvedWorkItemConfiguration,
+  type WorkItemPriority,
   type WorkItemScheduleCalendarPolicy,
+  type WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { Fragment, useMemo, useState, type DragEvent, type ReactNode } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
@@ -13,6 +15,7 @@ import {
   type TaskViewPresentationSettings,
 } from '../../task-views/model/taskViewPresentation'
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
+import type { ProjectTaskDirectScheduleHandle } from '../../task-views/model/projectTaskDirectActionRequest'
 import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
 import {
   resolveEditableWorkflowStatuses,
@@ -50,6 +53,18 @@ export type MyTasksViewMode = 'board' | 'table' | 'gantt' | 'calendar'
 export type MyTasksWorkspaceViewProps = {
   /** Checks whether one permission-pruned Work Item exposes status mutation controls. */
   canMoveTaskStatus?: (task: CanonicalWorkItem) => boolean
+  /** Checks whether the table may edit one Work Item's due date and priority in place. */
+  canEditTask?: (task: CanonicalWorkItem) => boolean
+  /**
+   * Starts a schedule change from the calendar, the Gantt chart, or the table's due date. The
+   * view shows the returned preview and confirms it; schedules are read-only without it.
+   */
+  onRequestScheduleChange?: (
+    task: CanonicalWorkItem,
+    operation: WorkItemScheduleOperation,
+  ) => ProjectTaskDirectScheduleHandle
+  /** Saves a priority chosen in the table; the priority is read-only without it. */
+  onUpdatePriority?: (task: CanonicalWorkItem, priority: WorkItemPriority) => Promise<void>
   /** Workspace task keys of Work Items the user contributes to without owning them. */
   contributorTaskKeys?: ReadonlySet<string>
   /** Team IDs whose Work Item configurations could not be loaded. */
@@ -120,7 +135,10 @@ export type MyTasksWorkspaceViewProps = {
  * @returns The personal Workspace task board.
  */
 export function MyTasksWorkspaceView({
+  canEditTask,
   canMoveTaskStatus,
+  onRequestScheduleChange,
+  onUpdatePriority,
   contributorTaskKeys,
   configurationFailedTeamIds,
   configurationsByTeam,
@@ -360,6 +378,7 @@ export function MyTasksWorkspaceView({
           month={calendarMonth}
           monthNote="shown-month"
           onMonthChange={changeCalendarMonth}
+          onRequestScheduleChange={onRequestScheduleChange}
           onSelectTask={onOpenTask}
           t={t}
           tasks={ganttTasks}
@@ -374,12 +393,15 @@ export function MyTasksWorkspaceView({
         {taskViewToolbar}
         {viewModeSwitch}
         <MyTasksTaskTable
+          canEditTask={canEditTask}
           configurationsByTeam={configurationsByTeam}
           contributorTaskKeys={contributorTaskKeys}
           focusedTaskKey={focusedTaskKey}
           locale={locale}
           onOpenTask={onOpenTask}
+          onRequestScheduleChange={onRequestScheduleChange}
           onTaskActionMenuOpen={onTaskActionMenuOpen}
+          onUpdatePriority={onUpdatePriority}
           personLabels={personLabels}
           presentation={presentation}
           selectedTaskKeys={selectedTaskKeys}
@@ -400,6 +422,7 @@ export function MyTasksWorkspaceView({
         <TaskGanttView
           configurationsByTeam={configurationsByTeam}
           group={ganttGroup}
+          onRequestScheduleChange={onRequestScheduleChange}
           onSelectTask={onOpenTask}
           outline={ganttOutline}
           t={t}
