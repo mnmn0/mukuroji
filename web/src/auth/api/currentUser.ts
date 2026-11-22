@@ -36,6 +36,10 @@ export type CurrentUser = {
   canViewCustomerSensitiveData?: boolean
   /** Whether the current user may read Customer records and relationship identifiers. */
   canReadCustomers?: boolean
+  /** Whether the current user may search the Workspace audit log (`audit.read` or `audit.export`). */
+  canReadAuditLog?: boolean
+  /** Whether the current user may request and download audit log exports (`audit.export`). */
+  canExportAuditLog?: boolean
   /** Whether the current user may create Customer Requests. */
   canManageCustomerRequests?: boolean
   /** Whether the current user may create or update Customer saved views. */
