@@ -48,8 +48,8 @@ import {
 import {
   applyAnalyticsFixedPeriod,
   applyAnalyticsPeriodPreset,
-  findAnalyticsPeriodPreset,
   isAnalyticsPeriodPreset,
+  selectAnalyticsPeriodPreset,
   type AnalyticsPeriodCalendar,
 } from '../model/periodPresets'
 import { readRecord } from '../../shared/api/jsonValidation'
@@ -1198,9 +1198,9 @@ function AnalyticsPeriodPresetPicker({
   t: ReturnType<typeof createTranslator>
   timeZone: string
 }) {
-  const selectedPreset = filter.periodPreset ?? (calendarSettings
-    ? findAnalyticsPeriodPreset(filter.period, new Date(), timeZone, calendarSettings)
-    : undefined)
+  const selectedPreset = calendarSettings
+    ? selectAnalyticsPeriodPreset(filter, new Date(), timeZone, calendarSettings)
+    : filter.periodPreset
   return (
     <div className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-muted)]">
       <label className="grid gap-1.5">

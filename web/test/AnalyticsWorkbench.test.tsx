@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { AnalyticsWorkbench } from '../src/analytics/ui/AnalyticsWorkbench'
 import { parseAnalyticsCustomFieldDraftValue } from '../src/analytics/model/filterDraft'
+import { applyAnalyticsPeriodPreset } from '../src/analytics/model/periodPresets'
 import {
   analyticsEvidenceFixture,
   analyticsFilterFixture,
@@ -53,17 +54,34 @@ describe('AnalyticsWorkbench', () => {
     expect(withSettings).toMatch(/<option value="custom" selected/u)
   })
 
-  test('shows the relative period a saved report remembers', () => {
-    const html = renderToStaticMarkup(
+  test('shows the relative period a saved report remembers while its dates are current', () => {
+    const calendarSettings = { fiscalYearStartMonth: 4, weekStartDay: 1 as const }
+    const current = renderToStaticMarkup(
       <AnalyticsWorkbench
         {...baseProps}
-        calendarSettings={{ fiscalYearStartMonth: 4, weekStartDay: 1 }}
+        calendarSettings={calendarSettings}
+        filter={applyAnalyticsPeriodPreset(
+          baseProps.filter,
+          'last-fiscal-year',
+          new Date(),
+          baseProps.timeZone,
+          calendarSettings,
+        )}
+        onFilterChange={() => undefined}
+      />,
+    )
+    // An old snapshot keeps the dates it was taken with.
+    const stale = renderToStaticMarkup(
+      <AnalyticsWorkbench
+        {...baseProps}
+        calendarSettings={calendarSettings}
         filter={{ ...baseProps.filter, periodPreset: 'last-fiscal-year' }}
         onFilterChange={() => undefined}
       />,
     )
 
-    expect(html).toMatch(/<option value="last-fiscal-year" selected/u)
+    expect(current).toMatch(/<option value="last-fiscal-year" selected/u)
+    expect(stale).not.toMatch(/<option value="last-fiscal-year" selected/u)
   })
 
   test('explains a failed calendar settings read and offers a retry while presets stay disabled', () => {

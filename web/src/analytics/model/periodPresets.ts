@@ -108,6 +108,36 @@ export function refreshAnalyticsPresetPeriod(
 }
 
 /**
+ * Picks the preset the period picker shows for a filter.
+ *
+ * A remembered preset is shown while its dates are the current ones. An immutable snapshot
+ * taken last week keeps last week's dates, so its "this week" preset is not shown as current.
+ * Otherwise the first preset covering the same local days is shown.
+ *
+ * @param filter - Current Analytics filter.
+ * @param now - Current instant.
+ * @param timeZone - IANA time zone the report reads calendar dates in.
+ * @param calendar - Workspace fiscal year start month and week start day.
+ * @returns The preset to show, or undefined for a custom period.
+ */
+export function selectAnalyticsPeriodPreset(
+  filter: AnalyticsFilter,
+  now: Date,
+  timeZone: string,
+  calendar: AnalyticsPeriodCalendar,
+): WorkspaceCalendarPeriodPreset | undefined {
+  const matched = findAnalyticsPeriodPreset(filter.period, now, timeZone, calendar)
+  if (!filter.periodPreset) return matched
+  const remembered = createAnalyticsPresetPeriod(filter.periodPreset, now, timeZone, calendar)
+  const current =
+    formatAnalyticsCalendarDate(remembered.from, timeZone) ===
+      formatAnalyticsCalendarDate(filter.period.from, timeZone) &&
+    formatAnalyticsCalendarDate(remembered.to, timeZone) ===
+      formatAnalyticsCalendarDate(filter.period.to, timeZone)
+  return current ? filter.periodPreset : matched
+}
+
+/**
  * Finds the preset whose local dates match a filter period, so the picker can show it.
  *
  * Only calendar dates are compared, which keeps a period chosen through the date inputs
