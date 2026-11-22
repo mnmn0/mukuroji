@@ -109,7 +109,7 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
     tenantAdministrationTable,
     workItemsTable,
   } = input.dataStores;
-  const { auditRetentionDays } = input.parameters;
+  const { auditRetentionDays, notificationReminderDefaultDays } = input.parameters;
 
   return {
     id: 'NotificationSchedule',
@@ -119,6 +119,8 @@ export function defineNotificationScheduleJob(input: ScheduleWorkerInput): Sched
       AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
       AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
       CUSTOMERS_TABLE_NAME: customersTable.tableName,
+      // The same parameter feeds the API, which shows these defaults in the Team settings.
+      NOTIFICATION_REMINDER_DEFAULT_DAYS: notificationReminderDefaultDays.valueAsString,
       NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
       NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
