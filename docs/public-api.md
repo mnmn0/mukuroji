@@ -127,7 +127,7 @@ POSTは任意query `assigneeUserId` でも担当者を固定できます。こ�
   timezone での `YYYY-MM-DD` です。`actualStartDate` は初めて `started` か `completed` に入った日で、着手前は省きます。
   `actualEndDate` は直近の完了日で、`completed` の間だけ返します。権限は `GET /api/v1/work-items/{workItemId}` と同じで、
   `work-items:read` scope が要ります。`WorkItem` の response schema は閉じた object のため、実績日は含めません。
-  `GET /api/developer/exports` も同じ `WorkItem` schema の page を返すため実績日を含めません。export した Work Item の
+  `GET /api/developer/exports` は `WorkItem` に Contributor と受け入れ条件を足した `WorkItemExportItem` schema の page を返し、実績日は含めません。export した Work Item の
   実績日が要る client は、この endpoint で 1 件ずつ読みます。
 - Work Item に link された Document は `GET /api/v1/work-items/{workItemId}/documents?teamId={teamId}` で
   `{ items: [{ id, title }], hasMore, nextCursor? }` として一覧し、本文は
@@ -328,7 +328,7 @@ Worker retry を使い切った job は `failed` として source を削除し�
 
 Worker が retry 上限に達した message は原因調査用 DLQ に保持する。DLQ の redrive で terminal job を再開せず、原因を修正した後に新しい idempotency key と source で import を作成し直す。
 
-Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。export は Workspace 管理者（`canExport`）に限るため、export page の Work Item は Contributor（`contributorAssignments`）と受け入れ条件（`acceptanceCriteria`）を含む。残工数（`remainingEffortMinutes`）と手入力の進捗（`progressPercent`）は含めない。
+Export は `GET /api/developer/exports?format=csv|json` で同期 download する。現在の RBAC で閲覧可能な Work Item だけを含め、credential、internal key、secret、redact 対象 field は含めない。export は Workspace 管理者（`canExport`）に限るため、export page の Work Item（`WorkItemExportItem` schema）は Contributor（`contributorAssignments`）と受け入れ条件（`acceptanceCriteria`）を含む。残工数（`remainingEffortMinutes`）と手入力の進捗（`progressPercent`）は含めない。
 
 Web の export file は CSV・JSON・Excel（`.xlsx`）・MS Project XML から選べる。Excel と MS Project XML は JSON の export page から browser で作る。各 Work Item の Team の階層（`GET /api/teams/{teamId}/work-item-hierarchy`）と Planning の依存（`GET /api/planning`）を読み、次の列を足して WBS の順に並べる。
 

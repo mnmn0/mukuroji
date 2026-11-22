@@ -2593,6 +2593,28 @@
         ],
         "type": "object"
       },
+      "PublicWorkItemExportPage": {
+        "additionalProperties": false,
+        "properties": {
+          "hasMore": {
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/WorkItemExportItem"
+            },
+            "type": "array"
+          },
+          "nextCursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "hasMore"
+        ],
+        "type": "object"
+      },
       "PublicWorkItemPage": {
         "additionalProperties": false,
         "properties": {
@@ -3793,6 +3815,186 @@
           "teamId",
           "workItemId",
           "revision"
+        ],
+        "type": "object"
+      },
+      "WorkItemExportContributorAssignment": {
+        "additionalProperties": false,
+        "description": "Contributor assignment of an exported Work Item.",
+        "properties": {
+          "assignmentId": {
+            "description": "Stable identifier of the assignment within its Work Item.",
+            "type": "string"
+          },
+          "jobRoleId": {
+            "description": "Stable job role ID from the Work Item configuration.",
+            "type": "string"
+          },
+          "memberUserId": {
+            "description": "Workspace user ID of the contributing member, when decided.",
+            "type": "string"
+          },
+          "plannedEffortMinutes": {
+            "description": "Planned effort for this contribution in minutes.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "description": "Progress of this contribution.",
+            "enum": [
+              "planned",
+              "in-progress",
+              "done"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "assignmentId",
+          "status"
+        ],
+        "type": "object"
+      },
+      "WorkItemExportItem": {
+        "additionalProperties": false,
+        "description": "Work Item in a developer export page. Exports are read by Workspace administrators, so they also carry contributors and acceptance criteria for a re-import.",
+        "properties": {
+          "acceptanceCriteria": {
+            "description": "Conditions the Work Item must meet before it is accepted; absent when none.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemAcceptanceCriterion"
+            },
+            "type": "array"
+          },
+          "assignedProjectId": {
+            "type": "string"
+          },
+          "assigneeEmail": {
+            "format": "email",
+            "type": "string"
+          },
+          "assigneeName": {
+            "type": "string"
+          },
+          "assigneeUserId": {
+            "type": "string"
+          },
+          "contributorAssignments": {
+            "description": "Contributors carrying out the work, separate from the accountable owner; absent when none.",
+            "items": {
+              "$ref": "#/components/schemas/WorkItemExportContributorAssignment"
+            },
+            "type": "array"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "creatorMemberKey": {
+            "type": "string"
+          },
+          "customFieldValues": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "description": {
+            "type": "string"
+          },
+          "dueDate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkItemScheduleDate"
+              },
+              {
+                "const": "",
+                "type": "string"
+              }
+            ],
+            "description": "Deadline projection derived from schedule; empty when unscheduled."
+          },
+          "id": {
+            "type": "string"
+          },
+          "priority": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "type": "string"
+          },
+          "relationIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/WorkItemSchedule"
+          },
+          "schemaVersion": {
+            "const": 2,
+            "type": "integer"
+          },
+          "source": {
+            "const": "dynamodb",
+            "type": "string"
+          },
+          "statusCategory": {
+            "enum": [
+              "backlog",
+              "unstarted",
+              "started",
+              "completed",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "teamId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "workItemTypeId": {
+            "type": "string"
+          },
+          "workflowSchemaVersion": {
+            "const": 1,
+            "type": "integer"
+          },
+          "workflowStatusId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "revision",
+          "id",
+          "teamId",
+          "title",
+          "assigneeUserId",
+          "dueDate",
+          "schedule",
+          "priority",
+          "creatorMemberKey",
+          "workflowStatusId",
+          "workItemTypeId",
+          "statusCategory",
+          "workflowSchemaVersion",
+          "customFieldValues",
+          "relationIds",
+          "createdAt",
+          "updatedAt",
+          "source"
         ],
         "type": "object"
       },
@@ -5615,7 +5817,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/PublicWorkItemPage"
+                  "$ref": "#/components/schemas/PublicWorkItemExportPage"
                 }
               }
             },
