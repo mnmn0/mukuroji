@@ -152,7 +152,8 @@ export function WorkspaceBulkInvitePanel({
   }
 
   const keepFailedRows = () => {
-    setText(createBulkInvitationRetryCsv(failedRows))
+    // Rows past the bulk limit were never sent, so they stay in the input after the failed rows.
+    setText(createBulkInvitationRetryCsv([...failedRows, ...(plan?.overflowRows ?? [])]))
     resetPlan()
   }
 
@@ -299,7 +300,7 @@ export function WorkspaceBulkInvitePanel({
                   : t('workspace.access.bulk.send').replace('{count}', String(sendableIndexes.length))}
               </button>
             ) : null}
-            {hasSent && !isSending && failedRows.length > 0 ? (
+            {hasSent && !isSending && failedRows.length + plan.overflowRows.length > 0 ? (
               <button
                 className="workbench-button-secondary min-h-10 px-4"
                 data-testid="workspace-bulk-invite-keep-failed"

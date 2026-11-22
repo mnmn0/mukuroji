@@ -52,10 +52,15 @@ export type BulkInvitationRow = {
 
 /** Result of checking a bulk invitation input without sending anything. */
 export type BulkInvitationPlan = {
-  /** Every row of the input, in input order, with blank lines left out. */
+  /** The first rows of the input that one bulk invitation sends, in input order, with blank lines left out. */
   rows: BulkInvitationRow[]
-  /** Whether the input had more rows than one bulk invitation sends; the extra rows are left out. */
+  /** Whether the input had more rows than one bulk invitation sends. */
   truncated: boolean
+  /**
+   * Rows past the bulk limit, unchecked and never sent. They are kept so that putting the unsent
+   * rows back into the input does not drop them.
+   */
+  overflowRows: BulkInvitationRow[]
 }
 
 /** State the check compares the input with. */
@@ -300,7 +305,19 @@ export function planBulkInvitation(text: string, context: BulkInvitationContext)
     return issue ? { ...row, issue } : row
   })
 
-  return { rows, truncated }
+  const overflowRows = rawRows.slice(WORKSPACE_BULK_INVITATION_MAX_ROWS).map((raw): BulkInvitationRow => {
+    const roleInput = raw.role?.trim() || undefined
+    const row: BulkInvitationRow = {
+      email: normalizeWorkspaceInvitationEmail(raw.email),
+      line: raw.line,
+      name: raw.name?.trim() || undefined,
+      role: context.defaultRole,
+    }
+    if (roleInput) row.roleInput = roleInput
+    return row
+  })
+
+  return { overflowRows, rows, truncated }
 }
 
 /**

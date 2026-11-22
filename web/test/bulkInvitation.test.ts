@@ -161,6 +161,7 @@ describe('planBulkInvitation', () => {
 
     expect(plan.rows).toHaveLength(WORKSPACE_BULK_INVITATION_MAX_ROWS)
     expect(plan.truncated).toBe(true)
+    expect(plan.overflowRows.map((row) => row.email)).toEqual(lines.slice(WORKSPACE_BULK_INVITATION_MAX_ROWS))
   })
 
   test('handles 100 rows in one check', () => {
