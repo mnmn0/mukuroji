@@ -26,7 +26,7 @@ test('reads keep only visible entries but count every entry', async () => {
   const scope = { workspaceId: 'ws', cycleId: 'cycle-a' }
   await captureCycleScheduleBaselineUseCase(store, scope, {
     capturedAt: '2026-11-22T00:00:00.000Z',
-    entries: [
+    readEntries: async () => [
       { teamId: 'team-a', workItemId: 'visible', endDate: '2026-11-30' },
       { teamId: 'team-b', workItemId: 'hidden', endDate: '2026-12-01' },
     ],
@@ -48,7 +48,7 @@ test('refuses a Cycle larger than one baseline holds', async () => {
   const entries = Array.from({ length: 1001 }, (_, index) => ({ teamId: 't', workItemId: `w${index}` }))
   const capture = captureCycleScheduleBaselineUseCase(store, { workspaceId: 'ws', cycleId: 'c' }, {
     capturedAt: '2026-11-22T00:00:00.000Z',
-    entries,
+    readEntries: async () => entries,
     callerAuthorization: [fence],
     auditContext,
   })

@@ -6,6 +6,7 @@ import {
   normalizeProjectScheduleBaselineName,
   PROJECT_SCHEDULE_BASELINE_NAME_MAX_LENGTH,
   type CaptureCycleScheduleBaselineRequest,
+  type CycleScheduleBaselineEntry,
   type CycleScheduleBaselineResponse,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
@@ -5145,26 +5146,19 @@ export function registerPlanningRoutes(routeApp: Hono): void {
       if (cycle.type !== 'cycle') {
         throw new PlanningError(404, 'PlanningEntityNotFound', 'Planning entity was not found.')
       }
-      const visible = filterPlanningSnapshotForPrincipal(principal, snapshot)
-      const workItems = new Map(visible.workItems.map((workItem) => [
-        createCycleBaselineEntryKey(workItem.teamId, workItem.id),
-        workItem,
-      ]))
-      const entries = visible.workItemLinks
-        .filter((link) => link.cycleId === cycleId)
-        .flatMap((link) => {
-          const workItem = workItems.get(createCycleBaselineEntryKey(link.teamId, link.workItemId))
-          return workItem
-            ? [{ teamId: workItem.teamId, ...createProjectScheduleBaselineEntry(workItem.id, workItem.schedule) }]
-            : []
-        })
       const response = await captureCycleScheduleBaselineUseCase(
         workItemDependencies.cycleScheduleBaselines,
         { workspaceId: principal.directoryId, cycleId },
         {
           capturedAt: new Date().toISOString(),
           ...(name === undefined ? {} : { name }),
-          entries,
+          readEntries: async () => readCycleBaselineEntries(
+            filterPlanningSnapshotForPrincipal(
+              principal,
+              await workItemDependencies.planning.get(principal.directoryId, await readPlanningWorkItemState(principal)),
+            ),
+            cycleId,
+          ),
           callerAuthorization: createPlanningCallerAuthorizationConditionChecks(
             principal,
             [],
@@ -5189,6 +5183,28 @@ export function registerPlanningRoutes(routeApp: Hono): void {
  */
 function createCycleBaselineEntryKey(teamId: string, workItemId: string) {
   return JSON.stringify([teamId, workItemId])
+}
+
+/**
+ * Freezes the current plan of the Cycle's Work Items that a filtered snapshot shows.
+ *
+ * @param visible - Planning snapshot filtered for the caller.
+ * @param cycleId - Cycle whose Work Items are frozen.
+ * @returns One entry per visible Work Item linked to the Cycle.
+ */
+function readCycleBaselineEntries(visible: PlanningSnapshot, cycleId: string): CycleScheduleBaselineEntry[] {
+  const workItems = new Map(visible.workItems.map((workItem) => [
+    createCycleBaselineEntryKey(workItem.teamId, workItem.id),
+    workItem,
+  ]))
+  return visible.workItemLinks
+    .filter((link) => link.cycleId === cycleId)
+    .flatMap((link) => {
+      const workItem = workItems.get(createCycleBaselineEntryKey(link.teamId, link.workItemId))
+      return workItem
+        ? [{ teamId: workItem.teamId, ...createProjectScheduleBaselineEntry(workItem.id, workItem.schedule) }]
+        : []
+    })
 }
 
 /**

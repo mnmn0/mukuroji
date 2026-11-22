@@ -202,7 +202,7 @@ export function CycleScheduleBaselinePanel({
           </button>
           <p className="text-xs text-[var(--workbench-muted)]">{labels.hint}</p>
           {isCapturing ? <p className="text-sm text-[var(--workbench-muted)]" role="status">{labels.capturing}</p> : null}
-          {captureFailed ? <p className="text-sm text-[var(--workbench-danger,#b91c1c)]" role="alert">{labels.captureError}</p> : null}
+          {captureFailed ? <p className="text-sm text-[var(--workbench-danger)]" role="alert">{labels.captureError}</p> : null}
         </form>
       ) : null}
     </section>

@@ -60,6 +60,15 @@ describe('Cycle schedule baselines', () => {
     expect(comparison.effortDeltaMinutes).toBe(0)
   })
 
+  test('does not count a closed Work Item as slipped', () => {
+    const closed = {
+      ...snapshot,
+      workItems: snapshot.workItems.map((workItem) =>
+        workItem.id === 'journey-copy' ? { ...workItem, statusCategory: 'canceled' as const } : workItem),
+    }
+    expect(compareCycleBaseline(baseline, 'cycle-14', closed).slipped).toEqual([])
+  })
+
   test('renders the comparison, the picker, and the save form for a manager', () => {
     const cycle = snapshot.entities.find((entity) => entity.id === 'cycle-14')!
     const response: CycleScheduleBaselineResponse = {

@@ -90,8 +90,11 @@ export type CaptureCycleScheduleBaselineInput<TCallerCheck, TAuditContext> = {
   capturedAt: string
   /** Optional trimmed name. */
   name?: string
-  /** Current plan of every Work Item in the Cycle that the caller may see. */
-  entries: CycleScheduleBaselineEntry[]
+  /**
+   * Reads the current plan of every Work Item in the Cycle that the caller may see. It is called
+   * after the list revision is pinned, so an older plan cannot become the newest baseline.
+   */
+  readEntries: () => Promise<CycleScheduleBaselineEntry[]>
   /** Server-built conditions that fail the write when the caller lost access. */
   callerAuthorization: readonly TCallerCheck[]
   /** Request audit context. */
@@ -106,7 +109,7 @@ export type CaptureCycleScheduleBaselineInput<TCallerCheck, TAuditContext> = {
  *
  * @param store - Baseline persistence.
  * @param scope - Authorized Workspace and Cycle.
- * @param capture - Entries, name, time, fences, and audit context.
+ * @param capture - Entry reader, name, time, fences, and audit context.
  * @returns The response with the new baseline.
  * @throws PlanningError 413 when the Cycle holds more Work Items than one baseline stores.
  */
@@ -115,19 +118,21 @@ export async function captureCycleScheduleBaselineUseCase<TCallerCheck, TAuditCo
   scope: CycleScheduleBaselineScope,
   capture: CaptureCycleScheduleBaselineInput<TCallerCheck, TAuditContext>,
 ): Promise<CycleScheduleBaselineResponse> {
-  if (capture.entries.length > CYCLE_SCHEDULE_BASELINE_MAX_ENTRIES) {
+  // Pin the list revision before reading the plan, so a concurrent capture of a newer plan wins.
+  const previous = await store.getIndex(scope.workspaceId, scope.cycleId)
+  const entries = await capture.readEntries()
+  if (entries.length > CYCLE_SCHEDULE_BASELINE_MAX_ENTRIES) {
     throw new PlanningError(
       413,
       'CycleScheduleBaselineTooLarge',
       `A Cycle schedule baseline can hold at most ${CYCLE_SCHEDULE_BASELINE_MAX_ENTRIES} Work Items.`,
     )
   }
-  const previous = await store.getIndex(scope.workspaceId, scope.cycleId)
   const baseline: StoredCycleScheduleBaseline = {
     id: (capture.createBaselineId ?? createDefaultBaselineId)(),
     ...(capture.name === undefined ? {} : { name: capture.name }),
     capturedAt: capture.capturedAt,
-    entries: capture.entries.map((entry) => ({ ...entry })),
+    entries: entries.map((entry) => ({ ...entry })),
   }
   const listed = [summarize(baseline), ...(previous?.savedBaselines ?? [])]
   const kept = listed.slice(0, CYCLE_SCHEDULE_BASELINE_MAX_SAVED)

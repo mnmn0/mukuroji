@@ -26,7 +26,7 @@ export type CycleBaselineComparison = {
   removed: { entry: CycleScheduleBaselineEntry; title?: string }[]
   /** Baseline Work Items the reader cannot see now. */
   hidden: number
-  /** Work Items whose planned end moved later, most delayed first. */
+  /** Open Work Items whose planned end moved later, most delayed first. */
   slipped: CycleBaselineSlippedItem[]
   /** Net change of planned effort in minutes across Work Items both sides estimate. */
   effortDeltaMinutes: number
@@ -66,7 +66,9 @@ export function compareCycleBaseline(
     }
     stillIn += 1
     const slip = deriveWorkItemScheduleSlip(entry, workItem.schedule)
-    if (slip.endSlipDays !== undefined && slip.endSlipDays > 0) slipped.push({ workItem, endSlipDays: slip.endSlipDays })
+    // The snapshot has no actual end date, so a closed Work Item's planned end says nothing about delay.
+    const open = workItem.statusCategory !== 'completed' && workItem.statusCategory !== 'canceled'
+    if (open && slip.endSlipDays !== undefined && slip.endSlipDays > 0) slipped.push({ workItem, endSlipDays: slip.endSlipDays })
     effortDeltaMinutes += slip.effortDeltaMinutes ?? 0
   }
   const removed = baseline.entries
