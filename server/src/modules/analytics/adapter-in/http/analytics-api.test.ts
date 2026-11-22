@@ -1733,3 +1733,76 @@ test('never lets parallel Milestone audit reads reserve past the event limit', a
   expect(maxCommitted).toBeLessThanOrEqual(10_000)
   expect(delivered).toBeLessThanOrEqual(10_000)
 })
+
+test('shares the Milestone audit event budget across history retries', async () => {
+  configureFakeProjectClients(true)
+  const workspaceId = 'user#demo@example.com'
+  const planning = new InMemoryPlanningClient(() => new Date())
+  const parent = (id: string, type: 'portfolio' | 'roadmap', expectedRevision: number) => ({
+    ...createMilestoneInput(id, expectedRevision, {}),
+    type,
+    title: id,
+    parentId: type === 'roadmap' ? 'trend-portfolio' : undefined,
+    baseline: { startDate: '2026-07-01', endDate: '2026-09-30' },
+    forecast: { startDate: '2026-07-01', endDate: '2026-09-30' },
+  })
+  await planning.create(workspaceId, parent('trend-portfolio', 'portfolio', 0), { workItems: [] })
+  await planning.create(workspaceId, parent('trend-roadmap', 'roadmap', 1), { workItems: [] })
+  // Three timelines of 1,500 events: 4,500 per attempt, so the third attempt passes 10,000.
+  const ids = ['milestone-a', 'milestone-b', 'milestone-c']
+  for (const [index, id] of ids.entries()) {
+    await planning.create(workspaceId, createMilestoneInput(id, index + 2, {
+      teamId: 'core-team',
+      projectId: 'refero',
+    }), { workItems: [] })
+  }
+  const base = createAnalyticsAuditEvent('planning-entity', 'milestone-template', '2026-06-01T00:00:00.000Z')
+  let delivered = 0
+  setTestAppDependencies({
+    analytics: new InMemoryAnalyticsRepository(),
+    planning,
+    auditEvents: {
+      async getEvent() {
+        return undefined
+      },
+      async query(input) {
+        const offset = Number(input.cursor ?? '0')
+        const end = Math.min(1_500, offset + (input.limit ?? 100))
+        delivered += end - offset
+        // Every event predates the Milestone's latest write, so each attempt retries.
+        return {
+          events: Array.from({ length: end - offset }, (_, index) => ({
+            ...base,
+            eventId: `${input.entityId}-${offset + index}`,
+            entityId: input.entityId ?? '',
+            metadata: { teamId: 'core-team', projectId: 'refero' },
+            changes: [],
+          })),
+          ...(end < 1_500 ? { nextCursor: String(end) } : {}),
+        }
+      },
+    },
+  })
+  const query = createAnalyticsQueryInput()
+  const now = new Date()
+
+  const response = await analyticsApiRequest('/api/analytics/query', {
+    ...query,
+    asOf: now.toISOString(),
+    filter: {
+      ...query.filter,
+      period: { from: new Date(now.getTime() - 86_400_000).toISOString(), to: now.toISOString() },
+      projectIds: ['refero'],
+    },
+    widgets: [{
+      id: 'trend',
+      type: 'table' as const,
+      title: 'Milestone trend',
+      metric: 'milestone-trend' as const,
+    }],
+  })
+
+  // A per-attempt budget would read 13,500 events and answer 503 instead.
+  expect(response.status).toBe(413)
+  expect(delivered).toBeLessThanOrEqual(10_000)
+})
